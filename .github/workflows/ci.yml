@@ -1,4 +1,4 @@
-name: Starry Test Harness CI Test
+name:  CI Test
 
 on: [push, pull_request]
 
