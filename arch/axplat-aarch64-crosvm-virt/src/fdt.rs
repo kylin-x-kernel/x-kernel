@@ -4,7 +4,7 @@
 // See LICENSE for license details.
 
 use axplat::mem::{VirtAddr, pa, phys_to_virt};
-use fdtree_rs::{InterruptController, LinuxFdt};
+use rs_fdtree::{InterruptController, LinuxFdt};
 use log::*;
 use spin::Once;
 

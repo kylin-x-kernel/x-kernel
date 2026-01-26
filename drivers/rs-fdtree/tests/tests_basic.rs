@@ -1,6 +1,6 @@
 static DTB_DATA: &[u8] = include_bytes!("../dtb/test.dtb");
 
-use fdtree_rs::LinuxFdt;
+use rs_fdtree::LinuxFdt;
 
 fn setup() -> LinuxFdt<'static> {
     LinuxFdt::new(DTB_DATA).unwrap()
@@ -10,13 +10,13 @@ fn setup() -> LinuxFdt<'static> {
 #[test]
 fn get_model() {
     let fdt = setup();
-    assert_eq!(fdt.machine(), "riscv-virtio,qemu");
+    assert_eq!(fdt.machine().unwrap(), "riscv-virtio,qemu");
 }
 
 #[test]
 fn chosen_node() {
     let fdt = setup();
-    let chosen = fdt.chosen();
+    let chosen = fdt.chosen().unwrap();
     assert_eq!(chosen.bootargs().unwrap(), "console=ttyS0");
     assert_eq!(chosen.stdout().unwrap().node.name, "uart@10000000");
     assert_eq!(chosen.stdout().unwrap().options.unwrap(), "115200n8");
@@ -64,9 +64,9 @@ fn linux_reserved_memory() {
     let mut valid_node_iter = reserved.valid_reserved_nodes();
     let vnode1 = valid_node_iter.next().unwrap();
     assert_eq!(vnode1.node.name, "static_buf@0000000080000000");
-    assert_eq!(vnode1.nomap(), false);
+    assert!(!vnode1.nomap());
 
-    let mut vreg1_iter = vnode1.regions();
+    let mut vreg1_iter = vnode1.regions().unwrap();
     assert_eq!(vreg1_iter.clone().count(), 1);
     let vreg1_0 = vreg1_iter.next().unwrap();
     assert_eq!(vreg1_0.starting_address as usize, 0x80000000);
@@ -74,9 +74,9 @@ fn linux_reserved_memory() {
 
     let vnode2 = valid_node_iter.next().unwrap();
     assert_eq!(vnode2.node.name, "secure_carveout@0000000090000000");
-    assert_eq!(vnode2.nomap(), true);
+    assert!(vnode2.nomap());
 
-    let mut vreg2_iter = vnode2.regions();
+    let mut vreg2_iter = vnode2.regions().unwrap();
     assert_eq!(vreg2_iter.clone().count(), 2);
     let vreg2_0 = vreg2_iter.next().unwrap();
     assert_eq!(vreg2_0.starting_address as usize, 0x90000000);
@@ -98,18 +98,18 @@ fn linux_reserved_memory_dynamic() {
     assert_eq!(dyn_node1.node.name, "dyn_pool");
     assert_eq!(dyn_node1.size(), 0x4000000);
     assert_eq!(dyn_node1.alignment(), 0x200000);
-    assert_eq!(dyn_node1.nomap(), false);
-    assert_eq!(dyn_node1.reusable(), false);
-    assert_eq!(dyn_node1.shared_dma_pool(), false);
+    assert!(!dyn_node1.nomap());
+    assert!(!dyn_node1.reusable());
+    assert!(!dyn_node1.shared_dma_pool());
     assert!(dyn_node1.alloc_ranges().is_none());
 
     let dyn_node2 = dyn_node_iter.next().unwrap();
     assert_eq!(dyn_node2.node.name, "linux,cma");
     assert_eq!(dyn_node2.size(), 0x10000000);
     assert_eq!(dyn_node2.alignment(), 0x2000000);
-    assert_eq!(dyn_node2.nomap(), false);
-    assert_eq!(dyn_node2.reusable(), true);
-    assert_eq!(dyn_node2.shared_dma_pool(), true);
+    assert!(!dyn_node2.nomap());
+    assert!(dyn_node2.reusable());
+    assert!(dyn_node2.shared_dma_pool());
     assert!(dyn_node2.alloc_ranges().is_none());
 }
 

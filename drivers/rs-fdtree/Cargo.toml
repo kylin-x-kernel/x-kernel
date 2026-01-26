@@ -1,5 +1,5 @@
 [package]
-name = "fdtree_rs"
+name = "rs_fdtree"
 version = { workspace = true }
 edition = { workspace = true }
 authors = { workspace = true }

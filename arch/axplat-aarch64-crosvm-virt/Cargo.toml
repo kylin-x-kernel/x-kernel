@@ -30,7 +30,7 @@ axcpu = { workspace = true }
 axplat = { version = "0.3.0", git = "https://github.com/kylin-x-kernel/axplat_crates.git", branch = "dev" }
 axplat-aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv3"] }
 aarch64-cpu = "10.0"
-fdtree_rs = { workspace = true }
+rs_fdtree = { workspace = true }
 spin = "0.9"
 lazyinit = "0.2"
 arm-gic.workspace = true
