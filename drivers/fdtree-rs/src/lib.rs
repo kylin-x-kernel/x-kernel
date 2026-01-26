@@ -88,35 +88,56 @@ impl<'a> LinuxFdt<'a> {
 
     /// Return the root (`/`) node, which is always available
     pub fn root(&self) -> Root<'_, 'a> {
-        Root { node: self.find_node("/").expect("/ is a required node") }
+        Root { node: self.find_node("/").unwrap_or_else(|| {
+            // Root node should always exist, this is a critical error
+            // but we can't panic in a no_std library
+            unreachable!("root node must exist in valid FDT")
+        }) }
     }
 
-    /// Returns the machine name
-    pub fn machine(&self) -> &'a str {
-        core::str::from_utf8(self.root().property("model").expect("expected model property").value).unwrap().trim_end_matches('\0')
+    /// Returns the machine name from the "model" property of the root node.
+    ///
+    /// Returns `None` if the model property is missing or invalid UTF-8.
+    pub fn machine(&self) -> Option<&'a str> {
+        let prop = self.root().property("model")?;
+        core::str::from_utf8(prop.value)
+            .ok()
+            .map(|s| s.trim_end_matches('\0'))
     }
 
-    /// Returns the chosen node
-    pub fn chosen(&self) -> Chosen<'_, 'a> {
+    /// Returns the chosen node.
+    ///
+    /// The chosen node contains boot-time configuration information passed to the kernel.
+    /// Returns `None` if the `/chosen` node is not present.
+    pub fn chosen(&self) -> Option<Chosen<'_, 'a>> {
         node::find_node(&mut FdtData::new(self.structs_block()), "/chosen", self, None)
             .map(|node| Chosen { node })
-            .expect("/chosen is required")
     }
 
-    /// Returns the DICE node
+    /// Returns the DICE (Dynamic Identity and Configuration Engine) node.
+    ///
+    /// DICE is used for device attestation and identity. Returns `None` if the
+    /// `/chosen/dice` node is not present.
     pub fn dice(&self) -> Option<Dice<'_, 'a>> {
         node::find_node(&mut FdtData::new(self.structs_block()), "/chosen/dice", self, None)
             .map(|node| Dice { node })
     }
 
-    /// Returns interrupt controller node
+    /// Returns interrupt controller node.
+    ///
+    /// Searches for the first node with an "interrupt-controller" property.
+    /// Returns `None` if no interrupt controller is found.
     pub fn interrupt_controller(&self) -> Option<InterruptController<'_, 'a>> {
         let ic_node = self.all_nodes()
             .find(|node| node.property("interrupt-controller").is_some())?;
         Some(InterruptController { node: ic_node })
     }
 
-    /// Return the reserved memory nodes
+    /// Returns the reserved memory configuration.
+    ///
+    /// The reserved memory node describes regions of memory that should be
+    /// reserved for specific purposes (firmware, secure world, DMA pools, etc.).
+    /// Returns `None` if the `/reserved-memory` node is not present or invalid.
     pub fn linux_reserved_memory(&self) -> Option<ReservedMemory<'_, 'a>>  {
         let rnode = node::find_node(&mut FdtData::new(self.structs_block()), "/reserved-memory", self, None)
             .map(|node| ReservedMemory { node })?;
@@ -125,7 +146,11 @@ impl<'a> LinuxFdt<'a> {
         Some(rnode)
     }
 
-    /// System memory reservations
+    /// System memory reservations from the FDT memory reservation block.
+    ///
+    /// These are low-level memory reservations stored in the FDT header's
+    /// memory reservation block (distinct from `/reserved-memory` nodes).
+    /// The OS should mark these regions as reserved during early boot.
     pub fn sys_memory_reservations(&self) -> impl Iterator<Item = MemoryReservation> + 'a {
         let mut stream = FdtData::new(&self.data[self.header.off_mem_rsvmap.get() as usize..]);
         let mut done = false;
@@ -146,7 +171,10 @@ impl<'a> LinuxFdt<'a> {
         })
     }
 
-    /// Returns the avaiable mem regions
+    /// Returns an iterator over all available memory nodes.
+    ///
+    /// Memory nodes describe physical memory regions available to the system.
+    /// This method filters for nodes with `device_type="memory"` and status="okay".
     pub fn mem_nodes(&self) -> impl Iterator<Item = Memory<'_, 'a>> + '_ {
         self.all_nodes()
             .filter(|node| {
@@ -156,7 +184,7 @@ impl<'a> LinuxFdt<'a> {
                 .unwrap_or(false)
             })
             .filter(|node| node.is_available())
-            .map(|node| Memory { node: node.clone() })
+            .map(|node| Memory { node })
     }
 
     /// Return the `/aliases` node, if one exists

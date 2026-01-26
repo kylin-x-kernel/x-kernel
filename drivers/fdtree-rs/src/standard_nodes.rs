@@ -24,17 +24,17 @@ impl<'b, 'a> Root<'b, 'a> {
     }
 
     /// `model` property
-    pub fn model(self) -> &'a str {
+    pub fn model(self) -> Option<&'a str> {
         self.node
             .properties()
             .find(|p| p.name == "model")
-            .and_then(|p| core::str::from_utf8(p.value).map(|s| s.trim_end_matches('\0')).ok())
-            .unwrap()
+            .and_then(|p| core::str::from_utf8(p.value).ok())
+            .map(|s| s.trim_end_matches('\0'))
     }
 
     /// `compatible` property
-    pub fn compatible(self) -> Compatible<'a> {
-        self.node.compatible().unwrap()
+    pub fn compatible(self) -> Option<Compatible<'a>> {
+        self.node.compatible()
     }
 
     /// Returns an iterator over all of the available properties
@@ -86,45 +86,39 @@ pub struct Cpu<'b, 'a> {
 
 impl<'b, 'a> Cpu<'b, 'a> {
     /// Return the IDs for the given CPU
-    pub fn ids(self) -> CpuIds<'a> {
+    pub fn ids(self) -> Option<CpuIds<'a>> {
         let address_cells = self.node.parent_cell_sizes().address_cells;
-
-        CpuIds {
-            reg: self
-                .node
-                .properties()
-                .find(|p| p.name == "reg")
-                .expect("reg is a required property of cpu nodes"),
+        let reg = self.node.properties().find(|p| p.name == "reg")?;
+        Some(CpuIds {
+            reg,
             address_cells,
-        }
+        })
     }
 
     /// `clock-frequency` property
-    pub fn clock_frequency(self) -> usize {
+    pub fn clock_frequency(self) -> Option<usize> {
         self.node
             .properties()
             .find(|p| p.name == "clock-frequency")
             .or_else(|| self.parent.property("clock-frequency"))
-            .map(|p| match p.value.len() {
-                4 => BigEndianU32::from_bytes(p.value).unwrap().get() as usize,
-                8 => BigEndianU64::from_bytes(p.value).unwrap().get() as usize,
-                _ => unreachable!(),
+            .and_then(|p| match p.value.len() {
+                4 => BigEndianU32::from_bytes(p.value).map(|v| v.get() as usize),
+                8 => BigEndianU64::from_bytes(p.value).map(|v| v.get() as usize),
+                _ => None,
             })
-            .expect("clock-frequency is a required property of cpu nodes")
     }
 
     /// `timebase-frequency` property
-    pub fn timebase_frequency(self) -> usize {
+    pub fn timebase_frequency(self) -> Option<usize> {
         self.node
             .properties()
             .find(|p| p.name == "timebase-frequency")
             .or_else(|| self.parent.property("timebase-frequency"))
-            .map(|p| match p.value.len() {
-                4 => BigEndianU32::from_bytes(p.value).unwrap().get() as usize,
-                8 => BigEndianU64::from_bytes(p.value).unwrap().get() as usize,
-                _ => unreachable!(),
+            .and_then(|p| match p.value.len() {
+                4 => BigEndianU32::from_bytes(p.value).map(|v| v.get() as usize),
+                8 => BigEndianU64::from_bytes(p.value).map(|v| v.get() as usize),
+                _ => None,
             })
-            .expect("timebase-frequency is a required property of cpu nodes")
     }
 
     /// Returns an iterator over all of the properties for the CPU node
@@ -147,25 +141,26 @@ pub struct CpuIds<'a> {
 }
 
 impl<'a> CpuIds<'a> {
-    /// The first listed CPU ID, which will always exist
-    pub fn first(self) -> usize {
+    /// The first listed CPU ID, returns None if parsing fails
+    pub fn first(self) -> Option<usize> {
         match self.address_cells {
-            1 => BigEndianU32::from_bytes(self.reg.value).unwrap().get() as usize,
-            2 => BigEndianU64::from_bytes(self.reg.value).unwrap().get() as usize,
-            n => panic!("address-cells of size {} is currently not supported", n),
+            1 => BigEndianU32::from_bytes(self.reg.value).map(|v| v.get() as usize),
+            2 => BigEndianU64::from_bytes(self.reg.value).map(|v| v.get() as usize),
+            _ => None,
         }
     }
 
     /// Returns an iterator over all of the listed CPU IDs
     pub fn all(self) -> impl Iterator<Item = usize> + 'a {
         let mut vals = FdtData::new(self.reg.value);
+        let address_cells = self.address_cells;
         core::iter::from_fn(move || match vals.remaining() {
             [] => None,
-            _ => Some(match self.address_cells {
-                1 => vals.u32()?.get() as usize,
-                2 => vals.u64()?.get() as usize,
-                n => panic!("address-cells of size {} is currently not supported", n),
-            }),
+            _ => match address_cells {
+                1 => vals.u32().map(|v| v.get() as usize),
+                2 => vals.u64().map(|v| v.get() as usize),
+                _ => None,
+            },
         })
     }
 }
@@ -177,9 +172,9 @@ pub struct Compatible<'a> {
 }
 
 impl<'a> Compatible<'a> {
-    /// First compatible string
-    pub fn first(self) -> &'a str {
-        CStr::new(self.data).expect("expected C str").as_str().unwrap()
+    /// First compatible string, returns None if parsing fails
+    pub fn first(self) -> Option<&'a str> {
+        CStr::new(self.data)?.as_str()
     }
 
     /// Returns an iterator over all available compatible strings
@@ -192,15 +187,13 @@ impl<'a> Compatible<'a> {
 
             match data.iter().position(|b| *b == b'\0') {
                 Some(idx) => {
-                    let ret = Some(core::str::from_utf8(&data[..idx]).ok()?);
+                    let ret = core::str::from_utf8(&data[..idx]).ok();
                     data = &data[idx + 1..];
-
                     ret
                 }
                 None => {
-                    let ret = Some(core::str::from_utf8(data).ok()?);
+                    let ret = core::str::from_utf8(data).ok();
                     data = &[];
-
                     ret
                 }
             }
@@ -248,7 +241,7 @@ impl<'a> Iterator for RegIter<'a> {
             _ => return None,
         };
 
-        Some(MemoryRegion { starting_address: base, size: size })
+        Some(MemoryRegion { starting_address: base, size })
     }
 }
 

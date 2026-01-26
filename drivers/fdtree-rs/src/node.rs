@@ -31,10 +31,13 @@ impl FdtProperty {
     }
 }
 
-/// A devicetree node
+/// A devicetree node representing a device, bus, or other hardware component.
+///
+/// Nodes contain properties describing the hardware and may have child nodes
+/// representing sub-components or devices.
 #[derive(Debug, Clone, Copy)]
 pub struct FdtNode<'b, 'a> {
-    /// Node name
+    /// Node name (may include unit address, e.g., "uart@10000000")
     pub name: &'a str,
     pub(crate) header: &'b LinuxFdt<'a>,
     props: &'a [u8],
@@ -51,7 +54,7 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         Self { name, header, props, parent_props }
     }
 
-    /// Returns an iterator over the available properties of the node
+    /// Returns an iterator over the available properties of the node.
     pub fn properties(self) -> impl Iterator<Item = NodeProperty<'a>> + 'b {
         let mut stream = FdtData::new(self.props);
         let mut done = false;
@@ -74,24 +77,26 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         })
     }
 
-    /// Attempts to find the a property by its name
+    /// Attempts to find a property by its name.
+    ///
+    /// Returns `None` if no property with the given name exists.
     pub fn property(self, name: &str) -> Option<NodeProperty<'a>> {
         self.properties().find(|p| p.name == name)
     }
 
-    /// sataus avaiable
+    /// Check if the node is available (status property is "okay", "ok", or missing).
+    ///
+    /// Nodes with status="disabled" or other values are considered unavailable.
     pub fn is_available(self) -> bool {
-        let status = self.property("status")
-            .and_then(|p| core::str::from_utf8(p.value).map(|s| s.trim_end_matches('\0')).ok());
-        match status {
-            None => true,
-            Some("okay") => true,
-            Some("ok") => true,
-            _ => false,
-        }
+        matches!(
+            self.property("status")
+                .and_then(|p| core::str::from_utf8(p.value).ok())
+                .map(|s| s.trim_end_matches('\0')),
+            None | Some("okay") | Some("ok")
+        )
     }
 
-    /// Returns an iterator over the children of the current node
+    /// Returns an iterator over the child nodes of the current node.
     pub fn children(self) -> impl Iterator<Item = FdtNode<'b, 'a>> {
         let mut stream = FdtData::new(self.props);
 
@@ -141,7 +146,9 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         })
     }
 
-    /// `reg` property
+    /// Parse and return the `reg` property as an iterator of memory regions.
+    ///
+    /// The `reg` property describes address ranges for devices and memory regions.
     ///
     /// Important: this method assumes that the value(s) inside the `reg`
     /// property represent CPU-addressable addresses that are able to fit within
@@ -154,6 +161,8 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     /// would return `None` for a node is a `pci` child node which contains the
     /// PCI address information in the `reg` property, of which the address has
     /// an `#address-cells` value of 3.
+    ///
+    /// Returns `None` if the node has no `reg` property or if cell sizes are too large.
     pub fn reg(self) -> Option<RegIter<'a>> {
         let sizes = self.parent_cell_sizes();
         if sizes.address_cells > 2 || sizes.size_cells > 2 {
@@ -168,7 +177,10 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     }
 
     /// Convenience method that provides an iterator over the raw bytes for the
-    /// address and size values inside of the `reg` property
+    /// address and size values inside of the `reg` property.
+    ///
+    /// Use this method when working with nodes that have unusual cell sizes
+    /// or when you need to manually parse the register values.
     pub fn raw_reg(self) -> Option<impl Iterator<Item = RawReg<'a>> + 'a> {
         let sizes = self.parent_cell_sizes();
 
@@ -185,7 +197,12 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         None
     }
 
-    /// `compatible` property
+    /// Parse and return the `compatible` property.
+    ///
+    /// The `compatible` property lists the device drivers that are compatible
+    /// with this node, in order of preference.
+    ///
+    /// Returns `None` if the node has no `compatible` property.
     pub fn compatible(self) -> Option<Compatible<'a>> {
         let mut s = None;
         for prop in self.properties() {
@@ -197,21 +214,24 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         s
     }
 
-    /// Cell sizes for child nodes
+    /// Get the cell sizes (`#address-cells` and `#size-cells`) for child nodes.
+    ///
+    /// These values determine how addresses and sizes are encoded in child nodes.
+    /// Returns default values (address_cells=2, size_cells=1) if not specified.
     pub fn cell_sizes(self) -> CellSizes {
         let mut cell_sizes = CellSizes::default();
 
         for property in self.properties() {
             match property.name {
                 "#address-cells" => {
-                    cell_sizes.address_cells = BigEndianU32::from_bytes(property.value)
-                        .expect("not enough bytes for #address-cells value")
-                        .get() as usize;
+                    if let Some(val) = BigEndianU32::from_bytes(property.value) {
+                        cell_sizes.address_cells = val.get() as usize;
+                    }
                 }
                 "#size-cells" => {
-                    cell_sizes.size_cells = BigEndianU32::from_bytes(property.value)
-                        .expect("not enough bytes for #size-cells value")
-                        .get() as usize;
+                    if let Some(val) = BigEndianU32::from_bytes(property.value) {
+                        cell_sizes.size_cells = val.get() as usize;
+                    }
                 }
                 _ => {}
             }
@@ -220,14 +240,19 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         cell_sizes
     }
 
-    /// Searches for the interrupt parent, if the node contains one
+    /// Search for and return the interrupt parent node.
+    ///
+    /// Returns the node referenced by the `interrupt-parent` property, if present.
     pub fn interrupt_parent(self) -> Option<FdtNode<'b, 'a>> {
         self.properties()
             .find(|p| p.name == "interrupt-parent")
             .and_then(|p| self.header.find_phandle(BigEndianU32::from_bytes(p.value)?.get()))
     }
 
-    /// `#interrupt-cells` property
+    /// Get the value of the `#interrupt-cells` property.
+    ///
+    /// This determines how many cells are used to encode interrupt specifiers
+    /// for child nodes. Returns `None` if the property is not present or invalid.
     pub fn interrupt_cells(self) -> Option<usize> {
         let mut interrupt_cells = None;
 
@@ -238,7 +263,11 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         interrupt_cells
     }
 
-    /// `interrupts` property
+    /// Parse and return the `interrupts` property as an iterator.
+    ///
+    /// Returns an iterator over interrupt specifiers. The format depends on
+    /// the interrupt controller's `#interrupt-cells` property.
+    /// Returns `None` if parsing fails or the property is not present.
     pub fn interrupts(self) -> Option<impl Iterator<Item = usize> + 'a> {
         let sizes = self.parent_interrupt_cells()?;
 
@@ -296,22 +325,50 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     }
 }
 
-/// The number of cells (big endian u32s) that addresses and sizes take
+/// The number of cells (big endian u32s) that addresses and sizes take.
+///
+/// In the device tree, addresses and sizes are encoded as sequences of 32-bit
+/// big-endian values. The `#address-cells` and `#size-cells` properties specify
+/// how many such values are used.
+///
+/// For example:
+/// - `#address-cells = 2, #size-cells = 1` means addresses are 64-bit (2 cells)
+///   and sizes are 32-bit (1 cell), typical for 64-bit systems
+/// - `#address-cells = 1, #size-cells = 1` means both are 32-bit (1 cell each),
+///   typical for 32-bit systems
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellSizes {
-    /// Size of values representing an address
+    /// Size of values representing an address (in u32 cells)
     pub address_cells: usize,
-    /// Size of values representing a size
+    /// Size of values representing a size (in u32 cells)
     pub size_cells: usize,
 }
 
+impl CellSizes {
+    /// Validate that cell sizes are within reasonable bounds.
+    ///
+    /// Returns `false` if cell sizes are 0 or greater than 4, which would
+    /// indicate an invalid or corrupt device tree.
+    pub fn is_valid(&self) -> bool {
+        self.address_cells > 0 && self.address_cells <= 4
+            && self.size_cells > 0 && self.size_cells <= 4
+    }
+}
+
 impl Default for CellSizes {
+    /// Returns default cell sizes (address_cells=2, size_cells=1).
+    ///
+    /// These defaults represent 64-bit addresses and 32-bit sizes, which is
+    /// common for modern 64-bit systems.
     fn default() -> Self {
         CellSizes { address_cells: 2, size_cells: 1 }
     }
 }
 
-/// A raw `reg` property value set
+/// A raw `reg` property value set containing unparsed address and size bytes.
+///
+/// Use this when working with nodes that have unusual cell sizes or when
+/// manual parsing is required.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawReg<'a> {
     /// Big-endian encoded bytes making up the address portion of the property.
@@ -466,17 +523,23 @@ pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<
     assert_eq!(stream.u32().unwrap().get(), FDT_END_NODE, "bad node");
 }
 
-/// A node property
+/// A devicetree node property containing a name and value.
+///
+/// Properties describe attributes of nodes such as device configuration,
+/// addresses, interrupts, etc.
 #[derive(Debug, Clone, Copy)]
 pub struct NodeProperty<'a> {
     /// Property name
     pub name: &'a str,
-    /// Property value
+    /// Property value (raw bytes)
     pub value: &'a [u8],
 }
 
 impl<'a> NodeProperty<'a> {
-    /// Attempt to parse the property value as a `usize`
+    /// Attempt to parse the property value as a `usize`.
+    ///
+    /// Handles both 32-bit (4 bytes) and 64-bit (8 bytes) values.
+    /// Returns `None` if the value length is not 4 or 8 bytes, or if parsing fails.
     pub fn as_usize(self) -> Option<usize> {
         match self.value.len() {
             4 => BigEndianU32::from_bytes(self.value).map(|i| i.get() as usize),
@@ -485,7 +548,10 @@ impl<'a> NodeProperty<'a> {
         }
     }
 
-    /// Attempt to parse the property value as a `&str`
+    /// Attempt to parse the property value as a UTF-8 string.
+    ///
+    /// Automatically trims null terminators from the end of the string.
+    /// Returns `None` if the value is not valid UTF-8.
     pub fn as_str(self) -> Option<&'a str> {
         core::str::from_utf8(self.value).map(|s| s.trim_end_matches('\0')).ok()
     }
@@ -506,7 +572,13 @@ impl<'a> NodeProperty<'a> {
         NodeProperty { name: header.str_at_offset(prop.name_offset.get() as usize), value: data }
     }
 
-    /// Attempt to parse the property value as a `reg` property
+    /// Attempt to parse the property value as a `reg` property.
+    ///
+    /// The `reg` property describes address ranges for devices and memory regions.
+    /// Returns `None` if cell sizes are too large (>2) or parsing fails.
+    ///
+    /// # Arguments
+    /// * `sizes` - The cell sizes to use for parsing addresses and sizes
     pub fn as_reg(self, sizes:  CellSizes) -> Option<RegIter<'a>> {
         if sizes.address_cells > 2 || sizes.size_cells > 2 {
             return None;
@@ -515,15 +587,21 @@ impl<'a> NodeProperty<'a> {
     }
 }
 
-/// Standard memory reservation
+/// Standard memory reservation from the FDT header's memory reservation block.
+///
+/// These reservations describe physical memory regions that should not be used
+/// by the operating system. They are stored in a separate block referenced by
+/// the FDT header's `off_mem_rsvmap` field.
 ///
 /// A 32-bit (big-endian) offset field in the FDT header,
 /// relative to the start address of the DTB.
 /// Points to an array of fdt_reserve_entry entries, each element of which is fixed:
-/// address: be64 (physical start address)
-/// size: be64 (length)
+/// - address: be64 (physical start address)
+/// - size: be64 (length)
+///
 /// Terminated by a pair of zeros: address == 0 && size == 0.
 /// Not dependent on #address-cells / #size-cells, always 64-bit big-endian encoding.
+///
 /// Semantics: These ranges are reserved for firmware, secure world, device buffers,
 /// etc. The OS should remove them from available memory early during memory
 /// initialization (e.g., memblock_reserve in Linux).
@@ -535,12 +613,12 @@ pub struct MemoryReservation {
 }
 
 impl MemoryReservation {
-    /// Pointer representing the memory reservation address
+    /// Returns a pointer representing the memory reservation address.
     pub fn address(&self) -> *const u8 {
         self.address.get() as usize as *const u8
     }
 
-    /// Size of the memory reservation
+    /// Returns the size of the memory reservation in bytes.
     pub fn size(&self) -> usize {
         self.size.get() as usize
     }

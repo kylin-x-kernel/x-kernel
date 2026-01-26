@@ -35,29 +35,24 @@ impl<'b, 'a: 'b> Chosen<'b, 'a> {
     /// Searches for the node representing `stdout`, if the property exists,
     /// attempting to resolve aliases if the node name doesn't exist as-is
     pub fn stdout(self) -> Option<Stdout<'b, 'a>> {
-        let mut stdout_path = self.node
+        let stdout_path = self.node
             .properties()
-            .find(|n| n.name == "stdout-path");
+            .find(|n| n.name == "stdout-path")
+            .or_else(|| {
+                // try linux,stdout-path
+                self.node
+                    .properties()
+                    .find(|n| n.name == "linux,stdout-path")
+            })?;
 
-        if stdout_path.is_none() {
-            // try linux,stdout-path
-            stdout_path = self.node
-                .properties()
-                .find(|n| n.name == "linux,stdout-path");
-            if stdout_path.is_none() {
-                return None;
-            }
-        }
-
-        let stdout_path = stdout_path.unwrap();
         let stdout_path = core::str::from_utf8(&stdout_path.value[..stdout_path.value.len() - 1]).ok()?;
         let (node_name, options) = stdout_path.split_once(':').unwrap_or((stdout_path, ""));
         let node = self.node.header.find_node(node_name)?;
 
         if options.is_empty() {
-            return Some(Stdout { node, options: None });
+            Some(Stdout { node, options: None })
         } else {
-            return Some(Stdout { node, options: Some(options) });
+            Some(Stdout { node, options: Some(options) })
         }
     }
 

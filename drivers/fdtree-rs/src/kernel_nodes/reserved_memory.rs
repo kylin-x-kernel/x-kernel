@@ -19,8 +19,8 @@ pub struct ValidReservedMemoryNode<'b, 'a> {
 
 impl <'b, 'a: 'b> ValidReservedMemoryNode<'b, 'a> {
     /// Returns an iterator over all of the valid regs
-    pub fn regions(&self) -> RegIter<'a> {
-        self.node.reg().unwrap()
+    pub fn regions(&self) -> Option<RegIter<'a>> {
+        self.node.reg()
     }
 
     /// return nomap property
@@ -48,7 +48,9 @@ impl <'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
     /// return alignment
     pub fn alignment(&self) -> usize {
         // if no alignment, default is 0
-        self.node.property("alignment").map(|p| p.as_usize().unwrap()).unwrap_or(0)
+        self.node.property("alignment")
+            .and_then(|p| p.as_usize())
+            .unwrap_or(0)
     }
 
     /// return nomap
@@ -60,7 +62,8 @@ impl <'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
     /// Address and Length pairs. Specifies regions of memory that are
     /// acceptable to allocate from.
     pub fn alloc_ranges(&self) -> Option<RegIter<'a>> {
-        self.node.property("alloc-ranges").map(|p| p.as_reg(self.node.parent_cell_sizes()).unwrap())
+        self.node.property("alloc-ranges")
+            .and_then(|p| p.as_reg(self.node.parent_cell_sizes()))
     }
 
     /// reusable property
@@ -70,7 +73,10 @@ impl <'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
 
     /// shared_dma_pool compatible
     pub fn shared_dma_pool(&self) -> bool {
-        self.node.compatible().map(|p| p.first() == "shared-dma-pool").unwrap_or(false)
+        self.node.compatible()
+            .and_then(|p| p.first())
+            .map(|s| s == "shared-dma-pool")
+            .unwrap_or(false)
     }
 
 }
@@ -106,23 +112,23 @@ impl<'b, 'a: 'b> ReservedMemory<'b, 'a> {
     /// Return valid ReservedNode
     pub fn valid_reserved_nodes(self) -> impl Iterator<Item = ValidReservedMemoryNode<'b, 'a>> + 'b {
         self.node.children().filter_map(|node| {
-            if node.is_available() {
-                if node.reg().is_some() {
-                    return Some(ValidReservedMemoryNode { node });
-                }
+            if node.is_available() && node.reg().is_some() {
+                Some(ValidReservedMemoryNode { node })
+            } else {
+                None
             }
-            None
         })
     }
 
     /// Return dynamic nodes
     pub fn dynamic_nodes(self) -> impl Iterator<Item = DynamicReservedMemoryNode<'b, 'a>> + 'b {
         self.node.children().filter_map(|node| {
-            if node.is_available() {
-                if let Some(size) = node.property("size") && node.reg().is_none() {
-                    return Some(DynamicReservedMemoryNode { node, size: size.as_usize().unwrap() });
-                }
-            }
+            if node.is_available()
+                && let Some(size_prop) = node.property("size")
+                    && node.reg().is_none() {
+                        let size = size_prop.as_usize()?;
+                        return Some(DynamicReservedMemoryNode { node, size });
+                    }
             None
         })
     }

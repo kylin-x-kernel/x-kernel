@@ -23,29 +23,26 @@ impl<'b, 'a: 'b> Memory<'b, 'a> {
     pub fn regions(&self) -> Option<RegIter<'a>> {
         if let Some(usable_mem) = self.node.property("linux,usable-memory") {
             let sizes = self.node.parent_cell_sizes();
-            return usable_mem.as_reg(sizes);
+            usable_mem.as_reg(sizes)
         } else {
-            return self.node.reg();
+            self.node.reg()
         }
     }
 
     /// Returns the initial mapped area, if it exists
     pub fn initial_mapped_area(&self) -> Option<MappedArea> {
-        let mut mapped_area = None;
+        let init_mapped_area = self.node.property("initial_mapped_area")?;
+        let mut stream = FdtData::new(init_mapped_area.value);
 
-        if let Some(init_mapped_area) = self.node.property("initial_mapped_area") {
-            let mut stream = FdtData::new(init_mapped_area.value);
-            let effective_address = stream.u64().expect("effective address");
-            let physical_address = stream.u64().expect("physical address");
-            let size = stream.u32().expect("size");
+        let effective_address = stream.u64()?.get() as usize;
+        let physical_address = stream.u64()?.get() as usize;
+        let size = stream.u32()?.get() as usize;
 
-            mapped_area = Some(MappedArea {
-                effective_address: effective_address.get() as usize,
-                physical_address: physical_address.get() as usize,
-                size: size.get() as usize,
-            });
-        }
-        mapped_area
+        Some(MappedArea {
+            effective_address,
+            physical_address,
+            size,
+        })
     }
 }
 

@@ -4,13 +4,22 @@
 // See LICENSE for license details.
 
 use core::convert::TryInto;
+use crate::error::FdtError;
+
 pub struct CStr<'a>(&'a [u8]);
 
 #[allow(dead_code)]
 impl<'a> CStr<'a> {
+    /// Create a new CStr from data, returning an Option for backward compatibility
     pub fn new(data: &'a [u8]) -> Option<Self> {
         let end = data.iter().position(|&b| b == 0)?;
         Some(Self(&data[..end]))
+    }
+
+    /// Create a new CStr from data, returning a Result
+    pub fn from_bytes(data: &'a [u8]) -> Result<Self, FdtError> {
+        let end = data.iter().position(|&b| b == 0).ok_or(FdtError::InvalidCString)?;
+        Ok(Self(&data[..end]))
     }
 
     /// Does not include the null terminating byte
@@ -20,6 +29,10 @@ impl<'a> CStr<'a> {
 
     pub fn as_str(&self) -> Option<&'a str> {
         core::str::from_utf8(self.0).ok()
+    }
+
+    pub fn to_str(&self) -> Result<&'a str, FdtError> {
+        core::str::from_utf8(self.0).map_err(|_| FdtError::InvalidString)
     }
 }
 

@@ -19,6 +19,6 @@ pub struct Dice<'b, 'a> {
 impl<'b, 'a: 'b> Dice<'b, 'a> {
     /// Returns an iterator over all of the available memory regions
     pub fn regions(&self) -> Option<RegIter<'a>> {
-        return self.node.reg()
+        self.node.reg()
     }
 }
