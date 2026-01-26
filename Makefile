@@ -45,7 +45,7 @@ DWARF ?=
 LTO ?=
 TARGET_DIR ?= $(PWD)/target
 EXTRA_CONFIG ?=
-OUT_CONFIG ?= $(PWD)/.platconfig.toml
+OUT_CONFIG ?= $(PWD)/.axconfig.toml
 UIMAGE ?= n
 
 # App options
