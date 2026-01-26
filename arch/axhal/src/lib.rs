@@ -96,6 +96,12 @@ pub mod psci {
     pub use axplat::psci::{share_dma_buffer, unshare_dma_buffer};
 }
 
+/// Provides access to PSCI-like shared memory functions for SEV (accessed via axplat).
+#[cfg(all(target_arch = "x86_64", not(feature = "crosvm")))]
+pub mod psci {
+    pub use axplat::psci::{share_dma_buffer, unshare_dma_buffer};
+}
+
 /// Trap handling.
 pub mod trap {
     pub use axcpu::trap::{IRQ, PAGE_FAULT, PageFaultFlags, register_trap_handler};

@@ -24,6 +24,7 @@ input = ["dep:axdriver_input"]
 vsock = ["axdriver_vsock"]
 
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:axsync", "dep:spin"]
+sev = ["pci-mmio", "dep:hashbrown", "dep:axsync", "dep:spin"]
 
 # Enabled by features `virtio-*`
 virtio = ["dep:axdriver_virtio", "dep:axalloc", "dep:axhal", "dep:axconfig"]

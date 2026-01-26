@@ -29,6 +29,7 @@ ipi = ["irq", "dep:axipi", "axhal/ipi", "axruntime/ipi"]
 myplat = ["axhal/myplat"]
 defplat = ["axhal/defplat"]
 crosvm = ["axhal/crosvm", "axdriver/crosvm", "axruntime/crosvm"]
+sev = ["axdriver?/sev"]
 
 # Memory
 alloc = ["axalloc", "axruntime/alloc"]

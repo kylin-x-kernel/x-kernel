@@ -57,7 +57,7 @@ x86_csv = [
     "axfeat/vsock",
     "starry-api/vsock",
 
-    "axfeat/crosvm",
+    "axfeat/sev",
     "dep:axplat-x86-csv",
     "pci",
 
