@@ -1,10 +1,7 @@
 [workspace]
 resolver = "2"
-members = [
-	"entry",
-	"drivers/rs-fdtree",
-]
-exclude = ["kylin-x-kernel"]
+members = ["entry"]
+exclude = []
 
 [workspace.package]
 version = "0.1.0"
