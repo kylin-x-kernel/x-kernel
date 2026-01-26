@@ -83,7 +83,7 @@ axplat-aarch64-crosvm-virt = { path = "arch/axplat-aarch64-crosvm-virt" }
 
 # Third-Party Crates
 arm-gic = { path = "drivers/arm-gic" }
-fdtree_rs = { path = "fs/fdtree-rs" }
+fdtree_rs = { path = "drivers/fdtree-rs" }
 kspin = { path = "util/kspin" }
 kernel_guard = { path = "util/kernel_guard" }
 bitflags = "2.10"
