@@ -16,12 +16,12 @@ use self::dma::ALLOCATOR;
 /// Converts a physical address to a bus address.
 ///
 /// It assumes that there is a linear mapping with the offset
-/// [`axconfig::plat::PHYS_BUS_OFFSET`], that maps all the physical memory
+/// [`platconfig::plat::PHYS_BUS_OFFSET`], that maps all the physical memory
 /// to the virtual space at the address plus the offset. So we have
 /// `baddr = paddr + PHYS_BUS_OFFSET`.
 #[inline]
 pub const fn phys_to_bus(paddr: PhysAddr) -> BusAddr {
-    BusAddr::new((paddr.as_usize() + axconfig::plat::PHYS_BUS_OFFSET) as u64)
+    BusAddr::new((paddr.as_usize() + platconfig::plat::PHYS_BUS_OFFSET) as u64)
 }
 
 /// Allocates **coherent** memory that meets Direct Memory Access (DMA)

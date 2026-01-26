@@ -20,14 +20,14 @@ const GLOBAL_TASK_QUEUE_SLOTS: usize = 4096;
 ///   `upgrade()` (which is internally atomic).
 /// - GC sweeps invalid weak refs and frees their boxes.
 struct GlobalTaskRegistry {
-    slots: [[AtomicUsize; GLOBAL_TASK_QUEUE_SLOTS]; axconfig::plat::CPU_NUM],
+    slots: [[AtomicUsize; GLOBAL_TASK_QUEUE_SLOTS]; platconfig::plat::CPU_NUM],
 }
 
 impl GlobalTaskRegistry {
     const fn new() -> Self {
         const ZERO: AtomicUsize = AtomicUsize::new(0);
         Self {
-            slots: [const { [ZERO; GLOBAL_TASK_QUEUE_SLOTS] }; axconfig::plat::CPU_NUM],
+            slots: [const { [ZERO; GLOBAL_TASK_QUEUE_SLOTS] }; platconfig::plat::CPU_NUM],
         }
     }
 

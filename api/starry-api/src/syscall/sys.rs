@@ -1,7 +1,7 @@
 use alloc::vec;
 use core::ffi::c_char;
 
-use axconfig::ARCH;
+use platconfig::ARCH;
 use axerrno::{AxError, AxResult};
 use axfs::FS_CONTEXT;
 use linux_raw_sys::{

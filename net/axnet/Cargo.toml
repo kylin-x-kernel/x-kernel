@@ -17,7 +17,7 @@ documentation = "https://arceos-org.github.io/arceos/axnet/index.html"
 vsock = ["axdriver/vsock"]
 
 [dependencies]
-axconfig = { workspace = true }
+platconfig = { workspace = true }
 axdriver = { workspace = true, features = ["net"] }
 axhal = { workspace = true }
 axsync = { workspace = true }

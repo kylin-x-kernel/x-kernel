@@ -53,8 +53,8 @@ fn reg_flag_to_map_flag(f: MemRegionFlags) -> MappingFlags {
 /// Creates a new address space for kernel itself.
 pub fn new_kernel_aspace() -> LinuxResult<AddrSpace> {
     let mut aspace = AddrSpace::new_empty(
-        va!(axconfig::plat::KERNEL_ASPACE_BASE),
-        axconfig::plat::KERNEL_ASPACE_SIZE,
+        va!(platconfig::plat::KERNEL_ASPACE_BASE),
+        platconfig::plat::KERNEL_ASPACE_SIZE,
     )?;
     for r in axhal::mem::memory_regions() {
         // mapped range should contain the whole region if it is not aligned.

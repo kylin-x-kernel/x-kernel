@@ -90,7 +90,7 @@ pub fn arrived_bitmap() -> usize {
 
 #[inline]
 pub fn all_arrived_mask() -> usize {
-    let n = axconfig::plat::CPU_NUM;
+    let n = platconfig::plat::CPU_NUM;
     if n >= usize::BITS as usize {
         usize::MAX
     } else {

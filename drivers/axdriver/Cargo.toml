@@ -15,7 +15,7 @@ documentation = "https://arceos-org.github.io/arceos/axdriver/index.html"
 
 [features]
 bus-mmio = []
-bus-pci = ["dep:axdriver_pci", "dep:axhal", "dep:axconfig"]
+bus-pci = ["dep:axdriver_pci", "dep:axhal", "dep:platconfig"]
 pci-mmio = ["bus-pci"]
 net = ["dep:axdriver_net"]
 block = ["dep:axdriver_block"]
@@ -26,7 +26,7 @@ vsock = ["axdriver_vsock"]
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:axsync", "dep:spin"]
 
 # Enabled by features `virtio-*`
-virtio = ["dep:axdriver_virtio", "dep:axalloc", "dep:axhal", "dep:axconfig"]
+virtio = ["dep:axdriver_virtio", "dep:axalloc", "dep:axhal", "dep:platconfig"]
 
 # various types of drivers
 virtio-blk = ["block", "virtio", "axdriver_virtio/block"]
@@ -36,8 +36,8 @@ virtio-input = ["input", "virtio", "axdriver_virtio/input"]
 virtio-socket = ["vsock", "virtio", "axdriver_virtio/socket"]
 ramdisk = ["block", "axdriver_block/ramdisk"]
 bcm2835-sdhci = ["block", "axdriver_block/bcm2835-sdhci"]
-sdmmc = ["block", "axdriver_block/sdmmc", "dep:axhal", "dep:axconfig"]
-ahci = ["block", "axdriver_block/ahci", "dep:axhal", "dep:axconfig"]
+sdmmc = ["block", "axdriver_block/sdmmc", "dep:axhal", "dep:platconfig"]
+ahci = ["block", "axdriver_block/ahci", "dep:axhal", "dep:platconfig"]
 # ixgbe = ["net", "axdriver_net/ixgbe", "dep:axalloc", "dep:axhal", "dep:axdma"]
 # fxmac = ["net", "axdriver_net/fxmac", "dep:axalloc", "dep:axhal", "dep:axdma"]
 # more devices example: e1000 = ["net", "axdriver_net/e1000"]
@@ -48,7 +48,7 @@ default = ["bus-pci"]
 
 [dependencies]
 axalloc = { workspace = true, optional = true }
-axconfig = { workspace = true, optional = true }
+platconfig = { workspace = true, optional = true }
 # axdma = { workspace = true, optional = true }
 axdriver_base = { workspace = true }
 axdriver_block = { workspace = true, optional = true }

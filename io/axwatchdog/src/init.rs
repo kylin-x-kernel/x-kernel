@@ -5,8 +5,8 @@ use log::debug;
 use crate::rendezvous as rv;
 
 /// Stores the active trap frame for each CPU when a watchdog failure is detected.
-static mut TRAP_FRAMES: [Option<&TrapFrame>; axconfig::plat::CPU_NUM] =
-    [None; axconfig::plat::CPU_NUM];
+static mut TRAP_FRAMES: [Option<&TrapFrame>; platconfig::plat::CPU_NUM] =
+    [None; platconfig::plat::CPU_NUM];
 
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
@@ -56,7 +56,7 @@ fn init_common() {
                 );
 
                 // Cause CPU dumps all tasks for all CPUs.
-                for cpu in 0..axconfig::plat::CPU_NUM {
+                for cpu in 0..platconfig::plat::CPU_NUM {
                     if let Some(tf) = unsafe { TRAP_FRAMES[cpu] } {
                         axtask::dump_cur_task_backtrace(cpu, tf, true);
                     }
@@ -105,7 +105,7 @@ pub fn init_softlockup_detection() {
             axtask::yield_now();
         },
         "watchdog".into(),
-        axconfig::TASK_STACK_SIZE,
+        platconfig::TASK_STACK_SIZE,
     );
 
     // Bind watchdog task to the local CPU.

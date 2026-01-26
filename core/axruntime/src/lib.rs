@@ -96,7 +96,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
 fn is_init_ok() -> bool {
-    INITED_CPUS.load(Ordering::Acquire) == axconfig::plat::CPU_NUM
+    INITED_CPUS.load(Ordering::Acquire) == platconfig::plat::CPU_NUM
 }
 
 /// The main entry point of the ArceOS runtime.
@@ -126,13 +126,13 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
             backtrace = {}
             smp = {}
         "},
-        axconfig::ARCH,
-        axconfig::PLATFORM,
+        platconfig::ARCH,
+        platconfig::PLATFORM,
         option_env!("AX_TARGET").unwrap_or(""),
         option_env!("AX_MODE").unwrap_or(""),
         option_env!("AX_LOG").unwrap_or(""),
         axbacktrace::is_enabled(),
-        axconfig::plat::CPU_NUM,
+        platconfig::plat::CPU_NUM,
     );
     #[cfg(feature = "rtc")]
     ax_println!(
@@ -284,7 +284,7 @@ fn init_allocator() {
 fn init_interrupt() {
     // Setup timer interrupt handler
     const PERIODIC_INTERVAL_NANOS: u64 =
-        axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
+        axhal::time::NANOS_PER_SEC / platconfig::TICKS_PER_SEC as u64;
 
     #[percpu::def_percpu]
     static NEXT_DEADLINE: u64 = 0;
@@ -312,7 +312,7 @@ fn init_interrupt() {
     });
 
     #[cfg(feature = "pmu")]
-    axhal::irq::register(axconfig::devices::PMU_IRQ, || {
+    axhal::irq::register(platconfig::devices::PMU_IRQ, || {
         debug!(
             "PMU interrupt received on cpu {}",
             axhal::percpu::this_cpu_id()

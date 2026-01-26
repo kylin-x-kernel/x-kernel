@@ -30,7 +30,7 @@ pub type AxTaskRef = Arc<AxTask>;
 pub type WeakAxTaskRef = Weak<AxTask>;
 
 /// The wrapper type for [`cpumask::CpuMask`] with SMP configuration.
-pub type AxCpuMask = cpumask::CpuMask<{ axconfig::plat::CPU_NUM }>;
+pub type AxCpuMask = cpumask::CpuMask<{ platconfig::plat::CPU_NUM }>;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
 
@@ -93,7 +93,7 @@ pub fn current() -> CurrentTask {
 
 /// Initializes the task scheduler (for the primary CPU).
 pub fn init_scheduler() {
-    init_scheduler_with_cpu_num(axconfig::plat::CPU_NUM);
+    init_scheduler_with_cpu_num(platconfig::plat::CPU_NUM);
 }
 
 /// Initializes the task scheduler with cpu_num (for the primary CPU).
@@ -145,20 +145,20 @@ where
     spawn_task(TaskInner::new(f, name, stack_size))
 }
 
-/// Spawns a new task with the given name and the default stack size ([`axconfig::TASK_STACK_SIZE`]).
+/// Spawns a new task with the given name and the default stack size ([`platconfig::TASK_STACK_SIZE`]).
 ///
 /// Returns the task reference.
 pub fn spawn_with_name<F>(f: F, name: String) -> AxTaskRef
 where
     F: FnOnce() + Send + 'static,
 {
-    spawn_raw(f, name, axconfig::TASK_STACK_SIZE)
+    spawn_raw(f, name, platconfig::TASK_STACK_SIZE)
 }
 
 /// Spawns a new task with the default parameters.
 ///
 /// The default task name is an empty string. The default task stack size is
-/// [`axconfig::TASK_STACK_SIZE`].
+/// [`platconfig::TASK_STACK_SIZE`].
 ///
 /// Returns the task reference.
 pub fn spawn<F>(f: F) -> AxTaskRef

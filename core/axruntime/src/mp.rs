@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use axconfig::{TASK_STACK_SIZE, plat::CPU_NUM};
+use platconfig::{TASK_STACK_SIZE, plat::CPU_NUM};
 use axhal::mem::{VirtAddr, virt_to_phys};
 
 #[unsafe(link_section = ".bss.stack")]
@@ -59,7 +59,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     }
 
     #[cfg(feature = "pmu")]
-    axhal::irq::set_enable(axconfig::devices::PMU_IRQ, true);
+    axhal::irq::set_enable(platconfig::devices::PMU_IRQ, true);
 
     #[cfg(feature = "irq")]
     axhal::asm::enable_irqs();

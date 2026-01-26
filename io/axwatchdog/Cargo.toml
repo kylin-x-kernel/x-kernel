@@ -12,7 +12,7 @@ categories = ["no-std", "embedded", "hardware-support"]
 default = ["axhal/nmi"]
 
 [dependencies]
-axconfig.workspace = true
+platconfig.workspace = true
 axhal.workspace = true
 axtask = { workspace = true, features = ["watchdog"] }
 cfg-if.workspace = true

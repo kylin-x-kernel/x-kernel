@@ -10,7 +10,7 @@ pub use axplat::irq::{handle, register, set_enable, unregister, set_priority, lo
 pub use axplat::irq::{IpiTarget, send_ipi};
 
 #[cfg(feature = "ipi")]
-pub use axconfig::devices::IPI_IRQ;
+pub use platconfig::devices::IPI_IRQ;
 
 static IRQ_HOOK: AtomicUsize = AtomicUsize::new(0);
 

@@ -15,7 +15,7 @@ default = []
 watchdog = ["dep:axbacktrace", "dep:axplat"]
 
 multitask = [
-    "dep:axconfig",
+    "dep:platconfig",
     "dep:axpoll",
     "dep:axsched",
     "dep:cpumask",
@@ -41,7 +41,7 @@ sched-cfs = ["multitask", "preempt"]
 test = ["percpu?/sp-naive"]
 
 [dependencies]
-axconfig = { workspace = true, optional = true }
+platconfig = { workspace = true, optional = true }
 axerrno.workspace = true
 axhal.workspace = true
 axbacktrace = { workspace = true, optional = true }

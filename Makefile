@@ -45,7 +45,7 @@ DWARF ?=
 LTO ?=
 TARGET_DIR ?= $(PWD)/target
 EXTRA_CONFIG ?=
-OUT_CONFIG ?= $(PWD)/.axconfig.toml
+OUT_CONFIG ?= $(PWD)/.platconfig.toml
 UIMAGE ?= n
 
 # App options
@@ -133,10 +133,10 @@ export AX_GW=$(GW)
 
 ifneq ($(filter $(MAKECMDGOALS),unittest unittest_no_fail_fast clippy doc doc_check_missing),)
   # When running unit tests or other tests unrelated to a specific platform,
-  # set `AX_CONFIG_PATH` to empty for dummy config
-  unexport AX_CONFIG_PATH
+  # set `PLAT_CONFIG_PATH` to empty for dummy config
+  unexport PLAT_CONFIG_PATH
 else
-  export AX_CONFIG_PATH=$(OUT_CONFIG)
+  export PLAT_CONFIG_PATH=$(OUT_CONFIG)
 endif
 
 # Binutils

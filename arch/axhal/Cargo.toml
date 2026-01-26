@@ -62,7 +62,7 @@ ipi = ["irq"]
 
 [dependencies]
 axalloc = { workspace = true, optional = true }
-axconfig.workspace = true
+platconfig.workspace = true
 axcpu = { workspace = true }
 axplat.workspace = true
 cfg-if.workspace = true
@@ -89,4 +89,4 @@ axplat-riscv64-qemu-virt = { workspace = true, optional = true }
 axplat-loongarch64-qemu-virt = { workspace = true, optional = true }
 
 [build-dependencies]
-axconfig.workspace = true
+platconfig.workspace = true

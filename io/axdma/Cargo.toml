@@ -13,7 +13,7 @@ documentation = "https://arceos-org.github.io/arceos/axdma/index.html"
 [dependencies]
 allocator.workspace = true
 axalloc.workspace = true
-axconfig.workspace = true
+platconfig.workspace = true
 axerrno.workspace = true
 axhal = { workspace = true, features = ["paging"] }
 axmm.workspace = true
