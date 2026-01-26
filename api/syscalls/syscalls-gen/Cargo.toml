@@ -1,0 +1,24 @@
+[package]
+name = "syscalls-gen"
+publish = false
+version = "0.0.0"
+authors = ["Baojun Wang <wangbj@gmail.com>", "Jason White <rust@jasonwhite.io>"]
+edition = "2021"
+license = "BSD-2-Clause"
+description = """
+Generates a syscalls table from Linux source code.
+"""
+keywords = ["syscall", "linux"]
+readme = "README.md"
+repository = "https://github.com/jasonwhite/syscalls"
+homepage = "https://github.com/jasonwhite/syscalls"
+documentation = "https://docs.rs/syscalls"
+
+[dependencies]
+color-eyre = "0.6"
+futures = "0.3"
+lazy_static = "1"
+regex = "1"
+reqwest = "0.11"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

@@ -73,6 +73,7 @@ starry-core = { path = "api/starry-core" }
 starry-api = { path = "api/starry-api" }
 starry-process = { path = "process/starry-process" }
 starry-vm = { path = "process/starry-vm" }
+syscalls = { path = "api/syscalls", default-features = false }
 
 # Platform Abstraction Layer
 axplat = { path = "arch/axplat" }
