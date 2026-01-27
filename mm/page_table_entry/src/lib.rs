@@ -26,6 +26,10 @@ bitflags::bitflags! {
         const DEVICE        = 1 << 4;
         /// The memory is uncached.
         const UNCACHED      = 1 << 5;
+        /// The memory is shared/unencrypted (for AMD SEV, no C-Bit).
+        /// This is used for memory that needs to be accessible by the hypervisor,
+        /// such as VirtIO DMA buffers.
+        const SHARED        = 1 << 6;
     }
 }
 

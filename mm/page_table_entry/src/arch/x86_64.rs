@@ -1,12 +1,32 @@
 //! x86 page table entries on 64-bit paging.
 
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use memory_addr::PhysAddr;
 
 pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;
 
 use crate::{GenericPTE, MappingFlags};
+
+/// Global C-Bit mask for AMD SEV.
+/// This is initialized once and then used for all page table operations.
+static SEV_CBIT_MASK: AtomicU64 = AtomicU64::new(0);
+
+/// Initialize the SEV C-Bit mask.
+/// This should be called early during boot on AMD SEV platforms.
+#[inline(never)]
+pub fn init_sev_cbit(cbit_position: u8) {
+    if cbit_position > 0 && cbit_position < 64 {
+        SEV_CBIT_MASK.store(1u64 << cbit_position, Ordering::SeqCst);
+    }
+}
+
+/// Get the current SEV C-Bit mask.
+#[inline]
+fn get_sev_cbit_mask() -> u64 {
+    SEV_CBIT_MASK.load(Ordering::SeqCst)
+}
 
 impl From<PTF> for MappingFlags {
     fn from(f: PTF) -> Self {
@@ -68,24 +88,37 @@ impl X64PTE {
 
 impl GenericPTE for X64PTE {
     fn new_page(paddr: PhysAddr, flags: MappingFlags, is_huge: bool) -> Self {
-        let mut flags = PTF::from(flags);
+        let mut ptf = PTF::from(flags);
         if is_huge {
-            flags |= PTF::HUGE_PAGE;
+            ptf |= PTF::HUGE_PAGE;
         }
-        Self(flags.bits() | (paddr.as_usize() as u64 & Self::PHYS_ADDR_MASK))
+        // Add C-Bit for AMD SEV encrypted pages, but NOT for shared memory
+        let cbit = if flags.contains(MappingFlags::SHARED) {
+            0
+        } else {
+            get_sev_cbit_mask()
+        };
+        let paddr_with_cbit = paddr.as_usize() as u64 | cbit;
+        Self(ptf.bits() | (paddr_with_cbit & Self::PHYS_ADDR_MASK))
     }
     fn new_table(paddr: PhysAddr) -> Self {
         let flags = PTF::PRESENT | PTF::WRITABLE | PTF::USER_ACCESSIBLE;
-        Self(flags.bits() | (paddr.as_usize() as u64 & Self::PHYS_ADDR_MASK))
+        // Page table pages are always encrypted (with C-Bit)
+        let paddr_with_cbit = paddr.as_usize() as u64 | get_sev_cbit_mask();
+        Self(flags.bits() | (paddr_with_cbit & Self::PHYS_ADDR_MASK))
     }
     fn paddr(&self) -> PhysAddr {
-        PhysAddr::from((self.0 & Self::PHYS_ADDR_MASK) as usize)
+        // Remove C-Bit when returning physical address
+        let paddr = (self.0 & Self::PHYS_ADDR_MASK) & !get_sev_cbit_mask();
+        PhysAddr::from(paddr as usize)
     }
     fn flags(&self) -> MappingFlags {
         PTF::from_bits_truncate(self.0).into()
     }
     fn set_paddr(&mut self, paddr: PhysAddr) {
-        self.0 = (self.0 & !Self::PHYS_ADDR_MASK) | (paddr.as_usize() as u64 & Self::PHYS_ADDR_MASK)
+        // Add C-Bit for AMD SEV encrypted pages
+        let paddr_with_cbit = paddr.as_usize() as u64 | get_sev_cbit_mask();
+        self.0 = (self.0 & !Self::PHYS_ADDR_MASK) | (paddr_with_cbit & Self::PHYS_ADDR_MASK)
     }
     fn set_flags(&mut self, flags: MappingFlags, is_huge: bool) {
         let mut flags = PTF::from(flags);

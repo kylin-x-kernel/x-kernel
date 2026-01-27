@@ -6,13 +6,10 @@
 //
 // This file has been modified by KylinSoft on 2025.
 use core::{marker::PhantomData, ptr::NonNull};
-use axalloc::{UsageKind, global_allocator};
 use axdriver_base::{BaseDriverOps, DevResult, DeviceType};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
-use axhal::mem::{phys_to_virt, virt_to_phys};
+use axhal::mem::phys_to_virt;
 #[cfg(feature = "crosvm")]
-use axhal::psci::{share_dma_buffer, unshare_dma_buffer};
-#[cfg(feature = "sev")]
 use axhal::psci::{share_dma_buffer, unshare_dma_buffer};
 use cfg_if::cfg_if;
 
@@ -369,12 +366,20 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             if let Some(paddr) = pool.alloc_pages(pages) {
                 let vaddr = phys_to_virt(paddr.into());
                 let ptr = NonNull::new(vaddr.as_mut_ptr()).unwrap();
+                log::debug!(
+                    "SEV dma_alloc: pages={}, paddr={:#x}, vaddr={:#x}",
+                    pages, paddr, vaddr
+                );
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 // Clear the allocated memory
                 unsafe {
                     core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, pages * PAGE_SIZE);
                 }
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                log::debug!("SEV dma_alloc: cleared memory at vaddr={:#x}", vaddr);
                 return (paddr, ptr);
             }
+            log::error!("SEV dma_alloc failed: pages={}", pages);
             return (0, NonNull::dangling());
         }
 
@@ -422,10 +427,12 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         NonNull::new(phys_to_virt(paddr.into()).as_mut_ptr()).unwrap()
     }
     #[allow(unused_variables)]
-    #[inline]
+    #[inline(never)]  // Prevent inlining to avoid compiler optimization issues
     unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> PhysAddr {
         #[cfg(feature = "sev")]
         {
+            use core::sync::atomic::{fence, Ordering};
+
             let vaddr = buffer.as_ptr() as *mut u8 as usize;
             let len = buffer.len();
 
@@ -435,6 +442,11 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 pool.alloc_bounce_buffer(vaddr, len)
                     .expect("SEV: failed to allocate shared bounce buffer")
             };
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            log::debug!(
+                "SEV share: vaddr={:#x}, len={:#x}, paddr={:#x}, direction={:?}",
+                vaddr, len, paddr, direction
+            );
 
             // If data flows from driver to device, copy to shared buffer
             if direction != BufferDirection::DeviceToDriver {
@@ -446,7 +458,14 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                         len,
                     );
                 }
+                // Ensure the copy is not optimized away and is visible
+                core::sync::atomic::fence(Ordering::SeqCst);
             }
+
+            // Full memory barrier to ensure data is visible to the device
+            // This is critical for SEV where data must be written to shared memory
+            // before the device accesses it
+            fence(Ordering::SeqCst);
 
             paddr
         }
@@ -476,14 +495,25 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             virt_to_phys(vaddr.into()).into()
         }
     }
-    #[inline]
+    #[inline(never)]  // Prevent inlining to avoid compiler optimization issues
     #[allow(unused_variables)]
     unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection) {
         #[cfg(feature = "sev")]
         {
+            use core::sync::atomic::{fence, Ordering};
+
             let mut buffer = buffer;
             let vaddr = buffer.as_ptr() as *mut u8 as usize;
             let len = buffer.len();
+
+            log::debug!(
+                "SEV unshare: paddr={:#x}, vaddr={:#x}, len={:#x}, direction={:?}",
+                paddr, vaddr, len, direction
+            );
+
+            // Full memory barrier to ensure device writes are visible before we read
+            // This is critical for SEV where device must complete writing to shared memory
+            fence(Ordering::SeqCst);
 
             // If data flows from device to driver, copy back from shared buffer
             if direction != BufferDirection::DriverToDevice {
@@ -495,6 +525,9 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                         len,
                     );
                 }
+                // Ensure the copy is not optimized away and create a final
+                // ordering point before we proceed.
+                core::sync::atomic::fence(Ordering::SeqCst);
             }
 
             // Free the bounce buffer

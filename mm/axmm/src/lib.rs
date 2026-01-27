@@ -14,7 +14,7 @@ use axhal::mem::{MemRegionFlags, phys_to_virt};
 use axhal::paging::MappingFlags;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
-use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
+use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, pa, va};
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();
 
@@ -50,35 +50,100 @@ pub fn new_kernel_aspace() -> AxResult<AddrSpace> {
         // mapped range should contain the whole region if it is not aligned.
         let start = r.paddr.align_down_4k();
         let end = (r.paddr + r.size).align_up_4k();
-        let mut paddr = start;
 
-        // Determine if this region should be encrypted (have C-Bit set)
-        let should_encrypt = cbit_mask != 0
+        // For SEV, we need to handle shared memory regions specially
+        if cbit_mask != 0
             && !r.flags.contains(MemRegionFlags::DEVICE)
             && !r.flags.contains(MemRegionFlags::UNCACHED)
-            && !is_in_shared_range(start.as_usize(), end.as_usize(), shared_range);
-
-        if should_encrypt {
-            paddr = PhysAddr::from(start.as_usize() | cbit_mask);
+        {
+            // Split the region if it overlaps with shared memory
+            map_region_with_shared_split(
+                &mut aspace,
+                start,
+                end,
+                cbit_mask,
+                shared_range,
+                reg_flag_to_map_flag(r.flags),
+            )?;
+        } else {
+            // DEVICE or UNCACHED regions are mapped without C-Bit
+            aspace.map_linear(
+                phys_to_virt(start),
+                start,
+                end - start,
+                reg_flag_to_map_flag(r.flags),
+            )?;
         }
-        aspace.map_linear(
-            phys_to_virt(start),
-            paddr,
-            end - start,
-            reg_flag_to_map_flag(r.flags),
-        )?;
     }
     Ok(aspace)
 }
 
-/// Checks if a memory range overlaps with the shared memory region.
-#[inline]
-fn is_in_shared_range(start: usize, end: usize, shared_range: (usize, usize)) -> bool {
-    if shared_range.0 == 0 && shared_range.1 == 0 {
-        return false;
+/// Maps a memory region, splitting it if necessary to handle shared memory.
+/// 
+/// For AMD SEV, shared memory (used for VirtIO DMA) must be mapped without
+/// the C-Bit, while normal memory must have the C-Bit set.
+fn map_region_with_shared_split(
+    aspace: &mut AddrSpace,
+    start: PhysAddr,
+    end: PhysAddr,
+    _cbit_mask: usize,
+    shared_range: (usize, usize),
+    flags: MappingFlags,
+) -> AxResult<()> {
+    let start_usize = start.as_usize();
+    let end_usize = end.as_usize();
+    let (shared_start, shared_end) = shared_range;
+
+    // If no shared range or no overlap, map the entire region (encrypted)
+    if shared_start == 0 && shared_end == 0 {
+        return aspace.map_linear(phys_to_virt(start), start, end - start, flags);
     }
-    // Check if ranges overlap
-    start < shared_range.1 && end > shared_range.0
+
+    // Check for overlap
+    if start_usize >= shared_end || end_usize <= shared_start {
+        // No overlap, map normally (encrypted)
+        return aspace.map_linear(phys_to_virt(start), start, end - start, flags);
+    }
+
+    // There is overlap, need to split the region
+    // Region 1: [start, shared_start) - encrypted (normal flags)
+    if start_usize < shared_start {
+        let region_end = shared_start.min(end_usize);
+        aspace.map_linear(
+            phys_to_virt(start),
+            start,
+            region_end - start_usize,
+            flags,
+        )?;
+    }
+
+    // Region 2: [max(start, shared_start), min(end, shared_end)) - shared (with SHARED flag)
+    let overlap_start = start_usize.max(shared_start);
+    let overlap_end = end_usize.min(shared_end);
+    if overlap_start < overlap_end {
+        let paddr = pa!(overlap_start);
+        // Add SHARED flag to indicate this memory should not be encrypted
+        aspace.map_linear(
+            phys_to_virt(paddr),
+            paddr,
+            overlap_end - overlap_start,
+            flags | MappingFlags::SHARED,
+        )?;
+    }
+
+    // Region 3: [shared_end, end) - encrypted (normal flags)
+    if end_usize > shared_end && shared_end > start_usize {
+        let region_start = shared_end.max(start_usize);
+        let paddr = pa!(region_start);
+        aspace.map_linear(
+            phys_to_virt(paddr),
+            paddr,
+            end_usize - region_start,
+            flags,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Creates a new address space for user processes.
@@ -107,11 +172,27 @@ pub fn kernel_page_table_root() -> PhysAddr {
 /// fine-grained kernel page table.
 pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
+
+    // Initialize SEV C-Bit in page table entry module for AMD SEV platforms
+    #[cfg(target_arch = "x86_64")]
+    {
+        let cbit_pos = sev_cbit_pos();
+        debug!("SEV C-Bit position = {}", cbit_pos);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        if cbit_pos > 0 {
+            page_table_multiarch::x86_64::init_sev_cbit(cbit_pos);
+            // Ensure the C-Bit initialization is visible before creating page tables
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            debug!("SEV C-Bit initialized: mask = {:#x}", 1usize << cbit_pos);
+        }
+    }
+
     let kernel_aspace = new_kernel_aspace().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_aspace);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_aspace));
     let mut root = kernel_page_table_root();
     let cbit_mask = sev_cbit_mask();
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     debug!("SEV C-Bit mask = {:#x}, ROOT = {:#x}", cbit_mask, root);
     if cbit_mask != 0 {
         root = PhysAddr::from(root.as_usize() | cbit_mask);
@@ -129,20 +210,27 @@ pub fn init_memory_management_secondary() {
     unsafe { axhal::asm::write_kernel_page_table(root) };
 }
 
+/// Returns the SEV C-Bit position (0 if SEV is not enabled).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn sev_cbit_pos() -> u8 {
+    // SAFETY: CPUID is available on x86_64.
+    let max = unsafe { core::arch::x86_64::__cpuid_count(0x8000_0000, 0) }.eax;
+    if max < 0x8000_001f {
+        return 0;
+    }
+    let r = unsafe { core::arch::x86_64::__cpuid_count(0x8000_001f, 0) };
+    if (r.eax & (1 << 1)) == 0 {
+        return 0;
+    }
+    (r.ebx & 0x3f) as u8
+}
+
 #[inline]
 fn sev_cbit_mask() -> usize {
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: CPUID is available on x86_64.
-        let max = unsafe { core::arch::x86_64::__cpuid_count(0x8000_0000, 0) }.eax;
-        if max < 0x8000_001f {
-            return 0;
-        }
-        let r = unsafe { core::arch::x86_64::__cpuid_count(0x8000_001f, 0) };
-        if (r.eax & (1 << 1)) == 0 {
-            return 0;
-        }
-        let cbit_pos = (r.ebx & 0x3f) as usize;
+        let cbit_pos = sev_cbit_pos() as usize;
         if cbit_pos == 0 { 0 } else { 1usize << cbit_pos }
     }
     #[cfg(not(target_arch = "x86_64"))]

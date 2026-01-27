@@ -2,6 +2,7 @@
 
 use memory_addr::VirtAddr;
 use page_table_entry::x86_64::X64PTE;
+pub use page_table_entry::init_sev_cbit;
 
 use crate::{PageTable64, PageTable64Mut, PagingMetaData};
 

@@ -34,9 +34,7 @@ fn alloc_frame(zeroed: bool, size: PageSize) -> AxResult<PhysAddr> {
     if zeroed {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, page_size) };
     }
-    let paddr = virt_to_phys(vaddr);
-
-    Ok(paddr)
+    Ok(virt_to_phys(vaddr))
 }
 
 fn dealloc_frame(frame: PhysAddr, align: PageSize) {
