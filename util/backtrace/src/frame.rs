@@ -1,8 +1,11 @@
 //! Stack frame representation.
 
-use crate::arch::{ArchBacktrace, CurrentArch};
-use crate::error::{BacktraceError, InvalidReason, Result};
 use core::fmt;
+
+use crate::{
+    arch::{ArchBacktrace, CurrentArch},
+    error::{BacktraceError, InvalidReason, Result},
+};
 
 /// Represents a single stack frame in the unwound stack.
 #[repr(C)]

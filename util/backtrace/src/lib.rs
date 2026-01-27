@@ -1,5 +1,4 @@
 #![no_std]
-
 #![doc = include_str!("../README.md")]
 
 //! # Backtrace - Stack Unwinding for x-kernel
@@ -17,7 +16,7 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use backtrace::{init, Backtrace};
+//! use backtrace::{Backtrace, init};
 //!
 //! // Initialize with valid memory ranges
 //! let code_range = 0x8000_0000..0x9000_0000;
@@ -39,24 +38,25 @@ use core::{fmt, ops::Range};
 use spin::Once;
 
 // Modules
-pub mod error;
-pub mod config;
-pub mod frame;
 pub mod arch;
-mod unwinder;
+pub mod config;
+pub mod error;
+pub mod frame;
 
+#[cfg(feature = "alloc")]
+mod unwinder;
+pub use config::{max_depth, set_max_depth};
 pub use error::{BacktraceError, Result};
-pub use config::{set_max_depth, max_depth};
 pub use frame::Frame;
+#[cfg(feature = "alloc")]
+use unwinder::Unwinder;
 
 #[cfg(feature = "dwarf")]
 mod dwarf;
 
+use config::BacktraceConfig;
 #[cfg(feature = "dwarf")]
 pub use dwarf::{DwarfReader, FrameIter};
-
-use config::BacktraceConfig;
-use unwinder::Unwinder;
 
 /// Global backtrace configuration.
 static CONFIG: Once<BacktraceConfig> = Once::new();
@@ -79,7 +79,6 @@ pub const fn is_enabled() -> bool {
 }
 
 // Unwind the stack from the given frame pointer.
-///
 /// Returns an empty vector if not initialized or on error.
 ///
 /// # Examples
@@ -215,10 +214,7 @@ impl Backtrace {
                 }
             }
 
-            frames.insert(
-                0,
-                Frame::new(fp,ip.wrapping_add(1))
-            );
+            frames.insert(0, Frame::new(fp, ip.wrapping_add(1)));
 
             Self {
                 inner: Inner::Captured(frames),
@@ -264,7 +260,10 @@ impl fmt::Display for Backtrace {
                 writeln!(f, "<unwinding unsupported on this architecture>")
             }
             Inner::Disabled => {
-                writeln!(f, "<backtrace disabled: enable the \"dwarf\" feature to capture backtraces>")
+                writeln!(
+                    f,
+                    "<backtrace disabled: enable the \"dwarf\" feature to capture backtraces>"
+                )
             }
             #[cfg(feature = "dwarf")]
             Inner::Captured(frames) => {

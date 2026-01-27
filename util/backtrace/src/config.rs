@@ -1,7 +1,9 @@
 //! Configuration for backtrace operations.
 
-use core::ops::Range;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    ops::Range,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// Configuration for backtrace capturing and unwinding.
 #[derive(Debug, Clone)]

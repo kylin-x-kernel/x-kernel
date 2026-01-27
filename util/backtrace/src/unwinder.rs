@@ -1,11 +1,12 @@
 //! Stack unwinding implementation.
 
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use crate::config::BacktraceConfig;
-use crate::error::{BacktraceError, Result};
-use crate::frame::Frame;
+use crate::{
+    config::BacktraceConfig,
+    error::{BacktraceError, Result},
+    frame::Frame,
+};
 
 /// Stack unwinder.
 pub struct Unwinder<'a> {
@@ -19,7 +20,6 @@ impl<'a> Unwinder<'a> {
     }
 
     /// Unwind the stack from the given frame pointer.
-    #[cfg(feature = "alloc")]
     pub fn unwind(&self, mut fp: usize) -> Result<Vec<Frame>> {
         // Validate initial frame pointer
         if !self.config.validate_fp(fp) {
@@ -57,12 +57,13 @@ impl<'a> Unwinder<'a> {
             }
 
             if let Some(large_stack_end) = fp.checked_add(self.config.max_stack_size)
-                && frame.fp >= large_stack_end {
-                    return Err(BacktraceError::StackTooLarge {
-                        fp: frame.fp,
-                        prev_fp,
-                        size: frame.fp,
-                    });
+                && frame.fp >= large_stack_end
+            {
+                return Err(BacktraceError::StackTooLarge {
+                    fp: frame.fp,
+                    prev_fp,
+                    size: frame.fp,
+                });
             }
 
             // Add frame

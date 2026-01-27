@@ -297,11 +297,8 @@ pub fn dump_cpu_task_backtrace(_cpu_id: usize, _force: bool) {
 #[cfg(all(feature = "watchdog", target_arch = "aarch64"))]
 #[inline(always)]
 pub fn dump_cur_task_backtrace(cpu_id: usize, tf: &TrapFrame, force: bool) {
-    let bt = backtrace::Backtrace::capture_trap(
-        tf.x[29] as usize,
-        tf.x[30] as usize,
-        tf.x[30] as usize,
-    );
+    let bt =
+        backtrace::Backtrace::capture_trap(tf.x[29] as usize, tf.x[30] as usize, tf.x[30] as usize);
     dump_println(
         force,
         format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id, current().inner()),

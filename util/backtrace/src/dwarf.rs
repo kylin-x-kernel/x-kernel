@@ -2,14 +2,12 @@ use alloc::borrow::Cow;
 use core::{fmt, slice};
 
 use addr2line::Context;
-use spin::Once;
-
 // Only import in non-test builds
 #[cfg(not(test))]
 use log::{error, info};
-
 #[cfg(not(test))]
 use paste::paste;
+use spin::Once;
 
 pub type DwarfReader = gimli::EndianSlice<'static, gimli::RunTimeEndian>;
 
@@ -20,7 +18,7 @@ static INIT_ONCE: Once<()> = Once::new();
 
 // Only define macro in non-test builds
 #[cfg(not(test))]
-#[allow(unused_macros)]  // Used at runtime via macro expansion
+#[allow(unused_macros)] // Used at runtime via macro expansion
 macro_rules! generate_sections {
     ($($name:ident),*) => {
         unsafe extern "C" {
@@ -52,7 +50,7 @@ macro_rules! generate_sections {
 
 // Stub macro for test builds - does nothing
 #[cfg(test)]
-#[allow(unused_macros)]  // Intentionally unused in tests
+#[allow(unused_macros)] // Intentionally unused in tests
 macro_rules! generate_sections {
     ($($name:ident),*) => {
         // No-op in test mode
@@ -209,7 +207,7 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
             return write!(f, "Backtracing is not initialized.");
         }
     }
-    
+
     // Normal symbolication
     for (i, (raw, frame)) in FrameIter::new(frames).enumerate() {
         write!(f, "{i:>4}")?;
@@ -224,11 +222,11 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
 pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) -> fmt::Result {
     #[allow(static_mut_refs)]
     if unsafe { CONTEXT.is_none() } {
-            writeln!(f, "Symbolication disabled in test mode.")?;
-            writeln!(f, "Raw frames:")?;
-            for (i, frame) in frames.iter().enumerate() {
-                writeln!(f, "  {:>4}: {}", i, frame)?;
-            }
+        writeln!(f, "Symbolication disabled in test mode.")?;
+        writeln!(f, "Raw frames:")?;
+        for (i, frame) in frames.iter().enumerate() {
+            writeln!(f, "  {:>4}: {}", i, frame)?;
+        }
         return Ok(());
     }
 
