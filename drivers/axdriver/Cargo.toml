@@ -60,7 +60,7 @@ vsock = { workspace = true, optional = true }
 axdriver_virtio = { workspace = true, optional = true }
 axerrno = { workspace = true, optional = true }
 axhal = { workspace = true, optional = true }
-axklib = { workspace = true, optional = true }
+driver_api = { workspace = true, optional = true }
 # axmm = { workspace = true, optional = true }
 cfg-if.workspace = true
 crate_interface.workspace = true
