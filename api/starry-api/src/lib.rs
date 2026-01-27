@@ -5,7 +5,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 #[macro_use]
-extern crate axlog;
+extern crate klogger;
 
 extern crate alloc;
 

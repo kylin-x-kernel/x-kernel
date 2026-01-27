@@ -69,7 +69,7 @@ macro_rules! console_print {
 /// Simple console print operation, with a newline.
 #[macro_export]
 macro_rules! console_println {
-    () => { $crate::ax_print!("\n") };
+    () => { $crate::console_print!("\n") };
     ($($arg:tt)*) => {
         $crate::console::__simple_print(format_args!("{}\n", format_args!($($arg)*)));
     }

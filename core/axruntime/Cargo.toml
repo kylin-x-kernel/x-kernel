@@ -44,7 +44,7 @@ axinput = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
 axhal.workspace = true
 axipi = { workspace = true, optional = true }
-axlog.workspace = true
+klogger.workspace = true
 axmm = { workspace = true, optional = true }
 axnet = { workspace = true, optional = true }
 axplat = { workspace = true }

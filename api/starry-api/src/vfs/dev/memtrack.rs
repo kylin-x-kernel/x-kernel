@@ -95,7 +95,7 @@ fn run_memory_analysis() {
     cleanup_task_tables();
     clear_elf_cache();
 
-    ax_println!(
+    kprintln!(
         "Alive tasks: {:?}",
         tasks().iter().map(|it| it.id_name()).collect::<Vec<_>>()
     );
@@ -117,17 +117,17 @@ fn run_memory_analysis() {
         .collect::<Vec<_>>();
     allocations.sort_by_key(|it| cmp::Reverse(it.2));
     if !allocations.is_empty() {
-        ax_println!("===========================");
-        ax_println!("Memory usage:");
+        kprintln!("===========================");
+        kprintln!("Memory usage:");
         for (category, layouts, total_size) in allocations {
-            ax_println!(
+            kprintln!(
                 " {} bytes, {} allocations, {:?}, {category}",
                 total_size,
                 layouts.len(),
                 layouts[0],
             );
         }
-        ax_println!("==========================");
+        kprintln!("==========================");
     }
 }
 
@@ -144,7 +144,7 @@ impl DeviceOps for MemTrack {
                 b"start\n" => {
                     let generation = axalloc::current_generation();
                     STAMPED_GENERATION.store(generation, Ordering::SeqCst);
-                    ax_println!("Memory allocation generation stamped: {}", generation);
+                    kprintln!("Memory allocation generation stamped: {}", generation);
                     axalloc::enable_tracking();
                 }
                 b"end\n" => {

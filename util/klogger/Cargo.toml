@@ -1,0 +1,18 @@
+[package]
+name = "klogger"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Kernel logger implementation"
+license.workspace = true
+
+[features]
+std = ["dep:chrono"]
+default = []
+
+[dependencies]
+cfg-if.workspace = true
+chrono = { workspace = true, default-features = true, optional = true }
+crate_interface.workspace = true
+kspin.workspace = true
+log.workspace = true
