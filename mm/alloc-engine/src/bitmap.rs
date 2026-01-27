@@ -72,8 +72,7 @@ impl<const PAGE_SIZE: usize> BaseAllocator for BitmapPageAllocator<PAGE_SIZE> {
         let start = start - self.base_addr;
         let start_idx = start / PAGE_SIZE;
 
-        self.bitmap
-            .insert(start_idx..start_idx + self.total_pages);
+        self.bitmap.insert(start_idx..start_idx + self.total_pages);
     }
 
     fn add_region(&mut self, _start: usize, _size: usize) -> AllocResult {
@@ -149,9 +148,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for BitmapPageAllocator<PAGE_SIZE> {
             "base must be aligned to PAGE_SIZE"
         );
         if match num_pages.cmp(&1) {
-            core::cmp::Ordering::Equal => {
-                self.bitmap.dealloc((base - self.base_addr) / PAGE_SIZE)
-            }
+            core::cmp::Ordering::Equal => self.bitmap.dealloc((base - self.base_addr) / PAGE_SIZE),
             core::cmp::Ordering::Greater => self
                 .bitmap
                 .dealloc_contiguous((base - self.base_addr) / PAGE_SIZE, num_pages),

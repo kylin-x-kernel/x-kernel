@@ -284,10 +284,7 @@ impl GlobalAllocator {
         }
         #[cfg(not(feature = "level-1"))]
         {
-            let addr = self
-                .palloc
-                .lock()
-                .allocate_pages(num_pages, align_pow2)?;
+            let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
             if !matches!(kind, UsageKind::RustHeap) {
                 self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
             }
