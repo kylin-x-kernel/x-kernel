@@ -1,7 +1,7 @@
 use alloc::{collections::VecDeque, sync::Arc};
 use core::{convert::From, mem::ManuallyDrop, ptr::NonNull};
 
-use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 pub use ixgbe_driver::{INTEL_82599, INTEL_VEND, IxgbeHal, PhysAddr};
 use ixgbe_driver::{IxgbeDevice, IxgbeError, IxgbeNetBuf, MemPool, NicDevice};
 use log::*;
@@ -28,12 +28,12 @@ unsafe impl<H: IxgbeHal, const QS: usize, const QN: u16> Send for IxgbeNic<H, QS
 impl<H: IxgbeHal, const QS: usize, const QN: u16> IxgbeNic<H, QS, QN> {
     /// Creates a net ixgbe NIC instance and initialize, or returns a error if
     /// any step fails.
-    pub fn init(base: usize, len: usize) -> DevResult<Self> {
+    pub fn init(base: usize, len: usize) -> DriverResult<Self> {
         let mem_pool = MemPool::allocate::<H>(MEM_POOL, MEM_POOL_ENTRY_SIZE)
-            .map_err(|_| DevError::NoMemory)?;
+            .map_err(|_| DriverError::NoMemory)?;
         let inner = IxgbeDevice::<H, QS>::init(base, len, QN, QN, &mem_pool).map_err(|err| {
             error!("Failed to initialize ixgbe device: {err:?}");
-            DevError::BadState
+            DriverError::BadState
         })?;
 
         let rx_buffer_queue = VecDeque::with_capacity(RX_BUFFER_SIZE);
@@ -45,13 +45,13 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> IxgbeNic<H, QS, QN> {
     }
 }
 
-impl<H: IxgbeHal, const QS: usize, const QN: u16> BaseDriverOps for IxgbeNic<H, QS, QN> {
-    fn device_name(&self) -> &str {
+impl<H: IxgbeHal, const QS: usize, const QN: u16> DriverOps for IxgbeNic<H, QS, QN> {
+    fn name(&self) -> &str {
         self.inner.get_driver_name()
     }
 
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Net
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Net
     }
 }
 
@@ -77,22 +77,22 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, Q
         self.inner.can_send(0).unwrap()
     }
 
-    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DevResult {
+    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DriverResult {
         let rx_buf = ixgbe_ptr_to_buf(rx_buf, &self.mem_pool)?;
         drop(rx_buf);
         Ok(())
     }
 
-    fn recycle_tx_buffers(&mut self) -> DevResult {
+    fn recycle_tx_buffers(&mut self) -> DriverResult {
         self.inner
             .recycle_tx_buffers(0)
-            .map_err(|_| DevError::BadState)?;
+            .map_err(|_| DriverError::BadState)?;
         Ok(())
     }
 
-    fn receive(&mut self) -> DevResult<NetBufPtr> {
+    fn receive(&mut self) -> DriverResult<NetBufPtr> {
         if !self.can_receive() {
-            return Err(DevError::Again);
+            return Err(DriverError::WouldBlock);
         }
         if !self.rx_buffer_queue.is_empty() {
             // RX buffer have received packets.
@@ -114,26 +114,26 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, Q
                     }
                 }
                 Err(e) => match e {
-                    IxgbeError::NotReady => Err(DevError::Again),
-                    _ => Err(DevError::BadState),
+                    IxgbeError::NotReady => Err(DriverError::WouldBlock),
+                    _ => Err(DriverError::BadState),
                 },
             }
         }
     }
 
-    fn transmit(&mut self, tx_buf: NetBufPtr) -> DevResult {
+    fn transmit(&mut self, tx_buf: NetBufPtr) -> DriverResult {
         let tx_buf = ixgbe_ptr_to_buf(tx_buf, &self.mem_pool)?;
         match self.inner.send(0, tx_buf) {
             Ok(_) => Ok(()),
             Err(err) => match err {
-                IxgbeError::QueueFull => Err(DevError::Again),
+                IxgbeError::QueueFull => Err(DriverError::WouldBlock),
                 _ => panic!("Unexpected err: {:?}", err),
             },
         }
     }
 
-    fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<NetBufPtr> {
-        let tx_buf = IxgbeNetBuf::alloc(&self.mem_pool, size).map_err(|_| DevError::NoMemory)?;
+    fn alloc_tx_buffer(&mut self, size: usize) -> DriverResult<NetBufPtr> {
+        let tx_buf = IxgbeNetBuf::alloc(&self.mem_pool, size).map_err(|_| DriverError::NoMemory)?;
         Ok(NetBufPtr::from(tx_buf))
     }
 }
@@ -154,7 +154,7 @@ impl From<IxgbeNetBuf> for NetBufPtr {
 }
 
 // Converts a `NetBufPtr` to `IxgbeNetBuf`.
-fn ixgbe_ptr_to_buf(ptr: NetBufPtr, pool: &Arc<MemPool>) -> DevResult<IxgbeNetBuf> {
+fn ixgbe_ptr_to_buf(ptr: NetBufPtr, pool: &Arc<MemPool>) -> DriverResult<IxgbeNetBuf> {
     IxgbeNetBuf::construct(ptr.raw_ptr::<()>().addr(), pool, ptr.packet_len())
-        .map_err(|_| DevError::BadState)
+        .map_err(|_| DriverError::BadState)
 }

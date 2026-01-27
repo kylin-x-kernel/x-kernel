@@ -72,7 +72,7 @@ pub fn init_network(mut net_devs: AxDeviceContainer<AxNetDevice>) {
     ));
 
     let eth0_ip = if let Some(dev) = net_devs.take_one() {
-        info!("  use NIC 0: {:?}", dev.device_name());
+        info!("  use NIC 0: {:?}", dev.name());
 
         let eth0_address = EthernetAddress(dev.mac_address().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
@@ -123,7 +123,7 @@ pub fn init_vsock(mut vsock_devs: AxDeviceContainer<AxVsockDevice>) {
     use crate::device::register_vsock_device;
     info!("Initialize vsock subsystem...");
     if let Some(dev) = vsock_devs.take_one() {
-        info!("  use vsock 0: {:?}", dev.device_name());
+        info!("  use vsock 0: {:?}", dev.name());
         if let Err(e) = register_vsock_device(dev) {
             warn!("Failed to initialize vsock device: {:?}", e);
         }

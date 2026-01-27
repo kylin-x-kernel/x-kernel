@@ -9,12 +9,12 @@
 use core::{marker::PhantomData, ptr::NonNull};
 
 use axalloc::{UsageKind, global_allocator};
-use axdriver_base::{BaseDriverOps, DevResult, DeviceType};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
 use axhal::mem::{phys_to_virt, virt_to_phys};
 #[cfg(feature = "crosvm")]
 use axhal::psci::{share_dma_buffer, unshare_dma_buffer};
 use cfg_if::cfg_if;
+use driver_base::{DeviceKind, DriverOps, DriverResult};
 
 use crate::{AxDeviceEnum, drivers::DriverProbe};
 
@@ -29,12 +29,12 @@ cfg_if! {
 
 /// A trait for VirtIO device meta information.
 pub trait VirtIoDevMeta {
-    const DEVICE_TYPE: DeviceType;
+    const DEVICE_TYPE: DeviceKind;
 
-    type Device: BaseDriverOps;
+    type Device: DriverOps;
     type Driver = VirtIoDriver<Self>;
 
-    fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DevResult<AxDeviceEnum>;
+    fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DriverResult<AxDeviceEnum>;
 }
 
 cfg_if! {
@@ -42,10 +42,10 @@ cfg_if! {
         pub struct VirtIoNet;
 
         impl VirtIoDevMeta for VirtIoNet {
-            const DEVICE_TYPE: DeviceType = DeviceType::Net;
+            const DEVICE_TYPE: DeviceKind = DeviceKind::Net;
             type Device = axdriver_virtio::VirtIoNetDev<VirtIoHalImpl, VirtIoTransport, 64>;
 
-            fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_net(Self::Device::try_new(transport, irq)?))
             }
         }
@@ -57,10 +57,10 @@ cfg_if! {
         pub struct VirtIoBlk;
 
         impl VirtIoDevMeta for VirtIoBlk {
-            const DEVICE_TYPE: DeviceType = DeviceType::Block;
+            const DEVICE_TYPE: DeviceKind = DeviceKind::Block;
             type Device = axdriver_virtio::VirtIoBlkDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_block(Self::Device::try_new(transport)?))
             }
         }
@@ -72,10 +72,10 @@ cfg_if! {
         pub struct VirtIoGpu;
 
         impl VirtIoDevMeta for VirtIoGpu {
-            const DEVICE_TYPE: DeviceType = DeviceType::Display;
+            const DEVICE_TYPE: DeviceKind = DeviceKind::Display;
             type Device = axdriver_virtio::VirtIoGpuDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_display(Self::Device::try_new(transport)?))
             }
         }
@@ -87,10 +87,10 @@ cfg_if! {
         pub struct VirtIoInput;
 
         impl VirtIoDevMeta for VirtIoInput {
-            const DEVICE_TYPE: DeviceType = DeviceType::Input;
+            const DEVICE_TYPE: DeviceKind = DeviceKind::Input;
             type Device = axdriver_virtio::VirtIoInputDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_input(Self::Device::try_new(transport)?))
             }
         }
@@ -102,10 +102,10 @@ cfg_if! {
         pub struct VirtIoSocket;
 
         impl VirtIoDevMeta for VirtIoSocket {
-            const DEVICE_TYPE: DeviceType = DeviceType::Vsock;
+            const DEVICE_TYPE: DeviceKind = DeviceKind::Vsock;
             type Device = axdriver_virtio::VirtIoSocketDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq:  Option<usize>) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, _irq:  Option<usize>) -> DriverResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_vsock(Self::Device::try_new(transport)?))
             }
         }
@@ -149,11 +149,11 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             return None;
         }
         match (D::DEVICE_TYPE, dev_info.device_id) {
-            (DeviceType::Net, 0x1000) | (DeviceType::Net, 0x1041) => {}
-            (DeviceType::Block, 0x1001) | (DeviceType::Block, 0x1042) => {}
-            (DeviceType::Input, 0x1052) => {}
-            (DeviceType::Display, 0x1050) => {}
-            (DeviceType::Vsock, 0x1053) => {}
+            (DeviceKind::Net, 0x1000) | (DeviceKind::Net, 0x1041) => {}
+            (DeviceKind::Block, 0x1001) | (DeviceKind::Block, 0x1042) => {}
+            (DeviceKind::Input, 0x1052) => {}
+            (DeviceKind::Display, 0x1050) => {}
+            (DeviceKind::Vsock, 0x1053) => {}
             _ => return None,
         }
 

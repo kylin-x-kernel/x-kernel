@@ -3,7 +3,7 @@
 #![no_std]
 
 #[doc(no_inline)]
-pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use strum::FromRepr;
 
 #[repr(u8)]
@@ -77,7 +77,7 @@ pub struct AbsInfo {
 }
 
 /// Operations that require a graphics device driver to implement.
-pub trait InputDriverOps: BaseDriverOps {
+pub trait InputDriverOps: DriverOps {
     /// Returns the device ID of the input device.
     fn device_id(&self) -> InputDeviceId;
 
@@ -92,10 +92,10 @@ pub trait InputDriverOps: BaseDriverOps {
     ///
     /// Returns true if the event type is supported and the bitmap is written to
     /// `out`.
-    fn get_event_bits(&mut self, ty: EventType, out: &mut [u8]) -> DevResult<bool>;
+    fn get_event_bits(&mut self, ty: EventType, out: &mut [u8]) -> DriverResult<bool>;
 
     /// Reads an input event from the device.
     ///
-    /// If no events are available, `Err(DevError::Again)` is returned.
-    fn read_event(&mut self) -> DevResult<Event>;
+    /// If no events are available, `Err(DriverError::WouldBlock)` is returned.
+    fn read_event(&mut self) -> DriverResult<Event>;
 }

@@ -1,5 +1,5 @@
 //! Wrappers of some devices in the [`virtio-drivers`][1] crate, that implement
-//! traits in the [`axdriver_base`][2] series crates.
+//! traits in the [`driver_base`][2] series crates.
 //!
 //! Like the [`virtio-drivers`][1] crate, you must implement the [`VirtIoHal`]
 //! trait (alias of [`virtio-drivers::Hal`][3]), to allocate DMA regions and
@@ -7,7 +7,7 @@
 //! addresses (as seen by your program).
 //!
 //! [1]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
-//! [2]: https://github.com/arceos-org/axdriver_crates/tree/main/axdriver_base
+//! [2]: https://github.com/arceos-org/axdriver_crates/tree/main/driver_base
 //! [3]: https://docs.rs/virtio-drivers/latest/virtio_drivers/trait.Hal.html
 
 #![no_std]
@@ -38,7 +38,7 @@ pub use self::net::VirtIoNetDev;
 
 #[cfg(feature = "socket")]
 mod socket;
-use axdriver_base::{DevError, DeviceType};
+use driver_base::{DeviceKind, DriverError};
 use virtio_drivers::transport::DeviceType as VirtIoDevType;
 pub use virtio_drivers::{
     BufferDirection, Hal as VirtIoHal, PhysAddr,
@@ -60,15 +60,15 @@ pub use self::socket::VirtIoSocketDev;
 pub fn probe_mmio_device(
     reg_base: *mut u8,
     _reg_size: usize,
-) -> Option<(DeviceType, MmioTransport)> {
+) -> Option<(DeviceKind, MmioTransport)> {
     use core::ptr::NonNull;
 
     use virtio_drivers::transport::mmio::VirtIOHeader;
 
     let header = NonNull::new(reg_base as *mut VirtIOHeader).unwrap();
     let transport = unsafe { MmioTransport::new(header) }.ok()?;
-    let dev_type = as_dev_type(transport.device_type())?;
-    Some((dev_type, transport))
+    let dev_kind = as_device_kind(transport.device_type())?;
+    Some((dev_kind, transport))
 }
 
 /// Try to probe a VirtIO PCI device from the given PCI address.
@@ -79,7 +79,7 @@ pub fn probe_pci_device<H: VirtIoHal>(
     root: &mut PciRoot,
     bdf: DeviceFunction,
     dev_info: &DeviceFunctionInfo,
-) -> Option<(DeviceType, PciTransport, usize)> {
+) -> Option<(DeviceKind, PciTransport, usize)> {
     use virtio_drivers::transport::pci::virtio_device_type;
 
     #[cfg(target_arch = "x86_64")]
@@ -91,48 +91,50 @@ pub fn probe_pci_device<H: VirtIoHal>(
     #[cfg(target_arch = "aarch64")]
     const PCI_IRQ_BASE: usize = 0x23;
 
-    let dev_type = virtio_device_type(dev_info).and_then(as_dev_type)?;
+    let dev_kind = virtio_device_type(dev_info).and_then(as_device_kind)?;
     let transport = PciTransport::new::<H>(root, bdf).ok()?;
     let irq = PCI_IRQ_BASE + (bdf.device & 3) as usize;
-    Some((dev_type, transport, irq))
+    Some((dev_kind, transport, irq))
 }
 
-const fn as_dev_type(t: VirtIoDevType) -> Option<DeviceType> {
+const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
     use VirtIoDevType::*;
     match t {
-        Block => Some(DeviceType::Block),
-        Network => Some(DeviceType::Net),
-        GPU => Some(DeviceType::Display),
-        Input => Some(DeviceType::Input),
-        Socket => Some(DeviceType::Vsock),
+        Block => Some(DeviceKind::Block),
+        Network => Some(DeviceKind::Net),
+        GPU => Some(DeviceKind::Display),
+        Input => Some(DeviceKind::Input),
+        Socket => Some(DeviceKind::Vsock),
         _ => None,
     }
 }
 
 #[allow(dead_code)]
-const fn as_dev_err(e: virtio_drivers::Error) -> DevError {
+pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
     use virtio_drivers::{Error::*, device::socket::SocketError::*};
     match e {
-        QueueFull => DevError::BadState,
-        NotReady => DevError::Again,
-        WrongToken => DevError::BadState,
-        AlreadyUsed => DevError::AlreadyExists,
-        InvalidParam => DevError::InvalidParam,
-        DmaError => DevError::NoMemory,
-        IoError => DevError::Io,
-        Unsupported => DevError::Unsupported,
-        ConfigSpaceTooSmall => DevError::BadState,
-        ConfigSpaceMissing => DevError::BadState,
+        QueueFull => DriverError::BadState,
+        NotReady => DriverError::WouldBlock,
+        WrongToken => DriverError::BadState,
+        AlreadyUsed => DriverError::AlreadyExists,
+        InvalidParam => DriverError::InvalidInput,
+        DmaError => DriverError::NoMemory,
+        IoError => DriverError::Io,
+        Unsupported => DriverError::Unsupported,
+        ConfigSpaceTooSmall => DriverError::BadState,
+        ConfigSpaceMissing => DriverError::BadState,
         SocketDeviceError(e) => match e {
-            ConnectionExists => DevError::AlreadyExists,
-            NotConnected => DevError::BadState,
-            InvalidOperation | InvalidNumber | UnknownOperation(_) => DevError::InvalidParam,
-            OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(..) => DevError::InvalidParam,
-            UnexpectedDataInPacket | PeerSocketShutdown | NoResponseReceived | ConnectionFailed => {
-                DevError::Io
+            ConnectionExists => DriverError::AlreadyExists,
+            NotConnected => DriverError::BadState,
+            InvalidOperation | InvalidNumber | UnknownOperation(_) => DriverError::InvalidInput,
+            OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(..) => {
+                DriverError::InvalidInput
             }
-            InsufficientBufferSpaceInPeer => DevError::Again,
-            RecycledWrongBuffer => DevError::BadState,
+            UnexpectedDataInPacket | PeerSocketShutdown | NoResponseReceived | ConnectionFailed => {
+                DriverError::Io
+            }
+            InsufficientBufferSpaceInPeer => DriverError::WouldBlock,
+            RecycledWrongBuffer => DriverError::BadState,
         },
     }
 }

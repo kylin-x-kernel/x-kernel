@@ -1,6 +1,6 @@
 //! AHCI driver.
 
-use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use simple_ahci::AhciDriver as SimpleAhciDriver;
 pub use simple_ahci::Hal as AhciHal;
 
@@ -24,13 +24,13 @@ impl<H: AhciHal> AhciDriver<H> {
     }
 }
 
-impl<H: AhciHal> BaseDriverOps for AhciDriver<H> {
-    fn device_name(&self) -> &str {
+impl<H: AhciHal> DriverOps for AhciDriver<H> {
+    fn name(&self) -> &str {
         "ahci"
     }
 
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Block
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Block
     }
 }
 
@@ -43,35 +43,35 @@ impl<H: AhciHal> BlockDriverOps for AhciDriver<H> {
         self.0.capacity()
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
+    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         if buf.len() % self.block_size() != 0 {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         if buf.as_ptr() as usize % 4 != 0 {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         if self.0.read(block_id, buf) {
             Ok(())
         } else {
-            Err(DevError::Io)
+            Err(DriverError::Io)
         }
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
+    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
         if buf.len() % self.block_size() != 0 {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         if buf.as_ptr() as usize % 4 != 0 {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         if self.0.write(block_id, buf) {
             Ok(())
         } else {
-            Err(DevError::Io)
+            Err(DriverError::Io)
         }
     }
 
-    fn flush(&mut self) -> DevResult {
+    fn flush(&mut self) -> DriverResult {
         Ok(())
     }
 }

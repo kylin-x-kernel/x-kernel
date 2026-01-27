@@ -1,10 +1,10 @@
 //! SD card driver for raspi4
 
-use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use bcm2835_sdhci::{
     Bcm2835SDhci::{BLOCK_SIZE, EmmcCtl},
     SDHCIError,
 };
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 use crate::BlockDriverOps;
 
@@ -13,69 +13,69 @@ pub struct SDHCIDriver(EmmcCtl);
 
 impl SDHCIDriver {
     /// Initialize the SDHCI driver, returns `Ok` if successful.
-    pub fn try_new() -> DevResult<SDHCIDriver> {
+    pub fn try_new() -> DriverResult<SDHCIDriver> {
         let mut ctrl = EmmcCtl::new();
         if ctrl.init() == 0 {
             log::info!("BCM2835 sdhci: successfully initialized");
             Ok(SDHCIDriver(ctrl))
         } else {
             log::warn!("BCM2835 sdhci: init failed");
-            Err(DevError::Io)
+            Err(DriverError::Io)
         }
     }
 }
 
-fn deal_sdhci_err(err: SDHCIError) -> DevError {
+fn deal_sdhci_err(err: SDHCIError) -> DriverError {
     match err {
-        SDHCIError::Io => DevError::Io,
-        SDHCIError::AlreadyExists => DevError::AlreadyExists,
-        SDHCIError::Again => DevError::Again,
-        SDHCIError::BadState => DevError::BadState,
-        SDHCIError::InvalidParam => DevError::InvalidParam,
-        SDHCIError::NoMemory => DevError::NoMemory,
-        SDHCIError::ResourceBusy => DevError::ResourceBusy,
-        SDHCIError::Unsupported => DevError::Unsupported,
+        SDHCIError::Io => DriverError::Io,
+        SDHCIError::AlreadyExists => DriverError::AlreadyExists,
+        SDHCIError::Again => DriverError::WouldBlock,
+        SDHCIError::BadState => DriverError::BadState,
+        SDHCIError::InvalidParam => DriverError::InvalidInput,
+        SDHCIError::NoMemory => DriverError::NoMemory,
+        SDHCIError::ResourceBusy => DriverError::ResourceBusy,
+        SDHCIError::Unsupported => DriverError::Unsupported,
     }
 }
 
-impl BaseDriverOps for SDHCIDriver {
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Block
+impl DriverOps for SDHCIDriver {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Block
     }
 
-    fn device_name(&self) -> &str {
+    fn name(&self) -> &str {
         "bcm2835_sdhci"
     }
 }
 
 impl BlockDriverOps for SDHCIDriver {
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
+    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         if buf.len() < BLOCK_SIZE {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         let (prefix, aligned_buf, suffix) = unsafe { buf.align_to_mut::<u32>() };
         if !prefix.is_empty() || !suffix.is_empty() {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         self.0
             .read_block(block_id as u32, 1, aligned_buf)
             .map_err(deal_sdhci_err)
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
+    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
         if buf.len() < BLOCK_SIZE {
-            return Err(DevError::Io);
+            return Err(DriverError::Io);
         }
         let (prefix, aligned_buf, suffix) = unsafe { buf.align_to::<u32>() };
         if !prefix.is_empty() || !suffix.is_empty() {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         self.0
             .write_block(block_id as u32, 1, aligned_buf)
             .map_err(deal_sdhci_err)
     }
 
-    fn flush(&mut self) -> DevResult {
+    fn flush(&mut self) -> DriverResult {
         Ok(())
     }
 

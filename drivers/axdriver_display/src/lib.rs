@@ -3,7 +3,7 @@
 #![no_std]
 
 #[doc(no_inline)]
-pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 /// The information of the graphics device.
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +44,7 @@ impl<'a> FrameBuffer<'a> {
 }
 
 /// Operations that require a graphics device driver to implement.
-pub trait DisplayDriverOps: BaseDriverOps {
+pub trait DisplayDriverOps: DriverOps {
     /// Get the display information.
     fn info(&self) -> DisplayInfo;
 
@@ -55,5 +55,5 @@ pub trait DisplayDriverOps: BaseDriverOps {
     fn need_flush(&self) -> bool;
 
     /// Flush framebuffer to the screen.
-    fn flush(&mut self) -> DevResult;
+    fn flush(&mut self) -> DriverResult;
 }

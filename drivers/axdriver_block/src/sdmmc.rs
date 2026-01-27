@@ -1,6 +1,6 @@
 //! SD/MMC driver based on SDIO.
 
-use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use simple_sdmmc::SdMmc;
 
 use crate::BlockDriverOps;
@@ -20,12 +20,12 @@ impl SdMmcDriver {
     }
 }
 
-impl BaseDriverOps for SdMmcDriver {
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Block
+impl DriverOps for SdMmcDriver {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Block
     }
 
-    fn device_name(&self) -> &str {
+    fn name(&self) -> &str {
         "sdmmc"
     }
 }
@@ -39,11 +39,11 @@ impl BlockDriverOps for SdMmcDriver {
         SdMmc::BLOCK_SIZE
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
+    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         let (blocks, remainder) = buf.as_chunks_mut::<{ SdMmc::BLOCK_SIZE }>();
 
         if !remainder.is_empty() {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
 
         for (i, block) in blocks.iter_mut().enumerate() {
@@ -53,11 +53,11 @@ impl BlockDriverOps for SdMmcDriver {
         Ok(())
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
+    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
         let (blocks, remainder) = buf.as_chunks::<{ SdMmc::BLOCK_SIZE }>();
 
         if !remainder.is_empty() {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
 
         for (i, block) in blocks.iter().enumerate() {
@@ -67,7 +67,7 @@ impl BlockDriverOps for SdMmcDriver {
         Ok(())
     }
 
-    fn flush(&mut self) -> DevResult {
+    fn flush(&mut self) -> DriverResult {
         Ok(())
     }
 }

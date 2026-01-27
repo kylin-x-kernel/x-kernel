@@ -10,7 +10,7 @@
 
 use core::ops::{Deref, DerefMut};
 
-use axdriver_base::{BaseDriverOps, DeviceType};
+use driver_base::{DeviceKind, DriverOps};
 use smallvec::SmallVec;
 
 #[path = "static.rs"]
@@ -38,39 +38,39 @@ pub enum AxDeviceEnum {
     Vsock(AxVsockDevice),
 }
 
-impl BaseDriverOps for AxDeviceEnum {
+impl DriverOps for AxDeviceEnum {
     #[inline]
     #[allow(unreachable_patterns)]
-    fn device_type(&self) -> DeviceType {
+    fn device_kind(&self) -> DeviceKind {
         match self {
             #[cfg(feature = "net")]
-            Self::Net(_) => DeviceType::Net,
+            Self::Net(_) => DeviceKind::Net,
             #[cfg(feature = "block")]
-            Self::Block(_) => DeviceType::Block,
+            Self::Block(_) => DeviceKind::Block,
             #[cfg(feature = "display")]
-            Self::Display(_) => DeviceType::Display,
+            Self::Display(_) => DeviceKind::Display,
             #[cfg(feature = "input")]
-            Self::Input(_) => DeviceType::Input,
+            Self::Input(_) => DeviceKind::Input,
             #[cfg(feature = "vsock")]
-            Self::Vsock(_) => DeviceType::Vsock,
+            Self::Vsock(_) => DeviceKind::Vsock,
             _ => unreachable!(),
         }
     }
 
     #[inline]
     #[allow(unreachable_patterns)]
-    fn device_name(&self) -> &str {
+    fn name(&self) -> &str {
         match self {
             #[cfg(feature = "net")]
-            Self::Net(dev) => dev.device_name(),
+            Self::Net(dev) => dev.name(),
             #[cfg(feature = "block")]
-            Self::Block(dev) => dev.device_name(),
+            Self::Block(dev) => dev.name(),
             #[cfg(feature = "display")]
-            Self::Display(dev) => dev.device_name(),
+            Self::Display(dev) => dev.name(),
             #[cfg(feature = "input")]
-            Self::Input(dev) => dev.device_name(),
+            Self::Input(dev) => dev.name(),
             #[cfg(feature = "vsock")]
-            Self::Vsock(dev) => dev.device_name(),
+            Self::Vsock(dev) => dev.name(),
             _ => unreachable!(),
         }
     }

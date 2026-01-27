@@ -2,7 +2,7 @@
 
 use core::ops::{Deref, DerefMut};
 
-use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 use crate::BlockDriverOps;
 
@@ -39,12 +39,12 @@ impl DerefMut for RamDisk {
     }
 }
 
-impl BaseDriverOps for RamDisk {
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Block
+impl DriverOps for RamDisk {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Block
     }
 
-    fn device_name(&self) -> &str {
+    fn name(&self) -> &str {
         "ramdisk"
     }
 }
@@ -60,31 +60,31 @@ impl BlockDriverOps for RamDisk {
         BLOCK_SIZE
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
+    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         if buf.len() % BLOCK_SIZE != 0 {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;
         if offset + buf.len() > self.len() {
-            return Err(DevError::Io);
+            return Err(DriverError::Io);
         }
         buf.copy_from_slice(&self[offset..offset + buf.len()]);
         Ok(())
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
+    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
         if buf.len() % BLOCK_SIZE != 0 {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;
         if offset + buf.len() > self.len() {
-            return Err(DevError::Io);
+            return Err(DriverError::Io);
         }
         self[offset..offset + buf.len()].copy_from_slice(buf);
         Ok(())
     }
 
-    fn flush(&mut self) -> DevResult {
+    fn flush(&mut self) -> DriverResult {
         Ok(())
     }
 }

@@ -3,7 +3,7 @@ use core::{any::Any, task::Context, time::Duration};
 
 #[allow(unused_imports)]
 use axdriver::prelude::{
-    AxInputDevice, BaseDriverOps, DevError, Event, EventType, InputDeviceId, InputDriverOps,
+    AxInputDevice, DriverError, DriverOps, Event, EventType, InputDeviceId, InputDriverOps,
 };
 use axerrno::{AxError, AxResult};
 use axfs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
@@ -40,7 +40,7 @@ impl Inner {
                     }
                     self.read_ahead = Some((wall_time(), event));
                 }
-                Err(DevError::Again) => {}
+                Err(DriverError::WouldBlock) => {}
                 Err(err) => {
                     warn!("Failed to read event: {err:?}");
                 }
@@ -240,11 +240,7 @@ impl DeviceOps for EventDev {
                         match nr {
                             // EVIOCGNAME
                             0x06 => {
-                                return return_str(
-                                    arg,
-                                    size,
-                                    self.inner.lock().device.device_name(),
-                                );
+                                return return_str(arg, size, self.inner.lock().device.name());
                             }
                             // EVIOCGPHYS
                             0x07 => {

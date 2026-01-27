@@ -267,7 +267,7 @@ impl Device for EthernetDevice {
             let rx_buf = match self.inner.receive() {
                 Ok(buf) => buf,
                 Err(err) => {
-                    if !matches!(err, DevError::Again) {
+                    if !matches!(err, DriverError::WouldBlock) {
                         warn!("receive failed: {:?}", err);
                     }
                     return false;
@@ -335,7 +335,7 @@ impl Device for EthernetDevice {
     }
 
     fn register_waker(&self, waker: &Waker) {
-        if let Some(irq) = self.inner.irq_num() {
+        if let Some(irq) = self.inner.irq() {
             register_irq_waker(irq, waker);
         }
     }

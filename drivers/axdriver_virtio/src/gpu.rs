@@ -1,8 +1,8 @@
-use axdriver_base::{BaseDriverOps, DevResult, DeviceType};
 use axdriver_display::{DisplayDriverOps, DisplayInfo, FrameBuffer};
+use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{Hal, device::gpu::VirtIOGpu as InnerDev, transport::Transport};
 
-use crate::as_dev_err;
+use crate::as_driver_error;
 
 /// The VirtIO GPU device driver.
 pub struct VirtIoGpuDev<H: Hal, T: Transport> {
@@ -16,7 +16,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
-    pub fn try_new(transport: T) -> DevResult<Self> {
+    pub fn try_new(transport: T) -> DriverResult<Self> {
         let mut virtio = InnerDev::new(transport).unwrap();
 
         // get framebuffer
@@ -38,13 +38,13 @@ impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> BaseDriverOps for VirtIoGpuDev<H, T> {
-    fn device_name(&self) -> &str {
+impl<H: Hal, T: Transport> DriverOps for VirtIoGpuDev<H, T> {
+    fn name(&self) -> &str {
         "virtio-gpu"
     }
 
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Display
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Display
     }
 }
 
@@ -63,7 +63,7 @@ impl<H: Hal, T: Transport> DisplayDriverOps for VirtIoGpuDev<H, T> {
         true
     }
 
-    fn flush(&mut self) -> DevResult {
-        self.inner.flush().map_err(as_dev_err)
+    fn flush(&mut self) -> DriverResult {
+        self.inner.flush().map_err(as_driver_error)
     }
 }

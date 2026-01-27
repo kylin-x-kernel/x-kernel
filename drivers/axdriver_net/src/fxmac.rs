@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, collections::VecDeque, vec};
 use core::ptr::NonNull;
 
-use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 pub use fxmac_rs::KernelFunc;
 use fxmac_rs::{self, FXmac, FXmacGetMacAddress, FXmacLwipPortTx, FXmacRecvHandler, xmac_init};
 use log::*;
@@ -22,7 +22,7 @@ unsafe impl Send for FXmacNic {}
 
 impl FXmacNic {
     /// initialize fxmac driver
-    pub fn init(mapped_regs: usize) -> DevResult<Self> {
+    pub fn init(mapped_regs: usize) -> DriverResult<Self> {
         info!("FXmacNic init @ {mapped_regs:#x}");
         let rx_buffer_queue = VecDeque::with_capacity(QS);
 
@@ -40,13 +40,13 @@ impl FXmacNic {
     }
 }
 
-impl BaseDriverOps for FXmacNic {
-    fn device_name(&self) -> &str {
+impl DriverOps for FXmacNic {
+    fn name(&self) -> &str {
         "cdns,phytium-gem-1.0"
     }
 
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Net
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Net
     }
 }
 
@@ -71,25 +71,25 @@ impl NetDriverOps for FXmacNic {
         true
     }
 
-    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DevResult {
+    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DriverResult {
         unsafe {
             drop(Box::from_raw(rx_buf.raw_ptr::<u8>()));
         }
         Ok(())
     }
 
-    fn recycle_tx_buffers(&mut self) -> DevResult {
+    fn recycle_tx_buffers(&mut self) -> DriverResult {
         // drop tx_buf
         Ok(())
     }
 
-    fn receive(&mut self) -> DevResult<NetBufPtr> {
+    fn receive(&mut self) -> DriverResult<NetBufPtr> {
         if !self.rx_buffer_queue.is_empty() {
             // RX buffer have received packets.
             Ok(self.rx_buffer_queue.pop_front().unwrap())
         } else {
             match FXmacRecvHandler(self.inner) {
-                None => Err(DevError::Again),
+                None => Err(DriverError::WouldBlock),
                 Some(packets) => {
                     for packet in packets {
                         debug!("received packet length {}", packet.len());
@@ -111,20 +111,20 @@ impl NetDriverOps for FXmacNic {
         }
     }
 
-    fn transmit(&mut self, tx_buf: NetBufPtr) -> DevResult {
+    fn transmit(&mut self, tx_buf: NetBufPtr) -> DriverResult {
         let tx_vec = vec![tx_buf.packet().to_vec()];
         let ret = FXmacLwipPortTx(self.inner, tx_vec);
         unsafe {
             drop(Box::from_raw(tx_buf.raw_ptr::<u8>()));
         }
         if ret < 0 {
-            Err(DevError::Again)
+            Err(DriverError::WouldBlock)
         } else {
             Ok(())
         }
     }
 
-    fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<NetBufPtr> {
+    fn alloc_tx_buffer(&mut self, size: usize) -> DriverResult<NetBufPtr> {
         let mut tx_buf = Box::new(alloc::vec![0; size]);
         let tx_buf_ptr = tx_buf.as_mut_ptr();
 

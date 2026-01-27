@@ -10,9 +10,9 @@ impl AllDevices {
                 if let Some(dev) = Driver::probe_mmio(reg.0, reg.1) {
                     info!(
                         "registered a new {:?} device at [PA:{:#x}, PA:{:#x}): {:?}",
-                        dev.device_type(),
+                        dev.device_kind(),
                         reg.0, reg.0 + reg.1,
-                        dev.device_name(),
+                        dev.name(),
                     );
                     self.add_device(dev);
                     continue; // skip to the next device

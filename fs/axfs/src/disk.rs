@@ -66,7 +66,7 @@ impl SeekableDisk {
     }
 
     /// Set the position of the cursor.
-    pub fn set_position(&mut self, pos: u64) -> DevResult<()> {
+    pub fn set_position(&mut self, pos: u64) -> DriverResult<()> {
         self.flush()?;
         self.block_id = pos >> self.block_size_log2;
         self.offset = pos as usize & (self.block_size() - 1);
@@ -74,7 +74,7 @@ impl SeekableDisk {
     }
 
     /// Write all pending changes to the disk.
-    pub fn flush(&mut self) -> DevResult<()> {
+    pub fn flush(&mut self) -> DriverResult<()> {
         if self.write_buffer_dirty {
             self.dev.write_block(self.block_id, &self.write_buffer)?;
             self.write_buffer_dirty = false;
@@ -82,7 +82,7 @@ impl SeekableDisk {
         Ok(())
     }
 
-    fn read_partial(&mut self, buf: &mut &mut [u8]) -> DevResult<usize> {
+    fn read_partial(&mut self, buf: &mut &mut [u8]) -> DriverResult<usize> {
         self.flush()?;
         self.dev.read_block(self.block_id, &mut self.read_buffer)?;
 
@@ -100,7 +100,7 @@ impl SeekableDisk {
     }
 
     /// Read from the disk, returns the number of bytes read.
-    pub fn read(&mut self, mut buf: &mut [u8]) -> DevResult<usize> {
+    pub fn read(&mut self, mut buf: &mut [u8]) -> DriverResult<usize> {
         let mut read = 0;
         if self.offset != 0 {
             read += self.read_partial(&mut buf)?;
@@ -121,7 +121,7 @@ impl SeekableDisk {
         Ok(read)
     }
 
-    fn write_partial(&mut self, buf: &mut &[u8]) -> DevResult<usize> {
+    fn write_partial(&mut self, buf: &mut &[u8]) -> DriverResult<usize> {
         if !self.write_buffer_dirty {
             self.dev.read_block(self.block_id, &mut self.write_buffer)?;
             self.write_buffer_dirty = true;
@@ -142,7 +142,7 @@ impl SeekableDisk {
     }
 
     /// Write to the disk, returns the number of bytes written.
-    pub fn write(&mut self, mut buf: &[u8]) -> DevResult<usize> {
+    pub fn write(&mut self, mut buf: &[u8]) -> DriverResult<usize> {
         let mut written = 0;
         if self.offset != 0 {
             written += self.write_partial(&mut buf)?;

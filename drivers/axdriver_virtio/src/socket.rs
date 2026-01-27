@@ -1,5 +1,5 @@
-use axdriver_base::{BaseDriverOps, DevResult, DeviceType};
 use axdriver_vsock::{VsockConnId, VsockDriverEvent, VsockDriverOps};
+use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{
     Hal,
     device::socket::{
@@ -8,7 +8,7 @@ use virtio_drivers::{
     transport::Transport,
 };
 
-use crate::as_dev_err;
+use crate::as_driver_error;
 
 /// The VirtIO socket device driver.
 pub struct VirtIoSocketDev<H: Hal, T: Transport> {
@@ -21,21 +21,21 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoSocketDev<H, T> {}
 impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
-    pub fn try_new(transport: T) -> DevResult<Self> {
-        let virtio_socket = VirtIOSocket::<H, _>::new(transport).map_err(as_dev_err)?;
+    pub fn try_new(transport: T) -> DriverResult<Self> {
+        let virtio_socket = VirtIOSocket::<H, _>::new(transport).map_err(as_driver_error)?;
         Ok(Self {
             inner: InnerDev::new_with_capacity(virtio_socket, 32 * 1024), // 32KB buffer
         })
     }
 }
 
-impl<H: Hal, T: Transport> BaseDriverOps for VirtIoSocketDev<H, T> {
-    fn device_name(&self) -> &str {
+impl<H: Hal, T: Transport> DriverOps for VirtIoSocketDev<H, T> {
+    fn name(&self) -> &str {
         "virtio-socket"
     }
 
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Vsock
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Vsock
     }
 }
 
@@ -58,49 +58,53 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
         self.inner.listen(src_port)
     }
 
-    fn connect(&mut self, cid: VsockConnId) -> DevResult<()> {
+    fn connect(&mut self, cid: VsockConnId) -> DriverResult<()> {
         let (peer_addr, src_port) = map_conn_id(cid);
-        self.inner.connect(peer_addr, src_port).map_err(as_dev_err)
+        self.inner
+            .connect(peer_addr, src_port)
+            .map_err(as_driver_error)
     }
 
-    fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DevResult<usize> {
+    fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
         let (peer_addr, src_port) = map_conn_id(cid);
         match self.inner.send(peer_addr, src_port, buf) {
             Ok(()) => Ok(buf.len()),
-            Err(e) => Err(as_dev_err(e)),
+            Err(e) => Err(as_driver_error(e)),
         }
     }
 
-    fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DevResult<usize> {
+    fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
         let (peer_addr, src_port) = map_conn_id(cid);
         let res = self
             .inner
             .recv(peer_addr, src_port, buf)
-            .map_err(as_dev_err);
+            .map_err(as_driver_error);
         let _ = self.inner.update_credit(peer_addr, src_port);
         res
     }
 
-    fn recv_avail(&mut self, cid: VsockConnId) -> DevResult<usize> {
+    fn recv_avail(&mut self, cid: VsockConnId) -> DriverResult<usize> {
         let (peer_addr, src_port) = map_conn_id(cid);
         self.inner
             .recv_buffer_available_bytes(peer_addr, src_port)
-            .map_err(as_dev_err)
+            .map_err(as_driver_error)
     }
 
-    fn disconnect(&mut self, cid: VsockConnId) -> DevResult<()> {
+    fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()> {
         let (peer_addr, src_port) = map_conn_id(cid);
-        self.inner.shutdown(peer_addr, src_port).map_err(as_dev_err)
+        self.inner
+            .shutdown(peer_addr, src_port)
+            .map_err(as_driver_error)
     }
 
-    fn abort(&mut self, cid: VsockConnId) -> DevResult<()> {
+    fn abort(&mut self, cid: VsockConnId) -> DriverResult<()> {
         let (peer_addr, src_port) = map_conn_id(cid);
         self.inner
             .force_close(peer_addr, src_port)
-            .map_err(as_dev_err)
+            .map_err(as_driver_error)
     }
 
-    fn poll_event(&mut self) -> DevResult<Option<VsockDriverEvent>> {
+    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEvent>> {
         match self.inner.poll() {
             Ok(None) => {
                 // no event
@@ -113,7 +117,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
             }
             Err(e) => {
                 // error
-                Err(as_dev_err(e))
+                Err(as_driver_error(e))
             }
         }
     }
@@ -122,7 +126,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
 fn convert_vsock_event<H: Hal, T: Transport>(
     event: VsockEvent,
     _inner: &mut InnerDev<H, T>,
-) -> DevResult<VsockDriverEvent> {
+) -> DriverResult<VsockDriverEvent> {
     let cid = VsockConnId {
         peer_addr: axdriver_vsock::VsockAddr {
             cid: event.source.cid as _,

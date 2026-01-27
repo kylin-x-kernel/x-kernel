@@ -1,14 +1,14 @@
 use alloc::{borrow::ToOwned, string::String};
 
-use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use axdriver_input::{Event, EventType, InputDeviceId, InputDriverOps};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use virtio_drivers::{
     Hal,
     device::input::{InputConfigSelect, VirtIOInput as InnerDev},
     transport::Transport,
 };
 
-use crate::as_dev_err;
+use crate::as_driver_error;
 
 /// The VirtIO Input device driver.
 pub struct VirtIoInputDev<H: Hal, T: Transport> {
@@ -23,10 +23,10 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoInputDev<H, T> {}
 impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
-    pub fn try_new(transport: T) -> DevResult<Self> {
+    pub fn try_new(transport: T) -> DriverResult<Self> {
         let mut virtio = InnerDev::new(transport).unwrap();
         let name = virtio.name().unwrap_or_else(|_| "<unknown>".to_owned());
-        let device_id = virtio.ids().map_err(as_dev_err)?;
+        let device_id = virtio.ids().map_err(as_driver_error)?;
         let device_id = InputDeviceId {
             bus_type: device_id.bustype,
             vendor: device_id.vendor,
@@ -42,13 +42,13 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> BaseDriverOps for VirtIoInputDev<H, T> {
-    fn device_name(&self) -> &str {
+impl<H: Hal, T: Transport> DriverOps for VirtIoInputDev<H, T> {
+    fn name(&self) -> &str {
         &self.name
     }
 
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Input
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Input
     }
 }
 
@@ -67,14 +67,14 @@ impl<H: Hal, T: Transport> InputDriverOps for VirtIoInputDev<H, T> {
         "virtio"
     }
 
-    fn get_event_bits(&mut self, ty: EventType, out: &mut [u8]) -> DevResult<bool> {
+    fn get_event_bits(&mut self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
         let read = self
             .inner
             .query_config_select(InputConfigSelect::EvBits, ty as u8, out);
         Ok(read != 0)
     }
 
-    fn read_event(&mut self) -> DevResult<Event> {
+    fn read_event(&mut self) -> DriverResult<Event> {
         self.inner.ack_interrupt();
         self.inner
             .pop_pending_event()
@@ -83,6 +83,6 @@ impl<H: Hal, T: Transport> InputDriverOps for VirtIoInputDev<H, T> {
                 code: e.code,
                 value: e.value,
             })
-            .ok_or(DevError::Again)
+            .ok_or(DriverError::WouldBlock)
     }
 }

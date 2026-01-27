@@ -4,7 +4,7 @@
 #![cfg_attr(doc, feature(doc_cfg))]
 
 #[doc(no_inline)]
-pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 /// Vsock address.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,7 +50,7 @@ pub enum VsockDriverEvent {
 }
 
 /// Operations that require a block storage device driver to implement.
-pub trait VsockDriverOps: BaseDriverOps {
+pub trait VsockDriverOps: DriverOps {
     /// guest cid
     fn guest_cid(&self) -> u64;
 
@@ -58,26 +58,26 @@ pub trait VsockDriverOps: BaseDriverOps {
     fn listen(&mut self, src_port: u32);
 
     /// Connect to a peer socket.
-    fn connect(&mut self, cid: VsockConnId) -> DevResult<()>;
+    fn connect(&mut self, cid: VsockConnId) -> DriverResult<()>;
 
     /// Send data to the connected peer socket. need addr for DGRAM mode
-    fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DevResult<usize>;
+    fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize>;
 
     /// Receive data from the connected peer socket.
-    fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DevResult<usize>;
+    fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize>;
 
     /// Returns the number of bytes in the receive buffer available to be read by recv.
-    fn recv_avail(&mut self, cid: VsockConnId) -> DevResult<usize>;
+    fn recv_avail(&mut self, cid: VsockConnId) -> DriverResult<usize>;
 
     /// Disconnect from the connected peer socket.
     ///
     /// Requests to shut down the connection cleanly, telling the peer that we won't send or receive
     /// any more data.
-    fn disconnect(&mut self, cid: VsockConnId) -> DevResult<()>;
+    fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()>;
 
     /// Forcibly closes the connection without waiting for the peer.
-    fn abort(&mut self, cid: VsockConnId) -> DevResult<()>;
+    fn abort(&mut self, cid: VsockConnId) -> DriverResult<()>;
 
     /// poll event from driver
-    fn poll_event(&mut self) -> DevResult<Option<VsockDriverEvent>>;
+    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEvent>>;
 }

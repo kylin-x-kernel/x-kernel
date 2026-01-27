@@ -23,8 +23,8 @@ pub fn init_input(mut input_devs: AxDeviceContainer<AxInputDevice>) {
     while let Some(dev) = input_devs.take_one() {
         info!(
             "  registered a new {:?} input device: {}",
-            dev.device_type(),
-            dev.device_name(),
+            dev.device_kind(),
+            dev.name(),
         );
         devices.push(dev);
     }

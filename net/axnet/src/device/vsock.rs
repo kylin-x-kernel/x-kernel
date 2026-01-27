@@ -219,12 +219,12 @@ pub fn vsock_listen(addr: VsockAddr) -> AxResult<()> {
     Ok(())
 }
 
-fn map_dev_err(e: DevError) -> AxError {
+fn map_dev_err(e: DriverError) -> AxError {
     match e {
-        DevError::AlreadyExists => AxError::AlreadyExists,
-        DevError::Again => AxError::WouldBlock,
-        DevError::InvalidParam => AxError::InvalidInput,
-        DevError::Io => AxError::Io,
+        DriverError::AlreadyExists => AxError::AlreadyExists,
+        DriverError::WouldBlock => AxError::WouldBlock,
+        DriverError::InvalidInput => AxError::InvalidInput,
+        DriverError::Io => AxError::Io,
         _ => AxError::BadState,
     }
 }

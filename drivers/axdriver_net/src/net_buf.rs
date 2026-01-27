@@ -3,7 +3,7 @@ use core::ptr::NonNull;
 
 use spin::Mutex;
 
-use crate::{DevError, DevResult};
+use crate::{DriverError, DriverResult};
 
 /// A raw buffer struct for network device.
 pub struct NetBufPtr {
@@ -183,12 +183,12 @@ pub struct NetBufPool {
 impl NetBufPool {
     /// Creates a new pool with the given `capacity`, and all buffer lengths are
     /// set to `buf_len`.
-    pub fn new(capacity: usize, buf_len: usize) -> DevResult<Arc<Self>> {
+    pub fn new(capacity: usize, buf_len: usize) -> DriverResult<Arc<Self>> {
         if capacity == 0 {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
         if !(MIN_BUFFER_LEN..=MAX_BUFFER_LEN).contains(&buf_len) {
-            return Err(DevError::InvalidParam);
+            return Err(DriverError::InvalidInput);
         }
 
         let pool = vec![0; capacity * buf_len];

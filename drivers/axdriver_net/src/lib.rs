@@ -13,7 +13,7 @@ pub mod fxmac;
 pub mod ixgbe;
 
 #[doc(no_inline)]
-pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 mod net_buf;
 pub use self::net_buf::{NetBuf, NetBufBox, NetBufPool, NetBufPtr};
@@ -22,7 +22,7 @@ pub use self::net_buf::{NetBuf, NetBufBox, NetBufPool, NetBufPtr};
 pub struct EthernetAddress(pub [u8; 6]);
 
 /// Operations that require a network device (NIC) driver to implement.
-pub trait NetDriverOps: BaseDriverOps {
+pub trait NetDriverOps: DriverOps {
     /// The ethernet address of the NIC.
     fn mac_address(&self) -> EthernetAddress;
 
@@ -42,15 +42,15 @@ pub trait NetDriverOps: BaseDriverOps {
     ///
     /// `rx_buf` should be the same as the one returned by
     /// [`NetDriverOps::receive`].
-    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DevResult;
+    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DriverResult;
 
     /// Poll the transmit queue and gives back the buffers for previous transmiting.
-    /// returns [`DevResult`].
-    fn recycle_tx_buffers(&mut self) -> DevResult;
+    /// returns [`DriverResult`].
+    fn recycle_tx_buffers(&mut self) -> DriverResult;
 
     /// Transmits a packet in the buffer to the network, without blocking,
-    /// returns [`DevResult`].
-    fn transmit(&mut self, tx_buf: NetBufPtr) -> DevResult;
+    /// returns [`DriverResult`].
+    fn transmit(&mut self, tx_buf: NetBufPtr) -> DriverResult;
 
     /// Receives a packet from the network and store it in the [`NetBuf`],
     /// returns the buffer.
@@ -59,10 +59,10 @@ pub trait NetDriverOps: BaseDriverOps {
     /// in the receive queue by [`NetDriverOps::recycle_rx_buffer`].
     ///
     /// If currently no incomming packets, returns an error with type
-    /// [`DevError::Again`].
-    fn receive(&mut self) -> DevResult<NetBufPtr>;
+    /// [`DriverError::WouldBlock`].
+    fn receive(&mut self) -> DriverResult<NetBufPtr>;
 
     /// Allocate a memory buffer of a specified size for network transmission,
-    /// returns [`DevResult`]
-    fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<NetBufPtr>;
+    /// returns [`DriverResult`]
+    fn alloc_tx_buffer(&mut self, size: usize) -> DriverResult<NetBufPtr>;
 }

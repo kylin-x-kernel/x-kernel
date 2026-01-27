@@ -121,8 +121,8 @@ impl AllDevices {
             if let Some(dev) = Driver::probe_global() {
                 info!(
                     "registered a new {:?} device: {:?}",
-                    dev.device_type(),
-                    dev.device_name(),
+                    dev.device_kind(),
+                    dev.name(),
                 );
                 self.add_device(dev);
             }
@@ -161,40 +161,40 @@ pub fn init_drivers() -> AllDevices {
     {
         debug!("number of NICs: {}", all_devs.net.len());
         for (i, dev) in all_devs.net.iter().enumerate() {
-            assert_eq!(dev.device_type(), DeviceType::Net);
-            debug!("  NIC {}: {:?}", i, dev.device_name());
+            assert_eq!(dev.device_kind(), DeviceKind::Net);
+            debug!("  NIC {}: {:?}", i, dev.name());
         }
     }
     #[cfg(feature = "block")]
     {
         debug!("number of block devices: {}", all_devs.block.len());
         for (i, dev) in all_devs.block.iter().enumerate() {
-            assert_eq!(dev.device_type(), DeviceType::Block);
-            debug!("  block device {}: {:?}", i, dev.device_name());
+            assert_eq!(dev.device_kind(), DeviceKind::Block);
+            debug!("  block device {}: {:?}", i, dev.name());
         }
     }
     #[cfg(feature = "display")]
     {
         debug!("number of graphics devices: {}", all_devs.display.len());
         for (i, dev) in all_devs.display.iter().enumerate() {
-            assert_eq!(dev.device_type(), DeviceType::Display);
-            debug!("  graphics device {}: {:?}", i, dev.device_name());
+            assert_eq!(dev.device_kind(), DeviceKind::Display);
+            debug!("  graphics device {}: {:?}", i, dev.name());
         }
     }
     #[cfg(feature = "input")]
     {
         debug!("number of input devices: {}", all_devs.input.len());
         for (i, dev) in all_devs.input.iter().enumerate() {
-            assert_eq!(dev.device_type(), DeviceType::Input);
-            debug!("  input device {}: {:?}", i, dev.device_name());
+            assert_eq!(dev.device_kind(), DeviceKind::Input);
+            debug!("  input device {}: {:?}", i, dev.name());
         }
     }
     #[cfg(feature = "vsock")]
     {
         debug!("number of vsock devices: {}", all_devs.vsock.len());
         for (i, dev) in all_devs.vsock.iter().enumerate() {
-            assert_eq!(dev.device_type(), DeviceType::Vsock);
-            debug!("  vsock device {}: {:?}", i, dev.device_name());
+            assert_eq!(dev.device_kind(), DeviceKind::Vsock);
+            debug!("  vsock device {}: {:?}", i, dev.name());
         }
     }
 
