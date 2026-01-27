@@ -14,10 +14,13 @@ use paste::paste;
 pub type DwarfReader = gimli::EndianSlice<'static, gimli::RunTimeEndian>;
 
 static mut CONTEXT: Option<Context<DwarfReader>> = None;
+
+#[cfg_attr(test, allow(dead_code))]
 static INIT_ONCE: Once<()> = Once::new();
 
 // Only define macro in non-test builds
 #[cfg(not(test))]
+#[allow(unused_macros)]  // Used at runtime via macro expansion
 macro_rules! generate_sections {
     ($($name:ident),*) => {
         unsafe extern "C" {
@@ -49,12 +52,14 @@ macro_rules! generate_sections {
 
 // Stub macro for test builds - does nothing
 #[cfg(test)]
+#[allow(unused_macros)]  // Intentionally unused in tests
 macro_rules! generate_sections {
     ($($name:ident),*) => {
         // No-op in test mode
     };
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub fn init() {
     INIT_ONCE.call_once(|| {
         // Only initialize DWARF in kernel builds

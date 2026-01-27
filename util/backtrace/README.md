@@ -86,6 +86,78 @@ if let Some(frames) = bt.frames() {
 - Be aware of performance impact in hot paths
 - Stack unwinding can be expensive (allocates Vec)
 
+## Testing
+
+### Running Tests
+
+```bash
+cd util/backtrace
+cargo test --all-features
+```
+
+### Test Environment Limitations
+
+**Important**: DWARF symbolication is automatically disabled during tests because:
+
+1. Debug symbols (`__start_debug_*`, `__stop_debug_*`) are defined by the kernel linker script
+2. These symbols are not available in user-space test environments
+3. Attempting to reference them causes linker errors
+
+### What Is Tested
+
+✅ **Tested in `cargo test`:**
+- Stack frame capture
+- Frame pointer validation
+- Configuration management (max depth, ranges)
+- API surface and error handling
+- Display formatting (raw frames)
+
+❌ **Not tested in `cargo test`:**
+- DWARF symbolication (function names, file paths, line numbers)
+- Architecture-specific symbol resolution in kernel context
+
+### Testing DWARF Symbolication
+
+To test full symbolication support, run in the actual kernel:
+
+```bash
+# Build x-kernel with backtrace support
+cd /path/to/x-kernel
+make A=apps/exception ARCH=aarch64 qemu
+
+# Trigger an exception to see backtrace with symbols
+```
+
+### Test Output Example
+
+When running `cargo test --all-features`, you'll see:
+
+```text
+running 11 tests
+test test_backtrace_display ... ok
+test test_capture_trap ... ok
+test test_frame_adjusted_ip ... ok
+test test_frame_count ... ok
+test test_frame_creation ... ok
+test test_frame_display ... ok
+test test_initialization ... ok
+test test_invalid_frame ... ok
+test test_max_depth_configuration ... ok
+test test_raw_frames_access ... ok
+test test_recursive_capture ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored
+```
+
+Backtrace display in tests will show:
+```text
+Symbolication not available in test mode.
+Raw frames:
+   0: fp=0x00007ffd12340000, ip=0x0000555555555000
+   1: fp=0x00007ffd12341000, ip=0x0000555555556000
+   ...
+```
+
 ## License
 
 See LICENSE file in the repository root.
