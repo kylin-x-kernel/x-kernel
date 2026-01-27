@@ -118,7 +118,7 @@ tee_raw_sys = { path = "tee/tee_raw_sys" }
 # Driver Crates
 driver_base = { path = "drivers/driver_base" }
 block = { path = "drivers/block" }
-axdriver_display = { path = "drivers/axdriver_display" }
+display = { path = "drivers/display" }
 input = { path = "drivers/input" }
 axdriver_net = { path = "drivers/axdriver_net" }
 axdriver_pci = { path = "drivers/axdriver_pci" }

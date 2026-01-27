@@ -19,7 +19,7 @@ bus-pci = ["dep:axdriver_pci", "dep:axhal", "dep:platconfig"]
 pci-mmio = ["bus-pci"]
 net = ["dep:axdriver_net"]
 block = ["dep:block"]
-display = ["dep:axdriver_display"]
+display = ["dep:display"]
 input = ["dep:input"]
 vsock = ["dep:vsock"]
 
@@ -52,7 +52,7 @@ platconfig = { workspace = true, optional = true }
 # axdma = { workspace = true, optional = true }
 driver_base = { workspace = true }
 block = { workspace = true, optional = true }
-axdriver_display = { workspace = true, optional = true }
+display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
 axdriver_net = { workspace = true, optional = true }
 axdriver_pci = { workspace = true, optional = true }

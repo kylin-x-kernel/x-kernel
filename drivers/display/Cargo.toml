@@ -1,9 +1,7 @@
 [package]
-name = "axdriver_display"
+name = "display"
 edition.workspace = true
 description = "Common traits and types for graphics device drivers"
-documentation = "https://arceos-org.github.io/axdriver_crates/axdriver_display"
-keywords = ["arceos", "driver", "gpu", "framebuffer"]
 version.workspace = true
 authors.workspace = true
 license.workspace = true

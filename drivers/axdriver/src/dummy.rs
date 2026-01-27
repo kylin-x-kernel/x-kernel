@@ -86,10 +86,10 @@ cfg_if! {
         }
 
         impl DisplayDriverOps for DummyDisplayDev {
-            fn info(&self) -> axdriver_display::DisplayInfo {
+            fn info(&self) -> display::DisplayInfo {
                 unreachable!()
             }
-            fn fb(&self) -> axdriver_display::FrameBuffer<'_> {
+            fn fb(&self) -> display::FrameBuffer<'_> {
                 unreachable!()
             }
             fn need_flush(&self) -> bool {
