@@ -1,5 +1,8 @@
 use axplat::mem::{Aligned4K, pa, va};
-use page_table_entry::{GenericPTE, MappingFlags, loongarch64::LA64PTE};
+use page_table::{
+    PageTableEntry as GenericPTE, PagingFlags as MappingFlags,
+    loongarch64::La64PageEntry as LA64PTE,
+};
 
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_BOOT_OFFSET, PHYS_VIRT_OFFSET};
 

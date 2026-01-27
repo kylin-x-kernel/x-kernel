@@ -2,7 +2,7 @@
 
 use loongArch64::register::{crmd, stlbps, tlbidx, tlbrehi, tlbrentry};
 use memaddr::PhysAddr;
-use page_table_multiarch::loongarch64::LA64MetaData;
+use page_table::loongarch64::LA64MetaData;
 
 /// Initializes TLB and MMU related registers on the current CPU.
 ///
