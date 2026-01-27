@@ -13,7 +13,7 @@ use crate::{alloc::string::ToString, vsock::connection_manager::VSOCK_CONN_MANAG
 
 // we need a global and static only one vsock device
 static VSOCK_DEVICE: Mutex<Option<AxVsockDevice>> = Mutex::new(None);
-static PENDING_EVENTS: Mutex<VecDeque<VsockDriverEvent>> = Mutex::new(VecDeque::new());
+static PENDING_EVENTS: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
 
 const VSOCK_RX_TMPBUF_SIZE: usize = 0x1000; // 4KiB buffer for vsock receive
 
@@ -144,9 +144,9 @@ fn poll_vsock_interfaces() -> AxResult<bool> {
     loop {
         match dev.poll_event() {
             Ok(None) => break, // no more events
-            Ok(Some(event)) => {
+            Ok(Some(event_type)) => {
                 event_count += 1;
-                handle_vsock_event(event, dev, &mut buf);
+                handle_vsock_event(event_type, dev, &mut buf);
             }
             Err(e) => {
                 info!("Failed to poll vsock event: {e:?}");
@@ -157,18 +157,18 @@ fn poll_vsock_interfaces() -> AxResult<bool> {
     Ok(event_count > 0)
 }
 
-fn handle_vsock_event(event: VsockDriverEvent, dev: &mut AxVsockDevice, buf: &mut [u8]) {
+fn handle_vsock_event(event_type: VsockDriverEventType, dev: &mut AxVsockDevice, buf: &mut [u8]) {
     let mut manager = VSOCK_CONN_MANAGER.lock();
-    debug!("Handling vsock event: {event:?}");
+    debug!("Handling vsock event: {event_type:?}");
 
-    match event {
-        VsockDriverEvent::ConnectionRequest(conn_id) => {
+    match event_type {
+        VsockDriverEventType::ConnectionRequest(conn_id) => {
             if let Err(e) = manager.on_connection_request(conn_id) {
                 info!("Connection request failed: {conn_id:?}, error={e:?}");
             }
         }
 
-        VsockDriverEvent::Received(conn_id, len) => {
+        VsockDriverEventType::Received(conn_id, len) => {
             let free_space = if let Some(conn) = manager.get_connection(conn_id) {
                 conn.lock().rx_buffer_free()
             } else {
@@ -179,7 +179,7 @@ fn handle_vsock_event(event: VsockDriverEvent, dev: &mut AxVsockDevice, buf: &mu
             if free_space == 0 {
                 PENDING_EVENTS
                     .lock()
-                    .push_back(VsockDriverEvent::Received(conn_id, len));
+                    .push_back(VsockDriverEventType::Received(conn_id, len));
                 return;
             }
 
@@ -196,19 +196,19 @@ fn handle_vsock_event(event: VsockDriverEvent, dev: &mut AxVsockDevice, buf: &mu
             }
         }
 
-        VsockDriverEvent::Disconnected(conn_id) => {
+        VsockDriverEventType::Disconnected(conn_id) => {
             if let Err(e) = manager.on_disconnected(conn_id) {
                 info!("Failed to handle disconnection: {conn_id:?}, error={e:?}",);
             }
         }
 
-        VsockDriverEvent::Connected(conn_id) => {
+        VsockDriverEventType::Connected(conn_id) => {
             if let Err(e) = manager.on_connected(conn_id) {
                 info!("Failed to handle connection established: {conn_id:?}, error={e:?}",);
             }
         }
 
-        VsockDriverEvent::Unknown => warn!("Received unknown vsock event"),
+        VsockDriverEventType::Unknown => warn!("Received unknown vsock event"),
     }
 }
 

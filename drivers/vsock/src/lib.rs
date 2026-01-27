@@ -34,9 +34,9 @@ impl VsockConnId {
     }
 }
 
-/// VsockDriverEvent
+/// VsockDriverEventType
 #[derive(Debug)]
-pub enum VsockDriverEvent {
+pub enum VsockDriverEventType {
     /// ConnectionRequest
     ConnectionRequest(VsockConnId),
     /// Connected
@@ -70,14 +70,11 @@ pub trait VsockDriverOps: DriverOps {
     fn recv_avail(&mut self, cid: VsockConnId) -> DriverResult<usize>;
 
     /// Disconnect from the connected peer socket.
-    ///
-    /// Requests to shut down the connection cleanly, telling the peer that we won't send or receive
-    /// any more data.
     fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()>;
 
     /// Forcibly closes the connection without waiting for the peer.
     fn abort(&mut self, cid: VsockConnId) -> DriverResult<()>;
 
     /// poll event from driver
-    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEvent>>;
+    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEventType>>;
 }

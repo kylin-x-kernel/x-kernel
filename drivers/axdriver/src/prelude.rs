@@ -21,5 +21,5 @@ pub use {
 #[cfg(feature = "vsock")]
 pub use {
     crate::structs::AxVsockDevice,
-    axdriver_vsock::{VsockAddr, VsockConnId, VsockDriverEvent, VsockDriverOps},
+    vsock::{VsockAddr, VsockConnId, VsockDriverEventType, VsockDriverOps},
 };

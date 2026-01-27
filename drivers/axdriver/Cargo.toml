@@ -21,7 +21,7 @@ net = ["dep:axdriver_net"]
 block = ["dep:block"]
 display = ["dep:axdriver_display"]
 input = ["dep:axdriver_input"]
-vsock = ["axdriver_vsock"]
+vsock = ["dep:vsock"]
 
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:axsync", "dep:spin"]
 
@@ -56,7 +56,7 @@ axdriver_display = { workspace = true, optional = true }
 axdriver_input = { workspace = true, optional = true }
 axdriver_net = { workspace = true, optional = true }
 axdriver_pci = { workspace = true, optional = true }
-axdriver_vsock = { workspace = true, optional = true }
+vsock = { workspace = true, optional = true }
 axdriver_virtio = { workspace = true, optional = true }
 axerrno = { workspace = true, optional = true }
 axhal = { workspace = true, optional = true }
