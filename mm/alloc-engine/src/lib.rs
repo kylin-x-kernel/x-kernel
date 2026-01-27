@@ -191,11 +191,8 @@ mod allocator_api {
             match layout.size() {
                 0 => Ok(NonNull::slice_from_raw_parts(NonNull::dangling(), 0)),
                 size => {
-                    let raw_addr = self
-                        .0
-                        .borrow_mut()
-                        .allocate(layout)
-                        .map_err(|_| AllocError)?;
+                    let raw_addr =
+                        self.0.borrow_mut().allocate(layout).map_err(|_| AllocError)?;
                     Ok(NonNull::slice_from_raw_parts(raw_addr, size))
                 }
             }
