@@ -3,8 +3,9 @@
 // See LICENSES for license details.
 //
 
-use super::*;
 use core::fmt::{self, Debug};
+
+use super::*;
 
 #[repr(C)]
 pub enum utee_time_category {

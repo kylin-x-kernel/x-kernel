@@ -84,6 +84,7 @@ axplat-aarch64-crosvm-virt = { path = "arch/axplat-aarch64-crosvm-virt" }
 # Third-Party Crates
 arm-gic = { path = "drivers/arm-gic" }
 rs_fdtree = { path = "drivers/rs-fdtree" }
+syscalls = { path = "api/syscalls" , default-features = false }
 bitflags = "2.10"
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
@@ -110,6 +111,9 @@ chrono = { version = "0.4", default-features = false }
 enum_dispatch = "0.3"
 ctor_bare = "0.2"
 lock_api = { version = "0.4", default-features = false }
+
+# Tee Crates
+tee_raw_sys = { path = "tee/tee_raw_sys" }
 
 # Driver Crates
 driver_base = { path = "drivers/driver_base" }
