@@ -21,7 +21,7 @@ use core::{
 };
 
 #[allow(unused_imports)]
-use allocator::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, PageAllocator};
+use alloc_engine::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, PageAllocator};
 use kspin::SpinNoIrq;
 use strum::{IntoStaticStr, VariantArray};
 
@@ -39,13 +39,13 @@ pub use tracking::*;
 cfg_if::cfg_if! {
     if #[cfg(feature = "slab")] {
         /// The default byte allocator.
-        pub type DefaultByteAllocator = allocator::SlabByteAllocator;
+        pub type DefaultByteAllocator = alloc_engine::SlabByteAllocator;
     } else if #[cfg(feature = "buddy")] {
         /// The default byte allocator.
-        pub type DefaultByteAllocator = allocator::BuddyByteAllocator;
+        pub type DefaultByteAllocator = alloc_engine::BuddyByteAllocator;
     } else if #[cfg(feature = "tlsf")] {
         /// The default byte allocator.
-        pub type DefaultByteAllocator = allocator::TlsfByteAllocator;
+        pub type DefaultByteAllocator = alloc_engine::TlsfByteAllocator;
     }
 }
 
@@ -109,7 +109,7 @@ impl fmt::Debug for Usages {
 /// Currently, [`TlsfByteAllocator`] is used as the byte allocator, while
 /// [`BitmapPageAllocator`] is used as the page allocator.
 ///
-/// [`TlsfByteAllocator`]: allocator::TlsfByteAllocator
+/// [`TlsfByteAllocator`]: alloc_engine::TlsfByteAllocator
 pub struct GlobalAllocator {
     balloc: SpinNoIrq<DefaultByteAllocator>,
     #[cfg(not(feature = "level-1"))]
@@ -157,16 +157,16 @@ impl GlobalAllocator {
         #[cfg(not(feature = "level-1"))]
         {
             let init_heap_size = MIN_HEAP_SIZE;
-            self.palloc.lock().init(start_vaddr, size);
+            self.palloc.lock().init_region(start_vaddr, size);
             let heap_ptr = self
                 .alloc_pages(init_heap_size / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap)
                 .unwrap();
 
-            self.balloc.lock().init(heap_ptr, init_heap_size);
+            self.balloc.lock().init_region(heap_ptr, init_heap_size);
         }
         #[cfg(feature = "level-1")]
         {
-            self.balloc.lock().init(start_vaddr, size);
+            self.balloc.lock().init_region(start_vaddr, size);
         }
     }
 
@@ -174,7 +174,7 @@ impl GlobalAllocator {
     ///
     /// It will add the whole region to the byte allocator.
     pub fn add_memory(&self, start_vaddr: usize, size: usize) -> AllocResult {
-        self.balloc.lock().add_memory(start_vaddr, size)
+        self.balloc.lock().add_region(start_vaddr, size)
     }
 
     /// Allocate arbitrary number of bytes. Returns the left bound of the
@@ -198,7 +198,7 @@ impl GlobalAllocator {
     fn alloc_level1(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         // single-level allocator: only use the byte allocator.
         let mut balloc = self.balloc.lock();
-        let ptr = balloc.alloc(layout)?;
+        let ptr = balloc.allocate(layout)?;
         self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
         Ok(ptr)
     }
@@ -208,7 +208,7 @@ impl GlobalAllocator {
         // simple two-level allocator: if no heap memory, allocate from the page allocator.
         let mut balloc = self.balloc.lock();
         loop {
-            if let Ok(ptr) = balloc.alloc(layout) {
+            if let Ok(ptr) = balloc.allocate(layout) {
                 self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
                 return Ok(ptr);
             } else {
@@ -240,7 +240,7 @@ impl GlobalAllocator {
                         heap_ptr,
                         heap_ptr + try_size
                     );
-                    balloc.add_memory(heap_ptr, try_size)?;
+                    balloc.add_region(heap_ptr, try_size)?;
                     break;
                 }
             }
@@ -258,7 +258,7 @@ impl GlobalAllocator {
         self.usages
             .lock()
             .dealloc(UsageKind::RustHeap, layout.size());
-        self.balloc.lock().dealloc(pos, layout)
+        self.balloc.lock().deallocate(pos, layout)
     }
 
     /// Allocates contiguous pages.
@@ -278,13 +278,16 @@ impl GlobalAllocator {
             // single-level allocator: allocate from the byte allocator.
             let mut balloc = self.balloc.lock();
             let layout = Layout::from_size_align(num_pages * PAGE_SIZE, align_pow2).unwrap();
-            let ptr = balloc.alloc(layout)?;
+            let ptr = balloc.allocate(layout)?;
             self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
             Ok(ptr.as_ptr() as usize)
         }
         #[cfg(not(feature = "level-1"))]
         {
-            let addr = self.palloc.lock().alloc_pages(num_pages, align_pow2)?;
+            let addr = self
+                .palloc
+                .lock()
+                .allocate_pages(num_pages, align_pow2)?;
             if !matches!(kind, UsageKind::RustHeap) {
                 self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
             }
@@ -316,7 +319,7 @@ impl GlobalAllocator {
             let addr = self
                 .palloc
                 .lock()
-                .alloc_pages_at(start, num_pages, align_pow2)?;
+                .allocate_pages_at(start, num_pages, align_pow2)?;
             if !matches!(kind, UsageKind::RustHeap) {
                 self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
             }
@@ -339,10 +342,10 @@ impl GlobalAllocator {
             let mut balloc = self.balloc.lock();
             let layout = Layout::from_size_align(num_pages * PAGE_SIZE, PAGE_SIZE).unwrap();
             let ptr = NonNull::new(pos as *mut u8).unwrap();
-            balloc.dealloc(ptr, layout);
+            balloc.deallocate(ptr, layout);
         }
         #[cfg(not(feature = "level-1"))]
-        self.palloc.lock().dealloc_pages(pos, num_pages);
+        self.palloc.lock().deallocate_pages(pos, num_pages);
     }
 
     /// Returns the number of allocated bytes in the byte allocator.

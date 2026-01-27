@@ -1,6 +1,6 @@
-//! Slab memory allocation.
+//! Slab-based memory allocation.
 //!
-//! TODO: comments
+//! This module wraps `slab_allocator::Heap` for byte-granularity allocation.
 
 use core::{alloc::Layout, ptr::NonNull};
 
@@ -12,21 +12,21 @@ use super::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
 ///
 /// [slab allocator]: ../slab_allocator/index.html
 pub struct SlabByteAllocator {
-    inner: Option<Heap>,
+    heap: Option<Heap>,
 }
 
 impl SlabByteAllocator {
     /// Creates a new empty `SlabByteAllocator`.
     pub const fn new() -> Self {
-        Self { inner: None }
+        Self { heap: None }
     }
 
     fn inner_mut(&mut self) -> &mut Heap {
-        self.inner.as_mut().unwrap()
+        self.heap.as_mut().unwrap()
     }
 
     fn inner(&self) -> &Heap {
-        self.inner.as_ref().unwrap()
+        self.heap.as_ref().unwrap()
     }
 }
 
@@ -37,11 +37,11 @@ impl Default for SlabByteAllocator {
 }
 
 impl BaseAllocator for SlabByteAllocator {
-    fn init(&mut self, start: usize, size: usize) {
-        self.inner = unsafe { Some(Heap::new(start, size)) };
+    fn init_region(&mut self, start: usize, size: usize) {
+        self.heap = unsafe { Some(Heap::new(start, size)) };
     }
 
-    fn add_memory(&mut self, start: usize, size: usize) -> AllocResult {
+    fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
         unsafe {
             self.inner_mut().add_memory(start, size);
         }
@@ -50,15 +50,15 @@ impl BaseAllocator for SlabByteAllocator {
 }
 
 impl ByteAllocator for SlabByteAllocator {
-    fn alloc(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
+    fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
         self.inner_mut()
             .allocate(layout)
             .map(|addr| unsafe { NonNull::new_unchecked(addr as *mut u8) })
             .map_err(|_| AllocError::NoMemory)
     }
 
-    fn dealloc(&mut self, pos: NonNull<u8>, layout: Layout) {
-        unsafe { self.inner_mut().deallocate(pos.as_ptr() as usize, layout) }
+    fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        unsafe { self.inner_mut().deallocate(ptr.as_ptr() as usize, layout) }
     }
 
     fn total_bytes(&self) -> usize {

@@ -1,6 +1,6 @@
-//! Various allocator algorithms in a unified interface.
+//! Various allocator algorithms with a unified interface.
 //!
-//! There are three types of allocators:
+//! The crate exposes three allocator classes:
 //!
 //! - [`ByteAllocator`]: Byte-granularity memory allocator. (e.g.,
 //!   [`BuddyByteAllocator`], [`SlabByteAllocator`])
@@ -39,8 +39,8 @@ pub use tlsf::TlsfByteAllocator;
 #[derive(Debug)]
 pub enum AllocError {
     /// Invalid `size` or `align_pow2`. (e.g. unaligned)
-    InvalidParam,
-    /// Memory added by `add_memory` overlapped with existed memory.
+    InvalidInput,
+    /// Memory added by `add_region` overlapped with existing memory.
     MemoryOverlap,
     /// No enough memory to allocate.
     NoMemory,
@@ -64,19 +64,19 @@ pub type AllocResult<T = ()> = Result<T, AllocError>;
 /// The base allocator inherited by other allocators.
 pub trait BaseAllocator {
     /// Initialize the allocator with a free memory region.
-    fn init(&mut self, start: usize, size: usize);
+    fn init_region(&mut self, base: usize, size: usize);
 
     /// Add a free memory region to the allocator.
-    fn add_memory(&mut self, start: usize, size: usize) -> AllocResult;
+    fn add_region(&mut self, base: usize, size: usize) -> AllocResult;
 }
 
 /// Byte-granularity allocator.
 pub trait ByteAllocator: BaseAllocator {
     /// Allocate memory with the given size (in bytes) and alignment.
-    fn alloc(&mut self, layout: Layout) -> AllocResult<NonNull<u8>>;
+    fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>>;
 
     /// Deallocate memory at the given position, size, and alignment.
-    fn dealloc(&mut self, pos: NonNull<u8>, layout: Layout);
+    fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout);
 
     /// Returns total memory size in bytes.
     fn total_bytes(&self) -> usize;
@@ -94,13 +94,13 @@ pub trait PageAllocator: BaseAllocator {
     const PAGE_SIZE: usize;
 
     /// Allocate contiguous memory pages with given count and alignment.
-    fn alloc_pages(&mut self, num_pages: usize, align_pow2: usize) -> AllocResult<usize>;
+    fn allocate_pages(&mut self, num_pages: usize, align_pow2: usize) -> AllocResult<usize>;
 
     /// Deallocate contiguous memory pages with given position and count.
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize);
+    fn deallocate_pages(&mut self, base: usize, num_pages: usize);
 
     /// Allocate contiguous memory pages with given base address, count and alignment.
-    fn alloc_pages_at(
+    fn allocate_pages_at(
         &mut self,
         base: usize,
         num_pages: usize,
@@ -120,16 +120,16 @@ pub trait PageAllocator: BaseAllocator {
 /// Used to allocate unique IDs (e.g., thread ID).
 pub trait IdAllocator: BaseAllocator {
     /// Allocate contiguous IDs with given count and alignment.
-    fn alloc_id(&mut self, count: usize, align_pow2: usize) -> AllocResult<usize>;
+    fn allocate_ids(&mut self, count: usize, align_pow2: usize) -> AllocResult<usize>;
 
     /// Deallocate contiguous IDs with given position and count.
-    fn dealloc_id(&mut self, start_id: usize, count: usize);
+    fn deallocate_ids(&mut self, start_id: usize, count: usize);
 
     /// Whether the given `id` was allocated.
     fn is_allocated(&self, id: usize) -> bool;
 
     /// Mark the given `id` has been allocated and cannot be reallocated.
-    fn alloc_fixed_id(&mut self, id: usize) -> AllocResult;
+    fn reserve_id(&mut self, id: usize) -> AllocResult;
 
     /// Returns the maximum number of supported IDs.
     fn size(&self) -> usize;
@@ -181,7 +181,7 @@ mod allocator_api {
     impl<A: ByteAllocator> AllocatorRc<A> {
         /// Creates a new allocator with the given memory pool.
         pub fn new(mut inner: A, pool: &mut [u8]) -> Self {
-            inner.init(pool.as_mut_ptr() as usize, pool.len());
+            inner.init_region(pool.as_mut_ptr() as usize, pool.len());
             Self(Rc::new(RefCell::new(inner)))
         }
     }
@@ -191,14 +191,15 @@ mod allocator_api {
             match layout.size() {
                 0 => Ok(NonNull::slice_from_raw_parts(NonNull::dangling(), 0)),
                 size => {
-                    let raw_addr = self.0.borrow_mut().alloc(layout).map_err(|_| AllocError)?;
+                    let raw_addr =
+                        self.0.borrow_mut().allocate(layout).map_err(|_| AllocError)?;
                     Ok(NonNull::slice_from_raw_parts(raw_addr, size))
                 }
             }
         }
 
         unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-            self.0.borrow_mut().dealloc(ptr, layout)
+            self.0.borrow_mut().deallocate(ptr, layout)
         }
     }
 
