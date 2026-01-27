@@ -1,4 +1,4 @@
-use proc_macro::{TokenStream};
+use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{Error, FnArg, ItemFn, ItemTrait, ReturnType, TraitItem};
@@ -9,9 +9,14 @@ fn generate_error(err: Error) -> TokenStream {
 }
 
 /// A shared function for validating main functions for primary and secondary cores.
-fn validate_main_fn(item: TokenStream, expected_args: usize, name: &str, error_message: &str) -> TokenStream {
+fn validate_main_fn(
+    item: TokenStream,
+    expected_args: usize,
+    name: &str,
+    error_message: &str,
+) -> TokenStream {
     let parsed_fn = syn::parse_macro_input!(item as ItemFn);
-    
+
     // Check if the return type is `!`
     let mut is_valid = if let ReturnType::Type(_, ty) = &parsed_fn.sig.output {
         quote! { #ty }.to_string() != "!"

@@ -19,10 +19,10 @@ pub mod power;
 pub mod psci;
 pub mod time;
 
+pub use crate_interface::impl_interface as impl_plat_interface;
 pub use kyplat_macros::main;
 #[cfg(feature = "smp")]
 pub use kyplat_macros::secondary_main;
-pub use crate_interface::impl_interface as impl_plat_interface;
 
 #[doc(hidden)]
 pub mod __priv {
