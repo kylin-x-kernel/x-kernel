@@ -1,4 +1,3 @@
-use vsock::{VsockConnId, VsockDriverEventType, VsockDriverOps};
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{
     Hal,
@@ -7,6 +6,7 @@ use virtio_drivers::{
     },
     transport::Transport,
 };
+use vsock::{VsockConnId, VsockDriverEventType, VsockDriverOps};
 
 use crate::as_driver_error;
 
