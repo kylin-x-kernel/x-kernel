@@ -27,7 +27,7 @@
 #![feature(doc_cfg)]
 
 #[macro_use]
-extern crate axlog;
+extern crate klogger;
 
 #[cfg(all(target_os = "none", not(test)))]
 mod lang_items;
@@ -57,16 +57,16 @@ unsafe extern "C" {
 struct LogIfImpl;
 
 #[crate_interface::impl_interface]
-impl axlog::LogIf for LogIfImpl {
-    fn console_write_str(s: &str) {
+impl klogger::LoggerAdapter for LogIfImpl {
+    fn write_str(s: &str) {
         axhal::console::write_bytes(s.as_bytes());
     }
 
-    fn current_time() -> core::time::Duration {
+    fn now() -> core::time::Duration {
         axhal::time::monotonic_time()
     }
 
-    fn current_cpu_id() -> Option<usize> {
+    fn cpu_id() -> Option<usize> {
         #[cfg(feature = "smp")]
         if is_init_ok() {
             Some(axhal::percpu::this_cpu_id())
@@ -77,7 +77,7 @@ impl axlog::LogIf for LogIfImpl {
         Some(0)
     }
 
-    fn current_task_id() -> Option<u64> {
+    fn task_id() -> Option<u64> {
         if is_init_ok() {
             #[cfg(feature = "multitask")]
             {
@@ -115,8 +115,8 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     axhal::percpu::init_primary(cpu_id);
     axhal::init_early(cpu_id, arg);
 
-    ax_println!("{}", LOGO);
-    ax_println!(
+    kprintln!("{}", LOGO);
+    kprintln!(
         indoc::indoc! {"
             arch = {}
             platform = {}
@@ -135,13 +135,13 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         platconfig::plat::CPU_NUM,
     );
     #[cfg(feature = "rtc")]
-    ax_println!(
+    kprintln!(
         "Boot at {}\n",
         chrono::DateTime::from_timestamp_nanos(axhal::time::wall_time_nanos() as _),
     );
 
-    axlog::init();
-    axlog::set_max_level(option_env!("AX_LOG").unwrap_or("")); // no effect if set `log-level-*` features
+    klogger::init_klogger();
+    klogger::set_log_level(option_env!("AX_LOG").unwrap_or("")); // no effect if set `log-level-*` features
     info!("Logging is enabled.");
     info!("Primary CPU {cpu_id} started, arg = {arg:#x}.");
 

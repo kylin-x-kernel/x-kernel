@@ -8,7 +8,7 @@
 extern crate alloc;
 
 #[macro_use]
-extern crate axlog;
+extern crate klogger;
 
 pub mod config;
 pub mod futex;

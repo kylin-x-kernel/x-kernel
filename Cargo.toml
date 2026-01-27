@@ -41,7 +41,7 @@ axfs = { path = "fs/axfs" }
 axhal = { path = "arch/axhal" }
 axinput = { path = "io/axinput" }
 axipi = { path = "arch/axipi" }
-axlog = { path = "util/axlog" }
+klogger = { path = "util/klogger" }
 axmm = { path = "mm/axmm" }
 axnet = { path = "net/axnet" }
 axruntime = { path = "core/axruntime" }

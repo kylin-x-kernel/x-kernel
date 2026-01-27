@@ -30,7 +30,7 @@ axfs.workspace = true
 axhal.workspace = true
 axinput = { workspace = true, optional = true }
 axio.workspace = true
-axlog.workspace = true
+klogger.workspace = true
 axmm.workspace = true
 axnet.workspace = true
 axplat-aarch64-crosvm-virt = { workspace = true, optional = true }

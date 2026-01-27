@@ -125,7 +125,7 @@ axfs = { workspace = true, optional = true }
 axhal.workspace = true
 axinput = { workspace = true, optional = true }
 axipi = { workspace = true, optional = true }
-axlog.workspace = true
+klogger.workspace = true
 axnet = { workspace = true, optional = true }
 axruntime.workspace = true
 axsync = { workspace = true, optional = true }
