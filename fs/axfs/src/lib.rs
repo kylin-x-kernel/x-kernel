@@ -33,7 +33,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
             block_devs.take_one().expect("No block device found!")
         }
     };
-    info!("  use block device 0: {:?}", dev.device_name());
+    info!("  use block device 0: {:?}", dev.name());
 
     let fs = fs::new_default(dev).expect("Failed to initialize filesystem");
     info!("  filesystem type: {:?}", fs.name());

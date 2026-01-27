@@ -19,7 +19,7 @@ fn config_pci_device(
     root: &mut PciRoot,
     bdf: DeviceFunction,
     allocator: &mut Option<PciRangeAllocator>,
-) -> DevResult {
+) -> DriverResult {
     let mut bar = 0;
     while bar < PCI_BAR_NUM {
         let info = root.bar_info(bdf, bar).unwrap();
@@ -36,7 +36,7 @@ fn config_pci_device(
                     .as_mut()
                     .expect("No memory ranges available for PCI BARs!")
                     .alloc(size as _)
-                    .ok_or(DevError::NoMemory)?;
+                    .ok_or(DriverError::NoMemory)?;
                 if address_type == MemoryBarType::Width32 {
                     root.set_bar_32(bdf, bar, new_addr as _);
                 } else if address_type == MemoryBarType::Width64 {
@@ -121,9 +121,9 @@ impl AllDevices {
                         if let Some(dev) = Driver::probe_pci(&mut root, bdf, &dev_info) {
                             info!(
                                 "registered a new {:?} device at {}: {:?}",
-                                dev.device_type(),
+                                dev.device_kind(),
                                 bdf,
-                                dev.device_name(),
+                                dev.name(),
                             );
                             self.add_device(dev);
                             continue; // skip to the next device

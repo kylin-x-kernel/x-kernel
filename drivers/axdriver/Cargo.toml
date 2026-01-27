@@ -50,7 +50,7 @@ default = ["bus-pci"]
 axalloc = { workspace = true, optional = true }
 platconfig = { workspace = true, optional = true }
 # axdma = { workspace = true, optional = true }
-axdriver_base = { workspace = true }
+driver_base = { workspace = true }
 axdriver_block = { workspace = true, optional = true }
 axdriver_display = { workspace = true, optional = true }
 axdriver_input = { workspace = true, optional = true }

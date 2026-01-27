@@ -20,7 +20,7 @@ pub fn init_display(mut display_devs: AxDeviceContainer<AxDisplayDevice>) {
     info!("Initialize display subsystem...");
 
     if let Some(dev) = display_devs.take_one() {
-        info!("  use display device 0: {:?}", dev.device_name());
+        info!("  use display device 0: {:?}", dev.name());
         MAIN_DISPLAY.init_once(Mutex::new(dev));
     } else {
         warn!("  No display device found!");

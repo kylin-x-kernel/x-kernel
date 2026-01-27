@@ -2,14 +2,15 @@
 
 #![allow(unused_imports, dead_code)]
 
-use axdriver_base::DeviceType;
+use crate::AxDeviceEnum;
+use driver_base::DeviceKind;
+
+#[cfg(feature = "virtio")]
+use crate::virtio::{self, VirtIoDevMeta};
 #[cfg(feature = "bus-pci")]
 use axdriver_pci::{DeviceFunction, DeviceFunctionInfo, PciRoot};
 
 pub use super::dummy::*;
-use crate::AxDeviceEnum;
-#[cfg(feature = "virtio")]
-use crate::virtio::{self, VirtIoDevMeta};
 
 pub trait DriverProbe {
     fn probe_global() -> Option<AxDeviceEnum> {

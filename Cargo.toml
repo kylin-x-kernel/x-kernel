@@ -115,7 +115,7 @@ ctor_bare = "0.2"
 lock_api = { version = "0.4", default-features = false }
 
 # Driver Crates
-axdriver_base = { path = "drivers/axdriver_base" }
+driver_base = { path = "drivers/driver_base" }
 axdriver_block = { path = "drivers/axdriver_block" }
 axdriver_display = { path = "drivers/axdriver_display" }
 axdriver_input = { path = "drivers/axdriver_input" }

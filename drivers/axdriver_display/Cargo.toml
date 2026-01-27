@@ -12,4 +12,4 @@ repository.workspace = true
 categories.workspace = true
 
 [dependencies]
-axdriver_base = { workspace = true }
+driver_base = { workspace = true }

@@ -15,5 +15,5 @@ categories.workspace = true
 default = []
 
 [dependencies]
-axdriver_base = { workspace = true }
+driver_base = { workspace = true }
 log = "0.4"

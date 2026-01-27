@@ -19,7 +19,7 @@ sdmmc = ["dep:simple-sdmmc"]
 ahci = ["dep:simple-ahci"]
 
 [dependencies]
-axdriver_base = { workspace = true }
+driver_base = { workspace = true }
 bcm2835-sdhci = { git = "https://github.com/lhw2002426/bcm2835-sdhci.git", rev = "e974f16", optional = true }
 log = { workspace = true }
 simple-sdmmc = { git = "https://github.com/Starry-OS/simple-sdmmc.git", rev = "9e6420c", optional = true }

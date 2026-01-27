@@ -15,9 +15,9 @@ cfg_if! {
         pub struct DummyNetDrvier;
         register_net_driver!(DummyNetDriver, DummyNetDev);
 
-        impl BaseDriverOps for DummyNetDev {
-            fn device_type(&self) -> DeviceType { DeviceType::Net }
-            fn device_name(&self) -> &str { "dummy-net" }
+        impl DriverOps for DummyNetDev {
+            fn device_kind(&self) -> DeviceKind { DeviceKind::Net }
+            fn name(&self) -> &str { "dummy-net" }
         }
 
         impl NetDriverOps for DummyNetDev {
@@ -26,11 +26,11 @@ cfg_if! {
             fn can_receive(&self) -> bool { false }
             fn rx_queue_size(&self) -> usize { 0 }
             fn tx_queue_size(&self) -> usize { 0 }
-            fn recycle_rx_buffer(&mut self, _: NetBufPtr) -> DevResult { Err(DevError::Unsupported) }
-            fn recycle_tx_buffers(&mut self) -> DevResult { Err(DevError::Unsupported) }
-            fn transmit(&mut self, _: NetBufPtr) -> DevResult { Err(DevError::Unsupported) }
-            fn receive(&mut self) -> DevResult<NetBufPtr> { Err(DevError::Unsupported) }
-            fn alloc_tx_buffer(&mut self, _: usize) -> DevResult<NetBufPtr> { Err(DevError::Unsupported) }
+            fn recycle_rx_buffer(&mut self, _: NetBufPtr) -> DriverResult { Err(DriverError::Unsupported) }
+            fn recycle_tx_buffers(&mut self) -> DriverResult { Err(DriverError::Unsupported) }
+            fn transmit(&mut self, _: NetBufPtr) -> DriverResult { Err(DriverError::Unsupported) }
+            fn receive(&mut self) -> DriverResult<NetBufPtr> { Err(DriverError::Unsupported) }
+            fn alloc_tx_buffer(&mut self, _: usize) -> DriverResult<NetBufPtr> { Err(DriverError::Unsupported) }
         }
     }
 }
@@ -41,11 +41,11 @@ cfg_if! {
         pub struct DummyBlockDriver;
         register_block_driver!(DummyBlockDriver, DummyBlockDev);
 
-        impl BaseDriverOps for DummyBlockDev {
-            fn device_type(&self) -> DeviceType {
-                DeviceType::Block
+        impl DriverOps for DummyBlockDev {
+            fn device_kind(&self) -> DeviceKind {
+                DeviceKind::Block
             }
-            fn device_name(&self) -> &str {
+            fn name(&self) -> &str {
                 "dummy-block"
             }
         }
@@ -57,14 +57,14 @@ cfg_if! {
             fn block_size(&self) -> usize {
                 0
             }
-            fn read_block(&mut self, _: u64, _: &mut [u8]) -> DevResult {
-                Err(DevError::Unsupported)
+            fn read_block(&mut self, _: u64, _: &mut [u8]) -> DriverResult {
+                Err(DriverError::Unsupported)
             }
-            fn write_block(&mut self, _: u64, _: &[u8]) -> DevResult {
-                Err(DevError::Unsupported)
+            fn write_block(&mut self, _: u64, _: &[u8]) -> DriverResult {
+                Err(DriverError::Unsupported)
             }
-            fn flush(&mut self) -> DevResult {
-                Err(DevError::Unsupported)
+            fn flush(&mut self) -> DriverResult {
+                Err(DriverError::Unsupported)
             }
         }
     }
@@ -76,11 +76,11 @@ cfg_if! {
         pub struct DummyDisplayDriver;
         register_display_driver!(DummyDisplayDriver, DummyDisplayDev);
 
-        impl BaseDriverOps for DummyDisplayDev {
-            fn device_type(&self) -> DeviceType {
-                DeviceType::Display
+        impl DriverOps for DummyDisplayDev {
+            fn device_kind(&self) -> DeviceKind {
+                DeviceKind::Display
             }
-            fn device_name(&self) -> &str {
+            fn name(&self) -> &str {
                 "dummy-display"
             }
         }
@@ -95,8 +95,8 @@ cfg_if! {
             fn need_flush(&self) -> bool {
                 false
             }
-            fn flush(&mut self) -> DevResult {
-                Err(DevError::Unsupported)
+            fn flush(&mut self) -> DriverResult {
+                Err(DriverError::Unsupported)
             }
         }
     }
@@ -108,11 +108,11 @@ cfg_if! {
         pub struct DummyInputDriver;
         register_input_driver!(DummyInputDriver, DummyInputDev);
 
-        impl BaseDriverOps for DummyInputDev {
-            fn device_type(&self) -> DeviceType {
-                DeviceType::Input
+        impl DriverOps for DummyInputDev {
+            fn device_kind(&self) -> DeviceKind {
+                DeviceKind::Input
             }
-            fn device_name(&self) -> &str {
+            fn name(&self) -> &str {
                 "dummy-input"
             }
         }
@@ -127,11 +127,11 @@ cfg_if! {
             fn unique_id(&self) -> &str {
                 "dummy"
             }
-            fn get_event_bits(&mut self, _ty: EventType, _out: &mut [u8]) -> DevResult<bool> {
-                Err(DevError::Unsupported)
+            fn get_event_bits(&mut self, _ty: EventType, _out: &mut [u8]) -> DriverResult<bool> {
+                Err(DriverError::Unsupported)
             }
-            fn read_event(&mut self) -> DevResult<Event> {
-                Err(DevError::Unsupported)
+            fn read_event(&mut self) -> DriverResult<Event> {
+                Err(DriverError::Unsupported)
             }
         }
     }
@@ -143,11 +143,11 @@ cfg_if! {
         pub struct DummyVsockDriver;
         register_vsock_driver!(DummyVsockDriver, DummyVsockDev);
 
-        impl BaseDriverOps for DummyVsockDev {
-            fn device_type(&self) -> DeviceType {
-                DeviceType::Vsock
+        impl DriverOps for DummyVsockDev {
+            fn device_kind(&self) -> DeviceKind {
+                DeviceKind::Vsock
             }
-            fn device_name(&self) -> &str {
+            fn name(&self) -> &str {
                 "dummy-vsock"
             }
         }
@@ -159,26 +159,26 @@ cfg_if! {
             fn listen(&mut self, _src_port: u32) {
                 unimplemented!()
             }
-            fn connect(&mut self, _cid: VsockConnId) -> DevResult<()> {
-                Err(DevError::Unsupported)
+            fn connect(&mut self, _cid: VsockConnId) -> DriverResult<()> {
+                Err(DriverError::Unsupported)
             }
-            fn send(&mut self, _cid: VsockConnId, _buf: &[u8]) -> DevResult<usize> {
-                Err(DevError::Unsupported)
+            fn send(&mut self, _cid: VsockConnId, _buf: &[u8]) -> DriverResult<usize> {
+                Err(DriverError::Unsupported)
             }
-            fn recv(&mut self, _cid: VsockConnId, _buf: &mut [u8]) -> DevResult<usize> {
-                Err(DevError::Unsupported)
+            fn recv(&mut self, _cid: VsockConnId, _buf: &mut [u8]) -> DriverResult<usize> {
+                Err(DriverError::Unsupported)
             }
-            fn recv_avail(&mut self, _cid: VsockConnId) -> DevResult<usize> {
-                Err(DevError::Unsupported)
+            fn recv_avail(&mut self, _cid: VsockConnId) -> DriverResult<usize> {
+                Err(DriverError::Unsupported)
             }
-            fn disconnect(&mut self, _cid: VsockConnId) -> DevResult<()> {
-                Err(DevError::Unsupported)
+            fn disconnect(&mut self, _cid: VsockConnId) -> DriverResult<()> {
+                Err(DriverError::Unsupported)
             }
-            fn abort(&mut self, _cid: VsockConnId) -> DevResult<()> {
-                Err(DevError::Unsupported)
+            fn abort(&mut self, _cid: VsockConnId) -> DriverResult<()> {
+                Err(DriverError::Unsupported)
             }
-            fn poll_event(&mut self, _buf: &mut [u8]) -> DevResult<Option<VsockDriverEvent>> {
-                Err(DevError::Unsupported)
+            fn poll_event(&mut self, _buf: &mut [u8]) -> DriverResult<Option<VsockDriverEvent>> {
+                Err(DriverError::Unsupported)
             }
         }
     }
