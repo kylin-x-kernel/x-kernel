@@ -7,7 +7,7 @@ license = { workspace = true }
 edition = { workspace = true }
 keywords = ["DWARF", "debug", "backtrace", "unwinding", "x-kernel"]
 categories = ["development-tools::debugging"]
-description = "Backtrace for X-kernel"
+description = "Backtrace Catching for X-kernel"
 
 [features]
 alloc = []

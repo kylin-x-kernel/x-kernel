@@ -39,44 +39,53 @@ macro_rules! generate_sections {
 }
 
 pub fn init() {
-    generate_sections!(
-        debug_abbrev,
-        debug_addr,
-        debug_aranges,
-        debug_info,
-        debug_line,
-        debug_line_str,
-        debug_ranges,
-        debug_rnglists,
-        debug_str,
-        debug_str_offsets
-    );
+    #[cfg(not(test))]
+    {
+        generate_sections!(
+            debug_abbrev,
+            debug_addr,
+            debug_aranges,
+            debug_info,
+            debug_line,
+            debug_line_str,
+            debug_ranges,
+            debug_rnglists,
+            debug_str,
+            debug_str_offsets
+        );
 
-    let default_section = DwarfReader::new(&[], gimli::RunTimeEndian::default());
+        let default_section = DwarfReader::new(&[], gimli::RunTimeEndian::default());
 
-    match Context::from_sections(
-        debug_abbrev.into(),
-        debug_addr.into(),
-        debug_aranges.into(),
-        debug_info.into(),
-        debug_line.into(),
-        debug_line_str.into(),
-        debug_ranges.into(),
-        debug_rnglists.into(),
-        debug_str.into(),
-        debug_str_offsets.into(),
-        default_section,
-    ) {
-        Ok(ctx) => {
-            unsafe {
-                CONTEXT = Some(ctx);
+        match Context::from_sections(
+            debug_abbrev.into(),
+            debug_addr.into(),
+            debug_aranges.into(),
+            debug_info.into(),
+            debug_line.into(),
+            debug_line_str.into(),
+            debug_ranges.into(),
+            debug_rnglists.into(),
+            debug_str.into(),
+            debug_str_offsets.into(),
+            default_section,
+        ) {
+            Ok(ctx) => {
+                unsafe {
+                    CONTEXT = Some(ctx);
+                }
+                info!("Initialized addr2line context successfully.");
             }
-            info!("Initialized addr2line context successfully.");
-        }
-        Err(e) => {
-            error!("Failed to initialize addr2line context: {e}");
+            Err(e) => {
+                error!("Failed to initialize addr2line context: {e}");
+            }
         }
     }
+
+    #[cfg(test)]
+    {
+        log::info!("DWARF initialization skipped in test mode");
+    }
+
 }
 
 /// An iterator over the stack frames in a captured backtrace.
@@ -152,6 +161,7 @@ fn fmt_frame<R: gimli::Reader>(
     Ok(())
 }
 
+#[cfg(not(test))]
 pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) -> fmt::Result {
     #[allow(static_mut_refs)]
     if unsafe { CONTEXT.is_none() } {
@@ -163,5 +173,26 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
         writeln!(f, " with {raw}")?;
     }
 
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) -> fmt::Result {
+    #[allow(static_mut_refs)]
+    if unsafe { CONTEXT.is_none() } {
+            writeln!(f, "Symbolication disabled in test mode.")?;
+            writeln!(f, "Raw frames:")?;
+            for (i, frame) in frames.iter().enumerate() {
+                writeln!(f, "  {:>4}: {}", i, frame)?;
+            }
+        return Ok(());
+    }
+
+    // 正常的符号化输出
+    for (i, (raw, frame)) in FrameIter::new(frames).enumerate() {
+        write!(f, "{i:>4}")?;
+        fmt_frame(f, &frame)?;
+        writeln!(f, " with {raw}")?;
+    }
     Ok(())
 }
