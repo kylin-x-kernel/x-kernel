@@ -2,9 +2,9 @@
 name = "page_table"
 version = "0.1.0"
 edition = "2024"
-authors = ["Choose License <choose_license@outlook.com>"]
-description = "Unified page table management"
-license = "Check License"
+authors.workspace = true
+description = "Unified page table implementation for multiarch."
+license.workspace = true
 
 [features]
 default = []
