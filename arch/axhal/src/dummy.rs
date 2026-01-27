@@ -3,12 +3,12 @@
 #[cfg(feature = "irq")]
 use kplat::interrupts::{Handler, IntrManager, TargetCpu};
 use kplat::{
-    console::Terminal,
+    boot::BootHandler,
     impl_dev_interface,
-    init::BootHandler,
-    mem::{HwMemory, MemRange},
-    power::SysCtrl,
-    time::GlobalTimer,
+    io::Terminal,
+    memory::{HwMemory, MemRange},
+    sys::SysCtrl,
+    timer::GlobalTimer,
 };
 
 struct DummyInit;
@@ -121,11 +121,11 @@ impl SysCtrl for DummyPower {
 impl IntrManager for DummyIrq {
     fn enable(_irq: usize, _enabled: bool) {}
 
-    fn register(_irq: usize, _handler: Handler) -> bool {
+    fn reg_handler(_irq: usize, _handler: Handler) -> bool {
         false
     }
 
-    fn unregister(_irq: usize) -> Option<Handler> {
+    fn unreg_handler(_irq: usize) -> Option<Handler> {
         None
     }
 

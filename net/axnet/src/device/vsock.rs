@@ -144,7 +144,7 @@ fn poll_vsock_interfaces() -> AxResult<bool> {
     loop {
         match dev.poll_event() {
             Ok(None) => break, // no more events
-            Ok(Some(event_type)) => {
+            Ok(Some(event)) => {
                 event_count += 1;
                 dispatch_irq_vsock_event(event, dev, &mut buf);
             }
@@ -157,11 +157,11 @@ fn poll_vsock_interfaces() -> AxResult<bool> {
     Ok(event_count > 0)
 }
 
-fn dispatch_irq_vsock_event(event: VsockDriverEvent, dev: &mut AxVsockDevice, buf: &mut [u8]) {
+fn dispatch_irq_vsock_event(event: VsockDriverEventType, dev: &mut AxVsockDevice, buf: &mut [u8]) {
     let mut manager = VSOCK_CONN_MANAGER.lock();
-    debug!("Handling vsock event: {event_type:?}");
+    debug!("Handling vsock event: {event:?}");
 
-    match event_type {
+    match event {
         VsockDriverEventType::ConnectionRequest(conn_id) => {
             if let Err(e) = manager.on_connection_request(conn_id) {
                 info!("Connection request failed: {conn_id:?}, error={e:?}");
