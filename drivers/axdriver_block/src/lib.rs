@@ -18,7 +18,7 @@ pub mod ahci;
 pub mod sdmmc;
 
 #[doc(no_inline)]
-pub use driver_base::{DriverOps, DriverError, DriverResult, DeviceKind};
+pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 /// Operations that require a block storage device driver to implement.
 pub trait BlockDriverOps: DriverOps {

@@ -1,7 +1,7 @@
 use alloc::{collections::VecDeque, sync::Arc};
 use core::{convert::From, mem::ManuallyDrop, ptr::NonNull};
 
-use driver_base::{DriverOps, DriverError, DriverResult, DeviceKind};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 pub use ixgbe_driver::{INTEL_82599, INTEL_VEND, IxgbeHal, PhysAddr};
 use ixgbe_driver::{IxgbeDevice, IxgbeError, IxgbeNetBuf, MemPool, NicDevice};
 use log::*;

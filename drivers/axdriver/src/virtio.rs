@@ -9,12 +9,12 @@
 use core::{marker::PhantomData, ptr::NonNull};
 
 use axalloc::{UsageKind, global_allocator};
-use driver_base::{DriverOps, DriverResult, DeviceKind};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
 use axhal::mem::{phys_to_virt, virt_to_phys};
 #[cfg(feature = "crosvm")]
 use axhal::psci::{share_dma_buffer, unshare_dma_buffer};
 use cfg_if::cfg_if;
+use driver_base::{DeviceKind, DriverOps, DriverResult};
 
 use crate::{AxDeviceEnum, drivers::DriverProbe};
 

@@ -1,5 +1,5 @@
-use driver_base::{DriverOps, DriverResult, DeviceKind};
 use axdriver_vsock::{VsockConnId, VsockDriverEvent, VsockDriverOps};
+use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{
     Hal,
     device::socket::{
@@ -60,7 +60,9 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
 
     fn connect(&mut self, cid: VsockConnId) -> DriverResult<()> {
         let (peer_addr, src_port) = map_conn_id(cid);
-        self.inner.connect(peer_addr, src_port).map_err(as_driver_error)
+        self.inner
+            .connect(peer_addr, src_port)
+            .map_err(as_driver_error)
     }
 
     fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
@@ -90,7 +92,9 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
 
     fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()> {
         let (peer_addr, src_port) = map_conn_id(cid);
-        self.inner.shutdown(peer_addr, src_port).map_err(as_driver_error)
+        self.inner
+            .shutdown(peer_addr, src_port)
+            .map_err(as_driver_error)
     }
 
     fn abort(&mut self, cid: VsockConnId) -> DriverResult<()> {

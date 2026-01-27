@@ -38,16 +38,20 @@ pub use self::net::VirtIoNetDev;
 
 #[cfg(feature = "socket")]
 mod socket;
-#[cfg(feature = "socket")]
-pub use self::socket::VirtIoSocketDev;
-
-pub use virtio_drivers::transport::pci::bus as pci;
-pub use virtio_drivers::transport::{mmio::MmioTransport, pci::PciTransport, Transport};
-pub use virtio_drivers::{BufferDirection, Hal as VirtIoHal, PhysAddr};
+use driver_base::{DeviceKind, DriverError};
+use virtio_drivers::transport::DeviceType as VirtIoDevType;
+pub use virtio_drivers::{
+    BufferDirection, Hal as VirtIoHal, PhysAddr,
+    transport::{
+        Transport,
+        mmio::MmioTransport,
+        pci::{PciTransport, bus as pci},
+    },
+};
 
 use self::pci::{DeviceFunction, DeviceFunctionInfo, PciRoot};
-use driver_base::{DriverError, DeviceKind};
-use virtio_drivers::transport::DeviceType as VirtIoDevType;
+#[cfg(feature = "socket")]
+pub use self::socket::VirtIoSocketDev;
 
 /// Try to probe a VirtIO MMIO device from the given memory region.
 ///
@@ -107,8 +111,7 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
 
 #[allow(dead_code)]
 pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
-    use virtio_drivers::device::socket::SocketError::*;
-    use virtio_drivers::Error::*;
+    use virtio_drivers::{Error::*, device::socket::SocketError::*};
     match e {
         QueueFull => DriverError::BadState,
         NotReady => DriverError::WouldBlock,
@@ -124,7 +127,7 @@ pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
             ConnectionExists => DriverError::AlreadyExists,
             NotConnected => DriverError::BadState,
             InvalidOperation | InvalidNumber | UnknownOperation(_) => DriverError::InvalidInput,
-            OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(_, _) => {
+            OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(..) => {
                 DriverError::InvalidInput
             }
             UnexpectedDataInPacket | PeerSocketShutdown | NoResponseReceived | ConnectionFailed => {

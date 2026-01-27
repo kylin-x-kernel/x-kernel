@@ -1,5 +1,5 @@
-use driver_base::{DriverOps, DriverResult, DeviceKind};
 use axdriver_block::BlockDriverOps;
+use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{Hal, device::blk::VirtIOBlk as InnerDev, transport::Transport};
 
 use crate::as_driver_error;

@@ -1,6 +1,6 @@
 //! SD/MMC driver based on SDIO.
 
-use driver_base::{DriverOps, DriverError, DriverResult, DeviceKind};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use simple_sdmmc::SdMmc;
 
 use crate::BlockDriverOps;

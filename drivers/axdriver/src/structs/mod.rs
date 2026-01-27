@@ -10,7 +10,7 @@
 
 use core::ops::{Deref, DerefMut};
 
-use driver_base::{DriverOps, DeviceKind};
+use driver_base::{DeviceKind, DriverOps};
 use smallvec::SmallVec;
 
 #[path = "static.rs"]

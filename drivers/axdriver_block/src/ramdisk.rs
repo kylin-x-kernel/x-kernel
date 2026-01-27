@@ -9,7 +9,7 @@ use core::{
     ptr::NonNull,
 };
 
-use driver_base::{DriverOps, DriverError, DriverResult, DeviceKind};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 use crate::BlockDriverOps;
 

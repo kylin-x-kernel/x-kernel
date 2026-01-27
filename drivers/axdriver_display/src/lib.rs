@@ -3,7 +3,7 @@
 #![no_std]
 
 #[doc(no_inline)]
-pub use driver_base::{DriverOps, DriverError, DriverResult, DeviceKind};
+pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 
 /// The information of the graphics device.
 #[derive(Debug, Clone, Copy)]

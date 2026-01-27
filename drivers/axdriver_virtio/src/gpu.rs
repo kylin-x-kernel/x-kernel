@@ -1,5 +1,5 @@
-use driver_base::{DriverOps, DriverResult, DeviceKind};
 use axdriver_display::{DisplayDriverOps, DisplayInfo, FrameBuffer};
+use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{Hal, device::gpu::VirtIOGpu as InnerDev, transport::Transport};
 
 use crate::as_driver_error;

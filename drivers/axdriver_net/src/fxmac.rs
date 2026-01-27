@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, collections::VecDeque, vec};
 use core::ptr::NonNull;
 
-use driver_base::{DriverOps, DriverError, DriverResult, DeviceKind};
+use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 pub use fxmac_rs::KernelFunc;
 use fxmac_rs::{self, FXmac, FXmacGetMacAddress, FXmacLwipPortTx, FXmacRecvHandler, xmac_init};
 use log::*;
