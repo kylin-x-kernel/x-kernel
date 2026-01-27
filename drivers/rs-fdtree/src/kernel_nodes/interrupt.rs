@@ -18,5 +18,4 @@ impl<'b, 'a: 'b> InterruptController<'b, 'a> {
     pub fn compatible(self) -> Option<&'a str> {
         self.node.compatible().and_then(|comp| comp.first())
     }
-
 }

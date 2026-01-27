@@ -5,10 +5,7 @@
 
 //! Kylin Dice
 
-use crate::{
-    node::FdtNode,
-    standard_nodes::RegIter,
-};
+use crate::{node::FdtNode, standard_nodes::RegIter};
 
 /// Represents the node with interrupt-controller property
 #[derive(Debug, Clone, Copy)]

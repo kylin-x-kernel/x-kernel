@@ -6,7 +6,6 @@ fn setup() -> LinuxFdt<'static> {
     LinuxFdt::new(DTB_DATA).unwrap()
 }
 
-
 #[test]
 fn get_model() {
     let fdt = setup();
@@ -25,7 +24,7 @@ fn chosen_node() {
 
     let mut cnt: usize = 0;
     for region in usable_memory_range {
-        cnt +=1 ;
+        cnt += 1;
         if cnt == 1 {
             assert_eq!(region.starting_address as usize, 0x9_f000_0000);
             assert_eq!(region.size, 0x10000000);
@@ -33,7 +32,7 @@ fn chosen_node() {
             assert_eq!(region.starting_address as usize, 0xa_0000_0000);
             assert_eq!(region.size, 0x20000000);
         }
-    };
+    }
 }
 
 #[test]
@@ -84,7 +83,6 @@ fn linux_reserved_memory() {
     let vreg2_1 = vreg2_iter.next().unwrap();
     assert_eq!(vreg2_1.starting_address as usize, 0x91000000);
     assert_eq!(vreg2_1.size, 0x1000000);
-
 }
 
 #[test]
@@ -127,5 +125,3 @@ fn sys_memory_reservations() {
 
     assert!(reservations.next().is_none());
 }
-
-

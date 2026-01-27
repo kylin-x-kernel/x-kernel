@@ -1,8 +1,8 @@
 //! NS16550A UART driver.
-use uart_16550::{MmioSerialPort,WouldBlockError};
 use axplat::mem::VirtAddr;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
+use uart_16550::{MmioSerialPort, WouldBlockError};
 
 static UART: LazyInit<SpinNoIrq<MmioSerialPort>> = LazyInit::new();
 
@@ -16,7 +16,7 @@ fn do_putchar(uart: &mut MmioSerialPort, c: u8) {
     }
 }
 
-pub fn write_bytes_force(uart_base: VirtAddr, bytes: &[u8]){
+pub fn write_bytes_force(uart_base: VirtAddr, bytes: &[u8]) {
     let base_addr = uart_base.as_usize();
     let mut uart = unsafe { MmioSerialPort::new(base_addr) };
     uart.init();
@@ -31,7 +31,7 @@ pub fn putchar(c: u8) {
 }
 
 /// Reads a byte from the console, or returns [`None`] if no input is available.
-pub fn getchar<E>() -> Result<u8,WouldBlockError> {
+pub fn getchar<E>() -> Result<u8, WouldBlockError> {
     UART.lock().try_receive()
 }
 
@@ -83,7 +83,8 @@ macro_rules! ns16550_console_if_impl {
             }
 
             fn write_bytes_force(bytes: &[u8]) {
-                let mut uart_base = axplat::mem::phys_to_virt(axplat::mem::pa!(crate::config::devices::UART_PADDR));
+                let mut uart_base =
+                    axplat::mem::phys_to_virt(axplat::mem::pa!(crate::config::devices::UART_PADDR));
                 $crate::ns16550a::write_bytes_force(uart_16550, bytes);
             }
 

@@ -85,11 +85,10 @@ unsafe impl lock_api::RawMutex for RawMutex {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        #[cfg(feature = "watchdog")]{
+                        #[cfg(feature = "watchdog")]
+                        {
                             current().inner().clear_waiting_lock();
-                            current()
-                                .inner()
-                                .push_held_lock(self as *const _ as usize);
+                            current().inner().push_held_lock(self as *const _ as usize);
                         }
                         break;
                     }
@@ -110,9 +109,10 @@ unsafe impl lock_api::RawMutex for RawMutex {
                 continue;
             }
             #[cfg(feature = "watchdog")]
-            current()
-                .inner()
-                .set_waiting_lock(self as *const _ as usize, axhal::time::current_ticks() as usize);
+            current().inner().set_waiting_lock(
+                self as *const _ as usize,
+                axhal::time::current_ticks() as usize,
+            );
             block_on(listener);
             owner_id = self.owner_id.load(Ordering::Acquire);
         }
@@ -123,19 +123,19 @@ unsafe impl lock_api::RawMutex for RawMutex {
         let current_id = current().id().as_u64();
         // The reason for using a strong compare_exchange is explained here:
         // https://github.com/Amanieu/parking_lot/pull/207#issuecomment-575869107
-        if self.owner_id
+        if self
+            .owner_id
             .compare_exchange(0, current_id, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
             #[cfg(feature = "watchdog")]
-            current()
-                .inner()
-                .push_held_lock(self as *const _ as usize);
+            current().inner().push_held_lock(self as *const _ as usize);
             true
         } else {
             false
         }
     }
+
     #[inline(always)]
     unsafe fn unlock(&self) {
         let owner_id = self.owner_id.swap(0, Ordering::Release);
@@ -163,9 +163,11 @@ pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
 #[cfg(test)]
 mod tests {
-    use crate::Mutex;
-    use axtask as thread;
     use std::sync::Once;
+
+    use axtask as thread;
+
+    use crate::Mutex;
 
     static INIT: Once = Once::new();
 

@@ -21,9 +21,9 @@
 //! # Crate features
 //!
 //! - `preempt`: Use in the preemptive system. If this feature is enabled, you
-//!    need to implement the [`KernelGuardIf`] trait in other crates. Otherwise
-//!    the preemption enable/disable operations will be no-ops. This feature is
-//!    disabled by default.
+//!   need to implement the [`KernelGuardIf`] trait in other crates. Otherwise
+//!   the preemption enable/disable operations will be no-ops. This feature is
+//!   disabled by default.
 //!
 //! use kspin::guard::{KernelGuardIf, NoPreempt};
 //!
@@ -125,6 +125,12 @@ impl NoOp {
     /// Creates a new [`NoOp`] guard.
     pub const fn new() -> Self {
         Self
+    }
+}
+
+impl Default for NoOp {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

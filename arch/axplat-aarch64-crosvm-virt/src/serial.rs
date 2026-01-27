@@ -48,24 +48,24 @@ pub fn boot_print_usize(num: usize) {
 #[derive(Copy, Clone, Debug)]
 /// Struct representing a NS16550A UART peripheral
 pub struct Uart {
-	/// Base address of the peripheral
-	base_address: usize,
+    /// Base address of the peripheral
+    base_address: usize,
 }
 
 impl Uart {
-	/// Creates a new instance of `Uart` with the given base address.
-	pub const fn new(base_address: usize) -> Self {
-		Self { base_address }
-	}
+    /// Creates a new instance of `Uart` with the given base address.
+    pub const fn new(base_address: usize) -> Self {
+        Self { base_address }
+    }
 
-	/// If the transmitter holding register is empty, writes `c` in the transmitter holding register, and returns `c`. Otherwise returns `None`.
-	pub fn put(&self, c: u8) -> Option<u8> {
-		let ptr = self.base_address as *mut u8;
-		unsafe {
-			ptr.write_volatile(c);
-		}
-		Some(c)
-	}
+    /// If the transmitter holding register is empty, writes `c` in the transmitter holding register, and returns `c`. Otherwise returns `None`.
+    pub fn put(&self, c: u8) -> Option<u8> {
+        let ptr = self.base_address as *mut u8;
+        unsafe {
+            ptr.write_volatile(c);
+        }
+        Some(c)
+    }
 }
 
 static BOOT_SERIAL: Uart = Uart::new(0x3f8);
@@ -111,7 +111,7 @@ pub fn print_el1_reg(switch: bool) {
     crate::boot_print_reg!("ICC_PMR_EL1");
     crate::boot_print_reg!("ICC_RPR_EL1");
     crate::boot_print_reg!("ICC_SRE_EL1");
-} 
+}
 
 /// BOOT阶段打印寄存器，用于调试
 #[macro_export]

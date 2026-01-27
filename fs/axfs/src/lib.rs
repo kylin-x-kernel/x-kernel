@@ -19,14 +19,16 @@ pub use highlevel::*;
 pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     info!("Initialize filesystem subsystem...");
 
-    let dev =  {
-        #[cfg(feature = "crosvm" )]
+    let dev = {
+        #[cfg(feature = "crosvm")]
         {
             // must have two block devices: secure and non-secure
             // we only use the second blk
-           block_devs.take_nth(1).expect("Less than two block devices found!")
+            block_devs
+                .take_nth(1)
+                .expect("Less than two block devices found!")
         }
-        #[cfg(not(feature = "crosvm" ))]
+        #[cfg(not(feature = "crosvm"))]
         {
             block_devs.take_one().expect("No block device found!")
         }

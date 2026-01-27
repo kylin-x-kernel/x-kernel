@@ -1,4 +1,3 @@
-
 /// Platform NMI capability.
 #[derive(Clone, Copy, Debug)]
 pub enum NmiType {
@@ -17,7 +16,7 @@ pub type NmiHandler = fn();
 /// Implementors provide a mechanism to trigger NMI-like interrupts
 /// at regular intervals for watchdog purposes.
 #[def_plat_interface]
-pub trait NmiIf{
+pub trait NmiIf {
     /// Initialize the NMI source.
     ///
     /// This should configure the hardware but not start triggering.
@@ -41,5 +40,5 @@ pub trait NmiIf{
     fn name() -> &'static str;
 
     /// Nmi handle func
-    fn register_nmi_handler(handler:NmiHandler) -> bool;
+    fn register_nmi_handler(handler: NmiHandler) -> bool;
 }

@@ -5,8 +5,10 @@ use heapless::Vec;
 use lazyinit::LazyInit;
 use multiboot::information::{MemoryManagement, MemoryType, Multiboot, PAddr};
 
-use crate::config::devices::MMIO_RANGES;
-use crate::config::plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET};
+use crate::config::{
+    devices::MMIO_RANGES,
+    plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
+};
 
 const MAX_REGIONS: usize = 16;
 
@@ -83,7 +85,7 @@ impl MemIf for MemIfImpl {
         pa!(vaddr.as_usize() - PHYS_VIRT_OFFSET)
     }
 
-        /// Returns the kernel address space base virtual address and size.
+    /// Returns the kernel address space base virtual address and size.
     fn kernel_aspace() -> (VirtAddr, usize) {
         (
             va!(crate::config::plat::KERNEL_ASPACE_BASE),

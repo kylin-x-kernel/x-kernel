@@ -1,7 +1,7 @@
 use core::arch::naked_asm;
 #[cfg(feature = "fp-simd")]
 use core::mem::offset_of;
-use memaddr::VirtAddr;
+use memory_addr::VirtAddr;
 
 /// General registers of Loongarch64.
 #[allow(missing_docs)]

@@ -6,7 +6,7 @@
 pub type OverflowHandler = fn();
 
 #[def_plat_interface]
-pub trait PmuIf{
+pub trait PmuIf {
     /// Pmu interrupt handle func
     fn handle_overflows() -> bool;
 

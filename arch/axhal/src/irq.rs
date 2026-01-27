@@ -3,14 +3,14 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use axcpu::trap::{IRQ, register_trap_handler};
-
-pub use axplat::irq::{handle, register, set_enable, unregister, set_priority, local_irq_save_and_disable, local_irq_restore};
-
 #[cfg(feature = "ipi")]
 pub use axplat::irq::{IpiTarget, send_ipi};
-
+pub use axplat::irq::{
+    handle, local_irq_restore, local_irq_save_and_disable, register, set_enable, set_priority,
+    unregister,
+};
 #[cfg(feature = "ipi")]
-pub use platconfig::devices::IPI_IRQ;
+pub use axconfig::devices::IPI_IRQ;
 
 static IRQ_HOOK: AtomicUsize = AtomicUsize::new(0);
 

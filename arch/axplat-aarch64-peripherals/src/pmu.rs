@@ -1,6 +1,6 @@
 use aarch64_pmuv3::pmuv3::{PmuCounter, PmuEvent};
-use lazyinit::LazyInit;
 use axplat::pmu::OverflowHandler;
+use lazyinit::LazyInit;
 
 const MAX_PMU_COUNTERS: usize = 32;
 
@@ -223,12 +223,12 @@ macro_rules! pmu_if_impl {
         #[impl_plat_interface]
         impl axplat::pmu::PmuIf for $name {
             /// Pmu interrupt handle func
-            fn handle_overflows() -> bool{
+            fn handle_overflows() -> bool {
                 $crate::pmu::handle_overflows()
             }
 
             /// Register an overflow handler for a PMU counter.
-            fn register_overflow_handler(index: u32, handler: OverflowHandler) -> bool{
+            fn register_overflow_handler(index: u32, handler: OverflowHandler) -> bool {
                 $crate::pmu::register_overflow_handler(index, handler)
             }
         }

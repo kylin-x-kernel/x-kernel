@@ -3,14 +3,16 @@
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use axplat::mem::{MemIf, PhysAddr, RawRange, VirtAddr, pa, va};
 use fdtree_rs::LinuxFdt;
 use spin::Once;
 
-use axplat::mem::{MemIf, PhysAddr, RawRange, VirtAddr, pa, va};
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-use crate::config::devices::MMIO_RANGES;
-use crate::config::plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET};
+use crate::config::{
+    devices::MMIO_RANGES,
+    plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
+};
 
 // default FDT memory size 2MB
 const FDT_MEM_SIZE: usize = 0x20_0000;
@@ -23,9 +25,7 @@ static DICE_MEM_SIZE: AtomicUsize = AtomicUsize::new(0);
 /// Initializes the reserved memory physical address.
 pub(crate) fn init_early(fdt_paddr: usize) {
     FDT_MEM_BASE.store(fdt_paddr, Ordering::SeqCst);
-    let fdt = unsafe {
-        LinuxFdt::from_ptr(fdt_paddr as *const u8).expect("Failed to parse FDT")
-    };
+    let fdt = unsafe { LinuxFdt::from_ptr(fdt_paddr as *const u8).expect("Failed to parse FDT") };
 
     fdt.dice().map(|dice_node| {
         let dice = dice_node;

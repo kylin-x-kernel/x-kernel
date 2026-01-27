@@ -67,7 +67,7 @@ pub trait IrqIf {
 
     /// Restore irq status
     fn local_irq_restore(flag: usize);
-    
+
     /// Allows the current CPU to respond to interrupts.
     fn enable_irqs();
 

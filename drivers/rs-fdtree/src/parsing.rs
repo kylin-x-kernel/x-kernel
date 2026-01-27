@@ -4,6 +4,7 @@
 // See LICENSE for license details.
 
 use core::convert::TryInto;
+
 use crate::error::FdtError;
 
 pub struct CStr<'a>(&'a [u8]);
@@ -18,7 +19,10 @@ impl<'a> CStr<'a> {
 
     /// Create a new CStr from data, returning a Result
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, FdtError> {
-        let end = data.iter().position(|&b| b == 0).ok_or(FdtError::InvalidCString)?;
+        let end = data
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or(FdtError::InvalidCString)?;
         Ok(Self(&data[..end]))
     }
 
@@ -46,7 +50,9 @@ impl BigEndianU32 {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        Some(BigEndianU32(u32::from_be_bytes(bytes.get(..4)?.try_into().unwrap())))
+        Some(BigEndianU32(u32::from_be_bytes(
+            bytes.get(..4)?.try_into().unwrap(),
+        )))
     }
 }
 
@@ -60,7 +66,9 @@ impl BigEndianU64 {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        Some(BigEndianU64(u64::from_be_bytes(bytes.get(..8)?.try_into().unwrap())))
+        Some(BigEndianU64(u64::from_be_bytes(
+            bytes.get(..8)?.try_into().unwrap(),
+        )))
     }
 }
 

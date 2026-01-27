@@ -2,7 +2,7 @@
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // Copyright (C) 2025 Yuekai Jia <equation618@gmail.com>
 // See LICENSE for license details.
-// 
+//
 // This file has been modified by KylinSoft on 2025.
 
 //! [ArceOS] hardware abstraction layer, provides unified APIs for
@@ -120,24 +120,19 @@ pub mod trap {
 ///   trapframe (or `None` if not in a trap). This is intended for diagnostic
 ///   paths such as watchdogs or backtrace collection.
 pub mod context {
-    pub use axcpu::{
-        active_trap_frame, with_active_trap_frame, TaskContext, TrapFrame,
-    };
+    pub use axcpu::{TaskContext, TrapFrame, active_trap_frame, with_active_trap_frame};
 }
 
 pub use axcpu::asm;
-
 #[cfg(feature = "uspace")]
 pub use axcpu::uspace;
-
 pub use axplat::init::init_later;
-
 #[cfg(feature = "smp")]
 pub use axplat::init::{init_early_secondary, init_later_secondary};
 
 #[cfg(feature = "nmi")]
 pub mod nmi {
-    pub use axplat::nmi::{init, enable, register_nmi_handler};
+    pub use axplat::nmi::{enable, init, register_nmi_handler};
 }
 
 #[cfg(feature = "pmu")]

@@ -7,8 +7,7 @@
 //!
 //! Reference: https://www.kernel.org/doc/Documentation/devicetree/bindings/reserved-memory/reserved-memory.yaml
 
-use crate::node::FdtNode;
-use crate::standard_nodes::RegIter;
+use crate::{node::FdtNode, standard_nodes::RegIter};
 
 /// Represents the `/reserved-memory/*` node, it status is ok and have `reg` property
 #[derive(Debug, Clone, Copy)]
@@ -17,7 +16,7 @@ pub struct ValidReservedMemoryNode<'b, 'a> {
     pub node: FdtNode<'b, 'a>,
 }
 
-impl <'b, 'a: 'b> ValidReservedMemoryNode<'b, 'a> {
+impl<'b, 'a: 'b> ValidReservedMemoryNode<'b, 'a> {
     /// Returns an iterator over all of the valid regs
     pub fn regions(&self) -> Option<RegIter<'a>> {
         self.node.reg()
@@ -38,7 +37,7 @@ pub struct DynamicReservedMemoryNode<'b, 'a> {
     size: usize,
 }
 
-impl <'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
+impl<'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
     /// return size
     #[inline]
     pub fn size(&self) -> usize {
@@ -48,7 +47,8 @@ impl <'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
     /// return alignment
     pub fn alignment(&self) -> usize {
         // if no alignment, default is 0
-        self.node.property("alignment")
+        self.node
+            .property("alignment")
             .and_then(|p| p.as_usize())
             .unwrap_or(0)
     }
@@ -62,7 +62,8 @@ impl <'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
     /// Address and Length pairs. Specifies regions of memory that are
     /// acceptable to allocate from.
     pub fn alloc_ranges(&self) -> Option<RegIter<'a>> {
-        self.node.property("alloc-ranges")
+        self.node
+            .property("alloc-ranges")
             .and_then(|p| p.as_reg(self.node.parent_cell_sizes()))
     }
 
@@ -73,12 +74,12 @@ impl <'b, 'a: 'b> DynamicReservedMemoryNode<'b, 'a> {
 
     /// shared_dma_pool compatible
     pub fn shared_dma_pool(&self) -> bool {
-        self.node.compatible()
+        self.node
+            .compatible()
             .and_then(|p| p.first())
             .map(|s| s == "shared-dma-pool")
             .unwrap_or(false)
     }
-
 }
 
 /// Represents the `/reserved-memory` node with specific helper methods
@@ -90,7 +91,7 @@ pub struct ReservedMemory<'b, 'a> {
 impl<'b, 'a: 'b> ReservedMemory<'b, 'a> {
     /// Contains the bootargs, if they exist
     pub(crate) fn check_root(self) -> Result<(), ()> {
-        // reserved mem root should have address-cells and size-cells and 
+        // reserved mem root should have address-cells and size-cells and
         // ranges property
         if self.node.property("#address-cells").is_none() {
             return Err(());
@@ -103,14 +104,16 @@ impl<'b, 'a: 'b> ReservedMemory<'b, 'a> {
         }
 
         // check size and address cell size is eque root node cell
-        if self.node.cell_sizes() != self.node.parent_cell_sizes()  {
+        if self.node.cell_sizes() != self.node.parent_cell_sizes() {
             return Err(());
         }
         Ok(())
     }
 
     /// Return valid ReservedNode
-    pub fn valid_reserved_nodes(self) -> impl Iterator<Item = ValidReservedMemoryNode<'b, 'a>> + 'b {
+    pub fn valid_reserved_nodes(
+        self,
+    ) -> impl Iterator<Item = ValidReservedMemoryNode<'b, 'a>> + 'b {
         self.node.children().filter_map(|node| {
             if node.is_available() && node.reg().is_some() {
                 Some(ValidReservedMemoryNode { node })
@@ -125,10 +128,11 @@ impl<'b, 'a: 'b> ReservedMemory<'b, 'a> {
         self.node.children().filter_map(|node| {
             if node.is_available()
                 && let Some(size_prop) = node.property("size")
-                    && node.reg().is_none() {
-                        let size = size_prop.as_usize()?;
-                        return Some(DynamicReservedMemoryNode { node, size });
-                    }
+                && node.reg().is_none()
+            {
+                let size = size_prop.as_usize()?;
+                return Some(DynamicReservedMemoryNode { node, size });
+            }
             None
         })
     }

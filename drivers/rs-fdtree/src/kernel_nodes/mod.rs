@@ -4,14 +4,14 @@
 // See LICENSE for license details.
 
 //! Linux kernel nodes
-pub mod dice;
 pub mod chosen;
+pub mod dice;
+pub mod interrupt;
 pub mod memory;
 pub mod reserved_memory;
-pub mod interrupt;
 
 pub use chosen::Chosen;
+pub use dice::Dice;
+pub use interrupt::InterruptController;
 pub use memory::Memory;
 pub use reserved_memory::ReservedMemory;
-pub use interrupt::InterruptController;
-pub use dice::Dice;

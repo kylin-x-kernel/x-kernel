@@ -47,7 +47,7 @@ impl ConsoleIf for ConsoleIfImpl {
         read_len
     }
 
-        /// Returns the IRQ number for the console input interrupt.
+    /// Returns the IRQ number for the console input interrupt.
     ///
     /// Returns `None` if input interrupt is not supported.
     #[cfg(feature = "irq")]

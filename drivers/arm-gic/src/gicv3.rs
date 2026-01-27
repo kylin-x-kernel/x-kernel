@@ -3,21 +3,22 @@
 // Copyright (C) 2025 Weikang Guo <guoweikang.kernel@gmail.com>
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
-// 
+//
 // This file has been modified by KylinSoft on 2025.
 
 //! Driver for the Arm Generic Interrupt Controller version 3 (or 4).
 
 mod registers;
 
-use self::registers::{GicdCtlr, Waker, GICD, GICR, SGI};
-use crate::sysreg::{read_sysreg, write_sysreg};
 use core::{
     fmt::{self, Debug, Formatter},
     hint::spin_loop,
     mem::size_of,
     ptr::{addr_of, addr_of_mut},
 };
+
+use self::registers::{GICD, GICR, GicdCtlr, SGI, Waker};
+use crate::sysreg::{read_sysreg, write_sysreg};
 
 /// The offset in bytes from `RD_base` to `SGI_base`.
 const SGI_OFFSET: usize = 0x10000;
@@ -27,17 +28,14 @@ const SGI_OFFSET: usize = 0x10000;
 pub struct IntId(u32);
 
 impl IntId {
-    /// The ID of the first Software Generated Interrupt.
-    const SGI_START: u32 = 0;
-
     /// The ID of the first Private Peripheral Interrupt.
     const PPI_START: u32 = 16;
-
-    /// The ID of the first Shared Peripheral Interrupt.
-    const SPI_START: u32 = 32;
-
+    /// The ID of the first Software Generated Interrupt.
+    const SGI_START: u32 = 0;
     /// The first special interrupt ID.
     const SPECIAL_START: u32 = 1020;
+    /// The ID of the first Shared Peripheral Interrupt.
+    const SPI_START: u32 = 32;
 
     /// Returns the interrupt ID for the given Software Generated Interrupt.
     pub const fn sgi(sgi: u32) -> Self {

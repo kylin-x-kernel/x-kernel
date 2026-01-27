@@ -9,10 +9,11 @@ use crate::{PageTable64, PageTable64Mut, PagingMetaData};
 pub struct X64PagingMetaData;
 
 impl PagingMetaData for X64PagingMetaData {
+    type VirtAddr = VirtAddr;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 52;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VirtAddr;
 
     #[inline]
     fn flush_tlb(vaddr: Option<VirtAddr>) {

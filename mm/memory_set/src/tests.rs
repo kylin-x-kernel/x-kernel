@@ -1,4 +1,4 @@
-use memaddr::{va_range, MemoryAddr, VirtAddr};
+use memory_addr::{MemoryAddr, VirtAddr, va_range};
 
 use crate::{MappingBackend, MappingError, MemoryArea, MemorySet};
 
@@ -55,16 +55,16 @@ impl MappingBackend for MockBackend {
 }
 
 macro_rules! assert_ok {
-    ($expr: expr) => {
+    ($expr:expr) => {
         assert!(($expr).is_ok())
     };
 }
 
 macro_rules! assert_err {
-    ($expr: expr) => {
+    ($expr:expr) => {
         assert!(($expr).is_err())
     };
-    ($expr: expr, $err: ident) => {
+    ($expr:expr, $err:ident) => {
         assert_eq!(($expr).err(), Some(MappingError::$err))
     };
 }

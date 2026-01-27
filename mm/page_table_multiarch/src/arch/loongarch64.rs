@@ -12,21 +12,6 @@ use crate::{PageTable64, PageTable64Mut, PagingMetaData};
 pub struct LA64MetaData;
 
 impl LA64MetaData {
-    /// PWCL(Page Walk Controller for Lower Half Address Space) CSR flags
-    ///
-    /// <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-lower-half-address-space>
-    ///
-    /// | BitRange | Name      | Value |
-    /// | ----     | ----      | ----  |
-    /// | 4:0      | PTBase    |    12 |
-    /// | 9:5      | PTWidth   |     9 |
-    /// | 14:10    | Dir1Base  |    21 |
-    /// | 19:15    | Dir1Width |     9 |
-    /// | 24:20    | Dir2Base  |    30 |
-    /// | 29:25    | Dir2Width |     9 |
-    /// | 31:30    | PTEWidth  |     0 |
-    pub const PWCL_VALUE: u32 = 12 | (9 << 5) | (21 << 10) | (9 << 15) | (30 << 20) | (9 << 25);
-
     /// PWCH(Page Walk Controller for Higher Half Address Space) CSR flags
     ///
     /// <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-higher-half-address-space>
@@ -41,13 +26,28 @@ impl LA64MetaData {
     /// | 24       | HPTW_En(CPUCFG.2.HPTW(bit24)=1) |     0 |
     /// | 31:25    | 0                               |     0 |
     pub const PWCH_VALUE: u32 = 39 | (9 << 6);
+    /// PWCL(Page Walk Controller for Lower Half Address Space) CSR flags
+    ///
+    /// <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-lower-half-address-space>
+    ///
+    /// | BitRange | Name      | Value |
+    /// | ----     | ----      | ----  |
+    /// | 4:0      | PTBase    |    12 |
+    /// | 9:5      | PTWidth   |     9 |
+    /// | 14:10    | Dir1Base  |    21 |
+    /// | 19:15    | Dir1Width |     9 |
+    /// | 24:20    | Dir2Base  |    30 |
+    /// | 29:25    | Dir2Width |     9 |
+    /// | 31:30    | PTEWidth  |     0 |
+    pub const PWCL_VALUE: u32 = 12 | (9 << 5) | (21 << 10) | (9 << 15) | (30 << 20) | (9 << 25);
 }
 
 impl PagingMetaData for LA64MetaData {
+    type VirtAddr = VirtAddr;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VirtAddr;
 
     #[inline]
     fn flush_tlb(vaddr: Option<VirtAddr>) {

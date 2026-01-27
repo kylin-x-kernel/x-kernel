@@ -1,8 +1,9 @@
 use core::{
     alloc::Layout,
-    ffi::{c_void, c_int},
+    ffi::{c_int, c_void},
     ptr::{self, NonNull},
 };
+
 use crate::global_allocator;
 
 // malloc - 分配内存并存储大小元数据
@@ -31,7 +32,7 @@ pub unsafe extern "C" fn malloc(size: c_int) -> *mut c_void {
             *(ptr.as_ptr() as *mut usize) = user_size;
             // 返回元数据之后的地址（用户可用空间）
             ptr.as_ptr().add(metadata_size) as *mut c_void
-        },
+        }
         Err(_) => ptr::null_mut(),
     }
 }
@@ -63,7 +64,7 @@ pub unsafe extern "C" fn calloc(nmemb: c_int, size: c_int) -> *mut c_void {
     if total_size == 0 {
         return ptr::null_mut();
     }
-    
+
     let ptr = malloc(total_size);
     if !ptr.is_null() {
         ptr::write_bytes(ptr as *mut u8, 0, total_size as usize);
@@ -82,11 +83,11 @@ pub unsafe extern "C" fn __memcpy_chk(
     if dest.is_null() || src.is_null() {
         return dest;
     }
-    
+
     if len > dest_len {
         return ptr::null_mut();
     }
-    
+
     ptr::copy_nonoverlapping(src as *const u8, dest as *mut u8, len as usize);
     dest
 }

@@ -33,10 +33,11 @@ pub struct Sv48MetaData<VA: SvVirtAddr> {
 }
 
 impl<VA: SvVirtAddr> PagingMetaData for Sv39MetaData<VA> {
+    type VirtAddr = VA;
+
     const LEVELS: usize = 3;
     const PA_MAX_BITS: usize = 56;
     const VA_MAX_BITS: usize = 39;
-    type VirtAddr = VA;
 
     #[inline]
     fn flush_tlb(vaddr: Option<VA>) {
@@ -45,10 +46,11 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv39MetaData<VA> {
 }
 
 impl<VA: SvVirtAddr> PagingMetaData for Sv48MetaData<VA> {
+    type VirtAddr = VA;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 56;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VA;
 
     #[inline]
     fn flush_tlb(vaddr: Option<VA>) {

@@ -6,9 +6,9 @@
 //! Standard nodes in the FDT, such as `/chosen`, `/aliases`, `/cpus/cpu*`, and `/memory`
 
 use crate::{
+    LinuxFdt,
     node::{CellSizes, FdtNode, NodeProperty},
     parsing::{BigEndianU32, BigEndianU64, CStr, FdtData},
-    LinuxFdt,
 };
 
 /// Represents the root (`/`) node with specific helper methods
@@ -61,18 +61,28 @@ impl<'b, 'a> Aliases<'b, 'a> {
         self.node
             .properties()
             .find(|p| p.name == alias)
-            .and_then(|p| core::str::from_utf8(p.value).map(|s| s.trim_end_matches('\0')).ok())
+            .and_then(|p| {
+                core::str::from_utf8(p.value)
+                    .map(|s| s.trim_end_matches('\0'))
+                    .ok()
+            })
     }
 
     /// Attempt to find the node specified by the given alias
     pub fn resolve_node(self, alias: &str) -> Option<FdtNode<'b, 'a>> {
-        self.resolve(alias).and_then(|name| self.header.find_node(name))
+        self.resolve(alias)
+            .and_then(|name| self.header.find_node(name))
     }
 
     /// Returns an iterator over all of the available aliases
     pub fn all(self) -> impl Iterator<Item = (&'a str, &'a str)> + 'b {
         self.node.properties().filter_map(|p| {
-            Some((p.name, core::str::from_utf8(p.value).map(|s| s.trim_end_matches('\0')).ok()?))
+            Some((
+                p.name,
+                core::str::from_utf8(p.value)
+                    .map(|s| s.trim_end_matches('\0'))
+                    .ok()?,
+            ))
         })
     }
 }
@@ -89,10 +99,7 @@ impl<'b, 'a> Cpu<'b, 'a> {
     pub fn ids(self) -> Option<CpuIds<'a>> {
         let address_cells = self.node.parent_cell_sizes().address_cells;
         let reg = self.node.properties().find(|p| p.name == "reg")?;
-        Some(CpuIds {
-            reg,
-            address_cells,
-        })
+        Some(CpuIds { reg, address_cells })
     }
 
     /// `clock-frequency` property
@@ -210,7 +217,6 @@ pub struct MemoryRegion {
     pub size: usize,
 }
 
-
 /// An iterator over the `reg` property of a node
 #[derive(Debug, Clone)]
 pub struct RegIter<'a> {
@@ -241,7 +247,9 @@ impl<'a> Iterator for RegIter<'a> {
             _ => return None,
         };
 
-        Some(MemoryRegion { starting_address: base, size })
+        Some(MemoryRegion {
+            starting_address: base,
+            size,
+        })
     }
 }
-

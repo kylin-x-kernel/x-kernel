@@ -16,7 +16,7 @@ pub mod trap;
 
 mod active_trapframe;
 
-pub use active_trapframe::{active_trap_frame, with_active_trap_frame, TrapFrameGuard};
+pub use active_trapframe::{TrapFrameGuard, active_trap_frame, with_active_trap_frame};
 
 #[cfg(feature = "uspace")]
 mod uspace_common;

@@ -3,15 +3,15 @@
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
 
+use axplat::{
+    init::InitIf,
+    mem::{pa, phys_to_virt},
+};
 use log::*;
 
-use axplat::init::InitIf;
 #[allow(unused_imports)]
-use crate::config::devices::{GICR_PADDR, GICD_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR, RTC_PADDR};
-use crate::config::plat::PSCI_METHOD;
-use axplat::mem::{pa, phys_to_virt};
-
-use crate::serial::*;
+use crate::config::devices::{GICD_PADDR, GICR_PADDR, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR};
+use crate::{config::plat::PSCI_METHOD, serial::*};
 
 struct InitIfImpl;
 
@@ -53,10 +53,7 @@ impl InitIf for InitIfImpl {
         {
             // hack: use our gicv3 implementation to init gic
             // use arm-gic-driver crate will cause databort
-            crate::gicv3::init_gic(
-                phys_to_virt(pa!(GICD_PADDR)),
-                phys_to_virt(pa!(GICR_PADDR)),
-            );
+            crate::gicv3::init_gic(phys_to_virt(pa!(GICD_PADDR)), phys_to_virt(pa!(GICR_PADDR)));
             // crosvm set uart as edge trigger irq
             info!("set UART IRQ {} as edge trigger", UART_IRQ);
             crate::gicv3::set_trigger(UART_IRQ, true);
@@ -69,10 +66,7 @@ impl InitIf for InitIfImpl {
     fn init_later_secondary(_cpu_id: usize) {
         #[cfg(feature = "irq")]
         {
-            crate::gicv3::init_gic(
-                phys_to_virt(pa!(GICD_PADDR)),
-                phys_to_virt(pa!(GICR_PADDR)),
-            );
+            crate::gicv3::init_gic(phys_to_virt(pa!(GICD_PADDR)), phys_to_virt(pa!(GICR_PADDR)));
             axplat_aarch64_peripherals::generic_timer::enable_irqs(TIMER_IRQ);
         }
     }

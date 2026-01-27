@@ -5,8 +5,10 @@ use core::mem::MaybeUninit;
 use axplat::mem::{PhysAddr, pa, phys_to_virt};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
-use x2apic::ioapic::IoApic;
-use x2apic::lapic::{LocalApic, LocalApicBuilder, xapic_base};
+use x2apic::{
+    ioapic::IoApic,
+    lapic::{LocalApic, LocalApicBuilder, xapic_base},
+};
 use x86_64::instructions::port::Port;
 
 use self::vectors::*;
@@ -198,12 +200,12 @@ mod irq_impl {
         }
 
         /// Allows the current CPU to respond to interrupts.
-        fn enable_irqs(){
+        fn enable_irqs() {
             todo!()
         }
 
         /// Makes the current CPU ignore interrupts.
-        fn disable_irqs(){
+        fn disable_irqs() {
             todo!()
         }
 

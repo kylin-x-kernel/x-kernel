@@ -9,7 +9,11 @@ pub fn print_node(
     n_spaces: usize,
 ) -> core::fmt::Result {
     write!(f, "{:width$}", ' ', width = n_spaces)?;
-    writeln!(f, "{} {{", if node.name.is_empty() { "/" } else { node.name })?;
+    writeln!(
+        f,
+        "{} {{",
+        if node.name.is_empty() { "/" } else { node.name }
+    )?;
     let mut were_props = false;
     for prop in node.properties() {
         were_props = true;
@@ -48,7 +52,14 @@ pub fn print_node(
                     if (!value.is_empty() && value.chars().all(|c| c.is_ascii_graphic()))
                         || prop.value == [0] =>
                 {
-                    writeln!(f, "{:width$}{} = {:?}", ' ', prop.name, value, width = n_spaces + 4)?
+                    writeln!(
+                        f,
+                        "{:width$}{} = {:?}",
+                        ' ',
+                        prop.name,
+                        value,
+                        width = n_spaces + 4
+                    )?
                 }
                 _ => match prop.value.len() {
                     4 | 8 => writeln!(

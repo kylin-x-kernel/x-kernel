@@ -11,10 +11,11 @@ use crate::{PageTable64, PageTable64Mut, PagingMetaData};
 pub struct A64PagingMetaData;
 
 impl PagingMetaData for A64PagingMetaData {
+    type VirtAddr = VirtAddr;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VirtAddr;
 
     fn vaddr_is_valid(vaddr: usize) -> bool {
         let top_bits = vaddr >> Self::VA_MAX_BITS;

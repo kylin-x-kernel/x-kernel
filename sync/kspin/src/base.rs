@@ -5,13 +5,14 @@
 //!
 //! Based on [`spin::Mutex`](https://docs.rs/spin/latest/src/spin/mutex/spin.rs.html).
 
-use core::cell::UnsafeCell;
-use core::fmt;
-use core::marker::PhantomData;
-use core::ops::{Deref, DerefMut};
-
 #[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    cell::UnsafeCell,
+    fmt,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+};
 
 use crate::guard::BaseGuard;
 
@@ -195,6 +196,7 @@ impl<G: BaseGuard, T: ?Sized + fmt::Debug> fmt::Debug for BaseSpinLock<G, T> {
 
 impl<G: BaseGuard, T: ?Sized> Deref for BaseSpinLockGuard<'_, G, T> {
     type Target = T;
+
     #[inline(always)]
     fn deref(&self) -> &T {
         // We know statically that only we are referencing data
@@ -229,17 +231,23 @@ impl<G: BaseGuard, T: ?Sized> Drop for BaseSpinLockGuard<'_, G, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+            mpsc::channel,
+        },
+        thread,
+    };
+
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc::channel;
-    use std::sync::Arc;
-    use std::thread;
 
     struct TestGuardIrq;
 
     static mut IRQ_CNT: u32 = 0;
     impl BaseGuard for TestGuardIrq {
         type State = u32;
+
         fn acquire() -> Self::State {
             unsafe {
                 IRQ_CNT += 1;

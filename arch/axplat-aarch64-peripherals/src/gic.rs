@@ -2,23 +2,23 @@
 // Copyright (C) 2025 The axplat_crates Authors.
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
-// 
+//
 // This file has been modified by KylinSoft on 2025.
 
 //! ARM Generic Interrupt Controller (GIC).
 
+use core::arch::asm;
+#[cfg(feature = "pmr")]
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use aarch64_cpu::registers::{DAIF, Readable};
 #[cfg(feature = "gicv2")]
 use arm_gic_driver::v2::*;
 #[cfg(feature = "gicv3")]
 use arm_gic_driver::v3::*;
-use axplat::{irq::{HandlerTable, IpiTarget, IrqHandler}};
-use core::arch::asm;
-use aarch64_cpu::registers::{DAIF, Readable};
+use axplat::irq::{HandlerTable, IpiTarget, IrqHandler};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
-
-#[cfg(feature = "pmr")]
-use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The maximum number of IRQs.
 const MAX_IRQ_COUNT: usize = 1024;
@@ -54,11 +54,7 @@ pub fn is_gic_initialized() -> bool {
 pub fn set_trigger(irq_num: usize, edge: bool) {
     trace!("GIC set trigger: {} {}", irq_num, edge);
     let intid = unsafe { IntId::raw(irq_num as u32) };
-    let cfg = if edge {
-        Trigger::Edge
-    } else {
-        Trigger::Level
-    };
+    let cfg = if edge { Trigger::Edge } else { Trigger::Level };
     GIC.lock().set_cfg(intid, cfg);
 }
 
@@ -121,8 +117,10 @@ pub fn set_priority(_irq: usize, _priority: u8) {
 /// priority-based interrupt masking.
 #[cfg(feature = "pmr")]
 fn set_priority_mask(priority: u8) {
-    unsafe { core::ptr::write_volatile((*GICC_PMR.get_unchecked()) as *mut u32, priority as u32);}
-}   
+    unsafe {
+        core::ptr::write_volatile((*GICC_PMR.get_unchecked()) as *mut u32, priority as u32);
+    }
+}
 
 /// Gets the current priority mask of the CPU interface.
 ///
@@ -132,8 +130,10 @@ fn set_priority_mask(priority: u8) {
 /// greater than the PMR are masked and will not be delivered to the CPU.
 #[cfg(feature = "pmr")]
 fn get_priority_mask() -> u8 {
-    unsafe { core::ptr::read_volatile((*GICC_PMR.get_unchecked()) as *const usize as *const u32) as u8 }
-}   
+    unsafe {
+        core::ptr::read_volatile((*GICC_PMR.get_unchecked()) as *const usize as *const u32) as u8
+    }
+}
 
 /// Enter high-priority IRQ mode.
 ///
@@ -144,7 +144,7 @@ fn get_priority_mask() -> u8 {
 /// Commonly used to support high-priority IRQ nesting or as a
 /// degraded form of `disable_irqs()` based on priority masking.
 #[cfg(feature = "pmr")]
-fn open_high_priority_irq_mode(){
+fn open_high_priority_irq_mode() {
     set_priority_mask(0x80);
     unsafe { asm!("msr daifclr, #2") };
 }
@@ -159,7 +159,7 @@ fn open_high_priority_irq_mode(){
 /// It is intended to restore a CPU-masked baseline after temporarily
 /// delegating IRQ control to PMR.
 #[cfg(feature = "pmr")]
-fn close_irq_and_restore_masking(){
+fn close_irq_and_restore_masking() {
     unsafe { asm!("msr daifset, #2") };
     set_priority_mask(0xff);
 }
@@ -187,7 +187,7 @@ pub fn handle_irq(_unused: usize, pmu_irq: usize) -> Option<usize> {
     trace!("IRQ: {ack:?}");
 
     #[cfg(feature = "nmi-pmu")]
-    if irq != pmu_irq{
+    if irq != pmu_irq {
         open_high_priority_irq_mode();
     }
 
@@ -201,7 +201,7 @@ pub fn handle_irq(_unused: usize, pmu_irq: usize) -> Option<usize> {
     }
 
     #[cfg(feature = "nmi-pmu")]
-    if irq != pmu_irq{
+    if irq != pmu_irq {
         close_irq_and_restore_masking();
     }
 
@@ -311,22 +311,23 @@ pub fn send_ipi(irq_num: usize, target: IpiTarget) {
 pub fn send_ipi(irq_num: usize, target: IpiTarget) {
     match target {
         IpiTarget::Current { cpu_id: _ } => {
-            GIC.lock().cpu_interface()
+            GIC.lock()
+                .cpu_interface()
                 .send_sgi(IntId::sgi(irq_num as u32), SGITarget::current());
-            }
+        }
         IpiTarget::Other { cpu_id } => {
             let affinity = Affinity::from_mpidr(cpu_id as u64);
             let target_list = TargetList::new([affinity]);
-            GIC.lock().cpu_interface().send_sgi(
-                IntId::sgi(irq_num as u32),
-                SGITarget::List(target_list),
-            );
+            GIC.lock()
+                .cpu_interface()
+                .send_sgi(IntId::sgi(irq_num as u32), SGITarget::List(target_list));
         }
         IpiTarget::AllExceptCurrent {
             cpu_id: _,
             cpu_num: _,
         } => {
-            GIC.lock().cpu_interface()
+            GIC.lock()
+                .cpu_interface()
                 .send_sgi(IntId::sgi(irq_num as u32), SGITarget::All);
         }
     }
@@ -416,17 +417,16 @@ pub fn irqs_enabled() -> bool {
 ///
 /// After the GIC has been initialized, IRQ masking is performed via the GIC
 /// priority mask (PMR) instead.
-/// 
+///
 /// TODO: adapt gicv3
 #[cfg(feature = "pmr")]
 #[inline]
 pub fn local_irq_save_and_disable() -> usize {
-    if is_gic_initialized(){
+    if is_gic_initialized() {
         let pmr = get_priority_mask();
         set_priority_mask(0x80);
         pmr as usize
-    }
-    else{
+    } else {
         let flags: usize;
         // save `DAIF` flags, mask `I` bit (disable IRQs)
         unsafe { asm!("mrs {}, daif; msr daifset, #2", out(reg) flags) };
@@ -439,15 +439,14 @@ pub fn local_irq_save_and_disable() -> usize {
 /// If the GIC has already been initialized, the saved value is interpreted as a
 /// GIC priority mask and restored via the PMR. Otherwise, the saved DAIF value
 /// is written back directly (early boot path).
-/// 
+///
 /// TODO: adapt gicv3
 #[cfg(feature = "pmr")]
 #[inline]
 pub fn local_irq_restore(flags: usize) {
-    if is_gic_initialized(){
+    if is_gic_initialized() {
         set_priority_mask(flags as u8);
-    }
-    else{
+    } else {
         unsafe { asm!("msr daif, {}", in(reg) flags) };
     }
 }
@@ -512,12 +511,12 @@ macro_rules! irq_if_impl {
             }
 
             /// Allows the current CPU to respond to interrupts.
-            fn enable_irqs(){
+            fn enable_irqs() {
                 $crate::gic::enable_irqs();
             }
 
             /// Makes the current CPU ignore interrupts.
-            fn disable_irqs(){
+            fn disable_irqs() {
                 $crate::gic::disable_irqs();
             }
 

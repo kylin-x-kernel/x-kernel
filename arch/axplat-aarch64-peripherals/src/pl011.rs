@@ -17,7 +17,7 @@ fn do_putchar(uart: &mut Pl011Uart, c: u8) {
     }
 }
 
-pub fn write_bytes_force(uart_base: VirtAddr, bytes: &[u8]){
+pub fn write_bytes_force(uart_base: VirtAddr, bytes: &[u8]) {
     let mut uart = Pl011Uart::new(uart_base.as_mut_ptr());
     uart.init();
     for c in bytes {
@@ -82,7 +82,8 @@ macro_rules! console_if_impl {
             }
 
             fn write_bytes_force(bytes: &[u8]) {
-                let uart_base = axplat::mem::phys_to_virt(axplat::mem::pa!(crate::config::devices::UART_PADDR));
+                let uart_base =
+                    axplat::mem::phys_to_virt(axplat::mem::pa!(crate::config::devices::UART_PADDR));
                 $crate::pl011::write_bytes_force(uart_base, bytes);
             }
 

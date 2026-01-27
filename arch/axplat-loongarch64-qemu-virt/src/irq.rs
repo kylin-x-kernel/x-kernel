@@ -137,7 +137,7 @@ impl IrqIf for IrqIfImpl {
 
     /// Sets the priority for a specific interrupt request (IRQ).
     fn set_priority(irq: usize, priority: u8) {
-         todo!()
+        todo!()
     }
 
     /// Save irq status and disable
@@ -147,16 +147,16 @@ impl IrqIf for IrqIfImpl {
 
     /// Restore irq status
     fn local_irq_restore(flag: usize) {
-         todo!()
+        todo!()
     }
 
     /// Allows the current CPU to respond to interrupts.
-    fn enable_irqs(){
+    fn enable_irqs() {
         todo!()
     }
 
     /// Makes the current CPU ignore interrupts.
-    fn disable_irqs(){
+    fn disable_irqs() {
         todo!()
     }
 

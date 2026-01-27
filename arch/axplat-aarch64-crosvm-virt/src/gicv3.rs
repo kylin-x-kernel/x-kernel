@@ -3,16 +3,21 @@
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
 
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
 use aarch64_cpu::registers::*;
 use arm_gic::gicv3::*;
-use core::sync::atomic::{AtomicBool, Ordering};
+use axplat::{
+    irq::{HandlerTable, IrqHandler},
+    mem::VirtAddr,
+};
 use kspin::SpinNoIrq;
 use log::*;
-use core::arch::asm;
 
 use crate::config::plat::CPU_NUM;
-use axplat::irq::{HandlerTable, IrqHandler};
-use axplat::mem::VirtAddr;
 
 static GICD_INIT: AtomicBool = AtomicBool::new(false);
 const MAX_IRQ_COUNT: usize = 1024;
@@ -386,12 +391,12 @@ macro_rules! irq_if_impl {
             }
 
             /// Allows the current CPU to respond to interrupts.
-            fn enable_irqs(){
+            fn enable_irqs() {
                 $crate::gicv3::enable_irqs();
             }
 
             /// Makes the current CPU ignore interrupts.
-            fn disable_irqs(){
+            fn disable_irqs() {
                 $crate::gicv3::disable_irqs();
             }
 

@@ -3,9 +3,9 @@
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
 
+use aarch64_cpu::registers::*;
 use axplat::mem::{Aligned4K, pa};
 use page_table_entry::{GenericPTE, MappingFlags, aarch64::A64PTE};
-use aarch64_cpu::registers::*;
 
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 
@@ -65,7 +65,6 @@ unsafe fn init_boot_page_table() {
             true,
         );
     }
-
 }
 
 #[unsafe(no_mangle)]

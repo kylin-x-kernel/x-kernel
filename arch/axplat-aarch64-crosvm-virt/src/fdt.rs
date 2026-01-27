@@ -4,8 +4,8 @@
 // See LICENSE for license details.
 
 use axplat::mem::{VirtAddr, pa, phys_to_virt};
-use rs_fdtree::{InterruptController, LinuxFdt};
 use log::*;
+use rs_fdtree::{InterruptController, LinuxFdt};
 use spin::Once;
 
 pub static FDT: Once<LinuxFdt> = Once::new();

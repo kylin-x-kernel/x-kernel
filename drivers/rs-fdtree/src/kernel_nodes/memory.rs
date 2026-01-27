@@ -5,12 +5,7 @@
 
 //! Linux kernel memory nodes
 
-
-use crate::{
-    node::FdtNode,
-    parsing::FdtData,
-    standard_nodes::RegIter,
-};
+use crate::{node::FdtNode, parsing::FdtData, standard_nodes::RegIter};
 
 /// Represents the `device_type="memory"` node with specific helper methods
 #[derive(Debug, Clone, Copy)]
@@ -58,4 +53,3 @@ pub struct MappedArea {
     /// Size of the mapped area
     pub size: usize,
 }
-

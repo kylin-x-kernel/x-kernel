@@ -1,16 +1,13 @@
 //! Physical memory management.
 
+pub use axplat::mem::{
+    MemRegionFlags, PhysMemRegion, kernel_aspace, mmio_ranges, phys_ram_ranges, phys_to_virt,
+    reserved_phys_ram_ranges, total_ram_size, virt_to_phys,
+};
+use axplat::mem::{check_sorted_ranges_overlap, ranges_difference};
 use heapless::Vec;
 use lazyinit::LazyInit;
-
-use axplat::mem::{check_sorted_ranges_overlap, ranges_difference};
-
-pub use axplat::mem::{MemRegionFlags, PhysMemRegion};
-pub use axplat::mem::{
-    kernel_aspace, mmio_ranges, phys_ram_ranges, phys_to_virt, reserved_phys_ram_ranges,
-    total_ram_size, virt_to_phys,
-};
-pub use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
+pub use memory_addr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 
 use crate::addr_of_sym;
 

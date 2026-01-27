@@ -3,9 +3,9 @@
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
 
+use axplat::psci::PsciIf;
 use spin::Once;
 
-use axplat::psci::PsciIf;
 use crate::serial::{boot_print_str, boot_print_usize};
 
 /// kvm guard granule
@@ -37,7 +37,8 @@ pub fn psci_hvc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> (usize
 
 /// 获取KVM的内存保护粒度
 pub fn kvm_guard_granule_init() {
-    let (guard_granule, guard_has_range) = psci_hvc_call(ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, 0, 0, 0);
+    let (guard_granule, guard_has_range) =
+        psci_hvc_call(ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, 0, 0, 0);
     assert_eq!(guard_has_range, 0x1);
     GUARD_GRANULE.call_once(|| guard_granule);
     boot_print_str("KVM MMIO guard granule: ");
@@ -47,10 +48,10 @@ pub fn kvm_guard_granule_init() {
 fn __invoke_mmioguard(phys_addr: usize, nr_granules: usize, map: bool) -> usize {
     let func_id: u32 = if map {
         // ARM_SMCCC_VENDOR_HYP_KVM_MMIO_RGUARD_MAP_FUNC_ID
-        ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((10) & 0xFFFF) 
+        ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((10) & 0xFFFF)
     } else {
         // ARM_SMCCC_VENDOR_HYP_KVM_MMIO_RGUARD_UNMAP_FUNC_ID
-        ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((11) & 0xFFFF) 
+        ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((11) & 0xFFFF)
     };
     // 无法批量操作，每次只能操作1个页面
     let (result, done) = psci_hvc_call(func_id, phys_addr, 1, 0);
@@ -83,7 +84,7 @@ fn __do_xmap_granules(phys_addr: usize, nr_granules: usize, map: bool) -> usize 
             boot_print_str("[warning] __invoke_mmioguard");
             break;
         }
-        phys_addr += __nr_xmapped * { GUARD_GRANULE.get().unwrap()};
+        phys_addr += __nr_xmapped * { GUARD_GRANULE.get().unwrap() };
         nr_granules -= __nr_xmapped as isize;
     }
 
@@ -92,24 +93,22 @@ fn __do_xmap_granules(phys_addr: usize, nr_granules: usize, map: bool) -> usize 
 
 /// Maps a physical memory region for KVM MMIO access.
 pub fn do_xmap_granules(phys_addr: usize, size: usize) {
-    let nr_granules = size / { GUARD_GRANULE.get().unwrap()};
+    let nr_granules = size / { GUARD_GRANULE.get().unwrap() };
     let ret = __do_xmap_granules(phys_addr, nr_granules, true);
     assert_eq!(ret, nr_granules);
 }
-
 
 struct PsciImpl;
 
 #[impl_plat_interface]
 impl PsciIf for PsciImpl {
-
     fn unshare_dma_buffer(paddr: usize, size: usize) {
         let page_size = 0x1000;
         let pages = size / page_size;
         for i in 0..pages {
             let (ret0, _ret1) = psci_hvc_call(
                 ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID,
-                paddr +  page_size * i,
+                paddr + page_size * i,
                 1,
                 0,
             );

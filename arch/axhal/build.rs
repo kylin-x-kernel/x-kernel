@@ -1,5 +1,4 @@
-use std::io::Result;
-use std::path::Path;
+use std::{io::Result, path::Path};
 
 fn main() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();

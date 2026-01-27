@@ -4,9 +4,9 @@
 // See LICENSE for license details.
 
 use crate::{
+    LinuxFdt,
     parsing::{BigEndianU32, BigEndianU64, CStr, FdtData},
     standard_nodes::{Compatible, RegIter},
-    LinuxFdt,
 };
 
 const FDT_BEGIN_NODE: u32 = 1;
@@ -51,7 +51,12 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         props: &'a [u8],
         parent_props: Option<&'a [u8]>,
     ) -> Self {
-        Self { name, header, props, parent_props }
+        Self {
+            name,
+            header,
+            props,
+            parent_props,
+        }
     }
 
     /// Returns an iterator over the available properties of the node.
@@ -131,7 +136,12 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
                         stream.skip(4 - (full_name_len % 4));
                     }
 
-                    Some(Self::new(unit_name, self.header, stream.remaining(), Some(self.props)))
+                    Some(Self::new(
+                        unit_name,
+                        self.header,
+                        stream.remaining(),
+                        Some(self.props),
+                    ))
                 };
 
                 stream = FdtData::new(origin);
@@ -246,7 +256,10 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     pub fn interrupt_parent(self) -> Option<FdtNode<'b, 'a>> {
         self.properties()
             .find(|p| p.name == "interrupt-parent")
-            .and_then(|p| self.header.find_phandle(BigEndianU32::from_bytes(p.value)?.get()))
+            .and_then(|p| {
+                self.header
+                    .find_phandle(BigEndianU32::from_bytes(p.value)?.get())
+            })
     }
 
     /// Get the value of the `#interrupt-cells` property.
@@ -295,8 +308,12 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         let mut cell_sizes = CellSizes::default();
 
         if let Some(parent) = self.parent_props {
-            let parent =
-                FdtNode { name: "", props: parent, header: self.header, parent_props: None };
+            let parent = FdtNode {
+                name: "",
+                props: parent,
+                header: self.header,
+                parent_props: None,
+            };
             cell_sizes = parent.cell_sizes();
         }
 
@@ -307,7 +324,10 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         let mut interrupt_cells = None;
         let parent = self
             .property("interrupt-parent")
-            .and_then(|p| self.header.find_phandle(BigEndianU32::from_bytes(p.value)?.get()))
+            .and_then(|p| {
+                self.header
+                    .find_phandle(BigEndianU32::from_bytes(p.value)?.get())
+            })
             .or_else(|| {
                 Some(FdtNode {
                     name: "",
@@ -350,8 +370,10 @@ impl CellSizes {
     /// Returns `false` if cell sizes are 0 or greater than 4, which would
     /// indicate an invalid or corrupt device tree.
     pub fn is_valid(&self) -> bool {
-        self.address_cells > 0 && self.address_cells <= 4
-            && self.size_cells > 0 && self.size_cells <= 4
+        self.address_cells > 0
+            && self.address_cells <= 4
+            && self.size_cells > 0
+            && self.size_cells <= 4
     }
 }
 
@@ -361,7 +383,10 @@ impl Default for CellSizes {
     /// These defaults represent 64-bit addresses and 32-bit sizes, which is
     /// common for modern 64-bit systems.
     fn default() -> Self {
-        CellSizes { address_cells: 2, size_cells: 1 }
+        CellSizes {
+            address_cells: 2,
+            size_cells: 1,
+        }
     }
 }
 
@@ -397,7 +422,9 @@ pub(crate) fn find_node<'b, 'a: 'b>(
         _ => return None,
     }
 
-    let unit_name = CStr::new(stream.remaining()).expect("unit name C str").as_str()?;
+    let unit_name = CStr::new(stream.remaining())
+        .expect("unit name C str")
+        .as_str()?;
 
     let full_name_len = unit_name.len() + 1;
     skip_4_aligned(stream, full_name_len);
@@ -415,7 +442,12 @@ pub(crate) fn find_node<'b, 'a: 'b>(
 
     let next_part = match parts.next() {
         None | Some("") => {
-            return Some(FdtNode::new(unit_name, header, stream.remaining(), parent_props))
+            return Some(FdtNode::new(
+                unit_name,
+                header,
+                stream.remaining(),
+                parent_props,
+            ));
         }
         Some(part) => part,
     };
@@ -444,7 +476,9 @@ pub(crate) fn find_node<'b, 'a: 'b>(
 }
 
 // FIXME: this probably needs refactored
-pub(crate) fn all_nodes<'b, 'a: 'b>(header: &'b LinuxFdt<'a>) -> impl Iterator<Item = FdtNode<'b, 'a>> {
+pub(crate) fn all_nodes<'b, 'a: 'b>(
+    header: &'b LinuxFdt<'a>,
+) -> impl Iterator<Item = FdtNode<'b, 'a>> {
     let mut stream = FdtData::new(header.structs_block());
     let mut done = false;
     let mut parents: [&[u8]; 64] = [&[]; 64];
@@ -474,7 +508,10 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(header: &'b LinuxFdt<'a>) -> impl Iterator<I
             _ => return None,
         }
 
-        let unit_name = CStr::new(stream.remaining()).expect("unit name C str").as_str().unwrap();
+        let unit_name = CStr::new(stream.remaining())
+            .expect("unit name C str")
+            .as_str()
+            .unwrap();
         let full_name_len = unit_name.len() + 1;
         skip_4_aligned(&mut stream, full_name_len);
 
@@ -506,7 +543,10 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(header: &'b LinuxFdt<'a>) -> impl Iterator<I
 pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) {
     assert_eq!(stream.u32().unwrap().get(), FDT_BEGIN_NODE, "bad node");
 
-    let unit_name = CStr::new(stream.remaining()).expect("unit_name C str").as_str().unwrap();
+    let unit_name = CStr::new(stream.remaining())
+        .expect("unit_name C str")
+        .as_str()
+        .unwrap();
     let full_name_len = unit_name.len() + 1;
     skip_4_aligned(stream, full_name_len);
 
@@ -553,7 +593,9 @@ impl<'a> NodeProperty<'a> {
     /// Automatically trims null terminators from the end of the string.
     /// Returns `None` if the value is not valid UTF-8.
     pub fn as_str(self) -> Option<&'a str> {
-        core::str::from_utf8(self.value).map(|s| s.trim_end_matches('\0')).ok()
+        core::str::from_utf8(self.value)
+            .map(|s| s.trim_end_matches('\0'))
+            .ok()
     }
 
     fn parse(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> Self {
@@ -569,7 +611,10 @@ impl<'a> NodeProperty<'a> {
 
         skip_4_aligned(stream, data_len);
 
-        NodeProperty { name: header.str_at_offset(prop.name_offset.get() as usize), value: data }
+        NodeProperty {
+            name: header.str_at_offset(prop.name_offset.get() as usize),
+            value: data,
+        }
     }
 
     /// Attempt to parse the property value as a `reg` property.
@@ -579,7 +624,7 @@ impl<'a> NodeProperty<'a> {
     ///
     /// # Arguments
     /// * `sizes` - The cell sizes to use for parsing addresses and sizes
-    pub fn as_reg(self, sizes:  CellSizes) -> Option<RegIter<'a>> {
+    pub fn as_reg(self, sizes: CellSizes) -> Option<RegIter<'a>> {
         if sizes.address_cells > 2 || sizes.size_cells > 2 {
             return None;
         }

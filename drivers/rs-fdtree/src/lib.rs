@@ -8,24 +8,23 @@
 
 #![no_std]
 
-mod standard_nodes;
-mod kernel_nodes;
 mod error;
-mod parsing;
-mod node;
 mod header;
+mod kernel_nodes;
+mod node;
+mod parsing;
 mod pretty_print;
+mod standard_nodes;
 
-pub use kernel_nodes::*;
-pub use standard_nodes::*;
 pub use error::FdtError;
-pub use node::FdtNode;
-use parsing::{FdtData, BigEndianU32, CStr};
 use header::FdtHeader;
+pub use kernel_nodes::*;
+pub use node::FdtNode;
 use node::MemoryReservation;
+use parsing::{BigEndianU32, CStr, FdtData};
+pub use standard_nodes::*;
 
 /// A flattened devicetree located somewhere in memory
-///
 #[derive(Clone, Copy)]
 pub struct LinuxFdt<'a> {
     data: &'a [u8],
@@ -69,16 +68,15 @@ impl<'a> LinuxFdt<'a> {
         }
 
         // SAFETY: we assume that the pointer is valid and points to a valid FDT
-        let tmp_header = unsafe {
-                core::slice::from_raw_parts(ptr, core::mem::size_of::<FdtHeader>())
-        };
+        let tmp_header =
+            unsafe { core::slice::from_raw_parts(ptr, core::mem::size_of::<FdtHeader>()) };
 
-        let real_size =
-            FdtHeader::from_bytes(&mut FdtData::new(tmp_header)).unwrap().totalsize.get() as usize;
+        let real_size = FdtHeader::from_bytes(&mut FdtData::new(tmp_header))
+            .unwrap()
+            .totalsize
+            .get() as usize;
 
-        unsafe {
-            Self::new(core::slice::from_raw_parts(ptr, real_size))
-        }
+        unsafe { Self::new(core::slice::from_raw_parts(ptr, real_size)) }
     }
 
     /// Total size of the devicetree in bytes
@@ -88,11 +86,13 @@ impl<'a> LinuxFdt<'a> {
 
     /// Return the root (`/`) node, which is always available
     pub fn root(&self) -> Root<'_, 'a> {
-        Root { node: self.find_node("/").unwrap_or_else(|| {
-            // Root node should always exist, this is a critical error
-            // but we can't panic in a no_std library
-            unreachable!("root node must exist in valid FDT")
-        }) }
+        Root {
+            node: self.find_node("/").unwrap_or_else(|| {
+                // Root node should always exist, this is a critical error
+                // but we can't panic in a no_std library
+                unreachable!("root node must exist in valid FDT")
+            }),
+        }
     }
 
     /// Returns the machine name from the "model" property of the root node.
@@ -110,8 +110,13 @@ impl<'a> LinuxFdt<'a> {
     /// The chosen node contains boot-time configuration information passed to the kernel.
     /// Returns `None` if the `/chosen` node is not present.
     pub fn chosen(&self) -> Option<Chosen<'_, 'a>> {
-        node::find_node(&mut FdtData::new(self.structs_block()), "/chosen", self, None)
-            .map(|node| Chosen { node })
+        node::find_node(
+            &mut FdtData::new(self.structs_block()),
+            "/chosen",
+            self,
+            None,
+        )
+        .map(|node| Chosen { node })
     }
 
     /// Returns the DICE (Dynamic Identity and Configuration Engine) node.
@@ -119,8 +124,13 @@ impl<'a> LinuxFdt<'a> {
     /// DICE is used for device attestation and identity. Returns `None` if the
     /// `/chosen/dice` node is not present.
     pub fn dice(&self) -> Option<Dice<'_, 'a>> {
-        node::find_node(&mut FdtData::new(self.structs_block()), "/chosen/dice", self, None)
-            .map(|node| Dice { node })
+        node::find_node(
+            &mut FdtData::new(self.structs_block()),
+            "/chosen/dice",
+            self,
+            None,
+        )
+        .map(|node| Dice { node })
     }
 
     /// Returns interrupt controller node.
@@ -128,7 +138,8 @@ impl<'a> LinuxFdt<'a> {
     /// Searches for the first node with an "interrupt-controller" property.
     /// Returns `None` if no interrupt controller is found.
     pub fn interrupt_controller(&self) -> Option<InterruptController<'_, 'a>> {
-        let ic_node = self.all_nodes()
+        let ic_node = self
+            .all_nodes()
             .find(|node| node.property("interrupt-controller").is_some())?;
         Some(InterruptController { node: ic_node })
     }
@@ -138,9 +149,14 @@ impl<'a> LinuxFdt<'a> {
     /// The reserved memory node describes regions of memory that should be
     /// reserved for specific purposes (firmware, secure world, DMA pools, etc.).
     /// Returns `None` if the `/reserved-memory` node is not present or invalid.
-    pub fn linux_reserved_memory(&self) -> Option<ReservedMemory<'_, 'a>>  {
-        let rnode = node::find_node(&mut FdtData::new(self.structs_block()), "/reserved-memory", self, None)
-            .map(|node| ReservedMemory { node })?;
+    pub fn linux_reserved_memory(&self) -> Option<ReservedMemory<'_, 'a>> {
+        let rnode = node::find_node(
+            &mut FdtData::new(self.structs_block()),
+            "/reserved-memory",
+            self,
+            None,
+        )
+        .map(|node| ReservedMemory { node })?;
         // check reserved-memory node is valid
         rnode.check_root().ok()?;
         Some(rnode)
@@ -179,9 +195,9 @@ impl<'a> LinuxFdt<'a> {
         self.all_nodes()
             .filter(|node| {
                 node.property("device_type")
-                .and_then(|p| core::str::from_utf8(p.value).ok())
-                .map(|s| s.trim_end_matches('\0') == "memory")
-                .unwrap_or(false)
+                    .and_then(|p| core::str::from_utf8(p.value).ok())
+                    .map(|s| s.trim_end_matches('\0') == "memory")
+                    .unwrap_or(false)
             })
             .filter(|node| node.is_available())
             .map(|node| Memory { node })
@@ -190,7 +206,12 @@ impl<'a> LinuxFdt<'a> {
     /// Return the `/aliases` node, if one exists
     pub fn aliases(&self) -> Option<Aliases<'_, 'a>> {
         Some(Aliases {
-            node: node::find_node(&mut FdtData::new(self.structs_block()), "/aliases", self, None)?,
+            node: node::find_node(
+                &mut FdtData::new(self.structs_block()),
+                "/aliases",
+                self,
+                None,
+            )?,
             header: self,
         })
     }
@@ -231,7 +252,9 @@ impl<'a> LinuxFdt<'a> {
     }
 
     fn str_at_offset(&self, offset: usize) -> &'a str {
-        self.cstr_at_offset(offset).as_str().expect("not utf-8 cstr")
+        self.cstr_at_offset(offset)
+            .as_str()
+            .expect("not utf-8 cstr")
     }
 
     fn structs_block(&self) -> &'a [u8] {

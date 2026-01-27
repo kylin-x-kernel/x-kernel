@@ -57,7 +57,13 @@ pub(super) fn init_percpu() {
 }
 
 macro_rules! with_cause {
-    ($cause: expr, @S_TIMER => $timer_op: expr, @S_SOFT => $ipi_op: expr, @S_EXT => $ext_op: expr, @EX_IRQ => $plic_op: expr $(,)?) => {
+    (
+        $cause:expr, @S_TIMER =>
+        $timer_op:expr, @S_SOFT =>
+        $ipi_op:expr, @S_EXT =>
+        $ext_op:expr, @EX_IRQ =>
+        $plic_op:expr $(,)?
+    ) => {
         match $cause {
             S_TIMER => $timer_op,
             S_SOFT => $ipi_op,
@@ -248,7 +254,7 @@ impl IrqIf for IrqIfImpl {
 
     /// Sets the priority for a specific interrupt request (IRQ).
     fn set_priority(irq: usize, priority: u8) {
-         todo!()
+        todo!()
     }
 
     /// Save irq status and disable
@@ -258,16 +264,16 @@ impl IrqIf for IrqIfImpl {
 
     /// Restore irq status
     fn local_irq_restore(flag: usize) {
-         todo!()
+        todo!()
     }
 
     /// Allows the current CPU to respond to interrupts.
-    fn enable_irqs(){
+    fn enable_irqs() {
         todo!()
     }
 
     /// Makes the current CPU ignore interrupts.
-    fn disable_irqs(){
+    fn disable_irqs() {
         todo!()
     }
 

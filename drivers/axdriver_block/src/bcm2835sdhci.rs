@@ -1,8 +1,10 @@
 //! SD card driver for raspi4
 
 use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
-use bcm2835_sdhci::Bcm2835SDhci::{EmmcCtl, BLOCK_SIZE};
-use bcm2835_sdhci::SDHCIError;
+use bcm2835_sdhci::{
+    Bcm2835SDhci::{BLOCK_SIZE, EmmcCtl},
+    SDHCIError,
+};
 
 use crate::BlockDriverOps;
 
@@ -72,6 +74,7 @@ impl BlockDriverOps for SDHCIDriver {
             .write_block(block_id as u32, 1, aligned_buf)
             .map_err(deal_sdhci_err)
     }
+
     fn flush(&mut self) -> DevResult {
         Ok(())
     }

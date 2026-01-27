@@ -10,19 +10,19 @@ use strum::FromRepr;
 #[derive(Debug, Clone, Copy, Eq, PartialEq, FromRepr)]
 pub enum EventType {
     Synchronization = 0x00,
-    Key = 0x01,
-    Relative = 0x02,
-    Absolute = 0x03,
-    Misc = 0x04,
-    Switch = 0x05,
-    Led = 0x11,
-    Sound = 0x12,
-    ForceFeedback = 0x15,
+    Key             = 0x01,
+    Relative        = 0x02,
+    Absolute        = 0x03,
+    Misc            = 0x04,
+    Switch          = 0x05,
+    Led             = 0x11,
+    Sound           = 0x12,
+    ForceFeedback   = 0x15,
 }
 
 impl EventType {
-    pub const MAX: u8 = 0x1f;
     pub const COUNT: u8 = Self::MAX + 1;
+    pub const MAX: u8 = 0x1f;
 
     pub const fn bits_count(&self) -> usize {
         match self {

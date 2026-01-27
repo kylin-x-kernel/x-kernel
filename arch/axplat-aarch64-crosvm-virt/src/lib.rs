@@ -9,13 +9,13 @@
 extern crate axplat;
 
 mod boot;
+pub mod fdt;
+mod gicv3;
 mod init;
 mod mem;
 mod power;
-pub mod fdt;
-mod serial;
-mod gicv3;
 pub mod psci;
+mod serial;
 
 pub mod config {
     //! Platform configuration module.
@@ -28,13 +28,13 @@ pub mod config {
     assert_str_eq!(
         PACKAGE,
         env!("CARGO_PKG_NAME"),
-        "`PACKAGE` field in the configuration does not match the Package name. Please check your configuration file."
+        "`PACKAGE` field in the configuration does not match the Package name. Please check your \
+         configuration file."
     );
 }
 
 axplat_aarch64_peripherals::ns16550_console_if_impl!(ConsoleIfImpl);
 axplat_aarch64_peripherals::time_if_impl!(TimeIfImpl);
-
 
 #[cfg(feature = "irq")]
 irq_if_impl!(IrqIfImpl);
