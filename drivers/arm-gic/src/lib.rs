@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2023 The arm-gic Authors.
 // Copyright (C) 2025 Weikang Guo <guoweikang.kernel@gmail.com>
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSE for license details.
 //
-// This file has been modified by KylinSoft on 2025.
 
-//! Driver for the Arm Generic Interrupt Controller version 3 or 4, on aarch64.
-//!
-//! This top level module contains functions that are not specific to any particular interrupt
-//! controller, as support for other GIC versions may be added in future.
+//! This module defines the generic abstraction layer for ARM interrupt management.
+//! The interfaces provided here are architecturally neutral, ensuring compatibility
+//! with various GIC implementations and facilitating seamless integration of
+//! additional controller versions as requirements evolve.
 //!
 //! # Example
 //!
@@ -19,22 +17,28 @@
 //!     irq_enable,
 //! };
 //!
-//! // Base addresses of the GICv3 distributor and redistributor.
-//! const GICD_BASE_ADDRESS: *mut u64 = 0x800_0000 as _;
-//! const GICR_BASE_ADDRESS: *mut u64 = 0x80A_0000 as _;
+//! // Define MMIO base addresses for the distributor and redistributor interfaces.
+//! const PLAT_DIST_BASE: *mut u64 = 0x800_0000 as _;
+//! const PLAT_REDIST_BASE: *mut u64 = 0x80A_0000 as _;
 //!
-//! // Initialise the GIC.
-//! let mut gic = unsafe { GicV3::new(GICD_BASE_ADDRESS, GICR_BASE_ADDRESS) };
-//! gic.setup();
+//! // Initialize the Interrupt Controller (INTC) hardware instance.
+//! let mut intc_dev = unsafe { GicV3::new(PLAT_DIST_BASE, PLAT_REDIST_BASE) };
+//! intc_dev.setup();
 //!
-//! // Configure an SGI and then send it to ourself.
-//! let sgi_intid = IntId::sgi(3);
+//! // Prepare a Software Generated Interrupt (SGI) with ID 3.
+//! let target_irq = IntId::sgi(3);
+//!
+//! // Configure priority masking and set individual IRQ priority levels.
 //! GicV3::set_priority_mask(0xff);
-//! gic.set_interrupt_priority(sgi_intid, 0x80);
-//! gic.enable_interrupt(sgi_intid, true);
+//! intc_dev.set_interrupt_priority(target_irq, 0x80);
+//!
+//! // Enable the specific interrupt line and unmask processor-local interrupts.
+//! intc_dev.enable_interrupt(target_irq, true);
 //! irq_enable();
+//!
+//! // Dispatch the SGI to the current processor core.
 //! GicV3::send_sgi(
-//!     sgi_intid,
+//!     target_irq,
 //!     SgiTarget::List {
 //!         affinity3: 0,
 //!         affinity2: 0,
