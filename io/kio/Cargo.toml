@@ -1,8 +1,8 @@
 [package]
-name = "kylinio"
+name = "kio"
 edition = "2024"
 description = "`std::io` for `no_std` environment"
-documentation = "https://docs.rs/kylinio"
+documentation = "https://docs.rs/kio"
 keywords = ["io", "no-std"]
 categories.workspace = true
 version.workspace = true

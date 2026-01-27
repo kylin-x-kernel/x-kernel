@@ -8,7 +8,7 @@ use core::task::Context;
 use axerrno::{AxError, AxResult, ax_bail, ax_err_type};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
-use kylinio::prelude::*;
+use kio::prelude::*;
 
 use super::connection_manager::*;
 use crate::{
@@ -217,7 +217,7 @@ impl VsockTransportOps for VsockStreamTransport {
         drop(conn_guard);
 
         // now virtio-driver only support non-blocking send
-        let result = src.write_to(&mut kylinio::write_fn(|buf| {
+        let result = src.write_to(&mut kio::write_fn(|buf| {
             crate::device::vsock_send(conn_id, buf)
         }));
         conn.lock().add_tx_bytes(result.unwrap_or(0));

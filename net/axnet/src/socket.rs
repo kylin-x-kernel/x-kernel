@@ -12,7 +12,7 @@ use axerrno::{AxError, AxResult, LinuxError};
 use axpoll::{IoEvents, Pollable};
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
-use kylinio::prelude::*;
+use kio::prelude::*;
 
 #[cfg(feature = "vsock")]
 use crate::vsock::VsockSocket;

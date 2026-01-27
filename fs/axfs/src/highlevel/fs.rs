@@ -11,7 +11,7 @@ use axfs_ng_vfs::{
     path::{Component, Components, Path, PathBuf},
 };
 use axsync::Mutex;
-use kylinio::{Read, Write};
+use kio::{Read, Write};
 use spin::Once;
 
 use super::File;

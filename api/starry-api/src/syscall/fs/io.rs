@@ -8,7 +8,7 @@ use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, FileFlags, OpenOptions};
 use axpoll::{IoEvents, Pollable};
 use axtask::current;
-use kylinio::{Seek, SeekFrom};
+use kio::{Seek, SeekFrom};
 use linux_raw_sys::general::__kernel_off_t;
 use starry_vm::{VmMutPtr, VmPtr};
 use syscalls::Sysno;

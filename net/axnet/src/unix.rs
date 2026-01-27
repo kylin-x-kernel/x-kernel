@@ -13,7 +13,7 @@ use axsync::Mutex;
 use axtask::future::{block_on, interruptible};
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
-use kylinio::{IoBuf, Read, Write};
+use kio::{IoBuf, Read, Write};
 use lazy_static::lazy_static;
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
