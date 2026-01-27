@@ -11,7 +11,7 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axdma"
 documentation = "https://arceos-org.github.io/arceos/axdma/index.html"
 
 [dependencies]
-allocator.workspace = true
+alloc-engine.workspace = true
 axalloc.workspace = true
 platconfig.workspace = true
 axerrno.workspace = true

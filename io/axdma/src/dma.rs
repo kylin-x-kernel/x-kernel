@@ -1,6 +1,6 @@
 use core::{alloc::Layout, ptr::NonNull};
 
-use allocator::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
+use alloc_engine::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
 use axalloc::{DefaultByteAllocator, UsageKind, global_allocator};
 use axhal::{mem::virt_to_phys, paging::MappingFlags};
 use kspin::SpinNoIrq;
@@ -39,7 +39,7 @@ impl DmaAllocator {
     fn alloc_coherent_bytes(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
         let mut is_expanded = false;
         loop {
-            if let Ok(data) = self.alloc.alloc(layout) {
+            if let Ok(data) = self.alloc.allocate(layout) {
                 let cpu_addr = va!(data.as_ptr() as usize);
                 return Ok(DMAInfo {
                     cpu_addr: data,
@@ -63,7 +63,7 @@ impl DmaAllocator {
                     MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED,
                 )?;
                 self.alloc
-                    .add_memory(vaddr_raw, expand_size)
+                    .add_region(vaddr_raw, expand_size)
                     .inspect_err(|e| error!("add memory fail: {e:?}"))?;
                 debug!("expand memory @{vaddr:#X}, size: {expand_size:#X} bytes");
             }
@@ -117,7 +117,7 @@ impl DmaAllocator {
                 MappingFlags::READ | MappingFlags::WRITE,
             );
         } else {
-            self.alloc.dealloc(dma.cpu_addr, layout)
+            self.alloc.deallocate(dma.cpu_addr, layout)
         }
     }
 }

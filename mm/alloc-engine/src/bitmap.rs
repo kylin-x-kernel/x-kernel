@@ -32,20 +32,20 @@ cfg_if::cfg_if! {
 ///
 /// The `PAGE_SIZE` must be a power of two.
 pub struct BitmapPageAllocator<const PAGE_SIZE: usize> {
-    base: usize,
+    base_addr: usize,
     total_pages: usize,
     used_pages: usize,
-    inner: BitAllocUsed,
+    bitmap: BitAllocUsed,
 }
 
 impl<const PAGE_SIZE: usize> BitmapPageAllocator<PAGE_SIZE> {
     /// Creates a new empty `BitmapPageAllocator`.
     pub const fn new() -> Self {
         Self {
-            base: 0,
+            base_addr: 0,
             total_pages: 0,
             used_pages: 0,
-            inner: BitAllocUsed::DEFAULT,
+            bitmap: BitAllocUsed::DEFAULT,
         }
     }
 }
@@ -57,7 +57,7 @@ impl<const PAGE_SIZE: usize> Default for BitmapPageAllocator<PAGE_SIZE> {
 }
 
 impl<const PAGE_SIZE: usize> BaseAllocator for BitmapPageAllocator<PAGE_SIZE> {
-    fn init(&mut self, start: usize, size: usize) {
+    fn init_region(&mut self, start: usize, size: usize) {
         assert!(PAGE_SIZE.is_power_of_two());
 
         // Range for real:  [align_up(start, PAGE_SIZE), align_down(start + size, PAGE_SIZE))
@@ -66,16 +66,17 @@ impl<const PAGE_SIZE: usize> BaseAllocator for BitmapPageAllocator<PAGE_SIZE> {
         self.total_pages = (end - start) / PAGE_SIZE;
 
         // Calculate the base offset stored in the real [`BitAlloc`] instance.
-        self.base = crate::align_down(start, MAX_ALIGN_1GB);
+        self.base_addr = crate::align_down(start, MAX_ALIGN_1GB);
 
         // Range in bitmap: [start - self.base, start - self.base + total_pages * PAGE_SIZE)
-        let start = start - self.base;
+        let start = start - self.base_addr;
         let start_idx = start / PAGE_SIZE;
 
-        self.inner.insert(start_idx..start_idx + self.total_pages);
+        self.bitmap
+            .insert(start_idx..start_idx + self.total_pages);
     }
 
-    fn add_memory(&mut self, _start: usize, _size: usize) -> AllocResult {
+    fn add_region(&mut self, _start: usize, _size: usize) -> AllocResult {
         Err(AllocError::NoMemory) // unsupported
     }
 }
@@ -83,33 +84,36 @@ impl<const PAGE_SIZE: usize> BaseAllocator for BitmapPageAllocator<PAGE_SIZE> {
 impl<const PAGE_SIZE: usize> PageAllocator for BitmapPageAllocator<PAGE_SIZE> {
     const PAGE_SIZE: usize = PAGE_SIZE;
 
-    fn alloc_pages(&mut self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
+    fn allocate_pages(&mut self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
         // Check if the alignment is valid.
         if align_pow2 > MAX_ALIGN_1GB || !crate::is_aligned(align_pow2, PAGE_SIZE) {
-            return Err(AllocError::InvalidParam);
+            return Err(AllocError::InvalidInput);
         }
         let align_pow2 = align_pow2 / PAGE_SIZE;
         if !align_pow2.is_power_of_two() {
-            return Err(AllocError::InvalidParam);
+            return Err(AllocError::InvalidInput);
         }
         if num_pages > self.available_pages() {
             return Err(AllocError::NoMemory);
         }
         let align_log2 = align_pow2.trailing_zeros() as usize;
         match num_pages.cmp(&1) {
-            core::cmp::Ordering::Equal => self.inner.alloc().map(|idx| idx * PAGE_SIZE + self.base),
+            core::cmp::Ordering::Equal => self
+                .bitmap
+                .alloc()
+                .map(|idx| idx * PAGE_SIZE + self.base_addr),
             core::cmp::Ordering::Greater => self
-                .inner
+                .bitmap
                 .alloc_contiguous(None, num_pages, align_log2)
-                .map(|idx| idx * PAGE_SIZE + self.base),
-            _ => return Err(AllocError::InvalidParam),
+                .map(|idx| idx * PAGE_SIZE + self.base_addr),
+            _ => return Err(AllocError::InvalidInput),
         }
         .ok_or(AllocError::NoMemory)
         .inspect(|_| self.used_pages += num_pages)
     }
 
     /// Allocate pages at a specific address.
-    fn alloc_pages_at(
+    fn allocate_pages_at(
         &mut self,
         base: usize,
         num_pages: usize,
@@ -121,34 +125,36 @@ impl<const PAGE_SIZE: usize> PageAllocator for BitmapPageAllocator<PAGE_SIZE> {
             || !crate::is_aligned(align_pow2, PAGE_SIZE)
             || !crate::is_aligned(base, align_pow2)
         {
-            return Err(AllocError::InvalidParam);
+            return Err(AllocError::InvalidInput);
         }
 
         let align_pow2 = align_pow2 / PAGE_SIZE;
         if !align_pow2.is_power_of_two() {
-            return Err(AllocError::InvalidParam);
+            return Err(AllocError::InvalidInput);
         }
         let align_log2 = align_pow2.trailing_zeros() as usize;
 
-        let idx = (base - self.base) / PAGE_SIZE;
+        let idx = (base - self.base_addr) / PAGE_SIZE;
 
-        self.inner
+        self.bitmap
             .alloc_contiguous(Some(idx), num_pages, align_log2)
-            .map(|idx| idx * PAGE_SIZE + self.base)
+            .map(|idx| idx * PAGE_SIZE + self.base_addr)
             .ok_or(AllocError::NoMemory)
             .inspect(|_| self.used_pages += num_pages)
     }
 
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
+    fn deallocate_pages(&mut self, base: usize, num_pages: usize) {
         assert!(
-            crate::is_aligned(pos, Self::PAGE_SIZE),
-            "pos must be aligned to PAGE_SIZE"
+            crate::is_aligned(base, Self::PAGE_SIZE),
+            "base must be aligned to PAGE_SIZE"
         );
         if match num_pages.cmp(&1) {
-            core::cmp::Ordering::Equal => self.inner.dealloc((pos - self.base) / PAGE_SIZE),
+            core::cmp::Ordering::Equal => {
+                self.bitmap.dealloc((base - self.base_addr) / PAGE_SIZE)
+            }
             core::cmp::Ordering::Greater => self
-                .inner
-                .dealloc_contiguous((pos - self.base) / PAGE_SIZE, num_pages),
+                .bitmap
+                .dealloc_contiguous((base - self.base_addr) / PAGE_SIZE, num_pages),
             _ => false,
         } {
             self.used_pages -= num_pages;
@@ -177,22 +183,22 @@ mod tests {
     #[test]
     fn test_bitmap_page_allocator_one_page() {
         let mut allocator = BitmapPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(PAGE_SIZE, PAGE_SIZE);
+        allocator.init_region(PAGE_SIZE, PAGE_SIZE);
 
         assert_eq!(allocator.total_pages(), 1);
         assert_eq!(allocator.used_pages(), 0);
         assert_eq!(allocator.available_pages(), 1);
 
-        let addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
+        let addr = allocator.allocate_pages(1, PAGE_SIZE).unwrap();
         assert_eq!(addr, 0x1000);
         assert_eq!(allocator.used_pages(), 1);
         assert_eq!(allocator.available_pages(), 0);
 
-        allocator.dealloc_pages(addr, 1);
+        allocator.deallocate_pages(addr, 1);
         assert_eq!(allocator.used_pages(), 0);
         assert_eq!(allocator.available_pages(), 1);
 
-        let addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
+        let addr = allocator.allocate_pages(1, PAGE_SIZE).unwrap();
         assert_eq!(addr, 0x1000);
         assert_eq!(allocator.used_pages(), 1);
         assert_eq!(allocator.available_pages(), 0);
@@ -206,7 +212,7 @@ mod tests {
         const TEST_BASE_ADDR: usize = SIZE_1G + PAGE_SIZE;
 
         let mut allocator = BitmapPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(TEST_BASE_ADDR, SIZE_2G);
+        allocator.init_region(TEST_BASE_ADDR, SIZE_2G);
 
         let mut num_pages = 1;
         // Test allocation and deallocation of 1, 10, 100, 1000 pages.
@@ -215,12 +221,12 @@ mod tests {
             assert_eq!(allocator.used_pages(), 0);
             assert_eq!(allocator.available_pages(), SIZE_2G / PAGE_SIZE);
 
-            let addr = allocator.alloc_pages(num_pages, PAGE_SIZE).unwrap();
+            let addr = allocator.allocate_pages(num_pages, PAGE_SIZE).unwrap();
             assert_eq!(addr, TEST_BASE_ADDR);
             assert_eq!(allocator.used_pages(), num_pages);
             assert_eq!(allocator.available_pages(), SIZE_2G / PAGE_SIZE - num_pages);
 
-            allocator.dealloc_pages(addr, num_pages);
+            allocator.deallocate_pages(addr, num_pages);
             assert_eq!(allocator.used_pages(), 0);
             assert_eq!(allocator.available_pages(), SIZE_2G / PAGE_SIZE);
 
@@ -235,12 +241,12 @@ mod tests {
             assert_eq!(allocator.used_pages(), 0);
             assert_eq!(allocator.available_pages(), SIZE_2G / PAGE_SIZE);
 
-            let addr = allocator.alloc_pages(num_pages, align).unwrap();
+            let addr = allocator.allocate_pages(num_pages, align).unwrap();
             assert_eq!(addr, crate::align_up(TEST_BASE_ADDR, align));
             assert_eq!(allocator.used_pages(), num_pages);
             assert_eq!(allocator.available_pages(), SIZE_2G / PAGE_SIZE - num_pages);
 
-            allocator.dealloc_pages(addr, num_pages);
+            allocator.deallocate_pages(addr, num_pages);
             assert_eq!(allocator.used_pages(), 0);
             assert_eq!(allocator.available_pages(), SIZE_2G / PAGE_SIZE);
 
@@ -263,7 +269,7 @@ mod tests {
                 SIZE_2G / PAGE_SIZE - used_pages
             );
 
-            let addr = allocator.alloc_pages(num_pages, align).unwrap();
+            let addr = allocator.allocate_pages(num_pages, align).unwrap();
             assert!(crate::is_aligned(addr, align));
 
             addrs[i] = (addr, num_pages);
@@ -285,7 +291,7 @@ mod tests {
         while i < 3 {
             let addr = addrs[i].0;
             let num_pages = addrs[i].1;
-            allocator.dealloc_pages(addr, num_pages);
+            allocator.deallocate_pages(addr, num_pages);
 
             used_pages -= num_pages;
             assert_eq!(allocator.used_pages(), used_pages);
@@ -315,7 +321,7 @@ mod tests {
             );
 
             let addr = allocator
-                .alloc_pages_at(test_addr_base, num_pages, align)
+                .allocate_pages_at(test_addr_base, num_pages, align)
                 .unwrap();
             assert_eq!(addr, test_addr_base);
 
