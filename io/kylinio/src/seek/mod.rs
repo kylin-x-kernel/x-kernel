@@ -30,8 +30,6 @@ pub fn default_stream_len<T: Seek + ?Sized>(this: &mut T) -> Result<u64> {
     let old_pos = this.stream_position()?;
     let len = this.seek(SeekFrom::End(0))?;
 
-    // Avoid seeking a third time when we were already at the end of the
-    // stream. The branch is usually way cheaper than a seek operation.
     if old_pos != len {
         this.seek(SeekFrom::Start(old_pos))?;
     }
@@ -45,26 +43,15 @@ pub fn default_stream_len<T: Seek + ?Sized>(this: &mut T) -> Result<u64> {
 /// See [`std::io::Seek`] for more details.
 pub trait Seek {
     /// Seek to an offset, in bytes, in a stream.
-    ///
-    /// A seek beyond the end of a stream is allowed, but behavior is defined
-    /// by the implementation.
-    ///
-    /// If the seek operation completed successfully,
-    /// this method returns the new position from the start of the stream.
-    /// That position can be used later with [`SeekFrom::Start`].
     fn seek(&mut self, pos: SeekFrom) -> Result<u64>;
 
     /// Rewind to the beginning of a stream.
-    ///
-    /// This is a convenience method, equivalent to `seek(SeekFrom::Start(0))`.
     fn rewind(&mut self) -> Result<()> {
         self.seek(SeekFrom::Start(0))?;
         Ok(())
     }
 
     /// Returns the current seek position from the start of the stream.
-    ///
-    /// This is equivalent to `self.seek(SeekFrom::Current(0))`.
     fn stream_position(&mut self) -> Result<u64> {
         self.seek(SeekFrom::Current(0))
     }

@@ -3,8 +3,7 @@ use alloc::boxed::Box;
 
 use crate::{Result, Seek, SeekFrom};
 
-// =============================================================================
-// Forwarding implementations
+
 
 impl<S: Seek + ?Sized> Seek for &mut S {
     #[inline]

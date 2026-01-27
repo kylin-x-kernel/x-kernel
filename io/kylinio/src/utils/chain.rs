@@ -28,25 +28,14 @@ impl<T, U> Chain<T, U> {
         }
     }
 
-    /// Consumes the `Chain`, returning the wrapped readers.
     pub fn into_inner(self) -> (T, U) {
         (self.first, self.second)
     }
 
-    /// Gets references to the underlying readers in this `Chain`.
-    ///
-    /// Care should be taken to avoid modifying the internal I/O state of the
-    /// underlying readers as doing so may corrupt the internal state of this
-    /// `Chain`.
     pub fn get_ref(&self) -> (&T, &U) {
         (&self.first, &self.second)
     }
 
-    /// Gets mutable references to the underlying readers in this `Chain`.
-    ///
-    /// Care should be taken to avoid modifying the internal I/O state of the
-    /// underlying readers as doing so may corrupt the internal state of this
-    /// `Chain`.
     pub fn get_mut(&mut self) -> (&mut T, &mut U) {
         (&mut self.first, &mut self.second)
     }
@@ -91,9 +80,6 @@ impl<T: Read, U: Read> Read for Chain<T, U> {
         read += self.second.read_to_end(buf)?;
         Ok(read)
     }
-
-    // We don't override `read_to_string` here because an UTF-8 sequence could
-    // be split between the two parts of the chain
 }
 
 impl<T: BufRead, U: BufRead> BufRead for Chain<T, U> {
@@ -131,8 +117,6 @@ impl<T: BufRead, U: BufRead> BufRead for Chain<T, U> {
         Ok(read)
     }
 
-    // We don't override `read_line` here because an UTF-8 sequence could be
-    // split between the two parts of the chain
 }
 
 impl<T: IoBuf, U: IoBuf> IoBuf for Chain<T, U> {

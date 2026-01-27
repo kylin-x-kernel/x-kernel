@@ -5,7 +5,6 @@
 #![feature(min_specialization)]
 #![feature(maybe_uninit_fill)]
 #![cfg_attr(not(maybe_uninit_slice), feature(maybe_uninit_slice))]
-#![warn(missing_docs)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

@@ -18,39 +18,26 @@ pub struct Cursor<T> {
 }
 
 impl<T> Cursor<T> {
-    /// Creates a new cursor wrapping the provided underlying in-memory buffer.
-    ///
-    /// Cursor initial position is `0` even if underlying buffer (e.g., [`Vec`])
-    /// is not empty. So writing to cursor starts with overwriting [`Vec`]
-    /// content, not with appending to it.
     pub const fn new(inner: T) -> Cursor<T> {
         Cursor { pos: 0, inner }
     }
 
-    /// Consumes this cursor, returning the underlying value.
     pub fn into_inner(self) -> T {
         self.inner
     }
 
-    /// Gets a reference to the underlying value in this cursor.
     pub const fn get_ref(&self) -> &T {
         &self.inner
     }
 
-    /// Gets a mutable reference to the underlying value in this cursor.
-    ///
-    /// Care should be taken to avoid modifying the internal I/O state of the
-    /// underlying value as it may corrupt this cursor's position.
     pub const fn get_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 
-    /// Returns the current position of this cursor.
     pub const fn position(&self) -> u64 {
         self.pos
     }
 
-    /// Sets the position of this cursor.
     pub const fn set_position(&mut self, pos: u64) {
         self.pos = pos;
     }
@@ -60,7 +47,6 @@ impl<T> Cursor<T>
 where
     T: AsRef<[u8]>,
 {
-    /// Splits the underlying slice at the cursor position and returns them.
     pub fn split(&self) -> (&[u8], &[u8]) {
         let slice = self.inner.as_ref();
         let pos = self.pos.min(slice.len() as u64);
@@ -72,8 +58,6 @@ impl<T> Cursor<T>
 where
     T: AsMut<[u8]>,
 {
-    /// Splits the underlying slice at the cursor position and returns them
-    /// mutably.
     pub fn split_mut(&mut self) -> (&mut [u8], &mut [u8]) {
         let slice = self.inner.as_mut();
         let pos = self.pos.min(slice.len() as u64);
@@ -146,7 +130,6 @@ where
 
         match result {
             Ok(_) => self.pos += buf.len() as u64,
-            // The only possible error condition is EOF, so place the cursor at "EOF"
             Err(_) => self.pos = self.inner.as_ref().len() as u64,
         }
 
@@ -230,22 +213,12 @@ fn slice_write_all(pos_mut: &mut u64, slice: &mut [u8], buf: &[u8]) -> Result<()
 fn reserve_and_pad(pos_mut: &mut u64, vec: &mut Vec<u8>, buf_len: usize) -> Result<usize> {
     let pos: usize = (*pos_mut).try_into().map_err(|_| Error::InvalidInput)?;
 
-    // For safety reasons, we don't want these numbers to overflow
-    // otherwise our allocation won't be enough
     let desired_cap = pos.saturating_add(buf_len);
     if desired_cap > vec.capacity() {
-        // We want our vec's total capacity
-        // to have room for (pos+buf_len) bytes. Reserve allocates
-        // based on additional elements from the length, so we need to
-        // reserve the difference
         vec.reserve(desired_cap - vec.len());
     }
-    // Pad if pos is above the current len.
     if pos > vec.len() {
         let diff = pos - vec.len();
-        // Unfortunately, `resize()` would suffice but the optimiser does not
-        // realise the `reserve` it does can be eliminated. So we do it manually
-        // to eliminate that extra branch
         let spare = vec.spare_capacity_mut();
         debug_assert!(spare.len() >= diff);
         // Safety: we have allocated enough capacity for this.
@@ -287,7 +260,6 @@ fn vec_write_all(pos_mut: &mut u64, vec: &mut Vec<u8>, buf: &[u8]) -> Result<usi
     let buf_len = buf.len();
     let mut pos = reserve_and_pad(pos_mut, vec, buf_len)?;
 
-    // Write the buf then progress the vec forward if necessary
     // Safety: we have ensured that the capacity is available
     // and that all bytes get written up to pos
     unsafe {
@@ -297,7 +269,6 @@ fn vec_write_all(pos_mut: &mut u64, vec: &mut Vec<u8>, buf: &[u8]) -> Result<usi
         }
     };
 
-    // Bump us forward
     *pos_mut += buf_len as u64;
     Ok(buf_len)
 }

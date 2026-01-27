@@ -32,32 +32,23 @@ impl<W> IntoInnerError<W> {
 
     /// Returns the error which caused the call to [`BufWriter::into_inner()`]
     /// to fail.
-    ///
-    /// This error was returned when attempting to write the internal buffer.
     pub fn error(&self) -> &Error {
         &self.1
     }
 
     /// Returns the buffered writer instance which generated the error.
-    ///
-    /// The returned object can be used for error recovery, such as
-    /// re-inspecting the buffer.
     pub fn into_inner(self) -> W {
         self.0
     }
 
     /// Consumes the [`IntoInnerError`] and returns the error which caused the call to
-    /// [`BufWriter::into_inner()`] to fail.  Unlike `error`, this can be used to
-    /// obtain ownership of the underlying error.
+    /// [`BufWriter::into_inner()`] to fail.
     pub fn into_error(self) -> Error {
         self.1
     }
 
     /// Consumes the [`IntoInnerError`] and returns the error which caused the call to
     /// [`BufWriter::into_inner()`] to fail, and the underlying writer.
-    ///
-    /// This can be used to simply obtain ownership of the underlying error; it can also be used for
-    /// advanced error recovery.
     pub fn into_parts(self) -> (Error, W) {
         (self.1, self.0)
     }
