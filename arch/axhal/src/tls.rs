@@ -52,6 +52,7 @@
 extern crate alloc;
 
 use core::{alloc::Layout, ptr::NonNull};
+
 use memaddr::align_up;
 
 use crate::addr_of_sym;

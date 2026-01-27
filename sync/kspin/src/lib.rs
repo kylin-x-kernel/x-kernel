@@ -1,10 +1,10 @@
 #![cfg_attr(not(test), no_std)]
 #![doc = include_str!("../README.md")]
 
-mod guard;
 mod base;
+mod guard;
 
-pub use guard::{IrqSave, NoPreempt, NoPreemptIrqSave, BaseGuard, KernelGuardIf, NoOp};
+pub use guard::{BaseGuard, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave};
 
 pub use self::base::{BaseSpinLock, BaseSpinLockGuard};
 

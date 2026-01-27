@@ -9,8 +9,7 @@ use core::{
 };
 
 use axerrno::AxError;
-use kspin::NoPreemptIrqSave;
-use kspin::SpinNoIrq;
+use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
 use crate::{AxTaskRef, WeakAxTaskRef, current, current_run_queue, select_run_queue};
 

@@ -1,15 +1,16 @@
 //! Procedural macros for X-Kernel platform configuration.
 //!
-//! This crate provides procedural macros for converting TOML format configurations 
+//! This crate provides procedural macros for converting TOML format configurations
 //! to equivalent Rust constant definitions for the X-Kernel project.
 #![cfg_attr(feature = "nightly", feature(proc_macro_expand))]
-use proc_macro::{LexError, TokenStream};
-use quote::{quote, ToTokens};
-use syn::parse::{Parse, ParseStream};
-use syn::parse_macro_input;
-use syn::{Error, Ident, LitStr, Result, Token};
-
 use axconfig_gen::{Config, OutputFormat};
+use proc_macro::{LexError, TokenStream};
+use quote::{ToTokens, quote};
+use syn::{
+    Error, Ident, LitStr, Result, Token,
+    parse::{Parse, ParseStream},
+    parse_macro_input,
+};
 
 fn compiler_error<T: ToTokens>(tokens: T, msg: String) -> TokenStream {
     Error::new_spanned(tokens, msg).to_compile_error().into()
@@ -28,7 +29,7 @@ pub fn parse_configs(config_toml: TokenStream) -> TokenStream {
         Err(e) => {
             return Error::new(proc_macro2::Span::call_site(), e.to_string())
                 .to_compile_error()
-                .into()
+                .into();
         }
     };
 
@@ -124,7 +125,7 @@ impl Parse for IncludeConfigsArgs {
                     return Err(Error::new(
                         ident.span(),
                         format!("unexpected parameter `{}`", ident),
-                    ))
+                    ));
                 }
             }
 

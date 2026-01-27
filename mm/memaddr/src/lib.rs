@@ -2,7 +2,10 @@
 
 mod units;
 
-pub use self::units::{AddrOps, AddrRange, DynPageIter, MemoryAddr, PageIter, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
+pub use self::units::{
+    AddrOps, AddrRange, DynPageIter, MemoryAddr, PageIter, PhysAddr, PhysAddrRange, VirtAddr,
+    VirtAddrRange,
+};
 
 pub const PAGE_SIZE_4K: usize = 0x1000;
 pub const PAGE_SIZE_2M: usize = 0x20_0000;

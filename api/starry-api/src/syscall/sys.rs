@@ -1,13 +1,13 @@
 use alloc::vec;
 use core::ffi::c_char;
 
-use platconfig::ARCH;
 use axerrno::{AxError, AxResult};
 use axfs::FS_CONTEXT;
 use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
 };
+use platconfig::ARCH;
 use starry_core::task::processes;
 use starry_vm::{VmMutPtr, vm_write_slice};
 

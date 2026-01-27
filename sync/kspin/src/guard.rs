@@ -49,7 +49,6 @@
 //! drop(guard);
 //! ```
 
-
 mod arch;
 
 /// Low-level interfaces that must be implemented by the crate user.

@@ -10,7 +10,7 @@ use core::{
 use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
 use futures_util::task::AtomicWaker;
-use kspin::{SpinNoIrqGuard, SpinRaw, BaseGuard};
+use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
 use crate::{
