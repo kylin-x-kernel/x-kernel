@@ -1,8 +1,11 @@
-use core::fmt;
-use core::arch::asm;
+use core::{arch::asm, fmt};
+
 use memaddr::{PhysAddr, VirtAddr};
-use crate::defs::{PageTableEntry, PagingFlags, PagingMetaData};
-use crate::table::{PageTable, PageTableMut};
+
+use crate::{
+    defs::{PageTableEntry, PagingFlags, PagingMetaData},
+    table64::{PageTable64, PageTableMut},
+};
 
 bitflags::bitflags! {
     #[derive(Debug)]
@@ -96,7 +99,7 @@ impl PageTableEntry for La64PageEntry {
     fn new_page(paddr: PhysAddr, flags: PagingFlags, is_huge: bool) -> Self {
         let mut f = LaFlags::from(flags);
         if is_huge {
-            f |= LaFlags::GH; 
+            f |= LaFlags::GH;
         }
         Self(f.bits() | (paddr.as_usize() as u64 & Self::PADDR_MASK))
     }
@@ -158,28 +161,29 @@ impl fmt::Debug for La64PageEntry {
 pub struct LA64MetaData;
 
 impl LA64MetaData {
-    pub const PWCL_VALUE: u32 = 12 | (9 << 5) | (21 << 10) | (9 << 15) | (30 << 20) | (9 << 25);
     pub const PWCH_VALUE: u32 = 39 | (9 << 6);
+    pub const PWCL_VALUE: u32 = 12 | (9 << 5) | (21 << 10) | (9 << 15) | (30 << 20) | (9 << 25);
 }
 
 impl PagingMetaData for LA64MetaData {
+    type VirtAddr = VirtAddr;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VirtAddr;
 
     fn flush_tlb(vaddr: Option<VirtAddr>) {
         if let Some(vaddr) = vaddr {
-             unsafe {
+            unsafe {
                 asm!("invtlb 0x01, $r0, {}", in(reg) vaddr.as_usize());
-             }
+            }
         } else {
-             unsafe {
+            unsafe {
                 asm!("invtlb 0x00, $r0, $r0");
-             }
+            }
         }
     }
 }
 
-pub type LA64PageTable<H> = PageTable<LA64MetaData, La64PageEntry, H>;
+pub type LA64PageTable<H> = PageTable64<LA64MetaData, La64PageEntry, H>;
 pub type LA64PageTableMut<'a, H> = PageTableMut<'a, LA64MetaData, La64PageEntry, H>;

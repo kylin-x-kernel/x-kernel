@@ -5,7 +5,7 @@ pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;
 
 use crate::{
     defs::{PageTableEntry, PagingFlags, PagingMetaData},
-    table::{PageTable, PageTableMut},
+    table64::{PageTable64, PageTableMut},
 };
 
 impl From<PTF> for PagingFlags {
@@ -147,5 +147,5 @@ impl PagingMetaData for X64PagingMetaData {
     }
 }
 
-pub type X64PageTable<H> = PageTable<X64PagingMetaData, X64PageEntry, H>;
+pub type X64PageTable<H> = PageTable64<X64PagingMetaData, X64PageEntry, H>;
 pub type X64PageTableMut<'a, H> = PageTableMut<'a, X64PagingMetaData, X64PageEntry, H>;

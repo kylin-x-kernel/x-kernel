@@ -1,5 +1,6 @@
 use core::fmt;
-use memaddr::{PhysAddr, VirtAddr, MemoryAddr};
+
+use memaddr::{MemoryAddr, PhysAddr, VirtAddr};
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, PartialEq)]
@@ -64,7 +65,7 @@ pub trait PagingMetaData: Sync + Send {
     fn paddr_is_valid(paddr: usize) -> bool {
         paddr <= Self::PA_MAX_ADDR
     }
-    
+
     fn vaddr_is_valid(vaddr: usize) -> bool {
         let top_mask = usize::MAX << (Self::VA_MAX_BITS - 1);
         (vaddr & top_mask) == 0 || (vaddr & top_mask) == top_mask

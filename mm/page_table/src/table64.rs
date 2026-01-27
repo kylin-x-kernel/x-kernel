@@ -1,7 +1,11 @@
 use core::{marker::PhantomData, ops::Deref};
+
 use arrayvec::ArrayVec;
-use memaddr::{PAGE_SIZE_4K, PhysAddr, MemoryAddr};
-use crate::defs::{PageTableEntry, PagingFlags, PageSize, PtError, PagingHandler, PagingMetaData, PtResult};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
+
+use crate::defs::{
+    PageSize, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData, PtError, PtResult,
+};
 
 const ENTRY_COUNT: usize = 512;
 
@@ -21,14 +25,14 @@ const fn p1_idx(vaddr: usize) -> usize {
     (vaddr >> 12) & (ENTRY_COUNT - 1)
 }
 
-pub struct PageTable<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
+pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
     root_paddr: PhysAddr,
     #[cfg(feature = "copy-from")]
     borrowed_entries: bitmaps::Bitmap<ENTRY_COUNT>,
     _phantom: PhantomData<(M, PTE, H)>,
 }
 
-impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable<M, PTE, H> {
+impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PTE, H> {
     pub fn try_new() -> PtResult<Self> {
         let root_paddr = Self::alloc_table()?;
         Ok(Self {
@@ -57,7 +61,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable<M, PTE,
     }
 }
 
-impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable<M, PTE, H> {
+impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PTE, H> {
     fn alloc_table() -> PtResult<PhysAddr> {
         if let Some(paddr) = H::alloc_frame() {
             let ptr = H::phys_to_virt(paddr).as_mut_ptr();
@@ -122,7 +126,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable<M, PTE,
     }
 }
 
-impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTable<M, PTE, H> {
+impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTable64<M, PTE, H> {
     fn drop(&mut self) {
         let root = self.table_of(self.root_paddr);
         #[allow(unused_variables)]
@@ -148,12 +152,14 @@ enum ToFlush<M: PagingMetaData> {
 }
 
 pub struct PageTableMut<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
-    inner: &'a mut PageTable<M, PTE, H>,
+    inner: &'a mut PageTable64<M, PTE, H>,
     flush: ToFlush<M>,
 }
 
-impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Deref for PageTableMut<'_, M, PTE, H> {
-    type Target = PageTable<M, PTE, H>;
+impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Deref
+    for PageTableMut<'_, M, PTE, H>
+{
+    type Target = PageTable64<M, PTE, H>;
 
     fn deref(&self) -> &Self::Target {
         self.inner
@@ -161,7 +167,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Deref for PageTab
 }
 
 impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<'a, M, PTE, H> {
-    fn new(inner: &'a mut PageTable<M, PTE, H>) -> Self {
+    fn new(inner: &'a mut PageTable64<M, PTE, H>) -> Self {
         Self {
             inner,
             flush: ToFlush::None,
@@ -201,7 +207,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
 
     fn next_table_mut_or_create(&mut self, entry: &mut PTE) -> PtResult<&'a mut [PTE]> {
         if entry.is_unused() {
-            let paddr = PageTable::<M, PTE, H>::alloc_table()?;
+            let paddr = PageTable64::<M, PTE, H>::alloc_table()?;
             *entry = PageTableEntry::new_table(paddr);
             Ok(self.table_of_mut(paddr))
         } else {
@@ -306,10 +312,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Ok(size)
     }
 
-    pub fn unmap(
-        &mut self,
-        vaddr: M::VirtAddr,
-    ) -> PtResult<(PhysAddr, PagingFlags, PageSize)> {
+    pub fn unmap(&mut self, vaddr: M::VirtAddr) -> PtResult<(PhysAddr, PagingFlags, PageSize)> {
         let (entry, size) = self.get_entry_mut(vaddr)?;
         if !entry.is_present() {
             entry.clear();
@@ -397,7 +400,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     }
 
     #[cfg(feature = "copy-from")]
-    pub fn copy_from(&mut self, other: &PageTable<M, PTE, H>, start: M::VirtAddr, size: usize) {
+    pub fn copy_from(&mut self, other: &PageTable64<M, PTE, H>, start: M::VirtAddr, size: usize) {
         if size == 0 {
             return;
         }
@@ -438,7 +441,9 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     }
 }
 
-impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTableMut<'_, M, PTE, H> {
+impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop
+    for PageTableMut<'_, M, PTE, H>
+{
     fn drop(&mut self) {
         self.finish();
     }

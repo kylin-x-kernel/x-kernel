@@ -1,8 +1,11 @@
-use core::fmt;
-use core::arch::asm;
+use core::{arch::asm, fmt};
+
 use memaddr::{PhysAddr, VirtAddr};
-use crate::defs::{PageTableEntry, PagingFlags, PagingMetaData};
-use crate::table::{PageTable, PageTableMut};
+
+use crate::{
+    defs::{PageTableEntry, PagingFlags, PagingMetaData},
+    table64::{PageTable64, PageTableMut},
+};
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +35,8 @@ bitflags::bitflags! {
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Arm64MemAttr {
-    Device = 0,
-    Normal = 1,
+    Device             = 0,
+    Normal             = 1,
     NormalNonCacheable = 2,
 }
 
@@ -63,9 +66,9 @@ impl Arm64MemAttr {
     pub const MAIR_VALUE: u64 = Self::mair_el1_val();
 
     pub const fn mair_el1_val() -> u64 {
-        let device = 0x00; 
-        let normal = 0xff; 
-        let normal_nc = 0x44; 
+        let device = 0x00;
+        let normal = 0xff;
+        let normal_nc = 0x44;
         (device << (8 * Self::Device as u64))
             | (normal << (8 * Self::Normal as u64))
             | (normal_nc << (8 * Self::NormalNonCacheable as u64))
@@ -146,7 +149,9 @@ impl PageTableEntry for A64PageEntry {
     }
 
     fn new_table(paddr: PhysAddr) -> Self {
-        let a = Arm64Attr::VALID | Arm64Attr::NON_BLOCK | Arm64Attr::from_mem_attr(Arm64MemAttr::Normal);
+        let a = Arm64Attr::VALID
+            | Arm64Attr::NON_BLOCK
+            | Arm64Attr::from_mem_attr(Arm64MemAttr::Normal);
         Self(a.bits() | (paddr.as_usize() as u64 & Self::PADDR_MASK))
     }
 
@@ -204,10 +209,11 @@ impl fmt::Debug for A64PageEntry {
 pub struct A64PagingMetaData;
 
 impl PagingMetaData for A64PagingMetaData {
+    type VirtAddr = VirtAddr;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VirtAddr;
 
     fn vaddr_is_valid(vaddr: usize) -> bool {
         let top_bits = vaddr >> Self::VA_MAX_BITS;
@@ -227,5 +233,5 @@ impl PagingMetaData for A64PagingMetaData {
     }
 }
 
-pub type A64PageTable<H> = PageTable<A64PagingMetaData, A64PageEntry, H>;
+pub type A64PageTable<H> = PageTable64<A64PagingMetaData, A64PageEntry, H>;
 pub type A64PageTableMut<'a, H> = PageTableMut<'a, A64PagingMetaData, A64PageEntry, H>;

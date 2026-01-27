@@ -1,7 +1,11 @@
 use core::fmt;
+
 use memaddr::{PhysAddr, VirtAddr};
-use crate::defs::{PageTableEntry, PagingFlags, PagingMetaData};
-use crate::table::{PageTable, PageTableMut};
+
+use crate::{
+    defs::{PageTableEntry, PagingFlags, PagingMetaData},
+    table64::{PageTable64, PageTableMut},
+};
 
 bitflags::bitflags! {
     #[derive(Debug)]
@@ -67,7 +71,7 @@ pub struct Rv64PageEntry(u64);
 
 impl Rv64PageEntry {
     const PADDR_MASK: u64 = (1 << 54) - (1 << 10);
-    
+
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -155,10 +159,11 @@ pub struct Sv48MetaData<VA: SvVirtAddr> {
 }
 
 impl<VA: SvVirtAddr> PagingMetaData for Sv39MetaData<VA> {
+    type VirtAddr = VA;
+
     const LEVELS: usize = 3;
     const PA_MAX_BITS: usize = 56;
     const VA_MAX_BITS: usize = 39;
-    type VirtAddr = VA;
 
     #[inline]
     fn flush_tlb(vaddr: Option<VA>) {
@@ -167,10 +172,11 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv39MetaData<VA> {
 }
 
 impl<VA: SvVirtAddr> PagingMetaData for Sv48MetaData<VA> {
+    type VirtAddr = VA;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 56;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VA;
 
     #[inline]
     fn flush_tlb(vaddr: Option<VA>) {
@@ -178,8 +184,8 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv48MetaData<VA> {
     }
 }
 
-pub type Sv39PageTable<H> = PageTable<Sv39MetaData<VirtAddr>, Rv64PageEntry, H>;
+pub type Sv39PageTable<H> = PageTable64<Sv39MetaData<VirtAddr>, Rv64PageEntry, H>;
 pub type Sv39PageTableMut<'a, H> = PageTableMut<'a, Sv39MetaData<VirtAddr>, Rv64PageEntry, H>;
 
-pub type Sv48PageTable<H> = PageTable<Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;
+pub type Sv48PageTable<H> = PageTable64<Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;
 pub type Sv48PageTableMut<'a, H> = PageTableMut<'a, Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;
