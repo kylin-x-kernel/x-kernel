@@ -20,7 +20,7 @@ pci-mmio = ["bus-pci"]
 net = ["dep:axdriver_net"]
 block = ["dep:block"]
 display = ["dep:axdriver_display"]
-input = ["dep:axdriver_input"]
+input = ["dep:input"]
 vsock = ["dep:vsock"]
 
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:axsync", "dep:spin"]
@@ -53,7 +53,7 @@ platconfig = { workspace = true, optional = true }
 driver_base = { workspace = true }
 block = { workspace = true, optional = true }
 axdriver_display = { workspace = true, optional = true }
-axdriver_input = { workspace = true, optional = true }
+input = { workspace = true, optional = true }
 axdriver_net = { workspace = true, optional = true }
 axdriver_pci = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }

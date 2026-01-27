@@ -11,7 +11,7 @@ pub use {
 #[cfg(feature = "input")]
 pub use {
     crate::structs::AxInputDevice,
-    axdriver_input::{Event, EventType, InputDeviceId, InputDriverOps},
+    input::{Event, EventType, InputDeviceId, InputDriverOps},
 };
 #[cfg(feature = "net")]
 pub use {

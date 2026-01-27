@@ -119,7 +119,7 @@ tee_raw_sys = { path = "tee/tee_raw_sys" }
 driver_base = { path = "drivers/driver_base" }
 block = { path = "drivers/block" }
 axdriver_display = { path = "drivers/axdriver_display" }
-axdriver_input = { path = "drivers/axdriver_input" }
+input = { path = "drivers/input" }
 axdriver_net = { path = "drivers/axdriver_net" }
 axdriver_pci = { path = "drivers/axdriver_pci" }
 vsock = { path = "drivers/vsock" }
