@@ -53,10 +53,7 @@ axcpu = { path = "arch/axcpu" }
 # Arceos Crates
 allocator = { path = "mm/allocator", features = ["axerrno"] }
 axklib = { path = "util/axklib" } # FIXME: pin to a specific commit or tag
-page_table_multiarch = { path = "mm/page_table_multiarch", features = [
-    "axerrno",
-] }
-page_table_entry = { path = "mm/page_table_entry" }
+page_table = { path = "mm/page_table", features = ["axerrno"] }
 axbacktrace = { path = "util/axbacktrace" }
 axerrno = { path = "util/axerrno" }
 axfs-ng-vfs = { path = "fs/axfs-ng-vfs" }
