@@ -56,15 +56,13 @@ impl<'a> Unwinder<'a> {
                 break;
             }
 
-            // Check stack size
-            if let Some(stack_size) = frame.fp.checked_sub(prev_fp) {
-                if stack_size > self.config.max_stack_size {
+            if let Some(large_stack_end) = fp.checked_add(self.config.max_stack_size)
+                && frame.fp >= large_stack_end {
                     return Err(BacktraceError::StackTooLarge {
                         fp: frame.fp,
                         prev_fp,
-                        size: stack_size,
+                        size: frame.fp,
                     });
-                }
             }
 
             // Add frame
