@@ -54,7 +54,7 @@ axcpu = { path = "arch/axcpu" }
 alloc-engine = { path = "mm/alloc-engine", features = ["axerrno"] }
 axklib = { path = "util/axklib" } # FIXME: pin to a specific commit or tag
 page_table = { path = "mm/page_table", features = ["axerrno"] }
-axbacktrace = { path = "util/axbacktrace" }
+backtrace = { path = "util/backtrace" }
 axerrno = { path = "util/axerrno" }
 axfs-ng-vfs = { path = "fs/axfs-ng-vfs" }
 kio = { path = "io/kio" }

@@ -137,8 +137,8 @@ impl TrapFrame {
     }
 
     /// Unwind the stack and get the backtrace.
-    pub fn backtrace(&self) -> axbacktrace::Backtrace {
-        axbacktrace::Backtrace::capture_trap(self.rbp as _, self.rip as _, 0)
+    pub fn backtrace(&self) -> backtrace::Backtrace {
+        backtrace::Backtrace::capture_trap(self.rbp as _, self.rip as _, 0)
     }
 }
 

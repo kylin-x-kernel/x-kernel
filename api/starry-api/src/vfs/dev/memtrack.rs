@@ -6,7 +6,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use axbacktrace::Backtrace;
+use backtrace::Backtrace;
 use axfs_ng_vfs::{NodeFlags, VfsResult};
 use starry_core::{
     mm::clear_elf_cache,

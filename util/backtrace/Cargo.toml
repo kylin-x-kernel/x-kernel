@@ -1,27 +1,28 @@
 [package]
-name = "axbacktrace"
-version = "0.1.1"
-description = "Backtrace for ArceOS"
-authors = ["Mivik <mivikq@gmail.com>", "朝倉水希 <asakuramizu111@gmail.com>"]
-repository = "https://github.com/Starry-OS/axbacktrace"
-license = "MIT OR Apache-2.0"
-edition = "2024"
-keywords = ["DWARF", "debug", "backtrace", "unwinding"]
+name = "backtrace"
+version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
+keywords = ["DWARF", "debug", "backtrace", "unwinding", "x-kernel"]
 categories = ["development-tools::debugging"]
+description = "Backtrace for X-kernel"
 
 [features]
 alloc = []
 dwarf = ["dep:addr2line", "dep:gimli", "dep:paste", "alloc"]
 
 [dependencies]
-cfg-if = "1"
-log = "0.4"
+cfg-if = { workspace = true }
+log = { workspace = true }
 spin = { version = "0.10", default-features = false, features = ["once"] }
 
 addr2line = { version = "0.25.1", default-features = false, optional = true, features = [
     "cpp_demangle",
     "rustc-demangle",
 ] }
+
 gimli = { version = "0.32", default-features = false, optional = true, features = [
     "read-core",
     "endian-reader",

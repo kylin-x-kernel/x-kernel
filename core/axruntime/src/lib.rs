@@ -131,7 +131,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         option_env!("AX_TARGET").unwrap_or(""),
         option_env!("AX_MODE").unwrap_or(""),
         option_env!("AX_LOG").unwrap_or(""),
-        axbacktrace::is_enabled(),
+        backtrace::is_enabled(),
         platconfig::plat::CPU_NUM,
     );
     #[cfg(feature = "rtc")]
@@ -179,7 +179,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
             end: usize::MAX,
         };
 
-        axbacktrace::init(ip_range, fp_range);
+        backtrace::init(ip_range, fp_range);
     }
 
     #[cfg(feature = "paging")]

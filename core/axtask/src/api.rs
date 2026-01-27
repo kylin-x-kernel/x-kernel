@@ -276,7 +276,7 @@ pub fn dump_cpu_task_backtrace(cpu_id: usize, force: bool) {
             && !task.inner().is_running()
         {
             let ctx = task.inner().ctx();
-            let bt = axbacktrace::Backtrace::capture_trap(
+            let bt = backtrace::Backtrace::capture_trap(
                 ctx.r29 as usize, // fp
                 ctx.lr as usize,  // ip
                 ctx.lr as usize,  // ra
@@ -297,7 +297,7 @@ pub fn dump_cpu_task_backtrace(_cpu_id: usize, _force: bool) {
 #[cfg(all(feature = "watchdog", target_arch = "aarch64"))]
 #[inline(always)]
 pub fn dump_cur_task_backtrace(cpu_id: usize, tf: &TrapFrame, force: bool) {
-    let bt = axbacktrace::Backtrace::capture_trap(
+    let bt = backtrace::Backtrace::capture_trap(
         tf.x[29] as usize,
         tf.x[30] as usize,
         tf.x[30] as usize,

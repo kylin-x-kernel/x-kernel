@@ -405,7 +405,7 @@ unsafe impl GlobalAlloc for GlobalAllocator {
                         ptr as usize,
                         tracking::AllocationInfo {
                             layout,
-                            backtrace: axbacktrace::Backtrace::capture(),
+                            backtrace: backtrace::Backtrace::capture(),
                             generation,
                         },
                     );

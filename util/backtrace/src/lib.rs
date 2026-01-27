@@ -76,7 +76,7 @@ pub fn unwind_stack(mut fp: usize) -> Vec<Frame> {
 
     let Some(fp_range) = FP_RANGE.get() else {
         // We cannot panic here!
-        log::error!("Backtrace not initialized. Call `axbacktrace::init` first.");
+        log::error!("Backtrace not initialized. Call `backtrace::init` first.");
         return frames;
     };
 

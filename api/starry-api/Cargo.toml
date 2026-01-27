@@ -19,7 +19,7 @@ tee_test_mock_user_access = []
 
 [dependencies]
 axalloc.workspace = true
-axbacktrace.workspace = true
+backtrace.workspace = true
 platconfig.workspace = true
 axdisplay.workspace = true
 axdriver.workspace = true

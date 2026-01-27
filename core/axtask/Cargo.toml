@@ -12,7 +12,7 @@ documentation = "https://arceos-org.github.io/arceos/axtask/index.html"
 [features]
 default = []
 
-watchdog = ["dep:axbacktrace", "dep:axplat"]
+watchdog = ["dep:backtrace", "dep:axplat"]
 
 multitask = [
     "dep:platconfig",
@@ -43,7 +43,7 @@ test = ["percpu?/sp-naive"]
 platconfig = { workspace = true, optional = true }
 axerrno.workspace = true
 axhal.workspace = true
-axbacktrace = { workspace = true, optional = true }
+backtrace = { workspace = true, optional = true }
 axpoll = { workspace = true, optional = true }
 axsched = { version = "0.3", optional = true }
 cfg-if.workspace = true

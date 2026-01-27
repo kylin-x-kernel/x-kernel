@@ -36,7 +36,7 @@ pmu = ["irq", "axhal/pmu"]
 
 [dependencies]
 axalloc = { workspace = true, optional = true }
-axbacktrace.workspace = true
+backtrace.workspace = true
 platconfig.workspace = true
 axdisplay = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }

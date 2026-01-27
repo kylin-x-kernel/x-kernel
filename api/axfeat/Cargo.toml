@@ -108,7 +108,7 @@ driver-ahci = ["axdriver?/ahci"]
 # driver-dyn = ["paging", "axruntime/driver-dyn", "axdriver/dyn"]
 
 # Backtrace
-dwarf = ["alloc", "axbacktrace/dwarf"]
+dwarf = ["alloc", "backtrace/dwarf"]
 
 # Watchdog
 watchdog = ["axruntime/watchdog"]
@@ -118,7 +118,7 @@ pmu = ["axruntime/pmu"]
 
 [dependencies]
 axalloc = { workspace = true, optional = true }
-axbacktrace.workspace = true
+backtrace.workspace = true
 axdisplay = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
