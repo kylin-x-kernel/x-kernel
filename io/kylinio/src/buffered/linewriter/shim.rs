@@ -56,7 +56,7 @@ impl<'a, W: ?Sized + Write> Write for LineWriterShim<'a, W> {
         let lines = &buf[..newline_idx];
 
         let flushed = self.inner_mut().write(lines)?;
-        
+
         if flushed == 0 {
             return Ok(0);
         }

@@ -4,8 +4,6 @@ use core::{cmp, io::BorrowedCursor};
 
 use crate::{BufRead, Error, Read, Result};
 
-
-
 impl<R: Read + ?Sized> Read for &mut R {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -143,8 +141,6 @@ impl<B: BufRead + ?Sized> BufRead for Box<B> {
         (**self).read_line(buf)
     }
 }
-
-
 
 impl Read for &[u8] {
     #[inline]

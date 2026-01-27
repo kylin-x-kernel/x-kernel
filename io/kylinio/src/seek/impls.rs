@@ -3,8 +3,6 @@ use alloc::boxed::Box;
 
 use crate::{Result, Seek, SeekFrom};
 
-
-
 impl<S: Seek + ?Sized> Seek for &mut S {
     #[inline]
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {

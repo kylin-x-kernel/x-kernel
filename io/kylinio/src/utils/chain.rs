@@ -116,7 +116,6 @@ impl<T: BufRead, U: BufRead> BufRead for Chain<T, U> {
         read += self.second.read_until(byte, buf)?;
         Ok(read)
     }
-
 }
 
 impl<T: IoBuf, U: IoBuf> IoBuf for Chain<T, U> {

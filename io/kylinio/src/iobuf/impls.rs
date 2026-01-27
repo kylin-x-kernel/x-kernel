@@ -4,8 +4,6 @@ use core::io::BorrowedCursor;
 
 use crate::{IoBuf, IoBufMut};
 
-
-
 impl<R: IoBuf + ?Sized> IoBuf for &R {
     #[inline]
     fn remaining(&self) -> usize {
@@ -49,8 +47,6 @@ impl<W: IoBufMut + ?Sized> IoBufMut for Box<W> {
         (**self).remaining_mut()
     }
 }
-
-
 
 impl IoBuf for [u8] {
     #[inline]

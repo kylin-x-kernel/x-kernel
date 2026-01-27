@@ -10,8 +10,8 @@ use axfs_ng_vfs::{
     Location, Metadata, NodePermission, NodeType, VfsError, VfsResult,
     path::{Component, Components, Path, PathBuf},
 };
-use kylinio::{Read, Write};
 use axsync::Mutex;
+use kylinio::{Read, Write};
 use spin::Once;
 
 use super::File;
