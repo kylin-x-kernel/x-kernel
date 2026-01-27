@@ -12,8 +12,8 @@ use axhal::{
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},
 };
-use axio::prelude::*;
 use axtask::current;
+use kio::prelude::*;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use starry_core::{mm::access_user_memory, task::AsThread};
 use starry_vm::{vm_load, vm_load_until_nul, vm_read_slice, vm_write_slice};
@@ -267,7 +267,7 @@ pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> AxResult<Strin
 
 /// A read-only buffer in the VM's memory.
 ///
-/// It implements the `axio::Read` trait, allowing it to be used with other I/O
+/// It implements the `kio::Read` trait, allowing it to be used with other I/O
 /// operations.
 pub struct VmBytes {
     /// The pointer to the start of the buffer in the VM's memory.
@@ -290,7 +290,7 @@ impl VmBytes {
 
 impl Read for VmBytes {
     /// Reads bytes from the VM's memory into the provided buffer.
-    fn read(&mut self, buf: &mut [u8]) -> axio::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> kio::Result<usize> {
         let len = self.len.min(buf.len());
         vm_read_slice(self.ptr, unsafe {
             transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buf[..len])
@@ -309,7 +309,7 @@ impl IoBuf for VmBytes {
 
 /// A mutable buffer in the VM's memory.
 ///
-/// It implements the `axio::Write` trait, allowing it to be used with other I/O
+/// It implements the `kio::Write` trait, allowing it to be used with other I/O
 /// operations.
 pub struct VmBytesMut {
     /// The pointer to the start of the buffer in the VM's memory.
@@ -332,7 +332,7 @@ impl VmBytesMut {
 
 impl Write for VmBytesMut {
     /// Writes bytes from the provided buffer into the VM's memory.
-    fn write(&mut self, buf: &[u8]) -> axio::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> kio::Result<usize> {
         let len = self.len.min(buf.len());
         vm_write_slice(self.ptr, &buf[..len])?;
         self.ptr = self.ptr.wrapping_add(len);
@@ -341,7 +341,7 @@ impl Write for VmBytesMut {
     }
 
     /// Flushes the buffer. This is a no-op for `VmBytesMut`.
-    fn flush(&mut self) -> axio::Result {
+    fn flush(&mut self) -> kio::Result {
         Ok(())
     }
 }

@@ -6,9 +6,9 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, FileFlags, OpenOptions};
-use axio::{Seek, SeekFrom};
 use axpoll::{IoEvents, Pollable};
 use axtask::current;
+use kio::{Seek, SeekFrom};
 use linux_raw_sys::general::__kernel_off_t;
 use starry_vm::{VmMutPtr, VmPtr};
 use syscalls::Sysno;

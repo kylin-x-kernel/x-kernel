@@ -33,7 +33,7 @@ impl EventFd {
 }
 
 impl FileLike for EventFd {
-    fn read(&self, dst: &mut IoDst) -> axio::Result<usize> {
+    fn read(&self, dst: &mut IoDst) -> kio::Result<usize> {
         if dst.remaining_mut() < size_of::<u64>() {
             return Err(AxError::InvalidInput);
         }
@@ -60,7 +60,7 @@ impl FileLike for EventFd {
         }))
     }
 
-    fn write(&self, src: &mut IoSrc) -> axio::Result<usize> {
+    fn write(&self, src: &mut IoSrc) -> kio::Result<usize> {
         if src.remaining() < size_of::<u64>() {
             return Err(AxError::InvalidInput);
         }
@@ -96,7 +96,7 @@ impl FileLike for EventFd {
         self.non_blocking.load(Ordering::Acquire)
     }
 
-    fn set_nonblocking(&self, non_blocking: bool) -> axio::Result {
+    fn set_nonblocking(&self, non_blocking: bool) -> kio::Result {
         self.non_blocking.store(non_blocking, Ordering::Release);
         Ok(())
     }

@@ -57,7 +57,7 @@ page_table = { path = "mm/page_table", features = ["axerrno"] }
 axbacktrace = { path = "util/axbacktrace" }
 axerrno = { path = "util/axerrno" }
 axfs-ng-vfs = { path = "fs/axfs-ng-vfs" }
-axio = { path = "io/axio" }
+kio = { path = "io/kio" }
 axpoll = { path = "core/axpoll" }
 memaddr = { path = "mm/memaddr" }
 memory_set = { path = "mm/memory_set" }

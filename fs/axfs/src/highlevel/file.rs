@@ -12,10 +12,10 @@ use axfs_ng_vfs::{
     FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
 use axhal::mem::{PhysAddr, VirtAddr, virt_to_phys};
-use axio::{SeekFrom, prelude::*};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
+use kio::{SeekFrom, prelude::*};
 use lru::LruCache;
 use spin::RwLock;
 
@@ -697,7 +697,7 @@ impl FileBackend {
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => cached.read_at(dst, offset),
-            Self::Direct(loc) => dst.read_from(&mut axio::read_fn(|buf| {
+            Self::Direct(loc) => dst.read_from(&mut kio::read_fn(|buf| {
                 loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
                     offset += *read as u64;
                 })
@@ -708,7 +708,7 @@ impl FileBackend {
     pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => cached.write_at(src, offset),
-            Self::Direct(loc) => src.write_to(&mut axio::write_fn(|buf| {
+            Self::Direct(loc) => src.write_to(&mut kio::write_fn(|buf| {
                 loc.entry()
                     .as_file()?
                     .write_at(buf, offset)
@@ -724,7 +724,7 @@ impl FileBackend {
             Self::Cached(cached) => cached.append(src),
             Self::Direct(loc) => {
                 let mut end = 0;
-                src.write_to(&mut axio::write_fn(|buf| {
+                src.write_to(&mut kio::write_fn(|buf| {
                     loc.entry().as_file()?.append(buf).map(|(n, offset)| {
                         end = offset;
                         n
@@ -846,7 +846,7 @@ impl File {
         self.inner.sync(data_only)
     }
 
-    pub fn read(&self, dst: impl Write + IoBufMut) -> axio::Result<usize> {
+    pub fn read(&self, dst: impl Write + IoBufMut) -> kio::Result<usize> {
         #[cfg(feature = "times")]
         {
             self.access_flags.fetch_or(1, Ordering::AcqRel);
@@ -861,7 +861,7 @@ impl File {
         }
     }
 
-    pub fn write(&self, src: impl Read + IoBuf) -> axio::Result<usize> {
+    pub fn write(&self, src: impl Read + IoBuf) -> kio::Result<usize> {
         #[cfg(feature = "times")]
         {
             self.access_flags.fetch_or(3, Ordering::AcqRel);
@@ -883,30 +883,30 @@ impl File {
         }
     }
 
-    pub fn flush(&self) -> axio::Result {
+    pub fn flush(&self) -> kio::Result {
         self.access(FileFlags::empty())?;
         Ok(())
     }
 }
 
 impl Read for &File {
-    fn read(&mut self, buf: &mut [u8]) -> axio::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> kio::Result<usize> {
         (*self).read(buf)
     }
 }
 
 impl Write for &File {
-    fn write(&mut self, buf: &[u8]) -> axio::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> kio::Result<usize> {
         (*self).write(buf)
     }
 
-    fn flush(&mut self) -> axio::Result {
+    fn flush(&mut self) -> kio::Result {
         (*self).flush()
     }
 }
 
 impl Seek for &File {
-    fn seek(&mut self, pos: SeekFrom) -> axio::Result<u64> {
+    fn seek(&mut self, pos: SeekFrom) -> kio::Result<u64> {
         self.access(FileFlags::empty())?;
 
         if let Some(guard) = self.position.as_ref() {

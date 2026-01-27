@@ -9,10 +9,10 @@ use core::{
 #[cfg(feature = "vsock")]
 use axdriver::prelude::VsockAddr;
 use axerrno::{AxError, AxResult, LinuxError};
-use axio::prelude::*;
 use axpoll::{IoEvents, Pollable};
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
+use kio::prelude::*;
 
 #[cfg(feature = "vsock")]
 use crate::vsock::VsockSocket;

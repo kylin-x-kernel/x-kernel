@@ -9,7 +9,7 @@ use axfs::{File, FsContext, fs};
 use axfs_ng_vfs::{
     Filesystem, Location, Mountpoint, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
-use axio::Read;
+use kio::Read;
 
 type RawMutex = spin::Mutex<()>;
 

@@ -29,7 +29,7 @@ axfs-ng-vfs.workspace = true
 axfs.workspace = true
 axhal.workspace = true
 axinput = { workspace = true, optional = true }
-axio.workspace = true
+kio.workspace = true
 klogger.workspace = true
 axmm.workspace = true
 axnet.workspace = true
