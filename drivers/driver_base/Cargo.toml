@@ -2,7 +2,7 @@
 name = "driver_base"
 edition.workspace = true
 description = "Common interfaces for all kinds of device drivers"
-documentation = "https://arceos-org.github.io/x-kernel/driver_base"
+documentation = "https://kylin-x-kernel.github.io/driver_base"
 keywords = ["arceos", "driver"]
 version.workspace = true
 authors.workspace = true
