@@ -1,10 +1,9 @@
-/// Trait for PmuIf
-
 /// PMU counter overflow callback.
 ///
 /// Called in interrupt context.
 pub type OverflowHandler = fn();
 
+/// Trait for PmuIf.
 #[def_plat_interface]
 pub trait PmuIf {
     /// Pmu interrupt handle func
