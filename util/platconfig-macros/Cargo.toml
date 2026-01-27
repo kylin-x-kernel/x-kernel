@@ -1,0 +1,22 @@
+[package]
+name = "platconfig-macros"
+version = "0.1.0"
+edition = "2021"
+authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
+description = "Procedural macros for X-Kernel platform configuration"
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/kylin-x-kernel/x-kernel"
+
+[lib]
+name = "platconfig_macros"
+proc-macro = true
+
+[features]
+nightly = []
+
+[dependencies]
+axconfig-gen = "0.2"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }

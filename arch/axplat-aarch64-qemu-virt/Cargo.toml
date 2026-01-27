@@ -22,7 +22,7 @@ pmu = ["irq", "axplat/pmu"]
 [dependencies]
 log = "0.4"
 page_table_entry = { workspace = true }
-axconfig-macros = "0.2"
+platconfig-macros = { workspace = true }
 axplat-aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv2"]}
 axcpu = { workspace = true }
 axplat = { workspace = true }

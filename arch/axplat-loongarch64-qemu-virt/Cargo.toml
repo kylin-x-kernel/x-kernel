@@ -26,7 +26,7 @@ loongArch64 = "0.2.4"
 page_table_entry = "0.5"
 uart_16550 = "0.4.0"
 
-axconfig-macros = "0.2"
+platconfig-macros = { workspace = true }
 axcpu = { workspace = true }
 axplat = { workspace = true }
 

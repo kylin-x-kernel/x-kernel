@@ -5,7 +5,7 @@ Cargo.lock
 *.bin
 *.dbg
 **/target/
-/.axconfig.*
+/.platconfig.*
 *.img
 /kernel-rv
 /kernel-la

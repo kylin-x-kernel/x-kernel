@@ -9,4 +9,4 @@ homepage.workspace = true
 repository = "https://github.com/kylin-x-kernel/x-kernel/tree/main/util/platconfig"
 
 [dependencies]
-axconfig-macros = "0.2"
+platconfig-macros = { workspace = true }
