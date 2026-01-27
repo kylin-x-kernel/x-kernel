@@ -31,6 +31,12 @@ where
     }
 
     #[inline]
+    /// Creates a range without checking that `start <= end`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `start <= end`. Violating this may break
+    /// invariants expected by users of `AddrRange`.
     pub const unsafe fn new_unchecked(start: A, end: A) -> Self {
         Self { start, end }
     }
@@ -53,6 +59,12 @@ where
     }
 
     #[inline]
+    /// Creates a range from `start` and `size` without overflow checks.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `start + size` does not overflow and that the
+    /// resulting end is valid for the address type.
     pub unsafe fn from_start_size_unchecked(start: A, size: usize) -> Self {
         let end = start.wrapping_add(size);
         Self { start, end }

@@ -1,4 +1,4 @@
-use memory_addr::{MemoryAddr, VirtAddr, va_range};
+use memaddr::{MemoryAddr, VirtAddr, va_range};
 
 use crate::{MappingBackend, MappingError, MemoryArea, MemorySet};
 

@@ -1,6 +1,6 @@
 use core::{arch::naked_asm, fmt};
 
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 
 /// Saved registers when a trap (exception) occurs.
 #[repr(C)]

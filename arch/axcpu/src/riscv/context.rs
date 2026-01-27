@@ -1,5 +1,5 @@
 use core::arch::naked_asm;
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 use riscv::register::sstatus::{self, FS};
 
 /// General registers of RISC-V.
