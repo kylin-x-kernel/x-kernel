@@ -53,12 +53,12 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
-            super::super::arch::local_irq_save_and_disable()
+            crate::guard::arch::local_irq_save_and_disable()
         }
 
         #[inline]
         fn release(state: Self::State) {
-            super::super::arch::local_irq_restore(state)
+            crate::guard::arch::local_irq_restore(state)
         }
     }
 
@@ -91,13 +91,13 @@ mod kernel {
         #[inline]
         fn acquire() -> Self::State {
             #[cfg(feature = "preempt")]
-            crate_interface::call_interface!(super::super::KernelGuardIf::disable_preempt);
+            crate_interface::call_interface!(crate::guard::KernelGuardIf::disable_preempt);
         }
 
         #[inline]
         fn release(_state: Self::State) {
             #[cfg(feature = "preempt")]
-            crate_interface::call_interface!(super::super::KernelGuardIf::enable_preempt);
+            crate_interface::call_interface!(crate::guard::KernelGuardIf::enable_preempt);
         }
     }
 
@@ -132,18 +132,18 @@ mod kernel {
         fn acquire() -> Self::State {
             // Order: disable preemption first, then IRQs
             #[cfg(feature = "preempt")]
-            crate_interface::call_interface!(super::super::KernelGuardIf::disable_preempt);
+            crate_interface::call_interface!(crate::guard::KernelGuardIf::disable_preempt);
 
-            super::super::arch::local_irq_save_and_disable()
+            crate::guard::arch::local_irq_save_and_disable()
         }
 
         #[inline]
         fn release(state: Self::State) {
             // Order: restore IRQs first, then enable preemption
-            super::super::arch::local_irq_restore(state);
+            crate::guard::arch::local_irq_restore(state);
 
             #[cfg(feature = "preempt")]
-            crate_interface::call_interface!(super::super::KernelGuardIf::enable_preempt);
+            crate_interface::call_interface!(crate::guard::KernelGuardIf::enable_preempt);
         }
     }
 
