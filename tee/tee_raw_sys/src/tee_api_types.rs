@@ -4,7 +4,7 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
-use core::{ffi::*, fmt::Debug, fmt};
+use core::{ffi::*, fmt, fmt::Debug};
 
 use crate::libc_compat::size_t;
 
@@ -104,8 +104,9 @@ impl Debug for TEE_ObjectInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "TEE_ObjectInfo{{objectId: {:#010X?}, objectType: {:#010X?}, objectSize: {:#010X?}, maxObjectSize: \
-             {:#010X?}, objectUsage: {:#010X?}, dataSize: {:#010X?}, dataPosition: {:#010X?}, handleFlags: {:#010X?}}}",
+            "TEE_ObjectInfo{{objectId: {:#010X?}, objectType: {:#010X?}, objectSize: {:#010X?}, \
+             maxObjectSize: {:#010X?}, objectUsage: {:#010X?}, dataSize: {:#010X?}, dataPosition: \
+             {:#010X?}, handleFlags: {:#010X?}}}",
             self.objectId,
             self.objectType,
             self.objectSize,
