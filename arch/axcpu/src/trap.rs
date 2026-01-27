@@ -4,14 +4,9 @@ pub use linkme::{
     distributed_slice as def_trap_handler, distributed_slice as register_trap_handler,
 };
 use memaddr::VirtAddr;
-pub use page_table_entry::MappingFlags as PageFaultFlags;
-
-pub use crate::TrapFrame;
-
-pub use crate::TrapFrame;
-pub use linkme::distributed_slice as def_trap_handler;
-pub use linkme::distributed_slice as register_trap_handler;
 pub use page_table::PagingFlags as PageFaultFlags;
+
+pub use crate::TrapFrame;
 
 /// A slice of IRQ handler functions.
 #[def_trap_handler]

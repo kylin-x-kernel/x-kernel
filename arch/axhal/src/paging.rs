@@ -4,7 +4,9 @@ use axalloc::{UsageKind, global_allocator};
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use page_table::PagingHandler;
 #[doc(no_inline)]
-pub use page_table::{PagingFlags as MappingFlags, PageSize, PtError as PagingError, PtResult as PagingResult};
+pub use page_table::{
+    PageSize, PagingFlags as MappingFlags, PtError as PagingError, PtResult as PagingResult,
+};
 
 use crate::mem::{phys_to_virt, virt_to_phys};
 
