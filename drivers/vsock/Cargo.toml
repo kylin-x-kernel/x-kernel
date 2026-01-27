@@ -1,11 +1,11 @@
 [package]
-name = "axdriver_vsock"
+name = "vsock"
 edition.workspace = true
 description = "Common traits and types for vsock drivers"
-documentation = "https://arceos-org.github.io/axdriver_crates/axdriver_vsock"
-keywords = ["arceos", "driver", "vsock"]
+keywords = ["x-kernel", "driver", "vsock"]
+documentation = "https://kylin-x-kernel.github.io/vsock"
 version.workspace = true
-authors = ["Weikang Guo <guoweikang@kylinos.cn>"]
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
@@ -15,5 +15,5 @@ categories.workspace = true
 default = []
 
 [dependencies]
-driver_base = { workspace = true }
-log = "0.4"
+driver_base.workspace = true
+log.workspace = true

@@ -1,4 +1,3 @@
-use axdriver_vsock::{VsockConnId, VsockDriverEvent, VsockDriverOps};
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{
     Hal,
@@ -7,6 +6,7 @@ use virtio_drivers::{
     },
     transport::Transport,
 };
+use vsock::{VsockConnId, VsockDriverEventType, VsockDriverOps};
 
 use crate::as_driver_error;
 
@@ -104,7 +104,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
             .map_err(as_driver_error)
     }
 
-    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEvent>> {
+    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEventType>> {
         match self.inner.poll() {
             Ok(None) => {
                 // no event
@@ -126,9 +126,9 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
 fn convert_vsock_event<H: Hal, T: Transport>(
     event: VsockEvent,
     _inner: &mut InnerDev<H, T>,
-) -> DriverResult<VsockDriverEvent> {
+) -> DriverResult<VsockDriverEventType> {
     let cid = VsockConnId {
-        peer_addr: axdriver_vsock::VsockAddr {
+        peer_addr: vsock::VsockAddr {
             cid: event.source.cid as _,
             port: event.source.port as _,
         },
@@ -136,13 +136,13 @@ fn convert_vsock_event<H: Hal, T: Transport>(
     };
 
     match event.event_type {
-        VsockEventType::ConnectionRequest => Ok(VsockDriverEvent::ConnectionRequest(cid)),
-        VsockEventType::Connected => Ok(VsockDriverEvent::Connected(cid)),
+        VsockEventType::ConnectionRequest => Ok(VsockDriverEventType::ConnectionRequest(cid)),
+        VsockEventType::Connected => Ok(VsockDriverEventType::Connected(cid)),
         VsockEventType::Received { length } => {
             // Do not read data here, let the upper layer decide when to read.
-            Ok(VsockDriverEvent::Received(cid, length))
+            Ok(VsockDriverEventType::Received(cid, length))
         }
-        VsockEventType::Disconnected { reason: _ } => Ok(VsockDriverEvent::Disconnected(cid)),
-        _ => Ok(VsockDriverEvent::Unknown),
+        VsockEventType::Disconnected { reason: _ } => Ok(VsockDriverEventType::Disconnected(cid)),
+        _ => Ok(VsockDriverEventType::Unknown),
     }
 }
