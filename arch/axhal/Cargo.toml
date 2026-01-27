@@ -43,7 +43,7 @@ rtc = [
 ]
 nmi = ["axplat/nmi", "axplat-aarch64-qemu-virt?/nmi"]
 pmu = ["axplat-aarch64-qemu-virt?/pmu"]
-paging = ["dep:axalloc", "dep:page_table_multiarch"]
+paging = ["dep:axalloc", "dep:page_table"]
 tls = ["axcpu/tls"]
 uspace = ["paging", "axcpu/uspace"]
 
@@ -76,7 +76,7 @@ lazyinit.workspace = true
 linkme = { version = "0.3.33", optional = true }
 log.workspace = true
 memaddr.workspace = true
-page_table_multiarch = { workspace = true, optional = true }
+page_table = { workspace = true, optional = true }
 percpu.workspace = true
 fdt-parser = "0.4"
 
