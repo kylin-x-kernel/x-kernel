@@ -107,8 +107,8 @@ fn aarch64_trap_handler(tf: &mut TrapFrame, kind: TrapKind, source: TrapSource) 
                 e => {
                     let vaddr = va!(FAR_EL1.get() as usize);
                     panic!(
-                        "Undispatch_irqd synchronous exception {:?} @ {:#x}: ESR={:#x} (EC {:#08b}, \
-                         FAR: {:#x} ISS {:#x})\n{}",
+                        "Undispatch_irqd synchronous exception {:?} @ {:#x}: ESR={:#x} (EC \
+                         {:#08b}, FAR: {:#x} ISS {:#x})\n{}",
                         e,
                         tf.elr,
                         esr.get(),

@@ -2,8 +2,8 @@ use core::{
     fmt,
     ops::{Deref, DerefMut, Range},
 };
-use kplat_macros::device_interface;
 
+use kplat_macros::device_interface;
 pub use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, pa, va};
 
 bitflags::bitflags! {
@@ -34,7 +34,10 @@ impl fmt::Debug for MemFlags {
 
 pub const RAM_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::FREE);
 pub const RSVD_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::RSVD);
-pub const MMIO_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::DEV).union(MemFlags::RSVD);
+pub const MMIO_DEF: MemFlags = MemFlags::R
+    .union(MemFlags::W)
+    .union(MemFlags::DEV)
+    .union(MemFlags::RSVD);
 
 pub type MemRange = (usize, usize);
 
@@ -49,6 +52,7 @@ impl<T: Sized> PageAligned<T> {
 
 impl<T> Deref for PageAligned<T> {
     type Target = T;
+
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -113,9 +117,7 @@ pub fn total_ram() -> usize {
 
 pub type OverlapError = (Range<usize>, Range<usize>);
 
-pub fn check_overlap(
-    iter: impl Iterator<Item = MemRange>,
-) -> Result<(), OverlapError> {
+pub fn check_overlap(iter: impl Iterator<Item = MemRange>) -> Result<(), OverlapError> {
     let mut last = Range::default();
     for (s, n) in iter {
         if last.end > s {
@@ -126,11 +128,7 @@ pub fn check_overlap(
     Ok(())
 }
 
-pub fn sub_ranges<F>(
-    base: &[MemRange],
-    cut: &[MemRange],
-    mut cb: F,
-) -> Result<(), OverlapError>
+pub fn sub_ranges<F>(base: &[MemRange], cut: &[MemRange], mut cb: F) -> Result<(), OverlapError>
 where
     F: FnMut(MemRange),
 {

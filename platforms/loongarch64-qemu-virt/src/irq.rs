@@ -1,8 +1,9 @@
-use kplat::interrupts::{HandlerTable, TargetCpu, Handler, IntrManager};
+use kplat::interrupts::{Handler, HandlerTable, IntrManager, TargetCpu};
 use loongArch64::reg_handler::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
 };
+
 use crate::config::devices::{EIOINTC_IRQ, TIMER_IRQ};
 mod eiointc;
 mod pch_pic;
@@ -26,6 +27,7 @@ impl IrqType {
             n => Self::Ex(n),
         }
     }
+
     fn as_usize(&self) -> usize {
         match self {
             IrqType::Timer => TIMER_IRQ,
@@ -60,6 +62,7 @@ impl IntrManager for IntrManagerImpl {
             }
         }
     }
+
     fn reg_handler(irq: usize, handler: Handler) -> bool {
         if IRQ_HANDLER_TABLE.reg_handler_handler(irq, handler) {
             Self::enable(irq, true);
@@ -68,11 +71,13 @@ impl IntrManager for IntrManagerImpl {
         warn!("reg_handler handler for IRQ {} failed", irq);
         false
     }
+
     fn unreg_handler(irq: usize) -> Option<Handler> {
         IRQ_HANDLER_TABLE
             .unreg_handler_handler(irq)
             .inspect(|_| Self::enable(irq, false))
     }
+
     fn dispatch_irq(irq: usize) -> Option<usize> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
@@ -97,24 +102,31 @@ impl IntrManager for IntrManagerImpl {
         }
         Some(irq.as_usize())
     }
+
     fn notify_cpu(_interrupt_id: usize, _target: TargetCpu) {
         todo!()
     }
+
     fn set_prio(irq: usize, priority: u8) {
         todo!()
     }
+
     fn save_disable() -> usize {
         todo!()
     }
+
     fn restore(flag: usize) {
         todo!()
     }
+
     fn enable_local() {
         todo!()
     }
+
     fn disable_local() {
         todo!()
     }
+
     fn is_enabled() -> bool {
         todo!()
     }

@@ -8,7 +8,7 @@ use axcpu::trap::{IRQ, register_trap_handler};
 #[cfg(feature = "ipi")]
 pub use kplat::interrupts::{TargetCpu, notify_cpu};
 pub use kplat::interrupts::{
-    dispatch_irq, restore, save_disable, reg_handler as register, enable, set_prio,
+    dispatch_irq, enable, reg_handler as register, restore, save_disable, set_prio,
     unreg_handler as unregister,
 };
 

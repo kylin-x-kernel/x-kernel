@@ -1,10 +1,9 @@
- 
-use kplat::timer::GlobalTimer;
 #[cfg(feature = "irq")]
 use int_ratio::Ratio;
+use kplat::timer::GlobalTimer;
 use raw_cpuid::CpuId;
 #[cfg(feature = "irq")]
-const LAPIC_TICKS_PER_SEC: u64 = 1_000_000_000;  
+const LAPIC_TICKS_PER_SEC: u64 = 1_000_000_000;
 #[cfg(feature = "irq")]
 static mut NANOS_TO_LAPIC_TICKS_RATIO: Ratio = Ratio::zero();
 static mut INIT_TICK: u64 = 0;
@@ -58,15 +57,19 @@ impl GlobalTimer for GlobalTimerImpl {
     fn now_ticks() -> u64 {
         unsafe { core::arch::x86_64::_rdtsc() - INIT_TICK }
     }
+
     fn t2ns(ticks: u64) -> u64 {
         ticks * 1_000 / unsafe { CPU_FREQ_MHZ }
     }
+
     fn ns2t(nanos: u64) -> u64 {
         nanos * unsafe { CPU_FREQ_MHZ } / 1_000
     }
+
     fn offset_ns() -> u64 {
         unsafe { RTC_EPOCHOFFSET_NANOS }
     }
+
     #[cfg(feature = "irq")]
     fn arm_timer(deadline_ns: u64) {
         let lapic = super::apic::local_apic();
@@ -81,10 +84,12 @@ impl GlobalTimer for GlobalTimerImpl {
             }
         }
     }
+
     #[cfg(feature = "irq")]
     fn interrupt_id() -> usize {
         crate::config::devices::TIMER_IRQ
     }
+
     fn freq() -> u64 {
         unsafe { CPU_FREQ_MHZ * 1_000_000 }
     }

@@ -1,4 +1,5 @@
 use core::time::Duration;
+
 use kplat_macros::device_interface;
 
 pub type ClockTime = Duration;

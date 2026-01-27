@@ -3,18 +3,18 @@
 
 extern crate kplat_macros;
 
-pub mod io;
 pub mod boot;
+pub mod cpu;
 #[cfg(feature = "irq")]
 pub mod interrupts;
+pub mod io;
 pub mod memory;
 #[cfg(feature = "nmi")]
 pub mod nm_irq;
-pub mod cpu;
 #[cfg(feature = "pmu")]
 pub mod perf;
-pub mod sys;
 pub mod psci;
+pub mod sys;
 pub mod timer;
 
 pub use crate_interface::impl_interface as impl_dev_interface;
@@ -34,10 +34,7 @@ macro_rules! check_str_eq {
         const _: () = assert!($crate::__priv::str_eq!($l, $r), $msg);
     };
     ($l:expr, $r:expr $(,)?) => {
-        const _: () = assert!(
-            $crate::__priv::str_eq!($l, $r),
-            "String mismatch",
-        );
+        const _: () = assert!($crate::__priv::str_eq!($l, $r), "String mismatch",);
     };
 }
 

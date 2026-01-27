@@ -1,4 +1,3 @@
- 
 #[macro_export]
 macro_rules! nmi_if_impl {
     ($name:ident) => {
@@ -11,21 +10,27 @@ macro_rules! nmi_if_impl {
                 $crate::gic::set_prio(crate::config::devices::PMU_IRQ, 0);
                 $crate::pmu::init_cycle_counter(threshold)
             }
+
             fn enable() {
                 $crate::pmu::enable(CYCLE_COUNTER_INDEX);
             }
+
             fn disable() {
                 $crate::pmu::disable(CYCLE_COUNTER_INDEX);
             }
+
             fn is_enabled() -> bool {
                 $crate::pmu::is_enabled(CYCLE_COUNTER_INDEX)
             }
+
             fn name() -> &'static str {
                 "PMU"
             }
+
             fn nmi_type() -> NmiType {
                 NmiType::PseudoNmi
             }
+
             fn reg_handler_nmi_handler(handler: NmiHandler) -> bool {
                 $crate::pmu::reg_handler_overflow_handler(CYCLE_COUNTER_INDEX, handler)
             }

@@ -187,7 +187,10 @@ fn dispatch_irq_vsock_event(event: VsockDriverEvent, dev: &mut AxVsockDevice, bu
             match dev.recv(conn_id, &mut buf[..max_read]) {
                 Ok(read_len) => {
                     if let Err(e) = manager.on_data_received(conn_id, &buf[..read_len]) {
-                        info!("Failed to dispatch_irq received data: conn_id={conn_id:?}, error={e:?}",);
+                        info!(
+                            "Failed to dispatch_irq received data: conn_id={conn_id:?}, \
+                             error={e:?}",
+                        );
                     }
                 }
                 Err(e) => {

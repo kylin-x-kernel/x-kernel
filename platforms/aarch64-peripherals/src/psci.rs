@@ -1,4 +1,3 @@
- 
 #![allow(dead_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;

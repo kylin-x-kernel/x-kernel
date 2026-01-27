@@ -1,4 +1,3 @@
- 
 use kplat::io::Terminal;
 use kspin::SpinNoIrq;
 use uart_16550::SerialPort;
@@ -20,6 +19,7 @@ impl Terminal for TerminalImpl {
             putchar(*c);
         }
     }
+
     fn read_data(bytes: &mut [u8]) -> usize {
         let mut read_len = 0;
         while read_len < bytes.len() {
@@ -32,6 +32,7 @@ impl Terminal for TerminalImpl {
         }
         read_len
     }
+
     #[cfg(feature = "irq")]
     fn interrupt_id() -> Option<usize> {
         None

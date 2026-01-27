@@ -317,7 +317,11 @@ impl AddrSpace {
     ///
     /// Returns `true` if the page fault is dispatch_irqd successfully (not a real
     /// fault).
-    pub fn dispatch_irq_page_fault(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
+    pub fn dispatch_irq_page_fault(
+        &mut self,
+        vaddr: VirtAddr,
+        access_flags: PageFaultFlags,
+    ) -> bool {
         if !self.va_range.contains(vaddr) {
             return false;
         }

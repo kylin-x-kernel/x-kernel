@@ -1,4 +1,5 @@
 use kplat::memory::{HwMemory, PhysAddr, RawRange, VirtAddr, pa, va};
+
 use crate::config::{
     devices::MMIO_RANGES,
     plat::{
@@ -20,6 +21,7 @@ impl HwMemory for HwMemoryImpl {
             ]
         }
     }
+
     /// Returns all reserved physical memory ranges on the platform.
     ///
     /// Reserved memory can be contained in [`ram_regions`], they are not
@@ -27,13 +29,16 @@ impl HwMemory for HwMemoryImpl {
     fn reserved_ram_regions() -> &'static [RawRange] {
         &[(0, 0x200000)] // boot_info + fdt
     }
+
     /// Returns all device memory (MMIO) ranges on the platform.
     fn mmio_regions() -> &'static [RawRange] {
         &MMIO_RANGES
     }
+
     fn p2v(paddr: PhysAddr) -> VirtAddr {
         va!(paddr.as_usize() + PHYS_VIRT_OFFSET)
     }
+
     fn v2p(vaddr: VirtAddr) -> PhysAddr {
         let vaddr = vaddr.as_usize();
         if vaddr & 0xffff_0000_0000_0000 == PHYS_BOOT_OFFSET {
@@ -42,6 +47,7 @@ impl HwMemory for HwMemoryImpl {
             pa!(vaddr - PHYS_VIRT_OFFSET)
         }
     }
+
     fn kernel_layout() -> (VirtAddr, usize) {
         (
             va!(crate::config::plat::KERNEL_ASPACE_BASE),

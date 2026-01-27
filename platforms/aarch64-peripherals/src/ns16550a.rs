@@ -1,4 +1,3 @@
- 
 use kplat::memory::VirtAddr;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
@@ -63,14 +62,17 @@ macro_rules! ns16550_console_if_impl {
             fn write_data(bytes: &[u8]) {
                 $crate::ns16550a::write_data(bytes);
             }
+
             fn write_data_force(bytes: &[u8]) {
                 let mut uart_base =
                     kplat::memory::p2v(kplat::memory::pa!(crate::config::devices::UART_PADDR));
                 $crate::ns16550a::write_data_force(uart_16550, bytes);
             }
+
             fn read_data(bytes: &mut [u8]) -> usize {
                 $crate::ns16550a::read_data(bytes)
             }
+
             #[cfg(feature = "irq")]
             fn interrupt_id() -> Option<usize> {
                 Some(crate::config::devices::UART_IRQ as _)

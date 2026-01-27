@@ -1,6 +1,6 @@
- 
 use core::mem::MaybeUninit;
-use kplat::memory::{PhysAddr, pa, p2v};
+
+use kplat::memory::{PhysAddr, p2v, pa};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use x2apic::{
@@ -8,6 +8,7 @@ use x2apic::{
     lapic::{LocalApic, LocalApicBuilder, xapic_base},
 };
 use x86_64::instructions::port::Port;
+
 use self::vectors::*;
 pub(super) mod vectors {
     pub const APIC_TIMER_VECTOR: u8 = 0xf0;
@@ -84,7 +85,7 @@ pub fn init_secondary() {
 }
 #[cfg(feature = "irq")]
 mod irq_impl {
-    use kplat::interrupts::{HandlerTable, TargetCpu, Handler, IntrManager};
+    use kplat::interrupts::{Handler, HandlerTable, IntrManager, TargetCpu};
     const MAX_IRQ_COUNT: usize = 256;
     static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
     struct IntrManagerImpl;
@@ -93,6 +94,7 @@ mod irq_impl {
         fn enable(vector: usize, enabled: bool) {
             super::enable(vector, enabled);
         }
+
         fn reg_handler(vector: usize, handler: Handler) -> bool {
             if IRQ_HANDLER_TABLE.reg_handler_handler(vector, handler) {
                 Self::enable(vector, true);
@@ -101,10 +103,12 @@ mod irq_impl {
             warn!("reg_handler handler for IRQ {} failed", vector);
             false
         }
+
         fn unreg_handler(vector: usize) -> Option<Handler> {
             Self::enable(vector, false);
             IRQ_HANDLER_TABLE.unreg_handler_handler(vector)
         }
+
         fn dispatch_irq(vector: usize) -> Option<usize> {
             trace!("IRQ {}", vector);
             if !IRQ_HANDLER_TABLE.dispatch_irq(vector) {
@@ -113,6 +117,7 @@ mod irq_impl {
             unsafe { super::local_apic().end_of_interrupt() };
             Some(vector)
         }
+
         fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
             match target {
                 TargetCpu::Current { cpu_id: _ } => {
@@ -138,21 +143,27 @@ mod irq_impl {
                 }
             }
         }
+
         fn set_prio(_irq: usize, _priority: u8) {
             todo!()
         }
+
         fn save_disable() -> usize {
             todo!()
         }
+
         fn restore(_flag: usize) {
             todo!()
         }
+
         fn enable_local() {
             todo!()
         }
+
         fn disable_local() {
             todo!()
         }
+
         fn is_enabled() -> bool {
             todo!()
         }

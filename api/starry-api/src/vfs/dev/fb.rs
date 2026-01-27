@@ -226,10 +226,7 @@ impl DeviceOps for FrameBuffer {
     }
 
     fn mmap(&self) -> DeviceMmap {
-        DeviceMmap::Physical(PhysAddrRange::from_start_size(
-            v2p(self.base),
-            self.size,
-        ))
+        DeviceMmap::Physical(PhysAddrRange::from_start_size(v2p(self.base), self.size))
     }
 
     fn flags(&self) -> NodeFlags {

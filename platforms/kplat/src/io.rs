@@ -1,4 +1,5 @@
 use core::fmt::{Arguments, Result, Write};
+
 use kplat_macros::device_interface;
 
 #[device_interface]

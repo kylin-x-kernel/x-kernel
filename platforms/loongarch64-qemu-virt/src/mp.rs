@@ -1,5 +1,6 @@
 use kplat::memory::PhysAddr;
 use loongArch64::ipi::{csr_mail_send, notify_cpu_single};
+
 use crate::config::plat::{PHYS_BOOT_OFFSET, PHYS_VIRT_OFFSET};
 const ACTION_BOOT_CPU: u32 = 1;
 pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) {

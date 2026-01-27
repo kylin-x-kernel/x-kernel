@@ -3,14 +3,16 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicPtr, Ordering},
 };
+
 use kplat::{
-    irq::{HandlerTable, TargetCpu, Handler, IntrManager},
+    irq::{Handler, HandlerTable, IntrManager, TargetCpu},
     percpu::this_cpu_id,
 };
 use kspin::SpinNoIrq;
 use riscv::reg_handler::sie;
 use riscv_plic::Plic;
 use sbi_rt::HartMask;
+
 use crate::config::{devices::PLIC_PADDR, plat::PHYS_VIRT_OFFSET};
 pub(super) const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
 #[allow(unused)]
@@ -26,7 +28,7 @@ static PLIC: SpinNoIrq<Plic> = SpinNoIrq::new(unsafe {
 });
 fn this_context() -> usize {
     let hart_id = this_cpu_id();
-    hart_id * 2 + 1  
+    hart_id * 2 + 1
 }
 pub(super) fn init_percpu() {
     unsafe {
@@ -90,6 +92,7 @@ impl IntrManager for IntrManagerImpl {
             }
         );
     }
+
     fn reg_handler(irq: usize, handler: Handler) -> bool {
         with_cause!(
             irq,
@@ -110,6 +113,7 @@ impl IntrManager for IntrManagerImpl {
             }
         )
     }
+
     fn unreg_handler(irq: usize) -> Option<Handler> {
         with_cause!(
             irq,
@@ -136,6 +140,7 @@ impl IntrManager for IntrManagerImpl {
             @EX_IRQ => IRQ_HANDLER_TABLE.unreg_handler_handler(irq).inspect(|_| Self::enable(irq, false))
         )
     }
+
     fn dispatch_irq(irq: usize) -> Option<usize> {
         with_cause!(
             irq,
@@ -171,6 +176,7 @@ impl IntrManager for IntrManagerImpl {
             }
         )
     }
+
     fn notify_cpu(_interrupt_id: usize, target: TargetCpu) {
         match target {
             TargetCpu::Current { cpu_id } => {
@@ -197,21 +203,27 @@ impl IntrManager for IntrManagerImpl {
             }
         }
     }
+
     fn set_prio(_irq: usize, _priority: u8) {
         todo!()
     }
+
     fn save_disable() -> usize {
         todo!()
     }
+
     fn restore(_flag: usize) {
         todo!()
     }
+
     fn enable_local() {
         todo!()
     }
+
     fn disable_local() {
         todo!()
     }
+
     fn is_enabled() -> bool {
         todo!()
     }

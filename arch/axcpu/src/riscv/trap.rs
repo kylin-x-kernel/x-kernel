@@ -49,7 +49,9 @@ fn riscv_trap_handler(tf: &mut TrapFrame) {
     if let Ok(cause) = scause.cause().try_into::<I, E>() {
         match cause {
             Trap::Exception(E::LoadPageFault) => dispatch_irq_page_fault(tf, PageFaultFlags::READ),
-            Trap::Exception(E::StorePageFault) => dispatch_irq_page_fault(tf, PageFaultFlags::WRITE),
+            Trap::Exception(E::StorePageFault) => {
+                dispatch_irq_page_fault(tf, PageFaultFlags::WRITE)
+            }
             Trap::Exception(E::InstructionPageFault) => {
                 dispatch_irq_page_fault(tf, PageFaultFlags::EXECUTE)
             }

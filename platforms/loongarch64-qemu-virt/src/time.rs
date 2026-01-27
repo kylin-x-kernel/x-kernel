@@ -15,8 +15,8 @@ pub(super) fn init_percpu() {
 }
 #[cfg(feature = "rtc")]
 fn init_rtc() {
-    use kplat::memory::{PhysAddr, pa, p2v};
     use chrono::{TimeZone, Timelike, Utc};
+    use kplat::memory::{PhysAddr, p2v, pa};
     const SYS_TOY_READ0: usize = 0x2C;
     const SYS_TOY_READ1: usize = 0x30;
     const SYS_RTCCTRL: usize = 0x40;
@@ -63,22 +63,28 @@ impl GlobalTimer for GlobalTimerImpl {
     fn now_ticks() -> u64 {
         Time::read() as _
     }
+
     fn offset_ns() -> u64 {
         unsafe { RTC_EPOCHOFFSET_NANOS }
     }
+
     fn t2ns(ticks: u64) -> u64 {
         ticks * *NANOS_PER_TICK
     }
+
     fn ns2t(nanos: u64) -> u64 {
         nanos / *NANOS_PER_TICK
     }
+
     fn freq() -> u64 {
         crate::config::devices::TIMER_FREQUENCY as u64
     }
+
     #[cfg(feature = "irq")]
     fn interrupt_id() -> usize {
         crate::config::devices::TIMER_IRQ
     }
+
     #[cfg(feature = "irq")]
     fn arm_timer(deadline_ns: u64) {
         use loongArch64::reg_handler::tcfg;

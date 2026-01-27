@@ -241,7 +241,10 @@ impl SocketOps for TcpSocket {
                         .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
                     Ok(())
                 })?;
-                debug!("TCP socket {}: binding to {}", self.dispatch_irq, local_addr);
+                debug!(
+                    "TCP socket {}: binding to {}",
+                    self.dispatch_irq, local_addr
+                );
                 Ok(())
             })
     }

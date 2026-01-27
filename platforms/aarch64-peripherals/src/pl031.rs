@@ -1,6 +1,6 @@
- 
 use arm_pl031::Rtc;
 use kplat::memory::VirtAddr;
+
 use crate::generic_timer::{now_ticks, t2ns};
 static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
 #[inline]

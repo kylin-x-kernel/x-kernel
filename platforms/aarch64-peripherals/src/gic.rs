@@ -1,13 +1,13 @@
- 
 use core::arch::asm;
 #[cfg(feature = "pmr")]
 use core::sync::atomic::{AtomicBool, Ordering};
+
 use aarch64_cpu::registers::{DAIF, Readable};
 #[cfg(feature = "gicv2")]
 use arm_gic_driver::v2::*;
 #[cfg(feature = "gicv3")]
 use arm_gic_driver::v3::*;
-use kplat::interrupts::{HandlerTable, TargetCpu, Handler};
+use kplat::interrupts::{Handler, HandlerTable, TargetCpu};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 const MAX_IRQ_COUNT: usize = 1024;
@@ -209,9 +209,10 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
         TargetCpu::Other { cpu_id } => {
             let affinity = Affinity::from_mpidr(cpu_id as u64);
             let target_list = TargetList::new([affinity]);
-            GIC.lock()
-                .cpu_interface()
-                .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::List(target_list));
+            GIC.lock().cpu_interface().send_sgi(
+                IntId::sgi(interrupt_id as u32),
+                SGITarget::List(target_list),
+            );
         }
         TargetCpu::AllExceptCurrent {
             cpu_id: _,
@@ -299,34 +300,44 @@ macro_rules! irq_if_impl {
             fn enable(irq: usize, enabled: bool) {
                 $crate::gic::enable(irq, enabled);
             }
+
             fn reg_handler(irq: usize, handler: kplat::interrupts::Handler) -> bool {
                 $crate::gic::register_handler(irq, handler)
             }
+
             fn unreg_handler(irq: usize) -> Option<kplat::interrupts::Handler> {
                 $crate::gic::unregister_handler(irq)
             }
+
             fn dispatch_irq(irq: usize) -> Option<usize> {
                 let pmu_irq = crate::config::devices::PMU_IRQ;
                 $crate::gic::dispatch_irq_irq(irq, pmu_irq)
             }
+
             fn notify_cpu(interrupt_id: usize, target: kplat::interrupts::TargetCpu) {
                 $crate::gic::notify_cpu(interrupt_id, target);
             }
+
             fn set_prio(irq: usize, priority: u8) {
                 $crate::gic::set_prio(irq, priority);
             }
+
             fn save_disable() -> usize {
                 $crate::gic::save_disable()
             }
+
             fn restore(flag: usize) {
                 $crate::gic::restore(flag);
             }
+
             fn enable_local() {
                 $crate::gic::enable_local();
             }
+
             fn disable_local() {
                 $crate::gic::disable_local();
             }
+
             fn is_enabled() -> bool {
                 $crate::gic::is_enabled()
             }

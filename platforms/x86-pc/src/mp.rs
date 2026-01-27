@@ -1,4 +1,3 @@
- 
 use kplat::{
     mem::{PAGE_SIZE_4K, PhysAddr, pa},
     time::{Duration, busy_wait},
@@ -25,16 +24,16 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
             (ap_end as *const () as usize - ap_start as *const () as usize) / 8,
         );
     }
-    start_page[U64_PER_PAGE - 2] = stack_top.as_usize() as u64;  
-    start_page[U64_PER_PAGE - 1] = ap_entry32 as *const () as usize as _;  
+    start_page[U64_PER_PAGE - 2] = stack_top.as_usize() as u64;
+    start_page[U64_PER_PAGE - 1] = ap_entry32 as *const () as usize as _;
 }
 pub fn start_secondary_cpu(apic_id: usize, stack_top: PhysAddr) {
     unsafe { setup_startup_page(stack_top) };
     let apic_id = super::apic::raw_apic_id(apic_id as u8);
     let lapic = super::apic::local_apic();
     unsafe { lapic.send_init_ipi(apic_id) };
-    busy_wait(Duration::from_millis(10));  
+    busy_wait(Duration::from_millis(10));
     unsafe { lapic.send_sipi(START_PAGE_IDX, apic_id) };
-    busy_wait(Duration::from_micros(200));  
+    busy_wait(Duration::from_micros(200));
     unsafe { lapic.send_sipi(START_PAGE_IDX, apic_id) };
 }

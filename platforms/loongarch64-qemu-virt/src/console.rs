@@ -1,10 +1,11 @@
 use kplat::{
     console::Terminal,
-    mem::{pa, p2v},
+    mem::{p2v, pa},
 };
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use uart_16550::MmioSerialPort;
+
 use crate::config::devices::UART_PADDR;
 static UART: LazyInit<SpinNoIrq<MmioSerialPort>> = LazyInit::new();
 pub(crate) fn early_init() {
@@ -29,6 +30,7 @@ impl Terminal for TerminalImpl {
             }
         }
     }
+
     fn read_data(bytes: &mut [u8]) -> usize {
         let mut uart = UART.lock();
         for (i, byte) in bytes.iter_mut().enumerate() {
@@ -39,6 +41,7 @@ impl Terminal for TerminalImpl {
         }
         bytes.len()
     }
+
     #[cfg(feature = "irq")]
     fn interrupt_id() -> Option<usize> {
         Some(crate::config::devices::UART_IRQ)

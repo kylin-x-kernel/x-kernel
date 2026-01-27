@@ -8,11 +8,11 @@ mod boot;
 mod console;
 mod init;
 mod mem;
+#[cfg(feature = "smp")]
+mod mp;
 mod power;
 pub mod psci;
 mod time;
-#[cfg(feature = "smp")]
-mod mp;
 pub mod config {
     platconfig_macros::include_configs!(path_env = "PLAT_CONFIG_PATH", fallback = "axconfig.toml");
     assert_str_eq!(

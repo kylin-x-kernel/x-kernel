@@ -3,21 +3,12 @@
 pub use core::time::Duration;
 pub type TimeValue = Duration;
 
-pub use kplat::timer::{
-    US_SEC, MS_SEC, NS_US, NS_MS, NS_SEC,
-    spin_wait, spin_until, now_ticks, offset_ns,
-    now as monotonic_time, now_ns as monotonic_time_nanos,
-    ns2t, t2ns, freq,
-    wall as wall_time, wall_ns as wall_time_nanos,
-};
-
 // Aliases for kplat names if needed locally or exposed
 pub use kplat::timer::now;
-pub use kplat::timer::now_ns;
-pub use kplat::timer::wall;
-pub use kplat::timer::wall_ns;
-
+pub use kplat::timer::{
+    MS_SEC, NS_MS, NS_SEC, NS_SEC as NANOS_PER_SEC, NS_US, NS_US as NANOS_PER_MICROS, US_SEC, freq,
+    now as monotonic_time, now_ns as monotonic_time_nanos, now_ns, now_ticks, ns2t, offset_ns,
+    spin_until, spin_wait, t2ns, wall as wall_time, wall, wall_ns as wall_time_nanos, wall_ns,
+};
 #[cfg(feature = "irq")]
-pub use kplat::timer::{interrupt_id, arm_timer};
-pub use kplat::timer::NS_US as NANOS_PER_MICROS;
-pub use kplat::timer::NS_SEC as NANOS_PER_SEC;
+pub use kplat::timer::{arm_timer, interrupt_id};

@@ -1,9 +1,9 @@
- 
 use kplat::{
     init::BootHandler,
-    mem::{pa, p2v},
+    mem::{p2v, pa},
 };
 use log::*;
+
 #[allow(unused_imports)]
 use crate::config::devices::{GICD_PADDR, GICR_PADDR, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR};
 use crate::{config::plat::PSCI_METHOD, serial::*};
@@ -20,10 +20,12 @@ impl BootHandler for BootHandlerImpl {
         #[cfg(feature = "rtc")]
         kplat_aarch64_peripherals::pl031::early_init(p2v(pa!(RTC_PADDR)));
     }
+
     #[cfg(feature = "smp")]
     fn early_init_secondary(_cpu_id: usize) {
         axcpu::init::init_trap();
     }
+
     fn final_init(cpu_id: usize, dtb: usize) {
         info!("cpu_id {}", cpu_id);
         crate::fdt::init_fdt(p2v(pa!(dtb)));
@@ -35,6 +37,7 @@ impl BootHandler for BootHandlerImpl {
             kplat_aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
         }
     }
+
     #[cfg(feature = "smp")]
     fn final_init_secondary(_cpu_id: usize) {
         #[cfg(feature = "irq")]

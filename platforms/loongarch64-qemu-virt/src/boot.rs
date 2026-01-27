@@ -3,6 +3,7 @@ use page_table::{
     PageTableEntry as GenericPTE, PagingFlags as MappingFlags,
     loongarch64::La64PageEntry as LA64PTE,
 };
+
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_BOOT_OFFSET, PHYS_VIRT_OFFSET};
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];

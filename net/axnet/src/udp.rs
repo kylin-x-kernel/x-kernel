@@ -161,7 +161,10 @@ impl SocketOps for UdpSocket {
         let remote_addr = IpEndpoint::from(remote_addr);
         let src = SERVICE.lock().get_source_address(&remote_addr.addr);
         *guard = Some((remote_addr, src));
-        debug!("UDP socket {}: connected to {}", self.dispatch_irq, remote_addr);
+        debug!(
+            "UDP socket {}: connected to {}",
+            self.dispatch_irq, remote_addr
+        );
         Ok(())
     }
 

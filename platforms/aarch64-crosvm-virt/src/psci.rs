@@ -1,6 +1,6 @@
- 
 use kplat::psci::PsciIf;
 use spin::Once;
+
 use crate::serial::{boot_print_str, boot_print_usize};
 pub static GUARD_GRANULE: Once<usize> = Once::new();
 const ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID: u32 =
@@ -96,6 +96,7 @@ impl PsciIf for PsciImpl {
             }
         }
     }
+
     fn share_dma_buffer(paddr: usize, size: usize) {
         let page_size = 0x1000;
         let pages = size / page_size;

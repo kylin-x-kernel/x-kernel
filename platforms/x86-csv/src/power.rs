@@ -1,4 +1,3 @@
- 
 use kplat::sys::SysCtrl;
 use x86_64::instructions::port::PortWriteOnly;
 struct PowerImpl;
@@ -9,6 +8,7 @@ impl SysCtrl for PowerImpl {
         use kplat::memory::pa;
         crate::mp::start_secondary_cpu(cpu_id, pa!(stack_top_paddr))
     }
+
     fn shutdown() -> ! {
         info!("Shutting down...");
         if cfg!(feature = "reboot-on-system-off") {

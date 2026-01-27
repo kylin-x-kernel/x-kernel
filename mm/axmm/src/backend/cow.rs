@@ -100,9 +100,7 @@ impl CowBackend {
         let frame = self.alloc_new_frame(true)?;
 
         if let Some((file, file_start, file_end)) = &self.file {
-            let buf = unsafe {
-                slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _)
-            };
+            let buf = unsafe { slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _) };
             // vaddr can be smaller than self.start (at most 1 page) due to
             // non-aligned mappings, we need to keep the gap clean.
             let start = self.start.as_usize().saturating_sub(vaddr.as_usize());

@@ -1,4 +1,3 @@
- 
 use loongArch64::iocsr::{iocsr_read_d, iocsr_write_d, iocsr_write_w};
 const LOONGARCH_IOCSR_MISC_FUNC: usize = 0x420;
 const IOCSR_MISC_FUNC_EXT_IOI_EN: u64 = 1 << 48;

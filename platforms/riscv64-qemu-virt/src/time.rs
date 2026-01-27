@@ -1,4 +1,4 @@
-use kplat::timer::{NANOS_PER_SEC, GlobalTimer};
+use kplat::timer::{GlobalTimer, NANOS_PER_SEC};
 use riscv::reg_handler::time;
 const NANOS_PER_TICK: u64 = NANOS_PER_SEC / crate::config::devices::TIMER_FREQUENCY as u64;
 static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
@@ -26,22 +26,28 @@ impl GlobalTimer for GlobalTimerImpl {
     fn now_ticks() -> u64 {
         time::read() as u64
     }
+
     fn t2ns(ticks: u64) -> u64 {
         ticks * NANOS_PER_TICK
     }
+
     fn ns2t(nanos: u64) -> u64 {
         nanos / NANOS_PER_TICK
     }
+
     fn offset_ns() -> u64 {
         unsafe { RTC_EPOCHOFFSET_NANOS }
     }
+
     fn freq() -> u64 {
         crate::config::devices::TIMER_FREQUENCY as u64
     }
+
     #[cfg(feature = "irq")]
     fn interrupt_id() -> usize {
         crate::config::devices::TIMER_IRQ
     }
+
     #[cfg(feature = "irq")]
     fn arm_timer(deadline_ns: u64) {
         sbi_rt::set_timer(Self::ns2t(deadline_ns));

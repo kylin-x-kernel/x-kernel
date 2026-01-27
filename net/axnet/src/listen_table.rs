@@ -84,7 +84,10 @@ impl ListenTable {
 
     pub fn can_accept(&self, port: u16) -> AxResult<bool> {
         if let Some(entry) = self.listen_entry(port).lock().as_ref() {
-            Ok(entry.syn_queue.iter().any(|&dispatch_irq| is_connected(dispatch_irq)))
+            Ok(entry
+                .syn_queue
+                .iter()
+                .any(|&dispatch_irq| is_connected(dispatch_irq)))
         } else {
             warn!("accept before listen");
             Err(AxError::InvalidInput)
@@ -165,6 +168,7 @@ fn is_connected(dispatch_irq: SocketHandle) -> bool {
 }
 
 fn is_closed(dispatch_irq: SocketHandle) -> bool {
-    SOCKET_SET
-        .with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| matches!(socket.state(), State::Closed))
+    SOCKET_SET.with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| {
+        matches!(socket.state(), State::Closed)
+    })
 }

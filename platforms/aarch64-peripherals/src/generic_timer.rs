@@ -1,4 +1,3 @@
- 
 use aarch64_cpu::registers::{CNTFRQ_EL0, CNTP_TVAL_EL0, CNTPCT_EL0, Readable, Writeable};
 use int_ratio::Ratio;
 static mut CNTPCT_TO_NANOS_RATIO: Ratio = Ratio::zero();
@@ -54,22 +53,28 @@ macro_rules! time_if_impl {
             fn now_ticks() -> u64 {
                 $crate::generic_timer::now_ticks()
             }
+
             fn t2ns(ticks: u64) -> u64 {
                 $crate::generic_timer::t2ns(ticks)
             }
+
             fn ns2t(nanos: u64) -> u64 {
                 $crate::generic_timer::ns2t(nanos)
             }
+
             fn offset_ns() -> u64 {
                 $crate::pl031::offset_ns()
             }
+
             fn freq() -> u64 {
                 $crate::generic_timer::freq()
             }
+
             #[cfg(feature = "irq")]
             fn interrupt_id() -> usize {
                 crate::config::devices::TIMER_IRQ
             }
+
             #[cfg(feature = "irq")]
             fn arm_timer(deadline_ns: u64) {
                 $crate::generic_timer::arm_timer(deadline_ns)

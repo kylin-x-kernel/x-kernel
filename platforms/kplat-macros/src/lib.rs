@@ -5,12 +5,7 @@ use syn::{Error, FnArg, ItemFn, ItemTrait, ReturnType, TraitItem};
 fn err_ts(e: Error) -> TokenStream {
     e.to_compile_error().into()
 }
-fn check_fn(
-    t: TokenStream,
-    cnt: usize,
-    exp_name: &str,
-    msg: &str,
-) -> TokenStream {
+fn check_fn(t: TokenStream, cnt: usize, exp_name: &str, msg: &str) -> TokenStream {
     let f = syn::parse_macro_input!(t as ItemFn);
     let mut bad = if let ReturnType::Type(_, ty) = &f.sig.output {
         quote! { #ty }.to_string() != "!"
@@ -18,16 +13,14 @@ fn check_fn(
         true
     };
     let inputs = &f.sig.inputs;
-    /*
-    for i in inputs.iter() {
-        if let FnArg::Typed(pt) = i {
-            if quote! { #pt.ty }.to_string() != "usize" {
-                bad = true;
-                break;
-            }
-        }
-    }
-    */
+    // for i in inputs.iter() {
+    // if let FnArg::Typed(pt) = i {
+    // if quote! { #pt.ty }.to_string() != "usize" {
+    // bad = true;
+    // break;
+    // }
+    // }
+    // }
     if inputs.len() != cnt {
         bad = true;
     }
@@ -44,10 +37,7 @@ fn check_fn(
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        return err_ts(Error::new(
-            Span::call_site(),
-            "Attr must be empty",
-        ));
+        return err_ts(Error::new(Span::call_site(), "Attr must be empty"));
     }
     check_fn(
         item,
@@ -59,10 +49,7 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn secondary_main(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        return err_ts(Error::new(
-            Span::call_site(),
-            "Attr must be empty",
-        ));
+        return err_ts(Error::new(Span::call_site(), "Attr must be empty"));
     }
     check_fn(
         item,
@@ -74,10 +61,7 @@ pub fn secondary_main(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn device_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        return err_ts(Error::new(
-            Span::call_site(),
-            "Attr must be empty",
-        ));
+        return err_ts(Error::new(Span::call_site(), "Attr must be empty"));
     }
     let tr = syn::parse_macro_input!(item as ItemTrait);
     let tr_id = &tr.ident;
@@ -91,10 +75,7 @@ pub fn device_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
             for arg in &m_sig.inputs {
                 match arg {
                     FnArg::Receiver(_) => {
-                        return err_ts(Error::new_spanned(
-                            arg,
-                            "self not allowed",
-                        ));
+                        return err_ts(Error::new_spanned(arg, "self not allowed"));
                     }
                     FnArg::Typed(t) => args.push(t.pat.clone()),
                 }

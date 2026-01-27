@@ -1,4 +1,3 @@
- 
 use arm_pl011::Pl011Uart;
 use kplat::memory::VirtAddr;
 use kspin::SpinNoIrq;
@@ -61,14 +60,17 @@ macro_rules! console_if_impl {
             fn write_data(bytes: &[u8]) {
                 $crate::pl011::write_data(bytes);
             }
+
             fn write_data_atomic(bytes: &[u8]) {
                 let uart_base =
                     kplat::memory::p2v(kplat::memory::pa!(crate::config::devices::UART_PADDR));
                 $crate::pl011::write_data_force(uart_base, bytes);
             }
+
             fn read_data(bytes: &mut [u8]) -> usize {
                 $crate::pl011::read_data(bytes)
             }
+
             #[cfg(feature = "irq")]
             fn interrupt_id() -> Option<usize> {
                 Some(crate::config::devices::UART_IRQ as _)

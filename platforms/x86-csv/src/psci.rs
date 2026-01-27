@@ -1,10 +1,9 @@
- 
 use kplat::psci::PsciIf;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use log::{debug, info, warn};
-use crate::config::plat::SHARED_MEM_BASE;
-use crate::config::plat::SHARED_MEM_SIZE;
+
+use crate::config::plat::{SHARED_MEM_BASE, SHARED_MEM_SIZE};
 const PAGE_SIZE: usize = 0x1000;
 const MAX_PAGES: usize = SHARED_MEM_SIZE / PAGE_SIZE;
 const BITMAP_SIZE: usize = (MAX_PAGES + 63) / 64;
@@ -21,6 +20,7 @@ impl SharedMemAllocator {
             allocated_pages: 0,
         }
     }
+
     fn alloc_pages(&mut self, pages: usize) -> Option<usize> {
         if pages == 0 {
             return None;
@@ -30,6 +30,7 @@ impl SharedMemAllocator {
         }
         self.alloc_contiguous_pages(pages)
     }
+
     fn alloc_single_page(&mut self) -> Option<usize> {
         for i in self.next_hint..MAX_PAGES {
             if self.is_page_free(i) {
@@ -49,6 +50,7 @@ impl SharedMemAllocator {
         }
         None
     }
+
     fn alloc_contiguous_pages(&mut self, pages: usize) -> Option<usize> {
         let mut start = 0;
         let mut count = 0;
@@ -72,6 +74,7 @@ impl SharedMemAllocator {
         }
         None
     }
+
     fn free_pages(&mut self, paddr: usize, pages: usize) {
         if paddr < SHARED_MEM_BASE || paddr >= SHARED_MEM_BASE + SHARED_MEM_SIZE {
             warn!(
@@ -92,18 +95,21 @@ impl SharedMemAllocator {
             self.next_hint = start_page;
         }
     }
+
     #[inline]
     fn is_page_free(&self, page_idx: usize) -> bool {
         let word_idx = page_idx / 64;
         let bit_idx = page_idx % 64;
         (self.bitmap[word_idx] & (1u64 << bit_idx)) == 0
     }
+
     #[inline]
     fn set_page_allocated(&mut self, page_idx: usize) {
         let word_idx = page_idx / 64;
         let bit_idx = page_idx % 64;
         self.bitmap[word_idx] |= 1u64 << bit_idx;
     }
+
     #[inline]
     fn set_page_free(&mut self, page_idx: usize) {
         let word_idx = page_idx / 64;
@@ -149,6 +155,7 @@ impl PsciIf for PsciImpl {
             is_shared_memory(phys_addr)
         );
     }
+
     fn unshare_dma_buffer(phys_addr: usize, size: usize) {
         debug!(
             "unshare_dma_buffer: paddr={:#x}, size={:#x}",

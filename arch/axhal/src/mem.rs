@@ -1,11 +1,11 @@
 //! Physical memory management.
 
+use heapless::Vec;
 pub use kplat::memory::{
-    MemFlags, MemoryRegion, kernel_layout, mmio_regions, ram_regions, p2v,
-    rsvd_regions, total_ram, v2p,
+    MemFlags, MemoryRegion, kernel_layout, mmio_regions, p2v, ram_regions, rsvd_regions, total_ram,
+    v2p,
 };
 use kplat::memory::{check_overlap, sub_ranges};
-use heapless::Vec;
 use lazyinit::LazyInit;
 pub use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 

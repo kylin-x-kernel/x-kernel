@@ -1,5 +1,4 @@
- 
-use kplat::memory::{VirtAddr, pa, p2v};
+use kplat::memory::{VirtAddr, p2v, pa};
 use log::*;
 use rs_fdtree::{InterruptController, LinuxFdt};
 use spin::Once;

@@ -128,7 +128,9 @@ pub use axcpu::asm;
 pub use axcpu::uspace;
 pub use kplat::boot::final_init;
 #[cfg(feature = "smp")]
-pub use kplat::boot::{early_init_ap as early_init_secondary, final_init_ap as final_init_secondary};
+pub use kplat::boot::{
+    early_init_ap as early_init_secondary, final_init_ap as final_init_secondary,
+};
 
 #[cfg(feature = "nmi")]
 pub mod nmi {

@@ -1,16 +1,17 @@
- 
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, Ordering},
 };
+
 use aarch64_cpu::registers::*;
 use arm_gic::gicv3::*;
 use kplat::{
-    irq::{HandlerTable, Handler},
+    irq::{Handler, HandlerTable},
     mem::VirtAddr,
 };
 use kspin::SpinNoIrq;
 use log::*;
+
 use crate::config::plat::CPU_NUM;
 static GICD_INIT: AtomicBool = AtomicBool::new(false);
 const MAX_IRQ_COUNT: usize = 1024;
@@ -28,7 +29,7 @@ fn get_current_cpu_id() -> usize {
     unsafe {
         core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr_el1);
     }
-    mpidr_el1 & 0xff  
+    mpidr_el1 & 0xff
 }
 pub fn init_gic(gicd_base: VirtAddr, gicr_base: VirtAddr) {
     info!(
@@ -112,7 +113,7 @@ pub fn notify_cpu(irq: usize, target: kplat::interrupts::TargetCpu) {
 }
 #[allow(dead_code)]
 fn test_manual_trigger() {
-    let gicd_base = 0xffff00003fff0000 as usize;  
+    let gicd_base = 0xffff00003fff0000 as usize;
     info!("=== Manual Trigger Test ===");
     unsafe {
         core::ptr::write_volatile((gicd_base + 0x200 + 1 * 4) as *mut u32, 0x1);
@@ -127,7 +128,7 @@ fn test_manual_trigger() {
 #[allow(dead_code)]
 fn debug_irq_32() {
     let irq = 32;
-    let gicd_base = 0xffff00003fff0000 as usize;  
+    let gicd_base = 0xffff00003fff0000 as usize;
     unsafe {
         let isenabler =
             core::ptr::read_volatile((gicd_base + 0x100 + (irq / 32) * 4) as *const u32);
@@ -192,9 +193,9 @@ fn debug_irq_32() {
         let mut igrpen1: u64;
         let mut ctlr: u64;
         core::arch::asm!(
-            "mrs {0}, S3_0_C4_C6_0",   
-            "mrs {1}, S3_0_C12_C12_7",  
-            "mrs {2}, S3_0_C12_C12_4",  
+            "mrs {0}, S3_0_C4_C6_0",
+            "mrs {1}, S3_0_C12_C12_7",
+            "mrs {2}, S3_0_C12_C12_4",
             out(reg) pmr,
             out(reg) igrpen1,
             out(reg) ctlr,
@@ -248,33 +249,43 @@ macro_rules! irq_if_impl {
             fn enable(irq: usize, enabled: bool) {
                 $crate::gicv3::enable(irq, enabled);
             }
+
             fn reg_handler(irq: usize, handler: kplat::interrupts::Handler) -> bool {
                 $crate::gicv3::reg_handler_handler(irq, handler)
             }
+
             fn unreg_handler(irq: usize) -> Option<kplat::interrupts::Handler> {
                 $crate::gicv3::unreg_handler_handler(irq)
             }
+
             fn dispatch_irq(irq: usize) -> Option<usize> {
                 $crate::gicv3::dispatch_irq_irq(irq)
             }
+
             fn notify_cpu(interrupt_id: usize, target: kplat::interrupts::TargetCpu) {
                 $crate::gicv3::notify_cpu(interrupt_id, target);
             }
+
             fn set_prio(_irq: usize, _priority: u8) {
                 todo!()
             }
+
             fn save_disable() -> usize {
                 $crate::gicv3::save_disable()
             }
+
             fn restore(flag: usize) {
                 $crate::gicv3::restore(flag);
             }
+
             fn enable_local() {
                 $crate::gicv3::enable_local();
             }
+
             fn disable_local() {
                 $crate::gicv3::disable_local();
             }
+
             fn is_enabled() -> bool {
                 $crate::gicv3::is_enabled()
             }

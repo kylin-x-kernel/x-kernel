@@ -109,10 +109,9 @@ unsafe impl lock_api::RawMutex for RawMutex {
                 continue;
             }
             #[cfg(feature = "watchdog")]
-            current().inner().set_waiting_lock(
-                self as *const _ as usize,
-                axhal::time::now_ticks() as usize,
-            );
+            current()
+                .inner()
+                .set_waiting_lock(self as *const _ as usize, axhal::time::now_ticks() as usize);
             block_on(listener);
             owner_id = self.owner_id.load(Ordering::Acquire);
         }

@@ -2,6 +2,7 @@ use kplat::memory::{PageAligned, pa};
 use page_table::{
     PageTableEntry as GenericPTE, PagingFlags as MappingFlags, aarch64::A64PageEntry as A64PTE,
 };
+
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];

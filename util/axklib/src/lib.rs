@@ -92,5 +92,5 @@ pub mod time {
 
 /// Convenience re-exports for IRQ operations.
 pub mod irq {
-    pub use super::klib::{irq_register as register, irq_enable as enable};
+    pub use super::klib::{irq_enable as enable, irq_register as register};
 }

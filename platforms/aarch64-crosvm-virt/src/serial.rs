@@ -1,4 +1,3 @@
- 
 #[unsafe(no_mangle)]
 pub extern "C" fn _boot_print_usize(num: usize) {
     let mut msg: [u8; 16] = [0; 16];
@@ -43,6 +42,7 @@ impl Uart {
     pub const fn new(base_address: usize) -> Self {
         Self { base_address }
     }
+
     pub fn put(&self, c: u8) -> Option<u8> {
         let ptr = self.base_address as *mut u8;
         unsafe {

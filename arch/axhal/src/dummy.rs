@@ -1,7 +1,7 @@
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
 #[cfg(feature = "irq")]
-use kplat::interrupts::{TargetCpu, Handler, IntrManager};
+use kplat::interrupts::{Handler, IntrManager, TargetCpu};
 use kplat::{
     console::Terminal,
     impl_dev_interface,
