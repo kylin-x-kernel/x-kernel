@@ -1,26 +1,24 @@
-//! AHCI driver.
-
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
-use simple_ahci::AhciDriver as SimpleAhciDriver;
+use simple_ahci::AhciDriver as CoreAhciDriver;
 pub use simple_ahci::Hal as AhciHal;
 
 use crate::BlockDriverOps;
 
-/// AHCI driver based on the `simple_ahci` crate.
-pub struct AhciDriver<H: AhciHal>(SimpleAhciDriver<H>);
+/// AHCI driver implementation based on `simple_ahci` crate.
+pub struct AhciDriver<H: AhciHal>(CoreAhciDriver<H>);
 
 impl<H: AhciHal> AhciDriver<H> {
-    /// Try to construct a new AHCI driver from the given MMIO base address.
+    /// Attempts to create a new AHCI driver using the specified MMIO base address.
     ///
     /// # Safety
     ///
     /// The caller must ensure that:
-    /// - `base` is a valid virtual address pointing to the AHCI controller's MMIO register block.
-    /// - The memory region starting at `base` is properly mapped and accessible.
-    /// - No other code is concurrently accessing the same AHCI controller.
-    /// - The AHCI controller hardware is present and functional at the given address.
-    pub unsafe fn try_new(base: usize) -> Option<Self> {
-        unsafe { SimpleAhciDriver::<H>::try_new(base) }.map(AhciDriver)
+    /// - `base` refers to a valid MMIO register block of the AHCI controller.
+    /// - The memory region from `base` onward is mapped and accessible.
+    /// - No other part of the code is accessing the AHCI controller simultaneously.
+    /// - The AHCI hardware is functioning at the provided address.
+    pub unsafe fn new(base_addr: usize) -> Option<Self> {
+        CoreAhciDriver::<H>::new(base_addr).map(AhciDriver)
     }
 }
 
