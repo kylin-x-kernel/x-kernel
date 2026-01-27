@@ -134,4 +134,20 @@ impl IrqIf for DummyIrq {
     }
 
     fn send_ipi(_irq: usize, _target: IpiTarget) {}
+
+    fn set_priority(_irq: usize, _priority: u8) {}
+
+    fn local_irq_save_and_disable() -> usize {
+        0
+    }
+
+    fn local_irq_restore(_flag: usize) {}
+
+    fn enable_irqs() {}
+
+    fn disable_irqs() {}
+
+    fn irqs_enabled() -> bool {
+        false
+    }
 }

@@ -41,7 +41,7 @@ rtc = [
     "axplat-riscv64-qemu-virt?/rtc",
     "axplat-loongarch64-qemu-virt?/rtc",
 ]
-nmi = ["axplat-aarch64-qemu-virt?/nmi"]
+nmi = ["axplat/nmi", "axplat-aarch64-qemu-virt?/nmi"]
 pmu = ["axplat-aarch64-qemu-virt?/pmu"]
 paging = ["dep:axalloc", "dep:page_table_multiarch"]
 tls = ["axcpu/tls"]
@@ -55,6 +55,10 @@ defplat = [
     "dep:axplat-riscv64-qemu-virt",
     "dep:axplat-loongarch64-qemu-virt",
 ]
+defplat-aarch64 = ["dep:axplat-aarch64-qemu-virt"]
+defplat-x86_64 = ["dep:axplat-x86-pc"]
+defplat-riscv64 = ["dep:axplat-riscv64-qemu-virt"]
+defplat-loongarch64 = ["dep:axplat-loongarch64-qemu-virt"]
 crosvm = []
 
 default = []

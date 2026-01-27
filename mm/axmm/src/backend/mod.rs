@@ -82,7 +82,7 @@ pub trait BackendOps {
         _flags: MappingFlags,
         _access_flags: MappingFlags,
         _pt: &mut PageTableMut,
-    ) -> AxResult<(usize, Option<Box<dyn FnOnce(&mut AddrSpace)>>)> {
+    ) -> PopulateResult {
         Ok((0, None))
     }
 
@@ -101,6 +101,9 @@ pub trait BackendOps {
         new_aspace: &Arc<Mutex<AddrSpace>>,
     ) -> AxResult<Backend>;
 }
+
+type PopulateHook = Box<dyn FnOnce(&mut AddrSpace)>;
+type PopulateResult = AxResult<(usize, Option<PopulateHook>)>;
 
 /// A unified enum type for different memory mapping backends.
 #[derive(Clone)]

@@ -77,7 +77,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
             .inner
             .recv(peer_addr, src_port, buf)
             .map_err(as_dev_err);
-        self.inner.update_credit(peer_addr, src_port);
+        let _ = self.inner.update_credit(peer_addr, src_port);
         res
     }
 
@@ -121,7 +121,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
 
 fn convert_vsock_event<H: Hal, T: Transport>(
     event: VsockEvent,
-    inner: &mut InnerDev<H, T>,
+    _inner: &mut InnerDev<H, T>,
 ) -> DevResult<VsockDriverEvent> {
     let cid = VsockConnId {
         peer_addr: axdriver_vsock::VsockAddr {

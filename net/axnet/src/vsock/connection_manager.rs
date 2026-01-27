@@ -404,7 +404,7 @@ impl VsockConnectionManager {
 
         // 加入 accept 队列
         let mut queue_guard = queue.lock();
-        if let Err(_) = queue_guard.accept_queue.push(conn_id) {
+        if queue_guard.accept_queue.push(conn_id).is_err() {
             info!(
                 "Accept queue full for port {}, dropping connection from {:?}",
                 conn_id.local_port, conn_id.peer_addr

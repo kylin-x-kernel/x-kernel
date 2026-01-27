@@ -28,6 +28,10 @@ ipi = ["irq", "dep:axipi", "axhal/ipi", "axruntime/ipi"]
 # Custom or default platforms
 myplat = ["axhal/myplat"]
 defplat = ["axhal/defplat"]
+defplat-aarch64 = ["axhal/defplat-aarch64"]
+defplat-x86_64 = ["axhal/defplat-x86_64"]
+defplat-riscv64 = ["axhal/defplat-riscv64"]
+defplat-loongarch64 = ["axhal/defplat-loongarch64"]
 crosvm = ["axhal/crosvm", "axdriver/crosvm", "axruntime/crosvm"]
 
 # Memory

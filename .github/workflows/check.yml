@@ -54,4 +54,4 @@ jobs:
           arch: ${{ matrix.arch }}
 
       - name: Clippy
-        run: cargo clippy --target ${{ matrix.target }} -F qemu -- -D warnings
+        run: cargo clippy -p entry --target ${{ matrix.target }} -F qemu -- -D warnings

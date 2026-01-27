@@ -452,6 +452,7 @@ pub fn local_irq_restore(flags: usize) {
 }
 
 /// Default implementation of [`axplat::irq::IrqIf`] using the GIC.
+#[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! irq_if_impl {
     ($name:ident) => {

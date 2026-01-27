@@ -39,8 +39,10 @@ impl Drop for ListenTableEntry {
 }
 
 pub struct ListenTable {
-    tcp: Box<[Arc<Mutex<Option<Box<ListenTableEntry>>>>]>,
+    tcp: TcpListenTable,
 }
+
+type TcpListenTable = Box<[Arc<Mutex<Option<Box<ListenTableEntry>>>>]>;
 
 impl ListenTable {
     pub fn new() -> Self {

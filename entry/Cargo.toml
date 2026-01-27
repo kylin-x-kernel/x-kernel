@@ -19,7 +19,7 @@ qemu = [
     "axfeat/vsock",
     "starry-api/vsock",
 
-    "axfeat/defplat",
+    "axfeat/defplat-aarch64",
     "axfeat/bus-pci",
 
     # auxilary features

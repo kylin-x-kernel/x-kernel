@@ -258,7 +258,7 @@ pub fn run_idle() -> ! {
     }
 }
 
-#[cfg(feature = "watchdog")]
+#[cfg(all(feature = "watchdog", target_arch = "aarch64"))]
 #[inline(always)]
 fn dump_println(force: bool, args: core::fmt::Arguments<'_>) {
     if force {
@@ -269,27 +269,18 @@ fn dump_println(force: bool, args: core::fmt::Arguments<'_>) {
     }
 }
 
-#[cfg(feature = "watchdog")]
+#[cfg(all(feature = "watchdog", target_arch = "aarch64"))]
 pub fn dump_cpu_task_backtrace(cpu_id: usize, force: bool) {
     crate::global_task_queue::for_each_watchdog_task(cpu_id, |weaktask| {
         if let Some(task) = weaktask.upgrade()
             && !task.inner().is_running()
         {
             let ctx = task.inner().ctx();
-            #[cfg(target_arch = "aarch64")]
             let bt = axbacktrace::Backtrace::capture_trap(
                 ctx.r29 as usize, // fp
                 ctx.lr as usize,  // ip
                 ctx.lr as usize,  // ra
             );
-
-            #[cfg(not(target_arch = "aarch64"))]
-            let bt = {
-                panic!(
-                    "dump_cpu_task_backtrace: unimplemented arch {}",
-                    core::env!("CARGO_CFG_TARGET_ARCH")
-                );
-            };
             dump_println(
                 force,
                 format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id, task.inner()),
@@ -298,27 +289,29 @@ pub fn dump_cpu_task_backtrace(cpu_id: usize, force: bool) {
     });
 }
 
-#[cfg(feature = "watchdog")]
+#[cfg(all(feature = "watchdog", not(target_arch = "aarch64")))]
+pub fn dump_cpu_task_backtrace(_cpu_id: usize, _force: bool) {
+    panic!("dump_cpu_task_backtrace: unimplemented arch");
+}
+
+#[cfg(all(feature = "watchdog", target_arch = "aarch64"))]
 #[inline(always)]
 pub fn dump_cur_task_backtrace(cpu_id: usize, tf: &TrapFrame, force: bool) {
-    #[cfg(target_arch = "aarch64")]
     let bt = axbacktrace::Backtrace::capture_trap(
         tf.x[29] as usize,
         tf.x[30] as usize,
         tf.x[30] as usize,
     );
-
-    #[cfg(not(target_arch = "aarch64"))]
-    let bt = {
-        panic!(
-            "dump_cur_task_backtrace: unimplemented arch {}",
-            core::env!("CARGO_CFG_TARGET_ARCH")
-        );
-    };
     dump_println(
         force,
         format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id, current().inner()),
     );
+}
+
+#[cfg(all(feature = "watchdog", not(target_arch = "aarch64")))]
+#[inline(always)]
+pub fn dump_cur_task_backtrace(_cpu_id: usize, _tf: &TrapFrame, _force: bool) {
+    panic!("dump_cur_task_backtrace: unimplemented arch");
 }
 
 /// Returns `true` when no suspicious long lock-waits are observed on this CPU.
@@ -341,7 +334,6 @@ pub fn check_mutex_deadlock(now: usize) -> bool {
             if axhal::time::ticks_to_nanos(blocked as u64) > 20_000_000_000 {
                 // suspect stall (20s)
                 ok = false;
-                return;
             }
         }
     });

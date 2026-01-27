@@ -343,8 +343,10 @@ impl Drop for PageCache {
     }
 }
 
+type EvictListenerFn = dyn Fn(u32, &PageCache) + Send + Sync;
+
 struct EvictListener {
-    listener: Box<dyn Fn(u32, &PageCache) + Send + Sync>,
+    listener: Box<EvictListenerFn>,
     link: LinkedListAtomicLink,
 }
 
@@ -455,6 +457,13 @@ impl CachedFile {
         handle
     }
 
+    /// Removes an evict listener by handle.
+    ///
+    /// # Safety
+    ///
+    /// The `handle` must come from a previous call to [`add_evict_listener`]
+    /// on the same [`CachedFile`] and must not have been removed already.
+    /// Passing an invalid handle is undefined behavior.
     pub unsafe fn remove_evict_listener(&self, handle: usize) {
         let mut guard = self.shared.evict_listeners.lock();
         let mut cursor = unsafe { guard.cursor_mut_from_ptr(handle as *const EvictListener) };

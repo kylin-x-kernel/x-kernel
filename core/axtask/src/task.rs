@@ -73,12 +73,11 @@ struct PerTaskRecording {
 
 #[cfg(feature = "watchdog")]
 impl PerTaskRecording {
-    const fn new() -> Self {
-        const ZERO: AtomicUsize = AtomicUsize::new(0);
+    fn new() -> Self {
         Self {
-            waiting_lock: ZERO,
-            waiting_since: ZERO,
-            held_locks: [ZERO; HELD_LOCK_SLOTS],
+            waiting_lock: AtomicUsize::new(0),
+            waiting_since: AtomicUsize::new(0),
+            held_locks: [const { AtomicUsize::new(0) }; HELD_LOCK_SLOTS],
         }
     }
 }

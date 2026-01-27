@@ -77,6 +77,12 @@ impl TcpSocket {
     }
 }
 
+impl Default for TcpSocket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Private methods
 impl TcpSocket {
     fn state(&self) -> State {

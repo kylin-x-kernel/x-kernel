@@ -41,6 +41,12 @@ impl VsockStreamTransport {
     }
 }
 
+impl Default for VsockStreamTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Configurable for VsockStreamTransport {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
         self.general.get_option_inner(opt)
@@ -259,7 +265,7 @@ impl VsockTransportOps for VsockStreamTransport {
                 );
                 Ok(count)
             } else {
-                return Err(AxError::WouldBlock);
+                Err(AxError::WouldBlock)
             }
         })
     }

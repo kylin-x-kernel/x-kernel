@@ -47,6 +47,7 @@ pub trait TransportOps: Configurable + Pollable + Send + Sync {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[enum_dispatch(Configurable, TransportOps)]
 pub enum Transport {
     Stream(StreamTransport),

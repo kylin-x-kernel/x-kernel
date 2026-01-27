@@ -70,6 +70,7 @@ pub fn init_early(uart_base: VirtAddr) {
 
 /// Default implementation of [`axplat::console::ConsoleIf`] using the
 /// 16550a UART.
+#[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! ns16550_console_if_impl {
     ($name:ident) => {
@@ -83,8 +84,9 @@ macro_rules! ns16550_console_if_impl {
             }
 
             fn write_bytes_force(bytes: &[u8]) {
-                let mut uart_base =
-                    axplat::mem::phys_to_virt(axplat::mem::pa!(crate::config::devices::UART_PADDR));
+                let mut uart_base = axplat::mem::phys_to_virt(axplat::mem::pa!(
+                    crate::config::devices::UART_PADDR
+                ));
                 $crate::ns16550a::write_bytes_force(uart_16550, bytes);
             }
 
@@ -98,7 +100,6 @@ macro_rules! ns16550_console_if_impl {
             /// Returns the IRQ number for the console, if applicable.
             #[cfg(feature = "irq")]
             fn irq_num() -> Option<usize> {
-                // Note that `crate` is not `$crate`!
                 Some(crate::config::devices::UART_IRQ as _)
             }
         }
