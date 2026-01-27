@@ -35,12 +35,12 @@ define cargo_clippy
   $(call run_cmd,cargo clippy,-p axlog $(1) $(verbose) -- $(clippy_args))
 endef
 
+subdirs := api arch core drivers fs io mm net process sync tee util
 all_packages := \
-  $(shell ls $(CURDIR)/modules) \
-  axfeat arceos_api axstd axlibc
+  $(foreach dir,$(subdirs),$(shell ls $(CURDIR)/$(dir)))
 
 define cargo_doc
-  $(call run_cmd,cargo doc,--no-deps --all-features --workspace --exclude "arceos-*" $(verbose))
+  $(call run_cmd,cargo doc,--no-deps --all-features --workspace $(verbose))
   @# run twice to fix broken hyperlinks
   $(foreach p,$(all_packages), \
     $(call run_cmd,cargo rustdoc,--all-features -p $(p) $(verbose))
