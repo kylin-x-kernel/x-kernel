@@ -11,7 +11,7 @@ Stack unwinding and symbolication library for bare-metal and kernel environments
 
 ## Quick Start
 
-```rust
+```rust,no_run
 use backtrace::{init, Backtrace};
 
 // 1. Initialize (once, at startup)

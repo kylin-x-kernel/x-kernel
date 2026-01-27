@@ -64,7 +64,7 @@ static CONFIG: Once<BacktraceConfig> = Once::new();
 /// Initializes the backtrace library.
 pub fn init(ip_range: Range<usize>, fp_range: Range<usize>) {
     CONFIG.call_once(|| BacktraceConfig::new(ip_range, fp_range));
-    #[cfg(feature = "dwarf")]
+    #[cfg(all(feature = "dwarf", not(test)))]
     dwarf::init();
 }
 
