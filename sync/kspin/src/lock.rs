@@ -17,10 +17,10 @@ use crate::guard::BaseGuard;
 /// A spinlock with configurable guard behavior.
 ///
 /// The guard type `G` determines what happens when acquiring the lock:
-/// - [`NoOp`]: No special behavior (fastest, least safe)
-/// - [`NoPreempt`]: Disables preemption
-/// - [`IrqSave`]: Saves and disables IRQs
-/// - [`NoPreemptIrqSave`]: Disables both preemption and IRQs (safest)
+/// - [`crate::NoOp`]: No special behavior (fastest, least safe)
+/// - [`crate::NoPreempt`]: Disables preemption
+/// - [`crate::IrqSave`]: Saves and disables IRQs
+/// - [`crate::NoPreemptIrqSave`]: Disables both preemption and IRQs (safest)
 ///
 /// # Single-core optimization
 ///
