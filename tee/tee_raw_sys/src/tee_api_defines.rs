@@ -5,8 +5,9 @@
 // This file has been modified by KylinSoft on 2025.
 //
 
-use super::tee_api_types::*;
 use core::ptr::null;
+
+use super::tee_api_types::*;
 
 pub const TEE_CORE_API_MAJOR_VERSION: u32 = 0x00000001;
 pub const TEE_CORE_API_MINOR_VERSION: u32 = 0x00000003;
@@ -227,7 +228,7 @@ pub const TEE_ALG_ED25519: u32 = 0x70006043;
 pub const TEE_ALG_X25519: u32 = 0x80000044;
 pub const TEE_ALG_ILLEGAL_VALUE: u32 = 0xEFFFFFFF;
 
-/* TEE_ALG_ECDSA_P* and TEE_ALG_ECDH_P* are deprecated */
+// TEE_ALG_ECDSA_P* and TEE_ALG_ECDH_P* are deprecated
 pub const TEE_ALG_ECDH_DERIVE_SHARED_SECRET: u32 = 0x80000042;
 pub const TEE_ALG_ECDSA_SHA1: u32 = 0x70001042;
 pub const TEE_ALG_ECDSA_SHA224: u32 = 0x70002042;
@@ -235,10 +236,8 @@ pub const TEE_ALG_ECDSA_SHA256: u32 = 0x70003042;
 pub const TEE_ALG_ECDSA_SHA384: u32 = 0x70004042;
 pub const TEE_ALG_ECDSA_SHA512: u32 = 0x70005042;
 
-/*
- * Copied from TEE Internal API specificaion v1.0 table 6-9 "Structure of
- * Algorithm Identifier".
- */
+// Copied from TEE Internal API specificaion v1.0 table 6-9 "Structure of
+// Algorithm Identifier".
 pub const TEE_MAIN_ALGO_MD5: u32 = 0x01;
 pub const TEE_MAIN_ALGO_SHA1: u32 = 0x02;
 pub const TEE_MAIN_ALGO_SHA224: u32 = 0x03;
@@ -371,7 +370,7 @@ pub const TEE_PANIC_ID_TA_CREATEENTRYPOINT: u32 = 0x00000102;
 pub const TEE_PANIC_ID_TA_DESTROYENTRYPOINT: u32 = 0x00000103;
 pub const TEE_PANIC_ID_TA_INVOKECOMMANDENTRYPOINT: u32 = 0x00000104;
 pub const TEE_PANIC_ID_TA_OPENSESSIONENTRYPOINT: u32 = 0x00000105;
-/* Property Access */
+// Property Access
 pub const TEE_PANIC_ID_TEE_ALLOCATEPROPERTYENUMERATOR: u32 = 0x00000201;
 pub const TEE_PANIC_ID_TEE_FREEPROPERTYENUMERATOR: u32 = 0x00000202;
 pub const TEE_PANIC_ID_TEE_GETNEXTPROPERTY: u32 = 0x00000203;
