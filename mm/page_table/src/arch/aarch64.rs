@@ -41,7 +41,7 @@ pub enum Arm64MemAttr {
 }
 
 impl Arm64Attr {
-    const ATTR_INDEX_MASK: u64 = 0b111_00;
+    const ATTR_INDEX_MASK: u64 = 0b1_1100;
 
     pub const fn from_mem_attr(idx: Arm64MemAttr) -> Self {
         let mut bits = (idx as u64) << 2;
