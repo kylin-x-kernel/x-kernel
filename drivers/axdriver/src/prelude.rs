@@ -2,7 +2,7 @@
 
 pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 #[cfg(feature = "block")]
-pub use {crate::structs::AxBlockDevice, axdriver_block::BlockDriverOps};
+pub use {crate::structs::AxBlockDevice, block::BlockDriverOps};
 #[cfg(feature = "display")]
 pub use {
     crate::structs::AxDisplayDevice,

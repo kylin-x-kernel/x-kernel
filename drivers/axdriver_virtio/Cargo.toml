@@ -13,7 +13,7 @@ categories.workspace = true
 
 [features]
 alloc = ["virtio-drivers/alloc"]
-block = ["axdriver_block"]
+block = ["dep:block"]
 gpu = ["alloc", "axdriver_display"]
 input = ["alloc", "axdriver_input"]
 net = ["alloc", "axdriver_net"]
@@ -21,7 +21,7 @@ socket = ["alloc", "axdriver_vsock"]
 
 [dependencies]
 driver_base = { workspace = true }
-axdriver_block = { workspace = true, optional = true }
+block = { workspace = true, optional = true }
 axdriver_display = { workspace = true, optional = true }
 axdriver_input = { workspace = true, optional = true }
 axdriver_net = { workspace = true, optional = true }

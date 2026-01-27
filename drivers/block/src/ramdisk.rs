@@ -1,4 +1,4 @@
-//! A RAM disk driver backed by heap memory.
+//! A RAM disk driver backed by heap-allocated memory.
 
 extern crate alloc;
 
@@ -15,7 +15,7 @@ use crate::BlockDriverOps;
 
 const BLOCK_SIZE: usize = 512;
 
-/// A RAM disk backed by heap memory.
+/// A RAM disk structure backed by heap memory.
 pub struct RamDisk(NonNull<[u8]>);
 
 unsafe impl Send for RamDisk {}
@@ -23,22 +23,22 @@ unsafe impl Sync for RamDisk {}
 
 impl Default for RamDisk {
     fn default() -> Self {
+        // Initially creates an empty dangling pointer for the RamDisk
         Self(NonNull::<[u8; 0]>::dangling())
     }
 }
 
 impl RamDisk {
-    /// Creates a new RAM disk with the given size hint.
+    /// Creates a new RAM disk with the specified size hint.
     ///
-    /// The actual size of the RAM disk will be aligned upwards to the block
-    /// size (512 bytes).
+    /// The size is rounded up to be aligned to the block size (512 bytes).
     pub fn new(size_hint: usize) -> Self {
         let size = align_up(size_hint);
-        let ptr = unsafe {
-            NonNull::new_unchecked(alloc_zeroed(Layout::from_size_align_unchecked(
-                size, BLOCK_SIZE,
-            )))
-        };
+        let layout = Layout::from_size_align_unchecked(size, BLOCK_SIZE);
+
+        // Allocate the memory and create a NonNull pointer to the RAM disk buffer.
+        let ptr = unsafe { NonNull::new_unchecked(alloc_zeroed(layout)) };
+
         Self(NonNull::slice_from_raw_parts(ptr, size))
     }
 }
@@ -48,6 +48,8 @@ impl Drop for RamDisk {
         if self.0.is_empty() {
             return;
         }
+
+        // Deallocate the memory when the RamDisk goes out of scope
         unsafe {
             dealloc(
                 self.0.cast::<u8>().as_ptr(),
@@ -61,21 +63,23 @@ impl Deref for RamDisk {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
+        // Dereferencing the RamDisk to get a slice of bytes
         unsafe { self.0.as_ref() }
     }
 }
 
 impl DerefMut for RamDisk {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // Dereferencing mutably for mutable operations
         unsafe { self.0.as_mut() }
     }
 }
 
 impl From<&[u8]> for RamDisk {
     fn from(data: &[u8]) -> Self {
-        let mut this = RamDisk::new(data.len());
-        this[..data.len()].copy_from_slice(data);
-        this
+        let mut ramdisk = RamDisk::new(data.len());
+        ramdisk[..data.len()].copy_from_slice(data);
+        ramdisk
     }
 }
 
@@ -92,6 +96,7 @@ impl DriverOps for RamDisk {
 impl BlockDriverOps for RamDisk {
     #[inline]
     fn num_blocks(&self) -> u64 {
+        // Calculates the number of blocks in the RAM disk
         (self.len() / BLOCK_SIZE) as u64
     }
 
@@ -129,6 +134,7 @@ impl BlockDriverOps for RamDisk {
     }
 }
 
+/// Aligns a given size upwards to the nearest multiple of `BLOCK_SIZE`.
 const fn align_up(val: usize) -> usize {
     (val + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1)
 }
