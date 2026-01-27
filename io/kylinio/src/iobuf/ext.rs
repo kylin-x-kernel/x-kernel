@@ -9,7 +9,6 @@ use crate::{BufReader, BufWriter, DEFAULT_BUF_SIZE, IoBuf, IoBufMut, Read, Resul
 
 /// Extension methods for [`IoBuf`].
 pub trait IoBufExt: Read + IoBuf {
-    /// Reads some bytes from this buffer and writes them into `writer`.
     #[inline]
     fn write_to<W: Write + ?Sized>(&mut self, writer: &mut W) -> Result<usize> {
         IoBufSpec::write_to(self, writer)

@@ -22,15 +22,12 @@ pub struct LineWriter<W: ?Sized + Write> {
 }
 
 impl<W: Write> LineWriter<W> {
-    /// Creates a new `LineWriter`.
     pub fn new(inner: W) -> LineWriter<W> {
         LineWriter {
             inner: BufWriter::new(inner),
         }
     }
 
-    /// Creates a new `LineWriter` with at least the specified capacity for the
-    /// internal buffer.
     #[cfg(feature = "alloc")]
     pub fn with_capacity(capacity: usize, inner: W) -> LineWriter<W> {
         LineWriter {
@@ -39,11 +36,6 @@ impl<W: Write> LineWriter<W> {
     }
 
     /// Unwraps this `LineWriter`, returning the underlying writer.
-    ///
-    /// The internal buffer is written out before returning the writer.
-    ///
-    /// # Errors
-    ///
     /// An [`Err`] will be returned if an error occurs while flushing the buffer.
     #[cfg_attr(not(feature = "alloc"), allow(clippy::result_large_err))]
     pub fn into_inner(self) -> core::result::Result<W, IntoInnerError<LineWriter<W>>> {
@@ -60,9 +52,6 @@ impl<W: ?Sized + Write> LineWriter<W> {
     }
 
     /// Gets a mutable reference to the underlying writer.
-    ///
-    /// Caution must be taken when calling methods on the mutable reference
-    /// returned as extra writes could corrupt the output stream.
     pub fn get_mut(&mut self) -> &mut W {
         self.inner.get_mut()
     }

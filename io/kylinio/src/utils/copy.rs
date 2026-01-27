@@ -29,7 +29,6 @@ where
     BufferedWriterSpec::copy_from(writer, reader)
 }
 
-/// Fallback [`copy`] implementation using a stack-allocated buffer.
 pub fn stack_buffer_copy<R, W>(reader: &mut R, writer: &mut W) -> Result<u64>
 where
     R: Read + ?Sized,
@@ -85,8 +84,6 @@ where
 
 impl BufferedReaderSpec for &[u8] {
     fn buffer_size(&self) -> usize {
-        // prefer this specialization since the source "buffer" is all we'll ever need,
-        // even if it's small
         usize::MAX
     }
 
@@ -101,8 +98,6 @@ impl BufferedReaderSpec for &[u8] {
 #[cfg(feature = "alloc")]
 impl BufferedReaderSpec for VecDeque<u8> {
     fn buffer_size(&self) -> usize {
-        // prefer this specialization since the source "buffer" is all we'll ever need,
-        // even if it's small
         usize::MAX
     }
 
@@ -129,10 +124,6 @@ where
         let mut len = 0;
 
         loop {
-            // Hack: this relies on `impl Read for BufReader` always calling fill_buf
-            // if the buffer is empty, even for empty slices.
-            // It can't be called directly here since specialization prevents us
-            // from adding I: Read
             match self.read(&mut []) {
                 Ok(_) => {}
                 Err(e) if e.canonicalize() == Error::Interrupted => continue,
@@ -143,11 +134,6 @@ where
                 return Ok(len);
             }
 
-            // In case the writer side is a BufWriter then its write_all
-            // implements an optimization that passes through large
-            // buffers to the underlying writer. That code path is #[cold]
-            // but we're still avoiding redundant memcopies when doing
-            // a copy between buffered inputs and outputs.
             to.write_all(buf)?;
             len += buf.len() as u64;
             self.discard_buffer();
@@ -229,10 +215,6 @@ impl<I: Write + ?Sized> BufferedWriterSpec for BufWriter<I> {
 
                         // SAFETY: BorrowedBuf guarantees all of its filled bytes are init
                         unsafe { buf.set_len(buf.len() + bytes_read) };
-
-                        // Read again if the buffer still has enough capacity, as BufWriter itself
-                        // would do This will occur if the reader returns
-                        // short reads
                     }
                     Err(ref e) if e.canonicalize() == Error::Interrupted => {}
                     Err(e) => return Err(e),
@@ -240,8 +222,6 @@ impl<I: Write + ?Sized> BufferedWriterSpec for BufWriter<I> {
             } else {
                 #[cfg(borrowedbuf_init)]
                 {
-                    // All the bytes that were already in the buffer are initialized,
-                    // treat them as such when the buffer is flushed.
                     init += buf.len();
                 }
 

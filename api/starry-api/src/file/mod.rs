@@ -12,7 +12,7 @@ use core::{ffi::c_int, time::Duration};
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, OpenOptions};
 use axfs_ng_vfs::DeviceId;
-use axio::prelude::*;
+use kylinio::prelude::*;
 use axpoll::Pollable;
 use axtask::current;
 use downcast_rs::{DowncastSync, impl_downcast};

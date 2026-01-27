@@ -5,7 +5,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult, ax_bail, ax_err_type};
-use axio::prelude::*;
+use kylinio::prelude::*;
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use smoltcp::{

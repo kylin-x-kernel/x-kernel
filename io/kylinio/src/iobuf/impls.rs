@@ -4,8 +4,7 @@ use core::io::BorrowedCursor;
 
 use crate::{IoBuf, IoBufMut};
 
-// =============================================================================
-// Forwarding implementations
+
 
 impl<R: IoBuf + ?Sized> IoBuf for &R {
     #[inline]
@@ -51,8 +50,7 @@ impl<W: IoBufMut + ?Sized> IoBufMut for Box<W> {
     }
 }
 
-// =============================================================================
-// In-memory buffer implementations
+
 
 impl IoBuf for [u8] {
     #[inline]

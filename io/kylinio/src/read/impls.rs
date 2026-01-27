@@ -4,8 +4,7 @@ use core::{cmp, io::BorrowedCursor};
 
 use crate::{BufRead, Error, Read, Result};
 
-// =============================================================================
-// Forwarding implementations
+
 
 impl<R: Read + ?Sized> Read for &mut R {
     #[inline]
@@ -145,8 +144,7 @@ impl<B: BufRead + ?Sized> BufRead for Box<B> {
     }
 }
 
-// =============================================================================
-// In-memory buffer implementations
+
 
 impl Read for &[u8] {
     #[inline]

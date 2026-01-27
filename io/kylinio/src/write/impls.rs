@@ -4,9 +4,6 @@ use core::{cmp, fmt, io::BorrowedCursor, mem};
 
 use crate::{Error, Result, Write};
 
-// =============================================================================
-// Forwarding implementations
-
 impl<W: Write + ?Sized> Write for &mut W {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
@@ -51,9 +48,6 @@ impl<W: Write + ?Sized> Write for Box<W> {
         (**self).write_fmt(fmt)
     }
 }
-
-// =============================================================================
-// In-memory buffer implementations
 
 impl Write for &mut [u8] {
     #[inline]

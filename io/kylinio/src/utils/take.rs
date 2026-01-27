@@ -29,45 +29,27 @@ impl<T> Take<T> {
         }
     }
 
-    /// Returns the number of bytes that can be read before this instance will
-    /// return EOF.
     pub fn limit(&self) -> u64 {
         self.limit
     }
 
-    /// Returns the number of bytes read so far.
     pub fn position(&self) -> u64 {
         self.len - self.limit
     }
 
-    /// Sets the number of bytes that can be read before this instance will
-    /// return EOF. This is the same as constructing a new `Take` instance, so
-    /// the amount of bytes read and the previous limit value don't matter when
-    /// calling this method.
     pub fn set_limit(&mut self, limit: u64) {
         self.len = limit;
         self.limit = limit;
     }
 
-    /// Consumes the `Take`, returning the wrapped reader.
     pub fn into_inner(self) -> T {
         self.inner
     }
 
-    /// Gets a reference to the underlying reader.
-    ///
-    /// Care should be taken to avoid modifying the internal I/O state of the
-    /// underlying reader as doing so may corrupt the internal limit of this
-    /// `Take`.
     pub fn get_ref(&self) -> &T {
         &self.inner
     }
 
-    /// Gets a mutable reference to the underlying reader.
-    ///
-    /// Care should be taken to avoid modifying the internal I/O state of the
-    /// underlying reader as doing so may corrupt the internal limit of this
-    /// `Take`.
     pub fn get_mut(&mut self) -> &mut T {
         &mut self.inner
     }
@@ -94,7 +76,6 @@ impl<T: Read> Read for Take<T> {
         }
 
         if self.limit < buf.capacity() as u64 {
-            // The condition above guarantees that `self.limit` fits in `usize`.
             let limit = self.limit as usize;
 
             #[cfg(borrowedbuf_init)]

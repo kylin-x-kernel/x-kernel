@@ -6,7 +6,6 @@ use crate::{Chain, Error, Result, Take};
 
 mod impls;
 
-/// Default [`Read::read_exact`] implementation.
 pub fn default_read_exact<R: Read + ?Sized>(this: &mut R, mut buf: &mut [u8]) -> Result<()> {
     while !buf.is_empty() {
         match this.read(buf) {
@@ -25,7 +24,6 @@ pub fn default_read_exact<R: Read + ?Sized>(this: &mut R, mut buf: &mut [u8]) ->
     }
 }
 
-/// Default [`Read::read_buf`] implementation.
 pub fn default_read_buf<F>(read: F, mut cursor: BorrowedCursor<'_>) -> Result<()>
 where
     F: FnOnce(&mut [u8]) -> Result<usize>,
@@ -37,10 +35,8 @@ where
     }
     #[cfg(not(borrowedbuf_init))]
     {
-        // SAFETY: We do not uninitialize any part of the buffer.
         let n = read(unsafe { cursor.as_mut().write_filled(0) })?;
         assert!(n <= cursor.capacity());
-        // SAFETY: We've initialized the entire buffer, and `read` can't make it uninitialized.
         unsafe {
             cursor.advance(n);
         }
@@ -48,7 +44,6 @@ where
     Ok(())
 }
 
-/// Default [`Read::read_buf_exact`] implementation.
 pub fn default_read_buf_exact<R: Read + ?Sized>(
     this: &mut R,
     mut cursor: BorrowedCursor<'_>,
@@ -69,7 +64,6 @@ pub fn default_read_buf_exact<R: Read + ?Sized>(
     Ok(())
 }
 
-/// Default [`Read::read_to_end`] implementation with optional size hint.
 #[cfg(feature = "alloc")]
 pub fn default_read_to_end<R: Read + ?Sized>(
     r: &mut R,
@@ -82,8 +76,6 @@ pub fn default_read_to_end<R: Read + ?Sized>(
 
     let start_len = buf.len();
     let start_cap = buf.capacity();
-    // Optionally limit the maximum bytes read on each iteration.
-    // This adds an arbitrary fiddle factor to allow for more data than we expect.
     let mut max_read_size = size_hint
         .and_then(|s| {
             s.checked_add(1024)?
@@ -99,8 +91,6 @@ pub fn default_read_to_end<R: Read + ?Sized>(
         loop {
             match r.read(&mut probe) {
                 Ok(n) => {
-                    // there is no way to recover from allocation failure here
-                    // because the data has already been read.
                     buf.extend_from_slice(&probe[..n]);
                     return Ok(n);
                 }
@@ -125,10 +115,6 @@ pub fn default_read_to_end<R: Read + ?Sized>(
 
     loop {
         if buf.len() == buf.capacity() && buf.capacity() == start_cap {
-            // The buffer might be an exact fit. Let's read into a probe buffer
-            // and see if it returns `Ok(0)`. If so, we've avoided an
-            // unnecessary doubling of the capacity. But if not, append the
-            // probe buffer to the primary buffer and let its capacity grow.
             let read = small_probe_read(r, buf)?;
 
             if read == 0 {
@@ -137,7 +123,6 @@ pub fn default_read_to_end<R: Read + ?Sized>(
         }
 
         if buf.len() == buf.capacity() {
-            // buf is full, need more space
             buf.try_reserve(PROBE_SIZE).map_err(|_| Error::NoMemory)?;
         }
 
@@ -156,8 +141,6 @@ pub fn default_read_to_end<R: Read + ?Sized>(
         let result = loop {
             match r.read_buf(cursor.reborrow()) {
                 Err(e) if e.canonicalize() == Error::Interrupted => continue,
-                // Do not stop now in case of error: we might have received both data
-                // and an error
                 res => break res,
             }
         };
@@ -174,7 +157,6 @@ pub fn default_read_to_end<R: Read + ?Sized>(
             buf.set_len(new_len);
         }
 
-        // Now that all data is pushed to the vector, we can fail without data loss
         result?;
 
         if bytes_read == 0 {
@@ -198,11 +180,6 @@ pub fn default_read_to_end<R: Read + ?Sized>(
         if size_hint.is_none() {
             #[cfg(borrowedbuf_init)]
             // The reader is returning short reads but it doesn't call ensure_init().
-            // In that case we no longer need to restrict read sizes to avoid
-            // initialization costs.
-            // When reading from disk we usually don't get any short reads except at EOF.
-            // So we wait for at least 2 short reads before uncapping the read buffer;
-            // this helps with the Windows issue.
             if !was_fully_initialized && consecutive_short_reads > 1 {
                 max_read_size = usize::MAX;
             }
@@ -262,10 +239,6 @@ pub fn default_read_to_string<R: Read + ?Sized>(
     // method to fill it up. An arbitrary implementation could overwrite the
     // entire contents of the vector, not just append to it (which is what
     // we are expecting).
-    //
-    // To prevent extraneously checking the UTF-8-ness of the entire buffer
-    // we pass it to our hardcoded `default_read_to_end` implementation which
-    // we know is guaranteed to only read data into the end of the buffer.
     unsafe { append_to_string(buf, |b| default_read_to_end(r, b, size_hint)) }
 }
 
@@ -273,8 +246,7 @@ pub fn default_read_to_string<R: Read + ?Sized>(
 ///
 /// See [`std::io::Read`] for more details.
 pub trait Read {
-    /// Pull some bytes from this source into the specified buffer, returning
-    /// how many bytes were read.
+    /// Pull some bytes from this source into the specified buffer
     fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
 
     /// Read the exact number of bytes required to fill `buf`.
@@ -283,15 +255,11 @@ pub trait Read {
     }
 
     /// Pull some bytes from this source into the specified buffer.
-    ///
-    /// This method makes it possible to return both data and an error but it is advised against.
     fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> Result<()> {
         default_read_buf(|b| self.read(b), buf)
     }
 
     /// Reads the exact number of bytes required to fill `cursor`.
-    ///
-    /// If this function returns an error, all bytes read will be appended to `cursor`.
     fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> Result<()> {
         default_read_buf_exact(self, cursor)
     }
@@ -309,9 +277,6 @@ pub trait Read {
     }
 
     /// Creates a "by reference" adapter for this instance of `Read`.
-    ///
-    /// The returned `adapter` also implements Read and will simply borrow this
-    /// current reader.
     fn by_ref(&mut self) -> &mut Self
     where
         Self: Sized,
@@ -320,10 +285,6 @@ pub trait Read {
     }
 
     /// Creates an adapter which will chain this stream with another.
-    ///
-    /// The returned `Read` instance will first read all bytes from this object
-    /// until EOF is encountered. Afterwards the output is equivalent to the
-    /// output of `next`.
     fn chain<R: Read>(self, next: R) -> Chain<Self, R>
     where
         Self: Sized,
@@ -332,14 +293,6 @@ pub trait Read {
     }
 
     /// Creates an adapter which will read at most `limit` bytes from it.
-    ///
-    /// This function returns a new instance of `Read` which will read at most
-    /// `limit` bytes, after which it will always return EOF ([`Ok(0)`]). Any
-    /// read errors will not count towards the number of bytes read and future
-    /// calls to [`read()`] may succeed.
-    ///
-    /// [`Ok(0)`]: Ok
-    /// [`read()`]: Read::read
     fn take(self, limit: u64) -> Take<Self>
     where
         Self: Sized,
