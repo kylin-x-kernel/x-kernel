@@ -1,4 +1,4 @@
-[package]
+ [package]
 name = "axplat"
 version = "0.3.0"
 description = "This crate provides a unified abstraction layer for diverse hardware platforms."
@@ -23,7 +23,7 @@ bitflags = "2.6"
 crate_interface = "0.1"
 handler_table = { version = "0.1.2", optional = true }
 const-str = "0.6.2"
-axplat-macros = { workspace = true }
+kyplat-macros = { workspace = true }
 kspin = "0.1"
 percpu = "0.2.0"
 

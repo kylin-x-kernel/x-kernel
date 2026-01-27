@@ -72,7 +72,7 @@ starry-vm = { path = "process/starry-vm" }
 
 # Platform Abstraction Layer
 axplat = { path = "arch/axplat" }
-axplat-macros = { path = "arch/axplat-macros" }
+kyplat-macros = { path = "arch/kyplat-macros" }
 axplat-aarch64-qemu-virt = { path = "arch/axplat-aarch64-qemu-virt" }
 axplat-x86-pc = { path = "arch/axplat-x86-pc" }
 axplat-x86-csv = { path = "arch/axplat-x86-csv" }

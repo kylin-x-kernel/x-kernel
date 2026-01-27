@@ -3,7 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 #[macro_use]
-extern crate axplat_macros;
+extern crate kyplat_macros;
 
 pub mod console;
 pub mod init;
@@ -19,10 +19,10 @@ pub mod power;
 pub mod psci;
 pub mod time;
 
-pub use axplat_macros::main;
-#[cfg(feature = "smp")]
-pub use axplat_macros::secondary_main;
 pub use crate_interface::impl_interface as impl_plat_interface;
+pub use kyplat_macros::main;
+#[cfg(feature = "smp")]
+pub use kyplat_macros::secondary_main;
 
 #[doc(hidden)]
 pub mod __priv {
