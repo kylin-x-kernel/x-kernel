@@ -1,8 +1,12 @@
 use core::fmt;
-use memaddr::{PhysAddr, VirtAddr, MemoryAddr};
+
+use memaddr::{PhysAddr, VirtAddr};
 pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;
-use crate::defs::{PageTableEntry, PagingFlags, PagingMetaData};
-use crate::table::{PageTable, PageTableMut};
+
+use crate::{
+    defs::{PageTableEntry, PagingFlags, PagingMetaData},
+    table::{PageTable, PageTableMut},
+};
 
 impl From<PTF> for PagingFlags {
     fn from(f: PTF) -> Self {
@@ -54,7 +58,7 @@ pub struct X64PageEntry(u64);
 
 impl X64PageEntry {
     const PADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
-    
+
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -127,19 +131,18 @@ impl fmt::Debug for X64PageEntry {
 pub struct X64PagingMetaData;
 
 impl PagingMetaData for X64PagingMetaData {
+    type VirtAddr = VirtAddr;
+
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 52;
     const VA_MAX_BITS: usize = 48;
-    type VirtAddr = VirtAddr;
 
     #[inline]
     fn flush_tlb(vaddr: Option<VirtAddr>) {
-        unsafe {
-            if let Some(vaddr) = vaddr {
-                x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(vaddr.as_usize() as u64));
-            } else {
-                x86_64::instructions::tlb::flush_all();
-            }
+        if let Some(vaddr) = vaddr {
+            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(vaddr.as_usize() as u64));
+        } else {
+            x86_64::instructions::tlb::flush_all();
         }
     }
 }

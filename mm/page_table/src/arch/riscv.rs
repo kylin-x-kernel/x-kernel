@@ -128,7 +128,8 @@ impl fmt::Debug for Rv64PageEntry {
             .field("paddr", &self.paddr())
             .field("flags", &self.flags())
             .finish()
- 
+    }
+}
 
 pub trait SvVirtAddr: memaddr::MemoryAddr + Send + Sync {
     fn flush_tlb(vaddr: Option<Self>);
@@ -138,9 +139,9 @@ impl SvVirtAddr for VirtAddr {
     #[inline]
     fn flush_tlb(vaddr: Option<Self>) {
         if let Some(vaddr) = vaddr {
-            unsafe { riscv::asm::sfence_vma(0, vaddr.as_usize()) }
+            riscv::asm::sfence_vma(0, vaddr.as_usize());
         } else {
-            unsafe { riscv::asm::sfence_vma_all() }
+            riscv::asm::sfence_vma_all();
         }
     }
 }
@@ -181,5 +182,4 @@ pub type Sv39PageTable<H> = PageTable<Sv39MetaData<VirtAddr>, Rv64PageEntry, H>;
 pub type Sv39PageTableMut<'a, H> = PageTableMut<'a, Sv39MetaData<VirtAddr>, Rv64PageEntry, H>;
 
 pub type Sv48PageTable<H> = PageTable<Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;
-pub type Sv48PageTableMut<'a, H> = PageTableMut<'a, Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;   }
-}
+pub type Sv48PageTableMut<'a, H> = PageTableMut<'a, Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;

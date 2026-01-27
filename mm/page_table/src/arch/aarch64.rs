@@ -1,6 +1,5 @@
 use core::fmt;
 use core::arch::asm;
-use aarch64_cpu::registers::MAIR_EL1;
 use memaddr::{PhysAddr, VirtAddr};
 use crate::defs::{PageTableEntry, PagingFlags, PagingMetaData};
 use crate::table::{PageTable, PageTableMut};
@@ -61,6 +60,8 @@ impl Arm64Attr {
 }
 
 impl Arm64MemAttr {
+    pub const MAIR_VALUE: u64 = Self::mair_el1_val();
+
     pub const fn mair_el1_val() -> u64 {
         let device = 0x00; 
         let normal = 0xff; 
@@ -196,7 +197,9 @@ impl fmt::Debug for A64PageEntry {
         f.debug_struct("A64PageEntry")
             .field("paddr", &self.paddr())
             .field("flags", &self.flags())
- 
+            .finish()
+    }
+}
 
 pub struct A64PagingMetaData;
 
@@ -225,6 +228,4 @@ impl PagingMetaData for A64PagingMetaData {
 }
 
 pub type A64PageTable<H> = PageTable<A64PagingMetaData, A64PageEntry, H>;
-pub type A64PageTableMut<'a, H> = PageTableMut<'a, A64PagingMetaData, A64PageEntry, H>;           .finish()
-    }
-}
+pub type A64PageTableMut<'a, H> = PageTableMut<'a, A64PagingMetaData, A64PageEntry, H>;

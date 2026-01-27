@@ -253,7 +253,7 @@ impl IrqIf for IrqIfImpl {
     }
 
     /// Sets the priority for a specific interrupt request (IRQ).
-    fn set_priority(irq: usize, priority: u8) {
+    fn set_priority(_irq: usize, _priority: u8) {
         todo!()
     }
 
@@ -263,7 +263,7 @@ impl IrqIf for IrqIfImpl {
     }
 
     /// Restore irq status
-    fn local_irq_restore(flag: usize) {
+    fn local_irq_restore(_flag: usize) {
         todo!()
     }
 
