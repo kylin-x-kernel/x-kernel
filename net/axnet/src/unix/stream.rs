@@ -201,7 +201,7 @@ impl TransportOps for StreamTransport {
         let (rx, _poll) = {
             let mut guard = self.conn_rx.lock();
             let Some((rx, poll)) = guard.as_mut() else {
-            return Err(AxError::NotConnected);
+                return Err(AxError::NotConnected);
             };
             (rx.clone(), poll.clone())
         };

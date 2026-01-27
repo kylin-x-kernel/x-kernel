@@ -84,9 +84,8 @@ macro_rules! ns16550_console_if_impl {
             }
 
             fn write_bytes_force(bytes: &[u8]) {
-                let mut uart_base = axplat::mem::phys_to_virt(axplat::mem::pa!(
-                    crate::config::devices::UART_PADDR
-                ));
+                let mut uart_base =
+                    axplat::mem::phys_to_virt(axplat::mem::pa!(crate::config::devices::UART_PADDR));
                 $crate::ns16550a::write_bytes_force(uart_16550, bytes);
             }
 

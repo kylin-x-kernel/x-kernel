@@ -26,7 +26,8 @@ struct GlobalTaskRegistry {
 impl GlobalTaskRegistry {
     const fn new() -> Self {
         Self {
-            slots: [const { [const { AtomicUsize::new(0) }; GLOBAL_TASK_QUEUE_SLOTS] }; axconfig::plat::CPU_NUM],
+            slots: [const { [const { AtomicUsize::new(0) }; GLOBAL_TASK_QUEUE_SLOTS] };
+                axconfig::plat::CPU_NUM],
         }
     }
 
