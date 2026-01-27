@@ -17,14 +17,14 @@ core::arch::global_asm!(
     trapframe_size = const core::mem::size_of::<TrapFrame>(),
 );
 
-fn handle_breakpoint(sepc: &mut usize) {
+fn dispatch_irq_breakpoint(sepc: &mut usize) {
     debug!("Exception(Breakpoint) @ {sepc:#x} ");
     *sepc += 2
 }
 
-fn handle_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
+fn dispatch_irq_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
     let vaddr = va!(stval::read());
-    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     #[cfg(feature = "uspace")]
@@ -33,7 +33,7 @@ fn handle_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
     }
     core::hint::cold_path();
     panic!(
-        "Unhandled Supervisor Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
+        "Undispatch_irqd Supervisor Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
         tf.sepc,
         vaddr,
         access_flags,
@@ -48,18 +48,18 @@ fn riscv_trap_handler(tf: &mut TrapFrame) {
     let scause = scause::read();
     if let Ok(cause) = scause.cause().try_into::<I, E>() {
         match cause {
-            Trap::Exception(E::LoadPageFault) => handle_page_fault(tf, PageFaultFlags::READ),
-            Trap::Exception(E::StorePageFault) => handle_page_fault(tf, PageFaultFlags::WRITE),
+            Trap::Exception(E::LoadPageFault) => dispatch_irq_page_fault(tf, PageFaultFlags::READ),
+            Trap::Exception(E::StorePageFault) => dispatch_irq_page_fault(tf, PageFaultFlags::WRITE),
             Trap::Exception(E::InstructionPageFault) => {
-                handle_page_fault(tf, PageFaultFlags::EXECUTE)
+                dispatch_irq_page_fault(tf, PageFaultFlags::EXECUTE)
             }
-            Trap::Exception(E::Breakpoint) => handle_breakpoint(&mut tf.sepc),
+            Trap::Exception(E::Breakpoint) => dispatch_irq_breakpoint(&mut tf.sepc),
             Trap::Interrupt(_) => {
-                handle_trap!(IRQ, scause.bits());
+                dispatch_irq_trap!(IRQ, scause.bits());
             }
             _ => {
                 panic!(
-                    "Unhandled trap {:?} @ {:#x}, stval={:#x}:\n{:#x?}\n{}",
+                    "Undispatch_irqd trap {:?} @ {:#x}, stval={:#x}:\n{:#x?}\n{}",
                     cause,
                     tf.sepc,
                     stval::read(),

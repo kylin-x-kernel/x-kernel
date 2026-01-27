@@ -47,7 +47,7 @@ axipi = { workspace = true, optional = true }
 klogger.workspace = true
 axmm = { workspace = true, optional = true }
 axnet = { workspace = true, optional = true }
-axplat = { workspace = true }
+kplat = { workspace = true }
 axtask = { workspace = true, optional = true }
 axwatchdog = { workspace = true, optional = true }
 chrono.workspace = true

@@ -136,7 +136,7 @@ impl FutexKey {
                 Backend::File(file) => {
                     return Self::Shared {
                         offset: address - area.start().as_usize(),
-                        region: Err(file.futex_handle()),
+                        region: Err(file.futex_dispatch_irq()),
                     };
                 }
                 _ => {}

@@ -37,7 +37,7 @@ pub enum ProcessMode {
     /// Spawns task for processing inputs, relying on external events to wake
     /// up.
     ///
-    /// In this mode a dedicated task is spawned to handle inputs. When there's
+    /// In this mode a dedicated task is spawned to dispatch_irq inputs. When there's
     /// nothing to read the argument is invoked to register rx waker.
     External(Box<dyn Fn(Waker) + Send + Sync>),
     /// Do not process inputs.

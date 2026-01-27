@@ -1,0 +1,30 @@
+[package]
+name = "aarch64-raspi"
+version = "0.3.0"
+description = "Implementation of `kplat` hardware abstraction layer for Raspberry Pi 4B board."
+documentation = "https://docs.rs/kplat-aarch64-raspi"
+keywords = ["arceos", "os", "hal", "aarch64", "raspi"]
+categories = ["embedded", "no-std", "hardware-support", "os"]
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+fp-simd = ["axcpu/fp-simd"]
+irq = ["kplat/irq", "aarch64-peripherals/irq"]
+rtc = []                                               # Not implemented, currently no effect
+smp = ["kplat/smp"]
+
+[dependencies]
+log = "0.4"
+aarch64-cpu = "10.0"
+page_table = { workspace = true }
+platconfig-macros = { workspace = true }
+aarch64-peripherals = { version = "0.3.0", path = "../kplat-aarch64-peripherals" }
+axcpu = { workspace = true }
+kplat = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["aarch64-unknown-none"]

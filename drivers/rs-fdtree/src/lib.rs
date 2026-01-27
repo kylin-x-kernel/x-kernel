@@ -232,12 +232,12 @@ impl<'a> LinuxFdt<'a> {
         node.or_else(|| self.aliases()?.resolve_node(path))
     }
 
-    /// Searches for the given `phandle`
-    pub fn find_phandle(&self, phandle: u32) -> Option<node::FdtNode<'_, 'a>> {
+    /// Searches for the given `pdispatch_irq`
+    pub fn find_pdispatch_irq(&self, pdispatch_irq: u32) -> Option<node::FdtNode<'_, 'a>> {
         self.all_nodes().find(|n| {
             n.properties()
-                .find(|p| p.name == "phandle")
-                .and_then(|p| Some(BigEndianU32::from_bytes(p.value)?.get() == phandle))
+                .find(|p| p.name == "pdispatch_irq")
+                .and_then(|p| Some(BigEndianU32::from_bytes(p.value)?.get() == pdispatch_irq))
                 .unwrap_or(false)
         })
     }

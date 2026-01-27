@@ -37,13 +37,13 @@ core::arch::global_asm!(
 
 #[inline(always)]
 pub(super) fn is_valid_page_fault(iss: u64) -> bool {
-    // Only handle Translation fault and Permission fault
+    // Only dispatch_irq Translation fault and Permission fault
     matches!(iss & 0b111100, 0b0100 | 0b1100) // IFSC or DFSC bits
 }
 
-fn handle_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
+fn dispatch_irq_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
     let vaddr = va!(FAR_EL1.get() as usize);
-    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     #[cfg(feature = "uspace")]
@@ -52,7 +52,7 @@ fn handle_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
     }
     core::hint::cold_path();
     panic!(
-        "Unhandled EL1 Page Fault @ {:#x}, fault_vaddr={:#x}, ESR={:#x} ({:?}):\n{:#x?}\n{}",
+        "Undispatch_irqd EL1 Page Fault @ {:#x}, fault_vaddr={:#x}, ESR={:#x} ({:?}):\n{:#x?}\n{}",
         tf.elr,
         vaddr,
         ESR_EL1.get(),
@@ -76,22 +76,22 @@ fn aarch64_trap_handler(tf: &mut TrapFrame, kind: TrapKind, source: TrapSource) 
     }
     match kind {
         TrapKind::Fiq | TrapKind::SError => {
-            panic!("Unhandled exception {:?}:\n{:#x?}", kind, tf);
+            panic!("Undispatch_irqd exception {:?}:\n{:#x?}", kind, tf);
         }
         TrapKind::Irq => {
-            handle_trap!(IRQ, 0);
+            dispatch_irq_trap!(IRQ, 0);
         }
         TrapKind::Synchronous => {
             let esr = ESR_EL1.extract();
             let iss = esr.read(ESR_EL1::ISS);
             match esr.read_as_enum(ESR_EL1::EC) {
                 Some(ESR_EL1::EC::Value::InstrAbortCurrentEL) if is_valid_page_fault(iss) => {
-                    handle_page_fault(tf, PageFaultFlags::EXECUTE);
+                    dispatch_irq_page_fault(tf, PageFaultFlags::EXECUTE);
                 }
                 Some(ESR_EL1::EC::Value::DataAbortCurrentEL) if is_valid_page_fault(iss) => {
                     let wnr = (iss & (1 << 6)) != 0; // WnR: Write not Read
                     let cm = (iss & (1 << 8)) != 0; // CM: Cache maintenance
-                    handle_page_fault(
+                    dispatch_irq_page_fault(
                         tf,
                         if wnr & !cm {
                             PageFaultFlags::WRITE
@@ -107,7 +107,7 @@ fn aarch64_trap_handler(tf: &mut TrapFrame, kind: TrapKind, source: TrapSource) 
                 e => {
                     let vaddr = va!(FAR_EL1.get() as usize);
                     panic!(
-                        "Unhandled synchronous exception {:?} @ {:#x}: ESR={:#x} (EC {:#08b}, \
+                        "Undispatch_irqd synchronous exception {:?} @ {:#x}: ESR={:#x} (EC {:#08b}, \
                          FAR: {:#x} ISS {:#x})\n{}",
                         e,
                         tf.elr,

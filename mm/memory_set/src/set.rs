@@ -212,7 +212,7 @@ impl<B: MappingBackend> MemorySet<B> {
     ///
     /// Memory areas will be skipped according to `update_flags`. Memory areas
     /// that are fully contained in the range or contains the range or
-    /// intersects with the boundary will be handled similarly to `munmap`.
+    /// intersects with the boundary will be dispatch_irqd similarly to `munmap`.
     pub fn protect(
         &mut self,
         start: B::Addr,

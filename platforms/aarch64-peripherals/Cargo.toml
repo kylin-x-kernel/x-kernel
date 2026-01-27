@@ -1,0 +1,42 @@
+[package]
+name = "aarch64-peripherals"
+version = "0.3.0"
+description = "ARM64 common peripheral drivers with `kplat` compatibility"
+documentation = "https://docs.rs/kplat-aarch64-peripherals"
+keywords = ["arceos", "os", "hal", "peripheral", "aarch64"]
+categories = ["embedded", "no-std", "hardware-support", "os"]
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+irq = ["kplat/irq"]
+default = []
+gicv2 = ["irq"]
+gicv3 = ["irq"]
+pmr = []
+pmu = ["dep:aarch64-pmuv3", "irq", "kplat/pmu"]
+nmi-pmu = ["pmr", "pmu", "kplat/nmi"]
+nmi-sdei = []
+
+[dependencies]
+kspin = { workspace = true }
+log = "0.4"
+spin = "0.10"
+int_ratio = "0.1"
+lazyinit = "0.2"
+page_table = { workspace = true }
+aarch64-cpu = "10.0"
+arm_pl011 = "0.1"
+arm-gic-driver = "0.15"
+uart_16550 = "0.4"
+arm_pl031 = "0.2"
+axcpu = { workspace = true }
+kplat = { workspace = true }
+aarch64-pmuv3 = { git = "https://github.com/kylin-x-kernel/aarch64-pmuv3.git", branch = "lzx/dev", optional = true }
+percpu = "0.2.0"
+
+[package.metadata.docs.rs]
+targets = ["aarch64-unknown-none"]

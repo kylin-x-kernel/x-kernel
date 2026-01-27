@@ -16,11 +16,11 @@ pub(super) const LEGACY_SYSCALL_VECTOR: u8 = 0x80;
 pub(super) const IRQ_VECTOR_START: u8 = 0x20;
 pub(super) const IRQ_VECTOR_END: u8 = 0xff;
 
-fn handle_page_fault(tf: &mut TrapFrame) {
+fn dispatch_irq_page_fault(tf: &mut TrapFrame) {
     let access_flags = err_code_to_flags(tf.error_code)
         .unwrap_or_else(|e| panic!("Invalid #PF error code: {:#x}", e));
     let vaddr = va!(unsafe { cr2() });
-    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     #[cfg(feature = "uspace")]
@@ -29,7 +29,7 @@ fn handle_page_fault(tf: &mut TrapFrame) {
     }
     core::hint::cold_path();
     panic!(
-        "Unhandled #PF @ {:#x}, fault_vaddr={:#x}, error_code={:#x} ({:?}):\n{:#x?}\n{}",
+        "Undispatch_irqd #PF @ {:#x}, fault_vaddr={:#x}, error_code={:#x} ({:?}):\n{:#x?}\n{}",
         tf.rip,
         vaddr,
         tf.error_code,
@@ -43,7 +43,7 @@ fn handle_page_fault(tf: &mut TrapFrame) {
 fn x86_trap_handler(tf: &mut TrapFrame) {
     let _tf_guard = crate::TrapFrameGuard::new(tf);
     match tf.vector as u8 {
-        PAGE_FAULT_VECTOR => handle_page_fault(tf),
+        PAGE_FAULT_VECTOR => dispatch_irq_page_fault(tf),
         BREAKPOINT_VECTOR => debug!("#BP @ {:#x} ", tf.rip),
         GENERAL_PROTECTION_FAULT_VECTOR => {
             panic!(
@@ -55,11 +55,11 @@ fn x86_trap_handler(tf: &mut TrapFrame) {
             );
         }
         IRQ_VECTOR_START..=IRQ_VECTOR_END => {
-            handle_trap!(IRQ, tf.vector as _);
+            dispatch_irq_trap!(IRQ, tf.vector as _);
         }
         _ => {
             panic!(
-                "Unhandled exception {} ({}, error_code={:#x}) @ {:#x}:\n{:#x?}\n{}",
+                "Undispatch_irqd exception {} ({}, error_code={:#x}) @ {:#x}:\n{:#x?}\n{}",
                 tf.vector,
                 vec_to_str(tf.vector),
                 tf.error_code,

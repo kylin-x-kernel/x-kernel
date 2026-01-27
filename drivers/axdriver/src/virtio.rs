@@ -10,7 +10,7 @@ use core::{marker::PhantomData, ptr::NonNull};
 
 use axalloc::{UsageKind, global_allocator};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
-use axhal::mem::{phys_to_virt, virt_to_phys};
+use axhal::mem::{p2v, v2p};
 #[cfg(feature = "crosvm")]
 use axhal::psci::{share_dma_buffer, unshare_dma_buffer};
 use cfg_if::cfg_if;
@@ -118,7 +118,7 @@ pub struct VirtIoDriver<D: VirtIoDevMeta + ?Sized>(PhantomData<D>);
 impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     #[cfg(bus = "mmio")]
     fn probe_mmio(mmio_base: usize, mmio_size: usize) -> Option<AxDeviceEnum> {
-        let base_vaddr = phys_to_virt(mmio_base.into());
+        let base_vaddr = p2v(mmio_base.into());
         if let Some((ty, transport)) =
             axdriver_virtio::probe_mmio_device(base_vaddr.as_mut_ptr(), mmio_size)
             && ty == D::DEVICE_TYPE
@@ -192,7 +192,7 @@ cfg_if! {
 
         static VIRTIO_FRAME_POOL: Lazy<Mutex<VirtIoFramePool>> = Lazy::new(|| {
             let vaddr = global_allocator().alloc_pages(VIRTIO_QUEUE_SIZE,0x1000,UsageKind::Dma).expect("virtio frame pool alloc failed");
-            let paddr = virt_to_phys(vaddr.into());
+            let paddr = v2p(vaddr.into());
             share_dma_buffer(paddr.as_usize(), VIRTIO_QUEUE_SIZE * PAGE_SIZE);
             let pool = VirtIoFramePool {
                 pool_paddr: paddr.into(),
@@ -238,7 +238,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         } else {
             return (0, NonNull::dangling());
         };
-        let paddr = virt_to_phys(vaddr.into());
+        let paddr = v2p(vaddr.into());
         let ptr = NonNull::new(vaddr as _).unwrap();
 
         #[cfg(feature = "crosvm")]
@@ -260,7 +260,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
     #[inline]
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, _size: usize) -> NonNull<u8> {
-        NonNull::new(phys_to_virt(paddr.into()).as_mut_ptr()).unwrap()
+        NonNull::new(p2v(paddr.into()).as_mut_ptr()).unwrap()
     }
 
     #[allow(unused_variables)]
@@ -278,7 +278,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
             if direction != BufferDirection::DeviceToDriver {
                 let data = unsafe {
-                    let data = phys_to_virt(paddr.into()).as_usize() as *mut u8;
+                    let data = p2v(paddr.into()).as_usize() as *mut u8;
                     core::slice::from_raw_parts_mut(data, len)
                 };
                 data.clone_from_slice(unsafe { &buffer.as_ref() });
@@ -289,7 +289,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         #[cfg(not(feature = "crosvm"))]
         {
             let vaddr = buffer.as_ptr() as *mut u8 as usize;
-            virt_to_phys(vaddr.into()).into()
+            v2p(vaddr.into()).into()
         }
     }
 
@@ -303,7 +303,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
             if direction != BufferDirection::DriverToDevice {
                 let data = unsafe {
-                    let data = phys_to_virt(paddr.into()).as_usize() as *mut u8;
+                    let data = p2v(paddr.into()).as_usize() as *mut u8;
                     core::slice::from_raw_parts(data, buffer.len())
                 };
                 unsafe { buffer.as_mut().clone_from_slice(&data) };

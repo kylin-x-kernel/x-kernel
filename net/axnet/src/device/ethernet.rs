@@ -101,7 +101,7 @@ impl EthernetDevice {
         }
     }
 
-    fn handle_frame(
+    fn dispatch_irq_frame(
         &mut self,
         frame: &[u8],
         buffer: &mut PacketBuffer<()>,
@@ -279,7 +279,7 @@ impl Device for EthernetDevice {
                 rx_buf.packet()
             );
 
-            let result = self.handle_frame(rx_buf.packet(), buffer, timestamp);
+            let result = self.dispatch_irq_frame(rx_buf.packet(), buffer, timestamp);
             self.inner.recycle_rx_buffer(rx_buf).unwrap();
             if result {
                 return true;

@@ -8,7 +8,7 @@ pub use page_table::{
     PageSize, PagingFlags as MappingFlags, PtError as PagingError, PtResult as PagingResult,
 };
 
-use crate::mem::{phys_to_virt, virt_to_phys};
+use crate::mem::{p2v, v2p};
 
 /// Implementation of [`PagingHandler`], to provide physical memory manipulation
 /// to the [page_table] crate.
@@ -18,17 +18,17 @@ impl PagingHandler for PagingHandlerImpl {
     fn alloc_frame() -> Option<PhysAddr> {
         global_allocator()
             .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageTable)
-            .map(|vaddr| virt_to_phys(vaddr.into()))
+            .map(|vaddr| v2p(vaddr.into()))
             .ok()
     }
 
     fn dealloc_frame(paddr: PhysAddr) {
-        global_allocator().dealloc_pages(phys_to_virt(paddr).as_usize(), 1, UsageKind::PageTable);
+        global_allocator().dealloc_pages(p2v(paddr).as_usize(), 1, UsageKind::PageTable);
     }
 
     #[inline]
-    fn phys_to_virt(paddr: PhysAddr) -> VirtAddr {
-        phys_to_virt(paddr)
+    fn p2v(paddr: PhysAddr) -> VirtAddr {
+        p2v(paddr)
     }
 }
 

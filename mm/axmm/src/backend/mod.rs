@@ -4,7 +4,7 @@ use alloc::{boxed::Box, sync::Arc};
 use axalloc::{UsageKind, global_allocator};
 use axerrno::{AxError, AxResult};
 use axhal::{
-    mem::{phys_to_virt, virt_to_phys},
+    mem::{p2v, v2p},
     paging::{MappingFlags, PageSize, PageTable, PageTableMut},
 };
 use axsync::Mutex;
@@ -34,13 +34,13 @@ fn alloc_frame(zeroed: bool, size: PageSize) -> AxResult<PhysAddr> {
     if zeroed {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, page_size) };
     }
-    let paddr = virt_to_phys(vaddr);
+    let paddr = v2p(vaddr);
 
     Ok(paddr)
 }
 
 fn dealloc_frame(frame: PhysAddr, align: PageSize) {
-    let vaddr = phys_to_virt(frame);
+    let vaddr = p2v(frame);
     let page_size: usize = align.into();
     let num_pages = page_size / PAGE_SIZE_4K;
     global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);

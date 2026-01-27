@@ -378,7 +378,7 @@ impl VsockConnectionManager {
         }
     }
 
-    /// handle a new connection request (by driver event)
+    /// dispatch_irq a new connection request (by driver event)
     pub fn on_connection_request(&mut self, conn_id: VsockConnId) -> AxResult<()> {
         let queue = self
             .listen_queues
@@ -425,7 +425,7 @@ impl VsockConnectionManager {
         Ok(())
     }
 
-    /// handle data received (by driver event)
+    /// dispatch_irq data received (by driver event)
     pub fn on_data_received(&mut self, conn_id: VsockConnId, data: &[u8]) -> AxResult<()> {
         let conn = self
             .connections
@@ -450,7 +450,7 @@ impl VsockConnectionManager {
         Ok(())
     }
 
-    /// handle disconnection (by driver event)
+    /// dispatch_irq disconnection (by driver event)
     pub fn on_disconnected(&mut self, conn_id: VsockConnId) -> AxResult<()> {
         if let Some(conn) = self.connections.get(&conn_id) {
             let mut conn_guard = conn.lock();
@@ -463,7 +463,7 @@ impl VsockConnectionManager {
         Ok(())
     }
 
-    /// handle connected event (by driver event)
+    /// dispatch_irq connected event (by driver event)
     pub fn on_connected(&mut self, conn_id: VsockConnId) -> AxResult<()> {
         if let Some(conn) = self.connections.get(&conn_id) {
             let mut conn_guard = conn.lock();

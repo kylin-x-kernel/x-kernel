@@ -60,7 +60,7 @@ lazyinit = { workspace = true, optional = true }
 log.workspace = true
 memaddr = { workspace = true, optional = true }
 percpu = { workspace = true, optional = true }
-axplat = { workspace = true, optional = true }
+kplat = { workspace = true, optional = true }
 
 [dev-dependencies]
 axhal = { workspace = true, features = ["fp-simd"] }

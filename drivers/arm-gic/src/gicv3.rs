@@ -233,7 +233,7 @@ impl GicV3 {
     /// Sets the priority mask for the current CPU core.
     ///
     /// Only interrupts with a higher priority (numerically lower) will be signalled.
-    pub fn set_priority_mask(min_priority: u8) {
+    pub fn set_prio_mask(min_priority: u8) {
         // Safe because writing to this system register doesn't access memory in any way.
         unsafe {
             write_sysreg!(icc_pmr_el1, min_priority.into());

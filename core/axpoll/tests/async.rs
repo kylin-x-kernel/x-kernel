@@ -43,20 +43,20 @@ async fn async_wake_single() {
 
     let f = WaitFuture::new(ps.clone(), ready.clone());
 
-    let handle = tokio::spawn(async move {
+    let dispatch_irq = tokio::spawn(async move {
         ready.store(true, Ordering::SeqCst);
         ps.wake();
     });
 
     f.await;
-    handle.await.unwrap();
+    dispatch_irq.await.unwrap();
 }
 
 #[tokio::test]
 async fn async_wake_many() {
     let ps = Arc::new(PollSet::new());
     let mut flags = Vec::new();
-    let mut handles = Vec::new();
+    let mut dispatch_irqs = Vec::new();
     let barrier = Arc::new(Barrier::new(66));
     for _ in 0..65 {
         let flag = Arc::new(AtomicBool::new(false));
@@ -67,13 +67,13 @@ async fn async_wake_many() {
             f.await;
         });
         flags.push(flag);
-        handles.push(h);
+        dispatch_irqs.push(h);
     }
     barrier.wait().await;
 
     let mut ready: Vec<_> = Vec::new();
     let mut pending: Vec<_> = Vec::new();
-    for (i, h) in handles.into_iter().enumerate() {
+    for (i, h) in dispatch_irqs.into_iter().enumerate() {
         if i % 2 == 0 {
             ready.push(h);
             flags[i].store(true, Ordering::SeqCst);

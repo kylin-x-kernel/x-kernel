@@ -1,6 +1,6 @@
 //! CPU-local data structures.
 
-pub use axplat::percpu::*;
+pub use kplat::cpu::*;
 
 #[percpu::def_percpu]
 static CURRENT_TASK_PTR: usize = 0;
@@ -54,3 +54,7 @@ pub unsafe fn set_current_task_ptr<T>(ptr: *const T) {
         unsafe { CURRENT_TASK_PTR.write_current_raw(ptr as usize) }
     }
 }
+pub use kplat::cpu::id as this_cpu_id;
+pub use kplat::cpu::boot_cpu_init as init_primary;
+#[cfg(feature = "smp")]
+pub use kplat::cpu::ap_cpu_init as init_secondary;

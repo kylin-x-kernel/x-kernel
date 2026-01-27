@@ -690,10 +690,10 @@ syscall_enum! {
         recvmmsg = 343,
         /// See [accept4(2)](https://man7.org/linux/man-pages/man2/accept4.2.html) for more info on this syscall.
         accept4 = 344,
-        /// See [name_to_handle_at(2)](https://man7.org/linux/man-pages/man2/name_to_handle_at.2.html) for more info on this syscall.
-        name_to_handle_at = 345,
-        /// See [open_by_handle_at(2)](https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html) for more info on this syscall.
-        open_by_handle_at = 346,
+        /// See [name_to_dispatch_irq_at(2)](https://man7.org/linux/man-pages/man2/name_to_dispatch_irq_at.2.html) for more info on this syscall.
+        name_to_dispatch_irq_at = 345,
+        /// See [open_by_dispatch_irq_at(2)](https://man7.org/linux/man-pages/man2/open_by_dispatch_irq_at.2.html) for more info on this syscall.
+        open_by_dispatch_irq_at = 346,
         /// See [clock_adjtime(2)](https://man7.org/linux/man-pages/man2/clock_adjtime.2.html) for more info on this syscall.
         clock_adjtime = 347,
         /// See [syncfs(2)](https://man7.org/linux/man-pages/man2/syncfs.2.html) for more info on this syscall.

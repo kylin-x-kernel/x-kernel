@@ -4,14 +4,14 @@ use core::arch::asm;
 const IF_BIT: usize = 1 << 9;
 
 #[inline]
-pub fn local_irq_save_and_disable() -> usize {
+pub fn save_disable() -> usize {
     let flags: usize;
     unsafe { asm!("pushf; pop {}; cli", out(reg) flags) };
     flags & IF_BIT
 }
 
 #[inline]
-pub fn local_irq_restore(flags: usize) {
+pub fn restore(flags: usize) {
     if flags != 0 {
         unsafe { asm!("sti") };
     } else {

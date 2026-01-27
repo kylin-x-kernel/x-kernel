@@ -77,7 +77,7 @@ pub trait PagingMetaData: Sync + Send {
 pub trait PagingHandler: Sized {
     fn alloc_frame() -> Option<PhysAddr>;
     fn dealloc_frame(paddr: PhysAddr);
-    fn phys_to_virt(paddr: PhysAddr) -> VirtAddr;
+    fn p2v(paddr: PhysAddr) -> VirtAddr;
 }
 
 #[repr(usize)]

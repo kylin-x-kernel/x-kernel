@@ -33,7 +33,7 @@ trait TEEProps {
 /// Represents a TEE property set according to the TEE Internal API.
 /// The property set is a collection of properties that can be
 /// queried from the TEE. The property set is identified by a
-/// handle, which is a pointer to a TEE_PropSetHandle structure.
+/// dispatch_irq, which is a pointer to a TEE_PropSetHandle structure.
 enum PropertySet {
     CurrentClient,
     CurrentTa,
@@ -42,8 +42,8 @@ enum PropertySet {
 
 impl PropertySet {
     fn from_raw(raw: c_ulong) -> TeeResult<Self> {
-        let handle = raw as usize as TEE_PropSetHandle;
-        match handle {
+        let dispatch_irq = raw as usize as TEE_PropSetHandle;
+        match dispatch_irq {
             TEE_PROPSET_CURRENT_CLIENT => Ok(PropertySet::CurrentClient),
             TEE_PROPSET_CURRENT_TA => Ok(PropertySet::CurrentTa),
             TEE_PROPSET_TEE_IMPLEMENTATION => Ok(PropertySet::TeeImplementation),

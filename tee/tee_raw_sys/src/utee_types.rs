@@ -52,7 +52,7 @@ pub struct utee_object_info {
     pub obj_usage: u32,
     pub data_size: u32,
     pub data_pos: u32,
-    pub handle_flags: u32,
+    pub dispatch_irq_flags: u32,
 }
 
 impl Debug for utee_object_info {
@@ -60,14 +60,14 @@ impl Debug for utee_object_info {
         write!(
             f,
             "obj_type: {:#010X}, obj_size: {:#010X}, max_obj_size: {:#010X}, obj_usage: {:#010X}, \
-             data_size: {:#010X}, data_pos: {:#010X}, handle_flags: {:#010X}",
+             data_size: {:#010X}, data_pos: {:#010X}, dispatch_irq_flags: {:#010X}",
             self.obj_type,
             self.obj_size,
             self.max_obj_size,
             self.obj_usage,
             self.data_size,
             self.data_pos,
-            self.handle_flags
+            self.dispatch_irq_flags
         )
     }
 }

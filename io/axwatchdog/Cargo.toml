@@ -22,4 +22,4 @@ lazyinit.workspace = true
 kspin.workspace = true
 backtrace.workspace = true
 axsync = { workspace = true, features = ["watchdog"] }
-axplat.workspace = true
+kplat.workspace = true

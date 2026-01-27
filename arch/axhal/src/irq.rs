@@ -6,15 +6,15 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub use axconfig::devices::IPI_IRQ;
 use axcpu::trap::{IRQ, register_trap_handler};
 #[cfg(feature = "ipi")]
-pub use axplat::irq::{IpiTarget, send_ipi};
-pub use axplat::irq::{
-    handle, local_irq_restore, local_irq_save_and_disable, register, set_enable, set_priority,
-    unregister,
+pub use kplat::interrupts::{TargetCpu, notify_cpu};
+pub use kplat::interrupts::{
+    dispatch_irq, restore, save_disable, reg_handler as register, enable, set_prio,
+    unreg_handler as unregister,
 };
 
 static IRQ_HOOK: AtomicUsize = AtomicUsize::new(0);
 
-/// Register a hook function called after an IRQ is handled.
+/// Register a hook function called after an IRQ is dispatched.
 ///
 /// This function can be called only once; subsequent calls will return false.
 ///
@@ -39,7 +39,7 @@ pub fn register_irq_hook(hook: fn(usize)) -> bool {
 pub fn irq_handler(vector: usize) -> bool {
     let guard = kspin::NoPreempt::new();
 
-    if let Some(irq) = handle(vector) {
+    if let Some(irq) = dispatch_irq(vector) {
         let hook = IRQ_HOOK.load(Ordering::SeqCst);
         if hook != 0 {
             let hook = unsafe { core::mem::transmute::<usize, fn(usize)>(hook) };

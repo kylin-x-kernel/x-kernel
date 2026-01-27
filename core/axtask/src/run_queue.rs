@@ -368,7 +368,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             unsafe {
                 EXITED_TASKS.current_ref_mut_raw().clear();
             }
-            axhal::power::system_off();
+            axhal::power::shutdown();
         } else {
             // Notify the joiner task.
             curr.notify_exit(exit_code);
@@ -517,7 +517,7 @@ impl AxRunQueue {
         // Make sure that IRQs are disabled by kernel guard or other means.
         #[cfg(all(not(test), feature = "irq"))] // Note: irq is faked under unit tests.
         assert!(
-            !axhal::asm::irqs_enabled(),
+            !axhal::asm::is_enabled(),
             "IRQs must be disabled during scheduling"
         );
         trace!(

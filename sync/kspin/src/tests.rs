@@ -63,11 +63,11 @@ fn concurrent_increments() {
     }
 
     let (tx, rx) = channel();
-    let mut handles = Vec::new();
+    let mut dispatch_irqs = Vec::new();
 
     for _ in 0..NUM_THREADS * 2 {
         let tx = tx.clone();
-        handles.push(thread::spawn(move || {
+        dispatch_irqs.push(thread::spawn(move || {
             inc();
             tx.send(()).unwrap();
         }));
@@ -80,7 +80,7 @@ fn concurrent_increments() {
 
     assert_eq!(unsafe { CNT }, INCREMENTS_PER_THREAD * NUM_THREADS * 2);
 
-    for h in handles {
+    for h in dispatch_irqs {
         h.join().unwrap();
     }
 }

@@ -688,7 +688,7 @@ extern "C" fn task_entry() -> ! {
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
     #[cfg(feature = "irq")]
-    axhal::asm::enable_irqs();
+    axhal::asm::enable_local();
     let task = crate::current();
     if let Some(entry) = task.entry.take() {
         entry()

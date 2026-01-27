@@ -71,15 +71,15 @@ starry-process = { path = "process/starry-process" }
 starry-vm = { path = "process/starry-vm" }
 
 # Platform Abstraction Layer
-axplat = { path = "arch/axplat" }
-kyplat-macros = { path = "arch/kyplat-macros" }
-axplat-aarch64-qemu-virt = { path = "arch/axplat-aarch64-qemu-virt" }
-axplat-x86-pc = { path = "arch/axplat-x86-pc" }
-axplat-x86-csv = { path = "arch/axplat-x86-csv" }
-axplat-riscv64-qemu-virt = { path = "arch/axplat-riscv64-qemu-virt" }
-axplat-loongarch64-qemu-virt = { path = "arch/axplat-loongarch64-qemu-virt" }
-axplat-aarch64-peripherals = { path = "arch/axplat-aarch64-peripherals", default-features = false }
-axplat-aarch64-crosvm-virt = { path = "arch/axplat-aarch64-crosvm-virt" }
+kplat = { path = "platforms/kplat" }
+kplat-macros = { path = "platforms/kplat-macros" }
+aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
+x86-pc = { path = "platforms/x86-pc" }
+x86-csv = { path = "platforms/x86-csv" }
+riscv64-qemu-virt = { path = "platforms/riscv64-qemu-virt" }
+loongarch64-qemu-virt = { path = "platforms/loongarch64-qemu-virt" }
+aarch64-peripherals = { path = "platforms/aarch64-peripherals", default-features = false }
+aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }
 
 # Third-Party Crates
 arm-gic = { path = "drivers/arm-gic" }

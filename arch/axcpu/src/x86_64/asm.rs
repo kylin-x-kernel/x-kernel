@@ -8,10 +8,10 @@ use x86_64::instructions::interrupts;
 
 /// Allows the current CPU to respond to interrupts.
 #[inline]
-pub fn enable_irqs() {
+pub fn enable_local() {
     #[cfg(not(target_os = "none"))]
     {
-        warn!("enable_irqs: not implemented");
+        warn!("enable_local: not implemented");
     }
     #[cfg(target_os = "none")]
     interrupts::enable()
@@ -19,10 +19,10 @@ pub fn enable_irqs() {
 
 /// Makes the current CPU to ignore interrupts.
 #[inline]
-pub fn disable_irqs() {
+pub fn disable_local() {
     #[cfg(not(target_os = "none"))]
     {
-        warn!("disable_irqs: not implemented");
+        warn!("disable_local: not implemented");
     }
     #[cfg(target_os = "none")]
     interrupts::disable()
@@ -30,7 +30,7 @@ pub fn disable_irqs() {
 
 /// Returns whether the current CPU is allowed to respond to interrupts.
 #[inline]
-pub fn irqs_enabled() -> bool {
+pub fn is_enabled() -> bool {
     interrupts::are_enabled()
 }
 
@@ -49,7 +49,7 @@ pub fn wait_for_irqs() {
 /// Halt the current CPU.
 #[inline]
 pub fn halt() {
-    disable_irqs();
+    disable_local();
     wait_for_irqs(); // should never return
 }
 

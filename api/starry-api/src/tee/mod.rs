@@ -32,7 +32,7 @@ mod uuid;
 
 pub type TeeResult<T = ()> = Result<T, u32>;
 
-pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
+pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
     // Handle TEE-specific syscalls here
     match sysno {
         Sysno::tee_scn_return => sys_tee_scn_return(uctx.arg0() as _),

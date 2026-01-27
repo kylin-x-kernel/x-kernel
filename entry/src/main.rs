@@ -44,7 +44,7 @@ fn main() {
 }
 
 #[cfg(feature = "crosvm")]
-extern crate axplat_aarch64_crosvm_virt;
+extern crate kplat_aarch64_crosvm_virt;
 
 #[cfg(feature = "x86_csv")]
-extern crate axplat_x86_csv;
+extern crate kplat_x86_csv;

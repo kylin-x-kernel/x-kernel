@@ -1,10 +1,10 @@
 //! Physical memory management.
 
-pub use axplat::mem::{
-    MemRegionFlags, PhysMemRegion, kernel_aspace, mmio_ranges, phys_ram_ranges, phys_to_virt,
-    reserved_phys_ram_ranges, total_ram_size, virt_to_phys,
+pub use kplat::memory::{
+    MemFlags, MemoryRegion, kernel_layout, mmio_regions, ram_regions, p2v,
+    rsvd_regions, total_ram, v2p,
 };
-use axplat::mem::{check_sorted_ranges_overlap, ranges_difference};
+use kplat::memory::{check_overlap, sub_ranges};
 use heapless::Vec;
 use lazyinit::LazyInit;
 pub use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
@@ -13,10 +13,10 @@ use crate::addr_of_sym;
 
 const MAX_REGIONS: usize = 128;
 
-static ALL_MEM_REGIONS: LazyInit<Vec<PhysMemRegion, MAX_REGIONS>> = LazyInit::new();
+static ALL_MEM_REGIONS: LazyInit<Vec<MemoryRegion, MAX_REGIONS>> = LazyInit::new();
 
 /// Returns an iterator over all physical memory regions.
-pub fn memory_regions() -> impl Iterator<Item = PhysMemRegion> {
+pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
     ALL_MEM_REGIONS.iter().cloned()
 }
 
@@ -40,56 +40,56 @@ pub unsafe fn clear_bss() {
 /// Initializes physical memory regions.
 pub fn init() {
     let mut all_regions = Vec::new();
-    let mut push = |r: PhysMemRegion| {
+    let mut push = |r: MemoryRegion| {
         if r.size > 0 {
             all_regions.push(r).expect("too many memory regions");
         }
     };
 
     // Push regions in kernel image
-    push(PhysMemRegion {
-        paddr: virt_to_phys(addr_of_sym!(_stext).into()),
+    push(MemoryRegion {
+        paddr: v2p(addr_of_sym!(_stext).into()),
         size: addr_of_sym!(_etext) - addr_of_sym!(_stext),
-        flags: MemRegionFlags::RESERVED | MemRegionFlags::READ | MemRegionFlags::EXECUTE,
+        flags: MemFlags::RSVD | MemFlags::R | MemFlags::X,
         name: ".text",
     });
-    push(PhysMemRegion {
-        paddr: virt_to_phys(addr_of_sym!(_srodata).into()),
+    push(MemoryRegion {
+        paddr: v2p(addr_of_sym!(_srodata).into()),
         size: addr_of_sym!(_erodata) - addr_of_sym!(_srodata),
-        flags: MemRegionFlags::RESERVED | MemRegionFlags::READ,
+        flags: MemFlags::RSVD | MemFlags::R,
         name: ".rodata",
     });
-    push(PhysMemRegion {
-        paddr: virt_to_phys(addr_of_sym!(_sdata).into()),
+    push(MemoryRegion {
+        paddr: v2p(addr_of_sym!(_sdata).into()),
         size: addr_of_sym!(_edata) - addr_of_sym!(_sdata),
-        flags: MemRegionFlags::RESERVED | MemRegionFlags::READ | MemRegionFlags::WRITE,
+        flags: MemFlags::RSVD | MemFlags::R | MemFlags::W,
         name: ".data .tdata .tbss .percpu",
     });
-    push(PhysMemRegion {
-        paddr: virt_to_phys(addr_of_sym!(boot_stack).into()),
+    push(MemoryRegion {
+        paddr: v2p(addr_of_sym!(boot_stack).into()),
         size: addr_of_sym!(boot_stack_top) - addr_of_sym!(boot_stack),
-        flags: MemRegionFlags::RESERVED | MemRegionFlags::READ | MemRegionFlags::WRITE,
+        flags: MemFlags::RSVD | MemFlags::R | MemFlags::W,
         name: "boot stack",
     });
-    push(PhysMemRegion {
-        paddr: virt_to_phys(addr_of_sym!(_sbss).into()),
+    push(MemoryRegion {
+        paddr: v2p(addr_of_sym!(_sbss).into()),
         size: addr_of_sym!(_ebss) - addr_of_sym!(_sbss),
-        flags: MemRegionFlags::RESERVED | MemRegionFlags::READ | MemRegionFlags::WRITE,
+        flags: MemFlags::RSVD | MemFlags::R | MemFlags::W,
         name: ".bss",
     });
 
     // Push MMIO & reserved regions
-    for &(start, size) in mmio_ranges() {
-        push(PhysMemRegion::new_mmio(start, size, "mmio"));
+    for &(start, size) in mmio_regions() {
+        push(MemoryRegion::new_mmio(start, size, "mmio"));
     }
-    for &(start, size) in reserved_phys_ram_ranges() {
-        push(PhysMemRegion::new_reserved(start, size, "reserved"));
+    for &(start, size) in rsvd_regions() {
+        push(MemoryRegion::new_rsvd(start, size, "reserved"));
     }
 
     // Combine kernel image range and reserved ranges
-    let kernel_start = virt_to_phys(addr_of_sym!(_skernel).into()).as_usize();
+    let kernel_start = v2p(addr_of_sym!(_skernel).into()).as_usize();
     let kernel_size = addr_of_sym!(_ekernel) - addr_of_sym!(_skernel);
-    let mut reserved_ranges = reserved_phys_ram_ranges()
+    let mut reserved_ranges = rsvd_regions()
         .iter()
         .cloned()
         .chain(core::iter::once((kernel_start, kernel_size))) // kernel image range is also reserved
@@ -97,15 +97,15 @@ pub fn init() {
 
     // Remove all reserved ranges from RAM ranges, and push the remaining as free memory
     reserved_ranges.sort_unstable_by_key(|&(start, _size)| start);
-    ranges_difference(phys_ram_ranges(), &reserved_ranges, |(start, size)| {
-        push(PhysMemRegion::new_ram(start, size, "free memory"));
+    sub_ranges(ram_regions(), &reserved_ranges, |(start, size)| {
+        push(MemoryRegion::new_ram(start, size, "free memory"));
     })
     .inspect_err(|(a, b)| error!("Reserved memory region {a:#x?} overlaps with {b:#x?}"))
     .unwrap();
 
     // Check overlapping
     all_regions.sort_unstable_by_key(|r| r.paddr);
-    check_sorted_ranges_overlap(all_regions.iter().map(|r| (r.paddr.into(), r.size)))
+    check_overlap(all_regions.iter().map(|r| (r.paddr.into(), r.size)))
         .inspect_err(|(a, b)| error!("Physical memory region {a:#x?} overlaps with {b:#x?}"))
         .unwrap();
 

@@ -2,7 +2,7 @@ use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
 use axalloc::{DefaultByteAllocator, UsageKind, global_allocator};
-use axhal::{mem::virt_to_phys, paging::MappingFlags};
+use axhal::{mem::v2p, paging::MappingFlags};
 use kspin::SpinNoIrq;
 use log::{debug, error};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, va};
@@ -96,7 +96,7 @@ impl DmaAllocator {
         flags: MappingFlags,
     ) -> AllocResult<()> {
         let expand_size = num_pages * PAGE_SIZE_4K;
-        axmm::kernel_aspace()
+        axmm::kernel_layout()
             .lock()
             .protect(vaddr, expand_size, flags)
             .map_err(|e| {
@@ -123,7 +123,7 @@ impl DmaAllocator {
 }
 
 fn virt_to_bus(addr: VirtAddr) -> BusAddr {
-    let paddr = virt_to_phys(addr);
+    let paddr = v2p(addr);
     phys_to_bus(paddr)
 }
 

@@ -151,7 +151,7 @@ pub struct TeeTaCtx {
     /// Test-only field, used only when the tee_test feature is enabled
     #[cfg(feature = "tee_test")]
     pub for_test_only: u32,
-    pub session_handle: u32,
+    pub session_dispatch_irq: u32,
     pub open_sessions: HashMap<u32, SessionIdentity>,
     pub uuid: String,
 }

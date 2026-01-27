@@ -3,7 +3,7 @@ use alloc::{vec, vec::Vec};
 use core::any::Any;
 
 use axerrno::{AxError, AxResult};
-use axplat_aarch64_crosvm_virt::fdt::dice_reg;
+use kplat_aarch64_crosvm_virt::fdt::dice_reg;
 use memaddr::VirtAddr;
 use rand_chacha::{
     ChaCha8Rng,
@@ -146,7 +146,7 @@ fn get_process_hash() -> AxResult<Vec<u8>> {
 }
 
 static GLOBAL_RAND: Lazy<Mutex<ChaCha8Rng>> = Lazy::new(|| {
-    let seed = axhal::time::current_ticks();
+    let seed = axhal::time::now_ticks();
     Mutex::new(ChaCha8Rng::seed_from_u64(seed))
 });
 

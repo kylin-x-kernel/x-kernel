@@ -20,7 +20,7 @@ use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     signal::{check_signals, unblock_next_signal},
-    syscall::handle_syscall,
+    syscall::dispatch_irq_syscall,
 };
 
 /// Create a new user task.
@@ -42,9 +42,9 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                 set_timer_state(&curr, TimerState::Kernel);
 
                 match reason {
-                    ReturnReason::Syscall => handle_syscall(&mut uctx),
+                    ReturnReason::Syscall => dispatch_irq_syscall(&mut uctx),
                     ReturnReason::PageFault(addr, flags) => {
-                        if !thr.proc_data.aspace.lock().handle_page_fault(addr, flags) {
+                        if !thr.proc_data.aspace.lock().dispatch_irq_page_fault(addr, flags) {
                             info!(
                                 "{:?}: segmentation fault at {:#x} {:?}",
                                 thr.proc_data.proc, addr, flags
@@ -106,7 +106,7 @@ pub struct RobustListHead {
     pub list_op_pending: *mut RobustList,
 }
 
-fn handle_futex_death(entry: *mut RobustList, offset: i64) -> AxResult<()> {
+fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> AxResult<()> {
     let address = (entry as u64)
         .checked_add_signed(offset)
         .ok_or(AxError::InvalidInput)?;
@@ -138,7 +138,7 @@ pub fn exit_robust_list(head: *const RobustListHead) -> AxResult<()> {
     while !core::ptr::eq(entry, end_ptr) {
         let next_entry = entry.vm_read()?.next;
         if entry != pending {
-            handle_futex_death(entry, offset)?;
+            dispatch_irq_futex_death(entry, offset)?;
         }
         entry = next_entry;
 
@@ -212,7 +212,7 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> AxResult<()> {
     {
         task.interrupt();
     } else {
-        // No task wants to handle the signal, abort the task
+        // No task wants to dispatch_irq the signal, abort the task
         do_exit(signo as i32, true);
     }
 

@@ -12,14 +12,14 @@ core::arch::global_asm!(
     trapframe_size = const (core::mem::size_of::<TrapFrame>()),
 );
 
-fn handle_breakpoint(era: &mut usize) {
+fn dispatch_irq_breakpoint(era: &mut usize) {
     debug!("Exception(Breakpoint) @ {era:#x} ");
     *era += 4;
 }
 
-fn handle_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
+fn dispatch_irq_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
     let vaddr = va!(badv::read().vaddr());
-    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     #[cfg(feature = "uspace")]
@@ -28,7 +28,7 @@ fn handle_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
     }
     core::hint::cold_path();
     panic!(
-        "Unhandled PLV0 Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
+        "Undispatch_irqd PLV0 Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}\n{}",
         tf.era,
         vaddr,
         access_flags,
@@ -45,27 +45,27 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) {
     match estat.cause() {
         Trap::Exception(Exception::LoadPageFault)
         | Trap::Exception(Exception::PageNonReadableFault) => {
-            handle_page_fault(tf, PageFaultFlags::READ)
+            dispatch_irq_page_fault(tf, PageFaultFlags::READ)
         }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::PageModifyFault) => {
-            handle_page_fault(tf, PageFaultFlags::WRITE)
+            dispatch_irq_page_fault(tf, PageFaultFlags::WRITE)
         }
         Trap::Exception(Exception::FetchPageFault)
         | Trap::Exception(Exception::PageNonExecutableFault) => {
-            handle_page_fault(tf, PageFaultFlags::EXECUTE);
+            dispatch_irq_page_fault(tf, PageFaultFlags::EXECUTE);
         }
-        Trap::Exception(Exception::Breakpoint) => handle_breakpoint(&mut tf.era),
+        Trap::Exception(Exception::Breakpoint) => dispatch_irq_breakpoint(&mut tf.era),
         Trap::Exception(Exception::AddressNotAligned) => unsafe {
             tf.emulate_unaligned().unwrap();
         },
         Trap::Interrupt(_) => {
-            let irq_num: usize = estat.is().trailing_zeros() as usize;
-            handle_trap!(IRQ, irq_num);
+            let interrupt_id: usize = estat.is().trailing_zeros() as usize;
+            dispatch_irq_trap!(IRQ, interrupt_id);
         }
         trap => {
             panic!(
-                "Unhandled trap {:?} @ {:#x}:\n{:#x?}\n{}",
+                "Undispatch_irqd trap {:?} @ {:#x}:\n{:#x?}\n{}",
                 trap,
                 tf.era,
                 tf,

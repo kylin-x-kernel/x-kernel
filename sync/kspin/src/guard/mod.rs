@@ -13,10 +13,10 @@ pub trait KernelGuardIf {
     fn disable_preempt();
 
     /// Save and disable local interrupts, returning saved flags.
-    fn local_irq_save_and_disable() -> usize;
+    fn save_disable() -> usize;
 
     /// Restore local interrupts from saved flags.
-    fn local_irq_restore(flags: usize);
+    fn restore(flags: usize);
 }
 
 /// Base trait for all guard types.

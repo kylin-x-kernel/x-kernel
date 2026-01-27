@@ -44,11 +44,11 @@ impl GlobalPage {
     }
 
     /// Get the start physical address of this page.
-    pub fn start_paddr<F>(&self, virt_to_phys: F) -> PhysAddr
+    pub fn start_paddr<F>(&self, v2p: F) -> PhysAddr
     where
         F: FnOnce(VirtAddr) -> PhysAddr,
     {
-        virt_to_phys(self.start_vaddr)
+        v2p(self.start_vaddr)
     }
 
     /// Get the total size (in bytes) of these page(s).

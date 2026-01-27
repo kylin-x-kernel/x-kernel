@@ -4,7 +4,7 @@ use core::arch::asm;
 const IRQ_DISABLE_BIT: usize = 1 << 7;
 
 #[inline]
-pub fn local_irq_save_and_disable() -> usize {
+pub fn save_disable() -> usize {
     let flags: usize;
     unsafe {
         // Save CPSR and disable IRQs by setting the I bit
@@ -19,7 +19,7 @@ pub fn local_irq_save_and_disable() -> usize {
 }
 
 #[inline]
-pub fn local_irq_restore(flags: usize) {
+pub fn restore(flags: usize) {
     if flags & IRQ_DISABLE_BIT == 0 {
         // IRQs were enabled before, re-enable them
         unsafe {

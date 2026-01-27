@@ -75,7 +75,7 @@ impl UserContext {
         assert_eq!(self.cs, gdt::UCODE64.0 as _);
         assert_eq!(self.ss, gdt::UDATA.0 as _);
 
-        crate::asm::disable_irqs();
+        crate::asm::disable_local();
 
         let kernel_fs_base = read_thread_pointer();
         unsafe { write_thread_pointer(self.fs_base as _) };
@@ -98,7 +98,7 @@ impl UserContext {
             }
             LEGACY_SYSCALL_VECTOR => ReturnReason::Syscall,
             IRQ_VECTOR_START..=IRQ_VECTOR_END => {
-                handle_trap!(IRQ, vector as _);
+                dispatch_irq_trap!(IRQ, vector as _);
                 ReturnReason::Interrupt
             }
             _ => ReturnReason::Exception(ExceptionInfo {
@@ -108,7 +108,7 @@ impl UserContext {
             }),
         };
 
-        crate::asm::enable_irqs();
+        crate::asm::enable_local();
         ret
     }
 }

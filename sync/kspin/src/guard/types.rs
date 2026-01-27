@@ -53,12 +53,12 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
-            crate::guard::arch::local_irq_save_and_disable()
+            crate::guard::arch::save_disable()
         }
 
         #[inline]
         fn release(state: Self::State) {
-            crate::guard::arch::local_irq_restore(state)
+            crate::guard::arch::restore(state)
         }
     }
 
@@ -134,13 +134,13 @@ mod kernel {
             #[cfg(feature = "preempt")]
             crate_interface::call_interface!(crate::guard::KernelGuardIf::disable_preempt);
 
-            crate::guard::arch::local_irq_save_and_disable()
+            crate::guard::arch::save_disable()
         }
 
         #[inline]
         fn release(state: Self::State) {
             // Order: restore IRQs first, then enable preemption
-            crate::guard::arch::local_irq_restore(state);
+            crate::guard::arch::restore(state);
 
             #[cfg(feature = "preempt")]
             crate_interface::call_interface!(crate::guard::KernelGuardIf::enable_preempt);

@@ -62,11 +62,11 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     match resp {
         TeeResponse::OpenSession { session_id, result } => match result {
             TEE_SUCCESS => with_tee_ta_ctx_mut(|ctx| {
-                let handle = ctx.session_handle;
+                let dispatch_irq = ctx.session_dispatch_irq;
                 ctx.open_sessions
-                    .insert(handle, SessionIdentity { uuid, session_id });
-                ctx.session_handle += 1;
-                Ok(handle)
+                    .insert(dispatch_irq, SessionIdentity { uuid, session_id });
+                ctx.session_dispatch_irq += 1;
+                Ok(dispatch_irq)
             }),
             _ => return Err(result),
         },
@@ -144,8 +144,8 @@ pub fn tee_ta_invoke_command(
     }
 }
 
-pub fn tee_ta_get_session(handle: u32) -> TeeResult<SessionIdentity> {
-    with_tee_ta_ctx(|ctx| match ctx.open_sessions.get(&handle) {
+pub fn tee_ta_get_session(dispatch_irq: u32) -> TeeResult<SessionIdentity> {
+    with_tee_ta_ctx(|ctx| match ctx.open_sessions.get(&dispatch_irq) {
         Some(sess_id) => Ok(sess_id.clone()),
         None => Err(TEE_ERROR_ITEM_NOT_FOUND),
     })

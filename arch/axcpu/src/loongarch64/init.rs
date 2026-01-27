@@ -13,12 +13,12 @@ use page_table::loongarch64::LA64MetaData;
 /// - CRMD: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#current-mode-information>
 pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
     unsafe extern "C" {
-        fn handle_tlb_refill();
+        fn dispatch_irq_tlb_refill();
     }
 
     // Configure TLB
     const PS_4K: usize = 0x0c; // Page Size 4KB
-    let tlbrentry_paddr = pa!(handle_tlb_refill as usize - phys_virt_offset);
+    let tlbrentry_paddr = pa!(dispatch_irq_tlb_refill as usize - phys_virt_offset);
     tlbidx::set_ps(PS_4K);
     stlbps::set_ps(PS_4K);
     tlbrehi::set_ps(PS_4K);

@@ -1,0 +1,39 @@
+[package]
+name = "aarch64-crosvm-virt"
+version = "0.2.0"
+description = "Implementation of `kplat` hardware abstraction layer for CROSVM ARM64 virtual machine."
+documentation = "https://docs.rs/kplat-aarch64-crosvm-virt"
+keywords = ["arceos", "os", "hal", "embedded", "aarch64"]
+categories = ["embedded", "no-std", "hardware-support", "os"]
+edition = "2024"
+authors = [
+    "WeiKang Guo <guoweikang.kernel@gmail.com",
+    "KylinSoft Co., Ltd. <https://www.kylinos.cn/>"
+    ]
+license = "Apache-2.0"
+homepage = "https://github.com/kylin-x-kernel/kplat-aarch64-crosvm-virt.git"
+repository = "https://github.com/kylin-x-kernel/kplat-aarch64-crosvm-virt.git"
+
+[features]
+fp-simd = ["axcpu/fp-simd"]
+irq = ["kplat/irq"]
+smp = ["kplat/smp"]
+rtc = []
+
+[dependencies]
+log = "0.4"
+page_table = { workspace = true }
+platconfig-macros = { workspace = true }
+kspin = "0.1"
+dw_apb_uart = "0.1"
+axcpu = { workspace = true }
+kplat = { workspace = true }
+aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv3"] }
+aarch64-cpu = "10.0"
+rs_fdtree = { workspace = true }
+spin = "0.9"
+lazyinit = "0.2"
+arm-gic.workspace = true
+
+[package.metadata.docs.rs]
+targets = ["aarch64-unknown-none"]

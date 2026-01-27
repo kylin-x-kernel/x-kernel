@@ -258,7 +258,7 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
             .find(|p| p.name == "interrupt-parent")
             .and_then(|p| {
                 self.header
-                    .find_phandle(BigEndianU32::from_bytes(p.value)?.get())
+                    .find_pdispatch_irq(BigEndianU32::from_bytes(p.value)?.get())
             })
     }
 
@@ -326,7 +326,7 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
             .property("interrupt-parent")
             .and_then(|p| {
                 self.header
-                    .find_phandle(BigEndianU32::from_bytes(p.value)?.get())
+                    .find_pdispatch_irq(BigEndianU32::from_bytes(p.value)?.get())
             })
             .or_else(|| {
                 Some(FdtNode {

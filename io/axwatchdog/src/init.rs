@@ -23,7 +23,7 @@ fn init_common() {
     crate::register_watchdog_task(&crate::watchdog_task::MUTEX_DEADLOCK_CHECK);
 
     // Initialize and enable NMI source for hard lockup detection.
-    axhal::nmi::init(axhal::time::timer_frequency() * 10 * 16);
+    axhal::nmi::init(axhal::time::freq() * 10 * 16);
     axhal::nmi::enable();
 
     // Register NMI handler
@@ -48,7 +48,7 @@ fn init_common() {
                 // Strong rendezvous: MUST wait until all CPUs are in NMI.
                 rv::wait_all_arrived_strong();
 
-                axplat::console_force_println!(
+                kplat::io_force_println!(
                     "[watchdog] failure detected on cpu {}, failed_task={:?}, arrived_mask={:#x}",
                     this_cpu,
                     fail_name,

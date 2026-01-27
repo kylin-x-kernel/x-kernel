@@ -36,7 +36,7 @@ pub(crate) fn new_tcp_socket() -> smol::Socket<'static> {
 /// A TCP socket that provides POSIX-like APIs.
 pub struct TcpSocket {
     state: StateLock,
-    handle: SocketHandle,
+    dispatch_irq: SocketHandle,
 
     general: GeneralOptions,
     rx_closed: AtomicBool,
@@ -50,7 +50,7 @@ impl TcpSocket {
     pub fn new() -> Self {
         Self {
             state: StateLock::new(State::Idle),
-            handle: SOCKET_SET.add(new_tcp_socket()),
+            dispatch_irq: SOCKET_SET.add(new_tcp_socket()),
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
@@ -59,10 +59,10 @@ impl TcpSocket {
     }
 
     /// Creates a new TCP socket that is already connected.
-    fn new_connected(handle: SocketHandle) -> Self {
+    fn new_connected(dispatch_irq: SocketHandle) -> Self {
         let result = Self {
             state: StateLock::new(State::Connected),
-            handle,
+            dispatch_irq,
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
@@ -95,7 +95,7 @@ impl TcpSocket {
     }
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
-        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.handle, f)
+        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
     }
 
     fn bound_endpoint(&self) -> AxResult<IpListenEndpoint> {
@@ -114,7 +114,7 @@ impl TcpSocket {
                 self.state.set(State::Connected); // connected
                 debug!(
                     "TCP socket {}: connected to {}",
-                    self.handle,
+                    self.dispatch_irq,
                     socket.remote_endpoint().unwrap(),
                 );
                 true
@@ -241,7 +241,7 @@ impl SocketOps for TcpSocket {
                         .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
                     Ok(())
                 })?;
-                debug!("TCP socket {}: binding to {}", self.handle, local_addr);
+                debug!("TCP socket {}: binding to {}", self.dispatch_irq, local_addr);
                 Ok(())
             })
     }
@@ -337,11 +337,11 @@ impl SocketOps for TcpSocket {
         let bound_port = self.bound_endpoint()?.port;
         self.general.recv_poller(self, || {
             poll_interfaces();
-            LISTEN_TABLE.accept(bound_port).map(|handle| {
-                let socket = TcpSocket::new_connected(handle);
+            LISTEN_TABLE.accept(bound_port).map(|dispatch_irq| {
+                let socket = TcpSocket::new_connected(dispatch_irq);
                 debug!(
                     "accepted connection from {}, {}",
-                    handle,
+                    dispatch_irq,
                     socket.with_smol_socket(|socket| socket.remote_endpoint().unwrap())
                 );
                 Socket::Tcp(socket)
@@ -350,7 +350,7 @@ impl SocketOps for TcpSocket {
     }
 
     fn send(&self, mut src: impl Read, _options: SendOptions) -> AxResult<usize> {
-        // SAFETY: `self.handle` should be initialized in a connected socket.
+        // SAFETY: `self.dispatch_irq` should be initialized in a connected socket.
         self.general.send_poller(self, || {
             poll_interfaces();
             self.with_smol_socket(|socket| {
@@ -440,7 +440,7 @@ impl SocketOps for TcpSocket {
             guard.transit(State::Closed, || {
                 if how.has_write() {
                     self.with_smol_socket(|socket| {
-                        debug!("TCP socket {}: shutting down", self.handle);
+                        debug!("TCP socket {}: shutting down", self.dispatch_irq);
                         socket.close();
                     });
                 }
@@ -489,9 +489,9 @@ impl Pollable for TcpSocket {
 impl Drop for TcpSocket {
     fn drop(&mut self) {
         if let Err(err) = self.shutdown(Shutdown::Both) {
-            warn!("TCP socket {}: shutdown failed: {}", self.handle, err);
+            warn!("TCP socket {}: shutdown failed: {}", self.dispatch_irq, err);
         }
-        SOCKET_SET.remove(self.handle);
+        SOCKET_SET.remove(self.dispatch_irq);
         // This is crucial for the close messages to be sent.
         poll_interfaces();
     }

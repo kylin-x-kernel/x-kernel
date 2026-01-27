@@ -57,7 +57,7 @@ pub fn register_irq_waker(irq: usize, waker: &core::task::Waker) {
     match POLL_IRQ.lock().entry(irq) {
         Entry::Vacant(e) => {
             axhal::irq::register_irq_hook(irq_hook);
-            axhal::irq::set_enable(irq, true);
+            axhal::irq::enable(irq, true);
             e.insert(PollSet::new())
         }
         Entry::Occupied(e) => e.into_mut(),

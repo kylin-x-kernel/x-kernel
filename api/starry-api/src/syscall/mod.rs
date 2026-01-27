@@ -19,7 +19,7 @@ use self::{
     time::*,
 };
 
-pub fn handle_syscall(uctx: &mut UserContext) {
+pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
         warn!("Invalid syscall number: {}", uctx.sysno());
         uctx.set_retval(-LinuxError::ENOSYS.code() as _);
@@ -628,9 +628,9 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             {
                 use tee_raw_sys::TEE_SUCCESS;
 
-                use crate::tee::handle_tee_syscall;
+                use crate::tee::dispatch_irq_tee_syscall;
 
-                match handle_tee_syscall(sysno, uctx) {
+                match dispatch_irq_tee_syscall(sysno, uctx) {
                     Ok(_) => Ok(TEE_SUCCESS as isize),
                     Err(errno) => Ok(errno as isize),
                 }

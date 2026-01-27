@@ -309,15 +309,15 @@ impl FileNodeOps for MemoryNode {
             buf[..len].copy_from_slice(&symlink.as_bytes()[..len]);
             return Ok(len);
         }
-        unreachable!("page cache should handle reading");
+        unreachable!("page cache should dispatch_irq reading");
     }
 
     fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        unreachable!("page cache should handle writing");
+        unreachable!("page cache should dispatch_irq writing");
     }
 
     fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
-        unreachable!("page cache should handle writing");
+        unreachable!("page cache should dispatch_irq writing");
     }
 
     fn set_len(&self, len: u64) -> VfsResult<()> {

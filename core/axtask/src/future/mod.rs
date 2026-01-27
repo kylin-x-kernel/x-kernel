@@ -48,7 +48,7 @@ impl Wake for AxWaker {
 
 /// Blocks the current task until the given future is resolved.
 ///
-/// Note that this doesn't handle interruption and is not recommended for direct
+/// Note that this doesn't dispatch_irq interruption and is not recommended for direct
 /// use in most cases.
 pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     let mut fut = pin!(f.into_future());

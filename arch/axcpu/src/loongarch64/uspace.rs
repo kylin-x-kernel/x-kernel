@@ -41,7 +41,7 @@ impl UserContext {
             fn enter_user(uctx: &mut UserContext);
         }
 
-        crate::asm::disable_irqs();
+        crate::asm::disable_local();
         unsafe { enter_user(self) };
 
         let estat = estat::read();
@@ -50,8 +50,8 @@ impl UserContext {
 
         let ret = match estat.cause() {
             Trap::Interrupt(_) => {
-                let irq_num: usize = estat.is().trailing_zeros() as usize;
-                handle_trap!(IRQ, irq_num);
+                let interrupt_id: usize = estat.is().trailing_zeros() as usize;
+                dispatch_irq_trap!(IRQ, interrupt_id);
                 ReturnReason::Interrupt
             }
             Trap::Exception(Exception::Syscall) => {
@@ -74,7 +74,7 @@ impl UserContext {
             _ => ReturnReason::Unknown,
         };
 
-        crate::asm::enable_irqs();
+        crate::asm::enable_local();
         ret
     }
 }

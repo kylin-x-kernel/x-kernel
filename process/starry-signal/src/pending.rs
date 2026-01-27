@@ -10,7 +10,7 @@ pub struct PendingSignals {
     /// Note that does not correspond to `pending signals` as described in
     /// Linux. `Pending signals` in Linux refers to the signals that are
     /// delivered but blocked from delivery, while `pending` here refers to any
-    /// signal that is delivered and not yet handled.
+    /// signal that is delivered and not yet dispatch_irqd.
     pub set: SignalSet,
 
     /// Signal info of standard signals (1-31).

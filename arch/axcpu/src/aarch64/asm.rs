@@ -3,7 +3,7 @@
 use core::arch::asm;
 
 use aarch64_cpu::{asm::barrier, registers::*};
-pub use axplat::irq::{disable_irqs, enable_irqs, irqs_enabled};
+pub use kplat::interrupts::{disable_local, enable_local, is_enabled};
 use memaddr::{PhysAddr, VirtAddr};
 
 /// Relaxes the current CPU and waits for interrupts.
@@ -17,7 +17,7 @@ pub fn wait_for_irqs() {
 /// Halt the current CPU.
 #[inline]
 pub fn halt() {
-    disable_irqs();
+    disable_local();
     aarch64_cpu::asm::wfi(); // should never return
 }
 

@@ -598,10 +598,10 @@ syscall_enum! {
         fanotify_mark = 5296,
         /// See [prlimit64(2)](https://man7.org/linux/man-pages/man2/prlimit64.2.html) for more info on this syscall.
         prlimit64 = 5297,
-        /// See [name_to_handle_at(2)](https://man7.org/linux/man-pages/man2/name_to_handle_at.2.html) for more info on this syscall.
-        name_to_handle_at = 5298,
-        /// See [open_by_handle_at(2)](https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html) for more info on this syscall.
-        open_by_handle_at = 5299,
+        /// See [name_to_dispatch_irq_at(2)](https://man7.org/linux/man-pages/man2/name_to_dispatch_irq_at.2.html) for more info on this syscall.
+        name_to_dispatch_irq_at = 5298,
+        /// See [open_by_dispatch_irq_at(2)](https://man7.org/linux/man-pages/man2/open_by_dispatch_irq_at.2.html) for more info on this syscall.
+        open_by_dispatch_irq_at = 5299,
         /// See [clock_adjtime(2)](https://man7.org/linux/man-pages/man2/clock_adjtime.2.html) for more info on this syscall.
         clock_adjtime = 5300,
         /// See [syncfs(2)](https://man7.org/linux/man-pages/man2/syncfs.2.html) for more info on this syscall.

@@ -29,7 +29,7 @@ pub enum DefaultSignalAction {
     Continue,
 }
 
-/// Signal action that should be properly handled by the OS.
+/// Signal action that should be properly dispatch_irqd by the OS.
 ///
 /// See [`SignalManager::check_signals`] for details.
 #[derive(Debug)]

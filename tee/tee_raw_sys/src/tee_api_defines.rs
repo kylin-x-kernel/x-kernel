@@ -76,7 +76,7 @@ pub const TEE_ORIGIN_COMMS: u32 = 0x00000002;
 pub const TEE_ORIGIN_TEE: u32 = 0x00000003;
 pub const TEE_ORIGIN_TRUSTED_APP: u32 = 0x00000004;
 
-// Property Sets pseudo handles
+// Property Sets pseudo dispatch_irqs
 pub const TEE_PROPSET_TEE_IMPLEMENTATION: TEE_PropSetHandle = 0xFFFFFFFD as *mut _;
 pub const TEE_PROPSET_CURRENT_CLIENT: TEE_PropSetHandle = 0xFFFFFFFE as *mut _;
 pub const TEE_PROPSET_CURRENT_TA: TEE_PropSetHandle = 0xFFFFFFFF as *mut _;

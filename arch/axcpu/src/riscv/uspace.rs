@@ -53,7 +53,7 @@ impl UserContext {
             fn enter_user(uctx: &mut UserContext);
         }
 
-        crate::asm::disable_irqs();
+        crate::asm::disable_local();
         unsafe { enter_user(self) };
 
         let scause = scause::read();
@@ -61,7 +61,7 @@ impl UserContext {
             let stval = stval::read();
             match cause {
                 Trap::Interrupt(_) => {
-                    handle_trap!(IRQ, scause.bits());
+                    dispatch_irq_trap!(IRQ, scause.bits());
                     ReturnReason::Interrupt
                 }
                 Trap::Exception(E::UserEnvCall) => {
@@ -85,7 +85,7 @@ impl UserContext {
             ReturnReason::Unknown
         };
 
-        crate::asm::enable_irqs();
+        crate::asm::enable_local();
         ret
     }
 }

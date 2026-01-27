@@ -8,7 +8,7 @@ use axfs::{CachedFile, FS_CONTEXT, FileBackend};
 use axfs_ng_vfs::Location;
 use axhal::{
     asm::user_copy,
-    mem::virt_to_phys,
+    mem::v2p,
     paging::{MappingFlags, PageSize},
 };
 use axmm::{AddrSpace, backend::Backend};
@@ -43,7 +43,7 @@ pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> AxResult {
         // ARMv8 (aarch64) and LoongArch64 use separate page tables for user space
         // (aarch64: TTBR0_EL1, LoongArch64: PGDL), so there is no need to copy the
         // kernel portion to the user page table.
-        _aspace.copy_mappings_from(&axmm::kernel_aspace().lock())?;
+        _aspace.copy_mappings_from(&axmm::kernel_layout().lock())?;
     }
     Ok(())
 }
@@ -51,7 +51,7 @@ pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> AxResult {
 /// Map the signal trampoline to the user address space.
 pub fn map_trampoline(aspace: &mut AddrSpace) -> AxResult {
     let signal_trampoline_paddr =
-        virt_to_phys(starry_signal::arch::signal_trampoline_address().into());
+        v2p(starry_signal::arch::signal_trampoline_address().into());
     aspace.map_linear(
         crate::config::SIGNAL_TRAMPOLINE.into(),
         signal_trampoline_paddr,
@@ -112,7 +112,7 @@ fn map_elf<'a>(
         let seg_start = VirtAddr::from_usize(vaddr);
 
         // Note that `offset` might not be aligned to 4K here, and it's
-        // backend's responsibility to properly handle it.
+        // backend's responsibility to properly dispatch_irq it.
         let backend = Backend::new_cow(
             seg_start,
             PageSize::Size4K,

@@ -235,7 +235,7 @@ macro_rules! nullable {
 pub(crate) use nullable;
 
 #[register_trap_handler(PAGE_FAULT)]
-fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
+fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
     debug!("Page fault at {vaddr:#x}, access_flags: {access_flags:#x?}");
 
     let curr = current();
@@ -250,7 +250,7 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
     thr.proc_data
         .aspace
         .lock()
-        .handle_page_fault(vaddr, access_flags)
+        .dispatch_irq_page_fault(vaddr, access_flags)
 }
 
 pub fn vm_load_string(ptr: *const c_char) -> AxResult<String> {

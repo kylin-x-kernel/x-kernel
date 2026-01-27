@@ -11,7 +11,7 @@ use axalloc::{UsageKind, global_allocator};
 use axfs_ng_vfs::{
     FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
-use axhal::mem::{PhysAddr, VirtAddr, virt_to_phys};
+use axhal::mem::{PhysAddr, VirtAddr, v2p};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
@@ -322,7 +322,7 @@ impl PageCache {
     }
 
     pub fn paddr(&self) -> PhysAddr {
-        virt_to_phys(self.addr)
+        v2p(self.addr)
     }
 
     pub fn mark_dirty(&mut self) {
@@ -452,21 +452,21 @@ impl CachedFile {
             listener: Box::new(listener),
             link: LinkedListAtomicLink::new(),
         });
-        let handle = pointer.as_ref() as *const EvictListener as usize;
+        let dispatch_irq = pointer.as_ref() as *const EvictListener as usize;
         self.shared.evict_listeners.lock().push_back(pointer);
-        handle
+        dispatch_irq
     }
 
-    /// Removes an evict listener by handle.
+    /// Removes an evict listener by dispatch_irq.
     ///
     /// # Safety
     ///
-    /// The `handle` must come from a previous call to [`add_evict_listener`]
+    /// The `dispatch_irq` must come from a previous call to [`add_evict_listener`]
     /// on the same [`CachedFile`] and must not have been removed already.
-    /// Passing an invalid handle is undefined behavior.
-    pub unsafe fn remove_evict_listener(&self, handle: usize) {
+    /// Passing an invalid dispatch_irq is undefined behavior.
+    pub unsafe fn remove_evict_listener(&self, dispatch_irq: usize) {
         let mut guard = self.shared.evict_listeners.lock();
-        let mut cursor = unsafe { guard.cursor_mut_from_ptr(handle as *const EvictListener) };
+        let mut cursor = unsafe { guard.cursor_mut_from_ptr(dispatch_irq as *const EvictListener) };
         cursor.remove();
     }
 

@@ -59,7 +59,7 @@ struct LogIfImpl;
 #[crate_interface::impl_interface]
 impl klogger::LoggerAdapter for LogIfImpl {
     fn write_str(s: &str) {
-        axhal::console::write_bytes(s.as_bytes());
+        axhal::console::write_data(s.as_bytes());
     }
 
     fn now() -> core::time::Duration {
@@ -102,18 +102,18 @@ fn is_init_ok() -> bool {
 /// The main entry point of the ArceOS runtime.
 ///
 /// It is called from the bootstrapping code in the specific platform crate (see
-/// [`axplat::main`]).
+/// [`kplat::main`]).
 ///
 /// `cpu_id` is the logic ID of the current CPU, and `arg` is passed from the
 /// bootloader (typically the device tree blob address).
 ///
 /// In multi-core environment, this function is called on the primary core, and
 /// secondary cores call [`rust_main_secondary`].
-#[cfg_attr(not(test), axplat::main)]
+#[cfg_attr(not(test), kplat::main)]
 pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     unsafe { axhal::mem::clear_bss() };
     axhal::percpu::init_primary(cpu_id);
-    axhal::init_early(cpu_id, arg);
+    axhal::early_init(cpu_id, arg);
 
     kprintln!("{}", LOGO);
     kprintln!(
@@ -186,7 +186,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     axmm::init_memory_management();
 
     info!("Initialize platform devices...");
-    axhal::init_later(cpu_id, arg);
+    axhal::final_init(cpu_id, arg);
 
     #[cfg(feature = "multitask")]
     axtask::init_scheduler();
@@ -245,23 +245,23 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(not(feature = "multitask"))]
     {
         debug!("main task exited: exit_code={}", 0);
-        axhal::power::system_off();
+        axhal::power::shutdown();
     }
 }
 
 #[cfg(feature = "alloc")]
 fn init_allocator() {
-    use axhal::mem::{MemRegionFlags, memory_regions, phys_to_virt, virt_to_phys};
+    use axhal::mem::{MemFlags, memory_regions, p2v, v2p};
 
     info!("Initialize global memory allocator...");
     info!("  use {} allocator.", axalloc::global_allocator().name());
 
-    let free_regions = || memory_regions().filter(|r| r.flags.contains(MemRegionFlags::FREE));
+    let free_regions = || memory_regions().filter(|r| r.flags.contains(MemFlags::FREE));
 
     unsafe extern "C" {
         safe static _ekernel: [u8; 0];
     }
-    let kernel_end_paddr = virt_to_phys(_ekernel.as_ptr().addr().into());
+    let kernel_end_paddr = v2p(_ekernel.as_ptr().addr().into());
 
     let init_region = free_regions()
         // First try to find a free memory region after the kernel image
@@ -270,11 +270,11 @@ fn init_allocator() {
         .or_else(|| free_regions().max_by_key(|r| r.size))
         .expect("no free memory region found!!");
 
-    axalloc::global_init(phys_to_virt(init_region.paddr).as_usize(), init_region.size);
+    axalloc::global_init(p2v(init_region.paddr).as_usize(), init_region.size);
 
     for r in free_regions() {
         if r.paddr != init_region.paddr {
-            axalloc::global_add_memory(phys_to_virt(r.paddr).as_usize(), r.size)
+            axalloc::global_add_memory(p2v(r.paddr).as_usize(), r.size)
                 .expect("add heap memory region failed");
         }
     }
@@ -297,10 +297,10 @@ fn init_interrupt() {
             deadline = now_ns + PERIODIC_INTERVAL_NANOS;
         }
         unsafe { NEXT_DEADLINE.write_current_raw(deadline + PERIODIC_INTERVAL_NANOS) };
-        axhal::time::set_oneshot_timer(deadline);
+        axhal::time::arm_timer(deadline);
     }
 
-    axhal::irq::register(axhal::time::irq_num(), || {
+    axhal::irq::register(axhal::time::interrupt_id(), || {
         update_timer();
         #[cfg(feature = "multitask")]
         axtask::on_timer_tick();
@@ -317,11 +317,11 @@ fn init_interrupt() {
             "PMU interrupt received on cpu {}",
             axhal::percpu::this_cpu_id()
         );
-        axhal::pmu::handle_overflows();
+        axhal::pmu::dispatch_irq_overflows();
     });
 
     // Enable IRQs before starting app
-    axhal::asm::enable_irqs();
+    axhal::asm::enable_local();
 }
 
 #[cfg(all(feature = "tls", not(feature = "multitask")))]

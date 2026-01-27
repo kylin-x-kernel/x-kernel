@@ -549,7 +549,7 @@ impl TrapFrame {
     /// Emulates an unaligned memory access triggered by a trap.
     ///
     /// # Safety
-    /// This function uses raw pointers and inline assembly to handle unaligned memory accesses,
+    /// This function uses raw pointers and inline assembly to dispatch_irq unaligned memory accesses,
     /// so it must only be called in a valid trap context with a properly initialized TrapFrame.
     pub unsafe fn emulate_unaligned(&mut self) -> Result<(), UnalignedError> {
         let mut value: u64 = 0;

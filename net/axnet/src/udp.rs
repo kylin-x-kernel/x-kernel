@@ -35,7 +35,7 @@ pub(crate) fn new_udp_socket() -> smol::Socket<'static> {
 
 /// A UDP socket that provides POSIX-like APIs.
 pub struct UdpSocket {
-    handle: SocketHandle,
+    dispatch_irq: SocketHandle,
     local_addr: RwLock<Option<IpEndpoint>>,
     peer_addr: RwLock<Option<(IpEndpoint, IpAddress)>>,
 
@@ -47,10 +47,10 @@ impl UdpSocket {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let socket = new_udp_socket();
-        let handle = SOCKET_SET.add(socket);
+        let dispatch_irq = SOCKET_SET.add(socket);
 
         Self {
-            handle,
+            dispatch_irq,
             local_addr: RwLock::new(None),
             peer_addr: RwLock::new(None),
 
@@ -59,7 +59,7 @@ impl UdpSocket {
     }
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
-        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.handle, f)
+        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
     }
 
     fn remote_endpoint(&self) -> AxResult<(IpEndpoint, IpAddress)> {
@@ -144,7 +144,7 @@ impl SocketOps for UdpSocket {
             .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
 
         *guard = Some(local_endpoint);
-        info!("UDP socket {}: bound on {}", self.handle, endpoint);
+        info!("UDP socket {}: bound on {}", self.dispatch_irq, endpoint);
         Ok(())
     }
 
@@ -161,7 +161,7 @@ impl SocketOps for UdpSocket {
         let remote_addr = IpEndpoint::from(remote_addr);
         let src = SERVICE.lock().get_source_address(&remote_addr.addr);
         *guard = Some((remote_addr, src));
-        debug!("UDP socket {}: connected to {}", self.handle, remote_addr);
+        debug!("UDP socket {}: connected to {}", self.dispatch_irq, remote_addr);
         Ok(())
     }
 
@@ -303,7 +303,7 @@ impl SocketOps for UdpSocket {
         poll_interfaces();
 
         self.with_smol_socket(|socket| {
-            debug!("UDP socket {}: shutting down", self.handle);
+            debug!("UDP socket {}: shutting down", self.dispatch_irq);
             socket.close();
         });
         Ok(())
@@ -335,7 +335,7 @@ impl Pollable for UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         self.shutdown(Shutdown::Both).ok();
-        SOCKET_SET.remove(self.handle);
+        SOCKET_SET.remove(self.dispatch_irq);
     }
 }
 

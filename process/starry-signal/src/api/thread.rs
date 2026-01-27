@@ -64,7 +64,7 @@ impl ThreadSignalManager {
         &self.proc
     }
 
-    pub fn handle_signal(
+    pub fn dispatch_irq_signal(
         &self,
         uctx: &mut UserContext,
         restore_blocked: SignalSet,
@@ -161,13 +161,13 @@ impl ThreadSignalManager {
             }?;
             let action = self.proc.actions.lock()[sig.signo()].clone();
 
-            if let Some(os_action) = self.handle_signal(uctx, restore_blocked, &sig, &action) {
+            if let Some(os_action) = self.dispatch_irq_signal(uctx, restore_blocked, &sig, &action) {
                 break Some((sig, os_action));
             }
         }
     }
 
-    /// Checks pending signals and handle them.
+    /// Checks pending signals and dispatch_irq them.
     ///
     /// Returns the signal number and the action the OS should take, if any.
     pub fn check_signals(

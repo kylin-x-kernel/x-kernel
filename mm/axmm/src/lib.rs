@@ -19,7 +19,7 @@ pub mod backend;
 
 use axerrno::LinuxResult;
 use axhal::{
-    mem::{MemRegionFlags, phys_to_virt},
+    mem::{MemFlags, p2v},
     paging::MappingFlags,
 };
 use kspin::SpinNoIrq;
@@ -30,28 +30,28 @@ pub use self::aspace::AddrSpace;
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();
 
-fn reg_flag_to_map_flag(f: MemRegionFlags) -> MappingFlags {
+fn reg_flag_to_map_flag(f: MemFlags) -> MappingFlags {
     let mut ret = MappingFlags::empty();
-    if f.contains(MemRegionFlags::READ) {
+    if f.contains(MemFlags::READ) {
         ret |= MappingFlags::READ;
     }
-    if f.contains(MemRegionFlags::WRITE) {
+    if f.contains(MemFlags::WRITE) {
         ret |= MappingFlags::WRITE;
     }
-    if f.contains(MemRegionFlags::EXECUTE) {
+    if f.contains(MemFlags::EXECUTE) {
         ret |= MappingFlags::EXECUTE;
     }
-    if f.contains(MemRegionFlags::DEVICE) {
+    if f.contains(MemFlags::DEVICE) {
         ret |= MappingFlags::DEVICE;
     }
-    if f.contains(MemRegionFlags::UNCACHED) {
+    if f.contains(MemFlags::UNCACHED) {
         ret |= MappingFlags::UNCACHED;
     }
     ret
 }
 
 /// Creates a new address space for kernel itself.
-pub fn new_kernel_aspace() -> LinuxResult<AddrSpace> {
+pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
     let mut aspace = AddrSpace::new_empty(
         va!(platconfig::plat::KERNEL_ASPACE_BASE),
         platconfig::plat::KERNEL_ASPACE_SIZE,
@@ -61,7 +61,7 @@ pub fn new_kernel_aspace() -> LinuxResult<AddrSpace> {
         let start = r.paddr.align_down_4k();
         let end = (r.paddr + r.size).align_up_4k();
         aspace.map_linear(
-            phys_to_virt(start),
+            p2v(start),
             start,
             end - start,
             reg_flag_to_map_flag(r.flags),
@@ -71,7 +71,7 @@ pub fn new_kernel_aspace() -> LinuxResult<AddrSpace> {
 }
 
 /// Returns the globally unique kernel address space.
-pub fn kernel_aspace() -> &'static SpinNoIrq<AddrSpace> {
+pub fn kernel_layout() -> &'static SpinNoIrq<AddrSpace> {
     &KERNEL_ASPACE
 }
 
@@ -87,9 +87,9 @@ pub fn kernel_page_table_root() -> PhysAddr {
 pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
 
-    let kernel_aspace = new_kernel_aspace().expect("failed to initialize kernel address space");
-    debug!("kernel address space init OK: {:#x?}", kernel_aspace);
-    KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_aspace));
+    let kernel_layout = new_kernel_layout().expect("failed to initialize kernel address space");
+    debug!("kernel address space init OK: {:#x?}", kernel_layout);
+    KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
     unsafe { axhal::asm::write_kernel_page_table(kernel_page_table_root()) };
     // flush all TLB
     axhal::asm::flush_tlb(None);

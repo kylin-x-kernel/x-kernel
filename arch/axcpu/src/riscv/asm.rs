@@ -8,19 +8,19 @@ use riscv::{
 
 /// Allows the current CPU to respond to interrupts.
 #[inline]
-pub fn enable_irqs() {
+pub fn enable_local() {
     unsafe { sstatus::set_sie() }
 }
 
 /// Makes the current CPU to ignore interrupts.
 #[inline]
-pub fn disable_irqs() {
+pub fn disable_local() {
     unsafe { sstatus::clear_sie() }
 }
 
 /// Returns whether the current CPU is allowed to respond to interrupts.
 #[inline]
-pub fn irqs_enabled() -> bool {
+pub fn is_enabled() -> bool {
     sstatus::read().sie()
 }
 
@@ -35,7 +35,7 @@ pub fn wait_for_irqs() {
 /// Halt the current CPU.
 #[inline]
 pub fn halt() {
-    disable_irqs();
+    disable_local();
     riscv::asm::wfi() // should never return
 }
 

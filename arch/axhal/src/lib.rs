@@ -50,13 +50,13 @@ cfg_if::cfg_if! {
         // link the custom platform crate in your application.
     } else if #[cfg(all(target_os = "none", feature = "defplat"))] {
         #[cfg(target_arch = "x86_64")]
-        extern crate axplat_x86_pc;
+        extern crate x86_pc;
         #[cfg(target_arch = "aarch64")]
-        extern crate axplat_aarch64_qemu_virt;
+        extern crate aarch64_qemu_virt;
         #[cfg(target_arch = "riscv64")]
-        extern crate axplat_riscv64_qemu_virt;
+        extern crate riscv64_qemu_virt;
         #[cfg(target_arch = "loongarch64")]
-        extern crate axplat_loongarch64_qemu_virt;
+        extern crate loongarch64_qemu_virt;
     } else {
         // Link the dummy platform implementation to pass cargo test.
         mod dummy;
@@ -80,20 +80,20 @@ pub mod paging;
 /// Console input and output.
 pub mod console {
     #[cfg(feature = "irq")]
-    pub use axplat::console::irq_num;
-    pub use axplat::console::{read_bytes, write_bytes};
+    pub use kplat::io::interrupt_id;
+    pub use kplat::io::{read_data, write_data};
 }
 
 /// CPU power management.
 pub mod power {
     #[cfg(feature = "smp")]
-    pub use axplat::power::cpu_boot;
-    pub use axplat::power::system_off;
+    pub use kplat::sys::boot_ap;
+    pub use kplat::sys::shutdown;
 }
 
 #[cfg(feature = "crosvm")]
 pub mod psci {
-    pub use axplat::psci::{share_dma_buffer, unshare_dma_buffer};
+    pub use kplat::psci::{share_dma_buffer, unshare_dma_buffer};
 }
 
 /// Trap handling.
@@ -126,24 +126,24 @@ pub mod context {
 pub use axcpu::asm;
 #[cfg(feature = "uspace")]
 pub use axcpu::uspace;
-pub use axplat::init::init_later;
+pub use kplat::boot::final_init;
 #[cfg(feature = "smp")]
-pub use axplat::init::{init_early_secondary, init_later_secondary};
+pub use kplat::boot::{early_init_ap as early_init_secondary, final_init_ap as final_init_secondary};
 
 #[cfg(feature = "nmi")]
 pub mod nmi {
-    pub use axplat::nmi::{enable, init, register_nmi_handler};
+    pub use kplat::nm_irq::{enable, init, register_nmi_handler};
 }
 
 #[cfg(feature = "pmu")]
 pub mod pmu {
-    pub use axplat::pmu::{handle_overflows, register_overflow_handler};
+    pub use kplat::perf::{dispatch_irq_overflows, register_overflow_handler};
 }
 /// Initializes the platform and boot argument.
 /// This function should be called as early as possible.
-pub fn init_early(cpu_id: usize, arg: usize) {
+pub fn early_init(cpu_id: usize, arg: usize) {
     dtb::init(arg);
-    axplat::init::init_early(cpu_id, arg);
+    kplat::boot::early_init(cpu_id, arg);
 }
 
 macro_rules! addr_of_sym {

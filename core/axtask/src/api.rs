@@ -67,12 +67,12 @@ impl kspin::KernelGuardIf for KernelGuardIfImpl {
         }
     }
 
-    fn local_irq_save_and_disable() -> usize {
-        axhal::irq::local_irq_save_and_disable()
+    fn save_disable() -> usize {
+        axhal::irq::save_disable()
     }
 
-    fn local_irq_restore(flags: usize) {
-        axhal::irq::local_irq_restore(flags);
+    fn restore(flags: usize) {
+        axhal::irq::restore(flags);
     }
 }
 
@@ -177,7 +177,7 @@ where
 /// Returns `true` if the priority is set successfully.
 ///
 /// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
-pub fn set_priority(prio: isize) -> bool {
+pub fn set_prio(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
 }
 
@@ -262,7 +262,7 @@ pub fn run_idle() -> ! {
 #[inline(always)]
 fn dump_println(force: bool, args: core::fmt::Arguments<'_>) {
     if force {
-        axplat::console_force_println!("{}", args);
+        kplat::io_force_println!("{}", args);
     } else {
         // Use log output in normal (non-NMI) contexts.
         error!("{}", args);
@@ -328,7 +328,7 @@ pub fn check_mutex_deadlock(now: usize) -> bool {
             };
 
             let blocked = now.saturating_sub(since);
-            if axhal::time::ticks_to_nanos(blocked as u64) > 20_000_000_000 {
+            if axhal::time::t2ns(blocked as u64) > 20_000_000_000 {
                 // suspect stall (20s)
                 ok = false;
             }

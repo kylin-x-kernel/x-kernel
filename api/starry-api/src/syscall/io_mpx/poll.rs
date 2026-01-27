@@ -108,6 +108,6 @@ pub fn sys_ppoll(
     let timeout = nullable!(timeout.get_as_ref())?
         .map(|ts| ts.try_into_time_value())
         .transpose()?;
-    // TODO: handle signal
+    // TODO: dispatch_irq signal
     do_poll(fds, timeout, nullable!(sigmask.get_as_ref())?.copied())
 }

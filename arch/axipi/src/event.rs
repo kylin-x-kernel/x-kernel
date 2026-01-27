@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, sync::Arc};
 
-/// A callback function that will be called when an [`IpiEvent`] is received and handled.
+/// A callback function that will be called when an [`IpiEvent`] is received and dispatch_irqd.
 pub struct Callback(Box<dyn FnOnce()>);
 
 impl Callback {
@@ -52,6 +52,6 @@ impl<T: Fn() + 'static> From<T> for MulticastCallback {
 pub struct IpiEvent {
     /// The source CPU ID that sent the IPI event.
     pub src_cpu_id: usize,
-    /// The callback function that will be called when the IPI event is handled.
+    /// The callback function that will be called when the IPI event is dispatch_irqd.
     pub callback: Callback,
 }

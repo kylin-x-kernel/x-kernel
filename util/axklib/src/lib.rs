@@ -69,7 +69,7 @@ pub trait Klib {
     ///
     /// `irq` is a platform IRQ number. `enabled` selects whether the IRQ
     /// should be enabled (true) or disabled (false).
-    fn irq_set_enable(irq: usize, enabled: bool);
+    fn irq_enable(irq: usize, enabled: bool);
 
     /// Register a simple IRQ handler for the given IRQ number.
     ///
@@ -92,5 +92,5 @@ pub mod time {
 
 /// Convenience re-exports for IRQ operations.
 pub mod irq {
-    pub use super::klib::{irq_register as register, irq_set_enable as set_enable};
+    pub use super::klib::{irq_register as register, irq_enable as enable};
 }

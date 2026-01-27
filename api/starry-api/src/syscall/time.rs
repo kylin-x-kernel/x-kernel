@@ -1,5 +1,5 @@
 use axerrno::{AxError, AxResult};
-use axhal::time::{TimeValue, monotonic_time, monotonic_time_nanos, nanos_to_ticks, wall_time};
+use axhal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
 use axtask::current;
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
@@ -68,7 +68,7 @@ pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
         tms_cutime: utime,
         tms_cstime: stime,
     })?;
-    Ok(nanos_to_ticks(monotonic_time_nanos()) as _)
+    Ok(ns2t(monotonic_time_nanos()) as _)
 }
 
 pub fn sys_getitimer(which: i32, value: *mut itimerval) -> AxResult<isize> {

@@ -28,7 +28,7 @@ pub fn get_fdt() -> Option<&'static Fdt<'static>> {
 
     fn init_fdt() -> Option<Fdt<'static>> {
         let fdt_paddr = get_bootarg();
-        let fdt_ptr = NonNull::new(crate::mem::phys_to_virt(fdt_paddr.into()).as_mut_ptr())?;
+        let fdt_ptr = NonNull::new(crate::mem::p2v(fdt_paddr.into()).as_mut_ptr())?;
         Fdt::from_ptr(fdt_ptr).ok()
     }
 

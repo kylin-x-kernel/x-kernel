@@ -67,7 +67,7 @@ pub unsafe extern "C" fn calloc(nmemb: c_int, size: c_int) -> *mut c_void {
 
     let ptr = malloc(total_size);
     if !ptr.is_null() {
-        ptr::write_bytes(ptr as *mut u8, 0, total_size as usize);
+        ptr::write_data(ptr as *mut u8, 0, total_size as usize);
     }
     ptr
 }

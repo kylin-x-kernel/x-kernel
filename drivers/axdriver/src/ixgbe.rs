@@ -1,6 +1,6 @@
 use axdma::{BusAddr, DMAInfo, alloc_coherent, dealloc_coherent};
 use axdriver_net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
-use axhal::mem::{phys_to_virt, virt_to_phys};
+use axhal::mem::{p2v, v2p};
 use core::{alloc::Layout, ptr::NonNull};
 
 pub struct IxgbeHalImpl;
@@ -24,12 +24,12 @@ unsafe impl IxgbeHal for IxgbeHalImpl {
         0
     }
 
-    unsafe fn mmio_phys_to_virt(paddr: IxgbePhysAddr, _size: usize) -> NonNull<u8> {
-        NonNull::new(phys_to_virt(paddr.into()).as_mut_ptr()).unwrap()
+    unsafe fn mmio_p2v(paddr: IxgbePhysAddr, _size: usize) -> NonNull<u8> {
+        NonNull::new(p2v(paddr.into()).as_mut_ptr()).unwrap()
     }
 
-    unsafe fn mmio_virt_to_phys(vaddr: NonNull<u8>, _size: usize) -> IxgbePhysAddr {
-        virt_to_phys((vaddr.as_ptr() as usize).into()).into()
+    unsafe fn mmio_v2p(vaddr: NonNull<u8>, _size: usize) -> IxgbePhysAddr {
+        v2p((vaddr.as_ptr() as usize).into()).into()
     }
 
     fn wait_until(duration: core::time::Duration) -> Result<(), &'static str> {

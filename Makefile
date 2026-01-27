@@ -210,7 +210,7 @@ debug: build
 	$(call run_qemu_debug) &
 	$(GDB) $(OUT_ELF) \
 	  -ex 'target remote localhost:1234' \
-	  -ex 'b __axplat_main' \
+	  -ex 'b __kplat_main' \
 	  -ex 'continue' \
 	  -ex 'disp /16i $$pc'
 

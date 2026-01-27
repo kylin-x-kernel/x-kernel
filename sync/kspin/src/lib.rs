@@ -77,12 +77,12 @@
 //!         // Your implementation
 //!     }
 //!
-//!     fn local_irq_save_and_disable() -> usize {
+//!     fn save_disable() -> usize {
 //!         // Your implementation
 //!         0
 //!     }
 //!
-//!     fn local_irq_restore(flags: usize) {
+//!     fn restore(flags: usize) {
 //!         // Your implementation
 //!     }
 //! }

@@ -199,7 +199,7 @@ impl DirNodeOps for FatDirNode {
         let dir = self.inner.borrow(&fs);
 
         // The default implementation throws EEXIST if dst exists, so we need to
-        // handle it
+        // dispatch_irq it
         match dst_dir.inner.borrow(&fs).remove(dst_name) {
             Ok(_) => {}
             Err(fatfs::Error::NotFound) => {}

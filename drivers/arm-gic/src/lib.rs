@@ -29,7 +29,7 @@
 //! let target_irq = IntId::sgi(3);
 //!
 //! // Configure priority masking and set individual IRQ priority levels.
-//! GicV3::set_priority_mask(0xff);
+//! GicV3::set_prio_mask(0xff);
 //! intc_dev.set_interrupt_priority(target_irq, 0x80);
 //!
 //! // Enable the specific interrupt line and unmask processor-local interrupts.

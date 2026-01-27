@@ -330,7 +330,7 @@ impl Iterator for ReadDir {
                 },
             );
 
-            // We handle errors only if we didn't get any entries
+            // We dispatch_irq errors only if we didn't get any entries
             if self.buf.is_empty() {
                 if let Err(err) = result {
                     return Some(Err(err));

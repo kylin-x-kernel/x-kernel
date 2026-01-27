@@ -1,14 +1,14 @@
-//! Dummy implementation of platform-related interfaces defined in [`axplat`].
+//! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
 #[cfg(feature = "irq")]
-use axplat::irq::{IpiTarget, IrqHandler, IrqIf};
-use axplat::{
-    console::ConsoleIf,
-    impl_plat_interface,
-    init::InitIf,
-    mem::{MemIf, RawRange},
-    power::PowerIf,
-    time::TimeIf,
+use kplat::interrupts::{TargetCpu, Handler, IntrManager};
+use kplat::{
+    console::Terminal,
+    impl_dev_interface,
+    init::BootHandler,
+    mem::{HwMemory, MemRange},
+    power::SysCtrl,
+    time::GlobalTimer,
 };
 
 struct DummyInit;
@@ -19,135 +19,135 @@ struct DummyPower;
 #[cfg(feature = "irq")]
 struct DummyIrq;
 
-#[impl_plat_interface]
-impl InitIf for DummyInit {
-    fn init_early(_cpu_id: usize, _arg: usize) {}
+#[impl_dev_interface]
+impl BootHandler for DummyInit {
+    fn early_init(_cpu_id: usize, _arg: usize) {}
 
     #[cfg(feature = "smp")]
-    fn init_early_secondary(_cpu_id: usize) {}
+    fn early_init_secondary(_cpu_id: usize) {}
 
-    fn init_later(_cpu_id: usize, _arg: usize) {}
+    fn final_init(_cpu_id: usize, _arg: usize) {}
 
     #[cfg(feature = "smp")]
-    fn init_later_secondary(_cpu_id: usize) {}
+    fn final_init_secondary(_cpu_id: usize) {}
 }
 
-#[impl_plat_interface]
-impl ConsoleIf for DummyConsole {
-    fn write_bytes(_bytes: &[u8]) {
+#[impl_dev_interface]
+impl Terminal for DummyConsole {
+    fn write_data(_bytes: &[u8]) {
         unimplemented!()
     }
 
-    fn read_bytes(_bytes: &mut [u8]) -> usize {
+    fn read_data(_bytes: &mut [u8]) -> usize {
         unimplemented!()
     }
 
     #[cfg(feature = "irq")]
-    fn irq_num() -> Option<usize> {
+    fn interrupt_id() -> Option<usize> {
         None
     }
 }
 
-#[impl_plat_interface]
-impl MemIf for DummyMem {
-    fn phys_ram_ranges() -> &'static [RawRange] {
+#[impl_dev_interface]
+impl HwMemory for DummyMem {
+    fn ram_regions() -> &'static [MemRange] {
         &[]
     }
 
-    fn reserved_phys_ram_ranges() -> &'static [RawRange] {
+    fn rsvd_regions() -> &'static [MemRange] {
         &[]
     }
 
-    fn mmio_ranges() -> &'static [RawRange] {
+    fn mmio_regions() -> &'static [MemRange] {
         &[]
     }
 
-    fn phys_to_virt(_paddr: memaddr::PhysAddr) -> memaddr::VirtAddr {
+    fn p2v(_paddr: memaddr::PhysAddr) -> memaddr::VirtAddr {
         va!(0)
     }
 
-    fn virt_to_phys(_vaddr: memaddr::VirtAddr) -> memaddr::PhysAddr {
+    fn v2p(_vaddr: memaddr::VirtAddr) -> memaddr::PhysAddr {
         pa!(0)
     }
 
-    fn kernel_aspace() -> (memaddr::VirtAddr, usize) {
+    fn kernel_layout() -> (memaddr::VirtAddr, usize) {
         (va!(0), 0)
     }
 }
 
-#[impl_plat_interface]
-impl TimeIf for DummyTime {
-    fn current_ticks() -> u64 {
+#[impl_dev_interface]
+impl GlobalTimer for DummyTime {
+    fn now_ticks() -> u64 {
         0
     }
 
-    fn ticks_to_nanos(ticks: u64) -> u64 {
+    fn t2ns(ticks: u64) -> u64 {
         ticks
     }
 
-    fn nanos_to_ticks(nanos: u64) -> u64 {
+    fn ns2t(nanos: u64) -> u64 {
         nanos
     }
 
-    fn epochoffset_nanos() -> u64 {
+    fn offset_ns() -> u64 {
         0
     }
 
-    fn timer_frequency() -> u64 {
-        0
-    }
-
-    #[cfg(feature = "irq")]
-    fn irq_num() -> usize {
+    fn freq() -> u64 {
         0
     }
 
     #[cfg(feature = "irq")]
-    fn set_oneshot_timer(_deadline_ns: u64) {}
+    fn interrupt_id() -> usize {
+        0
+    }
+
+    #[cfg(feature = "irq")]
+    fn arm_timer(_deadline_ns: u64) {}
 }
 
-#[impl_plat_interface]
-impl PowerIf for DummyPower {
+#[impl_dev_interface]
+impl SysCtrl for DummyPower {
     #[cfg(feature = "smp")]
-    fn cpu_boot(_cpu_id: usize, _stack_top_paddr: usize) {}
+    fn boot_ap(_cpu_id: usize, _stack_top_paddr: usize) {}
 
-    fn system_off() -> ! {
+    fn shutdown() -> ! {
         unimplemented!()
     }
 }
 
 #[cfg(feature = "irq")]
-#[impl_plat_interface]
-impl IrqIf for DummyIrq {
-    fn set_enable(_irq: usize, _enabled: bool) {}
+#[impl_dev_interface]
+impl IntrManager for DummyIrq {
+    fn enable(_irq: usize, _enabled: bool) {}
 
-    fn register(_irq: usize, _handler: IrqHandler) -> bool {
+    fn register(_irq: usize, _handler: Handler) -> bool {
         false
     }
 
-    fn unregister(_irq: usize) -> Option<IrqHandler> {
+    fn unregister(_irq: usize) -> Option<Handler> {
         None
     }
 
-    fn handle(_irq: usize) -> Option<usize> {
+    fn dispatch_irq(_irq: usize) -> Option<usize> {
         None
     }
 
-    fn send_ipi(_irq: usize, _target: IpiTarget) {}
+    fn notify_cpu(_irq: usize, _target: TargetCpu) {}
 
-    fn set_priority(_irq: usize, _priority: u8) {}
+    fn set_prio(_irq: usize, _priority: u8) {}
 
-    fn local_irq_save_and_disable() -> usize {
+    fn save_disable() -> usize {
         0
     }
 
-    fn local_irq_restore(_flag: usize) {}
+    fn restore(_flag: usize) {}
 
-    fn enable_irqs() {}
+    fn enable_local() {}
 
-    fn disable_irqs() {}
+    fn disable_local() {}
 
-    fn irqs_enabled() -> bool {
+    fn is_enabled() -> bool {
         false
     }
 }

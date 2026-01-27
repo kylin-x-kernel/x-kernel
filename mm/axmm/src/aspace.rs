@@ -3,7 +3,7 @@ use core::{fmt, ops::DerefMut};
 
 use axerrno::{AxError, AxResult, ax_bail};
 use axhal::{
-    mem::phys_to_virt,
+    mem::p2v,
     paging::{MappingFlags, PageTable},
     trap::PageFaultFlags,
 };
@@ -228,7 +228,7 @@ impl AddrSpace {
                 copy_size = copy_size.min(PAGE_SIZE_4K - align_offset);
                 paddr += align_offset;
             }
-            f(phys_to_virt(paddr), cnt, copy_size);
+            f(p2v(paddr), cnt, copy_size);
             cnt += copy_size;
         }
         Ok(())
@@ -315,9 +315,9 @@ impl AddrSpace {
     ///
     /// `access_flags` indicates the access type that caused the page fault.
     ///
-    /// Returns `true` if the page fault is handled successfully (not a real
+    /// Returns `true` if the page fault is dispatch_irqd successfully (not a real
     /// fault).
-    pub fn handle_page_fault(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
+    pub fn dispatch_irq_page_fault(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
         if !self.va_range.contains(vaddr) {
             return false;
         }

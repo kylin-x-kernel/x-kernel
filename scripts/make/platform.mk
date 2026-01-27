@@ -22,13 +22,13 @@ endef
 ifeq ($(MYPLAT),)
   # `MYPLAT` is not specified, use the default platform for each architecture
   ifeq ($(ARCH), x86_64)
-    PLAT_PACKAGE := axplat-x86-pc
+    PLAT_PACKAGE := x86-pc
   else ifeq ($(ARCH), aarch64)
-    PLAT_PACKAGE := axplat-aarch64-qemu-virt
+    PLAT_PACKAGE := aarch64-qemu-virt
   else ifeq ($(ARCH), riscv64)
-    PLAT_PACKAGE := axplat-riscv64-qemu-virt
+    PLAT_PACKAGE := riscv64-qemu-virt
   else ifeq ($(ARCH), loongarch64)
-    PLAT_PACKAGE := axplat-loongarch64-qemu-virt
+    PLAT_PACKAGE := loongarch64-qemu-virt
   else
     $(error "ARCH" must be one of "x86_64", "riscv64", "aarch64" or "loongarch64")
   endif

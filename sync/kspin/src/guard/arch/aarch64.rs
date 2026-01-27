@@ -1,9 +1,9 @@
 #[inline]
-pub fn local_irq_save_and_disable() -> usize {
-    crate_interface::call_interface!(crate::guard::KernelGuardIf::local_irq_save_and_disable)
+pub fn save_disable() -> usize {
+    crate_interface::call_interface!(crate::guard::KernelGuardIf::save_disable)
 }
 
 #[inline]
-pub fn local_irq_restore(flags: usize) {
-    crate_interface::call_interface!(crate::guard::KernelGuardIf::local_irq_restore(flags))
+pub fn restore(flags: usize) {
+    crate_interface::call_interface!(crate::guard::KernelGuardIf::restore(flags))
 }

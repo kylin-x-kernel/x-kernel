@@ -1,10 +1,23 @@
 //! Time-related operations.
 
-pub use axplat::time::{
-    Duration, MICROS_PER_SEC, MILLIS_PER_SEC, NANOS_PER_MICROS, NANOS_PER_MILLIS, NANOS_PER_SEC,
-    TimeValue, busy_wait, busy_wait_until, current_ticks, epochoffset_nanos, monotonic_time,
-    monotonic_time_nanos, nanos_to_ticks, ticks_to_nanos, timer_frequency, wall_time,
-    wall_time_nanos,
+pub use core::time::Duration;
+pub type TimeValue = Duration;
+
+pub use kplat::timer::{
+    US_SEC, MS_SEC, NS_US, NS_MS, NS_SEC,
+    spin_wait, spin_until, now_ticks, offset_ns,
+    now as monotonic_time, now_ns as monotonic_time_nanos,
+    ns2t, t2ns, freq,
+    wall as wall_time, wall_ns as wall_time_nanos,
 };
+
+// Aliases for kplat names if needed locally or exposed
+pub use kplat::timer::now;
+pub use kplat::timer::now_ns;
+pub use kplat::timer::wall;
+pub use kplat::timer::wall_ns;
+
 #[cfg(feature = "irq")]
-pub use axplat::time::{irq_num, set_oneshot_timer};
+pub use kplat::timer::{interrupt_id, arm_timer};
+pub use kplat::timer::NS_US as NANOS_PER_MICROS;
+pub use kplat::timer::NS_SEC as NANOS_PER_SEC;

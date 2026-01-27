@@ -97,7 +97,7 @@ pub struct TEE_ObjectInfo {
     pub objectUsage: u32,
     pub dataSize: usize,
     pub dataPosition: usize,
-    pub handleFlags: u32,
+    pub dispatch_irqFlags: u32,
 }
 
 impl Debug for TEE_ObjectInfo {
@@ -106,7 +106,7 @@ impl Debug for TEE_ObjectInfo {
             f,
             "TEE_ObjectInfo{{objectId: {:#010X?}, objectType: {:#010X?}, objectSize: {:#010X?}, \
              maxObjectSize: {:#010X?}, objectUsage: {:#010X?}, dataSize: {:#010X?}, dataPosition: \
-             {:#010X?}, handleFlags: {:#010X?}}}",
+             {:#010X?}, dispatch_irqFlags: {:#010X?}}}",
             self.objectId,
             self.objectType,
             self.objectSize,
@@ -114,7 +114,7 @@ impl Debug for TEE_ObjectInfo {
             self.objectUsage,
             self.dataSize,
             self.dataPosition,
-            self.handleFlags
+            self.dispatch_irqFlags
         )
     }
 }
@@ -181,7 +181,7 @@ pub struct TEE_OperationInfo {
     pub maxKeySize: u32,
     pub keySize: u32,
     pub requiredKeyUsage: u32,
-    pub handleState: u32,
+    pub dispatch_irqState: u32,
 }
 
 #[repr(C)]
@@ -197,7 +197,7 @@ pub struct TEE_OperationInfoMultiple {
     pub mode: u32,
     pub digestLength: u32,
     pub maxKeySize: u32,
-    pub handleState: u32,
+    pub dispatch_irqState: u32,
     pub operationState: u32,
     pub numberOfKeys: u32,
     pub keyInformation: *mut TEE_OperationInfoKey,

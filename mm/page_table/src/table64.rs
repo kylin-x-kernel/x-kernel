@@ -64,7 +64,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PTE, H> {
     fn alloc_table() -> PtResult<PhysAddr> {
         if let Some(paddr) = H::alloc_frame() {
-            let ptr = H::phys_to_virt(paddr).as_mut_ptr();
+            let ptr = H::p2v(paddr).as_mut_ptr();
             unsafe { core::ptr::write_bytes(ptr, 0, PAGE_SIZE_4K) };
             Ok(paddr)
         } else {
@@ -73,7 +73,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     }
 
     fn table_of<'a>(&self, paddr: PhysAddr) -> &'a [PTE] {
-        let ptr = H::phys_to_virt(paddr).as_ptr() as _;
+        let ptr = H::p2v(paddr).as_ptr() as _;
         unsafe { core::slice::from_raw_parts(ptr, ENTRY_COUNT) }
     }
 
@@ -191,7 +191,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     }
 
     fn table_of_mut(&mut self, paddr: PhysAddr) -> &'a mut [PTE] {
-        let ptr = H::phys_to_virt(paddr).as_mut_ptr() as _;
+        let ptr = H::p2v(paddr).as_mut_ptr() as _;
         unsafe { core::slice::from_raw_parts_mut(ptr, ENTRY_COUNT) }
     }
 

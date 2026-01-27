@@ -167,7 +167,7 @@ pub(crate) fn bb_memdup_user_private(src: &[u8]) -> TeeResult<Box<[u8]>> {
 #[inline(always)]
 pub(crate) fn enter_user_access() {
     // Implementation would enable user memory access permissions
-    // In OP-TEE, this handles entering user context for cryptographic operations
+    // In OP-TEE, this dispatch_irqs entering user context for cryptographic operations
 }
 
 /// Exit user access context
@@ -175,7 +175,7 @@ pub(crate) fn enter_user_access() {
 #[inline(always)]
 pub(crate) fn exit_user_access() {
     // Implementation would disable user memory access permissions
-    // In OP-TEE, this handles returning from user context
+    // In OP-TEE, this dispatch_irqs returning from user context
 }
 
 #[cfg(feature = "tee_test")]

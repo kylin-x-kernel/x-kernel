@@ -1,0 +1,15 @@
+ 
+use kplat::sys::SysCtrl;
+struct PowerImpl;
+#[impl_dev_interface]
+impl SysCtrl for PowerImpl {
+    #[cfg(feature = "smp")]
+    fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
+        use kplat::memory::{va, v2p};
+        let entry_paddr = v2p(va!(crate::boot::_start_secondary as *const () as usize));
+        kplat_aarch64_peripherals::psci::cpu_on(cpu_id, entry_paddr.as_usize(), stack_top_paddr);
+    }
+    fn shutdown() -> ! {
+        kplat_aarch64_peripherals::psci::shutdown()
+    }
+}

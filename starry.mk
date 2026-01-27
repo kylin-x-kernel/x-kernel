@@ -54,11 +54,11 @@ la:
 	$(MAKE) ARCH=loongarch64 run
 
 vf2:
-	$(MAKE) ARCH=riscv64 APP_FEATURES=vf2 MYPLAT=axplat-riscv64-visionfive2 BUS=mmio build
+	$(MAKE) ARCH=riscv64 APP_FEATURES=vf2 MYPLAT=riscv64-visionfive2 BUS=mmio build
 
 crosvm:
-	$(MAKE) --debug=v ARCH=aarch64 APP_FEATURES=crosvm MYPLAT=axplat-aarch64-crosvm-virt BUS=pci LOG=warn build
+	$(MAKE) --debug=v ARCH=aarch64 APP_FEATURES=crosvm MYPLAT=aarch64-crosvm-virt BUS=pci LOG=warn build
 
 dice:
-	$(MAKE) --debug=v ARCH=aarch64 APP_FEATURES=dice MYPLAT=axplat-aarch64-crosvm-virt BUS=pci LOG=warn build
+	$(MAKE) --debug=v ARCH=aarch64 APP_FEATURES=dice MYPLAT=aarch64-crosvm-virt BUS=pci LOG=warn build
 .PHONY: build run justrun debug disasm clean

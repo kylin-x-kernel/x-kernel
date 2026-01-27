@@ -44,7 +44,7 @@ pub fn sys_execve(
     let proc_data = &curr.as_thread().proc_data;
 
     if proc_data.proc.threads().len() > 1 {
-        // TODO: handle multi-thread case
+        // TODO: dispatch_irq multi-thread case
         error!("sys_execve: multi-thread not supported");
         return Err(AxError::WouldBlock);
     }

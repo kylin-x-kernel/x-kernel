@@ -32,8 +32,8 @@ impl ListenTableEntry {
 
 impl Drop for ListenTableEntry {
     fn drop(&mut self) {
-        for &handle in &self.syn_queue {
-            SOCKET_SET.remove(handle);
+        for &dispatch_irq in &self.syn_queue {
+            SOCKET_SET.remove(dispatch_irq);
         }
     }
 }
@@ -84,7 +84,7 @@ impl ListenTable {
 
     pub fn can_accept(&self, port: u16) -> AxResult<bool> {
         if let Some(entry) = self.listen_entry(port).lock().as_ref() {
-            Ok(entry.syn_queue.iter().any(|&handle| is_connected(handle)))
+            Ok(entry.syn_queue.iter().any(|&dispatch_irq| is_connected(dispatch_irq)))
         } else {
             warn!("accept before listen");
             Err(AxError::InvalidInput)
@@ -103,7 +103,7 @@ impl ListenTable {
         let idx = syn_queue
             .iter()
             .enumerate()
-            .find_map(|(idx, &handle)| is_connected(handle).then_some(idx))
+            .find_map(|(idx, &dispatch_irq)| is_connected(dispatch_irq).then_some(idx))
             .ok_or(AxError::WouldBlock)?; // wait for connection
         if idx > 0 {
             warn!(
@@ -112,14 +112,14 @@ impl ListenTable {
                 syn_queue.len()
             );
         }
-        let handle = syn_queue.swap_remove_front(idx).unwrap();
+        let dispatch_irq = syn_queue.swap_remove_front(idx).unwrap();
         // If the connection is reset, return ConnectionReset error
-        // Otherwise, return the handle and the address tuple
-        if is_closed(handle) {
+        // Otherwise, return the dispatch_irq and the address tuple
+        if is_closed(dispatch_irq) {
             warn!("accept failed: connection reset");
             Err(AxError::ConnectionReset)
         } else {
-            Ok(handle)
+            Ok(dispatch_irq)
         }
     }
 
@@ -148,23 +148,23 @@ impl ListenTable {
                 warn!("Failed to listen on {}: {:?}", entry.listen_endpoint, err);
                 return;
             }
-            let handle = sockets.add(socket);
+            let dispatch_irq = sockets.add(socket);
             debug!(
                 "TCP socket {}: prepare for connection {} -> {}",
-                handle, src, entry.listen_endpoint
+                dispatch_irq, src, entry.listen_endpoint
             );
-            entry.syn_queue.push_back(handle);
+            entry.syn_queue.push_back(dispatch_irq);
         }
     }
 }
 
-fn is_connected(handle: SocketHandle) -> bool {
-    SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| {
+fn is_connected(dispatch_irq: SocketHandle) -> bool {
+    SOCKET_SET.with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| {
         !matches!(socket.state(), State::Listen | State::SynReceived)
     })
 }
 
-fn is_closed(handle: SocketHandle) -> bool {
+fn is_closed(dispatch_irq: SocketHandle) -> bool {
     SOCKET_SET
-        .with_socket::<tcp::Socket, _, _>(handle, |socket| matches!(socket.state(), State::Closed))
+        .with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| matches!(socket.state(), State::Closed))
 }

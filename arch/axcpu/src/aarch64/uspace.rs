@@ -78,12 +78,12 @@ impl UserContext {
             fn enter_user(uctx: &mut UserContext) -> TrapKind;
         }
 
-        crate::asm::disable_irqs();
+        crate::asm::disable_local();
         let kind = unsafe { enter_user(self) };
 
         let ret = match kind {
             TrapKind::Irq => {
-                handle_trap!(IRQ, 0);
+                dispatch_irq_trap!(IRQ, 0);
                 ReturnReason::Interrupt
             }
             TrapKind::Fiq | TrapKind::SError => ReturnReason::Unknown,
@@ -118,7 +118,7 @@ impl UserContext {
             }
         };
 
-        crate::asm::enable_irqs();
+        crate::asm::enable_local();
         ret
     }
 }

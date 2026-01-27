@@ -53,7 +53,7 @@ pub trait DirNodeOps: NodeOps {
     ///
     /// If this returns `false`, the directory will not be cached in dentry and
     /// each call to [`DirNode::lookup`] will end up calling [`lookup`].
-    /// Implementations should take care to handle cases where [`lookup`] is
+    /// Implementations should take care to dispatch_irq cases where [`lookup`] is
     /// called multiple times for the same name.
     fn is_cacheable(&self) -> bool {
         true

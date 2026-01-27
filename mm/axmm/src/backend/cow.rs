@@ -4,7 +4,7 @@ use core::slice;
 use axerrno::{AxError, AxResult};
 use axfs::FileBackend;
 use axhal::{
-    mem::phys_to_virt,
+    mem::p2v,
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
 use axsync::Mutex;
@@ -101,7 +101,7 @@ impl CowBackend {
 
         if let Some((file, file_start, file_end)) = &self.file {
             let buf = unsafe {
-                slice::from_raw_parts_mut(phys_to_virt(frame).as_mut_ptr(), self.size as _)
+                slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _)
             };
             // vaddr can be smaller than self.start (at most 1 page) due to
             // non-aligned mappings, we need to keep the gap clean.
@@ -120,7 +120,7 @@ impl CowBackend {
         Ok(())
     }
 
-    fn handle_cow_fault(
+    fn dispatch_irq_cow_fault(
         &self,
         vaddr: VirtAddr,
         paddr: PhysAddr,
@@ -145,8 +145,8 @@ impl CowBackend {
                 let new_frame = self.alloc_new_frame(false)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        phys_to_virt(paddr).as_ptr(),
-                        phys_to_virt(new_frame).as_mut_ptr(),
+                        p2v(paddr).as_ptr(),
+                        p2v(new_frame).as_mut_ptr(),
                         self.size as _,
                     );
                 }
@@ -202,7 +202,7 @@ impl BackendOps for CowBackend {
                     if access_flags.contains(MappingFlags::WRITE)
                         && !page_flags.contains(MappingFlags::WRITE)
                     {
-                        self.handle_cow_fault(addr, paddr, flags, pt)?;
+                        self.dispatch_irq_cow_fault(addr, paddr, flags, pt)?;
                         pages += 1;
                     } else if page_flags.contains(access_flags) {
                         pages += 1;

@@ -9,7 +9,7 @@
 use axdriver_pci::{
     BarInfo, Cam, Command, DeviceFunction, HeaderType, MemoryBarType, PciRangeAllocator, PciRoot,
 };
-use axhal::mem::phys_to_virt;
+use axhal::mem::p2v;
 
 use crate::{AllDevices, prelude::*};
 
@@ -93,7 +93,7 @@ fn config_pci_device(
 
 impl AllDevices {
     pub(crate) fn probe_bus_devices(&mut self) {
-        let base_vaddr = phys_to_virt(platconfig::devices::PCI_ECAM_BASE.into());
+        let base_vaddr = p2v(platconfig::devices::PCI_ECAM_BASE.into());
         let mut root = {
             #[cfg(feature = "pci-mmio")]
             {

@@ -28,7 +28,7 @@ qemu = [
 ]
 smp = ["axfeat/smp"]
 
-# vf2 = ["dep:axplat-riscv64-visionfive2", "axfeat/driver-sdmmc"]
+# vf2 = ["dep:kplat-riscv64-visionfive2", "axfeat/driver-sdmmc"]
 dice = ["crosvm", "starry-api/dice"]
 crosvm = [
     "axfeat/display",
@@ -39,7 +39,7 @@ crosvm = [
     "starry-api/vsock",
 
     "axfeat/crosvm",
-    "dep:axplat-aarch64-crosvm-virt",
+    "dep:aarch64-crosvm-virt",
     "pci",
 
     "smp",
@@ -58,7 +58,7 @@ x86_csv = [
     "starry-api/vsock",
 
     "axfeat/crosvm",
-    "dep:axplat-x86-csv",
+    "dep:x86-csv",
     "pci",
 
     "smp",
@@ -91,12 +91,12 @@ starry-signal.workspace = true
 starry-core.workspace = true
 starry-api.workspace = true
 
-[dependencies.axplat-aarch64-crosvm-virt]
+[dependencies.aarch64-crosvm-virt]
 workspace = true
 optional = true
 features = ["irq", "fp-simd", "smp", "rtc"]
 
-[dependencies.axplat-x86-csv]
+[dependencies.x86-csv]
 workspace = true
 optional = true
 features = ["irq", "fp-simd", "smp", "rtc"]
