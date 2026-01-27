@@ -2,7 +2,7 @@
 
 use core::ops::{Deref, DerefMut};
 
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 use x86_64::{
     registers::{
         control::Cr2,

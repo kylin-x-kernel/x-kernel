@@ -29,7 +29,7 @@
 use core::time::Duration;
 
 pub use axerrno::AxResult;
-pub use memory_addr::{PhysAddr, VirtAddr};
+pub use memaddr::{PhysAddr, VirtAddr};
 
 use trait_ffi::*;
 

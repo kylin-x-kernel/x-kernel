@@ -3,7 +3,7 @@
 use core::ops::{Deref, DerefMut};
 
 use aarch64_cpu::registers::{Readable, ESR_EL1, FAR_EL1};
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 use tock_registers::LocalRegisterCopy;
 
 use super::trap::{is_valid_page_fault, TrapKind};

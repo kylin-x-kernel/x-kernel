@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use memory_addr::PhysAddr;
+use memaddr::PhysAddr;
 
 pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;
 

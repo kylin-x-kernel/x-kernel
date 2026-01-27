@@ -5,7 +5,7 @@ use std::{
     marker::PhantomData,
 };
 
-use memory_addr::{PhysAddr, VirtAddr};
+use memaddr::{PhysAddr, VirtAddr};
 use page_table_entry::{GenericPTE, MappingFlags};
 use page_table_multiarch::{PageSize, PageTable64, PagingHandler, PagingMetaData, PagingResult};
 use rand::{Rng, SeedableRng, rngs::SmallRng};

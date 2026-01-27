@@ -1,12 +1,12 @@
 //! RISC-V specific page table structures.
 
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 use page_table_entry::riscv::Rv64PTE;
 
 use crate::{PageTable64, PageTable64Mut, PagingMetaData};
 
 /// A virtual address that can be used in RISC-V Sv39 and Sv48 page tables.
-pub trait SvVirtAddr: memory_addr::MemoryAddr + Send + Sync {
+pub trait SvVirtAddr: memaddr::MemoryAddr + Send + Sync {
     /// Flush the TLB.
     fn flush_tlb(vaddr: Option<Self>);
 }

@@ -9,7 +9,7 @@ use axmm::backend::{Backend, SharedPages};
 use axsync::Mutex;
 use axtask::current;
 use linux_raw_sys::general::*;
-use memory_addr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use starry_core::{
     shm::{SHM_MANAGER, ShmInner, ShmidDs},
     task::AsThread,
@@ -32,7 +32,7 @@ bitflags::bitflags! {
 }
 
 pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
-    let page_num = memory_addr::align_up_4k(size) / PAGE_SIZE_4K;
+    let page_num = memaddr::align_up_4k(size) / PAGE_SIZE_4K;
     if page_num == 0 {
         return Err(AxError::InvalidInput);
     }
@@ -97,7 +97,7 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
     let pid = proc_data.proc.pid();
     let mut aspace = proc_data.aspace.lock();
 
-    let start_aligned = memory_addr::align_down_4k(addr);
+    let start_aligned = memaddr::align_down_4k(addr);
     let length = shm_inner.page_num * PAGE_SIZE_4K;
 
     // alloc the virtual address range

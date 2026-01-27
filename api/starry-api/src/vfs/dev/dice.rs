@@ -4,7 +4,7 @@ use core::any::Any;
 
 use axerrno::{AxError, AxResult};
 use axplat_aarch64_crosvm_virt::fdt::dice_reg;
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 use rand_chacha::{
     ChaCha8Rng,
     rand_core::{RngCore, SeedableRng},

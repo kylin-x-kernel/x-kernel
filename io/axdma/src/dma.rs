@@ -5,7 +5,7 @@ use axalloc::{DefaultByteAllocator, UsageKind, global_allocator};
 use axhal::{mem::virt_to_phys, paging::MappingFlags};
 use kspin::SpinNoIrq;
 use log::{debug, error};
-use memory_addr::{PAGE_SIZE_4K, VirtAddr, va};
+use memaddr::{PAGE_SIZE_4K, VirtAddr, va};
 
 use crate::{BusAddr, DMAInfo, phys_to_bus};
 
@@ -128,5 +128,5 @@ fn virt_to_bus(addr: VirtAddr) -> BusAddr {
 }
 
 const fn layout_pages(layout: &Layout) -> usize {
-    memory_addr::align_up_4k(layout.size()) / PAGE_SIZE_4K
+    memaddr::align_up_4k(layout.size()) / PAGE_SIZE_4K
 }

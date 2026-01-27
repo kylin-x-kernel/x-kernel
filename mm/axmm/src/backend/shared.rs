@@ -4,7 +4,7 @@ use core::ops::Deref;
 use axerrno::AxResult;
 use axhal::paging::{MappingFlags, PageSize, PageTableMut};
 use axsync::Mutex;
-use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
+use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
 
 use super::{alloc_frame, dealloc_frame};
 use crate::{

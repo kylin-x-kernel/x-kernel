@@ -9,5 +9,5 @@ categories = ["os", "no-std"]
 
 [dependencies]
 axerrno = {workspace = true}
-memory_addr = { workspace = true }
+memaddr = { workspace = true }
 trait-ffi = "0.2"

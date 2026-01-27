@@ -2,7 +2,7 @@ use axerrno::AxResult;
 use axhal::paging::{MappingFlags, PageSize};
 use axmm::backend::Backend;
 use axtask::current;
-use memory_addr::{VirtAddr, align_up_4k};
+use memaddr::{VirtAddr, align_up_4k};
 use starry_core::{
     config::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX},
     task::AsThread,

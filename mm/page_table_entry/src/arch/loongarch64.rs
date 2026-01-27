@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use memory_addr::PhysAddr;
+use memaddr::PhysAddr;
 
 use crate::{GenericPTE, MappingFlags};
 

@@ -25,7 +25,7 @@ use axtask::{
 };
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 
 use crate::task::AsThread;
 

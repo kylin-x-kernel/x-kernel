@@ -8,7 +8,7 @@ use axhal::{
     trap::PageFaultFlags,
 };
 use axsync::Mutex;
-use memory_addr::{
+use memaddr::{
     MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr, VirtAddrRange, is_aligned_4k,
 };
 use memory_set::{MemoryArea, MemorySet};

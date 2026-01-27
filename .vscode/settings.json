@@ -1,7 +1,7 @@
 {
   "rust-analyzer.cargo.target": "aarch64-unknown-none-softfloat",
   "rust-analyzer.cargo.allTargets": false,
-  "rust-analyzer.cargo.buildScripts.enable": false,
+  "rust-analyzer.cargo.buildScripts.enable": true,
   "rust-analyzer.check.workspace": false,
   "rust-analyzer.linkedProjects": [
     "entry/Cargo.toml",

@@ -71,7 +71,7 @@ kernel_guard.workspace = true
 lazyinit.workspace = true
 linkme = { version = "0.3.33", optional = true }
 log.workspace = true
-memory_addr.workspace = true
+memaddr.workspace = true
 page_table_multiarch = { workspace = true, optional = true }
 percpu.workspace = true
 fdt-parser = "0.4"

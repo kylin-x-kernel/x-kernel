@@ -9,7 +9,7 @@ mod dma;
 use core::{alloc::Layout, ptr::NonNull};
 
 use allocator::AllocResult;
-use memory_addr::PhysAddr;
+use memaddr::PhysAddr;
 
 use self::dma::ALLOCATOR;
 

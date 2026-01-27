@@ -51,7 +51,7 @@
 
 extern crate alloc;
 
-use memory_addr::align_up;
+use memaddr::align_up;
 
 use core::alloc::Layout;
 use core::ptr::NonNull;

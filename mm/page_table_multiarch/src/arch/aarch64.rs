@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 use page_table_entry::aarch64::A64PTE;
 
 use crate::{PageTable64, PageTable64Mut, PagingMetaData};

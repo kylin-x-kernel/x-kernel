@@ -62,7 +62,7 @@ axerrno = { path = "util/axerrno" }
 axfs-ng-vfs = { path = "fs/axfs-ng-vfs" }
 axio = { path = "io/axio" }
 axpoll = { path = "core/axpoll" }
-memory_addr = { path = "mm/memory_addr" }
+memaddr = { path = "mm/memaddr" }
 memory_set = { path = "mm/memory_set" }
 
 # Starry Modules

@@ -17,7 +17,7 @@ use axtask::current;
 use extern_trait::extern_trait;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kernel_guard::IrqSave;
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use ouroboros::self_referencing;
 use starry_vm::{VmError, VmIo, VmResult};
 

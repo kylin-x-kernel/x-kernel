@@ -11,7 +11,7 @@ use linux_raw_sys::{
     ctypes::{c_long, c_ushort},
     general::*,
 };
-use memory_addr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use starry_process::Pid;
 /// Data structure used to pass permission information to IPC operations.
 #[repr(C)]
@@ -109,7 +109,7 @@ impl ShmInner {
     pub fn new(key: i32, shmid: i32, size: usize, mapping_flags: MappingFlags, pid: Pid) -> Self {
         ShmInner {
             shmid,
-            page_num: memory_addr::align_up_4k(size) / PAGE_SIZE_4K,
+            page_num: memaddr::align_up_4k(size) / PAGE_SIZE_4K,
             va_range: BTreeMap::new(),
             phys_pages: None,
             rmid: false,

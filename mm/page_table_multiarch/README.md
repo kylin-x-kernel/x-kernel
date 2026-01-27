@@ -32,7 +32,7 @@ Currently supported architectures and page table structures:
 ## Examples (x86_64)
 
 ```rust
-use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
+use memaddr::{MemoryAddr, PhysAddr, VirtAddr};
 use page_table_multiarch::x86_64::{X64PageTable};
 use page_table_multiarch::{MappingFlags, PagingHandler, PageSize};
 

@@ -1,6 +1,6 @@
 //! Trap handling.
 
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 
 pub use crate::TrapFrame;
 pub use linkme::distributed_slice as def_trap_handler;

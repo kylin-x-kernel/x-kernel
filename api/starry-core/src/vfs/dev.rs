@@ -8,7 +8,7 @@ use axfs_ng_vfs::{
 };
 use axpoll::{IoEvents, Pollable};
 use inherit_methods_macro::inherit_methods;
-use memory_addr::PhysAddrRange;
+use memaddr::PhysAddrRange;
 
 use super::{SimpleFs, SimpleFsNode};
 

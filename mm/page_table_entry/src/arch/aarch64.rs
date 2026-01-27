@@ -3,7 +3,7 @@
 use core::fmt;
 
 use aarch64_cpu::registers::MAIR_EL1;
-use memory_addr::PhysAddr;
+use memaddr::PhysAddr;
 
 use crate::{GenericPTE, MappingFlags};
 

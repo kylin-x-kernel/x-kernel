@@ -14,7 +14,7 @@ It is useful to implement [`mmap`][1], [`munmap`][1] and [`mprotect`][2].
 ## Examples
 
 ```rust
-use memory_addr::{va, va_range, VirtAddr};
+use memaddr::{va, va_range, VirtAddr};
 use memory_set::{MappingBackend, MemoryArea, MemorySet};
 
 const MAX_ADDR: usize = 0x10000;

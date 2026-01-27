@@ -18,7 +18,7 @@ arm-el2 = []
 
 [dependencies]
 bitflags = "2.9"
-memory_addr.workspace = true
+memaddr.workspace = true
 
 [target.'cfg(any(target_arch = "aarch64", doc, docsrs))'.dependencies]
 aarch64-cpu = "10.0"

@@ -26,7 +26,7 @@ methods for manipulating various page table entries.
 ## Examples (x86_64)
 
 ```rust
-use memory_addr::PhysAddr;
+use memaddr::PhysAddr;
 use x86_64::structures::paging::page_table::PageTableFlags;
 use page_table_entry::{GenericPTE, MappingFlags, x86_64::X64PTE};
 

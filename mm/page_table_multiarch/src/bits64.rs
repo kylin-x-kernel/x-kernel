@@ -1,7 +1,7 @@
 use core::{marker::PhantomData, ops::Deref};
 
 use arrayvec::ArrayVec;
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
 
 use crate::{
     GenericPTE, MappingFlags, PageSize, PagingError, PagingHandler, PagingMetaData, PagingResult,

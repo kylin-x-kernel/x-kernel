@@ -1,5 +1,5 @@
 use axerrno::AxResult;
-use memory_addr::{PhysAddr, VirtAddr};
+use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{PAGE_SIZE, UsageKind, global_allocator};
 

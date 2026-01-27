@@ -9,7 +9,7 @@ use axhal::{
 };
 use axsync::Mutex;
 use kspin::SpinNoIrq;
-use memory_addr::{PhysAddr, VirtAddr, VirtAddrRange};
+use memaddr::{PhysAddr, VirtAddr, VirtAddrRange};
 
 use crate::{
     AddrSpace,

@@ -6,7 +6,7 @@ use loongArch64::register::{
     badi, badv,
     estat::{self, Exception, Trap},
 };
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 
 use crate::{trap::PageFaultFlags, TrapFrame};
 

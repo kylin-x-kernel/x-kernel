@@ -1,6 +1,6 @@
 //! x86 specific page table structures.
 
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 use page_table_entry::x86_64::X64PTE;
 
 use crate::{PageTable64, PageTable64Mut, PagingMetaData};

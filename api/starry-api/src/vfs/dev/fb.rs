@@ -5,7 +5,7 @@ use axdriver::prelude::DisplayDriverOps;
 use axerrno::AxError;
 use axfs_ng_vfs::{NodeFlags, VfsError, VfsResult};
 use axhal::mem::virt_to_phys;
-use memory_addr::{PhysAddrRange, VirtAddr};
+use memaddr::{PhysAddrRange, VirtAddr};
 use starry_core::vfs::{DeviceMmap, DeviceOps};
 use starry_vm::VmMutPtr;
 

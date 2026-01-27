@@ -3,7 +3,7 @@
 use core::arch::asm;
 
 use loongArch64::register::{crmd, ecfg, eentry, pgdh, pgdl};
-use memory_addr::{PhysAddr, VirtAddr};
+use memaddr::{PhysAddr, VirtAddr};
 
 /// Allows the current CPU to respond to interrupts.
 #[inline]

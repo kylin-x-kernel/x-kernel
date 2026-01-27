@@ -2,7 +2,7 @@
 
 use core::ops::{Deref, DerefMut};
 
-use memory_addr::VirtAddr;
+use memaddr::VirtAddr;
 #[cfg(feature = "fp-simd")]
 use riscv::register::sstatus::FS;
 use riscv::register::{scause, sstatus::Sstatus};

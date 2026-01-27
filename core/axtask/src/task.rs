@@ -18,7 +18,7 @@ use axhal::context::TaskContext;
 use axhal::tls::TlsArea;
 use futures_util::task::AtomicWaker;
 use kspin::SpinNoIrq;
-use memory_addr::{VirtAddr, align_up_4k};
+use memaddr::{VirtAddr, align_up_4k};
 
 use crate::{AxCpuMask, AxTask, AxTaskRef, future::block_on};
 

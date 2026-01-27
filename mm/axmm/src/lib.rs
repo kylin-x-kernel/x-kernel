@@ -24,7 +24,7 @@ use axhal::{
 };
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
-use memory_addr::{MemoryAddr, PhysAddr, va};
+use memaddr::{MemoryAddr, PhysAddr, va};
 
 pub use self::aspace::AddrSpace;
 

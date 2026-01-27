@@ -13,7 +13,7 @@ use axtask::{
     future::{block_on, poll_io},
 };
 use linux_raw_sys::{general::S_IFIFO, ioctl::FIONREAD};
-use memory_addr::PAGE_SIZE_4K;
+use memaddr::PAGE_SIZE_4K;
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},

@@ -10,7 +10,7 @@ pub use axplat::mem::{
     kernel_aspace, mmio_ranges, phys_ram_ranges, phys_to_virt, reserved_phys_ram_ranges,
     total_ram_size, virt_to_phys,
 };
-pub use memory_addr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
+pub use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 
 use crate::addr_of_sym;
 

@@ -9,7 +9,7 @@ use axhal::{
 };
 use axsync::Mutex;
 use enum_dispatch::enum_dispatch;
-use memory_addr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
+use memaddr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 use memory_set::MappingBackend;
 
 pub mod cow;

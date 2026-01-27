@@ -10,7 +10,7 @@ mod bits64;
 
 use core::fmt::Debug;
 
-use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
+use memaddr::{MemoryAddr, PhysAddr, VirtAddr};
 #[doc(no_inline)]
 pub use page_table_entry::{GenericPTE, MappingFlags};
 
@@ -123,12 +123,12 @@ impl PageSize {
 
     /// Checks whether a given address or size is aligned to the page size.
     pub const fn is_aligned(self, addr_or_size: usize) -> bool {
-        memory_addr::is_aligned(addr_or_size, self as usize)
+        memaddr::is_aligned(addr_or_size, self as usize)
     }
 
     /// Returns the offset of the address within the page size.
     pub const fn align_offset(self, addr: usize) -> usize {
-        memory_addr::align_offset(addr, self as usize)
+        memaddr::align_offset(addr, self as usize)
     }
 }
 

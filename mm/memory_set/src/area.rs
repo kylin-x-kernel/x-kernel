@@ -1,6 +1,6 @@
 use core::fmt;
 
-use memory_addr::{AddrRange, MemoryAddr};
+use memaddr::{AddrRange, MemoryAddr};
 
 use crate::{MappingBackend, MappingError, MappingResult};
 

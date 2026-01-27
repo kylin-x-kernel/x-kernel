@@ -30,6 +30,6 @@ axerrno.workspace = true
 cfg-if.workspace = true
 kspin.workspace = true
 log.workspace = true
-memory_addr.workspace = true
+memaddr.workspace = true
 percpu = { workspace = true, optional = true }
 strum = { version = "0.27.2", default-features = false, features = ["derive"] }

@@ -19,4 +19,4 @@ axhal = { workspace = true, features = ["paging"] }
 axmm.workspace = true
 kspin.workspace = true
 log.workspace = true
-memory_addr.workspace = true
+memaddr.workspace = true

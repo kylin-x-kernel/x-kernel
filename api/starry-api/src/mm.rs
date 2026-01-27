@@ -14,7 +14,7 @@ use axhal::{
 };
 use axio::prelude::*;
 use axtask::current;
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use starry_core::{mm::access_user_memory, task::AsThread};
 use starry_vm::{vm_load, vm_load_until_nul, vm_read_slice, vm_write_slice};
 

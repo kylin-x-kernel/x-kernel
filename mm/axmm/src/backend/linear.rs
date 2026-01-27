@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use axerrno::AxResult;
 use axhal::paging::{MappingFlags, PageSize, PageTableMut};
 use axsync::Mutex;
-use memory_addr::{PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
+use memaddr::{PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{
     AddrSpace,

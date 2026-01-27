@@ -1,7 +1,7 @@
 //! Helper functions to initialize the CPU states on systems bootstrapping.
 
 use aarch64_cpu::{asm::barrier, registers::*};
-use memory_addr::PhysAddr;
+use memaddr::PhysAddr;
 
 /// Swtich current exception level to EL1.
 ///

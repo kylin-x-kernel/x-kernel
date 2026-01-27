@@ -15,7 +15,7 @@ rust-version = "1.70.0"
 
 [dependencies]
 axerrno = { workspace = true, optional = true }
-memory_addr = { workspace = true }
+memaddr = { workspace = true }
 
 [features]
 axerrno = ["dep:axerrno"]
