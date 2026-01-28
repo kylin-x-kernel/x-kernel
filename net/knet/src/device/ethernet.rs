@@ -286,9 +286,7 @@ impl NetDeviceOps for EthernetDevice {
         ip_packet: &[u8],
         timestamp: Instant,
     ) -> bool {
-        if next_hop.is_broadcast()
-            || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop)
-        {
+        if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
             Self::send_to(
                 &mut self.inner,
                 EthernetAddress::BROADCAST,
