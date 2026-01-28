@@ -39,7 +39,7 @@ axdriver = { path = "drivers/axdriver" }
 axdma = { path = "io/axdma" }
 axfs = { path = "fs/axfs" }
 khal = { path = "arch/khal" }
-axinput = { path = "io/axinput" }
+inputdev = { path = "io/inputdev" }
 kipi = { path = "arch/kipi" }
 klogger = { path = "util/klogger" }
 axmm = { path = "mm/axmm" }

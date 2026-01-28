@@ -1,5 +1,3 @@
-//! [ArceOS](https://github.com/arceos-org/arceos) input module.
-
 #![no_std]
 
 #[macro_use]
@@ -13,10 +11,9 @@ use axdriver::{AxDeviceContainer, prelude::*};
 use axsync::Mutex;
 use lazyinit::LazyInit;
 
-static DEVICES: LazyInit<Mutex<Vec<AxInputDevice>>> = LazyInit::new();
+static INPUT_DEVICES: LazyInit<Mutex<Vec<AxInputDevice>>> = LazyInit::new();
 
-/// Initializes the graphics subsystem by underlayer devices.
-pub fn init_input(mut input_devs: AxDeviceContainer<AxInputDevice>) {
+pub fn input_init(mut input_devs: AxDeviceContainer<AxInputDevice>) {
     info!("Initialize input subsystem...");
 
     let mut devices = Vec::new();
@@ -28,10 +25,9 @@ pub fn init_input(mut input_devs: AxDeviceContainer<AxInputDevice>) {
         );
         devices.push(dev);
     }
-    DEVICES.init_once(Mutex::new(devices));
+    INPUT_DEVICES.init_once(Mutex::new(devices));
 }
 
-/// Takes the initialized input devices.
-pub fn take_inputs() -> Vec<AxInputDevice> {
-    mem::take(&mut DEVICES.lock())
+pub fn input_take_all() -> Vec<AxInputDevice> {
+    mem::take(&mut INPUT_DEVICES.lock())
 }

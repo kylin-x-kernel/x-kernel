@@ -318,7 +318,7 @@ impl Pollable for EventDev {
 pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut inputs = DirMapping::new();
     let mut input_id = 0;
-    let input_devices = axinput::take_inputs();
+    let input_devices = inputdev::input_take_all();
     let mut keys = [0; 0x300usize.div_ceil(8)];
     for (i, mut device) in input_devices.into_iter().enumerate() {
         assert!(device.get_event_bits(EventType::Key, &mut keys).unwrap());

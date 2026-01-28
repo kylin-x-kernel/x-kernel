@@ -88,7 +88,7 @@ input = [
     "alloc",
     "paging",
     "axdriver/virtio-input",
-    "dep:axinput",
+    "dep:inputdev",
     "axruntime/input",
 ]
 
@@ -123,7 +123,7 @@ fbdevice = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
 khal.workspace = true
-axinput = { workspace = true, optional = true }
+inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 klogger.workspace = true
 axnet = { workspace = true, optional = true }

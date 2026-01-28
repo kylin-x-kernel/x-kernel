@@ -26,7 +26,7 @@ multitask = ["axtask/multitask"]
 fs = ["dep:axdriver", "dep:axfs"]
 net = ["dep:axdriver", "dep:axnet"]
 display = ["dep:axdriver", "dep:fbdevice"]
-input = ["dep:axdriver", "dep:axinput"]
+input = ["dep:axdriver", "dep:inputdev"]
 vsock = ["net", "dep:axdriver"]
 rtc = []
 # driver-dyn = ["axdriver/dyn"]
@@ -40,7 +40,7 @@ backtrace.workspace = true
 platconfig.workspace = true
 fbdevice = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
-axinput = { workspace = true, optional = true }
+inputdev = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
 khal.workspace = true
 kipi = { workspace = true, optional = true }

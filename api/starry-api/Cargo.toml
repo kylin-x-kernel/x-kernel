@@ -8,7 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-input = ["dep:axinput"]
+input = ["dep:inputdev"]
 memtrack = ["axfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["axnet/vsock"]
 dev-log = []
@@ -28,7 +28,7 @@ axfeat.workspace = true
 axfs-ng-vfs.workspace = true
 axfs.workspace = true
 khal.workspace = true
-axinput = { workspace = true, optional = true }
+inputdev = { workspace = true, optional = true }
 kio.workspace = true
 klogger.workspace = true
 axmm.workspace = true
