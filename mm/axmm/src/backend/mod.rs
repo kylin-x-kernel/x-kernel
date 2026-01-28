@@ -10,7 +10,7 @@ use axhal::{
 use axsync::Mutex;
 use enum_dispatch::enum_dispatch;
 use memaddr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
-use memset::MappingBackend;
+use memset::MemorySetBackend;
 
 pub mod cow;
 pub mod file;
@@ -115,7 +115,7 @@ pub enum Backend {
     File(file::FileBackend),
 }
 
-impl MappingBackend for Backend {
+impl MemorySetBackend for Backend {
     type Addr = VirtAddr;
     type Flags = MappingFlags;
     type PageTable = PageTable;

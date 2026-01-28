@@ -2,20 +2,20 @@ use core::fmt;
 
 use memaddr::{AddrRange, MemoryAddr};
 
-use crate::{MappingBackend, MappingError, MappingResult};
+use crate::{MemorySetBackend, MemorySetError, MemorySetResult};
 
 /// A memory area represents a continuous range of virtual memory with the same
 /// flags.
 ///
-/// The target physical memory frames are determined by [`MappingBackend`] and
+/// The target physical memory frames are determined by [`MemorySetBackend`] and
 /// may not be contiguous.
-pub struct MemoryArea<B: MappingBackend> {
+pub struct MemoryArea<B: MemorySetBackend> {
     va_range: AddrRange<B::Addr>,
     flags: B::Flags,
     backend: B,
 }
 
-impl<B: MappingBackend> MemoryArea<B> {
+impl<B: MemorySetBackend> MemoryArea<B> {
     /// Creates a new memory area.
     ///
     /// # Panics
@@ -60,7 +60,7 @@ impl<B: MappingBackend> MemoryArea<B> {
     }
 }
 
-impl<B: MappingBackend> MemoryArea<B> {
+impl<B: MemorySetBackend> MemoryArea<B> {
     /// Changes the flags.
     pub(crate) fn set_flags(&mut self, new_flags: B::Flags) {
         self.flags = new_flags;
@@ -72,19 +72,19 @@ impl<B: MappingBackend> MemoryArea<B> {
     }
 
     /// Maps the whole memory area in the page table.
-    pub(crate) fn map_area(&self, page_table: &mut B::PageTable) -> MappingResult {
+    pub(crate) fn map_area(&self, page_table: &mut B::PageTable) -> MemorySetResult {
         self.backend
             .map(self.start(), self.size(), self.flags, page_table)
             .then_some(())
-            .ok_or(MappingError::BadState)
+            .ok_or(MemorySetError::BadState)
     }
 
     /// Unmaps the whole memory area in the page table.
-    pub(crate) fn unmap_area(&self, page_table: &mut B::PageTable) -> MappingResult {
+    pub(crate) fn unmap_area(&self, page_table: &mut B::PageTable) -> MemorySetResult {
         self.backend
             .unmap(self.start(), self.size(), page_table)
             .then_some(())
-            .ok_or(MappingError::BadState)
+            .ok_or(MemorySetError::BadState)
     }
 
     /// Changes the flags in the page table.
@@ -92,7 +92,7 @@ impl<B: MappingBackend> MemoryArea<B> {
         &mut self,
         new_flags: B::Flags,
         page_table: &mut B::PageTable,
-    ) -> MappingResult {
+    ) -> MemorySetResult {
         self.backend
             .protect(self.start(), self.size(), new_flags, page_table);
         Ok(())
@@ -108,14 +108,14 @@ impl<B: MappingBackend> MemoryArea<B> {
         &mut self,
         new_size: usize,
         page_table: &mut B::PageTable,
-    ) -> MappingResult {
+    ) -> MemorySetResult {
         assert!(new_size > 0 && new_size < self.size());
 
         let old_size = self.size();
         let unmap_size = old_size - new_size;
 
         if !self.backend.unmap(self.start(), unmap_size, page_table) {
-            return Err(MappingError::BadState);
+            return Err(MemorySetError::BadState);
         }
         // Use wrapping_add to avoid overflow check.
         // Safety: `unmap_size` is less than the current size, so it will never
@@ -134,7 +134,7 @@ impl<B: MappingBackend> MemoryArea<B> {
         &mut self,
         new_size: usize,
         page_table: &mut B::PageTable,
-    ) -> MappingResult {
+    ) -> MemorySetResult {
         assert!(new_size > 0 && new_size < self.size());
         let old_size = self.size();
         let unmap_size = old_size - new_size;
@@ -144,7 +144,7 @@ impl<B: MappingBackend> MemoryArea<B> {
         let unmap_start = self.start().wrapping_add(new_size);
 
         if !self.backend.unmap(unmap_start, unmap_size, page_table) {
-            return Err(MappingError::BadState);
+            return Err(MemorySetError::BadState);
         }
 
         // Use wrapping_sub to avoid overflow check, same as above.
@@ -177,7 +177,7 @@ impl<B: MappingBackend> MemoryArea<B> {
     }
 }
 
-impl<B: MappingBackend> fmt::Debug for MemoryArea<B>
+impl<B: MemorySetBackend> fmt::Debug for MemoryArea<B>
 where
     B::Addr: fmt::Debug,
     B::Flags: fmt::Debug + Copy,

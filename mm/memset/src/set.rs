@@ -5,14 +5,14 @@ use core::fmt;
 
 use memaddr::{AddrRange, MemoryAddr};
 
-use crate::{MappingBackend, MappingError, MappingResult, MemoryArea};
+use crate::{MemorySetBackend, MemorySetError, MemorySetResult, MemoryArea};
 
 /// A container that maintains memory mappings ([`MemoryArea`]).
-pub struct MemorySet<B: MappingBackend> {
+pub struct MemorySet<B: MemorySetBackend> {
     areas: BTreeMap<B::Addr, MemoryArea<B>>,
 }
 
-impl<B: MappingBackend> MemorySet<B> {
+impl<B: MemorySetBackend> MemorySet<B> {
     /// Creates a new memory set.
     pub const fn new() -> Self {
         Self {
@@ -82,7 +82,7 @@ impl<B: MappingBackend> MemorySet<B> {
             return None;
         }
         // brute force: try each area's end address as the start.
-        let mut last_end: <B as MappingBackend>::Addr = hint.max(limit.start).align_up(align);
+        let mut last_end: <B as MemorySetBackend>::Addr = hint.max(limit.start).align_up(align);
         if let Some((_, area)) = self.areas.range(..last_end).last() {
             last_end = last_end.max(area.end()).align_up(align);
         }
@@ -115,16 +115,16 @@ impl<B: MappingBackend> MemorySet<B> {
         area: MemoryArea<B>,
         page_table: &mut B::PageTable,
         unmap_overlap: bool,
-    ) -> MappingResult {
+    ) -> MemorySetResult {
         if area.va_range().is_empty() {
-            return Err(MappingError::InvalidParam);
+            return Err(MemorySetError::InvalidParam);
         }
 
         if self.overlaps(area.va_range()) {
             if unmap_overlap {
                 self.unmap(area.start(), area.size(), page_table)?;
             } else {
-                return Err(MappingError::AlreadyExists);
+                return Err(MemorySetError::AlreadyExists);
             }
         }
 
@@ -144,9 +144,9 @@ impl<B: MappingBackend> MemorySet<B> {
         start: B::Addr,
         size: usize,
         page_table: &mut B::PageTable,
-    ) -> MappingResult {
+    ) -> MemorySetResult {
         let range =
-            AddrRange::try_from_start_size(start, size).ok_or(MappingError::InvalidParam)?;
+            AddrRange::try_from_start_size(start, size).ok_or(MemorySetError::InvalidParam)?;
         if range.is_empty() {
             return Ok(());
         }
@@ -196,7 +196,7 @@ impl<B: MappingBackend> MemorySet<B> {
     }
 
     /// Remove all memory areas and the underlying mappings.
-    pub fn clear(&mut self, page_table: &mut B::PageTable) -> MappingResult {
+    pub fn clear(&mut self, page_table: &mut B::PageTable) -> MemorySetResult {
         for (_, area) in self.areas.iter() {
             area.unmap_area(page_table)?;
         }
@@ -219,8 +219,8 @@ impl<B: MappingBackend> MemorySet<B> {
         size: usize,
         update_flags: impl Fn(B::Flags) -> Option<B::Flags>,
         page_table: &mut B::PageTable,
-    ) -> MappingResult {
-        let end = start.checked_add(size).ok_or(MappingError::InvalidParam)?;
+    ) -> MemorySetResult {
+        let end = start.checked_add(size).ok_or(MemorySetError::InvalidParam)?;
         let mut to_insert = Vec::new();
         for (&area_start, area) in self.areas.iter_mut() {
             let area_end = area.end();
@@ -276,13 +276,13 @@ impl<B: MappingBackend> MemorySet<B> {
     }
 }
 
-impl<B: MappingBackend> Default for MemorySet<B> {
+impl<B: MemorySetBackend> Default for MemorySet<B> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<B: MappingBackend> fmt::Debug for MemorySet<B>
+impl<B: MemorySetBackend> fmt::Debug for MemorySet<B>
 where
     B::Addr: fmt::Debug,
     B::Flags: fmt::Debug,

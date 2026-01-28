@@ -1,13 +1,13 @@
 use memaddr::MemoryAddr;
 
-/// Underlying operations to do when manipulating mappings within the specific
+/// Underlying operations to do when manipulating memory areas within the specific
 /// [`MemoryArea`](crate::MemoryArea).
 ///
 /// The backend can be different for different memory areas. e.g., for linear
 /// mappings, the target physical address is known when it is added to the page
 /// table. For lazy mappings, an empty mapping needs to be added to the page
 /// table to trigger a page fault.
-pub trait MappingBackend: Clone {
+pub trait MemorySetBackend: Clone {
     /// The address type used in the memory area.
     type Addr: MemoryAddr;
     /// The flags type used in the memory area.
