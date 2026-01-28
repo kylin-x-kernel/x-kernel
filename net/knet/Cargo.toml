@@ -2,14 +2,12 @@
 name = "knet"
 version.workspace = true
 edition.workspace = true
-authors = [
-  "KylinSoft Co., Ltd. <https://www.kylinos.cn/>"
-]
+authors.workspace = true
 description = "network module"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/knet"
-documentation = "https://kylin-x-kernel.github.io/arceos/knet/index.html"
+repository.workspace = true
+documentation.workspace = true
 
 [features]
 vsock = ["kdriver/vsock"]
