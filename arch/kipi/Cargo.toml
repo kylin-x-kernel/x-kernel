@@ -1,5 +1,5 @@
 [package]
-name = "kapi"
+name = "kipi"
 version.workspace = true
 edition.workspace = true
 authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]

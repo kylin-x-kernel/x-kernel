@@ -28,11 +28,11 @@ pub use event::{Callback, MulticastCallback};
 use queue::IpiEventQueue;
 
 /// Result type for IPI operations
-pub type Result<T> = core::result::Result<T, KapiError>;
+pub type Result<T> = core::result::Result<T, KipiError>;
 
 /// Error types for IPI operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KapiError {
+pub enum KipiError {
     /// Invalid CPU ID (exceeds system CPU count)
     InvalidCpuId,
     /// Queue full (too many pending callbacks)
@@ -41,7 +41,7 @@ pub enum KapiError {
     CallbackFailed,
 }
 
-impl core::fmt::Display for KapiError {
+impl core::fmt::Display for KpiError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
             Self::InvalidCpuId => write!(f, "Invalid CPU ID"),
@@ -69,14 +69,14 @@ pub fn init() {
 ///
 /// # Errors
 ///
-/// Returns `KapiError::InvalidCpuId` if `dest_cpu` exceeds system CPU count.
+/// Returns `KipiError::InvalidCpuId` if `dest_cpu` exceeds system CPU count.
 pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()> {
     let cpu_num = platconfig::plat::CPU_NUM;
 
     // Error handling: check CPU ID validity
     if dest_cpu >= cpu_num {
         error!("Invalid CPU ID: {} (max: {})", dest_cpu, cpu_num - 1);
-        return Err(KapiError::InvalidCpuId);
+        return Err(KpiError::InvalidCpuId);
     }
 
     info!("Send IPI event to CPU {dest_cpu}");

@@ -308,7 +308,7 @@ fn init_interrupt() {
 
     #[cfg(feature = "ipi")]
     axhal::irq::register(axhal::irq::IPI_IRQ, || {
-        kapi::ipi_handler();
+        kipi::ipi_handler();
     });
 
     #[cfg(feature = "pmu")]

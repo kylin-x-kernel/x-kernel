@@ -40,7 +40,7 @@ axdma = { path = "io/axdma" }
 axfs = { path = "fs/axfs" }
 axhal = { path = "arch/axhal" }
 axinput = { path = "io/axinput" }
-kapi = { path = "arch/kapi" }
+kipi = { path = "arch/kipi" }
 klogger = { path = "util/klogger" }
 axmm = { path = "mm/axmm" }
 axnet = { path = "net/axnet" }

@@ -49,7 +49,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     axtask::init_scheduler_secondary();
 
     #[cfg(feature = "ipi")]
-    kapi::init();
+    kipi::init();
 
     info!("Secondary CPU {cpu_id:x} init OK.");
     super::INITED_CPUS.fetch_add(1, Ordering::Release);
