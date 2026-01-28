@@ -9,7 +9,7 @@ use super::prelude::*;
 
 cfg_if! {
     if #[cfg(net_dev = "dummy")] {
-        use axdriver_net::{EthernetAddress, NetBuf, NetBufBox, NetBufPool, NetBufPtr};
+        use net::{MacAddress, NetBuf, NetBufBox, NetBufPool, NetBufHandle};
 
         pub struct DummyNetDev;
         pub struct DummyNetDrvier;
@@ -21,16 +21,16 @@ cfg_if! {
         }
 
         impl NetDriverOps for DummyNetDev {
-            fn mac_address(&self) -> EthernetAddress { unreachable!() }
-            fn can_transmit(&self) -> bool { false }
-            fn can_receive(&self) -> bool { false }
-            fn rx_queue_size(&self) -> usize { 0 }
-            fn tx_queue_size(&self) -> usize { 0 }
-            fn recycle_rx_buffer(&mut self, _: NetBufPtr) -> DriverResult { Err(DriverError::Unsupported) }
-            fn recycle_tx_buffers(&mut self) -> DriverResult { Err(DriverError::Unsupported) }
-            fn transmit(&mut self, _: NetBufPtr) -> DriverResult { Err(DriverError::Unsupported) }
-            fn receive(&mut self) -> DriverResult<NetBufPtr> { Err(DriverError::Unsupported) }
-            fn alloc_tx_buffer(&mut self, _: usize) -> DriverResult<NetBufPtr> { Err(DriverError::Unsupported) }
+            fn mac(&self) -> MacAddress { unreachable!() }
+            fn can_tx(&self) -> bool { false }
+            fn can_rx(&self) -> bool { false }
+            fn rx_queue_len(&self) -> usize { 0 }
+            fn tx_queue_len(&self) -> usize { 0 }
+            fn recycle_rx(&mut self, _: NetBufHandle) -> DriverResult { Err(DriverError::Unsupported) }
+            fn recycle_tx(&mut self) -> DriverResult { Err(DriverError::Unsupported) }
+            fn send(&mut self, _: NetBufHandle) -> DriverResult { Err(DriverError::Unsupported) }
+            fn recv(&mut self) -> DriverResult<NetBufHandle> { Err(DriverError::Unsupported) }
+            fn alloc_tx_buf(&mut self, _: usize) -> DriverResult<NetBufHandle> { Err(DriverError::Unsupported) }
         }
     }
 }

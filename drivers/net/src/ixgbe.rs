@@ -6,7 +6,7 @@ pub use ixgbe_driver::{INTEL_82599, INTEL_VEND, IxgbeHal, PhysAddr};
 use ixgbe_driver::{IxgbeDevice, IxgbeError, IxgbeNetBuf, MemPool, NicDevice};
 use log::*;
 
-use crate::{EthernetAddress, NetBufPtr, NetDriverOps};
+use crate::{MacAddress, NetBufHandle, NetDriverOps};
 
 const RECV_BATCH_SIZE: usize = 64;
 const RX_BUFFER_SIZE: usize = 1024;
@@ -19,7 +19,7 @@ const MEM_POOL_ENTRY_SIZE: usize = 2048;
 pub struct IxgbeNic<H: IxgbeHal, const QS: usize, const QN: u16> {
     inner: IxgbeDevice<H, QS>,
     mem_pool: Arc<MemPool>,
-    rx_buffer_queue: VecDeque<NetBufPtr>,
+    rx_buffer_queue: VecDeque<NetBufHandle>,
 }
 
 unsafe impl<H: IxgbeHal, const QS: usize, const QN: u16> Sync for IxgbeNic<H, QS, QN> {}
@@ -56,42 +56,42 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> DriverOps for IxgbeNic<H, QS, 
 }
 
 impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, QS, QN> {
-    fn mac_address(&self) -> EthernetAddress {
-        EthernetAddress(self.inner.get_mac_addr())
+    fn mac(&self) -> MacAddress {
+        MacAddress(self.inner.get_mac_addr())
     }
 
-    fn rx_queue_size(&self) -> usize {
+    fn rx_queue_len(&self) -> usize {
         QS
     }
 
-    fn tx_queue_size(&self) -> usize {
+    fn tx_queue_len(&self) -> usize {
         QS
     }
 
-    fn can_receive(&self) -> bool {
+    fn can_rx(&self) -> bool {
         !self.rx_buffer_queue.is_empty() || self.inner.can_receive(0).unwrap()
     }
 
-    fn can_transmit(&self) -> bool {
+    fn can_tx(&self) -> bool {
         // Default implementation is return true forever.
         self.inner.can_send(0).unwrap()
     }
 
-    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DriverResult {
+    fn recycle_rx(&mut self, rx_buf: NetBufHandle) -> DriverResult {
         let rx_buf = ixgbe_ptr_to_buf(rx_buf, &self.mem_pool)?;
         drop(rx_buf);
         Ok(())
     }
 
-    fn recycle_tx_buffers(&mut self) -> DriverResult {
+    fn recycle_tx(&mut self) -> DriverResult {
         self.inner
-            .recycle_tx_buffers(0)
+            .recycle_tx(0)
             .map_err(|_| DriverError::BadState)?;
         Ok(())
     }
 
-    fn receive(&mut self) -> DriverResult<NetBufPtr> {
-        if !self.can_receive() {
+    fn recv(&mut self) -> DriverResult<NetBufHandle> {
+        if !self.can_rx() {
             return Err(DriverError::WouldBlock);
         }
         if !self.rx_buffer_queue.is_empty() {
@@ -99,16 +99,16 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, Q
             Ok(self.rx_buffer_queue.pop_front().unwrap())
         } else {
             let f = |rx_buf| {
-                let rx_buf = NetBufPtr::from(rx_buf);
+                let rx_buf = NetBufHandle::from(rx_buf);
                 self.rx_buffer_queue.push_back(rx_buf);
             };
 
-            // RX queue is empty, receive from ixgbe NIC.
+            // RX queue is empty, recv from ixgbe NIC.
             match self.inner.receive_packets(0, RECV_BATCH_SIZE, f) {
                 Ok(recv_nums) => {
                     if recv_nums == 0 {
-                        // No packet is received, it is impossible things.
-                        panic!("Error: No receive packets.")
+                        // No payload is received, it is impossible things.
+                        panic!("Error: No recv packets.")
                     } else {
                         Ok(self.rx_buffer_queue.pop_front().unwrap())
                     }
@@ -121,7 +121,7 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, Q
         }
     }
 
-    fn transmit(&mut self, tx_buf: NetBufPtr) -> DriverResult {
+    fn send(&mut self, tx_buf: NetBufHandle) -> DriverResult {
         let tx_buf = ixgbe_ptr_to_buf(tx_buf, &self.mem_pool)?;
         match self.inner.send(0, tx_buf) {
             Ok(_) => Ok(()),
@@ -132,29 +132,30 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, Q
         }
     }
 
-    fn alloc_tx_buffer(&mut self, size: usize) -> DriverResult<NetBufPtr> {
-        let tx_buf = IxgbeNetBuf::alloc(&self.mem_pool, size).map_err(|_| DriverError::NoMemory)?;
-        Ok(NetBufPtr::from(tx_buf))
+    fn alloc_tx_buf(&mut self, size: usize) -> DriverResult<NetBufHandle> {
+        let tx_buf =
+            IxgbeNetBuf::alloc_buf(&self.mem_pool, size).map_err(|_| DriverError::NoMemory)?;
+        Ok(NetBufHandle::from(tx_buf))
     }
 }
 
-impl From<IxgbeNetBuf> for NetBufPtr {
+impl From<IxgbeNetBuf> for NetBufHandle {
     fn from(buf: IxgbeNetBuf) -> Self {
         // Use `ManuallyDrop` to avoid drop `tx_buf`.
         let mut buf = ManuallyDrop::new(buf);
-        // In ixgbe, `raw_ptr` is the pool entry, `buf_ptr` is the packet ptr, `len` is packet len
+        // In ixgbe, `raw_ptr` is the pool entry, `buf_ptr` is the payload ptr, `len` is payload len
         // to avoid too many dynamic memory allocation.
-        let buf_ptr = buf.packet_mut().as_mut_ptr();
+        let buf_ptr = buf.payload_mut().as_mut_ptr();
         Self::new(
             NonNull::new(buf.pool_entry() as *mut u8).unwrap(),
             NonNull::new(buf_ptr).unwrap(),
-            buf.packet_len(),
+            buf.payload_len(),
         )
     }
 }
 
-// Converts a `NetBufPtr` to `IxgbeNetBuf`.
-fn ixgbe_ptr_to_buf(ptr: NetBufPtr, pool: &Arc<MemPool>) -> DriverResult<IxgbeNetBuf> {
-    IxgbeNetBuf::construct(ptr.raw_ptr::<()>().addr(), pool, ptr.packet_len())
+// Converts a `NetBufHandle` to `IxgbeNetBuf`.
+fn ixgbe_ptr_to_buf(ptr: NetBufHandle, pool: &Arc<MemPool>) -> DriverResult<IxgbeNetBuf> {
+    IxgbeNetBuf::construct(ptr.owner_ptr::<()>().addr(), pool, ptr.len())
         .map_err(|_| DriverError::BadState)
 }

@@ -35,7 +35,7 @@ fn config_pci_device(
                 let new_addr = allocator
                     .as_mut()
                     .expect("No memory ranges available for PCI BARs!")
-                    .alloc(size as _)
+                    .alloc_buf(size as _)
                     .ok_or(DriverError::NoMemory)?;
                 if address_type == MemoryBarType::Width32 {
                     root.set_bar_32(bdf, bar, new_addr as _);

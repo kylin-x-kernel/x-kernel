@@ -34,7 +34,7 @@ impl PciRangeAllocator {
     ///
     /// The `size` should be a power of 2, and the returned value is also a
     /// multiple of `size`.
-    pub fn alloc(&mut self, size: u64) -> Option<u64> {
+    pub fn alloc_buf(&mut self, size: u64) -> Option<u64> {
         if !size.is_power_of_two() {
             return None;
         }

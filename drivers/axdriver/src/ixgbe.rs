@@ -1,5 +1,5 @@
 use axdma::{BusAddr, DMAInfo, alloc_coherent, dealloc_coherent};
-use axdriver_net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
+use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 use axhal::mem::{p2v, v2p};
 use core::{alloc::Layout, ptr::NonNull};
 

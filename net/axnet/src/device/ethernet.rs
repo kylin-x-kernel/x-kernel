@@ -58,7 +58,7 @@ impl EthernetDevice {
 
     #[inline]
     fn hardware_address(&self) -> EthernetAddress {
-        EthernetAddress(self.inner.mac_address().0)
+        EthernetAddress(self.inner.mac().0)
     }
 
     fn send_to<F>(
@@ -70,34 +70,34 @@ impl EthernetDevice {
     ) where
         F: FnOnce(&mut [u8]),
     {
-        if let Err(err) = inner.recycle_tx_buffers() {
-            warn!("recycle_tx_buffers failed: {:?}", err);
+        if let Err(err) = inner.recycle_tx() {
+            warn!("recycle_tx failed: {:?}", err);
             return;
         }
 
         let repr = EthernetRepr {
-            src_addr: EthernetAddress(inner.mac_address().0),
+            src_addr: EthernetAddress(inner.mac().0),
             dst_addr: dst,
             ethertype: proto,
         };
 
-        let mut tx_buf = match inner.alloc_tx_buffer(repr.buffer_len() + size) {
+        let mut tx_buf = match inner.alloc_tx_buf(repr.buffer_len() + size) {
             Ok(buf) => buf,
             Err(err) => {
-                warn!("alloc_tx_buffer failed: {:?}", err);
+                warn!("alloc_tx_buf failed: {:?}", err);
                 return;
             }
         };
-        let mut frame = EthernetFrame::new_unchecked(tx_buf.packet_mut());
+        let mut frame = EthernetFrame::new_unchecked(tx_buf.data_mut());
         repr.emit(&mut frame);
         f(frame.payload_mut());
         trace!(
             "SEND {} bytes: {:02X?}",
-            tx_buf.packet_len(),
-            tx_buf.packet()
+            tx_buf.len(),
+            tx_buf.data()
         );
-        if let Err(err) = inner.transmit(tx_buf) {
-            warn!("transmit failed: {:?}", err);
+        if let Err(err) = inner.send(tx_buf) {
+            warn!("send failed: {:?}", err);
         }
     }
 
@@ -179,7 +179,7 @@ impl EthernetDevice {
             let is_unicast_mac =
                 target_hardware_addr != EMPTY_MAC && !target_hardware_addr.is_broadcast();
             if is_unicast_mac && self.hardware_address() != target_hardware_addr {
-                // Only process packet that are for us
+                // Only process packets that are for us
                 return;
             }
 
@@ -264,36 +264,36 @@ impl Device for EthernetDevice {
 
     fn recv(&mut self, buffer: &mut PacketBuffer<()>, timestamp: Instant) -> bool {
         loop {
-            let rx_buf = match self.inner.receive() {
+            let rx_buf = match self.inner.recv() {
                 Ok(buf) => buf,
                 Err(err) => {
                     if !matches!(err, DriverError::WouldBlock) {
-                        warn!("receive failed: {:?}", err);
+                        warn!("recv failed: {:?}", err);
                     }
                     return false;
                 }
             };
             trace!(
                 "RECV {} bytes: {:02X?}",
-                rx_buf.packet_len(),
-                rx_buf.packet()
+                rx_buf.len(),
+                rx_buf.data()
             );
 
-            let result = self.dispatch_irq_frame(rx_buf.packet(), buffer, timestamp);
-            self.inner.recycle_rx_buffer(rx_buf).unwrap();
+            let result = self.dispatch_irq_frame(rx_buf.data(), buffer, timestamp);
+            self.inner.recycle_rx(rx_buf).unwrap();
             if result {
                 return true;
             }
         }
     }
 
-    fn send(&mut self, next_hop: IpAddress, packet: &[u8], timestamp: Instant) -> bool {
+    fn send(&mut self, next_hop: IpAddress, payload: &[u8], timestamp: Instant) -> bool {
         if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
             Self::send_to(
                 &mut self.inner,
                 EthernetAddress::BROADCAST,
-                packet.len(),
-                |buf| buf.copy_from_slice(packet),
+                payload.len(),
+                |buf| buf.copy_from_slice(payload),
                 EthernetProtocol::Ipv4,
             );
             return false;
@@ -305,8 +305,8 @@ impl Device for EthernetDevice {
                     Self::send_to(
                         &mut self.inner,
                         neighbor.hardware_address,
-                        packet.len(),
-                        |buf| buf.copy_from_slice(packet),
+                        payload.len(),
+                        |buf| buf.copy_from_slice(payload),
                         EthernetProtocol::Ipv4,
                     );
                     return false;
@@ -326,11 +326,11 @@ impl Device for EthernetDevice {
             warn!("Pending packets buffer is full, dropping packet");
             return false;
         }
-        let Ok(dst_buffer) = self.pending_packets.enqueue(packet.len(), next_hop) else {
+        let Ok(dst_buffer) = self.pending_packets.enqueue(payload.len(), next_hop) else {
             warn!("Failed to enqueue packet in pending packets buffer");
             return false;
         };
-        dst_buffer.copy_from_slice(packet);
+        dst_buffer.copy_from_slice(payload);
         false
     }
 

@@ -1,6 +1,6 @@
 use alloc::{sync::Arc, vec::Vec};
 
-use axdriver_net::{EthernetAddress, NetBuf, NetBufBox, NetBufPool, NetBufPtr, NetDriverOps};
+use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufPool, NetBufHandle, NetDriverOps};
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
@@ -50,7 +50,7 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetDev<H, T, QS> {
             // Safe because the buffer lives as long as the queue.
             let token = unsafe {
                 dev.inner
-                    .receive_begin(rx_buf.raw_buf_mut())
+                    .receive_begin(rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
             };
             assert_eq!(token, i as u16);
@@ -63,9 +63,9 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetDev<H, T, QS> {
             // Fill header
             let hdr_len = dev
                 .inner
-                .fill_buffer_header(tx_buf.raw_buf_mut())
+                .fill_buffer_header(tx_buf.buffer_mut())
                 .or(Err(DriverError::InvalidInput))?;
-            tx_buf.set_header_len(hdr_len);
+            tx_buf.set_hdr_len(hdr_len);
             dev.free_tx_bufs.push(tx_buf);
         }
 
@@ -90,41 +90,41 @@ impl<H: Hal, T: Transport, const QS: usize> DriverOps for VirtIoNetDev<H, T, QS>
 
 impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, QS> {
     #[inline]
-    fn mac_address(&self) -> EthernetAddress {
-        EthernetAddress(self.inner.mac_address())
+    fn mac(&self) -> MacAddress {
+        MacAddress(self.inner.mac_address())
     }
 
     #[inline]
-    fn can_transmit(&self) -> bool {
+    fn can_tx(&self) -> bool {
         !self.free_tx_bufs.is_empty() && self.inner.can_send()
     }
 
     #[inline]
-    fn can_receive(&self) -> bool {
+    fn can_rx(&self) -> bool {
         self.inner.poll_receive().is_some()
     }
 
     #[inline]
-    fn rx_queue_size(&self) -> usize {
+    fn rx_queue_len(&self) -> usize {
         QS
     }
 
     #[inline]
-    fn tx_queue_size(&self) -> usize {
+    fn tx_queue_len(&self) -> usize {
         QS
     }
 
-    fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DriverResult {
-        let mut rx_buf = unsafe { NetBuf::from_buf_ptr(rx_buf) };
+    fn recycle_rx(&mut self, rx_buf: NetBufHandle) -> DriverResult {
+        let mut rx_buf = unsafe { NetBuf::from_handle(rx_buf) };
         // Safe because we take the ownership of `rx_buf` back to `rx_buffers`,
         // it lives as long as the queue.
         let new_token = unsafe {
             self.inner
-                .receive_begin(rx_buf.raw_buf_mut())
+                .receive_begin(rx_buf.buffer_mut())
                 .map_err(as_driver_error)?
         };
         // `rx_buffers[new_token]` is expected to be `None` since it was taken
-        // away at `Self::receive()` and has not been added back.
+        // away at `Self::recv()` and has not been added back.
         if self.rx_buffers[new_token as usize].is_some() {
             return Err(DriverError::BadState);
         }
@@ -132,14 +132,14 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
         Ok(())
     }
 
-    fn recycle_tx_buffers(&mut self) -> DriverResult {
+    fn recycle_tx(&mut self) -> DriverResult {
         while let Some(token) = self.inner.poll_transmit() {
             let tx_buf = self.tx_buffers[token as usize]
                 .take()
                 .ok_or(DriverError::BadState)?;
             unsafe {
                 self.inner
-                    .transmit_complete(token, tx_buf.packet_with_header())
+                    .transmit_complete(token, tx_buf.frame())
                     .map_err(as_driver_error)?;
             }
             // Recycle the buffer.
@@ -148,20 +148,20 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
         Ok(())
     }
 
-    fn transmit(&mut self, tx_buf: NetBufPtr) -> DriverResult {
+    fn send(&mut self, tx_buf: NetBufHandle) -> DriverResult {
         // 0. prepare tx buffer.
-        let tx_buf = unsafe { NetBuf::from_buf_ptr(tx_buf) };
-        // 1. transmit packet.
+        let tx_buf = unsafe { NetBuf::from_handle(tx_buf) };
+        // 1. send payload.
         let token = unsafe {
             self.inner
-                .transmit_begin(tx_buf.packet_with_header())
+                .transmit_begin(tx_buf.frame())
                 .map_err(as_driver_error)?
         };
         self.tx_buffers[token as usize] = Some(tx_buf);
         Ok(())
     }
 
-    fn receive(&mut self) -> DriverResult<NetBufPtr> {
+    fn recv(&mut self) -> DriverResult<NetBufHandle> {
         self.inner.ack_interrupt();
         if let Some(token) = self.inner.poll_receive() {
             let mut rx_buf = self.rx_buffers[token as usize]
@@ -170,31 +170,31 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
             // Safe because the buffer lives as long as the queue.
             let (hdr_len, pkt_len) = unsafe {
                 self.inner
-                    .receive_complete(token, rx_buf.raw_buf_mut())
+                    .receive_complete(token, rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
             };
-            rx_buf.set_header_len(hdr_len);
-            rx_buf.set_packet_len(pkt_len);
+            rx_buf.set_hdr_len(hdr_len);
+            rx_buf.set_payload_len(pkt_len);
 
-            Ok(rx_buf.into_buf_ptr())
+            Ok(rx_buf.into_handle())
         } else {
             Err(DriverError::WouldBlock)
         }
     }
 
-    fn alloc_tx_buffer(&mut self, size: usize) -> DriverResult<NetBufPtr> {
+    fn alloc_tx_buf(&mut self, size: usize) -> DriverResult<NetBufHandle> {
         // 0. Allocate a buffer from the queue.
         let mut net_buf = self.free_tx_bufs.pop().ok_or(DriverError::NoMemory)?;
         let pkt_len = size;
 
         // 1. Check if the buffer is large enough.
-        let hdr_len = net_buf.header_len();
+        let hdr_len = net_buf.hdr_len();
         if hdr_len + pkt_len > net_buf.capacity() {
             return Err(DriverError::InvalidInput);
         }
-        net_buf.set_packet_len(pkt_len);
+        net_buf.set_payload_len(pkt_len);
 
         // 2. Return the buffer.
-        Ok(net_buf.into_buf_ptr())
+        Ok(net_buf.into_handle())
     }
 }

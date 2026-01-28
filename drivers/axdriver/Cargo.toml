@@ -17,7 +17,7 @@ documentation = "https://arceos-org.github.io/arceos/axdriver/index.html"
 bus-mmio = []
 bus-pci = ["dep:axdriver_pci", "dep:axhal", "dep:platconfig"]
 pci-mmio = ["bus-pci"]
-net = ["dep:axdriver_net"]
+net = ["dep:net"]
 block = ["dep:block"]
 display = ["dep:display"]
 input = ["dep:input"]
@@ -38,9 +38,9 @@ ramdisk = ["block", "block/ramdisk"]
 bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
 sdmmc = ["block", "block/sdmmc", "dep:axhal", "dep:platconfig"]
 ahci = ["block", "block/ahci", "dep:axhal", "dep:platconfig"]
-# ixgbe = ["net", "axdriver_net/ixgbe", "dep:axalloc", "dep:axhal", "dep:axdma"]
-# fxmac = ["net", "axdriver_net/fxmac", "dep:axalloc", "dep:axhal", "dep:axdma"]
-# more devices example: e1000 = ["net", "axdriver_net/e1000"]
+# ixgbe = ["net", "net/ixgbe", "dep:axalloc", "dep:axhal", "dep:axdma"]
+# fxmac = ["net", "net/fxmac", "dep:axalloc", "dep:axhal", "dep:axdma"]
+# more devices example: e1000 = ["net", "net/e1000"]
 
 irq = []
 
@@ -54,7 +54,7 @@ driver_base = { workspace = true }
 block = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
-axdriver_net = { workspace = true, optional = true }
+net = { workspace = true, optional = true }
 axdriver_pci = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 axdriver_virtio = { workspace = true, optional = true }

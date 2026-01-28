@@ -50,7 +50,7 @@
 //! - `display`: use graphics display devices. Similar to the `net` feature.
 //!
 //! [`VirtioNetDev`]: axdriver_virtio::VirtIoNetDev
-//! [`Box<dyn NetDriverOps>`]: axdriver_net::NetDriverOps
+//! [`Box<dyn NetDriverOps>`]: net::NetDriverOps
 //! [trait objects]: https://doc.rust-lang.org/book/ch17-02-trait-objects.html
 //! [dyn]: https://doc.rust-lang.org/std/keyword.dyn.html
 

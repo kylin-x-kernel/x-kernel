@@ -74,7 +74,7 @@ pub fn init_network(mut net_devs: AxDeviceContainer<AxNetDevice>) {
     let eth0_ip = if let Some(dev) = net_devs.take_one() {
         info!("  use NIC 0: {:?}", dev.name());
 
-        let eth0_address = EthernetAddress(dev.mac_address().0);
+        let eth0_address = EthernetAddress(dev.mac().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0_dev = router.add_device(Box::new(EthernetDevice::new(

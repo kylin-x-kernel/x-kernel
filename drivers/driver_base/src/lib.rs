@@ -6,12 +6,12 @@
 //!
 //! - [`axdriver_block`][2]: Common traits for block storage drivers.
 //! - [`axdriver_display`][3]: Common traits and types for graphics display drivers.
-//! - [`axdriver_net`][4]: Common traits and types for network (NIC) drivers.
+//! - [`net`][4]: Common traits and types for network (NIC) drivers.
 //!
 //! [1]: https://github.com/arceos-org/arceos
 //! [2]: ../axdriver_block/index.html
 //! [3]: ../axdriver_display/index.html
-//! [4]: ../axdriver_net/index.html
+//! [4]: ../net/index.html
 
 #![no_std]
 

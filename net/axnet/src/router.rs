@@ -100,14 +100,14 @@ impl Router {
 
     pub fn dispatch(&mut self, timestamp: Instant) -> bool {
         let mut poll_next = false;
-        while let Ok(((), packet)) = self.tx_buffer.dequeue() {
-            match IpVersion::of_packet(packet).expect("got invalid IP packet") {
+        while let Ok(((), ip_packet)) = self.tx_buffer.dequeue() {
+            match IpVersion::of_packet(ip_packet).expect("got invalid IP packet") {
                 IpVersion::Ipv4 => {
-                    let packet = smoltcp::wire::Ipv4Packet::new_checked(packet)
+                    let ip_packet = smoltcp::wire::Ipv4Packet::new_checked(ip_packet)
                         .expect("got invalid IPv4 packet");
-                    let dst_addr = IpAddress::Ipv4(packet.dst_addr());
-                    if packet.dst_addr().is_broadcast() {
-                        let buf = packet.into_inner();
+                    let dst_addr = IpAddress::Ipv4(ip_packet.dst_addr());
+                    if ip_packet.dst_addr().is_broadcast() {
+                        let buf = ip_packet.into_inner();
                         for dev in &mut self.devices {
                             poll_next |= dev.send(dst_addr, buf, timestamp);
                         }
@@ -116,19 +116,19 @@ impl Router {
                             warn!("No route found for destination: {}", dst_addr);
                             continue;
                         };
-                        assert_eq!(rule.src, IpAddress::Ipv4(packet.src_addr()));
+                        assert_eq!(rule.src, IpAddress::Ipv4(ip_packet.src_addr()));
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
                         let dev = &mut self.devices[rule.dev];
-                        poll_next |= dev.send(next_hop, packet.into_inner(), timestamp);
+                        poll_next |= dev.send(next_hop, ip_packet.into_inner(), timestamp);
                     }
                 }
                 IpVersion::Ipv6 => {
-                    let packet = smoltcp::wire::Ipv6Packet::new_checked(packet)
+                    let ip_packet = smoltcp::wire::Ipv6Packet::new_checked(ip_packet)
                         .expect("got invalid IPv6 packet");
-                    let dst_addr = IpAddress::Ipv6(packet.dst_addr());
-                    if packet.dst_addr().is_multicast() {
-                        let buf = packet.into_inner();
+                    let dst_addr = IpAddress::Ipv6(ip_packet.dst_addr());
+                    if ip_packet.dst_addr().is_multicast() {
+                        let buf = ip_packet.into_inner();
                         for dev in &mut self.devices {
                             poll_next |= dev.send(dst_addr, buf, timestamp);
                         }
@@ -137,11 +137,11 @@ impl Router {
                             warn!("No route found for destination: {}", dst_addr);
                             continue;
                         };
-                        assert_eq!(rule.src, IpAddress::Ipv6(packet.src_addr()));
+                        assert_eq!(rule.src, IpAddress::Ipv6(ip_packet.src_addr()));
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
                         let dev = &mut self.devices[rule.dev];
-                        poll_next |= dev.send(next_hop, packet.into_inner(), timestamp);
+                        poll_next |= dev.send(next_hop, ip_packet.into_inner(), timestamp);
                     }
                 }
             }
@@ -167,21 +167,21 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
 fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
     let (protocol, src_addr, dst_addr, payload) = match IpVersion::of_packet(buf).unwrap() {
         IpVersion::Ipv4 => {
-            let packet = Ipv4Packet::new_unchecked(buf);
+            let ip_packet = Ipv4Packet::new_unchecked(buf);
             (
-                packet.next_header(),
-                IpAddress::Ipv4(packet.src_addr()),
-                IpAddress::Ipv4(packet.dst_addr()),
-                packet.payload(),
+                ip_packet.next_header(),
+                IpAddress::Ipv4(ip_packet.src_addr()),
+                IpAddress::Ipv4(ip_packet.dst_addr()),
+                ip_packet.payload(),
             )
         }
         IpVersion::Ipv6 => {
-            let packet = Ipv6Packet::new_unchecked(buf);
+            let ip_packet = Ipv6Packet::new_unchecked(buf);
             (
-                packet.next_header(),
-                IpAddress::Ipv6(packet.src_addr()),
-                IpAddress::Ipv6(packet.dst_addr()),
-                packet.payload(),
+                ip_packet.next_header(),
+                IpAddress::Ipv6(ip_packet.src_addr()),
+                IpAddress::Ipv6(ip_packet.dst_addr()),
+                ip_packet.payload(),
             )
         }
     };
