@@ -2,9 +2,9 @@
 
 #![allow(unused_imports, dead_code)]
 
+use driver_base::DeviceKind;
 #[cfg(feature = "bus-pci")]
 use pci::{DeviceFunction, DeviceFunctionInfo, PciRoot};
-use driver_base::DeviceKind;
 
 pub use super::dummy::*;
 use crate::AxDeviceEnum;
