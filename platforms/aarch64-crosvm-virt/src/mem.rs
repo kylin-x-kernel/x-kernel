@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rs_fdtree::LinuxFdt;
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
+use rs_fdtree::LinuxFdt;
 use spin::Once;
 
 use crate::config::{

@@ -1,8 +1,9 @@
+use core::time::Duration;
+
 use kplat::{
     memory::{PAGE_SIZE_4K, PhysAddr, pa},
     timer::spin_wait,
 };
-use core::time::Duration;
 
 const START_PAGE_IDX: u8 = 6;
 const START_PAGE_PADDR: PhysAddr = pa!(START_PAGE_IDX as usize * PAGE_SIZE_4K);

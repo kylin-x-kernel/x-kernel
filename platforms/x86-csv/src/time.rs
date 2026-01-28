@@ -38,10 +38,8 @@ pub fn init_primary() {
         lapic.set_timer_mode(TimerMode::OneShot);
         lapic.set_timer_divide(TimerDivide::Div1);
         lapic.enable_timer();
-        NANOS_TO_LAPIC_TICKS_RATIO = Ratio::new(
-            LAPIC_TICKS_PER_SEC as u32,
-            kplat::timer::NS_SEC as u32,
-        );
+        NANOS_TO_LAPIC_TICKS_RATIO =
+            Ratio::new(LAPIC_TICKS_PER_SEC as u32, kplat::timer::NS_SEC as u32);
     }
 }
 #[cfg(feature = "smp")]
