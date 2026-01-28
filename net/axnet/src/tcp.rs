@@ -1,4 +1,4 @@
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
@@ -40,7 +40,7 @@ pub struct TcpSocket {
 
     general: GeneralOptions,
     rx_closed: AtomicBool,
-    poll_rx_closed: PollSet,
+    poll_rx_closed: Arc<PollSet>,
 }
 
 unsafe impl Sync for TcpSocket {}
@@ -54,7 +54,7 @@ impl TcpSocket {
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
-            poll_rx_closed: PollSet::new(),
+            poll_rx_closed: Arc::new(PollSet::new()),
         }
     }
 
@@ -66,7 +66,7 @@ impl TcpSocket {
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
-            poll_rx_closed: PollSet::new(),
+            poll_rx_closed: Arc::new(PollSet::new()),
         };
         result.with_smol_socket(|socket| {
             result

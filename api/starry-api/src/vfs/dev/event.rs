@@ -7,7 +7,6 @@ use axdriver::prelude::{
 };
 use axerrno::{AxError, AxResult};
 use axfs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
-use axsync::Mutex;
 use bitmaps::Bitmap;
 use khal::time::wall_time;
 use kpoll::{IoEvents, Pollable};

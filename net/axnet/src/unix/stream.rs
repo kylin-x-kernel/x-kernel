@@ -87,7 +87,7 @@ struct ConnRequest {
 pub struct StreamTransport {
     channel: Mutex<Option<Channel>>,
     conn_rx: Mutex<Option<(async_channel::Receiver<ConnRequest>, Arc<PollSet>)>>,
-    poll_state: PollSet,
+    poll_state: Arc<PollSet>,
     general: GeneralOptions,
     pid: u32,
     rx_closed: AtomicBool,
@@ -102,7 +102,7 @@ impl StreamTransport {
         StreamTransport {
             channel: Mutex::new(channel),
             conn_rx: Mutex::new(None),
-            poll_state: PollSet::new(),
+            poll_state: Arc::new(PollSet::new()),
             general: GeneralOptions::default(),
             pid,
             rx_closed: AtomicBool::new(false),
