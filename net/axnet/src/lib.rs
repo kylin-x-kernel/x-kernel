@@ -36,8 +36,8 @@ mod wrapper;
 
 use alloc::{borrow::ToOwned, boxed::Box};
 
-use ksync::Mutex;
 use kdriver::{DeviceContainer, prelude::*};
+use ksync::Mutex;
 use lazyinit::LazyInit;
 use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
 pub use socket::*;

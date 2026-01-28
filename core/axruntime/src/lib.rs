@@ -200,7 +200,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         fbdevice::fb_init(all_devices.display);
 
         #[cfg(feature = "input")]
-        inputdev::input_init(all_devices.input);
+        inputdev::init_input(all_devices.input);
     }
 
     #[cfg(feature = "smp")]

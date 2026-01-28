@@ -3,14 +3,14 @@
 #[macro_use]
 extern crate log;
 
-pub use axdriver::prelude::DisplayInfo;
-use axdriver::{AxDeviceContainer, prelude::*};
+pub use kdriver::prelude::DisplayInfo;
+use kdriver::{DeviceContainer, prelude::*};
 use ksync::Mutex;
 use lazyinit::LazyInit;
 
-static PRIMARY_FB: LazyInit<Mutex<AxDisplayDevice>> = LazyInit::new();
+static PRIMARY_FB: LazyInit<Mutex<DisplayDevice>> = LazyInit::new();
 
-pub fn fb_init(mut display_devs: AxDeviceContainer<AxDisplayDevice>) {
+pub fn fb_init(mut display_devs: DeviceContainer<DisplayDevice>) {
     info!("Initialize framebuffer subsystem...");
 
     if let Some(dev) = display_devs.take_one() {

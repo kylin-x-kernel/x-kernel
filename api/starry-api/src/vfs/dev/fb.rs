@@ -2,9 +2,9 @@ use core::{any::Any, slice};
 
 use axerrno::AxError;
 use axfs_ng_vfs::{NodeFlags, VfsError, VfsResult};
-use khal::mem::v2p;
 #[allow(unused_imports)]
 use kdriver::prelude::DisplayDriverOps;
+use khal::mem::v2p;
 use memaddr::{PhysAddrRange, VirtAddr};
 use starry_core::vfs::{DeviceMmap, DeviceOps};
 use starry_vm::VmMutPtr;
