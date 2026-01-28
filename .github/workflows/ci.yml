@@ -54,6 +54,11 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
+      - name: Install Rust kernel targets
+        run: |
+          rustup target add x86_64-unknown-none
+          rustup target add x86_64-unknown-linux-musl || true
+
       - name: Install QEMU
         uses: arceos-org/setup-qemu@v1
         with:
