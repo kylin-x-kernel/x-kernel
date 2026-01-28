@@ -7,13 +7,14 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::mem;
 
+use kdriver::{DeviceContainer, prelude::*};
 use ksync::Mutex;
-use kdriver::{AxDeviceContainer, prelude::*};
 use lazyinit::LazyInit;
 
-static INPUT_DEVICES: LazyInit<Mutex<Vec<AxInputDevice>>> = LazyInit::new();
+static DEVICES: LazyInit<Mutex<Vec<InputDevice>>> = LazyInit::new();
 
-pub fn input_init(mut input_devs: AxDeviceContainer<AxInputDevice>) {
+/// Initializes the graphics subsystem by underlayer devices.
+pub fn init_input(mut input_devs: DeviceContainer<InputDevice>) {
     info!("Initialize input subsystem...");
 
     let mut devices = Vec::new();
@@ -25,9 +26,9 @@ pub fn input_init(mut input_devs: AxDeviceContainer<AxInputDevice>) {
         );
         devices.push(dev);
     }
-    INPUT_DEVICES.init_once(Mutex::new(devices));
+    DEVICES.init_once(Mutex::new(devices));
 }
 
-pub fn input_take_all() -> Vec<AxInputDevice> {
-    mem::take(&mut INPUT_DEVICES.lock())
+pub fn input_take_all() -> Vec<InputDevice> {
+    mem::take(&mut DEVICES.lock())
 }

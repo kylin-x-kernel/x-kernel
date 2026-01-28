@@ -3,7 +3,7 @@ use core::{any::Any, task::Context, time::Duration};
 
 #[allow(unused_imports)]
 use kdriver::prelude::{
-    AxInputDevice, DriverError, DriverOps, Event, EventType, InputDeviceId, InputDriverOps,
+    InputDevice, DriverError, DriverOps, Event, EventType, InputDeviceId, InputDriverOps,
 };
 use axerrno::{AxError, AxResult};
 use axfs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
@@ -22,7 +22,7 @@ use crate::mm::UserPtr;
 const KEY_CNT: usize = EventType::Key.bits_count();
 
 struct Inner {
-    device: AxInputDevice,
+    device: InputDevice,
     read_ahead: Option<(Duration, Event)>,
     key_state: Bitmap<KEY_CNT>,
 }
@@ -56,7 +56,7 @@ pub struct EventDev {
 }
 
 impl EventDev {
-    pub fn new(mut device: AxInputDevice) -> Self {
+    pub fn new(mut device: InputDevice) -> Self {
         let mut ev_bits = Bitmap::new();
         for i in 0..EventType::COUNT {
             let Some(ty) = EventType::from_repr(i) else {

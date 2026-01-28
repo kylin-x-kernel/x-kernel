@@ -12,13 +12,13 @@ use ksync::Mutex;
 use crate::{alloc::string::ToString, vsock::connection_manager::VSOCK_CONN_MANAGER};
 
 // we need a global and static only one vsock device
-static VSOCK_DEVICE: Mutex<Option<AxVsockDevice>> = Mutex::new(None);
+static VSOCK_DEVICE: Mutex<Option<VsockDevice>> = Mutex::new(None);
 static PENDING_EVENTS: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
 
 const VSOCK_RX_TMPBUF_SIZE: usize = 0x1000; // 4KiB buffer for vsock receive
 
 /// Registers a vsock device. Only one vsock device can be registered.
-pub fn register_vsock_device(dev: AxVsockDevice) -> AxResult {
+pub fn register_vsock_device(dev: VsockDevice) -> AxResult {
     let mut guard = VSOCK_DEVICE.lock();
     if guard.is_some() {
         ax_bail!(AlreadyExists, "vsock device already registered");
@@ -157,7 +157,7 @@ fn poll_vsock_interfaces() -> AxResult<bool> {
     Ok(event_count > 0)
 }
 
-fn dispatch_irq_vsock_event(event: VsockDriverEventType, dev: &mut AxVsockDevice, buf: &mut [u8]) {
+fn dispatch_irq_vsock_event(event: VsockDriverEventType, dev: &mut VsockDevice, buf: &mut [u8]) {
     let mut manager = VSOCK_CONN_MANAGER.lock();
     debug!("Handling vsock event: {event:?}");
 
