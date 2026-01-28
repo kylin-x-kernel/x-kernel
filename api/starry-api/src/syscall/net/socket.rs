@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use axerrno::{AxError, AxResult, LinuxError};
 use axtask::current;
 #[cfg(feature = "vsock")]
@@ -34,23 +36,23 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
             if proto != 0 && proto != IPPROTO_TCP as _ {
                 return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Tcp(TcpSocket::new())
+            knet::Socket::Tcp(Box::new(TcpSocket::new()))
         }
         (AF_INET, SOCK_DGRAM) => {
             if proto != 0 && proto != IPPROTO_UDP as _ {
                 return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Udp(UdpSocket::new())
+            knet::Socket::Udp(Box::new(UdpSocket::new()))
         }
         (AF_UNIX, SOCK_STREAM) => {
-            knet::Socket::Unix(UnixDomainSocket::new(StreamTransport::new(pid)))
+            knet::Socket::Unix(Box::new(UnixDomainSocket::new(StreamTransport::new(pid))))
         }
         (AF_UNIX, SOCK_DGRAM) => {
-            knet::Socket::Unix(UnixDomainSocket::new(DgramTransport::new(pid)))
+            knet::Socket::Unix(Box::new(UnixDomainSocket::new(DgramTransport::new(pid))))
         }
         #[cfg(feature = "vsock")]
         (AF_VSOCK, SOCK_STREAM) => {
-            knet::Socket::Vsock(VsockSocket::new(VsockStreamTransport::new()))
+            knet::Socket::Vsock(Box::new(VsockSocket::new(VsockStreamTransport::new())))
         }
         (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) => {
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
@@ -182,8 +184,8 @@ pub fn sys_socketpair(
             return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
         }
     };
-    let sock1 = Socket(knet::Socket::Unix(sock1));
-    let sock2 = Socket(knet::Socket::Unix(sock2));
+    let sock1 = Socket(knet::Socket::Unix(Box::new(sock1)));
+    let sock2 = Socket(knet::Socket::Unix(Box::new(sock2)));
 
     if raw_ty & O_NONBLOCK != 0 {
         sock1.set_nonblocking(true)?;

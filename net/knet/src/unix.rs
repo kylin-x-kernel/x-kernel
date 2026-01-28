@@ -193,11 +193,11 @@ impl SocketOps for UnixDomainSocket {
 
     fn accept(&self) -> AxResult<Socket> {
         let (transport, peer_endpoint) = block_on(interruptible(self.transport.accept()))??;
-        Ok(Socket::Unix(Self {
+        Ok(Socket::Unix(Box::new(Self {
             transport,
             local_endpoint: Mutex::new(self.local_endpoint.lock().clone()),
             peer_endpoint: Mutex::new(peer_endpoint),
-        }))
+        })))
     }
 
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize> {

@@ -53,6 +53,7 @@ crosvm = []
 
 default = []
 ipi = []
+irq = []
 
 [dependencies]
 kalloc = { workspace = true, optional = true }

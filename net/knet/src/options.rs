@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use core::time::Duration;
 
 use axerrno::{AxError, AxResult, LinuxError};
@@ -95,5 +96,15 @@ pub trait Configurable {
                 Ok(())
             }
         })
+    }
+}
+
+impl<T: Configurable + ?Sized> Configurable for Box<T> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
+        (**self).get_option_inner(opt)
+    }
+
+    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
+        (**self).set_option_inner(opt)
     }
 }

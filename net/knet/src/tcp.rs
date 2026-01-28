@@ -1,4 +1,4 @@
-use alloc::{sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc, vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
@@ -347,7 +347,7 @@ impl SocketOps for TcpSocket {
                     dispatch_irq,
                     socket.with_smol_socket(|socket| socket.remote_endpoint().unwrap())
                 );
-                Socket::Tcp(socket)
+                Socket::Tcp(Box::new(socket))
             })
         })
     }
