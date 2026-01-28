@@ -24,12 +24,12 @@ impl BootHandler for DummyInit {
     fn early_init(_cpu_id: usize, _arg: usize) {}
 
     #[cfg(feature = "smp")]
-    fn early_init_secondary(_cpu_id: usize) {}
+    fn early_init_ap(_cpu_id: usize) {}
 
     fn final_init(_cpu_id: usize, _arg: usize) {}
 
     #[cfg(feature = "smp")]
-    fn final_init_secondary(_cpu_id: usize) {}
+    fn final_init_ap(_cpu_id: usize) {}
 }
 
 #[impl_dev_interface]

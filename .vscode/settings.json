@@ -7,6 +7,6 @@
     "entry/Cargo.toml",
   ],
   "rust-analyzer.cargo.features": [
-    "qemu"
+    "qemu", "smp"
   ],
 }
