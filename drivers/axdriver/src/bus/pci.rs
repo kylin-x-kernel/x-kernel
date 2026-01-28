@@ -6,7 +6,7 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
-use axhal::mem::p2v;
+use khal::mem::p2v;
 use pci::{
     BarInfo, Cam, Command, DeviceFunction, HeaderType, MemoryBarType, PciRangeAllocator, PciRoot,
 };

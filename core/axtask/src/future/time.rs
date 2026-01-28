@@ -7,7 +7,7 @@ use core::{
 };
 
 use axerrno::AxError;
-use axhal::time::{TimeValue, wall_time};
+use khal::time::{TimeValue, wall_time};
 use futures_util::{FutureExt, select_biased};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -147,7 +147,7 @@ pub async fn timeout<F: IntoFuture>(
     f: F,
 ) -> Result<F::Output, Elapsed> {
     timeout_at(
-        duration.and_then(|x| x.checked_add(axhal::time::wall_time())),
+        duration.and_then(|x| x.checked_add(khal::time::wall_time())),
         f,
     )
     .await

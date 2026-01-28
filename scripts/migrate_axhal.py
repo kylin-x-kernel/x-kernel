@@ -26,7 +26,7 @@ replacements = [
     ("busy_wait_until", "spin_until"),
     
     # Interrupt API
-    # "register" is generic, might be dangerous. But in axhal/src/irq.rs imports:
+    # "register" is generic, might be dangerous. But in khal/src/irq.rs imports:
     ("use kplat::interrupts::{", "use kplat::interrupts::{"), # Context anchor not useful for replace
     (", register,", ", reg_handler as register,"), # Alias import to avoid code change? 
     # Or change usage.
@@ -74,7 +74,7 @@ def process_file(filepath):
             f.write(new_content)
 
 def main():
-    root_dir = "arch/axhal"
+    root_dir = "arch/khal"
     for root, dirs, files in os.walk(root_dir):
         for file in files:
             if file.endswith(".rs"):

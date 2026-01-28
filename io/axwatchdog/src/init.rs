@@ -1,4 +1,4 @@
-use axhal::{context::TrapFrame, percpu::this_cpu_id};
+use khal::{context::TrapFrame, percpu::this_cpu_id};
 use axtask::{AxCpuMask, TaskInner};
 use log::debug;
 
@@ -23,11 +23,11 @@ fn init_common() {
     crate::register_watchdog_task(&crate::watchdog_task::MUTEX_DEADLOCK_CHECK);
 
     // Initialize and enable NMI source for hard lockup detection.
-    axhal::nmi::init(axhal::time::freq() * 10 * 16);
-    axhal::nmi::enable();
+    khal::nmi::init(khal::time::freq() * 10 * 16);
+    khal::nmi::enable();
 
     // Register NMI handler
-    axhal::nmi::register_nmi_handler(|| {
+    khal::nmi::register_nmi_handler(|| {
         // Every NMI checks whether watchdog tasks on THIS CPU are healthy.
         // If a failure is detected, THIS CPU becomes the cause CPU and
         // triggers a global rendezvous.
@@ -40,7 +40,7 @@ fn init_common() {
         if rv::is_triggered() {
             rv::mark_arrived();
             unsafe {
-                TRAP_FRAMES[this_cpu_id()] = axhal::context::active_exception_context();
+                TRAP_FRAMES[this_cpu_id()] = khal::context::active_exception_context();
             }
             let this_cpu = this_cpu_id();
             let is_cause = rv::cause_cpu() == Some(this_cpu);
@@ -87,11 +87,11 @@ fn init_common() {
 pub fn init_softlockup_detection() {
     // Timer callback used to detect soft lockup conditions.
     axtask::register_timer_callback(|_| {
-        let now_ns = axhal::time::monotonic_time_nanos();
+        let now_ns = khal::time::monotonic_time_nanos();
         crate::timer_tick();
 
         if crate::check_softlockup(now_ns) {
-            if let Some(tf) = axhal::context::active_exception_context() {
+            if let Some(tf) = khal::context::active_exception_context() {
                 axtask::dump_cur_task_backtrace(this_cpu_id(), tf, false);
             }
             axtask::dump_cpu_task_backtrace(this_cpu_id(), false);
@@ -101,7 +101,7 @@ pub fn init_softlockup_detection() {
     // Watchdog task that periodically "touches" the soft lockup timestamp.
     let watchdog_task = TaskInner::new(
         move || loop {
-            crate::touch_softlockup(axhal::time::monotonic_time_nanos());
+            crate::touch_softlockup(khal::time::monotonic_time_nanos());
             axtask::yield_now();
         },
         "watchdog".into(),

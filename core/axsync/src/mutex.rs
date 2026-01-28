@@ -111,7 +111,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             #[cfg(feature = "watchdog")]
             current()
                 .inner()
-                .set_waiting_lock(self as *const _ as usize, axhal::time::now_ticks() as usize);
+                .set_waiting_lock(self as *const _ as usize, khal::time::now_ticks() as usize);
             block_on(listener);
             owner_id = self.owner_id.load(Ordering::Acquire);
         }

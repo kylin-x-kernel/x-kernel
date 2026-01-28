@@ -8,7 +8,7 @@ pub struct AxHal;
 impl SystemHal for AxHal {
     fn now() -> Option<core::time::Duration> {
         if cfg!(feature = "times") {
-            Some(axhal::time::wall_time())
+            Some(khal::time::wall_time())
         } else {
             None
         }

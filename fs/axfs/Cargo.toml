@@ -21,7 +21,7 @@ kalloc = { workspace = true }
 axdriver = { workspace = true, features = ["block"] }
 axerrno = { workspace = true }
 axfs-ng-vfs = { workspace = true }
-axhal = { workspace = true }
+khal = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 kpoll = { workspace = true }
 axsync = { workspace = true }

@@ -29,7 +29,7 @@ multitask = [
 ]
 task-ext = ["dep:extern-trait"]
 irq = []
-tls = ["axhal/tls"]
+tls = ["khal/tls"]
 preempt = ["irq", "percpu?/preempt", "kspin/preempt"]
 smp = ["kspin/smp"]
 
@@ -42,7 +42,7 @@ test = ["percpu?/sp-naive"]
 [dependencies]
 platconfig = { workspace = true, optional = true }
 axerrno.workspace = true
-axhal.workspace = true
+khal.workspace = true
 backtrace = { workspace = true, optional = true }
 kpoll = { workspace = true, optional = true }
 axsched = { version = "0.3", optional = true }
@@ -63,5 +63,5 @@ percpu = { workspace = true, optional = true }
 kplat = { workspace = true, optional = true }
 
 [dev-dependencies]
-axhal = { workspace = true, features = ["fp-simd"] }
+khal = { workspace = true, features = ["fp-simd"] }
 axtask = { workspace = true, features = ["test", "multitask"] }

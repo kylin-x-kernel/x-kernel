@@ -8,9 +8,9 @@
 
 use core::{marker::PhantomData, ptr::NonNull};
 
-use axhal::mem::{p2v, v2p};
+use khal::mem::{p2v, v2p};
 #[cfg(feature = "crosvm")]
-use axhal::psci::{dma_share, dma_unshare};
+use khal::psci::{dma_share, dma_unshare};
 use cfg_if::cfg_if;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use kalloc::{UsageKind, global_allocator};

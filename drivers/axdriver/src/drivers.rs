@@ -86,7 +86,7 @@ cfg_if::cfg_if! {
             fn probe_global() -> Option<AxDeviceEnum> {
                 let sdmmc = unsafe {
                     axdriver_block::sdmmc::SdMmcDriver::new(
-                        axhal::mem::p2v(platconfig::devices::SDMMC_PADDR.into()).into(),
+                        khal::mem::p2v(platconfig::devices::SDMMC_PADDR.into()).into(),
                     )
                 };
                 Some(AxDeviceEnum::from_block(sdmmc))
@@ -100,11 +100,11 @@ cfg_if::cfg_if! {
         pub struct AhciHalImpl;
         impl axdriver_block::ahci::AhciHal for AhciHalImpl {
             fn v2p(va: usize) -> usize {
-                axhal::mem::v2p(va.into()).as_usize()
+                khal::mem::v2p(va.into()).as_usize()
             }
 
             fn current_ms() -> u64 {
-                axhal::time::monotonic_time_nanos() / 1_000_000
+                khal::time::monotonic_time_nanos() / 1_000_000
             }
 
             fn flush_dcache() {
@@ -123,7 +123,7 @@ cfg_if::cfg_if! {
             fn probe_global() -> Option<AxDeviceEnum> {
                 let ahci = unsafe {
                     axdriver_block::ahci::AhciDriver::<AhciHalImpl>::try_new(
-                        axhal::mem::p2v(platconfig::devices::AHCI_PADDR.into()).into(),
+                        khal::mem::p2v(platconfig::devices::AHCI_PADDR.into()).into(),
                     )?
                 };
                 Some(AxDeviceEnum::from_block(ahci))
@@ -174,7 +174,7 @@ cfg_if::cfg_if! {
                     match bar_info {
                         pci::BarInfo::Memory { address, size, .. } => {
                             let ixgbe_nic = IxgbeNic::<IxgbeHalImpl, QS, QN>::init(
-                                axhal::mem::p2v((address as usize).into()).into(),
+                                khal::mem::p2v((address as usize).into()).into(),
                                 size as usize,
                             )
                             .expect("failed to initialize ixgbe device");
@@ -195,16 +195,16 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(net_dev = "fxmac")]{
         use axalloc::{UsageKind, global_allocator};
-        use axhal::mem::PAGE_SIZE_4K;
+        use khal::mem::PAGE_SIZE_4K;
 
         #[crate_interface::impl_interface]
         impl net::fxmac::KernelFunc for FXmacDriver {
             fn virt_to_phys(addr: usize) -> usize {
-                axhal::mem::v2p(addr.into()).into()
+                khal::mem::v2p(addr.into()).into()
             }
 
             fn phys_to_virt(addr: usize) -> usize {
-                axhal::mem::p2v(addr.into()).into()
+                khal::mem::p2v(addr.into()).into()
             }
 
             fn dma_alloc_coherent(pages: usize) -> (usize, usize) {
@@ -213,7 +213,7 @@ cfg_if::cfg_if! {
                     error!("failed to alloc pages");
                     return (0, 0);
                 };
-                let paddr = axhal::mem::v2p((vaddr).into());
+                let paddr = khal::mem::v2p((vaddr).into());
                 debug!("alloc pages @ vaddr={:#x}, paddr={:#x}", vaddr, paddr);
                 (vaddr, paddr.as_usize())
             }

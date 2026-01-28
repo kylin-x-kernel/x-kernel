@@ -9,11 +9,11 @@ keywords = ["watchdog", "nmi", "embedded", "no_std"]
 categories = ["no-std", "embedded", "hardware-support"]
 
 [features]
-default = ["axhal/nmi"]
+default = ["khal/nmi"]
 
 [dependencies]
 platconfig.workspace = true
-axhal.workspace = true
+khal.workspace = true
 axtask = { workspace = true, features = ["watchdog"] }
 cfg-if.workspace = true
 log.workspace = true

@@ -1,5 +1,5 @@
 use axerrno::AxResult;
-use axhal::paging::{MappingFlags, PageSize};
+use khal::paging::{MappingFlags, PageSize};
 use axmm::backend::Backend;
 use axtask::current;
 use memaddr::{VirtAddr, align_up_4k};

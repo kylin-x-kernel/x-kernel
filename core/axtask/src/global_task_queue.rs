@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use axhal::percpu::this_cpu_id;
+use khal::percpu::this_cpu_id;
 
 use crate::WeakAxTaskRef;
 

@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::AxResult;
-use axhal::uspace::UserContext;
+use khal::uspace::UserContext;
 use axtask::current;
 use starry_core::task::{AsThread, Thread};
 use starry_signal::{SignalOSAction, SignalSet};

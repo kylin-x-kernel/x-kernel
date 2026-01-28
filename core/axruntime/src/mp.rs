@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use axhal::mem::{VirtAddr, v2p};
+use khal::mem::{VirtAddr, v2p};
 use platconfig::{TASK_STACK_SIZE, plat::CPU_NUM};
 
 #[unsafe(link_section = ".bss.stack")]
@@ -19,7 +19,7 @@ pub fn start_secondary_cpus(primary_cpu_id: usize) {
             }));
 
             debug!("starting CPU {i}...");
-            axhal::power::boot_ap(i, stack_top.as_usize());
+            khal::power::boot_ap(i, stack_top.as_usize());
             logic_cpu_id += 1;
 
             while ENTERED_CPUS.load(Ordering::Acquire) <= logic_cpu_id {
@@ -34,8 +34,8 @@ pub fn start_secondary_cpus(primary_cpu_id: usize) {
 /// It is called from the bootstrapping code in the specific platform crate.
 #[kplat::secondary_main]
 pub fn rust_main_secondary(cpu_id: usize) -> ! {
-    axhal::percpu::init_secondary(cpu_id);
-    axhal::early_init_secondary(cpu_id);
+    khal::percpu::init_secondary(cpu_id);
+    khal::early_init_secondary(cpu_id);
 
     ENTERED_CPUS.fetch_add(1, Ordering::Release);
     info!("Secondary CPU {cpu_id} started.");
@@ -43,7 +43,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     #[cfg(feature = "paging")]
     axmm::init_memory_management_secondary();
 
-    axhal::final_init_secondary(cpu_id);
+    khal::final_init_secondary(cpu_id);
 
     #[cfg(feature = "multitask")]
     axtask::init_scheduler_secondary();
@@ -59,10 +59,10 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     }
 
     #[cfg(feature = "pmu")]
-    axhal::irq::enable(platconfig::devices::PMU_IRQ, true);
+    khal::irq::enable(platconfig::devices::PMU_IRQ, true);
 
     #[cfg(feature = "irq")]
-    axhal::asm::enable_local();
+    khal::asm::enable_local();
 
     #[cfg(feature = "watchdog")]
     axwatchdog::init_secondary();
@@ -74,6 +74,6 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     axtask::run_idle();
     #[cfg(not(feature = "multitask"))]
     loop {
-        axhal::asm::wait_for_irqs();
+        khal::asm::wait_for_irqs();
     }
 }

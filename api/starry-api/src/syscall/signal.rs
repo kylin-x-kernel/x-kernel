@@ -1,7 +1,7 @@
 use core::{future::poll_fn, task::Poll};
 
 use axerrno::{AxError, AxResult, LinuxError};
-use axhal::uspace::UserContext;
+use khal::uspace::UserContext;
 use axtask::{
     current,
     future::{self, block_on},

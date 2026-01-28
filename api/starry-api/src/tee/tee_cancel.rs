@@ -2,7 +2,7 @@
 
 use core::{ffi::c_uint, slice};
 
-use axhal::time::wall_time;
+use khal::time::wall_time;
 use tee_raw_sys::TeeTime;
 
 use crate::tee::{

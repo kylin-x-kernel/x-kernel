@@ -1,5 +1,5 @@
 [package]
-name = "axhal"
+name = "khal"
 version.workspace = true
 edition.workspace = true
 authors = [
@@ -9,8 +9,8 @@ authors = [
 description = "ArceOS hardware abstraction layer, provides unified APIs for platform-specific operations"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/axhal"
-documentation = "https://arceos-org.github.io/arceos/axhal/index.html"
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/khal"
+documentation = "https://arceos-org.github.io/arceos/khal/index.html"
 
 [features]
 smp = [

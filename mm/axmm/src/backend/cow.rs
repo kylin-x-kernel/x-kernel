@@ -3,7 +3,7 @@ use core::slice;
 
 use axerrno::{AxError, AxResult};
 use axfs::FileBackend;
-use axhal::{
+use khal::{
     mem::p2v,
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };

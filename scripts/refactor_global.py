@@ -100,7 +100,7 @@ def process_file(filepath):
 def main():
     target_dir = "."
     # We skip platforms because we already did it (mostly), but running again is harmless as replacements are usually idempotent or already done.
-    # But we specifically want to hit arch/axhal, core, etc.
+    # But we specifically want to hit arch/khal, core, etc.
     
     exclude_dirs = [".git", "target", "scripts"]
     

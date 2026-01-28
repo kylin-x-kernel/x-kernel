@@ -13,9 +13,9 @@ use core::{
     task::{Context, Poll},
 };
 
-use axhal::context::TaskContext;
+use khal::context::TaskContext;
 #[cfg(feature = "tls")]
-use axhal::tls::TlsArea;
+use khal::tls::TlsArea;
 use futures_util::task::AtomicWaker;
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
@@ -627,7 +627,7 @@ pub struct CurrentTask(ManuallyDrop<AxTaskRef>);
 
 impl CurrentTask {
     pub(crate) fn try_get() -> Option<Self> {
-        let ptr: *const super::AxTask = axhal::percpu::current_task_ptr();
+        let ptr: *const super::AxTask = khal::percpu::current_task_ptr();
         if !ptr.is_null() {
             Some(Self(unsafe { ManuallyDrop::new(AxTaskRef::from_raw(ptr)) }))
         } else {
@@ -654,11 +654,11 @@ impl CurrentTask {
         assert!(init_task.is_init());
         #[cfg(feature = "tls")]
         unsafe {
-            axhal::asm::write_thread_pointer(init_task.tls.tls_ptr() as usize)
+            khal::asm::write_thread_pointer(init_task.tls.tls_ptr() as usize)
         };
         let ptr = Arc::into_raw(init_task);
         unsafe {
-            axhal::percpu::set_current_task_ptr(ptr);
+            khal::percpu::set_current_task_ptr(ptr);
         }
     }
 
@@ -667,7 +667,7 @@ impl CurrentTask {
         ManuallyDrop::into_inner(arc); // `call Arc::drop()` to decrease prev task reference count.
         let ptr = Arc::into_raw(next);
         unsafe {
-            axhal::percpu::set_current_task_ptr(ptr);
+            khal::percpu::set_current_task_ptr(ptr);
         }
     }
 }
@@ -688,7 +688,7 @@ extern "C" fn task_entry() -> ! {
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
     #[cfg(feature = "irq")]
-    axhal::asm::enable_local();
+    khal::asm::enable_local();
     let task = crate::current();
     if let Some(entry) = task.entry.take() {
         entry()

@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use axerrno::{AxError, AxResult};
-use axhal::time::TimeValue;
+use khal::time::TimeValue;
 use axtask::future::{self, block_on, poll_io};
 use kpoll::IoEvents;
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};

@@ -146,7 +146,7 @@ fn get_process_hash() -> AxResult<Vec<u8>> {
 }
 
 static GLOBAL_RAND: Lazy<Mutex<ChaCha8Rng>> = Lazy::new(|| {
-    let seed = axhal::time::now_ticks();
+    let seed = khal::time::now_ticks();
     Mutex::new(ChaCha8Rng::seed_from_u64(seed))
 });
 

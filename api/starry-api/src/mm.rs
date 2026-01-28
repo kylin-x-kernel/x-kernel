@@ -8,7 +8,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axhal::{
+use khal::{
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},
 };

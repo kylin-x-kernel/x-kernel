@@ -11,7 +11,7 @@ mod task;
 mod time;
 
 use axerrno::{AxError, LinuxError};
-use axhal::uspace::UserContext;
+use khal::uspace::UserContext;
 use syscalls::Sysno;
 
 use self::{

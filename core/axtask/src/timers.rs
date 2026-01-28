@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, vec::Vec};
 
-use axhal::time::{TimeValue, wall_time};
+use khal::time::{TimeValue, wall_time};
 use kspin::NoPreemptIrqSave;
 
 percpu_static! {

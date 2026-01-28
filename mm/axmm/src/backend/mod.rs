@@ -2,7 +2,7 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use axerrno::{AxError, AxResult};
-use axhal::{
+use khal::{
     mem::{p2v, v2p},
     paging::{MappingFlags, PageSize, PageTable, PageTableMut},
 };

@@ -1,6 +1,6 @@
 use axdma::{BusAddr, DMAInfo, alloc_coherent, dealloc_coherent};
 use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
-use axhal::mem::{p2v, v2p};
+use khal::mem::{p2v, v2p};
 use core::{alloc::Layout, ptr::NonNull};
 
 pub struct IxgbeHalImpl;
@@ -33,7 +33,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl {
     }
 
     fn wait_until(duration: core::time::Duration) -> Result<(), &'static str> {
-        axhal::time::busy_wait_until(duration);
+        khal::time::busy_wait_until(duration);
         Ok(())
     }
 }

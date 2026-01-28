@@ -13,26 +13,26 @@ documentation = "https://arceos-org.github.io/arceos/axfeat/index.html"
 default = []
 
 # Multicore
-smp = ["axhal/smp", "axruntime/smp", "axtask?/smp", "kspin/smp"]
+smp = ["khal/smp", "axruntime/smp", "axtask?/smp", "kspin/smp"]
 
 # Floating point/SIMD
-fp-simd = ["axhal/fp-simd"]
+fp-simd = ["khal/fp-simd"]
 
 # User space support
-uspace = ["axhal/uspace"]
+uspace = ["khal/uspace"]
 
 # Interrupts
-irq = ["axhal/irq", "axruntime/irq", "axtask?/irq", "axdriver?/irq"]
-ipi = ["irq", "dep:kipi", "axhal/ipi", "axruntime/ipi"]
+irq = ["khal/irq", "axruntime/irq", "axtask?/irq", "axdriver?/irq"]
+ipi = ["irq", "dep:kipi", "khal/ipi", "axruntime/ipi"]
 
 # Custom or default platforms
-myplat = ["axhal/myplat"]
-defplat = ["axhal/defplat"]
-defplat-aarch64 = ["axhal/defplat-aarch64"]
-defplat-x86_64 = ["axhal/defplat-x86_64"]
-defplat-riscv64 = ["axhal/defplat-riscv64"]
-defplat-loongarch64 = ["axhal/defplat-loongarch64"]
-crosvm = ["axhal/crosvm", "axdriver/crosvm", "axruntime/crosvm"]
+myplat = ["khal/myplat"]
+defplat = ["khal/defplat"]
+defplat-aarch64 = ["khal/defplat-aarch64"]
+defplat-x86_64 = ["khal/defplat-x86_64"]
+defplat-riscv64 = ["khal/defplat-riscv64"]
+defplat-loongarch64 = ["khal/defplat-loongarch64"]
+crosvm = ["khal/crosvm", "axdriver/crosvm", "axruntime/crosvm"]
 
 # Memory
 alloc = ["kalloc", "axruntime/alloc"]
@@ -42,8 +42,8 @@ alloc-buddy = ["kalloc/buddy"]
 alloc-level-1 = ["kalloc/level-1", "alloc"]
 page-alloc-64g = ["kalloc/page-alloc-64g"]                   # up to 64G memory capacity
 page-alloc-4g = ["kalloc/page-alloc-4g"]                     # up to 4G memory capacity
-paging = ["alloc", "axhal/paging", "axruntime/paging"]
-tls = ["alloc", "axhal/tls", "axruntime/tls", "axtask?/tls"]
+paging = ["alloc", "khal/paging", "axruntime/paging"]
+tls = ["alloc", "khal/tls", "axruntime/tls", "axtask?/tls"]
 dma = ["alloc", "paging"]
 
 # Multi-threading and scheduler
@@ -93,7 +93,7 @@ input = [
 ]
 
 # Real Time Clock (RTC) Driver.
-rtc = ["axhal/rtc", "axruntime/rtc"]
+rtc = ["khal/rtc", "axruntime/rtc"]
 
 # Device drivers
 bus-mmio = ["axdriver?/bus-mmio"]
@@ -122,7 +122,7 @@ backtrace.workspace = true
 axdisplay = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
-axhal.workspace = true
+khal.workspace = true
 axinput = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 klogger.workspace = true

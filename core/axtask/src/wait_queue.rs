@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use axhal::time::wall_time;
+use khal::time::wall_time;
 use event_listener::{Event, listener};
 
 use crate::future::{block_on, timeout_at};

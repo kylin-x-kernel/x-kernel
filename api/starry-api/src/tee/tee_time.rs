@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use axhal::time::{TimeValue, wall_time};
+use khal::time::{TimeValue, wall_time};
 use tee_raw_sys::{
     TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OVERFLOW, TEE_ERROR_TIME_NOT_SET, TEE_UUID, TeeTime,
 };
@@ -18,10 +18,10 @@ use crate::tee::{
     user_access::{copy_from_user_struct, copy_to_user_struct},
 };
 
-pub fn tee_time_get_sys_time() -> axhal::time::TimeValue {
+pub fn tee_time_get_sys_time() -> khal::time::TimeValue {
     wall_time()
 }
-fn tee_time_get_ree_time() -> axhal::time::TimeValue {
+fn tee_time_get_ree_time() -> khal::time::TimeValue {
     wall_time()
 }
 

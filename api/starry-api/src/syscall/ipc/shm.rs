@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use axerrno::{AxError, AxResult};
-use axhal::{
+use khal::{
     paging::{MappingFlags, PageSize},
     time::monotonic_time_nanos,
 };

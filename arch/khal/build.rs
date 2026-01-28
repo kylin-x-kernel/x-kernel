@@ -42,7 +42,7 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
         },
     );
 
-    // target/<target_triple>/<mode>/build/axhal-xxxx/out
+    // target/<target_triple>/<mode>/build/khal-xxxx/out
     let out_dir = std::env::var("OUT_DIR").unwrap();
     // target/<target_triple>/<mode>/linker_xxxx.lds
     let out_path = Path::new(&out_dir).join("../../..").join(fname);

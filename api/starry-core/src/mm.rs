@@ -6,7 +6,7 @@ use core::{ffi::CStr, hint::unlikely, iter, mem::MaybeUninit};
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, FS_CONTEXT, FileBackend};
 use axfs_ng_vfs::Location;
-use axhal::{
+use khal::{
     asm::user_copy,
     mem::v2p,
     paging::{MappingFlags, PageSize},

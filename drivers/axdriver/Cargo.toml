@@ -15,7 +15,7 @@ documentation = "https://arceos-org.github.io/arceos/axdriver/index.html"
 
 [features]
 bus-mmio = []
-bus-pci = ["dep:pci", "dep:axhal", "dep:platconfig"]
+bus-pci = ["dep:pci", "dep:khal", "dep:platconfig"]
 pci-mmio = ["bus-pci"]
 net = ["dep:net"]
 block = ["dep:block"]
@@ -26,7 +26,7 @@ vsock = ["dep:vsock"]
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:axsync", "dep:spin"]
 
 # Enabled by features `virtio-*`
-virtio = ["dep:virtio", "dep:kalloc", "dep:axhal", "dep:platconfig"]
+virtio = ["dep:virtio", "dep:kalloc", "dep:khal", "dep:platconfig"]
 
 # various types of drivers
 virtio-blk = ["block", "virtio", "virtio/block"]
@@ -36,10 +36,10 @@ virtio-input = ["input", "virtio", "virtio/input"]
 virtio-socket = ["vsock", "virtio", "virtio/socket"]
 ramdisk = ["block", "block/ramdisk"]
 bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
-sdmmc = ["block", "block/sdmmc", "dep:axhal", "dep:platconfig"]
-ahci = ["block", "block/ahci", "dep:axhal", "dep:platconfig"]
-# ixgbe = ["net", "net/ixgbe", "dep:axalloc", "dep:axhal", "dep:axdma"]
-# fxmac = ["net", "net/fxmac", "dep:axalloc", "dep:axhal", "dep:axdma"]
+sdmmc = ["block", "block/sdmmc", "dep:khal", "dep:platconfig"]
+ahci = ["block", "block/ahci", "dep:khal", "dep:platconfig"]
+# ixgbe = ["net", "net/ixgbe", "dep:axalloc", "dep:khal", "dep:axdma"]
+# fxmac = ["net", "net/fxmac", "dep:axalloc", "dep:khal", "dep:axdma"]
 # more devices example: e1000 = ["net", "net/e1000"]
 
 irq = []
@@ -59,7 +59,7 @@ pci = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
 axerrno = { workspace = true, optional = true }
-axhal = { workspace = true, optional = true }
+khal = { workspace = true, optional = true }
 # axmm = { workspace = true, optional = true }
 cfg-if.workspace = true
 crate_interface.workspace = true

@@ -18,7 +18,7 @@ mod aspace;
 pub mod backend;
 
 use axerrno::LinuxResult;
-use axhal::{
+use khal::{
     mem::{MemFlags, p2v},
     paging::MappingFlags,
 };
@@ -56,7 +56,7 @@ pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
         va!(platconfig::plat::KERNEL_ASPACE_BASE),
         platconfig::plat::KERNEL_ASPACE_SIZE,
     )?;
-    for r in axhal::mem::memory_regions() {
+    for r in khal::mem::memory_regions() {
         // mapped range should contain the whole region if it is not aligned.
         let start = r.paddr.align_down_4k();
         let end = (r.paddr + r.size).align_up_4k();
@@ -90,14 +90,14 @@ pub fn init_memory_management() {
     let kernel_layout = new_kernel_layout().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_layout);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
-    unsafe { axhal::asm::write_kernel_page_table(kernel_page_table_root()) };
+    unsafe { khal::asm::write_kernel_page_table(kernel_page_table_root()) };
     // flush all TLB
-    axhal::asm::flush_tlb(None);
+    khal::asm::flush_tlb(None);
 }
 
 /// Initializes kernel paging for secondary CPUs.
 pub fn init_memory_management_secondary() {
-    unsafe { axhal::asm::write_kernel_page_table(kernel_page_table_root()) };
+    unsafe { khal::asm::write_kernel_page_table(kernel_page_table_root()) };
     // flush all TLB
-    axhal::asm::flush_tlb(None);
+    khal::asm::flush_tlb(None);
 }

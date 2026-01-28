@@ -2,7 +2,7 @@ use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
 use axalloc::{DefaultByteAllocator, UsageKind, global_allocator};
-use axhal::{mem::v2p, paging::MappingFlags};
+use khal::{mem::v2p, paging::MappingFlags};
 use kspin::SpinNoIrq;
 use log::{debug, error};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, va};

@@ -7,7 +7,7 @@ use alloc::{
 use core::sync::atomic::AtomicUsize;
 
 #[cfg(feature = "watchdog")]
-use axhal::context::TrapFrame;
+use khal::context::TrapFrame;
 use kspin::NoPreemptIrqSave;
 
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue};
@@ -68,11 +68,11 @@ impl kspin::KernelGuardIf for KernelGuardIfImpl {
     }
 
     fn save_disable() -> usize {
-        axhal::irq::save_disable()
+        khal::irq::save_disable()
     }
 
     fn restore(flags: usize) {
-        axhal::irq::restore(flags);
+        khal::irq::restore(flags);
     }
 }
 
@@ -196,7 +196,7 @@ pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
         // After setting the affinity, we need to check if current cpu matches
         // the affinity. If not, we need to migrate the task to the correct CPU.
         #[cfg(feature = "smp")]
-        if !cpumask.get(axhal::percpu::this_cpu_id()) {
+        if !cpumask.get(khal::percpu::this_cpu_id()) {
             const MIGRATION_TASK_STACK_SIZE: usize = 4096;
             // Spawn a new migration task for migrating.
             let migration_task = TaskInner::new(
@@ -210,7 +210,7 @@ pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
             current_run_queue::<NoPreemptIrqSave>().migrate_current(migration_task);
 
             assert!(
-                cpumask.get(axhal::percpu::this_cpu_id()),
+                cpumask.get(khal::percpu::this_cpu_id()),
                 "Migration failed"
             );
         }
@@ -228,17 +228,17 @@ pub fn yield_now() {
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
 pub fn sleep(dur: core::time::Duration) {
-    sleep_until(axhal::time::wall_time() + dur);
+    sleep_until(khal::time::wall_time() + dur);
 }
 
 /// Current task is going to sleep, it will be woken up at the given deadline.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
-pub fn sleep_until(deadline: axhal::time::TimeValue) {
+pub fn sleep_until(deadline: khal::time::TimeValue) {
     #[cfg(feature = "irq")]
     crate::future::block_on(crate::future::sleep_until(deadline));
     #[cfg(not(feature = "irq"))]
-    axhal::time::busy_wait_until(deadline);
+    khal::time::busy_wait_until(deadline);
 }
 
 /// Exits the current task.
@@ -254,7 +254,7 @@ pub fn run_idle() -> ! {
         yield_now();
         trace!("idle task: waiting for IRQs...");
         #[cfg(feature = "irq")]
-        axhal::asm::await_interrupts();
+        khal::asm::await_interrupts();
     }
 }
 
@@ -318,7 +318,7 @@ pub fn dump_cur_task_backtrace(_cpu_id: usize, _tf: &TrapFrame, _force: bool) {
 #[cfg(feature = "watchdog")]
 pub fn check_mutex_deadlock(now: usize) -> bool {
     let mut ok = true;
-    crate::global_task_queue::for_each_watchdog_task(axhal::percpu::this_cpu_id(), |weaktask| {
+    crate::global_task_queue::for_each_watchdog_task(khal::percpu::this_cpu_id(), |weaktask| {
         if !ok {
             return;
         }
@@ -328,7 +328,7 @@ pub fn check_mutex_deadlock(now: usize) -> bool {
             };
 
             let blocked = now.saturating_sub(since);
-            if axhal::time::t2ns(blocked as u64) > 20_000_000_000 {
+            if khal::time::t2ns(blocked as u64) > 20_000_000_000 {
                 // suspect stall (20s)
                 ok = false;
             }

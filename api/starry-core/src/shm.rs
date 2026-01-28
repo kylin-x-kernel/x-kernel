@@ -3,7 +3,7 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult};
-use axhal::{paging::MappingFlags, time::monotonic_time_nanos};
+use khal::{paging::MappingFlags, time::monotonic_time_nanos};
 use axmm::backend::SharedPages;
 use axsync::Mutex;
 use bytemuck::AnyBitPattern;

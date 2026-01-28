@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use axhal::uspace::UserContext;
+use khal::uspace::UserContext;
 use syscalls::Sysno;
 use tee_raw_sys::{TEE_ERROR_NOT_SUPPORTED, TeeTime};
 

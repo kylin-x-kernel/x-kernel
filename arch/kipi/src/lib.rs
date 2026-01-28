@@ -14,7 +14,7 @@
 extern crate log;
 extern crate alloc;
 
-use axhal::{
+use khal::{
     irq::{IPI_IRQ, TargetCpu as IpiTarget},
     percpu::this_cpu_id,
 };
@@ -88,7 +88,7 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()>
         unsafe { IPI_EVENT_QUEUE.remote_ref_raw(dest_cpu) }
             .lock()
             .push(this_cpu_id(), callback.into());
-        axhal::irq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu));
+        khal::irq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu));
     }
 
     Ok(())
@@ -114,7 +114,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     }
 
     // Send IPI to all other CPUs to trigger their callbacks
-    axhal::irq::notify_cpu(
+    khal::irq::notify_cpu(
         IPI_IRQ,
         IpiTarget::AllButSelf {
             me: current_cpu_id,

@@ -54,7 +54,7 @@ pub fn sys_set_tid_address(clear_child_tid: usize) -> AxResult<isize> {
 
 #[cfg(target_arch = "x86_64")]
 pub fn sys_arch_prctl(
-    uctx: &mut axhal::uspace::UserContext,
+    uctx: &mut khal::uspace::UserContext,
     code: i32,
     addr: usize,
 ) -> AxResult<isize> {

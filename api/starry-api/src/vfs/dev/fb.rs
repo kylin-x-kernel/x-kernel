@@ -4,7 +4,7 @@ use core::{any::Any, slice};
 use axdriver::prelude::DisplayDriverOps;
 use axerrno::AxError;
 use axfs_ng_vfs::{NodeFlags, VfsError, VfsResult};
-use axhal::mem::v2p;
+use khal::mem::v2p;
 use memaddr::{PhysAddrRange, VirtAddr};
 use starry_core::vfs::{DeviceMmap, DeviceOps};
 use starry_vm::VmMutPtr;

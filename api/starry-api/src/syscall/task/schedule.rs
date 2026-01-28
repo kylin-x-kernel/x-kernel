@@ -1,5 +1,5 @@
 use axerrno::{AxError, AxResult};
-use axhal::time::TimeValue;
+use khal::time::TimeValue;
 use axtask::{
     AxCpuMask, current,
     future::{block_on, interruptible, sleep},
@@ -36,7 +36,7 @@ pub fn sys_nanosleep(req: *const timespec, rem: *mut timespec) -> AxResult<isize
     let req = unsafe { req.vm_read_uninit()?.assume_init() }.try_into_time_value()?;
     debug!("sys_nanosleep <= req: {req:?}");
 
-    let actual = sleep_impl(axhal::time::monotonic_time, req);
+    let actual = sleep_impl(khal::time::monotonic_time, req);
 
     if let Some(diff) = req.checked_sub(actual) {
         debug!("sys_nanosleep => rem: {diff:?}");
@@ -56,8 +56,8 @@ pub fn sys_clock_nanosleep(
     rem: *mut timespec,
 ) -> AxResult<isize> {
     let clock = match clock_id as u32 {
-        CLOCK_REALTIME => axhal::time::wall_time,
-        CLOCK_MONOTONIC => axhal::time::monotonic_time,
+        CLOCK_REALTIME => khal::time::wall_time,
+        CLOCK_MONOTONIC => khal::time::monotonic_time,
         _ => {
             warn!("Unsupported clock_id: {clock_id}");
             return Err(AxError::InvalidInput);

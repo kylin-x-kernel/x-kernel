@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use axhal::percpu::this_cpu_id;
+use khal::percpu::this_cpu_id;
 
 /// Rendezvous phases.
 #[repr(usize)]

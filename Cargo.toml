@@ -38,7 +38,7 @@ axdisplay = { path = "io/axdisplay" }
 axdriver = { path = "drivers/axdriver" }
 axdma = { path = "io/axdma" }
 axfs = { path = "fs/axfs" }
-axhal = { path = "arch/axhal" }
+khal = { path = "arch/khal" }
 axinput = { path = "io/axinput" }
 kipi = { path = "arch/kipi" }
 klogger = { path = "util/klogger" }

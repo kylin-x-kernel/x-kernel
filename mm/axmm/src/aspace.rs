@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::{fmt, ops::DerefMut};
 
 use axerrno::{AxError, AxResult, ax_bail};
-use axhal::{
+use khal::{
     mem::p2v,
     paging::{MappingFlags, PageTable},
     trap::PageFaultFlags,

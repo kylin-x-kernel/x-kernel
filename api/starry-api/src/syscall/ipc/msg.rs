@@ -1,7 +1,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult, LinuxError};
-use axhal::time::monotonic_time_nanos;
+use khal::time::monotonic_time_nanos;
 use axsync::Mutex;
 use axtask::current;
 use bytemuck::AnyBitPattern;

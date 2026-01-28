@@ -50,6 +50,6 @@ impl WatchdogTask for MutexDeadlockCheck {
     }
 
     fn check(&self) -> bool {
-        axtask::check_mutex_deadlock(axhal::time::now_ticks() as usize)
+        axtask::check_mutex_deadlock(khal::time::now_ticks() as usize)
     }
 }

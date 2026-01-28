@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use axerrno::AxResult;
-use axhal::paging::{MappingFlags, PageSize, PageTableMut};
+use khal::paging::{MappingFlags, PageSize, PageTableMut};
 use axsync::Mutex;
 use memaddr::{PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 

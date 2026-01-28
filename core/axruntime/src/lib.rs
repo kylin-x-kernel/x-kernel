@@ -59,17 +59,17 @@ struct LogIfImpl;
 #[crate_interface::impl_interface]
 impl klogger::LoggerAdapter for LogIfImpl {
     fn write_str(s: &str) {
-        axhal::console::write_data(s.as_bytes());
+        khal::console::write_data(s.as_bytes());
     }
 
     fn now() -> core::time::Duration {
-        axhal::time::monotonic_time()
+        khal::time::monotonic_time()
     }
 
     fn cpu_id() -> Option<usize> {
         #[cfg(feature = "smp")]
         if is_init_ok() {
-            Some(axhal::percpu::this_cpu_id())
+            Some(khal::percpu::this_cpu_id())
         } else {
             None
         }
@@ -111,9 +111,9 @@ fn is_init_ok() -> bool {
 /// secondary cores call [`rust_main_secondary`].
 #[cfg_attr(not(test), kplat::main)]
 pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
-    unsafe { axhal::mem::clear_bss() };
-    axhal::percpu::init_primary(cpu_id);
-    axhal::early_init(cpu_id, arg);
+    unsafe { khal::mem::clear_bss() };
+    khal::percpu::init_primary(cpu_id);
+    khal::early_init(cpu_id, arg);
 
     kprintln!("{}", LOGO);
     kprintln!(
@@ -137,7 +137,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(feature = "rtc")]
     kprintln!(
         "Boot at {}\n",
-        chrono::DateTime::from_timestamp_nanos(axhal::time::wall_time_nanos() as _),
+        chrono::DateTime::from_timestamp_nanos(khal::time::wall_time_nanos() as _),
     );
 
     klogger::init_klogger();
@@ -145,9 +145,9 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     info!("Logging is enabled.");
     info!("Primary CPU {cpu_id} started, arg = {arg:#x}.");
 
-    axhal::mem::init();
+    khal::mem::init();
     info!("Found physcial memory regions:");
-    for r in axhal::mem::memory_regions() {
+    for r in khal::mem::memory_regions() {
         info!(
             "  [{:x?}, {:x?}) {} ({:?})",
             r.paddr,
@@ -186,7 +186,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     axmm::init_memory_management();
 
     info!("Initialize platform devices...");
-    axhal::final_init(cpu_id, arg);
+    khal::final_init(cpu_id, arg);
 
     #[cfg(feature = "multitask")]
     axtask::init_scheduler();
@@ -245,13 +245,13 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(not(feature = "multitask"))]
     {
         debug!("main task exited: exit_code={}", 0);
-        axhal::power::shutdown();
+        khal::power::shutdown();
     }
 }
 
 #[cfg(feature = "alloc")]
 fn init_allocator() {
-    use axhal::mem::{MemFlags, memory_regions, p2v, v2p};
+    use khal::mem::{MemFlags, memory_regions, p2v, v2p};
 
     info!("Initialize global memory allocator...");
     info!("  use {} allocator.", kalloc::global_allocator().name());
@@ -284,49 +284,49 @@ fn init_allocator() {
 fn init_interrupt() {
     // Setup timer interrupt handler
     const PERIODIC_INTERVAL_NANOS: u64 =
-        axhal::time::NANOS_PER_SEC / platconfig::TICKS_PER_SEC as u64;
+        khal::time::NANOS_PER_SEC / platconfig::TICKS_PER_SEC as u64;
 
     #[percpu::def_percpu]
     static NEXT_DEADLINE: u64 = 0;
 
     fn update_timer() {
-        let now_ns = axhal::time::monotonic_time_nanos();
+        let now_ns = khal::time::monotonic_time_nanos();
         // Safety: we have disabled preemption in IRQ handler.
         let mut deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
         if now_ns >= deadline {
             deadline = now_ns + PERIODIC_INTERVAL_NANOS;
         }
         unsafe { NEXT_DEADLINE.write_current_raw(deadline + PERIODIC_INTERVAL_NANOS) };
-        axhal::time::arm_timer(deadline);
+        khal::time::arm_timer(deadline);
     }
 
-    axhal::irq::register(axhal::time::interrupt_id(), || {
+    khal::irq::register(khal::time::interrupt_id(), || {
         update_timer();
         #[cfg(feature = "multitask")]
         axtask::on_timer_tick();
     });
 
     #[cfg(feature = "ipi")]
-    axhal::irq::register(axhal::irq::IPI_IRQ, || {
+    khal::irq::register(khal::irq::IPI_IRQ, || {
         kipi::ipi_handler();
     });
 
     #[cfg(feature = "pmu")]
-    axhal::irq::register(platconfig::devices::PMU_IRQ, || {
+    khal::irq::register(platconfig::devices::PMU_IRQ, || {
         debug!(
             "PMU interrupt received on cpu {}",
-            axhal::percpu::this_cpu_id()
+            khal::percpu::this_cpu_id()
         );
-        axhal::pmu::dispatch_irq_overflows();
+        khal::pmu::dispatch_irq_overflows();
     });
 
     // Enable IRQs before starting app
-    axhal::asm::enable_local();
+    khal::asm::enable_local();
 }
 
 #[cfg(all(feature = "tls", not(feature = "multitask")))]
 fn init_tls() {
-    let main_tls = axhal::tls::TlsArea::alloc();
-    unsafe { axhal::asm::write_thread_pointer(main_tls.tls_ptr() as usize) };
+    let main_tls = khal::tls::TlsArea::alloc();
+    unsafe { khal::asm::write_thread_pointer(main_tls.tls_ptr() as usize) };
     core::mem::forget(main_tls);
 }

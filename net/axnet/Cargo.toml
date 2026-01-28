@@ -19,7 +19,7 @@ vsock = ["axdriver/vsock"]
 [dependencies]
 platconfig = { workspace = true }
 axdriver = { workspace = true, features = ["net"] }
-axhal = { workspace = true }
+khal = { workspace = true }
 axsync = { workspace = true }
 axtask = { workspace = true }
 

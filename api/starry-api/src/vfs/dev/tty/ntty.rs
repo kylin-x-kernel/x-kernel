@@ -12,12 +12,12 @@ pub type NTtyDriver = Tty<Console, Console>;
 pub struct Console;
 impl TtyRead for Console {
     fn read(&mut self, buf: &mut [u8]) -> usize {
-        axhal::console::read_data(buf)
+        khal::console::read_data(buf)
     }
 }
 impl TtyWrite for Console {
     fn write(&self, buf: &[u8]) {
-        axhal::console::write_data(buf);
+        khal::console::write_data(buf);
     }
 }
 
@@ -32,7 +32,7 @@ fn new_n_tty() -> Arc<NTtyDriver> {
         TtyConfig {
             reader: Console,
             writer: Console,
-            process_mode: if let Some(irq) = axhal::console::interrupt_id() {
+            process_mode: if let Some(irq) = khal::console::interrupt_id() {
                 ProcessMode::External(Box::new(move |waker| register_irq_waker(irq, &waker)) as _)
             } else {
                 ProcessMode::Manual
