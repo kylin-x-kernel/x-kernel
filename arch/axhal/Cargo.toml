@@ -43,7 +43,7 @@ rtc = [
 ]
 nmi = ["kplat/nmi", "aarch64-qemu-virt?/nmi"]
 pmu = ["aarch64-qemu-virt?/pmu"]
-paging = ["dep:axalloc", "dep:page_table"]
+paging = ["dep:kalloc", "dep:page_table"]
 tls = ["axcpu/tls"]
 uspace = ["paging", "axcpu/uspace"]
 
@@ -65,7 +65,7 @@ default = []
 ipi = ["irq"]
 
 [dependencies]
-axalloc = { workspace = true, optional = true }
+kalloc = { workspace = true, optional = true }
 platconfig.workspace = true
 axcpu = { workspace = true }
 kplat.workspace = true

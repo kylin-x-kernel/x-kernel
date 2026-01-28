@@ -1,10 +1,3 @@
-//! [ArceOS](https://github.com/arceos-org/arceos) global memory allocator.
-//!
-//! It provides [`GlobalAllocator`], which implements the trait
-//! [`core::alloc::GlobalAlloc`]. A static global variable of type
-//! [`GlobalAllocator`] is defined with the `#[global_allocator]` attribute, to
-//! be registered as the standard library’s default allocator.
-
 #![no_std]
 
 #[macro_use]
@@ -99,7 +92,7 @@ impl fmt::Debug for Usages {
     }
 }
 
-/// The global allocator used by ArceOS.
+/// The global allocator used by x-kernel.
 ///
 /// It combines a [`ByteAllocator`] and a [`PageAllocator`] into a simple
 /// two-level allocator: firstly tries allocate from the byte allocator, if
@@ -152,29 +145,29 @@ impl GlobalAllocator {
     /// It firstly adds the whole region to the page allocator, then allocates
     /// a small region (32 KB) to initialize the byte allocator. Therefore,
     /// the given region must be larger than 32 KB.
-    pub fn init(&self, start_vaddr: usize, size: usize) {
+    pub fn init(&self, va: usize, size: usize) {
         assert!(size > MIN_HEAP_SIZE);
         #[cfg(not(feature = "level-1"))]
         {
-            let init_heap_size = MIN_HEAP_SIZE;
-            self.palloc.lock().init_region(start_vaddr, size);
-            let heap_ptr = self
-                .alloc_pages(init_heap_size / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap)
+            let heap_size = MIN_HEAP_SIZE;
+            self.palloc.lock().init_region(va, size);
+            let heap_addr = self
+                .alloc_pages(heap_size / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap)
                 .unwrap();
 
-            self.balloc.lock().init_region(heap_ptr, init_heap_size);
+            self.balloc.lock().init_region(heap_addr, heap_size);
         }
         #[cfg(feature = "level-1")]
         {
-            self.balloc.lock().init_region(start_vaddr, size);
+            self.balloc.lock().init_region(va, size);
         }
     }
 
     /// Add the given region to the allocator.
     ///
     /// It will add the whole region to the byte allocator.
-    pub fn add_memory(&self, start_vaddr: usize, size: usize) -> AllocResult {
-        self.balloc.lock().add_region(start_vaddr, size)
+    pub fn add_memory(&self, va: usize, size: usize) -> AllocResult {
+        self.balloc.lock().add_region(va, size)
     }
 
     /// Allocate arbitrary number of bytes. Returns the left bound of the
@@ -213,23 +206,23 @@ impl GlobalAllocator {
                 return Ok(ptr);
             } else {
                 let old_size = balloc.total_bytes();
-                let expand_size = old_size
+                let exp_size = old_size
                     .max(layout.size())
                     .next_power_of_two()
                     .max(PAGE_SIZE);
 
-                let mut try_size = expand_size;
+                let mut req_size = exp_size;
                 let min_size = PAGE_SIZE.max(layout.size());
                 loop {
-                    let heap_ptr = match self.alloc_pages(
-                        try_size / PAGE_SIZE,
+                    let heap_addr = match self.alloc_pages(
+                        req_size / PAGE_SIZE,
                         PAGE_SIZE,
                         UsageKind::RustHeap,
                     ) {
-                        Ok(ptr) => ptr,
+                        Ok(addr) => addr,
                         Err(err) => {
-                            try_size /= 2;
-                            if try_size < min_size {
+                            req_size /= 2;
+                            if req_size < min_size {
                                 return Err(err);
                             }
                             continue;
@@ -237,10 +230,10 @@ impl GlobalAllocator {
                     };
                     debug!(
                         "expand heap memory: [{:#x}, {:#x})",
-                        heap_ptr,
-                        heap_ptr + try_size
+                        heap_addr,
+                        heap_addr + req_size
                     );
-                    balloc.add_region(heap_ptr, try_size)?;
+                    balloc.add_region(heap_addr, req_size)?;
                     break;
                 }
             }
@@ -254,11 +247,11 @@ impl GlobalAllocator {
     /// undefined.
     ///
     /// [`alloc`]: GlobalAllocator::alloc
-    pub fn dealloc(&self, pos: NonNull<u8>, layout: Layout) {
+    pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
         self.usages
             .lock()
             .dealloc(UsageKind::RustHeap, layout.size());
-        self.balloc.lock().deallocate(pos, layout)
+        self.balloc.lock().deallocate(ptr, layout)
     }
 
     /// Allocates contiguous pages.
@@ -301,14 +294,14 @@ impl GlobalAllocator {
     /// aligned to it.
     pub fn alloc_pages_at(
         &self,
-        start: usize,
+        va: usize,
         num_pages: usize,
         align_pow2: usize,
         kind: UsageKind,
     ) -> AllocResult<usize> {
         #[cfg(feature = "level-1")]
         {
-            let _ = (start, num_pages, align_pow2, kind);
+            let _ = (va, num_pages, align_pow2, kind);
             unimplemented!("level-1 allocator does not support alloc_pages_at")
         }
         #[cfg(not(feature = "level-1"))]
@@ -316,33 +309,33 @@ impl GlobalAllocator {
             let addr = self
                 .palloc
                 .lock()
-                .allocate_pages_at(start, num_pages, align_pow2)?;
-            if !matches!(kind, UsageKind::RustHeap) {
+                .allocate_pages_at(va, num_pages, align_pow2)?;
+            if kind != UsageKind::RustHeap {
                 self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
             }
             Ok(addr)
         }
     }
 
-    /// Gives back the allocated pages starts from `pos` to the page allocator.
+    /// Gives back the allocated pages starts from `va` to the page allocator.
     ///
     /// The pages should be allocated by [`alloc_pages`], and `align_pow2`
     /// should be the same as the one used in [`alloc_pages`]. Otherwise, the
     /// behavior is undefined.
     ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
-    pub fn dealloc_pages(&self, pos: usize, num_pages: usize, kind: UsageKind) {
+    pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
         #[cfg(feature = "level-1")]
         {
             // single-level allocator: deallocate to the byte allocator.
             let mut balloc = self.balloc.lock();
             let layout = Layout::from_size_align(num_pages * PAGE_SIZE, PAGE_SIZE).unwrap();
-            let ptr = NonNull::new(pos as *mut u8).unwrap();
+            let ptr = NonNull::new(va as *mut u8).unwrap();
             balloc.deallocate(ptr, layout);
         }
         #[cfg(not(feature = "level-1"))]
-        self.palloc.lock().deallocate_pages(pos, num_pages);
+        self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
     /// Returns the number of allocated bytes in the byte allocator.
@@ -385,7 +378,7 @@ impl GlobalAllocator {
 
 unsafe impl GlobalAlloc for GlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let inner = move || {
+        let allocate_memory = || {
             if let Ok(ptr) = GlobalAllocator::alloc(self, layout) {
                 ptr.as_ptr()
             } else {
@@ -395,45 +388,70 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 
         #[cfg(feature = "tracking")]
         {
-            tracking::with_state(|state| match state {
-                None => inner(),
-                Some(state) => {
-                    let ptr = inner();
-                    let generation = state.generation;
-                    state.generation += 1;
-                    state.map.insert(
-                        ptr as usize,
-                        tracking::AllocationInfo {
-                            layout,
-                            backtrace: backtrace::Backtrace::capture(),
-                            generation,
-                        },
-                    );
-                    ptr
-                }
-            })
+            track_allocation(allocate_memory, layout)
         }
 
         #[cfg(not(feature = "tracking"))]
-        inner()
+        {
+            allocate_memory()
+        }
+    }
+
+    #[cfg(feature = "tracking")]
+    fn track_allocation<F>(allocate_memory: F, layout: Layout) -> *mut u8
+    where
+        F: FnOnce() -> *mut u8,
+    {
+        tracking::with_state(|state| match state {
+            None => allocate_memory(),
+            Some(state) => {
+                let ptr = allocate_memory();
+                let generation = state.generation;
+                state.generation += 1;
+                state.map.insert(
+                    ptr as usize,
+                    tracking::AllocationInfo {
+                        layout,
+                        backtrace: backtrace::Backtrace::capture(),
+                        generation,
+                    },
+                );
+                ptr
+            }
+        })
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let ptr = NonNull::new(ptr).expect("dealloc null ptr");
-        let inner = || GlobalAllocator::dealloc(self, ptr, layout);
+
+        let deallocate_memory = || {
+            GlobalAllocator::dealloc(self, ptr, layout);
+        };
 
         #[cfg(feature = "tracking")]
+        {
+            track_deallocation(ptr, deallocate_memory);
+        }
+
+        #[cfg(not(feature = "tracking"))]
+        {
+            deallocate_memory();
+        }
+    }
+
+    #[cfg(feature = "tracking")]
+    fn track_deallocation<F>(ptr: NonNull<u8>, deallocate_memory: F)
+    where
+        F: FnOnce(),
+    {
         tracking::with_state(|state| match state {
-            None => inner(),
+            None => deallocate_memory(),
             Some(state) => {
                 let address = ptr.as_ptr() as usize;
                 state.map.remove(&address);
-                inner()
+                deallocate_memory();
             }
         });
-
-        #[cfg(not(feature = "tracking"))]
-        inner();
     }
 }
 
@@ -453,13 +471,13 @@ pub fn global_allocator() -> &'static GlobalAllocator {
 /// valid.
 ///
 /// This function should be called only once, and before any allocation.
-pub fn global_init(start_vaddr: usize, size: usize) {
+pub fn global_init(va: usize, size: usize) {
     debug!(
         "initialize global allocator at: [{:#x}, {:#x})",
-        start_vaddr,
-        start_vaddr + size
+        va,
+        va + size
     );
-    GLOBAL_ALLOCATOR.init(start_vaddr, size);
+    GLOBAL_ALLOCATOR.init(va, size);
 }
 
 /// Add the given memory region to the global allocator.
@@ -468,11 +486,11 @@ pub fn global_init(start_vaddr: usize, size: usize) {
 /// so that the allocated memory is also valid.
 ///
 /// It's similar to [`global_init`], but can be called multiple times.
-pub fn global_add_memory(start_vaddr: usize, size: usize) -> AllocResult {
+pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
     debug!(
         "add a memory region to global allocator: [{:#x}, {:#x})",
-        start_vaddr,
-        start_vaddr + size
+        va,
+        va + size
     );
-    GLOBAL_ALLOCATOR.add_memory(start_vaddr, size)
+    GLOBAL_ALLOCATOR.add_memory(va, size)
 }

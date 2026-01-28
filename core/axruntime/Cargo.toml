@@ -18,7 +18,7 @@ default = []
 smp = ["axhal/smp", "axtask?/smp"]
 irq = ["axhal/irq", "axtask?/irq", "dep:percpu"]
 tls = ["axhal/tls", "axtask?/tls"]
-alloc = ["dep:axalloc"]
+alloc = ["dep:kalloc"]
 paging = ["axhal/paging", "dep:axmm"]
 ipi = ["dep:kipi"]
 
@@ -35,7 +35,7 @@ watchdog = ["dep:axwatchdog"]
 pmu = ["irq", "axhal/pmu"]
 
 [dependencies]
-axalloc = { workspace = true, optional = true }
+kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 platconfig.workspace = true
 axdisplay = { workspace = true, optional = true }

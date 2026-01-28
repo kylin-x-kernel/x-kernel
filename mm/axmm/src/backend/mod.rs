@@ -1,7 +1,7 @@
 //! Memory mapping backends.
 use alloc::{boxed::Box, sync::Arc};
 
-use axalloc::{UsageKind, global_allocator};
+use kalloc::{UsageKind, global_allocator};
 use axerrno::{AxError, AxResult};
 use axhal::{
     mem::{p2v, v2p},

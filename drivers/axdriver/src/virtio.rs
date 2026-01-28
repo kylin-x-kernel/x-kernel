@@ -8,7 +8,7 @@
 
 use core::{marker::PhantomData, ptr::NonNull};
 
-use axalloc::{UsageKind, global_allocator};
+use kalloc::{UsageKind, global_allocator};
 use axhal::mem::{p2v, v2p};
 #[cfg(feature = "crosvm")]
 use axhal::psci::{dma_share, dma_unshare};

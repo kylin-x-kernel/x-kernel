@@ -26,7 +26,7 @@ vsock = ["dep:vsock"]
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:axsync", "dep:spin"]
 
 # Enabled by features `virtio-*`
-virtio = ["dep:virtio", "dep:axalloc", "dep:axhal", "dep:platconfig"]
+virtio = ["dep:virtio", "dep:kalloc", "dep:axhal", "dep:platconfig"]
 
 # various types of drivers
 virtio-blk = ["block", "virtio", "virtio/block"]
@@ -47,7 +47,7 @@ irq = []
 default = ["bus-pci"]
 
 [dependencies]
-axalloc = { workspace = true, optional = true }
+kalloc = { workspace = true, optional = true }
 platconfig = { workspace = true, optional = true }
 # axdma = { workspace = true, optional = true }
 driver_base = { workspace = true }

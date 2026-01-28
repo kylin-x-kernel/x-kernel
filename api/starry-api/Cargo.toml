@@ -9,16 +9,16 @@ repository.workspace = true
 
 [features]
 input = ["dep:axinput"]
-memtrack = ["axfeat/dwarf", "axalloc/tracking", "dep:gimli"]
+memtrack = ["axfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["axnet/vsock"]
 dev-log = []
-dice = ["dep:aarch64-crosvm-virt", "axalloc/dice", "dep:rand_chacha"]
+dice = ["dep:aarch64-crosvm-virt", "kalloc/dice", "dep:rand_chacha"]
 tee = ["syscalls/tee", "dep:tee_raw_sys", "dep:bincode", "dep:uuid", "dep:hex"]
 tee_test = []
 tee_test_mock_user_access = []
 
 [dependencies]
-axalloc.workspace = true
+kalloc.workspace = true
 backtrace.workspace = true
 platconfig.workspace = true
 axdisplay.workspace = true

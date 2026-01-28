@@ -254,7 +254,7 @@ fn init_allocator() {
     use axhal::mem::{MemFlags, memory_regions, p2v, v2p};
 
     info!("Initialize global memory allocator...");
-    info!("  use {} allocator.", axalloc::global_allocator().name());
+    info!("  use {} allocator.", kalloc::global_allocator().name());
 
     let free_regions = || memory_regions().filter(|r| r.flags.contains(MemFlags::FREE));
 
@@ -270,11 +270,11 @@ fn init_allocator() {
         .or_else(|| free_regions().max_by_key(|r| r.size))
         .expect("no free memory region found!!");
 
-    axalloc::global_init(p2v(init_region.paddr).as_usize(), init_region.size);
+    kalloc::global_init(p2v(init_region.paddr).as_usize(), init_region.size);
 
     for r in free_regions() {
         if r.paddr != init_region.paddr {
-            axalloc::global_add_memory(p2v(r.paddr).as_usize(), r.size)
+            kalloc::global_add_memory(p2v(r.paddr).as_usize(), r.size)
                 .expect("add heap memory region failed");
         }
     }

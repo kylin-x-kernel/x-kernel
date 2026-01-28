@@ -31,7 +31,7 @@ axfeat = { path = "api/axfeat", features = [
     "uspace",
 ] }
 
-axalloc = { path = "mm/axalloc" }
+kalloc = { path = "mm/kalloc" }
 platconfig = { path = "util/platconfig" }
 platconfig-macros = { path = "util/platconfig-macros" }
 axdisplay = { path = "io/axdisplay" }

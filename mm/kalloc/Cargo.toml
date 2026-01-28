@@ -1,13 +1,9 @@
 [package]
-name = "axalloc"
+name = "kalloc"
 version.workspace = true
 edition.workspace = true
-authors = ["Yuekai Jia <equation618@gmail.com>"]
-description = "ArceOS global memory allocator"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/axalloc"
-documentation = "https://arceos-org.github.io/arceos/axalloc/index.html"
 
 [features]
 tee = []
@@ -19,7 +15,9 @@ buddy = ["alloc-engine/buddy"]
 page-alloc-64g = [
     "alloc-engine/page-alloc-64g",
 ] # Support up to 64G memory capacity
-page-alloc-4g = ["alloc-engine/page-alloc-4g"] # Support up to 4G memory capacity
+page-alloc-4g = [
+    "alloc-engine/page-alloc-4g",
+] # Support up to 4G memory capacity
 level-1 = []
 tracking = ["dep:percpu", "dep:backtrace"]
 

@@ -17,7 +17,7 @@ std = ["lwext4_rust?/std"]
 crosvm = []
 
 [dependencies]
-axalloc = { workspace = true }
+kalloc = { workspace = true }
 axdriver = { workspace = true, features = ["block"] }
 axerrno = { workspace = true }
 axfs-ng-vfs = { workspace = true }

@@ -14,7 +14,7 @@ default = []
 copy = ["page_table/copy-from"]
 
 [dependencies]
-axalloc = { workspace = true }
+kalloc = { workspace = true }
 platconfig = { workspace = true }
 axerrno = { workspace = true }
 axfs = { workspace = true }
