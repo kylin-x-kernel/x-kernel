@@ -7,18 +7,18 @@
 #   - `APP_FEATURES`: a list of features to be enabled for the Rust app.
 #
 # Outputs:
-#   - `AX_FEAT`: features to be enabled for ArceOS modules (crate `kfeat`).
+#   - `KFEAT`: features to be enabled for ArceOS modules (crate `kfeat`).
 #   - `LIB_FEAT`: features to be enabled for the user library (crate `axstd`, `axlibc`).
 #   - `APP_FEAT`: features to be enabled for the Rust app.
 
 ifeq ($(APP_TYPE),c)
-  ax_feat_prefix := kfeat/
+  kfeat_prefix := kfeat/
   lib_features := fp-simd irq alloc fs net fd pipe select epoll
 else
   ifeq ($(NO_AXSTD),y)
-    ax_feat_prefix := kfeat/
+    kfeat_prefix := kfeat/
   else
-    ax_feat_prefix := axstd/
+    kfeat_prefix := axstd/
   endif
   lib_features :=
 endif
@@ -38,13 +38,13 @@ endif
 
 override FEATURES := $(strip $(FEATURES))
 
-ax_feat :=
+kfeat :=
 lib_feat :=
 
 ifneq ($(MYPLAT),)
-  ax_feat += myplat
+  kfeat += myplat
 else
-  ax_feat += defplat
+  kfeat += defplat
 endif
 
 ifeq ($(filter $(LOG),off error warn info debug trace),)
@@ -52,20 +52,20 @@ ifeq ($(filter $(LOG),off error warn info debug trace),)
 endif
 
 ifeq ($(BUS),mmio)
-  ax_feat += bus-mmio
+  kfeat += bus-mmio
 endif
 
 ifeq ($(DWARF),y)
-  ax_feat += dwarf
+  kfeat += dwarf
 endif
 
 ifeq ($(shell test $(SMP) -gt 1; echo $$?),0)
   lib_feat += smp
 endif
 
-ax_feat += $(filter-out $(lib_features),$(FEATURES))
+kfeat += $(filter-out $(lib_features),$(FEATURES))
 lib_feat += $(filter $(lib_features),$(FEATURES))
 
-AX_FEAT := $(strip $(addprefix $(ax_feat_prefix),$(ax_feat)))
+KFEAT := $(strip $(addprefix $(kfeat_prefix),$(kfeat)))
 LIB_FEAT := $(strip $(addprefix $(lib_feat_prefix),$(lib_feat)))
 APP_FEAT := $(strip $(shell echo $(APP_FEATURES) | tr ',' ' '))

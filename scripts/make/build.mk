@@ -25,7 +25,7 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
     $(info APP_TYPE: "$(APP_TYPE)")
     $(info FEATURES: "$(FEATURES)")
     $(info PLAT_CONFIG: "$(PLAT_CONFIG)")
-    $(info arceos features: "$(AX_FEAT)")
+    $(info arceos features: "$(KFEAT)")
     $(info lib features: "$(LIB_FEAT)")
     $(info app features: "$(APP_FEAT)")
   endif
@@ -48,10 +48,10 @@ endif
 _cargo_build: oldconfig
 	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME), App type: $(APP_TYPE)\n"
 ifeq ($(APP_TYPE), rust)
-	$(call cargo_build,$(APP),$(AX_FEAT) $(LIB_FEAT) $(APP_FEAT))
+	$(call cargo_build,$(APP),$(KFEAT) $(LIB_FEAT) $(APP_FEAT))
 	@cp $(rust_elf) $(OUT_ELF)
 else ifeq ($(APP_TYPE), c)
-	$(call cargo_build,ulib/axlibc,$(AX_FEAT) $(LIB_FEAT))
+	$(call cargo_build,ulib/axlibc,$(KFEAT) $(LIB_FEAT))
 endif
 
 $(OUT_DIR):
