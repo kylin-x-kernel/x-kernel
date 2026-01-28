@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["entry", "arch/kcpu"]
+members = ["entry"]
 exclude = []
 
 [workspace.package]
