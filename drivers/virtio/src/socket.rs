@@ -10,6 +10,9 @@ use vsock::{VsockConnId, VsockDriverEventType, VsockDriverOps};
 
 use crate::as_driver_error;
 
+/// Default buffer size for VirtIO socket device (32KB).
+const DEFAULT_BUFFER_SIZE: usize = 32 * 1024;
+
 /// The VirtIO socket device driver.
 pub struct VirtIoSocketDev<H: Hal, T: Transport> {
     inner: InnerDev<H, T>,
@@ -24,7 +27,7 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let virtio_socket = VirtIOSocket::<H, _>::new(transport).map_err(as_driver_error)?;
         Ok(Self {
-            inner: InnerDev::new_with_capacity(virtio_socket, 32 * 1024), // 32KB buffer
+            inner: InnerDev::new_with_capacity(virtio_socket, DEFAULT_BUFFER_SIZE as u32),
         })
     }
 }
@@ -138,10 +141,7 @@ fn convert_vsock_event<H: Hal, T: Transport>(
     match event.event_type {
         VsockEventType::ConnectionRequest => Ok(VsockDriverEventType::ConnectionRequest(cid)),
         VsockEventType::Connected => Ok(VsockDriverEventType::Connected(cid)),
-        VsockEventType::Received { length } => {
-            // Do not read data here, let the upper layer decide when to read.
-            Ok(VsockDriverEventType::Received(cid, length))
-        }
+        VsockEventType::Received { length } => Ok(VsockDriverEventType::Received(cid, length)),
         VsockEventType::Disconnected { reason: _ } => Ok(VsockDriverEventType::Disconnected(cid)),
         _ => Ok(VsockDriverEventType::Unknown),
     }

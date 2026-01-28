@@ -122,4 +122,4 @@ input = { path = "drivers/input" }
 net = { path = "drivers/net" }
 axdriver_pci = { path = "drivers/axdriver_pci" }
 vsock = { path = "drivers/vsock" }
-axdriver_virtio = { path = "drivers/axdriver_virtio" }
+virtio = { path = "drivers/virtio" }
