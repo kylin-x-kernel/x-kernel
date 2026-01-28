@@ -3,7 +3,7 @@ name:  CI Test
 on:
   push:
     branches:
-      - main
+      - main,feaure/x86cismp=4
   pull_request:
     branches:
       - main
@@ -15,9 +15,18 @@ concurrency:
 jobs:
   ci-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  
+      matrix:
+        arch: [x86_64]
+    
+    name: CI Test (${{ matrix.arch }})
+    
     env:
-      ARCH: aarch64
+      ARCH: ${{ matrix.arch }}
+      SMP: 4
       STARRYOS_ROOT: ${{ github.workspace }}/.cache/StarryOS
+    
     steps:
       - name: Checkout Starry Test Harness
         uses: actions/checkout@v4
@@ -37,26 +46,27 @@ jobs:
       - name: Install Rust cache for harness
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: starry-ci-harness
+          shared-key: starry-ci-harness-${{ matrix.arch }}
 
-      - name: Install musl toolchain
+      - name: Install musl toolchain for ${{ matrix.arch }}
         uses: arceos-org/setup-musl@v1
         with:
-          arch: ${{ env.ARCH }}
+          arch: ${{ matrix.arch }}
 
       - name: Install QEMU
         uses: arceos-org/setup-qemu@v1
         with:
           version: 10.1.0
-          arch_list: ${{ env.ARCH }}
+          arch_list: ${{ matrix.arch }}
 
       - name: Install filesystem tools
         run: sudo apt-get update && sudo apt-get install -y e2fsprogs
 
-      - name: 执行 ci-test
+      - name: 执行 ci-test (${{ matrix.arch }})
         working-directory: starry-test-harness
         run: |
           export STARRYOS_COMMIT=$(git -C ../.cache/StarryOS rev-parse HEAD)
+          export SMP=4
           make ci-test run
 
       - name: Dump suite logs
@@ -64,7 +74,9 @@ jobs:
         if: always()
         run: |
           if [ -d logs/ci ]; then
-            find logs/ci -name 'suite.log' -print -exec sh -c 'echo "::group::{}"; cat "$1"; echo "::endgroup::"' _ {} \;
+            echo "::group::Suite Log (${{ matrix.arch }})"
+            find logs/ci -name 'suite.log' -print -exec cat {} \;
+            echo "::endgroup::"
           else
             echo "logs/ci not found"
           fi
@@ -73,6 +85,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-logs-${{ github.run_id }}
+          name: ci-logs-${{ matrix.arch }}-${{ github.run_id }}
           path: starry-test-harness/logs/ci
           if-no-files-found: warn
