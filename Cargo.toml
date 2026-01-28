@@ -42,7 +42,7 @@ kipi = { path = "arch/kipi" }
 klogger = { path = "util/klogger" }
 memspace = { path = "mm/memspace" }
 knet = { path = "net/knet" }
-axruntime = { path = "core/axruntime" }
+kruntime = { path = "core/kruntime" }
 ksync = { path = "core/ksync" }
 ktask = { path = "core/ktask" }
 axwatchdog = { path = "io/axwatchdog" }

@@ -10,7 +10,7 @@
 extern crate klogger;
 
 extern crate alloc;
-extern crate axruntime;
+extern crate kruntime;
 
 use alloc::{borrow::ToOwned, vec::Vec};
 

@@ -13,7 +13,7 @@ description = "Top-level feature selection for x-kernel"
 default = []
 
 # Multicore
-smp = ["khal/smp", "axruntime/smp", "ktask?/smp", "kspin/smp"]
+smp = ["khal/smp", "kruntime/smp", "ktask?/smp", "kspin/smp"]
 
 # Floating point/SIMD
 fp-simd = ["khal/fp-simd"]
@@ -22,7 +22,7 @@ fp-simd = ["khal/fp-simd"]
 uspace = ["khal/uspace"]
 
 # Interrupts
-ipi = [ "dep:kipi", "khal/ipi", "axruntime/ipi"]
+ipi = [ "dep:kipi", "khal/ipi", "kruntime/ipi"]
 
 # Custom or default platforms
 myplat = ["khal/myplat"]
@@ -31,17 +31,17 @@ defplat-aarch64 = ["khal/defplat-aarch64"]
 defplat-x86_64 = ["khal/defplat-x86_64"]
 defplat-riscv64 = ["khal/defplat-riscv64"]
 defplat-loongarch64 = ["khal/defplat-loongarch64"]
-crosvm = ["khal/crosvm", "kdriver/crosvm", "axruntime/crosvm"]
+crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 
 # Memory
-alloc = ["kalloc", "axruntime/alloc"]
+alloc = ["kalloc", "kruntime/alloc"]
 alloc-tlsf = ["kalloc/tlsf"]
 alloc-slab = ["kalloc/slab"]
 alloc-buddy = ["kalloc/buddy"]
 alloc-level-1 = ["kalloc/level-1", "alloc"]
 page-alloc-64g = ["kalloc/page-alloc-64g"]                   # up to 64G memory capacity
 page-alloc-4g = ["kalloc/page-alloc-4g"]                     # up to 4G memory capacity
-paging = ["alloc", "khal/paging", "axruntime/paging"]
+paging = ["alloc", "khal/paging", "kruntime/paging"]
 dma = ["alloc", "paging"]
 
 task-ext = ["ktask/task-ext"]
@@ -55,15 +55,15 @@ fs = [
     "paging",
     "kdriver/virtio-blk",
     "dep:axfs",
-    "axruntime/fs",
+    "kruntime/fs",
 ] # TODO: try to remove "paging"
 fs-ext4 = ["fs", "axfs/ext4"]
 fs-fat = ["fs", "axfs/fat"]
 fs-times = ["fs", "axfs/times"]
 
 # Networking
-net = ["alloc", "paging", "kdriver/virtio-net", "dep:knet", "axruntime/net"]
-vsock = ["net", "kdriver/virtio-socket", "axruntime/vsock", "knet/vsock"]
+net = ["alloc", "paging", "kdriver/virtio-net", "dep:knet", "kruntime/net"]
+vsock = ["net", "kdriver/virtio-socket", "kruntime/vsock", "knet/vsock"]
 
 # Display
 display = [
@@ -71,7 +71,7 @@ display = [
     "paging",
     "kdriver/virtio-gpu",
     "dep:fbdevice",
-    "axruntime/display",
+    "kruntime/display",
 ]
 
 # Input
@@ -80,11 +80,11 @@ input = [
     "paging",
     "kdriver/virtio-input",
     "dep:inputdev",
-    "axruntime/input",
+    "kruntime/input",
 ]
 
 # Real Time Clock (RTC) Driver.
-rtc = ["khal/rtc", "axruntime/rtc"]
+rtc = ["khal/rtc", "kruntime/rtc"]
 
 # Device drivers
 bus-mmio = ["kdriver/bus-mmio"]
@@ -96,16 +96,16 @@ driver-sdmmc = ["kdriver/sdmmc"]
 driver-bcm2835-sdhci = ["kdriver/bcm2835-sdhci"]
 driver-ahci = ["kdriver/ahci"]
 
-# driver-dyn = ["paging", "axruntime/driver-dyn", "kdriver/dyn"]
+# driver-dyn = ["paging", "kruntime/driver-dyn", "kdriver/dyn"]
 
 # Backtrace
 dwarf = ["alloc", "backtrace/dwarf"]
 
 # Watchdog
-watchdog = ["axruntime/watchdog"]
+watchdog = ["kruntime/watchdog"]
 
 # Pmu
-pmu = ["axruntime/pmu"]
+pmu = ["kruntime/pmu"]
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
@@ -117,8 +117,13 @@ khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 klogger.workspace = true
+<<<<<<< HEAD
 knet = { workspace = true, optional = true }
 axruntime.workspace = true
+=======
+axnet = { workspace = true, optional = true }
+kruntime.workspace = true
+>>>>>>> 03966d1 (rename loggo)
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 kspin = { workspace = true, optional = true }
