@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 
 use axerrno::{AxError, AxResult};
-use axmm::backend::{Backend, SharedPages};
 use khal::{
     paging::{MappingFlags, PageSize},
     time::monotonic_time_nanos,
@@ -10,6 +9,7 @@ use ksync::Mutex;
 use ktask::current;
 use linux_raw_sys::general::*;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use memspace::backend::{Backend, SharedPages};
 use starry_core::{
     shm::{SHM_MANAGER, ShmInner, ShmidDs},
     task::AsThread,

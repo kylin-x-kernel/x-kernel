@@ -1,8 +1,8 @@
 use axerrno::AxResult;
-use axmm::backend::Backend;
 use khal::paging::{MappingFlags, PageSize};
 use ktask::current;
 use memaddr::{VirtAddr, align_up_4k};
+use memspace::backend::Backend;
 use starry_core::{
     config::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX},
     task::AsThread,

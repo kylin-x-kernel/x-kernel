@@ -14,10 +14,6 @@ use core::{
 };
 
 use axerrno::AxResult;
-use axmm::{
-    AddrSpace,
-    backend::{Backend, SharedPages},
-};
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
@@ -26,6 +22,10 @@ use ktask::{
     future::{self, block_on, interruptible},
 };
 use memaddr::VirtAddr;
+use memspace::{
+    AddrSpace,
+    backend::{Backend, SharedPages},
+};
 
 use crate::task::AsThread;
 

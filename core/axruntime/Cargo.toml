@@ -17,7 +17,7 @@ default = []
 
 smp = ["khal/smp", "ktask/smp"]
 alloc = ["dep:kalloc"]
-paging = ["khal/paging", "dep:axmm"]
+paging = ["khal/paging", "dep:memspace"]
 ipi = ["dep:kipi"]
 
 display = ["dep:kdriver", "dep:fbdevice"]
@@ -46,7 +46,7 @@ axfs = { workspace = true, optional = true }
 khal.workspace = true
 kipi = { workspace = true, optional = true }
 klogger.workspace = true
-axmm = { workspace = true, optional = true }
+memspace = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kplat = { workspace = true }
 ktask = { workspace = true }

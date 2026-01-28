@@ -33,7 +33,7 @@ khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kio.workspace = true
 klogger.workspace = true
-axmm.workspace = true
+memspace.workspace = true
 knet.workspace = true
 aarch64-crosvm-virt = { workspace = true, optional = true }
 kpoll.workspace = true

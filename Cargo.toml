@@ -40,7 +40,7 @@ khal = { path = "arch/khal" }
 inputdev = { path = "io/inputdev" }
 kipi = { path = "arch/kipi" }
 klogger = { path = "util/klogger" }
-axmm = { path = "mm/axmm" }
+memspace = { path = "mm/memspace" }
 knet = { path = "net/knet" }
 axruntime = { path = "core/axruntime" }
 ksync = { path = "core/ksync" }

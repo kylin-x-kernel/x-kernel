@@ -41,7 +41,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     info!("Secondary CPU {cpu_id} started.");
 
     #[cfg(feature = "paging")]
-    axmm::init_memory_management_secondary();
+    memspace::init_memory_management_secondary();
 
     khal::final_init_secondary(cpu_id);
 

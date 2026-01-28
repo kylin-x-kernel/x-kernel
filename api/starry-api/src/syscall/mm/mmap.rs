@@ -2,11 +2,11 @@ use alloc::sync::Arc;
 
 use axerrno::{AxError, AxResult};
 use axfs::FileBackend;
-use axmm::backend::{Backend, SharedPages};
 use khal::paging::{MappingFlags, PageSize};
 use ktask::current;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
+use memspace::backend::{Backend, SharedPages};
 use starry_core::{
     task::AsThread,
     vfs::{Device, DeviceMmap},

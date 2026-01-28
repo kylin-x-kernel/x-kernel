@@ -17,7 +17,7 @@ axfs.workspace = true
 khal.workspace = true
 kio.workspace = true
 klogger.workspace = true
-axmm.workspace = true
+memspace.workspace = true
 kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true
@@ -48,7 +48,7 @@ weak-map = "0.1.1"
 xmas-elf = "0.9"
 
 [target.'cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))'.dependencies]
-axmm = { workspace = true, features = ["copy"] }
+memspace = { workspace = true, features = ["copy"] }
 
 [features]
 tee = []

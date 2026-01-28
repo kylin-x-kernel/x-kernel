@@ -176,7 +176,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     }
 
     #[cfg(feature = "paging")]
-    axmm::init_memory_management();
+    memspace::init_memory_management();
 
     info!("Initialize platform devices...");
     khal::final_init(cpu_id, arg);

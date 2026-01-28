@@ -1,0 +1,28 @@
+[package]
+name = "memspace"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[features]
+default = []
+copy = ["page_table/copy-from"]
+
+[dependencies]
+kalloc = { workspace = true }
+platconfig = { workspace = true }
+axerrno = { workspace = true }
+axfs = { workspace = true }
+axfs-ng-vfs = { workspace = true }
+khal = { workspace = true, features = ["paging"] }
+ksync = { workspace = true }
+ktask = { workspace = true }
+enum_dispatch = { workspace = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
+log = { workspace = true }
+memaddr = { workspace = true }
+memset = { workspace = true }
+page_table = { workspace = true, optional = true }

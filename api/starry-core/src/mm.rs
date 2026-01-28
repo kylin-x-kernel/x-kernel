@@ -6,7 +6,6 @@ use core::{ffi::CStr, hint::unlikely, iter, mem::MaybeUninit};
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, FS_CONTEXT, FileBackend};
 use axfs_ng_vfs::Location;
-use axmm::{AddrSpace, backend::Backend};
 use extern_trait::extern_trait;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use khal::{
@@ -18,6 +17,7 @@ use kspin::IrqSave;
 use ksync::Mutex;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use memspace::{AddrSpace, backend::Backend};
 use ouroboros::self_referencing;
 use starry_vm::{VmError, VmIo, VmResult};
 

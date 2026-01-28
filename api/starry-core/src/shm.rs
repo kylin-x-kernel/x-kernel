@@ -3,7 +3,6 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult};
-use axmm::backend::SharedPages;
 use bytemuck::AnyBitPattern;
 use khal::{paging::MappingFlags, time::monotonic_time_nanos};
 use ksync::Mutex;
@@ -12,6 +11,7 @@ use linux_raw_sys::{
     general::*,
 };
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use memspace::backend::SharedPages;
 use starry_process::Pid;
 /// Data structure used to pass permission information to IPC operations.
 #[repr(C)]

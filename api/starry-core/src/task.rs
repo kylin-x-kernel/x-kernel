@@ -17,13 +17,13 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axmm::AddrSpace;
 use extern_trait::extern_trait;
 use hashbrown::HashMap;
 use kpoll::PollSet;
 use ksync::{Mutex, spin::SpinNoIrq};
 use ktask::{KtaskRef, TaskExt, TaskInner, WeakKtaskRef, current};
 use lazy_static::lazy_static;
+use memspace::AddrSpace;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
 use starry_process::{Pid, Process, ProcessGroup, Session};
