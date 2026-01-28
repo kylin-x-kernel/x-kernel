@@ -43,7 +43,7 @@ pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> AxResult {
         // ARMv8 (aarch64) and LoongArch64 use separate page tables for user space
         // (aarch64: TTBR0_EL1, LoongArch64: PGDL), so there is no need to copy the
         // kernel portion to the user page table.
-        _aspace.copy_mappings_from(&axmm::kernel_layout().lock())?;
+        _aspace.copy_mappings_from(&mems::kernel_layout().lock())?;
     }
     Ok(())
 }
