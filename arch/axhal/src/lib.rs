@@ -120,7 +120,9 @@ pub mod trap {
 ///   trapframe (or `None` if not in a trap). This is intended for diagnostic
 ///   paths such as watchdogs or backtrace collection.
 pub mod context {
-    pub use kcpu::{TaskContext, TrapFrame, active_exception_context, with_active_exception_context};
+    pub use kcpu::{
+        TaskContext, TrapFrame, active_exception_context, with_active_exception_context,
+    };
 }
 
 pub use kcpu::instrs as asm;

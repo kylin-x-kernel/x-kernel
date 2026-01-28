@@ -15,8 +15,8 @@ use x86_64::{
 use super::{
     TrapFrame,
     asm::{read_thread_pointer, write_thread_pointer},
-    gdt,
     excp::{IRQ_VECTOR_END, IRQ_VECTOR_START, LEGACY_SYSCALL_VECTOR, err_code_to_flags},
+    gdt,
 };
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 

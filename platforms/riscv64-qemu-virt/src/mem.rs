@@ -1,4 +1,4 @@
-use kplat::memory::{HwMemory, PhysAddr, MemRange, VirtAddr, pa, va};
+use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 
 use crate::config::{
     devices::MMIO_RANGES,

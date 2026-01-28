@@ -13,6 +13,8 @@ pub mod boot;
 pub mod userspace;
 
 pub use self::{
-    ctx::{FpuState, GeneralRegisters, TaskContext, ExceptionContext as TrapFrame, ExceptionContext},
+    ctx::{
+        ExceptionContext as TrapFrame, ExceptionContext, FpuState, GeneralRegisters, TaskContext,
+    },
     unaligned::UnalignedError,
 };

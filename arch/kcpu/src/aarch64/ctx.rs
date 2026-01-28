@@ -20,12 +20,12 @@ pub struct ExceptionContext {
 impl fmt::Debug for ExceptionContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ExceptionContext {{ ")?;
-        
+
         // Print general purpose registers
         for (idx, &val) in self.x.iter().enumerate() {
             write!(f, "x{}: {:#x}, ", idx, val)?;
         }
-        
+
         write!(f, "elr: {:#x}, ", self.elr)?;
         write!(f, "spsr: {:#x}, ", self.spsr)?;
         write!(f, "pad: {:#x} }}", self.__pad)
@@ -36,30 +36,64 @@ impl ExceptionContext {
     // There are 6 arguments for syscalls in AArch64 (x0-x5).
 
     /// Gets the 0th syscall argument.
-    pub const fn arg0(&self) -> usize { self.x[0] as usize }
+    pub const fn arg0(&self) -> usize {
+        self.x[0] as usize
+    }
+
     /// Gets the 1st syscall argument.
-    pub const fn arg1(&self) -> usize { self.x[1] as usize }
+    pub const fn arg1(&self) -> usize {
+        self.x[1] as usize
+    }
+
     /// Gets the 2nd syscall argument.
-    pub const fn arg2(&self) -> usize { self.x[2] as usize }
+    pub const fn arg2(&self) -> usize {
+        self.x[2] as usize
+    }
+
     /// Gets the 3rd syscall argument.
-    pub const fn arg3(&self) -> usize { self.x[3] as usize }
+    pub const fn arg3(&self) -> usize {
+        self.x[3] as usize
+    }
+
     /// Gets the 4th syscall argument.
-    pub const fn arg4(&self) -> usize { self.x[4] as usize }
+    pub const fn arg4(&self) -> usize {
+        self.x[4] as usize
+    }
+
     /// Gets the 5th syscall argument.
-    pub const fn arg5(&self) -> usize { self.x[5] as usize }
+    pub const fn arg5(&self) -> usize {
+        self.x[5] as usize
+    }
 
     /// Sets the 0th syscall argument.
-    pub const fn set_arg0(&mut self, val: usize) { self.x[0] = val as u64; }
+    pub const fn set_arg0(&mut self, val: usize) {
+        self.x[0] = val as u64;
+    }
+
     /// Sets the 1st syscall argument.
-    pub const fn set_arg1(&mut self, val: usize) { self.x[1] = val as u64; }
+    pub const fn set_arg1(&mut self, val: usize) {
+        self.x[1] = val as u64;
+    }
+
     /// Sets the 2nd syscall argument.
-    pub const fn set_arg2(&mut self, val: usize) { self.x[2] = val as u64; }
+    pub const fn set_arg2(&mut self, val: usize) {
+        self.x[2] = val as u64;
+    }
+
     /// Sets the 3rd syscall argument.
-    pub const fn set_arg3(&mut self, val: usize) { self.x[3] = val as u64; }
+    pub const fn set_arg3(&mut self, val: usize) {
+        self.x[3] = val as u64;
+    }
+
     /// Sets the 4th syscall argument.
-    pub const fn set_arg4(&mut self, val: usize) { self.x[4] = val as u64; }
+    pub const fn set_arg4(&mut self, val: usize) {
+        self.x[4] = val as u64;
+    }
+
     /// Sets the 5th syscall argument.
-    pub const fn set_arg5(&mut self, val: usize) { self.x[5] = val as u64; }
+    pub const fn set_arg5(&mut self, val: usize) {
+        self.x[5] = val as u64;
+    }
 
     /// Gets the instruction pointer.
     pub const fn ip(&self) -> usize {

@@ -11,5 +11,6 @@ pub mod boot;
 #[cfg(feature = "uspace")]
 pub mod userspace;
 
-pub use self::ctx::{FpState, GeneralRegisters, TaskContext, ExceptionContext as TrapFrame};
-pub use self::ctx::ExceptionContext;
+pub use self::ctx::{
+    ExceptionContext as TrapFrame, ExceptionContext, FpState, GeneralRegisters, TaskContext,
+};

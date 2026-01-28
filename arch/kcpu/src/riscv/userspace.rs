@@ -14,7 +14,7 @@ use riscv::{
 };
 
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
-use crate::{GeneralRegisters, ExceptionContext, excp::PageFaultFlags};
+use crate::{ExceptionContext, GeneralRegisters, excp::PageFaultFlags};
 
 /// Context to enter user space.
 #[derive(Debug, Clone, Copy)]

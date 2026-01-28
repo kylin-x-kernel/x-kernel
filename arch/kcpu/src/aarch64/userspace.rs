@@ -7,11 +7,11 @@ use memaddr::VirtAddr;
 use tock_registers::LocalRegisterCopy;
 
 use super::excp::{ArchTrap, check_page_fault};
-pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 // Use crate::ExceptionContext if exposed, or stick to TrapFrame alias
 // Since I want to rename things, I should try to use ExceptionContext
 use crate::aarch64::ExceptionContext;
 use crate::excp::PageFaultFlags;
+pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 
 /// Context to enter user space.
 #[repr(C, align(16))]

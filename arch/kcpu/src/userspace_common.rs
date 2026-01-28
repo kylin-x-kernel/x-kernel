@@ -1,7 +1,6 @@
 use memaddr::VirtAddr;
 
-use crate::{ExceptionContext, excp::PageFaultFlags};
-use crate::userspace::ExceptionInfo;
+use crate::{ExceptionContext, excp::PageFaultFlags, userspace::ExceptionInfo};
 
 /// A reason as to why the control of the CPU is returned from
 /// the user space to the kernel.

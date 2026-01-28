@@ -5,9 +5,9 @@ use core::{
 };
 
 use kplat::{
+    cpu::id as this_cpu_id,
     interrupts::{Handler, HandlerTable, IntrManager, TargetCpu},
 };
-use kplat::cpu::id as this_cpu_id;
 use kspin::SpinNoIrq;
 use riscv::register::sie;
 use riscv_plic::Plic;
@@ -191,7 +191,10 @@ impl IntrManager for IntrManagerImpl {
                     warn!("notify_cpu failed: {res:?}");
                 }
             }
-            TargetCpu::AllButSelf { me: cpu_id, total: cpu_num } => {
+            TargetCpu::AllButSelf {
+                me: cpu_id,
+                total: cpu_num,
+            } => {
                 for i in 0..cpu_num {
                     if i != cpu_id {
                         let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << i, 0));

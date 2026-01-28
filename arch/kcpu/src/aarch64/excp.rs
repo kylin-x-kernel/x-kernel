@@ -107,8 +107,8 @@ fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTra
                 e => {
                     let vaddr = va!(FAR_EL1.get() as usize);
                     panic!(
-                        "Unhandled synchronous exception {:?} @ {:#x}: ESR={:#x} (EC \
-                         {:#08b}, FAR: {:#x} ISS {:#x})\n{}",
+                        "Unhandled synchronous exception {:?} @ {:#x}: ESR={:#x} (EC {:#08b}, \
+                         FAR: {:#x} ISS {:#x})\n{}",
                         e,
                         tf.elr,
                         esr.get(),

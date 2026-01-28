@@ -12,7 +12,7 @@ pub fn stop_cpu() {
     disable_local();
     // Execute WFI (Wait For Interrupt) instruction
     // Since interrupts are disabled, this should stop execution until reset
-    aarch64_cpu::asm::wfi(); 
+    aarch64_cpu::asm::wfi();
 }
 
 /// Relaxes the current CPU and waits for interrupts.
@@ -32,7 +32,7 @@ pub fn await_interrupts() {
 #[inline]
 pub fn kernel_pt_root() -> PhysAddr {
     let pt_root_reg: usize;
-    
+
     #[cfg(not(feature = "arm-el2"))]
     {
         pt_root_reg = TTBR1_EL1.get() as usize;

@@ -15,7 +15,9 @@ pub mod excp;
 
 mod active_exception_context;
 
-pub use active_exception_context::{ExceptionContextGuard, active_exception_context, with_active_exception_context};
+pub use active_exception_context::{
+    ExceptionContextGuard, active_exception_context, with_active_exception_context,
+};
 
 #[cfg(feature = "uspace")]
 mod userspace_common;
