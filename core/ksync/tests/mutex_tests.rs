@@ -1,7 +1,7 @@
 use std::sync::Once;
 
-use axtask as thread;
 use ksync::Mutex;
+use ktask as thread;
 
 static INIT: Once = Once::new();
 

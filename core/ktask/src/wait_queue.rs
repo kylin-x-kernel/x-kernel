@@ -12,14 +12,14 @@ use crate::future::{block_on, timeout_at};
 /// ```
 /// use core::sync::atomic::{AtomicU32, Ordering};
 ///
-/// use axtask::WaitQueue;
+/// use ktask::WaitQueue;
 ///
 /// static VALUE: AtomicU32 = AtomicU32::new(0);
 /// static WQ: WaitQueue = WaitQueue::new();
 ///
-/// axtask::init_scheduler();
+/// ktask::init_scheduler();
 /// // spawn a new task that updates `VALUE` and notifies the main task
-/// axtask::spawn(|| {
+/// ktask::spawn(|| {
 ///     assert_eq!(VALUE.load(Ordering::Acquire), 0);
 ///     VALUE.fetch_add(1, Ordering::Release);
 ///     WQ.notify_one(true); // wake up the main task

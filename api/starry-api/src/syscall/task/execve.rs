@@ -3,8 +3,8 @@ use core::ffi::c_char;
 
 use axerrno::{AxError, AxResult};
 use axfs::FS_CONTEXT;
-use axtask::current;
 use khal::uspace::UserContext;
+use ktask::current;
 use starry_core::{config::USER_HEAP_BASE, mm::load_user_app, task::AsThread};
 use starry_vm::vm_load_until_nul;
 

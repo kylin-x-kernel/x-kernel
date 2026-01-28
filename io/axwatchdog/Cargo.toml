@@ -14,7 +14,7 @@ default = ["khal/nmi"]
 [dependencies]
 platconfig.workspace = true
 khal.workspace = true
-axtask = { workspace = true, features = ["watchdog"] }
+ktask = { workspace = true, features = ["watchdog"] }
 cfg-if.workspace = true
 log.workspace = true
 percpu.workspace = true

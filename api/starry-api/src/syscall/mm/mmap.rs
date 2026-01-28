@@ -3,8 +3,8 @@ use alloc::sync::Arc;
 use axerrno::{AxError, AxResult};
 use axfs::FileBackend;
 use axmm::backend::{Backend, SharedPages};
-use axtask::current;
 use khal::paging::{MappingFlags, PageSize};
+use ktask::current;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use starry_core::{

@@ -127,7 +127,7 @@ fn get_process_hash() -> AxResult<Vec<u8>> {
     use alloc::format;
 
     use axfs::FS_CONTEXT;
-    use axtask::current;
+    use ktask::current;
     use mbedtls::hash::{Md, Type};
     use starry_core::task::AsThread;
 

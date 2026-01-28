@@ -77,7 +77,7 @@ impl klogger::LoggerAdapter for LogIfImpl {
 
     fn task_id() -> Option<u64> {
         if is_init_ok() {
-            axtask::current_may_uninit().map(|curr| curr.id().as_u64())
+            ktask::current_may_uninit().map(|curr| curr.id().as_u64())
         } else {
             None
         }
@@ -181,7 +181,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     info!("Initialize platform devices...");
     khal::final_init(cpu_id, arg);
 
-    axtask::init_scheduler();
+    ktask::init_scheduler();
 
     #[cfg(any(feature = "fs", feature = "net", feature = "display"))]
     {
@@ -223,7 +223,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
     unsafe { main() };
 
-    axtask::exit(0);
+    ktask::exit(0);
 }
 
 #[cfg(feature = "alloc")]
@@ -278,7 +278,7 @@ fn init_interrupt() {
 
     khal::irq::register(khal::time::interrupt_id(), || {
         update_timer();
-        axtask::on_timer_tick();
+        ktask::on_timer_tick();
     });
 
     #[cfg(feature = "ipi")]

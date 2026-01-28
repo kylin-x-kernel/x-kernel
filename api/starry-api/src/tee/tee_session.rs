@@ -7,8 +7,8 @@
 use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{any::Any, default::Default};
 
-use axtask::current;
 use hashbrown::HashMap;
+use ktask::current;
 use spin::RwLock;
 use starry_core::task::{AsThread, TeeSessionCtxTrait};
 use tee_raw_sys::*;

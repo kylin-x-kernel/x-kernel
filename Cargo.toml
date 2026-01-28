@@ -16,7 +16,7 @@ categories = ["os", "no-std"]
 documentation = "https://gitee.com/openkylin/x-kernel"
 
 [workspace.dependencies]
-# Arceos Modules
+# X-kernel Modules
 axfeat = { path = "api/axfeat", features = [
     "alloc-slab",
     "fp-simd",
@@ -44,11 +44,11 @@ axmm = { path = "mm/axmm" }
 axnet = { path = "net/axnet" }
 axruntime = { path = "core/axruntime" }
 ksync = { path = "core/ksync" }
-axtask = { path = "core/axtask" }
+ktask = { path = "core/ktask" }
 axwatchdog = { path = "io/axwatchdog" }
 kcpu = { path = "arch/kcpu" }
 
-# Arceos Crates
+# x-kernel Crates
 alloc-engine = { path = "mm/alloc-engine", features = ["axerrno"] }
 page_table = { path = "mm/page_table", features = ["axerrno"] }
 backtrace = { path = "util/backtrace" }
@@ -60,7 +60,7 @@ memaddr = { path = "mm/memaddr" }
 memset = { path = "mm/memset" }
 kspin = { path = "sync/kspin" }
 
-# Starry Modules
+# x-kenrel userspace Modules
 starry-signal = { version = "0.2", path = "process/starry-signal" }
 starry-core = { path = "api/starry-core" }
 starry-api = { path = "api/starry-api" }
@@ -78,7 +78,7 @@ loongarch64-qemu-virt = { path = "platforms/loongarch64-qemu-virt" }
 aarch64-peripherals = { path = "platforms/aarch64-peripherals", default-features = false }
 aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }
 
-# Third-Party Crates
+# Utility Crates
 arm-gic = { path = "drivers/arm-gic" }
 rs_fdtree = { path = "drivers/rs-fdtree" }
 syscalls = { path = "api/syscalls", default-features = false }

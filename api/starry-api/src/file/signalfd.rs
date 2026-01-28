@@ -6,11 +6,11 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axtask::{
+use kpoll::{IoEvents, PollSet, Pollable};
+use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use kpoll::{IoEvents, PollSet, Pollable};
 use spin::RwLock;
 use starry_core::task::AsThread;
 use starry_signal::{SignalInfo, SignalSet};

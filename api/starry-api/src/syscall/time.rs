@@ -1,6 +1,6 @@
 use axerrno::{AxError, AxResult};
-use axtask::current;
 use khal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
+use ktask::current;
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
     CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,

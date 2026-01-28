@@ -7,7 +7,7 @@ use axnet::{
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixSocket},
 };
-use axtask::current;
+use ktask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{

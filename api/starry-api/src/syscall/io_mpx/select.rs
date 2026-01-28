@@ -2,9 +2,9 @@ use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
 use axerrno::{AxError, AxResult};
-use axtask::future::{self, block_on, poll_io};
 use bitmaps::Bitmap;
 use kpoll::IoEvents;
+use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::{
     general::*,
     select_macros::{FD_ISSET, FD_SET, FD_ZERO},

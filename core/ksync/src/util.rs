@@ -1,6 +1,6 @@
 //! Utility types and functions for synchronization primitives.
 
-use axtask::yield_now;
+use ktask::yield_now;
 
 /// Spin configuration for blocking synchronization primitives.
 ///

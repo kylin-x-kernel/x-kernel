@@ -9,8 +9,8 @@
 use alloc::vec;
 
 use axerrno::{AxError, AxResult};
-use axtask::current;
 use khal::paging::MappingFlags;
+use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use starry_core::task::AsThread;
 use starry_vm::vm_write_slice;

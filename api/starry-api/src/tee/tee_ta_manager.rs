@@ -10,8 +10,8 @@ use axnet::{
     RecvOptions, SendOptions, SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixSocket, UnixSocketAddr},
 };
-use axtask::current;
 use bincode::config;
+use ktask::current;
 use starry_core::task::AsThread;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND, TEE_SUCCESS, utee_params};
 

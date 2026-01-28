@@ -10,8 +10,8 @@ use alloc::{
 use core::{ffi::CStr, iter};
 
 use axfs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
-use axtask::{AxTaskRef, WeakAxTaskRef, current};
 use indoc::indoc;
+use ktask::{AxTaskRef, WeakAxTaskRef, current};
 use starry_core::{
     task::{AsThread, TaskStat, get_task, tasks},
     vfs::{

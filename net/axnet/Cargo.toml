@@ -21,7 +21,7 @@ platconfig = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }
 kdriver = { workspace = true, features = ["net"] }
-axtask = { workspace = true }
+ktask = { workspace = true }
 
 axerrno = { workspace = true }
 axfs = { workspace = true }

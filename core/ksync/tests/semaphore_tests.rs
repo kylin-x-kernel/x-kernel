@@ -3,8 +3,8 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use axtask as thread;
 use ksync::Semaphore;
+use ktask as thread;
 
 static INIT: Once = Once::new();
 

@@ -8,8 +8,8 @@ use core::{
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, FsContext};
 use axfs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, path::Path};
-use axtask::current;
 use khal::time::wall_time;
+use ktask::current;
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},

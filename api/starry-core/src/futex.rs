@@ -18,13 +18,13 @@ use axmm::{
     AddrSpace,
     backend::{Backend, SharedPages},
 };
-use axtask::{
-    current,
-    future::{self, block_on, interruptible},
-};
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
+use ktask::{
+    current,
+    future::{self, block_on, interruptible},
+};
 use memaddr::VirtAddr;
 
 use crate::task::AsThread;

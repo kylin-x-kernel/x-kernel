@@ -13,7 +13,7 @@ documentation = "https://arceos-org.github.io/arceos/axfeat/index.html"
 default = []
 
 # Multicore
-smp = ["khal/smp", "axruntime/smp", "axtask?/smp", "kspin/smp"]
+smp = ["khal/smp", "axruntime/smp", "ktask?/smp", "kspin/smp"]
 
 # Floating point/SIMD
 fp-simd = ["khal/fp-simd"]
@@ -44,10 +44,10 @@ page-alloc-4g = ["kalloc/page-alloc-4g"]                     # up to 4G memory c
 paging = ["alloc", "khal/paging", "axruntime/paging"]
 dma = ["alloc", "paging"]
 
-task-ext = ["axtask/task-ext"]
-sched-fifo = ["axtask/sched-fifo"]
-sched-rr = ["axtask/sched-rr"]
-sched-cfs = ["axtask/sched-cfs"]
+task-ext = ["ktask/task-ext"]
+sched-fifo = ["ktask/sched-fifo"]
+sched-rr = ["ktask/sched-rr"]
+sched-cfs = ["ktask/sched-cfs"]
 
 # File system
 fs = [
@@ -120,5 +120,5 @@ klogger.workspace = true
 axnet = { workspace = true, optional = true }
 axruntime.workspace = true
 ksync = { workspace = true, optional = true }
-axtask = { workspace = true, optional = true }
+ktask = { workspace = true, optional = true }
 kspin = { workspace = true, optional = true }

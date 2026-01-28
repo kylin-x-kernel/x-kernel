@@ -4,8 +4,8 @@
 use core::sync::atomic::AtomicU64 as StatsAtomicU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use axtask::{current, future::block_on};
 use event_listener::{Event, listener};
+use ktask::{current, future::block_on};
 
 use crate::util::{Spin, SpinConfig};
 
@@ -224,7 +224,7 @@ pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 mod tests {
     use std::sync::Once;
 
-    use axtask as thread;
+    use ktask as thread;
 
     use crate::Mutex;
 

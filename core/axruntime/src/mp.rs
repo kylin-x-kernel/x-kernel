@@ -45,7 +45,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
 
     khal::final_init_secondary(cpu_id);
 
-    axtask::init_scheduler_secondary();
+    ktask::init_scheduler_secondary();
 
     #[cfg(feature = "ipi")]
     kipi::init();
@@ -65,5 +65,5 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     #[cfg(feature = "watchdog")]
     axwatchdog::init_secondary();
 
-    axtask::run_idle();
+    ktask::run_idle();
 }

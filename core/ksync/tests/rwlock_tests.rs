@@ -1,7 +1,7 @@
 use std::sync::{Arc, Once};
 
-use axtask as thread;
 use ksync::RwLock;
+use ktask as thread;
 
 static INIT: Once = Once::new();
 

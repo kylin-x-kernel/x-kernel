@@ -21,7 +21,7 @@ axfs = { workspace = true }
 axfs-ng-vfs = { workspace = true }
 khal = { workspace = true, features = ["paging"] }
 ksync = { workspace = true }
-axtask = { workspace = true }
+ktask = { workspace = true }
 enum_dispatch = { workspace = true }
 kspin = { workspace = true }
 lazyinit = { workspace = true }

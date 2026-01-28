@@ -1,5 +1,5 @@
-use axtask::{AxCpuMask, TaskInner};
 use khal::{context::TrapFrame, percpu::this_cpu_id};
+use ktask::{AxCpuMask, TaskInner};
 use log::debug;
 
 use crate::rendezvous as rv;
@@ -58,9 +58,9 @@ fn init_common() {
                 // Cause CPU dumps all tasks for all CPUs.
                 for cpu in 0..platconfig::plat::CPU_NUM {
                     if let Some(tf) = unsafe { TRAP_FRAMES[cpu] } {
-                        axtask::dump_cur_task_backtrace(cpu, tf, true);
+                        ktask::dump_cur_task_backtrace(cpu, tf, true);
                     }
-                    axtask::dump_cpu_task_backtrace(cpu, true);
+                    ktask::dump_cpu_task_backtrace(cpu, true);
                 }
 
                 // Notify others that dump is done.
@@ -86,15 +86,15 @@ fn init_common() {
 /// and timer callbacks check whether the timestamp is stale.
 pub fn init_softlockup_detection() {
     // Timer callback used to detect soft lockup conditions.
-    axtask::register_timer_callback(|_| {
+    ktask::register_timer_callback(|_| {
         let now_ns = khal::time::monotonic_time_nanos();
         crate::timer_tick();
 
         if crate::check_softlockup(now_ns) {
             if let Some(tf) = khal::context::active_exception_context() {
-                axtask::dump_cur_task_backtrace(this_cpu_id(), tf, false);
+                ktask::dump_cur_task_backtrace(this_cpu_id(), tf, false);
             }
-            axtask::dump_cpu_task_backtrace(this_cpu_id(), false);
+            ktask::dump_cpu_task_backtrace(this_cpu_id(), false);
         }
     });
 
@@ -102,7 +102,7 @@ pub fn init_softlockup_detection() {
     let watchdog_task = TaskInner::new(
         move || loop {
             crate::touch_softlockup(khal::time::monotonic_time_nanos());
-            axtask::yield_now();
+            ktask::yield_now();
         },
         "watchdog".into(),
         platconfig::TASK_STACK_SIZE,
@@ -110,7 +110,7 @@ pub fn init_softlockup_detection() {
 
     // Bind watchdog task to the local CPU.
     watchdog_task.set_cpumask(AxCpuMask::one_shot(this_cpu_id()));
-    axtask::spawn_task(watchdog_task);
+    ktask::spawn_task(watchdog_task);
 }
 
 pub fn init_primary() {

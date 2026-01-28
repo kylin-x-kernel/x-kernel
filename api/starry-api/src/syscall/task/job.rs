@@ -1,5 +1,5 @@
 use axerrno::{AxError, AxResult};
-use axtask::current;
+use ktask::current;
 use starry_core::task::{AsThread, get_process_data, get_process_group};
 use starry_process::Pid;
 

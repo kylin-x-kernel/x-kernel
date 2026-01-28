@@ -1,7 +1,7 @@
 use alloc::{string::String, vec};
 use core::task::Waker;
 
-use axtask::future::register_irq_waker;
+use ktask::future::register_irq_waker;
 use hashbrown::HashMap;
 use kdriver::prelude::*;
 use smoltcp::{

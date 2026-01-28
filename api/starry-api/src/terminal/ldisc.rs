@@ -7,8 +7,8 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axtask::future::{block_on, poll_io};
 use kpoll::{IoEvents, PollSet, Pollable};
+use ktask::future::{block_on, poll_io};
 use linux_raw_sys::general::{
     ECHOCTL, ECHOK, ICRNL, IGNCR, ISIG, VEOF, VERASE, VKILL, VMIN, VTIME,
 };
@@ -255,7 +255,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
             ProcessMode::Manual => Processor::Manual(reader),
             ProcessMode::External(register) => {
                 let poll_rx = Arc::new(PollSet::new());
-                axtask::spawn_with_name(
+                ktask::spawn_with_name(
                     {
                         let poll_rx = poll_rx.clone();
                         let poll_tx = poll_tx.clone();

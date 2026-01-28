@@ -1,9 +1,9 @@
 use core::time::Duration;
 
 use axerrno::{AxError, AxResult};
-use axtask::future::{self, block_on, poll_io};
 use bitflags::bitflags;
 use kpoll::IoEvents;
+use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
 };

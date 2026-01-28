@@ -62,7 +62,7 @@ impl MemoryCategory {
                 | "axfs::highlevel::file::CachedFile::page_or_insert" => {
                     return Some("cached file");
                 }
-                "axtask::timers::set_alarm_wakeup" => {
+                "ktask::timers::set_alarm_wakeup" => {
                     return Some("timer");
                 }
                 "axfs_ng_vfs::node::dir::DirNode::lookup_locked"
@@ -91,7 +91,7 @@ impl fmt::Display for MemoryCategory {
 
 fn run_memory_analysis() {
     // Wait for gc
-    axtask::yield_now();
+    ktask::yield_now();
     cleanup_task_tables();
     clear_elf_cache();
 

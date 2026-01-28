@@ -83,7 +83,7 @@ async fn refresh_task() {
         if !fbdevice::fb_flush() {
             warn!("Failed to refresh framebuffer");
         }
-        axtask::future::sleep(delay).await;
+        ktask::future::sleep(delay).await;
     }
 }
 
@@ -93,8 +93,8 @@ pub struct FrameBuffer {
 }
 impl FrameBuffer {
     pub fn new() -> Self {
-        axtask::spawn_with_name(
-            || axtask::future::block_on(refresh_task()),
+        ktask::spawn_with_name(
+            || ktask::future::block_on(refresh_task()),
             "fb-refresh".into(),
         );
         let info = fbdevice::fb_info();

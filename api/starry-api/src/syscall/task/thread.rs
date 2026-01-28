@@ -1,5 +1,5 @@
 use axerrno::{AxError, AxResult};
-use axtask::current;
+use ktask::current;
 use starry_core::task::AsThread;
 
 pub fn sys_getpid() -> AxResult<isize> {

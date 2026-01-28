@@ -5,8 +5,8 @@ use axnet::{
     SendOptions, SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixSocket, UnixSocketAddr},
 };
-use axtask::current;
 use bincode::config;
+use ktask::current;
 use starry_core::task::AsThread;
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_GENERIC};
 

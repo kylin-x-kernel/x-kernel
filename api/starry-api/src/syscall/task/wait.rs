@@ -2,11 +2,11 @@ use alloc::vec::Vec;
 use core::{future::poll_fn, task::Poll};
 
 use axerrno::{AxError, AxResult, LinuxError};
-use axtask::{
+use bitflags::bitflags;
+use ktask::{
     current,
     future::{block_on, interruptible},
 };
-use bitflags::bitflags;
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };

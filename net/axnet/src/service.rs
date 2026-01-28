@@ -4,8 +4,8 @@ use core::{
     task::{Context, Waker},
 };
 
-use axtask::future::sleep_until;
 use khal::time::{NANOS_PER_MICROS, TimeValue, wall_time_nanos};
+use ktask::future::sleep_until;
 use smoltcp::{
     iface::{Interface, SocketSet},
     time::Instant,

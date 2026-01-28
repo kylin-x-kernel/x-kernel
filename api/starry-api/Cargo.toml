@@ -38,7 +38,7 @@ axnet.workspace = true
 aarch64-crosvm-virt = { workspace = true, optional = true }
 kpoll.workspace = true
 ksync.workspace = true
-axtask.workspace = true
+ktask.workspace = true
 bitflags.workspace = true
 bitmaps = { version = "3.2.1", default-features = false }
 bytemuck.workspace = true

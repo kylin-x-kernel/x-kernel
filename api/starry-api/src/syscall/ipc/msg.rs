@@ -1,10 +1,10 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult, LinuxError};
-use axtask::current;
 use bytemuck::AnyBitPattern;
 use khal::time::monotonic_time_nanos;
 use ksync::Mutex;
+use ktask::current;
 use linux_raw_sys::general::*;
 use starry_core::{shm::IpcPerm, task::AsThread};
 use starry_process::Pid;

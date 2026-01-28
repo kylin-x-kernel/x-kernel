@@ -2,8 +2,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use axtask::future::block_on;
 use event_listener::{Event, listener};
+use ktask::future::block_on;
 
 /// A counting semaphore.
 ///

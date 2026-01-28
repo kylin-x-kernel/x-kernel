@@ -15,7 +15,7 @@ documentation = "https://arceos-org.github.io/arceos/axruntime/index.html"
 [features]
 default = []
 
-smp = ["khal/smp", "axtask/smp"]
+smp = ["khal/smp", "ktask/smp"]
 alloc = ["dep:kalloc"]
 paging = ["khal/paging", "dep:axmm"]
 ipi = ["dep:kipi"]
@@ -48,7 +48,7 @@ klogger.workspace = true
 axmm = { workspace = true, optional = true }
 axnet = { workspace = true, optional = true }
 kplat = { workspace = true }
-axtask = { workspace = true }
+ktask = { workspace = true }
 axwatchdog = { workspace = true, optional = true }
 chrono.workspace = true
 crate_interface.workspace = true

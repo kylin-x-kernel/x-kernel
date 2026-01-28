@@ -1,9 +1,9 @@
 use core::{ffi::c_long, sync::atomic::Ordering};
 
 use axerrno::{AxError, AxResult};
-use axtask::{TaskInner, current};
 use bytemuck::AnyBitPattern;
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
+use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use starry_core::{
     futex::FutexKey,
@@ -27,7 +27,7 @@ use crate::{
 pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) -> TaskInner {
     TaskInner::new(
         move || {
-            let curr = axtask::current();
+            let curr = ktask::current();
 
             if let Some(tid) = (set_child_tid as *mut Pid).nullable() {
                 tid.vm_write(curr.id().as_u64() as Pid).ok();
@@ -151,7 +151,7 @@ pub fn exit_robust_list(head: *const RobustListHead) -> AxResult<()> {
         if limit == 0 {
             return Err(AxError::FilesystemLoop);
         }
-        axtask::yield_now();
+        ktask::yield_now();
     }
 
     Ok(())
@@ -171,7 +171,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         if let Some(futex) = guard {
             futex.wq.wake(1, u32::MAX);
         }
-        axtask::yield_now();
+        ktask::yield_now();
     }
     let head = thr.robust_list_head() as *const RobustListHead;
     if !head.is_null()

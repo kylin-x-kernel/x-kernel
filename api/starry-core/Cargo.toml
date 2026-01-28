@@ -20,7 +20,7 @@ klogger.workspace = true
 axmm.workspace = true
 kpoll.workspace = true
 ksync.workspace = true
-axtask.workspace = true
+ktask.workspace = true
 bitflags.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 cfg-if.workspace = true

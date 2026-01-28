@@ -2,8 +2,8 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use axtask::future::block_on;
 use event_listener::{Event, listener};
+use ktask::future::block_on;
 
 const WRITE_LOCKED: u32 = 1 << 31;
 const MAX_READERS: u32 = WRITE_LOCKED - 1;
