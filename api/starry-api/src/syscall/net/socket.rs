@@ -1,4 +1,5 @@
 use axerrno::{AxError, AxResult, LinuxError};
+use axtask::current;
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
