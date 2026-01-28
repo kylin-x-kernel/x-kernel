@@ -91,11 +91,7 @@ impl EthernetDevice {
         let mut frame = EthernetFrame::new_unchecked(tx_buf.data_mut());
         repr.emit(&mut frame);
         f(frame.payload_mut());
-        trace!(
-            "SEND {} bytes: {:02X?}",
-            tx_buf.len(),
-            tx_buf.data()
-        );
+        trace!("SEND {} bytes: {:02X?}", tx_buf.len(), tx_buf.data());
         if let Err(err) = inner.send(tx_buf) {
             warn!("send failed: {:?}", err);
         }
@@ -273,11 +269,7 @@ impl Device for EthernetDevice {
                     return false;
                 }
             };
-            trace!(
-                "RECV {} bytes: {:02X?}",
-                rx_buf.len(),
-                rx_buf.data()
-            );
+            trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
 
             let result = self.dispatch_irq_frame(rx_buf.data(), buffer, timestamp);
             self.inner.recycle_rx(rx_buf).unwrap();

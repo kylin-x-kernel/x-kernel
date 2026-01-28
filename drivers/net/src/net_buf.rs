@@ -34,6 +34,11 @@ impl NetBufHandle {
         self.data_len
     }
 
+    /// Returns true if the payload is empty.
+    pub fn is_empty(&self) -> bool {
+        self.data_len == 0
+    }
+
     /// Return the payload as `&[u8]`.
     pub fn data(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.data_ptr.as_ptr() as *const u8, self.data_len) }
