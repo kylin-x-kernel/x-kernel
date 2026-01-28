@@ -1,9 +1,9 @@
 [package]
 name = "memset"
 description = "Data structures and operations for managing memory mappings"
-documentation = "https://docs.rs/memset"
 keywords = ["x-kernel", "virtual-memory", "memory-area", "mmap"]
-edition = "2024"
+documentation.workspace = true
+edition.workspace = true
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -12,8 +12,5 @@ repository.workspace = true
 categories.workspace = true
 
 [dependencies]
-axerrno = { workspace = true, optional = true }
-memaddr = { workspace = true }
-
-[features]
-axerrno = ["dep:axerrno"]
+axerrno.workspace = true
+memaddr.workspace = true

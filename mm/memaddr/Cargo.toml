@@ -1,11 +1,10 @@
 [package]
 name = "memaddr"
 description = "Wrappers and helper functions for physical and virtual addresses"
-documentation = "https://docs.rs/memaddr"
-keywords = ["arceos", "address", "virtual-memory"]
-
+documentation.workspace = true
+keywords = ["address", "virtual-memory"]
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true

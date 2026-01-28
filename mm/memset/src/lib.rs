@@ -1,5 +1,4 @@
 #![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
 
 mod area;
@@ -19,7 +18,6 @@ pub enum MemorySetError {
     BadState,
 }
 
-#[cfg(feature = "axerrno")]
 impl From<MemorySetError> for axerrno::AxError {
     fn from(err: MemorySetError) -> Self {
         match err {
