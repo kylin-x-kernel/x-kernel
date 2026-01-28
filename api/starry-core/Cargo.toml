@@ -43,7 +43,7 @@ spin.workspace = true
 kprocess.workspace = true
 starry-signal.workspace = true
 starry-vm.workspace = true
-strum = { version = "0.27.2", default-features = false, features = ["derive"] }
+strum = { workspace = true }
 weak-map = "0.1.1"
 xmas-elf = "0.9"
 

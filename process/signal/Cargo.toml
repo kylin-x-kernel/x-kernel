@@ -1,0 +1,24 @@
+[package]
+name = "signal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Signal management library for Starry OS"
+keywords = ["signal", "ipc"]
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kcpu = { features = ["uspace",], workspace = true }
+bitflags = { workspace = true }
+cfg-if = { workspace = true }
+derive_more = { version = "2.0", default-features = false, features = ["full"] }
+event-listener = { workspace = true }
+kspin = { workspace = true }
+linux-raw-sys = { workspace = true, default-features = false, features = [
+    "general",
+    "no_std",
+] }
+log = { workspace = true }
+starry-vm = {workspace = true}
+strum = { workspace = true }
