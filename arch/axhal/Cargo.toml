@@ -43,7 +43,7 @@ rtc = [
 ]
 nmi = ["kplat/nmi", "aarch64-qemu-virt?/nmi"]
 pmu = ["aarch64-qemu-virt?/pmu"]
-paging = ["dep:axalloc", "dep:page_table"]
+paging = ["dep:kalloc", "dep:page_table"]
 tls = ["kcpu/tls"]
 uspace = ["paging", "kcpu/uspace"]
 
