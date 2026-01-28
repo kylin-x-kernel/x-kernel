@@ -15,7 +15,7 @@ default = []
 watchdog = ["dep:backtrace"]
 task-ext = ["dep:extern-trait"]
 tls = ["khal/tls"]
-preempt = ["percpu?/preempt", "kspin/preempt"]
+preempt = ["percpu/preempt", "kspin/preempt"]
 smp = ["kspin/smp"]
 
 sched-fifo = []

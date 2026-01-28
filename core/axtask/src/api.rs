@@ -223,7 +223,6 @@ pub fn sleep(dur: core::time::Duration) {
 
 /// Current task is going to sleep, it will be woken up at the given deadline.
 pub fn sleep_until(deadline: khal::time::TimeValue) {
-    #[cfg(feature = "irq")]
     crate::future::block_on(crate::future::sleep_until(deadline));
 }
 
