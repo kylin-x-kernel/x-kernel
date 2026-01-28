@@ -98,7 +98,7 @@ pub mod psci {
 
 /// Trap handling.
 pub mod trap {
-    pub use kcpu::trap::{IRQ, PAGE_FAULT, PageFaultFlags, register_trap_handler};
+    pub use kcpu::excp::{IRQ, PAGE_FAULT, PageFaultFlags, register_trap_handler};
 }
 
 /// CPU register states for context switching.
@@ -111,21 +111,21 @@ pub mod trap {
 /// In addition, this module exposes helpers to *observe* the currently active
 /// trap context on the current CPU:
 ///
-/// - [`active_trap_frame`]: Returns a best-effort reference to the trapframe
+/// - [`active_exception_context`]: Returns a best-effort reference to the trapframe
 ///   that is currently active on this CPU, if any.
 ///   The returned reference is **short-lived** and only valid while the CPU
 ///   remains in the corresponding trap context. It must not be stored.
 ///
-/// - [`with_active_trap_frame`]: Executes a closure with the currently active
+/// - [`with_active_exception_context`]: Executes a closure with the currently active
 ///   trapframe (or `None` if not in a trap). This is intended for diagnostic
 ///   paths such as watchdogs or backtrace collection.
 pub mod context {
-    pub use kcpu::{TaskContext, TrapFrame, active_trap_frame, with_active_trap_frame};
+    pub use kcpu::{TaskContext, TrapFrame, active_exception_context, with_active_exception_context};
 }
 
-pub use kcpu::asm;
+pub use kcpu::instrs as asm;
 #[cfg(feature = "uspace")]
-pub use kcpu::uspace;
+pub use kcpu::userspace as uspace;
 pub use kplat::boot::final_init;
 #[cfg(feature = "smp")]
 pub use kplat::boot::{

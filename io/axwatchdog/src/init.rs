@@ -40,7 +40,7 @@ fn init_common() {
         if rv::is_triggered() {
             rv::mark_arrived();
             unsafe {
-                TRAP_FRAMES[this_cpu_id()] = axhal::context::active_trap_frame();
+                TRAP_FRAMES[this_cpu_id()] = axhal::context::active_exception_context();
             }
             let this_cpu = this_cpu_id();
             let is_cause = rv::cause_cpu() == Some(this_cpu);
@@ -91,7 +91,7 @@ pub fn init_softlockup_detection() {
         crate::timer_tick();
 
         if crate::check_softlockup(now_ns) {
-            if let Some(tf) = axhal::context::active_trap_frame() {
+            if let Some(tf) = axhal::context::active_exception_context() {
                 axtask::dump_cur_task_backtrace(this_cpu_id(), tf, false);
             }
             axtask::dump_cpu_task_backtrace(this_cpu_id(), false);

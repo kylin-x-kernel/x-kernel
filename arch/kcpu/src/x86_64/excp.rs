@@ -1,12 +1,12 @@
 use x86::{controlregs::cr2, irq::*};
 use x86_64::structures::idt::PageFaultErrorCode;
 
-use super::{TrapFrame, gdt};
-use crate::trap::PageFaultFlags;
+use super::{ExceptionContext, gdt};
+use crate::excp::PageFaultFlags;
 
 core::arch::global_asm!(
-    include_str!("trap.S"),
-    trapframe_size = const core::mem::size_of::<TrapFrame>(),
+    include_str!("excp.S"),
+    trapframe_size = const core::mem::size_of::<ExceptionContext>(),
     UDATA = const gdt::UDATA.0,
     UCODE64 = const gdt::UCODE64.0,
     SYSCALL_VECTOR = const LEGACY_SYSCALL_VECTOR,
@@ -16,7 +16,7 @@ pub(super) const LEGACY_SYSCALL_VECTOR: u8 = 0x80;
 pub(super) const IRQ_VECTOR_START: u8 = 0x20;
 pub(super) const IRQ_VECTOR_END: u8 = 0xff;
 
-fn dispatch_irq_page_fault(tf: &mut TrapFrame) {
+fn dispatch_irq_page_fault(tf: &mut ExceptionContext) {
     let access_flags = err_code_to_flags(tf.error_code)
         .unwrap_or_else(|e| panic!("Invalid #PF error code: {:#x}", e));
     let vaddr = va!(unsafe { cr2() });
@@ -40,8 +40,8 @@ fn dispatch_irq_page_fault(tf: &mut TrapFrame) {
 }
 
 #[unsafe(no_mangle)]
-fn x86_trap_handler(tf: &mut TrapFrame) {
-    let _tf_guard = crate::TrapFrameGuard::new(tf);
+fn x86_trap_handler(tf: &mut ExceptionContext) {
+    let _tf_guard = crate::ExceptionContextGuard::new(tf);
     match tf.vector as u8 {
         PAGE_FAULT_VECTOR => dispatch_irq_page_fault(tf),
         BREAKPOINT_VECTOR => debug!("#BP @ {:#x} ", tf.rip),

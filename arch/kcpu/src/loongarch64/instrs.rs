@@ -27,13 +27,13 @@ pub fn is_enabled() -> bool {
 ///
 /// It must be called with interrupts enabled, otherwise it will never return.
 #[inline]
-pub fn wait_for_irqs() {
+pub fn await_interrupts() {
     unsafe { loongArch64::asm::idle() }
 }
 
 /// Halt the current CPU.
 #[inline]
-pub fn halt() {
+pub fn stop_cpu() {
     disable_local();
     unsafe { loongArch64::asm::idle() }
 }
@@ -187,7 +187,7 @@ pub fn enable_lsx() {
 }
 
 #[cfg(feature = "uspace")]
-core::arch::global_asm!(include_asm_macros!(), include_str!("user_copy.S"));
+core::arch::global_asm!(include_asm_macros!(), include_str!("copy_user.S"));
 
 #[cfg(feature = "uspace")]
 unsafe extern "C" {

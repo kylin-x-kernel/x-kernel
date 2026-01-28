@@ -3,13 +3,13 @@ use loongArch64::register::{
     estat::{self, Exception, Trap},
 };
 
-use super::context::TrapFrame;
-use crate::trap::PageFaultFlags;
+use super::context::ExceptionContext;
+use crate::excp::PageFaultFlags;
 
 core::arch::global_asm!(
     include_asm_macros!(),
-    include_str!("trap.S"),
-    trapframe_size = const (core::mem::size_of::<TrapFrame>()),
+    include_str!("excp.S"),
+    trapframe_size = const (core::mem::size_of::<ExceptionContext>()),
 );
 
 fn dispatch_irq_breakpoint(era: &mut usize) {
@@ -17,7 +17,7 @@ fn dispatch_irq_breakpoint(era: &mut usize) {
     *era += 4;
 }
 
-fn dispatch_irq_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
+fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(badv::read().vaddr());
     if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
@@ -38,8 +38,8 @@ fn dispatch_irq_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
 }
 
 #[unsafe(no_mangle)]
-fn loongarch64_trap_handler(tf: &mut TrapFrame) {
-    let _tf_guard = crate::TrapFrameGuard::new(tf);
+fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
+    let _tf_guard = crate::ExceptionContextGuard::new(tf);
     let estat = estat::read();
 
     match estat.cause() {

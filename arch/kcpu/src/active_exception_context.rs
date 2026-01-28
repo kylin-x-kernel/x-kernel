@@ -12,13 +12,13 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::TrapFrame;
+use crate::ExceptionContext;
 
 /// Stores the pointer to the currently active trapframe.
 ///
 /// 0 means no active trapframe.
 #[percpu::def_percpu]
-static ACTIVE_TRAPFRAME_PTR: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_EXCEPTION_CONTEXT_PTR: AtomicUsize = AtomicUsize::new(0);
 
 /// Returns the currently active trapframe, if any.
 ///
@@ -27,10 +27,10 @@ static ACTIVE_TRAPFRAME_PTR: AtomicUsize = AtomicUsize::new(0);
 /// context where the trapframe lives on the stack. Therefore, callers should
 /// treat it as a short-lived snapshot: use it immediately and don't store it.
 #[inline]
-pub fn active_trap_frame() -> Option<&'static TrapFrame> {
+pub fn active_exception_context() -> Option<&'static ExceptionContext> {
     // Safety: caller context must tolerate best-effort snapshot.
     let ptr = unsafe {
-        ACTIVE_TRAPFRAME_PTR
+        ACTIVE_EXCEPTION_CONTEXT_PTR
             .current_ref_raw()
             .load(Ordering::Relaxed)
     };
@@ -39,16 +39,16 @@ pub fn active_trap_frame() -> Option<&'static TrapFrame> {
         None
     } else {
         // SAFETY:
-        // - pointer was installed from a valid &TrapFrame
+        // - pointer was installed from a valid &ExceptionContext
         // - valid only while still in the trap context
-        Some(unsafe { &*(ptr as *const TrapFrame) })
+        Some(unsafe { &*(ptr as *const ExceptionContext) })
     }
 }
 
 /// Calls `f` with the currently active trapframe.
 #[inline]
-pub fn with_active_trap_frame<T>(f: impl FnOnce(Option<&TrapFrame>) -> T) -> T {
-    f(active_trap_frame().map(|tf| tf as &TrapFrame))
+pub fn with_active_exception_context<T>(f: impl FnOnce(Option<&ExceptionContext>) -> T) -> T {
+    f(active_exception_context().map(|tf| tf as &ExceptionContext))
 }
 
 /// A guard that exposes `tf` as the active trapframe within a scope.
@@ -56,24 +56,24 @@ pub fn with_active_trap_frame<T>(f: impl FnOnce(Option<&TrapFrame>) -> T) -> T {
 /// This is intended to be used at the beginning of a trap handler function:
 ///
 /// ```no_run
-/// fn trap_handler(tf: &mut TrapFrame) {
-///     let _guard = TrapFrameGuard::new(tf);
+/// fn trap_handler(tf: &mut ExceptionContext) {
+///     let _guard = ExceptionContextGuard::new(tf);
 ///     // ...
 /// }
 /// ```
-pub struct TrapFrameGuard {
+pub struct ExceptionContextGuard {
     prev: usize,
 }
 
-impl TrapFrameGuard {
+impl ExceptionContextGuard {
     /// Sets `tf` as the active trapframe and returns a guard which will restore
     /// the previous value on drop.
     #[inline]
-    pub fn new(tf: &TrapFrame) -> Self {
-        let ptr = tf as *const TrapFrame as usize;
+    pub fn new(tf: &ExceptionContext) -> Self {
+        let ptr = tf as *const ExceptionContext as usize;
 
         let prev = unsafe {
-            ACTIVE_TRAPFRAME_PTR
+            ACTIVE_EXCEPTION_CONTEXT_PTR
                 .current_ref_raw()
                 .swap(ptr, Ordering::Relaxed)
         };
@@ -82,11 +82,11 @@ impl TrapFrameGuard {
     }
 }
 
-impl Drop for TrapFrameGuard {
+impl Drop for ExceptionContextGuard {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            ACTIVE_TRAPFRAME_PTR
+            ACTIVE_EXCEPTION_CONTEXT_PTR
                 .current_ref_raw()
                 .store(self.prev, Ordering::Relaxed);
         }

@@ -6,15 +6,18 @@ use aarch64_cpu::registers::{ESR_EL1, FAR_EL1, Readable};
 use memaddr::VirtAddr;
 use tock_registers::LocalRegisterCopy;
 
-use super::trap::{TrapKind, is_valid_page_fault};
-pub use crate::uspace_common::{ExceptionKind, ReturnReason};
-use crate::{TrapFrame, trap::PageFaultFlags};
+use super::excp::{ArchTrap, check_page_fault};
+pub use crate::userspace_common::{ExceptionKind, ReturnReason};
+// Use crate::ExceptionContext if exposed, or stick to TrapFrame alias
+// Since I want to rename things, I should try to use ExceptionContext
+use crate::aarch64::ExceptionContext;
+use crate::excp::PageFaultFlags;
 
 /// Context to enter user space.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 pub struct UserContext {
-    tf: TrapFrame,
+    tf: ExceptionContext,
     /// Stack Pointer (SP_EL0).
     pub sp: u64,
     /// Software Thread ID Register (TPIDR_EL0).
@@ -31,7 +34,7 @@ impl UserContext {
         let mut regs = [0; 31];
         regs[0] = arg0 as _;
         Self {
-            tf: TrapFrame {
+            tf: ExceptionContext {
                 x: regs,
                 elr: entry as _,
                 spsr: (SPSR_EL1::M::EL0t
@@ -75,19 +78,19 @@ impl UserContext {
     /// This function returns when an exception or syscall occurs.
     pub fn run(&mut self) -> ReturnReason {
         extern "C" {
-            fn enter_user(uctx: &mut UserContext) -> TrapKind;
+            fn enter_user(uctx: &mut UserContext) -> ArchTrap;
         }
 
-        crate::asm::disable_local();
-        let kind = unsafe { enter_user(self) };
+        crate::instrs::disable_local(); // updated module reference from asm -> instrs
+        let trap_kind = unsafe { enter_user(self) };
 
-        let ret = match kind {
-            TrapKind::Irq => {
+        let ret = match trap_kind {
+            ArchTrap::Irq => {
                 dispatch_irq_trap!(IRQ, 0);
                 ReturnReason::Interrupt
             }
-            TrapKind::Fiq | TrapKind::SError => ReturnReason::Unknown,
-            TrapKind::Synchronous => {
+            ArchTrap::Fiq | ArchTrap::SError => ReturnReason::Unknown,
+            ArchTrap::Synchronous => {
                 let esr = ESR_EL1.extract();
                 let far = FAR_EL1.get() as usize;
 
@@ -95,13 +98,13 @@ impl UserContext {
 
                 match esr.read_as_enum(ESR_EL1::EC) {
                     Some(ESR_EL1::EC::Value::SVC64) => ReturnReason::Syscall,
-                    Some(ESR_EL1::EC::Value::InstrAbortLowerEL) if is_valid_page_fault(iss) => {
+                    Some(ESR_EL1::EC::Value::InstrAbortLowerEL) if check_page_fault(iss) => {
                         ReturnReason::PageFault(
                             va!(far),
                             PageFaultFlags::EXECUTE | PageFaultFlags::USER,
                         )
                     }
-                    Some(ESR_EL1::EC::Value::DataAbortLowerEL) if is_valid_page_fault(iss) => {
+                    Some(ESR_EL1::EC::Value::DataAbortLowerEL) if check_page_fault(iss) => {
                         let wnr = (iss & (1 << 6)) != 0; // WnR: Write not Read
                         let cm = (iss & (1 << 8)) != 0; // CM: Cache maintenance
                         ReturnReason::PageFault(
@@ -118,13 +121,13 @@ impl UserContext {
             }
         };
 
-        crate::asm::enable_local();
+        crate::instrs::enable_local();
         ret
     }
 }
 
 impl Deref for UserContext {
-    type Target = TrapFrame;
+    type Target = ExceptionContext;
 
     fn deref(&self) -> &Self::Target {
         &self.tf

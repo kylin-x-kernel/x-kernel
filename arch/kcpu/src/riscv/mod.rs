@@ -1,13 +1,15 @@
 #[macro_use]
 mod macros;
 
-mod context;
-mod trap;
+mod ctx;
+mod excp;
 
-pub mod asm;
-pub mod init;
+pub mod instrs;
+pub use instrs as asm;
+pub mod boot;
 
 #[cfg(feature = "uspace")]
-pub mod uspace;
+pub mod userspace;
 
-pub use self::context::{FpState, GeneralRegisters, TaskContext, TrapFrame};
+pub use self::ctx::{FpState, GeneralRegisters, TaskContext, ExceptionContext as TrapFrame};
+pub use self::ctx::ExceptionContext;

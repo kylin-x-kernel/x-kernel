@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "ipi")]
 pub use axconfig::devices::IPI_IRQ;
-use kcpu::trap::{IRQ, register_trap_handler};
+use kcpu::excp::{IRQ, register_trap_handler};
 #[cfg(feature = "ipi")]
 pub use kplat::interrupts::{TargetCpu, notify_cpu};
 pub use kplat::interrupts::{

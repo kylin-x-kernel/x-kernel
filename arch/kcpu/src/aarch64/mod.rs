@@ -1,11 +1,13 @@
-mod context;
+mod ctx;
 
-pub mod asm;
-pub mod init;
+pub mod instrs;
+pub mod boot;
 
-mod trap;
+mod excp;
 
 #[cfg(feature = "uspace")]
-pub mod uspace;
+pub mod userspace;
 
-pub use self::context::{FpState, TaskContext, TrapFrame};
+pub use self::ctx::{FpState, TaskContext, ExceptionContext as TrapFrame};
+pub use self::ctx::ExceptionContext;
+

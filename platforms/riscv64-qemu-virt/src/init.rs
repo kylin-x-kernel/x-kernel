@@ -3,14 +3,14 @@ struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
     fn early_init(_cpu_id: usize, _mbi: usize) {
-        kcpu::init::init_trap();
+        kcpu::boot::init_trap();
         crate::console::early_init();
         crate::time::early_init();
     }
 
     #[cfg(feature = "smp")]
     fn early_init_secondary(_cpu_id: usize) {
-        kcpu::init::init_trap();
+        kcpu::boot::init_trap();
     }
 
     fn final_init(_cpu_id: usize, _arg: usize) {

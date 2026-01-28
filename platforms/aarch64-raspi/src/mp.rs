@@ -18,10 +18,10 @@ pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) {
     let entry_paddr = v2p(va!(modify_stack_and_start as usize)).as_usize();
     let stack_top_ptr = &raw mut SECONDARY_STACK_TOP;
     unsafe { stack_top_ptr.write_volatile(stack_top.as_usize()) };
-    kcpu::asm::flush_dcache_line(va!(stack_top_ptr as usize));
+    kcpu::instrs::flush_dcache_line(va!(stack_top_ptr as usize));
     let spintable_vaddr = p2v(CPU_SPIN_TABLE[cpu_id]);
     let release_ptr = spintable_vaddr.as_mut_ptr() as *mut usize;
     unsafe { release_ptr.write_volatile(entry_paddr) };
-    kcpu::asm::flush_dcache_line(spintable_vaddr);
+    kcpu::instrs::flush_dcache_line(spintable_vaddr);
     aarch64_cpu::asm::sev();
 }

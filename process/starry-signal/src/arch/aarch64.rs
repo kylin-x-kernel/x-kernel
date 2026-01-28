@@ -1,4 +1,4 @@
-use kcpu::uspace::UserContext;
+use kcpu::userspace::UserContext;
 
 use crate::{SignalSet, SignalStack};
 

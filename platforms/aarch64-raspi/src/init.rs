@@ -6,13 +6,13 @@ struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
     fn early_init(_cpu_id: usize, _dtb: usize) {
-        kcpu::init::init_trap();
+        kcpu::boot::init_trap();
         kplat_aarch64_peripherals::pl011::early_init(p2v(pa!(UART_PADDR)));
         kplat_aarch64_peripherals::generic_timer::early_init();
     }
     #[cfg(feature = "smp")]
     fn early_init_secondary(_cpu_id: usize) {
-        kcpu::init::init_trap();
+        kcpu::boot::init_trap();
     }
     fn final_init(_cpu_id: usize, _dtb: usize) {
         #[cfg(feature = "irq")]

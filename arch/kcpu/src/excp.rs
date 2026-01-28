@@ -19,7 +19,7 @@ pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];
 #[allow(unused_macros)]
 macro_rules! dispatch_irq_trap {
     ($trap:ident, $($args:tt)*) => {{
-        let mut iter = $crate::trap::$trap.iter();
+        let mut iter = $crate::excp::$trap.iter();
         if let Some(func) = iter.next() {
             if iter.next().is_some() {
                 warn!("Multiple handlers for trap {} are not currently supported", stringify!($trap));

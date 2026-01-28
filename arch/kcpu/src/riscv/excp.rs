@@ -8,13 +8,13 @@ use riscv::{
     register::{scause, stval},
 };
 
-use super::TrapFrame;
-use crate::trap::PageFaultFlags;
+use super::ExceptionContext;
+use crate::excp::PageFaultFlags;
 
 core::arch::global_asm!(
     include_asm_macros!(),
-    include_str!("trap.S"),
-    trapframe_size = const core::mem::size_of::<TrapFrame>(),
+    include_str!("excp.S"),
+    trapframe_size = const core::mem::size_of::<ExceptionContext>(),
 );
 
 fn dispatch_irq_breakpoint(sepc: &mut usize) {
@@ -22,7 +22,7 @@ fn dispatch_irq_breakpoint(sepc: &mut usize) {
     *sepc += 2
 }
 
-fn dispatch_irq_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
+fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(stval::read());
     if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
@@ -43,8 +43,8 @@ fn dispatch_irq_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags) {
 }
 
 #[unsafe(no_mangle)]
-fn riscv_trap_handler(tf: &mut TrapFrame) {
-    let _tf_guard = crate::TrapFrameGuard::new(tf);
+fn riscv_trap_handler(tf: &mut ExceptionContext) {
+    let _tf_guard = crate::ExceptionContextGuard::new(tf);
     let scause = scause::read();
     if let Ok(cause) = scause.cause().try_into::<I, E>() {
         match cause {

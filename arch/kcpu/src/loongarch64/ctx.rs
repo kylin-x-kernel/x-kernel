@@ -73,7 +73,7 @@ impl FpuState {
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-pub struct TrapFrame {
+pub struct ExceptionContext {
     /// All general registers.
     pub regs: GeneralRegisters,
     /// Pre-exception Mode Information
@@ -82,7 +82,7 @@ pub struct TrapFrame {
     pub era: usize,
 }
 
-impl TrapFrame {
+impl ExceptionContext {
     /// Gets the 0th syscall argument.
     pub const fn arg0(&self) -> usize {
         self.regs.a0
@@ -265,14 +265,14 @@ impl TaskContext {
     pub fn switch_to(&mut self, next_ctx: &Self) {
         #[cfg(feature = "tls")]
         {
-            self.tp = crate::asm::read_thread_pointer();
-            unsafe { crate::asm::write_thread_pointer(next_ctx.tp) };
+            self.tp = crate::instrs::read_thread_pointer();
+            unsafe { crate::instrs::write_thread_pointer(next_ctx.tp) };
         }
         #[cfg(feature = "uspace")]
         {
             if self.pgdl != next_ctx.pgdl {
-                unsafe { crate::asm::write_user_page_table(pa!(next_ctx.pgdl)) };
-                crate::asm::flush_tlb(None); // currently flush the entire TLB
+                unsafe { crate::instrs::write_user_page_table(pa!(next_ctx.pgdl)) };
+                crate::instrs::flush_tlb(None); // currently flush the entire TLB
             }
         }
         #[cfg(feature = "fp-simd")]

@@ -53,7 +53,7 @@ extern "C" fn kernel_main_test() {
 }
 unsafe fn enable_fp() {
     #[cfg(feature = "fp-simd")]
-    kcpu::asm::enable_fp();
+    kcpu::instrs::enable_fp();
 }
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
@@ -100,7 +100,7 @@ unsafe extern "C" fn _start_primary() -> ! {
         ",
         switch_to_el1 = sym switch_to_el1,
         init_boot_page_table = sym init_boot_page_table,
-        init_mmu = sym kcpu::init::init_mmu,
+        init_mmu = sym kcpu::boot::init_mmu,
         enable_fp = sym enable_fp,
         boot_pt = sym BOOT_PT_L0,
         phys_virt_offset = const PHYS_VIRT_OFFSET,
@@ -126,8 +126,8 @@ pub(crate) unsafe extern "C" fn _start_secondary() -> ! {
         ldr     x8, ={entry}
         blr     x8
         b      .",
-        switch_to_el1 = sym kcpu::init::switch_to_el1,
-        init_mmu = sym kcpu::init::init_mmu,
+        switch_to_el1 = sym kcpu::boot::switch_to_el1,
+        init_mmu = sym kcpu::boot::init_mmu,
         enable_fp = sym enable_fp,
         boot_pt = sym BOOT_PT_L0,
         phys_virt_offset = const PHYS_VIRT_OFFSET,

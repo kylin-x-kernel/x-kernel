@@ -38,7 +38,7 @@ pub fn is_enabled() -> bool {
 ///
 /// It must be called with interrupts enabled, otherwise it will never return.
 #[inline]
-pub fn wait_for_irqs() {
+pub fn await_interrupts() {
     if cfg!(target_os = "none") {
         unsafe { asm!("hlt") }
     } else {
@@ -48,9 +48,9 @@ pub fn wait_for_irqs() {
 
 /// Halt the current CPU.
 #[inline]
-pub fn halt() {
+pub fn stop_cpu() {
     disable_local();
-    wait_for_irqs(); // should never return
+    await_interrupts(); // should never return
 }
 
 /// Reads the current page table root register for user space (`CR3`).
@@ -141,7 +141,7 @@ pub unsafe fn write_thread_pointer(fs_base: usize) {
 }
 
 #[cfg(feature = "uspace")]
-core::arch::global_asm!(include_str!("user_copy.S"));
+core::arch::global_asm!(include_str!("copy_user.S"));
 
 #[cfg(feature = "uspace")]
 unsafe extern "C" {

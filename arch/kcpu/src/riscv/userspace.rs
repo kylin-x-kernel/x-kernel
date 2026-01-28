@@ -13,13 +13,13 @@ use riscv::{
     register::{scause, sstatus::Sstatus, stval},
 };
 
-pub use crate::uspace_common::{ExceptionKind, ReturnReason};
-use crate::{GeneralRegisters, TrapFrame, trap::PageFaultFlags};
+pub use crate::userspace_common::{ExceptionKind, ReturnReason};
+use crate::{GeneralRegisters, ExceptionContext, excp::PageFaultFlags};
 
 /// Context to enter user space.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct UserContext(TrapFrame);
+pub struct UserContext(ExceptionContext);
 
 impl UserContext {
     /// Creates a new context with the given entry point, user stack pointer,
@@ -31,7 +31,7 @@ impl UserContext {
         #[cfg(feature = "fp-simd")]
         sstatus.set_fs(FS::Initial); // set the FPU to initial state
 
-        Self(TrapFrame {
+        Self(ExceptionContext {
             regs: GeneralRegisters {
                 a0: arg0,
                 sp: ustack_top.as_usize(),
@@ -53,7 +53,7 @@ impl UserContext {
             fn enter_user(uctx: &mut UserContext);
         }
 
-        crate::asm::disable_local();
+        crate::instrs::disable_local();
         unsafe { enter_user(self) };
 
         let scause = scause::read();
@@ -85,13 +85,13 @@ impl UserContext {
             ReturnReason::Unknown
         };
 
-        crate::asm::enable_local();
+        crate::instrs::enable_local();
         ret
     }
 }
 
 impl Deref for UserContext {
-    type Target = TrapFrame;
+    type Target = ExceptionContext;
 
     fn deref(&self) -> &Self::Target {
         &self.0

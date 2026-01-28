@@ -1,17 +1,18 @@
 #[macro_use]
 mod macros;
 
-mod context;
-mod trap;
+mod ctx;
+mod excp;
 mod unaligned;
 
-pub mod asm;
-pub mod init;
+pub mod instrs;
+pub use instrs as asm;
+pub mod boot;
 
 #[cfg(feature = "uspace")]
-pub mod uspace;
+pub mod userspace;
 
 pub use self::{
-    context::{FpuState, GeneralRegisters, TaskContext, TrapFrame},
+    ctx::{FpuState, GeneralRegisters, TaskContext, ExceptionContext as TrapFrame, ExceptionContext},
     unaligned::UnalignedError,
 };

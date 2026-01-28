@@ -52,7 +52,7 @@
     mov     x0, sp
     mov     x1, \kind
     mov     x2, \source
-    bl      aarch64_trap_handler
+    bl      dispatch_exception
     b       .Lexception_return
 .endm
 

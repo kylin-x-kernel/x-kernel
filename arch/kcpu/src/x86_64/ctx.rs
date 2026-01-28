@@ -6,7 +6,7 @@ use memaddr::VirtAddr;
 #[allow(missing_docs)]
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-pub struct TrapFrame {
+pub struct ExceptionContext {
     pub rax: u64,
     pub rcx: u64,
     pub rdx: u64,
@@ -35,7 +35,7 @@ pub struct TrapFrame {
     pub ss: u64,
 }
 
-impl TrapFrame {
+impl ExceptionContext {
     /// Gets the 0th syscall argument.
     pub const fn arg0(&self) -> usize {
         self.rdi as _
@@ -264,7 +264,7 @@ impl TaskContext {
             rsp: 0,
             fs_base: 0,
             #[cfg(feature = "uspace")]
-            cr3: crate::asm::read_kernel_page_table(),
+            cr3: crate::instrs::read_kernel_page_table(),
             #[cfg(feature = "fp-simd")]
             ext_state: ExtendedState::default(),
         }
@@ -313,13 +313,13 @@ impl TaskContext {
         }
         #[cfg(feature = "tls")]
         unsafe {
-            self.fs_base = crate::asm::read_thread_pointer();
-            crate::asm::write_thread_pointer(next_ctx.fs_base);
+            self.fs_base = crate::instrs::read_thread_pointer();
+            crate::instrs::write_thread_pointer(next_ctx.fs_base);
         }
         #[cfg(feature = "uspace")]
         unsafe {
             if next_ctx.cr3 != self.cr3 {
-                crate::asm::write_user_page_table(next_ctx.cr3);
+                crate::instrs::write_user_page_table(next_ctx.cr3);
                 // writing to CR3 has flushed the TLB
             }
         }

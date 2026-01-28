@@ -6,19 +6,21 @@ use aarch64_cpu::{asm::barrier, registers::*};
 pub use kplat::interrupts::{disable_local, enable_local, is_enabled};
 use memaddr::{PhysAddr, VirtAddr};
 
+/// Halt the current CPU.
+#[inline]
+pub fn stop_cpu() {
+    disable_local();
+    // Execute WFI (Wait For Interrupt) instruction
+    // Since interrupts are disabled, this should stop execution until reset
+    aarch64_cpu::asm::wfi(); 
+}
+
 /// Relaxes the current CPU and waits for interrupts.
 ///
 /// It must be called with interrupts enabled, otherwise it will never return.
 #[inline]
-pub fn wait_for_irqs() {
+pub fn await_interrupts() {
     aarch64_cpu::asm::wfi();
-}
-
-/// Halt the current CPU.
-#[inline]
-pub fn halt() {
-    disable_local();
-    aarch64_cpu::asm::wfi(); // should never return
 }
 
 /// Reads the current page table root register for kernel space (`TTBR1_EL1`).
@@ -28,14 +30,20 @@ pub fn halt() {
 ///
 /// Returns the physical address of the page table root.
 #[inline]
-pub fn read_kernel_page_table() -> PhysAddr {
+pub fn kernel_pt_root() -> PhysAddr {
+    let pt_root_reg: usize;
+    
     #[cfg(not(feature = "arm-el2"))]
-    let root = TTBR1_EL1.get();
+    {
+        pt_root_reg = TTBR1_EL1.get() as usize;
+    }
 
     #[cfg(feature = "arm-el2")]
-    let root = TTBR0_EL2.get();
+    {
+        pt_root_reg = TTBR0_EL2.get() as usize;
+    }
 
-    pa!(root as usize)
+    pa!(pt_root_reg)
 }
 
 /// Reads the current page table root register for user space (`TTBR0_EL1`).
@@ -45,9 +53,9 @@ pub fn read_kernel_page_table() -> PhysAddr {
 ///
 /// Returns the physical address of the page table root.
 #[inline]
-pub fn read_user_page_table() -> PhysAddr {
-    let root = TTBR0_EL1.get();
-    pa!(root as usize)
+pub fn user_pt_root() -> PhysAddr {
+    let val = TTBR0_EL1.get();
+    pa!(val as usize)
 }
 
 /// Writes the register to update the current page table root for kernel space
@@ -180,7 +188,7 @@ pub fn enable_fp() {
 }
 
 #[cfg(feature = "uspace")]
-core::arch::global_asm!(include_str!("user_copy.S"));
+core::arch::global_asm!(include_str!("copy_user.S"));
 
 #[cfg(feature = "uspace")]
 unsafe extern "C" {
@@ -193,5 +201,8 @@ unsafe extern "C" {
     /// # Returns
     /// Returns the number of bytes not copied. This means 0 indicates success,
     /// while a value > 0 indicates failure.
-    pub fn user_copy(dst: *mut u8, src: *const u8, size: usize) -> usize;
+    pub fn raw_copy_from_user(dst: *mut u8, src: *const u8, size: usize) -> usize;
 }
+
+/// Alias for compatibility with other architectures
+pub use raw_copy_from_user as user_copy;

@@ -2,7 +2,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![feature(cold_path)]
 #![feature(if_let_guard)]
-#![deny(missing_docs)]
 #![doc = include_str!("../README.md")]
 
 #[macro_use]
@@ -12,14 +11,14 @@ extern crate log;
 extern crate memaddr;
 
 #[macro_use]
-pub mod trap;
+pub mod excp;
 
-mod active_trapframe;
+mod active_exception_context;
 
-pub use active_trapframe::{TrapFrameGuard, active_trap_frame, with_active_trap_frame};
+pub use active_exception_context::{ExceptionContextGuard, active_exception_context, with_active_exception_context};
 
 #[cfg(feature = "uspace")]
-mod uspace_common;
+mod userspace_common;
 
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {

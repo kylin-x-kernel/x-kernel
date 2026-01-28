@@ -1,5 +1,5 @@
 // Ref: https://github.com/torvalds/linux/blob/v6.16/arch/arm64/lib/copy_from_user.S + project exception table style
-// Implements: size_t user_copy(void *dst, const void *src, size_t size)
+// Implements: size_t raw_copy_from_user(void *dst, const void *src, size_t size)
 // Arguments: x0=dst, x1=src, x2=size
 // Returns: 0 on success; remaining bytes (not copied) if a data abort occurs
 
@@ -12,7 +12,7 @@
 .endm
 
 .section .text
-.global user_copy
+.global raw_copy_from_user
 
 // Strategy:
 // 1. Fast path: if size==0 return 0
@@ -23,7 +23,7 @@
 // All load/store pairs are covered by exception table entries pointing to .Lfault
 // so that on fault we compute remaining = original_end - current_dst.
 
-user_copy:
+raw_copy_from_user:
     cbz     x2, .Lsuccess            // nothing to do
     add     x3, x0, x2                // x3 = dst_end (for remaining calc)
     mov     x4, x2                    // save original remaining (debug/unused)

@@ -5,11 +5,11 @@ use core::{
 };
 
 use kplat::{
-    irq::{Handler, HandlerTable, IntrManager, TargetCpu},
-    percpu::this_cpu_id,
+    interrupts::{Handler, HandlerTable, IntrManager, TargetCpu},
 };
+use kplat::cpu::id as this_cpu_id;
 use kspin::SpinNoIrq;
-use riscv::reg_handler::sie;
+use riscv::register::sie;
 use riscv_plic::Plic;
 use sbi_rt::HartMask;
 
@@ -84,7 +84,7 @@ impl IntrManager for IntrManagerImpl {
                 trace!("PLIC set enable: {irq} {enabled}");
                 let mut plic = PLIC.lock();
                 if enabled {
-                    plic.set_prio(irq, 6);
+                    plic.set_priority(irq, 6);
                     plic.enable(irq, this_context());
                 } else {
                     plic.disable(irq, this_context());
@@ -103,7 +103,7 @@ impl IntrManager for IntrManagerImpl {
                 false
             },
             @EX_IRQ => {
-                if IRQ_HANDLER_TABLE.reg_handler_handler(irq, handler) {
+                if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
                     Self::enable(irq, true);
                     true
                 } else {
@@ -137,7 +137,7 @@ impl IntrManager for IntrManagerImpl {
                 warn!("External IRQ should be got from PLIC, not scause");
                 None
             },
-            @EX_IRQ => IRQ_HANDLER_TABLE.unreg_handler_handler(irq).inspect(|_| Self::enable(irq, false))
+            @EX_IRQ => IRQ_HANDLER_TABLE.unregister_handler(irq).inspect(|_| Self::enable(irq, false))
         )
     }
 
@@ -167,7 +167,7 @@ impl IntrManager for IntrManagerImpl {
                     return None;
                 };
                 trace!("IRQ: external {irq}");
-                IRQ_HANDLER_TABLE.dispatch_irq(irq.get() as usize);
+                IRQ_HANDLER_TABLE.handle(irq.get() as usize);
                 plic.complete(this_context(), irq);
                 Some(irq.get() as usize)
             },
@@ -179,22 +179,22 @@ impl IntrManager for IntrManagerImpl {
 
     fn notify_cpu(_interrupt_id: usize, target: TargetCpu) {
         match target {
-            TargetCpu::Current { cpu_id } => {
-                let res = sbi_rt::notify_cpu(HartMask::from_mask_base(1 << cpu_id, 0));
+            TargetCpu::Self_ => {
+                let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << this_cpu_id(), 0));
                 if res.is_err() {
                     warn!("notify_cpu failed: {res:?}");
                 }
             }
-            TargetCpu::Other { cpu_id } => {
-                let res = sbi_rt::notify_cpu(HartMask::from_mask_base(1 << cpu_id, 0));
+            TargetCpu::Specific(cpu_id) => {
+                let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << cpu_id, 0));
                 if res.is_err() {
                     warn!("notify_cpu failed: {res:?}");
                 }
             }
-            TargetCpu::AllExceptCurrent { cpu_id, cpu_num } => {
+            TargetCpu::AllButSelf { me: cpu_id, total: cpu_num } => {
                 for i in 0..cpu_num {
                     if i != cpu_id {
-                        let res = sbi_rt::notify_cpu(HartMask::from_mask_base(1 << i, 0));
+                        let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << i, 0));
                         if res.is_err() {
                             warn!("notify_cpu_all_others failed: {res:?}");
                         }

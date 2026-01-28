@@ -1,4 +1,4 @@
-use kplat::memory::{HwMemory, PhysAddr, RawRange, VirtAddr, pa, va};
+use kplat::memory::{HwMemory, PhysAddr, MemRange, VirtAddr, pa, va};
 
 use crate::config::{
     devices::MMIO_RANGES,
@@ -7,7 +7,7 @@ use crate::config::{
 struct HwMemoryImpl;
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {
-    fn ram_regions() -> &'static [RawRange] {
+    fn ram_regions() -> &'static [MemRange] {
         // TODO: paser dtb to get the available memory ranges
         // We can't directly use `PHYS_MEMORY_BASE` here, because it may has been used by sbi.
         &[(
@@ -16,12 +16,12 @@ impl HwMemory for HwMemoryImpl {
         )]
     }
 
-    fn reserved_ram_regions() -> &'static [RawRange] {
+    fn rsvd_regions() -> &'static [MemRange] {
         &[]
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.
-    fn mmio_regions() -> &'static [RawRange] {
+    fn mmio_regions() -> &'static [MemRange] {
         &MMIO_RANGES
     }
 

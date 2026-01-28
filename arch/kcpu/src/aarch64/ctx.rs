@@ -5,7 +5,7 @@ use memaddr::VirtAddr;
 /// Saved registers when a trap (exception) occurs.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
-pub struct TrapFrame {
+pub struct ExceptionContext {
     /// General-purpose registers (X0..X30).
     pub x: [u64; 31],
     /// Exception Link Register (ELR_EL1).
@@ -17,119 +17,89 @@ pub struct TrapFrame {
     pub __pad: u64,
 }
 
-impl fmt::Debug for TrapFrame {
+impl fmt::Debug for ExceptionContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "TrapFrame: {{")?;
-        for (i, &reg) in self.x.iter().enumerate() {
-            writeln!(f, "    x{i}: {reg:#x},")?;
+        write!(f, "ExceptionContext {{ ")?;
+        
+        // Print general purpose registers
+        for (idx, &val) in self.x.iter().enumerate() {
+            write!(f, "x{}: {:#x}, ", idx, val)?;
         }
-        writeln!(f, "    elr: {:#x},", self.elr)?;
-        writeln!(f, "    spsr: {:#x},", self.spsr)?;
-        writeln!(f, "    pad: {:#x},", self.__pad)?;
-        write!(f, "}}")?;
-        Ok(())
+        
+        write!(f, "elr: {:#x}, ", self.elr)?;
+        write!(f, "spsr: {:#x}, ", self.spsr)?;
+        write!(f, "pad: {:#x} }}", self.__pad)
     }
 }
 
-impl TrapFrame {
+impl ExceptionContext {
+    // There are 6 arguments for syscalls in AArch64 (x0-x5).
+
     /// Gets the 0th syscall argument.
-    pub const fn arg0(&self) -> usize {
-        self.x[0] as _
-    }
+    pub const fn arg0(&self) -> usize { self.x[0] as usize }
+    /// Gets the 1st syscall argument.
+    pub const fn arg1(&self) -> usize { self.x[1] as usize }
+    /// Gets the 2nd syscall argument.
+    pub const fn arg2(&self) -> usize { self.x[2] as usize }
+    /// Gets the 3rd syscall argument.
+    pub const fn arg3(&self) -> usize { self.x[3] as usize }
+    /// Gets the 4th syscall argument.
+    pub const fn arg4(&self) -> usize { self.x[4] as usize }
+    /// Gets the 5th syscall argument.
+    pub const fn arg5(&self) -> usize { self.x[5] as usize }
 
     /// Sets the 0th syscall argument.
-    pub const fn set_arg0(&mut self, a0: usize) {
-        self.x[0] = a0 as _;
-    }
-
-    /// Gets the 1st syscall argument.
-    pub const fn arg1(&self) -> usize {
-        self.x[1] as _
-    }
-
+    pub const fn set_arg0(&mut self, val: usize) { self.x[0] = val as u64; }
     /// Sets the 1st syscall argument.
-    pub const fn set_arg1(&mut self, a1: usize) {
-        self.x[1] = a1 as _;
-    }
-
-    /// Gets the 2nd syscall argument.
-    pub const fn arg2(&self) -> usize {
-        self.x[2] as _
-    }
-
+    pub const fn set_arg1(&mut self, val: usize) { self.x[1] = val as u64; }
     /// Sets the 2nd syscall argument.
-    pub const fn set_arg2(&mut self, a2: usize) {
-        self.x[2] = a2 as _;
-    }
-
-    /// Gets the 3rd syscall argument.
-    pub const fn arg3(&self) -> usize {
-        self.x[3] as _
-    }
-
+    pub const fn set_arg2(&mut self, val: usize) { self.x[2] = val as u64; }
     /// Sets the 3rd syscall argument.
-    pub const fn set_arg3(&mut self, a3: usize) {
-        self.x[3] = a3 as _;
-    }
-
-    /// Gets the 4th syscall argument.
-    pub const fn arg4(&self) -> usize {
-        self.x[4] as _
-    }
-
+    pub const fn set_arg3(&mut self, val: usize) { self.x[3] = val as u64; }
     /// Sets the 4th syscall argument.
-    pub const fn set_arg4(&mut self, a4: usize) {
-        self.x[4] = a4 as _;
-    }
-
-    /// Gets the 5th syscall argument.
-    pub const fn arg5(&self) -> usize {
-        self.x[5] as _
-    }
-
+    pub const fn set_arg4(&mut self, val: usize) { self.x[4] = val as u64; }
     /// Sets the 5th syscall argument.
-    pub const fn set_arg5(&mut self, a5: usize) {
-        self.x[5] = a5 as _;
-    }
+    pub const fn set_arg5(&mut self, val: usize) { self.x[5] = val as u64; }
 
     /// Gets the instruction pointer.
     pub const fn ip(&self) -> usize {
-        self.elr as _
+        self.elr as usize
     }
 
     /// Sets the instruction pointer.
-    pub const fn set_ip(&mut self, pc: usize) {
-        self.elr = pc as _;
+    pub const fn set_ip(&mut self, val: usize) {
+        self.elr = val as u64;
     }
 
-    /// Get the syscall number.
+    /// Get the syscall number (x8).
     pub const fn sysno(&self) -> usize {
         self.x[8] as usize
     }
 
     /// Sets the syscall number.
-    pub const fn set_sysno(&mut self, sysno: usize) {
-        self.x[8] = sysno as _;
+    pub const fn set_sysno(&mut self, val: usize) {
+        self.x[8] = val as u64;
     }
 
     /// Gets the return value register.
     pub const fn retval(&self) -> usize {
-        self.x[0] as _
+        self.x[0] as usize
     }
 
     /// Sets the return value register.
-    pub const fn set_retval(&mut self, r0: usize) {
-        self.x[0] = r0 as _;
+    pub const fn set_retval(&mut self, val: usize) {
+        self.x[0] = val as u64;
     }
 
-    /// Sets the return address.
-    pub const fn set_ra(&mut self, lr: usize) {
-        self.x[30] = lr as _;
+    /// Sets the return address (LR/x30).
+    pub const fn set_ra(&mut self, val: usize) {
+        self.x[30] = val as u64;
     }
 
     /// Unwind the stack and get the backtrace.
     pub fn backtrace(&self) -> backtrace::Backtrace {
-        backtrace::Backtrace::capture_trap(self.x[29] as _, self.elr as _, self.x[30] as _)
+        let (fp, lr) = (self.x[29], self.x[30]);
+        backtrace::Backtrace::capture_trap(fp as _, self.elr as _, lr as _)
     }
 }
 
@@ -231,8 +201,8 @@ impl TaskContext {
     pub fn switch_to(&mut self, next_ctx: &Self) {
         #[cfg(feature = "tls")]
         {
-            self.tpidr_el0 = crate::asm::read_thread_pointer() as _;
-            unsafe { crate::asm::write_thread_pointer(next_ctx.tpidr_el0 as _) };
+            self.tpidr_el0 = crate::instrs::read_thread_pointer() as _;
+            unsafe { crate::instrs::write_thread_pointer(next_ctx.tpidr_el0 as _) };
         }
         #[cfg(feature = "fp-simd")]
         {
@@ -241,8 +211,8 @@ impl TaskContext {
         }
         #[cfg(feature = "uspace")]
         if self.ttbr0_el1 != next_ctx.ttbr0_el1 {
-            unsafe { crate::asm::write_user_page_table(next_ctx.ttbr0_el1) };
-            crate::asm::flush_tlb(None); // currently flush the entire TLB
+            unsafe { crate::instrs::write_user_page_table(next_ctx.ttbr0_el1) };
+            crate::instrs::flush_tlb(None); // currently flush the entire TLB
         }
         unsafe { context_switch(self, next_ctx) }
     }

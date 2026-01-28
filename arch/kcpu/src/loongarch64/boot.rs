@@ -26,11 +26,11 @@ pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
 
     // Configure page table walking
     unsafe {
-        crate::asm::write_pwc(LA64MetaData::PWCL_VALUE, LA64MetaData::PWCH_VALUE);
-        crate::asm::write_kernel_page_table(root_paddr);
-        crate::asm::write_user_page_table(pa!(0));
+        crate::instrs::write_pwc(LA64MetaData::PWCL_VALUE, LA64MetaData::PWCH_VALUE);
+        crate::instrs::write_kernel_page_table(root_paddr);
+        crate::instrs::write_user_page_table(pa!(0));
     }
-    crate::asm::flush_tlb(None);
+    crate::instrs::flush_tlb(None);
 
     // Enable mapped address translation mode
     crmd::set_pg(true);
@@ -41,12 +41,12 @@ pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
 /// In detail, it initializes the exception vector on LoongArch64 platforms.
 pub fn init_trap() {
     #[cfg(feature = "uspace")]
-    crate::uspace_common::init_exception_table();
+    crate::userspace_common::init_exception_table();
     unsafe {
         extern "C" {
             fn exception_entry_base();
         }
         core::arch::asm!(include_asm_macros!(), "csrwr $r0, KSAVE_KSP");
-        crate::asm::write_exception_entry_base(exception_entry_base as usize);
+        crate::instrs::write_exception_entry_base(exception_entry_base as usize);
     }
 }

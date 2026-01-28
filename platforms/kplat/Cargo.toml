@@ -22,7 +22,7 @@ handler_table = { version = "0.1.2", optional = true }
 const-str = "0.6.2"
 kplat-macros = { path = "../kplat-macros" }
 kspin = "0.1"
-percpu = "0.2.0"
+percpu = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

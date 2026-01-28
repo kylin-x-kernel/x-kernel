@@ -1,6 +1,7 @@
 use memaddr::VirtAddr;
 
-use crate::{TrapFrame, trap::PageFaultFlags, uspace::ExceptionInfo};
+use crate::{ExceptionContext, excp::PageFaultFlags};
+use crate::userspace::ExceptionInfo;
 
 /// A reason as to why the control of the CPU is returned from
 /// the user space to the kernel.
@@ -43,7 +44,7 @@ unsafe extern "C" {
     static _ex_table_end: [ExceptionTableEntry; 0];
 }
 
-impl TrapFrame {
+impl ExceptionContext {
     pub(crate) fn fixup_exception(&mut self) -> bool {
         let entries = unsafe {
             core::slice::from_raw_parts(

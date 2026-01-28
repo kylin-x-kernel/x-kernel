@@ -27,6 +27,7 @@ riscv_plic = { version = "0.2", optional = true }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
 uart_16550 = "0.4.0"
 
+percpu = { workspace = true }
 platconfig-macros = { workspace = true }
 kcpu = { workspace = true }
 kplat = { workspace = true }

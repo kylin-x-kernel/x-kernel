@@ -8,19 +8,19 @@ use loongArch64::register::{
 };
 use memaddr::VirtAddr;
 
-pub use crate::uspace_common::{ExceptionKind, ReturnReason};
-use crate::{TrapFrame, trap::PageFaultFlags};
+pub use crate::userspace_common::{ExceptionKind, ReturnReason};
+use crate::{ExceptionContext, excp::PageFaultFlags};
 
 /// Context to enter user space.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct UserContext(TrapFrame);
+pub struct UserContext(ExceptionContext);
 
 impl UserContext {
     /// Creates a new context with the given entry point, user stack pointer,
     /// and the argument.
     pub fn new(entry: usize, ustack_top: VirtAddr, arg0: usize) -> Self {
-        let mut trap_frame = TrapFrame::default();
+        let mut trap_frame = ExceptionContext::default();
         const PPLV_UMODE: usize = 0b11;
         const PIE: usize = 1 << 2;
         trap_frame.regs.sp = ustack_top.as_usize();
@@ -41,7 +41,7 @@ impl UserContext {
             fn enter_user(uctx: &mut UserContext);
         }
 
-        crate::asm::disable_local();
+        crate::instrs::disable_local();
         unsafe { enter_user(self) };
 
         let estat = estat::read();
@@ -74,13 +74,13 @@ impl UserContext {
             _ => ReturnReason::Unknown,
         };
 
-        crate::asm::enable_local();
+        crate::instrs::enable_local();
         ret
     }
 }
 
 impl Deref for UserContext {
-    type Target = TrapFrame;
+    type Target = ExceptionContext;
 
     fn deref(&self) -> &Self::Target {
         &self.0

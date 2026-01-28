@@ -1,6 +1,6 @@
-use kplat::timer::{GlobalTimer, NANOS_PER_SEC};
-use riscv::reg_handler::time;
-const NANOS_PER_TICK: u64 = NANOS_PER_SEC / crate::config::devices::TIMER_FREQUENCY as u64;
+use kplat::timer::{GlobalTimer, NS_SEC};
+use riscv::register::time;
+const NANOS_PER_TICK: u64 = NS_SEC / crate::config::devices::TIMER_FREQUENCY as u64;
 static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
 pub(super) fn early_init() {
     #[cfg(feature = "rtc")]

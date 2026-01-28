@@ -111,7 +111,7 @@ impl FpState {
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TrapFrame {
+pub struct ExceptionContext {
     /// All general registers.
     pub regs: GeneralRegisters,
     /// Supervisor Exception Program Counter.
@@ -120,7 +120,7 @@ pub struct TrapFrame {
     pub sstatus: sstatus::Sstatus,
 }
 
-impl Default for TrapFrame {
+impl Default for ExceptionContext {
     fn default() -> Self {
         Self {
             regs: GeneralRegisters::default(),
@@ -130,7 +130,7 @@ impl Default for TrapFrame {
     }
 }
 
-impl TrapFrame {
+impl ExceptionContext {
     /// Gets the 0th syscall argument.
     pub const fn arg0(&self) -> usize {
         self.regs.a0
@@ -303,7 +303,7 @@ impl TaskContext {
     pub fn new() -> Self {
         Self {
             #[cfg(feature = "uspace")]
-            satp: crate::asm::read_kernel_page_table(),
+            satp: crate::instrs::read_kernel_page_table(),
             ..Default::default()
         }
     }
@@ -332,13 +332,13 @@ impl TaskContext {
     pub fn switch_to(&mut self, next_ctx: &Self) {
         #[cfg(feature = "tls")]
         {
-            self.tp = crate::asm::read_thread_pointer();
-            unsafe { crate::asm::write_thread_pointer(next_ctx.tp) };
+            self.tp = crate::instrs::read_thread_pointer();
+            unsafe { crate::instrs::write_thread_pointer(next_ctx.tp) };
         }
         #[cfg(feature = "uspace")]
         if self.satp != next_ctx.satp {
-            unsafe { crate::asm::write_user_page_table(next_ctx.satp) };
-            crate::asm::flush_tlb(None); // currently flush the entire TLB
+            unsafe { crate::instrs::write_user_page_table(next_ctx.satp) };
+            crate::instrs::flush_tlb(None); // currently flush the entire TLB
         }
         #[cfg(feature = "fp-simd")]
         {

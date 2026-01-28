@@ -16,9 +16,9 @@ use super::{
     TrapFrame,
     asm::{read_thread_pointer, write_thread_pointer},
     gdt,
-    trap::{IRQ_VECTOR_END, IRQ_VECTOR_START, LEGACY_SYSCALL_VECTOR, err_code_to_flags},
+    excp::{IRQ_VECTOR_END, IRQ_VECTOR_START, LEGACY_SYSCALL_VECTOR, err_code_to_flags},
 };
-pub use crate::uspace_common::{ExceptionKind, ReturnReason};
+pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 
 /// Context to enter user space.
 #[derive(Debug, Clone, Copy)]
@@ -75,7 +75,7 @@ impl UserContext {
         assert_eq!(self.cs, gdt::UCODE64.0 as _);
         assert_eq!(self.ss, gdt::UDATA.0 as _);
 
-        crate::asm::disable_local();
+        crate::instrs::disable_local();
 
         let kernel_fs_base = read_thread_pointer();
         unsafe { write_thread_pointer(self.fs_base as _) };
@@ -108,7 +108,7 @@ impl UserContext {
             }),
         };
 
-        crate::asm::enable_local();
+        crate::instrs::enable_local();
         ret
     }
 }

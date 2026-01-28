@@ -254,7 +254,7 @@ pub fn run_idle() -> ! {
         yield_now();
         trace!("idle task: waiting for IRQs...");
         #[cfg(feature = "irq")]
-        axhal::asm::wait_for_irqs();
+        axhal::asm::await_interrupts();
     }
 }
 
