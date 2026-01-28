@@ -5,7 +5,7 @@ use core::fmt;
 
 use memaddr::{AddrRange, MemoryAddr};
 
-use crate::{MemorySetBackend, MemorySetError, MemorySetResult, MemoryArea};
+use crate::{MemoryArea, MemorySetBackend, MemorySetError, MemorySetResult};
 
 /// A container that maintains memory mappings ([`MemoryArea`]).
 pub struct MemorySet<B: MemorySetBackend> {
@@ -37,15 +37,15 @@ impl<B: MemorySetBackend> MemorySet<B> {
 
     /// Returns whether the given address range overlaps with any existing area.
     pub fn overlaps(&self, range: AddrRange<B::Addr>) -> bool {
-        if let Some((_, before)) = self.areas.range(..range.start).last() {
-            if before.va_range().overlaps(range) {
-                return true;
-            }
+        if let Some((_, before)) = self.areas.range(..range.start).last()
+            && before.va_range().overlaps(range)
+        {
+            return true;
         }
-        if let Some((_, after)) = self.areas.range(range.start..).next() {
-            if after.va_range().overlaps(range) {
-                return true;
-            }
+        if let Some((_, after)) = self.areas.range(range.start..).next()
+            && after.va_range().overlaps(range)
+        {
+            return true;
         }
         false
     }
@@ -77,7 +77,7 @@ impl<B: MemorySetBackend> MemorySet<B> {
         limit: AddrRange<B::Addr>,
         align: usize,
     ) -> Option<B::Addr> {
-        if size % align != 0 {
+        if !size.is_multiple_of(align) {
             // size must be a multiple of align.
             return None;
         }
@@ -220,7 +220,9 @@ impl<B: MemorySetBackend> MemorySet<B> {
         update_flags: impl Fn(B::Flags) -> Option<B::Flags>,
         page_table: &mut B::PageTable,
     ) -> MemorySetResult {
-        let end = start.checked_add(size).ok_or(MemorySetError::InvalidParam)?;
+        let end = start
+            .checked_add(size)
+            .ok_or(MemorySetError::InvalidParam)?;
         let mut to_insert = Vec::new();
         for (&area_start, area) in self.areas.iter_mut() {
             let area_end = area.end();
