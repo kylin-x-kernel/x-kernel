@@ -36,7 +36,7 @@ impl HwMemory for HwMemoryImpl {
     ///
     /// Reserved memory can be contained in [`ram_regions`], they are not
     /// allocatable but should be mapped to kernel's address space.
-    fn reserved_ram_regions() -> &'static [RawRange] {
+    fn rsvd_regions() -> &'static [RawRange] {
         FDT_MEM
             .call_once(|| {
                 [

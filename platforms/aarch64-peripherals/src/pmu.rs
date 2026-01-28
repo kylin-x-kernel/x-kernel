@@ -126,11 +126,11 @@ macro_rules! pmu_if_impl {
         use kplat::perf::OverflowHandler;
         #[impl_dev_interface]
         impl kplat::perf::PerfMgr for $name {
-            fn dispatch_irq_overflows() -> bool {
+            fn on_overflow() -> bool {
                 $crate::pmu::dispatch_irq_overflows()
             }
 
-            fn reg_handler_overflow_handler(index: u32, handler: OverflowHandler) -> bool {
+            fn reg_cb(index: u32, handler: OverflowHandler) -> bool {
                 $crate::pmu::reg_handler_overflow_handler(index, handler)
             }
         }
