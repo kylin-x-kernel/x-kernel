@@ -9,6 +9,7 @@ use khal::{
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
 use kspin::SpinNoIrq;
+use ksync::Mutex;
 use memaddr::{PhysAddr, VirtAddr, VirtAddrRange};
 
 use crate::{

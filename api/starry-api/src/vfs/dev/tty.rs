@@ -3,12 +3,12 @@ use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
 
 use axerrno::{AxError, AxResult};
 use axfs_ng_vfs::NodeFlags;
-use axsync::Mutex;
 use axtask::{
     current,
     future::{block_on, poll_io},
 };
 use kpoll::{IoEvents, Pollable};
+use ksync::Mutex;
 use starry_core::{task::AsThread, vfs::SimpleFs};
 use starry_process::Process;
 use starry_vm::{VmMutPtr, VmPtr};

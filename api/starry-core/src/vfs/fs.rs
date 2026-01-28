@@ -5,7 +5,7 @@ use axfs_ng_vfs::{
     DeviceId, DirEntry, DirNode, Filesystem, FilesystemOps, Metadata, MetadataUpdate, NodeOps,
     NodePermission, NodeType, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
 };
-use axsync::Mutex;
+use ksync::Mutex;
 use slab::Slab;
 
 use super::DirMaker;

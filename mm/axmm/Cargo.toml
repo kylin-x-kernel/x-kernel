@@ -20,7 +20,7 @@ axerrno = { workspace = true }
 axfs = { workspace = true }
 axfs-ng-vfs = { workspace = true }
 khal = { workspace = true, features = ["paging"] }
-axsync = { workspace = true }
+ksync = { workspace = true }
 axtask = { workspace = true }
 enum_dispatch = { workspace = true }
 kspin = { workspace = true }

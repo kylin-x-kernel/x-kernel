@@ -7,6 +7,6 @@ homepage.workspace = true
 
 [dependencies]
 axdriver = { workspace = true, features = ["display"] }
-axsync.workspace = true
+ksync.workspace = true
 lazyinit.workspace = true
 log.workspace = true

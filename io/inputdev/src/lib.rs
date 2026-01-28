@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::mem;
 
 use axdriver::{AxDeviceContainer, prelude::*};
-use axsync::Mutex;
+use ksync::Mutex;
 use lazyinit::LazyInit;
 
 static INPUT_DEVICES: LazyInit<Mutex<Vec<AxInputDevice>>> = LazyInit::new();

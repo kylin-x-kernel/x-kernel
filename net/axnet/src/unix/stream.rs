@@ -6,9 +6,9 @@ use core::{
 
 use async_trait::async_trait;
 use axerrno::{AxError, AxResult};
-use axsync::Mutex;
 use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
+use ksync::Mutex;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Observer, Producer, Split},

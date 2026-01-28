@@ -1,5 +1,5 @@
 [package]
-name = "axsync"
+name = "ksync"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -21,7 +21,7 @@ lock_api.workspace = true
 khal = { workspace = true, optional = true}
 
 [dev-dependencies]
-axsync = { workspace = true }
+ksync = { workspace = true }
 axtask = { workspace = true, features = ["test"] }
 # FIXME: `rand` crate can not be used since https://github.com/google/zerocopy/pull/2574
 fastrand = "2.3"

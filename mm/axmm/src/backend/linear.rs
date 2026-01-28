@@ -1,8 +1,8 @@
 use alloc::sync::Arc;
 
 use axerrno::AxResult;
-use axsync::Mutex;
 use khal::paging::{MappingFlags, PageSize, PageTableMut};
+use ksync::Mutex;
 use memaddr::{PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{

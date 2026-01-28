@@ -37,7 +37,7 @@ mod wrapper;
 use alloc::{borrow::ToOwned, boxed::Box};
 
 use axdriver::{AxDeviceContainer, prelude::*};
-use axsync::Mutex;
+use ksync::Mutex;
 use lazyinit::LazyInit;
 use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
 pub use socket::*;

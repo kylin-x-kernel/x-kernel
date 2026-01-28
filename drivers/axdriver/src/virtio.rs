@@ -177,7 +177,7 @@ pub struct VirtIoHalImpl;
 cfg_if! {
     if #[cfg(feature = "crosvm")] {
         use hashbrown::HashMap;
-        use axsync::Mutex;
+        use ksync::Mutex;
         use spin::Lazy;
         const PAGE_SIZE: usize = 0x1000; // define page size as 4KB
         const VIRTIO_QUEUE_SIZE: usize = 32;

@@ -6,12 +6,12 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axsync::Mutex;
 use axtask::{
     current,
     future::{block_on, poll_io},
 };
 use kpoll::{IoEvents, PollSet, Pollable};
+use ksync::Mutex;
 use linux_raw_sys::{general::S_IFIFO, ioctl::FIONREAD};
 use memaddr::PAGE_SIZE_4K;
 use ringbuf::{

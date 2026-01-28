@@ -6,7 +6,7 @@ use core::{
 use axerrno::{AxError, AxResult, LinuxError};
 use axfs::FileBackend;
 use axfs_ng_vfs::{DeviceId, NodeFlags, VfsResult};
-use axsync::Mutex;
+use ksync::Mutex;
 use linux_raw_sys::{
     ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKRAGET, BLKRASET, BLKROGET, BLKROSET},
     loop_device::{LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info},

@@ -9,9 +9,9 @@ use core::{
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, FsContext};
 use axfs_ng_vfs::{Location, Metadata, NodeFlags};
-use axsync::Mutex;
 use axtask::future::{block_on, poll_io};
 use kpoll::{IoEvents, Pollable};
+use ksync::Mutex;
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 use super::{FileLike, Kstat, get_file_like};

@@ -2,7 +2,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::ops::Deref;
 
 use axerrno::AxResult;
-use axsync::Mutex;
+use ksync::Mutex;
 use khal::paging::{MappingFlags, PageSize, PageTableMut};
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
 

@@ -19,7 +19,7 @@ kio.workspace = true
 klogger.workspace = true
 axmm.workspace = true
 kpoll.workspace = true
-axsync.workspace = true
+ksync.workspace = true
 axtask.workspace = true
 bitflags.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }

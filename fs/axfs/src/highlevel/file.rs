@@ -10,12 +10,12 @@ use core::{num::NonZeroUsize, ops::Range, task::Context};
 use axfs_ng_vfs::{
     FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
-use axsync::Mutex;
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use kalloc::{UsageKind, global_allocator};
 use khal::mem::{PhysAddr, VirtAddr, v2p};
 use kio::{SeekFrom, prelude::*};
 use kpoll::{IoEvents, Pollable};
+use ksync::Mutex;
 use lru::LruCache;
 use spin::RwLock;
 

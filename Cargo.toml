@@ -9,11 +9,11 @@ edition = "2024"
 license = "Apache-2.0"
 
 authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
-homepage = "https://github.com/kylin-x-kernel/kylin-x-kernel"
-repository = "https://github.com/kylin-x-kernel/kylin-x-kernel"
+homepage = "https://gitee.com/openkylin/x-kernel"
+repository = "https://gitee.com/openkylin/starry-os"
 keywords = ["kylin-x-kernel", "kernel"]
 categories = ["os", "no-std"]
-documentation = "https://kylin-x-kernel.github.io/kylin-x-kernel"
+documentation = "https://gitee.com/openkylin/x-kernel"
 
 [workspace.dependencies]
 # Arceos Modules
@@ -45,7 +45,7 @@ klogger = { path = "util/klogger" }
 axmm = { path = "mm/axmm" }
 axnet = { path = "net/axnet" }
 axruntime = { path = "core/axruntime" }
-axsync = { path = "core/axsync" }
+ksync = { path = "core/ksync" }
 axtask = { path = "core/axtask" }
 axwatchdog = { path = "io/axwatchdog" }
 kcpu = { path = "arch/kcpu" }

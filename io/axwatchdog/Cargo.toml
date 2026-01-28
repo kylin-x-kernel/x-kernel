@@ -21,5 +21,5 @@ percpu.workspace = true
 lazyinit.workspace = true
 kspin.workspace = true
 backtrace.workspace = true
-axsync = { workspace = true, features = ["watchdog"] }
+ksync = { workspace = true, features = ["watchdog"] }
 kplat.workspace = true

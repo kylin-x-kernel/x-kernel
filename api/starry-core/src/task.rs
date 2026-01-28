@@ -18,11 +18,11 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axmm::AddrSpace;
-use axsync::{Mutex, spin::SpinNoIrq};
 use axtask::{AxTaskRef, TaskExt, TaskInner, WeakAxTaskRef, current};
 use extern_trait::extern_trait;
 use hashbrown::HashMap;
 use kpoll::PollSet;
+use ksync::{Mutex, spin::SpinNoIrq};
 use lazy_static::lazy_static;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;

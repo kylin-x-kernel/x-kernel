@@ -17,7 +17,7 @@ use core::any::Any;
 
 use axerrno::AxError;
 use axfs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsResult};
-use axsync::Mutex;
+use ksync::Mutex;
 #[cfg(feature = "dev-log")]
 pub use log::bind_dev_log;
 use rand::{RngCore, SeedableRng, rngs::SmallRng};

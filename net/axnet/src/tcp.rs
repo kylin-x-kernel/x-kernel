@@ -6,9 +6,9 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult, ax_bail, ax_err_type};
-use axsync::Mutex;
 use kio::prelude::*;
 use kpoll::{IoEvents, PollSet, Pollable};
+use ksync::Mutex;
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp as smol,

@@ -2,7 +2,7 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use axerrno::{AxError, AxResult};
-use axsync::Mutex;
+use ksync::Mutex;
 use enum_dispatch::enum_dispatch;
 use kalloc::{UsageKind, global_allocator};
 use khal::{

@@ -6,9 +6,9 @@ use axfs_ng_vfs::{
     FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType,
     Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
 };
-use axsync::Mutex;
 use hashbrown::HashMap;
 use kpoll::{IoEvents, Pollable};
+use ksync::Mutex;
 use slab::Slab;
 use starry_core::vfs::dummy_stat_fs;
 

@@ -8,12 +8,12 @@ use async_trait::async_trait;
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, OpenOptions};
 use axfs_ng_vfs::NodeType;
-use axsync::Mutex;
 use axtask::future::{block_on, interruptible};
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
 use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, Pollable};
+use ksync::Mutex;
 use lazy_static::lazy_static;
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};

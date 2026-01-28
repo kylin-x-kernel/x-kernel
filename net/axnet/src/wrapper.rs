@@ -1,8 +1,8 @@
 use alloc::vec;
 
 use axerrno::{AxError, AxResult};
-use axsync::Mutex;
 use event_listener::Event;
+use ksync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},
     socket::{AnySocket, Socket},
