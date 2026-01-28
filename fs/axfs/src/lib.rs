@@ -7,7 +7,7 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-use kdriver::{AxBlockDevice, AxDeviceContainer, prelude::*};
+use kdriver::{BlockDevice as KBlockDevice, DeviceContainer, prelude::*};
 
 #[cfg(feature = "fat")]
 mod disk;
@@ -16,7 +16,7 @@ mod fs;
 mod highlevel;
 pub use highlevel::*;
 
-pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
+pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
     info!("Initialize filesystem subsystem...");
 
     let dev = {

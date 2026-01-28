@@ -28,7 +28,7 @@ struct Neighbor {
 pub struct EthernetDevice {
     #[allow(dead_code)]
     name: String,
-    inner: AxNetDevice,
+    inner: NetDevice,
     neighbors: HashMap<IpAddress, Option<Neighbor>>,
     ip: Ipv4Cidr,
 
@@ -37,7 +37,7 @@ pub struct EthernetDevice {
 impl EthernetDevice {
     const NEIGHBOR_TTL: Duration = Duration::from_secs(60);
 
-    pub fn new(name: String, inner: AxNetDevice, ip: Ipv4Cidr) -> Self {
+    pub fn new(name: String, inner: NetDevice, ip: Ipv4Cidr) -> Self {
         let pending_packets = PacketBuffer::new(
             vec![PacketMetadata::EMPTY; ETHERNET_MAX_PENDING_PACKETS],
             vec![
@@ -62,7 +62,7 @@ impl EthernetDevice {
     }
 
     fn send_to<F>(
-        inner: &mut AxNetDevice,
+        inner: &mut NetDevice,
         dst: EthernetAddress,
         size: usize,
         f: F,

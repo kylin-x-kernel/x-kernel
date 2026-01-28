@@ -2,7 +2,7 @@
 //!
 //! All detected devices are composed into [`AllDevices`] and returned by [`init_drivers`].
 //! 
-//! Device categories: [`AxNetDevice`], [`AxBlockDevice`], [`AxDisplayDevice`].
+//! Device categories: [`NetDevice`], [`BlockDevice`], [`DisplayDevice`].
 //!
 //! Supports static and dynamic device models via the `dyn` feature.
 
@@ -32,31 +32,31 @@ pub mod prelude;
 #[allow(unused_imports)]
 use self::prelude::*;
 #[cfg(feature = "block")]
-pub use self::structs::AxBlockDevice;
+pub use self::structs::BlockDevice;
 #[cfg(feature = "display")]
-pub use self::structs::AxDisplayDevice;
+pub use self::structs::DisplayDevice;
 #[cfg(feature = "net")]
-pub use self::structs::AxNetDevice;
-pub use self::structs::{AxDeviceContainer, AxDeviceEnum};
+pub use self::structs::NetDevice;
+pub use self::structs::{DeviceContainer, DeviceEnum};
 
 /// A structure that contains all device drivers, organized by their category.
 #[derive(Default)]
 pub struct AllDevices {
     /// All network device drivers.
     #[cfg(feature = "net")]
-    pub net: AxDeviceContainer<AxNetDevice>,
+    pub net: DeviceContainer<NetDevice>,
     /// All block device drivers.
     #[cfg(feature = "block")]
-    pub block: AxDeviceContainer<AxBlockDevice>,
+    pub block: DeviceContainer<BlockDevice>,
     /// All graphics device drivers.
     #[cfg(feature = "display")]
-    pub display: AxDeviceContainer<AxDisplayDevice>,
+    pub display: DeviceContainer<DisplayDevice>,
     /// All input device drivers.
     #[cfg(feature = "input")]
-    pub input: AxDeviceContainer<AxInputDevice>,
+    pub input: DeviceContainer<InputDevice>,
     /// All vsock device drivers.
     #[cfg(feature = "vsock")]
-    pub vsock: AxDeviceContainer<AxVsockDevice>,
+    pub vsock: DeviceContainer<VsockDevice>,
 }
 
 impl AllDevices {
@@ -82,18 +82,18 @@ impl AllDevices {
 
     /// Adds device to corresponding container.
     #[allow(dead_code)]
-    fn add_device(&mut self, dev: AxDeviceEnum) {
+    fn add_device(&mut self, dev: DeviceEnum) {
         match dev {
             #[cfg(feature = "net")]
-            AxDeviceEnum::Net(dev) => self.net.push(dev),
+            DeviceEnum::Net(dev) => self.net.push(dev),
             #[cfg(feature = "block")]
-            AxDeviceEnum::Block(dev) => self.block.push(dev),
+            DeviceEnum::Block(dev) => self.block.push(dev),
             #[cfg(feature = "display")]
-            AxDeviceEnum::Display(dev) => self.display.push(dev),
+            DeviceEnum::Display(dev) => self.display.push(dev),
             #[cfg(feature = "input")]
-            AxDeviceEnum::Input(dev) => self.input.push(dev),
+            DeviceEnum::Input(dev) => self.input.push(dev),
             #[cfg(feature = "vsock")]
-            AxDeviceEnum::Vsock(dev) => self.vsock.push(dev),
+            DeviceEnum::Vsock(dev) => self.vsock.push(dev),
         }
     }
 }

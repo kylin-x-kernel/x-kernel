@@ -37,7 +37,7 @@ mod wrapper;
 use alloc::{borrow::ToOwned, boxed::Box};
 
 use ksync::Mutex;
-use kdriver::{AxDeviceContainer, prelude::*};
+use kdriver::{DeviceContainer, prelude::*};
 use lazyinit::LazyInit;
 use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
 pub use socket::*;
@@ -57,7 +57,7 @@ static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
 static SERVICE: LazyInit<Mutex<Service>> = LazyInit::new();
 
 /// Initializes the network subsystem by NIC devices.
-pub fn init_network(mut net_devs: AxDeviceContainer<AxNetDevice>) {
+pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
     info!("Initialize network subsystem...");
 
     let mut router = Router::new();

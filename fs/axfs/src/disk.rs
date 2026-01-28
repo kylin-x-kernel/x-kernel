@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, vec};
 use core::mem;
 
-use kdriver::prelude::*;
+use kdriver::{BlockDevice as KBlockDevice, prelude::*};
 
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
     let (first, rem) = buf.split_at(cnt);
@@ -18,7 +18,7 @@ fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
 
 /// A disk device with a cursor.
 pub struct SeekableDisk {
-    dev: AxBlockDevice,
+    dev: KBlockDevice,
 
     block_id: u64,
     offset: usize,
@@ -34,7 +34,7 @@ pub struct SeekableDisk {
 
 impl SeekableDisk {
     /// Create a new disk.
-    pub fn new(dev: AxBlockDevice) -> Self {
+    pub fn new(dev: KBlockDevice) -> Self {
         assert!(dev.block_size().is_power_of_two());
         let block_size_log2 = dev.block_size().trailing_zeros() as u8;
         let read_buffer = vec![0u8; dev.block_size()].into_boxed_slice();
