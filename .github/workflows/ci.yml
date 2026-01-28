@@ -3,8 +3,8 @@ name:  CI Test
 on:
   push:
     branches:
-      - main,feaure/x86cismp=4
-      
+     
+
   pull_request:
     branches:
       - main
