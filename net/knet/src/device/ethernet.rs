@@ -287,10 +287,10 @@ impl NetDeviceOps for EthernetDevice {
         timestamp: Instant,
     ) -> bool {
         if next_hop.is_broadcast()
-            || self.ipv4_cidr.broadcast().map(IpAddress::Ipv4) == Some(next_hop)
+            || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop)
         {
-            Self::send_ethernet(
-                &mut self.nic,
+            Self::send_to(
+                &mut self.inner,
                 EthernetAddress::BROADCAST,
                 ip_packet.len(),
                 |buf| buf.copy_from_slice(ip_packet),
