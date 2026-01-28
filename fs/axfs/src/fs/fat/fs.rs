@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::marker::PhantomPinned;
 
-use axdriver::AxBlockDevice;
+use kdriver::AxBlockDevice;
 use axfs_ng_vfs::{
     DirEntry, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
 };

@@ -7,8 +7,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::mem;
 
-use axdriver::{AxDeviceContainer, prelude::*};
 use ksync::Mutex;
+use kdriver::{AxDeviceContainer, prelude::*};
 use lazyinit::LazyInit;
 
 static INPUT_DEVICES: LazyInit<Mutex<Vec<AxInputDevice>>> = LazyInit::new();

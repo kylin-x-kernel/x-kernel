@@ -6,7 +6,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-axdriver = { workspace = true, features = ["display"] }
 ksync.workspace = true
+kdriver = { workspace = true, features = ["display"] }
 lazyinit.workspace = true
 log.workspace = true

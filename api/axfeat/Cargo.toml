@@ -31,7 +31,7 @@ defplat-aarch64 = ["khal/defplat-aarch64"]
 defplat-x86_64 = ["khal/defplat-x86_64"]
 defplat-riscv64 = ["khal/defplat-riscv64"]
 defplat-loongarch64 = ["khal/defplat-loongarch64"]
-crosvm = ["khal/crosvm", "axdriver/crosvm", "axruntime/crosvm"]
+crosvm = ["khal/crosvm", "kdriver/crosvm", "axruntime/crosvm"]
 
 # Memory
 alloc = ["kalloc", "axruntime/alloc"]
@@ -53,7 +53,7 @@ sched-cfs = ["axtask/sched-cfs"]
 fs = [
     "alloc",
     "paging",
-    "axdriver/virtio-blk",
+    "kdriver/virtio-blk",
     "dep:axfs",
     "axruntime/fs",
 ] # TODO: try to remove "paging"
@@ -62,14 +62,14 @@ fs-fat = ["fs", "axfs/fat"]
 fs-times = ["fs", "axfs/times"]
 
 # Networking
-net = ["alloc", "paging", "axdriver/virtio-net", "dep:axnet", "axruntime/net"]
-vsock = ["net", "axdriver/virtio-socket", "axruntime/vsock", "axnet/vsock"]
+net = ["alloc", "paging", "kdriver/virtio-net", "dep:axnet", "axruntime/net"]
+vsock = ["net", "kdriver/virtio-socket", "axruntime/vsock", "axnet/vsock"]
 
 # Display
 display = [
     "alloc",
     "paging",
-    "axdriver/virtio-gpu",
+    "kdriver/virtio-gpu",
     "dep:fbdevice",
     "axruntime/display",
 ]
@@ -78,7 +78,7 @@ display = [
 input = [
     "alloc",
     "paging",
-    "axdriver/virtio-input",
+    "kdriver/virtio-input",
     "dep:inputdev",
     "axruntime/input",
 ]
@@ -87,16 +87,16 @@ input = [
 rtc = ["khal/rtc", "axruntime/rtc"]
 
 # Device drivers
-bus-mmio = ["axdriver/bus-mmio"]
-bus-pci = ["axdriver/bus-pci"]
-driver-ramdisk = ["axdriver/ramdisk", "axfs?/use-ramdisk"]
-driver-sdmmc = ["axdriver/sdmmc"]
-# driver-ixgbe = ["axdriver?/ixgbe"]
-# driver-fxmac = ["axdriver?/fxmac"]                          # fxmac ethernet driver for PhytiumPi
-driver-bcm2835-sdhci = ["axdriver/bcm2835-sdhci"]
-driver-ahci = ["axdriver/ahci"]
+bus-mmio = ["kdriver/bus-mmio"]
+bus-pci = ["kdriver/bus-pci"]
+driver-ramdisk = ["kdriver/ramdisk", "axfs?/use-ramdisk"]
+driver-sdmmc = ["kdriver/sdmmc"]
+# driver-ixgbe = ["kdriver?/ixgbe"]
+# driver-fxmac = ["kdriver?/fxmac"]                          # fxmac ethernet driver for PhytiumPi
+driver-bcm2835-sdhci = ["kdriver/bcm2835-sdhci"]
+driver-ahci = ["kdriver/ahci"]
 
-# driver-dyn = ["paging", "axruntime/driver-dyn", "axdriver/dyn"]
+# driver-dyn = ["paging", "axruntime/driver-dyn", "kdriver/dyn"]
 
 # Backtrace
 dwarf = ["alloc", "backtrace/dwarf"]
@@ -111,7 +111,7 @@ pmu = ["axruntime/pmu"]
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
-axdriver.workspace = true
+kdriver.workspace = true
 axfs = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }

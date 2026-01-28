@@ -73,7 +73,7 @@ pci = ["axfeat/bus-pci"]
 mmio = ["axfeat/bus-mmio"]
 
 [dependencies]
-axdriver.workspace = true
+kdriver.workspace = true
 axerrno.workspace = true
 axfeat.workspace = true
 axfs.workspace = true

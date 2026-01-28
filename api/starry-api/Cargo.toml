@@ -21,8 +21,10 @@ tee_test_mock_user_access = []
 kalloc.workspace = true
 backtrace.workspace = true
 platconfig.workspace = true
+
 fbdevice.workspace = true
-axdriver.workspace = true
+kdriver.workspace = true
+
 axerrno.workspace = true
 axfeat.workspace = true
 axfs-ng-vfs.workspace = true

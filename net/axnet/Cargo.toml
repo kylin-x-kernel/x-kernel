@@ -14,13 +14,13 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axnet"
 documentation = "https://arceos-org.github.io/arceos/axnet/index.html"
 
 [features]
-vsock = ["axdriver/vsock"]
+vsock = ["kdriver/vsock"]
 
 [dependencies]
 platconfig = { workspace = true }
-axdriver = { workspace = true, features = ["net"] }
 khal = { workspace = true }
 ksync = { workspace = true }
+kdriver = { workspace = true, features = ["net"] }
 axtask = { workspace = true }
 
 axerrno = { workspace = true }

@@ -186,7 +186,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(any(feature = "fs", feature = "net", feature = "display"))]
     {
         #[allow(unused_variables)]
-        let all_devices = axdriver::init_drivers();
+        let all_devices = kdriver::init_drivers();
 
         #[cfg(feature = "fs")]
         axfs::init_filesystems(all_devices.block);

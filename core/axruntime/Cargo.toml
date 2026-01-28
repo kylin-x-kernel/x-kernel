@@ -20,13 +20,15 @@ alloc = ["dep:kalloc"]
 paging = ["khal/paging", "dep:axmm"]
 ipi = ["dep:kipi"]
 
-fs = ["dep:axdriver", "dep:axfs"]
-net = ["dep:axdriver", "dep:axnet"]
 display = ["dep:axdriver", "dep:fbdevice"]
 input = ["dep:axdriver", "dep:inputdev"]
-vsock = ["net", "dep:axdriver"]
+multitask = ["axtask/multitask"]
+fs = ["dep:kdriver", "dep:axfs"]
+net = ["dep:kdriver", "dep:axnet"]
+vsock = ["net", "dep:kdriver"]
+
 rtc = []
-# driver-dyn = ["axdriver/dyn"]
+# driver-dyn = ["kdriver/dyn"]
 crosvm = ["vsock", "axfs/crosvm"]
 watchdog = ["dep:axwatchdog"]
 pmu = ["khal/pmu"]
@@ -35,9 +37,11 @@ pmu = ["khal/pmu"]
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 platconfig.workspace = true
+
 fbdevice = { workspace = true, optional = true }
-axdriver = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
+kdriver = { workspace = true, optional = true }
+
 axfs = { workspace = true, optional = true }
 khal.workspace = true
 kipi = { workspace = true, optional = true }

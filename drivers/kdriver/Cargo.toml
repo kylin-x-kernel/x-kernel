@@ -1,5 +1,5 @@
 [package]
-name = "axdriver"
+name = "kdriver"
 version.workspace = true
 edition.workspace = true
 authors = [
@@ -10,8 +10,8 @@ authors = [
 description = "ArceOS device drivers"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/axdriver"
-documentation = "https://arceos-org.github.io/arceos/axdriver/index.html"
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/kdriver"
+documentation = "https://arceos-org.github.io/arceos/kdriver/index.html"
 
 [features]
 bus-mmio = []

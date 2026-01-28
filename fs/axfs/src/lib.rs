@@ -7,7 +7,7 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-use axdriver::{AxBlockDevice, AxDeviceContainer, prelude::*};
+use kdriver::{AxBlockDevice, AxDeviceContainer, prelude::*};
 
 #[cfg(feature = "fat")]
 mod disk;

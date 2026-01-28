@@ -33,7 +33,7 @@ kalloc = { path = "mm/kalloc" }
 platconfig = { path = "util/platconfig" }
 platconfig-macros = { path = "util/platconfig-macros" }
 fbdevice = { path = "io/fbdevice" }
-axdriver = { path = "drivers/axdriver" }
+kdriver = { path = "drivers/kdriver" }
 axdma = { path = "io/axdma" }
 axfs = { path = "fs/axfs" }
 khal = { path = "arch/khal" }

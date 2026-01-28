@@ -5,7 +5,7 @@ pub(crate) mod stream;
 
 use core::task::Context;
 
-pub use axdriver::prelude::{VsockAddr, VsockConnId};
+pub use kdriver::prelude::{VsockAddr, VsockConnId};
 use axerrno::{AxError, AxResult};
 use enum_dispatch::enum_dispatch;
 use kio::{IoBuf, IoBufMut, Read, Write};

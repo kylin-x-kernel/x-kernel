@@ -4,7 +4,7 @@ use core::{
     time::Duration,
 };
 
-use axdriver::prelude::*;
+use kdriver::prelude::*;
 use axerrno::{AxError, AxResult, ax_bail};
 use axtask::future::{block_on, interruptible};
 use ksync::Mutex;
