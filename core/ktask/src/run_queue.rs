@@ -39,7 +39,7 @@ percpu_static! {
     IDLE_TASK: LazyInit<KtaskRef> = LazyInit::new(),
     /// Stores the weak reference to the previous task that is running on this CPU.
     #[cfg(feature = "smp")]
-    PREV_TASK: Weak<crate::AxTask> = Weak::new(),
+    PREV_TASK: Weak<crate::KTask> = Weak::new(),
 }
 
 /// An array of references to run queues, one for each CPU, indexed by cpu_id.
@@ -147,20 +147,20 @@ fn get_run_queue(index: usize) -> &'static mut RunQueue {
 ///
 /// ## Returns
 ///
-/// * [`AxRunQueueRef`] - a static reference to the selected [`RunQueue`] (current or remote).
+/// * [`KRunQueueRef`] - a static reference to the selected [`RunQueue`] (current or remote).
 ///
 /// ## TODO
 ///
 /// 1. Implement better load balancing across CPUs for more efficient task distribution.
 /// 2. Use a more generic load balancing algorithm that can be customized or replaced.
 #[inline]
-pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> AxRunQueueRef<'static, G> {
+pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
     let irq_state = G::acquire();
     #[cfg(not(feature = "smp"))]
     {
         let _ = task;
         // When SMP is disabled, all tasks are scheduled on the same global run queue.
-        AxRunQueueRef {
+        KRunQueueRef {
             inner: unsafe { RUN_QUEUE.current_ref_mut_raw() },
             state: irq_state,
             _phantom: core::marker::PhantomData,
@@ -170,7 +170,7 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> AxRunQueueRef<'
     {
         // When SMP is enabled, select the run queue based on the task's CPU affinity and load balance.
         let index = select_run_queue_index(task.cpumask());
-        AxRunQueueRef {
+        KRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
             _phantom: core::marker::PhantomData,
@@ -183,7 +183,7 @@ pub(crate) struct RunQueue {
     /// The ID of the CPU this run queue is associated with.
     cpu_id: usize,
     /// The core scheduler of this run queue.
-    /// Since irq and preempt are preserved by the kernel guard hold by `AxRunQueueRef`,
+    /// Since irq and preempt are preserved by the kernel guard hold by `KRunQueueRef`,
     /// we just use a simple raw spin lock here.
     scheduler: SpinRaw<Scheduler>,
 }
@@ -191,17 +191,17 @@ pub(crate) struct RunQueue {
 /// A reference to the run queue with specific guard.
 ///
 /// Note:
-/// [`AxRunQueueRef`] is used to get a reference to the run queue on current CPU
+/// [`KRunQueueRef`] is used to get a reference to the run queue on current CPU
 /// or a remote CPU, which is used to add tasks to the run queue or unblock tasks.
 /// If you want to perform scheduling operations on the current run queue,
 /// see [`CurrentRunQueueRef`].
-pub(crate) struct AxRunQueueRef<'a, G: BaseGuard> {
+pub(crate) struct KRunQueueRef<'a, G: BaseGuard> {
     inner: &'a mut RunQueue,
     state: G::State,
     _phantom: core::marker::PhantomData<G>,
 }
 
-impl<G: BaseGuard> Drop for AxRunQueueRef<'_, G> {
+impl<G: BaseGuard> Drop for KRunQueueRef<'_, G> {
     fn drop(&mut self) {
         G::release(self.state);
     }
@@ -226,7 +226,7 @@ impl<G: BaseGuard> Drop for CurrentRunQueueRef<'_, G> {
 }
 
 /// Management operations for run queue, including adding tasks, unblocking tasks, etc.
-impl<G: BaseGuard> AxRunQueueRef<'_, G> {
+impl<G: BaseGuard> KRunQueueRef<'_, G> {
     /// Adds a task to the scheduler.
     ///
     /// This function is used to add a new task to the scheduler.

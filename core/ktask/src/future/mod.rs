@@ -19,21 +19,21 @@ pub use poll::*;
 mod time;
 pub use time::*;
 
-struct AxWaker {
+struct KWaker {
     task: WeakKtaskRef,
     woke: SpinNoIrq<bool>,
 }
 
-impl AxWaker {
+impl KWaker {
     fn new(task: &KtaskRef) -> Arc<Self> {
-        Arc::new(AxWaker {
+        Arc::new(KWaker {
             task: Arc::downgrade(task),
             woke: SpinNoIrq::new(false),
         })
     }
 }
 
-impl Wake for AxWaker {
+impl Wake for KWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
@@ -58,7 +58,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     // to prevent it from being dropped while blocking.
     let task = curr.clone();
 
-    let axwaker = AxWaker::new(&task);
+    let axwaker = KWaker::new(&task);
     let waker = Waker::from(axwaker.clone());
     let mut cx = Context::from_waker(&waker);
 

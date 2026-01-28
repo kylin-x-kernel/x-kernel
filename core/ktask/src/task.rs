@@ -20,7 +20,7 @@ use khal::tls::TlsArea;
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
-use crate::{KCpuMask, AxTask, KtaskRef, future::block_on};
+use crate::{KCpuMask, KTask, KtaskRef, future::block_on};
 
 /// A unique identifier for a thread.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -47,7 +47,7 @@ pub enum TaskState {
 #[cfg(feature = "task-ext")]
 #[extern_trait::extern_trait(
     /// The impl proxy type for [`TaskExt`].
-    pub AxTaskExt
+    pub KTaskExt
 )]
 pub unsafe trait TaskExt {
     /// Called when the task is switched in.
@@ -116,7 +116,7 @@ pub struct TaskInner {
     ctx: UnsafeCell<TaskContext>,
 
     #[cfg(feature = "task-ext")]
-    task_ext: Option<AxTaskExt>,
+    task_ext: Option<KTaskExt>,
 
     #[cfg(feature = "tls")]
     tls: TlsArea,
@@ -214,13 +214,13 @@ impl TaskInner {
 
     /// Returns a reference to the task extended data.
     #[cfg(feature = "task-ext")]
-    pub fn task_ext(&self) -> Option<&AxTaskExt> {
+    pub fn task_ext(&self) -> Option<&KTaskExt> {
         self.task_ext.as_ref()
     }
 
     /// Returns a mutable reference to the task extended data.
     #[cfg(feature = "task-ext")]
-    pub fn task_ext_mut(&mut self) -> &mut Option<AxTaskExt> {
+    pub fn task_ext_mut(&mut self) -> &mut Option<KTaskExt> {
         &mut self.task_ext
     }
 
@@ -441,7 +441,7 @@ impl TaskInner {
     }
 
     pub(crate) fn into_arc(self) -> KtaskRef {
-        Arc::new(AxTask::new(self))
+        Arc::new(KTask::new(self))
     }
 
     /// Returns the current state of the task.
@@ -627,7 +627,7 @@ pub struct CurrentTask(ManuallyDrop<KtaskRef>);
 
 impl CurrentTask {
     pub(crate) fn try_get() -> Option<Self> {
-        let ptr: *const super::AxTask = khal::percpu::current_task_ptr();
+        let ptr: *const super::KTask = khal::percpu::current_task_ptr();
         if !ptr.is_null() {
             Some(Self(unsafe { ManuallyDrop::new(KtaskRef::from_raw(ptr)) }))
         } else {
