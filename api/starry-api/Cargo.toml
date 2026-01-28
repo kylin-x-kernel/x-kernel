@@ -34,7 +34,7 @@ klogger.workspace = true
 axmm.workspace = true
 axnet.workspace = true
 aarch64-crosvm-virt = { workspace = true, optional = true }
-axpoll.workspace = true
+kpoll.workspace = true
 axsync.workspace = true
 axtask.workspace = true
 bitflags.workspace = true

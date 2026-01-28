@@ -2,7 +2,7 @@ use alloc::sync::{Arc, Weak};
 use core::task::Context;
 
 use axerrno::{AxResult, ax_bail};
-use axpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollSet, Pollable};
 use axtask::current;
 use kspin::SpinNoIrq;
 use starry_core::task::AsThread;

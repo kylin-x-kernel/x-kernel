@@ -1,5 +1,5 @@
 [package]
-name = "axpoll"
+name = "kpoll"
 version = { workspace = true }
 edition = { workspace = true }
 authors = { workspace = true }
@@ -18,7 +18,7 @@ linux-raw-sys = { version = "0.11", default-features = false, features = [
     "no_std",
     "general",
 ] }
-axsync = { workspace = true }
+kspin = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "time", "sync"] }

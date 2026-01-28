@@ -13,7 +13,7 @@ use core::{
 
 use bitflags::bitflags;
 use linux_raw_sys::general::*;
-use axsync::Mutex;
+use kspin::SpinNoIrq;
 
 bitflags! {
     /// I/O events.
@@ -110,7 +110,7 @@ impl Drop for Inner {
 }
 
 /// A data structure for waking up tasks that are waiting for I/O events.
-pub struct PollSet(Mutex<Inner>);
+pub struct PollSet(SpinNoIrq<Inner>);
 
 impl Default for PollSet {
     fn default() -> Self {
@@ -121,7 +121,7 @@ impl Default for PollSet {
 impl PollSet {
     /// Creates a new empty [`PollSet`].
     pub const fn new() -> Self {
-        Self(Mutex::new(Inner::new()))
+        Self(SpinNoIrq::new(Inner::new()))
     }
 
     /// Registers a waker.

@@ -5,7 +5,7 @@ mod select;
 use alloc::{sync::Arc, vec::Vec};
 use core::task::Context;
 
-use axpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, Pollable};
 
 pub use self::{epoll::*, poll::*, select::*};
 use crate::file::FileLike;

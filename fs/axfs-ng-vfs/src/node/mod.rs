@@ -15,7 +15,7 @@ use core::{
     task::Context,
 };
 
-use axpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, Pollable};
 use bitflags::bitflags;
 pub use dir::*;
 pub use file::*;

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, OpenOptions};
 use axfs_ng_vfs::NodeType;
-use axpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use axtask::future::{block_on, interruptible};
 use enum_dispatch::enum_dispatch;

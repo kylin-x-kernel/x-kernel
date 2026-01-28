@@ -6,7 +6,7 @@ use axnet::{
     SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
-use axpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, Pollable};
 use linux_raw_sys::general::S_IFSOCK;
 
 use super::{FileLike, Kstat};

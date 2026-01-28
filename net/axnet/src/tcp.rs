@@ -6,7 +6,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult, ax_bail, ax_err_type};
-use axpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollSet, Pollable};
 use axsync::Mutex;
 use kio::prelude::*;
 use smoltcp::{

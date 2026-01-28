@@ -5,7 +5,7 @@ use core::{
 };
 
 use axerrno::AxError;
-use axpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollSet, Pollable};
 use axtask::future::{block_on, poll_io};
 
 use crate::file::{FileLike, IoDst, IoSrc};

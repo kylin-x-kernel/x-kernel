@@ -6,7 +6,7 @@ use std::{
     task::{Context, Wake, Waker},
 };
 
-use axpoll::PollSet;
+use kpoll::PollSet;
 
 struct Counter(AtomicUsize);
 

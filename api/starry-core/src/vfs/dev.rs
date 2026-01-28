@@ -6,7 +6,7 @@ use axfs_ng_vfs::{
     DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps,
     NodePermission, NodeType, VfsError, VfsResult,
 };
-use axpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, Pollable};
 use inherit_methods_macro::inherit_methods;
 use memaddr::PhysAddrRange;
 

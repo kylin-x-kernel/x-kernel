@@ -6,7 +6,7 @@ use core::{
 
 use async_trait::async_trait;
 use axerrno::{AxError, AxResult};
-use axpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollSet, Pollable};
 use axsync::Mutex;
 use kio::{IoBuf, Read, Write};
 use ringbuf::{

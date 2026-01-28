@@ -8,7 +8,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use axpoll::PollSet;
+use kpoll::PollSet;
 use futures::future;
 use tokio::sync::Barrier;
 

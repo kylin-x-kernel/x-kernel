@@ -5,7 +5,7 @@ use axfs_ng_vfs::{
     FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodeType,
     VfsError, VfsResult,
 };
-use axpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, Pollable};
 use fatfs::{Read, Seek, SeekFrom, Write};
 
 use super::{

@@ -19,7 +19,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axpoll::{IoEvents, PollSet, Pollable};
+use kpoll::{IoEvents, PollSet, Pollable};
 use bitflags::bitflags;
 use hashbrown::HashMap;
 use kspin::SpinNoPreempt;

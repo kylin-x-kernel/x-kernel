@@ -57,7 +57,7 @@ backtrace = { path = "util/backtrace" }
 axerrno = { path = "util/axerrno" }
 axfs-ng-vfs = { path = "fs/axfs-ng-vfs" }
 kio = { path = "io/kio" }
-axpoll = { path = "core/axpoll" }
+kpoll = { path = "core/kpoll" }
 memaddr = { path = "mm/memaddr" }
 memory_set = { path = "mm/memory_set" }
 kspin = { path = "sync/kspin" }

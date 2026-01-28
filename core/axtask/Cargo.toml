@@ -16,7 +16,7 @@ watchdog = ["dep:backtrace", "dep:kplat"]
 
 multitask = [
     "dep:platconfig",
-    "dep:axpoll",
+    "dep:kpoll",
     "dep:axsched",
     "dep:cpumask",
     "dep:crate_interface",
@@ -44,7 +44,7 @@ platconfig = { workspace = true, optional = true }
 axerrno.workspace = true
 axhal.workspace = true
 backtrace = { workspace = true, optional = true }
-axpoll = { workspace = true, optional = true }
+kpoll = { workspace = true, optional = true }
 axsched = { version = "0.3", optional = true }
 cfg-if.workspace = true
 cpumask = { version = "0.1", optional = true }

@@ -1,7 +1,7 @@
 use core::time::Duration;
 
 use axerrno::{AxError, AxResult};
-use axpoll::IoEvents;
+use kpoll::IoEvents;
 use axtask::future::{self, block_on, poll_io};
 use bitflags::bitflags;
 use linux_raw_sys::general::{

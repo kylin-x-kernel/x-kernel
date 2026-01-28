@@ -18,7 +18,7 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axmm::AddrSpace;
-use axpoll::PollSet;
+use kpoll::PollSet;
 use axsync::{Mutex, spin::SpinNoIrq};
 use axtask::{AxTaskRef, TaskExt, TaskInner, WeakAxTaskRef, current};
 use extern_trait::extern_trait;

@@ -8,7 +8,7 @@ use axdriver::prelude::{
 use axerrno::{AxError, AxResult};
 use axfs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
 use axhal::time::wall_time;
-use axpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use bitmaps::Bitmap;
 use linux_raw_sys::{
