@@ -11,7 +11,7 @@ use core::{ffi::CStr, iter};
 
 use axfs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
 use indoc::indoc;
-use ktask::{AxTaskRef, WeakKtaskRef, current};
+use ktask::{KtaskRef, WeakKtaskRef, current};
 use starry_core::{
     task::{AsThread, TaskStat, get_task, tasks},
     vfs::{
@@ -128,7 +128,7 @@ impl SimpleDirOps for ProcessTaskDir {
 }
 
 #[rustfmt::skip]
-fn task_status(task: &AxTaskRef) -> String {
+fn task_status(task: &KtaskRef) -> String {
     format!(
         "Tgid:\t{}\n\
         Pid:\t{}\n\

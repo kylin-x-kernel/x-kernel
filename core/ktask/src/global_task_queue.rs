@@ -91,7 +91,7 @@ static GLOBAL_TASK_REGISTRY: GlobalTaskRegistry = GlobalTaskRegistry::new();
 
 /// Record a task into the current CPU's watchdog registry.
 #[inline]
-pub(crate) fn record_task_for_watchdog(task: &crate::AxTaskRef) {
+pub(crate) fn record_task_for_watchdog(task: &crate::KtaskRef) {
     GLOBAL_TASK_REGISTRY.try_insert(this_cpu_id(), Arc::downgrade(task));
 }
 

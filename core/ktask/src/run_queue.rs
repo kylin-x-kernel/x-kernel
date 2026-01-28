@@ -14,7 +14,7 @@ use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
 use crate::{
-    KCpuMask, AxTaskRef, Scheduler, TaskInner,
+    KCpuMask, KtaskRef, Scheduler, TaskInner,
     future::block_on,
     task::{CurrentTask, TaskState},
 };
@@ -34,9 +34,9 @@ macro_rules! percpu_static {
 
 percpu_static! {
     RUN_QUEUE: LazyInit<RunQueue> = LazyInit::new(),
-    EXITED_TASKS: VecDeque<AxTaskRef> = VecDeque::new(),
+    EXITED_TASKS: VecDeque<KtaskRef> = VecDeque::new(),
     WAIT_FOR_EXIT: AtomicWaker = AtomicWaker::new(),
-    IDLE_TASK: LazyInit<AxTaskRef> = LazyInit::new(),
+    IDLE_TASK: LazyInit<KtaskRef> = LazyInit::new(),
     /// Stores the weak reference to the previous task that is running on this CPU.
     #[cfg(feature = "smp")]
     PREV_TASK: Weak<crate::AxTask> = Weak::new(),
@@ -154,7 +154,7 @@ fn get_run_queue(index: usize) -> &'static mut RunQueue {
 /// 1. Implement better load balancing across CPUs for more efficient task distribution.
 /// 2. Use a more generic load balancing algorithm that can be customized or replaced.
 #[inline]
-pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<'static, G> {
+pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> AxRunQueueRef<'static, G> {
     let irq_state = G::acquire();
     #[cfg(not(feature = "smp"))]
     {
@@ -230,7 +230,7 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
     /// Adds a task to the scheduler.
     ///
     /// This function is used to add a new task to the scheduler.
-    pub fn add_task(&mut self, task: AxTaskRef) {
+    pub fn add_task(&mut self, task: KtaskRef) {
         debug!(
             "task add: {} on run_queue {}",
             task.id_name(),
@@ -249,7 +249,7 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
     ///
     /// This function does nothing if the task is not in [`TaskState::Blocked`],
     /// which means the task is already unblocked by other cores.
-    pub fn unblock_task(&mut self, task: AxTaskRef, resched: bool) {
+    pub fn unblock_task(&mut self, task: KtaskRef, resched: bool) {
         let task_id_name = task.id_name();
         // Try to change the state of the task from `Blocked` to `Ready`,
         // if successful, the task will be put into this run queue,
@@ -305,7 +305,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Note: the ownership if migrating task (which is current task) is handed over to the migration task,
     /// before the migration task inserted it into the target run queue.
     #[cfg(feature = "smp")]
-    pub fn migrate_current(&mut self, migration_task: AxTaskRef) {
+    pub fn migrate_current(&mut self, migration_task: KtaskRef) {
         let curr = &self.current_task;
         trace!("task migrate: {}", curr.id_name());
         assert!(curr.is_running());
@@ -456,7 +456,7 @@ impl RunQueue {
     /// otherwise `false`.
     fn put_task_with_state(
         &mut self,
-        task: AxTaskRef,
+        task: KtaskRef,
         current_state: TaskState,
         preempt: bool,
     ) -> bool {
@@ -512,7 +512,7 @@ impl RunQueue {
         self.switch_to(crate::current(), next);
     }
 
-    fn switch_to(&mut self, prev_task: CurrentTask, next_task: AxTaskRef) {
+    fn switch_to(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
         // Make sure that IRQs are disabled by kernel guard or other means.
         assert!(
             !khal::asm::is_enabled(),
@@ -626,7 +626,7 @@ fn poll_gc(cx: &mut Context<'_>) -> Poll<()> {
 /// It calls `select_run_queue` to get the correct run queue for the task, and
 /// then puts the task to the scheduler of target run queue.
 #[cfg(feature = "smp")]
-pub(crate) fn migrate_entry(migrated_task: AxTaskRef) {
+pub(crate) fn migrate_entry(migrated_task: KtaskRef) {
     select_run_queue::<kspin::NoPreemptIrqSave>(&migrated_task)
         .inner
         .scheduler

@@ -11,7 +11,7 @@ use core::{
 use axerrno::AxError;
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::{AxTaskRef, WeakKtaskRef, current, current_run_queue, select_run_queue};
+use crate::{KtaskRef, WeakKtaskRef, current, current_run_queue, select_run_queue};
 
 mod poll;
 pub use poll::*;
@@ -25,7 +25,7 @@ struct AxWaker {
 }
 
 impl AxWaker {
-    fn new(task: &AxTaskRef) -> Arc<Self> {
+    fn new(task: &KtaskRef) -> Arc<Self> {
         Arc::new(AxWaker {
             task: Arc::downgrade(task),
             woke: SpinNoIrq::new(false),

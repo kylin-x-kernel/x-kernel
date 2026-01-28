@@ -20,7 +20,7 @@ use khal::tls::TlsArea;
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
-use crate::{KCpuMask, AxTask, AxTaskRef, future::block_on};
+use crate::{KCpuMask, AxTask, KtaskRef, future::block_on};
 
 /// A unique identifier for a thread.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -440,7 +440,7 @@ impl TaskInner {
         t
     }
 
-    pub(crate) fn into_arc(self) -> AxTaskRef {
+    pub(crate) fn into_arc(self) -> KtaskRef {
         Arc::new(AxTask::new(self))
     }
 
@@ -620,16 +620,16 @@ impl Drop for TaskStack {
     }
 }
 
-/// A wrapper of [`AxTaskRef`] as the current task.
+/// A wrapper of [`KtaskRef`] as the current task.
 ///
 /// It won't change the reference count of the task when created or dropped.
-pub struct CurrentTask(ManuallyDrop<AxTaskRef>);
+pub struct CurrentTask(ManuallyDrop<KtaskRef>);
 
 impl CurrentTask {
     pub(crate) fn try_get() -> Option<Self> {
         let ptr: *const super::AxTask = khal::percpu::current_task_ptr();
         if !ptr.is_null() {
-            Some(Self(unsafe { ManuallyDrop::new(AxTaskRef::from_raw(ptr)) }))
+            Some(Self(unsafe { ManuallyDrop::new(KtaskRef::from_raw(ptr)) }))
         } else {
             None
         }
@@ -639,18 +639,18 @@ impl CurrentTask {
         Self::try_get().expect("current task is uninitialized")
     }
 
-    /// Clone the inner `AxTaskRef`.
+    /// Clone the inner `KtaskRef`.
     #[allow(clippy::should_implement_trait)]
-    pub fn clone(&self) -> AxTaskRef {
+    pub fn clone(&self) -> KtaskRef {
         self.0.deref().clone()
     }
 
     /// Returns `true` if the current task is the same as `other`.
-    pub fn ptr_eq(&self, other: &AxTaskRef) -> bool {
+    pub fn ptr_eq(&self, other: &KtaskRef) -> bool {
         Arc::ptr_eq(&self.0, other)
     }
 
-    pub(crate) unsafe fn init_current(init_task: AxTaskRef) {
+    pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
         #[cfg(feature = "tls")]
         unsafe {
@@ -662,7 +662,7 @@ impl CurrentTask {
         }
     }
 
-    pub(crate) unsafe fn set_current(prev: Self, next: AxTaskRef) {
+    pub(crate) unsafe fn set_current(prev: Self, next: KtaskRef) {
         let Self(arc) = prev;
         ManuallyDrop::into_inner(arc); // `call Arc::drop()` to decrease prev task reference count.
         let ptr = Arc::into_raw(next);
@@ -673,7 +673,7 @@ impl CurrentTask {
 }
 
 impl Deref for CurrentTask {
-    type Target = AxTaskRef;
+    type Target = KtaskRef;
 
     fn deref(&self) -> &Self::Target {
         &self.0

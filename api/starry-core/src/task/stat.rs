@@ -67,7 +67,7 @@ pub struct TaskStat {
 }
 
 impl TaskStat {
-    /// Create a new [`TaskStat`] from a [`AxTaskRef`].
+    /// Create a new [`TaskStat`] from a [`KtaskRef`].
     pub fn from_thread(task: &TaskInner) -> AxResult<Self> {
         let thread = task.as_thread();
         let proc_data = &thread.proc_data;

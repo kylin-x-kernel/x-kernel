@@ -21,7 +21,7 @@ pub use crate::{
 };
 
 /// The reference type of a task.
-pub type AxTaskRef = Arc<AxTask>;
+pub type KtaskRef = Arc<AxTask>;
 
 /// The weak reference type of a task.
 pub type WeakKtaskRef = Weak<AxTask>;
@@ -124,7 +124,7 @@ pub fn on_timer_tick() {
 }
 
 /// Adds the given task to the run queue, returns the task reference.
-pub fn spawn_task(task: TaskInner) -> AxTaskRef {
+pub fn spawn_task(task: TaskInner) -> KtaskRef {
     let task_ref = task.into_arc();
     select_run_queue::<NoPreemptIrqSave>(&task_ref).add_task(task_ref.clone());
     task_ref
@@ -133,7 +133,7 @@ pub fn spawn_task(task: TaskInner) -> AxTaskRef {
 /// Spawns a new task with the given parameters.
 ///
 /// Returns the task reference.
-pub fn spawn_raw<F>(f: F, name: String, stack_size: usize) -> AxTaskRef
+pub fn spawn_raw<F>(f: F, name: String, stack_size: usize) -> KtaskRef
 where
     F: FnOnce() + Send + 'static,
 {
@@ -143,7 +143,7 @@ where
 /// Spawns a new task with the given name and the default stack size ([`platconfig::TASK_STACK_SIZE`]).
 ///
 /// Returns the task reference.
-pub fn spawn_with_name<F>(f: F, name: String) -> AxTaskRef
+pub fn spawn_with_name<F>(f: F, name: String) -> KtaskRef
 where
     F: FnOnce() + Send + 'static,
 {
@@ -156,7 +156,7 @@ where
 /// [`platconfig::TASK_STACK_SIZE`].
 ///
 /// Returns the task reference.
-pub fn spawn<F>(f: F) -> AxTaskRef
+pub fn spawn<F>(f: F) -> KtaskRef
 where
     F: FnOnce() + Send + 'static,
 {
