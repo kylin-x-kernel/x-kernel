@@ -96,23 +96,23 @@ mod irq_impl {
         }
 
         fn reg_handler(vector: usize, handler: Handler) -> bool {
-            if IRQ_HANDLER_TABLE.reg_handler_handler(vector, handler) {
+            if IRQ_HANDLER_TABLE.register_handler(vector, handler) {
                 Self::enable(vector, true);
                 return true;
             }
-            warn!("reg_handler handler for IRQ {} failed", vector);
+            warn!("register_handler handler for IRQ {} failed", vector);
             false
         }
 
         fn unreg_handler(vector: usize) -> Option<Handler> {
             Self::enable(vector, false);
-            IRQ_HANDLER_TABLE.unreg_handler_handler(vector)
+            IRQ_HANDLER_TABLE.unregister_handler(vector)
         }
 
         fn dispatch_irq(vector: usize) -> Option<usize> {
             trace!("IRQ {}", vector);
-            if !IRQ_HANDLER_TABLE.dispatch_irq(vector) {
-                warn!("Undispatch_irqd IRQ {vector}");
+            if !IRQ_HANDLER_TABLE.handle(vector) {
+                warn!("Unhandled IRQ {vector}");
             }
             unsafe { super::local_apic().end_of_interrupt() };
             Some(vector)
@@ -120,25 +120,22 @@ mod irq_impl {
 
         fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
             match target {
-                TargetCpu::Current { cpu_id: _ } => {
+                TargetCpu::Self_ => {
                     unsafe {
-                        super::local_apic().notify_cpu_self(interrupt_id as _);
+                        super::local_apic().send_ipi_self(interrupt_id as _);
                     };
                 }
-                TargetCpu::Other { cpu_id } => {
+                TargetCpu::Specific(cpu_id) => {
                     let apic_id = super::raw_apic_id(cpu_id as u8);
                     unsafe {
-                        super::local_apic().notify_cpu(interrupt_id as _, apic_id as _);
+                        super::local_apic().send_ipi(interrupt_id as _, apic_id as _);
                     };
                 }
-                TargetCpu::AllExceptCurrent {
-                    cpu_id: _,
-                    cpu_num: _,
-                } => {
+                TargetCpu::AllButSelf { me: _, total: _ } => {
                     use x2apic::lapic::IpiAllShorthand;
                     unsafe {
                         super::local_apic()
-                            .notify_cpu_all(interrupt_id as _, IpiAllShorthand::AllExcludingSelf);
+                            .send_ipi_all(interrupt_id as _, IpiAllShorthand::AllExcludingSelf);
                     };
                 }
             }

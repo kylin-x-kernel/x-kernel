@@ -1,4 +1,4 @@
-use kplat::psci::PsciIf;
+use kplat::psci::PsciOp;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use log::{debug, info, warn};
@@ -146,8 +146,8 @@ pub fn shared_memory_range() -> (usize, usize) {
 }
 struct PsciImpl;
 #[impl_dev_interface]
-impl PsciIf for PsciImpl {
-    fn share_dma_buffer(phys_addr: usize, size: usize) {
+impl PsciOp for PsciImpl {
+    fn dma_share(phys_addr: usize, size: usize) {
         debug!(
             "share_dma_buffer: paddr={:#x}, size={:#x}, in_shared_region={}",
             phys_addr,
@@ -156,7 +156,7 @@ impl PsciIf for PsciImpl {
         );
     }
 
-    fn unshare_dma_buffer(phys_addr: usize, size: usize) {
+    fn dma_unshare(phys_addr: usize, size: usize) {
         debug!(
             "unshare_dma_buffer: paddr={:#x}, size={:#x}",
             phys_addr, size

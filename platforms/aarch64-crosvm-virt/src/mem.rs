@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use fdtree_rs::LinuxFdt;
-use kplat::memory::{HwMemory, PhysAddr, RawRange, VirtAddr, pa, va};
+use rs_fdtree::LinuxFdt;
+use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 use spin::Once;
 
 use crate::config::{
@@ -10,7 +10,7 @@ use crate::config::{
 };
 const FDT_MEM_SIZE: usize = 0x20_0000;
 static FDT_MEM_BASE: AtomicUsize = AtomicUsize::new(0);
-static FDT_MEM: Once<[RawRange; 2]> = Once::new();
+static FDT_MEM: Once<[MemRange; 2]> = Once::new();
 static DICE_MEM_BASE: AtomicUsize = AtomicUsize::new(0);
 static DICE_MEM_SIZE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn early_init(fdt_paddr: usize) {
@@ -28,7 +28,7 @@ pub(crate) fn early_init(fdt_paddr: usize) {
 struct HwMemoryImpl;
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {
-    fn ram_regions() -> &'static [RawRange] {
+    fn ram_regions() -> &'static [MemRange] {
         &[(PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE)]
     }
 
@@ -36,7 +36,7 @@ impl HwMemory for HwMemoryImpl {
     ///
     /// Reserved memory can be contained in [`ram_regions`], they are not
     /// allocatable but should be mapped to kernel's address space.
-    fn rsvd_regions() -> &'static [RawRange] {
+    fn rsvd_regions() -> &'static [MemRange] {
         FDT_MEM
             .call_once(|| {
                 [
@@ -51,7 +51,7 @@ impl HwMemory for HwMemoryImpl {
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.
-    fn mmio_regions() -> &'static [RawRange] {
+    fn mmio_regions() -> &'static [MemRange] {
         &MMIO_RANGES
     }
 

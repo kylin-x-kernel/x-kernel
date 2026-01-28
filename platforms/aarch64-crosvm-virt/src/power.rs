@@ -6,10 +6,10 @@ impl SysCtrl for PowerImpl {
     fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
         use kplat::memory::{v2p, va};
         let entry_paddr = v2p(va!(crate::boot::_start_secondary as *const () as usize));
-        kplat_aarch64_peripherals::psci::cpu_on(cpu_id, entry_paddr.as_usize(), stack_top_paddr);
+        aarch64_peripherals::psci::cpu_on(cpu_id, entry_paddr.as_usize(), stack_top_paddr);
     }
 
     fn shutdown() -> ! {
-        kplat_aarch64_peripherals::psci::shutdown()
+        aarch64_peripherals::psci::shutdown()
     }
 }

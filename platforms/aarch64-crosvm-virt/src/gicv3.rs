@@ -6,8 +6,8 @@ use core::{
 use aarch64_cpu::registers::*;
 use arm_gic::gicv3::*;
 use kplat::{
-    irq::{Handler, HandlerTable},
-    mem::VirtAddr,
+    interrupts::{Handler, HandlerTable},
+    memory::VirtAddr,
 };
 use kspin::SpinNoIrq;
 use log::*;
@@ -80,7 +80,7 @@ pub fn enable(interrupt_id: usize, enabled: bool) {
     }
 }
 pub fn reg_handler_handler(interrupt_id: usize, handler: Handler) -> bool {
-    if IRQ_HANDLER_TABLE.reg_handler_handler(interrupt_id, handler) {
+    if IRQ_HANDLER_TABLE.register_handler(interrupt_id, handler) {
         trace!("reg_handler handler IRQ {}", interrupt_id);
         enable(interrupt_id, true);
         return true;
@@ -90,7 +90,7 @@ pub fn reg_handler_handler(interrupt_id: usize, handler: Handler) -> bool {
 pub fn unreg_handler_handler(interrupt_id: usize) -> Option<Handler> {
     trace!("unreg_handler handler IRQ {}", interrupt_id);
     enable(interrupt_id, false);
-    IRQ_HANDLER_TABLE.unreg_handler_handler(interrupt_id)
+    IRQ_HANDLER_TABLE.unregister_handler(interrupt_id)
 }
 fn end_of_interrupt(irq: usize) {
     GicV3::end_interrupt(IntId::from(irq as u32));
@@ -103,7 +103,7 @@ pub fn notify_cpu(irq: usize, target: kplat::interrupts::TargetCpu) {
     use arm_gic::gicv3::SgiTarget;
     let sgi_intid = IntId::from(irq as u32);
     match target {
-        kplat::interrupts::TargetCpu::AllExceptCurrent { .. } => {
+        kplat::interrupts::TargetCpu::AllButSelf { .. } => {
             GicV3::send_sgi(sgi_intid, SgiTarget::All);
         }
         _ => {
@@ -209,7 +209,7 @@ fn debug_irq_32() {
 }
 pub fn dispatch_irq_irq(_unused: usize) -> Option<usize> {
     let irq = get_and_acknowledge_interrupt();
-    if !IRQ_HANDLER_TABLE.dispatch_irq(irq as u32 as _) {
+    if !IRQ_HANDLER_TABLE.handle(irq as u32 as _) {
         debug!("Undispatch_irqd IRQ {:?}", irq);
     }
     if irq <= 1019 {

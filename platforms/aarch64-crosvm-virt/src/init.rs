@@ -1,6 +1,6 @@
 use kplat::{
-    init::BootHandler,
-    mem::{p2v, pa},
+    boot::BootHandler,
+    memory::{p2v, pa},
 };
 use log::*;
 
@@ -14,15 +14,15 @@ impl BootHandler for BootHandlerImpl {
         boot_print_str("[boot] platform init early\r\n");
         crate::mem::early_init(dtb);
         axcpu::init::init_trap();
-        kplat_aarch64_peripherals::ns16550a::early_init(p2v(pa!(UART_PADDR)));
-        kplat_aarch64_peripherals::psci::init(PSCI_METHOD);
-        kplat_aarch64_peripherals::generic_timer::early_init();
+        aarch64_peripherals::ns16550a::early_init(p2v(pa!(UART_PADDR)));
+        aarch64_peripherals::psci::init(PSCI_METHOD);
+        aarch64_peripherals::generic_timer::early_init();
         #[cfg(feature = "rtc")]
-        kplat_aarch64_peripherals::pl031::early_init(p2v(pa!(RTC_PADDR)));
+        aarch64_peripherals::pl031::early_init(p2v(pa!(RTC_PADDR)));
     }
 
     #[cfg(feature = "smp")]
-    fn early_init_secondary(_cpu_id: usize) {
+    fn early_init_ap(_cpu_id: usize) {
         axcpu::init::init_trap();
     }
 
@@ -34,16 +34,16 @@ impl BootHandler for BootHandlerImpl {
             crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
             info!("set UART IRQ {} as edge trigger", UART_IRQ);
             crate::gicv3::set_trigger(UART_IRQ, true);
-            kplat_aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
+            aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
         }
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_secondary(_cpu_id: usize) {
+    fn final_init_ap(_cpu_id: usize) {
         #[cfg(feature = "irq")]
         {
             crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
-            kplat_aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
+            aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
         }
     }
 }

@@ -1,7 +1,9 @@
 use kplat::{
-    mem::{PAGE_SIZE_4K, PhysAddr, pa},
-    time::{Duration, busy_wait},
+    memory::{PAGE_SIZE_4K, PhysAddr, pa},
+    timer::spin_wait,
 };
+use core::time::Duration;
+
 const START_PAGE_IDX: u8 = 6;
 const START_PAGE_PADDR: PhysAddr = pa!(START_PAGE_IDX as usize * PAGE_SIZE_4K);
 core::arch::global_asm!(
@@ -32,8 +34,8 @@ pub fn start_secondary_cpu(apic_id: usize, stack_top: PhysAddr) {
     let apic_id = super::apic::raw_apic_id(apic_id as u8);
     let lapic = super::apic::local_apic();
     unsafe { lapic.send_init_ipi(apic_id) };
-    busy_wait(Duration::from_millis(10));
+    spin_wait(Duration::from_millis(10));
     unsafe { lapic.send_sipi(START_PAGE_IDX, apic_id) };
-    busy_wait(Duration::from_micros(200));
+    spin_wait(Duration::from_micros(200));
     unsafe { lapic.send_sipi(START_PAGE_IDX, apic_id) };
 }

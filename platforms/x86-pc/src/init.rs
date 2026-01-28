@@ -10,7 +10,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
-    fn early_init_secondary(_cpu_id: usize) {
+    fn early_init_ap(_cpu_id: usize) {
         axcpu::init::init_trap();
     }
 
@@ -20,7 +20,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_secondary(_cpu_id: usize) {
+    fn final_init_ap(_cpu_id: usize) {
         crate::apic::init_secondary();
         crate::time::init_secondary();
     }

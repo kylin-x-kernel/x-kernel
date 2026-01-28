@@ -1,5 +1,5 @@
 use heapless::Vec;
-use kplat::memory::{HwMemory, PhysAddr, RawRange, VirtAddr, pa, va};
+use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 use lazyinit::LazyInit;
 use multiboot::information::{MemoryManagement, MemoryType, Multiboot, PAddr};
 
@@ -8,7 +8,7 @@ use crate::config::{
     plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
 };
 const MAX_REGIONS: usize = 16;
-static RAM_REGIONS: LazyInit<Vec<RawRange, MAX_REGIONS>> = LazyInit::new();
+static RAM_REGIONS: LazyInit<Vec<MemRange, MAX_REGIONS>> = LazyInit::new();
 pub fn init(multiboot_info_ptr: usize) {
     let mut mm = HwMemoryImpl;
     let info = unsafe { Multiboot::from_ptr(multiboot_info_ptr as _, &mut mm).unwrap() };
@@ -50,16 +50,16 @@ impl MemoryManagement for HwMemoryImpl {
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {
     /// Returns all physical memory (RAM) ranges on the platform.
-    fn ram_regions() -> &'static [RawRange] {
+    fn ram_regions() -> &'static [MemRange] {
         RAM_REGIONS.as_slice()
     }
 
-    fn reserved_ram_regions() -> &'static [RawRange] {
+    fn rsvd_regions() -> &'static [MemRange] {
         &[(0, 0x100000)]
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.
-    fn mmio_regions() -> &'static [RawRange] {
+    fn mmio_regions() -> &'static [MemRange] {
         &MMIO_RANGES
     }
 

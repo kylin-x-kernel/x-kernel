@@ -1,4 +1,4 @@
-use kplat::psci::PsciIf;
+use kplat::psci::PsciOp;
 use spin::Once;
 
 use crate::serial::{boot_print_str, boot_print_usize};
@@ -77,8 +77,8 @@ pub fn do_xmap_granules(phys_addr: usize, size: usize) {
 }
 struct PsciImpl;
 #[impl_dev_interface]
-impl PsciIf for PsciImpl {
-    fn unshare_dma_buffer(paddr: usize, size: usize) {
+impl PsciOp for PsciImpl {
+    fn dma_unshare(paddr: usize, size: usize) {
         let page_size = 0x1000;
         let pages = size / page_size;
         for i in 0..pages {
@@ -97,7 +97,7 @@ impl PsciIf for PsciImpl {
         }
     }
 
-    fn share_dma_buffer(paddr: usize, size: usize) {
+    fn dma_share(paddr: usize, size: usize) {
         let page_size = 0x1000;
         let pages = size / page_size;
         for i in 0..pages {

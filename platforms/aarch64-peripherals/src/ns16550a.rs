@@ -63,10 +63,10 @@ macro_rules! ns16550_console_if_impl {
                 $crate::ns16550a::write_data(bytes);
             }
 
-            fn write_data_force(bytes: &[u8]) {
+            fn write_data_atomic(bytes: &[u8]) {
                 let mut uart_base =
                     kplat::memory::p2v(kplat::memory::pa!(crate::config::devices::UART_PADDR));
-                $crate::ns16550a::write_data_force(uart_16550, bytes);
+                $crate::ns16550a::write_data_force(uart_base, bytes);
             }
 
             fn read_data(bytes: &mut [u8]) -> usize {

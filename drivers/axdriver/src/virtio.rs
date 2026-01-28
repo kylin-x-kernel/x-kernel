@@ -11,7 +11,7 @@ use core::{marker::PhantomData, ptr::NonNull};
 use axalloc::{UsageKind, global_allocator};
 use axhal::mem::{p2v, v2p};
 #[cfg(feature = "crosvm")]
-use axhal::psci::{share_dma_buffer, unshare_dma_buffer};
+use axhal::psci::{dma_share, dma_unshare};
 use cfg_if::cfg_if;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
@@ -194,7 +194,7 @@ cfg_if! {
                 .alloc_pages(VIRTIO_QUEUE_SIZE, 0x1000, UsageKind::Dma)
                 .expect("virtio frame pool alloc failed");
             let paddr = v2p(vaddr.into());
-            share_dma_buffer(paddr.as_usize(), VIRTIO_QUEUE_SIZE * PAGE_SIZE);
+            dma_share(paddr.as_usize(), VIRTIO_QUEUE_SIZE * PAGE_SIZE);
             let pool = VirtIoFramePool {
                 pool_paddr: paddr.into(),
                 bitmap: [false; VIRTIO_QUEUE_SIZE],
@@ -244,7 +244,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
         #[cfg(feature = "crosvm")]
         {
-            share_dma_buffer(paddr.as_usize(), pages * 0x1000);
+            dma_share(paddr.as_usize(), pages * 0x1000);
         }
         (paddr.as_usize(), ptr)
     }
@@ -254,7 +254,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         global_allocator().dealloc_pages(vaddr.as_ptr() as usize, pages, UsageKind::Dma);
         #[cfg(feature = "crosvm")]
         {
-            unshare_dma_buffer(paddr as usize, pages * 0x1000);
+            dma_unshare(paddr as usize, pages * 0x1000);
         }
         0
     }

@@ -39,7 +39,8 @@ pub fn set_trigger(interrupt_id: usize, edge: bool) {
 pub fn enable(irq: usize, enabled: bool) {
     trace!("GIC set enable: {irq} {enabled}");
     let intid = unsafe { IntId::raw(irq as u32) };
-    let gic = GIC.lock();
+    #[allow(unused_mut)]
+    let mut gic = GIC.lock();
     gic.set_irq_enable(intid, enabled);
     if !intid.is_private() {
         gic.set_cfg(intid, Trigger::Edge);
@@ -158,7 +159,7 @@ pub fn init_gic(gicd_base: kplat::memory::VirtAddr, gicr_base: kplat::memory::Vi
     info!("Initialize GICv3...");
     let gicd_base = VirtAddr::new(gicd_base.into());
     let gicr_base = VirtAddr::new(gicr_base.into());
-    let mut gic = unsafe { Gic::new(gicd_base, gicr_base, None) };
+    let mut gic = unsafe { Gic::new(gicd_base, gicr_base) };
     gic.init();
     GIC.init_once(SpinNoIrq::new(gic));
     let cpu = GIC.lock().cpu_interface();
@@ -201,12 +202,12 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
 #[cfg(feature = "gicv3")]
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     match target {
-        TargetCpu::Current { cpu_id: _ } => {
+        TargetCpu::Self_ => {
             GIC.lock()
                 .cpu_interface()
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::current());
         }
-        TargetCpu::Other { cpu_id } => {
+        TargetCpu::Specific(cpu_id) => {
             let affinity = Affinity::from_mpidr(cpu_id as u64);
             let target_list = TargetList::new([affinity]);
             GIC.lock().cpu_interface().send_sgi(
@@ -214,10 +215,7 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                 SGITarget::List(target_list),
             );
         }
-        TargetCpu::AllExceptCurrent {
-            cpu_id: _,
-            cpu_num: _,
-        } => {
+        TargetCpu::AllButSelf { .. } => {
             GIC.lock()
                 .cpu_interface()
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::All);

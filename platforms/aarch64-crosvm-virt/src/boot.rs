@@ -1,5 +1,5 @@
 use aarch64_cpu::registers::*;
-use kplat::memory::{Aligned4K, pa};
+use kplat::memory::{PageAligned, pa};
 use page_table::{
     PageTableEntry as GenericPTE, PagingFlags as MappingFlags, aarch64::A64PageEntry as A64PTE,
 };
@@ -8,9 +8,9 @@ use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 #[unsafe(link_section = ".data")]
-static mut BOOT_PT_L0: Aligned4K<[A64PTE; 512]> = Aligned4K::new([A64PTE::empty(); 512]);
+static mut BOOT_PT_L0: PageAligned<[A64PTE; 512]> = PageAligned::new([A64PTE::empty(); 512]);
 #[unsafe(link_section = ".data")]
-static mut BOOT_PT_L1: Aligned4K<[A64PTE; 512]> = Aligned4K::new([A64PTE::empty(); 512]);
+static mut BOOT_PT_L1: PageAligned<[A64PTE; 512]> = PageAligned::new([A64PTE::empty(); 512]);
 use crate::serial::{boot_print_str, boot_print_usize};
 unsafe fn init_boot_page_table() {
     boot_print_str("[boot] init boot page table\r\n");

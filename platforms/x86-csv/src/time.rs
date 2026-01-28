@@ -40,7 +40,7 @@ pub fn init_primary() {
         lapic.enable_timer();
         NANOS_TO_LAPIC_TICKS_RATIO = Ratio::new(
             LAPIC_TICKS_PER_SEC as u32,
-            kplat::timer::NANOS_PER_SEC as u32,
+            kplat::timer::NS_SEC as u32,
         );
     }
 }

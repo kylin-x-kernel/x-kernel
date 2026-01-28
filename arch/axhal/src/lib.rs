@@ -93,7 +93,7 @@ pub mod power {
 
 #[cfg(feature = "crosvm")]
 pub mod psci {
-    pub use kplat::psci::{share_dma_buffer, unshare_dma_buffer};
+    pub use kplat::psci::{dma_share, dma_unshare};
 }
 
 /// Trap handling.
