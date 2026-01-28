@@ -9,5 +9,4 @@ pub use kplat::timer::{
     now, now as monotonic_time, now_ns as monotonic_time_nanos, now_ns, now_ticks, ns2t, offset_ns,
     spin_until, spin_wait, t2ns, wall as wall_time, wall, wall_ns as wall_time_nanos, wall_ns,
 };
-#[cfg(feature = "irq")]
 pub use kplat::timer::{arm_timer, interrupt_id};

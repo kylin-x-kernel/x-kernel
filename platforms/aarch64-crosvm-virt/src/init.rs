@@ -29,21 +29,15 @@ impl BootHandler for BootHandlerImpl {
     fn final_init(cpu_id: usize, dtb: usize) {
         info!("cpu_id {}", cpu_id);
         crate::fdt::init_fdt(p2v(pa!(dtb)));
-        #[cfg(feature = "irq")]
-        {
-            crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
-            info!("set UART IRQ {} as edge trigger", UART_IRQ);
-            crate::gicv3::set_trigger(UART_IRQ, true);
-            aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
-        }
+        crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
+        info!("set UART IRQ {} as edge trigger", UART_IRQ);
+        crate::gicv3::set_trigger(UART_IRQ, true);
+        aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: usize) {
-        #[cfg(feature = "irq")]
-        {
-            crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
-            aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
-        }
+        crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
+        aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 }

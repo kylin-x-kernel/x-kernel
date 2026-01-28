@@ -71,7 +71,6 @@ macro_rules! console_if_impl {
                 $crate::pl011::read_data(bytes)
             }
 
-            #[cfg(feature = "irq")]
             fn interrupt_id() -> Option<usize> {
                 Some(crate::config::devices::UART_IRQ as _)
             }

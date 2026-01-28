@@ -24,20 +24,14 @@ impl BootHandler for BootHandlerImpl {
     }
 
     fn final_init(_cpu_id: usize, _dtb: usize) {
-        #[cfg(feature = "irq")]
-        {
-            aarch64_peripherals::gic::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICC_PADDR)));
-            aarch64_peripherals::gic::init_gicc();
-            aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
-        }
+        aarch64_peripherals::gic::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICC_PADDR)));
+        aarch64_peripherals::gic::init_gicc();
+        aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: usize) {
-        #[cfg(feature = "irq")]
-        {
-            aarch64_peripherals::gic::init_gicc();
-            aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
-        }
+       aarch64_peripherals::gic::init_gicc();
+       aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 }

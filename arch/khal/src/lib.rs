@@ -26,7 +26,6 @@
 //! - `smp`: Enable SMP (symmetric multiprocessing) support.
 //! - `fp-simd`: Enable floating-point and SIMD support.
 //! - `paging`: Enable page table manipulation.
-//! - `irq`: Enable interrupt handling support.
 //! - `tls`: Enable kernel space thread-local storage support.
 //! - `rtc`: Enable real-time clock support.
 //! - `uspace`: Enable user space support.
@@ -71,7 +70,6 @@ pub mod time;
 #[cfg(feature = "tls")]
 pub mod tls;
 
-#[cfg(feature = "irq")]
 pub mod irq;
 
 #[cfg(feature = "paging")]
@@ -79,7 +77,6 @@ pub mod paging;
 
 /// Console input and output.
 pub mod console {
-    #[cfg(feature = "irq")]
     pub use kplat::io::interrupt_id;
     pub use kplat::io::{read_data, write_data};
 }

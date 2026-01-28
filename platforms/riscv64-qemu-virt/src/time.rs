@@ -17,7 +17,6 @@ pub(super) fn early_init() {
     }
 }
 pub(super) fn init_percpu() {
-    #[cfg(feature = "irq")]
     sbi_rt::set_timer(0);
 }
 struct GlobalTimerImpl;
@@ -43,12 +42,10 @@ impl GlobalTimer for GlobalTimerImpl {
         crate::config::devices::TIMER_FREQUENCY as u64
     }
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> usize {
         crate::config::devices::TIMER_IRQ
     }
 
-    #[cfg(feature = "irq")]
     fn arm_timer(deadline_ns: u64) {
         sbi_rt::set_timer(Self::ns2t(deadline_ns));
     }

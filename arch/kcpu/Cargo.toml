@@ -21,7 +21,7 @@ arm-el2 = []
 
 [dependencies]
 backtrace = { workspace = true }
-kplat = { workspace = true, features = ["irq"]}
+kplat = { workspace = true }
 linkme = "0.3"
 log = "0.4"
 cfg-if = "1.0"

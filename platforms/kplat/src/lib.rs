@@ -5,7 +5,6 @@ extern crate kplat_macros;
 
 pub mod boot;
 pub mod cpu;
-#[cfg(feature = "irq")]
 pub mod interrupts;
 pub mod io;
 pub mod memory;

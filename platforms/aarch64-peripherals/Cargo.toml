@@ -12,12 +12,11 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-irq = ["kplat/irq"]
 default = []
-gicv2 = ["irq"]
-gicv3 = ["irq"]
+gicv2 = []
+gicv3 = []
 pmr = []
-pmu = ["dep:aarch64-pmuv3", "irq", "kplat/pmu"]
+pmu = ["dep:aarch64-pmuv3", "kplat/pmu"]
 nmi-pmu = ["pmr", "pmu", "kplat/nmi"]
 nmi-sdei = []
 

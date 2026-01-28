@@ -39,7 +39,6 @@ impl Terminal for TerminalImpl {
         bytes.len()
     }
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> Option<usize> {
         Some(crate::config::devices::UART_IRQ)
     }

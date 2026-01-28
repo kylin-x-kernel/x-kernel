@@ -16,7 +16,6 @@ repository = "https://github.com/kylin-x-kernel/kplat-aarch64-crosvm-virt.git"
 
 [features]
 fp-simd = ["kcpu/fp-simd"]
-irq = ["kplat/irq"]
 smp = ["kplat/smp"]
 rtc = []
 

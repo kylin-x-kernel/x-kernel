@@ -1,6 +1,5 @@
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
-#[cfg(feature = "irq")]
 use kplat::interrupts::{Handler, IntrManager, TargetCpu};
 use kplat::{
     boot::BootHandler,
@@ -16,7 +15,6 @@ struct DummyConsole;
 struct DummyMem;
 struct DummyTime;
 struct DummyPower;
-#[cfg(feature = "irq")]
 struct DummyIrq;
 
 #[impl_dev_interface]
@@ -42,7 +40,6 @@ impl Terminal for DummyConsole {
         unimplemented!()
     }
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> Option<usize> {
         None
     }
@@ -97,12 +94,10 @@ impl GlobalTimer for DummyTime {
         0
     }
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> usize {
         0
     }
 
-    #[cfg(feature = "irq")]
     fn arm_timer(_deadline_ns: u64) {}
 }
 
@@ -116,7 +111,6 @@ impl SysCtrl for DummyPower {
     }
 }
 
-#[cfg(feature = "irq")]
 #[impl_dev_interface]
 impl IntrManager for DummyIrq {
     fn enable(_irq: usize, _enabled: bool) {}

@@ -12,6 +12,7 @@ description = "x-kernel synchronization primitives"
 [features]
 default = []
 watchdog = ["dep:khal"]
+stats = []
 
 [dependencies]
 axtask.workspace = true

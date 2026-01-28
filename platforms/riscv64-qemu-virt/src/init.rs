@@ -14,14 +14,12 @@ impl BootHandler for BootHandlerImpl {
     }
 
     fn final_init(_cpu_id: usize, _arg: usize) {
-        #[cfg(feature = "irq")]
         crate::irq::init_percpu();
         crate::time::init_percpu();
     }
 
     #[cfg(feature = "smp")]
     fn final_init_secondary(_cpu_id: usize) {
-        #[cfg(feature = "irq")]
         crate::irq::init_percpu();
         crate::time::init_percpu();
     }

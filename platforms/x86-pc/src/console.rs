@@ -33,7 +33,6 @@ impl Terminal for TerminalImpl {
         read_len
     }
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> Option<usize> {
         None
     }

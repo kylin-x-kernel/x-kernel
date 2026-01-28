@@ -4,14 +4,11 @@ use loongArch64::time::Time;
 static NANOS_PER_TICK: LazyInit<u64> = LazyInit::new();
 static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
 pub(super) fn init_percpu() {
-    #[cfg(feature = "irq")]
-    {
-        use loongArch64::reg_handler::tcfg;
-        tcfg::set_init_val(0);
-        tcfg::set_periodic(false);
-        tcfg::set_en(true);
-        kplat::interrupts::enable(crate::config::devices::TIMER_IRQ, true);
-    }
+    use loongArch64::reg_handler::tcfg;
+    tcfg::set_init_val(0);
+    tcfg::set_periodic(false);
+    tcfg::set_en(true);
+    kplat::interrupts::enable(crate::config::devices::TIMER_IRQ, true);
 }
 #[cfg(feature = "rtc")]
 fn init_rtc() {
@@ -80,12 +77,10 @@ impl GlobalTimer for GlobalTimerImpl {
         crate::config::devices::TIMER_FREQUENCY as u64
     }
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> usize {
         crate::config::devices::TIMER_IRQ
     }
 
-    #[cfg(feature = "irq")]
     fn arm_timer(deadline_ns: u64) {
         use loongArch64::reg_handler::tcfg;
         let ticks_now = Self::now_ticks();

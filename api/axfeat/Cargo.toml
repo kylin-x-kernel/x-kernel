@@ -22,7 +22,7 @@ fp-simd = ["khal/fp-simd"]
 uspace = ["khal/uspace"]
 
 # Interrupts
-irq = ["khal/irq", "axruntime/irq", "axtask?/irq", "axdriver?/irq"]
+irq = ["axruntime/irq", "axtask?/irq", "axdriver?/irq"]
 ipi = ["irq", "dep:kipi", "khal/ipi", "axruntime/ipi"]
 
 # Custom or default platforms

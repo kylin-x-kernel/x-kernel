@@ -94,12 +94,12 @@ starry-api.workspace = true
 [dependencies.aarch64-crosvm-virt]
 workspace = true
 optional = true
-features = ["irq", "fp-simd", "smp", "rtc"]
+features = ["fp-simd", "smp", "rtc"]
 
 [dependencies.x86-csv]
 workspace = true
 optional = true
-features = ["irq", "fp-simd", "smp", "rtc"]
+features = ["fp-simd", "smp", "rtc"]
 
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]

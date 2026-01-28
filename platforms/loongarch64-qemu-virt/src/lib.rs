@@ -15,7 +15,6 @@ pub mod config {
 mod boot;
 mod console;
 mod init;
-#[cfg(feature = "irq")]
 mod irq;
 mod mem;
 #[cfg(feature = "smp")]

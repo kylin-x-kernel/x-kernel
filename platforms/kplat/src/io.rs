@@ -12,7 +12,6 @@ pub trait Terminal {
 
     fn read_data(buf: &mut [u8]) -> usize;
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> Option<usize>;
 }
 

@@ -2,7 +2,6 @@
 #[macro_use]
 extern crate log;
 pub mod generic_timer;
-#[cfg(feature = "irq")]
 pub mod gic;
 #[cfg(any(feature = "nmi-pmu", feature = "nmi-sdei"))]
 pub mod nmi;

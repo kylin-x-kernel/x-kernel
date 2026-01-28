@@ -18,10 +18,8 @@ pub trait GlobalTimer {
     fn ns2t(ns: u64) -> u64;
     fn offset_ns() -> u64;
 
-    #[cfg(feature = "irq")]
     fn interrupt_id() -> usize;
 
-    #[cfg(feature = "irq")]
     fn arm_timer(deadline: u64);
 }
 

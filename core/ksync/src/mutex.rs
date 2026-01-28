@@ -1,9 +1,25 @@
 //! A blocking mutex implementation.
 
+#[cfg(feature = "stats")]
+use core::sync::atomic::AtomicU64 as StatsAtomicU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use axtask::{current, future::block_on, yield_now};
+use axtask::{current, future::block_on};
 use event_listener::{Event, listener};
+
+use crate::util::{Spin, SpinConfig};
+
+/// Statistics for mutex operations (available with `stats` feature).
+#[cfg(feature = "stats")]
+#[derive(Debug, Default)]
+pub struct MutexStats {
+    /// Total number of lock acquisitions
+    pub total_locks: StatsAtomicU64,
+    /// Total number of spin iterations
+    pub total_spins: StatsAtomicU64,
+    /// Total number of times the task blocked
+    pub total_blocks: StatsAtomicU64,
+}
 
 /// A [`lock_api::RawMutex`] implementation.
 ///
@@ -13,42 +29,65 @@ use event_listener::{Event, listener};
 pub struct RawMutex {
     event: Event,
     owner_id: AtomicU64,
+    config: SpinConfig,
+    #[cfg(feature = "stats")]
+    stats: MutexStats,
 }
 
 impl RawMutex {
-    /// Creates a [`RawMutex`].
+    /// Creates a [`RawMutex`] with default spin configuration.
     #[inline(always)]
     pub const fn new() -> Self {
+        Self::with_config(SpinConfig {
+            max_spins: 10,
+            spin_before_yield: 3,
+        })
+    }
+
+    /// Creates a [`RawMutex`] with custom spin configuration.
+    #[inline(always)]
+    pub const fn with_config(config: SpinConfig) -> Self {
         Self {
             event: Event::new(),
             owner_id: AtomicU64::new(0),
+            config,
+            #[cfg(feature = "stats")]
+            stats: MutexStats {
+                total_locks: StatsAtomicU64::new(0),
+                total_spins: StatsAtomicU64::new(0),
+                total_blocks: StatsAtomicU64::new(0),
+            },
         }
+    }
+
+    /// Gets the mutex statistics (only available with `stats` feature).
+    ///
+    /// Returns `(total_locks, total_spins, total_blocks)`.
+    #[cfg(feature = "stats")]
+    pub fn stats(&self) -> (u64, u64, u64) {
+        (
+            self.stats.total_locks.load(Ordering::Relaxed),
+            self.stats.total_spins.load(Ordering::Relaxed),
+            self.stats.total_blocks.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Resets all statistics counters (only available with `stats` feature).
+    ///
+    /// Note: This method is not synchronized. If called while the mutex is being
+    /// actively used, the reset may produce inconsistent results as the individual
+    /// counters are reset independently.
+    #[cfg(feature = "stats")]
+    pub fn reset_stats(&self) {
+        self.stats.total_locks.store(0, Ordering::Relaxed);
+        self.stats.total_spins.store(0, Ordering::Relaxed);
+        self.stats.total_blocks.store(0, Ordering::Relaxed);
     }
 }
 
 impl Default for RawMutex {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-struct Spin(u32);
-
-impl Spin {
-    #[inline]
-    fn spin(&mut self) -> bool {
-        if self.0 >= 10 {
-            return false;
-        }
-        self.0 += 1;
-        if self.0 <= 3 {
-            for _ in 0..(1 << self.0) {
-                core::hint::spin_loop();
-            }
-        } else {
-            yield_now();
-        }
-        true
     }
 }
 
@@ -65,9 +104,13 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     fn lock(&self) {
+        #[cfg(feature = "stats")]
+        self.stats.total_locks.fetch_add(1, Ordering::Relaxed);
         let current_id = current().id().as_u64();
-        let mut spin = Spin(0);
+        let mut spin = Spin::new(self.config);
         let mut owner_id = self.owner_id.load(Ordering::Relaxed);
+        #[cfg(feature = "stats")]
+        let mut spin_count = 0u64;
 
         loop {
             assert_ne!(
@@ -85,6 +128,13 @@ unsafe impl lock_api::RawMutex for RawMutex {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        #[cfg(feature = "stats")]
+                        {
+                            self.stats
+                                .total_spins
+                                .fetch_add(spin_count, Ordering::Relaxed);
+                        }
+
                         #[cfg(feature = "watchdog")]
                         {
                             current().inner().clear_waiting_lock();
@@ -98,8 +148,20 @@ unsafe impl lock_api::RawMutex for RawMutex {
             }
 
             if spin.spin() {
+                #[cfg(feature = "stats")]
+                {
+                    spin_count += 1;
+                }
                 owner_id = self.owner_id.load(Ordering::Relaxed);
                 continue;
+            }
+
+            #[cfg(feature = "stats")]
+            {
+                self.stats
+                    .total_spins
+                    .fetch_add(spin_count, Ordering::Relaxed);
+                self.stats.total_blocks.fetch_add(1, Ordering::Relaxed);
             }
 
             listener!(self.event => listener);

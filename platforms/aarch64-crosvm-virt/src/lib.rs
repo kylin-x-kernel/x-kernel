@@ -20,5 +20,4 @@ pub mod config {
 }
 aarch64_peripherals::ns16550_console_if_impl!(TerminalImpl);
 aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
-#[cfg(feature = "irq")]
 irq_if_impl!(IntrManagerImpl);

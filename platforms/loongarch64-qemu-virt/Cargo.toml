@@ -13,7 +13,6 @@ repository.workspace = true
 
 [features]
 fp-simd = ["kcpu/fp-simd"]
-irq = ["kplat/irq"]
 rtc = ["dep:chrono"]
 smp = ["kplat/smp", "kspin/smp"]
 

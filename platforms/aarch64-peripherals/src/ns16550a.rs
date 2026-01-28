@@ -73,7 +73,6 @@ macro_rules! ns16550_console_if_impl {
                 $crate::ns16550a::read_data(bytes)
             }
 
-            #[cfg(feature = "irq")]
             fn interrupt_id() -> Option<usize> {
                 Some(crate::config::devices::UART_IRQ as _)
             }

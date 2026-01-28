@@ -19,7 +19,6 @@ const IO_APIC_BASE: PhysAddr = pa!(0xFEC0_0000);
 static mut LOCAL_APIC: MaybeUninit<LocalApic> = MaybeUninit::uninit();
 static mut IS_X2APIC: bool = false;
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
-#[cfg(feature = "irq")]
 pub fn enable(vector: usize, enabled: bool) {
     if vector < APIC_TIMER_VECTOR as _ {
         unsafe {
@@ -31,7 +30,6 @@ pub fn enable(vector: usize, enabled: bool) {
         }
     }
 }
-#[cfg(any(feature = "smp", feature = "irq"))]
 #[allow(static_mut_refs)]
 pub fn local_apic<'a>() -> &'a mut LocalApic {
     unsafe { LOCAL_APIC.assume_init_mut() }
@@ -83,7 +81,6 @@ pub fn init_primary() {
 pub fn init_secondary() {
     unsafe { local_apic().enable() };
 }
-#[cfg(feature = "irq")]
 mod irq_impl {
     use kplat::interrupts::{Handler, HandlerTable, IntrManager, TargetCpu};
     const MAX_IRQ_COUNT: usize = 256;

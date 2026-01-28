@@ -36,7 +36,6 @@ pub fn early_init() {
         NANOS_TO_CNTPCT_RATIO = CNTPCT_TO_NANOS_RATIO.inverse();
     }
 }
-#[cfg(feature = "irq")]
 pub fn enable_local(timer_interrupt_id: usize) {
     use aarch64_cpu::registers::CNTP_CTL_EL0;
     CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET);
@@ -70,12 +69,10 @@ macro_rules! time_if_impl {
                 $crate::generic_timer::freq()
             }
 
-            #[cfg(feature = "irq")]
             fn interrupt_id() -> usize {
                 crate::config::devices::TIMER_IRQ
             }
 
-            #[cfg(feature = "irq")]
             fn arm_timer(deadline_ns: u64) {
                 $crate::generic_timer::arm_timer(deadline_ns)
             }

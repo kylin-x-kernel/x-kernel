@@ -17,14 +17,7 @@ smp = [
     "loongarch64-qemu-virt?/smp",
     "kplat/smp",
 ]
-irq = [
-    "dep:linkme",
-    "x86-pc?/irq",
-    "aarch64-qemu-virt?/irq",
-    "riscv64-qemu-virt?/irq",
-    "loongarch64-qemu-virt?/irq",
-    "kplat/irq",
-]
+
 fp-simd = [
     "kcpu/fp-simd",
     "x86-pc?/fp-simd",
@@ -59,7 +52,7 @@ defplat-loongarch64 = ["dep:loongarch64-qemu-virt"]
 crosvm = []
 
 default = []
-ipi = ["irq"]
+ipi = []
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
@@ -70,7 +63,7 @@ cfg-if.workspace = true
 heapless = "0.9"
 kspin.workspace = true
 lazyinit.workspace = true
-linkme = { version = "0.3.33", optional = true }
+linkme = { version = "0.3.33" }
 log.workspace = true
 memaddr.workspace = true
 page_table = { workspace = true, optional = true }

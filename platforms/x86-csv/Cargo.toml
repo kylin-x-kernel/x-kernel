@@ -13,7 +13,6 @@ repository.workspace = true
 
 [features]
 fp-simd = ["kcpu/fp-simd"]
-irq = ["kplat/irq"]
 rtc = ["x86_rtc"]
 smp = ["kplat/smp", "kspin/smp"]
 reboot-on-system-off = []

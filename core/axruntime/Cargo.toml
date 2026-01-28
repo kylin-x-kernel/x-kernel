@@ -16,7 +16,7 @@ documentation = "https://arceos-org.github.io/arceos/axruntime/index.html"
 default = []
 
 smp = ["khal/smp", "axtask?/smp"]
-irq = ["khal/irq", "axtask?/irq", "dep:percpu"]
+irq = ["axtask?/irq", "dep:percpu"]
 tls = ["khal/tls", "axtask?/tls"]
 alloc = ["dep:kalloc"]
 paging = ["khal/paging", "dep:axmm"]
