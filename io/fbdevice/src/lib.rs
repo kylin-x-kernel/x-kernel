@@ -5,7 +5,7 @@ extern crate log;
 
 pub use axdriver::prelude::DisplayInfo;
 use axdriver::{AxDeviceContainer, prelude::*};
-use axsync::Mutex;
+use ksync::Mutex;
 use lazyinit::LazyInit;
 
 static PRIMARY_FB: LazyInit<Mutex<AxDisplayDevice>> = LazyInit::new();
