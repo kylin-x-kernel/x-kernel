@@ -77,8 +77,7 @@ pub mod paging;
 
 /// Console input and output.
 pub mod console {
-    pub use kplat::io::interrupt_id;
-    pub use kplat::io::{read_data, write_data};
+    pub use kplat::io::{interrupt_id, read_data, write_data};
 }
 
 /// CPU power management.

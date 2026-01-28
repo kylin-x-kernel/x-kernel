@@ -42,8 +42,6 @@ ahci = ["block", "block/ahci", "dep:khal", "dep:platconfig"]
 # fxmac = ["net", "net/fxmac", "dep:axalloc", "dep:khal", "dep:axdma"]
 # more devices example: e1000 = ["net", "net/e1000"]
 
-irq = []
-
 default = ["bus-pci"]
 
 [dependencies]

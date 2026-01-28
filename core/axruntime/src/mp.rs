@@ -45,7 +45,6 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
 
     khal::final_init_secondary(cpu_id);
 
-    #[cfg(feature = "multitask")]
     axtask::init_scheduler_secondary();
 
     #[cfg(feature = "ipi")]
@@ -61,19 +60,10 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     #[cfg(feature = "pmu")]
     khal::irq::enable(platconfig::devices::PMU_IRQ, true);
 
-    #[cfg(feature = "irq")]
     khal::asm::enable_local();
 
     #[cfg(feature = "watchdog")]
     axwatchdog::init_secondary();
 
-    #[cfg(all(feature = "tls", not(feature = "multitask")))]
-    super::init_tls();
-
-    #[cfg(feature = "multitask")]
     axtask::run_idle();
-    #[cfg(not(feature = "multitask"))]
-    loop {
-        khal::asm::wait_for_irqs();
-    }
 }

@@ -12,56 +12,41 @@ documentation = "https://arceos-org.github.io/arceos/axtask/index.html"
 [features]
 default = []
 
-watchdog = ["dep:backtrace", "dep:kplat"]
-
-multitask = [
-    "dep:platconfig",
-    "dep:kpoll",
-    "dep:axsched",
-    "dep:cpumask",
-    "dep:crate_interface",
-    "dep:event-listener",
-    "dep:futures-util",
-    "dep:kspin",
-    "dep:lazyinit",
-    "dep:memaddr",
-    "dep:percpu",
-]
+watchdog = ["dep:backtrace"]
 task-ext = ["dep:extern-trait"]
-irq = []
 tls = ["khal/tls"]
-preempt = ["irq", "percpu?/preempt", "kspin/preempt"]
+preempt = ["percpu?/preempt", "kspin/preempt"]
 smp = ["kspin/smp"]
 
-sched-fifo = ["multitask"]
-sched-rr = ["multitask", "preempt"]
-sched-cfs = ["multitask", "preempt"]
+sched-fifo = []
+sched-rr = ["preempt"]
+sched-cfs = ["preempt"]
 
-test = ["percpu?/sp-naive"]
+test = ["percpu/sp-naive"]
 
 [dependencies]
-platconfig = { workspace = true, optional = true }
+platconfig = { workspace = true }
 axerrno.workspace = true
 khal.workspace = true
 backtrace = { workspace = true, optional = true }
-kpoll = { workspace = true, optional = true }
-axsched = { version = "0.3", optional = true }
+kpoll = { workspace = true }
+axsched = { version = "0.3" }
 cfg-if.workspace = true
-cpumask = { version = "0.1", optional = true }
-crate_interface = { workspace = true, optional = true }
-event-listener = { workspace = true, optional = true }
+cpumask = { version = "0.1" }
+crate_interface = { workspace = true }
+event-listener = { workspace = true }
 extern-trait = { version = "0.2", optional = true }
-futures-util = { version = "0.3", default-features = false, optional = true, features = [
+futures-util = { version = "0.3", default-features = false, features = [
     "alloc",
     "async-await-macro",
 ] }
-kspin = { workspace = true, optional = true }
-lazyinit = { workspace = true, optional = true }
-log.workspace = true
-memaddr = { workspace = true, optional = true }
-percpu = { workspace = true, optional = true }
-kplat = { workspace = true, optional = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
+log = { workspace = true }
+memaddr = { workspace = true }
+percpu = { workspace = true }
+kplat = { workspace = true }
 
 [dev-dependencies]
 khal = { workspace = true, features = ["fp-simd"] }
-axtask = { workspace = true, features = ["test", "multitask"] }
+axtask = { workspace = true, features = ["test"] }

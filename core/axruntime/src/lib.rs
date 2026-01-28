@@ -14,8 +14,6 @@
 //!
 //! - `alloc`: Enable global memory allocator.
 //! - `paging`: Enable page table manipulation support.
-//! - `irq`: Enable interrupt handling support.
-//! - `multitask`: Enable multi-threading support.
 //! - `smp`: Enable SMP (symmetric multiprocessing) support.
 //! - `fs`: Enable filesystem support.
 //! - `net`: Enable networking support.
@@ -79,12 +77,7 @@ impl klogger::LoggerAdapter for LogIfImpl {
 
     fn task_id() -> Option<u64> {
         if is_init_ok() {
-            #[cfg(feature = "multitask")]
-            {
-                axtask::current_may_uninit().map(|curr| curr.id().as_u64())
-            }
-            #[cfg(not(feature = "multitask"))]
-            None
+            axtask::current_may_uninit().map(|curr| curr.id().as_u64())
         } else {
             None
         }
@@ -188,7 +181,6 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     info!("Initialize platform devices...");
     khal::final_init(cpu_id, arg);
 
-    #[cfg(feature = "multitask")]
     axtask::init_scheduler();
 
     #[cfg(any(feature = "fs", feature = "net", feature = "display"))]
@@ -214,20 +206,11 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(feature = "smp")]
     self::mp::start_secondary_cpus(cpu_id);
 
-    #[cfg(feature = "irq")]
-    {
-        info!("Initialize interrupt handlers...");
-        init_interrupt();
-    }
+    info!("Initialize interrupt handlers...");
+    init_interrupt();
 
     #[cfg(feature = "watchdog")]
     axwatchdog::init_primary();
-
-    #[cfg(all(feature = "tls", not(feature = "multitask")))]
-    {
-        info!("Initialize thread local storage...");
-        init_tls();
-    }
 
     ctor_bare::call_ctors();
 
@@ -240,13 +223,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
     unsafe { main() };
 
-    #[cfg(feature = "multitask")]
     axtask::exit(0);
-    #[cfg(not(feature = "multitask"))]
-    {
-        debug!("main task exited: exit_code={}", 0);
-        khal::power::shutdown();
-    }
 }
 
 #[cfg(feature = "alloc")]
@@ -280,7 +257,6 @@ fn init_allocator() {
     }
 }
 
-#[cfg(feature = "irq")]
 fn init_interrupt() {
     // Setup timer interrupt handler
     const PERIODIC_INTERVAL_NANOS: u64 =
@@ -302,7 +278,6 @@ fn init_interrupt() {
 
     khal::irq::register(khal::time::interrupt_id(), || {
         update_timer();
-        #[cfg(feature = "multitask")]
         axtask::on_timer_tick();
     });
 
@@ -322,11 +297,4 @@ fn init_interrupt() {
 
     // Enable IRQs before starting app
     khal::asm::enable_local();
-}
-
-#[cfg(all(feature = "tls", not(feature = "multitask")))]
-fn init_tls() {
-    let main_tls = khal::tls::TlsArea::alloc();
-    unsafe { khal::asm::write_thread_pointer(main_tls.tls_ptr() as usize) };
-    core::mem::forget(main_tls);
 }

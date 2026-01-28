@@ -1,9 +1,9 @@
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
-use kplat::interrupts::{Handler, IntrManager, TargetCpu};
 use kplat::{
     boot::BootHandler,
     impl_dev_interface,
+    interrupts::{Handler, IntrManager, TargetCpu},
     io::Terminal,
     memory::{HwMemory, MemRange},
     sys::SysCtrl,

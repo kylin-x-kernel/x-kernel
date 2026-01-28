@@ -21,8 +21,6 @@ axfeat = { path = "api/axfeat", features = [
     "alloc-slab",
     "fp-simd",
     "fs-ext4",
-    "irq",
-    "multitask",
     "net",
     "page-alloc-4g",
     "rtc",

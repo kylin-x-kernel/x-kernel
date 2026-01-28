@@ -15,14 +15,11 @@ documentation = "https://arceos-org.github.io/arceos/axruntime/index.html"
 [features]
 default = []
 
-smp = ["khal/smp", "axtask?/smp"]
-irq = ["axtask?/irq", "dep:percpu"]
-tls = ["khal/tls", "axtask?/tls"]
+smp = ["khal/smp", "axtask/smp"]
 alloc = ["dep:kalloc"]
 paging = ["khal/paging", "dep:axmm"]
 ipi = ["dep:kipi"]
 
-multitask = ["axtask/multitask"]
 fs = ["dep:axdriver", "dep:axfs"]
 net = ["dep:axdriver", "dep:axnet"]
 display = ["dep:axdriver", "dep:fbdevice"]
@@ -32,7 +29,7 @@ rtc = []
 # driver-dyn = ["axdriver/dyn"]
 crosvm = ["vsock", "axfs/crosvm"]
 watchdog = ["dep:axwatchdog"]
-pmu = ["irq", "khal/pmu"]
+pmu = ["khal/pmu"]
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
@@ -48,10 +45,10 @@ klogger.workspace = true
 axmm = { workspace = true, optional = true }
 axnet = { workspace = true, optional = true }
 kplat = { workspace = true }
-axtask = { workspace = true, optional = true }
+axtask = { workspace = true }
 axwatchdog = { workspace = true, optional = true }
 chrono.workspace = true
 crate_interface.workspace = true
 ctor_bare.workspace = true
 indoc = "2"
-percpu = { workspace = true, optional = true }
+percpu.workspace = true

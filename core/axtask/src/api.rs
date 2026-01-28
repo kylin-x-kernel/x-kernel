@@ -11,13 +11,10 @@ use khal::context::TrapFrame;
 use kspin::NoPreemptIrqSave;
 
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue};
-#[doc(cfg(all(feature = "multitask", feature = "task-ext")))]
+#[doc(cfg(feature = "task-ext"))]
 #[cfg(feature = "task-ext")]
 pub use crate::task::{AxTaskExt, TaskExt};
-#[doc(cfg(all(feature = "multitask", feature = "irq")))]
-#[cfg(feature = "irq")]
 pub use crate::timers::register_timer_callback;
-#[doc(cfg(feature = "multitask"))]
 pub use crate::{
     task::{CurrentTask, TaskId, TaskInner, TaskState},
     wait_queue::WaitQueue,
@@ -118,8 +115,6 @@ pub fn init_scheduler_secondary() {
 /// Handles periodic timer ticks for the task manager.
 ///
 /// For example, advance scheduler states, checks timed events, etc.
-#[cfg(feature = "irq")]
-#[doc(cfg(feature = "irq"))]
 pub fn on_timer_tick() {
     use kspin::NoOp;
     crate::timers::check_events();
@@ -222,20 +217,14 @@ pub fn yield_now() {
 }
 
 /// Current task is going to sleep for the given duration.
-///
-/// If the feature `irq` is not enabled, it uses busy-wait instead.
 pub fn sleep(dur: core::time::Duration) {
     sleep_until(khal::time::wall_time() + dur);
 }
 
 /// Current task is going to sleep, it will be woken up at the given deadline.
-///
-/// If the feature `irq` is not enabled, it uses busy-wait instead.
 pub fn sleep_until(deadline: khal::time::TimeValue) {
     #[cfg(feature = "irq")]
     crate::future::block_on(crate::future::sleep_until(deadline));
-    #[cfg(not(feature = "irq"))]
-    khal::time::busy_wait_until(deadline);
 }
 
 /// Exits the current task.
@@ -250,7 +239,6 @@ pub fn run_idle() -> ! {
     loop {
         yield_now();
         trace!("idle task: waiting for IRQs...");
-        #[cfg(feature = "irq")]
         khal::asm::await_interrupts();
     }
 }

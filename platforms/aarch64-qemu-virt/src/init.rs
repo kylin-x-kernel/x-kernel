@@ -31,7 +31,7 @@ impl BootHandler for BootHandlerImpl {
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: usize) {
-       aarch64_peripherals::gic::init_gicc();
-       aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
+        aarch64_peripherals::gic::init_gicc();
+        aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 }

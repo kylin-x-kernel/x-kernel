@@ -275,7 +275,6 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
 
 /// Core functions of run queue.
 impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
-    #[cfg(feature = "irq")]
     pub fn scheduler_timer_tick(&mut self) {
         let curr = &self.current_task;
         if !curr.is_idle() && self.inner.scheduler.lock().task_tick(curr) {
@@ -515,7 +514,6 @@ impl AxRunQueue {
 
     fn switch_to(&mut self, prev_task: CurrentTask, next_task: AxTaskRef) {
         // Make sure that IRQs are disabled by kernel guard or other means.
-        #[cfg(all(not(test), feature = "irq"))] // Note: irq is faked under unit tests.
         assert!(
             !khal::asm::is_enabled(),
             "IRQs must be disabled during scheduling"
