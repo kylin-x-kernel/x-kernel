@@ -15,7 +15,7 @@ documentation = "https://arceos-org.github.io/arceos/axdriver/index.html"
 
 [features]
 bus-mmio = []
-bus-pci = ["dep:axdriver_pci", "dep:axhal", "dep:platconfig"]
+bus-pci = ["dep:pci", "dep:axhal", "dep:platconfig"]
 pci-mmio = ["bus-pci"]
 net = ["dep:net"]
 block = ["dep:block"]
@@ -55,7 +55,7 @@ block = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
 net = { workspace = true, optional = true }
-axdriver_pci = { workspace = true, optional = true }
+pci = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
 axerrno = { workspace = true, optional = true }

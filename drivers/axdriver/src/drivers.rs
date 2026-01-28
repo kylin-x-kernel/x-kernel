@@ -3,7 +3,7 @@
 #![allow(unused_imports, dead_code)]
 
 #[cfg(feature = "bus-pci")]
-use axdriver_pci::{DeviceFunction, DeviceFunctionInfo, PciRoot};
+use pci::{DeviceFunction, DeviceFunctionInfo, PciRoot};
 use driver_base::DeviceKind;
 
 pub use super::dummy::*;
@@ -156,9 +156,9 @@ cfg_if::cfg_if! {
         impl DriverProbe for IxgbeDriver {
             #[cfg(bus = "pci")]
             fn probe_pci(
-                root: &mut axdriver_pci::PciRoot,
-                bdf: axdriver_pci::DeviceFunction,
-                dev_info: &axdriver_pci::DeviceFunctionInfo,
+                root: &mut pci::PciRoot,
+                bdf: pci::DeviceFunction,
+                dev_info: &pci::DeviceFunctionInfo,
             ) -> Option<crate::AxDeviceEnum> {
                 use net::ixgbe::{INTEL_82599, INTEL_VEND, IxgbeNic};
                 if dev_info.vendor_id == INTEL_VEND && dev_info.device_id == INTEL_82599 {
@@ -172,7 +172,7 @@ cfg_if::cfg_if! {
                     const QS: usize = 1024;
                     let bar_info = root.bar_info(bdf, 0).unwrap();
                     match bar_info {
-                        axdriver_pci::BarInfo::Memory { address, size, .. } => {
+                        pci::BarInfo::Memory { address, size, .. } => {
                             let ixgbe_nic = IxgbeNic::<IxgbeHalImpl, QS, QN>::init(
                                 axhal::mem::p2v((address as usize).into()).into(),
                                 size as usize,
@@ -180,7 +180,7 @@ cfg_if::cfg_if! {
                             .expect("failed to initialize ixgbe device");
                             return Some(AxDeviceEnum::from_net(ixgbe_nic));
                         }
-                        axdriver_pci::BarInfo::IO { .. } => {
+                        pci::BarInfo::IO { .. } => {
                             error!("ixgbe: BAR0 is of I/O type");
                             return None;
                         }

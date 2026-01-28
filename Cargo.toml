@@ -120,6 +120,6 @@ block = { path = "drivers/block" }
 display = { path = "drivers/display" }
 input = { path = "drivers/input" }
 net = { path = "drivers/net" }
-axdriver_pci = { path = "drivers/axdriver_pci" }
+pci = { path = "drivers/pci" }
 vsock = { path = "drivers/vsock" }
 virtio = { path = "drivers/virtio" }

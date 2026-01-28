@@ -6,7 +6,7 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
-use axdriver_pci::{
+use pci::{
     BarInfo, Cam, Command, DeviceFunction, HeaderType, MemoryBarType, PciRangeAllocator, PciRoot,
 };
 use axhal::mem::p2v;

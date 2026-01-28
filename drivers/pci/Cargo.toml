@@ -1,9 +1,9 @@
 [package]
-name = "axdriver_pci"
+name = "pci"
 edition.workspace = true
 description = "Structures and functions for PCI bus operations"
-documentation = "https://arceos-org.github.io/axdriver_crates/axdriver_pci"
-keywords = ["arceos", "driver", "pci"]
+documentation = "https://kylin-x-kernel.github.io/pci"
+keywords = ["x-kernel", "driver", "pci"]
 version.workspace = true
 authors.workspace = true
 license.workspace = true
