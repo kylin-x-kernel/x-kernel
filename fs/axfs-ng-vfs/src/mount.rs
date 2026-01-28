@@ -9,9 +9,9 @@ use core::{
     task::Context,
 };
 
-use kpoll::{IoEvents, Pollable};
 use hashbrown::HashMap;
 use inherit_methods_macro::inherit_methods;
+use kpoll::{IoEvents, Pollable};
 
 use crate::{
     DirEntry, DirEntrySink, Filesystem, FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard,

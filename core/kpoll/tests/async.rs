@@ -8,8 +8,8 @@ use std::{
     task::{Context, Poll},
 };
 
-use kpoll::PollSet;
 use futures::future;
+use kpoll::PollSet;
 use tokio::sync::Barrier;
 
 struct WaitFuture {

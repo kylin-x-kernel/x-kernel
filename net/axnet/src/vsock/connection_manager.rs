@@ -1,8 +1,8 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 
 use axerrno::{AxError, AxResult, ax_bail};
-use kpoll::PollSet;
 use axsync::Mutex;
+use kpoll::PollSet;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 
 use super::{VsockAddr, VsockConnId};

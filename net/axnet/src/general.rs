@@ -5,8 +5,8 @@ use core::{
 };
 
 use axerrno::AxResult;
-use kpoll::{IoEvents, Pollable};
 use axtask::future::{block_on, poll_io, timeout};
+use kpoll::{IoEvents, Pollable};
 
 use crate::{
     SERVICE,

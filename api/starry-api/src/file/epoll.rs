@@ -19,9 +19,9 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use kpoll::{IoEvents, PollSet, Pollable};
 use bitflags::bitflags;
 use hashbrown::HashMap;
+use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
 

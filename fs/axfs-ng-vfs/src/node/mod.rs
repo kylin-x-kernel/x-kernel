@@ -15,11 +15,11 @@ use core::{
     task::Context,
 };
 
-use kpoll::{IoEvents, Pollable};
 use bitflags::bitflags;
 pub use dir::*;
 pub use file::*;
 use inherit_methods_macro::inherit_methods;
+use kpoll::{IoEvents, Pollable};
 use smallvec::SmallVec;
 
 use crate::{

@@ -9,8 +9,8 @@ documentation = { workspace = true }
 description = "A library for polling I/O events and waking up tasks."
 
 [features]
-alloc = []
-default = ["alloc"]
+stats = []
+default = []
 
 [dependencies]
 bitflags = { version = "2.10", default-features = false }
