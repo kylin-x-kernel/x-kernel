@@ -42,7 +42,7 @@ impl<H: Hal, T: Transport> DriverOps for VirtIoSocketDev<H, T> {
     }
 }
 
-fn map_conn_id(cid: VsockConnId) -> (VsockAddr, u32) {
+fn extract_addr_and_port(cid: VsockConnId) -> (VsockAddr, u32) {
     (
         VsockAddr {
             cid: cid.peer_addr.cid as _,
@@ -62,14 +62,14 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
     }
 
     fn connect(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        let (peer_addr, src_port) = map_conn_id(cid);
+        let (peer_addr, src_port) = extract_addr_and_port(cid);
         self.inner
             .connect(peer_addr, src_port)
             .map_err(as_driver_error)
     }
 
     fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
-        let (peer_addr, src_port) = map_conn_id(cid);
+        let (peer_addr, src_port) = extract_addr_and_port(cid);
         match self.inner.send(peer_addr, src_port, buf) {
             Ok(()) => Ok(buf.len()),
             Err(e) => Err(as_driver_error(e)),
@@ -77,7 +77,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
     }
 
     fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
-        let (peer_addr, src_port) = map_conn_id(cid);
+        let (peer_addr, src_port) = extract_addr_and_port(cid);
         let res = self
             .inner
             .recv(peer_addr, src_port, buf)
@@ -87,21 +87,21 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
     }
 
     fn recv_avail(&mut self, cid: VsockConnId) -> DriverResult<usize> {
-        let (peer_addr, src_port) = map_conn_id(cid);
+        let (peer_addr, src_port) = extract_addr_and_port(cid);
         self.inner
             .recv_buffer_available_bytes(peer_addr, src_port)
             .map_err(as_driver_error)
     }
 
     fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        let (peer_addr, src_port) = map_conn_id(cid);
+        let (peer_addr, src_port) = extract_addr_and_port(cid);
         self.inner
             .shutdown(peer_addr, src_port)
             .map_err(as_driver_error)
     }
 
     fn abort(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        let (peer_addr, src_port) = map_conn_id(cid);
+        let (peer_addr, src_port) = extract_addr_and_port(cid);
         self.inner
             .force_close(peer_addr, src_port)
             .map_err(as_driver_error)
@@ -115,7 +115,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
             }
             Ok(Some(event)) => {
                 // translate event
-                let result = convert_vsock_event(event, &mut self.inner)?;
+                let result = translate_virtio_event(event, &mut self.inner)?;
                 Ok(Some(result))
             }
             Err(e) => {
@@ -126,7 +126,7 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
     }
 }
 
-fn convert_vsock_event<H: Hal, T: Transport>(
+fn translate_virtio_event<H: Hal, T: Transport>(
     event: VsockEvent,
     _inner: &mut InnerDev<H, T>,
 ) -> DriverResult<VsockDriverEventType> {
