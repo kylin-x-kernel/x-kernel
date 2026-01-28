@@ -23,7 +23,7 @@ uspace = ["axhal/uspace"]
 
 # Interrupts
 irq = ["axhal/irq", "axruntime/irq", "axtask?/irq", "axdriver?/irq"]
-ipi = ["irq", "dep:axipi", "axhal/ipi", "axruntime/ipi"]
+ipi = ["irq", "dep:kapi", "axhal/ipi", "axruntime/ipi"]
 
 # Custom or default platforms
 myplat = ["axhal/myplat"]
@@ -124,7 +124,7 @@ axdriver = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
 axhal.workspace = true
 axinput = { workspace = true, optional = true }
-axipi = { workspace = true, optional = true }
+kapi = { workspace = true, optional = true }
 klogger.workspace = true
 axnet = { workspace = true, optional = true }
 axruntime.workspace = true

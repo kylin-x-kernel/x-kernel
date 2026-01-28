@@ -20,7 +20,7 @@ irq = ["axhal/irq", "axtask?/irq", "dep:percpu"]
 tls = ["axhal/tls", "axtask?/tls"]
 alloc = ["dep:axalloc"]
 paging = ["axhal/paging", "dep:axmm"]
-ipi = ["dep:axipi"]
+ipi = ["dep:kapi"]
 
 multitask = ["axtask/multitask"]
 fs = ["dep:axdriver", "dep:axfs"]
@@ -43,7 +43,7 @@ axdriver = { workspace = true, optional = true }
 axinput = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
 axhal.workspace = true
-axipi = { workspace = true, optional = true }
+kapi = { workspace = true, optional = true }
 klogger.workspace = true
 axmm = { workspace = true, optional = true }
 axnet = { workspace = true, optional = true }

@@ -1,13 +1,11 @@
 [package]
-name = "axipi"
+name = "kapi"
 version.workspace = true
 edition.workspace = true
-authors = ["Keyang Hu <keyang.hu@qq.com>"]
-description = "ArceOS IPI management module"
+authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
+description = "X-Kernel Inter-Processor Communication API"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/axipi"
-documentation = "https://arceos-org.github.io/arceos/axipi/index.html"
 
 [features]
 default = []
@@ -15,6 +13,7 @@ default = []
 [dependencies]
 platconfig.workspace = true
 axhal = { workspace = true, features = ["ipi"] }
+kplat.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
