@@ -16,8 +16,8 @@ alloc = ["virtio-drivers/alloc"]
 block = ["dep:block"]
 gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
-net = ["alloc", "axdriver_net"]
-socket = ["alloc", "dep:vsock"]
+net = ["alloc", "dep:net"]
+socket = ["alloc", "vsock"]
 
 [dependencies]
 driver_base = { workspace = true }
