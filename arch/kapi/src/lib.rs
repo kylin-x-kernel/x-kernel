@@ -28,10 +28,9 @@ extern crate log;
 extern crate alloc;
 
 use axhal::{
-    irq::IPI_IRQ,
+    irq::{IPI_IRQ, TargetCpu as IpiTarget},
     percpu::this_cpu_id,
 };
-use kplat::interrupts::TargetCpu as IpiTarget;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 

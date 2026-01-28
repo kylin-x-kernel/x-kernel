@@ -13,7 +13,6 @@ default = []
 [dependencies]
 platconfig.workspace = true
 axhal = { workspace = true, features = ["ipi"] }
-kplat.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
