@@ -3,10 +3,10 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult};
-use khal::{paging::MappingFlags, time::monotonic_time_nanos};
 use axmm::backend::SharedPages;
 use axsync::Mutex;
 use bytemuck::AnyBitPattern;
+use khal::{paging::MappingFlags, time::monotonic_time_nanos};
 use linux_raw_sys::{
     ctypes::{c_long, c_ushort},
     general::*,

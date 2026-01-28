@@ -8,11 +8,11 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
+use axtask::current;
 use khal::{
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},
 };
-use axtask::current;
 use kio::prelude::*;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use starry_core::{mm::access_user_memory, task::AsThread};

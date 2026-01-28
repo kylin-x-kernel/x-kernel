@@ -4,9 +4,9 @@ use alloc::{
 };
 
 use axfs::FS_CONTEXT;
-use khal::uspace::UserContext;
 use axsync::Mutex;
 use axtask::{AxTaskExt, spawn_task};
+use khal::uspace::UserContext;
 use starry_api::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
 use starry_core::{
     mm::{copy_from_kernel, load_user_app, new_user_aspace_empty},

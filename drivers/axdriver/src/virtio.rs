@@ -8,12 +8,12 @@
 
 use core::{marker::PhantomData, ptr::NonNull};
 
-use khal::mem::{p2v, v2p};
-#[cfg(feature = "crosvm")]
-use khal::psci::{dma_share, dma_unshare};
 use cfg_if::cfg_if;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use kalloc::{UsageKind, global_allocator};
+use khal::mem::{p2v, v2p};
+#[cfg(feature = "crosvm")]
+use khal::psci::{dma_share, dma_unshare};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 use crate::{AxDeviceEnum, drivers::DriverProbe};

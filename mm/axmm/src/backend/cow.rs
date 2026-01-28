@@ -3,11 +3,11 @@ use core::slice;
 
 use axerrno::{AxError, AxResult};
 use axfs::FileBackend;
+use axsync::Mutex;
 use khal::{
     mem::p2v,
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
-use axsync::Mutex;
 use kspin::SpinNoIrq;
 use memaddr::{PhysAddr, VirtAddr, VirtAddrRange};
 

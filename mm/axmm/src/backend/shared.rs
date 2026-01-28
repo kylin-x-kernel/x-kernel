@@ -2,8 +2,8 @@ use alloc::{sync::Arc, vec::Vec};
 use core::ops::Deref;
 
 use axerrno::AxResult;
-use khal::paging::{MappingFlags, PageSize, PageTableMut};
 use axsync::Mutex;
+use khal::paging::{MappingFlags, PageSize, PageTableMut};
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
 
 use super::{alloc_frame, dealloc_frame};

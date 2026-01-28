@@ -2,13 +2,13 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use axerrno::{AxError, AxResult};
+use axsync::Mutex;
+use enum_dispatch::enum_dispatch;
+use kalloc::{UsageKind, global_allocator};
 use khal::{
     mem::{p2v, v2p},
     paging::{MappingFlags, PageSize, PageTable, PageTableMut},
 };
-use axsync::Mutex;
-use enum_dispatch::enum_dispatch;
-use kalloc::{UsageKind, global_allocator};
 use memaddr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 use memset::MemorySetBackend;
 

@@ -2,12 +2,12 @@ use alloc::sync::Arc;
 use core::{fmt, ops::DerefMut};
 
 use axerrno::{AxError, AxResult, ax_bail};
+use axsync::Mutex;
 use khal::{
     mem::p2v,
     paging::{MappingFlags, PageTable},
     trap::PageFaultFlags,
 };
-use axsync::Mutex;
 use memaddr::{
     MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr, VirtAddrRange, is_aligned_4k,
 };

@@ -7,9 +7,9 @@ use core::{
     task::{Context, Poll},
 };
 
-use khal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
 use futures_util::task::AtomicWaker;
+use khal::percpu::this_cpu_id;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 

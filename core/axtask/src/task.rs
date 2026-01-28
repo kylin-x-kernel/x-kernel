@@ -13,10 +13,10 @@ use core::{
     task::{Context, Poll},
 };
 
+use futures_util::task::AtomicWaker;
 use khal::context::TaskContext;
 #[cfg(feature = "tls")]
 use khal::tls::TlsArea;
-use futures_util::task::AtomicWaker;
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 

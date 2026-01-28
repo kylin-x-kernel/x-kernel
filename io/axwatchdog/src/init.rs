@@ -1,5 +1,5 @@
-use khal::{context::TrapFrame, percpu::this_cpu_id};
 use axtask::{AxCpuMask, TaskInner};
+use khal::{context::TrapFrame, percpu::this_cpu_id};
 use log::debug;
 
 use crate::rendezvous as rv;

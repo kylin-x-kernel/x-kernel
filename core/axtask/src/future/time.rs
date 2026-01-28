@@ -7,8 +7,8 @@ use core::{
 };
 
 use axerrno::AxError;
-use khal::time::{TimeValue, wall_time};
 use futures_util::{FutureExt, select_biased};
+use khal::time::{TimeValue, wall_time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TimerKey {
