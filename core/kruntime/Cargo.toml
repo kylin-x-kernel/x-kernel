@@ -1,16 +1,13 @@
 [package]
-name = "axruntime"
+name = "kruntime"
 version.workspace = true
 edition.workspace = true
-authors = [
-    "Yuekai Jia <equation618@gmail.com>", 
-    "KylinSoft Co., Ltd. <https://www.kylinos.cn/>"
-    ]
-description = "Runtime library of ArceOS"
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/axruntime"
-documentation = "https://arceos-org.github.io/arceos/axruntime/index.html"
+repository.workspace = true
+documentation.workspace = true
+description = "Runtime library of X-kernel"
 
 [features]
 default = []
