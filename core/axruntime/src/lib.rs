@@ -205,7 +205,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         axnet::init_vsock(all_devices.vsock);
 
         #[cfg(feature = "display")]
-        axdisplay::init_display(all_devices.display);
+        fbdevice::fb_init(all_devices.display);
 
         #[cfg(feature = "input")]
         axinput::init_input(all_devices.input);

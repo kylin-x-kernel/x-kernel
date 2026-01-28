@@ -34,7 +34,7 @@ axfeat = { path = "api/axfeat", features = [
 kalloc = { path = "mm/kalloc" }
 platconfig = { path = "util/platconfig" }
 platconfig-macros = { path = "util/platconfig-macros" }
-axdisplay = { path = "io/axdisplay" }
+fbdevice = { path = "io/fbdevice" }
 axdriver = { path = "drivers/axdriver" }
 axdma = { path = "io/axdma" }
 axfs = { path = "fs/axfs" }

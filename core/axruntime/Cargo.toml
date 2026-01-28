@@ -25,7 +25,7 @@ ipi = ["dep:kipi"]
 multitask = ["axtask/multitask"]
 fs = ["dep:axdriver", "dep:axfs"]
 net = ["dep:axdriver", "dep:axnet"]
-display = ["dep:axdriver", "dep:axdisplay"]
+display = ["dep:axdriver", "dep:fbdevice"]
 input = ["dep:axdriver", "dep:axinput"]
 vsock = ["net", "dep:axdriver"]
 rtc = []
@@ -38,7 +38,7 @@ pmu = ["irq", "khal/pmu"]
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 platconfig.workspace = true
-axdisplay = { workspace = true, optional = true }
+fbdevice = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
 axinput = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }

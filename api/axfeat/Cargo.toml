@@ -79,7 +79,7 @@ display = [
     "alloc",
     "paging",
     "axdriver/virtio-gpu",
-    "dep:axdisplay",
+    "dep:fbdevice",
     "axruntime/display",
 ]
 
@@ -119,7 +119,7 @@ pmu = ["axruntime/pmu"]
 [dependencies]
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
-axdisplay = { workspace = true, optional = true }
+fbdevice = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
 khal.workspace = true

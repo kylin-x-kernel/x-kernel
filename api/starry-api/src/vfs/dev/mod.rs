@@ -198,7 +198,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(rtc::Rtc),
         ),
     );
-    if axdisplay::has_display() {
+    if fbdevice::fb_available() {
         root.add(
             "fb0",
             Device::new(
