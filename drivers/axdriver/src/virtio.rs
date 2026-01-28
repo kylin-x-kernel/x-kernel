@@ -9,7 +9,8 @@
 use core::{marker::PhantomData, ptr::NonNull};
 
 use axalloc::{UsageKind, global_allocator};
-use axhal::mem::{p2v, v2p};
+use virtio::{BufferDirection, PhysAddr, VirtIoHal};
+use axhal::mem::{phys_to_virt, virt_to_phys};
 #[cfg(feature = "crosvm")]
 use axhal::psci::{share_dma_buffer, unshare_dma_buffer};
 use cfg_if::cfg_if;
@@ -119,7 +120,8 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     #[cfg(bus = "mmio")]
     fn probe_mmio(mmio_base: usize, mmio_size: usize) -> Option<AxDeviceEnum> {
         let base_vaddr = p2v(mmio_base.into());
-        if let Some((ty, transport)) = virtio::probe_mmio_device(base_vaddr.as_mut_ptr(), mmio_size)
+        if let Some((ty, transport)) =
+            virtio::probe_mmio_device(base_vaddr.as_mut_ptr(), mmio_size)
             && ty == D::DEVICE_TYPE
         {
             match D::try_new(transport, None) {
