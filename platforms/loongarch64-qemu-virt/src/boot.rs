@@ -42,12 +42,12 @@ unsafe fn init_boot_page_table() {
 fn enable_fp_simd() {
     #[cfg(feature = "fp-simd")]
     {
-        axcpu::asm::enable_fp();
-        axcpu::asm::enable_lsx();
+        kcpu::asm::enable_fp();
+        kcpu::asm::enable_lsx();
     }
 }
 fn init_mmu() {
-    axcpu::init::init_mmu(
+    kcpu::init::init_mmu(
         kplat::memory::v2p(va!(&raw const BOOT_PT_L0 as usize)),
         PHYS_BOOT_OFFSET,
     );

@@ -13,7 +13,7 @@ impl BootHandler for BootHandlerImpl {
     fn early_init(_cpu_id: usize, dtb: usize) {
         boot_print_str("[boot] platform init early\r\n");
         crate::mem::early_init(dtb);
-        axcpu::init::init_trap();
+        kcpu::init::init_trap();
         aarch64_peripherals::ns16550a::early_init(p2v(pa!(UART_PADDR)));
         aarch64_peripherals::psci::init(PSCI_METHOD);
         aarch64_peripherals::generic_timer::early_init();
@@ -23,7 +23,7 @@ impl BootHandler for BootHandlerImpl {
 
     #[cfg(feature = "smp")]
     fn early_init_ap(_cpu_id: usize) {
-        axcpu::init::init_trap();
+        kcpu::init::init_trap();
     }
 
     fn final_init(cpu_id: usize, dtb: usize) {

@@ -12,7 +12,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-fp-simd = ["axcpu/fp-simd"]
+fp-simd = ["kcpu/fp-simd"]
 irq = ["kplat/irq"]
 rtc = ["dep:chrono"]
 smp = ["kplat/smp", "kspin/smp"]
@@ -27,7 +27,7 @@ page_table = { workspace = true }
 uart_16550 = "0.4.0"
 
 platconfig-macros = { workspace = true }
-axcpu = { workspace = true }
+kcpu = { workspace = true }
 kplat = { workspace = true }
 
 [package.metadata.docs.rs]

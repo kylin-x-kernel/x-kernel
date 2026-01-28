@@ -16,10 +16,10 @@ impl SysCtrl for PowerImpl {
         let halt_addr = p2v(pa!(GED_PADDR)).as_mut_ptr();
         info!("Shutting down...");
         unsafe { halt_addr.write_volatile(0x34) };
-        axcpu::asm::halt();
+        kcpu::asm::halt();
         warn!("It should shutdown!");
         loop {
-            axcpu::asm::halt();
+            kcpu::asm::halt();
         }
     }
 }

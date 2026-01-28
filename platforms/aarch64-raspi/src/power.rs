@@ -9,7 +9,7 @@ impl SysCtrl for PowerImpl {
     fn shutdown() -> ! {
         log::info!("Shutting down...");
         loop {
-            axcpu::asm::halt();
+            kcpu::asm::halt();
         }
     }
 }

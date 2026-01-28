@@ -92,7 +92,7 @@ pub fn shutdown() -> ! {
     psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0).ok();
     warn!("It should shutdown!");
     loop {
-        axcpu::asm::halt();
+        kcpu::asm::halt();
     }
 }
 pub fn cpu_on(target_cpu: usize, entry_point: usize, arg: usize) {

@@ -12,7 +12,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-fp-simd = ["axcpu/fp-simd"]
+fp-simd = ["kcpu/fp-simd"]
 irq = ["kplat/irq", "aarch64-peripherals/irq"]
 rtc = []                                               # Not implemented, currently no effect
 smp = ["kplat/smp"]
@@ -23,7 +23,7 @@ aarch64-cpu = "10.0"
 page_table = { workspace = true }
 platconfig-macros = { workspace = true }
 aarch64-peripherals = { version = "0.3.0", path = "../kplat-aarch64-peripherals" }
-axcpu = { workspace = true }
+kcpu = { workspace = true }
 kplat = { workspace = true }
 
 [package.metadata.docs.rs]

@@ -15,7 +15,7 @@ homepage = "https://github.com/kylin-x-kernel/kplat-aarch64-crosvm-virt.git"
 repository = "https://github.com/kylin-x-kernel/kplat-aarch64-crosvm-virt.git"
 
 [features]
-fp-simd = ["axcpu/fp-simd"]
+fp-simd = ["kcpu/fp-simd"]
 irq = ["kplat/irq"]
 smp = ["kplat/smp"]
 rtc = []
@@ -26,7 +26,7 @@ page_table = { workspace = true }
 platconfig-macros = { workspace = true }
 kspin = "0.1"
 dw_apb_uart = "0.1"
-axcpu = { workspace = true }
+kcpu = { workspace = true }
 kplat = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv3"] }
 aarch64-cpu = "10.0"

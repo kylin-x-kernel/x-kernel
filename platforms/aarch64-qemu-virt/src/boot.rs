@@ -27,7 +27,7 @@ unsafe fn init_boot_page_table() {
 }
 unsafe fn enable_fp() {
     #[cfg(feature = "fp-simd")]
-    axcpu::asm::enable_fp();
+    kcpu::asm::enable_fp();
 }
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
@@ -72,8 +72,8 @@ unsafe extern "C" fn _start_primary() -> ! {
         ldr     x8, ={entry}
         blr     x8
         b      .",
-        switch_to_el1 = sym axcpu::init::switch_to_el1,
-        init_mmu = sym axcpu::init::init_mmu,
+        switch_to_el1 = sym kcpu::init::switch_to_el1,
+        init_mmu = sym kcpu::init::init_mmu,
         init_boot_page_table = sym init_boot_page_table,
         enable_fp = sym enable_fp,
         boot_pt = sym BOOT_PT_L0,
@@ -100,8 +100,8 @@ pub(crate) unsafe extern "C" fn _start_secondary() -> ! {
         ldr     x8, ={entry}
         blr     x8
         b      .",
-        switch_to_el1 = sym axcpu::init::switch_to_el1,
-        init_mmu = sym axcpu::init::init_mmu,
+        switch_to_el1 = sym kcpu::init::switch_to_el1,
+        init_mmu = sym kcpu::init::init_mmu,
         enable_fp = sym enable_fp,
         boot_pt = sym BOOT_PT_L0,
         phys_virt_offset = const PHYS_VIRT_OFFSET,

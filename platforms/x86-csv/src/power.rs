@@ -19,10 +19,10 @@ impl SysCtrl for PowerImpl {
         } else {
             unsafe { PortWriteOnly::new(0x604).write(0x2000u16) };
         }
-        axcpu::asm::halt();
+        kcpu::asm::halt();
         warn!("It should shutdown!");
         loop {
-            axcpu::asm::halt();
+            kcpu::asm::halt();
         }
     }
 }

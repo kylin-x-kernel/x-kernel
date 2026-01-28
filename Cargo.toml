@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["entry"]
+members = ["entry", "arch/kcpu"]
 exclude = []
 
 [workspace.package]
@@ -48,7 +48,9 @@ axruntime = { path = "core/axruntime" }
 axsync = { path = "core/axsync" }
 axtask = { path = "core/axtask" }
 axwatchdog = { path = "io/axwatchdog" }
-axcpu = { path = "arch/axcpu" }
+kcpu = { path = "arch/kcpu" }
+
+
 
 # Arceos Crates
 alloc-engine = { path = "mm/alloc-engine", features = ["axerrno"] }
