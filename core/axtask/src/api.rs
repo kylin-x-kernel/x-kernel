@@ -14,9 +14,9 @@ pub(crate) use crate::run_queue::{current_run_queue, select_run_queue};
 #[doc(cfg(feature = "task-ext"))]
 #[cfg(feature = "task-ext")]
 pub use crate::task::{AxTaskExt, TaskExt};
-pub use crate::timers::register_timer_callback;
 pub use crate::{
     task::{CurrentTask, TaskId, TaskInner, TaskState},
+    timers::register_timer_callback,
     wait_queue::WaitQueue,
 };
 
