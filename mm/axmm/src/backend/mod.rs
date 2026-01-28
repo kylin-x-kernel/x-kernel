@@ -1,7 +1,6 @@
 //! Memory mapping backends.
 use alloc::{boxed::Box, sync::Arc};
 
-use kalloc::{UsageKind, global_allocator};
 use axerrno::{AxError, AxResult};
 use axhal::{
     mem::{p2v, v2p},
@@ -9,6 +8,7 @@ use axhal::{
 };
 use axsync::Mutex;
 use enum_dispatch::enum_dispatch;
+use kalloc::{UsageKind, global_allocator};
 use memaddr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 use memset::MemorySetBackend;
 
