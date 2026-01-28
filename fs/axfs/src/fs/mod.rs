@@ -4,9 +4,9 @@ mod fat;
 #[cfg(feature = "ext4")]
 mod ext4;
 
-use kdriver::BlockDevice as KBlockDevice;
 use axfs_ng_vfs::{Filesystem, VfsResult};
 use cfg_if::cfg_if;
+use kdriver::BlockDevice as KBlockDevice;
 
 pub fn new_default(dev: KBlockDevice) -> VfsResult<Filesystem> {
     cfg_if! {

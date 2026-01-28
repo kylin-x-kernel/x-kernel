@@ -4,9 +4,9 @@ use core::{
     time::Duration,
 };
 
-use kdriver::prelude::*;
 use axerrno::{AxError, AxResult, ax_bail};
 use axtask::future::{block_on, interruptible};
+use kdriver::prelude::*;
 use ksync::Mutex;
 
 use crate::{alloc::string::ToString, vsock::connection_manager::VSOCK_CONN_MANAGER};

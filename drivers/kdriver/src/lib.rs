@@ -1,7 +1,7 @@
 //! [x-kernel] device drivers.
 //!
 //! All detected devices are composed into [`AllDevices`] and returned by [`init_drivers`].
-//! 
+//!
 //! Device categories: [`NetDevice`], [`BlockDevice`], [`DisplayDevice`].
 //!
 //! Supports static and dynamic device models via the `dyn` feature.

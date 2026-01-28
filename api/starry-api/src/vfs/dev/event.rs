@@ -1,13 +1,13 @@
 use alloc::{format, sync::Arc};
 use core::{any::Any, task::Context, time::Duration};
 
-#[allow(unused_imports)]
-use kdriver::prelude::{
-    InputDevice, DriverError, DriverOps, Event, EventType, InputDeviceId, InputDriverOps,
-};
 use axerrno::{AxError, AxResult};
 use axfs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
 use bitmaps::Bitmap;
+#[allow(unused_imports)]
+use kdriver::prelude::{
+    DriverError, DriverOps, Event, EventType, InputDevice, InputDeviceId, InputDriverOps,
+};
 use khal::time::wall_time;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
