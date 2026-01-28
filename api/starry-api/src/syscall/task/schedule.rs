@@ -1,7 +1,7 @@
 use axerrno::{AxError, AxResult};
 use khal::time::TimeValue;
 use ktask::{
-    AxCpuMask, current,
+    KCpuMask, current,
     future::{block_on, interruptible, sleep},
 };
 use linux_raw_sys::general::{
@@ -111,7 +111,7 @@ pub fn sys_sched_setaffinity(
 ) -> AxResult<isize> {
     let size = cpusetsize.min(platconfig::plat::CPU_NUM.div_ceil(8));
     let user_mask = vm_load(user_mask, size)?;
-    let mut cpu_mask = AxCpuMask::new();
+    let mut cpu_mask = KCpuMask::new();
 
     for i in 0..(size * 8).min(platconfig::plat::CPU_NUM) {
         if user_mask[i / 8] & (1 << (i % 8)) != 0 {

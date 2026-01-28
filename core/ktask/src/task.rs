@@ -20,7 +20,7 @@ use khal::tls::TlsArea;
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
-use crate::{AxCpuMask, AxTask, AxTaskRef, future::block_on};
+use crate::{KCpuMask, AxTask, AxTaskRef, future::block_on};
 
 /// A unique identifier for a thread.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -93,7 +93,7 @@ pub struct TaskInner {
     state: AtomicU8,
 
     /// CPU affinity mask.
-    cpumask: SpinNoIrq<AxCpuMask>,
+    cpumask: SpinNoIrq<KCpuMask>,
 
     /// Used to indicate the CPU ID where the task is running or will run.
     cpu_id: AtomicU32,
@@ -255,18 +255,18 @@ impl TaskInner {
 
     /// Gets the cpu affinity mask of the task.
     ///
-    /// Returns the cpu affinity mask of the task in type [`AxCpuMask`].
+    /// Returns the cpu affinity mask of the task in type [`KCpuMask`].
     #[inline]
-    pub fn cpumask(&self) -> AxCpuMask {
+    pub fn cpumask(&self) -> KCpuMask {
         *self.cpumask.lock()
     }
 
     /// Sets the cpu affinity mask of the task.
     ///
     /// # Arguments
-    /// `cpumask` - The cpu affinity mask to be set in type [`AxCpuMask`].
+    /// `cpumask` - The cpu affinity mask to be set in type [`KCpuMask`].
     #[inline]
-    pub fn set_cpumask(&self, cpumask: AxCpuMask) {
+    pub fn set_cpumask(&self, cpumask: KCpuMask) {
         *self.cpumask.lock() = cpumask
     }
 
@@ -385,7 +385,7 @@ impl TaskInner {
 // private methods
 impl TaskInner {
     fn new_common(id: TaskId, name: String) -> Self {
-        let mut cpumask = AxCpuMask::new();
+        let mut cpumask = KCpuMask::new();
         for cpu_id in 0..crate::api::active_cpu_num() {
             cpumask.set(cpu_id, true);
         }

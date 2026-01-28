@@ -1,5 +1,5 @@
 use khal::{context::TrapFrame, percpu::this_cpu_id};
-use ktask::{AxCpuMask, TaskInner};
+use ktask::{KCpuMask, TaskInner};
 use log::debug;
 
 use crate::rendezvous as rv;
@@ -109,7 +109,7 @@ pub fn init_softlockup_detection() {
     );
 
     // Bind watchdog task to the local CPU.
-    watchdog_task.set_cpumask(AxCpuMask::one_shot(this_cpu_id()));
+    watchdog_task.set_cpumask(KCpuMask::one_shot(this_cpu_id()));
     ktask::spawn_task(watchdog_task);
 }
 

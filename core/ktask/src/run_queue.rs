@@ -14,7 +14,7 @@ use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
 use crate::{
-    AxCpuMask, AxTaskRef, Scheduler, TaskInner,
+    KCpuMask, AxTaskRef, Scheduler, TaskInner,
     future::block_on,
     task::{CurrentTask, TaskState},
 };
@@ -99,7 +99,7 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
 // The modulo operation is safe here because `platconfig::plat::CPU_NUM` is always greater than 1 with "smp" enabled.
 #[allow(clippy::modulo_one)]
 #[inline]
-fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
+fn select_run_queue_index(cpumask: KCpuMask) -> usize {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static RUN_QUEUE_INDEX: AtomicUsize = AtomicUsize::new(0);
 
@@ -437,7 +437,7 @@ impl AxRunQueue {
         )
         .into_arc();
         // gc task should be pinned to the current CPU.
-        gc_task.set_cpumask(AxCpuMask::one_shot(cpu_id));
+        gc_task.set_cpumask(KCpuMask::one_shot(cpu_id));
 
         let mut scheduler = Scheduler::new();
         scheduler.add_task(gc_task);
@@ -655,7 +655,7 @@ pub(crate) fn init() {
     const IDLE_TASK_STACK_SIZE: usize = 16384;
     let idle_task = TaskInner::new(|| crate::run_idle(), "idle".into(), IDLE_TASK_STACK_SIZE);
     // idle task should be pinned to the current CPU.
-    idle_task.set_cpumask(AxCpuMask::one_shot(cpu_id));
+    idle_task.set_cpumask(KCpuMask::one_shot(cpu_id));
     IDLE_TASK.with_current(|i| {
         i.init_once(idle_task.into_arc());
     });

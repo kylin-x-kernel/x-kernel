@@ -27,7 +27,7 @@ pub type AxTaskRef = Arc<AxTask>;
 pub type WeakAxTaskRef = Weak<AxTask>;
 
 /// The wrapper type for [`cpumask::CpuMask`] with SMP configuration.
-pub type AxCpuMask = cpumask::CpuMask<{ platconfig::plat::CPU_NUM }>;
+pub type KCpuMask = cpumask::CpuMask<{ platconfig::plat::CPU_NUM }>;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
 
@@ -177,11 +177,11 @@ pub fn set_prio(prio: isize) -> bool {
 }
 
 /// Set the affinity for the current task.
-/// [`AxCpuMask`] is used to specify the CPU affinity.
+/// [`KCpuMask`] is used to specify the CPU affinity.
 /// Returns `true` if the affinity is set successfully.
 ///
 /// TODO: support set the affinity for other tasks.
-pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
+pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
     if cpumask.is_empty() {
         false
     } else {
