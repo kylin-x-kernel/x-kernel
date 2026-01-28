@@ -16,7 +16,7 @@ alloc = ["virtio-drivers/alloc"]
 block = ["dep:block"]
 gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
-net = ["alloc", "axdriver_net"]
+net = ["alloc", "dep:net"]
 socket = ["alloc", "dep:vsock"]
 
 [dependencies]
