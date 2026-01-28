@@ -13,7 +13,7 @@ use core::{
 
 use bitflags::bitflags;
 use linux_raw_sys::general::*;
-use spin::Mutex;
+use axsync::Mutex;
 
 bitflags! {
     /// I/O events.
