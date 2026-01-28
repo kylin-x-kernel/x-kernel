@@ -1,5 +1,5 @@
 use axerrno::{AxError, AxResult, LinuxError};
-use axnet::options::{Configurable, GetSocketOption, SetSocketOption};
+use knet::options::{Configurable, GetSocketOption, SetSocketOption};
 use linux_raw_sys::net::socklen_t;
 
 use crate::{
@@ -13,7 +13,7 @@ const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 
 mod conv {
     use axerrno::{AxError, AxResult};
-    use axnet::options::UnixCredentials;
+    use knet::options::UnixCredentials;
     use linux_raw_sys::{general::timeval, net::ucred};
 
     use crate::time::TimeValueLike;

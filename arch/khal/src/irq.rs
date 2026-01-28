@@ -49,6 +49,6 @@ pub fn irq_handler(vector: usize) -> bool {
         }
     }
 
-    drop(guard); // rescheduling may occur when preemption is re-enabled.
+    let _ = guard; // rescheduling may occur when preemption is re-enabled.
     true
 }

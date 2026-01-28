@@ -10,33 +10,33 @@ use smoltcp::{
 
 use crate::{
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::Device,
+    device::NetDevice,
 };
 
 pub struct LoopbackDevice {
-    buffer: PacketBuffer<'static, ()>,
-    poll: PollSet,
+    queue: PacketBuffer<'static, ()>,
+    wakers: PollSet,
 }
 impl LoopbackDevice {
     pub fn new() -> Self {
-        let buffer = PacketBuffer::new(
+        let queue = PacketBuffer::new(
             vec![PacketMetadata::EMPTY; SOCKET_BUFFER_SIZE],
             vec![0u8; STANDARD_MTU * SOCKET_BUFFER_SIZE],
         );
         Self {
-            buffer,
-            poll: PollSet::new(),
+            queue,
+            wakers: PollSet::new(),
         }
     }
 }
 
-impl Device for LoopbackDevice {
+impl NetDevice for LoopbackDevice {
     fn name(&self) -> &str {
         "lo"
     }
 
-    fn recv(&mut self, buffer: &mut PacketBuffer<()>, _timestamp: Instant) -> bool {
-        self.buffer.dequeue().ok().is_some_and(|(_, rx_buf)| {
+    fn poll_rx(&mut self, buffer: &mut PacketBuffer<()>, _timestamp: Instant) -> bool {
+        self.queue.dequeue().ok().is_some_and(|(_, rx_buf)| {
             buffer
                 .enqueue(rx_buf.len(), ())
                 .unwrap()
@@ -45,11 +45,16 @@ impl Device for LoopbackDevice {
         })
     }
 
-    fn send(&mut self, next_hop: IpAddress, packet: &[u8], _timestamp: Instant) -> bool {
-        match self.buffer.enqueue(packet.len(), ()) {
+    fn send_ip_packet(
+        &mut self,
+        next_hop: IpAddress,
+        ip_packet: &[u8],
+        _timestamp: Instant,
+    ) -> bool {
+        match self.queue.enqueue(ip_packet.len(), ()) {
             Ok(tx_buf) => {
-                tx_buf.copy_from_slice(packet);
-                self.poll.wake();
+                tx_buf.copy_from_slice(ip_packet);
+                self.wakers.wake();
                 true
             }
             Err(_) => {
@@ -62,7 +67,7 @@ impl Device for LoopbackDevice {
         }
     }
 
-    fn register_waker(&self, waker: &Waker) {
-        self.poll.register(waker);
+    fn register_rx_waker(&self, waker: &Waker) {
+        self.wakers.register(waker);
     }
 }

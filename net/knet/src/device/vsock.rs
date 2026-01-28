@@ -11,15 +11,15 @@ use ktask::future::{block_on, interruptible};
 
 use crate::{alloc::string::ToString, vsock::connection_manager::VSOCK_CONN_MANAGER};
 
-// we need a global and static only one vsock device
-static VSOCK_DEVICE: Mutex<Option<VsockDevice>> = Mutex::new(None);
-static PENDING_EVENTS: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
+// A single global vsock device instance.
+static VSOCK_DEV: Mutex<Option<VsockDevice>> = Mutex::new(None);
+static VSOCK_EVENT_QUEUE: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
 
-const VSOCK_RX_TMPBUF_SIZE: usize = 0x1000; // 4KiB buffer for vsock receive
+const VSOCK_RX_SCRATCH_SIZE: usize = 0x1000; // 4KiB scratch buffer for vsock receive
 
 /// Registers a vsock device. Only one vsock device can be registered.
-pub fn register_vsock_device(dev: VsockDevice) -> AxResult {
-    let mut guard = VSOCK_DEVICE.lock();
+pub fn register_vsock_dev(dev: VsockDevice) -> AxResult {
+    let mut guard = VSOCK_DEV.lock();
     if guard.is_some() {
         ax_bail!(AlreadyExists, "vsock device already registered");
     }
@@ -28,22 +28,22 @@ pub fn register_vsock_device(dev: VsockDevice) -> AxResult {
     Ok(())
 }
 
-static POLL_REF_COUNT: Mutex<usize> = Mutex::new(0);
-static POLL_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
-static POLL_FREQUENCY: PollFrequencyController = PollFrequencyController::new();
+static POLL_USERS: Mutex<usize> = Mutex::new(0);
+static POLL_ACTIVE: AtomicBool = AtomicBool::new(false);
+static POLL_BACKOFF: PollBackoff = PollBackoff::new();
 
-struct PollFrequencyController {
+struct PollBackoff {
     consecutive_idle: AtomicU64,
 }
 
-impl PollFrequencyController {
+impl PollBackoff {
     const fn new() -> Self {
         Self {
             consecutive_idle: AtomicU64::new(0),
         }
     }
 
-    fn current_interval(&self) -> Duration {
+    fn next_interval(&self) -> Duration {
         let idle = self.consecutive_idle.load(Ordering::Relaxed);
         let interval_us = match idle {
             0..=3 => 100,     //  3 ：100μs
@@ -54,73 +54,73 @@ impl PollFrequencyController {
         Duration::from_micros(interval_us)
     }
 
-    fn on_event(&self) {
+    fn on_activity(&self) {
         self.consecutive_idle.store(0, Ordering::Release);
     }
 
-    fn on_idle(&self) {
+    fn on_idle_tick(&self) {
         self.consecutive_idle.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn stats(&self) -> (u64, u64) {
+    fn snapshot(&self) -> (u64, u64) {
         let idle = self.consecutive_idle.load(Ordering::Relaxed);
-        let interval = self.current_interval().as_micros() as u64;
+        let interval = self.next_interval().as_micros() as u64;
         (idle, interval)
     }
 }
 
-pub fn start_vsock_poll() {
-    let mut count = POLL_REF_COUNT.lock();
+pub fn start_vsock_polling() {
+    let mut count = POLL_USERS.lock();
     *count += 1;
     let new_count = *count;
-    debug!("start_vsock_poll: ref_count -> {}", new_count);
+    debug!("start_vsock_polling: ref_count -> {}", new_count);
     if new_count == 1 {
-        if !POLL_TASK_RUNNING.swap(true, Ordering::SeqCst) {
+        if !POLL_ACTIVE.swap(true, Ordering::SeqCst) {
             drop(count);
             debug!("Starting vsock poll task");
-            ktask::spawn_with_name(vsock_poll_loop, "vsock-poll".to_string());
+            ktask::spawn_with_name(vsock_poll_task, "vsock-poll".to_string());
         } else {
             warn!("Poll task already running!");
         }
     }
 }
 
-pub fn stop_vsock_poll() {
-    let mut count = POLL_REF_COUNT.lock();
+pub fn stop_vsock_polling() {
+    let mut count = POLL_USERS.lock();
     if *count == 0 {
         // this should not happen, log a warning
-        warn!("stop_vsock_poll called but ref_count already 0");
+        warn!("stop_vsock_polling called but ref_count already 0");
         return;
     }
     *count -= 1;
     let new_count = *count;
-    debug!("stop_vsock_poll: ref_count -> {new_count}");
+    debug!("stop_vsock_polling: ref_count -> {new_count}");
 }
 
-fn vsock_poll_loop() {
+fn vsock_poll_task() {
     loop {
-        let ref_count = *POLL_REF_COUNT.lock();
+        let ref_count = *POLL_USERS.lock();
         if ref_count == 0 {
-            POLL_TASK_RUNNING.store(false, Ordering::SeqCst);
+            POLL_ACTIVE.store(false, Ordering::SeqCst);
             debug!("Vsock poll task exiting (no active connections)");
             break;
         }
-        let _ = block_on(interruptible(poll_interfaces_adaptive()));
+        let _ = block_on(interruptible(poll_vsock_adaptive()));
     }
 }
 
-async fn poll_interfaces_adaptive() -> AxResult<()> {
-    let has_events = poll_vsock_interfaces()?;
+async fn poll_vsock_adaptive() -> AxResult<()> {
+    let has_events = poll_vsock_devices()?;
 
     if has_events {
-        POLL_FREQUENCY.on_event();
+        POLL_BACKOFF.on_activity();
     } else {
-        POLL_FREQUENCY.on_idle();
+        POLL_BACKOFF.on_idle_tick();
     }
 
-    let interval = POLL_FREQUENCY.current_interval();
+    let interval = POLL_BACKOFF.next_interval();
 
-    let (idle_count, interval_us) = POLL_FREQUENCY.stats();
+    let (idle_count, interval_us) = POLL_BACKOFF.snapshot();
     if idle_count > 0 && idle_count % 10 == 0 {
         trace!("Poll frequency: idle_count={idle_count}, interval={interval_us}μs",);
     }
@@ -128,17 +128,17 @@ async fn poll_interfaces_adaptive() -> AxResult<()> {
     Ok(())
 }
 
-fn poll_vsock_interfaces() -> AxResult<bool> {
-    let mut guard = VSOCK_DEVICE.lock();
+fn poll_vsock_devices() -> AxResult<bool> {
+    let mut guard = VSOCK_DEV.lock();
     let dev = guard.as_mut().ok_or(AxError::NotFound)?;
     let mut event_count = 0;
-    let mut buf = alloc::vec![0; VSOCK_RX_TMPBUF_SIZE];
+    let mut buf = alloc::vec![0; VSOCK_RX_SCRATCH_SIZE];
 
     // Process pending events first
     // Use core::mem::take to atomically move all events out and empty the global queue
-    let pending_events = core::mem::take(&mut *PENDING_EVENTS.lock());
+    let pending_events = core::mem::take(&mut *VSOCK_EVENT_QUEUE.lock());
     for event in pending_events {
-        dispatch_irq_vsock_event(event, dev, &mut buf);
+        handle_vsock_event(event, dev, &mut buf);
     }
 
     loop {
@@ -146,7 +146,7 @@ fn poll_vsock_interfaces() -> AxResult<bool> {
             Ok(None) => break, // no more events
             Ok(Some(event)) => {
                 event_count += 1;
-                dispatch_irq_vsock_event(event, dev, &mut buf);
+                handle_vsock_event(event, dev, &mut buf);
             }
             Err(e) => {
                 info!("Failed to poll vsock event: {e:?}");
@@ -157,7 +157,7 @@ fn poll_vsock_interfaces() -> AxResult<bool> {
     Ok(event_count > 0)
 }
 
-fn dispatch_irq_vsock_event(event: VsockDriverEventType, dev: &mut VsockDevice, buf: &mut [u8]) {
+fn handle_vsock_event(event: VsockDriverEventType, dev: &mut VsockDevice, buf: &mut [u8]) {
     let mut manager = VSOCK_CONN_MANAGER.lock();
     debug!("Handling vsock event: {event:?}");
 
@@ -177,7 +177,7 @@ fn dispatch_irq_vsock_event(event: VsockDriverEventType, dev: &mut VsockDevice, 
             };
 
             if free_space == 0 {
-                PENDING_EVENTS
+                VSOCK_EVENT_QUEUE
                     .lock()
                     .push_back(VsockDriverEventType::Received(conn_id, len));
                 return;
@@ -216,7 +216,7 @@ fn dispatch_irq_vsock_event(event: VsockDriverEventType, dev: &mut VsockDevice, 
 }
 
 pub fn vsock_listen(addr: VsockAddr) -> AxResult<()> {
-    let mut guard = VSOCK_DEVICE.lock();
+    let mut guard = VSOCK_DEV.lock();
     let dev = guard.as_mut().ok_or(AxError::NotFound)?;
     dev.listen(addr.port);
     Ok(())
@@ -233,25 +233,25 @@ fn map_dev_err(e: DriverError) -> AxError {
 }
 
 pub fn vsock_connect(conn_id: VsockConnId) -> AxResult<()> {
-    let mut guard = VSOCK_DEVICE.lock();
+    let mut guard = VSOCK_DEV.lock();
     let dev = guard.as_mut().ok_or(AxError::NotFound)?;
     dev.connect(conn_id).map_err(map_dev_err)
 }
 
 pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> AxResult<usize> {
-    let mut guard = VSOCK_DEVICE.lock();
+    let mut guard = VSOCK_DEV.lock();
     let dev = guard.as_mut().ok_or(AxError::NotFound)?;
     dev.send(conn_id, buf).map_err(map_dev_err)
 }
 
 pub fn vsock_disconnect(conn_id: VsockConnId) -> AxResult<()> {
-    let mut guard = VSOCK_DEVICE.lock();
+    let mut guard = VSOCK_DEV.lock();
     let dev = guard.as_mut().ok_or(AxError::NotFound)?;
     dev.disconnect(conn_id).map_err(map_dev_err)
 }
 
 pub fn vsock_guest_cid() -> AxResult<u64> {
-    let mut guard = VSOCK_DEVICE.lock();
+    let mut guard = VSOCK_DEV.lock();
     let dev = guard.as_mut().ok_or(AxError::NotFound)?;
     Ok(dev.guest_cid())
 }

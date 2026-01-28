@@ -120,11 +120,11 @@ pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
 /// Init vsock subsystem by vsock devices.
 #[cfg(feature = "vsock")]
 pub fn init_vsock(mut vsock_devs: DeviceContainer<VsockDevice>) {
-    use crate::device::register_vsock_device;
+    use crate::device::register_vsock_dev;
     info!("Initialize vsock subsystem...");
     if let Some(dev) = vsock_devs.take_one() {
         info!("  use vsock 0: {:?}", dev.name());
-        if let Err(e) = register_vsock_device(dev) {
+        if let Err(e) = register_vsock_dev(dev) {
             warn!("Failed to initialize vsock device: {:?}", e);
         }
     } else {

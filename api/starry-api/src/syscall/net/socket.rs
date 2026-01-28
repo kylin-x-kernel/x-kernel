@@ -1,11 +1,11 @@
 use axerrno::{AxError, AxResult, LinuxError};
 #[cfg(feature = "vsock")]
-use axnet::vsock::{VsockSocket, VsockStreamTransport};
-use axnet::{
+use knet::vsock::{VsockSocket, VsockStreamTransport};
+use knet::{
     Shutdown, SocketAddrEx, SocketOps,
     tcp::TcpSocket,
     udp::UdpSocket,
-    unix::{DgramTransport, StreamTransport, UnixSocket},
+    unix::{DgramTransport, StreamTransport, UnixDomainSocket},
 };
 use ktask::current;
 use linux_raw_sys::{
@@ -33,19 +33,23 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
             if proto != 0 && proto != IPPROTO_TCP as _ {
                 return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
             }
-            axnet::Socket::Tcp(TcpSocket::new())
+            knet::Socket::Tcp(TcpSocket::new())
         }
         (AF_INET, SOCK_DGRAM) => {
             if proto != 0 && proto != IPPROTO_UDP as _ {
                 return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
             }
-            axnet::Socket::Udp(UdpSocket::new())
+            knet::Socket::Udp(UdpSocket::new())
         }
-        (AF_UNIX, SOCK_STREAM) => axnet::Socket::Unix(UnixSocket::new(StreamTransport::new(pid))),
-        (AF_UNIX, SOCK_DGRAM) => axnet::Socket::Unix(UnixSocket::new(DgramTransport::new(pid))),
+        (AF_UNIX, SOCK_STREAM) => {
+            knet::Socket::Unix(UnixDomainSocket::new(StreamTransport::new(pid)))
+        }
+        (AF_UNIX, SOCK_DGRAM) => {
+            knet::Socket::Unix(UnixDomainSocket::new(DgramTransport::new(pid)))
+        }
         #[cfg(feature = "vsock")]
         (AF_VSOCK, SOCK_STREAM) => {
-            axnet::Socket::Vsock(VsockSocket::new(VsockStreamTransport::new()))
+            knet::Socket::Vsock(VsockSocket::new(VsockStreamTransport::new()))
         }
         (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) => {
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
@@ -166,19 +170,19 @@ pub fn sys_socketpair(
     let (sock1, sock2) = match ty {
         SOCK_STREAM => {
             let (sock1, sock2) = StreamTransport::new_pair(pid);
-            (UnixSocket::new(sock1), UnixSocket::new(sock2))
+            (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
         }
         SOCK_DGRAM | SOCK_SEQPACKET => {
             let (sock1, sock2) = DgramTransport::new_pair(pid);
-            (UnixSocket::new(sock1), UnixSocket::new(sock2))
+            (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
         }
         _ => {
             warn!("Unsupported socketpair type: {ty}");
             return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
         }
     };
-    let sock1 = Socket(axnet::Socket::Unix(sock1));
-    let sock2 = Socket(axnet::Socket::Unix(sock2));
+    let sock1 = Socket(knet::Socket::Unix(sock1));
+    let sock2 = Socket(knet::Socket::Unix(sock2));
 
     if raw_ty & O_NONBLOCK != 0 {
         sock1.set_nonblocking(true)?;

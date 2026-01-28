@@ -2,7 +2,7 @@ use alloc::{borrow::Cow, format, sync::Arc};
 use core::{ffi::c_int, ops::Deref, task::Context};
 
 use axerrno::{AxError, AxResult};
-use axnet::{
+use knet::{
     SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
@@ -12,10 +12,10 @@ use linux_raw_sys::general::S_IFSOCK;
 use super::{FileLike, Kstat};
 use crate::file::{IoDst, IoSrc, get_file_like};
 
-pub struct Socket(pub axnet::Socket);
+pub struct Socket(pub knet::Socket);
 
 impl Deref for Socket {
-    type Target = axnet::Socket;
+    type Target = knet::Socket;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -24,11 +24,11 @@ impl Deref for Socket {
 
 impl FileLike for Socket {
     fn read(&self, dst: &mut IoDst) -> AxResult<usize> {
-        self.recv(dst, axnet::RecvOptions::default())
+        self.recv(dst, knet::RecvOptions::default())
     }
 
     fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
-        self.send(src, axnet::SendOptions::default())
+        self.send(src, knet::SendOptions::default())
     }
 
     fn stat(&self) -> AxResult<Kstat> {

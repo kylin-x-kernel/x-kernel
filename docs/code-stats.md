@@ -4,7 +4,7 @@
 
  自动统计 StarryOS 及其依赖仓库的代码量，包括：
 - 主仓库（StarryOS）
-- local_crates（axplat_crates, axdriver_crates, axcpu 等）
+- local_crates（axplat_crates, kdriver_crates, axcpu 等）
 - 白名单中的仓库
 
 统计工具基于 [starry-test-harness](https://github.com/kylin-x-kernel/starry-test-harness) 的代码统计功能。

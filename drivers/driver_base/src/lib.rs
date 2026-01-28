@@ -4,13 +4,13 @@
 //! You have to use this crate with the following crates for corresponding
 //! device types:
 //!
-//! - [`axdriver_block`][2]: Common traits for block storage drivers.
-//! - [`axdriver_display`][3]: Common traits and types for graphics display drivers.
+//! - [`kdriver_block`][2]: Common traits for block storage drivers.
+//! - [`kdriver_display`][3]: Common traits and types for graphics display drivers.
 //! - [`net`][4]: Common traits and types for network (NIC) drivers.
 //!
 //! [1]: https://github.com/arceos-org/arceos
-//! [2]: ../axdriver_block/index.html
-//! [3]: ../axdriver_display/index.html
+//! [2]: ../kdriver_block/index.html
+//! [3]: ../kdriver_display/index.html
 //! [4]: ../net/index.html
 
 #![no_std]

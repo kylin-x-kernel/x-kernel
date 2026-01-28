@@ -12,16 +12,18 @@ pub use loopback::*;
 #[cfg(feature = "vsock")]
 pub use vsock::*;
 
-pub trait Device: Send + Sync {
+pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
 
-    fn recv(&mut self, buffer: &mut PacketBuffer<()>, timestamp: Instant) -> bool;
-    /// Sends a packet to the next hop.
+    /// Polls the device and pushes received IP packets into `buffer`.
+    fn poll_rx(&mut self, buffer: &mut PacketBuffer<()>, timestamp: Instant) -> bool;
+    /// Sends an IP packet to the next hop.
     ///
     /// Returns `true` if this operation resulted in the readiness of receive
     /// operation. This is true for loopback devices and can be used to speed
     /// up packet processing.
-    fn send(&mut self, next_hop: IpAddress, packet: &[u8], timestamp: Instant) -> bool;
+    fn send_ip_packet(&mut self, next_hop: IpAddress, ip_packet: &[u8], timestamp: Instant)
+    -> bool;
 
-    fn register_waker(&self, waker: &Waker);
+    fn register_rx_waker(&self, waker: &Waker);
 }

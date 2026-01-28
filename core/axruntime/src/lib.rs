@@ -192,9 +192,9 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         axfs::init_filesystems(all_devices.block);
 
         #[cfg(feature = "net")]
-        axnet::init_network(all_devices.net);
+        knet::init_network(all_devices.net);
         #[cfg(feature = "vsock")]
-        axnet::init_vsock(all_devices.vsock);
+        knet::init_vsock(all_devices.vsock);
 
         #[cfg(feature = "display")]
         fbdevice::fb_init(all_devices.display);

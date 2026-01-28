@@ -20,13 +20,13 @@ use crate::{
     options::{Configurable, GetSocketOption, SetSocketOption},
     tcp::TcpSocket,
     udp::UdpSocket,
-    unix::{UnixSocket, UnixSocketAddr},
+    unix::{UnixAddr, UnixDomainSocket},
 };
 
 #[derive(Clone, Debug)]
 pub enum SocketAddrEx {
     Ip(SocketAddr),
-    Unix(UnixSocketAddr),
+    Unix(UnixAddr),
     #[cfg(feature = "vsock")]
     Vsock(VsockAddr),
 }
@@ -41,7 +41,7 @@ impl SocketAddrEx {
         }
     }
 
-    pub fn into_unix(self) -> AxResult<UnixSocketAddr> {
+    pub fn into_unix(self) -> AxResult<UnixAddr> {
         match self {
             SocketAddrEx::Unix(addr) => Ok(addr),
             SocketAddrEx::Ip(_) => Err(AxError::from(LinuxError::EAFNOSUPPORT)),
@@ -163,11 +163,12 @@ pub trait SocketOps: Configurable {
 }
 
 /// Network socket abstraction.
+#[allow(clippy::large_enum_variant)]
 #[enum_dispatch(Configurable, SocketOps)]
 pub enum Socket {
     Udp(UdpSocket),
     Tcp(TcpSocket),
-    Unix(UnixSocket),
+    Unix(UnixDomainSocket),
     #[cfg(feature = "vsock")]
     Vsock(VsockSocket),
 }

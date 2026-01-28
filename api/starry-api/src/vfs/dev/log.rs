@@ -1,14 +1,14 @@
 use core::bstr::ByteStr;
 
 use axerrno::LinuxResult;
-use axnet::{
+use knet::{
     RecvOptions, SocketAddrEx, SocketOps,
-    unix::{DgramTransport, UnixSocket, UnixSocketAddr},
+    unix::{DgramTransport, UnixAddr, UnixDomainSocket},
 };
 
 pub fn bind_dev_log() -> LinuxResult<()> {
-    let server = UnixSocket::new(DgramTransport::new(1));
-    server.bind(SocketAddrEx::Unix(UnixSocketAddr::Path("/dev/log".into())))?;
+    let server = UnixDomainSocket::new(DgramTransport::new(1));
+    server.bind(SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into())))?;
     ktask::spawn_with_name(
         move || {
             let mut buf = [0u8; 65536];

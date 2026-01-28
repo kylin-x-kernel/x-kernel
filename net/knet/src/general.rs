@@ -69,8 +69,8 @@ impl GeneralOptions {
         self.device_mask.load(Ordering::Acquire)
     }
 
-    pub fn register_waker(&self, waker: &Waker) {
-        SERVICE.lock().register_waker(self.device_mask(), waker);
+    pub fn register_rx_waker(&self, waker: &Waker) {
+        SERVICE.lock().register_rx_waker(self.device_mask(), waker);
     }
 
     pub fn send_poller<P: Pollable, F: FnMut() -> AxResult<T>, T>(

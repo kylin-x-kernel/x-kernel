@@ -41,7 +41,7 @@ inputdev = { path = "io/inputdev" }
 kipi = { path = "arch/kipi" }
 klogger = { path = "util/klogger" }
 axmm = { path = "mm/axmm" }
-axnet = { path = "net/axnet" }
+knet = { path = "net/knet" }
 axruntime = { path = "core/axruntime" }
 ksync = { path = "core/ksync" }
 ktask = { path = "core/ktask" }

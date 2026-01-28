@@ -330,7 +330,7 @@ impl Pollable for UdpSocket {
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         if events.intersects(IoEvents::IN | IoEvents::OUT) {
-            self.general.register_waker(context.waker());
+            self.general.register_rx_waker(context.waker());
         }
     }
 }

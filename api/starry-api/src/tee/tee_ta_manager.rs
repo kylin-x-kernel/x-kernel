@@ -6,11 +6,11 @@
 
 use alloc::{format, string::String, vec::Vec};
 
-use axnet::{
-    RecvOptions, SendOptions, SocketAddrEx, SocketOps,
-    unix::{StreamTransport, UnixSocket, UnixSocketAddr},
-};
 use bincode::config;
+use knet::{
+    RecvOptions, SendOptions, SocketAddrEx, SocketOps,
+    unix::{StreamTransport, UnixAddr, UnixDomainSocket},
+};
 use ktask::current;
 use starry_core::task::AsThread;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND, TEE_SUCCESS, utee_params};
@@ -29,11 +29,11 @@ pub struct SessionIdentity {
 
 pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     // Connect to dest TA via Unix socket
-    let socket = UnixSocket::new(StreamTransport::new(
+    let socket = UnixDomainSocket::new(StreamTransport::new(
         current().as_thread().proc_data.proc.pid(),
     ));
     let path = format!("/tmp/{}.sock", uuid);
-    let remote_addr = SocketAddrEx::Unix(UnixSocketAddr::Path(path.into()));
+    let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send open session request to dest TA
@@ -76,11 +76,11 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
 
 pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     // Connect to dest TA via Unix socket
-    let socket = UnixSocket::new(StreamTransport::new(
+    let socket = UnixDomainSocket::new(StreamTransport::new(
         current().as_thread().proc_data.proc.pid(),
     ));
     let path = format!("/tmp/{}.sock", sess_id.uuid);
-    let remote_addr = SocketAddrEx::Unix(UnixSocketAddr::Path(path.into()));
+    let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send close session request to dest TA
@@ -105,11 +105,11 @@ pub fn tee_ta_invoke_command(
     usr_param: *mut utee_params,
 ) -> TeeResult {
     // Connect to dest TA via Unix socket
-    let socket = UnixSocket::new(StreamTransport::new(
+    let socket = UnixDomainSocket::new(StreamTransport::new(
         current().as_thread().proc_data.proc.pid(),
     ));
     let path = format!("/tmp/{}.sock", sess_id.uuid);
-    let remote_addr = SocketAddrEx::Unix(UnixSocketAddr::Path(path.into()));
+    let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send invoke command request to dest TA

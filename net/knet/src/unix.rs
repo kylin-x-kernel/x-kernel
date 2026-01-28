@@ -23,21 +23,21 @@ use crate::{
 };
 
 #[derive(Default, Clone, Debug)]
-pub enum UnixSocketAddr {
+pub enum UnixAddr {
     #[default]
-    Unnamed,
+    Unbound,
     Abstract(Arc<[u8]>),
     Path(Arc<str>),
 }
 
-/// Abstract transport trait for Unix sockets.
+/// Transport interface for Unix-domain sockets.
 #[async_trait]
 #[enum_dispatch]
-pub trait TransportOps: Configurable + Pollable + Send + Sync {
-    fn bind(&self, slot: &BindSlot, local_addr: &UnixSocketAddr) -> AxResult;
-    fn connect(&self, slot: &BindSlot, local_addr: &UnixSocketAddr) -> AxResult;
+pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
+    fn bind(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> AxResult;
+    fn connect(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> AxResult;
 
-    async fn accept(&self) -> AxResult<(Transport, UnixSocketAddr)>;
+    async fn accept(&self) -> AxResult<(UnixTransport, UnixAddr)>;
 
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize>;
     fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> AxResult<usize>;
@@ -48,75 +48,75 @@ pub trait TransportOps: Configurable + Pollable + Send + Sync {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[enum_dispatch(Configurable, TransportOps)]
-pub enum Transport {
+#[enum_dispatch(Configurable, UnixTransportOps)]
+pub enum UnixTransport {
     Stream(StreamTransport),
     Dgram(DgramTransport),
 }
-impl Pollable for Transport {
+impl Pollable for UnixTransport {
     fn poll(&self) -> IoEvents {
         match self {
-            Transport::Stream(stream) => stream.poll(),
-            Transport::Dgram(dgram) => dgram.poll(),
+            UnixTransport::Stream(stream) => stream.poll(),
+            UnixTransport::Dgram(dgram) => dgram.poll(),
         }
     }
 
     fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
         match self {
-            Transport::Stream(stream) => stream.register(context, events),
-            Transport::Dgram(dgram) => dgram.register(context, events),
+            UnixTransport::Stream(stream) => stream.register(context, events),
+            UnixTransport::Dgram(dgram) => dgram.register(context, events),
         }
     }
 }
 
 #[derive(Default)]
-pub struct BindSlot {
+pub struct BindEntry {
     stream: Mutex<Option<stream::Bind>>,
     dgram: Mutex<Option<dgram::Bind>>,
 }
 
 lazy_static! {
-    static ref ABSTRACT_BINDS: Mutex<HashMap<Arc<[u8]>, BindSlot>> = Mutex::new(HashMap::new());
+    static ref ABSTRACT_BINDINGS: Mutex<HashMap<Arc<[u8]>, BindEntry>> = Mutex::new(HashMap::new());
 }
 
-pub(crate) fn with_slot<R>(
-    addr: &UnixSocketAddr,
-    f: impl FnOnce(&BindSlot) -> AxResult<R>,
+pub(crate) fn lookup_bind_entry<R>(
+    addr: &UnixAddr,
+    f: impl FnOnce(&BindEntry) -> AxResult<R>,
 ) -> AxResult<R> {
     match addr {
-        UnixSocketAddr::Unnamed => Err(AxError::InvalidInput),
-        UnixSocketAddr::Abstract(name) => {
-            let binds = ABSTRACT_BINDS.lock();
-            if let Some(slot) = binds.get(name) {
-                f(slot)
+        UnixAddr::Unbound => Err(AxError::InvalidInput),
+        UnixAddr::Abstract(name) => {
+            let bindings = ABSTRACT_BINDINGS.lock();
+            if let Some(entry) = bindings.get(name) {
+                f(entry)
             } else {
                 Err(AxError::NotFound)
             }
         }
-        UnixSocketAddr::Path(path) => {
+        UnixAddr::Path(path) => {
             let loc = FS_CONTEXT.lock().resolve(path.as_ref())?;
             if loc.metadata()?.node_type != NodeType::Socket {
                 return Err(AxError::NotASocket);
             }
             f(loc
                 .user_data()
-                .get::<BindSlot>()
+                .get::<BindEntry>()
                 .ok_or(AxError::ConnectionRefused)?
                 .as_ref())
         }
     }
 }
-fn with_slot_or_insert<R>(
-    addr: &UnixSocketAddr,
-    f: impl FnOnce(&BindSlot) -> AxResult<R>,
+fn lookup_or_create_bind_entry<R>(
+    addr: &UnixAddr,
+    f: impl FnOnce(&BindEntry) -> AxResult<R>,
 ) -> AxResult<R> {
     match addr {
-        UnixSocketAddr::Unnamed => Err(AxError::InvalidInput),
-        UnixSocketAddr::Abstract(name) => {
-            let mut binds = ABSTRACT_BINDS.lock();
-            f(binds.entry(name.clone()).or_default())
+        UnixAddr::Unbound => Err(AxError::InvalidInput),
+        UnixAddr::Abstract(name) => {
+            let mut bindings = ABSTRACT_BINDINGS.lock();
+            f(bindings.entry(name.clone()).or_default())
         }
-        UnixSocketAddr::Path(path) => {
+        UnixAddr::Path(path) => {
             let loc = OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -128,27 +128,27 @@ fn with_slot_or_insert<R>(
             }
             f(loc
                 .user_data()
-                .get_or_insert_with(BindSlot::default)
+                .get_or_insert_with(BindEntry::default)
                 .as_ref())
         }
     }
 }
 
-pub struct UnixSocket {
-    transport: Transport,
-    local_addr: Mutex<UnixSocketAddr>,
-    remote_addr: Mutex<UnixSocketAddr>,
+pub struct UnixDomainSocket {
+    transport: UnixTransport,
+    local_endpoint: Mutex<UnixAddr>,
+    peer_endpoint: Mutex<UnixAddr>,
 }
-impl UnixSocket {
-    pub fn new(transport: impl Into<Transport>) -> Self {
+impl UnixDomainSocket {
+    pub fn new(transport: impl Into<UnixTransport>) -> Self {
         Self {
             transport: transport.into(),
-            local_addr: Mutex::new(UnixSocketAddr::Unnamed),
-            remote_addr: Mutex::new(UnixSocketAddr::Unnamed),
+            local_endpoint: Mutex::new(UnixAddr::Unbound),
+            peer_endpoint: Mutex::new(UnixAddr::Unbound),
         }
     }
 }
-impl Configurable for UnixSocket {
+impl Configurable for UnixDomainSocket {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
         self.transport.get_option_inner(opt)
     }
@@ -157,13 +157,15 @@ impl Configurable for UnixSocket {
         self.transport.set_option_inner(opt)
     }
 }
-impl SocketOps for UnixSocket {
-    fn bind(&self, local_addr: SocketAddrEx) -> AxResult {
-        let local_addr = local_addr.into_unix()?;
-        let mut guard = self.local_addr.lock();
-        if matches!(&*guard, UnixSocketAddr::Unnamed) {
-            with_slot_or_insert(&local_addr, |slot| self.transport.bind(slot, &local_addr))?;
-            *guard = local_addr;
+impl SocketOps for UnixDomainSocket {
+    fn bind(&self, local_endpoint: SocketAddrEx) -> AxResult {
+        let local_endpoint = local_endpoint.into_unix()?;
+        let mut local_guard = self.local_endpoint.lock();
+        if matches!(&*local_guard, UnixAddr::Unbound) {
+            lookup_or_create_bind_entry(&local_endpoint, |slot| {
+                self.transport.bind(slot, &local_endpoint)
+            })?;
+            *local_guard = local_endpoint;
         } else {
             return Err(AxError::InvalidInput);
         }
@@ -172,13 +174,13 @@ impl SocketOps for UnixSocket {
 
     fn connect(&self, remote_addr: SocketAddrEx) -> AxResult {
         let remote_addr = remote_addr.into_unix()?;
-        let local_addr = self.local_addr.lock().clone();
-        let mut guard = self.remote_addr.lock();
-        if matches!(&*guard, UnixSocketAddr::Unnamed) {
-            with_slot(&remote_addr, |slot| {
-                self.transport.connect(slot, &local_addr)
+        let local_endpoint = self.local_endpoint.lock().clone();
+        let mut peer_guard = self.peer_endpoint.lock();
+        if matches!(&*peer_guard, UnixAddr::Unbound) {
+            lookup_bind_entry(&remote_addr, |slot| {
+                self.transport.connect(slot, &local_endpoint)
             })?;
-            *guard = remote_addr;
+            *peer_guard = remote_addr;
         } else {
             return Err(AxError::InvalidInput);
         }
@@ -190,11 +192,11 @@ impl SocketOps for UnixSocket {
     }
 
     fn accept(&self) -> AxResult<Socket> {
-        let (transport, peer_addr) = block_on(interruptible(self.transport.accept()))??;
+        let (transport, peer_endpoint) = block_on(interruptible(self.transport.accept()))??;
         Ok(Socket::Unix(Self {
             transport,
-            local_addr: Mutex::new(self.local_addr.lock().clone()),
-            remote_addr: Mutex::new(peer_addr),
+            local_endpoint: Mutex::new(self.local_endpoint.lock().clone()),
+            peer_endpoint: Mutex::new(peer_endpoint),
         }))
     }
 
@@ -207,11 +209,11 @@ impl SocketOps for UnixSocket {
     }
 
     fn local_addr(&self) -> AxResult<SocketAddrEx> {
-        Ok(SocketAddrEx::Unix(self.local_addr.lock().clone()))
+        Ok(SocketAddrEx::Unix(self.local_endpoint.lock().clone()))
     }
 
     fn peer_addr(&self) -> AxResult<SocketAddrEx> {
-        Ok(SocketAddrEx::Unix(self.remote_addr.lock().clone()))
+        Ok(SocketAddrEx::Unix(self.peer_endpoint.lock().clone()))
     }
 
     fn shutdown(&self, how: Shutdown) -> AxResult {
@@ -219,7 +221,7 @@ impl SocketOps for UnixSocket {
     }
 }
 
-impl Pollable for UnixSocket {
+impl Pollable for UnixDomainSocket {
     fn poll(&self) -> IoEvents {
         self.transport.poll()
     }

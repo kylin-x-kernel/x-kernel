@@ -1,5 +1,5 @@
 use axerrno::AxResult;
-use axnet::SocketOps;
+use knet::SocketOps;
 use linux_raw_sys::net::{sockaddr, socklen_t};
 
 use crate::{

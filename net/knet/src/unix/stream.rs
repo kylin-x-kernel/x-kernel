@@ -18,30 +18,30 @@ use crate::{
     RecvOptions, SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, SetSocketOption, UnixCredentials},
-    unix::{Transport, TransportOps, UnixSocketAddr},
+    unix::{UnixAddr, UnixTransport, UnixTransportOps},
 };
 
-const BUF_SIZE: usize = 64 * 1024;
+const STREAM_BUF_BYTES: usize = 64 * 1024;
 
-fn new_uni_channel() -> (HeapProd<u8>, HeapCons<u8>) {
-    let rb = HeapRb::new(BUF_SIZE);
+fn new_ring_pair() -> (HeapProd<u8>, HeapCons<u8>) {
+    let rb = HeapRb::new(STREAM_BUF_BYTES);
     rb.split()
 }
-fn new_channels(pid: u32) -> (Channel, Channel) {
-    let (client_tx, server_rx) = new_uni_channel();
-    let (server_tx, client_rx) = new_uni_channel();
-    let poll_update = Arc::new(PollSet::new());
+fn new_duplex_channel(pid: u32) -> (Channel, Channel) {
+    let (client_tx, server_rx) = new_ring_pair();
+    let (server_tx, client_rx) = new_ring_pair();
+    let poll = Arc::new(PollSet::new());
     (
         Channel {
             tx: client_tx,
             rx: client_rx,
-            poll_update: poll_update.clone(),
+            poll: poll.clone(),
             peer_pid: pid,
         },
         Channel {
             tx: server_tx,
             rx: server_rx,
-            poll_update,
+            poll,
             peer_pid: pid,
         },
     )
@@ -51,44 +51,44 @@ struct Channel {
     tx: HeapProd<u8>,
     rx: HeapCons<u8>,
     // TODO: granularity
-    poll_update: Arc<PollSet>,
+    poll: Arc<PollSet>,
     peer_pid: u32,
 }
 
 pub struct Bind {
     /// New connections are sent to this channel.
-    conn_tx: async_channel::Sender<ConnRequest>,
-    poll_new_conn: Arc<PollSet>,
+    accept_tx: async_channel::Sender<ConnRequest>,
+    accept_poll: Arc<PollSet>,
     pid: u32,
 }
 impl Bind {
-    fn connect(&self, local_addr: UnixSocketAddr, pid: u32) -> AxResult<Channel> {
-        let (mut client_chan, mut server_chan) = new_channels(0);
+    fn connect(&self, local_addr: UnixAddr, pid: u32) -> AxResult<Channel> {
+        let (mut client_chan, mut server_chan) = new_duplex_channel(0);
         client_chan.peer_pid = self.pid;
         server_chan.peer_pid = pid;
-        self.conn_tx
+        self.accept_tx
             .try_send(ConnRequest {
                 channel: server_chan,
                 addr: local_addr,
                 pid,
             })
             .map_err(|_| AxError::ConnectionRefused)?;
-        self.poll_new_conn.wake();
+        self.accept_poll.wake();
         Ok(client_chan)
     }
 }
 
 struct ConnRequest {
     channel: Channel,
-    addr: UnixSocketAddr,
+    addr: UnixAddr,
     pid: u32,
 }
 
 pub struct StreamTransport {
     channel: Mutex<Option<Channel>>,
-    conn_rx: Mutex<Option<(async_channel::Receiver<ConnRequest>, Arc<PollSet>)>>,
-    poll_state: Arc<PollSet>,
-    general: GeneralOptions,
+    accept_rx: Mutex<Option<(async_channel::Receiver<ConnRequest>, Arc<PollSet>)>>,
+    poll_state: PollSet,
+    options: GeneralOptions,
     pid: u32,
     rx_closed: AtomicBool,
     tx_closed: AtomicBool,
@@ -101,9 +101,9 @@ impl StreamTransport {
     fn new_channel(channel: Option<Channel>, pid: u32) -> Self {
         StreamTransport {
             channel: Mutex::new(channel),
-            conn_rx: Mutex::new(None),
-            poll_state: Arc::new(PollSet::new()),
-            general: GeneralOptions::default(),
+            accept_rx: Mutex::new(None),
+            poll_state: PollSet::new(),
+            options: GeneralOptions::default(),
             pid,
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
@@ -111,7 +111,7 @@ impl StreamTransport {
     }
 
     pub fn new_pair(pid: u32) -> (Self, Self) {
-        let (chan1, chan2) = new_channels(pid);
+        let (chan1, chan2) = new_duplex_channel(pid);
         let transport1 = StreamTransport::new_channel(Some(chan1), pid);
         let transport2 = StreamTransport::new_channel(Some(chan2), pid);
         (transport1, transport2)
@@ -122,13 +122,13 @@ impl Configurable for StreamTransport {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
         use GetSocketOption as O;
 
-        if self.general.get_option_inner(opt)? {
+        if self.options.get_option_inner(opt)? {
             return Ok(true);
         }
 
         match opt {
             O::SendBuffer(size) => {
-                **size = BUF_SIZE;
+                **size = STREAM_BUF_BYTES;
             }
             O::PassCredentials(_) => {}
             O::PeerCredentials(cred) => {
@@ -147,7 +147,7 @@ impl Configurable for StreamTransport {
     fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
         use SetSocketOption as O;
 
-        if self.general.set_option_inner(opt)? {
+        if self.options.set_option_inner(opt)? {
             return Ok(true);
         }
 
@@ -159,21 +159,21 @@ impl Configurable for StreamTransport {
     }
 }
 #[async_trait]
-impl TransportOps for StreamTransport {
-    fn bind(&self, slot: &super::BindSlot, _local_addr: &UnixSocketAddr) -> AxResult<()> {
+impl UnixTransportOps for StreamTransport {
+    fn bind(&self, slot: &super::BindEntry, _local_addr: &UnixAddr) -> AxResult<()> {
         let mut slot = slot.stream.lock();
         if slot.is_some() {
             return Err(AxError::AddrInUse);
         }
-        let mut guard = self.conn_rx.lock();
+        let mut guard = self.accept_rx.lock();
         if guard.is_some() {
             return Err(AxError::InvalidInput);
         }
         let (tx, rx) = async_channel::unbounded();
         let poll = Arc::new(PollSet::new());
         *slot = Some(Bind {
-            conn_tx: tx,
-            poll_new_conn: poll.clone(),
+            accept_tx: tx,
+            accept_poll: poll.clone(),
             pid: self.pid,
         });
         *guard = Some((rx, poll));
@@ -181,7 +181,7 @@ impl TransportOps for StreamTransport {
         Ok(())
     }
 
-    fn connect(&self, slot: &super::BindSlot, local_addr: &UnixSocketAddr) -> AxResult<()> {
+    fn connect(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> AxResult<()> {
         let mut guard = self.channel.lock();
         if guard.is_some() {
             return Err(AxError::AlreadyConnected);
@@ -197,9 +197,9 @@ impl TransportOps for StreamTransport {
         Ok(())
     }
 
-    async fn accept(&self) -> AxResult<(Transport, UnixSocketAddr)> {
+    async fn accept(&self) -> AxResult<(UnixTransport, UnixAddr)> {
         let (rx, _poll) = {
-            let mut guard = self.conn_rx.lock();
+            let mut guard = self.accept_rx.lock();
             let Some((rx, poll)) = guard.as_mut() else {
                 return Err(AxError::NotConnected);
             };
@@ -211,7 +211,7 @@ impl TransportOps for StreamTransport {
             pid,
         } = rx.recv().await.map_err(|_| AxError::ConnectionReset)?;
         Ok((
-            Transport::Stream(StreamTransport::new_channel(Some(channel), pid)),
+            UnixTransport::Stream(StreamTransport::new_channel(Some(channel), pid)),
             peer_addr,
         ))
     }
@@ -222,8 +222,8 @@ impl TransportOps for StreamTransport {
         }
         let size = src.remaining();
         let mut total = 0;
-        let non_blocking = self.general.nonblocking();
-        self.general.send_poller(self, || {
+        let non_blocking = self.options.nonblocking();
+        self.options.send_poller(self, || {
             let mut guard = self.channel.lock();
             let Some(chan) = guard.as_mut() else {
                 return Err(AxError::NotConnected);
@@ -243,7 +243,7 @@ impl TransportOps for StreamTransport {
             };
             total += count;
             if count > 0 {
-                chan.poll_update.wake();
+                chan.poll.wake();
             }
 
             if count == size || non_blocking {
@@ -255,7 +255,7 @@ impl TransportOps for StreamTransport {
     }
 
     fn recv(&self, mut dst: impl Write, _options: RecvOptions) -> AxResult<usize> {
-        self.general.recv_poller(self, || {
+        self.options.recv_poller(self, || {
             let mut guard = self.channel.lock();
             let Some(chan) = guard.as_mut() else {
                 return Err(AxError::NotConnected);
@@ -271,11 +271,13 @@ impl TransportOps for StreamTransport {
                 count
             };
             if count > 0 {
-                chan.poll_update.wake();
-                Ok(count)
-            } else {
-                Err(AxError::WouldBlock)
+                chan.poll.wake();
+                return Ok(count);
             }
+            if self.rx_closed.load(Ordering::Acquire) {
+                return Ok(0);
+            }
+            Err(AxError::WouldBlock)
         })
     }
 
@@ -292,7 +294,7 @@ impl TransportOps for StreamTransport {
             && self.tx_closed.load(Ordering::Acquire)
             && let Some(chan) = self.channel.lock().take()
         {
-            chan.poll_update.wake();
+            chan.poll.wake();
         }
         Ok(())
     }
@@ -310,8 +312,8 @@ impl Pollable for StreamTransport {
                 IoEvents::OUT,
                 !self.tx_closed.load(Ordering::Acquire) && chan.tx.vacant_len() > 0,
             );
-        } else if let Some((conn_tx, _)) = self.conn_rx.lock().as_ref() {
-            events.set(IoEvents::IN, !conn_tx.is_empty());
+        } else if let Some((accept_rx, _)) = self.accept_rx.lock().as_ref() {
+            events.set(IoEvents::IN, !accept_rx.is_empty());
         }
         events.set(IoEvents::RDHUP, self.rx_closed.load(Ordering::Acquire));
         events
@@ -320,12 +322,12 @@ impl Pollable for StreamTransport {
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         if let Some(chan) = self.channel.lock().as_ref() {
             if events.intersects(IoEvents::IN | IoEvents::OUT) {
-                chan.poll_update.register(context.waker());
+                chan.poll.register(context.waker());
             }
-        } else if let Some((_, poll_new_conn)) = self.conn_rx.lock().as_ref()
+        } else if let Some((_, accept_poll)) = self.accept_rx.lock().as_ref()
             && events.contains(IoEvents::IN)
         {
-            poll_new_conn.register(context.waker());
+            accept_poll.register(context.waker());
         }
         self.poll_state.register(context.waker());
     }
@@ -334,7 +336,7 @@ impl Pollable for StreamTransport {
 impl Drop for StreamTransport {
     fn drop(&mut self) {
         if let Some(chan) = self.channel.lock().as_ref() {
-            chan.poll_update.wake();
+            chan.poll.wake();
         }
     }
 }

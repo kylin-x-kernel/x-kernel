@@ -9,8 +9,8 @@ use core::{
 
 use axerrno::{AxError, AxResult, LinuxError};
 #[cfg(feature = "vsock")]
-use axnet::vsock::VsockAddr;
-use axnet::{SocketAddrEx, unix::UnixSocketAddr};
+use knet::vsock::VsockAddr;
+use knet::{SocketAddrEx, unix::UnixAddr};
 use linux_raw_sys::net::*;
 
 use crate::mm::{UserConstPtr, UserPtr};
@@ -144,7 +144,7 @@ impl SocketAddrExt for SocketAddrV6 {
     }
 }
 
-impl SocketAddrExt for UnixSocketAddr {
+impl SocketAddrExt for UnixAddr {
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> AxResult<Self> {
         if read_family(addr, addrlen)? as u32 != AF_UNIX {
             return Err(AxError::from(LinuxError::EAFNOSUPPORT));
@@ -153,7 +153,7 @@ impl SocketAddrExt for UnixSocketAddr {
         let ptr = UserConstPtr::<u8>::from(addr.address().as_usize() + offset);
         let data = ptr.get_as_slice(addrlen as usize - offset)?;
         Ok(if data.is_empty() {
-            Self::Unnamed
+            Self::Unbound
         } else if data[0] == 0 {
             Self::Abstract(data[1..].into())
         } else {
@@ -168,19 +168,19 @@ impl SocketAddrExt for UnixSocketAddr {
 
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> AxResult<()> {
         let data_len = match self {
-            UnixSocketAddr::Unnamed => 0,
-            UnixSocketAddr::Abstract(name) => name.len() + 1,
-            UnixSocketAddr::Path(path) => 1 + path.len(),
+            UnixAddr::Unbound => 0,
+            UnixAddr::Abstract(name) => name.len() + 1,
+            UnixAddr::Path(path) => 1 + path.len(),
         };
         let mut buf = Vec::with_capacity(size_of::<__kernel_sa_family_t>() + data_len);
         buf.extend_from_slice(&AF_UNIX.to_ne_bytes());
         match self {
-            UnixSocketAddr::Unnamed => {}
-            UnixSocketAddr::Abstract(name) => {
+            UnixAddr::Unbound => {}
+            UnixAddr::Abstract(name) => {
                 buf.push(0);
                 buf.extend_from_slice(name);
             }
-            UnixSocketAddr::Path(path) => {
+            UnixAddr::Path(path) => {
                 buf.extend_from_slice(path.as_bytes());
                 buf.push(0);
             }
@@ -245,7 +245,7 @@ impl SocketAddrExt for SocketAddrEx {
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> AxResult<Self> {
         match read_family(addr, addrlen)? as u32 {
             AF_INET | AF_INET6 => SocketAddr::read_from_user(addr, addrlen).map(Self::Ip),
-            AF_UNIX => UnixSocketAddr::read_from_user(addr, addrlen).map(Self::Unix),
+            AF_UNIX => UnixAddr::read_from_user(addr, addrlen).map(Self::Unix),
             #[cfg(feature = "vsock")]
             AF_VSOCK => VsockAddr::read_from_user(addr, addrlen).map(Self::Vsock),
             _ => Err(AxError::from(LinuxError::EAFNOSUPPORT)),

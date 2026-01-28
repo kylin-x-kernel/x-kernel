@@ -10,3 +10,13 @@ pub use kplat::timer::{
     now_ns, now_ticks, ns2t, offset_ns, spin_until, spin_wait, t2ns, wall as wall_time, wall,
     wall_ns as wall_time_nanos, wall_ns,
 };
+
+/// Busy-wait for the given duration.
+pub fn busy_wait(dur: Duration) {
+    spin_wait(dur);
+}
+
+/// Busy-wait until the given deadline.
+pub fn busy_wait_until(deadline: TimeValue) {
+    spin_until(deadline);
+}

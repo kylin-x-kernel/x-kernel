@@ -351,7 +351,7 @@ impl VsockConnectionManager {
         if self.connections.contains_key(&conn_id) {
             info!("Connection {:?} already exists, overwriting", conn_id);
         } else {
-            crate::device::start_vsock_poll();
+            crate::device::start_vsock_polling();
         }
         self.connections.insert(conn_id, conn.clone());
         debug!(
@@ -370,7 +370,7 @@ impl VsockConnectionManager {
     pub fn remove_connection(&mut self, conn_id: VsockConnId) {
         if let Some(conn) = self.connections.remove(&conn_id) {
             let conn = conn.lock();
-            crate::device::stop_vsock_poll();
+            crate::device::stop_vsock_polling();
             debug!(
                 "Removed connection {:?}: rx={} bytes, tx={} bytes, dropped={} bytes",
                 conn_id, conn.rx_bytes, conn.tx_bytes, conn.dropped_bytes

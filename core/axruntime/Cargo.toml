@@ -23,7 +23,7 @@ ipi = ["dep:kipi"]
 display = ["dep:kdriver", "dep:fbdevice"]
 input = ["dep:kdriver", "dep:inputdev"]
 fs = ["dep:kdriver", "dep:axfs"]
-net = ["dep:kdriver", "dep:axnet"]
+net = ["dep:kdriver", "dep:knet"]
 vsock = ["net", "dep:kdriver"]
 
 rtc = []
@@ -46,7 +46,7 @@ khal.workspace = true
 kipi = { workspace = true, optional = true }
 klogger.workspace = true
 axmm = { workspace = true, optional = true }
-axnet = { workspace = true, optional = true }
+knet = { workspace = true, optional = true }
 kplat = { workspace = true }
 ktask = { workspace = true }
 axwatchdog = { workspace = true, optional = true }

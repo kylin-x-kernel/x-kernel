@@ -11,7 +11,7 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE,
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::Device,
+    device::NetDevice,
 };
 
 #[derive(Debug)]
@@ -62,7 +62,7 @@ impl RouteTable {
 pub struct Router {
     rx_buffer: PacketBuffer,
     tx_buffer: PacketBuffer,
-    pub(crate) devices: Vec<Box<dyn Device>>,
+    pub(crate) devices: Vec<Box<dyn NetDevice>>,
     pub(crate) table: RouteTable,
 }
 impl Router {
@@ -87,14 +87,14 @@ impl Router {
         self.table.add_rule(rule);
     }
 
-    pub fn add_device(&mut self, device: Box<dyn Device>) -> usize {
+    pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
         self.devices.len() - 1
     }
 
     pub fn poll(&mut self, timestamp: Instant) {
         for dev in &mut self.devices {
-            while !self.rx_buffer.is_full() && dev.recv(&mut self.rx_buffer, timestamp) {}
+            while !self.rx_buffer.is_full() && dev.poll_rx(&mut self.rx_buffer, timestamp) {}
         }
     }
 
@@ -109,7 +109,7 @@ impl Router {
                     if ip_packet.dst_addr().is_broadcast() {
                         let buf = ip_packet.into_inner();
                         for dev in &mut self.devices {
-                            poll_next |= dev.send(dst_addr, buf, timestamp);
+                            poll_next |= dev.send_ip_packet(dst_addr, buf, timestamp);
                         }
                     } else {
                         let Some(rule) = self.table.lookup(&dst_addr) else {
@@ -120,7 +120,8 @@ impl Router {
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
                         let dev = &mut self.devices[rule.dev];
-                        poll_next |= dev.send(next_hop, ip_packet.into_inner(), timestamp);
+                        poll_next |=
+                            dev.send_ip_packet(next_hop, ip_packet.into_inner(), timestamp);
                     }
                 }
                 IpVersion::Ipv6 => {
@@ -130,7 +131,7 @@ impl Router {
                     if ip_packet.dst_addr().is_multicast() {
                         let buf = ip_packet.into_inner();
                         for dev in &mut self.devices {
-                            poll_next |= dev.send(dst_addr, buf, timestamp);
+                            poll_next |= dev.send_ip_packet(dst_addr, buf, timestamp);
                         }
                     } else {
                         let Some(rule) = self.table.lookup(&dst_addr) else {
@@ -141,7 +142,8 @@ impl Router {
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
                         let dev = &mut self.devices[rule.dev];
-                        poll_next |= dev.send(next_hop, ip_packet.into_inner(), timestamp);
+                        poll_next |=
+                            dev.send_ip_packet(next_hop, ip_packet.into_inner(), timestamp);
                     }
                 }
             }

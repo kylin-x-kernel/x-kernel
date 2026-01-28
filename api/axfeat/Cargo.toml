@@ -62,8 +62,8 @@ fs-fat = ["fs", "axfs/fat"]
 fs-times = ["fs", "axfs/times"]
 
 # Networking
-net = ["alloc", "paging", "kdriver/virtio-net", "dep:axnet", "axruntime/net"]
-vsock = ["net", "kdriver/virtio-socket", "axruntime/vsock", "axnet/vsock"]
+net = ["alloc", "paging", "kdriver/virtio-net", "dep:knet", "axruntime/net"]
+vsock = ["net", "kdriver/virtio-socket", "axruntime/vsock", "knet/vsock"]
 
 # Display
 display = [
@@ -117,7 +117,7 @@ khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 klogger.workspace = true
-axnet = { workspace = true, optional = true }
+knet = { workspace = true, optional = true }
 axruntime.workspace = true
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
