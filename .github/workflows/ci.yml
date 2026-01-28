@@ -1,9 +1,9 @@
-name:  CI Test
+name: CI Test
 
 on:
   push:
     branches:
-     feaure/x86cismp=4
+      - feaure/x86cismp=4
 
   pull_request:
     branches:
@@ -17,28 +17,28 @@ jobs:
   ci-test:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false  
+      fail-fast: false
       matrix:
-        arch: [x86_64]
-    
+        arch: [x86_64, aarch64]
+
     name: CI Test (${{ matrix.arch }})
-    
+
     env:
       ARCH: ${{ matrix.arch }}
       SMP: 4
       STARRYOS_ROOT: ${{ github.workspace }}/.cache/StarryOS
-    
+
     steps:
       - name: Checkout Starry Test Harness
         uses: actions/checkout@v4
         with:
           repository: kylin-x-kernel/starry-test-harness
           path: starry-test-harness
-      
+
       - name: Create cache directory
         run: mkdir -p .cache
-      
-      - name: Checkout StarryOS 
+
+      - name: Checkout StarryOS
         uses: actions/checkout@v4
         with:
           path: .cache/StarryOS
@@ -66,16 +66,21 @@ jobs:
       - name: Prepare Rust toolchain for StarryOS
         working-directory: .cache/StarryOS
         run: |
-          rustup target add x86_64-unknown-none
-          rustup target add x86_64-unknown-linux-musl || true
-          rustup target list --installed | grep x86_64
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            rustup target add x86_64-unknown-none
+            rustup target add x86_64-unknown-linux-musl || true
+            rustup target list --installed | grep x86_64
+          else
+            rustup target add aarch64-unknown-none
+            rustup target add aarch64-unknown-linux-musl || true
+            rustup target list --installed | grep aarch64
+          fi
 
       - name: 执行 ci-test (${{ matrix.arch }})
         working-directory: starry-test-harness
         run: |
           export STARRYOS_COMMIT=$(git -C ../.cache/StarryOS rev-parse HEAD)
-          export SMP=4
-          make ci-test run
+          make ci-test arch=${{ matrix.arch }} run
 
       - name: Dump suite logs
         working-directory: starry-test-harness
