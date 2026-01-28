@@ -2,16 +2,12 @@
 name = "kdriver"
 version.workspace = true
 edition.workspace = true
-authors = [
-    "Yuekai Jia <equation618@gmail.com>",
-    "ChengXiang Qi <kuangjux@outlook.com>",
-    "KylinSoft Co., Ltd. <https://www.kylinos.cn/>",
-]
-description = "ArceOS device drivers"
+authors.workspace = true
+description = "device drivers for x-kernel"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/kdriver"
-documentation = "https://arceos-org.github.io/arceos/kdriver/index.html"
+repository.workspace = true
+documentation.workspace = true
 
 [features]
 bus-mmio = []
@@ -28,7 +24,6 @@ crosvm = ["pci-mmio", "dep:hashbrown", "dep:ksync", "dep:spin"]
 # Enabled by features `virtio-*`
 virtio = ["dep:virtio", "dep:kalloc", "dep:khal", "dep:platconfig"]
 
-# various types of drivers
 virtio-blk = ["block", "virtio", "virtio/block"]
 virtio-net = ["net", "virtio", "virtio/net"]
 virtio-gpu = ["display", "virtio", "virtio/gpu"]
@@ -72,5 +67,6 @@ spin = { version = "0.10", optional = true }
 
 ksync = { workspace = true, optional = true }
 hashbrown = { workspace = true, optional = true }
+
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 arm-gic-driver = { version = "0.15", optional = true }

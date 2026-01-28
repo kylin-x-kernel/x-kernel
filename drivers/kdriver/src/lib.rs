@@ -1,58 +1,10 @@
-//! [ArceOS](https://github.com/arceos-org/arceos) device drivers.
+//! [x-kernel] device drivers.
 //!
-//! # Usage
+//! All detected devices are composed into [`AllDevices`] and returned by [`init_drivers`].
+//! 
+//! Device categories: [`AxNetDevice`], [`AxBlockDevice`], [`AxDisplayDevice`].
 //!
-//! All detected devices are composed into a large struct [`AllDevices`]
-//! and returned by the [`init_drivers`] function. The upperlayer subsystems
-//! (e.g., the network stack) may unpack the struct to get the specified device
-//! driver they want.
-//!
-//! For each device category (i.e., net, block, display, etc.), an unified type
-//! is used to represent all devices in that category. Currently, there are 3
-//! categories: [`AxNetDevice`], [`AxBlockDevice`], and [`AxDisplayDevice`].
-//!
-//! # Concepts
-//!
-//! This crate supports two device models depending on the `dyn` feature:
-//!
-//! - **Static**: The type of all devices is static, it is determined at compile
-//!   time by corresponding cargo features. For example, [`AxNetDevice`] will be
-//!   an alias of [`VirtioNetDev`] if the `virtio-net` feature is enabled. This
-//!   model provides the best performance as it avoids dynamic dispatch. But on
-//!   limitation, only one device instance is supported for each device category.
-//! - **Dynamic**: All device instance is using [trait objects] and wrapped in a
-//!   `Box<dyn Trait>`. For example, [`AxNetDevice`] will be [`Box<dyn NetDriverOps>`].
-//!   When call a method provided by the device, it uses [dynamic dispatch][dyn]
-//!   that may introduce a little overhead. But on the other hand, it is more
-//!   flexible, multiple instances of each device category are supported.
-//!
-//! # Supported Devices
-//!
-//! | Device Category | Cargo Feature | Description |
-//! |-|-|-|
-//! | Block | `ramdisk` | A RAM disk that stores data in a vector |
-//! | Block | `virtio-blk` | VirtIO block device |
-//! | Network | `virtio-net` | VirtIO network device |
-//! | Display | `virtio-gpu` | VirtIO graphics device |
-//!
-//! # Other Cargo Features
-//!
-//! - `dyn`: use the dynamic device model (see above).
-//! - `bus-mmio`: use device tree to probe all MMIO devices.
-//! - `bus-pci`: use PCI bus to probe all PCI devices. This feature is
-//!   enabled by default.
-//! - `virtio`: use VirtIO devices. This is enabled if any of `virtio-blk`,
-//!   `virtio-net` or `virtio-gpu` is enabled.
-//! - `net`: use network devices. This is enabled if any feature of network
-//!   devices is selected. If this feature is enabled without any network device
-//!   features, a dummy struct is used for [`AxNetDevice`].
-//! - `block`: use block storage devices. Similar to the `net` feature.
-//! - `display`: use graphics display devices. Similar to the `net` feature.
-//!
-//! [`VirtioNetDev`]: axdriver_virtio::VirtIoNetDev
-//! [`Box<dyn NetDriverOps>`]: net::NetDriverOps
-//! [trait objects]: https://doc.rust-lang.org/book/ch17-02-trait-objects.html
-//! [dyn]: https://doc.rust-lang.org/std/keyword.dyn.html
+//! Supports static and dynamic device models via the `dyn` feature.
 
 #![no_std]
 #![feature(doc_cfg)]
@@ -108,9 +60,7 @@ pub struct AllDevices {
 }
 
 impl AllDevices {
-    /// Returns the device model used, either `dyn` or `static`.
-    ///
-    /// See the [crate-level documentation](crate) for more details.
+    /// Returns the device model used.
     pub const fn device_model() -> &'static str {
         "static"
     }
@@ -127,11 +77,10 @@ impl AllDevices {
                 self.add_device(dev);
             }
         });
-
         self.probe_bus_devices();
     }
 
-    /// Adds one device into the corresponding container, according to its device category.
+    /// Adds device to corresponding container.
     #[allow(dead_code)]
     fn add_device(&mut self, dev: AxDeviceEnum) {
         match dev {
@@ -149,7 +98,7 @@ impl AllDevices {
     }
 }
 
-/// Probes and initializes all device drivers, returns the [`AllDevices`] struct.
+/// Initializes all device drivers.
 pub fn init_drivers() -> AllDevices {
     info!("Initialize device drivers...");
     info!("  device model: {}", AllDevices::device_model());

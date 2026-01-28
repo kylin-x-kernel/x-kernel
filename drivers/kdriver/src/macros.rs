@@ -5,35 +5,35 @@
 macro_rules! register_net_driver {
     ($driver_type:ty, $device_type:ty) => {
         /// The unified type of the NIC devices.
-        pub type AxNetDevice = $device_type;
+        pub type NetDevice = $device_type;
     };
 }
 
 macro_rules! register_block_driver {
     ($driver_type:ty, $device_type:ty) => {
         /// The unified type of the NIC devices.
-        pub type AxBlockDevice = $device_type;
+        pub type BlockDevice = $device_type;
     };
 }
 
 macro_rules! register_display_driver {
     ($driver_type:ty, $device_type:ty) => {
         /// The unified type of the NIC devices.
-        pub type AxDisplayDevice = $device_type;
+        pub type DisplayDevice = $device_type;
     };
 }
 
 macro_rules! register_input_driver {
     ($driver_type:ty, $device_type:ty) => {
         /// The unified type of the NIC devices.
-        pub type AxInputDevice = $device_type;
+        pub type InputDevice = $device_type;
     };
 }
 
 macro_rules! register_vsock_driver {
     ($driver_type:ty, $device_type:ty) => {
         /// The unified type of the NIC devices.
-        pub type AxVsockDevice = $device_type;
+        pub type VsockDevice = $device_type;
     };
 }
 

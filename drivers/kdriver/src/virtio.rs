@@ -16,7 +16,7 @@ use khal::mem::{p2v, v2p};
 use khal::psci::{dma_share, dma_unshare};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
-use crate::{AxDeviceEnum, drivers::DriverProbe};
+use crate::{DeviceEnum, drivers::DriverProbe};
 
 cfg_if! {
     if #[cfg(bus = "pci")] {
@@ -34,7 +34,7 @@ pub trait VirtIoDevMeta {
     type Device: DriverOps;
     type Driver = VirtIoDriver<Self>;
 
-    fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DriverResult<AxDeviceEnum>;
+    fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DriverResult<DeviceEnum>;
 }
 
 cfg_if! {
@@ -45,8 +45,8 @@ cfg_if! {
             const DEVICE_TYPE: DeviceKind = DeviceKind::Net;
             type Device = virtio::VirtIoNetDev<VirtIoHalImpl, VirtIoTransport, 64>;
 
-            fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
-                Ok(AxDeviceEnum::from_net(Self::Device::try_new(transport, irq)?))
+            fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DriverResult<DeviceEnum> {
+                Ok(DeviceEnum::from_net(Self::Device::try_new(transport, irq)?))
             }
         }
     }
@@ -60,8 +60,8 @@ cfg_if! {
             const DEVICE_TYPE: DeviceKind = DeviceKind::Block;
             type Device = virtio::VirtIoBlkDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
-                Ok(AxDeviceEnum::from_block(Self::Device::try_new(transport)?))
+            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<DeviceEnum> {
+                Ok(DeviceEnum::from_block(Self::Device::try_new(transport)?))
             }
         }
     }
@@ -75,8 +75,8 @@ cfg_if! {
             const DEVICE_TYPE: DeviceKind = DeviceKind::Display;
             type Device = virtio::VirtIoGpuDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
-                Ok(AxDeviceEnum::from_display(Self::Device::try_new(transport)?))
+            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<DeviceEnum> {
+                Ok(DeviceEnum::from_display(Self::Device::try_new(transport)?))
             }
         }
     }
@@ -90,8 +90,8 @@ cfg_if! {
             const DEVICE_TYPE: DeviceKind = DeviceKind::Input;
             type Device = virtio::VirtIoInputDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<AxDeviceEnum> {
-                Ok(AxDeviceEnum::from_input(Self::Device::try_new(transport)?))
+            fn try_new(transport: VirtIoTransport, _irq: Option<usize>) -> DriverResult<DeviceEnum> {
+                Ok(DeviceEnum::from_input(Self::Device::try_new(transport)?))
             }
         }
     }
@@ -105,8 +105,8 @@ cfg_if! {
             const DEVICE_TYPE: DeviceKind = DeviceKind::Vsock;
             type Device = virtio::VirtIoSocketDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq:  Option<usize>) -> DriverResult<AxDeviceEnum> {
-                Ok(AxDeviceEnum::from_vsock(Self::Device::try_new(transport)?))
+            fn try_new(transport: VirtIoTransport, _irq:  Option<usize>) -> DriverResult<DeviceEnum> {
+                Ok(DeviceEnum::from_vsock(Self::Device::try_new(transport)?))
             }
         }
     }
@@ -117,7 +117,7 @@ pub struct VirtIoDriver<D: VirtIoDevMeta + ?Sized>(PhantomData<D>);
 
 impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     #[cfg(bus = "mmio")]
-    fn probe_mmio(mmio_base: usize, mmio_size: usize) -> Option<AxDeviceEnum> {
+    fn probe_mmio(mmio_base: usize, mmio_size: usize) -> Option<DeviceEnum> {
         let base_vaddr = p2v(mmio_base.into());
         if let Some((ty, transport)) = virtio::probe_mmio_device(base_vaddr.as_mut_ptr(), mmio_size)
             && ty == D::DEVICE_TYPE
@@ -143,7 +143,7 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
         root: &mut PciRoot,
         bdf: DeviceFunction,
         dev_info: &DeviceFunctionInfo,
-    ) -> Option<AxDeviceEnum> {
+    ) -> Option<DeviceEnum> {
         if dev_info.vendor_id != 0x1af4 {
             return None;
         }

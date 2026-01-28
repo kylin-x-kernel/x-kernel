@@ -20,25 +20,25 @@ pub use imp::*;
 
 /// A unified enum that represents different categories of devices.
 #[allow(clippy::large_enum_variant)]
-pub enum AxDeviceEnum {
+pub enum DeviceEnum {
     /// Network card device.
     #[cfg(feature = "net")]
-    Net(AxNetDevice),
+    Net(NetDevice),
     /// Block storage device.
     #[cfg(feature = "block")]
-    Block(AxBlockDevice),
+    Block(BlockDevice),
     /// Graphic display device.
     #[cfg(feature = "display")]
-    Display(AxDisplayDevice),
+    Display(DisplayDevice),
     /// Graphic input device.
     #[cfg(feature = "input")]
-    Input(AxInputDevice),
+    Input(InputDevice),
     /// Vsock device.
     #[cfg(feature = "vsock")]
-    Vsock(AxVsockDevice),
+    Vsock(VsockDevice),
 }
 
-impl DriverOps for AxDeviceEnum {
+impl DriverOps for DeviceEnum {
     #[inline]
     #[allow(unreachable_patterns)]
     fn device_kind(&self) -> DeviceKind {
@@ -77,9 +77,9 @@ impl DriverOps for AxDeviceEnum {
 }
 
 /// A structure that contains all device drivers of a certain category.
-pub struct AxDeviceContainer<D>(SmallVec<[D; 1]>);
+pub struct DeviceContainer<D>(SmallVec<[D; 1]>);
 
-impl<D> AxDeviceContainer<D> {
+impl<D> DeviceContainer<D> {
     /// Constructs the container from one device.
     pub fn from_one(dev: D) -> Self {
         Self(SmallVec::from_buf([dev]))
@@ -109,7 +109,7 @@ impl<D> AxDeviceContainer<D> {
     }
 }
 
-impl<D> Deref for AxDeviceContainer<D> {
+impl<D> Deref for DeviceContainer<D> {
     type Target = SmallVec<[D; 1]>;
 
     fn deref(&self) -> &Self::Target {
@@ -117,13 +117,13 @@ impl<D> Deref for AxDeviceContainer<D> {
     }
 }
 
-impl<D> DerefMut for AxDeviceContainer<D> {
+impl<D> DerefMut for DeviceContainer<D> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<D> Default for AxDeviceContainer<D> {
+impl<D> Default for DeviceContainer<D> {
     fn default() -> Self {
         Self(Default::default())
     }

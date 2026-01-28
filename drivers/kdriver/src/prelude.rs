@@ -2,24 +2,24 @@
 
 pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 #[cfg(feature = "block")]
-pub use {crate::structs::AxBlockDevice, block::BlockDriverOps};
+pub use {crate::structs::BlockDevice, block::BlockDriverOps};
 #[cfg(feature = "display")]
 pub use {
-    crate::structs::AxDisplayDevice,
+    crate::structs::DisplayDevice,
     display::{DisplayDriverOps, DisplayInfo},
 };
 #[cfg(feature = "input")]
 pub use {
-    crate::structs::AxInputDevice,
+    crate::structs::InputDevice,
     input::{Event, EventType, InputDeviceId, InputDriverOps},
 };
 #[cfg(feature = "net")]
 pub use {
-    crate::structs::AxNetDevice,
+    crate::structs::NetDevice,
     net::{NetBufHandle, NetDriverOps},
 };
 #[cfg(feature = "vsock")]
 pub use {
-    crate::structs::AxVsockDevice,
+    crate::structs::VsockDevice,
     vsock::{VsockAddr, VsockConnId, VsockDriverEventType, VsockDriverOps},
 };

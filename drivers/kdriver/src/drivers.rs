@@ -7,17 +7,17 @@ use driver_base::DeviceKind;
 use pci::{DeviceFunction, DeviceFunctionInfo, PciRoot};
 
 pub use super::dummy::*;
-use crate::AxDeviceEnum;
+use crate::DeviceEnum;
 #[cfg(feature = "virtio")]
 use crate::virtio::{self, VirtIoDevMeta};
 
 pub trait DriverProbe {
-    fn probe_global() -> Option<AxDeviceEnum> {
+    fn probe_global() -> Option<DeviceEnum> {
         None
     }
 
     #[cfg(bus = "mmio")]
-    fn probe_mmio(_mmio_base: usize, _mmio_size: usize) -> Option<AxDeviceEnum> {
+    fn probe_mmio(_mmio_base: usize, _mmio_size: usize) -> Option<DeviceEnum> {
         None
     }
 
@@ -26,7 +26,7 @@ pub trait DriverProbe {
         _root: &mut PciRoot,
         _bdf: DeviceFunction,
         _dev_info: &DeviceFunctionInfo,
-    ) -> Option<AxDeviceEnum> {
+    ) -> Option<DeviceEnum> {
         None
     }
 }
@@ -64,13 +64,13 @@ register_vsock_driver!(
 cfg_if::cfg_if! {
     if #[cfg(block_dev = "ramdisk")] {
         pub struct RamDiskDriver;
-        register_block_driver!(RamDiskDriver, axdriver_block::ramdisk::RamDisk);
+        register_block_driver!(RamDiskDriver, block::ramdisk::RamDisk);
 
         impl DriverProbe for RamDiskDriver {
-            fn probe_global() -> Option<AxDeviceEnum> {
+            fn probe_global() -> Option<DeviceEnum> {
                 // TODO: format RAM disk
-                Some(AxDeviceEnum::from_block(
-                    axdriver_block::ramdisk::RamDisk::new(0x100_0000), // 16 MiB
+                Some(DeviceEnum::from_block(
+                    block::ramdisk::RamDisk::new(0x100_0000), // 16 MiB
                 ))
             }
         }
@@ -80,16 +80,16 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(block_dev = "sdmmc")] {
         pub struct SdMmcDriver;
-        register_block_driver!(SdMmcDriver, axdriver_block::sdmmc::SdMmcDriver);
+        register_block_driver!(SdMmcDriver, block::sdmmc::SdMmcDriver);
 
         impl DriverProbe for SdMmcDriver {
-            fn probe_global() -> Option<AxDeviceEnum> {
+            fn probe_global() -> Option<DeviceEnum> {
                 let sdmmc = unsafe {
-                    axdriver_block::sdmmc::SdMmcDriver::new(
-                        khal::mem::p2v(platconfig::devices::SDMMC_PADDR.into()).into(),
+                    block::sdmmc::SdMmcDriver::new(
+                        axhal::mem::p2v(platconfig::devices::SDMMC_PADDR.into()).into(),
                     )
                 };
-                Some(AxDeviceEnum::from_block(sdmmc))
+                Some(DeviceEnum::from_block(sdmmc))
             }
         }
     }
@@ -98,7 +98,7 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(block_dev = "ahci")] {
         pub struct AhciHalImpl;
-        impl axdriver_block::ahci::AhciHal for AhciHalImpl {
+        impl block::ahci::AhciHal for AhciHalImpl {
             fn v2p(va: usize) -> usize {
                 khal::mem::v2p(va.into()).as_usize()
             }
@@ -117,16 +117,16 @@ cfg_if::cfg_if! {
         }
 
         pub struct AhciDriver;
-        register_block_driver!(AhciDriver, axdriver_block::ahci::AhciDriver<AhciHalImpl>);
+        register_block_driver!(AhciDriver, block::ahci::AhciDriver<AhciHalImpl>);
 
         impl DriverProbe for AhciDriver {
-            fn probe_global() -> Option<AxDeviceEnum> {
+            fn probe_global() -> Option<DeviceEnum> {
                 let ahci = unsafe {
-                    axdriver_block::ahci::AhciDriver::<AhciHalImpl>::try_new(
-                        khal::mem::p2v(platconfig::devices::AHCI_PADDR.into()).into(),
+                    block::ahci::AhciDriver::<AhciHalImpl>::try_new(
+                        axhal::mem::p2v(platconfig::devices::AHCI_PADDR.into()).into(),
                     )?
                 };
-                Some(AxDeviceEnum::from_block(ahci))
+                Some(DeviceEnum::from_block(ahci))
             }
         }
     }
@@ -135,14 +135,14 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(block_dev = "bcm2835-sdhci")]{
         pub struct BcmSdhciDriver;
-        register_block_driver!(BcmSdhciDriver, axdriver_block::bcm2835sdhci::SDHCIDriver);
+        register_block_driver!(BcmSdhciDriver, block::bcm2835sdhci::SDHCIDriver);
 
         impl DriverProbe for BcmSdhciDriver {
-            fn probe_global() -> Option<AxDeviceEnum> {
+            fn probe_global() -> Option<DeviceEnum> {
                 debug!("mmc probe");
-                axdriver_block::bcm2835sdhci::SDHCIDriver::try_new()
+                block::bcm2835sdhci::SDHCIDriver::try_new()
                     .ok()
-                    .map(AxDeviceEnum::from_block)
+                    .map(DeviceEnum::from_block)
             }
         }
     }
@@ -159,7 +159,7 @@ cfg_if::cfg_if! {
                 root: &mut pci::PciRoot,
                 bdf: pci::DeviceFunction,
                 dev_info: &pci::DeviceFunctionInfo,
-            ) -> Option<crate::AxDeviceEnum> {
+            ) -> Option<crate::DeviceEnum> {
                 use net::ixgbe::{INTEL_82599, INTEL_VEND, IxgbeNic};
                 if dev_info.vendor_id == INTEL_VEND && dev_info.device_id == INTEL_82599 {
                     // Intel 10Gb Network
@@ -178,7 +178,7 @@ cfg_if::cfg_if! {
                                 size as usize,
                             )
                             .expect("failed to initialize ixgbe device");
-                            return Some(AxDeviceEnum::from_net(ixgbe_nic));
+                            return Some(DeviceEnum::from_net(ixgbe_nic));
                         }
                         pci::BarInfo::IO { .. } => {
                             error!("ixgbe: BAR0 is of I/O type");
@@ -231,11 +231,11 @@ cfg_if::cfg_if! {
 
         pub struct FXmacDriver;
         impl DriverProbe for FXmacDriver {
-            fn probe_global() -> Option<AxDeviceEnum> {
+            fn probe_global() -> Option<DeviceEnum> {
                 info!("fxmac for phytiumpi probe global");
                 net::fxmac::FXmacNic::init(0)
                     .ok()
-                    .map(AxDeviceEnum::from_net)
+                    .map(DeviceEnum::from_net)
             }
         }
     }

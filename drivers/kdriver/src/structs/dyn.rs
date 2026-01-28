@@ -4,21 +4,21 @@ use crate::prelude::*;
 
 /// The unified type of the NIC devices.
 #[cfg(feature = "net")]
-pub type AxNetDevice = Box<dyn NetDriverOps>;
+pub type NetDevice = Box<dyn NetDriverOps>;
 /// The unified type of the block storage devices.
 #[cfg(feature = "block")]
-pub type AxBlockDevice = Box<dyn BlockDriverOps>;
+pub type BlockDevice = Box<dyn BlockDriverOps>;
 /// The unified type of the graphics display devices.
 #[cfg(feature = "display")]
-pub type AxDisplayDevice = Box<dyn DisplayDriverOps>;
+pub type DisplayDevice = Box<dyn DisplayDriverOps>;
 /// The unified type of the input devices.
 #[cfg(feature = "input")]
-pub type AxInputDevice = Box<dyn InputDriverOps>;
+pub type InputDevice = Box<dyn InputDriverOps>;
 /// The unified type of the vsock devices.
 #[cfg(feature = "vsock")]
-pub type AxVsockDevice = Box<dyn VsockDriverOps>;
+pub type VsockDevice = Box<dyn VsockDriverOps>;
 
-impl super::AxDeviceEnum {
+impl super::DeviceEnum {
     /// Constructs a network device.
     #[cfg(feature = "net")]
     pub fn from_net(dev: impl NetDriverOps + 'static) -> Self {
