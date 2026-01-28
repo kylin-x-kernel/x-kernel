@@ -1,13 +1,13 @@
 [package]
-name = "axfeat"
+name = "kfeat"
 version.workspace = true
 edition.workspace = true
-authors = ["Yuekai Jia <equation618@gmail.com>"]
-description = "Top-level feature selection for ArceOS"
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/api/axfeat"
-documentation = "https://arceos-org.github.io/arceos/axfeat/index.html"
+repository.workspace = true
+documentation.workspace = true
+description = "Top-level feature selection for x-kernel"
 
 [features]
 default = []

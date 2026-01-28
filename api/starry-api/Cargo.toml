@@ -26,7 +26,7 @@ fbdevice.workspace = true
 kdriver.workspace = true
 
 axerrno.workspace = true
-axfeat.workspace = true
+kfeat.workspace = true
 axfs-ng-vfs.workspace = true
 axfs.workspace = true
 khal.workspace = true

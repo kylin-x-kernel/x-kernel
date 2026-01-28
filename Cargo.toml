@@ -16,8 +16,8 @@ categories = ["os", "no-std"]
 documentation = "https://gitee.com/openkylin/x-kernel"
 
 [workspace.dependencies]
-# X-kernel Modules
-axfeat = { path = "api/axfeat", features = [
+# Arceos Modules
+kfeat = { path = "api/kfeat", features = [
     "alloc-slab",
     "fp-simd",
     "fs-ext4",

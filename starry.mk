@@ -16,7 +16,7 @@ export SMP := 4
 # Generated Options
 export A := $(PWD)
 export NO_AXSTD := y
-export AX_LIB := axfeat
+export AX_LIB := kfeat
 export APP_FEATURES := qemu
 
 ifeq ($(MEMTRACK), y)

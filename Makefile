@@ -91,7 +91,7 @@ endif
 
 ifneq ($(wildcard $(APP)/Cargo.toml),)
   APP_TYPE := rust
-  AX_LIB ?= axfeat
+  AX_LIB ?= kfeat
 else
   APP_TYPE := c
   AX_LIB ?= axlibc

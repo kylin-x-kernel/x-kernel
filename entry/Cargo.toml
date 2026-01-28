@@ -12,70 +12,70 @@ default = []
 tee = ["starry-api/tee", "starry-core/tee"]
 tee_test = ["tee", "starry-api/tee_test"]
 qemu = [
-    "axfeat/display",
-    "axfeat/input",
+    "kfeat/display",
+    "kfeat/input",
     "starry-api/input",
 
-    "axfeat/vsock",
+    "kfeat/vsock",
     "starry-api/vsock",
 
-    "axfeat/defplat-aarch64",
-    "axfeat/bus-pci",
+    "kfeat/defplat-aarch64",
+    "kfeat/bus-pci",
 
     # auxilary features
-    "axfeat/fs-times",
+    "kfeat/fs-times",
     "starry-api/dev-log",
 ]
-smp = ["axfeat/smp"]
+smp = ["kfeat/smp"]
 
-# vf2 = ["dep:kplat-riscv64-visionfive2", "axfeat/driver-sdmmc"]
+# vf2 = ["dep:kplat-riscv64-visionfive2", "kfeat/driver-sdmmc"]
 dice = ["crosvm", "starry-api/dice"]
 crosvm = [
-    "axfeat/display",
-    "axfeat/input",
+    "kfeat/display",
+    "kfeat/input",
     "starry-api/input",
 
-    "axfeat/vsock",
+    "kfeat/vsock",
     "starry-api/vsock",
 
-    "axfeat/crosvm",
+    "kfeat/crosvm",
     "dep:aarch64-crosvm-virt",
     "pci",
 
     "smp",
 
     # auxilary features
-    "axfeat/fs-times",
+    "kfeat/fs-times",
     "starry-api/dev-log",
 ]
 
 x86_csv = [
-    "axfeat/display",
-    "axfeat/input",
+    "kfeat/display",
+    "kfeat/input",
     "starry-api/input",
 
-    "axfeat/vsock",
+    "kfeat/vsock",
     "starry-api/vsock",
 
-    "axfeat/crosvm",
+    "kfeat/crosvm",
     "dep:x86-csv",
     "pci",
 
     "smp",
 
     # auxilary features
-    "axfeat/fs-times",
+    "kfeat/fs-times",
     "starry-api/dev-log",
 ]
 
 # Stubs
-pci = ["axfeat/bus-pci"]
-mmio = ["axfeat/bus-mmio"]
+pci = ["kfeat/bus-pci"]
+mmio = ["kfeat/bus-mmio"]
 
 [dependencies]
 kdriver.workspace = true
 axerrno.workspace = true
-axfeat.workspace = true
+kfeat.workspace = true
 axfs.workspace = true
 khal.workspace = true
 klogger.workspace = true
