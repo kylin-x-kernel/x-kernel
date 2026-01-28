@@ -1,4 +1,5 @@
 use alloc::collections::VecDeque;
+
 use crate::event::{Callback, IpiEvent};
 
 /// A per-CPU queue of IPI events.

@@ -4,19 +4,6 @@
 //! using Inter-Processor Interrupts (IPI). It maintains per-CPU callback queues
 //! and dispatches callbacks asynchronously upon IPI interrupt reception.
 //!
-//! ## Architecture
-//!
-//! ```text
-//! CPU 0                      CPU 1
-//! ┌─────────────┐           ┌─────────────┐
-//! │run_on_cpu(1)│──────────▶│IPI Interrupt│
-//! │  enqueue()  │           │             │
-//! │  trigger()  │           │ipi_handler()│
-//! └─────────────┘           │  dequeue()  │
-//!                           │  execute()  │
-//!                           └─────────────┘
-//! ```
-//!
 //! ## Safety
 //!
 //! All callbacks must be `Send` as they execute on different CPUs.
@@ -85,15 +72,15 @@ pub fn init() {
 /// Returns `KapiError::InvalidCpuId` if `dest_cpu` exceeds system CPU count.
 pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()> {
     let cpu_num = platconfig::plat::CPU_NUM;
-    
+
     // Error handling: check CPU ID validity
     if dest_cpu >= cpu_num {
         error!("Invalid CPU ID: {} (max: {})", dest_cpu, cpu_num - 1);
         return Err(KapiError::InvalidCpuId);
     }
-    
+
     info!("Send IPI event to CPU {dest_cpu}");
-    
+
     if dest_cpu == this_cpu_id() {
         // Execute callback on current CPU immediately
         callback.into().call();
@@ -103,7 +90,7 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()>
             .push(this_cpu_id(), callback.into());
         axhal::irq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu));
     }
-    
+
     Ok(())
 }
 
@@ -116,7 +103,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
 
     // Execute callback on current CPU immediately
     callback.clone().call();
-    
+
     // Push the callback to all other CPUs' IPI event queues
     for cpu_id in 0..cpu_num {
         if cpu_id != current_cpu_id {
@@ -125,7 +112,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
                 .push(current_cpu_id, callback.clone().into_unicast());
         }
     }
-    
+
     // Send IPI to all other CPUs to trigger their callbacks
     axhal::irq::notify_cpu(
         IPI_IRQ,
@@ -134,7 +121,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
             total: cpu_num,
         },
     );
-    
+
     Ok(())
 }
 
@@ -148,11 +135,10 @@ pub fn ipi_handler() {
         .pop_one()
     {
         debug!("Received IPI event from CPU {src_cpu_id}");
-        
-        // Industry best practice B: use logging instead of silent failure
-        // TODO: If Rust environment supports catch_unwind, can catch panics here
+
+        // use logging instead of silent failure
         callback.call();
-        
+
         // If future needs to track failures, can add error handling inside Callback
     }
 }
