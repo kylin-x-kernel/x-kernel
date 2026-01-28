@@ -2,11 +2,8 @@
 name = "khal"
 version.workspace = true
 edition.workspace = true
-authors = [
-    "Yuekai Jia <equation618@gmail.com>", 
-    "KylinSoft Co., Ltd. <https://www.kylinos.cn/>"
-    ]
-description = "ArceOS hardware abstraction layer, provides unified APIs for platform-specific operations"
+authors.workspace = true
+description = "Hardware abstraction layer, provides unified APIs for platform-specific operations"
 license.workspace = true
 homepage.workspace = true
 repository = "https://github.com/arceos-org/arceos/tree/main/modules/khal"
