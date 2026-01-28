@@ -3,7 +3,7 @@ name: CI Test
 on:
   push:
     branches:
-      - feaure/x86cismp=4
+      - main
 
   pull_request:
     branches:
