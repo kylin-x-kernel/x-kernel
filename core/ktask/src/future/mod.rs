@@ -11,7 +11,7 @@ use core::{
 use axerrno::AxError;
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::{AxTaskRef, WeakAxTaskRef, current, current_run_queue, select_run_queue};
+use crate::{AxTaskRef, WeakKtaskRef, current, current_run_queue, select_run_queue};
 
 mod poll;
 pub use poll::*;
@@ -20,7 +20,7 @@ mod time;
 pub use time::*;
 
 struct AxWaker {
-    task: WeakAxTaskRef,
+    task: WeakKtaskRef,
     woke: SpinNoIrq<bool>,
 }
 

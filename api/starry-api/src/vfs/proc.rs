@@ -11,7 +11,7 @@ use core::{ffi::CStr, iter};
 
 use axfs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
 use indoc::indoc;
-use ktask::{AxTaskRef, WeakAxTaskRef, current};
+use ktask::{AxTaskRef, WeakKtaskRef, current};
 use starry_core::{
     task::{AsThread, TaskStat, get_task, tasks},
     vfs::{
@@ -146,7 +146,7 @@ fn task_status(task: &AxTaskRef) -> String {
 /// The /proc/[pid]/fd directory
 struct ThreadFdDir {
     fs: Arc<SimpleFs>,
-    task: WeakAxTaskRef,
+    task: WeakKtaskRef,
 }
 
 impl SimpleDirOps for ThreadFdDir {
@@ -186,7 +186,7 @@ impl SimpleDirOps for ThreadFdDir {
 /// The /proc/[pid] directory
 struct ThreadDir {
     fs: Arc<SimpleFs>,
-    task: WeakAxTaskRef,
+    task: WeakKtaskRef,
 }
 
 impl SimpleDirOps for ThreadDir {

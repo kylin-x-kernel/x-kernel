@@ -22,7 +22,7 @@ use extern_trait::extern_trait;
 use hashbrown::HashMap;
 use kpoll::PollSet;
 use ksync::{Mutex, spin::SpinNoIrq};
-use ktask::{AxTaskRef, TaskExt, TaskInner, WeakAxTaskRef, current};
+use ktask::{AxTaskRef, TaskExt, TaskInner, WeakKtaskRef, current};
 use lazy_static::lazy_static;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
@@ -361,7 +361,7 @@ lazy_static! {
     static ref SHARED_FUTEX_TABLES: Mutex<FutexTables> = Mutex::new(FutexTables::new());
 }
 
-static TASK_TABLE: RwLock<WeakMap<Pid, WeakAxTaskRef>> = RwLock::new(WeakMap::new());
+static TASK_TABLE: RwLock<WeakMap<Pid, WeakKtaskRef>> = RwLock::new(WeakMap::new());
 
 static PROCESS_TABLE: RwLock<WeakMap<Pid, Weak<ProcessData>>> = RwLock::new(WeakMap::new());
 

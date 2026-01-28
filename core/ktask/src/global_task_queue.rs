@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use khal::percpu::this_cpu_id;
 
-use crate::WeakAxTaskRef;
+use crate::WeakKtaskRef;
 
 /// Max number of task weak refs tracked per CPU for watchdog/NMI dumping.
 ///
@@ -15,7 +15,7 @@ const GLOBAL_TASK_QUEUE_SLOTS: usize = 4096;
 ///
 /// Safety / design notes:
 /// - Writers (task creation + GC) run on the owning CPU, but NMI may read any CPU.
-/// - Each slot stores a raw pointer to a heap-allocated `WeakAxTaskRef` (usize).
+/// - Each slot stores a raw pointer to a heap-allocated `WeakKtaskRef` (usize).
 /// - Readers snapshot the pointers with `Acquire` loads, dereference, and call
 ///   `upgrade()` (which is internally atomic).
 /// - GC sweeps invalid weak refs and frees their boxes.
@@ -32,7 +32,7 @@ impl GlobalTaskRegistry {
     }
 
     #[inline]
-    fn try_insert(&self, cpu_id: usize, weak: WeakAxTaskRef) {
+    fn try_insert(&self, cpu_id: usize, weak: WeakKtaskRef) {
         // Allocate once; if we fail to insert, free it immediately.
         let boxed = Box::new(weak);
         let ptr = Box::into_raw(boxed) as usize;
@@ -49,7 +49,7 @@ impl GlobalTaskRegistry {
         warn!("global task queue on cpu {} is full!", cpu_id);
 
         // registry full, drop record
-        unsafe { drop(Box::from_raw(ptr as *mut WeakAxTaskRef)) };
+        unsafe { drop(Box::from_raw(ptr as *mut WeakKtaskRef)) };
     }
 
     #[inline]
@@ -59,29 +59,29 @@ impl GlobalTaskRegistry {
             if ptr == 0 {
                 continue;
             }
-            // Safety: ptr is either 0 or a valid Box<WeakAxTaskRef> installed by try_insert.
-            let weak = unsafe { &*(ptr as *const WeakAxTaskRef) };
+            // Safety: ptr is either 0 or a valid Box<WeakKtaskRef> installed by try_insert.
+            let weak = unsafe { &*(ptr as *const WeakKtaskRef) };
             if weak.upgrade().is_none() {
                 // Try to claim the slot and free.
                 if slot
                     .compare_exchange(ptr, 0, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
                 {
-                    unsafe { drop(Box::from_raw(ptr as *mut WeakAxTaskRef)) };
+                    unsafe { drop(Box::from_raw(ptr as *mut WeakKtaskRef)) };
                 }
             }
         }
     }
 
     #[inline]
-    fn for_each(&self, cpu_id: usize, mut f: impl FnMut(&WeakAxTaskRef)) {
+    fn for_each(&self, cpu_id: usize, mut f: impl FnMut(&WeakKtaskRef)) {
         for slot in &self.slots[cpu_id] {
             let ptr = slot.load(Ordering::Acquire);
             if ptr == 0 {
                 continue;
             }
-            // Safety: ptr is either 0 or a valid Box<WeakAxTaskRef>.
-            let weak = unsafe { &*(ptr as *const WeakAxTaskRef) };
+            // Safety: ptr is either 0 or a valid Box<WeakKtaskRef>.
+            let weak = unsafe { &*(ptr as *const WeakKtaskRef) };
             f(weak);
         }
     }
@@ -103,6 +103,6 @@ pub(crate) fn sweep_watchdog_tasks(cpu_id: usize) {
 
 /// Iterate the given CPU's watchdog registry.
 #[inline]
-pub(crate) fn for_each_watchdog_task(cpu_id: usize, f: impl FnMut(&WeakAxTaskRef)) {
+pub(crate) fn for_each_watchdog_task(cpu_id: usize, f: impl FnMut(&WeakKtaskRef)) {
     GLOBAL_TASK_REGISTRY.for_each(cpu_id, f);
 }

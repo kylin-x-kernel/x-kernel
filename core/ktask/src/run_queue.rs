@@ -33,7 +33,7 @@ macro_rules! percpu_static {
 }
 
 percpu_static! {
-    RUN_QUEUE: LazyInit<AxRunQueue> = LazyInit::new(),
+    RUN_QUEUE: LazyInit<RunQueue> = LazyInit::new(),
     EXITED_TASKS: VecDeque<AxTaskRef> = VecDeque::new(),
     WAIT_FOR_EXIT: AtomicWaker = AtomicWaker::new(),
     IDLE_TASK: LazyInit<AxTaskRef> = LazyInit::new(),
@@ -51,10 +51,10 @@ percpu_static! {
 /// Access to this variable is marked as `unsafe` because it contains `MaybeUninit` references,
 /// which require careful handling to avoid undefined behavior. The array should be fully
 /// initialized before being accessed to ensure safe usage.
-static mut RUN_QUEUES: [MaybeUninit<&'static mut AxRunQueue>; platconfig::plat::CPU_NUM] =
+static mut RUN_QUEUES: [MaybeUninit<&'static mut RunQueue>; platconfig::plat::CPU_NUM] =
     [ARRAY_REPEAT_VALUE; platconfig::plat::CPU_NUM];
 #[allow(clippy::declare_interior_mutable_const)] // It's ok because it's used only for initialization `RUN_QUEUES`.
-const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut AxRunQueue> = MaybeUninit::uninit();
+const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut RunQueue> = MaybeUninit::uninit();
 
 /// Returns a reference to the current run queue in [`CurrentRunQueueRef`].
 ///
@@ -67,7 +67,7 @@ const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut AxRunQueue> = MaybeUninit::un
 ///
 /// ## Returns
 ///
-/// * [`CurrentRunQueueRef`] - a static reference to the current [`AxRunQueue`].
+/// * [`CurrentRunQueueRef`] - a static reference to the current [`RunQueue`].
 #[inline(always)]
 pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -125,14 +125,14 @@ fn select_run_queue_index(cpumask: KCpuMask) -> usize {
 ///
 /// ## Returns
 ///
-/// A reference to the `AxRunQueue` corresponding to the provided index.
+/// A reference to the `RunQueue` corresponding to the provided index.
 ///
 /// ## Panics
 ///
 /// This function will panic if the index is out of bounds.
 #[cfg(feature = "smp")]
 #[inline]
-fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
+fn get_run_queue(index: usize) -> &'static mut RunQueue {
     unsafe { RUN_QUEUES[index].assume_init_mut() }
 }
 
@@ -147,7 +147,7 @@ fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
 ///
 /// ## Returns
 ///
-/// * [`AxRunQueueRef`] - a static reference to the selected [`AxRunQueue`] (current or remote).
+/// * [`AxRunQueueRef`] - a static reference to the selected [`RunQueue`] (current or remote).
 ///
 /// ## TODO
 ///
@@ -178,8 +178,8 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
     }
 }
 
-/// [`AxRunQueue`] represents a run queue for global system or a specific CPU.
-pub(crate) struct AxRunQueue {
+/// [`RunQueue`] represents a run queue for global system or a specific CPU.
+pub(crate) struct RunQueue {
     /// The ID of the CPU this run queue is associated with.
     cpu_id: usize,
     /// The core scheduler of this run queue.
@@ -196,7 +196,7 @@ pub(crate) struct AxRunQueue {
 /// If you want to perform scheduling operations on the current run queue,
 /// see [`CurrentRunQueueRef`].
 pub(crate) struct AxRunQueueRef<'a, G: BaseGuard> {
-    inner: &'a mut AxRunQueue,
+    inner: &'a mut RunQueue,
     state: G::State,
     _phantom: core::marker::PhantomData<G>,
 }
@@ -213,7 +213,7 @@ impl<G: BaseGuard> Drop for AxRunQueueRef<'_, G> {
 /// [`CurrentRunQueueRef`] is used to get a reference to the run queue on current CPU,
 /// in which scheduling operations can be performed.
 pub(crate) struct CurrentRunQueueRef<'a, G: BaseGuard> {
-    inner: &'a mut AxRunQueue,
+    inner: &'a mut RunQueue,
     current_task: CurrentTask,
     state: G::State,
     _phantom: core::marker::PhantomData<G>,
@@ -426,7 +426,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     }
 }
 
-impl AxRunQueue {
+impl RunQueue {
     /// Create a new run queue for the specified CPU.
     /// The run queue is initialized with a per-CPU gc task in its scheduler.
     fn new(cpu_id: usize) -> Self {
@@ -666,7 +666,7 @@ pub(crate) fn init() {
     unsafe { CurrentTask::init_current(main_task) }
 
     RUN_QUEUE.with_current(|rq| {
-        rq.init_once(AxRunQueue::new(cpu_id));
+        rq.init_once(RunQueue::new(cpu_id));
     });
     unsafe {
         RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());
@@ -685,7 +685,7 @@ pub(crate) fn init_secondary() {
     unsafe { CurrentTask::init_current(idle_task) }
 
     RUN_QUEUE.with_current(|rq| {
-        rq.init_once(AxRunQueue::new(cpu_id));
+        rq.init_once(RunQueue::new(cpu_id));
     });
     unsafe {
         RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());

@@ -24,7 +24,7 @@ pub use crate::{
 pub type AxTaskRef = Arc<AxTask>;
 
 /// The weak reference type of a task.
-pub type WeakAxTaskRef = Weak<AxTask>;
+pub type WeakKtaskRef = Weak<AxTask>;
 
 /// The wrapper type for [`cpumask::CpuMask`] with SMP configuration.
 pub type KCpuMask = cpumask::CpuMask<{ platconfig::plat::CPU_NUM }>;
