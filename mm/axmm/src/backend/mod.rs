@@ -10,7 +10,7 @@ use axhal::{
 use axsync::Mutex;
 use enum_dispatch::enum_dispatch;
 use memaddr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
-use memory_set::MappingBackend;
+use memset::MappingBackend;
 
 pub mod cow;
 pub mod file;

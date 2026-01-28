@@ -59,7 +59,7 @@ axfs-ng-vfs = { path = "fs/axfs-ng-vfs" }
 kio = { path = "io/kio" }
 kpoll = { path = "core/kpoll" }
 memaddr = { path = "mm/memaddr" }
-memory_set = { path = "mm/memory_set" }
+memset = { path = "mm/memset" }
 kspin = { path = "sync/kspin" }
 
 # Starry Modules

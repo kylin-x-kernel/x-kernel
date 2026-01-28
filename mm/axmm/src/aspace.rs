@@ -11,7 +11,7 @@ use axsync::Mutex;
 use memaddr::{
     MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr, VirtAddrRange, is_aligned_4k,
 };
-use memory_set::{MemoryArea, MemorySet};
+use memset::{MemoryArea, MemorySet};
 
 use crate::backend::{Backend, BackendOps};
 
@@ -391,7 +391,7 @@ impl AddrSpace {
     ///
     /// This is required for `procfs` to generate `/proc/pid/maps`.
     /// Exposing internal state for system introspection is a standard practice.
-    pub fn areas(&self) -> impl Iterator<Item = &memory_set::MemoryArea<Backend>> {
+    pub fn areas(&self) -> impl Iterator<Item = &memset::MemoryArea<Backend>> {
         self.areas.iter()
     }
 }
