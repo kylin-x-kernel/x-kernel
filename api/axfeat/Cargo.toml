@@ -50,7 +50,6 @@ dma = ["alloc", "paging"]
 multitask = [
     "alloc",
     "axtask/multitask",
-    "axsync/multitask",
     "axruntime/multitask",
 ]
 task-ext = ["axtask/task-ext"]

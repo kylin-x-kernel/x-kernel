@@ -2,15 +2,14 @@
 name = "axsync"
 version.workspace = true
 edition.workspace = true
-authors = ["Yuekai Jia <equation618@gmail.com>"]
-description = "ArceOS synchronization primitives"
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/axsync"
-documentation = "https://arceos-org.github.io/arceos/axsync/index.html"
+repository.workspace = true
+documentation.workspace = true
+description = "x-kernel synchronization primitives"
 
 [features]
-multitask = ["axtask/multitask"]
 default = []
 watchdog = ["dep:khal"]
 
@@ -22,7 +21,7 @@ lock_api.workspace = true
 khal = { workspace = true, optional = true}
 
 [dev-dependencies]
-axsync = { workspace = true, features = ["multitask"] }
+axsync = { workspace = true }
 axtask = { workspace = true, features = ["test"] }
 # FIXME: `rand` crate can not be used since https://github.com/google/zerocopy/pull/2574
 fastrand = "2.3"

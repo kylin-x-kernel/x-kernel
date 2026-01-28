@@ -16,13 +16,6 @@
 
 pub use kspin as spin;
 
-#[cfg(feature = "multitask")]
 mod mutex;
 
-#[cfg(not(feature = "multitask"))]
-#[doc(cfg(not(feature = "multitask")))]
-pub use kspin::{SpinNoIrq as Mutex, SpinNoIrqGuard as MutexGuard};
-
-#[cfg(feature = "multitask")]
-#[doc(cfg(feature = "multitask"))]
 pub use self::mutex::{Mutex, MutexGuard, RawMutex};
