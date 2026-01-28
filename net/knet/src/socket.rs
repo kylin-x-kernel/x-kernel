@@ -6,11 +6,11 @@ use core::{
     task::Context,
 };
 
+#[cfg(feature = "vsock")]
+use kdriver::prelude::VsockAddr;
 use axerrno::{AxError, AxResult, LinuxError};
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
-#[cfg(feature = "vsock")]
-use kdriver::prelude::VsockAddr;
 use kio::prelude::*;
 use kpoll::{IoEvents, Pollable};
 

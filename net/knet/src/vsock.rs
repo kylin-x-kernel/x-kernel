@@ -6,9 +6,9 @@ pub(crate) mod stream;
 use alloc::boxed::Box;
 use core::task::Context;
 
+pub use kdriver::prelude::{VsockAddr, VsockConnId};
 use axerrno::{AxError, AxResult};
 use enum_dispatch::enum_dispatch;
-pub use kdriver::prelude::{VsockAddr, VsockConnId};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, Pollable};
 

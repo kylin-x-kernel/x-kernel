@@ -15,7 +15,7 @@ bus-pci = ["dep:pci", "dep:khal", "dep:platconfig"]
 pci-mmio = ["bus-pci"]
 net = ["dep:net"]
 block = ["dep:block"]
-display = ["dep:display"]
+display = ["dep:fbdevice"]
 input = ["dep:input"]
 vsock = ["dep:vsock"]
 

@@ -38,7 +38,7 @@ backtrace.workspace = true
 platconfig.workspace = true
 
 fbdevice = { workspace = true, optional = true }
-display = { workspace = true, optional = true }
+# display = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 kdriver = { workspace = true, optional = true }
 
