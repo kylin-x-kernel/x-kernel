@@ -2,7 +2,7 @@ use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::ffi::c_char;
 
 use axerrno::{AxError, AxResult};
-use axfs::FS_CONTEXT;
+use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use ktask::current;
 use starry_core::{config::USER_HEAP_BASE, mm::load_user_app, task::AsThread};

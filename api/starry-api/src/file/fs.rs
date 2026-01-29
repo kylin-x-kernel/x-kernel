@@ -7,7 +7,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axfs::{FS_CONTEXT, FsContext};
+use kfs::{FS_CONTEXT, FsContext};
 use fs_ng_vfs::{Location, Metadata, NodeFlags};
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
@@ -96,21 +96,21 @@ pub fn metadata_to_kstat(metadata: &Metadata) -> Kstat {
     }
 }
 
-/// File wrapper for `axfs::fops::File`.
+/// File wrapper for `kfs::fops::File`.
 pub struct File {
-    inner: axfs::File,
+    inner: kfs::File,
     nonblock: AtomicBool,
 }
 
 impl File {
-    pub fn new(inner: axfs::File) -> Self {
+    pub fn new(inner: kfs::File) -> Self {
         Self {
             inner,
             nonblock: AtomicBool::new(false),
         }
     }
 
-    pub fn inner(&self) -> &axfs::File {
+    pub fn inner(&self) -> &kfs::File {
         &self.inner
     }
 
@@ -191,7 +191,7 @@ impl Pollable for File {
     }
 }
 
-/// Directory wrapper for `axfs::fops::Directory`.
+/// Directory wrapper for `kfs::fops::Directory`.
 pub struct Directory {
     inner: Location,
     pub offset: Mutex<u64>,

@@ -14,7 +14,7 @@ copy = ["page_table/copy-from"]
 kalloc = { workspace = true }
 platconfig = { workspace = true }
 axerrno = { workspace = true }
-axfs = { workspace = true }
+kfs = { workspace = true }
 fs-ng-vfs = { workspace = true }
 khal = { workspace = true, features = ["paging"] }
 ksync = { workspace = true }

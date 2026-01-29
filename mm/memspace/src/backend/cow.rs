@@ -2,7 +2,7 @@ use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::slice;
 
 use axerrno::{AxError, AxResult};
-use axfs::FileBackend;
+use kfs::FileBackend;
 use khal::{
     mem::p2v,
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},

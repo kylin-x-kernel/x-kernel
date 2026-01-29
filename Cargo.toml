@@ -34,7 +34,7 @@ kalloc = { path = "mm/kalloc" }
 fbdevice = { path = "io/fbdevice" }
 kdriver = { path = "drivers/kdriver" }
 axdma = { path = "io/axdma" }
-axfs = { path = "fs/axfs" }
+kfs = { path = "fs/kfs" }
 khal = { path = "arch/khal" }
 inputdev = { path = "io/inputdev" }
 kipi = { path = "arch/kipi" }

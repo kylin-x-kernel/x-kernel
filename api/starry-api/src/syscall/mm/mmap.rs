@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use axerrno::{AxError, AxResult};
-use axfs::FileBackend;
+use kfs::FileBackend;
 use khal::paging::{MappingFlags, PageSize};
 use ktask::current;
 use linux_raw_sys::general::*;

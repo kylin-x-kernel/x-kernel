@@ -54,12 +54,12 @@ fs = [
     "alloc",
     "paging",
     "kdriver/virtio-blk",
-    "dep:axfs",
+    "dep:kfs",
     "kruntime/fs",
 ] # TODO: try to remove "paging"
-fs-ext4 = ["fs", "axfs/ext4"]
-fs-fat = ["fs", "axfs/fat"]
-fs-times = ["fs", "axfs/times"]
+fs-ext4 = ["fs", "kfs/ext4"]
+fs-fat = ["fs", "kfs/fat"]
+fs-times = ["fs", "kfs/times"]
 
 # Networking
 net = ["alloc", "paging", "kdriver/virtio-net", "dep:knet", "kruntime/net"]
@@ -89,7 +89,7 @@ rtc = ["khal/rtc", "kruntime/rtc"]
 # Device drivers
 bus-mmio = ["kdriver/bus-mmio"]
 bus-pci = ["kdriver/bus-pci"]
-driver-ramdisk = ["kdriver/ramdisk", "axfs?/use-ramdisk"]
+driver-ramdisk = ["kdriver/ramdisk", "kfs?/use-ramdisk"]
 driver-sdmmc = ["kdriver/sdmmc"]
 # driver-ixgbe = ["kdriver?/ixgbe"]
 # driver-fxmac = ["kdriver?/fxmac"]                          # fxmac ethernet driver for PhytiumPi
@@ -112,7 +112,7 @@ kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true
-axfs = { workspace = true, optional = true }
+kfs = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }

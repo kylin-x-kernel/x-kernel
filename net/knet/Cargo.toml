@@ -20,7 +20,7 @@ ksync = { workspace = true }
 ktask = { workspace = true }
 
 axerrno = { workspace = true }
-axfs = { workspace = true }
+kfs = { workspace = true }
 fs-ng-vfs = { workspace = true }
 kio = { workspace = true }
 kpoll = { workspace = true }

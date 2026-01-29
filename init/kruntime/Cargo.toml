@@ -19,13 +19,13 @@ ipi = ["dep:kipi"]
 
 display = ["dep:kdriver", "dep:fbdevice"]
 input = ["dep:kdriver", "dep:inputdev"]
-fs = ["dep:kdriver", "dep:axfs"]
+fs = ["dep:kdriver", "dep:kfs"]
 net = ["dep:kdriver", "dep:knet"]
 vsock = ["net", "dep:kdriver"]
 
 rtc = []
 # driver-dyn = ["kdriver/dyn"]
-crosvm = ["vsock", "axfs/crosvm"]
+crosvm = ["vsock", "kfs/crosvm"]
 watchdog = ["dep:watchdog"]
 pmu = ["khal/pmu"]
 
@@ -39,7 +39,7 @@ fbdevice = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 kdriver = { workspace = true, optional = true }
 
-axfs = { workspace = true, optional = true }
+kfs = { workspace = true, optional = true }
 khal.workspace = true
 kipi = { workspace = true, optional = true }
 klogger.workspace = true

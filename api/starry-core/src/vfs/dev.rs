@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::{any::Any, task::Context};
 
-use axfs::CachedFile;
+use kfs::CachedFile;
 use fs_ng_vfs::{
     DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps,
     NodePermission, NodeType, VfsError, VfsResult,

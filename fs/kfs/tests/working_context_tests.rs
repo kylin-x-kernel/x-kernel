@@ -4,7 +4,7 @@
 
 mod test_helpers;
 
-use axfs::WorkingContext;
+use kfs::WorkingContext;
 use fs_ng_vfs::{NodeType, VfsError};
 use test_helpers::*;
 

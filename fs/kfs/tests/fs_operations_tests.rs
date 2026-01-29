@@ -4,7 +4,7 @@
 
 mod test_helpers;
 
-use axfs::{FsContext, FsOperations};
+use kfs::{FsContext, FsOperations};
 use fs_ng_vfs::{NodePermission, NodeType, path::Path};
 use test_helpers::*;
 
@@ -283,7 +283,7 @@ fn test_component_decoupling() {
     let (_fs, root) = setup_test_fs();
 
     // Can independently create and use components
-    use axfs::{PathResolver, WorkingContext};
+    use kfs::{PathResolver, WorkingContext};
 
     let resolver = PathResolver::new();
     let loc = resolver.resolve(&root, Path::new("/a"), true).unwrap();

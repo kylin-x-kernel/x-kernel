@@ -3,7 +3,7 @@ use alloc::{
     sync::Arc,
 };
 
-use axfs::FS_CONTEXT;
+use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
 use ksync::Mutex;

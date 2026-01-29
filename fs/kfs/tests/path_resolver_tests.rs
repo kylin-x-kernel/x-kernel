@@ -6,7 +6,7 @@ mod test_helpers;
 
 use std::time::{Duration, Instant};
 
-use axfs::PathResolver;
+use kfs::PathResolver;
 use fs_ng_vfs::{NodeType, VfsError, path::Path};
 use test_helpers::*;
 

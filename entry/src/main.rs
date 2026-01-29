@@ -14,7 +14,7 @@ extern crate kruntime;
 
 use alloc::{borrow::ToOwned, vec::Vec};
 
-use axfs::FS_CONTEXT;
+use kfs::FS_CONTEXT;
 
 mod entry;
 

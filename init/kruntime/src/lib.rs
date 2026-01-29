@@ -191,7 +191,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         let all_devices = kdriver::init_drivers();
 
         #[cfg(feature = "fs")]
-        axfs::init_filesystems(all_devices.block);
+        kfs::init_filesystems(all_devices.block);
 
         #[cfg(feature = "net")]
         knet::init_network(all_devices.net);

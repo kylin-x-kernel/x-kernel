@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use axfs::{File, FsContext};
+use kfs::{File, FsContext};
 use fs_ng_vfs::{
     Filesystem, Location, Mountpoint, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };

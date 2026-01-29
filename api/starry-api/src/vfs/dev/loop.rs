@@ -4,7 +4,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult, LinuxError};
-use axfs::FileBackend;
+use kfs::FileBackend;
 use fs_ng_vfs::{DeviceId, NodeFlags, VfsResult};
 use ksync::Mutex;
 use linux_raw_sys::{

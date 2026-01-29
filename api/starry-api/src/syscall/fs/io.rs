@@ -5,7 +5,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axfs::{FS_CONTEXT, FileFlags, OpenOptions};
+use kfs::{FS_CONTEXT, FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
 use ktask::current;

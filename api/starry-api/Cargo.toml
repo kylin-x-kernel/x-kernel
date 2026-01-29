@@ -28,7 +28,7 @@ kdriver.workspace = true
 axerrno.workspace = true
 kfeat.workspace = true
 fs-ng-vfs.workspace = true
-axfs.workspace = true
+kfs.workspace = true
 khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kio.workspace = true

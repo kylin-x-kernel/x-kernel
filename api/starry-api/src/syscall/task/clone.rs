@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use axerrno::{AxError, AxResult};
-use axfs::FS_CONTEXT;
+use kfs::FS_CONTEXT;
 use bitflags::bitflags;
 use khal::uspace::UserContext;
 use kprocess::Pid;

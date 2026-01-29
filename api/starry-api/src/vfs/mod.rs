@@ -5,7 +5,7 @@ mod proc;
 mod tmp;
 
 use axerrno::LinuxResult;
-use axfs::{FS_CONTEXT, FsContext};
+use kfs::{FS_CONTEXT, FsContext};
 use fs_ng_vfs::{
     Filesystem, NodePermission,
     path::{Path, PathBuf},

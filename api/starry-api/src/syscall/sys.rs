@@ -2,7 +2,7 @@ use alloc::vec;
 use core::ffi::c_char;
 
 use axerrno::{AxError, AxResult};
-use axfs::FS_CONTEXT;
+use kfs::FS_CONTEXT;
 use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
