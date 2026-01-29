@@ -4,8 +4,8 @@
 
 mod test_helpers;
 
-use kfs::{FsContext, FsOperations};
 use fs_ng_vfs::{NodePermission, NodeType, path::Path};
+use kfs::{FsContext, FsOperations};
 use test_helpers::*;
 
 // ========== Basic Construction Tests ==========

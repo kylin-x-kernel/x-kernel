@@ -1,12 +1,12 @@
 use alloc::sync::Arc;
 use core::{any::Any, task::Context};
 
-use kfs::CachedFile;
 use fs_ng_vfs::{
     DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps,
     NodePermission, NodeType, VfsError, VfsResult,
 };
 use inherit_methods_macro::inherit_methods;
+use kfs::CachedFile;
 use kpoll::{IoEvents, Pollable};
 use memaddr::PhysAddrRange;
 

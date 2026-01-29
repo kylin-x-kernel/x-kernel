@@ -5,11 +5,11 @@ mod proc;
 mod tmp;
 
 use axerrno::LinuxResult;
-use kfs::{FS_CONTEXT, FsContext};
 use fs_ng_vfs::{
     Filesystem, NodePermission,
     path::{Path, PathBuf},
 };
+use kfs::{FS_CONTEXT, FsContext};
 pub use starry_core::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 pub use tmp::MemoryFs;
 

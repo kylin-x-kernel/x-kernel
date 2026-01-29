@@ -6,8 +6,8 @@ mod test_helpers;
 
 use std::time::{Duration, Instant};
 
-use kfs::PathResolver;
 use fs_ng_vfs::{NodeType, VfsError, path::Path};
+use kfs::PathResolver;
 use test_helpers::*;
 
 // ========== Basic Path Resolution Tests ==========

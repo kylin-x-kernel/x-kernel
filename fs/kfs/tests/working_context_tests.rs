@@ -4,8 +4,8 @@
 
 mod test_helpers;
 
-use kfs::WorkingContext;
 use fs_ng_vfs::{NodeType, VfsError};
+use kfs::WorkingContext;
 use test_helpers::*;
 
 // ========== Construction Tests ==========
