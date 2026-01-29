@@ -1,4 +1,4 @@
-# axcpu
+# kcpu
 
 This crate provides privileged instruction and structure abstractions for various CPU architectures. It is designed to implement the hardware abstraction layer of an operating system kernel.
 
