@@ -8,7 +8,7 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, FsContext};
-use axfs_ng_vfs::{Location, Metadata, NodeFlags};
+use fs_ng_vfs::{Location, Metadata, NodeFlags};
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io};

@@ -7,7 +7,7 @@ mod fs;
 
 use alloc::sync::Arc;
 
-use axfs_ng_vfs::{DirNodeOps, FileNodeOps, WeakDirEntry};
+use fs_ng_vfs::{DirNodeOps, FileNodeOps, WeakDirEntry};
 pub use dev::*;
 pub use dir::*;
 pub use file::*;

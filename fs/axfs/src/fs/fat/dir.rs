@@ -1,7 +1,7 @@
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, mem, ops::Deref, time::Duration};
 
-use axfs_ng_vfs::{
+use fs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FilesystemOps, Metadata, MetadataUpdate,
     NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
 };

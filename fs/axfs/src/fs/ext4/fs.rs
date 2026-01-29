@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::cell::OnceCell;
 
-use axfs_ng_vfs::{
+use fs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
 };
 use kdriver::BlockDevice as KBlockDevice;

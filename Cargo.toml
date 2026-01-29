@@ -48,7 +48,7 @@ kcpu = { path = "arch/kcpu" }
 # x-kernel Crates
 alloc-engine = { path = "mm/alloc-engine", features = ["axerrno"] }
 page_table = { path = "mm/page_table", features = ["axerrno"] }
-axfs-ng-vfs = { path = "fs/axfs-ng-vfs" }
+fs-ng-vfs = { path = "fs/fs-ng-vfs" }
 kio = { path = "io/kio" }
 kpoll = { path = "core/kpoll" }
 memaddr = { path = "mm/memaddr" }

@@ -1,7 +1,7 @@
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{any::Any, task::Context};
 
-use axfs_ng_vfs::{
+use fs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps,
     Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError,
     VfsResult, WeakDirEntry,

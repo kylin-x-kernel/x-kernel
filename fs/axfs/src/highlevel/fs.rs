@@ -6,7 +6,7 @@ use alloc::{
     vec::Vec,
 };
 
-use axfs_ng_vfs::{
+use fs_ng_vfs::{
     Location, Metadata, NodePermission, NodeType, VfsError, VfsResult,
     path::{Component, Components, Path, PathBuf},
 };

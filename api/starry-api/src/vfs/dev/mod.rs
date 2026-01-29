@@ -16,7 +16,7 @@ use alloc::{format, sync::Arc};
 use core::any::Any;
 
 use axerrno::AxError;
-use axfs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsResult};
+use fs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsResult};
 use ksync::Mutex;
 #[cfg(feature = "dev-log")]
 pub use log::bind_dev_log;

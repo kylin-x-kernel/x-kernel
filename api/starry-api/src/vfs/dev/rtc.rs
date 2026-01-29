@@ -1,6 +1,6 @@
 use core::{any::Any, ffi::c_int};
 
-use axfs_ng_vfs::{DeviceId, NodeFlags, VfsError, VfsResult};
+use fs_ng_vfs::{DeviceId, NodeFlags, VfsError, VfsResult};
 use chrono::{Datelike, Timelike};
 use linux_raw_sys::ioctl::RTC_RD_TIME;
 use starry_vm::VmMutPtr;

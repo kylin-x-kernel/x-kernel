@@ -21,7 +21,7 @@ ktask = { workspace = true }
 
 axerrno = { workspace = true }
 axfs = { workspace = true }
-axfs-ng-vfs = { workspace = true }
+fs-ng-vfs = { workspace = true }
 kio = { workspace = true }
 kpoll = { workspace = true }
 bitflags = "2.9.1"

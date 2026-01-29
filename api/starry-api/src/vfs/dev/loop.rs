@@ -5,7 +5,7 @@ use core::{
 
 use axerrno::{AxError, AxResult, LinuxError};
 use axfs::FileBackend;
-use axfs_ng_vfs::{DeviceId, NodeFlags, VfsResult};
+use fs_ng_vfs::{DeviceId, NodeFlags, VfsResult};
 use ksync::Mutex;
 use linux_raw_sys::{
     ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKRAGET, BLKRASET, BLKROGET, BLKROSET},

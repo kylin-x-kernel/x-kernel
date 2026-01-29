@@ -20,7 +20,7 @@ crosvm = []
 kalloc = { workspace = true }
 kdriver = { workspace = true, features = ["block"] }
 axerrno = { workspace = true }
-axfs-ng-vfs = { workspace = true }
+fs-ng-vfs = { workspace = true }
 khal = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 kpoll = { workspace = true }

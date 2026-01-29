@@ -7,7 +7,7 @@ use alloc::{
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::{num::NonZeroUsize, ops::Range, task::Context};
 
-use axfs_ng_vfs::{
+use fs_ng_vfs::{
     FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
@@ -234,7 +234,7 @@ impl OpenOptions {
             Ok((parent, name)) => {
                 let mut loc = parent.open_file(
                     &name,
-                    &axfs_ng_vfs::OpenOptions {
+                    &fs_ng_vfs::OpenOptions {
                         create: self.create,
                         create_new: self.create_new,
                         node_type: self.node_type,
@@ -944,7 +944,7 @@ impl Drop for File {
     fn drop(&mut self) {
         let flags = self.access_flags.load(Ordering::Acquire);
         if flags != 0 {
-            let mut update = axfs_ng_vfs::MetadataUpdate::default();
+            let mut update = fs_ng_vfs::MetadataUpdate::default();
             if flags & 1 != 0 {
                 update.atime = Some(khal::time::wall_time());
             }

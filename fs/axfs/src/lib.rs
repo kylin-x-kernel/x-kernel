@@ -38,6 +38,6 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
     let fs = fs::new_default(dev).expect("Failed to initialize filesystem");
     info!("  filesystem type: {:?}", fs.name());
 
-    let mp = axfs_ng_vfs::Mountpoint::new_root(&fs);
+    let mp = fs_ng_vfs::Mountpoint::new_root(&fs);
     ROOT_FS_CONTEXT.call_once(|| FsContext::new(mp.root_location()));
 }

@@ -5,7 +5,7 @@ use core::{ffi::CStr, hint::unlikely, iter, mem::MaybeUninit};
 
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, FS_CONTEXT, FileBackend};
-use axfs_ng_vfs::Location;
+use fs_ng_vfs::Location;
 use extern_trait::extern_trait;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use khal::{

@@ -7,7 +7,7 @@ use core::task::Context;
 use async_trait::async_trait;
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, OpenOptions};
-use axfs_ng_vfs::NodeType;
+use fs_ng_vfs::NodeType;
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
 use kio::{IoBuf, Read, Write};

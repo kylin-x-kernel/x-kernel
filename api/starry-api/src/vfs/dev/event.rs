@@ -2,7 +2,7 @@ use alloc::{format, sync::Arc};
 use core::{any::Any, task::Context, time::Duration};
 
 use axerrno::{AxError, AxResult};
-use axfs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
+use fs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
 use bitmaps::Bitmap;
 #[allow(unused_imports)]
 use kdriver::prelude::{

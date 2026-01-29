@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::any::Any;
 
 use axerrno::AxResult;
-use axfs_ng_vfs::{DeviceId, NodeType};
+use fs_ng_vfs::{DeviceId, NodeType};
 use starry_core::vfs::{Device, DeviceOps, SimpleFs};
 
 pub struct Ptmx(pub Arc<SimpleFs>);

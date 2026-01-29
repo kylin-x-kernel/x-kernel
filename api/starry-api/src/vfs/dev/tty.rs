@@ -2,7 +2,7 @@ use alloc::sync::{Arc, Weak};
 use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
 
 use axerrno::{AxError, AxResult};
-use axfs_ng_vfs::NodeFlags;
+use fs_ng_vfs::NodeFlags;
 use kpoll::{IoEvents, Pollable};
 use kprocess::Process;
 use ksync::Mutex;

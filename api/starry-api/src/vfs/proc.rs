@@ -9,7 +9,7 @@ use alloc::{
 };
 use core::{ffi::CStr, iter};
 
-use axfs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
+use fs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
 use indoc::indoc;
 use kprocess::Process;
 use ktask::{KtaskRef, WeakKtaskRef, current};

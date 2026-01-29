@@ -1,7 +1,7 @@
 use alloc::{borrow::Cow, sync::Arc, vec::Vec};
 use core::{any::Any, cmp::Ordering, task::Context};
 
-use axfs_ng_vfs::{
+use fs_ng_vfs::{
     FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
     NodeType, VfsError, VfsResult,
 };

@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use axfs::{File, FsContext, fs};
-use axfs_ng_vfs::{
+use fs_ng_vfs::{
     Filesystem, Location, Mountpoint, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
 use kdriver_block::ramdisk::RamDisk;
