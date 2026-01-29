@@ -11,39 +11,36 @@ use linux_raw_sys::{
 
 use crate::SignalSet;
 
-#[derive(Debug)]
+/// Default actions for signals when no custom handler is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultSignalAction {
     /// Terminate the process.
     Terminate,
-
     /// Ignore the signal.
     Ignore,
-
     /// Terminate the process and generate a core dump.
     CoreDump,
-
-    /// Stop the process.
+    /// Stop (suspend) the process.
     Stop,
-
-    /// Continue the process if stopped.
+    /// Continue the process if currently stopped.
     Continue,
 }
 
-/// Signal action that should be properly dispatch_irqd by the OS.
-///
-/// See [`SignalManager::check_signals`] for details.
-#[derive(Debug)]
+/// Operating system actions to take when a signal is delivered.
+/// 
+/// These represent the actions the kernel should take after signal
+/// processing, distinct from user-defined signal handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalOSAction {
-    /// Terminate the process.
+    /// Terminate the process immediately.
     Terminate,
     /// Generate a core dump and terminate the process.
     CoreDump,
-    /// Stop the process.
+    /// Suspend the process execution.
     Stop,
-    /// Continue the process if stopped.
+    /// Resume the process if it was stopped.
     Continue,
-    /// A signal handler is pushed into the signal stack. The OS doesn't need to
-    /// do anything.
+    /// A signal handler was invoked; no additional OS action needed.
     Handler,
 }
 

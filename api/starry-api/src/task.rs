@@ -15,7 +15,7 @@ use starry_core::{
     },
     time::TimerState,
 };
-use starry_signal::{SignalInfo, Signo};
+use signal::{SignalInfo, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{

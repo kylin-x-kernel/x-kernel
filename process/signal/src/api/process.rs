@@ -12,12 +12,15 @@ use kspin::SpinNoIrq;
 
 use crate::{
     DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
-    SignalInfo, SignalSet, Signo, api::ThreadSignalManager,
+    SignalInfo, SignalSet, Signo, MAX_SIGNALS, api::ThreadSignalManager,
 };
 
-/// Signal actions for a process.
+/// Container for signal actions across all supported signals.
+/// 
+/// This structure manages signal handlers for each signal number,
+/// providing type-safe access through signal number indexing.
 #[derive(Clone)]
-pub struct SignalActions(pub(crate) [SignalAction; 64]);
+pub struct SignalActions(pub(crate) [SignalAction; MAX_SIGNALS]);
 
 impl Default for SignalActions {
     fn default() -> Self {
@@ -39,42 +42,60 @@ impl IndexMut<Signo> for SignalActions {
     }
 }
 
-/// Process-level signal manager.
+/// Manages signal handling at the process level.
+/// 
+/// This manager coordinates signal delivery between the process and its threads,
+/// maintains signal actions, and handles process-wide pending signals.
 pub struct ProcessSignalManager {
-    /// The process-level shared pending signals
+    /// Process-level pending signals queue
     pending: SpinNoIrq<PendingSignals>,
 
-    /// The signal actions
+    /// Shared signal action handlers
     pub actions: Arc<SpinNoIrq<SignalActions>>,
 
-    /// The default restorer function.
+    /// Default signal handler restore function
     pub(crate) default_restorer: usize,
 
-    /// Thread-level signal managers.
+    /// Thread signal managers for signal distribution
     pub(crate) children: SpinNoIrq<Vec<(u32, Weak<ThreadSignalManager>)>>,
 
-    pub(crate) possibly_has_signal: AtomicBool,
+    /// Fast path indicator for pending signals
+    pub(crate) has_pending: AtomicBool,
 }
 
 impl ProcessSignalManager {
     /// Creates a new process signal manager.
+    /// 
+    /// # Arguments
+    /// * `actions` - Shared signal actions configuration
+    /// * `default_restorer` - Default signal handler restore function address
     pub fn new(actions: Arc<SpinNoIrq<SignalActions>>, default_restorer: usize) -> Self {
         Self {
             pending: SpinNoIrq::new(PendingSignals::default()),
             actions,
             default_restorer,
             children: SpinNoIrq::new(Vec::new()),
-            possibly_has_signal: AtomicBool::new(false),
+            has_pending: AtomicBool::new(false),
         }
     }
 
+    /// Dequeues the next pending signal that matches the given mask.
+    /// 
+    /// # Arguments
+    /// * `mask` - Signal mask to filter available signals
+    /// 
+    /// # Returns
+    /// The next available signal info, if any
     pub(crate) fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
-        let mut guard = self.pending.lock();
-        let result = guard.dequeue_signal(mask);
-        if guard.set.is_empty() {
-            self.possibly_has_signal.store(false, Ordering::Release);
+        let mut pending_guard = self.pending.lock();
+        let signal = pending_guard.dequeue_signal(mask);
+        
+        // Update fast path indicator
+        if pending_guard.set.is_empty() {
+            self.has_pending.store(false, Ordering::Release);
         }
-        result
+        
+        signal
     }
 
     /// Checks if a signal is ignored by the process.
@@ -97,31 +118,48 @@ impl ProcessSignalManager {
 
     /// Sends a signal to the process.
     ///
-    /// Returns `Some(tid)` if the signal wakes up a thread.
+    /// This method handles process-level signal delivery, checking if the signal
+    /// should be ignored and finding an appropriate thread to handle it.
     ///
-    /// See [`ThreadSignalManager::send_signal`] for the thread-level version.
+    /// # Arguments
+    /// * `sig` - Signal information to send
+    ///
+    /// # Returns
+    /// `Some(tid)` if a specific thread should handle the signal, `None` otherwise
     #[must_use]
     pub fn send_signal(&self, sig: SignalInfo) -> Option<u32> {
         let signo = sig.signo();
+        
+        // Check if signal should be ignored
         if self.signal_ignored(signo) {
             return None;
         }
 
+        // Add to pending signals
         if self.pending.lock().put_signal(sig) {
-            self.possibly_has_signal.store(true, Ordering::Release);
+            self.has_pending.store(true, Ordering::Release);
         }
-        let mut result = None;
-        self.children.lock().retain(|(tid, thread)| {
-            if let Some(thread) = thread.upgrade() {
-                if result.is_none() && !thread.signal_blocked(signo) {
-                    result = Some(*tid);
+        
+        // Find a thread that can handle this signal
+        self.find_target_thread(signo)
+    }
+    
+    /// Finds a suitable thread to handle the given signal.
+    fn find_target_thread(&self, signo: Signo) -> Option<u32> {
+        let mut target_tid = None;
+        
+        self.children.lock().retain(|(tid, thread_weak)| {
+            if let Some(thread) = thread_weak.upgrade() {
+                if target_tid.is_none() && !thread.signal_blocked(signo) {
+                    target_tid = Some(*tid);
                 }
-                true
+                true // Keep this thread reference
             } else {
-                false
+                false // Remove dead thread reference
             }
         });
-        result
+        
+        target_tid
     }
 
     /// Gets currently pending signals.

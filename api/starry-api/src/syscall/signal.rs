@@ -15,7 +15,7 @@ use starry_core::task::{
     AsThread, processes, send_signal_to_process, send_signal_to_process_group,
     send_signal_to_thread,
 };
-use starry_signal::{SignalInfo, SignalSet, SignalStack, Signo};
+use signal::{SignalInfo, SignalSet, SignalStack, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{

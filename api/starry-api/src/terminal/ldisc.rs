@@ -17,7 +17,7 @@ use ringbuf::{
     traits::{Consumer, Observer, Producer, Split},
 };
 use starry_core::task::send_signal_to_process_group;
-use starry_signal::SignalInfo;
+use signal::SignalInfo;
 
 use crate::terminal::{Terminal, termios::Termios2};
 

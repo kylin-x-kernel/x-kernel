@@ -1,6 +1,6 @@
 use axerrno::{AxError, AxResult};
 use starry_core::task::{get_process_data, send_signal_to_process};
-use starry_signal::SignalInfo;
+use signal::SignalInfo;
 
 use crate::{
     file::{FD_TABLE, FileLike, PidFd, add_file_like},

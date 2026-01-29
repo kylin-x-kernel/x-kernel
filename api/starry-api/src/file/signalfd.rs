@@ -13,7 +13,7 @@ use ktask::{
 };
 use spin::RwLock;
 use starry_core::task::AsThread;
-use starry_signal::{SignalInfo, SignalSet};
+use signal::{SignalInfo, SignalSet};
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::file::{FileLike, IoDst, IoSrc};

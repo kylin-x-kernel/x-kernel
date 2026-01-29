@@ -1,22 +1,24 @@
 use alloc::{boxed::Box, collections::vec_deque::VecDeque};
 use core::array;
 
-use crate::{SignalInfo, SignalSet};
+use crate::{SignalInfo, SignalSet, MAX_SIGNALS};
 
-/// Structure to record pending signals.
+/// Queue for managing pending signals awaiting delivery.
+/// 
+/// This structure maintains separate handling for standard signals (1-31)
+/// and real-time signals (32-64), as they have different queuing semantics.
+/// Standard signals can only have one pending instance, while real-time
+/// signals can queue multiple instances.
 pub struct PendingSignals {
-    /// The pending signals.
-    ///
-    /// Note that does not correspond to `pending signals` as described in
-    /// Linux. `Pending signals` in Linux refers to the signals that are
-    /// delivered but blocked from delivery, while `pending` here refers to any
-    /// signal that is delivered and not yet dispatch_irqd.
+    /// Bitmask of all pending signals
     pub set: SignalSet,
 
-    /// Signal info of standard signals (1-31).
+    /// Signal information for standard signals (1-31)
+    /// Only one instance can be pending at a time
     info_std: [Option<Box<SignalInfo>>; 32],
-    /// Signal info queue for real-time signals.
-    info_rt: [VecDeque<SignalInfo>; 33],
+    /// Signal information queues for real-time signals (32-64)
+    /// Multiple instances can be queued
+    info_rt: [VecDeque<SignalInfo>; MAX_SIGNALS - 31],
 }
 
 impl Default for PendingSignals {
@@ -30,10 +32,17 @@ impl Default for PendingSignals {
 }
 
 impl PendingSignals {
-    /// Puts a signal into the pending queue.
+    /// Adds a signal to the pending queue.
     ///
-    /// Returns `true` if the signal was added, `false` if the signal is
-    /// standard and ignored (i.e. already pending).
+    /// For standard signals (1-31), only one instance can be pending.
+    /// For real-time signals (32-64), multiple instances can be queued.
+    ///
+    /// # Arguments
+    /// * `sig` - Signal information to add
+    ///
+    /// # Returns
+    /// `true` if the signal was successfully added, `false` if it was
+    /// already pending (for standard signals only)
     pub fn put_signal(&mut self, sig: SignalInfo) -> bool {
         let signo = sig.signo();
         let added = self.set.add(signo);

@@ -6,6 +6,9 @@ use strum::{EnumIter, FromRepr, IntoEnumIterator};
 
 use crate::DefaultSignalAction;
 
+/// Maximum number of signals supported.
+pub const MAX_SIGNALS: usize = 64;
+
 /// Signal number.
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]

@@ -12,7 +12,7 @@ use starry_core::{
     mm::copy_from_kernel,
     task::{AsThread, ProcessData, Thread, add_task_to_table},
 };
-use starry_signal::Signo;
+use signal::Signo;
 use starry_vm::VmMutPtr;
 
 use crate::{

@@ -11,7 +11,7 @@ use ktask::{
 };
 use lazy_static::lazy_static;
 use spin::Mutex;
-use starry_signal::Signo;
+use signal::Signo;
 use strum::FromRepr;
 
 use crate::task::poll_timer;

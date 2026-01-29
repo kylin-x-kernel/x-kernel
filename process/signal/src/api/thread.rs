@@ -178,7 +178,7 @@ impl ThreadSignalManager {
     ) -> Option<(SignalInfo, SignalOSAction)> {
         // Fast path
         if !self.possibly_has_signal.load(Ordering::Acquire)
-            && !self.proc.possibly_has_signal.load(Ordering::Acquire)
+            && !self.proc.has_pending.load(Ordering::Acquire)
         {
             return None;
         }

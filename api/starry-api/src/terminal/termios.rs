@@ -6,7 +6,7 @@ use linux_raw_sys::general::{
     ONLCR, OPOST, VDISCARD, VEOF, VEOL, VEOL2, VERASE, VINTR, VKILL, VLNEXT, VQUIT, VREPRINT,
     VWERASE, speed_t, tcflag_t,
 };
-use starry_signal::Signo;
+use signal::Signo;
 
 #[repr(C)]
 #[derive(Clone, Copy, AnyBitPattern)]
