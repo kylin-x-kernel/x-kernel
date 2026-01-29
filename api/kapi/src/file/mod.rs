@@ -13,6 +13,7 @@ use axerrno::{AxError, AxResult};
 use downcast_rs::{DowncastSync, impl_downcast};
 use flatten_objects::FlattenObjects;
 use fs_ng_vfs::DeviceId;
+use kcore::{resources::AX_FILE_LIMIT, task::AsThread};
 use kfs::{FS_CONTEXT, OpenOptions};
 use kio::prelude::*;
 use kpoll::Pollable;
@@ -186,7 +187,7 @@ pub struct FileDescriptor {
 
 scope_local::scope_local! {
     /// The current file descriptor table.
-    pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, AX_FILE_LIMIT>>> = Arc::default();
+    pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>>> = Arc::default();
 }
 
 /// Get a file-like object by `fd`.
@@ -219,7 +220,7 @@ pub fn close_file_like(fd: c_int) -> AxResult {
     Ok(())
 }
 
-pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, AX_FILE_LIMIT>) -> AxResult<()> {
+pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>) -> AxResult<()> {
     assert_eq!(fd_table.count(), 0);
     let cx = FS_CONTEXT.lock();
     let open = |options: &mut OpenOptions| {

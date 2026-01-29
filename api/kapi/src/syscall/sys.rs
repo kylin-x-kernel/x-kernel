@@ -2,6 +2,7 @@ use alloc::vec;
 use core::ffi::c_char;
 
 use axerrno::{AxError, AxResult};
+use kcore::task::processes;
 use kfs::FS_CONTEXT;
 use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
@@ -9,7 +10,6 @@ use linux_raw_sys::{
 };
 use osvm::{VirtMutPtr, write_vm_mem};
 use platconfig::ARCH;
-use kcore::task::processes;
 
 pub fn sys_getuid() -> AxResult<isize> {
     Ok(0)

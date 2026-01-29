@@ -7,6 +7,7 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use fs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, path::Path};
+use kcore::task::AsThread;
 use kfs::{FS_CONTEXT, FsContext};
 use khal::time::wall_time;
 use ktask::current;
@@ -14,8 +15,7 @@ use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},
 };
-use kcore::task::AsThread;
-use osvm::{VmPtr, vm_write_slice};
+use osvm::{VirtPtr, write_vm_mem};
 
 use crate::{
     file::{Directory, FileLike, get_file_like, resolve_at, with_fs},

@@ -2,12 +2,6 @@ use core::{ffi::c_long, sync::atomic::Ordering};
 
 use axerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
-use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
-use kprocess::Pid;
-use ksignal::{SignalInfo, Signo};
-use ktask::{TaskInner, current};
-use linux_raw_sys::general::ROBUST_LIST_LIMIT;
-use osvm::{VirtMutPtr, VirtPtr};
 use kcore::{
     futex::FutexKey,
     shm::SHM_MANAGER,
@@ -17,6 +11,12 @@ use kcore::{
     },
     time::TimerState,
 };
+use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
+use kprocess::Pid;
+use ksignal::{SignalInfo, Signo};
+use ktask::{TaskInner, current};
+use linux_raw_sys::general::ROBUST_LIST_LIMIT;
+use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::{
     signal::{check_signals, unblock_next_signal},

@@ -3,16 +3,12 @@ use alloc::{
     sync::Arc,
 };
 
-use kfs::FS_CONTEXT;
-use khal::uspace::UserContext;
-use kprocess::{Pid, Process};
-use ksync::Mutex;
-use ktask::{KTaskExt, spawn_task};
 use kapi::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
 use kcore::{
     mm::{copy_from_kernel, load_user_app, new_user_aspace_empty},
     task::{ProcessData, Thread, add_task_to_table},
 };
+use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
 use ksync::Mutex;

@@ -17,7 +17,6 @@ use kio::prelude::*;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use osvm::{load_vec, load_vec_until_null, read_vm_mem, write_vm_mem};
-use kcore::{mm::access_user_memory, task::AsThread};
 
 fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> AxResult<()> {
     let align = layout.align();

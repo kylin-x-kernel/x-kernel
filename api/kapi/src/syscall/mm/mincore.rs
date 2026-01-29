@@ -14,7 +14,6 @@ use khal::paging::MappingFlags;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use osvm::write_vm_mem;
-use kcore::task::AsThread;
 
 /// Check whether pages are resident in memory.
 ///

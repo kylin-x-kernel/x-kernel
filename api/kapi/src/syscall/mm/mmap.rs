@@ -1,6 +1,10 @@
 use alloc::sync::Arc;
 
 use axerrno::{AxError, AxResult};
+use kcore::{
+    task::AsThread,
+    vfs::{Device, DeviceMmap},
+};
 use kfs::FileBackend;
 use khal::paging::{MappingFlags, PageSize};
 use ktask::current;
@@ -8,10 +12,6 @@ use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::backend::{Backend, SharedPages};
 use osvm::{load_vec, write_vm_mem};
-use kcore::{
-    task::AsThread,
-    vfs::{Device, DeviceMmap},
-};
 
 use crate::file::{File, FileLike};
 

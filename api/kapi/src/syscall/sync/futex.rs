@@ -11,10 +11,6 @@ use linux_raw_sys::general::{
     FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use kcore::{
-    futex::FutexKey,
-    task::{AsThread, get_task},
-};
 
 use crate::time::TimeValueLike;
 

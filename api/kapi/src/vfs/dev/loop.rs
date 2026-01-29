@@ -5,6 +5,7 @@ use core::{
 
 use axerrno::{AxError, AxResult, LinuxError};
 use fs_ng_vfs::{DeviceId, NodeFlags, VfsResult};
+use kcore::vfs::{DeviceMmap, DeviceOps};
 use kfs::FileBackend;
 use ksync::Mutex;
 use linux_raw_sys::{
@@ -12,7 +13,6 @@ use linux_raw_sys::{
     loop_device::{LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info},
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use kcore::vfs::{DeviceMmap, DeviceOps};
 
 use crate::file::get_file_like;
 

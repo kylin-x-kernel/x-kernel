@@ -12,7 +12,6 @@ use ktask::{
     future::{block_on, poll_io},
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use kcore::{task::AsThread, vfs::SimpleFs};
 
 use crate::{
     terminal::{

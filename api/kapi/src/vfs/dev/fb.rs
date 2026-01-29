@@ -8,7 +8,6 @@ use kdriver::prelude::DisplayDriverOps;
 use khal::mem::v2p;
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
-use kcore::vfs::{DeviceMmap, DeviceOps};
 
 // Types from https://github.com/Tangzh33/asterinas
 

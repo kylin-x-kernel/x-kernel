@@ -8,6 +8,7 @@ use core::{
 use axerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use fs_ng_vfs::{DirEntry, FileNode, Location, NodePermission, NodeType, Reference};
+use kcore::{task::AsThread, vfs::Device};
 use kfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
 use ktask::current;
 use linux_raw_sys::general::*;

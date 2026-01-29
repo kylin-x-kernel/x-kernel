@@ -9,8 +9,8 @@ use fs_ng_vfs::{
     Filesystem, NodePermission,
     path::{Path, PathBuf},
 };
-use kfs::{FS_CONTEXT, FsContext};
 pub use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
+use kfs::{FS_CONTEXT, FsContext};
 pub use tmp::MemoryFs;
 
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);

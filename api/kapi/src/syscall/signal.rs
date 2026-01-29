@@ -17,10 +17,6 @@ use linux_raw_sys::general::{
     timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use kcore::task::{
-    AsThread, processes, send_signal_to_process, send_signal_to_process_group,
-    send_signal_to_thread,
-};
 
 use crate::{
     signal::{block_next_signal, check_signals},

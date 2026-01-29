@@ -21,7 +21,6 @@ use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
 };
-use kcore::task::{AsThread, send_signal_to_process};
 
 use super::{FileLike, Kstat};
 use crate::file::{IoDst, IoSrc};

@@ -10,7 +10,6 @@ use linux_raw_sys::general::{
     SCHED_RR, TIMER_ABSTIME, timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr, load_vec, write_vm_mem};
-use kcore::task::{get_process_data, get_process_group};
 
 use crate::time::TimeValueLike;
 
