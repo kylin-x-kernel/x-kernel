@@ -1,5 +1,3 @@
-// Modified from https://github.com/LoongsonLab/StarryOS-LoongArch/blob/main/modules/khal/src/arch/loongarch64/unaligned.rs
-
 use core::{arch::asm, fmt};
 
 use loongArch64::register::badv;

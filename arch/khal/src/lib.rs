@@ -5,7 +5,7 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
-//! [ArceOS] hardware abstraction layer, provides unified APIs for
+//! hardware abstraction layer, provides unified APIs for
 //! platform-specific operations.
 //!
 //! It does the bootstrapping and initialization process for the specified
@@ -29,9 +29,6 @@
 //! - `tls`: Enable kernel space thread-local storage support.
 //! - `rtc`: Enable real-time clock support.
 //! - `uspace`: Enable user space support.
-//!
-//! [ArceOS]: https://github.com/arceos-org/arceos
-//! [cargo test]: https://doc.rust-lang.org/cargo/guide/tests.html
 
 #![no_std]
 #![feature(doc_cfg)]

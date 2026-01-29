@@ -1,5 +1,3 @@
-//! [ArceOS](https://github.com/rcore-os/arceos) network module.
-//!
 //! It provides unified networking primitives for TCP/UDP communication
 //! using various underlying network stacks. Currently, only [smoltcp] is
 //! supported.

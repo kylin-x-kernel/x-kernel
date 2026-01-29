@@ -10,13 +10,13 @@ license = "Apache-2.0"
 
 authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
 homepage = "https://gitee.com/openkylin/x-kernel"
-repository = "https://gitee.com/openkylin/starry-os"
+repository = "https://gitee.com/openkylin/x-kernel"
 keywords = ["kylin-x-kernel", "kernel"]
 categories = ["os", "no-std"]
 documentation = "https://gitee.com/openkylin/x-kernel"
 
 [workspace.dependencies]
-# Arceos Modules
+# Kernel Modules
 kfeat = { path = "api/kfeat", features = [
     "alloc-slab",
     "fp-simd",

@@ -5,8 +5,6 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
-//! [ArceOS](https://github.com/arceos-org/arceos) memory management module.
-
 #![no_std]
 
 #[macro_use]

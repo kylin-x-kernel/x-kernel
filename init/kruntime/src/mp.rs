@@ -29,7 +29,7 @@ pub fn start_secondary_cpus(primary_cpu_id: usize) {
     }
 }
 
-/// The main entry point of the ArceOS runtime for secondary cores.
+/// The main entry point of the runtime for secondary cores.
 ///
 /// It is called from the bootstrapping code in the specific platform crate.
 #[kplat::secondary_main]

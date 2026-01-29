@@ -1,5 +1,3 @@
-//! [ArceOS](https://github.com/arceos-org/arceos) global DMA allocator.
-
 #![no_std]
 
 extern crate alloc;

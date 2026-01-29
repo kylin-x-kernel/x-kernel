@@ -7,7 +7,7 @@
 #   - `APP_FEATURES`: a list of features to be enabled for the Rust app.
 #
 # Outputs:
-#   - `KFEAT`: features to be enabled for ArceOS modules (crate `kfeat`).
+#   - `KFEAT`: features to be enabled for modules (crate `kfeat`).
 #   - `LIB_FEAT`: features to be enabled for the user library (crate `axstd`, `axlibc`).
 #   - `APP_FEAT`: features to be enabled for the Rust app.
 

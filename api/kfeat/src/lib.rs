@@ -1,4 +1,4 @@
-//! Top-level feature selection for [ArceOS].
+//! Top-level feature selection for [X-Kernel].
 //!
 //! # Cargo Features
 //!
@@ -31,7 +31,5 @@
 //!     - `driver-ramdisk`: Use the RAM disk to emulate the block device.
 //!     - `driver-ixgbe`: Enable the Intel 82599 10Gbit NIC driver.
 //!     - `driver-bcm2835-sdhci`: Enable the BCM2835 SDHCI driver (Raspberry Pi SD card).
-//!
-//! [ArceOS]: https://github.com/arceos-org/arceos
 
 #![no_std]

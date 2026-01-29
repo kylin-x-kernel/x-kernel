@@ -94,7 +94,7 @@ fn is_init_ok() -> bool {
     INITED_CPUS.load(Ordering::Acquire) == platconfig::plat::CPU_NUM
 }
 
-/// The main entry point of the ArceOS runtime.
+/// The main entry point of the runtime.
 ///
 /// It is called from the bootstrapping code in the specific platform crate (see
 /// [`kplat::main`]).

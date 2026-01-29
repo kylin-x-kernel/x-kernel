@@ -1,9 +1,4 @@
 # kspin
-
-[![Crates.io](https://img.shields.io/crates/v/kspin)](https://crates.io/crates/kspin)
-[![Docs.rs](https://docs.rs/kspin/badge.svg)](https://docs.rs/kspin)
-[![CI](https://github.com/arceos-org/kspin/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/arceos-org/kspin/actions/workflows/ci.yml)
-
 Kernel-space spinlocks with configurable critical section guards.
 
 ## Features

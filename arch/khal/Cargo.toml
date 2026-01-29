@@ -3,11 +3,11 @@ name = "khal"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Hardware abstraction layer, provides unified APIs for platform-specific operations"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/khal"
-documentation = "https://arceos-org.github.io/arceos/khal/index.html"
+repository.workspace = true
+documentation.workspace = true
+description = "Hardware abstraction layer, provides unified APIs for platform-specific operations"
 
 [features]
 smp = [

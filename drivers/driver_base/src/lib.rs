@@ -1,4 +1,4 @@
-//! Device driver interfaces used by [ArceOS][1]. It provides common traits and
+//! Device driver interfaces used by [1]. It provides common traits and
 //! types for implementing a device driver.
 //!
 //! You have to use this crate with the following crates for corresponding
@@ -8,7 +8,7 @@
 //! - [`kdriver_display`][3]: Common traits and types for graphics display drivers.
 //! - [`net`][4]: Common traits and types for network (NIC) drivers.
 //!
-//! [1]: https://github.com/arceos-org/arceos
+//! [1]:
 //! [2]: ../kdriver_block/index.html
 //! [3]: ../kdriver_display/index.html
 //! [4]: ../net/index.html

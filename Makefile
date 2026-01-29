@@ -14,7 +14,7 @@
 #     - `LD_SCRIPT`: Use a custom linker script file.
 # * App options:
 #     - `A` or `APP`: Path to the application
-#     - `FEATURES`: Features os ArceOS modules to be enabled.
+#     - `FEATURES`: Features os modules to be enabled.
 #     - `APP_FEATURES`: Features of (rust) apps to be enabled.
 # * QEMU options:
 #     - `BLK`: Enable storage devices (virtio-blk)
@@ -30,7 +30,7 @@
 #     - `VFIO_PCI`: PCI device address in the format "bus:dev.func" to passthrough
 #     - `VHOST`: Enable vhost-net for tap backend (only for `NET_DEV=tap`)
 # * Network options:
-#     - `IP`: ArceOS IPv4 address (default is 10.0.2.15 for QEMU user netdev)
+#     - `IP`: IPv4 address (default is 10.0.2.15 for QEMU user netdev)
 #     - `GW`: Gateway IPv4 address (default is 10.0.2.2 for QEMU user netdev)
 
 export DWARF := y

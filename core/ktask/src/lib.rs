@@ -1,5 +1,3 @@
-//! [ArceOS](https://github.com/arceos-org/arceos) task management module.
-//!
 //! This module provides primitives for task management, including task
 //! creation, scheduling, sleeping, termination, etc. The scheduler algorithm
 //! is configurable by cargo features.

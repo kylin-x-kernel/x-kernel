@@ -2,7 +2,7 @@
 Thank you for your Pull Request. Please provide a description above and review
 the requirements below.
 
-Contributing guide: https://github.com/Starry-OS/StarryOS?tab=contributing-ov-file#contributing-guide
+Contributing guide: https://gitee.com/openkylin/x-kernel?tab=contributing-ov-file#contributing-guide
 
 Before submitting the PR, please ensure that your PR satisfies these requirements:
 - Code formatted with `cargo fmt`

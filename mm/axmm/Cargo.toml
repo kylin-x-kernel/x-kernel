@@ -3,11 +3,11 @@ name = "axmm"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "ArceOS virtual memory management module"
+description = "Virtual memory management module"
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/arceos-org/arceos/tree/main/modules/axmm"
-documentation = "https://arceos-org.github.io/arceos/axmm/index.html"
+repository.workspace = true
+documentation.workspace = true
 
 [features]
 default = []
