@@ -11,12 +11,12 @@ use core::{
 use kspin::SpinNoIrq;
 
 use crate::{
-    DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
-    SignalInfo, SignalSet, Signo, MAX_SIGNALS, api::ThreadSignalManager,
+    DefaultSignalAction, MAX_SIGNALS, PendingSignals, SignalAction, SignalActionFlags,
+    SignalDisposition, SignalInfo, SignalSet, Signo, api::ThreadSignalManager,
 };
 
 /// Container for signal actions across all supported signals.
-/// 
+///
 /// This structure manages signal handlers for each signal number,
 /// providing type-safe access through signal number indexing.
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl IndexMut<Signo> for SignalActions {
 }
 
 /// Manages signal handling at the process level.
-/// 
+///
 /// This manager coordinates signal delivery between the process and its threads,
 /// maintains signal actions, and handles process-wide pending signals.
 pub struct ProcessSignalManager {
@@ -65,7 +65,7 @@ pub struct ProcessSignalManager {
 
 impl ProcessSignalManager {
     /// Creates a new process signal manager.
-    /// 
+    ///
     /// # Arguments
     /// * `actions` - Shared signal actions configuration
     /// * `default_restorer` - Default signal handler restore function address
@@ -80,21 +80,21 @@ impl ProcessSignalManager {
     }
 
     /// Dequeues the next pending signal that matches the given mask.
-    /// 
+    ///
     /// # Arguments
     /// * `mask` - Signal mask to filter available signals
-    /// 
+    ///
     /// # Returns
     /// The next available signal info, if any
     pub(crate) fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
         let mut pending_guard = self.pending.lock();
         let signal = pending_guard.dequeue_signal(mask);
-        
+
         // Update fast path indicator
         if pending_guard.set.is_empty() {
             self.has_pending.store(false, Ordering::Release);
         }
-        
+
         signal
     }
 
@@ -129,7 +129,7 @@ impl ProcessSignalManager {
     #[must_use]
     pub fn send_signal(&self, sig: SignalInfo) -> Option<u32> {
         let signo = sig.signo();
-        
+
         // Check if signal should be ignored
         if self.signal_ignored(signo) {
             return None;
@@ -139,15 +139,15 @@ impl ProcessSignalManager {
         if self.pending.lock().put_signal(sig) {
             self.has_pending.store(true, Ordering::Release);
         }
-        
+
         // Find a thread that can handle this signal
         self.find_target_thread(signo)
     }
-    
+
     /// Finds a suitable thread to handle the given signal.
     fn find_target_thread(&self, signo: Signo) -> Option<u32> {
         let mut target_tid = None;
-        
+
         self.children.lock().retain(|(tid, thread_weak)| {
             if let Some(thread) = thread_weak.upgrade() {
                 if target_tid.is_none() && !thread.signal_blocked(signo) {
@@ -158,7 +158,7 @@ impl ProcessSignalManager {
                 false // Remove dead thread reference
             }
         });
-        
+
         target_tid
     }
 

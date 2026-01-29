@@ -8,11 +8,11 @@ use kprocess::Pid;
 use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};
 use linux_raw_sys::general::*;
+use signal::Signo;
 use starry_core::{
     mm::copy_from_kernel,
     task::{AsThread, ProcessData, Thread, add_task_to_table},
 };
-use signal::Signo;
 use starry_vm::VmMutPtr;
 
 use crate::{

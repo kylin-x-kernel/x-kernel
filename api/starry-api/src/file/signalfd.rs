@@ -11,9 +11,9 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
+use signal::{SignalInfo, SignalSet};
 use spin::RwLock;
 use starry_core::task::AsThread;
-use signal::{SignalInfo, SignalSet};
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::file::{FileLike, IoDst, IoSrc};

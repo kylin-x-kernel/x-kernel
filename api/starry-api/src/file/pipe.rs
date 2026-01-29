@@ -18,8 +18,8 @@ use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
 };
-use starry_core::task::{AsThread, send_signal_to_process};
 use signal::{SignalInfo, Signo};
+use starry_core::task::{AsThread, send_signal_to_process};
 use starry_vm::VmMutPtr;
 
 use super::{FileLike, Kstat};

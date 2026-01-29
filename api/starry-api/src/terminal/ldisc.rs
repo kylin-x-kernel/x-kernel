@@ -16,8 +16,8 @@ use ringbuf::{
     CachingCons, CachingProd,
     traits::{Consumer, Observer, Producer, Split},
 };
-use starry_core::task::send_signal_to_process_group;
 use signal::SignalInfo;
+use starry_core::task::send_signal_to_process_group;
 
 use crate::terminal::{Terminal, termios::Termios2};
 

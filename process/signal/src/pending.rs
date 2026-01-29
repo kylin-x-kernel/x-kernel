@@ -1,10 +1,10 @@
 use alloc::{boxed::Box, collections::vec_deque::VecDeque};
 use core::array;
 
-use crate::{SignalInfo, SignalSet, MAX_SIGNALS};
+use crate::{MAX_SIGNALS, SignalInfo, SignalSet};
 
 /// Queue for managing pending signals awaiting delivery.
-/// 
+///
 /// This structure maintains separate handling for standard signals (1-31)
 /// and real-time signals (32-64), as they have different queuing semantics.
 /// Standard signals can only have one pending instance, while real-time

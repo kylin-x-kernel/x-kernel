@@ -27,7 +27,7 @@ pub enum DefaultSignalAction {
 }
 
 /// Operating system actions to take when a signal is delivered.
-/// 
+///
 /// These represent the actions the kernel should take after signal
 /// processing, distinct from user-defined signal handlers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
