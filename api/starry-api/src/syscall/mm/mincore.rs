@@ -12,8 +12,8 @@ use axerrno::{AxError, AxResult};
 use khal::paging::MappingFlags;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use osvm::write_vm_mem;
 use starry_core::task::AsThread;
-use starry_vm::vm_write_slice;
 
 /// Check whether pages are resident in memory.
 ///
@@ -28,7 +28,7 @@ use starry_vm::vm_write_slice;
 /// # Return Value
 /// * `Ok(0)` on success
 /// * `Err(EAGAIN)` - Kernel is temporarily out of resources (not implemented in StarryOS)
-/// * `Err(EFAULT)` - vec points to an invalid address (dispatch_irqd by vm_write_slice)
+/// * `Err(EFAULT)` - vec points to an invalid address (dispatch_irqd by write_vm_mem)
 /// * `Err(EINVAL)` - addr is not a multiple of the page size
 /// * `Err(ENOMEM)` - length is greater than (TASK_SIZE - addr), or negative length, or `addr` to `addr`+`length` contained unmapped memory
 ///
@@ -50,7 +50,7 @@ pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> AxResult<isize> 
         return Err(AxError::InvalidInput);
     }
 
-    // EFAULT: vec must not be null (basic check, vm_write_slice will do full validation)
+    // EFAULT: vec must not be null (basic check, write_vm_mem will do full validation)
     if vec.is_null() {
         return Err(AxError::BadAddress);
     }
@@ -111,8 +111,8 @@ pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> AxResult<isize> 
     }
 
     // EFAULT: Write result to user space
-    // vm_write_slice will return EFAULT if vec is invalid
-    vm_write_slice(vec, result.as_slice())?;
+    // write_vm_mem will return EFAULT if vec is invalid
+    write_vm_mem(vec, result.as_slice())?;
 
     Ok(0)
 }

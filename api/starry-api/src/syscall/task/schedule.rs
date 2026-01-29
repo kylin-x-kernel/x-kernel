@@ -8,8 +8,8 @@ use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, PRIO_PGRP, PRIO_PROCESS, PRIO_USER,
     SCHED_RR, TIMER_ABSTIME, timespec,
 };
+use osvm::{VirtMutPtr, VirtPtr, load_vec, write_vm_mem};
 use starry_core::task::{get_process_data, get_process_group};
-use starry_vm::{VmMutPtr, VmPtr, vm_load, vm_write_slice};
 
 use crate::time::TimeValueLike;
 
@@ -33,15 +33,15 @@ fn sleep_impl(clock: impl Fn() -> TimeValue, dur: TimeValue) -> TimeValue {
 /// Sleep some nanoseconds
 pub fn sys_nanosleep(req: *const timespec, rem: *mut timespec) -> AxResult<isize> {
     // FIXME: AnyBitPattern
-    let req = unsafe { req.vm_read_uninit()?.assume_init() }.try_into_time_value()?;
+    let req = unsafe { req.read_uninit()?.assume_init() }.try_into_time_value()?;
     debug!("sys_nanosleep <= req: {req:?}");
 
     let actual = sleep_impl(khal::time::monotonic_time, req);
 
     if let Some(diff) = req.checked_sub(actual) {
         debug!("sys_nanosleep => rem: {diff:?}");
-        if let Some(rem) = rem.nullable() {
-            rem.vm_write(timespec::from_time_value(diff))?;
+        if let Some(rem) = rem.check_non_null() {
+            rem.write_vm(timespec::from_time_value(diff))?;
         }
         Err(AxError::Interrupted)
     } else {
@@ -64,7 +64,7 @@ pub fn sys_clock_nanosleep(
         }
     };
 
-    let req = unsafe { req.vm_read_uninit()?.assume_init() }.try_into_time_value()?;
+    let req = unsafe { req.read_uninit()?.assume_init() }.try_into_time_value()?;
     debug!("sys_clock_nanosleep <= clock_id: {clock_id}, flags: {flags}, req: {req:?}");
 
     let dur = if flags & TIMER_ABSTIME != 0 {
@@ -77,8 +77,8 @@ pub fn sys_clock_nanosleep(
 
     if let Some(diff) = dur.checked_sub(actual) {
         debug!("sys_clock_nanosleep => rem: {diff:?}");
-        if let Some(rem) = rem.nullable() {
-            rem.vm_write(timespec::from_time_value(diff))?;
+        if let Some(rem) = rem.check_non_null() {
+            rem.write_vm(timespec::from_time_value(diff))?;
         }
         Err(AxError::Interrupted)
     } else {
@@ -99,7 +99,7 @@ pub fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, user_mask: *mut u8) ->
     let mask = current().cpumask();
     let mask_bytes = mask.as_bytes();
 
-    vm_write_slice(user_mask, mask_bytes)?;
+    write_vm_mem(user_mask, mask_bytes)?;
 
     Ok(mask_bytes.len() as _)
 }
@@ -110,7 +110,7 @@ pub fn sys_sched_setaffinity(
     user_mask: *const u8,
 ) -> AxResult<isize> {
     let size = cpusetsize.min(platconfig::plat::CPU_NUM.div_ceil(8));
-    let user_mask = vm_load(user_mask, size)?;
+    let user_mask = load_vec(user_mask, size)?;
     let mut cpu_mask = KCpuMask::new();
 
     for i in 0..(size * 8).min(platconfig::plat::CPU_NUM) {

@@ -10,8 +10,8 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::{task::AsThread, vfs::SimpleFs};
-use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     terminal::{
@@ -107,22 +107,22 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
         use linux_raw_sys::ioctl::*;
         match cmd {
             TCGETS => {
-                (arg as *mut Termios).vm_write(*self.terminal.termios.lock().as_ref().deref())?;
+                (arg as *mut Termios).write_vm(*self.terminal.termios.lock().as_ref().deref())?;
             }
             TCGETS2 => {
-                (arg as *mut Termios2).vm_write(*self.terminal.termios.lock().as_ref())?;
+                (arg as *mut Termios2).write_vm(*self.terminal.termios.lock().as_ref())?;
             }
             TCSETS | TCSETSF | TCSETSW => {
                 // TODO: drain output?
                 *self.terminal.termios.lock() =
-                    Arc::new(Termios2::new((arg as *const Termios).vm_read()?));
+                    Arc::new(Termios2::new((arg as *const Termios).read_vm()?));
                 if cmd == TCSETSF {
                     self.ldisc.lock().drain_input();
                 }
             }
             TCSETS2 | TCSETSF2 | TCSETSW2 => {
                 // TODO: drain output?
-                *self.terminal.termios.lock() = Arc::new((arg as *const Termios2).vm_read()?);
+                *self.terminal.termios.lock() = Arc::new((arg as *const Termios2).read_vm()?);
                 if cmd == TCSETSF2 {
                     self.ldisc.lock().drain_input();
                 }
@@ -133,7 +133,7 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
                     .job_control
                     .foreground()
                     .ok_or(AxError::NoSuchProcess)?;
-                (arg as *mut u32).vm_write(foreground.pgid())?;
+                (arg as *mut u32).write_vm(foreground.pgid())?;
             }
             TIOCSPGRP => {
                 let curr = current();
@@ -142,14 +142,14 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
                     .set_foreground(&curr.as_thread().proc_data.proc.group())?;
             }
             TIOCGWINSZ => {
-                (arg as *mut WindowSize).vm_write(*self.terminal.window_size.lock())?;
+                (arg as *mut WindowSize).write_vm(*self.terminal.window_size.lock())?;
             }
             TIOCSWINSZ => {
-                *self.terminal.window_size.lock() = (arg as *const WindowSize).vm_read()?;
+                *self.terminal.window_size.lock() = (arg as *const WindowSize).read_vm()?;
             }
             TIOCSPTLCK => {}
             TIOCGPTN => {
-                (arg as *mut u32).vm_write(self.pty_number())?;
+                (arg as *mut u32).write_vm(self.pty_number())?;
             }
             TIOCSCTTY => {
                 self.this

@@ -15,12 +15,13 @@ use ktask::{
 };
 use linux_raw_sys::{general::S_IFIFO, ioctl::FIONREAD};
 use memaddr::PAGE_SIZE_4K;
+use osvm::VirtMutPtr;
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
 };
 use starry_core::task::{AsThread, send_signal_to_process};
-use starry_vm::VmMutPtr;
+use starry_signal::{SignalInfo, Signo};
 
 use super::{FileLike, Kstat};
 use crate::file::{IoDst, IoSrc};
@@ -201,7 +202,7 @@ impl FileLike for Pipe {
     fn ioctl(&self, cmd: u32, arg: usize) -> AxResult<usize> {
         match cmd {
             FIONREAD => {
-                (arg as *mut u32).vm_write(self.shared.buffer.lock().occupied_len() as u32)?;
+                (arg as *mut u32).write_vm(self.shared.buffer.lock().occupied_len() as u32)?;
                 Ok(0)
             }
             _ => Err(AxError::NotATty),

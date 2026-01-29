@@ -11,8 +11,9 @@ use ktask::{
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::task::AsThread;
-use starry_vm::{VmMutPtr, VmPtr};
+use starry_process::{Pid, Process};
 
 bitflags! {
     #[derive(Debug)]
@@ -93,8 +94,8 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
             if !options.contains(WaitOptions::WNOWAIT) {
                 child.free();
             }
-            if let Some(exit_code) = exit_code.nullable() {
-                exit_code.vm_write(child.exit_code())?;
+            if let Some(exit_code) = exit_code.check_non_null() {
+                exit_code.write_vm(child.exit_code())?;
             }
             Ok(Some(child.pid() as _))
         } else if options.contains(WaitOptions::WNOHANG) {

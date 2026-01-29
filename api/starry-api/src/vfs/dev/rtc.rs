@@ -3,7 +3,7 @@ use core::{any::Any, ffi::c_int};
 use chrono::{Datelike, Timelike};
 use fs_ng_vfs::{DeviceId, NodeFlags, VfsError, VfsResult};
 use linux_raw_sys::ioctl::RTC_RD_TIME;
-use starry_vm::VmMutPtr;
+use osvm::VirtMutPtr;
 
 use crate::vfs::DeviceOps;
 
@@ -41,7 +41,7 @@ impl DeviceOps for Rtc {
             RTC_RD_TIME => {
                 let wall =
                     chrono::DateTime::from_timestamp_nanos(khal::time::wall_time_nanos() as _);
-                (arg as *mut rtc_time).vm_write(rtc_time {
+                (arg as *mut rtc_time).write_vm(rtc_time {
                     tm_sec: wall.second() as _,
                     tm_min: wall.minute() as _,
                     tm_hour: wall.hour() as _,

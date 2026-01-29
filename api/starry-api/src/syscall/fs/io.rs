@@ -11,7 +11,7 @@ use kpoll::{IoEvents, Pollable};
 use ktask::current;
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
-use starry_vm::{VmMutPtr, VmPtr};
+use osvm::{VmMutPtr, VmPtr};
 
 use crate::{
     file::{File, FileLike, Pipe, get_file_like},
@@ -240,9 +240,9 @@ impl SendFile {
         match self {
             SendFile::Direct(file) => file.read(&mut buf),
             SendFile::Offset(file, offset) => {
-                let off = offset.vm_read()?;
+                let off = offset.read_vm()?;
                 let bytes_read = file.inner().read_at(&mut buf, off)?;
-                offset.vm_write(off + bytes_read as u64)?;
+                offset.write_vm(off + bytes_read as u64)?;
                 Ok(bytes_read)
             }
         }
@@ -252,9 +252,9 @@ impl SendFile {
         match self {
             SendFile::Direct(file) => file.write(&mut buf),
             SendFile::Offset(file, offset) => {
-                let off = offset.vm_read()?;
+                let off = offset.read_vm()?;
                 let bytes_written = file.inner().write_at(buf, off)?;
-                offset.vm_write(off + bytes_written as u64)?;
+                offset.write_vm(off + bytes_written as u64)?;
                 Ok(bytes_written)
             }
         }
@@ -302,7 +302,7 @@ pub fn sys_sendfile(out_fd: c_int, in_fd: c_int, offset: *mut u64, len: usize) -
     );
 
     let src = if !offset.is_null() {
-        if offset.vm_read()? > u32::MAX as u64 {
+        if offset.read_vm()? > u32::MAX as u64 {
             return Err(AxError::InvalidInput);
         }
         SendFile::Offset(File::from_fd(in_fd)?, offset)
@@ -377,7 +377,7 @@ pub fn sys_splice(
     }
 
     let src = if !off_in.is_null() {
-        if off_in.vm_read()? < 0 {
+        if off_in.read_vm()? < 0 {
             return Err(AxError::InvalidInput);
         }
         SendFile::Offset(File::from_fd(fd_in)?, off_in.cast())
@@ -397,7 +397,7 @@ pub fn sys_splice(
     };
 
     let dst = if !off_out.is_null() {
-        if off_out.vm_read()? < 0 {
+        if off_out.read_vm()? < 0 {
             return Err(AxError::InvalidInput);
         }
         SendFile::Offset(File::from_fd(fd_out)?, off_out.cast())

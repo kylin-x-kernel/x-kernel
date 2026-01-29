@@ -1,0 +1,17 @@
+[package]
+name = "osvm"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["alloc"]
+alloc = []
+
+[dependencies]
+axerrno = { workspace = true }
+bytemuck = { version = "1.24", features = [
+    "align_offset",
+    "const_zeroed",
+    "zeroable_maybe_uninit",
+] }
+extern-trait = "0.3"

@@ -15,8 +15,8 @@ use khal::{
 use kio::prelude::*;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use osvm::{load_vec, load_vec_until_null, read_vm_mem, write_vm_mem};
 use starry_core::{mm::access_user_memory, task::AsThread};
-use starry_vm::{vm_load, vm_load_until_nul, vm_read_slice, vm_write_slice};
 
 fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> AxResult<()> {
     let align = layout.align();
@@ -255,13 +255,13 @@ fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool 
 
 pub fn vm_load_string(ptr: *const c_char) -> AxResult<String> {
     #[allow(clippy::unnecessary_cast)]
-    let bytes = vm_load_until_nul(ptr as *const u8)?;
+    let bytes = load_vec_until_null(ptr as *const u8)?;
     String::from_utf8(bytes).map_err(|_| AxError::IllegalBytes)
 }
 
 pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> AxResult<String> {
     #[allow(clippy::unnecessary_cast)]
-    let bytes = vm_load(ptr as *const u8, len)?;
+    let bytes = load_vec(ptr as *const u8, len)?;
     String::from_utf8(bytes).map_err(|_| AxError::IllegalBytes)
 }
 
@@ -292,7 +292,7 @@ impl Read for VmBytes {
     /// Reads bytes from the VM's memory into the provided buffer.
     fn read(&mut self, buf: &mut [u8]) -> kio::Result<usize> {
         let len = self.len.min(buf.len());
-        vm_read_slice(self.ptr, unsafe {
+        read_vm_mem(self.ptr, unsafe {
             transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buf[..len])
         })?;
         self.ptr = self.ptr.wrapping_add(len);
@@ -334,7 +334,7 @@ impl Write for VmBytesMut {
     /// Writes bytes from the provided buffer into the VM's memory.
     fn write(&mut self, buf: &[u8]) -> kio::Result<usize> {
         let len = self.len.min(buf.len());
-        vm_write_slice(self.ptr, &buf[..len])?;
+        write_vm_mem(self.ptr, &buf[..len])?;
         self.ptr = self.ptr.wrapping_add(len);
         self.len -= len;
         Ok(len)

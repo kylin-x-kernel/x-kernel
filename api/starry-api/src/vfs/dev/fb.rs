@@ -6,8 +6,8 @@ use fs_ng_vfs::{NodeFlags, VfsError, VfsResult};
 use kdriver::prelude::DisplayDriverOps;
 use khal::mem::v2p;
 use memaddr::{PhysAddrRange, VirtAddr};
+use osvm::VirtMutPtr;
 use starry_core::vfs::{DeviceMmap, DeviceOps};
-use starry_vm::VmMutPtr;
 
 // Types from https://github.com/Tangzh33/asterinas
 
@@ -136,7 +136,7 @@ impl DeviceOps for FrameBuffer {
                 let info = fbdevice::fb_info();
                 let line_length = (info.fb_size / info.height as usize) as u32;
                 let bpp = line_length / info.width;
-                (arg as *mut VarScreenInfo).vm_write(VarScreenInfo {
+                (arg as *mut VarScreenInfo).write_vm(VarScreenInfo {
                     xres: info.width,
                     yres: info.height,
                     xres_virtual: info.width,
@@ -190,7 +190,7 @@ impl DeviceOps for FrameBuffer {
             // FBIOGET_FSCREENINFO
             0x4602 => {
                 let info = fbdevice::fb_info();
-                (arg as *mut FixScreenInfo).vm_write(FixScreenInfo {
+                (arg as *mut FixScreenInfo).write_vm(FixScreenInfo {
                     id: *b"Virtio Framebuf\0",
                     smem_start: info.fb_base_vaddr as u64,
                     smem_len: info.fb_size as u32,

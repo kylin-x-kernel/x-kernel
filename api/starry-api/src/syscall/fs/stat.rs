@@ -6,7 +6,7 @@ use kfs::FS_CONTEXT;
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
 };
-use starry_vm::{VmMutPtr, VmPtr};
+use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::{
     file::{File, FileLike, resolve_at},
@@ -46,12 +46,12 @@ pub fn sys_fstatat(
     statbuf: *mut stat,
     flags: u32,
 ) -> AxResult<isize> {
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = path.check_non_null().map(vm_load_string).transpose()?;
 
     debug!("sys_fstatat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     let loc = resolve_at(dirfd, path.as_deref(), flags)?;
-    statbuf.vm_write(loc.stat()?.into())?;
+    statbuf.write_vm(loc.stat()?.into())?;
 
     Ok(0)
 }
@@ -90,10 +90,10 @@ pub fn sys_statx(
     //        below), then the target file is the one referred to by the
     //        file descriptor dirfd.
 
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = path.check_non_null().map(vm_load_string).transpose()?;
     debug!("sys_statx <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
-    statxbuf.vm_write(resolve_at(dirfd, path.as_deref(), flags)?.stat()?.into())?;
+    statxbuf.write_vm(resolve_at(dirfd, path.as_deref(), flags)?.stat()?.into())?;
 
     Ok(0)
 }
@@ -106,7 +106,7 @@ pub fn sys_access(path: *const c_char, mode: u32) -> AxResult<isize> {
 }
 
 pub fn sys_faccessat2(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) -> AxResult<isize> {
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = path.check_non_null().map(vm_load_string).transpose()?;
     debug!("sys_faccessat2 <= dirfd: {dirfd}, path: {path:?}, mode: {mode}, flags: {flags}");
 
     let file = resolve_at(dirfd, path.as_deref(), flags)?;
@@ -157,7 +157,7 @@ pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_statfs <= path: {path:?}");
 
-    buf.vm_write(statfs(
+    buf.write_vm(statfs(
         &FS_CONTEXT
             .lock()
             .resolve(path)?
@@ -170,6 +170,6 @@ pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> AxResult<isize> {
 pub fn sys_fstatfs(fd: i32, buf: *mut statfs) -> AxResult<isize> {
     debug!("sys_fstatfs <= fd: {fd}");
 
-    buf.vm_write(statfs(File::from_fd(fd)?.inner().location())?)?;
+    buf.write_vm(statfs(File::from_fd(fd)?.inner().location())?)?;
     Ok(0)
 }

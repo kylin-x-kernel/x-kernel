@@ -3,8 +3,8 @@ use core::ffi::c_char;
 use axerrno::{AxError, AxResult};
 use ktask::current;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
+use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
 use starry_core::task::{AsThread, get_process_data};
-use starry_vm::{VmMutPtr, VmPtr, vm_write_slice};
 
 use crate::mm::vm_load_string;
 
@@ -12,10 +12,10 @@ const CAPABILITY_VERSION_3: u32 = 0x20080522;
 
 fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> AxResult<()> {
     // FIXME: AnyBitPattern
-    let mut header = unsafe { header_ptr.vm_read_uninit()?.assume_init() };
+    let mut header = unsafe { header_ptr.read_uninit()?.assume_init() };
     if header.version != CAPABILITY_VERSION_3 {
         header.version = CAPABILITY_VERSION_3;
-        header_ptr.vm_write(header)?;
+        header_ptr.write_vm(header)?;
         return Err(AxError::InvalidInput);
     }
     let _ = get_process_data(header.pid as u32)?;
@@ -28,7 +28,7 @@ pub fn sys_capget(
 ) -> AxResult<isize> {
     validate_cap_header(header)?;
 
-    data.vm_write(__user_cap_data_struct {
+    data.write_vm(__user_cap_data_struct {
         effective: u32::MAX,
         permitted: u32::MAX,
         inheritable: u32::MAX,
@@ -103,7 +103,7 @@ pub fn sys_prctl(
             let len = name.len().min(15);
             let mut buf = [0; 16];
             buf[..len].copy_from_slice(&name.as_bytes()[..len]);
-            vm_write_slice(arg2 as _, &buf)?;
+            write_vm_mem(arg2 as _, &buf)?;
         }
         PR_SET_SECCOMP => {}
         PR_MCE_KILL => {}

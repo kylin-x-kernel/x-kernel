@@ -7,7 +7,7 @@
 use alloc::{boxed::Box, vec};
 use core::mem::{MaybeUninit, size_of, transmute};
 
-use starry_vm::{VmError, vm_read_slice, vm_write_slice};
+use osvm::{MemError, read_vm_mem, write_vm_mem};
 use tee_raw_sys::{libc_compat::size_t, *};
 
 use super::TeeResult;
@@ -18,11 +18,11 @@ pub(crate) fn copy_from_user(kaddr: &mut [u8], uaddr: &[u8], len: size_t) -> Tee
             kaddr[..len].copy_from_slice(&uaddr[..len]);
             Ok(())
         } else {
-            vm_read_slice(uaddr.as_ptr(), unsafe {
+            read_vm_mem(uaddr.as_ptr(), unsafe {
                 transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut kaddr[..len])
             })
             .map_err(|error| match error {
-                VmError::BadAddress => TEE_ERROR_BAD_PARAMETERS,
+                MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
                 _ => TEE_ERROR_GENERIC,
             })?;
             Ok(())
@@ -36,9 +36,9 @@ pub(crate) fn copy_to_user(uaddr: &mut [u8], kaddr: &[u8], len: size_t) -> TeeRe
             uaddr[..len].copy_from_slice(&kaddr[..len]);
             Ok(())
         } else {
-            vm_write_slice(uaddr.as_mut_ptr(), kaddr)
+            write_vm_mem(uaddr.as_mut_ptr(), kaddr)
             .map_err(|error| match error {
-                VmError::BadAddress => TEE_ERROR_BAD_PARAMETERS,
+                MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
                 _ => TEE_ERROR_GENERIC,
             })?;
             Ok(())

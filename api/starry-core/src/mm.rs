@@ -18,8 +18,8 @@ use ksync::Mutex;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::{AddrSpace, backend::Backend};
+use osvm::{MemError, MemResult, VirtMemIo};
 use ouroboros::self_referencing;
-use starry_vm::{VmError, VmIo, VmResult};
 
 use crate::{
     config::{USER_SPACE_BASE, USER_SPACE_SIZE},
@@ -365,41 +365,41 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
 struct Vm(IrqSave);
 
 /// Briefly checks if the given memory region is valid user memory.
-pub fn check_access(start: usize, len: usize) -> VmResult {
+pub fn check_access(start: usize, len: usize) -> MemResult {
     const USER_SPACE_END: usize = USER_SPACE_BASE + USER_SPACE_SIZE;
     let ok = (USER_SPACE_BASE..USER_SPACE_END).contains(&start) && (USER_SPACE_END - start) >= len;
     if unlikely(!ok) {
-        Err(VmError::AccessDenied)
+        Err(MemError::NoAccess)
     } else {
         Ok(())
     }
 }
 
 #[extern_trait]
-unsafe impl VmIo for Vm {
+unsafe impl VirtMemIo for Vm {
     fn new() -> Self {
         Self(IrqSave::new())
     }
 
-    fn read(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> VmResult {
+    fn read_mem(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> MemResult {
         check_access(start, buf.len())?;
         let failed_at = access_user_memory(|| unsafe {
             user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
         });
         if unlikely(failed_at != 0) {
-            Err(VmError::AccessDenied)
+            Err(MemError::NoAccess)
         } else {
             Ok(())
         }
     }
 
-    fn write(&mut self, start: usize, buf: &[u8]) -> VmResult {
+    fn write_mem(&mut self, start: usize, buf: &[u8]) -> MemResult {
         check_access(start, buf.len())?;
         let failed_at = access_user_memory(|| unsafe {
             user_copy(start as _, buf.as_ptr() as *const _, buf.len())
         });
         if unlikely(failed_at != 0) {
-            Err(VmError::AccessDenied)
+            Err(MemError::NoAccess)
         } else {
             Ok(())
         }

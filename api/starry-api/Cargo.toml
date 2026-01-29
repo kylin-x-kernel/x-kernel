@@ -68,7 +68,7 @@ slab.workspace = true
 spin.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
-starry-vm.workspace = true
+osvm.workspace = true
 linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
 

@@ -3,8 +3,8 @@ use khal::time::TimeValue;
 use kprocess::Pid;
 use ktask::current;
 use linux_raw_sys::general::{__kernel_old_timeval, RLIM_NLIMITS, rlimit64, rusage};
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::task::{AsThread, Thread, get_process_data, get_task};
-use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::time::TimeValueLike;
 
@@ -19,17 +19,17 @@ pub fn sys_prlimit64(
     }
 
     let proc_data = get_process_data(pid)?;
-    if let Some(old_limit) = old_limit.nullable() {
+    if let Some(old_limit) = old_limit.check_non_null() {
         let limit = &proc_data.rlim.read()[resource];
-        old_limit.vm_write(rlimit64 {
+        old_limit.write_vm(rlimit64 {
             rlim_cur: limit.current,
             rlim_max: limit.max,
         })?;
     }
 
-    if let Some(new_limit) = new_limit.nullable() {
+    if let Some(new_limit) = new_limit.check_non_null() {
         // FIXME: AnyBitPattern
-        let new_limit = unsafe { new_limit.vm_read_uninit()?.assume_init() };
+        let new_limit = unsafe { new_limit.read_uninit()?.assume_init() };
         if new_limit.rlim_cur > new_limit.rlim_max {
             return Err(AxError::InvalidInput);
         }
@@ -118,7 +118,7 @@ pub fn sys_getrusage(who: i32, usage: *mut rusage) -> AxResult<isize> {
         RUSAGE_THREAD => Rusage::from_thread(thr),
         _ => return Err(AxError::InvalidInput),
     };
-    usage.vm_write(result.into())?;
+    usage.write_vm(result.into())?;
 
     Ok(0)
 }

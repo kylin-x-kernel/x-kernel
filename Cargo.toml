@@ -60,7 +60,7 @@ ksignal = { path = "process/ksignal" }
 starry-core = { path = "api/starry-core" }
 starry-api = { path = "api/starry-api" }
 kprocess = { path = "process/kprocess" }
-starry-vm = { path = "process/starry-vm" }
+osvm = { path = "process/osvm" }
 
 # Platform Abstraction Layer
 kplat = { path = "platforms/kplat" }

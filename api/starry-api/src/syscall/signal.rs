@@ -12,11 +12,11 @@ use linux_raw_sys::general::{
     MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, kernel_sigaction, siginfo,
     timespec,
 };
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::task::{
     AsThread, processes, send_signal_to_process, send_signal_to_process_group,
     send_signal_to_thread,
 };
-use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     signal::{block_next_signal, check_signals},
@@ -46,12 +46,12 @@ pub fn sys_rt_sigprocmask(
     let sig = &curr.as_thread().signal;
     let old = sig.blocked();
 
-    if let Some(oldset) = oldset.nullable() {
-        oldset.vm_write(old)?;
+    if let Some(oldset) = oldset.check_non_null() {
+        oldset.write_vm(old)?;
     }
 
-    if let Some(set) = set.nullable() {
-        let set = unsafe { set.vm_read_uninit()?.assume_init() };
+    if let Some(set) = set.check_non_null() {
+        let set = unsafe { set.read_uninit()?.assume_init() };
 
         let set = match how as u32 {
             SIG_BLOCK => old | set,
@@ -82,11 +82,11 @@ pub fn sys_rt_sigaction(
 
     let curr = current();
     let mut actions = curr.as_thread().proc_data.signal.actions.lock();
-    if let Some(oldact) = oldact.nullable() {
-        oldact.vm_write(actions[signo].clone().into())?;
+    if let Some(oldact) = oldact.check_non_null() {
+        oldact.write_vm(actions[signo].clone().into())?;
     }
-    if let Some(act) = act.nullable() {
-        let act = unsafe { act.vm_read_uninit()?.assume_init() }.into();
+    if let Some(act) = act.check_non_null() {
+        let act = unsafe { act.read_uninit()?.assume_init() }.into();
         debug!("sys_rt_sigaction <= signo: {signo:?}, act: {act:?}");
         actions[signo] = act;
     }
@@ -95,7 +95,7 @@ pub fn sys_rt_sigaction(
 
 pub fn sys_rt_sigpending(set: *mut SignalSet, sigsetsize: usize) -> AxResult<isize> {
     check_sigset_size(sigsetsize)?;
-    set.vm_write(current().as_thread().signal.pending())?;
+    set.write_vm(current().as_thread().signal.pending())?;
     Ok(0)
 }
 
@@ -168,7 +168,7 @@ pub(crate) fn make_queue_signal_info(
     }
 
     let signo = parse_signo(signo)?;
-    let mut sig = unsafe { sig.vm_read_uninit()?.assume_init() };
+    let mut sig = unsafe { sig.read_uninit()?.assume_init() };
     sig.set_signo(signo);
     if current().as_thread().proc_data.proc.pid() != tgid
         && (sig.code() >= 0 || sig.code() == SI_TKILL)
@@ -220,10 +220,10 @@ pub fn sys_rt_sigtimedwait(
 ) -> AxResult<isize> {
     check_sigset_size(sigsetsize)?;
 
-    let set = unsafe { set.vm_read_uninit()?.assume_init() };
+    let set = unsafe { set.read_uninit()?.assume_init() };
 
-    let timeout = if let Some(ts) = timeout.nullable() {
-        let ts = unsafe { ts.vm_read_uninit()?.assume_init() };
+    let timeout = if let Some(ts) = timeout.check_non_null() {
+        let ts = unsafe { ts.read_uninit()?.assume_init() };
         Some(ts.try_into_time_value()?)
     } else {
         None
@@ -261,8 +261,8 @@ pub fn sys_rt_sigtimedwait(
         return Ok(0);
     };
 
-    if let Some(info) = info.nullable() {
-        info.vm_write(sig.0)?;
+    if let Some(info) = info.check_non_null() {
+        info.write_vm(sig.0)?;
     }
 
     Ok(sig.signo() as _)
@@ -278,7 +278,7 @@ pub fn sys_rt_sigsuspend(
     let curr = current();
     let thr = curr.as_thread();
 
-    let set = unsafe { set.vm_read_uninit()?.assume_init() };
+    let set = unsafe { set.read_uninit()?.assume_init() };
     let old_blocked = thr.signal.set_blocked(set);
 
     // sigsuspend always returns -EINTR when a signal is caught
@@ -301,12 +301,12 @@ pub fn sys_sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> AxRe
     let curr = current();
     let sig = &curr.as_thread().signal;
 
-    if let Some(old_ss) = old_ss.nullable() {
-        old_ss.vm_write(sig.stack())?;
+    if let Some(old_ss) = old_ss.check_non_null() {
+        old_ss.write_vm(sig.stack())?;
     }
 
-    if let Some(ss) = ss.nullable() {
-        let ss = unsafe { ss.vm_read_uninit()?.assume_init() };
+    if let Some(ss) = ss.check_non_null() {
+        let ss = unsafe { ss.read_uninit()?.assume_init() };
         if ss.size <= MINSIGSTKSZ as usize {
             return Err(AxError::NoMemory);
         }

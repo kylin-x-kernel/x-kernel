@@ -7,11 +7,11 @@ use ktask::current;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::backend::{Backend, SharedPages};
+use osvm::{load_vec, write_vm_mem};
 use starry_core::{
     task::AsThread,
     vfs::{Device, DeviceMmap},
 };
-use starry_vm::{vm_load, vm_write_slice};
 
 use crate::file::{File, FileLike};
 
@@ -309,8 +309,8 @@ pub fn sys_mremap(addr: usize, old_size: usize, new_size: usize, flags: u32) -> 
     )? as usize;
 
     let copy_len = new_size.min(old_size);
-    let data = vm_load(addr.as_ptr(), copy_len)?;
-    vm_write_slice(new_addr as *mut u8, &data)?;
+    let data = load_vec(addr.as_ptr(), copy_len)?;
+    write_vm_mem(new_addr as *mut u8, &data)?;
 
     sys_munmap(addr.as_usize(), old_size)?;
 

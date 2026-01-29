@@ -5,8 +5,8 @@ use axerrno::{AxError, AxResult};
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use ktask::current;
+use osvm::load_vec_until_null;
 use starry_core::{config::USER_HEAP_BASE, mm::load_user_app, task::AsThread};
-use starry_vm::vm_load_until_nul;
 
 use crate::{file::FD_TABLE, mm::vm_load_string};
 
@@ -22,7 +22,7 @@ pub fn sys_execve(
         // Handle NULL argv (treat as empty array)
         Vec::new()
     } else {
-        vm_load_until_nul(argv)?
+        load_vec_until_null(argv)?
             .into_iter()
             .map(vm_load_string)
             .collect::<Result<Vec<_>, _>>()?
@@ -32,7 +32,7 @@ pub fn sys_execve(
         // Handle NULL envp (treat as empty array)
         Vec::new()
     } else {
-        vm_load_until_nul(envp)?
+        load_vec_until_null(envp)?
             .into_iter()
             .map(vm_load_string)
             .collect::<Result<Vec<_>, _>>()?

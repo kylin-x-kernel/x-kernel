@@ -1,0 +1,57 @@
+#![no_std]
+#![feature(maybe_uninit_as_bytes)]
+
+use core::{mem::MaybeUninit, slice};
+
+use axerrno::AxError;
+use extern_trait::extern_trait;
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum MemError {
+    InvalidAddr,
+    NoAccess,
+    #[cfg(feature = "alloc")]
+    NameTooLong,
+}
+
+impl From<MemError> for AxError {
+    fn from(e: MemError) -> Self {
+        match e {
+            MemError::InvalidAddr | MemError::NoAccess => AxError::BadAddress,
+            #[cfg(feature = "alloc")]
+            MemError::NameTooLong => AxError::NameTooLong,
+        }
+    }
+}
+
+pub type MemResult<T = ()> = Result<T, MemError>;
+
+#[extern_trait(MemImpl)]
+pub unsafe trait VirtMemIo {
+    fn new() -> Self;
+    fn read_mem(&mut self, addr: usize, out: &mut [MaybeUninit<u8>]) -> MemResult;
+    fn write_mem(&mut self, addr: usize, src: &[u8]) -> MemResult;
+}
+
+pub fn read_vm_mem<T>(p: *const T, out: &mut [MaybeUninit<T>]) -> MemResult {
+    if !p.is_aligned() {
+        return Err(MemError::InvalidAddr);
+    }
+    MemImpl::new().read_mem(p.addr(), out.as_bytes_mut())
+}
+
+pub fn write_vm_mem<T>(p: *mut T, src: &[T]) -> MemResult {
+    if !p.is_aligned() {
+        return Err(MemError::InvalidAddr);
+    }
+    let bytes = unsafe { slice::from_raw_parts(src.as_ptr().cast::<u8>(), size_of_val(src)) };
+    MemImpl::new().write_mem(p.addr(), bytes)
+}
+
+mod ptrs;
+pub use ptrs::{VirtMutPtr, VirtPtr};
+
+#[cfg(feature = "alloc")]
+mod heap;
+#[cfg(feature = "alloc")]
+pub use heap::{load_vec, load_vec_unsafe, load_vec_until_null};

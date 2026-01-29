@@ -42,7 +42,7 @@ slab.workspace = true
 spin.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
-starry-vm.workspace = true
+osvm.workspace = true
 strum = { workspace = true }
 weak-map = "0.1.1"
 xmas-elf = "0.9"

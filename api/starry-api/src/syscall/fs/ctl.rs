@@ -14,8 +14,8 @@ use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},
 };
+use osvm::{VirtPtr, write_vm_mem};
 use starry_core::task::AsThread;
-use starry_vm::{VmPtr, vm_write_slice};
 
 use crate::{
     file::{Directory, FileLike, get_file_like, resolve_at, with_fs},
@@ -29,7 +29,7 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> AxResult<isize> {
     debug!("sys_ioctl <= fd: {fd}, cmd: {cmd}, arg: {arg}");
     let f = get_file_like(fd)?;
     if cmd == FIONBIO {
-        let val = (arg as *const u8).vm_read()?;
+        let val = (arg as *const u8).read_vm()?;
         if val != 0 && val != 1 {
             return Err(AxError::InvalidInput);
         }
@@ -172,7 +172,7 @@ pub fn sys_getdents64(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
         return Err(AxError::InvalidInput);
     }
 
-    vm_write_slice(buf, &buffer.buf)?;
+    write_vm_mem(buf, &buffer.buf)?;
 
     Ok(buffer.offset as _)
 }
@@ -189,7 +189,7 @@ pub fn sys_linkat(
     new_path: *const c_char,
     flags: u32,
 ) -> AxResult<isize> {
-    let old_path = old_path.nullable().map(vm_load_string).transpose()?;
+    let old_path = old_path.check_non_null().map(vm_load_string).transpose()?;
     let new_path = vm_load_string(new_path)?;
     debug!(
         "sys_linkat <= old_dirfd: {old_dirfd}, old_path: {old_path:?}, new_dirfd: {new_dirfd}, \
@@ -261,7 +261,7 @@ pub fn sys_getcwd(buf: *mut u8, size: isize) -> AxResult<isize> {
     let cwd = cwd.as_bytes_with_nul();
 
     if cwd.len() <= size {
-        vm_write_slice(buf, cwd)?;
+        write_vm_mem(buf, cwd)?;
         // FIXME: it is said that this should return 0
         Ok(buf.as_ptr() as _)
     } else {
@@ -308,7 +308,7 @@ pub fn sys_readlinkat(
         let entry = fs.resolve_no_follow(path)?;
         let link = entry.read_link()?;
         let read = size.min(link.len());
-        vm_write_slice(buf, &link.as_bytes()[..read])?;
+        write_vm_mem(buf, &link.as_bytes()[..read])?;
         Ok(read as isize)
     })
 }
@@ -335,7 +335,7 @@ pub fn sys_fchownat(
     gid: i32,
     flags: u32,
 ) -> AxResult<isize> {
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = path.check_non_null().map(vm_load_string).transpose()?;
     let loc = resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
         .ok_or(AxError::BadFileDescriptor)?;
@@ -369,7 +369,7 @@ pub fn sys_fchmod(fd: i32, mode: u32) -> AxResult<isize> {
 }
 
 pub fn sys_fchmodat(dirfd: i32, path: *const c_char, mode: u32, flags: u32) -> AxResult<isize> {
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = path.check_non_null().map(vm_load_string).transpose()?;
     resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
         .ok_or(AxError::BadFileDescriptor)?
@@ -387,7 +387,7 @@ fn update_times(
     mtime: Option<Duration>,
     flags: u32,
 ) -> AxResult<()> {
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = path.check_non_null().map(vm_load_string).transpose()?;
     resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
         .ok_or(AxError::BadFileDescriptor)?
@@ -409,9 +409,9 @@ pub struct utimbuf {
 
 #[cfg(target_arch = "x86_64")]
 pub fn sys_utime(path: *const c_char, times: *const utimbuf) -> AxResult<isize> {
-    let (atime, mtime) = if let Some(times) = times.nullable() {
+    let (atime, mtime) = if let Some(times) = times.check_non_null() {
         // FIXME: AnyBitPattern
-        let times = unsafe { times.vm_read_uninit()?.assume_init() };
+        let times = unsafe { times.read_uninit()?.assume_init() };
         (
             Duration::from_secs(times.actime as _),
             Duration::from_secs(times.modtime as _),
@@ -429,9 +429,9 @@ pub fn sys_utimes(
     path: *const c_char,
     times: *const [linux_raw_sys::general::timeval; 2],
 ) -> AxResult<isize> {
-    let (atime, mtime) = if let Some(times) = times.nullable() {
+    let (atime, mtime) = if let Some(times) = times.check_non_null() {
         // FIXME: AnyBitPattern
-        let [atime, mtime] = unsafe { times.vm_read_uninit()?.assume_init() };
+        let [atime, mtime] = unsafe { times.read_uninit()?.assume_init() };
         (atime.try_into_time_value()?, mtime.try_into_time_value()?)
     } else {
         let time = wall_time();
@@ -458,9 +458,9 @@ pub fn sys_utimensat(
         }
     }
 
-    let (atime, mtime) = if let Some(times) = times.nullable() {
+    let (atime, mtime) = if let Some(times) = times.check_non_null() {
         // FIXME: AnyBitPattern
-        let [atime, mtime] = unsafe { times.vm_read_uninit()?.assume_init() };
+        let [atime, mtime] = unsafe { times.read_uninit()?.assume_init() };
         (
             utime_to_duration(&atime).transpose()?,
             utime_to_duration(&mtime).transpose()?,

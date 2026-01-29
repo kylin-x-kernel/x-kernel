@@ -7,7 +7,7 @@ use core::{
 
 use kcpu::userspace::UserContext;
 use kspin::SpinNoIrq;
-use starry_vm::VmMutPtr;
+use osvm::VirtMutPtr;
 
 use super::ProcessSignalManager;
 use crate::{
@@ -96,7 +96,7 @@ impl ThreadSignalManager {
 
                 let frame_ptr = aligned_sp as *mut SignalFrame;
                 if frame_ptr
-                    .vm_write(SignalFrame {
+                    .write_vm(SignalFrame {
                         ucontext: UContext::new(uctx, restore_blocked),
                         siginfo: sig.clone(),
                         uctx: *uctx,
@@ -118,7 +118,7 @@ impl ThreadSignalManager {
                 #[cfg(target_arch = "x86_64")]
                 {
                     let new_sp = uctx.sp() - 8;
-                    if (new_sp as *mut usize).vm_write(restorer).is_err() {
+                    if (new_sp as *mut usize).write_vm(restorer).is_err() {
                         return Some(SignalOSAction::CoreDump);
                     }
                     uctx.set_sp(new_sp);

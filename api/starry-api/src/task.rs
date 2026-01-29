@@ -7,6 +7,7 @@ use kprocess::Pid;
 use ksignal::{SignalInfo, Signo};
 use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::{
     futex::FutexKey,
     shm::SHM_MANAGER,
@@ -16,7 +17,6 @@ use starry_core::{
     },
     time::TimerState,
 };
-use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     signal::{check_signals, unblock_next_signal},
@@ -29,8 +29,8 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
         move || {
             let curr = ktask::current();
 
-            if let Some(tid) = (set_child_tid as *mut Pid).nullable() {
-                tid.vm_write(curr.id().as_u64() as Pid).ok();
+            if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
+                tid.write_vm(curr.id().as_u64() as Pid).ok();
             }
 
             info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
@@ -135,13 +135,13 @@ pub fn exit_robust_list(head: *const RobustListHead) -> AxResult<()> {
     let mut limit = ROBUST_LIST_LIMIT;
 
     let end_ptr = unsafe { &raw const (*head).list };
-    let head = head.vm_read()?;
+    let head = head.read_vm()?;
     let mut entry = head.list.next;
     let offset = head.futex_offset;
     let pending = head.list_op_pending;
 
     while !core::ptr::eq(entry, end_ptr) {
-        let next_entry = entry.vm_read()?.next;
+        let next_entry = entry.read_vm()?.next;
         if entry != pending {
             dispatch_irq_futex_death(entry, offset)?;
         }
@@ -164,7 +164,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     info!("{} exit with code: {}", curr.id_name(), exit_code);
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
-    if clear_child_tid.vm_write(0).is_ok() {
+    if clear_child_tid.write_vm(0).is_ok() {
         let key = FutexKey::new_current(clear_child_tid as usize);
         let table = thr.proc_data.futex_table_for(&key);
         let guard = table.get(&key);

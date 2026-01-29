@@ -7,9 +7,9 @@ use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
 };
+use osvm::{VirtMutPtr, write_vm_mem};
 use platconfig::ARCH;
 use starry_core::task::processes;
-use starry_vm::{VmMutPtr, vm_write_slice};
 
 pub fn sys_getuid() -> AxResult<isize> {
     Ok(0)
@@ -42,7 +42,7 @@ pub fn sys_getgroups(size: usize, list: *mut u32) -> AxResult<isize> {
     if size < 1 {
         return Err(AxError::InvalidInput);
     }
-    vm_write_slice(list, &[0])?;
+    write_vm_mem(list, &[0])?;
     Ok(1)
 }
 
@@ -70,7 +70,7 @@ const UTSNAME: new_utsname = new_utsname {
 };
 
 pub fn sys_uname(name: *mut new_utsname) -> AxResult<isize> {
-    name.vm_write(UTSNAME)?;
+    name.write_vm(UTSNAME)?;
     Ok(0)
 }
 
@@ -79,7 +79,7 @@ pub fn sys_sysinfo(info: *mut sysinfo) -> AxResult<isize> {
     let mut kinfo: sysinfo = unsafe { core::mem::zeroed() };
     kinfo.procs = processes().len() as _;
     kinfo.mem_unit = 1;
-    info.vm_write(kinfo)?;
+    info.write_vm(kinfo)?;
     Ok(0)
 }
 
@@ -114,7 +114,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> AxResult<isize> {
     let mut kbuf = vec![0; len];
     let len = f.entry().as_file()?.read_at(&mut kbuf, 0)?;
 
-    vm_write_slice(buf, &kbuf)?;
+    write_vm_mem(buf, &kbuf)?;
 
     Ok(len as _)
 }

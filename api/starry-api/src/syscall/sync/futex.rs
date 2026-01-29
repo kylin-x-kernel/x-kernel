@@ -6,11 +6,11 @@ use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
     FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::{
     futex::FutexKey,
     task::{AsThread, get_task},
 };
-use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::time::TimeValueLike;
 
@@ -46,13 +46,13 @@ pub fn sys_futex(
     match command {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
             // Fast path
-            if uaddr.vm_read()? != value {
+            if uaddr.read_vm()? != value {
                 return Err(AxError::WouldBlock);
             }
 
-            let timeout = if let Some(ts) = timeout.nullable() {
+            let timeout = if let Some(ts) = timeout.check_non_null() {
                 // FIXME: AnyBitPattern
-                let ts = unsafe { ts.vm_read_uninit()?.assume_init() }.try_into_time_value()?;
+                let ts = unsafe { ts.read_uninit()?.assume_init() }.try_into_time_value()?;
                 Some(ts)
             } else {
                 None
@@ -68,7 +68,7 @@ pub fn sys_futex(
 
             if !futex
                 .wq
-                .wait_if(bitset, timeout, || uaddr.vm_read() == Ok(value))?
+                .wait_if(bitset, timeout, || uaddr.read_vm() == Ok(value))?
             {
                 return Err(AxError::WouldBlock);
             }
@@ -95,7 +95,7 @@ pub fn sys_futex(
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
             assert_unsigned(value)?;
-            if command == FUTEX_CMP_REQUEUE && uaddr.vm_read()? != value3 {
+            if command == FUTEX_CMP_REQUEUE && uaddr.read_vm()? != value3 {
                 return Err(AxError::WouldBlock);
             }
             let value2 = assert_unsigned(timeout.addr() as u32)?;
@@ -124,8 +124,8 @@ pub fn sys_get_robust_list(
     size: *mut usize,
 ) -> AxResult<isize> {
     let task = get_task(tid)?;
-    head.vm_write(task.as_thread().robust_list_head() as _)?;
-    size.vm_write(size_of::<robust_list_head>())?;
+    head.write_vm(task.as_thread().robust_list_head() as _)?;
+    size.write_vm(size_of::<robust_list_head>())?;
 
     Ok(0)
 }

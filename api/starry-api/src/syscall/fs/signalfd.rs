@@ -2,7 +2,8 @@ use axerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use ksignal::SignalSet;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
-use starry_vm::VmPtr;
+use osvm::VirtPtr;
+use starry_signal::SignalSet;
 
 use crate::{
     file::{FileLike, add_file_like, signalfd::Signalfd},
@@ -52,7 +53,7 @@ pub fn sys_signalfd4(
     }
 
     // Read the signal mask from user space before handling the request mode.
-    let mask = unsafe { mask.vm_read_uninit()?.assume_init() };
+    let mask = unsafe { mask.read_uninit()?.assume_init() };
 
     // If fd is not -1, we should modify the existing signalfd
     if fd != -1 {

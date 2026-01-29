@@ -11,8 +11,8 @@ use linux_raw_sys::{
     ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKRAGET, BLKRASET, BLKROGET, BLKROSET},
     loop_device::{LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info},
 };
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::vfs::{DeviceMmap, DeviceOps};
-use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::file::get_file_like;
 
@@ -104,11 +104,11 @@ impl DeviceOps for LoopDevice {
                 *guard = None;
             }
             LOOP_GET_STATUS => {
-                (arg as *mut loop_info).vm_write(self.get_info()?)?;
+                (arg as *mut loop_info).write_vm(self.get_info()?)?;
             }
             LOOP_SET_STATUS => {
                 // FIXME: AnyBitPattern
-                let info = unsafe { (arg as *const loop_info).vm_read_uninit()?.assume_init() };
+                let info = unsafe { (arg as *const loop_info).read_uninit()?.assume_init() };
                 self.set_info(info)?;
             }
             // TODO: the following should apply to any block devices
@@ -116,27 +116,27 @@ impl DeviceOps for LoopDevice {
                 let file = self.clone_file()?;
                 let sectors = file.location().len()? / 512;
                 if cmd == BLKGETSIZE {
-                    (arg as *mut u32).vm_write(sectors as _)?;
+                    (arg as *mut u32).write_vm(sectors as _)?;
                 } else {
-                    (arg as *mut u64).vm_write(sectors * 512)?;
+                    (arg as *mut u64).write_vm(sectors * 512)?;
                 }
             }
             BLKROGET => {
-                (arg as *mut u32).vm_write(self.ro.load(Ordering::Relaxed) as u32)?;
+                (arg as *mut u32).write_vm(self.ro.load(Ordering::Relaxed) as u32)?;
             }
             BLKROSET => {
-                let ro = (arg as *const u32).vm_read()?;
+                let ro = (arg as *const u32).read_vm()?;
                 if ro != 0 && ro != 1 {
                     return Err(AxError::InvalidInput);
                 }
                 self.ro.store(ro != 0, Ordering::Relaxed);
             }
             BLKRAGET => {
-                (arg as *mut u32).vm_write(self.ra.load(Ordering::Relaxed))?;
+                (arg as *mut u32).write_vm(self.ra.load(Ordering::Relaxed))?;
             }
             BLKRASET => {
                 self.ra
-                    .store((arg as *const u32).vm_read()? as _, Ordering::Relaxed);
+                    .store((arg as *const u32).read_vm()? as _, Ordering::Relaxed);
             }
             _ => {
                 warn!("unknown ioctl for loop device: {cmd}");

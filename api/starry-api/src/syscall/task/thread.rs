@@ -58,7 +58,7 @@ pub fn sys_arch_prctl(
     code: i32,
     addr: usize,
 ) -> AxResult<isize> {
-    use starry_vm::VmMutPtr;
+    use osvm::VirtMutPtr;
 
     let code = ArchPrctlCode::try_from(code).map_err(|_| AxError::InvalidInput)?;
     debug!("sys_arch_prctl: code = {code:?}, addr = {addr:#x}");
@@ -67,7 +67,7 @@ pub fn sys_arch_prctl(
         // According to Linux implementation, SetFs & SetGs does not return
         // error at all
         ArchPrctlCode::GetFs => {
-            (addr as *mut usize).vm_write(uctx.tls())?;
+            (addr as *mut usize).write_vm(uctx.tls())?;
             Ok(0)
         }
         ArchPrctlCode::SetFs => {
@@ -75,7 +75,7 @@ pub fn sys_arch_prctl(
             Ok(0)
         }
         ArchPrctlCode::GetGs => {
-            (addr as *mut usize).vm_write(uctx.gs_base as _)?;
+            (addr as *mut usize).write_vm(uctx.gs_base as _)?;
             Ok(0)
         }
         ArchPrctlCode::SetGs => {

@@ -6,8 +6,8 @@ use linux_raw_sys::general::{
     CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
     CLOCK_THREAD_CPUTIME_ID, itimerval, timespec, timeval,
 };
+use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::{task::AsThread, time::ITimerType};
-use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::time::TimeValueLike;
 
@@ -27,12 +27,12 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> AxR
             // return Err(AxError::EINVAL);
         }
     };
-    ts.vm_write(timespec::from_time_value(now))?;
+    ts.write_vm(timespec::from_time_value(now))?;
     Ok(0)
 }
 
 pub fn sys_gettimeofday(ts: *mut timeval) -> AxResult<isize> {
-    ts.vm_write(timeval::from_time_value(wall_time()))?;
+    ts.write_vm(timeval::from_time_value(wall_time()))?;
     Ok(0)
 }
 
@@ -40,8 +40,8 @@ pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: *mut timespec) -> AxR
     if clock_id as u32 != CLOCK_MONOTONIC && clock_id as u32 != CLOCK_REALTIME {
         warn!("Called sys_clock_getres for unsupported clock {clock_id}");
     }
-    if let Some(res) = res.nullable() {
-        res.vm_write(timespec::from_time_value(TimeValue::from_micros(1)))?;
+    if let Some(res) = res.check_non_null() {
+        res.write_vm(timespec::from_time_value(TimeValue::from_micros(1)))?;
     }
     Ok(0)
 }
@@ -62,7 +62,7 @@ pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
     let (utime, stime) = current().as_thread().time.borrow().output();
     let utime = utime.as_micros() as usize;
     let stime = stime.as_micros() as usize;
-    tms.vm_write(Tms {
+    tms.write_vm(Tms {
         tms_utime: utime,
         tms_stime: stime,
         tms_cutime: utime,
@@ -75,7 +75,7 @@ pub fn sys_getitimer(which: i32, value: *mut itimerval) -> AxResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(AxError::InvalidInput)?;
     let (it_interval, it_value) = current().as_thread().time.borrow().get_itimer(ty);
 
-    value.vm_write(itimerval {
+    value.write_vm(itimerval {
         it_interval: timeval::from_time_value(it_interval),
         it_value: timeval::from_time_value(it_value),
     })?;
@@ -90,10 +90,10 @@ pub fn sys_setitimer(
     let ty = ITimerType::from_repr(which).ok_or(AxError::InvalidInput)?;
     let curr = current();
 
-    let (interval, remained) = match new_value.nullable() {
+    let (interval, remained) = match new_value.check_non_null() {
         Some(new_value) => {
             // FIXME: AnyBitPattern
-            let new_value = unsafe { new_value.vm_read_uninit()?.assume_init() };
+            let new_value = unsafe { new_value.read_uninit()?.assume_init() };
             (
                 new_value.it_interval.try_into_time_value()?.as_nanos() as usize,
                 new_value.it_value.try_into_time_value()?.as_nanos() as usize,
@@ -110,8 +110,8 @@ pub fn sys_setitimer(
         .borrow_mut()
         .set_itimer(ty, interval, remained);
 
-    if let Some(old_value) = old_value.nullable() {
-        old_value.vm_write(itimerval {
+    if let Some(old_value) = old_value.check_non_null() {
+        old_value.write_vm(itimerval {
             it_interval: timeval::from_time_value(old.0),
             it_value: timeval::from_time_value(old.1),
         })?;
