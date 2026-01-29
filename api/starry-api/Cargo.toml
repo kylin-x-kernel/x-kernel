@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 input = ["dep:inputdev"]
-memtrack = ["axfeat/dwarf", "kalloc/tracking", "dep:gimli"]
+memtrack = ["kfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["knet/vsock"]
 dev-log = []
 dice = ["dep:aarch64-crosvm-virt", "kalloc/dice", "dep:rand_chacha"]
