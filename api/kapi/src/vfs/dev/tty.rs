@@ -12,7 +12,7 @@ use ktask::{
     future::{block_on, poll_io},
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use starry_core::{task::AsThread, vfs::SimpleFs};
+use kcore::{task::AsThread, vfs::SimpleFs};
 
 use crate::{
     terminal::{

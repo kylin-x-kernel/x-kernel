@@ -9,7 +9,7 @@ use linux_raw_sys::{
 };
 use osvm::{VirtMutPtr, write_vm_mem};
 use platconfig::ARCH;
-use starry_core::task::processes;
+use kcore::task::processes;
 
 pub fn sys_getuid() -> AxResult<isize> {
     Ok(0)

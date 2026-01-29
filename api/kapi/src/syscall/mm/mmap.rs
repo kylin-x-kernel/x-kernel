@@ -8,7 +8,7 @@ use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::backend::{Backend, SharedPages};
 use osvm::{load_vec, write_vm_mem};
-use starry_core::{
+use kcore::{
     task::AsThread,
     vfs::{Device, DeviceMmap},
 };

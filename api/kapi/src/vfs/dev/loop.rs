@@ -12,7 +12,7 @@ use linux_raw_sys::{
     loop_device::{LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info},
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use starry_core::vfs::{DeviceMmap, DeviceOps};
+use kcore::vfs::{DeviceMmap, DeviceOps};
 
 use crate::file::get_file_like;
 

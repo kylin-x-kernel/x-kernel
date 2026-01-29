@@ -11,7 +11,7 @@ use linux_raw_sys::general::{
     FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use starry_core::{
+use kcore::{
     futex::FutexKey,
     task::{AsThread, get_task},
 };

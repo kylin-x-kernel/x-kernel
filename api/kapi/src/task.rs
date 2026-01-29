@@ -8,7 +8,7 @@ use ksignal::{SignalInfo, Signo};
 use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use osvm::{VirtMutPtr, VirtPtr};
-use starry_core::{
+use kcore::{
     futex::FutexKey,
     shm::SHM_MANAGER,
     task::{

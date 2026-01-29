@@ -10,7 +10,7 @@ use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
-use starry_core::{
+use kcore::{
     mm::copy_from_kernel,
     task::{AsThread, ProcessData, Thread, add_task_to_table},
 };

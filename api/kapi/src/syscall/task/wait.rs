@@ -13,7 +13,7 @@ use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use starry_core::task::AsThread;
+use kcore::task::AsThread;
 
 bitflags! {
     #[derive(Debug)]

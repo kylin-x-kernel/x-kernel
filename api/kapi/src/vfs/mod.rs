@@ -10,7 +10,7 @@ use fs_ng_vfs::{
     path::{Path, PathBuf},
 };
 use kfs::{FS_CONTEXT, FsContext};
-pub use starry_core::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
+pub use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 pub use tmp::MemoryFs;
 
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);

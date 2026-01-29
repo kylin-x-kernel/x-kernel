@@ -8,7 +8,7 @@ use linux_raw_sys::general::{
     CLOCK_THREAD_CPUTIME_ID, itimerval, timespec, timeval,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use starry_core::{task::AsThread, time::ITimerType};
+use kcore::{task::AsThread, time::ITimerType};
 
 use crate::time::TimeValueLike;
 

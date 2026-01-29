@@ -17,7 +17,7 @@ use linux_raw_sys::general::{
     timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use starry_core::task::{
+use kcore::task::{
     AsThread, processes, send_signal_to_process, send_signal_to_process_group,
     send_signal_to_thread,
 };
