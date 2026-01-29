@@ -46,7 +46,3 @@ log = { workspace = true }
 memaddr = { workspace = true }
 percpu = { workspace = true }
 kplat = { workspace = true }
-
-[dev-dependencies]
-khal = { workspace = true, features = ["fp-simd"] }
-ktask = { workspace = true, features = ["test"] }

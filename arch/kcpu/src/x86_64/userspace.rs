@@ -68,8 +68,8 @@ impl UserContext {
     ///
     /// This function returns when an exception or syscall occurs.
     pub fn run(&mut self) -> ReturnReason {
-        extern "C" {
-            fn enter_user(uctx: &mut UserContext);
+        unsafe extern "C" {
+            unsafe fn enter_user(uctx: &mut UserContext);
         }
 
         assert_eq!(self.cs, gdt::UCODE64.0 as _);
@@ -151,8 +151,8 @@ impl ExceptionInfo {
 
 /// Initializes syscall support and setups the syscall handler.
 pub(super) fn init_syscall() {
-    extern "C" {
-        fn syscall_entry();
+    unsafe extern "C" {
+        unsafe fn syscall_entry();
     }
 
     LStar::write(x86_64::VirtAddr::new_truncate(

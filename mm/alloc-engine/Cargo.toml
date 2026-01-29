@@ -36,7 +36,6 @@ slab_allocator = { git = "https://github.com/arceos-org/slab_allocator.git", tag
 bitmap-allocator = { version = "0.2", optional = true }
 
 [dev-dependencies]
-alloc-engine = { path = ".", features = ["full"] }
 rand = { version = "0.8", features = ["small_rng"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 

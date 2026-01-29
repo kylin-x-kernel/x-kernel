@@ -20,9 +20,3 @@ event-listener.workspace = true
 kspin.workspace = true
 lock_api.workspace = true
 khal = { workspace = true, optional = true}
-
-[dev-dependencies]
-ksync = { workspace = true }
-ktask = { workspace = true, features = ["test"] }
-# FIXME: `rand` crate can not be used since https://github.com/google/zerocopy/pull/2574
-fastrand = "2.3"
