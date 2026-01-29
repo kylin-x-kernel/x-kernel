@@ -11,10 +11,20 @@ use kdriver::{BlockDevice as KBlockDevice, DeviceContainer, prelude::*};
 
 #[cfg(feature = "fat")]
 mod disk;
-mod fs;
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) mod fs;
+
+// New refactored components
+mod fs_operations;
+mod path_resolver;
+mod working_context;
 
 mod highlevel;
+// Export new components (FsOperations for advanced use)
+pub use fs_operations::FsOperations;
 pub use highlevel::*;
+pub use path_resolver::PathResolver;
+pub use working_context::WorkingContext;
 
 pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
     info!("Initialize filesystem subsystem...");

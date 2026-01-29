@@ -15,8 +15,12 @@ use ksync::Mutex;
 use spin::Once;
 
 use super::File;
+use crate::{PathResolver, WorkingContext};
 
 pub const SYMLINKS_MAX: usize = 40;
+
+// Import the new FsOperations as the implementation
+use crate::fs_operations::FsOperations as FsContextImpl;
 
 pub static ROOT_FS_CONTEXT: Once<FsContext> = Once::new();
 
@@ -38,227 +42,120 @@ pub struct ReadDirEntry {
 }
 
 /// Provides `std::fs`-like interface.
+///
+/// This is now a wrapper around the refactored components for backward compatibility.
 #[derive(Debug, Clone)]
 pub struct FsContext {
-    root_dir: Location,
-    current_dir: Location,
+    pub(crate) inner: FsContextImpl,
 }
 
 impl FsContext {
     pub fn new(root_dir: Location) -> Self {
         Self {
-            root_dir: root_dir.clone(),
-            current_dir: root_dir,
+            inner: FsContextImpl::new(root_dir),
         }
+    }
+
+    /// Creates a FsContext from FsOperations (internal use)
+    #[doc(hidden)]
+    pub fn from_ops(ops: FsContextImpl) -> Self {
+        Self { inner: ops }
     }
 
     pub fn root_dir(&self) -> &Location {
-        &self.root_dir
+        self.inner.root_dir()
     }
 
     pub fn current_dir(&self) -> &Location {
-        &self.current_dir
+        self.inner.current_dir()
     }
 
     pub fn set_current_dir(&mut self, current_dir: Location) -> VfsResult<()> {
-        current_dir.check_is_dir()?;
-        self.current_dir = current_dir;
-        Ok(())
+        self.inner.set_current_dir(current_dir)
     }
 
     pub fn with_current_dir(&self, current_dir: Location) -> VfsResult<Self> {
-        current_dir.check_is_dir()?;
         Ok(Self {
-            root_dir: self.root_dir.clone(),
-            current_dir,
+            inner: self.inner.with_current_dir(current_dir)?,
         })
-    }
-
-    /// Attempts to resolve a possible symlink, at the current location (this
-    /// assumes that `loc` is a child of current directory).
-    pub fn try_resolve_symlink(
-        &self,
-        loc: Location,
-        follow_count: &mut usize,
-    ) -> VfsResult<Location> {
-        if loc.node_type() != NodeType::Symlink {
-            return Ok(loc);
-        }
-        if *follow_count >= SYMLINKS_MAX {
-            return Err(VfsError::FilesystemLoop);
-        }
-        *follow_count += 1;
-        let target = loc.read_link()?;
-        if target.is_empty() {
-            return Err(VfsError::NotFound);
-        }
-        self.resolve_components(PathBuf::from(target).components(), follow_count)
-    }
-
-    fn lookup(&self, dir: &Location, name: &str, follow_count: &mut usize) -> VfsResult<Location> {
-        let loc = dir.lookup_no_follow(name)?;
-        self.with_current_dir(dir.clone())?
-            .try_resolve_symlink(loc, follow_count)
-    }
-
-    fn resolve_components(
-        &self,
-        components: Components,
-        follow_count: &mut usize,
-    ) -> VfsResult<Location> {
-        let mut dir = self.current_dir.clone();
-        for comp in components {
-            match comp {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    dir = dir.parent().unwrap_or_else(|| self.root_dir.clone());
-                }
-                Component::RootDir => {
-                    dir = self.root_dir.clone();
-                }
-                Component::Normal(name) => {
-                    dir = self.lookup(&dir, name, follow_count)?;
-                }
-            }
-        }
-        Ok(dir)
-    }
-
-    fn resolve_inner<'a>(
-        &self,
-        path: &'a Path,
-        follow_count: &mut usize,
-    ) -> VfsResult<(Location, Option<&'a str>)> {
-        let entry_name = path.file_name();
-        let mut components = path.components();
-        if entry_name.is_some() {
-            components.next_back();
-        }
-        let dir = self.resolve_components(components, follow_count)?;
-        dir.check_is_dir()?;
-        Ok((dir, entry_name))
     }
 
     /// Resolves a path starting from `current_dir`.
     pub fn resolve(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
-        let mut follow_count = 0;
-        let (dir, name) = self.resolve_inner(path.as_ref(), &mut follow_count)?;
-        match name {
-            Some(name) => self.lookup(&dir, name, &mut follow_count),
-            None => Ok(dir),
-        }
+        self.inner.resolve(path)
     }
 
-    /// Resolves a path starting from `current_dir` not following symlinks.
+    /// Resolves a path starting from `current_dir`, without following symlinks.
     pub fn resolve_no_follow(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
-        let (dir, name) = self.resolve_inner(path.as_ref(), &mut 0)?;
-        match name {
-            Some(name) => dir.lookup_no_follow(name),
-            None => Ok(dir),
-        }
+        self.inner.resolve_no_follow(path)
     }
 
-    /// Taking current node as root directory, resolves a path starting from
-    /// `current_dir`.
-    ///
-    /// Returns `(parent_dir, entry_name)`, where `entry_name` is the name of
-    /// the entry.
+    /// Resolves a path to its parent directory and entry name
     pub fn resolve_parent<'a>(&self, path: &'a Path) -> VfsResult<(Location, Cow<'a, str>)> {
-        let (dir, name) = self.resolve_inner(path, &mut 0)?;
-        if let Some(name) = name {
-            Ok((dir, Cow::Borrowed(name)))
-        } else if let Some(parent) = dir.parent() {
-            Ok((parent, Cow::Owned(dir.name().to_owned())))
-        } else {
-            Err(VfsError::InvalidInput)
-        }
+        // Use inner resolver but convert String to Cow
+        let resolver = PathResolver::new();
+        let (dir, name) = resolver.resolve_parent(self.inner.current_dir(), path)?;
+        Ok((dir, Cow::Owned(name)))
     }
 
-    /// Resolves a path starting from `current_dir`, returning the parent
-    /// directory and the name of the entry.
-    ///
-    /// This function requires that the entry does not exist and the parent
-    /// exists. Note that, it does not perform an actual check to ensure the
-    /// entry's non-existence. It simply raises an error if the entry name is
-    /// not present in the path.
+    /// Resolves a path for a nonexistent entry
     pub fn resolve_nonexistent<'a>(&self, path: &'a Path) -> VfsResult<(Location, &'a str)> {
-        let (dir, name) = self.resolve_inner(path, &mut 0)?;
-        if let Some(name) = name {
-            Ok((dir, name))
-        } else {
-            Err(VfsError::InvalidInput)
-        }
+        // This method returns a lifetime-bound &str, so we need to use the path's lifetime
+        // We can only return a reference to something in the path itself
+        let entry_name = path.file_name().ok_or(VfsError::InvalidInput)?;
+        let mut components = path.components();
+        components.next_back();
+
+        let resolver = PathResolver::new();
+        let dir =
+            resolver.resolve_components_internal(self.inner.current_dir(), components, &mut 0)?;
+        dir.check_is_dir()?;
+        Ok((dir, entry_name))
     }
 
     /// Retrieves metadata for the file.
     pub fn metadata(&self, path: impl AsRef<Path>) -> VfsResult<Metadata> {
-        self.resolve(path)?.metadata()
+        self.inner.metadata(path)
     }
 
     /// Reads the entire contents of a file into a bytes vector.
     pub fn read(&self, path: impl AsRef<Path>) -> VfsResult<Vec<u8>> {
-        let mut buf = Vec::new();
-        let file = File::open(self, path.as_ref())?;
-        (&file).read_to_end(&mut buf)?;
-        Ok(buf)
+        self.inner.read(path)
     }
 
     /// Reads the entire contents of a file into a string.
     pub fn read_to_string(&self, path: impl AsRef<Path>) -> VfsResult<String> {
-        String::from_utf8(self.read(path)?).map_err(|_| VfsError::InvalidData)
+        self.inner.read_to_string(path)
     }
 
     /// Writes a slice as the entire contents of a file.
-    ///
-    /// This function will create a file if it does not exist, and will entirely
-    /// replace its contents if it does.
     pub fn write(&self, path: impl AsRef<Path>, buf: impl AsRef<[u8]>) -> VfsResult<()> {
-        let file = File::create(self, path.as_ref())?;
-        (&file).write_all(buf.as_ref())?;
-        Ok(())
+        self.inner.write(path, buf)
     }
 
     /// Returns an iterator over the entries in a directory.
     pub fn read_dir(&self, path: impl AsRef<Path>) -> VfsResult<ReadDir> {
-        let dir = self.resolve(path)?;
-        Ok(ReadDir {
-            dir,
-            buf: VecDeque::new(),
-            offset: 0,
-            ended: false,
-        })
+        self.inner.read_dir(path)
     }
 
     /// Removes a file from the filesystem.
     pub fn remove_file(&self, path: impl AsRef<Path>) -> VfsResult<()> {
-        let entry = self.resolve_no_follow(path.as_ref())?;
-        entry
-            .parent()
-            .ok_or(VfsError::IsADirectory)?
-            .unlink(entry.name(), false)
+        self.inner.remove_file(path)
     }
 
     /// Removes a directory from the filesystem.
     pub fn remove_dir(&self, path: impl AsRef<Path>) -> VfsResult<()> {
-        let entry = self.resolve_no_follow(path.as_ref())?;
-        entry
-            .parent()
-            .ok_or(VfsError::ResourceBusy)?
-            .unlink(entry.name(), true)
+        self.inner.remove_dir(path)
     }
 
-    /// Renames a file or directory to a new name, replacing the original file
-    /// if `to` already exists.
+    /// Renames a file or directory to a new name.
     pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfsResult<()> {
-        let (src_dir, src_name) = self.resolve_parent(from.as_ref())?;
-        let (dst_dir, dst_name) = self.resolve_parent(to.as_ref())?;
-        src_dir.rename(&src_name, &dst_dir, &dst_name)
+        self.inner.rename(from, to)
     }
 
     /// Creates a new, empty directory at the provided path.
     pub fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
-        let (dir, name) = self.resolve_nonexistent(path.as_ref())?;
-        dir.create(name, NodeType::Directory, mode)
+        self.inner.create_dir(path, mode)
     }
 
     /// Creates a new hard link on the filesystem.
@@ -267,9 +164,7 @@ impl FsContext {
         old_path: impl AsRef<Path>,
         new_path: impl AsRef<Path>,
     ) -> VfsResult<Location> {
-        let old = self.resolve(old_path.as_ref())?;
-        let (new_dir, new_name) = self.resolve_nonexistent(new_path.as_ref())?;
-        new_dir.link(new_name, &old)
+        self.inner.link(old_path, new_path)
     }
 
     /// Creates a new symbolic link on the filesystem.
@@ -278,27 +173,21 @@ impl FsContext {
         target: impl AsRef<str>,
         link_path: impl AsRef<Path>,
     ) -> VfsResult<Location> {
-        let (dir, name) = self.resolve_nonexistent(link_path.as_ref())?;
-        if dir.lookup_no_follow(name).is_ok() {
-            return Err(VfsError::AlreadyExists);
-        }
-        let symlink = dir.create(name, NodeType::Symlink, NodePermission::default())?;
-        symlink.entry().as_file()?.set_symlink(target.as_ref())?;
-        Ok(symlink)
+        self.inner.symlink(target, link_path)
     }
 
     /// Returns the canonical, absolute form of a path.
     pub fn canonicalize(&self, path: impl AsRef<Path>) -> VfsResult<PathBuf> {
-        self.resolve(path.as_ref())?.absolute_path()
+        self.inner.canonicalize(path)
     }
 }
 
 /// Iterator returned by [`FsContext::read_dir`].
 pub struct ReadDir {
-    dir: Location,
-    buf: VecDeque<ReadDirEntry>,
-    offset: u64,
-    ended: bool,
+    pub(crate) dir: Location,
+    pub(crate) buf: VecDeque<ReadDirEntry>,
+    pub(crate) offset: u64,
+    pub(crate) ended: bool,
 }
 
 impl ReadDir {

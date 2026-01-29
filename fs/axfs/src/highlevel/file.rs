@@ -232,7 +232,7 @@ impl OpenOptions {
 
         let loc = match context.resolve_parent(path.as_ref()) {
             Ok((parent, name)) => {
-                let mut loc = parent.open_file(
+                let loc = parent.open_file(
                     &name,
                     &fs_ng_vfs::OpenOptions {
                         create: self.create,
@@ -243,11 +243,10 @@ impl OpenOptions {
                     },
                 )?;
                 if !self.no_follow {
-                    loc = context
-                        .with_current_dir(parent)?
-                        .try_resolve_symlink(loc, &mut 0)?;
+                    context.resolve(path)?
+                } else {
+                    loc
                 }
-                loc
             }
             Err(VfsError::InvalidInput) => {
                 // root directory

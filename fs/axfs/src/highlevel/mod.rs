@@ -2,4 +2,9 @@ mod file;
 mod fs;
 
 pub use file::*;
-pub use fs::*;
+// Re-export the wrapper FsContext for backward compatibility
+pub use fs::{FS_CONTEXT, FsContext, ROOT_FS_CONTEXT, ReadDir, ReadDirEntry};
+
+// Re-export new components
+pub use crate::path_resolver::PathResolver;
+pub use crate::working_context::WorkingContext;
