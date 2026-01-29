@@ -15,7 +15,7 @@ pub mod config {
         "`PACKAGE` field in the configuration does not match the Package name. Please check your configuration file."
     );
 }
-kplat_aarch64_peripherals::console_if_impl!(TerminalImpl);
+kplat_aarch64_peripherals::console_if_impl!(ConsoleImpl);
 kplat_aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
 #[cfg(feature = "irq")]
 kplat_aarch64_peripherals::irq_if_impl!(IntrManagerImpl);

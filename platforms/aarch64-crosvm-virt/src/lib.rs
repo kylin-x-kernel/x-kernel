@@ -18,6 +18,6 @@ pub mod config {
          configuration file."
     );
 }
-aarch64_peripherals::ns16550_console_if_impl!(TerminalImpl);
+aarch64_peripherals::ns16550_console_if_impl!(ConsoleImpl);
 aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
 irq_if_impl!(IntrManagerImpl);

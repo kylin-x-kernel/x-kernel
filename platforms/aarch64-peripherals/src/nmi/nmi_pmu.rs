@@ -5,7 +5,7 @@ macro_rules! nmi_if_impl {
         use kplat::nm_irq::{NmiHandler, NmiType};
         const CYCLE_COUNTER_INDEX: u32 = 31;
         #[impl_dev_interface]
-        impl kplat::nm_irq::NmiIf for $name {
+        impl kplat::nm_irq::NmiDef for $name {
             fn init(threshold: u64) -> bool {
                 $crate::gic::set_prio(crate::config::devices::PMU_IRQ, 0);
                 $crate::pmu::init_cycle_counter(threshold)
@@ -31,7 +31,7 @@ macro_rules! nmi_if_impl {
                 NmiType::PseudoNmi
             }
 
-            fn reg_handler_nmi_handler(handler: NmiHandler) -> bool {
+            fn register_nmi_handler(handler: NmiHandler) -> bool {
                 $crate::pmu::reg_handler_overflow_handler(CYCLE_COUNTER_INDEX, handler)
             }
         }

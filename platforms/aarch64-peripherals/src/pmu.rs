@@ -1,13 +1,14 @@
 use aarch64_pmuv3::pmuv3::{PmuCounter, PmuEvent};
-use kplat::perf::OverflowHandler;
+use kplat::perf::PerfCb;
 use lazyinit::LazyInit;
 const MAX_PMU_COUNTERS: usize = 32;
 pub struct PmuManager {
     counters: [Option<PmuCounter>; MAX_PMU_COUNTERS],
-    overflow_handlers: [Option<OverflowHandler>; MAX_PMU_COUNTERS],
+    overflow_handlers: [Option<PerfCb>; MAX_PMU_COUNTERS],
 }
 #[percpu::def_percpu]
 static PMU: LazyInit<PmuManager> = LazyInit::new();
+
 #[inline]
 unsafe fn ensure_pmu_inited() -> &'static mut PmuManager {
     let pmu = unsafe { PMU.current_ref_mut_raw() };
@@ -17,7 +18,7 @@ unsafe fn ensure_pmu_inited() -> &'static mut PmuManager {
     });
     pmu
 }
-pub fn reg_handler_overflow_handler(index: u32, handler: OverflowHandler) -> bool {
+pub fn reg_handler_overflow_handler(index: u32, handler: PerfCb) -> bool {
     let idx = index as usize;
     if idx >= MAX_PMU_COUNTERS {
         return false;
@@ -104,7 +105,7 @@ pub fn dispatch_irq_overflows() -> bool {
             let Some(counter) = pmu.counters[idx].as_mut() else {
                 continue;
             };
-            if counter.dispatch_irq_overflow().is_ok() {
+            if counter.handle_overflow().is_ok() {
                 dispatch_irqd_any = true;
                 if let Some(h) = handler {
                     h();
@@ -123,14 +124,14 @@ pub fn set_threshold(index: u32, threshold: u64) {
 macro_rules! pmu_if_impl {
     ($name:ident) => {
         struct $name;
-        use kplat::perf::OverflowHandler;
+        use kplat::perf::PerfCb;
         #[impl_dev_interface]
         impl kplat::perf::PerfMgr for $name {
             fn on_overflow() -> bool {
                 $crate::pmu::dispatch_irq_overflows()
             }
 
-            fn reg_cb(index: u32, handler: OverflowHandler) -> bool {
+            fn reg_cb(index: u32, handler: PerfCb) -> bool {
                 $crate::pmu::reg_handler_overflow_handler(index, handler)
             }
         }

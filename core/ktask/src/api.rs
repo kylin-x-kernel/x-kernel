@@ -246,7 +246,7 @@ pub fn run_idle() -> ! {
 #[inline(always)]
 fn dump_println(force: bool, args: core::fmt::Arguments<'_>) {
     if force {
-        kplat::io_force_println!("{}", args);
+        kplat::kprint_atomic!("{}", args);
     } else {
         // Use log output in normal (non-NMI) contexts.
         error!("{}", args);

@@ -56,7 +56,7 @@ macro_rules! console_if_impl {
     ($name:ident) => {
         struct $name;
         #[kplat::impl_dev_interface]
-        impl kplat::io::Terminal for $name {
+        impl kplat::io::ConsoleIf for $name {
             fn write_data(bytes: &[u8]) {
                 $crate::pl011::write_data(bytes);
             }

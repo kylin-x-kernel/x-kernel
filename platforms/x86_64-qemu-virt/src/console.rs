@@ -1,4 +1,4 @@
-use kplat::io::Terminal;
+use kplat::io::ConsoleIf;
 use kspin::SpinNoIrq;
 use uart_16550::SerialPort;
 static COM1: SpinNoIrq<SerialPort> = unsafe { SpinNoIrq::new(SerialPort::new(0x3f8)) };
@@ -11,9 +11,9 @@ pub fn getchar() -> Option<u8> {
 pub fn init() {
     COM1.lock().init();
 }
-struct TerminalImpl;
+struct ConsoleImpl;
 #[impl_dev_interface]
-impl Terminal for TerminalImpl {
+impl ConsoleIf for ConsoleImpl {
     fn write_data(bytes: &[u8]) {
         for c in bytes {
             putchar(*c);

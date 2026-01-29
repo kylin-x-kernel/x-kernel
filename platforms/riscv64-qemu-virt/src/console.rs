@@ -1,4 +1,4 @@
-use kplat::io::Terminal;
+use kplat::io::ConsoleIf;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use uart_16550::MmioSerialPort;
@@ -12,9 +12,9 @@ pub(crate) fn early_init() {
         SpinNoIrq::new(uart)
     });
 }
-struct TerminalImpl;
+struct ConsoleImpl;
 #[impl_dev_interface]
-impl Terminal for TerminalImpl {
+impl ConsoleIf for ConsoleImpl {
     fn write_data(bytes: &[u8]) {
         for &c in bytes {
             let mut uart = UART.lock();

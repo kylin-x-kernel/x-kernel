@@ -3,7 +3,7 @@ use core::fmt::{Arguments, Result, Write};
 use kplat_macros::device_interface;
 
 #[device_interface]
-pub trait Terminal {
+pub trait ConsoleIf {
     fn write_data(buf: &[u8]);
 
     fn write_data_atomic(buf: &[u8]) {

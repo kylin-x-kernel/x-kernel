@@ -4,7 +4,7 @@ use kplat::{
     boot::BootHandler,
     impl_dev_interface,
     interrupts::{Handler, IntrManager, TargetCpu},
-    io::Terminal,
+    io::ConsoleIf,
     memory::{HwMemory, MemRange},
     sys::SysCtrl,
     timer::GlobalTimer,
@@ -31,7 +31,7 @@ impl BootHandler for DummyInit {
 }
 
 #[impl_dev_interface]
-impl Terminal for DummyConsole {
+impl ConsoleIf for DummyConsole {
     fn write_data(_bytes: &[u8]) {
         unimplemented!()
     }

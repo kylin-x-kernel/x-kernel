@@ -14,7 +14,7 @@ pub mod config {
     // configuration file."
     // );
 }
-aarch64_peripherals::console_if_impl!(TerminalImpl);
+aarch64_peripherals::console_if_impl!(ConsoleImpl);
 aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
 aarch64_peripherals::irq_if_impl!(IntrManagerImpl);
 #[cfg(feature = "pmu")]

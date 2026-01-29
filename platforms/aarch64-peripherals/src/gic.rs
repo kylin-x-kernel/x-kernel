@@ -64,7 +64,7 @@ pub fn unregister_handler(irq: usize) -> Option<Handler> {
 pub fn set_prio(irq: usize, priority: u8) {
     let intid = unsafe { IntId::raw(irq as u32) };
     let gic = GIC.lock();
-    gic.set_prio(intid, priority);
+    gic.set_priority(intid, priority);
 }
 #[cfg(not(feature = "pmr"))]
 pub fn set_prio(_irq: usize, _priority: u8) {
