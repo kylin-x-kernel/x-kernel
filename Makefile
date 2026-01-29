@@ -81,7 +81,7 @@ GW ?= 10.0.2.2
 export RUSTC_BOOTSTRAP := 1
 export MEMTRACK := n
 ifeq ($(MEMTRACK), y)
-	APP_FEATURES += starry-api/memtrack
+	APP_FEATURES += kapi/memtrack
 endif
 
 # App type

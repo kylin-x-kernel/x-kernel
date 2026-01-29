@@ -57,8 +57,8 @@ kspin = { path = "sync/kspin" }
 
 # x-kenrel userspace Modules
 ksignal = { path = "process/ksignal" }
-starry-core = { path = "api/starry-core" }
-starry-api = { path = "api/starry-api" }
+kcore = { path = "api/kcore" }
+kapi = { path = "api/kapi" }
 kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
 

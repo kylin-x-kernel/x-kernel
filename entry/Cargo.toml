@@ -9,34 +9,33 @@ homepage.workspace = true
 
 [features]
 default = []
-tee = ["starry-api/tee", "starry-core/tee"]
-tee_test = ["tee", "starry-api/tee_test"]
+tee = ["kapi/tee", "kcore/tee"]
+tee_test = ["tee", "kapi/tee_test"]
 qemu = [
     "kfeat/display",
     "kfeat/input",
-    "starry-api/input",
+    "kapi/input",
 
     "kfeat/vsock",
-    "starry-api/vsock",
+    "kapi/vsock",
 
     "kfeat/defplat-aarch64",
     "kfeat/bus-pci",
 
     # auxilary features
     "kfeat/fs-times",
-    "starry-api/dev-log",
+    "kapi/dev-log",
 ]
 smp = ["kfeat/smp"]
 
 # vf2 = ["dep:kplat-riscv64-visionfive2", "kfeat/driver-sdmmc"]
-dice = ["crosvm", "starry-api/dice"]
+dice = ["crosvm", "kapi/dice"]
 crosvm = [
     "kfeat/display",
     "kfeat/input",
-    "starry-api/input",
-
+    "kapi/input",
     "kfeat/vsock",
-    "starry-api/vsock",
+    "kapi/vsock",
 
     "kfeat/crosvm",
     "dep:aarch64-crosvm-virt",
@@ -46,17 +45,16 @@ crosvm = [
 
     # auxilary features
     "kfeat/fs-times",
-    "starry-api/dev-log",
+    "kapi/dev-log",
 ]
 
 x86_csv = [
     "kfeat/display",
     "kfeat/input",
-    "starry-api/input",
+    "kapi/input",
 
     "kfeat/vsock",
-    "starry-api/vsock",
-
+    "kapi/vsock",
     "kfeat/crosvm",
     "dep:x86-csv",
     "pci",
@@ -65,7 +63,7 @@ x86_csv = [
 
     # auxilary features
     "kfeat/fs-times",
-    "starry-api/dev-log",
+    "kapi/dev-log",
 ]
 
 # Stubs
@@ -88,8 +86,8 @@ linux-raw-sys.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
 
-starry-core.workspace = true
-starry-api.workspace = true
+kcore.workspace = true
+kapi.workspace = true
 
 [dependencies.aarch64-crosvm-virt]
 workspace = true

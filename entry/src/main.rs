@@ -22,7 +22,7 @@ pub const CMDLINE: &[&str] = &["/bin/sh", "-c", include_str!("init.sh")];
 
 #[unsafe(no_mangle)]
 fn main() {
-    starry_api::init();
+    kapi::init();
 
     let args = CMDLINE
         .iter()

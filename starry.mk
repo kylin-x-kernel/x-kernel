@@ -20,7 +20,7 @@ export AX_LIB := kfeat
 export APP_FEATURES := qemu
 
 ifeq ($(MEMTRACK), y)
-	APP_FEATURES += starry-api/memtrack
+	APP_FEATURES += kapi/memtrack
 endif
 
 default: build
