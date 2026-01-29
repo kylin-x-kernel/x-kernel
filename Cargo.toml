@@ -76,7 +76,7 @@ aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }
 # Third Crates
 arm-gic = { path = "drivers/arm-gic" }
 rs_fdtree = { path = "drivers/rs-fdtree" }
-syscalls = { path = "api/syscalls", default-features = false }
+linux_sysno = { path = "api/linux_sysno", default-features = false }
 bitflags = "2.10"
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"

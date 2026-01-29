@@ -1,8 +1,7 @@
+use core::{fmt, mem::MaybeUninit};
+
 use super::Sysno;
-use crate::set::SysnoSetIter;
-use crate::SysnoSet;
-use core::fmt;
-use core::mem::MaybeUninit;
+use crate::{SysnoSet, set::SysnoSetIter};
 
 type DataArray<T> = [MaybeUninit<T>; Sysno::table_size()];
 
@@ -14,7 +13,10 @@ type DataArray<T> = [MaybeUninit<T>; Sysno::table_size()];
 ///
 /// ```
 /// # use syscalls::{Sysno, SysnoMap};
-/// struct Point { x: i32, y: i32 }
+/// struct Point {
+///     x: i32,
+///     y: i32,
+/// }
 ///
 /// let mut map = SysnoMap::new();
 /// map.insert(Sysno::openat, Point { x: 1, y: 2 });
@@ -33,10 +35,7 @@ type DataArray<T> = [MaybeUninit<T>; Sysno::table_size()];
 ///
 /// ```
 /// # use syscalls::{Sysno, SysnoMap};
-/// let mut syscalls = SysnoMap::from_iter([
-///     (Sysno::openat, 0),
-///     (Sysno::close, 42),
-/// ]);
+/// let mut syscalls = SysnoMap::from_iter([(Sysno::openat, 0), (Sysno::close, 42)]);
 ///
 /// assert!(!syscalls.is_empty());
 /// assert_eq!(syscalls.remove(Sysno::openat), Some(0));
@@ -122,10 +121,7 @@ impl<T> SysnoMap<T> {
     /// was in the map.
     pub fn remove(&mut self, sysno: Sysno) -> Option<T> {
         if self.is_set.remove(sysno) {
-            let old = core::mem::replace(
-                &mut self.data[get_idx(sysno)],
-                MaybeUninit::uninit(),
-            );
+            let old = core::mem::replace(&mut self.data[get_idx(sysno)], MaybeUninit::uninit());
             Some(unsafe { old.assume_init() })
         } else {
             None
@@ -178,10 +174,8 @@ impl<T: Copy> SysnoMap<T> {
     /// ```
     /// use syscalls::{Sysno, SysnoMap};
     ///
-    /// static CALLBACKS: SysnoMap<fn() -> i32> = SysnoMap::from_slice(&[
-    ///     (Sysno::openat, || 42),
-    ///     (Sysno::close, || 43),
-    /// ]);
+    /// static CALLBACKS: SysnoMap<fn() -> i32> =
+    ///     SysnoMap::from_slice(&[(Sysno::openat, || 42), (Sysno::close, || 43)]);
     ///
     /// static DESCRIPTIONS: SysnoMap<&'static str> = SysnoMap::from_slice(&[
     ///     (Sysno::openat, "open and possibly create a file"),
@@ -192,8 +186,7 @@ impl<T: Copy> SysnoMap<T> {
     /// assert_eq!(DESCRIPTIONS[Sysno::close], "close a file descriptor");
     /// ```
     pub const fn from_slice(slice: &[(Sysno, T)]) -> Self {
-        let mut data: DataArray<T> =
-            unsafe { MaybeUninit::uninit().assume_init() };
+        let mut data: DataArray<T> = unsafe { MaybeUninit::uninit().assume_init() };
 
         let mut is_set = SysnoSet::empty();
 
@@ -286,8 +279,8 @@ impl<T> FromIterator<(Sysno, T)> for SysnoMap<T> {
 }
 
 impl<'a, T> IntoIterator for &'a SysnoMap<T> {
-    type Item = (Sysno, &'a T);
     type IntoIter = SysnoMapIter<'a, T>;
+    type Item = (Sysno, &'a T);
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()

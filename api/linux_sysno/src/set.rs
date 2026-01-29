@@ -1,9 +1,8 @@
 //! Enables the creation of a syscall bitset.
 
-use super::Sysno;
+use core::{fmt, num::NonZeroUsize};
 
-use core::fmt;
-use core::num::NonZeroUsize;
+use super::Sysno;
 
 const fn bits_per<T>() -> usize {
     core::mem::size_of::<T>().saturating_mul(8)
@@ -35,9 +34,8 @@ const fn words<T>(bits: usize) -> usize {
 /// Most operations can be done at compile-time as well.
 /// ```
 /// # use syscalls::{Sysno, SysnoSet};
-/// const SYSCALLS: SysnoSet =
-///     SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::close])
-///         .union(&SysnoSet::new(&[Sysno::openat]));
+/// const SYSCALLS: SysnoSet = SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::close])
+///     .union(&SysnoSet::new(&[Sysno::openat]));
 /// const _: () = assert!(SYSCALLS.contains(Sysno::read));
 /// const _: () = assert!(SYSCALLS.contains(Sysno::openat));
 /// ```
@@ -55,7 +53,6 @@ impl Default for SysnoSet {
 impl SysnoSet {
     /// The set of all valid syscalls.
     const ALL: &'static Self = &Self::new(Sysno::ALL);
-
     const WORD_WIDTH: usize = usize::BITS as usize;
 
     /// Compute the index and mask for the given syscall as stored in the set data.
@@ -264,8 +261,8 @@ impl Extend<Sysno> for SysnoSet {
 }
 
 impl<'a> IntoIterator for &'a SysnoSet {
-    type Item = Sysno;
     type IntoIter = SysnoSetIter<'a>;
+    type Item = Sysno;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -339,8 +336,7 @@ impl Iterator for SysnoSetIter<'_> {
             let bit = word.trailing_zeros();
 
             // Mask off that bit and store the resulting word for next time.
-            let next_word =
-                NonZeroUsize::new(word.get() & MASK.rotate_left(bit));
+            let next_word = NonZeroUsize::new(word.get() & MASK.rotate_left(bit));
 
             self.current = next_word.or_else(|| self.iter.next());
 
@@ -435,8 +431,7 @@ mod tests {
 
     #[test]
     fn test_const_new() {
-        static SYSCALLS: SysnoSet =
-            SysnoSet::new(&[Sysno::openat, Sysno::read, Sysno::close]);
+        static SYSCALLS: SysnoSet = SysnoSet::new(&[Sysno::openat, Sysno::read, Sysno::close]);
 
         assert!(SYSCALLS.contains(Sysno::openat));
         assert!(SYSCALLS.contains(Sysno::read));
@@ -501,8 +496,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_from_iter() {
-        let set =
-            SysnoSet::from_iter(vec![Sysno::openat, Sysno::read, Sysno::close]);
+        let set = SysnoSet::from_iter(vec![Sysno::openat, Sysno::read, Sysno::close]);
         assert!(set.contains(Sysno::openat));
         assert!(set.contains(Sysno::read));
         assert!(set.contains(Sysno::close));
@@ -529,12 +523,7 @@ mod tests {
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
         assert_eq!(
             a.union(&b),
-            SysnoSet::new(&[
-                Sysno::read,
-                Sysno::write,
-                Sysno::openat,
-                Sysno::close
-            ])
+            SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::openat, Sysno::close])
         );
     }
 
@@ -548,12 +537,7 @@ mod tests {
 
         assert_eq!(
             a,
-            SysnoSet::new(&[
-                Sysno::read,
-                Sysno::write,
-                Sysno::close,
-                Sysno::openat,
-            ])
+            SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::close, Sysno::openat,])
         );
     }
 
@@ -563,12 +547,7 @@ mod tests {
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
         assert_eq!(
             a | b,
-            SysnoSet::new(&[
-                Sysno::read,
-                Sysno::write,
-                Sysno::openat,
-                Sysno::close,
-            ])
+            SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::openat, Sysno::close,])
         );
     }
 
@@ -645,12 +624,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_serde_roundtrip() {
-        let syscalls = SysnoSet::new(&[
-            Sysno::read,
-            Sysno::write,
-            Sysno::close,
-            Sysno::openat,
-        ]);
+        let syscalls = SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::close, Sysno::openat]);
 
         let s = serde_json::to_string_pretty(&syscalls).unwrap();
 

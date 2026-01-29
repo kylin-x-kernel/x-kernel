@@ -16,14 +16,7 @@ pub struct SyscallArgs {
 }
 
 impl SyscallArgs {
-    pub fn new(
-        a0: usize,
-        a1: usize,
-        a2: usize,
-        a3: usize,
-        a4: usize,
-        a5: usize,
-    ) -> Self {
+    pub fn new(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> Self {
         SyscallArgs {
             arg0: a0,
             arg1: a1,

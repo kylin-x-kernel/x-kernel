@@ -1,47 +1,27 @@
 [package]
-name = "syscalls"
-version = "0.7.0"
-authors = ["Jason White <rust@jasonwhite.io>", "Baojun Wang <wangbj@gmail.com>"]
-edition = "2021"
-license = "BSD-2-Clause"
-description = """
-A list of Linux system calls.
-"""
+name = "linux_sysno"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Linux system call support"
 keywords = ["syscall", "linux"]
-readme = "README.md"
-repository = "https://github.com/jasonwhite/syscalls"
-homepage = "https://github.com/jasonwhite/syscalls"
-documentation = "https://docs.rs/syscalls"
 
 [features]
-default = ["std", "serde"]
-
-# Enables all extra features.
-full = ["std", "serde", "all"]
-
-# Enables usage of libstd.
-std = []
-
+default = []
 # Includes the syscall tables for all architectures.
 all = [
-    "aarch64", "arm", "loongarch64", "mips", "mips64", "powerpc", "powerpc64",
-    "riscv32", "riscv64", "s390x", "sparc", "sparc64", "x86", "x86_64"
+    "aarch64", "arm", "loongarch64", "riscv64", "x86_64"
 ]
 
 # Enable syscall tables for individual architectures.
 aarch64 = []
 arm = []
 loongarch64 = []
-mips = []
-mips64 = []
-powerpc = []
-powerpc64 = []
-riscv32 = []
 riscv64 = []
-s390x = []
-sparc = []
-sparc64 = []
-x86 = []
 x86_64 = []
 tee = []
 

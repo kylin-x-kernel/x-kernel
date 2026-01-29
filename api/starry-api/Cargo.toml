@@ -13,7 +13,7 @@ memtrack = ["kfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["knet/vsock"]
 dev-log = []
 dice = ["dep:aarch64-crosvm-virt", "kalloc/dice", "dep:rand_chacha"]
-tee = ["syscalls/tee", "dep:tee_raw_sys", "dep:bincode", "dep:uuid", "dep:hex"]
+tee = ["linux_sysno/tee", "dep:tee_raw_sys", "dep:bincode", "dep:uuid", "dep:hex"]
 tee_test = []
 tee_test_mock_user_access = []
 
@@ -69,7 +69,7 @@ spin.workspace = true
 kprocess.workspace = true
 starry-signal.workspace = true
 starry-vm.workspace = true
-syscalls = { workspace = true, default-features = false }
+linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
 
 bincode = { version = "2.0.1", default-features = false, optional = true, features = [

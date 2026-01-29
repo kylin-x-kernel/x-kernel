@@ -3,19 +3,15 @@ mod macros;
 
 mod generated;
 
-#[cfg(feature = "std")]
-mod last;
-
 use core::fmt;
 
 pub use self::generated::Errno;
 
 impl Errno {
-    /// Operation would block. This is the same as [`Errno::EAGAIN`].
-    pub const EWOULDBLOCK: Self = Self::EAGAIN;
-
     /// Same as [`Errno::EDEADLK`].
     pub const EDEADLOCK: Self = Self::EDEADLK;
+    /// Operation would block. This is the same as [`Errno::EAGAIN`].
+    pub const EWOULDBLOCK: Self = Self::EAGAIN;
 
     /// Creates a new `Errno`.
     pub fn new(num: i32) -> Self {
@@ -45,25 +41,6 @@ impl Errno {
         }
     }
 
-    /// Returns the last error that occurred.
-    #[cfg(feature = "std")]
-    pub fn last() -> Self {
-        Self(unsafe { *last::errno() })
-    }
-
-    /// Converts a value into an `Errno`.
-    #[cfg(feature = "std")]
-    pub fn result<T>(value: T) -> Result<T, Errno>
-    where
-        T: ErrnoSentinel + PartialEq<T>,
-    {
-        if value == T::sentinel() {
-            Err(Self::last())
-        } else {
-            Ok(value)
-        }
-    }
-
     /// Returns the name of the error. If the internal error code is unknown or
     /// invalid, `None` is returned.
     pub fn name(&self) -> Option<&'static str> {
@@ -74,18 +51,6 @@ impl Errno {
     /// invalid, `None` is returned.
     pub fn description(&self) -> Option<&'static str> {
         self.name_and_description().map(|x| x.1)
-    }
-
-    /// Converts an `std::io::Error` into an `Errno` if possible. Since an error
-    /// code is just one of the few possible error types that `std::io::Error`
-    /// can represent, this will return `None` if the conversion is not possible.
-    ///
-    /// A `From<std::io::Error>` implementation is not provided because this
-    /// conversion can fail. However, the reverse is possible, so that is
-    /// provided as a `From` implementation.
-    #[cfg(feature = "std")]
-    pub fn from_io_error(err: std::io::Error) -> Option<Self> {
-        err.raw_os_error().map(Self::new)
     }
 }
 
@@ -114,16 +79,6 @@ impl fmt::Debug for Errno {
         }
     }
 }
-
-#[cfg(feature = "std")]
-impl From<Errno> for std::io::Error {
-    fn from(err: Errno) -> Self {
-        std::io::Error::from_raw_os_error(err.into_raw())
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for Errno {}
 
 pub trait ErrnoSentinel: Sized {
     fn sentinel() -> Self;

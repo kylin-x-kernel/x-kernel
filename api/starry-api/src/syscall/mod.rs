@@ -12,7 +12,7 @@ mod time;
 
 use axerrno::{AxError, LinuxError};
 use khal::uspace::UserContext;
-use syscalls::Sysno;
+use linux_sysno::Sysno;
 
 use self::{
     fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,

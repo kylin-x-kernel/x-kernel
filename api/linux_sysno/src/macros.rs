@@ -41,13 +41,7 @@ macro_rules! syscall {
     };
 
     ($nr:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr) => {
-        $crate::syscall4(
-            $nr,
-            $a1 as usize,
-            $a2 as usize,
-            $a3 as usize,
-            $a4 as usize,
-        )
+        $crate::syscall4($nr, $a1 as usize, $a2 as usize, $a3 as usize, $a4 as usize)
     };
 
     ($nr:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr) => {
@@ -103,12 +97,7 @@ macro_rules! raw_syscall {
     };
 
     ($nr:expr, $a1:expr, $a2:expr, $a3:expr) => {
-        $crate::raw::syscall3(
-            $nr as usize,
-            $a1 as usize,
-            $a2 as usize,
-            $a3 as usize,
-        )
+        $crate::raw::syscall3($nr as usize, $a1 as usize, $a2 as usize, $a3 as usize)
     };
 
     ($nr:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr) => {

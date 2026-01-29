@@ -10,8 +10,8 @@ use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
 use ktask::current;
 use linux_raw_sys::general::__kernel_off_t;
+use linux_sysno::Sysno;
 use starry_vm::{VmMutPtr, VmPtr};
-use syscalls::Sysno;
 
 use crate::{
     file::{File, FileLike, Pipe, get_file_like},
