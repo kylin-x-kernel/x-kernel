@@ -59,14 +59,17 @@ const fn pad_str(info: &str) -> [c_char; 65] {
     }
     data
 }
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+);
 
 const UTSNAME: new_utsname = new_utsname {
-    sysname: pad_str("Linux"),
-    nodename: pad_str("starry"),
-    release: pad_str("10.0.0"),
-    version: pad_str("10.0.0"),
+    sysname: pad_str("kylin-x"),
+    nodename: pad_str("kylin-x"),
+    release: pad_str(VERSION),
+    version: pad_str(VERSION),
     machine: pad_str(ARCH),
-    domainname: pad_str("https://github.com/Starry-OS/StarryOS"),
+    domainname: pad_str("https://gitee/openkylin/x-kernel"),
 };
 
 pub fn sys_uname(name: *mut new_utsname) -> KResult<isize> {
