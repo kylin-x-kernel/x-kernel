@@ -131,7 +131,7 @@ unittest = {workspace = true, optional = true}
 [dependencies.aarch64-qemu-virt]
 workspace = true
 optional = true
-features = ["fp-simd", "smp", "rtc", "nmi", "pmu"]
+features = ["fp-simd", "smp", "rtc"]
 
 [dependencies.x86_64-qemu-virt]
 workspace = true
