@@ -1,17 +1,17 @@
-# axwatchdog
+# watchdog
 
 A Non-Maskable Interrupt (NMI) based hard lockup detection watchdog for system monitoring.
 
 ## Overview
 
-axwatchdog is a hard lockup detection implementation that uses NMI mechanisms to periodically trigger interrupts and monitor system state. When a hard lockup occurs, the watchdog can trigger appropriate handling mechanisms.
+watchdog is a hard lockup detection implementation that uses NMI mechanisms to periodically trigger interrupts and monitor system state. When a hard lockup occurs, the watchdog can trigger appropriate handling mechanisms.
 
 ## Usage
 
 ### Initialization
 
 ```rust
-use axwatchdog::nmi::{HARD_LOCKUP_THRESHOLD, init_primary, init_secondary};
+use watchdog::nmi::{HARD_LOCKUP_THRESHOLD, init_primary, init_secondary};
 // Initialize on primary core
 init_primary(HARD_LOCKUP_THRESHOLD)?;
 // Initialize on secondary cores (call when each secondary core boots)

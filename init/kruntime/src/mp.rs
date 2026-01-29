@@ -63,7 +63,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     khal::asm::enable_local();
 
     #[cfg(feature = "watchdog")]
-    axwatchdog::init_secondary();
+    watchdog::init_secondary();
 
     ktask::run_idle();
 }

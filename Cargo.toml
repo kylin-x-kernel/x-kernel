@@ -42,7 +42,7 @@ memspace = { path = "mm/memspace" }
 knet = { path = "net/knet" }
 ksync = { path = "core/ksync" }
 ktask = { path = "core/ktask" }
-axwatchdog = { path = "io/axwatchdog" }
+watchdog = { path = "io/watchdog" }
 kcpu = { path = "arch/kcpu" }
 
 # x-kernel Crates

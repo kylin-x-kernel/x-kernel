@@ -1,9 +1,9 @@
 [package]
-name = "axwatchdog"
-version = "0.1.0"
-edition = "2024"
-authors = ["ZhiXian Luo <luozhixian@kylinos.cn>"]
-license = "Apache-2.0"
+name = "watchdog"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "Watchdog timer with NMI support for embedded systems"
 keywords = ["watchdog", "nmi", "embedded", "no_std"]
 categories = ["no-std", "embedded", "hardware-support"]

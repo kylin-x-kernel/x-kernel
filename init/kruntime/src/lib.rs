@@ -212,7 +212,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     init_interrupt();
 
     #[cfg(feature = "watchdog")]
-    axwatchdog::init_primary();
+    watchdog::init_primary();
 
     kinit_setup::init_cb();
 
