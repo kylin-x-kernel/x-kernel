@@ -7,7 +7,7 @@ use ksync::Mutex;
 use ktask::current;
 use linux_raw_sys::general::*;
 use starry_core::{shm::IpcPerm, task::AsThread};
-use starry_process::Pid;
+use kprocess::Pid;
 use starry_vm::{VmMutPtr, VmPtr, vm_load, vm_write_slice};
 
 use super::{

@@ -26,7 +26,7 @@ use lazy_static::lazy_static;
 use memspace::AddrSpace;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
-use starry_process::{Pid, Process, ProcessGroup, Session};
+use kprocess::{Pid, Process, ProcessGroup, Session};
 use starry_signal::{
     SignalInfo, Signo,
     api::{ProcessSignalManager, SignalActions, ThreadSignalManager},

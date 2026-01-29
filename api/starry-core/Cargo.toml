@@ -40,7 +40,7 @@ percpu = { workspace = true }
 scope-local.workspace = true
 slab.workspace = true
 spin.workspace = true
-starry-process.workspace = true
+kprocess.workspace = true
 starry-signal.workspace = true
 starry-vm.workspace = true
 strum = { version = "0.27.2", default-features = false, features = ["derive"] }

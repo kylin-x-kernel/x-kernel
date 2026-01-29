@@ -12,7 +12,7 @@ use linux_raw_sys::{
 };
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::backend::SharedPages;
-use starry_process::Pid;
+use kprocess::Pid;
 /// Data structure used to pass permission information to IPC operations.
 #[repr(C)]
 #[derive(Clone, Copy, AnyBitPattern)]

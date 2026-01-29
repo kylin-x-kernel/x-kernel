@@ -14,7 +14,7 @@ use starry_core::{
     },
     time::TimerState,
 };
-use starry_process::Pid;
+use kprocess::Pid;
 use starry_signal::{SignalInfo, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 

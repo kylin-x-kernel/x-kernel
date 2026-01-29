@@ -19,7 +19,7 @@ use starry_core::{
         SimpleFileOperation, SimpleFs,
     },
 };
-use starry_process::Process;
+use kprocess::Process;
 
 use crate::file::FD_TABLE;
 

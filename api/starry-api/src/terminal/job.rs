@@ -6,7 +6,7 @@ use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ktask::current;
 use starry_core::task::AsThread;
-use starry_process::{ProcessGroup, Session};
+use kprocess::{ProcessGroup, Session};
 
 pub struct JobControl {
     foreground: SpinNoIrq<Weak<ProcessGroup>>,

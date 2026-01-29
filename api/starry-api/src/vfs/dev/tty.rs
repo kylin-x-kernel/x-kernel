@@ -10,7 +10,7 @@ use ktask::{
     future::{block_on, poll_io},
 };
 use starry_core::{task::AsThread, vfs::SimpleFs};
-use starry_process::Process;
+use kprocess::Process;
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{

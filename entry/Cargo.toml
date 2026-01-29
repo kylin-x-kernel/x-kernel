@@ -85,7 +85,7 @@ ktask.workspace = true
 cfg-if.workspace = true
 linkme.workspace = true
 linux-raw-sys.workspace = true
-starry-process.workspace = true
+kprocess.workspace = true
 starry-signal.workspace = true
 
 starry-core.workspace = true

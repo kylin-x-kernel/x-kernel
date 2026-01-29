@@ -3,7 +3,7 @@ use khal::time::TimeValue;
 use ktask::current;
 use linux_raw_sys::general::{__kernel_old_timeval, RLIM_NLIMITS, rlimit64, rusage};
 use starry_core::task::{AsThread, Thread, get_process_data, get_task};
-use starry_process::Pid;
+use kprocess::Pid;
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::time::TimeValueLike;

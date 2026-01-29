@@ -64,7 +64,7 @@ kspin = { path = "sync/kspin" }
 starry-signal = { version = "0.2", path = "process/starry-signal" }
 starry-core = { path = "api/starry-core" }
 starry-api = { path = "api/starry-api" }
-starry-process = { path = "process/starry-process" }
+kprocess = { path = "process/kprocess" }
 starry-vm = { path = "process/starry-vm" }
 
 # Platform Abstraction Layer
