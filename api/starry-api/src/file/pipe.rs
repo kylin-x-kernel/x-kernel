@@ -21,7 +21,6 @@ use ringbuf::{
     traits::{Consumer, Observer, Producer},
 };
 use starry_core::task::{AsThread, send_signal_to_process};
-use starry_signal::{SignalInfo, Signo};
 
 use super::{FileLike, Kstat};
 use crate::file::{IoDst, IoSrc};

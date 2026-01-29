@@ -9,7 +9,6 @@ use ktask::current;
 use linux_raw_sys::general::*;
 use osvm::{VirtMutPtr, VirtPtr, load_vec, write_vm_mem};
 use starry_core::{shm::IpcPerm, task::AsThread};
-use starry_process::Pid;
 
 use super::{
     IPC_CREAT, IPC_EXCL, IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, MSG_INFO, MSG_STAT,

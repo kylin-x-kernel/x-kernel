@@ -27,7 +27,7 @@ impl From<MemError> for AxError {
 pub type MemResult<T = ()> = Result<T, MemError>;
 
 #[extern_trait(MemImpl)]
-pub unsafe trait VirtMemIo {
+pub unsafe trait VirtMemIo: 'static {
     fn new() -> Self;
     fn read_mem(&mut self, addr: usize, out: &mut [MaybeUninit<u8>]) -> MemResult;
     fn write_mem(&mut self, addr: usize, src: &[u8]) -> MemResult;

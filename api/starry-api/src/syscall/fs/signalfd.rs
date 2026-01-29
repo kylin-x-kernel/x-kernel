@@ -3,7 +3,6 @@ use bitflags::bitflags;
 use ksignal::SignalSet;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtPtr;
-use starry_signal::SignalSet;
 
 use crate::{
     file::{FileLike, add_file_like, signalfd::Signalfd},

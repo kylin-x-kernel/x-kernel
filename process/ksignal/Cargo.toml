@@ -20,5 +20,5 @@ linux-raw-sys = { workspace = true, default-features = false, features = [
     "no_std",
 ] }
 log = { workspace = true }
-starry-vm = {workspace = true}
+osvm = {workspace = true}
 strum = { workspace = true }

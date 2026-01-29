@@ -14,8 +14,6 @@ use starry_core::{
     mm::copy_from_kernel,
     task::{AsThread, ProcessData, Thread, add_task_to_table},
 };
-use starry_process::Pid;
-use starry_signal::Signo;
 
 use crate::{
     file::{FD_TABLE, FileLike, PidFd},

@@ -13,7 +13,6 @@ use linux_raw_sys::general::{
 };
 use osvm::{VirtMutPtr, VirtPtr};
 use starry_core::task::AsThread;
-use starry_process::{Pid, Process};
 
 bitflags! {
     #[derive(Debug)]
