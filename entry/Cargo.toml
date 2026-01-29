@@ -48,6 +48,7 @@ aarch64_qemu_virt = [
     "kernel",
     "qemu",
     "smp",
+    "kfeat/watchdog",
     "dep:aarch64-qemu-virt",
 ]
 

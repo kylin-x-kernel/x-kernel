@@ -41,7 +41,7 @@ extern crate log;
 #[macro_use]
 extern crate memaddr;
 
-//mod dummy;
+// mod dummy;
 
 pub mod dtb;
 pub mod mem;

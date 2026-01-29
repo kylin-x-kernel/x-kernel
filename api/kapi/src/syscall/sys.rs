@@ -59,9 +59,7 @@ const fn pad_str(info: &str) -> [c_char; 65] {
     }
     data
 }
-const VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-);
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"),);
 
 const UTSNAME: new_utsname = new_utsname {
     sysname: pad_str("kylin-x"),

@@ -56,12 +56,11 @@ fn main() {
 extern crate aarch64_crosvm_virt;
 #[cfg(feature = "aarch64_qemu_virt")]
 extern crate aarch64_qemu_virt;
-#[cfg(feature = "x86_64_qemu_virt")]
-extern crate x86_64_qemu_virt;
-#[cfg(feature = "riscv64_qemu_virt")]
-extern crate riscv64_qemu_virt;
 #[cfg(feature = "loongarch64_qemu_virt")]
 extern crate loongarch64_qemu_virt;
+#[cfg(feature = "riscv64_qemu_virt")]
+extern crate riscv64_qemu_virt;
+#[cfg(feature = "x86_64_qemu_virt")]
+extern crate x86_64_qemu_virt;
 #[cfg(feature = "x86_csv")]
 extern crate x86_csv;
-
