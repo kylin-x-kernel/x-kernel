@@ -67,7 +67,7 @@ scope-local.workspace = true
 slab.workspace = true
 spin.workspace = true
 kprocess.workspace = true
-starry-signal.workspace = true
+signal.workspace = true
 starry-vm.workspace = true
 syscalls = { workspace = true, default-features = false }
 zerocopy = { version = "0.8.26", features = ["derive"] }
