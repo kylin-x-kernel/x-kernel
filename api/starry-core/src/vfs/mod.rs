@@ -7,11 +7,11 @@ mod fs;
 
 use alloc::sync::Arc;
 
-use fs_ng_vfs::{DirNodeOps, FileNodeOps, WeakDirEntry};
 pub use dev::*;
 pub use dir::*;
 pub use file::*;
 pub use fs::*;
+use fs_ng_vfs::{DirNodeOps, FileNodeOps, WeakDirEntry};
 
 /// A callback that builds a `Arc<dyn DirNodeOps>` for a given
 /// `WeakDirEntry`.

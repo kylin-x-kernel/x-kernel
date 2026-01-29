@@ -2,8 +2,8 @@ use alloc::{borrow::Cow, boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use axerrno::{AxError, AxResult};
-use fs_ng_vfs::{DeviceId, NodeType, VfsResult};
 use flatten_objects::FlattenObjects;
+use fs_ng_vfs::{DeviceId, NodeType, VfsResult};
 use kspin::SpinNoIrq;
 use starry_core::vfs::{Device, NodeOpsMux, SimpleDirOps, SimpleFs};
 

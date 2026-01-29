@@ -1,11 +1,11 @@
 use alloc::{sync::Arc, vec};
 use core::{any::Any, mem, ops::Deref, task::Context};
 
+use fatfs::{Read, Seek, SeekFrom, Write};
 use fs_ng_vfs::{
     FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodeType,
     VfsError, VfsResult,
 };
-use fatfs::{Read, Seek, SeekFrom, Write};
 use kpoll::{IoEvents, Pollable};
 
 use super::{
