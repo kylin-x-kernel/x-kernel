@@ -1,7 +1,7 @@
 use axerrno::{AxError, AxResult};
+use kprocess::Pid;
 use ktask::current;
 use starry_core::task::{AsThread, get_process_data, get_process_group};
-use kprocess::Pid;
 
 pub fn sys_getsid(pid: Pid) -> AxResult<isize> {
     Ok(get_process_data(pid)?.proc.group().session().sid() as _)

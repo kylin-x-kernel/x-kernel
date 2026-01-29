@@ -3,10 +3,10 @@ use core::task::Context;
 
 use axerrno::{AxResult, ax_bail};
 use kpoll::{IoEvents, PollSet, Pollable};
+use kprocess::{ProcessGroup, Session};
 use kspin::SpinNoIrq;
 use ktask::current;
 use starry_core::task::AsThread;
-use kprocess::{ProcessGroup, Session};
 
 pub struct JobControl {
     foreground: SpinNoIrq<Weak<ProcessGroup>>,

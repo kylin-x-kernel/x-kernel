@@ -20,13 +20,13 @@ use axerrno::{AxError, AxResult};
 use extern_trait::extern_trait;
 use hashbrown::HashMap;
 use kpoll::PollSet;
+use kprocess::{Pid, Process, ProcessGroup, Session};
 use ksync::{Mutex, spin::SpinNoIrq};
 use ktask::{KtaskRef, TaskExt, TaskInner, WeakKtaskRef, current};
 use lazy_static::lazy_static;
 use memspace::AddrSpace;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
-use kprocess::{Pid, Process, ProcessGroup, Session};
 use starry_signal::{
     SignalInfo, Signo,
     api::{ProcessSignalManager, SignalActions, ThreadSignalManager},

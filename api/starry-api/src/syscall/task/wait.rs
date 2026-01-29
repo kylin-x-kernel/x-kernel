@@ -3,6 +3,7 @@ use core::{future::poll_fn, task::Poll};
 
 use axerrno::{AxError, AxResult, LinuxError};
 use bitflags::bitflags;
+use kprocess::{Pid, Process};
 use ktask::{
     current,
     future::{block_on, interruptible},
@@ -11,7 +12,6 @@ use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
 use starry_core::task::AsThread;
-use kprocess::{Pid, Process};
 use starry_vm::{VmMutPtr, VmPtr};
 
 bitflags! {

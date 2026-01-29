@@ -5,6 +5,7 @@ use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use axerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
 use khal::{paging::MappingFlags, time::monotonic_time_nanos};
+use kprocess::Pid;
 use ksync::Mutex;
 use linux_raw_sys::{
     ctypes::{c_long, c_ushort},
@@ -12,7 +13,6 @@ use linux_raw_sys::{
 };
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::backend::SharedPages;
-use kprocess::Pid;
 /// Data structure used to pass permission information to IPC operations.
 #[repr(C)]
 #[derive(Clone, Copy, AnyBitPattern)]

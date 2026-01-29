@@ -5,6 +5,7 @@ use alloc::{
 
 use axfs::FS_CONTEXT;
 use khal::uspace::UserContext;
+use kprocess::{Pid, Process};
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
 use starry_api::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
@@ -12,7 +13,6 @@ use starry_core::{
     mm::{copy_from_kernel, load_user_app, new_user_aspace_empty},
     task::{ProcessData, Thread, add_task_to_table},
 };
-use kprocess::{Pid, Process};
 
 pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
     let mut uspace = new_user_aspace_empty()

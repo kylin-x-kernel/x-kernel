@@ -11,6 +11,7 @@ use core::{ffi::CStr, iter};
 
 use axfs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
 use indoc::indoc;
+use kprocess::Process;
 use ktask::{KtaskRef, WeakKtaskRef, current};
 use starry_core::{
     task::{AsThread, TaskStat, get_task, tasks},
@@ -19,7 +20,6 @@ use starry_core::{
         SimpleFileOperation, SimpleFs,
     },
 };
-use kprocess::Process;
 
 use crate::file::FD_TABLE;
 
