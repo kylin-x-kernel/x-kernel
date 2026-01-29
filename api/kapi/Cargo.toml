@@ -15,7 +15,6 @@ vsock = ["knet/vsock"]
 dev-log = []
 dice = ["dep:aarch64-crosvm-virt", "kalloc/dice", "dep:rand_chacha"]
 tee = ["linux_sysno/tee", "dep:tee_raw_sys", "dep:bincode", "dep:uuid", "dep:hex"]
-tee_test = []
 tee_test_mock_user_access = []
 
 [dependencies]

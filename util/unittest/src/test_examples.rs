@@ -66,13 +66,13 @@ tests! {
 }
 
 // This is a simulated main function to demonstrate how to run tests
-pub fn tee_test_example() {
+pub fn test_example() {
     let mut runner = TestRunner::new();
     run_tests!(runner, TEST_SUITE);
     let stats = runner.get_stats();
 
     // Print final statistics
-    info!(
+    warn!(
         "Final Test Stats: total={}, passed={}, failed={}, ignored={}",
         stats.total, stats.passed, stats.failed, stats.ignored
     );

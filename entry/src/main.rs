@@ -30,6 +30,15 @@ fn main() {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let envs = [];
+
+    #[cfg(feature = "test")]
+    {
+        use unittest::test_example;
+
+        info!("Running tests...");
+        test_example();
+    }
+
     let exit_code = entry::run_initproc(&args, &envs);
     info!("Init process exited with code: {exit_code:?}");
 

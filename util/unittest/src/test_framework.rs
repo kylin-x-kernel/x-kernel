@@ -235,7 +235,7 @@ impl TestRunner {
     }
 
     fn print_message(&self, msg: &str) {
-        info!("{}", msg);
+        warn!("{}", msg);
     }
 
     fn print_error(&self, msg: &str) {

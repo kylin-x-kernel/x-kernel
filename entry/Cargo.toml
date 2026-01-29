@@ -10,7 +10,7 @@ homepage.workspace = true
 [features]
 default = []
 tee = ["kapi/tee", "kcore/tee"]
-tee_test = ["tee", "kapi/tee_test"]
+test = ["unittest"]
 qemu = [
     "kfeat/display",
     "kfeat/input",
@@ -22,10 +22,11 @@ qemu = [
     "kfeat/defplat-aarch64",
     "kfeat/bus-pci",
 
-    # auxilary features
     "kfeat/fs-times",
     "kapi/dev-log",
+    "test",
 ]
+
 smp = ["kfeat/smp"]
 
 # vf2 = ["dep:kplat-riscv64-visionfive2", "kfeat/driver-sdmmc"]
@@ -88,6 +89,8 @@ ksignal.workspace = true
 
 kcore.workspace = true
 kapi.workspace = true
+
+unittest = {workspace = true, optional = true}
 
 [dependencies.aarch64-crosvm-virt]
 workspace = true

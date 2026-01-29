@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["entry", "util/macros"]
+members = ["entry"]
 exclude = []
 
 [workspace.package]
@@ -11,12 +11,12 @@ license = "Apache-2.0"
 authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
 homepage = "https://gitee.com/openkylin/x-kernel"
 repository = "https://gitee.com/openkylin/x-kernel"
+documentation = "https://gitee.com/openkylin/x-kernel"
 keywords = ["kylin-x-kernel", "kernel"]
 categories = ["os", "no-std"]
-documentation = "https://gitee.com/openkylin/x-kernel"
 
 [workspace.dependencies]
-# Kernel Modules
+# x-kernel Modules
 kfeat = { path = "api/kfeat", features = [
     "alloc-slab",
     "fp-simd",
@@ -125,3 +125,4 @@ platconfig-macros = { path = "util/platconfig-macros" }
 klogger = { path = "util/klogger" }
 backtrace = { path = "util/backtrace" }
 kerrno = { path = "util/kerrno" }
+unittest = { path = "util/unittest" }

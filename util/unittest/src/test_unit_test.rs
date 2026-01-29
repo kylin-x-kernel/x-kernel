@@ -15,6 +15,6 @@ pub fn tee_test_unit() {
     if tests_failed() {
         error!("!!! SOME TESTS FAILED, NEED TO BE FIXED !!!");
     } else {
-        info!("!!! ALL TESTS PASSED !!!");
+        warn!("!!! ALL TESTS PASSED !!!");
     }
 }
