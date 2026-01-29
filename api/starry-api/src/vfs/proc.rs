@@ -122,7 +122,7 @@ impl SimpleDirOps for ProcessTaskDir {
         )))
     }
 
-    fn is_cacheable(&self) -> bool {
+    fn supports_dentry_cache(&self) -> bool {
         false
     }
 }
@@ -178,7 +178,7 @@ impl SimpleDirOps for ThreadFdDir {
         Ok(SimpleFile::new(fs, NodeType::Symlink, move || Ok(path.clone())).into())
     }
 
-    fn is_cacheable(&self) -> bool {
+    fn supports_dentry_cache(&self) -> bool {
         false
     }
 }
@@ -312,7 +312,7 @@ impl SimpleDirOps for ThreadDir {
         })
     }
 
-    fn is_cacheable(&self) -> bool {
+    fn supports_dentry_cache(&self) -> bool {
         false
     }
 }
@@ -347,7 +347,7 @@ impl SimpleDirOps for ProcFsHandler {
         Ok(node)
     }
 
-    fn is_cacheable(&self) -> bool {
+    fn supports_dentry_cache(&self) -> bool {
         false
     }
 }

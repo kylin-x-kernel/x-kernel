@@ -95,7 +95,7 @@ enum Node {
 }
 
 impl Node {
-    pub fn clone_inner(&self) -> Arc<dyn NodeOps> {
+    pub fn clone_ops_arc(&self) -> Arc<dyn NodeOps> {
         match self {
             Node::File(file) => file.inner().clone(),
             Node::Dir(dir) => dir.inner().clone(),
@@ -123,6 +123,10 @@ impl fmt::Debug for Node {
     }
 }
 
+/// Key type for dentry cache lookups.
+///
+/// Combines the parent's inode number and the entry name to uniquely identify
+/// a directory entry within its parent directory.
 pub type ReferenceKey = (usize, String);
 
 #[derive(Debug)]
@@ -267,7 +271,7 @@ impl DirEntry {
     pub fn downcast<T: NodeOps>(&self) -> VfsResult<Arc<T>> {
         self.0
             .node
-            .clone_inner()
+            .clone_ops_arc()
             .into_any()
             .downcast()
             .map_err(|_| VfsError::InvalidInput)

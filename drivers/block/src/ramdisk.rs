@@ -34,7 +34,7 @@ impl RamDisk {
     /// The size is rounded up to be aligned to the block size (512 bytes).
     pub fn new(size_hint: usize) -> Self {
         let size = align_up(size_hint);
-        let layout = Layout::from_size_align_unchecked(size, BLOCK_SIZE);
+        let layout = unsafe { Layout::from_size_align_unchecked(size, BLOCK_SIZE) };
 
         // Allocate the memory and create a NonNull pointer to the RAM disk buffer.
         let ptr = unsafe { NonNull::new_unchecked(alloc_zeroed(layout)) };

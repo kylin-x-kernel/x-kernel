@@ -47,15 +47,29 @@ pub trait DirNodeOps: NodeOps {
 
     /// Returns whether directory entries can be cached.
     ///
-    /// Some filesystems (like '/proc') may not support caching directory
-    /// entries, as they may change frequently or not be backed by persistent
-    /// storage.
+    /// Some filesystems may not support caching directory entries because:
+    /// - Entries change frequently (e.g., `/proc`, `/sys`)
+    /// - Entries are dynamically generated
+    /// - The filesystem doesn't have persistent storage
     ///
-    /// If this returns `false`, the directory will not be cached in dentry and
-    /// each call to [`DirNode::lookup`] will end up calling [`lookup`].
-    /// Implementations should take care to dispatch_irq cases where [`lookup`] is
-    /// called multiple times for the same name.
-    fn is_cacheable(&self) -> bool {
+    /// # Behavior
+    ///
+    /// - If `true` (default): `DirNode` maintains a dentry cache for fast lookups
+    /// - If `false`: Every lookup calls this trait's `lookup()` method directly
+    ///
+    /// # Implementation Notes
+    ///
+    /// When returning `false`, implementations should:
+    /// - Handle repeated lookups efficiently
+    /// - Ensure thread-safety for concurrent lookups
+    /// - Consider caching at the filesystem level if needed
+    ///
+    /// # Examples
+    ///
+    /// - Regular filesystems (ext4, FAT): return `true`
+    /// - Dynamic filesystems (/proc, /sys): return `false`
+    /// - Device filesystems (/dev): typically return `true`
+    fn supports_dentry_cache(&self) -> bool {
         true
     }
 
@@ -116,8 +130,8 @@ impl Default for OpenOptions {
 
 pub struct DirNode {
     ops: Arc<dyn DirNodeOps>,
-    cache: Mutex<DirChildren>,
-    pub(crate) mountpoint: Mutex<Option<Arc<Mountpoint>>>,
+    dentry_cache: Mutex<DirChildren>,
+    pub(crate) mount_at_this_dir: Mutex<Option<Arc<Mountpoint>>>,
 }
 
 impl Deref for DirNode {
@@ -138,8 +152,8 @@ impl DirNode {
     pub fn new(ops: Arc<dyn DirNodeOps>) -> Self {
         Self {
             ops,
-            cache: Mutex::default(),
-            mountpoint: Mutex::default(),
+            dentry_cache: Mutex::default(),
+            mount_at_this_dir: Mutex::default(),
         }
     }
 
@@ -169,7 +183,7 @@ impl DirNode {
             Entry::Occupied(e) => Ok(e.get().clone()),
             Entry::Vacant(e) => {
                 let node = self.ops.lookup(name)?;
-                if self.ops.is_cacheable() {
+                if self.ops.supports_dentry_cache() {
                     e.insert(node.clone());
                 }
                 Ok(node)
@@ -183,8 +197,8 @@ impl DirNode {
             return Err(VfsError::NameTooLong);
         }
         // Fast path
-        if self.ops.is_cacheable() {
-            self.lookup_locked(name, &mut self.cache.lock())
+        if self.ops.supports_dentry_cache() {
+            self.lookup_locked(name, &mut self.dentry_cache.lock())
         } else {
             self.ops.lookup(name)
         }
@@ -192,8 +206,8 @@ impl DirNode {
 
     /// Looks up a directory entry by name in cache.
     pub fn lookup_cache(&self, name: &str) -> Option<DirEntry> {
-        if self.ops.is_cacheable() {
-            self.cache.lock().get(name).cloned()
+        if self.ops.supports_dentry_cache() {
+            self.dentry_cache.lock().get(name).cloned()
         } else {
             None
         }
@@ -201,8 +215,8 @@ impl DirNode {
 
     /// Inserts a directory entry into the cache.
     pub fn insert_cache(&self, name: String, entry: DirEntry) -> Option<DirEntry> {
-        if self.ops.is_cacheable() {
-            self.cache.lock().insert(name, entry)
+        if self.ops.supports_dentry_cache() {
+            self.dentry_cache.lock().insert(name, entry)
         } else {
             None
         }
@@ -217,7 +231,9 @@ impl DirNode {
         verify_entry_name(name)?;
 
         self.ops.link(name, node).inspect(|entry| {
-            self.cache.lock().insert(name.to_owned(), entry.clone());
+            self.dentry_cache
+                .lock()
+                .insert(name.to_owned(), entry.clone());
         })
     }
 
@@ -225,7 +241,7 @@ impl DirNode {
     pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
         verify_entry_name(name)?;
 
-        let mut children = self.cache.lock();
+        let mut children = self.dentry_cache.lock();
         let entry = self.lookup_locked(name, &mut children)?;
         match (entry.is_dir(), is_dir) {
             (true, false) => return Err(VfsError::IsADirectory),
@@ -272,7 +288,7 @@ impl DirNode {
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
         verify_entry_name(name)?;
-        self.create_locked(name, node_type, permission, &mut self.cache.lock())
+        self.create_locked(name, node_type, permission, &mut self.dentry_cache.lock())
     }
 
     fn lock_both_cache<'a>(
@@ -282,11 +298,11 @@ impl DirNode {
         MutexGuard<'a, DirChildren>,
         Option<MutexGuard<'a, DirChildren>>,
     ) {
-        let src_children = self.cache.lock();
+        let src_children = self.dentry_cache.lock();
         let dst_children = if core::ptr::eq(self, other) {
             None
         } else {
-            Some(other.cache.lock())
+            Some(other.dentry_cache.lock())
         };
         (src_children, dst_children)
     }
@@ -334,7 +350,7 @@ impl DirNode {
     pub fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<DirEntry> {
         verify_entry_name(name)?;
 
-        let mut children = self.cache.lock();
+        let mut children = self.dentry_cache.lock();
         match self.lookup_locked(name, &mut children) {
             Ok(val) => {
                 if options.create_new {
@@ -357,17 +373,17 @@ impl DirNode {
     }
 
     pub fn mountpoint(&self) -> Option<Arc<Mountpoint>> {
-        self.mountpoint.lock().clone()
+        self.mount_at_this_dir.lock().clone()
     }
 
     pub fn is_mountpoint(&self) -> bool {
-        self.mountpoint.lock().is_some()
+        self.mount_at_this_dir.lock().is_some()
     }
 
     /// Clears the cache of directory entries & user data, allowing them to be
     /// released.
     pub(crate) fn forget(&self) {
-        for (_, child) in mem::take(self.cache.lock().deref_mut()) {
+        for (_, child) in mem::take(self.dentry_cache.lock().deref_mut()) {
             if let Ok(dir) = child.as_dir() {
                 dir.forget();
             }

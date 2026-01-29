@@ -25,8 +25,9 @@ pub struct Mountpoint {
     root: DirEntry,
     /// Location in the parent mountpoint.
     location: Option<Location>,
-    /// Children of the mountpoint.
-    children: Mutex<HashMap<ReferenceKey, Weak<Self>>>,
+    /// Children of the mountpoint - tracks nested mounts under this mountpoint.
+    /// Maps from directory entry keys to weak references to child mountpoints.
+    child_mounts: Mutex<HashMap<ReferenceKey, Weak<Self>>>,
     /// Device ID
     device: u64,
 }
@@ -39,7 +40,7 @@ impl Mountpoint {
         Arc::new(Self {
             root,
             location: location_in_parent,
-            children: Mutex::default(),
+            child_mounts: Mutex::default(),
             device: DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed),
         })
     }
@@ -61,13 +62,25 @@ impl Mountpoint {
         self.location.is_none()
     }
 
-    /// Returns the effective mountpoint.
+    /// Returns the effective (visible) mountpoint by traversing the mount chain.
     ///
-    /// For example, first `mount /dev/sda1 /mnt` and then `mount /dev/sda2
-    /// /mnt`. After the second mount is completed, the content of the first
-    /// mount will be overridden (root mount -> mnt1 -> mnt2). We need to
-    /// return `mnt2` for `mnt1.effective_mountpoint()`.
-    pub(crate) fn effective_mountpoint(self: &Arc<Self>) -> Arc<Mountpoint> {
+    /// When multiple filesystems are mounted at the same location, they form a chain
+    /// where each new mount hides the previous one. This method traverses the chain
+    /// to find the final, visible mountpoint.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// mount /dev/sda1 /mnt  -> creates mountpoint A
+    /// mount /dev/sda2 /mnt  -> creates mountpoint B at A's root
+    /// A.resolve_final_mount() -> returns B (the visible mount)
+    /// ```
+    ///
+    /// # Implementation
+    ///
+    /// Follows the chain: root mount -> mnt1 -> mnt2 -> ... -> final mount
+    /// by checking if each root directory has a mountpoint attached.
+    pub(crate) fn resolve_final_mount(self: &Arc<Self>) -> Arc<Mountpoint> {
         let mut mountpoint = self.clone();
         while let Some(mount) = mountpoint.root.as_dir().unwrap().mountpoint() {
             mountpoint = mount;
@@ -121,7 +134,7 @@ impl Location {
         Self { mountpoint, entry }
     }
 
-    fn wrap(&self, entry: DirEntry) -> Self {
+    fn with_entry(&self, entry: DirEntry) -> Self {
         Self::new(self.mountpoint.clone(), entry)
     }
 
@@ -143,7 +156,7 @@ impl Location {
 
     pub fn parent(&self) -> Option<Self> {
         if !self.is_root_of_mount() {
-            return Some(self.wrap(self.entry.parent().unwrap()));
+            return Some(self.with_entry(self.entry.parent().unwrap()));
         }
         self.mountpoint.location()?.parent()
     }
@@ -189,12 +202,12 @@ impl Location {
         self.entry.as_dir().is_ok_and(|it| it.is_mountpoint())
     }
 
-    /// See [`Mountpoint::effective_mountpoint`].
-    fn resolve_mountpoint(self) -> Self {
+    /// See [`Mountpoint::resolve_final_mount`].
+    fn resolve_final_mount(self) -> Self {
         let Some(mountpoint) = self.entry.as_dir().ok().and_then(|it| it.mountpoint()) else {
             return self;
         };
-        let mountpoint = mountpoint.effective_mountpoint();
+        let mountpoint = mountpoint.resolve_final_mount();
         let entry = mountpoint.root.clone();
         Self::new(mountpoint, entry)
     }
@@ -205,7 +218,7 @@ impl Location {
             DOTDOT => self.parent().unwrap_or_else(|| self.clone()),
             _ => {
                 let loc = Self::new(self.mountpoint.clone(), self.entry.as_dir()?.lookup(name)?);
-                loc.resolve_mountpoint()
+                loc.resolve_final_mount()
             }
         })
     }
@@ -219,7 +232,7 @@ impl Location {
         self.entry
             .as_dir()?
             .create(name, node_type, permission)
-            .map(|entry| self.wrap(entry))
+            .map(|entry| self.with_entry(entry))
     }
 
     pub fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
@@ -229,7 +242,7 @@ impl Location {
         self.entry
             .as_dir()?
             .link(name, &node.entry)
-            .map(|entry| self.wrap(entry))
+            .map(|entry| self.with_entry(entry))
     }
 
     pub fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
@@ -252,7 +265,7 @@ impl Location {
         self.entry
             .as_dir()?
             .open_file(name, options)
-            .map(|entry| self.wrap(entry).resolve_mountpoint())
+            .map(|entry| self.with_entry(entry).resolve_final_mount())
     }
 
     pub fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
@@ -260,14 +273,14 @@ impl Location {
     }
 
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {
-        let mut mountpoint = self.entry.as_dir()?.mountpoint.lock();
+        let mut mountpoint = self.entry.as_dir()?.mount_at_this_dir.lock();
         if mountpoint.is_some() {
             return Err(VfsError::ResourceBusy);
         }
         let result = Mountpoint::new(fs, Some(self.clone()));
         *mountpoint = Some(result.clone());
         self.mountpoint
-            .children
+            .child_mounts
             .lock()
             .insert(self.entry.key(), Arc::downgrade(&result));
         Ok(result)
@@ -277,13 +290,13 @@ impl Location {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
-        if !self.mountpoint.children.lock().is_empty() {
+        if !self.mountpoint.child_mounts.lock().is_empty() {
             return Err(VfsError::ResourceBusy);
         }
         assert!(self.entry.ptr_eq(&self.mountpoint.root));
         self.entry.as_dir()?.forget();
         if let Some(parent_loc) = &self.mountpoint.location {
-            *parent_loc.entry.as_dir()?.mountpoint.lock() = None;
+            *parent_loc.entry.as_dir()?.mount_at_this_dir.lock() = None;
         }
         Ok(())
     }
@@ -292,7 +305,7 @@ impl Location {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
-        let children = mem::take(&mut *self.mountpoint.children.lock());
+        let children = mem::take(&mut *self.mountpoint.child_mounts.lock());
         for (_, child) in children {
             if let Some(child) = child.upgrade() {
                 child.root_location().unmount_all()?;
