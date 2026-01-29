@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(maybe_uninit_as_bytes)]
+#![allow(clippy::missing_safety_doc)]
 
 use core::{mem::MaybeUninit, slice};
 

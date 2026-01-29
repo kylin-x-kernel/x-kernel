@@ -8,11 +8,14 @@ use crate::{MemError, MemImpl, MemResult, VirtMemIo, read_vm_mem};
 pub unsafe fn load_vec_unsafe<T>(p: *const T, count: usize) -> MemResult<Vec<T>> {
     let mut v = Vec::with_capacity(count);
     read_vm_mem(p, &mut v.spare_capacity_mut()[..count])?;
+    // SAFETY: We have just initialized `count` elements.
     unsafe { v.set_len(count) }
     Ok(v)
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn load_vec<T: AnyBitPattern>(p: *const T, count: usize) -> MemResult<Vec<T>> {
+    // SAFETY: The caller must ensure that `p` is valid for reading `count` elements.
     unsafe { load_vec_unsafe(p, count) }
 }
 
