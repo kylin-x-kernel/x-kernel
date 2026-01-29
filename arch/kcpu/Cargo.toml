@@ -1,16 +1,12 @@
 [package]
 name = "kcpu"
-version = "0.3.0"
-edition = "2021"
-authors.workspace = true
 description = "Privileged instruction and structure abstractions for various CPU architectures"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 license.workspace = true
-homepage = "https://github.com/kylin-x-kernel/kcpu"
-repository = "https://github.com/kylin-x-kernel/kcpu"
-documentation = "https://docs.rs/kcpu"
-keywords = ["xkernel", "cpu", "architecture", "hal"]
-categories = ["embedded", "no-std", "hardware-support", "os"]
-rust-version = "1.88.0"
+homepage.workspace = true
+repository.workspace = true
 
 [features]
 default = []

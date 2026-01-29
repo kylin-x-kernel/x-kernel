@@ -1,10 +1,12 @@
 [package]
 name = "alloc-engine"
-version = "0.1.2"
-edition = "2021"
 description = "Allocator implementations behind a unified interface"
-license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
-documentation = "https://kylin-x-kernel.github.io/alloc-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [features]
 default = ["page-alloc-256m"]

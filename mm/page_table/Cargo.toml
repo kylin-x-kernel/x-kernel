@@ -1,10 +1,12 @@
 [package]
 name = "page_table"
-version = "0.1.0"
-edition = "2024"
-authors.workspace = true
 description = "Unified page table implementation for multiarch."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [features]
 default = []

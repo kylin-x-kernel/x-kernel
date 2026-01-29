@@ -1,10 +1,7 @@
 [package]
 name = "x86-csv"
-version = "0.3.0"
 description = "Implementation of `kplat` hardware abstraction layer for x86 Standard PC machine."
-documentation = "https://docs.rs/kplat-x86-csv"
-keywords = ["os", "hal", "x86"]
-categories = ["no-std", "hardware-support", "os"]
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "kcore"
+description = "Core kernel crate for X-Kernel"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

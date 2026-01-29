@@ -1,10 +1,7 @@
 [package]
 name = "riscv64-qemu-virt"
-version = "0.3.0"
 description = "Implementation of `kplat` hardware abstraction layer for QEMU RISC-V virt board."
-documentation = "https://docs.rs/kplat-riscv64-qemu-virt"
-keywords = ["os", "hal", "embedded", "riscv"]
-categories = ["embedded", "no-std", "hardware-support", "os"]
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -22,7 +19,7 @@ lazyinit = "0.2"
 log = "0.4"
 riscv = "0.14"
 riscv_goldfish = { version = "0.1", optional = true }
-riscv_plic = { version = "0.2", optional = true }
+riscv_plic = { version = "0.2" }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
 uart_16550 = "0.4.0"
 

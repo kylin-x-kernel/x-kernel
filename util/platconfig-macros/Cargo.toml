@@ -1,12 +1,12 @@
 [package]
 name = "platconfig-macros"
-version = "0.1.0"
-edition = "2021"
-authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
 description = "Procedural macros for X-Kernel platform configuration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/kylin-x-kernel/x-kernel"
+repository.workspace = true
 
 [lib]
 name = "platconfig_macros"

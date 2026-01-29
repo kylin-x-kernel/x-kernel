@@ -1,12 +1,12 @@
 [package]
 name = "platconfig"
+description = "Platform-specific constants and parameters for X-Kernel"
 version.workspace = true
 edition.workspace = true
-authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
-description = "Platform-specific constants and parameters for X-Kernel"
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/kylin-x-kernel/x-kernel/tree/main/util/platconfig"
+repository.workspace = true
 
 [dependencies]
 platconfig-macros = { workspace = true }

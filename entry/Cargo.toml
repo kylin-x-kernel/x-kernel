@@ -2,7 +2,7 @@
 name = "entry"
 version.workspace = true
 edition.workspace = true
-authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
+authors.workspace = true
 description = "X TeeOS Entry Crate"
 license.workspace = true
 homepage.workspace = true

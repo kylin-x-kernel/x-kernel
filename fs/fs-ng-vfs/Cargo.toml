@@ -1,11 +1,12 @@
 [package]
 name = "fs-ng-vfs"
-version = "0.1.0"
-edition = "2024"
-authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
 description = "Virtual filesystem layer for x-kernel"
-keywords = ["vfs", "filesystem", "fs-ng", "x-kernel"]
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies]
 axerrno = { workspace = true}

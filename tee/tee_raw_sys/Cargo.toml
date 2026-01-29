@@ -1,16 +1,18 @@
 [package]
 name = "tee_raw_sys"
-version = "0.1.0"
-edition = "2024"
-authors = ["Weikang Guo <guoweikang.kernel@gmail.com>"]
-description = "A Tee raw sys for kernel"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Raw bindings for Trusted Execution Environment (TEE) in x-kernel."
 keywords = [
     "tee",
     "kernel",
     "nostd",
 ]
 
-documentation = "https://github.com/kylin-x-kernel/tee_raw_sys.git"
+documentation.workspace = true
 
 [dependencies]

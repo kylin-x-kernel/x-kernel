@@ -1,10 +1,11 @@
 [package]
 name = "backtrace"
-version = { workspace = true }
-authors = { workspace = true }
-repository = { workspace = true }
-license = { workspace = true }
-edition = { workspace = true }
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 keywords = ["DWARF", "debug", "backtrace", "unwinding", "x-kernel"]
 categories = ["development-tools::debugging"]
 description = "Backtrace Catching for X-kernel"

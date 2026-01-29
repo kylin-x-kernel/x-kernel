@@ -77,8 +77,8 @@ impl UserContext {
     ///
     /// This function returns when an exception or syscall occurs.
     pub fn run(&mut self) -> ReturnReason {
-        extern "C" {
-            fn enter_user(uctx: &mut UserContext) -> ArchTrap;
+        unsafe extern "C" {
+            unsafe fn enter_user(uctx: &mut UserContext) -> ArchTrap;
         }
 
         crate::instrs::disable_local(); // updated module reference from asm -> instrs

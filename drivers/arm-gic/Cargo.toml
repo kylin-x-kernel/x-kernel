@@ -1,25 +1,12 @@
 [package]
-edition = "2021"
 name = "arm-gic"
-version = "0.1.0"
-authors = [
-    "Weikang Guo <guoweikang.kernel@gmail.com>", 
-    "KylinSoft Co., Ltd. <https://www.kylinos.cn/>"
-    ]
 description = "Specialized ARM Generic Interrupt Controller driver optimized for x-kernel."
-readme = "README.md"
-keywords = [
-    "aarch64",
-    "gic",
-    "kernel-driver",
-    "interrupt-controller",
-]
-categories = [
-    "no-std",
-    "os-development",
-]
-license = "Apache-2.0"
-repository = "https://github.com/kylin-x-kernel/arm-gic.git"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies.bitflags]
 version = "2.1.0"

@@ -1,18 +1,12 @@
 [package]
 name = "aarch64-crosvm-virt"
-version = "0.2.0"
 description = "Implementation of `kplat` hardware abstraction layer for CROSVM ARM64 virtual machine."
-documentation = "https://docs.rs/kplat-aarch64-crosvm-virt"
-keywords = ["os", "hal", "embedded", "aarch64"]
-categories = ["embedded", "no-std", "hardware-support", "os"]
-edition = "2024"
-authors = [
-    "WeiKang Guo <guoweikang.kernel@gmail.com",
-    "KylinSoft Co., Ltd. <https://www.kylinos.cn/>"
-    ]
-license = "Apache-2.0"
-homepage = "https://github.com/kylin-x-kernel/kplat-aarch64-crosvm-virt.git"
-repository = "https://github.com/kylin-x-kernel/kplat-aarch64-crosvm-virt.git"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [features]
 fp-simd = ["kcpu/fp-simd"]

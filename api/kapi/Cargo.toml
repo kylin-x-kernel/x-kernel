@@ -1,5 +1,6 @@
 [package]
 name = "kapi"
+description = "Kernel API crate for X-Kernel"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

@@ -1,12 +1,11 @@
 [package]
 name = "kspin"
-version = { workspace = true }
-edition = { workspace = true }
-authors = { workspace = true }
-documentation = { workspace = true }
-license = { workspace = true }
-homepage = { workspace = true }
-repository = { workspace = true }
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 keywords = ["synchronization", "spinlock", "no-irq"]
 description = "Spinlocks used for kernel space that can disable preemption or IRQs in the critical section."
 categories = ["os", "no-std"]

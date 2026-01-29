@@ -1,11 +1,12 @@
 [package]
 name = "kipi"
+description = "X-Kernel Inter-Processor Communication API"
 version.workspace = true
 edition.workspace = true
-authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
-description = "X-Kernel Inter-Processor Communication API"
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
+repository.workspace = true
 
 [features]
 default = []
