@@ -50,6 +50,6 @@ ktask = { workspace = true }
 axwatchdog = { workspace = true, optional = true }
 chrono.workspace = true
 crate_interface.workspace = true
-ctor_bare.workspace = true
+kinit_setup.workspace = true
 indoc = "2"
 percpu.workspace = true

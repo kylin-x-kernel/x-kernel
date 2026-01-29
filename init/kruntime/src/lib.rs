@@ -214,7 +214,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(feature = "watchdog")]
     axwatchdog::init_primary();
 
-    ctor_bare::call_ctors();
+    kinit_setup::init_cb();
 
     info!("Primary CPU {cpu_id} init OK.");
     INITED_CPUS.fetch_add(1, Ordering::Release);

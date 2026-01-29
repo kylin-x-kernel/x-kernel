@@ -1,0 +1,20 @@
+[package]
+name = "macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+documentation.workspace = true
+description = "Macros for x-kernel."
+keywords = ["x-kernel", "macros"]
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+
+[lib]
+proc-macro = true

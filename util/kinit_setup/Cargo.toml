@@ -1,0 +1,15 @@
+[package]
+name = "kinit_setup"
+edition.workspace = true
+description = "Register init functions for x-kernel"
+documentation.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+macros = { workspace = true }
