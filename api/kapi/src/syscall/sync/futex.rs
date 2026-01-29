@@ -1,6 +1,10 @@
 use core::sync::atomic::Ordering;
 
 use axerrno::{AxError, AxResult, LinuxError};
+use kcore::{
+    futex::FutexKey,
+    task::{AsThread, get_task},
+};
 use ktask::current;
 use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,

@@ -1,6 +1,10 @@
 use core::{future::poll_fn, task::Poll};
 
 use axerrno::{AxError, AxResult, LinuxError};
+use kcore::task::{
+    AsThread, processes, send_signal_to_process, send_signal_to_process_group,
+    send_signal_to_thread,
+};
 use khal::uspace::UserContext;
 use kprocess::Pid;
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};

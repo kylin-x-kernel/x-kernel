@@ -6,6 +6,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
+use kcore::task::AsThread;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, SignalSet};
 use ktask::{
@@ -13,7 +14,6 @@ use ktask::{
     future::{block_on, poll_io},
 };
 use spin::RwLock;
-use kcore::task::AsThread;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::file::{FileLike, IoDst, IoSrc};

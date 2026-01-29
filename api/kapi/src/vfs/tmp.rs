@@ -7,10 +7,10 @@ use fs_ng_vfs::{
     Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
 };
 use hashbrown::HashMap;
+use kcore::vfs::dummy_stat_fs;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use slab::Slab;
-use kcore::vfs::dummy_stat_fs;
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 struct FileName(String);

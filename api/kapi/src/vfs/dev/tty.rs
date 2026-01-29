@@ -3,6 +3,7 @@ use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
 
 use axerrno::{AxError, AxResult};
 use fs_ng_vfs::NodeFlags;
+use kcore::{task::AsThread, vfs::SimpleFs};
 use kpoll::{IoEvents, Pollable};
 use kprocess::Process;
 use ksync::Mutex;

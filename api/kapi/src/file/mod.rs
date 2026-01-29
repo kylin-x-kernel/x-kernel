@@ -19,7 +19,6 @@ use kpoll::Pollable;
 use ktask::current;
 use linux_raw_sys::general::{RLIMIT_NOFILE, stat, statx, statx_timestamp};
 use spin::RwLock;
-use kcore::{resources::AX_FILE_LIMIT, task::AsThread};
 
 pub use self::{
     fs::{Directory, File, ResolveAtResult, metadata_to_kstat, resolve_at, with_fs},

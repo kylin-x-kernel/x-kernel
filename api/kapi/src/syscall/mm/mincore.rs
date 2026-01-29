@@ -9,6 +9,7 @@
 use alloc::vec;
 
 use axerrno::{AxError, AxResult};
+use kcore::task::AsThread;
 use khal::paging::MappingFlags;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};

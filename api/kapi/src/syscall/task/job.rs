@@ -1,7 +1,7 @@
 use axerrno::{AxError, AxResult};
+use kcore::task::{AsThread, get_process_data, get_process_group};
 use kprocess::Pid;
 use ktask::current;
-use kcore::task::{AsThread, get_process_data, get_process_group};
 
 pub fn sys_getsid(pid: Pid) -> AxResult<isize> {
     Ok(get_process_data(pid)?.proc.group().session().sid() as _)

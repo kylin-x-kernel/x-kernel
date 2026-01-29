@@ -1,4 +1,5 @@
 use axerrno::{AxError, AxResult};
+use kcore::{task::AsThread, time::ITimerType};
 use khal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
 use ktask::current;
 use linux_raw_sys::general::{

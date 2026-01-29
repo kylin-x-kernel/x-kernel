@@ -7,6 +7,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
+use kcore::task::send_signal_to_process_group;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::SignalInfo;
 use ktask::future::{block_on, poll_io};
@@ -17,7 +18,6 @@ use ringbuf::{
     CachingCons, CachingProd,
     traits::{Consumer, Observer, Producer, Split},
 };
-use kcore::task::send_signal_to_process_group;
 
 use crate::terminal::{Terminal, termios::Termios2};
 

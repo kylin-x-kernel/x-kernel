@@ -1,4 +1,5 @@
 use axerrno::{AxError, AxResult};
+use kcore::task::{AsThread, Thread, get_process_data, get_task};
 use khal::time::TimeValue;
 use kprocess::Pid;
 use ktask::current;

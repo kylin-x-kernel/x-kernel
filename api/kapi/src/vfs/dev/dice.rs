@@ -3,6 +3,7 @@ use alloc::{vec, vec::Vec};
 use core::any::Any;
 
 use axerrno::{AxError, AxResult};
+use kcore::vfs::DeviceOps;
 use kplat_aarch64_crosvm_virt::fdt::dice_reg;
 use memaddr::VirtAddr;
 use rand_chacha::{
@@ -10,7 +11,6 @@ use rand_chacha::{
     rand_core::{RngCore, SeedableRng},
 };
 use spin::{Lazy, Mutex};
-use kcore::vfs::DeviceOps;
 /// DICE节点信息
 #[derive(Debug, Clone, Copy)]
 pub struct DiceNodeInfo<'a> {
@@ -129,7 +129,6 @@ fn get_process_hash() -> AxResult<Vec<u8>> {
     use kfs::FS_CONTEXT;
     use ktask::current;
     use mbedtls::hash::{Md, Type};
-    use kcore::task::AsThread;
 
     let pid = current().as_thread().proc_data.proc.pid();
     let proc_exe_path = format!("/proc/{}/exe", pid);

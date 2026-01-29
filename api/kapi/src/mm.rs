@@ -8,6 +8,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
+use kcore::{mm::access_user_memory, task::AsThread};
 use khal::{
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},

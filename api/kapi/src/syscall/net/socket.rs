@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 
 use axerrno::{AxError, AxResult, LinuxError};
+use kcore::task::AsThread;
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
@@ -17,7 +18,6 @@ use linux_raw_sys::{
         SOCK_DGRAM, SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
     },
 };
-use kcore::task::AsThread;
 
 use crate::{
     file::{FileLike, Socket},

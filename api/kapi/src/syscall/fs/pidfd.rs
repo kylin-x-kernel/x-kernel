@@ -1,6 +1,6 @@
 use axerrno::{AxError, AxResult};
-use ksignal::SignalInfo;
 use kcore::task::{get_process_data, send_signal_to_process};
+use ksignal::SignalInfo;
 
 use crate::{
     file::{FD_TABLE, FileLike, PidFd, add_file_like},

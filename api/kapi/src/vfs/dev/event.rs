@@ -4,6 +4,7 @@ use core::{any::Any, task::Context, time::Duration};
 use axerrno::{AxError, AxResult};
 use bitmaps::Bitmap;
 use fs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
+use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 #[allow(unused_imports)]
 use kdriver::prelude::{
     DriverError, DriverOps, Event, EventType, InputDevice, InputDeviceId, InputDriverOps,
@@ -15,7 +16,6 @@ use linux_raw_sys::{
     general::{__kernel_old_time_t, __kernel_suseconds_t},
     ioctl::{EVIOCGID, EVIOCGRAB, EVIOCGVERSION},
 };
-use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::mm::UserPtr;

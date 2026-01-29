@@ -8,9 +8,9 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{any::Any, default::Default};
 
 use hashbrown::HashMap;
+use kcore::task::{AsThread, TeeSessionCtxTrait};
 use ktask::current;
 use spin::RwLock;
-use kcore::task::{AsThread, TeeSessionCtxTrait};
 use tee_raw_sys::*;
 
 use crate::tee::{TeeResult, tee_ta_manager::SessionIdentity};

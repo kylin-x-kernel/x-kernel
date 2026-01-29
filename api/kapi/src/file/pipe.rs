@@ -6,6 +6,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
+use kcore::task::{AsThread, send_signal_to_process};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, Signo};
 use ksync::Mutex;

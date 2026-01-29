@@ -1,12 +1,12 @@
 use axerrno::AxResult;
-use khal::paging::{MappingFlags, PageSize};
-use ktask::current;
-use memaddr::{VirtAddr, align_up_4k};
-use memspace::backend::Backend;
 use kcore::{
     config::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX},
     task::AsThread,
 };
+use khal::paging::{MappingFlags, PageSize};
+use ktask::current;
+use memaddr::{VirtAddr, align_up_4k};
+use memspace::backend::Backend;
 
 pub fn sys_brk(addr: usize) -> AxResult<isize> {
     let curr = current();

@@ -1,10 +1,10 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::AxResult;
+use kcore::task::{AsThread, Thread};
 use khal::uspace::UserContext;
 use ksignal::{SignalOSAction, SignalSet};
 use ktask::current;
-use kcore::task::{AsThread, Thread};
 
 use crate::task::do_exit;
 

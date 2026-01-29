@@ -1,6 +1,6 @@
 use axerrno::{AxError, AxResult};
-use ktask::current;
 use kcore::task::AsThread;
+use ktask::current;
 
 pub fn sys_getpid() -> AxResult<isize> {
     Ok(current().as_thread().proc_data.proc.pid() as _)

@@ -11,8 +11,6 @@ use core::{ffi::CStr, iter};
 
 use fs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
 use indoc::indoc;
-use kprocess::Process;
-use ktask::{KtaskRef, WeakKtaskRef, current};
 use kcore::{
     task::{AsThread, TaskStat, get_task, tasks},
     vfs::{
@@ -20,6 +18,8 @@ use kcore::{
         SimpleFileOperation, SimpleFs,
     },
 };
+use kprocess::Process;
+use ktask::{KtaskRef, WeakKtaskRef, current};
 
 use crate::file::FD_TABLE;
 

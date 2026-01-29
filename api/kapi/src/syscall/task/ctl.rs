@@ -1,6 +1,7 @@
 use core::ffi::c_char;
 
 use axerrno::{AxError, AxResult};
+use kcore::task::{AsThread, get_process_data};
 use ktask::current;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};

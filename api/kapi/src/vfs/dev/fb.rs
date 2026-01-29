@@ -2,6 +2,7 @@ use core::{any::Any, slice};
 
 use axerrno::AxError;
 use fs_ng_vfs::{NodeFlags, VfsError, VfsResult};
+use kcore::vfs::{DeviceMmap, DeviceOps};
 #[allow(unused_imports)]
 use kdriver::prelude::DisplayDriverOps;
 use khal::mem::v2p;

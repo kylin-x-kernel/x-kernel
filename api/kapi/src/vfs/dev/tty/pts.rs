@@ -4,8 +4,8 @@ use core::sync::atomic::Ordering;
 use axerrno::{AxError, AxResult};
 use flatten_objects::FlattenObjects;
 use fs_ng_vfs::{DeviceId, NodeType, VfsResult};
-use kspin::SpinNoIrq;
 use kcore::vfs::{Device, NodeOpsMux, SimpleDirOps, SimpleFs};
+use kspin::SpinNoIrq;
 
 use crate::vfs::dev::tty::pty::PtyDriver;
 

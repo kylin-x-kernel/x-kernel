@@ -11,7 +11,6 @@ use fs_ng_vfs::{DirEntry, FileNode, Location, NodePermission, NodeType, Referenc
 use kfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
 use ktask::current;
 use linux_raw_sys::general::*;
-use kcore::{task::AsThread, vfs::Device};
 
 use crate::{
     file::{
