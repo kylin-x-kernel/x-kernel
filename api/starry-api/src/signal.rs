@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use axerrno::AxResult;
 use khal::uspace::UserContext;
 use ktask::current;
-use signal::{SignalOSAction, SignalSet};
+use ksignal::{SignalOSAction, SignalSet};
 use starry_core::task::{AsThread, Thread};
 
 use crate::task::do_exit;

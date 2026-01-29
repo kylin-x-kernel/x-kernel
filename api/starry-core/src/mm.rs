@@ -50,7 +50,7 @@ pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> AxResult {
 
 /// Map the signal trampoline to the user address space.
 pub fn map_trampoline(aspace: &mut AddrSpace) -> AxResult {
-    let signal_trampoline_paddr = v2p(signal::arch::signal_trampoline_address().into());
+    let signal_trampoline_paddr = v2p(ksignal::arch::signal_trampoline_address().into());
     aspace.map_linear(
         crate::config::SIGNAL_TRAMPOLINE.into(),
         signal_trampoline_paddr,

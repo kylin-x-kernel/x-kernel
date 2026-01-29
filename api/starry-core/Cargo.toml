@@ -41,7 +41,7 @@ scope-local.workspace = true
 slab.workspace = true
 spin.workspace = true
 kprocess.workspace = true
-signal.workspace = true
+ksignal.workspace = true
 starry-vm.workspace = true
 strum = { workspace = true }
 weak-map = "0.1.1"

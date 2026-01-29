@@ -10,7 +10,7 @@ use ktask::{
     future::{block_on, timeout_at},
 };
 use lazy_static::lazy_static;
-use signal::Signo;
+use ksignal::Signo;
 use spin::Mutex;
 use strum::FromRepr;
 

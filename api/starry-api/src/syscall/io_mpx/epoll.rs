@@ -7,7 +7,7 @@ use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
 };
-use signal::SignalSet;
+use ksignal::SignalSet;
 
 use crate::{
     file::{

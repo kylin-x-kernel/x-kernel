@@ -61,7 +61,7 @@ memset = { path = "mm/memset" }
 kspin = { path = "sync/kspin" }
 
 # x-kenrel userspace Modules
-signal = { path = "process/signal" }
+ksignal = { path = "process/ksignal" }
 starry-core = { path = "api/starry-core" }
 starry-api = { path = "api/starry-api" }
 kprocess = { path = "process/kprocess" }

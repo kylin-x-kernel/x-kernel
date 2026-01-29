@@ -1,10 +1,10 @@
 [package]
-name = "signal"
+name = "ksignal"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Signal management library for Starry OS"
-keywords = ["signal", "ipc"]
+description = "ksignal management library for Starry OS"
+keywords = ["ksignal", "ipc"]
 license.workspace = true
 repository.workspace = true
 

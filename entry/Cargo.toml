@@ -86,7 +86,7 @@ cfg-if.workspace = true
 linkme.workspace = true
 linux-raw-sys.workspace = true
 kprocess.workspace = true
-signal.workspace = true
+ksignal.workspace = true
 
 starry-core.workspace = true
 starry-api.workspace = true

@@ -18,7 +18,7 @@ use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
 };
-use signal::{SignalInfo, Signo};
+use ksignal::{SignalInfo, Signo};
 use starry_core::task::{AsThread, send_signal_to_process};
 use starry_vm::VmMutPtr;
 

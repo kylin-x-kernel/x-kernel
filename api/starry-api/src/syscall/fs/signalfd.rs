@@ -1,7 +1,7 @@
 use axerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
-use signal::SignalSet;
+use ksignal::SignalSet;
 use starry_vm::VmPtr;
 
 use crate::{

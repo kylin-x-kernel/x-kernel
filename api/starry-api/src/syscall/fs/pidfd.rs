@@ -1,5 +1,5 @@
 use axerrno::{AxError, AxResult};
-use signal::SignalInfo;
+use ksignal::SignalInfo;
 use starry_core::task::{get_process_data, send_signal_to_process};
 
 use crate::{

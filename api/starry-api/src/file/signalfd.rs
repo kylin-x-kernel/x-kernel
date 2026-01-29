@@ -11,7 +11,7 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use signal::{SignalInfo, SignalSet};
+use ksignal::{SignalInfo, SignalSet};
 use spin::RwLock;
 use starry_core::task::AsThread;
 use zerocopy::{Immutable, IntoBytes};

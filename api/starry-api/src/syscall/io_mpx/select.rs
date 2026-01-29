@@ -9,7 +9,7 @@ use linux_raw_sys::{
     general::*,
     select_macros::{FD_ISSET, FD_SET, FD_ZERO},
 };
-use signal::SignalSet;
+use ksignal::SignalSet;
 
 use super::FdPollSet;
 use crate::{

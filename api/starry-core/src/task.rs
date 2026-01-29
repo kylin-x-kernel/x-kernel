@@ -27,7 +27,7 @@ use lazy_static::lazy_static;
 use memspace::AddrSpace;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
-use signal::{
+use ksignal::{
     SignalInfo, Signo,
     api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
 };

@@ -5,7 +5,7 @@ use khal::time::TimeValue;
 use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
-use signal::SignalSet;
+use ksignal::SignalSet;
 
 use super::FdPollSet;
 use crate::{

@@ -2,7 +2,7 @@ use alloc::{borrow::ToOwned, fmt, string::String};
 
 use axerrno::AxResult;
 use ktask::{TaskInner, TaskState};
-use signal::Signo;
+use ksignal::Signo;
 
 use crate::task::AsThread;
 

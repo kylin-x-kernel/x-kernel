@@ -6,7 +6,7 @@ use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kprocess::Pid;
 use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
-use signal::{SignalInfo, Signo};
+use ksignal::{SignalInfo, Signo};
 use starry_core::{
     futex::FutexKey,
     shm::SHM_MANAGER,
