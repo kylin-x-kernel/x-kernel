@@ -29,6 +29,7 @@ kfeat = { path = "api/kfeat", features = [
     "uspace",
 ] }
 
+kruntime = { path = "init/kruntime" }
 kalloc = { path = "mm/kalloc" }
 platconfig = { path = "util/platconfig" }
 platconfig-macros = { path = "util/platconfig-macros" }
@@ -42,7 +43,6 @@ kipi = { path = "arch/kipi" }
 klogger = { path = "util/klogger" }
 memspace = { path = "mm/memspace" }
 knet = { path = "net/knet" }
-kruntime = { path = "core/kruntime" }
 ksync = { path = "core/ksync" }
 ktask = { path = "core/ktask" }
 axwatchdog = { path = "io/axwatchdog" }

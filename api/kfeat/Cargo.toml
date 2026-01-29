@@ -117,13 +117,8 @@ khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 klogger.workspace = true
-<<<<<<< HEAD
 knet = { workspace = true, optional = true }
-axruntime.workspace = true
-=======
-axnet = { workspace = true, optional = true }
 kruntime.workspace = true
->>>>>>> 03966d1 (rename loggo)
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 kspin = { workspace = true, optional = true }
