@@ -7,11 +7,11 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use kpoll::{IoEvents, PollSet, Pollable};
+use ksignal::{SignalInfo, SignalSet};
 use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use ksignal::{SignalInfo, SignalSet};
 use spin::RwLock;
 use starry_core::task::AsThread;
 use zerocopy::{Immutable, IntoBytes};

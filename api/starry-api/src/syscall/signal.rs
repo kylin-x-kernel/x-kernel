@@ -3,6 +3,7 @@ use core::{future::poll_fn, task::Poll};
 use axerrno::{AxError, AxResult, LinuxError};
 use khal::uspace::UserContext;
 use kprocess::Pid;
+use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
 use ktask::{
     current,
     future::{self, block_on},
@@ -11,7 +12,6 @@ use linux_raw_sys::general::{
     MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, kernel_sigaction, siginfo,
     timespec,
 };
-use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
 use starry_core::task::{
     AsThread, processes, send_signal_to_process, send_signal_to_process_group,
     send_signal_to_thread,

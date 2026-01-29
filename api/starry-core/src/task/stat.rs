@@ -1,8 +1,8 @@
 use alloc::{borrow::ToOwned, fmt, string::String};
 
 use axerrno::AxResult;
-use ktask::{TaskInner, TaskState};
 use ksignal::Signo;
+use ktask::{TaskInner, TaskState};
 
 use crate::task::AsThread;
 

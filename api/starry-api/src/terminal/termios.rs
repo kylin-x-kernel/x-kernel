@@ -1,12 +1,12 @@
 use core::ops::{Deref, DerefMut};
 
 use bytemuck::AnyBitPattern;
+use ksignal::Signo;
 use linux_raw_sys::general::{
     B38400, CREAD, CS8, ECHO, ECHOCTL, ECHOE, ECHOK, ECHOKE, ICANON, ICRNL, IEXTEN, ISIG, IXON,
     ONLCR, OPOST, VDISCARD, VEOF, VEOL, VEOL2, VERASE, VINTR, VKILL, VLNEXT, VQUIT, VREPRINT,
     VWERASE, speed_t, tcflag_t,
 };
-use ksignal::Signo;
 
 #[repr(C)]
 #[derive(Clone, Copy, AnyBitPattern)]

@@ -4,12 +4,12 @@ use core::{fmt, time::Duration};
 use axerrno::{AxError, AxResult};
 use bitmaps::Bitmap;
 use kpoll::IoEvents;
+use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::{
     general::*,
     select_macros::{FD_ISSET, FD_SET, FD_ZERO},
 };
-use ksignal::SignalSet;
 
 use super::FdPollSet;
 use crate::{

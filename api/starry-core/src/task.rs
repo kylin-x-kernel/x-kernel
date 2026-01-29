@@ -21,16 +21,16 @@ use extern_trait::extern_trait;
 use hashbrown::HashMap;
 use kpoll::PollSet;
 use kprocess::{Pid, Process, ProcessGroup, Session};
+use ksignal::{
+    SignalInfo, Signo,
+    api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
+};
 use ksync::{Mutex, spin::SpinNoIrq};
 use ktask::{KtaskRef, TaskExt, TaskInner, WeakKtaskRef, current};
 use lazy_static::lazy_static;
 use memspace::AddrSpace;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
-use ksignal::{
-    SignalInfo, Signo,
-    api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
-};
 use weak_map::WeakMap;
 
 pub use self::stat::TaskStat;

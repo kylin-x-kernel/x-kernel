@@ -3,9 +3,9 @@ use alloc::vec::Vec;
 use axerrno::{AxError, AxResult};
 use khal::time::TimeValue;
 use kpoll::IoEvents;
+use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
-use ksignal::SignalSet;
 
 use super::FdPollSet;
 use crate::{
