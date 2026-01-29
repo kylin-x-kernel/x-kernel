@@ -13,7 +13,7 @@ use core::{
     time::Duration,
 };
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
 use ksync::Mutex;

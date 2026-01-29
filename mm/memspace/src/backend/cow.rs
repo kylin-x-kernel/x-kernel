@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::slice;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kfs::FileBackend;
 use khal::{
     mem::p2v,
@@ -109,7 +109,8 @@ impl CowBackend {
 
             file.read_at(&mut &mut buf[start..start + max_read], file_start)?;
         }
-        pgtbl.map(va, frame, self.size, flags)?;
+        pgtbl.map(va, frame, self.size, flags)
+            .map_err(super::map_paging_err)?;
         Ok(())
     }
 
@@ -128,7 +129,8 @@ impl CowBackend {
         match frame.0 {
             1 => {
                 // Only one reference, just upgrade the permissions.
-                pgtble.protect(va, flags)?;
+                pgtble.protect(va, flags)
+                    .map_err(super::map_paging_err)?;
                 return Ok(());
             }
             _ => {
@@ -141,7 +143,8 @@ impl CowBackend {
                         self.size as _,
                     );
                 }
-                pgtble.remap(va, new_frame, flags)?;
+                pgtble.remap(va, new_frame, flags)
+                    .map_err(super::map_paging_err)?;
                 frame.drop_frame(pa, self.size);
             }
         }
@@ -245,8 +248,12 @@ impl BackendOps for CowBackend {
                         warn!("frame reference count overflow");
                         return Err(AxError::BadAddress);
                     }
-                    old_pgtbl.protect(vaddr, cow_flags)?;
-                    new_pgtbl.map(vaddr, paddr, self.size, cow_flags)?;
+                    old_pgtbl
+                        .protect(vaddr, cow_flags)
+                        .map_err(super::map_paging_err)?;
+                    new_pgtbl
+                        .map(vaddr, paddr, self.size, cow_flags)
+                        .map_err(super::map_paging_err)?;
                 }
                 // If the page is not mapped, skip it.
                 Err(PagingError::NotMapped) => {}

@@ -7,7 +7,7 @@ use core::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
 
-use axerrno::{AxError, AxResult, LinuxError};
+use kerrno::{AxError, AxResult, LinuxError};
 #[cfg(feature = "vsock")]
 use knet::vsock::VsockAddr;
 use knet::{SocketAddrEx, unix::UnixAddr};

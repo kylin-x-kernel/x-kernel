@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bitmaps::Bitmap;
 use kpoll::IoEvents;
 use ksignal::SignalSet;

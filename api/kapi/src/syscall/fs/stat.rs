@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_int};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use fs_ng_vfs::{Location, NodePermission};
 use kfs::FS_CONTEXT;
 use linux_raw_sys::general::{

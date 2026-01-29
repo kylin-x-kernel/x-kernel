@@ -1,6 +1,6 @@
 use core::{any::Any, slice};
 
-use axerrno::AxError;
+use kerrno::AxError;
 use fs_ng_vfs::{NodeFlags, VfsError, VfsResult};
 use kcore::vfs::{DeviceMmap, DeviceOps};
 #[allow(unused_imports)]

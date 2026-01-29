@@ -15,7 +15,7 @@ pub mod tty;
 use alloc::{format, sync::Arc};
 use core::any::Any;
 
-use axerrno::AxError;
+use kerrno::AxError;
 use fs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsResult};
 use kcore::vfs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFs};
 use ksync::Mutex;

@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use kcore::task::{AsThread, Thread};
 use khal::uspace::UserContext;
 use ksignal::{SignalOSAction, SignalSet};

@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use khal::time::TimeValue;
 use kpoll::IoEvents;
 use ksignal::SignalSet;

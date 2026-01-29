@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 
-use axerrno::{AxError, AxResult, LinuxError};
+use kerrno::{AxError, AxResult, LinuxError};
 use kcore::task::AsThread;
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};

@@ -13,7 +13,7 @@ copy = ["page_table/copy-from"]
 [dependencies]
 kalloc = { workspace = true }
 platconfig = { workspace = true }
-axerrno = { workspace = true }
+kerrno = { workspace = true }
 kfs = { workspace = true }
 fs-ng-vfs = { workspace = true }
 khal = { workspace = true, features = ["paging"] }

@@ -1,7 +1,7 @@
 use alloc::{borrow::Cow, format, sync::Arc};
 use core::{ffi::c_int, ops::Deref, task::Context};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use knet::{
     SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},

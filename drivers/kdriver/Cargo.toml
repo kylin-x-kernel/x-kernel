@@ -51,7 +51,7 @@ net = { workspace = true, optional = true }
 pci = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
-axerrno = { workspace = true, optional = true }
+kerrno = { workspace = true, optional = true }
 khal = { workspace = true, optional = true }
 # axmm = { workspace = true, optional = true }
 cfg-if.workspace = true

@@ -1,6 +1,6 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
-use axerrno::{AxError, AxResult, LinuxError};
+use kerrno::{AxError, AxResult, LinuxError};
 use bytemuck::AnyBitPattern;
 use kcore::{shm::IpcPerm, task::AsThread};
 use khal::time::monotonic_time_nanos;

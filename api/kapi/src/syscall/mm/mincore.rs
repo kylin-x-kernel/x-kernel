@@ -8,7 +8,7 @@
 
 use alloc::vec;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::task::AsThread;
 use khal::paging::MappingFlags;
 use ktask::current;

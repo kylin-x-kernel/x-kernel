@@ -3,7 +3,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
-use axerrno::{AxError, AxResult, LinuxError};
+use kerrno::{AxError, AxResult, LinuxError};
 use fs_ng_vfs::{DeviceId, NodeFlags, VfsResult};
 use kcore::vfs::{DeviceMmap, DeviceOps};
 use kfs::FileBackend;

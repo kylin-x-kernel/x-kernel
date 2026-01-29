@@ -6,7 +6,7 @@ use core::{
     task::Context,
 };
 
-use axerrno::{AxError, AxResult, LinuxError};
+use kerrno::{AxError, AxResult, LinuxError};
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
 #[cfg(feature = "vsock")]

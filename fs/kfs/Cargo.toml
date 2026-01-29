@@ -18,8 +18,9 @@ crosvm = []
 
 [dependencies]
 kalloc = { workspace = true }
+alloc-engine = { workspace = true }
 kdriver = { workspace = true, features = ["block"] }
-axerrno = { workspace = true }
+kerrno = { workspace = true }
 fs-ng-vfs = { workspace = true }
 khal = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }

@@ -1,4 +1,4 @@
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use ksignal::SignalSet;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};

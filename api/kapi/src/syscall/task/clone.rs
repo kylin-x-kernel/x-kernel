@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use kcore::{
     mm::copy_from_kernel,

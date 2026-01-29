@@ -16,7 +16,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
 };
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use extern_trait::extern_trait;
 use hashbrown::HashMap;
 use kpoll::PollSet;

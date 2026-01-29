@@ -6,7 +6,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::task::send_signal_to_process_group;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::SignalInfo;

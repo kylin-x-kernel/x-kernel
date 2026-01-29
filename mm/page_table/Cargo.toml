@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 default = []
-axerrno = ["dep:axerrno"]
+kerrno = ["dep:kerrno"]
 copy-from = ["dep:bitmaps"]
 
 [dependencies]
@@ -19,7 +19,7 @@ bitflags = "2.9"
 bitmaps = { version = "3.2", default-features = false, optional = true }
 log = "0.4"
 memaddr = { workspace = true }
-axerrno = { workspace = true, optional = true }
+kerrno = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = "0.15.2"

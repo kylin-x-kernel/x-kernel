@@ -1,6 +1,6 @@
 use core::mem::{self, MaybeUninit};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
 use kio::prelude::*;
 use osvm::{VirtPtr, read_vm_mem, write_vm_mem};

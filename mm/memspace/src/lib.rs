@@ -8,7 +8,7 @@ extern crate alloc;
 mod aspace;
 pub mod backend;
 
-use axerrno::LinuxResult;
+use kerrno::LinuxResult;
 use khal::{
     mem::{MemFlags, memory_regions, p2v},
     paging::MappingFlags,

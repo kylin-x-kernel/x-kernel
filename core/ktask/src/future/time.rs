@@ -6,7 +6,7 @@ use core::{
     time::Duration,
 };
 
-use axerrno::AxError;
+use kerrno::AxError;
 use futures_util::{FutureExt, select_biased};
 use khal::time::{TimeValue, wall_time};
 

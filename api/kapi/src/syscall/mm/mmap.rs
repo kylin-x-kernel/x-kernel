@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::{
     task::AsThread,
     vfs::{Device, DeviceMmap},

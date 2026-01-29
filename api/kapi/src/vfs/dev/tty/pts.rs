@@ -1,7 +1,7 @@
 use alloc::{borrow::Cow, boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use flatten_objects::FlattenObjects;
 use fs_ng_vfs::{DeviceId, NodeType, VfsResult};
 use kcore::vfs::{Device, NodeOpsMux, SimpleDirOps, SimpleFs};

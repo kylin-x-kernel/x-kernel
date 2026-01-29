@@ -9,7 +9,7 @@ pub mod signalfd;
 use alloc::{borrow::Cow, sync::Arc};
 use core::{ffi::c_int, time::Duration};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use downcast_rs::{DowncastSync, impl_downcast};
 use flatten_objects::FlattenObjects;
 use fs_ng_vfs::DeviceId;

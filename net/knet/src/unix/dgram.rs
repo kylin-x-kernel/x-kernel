@@ -3,7 +3,7 @@ use core::task::Context;
 
 use async_channel::TryRecvError;
 use async_trait::async_trait;
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kio::{Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;

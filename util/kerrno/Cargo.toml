@@ -1,0 +1,16 @@
+[package]
+name = "kerrno"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Generic error code representation."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords = ["errno"]
+categories = ["no-std", "os"]
+
+[dependencies]
+log = "0.4"
+strum = { workspace = true }

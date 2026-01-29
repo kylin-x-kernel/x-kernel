@@ -15,7 +15,7 @@
 
 ### Differences to `std::io`
 
-- Error types from `axerrno` instead of `std::io::Error`.
+- Error types from `kerrno` instead of `std::io::Error`.
 - No `IoSlice` and `*_vectored` APIs.
 
 ### Limitations

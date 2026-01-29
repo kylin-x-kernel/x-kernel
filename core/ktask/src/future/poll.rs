@@ -1,6 +1,6 @@
 use core::{future::poll_fn, task::Poll};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kpoll::{IoEvents, Pollable};
 
 /// A helper to wrap a synchronous non-blocking I/O function into an

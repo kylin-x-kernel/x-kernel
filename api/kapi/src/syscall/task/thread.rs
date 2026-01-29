@@ -1,4 +1,4 @@
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::task::AsThread;
 use ktask::current;
 
@@ -83,6 +83,6 @@ pub fn sys_arch_prctl(
             Ok(0)
         }
         ArchPrctlCode::GetCpuid => Ok(0),
-        ArchPrctlCode::SetCpuid => Err(axerrno::AxError::NoSuchDevice),
+        ArchPrctlCode::SetCpuid => Err(kerrno::AxError::NoSuchDevice),
     }
 }

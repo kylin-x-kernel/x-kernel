@@ -13,7 +13,7 @@ default = ["alloc"]
 alloc = []
 
 [dependencies]
-axerrno = { workspace = true }
+kerrno = { workspace = true }
 bytemuck = { version = "1.24", features = [
     "align_offset",
     "const_zeroed",

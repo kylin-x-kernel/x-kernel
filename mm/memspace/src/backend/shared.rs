@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Deref;
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use khal::paging::{MappingFlags, PageSize, PageTableMut};
 use ksync::Mutex;
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
@@ -9,7 +9,7 @@ use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
 use super::{alloc_frame, dealloc_frame};
 use crate::{
     aspace::AddrSpace,
-    backend::{Backend, BackendOps, divide_page, pages_in},
+    backend::{Backend, BackendOps, divide_page, map_paging_err, pages_in},
 };
 
 pub struct SharedPages {
@@ -79,7 +79,8 @@ impl BackendOps for SharedBackend {
         for (vaddr, paddr) in
             pages_in(range, self.pages.size)?.zip(self.pages_starting_from(range.start))
         {
-            pgtbl.map(vaddr, *paddr, self.pages.size, flags)?;
+            pgtbl.map(vaddr, *paddr, self.pages.size, flags)
+                .map_err(map_paging_err)?;
         }
         Ok(())
     }
@@ -87,7 +88,7 @@ impl BackendOps for SharedBackend {
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> AxResult {
         debug!("Shared::unmap: {:?}", range);
         for vaddr in pages_in(range, self.pages.size)? {
-            pgtbl.unmap(vaddr)?;
+            pgtbl.unmap(vaddr).map_err(map_paging_err)?;
         }
         Ok(())
     }

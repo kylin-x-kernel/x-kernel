@@ -2,7 +2,7 @@
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
 use khal::{paging::MappingFlags, time::monotonic_time_nanos};
 use kprocess::Pid;

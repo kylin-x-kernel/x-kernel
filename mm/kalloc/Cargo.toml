@@ -24,7 +24,7 @@ tracking = ["dep:percpu", "dep:backtrace"]
 [dependencies]
 alloc-engine = { workspace = true, features = ["bitmap"] }
 backtrace = { workspace = true, optional = true }
-axerrno.workspace = true
+kerrno.workspace = true
 cfg-if.workspace = true
 kspin.workspace = true
 log.workspace = true

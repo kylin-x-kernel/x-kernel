@@ -14,7 +14,7 @@ documentation.workspace = true
 alloc-engine.workspace = true
 axalloc.workspace = true
 platconfig.workspace = true
-axerrno.workspace = true
+kerrno.workspace = true
 khal = { workspace = true, features = ["paging"] }
 axmm.workspace = true
 kspin.workspace = true

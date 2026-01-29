@@ -5,7 +5,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use fs_ng_vfs::{DirEntry, FileNode, Location, NodePermission, NodeType, Reference};
 use kcore::{task::AsThread, vfs::Device};

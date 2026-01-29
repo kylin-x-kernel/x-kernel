@@ -1,13 +1,13 @@
 use alloc::sync::Arc;
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use khal::paging::{MappingFlags, PageSize, PageTableMut};
 use ksync::Mutex;
 use memaddr::{PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{
     aspace::AddrSpace,
-    backend::{Backend, BackendOps},
+    backend::{Backend, BackendOps, map_paging_err},
 };
 
 /// Linear mapping backend.
@@ -34,14 +34,16 @@ impl BackendOps for LinearBackend {
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> AxResult {
         let pa_range = PhysAddrRange::from_start_size(self.pa(range.start), range.size());
         debug!("Linear::map: {range:?} -> {pa_range:?} {flags:?}");
-        pgtbl.map_region(range.start, |va| self.pa(va), range.size(), flags, false)?;
+        pgtbl.map_region(range.start, |va| self.pa(va), range.size(), flags, false)
+            .map_err(map_paging_err)?;
         Ok(())
     }
 
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> AxResult {
         let pa_range = PhysAddrRange::from_start_size(self.pa(range.start), range.size());
         debug!("Linear::unmap: {range:?} -> {pa_range:?}");
-        pgtbl.unmap_region(range.start, range.size())?;
+        pgtbl.unmap_region(range.start, range.size())
+            .map_err(map_paging_err)?;
         Ok(())
     }
 

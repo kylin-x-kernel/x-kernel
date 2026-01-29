@@ -13,7 +13,7 @@ alloc = []
 default = []
 
 [dependencies]
-axerrno.workspace = true
+kerrno.workspace = true
 heapless = "0.9"
 memchr = { version = "2", default-features = false }
 

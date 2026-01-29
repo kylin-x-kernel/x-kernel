@@ -1,6 +1,6 @@
 use core::bstr::ByteStr;
 
-use axerrno::LinuxResult;
+use kerrno::LinuxResult;
 use knet::{
     RecvOptions, SocketAddrEx, SocketOps,
     unix::{DgramTransport, UnixAddr, UnixDomainSocket},

@@ -58,8 +58,8 @@ fn gen_linux_errno(dest_path: &Path) -> Result<()> {
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if line.starts_with("#define") {
             let mut iter = line.split_whitespace();
-            if let Some(name) = iter.nth(1) {
-                if let Some(num) = iter.next() {
+            if let Some(name) = iter.nth(1)
+                && let Some(num) = iter.next() {
                     let description = if let Some(pos) = line.find("/* ") {
                         String::from(line[pos + 3..].trim_end_matches(" */"))
                     } else {
@@ -71,7 +71,6 @@ fn gen_linux_errno(dest_path: &Path) -> Result<()> {
                 }
             }
         }
-    }
 
     fs::write(
         dest_path,

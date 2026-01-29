@@ -1,6 +1,6 @@
 use alloc::{borrow::ToOwned, fmt, string::String};
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use ksignal::Signo;
 use ktask::{TaskInner, TaskState};
 

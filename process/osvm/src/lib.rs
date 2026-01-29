@@ -4,7 +4,7 @@
 
 use core::{mem::MaybeUninit, slice};
 
-use axerrno::AxError;
+use kerrno::AxError;
 use extern_trait::extern_trait;
 
 #[derive(Debug, PartialEq, Clone, Copy)]

@@ -5,7 +5,7 @@ use core::{
     time::Duration,
 };
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use fs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, path::Path};
 use kcore::task::AsThread;
 use kfs::{FS_CONTEXT, FsContext};

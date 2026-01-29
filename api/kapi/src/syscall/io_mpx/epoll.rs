@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use kpoll::IoEvents;
 use ksignal::SignalSet;

@@ -4,7 +4,7 @@ use alloc::{
 };
 use core::task::Context;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::task::ProcessData;
 use kpoll::{IoEvents, PollSet, Pollable};
 

@@ -43,12 +43,12 @@ pub enum PtError {
     MappedToHugePage,
 }
 
-#[cfg(feature = "axerrno")]
-impl From<PtError> for axerrno::AxError {
+#[cfg(feature = "kerrno")]
+impl From<PtError> for kerrno::AxError {
     fn from(value: PtError) -> Self {
         match value {
-            PtError::NoMemory => axerrno::AxError::NoMemory,
-            _ => axerrno::AxError::InvalidInput,
+            PtError::NoMemory => kerrno::AxError::NoMemory,
+            _ => kerrno::AxError::InvalidInput,
         }
     }
 }

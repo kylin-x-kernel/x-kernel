@@ -10,7 +10,7 @@ mod sys;
 mod task;
 mod time;
 
-use axerrno::{AxError, LinuxError};
+use kerrno::{AxError, LinuxError};
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
 

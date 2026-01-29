@@ -5,7 +5,7 @@ use core::{
     task::Context,
 };
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::task::{AsThread, send_signal_to_process};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, Signo};

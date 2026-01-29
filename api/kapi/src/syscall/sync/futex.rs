@@ -1,6 +1,6 @@
 use core::sync::atomic::Ordering;
 
-use axerrno::{AxError, AxResult, LinuxError};
+use kerrno::{AxError, AxResult, LinuxError};
 use kcore::{
     futex::FutexKey,
     task::{AsThread, get_task},

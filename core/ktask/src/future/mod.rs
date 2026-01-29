@@ -8,7 +8,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use axerrno::AxError;
+use kerrno::AxError;
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
 use crate::{KtaskRef, WeakKtaskRef, current, current_run_queue, select_run_queue};

@@ -4,7 +4,7 @@ use core::{
     time::Duration,
 };
 
-use axerrno::{AxError, AxResult, ax_bail};
+use kerrno::{AxError, AxResult, ax_bail};
 use kdriver::prelude::*;
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};

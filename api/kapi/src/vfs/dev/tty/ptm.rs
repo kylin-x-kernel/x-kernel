@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::any::Any;
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use fs_ng_vfs::{DeviceId, NodeType};
 use kcore::vfs::{Device, DeviceOps, SimpleFs};
 

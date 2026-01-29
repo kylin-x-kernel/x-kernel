@@ -1,7 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use core::task::Context;
 
-use axerrno::{AxResult, ax_bail};
+use kerrno::{AxResult, ax_bail};
 use kcore::task::AsThread;
 use kpoll::{IoEvents, PollSet, Pollable};
 use kprocess::{ProcessGroup, Session};

@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use core::{future::poll_fn, task::Poll};
 
-use axerrno::{AxError, AxResult, LinuxError};
+use kerrno::{AxError, AxResult, LinuxError};
 use bitflags::bitflags;
 use kcore::task::AsThread;
 use kprocess::{Pid, Process};

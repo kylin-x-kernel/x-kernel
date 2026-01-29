@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use event_listener::Event;
 use ksync::Mutex;
 use smoltcp::{

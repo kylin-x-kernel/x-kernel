@@ -1,7 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use fs_ng_vfs::NodeFlags;
 use kcore::{task::AsThread, vfs::SimpleFs};
 use kpoll::{IoEvents, Pollable};

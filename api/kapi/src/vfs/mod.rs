@@ -4,7 +4,7 @@ pub mod dev;
 mod proc;
 mod tmp;
 
-use axerrno::LinuxResult;
+use kerrno::LinuxResult;
 use fs_ng_vfs::{
     Filesystem, NodePermission,
     path::{Path, PathBuf},

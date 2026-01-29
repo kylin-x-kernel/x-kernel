@@ -7,7 +7,7 @@ use core::{
     ptr, slice, str,
 };
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::{mm::access_user_memory, task::AsThread};
 use khal::{
     paging::MappingFlags,

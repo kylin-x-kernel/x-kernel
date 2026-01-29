@@ -12,5 +12,5 @@ repository.workspace = true
 categories.workspace = true
 
 [dependencies]
-axerrno.workspace = true
+kerrno.workspace = true
 memaddr.workspace = true

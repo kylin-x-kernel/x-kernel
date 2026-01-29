@@ -1,6 +1,6 @@
 use core::ffi::c_int;
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use bitflags::bitflags;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtMutPtr;

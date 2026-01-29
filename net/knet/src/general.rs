@@ -4,7 +4,7 @@ use core::{
     time::Duration,
 };
 
-use axerrno::AxResult;
+use kerrno::AxResult;
 use kpoll::{IoEvents, Pollable};
 use ktask::future::{block_on, poll_io, timeout};
 

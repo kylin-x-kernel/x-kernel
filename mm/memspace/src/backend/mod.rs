@@ -1,12 +1,12 @@
 //! Memory mapping backends.
 use alloc::{boxed::Box, sync::Arc};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use enum_dispatch::enum_dispatch;
 use kalloc::{UsageKind, global_allocator};
 use khal::{
     mem::{p2v, v2p},
-    paging::{MappingFlags, PageSize, PageTable, PageTableMut},
+    paging::{MappingFlags, PageSize, PageTable, PageTableMut, PagingError},
 };
 use ksync::Mutex;
 use memaddr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
@@ -29,8 +29,11 @@ fn divide_page(size: usize, pgsize: PageSize) -> usize {
 fn alloc_frame(zeroed: bool, size: PageSize) -> AxResult<PhysAddr> {
     let pgsize = size as usize;
     let num_pages = pgsize / PAGE_SIZE_4K;
-    let vaddr =
-        VirtAddr::from(global_allocator().alloc_pages(num_pages, pgsize, UsageKind::VirtMem)?);
+    let vaddr = VirtAddr::from(
+        global_allocator()
+            .alloc_pages(num_pages, pgsize, UsageKind::VirtMem)
+            .map_err(|_| AxError::NoMemory)?,
+    );
     if zeroed {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, pgsize) };
     }
@@ -48,6 +51,13 @@ fn dealloc_frame(frame: PhysAddr, align: PageSize) {
 
 fn pages_in(range: VirtAddrRange, align: PageSize) -> AxResult<DynPageIter<VirtAddr>> {
     DynPageIter::new(range.start, range.end, align as usize).ok_or(AxError::InvalidInput)
+}
+
+pub(crate) fn map_paging_err(err: PagingError) -> AxError {
+    match err {
+        PagingError::NoMemory => AxError::NoMemory,
+        _ => AxError::InvalidInput,
+    }
 }
 
 #[enum_dispatch]

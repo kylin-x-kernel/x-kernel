@@ -26,7 +26,7 @@ platconfig.workspace = true
 fbdevice.workspace = true
 kdriver.workspace = true
 
-axerrno.workspace = true
+kerrno.workspace = true
 kfeat.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true

@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_void};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kfs::FS_CONTEXT;
 
 use crate::{mm::vm_load_string, vfs::MemoryFs};

@@ -2,7 +2,7 @@
 use alloc::{vec, vec::Vec};
 use core::any::Any;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kcore::vfs::DeviceOps;
 use kplat_aarch64_crosvm_virt::fdt::dice_reg;
 use memaddr::VirtAddr;

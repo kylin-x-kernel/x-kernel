@@ -5,7 +5,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kfs::{CachedFile, FileFlags};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
@@ -13,7 +13,7 @@ use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 
 use crate::{
     aspace::AddrSpace,
-    backend::{Backend, BackendOps, pages_in},
+    backend::{Backend, BackendOps, map_paging_err, pages_in},
 };
 
 #[doc(hidden)]
@@ -120,7 +120,7 @@ impl BackendOps for FileBackend {
                 Ok(_) | Err(PagingError::NotMapped) => {}
                 Err(err) => {
                     warn!("Failed to unmap page {:?}: {:?}", addr, err);
-                    return Err(err.into());
+                    return Err(map_paging_err(err));
                 }
             }
         }
@@ -158,7 +158,8 @@ impl BackendOps for FileBackend {
                             if !in_memory {
                                 page.expect("page should be present").mark_dirty();
                             }
-                            pgtbl.remap(addr, paddr, flags)?;
+                            pgtbl.remap(addr, paddr, flags)
+                                .map_err(map_paging_err)?;
                             pages += 1;
                             AxResult::Ok(())
                         })?;
@@ -180,7 +181,8 @@ impl BackendOps for FileBackend {
                         if let Some((pn, _)) = evicted {
                             to_be_evicted.push(pn);
                         }
-                        pgtbl.map(addr, page.paddr(), PageSize::Size4K, map_flags)?;
+                        pgtbl.map(addr, page.paddr(), PageSize::Size4K, map_flags)
+                            .map_err(map_paging_err)?;
                         pages += 1;
                         Ok(())
                     })?;

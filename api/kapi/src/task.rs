@@ -1,6 +1,6 @@
 use core::{ffi::c_long, sync::atomic::Ordering};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
 use kcore::{
     futex::FutexKey,

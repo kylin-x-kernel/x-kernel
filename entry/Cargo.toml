@@ -72,7 +72,7 @@ mmio = ["kfeat/bus-mmio"]
 
 [dependencies]
 kdriver.workspace = true
-axerrno.workspace = true
+kerrno.workspace = true
 kfeat.workspace = true
 kfs.workspace = true
 khal.workspace = true

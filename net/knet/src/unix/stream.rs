@@ -5,7 +5,7 @@ use core::{
 };
 
 use async_trait::async_trait;
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;

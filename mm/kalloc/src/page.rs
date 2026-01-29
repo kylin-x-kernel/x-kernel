@@ -1,4 +1,4 @@
-use axerrno::AxResult;
+use kerrno::AxResult;
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{PAGE_SIZE, UsageKind, global_allocator};
@@ -80,7 +80,12 @@ impl GlobalPage {
 
     /// Internal function to allocate pages.
     fn alloc_pages(num_pages: usize) -> AxResult<Self> {
-        let va = global_allocator().alloc_pages(num_pages, PAGE_SIZE, UsageKind::Global)?;
+        let va = global_allocator()
+            .alloc_pages(num_pages, PAGE_SIZE, UsageKind::Global)
+            .map_err(|e| match e {
+                alloc_engine::AllocError::NoMemory => kerrno::AxError::NoMemory,
+                _ => kerrno::AxError::InvalidInput,
+            })?;
         Ok(Self {
             start_va: va.into(),
             num_pages,
@@ -89,7 +94,12 @@ impl GlobalPage {
 
     /// Internal function to allocate pages with specific alignment.
     fn alloc_pages_with_alignment(num_pages: usize, align_pow2: usize) -> AxResult<Self> {
-        let va = global_allocator().alloc_pages(num_pages, align_pow2, UsageKind::Global)?;
+        let va = global_allocator()
+            .alloc_pages(num_pages, align_pow2, UsageKind::Global)
+            .map_err(|e| match e {
+                alloc_engine::AllocError::NoMemory => kerrno::AxError::NoMemory,
+                _ => kerrno::AxError::InvalidInput,
+            })?;
         Ok(Self {
             start_va: va.into(),
             num_pages,

@@ -26,7 +26,7 @@ test = ["percpu/sp-naive"]
 
 [dependencies]
 platconfig = { workspace = true }
-axerrno.workspace = true
+kerrno.workspace = true
 khal.workspace = true
 backtrace = { workspace = true, optional = true }
 kpoll = { workspace = true }

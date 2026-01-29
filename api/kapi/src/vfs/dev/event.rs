@@ -1,7 +1,7 @@
 use alloc::{format, sync::Arc};
 use core::{any::Any, task::Context, time::Duration};
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use bitmaps::Bitmap;
 use fs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
 use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};

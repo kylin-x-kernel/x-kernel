@@ -4,7 +4,7 @@ use core::{
     task::Context,
 };
 
-use axerrno::{AxError, AxResult, ax_bail, ax_err_type};
+use kerrno::{AxError, AxResult, ax_bail, ax_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;

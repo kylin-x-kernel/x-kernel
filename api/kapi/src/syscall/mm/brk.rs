@@ -1,4 +1,4 @@
-use axerrno::AxResult;
+use kerrno::AxResult;
 use kcore::{
     config::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX},
     task::AsThread,

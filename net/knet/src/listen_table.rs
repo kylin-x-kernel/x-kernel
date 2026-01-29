@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec};
 use core::ops::DerefMut;
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use ksync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},

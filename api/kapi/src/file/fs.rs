@@ -6,7 +6,7 @@ use core::{
     task::Context,
 };
 
-use axerrno::{AxError, AxResult};
+use kerrno::{AxError, AxResult};
 use fs_ng_vfs::{Location, Metadata, NodeFlags};
 use kfs::{FS_CONTEXT, FsContext};
 use kpoll::{IoEvents, Pollable};
