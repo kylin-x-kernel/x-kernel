@@ -238,7 +238,7 @@ pub fn sys_rt_sigtimedwait(
     let old_blocked = signal.blocked();
     signal.set_blocked(old_blocked & !set);
 
-    uctx.set_retval(-LinuxError::EINTR.code() as usize);
+    uctx.set_retval(-LinuxError::EINTR.into_raw() as usize);
     let fut = poll_fn(|cx| {
         if let Some(sig) = signal.dequeue_signal(&set) {
             signal.set_blocked(old_blocked);
@@ -283,7 +283,7 @@ pub fn sys_rt_sigsuspend(
 
     // sigsuspend always returns -EINTR when a signal is caught
     // We set this in uctx before check_signals so it's saved in SignalFrame
-    uctx.set_retval(-LinuxError::EINTR.code() as usize);
+    uctx.set_retval(-LinuxError::EINTR.into_raw() as usize);
 
     block_on(poll_fn(|cx| {
         if check_signals(thr, uctx, Some(old_blocked)) {

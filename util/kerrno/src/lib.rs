@@ -3,13 +3,8 @@
 
 use core::fmt;
 
+pub use linux_sysno::Errno as LinuxError;
 use strum::EnumCount;
-
-mod linux_errno {
-    include!(concat!(env!("OUT_DIR"), "/linux_errno.rs"));
-}
-
-pub use linux_errno::LinuxError;
 
 /// The error kind type used by ArceOS.
 ///
@@ -201,48 +196,47 @@ impl fmt::Display for KErrorKind {
 impl From<KErrorKind> for LinuxError {
     fn from(e: KErrorKind) -> Self {
         use KErrorKind::*;
-        use LinuxError::*;
         match e {
-            AddrInUse => EADDRINUSE,
-            AlreadyConnected => EISCONN,
-            AlreadyExists => EEXIST,
-            ArgumentListTooLong => E2BIG,
-            BadAddress | BadState => EFAULT,
-            BadFileDescriptor => EBADF,
-            BrokenPipe => EPIPE,
-            ConnectionRefused => ECONNREFUSED,
-            ConnectionReset => ECONNRESET,
-            CrossesDevices => EXDEV,
-            DirectoryNotEmpty => ENOTEMPTY,
-            FilesystemLoop => ELOOP,
-            IllegalBytes => EILSEQ,
-            InProgress => EINPROGRESS,
-            Interrupted => EINTR,
-            InvalidExecutable => ENOEXEC,
-            InvalidInput | InvalidData => EINVAL,
-            Io => EIO,
-            IsADirectory => EISDIR,
-            NameTooLong => ENAMETOOLONG,
-            NoMemory => ENOMEM,
-            NoSuchDevice => ENODEV,
-            NoSuchProcess => ESRCH,
-            NotADirectory => ENOTDIR,
-            NotASocket => ENOTSOCK,
-            NotATty => ENOTTY,
-            NotConnected => ENOTCONN,
-            NotFound => ENOENT,
-            OperationNotPermitted => EPERM,
-            OperationNotSupported => EOPNOTSUPP,
-            OutOfRange => ERANGE,
-            PermissionDenied => EACCES,
-            ReadOnlyFilesystem => EROFS,
-            ResourceBusy => EBUSY,
-            StorageFull => ENOSPC,
-            TimedOut => ETIMEDOUT,
-            TooManyOpenFiles => EMFILE,
-            UnexpectedEof | WriteZero => EIO,
-            Unsupported => ENOSYS,
-            WouldBlock => EAGAIN,
+            AddrInUse => LinuxError::EADDRINUSE,
+            AlreadyConnected => LinuxError::EISCONN,
+            AlreadyExists => LinuxError::EEXIST,
+            ArgumentListTooLong => LinuxError::E2BIG,
+            BadAddress | BadState => LinuxError::EFAULT,
+            BadFileDescriptor => LinuxError::EBADF,
+            BrokenPipe => LinuxError::EPIPE,
+            ConnectionRefused => LinuxError::ECONNREFUSED,
+            ConnectionReset => LinuxError::ECONNRESET,
+            CrossesDevices => LinuxError::EXDEV,
+            DirectoryNotEmpty => LinuxError::ENOTEMPTY,
+            FilesystemLoop => LinuxError::ELOOP,
+            IllegalBytes => LinuxError::EILSEQ,
+            InProgress => LinuxError::EINPROGRESS,
+            Interrupted => LinuxError::EINTR,
+            InvalidExecutable => LinuxError::ENOEXEC,
+            InvalidInput | InvalidData => LinuxError::EINVAL,
+            Io => LinuxError::EIO,
+            IsADirectory => LinuxError::EISDIR,
+            NameTooLong => LinuxError::ENAMETOOLONG,
+            NoMemory => LinuxError::ENOMEM,
+            NoSuchDevice => LinuxError::ENODEV,
+            NoSuchProcess => LinuxError::ESRCH,
+            NotADirectory => LinuxError::ENOTDIR,
+            NotASocket => LinuxError::ENOTSOCK,
+            NotATty => LinuxError::ENOTTY,
+            NotConnected => LinuxError::ENOTCONN,
+            NotFound => LinuxError::ENOENT,
+            OperationNotPermitted => LinuxError::EPERM,
+            OperationNotSupported => LinuxError::EOPNOTSUPP,
+            OutOfRange => LinuxError::ERANGE,
+            PermissionDenied => LinuxError::EACCES,
+            ReadOnlyFilesystem => LinuxError::EROFS,
+            ResourceBusy => LinuxError::EBUSY,
+            StorageFull => LinuxError::ENOSPC,
+            TimedOut => LinuxError::ETIMEDOUT,
+            TooManyOpenFiles => LinuxError::EMFILE,
+            UnexpectedEof | WriteZero => LinuxError::EIO,
+            Unsupported => LinuxError::ENOSYS,
+            WouldBlock => LinuxError::EAGAIN,
         }
     }
 }
@@ -252,47 +246,46 @@ impl TryFrom<LinuxError> for KErrorKind {
 
     fn try_from(e: LinuxError) -> Result<Self, Self::Error> {
         use KErrorKind::*;
-        use LinuxError::*;
         Ok(match e {
-            EADDRINUSE => AddrInUse,
-            EISCONN => AlreadyConnected,
-            EEXIST => AlreadyExists,
-            E2BIG => ArgumentListTooLong,
-            EFAULT => BadAddress,
-            EBADF => BadFileDescriptor,
-            EPIPE => BrokenPipe,
-            ECONNREFUSED => ConnectionRefused,
-            ECONNRESET => ConnectionReset,
-            EXDEV => CrossesDevices,
-            ENOTEMPTY => DirectoryNotEmpty,
-            ELOOP => FilesystemLoop,
-            EILSEQ => IllegalBytes,
-            EINPROGRESS => InProgress,
-            EINTR => Interrupted,
-            ENOEXEC => InvalidExecutable,
-            EINVAL => InvalidInput,
-            EIO => Io,
-            EISDIR => IsADirectory,
-            ENAMETOOLONG => NameTooLong,
-            ENOMEM => NoMemory,
-            ENODEV => NoSuchDevice,
-            ESRCH => NoSuchProcess,
-            ENOTDIR => NotADirectory,
-            ENOTSOCK => NotASocket,
-            ENOTTY => NotATty,
-            ENOTCONN => NotConnected,
-            ENOENT => NotFound,
-            EPERM => OperationNotPermitted,
-            EOPNOTSUPP => OperationNotSupported,
-            ERANGE => OutOfRange,
-            EACCES => PermissionDenied,
-            EROFS => ReadOnlyFilesystem,
-            EBUSY => ResourceBusy,
-            ENOSPC => StorageFull,
-            ETIMEDOUT => TimedOut,
-            EMFILE => TooManyOpenFiles,
-            ENOSYS => Unsupported,
-            EAGAIN => WouldBlock,
+            LinuxError::EADDRINUSE => AddrInUse,
+            LinuxError::EISCONN => AlreadyConnected,
+            LinuxError::EEXIST => AlreadyExists,
+            LinuxError::E2BIG => ArgumentListTooLong,
+            LinuxError::EFAULT => BadAddress,
+            LinuxError::EBADF => BadFileDescriptor,
+            LinuxError::EPIPE => BrokenPipe,
+            LinuxError::ECONNREFUSED => ConnectionRefused,
+            LinuxError::ECONNRESET => ConnectionReset,
+            LinuxError::EXDEV => CrossesDevices,
+            LinuxError::ENOTEMPTY => DirectoryNotEmpty,
+            LinuxError::ELOOP => FilesystemLoop,
+            LinuxError::EILSEQ => IllegalBytes,
+            LinuxError::EINPROGRESS => InProgress,
+            LinuxError::EINTR => Interrupted,
+            LinuxError::ENOEXEC => InvalidExecutable,
+            LinuxError::EINVAL => InvalidInput,
+            LinuxError::EIO => Io,
+            LinuxError::EISDIR => IsADirectory,
+            LinuxError::ENAMETOOLONG => NameTooLong,
+            LinuxError::ENOMEM => NoMemory,
+            LinuxError::ENODEV => NoSuchDevice,
+            LinuxError::ESRCH => NoSuchProcess,
+            LinuxError::ENOTDIR => NotADirectory,
+            LinuxError::ENOTSOCK => NotASocket,
+            LinuxError::ENOTTY => NotATty,
+            LinuxError::ENOTCONN => NotConnected,
+            LinuxError::ENOENT => NotFound,
+            LinuxError::EPERM => OperationNotPermitted,
+            LinuxError::EOPNOTSUPP => OperationNotSupported,
+            LinuxError::ERANGE => OutOfRange,
+            LinuxError::EACCES => PermissionDenied,
+            LinuxError::EROFS => ReadOnlyFilesystem,
+            LinuxError::EBUSY => ResourceBusy,
+            LinuxError::ENOSPC => StorageFull,
+            LinuxError::ETIMEDOUT => TimedOut,
+            LinuxError::EMFILE => TooManyOpenFiles,
+            LinuxError::ENOSYS => Unsupported,
+            LinuxError::EAGAIN => WouldBlock,
             _ => {
                 return Err(e);
             }
@@ -315,13 +308,13 @@ impl KError {
         KError(kind.code())
     }
 
-    const fn new_linux(kind: LinuxError) -> Self {
-        KError(-kind.code())
+    fn new_linux(kind: LinuxError) -> Self {
+        KError(-kind.into_raw())
     }
 
-    const fn data(&self) -> KErrorData {
+    fn data(&self) -> KErrorData {
         if self.0 < 0 {
-            KErrorData::Linux(unsafe { core::mem::transmute::<i32, LinuxError>(-self.0) })
+            KErrorData::Linux(LinuxError::new(-self.0))
         } else {
             KErrorData::Ky(unsafe { core::mem::transmute::<i32, KErrorKind>(self.0) })
         }
@@ -382,15 +375,18 @@ impl TryFrom<KError> for KErrorKind {
     }
 }
 
-impl TryFrom<i32> for KError {
-    type Error = i32;
-
-    fn try_from(value: i32) -> Result<Self, Self::Error> {
-        if KErrorKind::try_from(value).is_ok() || LinuxError::try_from(-value).is_ok() {
-            Ok(KError(value))
-        } else {
-            Err(value)
+impl KError {
+    pub fn try_from_i32(value: i32) -> Result<Self, i32> {
+        if KErrorKind::try_from(value).is_ok() {
+            return Ok(KError(value));
         }
+        if value < 0 {
+            let linux = LinuxError::new(-value);
+            if linux.name().is_some() {
+                return Ok(KError(value));
+            }
+        }
+        Err(value)
     }
 }
 
@@ -574,12 +570,6 @@ macro_rules! k_bail {
 /// A specialized [`Result`] type with [`LinuxError`] as the error type.
 pub type LinuxResult<T = ()> = Result<T, LinuxError>;
 
-impl fmt::Display for LinuxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
 #[doc(hidden)]
 pub mod __priv {
     pub use log::warn;
@@ -598,21 +588,22 @@ mod tests {
         assert_eq!(max_code, KError::WriteZero.code());
 
         assert_eq!(KError::AddrInUse.code(), 1);
-        assert_eq!(Ok(KError::AddrInUse), KError::try_from(1));
-        assert_eq!(Ok(KError::AlreadyConnected), KError::try_from(2));
-        assert_eq!(Ok(KError::WriteZero), KError::try_from(max_code));
-        assert_eq!(Err(max_code + 1), KError::try_from(max_code + 1));
-        assert_eq!(Err(0), KError::try_from(0));
-        assert_eq!(Err(i32::MAX), KError::try_from(i32::MAX));
+        assert_eq!(Ok(KError::AddrInUse), KError::try_from_i32(1));
+        assert_eq!(Ok(KError::AlreadyConnected), KError::try_from_i32(2));
+        assert_eq!(Ok(KError::WriteZero), KError::try_from_i32(max_code));
+        assert_eq!(Err(max_code + 1), KError::try_from_i32(max_code + 1));
+        assert_eq!(Err(0), KError::try_from_i32(0));
+        assert_eq!(Err(i32::MAX), KError::try_from_i32(i32::MAX));
     }
 
     #[test]
     fn test_conversion() {
         for i in 1.. {
-            let Ok(err) = LinuxError::try_from(i) else {
+            let err = LinuxError::new(i);
+            if err.name().is_none() {
                 break;
-            };
-            assert_eq!(err as i32, i);
+            }
+            assert_eq!(err.into_raw(), i);
             let e = KError::from(err);
             assert_eq!(e.code(), -i);
             assert_eq!(LinuxError::from(e), err);

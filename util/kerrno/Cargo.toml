@@ -12,5 +12,6 @@ keywords = ["errno"]
 categories = ["no-std", "os"]
 
 [dependencies]
+linux_sysno = { workspace = true }
 log = "0.4"
 strum = { workspace = true }
