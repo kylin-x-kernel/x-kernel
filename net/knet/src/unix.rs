@@ -5,10 +5,10 @@ use alloc::{boxed::Box, sync::Arc};
 use core::task::Context;
 
 use async_trait::async_trait;
-use kerrno::{AxError, AxResult};
 use enum_dispatch::enum_dispatch;
 use fs_ng_vfs::NodeType;
 use hashbrown::HashMap;
+use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
 use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, Pollable};
@@ -34,15 +34,15 @@ pub enum UnixAddr {
 #[async_trait]
 #[enum_dispatch]
 pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
-    fn bind(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> AxResult;
-    fn connect(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> AxResult;
+    fn bind(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
+    fn connect(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
 
-    async fn accept(&self) -> AxResult<(UnixTransport, UnixAddr)>;
+    async fn accept(&self) -> KResult<(UnixTransport, UnixAddr)>;
 
-    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize>;
-    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> AxResult<usize>;
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
+    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> KResult<usize>;
 
-    fn shutdown(&self, _how: Shutdown) -> AxResult {
+    fn shutdown(&self, _how: Shutdown) -> KResult {
         Ok(())
     }
 }
@@ -81,37 +81,37 @@ lazy_static! {
 
 pub(crate) fn lookup_bind_entry<R>(
     addr: &UnixAddr,
-    f: impl FnOnce(&BindEntry) -> AxResult<R>,
-) -> AxResult<R> {
+    f: impl FnOnce(&BindEntry) -> KResult<R>,
+) -> KResult<R> {
     match addr {
-        UnixAddr::Unbound => Err(AxError::InvalidInput),
+        UnixAddr::Unbound => Err(KError::InvalidInput),
         UnixAddr::Abstract(name) => {
             let bindings = ABSTRACT_BINDINGS.lock();
             if let Some(entry) = bindings.get(name) {
                 f(entry)
             } else {
-                Err(AxError::NotFound)
+                Err(KError::NotFound)
             }
         }
         UnixAddr::Path(path) => {
             let loc = FS_CONTEXT.lock().resolve(path.as_ref())?;
             if loc.metadata()?.node_type != NodeType::Socket {
-                return Err(AxError::NotASocket);
+                return Err(KError::NotASocket);
             }
             f(loc
                 .user_data()
                 .get::<BindEntry>()
-                .ok_or(AxError::ConnectionRefused)?
+                .ok_or(KError::ConnectionRefused)?
                 .as_ref())
         }
     }
 }
 fn lookup_or_create_bind_entry<R>(
     addr: &UnixAddr,
-    f: impl FnOnce(&BindEntry) -> AxResult<R>,
-) -> AxResult<R> {
+    f: impl FnOnce(&BindEntry) -> KResult<R>,
+) -> KResult<R> {
     match addr {
-        UnixAddr::Unbound => Err(AxError::InvalidInput),
+        UnixAddr::Unbound => Err(KError::InvalidInput),
         UnixAddr::Abstract(name) => {
             let mut bindings = ABSTRACT_BINDINGS.lock();
             f(bindings.entry(name.clone()).or_default())
@@ -124,7 +124,7 @@ fn lookup_or_create_bind_entry<R>(
                 .open(&FS_CONTEXT.lock(), path.as_ref())?
                 .into_location();
             if loc.metadata()?.node_type != NodeType::Socket {
-                return Err(AxError::NotASocket);
+                return Err(KError::NotASocket);
             }
             f(loc
                 .user_data()
@@ -149,16 +149,16 @@ impl UnixDomainSocket {
     }
 }
 impl Configurable for UnixDomainSocket {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
         self.transport.get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
         self.transport.set_option_inner(opt)
     }
 }
 impl SocketOps for UnixDomainSocket {
-    fn bind(&self, local_endpoint: SocketAddrEx) -> AxResult {
+    fn bind(&self, local_endpoint: SocketAddrEx) -> KResult {
         let local_endpoint = local_endpoint.into_unix()?;
         let mut local_guard = self.local_endpoint.lock();
         if matches!(&*local_guard, UnixAddr::Unbound) {
@@ -167,12 +167,12 @@ impl SocketOps for UnixDomainSocket {
             })?;
             *local_guard = local_endpoint;
         } else {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         Ok(())
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> AxResult {
+    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
         let remote_addr = remote_addr.into_unix()?;
         let local_endpoint = self.local_endpoint.lock().clone();
         let mut peer_guard = self.peer_endpoint.lock();
@@ -182,16 +182,16 @@ impl SocketOps for UnixDomainSocket {
             })?;
             *peer_guard = remote_addr;
         } else {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         Ok(())
     }
 
-    fn listen(&self) -> AxResult {
+    fn listen(&self) -> KResult {
         Ok(())
     }
 
-    fn accept(&self) -> AxResult<Socket> {
+    fn accept(&self) -> KResult<Socket> {
         let (transport, peer_endpoint) = block_on(interruptible(self.transport.accept()))??;
         Ok(Socket::Unix(Box::new(Self {
             transport,
@@ -200,23 +200,23 @@ impl SocketOps for UnixDomainSocket {
         })))
     }
 
-    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize> {
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         self.transport.send(src, options)
     }
 
-    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> AxResult<usize> {
+    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> KResult<usize> {
         self.transport.recv(dst, options)
     }
 
-    fn local_addr(&self) -> AxResult<SocketAddrEx> {
+    fn local_addr(&self) -> KResult<SocketAddrEx> {
         Ok(SocketAddrEx::Unix(self.local_endpoint.lock().clone()))
     }
 
-    fn peer_addr(&self) -> AxResult<SocketAddrEx> {
+    fn peer_addr(&self) -> KResult<SocketAddrEx> {
         Ok(SocketAddrEx::Unix(self.peer_endpoint.lock().clone()))
     }
 
-    fn shutdown(&self, how: Shutdown) -> AxResult {
+    fn shutdown(&self, how: Shutdown) -> KResult {
         self.transport.shutdown(how)
     }
 }

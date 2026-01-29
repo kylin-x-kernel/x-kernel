@@ -8,13 +8,13 @@ Generic error code representation.
 
 It provides two error types and the corresponding result types:
 
-- [`AxError`] and [`AxResult`]: A generic error type similar to
+- [`KError`] and [`KResult`]: A generic error type similar to
   [`std::io::ErrorKind`].
 - [`LinuxError`] and [`LinuxResult`]: Linux specific error codes defined in
-  `errno.h`. It can be converted from [`AxError`].
+  `errno.h`. It can be converted from [`KError`].
 
-[`AxError`]: https://docs.rs/kerrno/latest/kerrno/enum.AxError.html
-[`AxResult`]: https://docs.rs/kerrno/latest/kerrno/type.AxResult.html
+[`KError`]: https://docs.rs/kerrno/latest/kerrno/enum.KError.html
+[`KResult`]: https://docs.rs/kerrno/latest/kerrno/type.KResult.html
 [`LinuxError`]: https://docs.rs/kerrno/latest/kerrno/enum.LinuxError.html
 [`LinuxResult`]: https://docs.rs/kerrno/latest/kerrno/type.LinuxResult.html
 [`std::io::ErrorKind`]: https://doc.rust-lang.org/std/io/enum.ErrorKind.html

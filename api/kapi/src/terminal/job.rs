@@ -1,8 +1,8 @@
 use alloc::sync::{Arc, Weak};
 use core::task::Context;
 
-use kerrno::{AxResult, ax_bail};
 use kcore::task::AsThread;
+use kerrno::{KResult, k_bail};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kprocess::{ProcessGroup, Session};
 use kspin::SpinNoIrq;
@@ -40,7 +40,7 @@ impl JobControl {
         self.foreground.lock().upgrade()
     }
 
-    pub fn set_foreground(&self, pg: &Arc<ProcessGroup>) -> AxResult<()> {
+    pub fn set_foreground(&self, pg: &Arc<ProcessGroup>) -> KResult<()> {
         let mut guard = self.foreground.lock();
         let weak = Arc::downgrade(pg);
         if Weak::ptr_eq(&weak, &*guard) {
@@ -48,13 +48,13 @@ impl JobControl {
         }
 
         let Some(session) = self.session.lock().upgrade() else {
-            ax_bail!(
+            k_bail!(
                 OperationNotPermitted,
                 "No session associated with job control"
             );
         };
         if !Arc::ptr_eq(&pg.session(), &session) {
-            ax_bail!(
+            k_bail!(
                 OperationNotPermitted,
                 "Process group does not belong to the session"
             );

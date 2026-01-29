@@ -4,8 +4,8 @@ use core::{
     time::Duration,
 };
 
-use kerrno::{AxError, AxResult, ax_bail};
 use kdriver::prelude::*;
+use kerrno::{KError, KResult, k_bail};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
 
@@ -18,10 +18,10 @@ static VSOCK_EVENT_QUEUE: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(Vec
 const VSOCK_RX_SCRATCH_SIZE: usize = 0x1000; // 4KiB scratch buffer for vsock receive
 
 /// Registers a vsock device. Only one vsock device can be registered.
-pub fn register_vsock_dev(dev: VsockDevice) -> AxResult {
+pub fn register_vsock_dev(dev: VsockDevice) -> KResult {
     let mut guard = VSOCK_DEV.lock();
     if guard.is_some() {
-        ax_bail!(AlreadyExists, "vsock device already registered");
+        k_bail!(AlreadyExists, "vsock device already registered");
     }
     *guard = Some(dev);
     drop(guard);
@@ -109,7 +109,7 @@ fn vsock_poll_task() {
     }
 }
 
-async fn poll_vsock_adaptive() -> AxResult<()> {
+async fn poll_vsock_adaptive() -> KResult<()> {
     let has_events = poll_vsock_devices()?;
 
     if has_events {
@@ -128,9 +128,9 @@ async fn poll_vsock_adaptive() -> AxResult<()> {
     Ok(())
 }
 
-fn poll_vsock_devices() -> AxResult<bool> {
+fn poll_vsock_devices() -> KResult<bool> {
     let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(AxError::NotFound)?;
+    let dev = guard.as_mut().ok_or(KError::NotFound)?;
     let mut event_count = 0;
     let mut buf = alloc::vec![0; VSOCK_RX_SCRATCH_SIZE];
 
@@ -215,43 +215,43 @@ fn handle_vsock_event(event: VsockDriverEventType, dev: &mut VsockDevice, buf: &
     }
 }
 
-pub fn vsock_listen(addr: VsockAddr) -> AxResult<()> {
+pub fn vsock_listen(addr: VsockAddr) -> KResult<()> {
     let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(AxError::NotFound)?;
+    let dev = guard.as_mut().ok_or(KError::NotFound)?;
     dev.listen(addr.port);
     Ok(())
 }
 
-fn map_dev_err(e: DriverError) -> AxError {
+fn map_dev_err(e: DriverError) -> KError {
     match e {
-        DriverError::AlreadyExists => AxError::AlreadyExists,
-        DriverError::WouldBlock => AxError::WouldBlock,
-        DriverError::InvalidInput => AxError::InvalidInput,
-        DriverError::Io => AxError::Io,
-        _ => AxError::BadState,
+        DriverError::AlreadyExists => KError::AlreadyExists,
+        DriverError::WouldBlock => KError::WouldBlock,
+        DriverError::InvalidInput => KError::InvalidInput,
+        DriverError::Io => KError::Io,
+        _ => KError::BadState,
     }
 }
 
-pub fn vsock_connect(conn_id: VsockConnId) -> AxResult<()> {
+pub fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
     let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(AxError::NotFound)?;
+    let dev = guard.as_mut().ok_or(KError::NotFound)?;
     dev.connect(conn_id).map_err(map_dev_err)
 }
 
-pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> AxResult<usize> {
+pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
     let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(AxError::NotFound)?;
+    let dev = guard.as_mut().ok_or(KError::NotFound)?;
     dev.send(conn_id, buf).map_err(map_dev_err)
 }
 
-pub fn vsock_disconnect(conn_id: VsockConnId) -> AxResult<()> {
+pub fn vsock_disconnect(conn_id: VsockConnId) -> KResult<()> {
     let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(AxError::NotFound)?;
+    let dev = guard.as_mut().ok_or(KError::NotFound)?;
     dev.disconnect(conn_id).map_err(map_dev_err)
 }
 
-pub fn vsock_guest_cid() -> AxResult<u64> {
+pub fn vsock_guest_cid() -> KResult<u64> {
     let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(AxError::NotFound)?;
+    let dev = guard.as_mut().ok_or(KError::NotFound)?;
     Ok(dev.guest_cid())
 }

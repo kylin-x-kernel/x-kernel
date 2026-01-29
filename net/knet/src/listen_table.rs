@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec};
 use core::ops::DerefMut;
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use ksync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},
@@ -60,7 +60,7 @@ impl ListenTable {
         self.tcp[port as usize].lock().is_none()
     }
 
-    pub fn listen(&self, listen_endpoint: IpListenEndpoint) -> AxResult {
+    pub fn listen(&self, listen_endpoint: IpListenEndpoint) -> KResult {
         let port = listen_endpoint.port;
         assert_ne!(port, 0);
         let mut entry = self.tcp[port as usize].lock();
@@ -69,7 +69,7 @@ impl ListenTable {
             Ok(())
         } else {
             warn!("socket already listening on port {port}");
-            Err(AxError::AddrInUse)
+            Err(KError::AddrInUse)
         }
     }
 
@@ -82,7 +82,7 @@ impl ListenTable {
         self.tcp[port as usize].clone()
     }
 
-    pub fn can_accept(&self, port: u16) -> AxResult<bool> {
+    pub fn can_accept(&self, port: u16) -> KResult<bool> {
         if let Some(entry) = self.listen_entry(port).lock().as_ref() {
             Ok(entry
                 .syn_queue
@@ -90,16 +90,16 @@ impl ListenTable {
                 .any(|&dispatch_irq| is_connected(dispatch_irq)))
         } else {
             warn!("accept before listen");
-            Err(AxError::InvalidInput)
+            Err(KError::InvalidInput)
         }
     }
 
-    pub fn accept(&self, port: u16) -> AxResult<SocketHandle> {
+    pub fn accept(&self, port: u16) -> KResult<SocketHandle> {
         let entry = self.listen_entry(port);
         let mut table = entry.lock();
         let Some(entry) = table.deref_mut() else {
             warn!("accept before listen");
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         };
 
         let syn_queue: &mut VecDeque<SocketHandle> = &mut entry.syn_queue;
@@ -107,7 +107,7 @@ impl ListenTable {
             .iter()
             .enumerate()
             .find_map(|(idx, &dispatch_irq)| is_connected(dispatch_irq).then_some(idx))
-            .ok_or(AxError::WouldBlock)?; // wait for connection
+            .ok_or(KError::WouldBlock)?; // wait for connection
         if idx > 0 {
             warn!(
                 "slow SYN queue enumeration: index = {}, len = {}!",
@@ -120,7 +120,7 @@ impl ListenTable {
         // Otherwise, return the dispatch_irq and the address tuple
         if is_closed(dispatch_irq) {
             warn!("accept failed: connection reset");
-            Err(AxError::ConnectionReset)
+            Err(KError::ConnectionReset)
         } else {
             Ok(dispatch_irq)
         }

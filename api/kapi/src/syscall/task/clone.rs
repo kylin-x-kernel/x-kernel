@@ -1,11 +1,11 @@
 use alloc::sync::Arc;
 
-use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use kcore::{
     mm::copy_from_kernel,
     task::{AsThread, ProcessData, Thread, add_task_to_table},
 };
+use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kprocess::Pid;
@@ -93,7 +93,7 @@ pub fn sys_clone(
     #[cfg(any(target_arch = "x86_64", target_arch = "loongarch64"))] child_tid: usize,
     tls: usize,
     #[cfg(not(any(target_arch = "x86_64", target_arch = "loongarch64")))] child_tid: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     const FLAG_MASK: u32 = 0xff;
     let exit_signal = flags & FLAG_MASK;
     let mut flags = CloneFlags::from_bits_truncate(flags & !FLAG_MASK);
@@ -108,13 +108,13 @@ pub fn sys_clone(
     );
 
     if exit_signal != 0 && flags.contains(CloneFlags::THREAD | CloneFlags::PARENT) {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     if flags.contains(CloneFlags::THREAD) && !flags.contains(CloneFlags::VM | CloneFlags::SIGHAND) {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     if flags.contains(CloneFlags::PIDFD | CloneFlags::PARENT_SETTID) {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     let exit_signal = Signo::from_repr(exit_signal as u8);
 
@@ -150,7 +150,7 @@ pub fn sys_clone(
         old_proc_data.clone()
     } else {
         let proc = if flags.contains(CloneFlags::PARENT) {
-            old_proc_data.proc.parent().ok_or(AxError::InvalidInput)?
+            old_proc_data.proc.parent().ok_or(KError::InvalidInput)?
         } else {
             old_proc_data.proc.clone()
         }
@@ -229,6 +229,6 @@ pub fn sys_clone(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_fork(uctx: &UserContext) -> AxResult<isize> {
+pub fn sys_fork(uctx: &UserContext) -> KResult<isize> {
     sys_clone(uctx, SIGCHLD, 0, 0, 0, 0)
 }

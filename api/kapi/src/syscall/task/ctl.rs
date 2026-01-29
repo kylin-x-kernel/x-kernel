@@ -1,7 +1,7 @@
 use core::ffi::c_char;
 
-use kerrno::{AxError, AxResult};
 use kcore::task::{AsThread, get_process_data};
+use kerrno::{KError, KResult};
 use ktask::current;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
@@ -10,13 +10,13 @@ use crate::mm::vm_load_string;
 
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
 
-fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> AxResult<()> {
+fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> KResult<()> {
     // FIXME: AnyBitPattern
     let mut header = unsafe { header_ptr.read_uninit()?.assume_init() };
     if header.version != CAPABILITY_VERSION_3 {
         header.version = CAPABILITY_VERSION_3;
         header_ptr.write_vm(header)?;
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     let _ = get_process_data(header.pid as u32)?;
     Ok(())
@@ -25,7 +25,7 @@ fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> AxResult<()
 pub fn sys_capget(
     header: *mut __user_cap_header_struct,
     data: *mut __user_cap_data_struct,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     validate_cap_header(header)?;
 
     data.write_vm(__user_cap_data_struct {
@@ -39,27 +39,27 @@ pub fn sys_capget(
 pub fn sys_capset(
     header: *mut __user_cap_header_struct,
     _data: *mut __user_cap_data_struct,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     validate_cap_header(header)?;
 
     Ok(0)
 }
 
-pub fn sys_umask(mask: u32) -> AxResult<isize> {
+pub fn sys_umask(mask: u32) -> KResult<isize> {
     let curr = current();
     let old = curr.as_thread().proc_data.replace_umask(mask);
     Ok(old as isize)
 }
 
-pub fn sys_setreuid(_ruid: u32, _euid: u32) -> AxResult<isize> {
+pub fn sys_setreuid(_ruid: u32, _euid: u32) -> KResult<isize> {
     Ok(0)
 }
 
-pub fn sys_setresuid(_ruid: u32, _euid: u32, _suid: u32) -> AxResult<isize> {
+pub fn sys_setresuid(_ruid: u32, _euid: u32, _suid: u32) -> KResult<isize> {
     Ok(0)
 }
 
-pub fn sys_setresgid(_rgid: u32, _egid: u32, _sgid: u32) -> AxResult<isize> {
+pub fn sys_setresgid(_rgid: u32, _egid: u32, _sgid: u32) -> KResult<isize> {
     Ok(0)
 }
 
@@ -69,7 +69,7 @@ pub fn sys_get_mempolicy(
     _maxnode: usize,
     _addr: usize,
     _flags: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     warn!("Dummy get_mempolicy called");
     Ok(0)
 }
@@ -88,7 +88,7 @@ pub fn sys_prctl(
     arg3: usize,
     arg4: usize,
     arg5: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     use linux_raw_sys::prctl::*;
 
     debug!("sys_prctl <= option: {option}, args: {arg2}, {arg3}, {arg4}, {arg5}");
@@ -109,11 +109,11 @@ pub fn sys_prctl(
         PR_MCE_KILL => {}
         PR_SET_MM => {
             // not implemented; but avoid annoying warnings
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         _ => {
             warn!("sys_prctl: unsupported option {option}");
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
     }
 

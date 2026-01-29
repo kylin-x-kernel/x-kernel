@@ -1,7 +1,6 @@
 use alloc::{format, sync::Arc};
 use core::{any::Any, task::Context, time::Duration};
 
-use kerrno::{AxError, AxResult};
 use bitmaps::Bitmap;
 use fs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
 use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
@@ -9,6 +8,7 @@ use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 use kdriver::prelude::{
     DriverError, DriverOps, Event, EventType, InputDevice, InputDeviceId, InputDriverOps,
 };
+use kerrno::{KError, KResult};
 use khal::time::wall_time;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
@@ -92,12 +92,12 @@ impl EventDev {
         }
     }
 
-    fn get_event_bits(&self, arg: usize, size: usize, ty: u8) -> AxResult<usize> {
+    fn get_event_bits(&self, arg: usize, size: usize, ty: u8) -> KResult<usize> {
         let bits = UserPtr::<u8>::from(arg).get_as_mut_slice(size)?;
         if ty == 0 {
             Ok(copy_bytes(self.ev_bits.as_bytes(), bits))
         } else {
-            let ty = EventType::from_repr(ty).ok_or(AxError::InvalidInput)?;
+            let ty = EventType::from_repr(ty).ok_or(KError::InvalidInput)?;
             match self.inner.lock().device.get_event_bits(ty, bits) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -118,11 +118,11 @@ fn copy_bytes(src: &[u8], dst: &mut [u8]) -> usize {
     len
 }
 
-fn return_str(arg: usize, size: usize, s: &str) -> AxResult<usize> {
+fn return_str(arg: usize, size: usize, s: &str) -> KResult<usize> {
     let slice = UserPtr::<u8>::from(arg).get_as_mut_slice(size)?;
     Ok(copy_bytes(s.as_bytes(), slice))
 }
-fn return_zero_bits(arg: usize, size: usize, bits: usize) -> AxResult<usize> {
+fn return_zero_bits(arg: usize, size: usize, bits: usize) -> KResult<usize> {
     let slice = UserPtr::<u8>::from(arg).get_as_mut_slice(size)?;
     let len = bits.div_ceil(8).min(slice.len());
     slice[..len].fill(0);
@@ -157,7 +157,7 @@ impl DeviceOps for EventDev {
             return Ok(0);
         }
         if buf.len() < size_of::<InputEvent>() {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let mut read = 0;
         let mut inner = self.inner.lock();
@@ -181,14 +181,14 @@ impl DeviceOps for EventDev {
             read += out.len();
         }
         if read == 0 {
-            Err(AxError::WouldBlock)
+            Err(KError::WouldBlock)
         } else {
             Ok(read)
         }
     }
 
     fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Err(AxError::InvalidInput)
+        Err(KError::InvalidInput)
     }
 
     fn flags(&self) -> NodeFlags {
@@ -228,12 +228,12 @@ impl DeviceOps for EventDev {
 
                 if ty != b'E' {
                     warn!("unknown ioctl for evdev: {cmd} {arg}");
-                    return Err(AxError::InvalidInput);
+                    return Err(KError::InvalidInput);
                 }
 
                 match dir {
                     // IOC_WRITE
-                    1 => return Err(AxError::InvalidInput),
+                    1 => return Err(KError::InvalidInput),
                     // IOC_READ
                     2 => {
                         #[allow(clippy::single_match)]
@@ -290,12 +290,12 @@ impl DeviceOps for EventDev {
                             // TODO: abs info
                             return Ok(0);
                         }
-                        return Err(AxError::InvalidInput);
+                        return Err(KError::InvalidInput);
                     }
                     _ => {}
                 }
 
-                Err(AxError::InvalidInput)
+                Err(KError::InvalidInput)
             }
         }
     }

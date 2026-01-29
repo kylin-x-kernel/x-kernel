@@ -10,7 +10,7 @@
 extern crate alloc;
 
 #[doc(no_inline)]
-pub use kerrno::{AxError as Error, AxErrorKind as ErrorKind, AxResult as Result};
+pub use kerrno::{KError as Error, KErrorKind as ErrorKind, KResult as Result};
 
 /// Default buffer size for I/O operations.
 pub const DEFAULT_BUF_SIZE: usize = 1024 * 2;

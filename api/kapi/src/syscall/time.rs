@@ -1,5 +1,5 @@
-use kerrno::{AxError, AxResult};
 use kcore::{task::AsThread, time::ITimerType};
+use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
 use ktask::current;
 use linux_raw_sys::general::{
@@ -11,7 +11,7 @@ use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::time::TimeValueLike;
 
-pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> AxResult<isize> {
+pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KResult<isize> {
     let now = match clock_id as u32 {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => wall_time(),
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
@@ -24,19 +24,19 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> AxR
         _ => {
             warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
             wall_time()
-            // return Err(AxError::EINVAL);
+            // return Err(KError::EINVAL);
         }
     };
     ts.write_vm(timespec::from_time_value(now))?;
     Ok(0)
 }
 
-pub fn sys_gettimeofday(ts: *mut timeval) -> AxResult<isize> {
+pub fn sys_gettimeofday(ts: *mut timeval) -> KResult<isize> {
     ts.write_vm(timeval::from_time_value(wall_time()))?;
     Ok(0)
 }
 
-pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: *mut timespec) -> AxResult<isize> {
+pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: *mut timespec) -> KResult<isize> {
     if clock_id as u32 != CLOCK_MONOTONIC && clock_id as u32 != CLOCK_REALTIME {
         warn!("Called sys_clock_getres for unsupported clock {clock_id}");
     }
@@ -58,7 +58,7 @@ pub struct Tms {
     tms_cstime: usize,
 }
 
-pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
+pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
     let (utime, stime) = current().as_thread().time.borrow().output();
     let utime = utime.as_micros() as usize;
     let stime = stime.as_micros() as usize;
@@ -71,8 +71,8 @@ pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
     Ok(ns2t(monotonic_time_nanos()) as _)
 }
 
-pub fn sys_getitimer(which: i32, value: *mut itimerval) -> AxResult<isize> {
-    let ty = ITimerType::from_repr(which).ok_or(AxError::InvalidInput)?;
+pub fn sys_getitimer(which: i32, value: *mut itimerval) -> KResult<isize> {
+    let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
     let (it_interval, it_value) = current().as_thread().time.borrow().get_itimer(ty);
 
     value.write_vm(itimerval {
@@ -86,8 +86,8 @@ pub fn sys_setitimer(
     which: i32,
     new_value: *const itimerval,
     old_value: *mut itimerval,
-) -> AxResult<isize> {
-    let ty = ITimerType::from_repr(which).ok_or(AxError::InvalidInput)?;
+) -> KResult<isize> {
+    let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
     let curr = current();
 
     let (interval, remained) = match new_value.check_non_null() {

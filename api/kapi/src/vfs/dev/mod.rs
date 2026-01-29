@@ -15,9 +15,9 @@ pub mod tty;
 use alloc::{format, sync::Arc};
 use core::any::Any;
 
-use kerrno::AxError;
 use fs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsResult};
 use kcore::vfs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFs};
+use kerrno::KError;
 use ksync::Mutex;
 #[cfg(feature = "dev-log")]
 pub use log::bind_dev_log;
@@ -110,7 +110,7 @@ impl DeviceOps for Full {
     }
 
     fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Err(AxError::StorageFull)
+        Err(KError::StorageFull)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -126,7 +126,7 @@ struct CpuDmaLatency;
 
 impl DeviceOps for CpuDmaLatency {
     fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        Err(AxError::InvalidInput)
+        Err(KError::InvalidInput)
     }
 
     fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {

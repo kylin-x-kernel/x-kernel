@@ -1,9 +1,9 @@
 use alloc::vec::Vec;
 use core::{future::poll_fn, task::Poll};
 
-use kerrno::{AxError, AxResult, LinuxError};
 use bitflags::bitflags;
 use kcore::task::AsThread;
+use kerrno::{KError, KResult, LinuxError};
 use kprocess::{Pid, Process};
 use ktask::{
     current,
@@ -59,7 +59,7 @@ impl WaitPid {
     }
 }
 
-pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isize> {
+pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {
     let options = WaitOptions::from_bits_truncate(options);
     info!("sys_waitpid <= pid: {pid:?}, options: {options:?}");
 
@@ -85,7 +85,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
         .filter(|child| pid.apply(child))
         .collect::<Vec<_>>();
     if children.is_empty() {
-        return Err(AxError::from(LinuxError::ECHILD));
+        return Err(KError::from(LinuxError::ECHILD));
     }
 
     let check_children = || {

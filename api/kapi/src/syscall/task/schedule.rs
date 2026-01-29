@@ -1,5 +1,5 @@
-use kerrno::{AxError, AxResult};
 use kcore::task::{get_process_data, get_process_group};
+use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use ktask::{
     KCpuMask, current,
@@ -13,7 +13,7 @@ use osvm::{VirtMutPtr, VirtPtr, load_vec, write_vm_mem};
 
 use crate::time::TimeValueLike;
 
-pub fn sys_sched_yield() -> AxResult<isize> {
+pub fn sys_sched_yield() -> KResult<isize> {
     ktask::yield_now();
     Ok(0)
 }
@@ -31,7 +31,7 @@ fn sleep_impl(clock: impl Fn() -> TimeValue, dur: TimeValue) -> TimeValue {
 }
 
 /// Sleep some nanoseconds
-pub fn sys_nanosleep(req: *const timespec, rem: *mut timespec) -> AxResult<isize> {
+pub fn sys_nanosleep(req: *const timespec, rem: *mut timespec) -> KResult<isize> {
     // FIXME: AnyBitPattern
     let req = unsafe { req.read_uninit()?.assume_init() }.try_into_time_value()?;
     debug!("sys_nanosleep <= req: {req:?}");
@@ -43,7 +43,7 @@ pub fn sys_nanosleep(req: *const timespec, rem: *mut timespec) -> AxResult<isize
         if let Some(rem) = rem.check_non_null() {
             rem.write_vm(timespec::from_time_value(diff))?;
         }
-        Err(AxError::Interrupted)
+        Err(KError::Interrupted)
     } else {
         Ok(0)
     }
@@ -54,13 +54,13 @@ pub fn sys_clock_nanosleep(
     flags: u32,
     req: *const timespec,
     rem: *mut timespec,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     let clock = match clock_id as u32 {
         CLOCK_REALTIME => khal::time::wall_time,
         CLOCK_MONOTONIC => khal::time::monotonic_time,
         _ => {
             warn!("Unsupported clock_id: {clock_id}");
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
     };
 
@@ -80,20 +80,20 @@ pub fn sys_clock_nanosleep(
         if let Some(rem) = rem.check_non_null() {
             rem.write_vm(timespec::from_time_value(diff))?;
         }
-        Err(AxError::Interrupted)
+        Err(KError::Interrupted)
     } else {
         Ok(0)
     }
 }
 
-pub fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, user_mask: *mut u8) -> AxResult<isize> {
+pub fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, user_mask: *mut u8) -> KResult<isize> {
     if cpusetsize * 8 < platconfig::plat::CPU_NUM {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     // TODO: support other threads
     if pid != 0 {
-        return Err(AxError::OperationNotPermitted);
+        return Err(KError::OperationNotPermitted);
     }
 
     let mask = current().cpumask();
@@ -104,11 +104,7 @@ pub fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, user_mask: *mut u8) ->
     Ok(mask_bytes.len() as _)
 }
 
-pub fn sys_sched_setaffinity(
-    _pid: i32,
-    cpusetsize: usize,
-    user_mask: *const u8,
-) -> AxResult<isize> {
+pub fn sys_sched_setaffinity(_pid: i32, cpusetsize: usize, user_mask: *const u8) -> KResult<isize> {
     let size = cpusetsize.min(platconfig::plat::CPU_NUM.div_ceil(8));
     let user_mask = load_vec(user_mask, size)?;
     let mut cpu_mask = KCpuMask::new();
@@ -125,19 +121,19 @@ pub fn sys_sched_setaffinity(
     Ok(0)
 }
 
-pub fn sys_sched_getscheduler(_pid: i32) -> AxResult<isize> {
+pub fn sys_sched_getscheduler(_pid: i32) -> KResult<isize> {
     Ok(SCHED_RR as _)
 }
 
-pub fn sys_sched_setscheduler(_pid: i32, _policy: i32, _param: *const ()) -> AxResult<isize> {
+pub fn sys_sched_setscheduler(_pid: i32, _policy: i32, _param: *const ()) -> KResult<isize> {
     Ok(0)
 }
 
-pub fn sys_sched_getparam(_pid: i32, _param: *mut ()) -> AxResult<isize> {
+pub fn sys_sched_getparam(_pid: i32, _param: *mut ()) -> KResult<isize> {
     Ok(0)
 }
 
-pub fn sys_getpriority(which: u32, who: u32) -> AxResult<isize> {
+pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
     debug!("sys_getpriority <= which: {which}, who: {who}");
 
     match which {
@@ -157,9 +153,9 @@ pub fn sys_getpriority(which: u32, who: u32) -> AxResult<isize> {
             if who == 0 {
                 Ok(20)
             } else {
-                Err(AxError::NoSuchProcess)
+                Err(KError::NoSuchProcess)
             }
         }
-        _ => Err(AxError::InvalidInput),
+        _ => Err(KError::InvalidInput),
     }
 }

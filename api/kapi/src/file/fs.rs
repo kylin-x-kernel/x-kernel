@@ -6,8 +6,8 @@ use core::{
     task::Context,
 };
 
-use kerrno::{AxError, AxResult};
 use fs_ng_vfs::{Location, Metadata, NodeFlags};
+use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, FsContext};
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
@@ -17,7 +17,7 @@ use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 use super::{FileLike, Kstat, get_file_like};
 use crate::file::{IoDst, IoSrc};
 
-pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> AxResult<R>) -> AxResult<R> {
+pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
     let mut fs = FS_CONTEXT.lock();
     if dirfd == AT_FDCWD {
         f(&mut fs)
@@ -40,7 +40,7 @@ impl ResolveAtResult {
         }
     }
 
-    pub fn stat(&self) -> AxResult<Kstat> {
+    pub fn stat(&self) -> KResult<Kstat> {
         match self {
             Self::File(file) => file.metadata().map(|it| metadata_to_kstat(&it)),
             Self::Other(file_like) => file_like.stat(),
@@ -48,11 +48,11 @@ impl ResolveAtResult {
     }
 }
 
-pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> AxResult<ResolveAtResult> {
+pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
     match path {
         Some("") | None => {
             if flags & AT_EMPTY_PATH == 0 {
-                return Err(AxError::NotFound);
+                return Err(KError::NotFound);
             }
             let file_like = get_file_like(dirfd)?;
             let f = file_like.clone();
@@ -125,7 +125,7 @@ fn path_for(loc: &Location) -> Cow<'static, str> {
 }
 
 impl FileLike for File {
-    fn read(&self, dst: &mut IoDst) -> AxResult<usize> {
+    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
         let inner = self.inner();
         if likely(self.is_blocking()) {
             inner.read(dst)
@@ -136,7 +136,7 @@ impl FileLike for File {
         }
     }
 
-    fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
+    fn write(&self, src: &mut IoSrc) -> KResult<usize> {
         let inner = self.inner();
         if likely(self.is_blocking()) {
             inner.write(src)
@@ -147,15 +147,15 @@ impl FileLike for File {
         }
     }
 
-    fn stat(&self) -> AxResult<Kstat> {
+    fn stat(&self) -> KResult<Kstat> {
         Ok(metadata_to_kstat(&self.inner().location().metadata()?))
     }
 
-    fn ioctl(&self, cmd: u32, arg: usize) -> AxResult<usize> {
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
         self.inner().backend()?.location().ioctl(cmd, arg)
     }
 
-    fn set_nonblocking(&self, flag: bool) -> AxResult {
+    fn set_nonblocking(&self, flag: bool) -> KResult {
         self.nonblock.store(flag, Ordering::Release);
         Ok(())
     }
@@ -168,15 +168,15 @@ impl FileLike for File {
         path_for(self.inner.location())
     }
 
-    fn from_fd(fd: c_int) -> AxResult<Arc<Self>>
+    fn from_fd(fd: c_int) -> KResult<Arc<Self>>
     where
         Self: Sized + 'static,
     {
         get_file_like(fd)?.downcast_arc().map_err(|any| {
             if any.is::<Directory>() {
-                AxError::IsADirectory
+                KError::IsADirectory
             } else {
-                AxError::BrokenPipe
+                KError::BrokenPipe
             }
         })
     }
@@ -212,15 +212,15 @@ impl Directory {
 }
 
 impl FileLike for Directory {
-    fn read(&self, _dst: &mut IoDst) -> AxResult<usize> {
-        Err(AxError::BadFileDescriptor)
+    fn read(&self, _dst: &mut IoDst) -> KResult<usize> {
+        Err(KError::BadFileDescriptor)
     }
 
-    fn write(&self, _src: &mut IoSrc) -> AxResult<usize> {
-        Err(AxError::BadFileDescriptor)
+    fn write(&self, _src: &mut IoSrc) -> KResult<usize> {
+        Err(KError::BadFileDescriptor)
     }
 
-    fn stat(&self) -> AxResult<Kstat> {
+    fn stat(&self) -> KResult<Kstat> {
         Ok(metadata_to_kstat(&self.inner.metadata()?))
     }
 
@@ -228,10 +228,10 @@ impl FileLike for Directory {
         path_for(&self.inner)
     }
 
-    fn from_fd(fd: c_int) -> AxResult<Arc<Self>> {
+    fn from_fd(fd: c_int) -> KResult<Arc<Self>> {
         get_file_like(fd)?
             .downcast_arc()
-            .map_err(|_| AxError::NotADirectory)
+            .map_err(|_| KError::NotADirectory)
     }
 }
 impl Pollable for Directory {

@@ -1,10 +1,10 @@
 use alloc::sync::Arc;
 
-use kerrno::{AxError, AxResult};
 use kcore::{
     shm::{SHM_MANAGER, ShmInner, ShmidDs},
     task::AsThread,
 };
+use kerrno::{KError, KResult};
 use khal::{
     paging::{MappingFlags, PageSize},
     time::monotonic_time_nanos,
@@ -31,10 +31,10 @@ bitflags::bitflags! {
     }
 }
 
-pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
+pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
     let page_num = memaddr::align_up_4k(size) / PAGE_SIZE_4K;
     if page_num == 0 {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     let mut mapping_flags = MappingFlags::from_name("USER").unwrap();
@@ -56,7 +56,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
         if let Some(shmid) = shm_manager.get_shmid_by_key(key) {
             let shm_inner = shm_manager
                 .get_inner_by_shmid(shmid)
-                .ok_or(AxError::InvalidInput)?;
+                .ok_or(KError::InvalidInput)?;
             let mut shm_inner = shm_inner.lock();
             return shm_inner.try_update(size, mapping_flags, cur_pid);
         }
@@ -77,7 +77,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
     Ok(shmid as isize)
 }
 
-pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
+pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     let shm_inner = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager.get_inner_by_shmid(shmid).unwrap()
@@ -117,7 +117,7 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
                 PAGE_SIZE_4K,
             )
         })
-        .ok_or(AxError::NoMemory)?;
+        .ok_or(KError::NoMemory)?;
     let end_addr = VirtAddr::from(start_addr.as_usize() + length);
     let va_range = VirtAddrRange::new(start_addr, end_addr);
 
@@ -150,12 +150,12 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
     Ok(start_addr.as_usize() as isize)
 }
 
-pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> AxResult<isize> {
+pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> KResult<isize> {
     let shm_inner = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
             .get_inner_by_shmid(shmid)
-            .ok_or(AxError::InvalidInput)?
+            .ok_or(KError::InvalidInput)?
     };
     let mut shm_inner = shm_inner.lock();
 
@@ -169,7 +169,7 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> AxResult<isize
     } else if cmd == IPC_RMID {
         shm_inner.rmid = true;
     } else {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     shm_inner.shmid_ds.shm_ctime = monotonic_time_nanos() as __kernel_time_t;
@@ -190,7 +190,7 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> AxResult<isize
 
 // Note: all the below delete functions only delete the mapping between the
 // shm_id and the shm_inner,   but the shm_inner is not deleted or modifyed!
-pub fn sys_shmdt(shmaddr: usize) -> AxResult<isize> {
+pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
     let shmaddr = VirtAddr::from(shmaddr);
 
     let curr = current();
@@ -201,17 +201,17 @@ pub fn sys_shmdt(shmaddr: usize) -> AxResult<isize> {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
             .get_shmid_by_vaddr(pid, shmaddr)
-            .ok_or(AxError::InvalidInput)?
+            .ok_or(KError::InvalidInput)?
     };
 
     let shm_inner = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
             .get_inner_by_shmid(shmid)
-            .ok_or(AxError::InvalidInput)?
+            .ok_or(KError::InvalidInput)?
     };
     let mut shm_inner = shm_inner.lock();
-    let va_range = shm_inner.get_addr_range(pid).ok_or(AxError::InvalidInput)?;
+    let va_range = shm_inner.get_addr_range(pid).ok_or(KError::InvalidInput)?;
 
     let mut aspace = proc_data.aspace.lock();
     aspace.unmap(va_range.start, va_range.size())?;

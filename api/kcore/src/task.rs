@@ -16,9 +16,9 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
 };
 
-use kerrno::{AxError, AxResult};
 use extern_trait::extern_trait;
 use hashbrown::HashMap;
+use kerrno::{KError, KResult};
 use kpoll::PollSet;
 use kprocess::{Pid, Process, ProcessGroup, Session};
 use ksignal::{
@@ -418,11 +418,11 @@ pub fn tasks() -> Vec<KtaskRef> {
 }
 
 /// Finds the task with the given TID.
-pub fn get_task(tid: Pid) -> AxResult<KtaskRef> {
+pub fn get_task(tid: Pid) -> KResult<KtaskRef> {
     if tid == 0 {
         return Ok(current().clone());
     }
-    TASK_TABLE.read().get(&tid).ok_or(AxError::NoSuchProcess)
+    TASK_TABLE.read().get(&tid).ok_or(KError::NoSuchProcess)
 }
 
 /// Lists all processes.
@@ -431,24 +431,24 @@ pub fn processes() -> Vec<Arc<ProcessData>> {
 }
 
 /// Finds the process with the given PID.
-pub fn get_process_data(pid: Pid) -> AxResult<Arc<ProcessData>> {
+pub fn get_process_data(pid: Pid) -> KResult<Arc<ProcessData>> {
     if pid == 0 {
         return Ok(current().as_thread().proc_data.clone());
     }
-    PROCESS_TABLE.read().get(&pid).ok_or(AxError::NoSuchProcess)
+    PROCESS_TABLE.read().get(&pid).ok_or(KError::NoSuchProcess)
 }
 
 /// Finds the process group with the given PGID.
-pub fn get_process_group(pgid: Pid) -> AxResult<Arc<ProcessGroup>> {
+pub fn get_process_group(pgid: Pid) -> KResult<Arc<ProcessGroup>> {
     PROCESS_GROUP_TABLE
         .read()
         .get(&pgid)
-        .ok_or(AxError::NoSuchProcess)
+        .ok_or(KError::NoSuchProcess)
 }
 
 /// Finds the session with the given SID.
-pub fn get_session(sid: Pid) -> AxResult<Arc<Session>> {
-    SESSION_TABLE.read().get(&sid).ok_or(AxError::NoSuchProcess)
+pub fn get_session(sid: Pid) -> KResult<Arc<Session>> {
+    SESSION_TABLE.read().get(&sid).ok_or(KError::NoSuchProcess)
 }
 
 /// Poll the timer
@@ -487,11 +487,11 @@ fn send_signal_thread_inner(task: &TaskInner, thr: &Thread, sig: SignalInfo) {
 }
 
 /// Sends a signal to a thread.
-pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo>) -> AxResult<()> {
+pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo>) -> KResult<()> {
     let task = get_task(tid)?;
-    let thread = task.try_as_thread().ok_or(AxError::OperationNotPermitted)?;
+    let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;
     if tgid.is_some_and(|tgid| thread.proc_data.proc.pid() != tgid) {
-        return Err(AxError::NoSuchProcess);
+        return Err(KError::NoSuchProcess);
     }
 
     if let Some(sig) = sig {
@@ -503,7 +503,7 @@ pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo
 }
 
 /// Sends a signal to a process.
-pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> AxResult<()> {
+pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> {
     let proc_data = get_process_data(pid)?;
 
     if let Some(sig) = sig {
@@ -520,7 +520,7 @@ pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> AxResult<()>
 }
 
 /// Sends a signal to a process group.
-pub fn send_signal_to_process_group(pgid: Pid, sig: Option<SignalInfo>) -> AxResult<()> {
+pub fn send_signal_to_process_group(pgid: Pid, sig: Option<SignalInfo>) -> KResult<()> {
     let pg = get_process_group(pgid)?;
 
     if let Some(sig) = sig {

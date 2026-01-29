@@ -7,8 +7,8 @@ use core::{
     ptr, slice, str,
 };
 
-use kerrno::{AxError, AxResult};
 use kcore::{mm::access_user_memory, task::AsThread};
+use kerrno::{KError, KResult};
 use khal::{
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},
@@ -18,17 +18,17 @@ use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use osvm::{load_vec, load_vec_until_null, read_vm_mem, write_vm_mem};
 
-fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> AxResult<()> {
+fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> KResult<()> {
     let align = layout.align();
     if start.as_usize() & (align - 1) != 0 {
-        return Err(AxError::BadAddress);
+        return Err(KError::BadAddress);
     }
 
     let curr = current();
     let mut aspace = curr.as_thread().proc_data.aspace.lock();
 
     if !aspace.can_access_range(start, layout.size(), access_flags) {
-        return Err(AxError::BadAddress);
+        return Err(KError::BadAddress);
     }
 
     let page_start = start.align_down_4k();
@@ -41,10 +41,10 @@ fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> 
 fn check_null_terminated<T: PartialEq + Default>(
     start: VirtAddr,
     access_flags: MappingFlags,
-) -> AxResult<usize> {
+) -> KResult<usize> {
     let align = Layout::new::<T>().align();
     if start.as_usize() & (align - 1) != 0 {
-        return Err(AxError::BadAddress);
+        return Err(KError::BadAddress);
     }
 
     let zero = T::default();
@@ -70,7 +70,7 @@ fn check_null_terminated<T: PartialEq + Default>(
                 let curr = current();
                 let aspace = curr.as_thread().proc_data.aspace.lock();
                 if !aspace.can_access_range(page, PAGE_SIZE_4K, access_flags) {
-                    return Err(AxError::BadAddress);
+                    return Err(KError::BadAddress);
                 }
 
                 page += PAGE_SIZE_4K;
@@ -127,12 +127,12 @@ impl<T> UserPtr<T> {
         self.0.is_null()
     }
 
-    pub fn get_as_mut(self) -> AxResult<&'static mut T> {
+    pub fn get_as_mut(self) -> KResult<&'static mut T> {
         check_region(self.address(), Layout::new::<T>(), Self::ACCESS_FLAGS)?;
         Ok(unsafe { &mut *self.0 })
     }
 
-    pub fn get_as_mut_slice(self, len: usize) -> AxResult<&'static mut [T]> {
+    pub fn get_as_mut_slice(self, len: usize) -> KResult<&'static mut [T]> {
         check_region(
             self.address(),
             Layout::array::<T>(len).unwrap(),
@@ -141,7 +141,7 @@ impl<T> UserPtr<T> {
         Ok(unsafe { slice::from_raw_parts_mut(self.0, len) })
     }
 
-    pub fn get_as_mut_null_terminated(self) -> AxResult<&'static mut [T]>
+    pub fn get_as_mut_null_terminated(self) -> KResult<&'static mut [T]>
     where
         T: PartialEq + Default,
     {
@@ -188,12 +188,12 @@ impl<T> UserConstPtr<T> {
         self.0.is_null()
     }
 
-    pub fn get_as_ref(self) -> AxResult<&'static T> {
+    pub fn get_as_ref(self) -> KResult<&'static T> {
         check_region(self.address(), Layout::new::<T>(), Self::ACCESS_FLAGS)?;
         Ok(unsafe { &*self.0 })
     }
 
-    pub fn get_as_slice(self, len: usize) -> AxResult<&'static [T]> {
+    pub fn get_as_slice(self, len: usize) -> KResult<&'static [T]> {
         check_region(
             self.address(),
             Layout::array::<T>(len).unwrap(),
@@ -202,7 +202,7 @@ impl<T> UserConstPtr<T> {
         Ok(unsafe { slice::from_raw_parts(self.0, len) })
     }
 
-    pub fn get_as_null_terminated(self) -> AxResult<&'static [T]>
+    pub fn get_as_null_terminated(self) -> KResult<&'static [T]>
     where
         T: PartialEq + Default,
     {
@@ -213,12 +213,12 @@ impl<T> UserConstPtr<T> {
 
 impl UserConstPtr<c_char> {
     /// Get the pointer as `&str`, validating the memory region.
-    pub fn get_as_str(self) -> AxResult<&'static str> {
+    pub fn get_as_str(self) -> KResult<&'static str> {
         let slice = self.get_as_null_terminated()?;
         // SAFETY: c_char is u8
         let slice = unsafe { transmute::<&[c_char], &[u8]>(slice) };
 
-        str::from_utf8(slice).map_err(|_| AxError::IllegalBytes)
+        str::from_utf8(slice).map_err(|_| KError::IllegalBytes)
     }
 }
 
@@ -253,16 +253,16 @@ fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool 
         .dispatch_irq_page_fault(vaddr, access_flags)
 }
 
-pub fn vm_load_string(ptr: *const c_char) -> AxResult<String> {
+pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
     #[allow(clippy::unnecessary_cast)]
     let bytes = load_vec_until_null(ptr as *const u8)?;
-    String::from_utf8(bytes).map_err(|_| AxError::IllegalBytes)
+    String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
 }
 
-pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> AxResult<String> {
+pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String> {
     #[allow(clippy::unnecessary_cast)]
     let bytes = load_vec(ptr as *const u8, len)?;
-    String::from_utf8(bytes).map_err(|_| AxError::IllegalBytes)
+    String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
 }
 
 /// A read-only buffer in the VM's memory.

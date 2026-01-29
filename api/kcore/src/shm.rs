@@ -2,8 +2,8 @@
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
-use kerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
+use kerrno::{KError, KResult};
 use khal::{paging::MappingFlags, time::monotonic_time_nanos};
 use kprocess::Pid;
 use ksync::Mutex;
@@ -130,11 +130,11 @@ impl ShmInner {
         size: usize,
         mapping_flags: MappingFlags,
         pid: Pid,
-    ) -> AxResult<isize> {
+    ) -> KResult<isize> {
         if size as __kernel_size_t != self.shmid_ds.shm_segsz
             || mapping_flags.bits() as __kernel_mode_t != self.shmid_ds.shm_perm.mode
         {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         self.shmid_ds.shm_lpid = pid as i32;
         Ok(self.shmid as isize)

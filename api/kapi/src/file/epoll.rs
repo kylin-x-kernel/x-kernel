@@ -18,9 +18,9 @@ use core::{
     task::{Context, Waker},
 };
 
-use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
 use hashbrown::HashMap;
+use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
@@ -106,7 +106,7 @@ struct EntryKey {
     file: Weak<dyn FileLike>,
 }
 impl EntryKey {
-    fn new(fd: i32) -> AxResult<Self> {
+    fn new(fd: i32) -> KResult<Self> {
         let file = get_file_like(fd)?;
         Ok(Self {
             fd,
@@ -315,12 +315,12 @@ impl Epoll {
         }
     }
 
-    pub fn add(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> AxResult<()> {
+    pub fn add(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
         let key = EntryKey::new(fd)?;
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
         let mut guard = self.inner.interests.lock();
         if guard.contains_key(&key) {
-            return Err(AxError::AlreadyExists);
+            return Err(KError::AlreadyExists);
         }
         guard.insert(key.clone(), Arc::clone(&interest));
         drop(guard);
@@ -329,12 +329,12 @@ impl Epoll {
         Ok(())
     }
 
-    pub fn modify(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> AxResult<()> {
+    pub fn modify(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
         let key = EntryKey::new(fd)?;
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
 
         let mut guard = self.inner.interests.lock();
-        let old = guard.get_mut(&key).ok_or(AxError::NotFound)?;
+        let old = guard.get_mut(&key).ok_or(KError::NotFound)?;
 
         // update new interest if old already in ready queue
         if old.is_in_queue() {
@@ -351,18 +351,18 @@ impl Epoll {
         Ok(())
     }
 
-    pub fn delete(&self, fd: i32) -> AxResult<()> {
+    pub fn delete(&self, fd: i32) -> KResult<()> {
         let key = EntryKey::new(fd)?;
         self.inner
             .interests
             .lock()
             .remove(&key)
-            .ok_or(AxError::NotFound)?;
+            .ok_or(KError::NotFound)?;
         trace!("Epoll: delete fd={fd}");
         Ok(())
     }
 
-    pub fn poll_events(&self, out: &mut [epoll_event]) -> AxResult<usize> {
+    pub fn poll_events(&self, out: &mut [epoll_event]) -> KResult<usize> {
         trace!("Epoll: poll_events called, out.len()={}", out.len());
         let mut count = 0;
         loop {
@@ -425,7 +425,7 @@ impl Epoll {
         }
 
         if count == 0 {
-            Err(AxError::WouldBlock)
+            Err(KError::WouldBlock)
         } else {
             Ok(count)
         }

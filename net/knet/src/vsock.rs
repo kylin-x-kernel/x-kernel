@@ -6,9 +6,9 @@ pub(crate) mod stream;
 use alloc::boxed::Box;
 use core::task::Context;
 
-use kerrno::{AxError, AxResult};
 use enum_dispatch::enum_dispatch;
 pub use kdriver::prelude::{VsockAddr, VsockConnId};
+use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, Pollable};
 
@@ -21,15 +21,15 @@ use crate::{
 /// Abstract transport trait for Unix sockets.
 #[enum_dispatch]
 pub trait VsockTransportOps: Configurable + Pollable + Send + Sync {
-    fn bind(&self, local_addr: VsockAddr) -> AxResult;
-    fn listen(&self) -> AxResult;
-    fn connect(&self, peer_addr: VsockAddr) -> AxResult;
-    fn accept(&self) -> AxResult<(VsockTransport, VsockAddr)>;
-    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize>;
-    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> AxResult<usize>;
-    fn shutdown(&self, _how: Shutdown) -> AxResult;
-    fn local_addr(&self) -> AxResult<Option<VsockAddr>>;
-    fn peer_addr(&self) -> AxResult<Option<VsockAddr>>;
+    fn bind(&self, local_addr: VsockAddr) -> KResult;
+    fn listen(&self) -> KResult;
+    fn connect(&self, peer_addr: VsockAddr) -> KResult;
+    fn accept(&self) -> KResult<(VsockTransport, VsockAddr)>;
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
+    fn recv(&self, dst: impl Write, options: RecvOptions<'_>) -> KResult<usize>;
+    fn shutdown(&self, _how: Shutdown) -> KResult;
+    fn local_addr(&self) -> KResult<Option<VsockAddr>>;
+    fn peer_addr(&self) -> KResult<Option<VsockAddr>>;
 }
 
 #[enum_dispatch(Configurable, VsockTransportOps)]
@@ -68,58 +68,58 @@ impl VsockSocket {
 }
 
 impl Configurable for VsockSocket {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
         self.transport.get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
         self.transport.set_option_inner(opt)
     }
 }
 
 impl SocketOps for VsockSocket {
-    fn bind(&self, local_addr: SocketAddrEx) -> AxResult {
+    fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let local_addr = local_addr.into_vsock()?;
         self.transport.bind(local_addr)
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> AxResult {
+    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
         let remote_addr = remote_addr.into_vsock()?;
         self.transport.connect(remote_addr)
     }
 
-    fn listen(&self) -> AxResult {
+    fn listen(&self) -> KResult {
         self.transport.listen()
     }
 
-    fn accept(&self) -> AxResult<Socket> {
+    fn accept(&self) -> KResult<Socket> {
         self.transport.accept().map(|(transport, _addr)| {
             let socket = VsockSocket::new(transport);
             Socket::Vsock(Box::new(socket))
         })
     }
 
-    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize> {
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         self.transport.send(src, options)
     }
 
-    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> AxResult<usize> {
+    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {
         self.transport.recv(dst, options)
     }
 
-    fn local_addr(&self) -> AxResult<SocketAddrEx> {
+    fn local_addr(&self) -> KResult<SocketAddrEx> {
         Ok(SocketAddrEx::Vsock(
-            self.transport.local_addr()?.ok_or(AxError::NotFound)?,
+            self.transport.local_addr()?.ok_or(KError::NotFound)?,
         ))
     }
 
-    fn peer_addr(&self) -> AxResult<SocketAddrEx> {
+    fn peer_addr(&self) -> KResult<SocketAddrEx> {
         Ok(SocketAddrEx::Vsock(
-            self.transport.peer_addr()?.ok_or(AxError::NotFound)?,
+            self.transport.peer_addr()?.ok_or(KError::NotFound)?,
         ))
     }
 
-    fn shutdown(&self, how: Shutdown) -> AxResult {
+    fn shutdown(&self, how: Shutdown) -> KResult {
         self.transport.shutdown(how)
     }
 }

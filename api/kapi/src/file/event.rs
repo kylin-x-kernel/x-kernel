@@ -4,7 +4,7 @@ use core::{
     task::Context,
 };
 
-use kerrno::AxError;
+use kerrno::KError;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::future::{block_on, poll_io};
 
@@ -35,7 +35,7 @@ impl EventFd {
 impl FileLike for EventFd {
     fn read(&self, dst: &mut IoDst) -> kio::Result<usize> {
         if dst.remaining_mut() < size_of::<u64>() {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
@@ -55,21 +55,21 @@ impl FileLike for EventFd {
                     self.poll_tx.wake();
                     Ok(size_of::<u64>())
                 }
-                Err(_) => Err(AxError::WouldBlock),
+                Err(_) => Err(KError::WouldBlock),
             }
         }))
     }
 
     fn write(&self, src: &mut IoSrc) -> kio::Result<usize> {
         if src.remaining() < size_of::<u64>() {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         let mut value = [0; size_of::<u64>()];
         src.read(&mut value)?;
         let value = u64::from_ne_bytes(value);
         if value == u64::MAX {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         block_on(poll_io(self, IoEvents::OUT, self.nonblocking(), || {
@@ -87,7 +87,7 @@ impl FileLike for EventFd {
                     self.poll_rx.wake();
                     Ok(size_of::<u64>())
                 }
-                Err(_) => Err(AxError::WouldBlock),
+                Err(_) => Err(KError::WouldBlock),
             }
         }))
     }

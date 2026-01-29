@@ -1,4 +1,4 @@
-use kerrno::AxResult;
+use kerrno::KResult;
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{PAGE_SIZE, UsageKind, global_allocator};
@@ -14,19 +14,19 @@ pub struct GlobalPage {
 
 impl GlobalPage {
     /// Allocates one 4K-sized page.
-    pub fn alloc() -> AxResult<Self> {
+    pub fn alloc() -> KResult<Self> {
         Self::alloc_pages(1)
     }
 
     /// Allocates one 4K-sized page and initializes it with zero.
-    pub fn alloc_zero() -> AxResult<Self> {
+    pub fn alloc_zero() -> KResult<Self> {
         let mut page = Self::alloc()?;
         page.zero();
         Ok(page)
     }
 
     /// Allocates contiguous 4K-sized pages.
-    pub fn alloc_contiguous(num_pages: usize, align_pow2: usize) -> AxResult<Self> {
+    pub fn alloc_contiguous(num_pages: usize, align_pow2: usize) -> KResult<Self> {
         Self::alloc_pages_with_alignment(num_pages, align_pow2)
     }
 
@@ -79,12 +79,12 @@ impl GlobalPage {
     }
 
     /// Internal function to allocate pages.
-    fn alloc_pages(num_pages: usize) -> AxResult<Self> {
+    fn alloc_pages(num_pages: usize) -> KResult<Self> {
         let va = global_allocator()
             .alloc_pages(num_pages, PAGE_SIZE, UsageKind::Global)
             .map_err(|e| match e {
-                alloc_engine::AllocError::NoMemory => kerrno::AxError::NoMemory,
-                _ => kerrno::AxError::InvalidInput,
+                alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
+                _ => kerrno::KError::InvalidInput,
             })?;
         Ok(Self {
             start_va: va.into(),
@@ -93,12 +93,12 @@ impl GlobalPage {
     }
 
     /// Internal function to allocate pages with specific alignment.
-    fn alloc_pages_with_alignment(num_pages: usize, align_pow2: usize) -> AxResult<Self> {
+    fn alloc_pages_with_alignment(num_pages: usize, align_pow2: usize) -> KResult<Self> {
         let va = global_allocator()
             .alloc_pages(num_pages, align_pow2, UsageKind::Global)
             .map_err(|e| match e {
-                alloc_engine::AllocError::NoMemory => kerrno::AxError::NoMemory,
-                _ => kerrno::AxError::InvalidInput,
+                alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
+                _ => kerrno::KError::InvalidInput,
             })?;
         Ok(Self {
             start_va: va.into(),

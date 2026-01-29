@@ -1,6 +1,6 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 
-use kerrno::{AxError, AxResult, ax_bail};
+use kerrno::{KError, KResult, k_bail};
 use kpoll::PollSet;
 use ksync::Mutex;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
@@ -212,10 +212,10 @@ impl AcceptQueue {
         self.consumer.is_empty()
     }
 
-    pub fn push(&mut self, conn_id: VsockConnId) -> AxResult<()> {
+    pub fn push(&mut self, conn_id: VsockConnId) -> KResult<()> {
         match self.producer.try_push(conn_id) {
             Ok(_) => Ok(()),
-            Err(_) => ax_bail!(ResourceBusy, "accept queue full"),
+            Err(_) => k_bail!(ResourceBusy, "accept queue full"),
         }
     }
 
@@ -274,7 +274,7 @@ impl VsockConnectionManager {
     }
 
     /// allocate an ephemeral port
-    pub fn allocate_port(&mut self) -> AxResult<u32> {
+    pub fn allocate_port(&mut self) -> KResult<u32> {
         let start = self.next_ephemeral_port;
         loop {
             let port = self.next_ephemeral_port;
@@ -294,15 +294,15 @@ impl VsockConnectionManager {
             }
 
             if self.next_ephemeral_port == start {
-                ax_bail!(AddrInUse, "no available ports");
+                k_bail!(AddrInUse, "no available ports");
             }
         }
     }
 
     /// create a listen queue
-    pub fn listen(&mut self, local_addr: VsockAddr) -> AxResult<()> {
+    pub fn listen(&mut self, local_addr: VsockAddr) -> KResult<()> {
         if self.listen_queues.contains_key(&local_addr.port) {
-            ax_bail!(AddrInUse, "port already in use");
+            k_bail!(AddrInUse, "port already in use");
         }
 
         let queue = Arc::new(Mutex::new(ListenQueue::new(local_addr)));
@@ -325,14 +325,14 @@ impl VsockConnectionManager {
     }
 
     /// accept a connection
-    pub fn accept(&mut self, port: u32) -> AxResult<(VsockConnId, VsockAddr)> {
-        let queue = self.listen_queues.get(&port).ok_or(AxError::InvalidInput)?;
+    pub fn accept(&mut self, port: u32) -> KResult<(VsockConnId, VsockAddr)> {
+        let queue = self.listen_queues.get(&port).ok_or(KError::InvalidInput)?;
 
-        let conn_id = queue.lock().accept_queue.pop().ok_or(AxError::WouldBlock)?;
+        let conn_id = queue.lock().accept_queue.pop().ok_or(KError::WouldBlock)?;
 
-        let conn = self.connections.get(&conn_id).ok_or(AxError::NotFound)?;
+        let conn = self.connections.get(&conn_id).ok_or(KError::NotFound)?;
 
-        let peer_addr = conn.lock().peer_addr.ok_or(AxError::NotFound)?;
+        let peer_addr = conn.lock().peer_addr.ok_or(KError::NotFound)?;
 
         debug!("Accepted connection: {:?} from {:?}", conn_id, peer_addr);
         Ok((conn_id, peer_addr))
@@ -379,11 +379,11 @@ impl VsockConnectionManager {
     }
 
     /// dispatch_irq a new connection request (by driver event)
-    pub fn on_connection_request(&mut self, conn_id: VsockConnId) -> AxResult<()> {
+    pub fn on_connection_request(&mut self, conn_id: VsockConnId) -> KResult<()> {
         let queue = self
             .listen_queues
             .get(&conn_id.local_port)
-            .ok_or(AxError::NotFound)?
+            .ok_or(KError::NotFound)?
             .clone();
 
         let local_addr = queue.lock().local_addr;
@@ -412,7 +412,7 @@ impl VsockConnectionManager {
             // full -- remove the connection
             drop(queue_guard);
             self.remove_connection(conn_id);
-            return Err(AxError::ResourceBusy);
+            return Err(KError::ResourceBusy);
         }
 
         queue_guard.wake();
@@ -426,11 +426,11 @@ impl VsockConnectionManager {
     }
 
     /// dispatch_irq data received (by driver event)
-    pub fn on_data_received(&mut self, conn_id: VsockConnId, data: &[u8]) -> AxResult<()> {
+    pub fn on_data_received(&mut self, conn_id: VsockConnId, data: &[u8]) -> KResult<()> {
         let conn = self
             .connections
             .get(&conn_id)
-            .ok_or(AxError::NotFound)?
+            .ok_or(KError::NotFound)?
             .clone();
 
         let mut conn_guard = conn.lock();
@@ -451,7 +451,7 @@ impl VsockConnectionManager {
     }
 
     /// dispatch_irq disconnection (by driver event)
-    pub fn on_disconnected(&mut self, conn_id: VsockConnId) -> AxResult<()> {
+    pub fn on_disconnected(&mut self, conn_id: VsockConnId) -> KResult<()> {
         if let Some(conn) = self.connections.get(&conn_id) {
             let mut conn_guard = conn.lock();
             conn_guard.state = ConnectionState::Closed;
@@ -464,7 +464,7 @@ impl VsockConnectionManager {
     }
 
     /// dispatch_irq connected event (by driver event)
-    pub fn on_connected(&mut self, conn_id: VsockConnId) -> AxResult<()> {
+    pub fn on_connected(&mut self, conn_id: VsockConnId) -> KResult<()> {
         if let Some(conn) = self.connections.get(&conn_id) {
             let mut conn_guard = conn.lock();
             conn_guard.state = ConnectionState::Connected;

@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 
-use kerrno::{AxError, AxResult, LinuxError};
 use kcore::task::AsThread;
+use kerrno::{KError, KResult, LinuxError};
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
@@ -25,7 +25,7 @@ use crate::{
     socket::SocketAddrExt,
 };
 
-pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
+pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     debug!("sys_socket <= domain: {domain}, ty: {raw_ty}, proto: {proto}");
     let ty = raw_ty & 0xFF;
 
@@ -33,13 +33,13 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
     let socket = match (domain, ty) {
         (AF_INET, SOCK_STREAM) => {
             if proto != 0 && proto != IPPROTO_TCP as _ {
-                return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
             knet::Socket::Tcp(Box::new(TcpSocket::new()))
         }
         (AF_INET, SOCK_DGRAM) => {
             if proto != 0 && proto != IPPROTO_UDP as _ {
-                return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
             knet::Socket::Udp(Box::new(UdpSocket::new()))
         }
@@ -55,10 +55,10 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
         }
         (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) => {
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
-            return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
+            return Err(KError::from(LinuxError::ESOCKTNOSUPPORT));
         }
         _ => {
-            return Err(AxError::from(LinuxError::EAFNOSUPPORT));
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
     };
     let socket = Socket(socket);
@@ -71,7 +71,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
     socket.add_to_fd_table(cloexec).map(|fd| fd as isize)
 }
 
-pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult<isize> {
+pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
     debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
 
@@ -80,13 +80,13 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult
     Ok(0)
 }
 
-pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult<isize> {
+pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
     debug!("sys_connect <= fd: {fd}, addr: {addr:?}");
 
     Socket::from_fd(fd)?.connect(addr).map_err(|e| {
-        if e == AxError::WouldBlock {
-            AxError::InProgress
+        if e == KError::WouldBlock {
+            KError::InProgress
         } else {
             e
         }
@@ -95,11 +95,11 @@ pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxRes
     Ok(0)
 }
 
-pub fn sys_listen(fd: i32, backlog: i32) -> AxResult<isize> {
+pub fn sys_listen(fd: i32, backlog: i32) -> KResult<isize> {
     debug!("sys_listen <= fd: {fd}, backlog: {backlog}");
 
     if backlog < 0 && backlog != -1 {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     Socket::from_fd(fd)?.listen()?;
@@ -107,11 +107,7 @@ pub fn sys_listen(fd: i32, backlog: i32) -> AxResult<isize> {
     Ok(0)
 }
 
-pub fn sys_accept(
-    fd: i32,
-    addr: UserPtr<sockaddr>,
-    addrlen: UserPtr<socklen_t>,
-) -> AxResult<isize> {
+pub fn sys_accept(fd: i32, addr: UserPtr<sockaddr>, addrlen: UserPtr<socklen_t>) -> KResult<isize> {
     sys_accept4(fd, addr, addrlen, 0)
 }
 
@@ -120,7 +116,7 @@ pub fn sys_accept4(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
     flags: u32,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     debug!("sys_accept <= fd: {fd}, flags: {flags}");
 
     let cloexec = flags & O_CLOEXEC != 0;
@@ -142,7 +138,7 @@ pub fn sys_accept4(
     Ok(fd)
 }
 
-pub fn sys_shutdown(fd: i32, how: u32) -> AxResult<isize> {
+pub fn sys_shutdown(fd: i32, how: u32) -> KResult<isize> {
     debug!("sys_shutdown <= fd: {fd}, how: {how:?}");
 
     let socket = Socket::from_fd(fd)?;
@@ -150,7 +146,7 @@ pub fn sys_shutdown(fd: i32, how: u32) -> AxResult<isize> {
         SHUT_RD => Shutdown::Read,
         SHUT_WR => Shutdown::Write,
         SHUT_RDWR => Shutdown::Both,
-        _ => return Err(AxError::InvalidInput),
+        _ => return Err(KError::InvalidInput),
     };
     socket.shutdown(how).map(|_| 0)
 }
@@ -160,12 +156,12 @@ pub fn sys_socketpair(
     raw_ty: u32,
     proto: u32,
     fds: UserPtr<[i32; 2]>,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     debug!("sys_socketpair <= domain: {domain}, ty: {raw_ty}, proto: {proto}");
     let ty = raw_ty & 0xFF;
 
     if domain != AF_UNIX {
-        return Err(AxError::from(LinuxError::EAFNOSUPPORT));
+        return Err(KError::from(LinuxError::EAFNOSUPPORT));
     }
 
     let pid = current().as_thread().proc_data.proc.pid();
@@ -180,7 +176,7 @@ pub fn sys_socketpair(
         }
         _ => {
             warn!("Unsupported socketpair type: {ty}");
-            return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
+            return Err(KError::from(LinuxError::ESOCKTNOSUPPORT));
         }
     };
     let sock1 = Socket(knet::Socket::Unix(Box::new(sock1)));

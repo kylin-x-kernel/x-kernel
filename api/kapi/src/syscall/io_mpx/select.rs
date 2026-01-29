@@ -1,8 +1,8 @@
 use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
-use kerrno::{AxError, AxResult};
 use bitmaps::Bitmap;
+use kerrno::{KError, KResult};
 use kpoll::IoEvents;
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
@@ -49,9 +49,9 @@ fn do_select(
     exceptfds: UserPtr<__kernel_fd_set>,
     timeout: Option<Duration>,
     sigmask: UserConstPtr<SignalSetWithSize>,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     if nfds > __FD_SETSIZE {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     let sigmask = if let Some(sigmask) = nullable!(sigmask.get_as_ref())? {
         check_sigset_size(sigmask.sigsetsize)?;
@@ -82,7 +82,7 @@ fn do_select(
     for fd in fd_bitmap.into_iter() {
         let f = fd_table
             .get(fd)
-            .ok_or(AxError::BadFileDescriptor)?
+            .ok_or(KError::BadFileDescriptor)?
             .inner
             .clone();
         let mut events = IoEvents::empty();
@@ -137,7 +137,7 @@ fn do_select(
                     return Ok(res as _);
                 }
 
-                Err(AxError::WouldBlock)
+                Err(KError::WouldBlock)
             }),
         )) {
             Ok(r) => r,
@@ -153,7 +153,7 @@ pub fn sys_select(
     writefds: UserPtr<__kernel_fd_set>,
     exceptfds: UserPtr<__kernel_fd_set>,
     timeout: UserConstPtr<timeval>,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     do_select(
         nfds,
         readfds,
@@ -180,7 +180,7 @@ pub fn sys_pselect6(
     exceptfds: UserPtr<__kernel_fd_set>,
     timeout: UserConstPtr<timespec>,
     sigmask: UserConstPtr<SignalSetWithSize>,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     do_select(
         nfds,
         readfds,

@@ -4,8 +4,8 @@ use alloc::{
 };
 use core::task::Context;
 
-use kerrno::{AxError, AxResult};
 use kcore::task::ProcessData;
+use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 
 use crate::file::FileLike;
@@ -22,8 +22,8 @@ impl PidFd {
         }
     }
 
-    pub fn process_data(&self) -> AxResult<Arc<ProcessData>> {
-        self.proc_data.upgrade().ok_or(AxError::NoSuchProcess)
+    pub fn process_data(&self) -> KResult<Arc<ProcessData>> {
+        self.proc_data.upgrade().ok_or(KError::NoSuchProcess)
     }
 }
 impl FileLike for PidFd {

@@ -1,5 +1,5 @@
-use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
+use kerrno::{KError, KResult};
 use linux_raw_sys::general::{EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
 
 use crate::file::{FileLike, add_file_like, event::EventFd};
@@ -17,10 +17,10 @@ bitflags! {
     }
 }
 
-pub fn sys_eventfd2(initval: u32, flags: u32) -> AxResult<isize> {
+pub fn sys_eventfd2(initval: u32, flags: u32) -> KResult<isize> {
     debug!("sys_eventfd2 <= initval: {initval}, flags: {flags}");
 
-    let flags = EventFdFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
+    let flags = EventFdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
 
     let event_fd = EventFd::new(initval as _, flags.contains(EventFdFlags::SEMAPHORE));
     event_fd.set_nonblocking(flags.contains(EventFdFlags::NONBLOCK))?;

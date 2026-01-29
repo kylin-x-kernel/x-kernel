@@ -1,6 +1,6 @@
 use core::sync::atomic::{Ordering, compiler_fence};
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 
 /// Memory barrier commands
 const MEMBARRIER_CMD_QUERY: i32 = 0;
@@ -17,10 +17,10 @@ const SUPPORTED_COMMANDS: i32 = (1 << MEMBARRIER_CMD_GLOBAL)
     | (1 << MEMBARRIER_CMD_PRIVATE_EXPEDITED)
     | (1 << MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED);
 
-pub fn sys_membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> AxResult<isize> {
+pub fn sys_membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> KResult<isize> {
     // 检查 flags 参数，目前应该为 0
     if flags != 0 {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     match cmd {

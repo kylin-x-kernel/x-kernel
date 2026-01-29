@@ -13,8 +13,8 @@ use core::{
     time::Duration,
 };
 
-use kerrno::AxResult;
 use hashbrown::HashMap;
+use kerrno::KResult;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
 use ktask::{
@@ -49,7 +49,7 @@ impl WaitQueue {
         bitset: u32,
         timeout: Option<Duration>,
         condition: impl FnOnce() -> bool,
-    ) -> AxResult<bool> {
+    ) -> KResult<bool> {
         let mut condition = Some(condition);
         block_on(interruptible(future::timeout(
             timeout,

@@ -1,7 +1,7 @@
 use alloc::vec;
 
-use kerrno::{AxError, AxResult};
 use event_listener::Event;
+use kerrno::{KError, KResult};
 use ksync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},
@@ -47,7 +47,7 @@ impl<'a> SocketSetWrapper<'a> {
         f(socket)
     }
 
-    pub fn bind_check(&self, addr: IpAddress, port: u16) -> AxResult {
+    pub fn bind_check(&self, addr: IpAddress, port: u16) -> KResult {
         if port == 0 {
             return Ok(());
         }
@@ -59,12 +59,12 @@ impl<'a> SocketSetWrapper<'a> {
                 Socket::Tcp(s) => {
                     let local_addr = s.get_bound_endpoint();
                     if local_addr.addr == Some(addr) && local_addr.port == port {
-                        return Err(AxError::AddrInUse);
+                        return Err(KError::AddrInUse);
                     }
                 }
                 Socket::Udp(s) => {
                     if s.endpoint().addr == Some(addr) && s.endpoint().port == port {
-                        return Err(AxError::AddrInUse);
+                        return Err(KError::AddrInUse);
                     }
                 }
                 _ => continue,

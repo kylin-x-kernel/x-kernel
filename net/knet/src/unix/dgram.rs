@@ -3,7 +3,7 @@ use core::task::Context;
 
 use async_channel::TryRecvError;
 use async_trait::async_trait;
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use kio::{Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
@@ -102,7 +102,7 @@ impl DgramTransport {
 }
 
 impl Configurable for DgramTransport {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
         use GetSocketOption as O;
 
         if self.options.get_option_inner(opt)? {
@@ -122,7 +122,7 @@ impl Configurable for DgramTransport {
         Ok(true)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
         use SetSocketOption as O;
 
         if self.options.set_option_inner(opt)? {
@@ -138,14 +138,14 @@ impl Configurable for DgramTransport {
 }
 #[async_trait]
 impl UnixTransportOps for DgramTransport {
-    fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> AxResult {
+    fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
         let mut slot = slot.dgram.lock();
         if slot.is_some() {
-            return Err(AxError::AddrInUse);
+            return Err(KError::AddrInUse);
         }
         let mut guard = self.rx.lock();
         if guard.is_some() {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let (tx, rx) = async_channel::unbounded();
         let poll = Arc::new(PollSet::new());
@@ -159,27 +159,27 @@ impl UnixTransportOps for DgramTransport {
         Ok(())
     }
 
-    fn connect(&self, slot: &super::BindEntry, _local_addr: &UnixAddr) -> AxResult {
+    fn connect(&self, slot: &super::BindEntry, _local_addr: &UnixAddr) -> KResult {
         let mut guard = self.peer.write();
         if guard.is_some() {
-            return Err(AxError::AlreadyConnected);
+            return Err(KError::AlreadyConnected);
         }
         *guard = Some(
             slot.dgram
                 .lock()
                 .as_ref()
-                .ok_or(AxError::NotConnected)?
+                .ok_or(KError::NotConnected)?
                 .connect(),
         );
         self.poll_state.wake();
         Ok(())
     }
 
-    async fn accept(&self) -> AxResult<(UnixTransport, UnixAddr)> {
-        Err(AxError::InvalidInput)
+    async fn accept(&self) -> KResult<(UnixTransport, UnixAddr)> {
+        Err(KError::InvalidInput)
     }
 
-    fn send(&self, mut src: impl Read, options: SendOptions) -> AxResult<usize> {
+    fn send(&self, mut src: impl Read, options: SendOptions) -> KResult<usize> {
         let mut message = Vec::new();
         src.read_to_end(&mut message)?;
         let len = message.len();
@@ -194,33 +194,33 @@ impl UnixTransportOps for DgramTransport {
             let addr = addr.into_unix()?;
             lookup_bind_entry(&addr, |slot| {
                 if let Some(bind) = slot.dgram.lock().as_ref() {
-                    bind.tx.try_send(packet).map_err(|_| AxError::BrokenPipe)?;
+                    bind.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
                     bind.poll.wake();
                     Ok(())
                 } else {
-                    Err(AxError::NotConnected)
+                    Err(KError::NotConnected)
                 }
             })?;
         } else if let Some(chan) = connected.as_ref() {
-            chan.tx.try_send(packet).map_err(|_| AxError::BrokenPipe)?;
+            chan.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
             chan.poll.wake();
         } else {
-            return Err(AxError::NotConnected);
+            return Err(KError::NotConnected);
         }
         Ok(len)
     }
 
-    fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> AxResult<usize> {
+    fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
         self.options.recv_poller(self, move || {
             let mut guard = self.rx.lock();
             let Some((rx, _)) = guard.as_mut() else {
-                return Err(AxError::NotConnected);
+                return Err(KError::NotConnected);
             };
 
             let Datagram { data, cmsg, sender } = match rx.try_recv() {
                 Ok(packet) => packet,
                 Err(TryRecvError::Empty) => {
-                    return Err(AxError::WouldBlock);
+                    return Err(KError::WouldBlock);
                 }
                 Err(TryRecvError::Closed) => {
                     return Ok(0);

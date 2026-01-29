@@ -1,7 +1,7 @@
 use core::mem::{self, MaybeUninit};
 
-use kerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
+use kerrno::{KError, KResult};
 use kio::prelude::*;
 use osvm::{VirtPtr, read_vm_mem, write_vm_mem};
 
@@ -20,15 +20,15 @@ pub struct IoVectorBuf {
 }
 
 impl IoVectorBuf {
-    pub fn new(iovs: *const IoVec, iovcnt: usize) -> AxResult<Self> {
+    pub fn new(iovs: *const IoVec, iovcnt: usize) -> KResult<Self> {
         if iovcnt > 1024 {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let mut len = 0;
         for i in 0..iovcnt {
             let iov = iovs.wrapping_add(i).read_vm()?;
             if iov.iov_len < 0 {
-                return Err(AxError::InvalidInput);
+                return Err(KError::InvalidInput);
             }
             len += iov.iov_len as usize;
         }
@@ -37,8 +37,8 @@ impl IoVectorBuf {
 
     pub fn read_with(
         self,
-        mut f: impl FnMut(*const u8, usize) -> AxResult<usize>,
-    ) -> AxResult<usize> {
+        mut f: impl FnMut(*const u8, usize) -> KResult<usize>,
+    ) -> KResult<usize> {
         let mut count = 0;
         for i in 0..self.iovcnt {
             let iov = self.iovs.wrapping_add(i).read_vm()?;
@@ -54,10 +54,7 @@ impl IoVectorBuf {
         Ok(count)
     }
 
-    pub fn fill_with(
-        self,
-        mut f: impl FnMut(*mut u8, usize) -> AxResult<usize>,
-    ) -> AxResult<usize> {
+    pub fn fill_with(self, mut f: impl FnMut(*mut u8, usize) -> KResult<usize>) -> KResult<usize> {
         let mut count = 0;
         for i in 0..self.iovcnt {
             let iov = self.iovs.wrapping_add(i).read_vm()?;
@@ -89,7 +86,7 @@ pub struct IoVectorBufIo {
 }
 
 impl IoVectorBufIo {
-    fn skip_empty(&mut self) -> AxResult<()> {
+    fn skip_empty(&mut self) -> KResult<()> {
         while self.start < self.inner.iovcnt {
             let iov = self.inner.iovs.wrapping_add(self.start).read_vm()?;
             if iov.iov_len as usize > self.offset {
@@ -103,7 +100,7 @@ impl IoVectorBufIo {
 }
 
 impl Read for IoVectorBufIo {
-    fn read(&mut self, buf: &mut [u8]) -> AxResult<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
         let mut count = 0;
         loop {
             self.skip_empty()?;
@@ -127,7 +124,7 @@ impl Read for IoVectorBufIo {
 }
 
 impl Write for IoVectorBufIo {
-    fn write(&mut self, buf: &[u8]) -> AxResult<usize> {
+    fn write(&mut self, buf: &[u8]) -> KResult<usize> {
         let mut count = 0;
         loop {
             self.skip_empty()?;
@@ -150,7 +147,7 @@ impl Write for IoVectorBufIo {
         Ok(count)
     }
 
-    fn flush(&mut self) -> AxResult {
+    fn flush(&mut self) -> KResult {
         Ok(())
     }
 }

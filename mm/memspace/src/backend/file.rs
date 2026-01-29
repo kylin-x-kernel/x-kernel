@@ -5,7 +5,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use kfs::{CachedFile, FileFlags};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
@@ -85,7 +85,7 @@ impl FileBackendInner {
 #[derive(Clone)]
 pub struct FileBackend(Arc<FileBackendInner>);
 impl FileBackend {
-    fn check_flags(&self, flags: MappingFlags) -> AxResult {
+    fn check_flags(&self, flags: MappingFlags) -> KResult {
         let mut required_flags = FileFlags::empty();
         if flags.contains(MappingFlags::READ) {
             required_flags |= FileFlags::READ;
@@ -95,7 +95,7 @@ impl FileBackend {
         }
 
         if !self.0.flags.contains(required_flags) {
-            return Err(AxError::PermissionDenied);
+            return Err(KError::PermissionDenied);
         }
         Ok(())
     }
@@ -110,11 +110,11 @@ impl BackendOps for FileBackend {
         PageSize::Size4K
     }
 
-    fn map(&self, _range: VirtAddrRange, flags: MappingFlags, _pt: &mut PageTableMut) -> AxResult {
+    fn map(&self, _range: VirtAddrRange, flags: MappingFlags, _pt: &mut PageTableMut) -> KResult {
         self.check_flags(flags)
     }
 
-    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> AxResult {
+    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> KResult {
         for addr in pages_in(range, PageSize::Size4K)? {
             match pt.unmap(addr) {
                 Ok(_) | Err(PagingError::NotMapped) => {}
@@ -132,7 +132,7 @@ impl BackendOps for FileBackend {
         _range: VirtAddrRange,
         new_flags: MappingFlags,
         _pgtbl: &mut PageTableMut,
-    ) -> AxResult {
+    ) -> KResult {
         self.check_flags(new_flags)
     }
 
@@ -142,7 +142,7 @@ impl BackendOps for FileBackend {
         flags: MappingFlags,
         access_flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> AxResult<(usize, Option<Box<dyn FnOnce(&mut AddrSpace)>>)> {
+    ) -> KResult<(usize, Option<Box<dyn FnOnce(&mut AddrSpace)>>)> {
         let mut pages = 0;
         let mut to_be_evicted = Vec::new();
         let start_page = ((range.start - self.0.start) / PAGE_SIZE_4K) as u32 + self.0.offset_page;
@@ -158,10 +158,9 @@ impl BackendOps for FileBackend {
                             if !in_memory {
                                 page.expect("page should be present").mark_dirty();
                             }
-                            pgtbl.remap(addr, paddr, flags)
-                                .map_err(map_paging_err)?;
+                            pgtbl.remap(addr, paddr, flags).map_err(map_paging_err)?;
                             pages += 1;
-                            AxResult::Ok(())
+                            KResult::Ok(())
                         })?;
                     } else if page_flags.contains(access_flags) {
                         pages += 1;
@@ -181,13 +180,14 @@ impl BackendOps for FileBackend {
                         if let Some((pn, _)) = evicted {
                             to_be_evicted.push(pn);
                         }
-                        pgtbl.map(addr, page.paddr(), PageSize::Size4K, map_flags)
+                        pgtbl
+                            .map(addr, page.paddr(), PageSize::Size4K, map_flags)
                             .map_err(map_paging_err)?;
                         pages += 1;
                         Ok(())
                     })?;
                 }
-                Err(_) => return Err(AxError::BadAddress),
+                Err(_) => return Err(KError::BadAddress),
             }
         }
         Ok((
@@ -212,7 +212,7 @@ impl BackendOps for FileBackend {
         _old_pgtbl: &mut PageTableMut,
         _new_pgtbl: &mut PageTableMut,
         new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> AxResult<Backend> {
+    ) -> KResult<Backend> {
         let inner = Arc::new(FileBackendInner {
             start: self.0.start,
             cache: self.0.cache.clone(),

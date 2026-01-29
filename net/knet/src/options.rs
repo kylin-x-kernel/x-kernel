@@ -1,8 +1,8 @@
 use alloc::boxed::Box;
 use core::time::Duration;
 
-use kerrno::{AxError, AxResult, LinuxError};
 use enum_dispatch::enum_dispatch;
+use kerrno::{KError, KResult, LinuxError};
 
 macro_rules! define_options {
     ($($name:ident($value:ty),)*) => {
@@ -75,23 +75,23 @@ define_options! {
 #[enum_dispatch]
 pub trait Configurable {
     /// Get a socket option, returns `true` if the socket supports the option.
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool>;
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool>;
     /// Set a socket option, returns `true` if the socket supports the option.
-    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool>;
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool>;
 
-    fn get_option(&self, mut opt: GetSocketOption) -> AxResult {
+    fn get_option(&self, mut opt: GetSocketOption) -> KResult {
         self.get_option_inner(&mut opt).and_then(|supported| {
             if !supported {
-                Err(AxError::from(LinuxError::ENOPROTOOPT))
+                Err(KError::from(LinuxError::ENOPROTOOPT))
             } else {
                 Ok(())
             }
         })
     }
-    fn set_option(&self, opt: SetSocketOption) -> AxResult {
+    fn set_option(&self, opt: SetSocketOption) -> KResult {
         self.set_option_inner(opt).and_then(|supported| {
             if !supported {
-                Err(AxError::from(LinuxError::ENOPROTOOPT))
+                Err(KError::from(LinuxError::ENOPROTOOPT))
             } else {
                 Ok(())
             }
@@ -100,11 +100,11 @@ pub trait Configurable {
 }
 
 impl<T: Configurable + ?Sized> Configurable for Box<T> {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
         (**self).get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
         (**self).set_option_inner(opt)
     }
 }

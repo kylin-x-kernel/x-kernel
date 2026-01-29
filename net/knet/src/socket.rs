@@ -6,11 +6,11 @@ use core::{
     task::Context,
 };
 
-use kerrno::{AxError, AxResult, LinuxError};
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
 #[cfg(feature = "vsock")]
 use kdriver::prelude::VsockAddr;
+use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use kpoll::{IoEvents, Pollable};
 
@@ -32,29 +32,29 @@ pub enum SocketAddrEx {
 }
 
 impl SocketAddrEx {
-    pub fn into_ip(self) -> AxResult<SocketAddr> {
+    pub fn into_ip(self) -> KResult<SocketAddr> {
         match self {
             SocketAddrEx::Ip(addr) => Ok(addr),
-            SocketAddrEx::Unix(_) => Err(AxError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Unix(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             #[cfg(feature = "vsock")]
-            SocketAddrEx::Vsock(_) => Err(AxError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Vsock(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
         }
     }
 
-    pub fn into_unix(self) -> AxResult<UnixAddr> {
+    pub fn into_unix(self) -> KResult<UnixAddr> {
         match self {
             SocketAddrEx::Unix(addr) => Ok(addr),
-            SocketAddrEx::Ip(_) => Err(AxError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Ip(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             #[cfg(feature = "vsock")]
-            SocketAddrEx::Vsock(_) => Err(AxError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Vsock(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
         }
     }
 
     #[cfg(feature = "vsock")]
-    pub fn into_vsock(self) -> AxResult<VsockAddr> {
+    pub fn into_vsock(self) -> KResult<VsockAddr> {
         match self {
-            SocketAddrEx::Ip(_) => Err(AxError::from(LinuxError::EAFNOSUPPORT)),
-            SocketAddrEx::Unix(_) => Err(AxError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Ip(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Unix(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Vsock(addr) => Ok(addr),
         }
     }
@@ -135,67 +135,67 @@ impl Shutdown {
 #[enum_dispatch]
 pub trait SocketOps: Configurable {
     /// Binds an unbound socket to the given address and port.
-    fn bind(&self, local_addr: SocketAddrEx) -> AxResult;
+    fn bind(&self, local_addr: SocketAddrEx) -> KResult;
     /// Connects the socket to a remote address.
-    fn connect(&self, remote_addr: SocketAddrEx) -> AxResult;
+    fn connect(&self, remote_addr: SocketAddrEx) -> KResult;
 
     /// Starts listening on the bound address and port.
-    fn listen(&self) -> AxResult {
-        Err(AxError::OperationNotSupported)
+    fn listen(&self) -> KResult {
+        Err(KError::OperationNotSupported)
     }
     /// Accepts a connection on a listening socket, returning a new socket.
-    fn accept(&self) -> AxResult<Socket> {
-        Err(AxError::OperationNotSupported)
+    fn accept(&self) -> KResult<Socket> {
+        Err(KError::OperationNotSupported)
     }
 
     /// Send data to the socket, optionally to a specific address.
-    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize>;
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
     /// Receive data from the socket.
-    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> AxResult<usize>;
+    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize>;
 
     /// Get the local endpoint of the socket.
-    fn local_addr(&self) -> AxResult<SocketAddrEx>;
+    fn local_addr(&self) -> KResult<SocketAddrEx>;
     /// Get the remote endpoint of the socket.
-    fn peer_addr(&self) -> AxResult<SocketAddrEx>;
+    fn peer_addr(&self) -> KResult<SocketAddrEx>;
 
     /// Shutdown the socket, closing the connection.
-    fn shutdown(&self, how: Shutdown) -> AxResult;
+    fn shutdown(&self, how: Shutdown) -> KResult;
 }
 
 impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
-    fn bind(&self, local_addr: SocketAddrEx) -> AxResult {
+    fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         (**self).bind(local_addr)
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> AxResult {
+    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
         (**self).connect(remote_addr)
     }
 
-    fn listen(&self) -> AxResult {
+    fn listen(&self) -> KResult {
         (**self).listen()
     }
 
-    fn accept(&self) -> AxResult<Socket> {
+    fn accept(&self) -> KResult<Socket> {
         (**self).accept()
     }
 
-    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize> {
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         (**self).send(src, options)
     }
 
-    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> AxResult<usize> {
+    fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {
         (**self).recv(dst, options)
     }
 
-    fn local_addr(&self) -> AxResult<SocketAddrEx> {
+    fn local_addr(&self) -> KResult<SocketAddrEx> {
         (**self).local_addr()
     }
 
-    fn peer_addr(&self) -> AxResult<SocketAddrEx> {
+    fn peer_addr(&self) -> KResult<SocketAddrEx> {
         (**self).peer_addr()
     }
 
-    fn shutdown(&self, how: Shutdown) -> AxResult {
+    fn shutdown(&self, how: Shutdown) -> KResult {
         (**self).shutdown(how)
     }
 }

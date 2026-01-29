@@ -1,7 +1,7 @@
 use alloc::format;
 use core::ffi::c_char;
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
 use linux_raw_sys::general::MFD_CLOEXEC;
 
@@ -12,7 +12,7 @@ use crate::{
 
 // TODO: correct memfd implementation
 
-pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> AxResult<isize> {
+pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     // This is cursed
     for id in 0..0xffff {
         let name = format!("/tmp/memfd-{id:04x}");
@@ -28,5 +28,5 @@ pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> AxResult<isi
             return File::new(file).add_to_fd_table(cloexec).map(|fd| fd as _);
         }
     }
-    Err(AxError::TooManyOpenFiles)
+    Err(KError::TooManyOpenFiles)
 }

@@ -4,8 +4,8 @@
 
 use core::{mem::MaybeUninit, slice};
 
-use kerrno::AxError;
 use extern_trait::extern_trait;
+use kerrno::KError;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum MemError {
@@ -15,12 +15,12 @@ pub enum MemError {
     NameTooLong,
 }
 
-impl From<MemError> for AxError {
+impl From<MemError> for KError {
     fn from(e: MemError) -> Self {
         match e {
-            MemError::InvalidAddr | MemError::NoAccess => AxError::BadAddress,
+            MemError::InvalidAddr | MemError::NoAccess => KError::BadAddress,
             #[cfg(feature = "alloc")]
-            MemError::NameTooLong => AxError::NameTooLong,
+            MemError::NameTooLong => KError::NameTooLong,
         }
     }
 }

@@ -1,7 +1,7 @@
 use core::time::Duration;
 
-use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
+use kerrno::{KError, KResult};
 use kpoll::IoEvents;
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
@@ -28,8 +28,8 @@ bitflags! {
     }
 }
 
-pub fn sys_epoll_create1(flags: u32) -> AxResult<isize> {
-    let flags = EpollCreateFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
+pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
+    let flags = EpollCreateFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_epoll_create1 <= flags: {flags:?}");
     Epoll::new()
         .add_to_fd_table(flags.contains(EpollCreateFlags::CLOEXEC))
@@ -41,15 +41,15 @@ pub fn sys_epoll_ctl(
     op: u32,
     fd: i32,
     event: UserConstPtr<epoll_event>,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     let epoll = Epoll::from_fd(epfd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
-    let parse_event = || -> AxResult<(EpollEvent, EpollFlags)> {
+    let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
         let event = event.get_as_ref()?;
         let events = IoEvents::from_bits_truncate(event.events);
         let flags =
-            EpollFlags::from_bits(event.events & !events.bits()).ok_or(AxError::InvalidInput)?;
+            EpollFlags::from_bits(event.events & !events.bits()).ok_or(KError::InvalidInput)?;
         Ok((
             EpollEvent {
                 events,
@@ -70,7 +70,7 @@ pub fn sys_epoll_ctl(
         EPOLL_CTL_DEL => {
             epoll.delete(fd)?;
         }
-        _ => return Err(AxError::InvalidInput),
+        _ => return Err(KError::InvalidInput),
     }
     Ok(0)
 }
@@ -82,14 +82,14 @@ fn do_epoll_wait(
     timeout: Option<Duration>,
     sigmask: UserConstPtr<SignalSet>,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
     debug!("sys_epoll_wait <= epfd: {epfd}, maxevents: {maxevents}, timeout: {timeout:?}");
 
     let epoll = Epoll::from_fd(epfd)?;
 
     if maxevents <= 0 {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     let events = events.get_as_mut_slice(maxevents as usize)?;
 
@@ -114,11 +114,11 @@ pub fn sys_epoll_pwait(
     timeout: i32,
     sigmask: UserConstPtr<SignalSet>,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     let timeout = match timeout {
         -1 => None,
         t if t >= 0 => Some(Duration::from_millis(t as u64)),
-        _ => return Err(AxError::InvalidInput),
+        _ => return Err(KError::InvalidInput),
     };
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }
@@ -130,7 +130,7 @@ pub fn sys_epoll_pwait2(
     timeout: UserConstPtr<timespec>,
     sigmask: UserConstPtr<SignalSet>,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     let timeout = nullable!(timeout.get_as_ref())?
         .map(|ts| ts.try_into_time_value())
         .transpose()?;

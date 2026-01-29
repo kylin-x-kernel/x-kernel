@@ -1,10 +1,10 @@
 use core::{future::poll_fn, task::Poll};
 
-use kerrno::{AxError, AxResult, LinuxError};
 use kcore::task::{
     AsThread, processes, send_signal_to_process, send_signal_to_process_group,
     send_signal_to_thread,
 };
+use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kprocess::Pid;
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
@@ -23,15 +23,15 @@ use crate::{
     time::TimeValueLike,
 };
 
-pub(crate) fn check_sigset_size(size: usize) -> AxResult<()> {
+pub(crate) fn check_sigset_size(size: usize) -> KResult<()> {
     if size != size_of::<SignalSet>() && size != 0 {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     Ok(())
 }
 
-fn parse_signo(signo: u32) -> AxResult<Signo> {
-    Signo::from_repr(signo as u8).ok_or(AxError::InvalidInput)
+fn parse_signo(signo: u32) -> KResult<Signo> {
+    Signo::from_repr(signo as u8).ok_or(KError::InvalidInput)
 }
 
 pub fn sys_rt_sigprocmask(
@@ -39,7 +39,7 @@ pub fn sys_rt_sigprocmask(
     set: *const SignalSet,
     oldset: *mut SignalSet,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
     let curr = current();
@@ -57,7 +57,7 @@ pub fn sys_rt_sigprocmask(
             SIG_BLOCK => old | set,
             SIG_UNBLOCK => old & !set,
             SIG_SETMASK => set,
-            _ => return Err(AxError::InvalidInput),
+            _ => return Err(KError::InvalidInput),
         };
 
         debug!("sys_rt_sigprocmask <= {set:?}");
@@ -72,12 +72,12 @@ pub fn sys_rt_sigaction(
     act: *const kernel_sigaction,
     oldact: *mut kernel_sigaction,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
     let signo = parse_signo(signo)?;
     if matches!(signo, Signo::SIGKILL | Signo::SIGSTOP) {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     let curr = current();
@@ -93,13 +93,13 @@ pub fn sys_rt_sigaction(
     Ok(0)
 }
 
-pub fn sys_rt_sigpending(set: *mut SignalSet, sigsetsize: usize) -> AxResult<isize> {
+pub fn sys_rt_sigpending(set: *mut SignalSet, sigsetsize: usize) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
     set.write_vm(current().as_thread().signal.pending())?;
     Ok(0)
 }
 
-fn make_siginfo(signo: u32, code: i32) -> AxResult<Option<SignalInfo>> {
+fn make_siginfo(signo: u32, code: i32) -> KResult<Option<SignalInfo>> {
     if signo == 0 {
         return Ok(None);
     }
@@ -111,7 +111,7 @@ fn make_siginfo(signo: u32, code: i32) -> AxResult<Option<SignalInfo>> {
     )))
 }
 
-pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
+pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
     debug!("sys_kill: pid = {pid}, signo = {signo}");
     let sig = make_siginfo(signo, SI_USER as _)?;
 
@@ -146,13 +146,13 @@ pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
     Ok(0)
 }
 
-pub fn sys_tkill(tid: Pid, signo: u32) -> AxResult<isize> {
+pub fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
     send_signal_to_thread(None, tid, sig)?;
     Ok(0)
 }
 
-pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> AxResult<isize> {
+pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
     send_signal_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
@@ -162,7 +162,7 @@ pub(crate) fn make_queue_signal_info(
     tgid: Pid,
     signo: u32,
     sig: *const SignalInfo,
-) -> AxResult<Option<SignalInfo>> {
+) -> KResult<Option<SignalInfo>> {
     if signo == 0 {
         return Ok(None);
     }
@@ -173,7 +173,7 @@ pub(crate) fn make_queue_signal_info(
     if current().as_thread().proc_data.proc.pid() != tgid
         && (sig.code() >= 0 || sig.code() == SI_TKILL)
     {
-        return Err(AxError::OperationNotPermitted);
+        return Err(KError::OperationNotPermitted);
     }
     Ok(Some(sig))
 }
@@ -183,7 +183,7 @@ pub fn sys_rt_sigqueueinfo(
     signo: u32,
     sig: *const SignalInfo,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
@@ -197,7 +197,7 @@ pub fn sys_rt_tgsigqueueinfo(
     signo: u32,
     sig: *const SignalInfo,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
@@ -205,7 +205,7 @@ pub fn sys_rt_tgsigqueueinfo(
     Ok(0)
 }
 
-pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> AxResult<isize> {
+pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
     block_next_signal();
     current().as_thread().signal.restore(uctx);
     Ok(uctx.retval() as isize)
@@ -217,7 +217,7 @@ pub fn sys_rt_sigtimedwait(
     info: *mut siginfo,
     timeout: *const timespec,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
     let set = unsafe { set.read_uninit()?.assume_init() };
@@ -254,7 +254,7 @@ pub fn sys_rt_sigtimedwait(
     let Ok(sig) = block_on(future::timeout(timeout, fut)) else {
         // Timeout
         signal.set_blocked(old_blocked);
-        return Err(AxError::WouldBlock);
+        return Err(KError::WouldBlock);
     };
     let Some(sig) = sig else {
         // Interrupted
@@ -272,7 +272,7 @@ pub fn sys_rt_sigsuspend(
     uctx: &mut UserContext,
     set: *const SignalSet,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
     let curr = current();
@@ -294,10 +294,10 @@ pub fn sys_rt_sigsuspend(
     }));
 
     // sigsuspend always returns -EINTR
-    Err(AxError::Interrupted)
+    Err(KError::Interrupted)
 }
 
-pub fn sys_sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> AxResult<isize> {
+pub fn sys_sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> KResult<isize> {
     let curr = current();
     let sig = &curr.as_thread().signal;
 
@@ -308,7 +308,7 @@ pub fn sys_sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> AxRe
     if let Some(ss) = ss.check_non_null() {
         let ss = unsafe { ss.read_uninit()?.assume_init() };
         if ss.size <= MINSIGSTKSZ as usize {
-            return Err(AxError::NoMemory);
+            return Err(KError::NoMemory);
         }
         sig.set_stack(ss);
     }

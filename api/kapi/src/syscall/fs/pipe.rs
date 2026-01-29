@@ -1,7 +1,7 @@
 use core::ffi::c_int;
 
-use kerrno::AxResult;
 use bitflags::bitflags;
+use kerrno::KResult;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtMutPtr;
 
@@ -18,7 +18,7 @@ bitflags! {
     }
 }
 
-pub fn sys_pipe2(fds: *mut [c_int; 2], flags: u32) -> AxResult<isize> {
+pub fn sys_pipe2(fds: *mut [c_int; 2], flags: u32) -> KResult<isize> {
     let flags = {
         let new_flags = PipeFlags::from_bits_truncate(flags);
         if new_flags.bits() != flags {

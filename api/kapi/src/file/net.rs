@@ -1,7 +1,7 @@
 use alloc::{borrow::Cow, format, sync::Arc};
 use core::{ffi::c_int, ops::Deref, task::Context};
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use knet::{
     SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
@@ -23,15 +23,15 @@ impl Deref for Socket {
 }
 
 impl FileLike for Socket {
-    fn read(&self, dst: &mut IoDst) -> AxResult<usize> {
+    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
         self.recv(dst, knet::RecvOptions::default())
     }
 
-    fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
+    fn write(&self, src: &mut IoSrc) -> KResult<usize> {
         self.send(src, knet::SendOptions::default())
     }
 
-    fn stat(&self) -> AxResult<Kstat> {
+    fn stat(&self) -> KResult<Kstat> {
         // TODO(mivik): implement stat for sockets
         Ok(Kstat {
             mode: S_IFSOCK | 0o777u32, // rwxrwxrwx
@@ -47,7 +47,7 @@ impl FileLike for Socket {
         result
     }
 
-    fn set_nonblocking(&self, nonblocking: bool) -> AxResult<()> {
+    fn set_nonblocking(&self, nonblocking: bool) -> KResult<()> {
         self.0
             .set_option(SetSocketOption::NonBlocking(&nonblocking))
     }
@@ -56,13 +56,13 @@ impl FileLike for Socket {
         format!("socket:[{}]", self as *const _ as usize).into()
     }
 
-    fn from_fd(fd: c_int) -> AxResult<Arc<Self>>
+    fn from_fd(fd: c_int) -> KResult<Arc<Self>>
     where
         Self: Sized + 'static,
     {
         get_file_like(fd)?
             .downcast_arc()
-            .map_err(|_| AxError::NotASocket)
+            .map_err(|_| KError::NotASocket)
     }
 }
 impl Pollable for Socket {

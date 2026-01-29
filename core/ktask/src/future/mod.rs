@@ -8,7 +8,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use kerrno::AxError;
+use kerrno::KError;
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
 use crate::{KtaskRef, WeakKtaskRef, current, current_run_queue, select_run_queue};
@@ -92,9 +92,9 @@ impl fmt::Display for Interrupted {
 
 impl core::error::Error for Interrupted {}
 
-impl From<Interrupted> for AxError {
+impl From<Interrupted> for KError {
     fn from(_: Interrupted) -> Self {
-        AxError::Interrupted
+        KError::Interrupted
     }
 }
 

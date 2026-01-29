@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 use core::task::Context;
 
-use kerrno::{AxError, AxResult, ax_bail, ax_err_type};
+use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
@@ -36,8 +36,8 @@ impl VsockStreamTransport {
         }
     }
 
-    fn get_connection(&self) -> AxResult<Arc<Mutex<Connection>>> {
-        self.connection.lock().clone().ok_or(AxError::NotConnected)
+    fn get_connection(&self) -> KResult<Arc<Mutex<Connection>>> {
+        self.connection.lock().clone().ok_or(KError::NotConnected)
     }
 }
 
@@ -48,20 +48,20 @@ impl Default for VsockStreamTransport {
 }
 
 impl Configurable for VsockStreamTransport {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
         self.general.get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
         self.general.set_option_inner(opt)
     }
 }
 
 impl VsockTransportOps for VsockStreamTransport {
-    fn bind(&self, mut local_addr: VsockAddr) -> AxResult<()> {
+    fn bind(&self, mut local_addr: VsockAddr) -> KResult<()> {
         self.state
             .lock(State::Idle)
-            .map_err(|_| ax_err_type!(InvalidInput, "already bound"))?
+            .map_err(|_| k_err_type!(InvalidInput, "already bound"))?
             .transit(State::Idle, || {
                 let mut manager = VSOCK_CONN_MANAGER.lock();
                 if local_addr.port == 0 {
@@ -79,11 +79,11 @@ impl VsockTransportOps for VsockStreamTransport {
         Ok(())
     }
 
-    fn listen(&self) -> AxResult<()> {
+    fn listen(&self) -> KResult<()> {
         let guard = self
             .state
             .lock(State::Idle)
-            .map_err(|_| ax_err_type!(InvalidInput, "invalid state for listen"))?;
+            .map_err(|_| k_err_type!(InvalidInput, "invalid state for listen"))?;
 
         guard.transit(State::Listening, || {
             let conn = self.get_connection()?;
@@ -99,9 +99,9 @@ impl VsockTransportOps for VsockStreamTransport {
         })
     }
 
-    fn accept(&self) -> AxResult<(VsockTransport, VsockAddr)> {
+    fn accept(&self) -> KResult<(VsockTransport, VsockAddr)> {
         if self.state.get() != State::Listening {
-            ax_bail!(InvalidInput, "not listening");
+            k_bail!(InvalidInput, "not listening");
         }
 
         let conn = self.get_connection()?;
@@ -112,11 +112,11 @@ impl VsockTransportOps for VsockStreamTransport {
             let mut manager = VSOCK_CONN_MANAGER.lock();
 
             if !manager.can_accept(local_port) {
-                return Err(AxError::WouldBlock);
+                return Err(KError::WouldBlock);
             }
 
             let (conn_id, peer_addr) = manager.accept(local_port)?;
-            let conn = manager.get_connection(conn_id).ok_or(AxError::NotFound)?;
+            let conn = manager.get_connection(conn_id).ok_or(KError::NotFound)?;
 
             // create new VsockStreamTransport
             let new_transport = VsockStreamTransport {
@@ -130,13 +130,13 @@ impl VsockTransportOps for VsockStreamTransport {
         })
     }
 
-    fn connect(&self, peer_addr: VsockAddr) -> AxResult<()> {
+    fn connect(&self, peer_addr: VsockAddr) -> KResult<()> {
         let guard = self.state.lock(State::Idle).map_err(|state| match state {
             State::Idle => unreachable!(),
-            State::Listening => ax_err_type!(InvalidInput, "already listening"),
-            State::Connecting => ax_err_type!(InProgress),
-            State::Connected => ax_err_type!(AlreadyConnected),
-            _ => ax_err_type!(AlreadyConnected),
+            State::Listening => k_err_type!(InvalidInput, "already listening"),
+            State::Connecting => k_err_type!(InProgress),
+            State::Connected => k_err_type!(AlreadyConnected),
+            _ => k_err_type!(AlreadyConnected),
         })?;
 
         guard.transit(State::Connecting, || {
@@ -153,7 +153,7 @@ impl VsockTransportOps for VsockStreamTransport {
                     }
                     _ => {
                         // should not happen due to state check above
-                        ax_bail!(InvalidInput, "already connected or listening");
+                        k_bail!(InvalidInput, "already connected or listening");
                     }
                 }
             } else {
@@ -195,25 +195,25 @@ impl VsockTransportOps for VsockStreamTransport {
             let state = conn.lock().state();
             match state {
                 ConnectionState::Connected => Ok(()),
-                ConnectionState::Connecting => Err(AxError::WouldBlock),
-                _ => Err(ax_err_type!(ConnectionRefused)),
+                ConnectionState::Connecting => Err(KError::WouldBlock),
+                _ => Err(k_err_type!(ConnectionRefused)),
             }
         })
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, _options: SendOptions) -> AxResult<usize> {
+    fn send(&self, mut src: impl Read + IoBuf, _options: SendOptions) -> KResult<usize> {
         let conn = self.get_connection()?;
         let conn_guard = conn.lock();
 
         if conn_guard.state() != ConnectionState::Connected {
-            return Err(AxError::NotConnected);
+            return Err(KError::NotConnected);
         }
 
         if conn_guard.tx_closed() {
-            return Err(AxError::NotConnected);
+            return Err(KError::NotConnected);
         }
 
-        let conn_id = self.conn_id.lock().ok_or(AxError::NotConnected)?;
+        let conn_id = self.conn_id.lock().ok_or(KError::NotConnected)?;
         drop(conn_guard);
 
         // now virtio-driver only support non-blocking send
@@ -224,7 +224,7 @@ impl VsockTransportOps for VsockStreamTransport {
         result
     }
 
-    fn recv(&self, mut dst: impl Write, options: RecvOptions) -> AxResult<usize> {
+    fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
         let conn = self.get_connection()?;
 
         self.general.recv_poller(self, || {
@@ -239,11 +239,11 @@ impl VsockTransportOps for VsockStreamTransport {
                 conn_guard.state(),
                 ConnectionState::Connected | ConnectionState::Closed
             ) {
-                return Err(AxError::NotConnected);
+                return Err(KError::NotConnected);
             }
 
             if conn_guard.rx_buffer_used() == 0 {
-                return Err(AxError::WouldBlock);
+                return Err(KError::WouldBlock);
             }
 
             let (left, right) = conn_guard.rx_slices();
@@ -265,12 +265,12 @@ impl VsockTransportOps for VsockStreamTransport {
                 );
                 Ok(count)
             } else {
-                Err(AxError::WouldBlock)
+                Err(KError::WouldBlock)
             }
         })
     }
 
-    fn shutdown(&self, how: Shutdown) -> AxResult<()> {
+    fn shutdown(&self, how: Shutdown) -> KResult<()> {
         let conn = self.get_connection()?;
         let mut conn = conn.lock();
 
@@ -293,14 +293,14 @@ impl VsockTransportOps for VsockStreamTransport {
         Ok(())
     }
 
-    fn local_addr(&self) -> AxResult<Option<VsockAddr>> {
+    fn local_addr(&self) -> KResult<Option<VsockAddr>> {
         Ok(self
             .get_connection()
             .ok()
             .map(|conn| conn.lock().local_addr()))
     }
 
-    fn peer_addr(&self) -> AxResult<Option<VsockAddr>> {
+    fn peer_addr(&self) -> KResult<Option<VsockAddr>> {
         Ok(self
             .get_connection()
             .ok()

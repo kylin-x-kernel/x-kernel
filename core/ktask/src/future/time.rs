@@ -6,8 +6,8 @@ use core::{
     time::Duration,
 };
 
-use kerrno::AxError;
 use futures_util::{FutureExt, select_biased};
+use kerrno::KError;
 use khal::time::{TimeValue, wall_time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -135,9 +135,9 @@ impl fmt::Display for Elapsed {
 
 impl core::error::Error for Elapsed {}
 
-impl From<Elapsed> for AxError {
+impl From<Elapsed> for KError {
     fn from(_: Elapsed) -> Self {
-        AxError::TimedOut
+        KError::TimedOut
     }
 }
 

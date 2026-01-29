@@ -1,5 +1,5 @@
-use kerrno::{AxError, AxResult};
 use kcore::task::{AsThread, Thread, get_process_data, get_task};
+use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kprocess::Pid;
 use ktask::current;
@@ -13,9 +13,9 @@ pub fn sys_prlimit64(
     resource: u32,
     new_limit: *const rlimit64,
     old_limit: *mut rlimit64,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     if resource >= RLIM_NLIMITS {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     let proc_data = get_process_data(pid)?;
@@ -31,7 +31,7 @@ pub fn sys_prlimit64(
         // FIXME: AnyBitPattern
         let new_limit = unsafe { new_limit.read_uninit()?.assume_init() };
         if new_limit.rlim_cur > new_limit.rlim_max {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         let limit = &mut proc_data.rlim.write()[resource];
@@ -39,7 +39,7 @@ pub fn sys_prlimit64(
             limit.max = new_limit.rlim_max;
         } else {
             // TODO: patch resources
-            // return Err(AxError::OperationNotPermitted);
+            // return Err(KError::OperationNotPermitted);
             return Ok(0);
         }
 
@@ -78,7 +78,7 @@ impl From<Rusage> for rusage {
     }
 }
 
-pub fn sys_getrusage(who: i32, usage: *mut rusage) -> AxResult<isize> {
+pub fn sys_getrusage(who: i32, usage: *mut rusage) -> KResult<isize> {
     const RUSAGE_SELF: i32 = linux_raw_sys::general::RUSAGE_SELF as i32;
     const RUSAGE_CHILDREN: i32 = linux_raw_sys::general::RUSAGE_CHILDREN;
     const RUSAGE_THREAD: i32 = linux_raw_sys::general::RUSAGE_THREAD as i32;
@@ -116,7 +116,7 @@ pub fn sys_getrusage(who: i32, usage: *mut rusage) -> AxResult<isize> {
                 })
         }
         RUSAGE_THREAD => Rusage::from_thread(thr),
-        _ => return Err(AxError::InvalidInput),
+        _ => return Err(KError::InvalidInput),
     };
     usage.write_vm(result.into())?;
 

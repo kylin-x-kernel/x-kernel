@@ -1,8 +1,8 @@
 use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::ffi::c_char;
 
-use kerrno::{AxError, AxResult};
 use kcore::{config::USER_HEAP_BASE, mm::load_user_app, task::AsThread};
+use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use ktask::current;
@@ -15,7 +15,7 @@ pub fn sys_execve(
     path: *const c_char,
     argv: *const *const c_char,
     envp: *const *const c_char,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     let path = vm_load_string(path)?;
 
     let args = if argv.is_null() {
@@ -46,7 +46,7 @@ pub fn sys_execve(
     if proc_data.proc.threads().len() > 1 {
         // TODO: dispatch_irq multi-thread case
         error!("sys_execve: multi-thread not supported");
-        return Err(AxError::WouldBlock);
+        return Err(KError::WouldBlock);
     }
 
     let mut aspace = proc_data.aspace.lock();

@@ -59,18 +59,19 @@ fn gen_linux_errno(dest_path: &Path) -> Result<()> {
         if line.starts_with("#define") {
             let mut iter = line.split_whitespace();
             if let Some(name) = iter.nth(1)
-                && let Some(num) = iter.next() {
-                    let description = if let Some(pos) = line.find("/* ") {
-                        String::from(line[pos + 3..].trim_end_matches(" */"))
-                    } else {
-                        format!("Error number {num}")
-                    };
-                    writeln!(enum_define, "    /// {description}\n    {name} = {num},")?;
-                    writeln!(try_from_i32, "            {num} => Ok({name}),")?;
-                    writeln!(detail_info, "            {name} => \"{description}\",")?;
-                }
+                && let Some(num) = iter.next()
+            {
+                let description = if let Some(pos) = line.find("/* ") {
+                    String::from(line[pos + 3..].trim_end_matches(" */"))
+                } else {
+                    format!("Error number {num}")
+                };
+                writeln!(enum_define, "    /// {description}\n    {name} = {num},")?;
+                writeln!(try_from_i32, "            {num} => Ok({name}),")?;
+                writeln!(detail_info, "            {name} => \"{description}\",")?;
             }
         }
+    }
 
     fs::write(
         dest_path,

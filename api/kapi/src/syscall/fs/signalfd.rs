@@ -1,5 +1,5 @@
-use kerrno::{AxError, AxResult};
 use bitflags::bitflags;
+use kerrno::{KError, KResult};
 use ksignal::SignalSet;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtPtr;
@@ -42,13 +42,13 @@ pub fn sys_signalfd4(
     mask: *const SignalSet,
     sigsetsize: usize,
     flags: u32,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
-    let flags = SignalfdFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
+    let flags = SignalfdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
 
     if fd != -1 && flags.contains(SignalfdFlags::CLOEXEC) {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     // Read the signal mask from user space before handling the request mode.

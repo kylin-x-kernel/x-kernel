@@ -5,7 +5,7 @@ use core::{
 };
 
 use async_trait::async_trait;
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
@@ -62,7 +62,7 @@ pub struct Bind {
     pid: u32,
 }
 impl Bind {
-    fn connect(&self, local_addr: UnixAddr, pid: u32) -> AxResult<Channel> {
+    fn connect(&self, local_addr: UnixAddr, pid: u32) -> KResult<Channel> {
         let (mut client_chan, mut server_chan) = new_duplex_channel(0);
         client_chan.peer_pid = self.pid;
         server_chan.peer_pid = pid;
@@ -72,7 +72,7 @@ impl Bind {
                 addr: local_addr,
                 pid,
             })
-            .map_err(|_| AxError::ConnectionRefused)?;
+            .map_err(|_| KError::ConnectionRefused)?;
         self.accept_poll.wake();
         Ok(client_chan)
     }
@@ -119,7 +119,7 @@ impl StreamTransport {
 }
 
 impl Configurable for StreamTransport {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
         use GetSocketOption as O;
 
         if self.options.get_option_inner(opt)? {
@@ -144,7 +144,7 @@ impl Configurable for StreamTransport {
         Ok(true)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
         use SetSocketOption as O;
 
         if self.options.set_option_inner(opt)? {
@@ -160,14 +160,14 @@ impl Configurable for StreamTransport {
 }
 #[async_trait]
 impl UnixTransportOps for StreamTransport {
-    fn bind(&self, slot: &super::BindEntry, _local_addr: &UnixAddr) -> AxResult<()> {
+    fn bind(&self, slot: &super::BindEntry, _local_addr: &UnixAddr) -> KResult<()> {
         let mut slot = slot.stream.lock();
         if slot.is_some() {
-            return Err(AxError::AddrInUse);
+            return Err(KError::AddrInUse);
         }
         let mut guard = self.accept_rx.lock();
         if guard.is_some() {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let (tx, rx) = async_channel::unbounded();
         let poll = Arc::new(PollSet::new());
@@ -181,27 +181,27 @@ impl UnixTransportOps for StreamTransport {
         Ok(())
     }
 
-    fn connect(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> AxResult<()> {
+    fn connect(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult<()> {
         let mut guard = self.channel.lock();
         if guard.is_some() {
-            return Err(AxError::AlreadyConnected);
+            return Err(KError::AlreadyConnected);
         }
         *guard = Some(
             slot.stream
                 .lock()
                 .as_ref()
-                .ok_or(AxError::NotConnected)?
+                .ok_or(KError::NotConnected)?
                 .connect(local_addr.clone(), self.pid)?,
         );
         self.poll_state.wake();
         Ok(())
     }
 
-    async fn accept(&self) -> AxResult<(UnixTransport, UnixAddr)> {
+    async fn accept(&self) -> KResult<(UnixTransport, UnixAddr)> {
         let (rx, _poll) = {
             let mut guard = self.accept_rx.lock();
             let Some((rx, poll)) = guard.as_mut() else {
-                return Err(AxError::NotConnected);
+                return Err(KError::NotConnected);
             };
             (rx.clone(), poll.clone())
         };
@@ -209,16 +209,16 @@ impl UnixTransportOps for StreamTransport {
             channel,
             addr: peer_addr,
             pid,
-        } = rx.recv().await.map_err(|_| AxError::ConnectionReset)?;
+        } = rx.recv().await.map_err(|_| KError::ConnectionReset)?;
         Ok((
             UnixTransport::Stream(StreamTransport::new_channel(Some(channel), pid)),
             peer_addr,
         ))
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize> {
+    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         if options.to.is_some() {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let size = src.remaining();
         let mut total = 0;
@@ -226,10 +226,10 @@ impl UnixTransportOps for StreamTransport {
         self.options.send_poller(self, || {
             let mut guard = self.channel.lock();
             let Some(chan) = guard.as_mut() else {
-                return Err(AxError::NotConnected);
+                return Err(KError::NotConnected);
             };
             if !chan.tx.read_is_held() {
-                return Err(AxError::BrokenPipe);
+                return Err(KError::BrokenPipe);
             }
 
             let count = {
@@ -249,16 +249,16 @@ impl UnixTransportOps for StreamTransport {
             if count == size || non_blocking {
                 Ok(total)
             } else {
-                Err(AxError::WouldBlock)
+                Err(KError::WouldBlock)
             }
         })
     }
 
-    fn recv(&self, mut dst: impl Write, _options: RecvOptions) -> AxResult<usize> {
+    fn recv(&self, mut dst: impl Write, _options: RecvOptions) -> KResult<usize> {
         self.options.recv_poller(self, || {
             let mut guard = self.channel.lock();
             let Some(chan) = guard.as_mut() else {
-                return Err(AxError::NotConnected);
+                return Err(KError::NotConnected);
             };
 
             let count = {
@@ -277,11 +277,11 @@ impl UnixTransportOps for StreamTransport {
             if self.rx_closed.load(Ordering::Acquire) {
                 return Ok(0);
             }
-            Err(AxError::WouldBlock)
+            Err(KError::WouldBlock)
         })
     }
 
-    fn shutdown(&self, how: Shutdown) -> AxResult<()> {
+    fn shutdown(&self, how: Shutdown) -> KResult<()> {
         if how.has_read() {
             self.rx_closed.store(true, Ordering::Release);
             self.poll_state.wake();

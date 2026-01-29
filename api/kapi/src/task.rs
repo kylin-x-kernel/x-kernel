@@ -1,6 +1,5 @@
 use core::{ffi::c_long, sync::atomic::Ordering};
 
-use kerrno::{AxError, AxResult};
 use bytemuck::AnyBitPattern;
 use kcore::{
     futex::FutexKey,
@@ -11,6 +10,7 @@ use kcore::{
     },
     time::TimerState,
 };
+use kerrno::{KError, KResult};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kprocess::Pid;
 use ksignal::{SignalInfo, Signo};
@@ -111,11 +111,11 @@ pub struct RobustListHead {
     pub list_op_pending: *mut RobustList,
 }
 
-fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> AxResult<()> {
+fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> {
     let address = (entry as u64)
         .checked_add_signed(offset)
-        .ok_or(AxError::InvalidInput)?;
-    let address: usize = address.try_into().map_err(|_| AxError::InvalidInput)?;
+        .ok_or(KError::InvalidInput)?;
+    let address: usize = address.try_into().map_err(|_| KError::InvalidInput)?;
     let key = FutexKey::new_current(address);
 
     let curr = current();
@@ -129,7 +129,7 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> AxResult<()>
     Ok(())
 }
 
-pub fn exit_robust_list(head: *const RobustListHead) -> AxResult<()> {
+pub fn exit_robust_list(head: *const RobustListHead) -> KResult<()> {
     // Reference: https://elixir.bootlin.com/linux/v6.13.6/source/kernel/futex/core.c#L777
 
     let mut limit = ROBUST_LIST_LIMIT;
@@ -149,7 +149,7 @@ pub fn exit_robust_list(head: *const RobustListHead) -> AxResult<()> {
 
         limit -= 1;
         if limit == 0 {
-            return Err(AxError::FilesystemLoop);
+            return Err(KError::FilesystemLoop);
         }
         ktask::yield_now();
     }
@@ -206,7 +206,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 }
 
 /// Sends a fatal signal to the current process.
-pub fn raise_signal_fatal(sig: SignalInfo) -> AxResult<()> {
+pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
     let curr = current();
     let proc_data = &curr.as_thread().proc_data;
 

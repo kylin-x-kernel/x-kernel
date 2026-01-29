@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kerrno::AxResult;
 use kcore::task::{AsThread, Thread};
+use kerrno::KResult;
 use khal::uspace::UserContext;
 use ksignal::{SignalOSAction, SignalSet};
 use ktask::current;
@@ -52,8 +52,8 @@ pub fn unblock_next_signal() -> bool {
 
 pub fn with_replacen_blocked<R>(
     blocked: Option<SignalSet>,
-    f: impl FnOnce() -> AxResult<R>,
-) -> AxResult<R> {
+    f: impl FnOnce() -> KResult<R>,
+) -> KResult<R> {
     let curr = current();
     let sig = &curr.as_thread().signal;
 

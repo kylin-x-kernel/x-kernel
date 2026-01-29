@@ -31,7 +31,7 @@ mod tlsf;
 use core::{alloc::Layout, ptr::NonNull};
 
 #[cfg(feature = "kerrno")]
-use kerrno::AxError;
+use kerrno::KError;
 #[cfg(feature = "tlsf")]
 pub use tlsf::TlsfByteAllocator;
 
@@ -49,11 +49,11 @@ pub enum AllocError {
 }
 
 #[cfg(feature = "kerrno")]
-impl From<AllocError> for AxError {
+impl From<AllocError> for KError {
     fn from(value: AllocError) -> Self {
         match value {
-            AllocError::NoMemory => AxError::NoMemory,
-            _ => AxError::InvalidInput,
+            AllocError::NoMemory => KError::NoMemory,
+            _ => KError::InvalidInput,
         }
     }
 }

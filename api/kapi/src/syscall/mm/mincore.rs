@@ -8,8 +8,8 @@
 
 use alloc::vec;
 
-use kerrno::{AxError, AxResult};
 use kcore::task::AsThread;
+use kerrno::{KError, KResult};
 use khal::paging::MappingFlags;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
@@ -42,17 +42,17 @@ use osvm::write_vm_mem;
 /// - EFAULT: vec points to invalid address
 /// - EINVAL: addr not page-aligned
 /// - ENOMEM: length > (TASK_SIZE - addr), negative length, or unmapped memory
-pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> AxResult<isize> {
+pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> KResult<isize> {
     let start_addr = VirtAddr::from(addr);
 
     // EINVAL: addr must be a multiple of the page size
     if !start_addr.is_aligned(PAGE_SIZE_4K) {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     // EFAULT: vec must not be null (basic check, write_vm_mem will do full validation)
     if vec.is_null() {
-        return Err(AxError::BadAddress);
+        return Err(KError::BadAddress);
     }
 
     debug!("sys_mincore <= addr: {addr:#x}, length: {length:#x}, vec: {vec:?}");
@@ -79,11 +79,11 @@ pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> AxResult<isize> 
         let addr = start_addr + i * PAGE_SIZE_4K;
 
         // ENOMEM: Check if this page is within a valid VMA
-        let area = aspace.find_area(addr).ok_or(AxError::NoMemory)?;
+        let area = aspace.find_area(addr).ok_or(KError::NoMemory)?;
 
         // Verify we have at least USER access permission
         if !area.flags().contains(MappingFlags::USER) {
-            return Err(AxError::NoMemory);
+            return Err(KError::NoMemory);
         }
 
         // Query page table with batch awareness

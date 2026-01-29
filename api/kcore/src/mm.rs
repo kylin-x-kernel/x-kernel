@@ -3,10 +3,10 @@
 use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
 use core::{ffi::CStr, hint::unlikely, iter, mem::MaybeUninit};
 
-use kerrno::{AxError, AxResult};
 use extern_trait::extern_trait;
 use fs_ng_vfs::Location;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
+use kerrno::{KError, KResult};
 use kfs::{CachedFile, FS_CONTEXT, FileBackend};
 use khal::{
     asm::user_copy,
@@ -28,7 +28,7 @@ use crate::{
 };
 
 /// Creates a new empty user address space.
-pub fn new_user_aspace_empty() -> AxResult<AddrSpace> {
+pub fn new_user_aspace_empty() -> KResult<AddrSpace> {
     AddrSpace::new_empty(
         VirtAddr::from_usize(crate::config::USER_SPACE_BASE),
         crate::config::USER_SPACE_SIZE,
@@ -37,7 +37,7 @@ pub fn new_user_aspace_empty() -> AxResult<AddrSpace> {
 
 /// If the target architecture requires it, the kernel portion of the address
 /// space will be copied to the user address space.
-pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> AxResult {
+pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> KResult {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))]
     {
         // ARMv8 (aarch64) and LoongArch64 use separate page tables for user space
@@ -49,7 +49,7 @@ pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> AxResult {
 }
 
 /// Map the signal trampoline to the user address space.
-pub fn map_trampoline(aspace: &mut AddrSpace) -> AxResult {
+pub fn map_trampoline(aspace: &mut AddrSpace) -> KResult {
     let signal_trampoline_paddr = v2p(ksignal::arch::signal_trampoline_address().into());
     aspace.map_linear(
         crate::config::SIGNAL_TRAMPOLINE.into(),
@@ -86,8 +86,8 @@ fn map_elf<'a>(
     uspace: &mut AddrSpace,
     base: usize,
     entry: &'a ElfCacheEntry,
-) -> AxResult<ELFParser<'a>> {
-    let elf_parser = ELFParser::new(entry.borrow_elf(), base).map_err(|_| AxError::InvalidData)?;
+) -> KResult<ELFParser<'a>> {
+    let elf_parser = ELFParser::new(entry.borrow_elf(), base).map_err(|_| KError::InvalidData)?;
     let cache = entry.borrow_cache();
 
     for ph in elf_parser
@@ -133,9 +133,9 @@ fn map_elf<'a>(
     Ok(elf_parser)
 }
 
-fn map_elf_error(err: &'static str) -> AxError {
+fn map_elf_error(err: &'static str) -> KError {
     debug!("Failed to parse ELF file: {err}");
-    AxError::InvalidExecutable
+    KError::InvalidExecutable
 }
 
 #[self_referencing]
@@ -148,13 +148,13 @@ struct ElfCacheEntry {
 }
 
 impl ElfCacheEntry {
-    fn load(loc: Location) -> AxResult<Result<Self, Vec<u8>>> {
+    fn load(loc: Location) -> KResult<Result<Self, Vec<u8>>> {
         let cache = CachedFile::get_or_create(loc);
 
         let mut data = vec![0; 4096];
         let read = cache.read_at(&mut data[..], 0)?;
         data.truncate(read);
-        match ElfCacheEntry::try_new_or_recover::<AxError>(cache.clone(), data, |data| {
+        match ElfCacheEntry::try_new_or_recover::<KError>(cache.clone(), data, |data| {
             let builder = ELFHeadersBuilder::new(data).map_err(map_elf_error)?;
             let range = builder.ph_range();
             if range.end as usize <= data.len() {
@@ -181,7 +181,7 @@ impl ElfLoader {
         Self(LruCache::new())
     }
 
-    fn load(&mut self, uspace: &mut AddrSpace, path: &str) -> AxResult<LoadResult> {
+    fn load(&mut self, uspace: &mut AddrSpace, path: &str) -> KResult<LoadResult> {
         let loc = FS_CONTEXT.lock().resolve(path)?;
 
         if !self.0.access(|e| e.borrow_cache().location().ptr_eq(&loc)) {
@@ -213,7 +213,7 @@ impl ElfLoader {
             let ldso = CStr::from_bytes_with_nul(&data)
                 .ok()
                 .and_then(|cstr| cstr.to_str().ok())
-                .ok_or(AxError::InvalidInput)?;
+                .ok_or(KError::InvalidInput)?;
             debug!("Loading dynamic linker: {ldso}");
             Some(ldso.to_owned())
         } else {
@@ -223,7 +223,7 @@ impl ElfLoader {
         let (elf, ldso) = if let Some(ldso) = ldso {
             let loc = FS_CONTEXT.lock().resolve(ldso)?;
             if !self.0.access(|e| e.borrow_cache().location().ptr_eq(&loc)) {
-                let e = ElfCacheEntry::load(loc)?.map_err(|_| AxError::InvalidInput)?;
+                let e = ElfCacheEntry::load(loc)?.map_err(|_| KError::InvalidInput)?;
                 self.0.put(e);
             }
 
@@ -277,10 +277,10 @@ pub fn load_user_app(
     path: Option<&str>,
     args: &[String],
     envs: &[String],
-) -> AxResult<(VirtAddr, VirtAddr)> {
+) -> KResult<(VirtAddr, VirtAddr)> {
     let path = path
         .or_else(|| args.first().map(String::as_str))
-        .ok_or(AxError::InvalidInput)?;
+        .ok_or(KError::InvalidInput)?;
 
     // FIXME: impl `/proc/self/exe` to let busybox retry running
     if path.ends_with(".sh") {
@@ -296,7 +296,7 @@ pub fn load_user_app(
             if data.starts_with(b"#!") {
                 let head = &data[2..data.len().min(256)];
                 let pos = head.iter().position(|c| *c == b'\n').unwrap_or(head.len());
-                let line = core::str::from_utf8(&head[..pos]).map_err(|_| AxError::InvalidInput)?;
+                let line = core::str::from_utf8(&head[..pos]).map_err(|_| KError::InvalidInput)?;
 
                 let new_args: Vec<String> = line
                     .trim()
@@ -307,7 +307,7 @@ pub fn load_user_app(
                     .collect();
                 return load_user_app(uspace, None, &new_args, envs);
             }
-            return Err(AxError::InvalidExecutable);
+            return Err(KError::InvalidExecutable);
         }
     };
 

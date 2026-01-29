@@ -1,6 +1,6 @@
 use core::{future::poll_fn, task::Poll};
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use kpoll::{IoEvents, Pollable};
 
 /// A helper to wrap a synchronous non-blocking I/O function into an
@@ -10,26 +10,26 @@ use kpoll::{IoEvents, Pollable};
 ///
 /// * `pollable`: The pollable object to register for I/O events.
 /// * `events`: The I/O events to wait for.
-/// * `non_blocking`: If true, the function will return `AxError::WouldBlock`
+/// * `non_blocking`: If true, the function will return `KError::WouldBlock`
 ///   immediately when the I/O operation would block.
 /// * `f`: The synchronous non-blocking I/O function to be wrapped. It should
-///   return `AxError::WouldBlock` when the operation would block.
-pub async fn poll_io<P: Pollable, F: FnMut() -> AxResult<T>, T>(
+///   return `KError::WouldBlock` when the operation would block.
+pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
     pollable: &P,
     events: IoEvents,
     non_blocking: bool,
     mut f: F,
-) -> AxResult<T> {
+) -> KResult<T> {
     super::interruptible(poll_fn(move |cx| match f() {
         Ok(value) => Poll::Ready(Ok(value)),
-        Err(AxError::WouldBlock) => {
+        Err(KError::WouldBlock) => {
             if non_blocking {
-                return Poll::Ready(Err(AxError::WouldBlock));
+                return Poll::Ready(Err(KError::WouldBlock));
             }
             pollable.register(cx, events);
             match f() {
                 Ok(value) => Poll::Ready(Ok(value)),
-                Err(AxError::WouldBlock) => Poll::Pending,
+                Err(KError::WouldBlock) => Poll::Pending,
                 Err(e) => Poll::Ready(Err(e)),
             }
         }

@@ -1,14 +1,14 @@
-use kerrno::AxResult;
 use kcore::{
     config::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX},
     task::AsThread,
 };
+use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
 use ktask::current;
 use memaddr::{VirtAddr, align_up_4k};
 use memspace::backend::Backend;
 
-pub fn sys_brk(addr: usize) -> AxResult<isize> {
+pub fn sys_brk(addr: usize) -> KResult<isize> {
     let curr = current();
     let proc_data = &curr.as_thread().proc_data;
     let current_top = proc_data.get_heap_top() as usize;

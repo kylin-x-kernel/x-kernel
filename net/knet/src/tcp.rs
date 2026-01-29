@@ -5,7 +5,7 @@ use core::{
     task::Context,
 };
 
-use kerrno::{AxError, AxResult, ax_bail, ax_err_type};
+use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
@@ -98,10 +98,10 @@ impl TcpSocket {
         SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
     }
 
-    fn bound_endpoint(&self) -> AxResult<IpListenEndpoint> {
+    fn bound_endpoint(&self) -> KResult<IpListenEndpoint> {
         let endpoint = self.with_smol_socket(|socket| socket.get_bound_endpoint());
         if endpoint.port == 0 {
-            ax_bail!(InvalidInput, "not bound");
+            k_bail!(InvalidInput, "not bound");
         }
         Ok(endpoint)
     }
@@ -154,7 +154,7 @@ impl TcpSocket {
 }
 
 impl Configurable for TcpSocket {
-    fn get_option_inner(&self, option: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<bool> {
         use GetSocketOption as O;
 
         if self.general.get_option_inner(option)? {
@@ -186,7 +186,7 @@ impl Configurable for TcpSocket {
         Ok(true)
     }
 
-    fn set_option_inner(&self, option: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, option: SetSocketOption) -> KResult<bool> {
         use SetSocketOption as O;
 
         if self.general.set_option_inner(option)? {
@@ -210,11 +210,11 @@ impl Configurable for TcpSocket {
     }
 }
 impl SocketOps for TcpSocket {
-    fn bind(&self, local_addr: SocketAddrEx) -> AxResult {
+    fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut local_addr = local_addr.into_ip()?;
         self.state
             .lock(State::Idle)
-            .map_err(|_| ax_err_type!(InvalidInput, "already bound"))?
+            .map_err(|_| k_err_type!(InvalidInput, "already bound"))?
             .transit(State::Idle, || {
                 // TODO: check addr is available
                 if local_addr.port() == 0 {
@@ -226,7 +226,7 @@ impl SocketOps for TcpSocket {
 
                 self.with_smol_socket(|socket| {
                     if socket.get_bound_endpoint().port != 0 {
-                        return Err(AxError::InvalidInput);
+                        return Err(KError::InvalidInput);
                     }
                     let endpoint = IpListenEndpoint {
                         addr: if local_addr.ip().is_unspecified() {
@@ -249,16 +249,16 @@ impl SocketOps for TcpSocket {
             })
     }
 
-    fn connect(&self, remote_addr: SocketAddrEx) -> AxResult {
+    fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
         let remote_addr = remote_addr.into_ip()?;
         self.state
             .lock(State::Idle)
             .map_err(|state| {
                 if state == State::Connecting {
-                    AxError::InProgress
+                    KError::InProgress
                 } else {
                     // TODO(mivik): error code
-                    ax_err_type!(AlreadyConnected)
+                    k_err_type!(AlreadyConnected)
                 }
             })?
             .transit(State::Connecting, || {
@@ -291,10 +291,10 @@ impl SocketOps for TcpSocket {
                         )
                         .map_err(|e| match e {
                             smol::ConnectError::InvalidState => {
-                                ax_err_type!(AlreadyConnected)
+                                k_err_type!(AlreadyConnected)
                             }
                             smol::ConnectError::Unaddressable => {
-                                ax_err_type!(ConnectionRefused, "unaddressable")
+                                k_err_type!(ConnectionRefused, "unaddressable")
                             }
                         })?;
                     Ok(())
@@ -309,16 +309,16 @@ impl SocketOps for TcpSocket {
             poll_interfaces();
             let events = self.poll_connect();
             if !events.contains(IoEvents::OUT) {
-                Err(AxError::WouldBlock)
+                Err(KError::WouldBlock)
             } else if self.state() == State::Connected {
                 Ok(())
             } else {
-                Err(ax_err_type!(ConnectionRefused, "connection refused"))
+                Err(k_err_type!(ConnectionRefused, "connection refused"))
             }
         })
     }
 
-    fn listen(&self) -> AxResult {
+    fn listen(&self) -> KResult {
         if let Ok(guard) = self.state.lock(State::Idle) {
             guard.transit(State::Listening, || {
                 let bound_endpoint = self.with_smol_socket(|socket| socket.get_bound_endpoint());
@@ -332,9 +332,9 @@ impl SocketOps for TcpSocket {
         Ok(())
     }
 
-    fn accept(&self) -> AxResult<Socket> {
+    fn accept(&self) -> KResult<Socket> {
         if !self.is_listening() {
-            ax_bail!(InvalidInput, "not listening");
+            k_bail!(InvalidInput, "not listening");
         }
 
         let bound_port = self.bound_endpoint()?.port;
@@ -352,15 +352,15 @@ impl SocketOps for TcpSocket {
         })
     }
 
-    fn send(&self, mut src: impl Read, _options: SendOptions) -> AxResult<usize> {
+    fn send(&self, mut src: impl Read, _options: SendOptions) -> KResult<usize> {
         // SAFETY: `self.dispatch_irq` should be initialized in a connected socket.
         self.general.send_poller(self, || {
             poll_interfaces();
             self.with_smol_socket(|socket| {
                 if !socket.is_active() {
-                    Err(AxError::NotConnected)
+                    Err(KError::NotConnected)
                 } else if !socket.can_send() {
-                    Err(AxError::WouldBlock)
+                    Err(KError::WouldBlock)
                 } else {
                     // connected, and the tx buffer is not full
                     let len = socket
@@ -369,31 +369,31 @@ impl SocketOps for TcpSocket {
                             let len = result.unwrap_or(0);
                             (len, result)
                         })
-                        .map_err(|_| ax_err_type!(NotConnected, "not connected?"))??;
+                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))??;
                     Ok(len)
                 }
             })
         })
     }
 
-    fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> AxResult<usize> {
+    fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {
         if self.rx_closed.load(Ordering::Acquire) {
-            return Err(AxError::NotConnected);
+            return Err(KError::NotConnected);
         }
         self.general.recv_poller(self, || {
             poll_interfaces();
             self.with_smol_socket(|socket| {
                 if !socket.is_active() {
-                    Err(AxError::NotConnected)
+                    Err(KError::NotConnected)
                 } else if !socket.may_recv() {
                     Ok(0)
                 } else if socket.recv_queue() == 0 {
-                    Err(AxError::WouldBlock)
+                    Err(KError::WouldBlock)
                 } else if options.flags.contains(RecvFlags::PEEK) {
                     dst.write(
                         socket
                             .peek(dst.remaining_mut())
-                            .map_err(|_| ax_err_type!(NotConnected, "not connected?"))?,
+                            .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
                     )
                 } else {
                     socket
@@ -402,13 +402,13 @@ impl SocketOps for TcpSocket {
                             let len = result.unwrap_or(0);
                             (len, result)
                         })
-                        .map_err(|_| ax_err_type!(NotConnected, "not connected?"))?
+                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
                 }
             })
         })
     }
 
-    fn local_addr(&self) -> AxResult<SocketAddrEx> {
+    fn local_addr(&self) -> KResult<SocketAddrEx> {
         self.with_smol_socket(|socket| {
             let endpoint = socket.get_bound_endpoint();
             Ok(SocketAddrEx::Ip(SocketAddr::new(
@@ -420,18 +420,15 @@ impl SocketOps for TcpSocket {
         })
     }
 
-    fn peer_addr(&self) -> AxResult<SocketAddrEx> {
+    fn peer_addr(&self) -> KResult<SocketAddrEx> {
         self.with_smol_socket(|socket| {
             Ok(SocketAddrEx::Ip(
-                socket
-                    .remote_endpoint()
-                    .ok_or(AxError::NotConnected)?
-                    .into(),
+                socket.remote_endpoint().ok_or(KError::NotConnected)?.into(),
             ))
         })
     }
 
-    fn shutdown(&self, how: Shutdown) -> AxResult {
+    fn shutdown(&self, how: Shutdown) -> KResult {
         // TODO(mivik): shutdown
         if how.has_read() {
             self.rx_closed.store(true, Ordering::Release);
@@ -500,7 +497,7 @@ impl Drop for TcpSocket {
     }
 }
 
-fn get_ephemeral_port() -> AxResult<u16> {
+fn get_ephemeral_port() -> KResult<u16> {
     const PORT_START: u16 = 0xc000;
     const PORT_END: u16 = 0xffff;
     static CURR: Mutex<u16> = Mutex::new(PORT_START);
@@ -520,5 +517,5 @@ fn get_ephemeral_port() -> AxResult<u16> {
         }
         tries += 1;
     }
-    ax_bail!(AddrInUse, "no available ports");
+    k_bail!(AddrInUse, "no available ports");
 }

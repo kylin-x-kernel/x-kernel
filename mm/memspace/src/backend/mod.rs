@@ -1,9 +1,9 @@
 //! Memory mapping backends.
 use alloc::{boxed::Box, sync::Arc};
 
-use kerrno::{AxError, AxResult};
 use enum_dispatch::enum_dispatch;
 use kalloc::{UsageKind, global_allocator};
+use kerrno::{KError, KResult};
 use khal::{
     mem::{p2v, v2p},
     paging::{MappingFlags, PageSize, PageTable, PageTableMut, PagingError},
@@ -26,13 +26,13 @@ fn divide_page(size: usize, pgsize: PageSize) -> usize {
     size >> (pgsize as usize).trailing_zeros()
 }
 
-fn alloc_frame(zeroed: bool, size: PageSize) -> AxResult<PhysAddr> {
+fn alloc_frame(zeroed: bool, size: PageSize) -> KResult<PhysAddr> {
     let pgsize = size as usize;
     let num_pages = pgsize / PAGE_SIZE_4K;
     let vaddr = VirtAddr::from(
         global_allocator()
             .alloc_pages(num_pages, pgsize, UsageKind::VirtMem)
-            .map_err(|_| AxError::NoMemory)?,
+            .map_err(|_| KError::NoMemory)?,
     );
     if zeroed {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, pgsize) };
@@ -49,14 +49,14 @@ fn dealloc_frame(frame: PhysAddr, align: PageSize) {
     global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
 }
 
-fn pages_in(range: VirtAddrRange, align: PageSize) -> AxResult<DynPageIter<VirtAddr>> {
-    DynPageIter::new(range.start, range.end, align as usize).ok_or(AxError::InvalidInput)
+fn pages_in(range: VirtAddrRange, align: PageSize) -> KResult<DynPageIter<VirtAddr>> {
+    DynPageIter::new(range.start, range.end, align as usize).ok_or(KError::InvalidInput)
 }
 
-pub(crate) fn map_paging_err(err: PagingError) -> AxError {
+pub(crate) fn map_paging_err(err: PagingError) -> KError {
     match err {
-        PagingError::NoMemory => AxError::NoMemory,
-        _ => AxError::InvalidInput,
+        PagingError::NoMemory => KError::NoMemory,
+        _ => KError::InvalidInput,
     }
 }
 
@@ -66,10 +66,10 @@ pub trait BackendOps {
     fn page_size(&self) -> PageSize;
 
     /// Map a memory region.
-    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> AxResult;
+    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult;
 
     /// Unmap a memory region.
-    fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> AxResult;
+    fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult;
 
     /// Called before a memory region is protected.
     fn on_protect(
@@ -77,7 +77,7 @@ pub trait BackendOps {
         _range: VirtAddrRange,
         _new_flags: MappingFlags,
         _pgtbl: &mut PageTableMut,
-    ) -> AxResult {
+    ) -> KResult {
         Ok(())
     }
 
@@ -109,11 +109,11 @@ pub trait BackendOps {
         old_pgtbl: &mut PageTableMut,
         new_pgtbl: &mut PageTableMut,
         new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> AxResult<Backend>;
+    ) -> KResult<Backend>;
 }
 
 type PopulateHook = Box<dyn FnOnce(&mut AddrSpace)>;
-type PopulateResult = AxResult<(usize, Option<PopulateHook>)>;
+type PopulateResult = KResult<(usize, Option<PopulateHook>)>;
 
 /// A unified enum type for different memory mapping backends.
 #[derive(Clone)]

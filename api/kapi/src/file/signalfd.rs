@@ -5,8 +5,8 @@ use core::{
     task::Context,
 };
 
-use kerrno::{AxError, AxResult};
 use kcore::task::AsThread;
+use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, SignalSet};
 use ktask::{
@@ -120,9 +120,9 @@ impl Signalfd {
 }
 
 impl FileLike for Signalfd {
-    fn read(&self, dst: &mut IoDst) -> AxResult<usize> {
+    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
         if dst.remaining_mut() < SIGNALFD_SIGINFO_SIZE {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
@@ -141,21 +141,21 @@ impl FileLike for Signalfd {
 
                 Ok(SIGNALFD_SIGINFO_SIZE)
             } else {
-                Err(AxError::WouldBlock)
+                Err(KError::WouldBlock)
             }
         }))
     }
 
-    fn write(&self, _src: &mut IoSrc) -> AxResult<usize> {
+    fn write(&self, _src: &mut IoSrc) -> KResult<usize> {
         // signalfd is read-only
-        Err(AxError::BadFileDescriptor)
+        Err(KError::BadFileDescriptor)
     }
 
     fn nonblocking(&self) -> bool {
         self.non_blocking.load(Ordering::Acquire)
     }
 
-    fn set_nonblocking(&self, non_blocking: bool) -> AxResult {
+    fn set_nonblocking(&self, non_blocking: bool) -> KResult {
         self.non_blocking.store(non_blocking, Ordering::Release);
         Ok(())
     }

@@ -9,11 +9,11 @@ pub mod signalfd;
 use alloc::{borrow::Cow, sync::Arc};
 use core::{ffi::c_int, time::Duration};
 
-use kerrno::{AxError, AxResult};
 use downcast_rs::{DowncastSync, impl_downcast};
 use flatten_objects::FlattenObjects;
 use fs_ng_vfs::DeviceId;
 use kcore::{resources::AX_FILE_LIMIT, task::AsThread};
+use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
 use kio::prelude::*;
 use kpoll::Pollable;
@@ -135,42 +135,42 @@ pub type IoSrc<'a> = dyn ReadBuf + 'a;
 
 #[allow(dead_code)]
 pub trait FileLike: Pollable + DowncastSync {
-    fn read(&self, _dst: &mut IoDst) -> AxResult<usize> {
-        Err(AxError::InvalidInput)
+    fn read(&self, _dst: &mut IoDst) -> KResult<usize> {
+        Err(KError::InvalidInput)
     }
 
-    fn write(&self, _src: &mut IoSrc) -> AxResult<usize> {
-        Err(AxError::InvalidInput)
+    fn write(&self, _src: &mut IoSrc) -> KResult<usize> {
+        Err(KError::InvalidInput)
     }
 
-    fn stat(&self) -> AxResult<Kstat> {
+    fn stat(&self) -> KResult<Kstat> {
         Ok(Kstat::default())
     }
 
     fn path(&self) -> Cow<'_, str>;
 
-    fn ioctl(&self, _cmd: u32, _arg: usize) -> AxResult<usize> {
-        Err(AxError::NotATty)
+    fn ioctl(&self, _cmd: u32, _arg: usize) -> KResult<usize> {
+        Err(KError::NotATty)
     }
 
     fn nonblocking(&self) -> bool {
         false
     }
 
-    fn set_nonblocking(&self, _nonblocking: bool) -> AxResult {
+    fn set_nonblocking(&self, _nonblocking: bool) -> KResult {
         Ok(())
     }
 
-    fn from_fd(fd: c_int) -> AxResult<Arc<Self>>
+    fn from_fd(fd: c_int) -> KResult<Arc<Self>>
     where
         Self: Sized + 'static,
     {
         get_file_like(fd)?
             .downcast_arc()
-            .map_err(|_| AxError::InvalidInput)
+            .map_err(|_| KError::InvalidInput)
     }
 
-    fn add_to_fd_table(self, cloexec: bool) -> AxResult<c_int>
+    fn add_to_fd_table(self, cloexec: bool) -> KResult<c_int>
     where
         Self: Sized + 'static,
     {
@@ -191,40 +191,40 @@ scope_local::scope_local! {
 }
 
 /// Get a file-like object by `fd`.
-pub fn get_file_like(fd: c_int) -> AxResult<Arc<dyn FileLike>> {
+pub fn get_file_like(fd: c_int) -> KResult<Arc<dyn FileLike>> {
     FD_TABLE
         .read()
         .get(fd as usize)
         .map(|fd| fd.inner.clone())
-        .ok_or(AxError::BadFileDescriptor)
+        .ok_or(KError::BadFileDescriptor)
 }
 
 /// Add a file to the file descriptor table.
-pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> AxResult<c_int> {
+pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> KResult<c_int> {
     let max_nofile = current().as_thread().proc_data.rlim.read()[RLIMIT_NOFILE].current;
     let mut table = FD_TABLE.write();
     if table.count() as u64 >= max_nofile {
-        return Err(AxError::TooManyOpenFiles);
+        return Err(KError::TooManyOpenFiles);
     }
     let fd = FileDescriptor { inner: f, cloexec };
-    Ok(table.add(fd).map_err(|_| AxError::TooManyOpenFiles)? as c_int)
+    Ok(table.add(fd).map_err(|_| KError::TooManyOpenFiles)? as c_int)
 }
 
 /// Close a file by `fd`.
-pub fn close_file_like(fd: c_int) -> AxResult {
+pub fn close_file_like(fd: c_int) -> KResult {
     let f = FD_TABLE
         .write()
         .remove(fd as usize)
-        .ok_or(AxError::BadFileDescriptor)?;
+        .ok_or(KError::BadFileDescriptor)?;
     debug!("close_file_like <= count: {}", Arc::strong_count(&f.inner));
     Ok(())
 }
 
-pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>) -> AxResult<()> {
+pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>) -> KResult<()> {
     assert_eq!(fd_table.count(), 0);
     let cx = FS_CONTEXT.lock();
     let open = |options: &mut OpenOptions| {
-        AxResult::Ok(Arc::new(File::new(
+        KResult::Ok(Arc::new(File::new(
             options.open(&cx, "/dev/console")?.into_file()?,
         )))
     };
@@ -236,19 +236,19 @@ pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }
             inner: tty_in,
             cloexec: false,
         })
-        .map_err(|_| AxError::TooManyOpenFiles)?;
+        .map_err(|_| KError::TooManyOpenFiles)?;
     fd_table
         .add(FileDescriptor {
             inner: tty_out.clone(),
             cloexec: false,
         })
-        .map_err(|_| AxError::TooManyOpenFiles)?;
+        .map_err(|_| KError::TooManyOpenFiles)?;
     fd_table
         .add(FileDescriptor {
             inner: tty_out,
             cloexec: false,
         })
-        .map_err(|_| AxError::TooManyOpenFiles)?;
+        .map_err(|_| KError::TooManyOpenFiles)?;
 
     Ok(())
 }

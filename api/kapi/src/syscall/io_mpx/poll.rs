@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kpoll::IoEvents;
 use ksignal::SignalSet;
@@ -20,7 +20,7 @@ fn do_poll(
     poll_fds: &mut [pollfd],
     timeout: Option<TimeValue>,
     sigmask: Option<SignalSet>,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     debug!("do_poll fds={poll_fds:?} timeout={timeout:?}");
 
     let mut res = 0isize;
@@ -35,7 +35,7 @@ fn do_poll(
             Ok(f) => {
                 fds.push((
                     f,
-                    IoEvents::from_bits(fd.events as _).ok_or(AxError::InvalidInput)?
+                    IoEvents::from_bits(fd.events as _).ok_or(KError::InvalidInput)?
                         | IoEvents::ALWAYS_POLL,
                 ));
                 revents.push(&mut fd.revents);
@@ -75,7 +75,7 @@ fn do_poll(
                 if res > 0 {
                     Ok(res as _)
                 } else {
-                    Err(AxError::WouldBlock)
+                    Err(KError::WouldBlock)
                 }
             }),
         )) {
@@ -86,7 +86,7 @@ fn do_poll(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> AxResult<isize> {
+pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
     let fds = fds.get_as_mut_slice(nfds as usize)?;
     let timeout = if timeout < 0 {
         None
@@ -102,9 +102,9 @@ pub fn sys_ppoll(
     timeout: UserConstPtr<timespec>,
     sigmask: UserConstPtr<SignalSet>,
     sigsetsize: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
-    let fds = fds.get_as_mut_slice(nfds.try_into().map_err(|_| AxError::InvalidInput)?)?;
+    let fds = fds.get_as_mut_slice(nfds.try_into().map_err(|_| KError::InvalidInput)?)?;
     let timeout = nullable!(timeout.get_as_ref())?
         .map(|ts| ts.try_into_time_value())
         .transpose()?;

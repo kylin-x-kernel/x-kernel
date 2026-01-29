@@ -1,5 +1,5 @@
-use kerrno::{AxError, AxResult};
 use kcore::task::{get_process_data, send_signal_to_process};
+use kerrno::{KError, KResult};
 use ksignal::SignalInfo;
 
 use crate::{
@@ -7,11 +7,11 @@ use crate::{
     syscall::signal::make_queue_signal_info,
 };
 
-pub fn sys_pidfd_open(pid: u32, flags: u32) -> AxResult<isize> {
+pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
     debug!("sys_pidfd_open <= pid: {pid}, flags: {flags}");
 
     if flags != 0 {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     let task = get_process_data(pid)?;
@@ -20,7 +20,7 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> AxResult<isize> {
     fd.add_to_fd_table(true).map(|fd| fd as _)
 }
 
-pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> AxResult<isize> {
+pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize> {
     debug!("sys_pidfd_getfd <= pidfd: {pidfd}, target_fd: {target_fd}, flags: {flags}");
 
     let pidfd = PidFd::from_fd(pidfd)?;
@@ -29,7 +29,7 @@ pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> AxResult<isize
         .scope(&proc_data.scope.read())
         .read()
         .get(target_fd as usize)
-        .ok_or(AxError::BadFileDescriptor)
+        .ok_or(KError::BadFileDescriptor)
         .and_then(|fd| {
             let fd = add_file_like(fd.inner.clone(), true)?;
             Ok(fd as isize)
@@ -41,9 +41,9 @@ pub fn sys_pidfd_send_signal(
     signo: u32,
     sig: *mut SignalInfo,
     flags: u32,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     if flags != 0 {
-        return Err(AxError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
 
     let pidfd = PidFd::from_fd(pidfd)?;

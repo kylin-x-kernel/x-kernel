@@ -1,22 +1,22 @@
-use kerrno::{AxError, AxResult};
 use kcore::task::AsThread;
+use kerrno::{KError, KResult};
 use ktask::current;
 
-pub fn sys_getpid() -> AxResult<isize> {
+pub fn sys_getpid() -> KResult<isize> {
     Ok(current().as_thread().proc_data.proc.pid() as _)
 }
 
-pub fn sys_getppid() -> AxResult<isize> {
+pub fn sys_getppid() -> KResult<isize> {
     current()
         .as_thread()
         .proc_data
         .proc
         .parent()
-        .ok_or(AxError::NoSuchProcess)
+        .ok_or(KError::NoSuchProcess)
         .map(|p| p.pid() as _)
 }
 
-pub fn sys_gettid() -> AxResult<isize> {
+pub fn sys_gettid() -> KResult<isize> {
     Ok(current().id().as_u64() as _)
 }
 
@@ -46,7 +46,7 @@ enum ArchPrctlCode {
 /// To set the clear_child_tid field in the task extended data.
 ///
 /// The set_tid_address() always succeeds
-pub fn sys_set_tid_address(clear_child_tid: usize) -> AxResult<isize> {
+pub fn sys_set_tid_address(clear_child_tid: usize) -> KResult<isize> {
     let curr = current();
     curr.as_thread().set_clear_child_tid(clear_child_tid);
     Ok(curr.id().as_u64() as isize)
@@ -57,10 +57,10 @@ pub fn sys_arch_prctl(
     uctx: &mut khal::uspace::UserContext,
     code: i32,
     addr: usize,
-) -> AxResult<isize> {
+) -> KResult<isize> {
     use osvm::VirtMutPtr;
 
-    let code = ArchPrctlCode::try_from(code).map_err(|_| AxError::InvalidInput)?;
+    let code = ArchPrctlCode::try_from(code).map_err(|_| KError::InvalidInput)?;
     debug!("sys_arch_prctl: code = {code:?}, addr = {addr:#x}");
 
     match code {
@@ -83,6 +83,6 @@ pub fn sys_arch_prctl(
             Ok(0)
         }
         ArchPrctlCode::GetCpuid => Ok(0),
-        ArchPrctlCode::SetCpuid => Err(kerrno::AxError::NoSuchDevice),
+        ArchPrctlCode::SetCpuid => Err(kerrno::KError::NoSuchDevice),
     }
 }

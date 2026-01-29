@@ -44,11 +44,11 @@ pub enum PtError {
 }
 
 #[cfg(feature = "kerrno")]
-impl From<PtError> for kerrno::AxError {
+impl From<PtError> for kerrno::KError {
     fn from(value: PtError) -> Self {
         match value {
-            PtError::NoMemory => kerrno::AxError::NoMemory,
-            _ => kerrno::AxError::InvalidInput,
+            PtError::NoMemory => kerrno::KError::NoMemory,
+            _ => kerrno::KError::InvalidInput,
         }
     }
 }

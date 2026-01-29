@@ -2,8 +2,8 @@
 use alloc::{vec, vec::Vec};
 use core::any::Any;
 
-use kerrno::{AxError, AxResult};
 use kcore::vfs::DeviceOps;
+use kerrno::{KError, KResult};
 use kplat_aarch64_crosvm_virt::fdt::dice_reg;
 use memaddr::VirtAddr;
 use rand_chacha::{
@@ -39,7 +39,7 @@ impl DiceNodeInfo<'static> {
         handover_ptr: usize,
         handover_size: usize,
         handover_out_size: usize,
-    ) -> AxResult<usize> {
+    ) -> KResult<usize> {
         let (cdi_attest, cdi_seal, chain) = self.parse_handover_data()?;
         let handover_out_size_ptr = handover_out_size as *mut usize;
         let len = cdi_attest.len() + cdi_seal.len() + chain.len();
@@ -49,7 +49,7 @@ impl DiceNodeInfo<'static> {
         };
 
         if handover_size < len {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         // 安全写入输出缓冲区
@@ -65,18 +65,18 @@ impl DiceNodeInfo<'static> {
         Ok(len)
     }
 
-    fn parse_handover_data(&self) -> AxResult<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    fn parse_handover_data(&self) -> KResult<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         use dice::{dice_main_flow_chain_codehash, dice_parse_handover};
 
         let (addr, size) = self.regions;
 
         let handover_data = if size > MAX_DICE_DATA_SIZE || size == 0 {
-            return Err(AxError::InvalidInput);
+            return Err(KError::InvalidInput);
         } else {
             let mut buffer = Vec::new();
             buffer
                 .try_reserve_exact(size)
-                .map_err(|_| AxError::NoMemory)?;
+                .map_err(|_| KError::NoMemory)?;
 
             unsafe {
                 buffer.set_len(size);
@@ -92,30 +92,30 @@ impl DiceNodeInfo<'static> {
         let mut handover_buf = vec![0u8; size as usize];
         let hash: Vec<u8> = get_process_hash()?;
         let handover = dice_main_flow_chain_codehash(&handover_data, &hash, &mut handover_buf)
-            .map_err(|_| AxError::InvalidInput)?;
+            .map_err(|_| KError::InvalidInput)?;
         let (cdi_attest, cdi_seal, chain) =
-            dice_parse_handover(&handover).map_err(|_| AxError::InvalidInput)?;
+            dice_parse_handover(&handover).map_err(|_| KError::InvalidInput)?;
 
         Ok((cdi_attest.to_vec(), cdi_seal.to_vec(), chain.to_vec()))
     }
 }
 
 impl DeviceOps for DiceNodeInfo<'static> {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> AxResult<usize> {
+    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> KResult<usize> {
         unreachable!()
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> AxResult<usize> {
+    fn write_at(&self, _buf: &[u8], _offset: u64) -> KResult<usize> {
         unreachable!()
     }
 
-    fn ioctl(&self, cmd: u32, arg: usize) -> AxResult<usize> {
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
         if cmd == 0x90007A00 {
             let ptr = arg as *const usize;
             let handover = unsafe { core::slice::from_raw_parts_mut(ptr as *mut usize, 3) };
             return self.sys_dice_get_handover(handover[0], handover[1], handover[2]);
         }
-        Err(AxError::InvalidInput)
+        Err(KError::InvalidInput)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -123,7 +123,7 @@ impl DeviceOps for DiceNodeInfo<'static> {
     }
 }
 
-fn get_process_hash() -> AxResult<Vec<u8>> {
+fn get_process_hash() -> KResult<Vec<u8>> {
     use alloc::format;
 
     use kfs::FS_CONTEXT;
@@ -136,8 +136,8 @@ fn get_process_hash() -> AxResult<Vec<u8>> {
     let data = fs.read(proc_exe_path).unwrap();
 
     let mut sm3_result = vec![0u8; 32];
-    let mut ctx = Md::new(Type::SM3).map_err(|_| AxError::InvalidInput)?;
-    ctx.update(&data).map_err(|_| AxError::InvalidInput)?;
+    let mut ctx = Md::new(Type::SM3).map_err(|_| KError::InvalidInput)?;
+    ctx.update(&data).map_err(|_| KError::InvalidInput)?;
     let _len = ctx.finish(&mut sm3_result);
 
     info!("resm3_resultsult: {:x?}", sm3_result);

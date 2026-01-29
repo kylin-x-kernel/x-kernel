@@ -1,7 +1,7 @@
 //! Memory mapping backends.
 use alloc::{boxed::Box, sync::Arc};
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use enum_dispatch::enum_dispatch;
 use kalloc::{UsageKind, global_allocator};
 use khal::{
@@ -26,7 +26,7 @@ fn divide_page(size: usize, page_size: PageSize) -> usize {
     size >> (page_size as usize).trailing_zeros()
 }
 
-fn alloc_frame(zeroed: bool, size: PageSize) -> AxResult<PhysAddr> {
+fn alloc_frame(zeroed: bool, size: PageSize) -> KResult<PhysAddr> {
     let page_size = size as usize;
     let num_pages = page_size / PAGE_SIZE_4K;
     let vaddr =
@@ -46,8 +46,8 @@ fn dealloc_frame(frame: PhysAddr, align: PageSize) {
     global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
 }
 
-fn pages_in(range: VirtAddrRange, align: PageSize) -> AxResult<DynPageIter<VirtAddr>> {
-    DynPageIter::new(range.start, range.end, align as usize).ok_or(AxError::InvalidInput)
+fn pages_in(range: VirtAddrRange, align: PageSize) -> KResult<DynPageIter<VirtAddr>> {
+    DynPageIter::new(range.start, range.end, align as usize).ok_or(KError::InvalidInput)
 }
 
 #[enum_dispatch]
@@ -56,10 +56,10 @@ pub trait BackendOps {
     fn page_size(&self) -> PageSize;
 
     /// Map a memory region.
-    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pt: &mut PageTableMut) -> AxResult;
+    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pt: &mut PageTableMut) -> KResult;
 
     /// Unmap a memory region.
-    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> AxResult;
+    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> KResult;
 
     /// Called before a memory region is protected.
     fn on_protect(
@@ -67,7 +67,7 @@ pub trait BackendOps {
         _range: VirtAddrRange,
         _new_flags: MappingFlags,
         _pt: &mut PageTableMut,
-    ) -> AxResult {
+    ) -> KResult {
         Ok(())
     }
 
@@ -99,11 +99,11 @@ pub trait BackendOps {
         old_pt: &mut PageTableMut,
         new_pt: &mut PageTableMut,
         new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> AxResult<Backend>;
+    ) -> KResult<Backend>;
 }
 
 type PopulateHook = Box<dyn FnOnce(&mut AddrSpace)>;
-type PopulateResult = AxResult<(usize, Option<PopulateHook>)>;
+type PopulateResult = KResult<(usize, Option<PopulateHook>)>;
 
 /// A unified enum type for different memory mapping backends.
 #[derive(Clone)]

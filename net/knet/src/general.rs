@@ -4,7 +4,7 @@ use core::{
     time::Duration,
 };
 
-use kerrno::AxResult;
+use kerrno::KResult;
 use kpoll::{IoEvents, Pollable};
 use ktask::future::{block_on, poll_io, timeout};
 
@@ -73,22 +73,22 @@ impl GeneralOptions {
         SERVICE.lock().register_rx_waker(self.device_mask(), waker);
     }
 
-    pub fn send_poller<P: Pollable, F: FnMut() -> AxResult<T>, T>(
+    pub fn send_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
         f: F,
-    ) -> AxResult<T> {
+    ) -> KResult<T> {
         block_on(timeout(
             self.send_timeout(),
             poll_io(pollable, IoEvents::OUT, self.nonblocking(), f),
         ))?
     }
 
-    pub fn recv_poller<P: Pollable, F: FnMut() -> AxResult<T>, T>(
+    pub fn recv_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
         f: F,
-    ) -> AxResult<T> {
+    ) -> KResult<T> {
         block_on(timeout(
             self.recv_timeout(),
             poll_io(pollable, IoEvents::IN, self.nonblocking(), f),
@@ -96,7 +96,7 @@ impl GeneralOptions {
     }
 }
 impl Configurable for GeneralOptions {
-    fn get_option_inner(&self, option: &mut GetSocketOption) -> AxResult<bool> {
+    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<bool> {
         use GetSocketOption as O;
         match option {
             O::Error(error) => {
@@ -120,7 +120,7 @@ impl Configurable for GeneralOptions {
         Ok(true)
     }
 
-    fn set_option_inner(&self, option: SetSocketOption) -> AxResult<bool> {
+    fn set_option_inner(&self, option: SetSocketOption) -> KResult<bool> {
         use SetSocketOption as O;
 
         match option {

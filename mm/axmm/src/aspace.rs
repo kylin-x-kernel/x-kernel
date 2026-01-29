@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::{fmt, ops::DerefMut};
 
-use kerrno::{AxError, AxResult, ax_bail};
+use kerrno::{KError, KResult, k_bail};
 use khal::{
     mem::p2v,
     paging::{MappingFlags, PageTable},
@@ -59,11 +59,11 @@ impl AddrSpace {
     }
 
     /// Creates a new empty address space.
-    pub fn new_empty(base: VirtAddr, size: usize) -> AxResult<Self> {
+    pub fn new_empty(base: VirtAddr, size: usize) -> KResult<Self> {
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
-            pt: PageTable::try_new().map_err(|_| AxError::NoMemory)?,
+            pt: PageTable::try_new().map_err(|_| KError::NoMemory)?,
         })
     }
 
@@ -75,19 +75,19 @@ impl AddrSpace {
     ///
     /// Returns an error if the two address spaces overlap.
     #[cfg(feature = "copy")]
-    pub fn copy_mappings_from(&mut self, other: &AddrSpace) -> AxResult {
+    pub fn copy_mappings_from(&mut self, other: &AddrSpace) -> KResult {
         self.pt
             .modify()
             .copy_from(&other.pt, other.base(), other.size());
         Ok(())
     }
 
-    fn validate_region(&self, start: VirtAddr, size: usize) -> AxResult {
+    fn validate_region(&self, start: VirtAddr, size: usize) -> KResult {
         if !self.contains_range(start, size) {
-            ax_bail!(NoMemory, "address out of range");
+            k_bail!(NoMemory, "address out of range");
         }
         if !start.is_aligned_4k() || !is_aligned_4k(size) {
-            ax_bail!(InvalidInput, "address is not aligned");
+            k_bail!(InvalidInput, "address is not aligned");
         }
         Ok(())
     }
@@ -127,11 +127,11 @@ impl AddrSpace {
         start_paddr: PhysAddr,
         size: usize,
         flags: MappingFlags,
-    ) -> AxResult {
+    ) -> KResult {
         self.validate_region(start_vaddr, size)?;
 
         if !start_paddr.is_aligned_4k() {
-            ax_bail!(InvalidInput, "address is not aligned");
+            k_bail!(InvalidInput, "address is not aligned");
         }
 
         let offset = start_vaddr.as_usize() as isize - start_paddr.as_usize() as isize;
@@ -147,7 +147,7 @@ impl AddrSpace {
         flags: MappingFlags,
         populate: bool,
         backend: Backend,
-    ) -> AxResult {
+    ) -> KResult {
         self.validate_region(start, size)?;
 
         let area = MemoryArea::new(start, size, flags, backend);
@@ -165,7 +165,7 @@ impl AddrSpace {
         mut start: VirtAddr,
         size: usize,
         access_flags: MappingFlags,
-    ) -> AxResult {
+    ) -> KResult {
         self.validate_region(start, size)?;
         let end = start + size;
 
@@ -183,7 +183,7 @@ impl AddrSpace {
 
         if start < end {
             // If the area is not fully mapped, we return ENOMEM.
-            ax_bail!(NoMemory);
+            k_bail!(NoMemory);
         }
 
         Ok(())
@@ -193,7 +193,7 @@ impl AddrSpace {
     ///
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
-    pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AxResult {
+    pub fn unmap(&mut self, start: VirtAddr, size: usize) -> KResult {
         self.validate_region(start, size)?;
 
         self.areas.unmap(start, size, &mut self.pt)?;
@@ -203,12 +203,12 @@ impl AddrSpace {
     /// To process data in this area with the given function.
     ///
     /// Now it supports reading and writing data in the given interval.
-    fn process_area_data<F>(&self, start: VirtAddr, size: usize, mut f: F) -> AxResult
+    fn process_area_data<F>(&self, start: VirtAddr, size: usize, mut f: F) -> KResult
     where
         F: FnMut(VirtAddr, usize, usize),
     {
         if !self.contains_range(start, size) {
-            ax_bail!(InvalidInput, "address out of range");
+            k_bail!(InvalidInput, "address out of range");
         }
         let mut cnt = 0;
         // If start is aligned to 4K, start_align_down will be equal to start_align_up.
@@ -216,7 +216,7 @@ impl AddrSpace {
         for vaddr in PageIter4K::new(start.align_down_4k(), end_align_up)
             .expect("Failed to create page iterator")
         {
-            let (mut paddr, ..) = self.pt.query(vaddr).map_err(|_| AxError::BadAddress)?;
+            let (mut paddr, ..) = self.pt.query(vaddr).map_err(|_| KError::BadAddress)?;
 
             let mut copy_size = (size - cnt).min(PAGE_SIZE_4K);
 
@@ -240,7 +240,7 @@ impl AddrSpace {
     ///
     /// * `start` - The start virtual address to read.
     /// * `buf` - The buffer to store the data.
-    pub fn read(&self, start: VirtAddr, buf: &mut [u8]) -> AxResult {
+    pub fn read(&self, start: VirtAddr, buf: &mut [u8]) -> KResult {
         self.process_area_data(start, buf.len(), |src, offset, read_size| unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr().add(offset), read_size);
         })
@@ -252,7 +252,7 @@ impl AddrSpace {
     ///
     /// * `start_vaddr` - The start virtual address to write.
     /// * `buf` - The buffer to write to the address space.
-    pub fn write(&self, start: VirtAddr, buf: &[u8]) -> AxResult {
+    pub fn write(&self, start: VirtAddr, buf: &[u8]) -> KResult {
         self.process_area_data(start, buf.len(), |dst, offset, write_size| unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), dst.as_mut_ptr(), write_size);
         })
@@ -262,7 +262,7 @@ impl AddrSpace {
     ///
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
-    pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> AxResult {
+    pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> KResult {
         self.validate_region(start, size)?;
 
         self.areas
@@ -362,7 +362,7 @@ impl AddrSpace {
     /// This method creates a new empty address space with the same base and
     /// size, then iterates over all memory areas in the original address
     /// space to copy or share their mappings into the new one.
-    pub fn try_clone(&mut self) -> AxResult<Arc<Mutex<Self>>> {
+    pub fn try_clone(&mut self) -> KResult<Arc<Mutex<Self>>> {
         let new_aspace = Arc::new(Mutex::new(Self::new_empty(self.base(), self.size())?));
         let new_aspace_clone = new_aspace.clone();
 

@@ -18,12 +18,12 @@ pub enum MemorySetError {
     BadState,
 }
 
-impl From<MemorySetError> for kerrno::AxError {
+impl From<MemorySetError> for kerrno::KError {
     fn from(err: MemorySetError) -> Self {
         match err {
-            MemorySetError::InvalidParam => kerrno::AxError::InvalidInput,
-            MemorySetError::AlreadyExists => kerrno::AxError::AlreadyExists,
-            MemorySetError::BadState => kerrno::AxError::BadState,
+            MemorySetError::InvalidParam => kerrno::KError::InvalidInput,
+            MemorySetError::AlreadyExists => kerrno::KError::AlreadyExists,
+            MemorySetError::BadState => kerrno::KError::BadState,
         }
     }
 }

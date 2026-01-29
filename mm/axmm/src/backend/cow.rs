@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::slice;
 
-use kerrno::{AxError, AxResult};
+use kerrno::{KError, KResult};
 use kfs::FileBackend;
 use khal::{
     mem::p2v,
@@ -85,7 +85,7 @@ pub struct CowBackend {
 }
 
 impl CowBackend {
-    fn alloc_new_frame(&self, zeroed: bool) -> AxResult<PhysAddr> {
+    fn alloc_new_frame(&self, zeroed: bool) -> KResult<PhysAddr> {
         let frame = alloc_frame(zeroed, self.size)?;
         FRAME_TABLE.lock().init_frame(frame);
         Ok(frame)
@@ -96,7 +96,7 @@ impl CowBackend {
         vaddr: VirtAddr,
         flags: MappingFlags,
         pt: &mut PageTableMut,
-    ) -> AxResult {
+    ) -> KResult {
         let frame = self.alloc_new_frame(true)?;
 
         if let Some((file, file_start, file_end)) = &self.file {
@@ -124,11 +124,11 @@ impl CowBackend {
         paddr: PhysAddr,
         flags: MappingFlags,
         pt: &mut PageTableMut,
-    ) -> AxResult {
+    ) -> KResult {
         let mut frame_table = FRAME_TABLE.lock();
         let frame = frame_table
             .get_frame_ref(paddr)
-            .ok_or(AxError::BadAddress)?;
+            .ok_or(KError::BadAddress)?;
         drop(frame_table);
         let mut frame = frame.lock();
         assert!(frame.0 > 0, "invalid frame reference count");
@@ -162,12 +162,12 @@ impl BackendOps for CowBackend {
         self.size
     }
 
-    fn map(&self, range: VirtAddrRange, flags: MappingFlags, _pt: &mut PageTableMut) -> AxResult {
+    fn map(&self, range: VirtAddrRange, flags: MappingFlags, _pt: &mut PageTableMut) -> KResult {
         debug!("Cow::map: {range:?} {flags:?}",);
         Ok(())
     }
 
-    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> AxResult {
+    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> KResult {
         debug!("Cow::unmap: {range:?}");
         for addr in pages_in(range, self.size)? {
             if let Ok((frame, _flags, page_size)) = pt.unmap(addr) {
@@ -175,7 +175,7 @@ impl BackendOps for CowBackend {
                 let frame_ref = FRAME_TABLE
                     .lock()
                     .get_frame_ref(frame)
-                    .ok_or(AxError::BadAddress)?;
+                    .ok_or(KError::BadAddress)?;
                 let mut frame_ref = frame_ref.lock();
                 frame_ref.drop_frame(frame, self.size);
             } else {
@@ -191,7 +191,7 @@ impl BackendOps for CowBackend {
         flags: MappingFlags,
         access_flags: MappingFlags,
         pt: &mut PageTableMut,
-    ) -> AxResult<(usize, Option<Box<dyn FnOnce(&mut AddrSpace)>>)> {
+    ) -> KResult<(usize, Option<Box<dyn FnOnce(&mut AddrSpace)>>)> {
         let mut pages = 0;
         for addr in pages_in(range, self.size)? {
             match pt.query(addr) {
@@ -211,7 +211,7 @@ impl BackendOps for CowBackend {
                     self.alloc_new_at(addr, flags, pt)?;
                     pages += 1;
                 }
-                Err(_) => return Err(AxError::BadAddress),
+                Err(_) => return Err(KError::BadAddress),
             }
         }
         Ok((pages, None))
@@ -224,7 +224,7 @@ impl BackendOps for CowBackend {
         old_pt: &mut PageTableMut,
         new_pt: &mut PageTableMut,
         _new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> AxResult<Backend> {
+    ) -> KResult<Backend> {
         let cow_flags = flags - MappingFlags::WRITE;
 
         for vaddr in pages_in(range, self.size)? {
@@ -239,20 +239,20 @@ impl BackendOps for CowBackend {
                     let frame = FRAME_TABLE
                         .lock()
                         .get_frame_ref(paddr)
-                        .ok_or(AxError::BadAddress)?;
+                        .ok_or(KError::BadAddress)?;
                     let mut frame = frame.lock();
                     assert!(frame.0 > 0, "referencing unreferenced frame");
                     frame.0 += 1;
                     if frame.0 == u8::MAX {
                         warn!("frame reference count overflow");
-                        return Err(AxError::BadAddress);
+                        return Err(KError::BadAddress);
                     }
                     old_pt.protect(vaddr, cow_flags)?;
                     new_pt.map(vaddr, paddr, self.size, cow_flags)?;
                 }
                 // If the page is not mapped, skip it.
                 Err(PagingError::NotMapped) => {}
-                Err(_) => return Err(AxError::BadAddress),
+                Err(_) => return Err(KError::BadAddress),
             };
         }
 

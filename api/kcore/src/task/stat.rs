@@ -1,6 +1,6 @@
 use alloc::{borrow::ToOwned, fmt, string::String};
 
-use kerrno::AxResult;
+use kerrno::KResult;
 use ksignal::Signo;
 use ktask::{TaskInner, TaskState};
 
@@ -68,7 +68,7 @@ pub struct TaskStat {
 
 impl TaskStat {
     /// Create a new [`TaskStat`] from a [`KtaskRef`].
-    pub fn from_thread(task: &TaskInner) -> AxResult<Self> {
+    pub fn from_thread(task: &TaskInner) -> KResult<Self> {
         let thread = task.as_thread();
         let proc_data = &thread.proc_data;
         let proc = &proc_data.proc;

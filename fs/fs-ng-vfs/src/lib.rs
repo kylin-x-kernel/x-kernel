@@ -13,7 +13,7 @@ pub use mount::*;
 pub use node::*;
 pub use types::*;
 
-pub type VfsError = kerrno::AxError;
+pub type VfsError = kerrno::KError;
 pub type VfsResult<T> = Result<T, VfsError>;
 
 use spin::{Mutex, MutexGuard};

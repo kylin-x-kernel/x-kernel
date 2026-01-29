@@ -6,8 +6,8 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use kerrno::{AxError, AxResult};
 use kcore::task::send_signal_to_process_group;
+use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::SignalInfo;
 use ktask::future::{block_on, poll_io};
@@ -325,14 +325,14 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         }
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> AxResult<usize> {
+    pub fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
         if matches!(self.processor, Processor::None(_, _)) {
             let read = self.buf_rx.pop_slice(buf);
             return if read == 0 {
-                Err(AxError::WouldBlock)
+                Err(KError::WouldBlock)
             } else {
                 Ok(read)
             };
@@ -350,7 +350,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         };
 
         if buf.len() < vmin {
-            return Err(AxError::WouldBlock);
+            return Err(KError::WouldBlock);
         }
 
         let mut total_read = 0;
@@ -365,7 +365,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
             self.poll_tx.wake();
             (total_read >= vmin)
                 .then_some(total_read)
-                .ok_or(AxError::WouldBlock)
+                .ok_or(KError::WouldBlock)
         }))
     }
 }

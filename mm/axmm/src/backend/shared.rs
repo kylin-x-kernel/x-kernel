@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Deref;
 
-use kerrno::AxResult;
+use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize, PageTableMut};
 use ksync::Mutex;
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
@@ -17,11 +17,11 @@ pub struct SharedPages {
     pub size: PageSize,
 }
 impl SharedPages {
-    pub fn new(size: usize, page_size: PageSize) -> AxResult<Self> {
+    pub fn new(size: usize, page_size: PageSize) -> KResult<Self> {
         Ok(Self {
             phys_pages: (0..divide_page(size, page_size))
                 .map(|_| alloc_frame(true, page_size))
-                .collect::<AxResult<_>>()?,
+                .collect::<KResult<_>>()?,
             size: page_size,
         })
     }
@@ -74,7 +74,7 @@ impl BackendOps for SharedBackend {
         self.pages.size
     }
 
-    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pt: &mut PageTableMut) -> AxResult {
+    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pt: &mut PageTableMut) -> KResult {
         debug!("Shared::map: {:?} {:?}", range, flags);
         for (vaddr, paddr) in
             pages_in(range, self.pages.size)?.zip(self.pages_starting_from(range.start))
@@ -84,7 +84,7 @@ impl BackendOps for SharedBackend {
         Ok(())
     }
 
-    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> AxResult {
+    fn unmap(&self, range: VirtAddrRange, pt: &mut PageTableMut) -> KResult {
         debug!("Shared::unmap: {:?}", range);
         for vaddr in pages_in(range, self.pages.size)? {
             pt.unmap(vaddr)?;
@@ -99,7 +99,7 @@ impl BackendOps for SharedBackend {
         _old_pt: &mut PageTableMut,
         _new_pt: &mut PageTableMut,
         _new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> AxResult<Backend> {
+    ) -> KResult<Backend> {
         Ok(Backend::Shared(self.clone()))
     }
 }

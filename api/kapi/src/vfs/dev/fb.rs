@@ -1,10 +1,10 @@
 use core::{any::Any, slice};
 
-use kerrno::AxError;
 use fs_ng_vfs::{NodeFlags, VfsError, VfsResult};
 use kcore::vfs::{DeviceMmap, DeviceOps};
 #[allow(unused_imports)]
 use kdriver::prelude::DisplayDriverOps;
+use kerrno::KError;
 use khal::mem::v2p;
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
@@ -214,10 +214,10 @@ impl DeviceOps for FrameBuffer {
             // FBIOPUTCMAP
             0x4605 => Ok(0),
             // FBIOPAN_DISPLAY
-            0x4606 => Err(AxError::InvalidInput),
+            0x4606 => Err(KError::InvalidInput),
             // FBIOBLANK
-            0x4611 => Err(AxError::InvalidInput),
-            _ => Err(AxError::NotATty),
+            0x4611 => Err(KError::InvalidInput),
+            _ => Err(KError::NotATty),
         }
     }
 
