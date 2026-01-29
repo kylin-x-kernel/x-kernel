@@ -1,9 +1,8 @@
 # Available arguments:
 # * General options:
 #     - `ARCH`: Target architecture: x86_64, riscv64, aarch64, loongarch64
-#     - `MYPLAT`: Package name of the target platform crate.
+#     - `PLAT`: Package name of the target platform crate.
 #     - `PLAT_CONFIG`: Path to the platform configuration file.
-#     - `SMP`: Number of CPUs. If not set, use the default value from platform config.
 #     - `MODE`: Build mode: release, debug
 #     - `LOG:` Logging level: warn, error, info, debug, trace
 #     - `V`: Verbose level: (empty), 1, 2
@@ -33,12 +32,13 @@
 #     - `IP`: IPv4 address (default is 10.0.2.15 for QEMU user netdev)
 #     - `GW`: Gateway IPv4 address (default is 10.0.2.2 for QEMU user netdev)
 
+# Enable unstable features
+export RUSTC_BOOTSTRAP := 1
 export DWARF := y
 # General options
 ARCH ?= aarch64
-MYPLAT ?=
+PLAT ?= $(ARCH)-qemu-virt
 PLAT_CONFIG ?=
-SMP ?=
 MODE ?= release
 LOG ?= warn
 V ?=
@@ -53,17 +53,16 @@ A := $(PWD)/entry
 APP ?= $(A)
 FEATURES ?=
 APP_FEATURES ?=
-NO_AXSTD ?= y
 
 # QEMU options
 BLK ?= y
-NET ?= n
+NET ?= y
 GRAPHIC ?= n
-INPUT ?= n
-VSOCK ?= n
+INPUT ?= y
+VSOCK ?= y
 BUS ?= pci
 MEM ?= 1g
-ACCEL ?=
+ACCEL ?= y
 ICOUNT ?= n
 QEMU_ARGS ?=
 
@@ -78,7 +77,6 @@ VHOST ?= n
 IP ?= 10.0.2.15
 GW ?= 10.0.2.2
 
-export RUSTC_BOOTSTRAP := 1
 export MEMTRACK := n
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += kapi/memtrack
@@ -87,14 +85,6 @@ endif
 # App type
 ifeq ($(wildcard $(APP)),)
   $(error Application path "$(APP)" is not valid)
-endif
-
-ifneq ($(wildcard $(APP)/Cargo.toml),)
-  APP_TYPE := rust
-  AX_LIB ?= kfeat
-else
-  APP_TYPE := c
-  AX_LIB ?= axlibc
 endif
 
 .DEFAULT_GOAL := all
@@ -123,13 +113,12 @@ else
   $(error "ARCH" must be one of "x86_64", "riscv64", "aarch64" or "loongarch64")
 endif
 
-export AX_ARCH=$(ARCH)
-export AX_PLATFORM=$(PLAT_NAME)
-export AX_MODE=$(MODE)
-export AX_LOG=$(LOG)
-export AX_TARGET=$(TARGET)
-export AX_IP=$(IP)
-export AX_GW=$(GW)
+export K_ARCH=$(ARCH)
+export K_MODE=$(MODE)
+export K_LOG=$(LOG)
+export K_TARGET=$(TARGET)
+export K_IP=$(IP)
+export K_GW=$(GW)
 
 ifneq ($(filter $(MAKECMDGOALS),unittest unittest_no_fail_fast clippy doc doc_check_missing),)
   # When running unit tests or other tests unrelated to a specific platform,

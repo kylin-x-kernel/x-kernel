@@ -24,13 +24,6 @@ uspace = ["khal/uspace"]
 # Interrupts
 ipi = [ "dep:kipi", "khal/ipi", "kruntime/ipi"]
 
-# Custom or default platforms
-myplat = ["khal/myplat"]
-defplat = ["khal/defplat"]
-defplat-aarch64 = ["khal/defplat-aarch64"]
-defplat-x86_64 = ["khal/defplat-x86_64"]
-defplat-riscv64 = ["khal/defplat-riscv64"]
-defplat-loongarch64 = ["khal/defplat-loongarch64"]
 crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 
 # Memory

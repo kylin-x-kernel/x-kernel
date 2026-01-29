@@ -123,9 +123,9 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         "},
         platconfig::ARCH,
         platconfig::PLATFORM,
-        option_env!("AX_TARGET").unwrap_or(""),
-        option_env!("AX_MODE").unwrap_or(""),
-        option_env!("AX_LOG").unwrap_or(""),
+        option_env!("K_TARGET").unwrap_or(""),
+        option_env!("K_MODE").unwrap_or(""),
+        option_env!("K_LOG").unwrap_or(""),
         backtrace::is_enabled(),
         platconfig::plat::CPU_NUM,
     );
@@ -136,7 +136,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     );
 
     klogger::init_klogger();
-    klogger::set_log_level(option_env!("AX_LOG").unwrap_or("")); // no effect if set `log-level-*` features
+    klogger::set_log_level(option_env!("K_LOG").unwrap_or("")); // no effect if set `log-level-*` features
     info!("Logging is enabled.");
     info!("Primary CPU {cpu_id} started, arg = {arg:#x}.");
 

@@ -17,18 +17,7 @@ categories = ["os", "no-std"]
 
 [workspace.dependencies]
 # x-kernel Modules
-kfeat = { path = "api/kfeat", features = [
-    "alloc-slab",
-    "fp-simd",
-    "fs-ext4",
-    "net",
-    "page-alloc-4g",
-    "rtc",
-    "sched-rr",
-    "task-ext",
-    "uspace",
-] }
-
+kfeat = { path = "api/kfeat" }
 kruntime = { path = "init/kruntime" }
 kalloc = { path = "mm/kalloc" }
 fbdevice = { path = "io/fbdevice" }
@@ -66,7 +55,7 @@ osvm = { path = "process/osvm" }
 kplat = { path = "platforms/kplat" }
 kplat-macros = { path = "platforms/kplat-macros" }
 aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
-x86-pc = { path = "platforms/x86-pc" }
+x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 x86-csv = { path = "platforms/x86-csv" }
 riscv64-qemu-virt = { path = "platforms/riscv64-qemu-virt" }
 loongarch64-qemu-virt = { path = "platforms/loongarch64-qemu-virt" }

@@ -10,48 +10,17 @@ documentation.workspace = true
 description = "Hardware abstraction layer, provides unified APIs for platform-specific operations"
 
 [features]
-smp = [
-    "x86-pc?/smp",
-    "aarch64-qemu-virt?/smp",
-    "riscv64-qemu-virt?/smp",
-    "loongarch64-qemu-virt?/smp",
-    "kplat/smp",
-]
-
-fp-simd = [
-    "kcpu/fp-simd",
-    "x86-pc?/fp-simd",
-    "aarch64-qemu-virt?/fp-simd",
-    "riscv64-qemu-virt?/fp-simd",
-    "loongarch64-qemu-virt?/fp-simd",
-]
-rtc = [
-    "x86-pc?/rtc",
-    "aarch64-qemu-virt?/rtc",
-    "riscv64-qemu-virt?/rtc",
-    "loongarch64-qemu-virt?/rtc",
-]
-nmi = ["kplat/nmi", "aarch64-qemu-virt?/nmi"]
-pmu = ["aarch64-qemu-virt?/pmu"]
+default = []
+smp = ["kplat/smp",]
+fp-simd = ["kcpu/fp-simd",]
+rtc = []
+nmi = ["kplat/nmi"]
+pmu = []
 paging = ["dep:kalloc", "dep:page_table"]
 tls = ["kcpu/tls"]
 uspace = ["paging", "kcpu/uspace"]
-
-# Custom or default platforms
-myplat = []
-defplat = [
-    "dep:x86-pc",
-    "dep:aarch64-qemu-virt",
-    "dep:riscv64-qemu-virt",
-    "dep:loongarch64-qemu-virt",
-]
-defplat-aarch64 = ["dep:aarch64-qemu-virt"]
-defplat-x86_64 = ["dep:x86-pc"]
-defplat-riscv64 = ["dep:riscv64-qemu-virt"]
-defplat-loongarch64 = ["dep:loongarch64-qemu-virt"]
 crosvm = []
 
-default = []
 ipi = []
 irq = []
 
@@ -71,17 +40,6 @@ page_table = { workspace = true, optional = true }
 percpu.workspace = true
 fdt-parser = "0.4"
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-x86-pc = { workspace = true, optional = true }
-
-[target.'cfg(target_arch = "aarch64")'.dependencies]
-aarch64-qemu-virt = { workspace = true, optional = true }
-
-[target.'cfg(target_arch = "riscv64")'.dependencies]
-riscv64-qemu-virt = { workspace = true, optional = true }
-
-[target.'cfg(target_arch = "loongarch64")'.dependencies]
-loongarch64-qemu-virt = { workspace = true, optional = true }
 
 [build-dependencies]
 platconfig.workspace = true

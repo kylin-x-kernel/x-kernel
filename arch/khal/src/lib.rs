@@ -41,23 +41,7 @@ extern crate log;
 #[macro_use]
 extern crate memaddr;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "myplat")] {
-        // link the custom platform crate in your application.
-    } else if #[cfg(all(target_os = "none", feature = "defplat"))] {
-        #[cfg(target_arch = "x86_64")]
-        extern crate x86_pc;
-        #[cfg(target_arch = "aarch64")]
-        extern crate aarch64_qemu_virt;
-        #[cfg(target_arch = "riscv64")]
-        extern crate riscv64_qemu_virt;
-        #[cfg(target_arch = "loongarch64")]
-        extern crate loongarch64_qemu_virt;
-    } else {
-        // Link the dummy platform implementation to pass cargo test.
-        mod dummy;
-    }
-}
+//mod dummy;
 
 pub mod dtb;
 pub mod mem;

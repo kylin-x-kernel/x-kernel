@@ -7,8 +7,8 @@ macro_rules! env_or_default {
     };
 }
 
-pub const IP: &str = env_or_default!("AX_IP");
-pub const GATEWAY: &str = env_or_default!("AX_GW");
+pub const IP: &str = env_or_default!("K_IP");
+pub const GATEWAY: &str = env_or_default!("K_GW");
 pub const IP_PREFIX: u8 = 24;
 
 pub const STANDARD_MTU: usize = 1500;

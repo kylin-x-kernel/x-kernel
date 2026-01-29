@@ -2,12 +2,8 @@
 
 include scripts/make/cargo.mk
 
-ifeq ($(APP_TYPE), c)
-  include scripts/make/build_c.mk
-else
-  rust_package := $(shell cat $(APP)/Cargo.toml | sed -n 's/^name = "\([a-z0-9A-Z_\-]*\)"/\1/p')
-  rust_elf := $(TARGET_DIR)/$(TARGET)/$(MODE)/$(rust_package)
-endif
+rust_package := $(shell cat $(APP)/Cargo.toml | sed -n 's/^name = "\([a-z0-9A-Z_\-]*\)"/\1/p')
+rust_elf := $(TARGET_DIR)/$(TARGET)/$(MODE)/$(rust_package)
 
 ifneq ($(filter $(MAKECMDGOALS),doc doc_check_missing),)
   # run `make doc`
@@ -22,18 +18,12 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
   # run `make build` and other above goals
   ifneq ($(V),)
     $(info APP: "$(APP)")
-    $(info APP_TYPE: "$(APP_TYPE)")
     $(info FEATURES: "$(FEATURES)")
     $(info PLAT_CONFIG: "$(PLAT_CONFIG)")
-    $(info arceos features: "$(KFEAT)")
-    $(info lib features: "$(LIB_FEAT)")
+    $(info x-kernel features: "$(KFEAT)")
     $(info app features: "$(APP_FEAT)")
   endif
-  ifeq ($(APP_TYPE), c)
-    $(if $(V), $(info CFLAGS: "$(CFLAGS)") $(info LDFLAGS: "$(LDFLAGS)"))
-  else ifeq ($(APP_TYPE), rust)
     RUSTFLAGS += $(RUSTFLAGS_LINK_ARGS)
-  endif
   ifeq ($(DWARF), y)
     RUSTFLAGS += -C force-frame-pointers -C debuginfo=2 -C strip=none
   endif
@@ -46,13 +36,9 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
 endif
 
 _cargo_build: oldconfig
-	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME), App type: $(APP_TYPE)\n"
-ifeq ($(APP_TYPE), rust)
-	$(call cargo_build,$(APP),$(KFEAT) $(LIB_FEAT) $(APP_FEAT))
+	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME)\n"
+	$(call cargo_build,$(APP),$(KFEAT) $(APP_FEAT))
 	@cp $(rust_elf) $(OUT_ELF)
-else ifeq ($(APP_TYPE), c)
-	$(call cargo_build,ulib/axlibc,$(KFEAT) $(LIB_FEAT))
-endif
 
 $(OUT_DIR):
 	$(call run_cmd,mkdir,-p $@)

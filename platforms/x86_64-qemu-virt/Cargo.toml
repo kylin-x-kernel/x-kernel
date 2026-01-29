@@ -1,5 +1,5 @@
 [package]
-name = "x86-pc"
+name = "x86_64-qemu-virt"
 description = "Implementation of `kplat` hardware abstraction layer for x86 Standard PC machine."
 version.workspace = true
 edition.workspace = true

@@ -1,5 +1,4 @@
 # Config generation
-
 config_args := \
   configs/defconfig.toml $(PLAT_CONFIG) $(EXTRA_CONFIG) \
   -w 'arch="$(ARCH)"' \
@@ -29,6 +28,6 @@ else
   define oldconfig
     $(if $(filter "$(PLAT_NAME)",$(shell axconfig-gen "$(OUT_CONFIG)" -r platform)),\
          $(call run_cmd,axconfig-gen,$(config_args) -c "$(OUT_CONFIG)"),\
-         $(error "ARCH" or "MYPLAT" has been changed, please run "make defconfig" again))
+         $(error "ARCH" or "PLAT" has been changed, please run "make defconfig" again))
   endef
 endif

@@ -8,48 +8,89 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-default = []
+# all of platforms should enable default features
+kernel = [
+    "kfeat/alloc-slab",
+    "kfeat/fs-ext4",
+    "kfeat/net",
+    "kfeat/page-alloc-4g",
+    "kfeat/rtc",
+    "kfeat/sched-rr",
+    "kfeat/task-ext",
+    "kfeat/uspace",
+]
+
 tee = ["kapi/tee", "kcore/tee"]
+smp = ["kfeat/smp"]
 test = ["unittest"]
+
+# Stubs
+pci = ["kfeat/bus-pci"]
+mmio = ["kfeat/bus-mmio"]
+
+# qemu default platforms enabled drivers
 qemu = [
+    "kernel",
+    "kfeat/fp-simd",
     "kfeat/display",
     "kfeat/input",
     "kapi/input",
-
     "kfeat/vsock",
     "kapi/vsock",
-
-    "kfeat/defplat-aarch64",
-    "kfeat/bus-pci",
-
     "kfeat/fs-times",
     "kapi/dev-log",
+    "pci",
     "test",
 ]
 
-smp = ["kfeat/smp"]
+# aarch64-qemu-virt platform
+aarch64_qemu_virt = [
+    "kernel",
+    "qemu",
+    "smp",
+    "dep:aarch64-qemu-virt",
+]
 
-# vf2 = ["dep:kplat-riscv64-visionfive2", "kfeat/driver-sdmmc"]
-dice = ["crosvm", "kapi/dice"]
-crosvm = [
+x86_64_qemu_virt = [
+    "kernel",
+    "qemu",
+    "dep:x86_64-qemu-virt",
+]
+
+riscv64_qemu_virt = [
+    "kernel",
+    "qemu",
+    "dep:riscv64-qemu-virt",
+]
+
+loongarch64_qemu_virt = [
+    "kernel",
+    "qemu",
+    "dep:loongarch64-qemu-virt",
+]
+
+# pkvm platform
+aarch64_crosvm_virt = [
+    "kernel",
+    "kfeat/fp-simd",
     "kfeat/display",
     "kfeat/input",
     "kapi/input",
     "kfeat/vsock",
     "kapi/vsock",
-
-    "kfeat/crosvm",
     "dep:aarch64-crosvm-virt",
     "pci",
-
     "smp",
-
     # auxilary features
     "kfeat/fs-times",
     "kapi/dev-log",
+    "kfeat/crosvm",
+    "kapi/dice",
 ]
 
+# higuang csv platform
 x86_csv = [
+    "kernel",
     "kfeat/display",
     "kfeat/input",
     "kapi/input",
@@ -60,16 +101,11 @@ x86_csv = [
     "dep:x86-csv",
     "pci",
 
-    "smp",
-
     # auxilary features
     "kfeat/fs-times",
     "kapi/dev-log",
 ]
 
-# Stubs
-pci = ["kfeat/bus-pci"]
-mmio = ["kfeat/bus-mmio"]
 
 [dependencies]
 kdriver.workspace = true
@@ -86,11 +122,30 @@ linkme.workspace = true
 linux-raw-sys.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
-
 kcore.workspace = true
 kapi.workspace = true
 
 unittest = {workspace = true, optional = true}
+
+[dependencies.aarch64-qemu-virt]
+workspace = true
+optional = true
+features = ["fp-simd", "smp", "rtc", "nmi", "pmu"]
+
+[dependencies.x86_64-qemu-virt]
+workspace = true
+optional = true
+features = ["fp-simd", "rtc"]
+
+[dependencies.riscv64-qemu-virt]
+workspace = true
+optional = true
+features = ["fp-simd", "rtc"]
+
+[dependencies.loongarch64-qemu-virt]
+workspace = true
+optional = true
+features = ["fp-simd", "rtc"]
 
 [dependencies.aarch64-crosvm-virt]
 workspace = true
@@ -100,8 +155,10 @@ features = ["fp-simd", "smp", "rtc"]
 [dependencies.x86-csv]
 workspace = true
 optional = true
-features = ["fp-simd", "smp", "rtc"]
+features = ["fp-simd", "rtc"]
+
 
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]
 all-features = true
+

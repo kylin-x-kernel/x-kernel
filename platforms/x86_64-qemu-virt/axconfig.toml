@@ -1,9 +1,9 @@
 # Architecture identifier.
 arch = "x86_64"                 # str
 # Platform identifier.
-platform = "x86-pc"             # str
+platform = "x86_64-qemu-virt"             # str
 # Platform Package.
-package = "x86-pc"       # str
+package = "x86_64-qemu-virt"       # str
 
 #
 # Platform configs
