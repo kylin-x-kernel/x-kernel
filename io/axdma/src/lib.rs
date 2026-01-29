@@ -11,6 +11,9 @@ use memaddr::PhysAddr;
 
 use self::dma::ALLOCATOR;
 
+// Re-export the interface trait for implementors
+pub use dma::DmaPageTableIf;
+
 /// Converts a physical address to a bus address.
 ///
 /// It assumes that there is a linear mapping with the offset

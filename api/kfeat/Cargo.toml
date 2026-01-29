@@ -25,6 +25,7 @@ uspace = ["khal/uspace"]
 ipi = [ "dep:kipi", "khal/ipi", "kruntime/ipi"]
 
 crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
+sev = ["dma", "kdriver/sev", "memspace/sev"]
 
 # Memory
 alloc = ["kalloc", "kruntime/alloc"]
@@ -35,7 +36,7 @@ alloc-level-1 = ["kalloc/level-1", "alloc"]
 page-alloc-64g = ["kalloc/page-alloc-64g"]                   # up to 64G memory capacity
 page-alloc-4g = ["kalloc/page-alloc-4g"]                     # up to 4G memory capacity
 paging = ["alloc", "khal/paging", "kruntime/paging"]
-dma = ["alloc", "paging"]
+dma = ["alloc", "paging", "kruntime/dma"]
 
 task-ext = ["ktask/task-ext"]
 sched-fifo = ["ktask/sched-fifo"]
@@ -101,6 +102,7 @@ watchdog = ["kruntime/watchdog"]
 pmu = ["kruntime/pmu"]
 
 [dependencies]
+memspace = { workspace = true, optional = true }
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }

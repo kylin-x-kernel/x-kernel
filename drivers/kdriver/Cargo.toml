@@ -20,6 +20,7 @@ input = ["dep:input"]
 vsock = ["dep:vsock"]
 
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:ksync", "dep:spin"]
+sev = ["pci-mmio", "axdma/sev", "dep:hashbrown", "dep:ksync", "dep:spin"]
 
 # Enabled by features `virtio-*`
 virtio = ["dep:virtio", "dep:kalloc", "dep:khal", "dep:platconfig"]
@@ -42,7 +43,7 @@ default = ["bus-pci"]
 [dependencies]
 kalloc = { workspace = true, optional = true }
 platconfig = { workspace = true, optional = true }
-# axdma = { workspace = true, optional = true }
+axdma.workspace = true
 driver_base = { workspace = true }
 block = { workspace = true, optional = true }
 display = { workspace = true, optional = true }

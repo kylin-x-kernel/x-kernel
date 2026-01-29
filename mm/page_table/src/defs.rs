@@ -11,6 +11,7 @@ bitflags::bitflags! {
         const USER          = 1 << 3;
         const DEVICE        = 1 << 4;
         const UNCACHED      = 1 << 5;
+        const SHARED        = 1 << 6;
     }
 }
 

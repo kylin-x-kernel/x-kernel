@@ -9,6 +9,7 @@ homepage.workspace = true
 [features]
 default = []
 copy = ["page_table/copy-from"]
+sev = []
 
 [dependencies]
 kalloc = { workspace = true }

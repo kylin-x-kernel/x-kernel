@@ -10,8 +10,7 @@ use core::{marker::PhantomData, ptr::NonNull};
 
 use cfg_if::cfg_if;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
-use kalloc::{UsageKind, global_allocator};
-use khal::mem::{p2v, v2p};
+use khal::mem::p2v;
 #[cfg(feature = "crosvm")]
 use khal::psci::{dma_share, dma_unshare};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
@@ -172,91 +171,52 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     }
 }
 
+const PAGE_SIZE: usize = 0x1000; // 4KB page size
 pub struct VirtIoHalImpl;
-
-cfg_if! {
-    if #[cfg(feature = "crosvm")] {
-        use hashbrown::HashMap;
-        use ksync::Mutex;
-        use spin::Lazy;
-        const PAGE_SIZE: usize = 0x1000; // define page size as 4KB
-        const VIRTIO_QUEUE_SIZE: usize = 32;
-
-        struct VirtIoFramePool
-        {
-            pool_paddr: PhysAddr,
-            bitmap: [bool; VIRTIO_QUEUE_SIZE],
-            v2p_map: HashMap<usize, usize>,
-        }
-
-        static VIRTIO_FRAME_POOL: Lazy<Mutex<VirtIoFramePool>> = Lazy::new(|| {
-            let vaddr = global_allocator()
-                .alloc_pages(VIRTIO_QUEUE_SIZE, 0x1000, UsageKind::Dma)
-                .expect("virtio frame pool alloc failed");
-            let paddr = v2p(vaddr.into());
-            dma_share(paddr.as_usize(), VIRTIO_QUEUE_SIZE * PAGE_SIZE);
-            let pool = VirtIoFramePool {
-                pool_paddr: paddr.into(),
-                bitmap: [false; VIRTIO_QUEUE_SIZE],
-                v2p_map: HashMap::new(),
-            };
-            Mutex::new(pool)
-        });
-
-        impl VirtIoFramePool {
-            fn alloc_page_from_pool(&mut self, vaddr: usize) -> PhysAddr {
-                let frame_index = {
-                    let mut fram_index = usize::MAX;
-                    for i in 0..VIRTIO_QUEUE_SIZE {
-                        if !self.bitmap[i] {
-                            fram_index = i;
-                            self.bitmap[i] = true;
-                            break;
-                        }
-                    }
-                    assert!(fram_index != usize::MAX);
-                    fram_index
-                };
-                self.v2p_map.insert(vaddr, frame_index);
-                let paddr = self.pool_paddr + (PAGE_SIZE * frame_index);
-                paddr
-            }
-
-            fn free_page_to_pool(&mut self, vaddr: usize) {
-                let frame_index = self.v2p_map.remove(&vaddr).unwrap();
-                assert!(self.bitmap[frame_index]);
-                self.bitmap[frame_index] = false;
-            }
-        }
-    }
-}
 
 unsafe impl VirtIoHal for VirtIoHalImpl {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
-        let vaddr = if let Ok(vaddr) = global_allocator().alloc_pages(pages, 0x1000, UsageKind::Dma)
-        {
-            vaddr
-        } else {
-            return (0, NonNull::dangling());
-        };
-        let paddr = v2p(vaddr.into());
-        let ptr = NonNull::new(vaddr as _).unwrap();
-
-        #[cfg(feature = "crosvm")]
-        {
-            dma_share(paddr.as_usize(), pages * 0x1000);
+        use core::alloc::Layout;
+        // For AMD SEV, use axdma which handles SHARED flag (clears C-Bit)
+        let size = pages * PAGE_SIZE;
+        let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
+        match unsafe { axdma::alloc_coherent(layout) } {
+            Ok(dma_info) => {
+                // Clear the allocated memory
+                unsafe {
+                    core::ptr::write_bytes(dma_info.cpu_addr.as_ptr(), 0, size);
+                }
+                let paddr = dma_info.bus_addr.as_u64() as PhysAddr;
+                let ptr = dma_info.cpu_addr;
+                #[cfg(feature = "crosvm")]
+                {
+                    dma_share(paddr, pages * 0x1000);
+                }
+                    // bus_addr is the physical address for DMA
+                (paddr, ptr)
+            }
+            Err(e) => {
+                log::error!("SEV dma_alloc failed: pages={}, error={:?}", pages, e);
+                (0, NonNull::dangling())
+            }
         }
-        (paddr.as_usize(), ptr)
     }
 
     #[allow(unused_variables)]
     unsafe fn dma_dealloc(paddr: PhysAddr, vaddr: NonNull<u8>, pages: usize) -> i32 {
-        global_allocator().dealloc_pages(vaddr.as_ptr() as usize, pages, UsageKind::Dma);
+        use core::alloc::Layout;
+        let size = pages * PAGE_SIZE;
+        let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
+        let dma_info = axdma::DMAInfo {
+            cpu_addr: vaddr,
+            bus_addr: axdma::BusAddr::new(paddr as u64),
+        };
+        unsafe { axdma::dealloc_coherent(dma_info, layout) };
         #[cfg(feature = "crosvm")]
         {
             dma_unshare(paddr as usize, pages * 0x1000);
         }
-        0
+        return 0;
     }
 
     #[inline]
@@ -267,51 +227,92 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     #[allow(unused_variables)]
     #[inline]
     unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> PhysAddr {
-        #[cfg(feature = "crosvm")]
+        #[cfg(any(feature = "sev", feature = "crosvm"))]
         {
-            let vaddr = buffer.as_ptr() as *mut u8 as usize;
-            let len = buffer.len();
-            assert!(len <= 0x1000, "only support share buffer size <= 4KB");
-            let paddr = {
-                let mut pool = VIRTIO_FRAME_POOL.lock();
-                pool.alloc_page_from_pool(vaddr)
-            };
+            use core::alloc::Layout;
+            use core::sync::atomic::{fence, Ordering};
 
-            if direction != BufferDirection::DeviceToDriver {
-                let data = unsafe {
-                    let data = p2v(paddr.into()).as_usize() as *mut u8;
-                    core::slice::from_raw_parts_mut(data, len)
-                };
-                data.clone_from_slice(unsafe { &buffer.as_ref() });
+            let len = buffer.len();
+            let aligned_size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let layout = Layout::from_size_align(aligned_size, PAGE_SIZE).unwrap();
+
+            // Allocate a bounce buffer using axdma (with SHARED flag)
+            let dma_info = unsafe { axdma::alloc_coherent(layout) }
+                .expect("failed to allocate shared bounce buffer via axdma");
+            let paddr = dma_info.bus_addr.as_u64() as PhysAddr;
+            let vaddr = dma_info.cpu_addr.as_ptr() as usize;
+            // For crosvm, also call share_dma_buffer
+            #[cfg(feature = "crosvm")]
+            {
+                dma_share(paddr as usize, aligned_size);
             }
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            // If data flows from driver to device, copy to shared buffer
+            if direction != BufferDirection::DeviceToDriver {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        buffer.as_ptr() as *const u8,
+                        vaddr as *mut u8,
+                        len,
+                    );
+                }
+                // Ensure the copy is not optimized away and is visible
+                core::sync::atomic::fence(Ordering::SeqCst);
+            }
+
+            // Full memory barrier to ensure data is visible to the device
+            fence(Ordering::SeqCst);
+
             paddr
         }
 
-        #[cfg(not(feature = "crosvm"))]
+        #[cfg(not(any(feature = "crosvm", feature = "sev")))]
         {
             let vaddr = buffer.as_ptr() as *mut u8 as usize;
-            v2p(vaddr.into()).into()
+            virt_to_phys(vaddr.into()).into()
         }
     }
 
     #[inline]
     #[allow(unused_variables)]
     unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection) {
-        #[cfg(feature = "crosvm")]
+        #[cfg(any(feature = "sev", feature = "crosvm"))]
         {
-            let mut buffer = buffer;
-            let vaddr = buffer.as_ptr() as *mut u8 as usize;
+            use core::alloc::Layout;
+            use core::sync::atomic::{fence, Ordering};
 
+            let len = buffer.len();
+            let aligned_size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            fence(Ordering::SeqCst);
+
+            // If data flows from device to driver, copy back from shared buffer
             if direction != BufferDirection::DriverToDevice {
-                let data = unsafe {
-                    let data = p2v(paddr.into()).as_usize() as *mut u8;
-                    core::slice::from_raw_parts(data, buffer.len())
-                };
-                unsafe { buffer.as_mut().clone_from_slice(&data) };
+                let shared_ptr = p2v(paddr.into()).as_ptr();
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        shared_ptr,
+                        buffer.as_ptr() as *mut u8,
+                        len,
+                    );
+                }
+                // Ensure the copy is not optimized away and create a final
+                // ordering point before we proceed.
+                core::sync::atomic::fence(Ordering::SeqCst);
             }
 
-            let mut pool = VIRTIO_FRAME_POOL.lock();
-            pool.free_page_to_pool(vaddr);
+            // For crosvm, call unshare_dma_buffer before freeing
+            #[cfg(feature = "crosvm")]
+            {
+                dma_unshare(paddr as usize, aligned_size);
+            }
+
+            // Free the bounce buffer via axdma
+            let layout = Layout::from_size_align(aligned_size, PAGE_SIZE).unwrap();
+            let dma_info = axdma::DMAInfo {
+                cpu_addr: NonNull::new(p2v(paddr.into()).as_mut_ptr()).unwrap(),
+                bus_addr: axdma::BusAddr::new(paddr as u64),
+            };
+            unsafe { axdma::dealloc_coherent(dma_info, layout) };
         }
     }
 }

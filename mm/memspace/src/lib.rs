@@ -77,11 +77,29 @@ pub fn kernel_page_table_root() -> PhysAddr {
 /// fine-grained kernel page table.
 pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
-
+    #[cfg(feature = "sev")]
+    {
+        let cbit_pos = platconfig::plat::SEV_CBIT_POS;
+        debug!("SEV C-Bit position = {}", cbit_pos);
+        if cbit_pos > 0 {
+            page_table::x86_64::init_sev_cbit(cbit_pos as u8);
+            // Ensure the C-Bit initialization is visible before creating page tables
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            debug!("SEV C-Bit initialized: mask = {:#x}", 1usize << cbit_pos);
+        }
+    }
     let kernel_layout = new_kernel_layout().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_layout);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
-    unsafe { khal::asm::write_kernel_page_table(kernel_page_table_root()) };
+    let mut root = kernel_page_table_root();
+    #[cfg(feature = "sev")]{
+        let cbit_pos = platconfig::plat::SEV_CBIT_POS;
+        if cbit_pos != 0 {
+            root = PhysAddr::from(root.as_usize() | (1usize << cbit_pos));
+            debug!("root: {:?}",root);
+        } 
+    }
+    unsafe { khal::asm::write_kernel_page_table(root) };
     // flush all TLB
     khal::asm::flush_tlb(None);
 }

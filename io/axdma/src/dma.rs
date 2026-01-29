@@ -1,13 +1,21 @@
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
-use axalloc::{DefaultByteAllocator, UsageKind, global_allocator};
+use kalloc::{DefaultByteAllocator, UsageKind, global_allocator};
 use khal::{mem::v2p, paging::MappingFlags};
 use kspin::SpinNoIrq;
 use log::{debug, error};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, va};
 
 use crate::{BusAddr, DMAInfo, phys_to_bus};
+
+/// Interface for updating page table flags.
+/// This breaks the cyclic dependency: axdma -> axmm -> axfs -> axdriver -> axdma
+#[crate_interface::def_interface]
+pub trait DmaPageTableIf {
+    /// Update the mapping flags for the given virtual address range.
+    fn protect(vaddr: VirtAddr, size: usize, flags: MappingFlags) -> Result<(), ()>;
+}
 
 pub(crate) static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocator::new());
 
@@ -57,10 +65,14 @@ impl DmaAllocator {
                 let vaddr_raw =
                     global_allocator().alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::Dma)?;
                 let vaddr = va!(vaddr_raw);
+                let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED;
+                #[cfg(feature = "sev")]
+                // For SEV, DMA memory must be shared (not encrypted)
+                let flags = flags | MappingFlags::SHARED;
                 self.update_flags(
                     vaddr,
                     num_pages,
-                    MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED,
+                    flags,
                 )?;
                 self.alloc
                     .add_region(vaddr_raw, expand_size)
@@ -78,10 +90,14 @@ impl DmaAllocator {
             UsageKind::Dma,
         )?;
         let vaddr = va!(vaddr_raw);
+        let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED;
+        #[cfg(feature = "sev")]
+        // For SEV, DMA memory must be shared (not encrypted)
+        let flags = flags | MappingFlags::SHARED;
         self.update_flags(
             vaddr,
             num_pages,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED,
+            flags,
         )?;
         Ok(DMAInfo {
             cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
@@ -96,11 +112,9 @@ impl DmaAllocator {
         flags: MappingFlags,
     ) -> AllocResult<()> {
         let expand_size = num_pages * PAGE_SIZE_4K;
-        axmm::kernel_layout()
-            .lock()
-            .protect(vaddr, expand_size, flags)
-            .map_err(|e| {
-                error!("change table flag fail: {e:?}");
+        crate_interface::call_interface!(DmaPageTableIf::protect(vaddr, expand_size, flags))
+            .map_err(|_| {
+                error!("change table flag fail");
                 AllocError::NoMemory
             })
     }
@@ -110,12 +124,36 @@ impl DmaAllocator {
         if layout.size() >= PAGE_SIZE_4K {
             let num_pages = layout_pages(&layout);
             let virt_raw = dma.cpu_addr.as_ptr() as usize;
-            global_allocator().dealloc_pages(virt_raw, num_pages, UsageKind::Dma);
+            use core::sync::atomic::{fence, Ordering};
+
+            let size = num_pages * PAGE_SIZE_4K;
+            let vaddr = virt_raw as *mut u8;
+
+            // ===== Phase 1: still SHARED (C=0) =====
+            unsafe {
+                core::ptr::write_bytes(vaddr, 0, size);
+            }
+            fence(Ordering::SeqCst);
+
+            // ===== switch to private (C=1) =====
             let _ = self.update_flags(
                 va!(virt_raw),
                 num_pages,
-                MappingFlags::READ | MappingFlags::WRITE,
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED,
             );
+            fence(Ordering::SeqCst);
+
+            // ===== Phase 2: encrypted clear =====
+            unsafe {
+                for off in (0..size).step_by(64) {
+                    core::ptr::write_volatile(
+                        vaddr.add(off) as *mut u64,
+                        0,
+                    );
+                }
+            }
+            fence(Ordering::SeqCst);
+            global_allocator().dealloc_pages(virt_raw, num_pages, UsageKind::Dma);
         } else {
             self.alloc.deallocate(dma.cpu_addr, layout)
         }

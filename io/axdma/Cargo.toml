@@ -10,13 +10,16 @@ categories.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[features]
+sev = []
+
 [dependencies]
 alloc-engine.workspace = true
-axalloc.workspace = true
+kalloc.workspace = true
 platconfig.workspace = true
 kerrno.workspace = true
 khal = { workspace = true, features = ["paging"] }
-axmm.workspace = true
+crate_interface.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true
