@@ -11,7 +11,7 @@ use kpoll::{IoEvents, Pollable};
 use ktask::current;
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
-use osvm::{VmMutPtr, VmPtr};
+use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::{
     file::{File, FileLike, Pipe, get_file_like},
