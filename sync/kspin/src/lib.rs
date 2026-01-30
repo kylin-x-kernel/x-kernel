@@ -90,8 +90,11 @@
 
 mod guard;
 mod lock;
+
+/// Unit test module for kspin crate.
 #[cfg(feature = "unittest")]
 pub mod test_unit_test;
+
 #[cfg(test)]
 mod tests;
 

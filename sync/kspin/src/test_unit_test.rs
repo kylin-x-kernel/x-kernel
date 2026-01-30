@@ -8,7 +8,15 @@ use crate::{
     lock::tests_lock::TEST_SPINLOCK,
 };
 
+/// Run all unit tests for the kspin crate.
+///
+/// This function executes tests for:
+/// - SpinLock functionality
+/// - BaseSpinLock functionality  
+/// - Guard types (NoOp, IrqSave, NoPreempt, NoPreemptIrqSave)
 pub fn kspin_unit_test() {
+    log::warn!("********************************");
+    log::warn!("Starting KSPIN unit tests...");
     let mut runner = TestRunner::new();
 
     run_tests!(
@@ -17,8 +25,10 @@ pub fn kspin_unit_test() {
     );
 
     if tests_failed() {
-        log::error!("!!! KSPIN TESTS FAILED !!!");
+        log::error!("!!! KSPIN TESTS FAILED, NEED TO BE FIXED !!!");
     } else {
-        log::warn!("!!! KSPIN TESTS PASSED !!!");
+        log::warn!("!!! ALL TESTS PASSED !!!");
     }
+
+    log::warn!("********************************\n");
 }

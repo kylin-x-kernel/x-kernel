@@ -217,6 +217,7 @@ pub mod tests_guard_types {
 
         fn test_irqsave_acquire_release() {
             // Just verify acquire/release work without panicking
+            #[allow(clippy::let_unit_value)]
             let state = IrqSave::acquire();
             IrqSave::release(state);
         }
@@ -235,6 +236,7 @@ pub mod tests_guard_types {
         using TestResult;
 
         fn test_nopreempt_irqsave_acquire_release() {
+            #[allow(clippy::let_unit_value)]
             let state = NoPreemptIrqSave::acquire();
             NoPreemptIrqSave::release(state);
         }
