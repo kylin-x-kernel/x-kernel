@@ -383,3 +383,62 @@ impl ShmManager {
 
 /// Global shared memory manager.
 pub static SHM_MANAGER: Mutex<ShmManager> = Mutex::new(ShmManager::new());
+
+#[cfg(feature = "kcore_test")]
+pub mod tests_shm {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::*;
+    use memaddr::VirtAddrRange;
+    use khal::paging::MappingFlags;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_bibtree_insert_lookup() {
+            let mut map: BiBTreeMap<u32, u32> = BiBTreeMap::new();
+            map.insert(1, 10);
+            map.insert(2, 20);
+            assert_eq!(map.get_by_key(&1), Some(&10));
+            assert_eq!(map.get_by_value(&20), Some(&2));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_bibtree_replace_value() {
+            let mut map: BiBTreeMap<u32, u32> = BiBTreeMap::new();
+            map.insert(1, 10);
+            map.insert(2, 10);
+            assert!(map.get_by_key(&1).is_none());
+            assert_eq!(map.get_by_key(&2), Some(&10));
+            assert_eq!(map.get_by_value(&10), Some(&2));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_shminner_attach_detach_and_update() {
+            let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+            let range = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
+            inner.attach_process(1, range);
+            assert_eq!(inner.attach_count(), 1);
+            assert!(inner.get_addr_range(1).is_some());
+            assert!(inner.try_update(4096, MappingFlags::READ, 2).is_ok());
+            assert!(inner.try_update(8192, MappingFlags::READ, 2).is_err());
+            inner.detach_process(1);
+            assert_eq!(inner.attach_count(), 0);
+        }
+    }
+
+    tests_name! {
+        TEST_SHM;
+        test_bibtree_insert_lookup,
+        test_bibtree_replace_value,
+        test_shminner_attach_detach_and_update,
+    }
+}

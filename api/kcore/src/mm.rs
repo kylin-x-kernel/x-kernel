@@ -409,3 +409,46 @@ unsafe impl VirtMemIo for Vm {
         }
     }
 }
+
+#[cfg(feature = "kcore_test")]
+pub mod tests_mm {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::{check_access, USER_SPACE_BASE, USER_SPACE_SIZE};
+    use osvm::MemError;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_check_access_valid() {
+            assert!(check_access(USER_SPACE_BASE, 1).is_ok());
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_check_access_invalid_low() {
+            let res = check_access(USER_SPACE_BASE - 1, 1);
+            assert!(matches!(res, Err(MemError::NoAccess)));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_check_access_invalid_len() {
+            let res = check_access(USER_SPACE_BASE, USER_SPACE_SIZE + 1);
+            assert!(matches!(res, Err(MemError::NoAccess)));
+        }
+    }
+
+    tests_name! {
+        TEST_MM;
+        test_check_access_valid,
+        test_check_access_invalid_low,
+        test_check_access_invalid_len,
+    }
+}

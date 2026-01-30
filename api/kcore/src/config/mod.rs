@@ -25,3 +25,46 @@ cfg_if::cfg_if! {
         compile_error!("Unsupported architecture");
     }
 }
+
+#[cfg(feature = "kcore_test")]
+pub mod tests_config {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::*;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_user_space_range() {
+            assert!(USER_SPACE_SIZE > 0);
+            assert!(USER_SPACE_BASE < USER_SPACE_BASE + USER_SPACE_SIZE);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_user_stack_range() {
+            assert!(USER_STACK_SIZE > 0);
+            assert!(USER_STACK_TOP > USER_STACK_SIZE);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_heap_limits() {
+            assert!(USER_HEAP_SIZE > 0);
+            assert!(USER_HEAP_SIZE_MAX >= USER_HEAP_SIZE);
+        }
+    }
+
+    tests_name! {
+        TEST_CONFIG;
+        test_user_space_range,
+        test_user_stack_range,
+        test_heap_limits,
+    }
+}

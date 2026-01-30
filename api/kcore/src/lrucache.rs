@@ -174,3 +174,58 @@ impl<'a, V, const CAP: usize> Iterator for LruIter<'a, V, CAP> {
         Some(val)
     }
 }
+
+#[cfg(feature = "kcore_test")]
+pub mod tests_lrucache {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::LruCache;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_lru_put_evict() {
+            let mut cache: LruCache<u32, 2> = LruCache::new();
+            assert_eq!(cache.put(1), None);
+            assert_eq!(cache.put(2), None);
+            assert_eq!(cache.put(3), Some(1));
+            assert_eq!(cache.peek_mru().copied(), Some(3));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_lru_access_promote() {
+            let mut cache: LruCache<u32, 3> = LruCache::new();
+            cache.put(1);
+            cache.put(2);
+            cache.put(3);
+            assert!(cache.access(|v| *v == 1));
+            let items: alloc::vec::Vec<u32> = cache.items().copied().collect();
+            assert_eq!(items.first().copied(), Some(1));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_lru_flush() {
+            let mut cache: LruCache<u32, 2> = LruCache::new();
+            cache.put(10);
+            cache.put(20);
+            cache.flush();
+            assert!(cache.peek_mru().is_none());
+            assert_eq!(cache.items().count(), 0);
+        }
+    }
+
+    tests_name! {
+        TEST_LRUCACHE;
+        test_lru_put_evict,
+        test_lru_access_promote,
+        test_lru_flush,
+    }
+}

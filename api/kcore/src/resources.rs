@@ -64,3 +64,49 @@ impl IndexMut<u32> for Rlimits {
         &mut self.0[index as usize]
     }
 }
+
+#[cfg(feature = "kcore_test")]
+pub mod tests_resources {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::*;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_rlimit_new() {
+            let r = Rlimit::new(1, 2);
+            assert_eq!(r.current, 1);
+            assert_eq!(r.max, 2);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_rlimit_from() {
+            let r: Rlimit = 3_u64.into();
+            assert_eq!(r.current, 3);
+            assert_eq!(r.max, 3);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_rlimits_default() {
+            let limits = Rlimits::default();
+            assert_eq!(limits[RLIMIT_STACK].current, crate::config::USER_STACK_SIZE as u64);
+            assert_eq!(limits[RLIMIT_NOFILE].current, AX_FILE_LIMIT as u64);
+        }
+    }
+
+    tests_name! {
+        TEST_RESOURCES;
+        test_rlimit_new,
+        test_rlimit_from,
+        test_rlimits_default,
+    }
+}

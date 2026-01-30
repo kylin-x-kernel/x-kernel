@@ -24,3 +24,5 @@ pub mod shm;
 pub mod task;
 pub mod time;
 pub mod vfs;
+#[cfg(feature = "kcore_test")]
+pub mod test_unit_test;
