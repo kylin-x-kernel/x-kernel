@@ -11,10 +11,10 @@ pub mod arm;
 pub mod loongarch64;
 #[cfg(any(target_arch = "riscv64", feature = "riscv64"))]
 pub mod riscv64;
-#[cfg(any(target_arch = "x86", feature = "x86"))]
-pub mod x86;
 #[cfg(any(target_arch = "x86_64", feature = "x86_64"))]
 pub mod x86_64;
+#[cfg(all(any(target_arch = "x86_64", feature = "x86_64"), feature = "tee"))]
+pub mod x86_64_tee;
 
 #[cfg(all(target_arch = "aarch64", not(feature = "tee")))]
 pub use aarch64::*;
