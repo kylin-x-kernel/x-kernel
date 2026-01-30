@@ -15,6 +15,7 @@ ext4 = ["dep:lwext4_rust"]
 times = []
 std = ["lwext4_rust?/std"]
 crosvm = []
+unittest = ["dep:unittest", "fs-ng-vfs/unittest"]
 
 [dependencies]
 kalloc = { workspace = true }
@@ -36,6 +37,7 @@ lru = "0.16.0"
 scope-local = { workspace = true }
 slab = { version = "0.4.9", default-features = false }
 spin = { workspace = true }
+unittest = { workspace = true, optional = true }
 
 [dependencies.lwext4_rust]
 git = "https://github.com/Starry-OS/lwext4_rust.git"

@@ -8,6 +8,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[features]
+unittest = ["dep:unittest"]
+
 [dependencies]
 kerrno = { workspace = true}
 kpoll = { workspace = true }
@@ -18,3 +21,4 @@ inherit-methods-macro = "0.1"
 log = "0.4"
 smallvec = "1.15"
 spin = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex"] }
+unittest = { workspace = true, optional = true }

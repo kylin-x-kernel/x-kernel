@@ -13,6 +13,13 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
+#[cfg(feature = "unittest")]
+pub mod test_path_resolver;
+#[cfg(feature = "unittest")]
+pub mod test_unit_test;
+#[cfg(feature = "unittest")]
+pub mod test_working_context;
+
 use kdriver::{BlockDevice as KBlockDevice, DeviceContainer, prelude::*};
 
 #[cfg(feature = "fat")]
@@ -58,3 +65,6 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
     let mp = fs_ng_vfs::Mountpoint::new_root(&fs);
     ROOT_FS_CONTEXT.call_once(|| FsContext::new(mp.root_location()));
 }
+
+#[cfg(feature = "unittest")]
+pub use test_unit_test::kfs_unit_test;
