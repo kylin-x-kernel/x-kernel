@@ -3,8 +3,9 @@
 //! This module provides the `test_run()` function that automatically discovers
 //! and runs all tests marked with `#[unittest]`.
 
-use crate::test_framework::{TestDescriptor, TestRunner, TestStats, TEST_FAILED_FLAG};
 use core::sync::atomic::Ordering;
+
+use crate::test_framework::{TEST_FAILED_FLAG, TestDescriptor, TestRunner, TestStats};
 
 // External symbols defined in the linker script
 #[allow(improper_ctypes)]

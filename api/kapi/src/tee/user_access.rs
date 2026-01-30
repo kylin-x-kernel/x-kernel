@@ -7,13 +7,10 @@
 #![allow(dead_code)]
 
 use alloc::{boxed::Box, vec};
-use core::mem::size_of;
+use core::mem::{MaybeUninit, size_of, transmute};
 
-use tee_raw_sys::*;
-use tee_raw_sys::libc_compat::size_t;
 use osvm::*;
-use core::mem::MaybeUninit;
-use core::mem::transmute;
+use tee_raw_sys::{libc_compat::size_t, *};
 
 use super::TeeResult;
 

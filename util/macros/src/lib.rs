@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{Error, Item, parse_macro_input, ItemFn};
+use syn::{Error, Item, ItemFn, parse_macro_input};
 
 /// Register a constructor function to be called before `main`.
 ///
@@ -155,4 +155,3 @@ pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     output.into()
 }
-
