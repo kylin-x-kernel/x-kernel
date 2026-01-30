@@ -91,6 +91,7 @@ pub fn init_memory_management() {
     let kernel_layout = new_kernel_layout().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_layout);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
+    #[allow(unused_mut)]
     let mut root = kernel_page_table_root();
     #[cfg(feature = "sev")]
     {

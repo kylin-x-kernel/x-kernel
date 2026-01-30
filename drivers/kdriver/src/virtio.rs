@@ -216,7 +216,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         {
             dma_unshare(paddr as usize, pages * 0x1000);
         }
-        return 0;
+        0
     }
 
     #[inline]
