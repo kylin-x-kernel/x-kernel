@@ -107,5 +107,12 @@ SECTIONS {
     linkme_PAGE_FAULT : { KEEP(*(linkme_PAGE_FAULT)) }
     linkm2_PAGE_FAULT : { KEEP(*(linkm2_PAGE_FAULT)) }
     scope_local : { KEEP(*(scope_local)) }
+
+    /* Unittest section */
+    .unittest : ALIGN(8) {
+        __unittest_start = .;
+        KEEP(*(.unittest .unittest.*))
+        __unittest_end = .;
+    }
 }
 INSERT AFTER .tbss;

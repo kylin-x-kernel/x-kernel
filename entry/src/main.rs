@@ -33,14 +33,7 @@ fn main() {
 
     #[cfg(feature = "test")]
     {
-        use kapi::tee::test_unit_test::tee_unit_test;
-        use unittest::test_examples::test_example;
-
-        info!("Running example tests...");
-        test_example();
-
-        info!("Running TEE unit tests...");
-        tee_unit_test();
+        unittest::test_run();
     }
 
     let exit_code = entry::run_initproc(&args, &envs);
@@ -54,6 +47,15 @@ fn main() {
         .filesystem()
         .flush()
         .expect("Failed to flush rootfs");
+}
+
+#[unittest::def_test]
+fn test_example() -> unittest::TestResult {
+    let a = 2 + 2;
+    if a != 4 {
+        return unittest::TestResult::Failed;
+    }
+    unittest::TestResult::Ok
 }
 
 #[cfg(feature = "aarch64_crosvm_virt")]
