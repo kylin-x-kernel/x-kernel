@@ -29,35 +29,32 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
     // Get current session context
     let uuid = with_tee_session_ctx(|ctx| Ok(ctx.clnt_id.uuid))?;
 
-    // Initialize time variable
-    let mut time_result: TeeResult<TeeTime> = Err(TEE_ERROR_BAD_PARAMETERS);
-
     // Get time based on category
-    match cat {
+    let time_result = match cat {
         0 => {
             // UTEE_TIME_CAT_SYSTEM
             let sys_time = tee_time_get_sys_time();
-            time_result = Ok(TeeTime {
+            Ok(TeeTime {
                 seconds: sys_time.as_secs() as u32,
                 millis: sys_time.subsec_millis(),
-            });
+            })
         }
         1 => {
             // UTEE_TIME_CAT_TA_PERSISTENT
-            time_result = tee_time_get_ta_time(&uuid);
+            tee_time_get_ta_time(&uuid)
         }
         2 => {
             // UTEE_TIME_CAT_REE
             let ree_time = tee_time_get_ree_time();
-            time_result = Ok(TeeTime {
+            Ok(TeeTime {
                 seconds: ree_time.as_secs() as u32,
                 millis: ree_time.subsec_millis(),
-            });
+            })
         }
         _ => {
             return Err(TEE_ERROR_BAD_PARAMETERS);
         }
-    }
+    };
 
     // Handle time retrieval result
     match time_result {
@@ -102,7 +99,7 @@ struct TeeTaTimeOffs {
 
 // Global time offset storage - using spin::Mutex for thread safety
 use spin::Mutex;
-static TEE_TIME_OFFS: Mutex<Option<Vec<TeeTaTimeOffs>>> = Mutex::new(None);
+static TEE_TIME_OFFS: Mutex<Option<vec::Vec<TeeTaTimeOffs>>> = Mutex::new(None);
 
 // Helper function: compare UUIDs
 fn uuid_equal(uuid1: &TEE_UUID, uuid2: &TEE_UUID) -> bool {
@@ -159,7 +156,7 @@ fn tee_time_ta_set_offs(uuid: &TEE_UUID, offs: &TeeTime, positive: bool) -> TeeR
         });
     } else {
         // Initialize vector and add first entry
-        let mut new_offsets = vec![TeeTaTimeOffs {
+        let new_offsets = vec![TeeTaTimeOffs {
             uuid: *uuid,
             offs: TeeTime {
                 seconds: offs.seconds,

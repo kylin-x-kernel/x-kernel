@@ -8,7 +8,7 @@ use crate::tee::{
     user_access::tests_user_access::TEST_USER_ACCESS,
 };
 
-pub fn tee_test_unit() {
+pub fn tee_unit_test() {
     let mut runner = TestRunner::new();
     // Here you would register and run your unit tests
     run_tests!(runner, [TEST_TEE_SESSION, TEST_USER_ACCESS,]);

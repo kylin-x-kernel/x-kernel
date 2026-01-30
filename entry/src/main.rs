@@ -40,10 +40,10 @@ fn main() {
 
         #[cfg(feature = "tee_test")]
         {
-            use kapi::tee::tee_unit_test::tee_test_unit;
+            use kapi::tee::tee_unit_test::tee_unit_test;
 
             info!("Running TEE unit tests...");
-            tee_test_unit();
+            tee_unit_test();
         }
     }
 
