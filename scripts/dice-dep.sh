@@ -63,7 +63,7 @@ modify_api_dependencies() {
     if grep -q "^dice = \\[" "$api_file"; then
         # Backup current dice feature line
         local old_dice_line=$(grep "^dice = \\[" "$api_file")
-        local new_dice_line='dice = ["dep:dice","dep:mbedtls","dep:axplat-aarch64-crosvm-virt", "axalloc/dice","dep:rand_chacha"]'
+        local new_dice_line='dice = ["dep:dice","dep:mbedtls","dep:aarch64-crosvm-virt", "axalloc/dice","dep:rand_chacha"]'
         
         # Use sed to replace the entire line
         sed -i.tmp "s|^dice = \\[.*|$new_dice_line|" "$api_file"
@@ -73,12 +73,12 @@ modify_api_dependencies() {
     else
         # If features section exists but dice feature doesn't, add it
         if grep -q "^\[features\]" "$api_file"; then
-            sed -i.tmp '/^\[features\]/a\dice = ["dep:dice","dep:mbedtls","dep:axplat-aarch64-crosvm-virt", "axalloc/dice","dep:rand_chacha"]' "$api_file"
+            sed -i.tmp '/^\[features\]/a\dice = ["dep:dice","dep:mbedtls","dep:aarch64-crosvm-virt", "axalloc/dice","dep:rand_chacha"]' "$api_file"
             echo "dice feature added to features"
         else
             # If features section doesn't exist, create it first then add
             echo -e "\n[features]" >> "$api_file"
-            echo 'dice = ["dep:dice","dep:mbedtls","dep:axplat-aarch64-crosvm-virt", "axalloc/dice","dep:rand_chacha"]' >> "$api_file"
+            echo 'dice = ["dep:dice","dep:mbedtls","dep:aaarch64-crosvm-virt", "axalloc/dice","dep:rand_chacha"]' >> "$api_file"
             echo "[features] section created and dice feature added"
         fi
     fi

@@ -8,16 +8,16 @@ config_args := \
 ifneq ($(MEM),)
   config_args += -w 'plat.phys-memory-size=$(shell ./scripts/make/strtosz.py $(MEM))'
 else
-  MEM := $(shell axconfig-gen $(PLAT_CONFIG) -r plat.phys-memory-size 2>/dev/null | tr -d _ | xargs printf "%dB")
+  MEM := $(shell kconfig-gen $(PLAT_CONFIG) -r plat.phys-memory-size 2>/dev/null | tr -d _ | xargs printf "%dB")
 endif
 
-SMP := $(shell axconfig-gen $(PLAT_CONFIG) -r plat.cpu-num 2>/dev/null)
+SMP := $(shell kconfig-gen $(PLAT_CONFIG) -r plat.cpu-num 2>/dev/null)
 ifeq ($(SMP),)
   $(error "`plat.cpu-num` is not defined in the platform configuration file")
 endif
 
 define defconfig
-  $(call run_cmd,axconfig-gen,$(config_args))
+  $(call run_cmd,kconfig-gen,$(config_args))
 endef
 
 ifeq ($(wildcard $(OUT_CONFIG)),)
@@ -26,8 +26,8 @@ ifeq ($(wildcard $(OUT_CONFIG)),)
   endef
 else
   define oldconfig
-    $(if $(filter "$(PLAT_NAME)",$(shell axconfig-gen "$(OUT_CONFIG)" -r platform)),\
-         $(call run_cmd,axconfig-gen,$(config_args) -c "$(OUT_CONFIG)"),\
+    $(if $(filter "$(PLAT_NAME)",$(shell kconfig-gen "$(OUT_CONFIG)" -r platform)),\
+         $(call run_cmd,kconfig-gen,$(config_args) -c "$(OUT_CONFIG)"),\
          $(error "ARCH" or "PLAT" has been changed, please run "make defconfig" again))
   endef
 endif

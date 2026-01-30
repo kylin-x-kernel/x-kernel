@@ -5,11 +5,11 @@ cargo_manifest_dir := $(APP)
 define resolve_config
   $(if $(wildcard $(PLAT_CONFIG)),\
     $(PLAT_CONFIG),\
-    $(shell cargo axplat info -C $(cargo_manifest_dir) -c $(PLAT_PACKAGE)))
+    $(shell cargo platconfig info -C $(cargo_manifest_dir) -c $(PLAT_PACKAGE)))
 endef
 
 define validate_config
-  $(eval package := $(shell axconfig-gen $(PLAT_CONFIG) -r package 2>/dev/null)) \
+  $(eval package := $(shell kconfig-gen $(PLAT_CONFIG) -r package 2>/dev/null)) \
   $(if $(strip $(package)),,$(error PLAT_CONFIG=$(PLAT_CONFIG) is not a valid platform configuration file)) \
   $(if $(filter "$(PLAT_PACKAGE)",$(package)),,\
     $(error `PLAT_PACKAGE` field mismatch: expected $(PLAT_PACKAGE), got $(package)))
@@ -32,4 +32,4 @@ ifeq ($(origin ARCH),command line)
 endif
 ARCH := $(_arch)
 
-PLAT_NAME := $(patsubst "%",%,$(shell axconfig-gen $(PLAT_CONFIG) -r platform))
+PLAT_NAME := $(patsubst "%",%,$(shell kconfig-gen $(PLAT_CONFIG) -r platform))

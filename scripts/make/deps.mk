@@ -1,15 +1,15 @@
 # Necessary dependencies for the build system
 
 # Tool to parse information about the target package
-ifeq ($(shell cargo axplat --version 2>/dev/null),)
-  $(info Installing cargo-axplat...)
-  $(shell cargo install cargo-axplat)
+ifeq ($(shell cargo platconfig --version 2>/dev/null),)
+  $(info Installing cargo-platconfig...)
+  $(shell cargo install --path xtask/cargo-platconfig)
 endif
 
 # Tool to generate platform configuration files
-ifeq ($(shell axconfig-gen --version 2>/dev/null),)
-  $(info Installing axconfig-gen...)
-  $(shell cargo install axconfig-gen)
+ifeq ($(shell kconfig-gen --version 2>/dev/null),)
+  $(info Installing kconfig-gen...)
+  $(shell cargo install --path xtask/kconfig-gen)
 endif
 
 # Cargo binutils

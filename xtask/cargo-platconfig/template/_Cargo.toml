@@ -1,0 +1,12 @@
+[package]
+name = "kplat-example" # to be overwritten
+version = "0.3.0"       # to be overwritten
+edition = "2021"        # to be overwritten
+
+[features]
+irq = ["kplat/irq"]
+smp = ["kplat/smp"]
+
+[dependencies]
+axconfig-macros = "0.2"
+kplat = "0.3"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["entry", "platforms/bootloader"]
+members = ["entry", "xtask/cargo-platconfig", "xtask/kconfig-gen", "platforms/bootloader"]
 exclude = []
 
 [workspace.package]
