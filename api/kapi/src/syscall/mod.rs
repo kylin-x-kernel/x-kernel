@@ -10,7 +10,7 @@ mod sys;
 mod task;
 mod time;
 
-use kerrno::{KError, LinuxError};
+use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
 
@@ -638,7 +638,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
             #[cfg(not(feature = "tee"))]
             {
                 warn!("Unimplemented syscall: {sysno}");
-                Err(KError::Unsupported)
+                Err(kerrno::KError::Unsupported)
             }
         }
     };

@@ -93,7 +93,7 @@ pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     message.extend_from_slice(&encoded);
     let mut src = message.as_slice();
     socket
-        .send(&mut src, SendOptions::default())
+        .send(src, SendOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
 
     Ok(())
@@ -124,7 +124,7 @@ pub fn tee_ta_invoke_command(
     message.extend_from_slice(&encoded);
     let mut src = message.as_slice();
     socket
-        .send(&mut src, SendOptions::default())
+        .send(src, SendOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Receive response from dest TA
