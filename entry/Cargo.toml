@@ -41,6 +41,7 @@ qemu = [
     "kapi/dev-log",
     "pci",
     "test",
+    "tee"
 ]
 
 # aarch64-qemu-virt platform
