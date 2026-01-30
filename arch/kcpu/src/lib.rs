@@ -41,3 +41,6 @@ cfg_if::cfg_if! {
         pub use self::loongarch64::*;
     }
 }
+
+#[cfg(feature = "kcpu_test")]
+pub mod test_unit_test;

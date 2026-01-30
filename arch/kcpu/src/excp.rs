@@ -35,3 +35,46 @@ macro_rules! dispatch_irq_trap {
         }
     }}
 }
+
+#[cfg(feature = "kcpu_test")]
+pub mod tests_excp {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::*;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_irq_slice_empty_by_default() {
+            let count = IRQ.iter().count();
+            assert_eq!(IRQ.len(), count);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_page_fault_slice_empty_by_default() {
+            let count = PAGE_FAULT.iter().count();
+            assert_eq!(PAGE_FAULT.len(), count);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_page_fault_flags_bits() {
+            let flags = PageFaultFlags::empty();
+            assert!(flags.is_empty());
+        }
+    }
+
+    tests_name! {
+        TEST_EXCP;
+        test_irq_slice_empty_by_default,
+        test_page_fault_slice_empty_by_default,
+        test_page_fault_flags_bits,
+    }
+}

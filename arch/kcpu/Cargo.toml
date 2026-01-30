@@ -14,6 +14,8 @@ fp-simd = []
 tls = []
 uspace = []
 arm-el2 = []
+kcpu_test = ["dep:unittest"]
+unittest = ["kcpu_test"]
 
 [dependencies]
 backtrace = { workspace = true }
@@ -25,6 +27,7 @@ memaddr = { workspace = true }
 page_table = { workspace = true }
 percpu = { workspace = true }
 static_assertions = "1.1.0"
+unittest = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 lazyinit = "0.2"

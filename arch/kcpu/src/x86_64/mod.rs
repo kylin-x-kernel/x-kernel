@@ -20,3 +20,59 @@ pub mod userspace;
 pub use self::ctx::{
     ExceptionContext as TrapFrame, ExceptionContext, ExtendedState, FxsaveArea, TaskContext,
 };
+
+#[cfg(all(feature = "kcpu_test", target_arch = "x86_64"))]
+pub mod tests_arch {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::ExceptionContext;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_exception_context_args() {
+            let mut ctx = ExceptionContext::default();
+            ctx.set_arg0(10);
+            ctx.set_arg1(20);
+            ctx.set_arg2(30);
+            assert_eq!(ctx.arg0(), 10);
+            assert_eq!(ctx.arg1(), 20);
+            assert_eq!(ctx.arg2(), 30);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_exception_context_ip_sp() {
+            let mut ctx = ExceptionContext::default();
+            ctx.set_ip(0x2000);
+            ctx.set_sp(0x3000);
+            assert_eq!(ctx.ip(), 0x2000);
+            assert_eq!(ctx.sp(), 0x3000);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_exception_context_sysno_retval() {
+            let mut ctx = ExceptionContext::default();
+            ctx.set_sysno(7);
+            assert_eq!(ctx.sysno(), 7);
+            assert_eq!(ctx.retval(), 7);
+            ctx.set_retval(9);
+            assert_eq!(ctx.sysno(), 9);
+            assert_eq!(ctx.retval(), 9);
+        }
+    }
+
+    tests_name! {
+        TEST_ARCH_X86_64;
+        test_exception_context_args,
+        test_exception_context_ip_sp,
+        test_exception_context_sysno_retval,
+    }
+}
