@@ -193,9 +193,8 @@ pub mod tests_guard_types {
 
         fn test_guard_noop_multiple_acquire_release() {
             for _ in 0..100 {
-                let state = NoOp::acquire();
-                assert_eq!(state, ());
-                NoOp::release(state);
+                NoOp::acquire();
+                NoOp::release(());
             }
         }
     }
@@ -204,12 +203,12 @@ pub mod tests_guard_types {
         using TestResult;
 
         fn test_guard_noop_nested() {
-            let s1 = NoOp::acquire();
-            let s2 = NoOp::acquire();
-            let s3 = NoOp::acquire();
-            NoOp::release(s3);
-            NoOp::release(s2);
-            NoOp::release(s1);
+            NoOp::acquire();
+            NoOp::acquire();
+            NoOp::acquire();
+            NoOp::release(());
+            NoOp::release(());
+            NoOp::release(());
         }
     }
 
@@ -227,8 +226,8 @@ pub mod tests_guard_types {
         using TestResult;
 
         fn test_nopreempt_acquire_release() {
-            let state = NoPreempt::acquire();
-            NoPreempt::release(state);
+            NoPreempt::acquire();
+            NoPreempt::release(());
         }
     }
 
