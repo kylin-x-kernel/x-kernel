@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use loongArch64::iocsr::{iocsr_read_d, iocsr_write_d, iocsr_write_w};
 const LOONGARCH_IOCSR_MISC_FUNC: usize = 0x420;
 const IOCSR_MISC_FUNC_EXT_IOI_EN: u64 = 1 << 48;

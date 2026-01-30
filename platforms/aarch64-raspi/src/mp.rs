@@ -1,4 +1,11 @@
+<<<<<<< HEAD
 //! SMP bring-up helpers for Raspberry Pi.
+=======
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+>>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
 use kplat::memory::{PhysAddr, pa, p2v, va, v2p};
 static mut SECONDARY_STACK_TOP: usize = 0;
 const CPU_SPIN_TABLE: [PhysAddr; 4] = [pa!(0xd8), pa!(0xe0), pa!(0xe8), pa!(0xf0)];

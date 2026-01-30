@@ -1,4 +1,11 @@
+<<<<<<< HEAD
 //! Physical memory layout and address translation helpers.
+=======
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+>>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};

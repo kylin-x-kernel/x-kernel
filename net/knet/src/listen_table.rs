@@ -1,4 +1,11 @@
+<<<<<<< HEAD
 //! TCP listen table and backlog management.
+=======
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+>>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec};
 use core::ops::DerefMut;
 

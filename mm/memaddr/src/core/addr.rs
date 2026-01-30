@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 pub trait AddrOps: Copy + From<usize> + Into<usize> + Ord {
     #[inline]
     #[must_use = "this returns a new address, without modifying the original"]

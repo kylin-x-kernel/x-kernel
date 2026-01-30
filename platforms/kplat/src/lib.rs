@@ -1,4 +1,10 @@
+<<<<<<< HEAD
 //! Platform abstraction layer interfaces and entry points.
+=======
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+>>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

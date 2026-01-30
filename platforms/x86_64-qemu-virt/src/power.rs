@@ -1,4 +1,10 @@
+<<<<<<< HEAD
 //! Power control implementation for x86_64-qemu-virt.
+=======
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+>>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
 
 use kplat::sys::SysCtrl;
 use x86_64::instructions::port::PortWriteOnly;

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use crate::config::{devices::PCH_PIC_PADDR, plat::PHYS_VIRT_OFFSET};
 const PIC_COUNT_PER_REG: usize = 32;
 const PIC_REG_COUNT: usize = 2;

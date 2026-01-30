@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! The TLSF (Two-Level Segregated Fit) dynamic memory allocation algorithm.
 //!
 //! This module wraps the implementation provided by the [rlsf] crate.

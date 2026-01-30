@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(doc), no_std)]
 #![feature(doc_cfg)]

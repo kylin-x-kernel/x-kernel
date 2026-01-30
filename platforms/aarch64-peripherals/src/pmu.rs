@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use aarch64_pmuv3::pmuv3::{PmuCounter, PmuEvent};
 use kplat::perf::PerfCb;
 use lazyinit::LazyInit;

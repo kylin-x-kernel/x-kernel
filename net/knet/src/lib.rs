@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! It provides unified networking primitives for TCP/UDP communication
 //! using various underlying network stacks. Currently, only [smoltcp] is
 //! supported.

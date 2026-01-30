@@ -1,5 +1,11 @@
+<<<<<<< HEAD
 //! C-compatible allocation shims for the kernel allocator.
 #![allow(unsafe_op_in_unsafe_fn)]
+=======
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+>>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
 
 use core::{
     alloc::Layout,

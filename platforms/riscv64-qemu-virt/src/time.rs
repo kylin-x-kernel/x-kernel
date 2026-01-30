@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use kplat::timer::{GlobalTimer, NS_SEC};
 use riscv::register::time;
 const NANOS_PER_TICK: u64 = NS_SEC / crate::config::devices::TIMER_FREQUENCY as u64;

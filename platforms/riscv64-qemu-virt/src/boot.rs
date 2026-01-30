@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use kplat::memory::{PageAligned, pa};
 
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};

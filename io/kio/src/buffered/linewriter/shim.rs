@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use crate::{BufWriter, Result, Write};
 
 /// Private helper struct for implementing the line-buffered writing logic.

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! A naïve spinning mutex.
 //!
 //! Waiting threads hammer an atomic variable until it becomes available. Best-case latency is low, but worst-case

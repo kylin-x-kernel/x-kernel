@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec::Vec};
 use core::{fmt, io::BorrowedCursor};

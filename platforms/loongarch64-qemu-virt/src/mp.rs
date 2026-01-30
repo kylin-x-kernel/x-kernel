@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use kplat::memory::PhysAddr;
 use loongArch64::ipi::{csr_mail_send, notify_cpu_single};
 
