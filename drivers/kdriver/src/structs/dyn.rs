@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Dynamic device type aliases for trait-object based device selection.
 use alloc::boxed::Box;
 

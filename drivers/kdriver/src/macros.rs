@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! TODO: generate registered drivers in `for_each_drivers!` automatically.
+
 //! Driver registration and enumeration macros.
 
 #![allow(unused_macros)]

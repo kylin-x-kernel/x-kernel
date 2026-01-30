@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Async helpers built on top of pollable I/O and IRQ wakers.
 
 use core::{future::poll_fn, task::Poll};

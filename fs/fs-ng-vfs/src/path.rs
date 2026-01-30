@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Path parsing and normalization utilities.
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{borrow::Borrow, fmt, ops::Deref};

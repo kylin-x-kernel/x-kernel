@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Path resolution module
 //!
 //! Provides stateless path resolution functionality, separated from filesystem operations.

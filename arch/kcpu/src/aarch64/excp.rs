@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! AArch64 exception and IRQ dispatching.
 
 use aarch64_cpu::registers::{ESR_EL1, FAR_EL1};

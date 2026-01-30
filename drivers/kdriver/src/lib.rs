@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! [x-kernel] device drivers.
 //!
 //! All detected devices are composed into [`AllDevices`] and returned by [`init_drivers`].

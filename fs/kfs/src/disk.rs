@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Block device wrapper with a seekable cursor.
 //! Seekable block device wrapper.
 use alloc::{boxed::Box, vec};

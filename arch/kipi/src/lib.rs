@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! X-Kernel Inter-Processor Communication (IPC) API
 //!
 //! This module provides a lightweight abstraction for CPU-to-CPU communication

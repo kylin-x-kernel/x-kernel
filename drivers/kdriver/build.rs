@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 const NET_DEV_FEATURES: &[&str] = &["fxmac", "ixgbe", "virtio-net"];
 const BLOCK_DEV_FEATURES: &[&str] = &["ahci", "ramdisk", "sdmmc", "bcm2835-sdhci", "virtio-blk"];
 const DISPLAY_DEV_FEATURES: &[&str] = &["virtio-gpu"];

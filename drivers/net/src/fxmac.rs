@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Phytium FXMAC network driver adapter.
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 use core::ptr::NonNull;

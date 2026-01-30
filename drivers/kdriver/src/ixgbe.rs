@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use kdma::{DmaBusAddress, DMAInfo, allocate_dma_memory, deallocate_dma_memory};
 use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 use khal::mem::{p2v, v2p};

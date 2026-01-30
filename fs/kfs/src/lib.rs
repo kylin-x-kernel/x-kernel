@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Kernel filesystem initialization and high-level APIs.
 #![cfg_attr(all(not(test), not(doc)), no_std)]
 #![allow(dead_code, unused_imports, rustdoc::broken_intra_doc_links)]

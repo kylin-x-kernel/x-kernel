@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! This module provides primitives for task management, including task
 //! creation, scheduling, sleeping, termination, etc. The scheduler algorithm
 //! is configurable by cargo features.

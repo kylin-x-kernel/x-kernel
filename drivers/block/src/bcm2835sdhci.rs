@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! SD card driver for Raspberry Pi 4 (BCM2835 SDHCI)
 
 use bcm2835_sdhci::{

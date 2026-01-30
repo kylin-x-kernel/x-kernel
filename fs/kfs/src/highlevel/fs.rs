@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! High-level filesystem context and directory iteration utilities.
 use alloc::{
     borrow::{Cow, ToOwned},

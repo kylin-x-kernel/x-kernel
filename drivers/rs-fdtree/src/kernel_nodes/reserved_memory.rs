@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Linux kernel reserved-memory nodes
 //!
 //! Reference: https://www.kernel.org/doc/Documentation/devicetree/bindings/reserved-memory/reserved-memory.yaml

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};

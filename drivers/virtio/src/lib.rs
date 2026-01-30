@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Wrappers of some devices in the [`virtio-drivers`][1] crate, that implement
 //! traits in the [`driver_base`][2] series crates.
 //!
