@@ -34,6 +34,9 @@ mod tracking;
 #[cfg(feature = "tracking")]
 pub use tracking::*;
 
+#[cfg(feature = "kalloc_test")]
+pub mod test_unit_test;
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "slab")] {
         /// The default byte allocator.
@@ -500,4 +503,54 @@ pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
         va + size
     );
     GLOBAL_ALLOCATOR.add_memory(va, size)
+}
+
+#[cfg(feature = "kalloc_test")]
+#[allow(missing_docs)]
+pub mod tests_kalloc {
+    use strum::VariantArray;
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::{UsageKind, Usages};
+
+    test_fn! {
+        using TestResult;
+
+        fn test_usages_alloc_dealloc() {
+            let mut usages = Usages::new();
+            usages.alloc(UsageKind::RustHeap, 64);
+            assert_eq!(usages.get(UsageKind::RustHeap), 64);
+            usages.dealloc(UsageKind::RustHeap, 32);
+            assert_eq!(usages.get(UsageKind::RustHeap), 32);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_usage_kind_variants_len() {
+            assert!(UsageKind::VARIANTS.len() >= 5);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_usages_independent_kinds() {
+            let mut usages = Usages::new();
+            usages.alloc(UsageKind::VirtMem, 10);
+            usages.alloc(UsageKind::PageTable, 20);
+            assert_eq!(usages.get(UsageKind::VirtMem), 10);
+            assert_eq!(usages.get(UsageKind::PageTable), 20);
+        }
+    }
+
+    tests_name! {
+        TEST_KALLOC;
+        test_usages_alloc_dealloc,
+        test_usage_kind_variants_len,
+        test_usages_independent_kinds,
+    }
 }
