@@ -9,7 +9,6 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-default = ["tee", "tee_test"]
 input = ["dep:inputdev"]
 memtrack = ["kfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["knet/vsock"]

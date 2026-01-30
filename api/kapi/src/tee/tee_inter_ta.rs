@@ -23,10 +23,10 @@ use crate::tee::{
 
 pub fn sys_tee_scn_open_ta_session(
     dest: *const TEE_UUID,
-    cancel_req_to: c_ulong,
-    usr_param: *mut utee_params,
-    ta_sees: *mut c_uint,
-    ret_orig: *mut c_uint,
+    _cancel_req_to: c_ulong,
+    _usr_param: *mut utee_params,
+    _ta_sees: *mut c_uint,
+    _ret_orig: *mut c_uint,
 ) -> TeeResult {
     let uuid = TEE_UUID {
         timeLow: 0,
@@ -54,10 +54,10 @@ pub fn sys_tee_scn_close_ta_session(ta_sees: c_ulong) -> TeeResult {
 
 pub fn sys_tee_scn_invoke_ta_command(
     ta_sees: c_ulong,
-    cancel_req_to: c_ulong,
+    _cancel_req_to: c_ulong,
     cmd_id: c_ulong,
     usr_param: *mut utee_params,
-    ret_orig: *mut c_uint,
+    _ret_orig: *mut c_uint,
 ) -> TeeResult {
     let sess_id = tee_ta_get_session(ta_sees as u32)?;
     tee_ta_invoke_command(sess_id, cmd_id as u32, usr_param)?;
