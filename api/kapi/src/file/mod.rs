@@ -18,7 +18,7 @@ use core::{ffi::c_int, time::Duration};
 use downcast_rs::{DowncastSync, impl_downcast};
 use flatten_objects::FlattenObjects;
 use fs_ng_vfs::DeviceId;
-use kcore::{resources::AX_FILE_LIMIT, task::AsThread};
+use kcore::{resources::FILE_LIMIT, task::AsThread};
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
 use kio::prelude::*;
@@ -231,7 +231,7 @@ pub struct FileDescriptor {
 
 scope_local::scope_local! {
     /// The current file descriptor table.
-    pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>>> = Arc::default();
+    pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, { FILE_LIMIT }>>> = Arc::default();
 }
 
 /// Retrieves a file-like object from the file descriptor table.
@@ -280,10 +280,7 @@ pub fn close_file_like(fd: c_int) -> KResult {
     Ok(())
 }
 
-/// Initializes the standard input, output, and error file descriptors (0, 1, 2).
-///
-/// All three standard streams are connected to `/dev/console`.
-pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>) -> KResult<()> {
+pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { FILE_LIMIT }>) -> KResult<()> {
     assert_eq!(fd_table.count(), 0);
     let cx = FS_CONTEXT.lock();
     let open = |options: &mut OpenOptions| {

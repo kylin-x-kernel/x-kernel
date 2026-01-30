@@ -62,15 +62,15 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     // to prevent it from being dropped while blocking.
     let task = curr.clone();
 
-    let axwaker = KWaker::new(&task);
-    let waker = Waker::from(axwaker.clone());
+    let kwaker = KWaker::new(&task);
+    let waker = Waker::from(kwaker.clone());
     let mut cx = Context::from_waker(&waker);
 
     loop {
         match fut.as_mut().poll(&mut cx) {
             Poll::Pending => {
                 let mut rq = current_run_queue::<NoPreemptIrqSave>();
-                let woke = axwaker.woke.lock();
+                let woke = kwaker.woke.lock();
                 if !*woke {
                     rq.blocked_resched(woke);
                 } else {

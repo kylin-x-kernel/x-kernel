@@ -220,9 +220,6 @@ doc_check_missing:
 fmt:
 	cargo fmt --all
 
-fmt_c:
-	@clang-format --style=file -i $(shell find ulib/axlibc -iname '*.c' -o -iname '*.h')
-
 unittest:
 	$(call unit_test)
 
@@ -241,7 +238,6 @@ clean: clean_c
 	cargo clean
 
 clean_c::
-	rm -rf ulib/axlibc/build_*
 	rm -rf $(app-objs)
 
 .PHONY: all defconfig oldconfig \

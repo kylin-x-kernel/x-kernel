@@ -14,10 +14,6 @@
 //!   `preempt` features if it is enabled.
 //! - `sched-cfs`: Use the [Completely Fair Scheduler][3]. It also enables the
 //!   `preempt` features if it is enabled.
-//!
-//! [1]: axsched::FifoScheduler
-//! [2]: axsched::RRScheduler
-//! [3]: axsched::CFScheduler
 
 #![cfg_attr(not(test), no_std)]
 #![feature(doc_cfg)]
