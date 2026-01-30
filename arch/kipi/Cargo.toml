@@ -10,6 +10,8 @@ repository.workspace = true
 
 [features]
 default = []
+kipi_test = ["dep:unittest"]
+unittest = ["kipi_test"]
 
 [dependencies]
 platconfig.workspace = true
@@ -18,3 +20,4 @@ kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
 percpu.workspace = true
+unittest = { workspace = true, optional = true }

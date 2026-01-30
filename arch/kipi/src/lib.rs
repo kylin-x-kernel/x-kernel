@@ -147,5 +147,8 @@ pub fn ipi_handler() {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "kipi_test"))]
 mod tests;
+
+#[cfg(feature = "kipi_test")]
+pub mod test_unit_test;
