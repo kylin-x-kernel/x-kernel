@@ -7,7 +7,7 @@ use kspin::SpinNoIrq;
 use log::{debug, error};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, va};
 
-use crate::{DmaBusAddress, DMAInfo, p2b};
+use crate::{DMAInfo, DmaBusAddress, p2b};
 
 /// Interface for updating page table flags.
 /// This breaks the cyclic dependency: kdma -> axmm -> axfs -> axdriver -> kdma
