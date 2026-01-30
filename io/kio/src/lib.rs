@@ -43,11 +43,11 @@ pub struct PollState {
 }
 
 #[cfg(feature = "unittest")]
-pub mod test_seek;
-#[cfg(feature = "unittest")]
 pub mod test_cursor;
 #[cfg(feature = "unittest")]
 pub mod test_iobuf;
+#[cfg(feature = "unittest")]
+pub mod test_seek;
 #[cfg(feature = "unittest")]
 pub mod test_unit_test;
 
