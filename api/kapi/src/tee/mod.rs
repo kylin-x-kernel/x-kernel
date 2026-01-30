@@ -39,13 +39,13 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         Sysno::tee_scn_log => sys_tee_scn_log(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::tee_scn_panic => sys_tee_scn_panic(uctx.arg0() as _),
         Sysno::tee_scn_get_property => {
-            let prop_type: usize;
-            unsafe {
-                asm!(
-                    "mov {0}, x6",
-                    out(reg) prop_type,
-                );
-            }
+            let prop_type: usize = 0;
+            // unsafe {
+            //     asm!(
+            //         "mov {0}, x6",
+            //         out(reg) prop_type,
+            //     );
+            // }
             sys_tee_scn_get_property(
                 uctx.arg0() as _,
                 uctx.arg1() as _,
