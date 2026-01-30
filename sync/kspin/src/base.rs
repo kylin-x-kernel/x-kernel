@@ -442,3 +442,107 @@ mod tests {
         assert!(lock.try_lock().is_some());
     }
 }
+
+#[cfg(feature = "unittest")]
+pub mod tests_base {
+    extern crate alloc;
+    
+    use super::*;
+    use crate::NoOp;
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    type TestBaseLock<T> = BaseSpinLock<NoOp, T>;
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_base_spinlock_nested_scope() {
+            let lock = TestBaseLock::new(0);
+            {
+                let mut g1 = lock.lock();
+                *g1 = 10;
+            }
+            {
+                let mut g2 = lock.lock();
+                *g2 += 5;
+            }
+            assert_eq!(*lock.lock(), 15);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_base_spinlock_guard_drop() {
+            let lock = TestBaseLock::new(100);
+            {
+                let mut guard = lock.lock();
+                *guard = 200;
+                // guard dropped here
+            }
+            // Should be able to lock again after drop
+            let guard2 = lock.lock();
+            assert_eq!(*guard2, 200);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_base_spinlock_get_mut() {
+            let mut lock = TestBaseLock::new(42);
+            {
+                let data = lock.get_mut();
+                *data = 99;
+            }
+            assert_eq!(*lock.lock(), 99);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_base_spinlock_into_inner_ownership() {
+            use alloc::vec::Vec;
+            let mut v = Vec::new();
+            v.push(1);
+            v.push(2);
+            v.push(3);
+            let lock = TestBaseLock::new(v);
+            let inner = lock.into_inner();
+            assert_eq!(inner.len(), 3);
+            assert_eq!(inner[0], 1);
+            assert_eq!(inner[2], 3);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_base_spinlock_try_lock_sequential() {
+            let lock = TestBaseLock::new(0);
+            {
+                let guard = lock.try_lock();
+                assert!(guard.is_some());
+                if let Some(mut g) = guard {
+                    *g = 42;
+                }
+            }
+            // After first guard dropped, try_lock should succeed
+            let guard2 = lock.try_lock();
+            assert!(guard2.is_some());
+            assert_eq!(*guard2.unwrap(), 42);
+        }
+    }
+
+    tests_name!(TEST_BASE_SPINLOCK;
+        test_base_spinlock_nested_scope,
+        test_base_spinlock_guard_drop,
+        test_base_spinlock_get_mut,
+        test_base_spinlock_into_inner_ownership,
+        test_base_spinlock_try_lock_sequential,
+    );
+}
+

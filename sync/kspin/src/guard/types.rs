@@ -179,3 +179,72 @@ pub use NoOp as NoPreempt;
 pub use NoOp as NoPreemptIrqSave;
 #[cfg(target_os = "none")]
 pub use kernel::*;
+
+#[cfg(feature = "unittest")]
+pub mod tests_guard_types {
+    use super::*;
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    test_fn! {
+        using TestResult;
+
+        fn test_guard_noop_multiple_acquire_release() {
+            for _ in 0..100 {
+                let state = NoOp::acquire();
+                assert_eq!(state, ());
+                NoOp::release(state);
+            }
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_guard_noop_nested() {
+            let s1 = NoOp::acquire();
+            let s2 = NoOp::acquire();
+            let s3 = NoOp::acquire();
+            NoOp::release(s3);
+            NoOp::release(s2);
+            NoOp::release(s1);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_irqsave_acquire_release() {
+            // Just verify acquire/release work without panicking
+            let state = IrqSave::acquire();
+            IrqSave::release(state);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_nopreempt_acquire_release() {
+            let state = NoPreempt::acquire();
+            NoPreempt::release(state);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_nopreempt_irqsave_acquire_release() {
+            let state = NoPreemptIrqSave::acquire();
+            NoPreemptIrqSave::release(state);
+        }
+    }
+
+    tests_name!(TEST_GUARD_TYPES;
+        test_guard_noop_multiple_acquire_release,
+        test_guard_noop_nested,
+        test_irqsave_acquire_release,
+        test_nopreempt_acquire_release,
+        test_nopreempt_irqsave_acquire_release,
+    );
+}

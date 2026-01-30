@@ -38,7 +38,7 @@ fn main() {
 
         info!("Running example tests...");
         test_example();
-
+        kspin::kspin_unit_test();
         info!("Running TEE unit tests...");
         tee_unit_test();
     }

@@ -235,3 +235,100 @@ impl<G: BaseGuard, T: ?Sized> Drop for SpinLockGuard<'_, G, T> {
         G::release(self.guard_state);
     }
 }
+
+#[cfg(feature = "unittest")]
+pub mod tests_lock {
+    extern crate alloc;
+    
+    use super::*;
+    use crate::NoOp;
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    type TestSpinLock<T> = SpinLock<NoOp, T>;
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_spinlock_multiple_locks() {
+            let lock = TestSpinLock::new(0);
+            for i in 0..10 {
+                let mut guard = lock.lock();
+                *guard += i;
+            }
+            assert_eq!(*lock.lock(), 45); // 0+1+2+...+9 = 45
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_spinlock_is_locked_after_lock() {
+            let lock = TestSpinLock::new(42);
+            let _guard = lock.lock();
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "smp")] {
+                    assert!(lock.is_locked());
+                } else {
+                    // On non-SMP, is_locked always returns false
+                    assert!(!lock.is_locked());
+                }
+            }
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_spinlock_is_locked_after_drop() {
+            let lock = TestSpinLock::new(42);
+            {
+                let _guard = lock.lock();
+                // locked here
+            }
+            // After guard dropped, should be unlocked
+            assert!(!lock.is_locked());
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_spinlock_complex_state_mutation() {
+            use alloc::string::String;
+            let lock = TestSpinLock::new(String::new());
+            {
+                let mut guard = lock.lock();
+                guard.push_str("hello");
+            }
+            {
+                let mut guard = lock.lock();
+                guard.push_str(" world");
+            }
+            assert_eq!(*lock.lock(), "hello world");
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+        
+        fn test_spinlock_try_lock_after_explicit_drop() {
+            let lock = TestSpinLock::new(0);
+            let guard = lock.lock();
+            drop(guard);
+            
+            // Should be able to try_lock after explicit drop
+            let result = lock.try_lock();
+            assert!(result.is_some());
+        }
+    }
+
+    tests_name!(TEST_SPINLOCK;
+        test_spinlock_multiple_locks,
+        test_spinlock_is_locked_after_lock,
+        test_spinlock_is_locked_after_drop,
+        test_spinlock_complex_state_mutation,
+        test_spinlock_try_lock_after_explicit_drop,
+    );
+}

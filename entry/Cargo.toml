@@ -22,7 +22,7 @@ kernel = [
 
 tee = ["kapi/tee", "kcore/tee"]
 smp = ["kfeat/smp"]
-test = ["unittest", "kapi/unittest"]
+test = ["unittest", "kapi/unittest", "kspin/unittest"]
 
 # Stubs
 pci = ["kfeat/bus-pci"]
@@ -114,6 +114,7 @@ kprocess.workspace = true
 ksignal.workspace = true
 kcore.workspace = true
 kapi.workspace = true
+kspin.workspace = true
 
 unittest = { workspace = true, optional = true }
 
