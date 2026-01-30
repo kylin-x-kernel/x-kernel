@@ -2,9 +2,9 @@
 use alloc::{vec, vec::Vec};
 use core::any::Any;
 
+use aarch64_crosvm_virt::fdt::dice_reg;
 use kcore::vfs::DeviceOps;
 use kerrno::{KError, KResult};
-use kplat_aarch64_crosvm_virt::fdt::dice_reg;
 use memaddr::VirtAddr;
 use rand_chacha::{
     ChaCha8Rng,
@@ -126,6 +126,7 @@ impl DeviceOps for DiceNodeInfo<'static> {
 fn get_process_hash() -> KResult<Vec<u8>> {
     use alloc::format;
 
+    use kcore::task::AsThread;
     use kfs::FS_CONTEXT;
     use ktask::current;
     use mbedtls::hash::{Md, Type};

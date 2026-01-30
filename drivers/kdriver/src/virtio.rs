@@ -10,7 +10,7 @@ use core::{marker::PhantomData, ptr::NonNull};
 
 use cfg_if::cfg_if;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
-use khal::mem::{p2v, v2p};
+use khal::mem::p2v;
 #[cfg(feature = "crosvm")]
 use khal::psci::{dma_share, dma_unshare};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
@@ -271,7 +271,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         #[cfg(not(any(feature = "crosvm", feature = "sev")))]
         {
             let vaddr = buffer.as_ptr() as *mut u8 as usize;
-            v2p(vaddr.into()).into()
+            khal::mem::v2p(vaddr.into()).into()
         }
     }
 

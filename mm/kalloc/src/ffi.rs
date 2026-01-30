@@ -5,6 +5,8 @@ use core::{
     ptr::{self, NonNull},
 };
 
+use crate::global_allocator;
+
 fn create_layout(user_size: usize) -> Option<Layout> {
     let metadata_size = size_of::<usize>();
     let total_size = user_size + metadata_size;
@@ -21,10 +23,10 @@ pub unsafe extern "C" fn malloc(size: c_int) -> *mut c_void {
     let user_size = size as usize;
     if let Some(layout) = create_layout(user_size) {
         match global_allocator().alloc(layout) {
-            Ok(ptr) => {
+            Ok(ptr) => unsafe {
                 *(ptr.as_ptr() as *mut usize) = user_size;
                 ptr.as_ptr().add(size_of::<usize>()) as *mut c_void
-            }
+            },
             Err(_) => ptr::null_mut(),
         }
     } else {
@@ -39,13 +41,15 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
     }
 
     let metadata_size = size_of::<usize>();
-    let base_ptr = (ptr as *mut u8).sub(metadata_size);
+    let base_ptr = unsafe { (ptr as *mut u8).sub(metadata_size) };
 
-    let user_size = *(base_ptr as *const usize);
+    let user_size = unsafe { *(base_ptr as *const usize) };
     let total_size = user_size + metadata_size;
 
-    let layout = Layout::from_size_align_unchecked(total_size, size_of::<usize>());
-    global_allocator().dealloc(NonNull::new_unchecked(base_ptr), layout);
+    unsafe {
+        let layout = Layout::from_size_align_unchecked(total_size, size_of::<usize>());
+        global_allocator().dealloc(NonNull::new_unchecked(base_ptr), layout);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -55,9 +59,11 @@ pub unsafe extern "C" fn calloc(nmemb: c_int, size: c_int) -> *mut c_void {
         return ptr::null_mut();
     }
 
-    let ptr = malloc(total_size);
+    let ptr = unsafe { malloc(total_size) };
     if !ptr.is_null() {
-        ptr::write_data(ptr as *mut u8, 0, total_size as usize);
+        unsafe {
+            ptr::write_bytes(ptr as *mut u8, 0, total_size as usize);
+        }
     }
     ptr
 }
@@ -77,6 +83,8 @@ pub unsafe extern "C" fn __memcpy_chk(
         return ptr::null_mut();
     }
 
-    ptr::copy_nonoverlapping(src as *const u8, dest as *mut u8, len as usize);
+    unsafe {
+        ptr::copy_nonoverlapping(src as *const u8, dest as *mut u8, len as usize);
+    }
     dest
 }

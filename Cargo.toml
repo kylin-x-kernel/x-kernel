@@ -95,6 +95,8 @@ strum = { version = "0.27", default-features = false, features = ["derive"] }
 
 # Tee Crates
 tee_raw_sys = { path = "tee/tee_raw_sys" }
+mbedtls = { git = "https://gitee.com/openkylin/rust-mbedtls.git", branch = "smx-mbedtls-sys-auto_v2.28.12", default-features = false, features = ["no_std_deps"]}
+dice = { git = "https://gitee.com/openkylin/rust-dice.git", branch = "starry-os"}
 
 # Driver Crates
 driver_base = { path = "drivers/driver_base" }

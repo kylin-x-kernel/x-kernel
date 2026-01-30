@@ -13,7 +13,7 @@ input = ["dep:inputdev"]
 memtrack = ["kfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["knet/vsock"]
 dev-log = []
-dice = ["dep:aarch64-crosvm-virt", "kalloc/dice", "dep:rand_chacha"]
+dice = ["dep:aarch64-crosvm-virt", "kalloc/dice", "dep:rand_chacha", "dep:dice", "dep:mbedtls"]
 tee = [
     "linux_sysno/tee",
     "dep:tee_raw_sys",
@@ -30,7 +30,8 @@ kalloc.workspace = true
 backtrace.workspace = true
 platconfig.workspace = true
 unittest = { workspace = true, optional = true }
-
+dice = { workspace = true, optional = true}
+mbedtls = { workspace = true, optional = true}
 fbdevice.workspace = true
 kdriver.workspace = true
 
