@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2025 WeiKang Guo <guoweikang.kernel@gmail.com
-// Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSE for license details.
-
 //! Error types for FDT parsing and manipulation.
 //!
 //! This module defines the error types that can occur when working with

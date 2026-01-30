@@ -1,11 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// Copyright (C) 2025 Yuekai Jia <equation618@gmail.com>
-// Copyright (C) 2025 ChengXiang Qi <kuangjux@outlook.com>
-// See LICENSE for license details.
-//
-// This file has been modified by KylinSoft on 2025.
-
 //! VirtIO device probing and HAL integration.
 use core::{marker::PhantomData, ptr::NonNull};
 

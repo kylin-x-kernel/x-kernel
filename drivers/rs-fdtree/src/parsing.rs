@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2025 WeiKang Guo <guoweikang.kernel@gmail.com
-// Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSE for license details.
-
 use core::convert::TryInto;
 
 use crate::error::FdtError;

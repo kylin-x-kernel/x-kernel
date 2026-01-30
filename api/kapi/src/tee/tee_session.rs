@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSES for license details.
-//
-// This file has been created by KylinSoft on 2025.
-
 use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{any::Any, default::Default};
 
