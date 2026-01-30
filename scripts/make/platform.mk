@@ -24,7 +24,7 @@ endif
 $(call validate_config)
 
 # Read the architecture name from the configuration file
-_arch := $(patsubst "%",%,$(shell axconfig-gen $(PLAT_CONFIG) -r arch))
+_arch := $(patsubst "%",%,$(shell kconfig-gen $(PLAT_CONFIG) -r arch))
 ifeq ($(origin ARCH),command line)
   ifneq ($(ARCH),$(_arch))
     $(error "ARCH=$(ARCH)" is not compatible with "PLAT=$(PLAT)")

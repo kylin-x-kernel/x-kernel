@@ -13,7 +13,7 @@ mod power;
 #[cfg(feature = "smp")]
 mod mp;
 pub mod config {
-    platconfig_macros::include_configs!(path_env = "PLAT_CONFIG_PATH", fallback = "axconfig.toml");
+    platconfig_macros::include_configs!(path_env = "PLAT_CONFIG_PATH", fallback = "platconfig.toml");
     assert_str_eq!(
         PACKAGE,
         env!("CARGO_PKG_NAME"),

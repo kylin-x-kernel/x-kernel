@@ -80,7 +80,7 @@ impl PlatformInfo {
 
         let manifest_path = package.manifest_path.to_string();
         let root_dir = manifest_path.strip_suffix("/Cargo.toml").unwrap();
-        let config_path = format!("{root_dir}/axconfig.toml");
+        let config_path = format!("{root_dir}/platconfig.toml");
         let (platform, arch) = parse_config(&config_path)?;
         Ok(Self {
             platform,

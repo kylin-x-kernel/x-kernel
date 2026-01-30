@@ -19,7 +19,10 @@ mod power;
 pub mod psci;
 mod time;
 pub mod config {
-    platconfig_macros::include_configs!(path_env = "PLAT_CONFIG_PATH", fallback = "axconfig.toml");
+    platconfig_macros::include_configs!(
+        path_env = "PLAT_CONFIG_PATH",
+        fallback = "platconfig.toml"
+    );
     check_str_eq!(
         PACKAGE,
         env!("CARGO_PKG_NAME"),

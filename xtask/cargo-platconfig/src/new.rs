@@ -48,7 +48,7 @@ fn apply_template(path: &str, arch: &str) -> io::Result<()> {
                 apply_cargo_toml_template(&mut orig_table, &new_table);
                 std::fs::write(dst, orig_table.to_string())?;
             }
-            "axconfig.toml" => {
+            "platconfig.toml" => {
                 let content = content
                     .replace("<ARCH>", arch)
                     .replace("<PACKAGE>", &package_name);
