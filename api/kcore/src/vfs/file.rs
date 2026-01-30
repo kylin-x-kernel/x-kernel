@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Simple file helpers for the in-kernel VFS.
 
 use alloc::{borrow::Cow, sync::Arc, vec::Vec};

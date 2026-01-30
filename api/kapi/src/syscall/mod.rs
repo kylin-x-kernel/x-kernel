@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Syscall implementation and dispatch.
 //!
 //! This module is the core of the syscall interface. It dispatches system calls from user space

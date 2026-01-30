@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Shared memory management.
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! DICE模块，用于处理 DICE handover数据
 use alloc::{vec, vec::Vec};
 use core::any::Any;

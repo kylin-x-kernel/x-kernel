@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 /// Performs a syscall and returns a `Result<usize, Errno>`.
 ///
 /// Accepts a syscall number and a variable number of arguments (0 to 6).

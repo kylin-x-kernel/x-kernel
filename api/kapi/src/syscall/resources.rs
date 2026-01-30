@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Resource limit and usage syscalls.
 //!
 //! This module provides syscalls for managing resource limits (prlimit64)
