@@ -14,7 +14,7 @@ use crate::{BusAddr, DMAInfo, phys_to_bus};
 #[crate_interface::def_interface]
 pub trait DmaPageTableIf {
     /// Update the mapping flags for the given virtual address range.
-    fn protect(vaddr: VirtAddr, size: usize, flags: MappingFlags) -> Result<(), ()>;
+    fn protect(vaddr: VirtAddr, size: usize, flags: MappingFlags) -> kerrno::KResult;
 }
 
 pub(crate) static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocator::new());

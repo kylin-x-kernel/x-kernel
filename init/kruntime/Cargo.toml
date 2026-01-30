@@ -34,7 +34,7 @@ pmu = ["khal/pmu"]
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 platconfig.workspace = true
-
+kerrno.workspace = true
 fbdevice = { workspace = true, optional = true }
 # display = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }

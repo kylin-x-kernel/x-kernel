@@ -104,11 +104,8 @@ impl axdma::DmaPageTableIf for DmaPageTableImpl {
         vaddr: memaddr::VirtAddr,
         size: usize,
         flags: khal::paging::MappingFlags,
-    ) -> Result<(), ()> {
-        memspace::kernel_layout()
-            .lock()
-            .protect(vaddr, size, flags)
-            .map_err(|_| ())
+    ) -> kerrno::KResult {
+        memspace::kernel_layout().lock().protect(vaddr, size, flags)
     }
 }
 
