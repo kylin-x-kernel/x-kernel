@@ -64,6 +64,6 @@ You can build the kernel for other supported platforms with the following comman
 ```bash
 make ARCH=xxx PLAT=[platforms/xxxxx] build
 ```
-## License
 
-This project is now released under the Apache License 2.0. All modifications and new contributions in our project are distributed under the same license. See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for details.
+## License
+This project is now released under the Apache License 2.0. See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for details.
