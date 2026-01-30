@@ -7,7 +7,7 @@
 
 use alloc::format;
 use core::{
-    fmt::Write,
+    fmt::{Debug, Write},
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -24,7 +24,7 @@ impl TestResult {
 }
 
 // Test statistics
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TestStats {
     pub total: usize,
     pub passed: usize,
@@ -49,6 +49,12 @@ impl TestStats {
             TestResult::Failed => self.failed += 1,
             TestResult::Ignored => self.ignored += 1,
         }
+    }
+}
+
+impl Default for TestStats {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -135,6 +141,12 @@ impl StringWriter {
 
     pub fn clear(&mut self) {
         self.pos = 0;
+    }
+}
+
+impl Default for StringWriter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -244,6 +256,12 @@ impl TestRunner {
 
     pub fn get_stats(&self) -> TestStats {
         self.stats
+    }
+}
+
+impl Default for TestRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
