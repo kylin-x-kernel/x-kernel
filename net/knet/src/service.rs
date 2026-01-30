@@ -1,3 +1,4 @@
+//! Network service wrapper around smoltcp interface.
 use alloc::boxed::Box;
 use core::{
     pin::Pin,

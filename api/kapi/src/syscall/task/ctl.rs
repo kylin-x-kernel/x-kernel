@@ -1,3 +1,10 @@
+//! Process capability and control syscalls.
+//!
+//! This module implements process control and capability operations including:
+//! - Process capabilities (capget, capset, etc.)
+//! - Process resource limits (prlimit, etc.)
+//! - Process information queries
+
 use core::ffi::c_char;
 
 use kcore::task::{AsThread, get_process_data};

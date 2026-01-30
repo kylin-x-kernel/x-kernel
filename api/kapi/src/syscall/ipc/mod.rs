@@ -1,9 +1,18 @@
+//! Inter-process communication syscalls.
+//!
+//! This module implements IPC mechanisms including:
+//! - Message queues (msgget, msgsnd, msgrcv, etc.)
+//! - Shared memory (shmget, shmat, shmdt, etc.)
+//! - Semaphores (semget, semop, semctl, etc.)
+//! - IPC permission and control operations
+
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use kcore::shm::IpcPerm;
 
 static IPC_ID: AtomicI32 = AtomicI32::new(0);
 
+/// Returns the next IPC identifier.
 fn next_ipc_id() -> i32 {
     IPC_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -31,7 +40,7 @@ const GROUP_WRITE: u32 = 0o020;
 const OTHER_READ: u32 = 0o004;
 const OTHER_WRITE: u32 = 0o002;
 
-// add a helper function to check IPC permissions
+/// Checks whether the current user has IPC permission for the given entry.
 fn has_ipc_permission(perm: &IpcPerm, current_uid: u32, current_gid: u32, is_write: bool) -> bool {
     // root user has all permissions
     if current_uid == 0 {

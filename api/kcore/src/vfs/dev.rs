@@ -1,3 +1,5 @@
+//! Device node helpers for the in-kernel VFS.
+
 use alloc::sync::Arc;
 use core::{any::Any, task::Context};
 

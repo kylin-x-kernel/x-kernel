@@ -1,3 +1,4 @@
+//! Ethernet device adapter for the smoltcp stack.
 use alloc::{string::String, vec};
 use core::task::Waker;
 
@@ -27,6 +28,7 @@ struct ArpNeighbor {
     expires_at: Instant,
 }
 
+/// Ethernet device backed by a driver-provided NIC.
 pub struct EthernetDevice {
     #[allow(dead_code)]
     name: String,
@@ -39,6 +41,7 @@ pub struct EthernetDevice {
 impl EthernetDevice {
     const NEIGHBOR_TTL: Duration = Duration::from_secs(60);
 
+    /// Create a new Ethernet device wrapper.
     pub fn new(name: String, inner: DriverNetDevice, ip: Ipv4Cidr) -> Self {
         let pending_tx = PacketBuffer::new(
             vec![PacketMetadata::EMPTY; ETHERNET_MAX_PENDING_PACKETS],

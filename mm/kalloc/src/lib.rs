@@ -1,3 +1,4 @@
+//! Kernel global allocator and page allocation helpers.
 #![no_std]
 
 #[macro_use]
@@ -60,11 +61,12 @@ pub enum UsageKind {
     Global,
 }
 
-/// Statistics of memory usages.
+/// Statistics of memory usage by category.
 #[derive(Clone, Copy)]
 pub struct Usages([usize; UsageKind::VARIANTS.len()]);
 
 impl Usages {
+    /// Create a zero-initialized usage table.
     const fn new() -> Self {
         Self([0; UsageKind::VARIANTS.len()])
     }
@@ -77,6 +79,7 @@ impl Usages {
         self.0[kind as usize] -= size;
     }
 
+    /// Return usage in bytes for the given kind.
     pub fn get(&self, kind: UsageKind) -> usize {
         self.0[kind as usize]
     }
@@ -397,30 +400,6 @@ unsafe impl GlobalAlloc for GlobalAllocator {
         }
     }
 
-    #[cfg(feature = "tracking")]
-    fn track_allocation<F>(allocate_memory: F, layout: Layout) -> *mut u8
-    where
-        F: FnOnce() -> *mut u8,
-    {
-        tracking::with_state(|state| match state {
-            None => allocate_memory(),
-            Some(state) => {
-                let ptr = allocate_memory();
-                let generation = state.generation;
-                state.generation += 1;
-                state.map.insert(
-                    ptr as usize,
-                    tracking::AllocationInfo {
-                        layout,
-                        backtrace: backtrace::Backtrace::capture(),
-                        generation,
-                    },
-                );
-                ptr
-            }
-        })
-    }
-
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let ptr = NonNull::new(ptr).expect("dealloc null ptr");
 
@@ -438,21 +417,45 @@ unsafe impl GlobalAlloc for GlobalAllocator {
             deallocate_memory();
         }
     }
+}
 
-    #[cfg(feature = "tracking")]
-    fn track_deallocation<F>(ptr: NonNull<u8>, deallocate_memory: F)
-    where
-        F: FnOnce(),
-    {
-        tracking::with_state(|state| match state {
-            None => deallocate_memory(),
-            Some(state) => {
-                let address = ptr.as_ptr() as usize;
-                state.map.remove(&address);
-                deallocate_memory();
-            }
-        });
-    }
+#[cfg(feature = "tracking")]
+fn track_allocation<F>(allocate_memory: F, layout: Layout) -> *mut u8
+where
+    F: FnOnce() -> *mut u8,
+{
+    tracking::with_state(|state| match state {
+        None => allocate_memory(),
+        Some(state) => {
+            let ptr = allocate_memory();
+            let generation = state.generation;
+            state.generation += 1;
+            state.map.insert(
+                ptr as usize,
+                tracking::AllocationInfo {
+                    layout,
+                    backtrace: backtrace::Backtrace::capture(),
+                    generation,
+                },
+            );
+            ptr
+        }
+    })
+}
+
+#[cfg(feature = "tracking")]
+fn track_deallocation<F>(ptr: NonNull<u8>, deallocate_memory: F)
+where
+    F: FnOnce(),
+{
+    tracking::with_state(|state| match state {
+        None => deallocate_memory(),
+        Some(state) => {
+            let address = ptr.as_ptr() as usize;
+            state.map.remove(&address);
+            deallocate_memory();
+        }
+    });
 }
 
 #[cfg_attr(all(target_os = "none", not(test)), global_allocator)]

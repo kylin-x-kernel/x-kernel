@@ -1,3 +1,5 @@
+//! Async helpers built on top of pollable I/O and IRQ wakers.
+
 use core::{future::poll_fn, task::Poll};
 
 use kerrno::{KError, KResult};

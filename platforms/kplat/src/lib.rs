@@ -1,3 +1,5 @@
+//! Platform abstraction layer interfaces and entry points.
+
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -37,10 +39,12 @@ macro_rules! check_str_eq {
     };
 }
 
+/// Primary CPU entry point invoked by the platform startup.
 pub fn entry(id: usize, dtb: usize) -> ! {
     unsafe { __kplat_main(id, dtb) }
 }
 
+/// Secondary CPU entry point (SMP only).
 #[cfg(feature = "smp")]
 pub fn entry_secondary(id: usize) -> ! {
     unsafe { __kplat_secondary_main(id) }

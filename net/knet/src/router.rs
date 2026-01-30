@@ -1,3 +1,4 @@
+//! Routing table and route selection.
 use alloc::{boxed::Box, vec, vec::Vec};
 
 use smoltcp::{

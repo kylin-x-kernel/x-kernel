@@ -1,3 +1,5 @@
+//! Global Descriptor Table (GDT) and Task State Segment (TSS) setup.
+
 use x86_64::{
     PrivilegeLevel,
     instructions::tables::load_tss,

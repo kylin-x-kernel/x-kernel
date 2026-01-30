@@ -1,4 +1,4 @@
-use kcore::{task::AsThread, time::ITimerType};
+//! Time-related syscalls.\n//!\n//! This module implements time and timer operations including:\n//! - Clock operations (clock_gettime, clock_settime, clock_getres, etc.)\n//! - Time queries (gettimeofday, gettime, etc.)\n//! - Timer management (setitimer, getitimer, timer_*, etc.)\n//! - Time conversions and utilities\n\nuse kcore::{task::AsThread, time::ITimerType};
 use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
 use ktask::current;
@@ -11,6 +11,7 @@ use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::time::TimeValueLike;
 
+/// Get the current time from the specified clock
 pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KResult<isize> {
     let now = match clock_id as u32 {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => wall_time(),
@@ -31,11 +32,13 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KRe
     Ok(0)
 }
 
+/// Get the current time of day
 pub fn sys_gettimeofday(ts: *mut timeval) -> KResult<isize> {
     ts.write_vm(timeval::from_time_value(wall_time()))?;
     Ok(0)
 }
 
+/// Get the resolution of the specified clock
 pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: *mut timespec) -> KResult<isize> {
     if clock_id as u32 != CLOCK_MONOTONIC && clock_id as u32 != CLOCK_REALTIME {
         warn!("Called sys_clock_getres for unsupported clock {clock_id}");
@@ -58,6 +61,7 @@ pub struct Tms {
     tms_cstime: usize,
 }
 
+/// Get timing information including user and system CPU time
 pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
     let (utime, stime) = current().as_thread().time.borrow().output();
     let utime = utime.as_micros() as usize;
@@ -71,6 +75,7 @@ pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
     Ok(ns2t(monotonic_time_nanos()) as _)
 }
 
+/// Get the current value of a timer
 pub fn sys_getitimer(which: i32, value: *mut itimerval) -> KResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
     let (it_interval, it_value) = current().as_thread().time.borrow().get_itimer(ty);
@@ -82,6 +87,7 @@ pub fn sys_getitimer(which: i32, value: *mut itimerval) -> KResult<isize> {
     Ok(0)
 }
 
+/// Set a timer to deliver a signal after a specified interval
 pub fn sys_setitimer(
     which: i32,
     new_value: *const itimerval,

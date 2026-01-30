@@ -6,6 +6,7 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
+//! PCI bus probing and BAR configuration.
 use khal::mem::p2v;
 use pci::{
     BarInfo, Cam, Command, DeviceFunction, HeaderType, MemoryBarType, PciRangeAllocator, PciRoot,
@@ -15,6 +16,7 @@ use crate::{AllDevices, prelude::*};
 
 const PCI_BAR_NUM: u8 = 6;
 
+/// Configure PCI BARs and enable the device.
 fn config_pci_device(
     root: &mut PciRoot,
     bdf: DeviceFunction,
@@ -92,6 +94,7 @@ fn config_pci_device(
 }
 
 impl AllDevices {
+    /// Enumerate PCI devices and register matching drivers.
     pub(crate) fn probe_bus_devices(&mut self) {
         let base_vaddr = p2v(platconfig::devices::PCI_ECAM_BASE.into());
         let mut root = {

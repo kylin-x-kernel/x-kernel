@@ -1,3 +1,4 @@
+//! Raspberry Pi system control implementation.
 use kplat::sys::SysCtrl;
 struct PowerImpl;
 #[impl_dev_interface]

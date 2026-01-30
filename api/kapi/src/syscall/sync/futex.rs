@@ -1,3 +1,11 @@
+//! Futex syscalls.
+//!
+//! This module implements fast userspace mutex (futex) operations including:
+//! - Futex wait and wake operations
+//! - Futex requeue operations
+//! - Robust futex lists
+//! - Priority-inheritance futexes
+
 use core::sync::atomic::Ordering;
 
 use kcore::{
@@ -14,6 +22,7 @@ use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::time::TimeValueLike;
 
+/// Helper to ensure a value is non-negative (unsigned interpretation)
 fn assert_unsigned(value: u32) -> KResult<u32> {
     if (value as i32) < 0 {
         Err(KError::InvalidInput)
@@ -22,6 +31,8 @@ fn assert_unsigned(value: u32) -> KResult<u32> {
     }
 }
 
+/// Fast userspace mutex (futex) system call.
+/// Implements Linux futex semantics for efficient synchronization primitives.
 pub fn sys_futex(
     uaddr: *const u32,
     futex_op: u32,
@@ -35,17 +46,20 @@ pub fn sys_futex(
          value3: {value3}",
     );
 
+    // Create a unique key for this futex (by virtual address and process)
     let key = FutexKey::new_current(uaddr.addr());
 
     let curr = current();
     let thr = curr.as_thread();
     let proc_data = &thr.proc_data;
+    // Get the futex table for the current process
     let futex_table = proc_data.futex_table_for(&key);
 
+    // Extract the command (lower bits) from the futex_op
     let command = futex_op & (FUTEX_CMD_MASK as u32);
     match command {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
-            // Fast path
+            // Fast path: Check if the value at uaddr matches the expected value
             if uaddr.read_vm()? != value {
                 return Err(KError::WouldBlock);
             }

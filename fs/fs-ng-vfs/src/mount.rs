@@ -1,3 +1,4 @@
+//! Mountpoints and location resolution for the VFS.
 use alloc::{
     string::String,
     sync::{Arc, Weak},
@@ -19,6 +20,7 @@ use crate::{
     path::{DOT, DOTDOT, PathBuf},
 };
 
+/// A mounted filesystem instance and its relationships.
 #[derive(Debug)]
 pub struct Mountpoint {
     /// Root dir entry in the mountpoint.
@@ -33,6 +35,7 @@ pub struct Mountpoint {
 }
 
 impl Mountpoint {
+    /// Create a new mountpoint for a filesystem at an optional parent location.
     pub fn new(fs: &Filesystem, location_in_parent: Option<Location>) -> Arc<Self> {
         static DEVICE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -45,10 +48,12 @@ impl Mountpoint {
         })
     }
 
+    /// Create a root mountpoint for a filesystem.
     pub fn new_root(fs: &Filesystem) -> Arc<Self> {
         Self::new(fs, None)
     }
 
+    /// Return a `Location` representing the mountpoint root.
     pub fn root_location(self: &Arc<Self>) -> Location {
         Location::new(self.clone(), self.root.clone())
     }
@@ -58,6 +63,7 @@ impl Mountpoint {
         self.location.clone()
     }
 
+    /// Returns whether this mountpoint has no parent mount.
     pub fn is_root(&self) -> bool {
         self.location.is_none()
     }
@@ -88,11 +94,13 @@ impl Mountpoint {
         mountpoint
     }
 
+    /// Returns the mountpoint's synthetic device ID.
     pub fn device(self: &Arc<Self>) -> u64 {
         self.device
     }
 }
 
+/// A resolved location within a mountpoint.
 #[derive(Debug, Clone)]
 pub struct Location {
     mountpoint: Arc<Mountpoint>,
@@ -130,6 +138,7 @@ impl Location {
 }
 
 impl Location {
+    /// Create a location from a mountpoint and directory entry.
     pub fn new(mountpoint: Arc<Mountpoint>, entry: DirEntry) -> Self {
         Self { mountpoint, entry }
     }
@@ -138,14 +147,17 @@ impl Location {
         Self::new(self.mountpoint.clone(), entry)
     }
 
+    /// Returns the mountpoint containing this location.
     pub fn mountpoint(&self) -> &Arc<Mountpoint> {
         &self.mountpoint
     }
 
+    /// Returns the underlying directory entry.
     pub fn entry(&self) -> &DirEntry {
         &self.entry
     }
 
+    /// Returns the name of this location within its parent directory.
     pub fn name(&self) -> &str {
         if self.is_root_of_mount() {
             self.mountpoint.location.as_ref().map_or("", Location::name)
@@ -154,6 +166,7 @@ impl Location {
         }
     }
 
+    /// Returns the parent location, if any.
     pub fn parent(&self) -> Option<Self> {
         if !self.is_root_of_mount() {
             return Some(self.with_entry(self.entry.parent().unwrap()));
@@ -161,24 +174,29 @@ impl Location {
         self.mountpoint.location()?.parent()
     }
 
+    /// Returns `true` if this is the global root location.
     pub fn is_root(&self) -> bool {
         self.mountpoint.is_root() && self.entry.is_root_of_mount()
     }
 
+    /// Ensure the location refers to a directory.
     pub fn check_is_dir(&self) -> VfsResult<()> {
         self.entry.as_dir().map(|_| ())
     }
 
+    /// Ensure the location refers to a file.
     pub fn check_is_file(&self) -> VfsResult<()> {
         self.entry.as_file().map(|_| ())
     }
 
+    /// Returns metadata with the mountpoint device ID applied.
     pub fn metadata(&self) -> VfsResult<Metadata> {
         let mut metadata = self.entry.metadata()?;
         metadata.device = self.mountpoint.device();
         Ok(metadata)
     }
 
+    /// Build the absolute path for this location.
     pub fn absolute_path(&self) -> VfsResult<PathBuf> {
         let mut components = vec![];
         let mut cur = self.clone();
@@ -194,10 +212,12 @@ impl Location {
             .collect())
     }
 
+    /// Returns `true` if this location references the same entry.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.mountpoint, &other.mountpoint) && self.entry.ptr_eq(&other.entry)
     }
 
+    /// Returns `true` if this location is a mountpoint directory.
     pub fn is_mountpoint(&self) -> bool {
         self.entry.as_dir().is_ok_and(|it| it.is_mountpoint())
     }
@@ -212,6 +232,7 @@ impl Location {
         Self::new(mountpoint, entry)
     }
 
+    /// Look up a child entry without following a symlink.
     pub fn lookup_no_follow(&self, name: &str) -> VfsResult<Self> {
         Ok(match name {
             DOT => self.clone(),
@@ -223,6 +244,7 @@ impl Location {
         })
     }
 
+    /// Create a new entry under this directory.
     pub fn create(
         &self,
         name: &str,
@@ -235,6 +257,7 @@ impl Location {
             .map(|entry| self.with_entry(entry))
     }
 
+    /// Create a hard link to an existing node.
     pub fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
         if !Arc::ptr_eq(&self.mountpoint, &node.mountpoint) {
             return Err(VfsError::CrossesDevices);
@@ -245,6 +268,7 @@ impl Location {
             .map(|entry| self.with_entry(entry))
     }
 
+    /// Rename an entry within the same mountpoint.
     pub fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
         if !Arc::ptr_eq(&self.mountpoint, &dst_dir.mountpoint) {
             return Err(VfsError::CrossesDevices);
@@ -257,10 +281,12 @@ impl Location {
             .rename(src_name, dst_dir.entry.as_dir()?, dst_name)
     }
 
+    /// Remove a file or directory entry.
     pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
         self.entry.as_dir()?.unlink(name, is_dir)
     }
 
+    /// Open a file entry with options.
     pub fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<Location> {
         self.entry
             .as_dir()?
@@ -268,10 +294,12 @@ impl Location {
             .map(|entry| self.with_entry(entry).resolve_final_mount())
     }
 
+    /// Read directory entries starting from the given offset.
     pub fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
         self.entry.as_dir()?.read_dir(offset, sink)
     }
 
+    /// Mount a filesystem at this location.
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {
         let mut mountpoint = self.entry.as_dir()?.mount_at_this_dir.lock();
         if mountpoint.is_some() {
@@ -286,6 +314,7 @@ impl Location {
         Ok(result)
     }
 
+    /// Unmount the filesystem rooted at this location.
     pub fn unmount(&self) -> VfsResult<()> {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
@@ -301,6 +330,7 @@ impl Location {
         Ok(())
     }
 
+    /// Recursively unmount this filesystem and all children.
     pub fn unmount_all(&self) -> VfsResult<()> {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);

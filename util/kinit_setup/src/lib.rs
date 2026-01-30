@@ -1,3 +1,4 @@
+//! Init callbacks registered in `.init_array`.
 #![no_std]
 
 pub use macros::register_init;

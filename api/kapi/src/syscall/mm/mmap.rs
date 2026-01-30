@@ -1,3 +1,12 @@
+//! Memory mapping syscalls.
+//!
+//! This module implements virtual memory mapping operations including:
+//! - Memory mapping (mmap, mmap2, etc.)
+//! - Memory unmapping (munmap)
+//! - Memory protection (mprotect)
+//! - Memory synchronization (msync)
+//! - Memory advice (madvise)
+
 use alloc::sync::Arc;
 
 use kcore::{

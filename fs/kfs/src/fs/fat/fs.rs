@@ -1,3 +1,4 @@
+//! FAT filesystem adapter.
 use alloc::sync::Arc;
 use core::marker::PhantomPinned;
 
@@ -11,6 +12,7 @@ use slab::Slab;
 use super::{dir::FatDirNode, ff, util::into_vfs_err};
 use crate::disk::SeekableDisk;
 
+/// Inner FAT filesystem state.
 pub struct FatFilesystemInner {
     pub inner: ff::FileSystem,
     inode_allocator: Slab<()>,
@@ -18,21 +20,25 @@ pub struct FatFilesystemInner {
 }
 
 impl FatFilesystemInner {
+    /// Allocate a new inode number.
     pub(crate) fn alloc_inode(&mut self) -> u64 {
         self.inode_allocator.insert(()) as u64 + 1
     }
 
+    /// Release a previously allocated inode number.
     pub(crate) fn release_inode(&mut self, ino: u64) {
         self.inode_allocator.remove(ino as usize - 1);
     }
 }
 
+/// FAT filesystem implementation.
 pub struct FatFilesystem {
     inner: Mutex<FatFilesystemInner>,
     root_dir: Mutex<Option<DirEntry>>,
 }
 
 impl FatFilesystem {
+    /// Create a new FAT filesystem instance backed by a block device.
     pub fn new(dev: KBlockDevice) -> Filesystem {
         let mut inner = FatFilesystemInner {
             inner: ff::FileSystem::new(SeekableDisk::new(dev), fatfs::FsOptions::new())

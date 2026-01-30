@@ -1,3 +1,9 @@
+//! Pipe creation syscalls.
+//!
+//! This module implements pipe creation operations including:
+//! - Pipe creation (pipe, pipe2, etc.)
+//! - Pipe flags and configuration (O_CLOEXEC, O_NONBLOCK, etc.)
+
 use core::ffi::c_int;
 
 use bitflags::bitflags;
@@ -18,6 +24,7 @@ bitflags! {
     }
 }
 
+/// Creates a pipe and returns the read/write file descriptors.
 pub fn sys_pipe2(fds: *mut [c_int; 2], flags: u32) -> KResult<isize> {
     let flags = {
         let new_flags = PipeFlags::from_bits_truncate(flags);

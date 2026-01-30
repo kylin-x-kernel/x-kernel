@@ -1,3 +1,11 @@
+//! Scheduling and timer syscalls.
+//!
+//! This module implements scheduling and timer operations including:
+//! - Yield control (sched_yield, etc.)
+//! - Sleep operations (sleep, nanosleep, etc.)
+//! - Scheduling priority (getpriority, setpriority, nice, etc.)
+//! - CPU affinity (sched_setaffinity, sched_getaffinity, etc.)
+
 use kcore::task::{get_process_data, get_process_group};
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
@@ -21,12 +29,15 @@ pub fn sys_sched_yield() -> KResult<isize> {
 fn sleep_impl(clock: impl Fn() -> TimeValue, dur: TimeValue) -> TimeValue {
     debug!("sleep_impl <= {dur:?}");
 
+    // Record the time before sleeping
     let start = clock();
 
     // TODO: currently ignoring concrete clock type
     // We detect EINTR manually if the slept time is not enough.
+    // Block on interruptible sleep - returns early if interrupted by signals
     let _ = block_on(interruptible(sleep(dur)));
 
+    // Return the actual time elapsed
     clock() - start
 }
 
@@ -55,6 +66,7 @@ pub fn sys_clock_nanosleep(
     req: *const timespec,
     rem: *mut timespec,
 ) -> KResult<isize> {
+    // Select appropriate clock function based on clock_id
     let clock = match clock_id as u32 {
         CLOCK_REALTIME => khal::time::wall_time,
         CLOCK_MONOTONIC => khal::time::monotonic_time,
@@ -67,6 +79,7 @@ pub fn sys_clock_nanosleep(
     let req = unsafe { req.read_uninit()?.assume_init() }.try_into_time_value()?;
     debug!("sys_clock_nanosleep <= clock_id: {clock_id}, flags: {flags}, req: {req:?}");
 
+    // If TIMER_ABSTIME flag is set, request is absolute time; otherwise it's relative
     let dur = if flags & TIMER_ABSTIME != 0 {
         req.saturating_sub(clock())
     } else {
@@ -87,28 +100,34 @@ pub fn sys_clock_nanosleep(
 }
 
 pub fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, user_mask: *mut u8) -> KResult<isize> {
+    // Check if the buffer is large enough
     if cpusetsize * 8 < platconfig::plat::CPU_NUM {
         return Err(KError::InvalidInput);
     }
 
     // TODO: support other threads
+    // Currently only supports getting the calling thread's affinity (pid=0)
     if pid != 0 {
         return Err(KError::OperationNotPermitted);
     }
 
+    // Get current thread's CPU affinity mask
     let mask = current().cpumask();
     let mask_bytes = mask.as_bytes();
 
+    // Write the mask to user space
     write_vm_mem(user_mask, mask_bytes)?;
 
     Ok(mask_bytes.len() as _)
 }
 
 pub fn sys_sched_setaffinity(_pid: i32, cpusetsize: usize, user_mask: *const u8) -> KResult<isize> {
+    // Load the CPU mask from user space (limit to actual CPU count)
     let size = cpusetsize.min(platconfig::plat::CPU_NUM.div_ceil(8));
     let user_mask = load_vec(user_mask, size)?;
     let mut cpu_mask = KCpuMask::new();
 
+    // Convert byte array to CPU mask bitset
     for i in 0..(size * 8).min(platconfig::plat::CPU_NUM) {
         if user_mask[i / 8] & (1 << (i % 8)) != 0 {
             cpu_mask.set(i, true);
@@ -116,6 +135,7 @@ pub fn sys_sched_setaffinity(_pid: i32, cpusetsize: usize, user_mask: *const u8)
     }
 
     // TODO: support other threads
+    // Apply the CPU affinity to the current thread
     ktask::set_current_affinity(cpu_mask);
 
     Ok(0)

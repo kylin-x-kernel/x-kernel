@@ -1,3 +1,4 @@
+//! FAT file node implementation.
 use alloc::{sync::Arc, vec};
 use core::{any::Any, mem, ops::Deref, task::Context};
 
@@ -15,6 +16,7 @@ use super::{
 };
 use crate::fs::fat::fs::FatFilesystemInner;
 
+/// FAT file node.
 pub struct FatFileNode {
     fs: Arc<FatFilesystem>,
     inner: FsRef<ff::File<'static>>,
@@ -22,6 +24,7 @@ pub struct FatFileNode {
 }
 
 impl FatFileNode {
+    /// Construct a file node from a FAT file handle.
     pub fn new(fs: Arc<FatFilesystem>, file: ff::File, inode: u64) -> FileNode {
         FileNode::new(Arc::new(Self {
             fs,

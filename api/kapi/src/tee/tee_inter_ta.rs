@@ -21,6 +21,7 @@ use crate::tee::{
     uuid::Uuid,
 };
 
+/// Open a session to another TEE application
 pub fn sys_tee_scn_open_ta_session(
     dest: *const TEE_UUID,
     _cancel_req_to: c_ulong,
@@ -46,12 +47,14 @@ pub fn sys_tee_scn_open_ta_session(
     Ok(())
 }
 
+/// Close a session to another TEE application
 pub fn sys_tee_scn_close_ta_session(ta_sees: c_ulong) -> TeeResult {
     let sess_id = tee_ta_get_session(ta_sees as u32)?;
     tee_ta_close_session(sess_id)?;
     Ok(())
 }
 
+/// Invoke a command in another TEE application
 pub fn sys_tee_scn_invoke_ta_command(
     ta_sees: c_ulong,
     _cancel_req_to: c_ulong,

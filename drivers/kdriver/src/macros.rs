@@ -1,7 +1,8 @@
-//! TODO: generate registered drivers in `for_each_drivers!` automatically.
+//! Driver registration and enumeration macros.
 
 #![allow(unused_macros)]
 
+/// Define the unified type for network devices.
 macro_rules! register_net_driver {
     ($driver_type:ty, $device_type:ty) => {
         /// The unified type of the NIC devices.
@@ -9,35 +10,40 @@ macro_rules! register_net_driver {
     };
 }
 
+/// Define the unified type for block devices.
 macro_rules! register_block_driver {
     ($driver_type:ty, $device_type:ty) => {
-        /// The unified type of the NIC devices.
+        /// The unified type of the block devices.
         pub type BlockDevice = $device_type;
     };
 }
 
-macro_rules! register_display_driver {
+    /// Define the unified type for display devices.
+    macro_rules! register_display_driver {
     ($driver_type:ty, $device_type:ty) => {
-        /// The unified type of the NIC devices.
+        /// The unified type of the display devices.
         pub type DisplayDevice = $device_type;
     };
 }
 
-macro_rules! register_input_driver {
+    /// Define the unified type for input devices.
+    macro_rules! register_input_driver {
     ($driver_type:ty, $device_type:ty) => {
-        /// The unified type of the NIC devices.
+        /// The unified type of the input devices.
         pub type InputDevice = $device_type;
     };
 }
 
-macro_rules! register_vsock_driver {
+    /// Define the unified type for vsock devices.
+    macro_rules! register_vsock_driver {
     ($driver_type:ty, $device_type:ty) => {
-        /// The unified type of the NIC devices.
+        /// The unified type of the vsock devices.
         pub type VsockDevice = $device_type;
     };
 }
 
-macro_rules! for_each_drivers {
+    /// Expand to iterate through all registered drivers under the current build config.
+    macro_rules! for_each_drivers {
     (type $drv_type:ident, $code:block) => {{
         #[allow(unused_imports)]
         use crate::drivers::DriverProbe;

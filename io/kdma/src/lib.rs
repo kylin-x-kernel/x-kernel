@@ -1,3 +1,4 @@
+//! DMA allocation helpers and bus address types.
 #![no_std]
 
 extern crate alloc;

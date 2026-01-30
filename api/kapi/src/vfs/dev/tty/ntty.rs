@@ -6,8 +6,10 @@ use lazy_static::lazy_static;
 use super::Tty;
 use crate::terminal::ldisc::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
 
+/// Native TTY driver using console I/O
 pub type NTtyDriver = Tty<Console, Console>;
 
+/// Console reader/writer for native TTY
 #[derive(Clone, Copy)]
 pub struct Console;
 impl TtyRead for Console {

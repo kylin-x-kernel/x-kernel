@@ -1,3 +1,11 @@
+//! Network I/O syscalls.
+//!
+//! This module implements network I/O operations including:
+//! - Send and receive (send, recv, sendto, recvfrom, etc.)
+//! - Vectored I/O (sendmsg, recvmsg, etc.)
+//! - Out-of-band data handling
+//! - Ancillary data (control messages)
+
 use alloc::{boxed::Box, vec::Vec};
 use core::net::Ipv4Addr;
 
@@ -16,6 +24,7 @@ use crate::{
     syscall::net::{CMsg, CMsgBuilder},
 };
 
+/// Send data on a socket with optional destination address and ancillary data
 fn send_impl(
     fd: i32,
     mut src: impl Read + IoBuf,
@@ -45,6 +54,7 @@ fn send_impl(
     Ok(sent as isize)
 }
 
+/// Send data to a specific address on a socket
 pub fn sys_sendto(
     fd: i32,
     buf: *const u8,
@@ -56,6 +66,7 @@ pub fn sys_sendto(
     send_impl(fd, VmBytes::new(buf, len), flags, addr, addrlen, Vec::new())
 }
 
+/// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.get_as_ref()?;
     let mut cmsg = Vec::new();
@@ -81,6 +92,7 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<is
     )
 }
 
+/// Receive data from a socket with optional remote address and ancillary data collection
 fn recv_impl(
     fd: i32,
     mut dst: impl Write + IoBufMut,
@@ -145,6 +157,7 @@ fn recv_impl(
     Ok(recv as isize)
 }
 
+/// Receive data from a socket with the sender's address
 pub fn sys_recvfrom(
     fd: i32,
     buf: *mut u8,
@@ -156,6 +169,7 @@ pub fn sys_recvfrom(
     recv_impl(fd, VmBytesMut::new(buf, len), flags, addr, addrlen, None)
 }
 
+/// Receive data with vectored I/O and ancillary data (control messages)
 pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.get_as_mut()?;
     recv_impl(

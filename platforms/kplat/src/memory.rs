@@ -1,3 +1,5 @@
+//! Platform memory layout and region helpers.
+
 use core::{
     fmt,
     ops::{Deref, DerefMut, Range},
@@ -8,6 +10,7 @@ pub use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, pa, va};
 
 bitflags::bitflags! {
     #[derive(Clone, Copy)]
+    /// Memory region attributes.
     pub struct MemFlags: usize {
         const READ = 1 << 0;
         const WRITE = 1 << 1;
@@ -32,16 +35,21 @@ impl fmt::Debug for MemFlags {
     }
 }
 
+/// Default flags for usable RAM.
 pub const RAM_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::FREE);
+/// Default flags for reserved memory.
 pub const RSVD_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::RSVD);
+/// Default flags for MMIO regions.
 pub const MMIO_DEF: MemFlags = MemFlags::R
     .union(MemFlags::W)
     .union(MemFlags::DEV)
     .union(MemFlags::RSVD);
 
+/// A memory range represented as (start, size).
 pub type MemRange = (usize, usize);
 
 #[repr(align(4096))]
+/// Wrapper that enforces 4K alignment for static values.
 pub struct PageAligned<T: Sized>(T);
 
 impl<T: Sized> PageAligned<T> {
@@ -66,9 +74,13 @@ impl<T> DerefMut for PageAligned<T> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryRegion {
+    /// Physical start address.
     pub paddr: PhysAddr,
+    /// Size in bytes.
     pub size: usize,
+    /// Region attributes.
     pub flags: MemFlags,
+    /// Human-readable name for diagnostics.
     pub name: &'static str,
 }
 
@@ -103,20 +115,29 @@ impl MemoryRegion {
 
 #[device_interface]
 pub trait HwMemory {
+    /// Returns RAM ranges provided by the platform.
     fn ram_regions() -> &'static [MemRange];
+    /// Returns reserved ranges provided by the platform.
     fn rsvd_regions() -> &'static [MemRange];
+    /// Returns MMIO ranges provided by the platform.
     fn mmio_regions() -> &'static [MemRange];
+    /// Converts a physical address to virtual.
     fn p2v(pa: PhysAddr) -> VirtAddr;
+    /// Converts a virtual address to physical.
     fn v2p(va: VirtAddr) -> PhysAddr;
+    /// Returns the kernel virtual layout base and size.
     fn kernel_layout() -> (VirtAddr, usize);
 }
 
+/// Returns total RAM size in bytes.
 pub fn total_ram() -> usize {
     ram_regions().iter().map(|r| r.1).sum()
 }
 
+/// Error returned when two ranges overlap.
 pub type OverlapError = (Range<usize>, Range<usize>);
 
+/// Validates that the provided ranges do not overlap.
 pub fn check_overlap(iter: impl Iterator<Item = MemRange>) -> Result<(), OverlapError> {
     let mut last = Range::default();
     for (s, n) in iter {
@@ -128,6 +149,7 @@ pub fn check_overlap(iter: impl Iterator<Item = MemRange>) -> Result<(), Overlap
     Ok(())
 }
 
+/// Subtracts `cut` ranges from `base` ranges and yields remaining segments.
 pub fn sub_ranges<F>(base: &[MemRange], cut: &[MemRange], mut cb: F) -> Result<(), OverlapError>
 where
     F: FnMut(MemRange),

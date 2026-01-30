@@ -1,3 +1,4 @@
+//! Vsock device integration helpers.
 use alloc::collections::VecDeque;
 use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -69,6 +70,7 @@ impl PollBackoff {
     }
 }
 
+/// Start the background vsock polling task if needed.
 pub fn start_vsock_polling() {
     let mut count = POLL_USERS.lock();
     *count += 1;

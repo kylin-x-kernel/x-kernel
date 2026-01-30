@@ -1,3 +1,10 @@
+//! Poll syscalls.
+//!
+//! This module implements poll I/O multiplexing including:
+//! - Poll operations (poll, ppoll, etc.)
+//! - File descriptor monitoring
+//! - Event notification and handling
+
 use alloc::vec::Vec;
 
 use kerrno::{KError, KResult};
@@ -16,6 +23,7 @@ use crate::{
     time::TimeValueLike,
 };
 
+/// Monitor multiple file descriptors for I/O events with optional timeout
 fn do_poll(
     poll_fds: &mut [pollfd],
     timeout: Option<TimeValue>,
@@ -85,6 +93,7 @@ fn do_poll(
     })
 }
 
+/// Poll file descriptors with millisecond timeout
 #[cfg(target_arch = "x86_64")]
 pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
     let fds = fds.get_as_mut_slice(nfds as usize)?;
@@ -96,6 +105,7 @@ pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize>
     do_poll(fds, timeout, None)
 }
 
+/// Poll file descriptors with high-precision timeout and signal masking
 pub fn sys_ppoll(
     fds: UserPtr<pollfd>,
     nfds: i32,

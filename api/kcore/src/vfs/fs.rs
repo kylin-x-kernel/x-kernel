@@ -1,3 +1,5 @@
+//! Simple filesystem scaffolding for the in-kernel VFS.
+
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, time::Duration};
 

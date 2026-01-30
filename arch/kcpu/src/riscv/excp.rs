@@ -1,3 +1,5 @@
+//! RISC-V exception and IRQ dispatching.
+
 #[cfg(feature = "fp-simd")]
 use riscv::register::sstatus;
 use riscv::{
@@ -17,11 +19,13 @@ core::arch::global_asm!(
     trapframe_size = const core::mem::size_of::<ExceptionContext>(),
 );
 
+/// Advances the PC after a breakpoint exception.
 fn dispatch_irq_breakpoint(sepc: &mut usize) {
     debug!("Exception(Breakpoint) @ {sepc:#x} ");
     *sepc += 2
 }
 
+/// Dispatches a page fault and panics if unhandled.
 fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(stval::read());
     if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
@@ -42,6 +46,7 @@ fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFla
     );
 }
 
+/// Architecture-specific trap entry point.
 #[unsafe(no_mangle)]
 fn riscv_trap_handler(tf: &mut ExceptionContext) {
     let _tf_guard = crate::ExceptionContextGuard::new(tf);

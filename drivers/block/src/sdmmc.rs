@@ -1,5 +1,7 @@
 //! SD/MMC driver based on SDIO.
 
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use simple_sdmmc::SdMmc;
 

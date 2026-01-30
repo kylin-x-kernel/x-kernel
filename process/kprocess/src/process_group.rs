@@ -1,3 +1,4 @@
+//! Process group management.
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,

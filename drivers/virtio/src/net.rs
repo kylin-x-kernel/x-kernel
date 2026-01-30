@@ -1,3 +1,4 @@
+//! VirtIO network driver adapter.
 use alloc::{sync::Arc, vec::Vec};
 
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};

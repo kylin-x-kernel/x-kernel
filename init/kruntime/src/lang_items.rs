@@ -1,3 +1,4 @@
+//! Panic handler for the runtime.
 use core::panic::PanicInfo;
 
 #[panic_handler]

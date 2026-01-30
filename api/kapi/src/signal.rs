@@ -1,3 +1,5 @@
+//! Signal checking helpers and blocked set management.
+
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use kcore::task::{AsThread, Thread};
@@ -8,6 +10,7 @@ use ktask::current;
 
 use crate::task::do_exit;
 
+/// Check for pending signals and execute default handlers if needed.
 pub fn check_signals(
     thr: &Thread,
     uctx: &mut UserContext,
@@ -42,14 +45,17 @@ pub fn check_signals(
 
 static BLOCK_NEXT_SIGNAL_CHECK: AtomicBool = AtomicBool::new(false);
 
+/// Block the next signal check from executing.
 pub fn block_next_signal() {
     BLOCK_NEXT_SIGNAL_CHECK.store(true, Ordering::SeqCst);
 }
 
+/// Unblock signal checks and return whether it was previously blocked.
 pub fn unblock_next_signal() -> bool {
     BLOCK_NEXT_SIGNAL_CHECK.swap(false, Ordering::SeqCst)
 }
 
+/// Temporarily replace the blocked signal set for the current thread.
 pub fn with_replacen_blocked<R>(
     blocked: Option<SignalSet>,
     f: impl FnOnce() -> KResult<R>,

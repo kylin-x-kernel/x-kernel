@@ -1,3 +1,4 @@
+//! Platform support for the aarch64 crosvm-virt target.
 #![no_std]
 #[macro_use]
 extern crate kplat;

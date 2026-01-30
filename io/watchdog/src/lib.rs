@@ -1,3 +1,4 @@
+//! Watchdog subsystem for soft/hard lockup detection.
 #![no_std]
 pub mod init;
 pub mod lockup_detection;

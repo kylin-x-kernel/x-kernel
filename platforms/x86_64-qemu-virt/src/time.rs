@@ -1,3 +1,5 @@
+//! TSC/LAPIC-based timer implementation for x86_64-qemu-virt.
+
 use int_ratio::Ratio;
 use kplat::timer::GlobalTimer;
 use raw_cpuid::CpuId;
@@ -6,6 +8,7 @@ static mut NANOS_TO_LAPIC_TICKS_RATIO: Ratio = Ratio::zero();
 static mut INIT_TICK: u64 = 0;
 static mut CPU_FREQ_MHZ: u64 = crate::config::devices::TIMER_FREQUENCY as u64 / 1_000_000;
 static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
+/// Performs early timer initialization and TSC calibration.
 pub fn early_init() {
     if let Some(freq) = CpuId::new()
         .get_processor_frequency_info()
@@ -27,6 +30,7 @@ pub fn early_init() {
         }
     }
 }
+/// Initializes the local APIC timer on the boot CPU.
 pub fn init_primary() {
     unsafe {
         use x2apic::lapic::{TimerDivide, TimerMode};
@@ -38,6 +42,7 @@ pub fn init_primary() {
             Ratio::new(LAPIC_TICKS_PER_SEC as u32, kplat::timer::NS_SEC as u32);
     }
 }
+/// Initializes the local APIC timer on a secondary CPU.
 #[cfg(feature = "smp")]
 pub fn init_secondary() {
     unsafe {

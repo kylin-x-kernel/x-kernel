@@ -1,3 +1,4 @@
+//! Platform boot hooks for early and final initialization.
 use kplat::{
     boot::BootHandler,
     memory::{p2v, pa},
@@ -7,9 +8,11 @@ use log::*;
 #[allow(unused_imports)]
 use crate::config::devices::{GICD_PADDR, GICR_PADDR, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR};
 use crate::{config::plat::PSCI_METHOD, serial::*};
+/// Platform-specific `BootHandler` implementation.
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
+    /// Perform early, minimal init before the allocator is ready.
     fn early_init(_cpu_id: usize, dtb: usize) {
         boot_print_str("[boot] platform init early\r\n");
         crate::mem::early_init(dtb);
@@ -26,6 +29,7 @@ impl BootHandler for BootHandlerImpl {
         kcpu::boot::init_trap();
     }
 
+    /// Finish platform init after core subsystems are online.
     fn final_init(cpu_id: usize, dtb: usize) {
         info!("cpu_id {}", cpu_id);
         crate::fdt::init_fdt(p2v(pa!(dtb)));
@@ -36,6 +40,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
+    /// Finalize per-CPU setup on secondary cores.
     fn final_init_ap(_cpu_id: usize) {
         crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
         aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);

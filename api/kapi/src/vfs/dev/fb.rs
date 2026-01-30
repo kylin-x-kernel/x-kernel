@@ -87,6 +87,7 @@ async fn refresh_task() {
     }
 }
 
+/// Framebuffer device for graphics output
 pub struct FrameBuffer {
     base: VirtAddr,
     size: usize,

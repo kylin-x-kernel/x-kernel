@@ -1,3 +1,5 @@
+//! LoongArch64 assembly helper macros.
+
 macro_rules! include_asm_macros {
     () => {
         r#"

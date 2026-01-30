@@ -1,3 +1,4 @@
+//! Linear mapping backend.
 use alloc::sync::Arc;
 
 use kerrno::KResult;
@@ -62,6 +63,7 @@ impl BackendOps for LinearBackend {
 }
 
 impl Backend {
+    /// Create a linear mapping backend with a fixed PA-VA offset.
     pub fn new_linear(offset: isize) -> Self {
         Self::Linear(LinearBackend { offset })
     }

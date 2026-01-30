@@ -1,3 +1,4 @@
+//! TCP socket implementation.
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},

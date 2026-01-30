@@ -1,3 +1,4 @@
+//! Static device type aliases for build-time device selection.
 #[cfg(feature = "block")]
 pub use crate::drivers::BlockDevice;
 #[cfg(feature = "display")]

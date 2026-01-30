@@ -1,3 +1,10 @@
+//! Signal file descriptor syscalls.
+//!
+//! This module implements signal notification operations including:
+//! - Signal file creation (signalfd, signalfd4, etc.)
+//! - Signal delivery through file descriptors
+//! - Signal file flags and configuration
+
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use ksignal::SignalSet;

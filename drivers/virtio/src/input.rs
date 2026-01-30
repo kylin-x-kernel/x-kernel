@@ -1,3 +1,4 @@
+//! VirtIO input driver adapter.
 use alloc::{borrow::ToOwned, string::String};
 
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};

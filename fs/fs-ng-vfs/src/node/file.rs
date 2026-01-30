@@ -1,3 +1,4 @@
+//! File node traits and wrappers.
 use alloc::sync::Arc;
 use core::ops::Deref;
 
@@ -6,6 +7,7 @@ use kpoll::Pollable;
 use super::NodeOps;
 use crate::{VfsError, VfsResult};
 
+/// File node operations.
 pub trait FileNodeOps: NodeOps + Pollable {
     /// Reads a number of bytes starting from a given offset.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize>;
@@ -31,6 +33,7 @@ pub trait FileNodeOps: NodeOps + Pollable {
     }
 }
 
+/// Wrapper around a file node implementation.
 #[repr(transparent)]
 pub struct FileNode(Arc<dyn FileNodeOps>);
 
@@ -49,14 +52,17 @@ impl From<FileNode> for Arc<dyn NodeOps> {
 }
 
 impl FileNode {
+    /// Create a new file node wrapper.
     pub fn new(ops: Arc<dyn FileNodeOps>) -> Self {
         Self(ops)
     }
 
+    /// Return the underlying file node implementation.
     pub fn inner(&self) -> &Arc<dyn FileNodeOps> {
         &self.0
     }
 
+    /// Downcast to a concrete file implementation.
     pub fn downcast<T: FileNodeOps>(self: &Arc<Self>) -> VfsResult<Arc<T>> {
         self.0
             .clone()

@@ -1,3 +1,10 @@
+//! Select syscalls.
+//!
+//! This module implements traditional select I/O multiplexing including:
+//! - Select operations (select, pselect6, etc.)
+//! - File descriptor set management
+//! - Timeout and signal handling
+
 use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
@@ -42,6 +49,7 @@ impl fmt::Debug for FdSet {
     }
 }
 
+/// Monitor multiple file descriptors for readability, writability, or exceptional conditions
 fn do_select(
     nfds: u32,
     readfds: UserPtr<__kernel_fd_set>,
@@ -146,6 +154,7 @@ fn do_select(
     })
 }
 
+/// Select file descriptors with microsecond timeout
 #[cfg(target_arch = "x86_64")]
 pub fn sys_select(
     nfds: u32,
@@ -173,6 +182,7 @@ pub struct SignalSetWithSize {
     sigsetsize: usize,
 }
 
+/// Select file descriptors with nanosecond timeout and signal masking
 pub fn sys_pselect6(
     nfds: u32,
     readfds: UserPtr<__kernel_fd_set>,

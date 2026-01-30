@@ -1,3 +1,4 @@
+//! VirtIO block driver adapter.
 use block::BlockDriverOps;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{Hal, device::blk::VirtIOBlk as InnerDev, transport::Transport};

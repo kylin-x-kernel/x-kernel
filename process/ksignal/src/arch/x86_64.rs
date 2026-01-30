@@ -1,3 +1,4 @@
+//! x86_64 signal frame layout and trampoline.
 use kcpu::userspace::UserContext;
 
 use crate::{SignalSet, SignalStack};
@@ -50,6 +51,7 @@ pub struct MContext {
 }
 
 impl MContext {
+    /// Build machine context from a user context snapshot.
     pub fn new(uctx: &UserContext) -> Self {
         Self {
             r8: uctx.r8 as _,
@@ -83,6 +85,7 @@ impl MContext {
         }
     }
 
+    /// Restore a user context from this machine context.
     pub fn restore(&self, uctx: &mut UserContext) {
         uctx.r8 = self.r8 as _;
         uctx.r9 = self.r9 as _;
@@ -119,6 +122,7 @@ pub struct UContext {
 }
 
 impl UContext {
+    /// Build a user context frame for signal handling.
     pub fn new(uctx: &UserContext, sigmask: SignalSet) -> Self {
         Self {
             flags: 0,

@@ -1,3 +1,4 @@
+//! SMP bring-up helpers for the runtime.
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use khal::mem::{VirtAddr, v2p};
@@ -9,6 +10,7 @@ static mut SECONDARY_BOOT_STACK: [[u8; TASK_STACK_SIZE]; CPU_NUM - 1] =
 
 static ENTERED_CPUS: AtomicUsize = AtomicUsize::new(1);
 
+/// Start all secondary CPUs and wait until they enter the runtime.
 #[allow(clippy::absurd_extreme_comparisons)]
 pub fn start_secondary_cpus(primary_cpu_id: usize) {
     let mut logic_cpu_id = 0;

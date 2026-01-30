@@ -1,3 +1,5 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use simple_ahci::AhciDriver as CoreAhciDriver;
 pub use simple_ahci::Hal as AhciHal;
@@ -18,7 +20,7 @@ impl<H: AhciHal> AhciDriver<H> {
     /// - No other part of the code is accessing the AHCI controller simultaneously.
     /// - The AHCI hardware is functioning at the provided address.
     pub unsafe fn new(base_addr: usize) -> Option<Self> {
-        CoreAhciDriver::<H>::new(base_addr).map(AhciDriver)
+        CoreAhciDriver::<H>::try_new(base_addr).map(AhciDriver)
     }
 }
 

@@ -1,3 +1,5 @@
+//! Blocking wait queue built on event listeners and timers.
+
 use core::time::Duration;
 
 use event_listener::{Event, listener};

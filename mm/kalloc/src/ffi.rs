@@ -1,3 +1,6 @@
+//! C-compatible allocation shims for the kernel allocator.
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use core::{
     alloc::Layout,
     ffi::{c_int, c_void},

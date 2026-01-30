@@ -1,3 +1,4 @@
+//! Init process bootstrap helpers.
 use alloc::{
     string::{String, ToString},
     sync::Arc,
@@ -14,6 +15,7 @@ use kprocess::{Pid, Process};
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
 
+/// Create and run the init process with the given argv/envp.
 pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
     let mut uspace = new_user_aspace_empty()
         .and_then(|mut it| {

@@ -1,3 +1,4 @@
+//! Rendezvous coordination for watchdog failures.
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use khal::percpu::this_cpu_id;
@@ -35,11 +36,13 @@ static CAUSE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static ARRIVED_BITMAP: AtomicUsize = AtomicUsize::new(0);
 
 #[inline]
+/// Returns whether a rendezvous is in progress.
 pub fn is_triggered() -> bool {
     Phase::load() == Phase::Triggered
 }
 
 #[inline]
+/// Returns whether the dump phase has completed.
 pub fn is_dump_done() -> bool {
     Phase::load() == Phase::DumpDone
 }
@@ -48,6 +51,7 @@ pub fn is_dump_done() -> bool {
 ///
 /// Returns `true` if this CPU became the *cause CPU*.
 #[inline]
+/// Trigger a rendezvous if none is active.
 pub fn try_trigger() {
     let cpu = this_cpu_id();
     if PHASE
@@ -64,6 +68,7 @@ pub fn try_trigger() {
 }
 
 #[inline]
+/// Returns the CPU that triggered the rendezvous.
 pub fn cause_cpu() -> Option<usize> {
     if Phase::load() == Phase::Idle {
         return None;
@@ -74,6 +79,7 @@ pub fn cause_cpu() -> Option<usize> {
 
 /// Mark current cpu as arrived.
 #[inline]
+/// Mark the current CPU as arrived.
 pub fn mark_arrived() {
     let id = this_cpu_id();
     if id >= usize::BITS as usize {

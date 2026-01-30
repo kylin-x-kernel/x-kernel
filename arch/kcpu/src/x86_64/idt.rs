@@ -1,3 +1,5 @@
+//! Interrupt Descriptor Table (IDT) initialization.
+
 use lazyinit::LazyInit;
 use x86_64::{
     addr::VirtAddr,

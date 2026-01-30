@@ -1,3 +1,4 @@
+//! Signal APIs for processes and threads.
 mod process;
 mod thread;
 

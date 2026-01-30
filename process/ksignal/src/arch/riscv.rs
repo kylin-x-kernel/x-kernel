@@ -1,3 +1,4 @@
+//! RISC-V signal frame layout and trampoline.
 use kcpu::{GeneralRegisters, userspace::UserContext};
 
 use crate::{SignalSet, SignalStack};
@@ -24,6 +25,7 @@ pub struct MContext {
 }
 
 impl MContext {
+    /// Build machine context from a user context snapshot.
     pub fn new(uctx: &UserContext) -> Self {
         Self {
             pc: uctx.sepc,
@@ -32,6 +34,7 @@ impl MContext {
         }
     }
 
+    /// Restore a user context from this machine context.
     pub fn restore(&self, uctx: &mut UserContext) {
         uctx.sepc = self.pc;
         uctx.regs = self.regs;
@@ -50,6 +53,7 @@ pub struct UContext {
 }
 
 impl UContext {
+    /// Build a user context frame for signal handling.
     pub fn new(uctx: &UserContext, sigmask: SignalSet) -> Self {
         Self {
             flags: 0,

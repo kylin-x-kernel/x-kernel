@@ -1,3 +1,5 @@
+//! Simple file helpers for the in-kernel VFS.
+
 use alloc::{borrow::Cow, sync::Arc, vec::Vec};
 use core::{any::Any, cmp::Ordering, task::Context};
 

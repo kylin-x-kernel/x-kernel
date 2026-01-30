@@ -4,8 +4,6 @@
 //
 // This file has been created by KylinSoft on 2025.
 
-#![allow(dead_code)]
-
 use alloc::{boxed::Box, vec};
 use core::mem::{MaybeUninit, size_of, transmute};
 
@@ -145,6 +143,7 @@ pub fn bb_alloc(len: usize) -> TeeResult<Box<[u8]>> {
 /// use for temporary memory allocation, can be optimized
 pub fn bb_free(kbuf: Box<[u8]>, _len: usize) {
     drop(kbuf);
+    let _ = len;
 }
 
 fn __bb_memdup_user(
@@ -180,7 +179,7 @@ pub(crate) fn exit_user_access() {
     // In OP-TEE, this dispatch_irqs returning from user context
 }
 
-#[cfg(feature = "tee_test")]
+#[cfg(any(test, feature = "tee_test"))]
 pub mod tests_user_access {
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,

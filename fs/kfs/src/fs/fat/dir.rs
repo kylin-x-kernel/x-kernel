@@ -1,3 +1,4 @@
+//! FAT directory node implementation.
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, mem, ops::Deref, time::Duration};
 
@@ -13,6 +14,7 @@ use super::{
     util::{file_metadata, into_vfs_err},
 };
 
+/// FAT directory node.
 pub struct FatDirNode {
     fs: Arc<FatFilesystem>,
     pub(crate) inner: FsRef<ff::Dir<'static>>,
@@ -21,6 +23,7 @@ pub struct FatDirNode {
 }
 
 impl FatDirNode {
+    /// Construct a directory node from a FAT directory handle.
     pub fn new(fs: Arc<FatFilesystem>, dir: ff::Dir, inode: u64, this: WeakDirEntry) -> DirNode {
         DirNode::new(Arc::new(Self {
             fs,

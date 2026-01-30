@@ -1,3 +1,4 @@
+//! Minimal early-boot UART printing for diagnostics.
 #[unsafe(no_mangle)]
 pub extern "C" fn _boot_print_usize(num: usize) {
     let mut msg: [u8; 16] = [0; 16];
@@ -25,24 +26,29 @@ pub extern "C" fn _boot_print_usize(num: usize) {
     boot_print_str("\r\n");
 }
 #[unsafe(no_mangle)]
+/// Write a string to the boot UART.
 pub fn boot_print_str(data: &str) {
     for byte in data.bytes() {
         boot_serial_send(byte);
     }
 }
 #[allow(dead_code)]
+/// Print a usize in hex to the boot UART.
 pub fn boot_print_usize(num: usize) {
     _boot_print_usize(num);
 }
+/// Simple UART wrapper for the boot console.
 #[derive(Copy, Clone, Debug)]
 pub struct Uart {
     base_address: usize,
 }
 impl Uart {
+    /// Create a UART instance backed by an MMIO base address.
     pub const fn new(base_address: usize) -> Self {
         Self { base_address }
     }
 
+    /// Write a byte to the UART TX register.
     pub fn put(&self, c: u8) -> Option<u8> {
         let ptr = self.base_address as *mut u8;
         unsafe {
@@ -92,6 +98,7 @@ pub fn print_el1_reg(switch: bool) {
     crate::boot_print_reg!("ICC_RPR_EL1");
     crate::boot_print_reg!("ICC_SRE_EL1");
 }
+/// Print a named EL1 system register to the boot UART.
 #[macro_export]
 macro_rules! boot_print_reg {
     ($reg_name:tt) => {
@@ -103,6 +110,7 @@ macro_rules! boot_print_reg {
     };
 }
 #[allow(unused)]
+/// Send a single byte to the boot UART.
 pub fn boot_serial_send(data: u8) {
     unsafe { BOOT_SERIAL.put(data) };
 }

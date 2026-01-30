@@ -1,3 +1,5 @@
+//! Async time utilities and timer wheel integration.
+
 use alloc::collections::BTreeMap;
 use core::{
     fmt,

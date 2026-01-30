@@ -4,6 +4,7 @@
 // See LICENSE for license details.
 //
 
+//! AArch64 system register read/write helper macros.
 /// Reads and returns the value of the given aarch64 system register.
 macro_rules! read_sysreg {
     ($name:ident) => {

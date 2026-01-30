@@ -1,3 +1,4 @@
+//! Minimal unit-test framework for kernel components.
 #![no_std]
 
 #[macro_use]

@@ -1,3 +1,5 @@
+//! Platform initialization hooks for x86_64-qemu-virt.
+
 use kplat::boot::BootHandler;
 struct BootHandlerImpl;
 #[impl_dev_interface]

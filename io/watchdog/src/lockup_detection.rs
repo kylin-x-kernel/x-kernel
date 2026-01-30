@@ -1,3 +1,4 @@
+//! Soft/hard lockup detection state and helpers.
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::watchdog_task::WatchdogTask;
@@ -8,6 +9,7 @@ pub const DEFAULT_SOFTLOCKUP_THRESH_NS: u64 = 20_000_000_000;
 /// Default hardlockup threshold in nanoseconds (10 seconds).
 pub const DEFAULT_HARDLOCKUP_THRESH_NS: u64 = 10_000_000_000;
 
+/// Per-CPU lockup detection state.
 #[repr(C, align(64))]
 pub struct LockupDetection {
     // === Softlockup Detection ===
@@ -127,6 +129,7 @@ pub fn check_softlockup(now_ns: u64) -> bool {
     }
 }
 
+/// Register the hard lockup detection task on the current CPU.
 pub fn register_hardlockup_detection_task() {
     let task: &'static LockupDetection = unsafe { LOCKUP_DETECTION.current_ref_raw() };
     crate::watchdog_task::register_watchdog_task(task);

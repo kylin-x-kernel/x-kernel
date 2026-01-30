@@ -1,3 +1,4 @@
+//! General socket options and polling helpers.
 use core::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     task::Waker,
@@ -31,6 +32,7 @@ impl Default for GeneralOptions {
     }
 }
 impl GeneralOptions {
+    /// Create a new set of general options with defaults.
     pub fn new() -> Self {
         Self {
             nonblock: AtomicBool::new(false),
@@ -43,36 +45,44 @@ impl GeneralOptions {
         }
     }
 
+    /// Returns whether the socket is non-blocking.
     pub fn nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
+    /// Returns whether `SO_REUSEADDR` is enabled.
     pub fn reuse_address(&self) -> bool {
         self.reuse_address.load(Ordering::Relaxed)
     }
 
+    /// Returns the configured send timeout.
     pub fn send_timeout(&self) -> Option<Duration> {
         let nanos = self.send_timeout_nanos.load(Ordering::Relaxed);
         (nanos > 0).then(|| Duration::from_nanos(nanos))
     }
 
+    /// Returns the configured receive timeout.
     pub fn recv_timeout(&self) -> Option<Duration> {
         let nanos = self.recv_timeout_nanos.load(Ordering::Relaxed);
         (nanos > 0).then(|| Duration::from_nanos(nanos))
     }
 
+    /// Set the device mask used for receive waker registration.
     pub fn set_device_mask(&self, mask: u32) {
         self.device_mask.store(mask, Ordering::Release);
     }
 
+    /// Return the device mask used for receive wakers.
     pub fn device_mask(&self) -> u32 {
         self.device_mask.load(Ordering::Acquire)
     }
 
+    /// Register a waker for receive readiness.
     pub fn register_rx_waker(&self, waker: &Waker) {
         SERVICE.lock().register_rx_waker(self.device_mask(), waker);
     }
 
+    /// Poll for send readiness and run the provided operation.
     pub fn send_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
@@ -84,6 +94,7 @@ impl GeneralOptions {
         ))?
     }
 
+    /// Poll for receive readiness and run the provided operation.
     pub fn recv_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,

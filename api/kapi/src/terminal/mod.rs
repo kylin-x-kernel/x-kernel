@@ -41,6 +41,7 @@ impl Default for Terminal {
     }
 }
 impl Terminal {
+    /// Load the current terminal I/O settings (termios)
     pub fn load_termios(&self) -> Arc<termios::Termios2> {
         self.termios.lock().clone()
     }

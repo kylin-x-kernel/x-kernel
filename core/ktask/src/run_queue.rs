@@ -1,3 +1,5 @@
+//! Per-CPU run queue implementation and scheduling helpers.
+
 #[cfg(feature = "smp")]
 use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};

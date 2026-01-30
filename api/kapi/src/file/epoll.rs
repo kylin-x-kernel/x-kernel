@@ -1,3 +1,4 @@
+//! Epoll instance and interest management.
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // Copyright (C) 2025 Azure-stars <Azure_stars@126.com>
@@ -28,7 +29,9 @@ use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
 use crate::file::{FileLike, get_file_like};
 
 pub struct EpollEvent {
+    /// Interested I/O events.
     pub events: IoEvents,
+    /// User data associated with the interest.
     pub user_data: u64,
 }
 
@@ -262,6 +265,7 @@ pub struct Epoll {
 }
 
 impl Epoll {
+    /// Creates a new epoll instance.
     pub fn new() -> Self {
         Self::default()
     }
@@ -315,6 +319,7 @@ impl Epoll {
         }
     }
 
+    /// Adds a file descriptor interest to the epoll instance.
     pub fn add(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
         let key = EntryKey::new(fd)?;
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
@@ -329,6 +334,7 @@ impl Epoll {
         Ok(())
     }
 
+    /// Modifies an existing interest for the given file descriptor.
     pub fn modify(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
         let key = EntryKey::new(fd)?;
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
@@ -351,6 +357,7 @@ impl Epoll {
         Ok(())
     }
 
+    /// Removes an existing interest for the given file descriptor.
     pub fn delete(&self, fd: i32) -> KResult<()> {
         let key = EntryKey::new(fd)?;
         self.inner
@@ -362,6 +369,7 @@ impl Epoll {
         Ok(())
     }
 
+    /// Polls for ready events and writes them into `out`.
     pub fn poll_events(&self, out: &mut [epoll_event]) -> KResult<usize> {
         trace!("Epoll: poll_events called, out.len()={}", out.len());
         let mut count = 0;

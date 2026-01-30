@@ -1,3 +1,4 @@
+//! Shared mapping backend.
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Deref;
 
@@ -12,11 +13,13 @@ use crate::{
     backend::{Backend, BackendOps, divide_page, map_paging_err, pages_in},
 };
 
+/// Shared physical pages backing a mapping.
 pub struct SharedPages {
     pub phys_pages: Vec<PhysAddr>,
     pub size: PageSize,
 }
 impl SharedPages {
+    /// Allocate a new set of shared pages.
     pub fn new(size: usize, pgsize: PageSize) -> KResult<Self> {
         Ok(Self {
             phys_pages: (0..divide_page(size, pgsize))
@@ -26,10 +29,12 @@ impl SharedPages {
         })
     }
 
+    /// Return the number of pages.
     pub fn len(&self) -> usize {
         self.phys_pages.len()
     }
 
+    /// Returns `true` if there are no pages.
     pub fn is_empty(&self) -> bool {
         self.phys_pages.is_empty()
     }
@@ -58,6 +63,7 @@ pub struct SharedBackend {
     pages: Arc<SharedPages>,
 }
 impl SharedBackend {
+    /// Access the shared page set.
     pub fn pages(&self) -> &Arc<SharedPages> {
         &self.pages
     }
@@ -107,6 +113,7 @@ impl BackendOps for SharedBackend {
 }
 
 impl Backend {
+    /// Create a shared mapping backend.
     pub fn new_shared(start: VirtAddr, pages: Arc<SharedPages>) -> Self {
         Self::Shared(SharedBackend { start, pages })
     }

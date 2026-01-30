@@ -1,3 +1,5 @@
+//! Lock-free per-CPU task registry for watchdog and NMI dumping.
+
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 

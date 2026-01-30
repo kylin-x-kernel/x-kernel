@@ -1,3 +1,5 @@
+//! User task entry, exit, and robust futex cleanup helpers.
+
 use core::{ffi::c_long, sync::atomic::Ordering};
 
 use bytemuck::AnyBitPattern;
@@ -23,7 +25,7 @@ use crate::{
     syscall::dispatch_irq_syscall,
 };
 
-/// Create a new user task.
+/// Create a new user task that runs in user space and handles traps.
 pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) -> TaskInner {
     TaskInner::new(
         move || {
@@ -97,20 +99,27 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
     )
 }
 
+/// Robust futex list node for robust mutexes
 #[repr(C)]
 #[derive(Debug, Copy, Clone, AnyBitPattern)]
 pub struct RobustList {
+    /// Next list node.
     pub next: *mut RobustList,
 }
 
+/// Head of a robust futex list with pending operation state
 #[repr(C)]
 #[derive(Debug, Copy, Clone, AnyBitPattern)]
 pub struct RobustListHead {
+    /// List head.
     pub list: RobustList,
+    /// Offset from list entry to futex word.
     pub futex_offset: c_long,
+    /// Pending list operation entry.
     pub list_op_pending: *mut RobustList,
 }
 
+/// Mark a futex as owned by a dead task and wake waiting threads.
 fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> {
     let address = (entry as u64)
         .checked_add_signed(offset)
@@ -129,6 +138,7 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> 
     Ok(())
 }
 
+/// Process robust futex list on thread exit and wake waiting threads.
 pub fn exit_robust_list(head: *const RobustListHead) -> KResult<()> {
     // Reference: https://elixir.bootlin.com/linux/v6.13.6/source/kernel/futex/core.c#L777
 
@@ -157,6 +167,7 @@ pub fn exit_robust_list(head: *const RobustListHead) -> KResult<()> {
     Ok(())
 }
 
+/// Exit the current thread or process group and perform cleanup.
 pub fn do_exit(exit_code: i32, group_exit: bool) {
     let curr = current();
     let thr = curr.as_thread();

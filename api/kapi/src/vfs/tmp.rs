@@ -57,6 +57,7 @@ pub struct MemoryFs {
 
 impl MemoryFs {
     /// Creates a new empty memory filesystem.
+    /// Create a new empty in-memory filesystem (tmpfs)
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Filesystem {
         let fs = Arc::new(Self {
@@ -131,6 +132,7 @@ struct Inode {
 }
 
 impl Inode {
+    /// Create a new inode with the given type and permissions
     pub fn new(
         fs: &Arc<MemoryFs>,
         parent: Option<u64>,
@@ -199,6 +201,7 @@ struct InodeRef {
 }
 
 impl InodeRef {
+    /// Create a reference to an inode, incrementing link count
     pub fn new(fs: Arc<MemoryFs>, ino: u64) -> Self {
         fs.get(ino).metadata.lock().nlink += 1;
         Self { fs, ino }
@@ -222,6 +225,7 @@ struct MemoryNode {
 }
 
 impl MemoryNode {
+    /// Create a new memory filesystem node
     pub fn new(fs: Arc<MemoryFs>, inode: Arc<Inode>, this: Option<WeakDirEntry>) -> Arc<Self> {
         Arc::new(Self { fs, inode, this })
     }

@@ -1,3 +1,9 @@
+//! Memory file descriptor syscalls.
+//!
+//! This module implements memory file operations including:
+//! - Memory file creation (memfd_create, etc.)
+//! - Memfd flags and operations
+
 use alloc::format;
 use core::ffi::c_char;
 
@@ -12,6 +18,7 @@ use crate::{
 
 // TODO: correct memfd implementation
 
+/// Creates an anonymous in-memory file descriptor.
 pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     // This is cursed
     for id in 0..0xffff {

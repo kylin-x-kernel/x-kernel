@@ -6,6 +6,7 @@ use knet::{
     unix::{DgramTransport, UnixAddr, UnixDomainSocket},
 };
 
+/// Bind /dev/log as a Unix domain socket for syslog messages
 pub fn bind_dev_log() -> LinuxResult<()> {
     let server = UnixDomainSocket::new(DgramTransport::new(1));
     server.bind(SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into())))?;

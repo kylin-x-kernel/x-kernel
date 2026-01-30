@@ -1,3 +1,5 @@
+//! RISC-V CPU context, trap, and userspace support.
+
 #[macro_use]
 mod macros;
 

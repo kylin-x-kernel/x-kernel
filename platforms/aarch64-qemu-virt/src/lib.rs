@@ -1,3 +1,5 @@
+//! Platform support for aarch64-qemu-virt.
+
 #![no_std]
 #[macro_use]
 extern crate kplat;

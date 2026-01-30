@@ -1,44 +1,77 @@
+//! RISC-V context structures for traps and task switching.
+
 use core::arch::naked_asm;
 
 use memaddr::VirtAddr;
 use riscv::register::sstatus::{self, FS};
 
 /// General registers of RISC-V.
-#[allow(missing_docs)]
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GeneralRegisters {
+    /// Constant zero register x0.
     pub zero: usize,
+    /// Return address register x1.
     pub ra: usize,
+    /// Stack pointer register x2.
     pub sp: usize,
+    /// Global pointer register x3.
     pub gp: usize,
+    /// Thread pointer register x4.
     pub tp: usize,
+    /// Temporary register x5.
     pub t0: usize,
+    /// Temporary register x6.
     pub t1: usize,
+    /// Temporary register x7.
     pub t2: usize,
+    /// Saved register x8 (s0/fp).
     pub s0: usize,
+    /// Saved register x9 (s1).
     pub s1: usize,
+    /// Function argument / return register x10 (a0).
     pub a0: usize,
+    /// Function argument register x11 (a1).
     pub a1: usize,
+    /// Function argument register x12 (a2).
     pub a2: usize,
+    /// Function argument register x13 (a3).
     pub a3: usize,
+    /// Function argument register x14 (a4).
     pub a4: usize,
+    /// Function argument register x15 (a5).
     pub a5: usize,
+    /// Function argument register x16 (a6).
     pub a6: usize,
+    /// Function argument register x17 (a7).
     pub a7: usize,
+    /// Saved register x18 (s2).
     pub s2: usize,
+    /// Saved register x19 (s3).
     pub s3: usize,
+    /// Saved register x20 (s4).
     pub s4: usize,
+    /// Saved register x21 (s5).
     pub s5: usize,
+    /// Saved register x22 (s6).
     pub s6: usize,
+    /// Saved register x23 (s7).
     pub s7: usize,
+    /// Saved register x24 (s8).
     pub s8: usize,
+    /// Saved register x25 (s9).
     pub s9: usize,
+    /// Saved register x26 (s10).
     pub s10: usize,
+    /// Saved register x27 (s11).
     pub s11: usize,
+    /// Temporary register x28 (t3).
     pub t3: usize,
+    /// Temporary register x29 (t4).
     pub t4: usize,
+    /// Temporary register x30 (t5).
     pub t5: usize,
+    /// Temporary register x31 (t6).
     pub t6: usize,
 }
 
@@ -263,25 +296,38 @@ impl ExceptionContext {
 ///
 /// On context switch, current task saves its context from CPU to memory,
 /// and the next task restores its context from memory to CPU.
-#[allow(missing_docs)]
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct TaskContext {
-    pub ra: usize, // return address (x1)
-    pub sp: usize, // stack pointer (x2)
+    /// Return address (x1).
+    pub ra: usize,
+    /// Stack pointer (x2).
+    pub sp: usize,
 
-    pub s0: usize, // x8-x9
+    /// Callee-saved register s0 (x8/fp).
+    pub s0: usize,
+    /// Callee-saved register s1 (x9).
     pub s1: usize,
 
-    pub s2: usize, // x18-x27
+    /// Callee-saved register s2 (x18).
+    pub s2: usize,
+    /// Callee-saved register s3 (x19).
     pub s3: usize,
+    /// Callee-saved register s4 (x20).
     pub s4: usize,
+    /// Callee-saved register s5 (x21).
     pub s5: usize,
+    /// Callee-saved register s6 (x22).
     pub s6: usize,
+    /// Callee-saved register s7 (x23).
     pub s7: usize,
+    /// Callee-saved register s8 (x24).
     pub s8: usize,
+    /// Callee-saved register s9 (x25).
     pub s9: usize,
+    /// Callee-saved register s10 (x26).
     pub s10: usize,
+    /// Callee-saved register s11 (x27).
     pub s11: usize,
     /// Thread Pointer
     pub tp: usize,

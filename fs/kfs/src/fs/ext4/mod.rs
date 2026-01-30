@@ -1,3 +1,4 @@
+//! Ext4 filesystem adapter.
 mod fs;
 mod inode;
 mod util;
@@ -8,6 +9,7 @@ pub use inode::*;
 use kdriver::{BlockDevice as KBlockDevice, prelude::BlockDriverOps};
 use lwext4_rust::{BlockDevice, Ext4Error, Ext4Result, ffi::EIO};
 
+/// Block device wrapper implementing the ext4 driver traits.
 pub(crate) struct Ext4Disk(KBlockDevice);
 
 impl BlockDevice for Ext4Disk {

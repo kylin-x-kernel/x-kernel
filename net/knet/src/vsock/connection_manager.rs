@@ -1,3 +1,4 @@
+//! Vsock connection manager.
 use alloc::{collections::BTreeMap, sync::Arc};
 
 use kerrno::{KError, KResult, k_bail};

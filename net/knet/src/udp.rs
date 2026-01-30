@@ -1,3 +1,4 @@
+//! UDP socket implementation.
 use alloc::vec;
 use core::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

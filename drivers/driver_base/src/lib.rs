@@ -14,6 +14,7 @@
 //! [4]: ../net/index.html
 
 #![no_std]
+#![allow(rustdoc::broken_intra_doc_links)]
 
 /// All supported device kinds.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

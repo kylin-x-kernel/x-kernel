@@ -1,3 +1,5 @@
+//! Core task data structures and lifecycle helpers.
+
 use alloc::{boxed::Box, string::String, sync::Arc};
 #[cfg(feature = "preempt")]
 use core::sync::atomic::AtomicUsize;

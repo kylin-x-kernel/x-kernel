@@ -1,3 +1,4 @@
+//! Directory node traits and helpers.
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{
     mem,
@@ -33,6 +34,7 @@ impl<F: FnMut(&str, u64, NodeType, u64) -> bool> DirEntrySink for F {
 
 type DirChildren = HashMap<String, DirEntry>;
 
+/// Directory node operations.
 pub trait DirNodeOps: NodeOps {
     /// Reads directory entries.
     ///
@@ -107,12 +109,18 @@ pub trait DirNodeOps: NodeOps {
 /// Options for opening (or creating) a directory entry.
 ///
 /// See [`DirNode::open_file`] for more details.
+/// Options for opening or creating an entry in a directory.
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
+    /// Create the entry if it does not exist.
     pub create: bool,
+    /// Fail if the entry already exists.
     pub create_new: bool,
+    /// Node type to create.
     pub node_type: NodeType,
+    /// Permission bits for new nodes.
     pub permission: NodePermission,
+    /// Owner (uid, gid) to apply on creation.
     pub user: Option<(u32, u32)>, // (uid, gid)
 }
 
@@ -128,6 +136,7 @@ impl Default for OpenOptions {
     }
 }
 
+/// Directory node wrapper with dentry cache support.
 pub struct DirNode {
     ops: Arc<dyn DirNodeOps>,
     dentry_cache: Mutex<DirChildren>,
@@ -149,6 +158,7 @@ impl From<DirNode> for Arc<dyn NodeOps> {
 }
 
 impl DirNode {
+    /// Create a new directory node wrapper.
     pub fn new(ops: Arc<dyn DirNodeOps>) -> Self {
         Self {
             ops,
@@ -157,10 +167,12 @@ impl DirNode {
         }
     }
 
+    /// Return the underlying directory operations object.
     pub fn inner(&self) -> &Arc<dyn DirNodeOps> {
         &self.ops
     }
 
+    /// Downcast to a concrete directory implementation.
     pub fn downcast<T: DirNodeOps>(&self) -> VfsResult<Arc<T>> {
         self.ops
             .clone()
@@ -222,6 +234,7 @@ impl DirNode {
         }
     }
 
+    /// Read directory entries starting at `offset`.
     pub fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
         self.ops.read_dir(offset, sink)
     }
@@ -372,10 +385,12 @@ impl DirNode {
         Ok(entry)
     }
 
+    /// Returns the mountpoint attached to this directory, if any.
     pub fn mountpoint(&self) -> Option<Arc<Mountpoint>> {
         self.mount_at_this_dir.lock().clone()
     }
 
+    /// Returns `true` if a filesystem is mounted at this directory.
     pub fn is_mountpoint(&self) -> bool {
         self.mount_at_this_dir.lock().is_some()
     }

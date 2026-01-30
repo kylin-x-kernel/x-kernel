@@ -29,6 +29,7 @@ impl JobControl {
         }
     }
 
+    /// Check if the current process is in the foreground process group
     pub fn current_in_foreground(&self) -> bool {
         self.foreground
             .lock()
@@ -36,10 +37,12 @@ impl JobControl {
             .is_none_or(|pg| Arc::ptr_eq(&current().as_thread().proc_data.proc.group(), &pg))
     }
 
+    /// Get the current foreground process group
     pub fn foreground(&self) -> Option<Arc<ProcessGroup>> {
         self.foreground.lock().upgrade()
     }
 
+    /// Set the foreground process group for this terminal
     pub fn set_foreground(&self, pg: &Arc<ProcessGroup>) -> KResult<()> {
         let mut guard = self.foreground.lock();
         let weak = Arc::downgrade(pg);
@@ -66,6 +69,7 @@ impl JobControl {
         Ok(())
     }
 
+    /// Associate this terminal with a session
     pub fn set_session(&self, session: &Arc<Session>) {
         let mut guard = self.session.lock();
         assert!(guard.upgrade().is_none());

@@ -1,3 +1,4 @@
+//! Unix stream socket transport.
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     sync::atomic::{AtomicBool, Ordering},

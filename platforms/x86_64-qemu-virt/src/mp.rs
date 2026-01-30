@@ -1,3 +1,5 @@
+//! SMP bring-up helpers for x86_64-qemu-virt.
+
 use core::time::Duration;
 
 use kplat::{
@@ -30,6 +32,7 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
     start_page[U64_PER_PAGE - 2] = stack_top.as_usize() as u64;
     start_page[U64_PER_PAGE - 1] = ap_entry32 as *const () as usize as _;
 }
+/// Starts a secondary CPU with the given APIC ID and stack.
 pub fn start_secondary_cpu(apic_id: usize, stack_top: PhysAddr) {
     unsafe { setup_startup_page(stack_top) };
     let apic_id = super::apic::raw_apic_id(apic_id as u8);

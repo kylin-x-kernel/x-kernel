@@ -1,3 +1,4 @@
+//! Address space implementation backed by memory sets and page tables.
 use alloc::sync::Arc;
 use core::{fmt, ops::DerefMut};
 
@@ -109,6 +110,7 @@ impl AddrSpace {
         self.areas.find_free_area(hint, size, limit, align)
     }
 
+    /// Find the memory area that contains the given virtual address.
     pub fn find_area(&self, vaddr: VirtAddr) -> Option<&MemoryArea<Backend>> {
         self.areas.find(vaddr)
     }
@@ -140,6 +142,7 @@ impl AddrSpace {
         Ok(())
     }
 
+    /// Map a region using the provided backend and flags.
     pub fn map(
         &mut self,
         start: VirtAddr,

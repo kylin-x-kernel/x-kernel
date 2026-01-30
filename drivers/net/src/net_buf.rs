@@ -1,3 +1,4 @@
+//! Network buffer types and pool allocator.
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::ptr::NonNull;
 

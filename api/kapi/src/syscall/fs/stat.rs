@@ -1,3 +1,11 @@
+//! File metadata and status syscalls.
+//!
+//! This module implements file metadata and status operations including:
+//! - File metadata queries (stat, fstat, lstat, fstatat, statx, etc.)
+//! - Filesystem information (statfs, fstatfs, etc.)
+//! - File access checks (faccessat, etc.)
+//! - File type and permission queries
+
 use core::ffi::{c_char, c_int};
 
 use fs_ng_vfs::{Location, NodePermission};
@@ -40,6 +48,7 @@ pub fn sys_lstat(path: *const c_char, statbuf: *mut stat) -> KResult<isize> {
     sys_fstatat(AT_FDCWD, path, statbuf, AT_SYMLINK_NOFOLLOW)
 }
 
+/// Gets file metadata relative to a directory file descriptor.
 pub fn sys_fstatat(
     dirfd: i32,
     path: *const c_char,
@@ -56,6 +65,7 @@ pub fn sys_fstatat(
     Ok(0)
 }
 
+/// Gets extended file metadata (statx).
 pub fn sys_statx(
     dirfd: c_int,
     path: *const c_char,
@@ -105,6 +115,7 @@ pub fn sys_access(path: *const c_char, mode: u32) -> KResult<isize> {
     sys_faccessat2(AT_FDCWD, path, mode, 0)
 }
 
+/// Checks file accessibility with additional flags.
 pub fn sys_faccessat2(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) -> KResult<isize> {
     let path = path.check_non_null().map(vm_load_string).transpose()?;
     debug!("sys_faccessat2 <= dirfd: {dirfd}, path: {path:?}, mode: {mode}, flags: {flags}");
@@ -132,6 +143,7 @@ pub fn sys_faccessat2(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) 
     Ok(0)
 }
 
+/// Builds a `statfs` snapshot for the filesystem at `loc`.
 fn statfs(loc: &Location) -> KResult<statfs> {
     let stat = loc.filesystem().stat()?;
     // FIXME: Zeroable
@@ -153,6 +165,7 @@ fn statfs(loc: &Location) -> KResult<statfs> {
     Ok(result)
 }
 
+/// Gets filesystem statistics by path.
 pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> KResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_statfs <= path: {path:?}");
@@ -167,6 +180,7 @@ pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> KResult<isize> {
     Ok(0)
 }
 
+/// Gets filesystem statistics by file descriptor.
 pub fn sys_fstatfs(fd: i32, buf: *mut statfs) -> KResult<isize> {
     debug!("sys_fstatfs <= fd: {fd}");
 

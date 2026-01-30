@@ -1,3 +1,5 @@
+//! Socket set wrapper utilities.
+
 use alloc::vec;
 
 use event_listener::Event;

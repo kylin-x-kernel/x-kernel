@@ -1,3 +1,4 @@
+//! Allocation helpers for loading user memory into heap buffers.
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -5,6 +6,7 @@ use bytemuck::{AnyBitPattern, Pod, bytes_of, zeroed};
 
 use crate::{MemError, MemImpl, MemResult, VirtMemIo, read_vm_mem};
 
+/// Load a fixed-length vector from user memory without validating pointer.
 pub unsafe fn load_vec_unsafe<T>(p: *const T, count: usize) -> MemResult<Vec<T>> {
     let mut v = Vec::with_capacity(count);
     read_vm_mem(p, &mut v.spare_capacity_mut()[..count])?;
@@ -14,6 +16,7 @@ pub unsafe fn load_vec_unsafe<T>(p: *const T, count: usize) -> MemResult<Vec<T>>
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Load a fixed-length vector from user memory.
 pub fn load_vec<T: AnyBitPattern>(p: *const T, count: usize) -> MemResult<Vec<T>> {
     // SAFETY: The caller must ensure that `p` is valid for reading `count` elements.
     unsafe { load_vec_unsafe(p, count) }
@@ -25,6 +28,7 @@ fn check_zero<T: Pod>(v: &T) -> bool {
 
 const LIMIT: usize = 128 * 1024;
 
+/// Load elements until a zeroed terminator is found or a length limit is hit.
 pub fn load_vec_until_null<T: Pod>(p: *const T) -> MemResult<Vec<T>> {
     if !p.is_aligned() {
         return Err(MemError::InvalidAddr);

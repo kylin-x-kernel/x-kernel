@@ -1,3 +1,4 @@
+//! Memory area representation.
 use core::fmt;
 
 use memaddr::{AddrRange, MemoryAddr};

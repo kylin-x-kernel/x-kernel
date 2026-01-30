@@ -1,3 +1,5 @@
+//! Boot entry and early page table setup for aarch64-qemu-virt.
+
 use kplat::memory::{PageAligned, pa};
 use page_table::{
     PageTableEntry as GenericPTE, PagingFlags as MappingFlags, aarch64::A64PageEntry as A64PTE,

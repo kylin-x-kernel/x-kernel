@@ -1,4 +1,6 @@
+//! Phytium FXMAC network driver adapter.
 use alloc::{boxed::Box, collections::VecDeque, vec};
+use alloc::vec::Vec;
 use core::ptr::NonNull;
 
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
@@ -10,7 +12,7 @@ use crate::{MacAddress, NetBufHandle, NetDriverOps};
 
 const QS: usize = 64;
 
-/// fxmac driver device
+/// FXMAC NIC driver instance.
 pub struct FXmacNic {
     inner: &'static mut FXmac,
     hwaddr: [u8; 6],
@@ -21,7 +23,7 @@ unsafe impl Sync for FXmacNic {}
 unsafe impl Send for FXmacNic {}
 
 impl FXmacNic {
-    /// initialize fxmac driver
+    /// Initialize the FXMAC driver instance.
     pub fn init(mapped_regs: usize) -> DriverResult<Self> {
         info!("FXmacNic init @ {mapped_regs:#x}");
         let rx_buffer_queue = VecDeque::with_capacity(QS);

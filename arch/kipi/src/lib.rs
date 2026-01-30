@@ -41,7 +41,7 @@ pub enum KipiError {
     CallbackFailed,
 }
 
-impl core::fmt::Display for KpiError {
+impl core::fmt::Display for KipiError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
             Self::InvalidCpuId => write!(f, "Invalid CPU ID"),
@@ -76,7 +76,7 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()>
     // Error handling: check CPU ID validity
     if dest_cpu >= cpu_num {
         error!("Invalid CPU ID: {} (max: {})", dest_cpu, cpu_num - 1);
-        return Err(KpiError::InvalidCpuId);
+        return Err(KipiError::InvalidCpuId);
     }
 
     info!("Send IPI event to CPU {dest_cpu}");

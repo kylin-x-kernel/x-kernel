@@ -1,3 +1,10 @@
+//! Memory barrier syscalls.
+//!
+//! This module implements memory barrier operations including:
+//! - Global memory barriers (membarrier, etc.)
+//! - Private and shared memory synchronization
+//! - Per-thread and per-process barriers
+
 use core::sync::atomic::{Ordering, compiler_fence};
 
 use kerrno::{KError, KResult};

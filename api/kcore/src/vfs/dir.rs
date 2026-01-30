@@ -1,3 +1,5 @@
+//! Simple directory helpers for the in-kernel VFS.
+
 use alloc::{
     borrow::{Cow, ToOwned},
     boxed::Box,

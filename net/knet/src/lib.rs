@@ -11,6 +11,7 @@
 //! [smoltcp]: https://github.com/smoltcp-rs/smoltcp
 
 #![no_std]
+#![allow(rustdoc::broken_intra_doc_links)]
 
 #[macro_use]
 extern crate log;

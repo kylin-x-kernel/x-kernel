@@ -34,9 +34,6 @@ ramdisk = ["block", "block/ramdisk"]
 bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
 sdmmc = ["block", "block/sdmmc", "dep:khal", "dep:platconfig"]
 ahci = ["block", "block/ahci", "dep:khal", "dep:platconfig"]
-# ixgbe = ["net", "net/ixgbe", "dep:axalloc", "dep:khal", "dep:kdma"]
-# fxmac = ["net", "net/fxmac", "dep:axalloc", "dep:khal", "dep:kdma"]
-# more devices example: e1000 = ["net", "net/e1000"]
 
 default = ["bus-pci"]
 
@@ -54,7 +51,6 @@ vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
 kerrno = { workspace = true, optional = true }
 khal = { workspace = true, optional = true }
-# axmm = { workspace = true, optional = true }
 cfg-if.workspace = true
 crate_interface.workspace = true
 dma-api = { version = "0.5", features = ["alloc"], optional = true }

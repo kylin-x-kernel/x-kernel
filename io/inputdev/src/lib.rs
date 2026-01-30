@@ -1,3 +1,4 @@
+//! Input device initialization and access helpers.
 #![no_std]
 
 #[macro_use]
@@ -13,7 +14,7 @@ use lazyinit::LazyInit;
 
 static DEVICES: LazyInit<Mutex<Vec<InputDevice>>> = LazyInit::new();
 
-/// Initializes the graphics subsystem by underlayer devices.
+/// Initialize the input subsystem with detected devices.
 pub fn init_input(mut input_devs: DeviceContainer<InputDevice>) {
     info!("Initialize input subsystem...");
 
@@ -29,6 +30,7 @@ pub fn init_input(mut input_devs: DeviceContainer<InputDevice>) {
     DEVICES.init_once(Mutex::new(devices));
 }
 
+/// Take ownership of all registered input devices.
 pub fn input_take_all() -> Vec<InputDevice> {
     mem::take(&mut DEVICES.lock())
 }

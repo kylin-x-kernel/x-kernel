@@ -1,3 +1,4 @@
+//! Unix datagram socket transport.
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::task::Context;
 

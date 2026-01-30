@@ -1,3 +1,4 @@
+//! Thread-level signal handling and user context setup.
 use alloc::sync::Arc;
 use core::{
     alloc::Layout,
@@ -37,6 +38,7 @@ pub struct ThreadSignalManager {
 }
 
 impl ThreadSignalManager {
+    /// Create a new thread signal manager attached to a process.
     pub fn new(tid: u32, proc: Arc<ProcessSignalManager>) -> Arc<Self> {
         let this = Arc::new(Self {
             proc: proc.clone(),
@@ -60,10 +62,12 @@ impl ThreadSignalManager {
             .or_else(|| self.proc.dequeue_signal(mask))
     }
 
+    /// Returns the owning process signal manager.
     pub fn process(&self) -> &Arc<ProcessSignalManager> {
         &self.proc
     }
 
+    /// Dispatch a signal, building a user stack frame if needed.
     pub fn dispatch_irq_signal(
         &self,
         uctx: &mut UserContext,
@@ -171,6 +175,7 @@ impl ThreadSignalManager {
     /// Checks pending signals and dispatch_irq them.
     ///
     /// Returns the signal number and the action the OS should take, if any.
+    /// Checks pending signals and dispatches one if available.
     pub fn check_signals(
         &self,
         uctx: &mut UserContext,
@@ -186,6 +191,7 @@ impl ThreadSignalManager {
     }
 
     /// Restores the signal frame. Called by `sigreturn`.
+    /// Restore user context from the signal frame during `sigreturn`.
     pub fn restore(&self, uctx: &mut UserContext) {
         let frame_ptr = uctx.sp() as *const SignalFrame;
         // SAFETY: pointer is valid
@@ -218,11 +224,13 @@ impl ThreadSignalManager {
     }
 
     /// Gets the blocked signals.
+    /// Returns the current blocked signal set.
     pub fn blocked(&self) -> SignalSet {
         *self.blocked.lock()
     }
 
     /// Sets the blocked signals. Return the old value.
+    /// Replace the blocked set, returning the previous one.
     pub fn set_blocked(&self, mut set: SignalSet) -> SignalSet {
         set.remove(Signo::SIGKILL);
         set.remove(Signo::SIGSTOP);
@@ -234,21 +242,25 @@ impl ThreadSignalManager {
     }
 
     /// Checks if a signal is blocked.
+    /// Returns `true` if the signal is currently blocked.
     pub fn signal_blocked(&self, signo: Signo) -> bool {
         self.blocked.lock().has(signo)
     }
 
     /// Gets the signal stack.
+    /// Returns the signal handler stack configuration.
     pub fn stack(&self) -> SignalStack {
         self.stack.lock().clone()
     }
 
     /// Sets the signal stack.
+    /// Sets the signal handler stack configuration.
     pub fn set_stack(&self, stack: SignalStack) {
         *self.stack.lock() = stack;
     }
 
     /// Gets current pending signals.
+    /// Returns pending signals for this thread and its process.
     pub fn pending(&self) -> SignalSet {
         self.pending.lock().set | self.proc.pending()
     }

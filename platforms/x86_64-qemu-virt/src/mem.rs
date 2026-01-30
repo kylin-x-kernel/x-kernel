@@ -1,3 +1,5 @@
+//! Memory layout definitions for x86_64-qemu-virt.
+
 use heapless::Vec;
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 use lazyinit::LazyInit;
@@ -6,6 +8,7 @@ use multiboot::information::{MemoryManagement, MemoryType, Multiboot, PAddr};
 use crate::config::{devices::MMIO_RANGES, plat::PHYS_VIRT_OFFSET};
 const MAX_REGIONS: usize = 16;
 static RAM_REGIONS: LazyInit<Vec<MemRange, MAX_REGIONS>> = LazyInit::new();
+/// Initializes RAM region list from multiboot information.
 pub fn init(multiboot_info_ptr: usize) {
     let mut mm = HwMemoryImpl;
     let info = unsafe { Multiboot::from_ptr(multiboot_info_ptr as _, &mut mm).unwrap() };

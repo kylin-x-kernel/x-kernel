@@ -1,11 +1,20 @@
+//! Thread and process identification syscalls.
+//!
+//! This module implements thread and process identification operations including:
+//! - Process ID queries (getpid, getppid, etc.)
+//! - Thread ID queries (gettid, etc.)
+//! - Architecture-specific controls (arch_prctl, etc.)
+
 use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use ktask::current;
 
+/// Get the process ID of the current process
 pub fn sys_getpid() -> KResult<isize> {
     Ok(current().as_thread().proc_data.proc.pid() as _)
 }
 
+/// Get the parent process ID of the current process
 pub fn sys_getppid() -> KResult<isize> {
     current()
         .as_thread()
@@ -16,6 +25,7 @@ pub fn sys_getppid() -> KResult<isize> {
         .map(|p| p.pid() as _)
 }
 
+/// Get the thread ID of the current thread
 pub fn sys_gettid() -> KResult<isize> {
     Ok(current().id().as_u64() as _)
 }
@@ -46,12 +56,16 @@ enum ArchPrctlCode {
 /// To set the clear_child_tid field in the task extended data.
 ///
 /// The set_tid_address() always succeeds
+/// Set the thread ID address for thread termination notification
+/// Always succeeds and returns the current thread ID
 pub fn sys_set_tid_address(clear_child_tid: usize) -> KResult<isize> {
     let curr = current();
     curr.as_thread().set_clear_child_tid(clear_child_tid);
     Ok(curr.id().as_u64() as isize)
 }
 
+/// Architecture-specific operations (x86_64 only)
+/// Supports FS/GS segment base operations and CPUID control
 #[cfg(target_arch = "x86_64")]
 pub fn sys_arch_prctl(
     uctx: &mut khal::uspace::UserContext,

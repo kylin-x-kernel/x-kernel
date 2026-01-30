@@ -18,13 +18,15 @@ chrono = { version = "0.4", default-features = false, optional = true }
 kspin = { workspace = true }
 lazyinit = "0.2"
 log = "0.4"
-loongArch64 = "0.2.4"
-page_table = { workspace = true }
-uart_16550 = "0.4.0"
 
 platconfig-macros = { workspace = true }
 kcpu = { workspace = true }
 kplat = { workspace = true }
+
+[target.'cfg(target_arch = "loongarch64")'.dependencies]
+loongArch64 = "0.2.4"
+page_table = { workspace = true }
+uart_16550 = "0.4.0"
 
 [package.metadata.docs.rs]
 targets = ["loongarch64-unknown-none"]

@@ -1,3 +1,4 @@
+//! VFS node types and directory entry wrappers.
 mod dir;
 mod file;
 
@@ -28,6 +29,7 @@ use crate::{
 };
 
 bitflags! {
+    /// Flags describing special node behaviors.
     #[derive(Debug, Clone, Copy)]
     pub struct NodeFlags: u32 {
         /// Indicates that this file behaves like a stream.
@@ -57,7 +59,7 @@ bitflags! {
     }
 }
 
-/// Filesystem node operationss
+/// Filesystem node operations.
 #[allow(clippy::len_without_is_empty)]
 pub trait NodeOps: Send + Sync + 'static {
     /// Gets the inode number of the node.
@@ -69,7 +71,7 @@ pub trait NodeOps: Send + Sync + 'static {
     /// Updates the metadata of the node.
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
 
-    /// Gets the filesystem
+    /// Gets the filesystem owning this node.
     fn filesystem(&self) -> &dyn FilesystemOps;
 
     /// Gets the size of the node.
@@ -129,6 +131,7 @@ impl fmt::Debug for Node {
 /// a directory entry within its parent directory.
 pub type ReferenceKey = (usize, String);
 
+/// Reference to a directory entry within a parent.
 #[derive(Debug)]
 pub struct Reference {
     parent: Option<DirEntry>,
@@ -136,14 +139,17 @@ pub struct Reference {
 }
 
 impl Reference {
+    /// Create a new reference with an optional parent and name.
     pub fn new(parent: Option<DirEntry>, name: String) -> Self {
         Self { parent, name }
     }
 
+    /// Create the root reference.
     pub fn root() -> Self {
         Self::new(None, String::new())
     }
 
+    /// Build a key suitable for cache lookup.
     pub fn key(&self) -> ReferenceKey {
         let address = self
             .parent
@@ -153,17 +159,21 @@ impl Reference {
     }
 }
 
+/// Type-indexed metadata storage for nodes.
 #[derive(Default)]
 pub struct TypeMap(SmallVec<[(TypeId, Arc<dyn Any + Send + Sync>); 2]>);
 impl TypeMap {
+    /// Create an empty `TypeMap`.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Insert a value by its concrete type.
     pub fn insert<T: Any + Send + Sync>(&mut self, value: T) {
         self.0.push((TypeId::of::<T>(), Arc::new(value)));
     }
 
+    /// Get a value by its concrete type.
     pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
         self.0
             .iter()
@@ -177,6 +187,7 @@ impl TypeMap {
             .and_then(|value| value.downcast().ok())
     }
 
+    /// Get a value by type or insert one created by `f`.
     pub fn get_or_insert_with<T: Any + Send + Sync>(&mut self, f: impl FnOnce() -> T) -> Arc<T> {
         if let Some(value) = self.get::<T>() {
             value
@@ -205,13 +216,16 @@ impl fmt::Debug for Inner {
     }
 }
 
+/// Strong reference to a directory entry.
 #[derive(Debug, Clone)]
 pub struct DirEntry(Arc<Inner>);
 
+/// Weak reference to a directory entry.
 #[derive(Debug, Clone)]
 pub struct WeakDirEntry(Weak<Inner>);
 
 impl WeakDirEntry {
+    /// Upgrade to a strong reference if the entry still exists.
     pub fn upgrade(&self) -> Option<DirEntry> {
         self.0.upgrade().map(DirEntry)
     }
@@ -243,6 +257,7 @@ impl DirEntry {
 }
 
 impl DirEntry {
+    /// Construct a file entry with the given node and reference.
     pub fn new_file(node: FileNode, node_type: NodeType, reference: Reference) -> Self {
         Self(Arc::new(Inner {
             node: Node::File(node),
@@ -252,6 +267,7 @@ impl DirEntry {
         }))
     }
 
+    /// Construct a directory entry with a node builder.
     pub fn new_dir(node_fn: impl FnOnce(WeakDirEntry) -> DirNode, reference: Reference) -> Self {
         Self(Arc::new_cyclic(|this| Inner {
             node: Node::Dir(node_fn(WeakDirEntry(this.clone()))),
@@ -261,6 +277,7 @@ impl DirEntry {
         }))
     }
 
+    /// Returns metadata for this entry, filling in its node type.
     pub fn metadata(&self) -> VfsResult<Metadata> {
         self.0.node.metadata().map(|mut metadata| {
             metadata.node_type = self.0.node_type;
@@ -268,6 +285,7 @@ impl DirEntry {
         })
     }
 
+    /// Attempt to downcast the entry to a concrete node type.
     pub fn downcast<T: NodeOps>(&self) -> VfsResult<Arc<T>> {
         self.0
             .node
@@ -277,22 +295,27 @@ impl DirEntry {
             .map_err(|_| VfsError::InvalidInput)
     }
 
+    /// Downgrade to a weak reference.
     pub fn downgrade(&self) -> WeakDirEntry {
         WeakDirEntry(Arc::downgrade(&self.0))
     }
 
+    /// Returns the cache key for this entry.
     pub fn key(&self) -> ReferenceKey {
         self.0.reference.key()
     }
 
+    /// Returns the node type of this entry.
     pub fn node_type(&self) -> NodeType {
         self.0.node_type
     }
 
+    /// Returns the parent directory entry, if any.
     pub fn parent(&self) -> Option<Self> {
         self.0.reference.parent.clone()
     }
 
+    /// Returns the entry name within its parent directory.
     pub fn name(&self) -> &str {
         &self.0.reference.name
     }
@@ -302,6 +325,7 @@ impl DirEntry {
         self.0.reference.parent.is_none()
     }
 
+    /// Returns whether `self` is an ancestor of `other`.
     pub fn is_ancestor_of(&self, other: &Self) -> VfsResult<bool> {
         let mut current = other.clone();
         loop {
@@ -329,6 +353,7 @@ impl DirEntry {
         }
     }
 
+    /// Returns the absolute path for this entry.
     pub fn absolute_path(&self) -> VfsResult<PathBuf> {
         let mut components = vec![];
         self.collect_absolute_path(&mut components);
@@ -337,14 +362,17 @@ impl DirEntry {
             .collect())
     }
 
+    /// Returns `true` if this entry is a file.
     pub fn is_file(&self) -> bool {
         matches!(self.0.node, Node::File(_))
     }
 
+    /// Returns `true` if this entry is a directory.
     pub fn is_dir(&self) -> bool {
         matches!(self.0.node, Node::Dir(_))
     }
 
+    /// Returns a file node reference if this entry is a file.
     pub fn as_file(&self) -> VfsResult<&FileNode> {
         match &self.0.node {
             Node::File(file) => Ok(file),
@@ -352,6 +380,7 @@ impl DirEntry {
         }
     }
 
+    /// Returns a directory node reference if this entry is a directory.
     pub fn as_dir(&self) -> VfsResult<&DirNode> {
         match &self.0.node {
             Node::Dir(dir) => Ok(dir),
@@ -359,14 +388,17 @@ impl DirEntry {
         }
     }
 
+    /// Returns `true` if two entries point to the same node.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    /// Returns the raw pointer value for this entry.
     pub fn as_ptr(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
 
+    /// Read the symlink target as a string.
     pub fn read_link(&self) -> VfsResult<String> {
         if self.node_type() != NodeType::Symlink {
             return Err(VfsError::InvalidData);
@@ -377,6 +409,7 @@ impl DirEntry {
         String::from_utf8(buf).map_err(|_| VfsError::InvalidData)
     }
 
+    /// Issue an ioctl to the underlying file node.
     pub fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
         match &self.0.node {
             Node::File(file) => file.ioctl(cmd, arg),
@@ -384,6 +417,7 @@ impl DirEntry {
         }
     }
 
+    /// Access per-node user data storage.
     pub fn user_data(&self) -> MutexGuard<'_, TypeMap> {
         self.0.user_data.lock()
     }

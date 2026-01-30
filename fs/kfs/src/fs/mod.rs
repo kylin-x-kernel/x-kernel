@@ -1,3 +1,4 @@
+//! Filesystem backends and selection helpers.
 #[cfg(feature = "fat")]
 mod fat;
 
@@ -8,6 +9,7 @@ use cfg_if::cfg_if;
 use fs_ng_vfs::{Filesystem, VfsResult};
 use kdriver::BlockDevice as KBlockDevice;
 
+/// Create the default filesystem instance for the given block device.
 pub fn new_default(_dev: KBlockDevice) -> VfsResult<Filesystem> {
     cfg_if! {
         if #[cfg(feature = "ext4")] {

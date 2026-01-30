@@ -1,3 +1,4 @@
+//! Common socket wrapper types and poll helpers.
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     any::Any,

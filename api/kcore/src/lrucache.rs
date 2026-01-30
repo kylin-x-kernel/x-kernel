@@ -1,3 +1,5 @@
+//! A small, fixed-capacity LRU cache utility.
+
 use alloc::vec::Vec;
 use core::mem::replace;
 

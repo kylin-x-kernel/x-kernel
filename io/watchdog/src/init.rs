@@ -1,3 +1,4 @@
+//! Watchdog initialization and NMI handler setup.
 use khal::{context::TrapFrame, percpu::this_cpu_id};
 use ktask::{KCpuMask, TaskInner};
 use log::debug;
@@ -84,6 +85,7 @@ fn init_common() {
 ///
 /// A per-CPU watchdog task periodically updates a timestamp,
 /// and timer callbacks check whether the timestamp is stale.
+/// Initialize soft lockup detection on the current CPU.
 pub fn init_softlockup_detection() {
     // Timer callback used to detect soft lockup conditions.
     ktask::register_timer_callback(|_| {
@@ -113,10 +115,12 @@ pub fn init_softlockup_detection() {
     ktask::spawn_task(watchdog_task);
 }
 
+/// Initialize watchdogs on the primary CPU.
 pub fn init_primary() {
     init_common();
 }
 
+/// Initialize watchdogs on a secondary CPU.
 pub fn init_secondary() {
     init_common();
 }

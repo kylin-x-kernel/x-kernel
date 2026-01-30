@@ -1,3 +1,5 @@
+//! User memory helpers and user pointer wrappers.
+
 use alloc::string::String;
 use core::{
     alloc::Layout,
@@ -18,6 +20,7 @@ use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use osvm::{load_vec, load_vec_until_null, read_vm_mem, write_vm_mem};
 
+/// Validate a user memory region and populate pages if needed.
 fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> KResult<()> {
     let align = layout.align();
     if start.as_usize() & (align - 1) != 0 {
@@ -38,6 +41,7 @@ fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> 
     Ok(())
 }
 
+/// Validate a null-terminated user buffer and return its element length.
 fn check_null_terminated<T: PartialEq + Default>(
     start: VirtAddr,
     access_flags: MappingFlags,
@@ -115,23 +119,28 @@ impl<T> Default for UserPtr<T> {
 impl<T> UserPtr<T> {
     const ACCESS_FLAGS: MappingFlags = MappingFlags::READ.union(MappingFlags::WRITE);
 
+    /// Get the virtual address of this user pointer
     pub fn address(&self) -> VirtAddr {
         VirtAddr::from_ptr_of(self.0)
     }
 
+    /// Cast this pointer to another type
     pub fn cast<U>(self) -> UserPtr<U> {
         UserPtr(self.0 as *mut U)
     }
 
+    /// Check if this pointer is null
     pub fn is_null(&self) -> bool {
         self.0.is_null()
     }
 
+    /// Get a mutable reference to the value, validating the memory region
     pub fn get_as_mut(self) -> KResult<&'static mut T> {
         check_region(self.address(), Layout::new::<T>(), Self::ACCESS_FLAGS)?;
         Ok(unsafe { &mut *self.0 })
     }
 
+    /// Get a mutable slice, validating the memory region
     pub fn get_as_mut_slice(self, len: usize) -> KResult<&'static mut [T]> {
         check_region(
             self.address(),
@@ -141,6 +150,7 @@ impl<T> UserPtr<T> {
         Ok(unsafe { slice::from_raw_parts_mut(self.0, len) })
     }
 
+    /// Get a mutable null-terminated slice, validating the memory region
     pub fn get_as_mut_null_terminated(self) -> KResult<&'static mut [T]>
     where
         T: PartialEq + Default,
@@ -176,23 +186,28 @@ impl<T> Default for UserConstPtr<T> {
 impl<T> UserConstPtr<T> {
     const ACCESS_FLAGS: MappingFlags = MappingFlags::READ;
 
+    /// Get the virtual address of this user pointer
     pub fn address(&self) -> VirtAddr {
         VirtAddr::from_ptr_of(self.0)
     }
 
+    /// Cast this pointer to another type
     pub fn cast<U>(self) -> UserConstPtr<U> {
         UserConstPtr(self.0 as *const U)
     }
 
+    /// Check if this pointer is null
     pub fn is_null(&self) -> bool {
         self.0.is_null()
     }
 
+    /// Get an immutable reference to the value, validating the memory region
     pub fn get_as_ref(self) -> KResult<&'static T> {
         check_region(self.address(), Layout::new::<T>(), Self::ACCESS_FLAGS)?;
         Ok(unsafe { &*self.0 })
     }
 
+    /// Get an immutable slice, validating the memory region
     pub fn get_as_slice(self, len: usize) -> KResult<&'static [T]> {
         check_region(
             self.address(),
@@ -202,6 +217,7 @@ impl<T> UserConstPtr<T> {
         Ok(unsafe { slice::from_raw_parts(self.0, len) })
     }
 
+    /// Get an immutable null-terminated slice, validating the memory region
     pub fn get_as_null_terminated(self) -> KResult<&'static [T]>
     where
         T: PartialEq + Default,
@@ -234,6 +250,7 @@ macro_rules! nullable {
 
 pub(crate) use nullable;
 
+/// Page fault handler used while accessing user memory.
 #[register_trap_handler(PAGE_FAULT)]
 fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
     debug!("Page fault at {vaddr:#x}, access_flags: {access_flags:#x?}");
@@ -253,12 +270,14 @@ fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool 
         .dispatch_irq_page_fault(vaddr, access_flags)
 }
 
+/// Load a null-terminated string from user virtual memory
 pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
     #[allow(clippy::unnecessary_cast)]
     let bytes = load_vec_until_null(ptr as *const u8)?;
     String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
 }
 
+/// Load a string with specified length from user virtual memory
 pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String> {
     #[allow(clippy::unnecessary_cast)]
     let bytes = load_vec(ptr as *const u8, len)?;
@@ -282,7 +301,7 @@ impl VmBytes {
         Self { ptr, len }
     }
 
-    /// Casts the `VmBytes` to a mutable `VmBytesMut`.
+    /// Cast the `VmBytes` to a mutable `VmBytesMut`
     pub fn cast_mut(&self) -> VmBytesMut {
         VmBytesMut::new(self.ptr as *mut u8, self.len)
     }
@@ -324,7 +343,7 @@ impl VmBytesMut {
         Self { ptr, len }
     }
 
-    /// Casts the `VmBytesMut` to a read-only `VmBytes`.
+    /// Cast the `VmBytesMut` to a read-only `VmBytes`
     pub fn cast_const(&self) -> VmBytes {
         VmBytes::new(self.ptr, self.len)
     }

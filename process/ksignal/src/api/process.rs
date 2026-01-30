@@ -1,3 +1,4 @@
+//! Process-level signal state and delivery.
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,

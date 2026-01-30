@@ -1,3 +1,4 @@
+//! TCP listen table and backlog management.
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec};
 use core::ops::DerefMut;
 
@@ -22,6 +23,7 @@ struct ListenTableEntry {
 }
 
 impl ListenTableEntry {
+    /// Create a new listen table entry for the given endpoint.
     pub fn new(listen_endpoint: IpListenEndpoint) -> Self {
         Self {
             listen_endpoint,
@@ -45,6 +47,7 @@ pub struct ListenTable {
 type TcpListenTable = Box<[Arc<Mutex<Option<Box<ListenTableEntry>>>>]>;
 
 impl ListenTable {
+    /// Create an empty listen table.
     pub fn new() -> Self {
         let tcp = unsafe {
             let mut buf = Box::new_uninit_slice(PORT_NUM);

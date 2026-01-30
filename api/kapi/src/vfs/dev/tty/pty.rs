@@ -15,10 +15,12 @@ use crate::terminal::{
 
 const PTY_BUF_SIZE: usize = 4096;
 
+/// Pseudo-terminal driver
 pub type PtyDriver = Tty<PtyReader, PtyWriter>;
 
 type Buffer = Arc<HeapRb<u8>>;
 
+/// PTY reader consuming data from ring buffer
 pub struct PtyReader(Cons<Buffer>);
 
 impl PtyReader {
@@ -33,6 +35,7 @@ impl TtyRead for PtyReader {
     }
 }
 
+/// PTY writer producing data into ring buffer
 #[derive(Clone)]
 pub struct PtyWriter(Arc<SpinNoPreempt<Prod<Buffer>>>, Arc<PollSet>);
 

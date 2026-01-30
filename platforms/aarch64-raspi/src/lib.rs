@@ -1,3 +1,4 @@
+//! Raspberry Pi (AArch64) platform support.
 #![no_std]
 #[macro_use]
 extern crate kplat;

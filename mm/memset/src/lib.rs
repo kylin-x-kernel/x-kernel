@@ -1,3 +1,4 @@
+//! Virtual memory set management and mapping utilities.
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 

@@ -1,5 +1,8 @@
+//! Build script for generating the platform linker script.
+
 use std::{io::Result, path::Path};
 
+/// Entry point for build script.
 fn main() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let platform = platconfig::PLATFORM;
@@ -8,6 +11,7 @@ fn main() {
     }
 }
 
+/// Generates a linker script for the given target arch and platform.
 fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
     let fname = format!("linker_{platform}.lds");
     let output_arch = if arch == "x86_64" {

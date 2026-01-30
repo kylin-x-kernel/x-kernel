@@ -4,6 +4,7 @@
 #![no_std]
 #![feature(likely_unlikely)]
 #![warn(missing_docs)]
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
 
 extern crate alloc;
 

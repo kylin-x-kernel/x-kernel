@@ -1,3 +1,5 @@
+//! AArch64 context structures for traps and task switching.
+
 use core::{arch::naked_asm, fmt};
 
 use memaddr::VirtAddr;
@@ -13,7 +15,7 @@ pub struct ExceptionContext {
     /// Saved Process Status Register (SPSR_EL1).
     pub spsr: u64,
 
-    /// make sure the size is 16 bytes aligned
+    /// Padding to keep the structure 16-byte aligned.
     pub __pad: u64,
 }
 
@@ -173,23 +175,35 @@ impl FpState {
 ///
 /// On context switch, current task saves its context from CPU to memory,
 /// and the next task restores its context from memory to CPU.
-#[allow(missing_docs)]
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct TaskContext {
+    /// Stack pointer.
     pub sp: u64,
+    /// Callee-saved register r19.
     pub r19: u64,
+    /// Callee-saved register r20.
     pub r20: u64,
+    /// Callee-saved register r21.
     pub r21: u64,
+    /// Callee-saved register r22.
     pub r22: u64,
+    /// Callee-saved register r23.
     pub r23: u64,
+    /// Callee-saved register r24.
     pub r24: u64,
+    /// Callee-saved register r25.
     pub r25: u64,
+    /// Callee-saved register r26.
     pub r26: u64,
+    /// Callee-saved register r27.
     pub r27: u64,
+    /// Callee-saved register r28.
     pub r28: u64,
+    /// Frame pointer (r29).
     pub r29: u64,
-    pub lr: u64, // r30
+    /// Link register (r30).
+    pub lr: u64,
     /// Thread Pointer
     pub tpidr_el0: u64,
     /// The `ttbr0_el1` register value, i.e., the page table root.

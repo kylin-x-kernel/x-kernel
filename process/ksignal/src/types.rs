@@ -1,3 +1,4 @@
+//! Signal types, sets, and siginfo helpers.
 use core::{fmt, mem};
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
@@ -80,10 +81,12 @@ pub enum Signo {
 }
 
 impl Signo {
+    /// Returns `true` if this is a real-time signal.
     pub fn is_realtime(&self) -> bool {
         *self >= Signo::SIGRTMIN
     }
 
+    /// Returns the default action for this signal.
     pub fn default_action(&self) -> DefaultSignalAction {
         match self {
             Signo::SIGHUP => DefaultSignalAction::Terminate,
@@ -207,6 +210,7 @@ impl fmt::Debug for SignalSet {
 pub struct SignalInfo(pub siginfo_t);
 
 impl SignalInfo {
+    /// Construct a kernel-originated signal.
     pub fn new_kernel(signo: Signo) -> Self {
         // FIXME: Zeroable
         let mut result: Self = unsafe { mem::zeroed() };
@@ -215,6 +219,7 @@ impl SignalInfo {
         result
     }
 
+    /// Construct a user-originated signal with a code and pid.
     pub fn new_user(signo: Signo, code: i32, pid: u32) -> Self {
         // FIXME: Zeroable
         let mut result: Self = unsafe { mem::zeroed() };
@@ -230,22 +235,27 @@ impl SignalInfo {
         result
     }
 
+    /// Returns the signal number.
     pub fn signo(&self) -> Signo {
         unsafe { Signo::from_repr(self.0.__bindgen_anon_1.__bindgen_anon_1.si_signo as _).unwrap() }
     }
 
+    /// Updates the signal number.
     pub fn set_signo(&mut self, signo: Signo) {
         self.0.__bindgen_anon_1.__bindgen_anon_1.si_signo = signo as _;
     }
 
+    /// Returns the signal code.
     pub fn code(&self) -> i32 {
         unsafe { self.0.__bindgen_anon_1.__bindgen_anon_1.si_code }
     }
 
+    /// Updates the signal code.
     pub fn set_code(&mut self, code: i32) {
         self.0.__bindgen_anon_1.__bindgen_anon_1.si_code = code;
     }
 
+    /// Returns the stored errno value.
     pub fn errno(&self) -> i32 {
         // SAFETY: The union layout matches Linux's siginfo_t definition. bindgen keeps this layout,
         // so it is safe to read the errno field through the anonymous union.

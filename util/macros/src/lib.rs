@@ -1,3 +1,4 @@
+//! Procedural macros for kernel utility helpers.
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};

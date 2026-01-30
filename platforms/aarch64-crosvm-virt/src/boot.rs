@@ -1,3 +1,4 @@
+//! Early boot and entry stubs for the aarch64 crosvm-virt platform.
 use aarch64_cpu::registers::*;
 use kplat::memory::{PageAligned, pa};
 use page_table::{
@@ -12,6 +13,7 @@ static mut BOOT_PT_L0: PageAligned<[A64PTE; 512]> = PageAligned::new([A64PTE::em
 #[unsafe(link_section = ".data")]
 static mut BOOT_PT_L1: PageAligned<[A64PTE; 512]> = PageAligned::new([A64PTE::empty(); 512]);
 use crate::serial::{boot_print_str, boot_print_usize};
+/// Build the minimal page tables used before the full MMU setup.
 unsafe fn init_boot_page_table() {
     boot_print_str("[boot] init boot page table\r\n");
     crate::psci::kvm_guard_granule_init();
@@ -48,9 +50,11 @@ unsafe fn init_boot_page_table() {
     }
 }
 #[unsafe(no_mangle)]
+/// Boot-time smoke test entry for early debugging.
 extern "C" fn kernel_main_test() {
     boot_print_str("[boot] kernel main entered cpu id\r\n");
 }
+/// Enable FP/SIMD usage if supported by build features.
 unsafe fn enable_fp() {
     #[cfg(feature = "fp-simd")]
     kcpu::instrs::enable_fp();
@@ -58,6 +62,7 @@ unsafe fn enable_fp() {
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
+/// First instruction executed by the primary CPU.
 unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!("
          bl       {entry}             // Branch to kernel start, magic
@@ -68,6 +73,7 @@ unsafe extern "C" fn _start() -> ! {
     entry = sym _start_primary,
     )
 }
+/// Switch the current exception level to EL1.
 unsafe fn switch_to_el1() {
     let current_sp = aarch64_cpu::registers::SP.get();
     SPSel.write(SPSel::SP::ELx);
@@ -77,6 +83,7 @@ unsafe fn switch_to_el1() {
     boot_print_usize(current_el as _);
 }
 #[unsafe(naked)]
+/// Primary CPU boot path: set up stack, MMU, and jump to `kplat::entry`.
 unsafe extern "C" fn _start_primary() -> ! {
     core::arch::naked_asm!("
         mrs     x19, mpidr_el1
@@ -111,6 +118,7 @@ unsafe extern "C" fn _start_primary() -> ! {
 }
 #[cfg(feature = "smp")]
 #[unsafe(naked)]
+/// Secondary CPU boot path for SMP bring-up.
 pub(crate) unsafe extern "C" fn _start_secondary() -> ! {
     core::arch::naked_asm!("
         mrs     x19, mpidr_el1

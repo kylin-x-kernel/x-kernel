@@ -1,3 +1,11 @@
+//! Message queue syscalls.
+//!
+//! This module implements POSIX message queue operations including:
+//! - Message queue creation and control (msgget, msgctl, etc.)
+//! - Message sending (msgsnd, etc.)
+//! - Message receiving (msgrcv, etc.)
+//! - Message queue information and statistics
+
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use bytemuck::AnyBitPattern;

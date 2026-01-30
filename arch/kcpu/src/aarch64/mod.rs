@@ -1,3 +1,5 @@
+//! AArch64 CPU context, trap, and userspace support.
+
 mod ctx;
 
 pub mod boot;

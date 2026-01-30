@@ -59,3 +59,8 @@ timer-frequency = 4_000_000_000     # uint
 timer-irq = 0xf0                    # uint
 # IPI interrupt num
 ipi-irq = 0xf3                      # uint
+# PMU interrupt num
+pmu-irq = 0                         # uint
+
+# AHCI controller physical address.
+ahci-paddr = 0                      # uint

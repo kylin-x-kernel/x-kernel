@@ -1,3 +1,4 @@
+//! Boot-time page table setup and entry stubs for Raspberry Pi.
 use kplat::memory::{Aligned4K, pa};
 use page_table::{PageTableEntry as GenericPTE, PagingFlags as MappingFlags, aarch64::A64PageEntry as A64PTE};
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
@@ -36,6 +37,7 @@ unsafe fn enable_fp() {
     #[cfg(feature = "fp-simd")]
     kcpu::instrs::enable_fp();
 }
+/// Primary CPU entry point from the boot loader.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
@@ -70,6 +72,7 @@ unsafe extern "C" fn _start() -> ! {
         entry = sym kplat::entry,
     )
 }
+/// Secondary CPU entry point for SMP bring-up.
 #[cfg(feature = "smp")]
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn _start_secondary() -> ! {

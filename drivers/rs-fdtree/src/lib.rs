@@ -7,6 +7,7 @@
 //! with the goal of having a very ergonomic and idiomatic API.
 
 #![no_std]
+#![allow(rustdoc::bare_urls)]
 
 mod error;
 mod header;

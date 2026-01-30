@@ -1,3 +1,5 @@
+//! Unaligned access emulation for LoongArch64.
+
 use core::{arch::asm, fmt};
 
 use loongArch64::register::badv;
@@ -428,6 +430,7 @@ fn asm_read_fpr_31() -> u64 {
     value
 }
 
+/// Writes a value to the specified floating-point register.
 pub fn write_fpr(fd: usize, val: u64) {
     match fd {
         0 => asm_write_fpr_0(val),
@@ -468,6 +471,7 @@ pub fn write_fpr(fd: usize, val: u64) {
     }
 }
 
+/// Reads the value of the specified floating-point register.
 pub fn read_fpr(fd: usize) -> u64 {
     let value: u64;
     match fd {

@@ -1,3 +1,5 @@
+//! x86_64 exception and IRQ dispatching.
+
 use x86::{controlregs::cr2, irq::*};
 use x86_64::structures::idt::PageFaultErrorCode;
 
@@ -16,6 +18,7 @@ pub(super) const LEGACY_SYSCALL_VECTOR: u8 = 0x80;
 pub(super) const IRQ_VECTOR_START: u8 = 0x20;
 pub(super) const IRQ_VECTOR_END: u8 = 0xff;
 
+/// Dispatches a page fault and panics if unhandled.
 fn dispatch_irq_page_fault(tf: &mut ExceptionContext) {
     let access_flags = err_code_to_flags(tf.error_code)
         .unwrap_or_else(|e| panic!("Invalid #PF error code: {:#x}", e));
@@ -39,6 +42,7 @@ fn dispatch_irq_page_fault(tf: &mut ExceptionContext) {
     );
 }
 
+/// Architecture-specific trap entry point.
 #[unsafe(no_mangle)]
 fn x86_trap_handler(tf: &mut ExceptionContext) {
     let _tf_guard = crate::ExceptionContextGuard::new(tf);
@@ -71,6 +75,7 @@ fn x86_trap_handler(tf: &mut ExceptionContext) {
     }
 }
 
+/// Returns a mnemonic string for an exception vector.
 fn vec_to_str(vec: u64) -> &'static str {
     if vec < 32 {
         EXCEPTIONS[vec as usize].mnemonic
@@ -79,6 +84,7 @@ fn vec_to_str(vec: u64) -> &'static str {
     }
 }
 
+/// Converts a page-fault error code to access flags.
 pub(super) fn err_code_to_flags(err_code: u64) -> Result<PageFaultFlags, u64> {
     let code = PageFaultErrorCode::from_bits_truncate(err_code);
     let reserved_bits = (PageFaultErrorCode::CAUSED_BY_WRITE

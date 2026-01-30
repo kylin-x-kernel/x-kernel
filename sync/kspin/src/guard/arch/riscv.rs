@@ -1,8 +1,10 @@
+//! RISC-V IRQ save/restore helpers.
 use core::arch::asm;
 
 /// Bit 1: Supervisor Interrupt Enable
 const SIE_BIT: usize = 1 << 1;
 
+/// Save SIE and disable interrupts.
 #[inline]
 pub fn save_disable() -> usize {
     let flags: usize;
@@ -11,6 +13,7 @@ pub fn save_disable() -> usize {
     flags & SIE_BIT
 }
 
+/// Restore SIE according to saved flags.
 #[inline]
 pub fn restore(flags: usize) {
     // restore the `SIE` bit

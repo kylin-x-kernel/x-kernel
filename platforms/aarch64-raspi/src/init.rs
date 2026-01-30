@@ -1,3 +1,4 @@
+//! Raspberry Pi boot initialization hooks.
 use kplat::boot::BootHandler;
 use kplat::memory::{pa, p2v};
 #[allow(unused_imports)]

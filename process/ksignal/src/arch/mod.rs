@@ -1,3 +1,4 @@
+//! Architecture-specific signal frames and trampoline.
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         mod x86_64;
@@ -16,6 +17,7 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Return the entry address of the signal trampoline.
 pub fn signal_trampoline_address() -> usize {
     unsafe extern "C" {
         safe static signal_trampoline: [u8; 0];

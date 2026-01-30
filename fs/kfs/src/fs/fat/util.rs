@@ -1,3 +1,4 @@
+//! FAT metadata and name helpers.
 use alloc::string::String;
 use core::time::Duration;
 
@@ -6,6 +7,7 @@ use fs_ng_vfs::{DeviceId, Metadata, MetadataUpdate, NodePermission, NodeType, Vf
 
 use super::{ff, fs::FatFilesystemInner};
 
+/// Case-insensitive string wrapper for FAT name comparisons.
 #[derive(Clone)]
 pub struct CaseInsensitiveString(pub String);
 
@@ -35,6 +37,7 @@ impl Ord for CaseInsensitiveString {
     }
 }
 
+/// Convert a FAT DOS timestamp to a Unix duration.
 pub fn dos_to_unix(date: fatfs::DateTime) -> Duration {
     // let date: NaiveDateTime = date.into();
     let date = NaiveDate::from_ymd_opt(

@@ -1,3 +1,4 @@
+//! High-level filesystem APIs (std-like wrappers).
 mod file;
 mod fs;
 

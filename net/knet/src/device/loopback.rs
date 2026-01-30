@@ -1,3 +1,4 @@
+//! Loopback network device implementation.
 use alloc::vec;
 use core::task::Waker;
 
@@ -13,11 +14,13 @@ use crate::{
     device::NetDevice,
 };
 
+/// Loopback device backed by an in-memory queue.
 pub struct LoopbackDevice {
     queue: PacketBuffer<'static, ()>,
     wakers: PollSet,
 }
 impl LoopbackDevice {
+    /// Create a new loopback device.
     pub fn new() -> Self {
         let queue = PacketBuffer::new(
             vec![PacketMetadata::EMPTY; SOCKET_BUFFER_SIZE],

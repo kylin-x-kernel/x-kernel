@@ -1,3 +1,5 @@
+//! RISC-V assembly helper macros.
+
 #[cfg(target_arch = "riscv32")]
 macro_rules! __asm_macros {
     () => {

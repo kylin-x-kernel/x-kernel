@@ -1,3 +1,5 @@
+//! Platform initialization hooks for aarch64-qemu-virt.
+
 use kplat::{
     boot::BootHandler,
     memory::{p2v, pa},

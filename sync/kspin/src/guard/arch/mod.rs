@@ -1,3 +1,4 @@
+//! Architecture-specific IRQ save/restore helpers.
 #![cfg_attr(not(target_os = "none"), allow(dead_code, unused_imports))]
 
 cfg_if::cfg_if! {

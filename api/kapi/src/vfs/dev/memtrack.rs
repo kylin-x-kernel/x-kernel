@@ -17,6 +17,7 @@ use crate::vfs::DeviceOps;
 
 static STAMPED_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Memory allocation category based on backtrace analysis
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum MemoryCategory {
     Known(&'static str),
@@ -24,6 +25,7 @@ enum MemoryCategory {
 }
 
 impl MemoryCategory {
+    /// Create a new memory category from a backtrace
     fn new(backtrace: &Backtrace) -> Self {
         match Self::category(backtrace) {
             Some(category) => Self::Known(category),
@@ -31,6 +33,7 @@ impl MemoryCategory {
         }
     }
 
+    /// Identify known allocation categories from backtrace frames
     fn category(backtrace: &Backtrace) -> Option<&'static str> {
         for (_, frame) in backtrace.frames()? {
             let Some(func) = frame.function else {
@@ -89,6 +92,7 @@ impl fmt::Display for MemoryCategory {
     }
 }
 
+/// Analyze memory allocations between stamped generations and print results
 fn run_memory_analysis() {
     // Wait for gc
     ktask::yield_now();
@@ -101,10 +105,10 @@ fn run_memory_analysis() {
     );
 
     let from = STAMPED_GENERATION.load(Ordering::SeqCst);
-    let to = axalloc::current_generation();
+    let to = kalloc::current_generation();
 
     let mut allocations: BTreeMap<MemoryCategory, Vec<Layout>> = BTreeMap::new();
-    axalloc::allocations_in(from..to, |info| {
+    kalloc::allocations_in(from..to, |info| {
         let category = MemoryCategory::new(&info.backtrace);
         allocations.entry(category).or_default().push(info.layout);
     });
@@ -131,6 +135,7 @@ fn run_memory_analysis() {
     }
 }
 
+/// Memory tracking device for allocation profiling (/dev/memtrack)
 pub(crate) struct MemTrack;
 
 impl DeviceOps for MemTrack {
@@ -142,14 +147,14 @@ impl DeviceOps for MemTrack {
         if offset == 0 && !buf.is_empty() {
             match buf {
                 b"start\n" => {
-                    let generation = axalloc::current_generation();
+                    let generation = kalloc::current_generation();
                     STAMPED_GENERATION.store(generation, Ordering::SeqCst);
                     kprintln!("Memory allocation generation stamped: {}", generation);
-                    axalloc::enable_tracking();
+                    kalloc::enable_tracking();
                 }
                 b"end\n" => {
                     run_memory_analysis();
-                    axalloc::disable_tracking();
+                    kalloc::disable_tracking();
                 }
                 _ => {}
             }

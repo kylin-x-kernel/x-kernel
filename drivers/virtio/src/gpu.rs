@@ -1,3 +1,4 @@
+//! VirtIO GPU driver adapter.
 use display::{DisplayDriverOps, DisplayInfo, FrameBuffer};
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{Hal, device::gpu::VirtIOGpu as InnerDev, transport::Transport};

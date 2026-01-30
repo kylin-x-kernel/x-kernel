@@ -1,14 +1,18 @@
+//! Block device wrapper with a seekable cursor.
+//! Seekable block device wrapper.
 use alloc::{boxed::Box, vec};
 use core::mem;
 
 use kdriver::{BlockDevice as KBlockDevice, prelude::*};
 
+/// Consume `cnt` bytes from the front of a slice.
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
     let (first, rem) = buf.split_at(cnt);
     *buf = rem;
     first
 }
 
+/// Consume `cnt` bytes from the front of a mutable slice.
 fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
     // use mem::take to circumvent lifetime issues
     let (first, rem) = mem::take(buf).split_at_mut(cnt);

@@ -17,6 +17,7 @@ use osvm::{VirtMutPtr, VirtPtr};
 use crate::file::get_file_like;
 
 /// /dev/loopX devices
+/// Loop device for attaching regular files as block devices
 pub struct LoopDevice {
     number: u32,
     dev_id: DeviceId,
@@ -29,6 +30,7 @@ pub struct LoopDevice {
 }
 
 impl LoopDevice {
+    /// Create a new loop device
     pub(crate) fn new(number: u32, dev_id: DeviceId) -> Self {
         Self {
             number,

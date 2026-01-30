@@ -1,3 +1,4 @@
+//! Kernel signal handling and delivery.
 #![no_std]
 
 #[macro_use]

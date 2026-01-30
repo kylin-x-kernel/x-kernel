@@ -1,3 +1,4 @@
+//! Process structure and lifecycle management.
 use alloc::{
     collections::btree_set::BTreeSet,
     sync::{Arc, Weak},
@@ -14,6 +15,7 @@ use weak_map::StrongMap;
 
 use crate::{Pid, ProcessGroup, Session};
 
+/// Thread group state tracked per process.
 #[derive(Default)]
 pub(crate) struct ThreadGroup {
     pub(crate) threads: BTreeSet<Pid>,

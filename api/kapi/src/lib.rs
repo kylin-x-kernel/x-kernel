@@ -1,3 +1,5 @@
+//! Kernel-facing APIs for user space services and syscall glue.
+
 #![no_std]
 #![feature(likely_unlikely)]
 #![feature(bstr)]
@@ -22,7 +24,7 @@ pub mod terminal;
 pub mod time;
 pub mod vfs;
 
-/// Initialize.
+/// Initializes VFS, /proc/interrupts accounting, and alarm task.
 pub fn init() {
     info!("Initialize VFS...");
     vfs::mount_all().expect("Failed to mount vfs");

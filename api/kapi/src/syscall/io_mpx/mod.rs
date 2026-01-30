@@ -1,3 +1,11 @@
+//! I/O multiplexing syscalls.
+//!
+//! This module implements synchronous I/O multiplexing mechanisms including:
+//! - select: Traditional file descriptor multiplexing
+//! - poll: Enhanced multiplexing with better scalability
+//! - epoll: High-performance event notification mechanism
+//! Allows monitoring multiple file descriptors for I/O events.
+
 mod epoll;
 mod poll;
 mod select;

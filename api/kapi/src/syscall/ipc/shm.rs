@@ -1,3 +1,10 @@
+//! Shared memory syscalls.
+//!
+//! This module implements POSIX shared memory operations including:
+//! - Shared memory management (shmget, shmctl, etc.)
+//! - Shared memory attachment (shmat, shmdt, etc.)
+//! - Shared memory information and statistics
+
 use alloc::sync::Arc;
 
 use kcore::{

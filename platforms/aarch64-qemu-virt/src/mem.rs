@@ -1,3 +1,5 @@
+//! Memory layout definitions for aarch64-qemu-virt.
+
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 
 use crate::config::{

@@ -1,3 +1,11 @@
+//! Epoll syscalls.
+//!
+//! This module implements epoll I/O multiplexing operations including:
+//! - Epoll instance creation (epoll_create, epoll_create1, etc.)
+//! - Epoll event management (epoll_ctl, etc.)
+//! - Event waiting (epoll_wait, epoll_pwait, etc.)
+//! - High-performance event notification
+
 use core::time::Duration;
 
 use bitflags::bitflags;
@@ -28,6 +36,7 @@ bitflags! {
     }
 }
 
+/// Create an epoll instance for efficient I/O event multiplexing
 pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
     let flags = EpollCreateFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_epoll_create1 <= flags: {flags:?}");
@@ -36,6 +45,7 @@ pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
         .map(|fd| fd as isize)
 }
 
+/// Control the epoll instance: add, modify, or delete event subscriptions
 pub fn sys_epoll_ctl(
     epfd: i32,
     op: u32,
@@ -75,6 +85,7 @@ pub fn sys_epoll_ctl(
     Ok(0)
 }
 
+/// Wait for events on the epoll instance, with optional signal mask replacement
 fn do_epoll_wait(
     epfd: i32,
     events: UserPtr<epoll_event>,
@@ -107,6 +118,7 @@ fn do_epoll_wait(
     )
 }
 
+/// Wait for events with millisecond timeout and signal masking
 pub fn sys_epoll_pwait(
     epfd: i32,
     events: UserPtr<epoll_event>,
@@ -123,6 +135,7 @@ pub fn sys_epoll_pwait(
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }
 
+/// Wait for events with high-precision timeout and signal masking
 pub fn sys_epoll_pwait2(
     epfd: i32,
     events: UserPtr<epoll_event>,

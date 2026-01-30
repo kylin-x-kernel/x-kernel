@@ -1,3 +1,4 @@
+//! File abstraction and caching layer.
 use alloc::{
     boxed::Box,
     sync::{Arc, Weak},
@@ -22,6 +23,7 @@ use spin::RwLock;
 use super::FsContext;
 
 bitflags::bitflags! {
+    /// Access mode flags for an opened file.
     #[derive(Debug, Clone, Copy)]
     pub struct FileFlags: u8 {
         const READ = 1;
@@ -39,6 +41,7 @@ pub enum OpenResult {
 }
 
 impl OpenResult {
+    /// Convert into a file result, erroring if it is a directory.
     pub fn into_file(self) -> VfsResult<File> {
         match self {
             Self::File(file) => Ok(file),
@@ -46,6 +49,7 @@ impl OpenResult {
         }
     }
 
+    /// Convert into a directory result, erroring if it is a file.
     pub fn into_dir(self) -> VfsResult<Location> {
         match self {
             Self::Dir(dir) => Ok(dir),
@@ -53,6 +57,7 @@ impl OpenResult {
         }
     }
 
+    /// Convert into a location regardless of variant.
     pub fn into_location(self) -> Location {
         match self {
             Self::File(file) => file.location().clone(),

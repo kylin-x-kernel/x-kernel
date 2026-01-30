@@ -11,7 +11,9 @@ cfg_if! {
     if #[cfg(net_dev = "dummy")] {
         use net::{MacAddress, NetBuf, NetBufBox, NetBufPool, NetBufHandle};
 
+        /// Placeholder network device.
         pub struct DummyNetDev;
+        /// Placeholder network driver.
         pub struct DummyNetDrvier;
         register_net_driver!(DummyNetDriver, DummyNetDev);
 
@@ -37,7 +39,9 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(block_dev = "dummy")] {
+        /// Placeholder block device.
         pub struct DummyBlockDev;
+        /// Placeholder block driver.
         pub struct DummyBlockDriver;
         register_block_driver!(DummyBlockDriver, DummyBlockDev);
 
@@ -72,7 +76,9 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(display_dev = "dummy")] {
+        /// Placeholder display device.
         pub struct DummyDisplayDev;
+        /// Placeholder display driver.
         pub struct DummyDisplayDriver;
         register_display_driver!(DummyDisplayDriver, DummyDisplayDev);
 
@@ -104,7 +110,9 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(input_dev = "dummy")] {
+        /// Placeholder input device.
         pub struct DummyInputDev;
+        /// Placeholder input driver.
         pub struct DummyInputDriver;
         register_input_driver!(DummyInputDriver, DummyInputDev);
 
@@ -139,7 +147,9 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(vsock_dev = "dummy")] {
+        /// Placeholder vsock device.
         pub struct DummyVsockDev;
+        /// Placeholder vsock driver.
         pub struct DummyVsockDriver;
         register_vsock_driver!(DummyVsockDriver, DummyVsockDev);
 

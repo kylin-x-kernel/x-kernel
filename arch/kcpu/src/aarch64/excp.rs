@@ -1,3 +1,5 @@
+//! AArch64 exception and IRQ dispatching.
+
 use aarch64_cpu::registers::{ESR_EL1, FAR_EL1};
 use tock_registers::interfaces::Readable;
 
@@ -36,11 +38,13 @@ core::arch::global_asm!(
 );
 
 #[inline(always)]
+/// Returns true if the ISS indicates a translation or permission fault.
 pub(super) fn check_page_fault(iss: u64) -> bool {
     // Only dispatch_irq Translation fault and Permission fault
     matches!(iss & 0b111100, 0b0100 | 0b1100)
 }
 
+/// Dispatches a page fault and panics if unhandled.
 fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(FAR_EL1.get() as usize);
     if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
@@ -62,6 +66,7 @@ fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     );
 }
 
+/// Architecture-specific trap entry point.
 #[unsafe(no_mangle)]
 fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTrapOrigin) {
     let _tf_guard = crate::ExceptionContextGuard::new(tf);

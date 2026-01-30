@@ -1,3 +1,4 @@
+//! Kernel logging utilities and macros.
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate log;

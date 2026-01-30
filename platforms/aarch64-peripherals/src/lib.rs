@@ -1,3 +1,4 @@
+//! AArch64 platform peripheral drivers and helpers.
 #![no_std]
 #[macro_use]
 extern crate log;

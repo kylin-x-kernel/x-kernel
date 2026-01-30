@@ -1,3 +1,4 @@
+//! Copy-on-write mapping backend.
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::slice;
 

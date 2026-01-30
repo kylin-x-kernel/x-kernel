@@ -1,45 +1,78 @@
+//! LoongArch64 context structures for traps and task switching.
+
 use core::arch::naked_asm;
 #[cfg(feature = "fp-simd")]
 use core::mem::offset_of;
 
 use memaddr::VirtAddr;
 
-/// General registers of Loongarch64.
-#[allow(missing_docs)]
+/// General registers of LoongArch64.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GeneralRegisters {
+    /// Constant zero register.
     pub zero: usize,
+    /// Return address register.
     pub ra: usize,
+    /// Thread pointer register.
     pub tp: usize,
+    /// Stack pointer register.
     pub sp: usize,
+    /// Argument register a0.
     pub a0: usize,
+    /// Argument register a1.
     pub a1: usize,
+    /// Argument register a2.
     pub a2: usize,
+    /// Argument register a3.
     pub a3: usize,
+    /// Argument register a4.
     pub a4: usize,
+    /// Argument register a5.
     pub a5: usize,
+    /// Argument register a6.
     pub a6: usize,
+    /// Argument register a7.
     pub a7: usize,
+    /// Temporary register t0.
     pub t0: usize,
+    /// Temporary register t1.
     pub t1: usize,
+    /// Temporary register t2.
     pub t2: usize,
+    /// Temporary register t3.
     pub t3: usize,
+    /// Temporary register t4.
     pub t4: usize,
+    /// Temporary register t5.
     pub t5: usize,
+    /// Temporary register t6.
     pub t6: usize,
+    /// Temporary register t7.
     pub t7: usize,
+    /// Temporary register t8.
     pub t8: usize,
+    /// Reserved/extra register u0.
     pub u0: usize,
+    /// Frame pointer register.
     pub fp: usize,
+    /// Saved register s0.
     pub s0: usize,
+    /// Saved register s1.
     pub s1: usize,
+    /// Saved register s2.
     pub s2: usize,
+    /// Saved register s3.
     pub s3: usize,
+    /// Saved register s4.
     pub s4: usize,
+    /// Saved register s5.
     pub s5: usize,
+    /// Saved register s6.
     pub s6: usize,
+    /// Saved register s7.
     pub s7: usize,
+    /// Saved register s8.
     pub s8: usize,
 }
 
@@ -215,7 +248,6 @@ impl ExceptionContext {
 ///
 /// On context switch, current task saves its context from CPU to memory,
 /// and the next task restores its context from memory to CPU.
-#[allow(missing_docs)]
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct TaskContext {

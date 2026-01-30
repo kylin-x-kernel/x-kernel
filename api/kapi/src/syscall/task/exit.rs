@@ -1,3 +1,10 @@
+//! Process and thread exit syscalls.
+//!
+//! This module implements process and thread termination operations including:
+//! - Process exit (exit, exit_group, etc.)
+//! - Exit code handling
+//! - Process cleanup and resource release
+
 use kerrno::KResult;
 
 use crate::task::do_exit;

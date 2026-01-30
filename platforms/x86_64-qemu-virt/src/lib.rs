@@ -1,3 +1,6 @@
+//! Platform support for x86_64-qemu-virt.
+
+#![cfg(target_arch = "x86_64")]
 #![no_std]
 #[macro_use]
 extern crate log;

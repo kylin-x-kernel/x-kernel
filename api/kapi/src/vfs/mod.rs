@@ -15,6 +15,7 @@ pub use tmp::MemoryFs;
 
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 
+/// Mount a filesystem at the specified path, creating the path if it doesn't exist
 fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()> {
     if fs.resolve(path).is_err() {
         fs.create_dir(path, DIR_PERMISSION)?;
@@ -25,6 +26,7 @@ fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()>
 }
 
 /// Mount all filesystems
+/// Mount all virtual filesystems (/dev, /tmp, /proc, /sys, etc.)
 pub fn mount_all() -> LinuxResult<()> {
     let fs = FS_CONTEXT.lock();
     mount_at(&fs, "/dev", dev::new_devfs())?;

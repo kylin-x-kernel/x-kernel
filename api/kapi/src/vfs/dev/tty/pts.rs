@@ -12,6 +12,7 @@ use crate::vfs::dev::tty::pty::PtyDriver;
 static PTS_TABLE: SpinNoIrq<FlattenObjects<Arc<Device>, 16>> =
     SpinNoIrq::new(FlattenObjects::new());
 
+/// Add a slave pseudo-terminal to /dev/pts
 pub fn add_slave(fs: Arc<SimpleFs>, pty: Arc<PtyDriver>) -> KResult<u32> {
     let terminal = pty.terminal.clone();
     let mut table = PTS_TABLE.lock();
@@ -32,6 +33,7 @@ pub fn add_slave(fs: Arc<SimpleFs>, pty: Arc<PtyDriver>) -> KResult<u32> {
 }
 
 /// /dev/pts directory
+/// /dev/pts directory containing slave pseudo-terminal devices
 pub struct PtsDir;
 
 impl SimpleDirOps for PtsDir {

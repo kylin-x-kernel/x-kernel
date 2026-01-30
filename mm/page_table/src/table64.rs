@@ -1,3 +1,4 @@
+//! Generic 64-bit multi-level page table implementation.
 use core::{marker::PhantomData, ops::Deref};
 
 use arrayvec::ArrayVec;
@@ -25,6 +26,7 @@ const fn p1_idx(vaddr: usize) -> usize {
     (vaddr >> 12) & (ENTRY_COUNT - 1)
 }
 
+/// A 64-bit page table with configurable metadata and handlers.
 pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
     root_paddr: PhysAddr,
     #[cfg(feature = "copy-from")]
@@ -33,6 +35,7 @@ pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>
 }
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PTE, H> {
+    /// Create a new page table root.
     pub fn try_new() -> PtResult<Self> {
         let root_paddr = Self::alloc_table()?;
         Ok(Self {
@@ -43,10 +46,12 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         })
     }
 
+    /// Return the root page table physical address.
     pub const fn root_paddr(&self) -> PhysAddr {
         self.root_paddr
     }
 
+    /// Query a virtual address translation.
     pub fn query(&self, vaddr: M::VirtAddr) -> PtResult<(PhysAddr, PagingFlags, PageSize)> {
         let (entry, size) = self.get_entry(vaddr)?;
         if !entry.is_present() {
@@ -56,6 +61,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         Ok((entry.paddr().add(off), entry.flags(), size))
     }
 
+    /// Create a mutable mapping view that tracks TLB flushes.
     pub fn modify(&mut self) -> PageTableMut<'_, M, PTE, H> {
         PageTableMut::new(self)
     }
@@ -151,6 +157,7 @@ enum ToFlush<M: PagingMetaData> {
     Full,
 }
 
+/// Mutable page table access with deferred TLB flushes.
 pub struct PageTableMut<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
     inner: &'a mut PageTable64<M, PTE, H>,
     flush: ToFlush<M>,

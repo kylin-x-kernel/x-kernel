@@ -1,3 +1,4 @@
+//! Helpers for reading/writing user virtual memory.
 #![no_std]
 #![feature(maybe_uninit_as_bytes)]
 #![allow(clippy::missing_safety_doc)]
@@ -7,6 +8,7 @@ use core::{mem::MaybeUninit, slice};
 use extern_trait::extern_trait;
 use kerrno::KError;
 
+/// Errors returned by virtual memory access helpers.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum MemError {
     InvalidAddr,
@@ -25,8 +27,10 @@ impl From<MemError> for KError {
     }
 }
 
+/// Result type for virtual memory operations.
 pub type MemResult<T = ()> = Result<T, MemError>;
 
+/// External trait that supplies platform-specific memory I/O.
 #[extern_trait(MemImpl)]
 pub unsafe trait VirtMemIo: 'static {
     fn new() -> Self;
@@ -34,6 +38,7 @@ pub unsafe trait VirtMemIo: 'static {
     fn write_mem(&mut self, addr: usize, src: &[u8]) -> MemResult;
 }
 
+/// Read virtual memory into an uninitialized buffer.
 pub fn read_vm_mem<T>(p: *const T, out: &mut [MaybeUninit<T>]) -> MemResult {
     if !p.is_aligned() {
         return Err(MemError::InvalidAddr);
@@ -41,6 +46,7 @@ pub fn read_vm_mem<T>(p: *const T, out: &mut [MaybeUninit<T>]) -> MemResult {
     MemImpl::new().read_mem(p.addr(), out.as_bytes_mut())
 }
 
+/// Write a typed slice to virtual memory.
 pub fn write_vm_mem<T>(p: *mut T, src: &[T]) -> MemResult {
     if !p.is_aligned() {
         return Err(MemError::InvalidAddr);

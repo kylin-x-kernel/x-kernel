@@ -1,3 +1,9 @@
+//! Memory resident status syscalls.
+//!
+//! This module implements memory residency checking operations including:
+//! - Check page residency in memory (mincore, etc.)
+//! - Memory presence queries
+
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // Copyright (C) 2025 Azure-stars <Azure_stars@126.com>

@@ -1,3 +1,4 @@
+//! Session management for process groups.
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,

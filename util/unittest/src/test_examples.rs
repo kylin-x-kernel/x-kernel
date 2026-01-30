@@ -1,3 +1,4 @@
+//! Example tests exercising the custom test framework.
 #![allow(dead_code)]
 
 //! Example unit tests demonstrating the test framework usage

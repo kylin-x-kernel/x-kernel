@@ -1,3 +1,4 @@
+//! PSCI interface helpers for power management and CPU control.
 #![allow(dead_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;
@@ -80,6 +81,7 @@ fn psci_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> Result<(), Psc
         Err(PsciError::from(ret as i32))
     }
 }
+/// Initialize the PSCI call method (`"smc"` or `"hvc"`).
 pub fn init(method: &str) {
     match method {
         "smc" => PSCI_METHOD_HVC.store(false, Ordering::Release),
@@ -87,6 +89,7 @@ pub fn init(method: &str) {
         _ => panic!("Unknown PSCI method: {}", method),
     }
 }
+/// Power off the system via PSCI.
 pub fn shutdown() -> ! {
     info!("Shutting down...");
     psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0).ok();
@@ -95,6 +98,7 @@ pub fn shutdown() -> ! {
         kcpu::instrs::stop_cpu();
     }
 }
+/// Power on a target CPU with the given entry point and argument.
 pub fn cpu_on(target_cpu: usize, entry_point: usize, arg: usize) {
     info!("Starting CPU {target_cpu:x} ON ...");
     let res = psci_call(PSCI_0_2_FN64_CPU_ON, target_cpu, entry_point, arg);
@@ -102,6 +106,7 @@ pub fn cpu_on(target_cpu: usize, entry_point: usize, arg: usize) {
         error!("failed to boot CPU {target_cpu:x} ({e:?})");
     }
 }
+/// Power off the current CPU via PSCI.
 pub fn cpu_off() {
     const PSCI_POWER_STATE_TYPE_STANDBY: u32 = 0;
     const PSCI_POWER_STATE_TYPE_POWER_DOWN: u32 = 1;

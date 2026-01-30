@@ -30,6 +30,7 @@ pub trait SocketAddrExt: Sized {
     fn family(&self) -> u16;
 }
 
+/// Read the address family from a user-space sockaddr
 fn read_family(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<u16> {
     if size_of::<__kernel_sa_family_t>() > addrlen as usize {
         return Err(KError::InvalidInput);
@@ -37,9 +38,11 @@ fn read_family(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<u16>
     let family = *addr.cast::<__kernel_sa_family_t>().get_as_ref()?;
     Ok(family)
 }
+/// Cast a reference to a byte slice
 unsafe fn cast_to_slice<T>(value: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) }
 }
+/// Write socket address data to user-space buffer
 fn fill_addr(addr: UserPtr<sockaddr>, addrlen: &mut socklen_t, data: &[u8]) -> KResult<()> {
     let len = (*addrlen as usize).min(data.len());
     addr.cast::<u8>()
@@ -49,7 +52,9 @@ fn fill_addr(addr: UserPtr<sockaddr>, addrlen: &mut socklen_t, data: &[u8]) -> K
     Ok(())
 }
 
+/// SocketAddrExt implementation for SocketAddr (IPv4 or IPv6)
 impl SocketAddrExt for SocketAddr {
+    /// Read IPv4 or IPv6 socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         match read_family(addr, addrlen)? as u32 {
             AF_INET => SocketAddrV4::read_from_user(addr, addrlen).map(Self::V4),
@@ -58,6 +63,7 @@ impl SocketAddrExt for SocketAddr {
         }
     }
 
+    /// Write IPv4 or IPv6 socket address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
         match self {
             SocketAddr::V4(v4) => v4.write_to_user(addr, addrlen),
@@ -73,7 +79,9 @@ impl SocketAddrExt for SocketAddr {
     }
 }
 
+/// SocketAddrExt implementation for IPv4 socket addresses
 impl SocketAddrExt for SocketAddrV4 {
+    /// Read IPv4 socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         if addrlen != size_of::<sockaddr_in>() as socklen_t {
             return Err(KError::InvalidInput);
@@ -89,6 +97,7 @@ impl SocketAddrExt for SocketAddrV4 {
         ))
     }
 
+    /// Write IPv4 socket address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
         let sockin_addr = sockaddr_in {
             sin_family: AF_INET as _,
@@ -106,7 +115,9 @@ impl SocketAddrExt for SocketAddrV4 {
     }
 }
 
+/// SocketAddrExt implementation for IPv6 socket addresses
 impl SocketAddrExt for SocketAddrV6 {
+    /// Read IPv6 socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         if addrlen != size_of::<sockaddr_in6>() as socklen_t {
             return Err(KError::InvalidInput);
@@ -124,6 +135,7 @@ impl SocketAddrExt for SocketAddrV6 {
         ))
     }
 
+    /// Write IPv6 socket address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
         let sockin_addr = sockaddr_in6 {
             sin6_family: AF_INET6 as _,
@@ -144,7 +156,9 @@ impl SocketAddrExt for SocketAddrV6 {
     }
 }
 
+/// SocketAddrExt implementation for Unix domain socket addresses
 impl SocketAddrExt for UnixAddr {
+    /// Read Unix domain socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         if read_family(addr, addrlen)? as u32 != AF_UNIX {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
@@ -166,6 +180,7 @@ impl SocketAddrExt for UnixAddr {
         })
     }
 
+    /// Write Unix domain socket address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
         let data_len = match self {
             UnixAddr::Unbound => 0,
@@ -208,8 +223,10 @@ pub struct sockaddr_vm {
     pub svm_zero: [u8; 4],
 }
 
+/// SocketAddrExt implementation for Vsock addresses
 #[cfg(feature = "vsock")]
 impl SocketAddrExt for VsockAddr {
+    /// Read Vsock address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         if addrlen != size_of::<sockaddr_vm>() as socklen_t {
             return Err(KError::InvalidInput);
@@ -225,6 +242,7 @@ impl SocketAddrExt for VsockAddr {
         })
     }
 
+    /// Write Vsock address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
         let sockvm_addr = sockaddr_vm {
             svm_family: AF_VSOCK as _,
@@ -241,7 +259,9 @@ impl SocketAddrExt for VsockAddr {
     }
 }
 
+/// SocketAddrExt implementation for extended socket addresses (all types)
 impl SocketAddrExt for SocketAddrEx {
+    /// Read any type of socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         match read_family(addr, addrlen)? as u32 {
             AF_INET | AF_INET6 => SocketAddr::read_from_user(addr, addrlen).map(Self::Ip),
@@ -252,6 +272,7 @@ impl SocketAddrExt for SocketAddrEx {
         }
     }
 
+    /// Write any type of socket address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
         match self {
             SocketAddrEx::Ip(ip_addr) => ip_addr.write_to_user(addr, addrlen),

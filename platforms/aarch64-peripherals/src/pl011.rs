@@ -1,8 +1,10 @@
+//! PL011 UART helper functions and console adapter macro.
 use arm_pl011::Pl011Uart;
 use kplat::memory::VirtAddr;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 static UART: LazyInit<SpinNoIrq<Pl011Uart>> = LazyInit::new();
+/// Write one byte to the UART, translating LF to CRLF.
 fn do_putchar(uart: &mut Pl011Uart, c: u8) {
     match c {
         b'\n' => {
@@ -12,6 +14,7 @@ fn do_putchar(uart: &mut Pl011Uart, c: u8) {
         c => uart.putchar(c),
     }
 }
+/// Write bytes to the UART using a temporary MMIO mapping.
 pub fn write_data_force(uart_base: VirtAddr, bytes: &[u8]) {
     let mut uart = Pl011Uart::new(uart_base.as_mut_ptr());
     uart.init();
@@ -19,18 +22,22 @@ pub fn write_data_force(uart_base: VirtAddr, bytes: &[u8]) {
         do_putchar(&mut uart, *c);
     }
 }
+/// Write a single byte to the shared UART instance.
 pub fn putchar(c: u8) {
     do_putchar(&mut UART.lock(), c);
 }
+/// Try to read a single byte from the UART.
 pub fn getchar() -> Option<u8> {
     UART.lock().getchar()
 }
+/// Write bytes to the shared UART instance.
 pub fn write_data(bytes: &[u8]) {
     let mut uart = UART.lock();
     for c in bytes {
         do_putchar(&mut uart, *c);
     }
 }
+/// Read available bytes into the buffer and return the count.
 pub fn read_data(bytes: &mut [u8]) -> usize {
     let mut read_len = 0;
     while read_len < bytes.len() {
@@ -43,6 +50,7 @@ pub fn read_data(bytes: &mut [u8]) -> usize {
     }
     read_len
 }
+/// Initialize the shared UART instance from the given base address.
 pub fn early_init(uart_base: VirtAddr) {
     UART.init_once(SpinNoIrq::new({
         let mut uart = Pl011Uart::new(uart_base.as_mut_ptr());
@@ -50,6 +58,7 @@ pub fn early_init(uart_base: VirtAddr) {
         uart
     }));
 }
+/// Implement `kplat::io::ConsoleIf` using the PL011 backend.
 #[macro_export]
 #[allow(clippy::crate_in_macro_def)]
 macro_rules! console_if_impl {

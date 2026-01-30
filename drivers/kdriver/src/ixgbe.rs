@@ -3,6 +3,7 @@ use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 use khal::mem::{p2v, v2p};
 use core::{alloc::Layout, ptr::NonNull};
 
+/// HAL implementation for the ixgbe driver.
 pub struct IxgbeHalImpl;
 
 unsafe impl IxgbeHal for IxgbeHalImpl {

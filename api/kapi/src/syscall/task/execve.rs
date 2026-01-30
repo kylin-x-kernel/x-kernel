@@ -1,3 +1,10 @@
+//! Program execution syscalls.
+//!
+//! This module implements program execution operations including:
+//! - Execute a new program (execve, execveat, execveeat, etc.)
+//! - Program loading and initialization
+//! - Argument and environment passing
+
 use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::ffi::c_char;
 

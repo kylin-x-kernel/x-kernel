@@ -13,6 +13,8 @@ use rand_chacha::{
 use spin::{Lazy, Mutex};
 /// DICE节点信息
 #[derive(Debug, Clone, Copy)]
+/// DICE (Device Identifier Composition Engine) node information
+/// Used for DICE handover data processing in TEE contexts
 pub struct DiceNodeInfo<'a> {
     /// 兼容性字符串（静态借用）
     pub _compatible: &'a str,

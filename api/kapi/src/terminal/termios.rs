@@ -54,6 +54,7 @@ impl Default for Termios {
 }
 
 impl Termios {
+    /// Get a special character (e.g., interrupt, kill, eof) by index
     pub fn special_char(&self, index: u32) -> u8 {
         self.c_cc[index as usize]
     }
@@ -74,10 +75,12 @@ impl Termios {
         self.c_lflag & flag != 0
     }
 
+    /// Check if echo mode is enabled
     pub fn echo(&self) -> bool {
         self.has_lflag(ECHO)
     }
 
+    /// Check if canonical (line-based) mode is enabled
     pub fn canonical(&self) -> bool {
         self.has_lflag(ICANON)
     }
@@ -86,6 +89,7 @@ impl Termios {
         self.has_lflag(IEXTEN)
     }
 
+    /// Check if a character is an end-of-line character
     pub fn is_eol(&self, ch: u8) -> bool {
         if ch == b'\n' || ch == self.special_char(VEOL) {
             return true;
@@ -98,6 +102,7 @@ impl Termios {
         false
     }
 
+    /// Get the signal number for a control character (e.g., SIGINT for Ctrl+C)
     pub fn signo_for(&self, ch: u8) -> Option<Signo> {
         Some(match ch {
             ch if ch == self.special_char(VINTR) => Signo::SIGINT,

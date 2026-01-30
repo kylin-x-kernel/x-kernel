@@ -27,25 +27,39 @@ use crate::file::{IoDst, IoSrc};
 
 const RING_BUFFER_INIT_SIZE: usize = 65536; // 64 KiB
 
+/// Shared state for both ends of a pipe.
 struct Shared {
+    /// Ring buffer for storing pipe data
     buffer: Mutex<HeapRb<u8>>,
+    /// Poll set for read-side notifications
     poll_rx: PollSet,
+    /// Poll set for write-side notifications
     poll_tx: PollSet,
+    /// Poll set for close notifications
     poll_close: PollSet,
 }
 
+/// One end of a pipe (either read or write).
+///
+/// A pipe consists of two `Pipe` instances sharing common state.
+/// Data can flow from the write end to the read end through a ring buffer.
 pub struct Pipe {
+    /// True if this is the read end, false if write end
     read_side: bool,
+    /// Shared state between both ends
     shared: Arc<Shared>,
+    /// Non-blocking flag for this pipe end
     non_blocking: AtomicBool,
 }
 impl Drop for Pipe {
+    /// Wakes all waiters on pipe close when this end is dropped.
     fn drop(&mut self) {
         self.shared.poll_close.wake();
     }
 }
 
 impl Pipe {
+    /// Creates a new pipe, returning both read and write ends.
     pub fn new() -> (Pipe, Pipe) {
         let shared = Arc::new(Shared {
             buffer: Mutex::new(HeapRb::new(RING_BUFFER_INIT_SIZE)),
@@ -66,22 +80,28 @@ impl Pipe {
         (read_end, write_end)
     }
 
+    /// Checks if this is the read end of the pipe.
     pub const fn is_read(&self) -> bool {
         self.read_side
     }
 
+    /// Checks if this is the write end of the pipe.
     pub const fn is_write(&self) -> bool {
         !self.read_side
     }
 
+    /// Checks if the other end of the pipe has been closed.
     pub fn closed(&self) -> bool {
         Arc::strong_count(&self.shared) == 1
     }
 
+    /// Returns the current capacity of the pipe buffer.
     pub fn capacity(&self) -> usize {
         self.shared.buffer.lock().capacity().get()
     }
 
+    /// Resizes the pipe buffer to a new size (rounded up to page size).
+    /// Returns error if new size is smaller than occupied data.
     pub fn resize(&self, new_size: usize) -> KResult<()> {
         let new_size = new_size.div_ceil(PAGE_SIZE_4K).max(1) * PAGE_SIZE_4K;
 
@@ -100,6 +120,7 @@ impl Pipe {
     }
 }
 
+/// Sends SIGPIPE signal to the current process.
 fn raise_pipe() {
     let curr = current();
     send_signal_to_process(
@@ -110,6 +131,7 @@ fn raise_pipe() {
 }
 
 impl FileLike for Pipe {
+    /// Reads data from the pipe (read end only).
     fn read(&self, dst: &mut IoDst) -> KResult<usize> {
         if !self.is_read() {
             return Err(KError::BadFileDescriptor);
@@ -140,6 +162,8 @@ impl FileLike for Pipe {
         }))
     }
 
+    /// Writes data to the pipe (write end only).
+    /// Sends SIGPIPE if the read end is closed.
     fn write(&self, src: &mut IoSrc) -> KResult<usize> {
         if !self.is_write() {
             return Err(KError::BadFileDescriptor);
@@ -178,6 +202,7 @@ impl FileLike for Pipe {
         }))
     }
 
+    /// Returns pipe statistics.
     fn stat(&self) -> KResult<Kstat> {
         Ok(Kstat {
             mode: S_IFIFO | if self.is_read() { 0o444 } else { 0o222 },
@@ -185,19 +210,23 @@ impl FileLike for Pipe {
         })
     }
 
+    /// Returns a string representation of the pipe.
     fn path(&self) -> Cow<'_, str> {
         format!("pipe:[{}]", self as *const _ as usize).into()
     }
 
+    /// Sets or clears the non-blocking flag.
     fn set_nonblocking(&self, nonblocking: bool) -> KResult {
         self.non_blocking.store(nonblocking, Ordering::Release);
         Ok(())
     }
 
+    /// Checks if non-blocking mode is enabled.
     fn nonblocking(&self) -> bool {
         self.non_blocking.load(Ordering::Acquire)
     }
 
+    /// Performs I/O control operations (supports FIONREAD).
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
         match cmd {
             FIONREAD => {
@@ -210,6 +239,9 @@ impl FileLike for Pipe {
 }
 
 impl Pollable for Pipe {
+    /// Polls for available I/O events.
+    /// Read end: checks if data is available or if closed.
+    /// Write end: checks if buffer space is available.
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
         let buf = self.shared.buffer.lock();
@@ -222,6 +254,7 @@ impl Pollable for Pipe {
         events
     }
 
+    /// Registers the pipe for polling with the given context and events.
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         if events.contains(IoEvents::IN) {
             self.shared.poll_rx.register(context.waker());

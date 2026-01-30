@@ -1,3 +1,10 @@
+//! Socket option syscalls.
+//!
+//! This module implements socket option manipulation including:
+//! - Get socket options (getsockopt, etc.)
+//! - Set socket options (setsockopt, etc.)
+//! - Socket-level, IP-level, TCP-level, and other protocol options
+
 use kerrno::{KError, KResult, LinuxError};
 use knet::options::{Configurable, GetSocketOption, SetSocketOption};
 use linux_raw_sys::net::socklen_t;
@@ -112,6 +119,7 @@ macro_rules! call_dispatch {
     }
 }
 
+/// Get socket options at a specified protocol level
 pub fn sys_getsockopt(
     fd: i32,
     level: u32,
@@ -153,6 +161,7 @@ pub fn sys_getsockopt(
     Ok(0)
 }
 
+/// Set socket options at a specified protocol level
 pub fn sys_setsockopt(
     fd: i32,
     level: u32,

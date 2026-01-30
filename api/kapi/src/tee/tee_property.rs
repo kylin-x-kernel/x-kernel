@@ -183,6 +183,7 @@ fn get_prop_index(name: &str) -> TeeResult<u32> {
     }
 }
 
+/// Get a TEE property from a property set by index
 pub fn sys_tee_scn_get_property(
     prop_set: c_ulong,
     index: c_ulong,
@@ -263,6 +264,7 @@ pub fn sys_tee_scn_get_property(
     Ok(())
 }
 
+/// Convert a TEE property name to its index
 pub fn sys_tee_scn_get_property_name_to_index(
     _prop_set: c_ulong,
     name: *mut c_void,

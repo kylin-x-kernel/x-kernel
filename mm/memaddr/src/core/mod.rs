@@ -1,3 +1,4 @@
+//! Core address types and iterators.
 mod addr;
 mod iter;
 mod range;

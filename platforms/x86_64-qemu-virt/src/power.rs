@@ -1,3 +1,5 @@
+//! Power control implementation for x86_64-qemu-virt.
+
 use kplat::sys::SysCtrl;
 use x86_64::instructions::port::PortWriteOnly;
 struct PowerImpl;

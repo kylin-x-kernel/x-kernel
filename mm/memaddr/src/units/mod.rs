@@ -1,3 +1,4 @@
+//! Address types and iterators with units.
 mod addr;
 mod iter;
 mod range;

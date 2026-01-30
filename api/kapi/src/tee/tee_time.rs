@@ -25,12 +25,13 @@ fn tee_time_get_ree_time() -> khal::time::TimeValue {
     wall_time()
 }
 
+/// Get the current time from the specified time category
 pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
     // Get current session context
     let uuid = with_tee_session_ctx(|ctx| Ok(ctx.clnt_id.uuid))?;
 
     // Get time based on category
-    let time_result = match cat {
+    let time_result: TeeResult<TeeTime> = match cat {
         0 => {
             // UTEE_TIME_CAT_SYSTEM
             let sys_time = tee_time_get_sys_time();
@@ -51,9 +52,7 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
                 millis: ree_time.subsec_millis(),
             })
         }
-        _ => {
-            return Err(TEE_ERROR_BAD_PARAMETERS);
-        }
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
     };
 
     // Handle time retrieval result
@@ -76,6 +75,7 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
     }
 }
 
+/// Set the TA-specific time offset
 pub fn sys_tee_scn_set_ta_time(mytime: &TeeTime) -> TeeResult {
     // Copy time data from user space to kernel space
     let mut t: TeeTime = TeeTime {
@@ -288,6 +288,7 @@ pub fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
     }
 }
 
+/// Wait for a specified number of milliseconds
 pub fn sys_tee_scn_wait(milliseconds_delay: u32) -> TeeResult {
     tee_time_busy_wait(milliseconds_delay)
 }

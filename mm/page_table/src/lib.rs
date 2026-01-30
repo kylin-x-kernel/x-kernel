@@ -1,3 +1,4 @@
+//! Generic page table abstractions and implementations.
 #![cfg_attr(not(test), no_std)]
 
 mod arch;

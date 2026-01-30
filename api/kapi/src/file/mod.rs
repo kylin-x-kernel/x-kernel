@@ -1,3 +1,5 @@
+//! File descriptor abstractions and file-like traits.
+
 pub mod epoll;
 pub mod event;
 mod fs;
@@ -28,20 +30,37 @@ pub use self::{
     pipe::Pipe,
 };
 
+/// Kernel stat structure containing file metadata.
+///
+/// This structure mirrors the POSIX `stat` structure and contains information about a file,
+/// including device IDs, inode number, permissions, sizes, and timestamps.
 #[derive(Debug, Clone, Copy)]
 pub struct Kstat {
+    /// Device ID of the filesystem containing the file.
     pub dev: u64,
+    /// Inode number.
     pub ino: u64,
+    /// Number of hard links.
     pub nlink: u32,
+    /// File mode and permissions.
     pub mode: u32,
+    /// Owner user ID.
     pub uid: u32,
+    /// Owner group ID.
     pub gid: u32,
+    /// File size in bytes.
     pub size: u64,
+    /// Preferred I/O block size.
     pub blksize: u32,
+    /// Number of allocated blocks.
     pub blocks: u64,
+    /// Device ID for special files.
     pub rdev: DeviceId,
+    /// Last access time.
     pub atime: Duration,
+    /// Last modification time.
     pub mtime: Duration,
+    /// Last status change time.
     pub ctime: Duration,
 }
 
@@ -125,42 +144,58 @@ impl From<Kstat> for statx {
     }
 }
 
+/// Trait for types that can be used as write destinations in I/O operations.
 pub trait WriteBuf: Write + IoBufMut {}
 impl<T: Write + IoBufMut> WriteBuf for T {}
+/// I/O destination buffer type for write operations.
 pub type IoDst<'a> = dyn WriteBuf + 'a;
 
+/// Trait for types that can be used as read sources in I/O operations.
 pub trait ReadBuf: Read + IoBuf {}
 impl<T: Read + IoBuf> ReadBuf for T {}
+/// I/O source buffer type for read operations.
 pub type IoSrc<'a> = dyn ReadBuf + 'a;
 
+/// Trait for file-like objects that support standard file operations.
+///
+/// This trait abstracts various file-like objects (regular files, directories, sockets, pipes, etc.)
+/// and provides a unified interface for I/O, metadata retrieval, and control operations.
 #[allow(dead_code)]
 pub trait FileLike: Pollable + DowncastSync {
+    /// Reads data from the file into the provided buffer.
     fn read(&self, _dst: &mut IoDst) -> KResult<usize> {
         Err(KError::InvalidInput)
     }
 
+    /// Writes data from the provided buffer to the file.
     fn write(&self, _src: &mut IoSrc) -> KResult<usize> {
         Err(KError::InvalidInput)
     }
 
+    /// Gets file metadata and statistics.
     fn stat(&self) -> KResult<Kstat> {
         Ok(Kstat::default())
     }
 
+    /// Returns the absolute path of this file.
     fn path(&self) -> Cow<'_, str>;
 
+    /// Performs I/O control operations.
     fn ioctl(&self, _cmd: u32, _arg: usize) -> KResult<usize> {
         Err(KError::NotATty)
     }
 
+    /// Returns whether this file is in non-blocking mode.
     fn nonblocking(&self) -> bool {
         false
     }
 
+    /// Sets or clears the non-blocking flag.
     fn set_nonblocking(&self, _nonblocking: bool) -> KResult {
         Ok(())
     }
 
+    /// Converts a file descriptor to a file-like reference.
     fn from_fd(fd: c_int) -> KResult<Arc<Self>>
     where
         Self: Sized + 'static,
@@ -170,6 +205,7 @@ pub trait FileLike: Pollable + DowncastSync {
             .map_err(|_| KError::InvalidInput)
     }
 
+    /// Adds this file-like object to the current process's file descriptor table.
     fn add_to_fd_table(self, cloexec: bool) -> KResult<c_int>
     where
         Self: Sized + 'static,
@@ -179,9 +215,13 @@ pub trait FileLike: Pollable + DowncastSync {
 }
 impl_downcast!(sync FileLike);
 
+/// A file descriptor entry in the file descriptor table.
+///
+/// Contains a reference to the file-like object and flags like close-on-exec.
 #[derive(Clone)]
 pub struct FileDescriptor {
     pub inner: Arc<dyn FileLike>,
+    /// Close-on-exec flag (true if file should be closed on exec)
     pub cloexec: bool,
 }
 
@@ -190,7 +230,13 @@ scope_local::scope_local! {
     pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>>> = Arc::default();
 }
 
-/// Get a file-like object by `fd`.
+/// Retrieves a file-like object from the file descriptor table.
+///
+/// # Arguments
+/// - `fd`: The file descriptor to look up
+///
+/// # Returns
+/// A reference to the file-like object, or `BadFileDescriptor` error if not found.
 pub fn get_file_like(fd: c_int) -> KResult<Arc<dyn FileLike>> {
     FD_TABLE
         .read()
@@ -199,7 +245,14 @@ pub fn get_file_like(fd: c_int) -> KResult<Arc<dyn FileLike>> {
         .ok_or(KError::BadFileDescriptor)
 }
 
-/// Add a file to the file descriptor table.
+/// Adds a file-like object to the current process's file descriptor table.
+///
+/// # Arguments
+/// - `f`: The file-like object to add
+/// - `cloexec`: Whether to set the close-on-exec flag
+///
+/// # Returns
+/// The new file descriptor number, or an error if the table is full.
 pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> KResult<c_int> {
     let max_nofile = current().as_thread().proc_data.rlim.read()[RLIMIT_NOFILE].current;
     let mut table = FD_TABLE.write();
@@ -210,7 +263,10 @@ pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> KResult<c_int> {
     Ok(table.add(fd).map_err(|_| KError::TooManyOpenFiles)? as c_int)
 }
 
-/// Close a file by `fd`.
+/// Closes a file descriptor and removes it from the file descriptor table.
+///
+/// # Arguments
+/// - `fd`: The file descriptor to close
 pub fn close_file_like(fd: c_int) -> KResult {
     let f = FD_TABLE
         .write()
@@ -220,6 +276,9 @@ pub fn close_file_like(fd: c_int) -> KResult {
     Ok(())
 }
 
+/// Initializes the standard input, output, and error file descriptors (0, 1, 2).
+///
+/// All three standard streams are connected to `/dev/console`.
 pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { AX_FILE_LIMIT }>) -> KResult<()> {
     assert_eq!(fd_table.count(), 0);
     let cx = FS_CONTEXT.lock();

@@ -1,3 +1,5 @@
+//! Time conversion helpers and interrupt accounting.
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
@@ -27,6 +29,7 @@ impl TimeValueLike for TimeValue {
 }
 
 impl TimeValueLike for timespec {
+    /// Convert TimeValue to timespec (nanosecond precision)
     fn from_time_value(tv: TimeValue) -> Self {
         Self {
             tv_sec: tv.as_secs() as _,
@@ -43,6 +46,7 @@ impl TimeValueLike for timespec {
 }
 
 impl TimeValueLike for __kernel_timespec {
+    /// Convert TimeValue to kernel timespec (nanosecond precision)
     fn from_time_value(tv: TimeValue) -> Self {
         Self {
             tv_sec: tv.as_secs() as _,
@@ -59,6 +63,7 @@ impl TimeValueLike for __kernel_timespec {
 }
 
 impl TimeValueLike for __kernel_old_timespec {
+    /// Convert TimeValue to old kernel timespec (nanosecond precision)
     fn from_time_value(tv: TimeValue) -> Self {
         Self {
             tv_sec: tv.as_secs() as _,
@@ -75,6 +80,7 @@ impl TimeValueLike for __kernel_old_timespec {
 }
 
 impl TimeValueLike for timeval {
+    /// Convert TimeValue to timeval (microsecond precision)
     fn from_time_value(tv: TimeValue) -> Self {
         Self {
             tv_sec: tv.as_secs() as _,
@@ -94,6 +100,7 @@ impl TimeValueLike for timeval {
 }
 
 impl TimeValueLike for __kernel_old_timeval {
+    /// Convert TimeValue to old kernel timeval (microsecond precision)
     fn from_time_value(tv: TimeValue) -> Self {
         Self {
             tv_sec: tv.as_secs() as _,
@@ -113,6 +120,7 @@ impl TimeValueLike for __kernel_old_timeval {
 }
 
 impl TimeValueLike for __kernel_sock_timeval {
+    /// Convert TimeValue to socket timeval (microsecond precision)
     fn from_time_value(tv: TimeValue) -> Self {
         Self {
             tv_sec: tv.as_secs() as _,
@@ -133,10 +141,12 @@ impl TimeValueLike for __kernel_sock_timeval {
 
 static IRQ_CNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Increment the interrupt count.
 pub(crate) fn inc_irq_cnt() {
     IRQ_CNT.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Get the current interrupt count.
 pub(crate) fn irq_cnt() -> usize {
     IRQ_CNT.load(Ordering::Relaxed)
 }

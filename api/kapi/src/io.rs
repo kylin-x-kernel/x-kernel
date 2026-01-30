@@ -1,3 +1,5 @@
+//! Scatter-gather I/O helpers for user memory buffers.
+
 use core::mem::{self, MaybeUninit};
 
 use bytemuck::AnyBitPattern;
@@ -5,21 +7,29 @@ use kerrno::{KError, KResult};
 use kio::prelude::*;
 use osvm::{VirtPtr, read_vm_mem, write_vm_mem};
 
+/// I/O vector representing a single buffer segment
 #[repr(C)]
 #[derive(Debug, Copy, Clone, AnyBitPattern)]
 pub struct IoVec {
+    /// Base address of the buffer in user memory.
     pub iov_base: *mut u8,
+    /// Length of the buffer in bytes.
     pub iov_len: isize,
 }
 
+/// A collection of I/O vectors for scatter-gather operations
 #[derive(Default)]
 pub struct IoVectorBuf {
+    /// Pointer to the user-space iovec array.
     iovs: *const IoVec,
+    /// Number of iovec entries.
     iovcnt: usize,
+    /// Remaining total length across all segments.
     len: usize,
 }
 
 impl IoVectorBuf {
+    /// Create a new I/O vector buffer from a user-space iovec array
     pub fn new(iovs: *const IoVec, iovcnt: usize) -> KResult<Self> {
         if iovcnt > 1024 {
             return Err(KError::InvalidInput);
@@ -35,6 +45,7 @@ impl IoVectorBuf {
         Ok(Self { iovs, iovcnt, len })
     }
 
+    /// Read from iovec segments using a custom function
     pub fn read_with(
         self,
         mut f: impl FnMut(*const u8, usize) -> KResult<usize>,
@@ -54,6 +65,7 @@ impl IoVectorBuf {
         Ok(count)
     }
 
+    /// Write to iovec segments using a custom function
     pub fn fill_with(self, mut f: impl FnMut(*mut u8, usize) -> KResult<usize>) -> KResult<usize> {
         let mut count = 0;
         for i in 0..self.iovcnt {
@@ -70,6 +82,7 @@ impl IoVectorBuf {
         Ok(count)
     }
 
+    /// Convert to a sequential I/O reader/writer over iovec segments
     pub fn into_io(self) -> IoVectorBufIo {
         IoVectorBufIo {
             inner: self,
@@ -79,6 +92,7 @@ impl IoVectorBuf {
     }
 }
 
+/// Sequential reader/writer for I/O vector buffers
 pub struct IoVectorBufIo {
     inner: IoVectorBuf,
     start: usize,

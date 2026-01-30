@@ -1,3 +1,4 @@
+//! FAT filesystem adapter and utilities.
 mod dir;
 mod ff;
 mod file;
@@ -52,17 +53,20 @@ pub(crate) struct FsRef<T> {
 }
 
 impl<T> FsRef<T> {
+    /// Create a new filesystem reference wrapper.
     pub fn new(inner: T) -> Self {
         Self {
             inner: UnsafeCell::new(inner),
         }
     }
 
+    /// Borrow an immutable reference tied to the filesystem lifetime.
     pub fn borrow<'a>(&self, _fs: &'a FatFilesystemInner) -> &'a T {
         // SAFETY: The filesystem outlives the reference
         unsafe { &*self.inner.get() }
     }
 
+    /// Borrow a mutable reference tied to the filesystem lifetime.
     #[allow(clippy::mut_from_ref)]
     pub fn borrow_mut<'a>(&self, _fs: &'a FatFilesystemInner) -> &'a mut T {
         // SAFETY: The filesystem outlives the reference

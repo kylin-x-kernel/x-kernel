@@ -1,3 +1,4 @@
+//! File-backed mapping backend.
 use alloc::{
     boxed::Box,
     sync::{Arc, Weak},
@@ -100,6 +101,7 @@ impl FileBackend {
         Ok(())
     }
 
+    /// Returns a weak handle used to dispatch futex-related events.
     pub fn futex_dispatch_irq(&self) -> Weak<()> {
         Arc::downgrade(&self.0.futex_dispatch_irq)
     }

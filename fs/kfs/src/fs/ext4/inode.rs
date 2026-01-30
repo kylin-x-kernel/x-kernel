@@ -1,3 +1,4 @@
+//! Ext4 inode wrapper and node implementations.
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{any::Any, task::Context};
 
@@ -14,6 +15,7 @@ use super::{
     util::{LwExt4Filesystem, into_vfs_err, into_vfs_type},
 };
 
+/// Ext4 inode wrapper used to implement VFS nodes.
 pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
@@ -21,6 +23,7 @@ pub struct Inode {
 }
 
 impl Inode {
+    /// Create a new inode wrapper.
     pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
         Arc::new(Self { fs, ino, this })
     }

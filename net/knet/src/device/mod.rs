@@ -1,3 +1,4 @@
+//! Network device abstractions.
 use core::task::Waker;
 
 use smoltcp::{storage::PacketBuffer, time::Instant, wire::IpAddress};
@@ -12,6 +13,7 @@ pub use loopback::*;
 #[cfg(feature = "vsock")]
 pub use vsock::*;
 
+/// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
 
@@ -25,5 +27,6 @@ pub trait NetDevice: Send + Sync {
     fn send_ip_packet(&mut self, next_hop: IpAddress, ip_packet: &[u8], timestamp: Instant)
     -> bool;
 
+    /// Register a waker for receive readiness.
     fn register_rx_waker(&self, waker: &Waker);
 }

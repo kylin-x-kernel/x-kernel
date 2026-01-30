@@ -1,3 +1,4 @@
+//! Memory set container and mapping operations.
 use alloc::collections::BTreeMap;
 #[allow(unused_imports)] // this is a weird false alarm
 use alloc::vec::Vec;

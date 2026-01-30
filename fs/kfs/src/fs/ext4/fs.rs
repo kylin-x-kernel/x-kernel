@@ -1,3 +1,4 @@
+//! Ext4 filesystem adapter.
 use alloc::sync::Arc;
 use core::cell::OnceCell;
 
@@ -15,12 +16,14 @@ use super::{
 
 const EXT4_CONFIG: FsConfig = FsConfig { bcache_size: 256 };
 
+/// Ext4 filesystem implementation.
 pub struct Ext4Filesystem {
     inner: Mutex<LwExt4Filesystem>,
     root_dir: OnceCell<DirEntry>,
 }
 
 impl Ext4Filesystem {
+    /// Create a new ext4 filesystem instance backed by a block device.
     pub fn new(dev: KBlockDevice) -> VfsResult<Filesystem> {
         let ext4 =
             lwext4_rust::Ext4Filesystem::new(Ext4Disk(dev), EXT4_CONFIG).map_err(into_vfs_err)?;
@@ -36,6 +39,7 @@ impl Ext4Filesystem {
         Ok(Filesystem::new(fs))
     }
 
+    /// Lock the inner ext4 filesystem state.
     pub(crate) fn lock(&self) -> MutexGuard<'_, LwExt4Filesystem> {
         self.inner.lock()
     }

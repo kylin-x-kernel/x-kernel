@@ -1,17 +1,23 @@
+//! Platform console I/O interface and logging helpers.
+
 use core::fmt::{Arguments, Result, Write};
 
 use kplat_macros::device_interface;
 
 #[device_interface]
 pub trait ConsoleIf {
+    /// Writes bytes to the platform console.
     fn write_data(buf: &[u8]);
 
+    /// Writes bytes to the console without locking.
     fn write_data_atomic(buf: &[u8]) {
         Self::write_data(buf)
     }
 
+    /// Reads bytes from the platform console.
     fn read_data(buf: &mut [u8]) -> usize;
 
+    /// Returns the interrupt ID for console input, if any.
     fn interrupt_id() -> Option<usize>;
 }
 
@@ -33,6 +39,7 @@ impl Write for AtomicLogger {
     }
 }
 
+/// Global lock guarding console output.
 pub static IO_LOCK: kspin::SpinNoIrq<()> = kspin::SpinNoIrq::new(());
 
 #[doc(hidden)]

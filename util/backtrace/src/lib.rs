@@ -1,5 +1,6 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
+#![allow(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
 
 //! # Backtrace - Stack Unwinding for x-kernel
 //!

@@ -1,4 +1,5 @@
 //! Platform-specific constants and parameters for X-Kernel.
+// NOTE: keep config docs in sync with configs (e.g., optional AHCI/PMU PADDR/IRQ).
 //!
 //! Currently supported platform configs can be found in the [configs] directory of
 //! the [X-Kernel] root.

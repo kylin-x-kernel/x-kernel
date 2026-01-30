@@ -1,3 +1,5 @@
+//! Timer tick callbacks and time-based event dispatch.
+
 use alloc::{boxed::Box, vec::Vec};
 
 use khal::time::{TimeValue, wall_time};

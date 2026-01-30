@@ -1,3 +1,5 @@
+//! x86_64 CPU context, trap, and userspace support.
+
 mod ctx;
 mod gdt;
 mod idt;

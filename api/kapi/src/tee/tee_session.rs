@@ -142,8 +142,8 @@ where
 /// All sessions in TA share this context
 #[derive(Default, Debug)]
 pub struct TeeTaCtx {
-    /// Test-only field, used only when the tee_test feature is enabled
-    #[cfg(feature = "tee_test")]
+    /// Test-only field, used only in test builds
+    #[cfg(test)]
     pub for_test_only: u32,
     pub session_dispatch_irq: u32,
     pub open_sessions: HashMap<u32, SessionIdentity>,
@@ -186,7 +186,7 @@ where
 
 // Test module for TEE session functionality
 // Only compiled when the tee_test feature is enabled
-#[cfg(feature = "tee_test")]
+#[cfg(any(test, feature = "tee_test"))]
 pub mod tests_tee_session {
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,

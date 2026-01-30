@@ -1,3 +1,4 @@
+//! Signal actions and sigaction conversions.
 use core::ffi::c_ulong;
 
 use bitflags::bitflags;

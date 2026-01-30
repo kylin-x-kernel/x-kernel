@@ -5,8 +5,10 @@ use fs_ng_vfs::{DeviceId, NodeType};
 use kcore::vfs::{Device, DeviceOps, SimpleFs};
 use kerrno::KResult;
 
+/// Master pseudoterminal device (/dev/ptmx)
 pub struct Ptmx(pub Arc<SimpleFs>);
 impl Ptmx {
+    /// Create a new pseudo-terminal
     pub fn create_pty(&self) -> KResult<(Arc<Device>, u32)> {
         let (master, slave) = super::pty::create_pty_pair();
         super::pts::add_slave(self.0.clone(), slave)?;

@@ -1,3 +1,8 @@
+//! Control message handling for socket operations.
+//!
+//! This module provides parsing and handling of control messages (ancillary data)
+//! in socket I/O operations, including file descriptor passing and other protocol-specific data.
+
 use alloc::{sync::Arc, vec::Vec};
 
 use kerrno::{KError, KResult};
@@ -8,10 +13,13 @@ use crate::{
     mm::{UserConstPtr, UserPtr},
 };
 
+/// Control message types for socket operations (ancillary data)
 pub enum CMsg {
+    /// SCM_RIGHTS: file descriptor passing between processes
     Rights { fds: Vec<Arc<dyn FileLike>> },
 }
 impl CMsg {
+    /// Parse a control message header and extract its data
     pub fn parse(hdr: &cmsghdr) -> KResult<Self> {
         if hdr.cmsg_len < size_of::<cmsghdr>() {
             return Err(KError::InvalidInput);
@@ -43,12 +51,14 @@ impl CMsg {
     }
 }
 
+/// Builder for constructing control message buffers for socket I/O
 pub struct CMsgBuilder<'a> {
     hdr: UserPtr<cmsghdr>,
     len: &'a mut usize,
     capacity: usize,
 }
 impl<'a> CMsgBuilder<'a> {
+    /// Create a new control message builder with a given buffer and capacity
     pub fn new(msg: UserPtr<cmsghdr>, len: &'a mut usize) -> Self {
         let capacity = *len;
         *len = 0;
@@ -59,6 +69,7 @@ impl<'a> CMsgBuilder<'a> {
         }
     }
 
+    /// Add a control message with the specified level and type to the buffer
     pub fn push(
         &mut self,
         level: u32,

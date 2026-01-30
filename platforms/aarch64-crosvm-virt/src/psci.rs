@@ -1,3 +1,4 @@
+//! PSCI wrappers and KVM guard-granule helpers.
 use kplat::psci::PsciOp;
 use spin::Once;
 
@@ -9,6 +10,7 @@ const ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID: u32 =
     ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((5) & 0xFFFF);
 const ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID: u32 =
     ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((3) & 0xFFFF);
+/// Invoke a PSCI HVC call and return raw results.
 pub fn psci_hvc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> (usize, usize) {
     let ret0;
     let ret1;
@@ -23,6 +25,7 @@ pub fn psci_hvc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> (usize
     }
     (ret0, ret1)
 }
+/// Query and cache the KVM MMIO guard granule size.
 pub fn kvm_guard_granule_init() {
     let (guard_granule, guard_has_range) =
         psci_hvc_call(ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, 0, 0, 0);
@@ -70,6 +73,7 @@ fn __do_xmap_granules(phys_addr: usize, nr_granules: usize, map: bool) -> usize 
     }
     return nr_xmapped;
 }
+/// Map a physical MMIO range via the KVM guard-granule interface.
 pub fn do_xmap_granules(phys_addr: usize, size: usize) {
     let nr_granules = size / { GUARD_GRANULE.get().unwrap() };
     let ret = __do_xmap_granules(phys_addr, nr_granules, true);
@@ -78,6 +82,7 @@ pub fn do_xmap_granules(phys_addr: usize, size: usize) {
 struct PsciImpl;
 #[impl_dev_interface]
 impl PsciOp for PsciImpl {
+    /// Unshare DMA buffers with the hypervisor.
     fn dma_unshare(paddr: usize, size: usize) {
         let page_size = 0x1000;
         let pages = size / page_size;
@@ -97,6 +102,7 @@ impl PsciOp for PsciImpl {
         }
     }
 
+    /// Share DMA buffers with the hypervisor.
     fn dma_share(paddr: usize, size: usize) {
         let page_size = 0x1000;
         let pages = size / page_size;

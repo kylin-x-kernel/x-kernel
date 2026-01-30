@@ -1,3 +1,4 @@
+#![cfg(target_arch = "loongarch64")]
 #![no_std]
 #[macro_use]
 extern crate log;

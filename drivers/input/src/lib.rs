@@ -1,4 +1,4 @@
-//! Common traits and types for graphics display device drivers.
+//! Common traits and types for input device drivers.
 
 #![no_std]
 
@@ -6,6 +6,7 @@
 pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use strum::FromRepr;
 
+/// Input event categories defined by the Linux input subsystem.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, FromRepr)]
 pub enum EventType {
@@ -21,9 +22,12 @@ pub enum EventType {
 }
 
 impl EventType {
+    /// Total number of event type slots.
     pub const COUNT: u8 = Self::MAX + 1;
+    /// Maximum event type value.
     pub const MAX: u8 = 0x1f;
 
+    /// Return the bitset length for the given event type.
     pub const fn bits_count(&self) -> usize {
         match self {
             EventType::Synchronization => 0x10,
@@ -43,11 +47,15 @@ impl EventType {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct Event {
+    /// Event category (matches `EventType`).
     pub event_type: u16,
+    /// Event code within the category.
     pub code: u16,
+    /// Event value/payload.
     pub value: u32,
 }
 
+/// Identification tuple for an input device.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct InputDeviceId {
@@ -61,6 +69,7 @@ pub struct InputDeviceId {
     pub version: u16,
 }
 
+/// Axis information for absolute input devices.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct AbsInfo {
@@ -76,7 +85,7 @@ pub struct AbsInfo {
     pub res: u32,
 }
 
-/// Operations that require a graphics device driver to implement.
+/// Operations that require an input device driver to implement.
 pub trait InputDriverOps: DriverOps {
     /// Returns the device ID of the input device.
     fn device_id(&self) -> InputDeviceId;

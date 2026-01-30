@@ -1,3 +1,4 @@
+//! TEE unit test entry points.
 use unittest::{
     run_tests,
     test_framework::{TestRunner, tests_failed},

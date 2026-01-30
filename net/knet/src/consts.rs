@@ -1,3 +1,4 @@
+//! Network stack constants and configuration defaults.
 macro_rules! env_or_default {
     ($key:literal) => {
         match option_env!($key) {

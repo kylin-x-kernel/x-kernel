@@ -1,3 +1,4 @@
+//! VirtIO vsock driver adapter.
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use virtio_drivers::{
     Hal,

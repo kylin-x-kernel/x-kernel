@@ -1,3 +1,4 @@
+//! Global page allocation helpers.
 use kerrno::KResult;
 use memaddr::{PhysAddr, VirtAddr};
 

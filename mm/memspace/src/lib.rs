@@ -1,3 +1,4 @@
+//! Virtual address space management utilities.
 #![no_std]
 
 #[macro_use]

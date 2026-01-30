@@ -1,8 +1,10 @@
+//! Page table definitions and traits.
 use core::fmt;
 
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr};
 
 bitflags::bitflags! {
+    /// Page table entry permission and attribute flags.
     #[derive(Clone, Copy, PartialEq)]
     pub struct PagingFlags: usize {
         const READ          = 1 << 0;
@@ -21,6 +23,7 @@ impl fmt::Debug for PagingFlags {
     }
 }
 
+/// Trait implemented by architecture-specific page table entries.
 pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
     fn new_page(paddr: PhysAddr, flags: PagingFlags, is_huge: bool) -> Self;
     fn new_table(paddr: PhysAddr) -> Self;
@@ -35,6 +38,7 @@ pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
     fn clear(&mut self);
 }
 
+/// Page table operation errors.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum PtError {
     NoMemory,
@@ -54,8 +58,10 @@ impl From<PtError> for kerrno::KError {
     }
 }
 
+/// Result type for page table operations.
 pub type PtResult<T = ()> = Result<T, PtError>;
 
+/// Architecture-specific paging metadata.
 pub trait PagingMetaData: Sync + Send {
     const LEVELS: usize;
     const PA_MAX_BITS: usize;
@@ -75,12 +81,14 @@ pub trait PagingMetaData: Sync + Send {
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
 }
 
+/// Hooks for allocating and mapping page table frames.
 pub trait PagingHandler: Sized {
     fn alloc_frame() -> Option<PhysAddr>;
     fn dealloc_frame(paddr: PhysAddr);
     fn p2v(paddr: PhysAddr) -> VirtAddr;
 }
 
+/// Supported page sizes.
 #[repr(usize)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PageSize {

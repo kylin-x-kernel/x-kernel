@@ -1,3 +1,10 @@
+//! Process and thread cloning syscalls.
+//!
+//! This module implements process and thread creation operations including:
+//! - Clone system call with various flags
+//! - Thread creation and configuration
+//! - Process/thread sharing options (VM, FS, files, signals, etc.)
+
 use alloc::sync::Arc;
 
 use bitflags::bitflags;

@@ -6,6 +6,7 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
+//! Device container and enum types for driver aggregation.
 #![allow(unused_imports)]
 
 use core::ops::{Deref, DerefMut};

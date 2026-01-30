@@ -1,3 +1,4 @@
+//! GICv3 initialization and IRQ routing helpers.
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, Ordering},
@@ -23,6 +24,7 @@ unsafe impl Send for GicV3Wrapper {}
 unsafe impl Sync for GicV3Wrapper {}
 static GIC_V3S: [SpinNoIrq<Option<GicV3Wrapper>>; CPU_NUM] =
     [const { SpinNoIrq::new(None) }; CPU_NUM];
+/// Read the current CPU ID from `MPIDR_EL1`.
 #[inline]
 fn get_current_cpu_id() -> usize {
     let mpidr_el1: usize;
@@ -31,6 +33,7 @@ fn get_current_cpu_id() -> usize {
     }
     mpidr_el1 & 0xff
 }
+/// Initialize the per-CPU GICv3 interface and distributor.
 pub fn init_gic(gicd_base: VirtAddr, gicr_base: VirtAddr) {
     info!(
         "Initialize GICv3... from 0x{:x} 0x{:x}",
@@ -61,6 +64,7 @@ pub fn init_gic(gicd_base: VirtAddr, gicr_base: VirtAddr) {
     v3.init_cpu();
     *gic_v3_lock = Some(GicV3Wrapper { inner: v3 });
 }
+/// Configure an interrupt as edge or level triggered.
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
     trace!("GIC set trigger: {}  edge: {}", interrupt_id, edge);
     let mut gic_v3_lock = GIC_V3S[get_current_cpu_id()].lock();
@@ -69,6 +73,7 @@ pub fn set_trigger(interrupt_id: usize, edge: bool) {
     let cfg = if edge { Trigger::Edge } else { Trigger::Level };
     gic_v3.set_trigger(intid, cfg);
 }
+/// Enable or disable a specific interrupt.
 pub fn enable(interrupt_id: usize, enabled: bool) {
     trace!("GIC set enable: {} {}", interrupt_id, enabled);
     let mut gic_v3_lock = GIC_V3S[get_current_cpu_id()].lock();
@@ -79,6 +84,7 @@ pub fn enable(interrupt_id: usize, enabled: bool) {
         gic_v3.enable_interrupt(IntId::from(interrupt_id as u32), false);
     }
 }
+/// Register an IRQ handler and enable the interrupt.
 pub fn reg_handler_handler(interrupt_id: usize, handler: Handler) -> bool {
     if IRQ_HANDLER_TABLE.register_handler(interrupt_id, handler) {
         trace!("reg_handler handler IRQ {}", interrupt_id);
@@ -87,6 +93,7 @@ pub fn reg_handler_handler(interrupt_id: usize, handler: Handler) -> bool {
     }
     false
 }
+/// Unregister an IRQ handler and disable the interrupt.
 pub fn unreg_handler_handler(interrupt_id: usize) -> Option<Handler> {
     trace!("unreg_handler handler IRQ {}", interrupt_id);
     enable(interrupt_id, false);
@@ -99,6 +106,7 @@ fn get_and_acknowledge_interrupt() -> usize {
     let irq = u32::from(GicV3::get_and_acknowledge_interrupt().unwrap()) as usize;
     return irq;
 }
+/// Send a software-generated interrupt to target CPUs.
 pub fn notify_cpu(irq: usize, target: kplat::interrupts::TargetCpu) {
     use arm_gic::gicv3::SgiTarget;
     let sgi_intid = IntId::from(irq as u32);

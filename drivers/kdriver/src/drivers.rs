@@ -11,17 +11,21 @@ use crate::DeviceEnum;
 #[cfg(feature = "virtio")]
 use crate::virtio::{self, VirtIoDevMeta};
 
+/// Probe entry points implemented by each driver type.
 pub trait DriverProbe {
+    /// Probe for globally discoverable devices.
     fn probe_global() -> Option<DeviceEnum> {
         None
     }
 
     #[cfg(bus = "mmio")]
+    /// Probe an MMIO device at the given physical base and size.
     fn probe_mmio(_mmio_base: usize, _mmio_size: usize) -> Option<DeviceEnum> {
         None
     }
 
     #[cfg(bus = "pci")]
+    /// Probe a PCI device described by BDF and device info.
     fn probe_pci(
         _root: &mut PciRoot,
         _bdf: DeviceFunction,
@@ -86,7 +90,7 @@ cfg_if::cfg_if! {
             fn probe_global() -> Option<DeviceEnum> {
                 let sdmmc = unsafe {
                     block::sdmmc::SdMmcDriver::new(
-                        axhal::mem::p2v(platconfig::devices::SDMMC_PADDR.into()).into(),
+                        khal::mem::p2v(platconfig::devices::SDMMC_PADDR.into()).into(),
                     )
                 };
                 Some(DeviceEnum::from_block(sdmmc))
@@ -99,7 +103,7 @@ cfg_if::cfg_if! {
     if #[cfg(block_dev = "ahci")] {
         pub struct AhciHalImpl;
         impl block::ahci::AhciHal for AhciHalImpl {
-            fn v2p(va: usize) -> usize {
+            fn virt_to_phys(va: usize) -> usize {
                 khal::mem::v2p(va.into()).as_usize()
             }
 
@@ -121,12 +125,20 @@ cfg_if::cfg_if! {
 
         impl DriverProbe for AhciDriver {
             fn probe_global() -> Option<DeviceEnum> {
-                let ahci = unsafe {
-                    block::ahci::AhciDriver::<AhciHalImpl>::try_new(
-                        axhal::mem::p2v(platconfig::devices::AHCI_PADDR.into()).into(),
-                    )?
-                };
-                Some(DeviceEnum::from_block(ahci))
+                #[cfg(doc)]
+                {
+                    None
+                }
+
+                #[cfg(not(doc))]
+                {
+                    let ahci = unsafe {
+                        block::ahci::AhciDriver::<AhciHalImpl>::new(
+                            khal::mem::p2v(platconfig::devices::AHCI_PADDR.into()).into(),
+                        )?
+                    };
+                    Some(DeviceEnum::from_block(ahci))
+                }
             }
         }
     }

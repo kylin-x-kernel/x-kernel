@@ -1,3 +1,4 @@
+//! Physical memory layout and address translation helpers.
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
@@ -13,6 +14,7 @@ static FDT_MEM_BASE: AtomicUsize = AtomicUsize::new(0);
 static FDT_MEM: Once<[MemRange; 2]> = Once::new();
 static DICE_MEM_BASE: AtomicUsize = AtomicUsize::new(0);
 static DICE_MEM_SIZE: AtomicUsize = AtomicUsize::new(0);
+/// Capture FDT/DICE memory ranges before the allocator is initialized.
 pub(crate) fn early_init(fdt_paddr: usize) {
     FDT_MEM_BASE.store(fdt_paddr, Ordering::SeqCst);
     let fdt = unsafe { LinuxFdt::from_ptr(fdt_paddr as *const u8).expect("Failed to parse FDT") };
@@ -25,6 +27,7 @@ pub(crate) fn early_init(fdt_paddr: usize) {
         }
     });
 }
+/// Platform-specific memory description for the kernel.
 struct HwMemoryImpl;
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {

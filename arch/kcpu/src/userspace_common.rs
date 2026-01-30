@@ -1,3 +1,5 @@
+//! Common user-space return reason and exception helpers.
+
 use memaddr::VirtAddr;
 
 use crate::{ExceptionContext, excp::PageFaultFlags, userspace::ExceptionInfo};

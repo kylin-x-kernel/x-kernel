@@ -1,3 +1,4 @@
+//! Backend trait for applying memory area mappings.
 use memaddr::MemoryAddr;
 
 /// Underlying operations to do when manipulating memory areas within the specific

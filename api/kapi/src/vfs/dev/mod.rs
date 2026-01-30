@@ -1,5 +1,5 @@
 //! Special devices
-#[cfg(feature = "dice")]
+#[cfg(all(feature = "dice", target_os = "none"))]
 mod dice;
 #[cfg(feature = "input")]
 mod event;
@@ -25,10 +25,12 @@ use rand::{RngCore, SeedableRng, rngs::SmallRng};
 
 const RANDOM_SEED: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 
+/// Create a new devfs filesystem for device access
 pub(crate) fn new_devfs() -> Filesystem {
     SimpleFs::new_with("devfs".into(), 0x01021994, builder)
 }
 
+/// /dev/null device - discards all writes and returns empty on reads
 struct Null;
 
 impl DeviceOps for Null {
@@ -49,6 +51,7 @@ impl DeviceOps for Null {
     }
 }
 
+/// /dev/zero device - returns zero-filled data on reads
 struct Zero;
 
 impl DeviceOps for Zero {
@@ -70,11 +73,13 @@ impl DeviceOps for Zero {
     }
 }
 
+/// /dev/random and /dev/urandom device - returns pseudo-random data
 struct Random {
     rng: Mutex<SmallRng>,
 }
 
 impl Random {
+    /// Create a new random device with seeded generator
     pub fn new() -> Self {
         Self {
             rng: Mutex::new(SmallRng::from_seed(*RANDOM_SEED)),
@@ -101,6 +106,7 @@ impl DeviceOps for Random {
     }
 }
 
+/// /dev/full device - returns ENOSPC error on writes
 struct Full;
 
 impl DeviceOps for Full {
@@ -122,6 +128,7 @@ impl DeviceOps for Full {
     }
 }
 
+/// /dev/cpu_dma_latency device - controls CPU DMA latency constraints
 struct CpuDmaLatency;
 
 impl DeviceOps for CpuDmaLatency {
@@ -142,6 +149,7 @@ impl DeviceOps for CpuDmaLatency {
     }
 }
 
+/// Build the devfs filesystem with all standard device entries
 fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     let mut root = DirMapping::new();
     root.add(
@@ -296,7 +304,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         SimpleDir::new_maker(fs.clone(), Arc::new(event::input_devices(fs.clone()))),
     );
 
-    #[cfg(feature = "dice")]
+    #[cfg(all(feature = "dice", target_os = "none"))]
     root.add(
         "dice",
         Device::new(

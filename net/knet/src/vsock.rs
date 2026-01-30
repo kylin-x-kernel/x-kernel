@@ -1,3 +1,4 @@
+//! Vsock socket support.
 // pub(crate) mod dgram; todo
 
 pub(crate) mod connection_manager;
@@ -18,7 +19,7 @@ use crate::{
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
 
-/// Abstract transport trait for Unix sockets.
+/// Abstract transport trait for vsock sockets.
 #[enum_dispatch]
 pub trait VsockTransportOps: Configurable + Pollable + Send + Sync {
     fn bind(&self, local_addr: VsockAddr) -> KResult;
@@ -55,11 +56,13 @@ impl Pollable for VsockTransport {
 }
 
 /// A network socket using the vsock protocol.
+/// A network socket using the vsock protocol.
 pub struct VsockSocket {
     transport: VsockTransport,
 }
 
 impl VsockSocket {
+    /// Create a new vsock socket from a transport.
     pub fn new(transport: impl Into<VsockTransport>) -> Self {
         Self {
             transport: transport.into(),

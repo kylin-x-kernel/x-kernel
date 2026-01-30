@@ -1,14 +1,18 @@
+//! Virtual pointer helpers for safe user memory access.
 use core::{mem::MaybeUninit, ptr::NonNull, slice};
 
 use bytemuck::AnyBitPattern;
 
 use crate::{MemResult, read_vm_mem, write_vm_mem};
 
+/// Read-only virtual pointer access helpers.
 pub trait VirtPtr: Copy {
     type Target;
 
+    /// Returns the raw pointer.
     fn as_ptr(self) -> *const Self::Target;
 
+    /// Returns `None` if the pointer is null.
     fn check_non_null(self) -> Option<Self> {
         if self.as_ptr().is_null() {
             None
@@ -17,12 +21,14 @@ pub trait VirtPtr: Copy {
         }
     }
 
+    /// Read into an uninitialized buffer.
     fn read_uninit(self) -> MemResult<MaybeUninit<Self::Target>> {
         let mut u = MaybeUninit::<Self::Target>::uninit();
         read_vm_mem(self.as_ptr(), slice::from_mut(&mut u))?;
         Ok(u)
     }
 
+    /// Read a typed value from user memory.
     fn read_vm(self) -> MemResult<Self::Target>
     where
         Self::Target: AnyBitPattern,
@@ -56,7 +62,9 @@ impl<T> VirtPtr for NonNull<T> {
     }
 }
 
+/// Mutable virtual pointer access helpers.
 pub trait VirtMutPtr: VirtPtr {
+    /// Write a typed value to user memory.
     fn write_vm(self, v: Self::Target) -> MemResult {
         write_vm_mem(self.as_ptr().cast_mut(), slice::from_ref(&v))
     }

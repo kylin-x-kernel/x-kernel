@@ -1,3 +1,4 @@
+//! Watchdog task registration and checks.
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -40,8 +41,10 @@ pub(crate) fn check_watchdog_tasks() -> Option<&'static str> {
     }
 }
 
+/// Default mutex deadlock watchdog task.
 pub static MUTEX_DEADLOCK_CHECK: MutexDeadlockCheck = MutexDeadlockCheck;
 
+/// Watchdog task that checks for mutex deadlocks.
 pub struct MutexDeadlockCheck;
 
 impl WatchdogTask for MutexDeadlockCheck {

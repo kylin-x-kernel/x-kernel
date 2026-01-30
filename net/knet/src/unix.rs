@@ -1,3 +1,4 @@
+//! Unix domain socket implementations.
 pub(crate) mod dgram;
 pub(crate) mod stream;
 

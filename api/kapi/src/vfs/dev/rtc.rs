@@ -25,6 +25,7 @@ struct rtc_time {
 }
 
 /// RTC device
+/// Real-time clock device
 pub struct Rtc;
 
 impl DeviceOps for Rtc {

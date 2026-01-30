@@ -1,3 +1,13 @@
+//! File control and manipulation syscalls.
+//!
+//! This module implements file control operations including:
+//! - I/O control (ioctl, etc.)
+//! - File control (fcntl, etc.)
+//! - File attribute manipulation (chmod, chown, utime, etc.)
+//! - Directory operations (mkdir, rmdir, rename, etc.)
+//! - Symbolic links (symlink, readlink, etc.)
+//! - File removal (unlink, unlinkat, etc.)
+
 use alloc::{ffi::CString, vec, vec::Vec};
 use core::{
     ffi::{c_char, c_int},
@@ -50,6 +60,7 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
         })
 }
 
+/// Changes the current working directory.
 pub fn sys_chdir(path: *const c_char) -> KResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chdir <= path: {path}");
@@ -60,6 +71,7 @@ pub fn sys_chdir(path: *const c_char) -> KResult<isize> {
     Ok(0)
 }
 
+/// Changes the current working directory by file descriptor.
 pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
@@ -73,6 +85,7 @@ pub fn sys_mkdir(path: *const c_char, mode: u32) -> KResult<isize> {
     sys_mkdirat(AT_FDCWD, path, mode)
 }
 
+/// Changes the root directory of the calling process.
 pub fn sys_chroot(path: *const c_char) -> KResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chroot <= path: {path}");
@@ -86,6 +99,7 @@ pub fn sys_chroot(path: *const c_char) -> KResult<isize> {
     Ok(0)
 }
 
+/// Creates a directory relative to a directory file descriptor.
 pub fn sys_mkdirat(dirfd: i32, path: *const c_char, mode: u32) -> KResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_mkdirat <= dirfd: {dirfd}, path: {path}, mode: {mode}");
@@ -148,6 +162,7 @@ impl DirBuffer {
     }
 }
 
+/// Reads directory entries in linux_dirent64 format.
 pub fn sys_getdents64(fd: i32, buf: *mut u8, len: usize) -> KResult<isize> {
     debug!("sys_getdents64 <= fd: {fd}, buf: {buf:?}, len: {len}");
 
@@ -182,6 +197,7 @@ pub fn sys_getdents64(fd: i32, buf: *mut u8, len: usize) -> KResult<isize> {
 /// new_path: new file path
 /// flags: link flags
 /// return value: return 0 when success, else return -1.
+/// Creates a hard link to an existing file.
 pub fn sys_linkat(
     old_dirfd: c_int,
     old_path: *const c_char,
@@ -223,6 +239,7 @@ pub fn sys_link(old_path: *const c_char, new_path: *const c_char) -> KResult<isi
 /// path: the name of link to be removed
 /// flags: can be 0 or AT_REMOVEDIR
 /// return 0 when success, else return -1
+/// Removes a directory entry (file or directory).
 pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> KResult<isize> {
     let path = vm_load_string(path)?;
 
@@ -248,6 +265,7 @@ pub fn sys_unlink(path: *const c_char) -> KResult<isize> {
     sys_unlinkat(AT_FDCWD, path, 0)
 }
 
+/// Gets the current working directory path.
 pub fn sys_getcwd(buf: *mut u8, size: isize) -> KResult<isize> {
     let size: usize = size.try_into().map_err(|_| KError::BadAddress)?;
     if buf.is_null() {
@@ -274,6 +292,7 @@ pub fn sys_symlink(target: *const c_char, linkpath: *const c_char) -> KResult<is
     sys_symlinkat(target, AT_FDCWD, linkpath)
 }
 
+/// Creates a symbolic link relative to a directory file descriptor.
 pub fn sys_symlinkat(
     target: *const c_char,
     new_dirfd: i32,
@@ -294,6 +313,7 @@ pub fn sys_readlink(path: *const c_char, buf: *mut u8, size: usize) -> KResult<i
     sys_readlinkat(AT_FDCWD, path, buf, size)
 }
 
+/// Reads the target of a symbolic link.
 pub fn sys_readlinkat(
     dirfd: i32,
     path: *const c_char,
@@ -328,6 +348,7 @@ pub fn sys_fchown(fd: i32, uid: i32, gid: i32) -> KResult<isize> {
     sys_fchownat(fd, core::ptr::null(), uid, gid, AT_EMPTY_PATH)
 }
 
+/// Changes file ownership relative to a directory file descriptor.
 pub fn sys_fchownat(
     dirfd: i32,
     path: *const c_char,
@@ -364,10 +385,12 @@ pub fn sys_chmod(path: *const c_char, mode: u32) -> KResult<isize> {
     sys_fchmodat(AT_FDCWD, path, mode, 0)
 }
 
+/// Changes file permissions by file descriptor.
 pub fn sys_fchmod(fd: i32, mode: u32) -> KResult<isize> {
     sys_fchmodat(fd, core::ptr::null(), mode, AT_EMPTY_PATH)
 }
 
+/// Changes file permissions relative to a directory file descriptor.
 pub fn sys_fchmodat(dirfd: i32, path: *const c_char, mode: u32, flags: u32) -> KResult<isize> {
     let path = path.check_non_null().map(vm_load_string).transpose()?;
     resolve_at(dirfd, path.as_deref(), flags)?

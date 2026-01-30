@@ -1,3 +1,11 @@
+//! File descriptor operations.
+//!
+//! This module implements file descriptor manipulation syscalls including:
+//! - Opening and closing files (open, openat, close, etc.)
+//! - File descriptor duplication (dup, dup2, dup3, etc.)
+//! - File descriptor flags and control (fcntl, etc.)
+//! - Directory operations (opendir, closedir, etc.)
+
 use alloc::{format, string::ToString, sync::Arc};
 use core::{
     ffi::{c_char, c_int},
@@ -24,42 +32,49 @@ use crate::{
 };
 
 /// Convert open flags to [`OpenOptions`].
+/// Interprets Linux open() flags and converts them to our internal OpenOptions format.
+/// Converts Linux open flags into internal `OpenOptions`.
 fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32)) -> OpenOptions {
     let flags = flags as u32;
     let mut options = OpenOptions::new();
     options.mode(mode).user(uid, gid);
+    
+    // Extract access mode (read-only, write-only, or read-write) from the lower 2 bits
     match flags & 0b11 {
         O_RDONLY => options.read(true),
         O_WRONLY => options.write(true),
-        _ => options.read(true).write(true),
+        _ => options.read(true).write(true),  // O_RDWR or unspecified defaults to read-write
     };
+    
+    // Process individual flag bits
     if flags & O_APPEND != 0 {
-        options.append(true);
+        options.append(true);  // Append writes to end of file
     }
     if flags & O_TRUNC != 0 {
-        options.truncate(true);
+        options.truncate(true);  // Truncate file to zero length
     }
     if flags & O_CREAT != 0 {
-        options.create(true);
+        options.create(true);  // Create file if it doesn't exist
     }
     if flags & O_PATH != 0 {
-        options.path(true);
+        options.path(true);  // Open for pathname operations only
     }
     if flags & O_EXCL != 0 {
-        options.create_new(true);
+        options.create_new(true);  // Fail if file exists (requires O_CREAT)
     }
     if flags & O_DIRECTORY != 0 {
-        options.directory(true);
+        options.directory(true);  // Ensure path is a directory
     }
     if flags & O_NOFOLLOW != 0 {
-        options.no_follow(true);
+        options.no_follow(true);  // Don't follow symbolic links
     }
     if flags & O_DIRECT != 0 {
-        options.direct(true);
+        options.direct(true);  // Direct I/O, bypassing cache
     }
     options
 }
 
+/// Adds an opened file or directory to the fd table.
 fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
     let f: Arc<dyn FileLike> = match result {
         OpenResult::File(mut file) => {
@@ -114,6 +129,7 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
 /// flags: open flags
 /// mode: see man 7 inode
 /// return new file descriptor if succeed, or return -1.
+/// Opens a file relative to a directory file descriptor.
 pub fn sys_openat(
     dirfd: c_int,
     path: *const c_char,
@@ -136,10 +152,12 @@ pub fn sys_openat(
 /// Return its index in the file table (`fd`). Return `EMFILE` if it already
 /// has the maximum number of files open.
 #[cfg(target_arch = "x86_64")]
+/// Opens a file by path.
 pub fn sys_open(path: *const c_char, flags: i32, mode: __kernel_mode_t) -> KResult<isize> {
     sys_openat(AT_FDCWD as _, path, flags, mode)
 }
 
+/// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {
     debug!("sys_close <= {fd}");
     close_file_like(fd)?;
@@ -154,6 +172,7 @@ bitflags! {
     }
 }
 
+/// Closes a range of file descriptors.
 pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
     if first < 0 || last < first {
         return Err(KError::InvalidInput);
@@ -186,18 +205,21 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
     Ok(0)
 }
 
+/// Duplicates a file descriptor and optionally sets `CLOEXEC`.
 fn dup_fd(old_fd: c_int, cloexec: bool) -> KResult<isize> {
     let f = get_file_like(old_fd)?;
     let new_fd = add_file_like(f, cloexec)?;
     Ok(new_fd as _)
 }
 
+/// Duplicates a file descriptor.
 pub fn sys_dup(old_fd: c_int) -> KResult<isize> {
     debug!("sys_dup <= {old_fd}");
     dup_fd(old_fd, false)
 }
 
 #[cfg(target_arch = "x86_64")]
+/// Duplicates a file descriptor to a specific target fd.
 pub fn sys_dup2(old_fd: c_int, new_fd: c_int) -> KResult<isize> {
     if old_fd == new_fd {
         get_file_like(new_fd)?;
@@ -213,6 +235,7 @@ bitflags::bitflags! {
     }
 }
 
+/// Duplicates a file descriptor with additional flags.
 pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> KResult<isize> {
     let flags = Dup3Flags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_dup3 <= old_fd: {old_fd}, new_fd: {new_fd}, flags: {flags:?}");
@@ -236,6 +259,7 @@ pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> KResult<isize> {
     Ok(new_fd as _)
 }
 
+/// Performs file descriptor control operations.
 pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
     debug!("sys_fcntl <= fd: {fd} cmd: {cmd} arg: {arg}");
 
@@ -305,6 +329,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
     }
 }
 
+/// Applies or removes an advisory lock on a file descriptor.
 pub fn sys_flock(fd: c_int, operation: c_int) -> KResult<isize> {
     debug!("flock <= fd: {fd}, operation: {operation}");
     // TODO: flock

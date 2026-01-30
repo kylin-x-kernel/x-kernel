@@ -1,4 +1,6 @@
+//! Kernel filesystem initialization and high-level APIs.
 #![cfg_attr(all(not(test), not(doc)), no_std)]
+#![allow(dead_code, unused_imports, rustdoc::broken_intra_doc_links)]
 #![feature(doc_cfg)]
 #![allow(clippy::new_ret_no_self)]
 
@@ -26,6 +28,7 @@ pub use highlevel::*;
 pub use path_resolver::PathResolver;
 pub use working_context::WorkingContext;
 
+/// Initialize the filesystem subsystem and mount the root filesystem.
 pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
     info!("Initialize filesystem subsystem...");
 

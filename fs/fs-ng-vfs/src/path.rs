@@ -1,13 +1,18 @@
+//! Path parsing and normalization utilities.
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{borrow::Borrow, fmt, ops::Deref};
 
 use crate::{VfsError, VfsResult};
 
+/// Current directory component.
 pub const DOT: &str = ".";
+/// Parent directory component.
 pub const DOTDOT: &str = "..";
 
+/// Maximum filename length.
 pub const MAX_NAME_LEN: usize = 255;
 
+/// Validate a directory entry name.
 pub(crate) fn verify_entry_name(name: &str) -> VfsResult<()> {
     if name == DOT || name == DOTDOT {
         return Err(VfsError::InvalidInput);
@@ -30,6 +35,7 @@ pub enum Component<'a> {
 }
 
 impl<'a> Component<'a> {
+    /// Returns the string form of this path component.
     pub fn as_str(&self) -> &'a str {
         match self {
             Component::RootDir => "/",
@@ -50,6 +56,7 @@ pub struct Components<'a> {
 }
 
 impl<'a> Components<'a> {
+    /// Returns the remaining slice as a `Path`.
     pub fn as_path(&self) -> &'a Path {
         Path::new(self.path)
     }

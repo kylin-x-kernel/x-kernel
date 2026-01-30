@@ -32,6 +32,7 @@ pub use ptm::Ptmx;
 pub use pts::PtsDir;
 pub use pty::PtyDriver;
 
+/// Create a new pseudo-terminal master-slave pair
 pub fn create_pty_master(fs: Arc<SimpleFs>) -> KResult<Arc<PtyDriver>> {
     let (master, slave) = pty::create_pty_pair();
     pts::add_slave(fs, slave)?;
@@ -39,6 +40,7 @@ pub fn create_pty_master(fs: Arc<SimpleFs>) -> KResult<Arc<PtyDriver>> {
 }
 
 /// Tty device
+/// TTY device combining terminal and line discipline
 pub struct Tty<R, W> {
     this: Weak<Self>,
     terminal: Arc<Terminal>,
@@ -63,6 +65,7 @@ impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
 }
 
 impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
+    /// Bind this TTY to a process group as the controlling terminal
     pub fn bind_to(self: &Arc<Self>, proc: &Process) -> KResult<()> {
         let pg = proc.group();
         if pg.session().sid() != proc.pid() {
@@ -77,6 +80,7 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         Ok(())
     }
 
+    /// Get the pseudo-terminal slave number
     pub fn pty_number(&self) -> u32 {
         self.terminal.pty_number.load(Ordering::Acquire)
     }
@@ -212,6 +216,7 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
     }
 }
 
+/// /dev/tty device - refers to the calling process's controlling terminal
 pub struct CurrentTty;
 impl DeviceOps for CurrentTty {
     fn read_at(&self, _buf: &mut [u8], _offset: u64) -> KResult<usize> {

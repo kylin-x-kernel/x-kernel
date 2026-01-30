@@ -1,3 +1,4 @@
+//! Pending signal queues for processes and threads.
 use alloc::{boxed::Box, collections::vec_deque::VecDeque};
 use core::array;
 

@@ -1,3 +1,10 @@
+//! Socket address name syscalls.
+//!
+//! This module implements socket name operations including:
+//! - Get socket name (getsockname, etc.)
+//! - Get peer name (getpeername, etc.)
+//! - Socket address queries
+
 use kerrno::KResult;
 use knet::SocketOps;
 use linux_raw_sys::net::{sockaddr, socklen_t};
@@ -8,6 +15,7 @@ use crate::{
     socket::SocketAddrExt,
 };
 
+/// Get the local address bound to a socket
 pub fn sys_getsockname(
     fd: i32,
     addr: UserPtr<sockaddr>,
@@ -21,6 +29,7 @@ pub fn sys_getsockname(
     Ok(0)
 }
 
+/// Get the address of the remote peer connected to a socket
 pub fn sys_getpeername(
     fd: i32,
     addr: UserPtr<sockaddr>,

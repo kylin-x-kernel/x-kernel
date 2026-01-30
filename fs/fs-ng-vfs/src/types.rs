@@ -1,6 +1,8 @@
+//! Common VFS data types.
 use core::{fmt::Debug, time::Duration};
 
 /// Filesystem node type.
+/// Filesystem node type values.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum NodeType {
@@ -117,11 +119,12 @@ pub struct MetadataUpdate {
     pub mtime: Option<Duration>,
 }
 
-/// Device Id
+/// Device identifier (major/minor encoding).
 #[derive(Default, Clone, PartialEq, Eq, Copy)]
 pub struct DeviceId(pub u64);
 
 impl DeviceId {
+    /// Create a new device ID from major/minor numbers.
     pub const fn new(major: u32, minor: u32) -> Self {
         let major = major as u64;
         let minor = minor as u64;
@@ -133,10 +136,12 @@ impl DeviceId {
         )
     }
 
+    /// Return the major number.
     pub const fn major(&self) -> u32 {
         ((self.0 >> 32) & 0xffff_f000 | (self.0 >> 8) & 0x0000_0fff) as u32
     }
 
+    /// Return the minor number.
     pub const fn minor(&self) -> u32 {
         ((self.0 >> 12) & 0xffff_ff00 | self.0 & 0x0000_00ff) as u32
     }

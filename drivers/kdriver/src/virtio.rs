@@ -6,6 +6,7 @@
 //
 // This file has been modified by KylinSoft on 2025.
 
+//! VirtIO device probing and HAL integration.
 use core::{marker::PhantomData, ptr::NonNull};
 
 use cfg_if::cfg_if;
@@ -26,13 +27,17 @@ cfg_if! {
     }
 }
 
-/// A trait for VirtIO device meta information.
+/// Metadata describing a VirtIO device type and its driver bindings.
 pub trait VirtIoDevMeta {
+    /// The device category for this VirtIO device.
     const DEVICE_TYPE: DeviceKind;
 
+    /// Concrete device type that implements driver operations.
     type Device: DriverOps;
+    /// Driver type used for probing and instantiation.
     type Driver = VirtIoDriver<Self>;
 
+    /// Try to construct a driver instance from a transport and optional IRQ.
     fn try_new(transport: VirtIoTransport, irq: Option<usize>) -> DriverResult<DeviceEnum>;
 }
 
@@ -116,7 +121,7 @@ pub struct VirtIoDriver<D: VirtIoDevMeta + ?Sized>(PhantomData<D>);
 
 impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     #[cfg(bus = "mmio")]
-    fn probe_mmio(mmio_base: usize, mmio_size: usize) -> Option<AxDeviceEnum> {
+    fn probe_mmio(mmio_base: usize, mmio_size: usize) -> Option<DeviceEnum> {
         let base_vaddr = p2v(mmio_base.into());
         if let Some((ty, transport)) = virtio::probe_mmio_device(base_vaddr.as_mut_ptr(), mmio_size)
             && ty == D::DEVICE_TYPE

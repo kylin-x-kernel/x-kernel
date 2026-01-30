@@ -1,3 +1,5 @@
+//! Power control implementation for aarch64-qemu-virt.
+
 use kplat::sys::SysCtrl;
 struct PowerImpl;
 #[impl_dev_interface]

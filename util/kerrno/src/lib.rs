@@ -1,3 +1,4 @@
+//! Kernel error types and errno conversions.
 #![cfg_attr(not(test), no_std)]
 
 use core::fmt;

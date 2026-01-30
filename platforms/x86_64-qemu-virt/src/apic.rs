@@ -1,3 +1,5 @@
+//! Local APIC and IO APIC setup for x86_64-qemu-virt.
+
 use core::mem::MaybeUninit;
 
 use kplat::memory::{PhysAddr, p2v, pa};
@@ -10,6 +12,7 @@ use x2apic::{
 use x86_64::instructions::port::Port;
 
 use self::vectors::*;
+/// APIC vector assignments.
 pub(super) mod vectors {
     pub const APIC_TIMER_VECTOR: u8 = 0xf0;
     pub const APIC_SPURIOUS_VECTOR: u8 = 0xf1;
@@ -19,6 +22,7 @@ const IO_APIC_BASE: PhysAddr = pa!(0xFEC0_0000);
 static mut LOCAL_APIC: MaybeUninit<LocalApic> = MaybeUninit::uninit();
 static mut IS_X2APIC: bool = false;
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
+/// Enables or disables the IO APIC line for the given vector.
 pub fn enable(vector: usize, enabled: bool) {
     if vector < APIC_TIMER_VECTOR as _ {
         unsafe {
@@ -30,10 +34,12 @@ pub fn enable(vector: usize, enabled: bool) {
         }
     }
 }
+/// Returns a mutable reference to the local APIC.
 #[allow(static_mut_refs)]
 pub fn local_apic<'a>() -> &'a mut LocalApic {
     unsafe { LOCAL_APIC.assume_init_mut() }
 }
+/// Converts an APIC ID into a raw APIC register format.
 #[cfg(feature = "smp")]
 pub fn raw_apic_id(id_u8: u8) -> u32 {
     if unsafe { IS_X2APIC } {
@@ -42,12 +48,14 @@ pub fn raw_apic_id(id_u8: u8) -> u32 {
         (id_u8 as u32) << 24
     }
 }
+/// Detects whether the CPU supports x2APIC.
 fn cpu_has_x2apic() -> bool {
     match raw_cpuid::CpuId::new().get_feature_info() {
         Some(finfo) => finfo.has_x2apic(),
         None => false,
     }
 }
+/// Initializes local and IO APIC on the boot CPU.
 pub fn init_primary() {
     info!("Initialize Local APIC...");
     unsafe {
@@ -77,6 +85,7 @@ pub fn init_primary() {
     let io_apic = unsafe { IoApic::new(p2v(IO_APIC_BASE).as_usize() as u64) };
     IO_APIC.init_once(SpinNoIrq::new(io_apic));
 }
+/// Initializes local APIC on a secondary CPU.
 #[cfg(feature = "smp")]
 pub fn init_secondary() {
     unsafe { local_apic().enable() };

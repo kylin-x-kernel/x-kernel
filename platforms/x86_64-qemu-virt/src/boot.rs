@@ -1,3 +1,5 @@
+//! Multiboot entry setup for x86_64-qemu-virt.
+
 use core::arch::global_asm;
 
 use x86_64::registers::{

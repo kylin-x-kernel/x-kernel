@@ -1,3 +1,4 @@
+//! High-level filesystem context and directory iteration utilities.
 use alloc::{
     borrow::{Cow, ToOwned},
     collections::vec_deque::VecDeque,
@@ -16,14 +17,17 @@ use spin::Once;
 use crate::PathResolver;
 
 #[allow(dead_code)]
+/// Maximum symlink follow depth for legacy APIs.
 pub const SYMLINKS_MAX: usize = 40;
 
 // Import the new FsOperations as the implementation
 use crate::fs_operations::FsOperations as FsContextImpl;
 
+/// Global root filesystem context initializer.
 pub static ROOT_FS_CONTEXT: Once<FsContext> = Once::new();
 
 scope_local::scope_local! {
+    /// Thread-local filesystem context handle.
     pub static FS_CONTEXT: Arc<Mutex<FsContext>> =
         Arc::new(Mutex::new(
             ROOT_FS_CONTEXT
@@ -33,10 +37,15 @@ scope_local::scope_local! {
         ));
 }
 
+/// Directory entry returned by `ReadDir`.
 pub struct ReadDirEntry {
+    /// Entry name.
     pub name: String,
+    /// Inode number.
     pub ino: u64,
+    /// Node type.
     pub node_type: NodeType,
+    /// Offset of the next entry.
     pub offset: u64,
 }
 
@@ -49,6 +58,7 @@ pub struct FsContext {
 }
 
 impl FsContext {
+    /// Create a filesystem context rooted at `root_dir`.
     pub fn new(root_dir: Location) -> Self {
         Self {
             inner: FsContextImpl::new(root_dir),
@@ -61,18 +71,22 @@ impl FsContext {
         Self { inner: ops }
     }
 
+    /// Returns the root directory location.
     pub fn root_dir(&self) -> &Location {
         self.inner.root_dir()
     }
 
+    /// Returns the current working directory.
     pub fn current_dir(&self) -> &Location {
         self.inner.current_dir()
     }
 
+    /// Change the current working directory.
     pub fn set_current_dir(&mut self, current_dir: Location) -> VfsResult<()> {
         self.inner.set_current_dir(current_dir)
     }
 
+    /// Create a new context with a different current directory.
     pub fn with_current_dir(&self, current_dir: Location) -> VfsResult<Self> {
         Ok(Self {
             inner: self.inner.with_current_dir(current_dir)?,
@@ -90,6 +104,7 @@ impl FsContext {
     }
 
     /// Resolves a path to its parent directory and entry name
+    /// Resolve a path to its parent directory and entry name.
     pub fn resolve_parent<'a>(&self, path: &'a Path) -> VfsResult<(Location, Cow<'a, str>)> {
         // Use inner resolver but convert String to Cow
         let resolver = PathResolver::new();
@@ -98,6 +113,7 @@ impl FsContext {
     }
 
     /// Resolves a path for a nonexistent entry
+    /// Resolve a path that is expected not to exist.
     pub fn resolve_nonexistent<'a>(&self, path: &'a Path) -> VfsResult<(Location, &'a str)> {
         // This method returns a lifetime-bound &str, so we need to use the path's lifetime
         // We can only return a reference to something in the path itself
@@ -191,6 +207,7 @@ pub struct ReadDir {
 
 impl ReadDir {
     // TODO: tune this
+    /// Read-ahead buffer size for directory entries.
     pub const BUF_SIZE: usize = 128;
 }
 

@@ -1,37 +1,58 @@
+//! x86_64 context structures for traps and task switching.
+
 use core::{arch::naked_asm, fmt};
 
 use memaddr::VirtAddr;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
-#[allow(missing_docs)]
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ExceptionContext {
+    /// General-purpose register rax.
     pub rax: u64,
+    /// General-purpose register rcx.
     pub rcx: u64,
+    /// General-purpose register rdx.
     pub rdx: u64,
+    /// General-purpose register rbx.
     pub rbx: u64,
+    /// Base pointer register rbp.
     pub rbp: u64,
+    /// Source index register rsi.
     pub rsi: u64,
+    /// Destination index register rdi.
     pub rdi: u64,
+    /// General-purpose register r8.
     pub r8: u64,
+    /// General-purpose register r9.
     pub r9: u64,
+    /// General-purpose register r10.
     pub r10: u64,
+    /// General-purpose register r11.
     pub r11: u64,
+    /// General-purpose register r12.
     pub r12: u64,
+    /// General-purpose register r13.
     pub r13: u64,
+    /// General-purpose register r14.
     pub r14: u64,
+    /// General-purpose register r15.
     pub r15: u64,
 
-    // Pushed by `trap.S`
+    /// Trap vector number (pushed by `trap.S`).
     pub vector: u64,
+    /// Error code (pushed by `trap.S` or CPU depending on vector).
     pub error_code: u64,
 
-    // Pushed by CPU
+    /// Instruction pointer at trap time.
     pub rip: u64,
+    /// Code segment selector.
     pub cs: u64,
+    /// RFLAGS register.
     pub rflags: u64,
+    /// Stack pointer at trap time.
     pub rsp: u64,
+    /// Stack segment selector.
     pub ss: u64,
 }
 
@@ -158,20 +179,30 @@ struct ContextSwitchFrame {
 /// restore the x87 FPU, MMX, XMM, and MXCSR registers.
 ///
 /// See <https://www.felixcloutier.com/x86/fxsave> for more details.
-#[allow(missing_docs)]
 #[repr(C, align(16))]
 #[derive(Debug)]
 pub struct FxsaveArea {
+    /// FPU control word.
     pub fcw: u16,
+    /// FPU status word.
     pub fsw: u16,
+    /// FPU tag word.
     pub ftw: u16,
+    /// FPU opcode.
     pub fop: u16,
+    /// FPU instruction pointer.
     pub fip: u64,
+    /// FPU data pointer.
     pub fdp: u64,
+    /// SSE control and status register.
     pub mxcsr: u32,
+    /// MXCSR mask.
     pub mxcsr_mask: u32,
+    /// x87/MMX registers.
     pub st: [u64; 16],
+    /// XMM registers.
     pub xmm: [u64; 32],
+    /// Reserved padding.
     _padding: [u64; 12],
 }
 

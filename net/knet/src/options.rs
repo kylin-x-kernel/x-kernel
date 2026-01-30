@@ -1,3 +1,4 @@
+//! Socket option types and configuration helpers.
 use alloc::boxed::Box;
 use core::time::Duration;
 

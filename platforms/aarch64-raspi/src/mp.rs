@@ -1,3 +1,4 @@
+//! SMP bring-up helpers for Raspberry Pi.
 use kplat::memory::{PhysAddr, pa, p2v, va, v2p};
 static mut SECONDARY_STACK_TOP: usize = 0;
 const CPU_SPIN_TABLE: [PhysAddr; 4] = [pa!(0xd8), pa!(0xe0), pa!(0xe8), pa!(0xf0)];
@@ -14,6 +15,7 @@ unsafe extern "C" fn modify_stack_and_start() {
         start_secondary = sym crate::boot::_start_secondary,
     );
 }
+/// Release a secondary CPU from the spin table and set its stack.
 pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) {
     let entry_paddr = v2p(va!(modify_stack_and_start as usize)).as_usize();
     let stack_top_ptr = &raw mut SECONDARY_STACK_TOP;

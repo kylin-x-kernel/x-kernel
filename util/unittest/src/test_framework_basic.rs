@@ -1,3 +1,5 @@
+//! Basic test result types and helper macros.
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TestResult {
     Ok,

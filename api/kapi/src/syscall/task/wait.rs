@@ -1,3 +1,10 @@
+//! Process waiting and status syscalls.
+//!
+//! This module implements process status waiting operations including:
+//! - Wait for process termination (wait, waitpid, waitid, etc.)
+//! - Process status retrieval and interpretation
+//! - Child process status monitoring
+
 use alloc::vec::Vec;
 use core::{future::poll_fn, task::Poll};
 

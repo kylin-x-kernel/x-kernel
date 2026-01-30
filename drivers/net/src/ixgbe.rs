@@ -1,3 +1,4 @@
+//! Intel ixgbe NIC driver implementation.
 use alloc::{collections::VecDeque, sync::Arc};
 use core::{convert::From, mem::ManuallyDrop, ptr::NonNull};
 
@@ -85,7 +86,7 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, Q
 
     fn recycle_tx(&mut self) -> DriverResult {
         self.inner
-            .recycle_tx(0)
+            .recycle_tx_buffers(0)
             .map_err(|_| DriverError::BadState)?;
         Ok(())
     }
@@ -134,7 +135,7 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, Q
 
     fn alloc_tx_buf(&mut self, size: usize) -> DriverResult<NetBufHandle> {
         let tx_buf =
-            IxgbeNetBuf::alloc_buf(&self.mem_pool, size).map_err(|_| DriverError::NoMemory)?;
+            IxgbeNetBuf::alloc(&self.mem_pool, size).map_err(|_| DriverError::NoMemory)?;
         Ok(NetBufHandle::from(tx_buf))
     }
 }
@@ -143,13 +144,16 @@ impl From<IxgbeNetBuf> for NetBufHandle {
     fn from(buf: IxgbeNetBuf) -> Self {
         // Use `ManuallyDrop` to avoid drop `tx_buf`.
         let mut buf = ManuallyDrop::new(buf);
+        let buf_ref = unsafe {
+            &mut *(&mut buf as *mut ManuallyDrop<IxgbeNetBuf> as *mut IxgbeNetBuf)
+        };
         // In ixgbe, `raw_ptr` is the pool entry, `buf_ptr` is the payload ptr, `len` is payload len
         // to avoid too many dynamic memory allocation.
-        let buf_ptr = buf.payload_mut().as_mut_ptr();
+        let buf_ptr = buf_ref.packet_mut().as_mut_ptr();
         Self::new(
-            NonNull::new(buf.pool_entry() as *mut u8).unwrap(),
+            NonNull::new(buf_ref.pool_entry() as *mut u8).unwrap(),
             NonNull::new(buf_ptr).unwrap(),
-            buf.payload_len(),
+            buf_ref.packet_len(),
         )
     }
 }

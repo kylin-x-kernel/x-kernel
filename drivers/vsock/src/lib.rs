@@ -1,4 +1,4 @@
-//! Common traits and types for socket communite device drivers (i.e. disk).
+//! Common traits and types for vsock device drivers.
 
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]
@@ -34,24 +34,24 @@ impl VsockConnId {
     }
 }
 
-/// VsockDriverEventType
+/// Vsock driver event type.
 #[derive(Debug)]
 pub enum VsockDriverEventType {
-    /// ConnectionRequest
+    /// A connection request was received.
     ConnectionRequest(VsockConnId),
-    /// Connected
+    /// A connection was established.
     Connected(VsockConnId),
-    /// Received
+    /// Data was received on a connection.
     Received(VsockConnId, usize),
-    /// Disconnected
+    /// A connection was disconnected.
     Disconnected(VsockConnId),
-    /// unknown event
+    /// Unknown or unsupported event.
     Unknown,
 }
 
-/// Operations that require a block storage device driver to implement.
+/// Operations that require a vsock device driver to implement.
 pub trait VsockDriverOps: DriverOps {
-    /// guest cid
+    /// Returns the guest CID.
     fn guest_cid(&self) -> u64;
 
     /// Listen on a specific port.
@@ -60,7 +60,7 @@ pub trait VsockDriverOps: DriverOps {
     /// Connect to a peer socket.
     fn connect(&mut self, cid: VsockConnId) -> DriverResult<()>;
 
-    /// Send data to the connected peer socket. need addr for DGRAM mode
+    /// Send data to the connected peer socket.
     fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize>;
 
     /// Receive data from the connected peer socket.
@@ -75,6 +75,6 @@ pub trait VsockDriverOps: DriverOps {
     /// Forcibly closes the connection without waiting for the peer.
     fn abort(&mut self, cid: VsockConnId) -> DriverResult<()>;
 
-    /// poll event from driver
+    /// Poll for a device event.
     fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEventType>>;
 }

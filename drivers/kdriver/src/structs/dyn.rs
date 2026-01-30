@@ -1,3 +1,4 @@
+//! Dynamic device type aliases for trait-object based device selection.
 use alloc::boxed::Box;
 
 use crate::prelude::*;
