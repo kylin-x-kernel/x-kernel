@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Procedural macros for X-Kernel platform configuration.
 //!
 //! This crate provides procedural macros for converting TOML format configurations

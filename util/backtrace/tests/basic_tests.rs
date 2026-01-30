@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Basic integration tests for backtrace functionality.
 //!
 //! Note: DWARF symbolication is not tested here because it requires

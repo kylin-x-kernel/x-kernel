@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 // Stub symbols for test mode
 // These symbols are normally provided by the kernel linker script,
 // but we need stub implementations for user-space tests.
