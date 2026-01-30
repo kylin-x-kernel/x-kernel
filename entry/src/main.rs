@@ -33,7 +33,7 @@ fn main() {
 
     #[cfg(feature = "test")]
     {
-        use unittest::test_example;
+        use unittest::test_examples::test_example;
 
         info!("Running tests...");
         test_example();

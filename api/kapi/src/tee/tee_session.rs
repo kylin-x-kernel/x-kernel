@@ -31,9 +31,6 @@ scope_local::scope_local! {
 ///
 /// This structure is attached to each thread handling a client session
 pub struct TeeSessionCtx {
-    pub session_id: u32,
-    pub login_type: u32,
-    pub user_id: u32,
     pub clnt_id: TEE_Identity,
     pub cancel: bool,
     pub cancel_mask: bool,
@@ -53,9 +50,6 @@ impl TeeSessionCtxTrait for TeeSessionCtx {
 impl Default for TeeSessionCtx {
     fn default() -> Self {
         TeeSessionCtx {
-            session_id: 0,
-            login_type: 0,
-            user_id: 0,
             clnt_id: TEE_Identity {
                 login: 0,
                 uuid: TEE_UUID {
@@ -170,7 +164,7 @@ where
     F: FnOnce(&mut TeeTaCtx) -> TeeResult<R>,
 {
     let mut ta_ctx = TEE_TA_CTX.write();
-    f(&mut *ta_ctx)
+    f(&mut ta_ctx)
 }
 
 /// Acquire an immutable reference to the global tee_ta_ctx
@@ -187,21 +181,18 @@ where
     F: FnOnce(&TeeTaCtx) -> TeeResult<R>,
 {
     let ta_ctx = TEE_TA_CTX.read();
-    f(&*ta_ctx)
+    f(&ta_ctx)
 }
 
 // Test module for TEE session functionality
 // Only compiled when the tee_test feature is enabled
 #[cfg(feature = "tee_test")]
 pub mod tests_tee_session {
-    //-------- test framework import --------
-    //-------- local tests import --------
-    use super::*;
-    use crate::{
-        assert_eq,
-        tee::test::{test_framework::TestDescriptor, test_framework_basic::TestResult},
-        test_fn, tests_name,
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+
+    use super::*;
 
     // Test function for basic tee_ta_ctx operations
     test_fn! {
@@ -209,7 +200,7 @@ pub mod tests_tee_session {
 
         fn test_tee_ta_ctx() {
             // Test reading from TEE_TA_CTX
-            let mut test_only: u32 = 0;
+            let test_only;
             {
                 let ta_ctx = TEE_TA_CTX.read();
                 test_only = ta_ctx.for_test_only;

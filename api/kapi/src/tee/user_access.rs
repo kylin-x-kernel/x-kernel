@@ -4,11 +4,12 @@
 //
 // This file has been created by KylinSoft on 2025.
 
-use alloc::{boxed::Box, vec};
-use core::mem::{MaybeUninit, size_of, transmute};
+#![allow(dead_code)]
 
-use osvm::{MemError, read_vm_mem, write_vm_mem};
-use tee_raw_sys::{libc_compat::size_t, *};
+use alloc::{boxed::Box, vec};
+use core::mem::size_of;
+
+use tee_raw_sys::libc_compat::size_t;
 
 use super::TeeResult;
 
@@ -30,10 +31,10 @@ pub(crate) fn copy_from_user(kaddr: &mut [u8], uaddr: &[u8], len: size_t) -> Tee
     }
 }
 
-pub(crate) fn copy_to_user(uaddr: &mut [u8], kaddr: &[u8], len: size_t) -> TeeResult {
+pub(crate) fn copy_to_user(uaddr: &mut [u8], kaddr: &[u8], _len: size_t) -> TeeResult {
     cfg_if::cfg_if! {
         if #[cfg(feature = "tee_test_mock_user_access")] {
-            uaddr[..len].copy_from_slice(&kaddr[..len]);
+            uaddr[.._len].copy_from_slice(&kaddr[.._len]);
             Ok(())
         } else {
             write_vm_mem(uaddr.as_mut_ptr(), kaddr)
@@ -133,7 +134,7 @@ pub fn copy_to_user_private(uaddr: &mut [u8], kaddr: &[u8], len: size_t) -> TeeR
 ///
 /// use for temporary memory allocation, can be optimized
 pub fn bb_alloc(len: usize) -> TeeResult<Box<[u8]>> {
-    let mut kbuf: Box<[u8]> = vec![0u8; len as _].into_boxed_slice();
+    let kbuf: Box<[u8]> = vec![0u8; len as _].into_boxed_slice();
 
     Ok(kbuf)
 }
@@ -141,7 +142,7 @@ pub fn bb_alloc(len: usize) -> TeeResult<Box<[u8]>> {
 /// free memory to kernel
 ///
 /// use for temporary memory allocation, can be optimized
-pub fn bb_free(kbuf: Box<[u8]>, len: usize) {
+pub fn bb_free(kbuf: Box<[u8]>, _len: usize) {
     drop(kbuf);
 }
 
@@ -180,14 +181,11 @@ pub(crate) fn exit_user_access() {
 
 #[cfg(feature = "tee_test")]
 pub mod tests_user_access {
-    //-------- test framework import --------
-    //-------- local tests import --------
-    use super::*;
-    use crate::{
-        assert_eq,
-        tee::test::{test_framework::TestDescriptor, test_framework_basic::TestResult},
-        test_fn, tests_name,
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+
+    use super::*;
 
     test_fn! {
         using TestResult;

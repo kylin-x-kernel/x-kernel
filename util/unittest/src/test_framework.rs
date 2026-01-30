@@ -52,6 +52,12 @@ impl TestStats {
     }
 }
 
+impl Default for TestStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub static TEST_FAILED_FLAG: AtomicBool = AtomicBool::new(false);
 
 // Testable trait
@@ -153,6 +159,12 @@ impl Write for StringWriter {
     }
 }
 
+impl Default for StringWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Test runner
 pub struct TestRunner {
     stats: TestStats,
@@ -244,6 +256,12 @@ impl TestRunner {
 
     pub fn get_stats(&self) -> TestStats {
         self.stats
+    }
+}
+
+impl Default for TestRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

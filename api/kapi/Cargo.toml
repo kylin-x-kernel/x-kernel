@@ -14,13 +14,22 @@ memtrack = ["kfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["knet/vsock"]
 dev-log = []
 dice = ["dep:aarch64-crosvm-virt", "kalloc/dice", "dep:rand_chacha"]
-tee = ["linux_sysno/tee", "dep:tee_raw_sys", "dep:bincode", "dep:uuid", "dep:hex"]
+tee = [
+    "linux_sysno/tee",
+    "dep:tee_raw_sys",
+    "dep:bincode",
+    "dep:uuid",
+    "dep:hex",
+]
 tee_test_mock_user_access = []
+tee_test = ["tee", "dep:unittest", "tee_test_mock_user_access"]
+unittest = ["tee_test"]
 
 [dependencies]
 kalloc.workspace = true
 backtrace.workspace = true
 platconfig.workspace = true
+unittest = { workspace = true, optional = true }
 
 fbdevice.workspace = true
 kdriver.workspace = true

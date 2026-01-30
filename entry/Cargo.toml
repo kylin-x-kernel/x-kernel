@@ -22,7 +22,7 @@ kernel = [
 
 tee = ["kapi/tee", "kcore/tee"]
 smp = ["kfeat/smp"]
-test = ["unittest"]
+test = ["unittest", "kapi/unittest"]
 
 # Stubs
 pci = ["kfeat/bus-pci"]
@@ -41,6 +41,7 @@ qemu = [
     "kapi/dev-log",
     "pci",
     "test",
+    "tee",
 ]
 
 # aarch64-qemu-virt platform
@@ -52,23 +53,11 @@ aarch64_qemu_virt = [
     "dep:aarch64-qemu-virt",
 ]
 
-x86_64_qemu_virt = [
-    "kernel",
-    "qemu",
-    "dep:x86_64-qemu-virt",
-]
+x86_64_qemu_virt = ["kernel", "qemu", "dep:x86_64-qemu-virt"]
 
-riscv64_qemu_virt = [
-    "kernel",
-    "qemu",
-    "dep:riscv64-qemu-virt",
-]
+riscv64_qemu_virt = ["kernel", "qemu", "dep:riscv64-qemu-virt"]
 
-loongarch64_qemu_virt = [
-    "kernel",
-    "qemu",
-    "dep:loongarch64-qemu-virt",
-]
+loongarch64_qemu_virt = ["kernel", "qemu", "dep:loongarch64-qemu-virt"]
 
 # pkvm platform
 aarch64_crosvm_virt = [
@@ -126,7 +115,7 @@ ksignal.workspace = true
 kcore.workspace = true
 kapi.workspace = true
 
-unittest = {workspace = true, optional = true}
+unittest = { workspace = true, optional = true }
 
 [dependencies.aarch64-qemu-virt]
 workspace = true
@@ -162,4 +151,3 @@ features = ["fp-simd", "rtc"]
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]
 all-features = true
-

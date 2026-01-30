@@ -5,7 +5,7 @@
 // This file has been modified by KylinSoft on 2025.
 //
 
-use alloc::vec::Vec;
+use alloc::vec;
 
 use khal::time::{TimeValue, wall_time};
 use tee_raw_sys::{
@@ -29,35 +29,32 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
     // Get current session context
     let uuid = with_tee_session_ctx(|ctx| Ok(ctx.clnt_id.uuid))?;
 
-    // Initialize time variable
-    let mut time_result: TeeResult<TeeTime> = Err(TEE_ERROR_BAD_PARAMETERS);
-
     // Get time based on category
-    match cat {
+    let time_result = match cat {
         0 => {
             // UTEE_TIME_CAT_SYSTEM
             let sys_time = tee_time_get_sys_time();
-            time_result = Ok(TeeTime {
+            Ok(TeeTime {
                 seconds: sys_time.as_secs() as u32,
                 millis: sys_time.subsec_millis(),
-            });
+            })
         }
         1 => {
             // UTEE_TIME_CAT_TA_PERSISTENT
-            time_result = tee_time_get_ta_time(&uuid);
+            tee_time_get_ta_time(&uuid)
         }
         2 => {
             // UTEE_TIME_CAT_REE
             let ree_time = tee_time_get_ree_time();
-            time_result = Ok(TeeTime {
+            Ok(TeeTime {
                 seconds: ree_time.as_secs() as u32,
                 millis: ree_time.subsec_millis(),
-            });
+            })
         }
         _ => {
             return Err(TEE_ERROR_BAD_PARAMETERS);
         }
-    }
+    };
 
     // Handle time retrieval result
     match time_result {
@@ -102,7 +99,7 @@ struct TeeTaTimeOffs {
 
 // Global time offset storage - using spin::Mutex for thread safety
 use spin::Mutex;
-static TEE_TIME_OFFS: Mutex<Option<Vec<TeeTaTimeOffs>>> = Mutex::new(None);
+static TEE_TIME_OFFS: Mutex<Option<vec::Vec<TeeTaTimeOffs>>> = Mutex::new(None);
 
 // Helper function: compare UUIDs
 fn uuid_equal(uuid1: &TEE_UUID, uuid2: &TEE_UUID) -> bool {
@@ -159,15 +156,14 @@ fn tee_time_ta_set_offs(uuid: &TEE_UUID, offs: &TeeTime, positive: bool) -> TeeR
         });
     } else {
         // Initialize vector and add first entry
-        let mut new_offsets = Vec::new();
-        new_offsets.push(TeeTaTimeOffs {
+        let new_offsets = vec![TeeTaTimeOffs {
             uuid: *uuid,
             offs: TeeTime {
                 seconds: offs.seconds,
                 millis: offs.millis,
             },
             positive,
-        });
+        }];
         *offs_guard = Some(new_offsets);
     }
 
@@ -197,7 +193,7 @@ pub fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
             return Err(TEE_ERROR_OVERFLOW);
         }
 
-        TimeValue::new(final_seconds, final_millis as u32 * 1_000_000)
+        TimeValue::new(final_seconds, final_millis * 1_000_000)
     } else {
         // Execute subtraction
         let mut seconds_diff = t.as_secs().saturating_sub(offs.seconds as u64);
@@ -231,7 +227,7 @@ pub fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult {
     }
 
     let t = tee_time_get_sys_time();
-    let time_value = TimeValue::new(time.seconds as u64, time.millis as u32 * 1_000_000);
+    let time_value = TimeValue::new(time.seconds as u64, time.millis * 1_000_000);
 
     if t.as_secs() < time_value.as_secs()
         || (t.as_secs() == time_value.as_secs() && t.subsec_millis() < time_value.subsec_millis())
@@ -274,7 +270,7 @@ pub fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
     let delay_seconds = milliseconds_delay / 1000;
     let delay_millis = milliseconds_delay % 1000;
 
-    let delay_duration = TimeValue::new(delay_seconds as u64, delay_millis as u32 * 1_000_000);
+    let delay_duration = TimeValue::new(delay_seconds as u64, delay_millis * 1_000_000);
 
     let end_time = TimeValue::from_nanos(
         (start_time.as_nanos() + delay_duration.as_nanos())

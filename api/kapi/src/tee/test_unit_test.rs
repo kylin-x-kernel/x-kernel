@@ -1,13 +1,14 @@
-use crate::{
+use unittest::{
     run_tests,
-    tee::{
-        tee_session::tests_tee_session::TEST_TEE_SESSION,
-        test::test_framework::{TestRunner, tests_failed},
-        user_access::tests_user_access::TEST_USER_ACCESS,
-    },
+    test_framework::{TestRunner, tests_failed},
 };
 
-pub fn tee_test_unit() {
+use crate::tee::{
+    tee_session::tests_tee_session::TEST_TEE_SESSION,
+    user_access::tests_user_access::TEST_USER_ACCESS,
+};
+
+pub fn tee_unit_test() {
     let mut runner = TestRunner::new();
     // Here you would register and run your unit tests
     run_tests!(runner, [TEST_TEE_SESSION, TEST_USER_ACCESS,]);

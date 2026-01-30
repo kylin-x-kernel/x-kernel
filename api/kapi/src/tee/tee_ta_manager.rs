@@ -46,9 +46,9 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     let mut message = Vec::with_capacity(4 + encoded.len());
     message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
     message.extend_from_slice(&encoded);
-    let mut src = message.as_slice();
+    let src = message.as_slice();
     socket
-        .send(&mut src, SendOptions::default())
+        .send(src, SendOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Receive response from dest TA
@@ -58,7 +58,7 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
         .recv(&mut dst, RecvOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
     let (resp, _): (TeeResponse, _) =
-        bincode::decode_from_slice(&dst, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+        bincode::decode_from_slice(dst, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
     match resp {
         TeeResponse::OpenSession { session_id, result } => match result {
             TEE_SUCCESS => with_tee_ta_ctx_mut(|ctx| {
@@ -68,9 +68,9 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
                 ctx.session_dispatch_irq += 1;
                 Ok(dispatch_irq)
             }),
-            _ => return Err(result),
+            _ => Err(result),
         },
-        _ => return Err(TEE_ERROR_GENERIC),
+        _ => Err(TEE_ERROR_GENERIC),
     }
 }
 
@@ -91,9 +91,9 @@ pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     let mut message = Vec::with_capacity(4 + encoded.len());
     message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
     message.extend_from_slice(&encoded);
-    let mut src = message.as_slice();
+    let src = message.as_slice();
     socket
-        .send(&mut src, SendOptions::default())
+        .send(src, SendOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
 
     Ok(())
@@ -102,7 +102,7 @@ pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
 pub fn tee_ta_invoke_command(
     sess_id: SessionIdentity,
     cmd_id: u32,
-    usr_param: *mut utee_params,
+    _usr_param: *mut utee_params,
 ) -> TeeResult {
     // Connect to dest TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(
@@ -122,9 +122,9 @@ pub fn tee_ta_invoke_command(
     let mut message = Vec::with_capacity(4 + encoded.len());
     message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
     message.extend_from_slice(&encoded);
-    let mut src = message.as_slice();
+    let src = message.as_slice();
     socket
-        .send(&mut src, SendOptions::default())
+        .send(src, SendOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Receive response from dest TA
@@ -134,9 +134,9 @@ pub fn tee_ta_invoke_command(
         .recv(&mut dst, RecvOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
     let (resp, _): (TeeResponse, _) =
-        bincode::decode_from_slice(&dst, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+        bincode::decode_from_slice(dst, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
     match resp {
-        TeeResponse::InvokeCommand { params, result } => match result {
+        TeeResponse::InvokeCommand { params: _, result } => match result {
             TEE_SUCCESS => Ok(()),
             _ => Err(result),
         },
