@@ -105,6 +105,7 @@ khal.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
 ksync.workspace = true
+kpoll.workspace = true
 ktask.workspace = true
 cfg-if.workspace = true
 linkme.workspace = true

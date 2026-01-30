@@ -76,12 +76,28 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(doc_cfg)]
 
+#[cfg(feature = "unittest")]
+#[macro_use]
+extern crate log;
+
 pub use kspin as spin;
 
 mod mutex;
 mod rwlock;
 mod semaphore;
 mod util;
+
+#[cfg(feature = "unittest")]
+pub mod test_mutex;
+#[cfg(feature = "unittest")]
+pub mod test_rwlock;
+#[cfg(feature = "unittest")]
+pub mod test_semaphore;
+#[cfg(feature = "unittest")]
+pub mod test_unit_test;
+
+#[cfg(feature = "unittest")]
+pub use test_unit_test::ksync_unit_test;
 
 #[cfg(feature = "stats")]
 pub use self::mutex::MutexStats;

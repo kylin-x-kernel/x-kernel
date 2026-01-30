@@ -13,10 +13,13 @@ description = "x-kernel synchronization primitives"
 default = []
 watchdog = ["dep:khal"]
 stats = []
+unittest = ["dep:unittest", "dep:log"]
 
 [dependencies]
 ktask.workspace = true
 event-listener.workspace = true
 kspin.workspace = true
 lock_api.workspace = true
-khal = { workspace = true, optional = true}
+khal = { workspace = true, optional = true }
+unittest = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
