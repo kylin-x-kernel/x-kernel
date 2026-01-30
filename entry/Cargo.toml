@@ -22,7 +22,7 @@ kernel = [
 
 tee = ["kapi/tee", "kcore/tee"]
 smp = ["kfeat/smp"]
-test = ["unittest", "kapi/unittest"]
+unittest = ["dep:unittest"]
 
 # Stubs
 pci = ["kfeat/bus-pci"]
@@ -40,7 +40,6 @@ qemu = [
     "kfeat/fs-times",
     "kapi/dev-log",
     "pci",
-    "test",
     "tee",
 ]
 

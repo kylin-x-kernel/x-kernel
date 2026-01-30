@@ -35,6 +35,13 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
   endif
 endif
 
+ifeq ($(UNITTEST), y)
+  RUSTFLAGS += --cfg unittest --check-cfg cfg(unittest)
+  APP_FEAT += unittest
+else
+  RUSTFLAGS += --check-cfg cfg(unittest)
+endif
+
 _cargo_build: oldconfig
 	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME)\n"
 	$(call cargo_build,$(APP),$(KFEAT) $(APP_FEAT))

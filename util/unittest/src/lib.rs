@@ -10,7 +10,7 @@ pub mod test_framework;
 pub mod test_framework_basic;
 
 // Re-export the def_test macro from unittest-macros crate
-pub use unittest_macros::def_test;
+pub use macros::def_test;
 
 // Re-export commonly used types
 pub use test_framework::{TestDescriptor, TestRunner, TestStats, Testable};

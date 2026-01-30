@@ -47,6 +47,7 @@ TARGET_DIR ?= $(PWD)/target
 EXTRA_CONFIG ?=
 OUT_CONFIG ?= $(PWD)/.platconfig.toml
 UIMAGE ?= n
+export UNITTEST ?= n
 
 # App options
 A := $(PWD)/entry

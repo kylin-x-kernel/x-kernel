@@ -9,7 +9,11 @@
 use alloc::{boxed::Box, vec};
 use core::mem::size_of;
 
+use tee_raw_sys::*;
 use tee_raw_sys::libc_compat::size_t;
+use osvm::*;
+use core::mem::MaybeUninit;
+use core::mem::transmute;
 
 use super::TeeResult;
 

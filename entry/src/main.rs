@@ -14,6 +14,9 @@ extern crate kruntime;
 
 use alloc::{borrow::ToOwned, vec::Vec};
 
+#[cfg(feature = "unittest")]
+mod unittest_simple;
+
 use kfs::FS_CONTEXT;
 
 mod entry;
@@ -31,10 +34,8 @@ fn main() {
         .collect::<Vec<_>>();
     let envs = [];
 
-    #[cfg(feature = "test")]
-    {
-        unittest::test_run();
-    }
+    #[cfg(feature = "unittest")]
+    unittest::test_run();
 
     let exit_code = entry::run_initproc(&args, &envs);
     info!("Init process exited with code: {exit_code:?}");
@@ -47,15 +48,6 @@ fn main() {
         .filesystem()
         .flush()
         .expect("Failed to flush rootfs");
-}
-
-#[unittest::def_test]
-fn test_example() -> unittest::TestResult {
-    let a = 2 + 2;
-    if a != 4 {
-        return unittest::TestResult::Failed;
-    }
-    unittest::TestResult::Ok
 }
 
 #[cfg(feature = "aarch64_crosvm_virt")]

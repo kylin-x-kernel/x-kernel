@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 log = "0.4"
-unittest-macros = { path = "../unittest-macros" }
+macros = { path = "../macros" }
