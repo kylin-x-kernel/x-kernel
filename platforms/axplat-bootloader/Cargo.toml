@@ -1,0 +1,8 @@
+[package]
+name = "axplat-bootloader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uefi = { version = "0.36.1", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
+log = "0.4"

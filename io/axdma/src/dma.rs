@@ -69,11 +69,7 @@ impl DmaAllocator {
                 #[cfg(feature = "sev")]
                 // For SEV, DMA memory must be shared (not encrypted)
                 let flags = flags | MappingFlags::SHARED;
-                self.update_flags(
-                    vaddr,
-                    num_pages,
-                    flags,
-                )?;
+                self.update_flags(vaddr, num_pages, flags)?;
                 self.alloc
                     .add_region(vaddr_raw, expand_size)
                     .inspect_err(|e| error!("add memory fail: {e:?}"))?;
@@ -94,11 +90,7 @@ impl DmaAllocator {
         #[cfg(feature = "sev")]
         // For SEV, DMA memory must be shared (not encrypted)
         let flags = flags | MappingFlags::SHARED;
-        self.update_flags(
-            vaddr,
-            num_pages,
-            flags,
-        )?;
+        self.update_flags(vaddr, num_pages, flags)?;
         Ok(DMAInfo {
             cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
             bus_addr: virt_to_bus(vaddr),
@@ -124,7 +116,7 @@ impl DmaAllocator {
         if layout.size() >= PAGE_SIZE_4K {
             let num_pages = layout_pages(&layout);
             let virt_raw = dma.cpu_addr.as_ptr() as usize;
-            use core::sync::atomic::{fence, Ordering};
+            use core::sync::atomic::{Ordering, fence};
 
             let size = num_pages * PAGE_SIZE_4K;
             let vaddr = virt_raw as *mut u8;

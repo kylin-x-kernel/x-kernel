@@ -1,5 +1,7 @@
-use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use memaddr::{PhysAddr, VirtAddr};
 pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;

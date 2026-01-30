@@ -192,7 +192,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 {
                     dma_share(paddr, pages * 0x1000);
                 }
-                    // bus_addr is the physical address for DMA
+                // bus_addr is the physical address for DMA
                 (paddr, ptr)
             }
             Err(e) => {
@@ -229,8 +229,10 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> PhysAddr {
         #[cfg(any(feature = "sev", feature = "crosvm"))]
         {
-            use core::alloc::Layout;
-            use core::sync::atomic::{fence, Ordering};
+            use core::{
+                alloc::Layout,
+                sync::atomic::{Ordering, fence},
+            };
 
             let len = buffer.len();
             let aligned_size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -278,8 +280,10 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection) {
         #[cfg(any(feature = "sev", feature = "crosvm"))]
         {
-            use core::alloc::Layout;
-            use core::sync::atomic::{fence, Ordering};
+            use core::{
+                alloc::Layout,
+                sync::atomic::{Ordering, fence},
+            };
 
             let len = buffer.len();
             let aligned_size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -289,11 +293,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             if direction != BufferDirection::DriverToDevice {
                 let shared_ptr = p2v(paddr.into()).as_ptr();
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        shared_ptr,
-                        buffer.as_ptr() as *mut u8,
-                        len,
-                    );
+                    core::ptr::copy_nonoverlapping(shared_ptr, buffer.as_ptr() as *mut u8, len);
                 }
                 // Ensure the copy is not optimized away and create a final
                 // ordering point before we proceed.

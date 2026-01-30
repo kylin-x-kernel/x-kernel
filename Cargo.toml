@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["entry"]
+members = ["entry", "platforms/axplat-bootloader"]
 exclude = []
 
 [workspace.package]

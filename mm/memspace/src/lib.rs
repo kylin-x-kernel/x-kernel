@@ -92,12 +92,13 @@ pub fn init_memory_management() {
     debug!("kernel address space init OK: {:#x?}", kernel_layout);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
     let mut root = kernel_page_table_root();
-    #[cfg(feature = "sev")]{
+    #[cfg(feature = "sev")]
+    {
         let cbit_pos = platconfig::plat::SEV_CBIT_POS;
         if cbit_pos != 0 {
             root = PhysAddr::from(root.as_usize() | (1usize << cbit_pos));
-            debug!("root: {:?}",root);
-        } 
+            debug!("root: {:?}", root);
+        }
     }
     unsafe { khal::asm::write_kernel_page_table(root) };
     // flush all TLB
