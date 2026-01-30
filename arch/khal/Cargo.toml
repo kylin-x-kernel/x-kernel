@@ -23,6 +23,8 @@ crosvm = []
 
 ipi = []
 irq = []
+khal_test = ["dep:unittest"]
+unittest = ["khal_test"]
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
@@ -39,6 +41,7 @@ memaddr.workspace = true
 page_table = { workspace = true, optional = true }
 percpu.workspace = true
 fdt-parser = "0.4"
+unittest = { workspace = true, optional = true }
 
 
 [build-dependencies]

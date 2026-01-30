@@ -55,3 +55,38 @@ cfg_if::cfg_if! {
         pub type PageTableMut<'a> = page_table::loongarch64::LA64PageTableMut<'a, PagingHandlerImpl>;
     }
 }
+
+#[cfg(all(feature = "khal_test", feature = "paging"))]
+#[allow(missing_docs)]
+pub mod tests_paging {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::MappingFlags;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_mapping_flags_combine() {
+            let flags = MappingFlags::READ | MappingFlags::WRITE;
+            assert!(flags.contains(MappingFlags::READ));
+            assert!(flags.contains(MappingFlags::WRITE));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_mapping_flags_empty() {
+            let flags = MappingFlags::empty();
+            assert!(flags.is_empty());
+        }
+    }
+
+    tests_name! {
+        TEST_PAGING;
+        test_mapping_flags_combine,
+        test_mapping_flags_empty,
+    }
+}
