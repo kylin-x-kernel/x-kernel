@@ -72,9 +72,9 @@ pub fn sys_rt_sigprocmask(
 
         // Apply the mask operation based on 'how' parameter
         let set = match how as u32 {
-            SIG_BLOCK => old | set,          // Add signals to the mask
-            SIG_UNBLOCK => old & !set,       // Remove signals from the mask
-            SIG_SETMASK => set,              // Replace the entire mask
+            SIG_BLOCK => old | set,    // Add signals to the mask
+            SIG_UNBLOCK => old & !set, // Remove signals from the mask
+            SIG_SETMASK => set,        // Replace the entire mask
             _ => return Err(KError::InvalidInput),
         };
 

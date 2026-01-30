@@ -119,7 +119,9 @@ pub mod nmi {
 
 #[cfg(feature = "pmu")]
 pub mod pmu {
-    pub use kplat::perf::{PerfCb, on_overflow as dispatch_irq_overflows, reg_cb as register_overflow_handler};
+    pub use kplat::perf::{
+        PerfCb, on_overflow as dispatch_irq_overflows, reg_cb as register_overflow_handler,
+    };
 }
 /// Initializes the platform and boot argument.
 /// This function should be called as early as possible.

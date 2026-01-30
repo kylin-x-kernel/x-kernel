@@ -271,8 +271,8 @@ pub fn sys_pwritev2(
 /// Helper for sendfile and copy_file_range operations
 /// Abstracts both fixed position (via offset pointer) and current position reads/writes
 enum SendFile {
-    Direct(Arc<dyn FileLike>),      // Use current file position
-    Offset(Arc<File>, *mut u64),    // Use fixed offset from user space
+    Direct(Arc<dyn FileLike>),   // Use current file position
+    Offset(Arc<File>, *mut u64), // Use fixed offset from user space
 }
 
 impl SendFile {
@@ -317,7 +317,7 @@ impl SendFile {
 /// Core implementation for sendfile/splice/copy_file_range
 /// Copies data from source to destination with buffering
 fn do_send(mut src: SendFile, mut dst: SendFile, len: usize) -> KResult<usize> {
-    let mut buf = vec![0; 0x1000];  // 4KB intermediate buffer
+    let mut buf = vec![0; 0x1000]; // 4KB intermediate buffer
     let mut total_written = 0;
     let mut remaining = len;
 
@@ -334,13 +334,13 @@ fn do_send(mut src: SendFile, mut dst: SendFile, len: usize) -> KResult<usize> {
             Err(e) => return Err(e),
         };
         if bytes_read == 0 {
-            break;  // EOF reached
+            break; // EOF reached
         }
 
         // Write the data to destination
         let bytes_written = dst.write(&buf[..bytes_read])?;
         if bytes_written < bytes_read {
-            break;  // Destination full or error
+            break; // Destination full or error
         }
 
         total_written += bytes_written;

@@ -229,10 +229,9 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
         TargetCpu::Specific(cpu_id) => {
             let affinity = Affinity::from_mpidr(cpu_id as u64);
             let target = SGITarget::list([affinity]);
-            GIC.lock().cpu_interface().send_sgi(
-                IntId::sgi(interrupt_id as u32),
-                target,
-            );
+            GIC.lock()
+                .cpu_interface()
+                .send_sgi(IntId::sgi(interrupt_id as u32), target);
         }
         TargetCpu::AllButSelf { .. } => {
             GIC.lock()

@@ -1,6 +1,5 @@
 //! Phytium FXMAC network driver adapter.
-use alloc::{boxed::Box, collections::VecDeque, vec};
-use alloc::vec::Vec;
+use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 use core::ptr::NonNull;
 
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};

@@ -13,7 +13,7 @@ use kfs::FS_CONTEXT;
 use crate::{mm::vm_load_string, vfs::MemoryFs};
 
 /// Mount a filesystem at the specified target path
-/// 
+///
 /// Currently only supports tmpfs (temporary memory-based filesystem).
 /// The source is loaded from user memory but not validated since tmpfs doesn't use source device names.
 pub fn sys_mount(
@@ -45,14 +45,14 @@ pub fn sys_mount(
 }
 
 /// Unmount a filesystem at the specified target path
-/// 
+///
 /// Removes the filesystem mounted at the target path and detaches it from the directory tree.
 /// The mounted filesystem must be empty or the unmount may fail depending on the filesystem implementation.
 pub fn sys_umount2(target: *const c_char, _flags: i32) -> KResult<isize> {
     // Load target path from user memory
     let target = vm_load_string(target)?;
     debug!("sys_umount2 <= target: {target:?}");
-    
+
     // Resolve the mount point path and detach the filesystem
     let target = FS_CONTEXT.lock().resolve(target)?;
     target.unmount()?;

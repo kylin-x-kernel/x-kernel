@@ -38,38 +38,38 @@ fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32))
     let flags = flags as u32;
     let mut options = OpenOptions::new();
     options.mode(mode).user(uid, gid);
-    
+
     // Extract access mode (read-only, write-only, or read-write) from the lower 2 bits
     match flags & 0b11 {
         O_RDONLY => options.read(true),
         O_WRONLY => options.write(true),
-        _ => options.read(true).write(true),  // O_RDWR or unspecified defaults to read-write
+        _ => options.read(true).write(true), // O_RDWR or unspecified defaults to read-write
     };
-    
+
     // Process individual flag bits
     if flags & O_APPEND != 0 {
-        options.append(true);  // Append writes to end of file
+        options.append(true); // Append writes to end of file
     }
     if flags & O_TRUNC != 0 {
-        options.truncate(true);  // Truncate file to zero length
+        options.truncate(true); // Truncate file to zero length
     }
     if flags & O_CREAT != 0 {
-        options.create(true);  // Create file if it doesn't exist
+        options.create(true); // Create file if it doesn't exist
     }
     if flags & O_PATH != 0 {
-        options.path(true);  // Open for pathname operations only
+        options.path(true); // Open for pathname operations only
     }
     if flags & O_EXCL != 0 {
-        options.create_new(true);  // Fail if file exists (requires O_CREAT)
+        options.create_new(true); // Fail if file exists (requires O_CREAT)
     }
     if flags & O_DIRECTORY != 0 {
-        options.directory(true);  // Ensure path is a directory
+        options.directory(true); // Ensure path is a directory
     }
     if flags & O_NOFOLLOW != 0 {
-        options.no_follow(true);  // Don't follow symbolic links
+        options.no_follow(true); // Don't follow symbolic links
     }
     if flags & O_DIRECT != 0 {
-        options.direct(true);  // Direct I/O, bypassing cache
+        options.direct(true); // Direct I/O, bypassing cache
     }
     options
 }

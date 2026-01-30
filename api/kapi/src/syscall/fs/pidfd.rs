@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Create a process file descriptor (pidfd) for the specified process
-/// 
+///
 /// A pidfd is a file descriptor that refers to a process and can be used to perform
 /// operations on that process without holding a reference to the process object.
 /// Flags must be 0 (no additional options currently supported).
@@ -37,7 +37,7 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
 }
 
 /// Get a duplicate of a file descriptor from another process using its pidfd
-/// 
+///
 /// This allows access to a file descriptor in another process by first opening
 /// that process with pidfd_open, then using this syscall to duplicate one of its fds.
 /// The duplicated fd is added to the current process's file descriptor table.
@@ -63,7 +63,7 @@ pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize>
 }
 
 /// Send a signal to the process referenced by the pidfd
-/// 
+///
 /// This allows sending signals to processes using their process file descriptors.
 /// The signal can optionally carry additional data via SignalInfo.
 /// Flags must be 0 (no additional options currently supported).
