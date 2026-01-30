@@ -182,10 +182,11 @@ pub use kernel::*;
 
 #[cfg(feature = "unittest")]
 pub mod tests_guard_types {
-    use super::*;
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+
+    use super::*;
 
     test_fn! {
         using TestResult;

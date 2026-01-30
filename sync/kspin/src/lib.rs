@@ -90,16 +90,15 @@
 
 mod guard;
 mod lock;
-#[cfg(test)]
-mod tests;
 #[cfg(feature = "unittest")]
 pub mod test_unit_test;
+#[cfg(test)]
+mod tests;
 
 mod base;
 
 pub use guard::{BaseGuard, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave};
 pub use lock::{SpinLock, SpinLockGuard};
-
 #[cfg(feature = "unittest")]
 pub use test_unit_test::kspin_unit_test;
 

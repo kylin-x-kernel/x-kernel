@@ -446,18 +446,19 @@ mod tests {
 #[cfg(feature = "unittest")]
 pub mod tests_base {
     extern crate alloc;
-    
-    use super::*;
-    use crate::NoOp;
+
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+
+    use super::*;
+    use crate::NoOp;
 
     type TestBaseLock<T> = BaseSpinLock<NoOp, T>;
 
     test_fn! {
         using TestResult;
-        
+
         fn test_base_spinlock_nested_scope() {
             let lock = TestBaseLock::new(0);
             {
@@ -474,7 +475,7 @@ pub mod tests_base {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_base_spinlock_guard_drop() {
             let lock = TestBaseLock::new(100);
             {
@@ -490,7 +491,7 @@ pub mod tests_base {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_base_spinlock_get_mut() {
             let mut lock = TestBaseLock::new(42);
             {
@@ -503,7 +504,7 @@ pub mod tests_base {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_base_spinlock_into_inner_ownership() {
             use alloc::vec::Vec;
             let mut v = Vec::new();
@@ -520,7 +521,7 @@ pub mod tests_base {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_base_spinlock_try_lock_sequential() {
             let lock = TestBaseLock::new(0);
             {
@@ -545,4 +546,3 @@ pub mod tests_base {
         test_base_spinlock_try_lock_sequential,
     );
 }
-

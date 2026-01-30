@@ -36,7 +36,6 @@ pub trait BaseGuard {
 mod arch;
 mod types;
 
-pub use types::{IrqSave, NoOp, NoPreempt, NoPreemptIrqSave};
-
 #[cfg(feature = "unittest")]
 pub use types::tests_guard_types;
+pub use types::{IrqSave, NoOp, NoPreempt, NoPreemptIrqSave};

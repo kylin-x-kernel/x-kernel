@@ -239,18 +239,19 @@ impl<G: BaseGuard, T: ?Sized> Drop for SpinLockGuard<'_, G, T> {
 #[cfg(feature = "unittest")]
 pub mod tests_lock {
     extern crate alloc;
-    
-    use super::*;
-    use crate::NoOp;
+
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+
+    use super::*;
+    use crate::NoOp;
 
     type TestSpinLock<T> = SpinLock<NoOp, T>;
 
     test_fn! {
         using TestResult;
-        
+
         fn test_spinlock_multiple_locks() {
             let lock = TestSpinLock::new(0);
             for i in 0..10 {
@@ -263,7 +264,7 @@ pub mod tests_lock {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_spinlock_is_locked_after_lock() {
             let lock = TestSpinLock::new(42);
             let _guard = lock.lock();
@@ -280,7 +281,7 @@ pub mod tests_lock {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_spinlock_is_locked_after_drop() {
             let lock = TestSpinLock::new(42);
             {
@@ -294,7 +295,7 @@ pub mod tests_lock {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_spinlock_complex_state_mutation() {
             use alloc::string::String;
             let lock = TestSpinLock::new(String::new());
@@ -312,12 +313,12 @@ pub mod tests_lock {
 
     test_fn! {
         using TestResult;
-        
+
         fn test_spinlock_try_lock_after_explicit_drop() {
             let lock = TestSpinLock::new(0);
             let guard = lock.lock();
             drop(guard);
-            
+
             // Should be able to try_lock after explicit drop
             let result = lock.try_lock();
             assert!(result.is_some());
