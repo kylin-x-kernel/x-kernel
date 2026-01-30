@@ -5,7 +5,7 @@
 // This file has been modified by KylinSoft on 2025.
 //
 
-use alloc::vec::{self, Vec};
+use alloc::vec;
 
 use khal::time::{TimeValue, wall_time};
 use tee_raw_sys::{
