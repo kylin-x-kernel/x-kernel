@@ -113,6 +113,7 @@ kprocess.workspace = true
 ksignal.workspace = true
 kcore.workspace = true
 kapi.workspace = true
+alloc-engine.workspace = true
 
 unittest = { workspace = true, optional = true }
 

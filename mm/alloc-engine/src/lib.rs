@@ -15,6 +15,11 @@
 #![no_std]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
+#[allow(unused_imports)]
+#[macro_use]
+extern crate log;
+extern crate alloc;
+
 #[cfg(feature = "bitmap")]
 mod bitmap;
 #[cfg(feature = "bitmap")]
@@ -38,6 +43,9 @@ use core::{alloc::Layout, ptr::NonNull};
 use kerrno::KError;
 #[cfg(feature = "tlsf")]
 pub use tlsf::TlsfByteAllocator;
+
+#[cfg(feature = "alloc_engine_test")]
+pub mod test_unit_test;
 
 /// The error type used for allocation.
 #[derive(Debug)]
