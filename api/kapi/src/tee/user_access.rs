@@ -180,14 +180,11 @@ pub(crate) fn exit_user_access() {
 
 #[cfg(feature = "tee_test")]
 pub mod tests_user_access {
-    //-------- test framework import --------
-    //-------- local tests import --------
-    use super::*;
-    use crate::{
-        assert_eq,
-        tee::test::{test_framework::TestDescriptor, test_framework_basic::TestResult},
-        test_fn, tests_name,
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+
+    use super::*;
 
     test_fn! {
         using TestResult;

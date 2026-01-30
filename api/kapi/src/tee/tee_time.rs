@@ -5,7 +5,7 @@
 // This file has been modified by KylinSoft on 2025.
 //
 
-use alloc::vec::Vec;
+use alloc::vec::{self, Vec};
 
 use khal::time::{TimeValue, wall_time};
 use tee_raw_sys::{
@@ -159,15 +159,14 @@ fn tee_time_ta_set_offs(uuid: &TEE_UUID, offs: &TeeTime, positive: bool) -> TeeR
         });
     } else {
         // Initialize vector and add first entry
-        let mut new_offsets = Vec::new();
-        new_offsets.push(TeeTaTimeOffs {
+        let mut new_offsets = vec![TeeTaTimeOffs {
             uuid: *uuid,
             offs: TeeTime {
                 seconds: offs.seconds,
                 millis: offs.millis,
             },
             positive,
-        });
+        }];
         *offs_guard = Some(new_offsets);
     }
 
@@ -197,7 +196,7 @@ pub fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
             return Err(TEE_ERROR_OVERFLOW);
         }
 
-        TimeValue::new(final_seconds, final_millis as u32 * 1_000_000)
+        TimeValue::new(final_seconds, final_millis * 1_000_000)
     } else {
         // Execute subtraction
         let mut seconds_diff = t.as_secs().saturating_sub(offs.seconds as u64);
@@ -231,7 +230,7 @@ pub fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult {
     }
 
     let t = tee_time_get_sys_time();
-    let time_value = TimeValue::new(time.seconds as u64, time.millis as u32 * 1_000_000);
+    let time_value = TimeValue::new(time.seconds as u64, time.millis * 1_000_000);
 
     if t.as_secs() < time_value.as_secs()
         || (t.as_secs() == time_value.as_secs() && t.subsec_millis() < time_value.subsec_millis())
@@ -274,7 +273,7 @@ pub fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
     let delay_seconds = milliseconds_delay / 1000;
     let delay_millis = milliseconds_delay % 1000;
 
-    let delay_duration = TimeValue::new(delay_seconds as u64, delay_millis as u32 * 1_000_000);
+    let delay_duration = TimeValue::new(delay_seconds as u64, delay_millis * 1_000_000);
 
     let end_time = TimeValue::from_nanos(
         (start_time.as_nanos() + delay_duration.as_nanos())

@@ -25,6 +25,8 @@ mod tee_property;
 mod tee_session;
 mod tee_ta_manager;
 mod tee_time;
+#[cfg(feature = "tee_test")]
+mod tee_unit_test;
 mod user_access;
 mod uuid;
 
