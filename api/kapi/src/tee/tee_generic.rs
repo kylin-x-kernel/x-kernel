@@ -49,9 +49,9 @@ pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
     let mut message = Vec::with_capacity(4 + encoded.len());
     message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
     message.extend_from_slice(&encoded);
-    let mut src = message.as_slice();
+    let src = message.as_slice();
     socket
-        .send(&mut src, SendOptions::default())
+        .send(src, SendOptions::default())
         .map_err(|_| TEE_ERROR_GENERIC)?;
     Ok(())
 }

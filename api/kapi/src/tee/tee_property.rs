@@ -4,6 +4,8 @@
 //
 // This file has been created by KylinSoft on 2025.
 
+#![allow(dead_code)]
+
 use alloc::{boxed::Box, ffi::CString, vec};
 use core::{
     ffi::{c_uint, c_ulong, c_void},
@@ -53,27 +55,27 @@ impl PropertySet {
 }
 
 enum PropType {
-    BOOL,        // bool
+    Bool,        // bool
     U32,         // uint32_t
-    UUID,        // TEE_UUID
-    IDENTITY,    // TEE_Identity
-    STRING,      // zero terminated string of char
-    BINARYBLOCK, // zero terminated base64 coded string
+    Uuid,        // TEE_UUID
+    Identity,    // TEE_Identity
+    String,      // zero terminated string of char
+    Binaryblock, // zero terminated base64 coded string
     U64,         // uint64_t
-    INVALID,     // invalid value
+    Invalid,     // invalid value
 }
 
 impl PropType {
     fn as_raw(&self) -> c_uint {
         match self {
-            PropType::BOOL => 0,
+            PropType::Bool => 0,
             PropType::U32 => 1,
-            PropType::UUID => 2,
-            PropType::IDENTITY => 3,
-            PropType::STRING => 4,
-            PropType::BINARYBLOCK => 5,
+            PropType::Uuid => 2,
+            PropType::Identity => 3,
+            PropType::String => 4,
+            PropType::Binaryblock => 5,
             PropType::U64 => 6,
-            PropType::INVALID => 7,
+            PropType::Invalid => 7,
         }
     }
 }
@@ -88,7 +90,7 @@ impl TEEProps for ClientIdentity {
     }
 
     fn prop_type(&self) -> PropType {
-        PropType::IDENTITY
+        PropType::Identity
     }
 
     fn get(&self, buf: *mut c_void, blen: &mut u32) -> TeeResult {
@@ -141,7 +143,7 @@ impl TEEProps for TAAppID {
     }
 
     fn prop_type(&self) -> PropType {
-        PropType::UUID
+        PropType::Uuid
     }
 
     fn get(&self, buf: *mut c_void, blen: &mut u32) -> TeeResult {
@@ -267,7 +269,7 @@ pub fn sys_tee_scn_get_property_name_to_index(
     name_len: c_ulong,
     index: *mut c_uint,
 ) -> TeeResult {
-    if name.is_null() || name_len <= 0 {
+    if name_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 

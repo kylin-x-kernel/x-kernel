@@ -24,7 +24,7 @@ impl TestResult {
 }
 
 // Test statistics
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct TestStats {
     pub total: usize,
     pub passed: usize,

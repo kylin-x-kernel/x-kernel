@@ -4,6 +4,8 @@
 //
 // This file has been created by KylinSoft on 2025.
 
+#![allow(dead_code)]
+
 use core::fmt;
 
 use hex;
