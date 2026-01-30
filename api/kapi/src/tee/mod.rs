@@ -1,5 +1,3 @@
-use core::arch::asm;
-
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
 use tee_raw_sys::{TEE_ERROR_NOT_SUPPORTED, TeeTime};
