@@ -112,6 +112,7 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
     /// This function provides no synchronization guarantees and so its result should be considered 'out of date'
     /// the instant it is called. Do not use it for synchronization purposes. However, it may be useful as a heuristic.
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn is_locked(&self) -> bool {
         cfg_if::cfg_if! {
             if #[cfg(feature = "smp")] {
@@ -162,6 +163,7 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
     /// thread. However, this can be useful in some instances for exposing the
     /// lock to FFI that doesn't know how to deal with RAII.
     #[inline(always)]
+    #[allow(dead_code)]
     pub unsafe fn force_unlock(&self) {
         #[cfg(feature = "smp")]
         self.lock.store(false, Ordering::Release);
