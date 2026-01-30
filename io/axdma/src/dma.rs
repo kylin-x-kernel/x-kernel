@@ -129,13 +129,11 @@ impl DmaAllocator {
             let size = num_pages * PAGE_SIZE_4K;
             let vaddr = virt_raw as *mut u8;
 
-            // ===== Phase 1: still SHARED (C=0) =====
             unsafe {
                 core::ptr::write_bytes(vaddr, 0, size);
             }
             fence(Ordering::SeqCst);
 
-            // ===== switch to private (C=1) =====
             let _ = self.update_flags(
                 va!(virt_raw),
                 num_pages,
@@ -143,16 +141,6 @@ impl DmaAllocator {
             );
             fence(Ordering::SeqCst);
 
-            // ===== Phase 2: encrypted clear =====
-            unsafe {
-                for off in (0..size).step_by(64) {
-                    core::ptr::write_volatile(
-                        vaddr.add(off) as *mut u64,
-                        0,
-                    );
-                }
-            }
-            fence(Ordering::SeqCst);
             global_allocator().dealloc_pages(virt_raw, num_pages, UsageKind::Dma);
         } else {
             self.alloc.deallocate(dma.cpu_addr, layout)
