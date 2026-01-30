@@ -20,6 +20,6 @@ pub fn tee_unit_test() {
     } else {
         warn!("!!! ALL TESTS PASSED !!!");
     }
-    
+
     warn!("********************************\n");
 }
