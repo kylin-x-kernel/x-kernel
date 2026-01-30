@@ -94,10 +94,8 @@ fn is_init_ok() -> bool {
     INITED_CPUS.load(Ordering::Acquire) == platconfig::plat::CPU_NUM
 }
 
-#[cfg(feature = "dma")]
 struct DmaPageTableImpl;
 
-#[cfg(feature = "dma")]
 #[crate_interface::impl_interface]
 impl axdma::DmaPageTableIf for DmaPageTableImpl {
     fn protect(

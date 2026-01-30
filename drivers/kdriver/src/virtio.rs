@@ -196,7 +196,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 (paddr, ptr)
             }
             Err(e) => {
-                log::error!("SEV dma_alloc failed: pages={}, error={:?}", pages, e);
+                log::error!("dma_alloc failed: pages={}, error={:?}", pages, e);
                 (0, NonNull::dangling())
             }
         }
