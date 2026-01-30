@@ -1,5 +1,4 @@
-use std::io;
-use std::path::Path;
+use std::{io, path::Path};
 
 use clap::{Parser, builder::PossibleValuesParser};
 use toml_edit::DocumentMut;

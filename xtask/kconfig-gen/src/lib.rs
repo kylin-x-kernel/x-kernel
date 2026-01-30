@@ -1,5 +1,3 @@
-#![doc = include_str!("../README.md")]
-
 mod config;
 mod output;
 mod ty;
@@ -10,10 +8,12 @@ mod tests;
 
 use toml_edit::TomlError;
 
-pub use self::config::{Config, ConfigItem};
-pub use self::output::OutputFormat;
-pub use self::ty::ConfigType;
-pub use self::value::ConfigValue;
+pub use self::{
+    config::{Config, ConfigItem},
+    output::OutputFormat,
+    ty::ConfigType,
+    value::ConfigValue,
+};
 
 /// The error type on config parsing.
 pub enum ConfigErr {

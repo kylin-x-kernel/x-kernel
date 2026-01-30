@@ -7,7 +7,7 @@
 //! This crate provides procedural macros for converting TOML format configurations
 //! to equivalent Rust constant definitions for the X-Kernel project.
 #![cfg_attr(feature = "nightly", feature(proc_macro_expand))]
-use axconfig_gen::{Config, OutputFormat};
+use kconfig_gen::{Config, OutputFormat};
 use proc_macro::{LexError, TokenStream};
 use quote::{ToTokens, quote};
 use syn::{

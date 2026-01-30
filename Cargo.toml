@@ -119,3 +119,4 @@ klogger = { path = "util/klogger" }
 backtrace = { path = "util/backtrace" }
 kerrno = { path = "util/kerrno" }
 unittest = { path = "util/unittest" }
+kconfig-gen = { path = "xtask/kconfig-gen" }
