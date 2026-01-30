@@ -7,10 +7,10 @@ use kspin::SpinNoIrq;
 use log::{debug, error};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, va};
 
-use crate::{BusAddr, DMAInfo, phys_to_bus};
+use crate::{DmaBusAddress, DMAInfo, p2b};
 
 /// Interface for updating page table flags.
-/// This breaks the cyclic dependency: axdma -> axmm -> axfs -> axdriver -> axdma
+/// This breaks the cyclic dependency: kdma -> axmm -> axfs -> axdriver -> kdma
 #[crate_interface::def_interface]
 pub trait DmaPageTableIf {
     /// Update the mapping flags for the given virtual address range.
@@ -36,7 +36,7 @@ impl DmaAllocator {
     /// It firstly tries to allocate from the coherent byte allocator. If there is no
     /// memory, it asks the global page allocator for more memory and adds it to the
     /// byte allocator.
-    pub unsafe fn alloc_coherent(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
+    pub unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
         if layout.size() >= PAGE_SIZE_4K {
             self.alloc_coherent_pages(layout)
         } else {
@@ -51,7 +51,7 @@ impl DmaAllocator {
                 let cpu_addr = va!(data.as_ptr() as usize);
                 return Ok(DMAInfo {
                     cpu_addr: data,
-                    bus_addr: virt_to_bus(cpu_addr),
+                    bus_addr: v2b(cpu_addr),
                 });
             } else {
                 if is_expanded {
@@ -93,7 +93,7 @@ impl DmaAllocator {
         self.update_flags(vaddr, num_pages, flags)?;
         Ok(DMAInfo {
             cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
-            bus_addr: virt_to_bus(vaddr),
+            bus_addr: v2b(vaddr),
         })
     }
 
@@ -112,7 +112,7 @@ impl DmaAllocator {
     }
 
     /// Gives back the allocated region to the byte allocator.
-    pub unsafe fn dealloc_coherent(&mut self, dma: DMAInfo, layout: Layout) {
+    pub unsafe fn deallocate_dma_memory(&mut self, dma: DMAInfo, layout: Layout) {
         if layout.size() >= PAGE_SIZE_4K {
             let num_pages = layout_pages(&layout);
             let virt_raw = dma.cpu_addr.as_ptr() as usize;
@@ -140,9 +140,9 @@ impl DmaAllocator {
     }
 }
 
-fn virt_to_bus(addr: VirtAddr) -> BusAddr {
+fn v2b(addr: VirtAddr) -> DmaBusAddress {
     let paddr = v2p(addr);
-    phys_to_bus(paddr)
+    p2b(paddr)
 }
 
 const fn layout_pages(layout: &Layout) -> usize {

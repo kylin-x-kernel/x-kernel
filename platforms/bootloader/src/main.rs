@@ -22,7 +22,7 @@ fn efi_main() -> Status {
         let _ = err;
     }
 
-    info!("axplat-bootloader: start");
+    info!("bootloader: start");
 
     let image_handle = uefi::boot::image_handle();
     info!("image handle = {:?}", image_handle);

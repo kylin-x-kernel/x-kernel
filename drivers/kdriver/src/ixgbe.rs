@@ -1,4 +1,4 @@
-use axdma::{BusAddr, DMAInfo, alloc_coherent, dealloc_coherent};
+use kdma::{DmaBusAddress, DMAInfo, allocate_dma_memory, deallocate_dma_memory};
 use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 use khal::mem::{p2v, v2p};
 use core::{alloc::Layout, ptr::NonNull};
@@ -8,7 +8,7 @@ pub struct IxgbeHalImpl;
 unsafe impl IxgbeHal for IxgbeHalImpl {
     fn dma_alloc(size: usize) -> (IxgbePhysAddr, NonNull<u8>) {
         let layout = Layout::from_size_align(size, 8).unwrap();
-        match unsafe { alloc_coherent(layout) } {
+        match unsafe { allocate_dma_memory(layout) } {
             Ok(dma_info) => (dma_info.bus_addr.as_u64() as usize, dma_info.cpu_addr),
             Err(_) => (0, NonNull::dangling()),
         }
@@ -18,9 +18,9 @@ unsafe impl IxgbeHal for IxgbeHalImpl {
         let layout = Layout::from_size_align(size, 8).unwrap();
         let dma_info = DMAInfo {
             cpu_addr: vaddr,
-            bus_addr: BusAddr::from(paddr as u64),
+            bus_addr: DmaBusAddress::from(paddr as u64),
         };
-        unsafe { dealloc_coherent(dma_info, layout) };
+        unsafe { deallocate_dma_memory(dma_info, layout) };
         0
     }
 

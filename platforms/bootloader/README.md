@@ -1,25 +1,25 @@
-# axplat-bootloader
+# bootloader
 
 UEFI 启动加载器（x86_64），用于加载并启动 `irq-kernel`（ELF 或 BIN）。
 
 ## 目录结构
 
-- `axplat-bootloader/`：UEFI 应用工程
-- `target/x86_64-unknown-uefi/release/axplat-bootloader.efi`
+- `bootloader/`：UEFI 应用工程
+- `target/x86_64-unknown-uefi/release/bootloader.efi`
 
 ## 构建
 
 在工作区根目录执行：
 
-- `cargo build -p axplat-bootloader --target x86_64-unknown-uefi --release`
+- `cargo build -p bootloader --target x86_64-unknown-uefi --release`
 
 生成的 EFI 文件在：
 
-- `target/x86_64-unknown-uefi/release/axplat-bootloader.efi`
+- `target/x86_64-unknown-uefi/release/bootloader.efi`
 
 ## 运行要求
 
-1. 将 `axplat-bootloader.efi` 和内核文件放在同一个 EFI FAT 分区根目录。
+1. 将 `bootloader.efi` 和内核文件放在同一个 EFI FAT 分区根目录。
 2. 内核文件名支持：
    - `\irq-kernel`
    - `\irq-kernel.bin`

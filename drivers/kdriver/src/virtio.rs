@@ -177,10 +177,10 @@ pub struct VirtIoHalImpl;
 unsafe impl VirtIoHal for VirtIoHalImpl {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
         use core::alloc::Layout;
-        // For AMD SEV, use axdma which handles SHARED flag (clears C-Bit)
+        // For AMD SEV, use kdma which handles SHARED flag (clears C-Bit)
         let size = pages * PAGE_SIZE;
         let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
-        match unsafe { axdma::alloc_coherent(layout) } {
+        match unsafe { kdma::allocate_dma_memory(layout) } {
             Ok(dma_info) => {
                 // Clear the allocated memory
                 unsafe {
@@ -207,11 +207,11 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         use core::alloc::Layout;
         let size = pages * PAGE_SIZE;
         let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
-        let dma_info = axdma::DMAInfo {
+        let dma_info = kdma::DMAInfo {
             cpu_addr: vaddr,
-            bus_addr: axdma::BusAddr::new(paddr as u64),
+            bus_addr: kdma::DmaBusAddress::new(paddr as u64),
         };
-        unsafe { axdma::dealloc_coherent(dma_info, layout) };
+        unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
         #[cfg(feature = "crosvm")]
         {
             dma_unshare(paddr as usize, pages * 0x1000);
@@ -238,9 +238,9 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             let aligned_size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let layout = Layout::from_size_align(aligned_size, PAGE_SIZE).unwrap();
 
-            // Allocate a bounce buffer using axdma (with SHARED flag)
-            let dma_info = unsafe { axdma::alloc_coherent(layout) }
-                .expect("failed to allocate shared bounce buffer via axdma");
+            // Allocate a bounce buffer using kdma (with SHARED flag)
+            let dma_info = unsafe { kdma::allocate_dma_memory(layout) }
+                .expect("failed to allocate shared bounce buffer via kdma");
             let paddr = dma_info.bus_addr.as_u64() as PhysAddr;
             let vaddr = dma_info.cpu_addr.as_ptr() as usize;
             // For crosvm, also call share_dma_buffer
@@ -306,13 +306,13 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 dma_unshare(paddr as usize, aligned_size);
             }
 
-            // Free the bounce buffer via axdma
+            // Free the bounce buffer via kdma
             let layout = Layout::from_size_align(aligned_size, PAGE_SIZE).unwrap();
-            let dma_info = axdma::DMAInfo {
+            let dma_info = kdma::DMAInfo {
                 cpu_addr: NonNull::new(p2v(paddr.into()).as_mut_ptr()).unwrap(),
-                bus_addr: axdma::BusAddr::new(paddr as u64),
+                bus_addr: kdma::DmaBusAddress::new(paddr as u64),
             };
-            unsafe { axdma::dealloc_coherent(dma_info, layout) };
+            unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
         }
     }
 }

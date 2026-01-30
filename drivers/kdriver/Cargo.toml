@@ -20,7 +20,7 @@ input = ["dep:input"]
 vsock = ["dep:vsock"]
 
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:ksync", "dep:spin"]
-sev = ["pci-mmio", "axdma/sev", "dep:hashbrown", "dep:ksync", "dep:spin"]
+sev = ["pci-mmio", "kdma/sev", "dep:hashbrown", "dep:ksync", "dep:spin"]
 
 # Enabled by features `virtio-*`
 virtio = ["dep:virtio", "dep:kalloc", "dep:khal", "dep:platconfig"]
@@ -34,8 +34,8 @@ ramdisk = ["block", "block/ramdisk"]
 bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
 sdmmc = ["block", "block/sdmmc", "dep:khal", "dep:platconfig"]
 ahci = ["block", "block/ahci", "dep:khal", "dep:platconfig"]
-# ixgbe = ["net", "net/ixgbe", "dep:axalloc", "dep:khal", "dep:axdma"]
-# fxmac = ["net", "net/fxmac", "dep:axalloc", "dep:khal", "dep:axdma"]
+# ixgbe = ["net", "net/ixgbe", "dep:axalloc", "dep:khal", "dep:kdma"]
+# fxmac = ["net", "net/fxmac", "dep:axalloc", "dep:khal", "dep:kdma"]
 # more devices example: e1000 = ["net", "net/e1000"]
 
 default = ["bus-pci"]
@@ -43,7 +43,7 @@ default = ["bus-pci"]
 [dependencies]
 kalloc = { workspace = true, optional = true }
 platconfig = { workspace = true, optional = true }
-axdma.workspace = true
+kdma.workspace = true
 driver_base = { workspace = true }
 block = { workspace = true, optional = true }
 display = { workspace = true, optional = true }

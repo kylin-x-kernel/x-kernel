@@ -38,7 +38,7 @@ fbdevice = { workspace = true, optional = true }
 # display = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 kdriver = { workspace = true, optional = true }
-axdma.workspace = true
+kdma.workspace = true
 memaddr.workspace = true
 kfs = { workspace = true, optional = true }
 khal.workspace = true

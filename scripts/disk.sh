@@ -3,8 +3,8 @@
 # 检查参数
 if [ $# -eq 0 ]; then
     echo "用法: $0 [files...] -o <image_name>"
-    echo "示例: $0 axplat-bootloader.efi"
-    echo "示例: $0 axplat-bootloader.efi file1 file2 -o myboot.img"
+    echo "示例: $0 bootloader.efi"
+    echo "示例: $0 bootloader.efi file1 file2 -o myboot.img"
     exit 1
 fi
 
@@ -25,8 +25,8 @@ while [ $# -gt 0 ]; do
             ;;
         -h|--help)
             echo "用法: $0 [files...] -o <image_name>"
-            echo "示例: $0 axplat-bootloader.efi"
-            echo "示例: $0 axplat-bootloader.efi file1 file2 -o myboot.img"
+            echo "示例: $0 bootloader.efi"
+            echo "示例: $0 bootloader.efi file1 file2 -o myboot.img"
             exit 0
             ;;
         -* )

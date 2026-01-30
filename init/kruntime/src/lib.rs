@@ -97,7 +97,7 @@ fn is_init_ok() -> bool {
 struct DmaPageTableImpl;
 
 #[crate_interface::impl_interface]
-impl axdma::DmaPageTableIf for DmaPageTableImpl {
+impl kdma::DmaPageTableIf for DmaPageTableImpl {
     fn protect(
         vaddr: memaddr::VirtAddr,
         size: usize,

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["entry", "platforms/axplat-bootloader"]
+members = ["entry", "platforms/bootloader"]
 exclude = []
 
 [workspace.package]
@@ -22,7 +22,7 @@ kruntime = { path = "init/kruntime" }
 kalloc = { path = "mm/kalloc" }
 fbdevice = { path = "io/fbdevice" }
 kdriver = { path = "drivers/kdriver" }
-axdma = { path = "io/axdma" }
+kdma = { path = "io/kdma" }
 kfs = { path = "fs/kfs" }
 khal = { path = "arch/khal" }
 inputdev = { path = "io/inputdev" }

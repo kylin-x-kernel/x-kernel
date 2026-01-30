@@ -20,8 +20,8 @@ use self::dma::ALLOCATOR;
 /// to the virtual space at the address plus the offset. So we have
 /// `baddr = paddr + PHYS_BUS_OFFSET`.
 #[inline]
-pub const fn phys_to_bus(paddr: PhysAddr) -> BusAddr {
-    BusAddr::new((paddr.as_usize() + platconfig::plat::PHYS_BUS_OFFSET) as u64)
+pub const fn p2b(paddr: PhysAddr) -> DmaBusAddress {
+    DmaBusAddress::new((paddr.as_usize() + platconfig::plat::PHYS_BUS_OFFSET) as u64)
 }
 
 /// Allocates **coherent** memory that meets Direct Memory Access (DMA)
@@ -43,8 +43,8 @@ pub const fn phys_to_bus(paddr: PhysAddr) -> BusAddr {
 /// This function is unsafe because it directly interacts with the global
 /// allocator, which can potentially cause memory leaks or other issues if not
 /// used correctly.
-pub unsafe fn alloc_coherent(layout: Layout) -> AllocResult<DMAInfo> {
-    unsafe { ALLOCATOR.lock().alloc_coherent(layout) }
+pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
+    unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
 }
 
 /// Frees coherent memory previously allocated.
@@ -60,8 +60,8 @@ pub unsafe fn alloc_coherent(layout: Layout) -> AllocResult<DMAInfo> {
 ///
 /// This function is unsafe because it directly interacts with the global allocator,
 /// which can potentially cause memory leaks or other issues if not used correctly.
-pub unsafe fn dealloc_coherent(dma: DMAInfo, layout: Layout) {
-    unsafe { ALLOCATOR.lock().dealloc_coherent(dma, layout) }
+pub unsafe fn deallocate_dma_memory(dma: DMAInfo, layout: Layout) {
+    unsafe { ALLOCATOR.lock().deallocate_dma_memory(dma, layout) }
 }
 
 /// A bus memory address.
@@ -69,9 +69,9 @@ pub unsafe fn dealloc_coherent(dma: DMAInfo, layout: Layout) {
 /// It's a wrapper type around an [`u64`].
 #[repr(transparent)]
 #[derive(Copy, Clone, Default, Ord, PartialOrd, Eq, PartialEq)]
-pub struct BusAddr(u64);
+pub struct DmaBusAddress(u64);
 
-impl BusAddr {
+impl DmaBusAddress {
     /// Converts an [`u64`] to a physical address.
     pub const fn new(addr: u64) -> Self {
         Self(addr)
@@ -83,15 +83,15 @@ impl BusAddr {
     }
 }
 
-impl From<u64> for BusAddr {
+impl From<u64> for DmaBusAddress {
     fn from(value: u64) -> Self {
         Self::new(value)
     }
 }
 
-impl core::fmt::Debug for BusAddr {
+impl core::fmt::Debug for DmaBusAddress {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_tuple("BusAddr")
+        f.debug_tuple("DmaBusAddress")
             .field(&format_args!("{:#X}", self.0))
             .finish()
     }
@@ -105,5 +105,5 @@ pub struct DMAInfo {
     pub cpu_addr: NonNull<u8>,
     /// Represents the physical address of this memory region on the bus. The DMA
     /// controller uses this address to directly access memory.
-    pub bus_addr: BusAddr,
+    pub bus_addr: DmaBusAddress,
 }
