@@ -102,6 +102,7 @@ kerrno.workspace = true
 kfeat.workspace = true
 kfs.workspace = true
 fs-ng-vfs.workspace = true
+kio.workspace = true
 khal.workspace = true
 klogger.workspace = true
 kruntime.workspace = true

@@ -13,6 +13,10 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "unittest")]
+#[macro_use]
+extern crate log;
+
 #[doc(no_inline)]
 pub use kerrno::{KError as Error, KErrorKind as ErrorKind, KResult as Result};
 
@@ -37,3 +41,15 @@ pub struct PollState {
     /// Object can be writen now.
     pub writable: bool,
 }
+
+#[cfg(feature = "unittest")]
+pub mod test_seek;
+#[cfg(feature = "unittest")]
+pub mod test_cursor;
+#[cfg(feature = "unittest")]
+pub mod test_iobuf;
+#[cfg(feature = "unittest")]
+pub mod test_unit_test;
+
+#[cfg(feature = "unittest")]
+pub use test_unit_test::kio_unit_test;
