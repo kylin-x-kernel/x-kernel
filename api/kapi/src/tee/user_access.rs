@@ -141,7 +141,7 @@ pub fn bb_alloc(len: usize) -> TeeResult<Box<[u8]>> {
 /// free memory to kernel
 ///
 /// use for temporary memory allocation, can be optimized
-pub fn bb_free(kbuf: Box<[u8]>, _len: usize) {
+pub fn bb_free(kbuf: Box<[u8]>, len: usize) {
     drop(kbuf);
     let _ = len;
 }

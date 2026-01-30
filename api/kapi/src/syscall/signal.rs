@@ -1,4 +1,12 @@
-//! Signal handling syscalls.\n//!\n//! This module implements signal-related system calls including:\n//! - Signal mask manipulation (rt_sigprocmask, rt_sigaction, etc.)\n//! - Signal sending (kill, tgkill, sigqueue, etc.)\n//! - Signal waiting (pause, rt_sigsuspend, etc.)\n//! - Alternate signal stacks (sigaltstack)\n//! - Real-time signal operations\n\nuse core::{future::poll_fn, task::Poll};
+//! Signal handling syscalls.
+//!
+//! This module implements signal-related system calls including:
+//! - Signal mask manipulation (rt_sigprocmask, rt_sigaction, etc.)
+//! - Signal sending (kill, tgkill, sigqueue, etc.)
+//! - Signal waiting (pause, rt_sigsuspend, etc.)
+//! - Alternate signal stacks (sigaltstack)
+//! - Real-time signal operations
+use core::{future::poll_fn, task::Poll};
 
 use kcore::task::{
     AsThread, processes, send_signal_to_process, send_signal_to_process_group,

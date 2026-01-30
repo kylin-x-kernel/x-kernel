@@ -1,4 +1,8 @@
-//! Resource limit and usage syscalls.\n//!\n//! This module provides syscalls for managing resource limits (prlimit64)\n//! and retrieving resource usage information (getrusage).\n\nuse kcore::task::{AsThread, Thread, get_process_data, get_task};
+//! Resource limit and usage syscalls.
+//!
+//! This module provides syscalls for managing resource limits (prlimit64)
+//! and retrieving resource usage information (getrusage).
+use kcore::task::{AsThread, Thread, get_process_data, get_task};
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kprocess::Pid;

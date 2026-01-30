@@ -1,4 +1,11 @@
-//! System information and control syscalls.\n//!\n//! This module provides syscalls for querying and manipulating system information including:\n//! - User and group ID operations (getuid, geteuid, setuid, setgid, etc.)\n//! - System information (uname, sysinfo, etc.)\n//! - Process information queries\n//! - Hostname management\n\nuse alloc::vec;
+//! System information and control syscalls.
+//!
+//! This module provides syscalls for querying and manipulating system information including:
+//! - User and group ID operations (getuid, geteuid, setuid, setgid, etc.)
+//! - System information (uname, sysinfo, etc.)
+//! - Process information queries
+//! - Hostname management
+
 use core::ffi::c_char;
 
 use kcore::task::processes;
@@ -124,7 +131,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
     };
 
     let f = FS_CONTEXT.lock().resolve(path)?;
-    let mut kbuf = vec![0; len];
+    let mut kbuf = alloc::vec![0; len];
     let len = f.entry().as_file()?.read_at(&mut kbuf, 0)?;
 
     write_vm_mem(buf, &kbuf)?;

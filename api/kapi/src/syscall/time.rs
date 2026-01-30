@@ -1,4 +1,11 @@
-//! Time-related syscalls.\n//!\n//! This module implements time and timer operations including:\n//! - Clock operations (clock_gettime, clock_settime, clock_getres, etc.)\n//! - Time queries (gettimeofday, gettime, etc.)\n//! - Timer management (setitimer, getitimer, timer_*, etc.)\n//! - Time conversions and utilities\n\nuse kcore::{task::AsThread, time::ITimerType};
+//! Time-related syscalls.
+//!
+//! This module implements time and timer operations including:
+//! - Clock operations (clock_gettime, clock_settime, clock_getres, etc.)
+//! - Time queries (gettimeofday, gettime, etc.)
+//! - Timer management (setitimer, getitimer, timer_*, etc.)
+//! - Time conversions and utilities
+use kcore::{task::AsThread, time::ITimerType};
 use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
 use ktask::current;

@@ -1,4 +1,22 @@
-//! Syscall implementation and dispatch.\n//!\n//! This module is the core of the syscall interface. It dispatches system calls from user space\n//! to the appropriate handler functions based on the syscall number.\n//!\n//! The module is organized into submodules for different categories:\n//! - `fs`: File system operations\n//! - `io_mpx`: I/O multiplexing (select, poll, epoll)\n//! - `ipc`: Inter-process communication\n//! - `mm`: Memory management\n//! - `net`: Network operations\n//! - `resources`: Resource limits and usage\n//! - `signal`: Signal handling\n//! - `sync`: Synchronization primitives\n//! - `sys`: System information and control\n//! - `task`: Process and thread management\n//! - `time`: Time-related operations\n\nmod fs;
+//! Syscall implementation and dispatch.
+//!
+//! This module is the core of the syscall interface. It dispatches system calls from user space
+//! to the appropriate handler functions based on the syscall number.
+//!
+//! The module is organized into submodules for different categories:
+//! - `fs`: File system operations
+//! - `io_mpx`: I/O multiplexing (select, poll, epoll)
+//! - `ipc`: Inter-process communication
+//! - `mm`: Memory management
+//! - `net`: Network operations
+//! - `resources`: Resource limits and usage
+//! - `signal`: Signal handling
+//! - `sync`: Synchronization primitives
+//! - `sys`: System information and control
+//! - `task`: Process and thread management
+//! - `time`: Time-related operations
+ 
+mod fs;
 mod io_mpx;
 mod ipc;
 mod mm;

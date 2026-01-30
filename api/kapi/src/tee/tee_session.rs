@@ -143,7 +143,7 @@ where
 #[derive(Default, Debug)]
 pub struct TeeTaCtx {
     /// Test-only field, used only in test builds
-    #[cfg(test)]
+    #[cfg(any(test, feature = "tee_test"))]
     pub for_test_only: u32,
     pub session_dispatch_irq: u32,
     pub open_sessions: HashMap<u32, SessionIdentity>,
