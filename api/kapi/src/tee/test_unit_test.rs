@@ -9,8 +9,10 @@ use crate::tee::{
 };
 
 pub fn tee_unit_test() {
+    warn!("********************************");
+    warn!("Starting TEE unit tests...");
+
     let mut runner = TestRunner::new();
-    // Here you would register and run your unit tests
     run_tests!(runner, [TEST_TEE_SESSION, TEST_USER_ACCESS,]);
 
     if tests_failed() {
@@ -18,4 +20,6 @@ pub fn tee_unit_test() {
     } else {
         warn!("!!! ALL TESTS PASSED !!!");
     }
+    
+    warn!("********************************\n");
 }

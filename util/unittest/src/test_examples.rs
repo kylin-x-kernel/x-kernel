@@ -67,6 +67,9 @@ tests! {
 
 // This is a simulated main function to demonstrate how to run tests
 pub fn test_example() {
+    warn!("********************************");
+    warn!("Starting example unit tests...");
+
     let mut runner = TestRunner::new();
     run_tests!(runner, TEST_SUITE);
     let stats = runner.get_stats();
@@ -76,4 +79,6 @@ pub fn test_example() {
         "Final Test Stats: total={}, passed={}, failed={}, ignored={}",
         stats.total, stats.passed, stats.failed, stats.ignored
     );
+
+    warn!("********************************\n");
 }

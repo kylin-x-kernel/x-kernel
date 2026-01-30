@@ -33,10 +33,14 @@ fn main() {
 
     #[cfg(feature = "test")]
     {
+        use kapi::tee::test_unit_test::tee_unit_test;
         use unittest::test_examples::test_example;
 
-        info!("Running tests...");
+        info!("Running example tests...");
         test_example();
+
+        info!("Running TEE unit tests...");
+        tee_unit_test();
     }
 
     let exit_code = entry::run_initproc(&args, &envs);
