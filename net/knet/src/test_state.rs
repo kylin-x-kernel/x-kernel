@@ -132,7 +132,8 @@ fn test_state_guard_transit_failure() {
     let lock = StateLock::new(State::Connecting);
     let guard = lock.lock(State::Connecting).unwrap();
 
-    let result: Result<(), _> = guard.transit(State::Connected, || Err(kerrno::KError::ConnectionRefused));
+    let result: Result<(), _> =
+        guard.transit(State::Connected, || Err(kerrno::KError::ConnectionRefused));
     assert!(result.is_err());
 
     // State should rollback to Connecting (the original state)
@@ -161,7 +162,7 @@ fn test_state_lock_concurrent_semantics() {
     // This allows re-locking with the current state
     let guard3 = lock.lock(State::Busy);
     assert!(guard3.is_ok());
-    
+
     // After guard3 takes the lock, state remains Busy
     assert_eq!(lock.get(), State::Busy);
 }
