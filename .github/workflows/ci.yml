@@ -80,7 +80,6 @@ jobs:
         working-directory: starry-test-harness
         run: |
           export XKERNEL_COMMIT=$(git -C ../.cache/X-Kernel rev-parse HEAD)
-          export UNITTEST=y
           make ci-test run
 
       - name: Dump suite logs
@@ -88,7 +87,7 @@ jobs:
         if: always()
         run: |
           if [ -d logs/ci ]; then
-            echo "::group::Suite Log (${{ matrix.arch }})"
+            echo "::group::CI Test Log (${{ matrix.arch }})"
             find logs/ci -name 'suite.log' -print -exec cat {} \;
             echo "::endgroup::"
           else

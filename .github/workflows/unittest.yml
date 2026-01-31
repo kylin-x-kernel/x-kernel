@@ -1,0 +1,89 @@
+name: Unit Test
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+
+    name: Unit Test (${{ matrix.arch }})
+
+    env:
+      ARCH: ${{ matrix.arch }}
+      SMP: 4
+
+    steps:
+      - name: Checkout X-Kernel
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: xkernel-unittest-${{ matrix.arch }}
+
+      - name: Install QEMU
+        uses: arceos-org/setup-qemu@v1
+        with:
+          version: 10.1.0
+          arch_list: ${{ matrix.arch }}
+
+      - name: Prepare Rust toolchain
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            rustup target add x86_64-unknown-none
+          else
+            rustup target add aarch64-unknown-none
+          fi
+          rustup target list --installed | grep ${{ matrix.arch }}
+
+      - name: Build X-Kernel with unit tests
+        run: |
+          make ARCH=${{ matrix.arch }} UNITTEST=y defconfig
+          make ARCH=${{ matrix.arch }} UNITTEST=y build
+
+      - name: Run kernel unit tests
+        run: |
+          timeout 120 make ARCH=${{ matrix.arch }} UNITTEST=y SMP=${{ env.SMP }} run | tee unittest-output.log || true
+          
+          if grep -q "test result:.*FAILED" unittest-output.log; then
+            echo "Unit tests failed!"
+            exit 1
+          fi
+          
+          if grep -q "test result: ok" unittest-output.log; then
+            echo "Unit tests passed!"
+            exit 0
+          fi
+          
+          if grep -q "panicked at" unittest-output.log; then
+            echo "Kernel panicked during unit tests!"
+            exit 1
+          fi
+          
+          echo "Unable to determine test result from output"
+          exit 1
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unittest-logs-${{ matrix.arch }}-${{ github.run_id }}
+          path: unittest-output.log
+          if-no-files-found: warn
