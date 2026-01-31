@@ -80,6 +80,7 @@ jobs:
         working-directory: starry-test-harness
         run: |
           export STARRYOS_COMMIT=$(git -C ../.cache/StarryOS rev-parse HEAD)
+          export UNITTEST=y
           make ci-test arch=${{ matrix.arch }} run
 
       - name: Dump suite logs
