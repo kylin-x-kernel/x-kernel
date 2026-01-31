@@ -46,13 +46,6 @@ fn test_explicit_result() -> TestResult {
     TestResult::Ok
 }
 
-/// Ignored test example - this test will be skipped
-#[def_test(ignore)]
-fn test_ignored() {
-    // This test is skipped and won't run
-    assert!(false);
-}
-
 // ============================================================================
 // More complex test examples
 // ============================================================================
