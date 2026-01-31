@@ -11,14 +11,13 @@ repository.workspace = true
 [features]
 alloc = []
 default = []
-unittest = ["alloc", "dep:unittest", "dep:log"]
+unittest = ["alloc"]
 
 [dependencies]
 kerrno.workspace = true
 heapless = "0.9"
 memchr = { version = "2", default-features = false }
-unittest = { workspace = true, optional = true }
-log = { workspace = true, optional = true }
+unittest = { workspace = true }
 
 [build-dependencies]
 autocfg = "1"
