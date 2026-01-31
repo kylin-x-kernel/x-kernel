@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! Process structure and lifecycle management.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! Process structure and lifecycle management.
 use alloc::{
     collections::btree_set::BTreeSet,
     sync::{Arc, Weak},

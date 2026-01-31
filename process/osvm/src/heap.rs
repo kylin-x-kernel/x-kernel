@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! Allocation helpers for loading user memory into heap buffers.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! Allocation helpers for loading user memory into heap buffers.
 extern crate alloc;
 use alloc::vec::Vec;
 

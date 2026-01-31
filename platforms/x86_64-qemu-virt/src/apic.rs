@@ -1,10 +1,8 @@
-<<<<<<< HEAD
-//! Local APIC and IO APIC setup for x86_64-qemu-virt.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+
+//! Local APIC and IO APIC setup for x86_64-qemu-virt.
 
 use core::mem::MaybeUninit;
 

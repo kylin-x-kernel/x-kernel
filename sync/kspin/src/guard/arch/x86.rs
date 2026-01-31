@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! x86/x86_64 IRQ save/restore helpers.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! x86/x86_64 IRQ save/restore helpers.
 use core::arch::asm;
 
 /// Interrupt Enable Flag (IF)

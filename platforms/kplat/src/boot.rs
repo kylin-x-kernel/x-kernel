@@ -1,10 +1,8 @@
-<<<<<<< HEAD
-//! Platform boot-stage interface definitions.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+
+//! Platform boot-stage interface definitions.
 
 use kplat_macros::device_interface;
 

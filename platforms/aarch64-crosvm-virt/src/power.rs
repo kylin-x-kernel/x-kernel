@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! Power and SMP boot controls for the platform.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! Power and SMP boot controls for the platform.
 use kplat::sys::SysCtrl;
 struct PowerImpl;
 #[impl_dev_interface]

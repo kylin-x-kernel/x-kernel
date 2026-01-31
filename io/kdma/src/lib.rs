@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! DMA allocation helpers and bus address types.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! DMA allocation helpers and bus address types.
 #![no_std]
 
 extern crate alloc;

@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! Minimal early-boot UART printing for diagnostics.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! Minimal early-boot UART printing for diagnostics.
 #[unsafe(no_mangle)]
 pub extern "C" fn _boot_print_usize(num: usize) {
     let mut msg: [u8; 16] = [0; 16];

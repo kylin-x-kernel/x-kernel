@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! PSCI interface helpers for power management and CPU control.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! PSCI interface helpers for power management and CPU control.
 #![allow(dead_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;

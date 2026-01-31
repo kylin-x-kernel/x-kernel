@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-/// Save IRQ state and disable local interrupts.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+/// Save IRQ state and disable local interrupts.
 #[inline]
 pub fn save_disable() -> usize {
     crate_interface::call_interface!(crate::guard::KernelGuardIf::save_disable)

@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! Raspberry Pi boot initialization hooks.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! Raspberry Pi boot initialization hooks.
 use kplat::boot::BootHandler;
 use kplat::memory::{pa, p2v};
 #[allow(unused_imports)]

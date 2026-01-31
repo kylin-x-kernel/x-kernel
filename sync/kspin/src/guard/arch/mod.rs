@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! Architecture-specific IRQ save/restore helpers.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! Architecture-specific IRQ save/restore helpers.
 #![cfg_attr(not(target_os = "none"), allow(dead_code, unused_imports))]
 
 cfg_if::cfg_if! {

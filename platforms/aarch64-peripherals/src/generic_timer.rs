@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! ARM generic timer helpers and adapter macro.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! ARM generic timer helpers and adapter macro.
 use aarch64_cpu::registers::{CNTFRQ_EL0, CNTP_TVAL_EL0, CNTPCT_EL0, Readable, Writeable};
 use int_ratio::Ratio;
 static mut CNTPCT_TO_NANOS_RATIO: Ratio = Ratio::zero();

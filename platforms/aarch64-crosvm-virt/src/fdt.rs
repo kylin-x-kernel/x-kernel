@@ -1,11 +1,8 @@
-<<<<<<< HEAD
-//! Device tree parsing helpers for the platform.
-=======
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
->>>>>>> 62a4f63a (./init, io, mm, net, platforms, process, sync over)
+//! Device tree parsing helpers for the platform.
 use kplat::memory::{VirtAddr, p2v, pa};
 use log::*;
 use rs_fdtree::{InterruptController, LinuxFdt};
