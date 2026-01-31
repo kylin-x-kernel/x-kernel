@@ -33,14 +33,12 @@
 //! println!("{}", bt);
 //! ```
 
-#[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use core::{fmt, ops::Range};
 
-use spin::Once;
+use ktypes::Once;
 
 // Modules
 pub mod arch;
@@ -48,12 +46,10 @@ pub mod config;
 pub mod error;
 pub mod frame;
 
-#[cfg(feature = "alloc")]
 mod unwinder;
 pub use config::{max_depth, set_max_depth};
 pub use error::{BacktraceError, Result};
 pub use frame::Frame;
-#[cfg(feature = "alloc")]
 use unwinder::Unwinder;
 
 #[cfg(feature = "dwarf")]
@@ -93,7 +89,6 @@ pub const fn is_enabled() -> bool {
 /// init(0..usize::MAX, 0..usize::MAX);
 /// let frames = unwind_stack(0x7fff_0000);
 /// ```
-#[cfg(feature = "alloc")]
 pub fn unwind_stack(fp: usize) -> Vec<Frame> {
     let Some(config) = CONFIG.get() else {
         log::error!("Backtrace not initialized. Call backtrace::init() first.");
@@ -239,7 +234,6 @@ impl Backtrace {
     }
 
     /// Get the raw frames without symbolication.
-    #[cfg(feature = "alloc")]
     pub fn raw_frames(&self) -> Option<&[Frame]> {
         match &self.inner {
             #[cfg(feature = "dwarf")]

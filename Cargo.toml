@@ -43,6 +43,7 @@ kpoll = { path = "core/kpoll" }
 memaddr = { path = "mm/memaddr" }
 memset = { path = "mm/memset" }
 kspin = { path = "sync/kspin" }
+ktypes = { path = "core/ktypes" }
 
 # x-kenrel userspace Modules
 ksignal = { path = "process/ksignal" }

@@ -6,12 +6,12 @@ use alloc::borrow::Cow;
 use core::{fmt, slice};
 
 use addr2line::Context;
+use ktypes::Once;
 // Only import in non-test builds
 #[cfg(not(test))]
 use log::{error, info};
 #[cfg(not(test))]
 use paste::paste;
-use spin::Once;
 
 pub type DwarfReader = gimli::EndianSlice<'static, gimli::RunTimeEndian>;
 

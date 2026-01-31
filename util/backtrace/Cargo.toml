@@ -11,13 +11,12 @@ categories = ["development-tools::debugging"]
 description = "Backtrace Catching for X-kernel"
 
 [features]
-alloc = []
-dwarf = ["dep:addr2line", "dep:gimli", "dep:paste", "alloc"]
+dwarf = ["dep:addr2line", "dep:gimli", "dep:paste"]
 
 [dependencies]
 cfg-if = { workspace = true }
 log = { workspace = true }
-spin = { version = "0.10", default-features = false, features = ["once"] }
+ktypes.workspace= true
 
 addr2line = { version = "0.25.1", default-features = false, optional = true, features = [
     "cpp_demangle",

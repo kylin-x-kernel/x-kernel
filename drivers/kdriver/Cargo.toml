@@ -19,8 +19,8 @@ display = ["dep:display"]
 input = ["dep:input"]
 vsock = ["dep:vsock"]
 
-crosvm = ["pci-mmio", "dep:hashbrown", "dep:ksync", "dep:spin"]
-sev = ["pci-mmio", "kdma/sev", "dep:hashbrown", "dep:ksync", "dep:spin"]
+crosvm = ["pci-mmio", "dep:hashbrown", "dep:ksync"]
+sev = ["pci-mmio", "kdma/sev", "dep:hashbrown", "dep:ksync"]
 
 # Enabled by features `virtio-*`
 virtio = ["dep:virtio", "dep:kalloc", "dep:khal", "dep:platconfig"]
@@ -60,7 +60,6 @@ rdif-block = { version = "0.6.2", optional = true }
 rdif-intc = { version = "0.12", optional = true }
 rdrive = { version = "0.18", optional = true }
 smallvec = { version = "1.15", features = ["const_generics", "union"] }
-spin = { version = "0.10", optional = true }
 
 ksync = { workspace = true, optional = true }
 hashbrown = { workspace = true, optional = true }

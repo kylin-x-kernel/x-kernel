@@ -39,6 +39,7 @@ dice = { workspace = true, optional = true }
 mbedtls = { workspace = true, optional = true }
 fbdevice.workspace = true
 kdriver.workspace = true
+ktypes.workspace = true
 
 kerrno.workspace = true
 kfeat.workspace = true

@@ -9,12 +9,14 @@ use core::any::Any;
 use aarch64_crosvm_virt::fdt::dice_reg;
 use kcore::vfs::DeviceOps;
 use kerrno::{KError, KResult};
+use ksync::Mutex;
+use ktypes::Lazy;
 use memaddr::VirtAddr;
 use rand_chacha::{
     ChaCha8Rng,
     rand_core::{RngCore, SeedableRng},
 };
-use spin::{Lazy, Mutex};
+
 /// DICE节点信息
 #[derive(Debug, Clone, Copy)]
 /// DICE (Device Identifier Composition Engine) node information

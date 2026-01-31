@@ -20,7 +20,6 @@ nmi-sdei = []
 [dependencies]
 kspin = { workspace = true }
 log = "0.4"
-spin = "0.10"
 int_ratio = "0.1"
 lazyinit = "0.2"
 page_table = { workspace = true }

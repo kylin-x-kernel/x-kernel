@@ -23,9 +23,9 @@ use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
 use kio::prelude::*;
 use kpoll::Pollable;
+use ksync::RwLock;
 use ktask::current;
 use linux_raw_sys::general::{RLIMIT_NOFILE, stat, statx, statx_timestamp};
-use spin::RwLock;
 
 pub use self::{
     fs::{Directory, File, ResolveAtResult, metadata_to_kstat, resolve_at, with_fs},

@@ -95,7 +95,7 @@ struct TeeTaTimeOffs {
 }
 
 // Global time offset storage - using spin::Mutex for thread safety
-use spin::Mutex;
+use ksync::Mutex;
 static TEE_TIME_OFFS: Mutex<Option<vec::Vec<TeeTaTimeOffs>>> = Mutex::new(None);
 
 // Helper function: compare UUIDs

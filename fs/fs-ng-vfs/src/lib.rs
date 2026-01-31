@@ -25,4 +25,4 @@ pub use types::*;
 pub type VfsError = kerrno::KError;
 pub type VfsResult<T> = Result<T, VfsError>;
 
-use spin::{Mutex, MutexGuard};
+use ksync::{Mutex, MutexGuard};
