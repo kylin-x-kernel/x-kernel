@@ -291,3 +291,18 @@ impl Pollable for Directory {
     /// Directories do not support polling registration.
     fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
 }
+
+#[cfg(unittest)]
+mod fs_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    /// Test AT_ constants have correct Linux values
+    #[def_test]
+    fn test_at_constants() {
+        assert_eq!(AT_FDCWD, -100);
+        assert_eq!(AT_EMPTY_PATH, 0x1000);
+        assert_eq!(AT_SYMLINK_NOFOLLOW, 0x100);
+    }
+}

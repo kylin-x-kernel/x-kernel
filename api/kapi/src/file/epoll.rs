@@ -457,3 +457,128 @@ impl Pollable for Epoll {
         }
     }
 }
+
+#[cfg(unittest)]
+mod epoll_tests {
+    use kpoll::IoEvents;
+    use unittest::def_test;
+
+    use super::*;
+
+    /// Test basic Epoll creation
+    #[def_test]
+    fn test_epoll_creation() {
+        let epoll = Epoll::new();
+        // Check that it implements FileLike correctly
+        assert_eq!(epoll.path(), "anon_inode:[eventpoll]");
+    }
+
+    /// Test EpollFlags bitflags
+    #[def_test]
+    fn test_epoll_flags() {
+        assert_eq!(EpollFlags::EDGE_TRIGGER.bits(), EPOLLET as u32);
+        assert_eq!(EpollFlags::ONESHOT.bits(), EPOLLONESHOT as u32);
+
+        let mut flags = EpollFlags::empty();
+        flags.insert(EpollFlags::EDGE_TRIGGER);
+        assert!(flags.contains(EpollFlags::EDGE_TRIGGER));
+
+        flags.insert(EpollFlags::ONESHOT);
+        assert!(flags.contains(EpollFlags::EDGE_TRIGGER | EpollFlags::ONESHOT));
+    }
+
+    /// Test TriggerMode creation from flags
+    #[def_test]
+    fn test_trigger_mode_from_flags() {
+        match TriggerMode::from_flags(EpollFlags::empty()) {
+            TriggerMode::Level => {} // Correct
+            _ => panic!("Expected Level trigger"),
+        }
+
+        match TriggerMode::from_flags(EpollFlags::EDGE_TRIGGER) {
+            TriggerMode::Edge => {} // Correct
+            _ => panic!("Expected Edge trigger"),
+        }
+
+        match TriggerMode::from_flags(EpollFlags::ONESHOT) {
+            TriggerMode::OneShot { fired: false } => {} // Correct
+            _ => panic!("Expected OneShot with fired=false"),
+        }
+
+        // Test combined flags (ONESHOT takes precedence?)
+        match TriggerMode::from_flags(EpollFlags::EDGE_TRIGGER | EpollFlags::ONESHOT) {
+            TriggerMode::OneShot { fired: false } => {} // ONESHOT should take precedence
+            _ => panic!("Expected OneShot with fired=false"),
+        }
+    }
+
+    /// Test TriggerMode should_notify logic
+    #[def_test]
+    fn test_trigger_mode_should_notify() {
+        // Level trigger: always notify
+        let (should_notify, new_mode) = TriggerMode::Level.should_notify();
+        assert!(should_notify);
+        match new_mode {
+            TriggerMode::Level => {} // Correct
+            _ => panic!("Should remain Level"),
+        }
+
+        // Edge trigger: notify
+        let (should_notify, new_mode) = TriggerMode::Edge.should_notify();
+        assert!(should_notify);
+        match new_mode {
+            TriggerMode::Edge => {} // Correct
+            _ => panic!("Should remain Edge"),
+        }
+
+        // OneShot first time: notify and become fired
+        let (should_notify, new_mode) = TriggerMode::OneShot { fired: false }.should_notify();
+        assert!(should_notify);
+        match new_mode {
+            TriggerMode::OneShot { fired: true } => {} // Correct
+            _ => panic!("Should become fired=true"),
+        }
+
+        // OneShot after fired: don't notify
+        let (should_notify, new_mode) = TriggerMode::OneShot { fired: true }.should_notify();
+        assert!(!should_notify);
+        match new_mode {
+            TriggerMode::OneShot { fired: true } => {} // Correct
+            _ => panic!("Should remain fired=true"),
+        }
+    }
+
+    /// Test TriggerMode is_enabled
+    #[def_test]
+    fn test_trigger_mode_is_enabled() {
+        assert!(TriggerMode::Level.is_enabled());
+        assert!(TriggerMode::Edge.is_enabled());
+        assert!(TriggerMode::OneShot { fired: false }.is_enabled());
+        assert!(!TriggerMode::OneShot { fired: true }.is_enabled());
+    }
+
+    /// Test EpollEvent creation
+    #[def_test]
+    fn test_epoll_event() {
+        let event = EpollEvent {
+            events: IoEvents::IN | IoEvents::OUT,
+            user_data: 0x12345678,
+        };
+
+        assert!(event.events.contains(IoEvents::IN));
+        assert!(event.events.contains(IoEvents::OUT));
+        assert!(!event.events.contains(IoEvents::ERR));
+        assert_eq!(event.user_data, 0x12345678);
+    }
+
+    /// Test poll_events with zero-length buffer
+    #[def_test]
+    fn test_poll_events_zero_buffer() {
+        let epoll = Epoll::new();
+        let mut events = [];
+
+        // Zero buffer should return WouldBlock (no space for events)
+        let result = epoll.poll_events(&mut events);
+        assert_eq!(result, Err(KError::WouldBlock));
+    }
+}

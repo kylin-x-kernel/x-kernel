@@ -159,3 +159,159 @@ impl Pollable for EventFd {
         }
     }
 }
+
+#[cfg(unittest)]
+mod eventfd_tests {
+    use kpoll::IoEvents;
+    use unittest::def_test;
+
+    use super::*;
+
+    /// Test EventFd creation
+    #[def_test]
+    fn test_eventfd_creation() {
+        let eventfd = EventFd::new(0, false);
+        // Check that it implements FileLike correctly
+        assert_eq!(eventfd.path(), "anon_inode:[eventfd]");
+    }
+
+    /// Test EventFd with initial value
+    #[def_test]
+    fn test_eventfd_with_initval() {
+        let eventfd = EventFd::new(42, false);
+        // Should be readable with count > 0
+        assert!(eventfd.poll().contains(IoEvents::IN));
+        // Should be writable (not near MAX)
+        assert!(eventfd.poll().contains(IoEvents::OUT));
+    }
+
+    /// Test EventFd poll state
+    #[def_test]
+    fn test_eventfd_poll_states() {
+        // Empty eventfd
+        let eventfd = EventFd::new(0, false);
+        let events = eventfd.poll();
+        assert!(!events.contains(IoEvents::IN));
+        assert!(events.contains(IoEvents::OUT));
+
+        // Non-empty eventfd
+        let eventfd = EventFd::new(1, false);
+        let events = eventfd.poll();
+        assert!(events.contains(IoEvents::IN));
+        assert!(events.contains(IoEvents::OUT));
+
+        // Near max eventfd
+        let eventfd = EventFd::new(u64::MAX - 1, false);
+        let events = eventfd.poll();
+        assert!(events.contains(IoEvents::IN));
+        assert!(!events.contains(IoEvents::OUT)); // Can't write even 1 more
+    }
+
+    /// Test EventFd semaphore mode creation
+    #[def_test]
+    fn test_eventfd_semaphore_mode() {
+        let eventfd = EventFd::new(10, true);
+        assert_eq!(eventfd.path(), "anon_inode:[eventfd]");
+    }
+
+    /// Test EventFd non-blocking mode
+    #[def_test]
+    fn test_eventfd_nonblocking_mode() {
+        let eventfd = EventFd::new(0, false);
+
+        // Initially blocking
+        assert!(!eventfd.nonblocking());
+
+        // Set to non-blocking
+        eventfd.set_nonblocking(true).unwrap();
+        assert!(eventfd.nonblocking());
+
+        // Set back to blocking
+        eventfd.set_nonblocking(false).unwrap();
+        assert!(!eventfd.nonblocking());
+    }
+
+    /// Test EventFd poll at max capacity
+    #[def_test]
+    fn test_eventfd_poll_at_max() {
+        let eventfd = EventFd::new(u64::MAX, false);
+        let events = eventfd.poll();
+        // At max, can read but can't write (even 0)
+        assert!(events.contains(IoEvents::IN));
+        assert!(!events.contains(IoEvents::OUT));
+    }
+
+    /// Test EventFd poll just below max
+    #[def_test]
+    fn test_eventfd_poll_near_max() {
+        let eventfd = EventFd::new(u64::MAX - 1, false);
+        let events = eventfd.poll();
+        // Can read, can't write (would overflow)
+        assert!(events.contains(IoEvents::IN));
+        assert!(!events.contains(IoEvents::OUT));
+    }
+
+    /// Test EventFd poll can write one more
+    #[def_test]
+    fn test_eventfd_poll_can_write_one() {
+        let eventfd = EventFd::new(u64::MAX - 2, false);
+        let events = eventfd.poll();
+        // Can read, can write 1 more
+        assert!(events.contains(IoEvents::IN));
+        assert!(events.contains(IoEvents::OUT));
+    }
+
+    /// Test EventFd register method compiles
+    #[def_test]
+    fn test_eventfd_register() {
+        use core::task::{Context, RawWaker, Waker};
+
+        let eventfd = EventFd::new(0, false);
+
+        // Create a dummy waker
+        static VTABLE: core::task::RawWakerVTable = core::task::RawWakerVTable::new(
+            |_| RawWaker::new(core::ptr::null(), &VTABLE),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
+
+        let raw_waker = RawWaker::new(core::ptr::null(), &VTABLE);
+        let waker = unsafe { Waker::from_raw(raw_waker) };
+        let mut context = Context::from_waker(&waker);
+
+        // Test registering for IN events
+        eventfd.register(&mut context, IoEvents::IN);
+
+        // Test registering for OUT events
+        eventfd.register(&mut context, IoEvents::OUT);
+
+        // Test registering for both
+        eventfd.register(&mut context, IoEvents::IN | IoEvents::OUT);
+
+        // This just verifies the method compiles and doesn't panic
+    }
+
+    /// Test EventFd path consistency
+    #[def_test]
+    fn test_eventfd_path_consistency() {
+        let eventfd1 = EventFd::new(0, false);
+        let eventfd2 = EventFd::new(100, true);
+        let eventfd3 = EventFd::new(u64::MAX, false);
+
+        // All EventFd instances should have the same path
+        assert_eq!(eventfd1.path(), "anon_inode:[eventfd]");
+        assert_eq!(eventfd2.path(), "anon_inode:[eventfd]");
+        assert_eq!(eventfd3.path(), "anon_inode:[eventfd]");
+    }
+
+    /// Test EventFd with maximum initial value
+    #[def_test]
+    fn test_eventfd_max_initval() {
+        let eventfd = EventFd::new(u64::MAX, false);
+        let events = eventfd.poll();
+        // Should be readable but not writable
+        assert!(events.contains(IoEvents::IN));
+        assert!(!events.contains(IoEvents::OUT));
+    }
+}

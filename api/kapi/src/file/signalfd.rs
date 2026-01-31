@@ -182,3 +182,23 @@ impl Pollable for Signalfd {
         }
     }
 }
+
+#[cfg(unittest)]
+mod signalfd_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    /// Test signalfd path
+    #[def_test]
+    fn test_signalfd_path() {
+        let signalfd = Signalfd::new(SignalSet::default());
+        assert_eq!(signalfd.path(), "anon_inode:[signalfd]");
+    }
+
+    /// Test SIGNALFD_SIGINFO_SIZE constant
+    #[def_test]
+    fn test_signalfd_siginfo_size() {
+        assert_eq!(SIGNALFD_SIGINFO_SIZE, 128);
+    }
+}

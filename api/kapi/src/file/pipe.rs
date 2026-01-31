@@ -269,3 +269,28 @@ impl Pollable for Pipe {
         self.shared.poll_close.register(context.waker());
     }
 }
+
+#[cfg(unittest)]
+mod pipe_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    /// Test pipe creation yields read and write ends
+    #[def_test]
+    fn test_pipe_creation() {
+        let (read_end, write_end) = Pipe::new();
+
+        assert!(read_end.is_read());
+        assert!(!read_end.is_write());
+        assert!(!write_end.is_read());
+        assert!(write_end.is_write());
+    }
+
+    /// Test pipe constants
+    #[def_test]
+    fn test_pipe_constants() {
+        assert_eq!(S_IFIFO, 0o010000);
+        assert_eq!(FIONREAD, 0x541B);
+    }
+}

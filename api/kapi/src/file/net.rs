@@ -95,3 +95,16 @@ impl Pollable for Socket {
         self.0.register(context, events);
     }
 }
+
+#[cfg(unittest)]
+mod socket_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    /// Test S_IFSOCK constant
+    #[def_test]
+    fn test_socket_mode_constant() {
+        assert_eq!(S_IFSOCK, 0o140000);
+    }
+}

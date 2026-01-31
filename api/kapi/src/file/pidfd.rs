@@ -62,3 +62,17 @@ impl Pollable for PidFd {
         }
     }
 }
+
+#[cfg(unittest)]
+mod pidfd_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn test_ioevents_constants() {
+        // Verify IoEvents has IN constant
+        let events = IoEvents::IN;
+        assert!(events.contains(IoEvents::IN));
+    }
+}
