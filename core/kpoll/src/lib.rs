@@ -7,10 +7,6 @@
 #![no_std]
 #![deny(missing_docs)]
 
-#[cfg(feature = "unittest")]
-#[macro_use]
-extern crate log;
-
 extern crate alloc;
 
 mod tests;
@@ -248,15 +244,4 @@ impl Default for PollSetGroup {
     }
 }
 
-/// Unit tests for IoEvents.
-#[cfg(feature = "unittest")]
-pub mod test_ioevents;
-/// Unit tests for PollSet.
-#[cfg(feature = "unittest")]
-pub mod test_pollset;
-/// Unit test entry point.
-#[cfg(feature = "unittest")]
-pub mod test_unit_test;
 
-#[cfg(feature = "unittest")]
-pub use test_unit_test::kpoll_unit_test;
