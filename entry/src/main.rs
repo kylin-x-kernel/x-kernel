@@ -35,8 +35,26 @@ fn main() {
     let envs = [];
 
     #[cfg(feature = "unittest")]
-    if !unittest::test_run_ok() {
-        panic!("Unit tests failed");
+    {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use ktask::spawn;
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_clone = finished.clone();
+
+        spawn(move || {
+            if !unittest::test_run_ok() {
+                panic!("Unit tests failed");
+            }
+            finished_clone.store(true, Ordering::Release);
+        });
+
+        // Loop until tests are finished.
+        // We use yield_now() to let the scheduler run the test task.
+        while !finished.load(Ordering::Acquire) {
+            ktask::yield_now();
+        }
     }
 
     let exit_code = entry::run_initproc(&args, &envs);
