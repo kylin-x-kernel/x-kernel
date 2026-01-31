@@ -22,7 +22,8 @@ pub mod mm;
 pub mod resources;
 pub mod shm;
 pub mod task;
+/// Unit test entrypoints.
+#[cfg(unittest)]
+pub mod test_unit_test;
 pub mod time;
 pub mod vfs;
-#[cfg(feature = "kcore_test")]
-pub mod test_unit_test;

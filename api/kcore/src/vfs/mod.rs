@@ -43,16 +43,15 @@ impl<T: FileNodeOps> From<Arc<T>> for NodeOpsMux {
     }
 }
 
-#[cfg(feature = "kcore_test")]
+#[cfg(unittest)]
+/// Unit tests.
 pub mod tests_vfs {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
-
     use alloc::sync::Arc;
-    use fs_ng_vfs::{DirNodeOps, VfsError, WeakDirEntry};
 
-    use super::{dummy_stat_fs, DirMapping, NodeOpsMux, SimpleDirOps};
+    use fs_ng_vfs::{DirNodeOps, VfsError, WeakDirEntry};
+    use unittest::{TestResult, def_test};
+
+    use super::{DirMapping, NodeOpsMux, SimpleDirOps, dummy_stat_fs};
 
     fn dummy_dir_maker() -> super::DirMaker {
         Arc::new(|_this: WeakDirEntry| -> Arc<dyn DirNodeOps> {
@@ -60,53 +59,41 @@ pub mod tests_vfs {
         })
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_dummy_stat_fs_values() {
-            let stat = dummy_stat_fs(0x1234);
-            assert_eq!(stat.fs_type, 0x1234);
-            assert_eq!(stat.block_size, 512);
-            assert_eq!(stat.blocks, 100);
-            assert_eq!(stat.name_length, fs_ng_vfs::path::MAX_NAME_LEN as _);
-        }
+    #[def_test]
+    fn test_dummy_stat_fs_values() {
+        let stat = dummy_stat_fs(0x1234);
+        assert_eq!(stat.fs_type, 0x1234);
+        assert_eq!(stat.block_size, 512);
+        assert_eq!(stat.blocks, 100);
+        assert_eq!(stat.name_length, fs_ng_vfs::path::MAX_NAME_LEN as _);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_dirmapping_lookup() {
-            let mut map = DirMapping::new();
-            let maker = dummy_dir_maker();
-            map.add("child", NodeOpsMux::from(maker));
-            let entry = map.lookup_child("child").unwrap();
-            match entry {
-                NodeOpsMux::Dir(_) => {}
-                _ => return TestResult::Failed,
-            }
+    #[def_test]
+    fn test_dirmapping_lookup() -> TestResult {
+        let mut map = DirMapping::new();
+        let maker = dummy_dir_maker();
+        map.add("child", NodeOpsMux::from(maker));
+        let entry = map.lookup_child("child").unwrap();
+        match entry {
+            NodeOpsMux::Dir(_) => {}
+            _ => return TestResult::Failed,
         }
+        TestResult::Ok
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_chained_dir_ops_lookup() {
-            let mut left = DirMapping::new();
-            let mut right = DirMapping::new();
-            let maker = dummy_dir_maker();
-            left.add("left", NodeOpsMux::from(maker.clone()));
-            right.add("right", NodeOpsMux::from(maker));
-            let chained = left.chain(right);
-            assert!(chained.lookup_child("left").is_ok());
-            assert!(chained.lookup_child("right").is_ok());
-            assert!(matches!(chained.lookup_child("missing"), Err(VfsError::NotFound)));
-        }
-    }
-
-    tests_name! {
-        TEST_VFS;
-        test_dummy_stat_fs_values,
-        test_dirmapping_lookup,
-        test_chained_dir_ops_lookup,
+    #[def_test]
+    fn test_chained_dir_ops_lookup() {
+        let mut left = DirMapping::new();
+        let mut right = DirMapping::new();
+        let maker = dummy_dir_maker();
+        left.add("left", NodeOpsMux::from(maker.clone()));
+        right.add("right", NodeOpsMux::from(maker));
+        let chained = left.chain(right);
+        assert!(chained.lookup_child("left").is_ok());
+        assert!(chained.lookup_child("right").is_ok());
+        assert!(matches!(
+            chained.lookup_child("missing"),
+            Err(VfsError::NotFound)
+        ));
     }
 }

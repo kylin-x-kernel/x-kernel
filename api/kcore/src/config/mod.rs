@@ -26,45 +26,28 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(feature = "kcore_test")]
+#[cfg(unittest)]
+/// Unit tests.
 pub mod tests_config {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
-
-        fn test_user_space_range() {
-            assert!(USER_SPACE_SIZE > 0);
-            assert!(USER_SPACE_BASE < USER_SPACE_BASE + USER_SPACE_SIZE);
-        }
+    #[def_test]
+    fn test_user_space_range() {
+        assert!(USER_SPACE_SIZE > 0);
+        assert!(USER_SPACE_BASE < USER_SPACE_BASE + USER_SPACE_SIZE);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_user_stack_range() {
-            assert!(USER_STACK_SIZE > 0);
-            assert!(USER_STACK_TOP > USER_STACK_SIZE);
-        }
+    #[def_test]
+    fn test_user_stack_range() {
+        assert!(USER_STACK_SIZE > 0);
+        assert!(USER_STACK_TOP > USER_STACK_SIZE);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_heap_limits() {
-            assert!(USER_HEAP_SIZE > 0);
-            assert!(USER_HEAP_SIZE_MAX >= USER_HEAP_SIZE);
-        }
-    }
-
-    tests_name! {
-        TEST_CONFIG;
-        test_user_space_range,
-        test_user_stack_range,
-        test_heap_limits,
+    #[def_test]
+    fn test_heap_limits() {
+        assert!(USER_HEAP_SIZE > 0);
+        assert!(USER_HEAP_SIZE_MAX >= USER_HEAP_SIZE);
     }
 }
