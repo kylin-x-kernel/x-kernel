@@ -476,8 +476,8 @@ mod epoll_tests {
     /// Test EpollFlags bitflags
     #[def_test]
     fn test_epoll_flags() {
-        assert_eq!(EpollFlags::EDGE_TRIGGER.bits(), EPOLLET as u32);
-        assert_eq!(EpollFlags::ONESHOT.bits(), EPOLLONESHOT as u32);
+        assert_eq!(EpollFlags::EDGE_TRIGGER.bits(), EPOLLET);
+        assert_eq!(EpollFlags::ONESHOT.bits(), EPOLLONESHOT);
 
         let mut flags = EpollFlags::empty();
         flags.insert(EpollFlags::EDGE_TRIGGER);
