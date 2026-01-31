@@ -25,7 +25,7 @@ memaddr = { workspace = true }
 page_table = { workspace = true }
 percpu = { workspace = true }
 static_assertions = "1.1.0"
-unittest = { workspace = true }
+unittest.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 lazyinit = "0.2"

@@ -39,7 +39,7 @@ memaddr.workspace = true
 page_table = { workspace = true, optional = true }
 percpu.workspace = true
 fdt-parser = "0.4"
-unittest = { workspace = true }
+unittest.workspace = true
 
 
 [build-dependencies]

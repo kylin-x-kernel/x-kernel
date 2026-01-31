@@ -18,4 +18,4 @@ kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
 percpu.workspace = true
-unittest = { workspace = true }
+unittest.workspace = true
