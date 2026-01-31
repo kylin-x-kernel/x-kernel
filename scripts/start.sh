@@ -11,7 +11,7 @@ qemu-system-x86_64 -m 1G -smp 1 -machine q35 \
     -drive id=disk0,if=none,format=raw,file=disk.img \
     -cpu host -accel kvm \
     -hda myboot.img \
-    -object sev-guest,id=sev0,policy=0x1,cbitpos=47,reduced-phys-bits=5 \
+    -object sev-guest,id=sev0,policy=0x1,cbitpos=47,reduced-phys-bits=5,session-file=cvm_1_launch_blob.bin,dh-cert-file=cvm_1_guest_owner_dh.cert \
     -machine memory-encryption=sev0 \
     -drive if=pflash,format=raw,unit=0,file=OVMF_CODE.fd,readonly=on \
     -drive if=pflash,format=raw,unit=1,file=OVMF_VARS.fd \

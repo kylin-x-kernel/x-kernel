@@ -29,6 +29,7 @@ tee = [
 ]
 tee_test_mock_user_access = []
 tee_test = ["tee"]
+sev = []
 
 [dependencies]
 kalloc.workspace = true

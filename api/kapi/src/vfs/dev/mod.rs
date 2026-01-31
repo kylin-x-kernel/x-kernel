@@ -3,6 +3,8 @@
 // See LICENSES for license details.
 
 //! Special devices
+#[cfg(feature = "sev")]
+mod csv_guest;
 #[cfg(all(feature = "dice", target_os = "none"))]
 mod dice;
 #[cfg(feature = "input")]
@@ -316,6 +318,17 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             NodeType::CharacterDevice,
             DeviceId::new(30, 0),
             Arc::new(rust_dice::DiceNodeInfo::new()),
+        ),
+    );
+
+    #[cfg(feature = "sev")]
+    root.add(
+        "csv-guest",
+        Device::new(
+            fs.clone(),
+            NodeType::CharacterDevice,
+            DeviceId::new(30, 0),
+            Arc::new(csv_guest::CsvGuestDevice::new(),
         ),
     );
 
