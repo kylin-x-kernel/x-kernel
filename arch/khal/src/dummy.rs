@@ -44,6 +44,10 @@ impl ConsoleIf for DummyConsole {
         unimplemented!()
     }
 
+    fn write_data_atomic(_bytes: &[u8]) {
+        unimplemented!()
+    }
+
     fn interrupt_id() -> Option<usize> {
         None
     }
@@ -60,6 +64,10 @@ impl HwMemory for DummyMem {
     }
 
     fn mmio_regions() -> &'static [MemRange] {
+        &[]
+    }
+
+    fn dma_regions() -> &'static [MemRange] {
         &[]
     }
 
