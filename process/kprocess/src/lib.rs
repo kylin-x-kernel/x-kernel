@@ -10,7 +10,6 @@
 
 extern crate alloc;
 
-#[cfg(unittest)]
 mod tests;
 
 mod process;
