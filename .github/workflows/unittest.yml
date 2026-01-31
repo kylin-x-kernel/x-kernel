@@ -58,6 +58,18 @@ jobs:
           fi
           rustup target list --installed | grep ${{ matrix.arch }}
 
+      - name: Download rootfs template
+        run: |
+          ROOTFS_VERSION=20250917
+          IMG_URL="https://github.com/Starry-OS/rootfs/releases/download/${ROOTFS_VERSION}"
+          
+          echo "Downloading rootfs-${{ matrix.arch }}.img..."
+          curl -f -L "${IMG_URL}/rootfs-${{ matrix.arch }}.img.xz" -o rootfs-${{ matrix.arch }}.img.xz
+          xz -d rootfs-${{ matrix.arch }}.img.xz
+          
+          cp rootfs-${{ matrix.arch }}.img disk.img
+          echo "Rootfs prepared: disk.img"
+
       - name: Build X-Kernel with unit tests
         run: |
           make ARCH=${{ matrix.arch }} UNITTEST=y defconfig
