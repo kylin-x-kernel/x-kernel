@@ -14,7 +14,22 @@ pub trait ConsoleIf {
     fn write_data(buf: &[u8]);
 
     /// Writes bytes to the console without locking.
-    fn write_data_atomic(buf: &[u8]);
+    ///
+    /// # Note
+    /// This default implementation exists **only to satisfy compilation** in the
+    /// device-interface macro framework. The function body here will **NOT** be
+    /// used at runtime.
+    ///
+    /// If this method is ever invoked, the platform must provide its own concrete
+    /// implementation in the corresponding `impl ConsoleIf`, otherwise a linker
+    /// error will occur.
+    ///
+    /// In other words, this default implementation does **not** provide a real
+    /// fallback behavior.
+    fn write_data_atomic(buf: &[u8]) {
+        Self::write_data(buf)
+    }
+
 
     /// Reads bytes from the platform console.
     fn read_data(buf: &mut [u8]) -> usize;
