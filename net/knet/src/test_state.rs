@@ -133,9 +133,7 @@ fn test_state_guard_transit_failure() {
     let lock = StateLock::new(State::Connecting);
     let guard = lock.lock(State::Connecting).unwrap();
 
-    let result = guard.transit(State::Connected, || {
-        Err(kerrno::KError::ConnectionRefused)
-    });
+    let result = guard.transit(State::Connected, || Err(kerrno::KError::ConnectionRefused));
     assert!(result.is_err());
 
     // State should rollback to Connecting (the original state)

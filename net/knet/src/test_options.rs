@@ -8,7 +8,7 @@ use core::time::Duration;
 
 use unittest::def_test;
 
-use crate::options::{UnixCredentials, GetSocketOption, SetSocketOption};
+use crate::options::{GetSocketOption, SetSocketOption, UnixCredentials};
 
 #[def_test]
 fn test_unix_credentials_construction() {
@@ -88,7 +88,7 @@ fn test_socket_option_variants_set() {
     let reuse_addr = true;
     let set_opt1 = SetSocketOption::ReuseAddress(&reuse_addr);
     let set_opt2 = set_opt1; // Test Copy trait
-    
+
     // Both should be valid
     match set_opt1 {
         SetSocketOption::ReuseAddress(val) => assert_eq!(*val, true),
