@@ -384,7 +384,7 @@ impl ShmManager {
 /// Global shared memory manager.
 pub static SHM_MANAGER: Mutex<ShmManager> = Mutex::new(ShmManager::new());
 
-#[cfg(unittest)]
+#[cfg(feature = "unittest")]
 /// Unit tests.
 pub mod tests_shm {
     use khal::paging::MappingFlags;

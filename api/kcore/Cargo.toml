@@ -56,5 +56,3 @@ memspace = { workspace = true, features = ["copy"] }
 tee = []
 unittest = ["dep:unittest"]
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(unittest)"] }

@@ -410,7 +410,7 @@ unsafe impl VirtMemIo for Vm {
     }
 }
 
-#[cfg(unittest)]
+#[cfg(feature = "unittest")]
 /// Unit tests.
 pub mod tests_mm {
     use osvm::MemError;

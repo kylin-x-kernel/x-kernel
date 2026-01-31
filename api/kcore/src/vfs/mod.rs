@@ -43,7 +43,7 @@ impl<T: FileNodeOps> From<Arc<T>> for NodeOpsMux {
     }
 }
 
-#[cfg(unittest)]
+#[cfg(feature = "unittest")]
 /// Unit tests.
 pub mod tests_vfs {
     use alloc::sync::Arc;

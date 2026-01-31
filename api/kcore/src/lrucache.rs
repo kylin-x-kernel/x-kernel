@@ -175,7 +175,7 @@ impl<'a, V, const CAP: usize> Iterator for LruIter<'a, V, CAP> {
     }
 }
 
-#[cfg(unittest)]
+#[cfg(feature = "unittest")]
 /// Unit tests.
 pub mod tests_lrucache {
     use unittest::def_test;
