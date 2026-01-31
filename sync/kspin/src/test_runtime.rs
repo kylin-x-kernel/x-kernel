@@ -27,7 +27,6 @@ impl BaseGuard for TestGuard {
 
 type TestSpinLock<T> = SpinLock<TestGuard, T>;
 
-
 #[def_test]
 fn test_spinlock_basic_lock_unlock() -> TestResult {
     let lock = SpinRaw::new(42);
@@ -63,7 +62,6 @@ fn test_spinlock_mutable_access() -> TestResult {
 
     TestResult::Ok
 }
-
 
 #[def_test]
 fn test_spinlock_zero_sized_type() -> TestResult {
@@ -159,7 +157,6 @@ fn test_spinlock_nested_data_structures() -> TestResult {
     TestResult::Ok
 }
 
-
 #[def_test]
 fn test_guard_acquire_release_tracking() -> TestResult {
     GUARD_COUNTER.store(0, Ordering::SeqCst);
@@ -250,7 +247,6 @@ fn test_try_lock_fails_when_locked() -> TestResult {
     TestResult::Ok
 }
 
-
 #[def_test]
 fn test_into_inner_extracts_value() -> TestResult {
     let lock = SpinRaw::new(alloc::vec![1, 2, 3, 4, 5]);
@@ -277,7 +273,6 @@ fn test_into_inner_with_modified_value() -> TestResult {
 
     TestResult::Ok
 }
-
 
 #[def_test]
 fn test_spinlock_with_drop_logic() -> TestResult {
@@ -355,7 +350,6 @@ fn test_spinlock_alternating_access_pattern() -> TestResult {
 
     TestResult::Ok
 }
-
 
 #[def_test]
 fn test_spinlock_array_type() -> TestResult {
