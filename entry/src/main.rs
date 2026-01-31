@@ -12,20 +12,19 @@ extern crate klogger;
 extern crate alloc;
 extern crate kruntime;
 
+use alloc::{borrow::ToOwned, vec::Vec};
+
 #[cfg(feature = "unittest")]
 mod unittest_simple;
 
-#[cfg(not(feature = "unittest"))]
+use kfs::FS_CONTEXT;
+
 mod entry;
 
 pub const CMDLINE: &[&str] = &["/bin/sh", "-c", include_str!("init.sh")];
 
-#[cfg(not(feature = "unittest"))]
 #[unsafe(no_mangle)]
 fn main() {
-    use alloc::{borrow::ToOwned, vec::Vec};
-
-    use kfs::FS_CONTEXT;
     kapi::init();
 
     let args = CMDLINE
@@ -34,6 +33,30 @@ fn main() {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let envs = [];
+
+    #[cfg(feature = "unittest")]
+    {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        use ktask::spawn;
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_clone = finished.clone();
+
+        spawn(move || {
+            if !unittest::test_run_ok() {
+                panic!("Unit tests failed");
+            }
+            finished_clone.store(true, Ordering::Release);
+        });
+
+        // Loop until tests are finished.
+        // We use yield_now() to let the scheduler run the test task.
+        while !finished.load(Ordering::Acquire) {
+            ktask::yield_now();
+        }
+    }
 
     let exit_code = entry::run_initproc(&args, &envs);
     info!("Init process exited with code: {exit_code:?}");
@@ -46,36 +69,6 @@ fn main() {
         .filesystem()
         .flush()
         .expect("Failed to flush rootfs");
-}
-
-#[cfg(feature = "unittest")]
-#[unsafe(no_mangle)]
-fn main() {
-    kapi::init();
-
-    use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    use ktask::spawn;
-
-    let finished = Arc::new(AtomicBool::new(false));
-    let finished_clone = finished.clone();
-
-    spawn(move || {
-        if !unittest::test_run_ok() {
-            panic!("Unit tests failed");
-        }
-        finished_clone.store(true, Ordering::Release);
-    });
-
-    // Loop until tests are finished.
-    // We use yield_now() to let the scheduler run the test task.
-    while !finished.load(Ordering::Acquire) {
-        ktask::yield_now();
-    }
-
-    info!("Unit tests passed, shutting down...");
-    khal::power::shutdown();
 }
 
 #[cfg(feature = "aarch64_crosvm_virt")]
