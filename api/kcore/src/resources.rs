@@ -93,6 +93,6 @@ pub mod tests_resources {
             limits[RLIMIT_STACK].current,
             crate::config::USER_STACK_SIZE as u64
         );
-        assert_eq!(limits[RLIMIT_NOFILE].current, AX_FILE_LIMIT as u64);
+        assert_eq!(limits[RLIMIT_NOFILE].current, FILE_LIMIT as u64);
     }
 }
