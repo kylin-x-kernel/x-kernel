@@ -12,7 +12,7 @@ use kerrno::{KError, KResult};
 use kio::{Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
-use spin::RwLock;
+use ksync::RwLock;
 
 use crate::{
     CMsgData, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,

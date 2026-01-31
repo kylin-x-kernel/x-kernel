@@ -35,8 +35,8 @@ log = { workspace = true }
 lru = "0.16.0"
 scope-local = { workspace = true }
 slab = { version = "0.4.9", default-features = false }
-spin = { workspace = true }
 unittest = { workspace = true}
+ktypes = { workspace = true }
 
 [dependencies.lwext4_rust]
 git = "https://github.com/Starry-OS/lwext4_rust.git"

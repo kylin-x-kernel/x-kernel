@@ -22,7 +22,7 @@ use kio::{SeekFrom, prelude::*};
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use lru::LruCache;
-use spin::RwLock;
+use ksync::RwLock;
 
 use super::FsContext;
 

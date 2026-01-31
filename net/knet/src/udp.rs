@@ -20,7 +20,7 @@ use smoltcp::{
     storage::PacketMetadata,
     wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
-use spin::RwLock;
+use ksync::RwLock;
 
 use crate::{
     RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx, SocketOps,

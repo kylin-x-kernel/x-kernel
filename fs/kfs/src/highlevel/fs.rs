@@ -16,7 +16,7 @@ use fs_ng_vfs::{
     path::{Path, PathBuf},
 };
 use ksync::Mutex;
-use spin::Once;
+use ktypes::Once;
 
 use crate::PathResolver;
 

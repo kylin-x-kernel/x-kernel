@@ -40,7 +40,6 @@ ouroboros = { version = "0.18.5", default-features = false }
 percpu = { workspace = true }
 scope-local.workspace = true
 slab.workspace = true
-spin.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
 osvm.workspace = true

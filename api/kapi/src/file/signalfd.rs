@@ -17,7 +17,7 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use spin::RwLock;
+use ksync::RwLock;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::file::{FileLike, IoDst, IoSrc};

@@ -81,7 +81,6 @@ rand_chacha = { version = "0.3", default-features = false, optional = true }
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 scope-local.workspace = true
 slab.workspace = true
-spin.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
 osvm.workspace = true

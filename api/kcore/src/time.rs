@@ -15,7 +15,7 @@ use ktask::{
     future::{block_on, timeout_at},
 };
 use lazy_static::lazy_static;
-use spin::Mutex;
+use ksync::Mutex;
 use strum::FromRepr;
 
 use crate::task::poll_timer;
