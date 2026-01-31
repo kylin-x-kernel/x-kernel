@@ -20,6 +20,7 @@ bitmaps = { version = "3.2", default-features = false, optional = true }
 log = "0.4"
 memaddr = { workspace = true }
 kerrno = { workspace = true, optional = true }
+unittest.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { workspace = true }

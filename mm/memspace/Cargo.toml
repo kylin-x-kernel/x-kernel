@@ -27,3 +27,4 @@ log = { workspace = true }
 memaddr = { workspace = true }
 memset = { workspace = true }
 page_table = { workspace = true, optional = true }
+unittest.workspace = true

@@ -44,9 +44,6 @@ use kerrno::KError;
 #[cfg(feature = "tlsf")]
 pub use tlsf::TlsfByteAllocator;
 
-#[cfg(feature = "alloc_engine_test")]
-pub mod test_unit_test;
-
 /// The error type used for allocation.
 #[derive(Debug)]
 pub enum AllocError {

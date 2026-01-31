@@ -175,72 +175,56 @@ impl<const PAGE_SIZE: usize> PageAllocator for BitmapPageAllocator<PAGE_SIZE> {
     }
 }
 
-#[cfg(all(feature = "alloc_engine_test", feature = "bitmap"))]
+#[cfg(all(unittest, feature = "bitmap"))]
 #[allow(missing_docs)]
 pub mod tests_bitmap {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::BitmapPageAllocator;
     use crate::{AllocError, BaseAllocator, PageAllocator};
 
     const PAGE_SIZE: usize = 4096;
 
-    test_fn! {
-        using TestResult;
-
-        fn test_bitmap_allocate_deallocate_one() {
-            let mut alloc = BitmapPageAllocator::<PAGE_SIZE>::new();
-            alloc.init_region(PAGE_SIZE, PAGE_SIZE * 2);
-            assert_eq!(alloc.total_pages(), 2);
-            let addr = alloc.allocate_pages(1, PAGE_SIZE).unwrap();
-            assert_eq!(alloc.used_pages(), 1);
-            alloc.deallocate_pages(addr, 1);
-            assert_eq!(alloc.used_pages(), 0);
-        }
+    #[def_test]
+    fn test_bitmap_allocate_deallocate_one() {
+        let mut alloc = BitmapPageAllocator::<PAGE_SIZE>::new();
+        alloc.init_region(PAGE_SIZE, PAGE_SIZE * 2);
+        assert_eq!(alloc.total_pages(), 2);
+        let addr = alloc.allocate_pages(1, PAGE_SIZE).unwrap();
+        assert_eq!(alloc.used_pages(), 1);
+        alloc.deallocate_pages(addr, 1);
+        assert_eq!(alloc.used_pages(), 0);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_bitmap_allocate_invalid_align() {
-            let mut alloc = BitmapPageAllocator::<PAGE_SIZE>::new();
-            alloc.init_region(PAGE_SIZE, PAGE_SIZE * 2);
-            let res = alloc.allocate_pages(1, 3);
-            assert!(matches!(res, Err(AllocError::InvalidInput)));
-        }
+    #[def_test]
+    fn test_bitmap_allocate_invalid_align() {
+        let mut alloc = BitmapPageAllocator::<PAGE_SIZE>::new();
+        alloc.init_region(PAGE_SIZE, PAGE_SIZE * 2);
+        let res = alloc.allocate_pages(1, 3);
+        assert!(matches!(res, Err(AllocError::InvalidInput)));
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_bitmap_allocate_pages_at() {
-            let mut alloc = BitmapPageAllocator::<PAGE_SIZE>::new();
-            alloc.init_region(PAGE_SIZE, PAGE_SIZE * 4);
-            let base = PAGE_SIZE * 2;
-            let addr = alloc.allocate_pages_at(base, 1, PAGE_SIZE).unwrap();
-            assert_eq!(addr, base);
-            alloc.deallocate_pages(addr, 1);
-            assert_eq!(alloc.used_pages(), 0);
-        }
-    }
-
-    tests_name! {
-        TEST_BITMAP;
-        test_bitmap_allocate_deallocate_one,
-        test_bitmap_allocate_invalid_align,
-        test_bitmap_allocate_pages_at,
+    #[def_test]
+    fn test_bitmap_allocate_pages_at() {
+        let mut alloc = BitmapPageAllocator::<PAGE_SIZE>::new();
+        alloc.init_region(PAGE_SIZE, PAGE_SIZE * 4);
+        let base = PAGE_SIZE * 2;
+        let addr = alloc.allocate_pages_at(base, 1, PAGE_SIZE).unwrap();
+        assert_eq!(addr, base);
+        alloc.deallocate_pages(addr, 1);
+        assert_eq!(alloc.used_pages(), 0);
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::def_test;
+
     use super::*;
 
     const PAGE_SIZE: usize = 4096;
 
-    #[test]
+    #[def_test]
     fn test_bitmap_page_allocator_one_page() {
         let mut allocator = BitmapPageAllocator::<PAGE_SIZE>::new();
         allocator.init_region(PAGE_SIZE, PAGE_SIZE);

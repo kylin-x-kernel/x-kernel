@@ -87,51 +87,37 @@ impl ByteAllocator for TlsfByteAllocator {
     }
 }
 
-#[cfg(all(feature = "alloc_engine_test", feature = "tlsf"))]
+#[cfg(all(unittest, feature = "tlsf"))]
 #[allow(missing_docs)]
 pub mod tests_tlsf {
     use core::alloc::Layout;
 
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::TlsfByteAllocator;
     use crate::{BaseAllocator, ByteAllocator};
 
-    test_fn! {
-        using TestResult;
-
-        fn test_tlsf_allocate_deallocate() {
-            let mut alloc = TlsfByteAllocator::new();
-            let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
-            let base = heap.as_mut_ptr() as usize;
-            let size = heap.len();
-            alloc.init_region(base, size);
-            let layout = Layout::from_size_align(64, 8).unwrap();
-            let ptr = alloc.allocate(layout).unwrap();
-            assert!(alloc.used_bytes() >= 64);
-            alloc.deallocate(ptr, layout);
-            assert!(alloc.used_bytes() <= alloc.total_bytes());
-        }
+    #[def_test]
+    fn test_tlsf_allocate_deallocate() {
+        let mut alloc = TlsfByteAllocator::new();
+        let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
+        let base = heap.as_mut_ptr() as usize;
+        let size = heap.len();
+        alloc.init_region(base, size);
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let ptr = alloc.allocate(layout).unwrap();
+        assert!(alloc.used_bytes() >= 64);
+        alloc.deallocate(ptr, layout);
+        assert!(alloc.used_bytes() <= alloc.total_bytes());
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_tlsf_available_bytes() {
-            let mut alloc = TlsfByteAllocator::new();
-            let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
-            let base = heap.as_mut_ptr() as usize;
-            let size = heap.len();
-            alloc.init_region(base, size);
-            assert_eq!(alloc.total_bytes(), alloc.available_bytes());
-        }
-    }
-
-    tests_name! {
-        TEST_TLSF;
-        test_tlsf_allocate_deallocate,
-        test_tlsf_available_bytes,
+    #[def_test]
+    fn test_tlsf_available_bytes() {
+        let mut alloc = TlsfByteAllocator::new();
+        let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
+        let base = heap.as_mut_ptr() as usize;
+        let size = heap.len();
+        alloc.init_region(base, size);
+        assert_eq!(alloc.total_bytes(), alloc.available_bytes());
     }
 }

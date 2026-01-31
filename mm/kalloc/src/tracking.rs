@@ -91,43 +91,29 @@ pub fn allocations_in(range: Range<u64>, visitor: impl FnMut(&AllocationInfo)) {
     });
 }
 
-#[cfg(feature = "kalloc_test")]
+#[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_tracking {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::{allocations_in, disable_tracking, enable_tracking, tracking_enabled};
 
-    test_fn! {
-        using TestResult;
-
-        fn test_tracking_toggle() {
-            disable_tracking();
-            assert!(!tracking_enabled());
-            enable_tracking();
-            assert!(tracking_enabled());
-            disable_tracking();
-            assert!(!tracking_enabled());
-        }
+    #[def_test]
+    fn test_tracking_toggle() {
+        disable_tracking();
+        assert!(!tracking_enabled());
+        enable_tracking();
+        assert!(tracking_enabled());
+        disable_tracking();
+        assert!(!tracking_enabled());
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_allocations_in_empty() {
-            enable_tracking();
-            let mut count = 0usize;
-            allocations_in(0..0, |_| count += 1);
-            assert_eq!(count, 0);
-            disable_tracking();
-        }
-    }
-
-    tests_name! {
-        TEST_TRACKING;
-        test_tracking_toggle,
-        test_allocations_in_empty,
+    #[def_test]
+    fn test_allocations_in_empty() {
+        enable_tracking();
+        let mut count = 0usize;
+        allocations_in(0..0, |_| count += 1);
+        assert_eq!(count, 0);
+        disable_tracking();
     }
 }
