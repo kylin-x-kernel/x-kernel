@@ -14,6 +14,9 @@ mod node;
 pub mod path;
 mod types;
 
+mod test_path;
+mod test_types;
+
 pub use fs::*;
 pub use mount::*;
 pub use node::*;
@@ -23,8 +26,3 @@ pub type VfsError = kerrno::KError;
 pub type VfsResult<T> = Result<T, VfsError>;
 
 use spin::{Mutex, MutexGuard};
-
-#[cfg(feature = "unittest")]
-mod test_path;
-#[cfg(feature = "unittest")]
-mod test_types;
