@@ -14,9 +14,7 @@ pub trait ConsoleIf {
     fn write_data(buf: &[u8]);
 
     /// Writes bytes to the console without locking.
-    fn write_data_atomic(buf: &[u8]) {
-        Self::write_data(buf)
-    }
+    fn write_data_atomic(buf: &[u8]);
 
     /// Reads bytes from the platform console.
     fn read_data(buf: &mut [u8]) -> usize;
