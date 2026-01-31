@@ -63,13 +63,13 @@ fn main() {
 
     spawn(move || {
         let test_passed = unittest::test_run_ok();
-        
+
         if test_passed {
             info!("=== UNITTEST_STATUS: ALL_TESTS_PASSED ===");
         } else {
             error!("=== UNITTEST_STATUS: TESTS_FAILED ===");
         }
-        
+
         finished_clone.store(true, Ordering::Release);
     });
 
