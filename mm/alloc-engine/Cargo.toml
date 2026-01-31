@@ -30,7 +30,6 @@ kerrno = ["dep:kerrno"]
 [dependencies]
 kerrno = { workspace = true, optional = true }
 cfg-if = "1.0"
-log.workspace = true
 rlsf = { version = "0.2", optional = true }
 buddy_system_allocator = { version = "0.10", default-features = false, optional = true }
 slab_allocator = { git = "https://github.com/arceos-org/slab_allocator.git", tag = "v0.3.1", optional = true }
