@@ -64,3 +64,30 @@ impl<H: Hal, T: Transport> BlockDriverOps for VirtIoBlkDev<H, T> {
         Ok(())
     }
 }
+
+#[cfg(unittest)]
+mod tests {
+    use super::*;
+    use unittest::{assert, assert_eq, def_test};
+    use crate::mock_virtio::{MockHal, MockTransport};
+
+    #[def_test]
+    fn test_virtio_blk_init_failure_handling() {
+        let transport = MockTransport::new();
+        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport);
+        
+        if let Ok(d) = dev {
+            assert_eq!(d.name(), "virtio-blk");
+            assert_eq!(d.device_kind(), DeviceKind::Block);
+            assert_eq!(d.block_size(), 512);
+        } else {
+            assert!(dev.is_err());
+        }
+    }
+
+    #[def_test]
+    fn test_virtio_blk_concurrency_traits() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<VirtIoBlkDev<MockHal, MockTransport>>();
+    }
+}

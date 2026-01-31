@@ -29,7 +29,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
     pub fn try_new(transport: T) -> DriverResult<Self> {
-        let mut virtio = InnerDev::new(transport).unwrap();
+        let mut virtio = InnerDev::new(transport).map_err(as_driver_error)?;
         let name = virtio.name().unwrap_or_else(|_| "<unknown>".to_owned());
         let device_id = virtio.ids().map_err(as_driver_error)?;
         let device_id = InputDeviceId {
@@ -89,5 +89,26 @@ impl<H: Hal, T: Transport> InputDriverOps for VirtIoInputDev<H, T> {
                 value: e.value,
             })
             .ok_or(DriverError::WouldBlock)
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use super::*;
+    use unittest::{assert, assert_eq, def_test};
+    use crate::mock_virtio::{MockHal, MockTransport};
+
+    #[def_test]
+    fn test_virtio_input_init_failure() {
+        let mut transport = MockTransport::new();
+        transport.device_type = virtio_drivers::transport::DeviceType::Input;
+        let dev = VirtIoInputDev::<MockHal, MockTransport>::try_new(transport);
+        assert!(dev.is_err());
+    }
+
+    #[def_test]
+    fn test_virtio_input_traits() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<VirtIoInputDev<MockHal, MockTransport>>();
     }
 }
