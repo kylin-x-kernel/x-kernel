@@ -23,6 +23,11 @@ impl HwMemory for HwMemoryImpl {
     fn mmio_regions() -> &'static [RawRange] {
         &MMIO_RANGES
     }
+
+    fn dma_regions() -> &'static [MemRange] {
+        &[]
+    }
+
     fn p2v(paddr: PhysAddr) -> VirtAddr {
         va!(paddr.as_usize() + PHYS_VIRT_OFFSET)
     }
