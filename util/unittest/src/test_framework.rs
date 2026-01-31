@@ -350,76 +350,113 @@ impl Default for TestRunner {
     }
 }
 
+// Helper functions for assertion macros (hidden from docs)
+// These allow assertions to work without the caller needing to depend on `log`
+
+#[doc(hidden)]
+pub fn __log_assert_eq_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
+    left_expr: &str,
+    left_val: &T,
+    right_expr: &str,
+    right_val: &U,
+) {
+    error!(
+        "assert_eq! failed: {} ({:x?}) == {} ({:x?})",
+        left_expr, left_val, right_expr, right_val
+    );
+}
+
+#[doc(hidden)]
+pub fn __log_assert_ne_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
+    left_expr: &str,
+    left_val: &T,
+    right_expr: &str,
+    right_val: &U,
+) {
+    error!(
+        "assert_ne! failed: {} ({:x?}) != {} ({:x?})",
+        left_expr, left_val, right_expr, right_val
+    );
+}
+
+#[doc(hidden)]
+pub fn __log_assert_failure(cond_expr: &str) {
+    error!("assert! failed: {}", cond_expr);
+}
+
 // Basic assertion macros
 #[macro_export]
 macro_rules! assert_eq {
-    ($left:expr, $right:expr) => {
-        if $left != $right {
-            // Output the expression text and actual values at call time
-            error!(
-                "assert_eq! failed: {} ({:x?}) == {} ({:x?})",
+    ($left:expr, $right:expr) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if left_val != right_val {
+            $crate::__log_assert_eq_failure(
                 stringify!($left),
-                $left,
+                left_val,
                 stringify!($right),
-                $right
+                right_val,
             );
-            return TestResult::Failed;
+            return $crate::TestResult::Failed;
         }
-    };
-    ($left:expr, $right:expr, $($arg:tt)*) => {
-        if $left != $right {
-            error!(
-                "assert_eq! failed: {} ({:x?}) == {} ({:x?})",
+    }};
+    ($left:expr, $right:expr, $($arg:tt)*) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if left_val != right_val {
+            $crate::__log_assert_eq_failure(
                 stringify!($left),
-                $left,
+                left_val,
                 stringify!($right),
-                $right
+                right_val,
             );
-            return TestResult::Failed;
+            return $crate::TestResult::Failed;
         }
-    };
+    }};
 }
 
 #[macro_export]
 macro_rules! assert_ne {
-    ($left:expr, $right:expr) => {
-        if $left == $right {
-            error!(
-                "assert_ne! failed: {} ({:x?}) == {} ({:x?})",
+    ($left:expr, $right:expr) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if left_val == right_val {
+            $crate::__log_assert_ne_failure(
                 stringify!($left),
-                $left,
+                left_val,
                 stringify!($right),
-                $right
+                right_val,
             );
-            return TestResult::Failed;
+            return $crate::TestResult::Failed;
         }
-    };
-    ($left:expr, $right:expr, $($arg:tt)*) => {
-        if $left == $right {
-            error!(
-                "assert_ne! failed: {} ({:x?}) == {} ({:x?})",
+    }};
+    ($left:expr, $right:expr, $($arg:tt)*) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if left_val == right_val {
+            $crate::__log_assert_ne_failure(
                 stringify!($left),
-                $left,
+                left_val,
                 stringify!($right),
-                $right
+                right_val,
             );
-            return TestResult::Failed;
+            return $crate::TestResult::Failed;
         }
-    };
+    }};
 }
 
 #[macro_export]
 macro_rules! assert {
     ($cond:expr) => {
         if !$cond {
-            error!("assert! failed: {}", stringify!($cond));
-            return TestResult::Failed;
+            $crate::__log_assert_failure(stringify!($cond));
+            return $crate::TestResult::Failed;
         }
     };
     ($cond:expr, $($arg:tt)*) => {
         if !$cond {
-            error!("assert! failed: {}", stringify!($cond));
-            return TestResult::Failed;
+            $crate::__log_assert_failure(stringify!($cond));
+            return $crate::TestResult::Failed;
         }
     };
 }

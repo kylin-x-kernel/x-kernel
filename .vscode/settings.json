@@ -7,9 +7,9 @@
     "entry/Cargo.toml",
   ],
   "rust-analyzer.cargo.features": [
-    "qemu", "smp"
+    "qemu", "smp", "unittest"
   ],
   "rust-analyzer.cargo.extraEnv": {
-    "RUSTFLAGS": "--check-cfg cfg(unittest)"
+    "RUSTFLAGS": "--cfg unittest --check-cfg cfg(unittest)"
   }
 }

@@ -17,6 +17,10 @@ pub mod test_framework_basic;
 pub use macros::{def_test, mod_test};
 // Re-export the test runner function
 pub use runner::{test_run, test_run_ok};
+// Re-export hidden helper functions for assertion macros
+// These are used internally by the assertion macros and should not be called directly
+#[doc(hidden)]
+pub use test_framework::{__log_assert_eq_failure, __log_assert_failure, __log_assert_ne_failure};
 // Re-export commonly used types
 pub use test_framework::{TestDescriptor, TestRunner, TestStats, Testable};
 pub use test_framework_basic::TestResult;

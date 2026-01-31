@@ -57,7 +57,7 @@ fn test_ignored() {
 // More complex test examples
 // ============================================================================
 
-#[mod_test]
+#[cfg(unittest)]
 mod math_tests {
     use unittest::def_test;
     /// Test Vec operations

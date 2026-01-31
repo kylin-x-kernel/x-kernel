@@ -9,6 +9,9 @@
 
 extern crate alloc;
 
+#[cfg(unittest)]
+mod tests;
+
 use core::{
     mem::MaybeUninit,
     task::{Context, Waker},
