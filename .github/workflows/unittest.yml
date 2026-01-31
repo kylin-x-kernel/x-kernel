@@ -38,6 +38,11 @@ jobs:
         with:
           shared-key: xkernel-unittest-${{ matrix.arch }}
 
+      - name: Install musl toolchain for ${{ matrix.arch }}
+        uses: arceos-org/setup-musl@v1
+        with:
+          arch: ${{ matrix.arch }}
+
       - name: Install QEMU
         uses: arceos-org/setup-qemu@v1
         with:
