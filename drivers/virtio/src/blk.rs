@@ -67,15 +67,16 @@ impl<H: Hal, T: Transport> BlockDriverOps for VirtIoBlkDev<H, T> {
 
 #[cfg(unittest)]
 mod tests {
-    use super::*;
     use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
     use crate::mock_virtio::{MockHal, MockTransport};
 
     #[def_test]
     fn test_virtio_blk_init_failure_handling() {
         let transport = MockTransport::new();
         let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport);
-        
+
         if let Ok(d) = dev {
             assert_eq!(d.name(), "virtio-blk");
             assert_eq!(d.device_kind(), DeviceKind::Block);

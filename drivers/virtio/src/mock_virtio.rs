@@ -1,8 +1,12 @@
 use core::{cell::RefCell, ptr::NonNull};
-use virtio_drivers::{BufferDirection, Hal, PhysAddr, Result, transport::{DeviceStatus, Transport, DeviceType}};
+
+use virtio_drivers::{
+    BufferDirection, Hal, PhysAddr, Result,
+    transport::{DeviceStatus, DeviceType, Transport},
+};
 
 extern crate alloc;
-use alloc::alloc::{alloc, dealloc, Layout};
+use alloc::alloc::{Layout, alloc, dealloc};
 
 pub struct MockHal;
 
@@ -62,15 +66,13 @@ impl Transport for MockTransport {
         self.features
     }
 
-    fn write_driver_features(&mut self, _features: u64) {
-    }
+    fn write_driver_features(&mut self, _features: u64) {}
 
     fn max_queue_size(&mut self, _queue: u16) -> u32 {
         32
     }
 
-    fn notify(&mut self, _queue: u16) {
-    }
+    fn notify(&mut self, _queue: u16) {}
 
     fn get_status(&self) -> DeviceStatus {
         *self.status.borrow()
@@ -80,8 +82,7 @@ impl Transport for MockTransport {
         *self.status.borrow_mut() = status;
     }
 
-    fn set_guest_page_size(&mut self, _guest_page_size: u32) {
-    }
+    fn set_guest_page_size(&mut self, _guest_page_size: u32) {}
 
     fn requires_legacy_layout(&self) -> bool {
         false
@@ -97,8 +98,7 @@ impl Transport for MockTransport {
     ) {
     }
 
-    fn queue_unset(&mut self, _queue: u16) {
-    }
+    fn queue_unset(&mut self, _queue: u16) {}
 
     fn queue_used(&mut self, _queue: u16) -> bool {
         false
