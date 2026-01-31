@@ -5,10 +5,6 @@
 //! Memory address types, ranges, and alignment utilities.
 #![cfg_attr(not(test), no_std)]
 
-#[allow(unused_imports)]
-#[macro_use]
-extern crate log;
-
 mod units;
 
 pub use self::units::{

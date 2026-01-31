@@ -13,4 +13,3 @@ categories.workspace = true
 
 [dependencies]
 unittest.workspace = true
-log.workspace = true
