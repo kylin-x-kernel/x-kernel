@@ -50,4 +50,4 @@ jobs:
           arch: ${{ matrix.arch }}
 
       - name: Clippy
-        run: RUSTFLAGS="--check-cfg=cfg(unittest)" cargo clippy -p entry --target aarch64-unknown-none-softfloat -F qemu -- -D warnings
+        run: RUSTFLAGS="--cfg unittest --check-cfg=cfg(unittest)" cargo clippy -p entry --target ${{ matrix.target }} -F qemu -- -D warnings
