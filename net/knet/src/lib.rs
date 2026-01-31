@@ -37,6 +37,9 @@ pub mod unix;
 pub mod vsock;
 mod wrapper;
 
+mod test_options;
+mod test_state;
+
 use alloc::{borrow::ToOwned, boxed::Box};
 
 use kdriver::{DeviceContainer, prelude::*};

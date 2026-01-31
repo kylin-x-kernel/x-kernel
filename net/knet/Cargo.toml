@@ -13,6 +13,7 @@ documentation.workspace = true
 vsock = ["kdriver/vsock"]
 
 [dependencies]
+unittest = { workspace = true }
 platconfig = { workspace = true }
 kdriver = { workspace = true, features = ["net"] }
 khal = { workspace = true }
