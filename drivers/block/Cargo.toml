@@ -22,3 +22,4 @@ bcm2835-sdhci = { git = "https://github.com/lhw2002426/bcm2835-sdhci.git", rev =
 log = { workspace = true }
 simple-sdmmc = { git = "https://github.com/Starry-OS/simple-sdmmc.git", rev = "9e6420c", optional = true }
 simple-ahci = { git = "https://github.com/Starry-OS/simple-ahci.git", rev = "36d0979", optional = true }
+unittest = { workspace = true }
