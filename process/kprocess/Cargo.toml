@@ -12,6 +12,7 @@ description = "Process management for X-Kernel"
 kspin = { workspace = true }
 lazyinit = "0.2.1"
 weak-map = "0.1"
+unittest.workspace = true
 
 [dev-dependencies]
 ctor = "0.4.1"

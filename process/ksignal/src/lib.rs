@@ -9,6 +9,9 @@
 extern crate log;
 extern crate alloc;
 
+#[cfg(unittest)]
+mod tests;
+
 pub mod api;
 pub mod arch;
 

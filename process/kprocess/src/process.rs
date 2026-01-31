@@ -283,7 +283,7 @@ impl Process {
 
         if let Some(parent) = parent {
             parent.children.lock().insert(pid, process.clone());
-        } else {
+        } else if INIT_PROC.get().is_none() {
             INIT_PROC.init_once(process.clone());
         }
 
@@ -304,7 +304,7 @@ impl Process {
     }
 }
 
-static INIT_PROC: LazyInit<Arc<Process>> = LazyInit::new();
+pub(crate) static INIT_PROC: LazyInit<Arc<Process>> = LazyInit::new();
 
 /// Gets the init process.
 ///

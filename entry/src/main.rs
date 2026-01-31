@@ -38,7 +38,6 @@ fn main() {
     {
         use alloc::sync::Arc;
         use core::sync::atomic::{AtomicBool, Ordering};
-
         use ktask::spawn;
 
         let finished = Arc::new(AtomicBool::new(false));
