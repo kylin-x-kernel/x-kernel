@@ -95,6 +95,8 @@
 
 mod guard;
 mod lock;
+
+mod test_runtime;
 #[cfg(test)]
 mod tests;
 
