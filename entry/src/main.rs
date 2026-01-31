@@ -62,9 +62,14 @@ fn main() {
     let finished_clone = finished.clone();
 
     spawn(move || {
-        if !unittest::test_run_ok() {
-            panic!("Unit tests failed");
+        let test_passed = unittest::test_run_ok();
+        
+        if test_passed {
+            info!("=== UNITTEST_STATUS: ALL_TESTS_PASSED ===");
+        } else {
+            error!("=== UNITTEST_STATUS: TESTS_FAILED ===");
         }
+        
         finished_clone.store(true, Ordering::Release);
     });
 
@@ -74,7 +79,7 @@ fn main() {
         ktask::yield_now();
     }
 
-    info!("Unit tests passed, shutting down...");
+    info!("Unit tests completed, shutting down...");
     khal::power::shutdown();
 }
 

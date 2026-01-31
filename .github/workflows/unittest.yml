@@ -79,22 +79,39 @@ jobs:
         run: |
           timeout 120 make ARCH=${{ matrix.arch }} UNITTEST=y SMP=${{ env.SMP }} VSOCK=n run | tee unittest-output.log || true
           
+          if grep -q "UNITTEST_STATUS: TESTS_FAILED" unittest-output.log; then
+            echo "❌ Unit tests failed!"
+            echo "::error::Unit tests failed - see logs for details"
+            exit 1
+          fi
+          
+          # Check for test success status message
+          if grep -q "UNITTEST_STATUS: ALL_TESTS_PASSED" unittest-output.log; then
+            echo "✅ Unit tests passed!"
+            exit 0
+          fi
+          
+          # Check for kernel panic
+          if grep -q "panicked at" unittest-output.log; then
+            echo "❌ Kernel panicked during unit tests!"
+            echo "::error::Kernel panic detected"
+            exit 1
+          fi
+          
+          # Fallback: check old-style test result output
           if grep -q "test result:.*FAILED" unittest-output.log; then
-            echo "Unit tests failed!"
+            echo "❌ Unit tests failed (legacy detection)!"
+            echo "::error::Unit tests failed"
             exit 1
           fi
           
           if grep -q "test result: ok" unittest-output.log; then
-            echo "Unit tests passed!"
+            echo "✅ Unit tests passed (legacy detection)!"
             exit 0
           fi
           
-          if grep -q "panicked at" unittest-output.log; then
-            echo "Kernel panicked during unit tests!"
-            exit 1
-          fi
-          
-          echo "Unable to determine test result from output"
+          echo "⚠️  Unable to determine test result from output"
+          echo "::warning::Test status unclear - check logs"
           exit 1
 
       - name: Upload test logs
