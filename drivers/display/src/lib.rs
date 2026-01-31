@@ -61,3 +61,5 @@ pub trait DisplayDriverOps: DriverOps {
     /// Flush framebuffer to the screen.
     fn flush(&mut self) -> DriverResult;
 }
+
+mod tests;
