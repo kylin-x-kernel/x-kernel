@@ -1,4 +1,3 @@
-//! Example tests exercising the custom test framework.
 #![allow(dead_code)]
 
 //! Example unit tests demonstrating the test framework usage
@@ -23,6 +22,7 @@ fn manual_test_example() -> TestResult {
 
 static MANUAL_TESTS: &[TestDescriptor] = &[TestDescriptor::new(
     "manual_test_example",
+    module_path!(),
     manual_test_example,
     false,
     false,

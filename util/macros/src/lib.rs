@@ -2,7 +2,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{Error, Item, ItemFn, parse_macro_input};
+use syn::{Error, Item, ItemFn, parse_macro_input, ItemMod};
 
 /// Register a constructor function to be called before `main`.
 ///
@@ -65,6 +65,61 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
     }
 }
 
+/// Marks a module as test-only code.
+///
+/// This is equivalent to `#[cfg(unittest)]` but more readable.
+/// The module will only be compiled when `--test` flag is passed to the build.
+///
+/// # Example
+///
+/// ```rust
+/// use unittest::{mod_test, def_test};
+///
+/// #[mod_test]
+/// mod tests {
+///     use super::*;
+///     
+///     #[def_test]
+///     fn test_addition() {
+///         assert_eq!(2 + 2, 4);
+///     }
+///     
+///     #[def_test]
+///     fn test_string() {
+///         assert_eq!("hello", "hello");
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let module = parse_macro_input!(item as ItemMod);
+    
+    let mod_attrs = &module.attrs;
+    let mod_vis = &module.vis;
+    let mod_name = &module.ident;
+    
+    let output = if let Some((brace, items)) = &module.content {
+        // Module with body
+        let _ = brace; // suppress unused warning
+        quote! {
+            #[cfg(unittest)]
+            #(#mod_attrs)*
+            #mod_vis mod #mod_name {
+                #(#items)*
+            }
+        }
+    } else {
+        // Module without body (e.g., `mod foo;`)
+        quote! {
+            #[cfg(unittest)]
+            #(#mod_attrs)*
+            #mod_vis mod #mod_name;
+        }
+    };
+    
+    output.into()
+}
+
 /// Marks a function as a unit test.
 ///
 /// # Example
@@ -81,7 +136,6 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 ///
 /// The test function can optionally return `TestResult`. If it doesn't return anything,
 /// the function body is wrapped to return `TestResult::Ok` on success.
-/// This allows using `assert_eq!` and other assertion macros that use `return`.
 ///
 /// # Attributes
 /// - `#[def_test]` - Normal test
@@ -90,7 +144,11 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
+    generate_function_test(attr, input)
+}
 
+/// Generate test code for a single function
+fn generate_function_test(attr: TokenStream, input: ItemFn) -> TokenStream {
     // Parse attributes
     let attr_str = attr.to_string();
     let ignore = attr_str.contains("ignore");
@@ -136,18 +194,15 @@ pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Use linker section to collect test descriptors
     // The linker script defines __unittest_start and __unittest_end symbols
-    // The generated code is gated by #[cfg(unittest)] so tests
-    // are only compiled when --cfg unittest is passed via RUSTFLAGS
     let output = quote! {
-        #[cfg(unittest)]
         #test_fn
 
-        #[cfg(unittest)]
         #[used]
         #[unsafe(link_section = ".unittest")]
         #[allow(non_upper_case_globals)]
         static #descriptor_name: unittest::TestDescriptor = unittest::TestDescriptor::new(
             #fn_name_str,
+            module_path!(),
             #fn_name,
             #should_panic_val,
             #ignore_val,

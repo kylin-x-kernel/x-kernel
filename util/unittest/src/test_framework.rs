@@ -5,7 +5,9 @@
 //! This module implements a custom unit test framework for Rust code.
 //! The framework supports manual test case registration and provides basic assertion functionality.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::vec::Vec;
 use core::{
     fmt::Write,
     sync::atomic::{AtomicBool, Ordering},
@@ -77,6 +79,7 @@ pub trait Testable {
 #[repr(C)]
 pub struct TestDescriptor {
     pub name: &'static str,
+    pub module: &'static str,
     pub test_fn: fn() -> TestResult,
     pub should_panic: bool,
     pub ignore: bool,
@@ -85,16 +88,22 @@ pub struct TestDescriptor {
 impl TestDescriptor {
     pub const fn new(
         name: &'static str,
+        module: &'static str,
         test_fn: fn() -> TestResult,
         should_panic: bool,
         ignore: bool,
     ) -> Self {
         Self {
             name,
+            module,
             test_fn,
             should_panic,
             ignore,
         }
+    }
+
+    pub fn module(&self) -> &'static str {
+        self.module
     }
 }
 
@@ -182,8 +191,8 @@ impl TestRunner {
     pub fn run_test(&mut self, test: &TestDescriptor) -> TestResult {
         self.output.clear();
 
-        // Print test start information
-        write!(self.output, "  Running test: {}", test.name()).ok();
+        // Print test start information with module path
+        write!(self.output, "  Running test: {}:{}", test.module(), test.name()).ok();
         self.print_message(self.output.as_str());
 
         // Run the test
@@ -227,6 +236,74 @@ impl TestRunner {
         if self.stats.failed > 0 {
             TEST_FAILED_FLAG.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Run tests grouped by module
+    /// Tests from the same module are run together
+    pub fn run_tests_grouped(
+        &mut self,
+        name: &str,
+        grouped: &BTreeMap<&'static str, Vec<&TestDescriptor>>,
+    ) {
+        self.stats = TestStats::new();
+
+        self.print_message("================================");
+        self.print_message(format!("Starting unit tests [{}]...", name).as_str());
+        self.print_message(format!("  {} module(s) found", grouped.len()).as_str());
+        self.print_message("================================");
+
+        for (module, tests) in grouped {
+            // Print module header
+            self.print_message("");
+            self.print_message(format!("  [{}] ({} tests)", module, tests.len()).as_str());
+            self.print_message("  --------------------------------");
+
+            // Run all tests in this module
+            for test in tests {
+                self.run_test_simple(test);
+            }
+        }
+
+        self.print_message("");
+        // Print final statistics
+        self.print_final_stats();
+
+        // Set global flag if any test failed
+        if self.stats.failed > 0 {
+            TEST_FAILED_FLAG.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Run a single test without printing module info (for grouped output)
+    fn run_test_simple(&mut self, test: &TestDescriptor) -> TestResult {
+        self.output.clear();
+
+        // Print test name only
+        write!(self.output, "    {}", test.name()).ok();
+        self.print_message(self.output.as_str());
+
+        // Run the test
+        let result = test.run();
+
+        // Print test result
+        self.output.clear();
+        match result {
+            TestResult::Ok => {
+                write!(self.output, "      => OK").ok();
+            }
+            TestResult::Failed => {
+                write!(self.output, "      => FAILED").ok();
+            }
+            TestResult::Ignored => {
+                write!(self.output, "      => IGNORED").ok();
+            }
+        }
+        self.print_message(self.output.as_str());
+
+        // Update statistics
+        self.stats.add_result(result);
+
+        result
     }
 
     pub fn print_final_stats(&mut self) {

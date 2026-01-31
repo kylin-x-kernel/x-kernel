@@ -3,7 +3,7 @@
 //! This module demonstrates how to use the `#[unittest]` macro to define
 //! unit tests that are automatically collected and can be run with `unittest::test_run()`.
 
-use unittest::{TestResult, assert, assert_eq, assert_ne, def_test};
+use unittest::{TestResult, assert, assert_eq, assert_ne, def_test, mod_test};
 
 // ============================================================================
 // Basic test examples using #[unittest] macro
@@ -53,21 +53,25 @@ fn test_ignored() {
 // More complex test examples
 // ============================================================================
 
-/// Test Vec operations
-#[def_test]
-fn test_vec_push() {
-    let mut v = alloc::vec::Vec::new();
-    v.push(1);
-    v.push(2);
-    v.push(3);
-    assert_eq!(v.len(), 3);
-    assert_eq!(v[0], 1);
-    assert_eq!(v[2], 3);
-}
+#[mod_test]
+mod math_tests {
+    use unittest::def_test;
+    /// Test Vec operations
+    #[def_test]
+    fn test_vec_push() {
+        let mut v = alloc::vec::Vec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], 1);
+        assert_eq!(v[2], 3);
+    }
 
-// Test Box allocation
-#[def_test]
-fn test_box_alloc() {
-    let boxed = alloc::boxed::Box::new(42u64);
-    assert_eq!(*boxed, 42);
+    // Test Box allocation
+    #[def_test]
+    fn test_box_alloc() {
+        let boxed = alloc::boxed::Box::new(42u64);
+        assert_eq!(*boxed, 42);
+    }
 }

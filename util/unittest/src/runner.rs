@@ -3,9 +3,10 @@
 //! This module provides the `test_run()` function that automatically discovers
 //! and runs all tests marked with `#[unittest]`.
 
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use crate::test_framework::{TestDescriptor, TestRunner, TestStats, TEST_FAILED_FLAG};
 use core::sync::atomic::Ordering;
-
-use crate::test_framework::{TEST_FAILED_FLAG, TestDescriptor, TestRunner, TestStats};
 
 // External symbols defined in the linker script
 #[allow(improper_ctypes)]
@@ -28,9 +29,21 @@ fn get_tests() -> &'static [TestDescriptor] {
     }
 }
 
+/// Group tests by module path
+fn group_tests_by_module(tests: &[TestDescriptor]) -> BTreeMap<&'static str, Vec<&TestDescriptor>> {
+    let mut grouped: BTreeMap<&'static str, Vec<&TestDescriptor>> = BTreeMap::new();
+    
+    for test in tests {
+        grouped.entry(test.module).or_default().push(test);
+    }
+    
+    grouped
+}
+
 /// Run all registered unit tests
 ///
 /// This function discovers all tests marked with `#[unittest]` and runs them.
+/// Tests are grouped by module and run together.
 /// It prints test results and statistics to the log.
 ///
 /// # Returns
@@ -58,7 +71,9 @@ pub fn test_run() -> TestStats {
         return TestStats::new();
     }
 
-    runner.run_tests_descriptors("unittest", tests);
+    // Group tests by module and run them
+    let grouped = group_tests_by_module(tests);
+    runner.run_tests_grouped("unittest", &grouped);
 
     runner.get_stats()
 }
