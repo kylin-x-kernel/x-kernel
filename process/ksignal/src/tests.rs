@@ -2,19 +2,11 @@
 
 #![cfg(unittest)]
 
-use log::info;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
-    DefaultSignalAction, PendingSignals, SignalInfo, SignalSet, Signo, types::MAX_SIGNALS,
+    DefaultSignalAction, PendingSignals, SignalInfo, SignalSet, Signo
 };
-
-#[derive(Debug)]
-struct MockSignalStack {
-    sp: usize,
-    flags: u32,
-    size: usize,
-}
 
 #[def_test]
 fn test_signo_properties() {
