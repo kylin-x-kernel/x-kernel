@@ -524,3 +524,112 @@ fn get_ephemeral_port() -> KResult<u16> {
     }
     k_bail!(AddrInUse, "no available ports");
 }
+
+#[cfg(unittest)]
+mod tcp_tests {
+    use unittest::*;
+
+    use super::*;
+    use core::net::SocketAddr;
+
+    /// Test TCP socket creation
+    #[def_test]
+    fn test_tcp_socket_creation() -> unittest::TestResult {
+        let socket = TcpSocket::new();
+        // Verify socket is created in idle state
+        unittest::assert_eq!(socket.state(), State::Idle);
+        unittest::TestResult::Ok
+    }
+
+    /// Test TCP socket binding to valid address
+    #[def_test]
+    fn test_tcp_bind_valid_address() -> unittest::TestResult {
+        let socket = TcpSocket::new();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let result = socket.bind(SocketAddrEx::Ip(addr));
+        // Should succeed for valid address
+        unittest::assert!(result.is_ok());
+        // Should be in idle state after binding
+        unittest::assert_eq!(socket.state(), State::Idle);
+        unittest::TestResult::Ok
+    }
+
+    /// Test TCP socket binding to unspecified address
+    #[def_test]
+    fn test_tcp_bind_unspecified_address() -> unittest::TestResult {
+        let socket = TcpSocket::new();
+        let addr = SocketAddr::from(([0, 0, 0, 0], 0)); // Should get ephemeral port
+        let result = socket.bind(SocketAddrEx::Ip(addr));
+        // Should succeed and assign ephemeral port
+        unittest::assert!(result.is_ok());
+        let bound_addr = socket.local_addr().unwrap();
+        match bound_addr {
+            SocketAddrEx::Ip(ip_addr) => {
+                let port = ip_addr.port();
+                unittest::assert!(port >= 0xc000);
+            }
+            _ => panic!("Expected IP address"),
+        }
+        unittest::TestResult::Ok
+    }
+
+    /// Test TCP socket double bind fails
+    #[def_test]
+    fn test_tcp_bind_twice_fails() -> unittest::TestResult {
+        let socket = TcpSocket::new();
+        let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let addr2 = SocketAddr::from(([127, 0, 0, 1], 8081));
+        
+        // First bind should succeed
+        unittest::assert!(socket.bind(SocketAddrEx::Ip(addr1)).is_ok());
+        // Second bind should fail
+        unittest::assert!(socket.bind(SocketAddrEx::Ip(addr2)).is_err());
+        unittest::TestResult::Ok
+    }
+
+    /// Test TCP socket options
+    #[def_test]
+    fn test_tcp_socket_options() -> unittest::TestResult {
+        let socket = TcpSocket::new();
+        
+        // Test setting no delay
+        unittest::assert!(socket.set_option_inner(SetSocketOption::NoDelay(&true)).is_ok());
+        
+        // Test getting no delay
+        let mut no_delay = false;
+        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::NoDelay(&mut no_delay)).is_ok());
+        unittest::assert!(no_delay);
+        
+        // Test keep alive
+        unittest::assert!(socket.set_option_inner(SetSocketOption::KeepAlive(&true)).is_ok());
+        let mut keep_alive = false;
+        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::KeepAlive(&mut keep_alive)).is_ok());
+        unittest::assert!(keep_alive);
+        unittest::TestResult::Ok
+    }
+
+    /// Test TCP socket buffer sizes
+    #[def_test]
+    fn test_tcp_buffer_sizes() -> unittest::TestResult {
+        let socket = TcpSocket::new();
+        
+        let mut send_buf = 0;
+        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::SendBuffer(&mut send_buf)).is_ok());
+        unittest::assert_eq!(send_buf, TCP_TX_BUF_LEN);
+        
+        let mut recv_buf = 0;
+        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::ReceiveBuffer(&mut recv_buf)).is_ok());
+        unittest::assert_eq!(recv_buf, TCP_RX_BUF_LEN);
+        unittest::TestResult::Ok
+    }
+
+    /// Test TCP socket poll in idle state
+    #[def_test]
+    fn test_tcp_poll_idle_state() -> unittest::TestResult {
+        let socket = TcpSocket::new();
+        let events = socket.poll();
+        // In idle state, should be writable but not readable
+        unittest::assert!(events.contains(IoEvents::OUT));
+        unittest::TestResult::Ok
+    }
+}

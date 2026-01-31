@@ -161,3 +161,40 @@ impl Configurable for GeneralOptions {
         Ok(true)
     }
 }
+
+#[cfg(unittest)]
+mod general_tests {
+    use unittest::def_test;
+
+    use super::*;
+    use core::sync::atomic::Ordering;
+
+    /// Test GeneralOptions default values
+    #[def_test]
+    fn test_general_options_defaults() {
+        let options = GeneralOptions::new();
+        // Test default values
+        assert!(!options.nonblock.load(Ordering::Relaxed));
+        assert!(!options.reuse_address.load(Ordering::Relaxed));
+        assert_eq!(options.send_timeout_nanos.load(Ordering::Relaxed), 0);
+        assert_eq!(options.recv_timeout_nanos.load(Ordering::Relaxed), 0);
+        assert_eq!(options.device_mask.load(Ordering::Relaxed), 0);
+    }
+
+    /// Test GeneralOptions boundary values
+    #[def_test]
+    fn test_general_options_boundary() {
+        let options = GeneralOptions::new();
+        // Test setting non-blocking
+        options.nonblock.store(true, Ordering::Relaxed);
+        assert!(options.nonblock.load(Ordering::Relaxed));
+
+        // Test timeout boundary (max u64)
+        options.send_timeout_nanos.store(u64::MAX, Ordering::Relaxed);
+        assert_eq!(options.send_timeout_nanos.load(Ordering::Relaxed), u64::MAX);
+
+        // Test device mask boundary
+        options.device_mask.store(u32::MAX, Ordering::Relaxed);
+        assert_eq!(options.device_mask.load(Ordering::Relaxed), u32::MAX);
+    }
+}

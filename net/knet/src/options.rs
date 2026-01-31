@@ -113,3 +113,33 @@ impl<T: Configurable + ?Sized> Configurable for Box<T> {
         (**self).set_option_inner(opt)
     }
 }
+
+#[cfg(unittest)]
+mod options_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    /// Test UnixCredentials creation
+    #[def_test]
+    fn test_unix_credentials_new() {
+        let creds = UnixCredentials::new(1234);
+        assert_eq!(creds.pid, 1234);
+        assert_eq!(creds.uid, 0);
+        assert_eq!(creds.gid, 0);
+    }
+
+    /// Test UnixCredentials boundary values
+    #[def_test]
+    fn test_unix_credentials_boundary() {
+        // Test maximum PID value
+        let creds = UnixCredentials {
+            pid: u32::MAX,
+            uid: u32::MAX,
+            gid: u32::MAX,
+        };
+        assert_eq!(creds.pid, u32::MAX);
+        assert_eq!(creds.uid, u32::MAX);
+        assert_eq!(creds.gid, u32::MAX);
+    }
+}

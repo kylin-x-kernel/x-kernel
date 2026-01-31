@@ -237,3 +237,31 @@ impl Pollable for Socket {
         }
     }
 }
+
+#[cfg(unittest)]
+mod socket_tests {
+    use unittest::def_test;
+
+    use super::*;
+    use core::net::SocketAddr;
+
+    /// Test SocketAddrEx conversion to IP address
+    #[def_test]
+    fn test_socket_addr_ex_into_ip() {
+        let ip_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let socket_addr = SocketAddrEx::Ip(ip_addr.clone());
+        let result = socket_addr.into_ip();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ip_addr);
+    }
+
+    /// Test SocketAddrEx boundary cases
+    #[def_test]
+    fn test_socket_addr_ex_boundary() {
+        // Test invalid conversion (Unix to IP)
+        let unix_addr = crate::unix::UnixAddr::Path(alloc::sync::Arc::from("/tmp/test.sock"));
+        let socket_addr = SocketAddrEx::Unix(unix_addr);
+        let result = socket_addr.into_ip();
+        assert!(result.is_err()); // Should fail for Unix address
+    }
+}

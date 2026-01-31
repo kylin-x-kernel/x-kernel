@@ -361,3 +361,57 @@ fn get_ephemeral_port() -> KResult<u16> {
     }
     Ok(port)
 }
+
+#[cfg(unittest)]
+mod udp_tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    /// Test UDP socket creation and basic unbound behavior
+    #[def_test]
+    fn test_udp_socket_creation_and_unbound() -> unittest::TestResult {
+        let socket = UdpSocket::new();
+
+        // When newly created and not bound, poll() should return empty events
+        let events = socket.poll();
+        assert!(!events.intersects(IoEvents::IN | IoEvents::OUT));
+
+        // local_addr should report NotConnected when unbound
+        let res = socket.local_addr();
+        assert!(res.is_err());
+
+        unittest::TestResult::Ok
+    }
+
+    /// Test that peer_addr returns NotConnected for an unconnected socket
+    #[def_test]
+    fn test_udp_peer_addr_unconnected() -> unittest::TestResult {
+        let socket = UdpSocket::new();
+        let res = socket.peer_addr();
+        assert!(res.is_err());
+
+        unittest::TestResult::Ok
+    }
+
+    /// Test that get_option_inner for send/receive buffer returns sizes
+    /// (This calls GeneralOptions path and should not require binding.)
+    #[def_test]
+    fn test_udp_buffer_options() -> unittest::TestResult {
+        let socket = UdpSocket::new();
+
+        let mut send_buf = 0usize;
+        let mut receive_buf = 0usize;
+
+        // These options are implemented to return constants even without full network init
+        let r1 = socket.get_option_inner(&mut GetSocketOption::SendBuffer(&mut send_buf));
+        assert!(r1.is_ok());
+        assert_eq!(send_buf, UDP_TX_BUF_LEN);
+
+        let r2 = socket.get_option_inner(&mut GetSocketOption::ReceiveBuffer(&mut receive_buf));
+        assert!(r2.is_ok());
+        assert_eq!(receive_buf, UDP_RX_BUF_LEN);
+
+        unittest::TestResult::Ok
+    }
+}
