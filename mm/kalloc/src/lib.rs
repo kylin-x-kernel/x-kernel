@@ -568,4 +568,3 @@ pub mod tests_kalloc {
         assert_eq!(usages.get(UsageKind::PageTable), 20);
     }
 }
-
