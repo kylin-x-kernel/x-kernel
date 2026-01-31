@@ -72,7 +72,7 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 /// Marks a module as test-only code.
 ///
 /// This is equivalent to `#[cfg(unittest)]` but more readable.
-/// The module will only be compiled when `--cfg unittest` is enabled.
+/// The module will only be compiled when `--test` flag is passed to the build.
 ///
 /// # Example
 ///
@@ -198,13 +198,9 @@ fn generate_function_test(attr: TokenStream, input: ItemFn) -> TokenStream {
 
     // Use linker section to collect test descriptors
     // The linker script defines __unittest_start and __unittest_end symbols
-    // The generated code is gated by #[cfg(unittest)] so tests
-    // are only compiled when --cfg unittest is enabled
     let output = quote! {
-        #[cfg(unittest)]
         #test_fn
 
-        #[cfg(unittest)]
         #[used]
         #[unsafe(link_section = ".unittest")]
         #[allow(non_upper_case_globals)]

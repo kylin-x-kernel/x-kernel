@@ -22,8 +22,7 @@ kernel = [
 
 tee = ["kapi/tee", "kcore/tee"]
 smp = ["kfeat/smp"]
-unittest = ["dep:unittest", "kapi/unittest"]
-test = ["unittest", "kapi/unittest"]
+unittest = ["dep:unittest"]
 
 # Stubs
 pci = ["kfeat/bus-pci"]

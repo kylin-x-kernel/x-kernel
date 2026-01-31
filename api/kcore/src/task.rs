@@ -561,10 +561,12 @@ pub mod tests_task {
 
     #[def_test]
     fn test_taskstat_display_custom() {
-        let mut stat = TaskStat::default();
-        stat.pid = 7;
-        stat.comm = "init".into();
-        stat.state = 'R';
+        let stat = TaskStat {
+            pid: 7,
+            comm: "init".into(),
+            state: 'R',
+            ..Default::default()
+        };
         let text = alloc::format!("{stat}");
         assert!(text.starts_with("7 (init) R "));
     }

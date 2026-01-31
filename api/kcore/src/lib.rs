@@ -15,7 +15,6 @@ extern crate alloc;
 #[macro_use]
 extern crate klogger;
 
-
 pub mod config;
 pub mod futex;
 mod lrucache;
@@ -25,6 +24,5 @@ pub mod shm;
 pub mod task;
 /// Unit test entrypoints.
 #[cfg(unittest)]
-pub mod test_unit_test;
 pub mod time;
 pub mod vfs;
