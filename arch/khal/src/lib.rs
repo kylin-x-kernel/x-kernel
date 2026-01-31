@@ -120,7 +120,7 @@ pub mod pmu {
         PerfCb, on_overflow as dispatch_irq_overflows, reg_cb as register_overflow_handler,
     };
 }
-#[cfg(feature = "khal_test")]
+#[cfg(unittest)]
 pub mod test_unit_test;
 /// Initializes the platform and boot argument.
 /// This function should be called as early as possible.

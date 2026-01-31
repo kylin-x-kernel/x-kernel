@@ -55,39 +55,25 @@ pub fn irq_handler(vector: usize) -> bool {
     true
 }
 
-#[cfg(feature = "khal_test")]
+#[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_irq {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::{irq_handler, register_irq_hook};
 
     fn dummy_hook(_irq: usize) {}
 
-    test_fn! {
-        using TestResult;
-
-        fn test_register_irq_hook_once() {
-            let first = register_irq_hook(dummy_hook);
-            let second = register_irq_hook(dummy_hook);
-            assert!(!second);
-            let _ = first;
-        }
+    #[def_test]
+    fn test_register_irq_hook_once() {
+        let first = register_irq_hook(dummy_hook);
+        let second = register_irq_hook(dummy_hook);
+        assert!(!second);
+        let _ = first;
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_irq_handler_returns_true() {
-            assert!(irq_handler(0));
-        }
-    }
-
-    tests_name! {
-        TEST_IRQ;
-        test_register_irq_hook_once,
-        test_irq_handler_returns_true,
+    #[def_test]
+    fn test_irq_handler_returns_true() {
+        assert!(irq_handler(0));
     }
 }

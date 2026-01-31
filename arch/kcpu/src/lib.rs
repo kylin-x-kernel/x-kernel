@@ -42,5 +42,5 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(feature = "kcpu_test")]
+#[cfg(unittest)]
 pub mod test_unit_test;

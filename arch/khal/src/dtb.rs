@@ -56,38 +56,24 @@ pub fn get_chosen_bootargs() -> Option<&'static str> {
     *CACHED_BOOTARGS.init_once(init_bootargs())
 }
 
-#[cfg(feature = "khal_test")]
+#[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_dtb {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::{get_bootarg, get_chosen_bootargs};
 
-    test_fn! {
-        using TestResult;
-
-        fn test_bootarg_consistent() {
-            let first = get_bootarg();
-            let second = get_bootarg();
-            assert_eq!(first, second);
-        }
+    #[def_test]
+    fn test_bootarg_consistent() {
+        let first = get_bootarg();
+        let second = get_bootarg();
+        assert_eq!(first, second);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_bootargs_cached_pointer() {
-            let first = get_chosen_bootargs().map(|s| s.as_ptr());
-            let second = get_chosen_bootargs().map(|s| s.as_ptr());
-            assert_eq!(first, second);
-        }
-    }
-
-    tests_name! {
-        TEST_DTB;
-        test_bootarg_consistent,
-        test_bootargs_cached_pointer,
+    #[def_test]
+    fn test_bootargs_cached_pointer() {
+        let first = get_chosen_bootargs().map(|s| s.as_ptr());
+        let second = get_chosen_bootargs().map(|s| s.as_ptr());
+        assert_eq!(first, second);
     }
 }

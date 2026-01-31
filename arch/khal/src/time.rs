@@ -25,39 +25,25 @@ pub fn busy_wait_until(deadline: TimeValue) {
     spin_until(deadline);
 }
 
-#[cfg(feature = "khal_test")]
+#[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_time {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::{Duration, NANOS_PER_SEC};
 
-    test_fn! {
-        using TestResult;
-
-        fn test_duration_from_nanos() {
-            let nanos = NANOS_PER_SEC;
-            let from = Duration::from_nanos(nanos);
-            let one = Duration::from_secs(1);
-            assert_eq!(from, one);
-        }
+    #[def_test]
+    fn test_duration_from_nanos() {
+        let nanos = NANOS_PER_SEC;
+        let from = Duration::from_nanos(nanos);
+        let one = Duration::from_secs(1);
+        assert_eq!(from, one);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_duration_ordering() {
-            let short = Duration::from_millis(1);
-            let long = Duration::from_millis(2);
-            assert!(long > short);
-        }
-    }
-
-    tests_name! {
-        TEST_TIME;
-        test_duration_from_nanos,
-        test_duration_ordering,
+    #[def_test]
+    fn test_duration_ordering() {
+        let short = Duration::from_millis(1);
+        let long = Duration::from_millis(2);
+        assert!(long > short);
     }
 }

@@ -97,51 +97,33 @@ impl Drop for ExceptionContextGuard {
     }
 }
 
-#[cfg(feature = "kcpu_test")]
+#[cfg(unittest)]
 pub mod tests_active_exception_context {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::*;
     use crate::ExceptionContext;
 
-    test_fn! {
-        using TestResult;
-
-        fn test_active_exception_context_none() {
-            assert!(active_exception_context().is_none());
-        }
+    #[def_test]
+    fn test_active_exception_context_none() {
+        assert!(active_exception_context().is_none());
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_guard_sets_and_restores() {
-            let ctx = ExceptionContext::default();
-            {
-                let _guard = ExceptionContextGuard::new(&ctx);
-                assert!(active_exception_context().is_some());
-            }
-            assert!(active_exception_context().is_none());
-        }
-    }
-
-    test_fn! {
-        using TestResult;
-
-        fn test_with_active_exception_context() {
-            let ctx = ExceptionContext::default();
+    #[def_test]
+    fn test_guard_sets_and_restores() {
+        let ctx = ExceptionContext::default();
+        {
             let _guard = ExceptionContextGuard::new(&ctx);
-            let got = with_active_exception_context(|opt| opt.map(|p| p as *const _));
-            assert_eq!(got, Some(&ctx as *const _));
+            assert!(active_exception_context().is_some());
         }
+        assert!(active_exception_context().is_none());
     }
 
-    tests_name! {
-        TEST_ACTIVE_EXCEPTION_CONTEXT;
-        test_active_exception_context_none,
-        test_guard_sets_and_restores,
-        test_with_active_exception_context,
+    #[def_test]
+    fn test_with_active_exception_context() {
+        let ctx = ExceptionContext::default();
+        let _guard = ExceptionContextGuard::new(&ctx);
+        let got = with_active_exception_context(|opt| opt.map(|p| p as *const _));
+        assert_eq!(got, Some(&ctx as *const _));
     }
 }

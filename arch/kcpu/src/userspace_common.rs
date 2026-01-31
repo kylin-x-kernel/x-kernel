@@ -82,47 +82,26 @@ pub(crate) fn init_exception_table() {
     ex_table.sort_unstable();
 }
 
-#[cfg(all(feature = "kcpu_test", feature = "uspace"))]
+#[cfg(all(unittest, feature = "uspace"))]
 pub mod tests_userspace_common {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::def_test;
 
     use super::{ExceptionKind, ReturnReason};
 
-    test_fn! {
-        using TestResult;
-
-        fn test_exception_kind_equality() {
-            assert_ne!(ExceptionKind::Breakpoint, ExceptionKind::Misaligned);
-        }
+    #[def_test]
+    fn test_exception_kind_equality() {
+        assert_ne!(ExceptionKind::Breakpoint, ExceptionKind::Misaligned);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_exception_kind_variants_distinct() {
-            assert_ne!(ExceptionKind::IllegalInstruction, ExceptionKind::Other);
-            assert_ne!(ExceptionKind::Misaligned, ExceptionKind::Breakpoint);
-        }
+    #[def_test]
+    fn test_exception_kind_variants_distinct() {
+        assert_ne!(ExceptionKind::IllegalInstruction, ExceptionKind::Other);
+        assert_ne!(ExceptionKind::Misaligned, ExceptionKind::Breakpoint);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_return_reason_match() {
-            let reason = ReturnReason::Syscall;
-            match reason {
-                ReturnReason::Syscall => {}
-                _ => return TestResult::Failed,
-            }
-        }
-    }
-
-    tests_name! {
-        TEST_USERSPACE_COMMON;
-        test_exception_kind_equality,
-        test_exception_kind_variants_distinct,
-        test_return_reason_match,
+    #[def_test]
+    fn test_return_reason_match() {
+        let reason = ReturnReason::Syscall;
+        assert!(matches!(reason, ReturnReason::Syscall));
     }
 }
