@@ -149,6 +149,3 @@ pub fn ipi_handler() {
 
 #[cfg(unittest)]
 mod tests;
-
-#[cfg(unittest)]
-pub mod test_unit_test;

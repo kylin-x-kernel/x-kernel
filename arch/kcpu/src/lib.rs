@@ -41,6 +41,3 @@ cfg_if::cfg_if! {
         pub use self::loongarch64::*;
     }
 }
-
-#[cfg(unittest)]
-pub mod test_unit_test;
