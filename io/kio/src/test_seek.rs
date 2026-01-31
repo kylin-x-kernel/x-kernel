@@ -61,4 +61,3 @@ fn test_cursor_seek_relative() {
     // Use stream_position
     assert_eq!(cursor.stream_position().unwrap(), 3);
 }
-

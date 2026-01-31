@@ -40,4 +40,3 @@ fn test_iobufmut_remaining() {
     assert_eq!(cursor.remaining_mut(), 0);
     assert!(cursor.is_full());
 }
-

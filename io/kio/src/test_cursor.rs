@@ -70,4 +70,3 @@ fn test_cursor_accessors() {
     let inner = cursor.into_inner();
     assert_eq!(inner, vec![10u8, 25, 30]);
 }
-

@@ -41,4 +41,3 @@ pub struct PollState {
     /// Object can be writen now.
     pub writable: bool,
 }
-
