@@ -3,6 +3,7 @@
 #![cfg(unittest)]
 
 use alloc::sync::Arc;
+
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{Process, process::INIT_PROC};
@@ -24,7 +25,7 @@ fn test_process_lifecycle() {
     let child_pid = 100;
     let child = init.fork(child_pid);
     assert_eq!(child.pid(), child_pid);
-    
+
     let parent = child.parent().expect("Child must have a parent");
     assert_eq!(parent.pid(), init.pid());
 
@@ -56,7 +57,7 @@ fn test_process_lifecycle() {
     child.add_thread(child_pid + 1);
     let threads = child.threads();
     assert!(threads.contains(&(child_pid + 1)));
-    
+
     // Remove secondary thread
     let is_last = child.exit_thread(child_pid + 1, 0);
     assert!(!is_last); // main thread is still there
@@ -104,7 +105,9 @@ fn test_process_group_session() {
     assert_eq!(p1_child.group().pgid(), 200); // Inherits g1
 
     // Create a new group for p1_child
-    let g_child = p1_child.create_group().expect("Failed to create group for p1_child");
+    let g_child = p1_child
+        .create_group()
+        .expect("Failed to create group for p1_child");
     assert_eq!(g_child.pgid(), 202);
     assert_eq!(p1_child.group().pgid(), 202);
 

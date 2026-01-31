@@ -6,9 +6,12 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
+
 use unittest::{assert, assert_eq, def_test};
 
-use crate::{read_vm_mem, write_vm_mem, VirtPtr, VirtMutPtr, load_vec, load_vec_until_null, MemError};
+use crate::{
+    MemError, VirtMutPtr, VirtPtr, load_vec, load_vec_until_null, read_vm_mem, write_vm_mem,
+};
 
 #[def_test]
 fn test_read_write_vm_mem_local() {
@@ -56,7 +59,7 @@ fn test_virt_mut_ptr_helpers() {
     let ptr = &mut val as *mut u32;
 
     let mut_ptr: *mut u32 = ptr;
-    
+
     // write_vm
     let new_val = 0x00C0FFEE;
     let write_res = mut_ptr.write_vm(new_val);
@@ -96,7 +99,7 @@ fn test_invalid_alignment_checks() {
     let ptr = data.as_ptr();
     // Unaligned pointer + 1 byte
     let unaligned_ptr = unsafe { (ptr as *const u8).add(1) as *const u64 };
-    
+
     let mut out = MaybeUninit::<u64>::uninit();
     let res = read_vm_mem(unaligned_ptr, core::slice::from_mut(&mut out));
     assert!(res.is_err());

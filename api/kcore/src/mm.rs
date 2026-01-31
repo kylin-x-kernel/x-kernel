@@ -388,7 +388,11 @@ unsafe impl VirtMemIo for Vm {
     fn read_mem(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> MemResult {
         if cfg!(unittest) {
             unsafe {
-                core::ptr::copy_nonoverlapping(start as *const u8, buf.as_mut_ptr() as *mut u8, buf.len());
+                core::ptr::copy_nonoverlapping(
+                    start as *const u8,
+                    buf.as_mut_ptr() as *mut u8,
+                    buf.len(),
+                );
             }
             return Ok(());
         }

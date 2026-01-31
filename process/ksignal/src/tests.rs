@@ -25,7 +25,10 @@ fn test_signo_properties() {
     assert!(Signo::SIGRTMIN.is_realtime());
     assert!(Signo::SIGRT32.is_realtime());
 
-    assert_eq!(Signo::SIGINT.default_action(), DefaultSignalAction::Terminate);
+    assert_eq!(
+        Signo::SIGINT.default_action(),
+        DefaultSignalAction::Terminate
+    );
     assert_eq!(Signo::SIGCHLD.default_action(), DefaultSignalAction::Ignore);
 }
 
@@ -59,13 +62,13 @@ fn test_signal_set_dequeuing() {
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGINT);
     mask.add(Signo::SIGUSR1);
-    
+
     // Should dequeue priority order (lowest number first usually, based on implementation)
     // implementation uses trailing_zeros, so lowest bit -> lowest signal number.
     let dequeued = set.dequeue(&mask);
     assert_eq!(dequeued, Some(Signo::SIGINT));
     assert!(!set.has(Signo::SIGINT));
-    
+
     let dequeued = set.dequeue(&mask);
     assert_eq!(dequeued, Some(Signo::SIGUSR1));
 
@@ -84,7 +87,7 @@ fn test_pending_signals_std() {
 
     assert!(pending.put_signal(siginfo_int.clone()));
     assert!(pending.set.has(Signo::SIGINT));
-    
+
     // Put duplicate std signal -> should return false
     assert!(!pending.put_signal(siginfo_int.clone()));
 
@@ -121,16 +124,16 @@ fn test_pending_signals_rt() {
     // So info1 should come out first.
     // Need to verify unique property of info1 vs info2.
     // SignalInfo internals access is tricky, but let's assume order.
-    
+
     // After first dequeue, rt1 bit should STILL be set because info2 is there.
     assert!(pending.set.has(rt1));
 
     let d2 = pending.dequeue_signal(&mask);
     assert!(d2.is_some());
-    
+
     // Now it should be empty
     assert!(!pending.set.has(rt1));
-    
+
     let d3 = pending.dequeue_signal(&mask);
     assert!(d3.is_none());
 }
