@@ -57,6 +57,12 @@ impl MockTransport {
     }
 }
 
+impl Default for MockTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transport for MockTransport {
     fn device_type(&self) -> DeviceType {
         self.device_type

@@ -94,7 +94,7 @@ impl<H: Hal, T: Transport> InputDriverOps for VirtIoInputDev<H, T> {
 
 #[cfg(unittest)]
 mod tests {
-    use unittest::{assert, assert_eq, def_test};
+    use unittest::{assert, def_test};
 
     use super::*;
     use crate::mock_virtio::{MockHal, MockTransport};
