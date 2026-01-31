@@ -229,4 +229,3 @@ impl Default for PathResolver {
         Self::new()
     }
 }
-
