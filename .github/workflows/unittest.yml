@@ -77,7 +77,7 @@ jobs:
 
       - name: Run kernel unit tests
         run: |
-          timeout 120 make ARCH=${{ matrix.arch }} UNITTEST=y SMP=${{ env.SMP }} run | tee unittest-output.log || true
+          timeout 120 make ARCH=${{ matrix.arch }} UNITTEST=y SMP=${{ env.SMP }} VSOCK=n run | tee unittest-output.log || true
           
           if grep -q "test result:.*FAILED" unittest-output.log; then
             echo "Unit tests failed!"
