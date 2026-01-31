@@ -1,3 +1,5 @@
+#![cfg(unittest)]
+
 use unittest::{assert_eq, def_test};
 
 use crate::types::{DeviceId, NodePermission, NodeType};

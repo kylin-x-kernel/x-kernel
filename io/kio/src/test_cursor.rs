@@ -1,5 +1,7 @@
 //! Unit tests for Cursor.
 
+#![cfg(unittest)]
+
 extern crate alloc;
 use alloc::vec;
 

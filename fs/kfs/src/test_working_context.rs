@@ -1,5 +1,7 @@
 //! Unit tests for WorkingContext.
 
+#![cfg(unittest)]
+
 use unittest::def_test;
 
 #[def_test]

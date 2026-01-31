@@ -1,5 +1,7 @@
 //! Unit tests for Path and PathBuf.
 
+#![cfg(unittest)]
+
 extern crate alloc;
 use alloc::vec::Vec;
 

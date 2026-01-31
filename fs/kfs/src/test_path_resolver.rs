@@ -1,5 +1,7 @@
 //! Unit tests for PathResolver.
 
+#![cfg(unittest)]
+
 use unittest::def_test;
 
 use crate::PathResolver;

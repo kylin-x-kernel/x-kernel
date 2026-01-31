@@ -1,5 +1,7 @@
 //! Unit tests for IoBuf and IoBufMut.
 
+#![cfg(unittest)]
+
 extern crate alloc;
 use alloc::vec;
 

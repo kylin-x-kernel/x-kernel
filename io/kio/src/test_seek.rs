@@ -1,5 +1,7 @@
 //! Unit tests for Seek operations.
 
+#![cfg(unittest)]
+
 use unittest::def_test;
 
 use crate::{Cursor, Seek, SeekFrom};
