@@ -4,9 +4,7 @@
 
 use unittest::{assert, assert_eq, def_test};
 
-use crate::{
-    DefaultSignalAction, PendingSignals, SignalInfo, SignalSet, Signo
-};
+use crate::{DefaultSignalAction, PendingSignals, SignalInfo, SignalSet, Signo};
 
 #[def_test]
 fn test_signo_properties() {
