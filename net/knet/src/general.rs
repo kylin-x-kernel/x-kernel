@@ -164,10 +164,11 @@ impl Configurable for GeneralOptions {
 
 #[cfg(unittest)]
 mod general_tests {
+    use core::sync::atomic::Ordering;
+
     use unittest::def_test;
 
     use super::*;
-    use core::sync::atomic::Ordering;
 
     /// Test GeneralOptions default values
     #[def_test]
@@ -190,7 +191,9 @@ mod general_tests {
         assert!(options.nonblock.load(Ordering::Relaxed));
 
         // Test timeout boundary (max u64)
-        options.send_timeout_nanos.store(u64::MAX, Ordering::Relaxed);
+        options
+            .send_timeout_nanos
+            .store(u64::MAX, Ordering::Relaxed);
         assert_eq!(options.send_timeout_nanos.load(Ordering::Relaxed), u64::MAX);
 
         // Test device mask boundary

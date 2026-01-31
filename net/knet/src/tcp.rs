@@ -527,10 +527,11 @@ fn get_ephemeral_port() -> KResult<u16> {
 
 #[cfg(unittest)]
 mod tcp_tests {
+    use core::net::SocketAddr;
+
     use unittest::*;
 
     use super::*;
-    use core::net::SocketAddr;
 
     /// Test TCP socket creation
     #[def_test]
@@ -579,7 +580,7 @@ mod tcp_tests {
         let socket = TcpSocket::new();
         let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
         let addr2 = SocketAddr::from(([127, 0, 0, 1], 8081));
-        
+
         // First bind should succeed
         unittest::assert!(socket.bind(SocketAddrEx::Ip(addr1)).is_ok());
         // Second bind should fail
@@ -591,19 +592,35 @@ mod tcp_tests {
     #[def_test]
     fn test_tcp_socket_options() -> unittest::TestResult {
         let socket = TcpSocket::new();
-        
+
         // Test setting no delay
-        unittest::assert!(socket.set_option_inner(SetSocketOption::NoDelay(&true)).is_ok());
-        
+        unittest::assert!(
+            socket
+                .set_option_inner(SetSocketOption::NoDelay(&true))
+                .is_ok()
+        );
+
         // Test getting no delay
         let mut no_delay = false;
-        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::NoDelay(&mut no_delay)).is_ok());
+        unittest::assert!(
+            socket
+                .get_option_inner(&mut GetSocketOption::NoDelay(&mut no_delay))
+                .is_ok()
+        );
         unittest::assert!(no_delay);
-        
+
         // Test keep alive
-        unittest::assert!(socket.set_option_inner(SetSocketOption::KeepAlive(&true)).is_ok());
+        unittest::assert!(
+            socket
+                .set_option_inner(SetSocketOption::KeepAlive(&true))
+                .is_ok()
+        );
         let mut keep_alive = false;
-        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::KeepAlive(&mut keep_alive)).is_ok());
+        unittest::assert!(
+            socket
+                .get_option_inner(&mut GetSocketOption::KeepAlive(&mut keep_alive))
+                .is_ok()
+        );
         unittest::assert!(keep_alive);
         unittest::TestResult::Ok
     }
@@ -612,13 +629,21 @@ mod tcp_tests {
     #[def_test]
     fn test_tcp_buffer_sizes() -> unittest::TestResult {
         let socket = TcpSocket::new();
-        
+
         let mut send_buf = 0;
-        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::SendBuffer(&mut send_buf)).is_ok());
+        unittest::assert!(
+            socket
+                .get_option_inner(&mut GetSocketOption::SendBuffer(&mut send_buf))
+                .is_ok()
+        );
         unittest::assert_eq!(send_buf, TCP_TX_BUF_LEN);
-        
+
         let mut recv_buf = 0;
-        unittest::assert!(socket.get_option_inner(&mut GetSocketOption::ReceiveBuffer(&mut recv_buf)).is_ok());
+        unittest::assert!(
+            socket
+                .get_option_inner(&mut GetSocketOption::ReceiveBuffer(&mut recv_buf))
+                .is_ok()
+        );
         unittest::assert_eq!(recv_buf, TCP_RX_BUF_LEN);
         unittest::TestResult::Ok
     }

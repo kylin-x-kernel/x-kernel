@@ -240,16 +240,17 @@ impl Pollable for Socket {
 
 #[cfg(unittest)]
 mod socket_tests {
+    use core::net::SocketAddr;
+
     use unittest::def_test;
 
     use super::*;
-    use core::net::SocketAddr;
 
     /// Test SocketAddrEx conversion to IP address
     #[def_test]
     fn test_socket_addr_ex_into_ip() {
         let ip_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let socket_addr = SocketAddrEx::Ip(ip_addr.clone());
+        let socket_addr = SocketAddrEx::Ip(ip_addr);
         let result = socket_addr.into_ip();
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), ip_addr);
