@@ -65,8 +65,8 @@ impl IndexMut<u32> for Rlimits {
     }
 }
 
-#[cfg(feature = "unittest")]
 /// Unit tests.
+#[unittest::mod_test]
 pub mod tests_resources {
     use unittest::def_test;
 

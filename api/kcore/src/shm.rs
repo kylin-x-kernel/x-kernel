@@ -384,8 +384,8 @@ impl ShmManager {
 /// Global shared memory manager.
 pub static SHM_MANAGER: Mutex<ShmManager> = Mutex::new(ShmManager::new());
 
-#[cfg(feature = "unittest")]
 /// Unit tests.
+#[unittest::mod_test]
 pub mod tests_shm {
     use khal::paging::MappingFlags;
     use memaddr::VirtAddrRange;

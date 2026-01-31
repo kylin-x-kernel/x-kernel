@@ -537,8 +537,8 @@ pub fn send_signal_to_process_group(pgid: Pid, sig: Option<SignalInfo>) -> KResu
     Ok(())
 }
 
-#[cfg(feature = "unittest")]
 /// Unit tests.
+#[unittest::mod_test]
 pub mod tests_task {
     use unittest::def_test;
 
