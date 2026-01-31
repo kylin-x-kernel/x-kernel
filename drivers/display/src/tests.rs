@@ -125,7 +125,7 @@ fn test_framebuffer_creation_and_access_patterns() {
     }
 
     // Create framebuffer from slice
-    let fb = FrameBuffer::from_slice(&mut test_data);
+    let _fb = FrameBuffer::from_slice(&mut test_data);
 
     // Test that framebuffer wraps the data correctly
     // (We can't directly access _raw due to privacy, but we can test behavior)
