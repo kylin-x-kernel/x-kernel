@@ -386,17 +386,6 @@ unsafe impl VirtMemIo for Vm {
     }
 
     fn read_mem(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> MemResult {
-        if cfg!(unittest) {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    start as *const u8,
-                    buf.as_mut_ptr() as *mut u8,
-                    buf.len(),
-                );
-            }
-            return Ok(());
-        }
-
         check_access(start, buf.len())?;
         let failed_at = access_user_memory(|| unsafe {
             user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
@@ -409,13 +398,6 @@ unsafe impl VirtMemIo for Vm {
     }
 
     fn write_mem(&mut self, start: usize, buf: &[u8]) -> MemResult {
-        if cfg!(unittest) {
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf.as_ptr(), start as *mut u8, buf.len());
-            }
-            return Ok(());
-        }
-
         check_access(start, buf.len())?;
         let failed_at = access_user_memory(|| unsafe {
             user_copy(start as _, buf.as_ptr() as *const _, buf.len())

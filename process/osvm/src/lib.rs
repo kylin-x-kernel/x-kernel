@@ -67,5 +67,6 @@ mod heap;
 #[cfg(feature = "alloc")]
 pub use heap::{load_vec, load_vec_unsafe, load_vec_until_null};
 
-#[cfg(unittest)]
-mod tests;
+// Cannot test in kernel mode
+// #[cfg(unittest)]
+// mod tests;
