@@ -114,6 +114,7 @@ pub struct GlobalAllocator {
     balloc: SpinNoIrq<DefaultByteAllocator>,
     #[cfg(not(feature = "level-1"))]
     palloc: SpinNoIrq<BitmapPageAllocator<PAGE_SIZE>>,
+    dma_palloc: SpinNoIrq<BitmapPageAllocator<PAGE_SIZE>>,
     usages: SpinNoIrq<Usages>,
 }
 
@@ -130,6 +131,7 @@ impl GlobalAllocator {
             balloc: SpinNoIrq::new(DefaultByteAllocator::new()),
             #[cfg(not(feature = "level-1"))]
             palloc: SpinNoIrq::new(BitmapPageAllocator::new()),
+            dma_palloc: SpinNoIrq::new(BitmapPageAllocator::new()),
             usages: SpinNoIrq::new(Usages::new()),
         }
     }
@@ -168,6 +170,10 @@ impl GlobalAllocator {
         {
             self.balloc.lock().init_region(va, size);
         }
+    }
+
+    pub fn init_dma_page_allocator(&self, va: usize, size: usize) {
+        self.dma_palloc.lock().init_region(va, size);
     }
 
     /// Add the given region to the allocator.
@@ -292,6 +298,20 @@ impl GlobalAllocator {
         }
     }
 
+    /// Allocates contiguous DMA pages.
+    pub fn alloc_dma_pages(
+        &self,
+        num_pages: usize,
+        align_pow2: usize,
+        kind: UsageKind,
+    ) -> AllocResult<usize> {
+        let addr = self.dma_palloc.lock().allocate_pages(num_pages, align_pow2)?;
+        if !matches!(kind, UsageKind::RustHeap) {
+            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
+        }
+        Ok(addr)
+    }
+
     /// Allocates contiguous pages starting from the given address.
     ///
     /// It allocates `num_pages` pages from the page allocator starting from the
@@ -343,6 +363,12 @@ impl GlobalAllocator {
         }
         #[cfg(not(feature = "level-1"))]
         self.palloc.lock().deallocate_pages(va, num_pages);
+    }
+
+    /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator. 
+    pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
+        self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
+        self.dma_palloc.lock().deallocate_pages(va, num_pages);
     }
 
     /// Returns the number of allocated bytes in the byte allocator.
@@ -500,6 +526,15 @@ pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
         va + size
     );
     GLOBAL_ALLOCATOR.add_memory(va, size)
+}
+
+pub fn global_init_dma_page_allocator(va: usize, size: usize) {
+    debug!(
+        "initialize global DMA page allocator at: [{:#x}, {:#x})",
+        va,
+        va + size
+    );
+    GLOBAL_ALLOCATOR.init_dma_page_allocator(va, size);
 }
 
 #[cfg(unittest)]
