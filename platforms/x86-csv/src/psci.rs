@@ -7,9 +7,9 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use log::{debug, info, warn};
 
-use crate::config::plat::{SHARED_MEM_BASE, SHARED_MEM_SIZE};
+use crate::config::plat::{DMA_MEM_BASE, DMA_MEM_SIZE};
 const PAGE_SIZE: usize = 0x1000;
-const MAX_PAGES: usize = SHARED_MEM_SIZE / PAGE_SIZE;
+const MAX_PAGES: usize = DMA_MEM_SIZE / PAGE_SIZE;
 const BITMAP_SIZE: usize = (MAX_PAGES + 63) / 64;
 struct SharedMemAllocator {
     bitmap: [u64; BITMAP_SIZE],
@@ -41,7 +41,7 @@ impl SharedMemAllocator {
                 self.set_page_allocated(i);
                 self.next_hint = i + 1;
                 self.allocated_pages += 1;
-                return Some(SHARED_MEM_BASE + i * PAGE_SIZE);
+                return Some(DMA_MEM_BASE + i * PAGE_SIZE);
             }
         }
         for i in 0..self.next_hint {
@@ -49,7 +49,7 @@ impl SharedMemAllocator {
                 self.set_page_allocated(i);
                 self.next_hint = i + 1;
                 self.allocated_pages += 1;
-                return Some(SHARED_MEM_BASE + i * PAGE_SIZE);
+                return Some(DMA_MEM_BASE + i * PAGE_SIZE);
             }
         }
         None
@@ -70,7 +70,7 @@ impl SharedMemAllocator {
                     }
                     self.allocated_pages += pages;
                     self.next_hint = start + pages;
-                    return Some(SHARED_MEM_BASE + start * PAGE_SIZE);
+                    return Some(DMA_MEM_BASE + start * PAGE_SIZE);
                 }
             } else {
                 count = 0;
@@ -80,14 +80,14 @@ impl SharedMemAllocator {
     }
 
     fn free_pages(&mut self, paddr: usize, pages: usize) {
-        if paddr < SHARED_MEM_BASE || paddr >= SHARED_MEM_BASE + SHARED_MEM_SIZE {
+        if paddr < DMA_MEM_BASE || paddr >= DMA_MEM_BASE + DMA_MEM_SIZE {
             warn!(
                 "free_pages: address {:#x} is outside shared memory region",
                 paddr
             );
             return;
         }
-        let start_page = (paddr - SHARED_MEM_BASE) / PAGE_SIZE;
+        let start_page = (paddr - DMA_MEM_BASE) / PAGE_SIZE;
         for i in 0..pages {
             let page_idx = start_page + i;
             if page_idx < MAX_PAGES {
@@ -126,7 +126,7 @@ pub fn init() {
     SHARED_ALLOCATOR.init_once(SpinNoIrq::new(SharedMemAllocator::new()));
     info!(
         "SEV shared memory pool initialized: base={:#x}, size={:#x} ({} pages)",
-        SHARED_MEM_BASE, SHARED_MEM_SIZE, MAX_PAGES
+        DMA_MEM_BASE, DMA_MEM_SIZE, MAX_PAGES
     );
 }
 pub fn alloc_shared_pages(pages: usize) -> Option<usize> {
@@ -143,10 +143,10 @@ pub fn free_shared_pages(paddr: usize, pages: usize) {
     SHARED_ALLOCATOR.lock().free_pages(paddr, pages);
 }
 pub fn is_shared_memory(paddr: usize) -> bool {
-    paddr >= SHARED_MEM_BASE && paddr < SHARED_MEM_BASE + SHARED_MEM_SIZE
+    paddr >= DMA_MEM_BASE && paddr < DMA_MEM_BASE + DMA_MEM_SIZE
 }
 pub fn shared_memory_range() -> (usize, usize) {
-    (SHARED_MEM_BASE, SHARED_MEM_BASE + SHARED_MEM_SIZE)
+    (DMA_MEM_BASE, DMA_MEM_BASE + DMA_MEM_SIZE)
 }
 struct PsciImpl;
 #[impl_dev_interface]
