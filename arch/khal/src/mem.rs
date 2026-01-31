@@ -6,8 +6,8 @@
 
 use heapless::Vec;
 pub use kplat::memory::{
-    MemFlags, MemoryRegion, kernel_layout, mmio_regions, p2v, ram_regions, rsvd_regions, total_ram,
-    v2p,
+    MemFlags, MemoryRegion, dma_regions, kernel_layout, mmio_regions, p2v, ram_regions,
+    rsvd_regions, total_ram, v2p,
 };
 use kplat::memory::{check_overlap, sub_ranges};
 use lazyinit::LazyInit;
@@ -89,6 +89,9 @@ pub fn init() {
     for &(start, size) in rsvd_regions() {
         push(MemoryRegion::new_rsvd(start, size, "reserved"));
     }
+    for &(start, size) in dma_regions() {
+        push(MemoryRegion::new_dma(start, size, "dma"));
+    }
 
     // Combine kernel image range and reserved ranges
     let kernel_start = v2p(addr_of_sym!(_skernel).into()).as_usize();
@@ -97,6 +100,7 @@ pub fn init() {
         .iter()
         .cloned()
         .chain(core::iter::once((kernel_start, kernel_size))) // kernel image range is also reserved
+        .chain(dma_regions().iter().cloned()) // DMA regions are also reserved
         .collect::<Vec<_, MAX_REGIONS>>();
 
     // Remove all reserved ranges from RAM ranges, and push the remaining as free memory

@@ -36,9 +36,9 @@ boot-stack-size = 0x40000                       # uint
 # SEV C-bit position (0 to disable SEV encryption bit).
 sev-cbit-pos = 47                               # uint
 # VirtIO shared memory pool base address for AMD SEV (unencrypted region).
-shared-mem-base = 0x0100_0000                   # uint
+dma-mem-base = 0x100_000                   # uint
 # VirtIO shared memory pool size.
-shared-mem-size = 0x0020_0000                   # uint
+dma-mem-size = 0x200_000                   # uint
 
 #
 # Device specifications

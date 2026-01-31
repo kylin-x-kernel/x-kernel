@@ -49,6 +49,12 @@ pub const MMIO_DEF: MemFlags = MemFlags::R
     .union(MemFlags::DEV)
     .union(MemFlags::RSVD);
 
+/// Default flags for DMA regions.
+pub const DMA_DEF: MemFlags = MemFlags::R
+    .union(MemFlags::W)
+    .union(MemFlags::UNCACHED)
+    .union(MemFlags::RSVD);
+
 /// A memory range represented as (start, size).
 pub type MemRange = (usize, usize);
 
@@ -115,6 +121,15 @@ impl MemoryRegion {
             name,
         }
     }
+
+    pub const fn new_dma(s: usize, n: usize, name: &'static str) -> Self {
+        Self {
+            paddr: PhysAddr::from_usize(s),
+            size: n,
+            flags: DMA_DEF,
+            name,
+        }
+    }
 }
 
 #[device_interface]
@@ -125,6 +140,10 @@ pub trait HwMemory {
     fn rsvd_regions() -> &'static [MemRange];
     /// Returns MMIO ranges provided by the platform.
     fn mmio_regions() -> &'static [MemRange];
+    /// Returns DMA-capable ranges provided by the platform.
+    fn dma_regions() -> &'static [MemRange] {
+        &[]
+    }
     /// Converts a physical address to virtual.
     fn p2v(pa: PhysAddr) -> VirtAddr;
     /// Converts a virtual address to physical.
