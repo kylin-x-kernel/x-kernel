@@ -305,7 +305,10 @@ impl GlobalAllocator {
         align_pow2: usize,
         kind: UsageKind,
     ) -> AllocResult<usize> {
-        let addr = self.dma_palloc.lock().allocate_pages(num_pages, align_pow2)?;
+        let addr = self
+            .dma_palloc
+            .lock()
+            .allocate_pages(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
             self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
         }
@@ -365,7 +368,7 @@ impl GlobalAllocator {
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
-    /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator. 
+    /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
         self.dma_palloc.lock().deallocate_pages(va, num_pages);

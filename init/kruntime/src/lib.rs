@@ -279,7 +279,6 @@ fn init_allocator() {
     for r in dma_regions() {
         kalloc::global_init_dma_page_allocator(p2v(r.paddr).as_usize(), r.size);
     }
-    
 }
 
 fn init_interrupt() {

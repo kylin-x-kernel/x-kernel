@@ -30,7 +30,6 @@ pub trait ConsoleIf {
         Self::write_data(buf)
     }
 
-
     /// Reads bytes from the platform console.
     fn read_data(buf: &mut [u8]) -> usize;
 
