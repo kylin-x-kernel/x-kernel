@@ -115,6 +115,7 @@ kcore.workspace = true
 kapi.workspace = true
 alloc-engine.workspace = true
 kalloc.workspace = true
+memaddr.workspace = true
 
 unittest = { workspace = true, optional = true }
 

@@ -23,5 +23,5 @@ pub fn kalloc_unit_test() {
     } else {
         warn!("!!! ALL TESTS PASSED !!!");
     }
-    warn!("********************************");
+    warn!("********************************\n");
 }

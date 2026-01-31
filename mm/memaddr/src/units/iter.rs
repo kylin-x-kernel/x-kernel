@@ -95,3 +95,57 @@ where
         }
     }
 }
+
+#[cfg(feature = "memaddr_test")]
+#[allow(missing_docs)]
+pub mod tests_iter {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::{DynPageIter, PageIter};
+    use crate::{PAGE_SIZE_4K, VirtAddr};
+
+    test_fn! {
+        using TestResult;
+
+        fn test_page_iter_steps() {
+            let start = VirtAddr::from(0x1000usize);
+            let end = VirtAddr::from(0x3000usize);
+            let mut iter = PageIter::<PAGE_SIZE_4K, _>::new(start, end).unwrap();
+            assert_eq!(iter.next().unwrap(), start);
+            assert_eq!(iter.next().unwrap(), VirtAddr::from(0x2000usize));
+            assert!(iter.next().is_none());
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_dyn_page_iter_steps() {
+            let start = VirtAddr::from(0x0usize);
+            let end = VirtAddr::from(0x2000usize);
+            let mut iter = DynPageIter::new(start, end, PAGE_SIZE_4K).unwrap();
+            assert_eq!(iter.next().unwrap(), start);
+            assert_eq!(iter.next().unwrap(), VirtAddr::from(0x1000usize));
+            assert!(iter.next().is_none());
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_page_iter_invalid_alignment() {
+            let start = VirtAddr::from(0x1001usize);
+            let end = VirtAddr::from(0x2000usize);
+            assert!(PageIter::<PAGE_SIZE_4K, _>::new(start, end).is_none());
+        }
+    }
+
+    tests_name! {
+        TEST_ITER;
+        test_page_iter_steps,
+        test_dyn_page_iter_steps,
+        test_page_iter_invalid_alignment,
+    }
+}

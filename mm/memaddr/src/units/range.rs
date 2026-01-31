@@ -180,3 +180,56 @@ macro_rules! pa_range {
         $crate::PhysAddrRange::try_from($range).expect("invalid address range in `pa_range!`")
     };
 }
+
+#[cfg(feature = "memaddr_test")]
+#[allow(missing_docs)]
+pub mod tests_range {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::AddrRange;
+    use crate::VirtAddr;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_range_size_and_empty() {
+            let range = AddrRange::from_start_size(VirtAddr::from(0x1000usize), 0x1000);
+            assert_eq!(range.size(), 0x1000);
+            assert!(!range.is_empty());
+            let empty = AddrRange::new(VirtAddr::from(0x1000usize), VirtAddr::from(0x1000usize));
+            assert!(empty.is_empty());
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_range_contains_range() {
+            let outer = AddrRange::from_start_size(VirtAddr::from(0x1000usize), 0x3000);
+            let inner = AddrRange::from_start_size(VirtAddr::from(0x2000usize), 0x1000);
+            assert!(outer.contains_range(inner));
+            assert!(inner.contained_in(outer));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_range_overlap() {
+            let a = AddrRange::from_start_size(VirtAddr::from(0x1000usize), 0x1000);
+            let b = AddrRange::from_start_size(VirtAddr::from(0x1800usize), 0x1000);
+            let c = AddrRange::from_start_size(VirtAddr::from(0x3000usize), 0x1000);
+            assert!(a.overlaps(b));
+            assert!(!a.overlaps(c));
+        }
+    }
+
+    tests_name! {
+        TEST_RANGE;
+        test_range_size_and_empty,
+        test_range_contains_range,
+        test_range_overlap,
+    }
+}

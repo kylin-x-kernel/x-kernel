@@ -5,6 +5,10 @@
 //! Memory address types, ranges, and alignment utilities.
 #![cfg_attr(not(test), no_std)]
 
+#[allow(unused_imports)]
+#[macro_use]
+extern crate log;
+
 mod units;
 
 pub use self::units::{
@@ -73,3 +77,53 @@ pub use ceil_align as align_up;
 pub use floor_4k as align_down_4k;
 pub use floor_align as align_down;
 pub use rem_4k as align_offset_4k;
+
+#[cfg(feature = "memaddr_test")]
+#[allow(missing_docs)]
+pub mod tests_memaddr {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::*;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_align_helpers() {
+            assert_eq!(floor_align(0x1234, 0x1000), 0x1000);
+            assert_eq!(ceil_align(0x1234, 0x1000), 0x2000);
+            assert_eq!(align_rem(0x1234, 0x1000), 0x234);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_align_4k_helpers() {
+            assert_eq!(floor_4k(0x1fff), 0x1000);
+            assert_eq!(ceil_4k(0x1001), 0x2000);
+            assert_eq!(rem_4k(0x1001), 0x1);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_aligned_checks() {
+            assert!(aligned_to(0x2000, 0x1000));
+            assert!(!aligned_to(0x2001, 0x1000));
+            assert!(aligned_4k(0x3000));
+        }
+    }
+
+    tests_name! {
+        TEST_MEMADDR;
+        test_align_helpers,
+        test_align_4k_helpers,
+        test_aligned_checks,
+    }
+}
+
+#[cfg(feature = "memaddr_test")]
+pub mod test_unit_test;

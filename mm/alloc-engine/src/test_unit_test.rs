@@ -33,5 +33,5 @@ pub fn alloc_engine_unit_test() {
     } else {
         warn!("!!! ALL TESTS PASSED !!!");
     }
-    warn!("********************************");
+    warn!("********************************\n");
 }
