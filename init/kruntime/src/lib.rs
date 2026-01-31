@@ -274,6 +274,12 @@ fn init_allocator() {
                 .expect("add heap memory region failed");
         }
     }
+
+    let dma_regions = || memory_regions().filter(|r| r.flags.contains(MemFlags::UNCACHED));
+    for r in dma_regions() {
+        kalloc::global_init_dma_page_allocator(p2v(r.paddr).as_usize(), r.size);
+    }
+    
 }
 
 fn init_interrupt() {

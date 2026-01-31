@@ -67,7 +67,7 @@ impl DmaAllocator {
                 let num_pages = 4.min(available_pages);
                 let expand_size = num_pages * PAGE_SIZE_4K;
                 let vaddr_raw =
-                    global_allocator().alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::Dma)?;
+                    global_allocator().alloc_dma_pages(num_pages, PAGE_SIZE_4K, UsageKind::Dma)?;
                 let vaddr = va!(vaddr_raw);
                 let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED;
                 #[cfg(feature = "sev")]
@@ -84,7 +84,7 @@ impl DmaAllocator {
 
     fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
         let num_pages = layout_pages(&layout);
-        let vaddr_raw = global_allocator().alloc_pages(
+        let vaddr_raw = global_allocator().alloc_dma_pages(
             num_pages,
             PAGE_SIZE_4K.max(layout.align()),
             UsageKind::Dma,
@@ -120,24 +120,14 @@ impl DmaAllocator {
         if layout.size() >= PAGE_SIZE_4K {
             let num_pages = layout_pages(&layout);
             let virt_raw = dma.cpu_addr.as_ptr() as usize;
-            use core::sync::atomic::{Ordering, fence};
-
-            let size = num_pages * PAGE_SIZE_4K;
-            let vaddr = virt_raw as *mut u8;
-
-            unsafe {
-                core::ptr::write_bytes(vaddr, 0, size);
-            }
-            fence(Ordering::SeqCst);
 
             let _ = self.update_flags(
                 va!(virt_raw),
                 num_pages,
-                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED,
+                MappingFlags::READ | MappingFlags::WRITE,
             );
-            fence(Ordering::SeqCst);
 
-            global_allocator().dealloc_pages(virt_raw, num_pages, UsageKind::Dma);
+            global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
         } else {
             self.alloc.deallocate(dma.cpu_addr, layout)
         }
