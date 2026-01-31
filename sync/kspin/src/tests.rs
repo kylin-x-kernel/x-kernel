@@ -6,9 +6,10 @@
 
 #![cfg(unittest)]
 
-use unittest::{assert, assert_eq, def_test};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 
