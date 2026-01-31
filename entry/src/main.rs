@@ -35,7 +35,9 @@ fn main() {
     let envs = [];
 
     #[cfg(feature = "unittest")]
-    unittest::test_run();
+    if !unittest::test_run_ok() {
+        panic!("Unit tests failed");
+    }
 
     let exit_code = entry::run_initproc(&args, &envs);
     info!("Init process exited with code: {exit_code:?}");
