@@ -54,10 +54,8 @@ fn group_tests_by_module(tests: &[TestDescriptor]) -> BTreeMap<&'static str, Vec
 /// `TestStats` containing the results of all tests
 ///
 /// # Example
-/// ```rust
-/// fn main() {
-///     unittest::test_run();
-/// }
+/// ```rust,no_run
+/// unittest::test_run();
 /// ```
 pub fn test_run() -> TestStats {
     // Reset the failed flag
