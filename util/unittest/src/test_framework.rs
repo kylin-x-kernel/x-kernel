@@ -5,9 +5,7 @@
 //! This module implements a custom unit test framework for Rust code.
 //! The framework supports manual test case registration and provides basic assertion functionality.
 
-use alloc::collections::BTreeMap;
-use alloc::format;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, format, vec::Vec};
 use core::{
     fmt::Write,
     sync::atomic::{AtomicBool, Ordering},
@@ -192,7 +190,13 @@ impl TestRunner {
         self.output.clear();
 
         // Print test start information with module path
-        write!(self.output, "  Running test: {}:{}", test.module(), test.name()).ok();
+        write!(
+            self.output,
+            "  Running test: {}:{}",
+            test.module(),
+            test.name()
+        )
+        .ok();
         self.print_message(self.output.as_str());
 
         // Run the test

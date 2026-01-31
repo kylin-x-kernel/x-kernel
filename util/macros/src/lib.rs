@@ -2,7 +2,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{Error, Item, ItemFn, parse_macro_input, ItemMod};
+use syn::{Error, Item, ItemFn, ItemMod, parse_macro_input};
 
 /// Register a constructor function to be called before `main`.
 ///
@@ -73,17 +73,17 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```rust
-/// use unittest::{mod_test, def_test};
+/// use unittest::{def_test, mod_test};
 ///
 /// #[mod_test]
 /// mod tests {
 ///     use super::*;
-///     
+///
 ///     #[def_test]
 ///     fn test_addition() {
 ///         assert_eq!(2 + 2, 4);
 ///     }
-///     
+///
 ///     #[def_test]
 ///     fn test_string() {
 ///         assert_eq!("hello", "hello");
@@ -93,11 +93,11 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let module = parse_macro_input!(item as ItemMod);
-    
+
     let mod_attrs = &module.attrs;
     let mod_vis = &module.vis;
     let mod_name = &module.ident;
-    
+
     let output = if let Some((brace, items)) = &module.content {
         // Module with body
         let _ = brace; // suppress unused warning
@@ -116,7 +116,7 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #mod_vis mod #mod_name;
         }
     };
-    
+
     output.into()
 }
 

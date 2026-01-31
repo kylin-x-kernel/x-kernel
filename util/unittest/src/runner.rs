@@ -3,10 +3,10 @@
 //! This module provides the `test_run()` function that automatically discovers
 //! and runs all tests marked with `#[unittest]`.
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use crate::test_framework::{TestDescriptor, TestRunner, TestStats, TEST_FAILED_FLAG};
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::Ordering;
+
+use crate::test_framework::{TEST_FAILED_FLAG, TestDescriptor, TestRunner, TestStats};
 
 // External symbols defined in the linker script
 #[allow(improper_ctypes)]
@@ -32,11 +32,11 @@ fn get_tests() -> &'static [TestDescriptor] {
 /// Group tests by module path
 fn group_tests_by_module(tests: &[TestDescriptor]) -> BTreeMap<&'static str, Vec<&TestDescriptor>> {
     let mut grouped: BTreeMap<&'static str, Vec<&TestDescriptor>> = BTreeMap::new();
-    
+
     for test in tests {
         grouped.entry(test.module).or_default().push(test);
     }
-    
+
     grouped
 }
 
