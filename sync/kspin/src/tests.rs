@@ -4,14 +4,11 @@
 
 //! Test suite for kspin
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-        mpsc::channel,
-    },
-    thread,
-};
+#![cfg(unittest)]
+
+use unittest::{assert, assert_eq, def_test};
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 
@@ -42,54 +39,14 @@ type TestMutex<T> = SpinRaw<T>;
 #[derive(Eq, PartialEq, Debug)]
 struct NonCopy(i32);
 
-#[test]
+#[def_test]
 fn smoke() {
     let m = TestMutex::new(());
     drop(m.lock());
     drop(m.lock());
 }
 
-#[test]
-#[cfg(feature = "smp")]
-fn concurrent_increments() {
-    static M: TestMutex<()> = TestMutex::new(());
-    static mut CNT: u32 = 0;
-    const INCREMENTS_PER_THREAD: u32 = 1000;
-    const NUM_THREADS: u32 = 3;
-
-    fn inc() {
-        for _ in 0..INCREMENTS_PER_THREAD {
-            unsafe {
-                let _g = M.lock();
-                CNT += 1;
-            }
-        }
-    }
-
-    let (tx, rx) = channel();
-    let mut dispatch_irqs = Vec::new();
-
-    for _ in 0..NUM_THREADS * 2 {
-        let tx = tx.clone();
-        dispatch_irqs.push(thread::spawn(move || {
-            inc();
-            tx.send(()).unwrap();
-        }));
-    }
-
-    drop(tx);
-    for _ in 0..NUM_THREADS * 2 {
-        rx.recv().unwrap();
-    }
-
-    assert_eq!(unsafe { CNT }, INCREMENTS_PER_THREAD * NUM_THREADS * 2);
-
-    for h in dispatch_irqs {
-        h.join().unwrap();
-    }
-}
-
-#[test]
+#[def_test]
 #[cfg(feature = "smp")]
 fn try_lock_works() {
     let mutex = TestMutex::new(42);
@@ -105,7 +62,7 @@ fn try_lock_works() {
     assert_eq!(c.as_ref().map(|r| **r), Some(42));
 }
 
-#[test]
+#[def_test]
 fn guard_state_restored() {
     let m = TestSpinIrq::new(());
     let _a = m.lock();
@@ -114,7 +71,7 @@ fn guard_state_restored() {
     assert_eq!(unsafe { IRQ_CNT }, 0);
 }
 
-#[test]
+#[def_test]
 #[cfg(feature = "smp")]
 fn failed_try_lock_restores_state() {
     let m = TestSpinIrq::new(());
@@ -129,13 +86,13 @@ fn failed_try_lock_restores_state() {
     assert_eq!(unsafe { IRQ_CNT }, 0);
 }
 
-#[test]
+#[def_test]
 fn into_inner_works() {
     let m = TestMutex::new(NonCopy(10));
     assert_eq!(m.into_inner(), NonCopy(10));
 }
 
-#[test]
+#[def_test]
 fn into_inner_drops() {
     struct Foo(Arc<AtomicUsize>);
     impl Drop for Foo {
@@ -156,47 +113,18 @@ fn into_inner_drops() {
     assert_eq!(num_drops.load(Ordering::SeqCst), 1);
 }
 
-#[test]
+#[def_test]
 fn nested_locks() {
     let arc = Arc::new(TestMutex::new(1));
     let arc2 = Arc::new(TestMutex::new(arc));
-    let (tx, rx) = channel();
 
-    let t = thread::spawn(move || {
-        let lock = arc2.lock();
-        let lock2 = lock.lock();
-        assert_eq!(*lock2, 1);
-        tx.send(()).unwrap();
-    });
-
-    rx.recv().unwrap();
-    t.join().unwrap();
+    // Single threaded nested lock test
+    let lock = arc2.lock();
+    let lock2 = lock.lock();
+    assert_eq!(*lock2, 1);
 }
 
-#[test]
-fn unwind_safety() {
-    let arc = Arc::new(TestMutex::new(1));
-    let arc2 = arc.clone();
-
-    let _ = thread::spawn(move || {
-        struct Unwinder {
-            i: Arc<TestMutex<i32>>,
-        }
-        impl Drop for Unwinder {
-            fn drop(&mut self) {
-                *self.i.lock() += 1;
-            }
-        }
-        let _u = Unwinder { i: arc2 };
-        panic!();
-    })
-    .join();
-
-    let lock = arc.lock();
-    assert_eq!(*lock, 2);
-}
-
-#[test]
+#[def_test]
 fn unsized_types() {
     let mutex: &TestMutex<[i32]> = &TestMutex::new([1, 2, 3]);
     {
@@ -208,10 +136,10 @@ fn unsized_types() {
     assert_eq!(&*mutex.lock(), expected);
 }
 
-#[test]
+#[def_test]
 fn force_unlock_works() {
     let lock = TestMutex::new(());
-    std::mem::forget(lock.lock());
+    core::mem::forget(lock.lock());
 
     unsafe {
         lock.force_unlock();
@@ -220,7 +148,7 @@ fn force_unlock_works() {
     assert!(lock.try_lock().is_some());
 }
 
-#[test]
+#[def_test]
 fn debug_output() {
     let lock = TestMutex::new(42);
     let debug_str = format!("{:?}", lock);

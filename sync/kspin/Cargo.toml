@@ -18,3 +18,4 @@ default = []
 [dependencies]
 cfg-if = { workspace = true }
 crate_interface = {workspace = true}
+unittest.workspace = true

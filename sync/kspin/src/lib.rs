@@ -93,9 +93,11 @@
 //! }
 //! ```
 
+#[macro_use]
+extern crate alloc;
+
 mod guard;
 mod lock;
-#[cfg(test)]
 mod tests;
 
 pub use guard::{BaseGuard, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave};
