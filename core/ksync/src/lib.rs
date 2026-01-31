@@ -81,14 +81,8 @@ pub use kspin as spin;
 mod mutex;
 mod rwlock;
 mod semaphore;
+mod tests;
 mod util;
-
-#[cfg(feature = "unittest")]
-mod test_mutex;
-#[cfg(feature = "unittest")]
-mod test_rwlock;
-#[cfg(feature = "unittest")]
-mod test_semaphore;
 
 #[cfg(feature = "stats")]
 pub use self::mutex::MutexStats;
