@@ -20,3 +20,4 @@ fxmac_rs = { git = "https://github.com/elliott10/fxmac_rs.git", rev = "0dbc3916"
 ixgbe-driver = { git = "https://github.com/KuangjuX/ixgbe-driver.git", rev = "8e5eb74", optional = true }
 log = { workspace = true }
 spin = "0.9"
+unittest = { workspace = true }
