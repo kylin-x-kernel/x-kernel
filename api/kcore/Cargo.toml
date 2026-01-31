@@ -54,7 +54,6 @@ memspace = { workspace = true, features = ["copy"] }
 
 [features]
 tee = []
-kcore_test = []
 unittest = []
 
 [lints.rust]
