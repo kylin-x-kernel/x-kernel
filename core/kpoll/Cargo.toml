@@ -11,6 +11,7 @@ repository.workspace = true
 [features]
 stats = []
 default = []
+unittest = ["dep:unittest"]
 
 [dependencies]
 bitflags = { version = "2.10", default-features = false }

@@ -83,11 +83,11 @@ mod rwlock;
 mod semaphore;
 mod util;
 
-#[cfg(unittest)]
+#[cfg(feature = "unittest")]
 mod test_mutex;
-#[cfg(unittest)]
+#[cfg(feature = "unittest")]
 mod test_rwlock;
-#[cfg(unittest)]
+#[cfg(feature = "unittest")]
 mod test_semaphore;
 
 #[cfg(feature = "stats")]

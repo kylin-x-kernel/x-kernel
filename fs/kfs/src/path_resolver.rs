@@ -230,19 +230,3 @@ impl Default for PathResolver {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_path_resolver_new() {
-        let resolver = PathResolver::new();
-        assert_eq!(resolver.max_symlinks, DEFAULT_MAX_SYMLINKS);
-    }
-
-    #[test]
-    fn test_path_resolver_with_max_symlinks() {
-        let resolver = PathResolver::with_max_symlinks(10);
-        assert_eq!(resolver.max_symlinks, 10);
-    }
-}

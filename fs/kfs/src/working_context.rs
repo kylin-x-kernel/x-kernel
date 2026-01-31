@@ -67,15 +67,3 @@ impl WorkingContext {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    // Note: Full tests require actual filesystem, see tests/working_context_tests.rs
-
-    #[test]
-    fn test_working_context_clone() {
-        // Basic clone test without filesystem
-        // Real tests are in integration tests
-    }
-}

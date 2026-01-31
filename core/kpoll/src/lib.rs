@@ -20,6 +20,11 @@ use bitflags::bitflags;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::*;
 
+#[cfg(feature = "unittest")]
+mod test_ioevents;
+#[cfg(feature = "unittest")]
+mod test_pollset;
+
 bitflags! {
     /// I/O events.
     #[derive(Debug, Clone, Copy)]
@@ -243,5 +248,3 @@ impl Default for PollSetGroup {
         Self::new()
     }
 }
-
-
