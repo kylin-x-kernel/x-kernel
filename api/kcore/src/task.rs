@@ -29,12 +29,11 @@ use ksignal::{
     SignalInfo, Signo,
     api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
 };
-use ksync::{Mutex, spin::SpinNoIrq};
+use ksync::{Mutex, RwLock, spin::SpinNoIrq};
 use ktask::{KtaskRef, TaskExt, TaskInner, WeakKtaskRef, current};
 use lazy_static::lazy_static;
 use memspace::AddrSpace;
 use scope_local::{ActiveScope, Scope};
-use ksync::RwLock;
 use weak_map::WeakMap;
 
 pub use self::stat::TaskStat;

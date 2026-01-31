@@ -10,12 +10,12 @@ use core::{mem, time::Duration};
 use event_listener::{Event, listener};
 use khal::time::{NANOS_PER_SEC, TimeValue, monotonic_time_nanos, wall_time};
 use ksignal::Signo;
+use ksync::Mutex;
 use ktask::{
     WeakKtaskRef, current,
     future::{block_on, timeout_at},
 };
 use lazy_static::lazy_static;
-use ksync::Mutex;
 use strum::FromRepr;
 
 use crate::task::poll_timer;
@@ -230,34 +230,35 @@ impl TimeManager {
 
 async fn alarm_task() {
     loop {
-        let guard = ALARM_LIST.lock();
-        let Some(entry) = guard.peek() else {
-            drop(guard);
-            listener!(EVENT_NEW_TIMER => listener);
+        let entry = {
+            let guard = ALARM_LIST.lock();
+            guard.peek().map(|e| (e.deadline, e.task.clone()))
+        };
 
+        let Some((deadline, task_weak)) = entry else {
+            listener!(EVENT_NEW_TIMER => listener);
             if !ALARM_LIST.lock().is_empty() {
                 continue;
             }
             listener.await;
-
             continue;
         };
 
         let now = wall_time();
-        if entry.deadline <= now {
-            let entry_deadline = entry.deadline;
-            if let Some(task) = entry.task.upgrade() {
-                drop(guard);
+        if deadline <= now {
+            // 任务已到期，执行它
+            if let Some(task) = task_weak.upgrade() {
                 poll_timer(&task);
-            } else {
-                drop(guard);
             }
+
+            // 从队列中移除
             let mut guard = ALARM_LIST.lock();
-            assert!(guard.pop().is_some_and(|it| it.deadline == entry_deadline));
+            assert!(guard.pop().is_some_and(|it| it.deadline == deadline));
         } else {
-            let deadline = entry.deadline;
-            drop(guard);
+            // 任务未到期，等待到 deadline 或新任务插入
             listener!(EVENT_NEW_TIMER => listener);
+
+            // 检查队列头是否还是同一个任务
             if ALARM_LIST
                 .lock()
                 .peek()
@@ -265,6 +266,7 @@ async fn alarm_task() {
             {
                 continue;
             }
+
             let _ = timeout_at(Some(deadline), listener).await;
         }
     }

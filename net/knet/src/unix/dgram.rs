@@ -11,8 +11,7 @@ use async_trait::async_trait;
 use kerrno::{KError, KResult};
 use kio::{Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
-use ksync::Mutex;
-use ksync::RwLock;
+use ksync::{Mutex, RwLock};
 
 use crate::{
     CMsgData, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,

@@ -13,11 +13,11 @@ use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, SignalSet};
+use ksync::RwLock;
 use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use ksync::RwLock;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::file::{FileLike, IoDst, IoSrc};

@@ -12,7 +12,7 @@ use core::{
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, Pollable};
-use ksync::Mutex;
+use ksync::{Mutex, RwLock};
 use smoltcp::{
     iface::SocketHandle,
     phy::PacketMeta,
@@ -20,7 +20,6 @@ use smoltcp::{
     storage::PacketMetadata,
     wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
-use ksync::RwLock;
 
 use crate::{
     RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx, SocketOps,

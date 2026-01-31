@@ -20,9 +20,8 @@ use kalloc::{UsageKind, global_allocator};
 use khal::mem::{PhysAddr, VirtAddr, v2p};
 use kio::{SeekFrom, prelude::*};
 use kpoll::{IoEvents, Pollable};
-use ksync::Mutex;
+use ksync::{Mutex, RwLock};
 use lru::LruCache;
-use ksync::RwLock;
 
 use super::FsContext;
 
