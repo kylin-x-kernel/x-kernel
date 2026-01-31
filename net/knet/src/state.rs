@@ -33,6 +33,7 @@ impl TryFrom<u8> for State {
     }
 }
 
+#[derive(Debug)]
 pub struct StateLock(AtomicU8);
 impl StateLock {
     pub fn new(state: State) -> Self {
@@ -64,6 +65,7 @@ impl StateLock {
 }
 
 #[must_use]
+#[derive(Debug)]
 pub struct StateGuard<'a>(&'a StateLock, u8);
 impl StateGuard<'_> {
     pub fn transit<R>(self, new: State, f: impl FnOnce() -> KResult<R>) -> KResult<R> {

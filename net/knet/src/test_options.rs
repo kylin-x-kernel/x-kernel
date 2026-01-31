@@ -3,7 +3,6 @@
 #![cfg(unittest)]
 
 extern crate alloc;
-use alloc::boxed::Box;
 use core::time::Duration;
 
 use unittest::def_test;
@@ -91,11 +90,11 @@ fn test_socket_option_variants_set() {
 
     // Both should be valid
     match set_opt1 {
-        SetSocketOption::ReuseAddress(val) => assert_eq!(*val, true),
+        SetSocketOption::ReuseAddress(val) => assert!(*val),
         _ => panic!("Expected ReuseAddress variant"),
     }
     match set_opt2 {
-        SetSocketOption::ReuseAddress(val) => assert_eq!(*val, true),
+        SetSocketOption::ReuseAddress(val) => assert!(*val),
         _ => panic!("Expected ReuseAddress variant"),
     }
 
