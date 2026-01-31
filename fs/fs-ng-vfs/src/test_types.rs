@@ -1,17 +1,8 @@
-//! Unit tests for VFS types (NodeType, NodePermission, DeviceId).
-
-#![allow(missing_docs)]
-
-use unittest::{
-    test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-};
 
 use crate::types::{DeviceId, NodePermission, NodeType};
-
-test_fn! {
-    using TestResult;
-
-    fn test_node_type_conversion() {
+use unittest::{assert_eq, def_test};
+#[def_test]
+fn test_node_type_conversion() {
         // Test NodeType from u8 conversion
         assert_eq!(NodeType::from(0o1), NodeType::Fifo);
         assert_eq!(NodeType::from(0o2), NodeType::CharacterDevice);
@@ -25,12 +16,9 @@ test_fn! {
         assert_eq!(NodeType::from(0o0), NodeType::Unknown);
         assert_eq!(NodeType::from(0o77), NodeType::Unknown);
     }
-}
 
-test_fn! {
-    using TestResult;
-
-    fn test_node_permission_bitflags() {
+#[def_test]
+fn test_node_permission_bitflags() {
         // Test permission combinations
         let rwx = NodePermission::OWNER_READ
             | NodePermission::OWNER_WRITE
@@ -56,12 +44,9 @@ test_fn! {
         assert!(special.contains(NodePermission::SET_GID));
         assert!(special.contains(NodePermission::STICKY));
     }
-}
 
-test_fn! {
-    using TestResult;
-
-    fn test_device_id_major_minor() {
+#[def_test]
+fn test_device_id_major_minor() {
         // Test DeviceId major/minor extraction
         let dev1 = DeviceId::new(1, 2);
         assert_eq!(dev1.major(), 1);
@@ -81,10 +66,6 @@ test_fn! {
         assert_eq!(dev4.major(), 0xFFFFFFFF);
         assert_eq!(dev4.minor(), 0xFFFFFFFF);
     }
-}
+    }
 
-tests_name!(TEST_TYPES;
-    test_node_type_conversion,
-    test_node_permission_bitflags,
-    test_device_id_major_minor,
-);
+

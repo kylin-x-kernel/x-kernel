@@ -15,7 +15,7 @@ ext4 = ["dep:lwext4_rust"]
 times = []
 std = ["lwext4_rust?/std"]
 crosvm = []
-unittest = ["dep:unittest", "fs-ng-vfs/unittest"]
+unittest = ["dep:unittest"]
 
 [dependencies]
 kalloc = { workspace = true }
