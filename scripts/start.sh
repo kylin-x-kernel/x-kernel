@@ -1,5 +1,5 @@
 #!/bin/bash
-bash scripts/disk.sh BOOTX64.EFI xkernel_x86-csv.elf axboot.toml -o myboot.img
+bash scripts/disk.sh target/x86_64-unknown-uefi/release/bootloader.efi xkernel_x86-csv.elf platforms/bootloader/axboot.toml -o myboot.img
 
 echo "启动 QEMU..."
 qemu-system-x86_64 -m 1G -smp 1 -machine q35 \

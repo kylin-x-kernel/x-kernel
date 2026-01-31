@@ -62,6 +62,13 @@ impl HwMemory for HwMemoryImpl {
         &[(0, 0x100000)]
     }
 
+    fn dma_regions() -> &'static [MemRange] {
+        &[(
+            crate::config::plat::DMA_MEM_BASE,
+            crate::config::plat::DMA_MEM_SIZE,
+        )]
+    }
+
     /// Returns all device memory (MMIO) ranges on the platform.
     fn mmio_regions() -> &'static [MemRange] {
         &MMIO_RANGES
