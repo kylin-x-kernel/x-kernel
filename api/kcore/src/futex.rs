@@ -246,7 +246,7 @@ impl Drop for FutexGuard<'_> {
 }
 
 /// Unit tests.
-#[unittest::mod_test]
+#[cfg(unittest)]
 pub mod tests_futex {
     use unittest::def_test;
 

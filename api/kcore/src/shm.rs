@@ -385,7 +385,7 @@ impl ShmManager {
 pub static SHM_MANAGER: Mutex<ShmManager> = Mutex::new(ShmManager::new());
 
 /// Unit tests.
-#[unittest::mod_test]
+#[cfg(unittest)]
 pub mod tests_shm {
     use khal::paging::MappingFlags;
     use memaddr::VirtAddrRange;

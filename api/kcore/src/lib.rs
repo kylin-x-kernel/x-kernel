@@ -24,7 +24,7 @@ pub mod resources;
 pub mod shm;
 pub mod task;
 /// Unit test entrypoints.
-#[cfg(feature = "unittest")]
+#[cfg(unittest)]
 pub mod test_unit_test;
 pub mod time;
 pub mod vfs;

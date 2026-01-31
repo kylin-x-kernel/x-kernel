@@ -27,7 +27,7 @@ cfg_if::cfg_if! {
 }
 
 /// Unit tests.
-#[unittest::mod_test]
+#[cfg(unittest)]
 pub mod tests_config {
     use unittest::def_test;
 

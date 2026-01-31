@@ -280,7 +280,7 @@ pub fn spawn_alarm_task() {
 }
 
 /// Unit tests.
-#[unittest::mod_test]
+#[cfg(unittest)]
 pub mod tests_time {
     use ksignal::Signo;
     use unittest::def_test;

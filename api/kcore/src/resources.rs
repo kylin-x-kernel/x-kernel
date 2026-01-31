@@ -66,7 +66,7 @@ impl IndexMut<u32> for Rlimits {
 }
 
 /// Unit tests.
-#[unittest::mod_test]
+#[cfg(unittest)]
 pub mod tests_resources {
     use unittest::def_test;
 
