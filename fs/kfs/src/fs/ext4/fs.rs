@@ -83,7 +83,7 @@ impl FilesystemOps for Ext4Filesystem {
     fn stat(&self) -> VfsResult<StatFs> {
         let fs = self.lock();
         let superblock = &fs.fs.superblock;
-        let block_size = superblock.block_size() as u64;
+        let block_size = superblock.block_size();
         let blocks = superblock.blocks_count();
         let blocks_free = superblock.free_blocks_count();
         Ok(StatFs {

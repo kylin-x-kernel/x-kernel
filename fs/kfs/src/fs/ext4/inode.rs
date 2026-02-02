@@ -120,11 +120,11 @@ impl NodeOps for Inode {
         let mut state = self.fs.lock();
         let (fs, dev) = state.split();
         let inode = fs.get_inode_by_num(dev, self.ino).map_err(into_vfs_err)?;
-        Ok(Metadata {
-            inode: self.ino as _,
-            device: 0,
-            nlink: inode.i_links_count as _,
-            mode: NodePermission::from_bits_truncate((inode.i_mode & 0o777) as u16),
+            Ok(Metadata {
+                inode: self.ino as _,
+                device: 0,
+                nlink: inode.i_links_count as _,
+                mode: NodePermission::from_bits_truncate(inode.i_mode & 0o777),
             node_type: inode_to_vfs_type(inode.is_dir(), inode.is_file(), inode.is_symlink()),
             uid: inode.uid(),
             gid: inode.gid(),
@@ -143,7 +143,7 @@ impl NodeOps for Inode {
         let (fs, dev) = state.split();
         fs.modify_inode(dev, self.ino, |inode| {
             if let Some(mode) = update.mode {
-                inode.i_mode = (inode.i_mode & !0o777) | (mode.bits() as u16);
+                    inode.i_mode = (inode.i_mode & !0o777) | mode.bits();
             }
             if let Some((uid, gid)) = update.owner {
                 inode.i_uid = (uid & 0xffff) as u16;
@@ -471,7 +471,7 @@ impl DirNodeOps for Inode {
                 .ok_or(VfsError::InvalidInput)?
         };
 
-        let mode_bits = permission.bits() as u16;
+        let mode_bits = permission.bits();
         fs.modify_inode(dev, ino, |node| {
             node.i_mode = (node.i_mode & !0o777) | mode_bits;
         })

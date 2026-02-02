@@ -24,7 +24,7 @@ pub(crate) struct Ext4Disk(KBlockDevice);
 impl BlockDevice for Ext4Disk {
     fn write(&mut self, buffer: &[u8], block_id: u32, count: u32) -> BlockDevResult<()> {
         let dev_block = self.0.block_size();
-        if FS_BLOCK_SIZE % dev_block != 0 {
+        if !FS_BLOCK_SIZE.is_multiple_of(dev_block) {
             return Err(BlockDevError::InvalidBlockSize {
                 size: dev_block,
                 expected: FS_BLOCK_SIZE,
@@ -46,7 +46,7 @@ impl BlockDevice for Ext4Disk {
 
     fn read(&mut self, buffer: &mut [u8], block_id: u32, count: u32) -> BlockDevResult<()> {
         let dev_block = self.0.block_size();
-        if FS_BLOCK_SIZE % dev_block != 0 {
+        if !FS_BLOCK_SIZE.is_multiple_of(dev_block) {
             return Err(BlockDevError::InvalidBlockSize {
                 size: dev_block,
                 expected: FS_BLOCK_SIZE,
