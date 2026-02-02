@@ -1,0 +1,170 @@
+[package]
+name = "mbedtls"
+# We jumped from v0.9 to v0.12 because v0.10 and v0.11 were based on mbedtls 3.X, which
+# we decided not to support.
+version = "0.13.3"
+authors = ["Jethro Beekman <jethro@fortanix.com>"]
+build = "build.rs"
+edition = "2018"
+license = "Apache-2.0 OR GPL-2.0-or-later"
+description = """
+Idiomatic Rust wrapper for MbedTLS, allowing you to use MbedTLS with only safe
+code while being able to use such great Rust features like error handling and
+closures.
+
+Building on MbedTLS's focus on embedded use, this crate can be used in a no_std
+environment."""
+readme = "../README.md"
+repository = "https://github.com/fortanix/rust-mbedtls"
+documentation = "https://docs.rs/mbedtls/"
+keywords = ["MbedTLS", "mbed", "TLS", "SSL", "cryptography"]
+
+[package.metadata.docs.rs]
+features = ["x509", "ssl"]
+
+[dependencies]
+bitflags = "1"
+serde = { version = "1.0.7", default-features = false, features = ["alloc"] }
+serde_derive = "1.0.7"
+byteorder = { version = "1.0.0", default-features = false }
+yasna = { version = "0.2", optional = true, features = [
+    "num-bigint",
+    "bit-vec",
+] }
+num-bigint = { version = "0.2", optional = true }
+bit-vec = { version = "0.5", optional = true }
+cbc = { version = "0.1.2", optional = true }
+rc2 = { version = "0.8.1", optional = true }
+cfg-if = "1.0.0"
+tokio = { version = "1.16.1", optional = true }
+chrono = { version = "0.4", optional = true }
+
+mbedtls-sys-auto = { workspace = true, features = [
+    "trusted_cert_callback",
+    "threading",
+] }
+
+mbedtls-platform-support = { workspace = true}
+
+[target.x86_64-fortanix-unknown-sgx.dependencies]
+rs-libc = "0.2.0"
+
+[dev-dependencies]
+libc = "0.2.0"
+rand = "0.4.0"
+serde_cbor = "0.6"
+hex = "0.3"
+matches = "0.1.8"
+hyper = { version = "0.10.16", default-features = false }
+async-stream = "0.3.0"
+futures = "0.3"
+tracing = "0.1"
+pin-project-lite = "0.2"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[build-dependencies]
+cc = "1.0"
+rustc_version = "0.4.0"
+
+# feature 'time` is necessary under windows
+# [target.'cfg(target_family = "windows")'.dependencies]
+# mbedtls-platform-support = { version = "0.1", workspace = true, features = [
+#     "time",
+# ] }
+# mbedtls-sys-auto = { workspace = true, version = "2.25.0", default-features = false, features = [
+#     "trusted_cert_callback",
+#     "threading",
+#     "time",
+# ] }
+
+[features]
+# Features are documented in the README
+
+x509 = []
+ssl = ["x509"]
+
+default = ["std", "aesni", "time", "padlock"]
+std = [
+    "byteorder/std",
+    "mbedtls-sys-auto/std",
+    "serde/std",
+    "yasna",
+    "mbedtls-platform-support/std",
+]
+debug = ["mbedtls-sys-auto/debug"]
+no_std_deps = ["mbedtls-platform-support/spin", "serde/alloc"]
+force_aesni_support = ["mbedtls-platform-support/force_aesni_support", "aesni"]
+mpi_force_c_code = ["mbedtls-sys-auto/mpi_force_c_code"]
+rdrand = []
+aesni = ["mbedtls-platform-support/aesni"]
+zlib = ["mbedtls-sys-auto/zlib"]
+time = ["mbedtls-platform-support/time"]
+padlock = ["mbedtls-sys-auto/padlock"]
+dsa = ["std", "yasna", "num-bigint", "bit-vec"]
+pkcs12 = ["std", "yasna", "x509"]
+pkcs12_rc2 = ["pkcs12", "rc2", "cbc"]
+legacy_protocols = ["mbedtls-sys-auto/legacy_protocols", "ssl"]
+async = ["std", "tokio", "tokio/net", "tokio/io-util", "tokio/macros"]
+async-rt = ["async", "tokio/rt", "tokio/sync", "tokio/rt-multi-thread"]
+
+[[example]]
+name = "client"
+required-features = ["std", "ssl"]
+
+[[example]]
+name = "client_sm2"
+required-features = ["std", "ssl"]
+
+[[example]]
+name = "server_sm2"
+required-features = ["std", "ssl"]
+
+[[example]]
+name = "client_dtls"
+required-features = ["std", "ssl"]
+
+[[example]]
+name = "client_psk"
+required-features = ["std", "ssl"]
+
+[[example]]
+name = "server"
+required-features = ["std", "ssl"]
+
+[[test]]
+name = "client_server"
+required-features = ["std", "ssl"]
+
+[[test]]
+name = "ssl_conf_ca_cb"
+required-features = ["std", "ssl"]
+
+[[test]]
+name = "ssl_conf_verify"
+required-features = ["std", "ssl"]
+
+[[test]]
+name = "hyper"
+required-features = ["std", "ssl"]
+
+[[test]]
+name = "async_session"
+path = "tests/async_session.rs"
+required-features = ["async-rt", "ssl"]
+
+[[bench]]
+name = "ecp_eq_test"
+harness = false
+
+[[bench]]
+name = "cipher"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(nightly)',
+    'cfg(sys_threading_component, values("custom"))',
+    'cfg(sys_time_component, values("custom"))',
+    'cfg(sys_std_component, values("entropy", "net"))',
+    'cfg(time_component, values("custom", "libc"))',
+] }

@@ -37,8 +37,7 @@ event-listener = { version = "5.4.0", default-features = false }
 async-trait = "0.1.88"
 
 [dependencies.smoltcp]
-git = "https://github.com/Starry-OS/smoltcp.git"
-rev = "7401a54"
+workspace = true
 default-features = false
 features = [
   "alloc",

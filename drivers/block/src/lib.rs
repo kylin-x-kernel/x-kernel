@@ -7,19 +7,19 @@
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]
 
-#[cfg(feature = "bcm2835-sdhci")]
-pub mod bcm2835sdhci;
+// #[cfg(feature = "bcm2835-sdhci")]
+// pub mod bcm2835sdhci;
 
-#[cfg(feature = "ramdisk")]
-pub mod ramdisk;
+// #[cfg(feature = "ramdisk")]
+// pub mod ramdisk;
 
-#[cfg(feature = "ramdisk-static")]
-pub mod ramdisk_static;
+// #[cfg(feature = "ramdisk-static")]
+// pub mod ramdisk_static;
 
-#[cfg(feature = "ahci")]
-pub mod ahci;
-#[cfg(feature = "sdmmc")]
-pub mod sdmmc;
+// #[cfg(feature = "ahci")]
+// pub mod ahci;
+// #[cfg(feature = "sdmmc")]
+// pub mod sdmmc;
 
 #[doc(no_inline)]
 pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};

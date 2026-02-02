@@ -13,10 +13,10 @@
 /mnt
 *.swp
 *.swo
-tests
 
 # Code statistics cache
 /.cache/
 /code-stats/
 
-
+# Cargo lock
+Cargo.lock

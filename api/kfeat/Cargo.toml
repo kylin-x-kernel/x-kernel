@@ -84,11 +84,11 @@ rtc = ["khal/rtc", "kruntime/rtc"]
 bus-mmio = ["kdriver/bus-mmio"]
 bus-pci = ["kdriver/bus-pci"]
 driver-ramdisk = ["kdriver/ramdisk", "kfs?/use-ramdisk"]
-driver-sdmmc = ["kdriver/sdmmc"]
+# driver-sdmmc = ["kdriver/sdmmc"]
 # driver-ixgbe = ["kdriver?/ixgbe"]
 # driver-fxmac = ["kdriver?/fxmac"]                          # fxmac ethernet driver for PhytiumPi
-driver-bcm2835-sdhci = ["kdriver/bcm2835-sdhci"]
-driver-ahci = ["kdriver/ahci"]
+# driver-bcm2835-sdhci = ["kdriver/bcm2835-sdhci"]
+# driver-ahci = ["kdriver/ahci"]
 
 # driver-dyn = ["paging", "kruntime/driver-dyn", "kdriver/dyn"]
 

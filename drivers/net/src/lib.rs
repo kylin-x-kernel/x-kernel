@@ -9,12 +9,12 @@
 
 extern crate alloc;
 
-#[cfg(feature = "fxmac")]
-/// fxmac driver for PhytiumPi
-pub mod fxmac;
-#[cfg(feature = "ixgbe")]
-/// ixgbe NIC device driver.
-pub mod ixgbe;
+// #[cfg(feature = "fxmac")]
+// /// fxmac driver for PhytiumPi
+// pub mod fxmac;
+// #[cfg(feature = "ixgbe")]
+// /// ixgbe NIC device driver.
+// pub mod ixgbe;
 
 #[doc(no_inline)]
 pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};

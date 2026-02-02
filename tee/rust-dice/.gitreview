@@ -1,0 +1,5 @@
+[gerrit]
+host=dev.futlab.me
+port=29418
+project=security/rust-dice
+defaultbranch=starry-os

@@ -39,14 +39,12 @@ unittest = { workspace = true}
 ktypes = { workspace = true }
 
 [dependencies.lwext4_rust]
-git = "https://github.com/Starry-OS/lwext4_rust.git"
-rev = "033fa2c"
+workspace = true
 default-features = false
 optional = true
 
 [dependencies.fatfs]
-git = "https://github.com/Starry-OS/rust-fatfs.git"
-rev = "2685439"
+workspace = true
 default-features = false
 optional = true
 features = ["alloc", "lfn", "log_level_trace", "unicode"]

@@ -93,7 +93,6 @@
 //! }
 //! ```
 
-#[macro_use]
 extern crate alloc;
 
 mod guard;

@@ -31,9 +31,9 @@ virtio-gpu = ["display", "virtio", "virtio/gpu"]
 virtio-input = ["input", "virtio", "virtio/input"]
 virtio-socket = ["vsock", "virtio", "virtio/socket"]
 ramdisk = ["block", "block/ramdisk"]
-bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
-sdmmc = ["block", "block/sdmmc", "dep:khal", "dep:platconfig"]
-ahci = ["block", "block/ahci", "dep:khal", "dep:platconfig"]
+# bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
+# sdmmc = ["block", "block/sdmmc", "dep:khal", "dep:platconfig"]
+# ahci = ["block", "block/ahci", "dep:khal", "dep:platconfig"]
 
 default = ["bus-pci"]
 

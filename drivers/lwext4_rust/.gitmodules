@@ -1,0 +1,4 @@
+[submodule "c/lwext4"]
+	path = c/lwext4
+	url = https://github.com/Starry-OS/lwext4.git
+	branch = master

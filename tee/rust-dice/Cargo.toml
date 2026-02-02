@@ -1,0 +1,15 @@
+[package]
+name = "dice"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dice"
+
+[dependencies]
+cty = "0.2"     # 提供 cty::c_int, cty::c_ulonglong 等
+# mbedtls-sys-auto = { workspace = true ,package = "mbedtls-sys-auto",default-features = false, optional = false }
+
+[build-dependencies]
+bindgen = { version = "0.65.1" }
+cc = "1.0.45"
