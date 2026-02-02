@@ -3,7 +3,12 @@
 // See LICENSES for license details.
 
 //! Ext4 inode wrapper and node implementations.
-use alloc::{borrow::ToOwned, string::String, sync::Arc};
+use alloc::{
+    borrow::ToOwned,
+    format,
+    string::{String, ToString},
+    sync::Arc,
+};
 use core::{any::Any, task::Context};
 
 use fs_ng_vfs::{
@@ -12,11 +17,11 @@ use fs_ng_vfs::{
     VfsResult, WeakDirEntry,
 };
 use kpoll::{IoEvents, Pollable};
-use lwext4_rust::{FileAttr, InodeType};
+use rsext4::{BLOCK_SIZE, Jbd2Dev};
 
 use super::{
-    Ext4Filesystem,
-    util::{LwExt4Filesystem, into_vfs_err, into_vfs_type},
+    Ext4Disk, Ext4Filesystem,
+    util::{dir_entry_type_to_vfs, inode_to_vfs_type, into_vfs_err, vfs_type_to_dir_entry},
 };
 
 /// Ext4 inode wrapper used to implement VFS nodes.
@@ -24,45 +29,85 @@ pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
     this: Option<WeakDirEntry>,
+    path: Option<String>,
 }
 
 impl Inode {
     /// Create a new inode wrapper.
-    pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
-        Arc::new(Self { fs, ino, this })
+    pub(crate) fn new(
+        fs: Arc<Ext4Filesystem>,
+        ino: u32,
+        this: Option<WeakDirEntry>,
+        path: Option<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            fs,
+            ino,
+            this,
+            path,
+        })
     }
 
-    fn create_entry(&self, entry: &lwext4_rust::DirEntry, name: impl Into<String>) -> DirEntry {
+    fn create_entry(
+        &self,
+        ino: u32,
+        inode: &rsext4::disknode::Ext4Inode,
+        name: impl Into<String>,
+    ) -> DirEntry {
+        let name = name.into();
         let reference = Reference::new(
             self.this.as_ref().and_then(WeakDirEntry::upgrade),
-            name.into(),
+            name.clone(),
         );
-        if entry.inode_type() == InodeType::Directory {
+        let path = self.dir_path().map(|dir| join_child_path(&dir, &name)).ok();
+        if inode.is_dir() {
             DirEntry::new_dir(
-                |this| DirNode::new(Inode::new(self.fs.clone(), entry.ino(), Some(this))),
+                |this| DirNode::new(Inode::new(self.fs.clone(), ino, Some(this), path.clone())),
                 reference,
             )
         } else {
             DirEntry::new_file(
-                FileNode::new(Inode::new(self.fs.clone(), entry.ino(), None)),
-                into_vfs_type(entry.inode_type()),
+                FileNode::new(Inode::new(self.fs.clone(), ino, None, path)),
+                inode_to_vfs_type(inode.is_dir(), inode.is_file(), inode.is_symlink()),
                 reference,
             )
         }
     }
 
-    fn lookup_locked(&self, fs: &mut LwExt4Filesystem, name: &str) -> VfsResult<DirEntry> {
-        let mut result = fs.lookup(self.ino, name).map_err(into_vfs_err)?;
-        let entry = result.entry();
-        Ok(self.create_entry(&entry, name))
+    fn dir_path(&self) -> VfsResult<String> {
+        if let Some(this) = self.this.as_ref().and_then(WeakDirEntry::upgrade) {
+            return Ok(this.absolute_path()?.to_string());
+        }
+        self.path.clone().ok_or(VfsError::InvalidInput)
     }
 
-    fn update_ctime_locked(&self, fs: &mut LwExt4Filesystem, ino: u32) -> VfsResult<()> {
-        fs.with_inode_ref(ino, |ino| {
-            ino.update_ctime();
-            Ok(())
+    fn lookup_locked(&self, name: &str) -> VfsResult<DirEntry> {
+        let path = join_child_path(&self.dir_path()?, name);
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        let (ino, inode) = rsext4::dir::get_inode_with_num(fs, dev, &path)
+            .map_err(into_vfs_err)?
+            .ok_or(VfsError::NotFound)?;
+        Ok(self.create_entry(ino, &inode, name))
+    }
+
+    fn update_ctime_with(
+        fs: &mut rsext4::Ext4FileSystem,
+        dev: &mut Jbd2Dev<Ext4Disk>,
+        ino: u32,
+    ) -> VfsResult<()> {
+        fs.modify_inode(dev, ino, |inode| {
+            if cfg!(feature = "times") {
+                inode.i_ctime = khal::time::wall_time().as_secs() as u32;
+            }
         })
         .map_err(into_vfs_err)
+    }
+
+    fn update_ctime_locked(&self, ino: u32) -> VfsResult<()> {
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        Self::update_ctime_with(fs, dev, ino)
     }
 }
 
@@ -72,55 +117,59 @@ impl NodeOps for Inode {
     }
 
     fn metadata(&self) -> VfsResult<Metadata> {
-        let mut attr = FileAttr::default();
-        self.fs
-            .lock()
-            .get_attr(self.ino, &mut attr)
-            .map_err(into_vfs_err)?;
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        let inode = fs.get_inode_by_num(dev, self.ino).map_err(into_vfs_err)?;
         Ok(Metadata {
             inode: self.ino as _,
-            device: attr.device,
-            nlink: attr.nlink,
-            mode: NodePermission::from_bits_truncate(attr.mode as u16),
-            node_type: into_vfs_type(attr.node_type),
-            uid: attr.uid,
-            gid: attr.gid,
-            size: attr.size,
-            block_size: attr.block_size,
-            blocks: attr.blocks,
+            device: 0,
+            nlink: inode.i_links_count as _,
+            mode: NodePermission::from_bits_truncate((inode.i_mode & 0o777) as u16),
+            node_type: inode_to_vfs_type(inode.is_dir(), inode.is_file(), inode.is_symlink()),
+            uid: inode.uid(),
+            gid: inode.gid(),
+            size: inode.size(),
+            block_size: fs.superblock.block_size(),
+            blocks: inode.blocks_count(),
             rdev: DeviceId::default(),
-            atime: attr.atime,
-            mtime: attr.mtime,
-            ctime: attr.ctime,
+            atime: core::time::Duration::from_secs(inode.i_atime as u64),
+            mtime: core::time::Duration::from_secs(inode.i_mtime as u64),
+            ctime: core::time::Duration::from_secs(inode.i_ctime as u64),
         })
     }
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        let mut fs = self.fs.lock();
-        fs.with_inode_ref(self.ino, |inode| {
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        fs.modify_inode(dev, self.ino, |inode| {
             if let Some(mode) = update.mode {
-                inode.set_mode((inode.mode() & !0xfff) | (mode.bits() as u32));
+                inode.i_mode = (inode.i_mode & !0o777) | (mode.bits() as u16);
             }
             if let Some((uid, gid)) = update.owner {
-                inode.set_owner(uid as _, gid as _);
+                inode.i_uid = (uid & 0xffff) as u16;
+                inode.l_i_uid_high = ((uid >> 16) & 0xffff) as u16;
+                inode.i_gid = (gid & 0xffff) as u16;
+                inode.l_i_gid_high = ((gid >> 16) & 0xffff) as u16;
             }
             if let Some(atime) = update.atime {
-                inode.set_atime(&atime);
+                inode.i_atime = atime.as_secs() as u32;
             }
             if let Some(mtime) = update.mtime {
-                inode.set_mtime(&mtime);
+                inode.i_mtime = mtime.as_secs() as u32;
             }
-            inode.update_ctime();
-            Ok(())
+            if cfg!(feature = "times") {
+                inode.i_ctime = khal::time::wall_time().as_secs() as u32;
+            }
         })
         .map_err(into_vfs_err)?;
         Ok(())
     }
 
     fn len(&self) -> VfsResult<u64> {
-        self.fs
-            .lock()
-            .with_inode_ref(self.ino, |inode| Ok(inode.size()))
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        fs.get_inode_by_num(dev, self.ino)
+            .map(|inode| inode.size())
             .map_err(into_vfs_err)
     }
 
@@ -143,37 +192,187 @@ impl NodeOps for Inode {
 
 impl FileNodeOps for Inode {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        self.fs
-            .lock()
-            .read_at(self.ino, buf, offset)
-            .map_err(into_vfs_err)
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut inode = fs.get_inode_by_num(dev, self.ino).map_err(into_vfs_err)?;
+
+        let file_size = inode.size();
+        if offset >= file_size {
+            return Ok(0);
+        }
+
+        let to_read = core::cmp::min(buf.len() as u64, file_size - offset) as usize;
+        if to_read == 0 {
+            return Ok(0);
+        }
+
+        if inode.is_symlink() {
+            let total = file_size as usize;
+            let to_read = core::cmp::min(buf.len(), total - offset as usize);
+            if total <= 60 {
+                let mut raw = [0u8; 60];
+                for i in 0..15 {
+                    raw[i * 4..i * 4 + 4].copy_from_slice(&inode.i_block[i].to_le_bytes());
+                }
+                let start = offset as usize;
+                let end = start + to_read;
+                buf[..to_read].copy_from_slice(&raw[start..end]);
+                return Ok(to_read);
+            }
+        }
+
+        if !inode.have_extend_header_and_use_extend() {
+            return Err(VfsError::Unsupported);
+        }
+
+        let block_bytes = BLOCK_SIZE as u64;
+        let start_off = offset;
+        let end_off = start_off + to_read as u64; // exclusive
+
+        let start_lbn = start_off / block_bytes;
+        let end_lbn = (end_off - 1) / block_bytes;
+
+        let extent_map = rsext4::loopfile::resolve_inode_block_allextend(fs, dev, &mut inode)
+            .map_err(into_vfs_err)?;
+
+        let mut written = 0usize;
+        for lbn in start_lbn..=end_lbn {
+            let lbn_start = lbn * block_bytes;
+            let lbn_end = lbn_start + block_bytes;
+
+            let copy_start = core::cmp::max(start_off, lbn_start) - lbn_start;
+            let copy_end = core::cmp::min(end_off, lbn_end) - lbn_start;
+            let copy_len = copy_end.saturating_sub(copy_start);
+            if copy_len == 0 {
+                continue;
+            }
+
+            if let Some(&phys) = extent_map.get(&(lbn as u32)) {
+                let cached = fs
+                    .datablock_cache
+                    .get_or_load(dev, phys)
+                    .map_err(into_vfs_err)?;
+                let data = &cached.data[..block_bytes as usize];
+                buf[written..written + copy_len as usize]
+                    .copy_from_slice(&data[copy_start as usize..(copy_start + copy_len) as usize]);
+            } else {
+                for b in &mut buf[written..written + copy_len as usize] {
+                    *b = 0;
+                }
+            }
+
+            written += copy_len as usize;
+            if written >= to_read {
+                break;
+            }
+        }
+
+        Ok(written)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        self.fs
-            .lock()
-            .write_at(self.ino, buf, offset)
-            .map_err(into_vfs_err)
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        rsext4::file::write_file_with_ino(dev, fs, self.ino, offset, buf).map_err(into_vfs_err)?;
+        Ok(buf.len())
     }
 
     fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
-        let mut fs = self.fs.lock();
-        let length = fs
-            .with_inode_ref(self.ino, |inode| Ok(inode.size()))
-            .map_err(into_vfs_err)?;
-        let written = fs.write_at(self.ino, buf, length).map_err(into_vfs_err)?;
-        Ok((written, length + written as u64))
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        let inode = fs.get_inode_by_num(dev, self.ino).map_err(into_vfs_err)?;
+        let length = inode.size();
+        rsext4::file::write_file_with_ino(dev, fs, self.ino, length, buf).map_err(into_vfs_err)?;
+        Ok((buf.len(), length + buf.len() as u64))
     }
 
     fn set_len(&self, len: u64) -> VfsResult<()> {
-        self.fs.lock().set_len(self.ino, len).map_err(into_vfs_err)
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        rsext4::file::truncate_with_ino(dev, fs, self.ino, len).map_err(into_vfs_err)
     }
 
     fn set_symlink(&self, target: &str) -> VfsResult<()> {
-        self.fs
-            .lock()
-            .set_symlink(self.ino, target.as_bytes())
-            .map_err(into_vfs_err)
+        let Some(_path) = self.path.clone() else {
+            return Err(VfsError::InvalidInput);
+        };
+
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        let mut inode = fs.get_inode_by_num(dev, self.ino).map_err(into_vfs_err)?;
+
+        if !inode.is_symlink() {
+            return Err(VfsError::InvalidInput);
+        }
+
+        if let Ok(blocks) = rsext4::loopfile::resolve_inode_block_allextend(fs, dev, &mut inode) {
+            for blk in blocks.values() {
+                let _ = fs.free_block(dev, *blk);
+            }
+        }
+
+        let target_bytes = target.as_bytes();
+        let target_len = target_bytes.len();
+        inode.i_size_lo = (target_len as u64 & 0xffffffff) as u32;
+        inode.i_size_high = ((target_len as u64) >> 32) as u32;
+        inode.i_blocks_lo = 0;
+        inode.l_i_blocks_high = 0;
+        inode.i_block = [0; 15];
+
+        if target_len == 0 {
+            inode.i_flags &= !rsext4::disknode::Ext4Inode::EXT4_EXTENTS_FL;
+        } else if target_len <= 60 {
+            inode.i_flags &= !rsext4::disknode::Ext4Inode::EXT4_EXTENTS_FL;
+            let mut raw = [0u8; 60];
+            raw[..target_len].copy_from_slice(target_bytes);
+            for i in 0..15 {
+                inode.i_block[i] = u32::from_le_bytes([
+                    raw[i * 4],
+                    raw[i * 4 + 1],
+                    raw[i * 4 + 2],
+                    raw[i * 4 + 3],
+                ]);
+            }
+        } else {
+            if !fs.superblock.has_extents() {
+                return Err(VfsError::Unsupported);
+            }
+
+            let mut data_blocks = alloc::vec::Vec::new();
+            let mut remaining = target_len;
+            let mut src_off = 0usize;
+            while remaining > 0 {
+                let blk = fs.alloc_block(dev).map_err(into_vfs_err)?;
+                let write_len = core::cmp::min(remaining, BLOCK_SIZE);
+                fs.datablock_cache.modify_new(blk, |data| {
+                    for b in data.iter_mut() {
+                        *b = 0;
+                    }
+                    let end = src_off + write_len;
+                    data[..write_len].copy_from_slice(&target_bytes[src_off..end]);
+                });
+                data_blocks.push(blk);
+                remaining -= write_len;
+                src_off += write_len;
+            }
+
+            let used_datablocks = data_blocks.len() as u64;
+            let iblocks_used = used_datablocks.saturating_mul(BLOCK_SIZE as u64 / 512) as u32;
+            inode.i_blocks_lo = iblocks_used;
+            inode.l_i_blocks_high = 0;
+            rsext4::file::build_file_block_mapping(fs, &mut inode, &data_blocks, dev);
+        }
+
+        fs.modify_inode(dev, self.ino, |on_disk| {
+            *on_disk = inode;
+        })
+        .map_err(into_vfs_err)?;
+
+        Ok(())
     }
 }
 
@@ -187,27 +386,62 @@ impl Pollable for Inode {
 
 impl DirNodeOps for Inode {
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
-        let mut fs = self.fs.lock();
-        let mut reader = fs.read_dir(self.ino, offset).map_err(into_vfs_err)?;
-        let mut count = 0;
-        while let Some(entry) = reader.current() {
-            let name = core::str::from_utf8(entry.name())
-                .map_err(|_| VfsError::InvalidData)?
-                .to_owned();
-            let ino = entry.ino() as u64;
-            let node_type = into_vfs_type(entry.inode_type());
-            reader.step().map_err(into_vfs_err)?;
-            if !sink.accept(&name, ino, node_type, reader.offset()) {
-                break;
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        let mut inode = fs.get_inode_by_num(dev, self.ino).map_err(into_vfs_err)?;
+
+        let blocks = rsext4::loopfile::resolve_inode_block_allextend(fs, dev, &mut inode)
+            .map_err(into_vfs_err)?;
+
+        let mut idx = 0u64;
+        let mut count = 0usize;
+        for &phys in blocks.values() {
+            let cached = fs
+                .datablock_cache
+                .get_or_load(dev, phys)
+                .map_err(into_vfs_err)?;
+            let data = &cached.data[..BLOCK_SIZE];
+            let iter = rsext4::entries::DirEntryIterator::new(data);
+            for (entry, _) in iter {
+                if entry.inode == 0 {
+                    continue;
+                }
+                if idx < offset {
+                    idx += 1;
+                    continue;
+                }
+                let name = core::str::from_utf8(entry.name)
+                    .map_err(|_| VfsError::InvalidData)?
+                    .to_owned();
+                let node_type = dir_entry_type_to_vfs(entry.file_type);
+                idx += 1;
+                if !sink.accept(&name, entry.inode as u64, node_type, idx) {
+                    return Ok(count);
+                }
+                count += 1;
             }
-            count += 1;
         }
+
         Ok(count)
     }
 
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
-        let mut fs = self.fs.lock();
-        self.lookup_locked(&mut fs, name)
+        if name == "." {
+            return self
+                .this
+                .as_ref()
+                .and_then(WeakDirEntry::upgrade)
+                .ok_or(VfsError::NotFound);
+        }
+        if name == ".." {
+            return self
+                .this
+                .as_ref()
+                .and_then(WeakDirEntry::upgrade)
+                .and_then(|entry| entry.parent())
+                .ok_or(VfsError::NotFound);
+        }
+        self.lookup_locked(name)
     }
 
     fn create(
@@ -216,26 +450,33 @@ impl DirNodeOps for Inode {
         node_type: NodeType,
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
-        let inode_type = match node_type {
-            NodeType::Fifo => InodeType::Fifo,
-            NodeType::CharacterDevice => InodeType::CharacterDevice,
-            NodeType::Directory => InodeType::Directory,
-            NodeType::BlockDevice => InodeType::BlockDevice,
-            NodeType::RegularFile => InodeType::RegularFile,
-            NodeType::Symlink => InodeType::Symlink,
-            NodeType::Socket => InodeType::Socket,
-            NodeType::Unknown => {
-                return Err(VfsError::InvalidData);
-            }
+        let Some(dir_path) = self.dir_path().ok() else {
+            return Err(VfsError::InvalidInput);
         };
-        let mut fs = self.fs.lock();
-        if fs.lookup(self.ino, name).is_ok() {
+        let path = join_child_path(&dir_path, name);
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        if rsext4::dir::get_inode_with_num(fs, dev, &path)
+            .map_err(into_vfs_err)?
+            .is_some()
+        {
             return Err(VfsError::AlreadyExists);
         }
-        let ino = fs
-            .create(self.ino, name, inode_type, permission.bits() as _)
-            .map_err(into_vfs_err)?;
-        self.update_ctime_locked(&mut fs, ino)?;
+
+        let (ino, _inode) = if node_type == NodeType::Directory {
+            rsext4::dir::mkdir_with_ino(dev, fs, &path).ok_or(VfsError::InvalidInput)?
+        } else {
+            let file_type = vfs_type_to_dir_entry(node_type).ok_or(VfsError::InvalidData)?;
+            rsext4::file::mkfile_with_ino(dev, fs, &path, None, Some(file_type))
+                .ok_or(VfsError::InvalidInput)?
+        };
+
+        let mode_bits = permission.bits() as u16;
+        fs.modify_inode(dev, ino, |node| {
+            node.i_mode = (node.i_mode & !0o777) | mode_bits;
+        })
+        .map_err(into_vfs_err)?;
+        Self::update_ctime_with(fs, dev, ino)?;
 
         let reference = Reference::new(
             self.this.as_ref().and_then(WeakDirEntry::upgrade),
@@ -243,12 +484,12 @@ impl DirNodeOps for Inode {
         );
         Ok(if node_type == NodeType::Directory {
             DirEntry::new_dir(
-                |this| DirNode::new(Inode::new(self.fs.clone(), ino, Some(this))),
+                |this| DirNode::new(Inode::new(self.fs.clone(), ino, Some(this), Some(path))),
                 reference,
             )
         } else {
             DirEntry::new_file(
-                FileNode::new(Inode::new(self.fs.clone(), ino, None)),
+                FileNode::new(Inode::new(self.fs.clone(), ino, None, Some(path))),
                 node_type,
                 reference,
             )
@@ -256,21 +497,59 @@ impl DirNodeOps for Inode {
     }
 
     fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
-        let mut fs = self.fs.lock();
-        fs.link(self.ino, name, node.inode() as _)
-            .map_err(into_vfs_err)?;
-        self.update_ctime_locked(&mut fs, node.inode() as _)?;
-        self.lookup_locked(&mut fs, name)
+        let dir_path = self.dir_path()?;
+        let link_path = join_child_path(&dir_path, name);
+        let target_path = node.absolute_path()?.to_string();
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+
+        if rsext4::dir::get_inode_with_num(fs, dev, &target_path)
+            .map_err(into_vfs_err)?
+            .is_none()
+        {
+            return Err(VfsError::NotFound);
+        }
+        if rsext4::dir::get_inode_with_num(fs, dev, &link_path)
+            .map_err(into_vfs_err)?
+            .is_some()
+        {
+            return Err(VfsError::AlreadyExists);
+        }
+
+        rsext4::file::link(fs, dev, &link_path, &target_path);
+        Self::update_ctime_with(fs, dev, node.inode() as u32)?;
+        self.lookup_locked(name)
     }
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
-        self.fs.lock().unlink(self.ino, name).map_err(into_vfs_err)
+        let dir_path = self.dir_path()?;
+        let path = join_child_path(&dir_path, name);
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        if rsext4::dir::get_inode_with_num(fs, dev, &path)
+            .map_err(into_vfs_err)?
+            .is_none()
+        {
+            return Err(VfsError::NotFound);
+        }
+        rsext4::file::unlink(fs, dev, &path);
+        Ok(())
     }
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let mut fs = self.fs.lock();
-        fs.rename(self.ino, src_name, dst_dir.ino, dst_name)
-            .map_err(into_vfs_err)
+        let src_path = join_child_path(&self.dir_path()?, src_name);
+        let dst_path = join_child_path(&dst_dir.dir_path()?, dst_name);
+        let mut state = self.fs.lock();
+        let (fs, dev) = state.split();
+        rsext4::file::rename(dev, fs, &src_path, &dst_path).map_err(into_vfs_err)
+    }
+}
+
+fn join_child_path(parent: &str, name: &str) -> String {
+    if parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{parent}/{name}")
     }
 }

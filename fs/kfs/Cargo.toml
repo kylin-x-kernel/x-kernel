@@ -11,9 +11,9 @@ homepage.workspace = true
 default = []
 use-ramdisk = []           # TODO: init ramdisk
 fat = ["dep:fatfs"]
-ext4 = ["dep:lwext4_rust"]
+ext4 = ["dep:rsext4"]
 times = []
-std = ["lwext4_rust?/std"]
+std = []
 crosvm = []
 
 [dependencies]
@@ -38,9 +38,8 @@ slab = { version = "0.4.9", default-features = false }
 unittest = { workspace = true}
 ktypes = { workspace = true }
 
-[dependencies.lwext4_rust]
+[dependencies.rsext4]
 workspace = true
-default-features = false
 optional = true
 
 [dependencies.fatfs]

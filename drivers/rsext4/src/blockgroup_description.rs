@@ -44,11 +44,10 @@ pub struct Ext4GroupDesc {
 }
 
 impl Ext4GroupDesc {
-    /// 标准块组描述符大小（32字节）
-    pub const GOOD_OLD_DESC_SIZE: usize = 32;
-
     /// 64位块组描述符大小（64字节）
     pub const EXT4_DESC_SIZE_64BIT: usize = 64;
+    /// 标准块组描述符大小（32字节）
+    pub const GOOD_OLD_DESC_SIZE: usize = 32;
 
     /// 获取块位图块号（64位）
     pub fn block_bitmap(&self) -> u64 {
@@ -123,12 +122,10 @@ impl Ext4GroupDesc {
 
 // 块组描述符标志常量
 impl Ext4GroupDesc {
-    /// Inode表和位图未初始化
-    pub const EXT4_BG_INODE_UNINIT: u16 = 0x0001;
-
     /// 块位图未初始化
     pub const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
-
+    /// Inode表和位图未初始化
+    pub const EXT4_BG_INODE_UNINIT: u16 = 0x0001;
     /// Inode表已清零
     pub const EXT4_BG_INODE_ZEROED: u16 = 0x0004;
 }

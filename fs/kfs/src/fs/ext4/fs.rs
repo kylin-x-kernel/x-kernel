@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Ext4 filesystem adapter.
+//! Ext4 filesystem adapter (rsext4 backend).
 use alloc::sync::Arc;
 use core::cell::OnceCell;
 
@@ -11,40 +11,58 @@ use fs_ng_vfs::{
 };
 use kdriver::BlockDevice as KBlockDevice;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
-use lwext4_rust::{FsConfig, ffi::EXT4_ROOT_INO};
+use rsext4::Jbd2Dev;
 
-use super::{
-    Ext4Disk, Inode,
-    util::{LwExt4Filesystem, into_vfs_err},
-};
+use super::{Ext4Disk, Inode, util::into_vfs_err};
 
-const EXT4_CONFIG: FsConfig = FsConfig { bcache_size: 256 };
+const EXT4_ROOT_INO: u32 = 2;
+
+pub(crate) struct Ext4State {
+    pub fs: rsext4::Ext4FileSystem,
+    pub dev: Jbd2Dev<Ext4Disk>,
+}
+
+impl Ext4State {
+    pub(crate) fn split(&mut self) -> (&mut rsext4::Ext4FileSystem, &mut Jbd2Dev<Ext4Disk>) {
+        let fs = &mut self.fs as *mut _;
+        let dev = &mut self.dev as *mut _;
+        // SAFETY: fs 和 dev 是同一结构体的不同字段，不会别名重叠。
+        unsafe { (&mut *fs, &mut *dev) }
+    }
+}
 
 /// Ext4 filesystem implementation.
 pub struct Ext4Filesystem {
-    inner: Mutex<LwExt4Filesystem>,
+    inner: Mutex<Ext4State>,
     root_dir: OnceCell<DirEntry>,
 }
 
 impl Ext4Filesystem {
     /// Create a new ext4 filesystem instance backed by a block device.
     pub fn new(dev: KBlockDevice) -> VfsResult<Filesystem> {
-        let ext4 =
-            lwext4_rust::Ext4Filesystem::new(Ext4Disk(dev), EXT4_CONFIG).map_err(into_vfs_err)?;
+        let mut dev = Jbd2Dev::initial_jbd2dev(0, Ext4Disk(dev), false);
+        let fs = rsext4::mount(&mut dev).map_err(into_vfs_err)?;
 
         let fs = Arc::new(Self {
-            inner: Mutex::new(ext4),
+            inner: Mutex::new(Ext4State { fs, dev }),
             root_dir: OnceCell::new(),
         });
         let _ = fs.root_dir.set(DirEntry::new_dir(
-            |this| DirNode::new(Inode::new(fs.clone(), EXT4_ROOT_INO, Some(this))),
+            |this| {
+                DirNode::new(Inode::new(
+                    fs.clone(),
+                    EXT4_ROOT_INO,
+                    Some(this),
+                    Some("/".into()),
+                ))
+            },
             Reference::root(),
         ));
         Ok(Filesystem::new(fs))
     }
 
     /// Lock the inner ext4 filesystem state.
-    pub(crate) fn lock(&self) -> MutexGuard<'_, LwExt4Filesystem> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Ext4State> {
         self.inner.lock()
     }
 }
@@ -63,17 +81,20 @@ impl FilesystemOps for Ext4Filesystem {
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
-        let mut fs = self.lock();
-        let stat = fs.stat().map_err(into_vfs_err)?;
+        let fs = self.lock();
+        let superblock = &fs.fs.superblock;
+        let block_size = superblock.block_size() as u64;
+        let blocks = superblock.blocks_count();
+        let blocks_free = superblock.free_blocks_count();
         Ok(StatFs {
             fs_type: 0xef53,
-            block_size: stat.block_size as _,
-            blocks: stat.blocks_count,
-            blocks_free: stat.free_blocks_count,
-            blocks_available: stat.free_blocks_count,
+            block_size: block_size as _,
+            blocks,
+            blocks_free,
+            blocks_available: blocks_free,
 
-            file_count: stat.inodes_count as _,
-            free_file_count: stat.free_inodes_count as _,
+            file_count: superblock.s_inodes_count as _,
+            free_file_count: superblock.s_free_inodes_count as _,
 
             name_length: MAX_NAME_LEN as _,
             fragment_size: 0,
@@ -82,6 +103,10 @@ impl FilesystemOps for Ext4Filesystem {
     }
 
     fn flush(&self) -> VfsResult<()> {
-        self.inner.lock().flush().map_err(into_vfs_err)
+        let mut state = self.inner.lock();
+        let (fs, dev) = state.split();
+        fs.inodetable_cahce.flush_all(dev).map_err(into_vfs_err)?;
+        fs.datablock_cache.flush_all(dev).map_err(into_vfs_err)?;
+        dev.cantflush().map_err(into_vfs_err)
     }
 }

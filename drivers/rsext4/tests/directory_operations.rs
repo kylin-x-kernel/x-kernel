@@ -2,9 +2,11 @@
 //!
 //! 测试文件系统的目录操作功能，包括创建、删除等
 
-use rsext4::disknode::Ext4Inode;
-use rsext4::error::{BlockDevError, BlockDevResult};
-use rsext4::*;
+use rsext4::{
+    disknode::Ext4Inode,
+    error::{BlockDevError, BlockDevResult},
+    *,
+};
 
 // 包装 mkdir 函数，将 Option 转换为 Result 以便于测试
 fn test_mkdir<B: BlockDevice>(

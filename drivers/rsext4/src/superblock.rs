@@ -2,9 +2,7 @@
 //!
 //! 定义了 ext4 文件系统的超级块结构，包含文件系统的基本元数据和参数。
 
-use crate::config::*;
-use crate::endian::*;
-use crate::jbd2::jbdstruct::*;
+use crate::{config::*, endian::*, jbd2::jbdstruct::*};
 
 /// UUID 结构
 pub struct UUID(pub [u32; 4]);
@@ -90,7 +88,7 @@ pub struct Ext4Superblock {
     // 0x170 - Flexible Block Groups
     pub s_log_groups_per_flex: u8,      // 弹性块组大小
     pub s_checksum_type: u8,            // 元数据校验和算法类型
-    pub s_encryption_level: u8,         //加密版本
+    pub s_encryption_level: u8,         // 加密版本
     pub s_reserved_pad: u8,             // 填充
     pub s_kbytes_written: u64,          // 生命周期写入的KB数
     pub s_snapshot_inum: u32,           // 活动快照的inode号
@@ -191,7 +189,7 @@ impl Default for Ext4Superblock {
             s_journal_dev: 0,
             s_last_orphan: 0,
             s_hash_seed: [0; 4],
-            s_def_hash_version: 1, //默认Legacy版本
+            s_def_hash_version: 1, // 默认Legacy版本
             s_jnl_backup_type: 0,
             s_desc_size: 0,
             s_default_mount_opts: 0,
@@ -258,10 +256,8 @@ impl Default for Ext4Superblock {
 impl Ext4Superblock {
     /// EXT4超级块魔数
     pub const EXT4_SUPER_MAGIC: u16 = 0xEF53;
-
     /// 超级块在分区中的偏移量（字节）
     pub const SUPERBLOCK_OFFSET: u64 = 1024;
-
     /// 超级块大小（字节）
     pub const SUPERBLOCK_SIZE: usize = 1024;
 
@@ -375,87 +371,92 @@ impl Ext4Superblock {
 
 // 文件系统状态常量
 impl Ext4Superblock {
-    pub const EXT4_VALID_FS: u16 = 0x0001; // 未挂载的干净文件系统
-    pub const EXT4_ERROR_FS: u16 = 0x0002; // 检测到错误的文件系统
-    pub const EXT4_ORPHAN_FS: u16 = 0x0004; // 孤儿正在被恢复
+    // 未挂载的干净文件系统
+    pub const EXT4_ERROR_FS: u16 = 0x0002;
+    // 检测到错误的文件系统
+    pub const EXT4_ORPHAN_FS: u16 = 0x0004;
+    pub const EXT4_VALID_FS: u16 = 0x0001; // 孤儿正在被恢复
 }
 
 // 错误处理方式常量
 impl Ext4Superblock {
-    pub const EXT4_ERRORS_CONTINUE: u16 = 1; // 继续执行
-    pub const EXT4_ERRORS_RO: u16 = 2; // 重新挂载为只读
-    pub const EXT4_ERRORS_PANIC: u16 = 3; // 内核恐慌
+    pub const EXT4_ERRORS_CONTINUE: u16 = 1;
+    // 重新挂载为只读
+    pub const EXT4_ERRORS_PANIC: u16 = 3;
+    // 继续执行
+    pub const EXT4_ERRORS_RO: u16 = 2; // 内核恐慌
 }
 
 // 创建者操作系统常量
 impl Ext4Superblock {
-    pub const EXT4_OS_LINUX: u32 = 0;
-    pub const EXT4_OS_HURD: u32 = 1;
-    pub const EXT4_OS_MASIX: u32 = 2;
     pub const EXT4_OS_FREEBSD: u32 = 3;
+    pub const EXT4_OS_HURD: u32 = 1;
+    pub const EXT4_OS_LINUX: u32 = 0;
     pub const EXT4_OS_LITES: u32 = 4;
+    pub const EXT4_OS_MASIX: u32 = 2;
 }
 
 // 版本号常量
 impl Ext4Superblock {
-    pub const EXT4_GOOD_OLD_REV: u32 = 0; // 原始格式
-    pub const EXT4_DYNAMIC_REV: u32 = 1; // 动态inode大小
+    // 原始格式
+    pub const EXT4_DYNAMIC_REV: u32 = 1;
+    pub const EXT4_GOOD_OLD_REV: u32 = 0; // 动态inode大小
 }
 
 // 兼容特性标志
 impl Ext4Superblock {
+    pub const EXT4_FEATURE_COMPAT_DIR_INDEX: u32 = 0x0020;
     // 兼容特性标志
     pub const EXT4_FEATURE_COMPAT_DIR_PREALLOC: u32 = 0x0001;
-    pub const EXT4_FEATURE_COMPAT_IMAGIC_INODES: u32 = 0x0002;
-    pub const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
-    pub const EXT4_FEATURE_COMPAT_EXT_ATTR: u32 = 0x0008;
-    pub const EXT4_FEATURE_COMPAT_RESIZE_INODE: u32 = 0x0010;
-    pub const EXT4_FEATURE_COMPAT_DIR_INDEX: u32 = 0x0020;
-    pub const EXT4_FEATURE_COMPAT_LAZY_BG: u32 = 0x0040;
-    pub const EXT4_FEATURE_COMPAT_EXCLUDE_INODE: u32 = 0x0080;
     pub const EXT4_FEATURE_COMPAT_EXCLUDE_BITMAP: u32 = 0x0100;
-    pub const EXT4_FEATURE_COMPAT_SPARSE_SUPER2: u32 = 0x0200;
+    pub const EXT4_FEATURE_COMPAT_EXCLUDE_INODE: u32 = 0x0080;
+    pub const EXT4_FEATURE_COMPAT_EXT_ATTR: u32 = 0x0008;
     pub const EXT4_FEATURE_COMPAT_FAST_COMMIT: u32 = 0x0400;
+    pub const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
+    pub const EXT4_FEATURE_COMPAT_IMAGIC_INODES: u32 = 0x0002;
+    pub const EXT4_FEATURE_COMPAT_LAZY_BG: u32 = 0x0040;
     pub const EXT4_FEATURE_COMPAT_ORPHAN_FILE: u32 = 0x1000;
+    pub const EXT4_FEATURE_COMPAT_RESIZE_INODE: u32 = 0x0010;
+    pub const EXT4_FEATURE_COMPAT_SPARSE_SUPER2: u32 = 0x0200;
 }
 
 // 不兼容特性标志
 impl Ext4Superblock {
-    pub const EXT4_FEATURE_INCOMPAT_COMPRESSION: u32 = 0x0001;
-    pub const EXT4_FEATURE_INCOMPAT_FILETYPE: u32 = 0x0002;
-    pub const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
-    pub const EXT4_FEATURE_INCOMPAT_JOURNAL_DEV: u32 = 0x0008;
-    pub const EXT4_FEATURE_INCOMPAT_META_BG: u32 = 0x0010;
-    pub const EXT4_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;
     pub const EXT4_FEATURE_INCOMPAT_64BIT: u32 = 0x0080;
-    pub const EXT4_FEATURE_INCOMPAT_MMP: u32 = 0x0100;
-    pub const EXT4_FEATURE_INCOMPAT_FLEX_BG: u32 = 0x0200;
-    pub const EXT4_FEATURE_INCOMPAT_EA_INODE: u32 = 0x0400;
-    pub const EXT4_FEATURE_INCOMPAT_DIRDATA: u32 = 0x1000;
+    pub const EXT4_FEATURE_INCOMPAT_COMPRESSION: u32 = 0x0001;
     pub const EXT4_FEATURE_INCOMPAT_CSUM_SEED: u32 = 0x2000;
-    pub const EXT4_FEATURE_INCOMPAT_LARGEDIR: u32 = 0x4000;
-    pub const EXT4_FEATURE_INCOMPAT_INLINE_DATA: u32 = 0x8000;
+    pub const EXT4_FEATURE_INCOMPAT_DIRDATA: u32 = 0x1000;
+    pub const EXT4_FEATURE_INCOMPAT_EA_INODE: u32 = 0x0400;
     pub const EXT4_FEATURE_INCOMPAT_ENCRYPT: u32 = 0x10000;
+    pub const EXT4_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;
+    pub const EXT4_FEATURE_INCOMPAT_FILETYPE: u32 = 0x0002;
+    pub const EXT4_FEATURE_INCOMPAT_FLEX_BG: u32 = 0x0200;
+    pub const EXT4_FEATURE_INCOMPAT_INLINE_DATA: u32 = 0x8000;
+    pub const EXT4_FEATURE_INCOMPAT_JOURNAL_DEV: u32 = 0x0008;
+    pub const EXT4_FEATURE_INCOMPAT_LARGEDIR: u32 = 0x4000;
+    pub const EXT4_FEATURE_INCOMPAT_META_BG: u32 = 0x0010;
+    pub const EXT4_FEATURE_INCOMPAT_MMP: u32 = 0x0100;
+    pub const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
 }
 
 // 只读兼容特性标志
 impl Ext4Superblock {
-    pub const EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
-    pub const EXT4_FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x0002;
+    pub const EXT4_FEATURE_RO_COMPAT_BIGALLOC: u32 = 0x0200;
     pub const EXT4_FEATURE_RO_COMPAT_BTREE_DIR: u32 = 0x0004;
-    pub const EXT4_FEATURE_RO_COMPAT_HUGE_FILE: u32 = 0x0008;
-    pub const EXT4_FEATURE_RO_COMPAT_GDT_CSUM: u32 = 0x0010;
     pub const EXT4_FEATURE_RO_COMPAT_DIR_NLINK: u32 = 0x0020;
     pub const EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE: u32 = 0x0040;
+    pub const EXT4_FEATURE_RO_COMPAT_GDT_CSUM: u32 = 0x0010;
     pub const EXT4_FEATURE_RO_COMPAT_HAS_SNAPSHOT: u32 = 0x0080;
-    pub const EXT4_FEATURE_RO_COMPAT_QUOTA: u32 = 0x0100;
-    pub const EXT4_FEATURE_RO_COMPAT_BIGALLOC: u32 = 0x0200;
+    pub const EXT4_FEATURE_RO_COMPAT_HUGE_FILE: u32 = 0x0008;
+    pub const EXT4_FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x0002;
     pub const EXT4_FEATURE_RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
-    pub const EXT4_FEATURE_RO_COMPAT_REPLICA: u32 = 0x0800;
-    pub const EXT4_FEATURE_RO_COMPAT_READONLY: u32 = 0x1000;
-    pub const EXT4_FEATURE_RO_COMPAT_PROJECT: u32 = 0x2000;
-    pub const EXT4_FEATURE_RO_COMPAT_VERITY: u32 = 0x8000;
     pub const EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT: u32 = 0x10000;
+    pub const EXT4_FEATURE_RO_COMPAT_PROJECT: u32 = 0x2000;
+    pub const EXT4_FEATURE_RO_COMPAT_QUOTA: u32 = 0x0100;
+    pub const EXT4_FEATURE_RO_COMPAT_READONLY: u32 = 0x1000;
+    pub const EXT4_FEATURE_RO_COMPAT_REPLICA: u32 = 0x0800;
+    pub const EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
+    pub const EXT4_FEATURE_RO_COMPAT_VERITY: u32 = 0x8000;
 }
 
 // 实现 DiskFormat trait，用于小端序列化/反序列化超级块

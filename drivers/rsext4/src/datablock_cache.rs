@@ -2,11 +2,9 @@
 //!
 //! 提供文件和目录数据块的缓存管理，支持延迟写回和LRU淘汰
 
-use crate::blockdev::*;
-use crate::config::*;
-use crate::error::*;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
+
+use crate::{blockdev::*, config::*, error::*};
 /// 数据块缓存键（全局块号）
 pub type BlockCacheKey = u64;
 

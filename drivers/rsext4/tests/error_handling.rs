@@ -2,8 +2,10 @@
 //!
 //! 测试文件系统在各种错误条件下的行为
 
-use rsext4::error::{BlockDevError, BlockDevResult};
-use rsext4::*;
+use rsext4::{
+    error::{BlockDevError, BlockDevResult},
+    *,
+};
 
 /// 可控错误的模拟块设备
 struct ErrorMockDevice {

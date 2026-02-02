@@ -2,21 +2,16 @@
 //!
 //! 提供文件内容读取、块解析等功能。
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use log::{error, info};
+use alloc::{collections::BTreeMap, vec::Vec};
 
-use crate::blockdev::*;
-use crate::config::*;
-use crate::disknode::*;
-use crate::entries::*;
-use crate::error::*;
-use crate::ext4::*;
-use crate::extents_tree::*;
-use crate::hashtree::*;
-use log::debug;
+use log::{debug, error, info};
 
-///支持extend数和多级索引(多级索引将来弃用)
+use crate::{
+    blockdev::*, config::*, disknode::*, entries::*, error::*, ext4::*, extents_tree::*,
+    hashtree::*,
+};
+
+/// 支持extend数和多级索引(多级索引将来弃用)
 /// 根据 inode 的逻辑块号解析到物理块号，支持 12 个直接块和 1/2/3 级间接块
 pub fn resolve_inode_block<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
@@ -124,7 +119,7 @@ pub fn resolve_inode_block_allextend<B: BlockDevice>(
     Ok(out)
 }
 
-///传入完整的路径信息按照特性进行扫描。
+/// 传入完整的路径信息按照特性进行扫描。
 pub fn get_file_inode<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,

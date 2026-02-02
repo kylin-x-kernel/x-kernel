@@ -2,16 +2,11 @@
 //!
 //! 实现 ext4 文件系统的 extents 功能，用于高效管理文件的连续块分配。
 
+use alloc::{vec, vec::*};
+
 use log::{debug, error};
 
-use crate::blockdev::*;
-use crate::config::*;
-use crate::disknode::*;
-use crate::endian::*;
-use crate::error::*;
-use crate::ext4::*;
-use alloc::vec;
-use alloc::vec::*;
+use crate::{blockdev::*, config::*, disknode::*, endian::*, error::*, ext4::*};
 
 /// 内存中的 extent 树节点表示
 #[derive(Clone)]
@@ -55,9 +50,9 @@ pub struct ExtentTree<'a> {
 
 /// 用于在递归插入时向上冒泡分裂信息
 struct SplitInfo {
-    ///分裂出去的右节点的起始逻辑块号 (Key)
+    /// 分裂出去的右节点的起始逻辑块号 (Key)
     start_block: u32,
-    ///分裂出去的右节点的物理块号 (Value)
+    /// 分裂出去的右节点的物理块号 (Value)
     phy_block: u64,
 }
 
@@ -171,7 +166,7 @@ impl<'a> ExtentTree<'a> {
         let iblocks = &self.inode.i_block; //不同端序解析为错误端序
         let mut bytes: [u8; 60] = [0; 60];
         for idx in 0..15 {
-            //正确处理字节序
+            // 正确处理字节序
             let trans_b1 = iblocks[idx].to_le_bytes();
             bytes[idx * 4] = trans_b1[0];
             bytes[idx * 4 + 1] = trans_b1[1];
@@ -912,7 +907,8 @@ impl<'a> ExtentTree<'a> {
         match &root {
             ExtentNode::Leaf { header, entries } => {
                 debug!(
-                    "ExtentTree::insert_extent: current root=LEAF depth={} entries={} max={} first_extents={:?}",
+                    "ExtentTree::insert_extent: current root=LEAF depth={} entries={} max={} \
+                     first_extents={:?}",
                     header.eh_depth,
                     header.eh_entries,
                     header.eh_max,
@@ -925,7 +921,8 @@ impl<'a> ExtentTree<'a> {
             }
             ExtentNode::Index { header, entries } => {
                 debug!(
-                    "ExtentTree::insert_extent: current root=INDEX depth={} entries={} max={} first_indexes={:?}",
+                    "ExtentTree::insert_extent: current root=INDEX depth={} entries={} max={} \
+                     first_indexes={:?}",
                     header.eh_depth,
                     header.eh_entries,
                     header.eh_max,
@@ -960,7 +957,8 @@ impl<'a> ExtentTree<'a> {
                 let new_left_block = fs.alloc_block(block_dev)?;
                 self.add_inode_sectors_for_block();
                 debug!(
-                    "ExtentTree::insert_extent: root split occurred, new_left_block={} split_info={{start_block={}, phy_block={}}}",
+                    "ExtentTree::insert_extent: root split occurred, new_left_block={} \
+                     split_info={{start_block={}, phy_block={}}}",
                     new_left_block, split_info.start_block, split_info.phy_block
                 );
 
@@ -1027,7 +1025,8 @@ impl<'a> ExtentTree<'a> {
         match node {
             ExtentNode::Leaf { header, entries } => {
                 debug!(
-                    "insert_recursive: LEAF depth={} entries_before={} max={} new_ext=(lbn={}, len={}, phys_start={}) phy_block={:?}",
+                    "insert_recursive: LEAF depth={} entries_before={} max={} new_ext=(lbn={}, \
+                     len={}, phys_start={}) phy_block={:?}",
                     header.eh_depth,
                     header.eh_entries,
                     header.eh_max,
@@ -1066,7 +1065,8 @@ impl<'a> ExtentTree<'a> {
                                 if total <= MAX_LEN {
                                     prev.ee_len = (total as u16 & 0x7FFF) | hi_flag;
                                     debug!(
-                                        "insert_recursive: merged with previous extent -> new_len={total} (no split yet)"
+                                        "insert_recursive: merged with previous extent -> \
+                                         new_len={total} (no split yet)"
                                     );
 
                                     if entries.len() <= header.eh_max as usize {
@@ -1105,7 +1105,9 @@ impl<'a> ExtentTree<'a> {
                                         entries.insert(insert_pos, tail);
                                         header.eh_entries = entries.len() as u16;
                                         debug!(
-                                            "insert_recursive: previous extent saturated MAX_LEN, inserted tail extent (lbn={}, len={}, phys_start={}) now entries_len={}",
+                                            "insert_recursive: previous extent saturated MAX_LEN, \
+                                             inserted tail extent (lbn={}, len={}, phys_start={}) \
+                                             now entries_len={}",
                                             tail.ee_block,
                                             tail.ee_len & 0x7FFF,
                                             tail.start_block(),
@@ -1137,7 +1139,8 @@ impl<'a> ExtentTree<'a> {
                 entries.insert(pos, new_ext);
                 header.eh_entries = entries.len() as u16;
                 debug!(
-                    "insert_recursive: after insert (no split yet) leaf entries_len={} (max={}) first_extents={:?}",
+                    "insert_recursive: after insert (no split yet) leaf entries_len={} (max={}) \
+                     first_extents={:?}",
                     header.eh_entries,
                     header.eh_max,
                     entries
@@ -1147,7 +1150,7 @@ impl<'a> ExtentTree<'a> {
                         .collect::<Vec<_>>()
                 );
 
-                //检查是否需要分裂
+                // 检查是否需要分裂
                 if entries.len() <= header.eh_max as usize {
                     // 不需要分裂，如果不是 Root (phy_block有值)，则写回磁盘
                     if let Some(block_id) = phy_block {
@@ -1193,7 +1196,7 @@ impl<'a> ExtentTree<'a> {
                     entries: right_entries,
                 };
 
-                //写回数据
+                // 写回数据
                 // 写右节点（新块）
                 Self::write_node_to_block(
                     block_dev,
@@ -1211,7 +1214,7 @@ impl<'a> ExtentTree<'a> {
                     Self::write_node_to_block(block_dev, block_id, &disk_node, header.eh_max)?;
                 }
 
-                //返回分裂信息
+                // 返回分裂信息
                 // Key 是右节点的第一个 extent 的逻辑块号
                 let split_key = match &right_node {
                     ExtentNode::Leaf { entries, .. } => entries[0].ee_block,
@@ -1226,7 +1229,8 @@ impl<'a> ExtentTree<'a> {
 
             ExtentNode::Index { header, entries } => {
                 debug!(
-                    "insert_recursive: INDEX depth={} entries_before={} max={} new_ext=(lbn={}, len={}, phys_start={}) phy_block={:?}",
+                    "insert_recursive: INDEX depth={} entries_before={} max={} new_ext=(lbn={}, \
+                     len={}, phys_start={}) phy_block={:?}",
                     header.eh_depth,
                     header.eh_entries,
                     header.eh_max,
@@ -1300,14 +1304,15 @@ impl<'a> ExtentTree<'a> {
                         return Ok(None);
                     }
 
-                    //Index 节点分裂逻辑
+                    // Index 节点分裂逻辑
                     debug!("Index node overflow, splitting...");
                     // 分裂点：中间
                     let split_idx = entries.len() / 2;
                     let right_entries = entries.split_off(split_idx);
                     header.eh_entries = entries.len() as u16;
                     debug!(
-                        "insert_recursive: index split at idx={} -> left_entries={} right_entries={}",
+                        "insert_recursive: index split at idx={} -> left_entries={} \
+                         right_entries={}",
                         split_idx,
                         header.eh_entries,
                         right_entries.len()
@@ -1317,7 +1322,8 @@ impl<'a> ExtentTree<'a> {
                     let new_phy_block = fs.alloc_block(block_dev)?;
                     self.add_inode_sectors_for_block();
                     debug!(
-                        "insert_recursive: allocated new block for right index node: {new_phy_block}"
+                        "insert_recursive: allocated new block for right index node: \
+                         {new_phy_block}"
                     );
 
                     let right_header = Ext4ExtentHeader {
@@ -1450,13 +1456,15 @@ impl<'a> ExtentTree<'a> {
 mod tests {
     extern crate std;
 
+    use alloc::{vec, vec::Vec};
+
     use super::*;
-    use crate::bitmap_cache::CacheKey;
-    use crate::blockdev::{BlockDevice, Jbd2Dev};
-    use crate::error::{BlockDevError, BlockDevResult};
-    use crate::ext4::{mkfs, mount};
-    use alloc::vec;
-    use alloc::vec::Vec;
+    use crate::{
+        bitmap_cache::CacheKey,
+        blockdev::{BlockDevice, Jbd2Dev},
+        error::{BlockDevError, BlockDevResult},
+        ext4::{mkfs, mount},
+    };
 
     struct MemBlockDev {
         data: Vec<u8>,

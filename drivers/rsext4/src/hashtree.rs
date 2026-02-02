@@ -3,17 +3,11 @@
 //! 提供基于哈希树的目录查找功能，替代线性搜索以提高大型目录的性能
 //! 支持 Ext4 HTree 索引格式，包括多种哈希算法
 
-use crate::blockdev::*;
-use crate::config::*;
-use crate::disknode::*;
-use crate::endian::*;
-use crate::entries::*;
-use crate::ext4::*;
-use crate::loopfile::*;
-
 use alloc::vec::Vec;
-use log::error;
-use log::{debug, warn};
+
+use log::{debug, error, warn};
+
+use crate::{blockdev::*, config::*, disknode::*, endian::*, entries::*, ext4::*, loopfile::*};
 
 /// Hash tree error type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +85,7 @@ impl HashTreeManager {
 
         // 1. Check if directory has hash tree index enabled
         if !dir_inode.is_htree_indexed() {
-            //warn!("Directory does not have hash tree index enabled, falling back to linear search");
+            // warn!("Directory does not have hash tree index enabled, falling back to linear search");
             return self.fallback_to_linear_search(fs, block_dev, dir_inode, target_name);
         }
 
@@ -449,10 +443,10 @@ pub fn lookup_directory_entry<B: BlockDevice>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use crate::error::BlockDevError;
     use alloc::vec::Vec;
+
+    use super::*;
+    use crate::error::BlockDevError;
     // Mock block device
     struct MockBlockDevice {
         data: Vec<u8>,
@@ -531,11 +525,10 @@ mod tests {
 
     // Create test filesystem
     fn create_test_fs() -> Ext4FileSystem {
-        use crate::bitmap_cache::BitmapCache;
-        use crate::bmalloc::*;
-        use crate::datablock_cache::DataBlockCache;
-        use crate::inodetable_cache::InodeCache;
-        use crate::superblock::Ext4Superblock;
+        use crate::{
+            bitmap_cache::BitmapCache, bmalloc::*, datablock_cache::DataBlockCache,
+            inodetable_cache::InodeCache, superblock::Ext4Superblock,
+        };
         let mut superblock = Ext4Superblock::default();
         superblock.s_hash_seed = [0x12345678, 0x87654321, 0xABCDEF00, 0x00FEDCBA];
         superblock.s_def_hash_version = 0x8; // Half SipHash

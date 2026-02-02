@@ -2,8 +2,10 @@
 //!
 //! 测试文件系统的文件操作功能，包括创建、读取、写入、删除等
 
-use rsext4::error::{BlockDevError, BlockDevResult};
-use rsext4::*;
+use rsext4::{
+    error::{BlockDevError, BlockDevResult},
+    *,
+};
 
 /// 测试用块设备
 struct MockBlockDevice {

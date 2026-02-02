@@ -59,17 +59,22 @@ pub struct Ext4Inode {
 }
 
 impl Ext4Inode {
+    /// 标准inode大小（128字节）
+    pub const GOOD_OLD_INODE_SIZE: u16 = 128;
+    /// 大inode默认大小（256字节）
+    pub const LARGE_INODE_SIZE: u16 = 256;
+
     /// 写入初始extend header便捷函数
     pub fn write_extend_header(&mut self) {
         let per_extent_header_offset = Ext4ExtentHeader::disk_size();
         let current_offset = 0;
         let mut extent_buffer: [u8; 60] = [0; 60];
         let header = Ext4ExtentHeader::new();
-        //写入header
+        // 写入header
         header.to_disk_bytes(
             &mut extent_buffer[current_offset..current_offset + per_extent_header_offset],
         );
-        //转换写回
+        // 转换写回
         let mut new_slice: [u32; 15] = [0; 15];
         for idx in 0..15 {
             new_slice[idx] = u32::from_le_bytes([
@@ -81,12 +86,6 @@ impl Ext4Inode {
         }
         self.i_block.copy_from_slice(&new_slice);
     }
-
-    /// 标准inode大小（128字节）
-    pub const GOOD_OLD_INODE_SIZE: u16 = 128;
-
-    /// 大inode默认大小（256字节）
-    pub const LARGE_INODE_SIZE: u16 = 256;
 
     /// 获取完整的文件大小（64位）
     pub fn size(&self) -> u64 {
@@ -132,7 +131,8 @@ impl Ext4Inode {
     fn is_extent(&self) -> bool {
         self.i_flags & Self::EXT4_EXTENTS_FL != 0
     }
-    ///检查是否有extend树的结构
+
+    /// 检查是否有extend树的结构
     /// 检查EXT4_EXTENTS_FL标志和标志extend头
     pub fn have_extend_header_and_use_extend(&self) -> bool {
         if !Self::is_extent(self) {
@@ -150,13 +150,15 @@ impl Ext4Inode {
         }
     }
 
-    //some metadata change support
+    // some metadata change support
     pub fn set_mtime(&mut self, mtime: u32) {
         self.i_mtime = mtime;
     }
+
     pub fn set_ctime(&mut self, ctime: u32) {
         self.i_ctime = ctime;
     }
+
     pub fn set_atime(&mut self, atime: u32) {
         self.i_atime = atime;
     }
@@ -164,65 +166,113 @@ impl Ext4Inode {
 
 // 文件模式常量 - 文件类型
 impl Ext4Inode {
-    pub const S_IFMT: u16 = 0xF000; // 文件类型位掩码
-    pub const S_IFSOCK: u16 = 0xC000; // 套接字
-    pub const S_IFLNK: u16 = 0xA000; // 符号链接
-    pub const S_IFREG: u16 = 0x8000; // 普通文件
-    pub const S_IFBLK: u16 = 0x6000; // 块设备
-    pub const S_IFDIR: u16 = 0x4000; // 目录
-    pub const S_IFCHR: u16 = 0x2000; // 字符设备
-    pub const S_IFIFO: u16 = 0x1000; // FIFO
+    // 普通文件
+    pub const S_IFBLK: u16 = 0x6000;
+    // 目录
+    pub const S_IFCHR: u16 = 0x2000;
+    // 块设备
+    pub const S_IFDIR: u16 = 0x4000;
+    // 字符设备
+    pub const S_IFIFO: u16 = 0x1000;
+    // 套接字
+    pub const S_IFLNK: u16 = 0xA000;
+    pub const S_IFMT: u16 = 0xF000;
+    // 符号链接
+    pub const S_IFREG: u16 = 0x8000;
+    // 文件类型位掩码
+    pub const S_IFSOCK: u16 = 0xC000; // FIFO
 }
 
 // 文件模式常量 - 权限位
 impl Ext4Inode {
-    pub const S_ISUID: u16 = 0x0800; // 设置UID位
-    pub const S_ISGID: u16 = 0x0400; // 设置GID位
-    pub const S_ISVTX: u16 = 0x0200; // 粘滞位
-    pub const S_IRWXU: u16 = 0x01C0; // 所有者权限掩码
-    pub const S_IRUSR: u16 = 0x0100; // 所有者读权限
-    pub const S_IWUSR: u16 = 0x0080; // 所有者写权限
-    pub const S_IXUSR: u16 = 0x0040; // 所有者执行权限
-    pub const S_IRWXG: u16 = 0x0038; // 组权限掩码
-    pub const S_IRGRP: u16 = 0x0020; // 组读权限
-    pub const S_IWGRP: u16 = 0x0010; // 组写权限
-    pub const S_IXGRP: u16 = 0x0008; // 组执行权限
-    pub const S_IRWXO: u16 = 0x0007; // 其他用户权限掩码
-    pub const S_IROTH: u16 = 0x0004; // 其他用户读权限
-    pub const S_IWOTH: u16 = 0x0002; // 其他用户写权限
-    pub const S_IXOTH: u16 = 0x0001; // 其他用户执行权限
+    // 组权限掩码
+    pub const S_IRGRP: u16 = 0x0020;
+    // 其他用户权限掩码
+    pub const S_IROTH: u16 = 0x0004;
+    // 所有者权限掩码
+    pub const S_IRUSR: u16 = 0x0100;
+    // 所有者执行权限
+    pub const S_IRWXG: u16 = 0x0038;
+    // 组执行权限
+    pub const S_IRWXO: u16 = 0x0007;
+    // 粘滞位
+    pub const S_IRWXU: u16 = 0x01C0;
+    // 设置UID位
+    pub const S_ISGID: u16 = 0x0400;
+    pub const S_ISUID: u16 = 0x0800;
+    // 设置GID位
+    pub const S_ISVTX: u16 = 0x0200;
+    // 组读权限
+    pub const S_IWGRP: u16 = 0x0010;
+    // 其他用户读权限
+    pub const S_IWOTH: u16 = 0x0002;
+    // 所有者读权限
+    pub const S_IWUSR: u16 = 0x0080;
+    // 组写权限
+    pub const S_IXGRP: u16 = 0x0008;
+    // 其他用户写权限
+    pub const S_IXOTH: u16 = 0x0001;
+    // 所有者写权限
+    pub const S_IXUSR: u16 = 0x0040; // 其他用户执行权限
 }
 
 // Inode标志常量
 impl Ext4Inode {
-    pub const EXT4_SECRM_FL: u32 = 0x00000001; // 安全删除
-    pub const EXT4_UNRM_FL: u32 = 0x00000002; // 可恢复删除
-    pub const EXT4_COMPR_FL: u32 = 0x00000004; // 压缩文件
-    pub const EXT4_SYNC_FL: u32 = 0x00000008; // 同步更新
-    pub const EXT4_IMMUTABLE_FL: u32 = 0x00000010; // 不可修改
-    pub const EXT4_APPEND_FL: u32 = 0x00000020; // 只能追加
-    pub const EXT4_NODUMP_FL: u32 = 0x00000040; // 不转储
-    pub const EXT4_NOATIME_FL: u32 = 0x00000080; // 不更新访问时间
-    pub const EXT4_DIRTY_FL: u32 = 0x00000100; // 脏数据
-    pub const EXT4_COMPRBLK_FL: u32 = 0x00000200; // 一个或多个压缩簇
-    pub const EXT4_NOCOMPR_FL: u32 = 0x00000400; // 不压缩
-    pub const EXT4_ENCRYPT_FL: u32 = 0x00000800; // 加密文件
-    pub const EXT4_INDEX_FL: u32 = 0x00001000; // 哈希索引目录
-    pub const EXT4_IMAGIC_FL: u32 = 0x00002000; // AFS目录
-    pub const EXT4_JOURNAL_DATA_FL: u32 = 0x00004000; // 日志文件数据
-    pub const EXT4_NOTAIL_FL: u32 = 0x00008000; // 文件尾不合并
-    pub const EXT4_DIRSYNC_FL: u32 = 0x00010000; // 目录同步更新
-    pub const EXT4_TOPDIR_FL: u32 = 0x00020000; // 顶层目录
-    pub const EXT4_HUGE_FILE_FL: u32 = 0x00040000; // 巨大文件
-    pub const EXT4_EXTENTS_FL: u32 = 0x00080000; // 使用extent树
-    pub const EXT4_EA_INODE_FL: u32 = 0x00200000; // 扩展属性inode
-    pub const EXT4_EOFBLOCKS_FL: u32 = 0x00400000; // EOF后的块
-    pub const EXT4_SNAPFILE_FL: u32 = 0x01000000; // 快照文件
-    pub const EXT4_SNAPFILE_DELETED_FL: u32 = 0x04000000; // 快照被删除
-    pub const EXT4_SNAPFILE_SHRUNK_FL: u32 = 0x08000000; // 快照收缩
-    pub const EXT4_INLINE_DATA_FL: u32 = 0x10000000; // 内联数据
-    pub const EXT4_PROJINHERIT_FL: u32 = 0x20000000; // 创建时继承项目ID
-    pub const EXT4_RESERVED_FL: u32 = 0x80000000; // 保留
+    // 不可修改
+    pub const EXT4_APPEND_FL: u32 = 0x00000020;
+    // 脏数据
+    pub const EXT4_COMPRBLK_FL: u32 = 0x00000200;
+    // 可恢复删除
+    pub const EXT4_COMPR_FL: u32 = 0x00000004;
+    // 文件尾不合并
+    pub const EXT4_DIRSYNC_FL: u32 = 0x00010000;
+    // 不更新访问时间
+    pub const EXT4_DIRTY_FL: u32 = 0x00000100;
+    // 使用extent树
+    pub const EXT4_EA_INODE_FL: u32 = 0x00200000;
+    // 不压缩
+    pub const EXT4_ENCRYPT_FL: u32 = 0x00000800;
+    // 扩展属性inode
+    pub const EXT4_EOFBLOCKS_FL: u32 = 0x00400000;
+    // 巨大文件
+    pub const EXT4_EXTENTS_FL: u32 = 0x00080000;
+    // 顶层目录
+    pub const EXT4_HUGE_FILE_FL: u32 = 0x00040000;
+    // 哈希索引目录
+    pub const EXT4_IMAGIC_FL: u32 = 0x00002000;
+    // 同步更新
+    pub const EXT4_IMMUTABLE_FL: u32 = 0x00000010;
+    // 加密文件
+    pub const EXT4_INDEX_FL: u32 = 0x00001000;
+    // 快照收缩
+    pub const EXT4_INLINE_DATA_FL: u32 = 0x10000000;
+    // AFS目录
+    pub const EXT4_JOURNAL_DATA_FL: u32 = 0x00004000;
+    // 不转储
+    pub const EXT4_NOATIME_FL: u32 = 0x00000080;
+    // 一个或多个压缩簇
+    pub const EXT4_NOCOMPR_FL: u32 = 0x00000400;
+    // 只能追加
+    pub const EXT4_NODUMP_FL: u32 = 0x00000040;
+    // 日志文件数据
+    pub const EXT4_NOTAIL_FL: u32 = 0x00008000;
+    // 内联数据
+    pub const EXT4_PROJINHERIT_FL: u32 = 0x20000000;
+    // 创建时继承项目ID
+    pub const EXT4_RESERVED_FL: u32 = 0x80000000;
+    pub const EXT4_SECRM_FL: u32 = 0x00000001;
+    // 快照文件
+    pub const EXT4_SNAPFILE_DELETED_FL: u32 = 0x04000000;
+    // EOF后的块
+    pub const EXT4_SNAPFILE_FL: u32 = 0x01000000;
+    // 快照被删除
+    pub const EXT4_SNAPFILE_SHRUNK_FL: u32 = 0x08000000;
+    // 压缩文件
+    pub const EXT4_SYNC_FL: u32 = 0x00000008;
+    // 目录同步更新
+    pub const EXT4_TOPDIR_FL: u32 = 0x00020000;
+    // 安全删除
+    pub const EXT4_UNRM_FL: u32 = 0x00000002; // 保留
 }
 
 /// Extent头部结构
@@ -245,7 +295,8 @@ impl Default for Ext4ExtentHeader {
 
 impl Ext4ExtentHeader {
     pub const EXT4_EXT_MAGIC: u16 = 0xF30A;
-    ///默认根节点配置 4个条目 最大容量 深度 生成号
+
+    /// 默认根节点配置 4个条目 最大容量 深度 生成号
     pub fn new() -> Self {
         Self {
             eh_magic: Self::EXT4_EXT_MAGIC,
@@ -292,11 +343,10 @@ impl Default for Ext4Extent {
 impl Ext4Extent {
     /// extent最大长度（已初始化）
     pub const EXT_INIT_MAX_LEN: u16 = 32768;
-
     /// extent最大长度（未初始化）
     pub const EXT_UNINIT_MAX_LEN: u16 = 32768;
 
-    ///默认配置
+    /// 默认配置
     pub fn new(logic_start: u32, start_phy_block: u64, len: u16) -> Self {
         let high = (start_phy_block >> 32) as u16;
         let low = (start_phy_block & 0xffffffff) as u32;

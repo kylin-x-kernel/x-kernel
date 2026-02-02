@@ -2,8 +2,10 @@
 //!
 //! 测试 ext4 文件系统的基本功能
 
-use rsext4::error::{BlockDevError, BlockDevResult};
-use rsext4::*;
+use rsext4::{
+    error::{BlockDevError, BlockDevResult},
+    *,
+};
 
 /// 创建一个简单的测试块设备
 struct TestBlockDevice {

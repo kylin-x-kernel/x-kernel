@@ -44,18 +44,18 @@ pub const DEFAULT_INODE_SIZE: u16 = 256;
 // ============================================================================
 // 数据结构缓存相关配置,在小的嵌入式系统中可以适当调小防止崩内存
 // ============================================================================
-///Inodecahe数量
+/// Inodecahe数量
 pub const INODE_CACHE_MAX: usize = 128;
-///Datablock cahce数量
+/// Datablock cahce数量
 pub const DATABLOCK_CACHE_MAX: usize = 128;
-///BITMAP cache数量
+/// BITMAP cache数量
 pub const BITMAP_CACHE_MAX: usize = 128;
 
 //============================================================================
-//目录项DirEntry配置
+// 目录项DirEntry配置
 //============================================================================
 pub const DIRNAME_LEN: usize = 255; //目录名长度
-///保留inodes数量
+/// 保留inodes数量
 pub const RESERVED_INODES: u32 = 10;
 
 // ============================================================================

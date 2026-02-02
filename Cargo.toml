@@ -38,7 +38,7 @@ ksync = { path = "core/ksync" }
 ktask = { path = "core/ktask" }
 watchdog = { path = "io/watchdog" }
 kcpu = { path = "arch/kcpu" }
-smoltcp = { path = "net/smoltcp", default-features = false}
+smoltcp = { path = "net/smoltcp", default-features = false }
 
 # x-kernel Crates
 alloc-engine = { path = "mm/alloc-engine" }
@@ -123,9 +123,8 @@ pci = { path = "drivers/pci" }
 vsock = { path = "drivers/vsock" }
 virtio = { path = "drivers/virtio" }
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
-lwext4_rust = { path = "drivers/lwext4_rust", default-features = false }
 fatfs = { path = "drivers/rust-fatfs", default-features = false }
-rsext4 = { path = "drivers/rsext4" }
+rsext4 = { path = "drivers/rsext4", default-features = false }
 
 # util Crates
 macros = { path = "util/macros" }

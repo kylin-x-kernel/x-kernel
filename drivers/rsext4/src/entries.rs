@@ -2,9 +2,9 @@
 //!
 //! 定义了 ext4 文件系统中目录条目的数据结构和操作。
 
-use crate::config::*;
-use crate::endian::*;
 use alloc::vec::Vec;
+
+use crate::{config::*, endian::*};
 
 /// Ext4 目录条目结构（传统格式）
 ///
@@ -34,7 +34,12 @@ pub struct Ext4DirEntry2 {
 }
 
 impl Ext4DirEntry2 {
-    ///构造函数
+    /// 文件名最大长度
+    pub const MAX_NAME_LEN: u8 = 255;
+    /// 目录条目最小长度
+    pub const MIN_DIR_ENTRY_LEN: u16 = 12;
+
+    /// 构造函数
     pub fn new(inode_num: u32, rec_len: u16, file_type: u8, name: &[u8]) -> Self {
         let mut name_buf = [0u8; DIRNAME_LEN];
         let len = core::cmp::min(
@@ -51,12 +56,6 @@ impl Ext4DirEntry2 {
         }
     }
 
-    /// 目录条目最小长度
-    pub const MIN_DIR_ENTRY_LEN: u16 = 12;
-
-    /// 文件名最大长度
-    pub const MAX_NAME_LEN: u8 = 255;
-
     /// 计算目录条目实际占用长度（含对齐）
     pub fn entry_len(name_len: u8) -> u16 {
         let base_len = 8;
@@ -68,15 +67,23 @@ impl Ext4DirEntry2 {
 
 // 文件类型常量
 impl Ext4DirEntry2 {
-    pub const EXT4_FT_UNKNOWN: u8 = 0; // 未知类型
-    pub const EXT4_FT_REG_FILE: u8 = 1; // 普通文件
-    pub const EXT4_FT_DIR: u8 = 2; // 目录
-    pub const EXT4_FT_CHRDEV: u8 = 3; // 字符设备
-    pub const EXT4_FT_BLKDEV: u8 = 4; // 块设备
-    pub const EXT4_FT_FIFO: u8 = 5; // FIFO
-    pub const EXT4_FT_SOCK: u8 = 6; // 套接字
-    pub const EXT4_FT_SYMLINK: u8 = 7; // 符号链接
-    pub const EXT4_FT_MAX: u8 = 8; // 最大值
+    // 字符设备
+    pub const EXT4_FT_BLKDEV: u8 = 4;
+    // 目录
+    pub const EXT4_FT_CHRDEV: u8 = 3;
+    // 普通文件
+    pub const EXT4_FT_DIR: u8 = 2;
+    // 块设备
+    pub const EXT4_FT_FIFO: u8 = 5;
+    // 符号链接
+    pub const EXT4_FT_MAX: u8 = 8;
+    // 未知类型
+    pub const EXT4_FT_REG_FILE: u8 = 1;
+    // FIFO
+    pub const EXT4_FT_SOCK: u8 = 6;
+    // 套接字
+    pub const EXT4_FT_SYMLINK: u8 = 7;
+    pub const EXT4_FT_UNKNOWN: u8 = 0; // 最大值
 }
 
 /// 目录条目尾部（用于校验和）
@@ -102,8 +109,8 @@ impl Ext4DirEntryTail {
 pub struct Ext4DxRoot {
     pub dot: Ext4DirEntry2,    // "." 条目
     pub dotdot: Ext4DirEntry2, // ".." 条目
-    pub info: Ext4DxRootInfo,  // 根信息
-                               // 后面跟着Ext4DxEntry数组
+    pub info: Ext4DxRootInfo,  /* 根信息
+                                * 后面跟着Ext4DxEntry数组 */
 }
 
 /// HTree根节点信息
@@ -123,11 +130,16 @@ impl Ext4DxRootInfo {
 
 // 哈希版本常量
 impl Ext4DxRootInfo {
-    pub const DX_HASH_LEGACY: u8 = 0; // 传统哈希
-    pub const DX_HASH_HALF_MD4: u8 = 1; // Half MD4
-    pub const DX_HASH_TEA: u8 = 2; // TEA
-    pub const DX_HASH_LEGACY_UNSIGNED: u8 = 3; // 传统无符号
-    pub const DX_HASH_HALF_MD4_UNSIGNED: u8 = 4; // Half MD4无符号
+    // 传统哈希
+    pub const DX_HASH_HALF_MD4: u8 = 1;
+    // 传统无符号
+    pub const DX_HASH_HALF_MD4_UNSIGNED: u8 = 4;
+    pub const DX_HASH_LEGACY: u8 = 0;
+    // TEA
+    pub const DX_HASH_LEGACY_UNSIGNED: u8 = 3;
+    // Half MD4
+    pub const DX_HASH_TEA: u8 = 2;
+    // Half MD4无符号
     pub const DX_HASH_TEA_UNSIGNED: u8 = 5; // TEA无符号
 }
 
@@ -153,8 +165,8 @@ pub struct Ext4DxCountlimit {
 #[derive(Debug)]
 pub struct Ext4DxNode {
     pub fake: Ext4DirEntry2, // 伪造的目录条目
-    pub countlimit: Ext4DxCountlimit, // 计数和限制
-                             // 后面跟着Ext4DxEntry数组
+    pub countlimit: Ext4DxCountlimit, /* 计数和限制
+                              * 后面跟着Ext4DxEntry数组 */
 }
 
 /// Extent状态树的叶子节点
@@ -234,7 +246,9 @@ impl<'a> DirEntryIterator<'a> {
 }
 
 impl<'a> Iterator for DirEntryIterator<'a> {
-    type Item = (Ext4DirEntryInfo<'a>, u16); // (条目信息, rec_len)
+    type Item = (Ext4DirEntryInfo<'a>, u16);
+
+    // (条目信息, rec_len)
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.offset < self.data.len() {

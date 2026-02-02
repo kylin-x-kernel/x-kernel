@@ -2,8 +2,10 @@
 //!
 //! 测试文件系统的 API 功能，包括 open、read_at、write_at、lseek 等
 
-use rsext4::error::{BlockDevError, BlockDevResult};
-use rsext4::*;
+use rsext4::{
+    error::{BlockDevError, BlockDevResult},
+    *,
+};
 
 /// 测试用块设备
 struct MockBlockDevice {

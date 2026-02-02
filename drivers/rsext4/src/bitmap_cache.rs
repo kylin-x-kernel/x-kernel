@@ -1,11 +1,10 @@
 //! 位图缓存模块
 
-use crate::BITMAP_CACHE_MAX;
-use crate::blockdev::*;
-use crate::error::*;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
+
 use log::debug;
+
+use crate::{BITMAP_CACHE_MAX, blockdev::*, error::*};
 
 /// 位图类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -184,7 +183,8 @@ impl BitmapCache {
     {
         let bitmap = self.get_or_load_mut(block_dev, key, block_num)?;
         debug!(
-            "BitmapCache::modify: key=({}:{:?}) block_num={} before_dirty={} (will apply in-memory changes)",
+            "BitmapCache::modify: key=({}:{:?}) block_num={} before_dirty={} (will apply \
+             in-memory changes)",
             key.group_id, key.bitmap_type, block_num, bitmap.dirty
         );
 
@@ -192,7 +192,8 @@ impl BitmapCache {
         bitmap.mark_dirty();
 
         debug!(
-            "BitmapCache::modify: key=({}:{:?}) block_num={} marked_dirty=true (bitmap updated in cache, writeback deferred)",
+            "BitmapCache::modify: key=({}:{:?}) block_num={} marked_dirty=true (bitmap updated in \
+             cache, writeback deferred)",
             key.group_id, key.bitmap_type, block_num
         );
         Ok(())
@@ -327,8 +328,9 @@ pub struct CacheStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloc::vec;
+
+    use super::*;
 
     #[test]
     fn test_cache_key() {

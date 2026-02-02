@@ -2,28 +2,28 @@
 //!
 //! 提供 ext4 文件系统的核心实现，包括文件系统挂载、卸载、文件操作等高层接口。
 
-use crate::bitmap::InodeBitmap;
-use crate::bitmap_cache::*;
-use crate::blockdev::*;
-use crate::blockgroup_description::*;
-use crate::bmalloc::*;
-use crate::config::*;
-use crate::datablock_cache::*;
-use crate::dir::*;
-use crate::disknode::*;
-use crate::endian::*;
-use crate::error::*;
-use crate::inodetable_cache::*;
-use crate::jbd2::jbd2::*;
-use crate::jbd2::jbdstruct::*;
-use crate::loopfile::*;
-use crate::superblock::*;
-use crate::tool::*;
-use log::trace;
+use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 
-use alloc::collections::vec_deque::VecDeque;
-use alloc::vec::Vec;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
+
+use crate::{
+    bitmap::InodeBitmap,
+    bitmap_cache::*,
+    blockdev::*,
+    blockgroup_description::*,
+    bmalloc::*,
+    config::*,
+    datablock_cache::*,
+    dir::*,
+    disknode::*,
+    endian::*,
+    error::*,
+    inodetable_cache::*,
+    jbd2::{jbd2::*, jbdstruct::*},
+    loopfile::*,
+    superblock::*,
+    tool::*,
+};
 
 /// Ext4 文件系统实例
 ///
@@ -93,7 +93,8 @@ impl Ext4FileSystem {
             Some(d) => d,
             None => {
                 warn!(
-                    "inode_num_already_allocted: invalid group_idx {group_idx} for inode {inode_num}"
+                    "inode_num_already_allocted: invalid group_idx {group_idx} for inode \
+                     {inode_num}"
                 );
                 return false;
             }
@@ -122,7 +123,7 @@ impl Ext4FileSystem {
         }
     }
 
-    ///目录是否存在
+    /// 目录是否存在
     pub fn file_entries_exist<B: BlockDevice>(
         &mut self,
         device: &mut Jbd2Dev<B>,
@@ -141,7 +142,7 @@ impl Ext4FileSystem {
         }
     }
 
-    ///遍历目录
+    /// 遍历目录
     pub fn find_file<B: BlockDevice>(
         &mut self,
         device: &mut Jbd2Dev<B>,
@@ -160,8 +161,8 @@ impl Ext4FileSystem {
         }
     }
 
-    ///获取根目录
-    ///上层api封装 获取根目录 inode为2
+    /// 获取根目录
+    /// 上层api封装 获取根目录 inode为2
     pub fn get_root<B: BlockDevice>(
         &mut self,
         block_dev: &mut Jbd2Dev<B>,
@@ -186,8 +187,8 @@ impl Ext4FileSystem {
         Ok(result.inode)
     }
 
-    ///创建根目录
-    ///文件系统初始化时调用
+    /// 创建根目录
+    /// 文件系统初始化时调用
     fn create_root_dir<B: BlockDevice>(
         &mut self,
         block_dev: &mut Jbd2Dev<B>,
@@ -200,8 +201,8 @@ impl Ext4FileSystem {
     pub fn mount<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> Result<Self, RSEXT4Error> {
         debug!("Start mounting Ext4 filesystem...");
 
-        //在mount时应该重放一遍日志
-        //block_dev.set_journal_superblock(super_block, jouranl_start_block);
+        // 在mount时应该重放一遍日志
+        // block_dev.set_journal_superblock(super_block, jouranl_start_block);
 
         // 1. 读取超级块（按 ext4 标准偏移 1024 字节，大小 1024 字节）
         let superblock = read_superblock(block_dev).map_err(|_| RSEXT4Error::IoError)?;
@@ -268,7 +269,7 @@ impl Ext4FileSystem {
             mounted: true,
             journal_sb_block_start: None,
         };
-        //详细debug输出
+        // 详细debug输出
         debug_super_and_desc(&fs.superblock, &fs);
 
         // rootinode check !
@@ -277,7 +278,8 @@ impl Ext4FileSystem {
             let root_inode = fs.get_root(block_dev).map_err(|_| RSEXT4Error::IoError)?;
             if root_inode.i_mode == 0 || !root_inode.is_dir() {
                 warn!(
-                    "Root inode is uninitialized or not a directory, creating root and lost+found... i_mode: {}, is_dir: {}",
+                    "Root inode is uninitialized or not a directory, creating root and \
+                     lost+found... i_mode: {}, is_dir: {}",
                     root_inode.i_mode,
                     root_inode.is_dir()
                 );
@@ -325,10 +327,10 @@ impl Ext4FileSystem {
                 {
                     // 不存在但 superblock 声明有 journal，则创建一个新的 journal 文件
                     create_journal_entry(&mut fs, block_dev).expect("create journal entry failed");
-                    //dump_journal_inode(&mut fs, block_dev);
+                    // dump_journal_inode(&mut fs, block_dev);
                 }
             }
-            //实际启用Journal
+            // 实际启用Journal
             if block_dev.is_use_journal() {
                 // 到这里为止：journal inode 一定存在
                 // 初始化 jbd2：读入 journal 超级块并塞进 Jbd2Dev
@@ -341,7 +343,7 @@ impl Ext4FileSystem {
                     .and_then(|opt| opt.ok_or(BlockDevError::Corrupted))
                     .expect("resolve journal first block failed");
 
-                //写入fs
+                // 写入fs
                 fs.journal_sb_block_start = Some(journal_first_block);
                 // 通过数据块缓存读出 journal superblock 内容
                 let journal_data = fs
@@ -361,7 +363,7 @@ impl Ext4FileSystem {
             }
         }
 
-        //详细的Inode/DataBlock占用情况
+        // 详细的Inode/DataBlock占用情况
         {
             let g0 = match fs.group_descs.first() {
                 Some(desc) => desc,
@@ -418,7 +420,7 @@ impl Ext4FileSystem {
             );
         }
 
-        //debug
+        // debug
         // info!(" Ext4文件系统挂载成功！");
         info!("Ext4 filesystem mounted");
         info!("  - block size: {} bytes", fs.superblock.block_size());
@@ -426,7 +428,7 @@ impl Ext4FileSystem {
         info!("  - free blocks: {}", fs.superblock.free_blocks_count());
         info!("  - total inodes: {}", fs.superblock.s_inodes_count);
         info!("  - free inodes: {}", fs.superblock.s_free_inodes_count);
-        //缓存刷新回磁盘
+        // 缓存刷新回磁盘
         fs.datablock_cache
             .flush_all(block_dev)
             .expect("flush failed!");
@@ -490,6 +492,7 @@ impl Ext4FileSystem {
         );
         Ok(group_descs)
     }
+
     /// 卸载文件系统 不写超级块备份
     pub fn umount<B: BlockDevice>(&mut self, block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
         if !self.mounted {
@@ -516,7 +519,7 @@ impl Ext4FileSystem {
         debug!("Writing back group descriptors...");
         self.sync_group_descriptors(block_dev)?;
 
-        //确保缓存已经提交完毕
+        // 确保缓存已经提交完毕
         block_dev.umount_commit();
 
         self.mounted = false;
@@ -540,7 +543,8 @@ impl Ext4FileSystem {
         let block_size_u64 = BLOCK_SIZE as u64;
 
         debug!(
-            "Writing back group descriptors: {total_desc_count} descriptors, desc_size = {desc_size} bytes"
+            "Writing back group descriptors: {total_desc_count} descriptors, desc_size = \
+             {desc_size} bytes"
         );
 
         // 为了避免频繁读写，按块聚合写回
@@ -558,7 +562,7 @@ impl Ext4FileSystem {
                 if let Some(prev_block) = current_block
                     && Some(prev_block) == buffer_snapshot_block
                 {
-                    //由于目前日志回放在fs构建之后（块组描述符读取之后），目前为了快速修复防止读取到旧的超级块。直接落盘写回
+                    // 由于目前日志回放在fs构建之后（块组描述符读取之后），目前为了快速修复防止读取到旧的超级块。直接落盘写回
                     block_dev.write_block(prev_block as u32, false)?;
                 }
 
@@ -600,7 +604,7 @@ impl Ext4FileSystem {
         &mut self,
         block_dev: &mut Jbd2Dev<B>,
     ) -> BlockDevResult<()> {
-        //同步group_desc 和 super_block计数
+        // 同步group_desc 和 super_block计数
         let mut real_free_blocks: u64 = 0;
         let mut real_free_inodes: u64 = 0;
         for desc in &self.group_descs {
@@ -710,7 +714,8 @@ impl Ext4FileSystem {
             let mut alloc_res: Result<BlockAlloc, BlockDevError> = Err(BlockDevError::NoSpace);
 
             debug!(
-                "alloc_blocks: candidate group={group_idx} bitmap_block={bitmap_block} starting contiguous allocation of {count} blocks"
+                "alloc_blocks: candidate group={group_idx} bitmap_block={bitmap_block} starting \
+                 contiguous allocation of {count} blocks"
             );
 
             self.bitmap_cache
@@ -732,7 +737,8 @@ impl Ext4FileSystem {
                 desc_mut.bg_free_blocks_count_hi = (new_count >> 16) as u16;
 
                 debug!(
-                    "alloc_blocks: group={} free_blocks_count change {} -> {} (allocated {} blocks starting at global={})",
+                    "alloc_blocks: group={} free_blocks_count change {} -> {} (allocated {} \
+                     blocks starting at global={})",
                     group_idx, before, new_count, count, alloc.global_block
                 );
             }
@@ -744,7 +750,8 @@ impl Ext4FileSystem {
             let sb_after = self.superblock.free_blocks_count();
 
             debug!(
-                "alloc_blocks: superblock free_blocks_count change {sb_before} -> {sb_after} (delta=-{count})"
+                "alloc_blocks: superblock free_blocks_count change {sb_before} -> {sb_after} \
+                 (delta=-{count})"
             );
 
             let mut blocks = Vec::with_capacity(count as usize);
@@ -753,7 +760,8 @@ impl Ext4FileSystem {
             }
 
             debug!(
-                "Allocated blocks: group={}, first_block_in_group={}, first_global_block={}, count={} [bitmap updated, writeback deferred]",
+                "Allocated blocks: group={}, first_block_in_group={}, first_global_block={}, \
+                 count={} [bitmap updated, writeback deferred]",
                 alloc.group_idx, alloc.block_in_group, alloc.global_block, count
             );
 
@@ -996,9 +1004,9 @@ impl Ext4FileSystem {
         }
     }
 
-    ///创建最基本的file
+    /// 创建最基本的file
     pub fn make_base_dir(&self) {
-        //root journal lost+found
+        // root journal lost+found
     }
 }
 
@@ -1018,7 +1026,7 @@ pub struct FileSystemStats {
     /// 块组数
     pub block_groups: u32,
 }
-///entries是否存在
+/// entries是否存在
 pub fn file_entry_exisr<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     device: &mut Jbd2Dev<B>,
@@ -1049,7 +1057,7 @@ pub fn mount<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<Ext4F
     }
 }
 
-///取消挂载函数
+/// 取消挂载函数
 pub fn umount<B: BlockDevice>(
     fs: Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
@@ -1206,34 +1214,34 @@ pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
     debug!("  Blocks per group: {}", layout.blocks_per_group);
     debug!("  Inodes per group: {}", layout.inodes_per_group);
 
-    //构建并根据fearure写入到所有group超级块
+    // 构建并根据fearure写入到所有group超级块
     let superblock = build_superblock(total_blocks, &layout);
     write_superblock(block_dev, &superblock)?;
     debug!("Superblock written");
 
-    //写冗余备份 自动判断是否写
+    // 写冗余备份 自动判断是否写
     write_superblock_redundant_backup(block_dev, &superblock, total_groups, &layout)?;
 
-    //注意顺序
+    // 注意顺序
     let mut descs: VecDeque<Ext4GroupDesc> = VecDeque::new();
-    //为superblock写入gdt（全部标记为UNINIT）
+    // 为superblock写入gdt（全部标记为UNINIT）
     for group_id in 0..total_groups {
         let desc = build_uninit_group_desc(&superblock, group_id, &layout);
         write_group_desc(block_dev, group_id, &desc)?;
         descs.push_back(desc);
     }
-    //为其它块组选择性的写入冗余备份desc
+    // 为其它块组选择性的写入冗余备份desc
     write_gdt_redundant_backup(block_dev, &descs, &superblock, total_groups, &layout)?;
     debug!("{total_groups} block group descriptors written");
 
-    //实际初始化块组0（用于根目录）
+    // 实际初始化块组0（用于根目录）
     initialize_group_0(block_dev, &layout)?;
     debug!("Block group 0 initialized (for root directory)");
 
     // 初始化其它块组的位图（全部视为空闲）
     initialize_other_groups_bitmaps(block_dev, &layout, &superblock)?;
 
-    //通过一次挂载/卸载流程，让根目录在 mkfs 阶段就被真正创建并写回磁盘
+    // 通过一次挂载/卸载流程，让根目录在 mkfs 阶段就被真正创建并写回磁盘
     // 注意：此时日志仍然关闭，等真正挂载时再开启 JBD2
     {
         let mut fs = Ext4FileSystem::mount(block_dev).expect("Mount Failed!");
@@ -1278,12 +1286,12 @@ fn build_superblock(total_blocks: u64, layout: &FsLayoutInfo) -> Ext4Superblock 
         ..Default::default()
     };
 
-    //设置hash种子
-    //需要生成UUID
+    // 设置hash种子
+    // 需要生成UUID
     let uuid = generate_uuid();
     sb.s_hash_seed = uuid.0;
 
-    //设置文件系统UUID
+    // 设置文件系统UUID
     let filesys_uuid = generate_uuid_8();
     sb.s_uuid = filesys_uuid;
 
@@ -1374,14 +1382,14 @@ fn build_uninit_group_desc(
     desc
 }
 
-///写备份超级块到所有组，从块组1开始
+/// 写备份超级块到所有组，从块组1开始
 fn write_superblock_redundant_backup<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
     sb: &Ext4Superblock,
     groups_count: u32,
     fs_layout: &FsLayoutInfo,
 ) -> BlockDevResult<()> {
-    //从1开始
+    // 从1开始
     // sparse_superbllock特性判断
     let sprse_feature =
         sb.has_feature_ro_compat(Ext4Superblock::EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER);
@@ -1397,7 +1405,7 @@ fn write_superblock_redundant_backup<B: BlockDevice>(
                 fs_layout.group0_inode_table,
                 fs_layout.gdt_blocks,
             );
-            //需要超级块备份
+            // 需要超级块备份
             if need_redundant_backup(gid) {
                 let super_blocks = group_layout.group_start_block;
                 block_dev
@@ -1454,7 +1462,7 @@ fn read_superblock<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult
     }
 }
 
-///写入所有组的冗余备份中 自动判断特性
+/// 写入所有组的冗余备份中 自动判断特性
 fn write_gdt_redundant_backup<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
     descs: &VecDeque<Ext4GroupDesc>,
@@ -1462,7 +1470,7 @@ fn write_gdt_redundant_backup<B: BlockDevice>(
     groups_count: u32,
     fs_layout: &FsLayoutInfo,
 ) -> BlockDevResult<()> {
-    //参数合法性判断
+    // 参数合法性判断
     let desc_size = sb.get_desc_size();
     let desc_all_size = descs.len() * desc_size as usize;
     let can_recive_size = fs_layout.gdt_blocks * fs_layout.descs_per_block * desc_size as u32;
@@ -1476,7 +1484,7 @@ fn write_gdt_redundant_backup<B: BlockDevice>(
     let sprse_feature =
         sb.has_feature_ro_compat(Ext4Superblock::EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER);
     if sprse_feature {
-        //为每个块组执行
+        // 为每个块组执行
         for gid in 1..groups_count {
             if need_redundant_backup(gid) {
                 let group_layout = cloc_group_layout(
@@ -1492,7 +1500,7 @@ fn write_gdt_redundant_backup<B: BlockDevice>(
                 let gdt_start = group_layout.group_start_block + 1; //跳过超级块
 
                 let mut desc_iter = descs.iter();
-                //循环写入desc
+                // 循环写入desc
                 for gdt_block_id in gdt_start..group_layout.group_blcok_bitmap_startblocks {
                     block_dev.read_block(gdt_block_id as u32)?;
                     let buffer = block_dev.buffer_mut();
@@ -1505,7 +1513,7 @@ fn write_gdt_redundant_backup<B: BlockDevice>(
                             current_offset += desc_size as usize;
                         }
                     }
-                    //写回磁盘
+                    // 写回磁盘
                     block_dev.write_block(gdt_block_id as u32, true)?;
                 }
             }

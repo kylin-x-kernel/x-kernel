@@ -2,21 +2,17 @@
 //!
 //! 提供对 ext4 文件系统中文件的读写、创建、删除等操作功能。
 
-use alloc::string::ToString;
-use alloc::vec::Vec;
-use log::{debug, warn};
-use log::{error, info};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
-use crate::blockdev::*;
-use crate::config::*;
-use crate::dir::*;
-use crate::disknode::*;
-use crate::entries::*;
-use crate::error::*;
-use crate::ext4::*;
-use crate::extents_tree::*;
-use crate::loopfile::*;
-use alloc::string::String;
+use log::{debug, error, info, warn};
+
+use crate::{
+    blockdev::*, config::*, dir::*, disknode::*, entries::*, error::*, ext4::*, extents_tree::*,
+    loopfile::*,
+};
 
 /// 重命名文件或目录
 ///
@@ -47,7 +43,7 @@ pub fn rename<B: BlockDevice>(
             delete_file(fs, device, new_path);
         }
     }
-    //删除了还存在？错误!
+    // 删除了还存在？错误!
     if get_inode_with_num(fs, device, &new_norm)
         .ok()
         .flatten()
@@ -93,7 +89,7 @@ pub fn truncate<B: BlockDevice>(
     truncate_with_ino(device, fs, inode_num, truncate_size)
 }
 
-///TODO:shrink暂时不要用不成熟   记得更新inodesize extendtree不负责更新inodesize
+/// TODO:shrink暂时不要用不成熟   记得更新inodesize extendtree不负责更新inodesize
 pub fn truncate_with_ino<B: BlockDevice>(
     device: &mut Jbd2Dev<B>,
     fs: &mut Ext4FileSystem,
@@ -215,7 +211,7 @@ pub fn truncate_with_ino<B: BlockDevice>(
         return Ok(());
     }
 
-    //todo:
+    // todo:
     // 非 extent：仅支持 12 个直接块（现有实现本来就不支持间接块）
     if new_blocks > 12 {
         return Err(BlockDevError::Unsupported);
@@ -517,21 +513,21 @@ fn read_file_follow<B: BlockDevice>(
     Ok(Some(buf))
 }
 
-//mv
+// mv
 pub fn mv<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
     old_path: &str,
     new_path: &str,
 ) -> BlockDevResult<()> {
-    //找到对应entry，找不到就返回。
-    //判断new_path的父目录是否已经存在不存在就返回，存在继续判断new_path是否有对应的entry，存在就返回
-    //判断被移动的entry类型，如果是目录
-    //对entry的父目录的link-1.
-    //将旧entry使用insertnewentry插入到新目录修改文件名称，更新长度信息，使用removeentry...删除旧entry
-    //对新父目录的link+1.
-    //如果是文件或者链接
-    //将旧entry使用insertnewentry插入到新目录修改文件名称，更新长度信息，使用removeentry...删除旧entry
+    // 找到对应entry，找不到就返回。
+    // 判断new_path的父目录是否已经存在不存在就返回，存在继续判断new_path是否有对应的entry，存在就返回
+    // 判断被移动的entry类型，如果是目录
+    // 对entry的父目录的link-1.
+    // 将旧entry使用insertnewentry插入到新目录修改文件名称，更新长度信息，使用removeentry...删除旧entry
+    // 对新父目录的link+1.
+    // 如果是文件或者链接
+    // 将旧entry使用insertnewentry插入到新目录修改文件名称，更新长度信息，使用removeentry...删除旧entry
 
     let old_norm = split_paren_child_and_tranlatevalid(old_path);
     let new_norm = split_paren_child_and_tranlatevalid(new_path);
@@ -642,7 +638,8 @@ pub fn mv<B: BlockDevice>(
         Some(v) => v,
         None => {
             error!(
-                "mv source entry not found in old parent: old_path={old_path} old_parent={old_parent} old_name={old_name}"
+                "mv source entry not found in old parent: old_path={old_path} \
+                 old_parent={old_parent} old_name={old_name}"
             );
             return Err(BlockDevError::InvalidInput);
         }
@@ -695,7 +692,8 @@ pub fn mv<B: BlockDevice>(
     .is_err()
     {
         error!(
-            "mv insert_dir_entry failed: old_path={old_path} new_path={new_path} new_parent={new_parent} new_name={new_name} src_ino={src_ino}"
+            "mv insert_dir_entry failed: old_path={old_path} new_path={new_path} \
+             new_parent={new_parent} new_name={new_name} src_ino={src_ino}"
         );
         return Err(BlockDevError::WriteError);
     }
@@ -704,7 +702,8 @@ pub fn mv<B: BlockDevice>(
     if !remove_inodeentry_from_parentdir(fs, block_dev, &old_parent, &old_name) {
         let _ = remove_inodeentry_from_parentdir(fs, block_dev, &new_parent, &new_name);
         error!(
-            "mv remove old entry failed: old_parent={old_parent} old_name={old_name} (rollback new_parent={new_parent} new_name={new_name})"
+            "mv remove old entry failed: old_parent={old_parent} old_name={old_name} (rollback \
+             new_parent={new_parent} new_name={new_name})"
         );
         return Err(BlockDevError::WriteError);
     }
@@ -773,13 +772,13 @@ pub fn mv<B: BlockDevice>(
     Ok(())
 }
 
-///UnLink
+/// UnLink
 pub fn unlink<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
     link_path: &str,
 ) {
-    //首先逐级扫描entry找到对应linkentry。
+    // 首先逐级扫描entry找到对应linkentry。
     let norm_path = split_paren_child_and_tranlatevalid(link_path);
     let (parent_path, child_name) = if let Some(pos) = norm_path.rfind('/') {
         let parent = if pos == 0 {
@@ -850,7 +849,7 @@ pub fn unlink<B: BlockDevice>(
         }
     };
 
-    //首先对指向inode 的link -1。
+    // 首先对指向inode 的link -1。
     let new_links = target_inode.i_links_count.saturating_sub(1);
     target_inode.i_links_count = new_links;
     if fs
@@ -863,7 +862,7 @@ pub fn unlink<B: BlockDevice>(
         return;
     }
 
-    //如果此时link数为0就调用deletefile删除对应文件.   这里不复用deletefile，因为需要额外的定位
+    // 如果此时link数为0就调用deletefile删除对应文件.   这里不复用deletefile，因为需要额外的定位
     if new_links == 0 {
         let mut used_blocks: Vec<u64> =
             match resolve_inode_block_allextend(fs, block_dev, &mut target_inode) {
@@ -889,14 +888,14 @@ pub fn unlink<B: BlockDevice>(
         });
     }
 
-    //最后调用removeentryfromparent移除entry
+    // 最后调用removeentryfromparent移除entry
     let removed = remove_inodeentry_from_parentdir(fs, block_dev, &parent_path, &child_name);
     if !removed {
         warn!("Dir entry '{child_name}' not found under parent {parent_path} in unlink");
     }
 }
 
-///Link
+/// Link
 pub fn link<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
@@ -1129,7 +1128,7 @@ pub fn remove_inodeentry_from_parentdir<B: BlockDevice>(
     removed
 }
 
-///删除目录
+/// 删除目录
 pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2Dev<B>, path: &str) {
     #[derive(Clone)]
     struct DirFrame {
@@ -1375,13 +1374,13 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
     }
 }
 
-///删除文件/删除链接文件
+/// 删除文件/删除链接文件
 pub fn delete_file<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
     path: &str,
 ) {
-    //find inode
+    // find inode
     let norm_path = split_paren_child_and_tranlatevalid(path);
     let target = match get_file_inode(fs, block_dev, &norm_path) {
         Ok(Some((ino_num, inode))) => (ino_num, inode),
@@ -1401,16 +1400,16 @@ pub fn delete_file<B: BlockDevice>(
         return;
     }
 
-    //统计block（i_blocks 以 512 字节为单位，换算成数据块个数）
+    // 统计block（i_blocks 以 512 字节为单位，换算成数据块个数）
     let mut inode_used_blocks: Vec<u64> =
         resolve_inode_block_allextend(fs, block_dev, &mut target_inode)
             .expect("Parse inode extend failed")
             .into_values()
             .collect();
     inode_used_blocks.sort(); //排序block
-    //link-1
+    // link-1
     target_inode.i_links_count = target_inode.i_links_count.saturating_sub(1);
-    //update target inode link
+    // update target inode link
     if fs
         .modify_inode(block_dev, ino_num, |td| {
             td.i_links_count = target_inode.i_links_count;
@@ -1421,16 +1420,16 @@ pub fn delete_file<B: BlockDevice>(
     }
     if target_inode.i_links_count == 0 {
         debug!("Will free inode:{ino_num} path:{path}");
-        //设置dtime(删除时的时间戳) 太小会触发PR_1_LOW_DTIME问题，inode存在并且正常使用时应该为0.
+        // 设置dtime(删除时的时间戳) 太小会触发PR_1_LOW_DTIME问题，inode存在并且正常使用时应该为0.
 
-        //释放inode所有的datablock
+        // 释放inode所有的datablock
         for blk in inode_used_blocks {
             if let Err(e) = fs.free_block(block_dev, blk) {
                 warn!("free_block failed for blk {blk}: {e:?}");
                 return;
             }
         }
-        //释放inode
+        // 释放inode
         if let Err(e) = fs.free_inode(block_dev, ino_num) {
             warn!("free_inode failed for inode {ino_num}: {e:?}");
             return;
@@ -1459,7 +1458,8 @@ pub fn delete_file<B: BlockDevice>(
     let removed = remove_inodeentry_from_parentdir(fs, block_dev, &parent_path, &child_name);
     if !removed {
         warn!(
-            "Dir entry '{child_name}' not found under parent {parent_path}, but inode/data already freed"
+            "Dir entry '{child_name}' not found under parent {parent_path}, but inode/data \
+             already freed"
         );
     }
 }
@@ -1484,7 +1484,7 @@ pub fn build_file_block_mapping<B: BlockDevice>(
         inode.i_flags |= Ext4Inode::EXT4_EXTENTS_FL;
         inode.i_block = [0; 15];
 
-        //初始头构建
+        // 初始头构建
         if !inode.have_extend_header_and_use_extend() {
             inode.i_flags |= Ext4Inode::EXT4_EXTENTS_FL;
             inode.write_extend_header();
@@ -1530,7 +1530,7 @@ pub fn build_file_block_mapping<B: BlockDevice>(
     }
 }
 
-///创建文件类型entry通用接口
+/// 创建文件类型entry通用接口
 /// 传入文件名称,可选初始数据
 /// file_type 可选文件entry类型，None表示默认普通文件,传entry类型,别传inode类型
 pub fn mkfile<B: BlockDevice>(
@@ -1593,7 +1593,7 @@ pub fn mkfile_with_ino<B: BlockDevice>(
             }
         };
 
-    //为新文件分配 inode（内部自动选择块组）
+    // 为新文件分配 inode（内部自动选择块组）
     let new_file_ino = match fs.alloc_inode(device) {
         Ok(ino) => ino,
         Err(e) => {
@@ -1660,7 +1660,7 @@ pub fn mkfile_with_ino<B: BlockDevice>(
 
     new_inode.i_mode = imode;
 
-    //extend是否开启
+    // extend是否开启
     if fs.superblock.has_extents() {
         new_inode.write_extend_header();
     }
@@ -1682,7 +1682,7 @@ pub fn mkfile_with_ino<B: BlockDevice>(
 
         build_file_block_mapping(fs, &mut new_inode, &data_blocks, device);
     } else {
-        //无初始数据：空文件
+        // 无初始数据：空文件
         new_inode.i_size_lo = 0;
         new_inode.i_size_high = 0;
         new_inode.i_blocks_lo = 0;
@@ -1705,7 +1705,7 @@ pub fn mkfile_with_ino<B: BlockDevice>(
         return None;
     }
 
-    //在父目录中插入一个普通文件类型的目录项（必要时自动扩展目录块）
+    // 在父目录中插入一个普通文件类型的目录项（必要时自动扩展目录块）
 
     let file_type = match file_type {
         Some(ft) => ft,
@@ -1725,7 +1725,8 @@ pub fn mkfile_with_ino<B: BlockDevice>(
     .is_err()
     {
         error!(
-            "mkfile insert_dir_entry failed path={path} parent_ino={parent_ino_num} child={child} ino={new_file_ino}"
+            "mkfile insert_dir_entry failed path={path} parent_ino={parent_ino_num} child={child} \
+             ino={new_file_ino}"
         );
         return None;
     }
@@ -1740,7 +1741,7 @@ pub fn mkfile_with_ino<B: BlockDevice>(
     }
 }
 
-///读取指定路径的整个文件内容
+/// 读取指定路径的整个文件内容
 pub fn read_file<B: BlockDevice>(
     device: &mut Jbd2Dev<B>,
     fs: &mut Ext4FileSystem,
