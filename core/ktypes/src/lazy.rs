@@ -38,7 +38,7 @@ use core::{cell::Cell, fmt, ops::Deref};
 /// }
 /// ```
 pub struct Lazy<T, F = fn() -> T> {
-    cell: Once<T, R>,
+    cell: Once<T>,
     init: Cell<Option<F>>,
 }
 

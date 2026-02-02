@@ -16,9 +16,9 @@ phys-memory-base = 0            # uint
 # Size of the whole physical memory. (128M)
 phys-memory-size = 0x800_0000   # uint
 # Base physical address of the kernel image.
-kernel-base-paddr = 0x20_0000   # uint
+kernel-base-paddr = 0x40_0000   # uint
 # Base virtual address of the kernel image.
-kernel-base-vaddr = "0xffff_8000_0020_0000"     # uint
+kernel-base-vaddr = "0xffff_8000_0040_0000"     # uint
 # Linear mapping offset, for quick conversions between physical and virtual
 # addresses.
 phys-virt-offset = "0xffff_8000_0000_0000"      # uint
@@ -32,9 +32,9 @@ kernel-aspace-size = "0x0000_7fff_ffff_f000"    # uint
 # Stack size on bootstrapping. (256K)
 boot-stack-size = 0x40000                       # uint
 # Dma memory base.
-dma-mem-base = 0x2a8f000                     # uint
+dma-mem-base = 0x200000                         # uint
 # Dma memory size.
-dma-mem-size = 0x200_000                        # uint
+dma-mem-size = 0x200000                         # uint
 #
 # Device specifications
 #
