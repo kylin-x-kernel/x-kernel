@@ -1,6 +1,6 @@
 [package]
 name = "kconfig-gen"
-description = "A TOML-based configuration generation tool for ArceOS."
+description = "A TOML-based configuration generation tool for x-kernel."
 documentation.workspace = true
 categories = ["config", "parsing", "parser-implementations"]
 keywords.workspace = true

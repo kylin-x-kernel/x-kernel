@@ -10,7 +10,7 @@ use core::fmt;
 pub use linux_sysno::Errno as LinuxError;
 use strum::EnumCount;
 
-/// The error kind type used by ArceOS.
+/// The error kind type used by x-kernel.
 ///
 /// Similar to [`std::io::ErrorKind`].
 ///
@@ -297,7 +297,7 @@ impl TryFrom<LinuxError> for KErrorKind {
     }
 }
 
-/// The error type used by ArceOS.
+/// The error type used by x-kernel.
 #[repr(transparent)]
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct KError(i32);

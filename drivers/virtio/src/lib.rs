@@ -11,8 +11,7 @@
 //! addresses (as seen by your program).
 //!
 //! [1]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
-//! [2]: https://github.com/arceos-org/kdriver_crates/tree/main/driver_base
-//! [3]: https://docs.rs/virtio-drivers/latest/virtio_drivers/trait.Hal.html
+//! [2]: https://docs.rs/virtio-drivers/latest/virtio_drivers/trait.Hal.html
 
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]
