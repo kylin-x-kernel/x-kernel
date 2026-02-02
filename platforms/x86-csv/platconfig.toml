@@ -35,9 +35,9 @@ kernel-aspace-size = "0x0000_7fff_ffff_f000"    # uint
 boot-stack-size = 0x40000                       # uint
 # SEV C-bit position (0 to disable SEV encryption bit).
 sev-cbit-pos = 47                               # uint
-# VirtIO shared memory pool base address for AMD SEV (unencrypted region).
+# DMA memory size.
 dma-mem-base = 0x100_000                   # uint
-# VirtIO shared memory pool size.
+# DMA memory size.
 dma-mem-size = 0x200_000                   # uint
 
 #

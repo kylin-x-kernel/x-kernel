@@ -31,9 +31,9 @@ kernel-aspace-base = "0xffff_0000_0000_0000"    # uint
 kernel-aspace-size = "0x0000_ffff_ffff_f000"    # uint
 # Stack size on bootstrapping. (256K)
 boot-stack-size = 0x40000                       # uint
-# Dma memory base.
+# DMA memory base.
 dma-mem-base = 0x8000_0000                      # uint
-# Dma memory size.
+# DMA memory size.
 dma-mem-size = 0x8_0000                         # uint
 # PSCI
 psci-method = "hvc"             # str

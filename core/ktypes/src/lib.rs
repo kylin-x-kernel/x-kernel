@@ -4,7 +4,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
-mod once;
 mod lazy;
-pub use once::Once;
+mod once;
 pub use lazy::Lazy;
+pub use once::Once;
