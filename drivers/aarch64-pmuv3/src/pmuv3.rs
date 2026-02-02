@@ -116,7 +116,7 @@ impl PmuCounter {
     /// Enable the PMU Counter.
     ///
     /// This starts the counter and enables overflow interrupt.
-    pub fn enable(&self){
+    pub fn enable(&self) {
         // Enable overflow interrupt
         msr!(PMINTENSET_EL1, 1u64 << self.counter_index);
 
@@ -143,7 +143,7 @@ impl PmuCounter {
     }
 
     /// Disable the PMU Counter.
-    pub fn disable(&self){
+    pub fn disable(&self) {
         self.enabled.store(false, Ordering::Release);
 
         // Disable counter

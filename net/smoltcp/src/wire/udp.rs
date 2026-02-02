@@ -312,7 +312,7 @@ impl Repr {
     }
 }
 
-impl<'a, T: AsRef<[u8]> + ?Sized> fmt::Display for Packet<&'a T> {
+impl<T: AsRef<[u8]> + ?Sized> fmt::Display for Packet<&T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Cannot use Repr::parse because we don't have the IP addresses.
         write!(
@@ -326,7 +326,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> fmt::Display for Packet<&'a T> {
 }
 
 #[cfg(feature = "defmt")]
-impl<'a, T: AsRef<[u8]> + ?Sized> defmt::Format for Packet<&'a T> {
+impl<T: AsRef<[u8]> + ?Sized> defmt::Format for Packet<&T> {
     fn format(&self, fmt: defmt::Formatter) {
         // Cannot use Repr::parse because we don't have the IP addresses.
         defmt::write!(

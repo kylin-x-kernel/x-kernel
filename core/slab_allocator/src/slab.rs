@@ -91,11 +91,10 @@ impl<const BLK_SIZE: usize> FreeBlockList<BLK_SIZE> {
     }
 
     fn pop(&mut self) -> Option<&'static mut FreeBlock> {
-        self.head.take().map(|node| {
-            self.head = node.next.take();
-            self.len -= 1;
-            node
-        })
+        let node = self.head.take()?;
+        self.head = node.next.take();
+        self.len -= 1;
+        Some(node)
     }
 
     fn push(&mut self, free_block: &'static mut FreeBlock) {

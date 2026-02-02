@@ -58,7 +58,7 @@ impl Heap {
     /// given address is invalid.
     pub unsafe fn new(heap_start_addr: usize, heap_size: usize) -> Heap {
         assert!(
-            heap_start_addr % 4096 == 0,
+            heap_start_addr.is_multiple_of(4096),
             "Start address should be page aligned"
         );
         assert!(
@@ -66,7 +66,7 @@ impl Heap {
             "Heap size should be greater or equal to minimum heap size"
         );
         assert!(
-            heap_size % MIN_HEAP_SIZE == 0,
+            heap_size.is_multiple_of(MIN_HEAP_SIZE),
             "Heap size should be a multiple of minimum heap size"
         );
         Heap {
@@ -94,11 +94,11 @@ impl Heap {
     /// given address is invalid.
     pub unsafe fn add_memory(&mut self, heap_start_addr: usize, heap_size: usize) {
         assert!(
-            heap_start_addr % 4096 == 0,
+            heap_start_addr.is_multiple_of(4096),
             "Start address should be page aligned"
         );
         assert!(
-            heap_size % 4096 == 0,
+            heap_size.is_multiple_of(4096),
             "Add Heap size should be a multiple of page size"
         );
         self.buddy_allocator
