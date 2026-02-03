@@ -16,6 +16,7 @@
 
 #![no_std]
 #![allow(rustdoc::broken_intra_doc_links)]
+#![feature(maybe_uninit_slice)]
 
 #[macro_use]
 extern crate log;

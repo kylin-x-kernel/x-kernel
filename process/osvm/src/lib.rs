@@ -4,11 +4,11 @@
 
 //! Helpers for reading/writing user virtual memory.
 #![no_std]
+#![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_as_bytes)]
 #![allow(clippy::missing_safety_doc)]
 
 use core::{mem::MaybeUninit, slice};
-
 use extern_trait::extern_trait;
 use kerrno::KError;
 
