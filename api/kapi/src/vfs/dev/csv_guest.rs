@@ -24,7 +24,7 @@ const SM3_HASH_BLOCK_SIZE: usize = 32;
 const ATTESTATION_MAGIC_LEN: usize = 16;
 
 /// Magic string for extension-aware attestation requests
-const CSV_ATTESTATION_MAGIC_STRING: &[u8; 15] = b"ATTESTATION_EXT";
+const CSV_ATTESTATION_MAGIC_STRING: &[u8; 16] = b"ATTESTATION_EXT\0";
 
 /// Hypercall number for VM attestation (specific to Hygon platform)
 const KVM_HC_VM_ATTESTATION: u64 = 100;
