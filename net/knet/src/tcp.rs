@@ -14,7 +14,7 @@ use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
-use x_smoltcp::{
+use smoltcp::{
     iface::SocketHandle,
     socket::tcp as smol,
     time::Duration,

@@ -13,7 +13,7 @@ use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, Pollable};
 use ksync::{Mutex, RwLock};
-use x_smoltcp::{
+use smoltcp::{
     iface::SocketHandle,
     phy::PacketMeta,
     socket::udp::{self as smol, UdpMetadata},

@@ -5,7 +5,7 @@
 //! Routing table and route selection.
 use alloc::{boxed::Box, vec, vec::Vec};
 
-use x_smoltcp::{
+use smoltcp::{
     iface::SocketSet,
     phy::{DeviceCapabilities, Medium},
     storage::PacketMetadata,
@@ -38,7 +38,7 @@ impl Rule {
     }
 }
 
-type PacketBuffer = x_smoltcp::storage::PacketBuffer<'static, ()>;
+type PacketBuffer = smoltcp::storage::PacketBuffer<'static, ()>;
 
 // TODO(mivik): optimize
 pub struct RouteTable {
@@ -108,7 +108,7 @@ impl Router {
         while let Ok(((), ip_packet)) = self.tx_buffer.dequeue() {
             match IpVersion::of_packet(ip_packet).expect("got invalid IP packet") {
                 IpVersion::Ipv4 => {
-                    let ip_packet = x_smoltcp::wire::Ipv4Packet::new_checked(ip_packet)
+                    let ip_packet = smoltcp::wire::Ipv4Packet::new_checked(ip_packet)
                         .expect("got invalid IPv4 packet");
                     let dst_addr = IpAddress::Ipv4(ip_packet.dst_addr());
                     if ip_packet.dst_addr().is_broadcast() {
@@ -130,7 +130,7 @@ impl Router {
                     }
                 }
                 IpVersion::Ipv6 => {
-                    let ip_packet = x_smoltcp::wire::Ipv6Packet::new_checked(ip_packet)
+                    let ip_packet = smoltcp::wire::Ipv6Packet::new_checked(ip_packet)
                         .expect("got invalid IPv6 packet");
                     let dst_addr = IpAddress::Ipv6(ip_packet.dst_addr());
                     if ip_packet.dst_addr().is_multicast() {
@@ -159,7 +159,7 @@ impl Router {
 
 pub struct TxToken<'a>(&'a mut PacketBuffer);
 
-impl x_smoltcp::phy::TxToken for TxToken<'_> {
+impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -205,7 +205,7 @@ fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
 
 pub struct RxToken<'a>(&'a [u8]);
 
-impl<'a> x_smoltcp::phy::RxToken for RxToken<'a> {
+impl<'a> smoltcp::phy::RxToken for RxToken<'a> {
     fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
@@ -218,7 +218,7 @@ impl<'a> x_smoltcp::phy::RxToken for RxToken<'a> {
     }
 }
 
-impl x_smoltcp::phy::Device for Router {
+impl smoltcp::phy::Device for Router {
     type RxToken<'a> = RxToken<'a>;
     type TxToken<'a> = TxToken<'a>;
 

@@ -11,7 +11,7 @@ use core::{
 
 use khal::time::{NANOS_PER_MICROS, TimeValue, wall_time_nanos};
 use ktask::future::sleep_until;
-use x_smoltcp::{
+use smoltcp::{
     iface::{Interface, SocketSet},
     time::Instant,
     wire::{HardwareAddress, IpAddress, IpListenEndpoint},
@@ -30,7 +30,7 @@ pub struct Service {
 }
 impl Service {
     pub fn new(mut router: Router) -> Self {
-        let config = x_smoltcp::iface::Config::new(HardwareAddress::Ip);
+        let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(config, &mut router, now());
 
         Self {

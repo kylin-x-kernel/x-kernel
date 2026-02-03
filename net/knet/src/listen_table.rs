@@ -8,7 +8,7 @@ use core::ops::DerefMut;
 
 use kerrno::{KError, KResult};
 use ksync::Mutex;
-use x_smoltcp::{
+use smoltcp::{
     iface::{SocketHandle, SocketSet},
     socket::tcp::{self, SocketBuffer, State},
     wire::{IpEndpoint, IpListenEndpoint},
@@ -147,7 +147,7 @@ impl ListenTable {
                 return;
             }
 
-            let mut socket = x_smoltcp::socket::tcp::Socket::new(
+            let mut socket = smoltcp::socket::tcp::Socket::new(
                 SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]),
                 SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]),
             );

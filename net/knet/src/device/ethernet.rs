@@ -11,7 +11,7 @@ use kdriver::prelude::{
     DriverError, DriverOps, NetBufHandle, NetDevice as DriverNetDevice, NetDriverOps,
 };
 use ktask::future::register_irq_waker;
-use x_smoltcp::{
+use smoltcp::{
     storage::{PacketBuffer, PacketMetadata},
     time::{Duration, Instant},
     wire::{

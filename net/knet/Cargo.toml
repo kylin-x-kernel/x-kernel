@@ -36,7 +36,7 @@ async-channel = { version = "2.5.0", default-features = false }
 event-listener = { version = "5.4.0", default-features = false }
 async-trait = "0.1.88"
 
-[dependencies.x-smoltcp]
+[dependencies.smoltcp]
 workspace = true
 default-features = false
 features = [

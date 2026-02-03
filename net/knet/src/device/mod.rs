@@ -5,7 +5,7 @@
 //! Network device abstractions.
 use core::task::Waker;
 
-use x_smoltcp::{storage::PacketBuffer, time::Instant, wire::IpAddress};
+use smoltcp::{storage::PacketBuffer, time::Instant, wire::IpAddress};
 
 mod ethernet;
 mod loopback;
