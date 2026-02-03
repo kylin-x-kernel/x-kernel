@@ -1,14 +1,14 @@
 [package]
 name = "kernel-elf-parser"
-version = "0.3.3"
-edition = "2024"
-authors = ["Youjie Zheng <zyj578335934@gmail.com>"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 license = "Apache-2.0"
 documentation.workspace = true
 repository.workspace = true
 description = "An lightweight ELF parser that parses ELF files and converts them into information needed for kernel building"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-keywords = ["Starry", "ELF", "kernel"]
+keywords = ["ELF", "kernel"]
 categories = ["no-std"]
 
 [dependencies]

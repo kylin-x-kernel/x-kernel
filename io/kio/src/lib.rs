@@ -8,6 +8,7 @@
 #![feature(core_io_borrowed_buf)]
 #![feature(min_specialization)]
 #![feature(maybe_uninit_fill)]
+#![feature(unsigned_signed_diff)]
 #![cfg_attr(not(maybe_uninit_slice), feature(maybe_uninit_slice))]
 
 #[cfg(feature = "alloc")]
