@@ -80,7 +80,7 @@ impl CsvGuestDevice {
                 pa = in(reg) pa,
                 inout("rax") nr => ret,
                 in("rcx") len,
-                options(nostack)
+                options()
             );
         }
         ret
