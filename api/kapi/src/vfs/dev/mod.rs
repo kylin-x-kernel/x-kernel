@@ -315,7 +315,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             fs.clone(),
             NodeType::CharacterDevice,
             DeviceId::new(30, 0),
-            Arc::new(dice::DiceNodeInfo::new()),
+            Arc::new(rust_dice::DiceNodeInfo::new()),
         ),
     );
 

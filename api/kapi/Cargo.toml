@@ -17,7 +17,7 @@ dice = [
     "dep:aarch64-crosvm-virt",
     "kalloc/dice",
     "dep:rand_chacha",
-    "dep:dice",
+    "dep:rust-dice",
     "dep:mbedtls",
 ]
 tee = [
@@ -35,7 +35,7 @@ kalloc.workspace = true
 backtrace.workspace = true
 platconfig.workspace = true
 unittest = { workspace = true }
-dice = { workspace = true, optional = true }
+rust-dice = { workspace = true, optional = true }
 mbedtls = { workspace = true, optional = true }
 fbdevice.workspace = true
 kdriver.workspace = true

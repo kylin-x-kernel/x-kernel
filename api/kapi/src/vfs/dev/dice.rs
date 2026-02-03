@@ -74,7 +74,7 @@ impl DiceNodeInfo<'static> {
     }
 
     fn parse_handover_data(&self) -> KResult<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        use dice::{dice_main_flow_chain_codehash, dice_parse_handover};
+        use rust_dice::{dice_main_flow_chain_codehash, dice_parse_handover};
 
         let (addr, size) = self.regions;
 
