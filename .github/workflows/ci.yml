@@ -27,6 +27,7 @@ jobs:
       ARCH: ${{ matrix.arch }}
       SMP: 4
       XKERNEL_ROOT: ${{ github.workspace }}/.cache/X-Kernel
+      RUSTUP_TOOLCHAIN: 1.90
 
     steps:
       - name: Checkout X-Kernel Test Harness
@@ -68,6 +69,7 @@ jobs:
           rustup toolchain install 1.90 --profile minimal \
             --component rust-src --component llvm-tools \
             --component rustfmt --component clippy
+          rustup default 1.90
 
       - name: Prepare Rust toolchain for X-Kernel
         working-directory: .cache/X-Kernel
