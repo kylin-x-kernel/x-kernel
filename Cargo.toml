@@ -121,8 +121,8 @@ pci = { path = "drivers/pci" }
 vsock = { path = "drivers/vsock" }
 virtio = { path = "drivers/virtio" }
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
-fatfs = { path = "drivers/rust-fatfs", default-features = false }
-rsext4 = { path = "drivers/rsext4", default-features = false }
+fatfs = { path = "fs/fatfs", default-features = false }
+rsext4 = { path = "fs/rsext4", default-features = false }
 
 # util Crates
 macros = { path = "util/macros" }
