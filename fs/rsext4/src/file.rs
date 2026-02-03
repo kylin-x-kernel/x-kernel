@@ -1863,7 +1863,7 @@ pub fn write_file_with_ino<B: BlockDevice>(
                 return;
             }
 
-            let src_off = (write_start - offset) as u64;
+            let src_off = write_start - offset;
             let dst_off = (write_start - block_start) as usize;
             let len = write_end - write_start;
 
