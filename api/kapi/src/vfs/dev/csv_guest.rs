@@ -119,20 +119,33 @@ impl CsvGuestDevice {
         // Copy user data from userspace to kernel buffer
         // Legacy format: user_data (64) + mnonce (16) + hash (32) = 112 bytes
         // Extension format: user_data (64) + mnonce (16) + hash (32) + magic (16) + flags (4) = 132 bytes
-        // We copy the full legacy size first, then check for extension magic
+        // We copy the legacy size first, then check for extension magic if available
         let legacy_input_size = REPORT_USER_DATA_SIZE + REPORT_MNONCE_SIZE + SM3_HASH_BLOCK_SIZE;
         let ext_input_size = legacy_input_size + ATTESTATION_MAGIC_LEN + 4; // +4 for flags
 
-        // First copy the legacy portion
+        // Ensure the caller provided at least the legacy input size
+        if buf_len < legacy_input_size {
+            warn!(
+                "csv-guest: buffer too small for legacy attestation request: {} (min {})",
+                buf_len, legacy_input_size
+            );
+            return Err(KError::InvalidInput);
+        }
+
+        // Copy up to the available data, but never more than the extension input size
+        let copy_len = core::cmp::min(buf_len, ext_input_size);
         let user_slice =
-            unsafe { core::slice::from_raw_parts(user_addr as *const u8, ext_input_size) };
-        kernel_buf[..ext_input_size].copy_from_slice(user_slice);
+            unsafe { core::slice::from_raw_parts(user_addr as *const u8, copy_len) };
+        kernel_buf[..copy_len].copy_from_slice(user_slice);
 
         // Check if this is an extension-aware request by looking for the magic string
-        let magic_offset = legacy_input_size;
-        let is_ext_aware = &kernel_buf
-            [magic_offset..magic_offset + CSV_ATTESTATION_MAGIC_STRING.len()]
-            == CSV_ATTESTATION_MAGIC_STRING;
+        let mut is_ext_aware = false;
+        if buf_len >= ext_input_size {
+            let magic_offset = legacy_input_size;
+            is_ext_aware = &kernel_buf
+                [magic_offset..magic_offset + CSV_ATTESTATION_MAGIC_STRING.len()]
+                == CSV_ATTESTATION_MAGIC_STRING;
+        }
 
         if is_ext_aware {
             debug!("csv-guest: extension-aware attestation request detected");
