@@ -87,6 +87,7 @@ x86_csv = [
     "kfeat/vsock",
     "kapi/vsock",
     "kfeat/sev",
+    "kapi/sev",
     "dep:x86-csv",
     "pci",
 
