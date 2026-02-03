@@ -9,7 +9,7 @@ use alloc::vec;
 use event_listener::Event;
 use kerrno::{KError, KResult};
 use ksync::Mutex;
-use smoltcp::{
+use x_smoltcp::{
     iface::{SocketHandle, SocketSet},
     socket::{AnySocket, Socket},
     wire::IpAddress,

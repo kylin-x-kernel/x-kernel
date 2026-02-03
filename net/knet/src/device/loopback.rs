@@ -7,7 +7,7 @@ use alloc::vec;
 use core::task::Waker;
 
 use kpoll::PollSet;
-use smoltcp::{
+use x_smoltcp::{
     storage::{PacketBuffer, PacketMetadata},
     time::Instant,
     wire::IpAddress,
