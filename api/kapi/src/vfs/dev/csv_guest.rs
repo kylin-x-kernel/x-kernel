@@ -134,8 +134,7 @@ impl CsvGuestDevice {
 
         // Copy up to the available data, but never more than the extension input size
         let copy_len = core::cmp::min(buf_len, ext_input_size);
-        let user_slice =
-            unsafe { core::slice::from_raw_parts(user_addr as *const u8, copy_len) };
+        let user_slice = unsafe { core::slice::from_raw_parts(user_addr as *const u8, copy_len) };
         kernel_buf[..copy_len].copy_from_slice(user_slice);
 
         // Check if this is an extension-aware request by looking for the magic string
