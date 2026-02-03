@@ -1,5 +1,0 @@
-[gerrit]
-host=dev.futlab.me
-port=29418
-project=security/tee_dice_pta
-defaultbranch=master

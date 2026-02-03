@@ -1,5 +1,0 @@
-### 注意事项
-
-rust-dice中的get_rand函数依赖于各平台的实现，需要各平台独立实现get_rand函数并引入。
-
-rust-dice中提供一个弱引用的get_rand的default函数，在不同平台上，请再次依据平台实现get_rand函数。

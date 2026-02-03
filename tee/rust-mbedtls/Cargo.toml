@@ -1,3 +1,0 @@
-[workspace]
-members = ["mbedtls", "mbedtls-sys", "mbedtls-platform-support"]
-resolver = "2"

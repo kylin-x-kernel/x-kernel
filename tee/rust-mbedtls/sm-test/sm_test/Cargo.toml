@@ -1,7 +1,0 @@
-[package]
-name = "sm_test"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-mbedtls-sys-auto = { path = "/home/yuqidu/mbedtls/rust-mbedtls/rust-mbedtls/mbedtls-sys" }
