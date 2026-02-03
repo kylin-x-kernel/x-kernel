@@ -63,17 +63,23 @@ jobs:
       - name: Install filesystem tools
         run: sudo apt-get update && sudo apt-get install -y e2fsprogs
 
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.90 --profile minimal \
+            --component rust-src --component llvm-tools \
+            --component rustfmt --component clippy
+
       - name: Prepare Rust toolchain for X-Kernel
         working-directory: .cache/X-Kernel
         run: |
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            rustup target add x86_64-unknown-none
-            rustup target add x86_64-unknown-linux-musl || true
+            rustup target add --toolchain 1.90 x86_64-unknown-none
+            rustup target add --toolchain 1.90 x86_64-unknown-linux-musl || true
             rustup target list --installed | grep x86_64
           else
-            rustup target add aarch64-unknown-none
-            rustup target add aarch64-unknown-none-softfloat
-            rustup target add aarch64-unknown-linux-musl || true
+            rustup target add --toolchain 1.90 aarch64-unknown-none
+            rustup target add --toolchain 1.90 aarch64-unknown-none-softfloat
+            rustup target add --toolchain 1.90 aarch64-unknown-linux-musl || true
             rustup target list --installed | grep aarch64
           fi
 
