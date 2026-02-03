@@ -41,6 +41,11 @@ jobs:
         with:
           submodules: "recursive"
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
@@ -50,4 +55,7 @@ jobs:
           arch: ${{ matrix.arch }}
 
       - name: Clippy
-        run: RUSTFLAGS="--cfg unittest --check-cfg=cfg(unittest)" cargo +nightly clippy -p entry --target ${{ matrix.target }} -F qemu -- -D warnings -A stable-features
+        run: |
+          RUSTFLAGS="--cfg unittest --check-cfg=cfg(unittest)" \
+            cargo +nightly clippy -p entry --target ${{ matrix.target }} \
+            -F qemu -- -D warnings -A stable-features
