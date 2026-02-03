@@ -9,6 +9,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use core::{mem::MaybeUninit, slice};
+
 use extern_trait::extern_trait;
 use kerrno::KError;
 
