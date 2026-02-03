@@ -109,7 +109,7 @@ tee_raw_sys = { path = "tee/tee_raw_sys" }
 mbedtls = { version = "0.13.4", package = "mbedtls-smx", default-features = false, features = [
     "no_std_deps",
 ] }
-rust-dice = { version = "0.1.0", default-features = false }
+rust-dice = { version = "0.1.1", default-features = false }
 
 # Driver Crates
 driver_base = { path = "drivers/driver_base" }
