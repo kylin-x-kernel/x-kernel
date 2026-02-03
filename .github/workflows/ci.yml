@@ -82,22 +82,22 @@ jobs:
           export XKERNEL_COMMIT=$(git -C ../.cache/X-Kernel rev-parse HEAD)
           make ci-test run
 
-      - name: Dump suite logs
-        working-directory: starry-test-harness
-        if: always()
-        run: |
-          if [ -d logs/ci ]; then
-            echo "::group::CI Test Log (${{ matrix.arch }})"
-            find logs/ci -name 'suite.log' -print -exec cat {} \;
-            echo "::endgroup::"
-          else
-            echo "logs/ci not found"
-          fi
+      # - name: Dump suite logs
+      #   working-directory: starry-test-harness
+      #   if: always()
+      #   run: |
+      #     if [ -d logs/ci ]; then
+      #       echo "::group::CI Test Log (${{ matrix.arch }})"
+      #       find logs/ci -name 'suite.log' -print -exec cat {} \;
+      #       echo "::endgroup::"
+      #     else
+      #       echo "logs/ci not found"
+      #     fi
 
-      - name: Upload suite artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-logs-${{ matrix.arch }}-${{ github.run_id }}
-          path: starry-test-harness/logs/ci
-          if-no-files-found: warn
+      # - name: Upload suite artifacts
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ci-logs-${{ matrix.arch }}-${{ github.run_id }}
+      #     path: starry-test-harness/logs/ci
+      #     if-no-files-found: warn

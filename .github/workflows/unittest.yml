@@ -114,10 +114,10 @@ jobs:
           echo "::warning::Test status unclear - check logs"
           exit 1
 
-      - name: Upload test logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: unittest-logs-${{ matrix.arch }}-${{ github.run_id }}
-          path: unittest-output.log
-          if-no-files-found: warn
+      # - name: Upload test logs
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: unittest-logs-${{ matrix.arch }}-${{ github.run_id }}
+      #     path: unittest-output.log
+      #     if-no-files-found: warn
