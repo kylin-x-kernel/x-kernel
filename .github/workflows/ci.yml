@@ -48,6 +48,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: xkernel-ci-harness-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install musl toolchain for ${{ matrix.arch }}
         uses: arceos-org/setup-musl@v1

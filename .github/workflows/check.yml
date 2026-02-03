@@ -49,7 +49,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: xkernel-check-${{ matrix.arch }}
           cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: arceos-org/setup-musl@v1
         with:
