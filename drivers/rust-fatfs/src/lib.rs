@@ -18,7 +18,9 @@
 //! fn main() -> std::io::Result<()> {
 //!     # std::fs::copy("resources/fat16.img", "tmp/fat.img")?;
 //!     // Initialize a filesystem object
-//!     let img_file = std::fs::OpenOptions::new().read(true).write(true)
+//!     let img_file = std::fs::OpenOptions::new()
+//!         .read(true)
+//!         .write(true)
 //!         .open("tmp/fat.img")?;
 //!     let buf_stream = fscommon::BufStream::new(img_file);
 //!     let fs = fatfs::FileSystem::new(buf_stream, fatfs::FsOptions::new())?;
@@ -45,7 +47,10 @@
 #![crate_name = "fatfs"]
 #![cfg_attr(not(feature = "std"), no_std)]
 // Disable warnings to not clutter code with cfg too much
-#![cfg_attr(not(all(feature = "alloc", feature = "lfn")), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    not(all(feature = "alloc", feature = "lfn")),
+    allow(dead_code, unused_imports)
+)]
 #![warn(clippy::pedantic)]
 #![allow(
     clippy::module_name_repetitions,
@@ -72,10 +77,4 @@ mod io;
 mod table;
 mod time;
 
-pub use crate::dir::*;
-pub use crate::dir_entry::*;
-pub use crate::error::*;
-pub use crate::file::*;
-pub use crate::fs::*;
-pub use crate::io::*;
-pub use crate::time::*;
+pub use crate::{dir::*, dir_entry::*, error::*, file::*, fs::*, io::*, time::*};

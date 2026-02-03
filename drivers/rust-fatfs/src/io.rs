@@ -205,6 +205,7 @@ impl<T: std::io::Read> Read for StdIoWrapper<T> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.inner.read(buf)
     }
+
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
         self.inner.read_exact(buf)
     }

@@ -39,7 +39,9 @@ impl From<Error<std::io::Error>> for std::io::Error {
     fn from(error: Error<Self>) -> Self {
         match error {
             Error::Io(io_error) => io_error,
-            Error::UnexpectedEof | Error::NotEnoughSpace => Self::new(std::io::ErrorKind::UnexpectedEof, error),
+            Error::UnexpectedEof | Error::NotEnoughSpace => {
+                Self::new(std::io::ErrorKind::UnexpectedEof, error)
+            }
             Error::WriteZero => Self::new(std::io::ErrorKind::WriteZero, error),
             Error::InvalidInput
             | Error::InvalidFileNameLength
@@ -128,10 +130,16 @@ impl IoError for std::io::Error {
     }
 
     fn new_unexpected_eof_error() -> Self {
-        Self::new(std::io::ErrorKind::UnexpectedEof, "failed to fill whole buffer")
+        Self::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "failed to fill whole buffer",
+        )
     }
 
     fn new_write_zero_error() -> Self {
-        Self::new(std::io::ErrorKind::WriteZero, "failed to write whole buffer")
+        Self::new(
+            std::io::ErrorKind::WriteZero,
+            "failed to write whole buffer",
+        )
     }
 }

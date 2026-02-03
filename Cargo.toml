@@ -109,8 +109,6 @@ tee_raw_sys = { path = "tee/tee_raw_sys" }
 mbedtls = { git = "https://gitee.com/openkylin/rust-mbedtls.git", branch = "smx-mbedtls-sys-auto_v2.28.12", default-features = false, features = [
     "no_std_deps",
 ] }
-mbedtls-sys-auto = { git = "https://gitee.com/openkylin/rust-mbedtls.git", branch = "smx-mbedtls-sys-auto_v2.28.12" }
-mbedtls-platform-support = { git = "https://gitee.com/openkylin/rust-mbedtls.git", branch = "smx-mbedtls-sys-auto_v2.28.12" }
 dice = { git = "https://gitee.com/openkylin/rust-dice.git", default-features = false, branch = "x-kernel" }
 
 # Driver Crates
@@ -136,4 +134,4 @@ backtrace = { path = "util/backtrace" }
 kerrno = { path = "util/kerrno" }
 unittest = { path = "util/unittest" }
 kconfig-gen = { path = "xtask/kconfig-gen" }
-x-smoltcp = { version = "0.12.0",default-features = false }
+x-smoltcp = { version = "0.12.0", default-features = false }

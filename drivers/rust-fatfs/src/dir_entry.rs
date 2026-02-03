@@ -1,20 +1,21 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use alloc::string::String;
-use bitflags::bitflags;
-use core::char;
-use core::convert::TryInto;
-use core::fmt;
 #[cfg(not(feature = "unicode"))]
 use core::iter;
+use core::{char, convert::TryInto, fmt};
+
+use bitflags::bitflags;
 
 #[cfg(feature = "lfn")]
 use crate::dir::LfnBuffer;
-use crate::dir::{Dir, DirRawStream};
-use crate::error::{Error, IoError};
-use crate::file::File;
-use crate::fs::{FatType, FileSystem, OemCpConverter, ReadWriteSeek};
-use crate::io::{self, Read, ReadLeExt, Write, WriteLeExt};
-use crate::time::{Date, DateTime};
+use crate::{
+    dir::{Dir, DirRawStream},
+    error::{Error, IoError},
+    file::File,
+    fs::{FatType, FileSystem, OemCpConverter, ReadWriteSeek},
+    io::{self, Read, ReadLeExt, Write, WriteLeExt},
+    time::{Date, DateTime},
+};
 
 bitflags! {
     /// A FAT file attributes.
@@ -180,11 +181,7 @@ impl DirFileEntryData {
             0
         };
         let n = (u32::from(first_cluster_hi) << 16) | u32::from(self.first_cluster_lo);
-        if n == 0 {
-            None
-        } else {
-            Some(n)
-        }
+        if n == 0 { None } else { Some(n) }
     }
 
     pub(crate) fn set_first_cluster(&mut self, cluster: Option<u32>, fat_type: FatType) {
@@ -366,7 +363,10 @@ pub(crate) enum DirEntryData {
 }
 
 impl DirEntryData {
-    pub(crate) fn serialize<E: IoError, W: Write<Error = Error<E>>>(&self, wrt: &mut W) -> Result<(), Error<E>> {
+    pub(crate) fn serialize<E: IoError, W: Write<Error = Error<E>>>(
+        &self,
+        wrt: &mut W,
+    ) -> Result<(), Error<E>> {
         trace!("DirEntryData::serialize");
         match self {
             DirEntryData::File(file) => file.serialize(wrt),
@@ -374,7 +374,9 @@ impl DirEntryData {
         }
     }
 
-    pub(crate) fn deserialize<E: IoError, R: Read<Error = Error<E>>>(rdr: &mut R) -> Result<Self, Error<E>> {
+    pub(crate) fn deserialize<E: IoError, R: Read<Error = Error<E>>>(
+        rdr: &mut R,
+    ) -> Result<Self, Error<E>> {
         trace!("DirEntryData::deserialize");
         let mut name = [0; SFN_SIZE];
         match rdr.read_exact(&mut name) {
@@ -512,7 +514,10 @@ impl DirEntryEditor {
         }
     }
 
-    pub(crate) fn flush<IO: ReadWriteSeek, TP, OCC>(&mut self, fs: &FileSystem<IO, TP, OCC>) -> Result<(), IO::Error> {
+    pub(crate) fn flush<IO: ReadWriteSeek, TP, OCC>(
+        &mut self,
+        fs: &FileSystem<IO, TP, OCC>,
+    ) -> Result<(), IO::Error> {
         if self.dirty {
             self.write(fs)?;
             self.dirty = false;
@@ -520,7 +525,10 @@ impl DirEntryEditor {
         Ok(())
     }
 
-    fn write<IO: ReadWriteSeek, TP, OCC>(&self, fs: &FileSystem<IO, TP, OCC>) -> Result<(), IO::Error> {
+    fn write<IO: ReadWriteSeek, TP, OCC>(
+        &self,
+        fs: &FileSystem<IO, TP, OCC>,
+    ) -> Result<(), IO::Error> {
         let mut disk = fs.disk.borrow_mut();
         disk.seek(io::SeekFrom::Start(self.pos))?;
         self.data.serialize(&mut *disk)
@@ -585,7 +593,9 @@ impl<'a, IO: ReadWriteSeek, TP, OCC: OemCpConverter> DirEntry<'a, IO, TP, OCC> {
             }
         }
 
-        self.data.lowercase_name().to_string(&self.fs.options.oem_cp_converter)
+        self.data
+            .lowercase_name()
+            .to_string(&self.fs.options.oem_cp_converter)
     }
 
     /// Returns file attributes.
@@ -712,7 +722,8 @@ impl<'a, IO: ReadWriteSeek, TP, OCC: OemCpConverter> DirEntry<'a, IO, TP, OCC> {
             }
         }
 
-        self.short_name.eq_ignore_case(name, &self.fs.options.oem_cp_converter)
+        self.short_name
+            .eq_ignore_case(name, &self.fs.options.oem_cp_converter)
     }
 }
 
@@ -730,28 +741,49 @@ mod tests {
     #[test]
     fn short_name_with_ext() {
         let oem_cp_conv = LossyOemCpConverter::new();
-        assert_eq!(ShortName::new(b"FOO     BAR").to_string(&oem_cp_conv), "FOO.BAR");
-        assert_eq!(ShortName::new(b"LOOK AT M E").to_string(&oem_cp_conv), "LOOK AT.M E");
+        assert_eq!(
+            ShortName::new(b"FOO     BAR").to_string(&oem_cp_conv),
+            "FOO.BAR"
+        );
+        assert_eq!(
+            ShortName::new(b"LOOK AT M E").to_string(&oem_cp_conv),
+            "LOOK AT.M E"
+        );
         assert_eq!(
             ShortName::new(b"\x99OOK AT M \x99").to_string(&oem_cp_conv),
             "\u{FFFD}OOK AT.M \u{FFFD}"
         );
-        assert!(ShortName::new(b"\x99OOK AT M \x99").eq_ignore_case("\u{FFFD}OOK AT.M \u{FFFD}", &oem_cp_conv));
+        assert!(
+            ShortName::new(b"\x99OOK AT M \x99")
+                .eq_ignore_case("\u{FFFD}OOK AT.M \u{FFFD}", &oem_cp_conv)
+        );
     }
 
     #[test]
     fn short_name_without_ext() {
         let oem_cp_conv = LossyOemCpConverter::new();
-        assert_eq!(ShortName::new(b"FOO        ").to_string(&oem_cp_conv), "FOO");
-        assert_eq!(ShortName::new(b"LOOK AT    ").to_string(&oem_cp_conv), "LOOK AT");
+        assert_eq!(
+            ShortName::new(b"FOO        ").to_string(&oem_cp_conv),
+            "FOO"
+        );
+        assert_eq!(
+            ShortName::new(b"LOOK AT    ").to_string(&oem_cp_conv),
+            "LOOK AT"
+        );
     }
 
     #[test]
     fn short_name_eq_ignore_case() {
         let oem_cp_conv = LossyOemCpConverter::new();
         let raw_short_name: &[u8; SFN_SIZE] = b"\x99OOK AT M \x99";
-        assert!(ShortName::new(raw_short_name).eq_ignore_case("\u{FFFD}OOK AT.M \u{FFFD}", &oem_cp_conv));
-        assert!(ShortName::new(raw_short_name).eq_ignore_case("\u{FFFD}ook AT.m \u{FFFD}", &oem_cp_conv));
+        assert!(
+            ShortName::new(raw_short_name)
+                .eq_ignore_case("\u{FFFD}OOK AT.M \u{FFFD}", &oem_cp_conv)
+        );
+        assert!(
+            ShortName::new(raw_short_name)
+                .eq_ignore_case("\u{FFFD}ook AT.m \u{FFFD}", &oem_cp_conv)
+        );
     }
 
     #[test]
@@ -759,7 +791,9 @@ mod tests {
         let raw_short_name = [0x05; SFN_SIZE];
         assert_eq!(
             ShortName::new(&raw_short_name).as_bytes(),
-            [0xE5, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, b'.', 0x05, 0x05, 0x05]
+            [
+                0xE5, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, b'.', 0x05, 0x05, 0x05
+            ]
         );
     }
 
