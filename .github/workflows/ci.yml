@@ -72,6 +72,7 @@ jobs:
             rustup target list --installed | grep x86_64
           else
             rustup target add aarch64-unknown-none
+            rustup target add aarch64-unknown-none-softfloat
             rustup target add aarch64-unknown-linux-musl || true
             rustup target list --installed | grep aarch64
           fi
