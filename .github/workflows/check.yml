@@ -45,6 +45,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
