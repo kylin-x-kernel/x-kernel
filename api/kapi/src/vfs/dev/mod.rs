@@ -328,7 +328,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             fs.clone(),
             NodeType::CharacterDevice,
             DeviceId::new(30, 0),
-            Arc::new(csv_guest::CsvGuestDevice::new(),
+            Arc::new(csv_guest::CsvGuestDevice::new()),
         ),
     );
 
