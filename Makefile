@@ -22,6 +22,8 @@
 #     - `BUS`: Device bus type: mmio, pci
 #     - `MEM`: Memory size (default is 128M)
 #     - `DISK_IMG`: Path to the virtual disk image
+#     - `ROOTFS`: Rootfs provider (empty or "tee")
+#     - `ROOTFS_SIZE`: Rootfs image size (e.g. 64M)
 #     - `ACCEL`: Enable hardware acceleration (KVM on linux)
 #     - `QEMU_LOG`: Enable QEMU logging (log file is "qemu.log")
 #     - `NET_DUMP`: Enable network packet dump (log file is "netdump.pcap")
@@ -67,12 +69,18 @@ ACCEL ?= y
 ICOUNT ?= n
 QEMU_ARGS ?=
 
-DISK_IMG ?= disk.img
+DISK_IMG ?= $(PWD)/disk.img
 QEMU_LOG ?= n
 NET_DUMP ?= n
 NET_DEV ?= user
 VFIO_PCI ?=
 VHOST ?= n
+ROOTFS ?=
+ROOTFS_SIZE ?= 64M
+HELLO_PKG ?= hello_world
+HELLO_TARGET ?= x86_64-unknown-linux-musl
+HELLO_BIN ?= $(PWD)/target/$(HELLO_TARGET)/release/hello_world
+HELLO_CC ?= x86_64-linux-musl-gcc
 
 X86_GNU := n
 
@@ -191,11 +199,16 @@ rootfs:
 		curl -f -L $(ROOTFS_URL)/$(ROOTFS_IMG).xz -O; \
 		xz -d $(ROOTFS_IMG).xz; \
 	fi
-	@cp $(ROOTFS_IMG) disk.img
+	@cp $(ROOTFS_IMG) $(DISK_IMG)
 
-img:
-	@echo -e "\033[33mWARN: The 'img' target is deprecated. Please use 'rootfs' instead.\033[0m"
-	@$(MAKE) --no-print-directory rootfs
+rootfs_tee:
+	$(call run_cmd,RUSTFLAGS= CC=$(HELLO_CC) \
+		CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$(HELLO_CC) \
+		cargo build,-p $(HELLO_PKG) --release --target $(HELLO_TARGET))
+	$(call run_cmd,RUSTFLAGS= cargo run,\
+		-p crate_rootfs --release -- \
+		--image $(DISK_IMG) --size-bytes $(ROOTFS_SIZE) \
+		--src $(HELLO_BIN) --dest /hello)
 
 defconfig:
 	$(call defconfig)
