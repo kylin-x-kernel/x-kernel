@@ -337,7 +337,6 @@ pub trait tee_crypto_ops {
 /// 加密对象类型
 ///
 /// 对应类型 TEE_TYPE_*
-///
 #[allow(non_camel_case_types)]
 pub enum TeeCryptObj {
     rsa_keypair(rsa_keypair),
@@ -2779,11 +2778,10 @@ fn tee_init_ref_attribute(attr: &mut utee_attribute, attributeID: u32, buffer: &
 
 #[cfg(feature = "tee_test")]
 pub mod tests_tee_svc_cryp {
-    use zerocopy::IntoBytes;
-
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+    use zerocopy::IntoBytes;
 
     use super::*;
 

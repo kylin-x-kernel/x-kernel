@@ -1162,7 +1162,6 @@ pub mod tests_cryp {
     };
 
     use super::*;
-
     use crate::tee::tee_svc_cryp::{syscall_cryp_obj_alloc, syscall_obj_generate_key};
 
     test_fn! {

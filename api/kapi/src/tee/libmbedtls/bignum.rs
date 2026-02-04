@@ -189,11 +189,10 @@ pub fn crypto_bignum_clear(bn: &mut BigNum) {
 
 #[cfg(feature = "tee_test")]
 pub mod tests_tee_bignum {
-    use zerocopy::IntoBytes;
-
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
+    use zerocopy::IntoBytes;
 
     use super::*;
 

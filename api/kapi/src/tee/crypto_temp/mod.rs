@@ -2,7 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//
 // NOTE: !!!Temporary file for crypto operations.!!!
 //       !!! DO NOT ADD NEW FUNCTIONS TO THIS FILE !!!
 // TODO: Remove this file after the crypto module are implemented.

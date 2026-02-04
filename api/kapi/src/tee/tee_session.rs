@@ -11,8 +11,7 @@ use core::{any::Any, default::Default};
 
 use hashbrown::HashMap;
 use kcore::task::{AsThread, TeeSessionCtxTrait};
-use ksync::Mutex;
-use ksync::RwLock;
+use ksync::{Mutex, RwLock};
 use ktask::current;
 use slab::Slab;
 use tee_raw_sys::*;

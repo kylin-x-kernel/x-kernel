@@ -90,13 +90,13 @@ pub struct Value {
 
 #[derive(Encode, Decode)]
 pub enum ParamType {
-    None = 0,
-    ValueInput = 1,
-    ValueOutput = 2,
-    ValueInout = 3,
-    MemrefInput = 5,
+    None         = 0,
+    ValueInput   = 1,
+    ValueOutput  = 2,
+    ValueInout   = 3,
+    MemrefInput  = 5,
     MemrefOutput = 6,
-    MemrefInout = 7,
+    MemrefInout  = 7,
 }
 
 impl From<u32> for ParamType {

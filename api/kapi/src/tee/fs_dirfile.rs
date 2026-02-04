@@ -261,13 +261,13 @@ pub fn tee_fs_dirfile_open(
             Ok(()) => {}
         }
 
-        /* if (is_free(&dent)) */
+        // if (is_free(&dent))
         if is_free(&dent) {
             n += 1;
             continue;
         }
 
-        /* if (test_file(dirh, dent.file_number)) */
+        // if (test_file(dirh, dent.file_number))
         if test_file(&mut *dirh, dent.file_number as usize) {
             tee_debug!("clearing duplicate file number {}", dent.file_number);
             let mut zero_dent: DirFileEntry = unsafe { core::mem::zeroed() };
@@ -278,7 +278,7 @@ pub fn tee_fs_dirfile_open(
             continue;
         }
 
-        /* res = set_file(dirh, dent.file_number); */
+        // res = set_file(dirh, dent.file_number);
         if let Err(e) = set_file(&mut *dirh, dent.file_number as usize) {
             break Err(e);
         }

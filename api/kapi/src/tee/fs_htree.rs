@@ -3075,7 +3075,6 @@ pub mod tests_fs_htree {
     };
 
     use super::*;
-
     use crate::tee::common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT};
 
     test_fn! {

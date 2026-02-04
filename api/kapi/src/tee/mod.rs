@@ -10,8 +10,9 @@
 #![allow(missing_docs)]
 #![allow(non_upper_case_globals)]
 
-use cfg_if::cfg_if;
 use core::{arch::asm, ffi::c_uint};
+
+use cfg_if::cfg_if;
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
 use tee_raw_sys::{TEE_ERROR_NOT_SUPPORTED, TeeTime};
@@ -211,8 +212,8 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         ),
 
         Sysno::tee_scn_storage_obj_create => {
-            let len: usize = 0;
-            let obj_ptr: *mut c_uint = core::ptr::null_mut();
+            let mut len: usize = 0;
+            let mut obj_ptr: *mut c_uint = core::ptr::null_mut();
 
             cfg_if::cfg_if! {
                 if #[cfg(target_arch = "aarch64")] {

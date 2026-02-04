@@ -13,11 +13,11 @@ use crate::tee::TeeResult;
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HukSubkeyUsage {
-    Rpmb = 0,
-    Ssk = 1,
-    DieId = 2,
+    Rpmb     = 0,
+    Ssk      = 1,
+    DieId    = 2,
     UniqueTa = 3,
-    TaEnc = 4,
+    TaEnc    = 4,
 }
 
 pub const HUK_SUBKEY_MAX_LEN: usize = TEE_SHA256_HASH_SIZE;

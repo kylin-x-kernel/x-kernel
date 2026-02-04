@@ -4,7 +4,6 @@
 
 use alloc::{sync::Arc, vec::Vec};
 use core::ffi::c_int;
-use slab::Slab;
 
 use fs_ng_vfs::VfsError;
 use kcore::task::AsThread;
@@ -15,6 +14,7 @@ use ksync::RwLock;
 use ktask::current;
 use linux_raw_sys::general::*;
 use scope_local::scope_local;
+use slab::Slab;
 use tee_raw_sys::TEE_ERROR_GENERIC;
 
 use crate::{
