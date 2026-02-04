@@ -79,6 +79,8 @@ jobs:
 
       - name: 执行 ci-test (${{ matrix.arch }})
         working-directory: starry-test-harness
+        env:
+          BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/dev/null"
         run: |
           export XKERNEL_COMMIT=$(git -C ../.cache/X-Kernel rev-parse HEAD)
           make ci-test run
