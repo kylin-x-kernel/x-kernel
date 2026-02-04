@@ -81,6 +81,10 @@ jobs:
         working-directory: starry-test-harness
         env:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/dev/null"
+          CC_aarch64_unknown_none_softfloat: "${{ matrix.arch }}-linux-musl-gcc"
+          CFLAGS_aarch64_unknown_none_softfloat: "-nostdlib -ffreestanding"
+          CC_x86_64_unknown_none: "x86_64-linux-musl-gcc"
+          CFLAGS_x86_64_unknown_none: "-nostdlib -ffreestanding"
         run: |
           export XKERNEL_COMMIT=$(git -C ../.cache/X-Kernel rev-parse HEAD)
           make ci-test run
