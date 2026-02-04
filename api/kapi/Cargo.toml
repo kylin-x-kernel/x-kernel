@@ -22,13 +22,18 @@ dice = [
 ]
 tee = [
     "linux_sysno/tee",
+    "kalloc/tee",
     "dep:tee_raw_sys",
     "dep:bincode",
     "dep:uuid",
     "dep:hex",
+    "dep:rand_chacha",
+    "dep:mbedtls",
+    "dep:mbedtls-sys-auto",
 ]
 tee_test_mock_user_access = []
-tee_test = ["tee"]
+tee_test = ["tee", "tee_test_mock_user_access"]
+tee_cfg_memtag = []
 sev = []
 
 [dependencies]
@@ -38,6 +43,7 @@ platconfig.workspace = true
 unittest = { workspace = true }
 rust-dice = { workspace = true, optional = true }
 mbedtls = { workspace = true, optional = true }
+mbedtls-sys-auto = { workspace = true, optional = true }
 fbdevice.workspace = true
 kdriver.workspace = true
 ktypes.workspace = true
@@ -99,6 +105,10 @@ hex = { version = "0.4", default-features = false, optional = true, features = [
 ] }
 
 kcore.workspace = true
+
+subtle = { version = "2", default-features = false }
+static_assertions = "1.1.0"
+memoffset = { version = "0.9", default-features = false }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"

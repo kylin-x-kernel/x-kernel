@@ -1,0 +1,453 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+use alloc::{
+    boxed::Box,
+    collections::VecDeque,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
+use core::{default, fmt, fmt::Debug, ptr};
+
+use ksync::{Mutex, RwLock};
+use lazy_static::lazy_static;
+use tee_raw_sys::*;
+
+use super::{
+    TeeResult,
+    tee_ree_fs::{REE_FS_OPS, TeeFileOperations, tee_file_handle},
+    uuid::Uuid,
+};
+
+static POBJS_MUTEX: Mutex<()> = Mutex::new(());
+static POBJS_USAGE_MUTEX: Mutex<()> = Mutex::new(());
+// static POBJS: LazyInit<Arc<Mutex<VecDeque<tee_pobj>>>> = LazyInit::new();
+lazy_static! {
+    static ref POBJS: tee_pobjs = tee_pobjs::new();
+}
+
+#[repr(C)]
+pub struct tee_pobj {
+    pub refcnt: u32,
+    pub uuid: TEE_UUID,
+    pub obj_id: Box<[u8]>,
+    pub obj_id_len: u32,
+    pub flags: u32,
+    pub obj_info_usage: u32,
+    pub temporary: bool, // can be changed while creating == true
+    pub creating: bool,  // can only be changed with mutex held
+    pub fops: Option<&'static TeeFileOperations>, // Filesystem handling this object
+}
+
+impl Debug for tee_pobj {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let obj_id = String::from_utf8_lossy(&self.obj_id[..self.obj_id_len as usize]);
+        let uuid: Uuid = self.uuid.into();
+
+        write!(
+            f,
+            "tee_pobj{{refcnt: {:?}, uuid: {}, obj_id: {:?}, obj_id_len: {:?}, flags: {:#010X?}, \
+             obj_info_usage: {:010X?}, temporary: {:?}, creating: {:?}, fops: {:?}}}",
+            self.refcnt,
+            uuid,
+            obj_id,
+            self.obj_id_len,
+            self.flags,
+            self.obj_info_usage,
+            self.temporary,
+            self.creating,
+            self.fops.as_ref().map(|fops| fops.name).unwrap_or("None"),
+        )
+    }
+}
+
+impl default::Default for tee_pobj {
+    fn default() -> Self {
+        tee_pobj {
+            refcnt: 0,
+            uuid: TEE_UUID::default(),
+            obj_id: Box::new([]),
+            obj_id_len: 0,
+            flags: 0,
+            obj_info_usage: 0,
+            temporary: false,
+            creating: false,
+            fops: None,
+        }
+    }
+}
+
+impl tee_pobj {
+    /// Create a new tee_pobj
+    ///
+    /// # Arguments
+    /// * `uuid` - The UUID of the object
+    /// * `obj_id` - The object ID
+    /// * `obj_id_len` - The actual length of the object ID
+    /// * `flags` - The flags of the object
+    /// * `fops` - The reference to the TeeFileOperations struct
+    pub fn new(
+        uuid: TEE_UUID,
+        obj_id: &[u8],
+        obj_id_len: u32,
+        flags: u32,
+        fops: &'static TeeFileOperations,
+    ) -> Self {
+        Self {
+            refcnt: 1,
+            uuid,
+            obj_id: obj_id.to_vec().into_boxed_slice(),
+            obj_id_len,
+            flags,
+            obj_info_usage: 0,
+            temporary: false,
+            creating: false,
+            fops: Some(fops),
+        }
+    }
+
+    /// Check if the tee_pobj matches the given parameters
+    ///
+    /// # Arguments
+    /// * `uuid` - The UUID of the object
+    /// * `obj_id` - The object ID
+    /// * `obj_id_len` - The actual length of the object ID
+    /// * `fops` - The reference to the TeeFileOperations struct
+    pub fn matches(
+        &self,
+        uuid: &TEE_UUID,
+        obj_id: &[u8],
+        obj_id_len: u32,
+        fops: &Option<&'static TeeFileOperations>,
+    ) -> bool {
+        // info!("matches begin");
+        // check obj_id_len
+        if self.obj_id_len != obj_id_len {
+            return false;
+        }
+        // check obj_id
+        if self.obj_id[..obj_id_len as usize] != obj_id[..obj_id_len as usize] {
+            return false;
+        }
+        // check uuid
+        if self.uuid != *uuid {
+            return false;
+        }
+        // info!("matches fops with {:?}, {:?}", self.fops, fops);
+        // check fops, using ptr::eq
+        match (&self.fops, fops) {
+            (Some(a), Some(b)) => {
+                // info!("matches fops: {:p}, {:p}", *a as *const _, *b as *const _);
+                let result = ptr::eq(*a, *b);
+                // info!("matches fops result: {}", result);
+                result
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A collection of tee_pobjs
+///
+/// must ensure process safe and thread safe
+#[derive(Debug)]
+pub struct tee_pobjs {
+    inner: Arc<Mutex<VecDeque<Arc<RwLock<tee_pobj>>>>>,
+}
+
+impl tee_pobjs {
+    /// Create a new tee_pobjs
+    pub fn new() -> Self {
+        tee_pobjs {
+            inner: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Find a tee_pobj in the collection
+    ///
+    /// # Arguments
+    /// * `uuid` - The UUID of the object
+    /// * `obj_id` - The object ID
+    /// * `obj_id_len` - The actual length of the object ID
+    /// * `fops` - The reference to the TeeFileOperations struct
+    pub fn find_pobj(
+        &self,
+        uuid: &TEE_UUID,
+        obj_id: &[u8],
+        obj_id_len: u32,
+        fops: &Option<&'static TeeFileOperations>,
+    ) -> Option<Arc<RwLock<tee_pobj>>> {
+        let pobjs = self.inner.lock();
+        pobjs
+            .iter()
+            .find(|pobj_arc| {
+                let pobj_guard = pobj_arc.read();
+                pobj_guard.matches(uuid, obj_id, obj_id_len, fops)
+            })
+            .map(|pobj_arc| Arc::clone(pobj_arc))
+    }
+}
+
+/// Usage of the tee_pobj
+#[derive(PartialEq, Debug)]
+pub enum tee_pobj_usage {
+    TEE_POBJ_USAGE_OPEN = 0,
+    TEE_POBJ_USAGE_RENAME = 1,
+    TEE_POBJ_USAGE_CREATE = 2,
+    TEE_POBJ_USAGE_ENUM = 3,
+}
+
+/// Check if the tee_pobj needs usage lock
+///
+/// # Arguments
+/// * `obj` - The tee_pobj
+fn pobj_need_usage_lock(flags: u32) -> bool {
+    flags & (TEE_DATA_FLAG_SHARE_WRITE | TEE_DATA_FLAG_SHARE_READ) != 0
+}
+
+/// With usage lock
+///
+/// # Arguments
+/// * `obj` - The tee_pobj
+/// * `f` - The function to execute
+pub fn with_pobj_usage_lock<R, F>(flags: u32, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    if pobj_need_usage_lock(flags) {
+        let _guard = POBJS_USAGE_MUTEX.lock();
+        tee_debug!("with_pobj_usage_lock: POBJS_USAGE_MUTEX locked");
+        f()
+    } else {
+        tee_debug!("with_pobj_usage_lock: POBJS_USAGE_MUTEX not locked");
+        f()
+    }
+}
+
+fn tee_pobj_check_access(_oflags: u32, _nflags: u32) -> TeeResult {
+    Ok(())
+}
+
+/// Get a tee_pobj from the collection
+///
+/// # Arguments
+/// * `uuid` - The UUID of the object
+/// * `obj_id` - The object ID
+/// * `obj_id_len` - The actual length of the object ID
+/// * `flags` - The flags of the object
+/// * `usage` - The usage of the tee_pobj
+/// * `fops` - The reference to the TeeFileOperations struct
+///
+/// # Returns
+/// * The tee_pobj, can safe shared reference
+pub fn tee_pobj_get(
+    uuid: &TEE_UUID,
+    obj_id: &[u8],
+    obj_id_len: u32,
+    flags: u32,
+    usage: tee_pobj_usage,
+    fops: &'static TeeFileOperations,
+) -> TeeResult<Arc<RwLock<tee_pobj>>> {
+    // info!(
+    //     "tee_pobj_get: uuid: {:x?}, obj_id: {:x?}, obj_id_len: {}, flags: {}, usage: {:?}, fops: \
+    //      {:p}",
+    //     uuid, obj_id, obj_id_len, flags, usage, fops as *const _
+    // );
+    // lock the pobjs
+    if let Some(obj) = POBJS.find_pobj(uuid, obj_id, obj_id_len, &Some(fops)) {
+        let mut obj_guard = obj.write();
+
+        if usage == tee_pobj_usage::TEE_POBJ_USAGE_ENUM {
+            obj_guard.refcnt += 1;
+            return Ok(Arc::clone(&obj));
+        }
+
+        if obj_guard.creating
+            || (usage == tee_pobj_usage::TEE_POBJ_USAGE_CREATE
+                && (flags & TEE_DATA_FLAG_OVERWRITE) == 0)
+        {
+            return Err(TEE_ERROR_ACCESS_CONFLICT);
+        }
+
+        tee_pobj_check_access(obj_guard.flags, flags);
+        obj_guard.refcnt += 1;
+        return Ok(Arc::clone(&obj));
+    }
+
+    // new file
+    let mut obj = tee_pobj::default();
+    obj.refcnt = 1;
+    obj.uuid = *uuid;
+    obj.flags = flags;
+    obj.fops = Some(fops);
+
+    if usage == tee_pobj_usage::TEE_POBJ_USAGE_CREATE {
+        obj.temporary = true;
+        obj.creating = true;
+    }
+
+    // copy obj_id
+    obj.obj_id = obj_id[..obj_id_len as usize].to_vec().into_boxed_slice();
+    obj.obj_id_len = obj_id_len;
+
+    // add to pobjs
+    let mut pobjs = POBJS.inner.lock();
+    let pobj = Arc::new(RwLock::new(obj));
+    pobjs.push_back(pobj.clone());
+    return Ok(pobj);
+}
+
+pub fn tee_pobj_create_final(po: &mut tee_pobj) {
+    let _guard = POBJS_MUTEX.lock();
+    po.temporary = false;
+    po.creating = false;
+}
+
+/// Release a tee_pobj
+///
+/// if no reference to the tee_pobj, the tee_pobj will be removed from the collection POBJS.
+///
+/// # Arguments
+/// * `obj` - The tee_pobj
+/// # Returns
+/// * `TeeResult` - the result of the operation
+pub fn tee_pobj_release(obj: Arc<RwLock<tee_pobj>>) -> TeeResult {
+    let _guard = POBJS_MUTEX.lock();
+    let mut obj_guard = obj.write();
+    tee_debug!(
+        "tee_pobj_release: obj.refcnt from: {:?} to: {:?}",
+        obj_guard.refcnt,
+        obj_guard.refcnt - 1
+    );
+    obj_guard.refcnt -= 1;
+    if obj_guard.refcnt == 0 {
+        // remove the pobj from the collection POBJS
+        // use Arc::ptr_eq to compare the pointer address, find the corresponding Arc
+        let mut pobjs = POBJS.inner.lock();
+        pobjs.retain(|pobj_arc| !Arc::ptr_eq(pobj_arc, &obj));
+        // Arc will be released automatically when it leaves the scope (if the reference count is 0)
+        // Box will also be released, no need to manually call free
+    }
+    Ok(())
+}
+
+/// Rename a tee_pobj
+///
+/// # Arguments
+/// * `obj` - The tee_pobj
+/// * `obj_id` - The new object ID
+/// * `obj_id_len` - The actual length of the new object ID
+/// # Returns
+/// * `TeeResult` - the result of the operation
+pub fn tee_pobj_rename(obj: &mut tee_pobj, obj_id: &[u8], obj_id_len: u32) -> TeeResult {
+    let _guard = POBJS_MUTEX.lock();
+
+    if obj.refcnt != 1 {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+
+    // check obj_id_len is not greater than obj_id length
+    if obj_id_len as usize > obj_id.len() {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    obj.obj_id = obj_id[..obj_id_len as usize].to_vec().into_boxed_slice();
+    obj.obj_id_len = obj_id_len;
+    Ok(())
+}
+
+#[cfg(feature = "tee_test")]
+pub mod tests_tee_pobj {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::*;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_tee_pobj_default() {
+            let pobj = tee_pobj::default();
+            assert_eq!(pobj.obj_id_len, 0);
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_with_pobj_usage_lock() {
+            let mut pobj = tee_pobj::default();
+            let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || {
+                Ok(())
+            });
+            assert_eq!(result, Ok::<(), ()>(()));
+            // set flag
+            pobj.flags = TEE_DATA_FLAG_SHARE_WRITE;
+            let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || {
+                Ok(())
+            });
+            assert_eq!(result, Ok::<(), ()>(()));
+            // set flag
+            pobj.flags = TEE_DATA_FLAG_SHARE_READ;
+            let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || {
+                Ok(())
+            });
+            assert_eq!(result, Ok::<(), ()>(()));
+        }
+    }
+
+    test_fn! {
+        using TestResult;
+
+        fn test_tee_pobj_get() {
+            // 1. create a new pobj
+            let obj_id = [0x12, 0x34, 0x56, 0x78];
+            {
+                let result = tee_pobj_get(&TEE_UUID::default(), &obj_id, obj_id.len() as u32, 0, tee_pobj_usage::TEE_POBJ_USAGE_ENUM, &REE_FS_OPS);
+                assert_eq!(result.is_ok(), true);
+                // check VecQueue size
+                let mut pobjs = POBJS.inner.lock();
+                assert_eq!(pobjs.len(), 1);
+                // check pobj
+                let pobj = result.unwrap();
+                let pobj_guard = pobj.read();
+                assert_eq!(pobj_guard.obj_id, obj_id.to_vec().into_boxed_slice());
+                assert_eq!(pobj_guard.obj_id_len, obj_id.len() as u32);
+                assert_eq!(pobj_guard.flags, 0);
+                assert_eq!(pobj_guard.fops.unwrap() as *const TeeFileOperations, &REE_FS_OPS as *const TeeFileOperations);
+                let echo = (pobj_guard.fops.unwrap().echo)();
+                assert_eq!(echo, "TeeFileOperations->echo");
+            }
+            // 2. get the same pobj
+            {
+                let result = tee_pobj_get(&TEE_UUID::default(), &obj_id, obj_id.len() as u32, 0, tee_pobj_usage::TEE_POBJ_USAGE_ENUM, &REE_FS_OPS);
+                assert_eq!(result.is_ok(), true);
+                // check VecQueue size
+                let mut pobjs = POBJS.inner.lock();
+                assert_eq!(pobjs.len(), 1);
+                // check pobj
+                let pobj = result.unwrap();
+                let pobj_guard = pobj.read();
+                assert_eq!(pobj_guard.obj_id, obj_id.to_vec().into_boxed_slice());
+                assert_eq!(pobj_guard.obj_id_len, obj_id.len() as u32);
+                assert_eq!(pobj_guard.flags, 0);
+                assert_eq!(pobj_guard.fops.unwrap() as *const TeeFileOperations, &REE_FS_OPS as *const TeeFileOperations);
+                let echo = (pobj_guard.fops.unwrap().echo)();
+                assert_eq!(echo, "TeeFileOperations->echo");
+            }
+        }
+    }
+
+    tests_name! {
+        TEST_TEE_POBJ;
+        tee_pobj;
+        //------------------------
+        test_tee_pobj_default,
+        test_with_pobj_usage_lock,
+        test_tee_pobj_get,
+    }
+}

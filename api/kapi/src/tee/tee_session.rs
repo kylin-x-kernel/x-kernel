@@ -2,16 +2,25 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+};
 use core::{any::Any, default::Default};
 
 use hashbrown::HashMap;
 use kcore::task::{AsThread, TeeSessionCtxTrait};
+use ksync::Mutex;
 use ksync::RwLock;
 use ktask::current;
+use slab::Slab;
 use tee_raw_sys::*;
 
-use crate::tee::{TeeResult, tee_ta_manager::SessionIdentity};
+use crate::tee::{
+    TeeResult, tee_obj::tee_obj, tee_svc_cryp2::TeeCrypState, tee_svc_storage::tee_storage_enum,
+    tee_ta_manager::SessionIdentity, user_ta::user_ta_ctx, uuid::Uuid,
+};
 
 scope_local::scope_local! {
     /// Global TEE TA (Trusted Application) context shared across all sessions
@@ -33,6 +42,9 @@ pub struct TeeSessionCtx {
     pub cancel: bool,
     pub cancel_mask: bool,
     pub cancel_time: TeeTime,
+    pub objects: Slab<Arc<Mutex<tee_obj>>>,
+    pub storage_enums: Slab<Arc<Mutex<tee_storage_enum>>>,
+    pub cryp_state: Slab<Arc<Mutex<TeeCrypState>>>,
 }
 
 impl TeeSessionCtxTrait for TeeSessionCtx {
@@ -63,6 +75,9 @@ impl Default for TeeSessionCtx {
                 seconds: 0,
                 millis: 0,
             },
+            objects: Slab::new(),
+            storage_enums: Slab::new(),
+            cryp_state: Slab::new(),
         }
     }
 }
@@ -138,7 +153,7 @@ where
 /// TEE Trusted Application Context
 /// This structure holds the global state for TA
 /// All sessions in TA share this context
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct TeeTaCtx {
     /// Test-only field, used only in test builds
     #[cfg(any(test, feature = "tee_test"))]
@@ -148,6 +163,17 @@ pub struct TeeTaCtx {
     pub uuid: String,
 }
 
+impl Default for TeeTaCtx {
+    fn default() -> Self {
+        TeeTaCtx {
+            #[cfg(feature = "tee_test")]
+            for_test_only: 0,
+            session_dispatch_irq: 0,
+            open_sessions: HashMap::new(),
+            uuid: Uuid::default().to_string(),
+        }
+    }
+}
 /// Acquire a mutable reference to the global tee_ta_ctx
 /// Executes the provided closure with the mutable reference
 /// The closure pattern ensures proper lock release

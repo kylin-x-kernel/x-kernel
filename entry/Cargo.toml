@@ -20,7 +20,7 @@ kernel = [
     "kfeat/uspace",
 ]
 
-tee = ["kapi/tee", "kcore/tee", "kapi/tee_test"]
+tee = ["kapi/tee", "kcore/tee", "kapi/tee_test", "dep:mbedtls", "dep:mbedtls-sys-auto"]
 smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
 
@@ -114,7 +114,8 @@ kprocess.workspace = true
 ksignal.workspace = true
 kapi.workspace = true
 kcore.workspace = true
-
+mbedtls = { workspace = true, optional = true }
+mbedtls-sys-auto = { workspace = true, optional = true }
 unittest = { workspace = true, optional = true }
 
 [dependencies.aarch64-qemu-virt]

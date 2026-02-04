@@ -35,11 +35,21 @@ pub struct utee_params {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct utee_attribute {
     pub a: u64,
     pub b: u64,
     pub attribute_id: u32,
+}
+
+impl Debug for utee_attribute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.attribute_id & TEE_ATTR_FLAG_VALUE != 0 {
+            write!(f, "utee_attribute{{a: {:#010X?}, b: {:#010X?}, attribute_id: {:#010X?}}}", self.a, self.b, self.attribute_id)
+            } else {
+                write!(f, "utee_attribute{{a: {:#010X?}, b: {:#010X?}, attribute_id: {:#010X?}}}", self.a, self.b, self.attribute_id)
+            }
+    }
 }
 
 #[repr(C)]
@@ -51,7 +61,7 @@ pub struct utee_object_info {
     pub obj_usage: u32,
     pub data_size: u32,
     pub data_pos: u32,
-    pub dispatch_irq_flags: u32,
+    pub handle_flags: u32,
 }
 
 impl Debug for utee_object_info {
@@ -59,14 +69,14 @@ impl Debug for utee_object_info {
         write!(
             f,
             "obj_type: {:#010X}, obj_size: {:#010X}, max_obj_size: {:#010X}, obj_usage: {:#010X}, \
-             data_size: {:#010X}, data_pos: {:#010X}, dispatch_irq_flags: {:#010X}",
+             data_size: {:#010X}, data_pos: {:#010X}, handle_flags: {:#010X}",
             self.obj_type,
             self.obj_size,
             self.max_obj_size,
             self.obj_usage,
             self.data_size,
             self.data_pos,
-            self.dispatch_irq_flags
+            self.handle_flags
         )
     }
 }

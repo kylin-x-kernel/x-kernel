@@ -4,6 +4,7 @@
 
 use core::{ffi::*, fmt, fmt::Debug};
 
+use super::TEE_ATTR_FLAG_VALUE;
 use crate::libc_compat::size_t;
 
 #[allow(non_camel_case_types)]
@@ -95,7 +96,7 @@ pub struct TEE_ObjectInfo {
     pub objectUsage: u32,
     pub dataSize: usize,
     pub dataPosition: usize,
-    pub dispatch_irqFlags: u32,
+    pub handleFlags: u32,
 }
 
 impl Debug for TEE_ObjectInfo {
@@ -104,7 +105,7 @@ impl Debug for TEE_ObjectInfo {
             f,
             "TEE_ObjectInfo{{objectId: {:#010X?}, objectType: {:#010X?}, objectSize: {:#010X?}, \
              maxObjectSize: {:#010X?}, objectUsage: {:#010X?}, dataSize: {:#010X?}, dataPosition: \
-             {:#010X?}, dispatch_irqFlags: {:#010X?}}}",
+             {:#010X?}, handleFlags: {:#010X?}}}",
             self.objectId,
             self.objectType,
             self.objectSize,
@@ -112,7 +113,7 @@ impl Debug for TEE_ObjectInfo {
             self.objectUsage,
             self.dataSize,
             self.dataPosition,
-            self.dispatch_irqFlags
+            self.handleFlags
         )
     }
 }
@@ -139,18 +140,49 @@ impl Default for content {
     }
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone)]
 #[repr(C)]
 pub struct TEE_Attribute {
     pub attributeID: u32,
     pub content: content,
 }
 
+impl Default for TEE_Attribute {
+    fn default() -> Self {
+        TEE_Attribute {
+            attributeID: 0,
+            content: content::default(),
+        }
+    }
+}
+
+impl Debug for TEE_Attribute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unsafe {
+            if self.attributeID & TEE_ATTR_FLAG_VALUE != 0 {
+                write!(
+                    f,
+                    "TEE_Attribute{{attributeID: {:#010X?}, content: value: a={:#010X?}, \
+                     b={:#010X?}}}",
+                    self.attributeID, self.content.value.a, self.content.value.b
+                )
+            } else {
+                write!(
+                    f,
+                    "TEE_Attribute{{attributeID: {:#010X?}, content: memref: {:#010X?}, \
+                     {:#010X?}}}",
+                    self.attributeID, self.content.memref.buffer, self.content.memref.size
+                )
+            }
+        }
+    }
+}
+
 // Cryptographic Operations API
 
 // Reserve the GP 1.1.1 type
 #[repr(C)]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Debug)]
 pub enum TEE_OperationMode {
     TEE_MODE_ENCRYPT,
     TEE_MODE_DECRYPT,
@@ -170,7 +202,7 @@ pub struct TEE_OperationInfo {
     pub maxKeySize: u32,
     pub keySize: u32,
     pub requiredKeyUsage: u32,
-    pub dispatch_irqState: u32,
+    pub handleState: u32,
 }
 
 #[repr(C)]
@@ -186,7 +218,7 @@ pub struct TEE_OperationInfoMultiple {
     pub mode: u32,
     pub digestLength: u32,
     pub maxKeySize: u32,
-    pub dispatch_irqState: u32,
+    pub handleState: u32,
     pub operationState: u32,
     pub numberOfKeys: u32,
     pub keyInformation: *mut TEE_OperationInfoKey,
