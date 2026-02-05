@@ -2402,8 +2402,7 @@ pub fn syscall_cryp_obj_populate(
     let type_props = tee_svc_find_type_props(o.info.objectType).ok_or(TEE_ERROR_NOT_IMPLEMENTED)?;
 
     let attr_null: TEE_Attribute = TEE_Attribute::default();
-    let mut attrs: Box<[TEE_Attribute]> =
-        vec![attr_null; usr_attrs.len() as usize].into_boxed_slice();
+    let mut attrs: Box<[TEE_Attribute]> = vec![attr_null; usr_attrs.len()].into_boxed_slice();
     copy_in_attrs(&mut user_ta_ctx::default(), usr_attrs, &mut attrs)?;
 
     tee_svc_cryp_check_attr(attr_usage::ATTR_USAGE_POPULATE, type_props, &attrs)?;
