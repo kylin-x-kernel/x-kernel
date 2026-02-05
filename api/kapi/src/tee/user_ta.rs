@@ -7,10 +7,5 @@ use core::default::Default;
 /// user ta context
 /// NOTE: NEVER USE THIS STRUCT IN YOUR CODE
 #[repr(C)]
+#[derive(Default)]
 pub struct user_ta_ctx {}
-
-impl Default for user_ta_ctx {
-    fn default() -> Self {
-        Self {}
-    }
-}
