@@ -21,10 +21,6 @@ signal_trampoline:
 "
 );
 
-// x86_64 SysV ABI: stack must be 16-byte aligned before `call`,
-// so at handler entry (after pushing return/restorer) it should be %16 == 8.
-// Align the signal frame to 16 bytes on x86_64 to preserve this invariant.
-
 #[repr(C, align(16))]
 #[derive(Clone)]
 pub struct MContext {
