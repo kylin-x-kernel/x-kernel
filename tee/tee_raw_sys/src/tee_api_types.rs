@@ -140,20 +140,11 @@ impl Default for content {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 #[repr(C)]
 pub struct TEE_Attribute {
     pub attributeID: u32,
     pub content: content,
-}
-
-impl Default for TEE_Attribute {
-    fn default() -> Self {
-        TEE_Attribute {
-            attributeID: 0,
-            content: content::default(),
-        }
-    }
 }
 
 impl Debug for TEE_Attribute {
