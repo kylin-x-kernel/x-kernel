@@ -47,13 +47,13 @@ impl Debug for utee_attribute {
         if self.attribute_id & TEE_ATTR_FLAG_VALUE != 0 {
             write!(
                 f,
-                "utee_attribute{{a: {:#010X?}, b: {:#010X?}, attribute_id: {:#010X?}}}",
+                "utee_attribute::VALUE {{a: {:#010X?}, b: {:#010X?}, attribute_id: {:#010X?}}}",
                 self.a, self.b, self.attribute_id
             )
         } else {
             write!(
                 f,
-                "utee_attribute{{a: {:#010X?}, b: {:#010X?}, attribute_id: {:#010X?}}}",
+                "utee_attribute::REF {{a: {:#010X?}, b: {:#010X?}, attribute_id: {:#010X?}}}",
                 self.a, self.b, self.attribute_id
             )
         }
