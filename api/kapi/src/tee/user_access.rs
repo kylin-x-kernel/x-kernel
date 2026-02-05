@@ -12,7 +12,7 @@ use super::TeeResult;
 
 pub(crate) fn copy_from_user(kaddr: &mut [u8], uaddr: &[u8], len: size_t) -> TeeResult {
     cfg_if::cfg_if! {
-        if #[cfg(feature = "tee_test_mock_user_access")] {
+        if #[cfg(feature = "tee_test")] {
             kaddr[..len].copy_from_slice(&uaddr[..len]);
             Ok(())
         } else {
@@ -30,7 +30,7 @@ pub(crate) fn copy_from_user(kaddr: &mut [u8], uaddr: &[u8], len: size_t) -> Tee
 
 pub(crate) fn copy_to_user(uaddr: &mut [u8], kaddr: &[u8], _len: size_t) -> TeeResult {
     cfg_if::cfg_if! {
-        if #[cfg(feature = "tee_test_mock_user_access")] {
+        if #[cfg(feature = "tee_test")] {
             uaddr[.._len].copy_from_slice(&kaddr[.._len]);
             Ok(())
         } else {

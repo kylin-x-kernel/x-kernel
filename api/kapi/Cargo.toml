@@ -31,8 +31,7 @@ tee = [
     "dep:mbedtls",
     "dep:mbedtls-sys-auto",
 ]
-tee_test_mock_user_access = []
-tee_test = ["tee", "tee_test_mock_user_access"]
+tee_test = ["tee"]
 tee_cfg_memtag = []
 sev = []
 
