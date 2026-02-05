@@ -100,7 +100,14 @@ impl ThreadSignalManager {
                 };
                 drop(stack);
 
-                let aligned_sp = (sp - layout.size()) & !(layout.align() - 1);
+                // x86_64 SysV ABI: stack must be 16-byte aligned before `call`,
+                // so at handler entry (after pushing return/restorer) it should be %16 == 8.
+                // Align the signal frame to 16 bytes on x86_64 to preserve this invariant.
+                #[cfg(target_arch = "x86_64")]
+                let stack_align = 16usize;
+                #[cfg(not(target_arch = "x86_64"))]
+                let stack_align = layout.align();
+                let aligned_sp = (sp - layout.size()) & !(stack_align - 1);
 
                 let frame_ptr = aligned_sp as *mut SignalFrame;
                 if frame_ptr
