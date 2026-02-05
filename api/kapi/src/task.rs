@@ -189,10 +189,8 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         ktask::yield_now();
     }
     let head = thr.robust_list_head() as *const RobustListHead;
-    if !head.is_null()
-        && let Err(err) = exit_robust_list(head)
-    {
-        warn!("exit robust list failed: {err:?}");
+    if !head.is_null() {
+        let _ = exit_robust_list(head);
     }
 
     let process = &thr.proc_data.proc;
