@@ -22,8 +22,6 @@
 #     - `BUS`: Device bus type: mmio, pci
 #     - `MEM`: Memory size (default is 128M)
 #     - `DISK_IMG`: Path to the virtual disk image
-#     - `ROOTFS`: Rootfs provider (empty or "tee")
-#     - `ROOTFS_SIZE`: Rootfs image size (e.g. 64M)
 #     - `ACCEL`: Enable hardware acceleration (KVM on linux)
 #     - `QEMU_LOG`: Enable QEMU logging (log file is "qemu.log")
 #     - `NET_DUMP`: Enable network packet dump (log file is "netdump.pcap")
@@ -75,14 +73,9 @@ NET_DUMP ?= n
 NET_DEV ?= user
 VFIO_PCI ?=
 VHOST ?= n
-ROOTFS ?=
-ROOTFS_SIZE ?= 64M
-HELLO_PKG ?= hello_world
-HELLO_TARGET ?= x86_64-unknown-linux-musl
-HELLO_BIN ?= $(PWD)/target/$(HELLO_TARGET)/release/hello_world
-HELLO_CC ?= x86_64-linux-musl-gcc
 
-X86_GNU := n
+X86_GNU ?= n
+TEE ?= n
 
 # Network options
 IP ?= 10.0.2.15
@@ -91,6 +84,10 @@ GW ?= 10.0.2.2
 export MEMTRACK := n
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += kapi/memtrack
+endif
+
+ifeq ($(TEE), y)
+	APP_FEATURES += tee
 endif
 
 # App type
@@ -201,14 +198,8 @@ rootfs:
 	fi
 	@cp $(ROOTFS_IMG) $(DISK_IMG)
 
-rootfs_tee:
-	$(call run_cmd,RUSTFLAGS= CC=$(HELLO_CC) \
-		CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$(HELLO_CC) \
-		cargo build,-p $(HELLO_PKG) --release --target $(HELLO_TARGET))
-	$(call run_cmd,RUSTFLAGS= cargo run,\
-		-p crate_rootfs --release -- \
-		--image $(DISK_IMG) --size-bytes $(ROOTFS_SIZE) \
-		--src $(HELLO_BIN) --dest /hello)
+tee_build:
+	$(MAKE) -C tee_apps ARCH=$(ARCH)
 
 defconfig:
 	$(call defconfig)
@@ -217,6 +208,10 @@ oldconfig:
 	$(call oldconfig)
 
 build: $(OUT_DIR) $(FINAL_IMG)
+
+ifeq ($(TEE), y)
+build: tee_build
+endif
 
 disasm:
 	$(OBJDUMP) $(OUT_ELF) | less
@@ -270,7 +265,7 @@ clean: clean_c
 clean_c::
 	rm -rf $(app-objs)
 
-.PHONY: all defconfig oldconfig \
+.PHONY: all defconfig oldconfig tee \
 	build disasm run justrun debug \
 	clippy doc doc_check_missing fmt fmt_c unittest unittest_no_fail_fast \
 	disk_img clean clean_c

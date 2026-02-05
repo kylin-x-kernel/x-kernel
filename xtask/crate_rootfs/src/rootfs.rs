@@ -46,44 +46,26 @@ pub fn build_rootfs(args: Args) -> Result<(), String> {
 
     let mut fs = Ext4FileSystem::mount(&mut jbd).map_err(|e| format!("mount failed: {e}"))?;
 
-    let mut hello_data = Vec::new();
-    File::open(&args.src)
-        .map_err(|e| format!("failed to open source binary {}: {e}", args.src.display()))?
-        .read_to_end(&mut hello_data)
-        .map_err(|e| format!("failed to read hello binary: {e}"))?;
+    let mut created_paths = Vec::new();
 
-    let dest = if args.dest.starts_with('/') {
-        args.dest.clone()
-    } else {
-        format!("/{}", args.dest)
-    };
+    for item in &args.copies {
+        let data = read_file_bytes(&item.src)?;
+        let dest = normalize_dest(&item.dest);
 
-    let (inode_num, _inode) = mkfile_with_ino(&mut jbd, &mut fs, &dest, Some(&hello_data), None)
-        .ok_or_else(|| format!("failed to create file {dest} in ext4 image"))?;
+        let (inode_num, _inode) = mkfile_with_ino(&mut jbd, &mut fs, &dest, Some(&data), None)
+            .ok_or_else(|| format!("failed to create file {dest} in ext4 image"))?;
 
-    fs.modify_inode(&mut jbd, inode_num, |inode| {
-        inode.i_mode = Ext4Inode::S_IFREG | 0o755;
-    })
-    .map_err(|e| format!("chmod failed: {e}"))?;
-
-    let fallback_path = "/bin/hello";
-    if dest != fallback_path {
-        let (fallback_ino, _fallback_inode) = mkfile_with_ino(
-            &mut jbd,
-            &mut fs,
-            fallback_path,
-            Some(&hello_data),
-            None,
-        )
-        .ok_or_else(|| format!("failed to create file {fallback_path} in ext4 image"))?;
-        fs.modify_inode(&mut jbd, fallback_ino, |inode| {
+        fs.modify_inode(&mut jbd, inode_num, |inode| {
             inode.i_mode = Ext4Inode::S_IFREG | 0o755;
         })
         .map_err(|e| format!("chmod failed: {e}"))?;
+
+        created_paths.push(dest);
     }
 
-    verify_present(&mut fs, &mut jbd, &dest)?;
-    verify_present(&mut fs, &mut jbd, fallback_path)?;
+    for path in &created_paths {
+        verify_present(&mut fs, &mut jbd, path)?;
+    }
 
     fs.umount(&mut jbd)
         .map_err(|e| format!("umount failed: {e}"))?;
@@ -93,7 +75,7 @@ pub fn build_rootfs(args: Args) -> Result<(), String> {
 
     drop(jbd);
 
-    verify_persisted(&args, total_blocks, &dest, fallback_path)?;
+    verify_persisted(&args, total_blocks, &created_paths)?;
 
     Ok(())
 }
@@ -112,12 +94,7 @@ fn verify_present(
     Ok(())
 }
 
-fn verify_persisted(
-    args: &Args,
-    total_blocks: u64,
-    primary: &str,
-    fallback: &str,
-) -> Result<(), String> {
+fn verify_persisted(args: &Args, total_blocks: u64, paths: &[String]) -> Result<(), String> {
     let verify_file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -128,17 +105,13 @@ fn verify_persisted(
     let mut verify_fs =
         Ext4FileSystem::mount(&mut verify_jbd).map_err(|e| format!("verify mount failed: {e}"))?;
 
-    if get_inode_with_num(&mut verify_fs, &mut verify_jbd, primary)
-        .map_err(|e| format!("verify after umount {primary} failed: {e}"))?
-        .is_none()
-    {
-        return Err(format!("verify after umount {primary} failed: not found"));
-    }
-    if get_inode_with_num(&mut verify_fs, &mut verify_jbd, fallback)
-        .map_err(|e| format!("verify after umount {fallback} failed: {e}"))?
-        .is_none()
-    {
-        return Err(format!("verify after umount {fallback} failed: not found"));
+    for path in paths {
+        if get_inode_with_num(&mut verify_fs, &mut verify_jbd, path)
+            .map_err(|e| format!("verify after umount {path} failed: {e}"))?
+            .is_none()
+        {
+            return Err(format!("verify after umount {path} failed: not found"));
+        }
     }
 
     verify_fs
@@ -148,4 +121,21 @@ fn verify_persisted(
         .cantflush()
         .map_err(|e| format!("verify flush failed: {e}"))?;
     Ok(())
+}
+
+fn read_file_bytes(path: &std::path::PathBuf) -> Result<Vec<u8>, String> {
+    let mut data = Vec::new();
+    File::open(path)
+        .map_err(|e| format!("failed to open source binary {}: {e}", path.display()))?
+        .read_to_end(&mut data)
+        .map_err(|e| format!("failed to read source binary {}: {e}", path.display()))?;
+    Ok(data)
+}
+
+fn normalize_dest(dest: &str) -> String {
+    if dest.starts_with('/') {
+        dest.to_string()
+    } else {
+        format!("/{}", dest)
+    }
 }

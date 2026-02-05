@@ -40,7 +40,6 @@ qemu = [
     "kfeat/fs-times",
     "kapi/dev-log",
     "pci",
-    "tee",
 ]
 
 # aarch64-qemu-virt platform

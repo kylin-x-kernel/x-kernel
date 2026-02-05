@@ -18,7 +18,11 @@ mod unittest_simple;
 #[cfg(not(feature = "unittest"))]
 mod entry;
 
-pub const CMDLINE: &[&str] = &["/hello"];
+#[cfg(feature = "tee")]
+pub const CMDLINE: &[&str] = &["/tee_init"];
+
+#[cfg(not(feature = "tee"))]
+pub const CMDLINE: &[&str] = &["/bin/sh", "-c", include_str!("init.sh")];
 
 #[cfg(not(feature = "unittest"))]
 #[unsafe(no_mangle)]

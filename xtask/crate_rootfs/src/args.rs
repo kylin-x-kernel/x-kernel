@@ -23,9 +23,28 @@ fn parse_size(input: &str) -> Result<u64, String> {
     Ok(num.saturating_mul(multiplier))
 }
 
+#[derive(Debug, Clone)]
+pub struct CopySpec {
+    pub src: PathBuf,
+    pub dest: String,
+}
+
+fn parse_copy_spec(input: &str) -> Result<CopySpec, String> {
+    let (src, dest) = input
+        .split_once(':')
+        .ok_or_else(|| "copy spec must be in SRC:DEST format".to_string())?;
+    if src.trim().is_empty() || dest.trim().is_empty() {
+        return Err("copy spec must be in SRC:DEST format".to_string());
+    }
+    Ok(CopySpec {
+        src: PathBuf::from(src),
+        dest: dest.to_string(),
+    })
+}
+
 /// Command line arguments for rootfs creation.
 #[derive(Debug, Parser)]
-#[command(author, version, about = "Create an ext4 rootfs image with hello binary")]
+#[command(author, version, about = "Create an ext4 rootfs image")]
 pub struct Args {
     /// Output image path.
     #[arg(long, default_value = "disk.img")]
@@ -35,13 +54,9 @@ pub struct Args {
     #[arg(long, default_value = "64M", value_parser = parse_size)]
     pub size_bytes: u64,
 
-    /// Path to the source binary to copy into the image.
-    #[arg(long)]
-    pub src: PathBuf,
-
-    /// Destination path inside the image.
-    #[arg(long, default_value = "/hello")]
-    pub dest: String,
+    /// Multiple copy specs in SRC:DEST format. Can be provided multiple times.
+    #[arg(long = "copy", value_parser = parse_copy_spec)]
+    pub copies: Vec<CopySpec>,
 }
 
 /// Parse CLI args into a structured Args value.
