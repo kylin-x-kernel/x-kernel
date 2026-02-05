@@ -206,7 +206,7 @@ where
     A: EccKeyPairCanSign + crypto_ecc_keypair_ops_sign_impl,
 {
     fn sign(&mut self, algo: u32, msg: &[u8], sig: &mut [u8], sig_len: &mut usize) {
-        A::sign_impl( self.inner, algo, msg, sig, sig_len);
+        A::sign_impl(self.inner, algo, msg, sig, sig_len);
     }
 }
 
