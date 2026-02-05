@@ -17,10 +17,6 @@ build_args := \
   $(build_args-$(MODE)) \
   $(verbose)
 
-ifneq ($(filter %.json,$(TARGET)),)
-  build_args += -Z build-std=core,alloc,compiler_builtins -Z build-std-features=compiler-builtins-mem
-endif
-
 RUSTFLAGS_LINK_ARGS := -C link-arg=-T$(LD_SCRIPT) -C link-arg=-no-pie -C link-arg=-znostart-stop-gc
 RUSTDOCFLAGS := -Z unstable-options --enable-index-page -D rustdoc::broken_intra_doc_links
 

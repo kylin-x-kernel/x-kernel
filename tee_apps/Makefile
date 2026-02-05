@@ -1,8 +1,5 @@
-ARCH ?= aarch64
-
 ROOT_DIR := $(abspath ..)
 TARGET_DIR ?= $(ROOT_DIR)/target
-DISK_IMG ?= $(ROOT_DIR)/disk.img
 ROOTFS_SIZE ?= 64M
 
 APP_DIRS := $(patsubst %/Cargo.toml,%,$(wildcard */Cargo.toml))

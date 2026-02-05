@@ -3,7 +3,7 @@
 include scripts/make/cargo.mk
 
 rust_package := $(shell cat $(APP)/Cargo.toml | sed -n 's/^name = "\([a-z0-9A-Z_\-]*\)"/\1/p')
-rust_elf := $(TARGET_DIR)/$(TARGET_DIR_NAME)/$(MODE)/$(rust_package)
+rust_elf := $(TARGET_DIR)/$(TARGET)/$(MODE)/$(rust_package)
 
 ifneq ($(filter $(MAKECMDGOALS),doc doc_check_missing),)
   # run `make doc`
