@@ -75,7 +75,6 @@ VFIO_PCI ?=
 VHOST ?= n
 
 X86_GNU ?= n
-TEE ?= n
 
 # Network options
 IP ?= 10.0.2.15
@@ -84,10 +83,6 @@ GW ?= 10.0.2.2
 export MEMTRACK := n
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += kapi/memtrack
-endif
-
-ifeq ($(TEE), y)
-	APP_FEATURES += tee
 endif
 
 # App type
@@ -198,7 +193,7 @@ rootfs:
 	fi
 	@cp $(ROOTFS_IMG) $(DISK_IMG)
 
-tee_build:
+teefs:
 	$(MAKE) -C tee_apps ARCH=$(ARCH)
 
 defconfig:
@@ -208,10 +203,6 @@ oldconfig:
 	$(call oldconfig)
 
 build: $(OUT_DIR) $(FINAL_IMG)
-
-ifeq ($(TEE), y)
-build: tee_build
-endif
 
 disasm:
 	$(OBJDUMP) $(OUT_ELF) | less
@@ -265,7 +256,7 @@ clean: clean_c
 clean_c::
 	rm -rf $(app-objs)
 
-.PHONY: all defconfig oldconfig tee \
+.PHONY: all defconfig oldconfig \
 	build disasm run justrun debug \
 	clippy doc doc_check_missing fmt fmt_c unittest unittest_no_fail_fast \
 	disk_img clean clean_c

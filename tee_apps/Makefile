@@ -6,7 +6,6 @@ DISK_IMG ?= $(ROOT_DIR)/disk.img
 ROOTFS_SIZE ?= 64M
 
 APP_DIRS := $(patsubst %/Cargo.toml,%,$(wildcard */Cargo.toml))
-TEE_INIT_APPS := $(shell printf '/%s,' $(APP_DIRS) | sed 's/,$$//')
 
 ifeq ($(ARCH), aarch64)
   TARGET := aarch64-unknown-linux-musl
@@ -19,8 +18,12 @@ else
 endif
 
 APP_NAMES := $(foreach app,$(APP_DIRS),$(shell sed -n 's/^name *= *"\(.*\)"/\1/p' $(app)/Cargo.toml | head -n 1))
+SH_APP := sh
+TEE_APP_NAMES := $(filter-out $(SH_APP),$(APP_NAMES))
+TEE_INIT_APPS := $(shell printf '/tee/%s,' $(TEE_APP_NAMES) | sed 's/,$$//')
 APP_BINS := $(foreach name,$(APP_NAMES),$(TARGET_DIR)/$(TARGET)/release/$(name))
-COPY_ARGS := $(foreach name,$(APP_NAMES),--copy $(TARGET_DIR)/$(TARGET)/release/$(name):/$(name))
+COPY_ARGS := --copy $(TARGET_DIR)/$(TARGET)/release/$(SH_APP):/bin/$(SH_APP) \
+$(foreach name,$(TEE_APP_NAMES),--copy $(TARGET_DIR)/$(TARGET)/release/$(name):/tee/$(name))
 
 TARGET_UPPER := $(shell echo $(TARGET) | tr a-z- A-Z_)
 LINKER_ENV := CARGO_TARGET_$(TARGET_UPPER)_LINKER
@@ -32,7 +35,7 @@ tee_apps:
 	@set -e; \
 	for app in $(APP_DIRS); do \
 		echo "==> Building $$app ($(TARGET))"; \
-		if [ "$$app" = "tee_init" ]; then \
+		if [ "$$app" = "$(SH_APP)" ]; then \
 			TEE_INIT_APPS="$(TEE_INIT_APPS)" $(CARGO_ENV) \
 				$(CARGO_BUILD) --manifest-path $$app/Cargo.toml; \
 		else \

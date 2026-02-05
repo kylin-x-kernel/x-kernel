@@ -26,11 +26,10 @@ fn main() {
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .filter(|s| *s != "/tee_init")
         .map(|s| s.to_string())
         .collect();
 
-    let mut children: Vec<(String, Child)> = apps
+    let children: Vec<(String, Child)> = apps
         .iter()
         .filter_map(|path| spawn_app(path).map(|child| (path.to_string(), child)))
         .collect();
