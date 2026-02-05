@@ -104,6 +104,7 @@ pub fn tee_obj_add(mut obj: tee_obj) -> TeeResult<tee_obj_id_type> {
         obj.info.objectId = id as u32;
 
         // 创建 Arc 并插入
+        #[allow(clippy::arc_with_non_send_sync)]
         let arc_obj = Arc::new(Mutex::new(obj));
         let inserted_id = vacant.insert(arc_obj);
         tee_debug!("tee_obj_add: id: {}", id);
@@ -115,7 +116,7 @@ pub fn tee_obj_add(mut obj: tee_obj) -> TeeResult<tee_obj_id_type> {
 pub fn tee_obj_get(obj_id: tee_obj_id_type) -> TeeResult<Arc<Mutex<tee_obj>>> {
     let obj_id = obj_outer_to_inner(obj_id);
     with_tee_session_ctx(|ctx| match ctx.objects.get(obj_id as _) {
-        Some(obj) => Ok(Arc::clone(&obj)),
+        Some(obj) => Ok(Arc::clone(obj)),
         None => Err(TEE_ERROR_ITEM_NOT_FOUND),
     })
 }

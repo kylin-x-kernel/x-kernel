@@ -672,30 +672,30 @@ pub fn syscall_cryp_state_alloc(
     // 判断密钥对象是否存在，并取出密钥对象
     let mut o1_ok = false;
     let mut o2_ok = false;
-    if let Some(key1) = key1 {
-        if let Ok(obj1_arc) = tee_obj_get(key1 as tee_obj_id_type) {
-            o1_ok = true;
-            let mut o1 = obj1_arc.lock();
-            if o1.busy {
-                return Err(TEE_ERROR_BUSY);
-            }
-            o1.busy = true;
-            cs.key1 = Some(o1.info.objectId);
-            tee_svc_cryp_check_key_type(&*o1, algo, mode)?;
+    if let Some(key1) = key1
+        && let Ok(obj1_arc) = tee_obj_get(key1 as tee_obj_id_type)
+    {
+        o1_ok = true;
+        let mut o1 = obj1_arc.lock();
+        if o1.busy {
+            return Err(TEE_ERROR_BUSY);
         }
+        o1.busy = true;
+        cs.key1 = Some(o1.info.objectId);
+        tee_svc_cryp_check_key_type(&o1, algo, mode)?;
     }
 
-    if let Some(key2) = key2 {
-        if let Ok(obj2_arc) = tee_obj_get(key2 as tee_obj_id_type) {
-            o2_ok = true;
-            let mut o2 = obj2_arc.lock();
-            if o2.busy {
-                return Err(TEE_ERROR_BUSY);
-            }
-            o2.busy = true;
-            cs.key2 = Some(o2.info.objectId);
-            tee_svc_cryp_check_key_type(&*o2, algo, mode)?;
+    if let Some(key2) = key2
+        && let Ok(obj2_arc) = tee_obj_get(key2 as tee_obj_id_type)
+    {
+        o2_ok = true;
+        let mut o2 = obj2_arc.lock();
+        if o2.busy {
+            return Err(TEE_ERROR_BUSY);
         }
+        o2.busy = true;
+        cs.key2 = Some(o2.info.objectId);
+        tee_svc_cryp_check_key_type(&o2, algo, mode)?;
     }
 
     // 判断密钥是否符合算法要求
@@ -787,7 +787,7 @@ pub fn syscall_cryp_state_free(id: u32) -> TeeResult {
 // 根据id获取一个TeeCrypState
 pub fn tee_cryp_state_get(id: u32) -> TeeResult<Arc<Mutex<TeeCrypState>>> {
     with_tee_session_ctx(|ctx| match ctx.cryp_state.get(id as _) {
-        Some(cs) => Ok(Arc::clone(&cs)),
+        Some(cs) => Ok(Arc::clone(cs)),
         None => Err(TEE_ERROR_ITEM_NOT_FOUND),
     })
 }
@@ -797,10 +797,10 @@ fn cryp_state_free(id: u32) -> TeeResult {
     with_tee_session_ctx_mut(|ctx| {
         if let Some(cs) = ctx.cryp_state.try_remove(id as usize) {
             tee_debug!("Remove cryp state {}", id);
-            return Ok(());
+            Ok(())
         } else {
             tee_debug!("Remove cryp state failed");
-            return Err(TEE_ERROR_BAD_STATE);
+            Err(TEE_ERROR_BAD_STATE)
         }
     })?;
     Ok(())
@@ -831,9 +831,7 @@ pub fn syscall_hash_init(id: u32) -> TeeResult {
                 Err(TEE_ERROR_BAD_STATE)
             }
         }
-        _ => {
-            return Err(TEE_ERROR_BAD_PARAMETERS);
-        }
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 
@@ -853,9 +851,7 @@ pub fn syscall_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
     match tee_alg_get_class(algo) {
         TEE_OPERATION_DIGEST => crypto_hash_update(cs.clone(), chunk),
         TEE_OPERATION_MAC => crypto_mac_update(cs.clone(), chunk),
-        _ => {
-            return Err(TEE_ERROR_BAD_PARAMETERS);
-        }
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 
@@ -881,10 +877,10 @@ pub fn syscall_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<u
                 return Err(TEE_ERROR_SHORT_BUFFER);
             }
 
-            if chunk.len() != 0 {
+            if !chunk.is_empty() {
                 crypto_hash_update(cs.clone(), chunk)?;
             }
-            return crypto_hash_final(cs.clone(), hash);
+            crypto_hash_final(cs.clone(), hash)
         }
         TEE_OPERATION_MAC => {
             tee_alg_get_digest_size(algo, &mut hash_size)?;
@@ -892,14 +888,12 @@ pub fn syscall_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<u
                 return Err(TEE_ERROR_SHORT_BUFFER);
             }
 
-            if chunk.len() != 0 {
+            if !chunk.is_empty() {
                 crypto_mac_update(cs.clone(), chunk)?;
             }
-            return crypto_mac_final(cs.clone(), hash);
+            crypto_mac_final(cs.clone(), hash)
         }
-        _ => {
-            return Err(TEE_ERROR_BAD_PARAMETERS);
-        }
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 

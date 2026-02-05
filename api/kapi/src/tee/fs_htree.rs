@@ -24,7 +24,7 @@ use super::utee_defines::{TEE_AES_BLOCK_SIZE, TEE_SHA256_HASH_SIZE};
 use crate::tee::{
     TeeResult,
     common::file_ops::FileVariant,
-    crypto_temp::crypto_temp::{
+    crypto_temp::crypto_hash_temp::{
         crypto_hash_alloc_ctx, crypto_hash_final, crypto_hash_init, crypto_hash_update,
     },
     rng_software::crypto_rng_read,
@@ -482,11 +482,11 @@ pub fn calc_node(
     let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
     if node.parent.is_some() {
-        calc_node_hash_with_type(TEE_FS_HTREE_HASH_ALG, &node, None, &mut digest)?;
+        calc_node_hash_with_type(TEE_FS_HTREE_HASH_ALG, node, None, &mut digest)?;
     } else {
         calc_node_hash_with_type(
             TEE_FS_HTREE_HASH_ALG,
-            &node,
+            node,
             Some(&ht_data.imeta.meta),
             &mut digest,
         )?;
@@ -617,7 +617,7 @@ where
     }
 
     // 回调当前节点
-    let _res = cb(tee_fs_htree, node, fd.as_deref_mut());
+    let _res = cb(tee_fs_htree, node, fd);
 
     Ok(())
 }
@@ -846,14 +846,14 @@ fn htree_sync_node_to_storage(
     }
     let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-    calc_node_hash_with_type(TEE_FS_HTREE_HASH_ALG, &node, meta, &mut digest)?;
+    calc_node_hash_with_type(TEE_FS_HTREE_HASH_ALG, node, meta, &mut digest)?;
 
     node.node.hash.copy_from_slice(&digest);
 
     node.dirty = false;
     node.block_updated = false;
 
-    rpc_write_node(storage, node.id, vers, &mut node.node)?;
+    rpc_write_node(storage, node.id, vers, &node.node)?;
     Ok(())
 }
 
@@ -876,7 +876,7 @@ fn create_cipher<M: Operation>(
             key_bits as u32,
         )
         .map_err(|_| TEE_ERROR_NOT_SUPPORTED),
-        _ => return Err(TEE_ERROR_NOT_SUPPORTED),
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
 }
 
@@ -994,7 +994,7 @@ fn authenc_init_decrypt(
         head,
         hex::encode(iv),
         ni_is_some,
-        root_hash.map(|hash| hex::encode(hash)),
+        root_hash.map(hex::encode),
     );
     authenc_init_core(fek, head, iv, ni_is_some, root_hash)
 }
@@ -1030,7 +1030,7 @@ fn authenc_init_encrypt(
         head,
         hex::encode(iv),
         ni_is_some,
-        root_hash.map(|hash| hex::encode(hash)),
+        root_hash.map(hex::encode),
     );
     authenc_init_core(fek, head, iv, ni_is_some, root_hash)
 }
@@ -1113,9 +1113,9 @@ pub fn authenc_encrypt_final(
 
     tee_debug!(
         "authenc_encrypt_final: tag: {:?}, crypt: {:?}, plain: {:?}",
-        slice_fmt(&tag),
-        slice_fmt(&crypt),
-        slice_fmt(&plain),
+        slice_fmt(tag),
+        slice_fmt(crypt),
+        slice_fmt(plain),
     );
     Ok(())
 }
@@ -1139,7 +1139,7 @@ pub fn update_root(ht: &mut TeeFsHtree) -> TeeResult {
 
     let ptr = &mut ht.data.imeta as *mut _ as *mut u8;
     unsafe {
-        let slice = core::slice::from_raw_parts_mut(ptr, size_of_val(&mut ht.data.imeta));
+        let slice = core::slice::from_raw_parts_mut(ptr, size_of_val(&ht.data.imeta));
         authenc_encrypt_final(
             cipher,
             &mut ht.data.head.tag,
@@ -1419,7 +1419,7 @@ pub fn init_head_from_data(
                 hex::encode(target_hash)
             );
             if node_ref.hash == target_hash {
-                let _head = rpc_read_head(storage, idx, &mut ht.data.head).inspect_err(|e| {
+                rpc_read_head(storage, idx, &mut ht.data.head).inspect_err(|e| {
                     error!("rpc_read_head error! {:X?}", e);
                 })?;
                 break;
@@ -1431,13 +1431,13 @@ pub fn init_head_from_data(
         }
     } else {
         let mut heads = [TeeFsHtreeImage::default(); 2];
-        for idx in 0..2 {
+        for (idx, head) in heads.iter_mut().enumerate() {
             // Read version idx (0 or 1) of the head, consistent with C implementation
-            rpc_read_head(storage, idx as u8, &mut heads[idx])?;
+            rpc_read_head(storage, idx as u8, head)?;
             tee_debug!(
                 "init_head_from_data: read head[{}]: counter={}",
                 idx,
-                heads[idx].counter
+                head.counter
             );
         }
 
@@ -1540,7 +1540,7 @@ pub fn verify_root(ht: &mut TeeFsHtree) -> TeeResult {
 
     let ptr = &mut ht.data.imeta as *mut _ as *mut u8;
     unsafe {
-        let slice = core::slice::from_raw_parts_mut(ptr, size_of_val(&mut ht.data.imeta));
+        let slice = core::slice::from_raw_parts_mut(ptr, size_of_val(&ht.data.imeta));
         authenc_decrypt_final(cipher, &ht.data.head.tag, &ht.data.head.imeta, slice)?;
     }
 
@@ -1593,11 +1593,11 @@ pub fn tee_fs_htree_sync_to_storage(
     );
 
     let storage = ht.storage.as_ref();
-    rpc_write_head(storage, head_vers, &mut ht.data.head)?;
+    rpc_write_head(storage, head_vers, &ht.data.head)?;
 
     ht.data.dirty = false;
 
-    if let Some(slice) = hash.as_deref_mut() {
+    if let Some(slice) = hash {
         slice.copy_from_slice(&ht.root.node.hash);
     }
 
@@ -1639,7 +1639,7 @@ pub fn tee_fs_htree_open(
         if create {
             let mut dummy_head = TeeFsHtreeImage::default();
             tee_debug!("tee_fs_htree_open: create: true");
-            crypto_rng_read(&mut ht.data.fek).map_err(|e| e)?;
+            crypto_rng_read(&mut ht.data.fek)?;
             tee_fs_fek_crypt(
                 Some(&ht.data.uuid),
                 TEE_OperationMode::TEE_MODE_ENCRYPT,
@@ -1652,7 +1652,7 @@ pub fn tee_fs_htree_open(
             ht.data.dirty = true;
             tee_fs_htree_sync_to_storage(&mut ht, hash)?;
             let storage = ht.storage.as_ref();
-            rpc_write_head(storage, 0, &mut dummy_head)?;
+            rpc_write_head(storage, 0, &dummy_head)?;
         } else {
             init_head_from_data(&mut ht, hash.as_ref().map(|s| &s[..])).inspect_err(|e| {
                 error!("init_head_from_data error! {:X?}", e);

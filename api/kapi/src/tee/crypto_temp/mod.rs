@@ -7,5 +7,5 @@
 // TODO: Remove this file after the crypto module are implemented.
 
 pub mod aes_cbc;
-pub mod crypto_temp;
+pub mod crypto_hash_temp;
 pub mod hash;

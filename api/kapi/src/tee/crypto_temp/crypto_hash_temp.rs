@@ -219,7 +219,7 @@ pub fn crypto_hash_update(md: &mut Md, data: &[u8]) -> TeeResult {
     tee_debug!(
         "crypto_hash_update: data length: {:?}, data: {:X?}",
         data.len(),
-        hex::encode(&data)
+        hex::encode(data)
     );
     md.update(data).map_err(|_| TEE_ERROR_BAD_STATE)?;
     Ok(())

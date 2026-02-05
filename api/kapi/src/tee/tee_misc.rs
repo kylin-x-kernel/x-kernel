@@ -42,7 +42,7 @@ pub fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
 /// 返回写入的字节数
 pub fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, ()> {
     let hslen = hs.len();
-    if hslen % 2 != 0 {
+    if !hslen.is_multiple_of(2) {
         return Err(()); // 长度必须是偶数
     }
 

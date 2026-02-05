@@ -22,7 +22,7 @@ use super::{
 };
 use crate::tee::crypto_temp::{
     aes_cbc::MbedAesCbcCtx,
-    crypto_temp::{CryptoCipherCtx, CryptoCipherOps},
+    crypto_hash_temp::{CryptoCipherCtx, CryptoCipherOps},
 };
 
 const TEE_FS_KM_SSK_SIZE: usize = TEE_SHA256_HASH_SIZE;
@@ -131,7 +131,7 @@ pub fn tee_fs_fek_crypt(
     let in_key_slice = in_key.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
 
     let ssk = TEE_FS_SSK.lock();
-    if ssk.is_init == false {
+    if !ssk.is_init {
         error!("tee_fs_fek_crypt: TEE_FS_SSK is not initialized");
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
@@ -152,7 +152,7 @@ pub fn tee_fs_fek_crypt(
         let dummy = [0u8, 1];
         do_hmac(&mut tsk, ssk_key_slice, &dummy)?;
     }
-    let _ = match crypto_cipher_alloc_ctx(TEE_ALG_AES_ECB_NOPAD) {
+    match crypto_cipher_alloc_ctx(TEE_ALG_AES_ECB_NOPAD) {
         Ok(mut ctx) => {
             ctx.init(mode, Some(&tsk), None, None).inspect_err(|_| {
                 error!("tee_fs_fek_crypt: ctx.init failed");

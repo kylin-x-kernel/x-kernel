@@ -32,22 +32,12 @@ use crate::tee::{
     tee_svc_cryp2::{CipherPaddingMode, CrypCtx, CrypState, TeeCrypState},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ecc_public_key {
     pub x: BigNum,
     pub y: BigNum,
     curve: u32,
     // ops: Box<dyn crypto_ecc_public_ops>,
-}
-
-impl Default for ecc_public_key {
-    fn default() -> Self {
-        ecc_public_key {
-            x: BigNum::default(),
-            y: BigNum::default(),
-            curve: 0,
-        }
-    }
 }
 
 impl tee_crypto_ops for ecc_public_key {
@@ -77,7 +67,7 @@ impl tee_crypto_ops for ecc_public_key {
         }
     }
 }
-
+#[derive(Default)]
 pub struct ecc_keypair {
     pub d: BigNum,
     pub x: BigNum,
@@ -85,18 +75,6 @@ pub struct ecc_keypair {
     pub curve: u32,
     // TODO: add ops
     // pub ops: Box<dyn crypto_ecc_keypair_ops>,
-}
-
-impl Default for ecc_keypair {
-    fn default() -> Self {
-        ecc_keypair {
-            d: BigNum::default(),
-            x: BigNum::default(),
-            y: BigNum::default(),
-            curve: 0,
-            // ops: Box::new(EcdOps),
-        }
-    }
 }
 
 impl Debug for ecc_keypair {
@@ -328,7 +306,7 @@ pub(crate) fn crypto_hash_init(cs: Arc<Mutex<TeeCrypState>>) -> TeeResult {
         cs_guard.state = CrypState::Initialized;
         Ok(())
     } else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+        Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
@@ -582,7 +560,7 @@ pub(crate) fn crypto_cipher_init(
         cs_guard.ctx = CrypCtx::CipherCtx(cipher);
         Ok(())
     } else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+        Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
@@ -666,7 +644,7 @@ pub(crate) fn crypto_authenc_init(
         cs_guard.ctx = CrypCtx::CipherCtx(cipher);
         Ok(())
     } else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+        Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 

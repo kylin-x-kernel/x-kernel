@@ -321,7 +321,7 @@ pub fn tee_get_file_size(path: &str) -> TeeResult<usize> {
 }
 
 pub fn file_ops_test() {
-    let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT) as u32, 0o644);
+    let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT), 0o644);
     assert!(fd.is_ok());
     let mut fd = fd.unwrap();
 

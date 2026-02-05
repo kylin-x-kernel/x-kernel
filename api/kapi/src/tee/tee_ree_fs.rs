@@ -91,6 +91,7 @@ impl TeeFsFdAux {
 }
 
 #[repr(C)]
+#[derive(Default)]
 pub struct TeeFsDir {
     pub dirh: *mut TeeFsDirfileDirh,
     pub idx: i32,
@@ -98,16 +99,16 @@ pub struct TeeFsDir {
     pub uuid: TEE_UUID,
 }
 
-impl Default for TeeFsDir {
-    fn default() -> Self {
-        TeeFsDir {
-            dirh: ptr::null_mut(),
-            idx: 0,
-            d: tee_fs_dirent::default(),
-            uuid: TEE_UUID::default(),
-        }
-    }
-}
+// impl Default for TeeFsDir {
+//     fn default() -> Self {
+//         TeeFsDir {
+//             dirh: ptr::null_mut(),
+//             idx: 0,
+//             d: tee_fs_dirent::default(),
+//             uuid: TEE_UUID::default(),
+//         }
+//     }
+// }
 
 fn pos_to_block_num(position: usize) -> usize {
     position >> BLOCK_SHIFT
@@ -207,7 +208,7 @@ pub fn get_offs_size(typ: TeeFsHtreeType, idx: usize, vers: u8) -> TeeResult<(us
 /// the typical flow is:
 ///   1. call ree_fs_rpc_read_init to get offs and size to fill params
 ///   2. send OPTEE_RPC_CMD_FS to ree
-/// in starryos, just usign file operations to read data
+///      in starryos, just usign file operations to read data
 ///
 /// # Arguments
 /// * `fd` - file descriptor
@@ -406,10 +407,7 @@ pub fn ree_fs_open_primitive(
 
     tee_debug!("ree_fs_open_primitive: fd: {:?}", fd);
 
-    let fd = match fd {
-        Ok(fd) => fd,
-        Err(e) => return Err(e),
-    };
+    let fd = fd?;
 
     fdp.fd = Box::new(fd);
 
@@ -445,8 +443,8 @@ fn out_of_place_write(
         fdp.fd,
         pos,
         len,
-        slice_fmt(&buf_core),
-        slice_fmt(&buf_user)
+        slice_fmt(buf_core),
+        slice_fmt(buf_user)
     );
     // It doesn't make sense to call this function if nothing is to be
     // written. This also guards against end_block_num getting an
@@ -502,7 +500,7 @@ fn out_of_place_write(
             &mut fdp.ht,
             // &mut fdp.fd,
             current_start_block_num,
-            &mut *block,
+            &*block,
         )?;
 
         remain_bytes -= size_to_write;
@@ -541,11 +539,11 @@ pub fn ree_fs_read_primitive(
     let meta = tee_fs_htree_get_meta(&mut fh.ht);
 
     // One of buf_core and buf_user must be NULL
-    debug_assert!(buf_core.len() > 0 || buf_user.len() > 0);
+    debug_assert!(!buf_core.is_empty() || !buf_user.is_empty());
 
     tee_debug!("ree_fs_read_primitive: check boundary conditions");
     // 检查边界条件
-    if (pos + remain_bytes) < remain_bytes || pos > meta.length as usize {
+    if pos.checked_add(remain_bytes).is_none() || pos > meta.length as usize {
         remain_bytes = 0;
     } else if pos + remain_bytes > meta.length as usize {
         remain_bytes = meta.length as usize - pos;
@@ -640,7 +638,7 @@ pub fn ree_fs_write_primitive(
     buf_user: &[u8],
     len: usize,
 ) -> TeeResult {
-    debug_assert!(buf_core.len() > 0 || buf_user.len() > 0);
+    debug_assert!(!buf_core.is_empty() || !buf_user.is_empty());
 
     if len == 0 {
         return Ok(());
@@ -648,7 +646,7 @@ pub fn ree_fs_write_primitive(
 
     let file_size = tee_fs_htree_get_meta(&mut fdp.ht).length;
 
-    if (pos + len) < len {
+    if pos.checked_add(len).is_none() {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
@@ -765,6 +763,7 @@ pub struct TeeFileOperations {
 
     pub open: fn(po: &mut tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>>,
 
+    #[allow(clippy::type_complexity)]
     pub create: fn(
         po: &mut tee_pobj,
         overwrite: bool,
@@ -837,9 +836,8 @@ pub fn ree_fs_open(po: &mut tee_pobj, size: Option<&mut usize>) -> TeeResult<Box
 
         Ok(fdp)
     })()
-    .map_err(|err| {
-        put_dirh(&dirh, true);
-        err
+    .inspect_err(|err| {
+        put_dirh(dirh, true);
     })?;
 
     Ok(fd)
@@ -961,16 +959,15 @@ fn ree_fs_create(
         })?;
 
         // 成功时取出 fdp，使用 take() 避免移动后无法在 map_err 中使用
-        Ok(fdp.take().ok_or(TEE_ERROR_GENERIC)?)
+        fdp.take().ok_or(TEE_ERROR_GENERIC)
     })()
-    .map_err(|err| {
+    .inspect_err(|_err| {
         // 错误处理：对应 C 版本中的 if (*fh) 检查
-        put_dirh(&dirh, true);
+        put_dirh(dirh, true);
         if let Some(ref mut fdp_val) = fdp {
             ree_fs_close_primitive(fdp_val);
             tee_fs_rpc_remove_dfh(Some(&dfh)).ok();
         }
-        err
     })
 }
 
@@ -1021,7 +1018,7 @@ pub fn ree_fs_write(
         tee_fs_htree_sync_to_storage(&mut fh.ht, Some(&mut fh.dfh.hash)).inspect_err(|e| {
             error!("ree_fs_write: sync to storage failed: {:#010X}", e);
         })?;
-        tee_fs_dirfile_update_hash(dirh, &mut fh.dfh).inspect_err(|e| {
+        tee_fs_dirfile_update_hash(dirh, &fh.dfh).inspect_err(|e| {
             error!("ree_fs_write: update hash failed: {:#010X}", e);
         })?;
         commit_dirh_writes(dirh).inspect_err(|e| {
@@ -1031,7 +1028,7 @@ pub fn ree_fs_write(
         Ok(())
     })();
 
-    put_dirh(&dirh, ret.is_err());
+    put_dirh(dirh, ret.is_err());
     ret
 }
 
@@ -1048,13 +1045,13 @@ pub fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
 
         tee_fs_htree_sync_to_storage(&mut fh.ht, Some(&mut fh.dfh.hash))?;
 
-        tee_fs_dirfile_update_hash(dirh, &mut fh.dfh)?;
+        tee_fs_dirfile_update_hash(dirh, &fh.dfh)?;
         commit_dirh_writes(dirh)?;
 
         Ok(())
     })();
 
-    put_dirh(&dirh, ret.is_err());
+    put_dirh(dirh, ret.is_err());
     ret
 }
 
@@ -1096,7 +1093,7 @@ pub fn ree_fs_rename(old: &mut tee_pobj, new: &tee_pobj, overwrite: bool) -> Tee
         Ok(())
     })();
 
-    put_dirh(&dirh, ret.is_err());
+    put_dirh(dirh, ret.is_err());
     ret
 }
 
@@ -1122,7 +1119,7 @@ pub fn ree_fs_remove(po: &tee_pobj) -> TeeResult {
         Ok(())
     })();
 
-    put_dirh(&dirh, ret.is_err());
+    put_dirh(dirh, ret.is_err());
     ret
 }
 
@@ -1180,7 +1177,7 @@ fn open_dirh() -> TeeResult<Box<TeeFsDirfileDirh>> {
 
 fn close_dirh(dirh: &mut Box<TeeFsDirfileDirh>) -> TeeResult {
     // 关闭目录句柄
-    tee_fs_dirfile_close(&mut **dirh)
+    tee_fs_dirfile_close(dirh)
     //*dirh = Arc::new(TeeFsDirfileDirh::default());
 }
 

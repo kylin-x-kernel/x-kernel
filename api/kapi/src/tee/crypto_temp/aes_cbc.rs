@@ -10,7 +10,7 @@ use mbedtls_sys_auto::{
 };
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE, TEE_OperationMode};
 
-use super::crypto_temp::{CryptoCipherCtx, CryptoCipherOps};
+use super::crypto_hash_temp::{CryptoCipherCtx, CryptoCipherOps};
 use crate::tee::{TeeResult, common::array, utee_defines::TEE_AES_BLOCK_SIZE, utils::slice_fmt};
 
 #[repr(C)]

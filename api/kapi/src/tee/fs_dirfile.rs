@@ -252,7 +252,7 @@ pub fn tee_fs_dirfile_open(
     let res: TeeResult<()> = loop {
         let mut dent: DirFileEntry = unsafe { core::mem::zeroed() };
 
-        match read_dent(&mut *dirh, n, &mut dent) {
+        match read_dent(&mut dirh, n, &mut dent) {
             Err(TEE_ERROR_ITEM_NOT_FOUND) => {
                 tee_debug!("read_dent: TEE_ERROR_ITEM_NOT_FOUND at idx {}", n);
                 break Ok(());
@@ -268,10 +268,10 @@ pub fn tee_fs_dirfile_open(
         }
 
         // if (test_file(dirh, dent.file_number))
-        if test_file(&mut *dirh, dent.file_number as usize) {
+        if test_file(&mut dirh, dent.file_number as usize) {
             tee_debug!("clearing duplicate file number {}", dent.file_number);
             let mut zero_dent: DirFileEntry = unsafe { core::mem::zeroed() };
-            if let Err(e) = write_dent(&mut *dirh, n, &mut zero_dent) {
+            if let Err(e) = write_dent(&mut dirh, n, &zero_dent) {
                 break Err(e);
             }
             n += 1;
@@ -279,7 +279,7 @@ pub fn tee_fs_dirfile_open(
         }
 
         // res = set_file(dirh, dent.file_number);
-        if let Err(e) = set_file(&mut *dirh, dent.file_number as usize) {
+        if let Err(e) = set_file(&mut dirh, dent.file_number as usize) {
             break Err(e);
         }
 
@@ -293,7 +293,7 @@ pub fn tee_fs_dirfile_open(
             Ok(dirh)
         }
         Err(e) => {
-            tee_fs_dirfile_close(&mut *dirh);
+            tee_fs_dirfile_close(&mut dirh);
             Err(e)
         }
     }
@@ -381,7 +381,7 @@ pub fn tee_fs_dirfile_remove(dirh: &mut TeeFsDirfileDirh, dfh: &TeeFsDirfileFile
     core::assert!(test_file(dirh, file_number as usize));
 
     dent = unsafe { core::mem::zeroed() };
-    write_dent(dirh, dfh.idx as usize, &mut dent)?;
+    write_dent(dirh, dfh.idx as usize, &dent)?;
     tee_debug!(
         "tee_fs_dirfile_remove: after write_dent, dirh.fh.ht.data.dirty: {}, dfh.idx: {}",
         dirh.fh.ht.data.dirty,
@@ -409,7 +409,7 @@ pub fn tee_fs_dirfile_update_hash(
 
     dent.hash.copy_from_slice(&dfh.hash);
 
-    write_dent(dirh, dfh.idx as usize, &mut dent)
+    write_dent(dirh, dfh.idx as usize, &dent)
 }
 
 pub fn tee_fs_dirfile_close(dirh: &mut TeeFsDirfileDirh) -> TeeResult {

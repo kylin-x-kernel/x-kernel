@@ -5,7 +5,6 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(non_camel_case_types, non_snake_case)]
-#![allow(unused_imports)]
 #![allow(unused)]
 #![allow(missing_docs)]
 #![allow(non_upper_case_globals)]

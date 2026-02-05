@@ -94,7 +94,7 @@ const cil: usize = mem::size_of::<mpi_uint>();
 const bil: usize = cil << 3;
 
 fn bits_to_limbs(i: usize) -> usize {
-    i / bil + if i % bil != 0 { 1 } else { 0 }
+    i / bil + if !i.is_multiple_of(bil) { 1 } else { 0 }
 }
 
 /// Get number of bytes required to store the big number

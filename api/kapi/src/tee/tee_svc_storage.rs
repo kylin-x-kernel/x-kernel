@@ -66,6 +66,7 @@ pub fn tee_svc_storage_add_enum(mut obj: tee_storage_enum) -> TeeResult<c_ulong>
         obj.id = id as c_ulong;
 
         // 创建 Arc 并插入
+        #[allow(clippy::arc_with_non_send_sync)]
         let arc_obj = Arc::new(Mutex::new(obj));
         let inserted_id = vacant.insert(arc_obj);
         tee_debug!("tee_svc_storage_add_enum: id: {}", id);
@@ -203,7 +204,7 @@ fn tee_svc_storage_read_head(o: &mut tee_obj) -> TeeResult {
         tee_debug!("get write lock");
         // open the file, store the file handle in tee_obj.fh
         o.fh = Some(
-            (fops.open)(&mut *pobj_guard, Some(&mut size)).inspect_err(|e| {
+            (fops.open)(&mut pobj_guard, Some(&mut size)).inspect_err(|e| {
                 error!("open failed: {:X?}", e);
             })?,
         );
@@ -276,15 +277,15 @@ fn tee_svc_storage_read_head(o: &mut tee_obj) -> TeeResult {
     tee_obj_attr_from_binary(o, &attr_data)?;
 
     o.info.dataSize = size - size_of_val(&head) - head.attr_size as usize;
-    o.info.objectSize = head.objectSize as u32;
+    o.info.objectSize = head.objectSize;
     // 需要再次获取写锁来修改 obj_info_usage
     o.pobj
         .as_ref()
         .ok_or(TEE_ERROR_BAD_STATE)?
         .write()
-        .obj_info_usage = head.objectUsage as u32;
-    o.info.objectType = head.objectType as u32;
-    o.have_attrs = head.have_attrs as u32;
+        .obj_info_usage = head.objectUsage;
+    o.info.objectType = head.objectType;
+    o.have_attrs = head.have_attrs;
 
     Ok(())
 }
@@ -341,7 +342,7 @@ pub fn syscall_storage_obj_open(
 
     // dump object_id to kernel memory from user space
     let object_id_slice =
-        unsafe { core::slice::from_raw_parts(object_id as *const u8, object_id_len as usize) };
+        unsafe { core::slice::from_raw_parts(object_id as *const u8, object_id_len) };
     let oid_bbuf = bb_memdup_user_private(object_id_slice)?;
 
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
@@ -387,16 +388,14 @@ pub fn syscall_storage_obj_open(
 
         Ok(())
     })();
-    match obj_open {
-        Err(err) => {
-            if err != TEE_ERROR_CORRUPT_OBJECT {
-                let _ = tee_obj_close(tee_obj_id).inspect_err(|e| {
-                    error!("tee_obj_close failed: {:X?}", e);
-                });
-                return Err(err);
-            }
-        }
-        _ => {}
+
+    if let Err(err) = obj_open
+        && err != TEE_ERROR_CORRUPT_OBJECT
+    {
+        let _ = tee_obj_close(tee_obj_id).inspect_err(|e| {
+            error!("tee_obj_close failed: {:X?}", e);
+        });
+        return Err(err);
     }
 
     Ok(())
@@ -441,12 +440,15 @@ fn tee_svc_storage_init_file(
     o.ds_pos = size_of::<tee_svc_storage_head>() + attr_size;
 
     // write head
-    let mut head = tee_svc_storage_head::default();
-    head.attr_size = attr_size as u32;
-    head.objectSize = o.info.objectSize;
-    head.maxObjectSize = o.info.maxObjectSize;
-    head.objectType = o.info.objectType;
-    head.have_attrs = o.have_attrs;
+    let mut head = tee_svc_storage_head {
+        attr_size: attr_size as u32,
+        objectSize: o.info.objectSize,
+        maxObjectSize: o.info.maxObjectSize,
+        objectType: o.info.objectType,
+        have_attrs: o.have_attrs,
+        ..Default::default()
+    };
+
     let mut pobj_guard = o.pobj.as_mut().ok_or(TEE_ERROR_BAD_STATE)?.write();
     head.objectUsage = pobj_guard.obj_info_usage;
     o.fh = Some(
@@ -545,6 +547,7 @@ fn syscall_storage_obj_create_inner(
         // 2. attr_o != null means attributes object is provided(attr != TEE_HANDLE_NULL)
         // 3. TEE_HANDLE_FLAG_PERSISTENT == 0 means attributes object is not a persistent object(is a temporary object)
 
+        #[allow(clippy::unnecessary_unwrap)]
         let attr_o = attr_o.unwrap();
         let mut a = attr_o.lock();
 
@@ -649,6 +652,7 @@ fn syscall_storage_obj_create_inner(
 /// * `obj` - the object
 /// # Returns
 /// * `TeeResult` - the result of the operation
+#[allow(clippy::too_many_arguments)]
 pub fn syscall_storage_obj_create(
     storage_id: c_ulong,
     object_id: *mut c_void,
@@ -738,12 +742,12 @@ pub fn syscall_storage_obj_create(
 
         CreateInnerResult::CreatedNew(o_id) => {
             // 第二分支成功，继续处理
-            if !obj.is_null() {
-                if let Err(e) = unsafe { copy_to_user_struct(&mut *obj, &o_id) } {
-                    // oclose 路径：C 逻辑中 oclose 不进行错误码转换
-                    let _ = tee_obj_close(o_id);
-                    return Err(e);
-                }
+            if !obj.is_null()
+                && let Err(e) = unsafe { copy_to_user_struct(&mut *obj, &o_id) }
+            {
+                // oclose 路径：C 逻辑中 oclose 不进行错误码转换
+                let _ = tee_obj_close(o_id);
+                return Err(e);
             }
 
             tee_pobj_create_final(&mut po.write());
@@ -764,11 +768,11 @@ pub fn syscall_storage_obj_create(
                 // o 会在这里 drop
             }
 
-            if error == TEE_ERROR_CORRUPT_OBJECT {
-                if let Some(ref po_ref) = po {
-                    tee_debug!("CreateInnerResult::ErrBeforeAdd: fops.remove");
-                    (fops.remove)(&mut po_ref.write());
-                }
+            if error == TEE_ERROR_CORRUPT_OBJECT
+                && let Some(ref po_ref) = po
+            {
+                tee_debug!("CreateInnerResult::ErrBeforeAdd: fops.remove");
+                (fops.remove)(&mut po_ref.write());
             }
 
             if let Some(po) = po {
@@ -1343,7 +1347,7 @@ pub fn syscall_storage_next_enum(
         let pobj = tee_pobj_get(
             uuid.as_raw_ref(),
             d.oid.as_ref(),
-            d.oid_len as u32,
+            d.oid_len,
             0,
             tee_pobj_usage::TEE_POBJ_USAGE_ENUM,
             fops,
@@ -1392,13 +1396,13 @@ pub fn syscall_storage_next_enum(
         Ok(())
     })();
 
-    if let Some(mut o) = o {
-        if let Some(pobj) = o.pobj.take() {
-            let fops = pobj.read().fops.ok_or(TEE_ERROR_BAD_STATE)?;
+    if let Some(mut o) = o
+        && let Some(pobj) = o.pobj.take()
+    {
+        let fops = pobj.read().fops.ok_or(TEE_ERROR_BAD_STATE)?;
 
-            (fops.close)(&mut o.fh);
-            let _ = tee_pobj_release(pobj);
-        }
+        (fops.close)(&mut o.fh);
+        let _ = tee_pobj_release(pobj);
     }
 
     res

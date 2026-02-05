@@ -69,11 +69,11 @@ pub fn crypto_acipher_gen_rsa_key(key: &mut rsa_keypair, key_size: usize) -> Tee
                 crypto_bignum_copy_from_mpi(&mut key.dq, &(*ctx).DQ);
             }
 
-            return Ok(());
+            Ok(())
         }
         Err(e) => {
             let e = e.to_int();
-            return get_tee_result(e);
+            get_tee_result(e)
         }
     }
 }

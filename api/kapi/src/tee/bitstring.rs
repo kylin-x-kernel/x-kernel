@@ -46,9 +46,7 @@ pub fn bit_nclear(name: &mut [u8], start: usize, stop: usize) {
     } else {
         name[start_byte] &= 0xff >> (8 - (start & 0x7));
 
-        for i in (start_byte + 1)..stop_byte {
-            name[i] = 0;
-        }
+        name[(start_byte + 1)..stop_byte].fill(0);
 
         name[stop_byte] &= 0xff << ((stop & 0x7) + 1);
     }
@@ -58,9 +56,9 @@ pub fn bit_ffc(name: &[u8], nbits: usize, value: &mut isize) {
     let stop_byte = bit_byte(nbits - 1);
     let mut val: isize = -1;
     if nbits > 0 {
-        for byte_index in 0..=stop_byte {
-            if name[byte_index] != 0xff {
-                let mut lb = name[byte_index];
+        for (byte_index, &byte) in name.iter().enumerate().take(stop_byte + 1) {
+            if byte != 0xff {
+                let mut lb = byte;
                 val = (byte_index << 3) as isize;
                 while (lb & 0x1) != 0 {
                     val += 1;

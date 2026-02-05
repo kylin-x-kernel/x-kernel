@@ -140,9 +140,8 @@ impl tee_pobj {
         match (&self.fops, fops) {
             (Some(a), Some(b)) => {
                 // info!("matches fops: {:p}, {:p}", *a as *const _, *b as *const _);
-                let result = ptr::eq(*a, *b);
+                ptr::eq(*a, *b)
                 // info!("matches fops result: {}", result);
-                result
             }
             (None, None) => true,
             _ => false,
@@ -187,7 +186,7 @@ impl tee_pobjs {
                 let pobj_guard = pobj_arc.read();
                 pobj_guard.matches(uuid, obj_id, obj_id_len, fops)
             })
-            .map(|pobj_arc| Arc::clone(pobj_arc))
+            .map(Arc::clone)
     }
 }
 
@@ -278,11 +277,13 @@ pub fn tee_pobj_get(
     }
 
     // new file
-    let mut obj = tee_pobj::default();
-    obj.refcnt = 1;
-    obj.uuid = *uuid;
-    obj.flags = flags;
-    obj.fops = Some(fops);
+    let mut obj = tee_pobj {
+        refcnt: 1,
+        uuid: *uuid,
+        flags,
+        fops: Some(fops),
+        ..Default::default()
+    };
 
     if usage == tee_pobj_usage::TEE_POBJ_USAGE_CREATE {
         obj.temporary = true;
@@ -297,7 +298,7 @@ pub fn tee_pobj_get(
     let mut pobjs = POBJS.inner.lock();
     let pobj = Arc::new(RwLock::new(obj));
     pobjs.push_back(pobj.clone());
-    return Ok(pobj);
+    Ok(pobj)
 }
 
 pub fn tee_pobj_create_final(po: &mut tee_pobj) {

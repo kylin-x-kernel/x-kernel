@@ -34,7 +34,7 @@ fn tee_software_get_rand(output: &mut [u8]) {
 /// # Returns
 /// * `Ok(())` - success
 /// * `Err(TEE_ERROR_GENERIC)` - error
-/// TODO: Using mbedtls to implement a real RNG
+///   TODO: Using mbedtls to implement a real RNG
 pub fn crypto_rng_read(buf: &mut [u8]) -> TeeResult {
     // buf.fill(0);
     tee_software_get_rand(buf);

@@ -4,7 +4,7 @@
 
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE};
 
-use super::crypto_temp::CryptoHashOps;
+use super::crypto_hash_temp::CryptoHashOps;
 use crate::tee::{TeeResult, common::array, utee_defines::TEE_MAX_HASH_SIZE};
 //--------------------from rust-mbedtls bindings.rs --------------------
 #[allow(non_camel_case_types)]
