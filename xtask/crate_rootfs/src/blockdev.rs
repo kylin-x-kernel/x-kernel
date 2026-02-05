@@ -3,8 +3,10 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
 };
 
-use rsext4::error::{BlockDevError, BlockDevResult};
-use rsext4::BlockDevice;
+use rsext4::{
+    BlockDevice,
+    error::{BlockDevError, BlockDevResult},
+};
 
 /// File-backed block device for building a raw ext4 image.
 pub struct FileBlockDev {

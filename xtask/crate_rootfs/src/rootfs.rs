@@ -4,12 +4,12 @@ use std::{
 };
 
 use rsext4::{
+    Jbd2Dev,
     config::BLOCK_SIZE,
     dir::get_inode_with_num,
     disknode::Ext4Inode,
-    ext4::{mkfs, Ext4FileSystem},
+    ext4::{Ext4FileSystem, mkfs},
     file::mkfile_with_ino,
-    Jbd2Dev,
 };
 
 use crate::{
@@ -34,7 +34,13 @@ pub fn build_rootfs(args: Args) -> Result<(), String> {
         .read(true)
         .write(true)
         .open(&args.image)
-        .map_err(|e| format!("failed to open image {}/{}: {e}", args.image.display(), size_bytes))?;
+        .map_err(|e| {
+            format!(
+                "failed to open image {}/{}: {e}",
+                args.image.display(),
+                size_bytes
+            )
+        })?;
     file.set_len(size_bytes)
         .map_err(|e| format!("failed to set image size: {e}"))?;
 
@@ -70,8 +76,7 @@ pub fn build_rootfs(args: Args) -> Result<(), String> {
     fs.umount(&mut jbd)
         .map_err(|e| format!("umount failed: {e}"))?;
 
-    jbd.cantflush()
-        .map_err(|e| format!("flush failed: {e}"))?;
+    jbd.cantflush().map_err(|e| format!("flush failed: {e}"))?;
 
     drop(jbd);
 
