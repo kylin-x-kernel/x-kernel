@@ -58,40 +58,6 @@ impl CsvGuestDevice {
         Self
     }
 
-    /// Perform a hypercall to request attestation report from the hypervisor
-    ///
-    /// # Arguments
-    /// * `nr` - Hypercall number (KVM_HC_VM_ATTESTATION = 100)
-    /// * `pa` - Physical address of the request/response buffer
-    /// * `len` - Length of the buffer
-    ///
-    /// # Returns
-    /// Return value from the hypercall (0 on success)
-    #[cfg(target_arch = "x86_64")]
-    fn hypercall(nr: u64, pa: u64, len: u64) -> i64 {
-        let ret: i64;
-        unsafe {
-            // Note: rbx is reserved by LLVM, so we need to save/restore it manually
-            core::arch::asm!(
-                "push rbx",
-                "mov rbx, {pa}",
-                "vmmcall",
-                "pop rbx",
-                pa = in(reg) pa,
-                inout("rax") nr => ret,
-                in("rcx") len,
-                options()
-            );
-        }
-        ret
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    fn hypercall(_nr: u64, _pa: u64, _len: u64) -> i64 {
-        // Not supported on other architectures
-        -1
-    }
-
     /// Handle the GET_REPORT ioctl command
     ///
     /// This function:
@@ -161,7 +127,7 @@ impl CsvGuestDevice {
         );
 
         // Make the hypercall to request attestation report
-        let ret = Self::hypercall(
+        let ret = kcpu::hypercall(
             KVM_HC_VM_ATTESTATION,
             kernel_buf_pa.as_usize() as u64,
             buf_len as u64,

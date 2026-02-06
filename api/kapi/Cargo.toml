@@ -33,7 +33,7 @@ tee = [
 ]
 tee_test = ["tee"]
 tee_cfg_memtag = []
-sev = []
+sev = ["dep:kcpu"]
 
 [dependencies]
 kalloc.workspace = true
@@ -46,7 +46,7 @@ mbedtls-sys-auto = { workspace = true, optional = true }
 fbdevice.workspace = true
 kdriver.workspace = true
 ktypes.workspace = true
-
+kcpu = { workspace = true, optional = true }
 kerrno.workspace = true
 kfeat.workspace = true
 fs-ng-vfs.workspace = true
