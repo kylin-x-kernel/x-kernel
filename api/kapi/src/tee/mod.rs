@@ -83,7 +83,8 @@ mod tee_ta_manager;
 mod tee_time;
 #[cfg(feature = "tee_test")]
 pub mod test_unit_test;
-
+#[cfg(feature = "x86_csv")]
+mod tee_get_sealing_key;
 mod types_ext;
 mod user_access;
 mod user_ta;

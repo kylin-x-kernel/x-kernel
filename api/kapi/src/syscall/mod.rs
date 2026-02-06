@@ -41,6 +41,9 @@ use self::{
     time::*,
 };
 
+// Re-export sys_getrandom for use in TEE modules
+pub use sys::sys_getrandom;
+
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
