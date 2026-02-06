@@ -245,7 +245,13 @@ pub unsafe fn get_attestation_report(
     user_data.compute_sm3_hash()?;
 
     let user_data_pa = user_data.physical_address();
-    let ret = unsafe { kcpu::hypercall(KVM_HC_VM_ATTESTATION, user_data_pa, PAGE_SIZE) };
+    let ret = unsafe {
+        kcpu::hypercall(
+            KVM_HC_VM_ATTESTATION as u64,
+            user_data_pa as u64,
+            PAGE_SIZE as u64,
+        )
+    };
 
     if ret != 0 {
         error!("hypercall failed: {}", ret);
