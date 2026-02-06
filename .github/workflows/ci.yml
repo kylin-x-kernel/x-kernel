@@ -55,17 +55,6 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
-      - name: Debug musl toolchain paths
-        run: |
-          echo "=== Environment variables ==="
-          env | grep -i musl || true
-          echo "=== Which gcc ==="
-          which ${{ matrix.arch }}-linux-musl-gcc || true
-          echo "=== GCC search dirs ==="
-          ${{ matrix.arch }}-linux-musl-gcc -print-search-dirs || true
-          echo "=== Find include dirs ==="
-          dirname $(which ${{ matrix.arch }}-linux-musl-gcc) | xargs -I{} find {}/../ -type d -name include 2>/dev/null | head -20
-
       - name: Install QEMU
         uses: arceos-org/setup-qemu@v1
         with:
@@ -91,19 +80,6 @@ jobs:
       - name: 执行 ci-test (${{ matrix.arch }})
         working-directory: starry-test-harness
         run: |
-          MUSL_GCC=$(which ${{ matrix.arch }}-linux-musl-gcc)
-          MUSL_ROOT=$(dirname "$MUSL_GCC")/..
-          MUSL_INCLUDE="$MUSL_ROOT/${{ matrix.arch }}-linux-musl/include"
-          
-          echo "MUSL_ROOT=$MUSL_ROOT"
-          echo "MUSL_INCLUDE=$MUSL_INCLUDE"
-          
-          export CC="$MUSL_GCC"
-          export CFLAGS="-I$MUSL_INCLUDE"
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$MUSL_GCC"
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$MUSL_GCC"
-          export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/dev/null"
-          
           export XKERNEL_COMMIT=$(git -C ../.cache/X-Kernel rev-parse HEAD)
           make ci-test run
 
