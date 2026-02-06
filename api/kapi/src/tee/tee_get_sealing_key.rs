@@ -1,7 +1,5 @@
-use core::arch::asm;
-use core::ptr;
 use alloc::vec::Vec;
-use core::mem::size_of;
+use core::{arch::asm, mem::size_of, ptr};
 
 pub const GUEST_ATTESTATION_DATA_SIZE: usize = 64;
 pub const GUEST_ATTESTATION_NONCE_SIZE: usize = 16;
@@ -57,7 +55,7 @@ pub struct CsvAttestationReport {
     pub mac: HashBlockU,
 }
 
-#[repr(C, packed)]  // ✓ 添加 packed
+#[repr(C, packed)] // ✓ 添加 packed
 #[derive(Copy, Clone)]
 pub struct EccSignatureT {
     pub sig_r: [u32; ECC_POINT_SIZE / SIZE_INT32],
@@ -104,7 +102,7 @@ pub struct EccPubkeyT {
 #[repr(C)]
 pub union CertPubkeyData {
     pub pubkey: [u32; (SIZE_INT32 + ECC_POINT_SIZE * 2 + HYGON_USER_ID_SIZE) / SIZE_INT32],
-    pub ecc_pubkey: EccPubkeyT,  // ✓ 修正：改为 ecc_pubkey
+    pub ecc_pubkey: EccPubkeyT, // ✓ 修正：改为 ecc_pubkey
 }
 
 // ==================== Helper Functions ====================
@@ -135,22 +133,25 @@ pub unsafe fn hypercall(nr: u32, p1: usize, len: usize) -> i64 {
     }
 }
 
-use crate::syscall::sys_getrandom;
-use crate::tee::tee_svc_cryp::{
-    syscall_cryp_obj_alloc, syscall_obj_generate_key,
-    tee_cryp_obj_secret_wrapper, TeeCryptObj,
-};
-use crate::tee::tee_svc_cryp2::{
-    syscall_cryp_state_alloc, syscall_hash_final,
-    syscall_hash_init, syscall_hash_update,
-};
-use crate::tee::tee_obj::tee_obj_get;
 use tee_raw_sys::{
-    TEE_ALG_SM3, TEE_ALG_HMAC_SM3,
-    TEE_TYPE_SM4, TEE_TYPE_HMAC_SM3,
-    TEE_OperationMode,
+    TEE_ALG_HMAC_SM3, TEE_ALG_SM3, TEE_OperationMode,
+    TEE_OperationMode::{TEE_MODE_DIGEST, TEE_MODE_MAC},
+    TEE_TYPE_HMAC_SM3, TEE_TYPE_SM4,
 };
-use tee_raw_sys::TEE_OperationMode::{TEE_MODE_DIGEST, TEE_MODE_MAC};
+
+use crate::{
+    syscall::sys_getrandom,
+    tee::{
+        tee_obj::tee_obj_get,
+        tee_svc_cryp::{
+            TeeCryptObj, syscall_cryp_obj_alloc, syscall_obj_generate_key,
+            tee_cryp_obj_secret_wrapper,
+        },
+        tee_svc_cryp2::{
+            syscall_cryp_state_alloc, syscall_hash_final, syscall_hash_init, syscall_hash_update,
+        },
+    },
+};
 
 // ==================== Trait Implementations ====================
 
@@ -176,7 +177,8 @@ impl CsvAttestationUserData {
 
     /// 构建哈希输入数据（data + mnonce）
     pub fn hash_input(&self) -> Vec<u8> {
-        let mut input = Vec::with_capacity(GUEST_ATTESTATION_DATA_SIZE + GUEST_ATTESTATION_NONCE_SIZE);
+        let mut input =
+            Vec::with_capacity(GUEST_ATTESTATION_DATA_SIZE + GUEST_ATTESTATION_NONCE_SIZE);
         input.extend_from_slice(&self.data);
         input.extend_from_slice(&self.mnonce);
         input
@@ -294,10 +296,7 @@ pub unsafe fn get_attestation_report(
 /// # Returns
 /// * `Ok(())` - MAC 验证成功
 /// * `Err(())` - MAC 验证失败
-pub unsafe fn verify_session_mac(
-    report: &CsvAttestationReport,
-    key: &[u8],
-) -> Result<(), u32> {
+pub unsafe fn verify_session_mac(report: &CsvAttestationReport, key: &[u8]) -> Result<(), u32> {
     let computed_mac = compute_hmac_sm3(report, key)?;
 
     if computed_mac == report.mac.block {
@@ -318,10 +317,7 @@ pub unsafe fn verify_session_mac(
 /// # Returns
 /// * `Ok([u8; 32])` - 计算得到的 MAC 值
 /// * `Err(())` - 计算失败
-fn compute_hmac_sm3(
-    report: &CsvAttestationReport,
-    key: &[u8],
-) -> Result<[u8; HASH_LEN], u32> {
+fn compute_hmac_sm3(report: &CsvAttestationReport, key: &[u8]) -> Result<[u8; HASH_LEN], u32> {
     let mut state = 0u32;
     let mut obj_id: core::ffi::c_uint = 0;
 
@@ -349,11 +345,11 @@ fn compute_hmac_sm3(
     let pek_cert_size = size_of::<HygonCsvCert>();
     let pek_cert_ptr = &report.pek_cert as *const _ as *const u8;
 
-    let mut data_to_hash = Vec::with_capacity(pek_cert_size + report.sn.len() + report.reserved2.len());
+    let mut data_to_hash =
+        Vec::with_capacity(pek_cert_size + report.sn.len() + report.reserved2.len());
 
-    data_to_hash.extend_from_slice(unsafe {
-        core::slice::from_raw_parts(pek_cert_ptr, pek_cert_size)
-    });
+    data_to_hash
+        .extend_from_slice(unsafe { core::slice::from_raw_parts(pek_cert_ptr, pek_cert_size) });
     data_to_hash.extend_from_slice(&report.sn);
     data_to_hash.extend_from_slice(&report.reserved2);
 
@@ -377,10 +373,7 @@ fn compute_hmac_sm3(
 ///
 /// # Safety
 /// 调用者必须确保 key_buf 指向的内存区域有效且可写，且 buf_len 与实际分配大小匹配
-pub unsafe fn vmmcall_get_sealing_key(
-    key_buf: *mut u8,
-    buf_len: usize,
-) -> Result<(), u32> {
+pub unsafe fn vmmcall_get_sealing_key(key_buf: *mut u8, buf_len: usize) -> Result<(), u32> {
     if buf_len < 32 {
         error!("The allocated length is too short to hold the sealing key!");
         error!("The length should not be less than 32");
