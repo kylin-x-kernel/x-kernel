@@ -57,20 +57,6 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
-      - name: Setup MUSL environment
-        run: |
-          MUSL_GCC=$(which ${{ matrix.arch }}-linux-musl-gcc)
-          MUSL_ROOT=$(dirname "$MUSL_GCC")/..
-          MUSL_INCLUDE="$MUSL_ROOT/${{ matrix.arch }}-linux-musl/include"
-          
-          echo "MUSL_ROOT=$MUSL_ROOT" >> $GITHUB_ENV
-          echo "MUSL_INCLUDE=$MUSL_INCLUDE" >> $GITHUB_ENV
-          echo "CC=$MUSL_GCC" >> $GITHUB_ENV
-          echo "CFLAGS=-I$MUSL_INCLUDE" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$MUSL_GCC" >> $GITHUB_ENV
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$MUSL_GCC" >> $GITHUB_ENV
-          echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=/dev/null" >> $GITHUB_ENV
-
       - name: Clippy
         run: |
           RUSTFLAGS="--cfg unittest --check-cfg=cfg(unittest)" \
