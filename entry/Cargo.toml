@@ -94,6 +94,7 @@ x86_csv = [
     # auxilary features
     "kfeat/fs-times",
     "kapi/dev-log",
+    "kapi/x86_csv"
 ]
 
 

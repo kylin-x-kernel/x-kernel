@@ -33,7 +33,8 @@ tee = [
 ]
 tee_test = ["tee"]
 tee_cfg_memtag = []
-sev = ["dep:kcpu"]
+sev = []
+x86_csv = []
 
 [dependencies]
 kalloc.workspace = true

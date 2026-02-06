@@ -35,14 +35,13 @@ mod time;
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
+// Re-export sys_getrandom for use in TEE modules
+pub use sys::sys_getrandom;
 
 use self::{
     fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
     time::*,
 };
-
-// Re-export sys_getrandom for use in TEE modules
-pub use sys::sys_getrandom;
 
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) {

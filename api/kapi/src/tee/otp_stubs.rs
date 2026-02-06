@@ -2,11 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use super::utee_defines::HW_UNIQUE_KEY_LENGTH;
-use crate::tee::TeeResult;
-
 #[cfg(all(target_arch = "x86_64", feature = "x86_csv"))]
 use super::tee_get_sealing_key::vmmcall_get_sealing_key;
+use super::utee_defines::HW_UNIQUE_KEY_LENGTH;
+use crate::tee::TeeResult;
 
 #[repr(C)]
 pub struct TeeHwUniqueKey {
