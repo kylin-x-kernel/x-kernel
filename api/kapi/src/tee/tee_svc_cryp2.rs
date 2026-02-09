@@ -89,10 +89,13 @@ use crate::{
         crypto::{
             self,
             crypto::{
-                crypto_acipher_rsanopad_decrypt, crypto_acipher_rsanopad_encrypt,
-                crypto_authenc_dec_final, crypto_authenc_enc_final, crypto_authenc_init,
-                crypto_authenc_update_aad, crypto_cipher_final, crypto_cipher_init,
-                crypto_cipher_update,
+                crypto_acipher_ecc_sign, crypto_acipher_ecc_verify, crypto_acipher_rsaes_decrypt,
+                crypto_acipher_rsaes_encrypt, crypto_acipher_rsanopad_decrypt,
+                crypto_acipher_rsanopad_encrypt, crypto_acipher_rsassa_sign,
+                crypto_acipher_rsassa_verify, crypto_acipher_sm2_pke_decrypt,
+                crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final, crypto_authenc_enc_final,
+                crypto_authenc_init, crypto_authenc_update_aad, crypto_cipher_final,
+                crypto_cipher_init, crypto_cipher_update,
             },
         },
         libmbedtls::bignum::BigNum,
@@ -732,10 +735,8 @@ pub fn syscall_cryp_state_alloc(
                 if !o1_ok || !o2_ok {
                     return Err(TEE_ERROR_BAD_PARAMETERS);
                 }
-            } else {
-                if !o1_ok || o2_ok {
-                    return Err(TEE_ERROR_BAD_PARAMETERS);
-                }
+            } else if !o1_ok || o2_ok {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
             }
         }
         _ => {
@@ -1101,7 +1102,12 @@ pub fn syscall_authenc_dec_final(
     crypto_authenc_dec_final(cs.clone(), input, output, tag)
 }
 
-pub fn syscall_asymm_operate(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
+pub fn syscall_asymm_operate(
+    id: u32,
+    input: &[u8],
+    output: &mut [u8],
+    label: Option<&[u8]>,
+) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1110,6 +1116,10 @@ pub fn syscall_asymm_operate(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
     let mode = cs_guard.mode;
+    let label = match label {
+        Some(label) => label,
+        None => &[],
+    };
 
     drop(cs_guard);
     match algo {
@@ -1122,14 +1132,30 @@ pub fn syscall_asymm_operate(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
             }
             _ => Err(TEE_ERROR_GENERIC),
         },
-        TEE_ALG_SM2_PKE => Ok(0),
+        TEE_ALG_SM2_PKE => match mode {
+            TEE_OperationMode::TEE_MODE_ENCRYPT => {
+                crypto_acipher_sm2_pke_encrypt(cs.clone(), input, output)
+            }
+            TEE_OperationMode::TEE_MODE_DECRYPT => {
+                crypto_acipher_sm2_pke_decrypt(cs.clone(), input, output)
+            }
+            _ => Err(TEE_ERROR_GENERIC),
+        },
         TEE_ALG_RSAES_PKCS1_V1_5
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384
-        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => Ok(0),
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => match mode {
+            TEE_OperationMode::TEE_MODE_ENCRYPT => {
+                crypto_acipher_rsaes_encrypt(cs.clone(), input, output, label)
+            }
+            TEE_OperationMode::TEE_MODE_DECRYPT => {
+                crypto_acipher_rsaes_decrypt(cs.clone(), input, output, label)
+            }
+            _ => Err(TEE_ERROR_GENERIC),
+        },
         TEE_ALG_RSASSA_PKCS1_V1_5_MD5
         | TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
         | TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
@@ -1141,10 +1167,59 @@ pub fn syscall_asymm_operate(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
-        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => Ok(0),
-        TEE_ALG_DSA_SHA1 | TEE_ALG_DSA_SHA224 | TEE_ALG_DSA_SHA256 => Ok(0),
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => {
+            crypto_acipher_rsassa_sign(cs.clone(), input, output)
+        }
+        TEE_ALG_DSA_SHA1 | TEE_ALG_DSA_SHA224 | TEE_ALG_DSA_SHA256 => Err(TEE_ERROR_NOT_SUPPORTED), /* mbedtls no support for DSA */
+        TEE_ALG_ED25519 => Err(TEE_ERROR_NOT_SUPPORTED), // mbedtls no support for EdDSA
         TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
-        | TEE_ALG_ECDSA_SHA512 | TEE_ALG_SM2_DSA_SM3 => Ok(0),
+        | TEE_ALG_ECDSA_SHA512 | TEE_ALG_SM2_DSA_SM3 => {
+            crypto_acipher_ecc_sign(cs.clone(), input, output)
+        }
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
+
+pub fn syscall_asymm_verify(
+    id: u32,
+    hash: &[u8],
+    signature: &[u8],
+    label: Option<&[u8]>,
+) -> TeeResult {
+    memtag_strip_tag()?;
+    vm_check_access_rights(0, 0, 0)?;
+
+    let mut cs = tee_cryp_state_get(id)?;
+    let cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    let mode = cs_guard.mode;
+    drop(cs_guard);
+
+    if mode != TEE_OperationMode::TEE_MODE_VERIFY {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+
+    match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA256
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA384
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA512
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => {
+            crypto_acipher_rsassa_verify(cs.clone(), hash, signature)
+        }
+        TEE_ALG_DSA_SHA1 | TEE_ALG_DSA_SHA224 | TEE_ALG_DSA_SHA256 => Err(TEE_ERROR_NOT_SUPPORTED), /* mbedtls no support for DSA */
+        TEE_ALG_ED25519 => Err(TEE_ERROR_NOT_SUPPORTED), // mbedtls no support for EdDSA
+        TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
+        | TEE_ALG_ECDSA_SHA512 | TEE_ALG_SM2_DSA_SM3 => {
+            crypto_acipher_ecc_verify(cs.clone(), hash, signature)
+        }
         _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
 }
@@ -1156,7 +1231,9 @@ pub mod tests_cryp {
     };
 
     use super::*;
-    use crate::tee::tee_svc_cryp::{syscall_cryp_obj_alloc, syscall_obj_generate_key};
+    use crate::tee::tee_svc_cryp::{
+        syscall_cryp_obj_alloc, syscall_cryp_obj_copy, syscall_obj_generate_key,
+    };
 
     test_fn! {
         using TestResult;
@@ -1690,6 +1767,124 @@ pub mod tests_cryp {
        }
     }
 
+    test_fn! {
+       using TestResult;
+
+       fn test_cryp_sm2_sign_verify(){
+            // alloc sm2 key pair
+            let mut obj_id: c_uint = 0;
+            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, &mut obj_id);
+            assert!(res.is_ok());
+            // sm2 no need usr_params
+            let res = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
+            assert!(res.is_ok());
+            // get attr from obj
+            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+            assert!(obj_arc.is_ok());
+            let obj_arc = obj_arc.unwrap();
+            let obj = obj_arc.lock();
+            assert_eq!(obj.info.objectType, TEE_TYPE_SM2_DSA_KEYPAIR);
+            assert_eq!(obj.info.maxObjectSize, 256);
+            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+            assert_eq!(obj.attr.len(), 1);
+            assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
+            drop(obj);
+
+            let mut obj_id_pub: c_uint = 0;
+            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, &mut obj_id_pub);
+            assert!(res.is_ok());
+
+            let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
+            assert!(res.is_ok());
+
+            let mut state: u32 = 0;
+            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_SIGN, Some(obj_id as _), None, &mut state);
+            assert!(res.is_ok());
+
+            let mut state_pub: u32 = 0;
+            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_VERIFY, Some(obj_id_pub as _), None, &mut state_pub);
+            assert!(res.is_ok());
+
+            let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+            let mut signature1 = [0u8; 141];
+            let mut signature2 = [0u8; 141];
+
+            let res = syscall_asymm_operate(state, data, &mut signature1, None);
+            assert!(res.is_ok());
+            let len = res.unwrap();
+
+            let res = syscall_asymm_verify(state_pub, data, &signature1[..len], None);
+            assert!(res.is_ok());
+       }
+    }
+
+    test_fn! {
+       using TestResult;
+
+       fn test_cryp_sm2_enc_dec(){
+            // alloc sm2 key pair
+            let mut obj_id: c_uint = 0;
+            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_KEYPAIR as _, 256, &mut obj_id);
+            assert!(res.is_ok());
+            // sm2 no need usr_params
+            let res = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
+            assert!(res.is_ok());
+            // get attr from obj
+            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+            assert!(obj_arc.is_ok());
+            let obj_arc = obj_arc.unwrap();
+            let obj = obj_arc.lock();
+            assert_eq!(obj.info.objectType, TEE_TYPE_SM2_PKE_KEYPAIR);
+            assert_eq!(obj.info.maxObjectSize, 256);
+            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+            assert_eq!(obj.attr.len(), 1);
+            assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
+            drop(obj);
+
+            let mut obj_id_pub: c_uint = 0;
+            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_PUBLIC_KEY as _, 256, &mut obj_id_pub);
+            assert!(res.is_ok());
+
+            let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
+            assert!(res.is_ok());
+
+            let mut state_enc: u32 = 0;
+            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id_pub as _), None, &mut state_enc);
+            assert!(res.is_ok());
+
+            let mut state_dec: u32 = 0;
+            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state_dec);
+            assert!(res.is_ok());
+
+            let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+            let mut cipher1 = [0u8; 141];
+            let mut cipher2 = [0u8; 141];
+            let mut clear1 = [0u8; 141];
+            let mut clear2 = [0u8; 141];
+
+            let res = syscall_asymm_operate(state_enc, data, &mut cipher1, None);
+            assert!(res.is_ok());
+            let len1 = res.unwrap();
+
+            let res = syscall_asymm_operate(state_enc, data, &mut cipher2, None);
+            assert!(res.is_ok());
+            let len1 = res.unwrap();
+
+            assert_ne!(cipher1[..len1], cipher2[..len1]);
+
+            let res = syscall_asymm_operate(state_dec, &cipher1[..len1], &mut clear1, None);
+            assert!(res.is_ok());
+            let len = res.unwrap();
+
+            let res = syscall_asymm_operate(state_dec, &cipher2[..len1], &mut clear2, None);
+            assert!(res.is_ok());
+            let len = res.unwrap();
+
+            assert_eq!(&clear1[..len], &clear2[..len]);
+            assert_eq!(&clear1[..len], data);
+       }
+    }
+
     tests_name! {
         TEST_TEE_CRYP;
         tee_svc_cryp2;
@@ -1703,5 +1898,7 @@ pub mod tests_cryp {
         test_cryp_sm4_cbc_decrypt,
         test_cryp_sm4_gcm_encrypt,
         test_cryp_sm4_gcm_decrypt,
+        test_cryp_sm2_sign_verify,
+        test_cryp_sm2_enc_dec,
     }
 }

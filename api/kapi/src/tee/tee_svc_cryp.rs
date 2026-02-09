@@ -837,6 +837,19 @@ pub const tee_cryp_obj_ecc_pub_key_attrs: &[tee_cryp_obj_type_attrs] = &[
     },
 ];
 
+pub const tee_cryp_obj_rsa_pub_key_attrs: &[tee_cryp_obj_type_attrs] = &[
+    tee_cryp_obj_type_attrs {
+        attr_id: TEE_ATTR_RSA_MODULUS,
+        flags: (TEE_TYPE_ATTR_REQUIRED | TEE_TYPE_ATTR_SIZE_INDICATOR) as _,
+        ops_index: ATTR_OPS_INDEX_BIGNUM as _,
+    },
+    tee_cryp_obj_type_attrs {
+        attr_id: TEE_ATTR_RSA_PUBLIC_EXPONENT,
+        flags: TEE_TYPE_ATTR_REQUIRED as _,
+        ops_index: ATTR_OPS_INDEX_BIGNUM as _,
+    },
+];
+
 pub const tee_cryp_obj_rsa_keypair_attrs: &[tee_cryp_obj_type_attrs] = &[
     tee_cryp_obj_type_attrs {
         attr_id: TEE_ATTR_RSA_MODULUS,
@@ -910,6 +923,19 @@ pub const tee_cryp_obj_sm2_keypair_attrs: &[tee_cryp_obj_type_attrs] = &[
         flags: TEE_TYPE_ATTR_REQUIRED as _,
         ops_index: ATTR_OPS_INDEX_BIGNUM as _,
     },
+    tee_cryp_obj_type_attrs {
+        attr_id: TEE_ATTR_ECC_PUBLIC_VALUE_X,
+        flags: TEE_TYPE_ATTR_REQUIRED as _,
+        ops_index: ATTR_OPS_INDEX_BIGNUM as _,
+    },
+    tee_cryp_obj_type_attrs {
+        attr_id: TEE_ATTR_ECC_PUBLIC_VALUE_Y,
+        flags: TEE_TYPE_ATTR_REQUIRED as _,
+        ops_index: ATTR_OPS_INDEX_BIGNUM as _,
+    },
+];
+
+pub const tee_cryp_obj_sm2_pub_key_attrs: &[tee_cryp_obj_type_attrs] = &[
     tee_cryp_obj_type_attrs {
         attr_id: TEE_ATTR_ECC_PUBLIC_VALUE_X,
         flags: TEE_TYPE_ATTR_REQUIRED as _,
@@ -1136,7 +1162,7 @@ pub const fn prop(
     }
 }
 
-pub static TEE_CRYP_OBJ_PROPS: [tee_cryp_obj_type_props; 10] = [
+pub static TEE_CRYP_OBJ_PROPS: [tee_cryp_obj_type_props; 14] = [
     // AES
     prop(
         TEE_TYPE_AES,
@@ -1201,6 +1227,14 @@ pub static TEE_CRYP_OBJ_PROPS: [tee_cryp_obj_type_props; 10] = [
         tee_cryp_obj_rsa_keypair_attrs,
     ),
     prop(
+        TEE_TYPE_RSA_PUBLIC_KEY,
+        1,
+        256,
+        CFG_CORE_BIGNUM_MAX_BITS as _,
+        0,
+        tee_cryp_obj_rsa_pub_key_attrs,
+    ),
+    prop(
         TEE_TYPE_ECDSA_KEYPAIR,
         1,
         192,
@@ -1223,6 +1257,30 @@ pub static TEE_CRYP_OBJ_PROPS: [tee_cryp_obj_type_props; 10] = [
         256,
         0,
         tee_cryp_obj_sm2_keypair_attrs,
+    ),
+    prop(
+        TEE_TYPE_SM2_DSA_PUBLIC_KEY,
+        1,
+        256,
+        256,
+        0,
+        tee_cryp_obj_sm2_pub_key_attrs,
+    ),
+    prop(
+        TEE_TYPE_SM2_PKE_KEYPAIR,
+        1,
+        256,
+        256,
+        0,
+        tee_cryp_obj_sm2_keypair_attrs,
+    ),
+    prop(
+        TEE_TYPE_SM2_PKE_PUBLIC_KEY,
+        1,
+        256,
+        256,
+        0,
+        tee_cryp_obj_sm2_pub_key_attrs,
     ),
 ];
 

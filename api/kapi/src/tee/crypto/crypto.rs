@@ -9,14 +9,18 @@ use ksync::Mutex;
 use mbedtls::{
     bignum::Mpi,
     cipher::raw::{Cipher, CipherId, CipherMode, CipherPadding, CipherType, Operation},
+    ecp::EcPoint,
     hash::{Hmac, Md, Type as MdType},
-    pk::{Pk, RsaPadding, RsaPrivateComponents, RsaPublicComponents, Type as PkType},
+    pk::{
+        EcGroup, EcGroupId, Pk, RsaPadding, RsaPrivateComponents, RsaPublicComponents,
+        Type as PkType,
+    },
 };
 use mbedtls_sys_auto::mpi_write_binary;
 use tee_raw_sys::*;
 
 use crate::tee::{
-    TeeResult,
+    TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5, TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5, TeeResult,
     crypto::crypto_impl::{
         EccAlgoKeyPair, EccComKeyPair, EccKeypair, Sm2DsaKeyPair, Sm2KepKeyPair, Sm2PkeKeyPair,
         crypto_ecc_keypair_ops, crypto_ecc_keypair_ops_generate,
@@ -42,11 +46,12 @@ pub struct ecc_public_key {
 
 impl tee_crypto_ops for ecc_public_key {
     fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
+        let mut curve = 0;
         match key_type {
             TEE_TYPE_SM2_DSA_PUBLIC_KEY
             | TEE_TYPE_SM2_PKE_PUBLIC_KEY
             | TEE_TYPE_SM2_KEP_PUBLIC_KEY => {
-                return Err(TEE_ERROR_NOT_IMPLEMENTED);
+                curve = TEE_ECC_CURVE_SM2;
             }
             _ => {}
         };
@@ -54,7 +59,7 @@ impl tee_crypto_ops for ecc_public_key {
         Ok(ecc_public_key {
             x: crypto_bignum_allocate(key_size_bits)?,
             y: crypto_bignum_allocate(key_size_bits)?,
-            curve: 0,
+            curve,
         })
     }
 
@@ -703,7 +708,7 @@ pub(crate) fn crypto_authenc_dec_final(
     }
 }
 
-pub fn crypto_rsa_init(
+pub(crate) fn crypto_rsa_init(
     cs: Arc<Mutex<TeeCrypState>>,
     padding_mode: RsaPadding,
     mode: TEE_OperationMode,
@@ -720,11 +725,11 @@ pub fn crypto_rsa_init(
         }
 
         match mode {
-            TEE_OperationMode::TEE_MODE_ENCRYPT => {
+            TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_VERIFY => {
                 if let TeeCryptObj::rsa_public_key(rsa_key) = &obj_key1_guard.attr[0] {
                     let rsa = RsaPublicComponents {
-                        n: &rsa_key.n,
-                        e: &rsa_key.e,
+                        n: rsa_key.n.as_mpi(),
+                        e: rsa_key.e.as_mpi(),
                     };
                     let mut pk = Pk::public_from_rsa_components(rsa)
                         .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
@@ -736,12 +741,12 @@ pub fn crypto_rsa_init(
                     return Err(TEE_ERROR_BAD_STATE);
                 }
             }
-            TEE_OperationMode::TEE_MODE_DECRYPT => {
+            TEE_OperationMode::TEE_MODE_DECRYPT | TEE_OperationMode::TEE_MODE_SIGN => {
                 if let TeeCryptObj::rsa_keypair(rsa_key) = &obj_key1_guard.attr[0] {
                     let rsa = RsaPrivateComponents::WithPrimes {
-                        p: &rsa_key.p,
-                        q: &rsa_key.q,
-                        e: &rsa_key.e,
+                        p: rsa_key.p.as_mpi(),
+                        q: rsa_key.q.as_mpi(),
+                        e: rsa_key.e.as_mpi(),
                     };
                     let mut pk = Pk::private_from_rsa_components(rsa)
                         .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
@@ -771,7 +776,8 @@ pub(crate) fn crypto_acipher_rsanopad_encrypt(
         RsaPadding::None,
         TEE_OperationMode::TEE_MODE_ENCRYPT,
     )?;
-    if let CrypCtx::AsyCtx(pk) = &mut cs.lock().ctx {
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
         let mut rng = TeeSoftwareRng::new();
         pk.encrypt_extend(input, output, &mut rng, None)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
@@ -790,9 +796,406 @@ pub(crate) fn crypto_acipher_rsanopad_decrypt(
         RsaPadding::None,
         TEE_OperationMode::TEE_MODE_DECRYPT,
     )?;
-    if let CrypCtx::AsyCtx(pk) = &mut cs.lock().ctx {
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
         let mut rng = TeeSoftwareRng::new();
         pk.decrypt_extend(input, output, &mut rng, None)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+fn get_curve_id(curve: u32) -> TeeResult<EcGroupId> {
+    match curve {
+        TEE_CRYPTO_ELEMENT_NONE => Ok(EcGroupId::None),
+        TEE_ECC_CURVE_NIST_P192 => Ok(EcGroupId::SecP192R1),
+        TEE_ECC_CURVE_NIST_P224 => Ok(EcGroupId::SecP224R1),
+        TEE_ECC_CURVE_NIST_P256 => Ok(EcGroupId::SecP256R1),
+        TEE_ECC_CURVE_NIST_P384 => Ok(EcGroupId::SecP384R1),
+        TEE_ECC_CURVE_NIST_P521 => Ok(EcGroupId::SecP521R1),
+        TEE_ECC_CURVE_25519 => Ok(EcGroupId::Curve25519),
+        TEE_ECC_CURVE_SM2 => Ok(EcGroupId::SM2P256R1),
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
+
+pub(crate) fn crypto_ecc_init(cs: Arc<Mutex<TeeCrypState>>, pk_type: PkType) -> TeeResult {
+    let mut cs_guard = cs.lock();
+    let key1 = cs_guard.key1;
+    let mode = cs_guard.mode;
+
+    if let Some(k) = key1 {
+        let obj_key1 = tee_obj_get(k as _)?;
+        let obj_key1_guard = obj_key1.lock();
+
+        if obj_key1_guard.attr.is_empty() {
+            return Err(TEE_ERROR_BAD_STATE);
+        }
+
+        match mode {
+            TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_VERIFY => {
+                if let TeeCryptObj::ecc_public_key(ecc_key) = &obj_key1_guard.attr[0] {
+                    let public_point = EcPoint::from_components(
+                        ecc_key.x.clone().into_mpi(),
+                        ecc_key.y.clone().into_mpi(),
+                    )
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                    let curve_id = get_curve_id(ecc_key.curve)?;
+                    let ec_group = EcGroup::new(curve_id).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                    let mut pk = Pk::public_from_ec_components_extend(
+                        ec_group,
+                        public_point,
+                        pk_type.into(),
+                    )
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                    cs_guard.ctx = CrypCtx::AsyCtx(pk);
+                } else {
+                    return Err(TEE_ERROR_BAD_STATE);
+                }
+            }
+            TEE_OperationMode::TEE_MODE_DECRYPT | TEE_OperationMode::TEE_MODE_SIGN => {
+                if let TeeCryptObj::ecc_keypair(ecc_key) = &obj_key1_guard.attr[0] {
+                    let curve_id = get_curve_id(ecc_key.curve)?;
+                    let mut ec_group =
+                        EcGroup::new(curve_id).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                    let mut pk = Pk::private_from_ec_components_extend(
+                        ec_group,
+                        ecc_key.d.clone().into_mpi(),
+                        pk_type.into(),
+                    )
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                    cs_guard.ctx = CrypCtx::AsyCtx(pk);
+                }
+            }
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn crypto_acipher_sm2_pke_encrypt(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+) -> TeeResult<usize> {
+    crypto_ecc_init(cs.clone(), PkType::SM2)?;
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        let mut rng = TeeSoftwareRng::new();
+        pk.encrypt_extend(input, output, &mut rng, Some(MdType::SM3 as _))
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+pub(crate) fn crypto_acipher_sm2_pke_decrypt(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+) -> TeeResult<usize> {
+    crypto_ecc_init(cs.clone(), PkType::SM2)?;
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        let mut rng = TeeSoftwareRng::new();
+        pk.decrypt_extend(input, output, &mut rng, Some(MdType::SM3 as _))
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+pub(crate) fn crypto_acipher_rsaes_encrypt(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+    label: &[u8],
+) -> TeeResult<usize> {
+    let cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    drop(cs_guard);
+
+    let padding_mode = match algo {
+        TEE_ALG_RSAES_PKCS1_V1_5 => RsaPadding::Pkcs1V15,
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5 => RsaPadding::Pkcs1V21 { mgf: MdType::Md5 },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1 => RsaPadding::Pkcs1V21 { mgf: MdType::Sha1 },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha224,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha256,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha384,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha512,
+        },
+        _ => RsaPadding::None,
+    };
+
+    crypto_rsa_init(
+        cs.clone(),
+        padding_mode,
+        TEE_OperationMode::TEE_MODE_DECRYPT,
+    )?;
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        let mut rng = TeeSoftwareRng::new();
+
+        match algo {
+            TEE_ALG_RSAES_PKCS1_V1_5 => pk
+                .encrypt_extend(input, output, &mut rng, None)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => pk
+                .encrypt_with_label(input, output, &mut rng, label)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            _ => Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+pub(crate) fn crypto_acipher_rsaes_decrypt(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+    label: &[u8],
+) -> TeeResult<usize> {
+    let cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    drop(cs_guard);
+
+    let padding_mode = match algo {
+        TEE_ALG_RSAES_PKCS1_V1_5 => RsaPadding::Pkcs1V15,
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5 => RsaPadding::Pkcs1V21 { mgf: MdType::Md5 },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1 => RsaPadding::Pkcs1V21 { mgf: MdType::Sha1 },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha224,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha256,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha384,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha512,
+        },
+        _ => RsaPadding::None,
+    };
+
+    crypto_rsa_init(
+        cs.clone(),
+        padding_mode,
+        TEE_OperationMode::TEE_MODE_DECRYPT,
+    )?;
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        let mut rng = TeeSoftwareRng::new();
+
+        match algo {
+            TEE_ALG_RSAES_PKCS1_V1_5 => pk
+                .decrypt_extend(input, output, &mut rng, None)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384
+            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => pk
+                .decrypt_with_label(input, output, &mut rng, label)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            _ => Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+pub(crate) fn crypto_acipher_rsassa_sign(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+) -> TeeResult<usize> {
+    let cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    drop(cs_guard);
+
+    let padding_mode = match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA256
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA384
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 => RsaPadding::Pkcs1V15,
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => RsaPadding::Pkcs1V21 { mgf: MdType::Md5 },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => RsaPadding::Pkcs1V21 { mgf: MdType::Sha1 },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha224,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha256,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha384,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha512,
+        },
+        _ => RsaPadding::None,
+    };
+
+    let md_type = match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => MdType::Md5,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA1 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => MdType::Sha1,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA224 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => MdType::Sha224,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA256 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => MdType::Sha256,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA384 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => MdType::Sha384,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => MdType::Sha512,
+        _ => MdType::None,
+    };
+
+    crypto_rsa_init(cs.clone(), padding_mode, TEE_OperationMode::TEE_MODE_SIGN)?;
+    let mut cs_guard = cs.lock();
+
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        let mut rng = TeeSoftwareRng::new();
+        pk.sign(md_type, input, output, &mut rng)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+pub(crate) fn crypto_acipher_rsassa_verify(
+    cs: Arc<Mutex<TeeCrypState>>,
+    hash: &[u8],
+    signature: &[u8],
+) -> TeeResult {
+    let cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    drop(cs_guard);
+
+    let padding_mode = match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA256
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA384
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 => RsaPadding::Pkcs1V15,
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => RsaPadding::Pkcs1V21 { mgf: MdType::Md5 },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => RsaPadding::Pkcs1V21 { mgf: MdType::Sha1 },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha224,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha256,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha384,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha512,
+        },
+        _ => RsaPadding::None,
+    };
+
+    let md_type = match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => MdType::Md5,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA1 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => MdType::Sha1,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA224 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => MdType::Sha224,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA256 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => MdType::Sha256,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA384 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => MdType::Sha384,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => MdType::Sha512,
+        _ => MdType::None,
+    };
+
+    crypto_rsa_init(cs.clone(), padding_mode, TEE_OperationMode::TEE_MODE_SIGN)?;
+    let mut cs_guard = cs.lock();
+
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        pk.verify(md_type, hash, signature)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+pub(crate) fn crypto_acipher_ecc_sign(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+) -> TeeResult<usize> {
+    let cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    drop(cs_guard);
+
+    let pk_type = match algo {
+        TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
+        | TEE_ALG_ECDSA_SHA512 => PkType::Eckey,
+        TEE_ALG_SM2_DSA_SM3 => PkType::SM2,
+        _ => PkType::None,
+    };
+    let md_type = match algo {
+        TEE_ALG_ECDSA_SHA1 => MdType::Sha1,
+        TEE_ALG_ECDSA_SHA224 => MdType::Sha224,
+        TEE_ALG_ECDSA_SHA256 => MdType::Sha256,
+        TEE_ALG_ECDSA_SHA384 => MdType::Sha384,
+        TEE_ALG_ECDSA_SHA512 => MdType::Sha512,
+        TEE_ALG_SM2_DSA_SM3 => MdType::SM3,
+        _ => MdType::None,
+    };
+
+    crypto_ecc_init(cs.clone(), pk_type)?;
+    let mut cs_guard = cs.lock();
+
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        let mut rng = TeeSoftwareRng::new();
+        pk.sign(md_type, input, output, &mut rng)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
+pub(crate) fn crypto_acipher_ecc_verify(
+    cs: Arc<Mutex<TeeCrypState>>,
+    hash: &[u8],
+    signature: &[u8],
+) -> TeeResult {
+    let cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    drop(cs_guard);
+
+    let pk_type = match algo {
+        TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
+        | TEE_ALG_ECDSA_SHA512 => PkType::Eckey,
+        TEE_ALG_SM2_DSA_SM3 => PkType::SM2,
+        _ => PkType::None,
+    };
+    let md_type = match algo {
+        TEE_ALG_ECDSA_SHA1 => MdType::Sha1,
+        TEE_ALG_ECDSA_SHA224 => MdType::Sha224,
+        TEE_ALG_ECDSA_SHA256 => MdType::Sha256,
+        TEE_ALG_ECDSA_SHA384 => MdType::Sha384,
+        TEE_ALG_ECDSA_SHA512 => MdType::Sha512,
+        TEE_ALG_SM2_DSA_SM3 => MdType::SM3,
+        _ => MdType::None,
+    };
+
+    crypto_ecc_init(cs.clone(), pk_type)?;
+    let mut cs_guard = cs.lock();
+
+    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+        pk.verify(md_type, hash, signature)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
