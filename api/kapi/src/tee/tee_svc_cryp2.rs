@@ -1184,7 +1184,6 @@ pub fn syscall_asymm_verify(
     id: u32,
     hash: &[u8],
     signature: &[u8],
-    label: Option<&[u8]>,
 ) -> TeeResult {
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1813,7 +1812,7 @@ pub mod tests_cryp {
             assert!(res.is_ok());
             let len = res.unwrap();
 
-            let res = syscall_asymm_verify(state_pub, data, &signature1[..len], None);
+            let res = syscall_asymm_verify(state_pub, data, &signature1[..len]);
             assert!(res.is_ok());
        }
     }
