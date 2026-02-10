@@ -1180,11 +1180,7 @@ pub fn syscall_asymm_operate(
     }
 }
 
-pub fn syscall_asymm_verify(
-    id: u32,
-    hash: &[u8],
-    signature: &[u8],
-) -> TeeResult {
+pub fn syscall_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResult {
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
 
