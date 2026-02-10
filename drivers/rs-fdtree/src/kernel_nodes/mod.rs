@@ -13,4 +13,4 @@ pub use chosen::Chosen;
 pub use interrupt::InterruptController;
 pub use memory::Memory;
 pub use reserved_memory::ReservedMemory;
-pub use rust_dice::Dice;
+pub use dice::Dice;
