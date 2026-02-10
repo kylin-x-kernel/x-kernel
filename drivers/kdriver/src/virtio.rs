@@ -16,10 +16,10 @@ use crate::{DeviceEnum, drivers::DriverProbe};
 
 cfg_if! {
     if #[cfg(bus = "pci")] {
-        use pci::{PciRoot, DeviceFunction, DeviceFunctionInfo};
+        use pci::{ConfigurationAccess, DeviceFunction, DeviceFunctionInfo, PciRoot};
         type VirtIoTransport = virtio::PciTransport;
     } else if #[cfg(bus =  "mmio")] {
-        type VirtIoTransport = virtio::MmioTransport;
+        type VirtIoTransport = virtio::MmioTransport<'static>;
     }
 }
 
@@ -139,8 +139,8 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     }
 
     #[cfg(bus = "pci")]
-    fn probe_pci(
-        root: &mut PciRoot,
+    fn probe_pci<C: ConfigurationAccess>(
+        root: &mut PciRoot<C>,
         bdf: DeviceFunction,
         dev_info: &DeviceFunctionInfo,
     ) -> Option<DeviceEnum> {
@@ -157,7 +157,7 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
         }
 
         if let Some((ty, transport, irq)) =
-            virtio::probe_pci_device::<VirtIoHalImpl>(root, bdf, dev_info)
+            virtio::probe_pci_device::<VirtIoHalImpl, C>(root, bdf, dev_info)
             && ty == D::DEVICE_TYPE
         {
             match D::try_new(transport, Some(irq)) {
@@ -222,7 +222,8 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
     #[inline]
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, _size: usize) -> NonNull<u8> {
-        NonNull::new(p2v(paddr.into()).as_mut_ptr()).unwrap()
+        let paddr_usize = paddr as usize;
+        NonNull::new(p2v(paddr_usize.into()).as_mut_ptr()).unwrap()
     }
 
     #[allow(unused_variables)]
@@ -272,7 +273,8 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         #[cfg(not(any(feature = "crosvm", feature = "sev")))]
         {
             let vaddr = buffer.as_ptr() as *mut u8 as usize;
-            khal::mem::v2p(vaddr.into()).into()
+            let paddr_usize: usize = khal::mem::v2p(vaddr.into()).into();
+            paddr_usize as PhysAddr
         }
     }
 
@@ -292,7 +294,8 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
             // If data flows from device to driver, copy back from shared buffer
             if direction != BufferDirection::DriverToDevice {
-                let shared_ptr = p2v(paddr.into()).as_ptr();
+                let paddr_usize = paddr as usize;
+                let shared_ptr = p2v(paddr_usize.into()).as_ptr();
                 unsafe {
                     core::ptr::copy_nonoverlapping(shared_ptr, buffer.as_ptr() as *mut u8, len);
                 }
@@ -310,7 +313,10 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             // Free the bounce buffer via kdma
             let layout = Layout::from_size_align(aligned_size, PAGE_SIZE).unwrap();
             let dma_info = kdma::DMAInfo {
-                cpu_addr: NonNull::new(p2v(paddr.into()).as_mut_ptr()).unwrap(),
+                cpu_addr: {
+                    let paddr_usize = paddr as usize;
+                    NonNull::new(p2v(paddr_usize.into()).as_mut_ptr()).unwrap()
+                },
                 bus_addr: kdma::DmaBusAddress::new(paddr as u64),
             };
             unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
