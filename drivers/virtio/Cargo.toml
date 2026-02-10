@@ -29,3 +29,4 @@ vsock = { workspace = true, optional = true }
 log = { workspace = true }
 virtio-drivers.workspace = true
 unittest = { workspace = true }
+zerocopy = "0.8"

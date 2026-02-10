@@ -210,7 +210,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
         let dma_info = kdma::DMAInfo {
             cpu_addr: vaddr,
-            bus_addr: kdma::DmaBusAddress::new(paddr as u64),
+            bus_addr: kdma::DmaBusAddress::new(paddr),
         };
         unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
         #[cfg(feature = "crosvm")]

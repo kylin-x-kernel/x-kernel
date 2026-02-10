@@ -76,7 +76,7 @@ fn config_pci_device<C: ConfigurationAccess>(
                         "  BAR {}: MEM [{:#x}, {:#x}){}{}",
                         bar,
                         address,
-                        address + size as u64,
+                        address + size,
                         if address_type == MemoryBarType::Width64 {
                             " 64bit"
                         } else {
