@@ -137,9 +137,7 @@ pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
             OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(..) => {
                 DriverError::InvalidInput
             }
-            UnexpectedDataInPacket | PeerSocketShutdown => {
-                DriverError::Io
-            }
+            UnexpectedDataInPacket | PeerSocketShutdown => DriverError::Io,
             InsufficientBufferSpaceInPeer => DriverError::WouldBlock,
             RecycledWrongBuffer => DriverError::BadState,
         },

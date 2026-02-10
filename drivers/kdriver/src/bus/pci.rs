@@ -5,8 +5,8 @@
 //! PCI bus probing and BAR configuration.
 use khal::mem::p2v;
 use pci::{
-    BarInfo, Cam, Command, ConfigurationAccess, DeviceFunction, HeaderType, MemoryBarType,
-    MmioCam, PciRangeAllocator, PciRoot,
+    BarInfo, Cam, Command, ConfigurationAccess, DeviceFunction, HeaderType, MemoryBarType, MmioCam,
+    PciRangeAllocator, PciRoot,
 };
 
 use crate::{AllDevices, prelude::*};
