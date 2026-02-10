@@ -1,9 +1,8 @@
 use core::{cell::RefCell, ptr::NonNull};
 
 use virtio_drivers::{
-    BufferDirection, Hal, PhysAddr, Result,
+    BufferDirection, Error, Hal, PhysAddr, Result,
     transport::{DeviceStatus, DeviceType, InterruptStatus, Transport},
-    Error,
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
@@ -120,10 +119,7 @@ impl Transport for MockTransport {
         0
     }
 
-    fn read_config_space<T: FromBytes + IntoBytes>(
-        &self,
-        offset: usize,
-    ) -> Result<T> {
+    fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> Result<T> {
         let size = core::mem::size_of::<T>();
         let config = self.config_space.borrow();
         if offset
