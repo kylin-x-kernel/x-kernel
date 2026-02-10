@@ -43,7 +43,6 @@ ktask = { path = "core/ktask" }
 watchdog = { path = "io/watchdog" }
 kcpu = { path = "arch/kcpu" }
 
-
 # x-kernel Crates
 alloc-engine = { path = "mm/alloc-engine" }
 page_table = { path = "mm/page_table" }
@@ -126,6 +125,7 @@ net = { path = "drivers/net" }
 pci = { path = "drivers/pci" }
 vsock = { path = "drivers/vsock" }
 virtio = { path = "drivers/virtio" }
+virtio-drivers = { version = "0.12.0", default-features = false }
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
 fatfs = { path = "fs/fatfs", default-features = false }
 rsext4 = { path = "fs/rsext4", default-features = false }
@@ -140,4 +140,4 @@ backtrace = { path = "util/backtrace" }
 kerrno = { path = "util/kerrno" }
 unittest = { path = "util/unittest" }
 kconfig-gen = { path = "xtask/kconfig-gen" }
-smoltcp = { version = "0.12.0",package = "x-smoltcp", default-features = false }
+smoltcp = { version = "0.12.0", package = "x-smoltcp", default-features = false }
