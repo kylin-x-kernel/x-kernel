@@ -97,9 +97,23 @@ pub fn tee_fs_rpc_remove_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult {
 
     tee_debug!("tee_fs_rpc_remove_dfh: f_name: {}", f_name);
     // Remove the file
-    FileVariant::remove(&f_name).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
-    Ok(())
+    // If file doesn't exist, return success (idempotent behavior)
+    // This handles the case where the file was already deleted or doesn't exist
+    // This is important for persistent filesystems where files may persist across OS restarts
+    match FileVariant::remove_file(&f_name) {
+        Ok(()) => Ok(()),
+        Err(TEE_ERROR_ITEM_NOT_FOUND) => {
+            tee_debug!(
+                "tee_fs_rpc_remove_dfh: file {} already removed, returning success",
+                f_name
+            );
+            Ok(())
+        }
+        Err(e) => {
+            error!("tee_fs_rpc_remove_dfh: remove file failed: {:X?}", e);
+            Err(e)
+        }
+    }
 }
 
 /// Truncate a file from a dfh

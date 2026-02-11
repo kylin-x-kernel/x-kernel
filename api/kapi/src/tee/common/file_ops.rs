@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{format, sync::Arc, vec::Vec};
 use core::ffi::c_int;
 
-use fs_ng_vfs::VfsError;
+use fs_ng_vfs::{NodePermission, VfsError};
 use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, File, FileBackend, FileFlags, OpenOptions, OpenResult};
@@ -15,7 +15,7 @@ use ktask::current;
 use linux_raw_sys::general::*;
 use scope_local::scope_local;
 use slab::Slab;
-use tee_raw_sys::TEE_ERROR_GENERIC;
+use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
 
 use crate::{
     file::{resolve_at, with_fs},
@@ -23,9 +23,9 @@ use crate::{
 };
 
 pub const FS_MODE_644: u32 = (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-pub const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR;
-pub const FS_OFLAG_RW: u32 = O_RDWR;
-pub const FS_OFLAG_RW_TRUNC: u32 = O_RDWR | O_TRUNC;
+pub const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR | O_SYNC;
+pub const FS_OFLAG_RW: u32 = O_RDWR | O_SYNC;
+pub const FS_OFLAG_RW_TRUNC: u32 = O_RDWR | O_TRUNC | O_SYNC;
 
 scope_local::scope_local! {
     /// The open objects for TA.
@@ -207,10 +207,34 @@ impl FileVariant {
     /// * `path` - the path of the file to remove
     /// # Returns
     /// * `TeeResult` - the result of the operation
-    pub fn remove(path: &str) -> TeeResult {
+    ///   - `Ok(())` - file successfully removed
+    ///   - `Err(TEE_ERROR_ITEM_NOT_FOUND)` - file does not exist
+    ///   - `Err(TEE_ERROR_GENERIC)` - other errors
+    pub fn remove_file(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove file with path: {}", path);
-        with_fs(AT_FDCWD, |fs| fs.remove_file(path))
-            .inspect_err(|e| error!("remove file failed: {:?}", e))
+        match with_fs(AT_FDCWD, |fs| fs.remove_file(path)) {
+            Ok(()) => Ok(()),
+            Err(VfsError::NotFound) => {
+                tee_debug!("FileVariant::remove_file: file {} not found", path);
+                Err(TEE_ERROR_ITEM_NOT_FOUND)
+            }
+            Err(e) => {
+                error!("FileVariant::remove_file failed: {:?}", e);
+                Err(TEE_ERROR_GENERIC)
+            }
+        }
+    }
+
+    /// remove file
+    ///
+    /// # Arguments
+    /// * `path` - the path of the file to remove
+    /// # Returns
+    /// * `TeeResult` - the result of the operation
+    pub fn remove_dir(path: &str) -> TeeResult {
+        tee_debug!("FileVariant::remove dir with path: {}", path);
+        with_fs(AT_FDCWD, |fs| fs.remove_dir(path))
+            .inspect_err(|e| error!("remove dir failed: {:?}", e))
             .map_err(|_| TEE_ERROR_GENERIC)?;
 
         Ok(())
@@ -228,6 +252,38 @@ impl FileVariant {
             Ok(loc) => loc.stat().is_ok(),
             Err(_) => false,
         }
+    }
+
+    /// Create a directory at the given path.
+    ///
+    /// # Arguments
+    /// * `path` - The path of the directory to create
+    ///
+    /// # Returns
+    /// * `Ok(())` - Success (directory created or already exists)
+    /// * `Err(TEE_ERROR_GENERIC)` - Error occurred (e.g., parent directory doesn't exist)
+    ///
+    /// # Note
+    /// This function does not create parent directories. If the parent directory
+    /// doesn't exist, the function will return an error.
+    /// If the directory already exists, the function returns success (idempotent behavior).
+    pub fn create_dir(path: &str) -> TeeResult {
+        let mode = NodePermission::from_bits_truncate(0o755);
+        with_fs(AT_FDCWD, |fs| {
+            match fs.create_dir(path, mode) {
+                Ok(_) => Ok(()),
+                Err(VfsError::AlreadyExists) => {
+                    // Directory already exists, return success (idempotent)
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("create_dir failed for {}: {:?}", path, e);
+                    Err(KError::InvalidInput)
+                }
+            }
+        })
+        .inspect_err(|e| error!("tee_crate_dir with_fs failed for {}: {:?}", path, e))
+        .map_err(|_| TEE_ERROR_GENERIC)
     }
 }
 
@@ -270,9 +326,18 @@ impl TeeFileLike for FileVariant {
 
     fn pwrite(&self, buf: &[u8], offset: usize) -> TeeResult<usize> {
         with_file(self, |file| {
-            file.write_at(buf, offset as _)
+            let len = file
+                .write_at(buf, offset as _)
                 .inspect_err(|e| error!("write_at to file failed: {:?}", e))
-                .map_err(|_| TEE_ERROR_GENERIC)
+                .map_err(|_| TEE_ERROR_GENERIC)?;
+
+            // Use sync(true) to sync both data and metadata (file size, etc.)
+            // This is important for ext4 filesystem to ensure file size changes are persisted
+            file.sync(true)
+                .inspect_err(|e| error!("pwrite: sync file failed: {:?}", e))
+                .map_err(|_| TEE_ERROR_GENERIC)?;
+
+            Ok(len)
         })
     }
 
@@ -332,6 +397,7 @@ pub fn file_ops_test() {
 
 #[cfg(feature = "tee_test")]
 pub mod tests_file_ops {
+    use rand::{Rng, distr::Alphanumeric};
     use unittest::{
         test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
     };
@@ -394,7 +460,7 @@ pub mod tests_file_ops {
             assert!(FileVariant::exists(path));
             // remove file
             {
-                let n = FileVariant::remove(path);
+                let n = FileVariant::remove_file(path);
                 assert!(n.is_ok());
             }
             // check if file exists
@@ -406,6 +472,28 @@ pub mod tests_file_ops {
             // }
         }
     }
+
+    test_fn! {
+
+        using TestResult;
+
+        fn test_file_ops_create_dir() {
+            // create a radom path in /tmp/
+            let path = "/tmp/test_create_dir/";
+            let n = FileVariant::create_dir(path);
+            assert!(n.is_ok());
+            // check if directory exists
+            assert!(FileVariant::exists(path));
+            // create dir again
+            let n = FileVariant::create_dir(path);
+            assert!(n.is_ok());
+            // remove directory
+            let n = FileVariant::remove_dir(path);
+            assert!(n.is_ok());
+            // check if directory no longer exists
+            assert!(!FileVariant::exists(path));
+        }
+    }
     tests_name! {
         TEST_FILE_OPS;
         file_ops;
@@ -413,5 +501,6 @@ pub mod tests_file_ops {
 
         test_file_ops_read,
         test_file_ops_exists,
+        test_file_ops_create_dir,
     }
 }

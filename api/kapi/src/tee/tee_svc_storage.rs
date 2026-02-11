@@ -11,9 +11,11 @@ use core::{
 
 use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
 use ksync::{Mutex, RwLock};
+use ktypes::Once;
 use tee_raw_sys::*;
 
 use super::{
+    common::file_ops::FileVariant,
     fs_dirfile::{TeeFsDirfileFileh, tee_fs_dirfile_fileh_to_fname},
     tee_fs::tee_fs_dirent,
     tee_misc::{tee_b2hs, tee_b2hs_hsbuf_size},
@@ -38,6 +40,7 @@ use crate::tee::TeeResult;
 
 pub const TEE_UUID_HEX_LEN: usize = size_of::<TEE_UUID>();
 
+pub static ROOT_TEE_FS_INIT: Once<()> = Once::new();
 #[repr(C)]
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
 struct tee_svc_storage_head {
@@ -152,7 +155,7 @@ pub fn tee_svc_storage_create_dirname(buf: &mut [u8], uuid: &TEE_UUID) -> TeeRes
     Ok(())
 }
 
-const CFG_TEE_FS_PARENT_PATH: &str = "/tmp/";
+const CFG_TEE_FS_PARENT_PATH: &str = "/tee/";
 
 pub fn tee_svc_storage_create_filename_dfh(
     buf: &mut [u8],
@@ -160,6 +163,9 @@ pub fn tee_svc_storage_create_filename_dfh(
 ) -> TeeResult<usize> {
     let prefix = CFG_TEE_FS_PARENT_PATH;
 
+    ROOT_TEE_FS_INIT.call_once(|| {
+        let _ = FileVariant::create_dir(CFG_TEE_FS_PARENT_PATH);
+    });
     if buf.len() < prefix.len() + 1 {
         return Err(TEE_ERROR_SHORT_BUFFER);
     }

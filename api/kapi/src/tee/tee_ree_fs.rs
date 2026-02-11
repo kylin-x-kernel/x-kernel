@@ -1579,6 +1579,11 @@ pub mod tests_tee_ree_fs {
             expected_full_data.extend_from_slice(test_data);
             expected_full_data.extend_from_slice(additional_data);
             assert_eq!(&full_buffer[..full_len], expected_full_data.as_slice());
+
+            // Cleanup: close and remove the test file
+            // Note: File system is persistent, so we need to explicitly remove the file
+            // Rust's Drop trait only releases memory objects, not filesystem files
+            // let _ = tee_fs_rpc_remove_dfh(Some(&fdp.dfh));
         }
     }
 
