@@ -14,7 +14,10 @@ pub(crate) mod fs9p;
 
 use cfg_if::cfg_if;
 use fs_ng_vfs::{Filesystem, VfsResult};
-use kdriver::{BlockDevice, Virtio9pDevice};
+use kdriver::BlockDevice;
+
+#[cfg(feature = "fs9p")]
+use kdriver::Virtio9pDevice;
 
 /// Create the default filesystem instance for the given block device.
 #[cfg(feature = "ext4")]

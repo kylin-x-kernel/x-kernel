@@ -16,7 +16,10 @@ extern crate log;
 mod test_path_resolver;
 mod test_working_context;
 
-use kdriver::{BlockDevice, Virtio9pDevice, DeviceContainer, prelude::*};
+use kdriver::{BlockDevice, DeviceContainer, prelude::*};
+
+#[cfg(feature = "fs9p")]
+use kdriver::Virtio9pDevice;
 
 #[cfg(feature = "fat")]
 mod disk;

@@ -47,14 +47,12 @@ sched-cfs = ["ktask/sched-cfs"]
 fs = [
     "alloc",
     "paging",
-    "kdriver/virtio_9p",
     "dep:kfs",
-    "kruntime/fs9p",
 ] # TODO: try to remove "paging"
-fs-ext4 = ["fs", "kfs/ext4"]
-fs-fat = ["fs", "kfs/fat"]
-fs-9p = ["fs", "kfs/fs9p"]
-fs-times = ["fs", "kfs/times"]
+fs-ext4 = ["kfs/ext4", "kdriver/virtio-blk", "kruntime/fs"]
+fs-fat = ["kfs/fat", "kdriver/virtio-blk", "kruntime/fs"]
+fs-9p = ["kfs/fs9p", "kdriver/virtio_9p", "kruntime/fs9p"]
+fs-times = ["kfs/times"]
 
 # Networking
 net = ["alloc", "paging", "kdriver/virtio-net", "dep:knet", "kruntime/net"]

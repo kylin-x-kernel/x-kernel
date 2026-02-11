@@ -11,7 +11,8 @@ homepage.workspace = true
 # all of platforms should enable default features
 kernel = [
     "kfeat/alloc-slab",
-    "kfeat/fs-9p",
+    "kfeat/fs",
+    "kfeat/fs-ext4",
     "kfeat/net",
     "kfeat/page-alloc-4g",
     "kfeat/rtc",
