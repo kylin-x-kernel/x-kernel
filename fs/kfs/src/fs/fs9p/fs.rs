@@ -32,7 +32,7 @@ impl Fs9pFilesystem {
         let mut session = Session::new(transport, mount_tag);
         session
             .negotiate()
-            .map_err(|e| fs_ng_vfs::VfsError::from(kerrno::LinuxError::EIO))?;
+            .map_err(|_| fs_ng_vfs::VfsError::from(kerrno::LinuxError::EIO))?;
 
         let fs = Arc::new(Self {
             inner: Mutex::new(session),

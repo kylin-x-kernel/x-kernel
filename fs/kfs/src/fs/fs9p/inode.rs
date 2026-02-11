@@ -314,7 +314,7 @@ impl FileNodeOps for Inode {
         result
     }
 
-    fn set_symlink(&self, target: &str) -> VfsResult<()> {
+    fn set_symlink(&self, _target: &str) -> VfsResult<()> {
         // For 9P, symlinks are created atomically via TSYMLINK in create().
         // Changing an existing symlink target is not part of the 9P protocol.
         Err(VfsError::Unsupported)

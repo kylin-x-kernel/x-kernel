@@ -21,7 +21,6 @@ const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755)
 
 /// Mount a filesystem at the specified path, creating the path if it doesn't exist
 fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()> {
-    error!("Mounting {} at {}", mount_fs.name(), path);
     match fs.resolve(path) {
         Ok(loc) => {
             if loc.check_is_dir().is_err() {
@@ -34,9 +33,7 @@ fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()>
             fs.create_dir(path, DIR_PERMISSION)?;
         }
     }
-    error!("Mounting {} at {}", mount_fs.name(), path);
     fs.resolve(path)?.mount(&mount_fs)?;
-    info!("Mounted {} at {}", mount_fs.name(), path);
     Ok(())
 }
 
@@ -57,18 +54,14 @@ pub fn mount_all() -> LinuxResult<()> {
             fs.create_dir(&path, DIR_PERMISSION)?;
         }
     }
-    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
     path.push("subsystem");
-    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
     if let Err(err) = fs.symlink("whatever", &path) {
         let linux_err = LinuxError::from(err);
         if linux_err != LinuxError::EEXIST {
             return Err(linux_err);
         }
     }
-    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
     drop(fs);
-    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
 
     #[cfg(feature = "dev-log")]
     if let Err(err) = dev::bind_dev_log() {

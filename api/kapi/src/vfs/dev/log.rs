@@ -12,7 +12,6 @@ use knet::{
 
 /// Bind /dev/log as a Unix domain socket for syslog messages
 pub fn bind_dev_log() -> LinuxResult<()> {
-    error!("Binding /dev/log for syslog messages");
     let server = UnixDomainSocket::new(DgramTransport::new(1));
     if let Err(err) = server.bind(SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into()))) {
         let kind = KErrorKind::try_from(err);
@@ -25,7 +24,6 @@ pub fn bind_dev_log() -> LinuxResult<()> {
         }
         return Err(LinuxError::from(err));
     }
-    error!("Bound /dev/log for syslog messages");
     ktask::spawn_with_name(
         move || {
             let mut buf = [0u8; 65536];
