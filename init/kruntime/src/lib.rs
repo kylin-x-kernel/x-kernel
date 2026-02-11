@@ -210,6 +210,9 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         #[cfg(feature = "fs")]
         kfs::init_filesystems(all_devices.block);
 
+        #[cfg(feature = "fs9p")]
+        kfs::init_9pfilesystems(all_devices.virtio_9p);
+
         #[cfg(feature = "net")]
         knet::init_network(all_devices.net);
         #[cfg(feature = "vsock")]

@@ -13,7 +13,7 @@ use fs_ng_vfs::{
     path::{Path, PathBuf},
 };
 pub use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
-use kerrno::LinuxResult;
+use kerrno::{LinuxError, LinuxResult};
 use kfs::{FS_CONTEXT, FsContext};
 pub use tmp::MemoryFs;
 
@@ -21,9 +21,20 @@ const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755)
 
 /// Mount a filesystem at the specified path, creating the path if it doesn't exist
 fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()> {
-    if fs.resolve(path).is_err() {
-        fs.create_dir(path, DIR_PERMISSION)?;
+    error!("Mounting {} at {}", mount_fs.name(), path);
+    match fs.resolve(path) {
+        Ok(loc) => {
+            if loc.check_is_dir().is_err() {
+                // Path exists but is not a directory, replace it with a directory.
+                fs.remove_file(path)?;
+                fs.create_dir(path, DIR_PERMISSION)?;
+            }
+        }
+        Err(_) => {
+            fs.create_dir(path, DIR_PERMISSION)?;
+        }
     }
+    error!("Mounting {} at {}", mount_fs.name(), path);
     fs.resolve(path)?.mount(&mount_fs)?;
     info!("Mounted {} at {}", mount_fs.name(), path);
     Ok(())
@@ -46,12 +57,26 @@ pub fn mount_all() -> LinuxResult<()> {
             fs.create_dir(&path, DIR_PERMISSION)?;
         }
     }
+    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
     path.push("subsystem");
-    fs.symlink("whatever", &path)?;
+    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
+    if let Err(err) = fs.symlink("whatever", &path) {
+        let linux_err = LinuxError::from(err);
+        if linux_err != LinuxError::EEXIST {
+            return Err(linux_err);
+        }
+    }
+    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
     drop(fs);
+    error!("Creating symlink /sys/class/graphics/fb0/device/subsystem");
 
     #[cfg(feature = "dev-log")]
-    dev::bind_dev_log().expect("Failed to bind /dev/log");
+    if let Err(err) = dev::bind_dev_log() {
+        if err != LinuxError::ENOSYS && err != LinuxError::EOPNOTSUPP {
+            return Err(err);
+        }
+        warn!("/dev/log not available: {err}");
+    }
 
     Ok(())
 }

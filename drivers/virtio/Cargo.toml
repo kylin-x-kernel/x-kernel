@@ -18,8 +18,10 @@ gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]
 socket = ["alloc", "dep:vsock"]
+virtio_9p = ["alloc"]
 
 [dependencies]
+zerocopy = "0.8"
 driver_base = { workspace = true }
 block = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
@@ -27,6 +29,6 @@ input = { workspace = true, optional = true }
 net = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 log = { workspace = true }
-virtio-drivers.workspace = true
+virtio-drivers = { workspace = true }
 unittest = { workspace = true }
-zerocopy = "0.8"
+

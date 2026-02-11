@@ -41,6 +41,11 @@ mod net;
 #[cfg(feature = "net")]
 pub use self::net::VirtIoNetDev;
 
+#[cfg(feature = "virtio_9p")]
+mod virtio_9p;
+#[cfg(feature = "virtio_9p")]
+pub use self::virtio_9p::VirtIo9pDev;
+
 #[cfg(unittest)]
 pub mod mock_virtio;
 #[cfg(feature = "socket")]
@@ -112,6 +117,7 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
         GPU => Some(DeviceKind::Display),
         Input => Some(DeviceKind::Input),
         Socket => Some(DeviceKind::Vsock),
+        _9P => Some(DeviceKind::Virtio9p),
         _ => None,
     }
 }

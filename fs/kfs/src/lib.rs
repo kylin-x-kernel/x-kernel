@@ -16,7 +16,7 @@ extern crate log;
 mod test_path_resolver;
 mod test_working_context;
 
-use kdriver::{BlockDevice as KBlockDevice, DeviceContainer, prelude::*};
+use kdriver::{BlockDevice, Virtio9pDevice, DeviceContainer, prelude::*};
 
 #[cfg(feature = "fat")]
 mod disk;
@@ -36,7 +36,7 @@ pub use path_resolver::PathResolver;
 pub use working_context::WorkingContext;
 
 /// Initialize the filesystem subsystem and mount the root filesystem.
-pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
+pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
     info!("Initialize filesystem subsystem...");
 
     let dev = {
@@ -61,3 +61,21 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
     let mp = fs_ng_vfs::Mountpoint::new_root(&fs);
     ROOT_FS_CONTEXT.call_once(|| FsContext::new(mp.root_location()));
 }
+
+pub fn init_9pfilesystems(mut virtio_9p_devs: DeviceContainer<Virtio9pDevice>) {
+    info!("Initialize filesystem subsystem...");
+    let dev_9p = virtio_9p_devs
+        .take_one()
+        .expect("No virtio-9p device found!");
+    info!("  use virtio-9p device: {:?}", dev_9p.name());
+    let mount_tag = dev_9p
+        .mount_tag();
+    info!("  mount tag: {:?}", mount_tag);
+
+    let fs = fs::new_9p_filesystem(dev_9p).expect("Failed to initialize filesystem");
+    info!("  filesystem type: {:?}", fs.name());
+
+    let mp = fs_ng_vfs::Mountpoint::new_root(&fs);
+    ROOT_FS_CONTEXT.call_once(|| FsContext::new(mp.root_location()));
+}
+

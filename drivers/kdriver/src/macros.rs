@@ -48,6 +48,14 @@ macro_rules! register_vsock_driver {
     };
 }
 
+/// Define the unified type for 9P filesystem devices.
+macro_rules! register_virtio_9p_driver {
+    ($driver_type:ty, $device_type:ty) => {
+        /// The unified type of the 9P filesystem devices.
+        pub type Virtio9pDevice = $device_type;
+    };
+}
+
 /// Expand to iterate through all registered drivers under the current build config.
 macro_rules! for_each_drivers {
     (type $drv_type:ident, $code:block) => {{
@@ -80,6 +88,11 @@ macro_rules! for_each_drivers {
         #[cfg(vsock_dev = "virtio-socket")]
         {
             type $drv_type = <virtio::VirtIoSocket as VirtIoDevMeta>::Driver;
+            $code
+        }
+        #[cfg(virtio_9p_dev = "virtio-9p")]
+        {
+            type $drv_type = <virtio::VirtIo9p as VirtIoDevMeta>::Driver;
             $code
         }
         #[cfg(block_dev = "ramdisk")]

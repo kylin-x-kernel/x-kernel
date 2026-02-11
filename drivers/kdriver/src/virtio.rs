@@ -112,6 +112,21 @@ cfg_if! {
     }
 }
 
+cfg_if! {
+    if #[cfg(virtio_9p_dev = "virtio-9p")] {
+        pub struct VirtIo9p;
+
+        impl VirtIoDevMeta for VirtIo9p {
+            const DEVICE_TYPE: DeviceKind = DeviceKind::Virtio9p;
+            type Device = virtio::VirtIo9pDev<VirtIoHalImpl, VirtIoTransport>;
+
+            fn try_new(transport: VirtIoTransport, _irq:  Option<usize>) -> DriverResult<DeviceEnum> {
+                Ok(DeviceEnum::from_virtio_9p(Self::Device::try_new(transport)?))
+            }
+        }
+    }
+}
+
 /// A common driver for all VirtIO devices that implements [`DriverProbe`].
 pub struct VirtIoDriver<D: VirtIoDevMeta + ?Sized>(PhantomData<D>);
 
@@ -153,6 +168,7 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             (DeviceKind::Input, 0x1052) => {}
             (DeviceKind::Display, 0x1050) => {}
             (DeviceKind::Vsock, 0x1053) => {}
+            (DeviceKind::Virtio9p, 0x1009) => {}
             _ => return None,
         }
 

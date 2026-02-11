@@ -197,3 +197,31 @@ cfg_if! {
         }
     }
 }
+
+cfg_if! {
+    if #[cfg(virtio_9p_dev = "dummy")] {
+        /// Placeholder 9P filesystem device.
+        pub struct DummyVirtio9pDev;
+        /// Placeholder 9P filesystem driver.
+        pub struct DummyVirtio9pDriver;
+        register_virtio_9p_driver!(DummyVirtio9pDriver, DummyVirtio9pDev);
+
+        impl DriverOps for DummyVirtio9pDev {
+            fn device_kind(&self) -> DeviceKind {
+                DeviceKind::Virtio9p
+            }
+            fn name(&self) -> &str {
+                "dummy-virtio_9p"
+            }
+        }
+
+        impl Virtio9pDriverOps for DummyVirtio9pDev {
+            fn mount(&mut self, _mount_point: &str) -> DriverResult<()> {
+                Err(DriverError::Unsupported)
+            }
+            fn unmount(&mut self) -> DriverResult<()> {
+                Err(DriverError::Unsupported)
+            }
+        }
+    }
+}

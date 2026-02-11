@@ -6,7 +6,7 @@
 //!
 //! Combines PathResolver and WorkingContext to provide high-level filesystem operations.
 
-use alloc::{collections::vec_deque::VecDeque, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, collections::vec_deque::VecDeque, string::String, vec::Vec};
 
 use fs_ng_vfs::{
     Location, Metadata, NodePermission, NodeType, VfsResult,
@@ -15,6 +15,9 @@ use fs_ng_vfs::{
 use kio::{Read, Write};
 
 use crate::{File, PathResolver, ReadDir, WorkingContext};
+
+#[cfg(feature = "fs9p")]
+use crate::fs::fs9p::Inode as Fs9pInode;
 
 /// Filesystem operations - combines path resolution and working context
 ///
@@ -196,11 +199,37 @@ impl FsOperations {
         let (dir, name) = self
             .resolver
             .resolve_nonexistent(self.context.cwd(), link_path.as_ref())?;
+        let dir_path = dir.absolute_path().ok();
+        error!(
+            "symlink: target={} link_dir={} link_name={} fs={}",
+            target.as_ref(),
+            dir_path.as_ref().map(|p| p.as_str()).unwrap_or("<unknown>"),
+            name,
+            dir.filesystem().name()
+        );
         if dir.lookup_no_follow(name).is_ok() {
             return Err(fs_ng_vfs::VfsError::AlreadyExists);
         }
+
+        #[cfg(feature = "fs9p")]
+        if let Ok(fs9p_dir) = dir.entry().as_dir()?.downcast::<Fs9pInode>() {
+            let entry = fs9p_dir.create_symlink_entry(name, target.as_ref())?;
+            let dir_node = dir.entry().as_dir()?;
+            let _ = dir_node.insert_cache(name.to_owned(), entry.clone());
+            return Ok(Location::new(dir.mountpoint().clone(), entry));
+        }
+
         let symlink = dir.create(name, NodeType::Symlink, NodePermission::default())?;
-        symlink.entry().as_file()?.set_symlink(target.as_ref())?;
+        if let Err(err) = symlink.entry().as_file()?.set_symlink(target.as_ref()) {
+            error!(
+                "symlink: set_symlink failed target={} link_name={} fs={} err={:?}",
+                target.as_ref(),
+                name,
+                dir.filesystem().name(),
+                err
+            );
+            return Err(err);
+        }
         Ok(symlink)
     }
 

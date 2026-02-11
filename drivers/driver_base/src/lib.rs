@@ -35,6 +35,8 @@ pub enum DeviceKind {
     Input,
     /// Vsock device (e.g., virtio-vsock).
     Vsock,
+    /// 9P filesystem device (e.g., virtio-9p).
+    Virtio9p,
 }
 
 /// The error type for driver operation failures.

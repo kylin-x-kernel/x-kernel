@@ -61,6 +61,7 @@ NET ?= y
 GRAPHIC ?= n
 INPUT ?= y
 VSOCK ?= y
+VIRTIO_9P ?= y
 BUS ?= pci
 MEM ?= 1g
 ACCEL ?= y

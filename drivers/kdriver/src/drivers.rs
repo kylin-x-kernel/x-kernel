@@ -69,6 +69,12 @@ register_vsock_driver!(
     <virtio::VirtIoSocket as VirtIoDevMeta>::Device
 );
 
+#[cfg(virtio_9p_dev = "virtio-9p")]
+register_virtio_9p_driver!(
+    <virtio::VirtIo9p as VirtIoDevMeta>::Driver,
+    <virtio::VirtIo9p as VirtIoDevMeta>::Device
+);
+
 cfg_if::cfg_if! {
     if #[cfg(block_dev = "ramdisk")] {
         pub struct RamDiskDriver;

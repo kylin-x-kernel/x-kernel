@@ -20,6 +20,7 @@ ipi = ["dep:kipi"]
 display = ["dep:kdriver", "dep:fbdevice"]
 input = ["dep:kdriver", "dep:inputdev"]
 fs = ["dep:kdriver", "dep:kfs"]
+fs9p = ["dep:kdriver", "dep:kfs"]
 net = ["dep:kdriver", "dep:knet"]
 vsock = ["net", "dep:kdriver"]
 

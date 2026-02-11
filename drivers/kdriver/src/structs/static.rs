@@ -13,6 +13,8 @@ pub use crate::drivers::InputDevice;
 pub use crate::drivers::NetDevice;
 #[cfg(feature = "vsock")]
 pub use crate::drivers::VsockDevice;
+#[cfg(feature = "virtio_9p")]
+pub use crate::drivers::Virtio9pDevice;
 
 impl super::DeviceEnum {
     /// Constructs a network device.
@@ -43,5 +45,11 @@ impl super::DeviceEnum {
     #[cfg(feature = "vsock")]
     pub const fn from_vsock(dev: VsockDevice) -> Self {
         Self::Vsock(dev)
+    }
+
+    /// Constructs a 9P filesystem device.
+    #[cfg(feature = "virtio_9p")]
+    pub const fn from_virtio_9p(dev: Virtio9pDevice) -> Self {
+        Self::Virtio9p(dev)
     }
 }
