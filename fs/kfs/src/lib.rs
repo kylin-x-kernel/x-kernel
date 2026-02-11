@@ -36,6 +36,7 @@ pub use path_resolver::PathResolver;
 pub use working_context::WorkingContext;
 
 /// Initialize the filesystem subsystem and mount the root filesystem.
+#[cfg(not(feature = "fs9p"))]
 pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
     info!("Initialize filesystem subsystem...");
 
@@ -62,6 +63,7 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
     ROOT_FS_CONTEXT.call_once(|| FsContext::new(mp.root_location()));
 }
 
+#[cfg(feature = "fs9p")]
 pub fn init_9pfilesystems(mut virtio_9p_devs: DeviceContainer<Virtio9pDevice>) {
     info!("Initialize filesystem subsystem...");
     let dev_9p = virtio_9p_devs

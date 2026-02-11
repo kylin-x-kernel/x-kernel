@@ -10,5 +10,5 @@ mod protocol;
 mod session;
 mod transport;
 
-pub use session::P9Session as Session;
+pub use session::{FileAttr, P9DirEntry, P9Session as Session};
 pub use transport::Transport;

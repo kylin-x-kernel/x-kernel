@@ -2,85 +2,59 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Virtio-9p filesystem adapter.
-use alloc::{boxed::Box, string::ToString, string::String, sync::Arc};
+//! 9P filesystem adapter — filesystem-level operations.
+
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::cell::OnceCell;
 
+use fs9p::Session;
 use fs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult,
     path::MAX_NAME_LEN,
 };
-use fs9p::Session;
 use kdriver::Virtio9pDevice;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
 
-use super::{Inode, util::into_vfs_err};
+use super::{VirtioTransport, inode::Inode};
 
-struct Virtio9pTransport {
-    dev: Mutex<Virtio9pDevice>,
-}
-
-impl Virtio9pTransport {
-    fn new(dev: Virtio9pDevice) -> Self {
-        Self {
-            dev: Mutex::new(dev),
-        }
-    }
-}
-
-impl fs9p::Transport for Virtio9pTransport {
-    fn request(&self, req: &[u8], resp: &mut [u8]) -> Result<usize, String> {
-        let mut dev = self.dev.lock();
-        dev.request(req, resp)
-            .map_err(|err| alloc::format!("{err:?}"))
-    }
-}
-
-pub(crate) struct Fs9pState {
-    pub session: Session,
-}
-
-/// Virtio-9p filesystem implementation.
+/// 9P filesystem implementation backed by a virtio-9p device.
 pub struct Fs9pFilesystem {
-    inner: Mutex<Fs9pState>,
+    inner: Mutex<Session>,
     root_dir: OnceCell<DirEntry>,
 }
 
 impl Fs9pFilesystem {
-    /// Create a new 9p filesystem instance backed by a virtio-9p device.
+    /// Create a new 9P filesystem instance from a virtio-9p device.
     pub fn new(dev: Virtio9pDevice) -> VfsResult<Filesystem> {
-        let mount_tag = dev.mount_tag().to_string();
-        let transport = Box::new(Virtio9pTransport::new(dev));
+        let mount_tag = dev.mount_tag().into();
+        let transport = Box::new(VirtioTransport(Mutex::new(dev)));
         let mut session = Session::new(transport, mount_tag);
-        session.negotiate().map_err(into_vfs_err)?;
-
-        let root_info = session.lookup_path("/").ok();
-        let root_ino = root_info
-            .as_ref()
-            .map(|info| info.qid_path)
-            .unwrap_or(1);
+        session
+            .negotiate()
+            .map_err(|e| fs_ng_vfs::VfsError::from(kerrno::LinuxError::EIO))?;
 
         let fs = Arc::new(Self {
-            inner: Mutex::new(Fs9pState { session }),
+            inner: Mutex::new(session),
             root_dir: OnceCell::new(),
         });
+
         let _ = fs.root_dir.set(DirEntry::new_dir(
             |this| {
-                DirNode::new(Inode::new(
+                DirNode::new(Inode::new_dir(
                     fs.clone(),
-                    root_ino,
-                    true,
-                    false,
                     Some(this),
-                    String::from("/"),
+                    Some("/".into()),
                 ))
             },
             Reference::root(),
         ));
+
         Ok(Filesystem::new(fs))
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<'_, Fs9pState> {
+    /// Lock the inner 9P session for sending requests.
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Session> {
         self.inner.lock()
     }
 }
@@ -98,8 +72,10 @@ impl FilesystemOps for Fs9pFilesystem {
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
+        // 9P does not expose filesystem-wide statistics in a standard way.
+        // Return a minimal StatFs with zeroed fields.
         Ok(StatFs {
-            fs_type: 0x9fa0,
+            fs_type: 0x01021997, // V9FS_MAGIC
             block_size: 4096,
             blocks: 0,
             blocks_free: 0,
@@ -110,5 +86,10 @@ impl FilesystemOps for Fs9pFilesystem {
             fragment_size: 0,
             mount_flags: 0,
         })
+    }
+
+    fn flush(&self) -> VfsResult<()> {
+        // 9P writes are synchronous through virtio — no explicit flush needed.
+        Ok(())
     }
 }

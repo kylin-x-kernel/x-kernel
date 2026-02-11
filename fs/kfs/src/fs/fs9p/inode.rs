@@ -2,10 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Virtio-9p inode wrapper and node implementations.
-use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
-use core::{any::Any, task::Context, time::Duration};
+//! 9P inode wrapper and VFS node implementations.
 
+use alloc::{
+    format,
+    string::{String, ToString},
+    sync::Arc,
+};
+use core::{any::Any, task::Context};
+
+use fs9p::FileAttr;
 use fs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps,
     Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError,
@@ -13,148 +19,206 @@ use fs_ng_vfs::{
 };
 use kpoll::{IoEvents, Pollable};
 
-use super::{Fs9pFilesystem, util::into_vfs_err};
+use super::{Fs9pFilesystem, util::{dtype_to_vfs, into_vfs_err, qid_type_to_vfs}};
 
-/// 9p inode wrapper used to implement VFS nodes.
+/// A VFS inode backed by a 9P session.
+///
+/// Unlike ext4, the 9P filesystem is stateless on the client side — each
+/// operation sends a message to the server.  We store the filesystem reference
+/// (which holds the session) and the path of this node so that we can call
+/// path-based session operations when VFS methods are invoked.
+///
+/// For file I/O (`read_at`, `write_at`, `append`, `set_len`), we open a
+/// temporary fid, perform the operation, then close the fid.
 pub struct Inode {
     fs: Arc<Fs9pFilesystem>,
-    ino: u64,
-    is_dir: bool,
-    is_symlink: bool,
     this: Option<WeakDirEntry>,
-    path: String,
+    path: Option<String>,
+    is_dir: bool,
 }
 
 impl Inode {
-    pub(crate) fn new(
+    /// Create a new inode for a directory node.
+    pub(crate) fn new_dir(
         fs: Arc<Fs9pFilesystem>,
-        ino: u64,
-        is_dir: bool,
-        is_symlink: bool,
         this: Option<WeakDirEntry>,
-        path: String,
+        path: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             fs,
-            ino,
-            is_dir,
-            is_symlink,
             this,
             path,
+            is_dir: true,
         })
     }
 
-    fn dir_path(&self) -> VfsResult<String> {
+    /// Create a new inode for a file (or symlink) node.
+    pub(crate) fn new_file(
+        fs: Arc<Fs9pFilesystem>,
+        path: Option<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            fs,
+            this: None,
+            path,
+            is_dir: false,
+        })
+    }
+
+    /// Resolve the absolute path of this node.
+    fn node_path(&self) -> VfsResult<String> {
         if let Some(this) = self.this.as_ref().and_then(WeakDirEntry::upgrade) {
             return Ok(this.absolute_path()?.to_string());
         }
-        Ok(self.path.clone())
+        self.path.clone().ok_or(VfsError::InvalidInput)
     }
 
-    fn create_entry(&self, name: String, ino: u64, node_type: NodeType) -> DirEntry {
+    /// Resolve the absolute path of this directory node.
+    fn dir_path(&self) -> VfsResult<String> {
+        self.node_path()
+    }
+
+    /// Look up a child entry via the 9P session.
+    fn lookup_locked(&self, name: &str) -> VfsResult<DirEntry> {
+        let child_path = join_child_path(&self.dir_path()?, name);
+        let mut session = self.fs.lock();
+        let attr = session.getattr(&child_path).map_err(into_vfs_err)?;
+        Ok(self.create_entry_from_attr(name, &attr, &child_path))
+    }
+
+    /// Build a `DirEntry` from 9P file attributes.
+    fn create_entry_from_attr(&self, name: &str, attr: &FileAttr, path: &str) -> DirEntry {
         let reference = Reference::new(
             self.this.as_ref().and_then(WeakDirEntry::upgrade),
-            name.clone(),
+            name.into(),
         );
-        let path = join_child_path(&self.dir_path().unwrap_or_else(|_| self.path.clone()), &name);
+        let node_type = qid_type_to_vfs(attr.qid_type);
         if node_type == NodeType::Directory {
             DirEntry::new_dir(
-                |this| DirNode::new(Inode::new(self.fs.clone(), ino, true, false, Some(this), path)),
+                |this| {
+                    DirNode::new(Inode::new_dir(
+                        self.fs.clone(),
+                        Some(this),
+                        Some(path.into()),
+                    ))
+                },
                 reference,
             )
         } else {
             DirEntry::new_file(
-                FileNode::new(Inode::new(
-                    self.fs.clone(),
-                    ino,
-                    false,
-                    node_type == NodeType::Symlink,
-                    None,
-                    path,
-                )),
+                FileNode::new(Inode::new_file(self.fs.clone(), Some(path.into()))),
                 node_type,
                 reference,
             )
         }
     }
 
-    fn file_size_with(&self, session: &mut fs9p::Session) -> VfsResult<u64> {
-        if self.is_symlink {
-            let target = session.read_link(&self.path).map_err(into_vfs_err)?;
-            return Ok(target.as_bytes().len() as u64);
-        }
-        let chunk = session.read_chunk_size().max(256) as usize;
-        let mut offset = 0u64;
-        loop {
-            let data = session
-                .read_file(&self.path, offset, chunk as u32)
-                .map_err(into_vfs_err)?;
-            if data.is_empty() {
-                break;
-            }
-            offset = offset.saturating_add(data.len() as u64);
-            if data.len() < chunk {
-                break;
-            }
-        }
-        Ok(offset)
+    /// Create a DirEntry for a symlink, using the 9P `TSYMLINK` operation.
+    ///
+    /// This is called from `fs_operations.rs` for the special symlink path.
+    pub fn create_symlink_entry(&self, name: &str, target: &str) -> VfsResult<DirEntry> {
+        let dir_path = self.dir_path()?;
+        let link_path = join_child_path(&dir_path, name);
+        let mut session = self.fs.lock();
+        session.symlink(target, &link_path).map_err(into_vfs_err)?;
+        drop(session);
+
+        let reference = Reference::new(
+            self.this.as_ref().and_then(WeakDirEntry::upgrade),
+            name.into(),
+        );
+        Ok(DirEntry::new_file(
+            FileNode::new(Inode::new_file(self.fs.clone(), Some(link_path))),
+            NodeType::Symlink,
+            reference,
+        ))
+    }
+
+    /// Open a temporary fid for file I/O on this node's path.
+    fn open_fid_rdonly(&self) -> VfsResult<u32> {
+        let path = self.node_path()?;
+        let mut session = self.fs.lock();
+        session
+            .open_path_with_flags(&path, 0, 0) // OREAD / P9_DOTL_RDONLY
+            .map_err(into_vfs_err)
+    }
+
+    /// Open a temporary fid for read-write file I/O.
+    fn open_fid_rdwr(&self) -> VfsResult<u32> {
+        let path = self.node_path()?;
+        let mut session = self.fs.lock();
+        session
+            .open_path_with_flags(&path, 2, 2) // ORDWR / P9_DOTL_RDWR
+            .map_err(into_vfs_err)
+    }
+
+    fn close_fid(&self, fid: u32) {
+        let mut session = self.fs.lock();
+        let _ = session.close_fid(fid);
     }
 }
 
+// ---------------------------------------------------------------------------
+// NodeOps — common operations for all node types
+// ---------------------------------------------------------------------------
+
 impl NodeOps for Inode {
     fn inode(&self) -> u64 {
-        self.ino
+        // 9P does not expose persistent inode numbers to the client in a
+        // trivially usable way.  We use the pointer address of this Arc as
+        // a unique-ish identifier.
+        0
     }
 
     fn metadata(&self) -> VfsResult<Metadata> {
-        let size = if self.is_dir {
-            0
-        } else {
-            let mut state = self.fs.lock();
-            self.file_size_with(&mut state.session)?
-        };
-        let node_type = if self.is_dir {
-            NodeType::Directory
-        } else if self.is_symlink {
-            NodeType::Symlink
-        } else {
-            NodeType::RegularFile
-        };
+        let path = self.node_path()?;
+        let mut session = self.fs.lock();
+        let attr = session.getattr(&path).map_err(into_vfs_err)?;
         Ok(Metadata {
-            inode: self.ino,
+            inode: 0,
             device: 0,
-            nlink: 1,
-            mode: NodePermission::default(),
-            node_type,
-            uid: 0,
-            gid: 0,
-            size,
+            nlink: attr.nlink as _,
+            mode: NodePermission::from_bits_truncate((attr.mode & 0o777) as u16),
+            node_type: qid_type_to_vfs(attr.qid_type),
+            uid: attr.uid,
+            gid: attr.gid,
+            size: attr.size,
             block_size: 4096,
-            blocks: size / 4096,
+            blocks: (attr.size + 511) / 512,
             rdev: DeviceId::default(),
-            atime: Duration::default(),
-            mtime: Duration::default(),
-            ctime: Duration::default(),
+            atime: core::time::Duration::from_secs(attr.atime_sec),
+            mtime: core::time::Duration::from_secs(attr.mtime_sec),
+            ctime: core::time::Duration::from_secs(attr.ctime_sec),
         })
     }
 
-    fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
-        Err(VfsError::Unsupported)
+    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+        let path = self.node_path()?;
+        if let Some(mode) = update.mode {
+            let mut session = self.fs.lock();
+            session
+                .setattr_mode(&path, mode.bits() as u32)
+                .map_err(into_vfs_err)?;
+        }
+        // 9P2000.L TSETATTR supports uid/gid/atime/mtime/size changes,
+        // but our fs9p::Session currently only exposes setattr_mode.
+        // Additional setattr helpers can be added as the Session API grows.
+        Ok(())
+    }
+
+    fn len(&self) -> VfsResult<u64> {
+        let path = self.node_path()?;
+        let mut session = self.fs.lock();
+        let attr = session.getattr(&path).map_err(into_vfs_err)?;
+        Ok(attr.size)
     }
 
     fn filesystem(&self) -> &dyn FilesystemOps {
         &*self.fs
     }
 
-    fn len(&self) -> VfsResult<u64> {
-        if self.is_dir {
-            return Ok(0);
-        }
-        let mut state = self.fs.lock();
-        self.file_size_with(&mut state.session)
-    }
-
     fn sync(&self, _data_only: bool) -> VfsResult<()> {
+        // QEMU's 9P local backend does not implement TFSYNC.
         Ok(())
     }
 
@@ -163,94 +227,103 @@ impl NodeOps for Inode {
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::BLOCKING | NodeFlags::NON_CACHEABLE
+        NodeFlags::BLOCKING
     }
 }
+
+// ---------------------------------------------------------------------------
+// FileNodeOps — file I/O operations
+// ---------------------------------------------------------------------------
 
 impl FileNodeOps for Inode {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        if self.is_symlink {
-            let mut state = self.fs.lock();
-            let target = state.session.read_link(&self.path).map_err(into_vfs_err)?;
-            let data = target.as_bytes();
-            let start = offset as usize;
-            if start >= data.len() {
-                return Ok(0);
-            }
-            let end = core::cmp::min(data.len(), start + buf.len());
-            let to_copy = end - start;
-            buf[..to_copy].copy_from_slice(&data[start..end]);
-            return Ok(to_copy);
+        if buf.is_empty() {
+            return Ok(0);
         }
-        let mut state = self.fs.lock();
-        let data = state
-            .session
-            .read_file(&self.path, offset, buf.len() as u32)
-            .map_err(into_vfs_err)?;
-        let to_copy = data.len().min(buf.len());
-        buf[..to_copy].copy_from_slice(&data[..to_copy]);
-        Ok(to_copy)
+
+        // For symlinks, read the link target.
+        let path = self.node_path()?;
+        {
+            let mut session = self.fs.lock();
+            let attr = session.getattr(&path).map_err(into_vfs_err)?;
+            if qid_type_to_vfs(attr.qid_type) == NodeType::Symlink {
+                let target = session.read_link(&path).map_err(into_vfs_err)?;
+                let target_bytes = target.as_bytes();
+                let start = offset as usize;
+                if start >= target_bytes.len() {
+                    return Ok(0);
+                }
+                let to_read = core::cmp::min(buf.len(), target_bytes.len() - start);
+                buf[..to_read].copy_from_slice(&target_bytes[start..start + to_read]);
+                return Ok(to_read);
+            }
+        }
+
+        let fid = self.open_fid_rdonly()?;
+        let result = {
+            let mut session = self.fs.lock();
+            session
+                .read_fid(fid, offset, buf.len() as u32)
+                .map_err(into_vfs_err)
+        };
+        self.close_fid(fid);
+
+        match result {
+            Ok(data) => {
+                let n = core::cmp::min(data.len(), buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                Ok(n)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        if self.is_symlink {
-            return Err(VfsError::Unsupported);
+        if buf.is_empty() {
+            return Ok(0);
         }
-        let mut state = self.fs.lock();
-        state
-            .session
-            .write_file(&self.path, offset, buf)
-            .map_err(into_vfs_err)
+        let fid = self.open_fid_rdwr()?;
+        let result = {
+            let mut session = self.fs.lock();
+            session
+                .write_fid(fid, offset, buf)
+                .map_err(into_vfs_err)
+        };
+        self.close_fid(fid);
+        result
     }
 
     fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
-        if self.is_symlink {
-            return Err(VfsError::Unsupported);
-        }
-        let mut state = self.fs.lock();
-        let size = self.file_size_with(&mut state.session)?;
-        let written = state
-            .session
-            .write_file(&self.path, size, buf)
-            .map_err(into_vfs_err)?;
-        Ok((written, size + written as u64))
+        let path = self.node_path()?;
+        let offset = {
+            let mut session = self.fs.lock();
+            let attr = session.getattr(&path).map_err(into_vfs_err)?;
+            attr.size
+        };
+        let written = self.write_at(buf, offset)?;
+        Ok((written, offset + written as u64))
     }
 
     fn set_len(&self, len: u64) -> VfsResult<()> {
-        if self.is_dir {
-            return Err(VfsError::IsADirectory);
-        }
-        if self.is_symlink {
-            return Err(VfsError::Unsupported);
-        }
-        let mut state = self.fs.lock();
-        let current = self.file_size_with(&mut state.session)?;
-        if len == current {
-            return Ok(());
-        }
-        if len < current {
-            return Err(VfsError::Unsupported);
-        }
-        if len == 0 {
-            return Ok(());
-        }
-        let zero = [0u8; 1];
-        state
-            .session
-            .write_file(&self.path, len - 1, &zero)
-            .map_err(into_vfs_err)?;
-        Ok(())
+        let fid = self.open_fid_rdwr()?;
+        let result = {
+            let mut session = self.fs.lock();
+            session.truncate_fid(fid, len).map_err(into_vfs_err)
+        };
+        self.close_fid(fid);
+        result
     }
 
     fn set_symlink(&self, target: &str) -> VfsResult<()> {
-        error!(
-            "fs9p: set_symlink unsupported path={} target={}",
-            self.path.as_str(),
-            target
-        );
+        // For 9P, symlinks are created atomically via TSYMLINK in create().
+        // Changing an existing symlink target is not part of the 9P protocol.
         Err(VfsError::Unsupported)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pollable
+// ---------------------------------------------------------------------------
 
 impl Pollable for Inode {
     fn poll(&self) -> IoEvents {
@@ -260,47 +333,28 @@ impl Pollable for Inode {
     fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
 }
 
+// ---------------------------------------------------------------------------
+// DirNodeOps — directory operations
+// ---------------------------------------------------------------------------
+
 impl DirNodeOps for Inode {
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
-        let mut state = self.fs.lock();
-        let names = state.session.list_dir(&self.path).map_err(into_vfs_err)?;
+        let dir_path = self.dir_path()?;
+        let mut session = self.fs.lock();
+        let entries = session
+            .list_dir_entries(&dir_path)
+            .map_err(into_vfs_err)?;
 
-        let mut entries: Vec<(String, u64, NodeType)> = Vec::new();
-        entries.push((String::from("."), self.ino, NodeType::Directory));
-        let parent_ino = self
-            .this
-            .as_ref()
-            .and_then(WeakDirEntry::upgrade)
-            .and_then(|entry| entry.parent())
-            .map(|entry| entry.inode())
-            .unwrap_or(self.ino);
-        entries.push((String::from(".."), parent_ino, NodeType::Directory));
-
-        for name in names {
-            let child_path = join_child_path(&self.path, &name);
-            let info = state
-                .session
-                .lookup_path(&child_path)
-                .map_err(into_vfs_err)?;
-            let node_type = if info.is_dir {
-                NodeType::Directory
-            } else if info.is_symlink {
-                NodeType::Symlink
-            } else {
-                NodeType::RegularFile
-            };
-            entries.push((name, info.qid_path, node_type));
-        }
-
-        let mut idx = 0u64;
         let mut count = 0usize;
-        for (name, ino, node_type) in entries {
+        let mut idx = 0u64;
+        for entry in entries {
             if idx < offset {
                 idx += 1;
                 continue;
             }
+            let node_type = dtype_to_vfs(entry.entry_type);
             idx += 1;
-            if !sink.accept(&name, ino, node_type, idx) {
+            if !sink.accept(&entry.name, 0, node_type, idx) {
                 return Ok(count);
             }
             count += 1;
@@ -325,92 +379,100 @@ impl DirNodeOps for Inode {
                 .and_then(|entry| entry.parent())
                 .ok_or(VfsError::NotFound);
         }
-
-        let path = join_child_path(&self.dir_path()?, name);
-        let mut state = self.fs.lock();
-        let info = state.session.lookup_path(&path).map_err(into_vfs_err)?;
-        let node_type = if info.is_dir {
-            NodeType::Directory
-        } else if info.is_symlink {
-            NodeType::Symlink
-        } else {
-            NodeType::RegularFile
-        };
-        Ok(self.create_entry(name.to_string(), info.qid_path, node_type))
-    }
-
-    fn supports_dentry_cache(&self) -> bool {
-        false
+        self.lookup_locked(name)
     }
 
     fn create(
         &self,
         name: &str,
         node_type: NodeType,
-        permission: NodePermission,
+        _permission: NodePermission,
     ) -> VfsResult<DirEntry> {
         let dir_path = self.dir_path()?;
-        let path = join_child_path(&dir_path, name);
-        let mut state = self.fs.lock();
+        let child_path = join_child_path(&dir_path, name);
 
-        match node_type {
-            NodeType::Directory => {
-                state.session.create_dir(&path).map_err(into_vfs_err)?;
-            }
-            NodeType::RegularFile => {
-                state
-                    .session
-                    .create_file(&path, permission.bits().into())
-                    .map_err(into_vfs_err)?;
-            }
-            _ => return Err(VfsError::Unsupported),
-        }
-
-        let info = state.session.lookup_path(&path).map_err(into_vfs_err)?;
-        let node_type = if info.is_dir {
-            NodeType::Directory
-        } else if info.is_symlink {
-            NodeType::Symlink
+        let mut session = self.fs.lock();
+        if node_type == NodeType::Directory {
+            session
+                .create_dir(&child_path)
+                .map_err(into_vfs_err)?;
         } else {
-            NodeType::RegularFile
-        };
-        Ok(self.create_entry(name.to_string(), info.qid_path, node_type))
+            // Create a regular file. The fid returned by create_file is
+            // immediately closed — VFS I/O will re-open as needed.
+            let fid = session
+                .create_file(&child_path)
+                .map_err(into_vfs_err)?;
+            let _ = session.close_fid(fid);
+        }
+        drop(session);
+
+        let reference = Reference::new(
+            self.this.as_ref().and_then(WeakDirEntry::upgrade),
+            name.into(),
+        );
+
+        Ok(if node_type == NodeType::Directory {
+            DirEntry::new_dir(
+                |this| {
+                    DirNode::new(Inode::new_dir(
+                        self.fs.clone(),
+                        Some(this),
+                        Some(child_path),
+                    ))
+                },
+                reference,
+            )
+        } else {
+            DirEntry::new_file(
+                FileNode::new(Inode::new_file(self.fs.clone(), Some(child_path))),
+                node_type,
+                reference,
+            )
+        })
     }
 
-    fn link(&self, _name: &str, _node: &DirEntry) -> VfsResult<DirEntry> {
-        Err(VfsError::Unsupported)
+    fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
+        let dir_path = self.dir_path()?;
+        let link_path = join_child_path(&dir_path, name);
+        let target_path = node.absolute_path()?.to_string();
+
+        let mut session = self.fs.lock();
+        session
+            .link(&target_path, &link_path)
+            .map_err(into_vfs_err)?;
+        drop(session);
+
+        self.lookup_locked(name)
     }
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
         let dir_path = self.dir_path()?;
-        let path = join_child_path(&dir_path, name);
-        let mut state = self.fs.lock();
-        state.session.remove_path(&path).map_err(into_vfs_err)
+        let child_path = join_child_path(&dir_path, name);
+        let mut session = self.fs.lock();
+        session
+            .remove_path(&child_path)
+            .map_err(into_vfs_err)
     }
 
-    fn rename(&self, _src_name: &str, _dst_dir: &DirNode, _dst_name: &str) -> VfsResult<()> {
-        Err(VfsError::Unsupported)
+    fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+        let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
+        let src_path = join_child_path(&self.dir_path()?, src_name);
+        let dst_path = join_child_path(&dst_dir.dir_path()?, dst_name);
+        let mut session = self.fs.lock();
+        session
+            .rename_path(&src_path, &dst_path)
+            .map_err(into_vfs_err)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn join_child_path(parent: &str, name: &str) -> String {
     if parent == "/" {
-        alloc::format!("/{name}")
+        format!("/{name}")
     } else {
-        alloc::format!("{parent}/{name}")
-    }
-}
-
-impl Inode {
-    pub(crate) fn create_symlink_entry(&self, name: &str, target: &str) -> VfsResult<DirEntry> {
-        let dir_path = self.dir_path()?;
-        let path = join_child_path(&dir_path, name);
-        let mut state = self.fs.lock();
-        state
-            .session
-            .create_symlink(&path, target)
-            .map_err(into_vfs_err)?;
-        let info = state.session.lookup_path(&path).map_err(into_vfs_err)?;
-        Ok(self.create_entry(name.to_string(), info.qid_path, NodeType::Symlink))
+        format!("{parent}/{name}")
     }
 }

@@ -17,6 +17,7 @@ use fs_ng_vfs::{Filesystem, VfsResult};
 use kdriver::{BlockDevice, Virtio9pDevice};
 
 /// Create the default filesystem instance for the given block device.
+#[cfg(feature = "ext4")]
 pub fn new_default(_dev: BlockDevice) -> VfsResult<Filesystem> {
     cfg_if! {
         if #[cfg(feature = "ext4")] {
@@ -30,6 +31,7 @@ pub fn new_default(_dev: BlockDevice) -> VfsResult<Filesystem> {
 }
 
 /// Create the default 9p filesystem instance for the given virtio-9p device.
+#[cfg(feature = "fs9p")]
 pub fn new_9p_filesystem(_dev: Virtio9pDevice) -> VfsResult<Filesystem> {
     #[cfg(feature = "fs9p")]
     {

@@ -141,7 +141,7 @@ kerrno = { path = "util/kerrno" }
 unittest = { path = "util/unittest" }
 kconfig-gen = { path = "xtask/kconfig-gen" }
 smoltcp = { version = "0.12.0", package = "x-smoltcp", default-features = false }
-fs9p ={ path = "fs/fs9p" , default-features = false }
+fs9p = { path = "fs/fs9p", default-features = false }
 
 [patch.crates-io]
-virtio-drivers = { path = "virtio-drivers" }
+virtio-drivers = { git = "https://github.com/luodeb/virtio-drivers" }
