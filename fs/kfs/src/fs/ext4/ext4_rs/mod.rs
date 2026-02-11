@@ -7,14 +7,12 @@ mod fs;
 mod inode;
 mod util;
 
-pub use fs::*;
-pub use inode::*;
-
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::cmp::min;
 
-use ext4_rs::{BlockDevice, BLOCK_SIZE};
+use ext4_rs::{BLOCK_SIZE, BlockDevice};
+pub use fs::*;
+pub use inode::*;
 use kdriver::{BlockDevice as KBlockDevice, prelude::BlockDriverOps};
 use kspin::SpinNoPreempt as Mutex;
 
@@ -53,9 +51,8 @@ impl BlockDevice for Ext4Disk {
             dev.read_block(current_block as u64, &mut block_data)
                 .expect("ext4_rs: read_block failed");
 
-            buf[total_bytes_read..total_bytes_read + bytes_to_copy].copy_from_slice(
-                &block_data[offset_in_block..offset_in_block + bytes_to_copy],
-            );
+            buf[total_bytes_read..total_bytes_read + bytes_to_copy]
+                .copy_from_slice(&block_data[offset_in_block..offset_in_block + bytes_to_copy]);
 
             total_bytes_read += bytes_to_copy;
             offset_in_block = 0;
@@ -79,8 +76,10 @@ impl BlockDevice for Ext4Disk {
         let mut total_bytes_written = 0;
 
         while total_bytes_written < bytes_to_write {
-            let bytes_to_copy =
-                min(bytes_to_write - total_bytes_written, dev_block - offset_in_block);
+            let bytes_to_copy = min(
+                bytes_to_write - total_bytes_written,
+                dev_block - offset_in_block,
+            );
 
             let mut block_data = vec![0u8; dev_block];
             if bytes_to_copy != dev_block || offset_in_block != 0 {
@@ -88,9 +87,8 @@ impl BlockDevice for Ext4Disk {
                     .expect("ext4_rs: read_block failed");
             }
 
-            block_data[offset_in_block..offset_in_block + bytes_to_copy].copy_from_slice(
-                &data[total_bytes_written..total_bytes_written + bytes_to_copy],
-            );
+            block_data[offset_in_block..offset_in_block + bytes_to_copy]
+                .copy_from_slice(&data[total_bytes_written..total_bytes_written + bytes_to_copy]);
 
             dev.write_block(current_block as u64, &block_data)
                 .expect("ext4_rs: write_block failed");

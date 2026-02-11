@@ -14,7 +14,10 @@ use fs_ng_vfs::{
 };
 use kpoll::{IoEvents, Pollable};
 
-use super::{Ext4Filesystem, util::{dir_entry_type_to_vfs, inode_to_vfs_type, into_vfs_err, vfs_type_to_inode}};
+use super::{
+    Ext4Filesystem,
+    util::{dir_entry_type_to_vfs, inode_to_vfs_type, into_vfs_err, vfs_type_to_inode},
+};
 
 /// Ext4 inode wrapper used to implement VFS nodes.
 pub struct Inode {
@@ -278,7 +281,9 @@ impl DirNodeOps for Inode {
 
         let mode_bits = permission.bits() & 0o7777;
         let inode_mode = inode_type.bits() | mode_bits;
-        let mut inode_ref = fs.create(self.ino, name, inode_mode).map_err(into_vfs_err)?;
+        let mut inode_ref = fs
+            .create(self.ino, name, inode_mode)
+            .map_err(into_vfs_err)?;
         inode_ref.inode.set_mode(inode_mode);
         if cfg!(feature = "times") {
             inode_ref
