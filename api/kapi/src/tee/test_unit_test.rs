@@ -16,6 +16,7 @@ use crate::tee::{
     crypto_temp::aes_cbc::tests_aes_cbc::TEST_TEE_AES_CBC,
     fs_dirfile::tests_tee_fs_dirfile::TEST_TEE_FS_DIRFILE, fs_htree::tests_fs_htree::TEST_FS_HTREE,
     fs_htree_tests::tests_fs_htree_tests::TEST_FS_HTREE_TESTS,
+    huk_subkey::tests_huk_subkey::TEST_HUK_SUBKEY_DERIVE,
     libmbedtls::bignum::tests_tee_bignum::TEST_TEE_BIGNUM,
     rng_software::tests_rng_software::TEST_RNG_SOFTWARE, tee_misc::tests_tee_misc::TEST_TEE_MISC,
     tee_obj::tests_tee_obj::TEST_TEE_OBJ, tee_pobj::tests_tee_pobj::TEST_TEE_POBJ,
@@ -34,6 +35,7 @@ pub fn tee_unit_test() {
     run_tests!(
         runner,
         [
+            TEST_HUK_SUBKEY_DERIVE,
             TEST_TEE_POBJ,
             TEST_TEE_OBJ,
             TEST_TEE_SVC_CRYP,
