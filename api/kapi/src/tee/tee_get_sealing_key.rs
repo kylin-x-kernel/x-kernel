@@ -180,10 +180,12 @@ impl CsvAttestationReport {
         let pek_cert_size = size_of::<HygonCsvCert>();
         let pek_cert_ptr = &self.pek_cert as *const _ as *const u8;
 
-        let mut data_to_hash = Vec::with_capacity(pek_cert_size + self.sn.len() + self.reserved2.len());
+        let mut data_to_hash = 
+            Vec::with_capacity(pek_cert_size + self.sn.len() + self.reserved2.len());
 
         unsafe {
-            data_to_hash.extend_from_slice(core::slice::from_raw_parts(pek_cert_ptr, pek_cert_size));
+            data_to_hash
+                .extend_from_slice(core::slice::from_raw_parts(pek_cert_ptr, pek_cert_size));
         }
         data_to_hash.extend_from_slice(&self.sn);
         data_to_hash.extend_from_slice(&self.reserved2);
