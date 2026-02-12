@@ -21,6 +21,7 @@ kernel = [
 ]
 
 tee = ["kapi/tee", "kcore/tee"]
+tee_test  = ["kapi/tee_test"]
 smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
 

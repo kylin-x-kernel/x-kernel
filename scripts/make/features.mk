@@ -17,7 +17,7 @@ ifeq ($(DWARF),y)
   kfeat += dwarf
 endif
 
-APP_FEATURES += $(subst -,_,$(PLAT))
+override APP_FEATURES += $(subst -,_,$(PLAT))
 
 KFEAT := $(strip $(addprefix $(kfeat_prefix),$(kfeat)))
 APP_FEAT := $(strip $(shell echo $(APP_FEATURES) | tr ',' ' '))
