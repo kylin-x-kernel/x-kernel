@@ -1,5 +1,8 @@
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::{arch::asm, mem::size_of, ptr};
+
+use ksync::Mutex;
+use tee_raw_sys::{TEE_ALG_HMAC_SM3, TEE_ALG_SM3, TEE_OperationMode};
 
 pub const GUEST_ATTESTATION_DATA_SIZE: usize = 64;
 pub const GUEST_ATTESTATION_NONCE_SIZE: usize = 16;
@@ -113,16 +116,7 @@ use tee_raw_sys::{
 
 use crate::{
     syscall::sys_getrandom,
-    tee::{
-        tee_obj::tee_obj_get,
-        tee_svc_cryp::{
-            TeeCryptObj, syscall_cryp_obj_alloc, syscall_obj_generate_key,
-            tee_cryp_obj_secret_wrapper,
-        },
-        tee_svc_cryp2::{
-            syscall_cryp_state_alloc, syscall_hash_final, syscall_hash_init, syscall_hash_update,
-        },
-    },
+    tee::{tee_obj::tee_obj_get, tee_svc_cryp::TeeCryptObj},
 };
 
 // ==================== Trait Implementations ====================
@@ -208,12 +202,21 @@ impl CsvAttestationReport {
 
 /// 计算 SM3 哈希值
 fn compute_sm3_hash(data: &[u8]) -> Result<[u8; HASH_LEN], u32> {
-    let mut state = 0u32;
-    syscall_cryp_state_alloc(TEE_ALG_SM3, TEE_MODE_DIGEST, None, None, &mut state)?;
-    syscall_hash_init(state)?;
-    syscall_hash_update(state, data)?;
+    let state = Arc::new(Mutex::new(crate::tee::tee_svc_cryp2::TeeCrypState {
+        algo: TEE_ALG_SM3,
+        mode: TEE_OperationMode::TEE_MODE_DIGEST,
+        key1: None,
+        key2: None,
+        ctx: crate::tee::tee_svc_cryp2::CrypCtx::Others,
+        ctx_finalize: None,
+        state: crate::tee::tee_svc_cryp2::CrypState::Uninitialized,
+        id: 0,
+    }));
+
+    crate::tee::crypto::crypto::crypto_hash_init(state.clone())?;
+    crate::tee::crypto::crypto::crypto_hash_update(state.clone(), data)?;
     let mut hash = [0u8; HASH_LEN];
-    syscall_hash_final(state, &[], &mut hash)?;
+    crate::tee::crypto::crypto::crypto_hash_final(state, &mut hash)?;
     Ok(hash)
 }
 
@@ -296,46 +299,21 @@ pub unsafe fn verify_session_mac(report: &CsvAttestationReport, key: &[u8]) -> R
 /// * `Ok([u8; 32])` - 计算得到的 MAC 值
 /// * `Err(())` - 计算失败
 fn compute_hmac_sm3(report: &CsvAttestationReport, key: &[u8]) -> Result<[u8; HASH_LEN], u32> {
-    let mut state = 0u32;
-    let mut obj_id: core::ffi::c_uint = 0;
+    let state = Arc::new(Mutex::new(crate::tee::tee_svc_cryp2::TeeCrypState {
+        algo: TEE_ALG_HMAC_SM3,
+        mode: TEE_OperationMode::TEE_MODE_MAC,
+        key1: None,
+        key2: None,
+        ctx: crate::tee::tee_svc_cryp2::CrypCtx::Others,
+        ctx_finalize: None,
+        state: crate::tee::tee_svc_cryp2::CrypState::Uninitialized,
+        id: 0,
+    }));
 
-    syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, &mut obj_id)?;
-    syscall_obj_generate_key(obj_id as u64, 128, core::ptr::null(), 0)?;
-
-    let obj_arc = tee_obj_get(obj_id as u64)?;
-    let mut obj = obj_arc.lock();
-
-    let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-    secret.set_secret_data(key);
-    let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-    let _ = core::mem::replace(&mut obj.info.objectType, TEE_TYPE_HMAC_SM3);
-    drop(obj);
-
-    syscall_cryp_state_alloc(
-        TEE_ALG_HMAC_SM3,
-        TEE_MODE_MAC,
-        Some(obj_id as _),
-        None,
-        &mut state,
-    )?;
-    syscall_hash_init(state)?;
-
-    let pek_cert_size = size_of::<HygonCsvCert>();
-    let pek_cert_ptr = &report.pek_cert as *const _ as *const u8;
-
-    let mut data_to_hash =
-        Vec::with_capacity(pek_cert_size + report.sn.len() + report.reserved2.len());
-
-    data_to_hash
-        .extend_from_slice(unsafe { core::slice::from_raw_parts(pek_cert_ptr, pek_cert_size) });
-    data_to_hash.extend_from_slice(&report.sn);
-    data_to_hash.extend_from_slice(&report.reserved2);
-
-    syscall_hash_update(state, &data_to_hash)?;
-
+    crate::tee::crypto::crypto::crypto_mac_init(state.clone(), key)?;
+    crate::tee::crypto::crypto::crypto_mac_update(state.clone(), &report.hash_input())?;
     let mut hash = [0u8; HASH_LEN];
-    syscall_hash_final(state, &[], &mut hash)?;
-
+    crate::tee::crypto::crypto::crypto_mac_final(state, &mut hash)?;
     Ok(hash)
 }
 
