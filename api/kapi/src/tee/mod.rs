@@ -33,7 +33,10 @@ use crate::tee::{
         syscall_cryp_obj_get_attr, syscall_cryp_obj_get_info, syscall_cryp_obj_populate,
         syscall_cryp_obj_reset, syscall_cryp_obj_restrict_usage, syscall_obj_generate_key,
     },
-    tee_svc_cryp2::{sys_tee_scn_hash_final, sys_tee_scn_hash_init, sys_tee_scn_hash_update},
+    tee_svc_cryp2::{
+        CipherPaddingMode, scn_cipher_final, scn_cipher_init, scn_cipher_update, scn_hash_final,
+        scn_hash_init, scn_hash_update,
+    },
     tee_svc_storage::{
         syscall_storage_alloc_enum, syscall_storage_free_enum, syscall_storage_next_enum,
         syscall_storage_obj_create, syscall_storage_obj_del, syscall_storage_obj_open,
@@ -157,21 +160,36 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
             sys_tee_scn_set_ta_time(teetime_ref)
         }
 
-        // Sysno::tee_scn_hash_init => sys_tee_scn_hash_init(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::tee_scn_hash_init => {
-            sys_tee_scn_hash_init(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
+        Sysno::tee_scn_hash_init => scn_hash_init(uctx.arg0()),
+
+        Sysno::tee_scn_hash_update => scn_hash_update(uctx.arg0(), uctx.arg1(), uctx.arg2()),
+
+        Sysno::tee_scn_hash_final => scn_hash_final(
+            uctx.arg0(),
+            uctx.arg1(),
+            uctx.arg2(),
+            uctx.arg3(),
+            uctx.arg4(),
+        ),
+
+        Sysno::tee_scn_cipher_init => {
+            scn_cipher_init(uctx.arg0(), uctx.arg1(), uctx.arg2(), uctx.arg3())
         }
 
-        Sysno::tee_scn_hash_update => {
-            sys_tee_scn_hash_update(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
-        }
+        Sysno::tee_scn_cipher_update => scn_cipher_update(
+            uctx.arg0(),
+            uctx.arg1(),
+            uctx.arg2(),
+            uctx.arg3(),
+            uctx.arg4(),
+        ),
 
-        Sysno::tee_scn_hash_update => sys_tee_scn_hash_final(
-            uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
-            uctx.arg3() as _,
-            uctx.arg4() as _,
+        Sysno::tee_scn_cipher_final => scn_cipher_final(
+            uctx.arg0(),
+            uctx.arg1(),
+            uctx.arg2(),
+            uctx.arg3(),
+            uctx.arg4(),
         ),
 
         Sysno::tee_scn_cryp_obj_get_info => {

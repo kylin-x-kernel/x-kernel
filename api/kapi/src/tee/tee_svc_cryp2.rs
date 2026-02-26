@@ -836,6 +836,10 @@ pub fn syscall_hash_init(id: u32) -> TeeResult {
     }
 }
 
+pub fn scn_hash_init(arg0: usize) -> TeeResult {
+    syscall_hash_init(arg0 as _)
+}
+
 pub fn syscall_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
     memtag_strip_tag_const()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -854,6 +858,19 @@ pub fn syscall_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
         TEE_OPERATION_MAC => crypto_mac_update(cs.clone(), chunk),
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
+}
+
+pub fn scn_hash_update(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
+    let chunk_ptr = arg1 as *const u8;
+    let chunk_len = arg2 as usize;
+
+    let chunk: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    } else {
+        unsafe { core::slice::from_raw_parts(chunk_ptr, chunk_len) }
+    };
+
+    syscall_hash_update(arg0 as _, chunk)
 }
 
 pub fn syscall_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<usize> {
@@ -896,6 +913,36 @@ pub fn syscall_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<u
         }
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
+}
+
+pub fn scn_hash_final(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> TeeResult {
+    let chunk_ptr = arg1 as *const u8;
+    let chunk_len = arg2 as usize;
+
+    // 输入的hash_len长度应该为缓冲区长度，最后函数返回值为实际长度
+    let hash_ptr = arg3 as *mut u8;
+    let mut hash_len = unsafe { *(arg4 as *mut usize) };
+
+    let chunk: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(chunk_ptr, chunk_len) }
+    };
+
+    if hash_ptr.is_null() || hash_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let mut hash = unsafe { core::slice::from_raw_parts_mut(hash_ptr, hash_len) };
+
+    hash_len = syscall_hash_final(arg0 as _, chunk, hash)?;
+    Ok(())
 }
 
 /// optee中只支持NoPad，此处实现了Padding模式的拓展
@@ -956,6 +1003,35 @@ pub fn syscall_cipher_init(
     crypto_cipher_init(cs.clone(), key.as_slice(), iv, padding_mode)
 }
 
+pub fn scn_cipher_init(arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> TeeResult {
+    let iv_ptr = arg1 as *const u8;
+    let iv_len = arg2 as usize;
+    let padding_mode_val = arg3 as u32;
+
+    // 转换IV
+    let iv: Option<&[u8]> = if iv_ptr.is_null() {
+        if iv_len != 0 {
+            return Err(TEE_ERROR_BAD_PARAMETERS);
+        }
+        None
+    } else if iv_len == 0 {
+        Some(&[])
+    } else {
+        Some(unsafe { core::slice::from_raw_parts(iv_ptr, iv_len) })
+    };
+
+    let padding_mode = match padding_mode_val {
+        0 => CipherPaddingMode::Pkcs7,
+        1 => CipherPaddingMode::IsoIec78164,
+        2 => CipherPaddingMode::AnsiX923,
+        3 => CipherPaddingMode::Zeros,
+        4 => CipherPaddingMode::None,
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+    };
+
+    syscall_cipher_init(arg0 as _, iv, padding_mode)
+}
+
 /// 注意:
 /// 对于ECB模式而言，每次只能传入一个块数据，即input.len() == block_size
 /// 需要多次调用syscall_cipher_update()函数
@@ -985,8 +1061,38 @@ pub fn syscall_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
     crypto_cipher_update(cs.clone(), input, output)
 }
 
+pub fn scn_cipher_update(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> TeeResult {
+    let src_ptr = arg1 as *const u8;
+    let src_len = arg2 as usize;
+
+    // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
+    let dst_ptr = arg3 as *mut u8;
+    let mut dst_len = unsafe { *(arg4 as *mut usize) };
+
+    let src = if src_ptr.is_null() || src_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    } else {
+        unsafe { core::slice::from_raw_parts(src_ptr, src_len) }
+    };
+
+    let mut dst = if dst_ptr.is_null() || dst_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) }
+    };
+
+    dst_len = syscall_cipher_update(arg0 as _, src, dst)?;
+    Ok(())
+}
+
 /// 用于处理最后一个数据块的填充和加密
-pub fn syscall_cipher_final(id: u32, output: &mut [u8]) -> TeeResult<usize> {
+pub fn syscall_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -999,7 +1105,40 @@ pub fn syscall_cipher_final(id: u32, output: &mut [u8]) -> TeeResult<usize> {
     }
 
     drop(cs_guard);
-    crypto_cipher_final(cs.clone(), output)
+
+    let mut len = syscall_cipher_update(id, input, output)?;
+    len += crypto_cipher_final(cs.clone(), &mut output[len..])?;
+    Ok(len)
+}
+
+pub fn scn_cipher_final(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> TeeResult {
+    let src_ptr = arg1 as *const u8;
+    let src_len = arg2 as usize;
+
+    // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
+    let dst_ptr = arg3 as *mut u8;
+    let mut dst_len = unsafe { *(arg4 as *mut usize) };
+
+    let src = if src_ptr.is_null() || src_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    } else {
+        unsafe { core::slice::from_raw_parts(src_ptr, src_len) }
+    };
+
+    let mut dst = if dst_ptr.is_null() || dst_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) }
+    };
+
+    dst_len = syscall_cipher_final(arg0 as _, src, dst)?;
+    Ok(())
 }
 
 pub fn syscall_authenc_init(id: u32, nonce: &[u8], padding_mode: CipherPaddingMode) -> TeeResult {
@@ -1532,7 +1671,7 @@ pub mod tests_cryp {
             total_len += res.unwrap();
 
             // 处理填充
-            let res = syscall_cipher_final(state, &mut out[total_len..]);
+            let res = syscall_cipher_final(state, &[], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
@@ -1595,7 +1734,7 @@ pub mod tests_cryp {
             assert!(res.is_ok());
             total_len += res.unwrap();
 
-            let res = syscall_cipher_final(state, &mut out[total_len..]);
+            let res = syscall_cipher_final(state, &[], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
