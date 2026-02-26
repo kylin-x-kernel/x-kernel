@@ -31,8 +31,7 @@ endef
 clippy_args := -A unsafe_op_in_unsafe_fn
 
 define cargo_clippy
-  $(call run_cmd,cargo clippy,--all-features --workspace --exclude axlog $(1) $(verbose) -- $(clippy_args))
-  $(call run_cmd,cargo clippy,-p axlog $(1) $(verbose) -- $(clippy_args))
+  $(call run_cmd,cargo -Z unstable-options -C $(APP) clippy,-p $(rust_package) --target $(TARGET) --features "$(strip $(KFEAT) $(APP_FEAT))" $(1) $(verbose) -- $(clippy_args))
 endef
 
 subdirs := api arch core drivers fs io mm net process sync tee util

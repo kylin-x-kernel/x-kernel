@@ -109,10 +109,10 @@ x86_64 = { version = "0.15.2", features = ["instructions"] }
 
 # Tee Crates
 tee_raw_sys = { path = "tee/tee_raw_sys" }
-mbedtls = { version = "0.13.5", package = "mbedtls-smx", default-features = false, features = [
+mbedtls = { version = "0.13.6", package = "mbedtls-smx", default-features = false, features = [
     "no_std_deps",
 ] }
-mbedtls-sys-auto = { version = "2.28.14", package = "mbedtls-sys-auto-smx", default-features = false, features = [
+mbedtls-sys-auto = { version = "2.28.15", package = "mbedtls-sys-auto-smx", default-features = false, features = [
 ] }
 rust-dice = { version = "0.1.1", default-features = false }
 

@@ -206,12 +206,11 @@ impl Backtrace {
         {
             let mut frames = unwind_stack(fp);
             // Fix up the first frame if needed
-            if let Some(first) = frames.first_mut() {
-                if let Some(config) = CONFIG.get() {
-                    if !config.validate_ip(first.ip) {
-                        first.ip = ra;
-                    }
-                }
+            if let Some(first) = frames.first_mut()
+                && let Some(config) = CONFIG.get()
+                && !config.validate_ip(first.ip)
+            {
+                first.ip = ra;
             }
 
             frames.insert(0, Frame::new(fp, ip.wrapping_add(1)));

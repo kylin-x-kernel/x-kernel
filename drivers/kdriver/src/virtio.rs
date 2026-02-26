@@ -191,7 +191,11 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 let ptr = dma_info.cpu_addr;
                 #[cfg(feature = "crosvm")]
                 {
-                    dma_share(paddr, pages * 0x1000);
+                    if let Ok(shared_paddr) = usize::try_from(paddr) {
+                        dma_share(shared_paddr, pages * PAGE_SIZE);
+                    } else {
+                        log::error!("dma_alloc share failed: paddr {paddr:#x} does not fit usize");
+                    }
                 }
                 // bus_addr is the physical address for DMA
                 (paddr, ptr)

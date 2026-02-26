@@ -15,8 +15,6 @@ pub use kplat::interrupts::{
 };
 #[cfg(feature = "ipi")]
 pub use platconfig::devices::IPI_IRQ;
-#[cfg(feature = "ipi")]
-pub use platconfig::devices::IPI_IRQ;
 
 static IRQ_HOOK: AtomicUsize = AtomicUsize::new(0);
 

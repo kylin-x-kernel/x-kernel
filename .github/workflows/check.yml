@@ -59,6 +59,4 @@ jobs:
 
       - name: Clippy
         run: |
-          RUSTFLAGS="--cfg unittest --check-cfg=cfg(unittest)" \
-            cargo +nightly clippy -p entry --target ${{ matrix.target }} \
-            -F qemu -- -D warnings -A stable-features
+          make ARCH=${{ matrix.arch }} clippy

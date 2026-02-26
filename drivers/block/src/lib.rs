@@ -10,11 +10,11 @@
 // #[cfg(feature = "bcm2835-sdhci")]
 // pub mod bcm2835sdhci;
 
-// #[cfg(feature = "ramdisk")]
-// pub mod ramdisk;
+#[cfg(feature = "ramdisk")]
+pub mod ramdisk;
 
-// #[cfg(feature = "ramdisk-static")]
-// pub mod ramdisk_static;
+#[cfg(feature = "ramdisk-static")]
+pub mod ramdisk_static;
 
 // #[cfg(feature = "ahci")]
 // pub mod ahci;
