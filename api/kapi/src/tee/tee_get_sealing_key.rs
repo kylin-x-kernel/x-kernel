@@ -1,8 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use alloc::{sync::Arc, vec::Vec};
 use core::{arch::asm, mem::size_of, ptr};
 
 use ksync::Mutex;
-use tee_raw_sys::{TEE_ALG_HMAC_SM3, TEE_ALG_SM3, TEE_OperationMode};
+use tee_raw_sys::{
+    TEE_ALG_HMAC_SM3, TEE_ALG_SM3, TEE_OperationMode,
+    TEE_OperationMode::{TEE_MODE_DIGEST, TEE_MODE_MAC},
+    TEE_TYPE_HMAC_SM3, TEE_TYPE_SM4,
+};
 
 pub const GUEST_ATTESTATION_DATA_SIZE: usize = 64;
 pub const GUEST_ATTESTATION_NONCE_SIZE: usize = 16;
@@ -108,12 +116,6 @@ pub union CertPubkeyData {
     pub ecc_pubkey: EccPubkeyT, // ✓ 修正：改为 ecc_pubkey
 }
 
-use tee_raw_sys::{
-    TEE_ALG_HMAC_SM3, TEE_ALG_SM3, TEE_OperationMode,
-    TEE_OperationMode::{TEE_MODE_DIGEST, TEE_MODE_MAC},
-    TEE_TYPE_HMAC_SM3, TEE_TYPE_SM4,
-};
-
 use crate::{
     syscall::sys_getrandom,
     tee::{tee_obj::tee_obj_get, tee_svc_cryp::TeeCryptObj},
@@ -170,6 +172,23 @@ impl CsvAttestationReport {
         self.user_data.copy_from_slice(&user_data.data);
         self.mnonce.copy_from_slice(&user_data.mnonce);
         self.measure.block.copy_from_slice(&user_data.hash.block);
+    }
+
+    /// 构建哈希输入数据
+    pub fn hash_input(&self) -> Vec<u8> {
+        let pek_cert_size = size_of::<HygonCsvCert>();
+        let pek_cert_ptr = &self.pek_cert as *const _ as *const u8;
+
+        let mut data_to_hash =
+            Vec::with_capacity(pek_cert_size + self.sn.len() + self.reserved2.len());
+
+        unsafe {
+            data_to_hash
+                .extend_from_slice(core::slice::from_raw_parts(pek_cert_ptr, pek_cert_size));
+        }
+        data_to_hash.extend_from_slice(&self.sn);
+        data_to_hash.extend_from_slice(&self.reserved2);
+        data_to_hash
     }
 
     /// 验证 mnonce 匹配
