@@ -23,7 +23,7 @@ use crate::tee::{
         TeeCryptObj, syscall_cryp_obj_alloc, syscall_obj_generate_key, tee_cryp_obj_secret_wrapper,
     },
     tee_svc_cryp2::{
-        syscall_cryp_state_alloc, syscall_hash_final, syscall_hash_init, syscall_hash_update,
+        tee_cryp_hash_final, tee_cryp_hash_init, tee_cryp_hash_update, tee_cryp_state_alloc,
     },
 };
 

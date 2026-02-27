@@ -102,6 +102,7 @@ use crate::{
         memtag::{memtag_strip_tag, memtag_strip_tag_const},
         tee_session::{with_tee_session_ctx, with_tee_session_ctx_mut},
         tee_svc_cryp::{CryptoAttrRef, TeeCryptObjAttrOps, tee_crypto_ops},
+        user_access::bb_memdup_user,
         utee_defines::{
             TEE_AES_BLOCK_SIZE, TEE_DES_BLOCK_SIZE, TEE_MD5_HASH_SIZE, TEE_SHA1_HASH_SIZE,
             TEE_SHA224_HASH_SIZE, TEE_SHA256_HASH_SIZE, TEE_SHA384_HASH_SIZE, TEE_SHA512_HASH_SIZE,
@@ -661,7 +662,7 @@ fn tee_svc_cryp_check_key_type(o: &tee_obj, algo: u32, mode: TEE_OperationMode) 
 }
 
 // 创建一个TeeCrypState
-pub fn syscall_cryp_state_alloc(
+pub fn tee_cryp_state_alloc(
     algo: u32,
     mode: TEE_OperationMode,
     key1: Option<u32>,
@@ -762,7 +763,7 @@ pub fn syscall_cryp_state_alloc(
 }
 
 // 复制一个TeeCrypState
-pub fn syscall_cryp_state_copy(_dst_id: u32, _src_id: u32) -> TeeResult {
+pub fn tee_cryp_state_copy(_dst_id: u32, _src_id: u32) -> TeeResult {
     // TODO:需要改动mbedtls，后续再进行实现
     // with_tee_session_ctx_mut(|ctx|{
     // let cs_dst = tee_cryp_state_get(dst_id)?;
@@ -781,7 +782,7 @@ pub fn syscall_cryp_state_copy(_dst_id: u32, _src_id: u32) -> TeeResult {
 }
 
 // 删除一个TeeCrypState
-pub fn syscall_cryp_state_free(id: u32) -> TeeResult {
+pub fn tee_cryp_state_free(id: u32) -> TeeResult {
     cryp_state_free(id)
 }
 
@@ -807,7 +808,7 @@ fn cryp_state_free(id: u32) -> TeeResult {
     Ok(())
 }
 
-pub fn syscall_hash_init(id: u32) -> TeeResult {
+pub fn tee_cryp_hash_init(id: u32) -> TeeResult {
     let mut cs = tee_cryp_state_get(id)?;
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -836,11 +837,11 @@ pub fn syscall_hash_init(id: u32) -> TeeResult {
     }
 }
 
-pub fn scn_hash_init(arg0: usize) -> TeeResult {
-    syscall_hash_init(arg0 as _)
+pub fn syscall_hash_init(arg0: usize) -> TeeResult {
+    tee_cryp_hash_init(arg0 as _)
 }
 
-pub fn syscall_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
+pub fn tee_cryp_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
     memtag_strip_tag_const()?;
     vm_check_access_rights(0, 0, 0)?;
 
@@ -860,20 +861,21 @@ pub fn syscall_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
     }
 }
 
-pub fn scn_hash_update(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
+pub fn syscall_hash_update(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     let chunk_ptr = arg1 as *const u8;
     let chunk_len = arg2 as usize;
 
-    let chunk: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
+    let chunk_slice: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     } else {
         unsafe { core::slice::from_raw_parts(chunk_ptr, chunk_len) }
     };
+    let chunk = bb_memdup_user(chunk_slice)?;
 
-    syscall_hash_update(arg0 as _, chunk)
+    tee_cryp_hash_update(arg0 as _, &chunk)
 }
 
-pub fn syscall_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<usize> {
+pub fn tee_cryp_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -915,7 +917,7 @@ pub fn syscall_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<u
     }
 }
 
-pub fn scn_hash_final(
+pub fn syscall_hash_final(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -927,27 +929,34 @@ pub fn scn_hash_final(
 
     // 输入的hash_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let hash_ptr = arg3 as *mut u8;
-    let mut hash_len = unsafe { *(arg4 as *mut usize) };
+    let mut hash_len_ptr = arg4 as *mut usize;
+    let mut hash_len: usize = 0;
 
-    let chunk: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
+    let chunk_slice: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
         &[]
     } else {
         unsafe { core::slice::from_raw_parts(chunk_ptr, chunk_len) }
     };
+    let chunk = bb_memdup_user(chunk_slice)?;
 
     if hash_ptr.is_null() || hash_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    let mut hash = unsafe { core::slice::from_raw_parts_mut(hash_ptr, hash_len) };
+    let hash_slice = unsafe { core::slice::from_raw_parts_mut(hash_ptr, hash_len) };
+    let mut hash = bb_memdup_user(&hash_slice)?;
 
-    hash_len = syscall_hash_final(arg0 as _, chunk, hash)?;
+    hash_len = tee_cryp_hash_final(arg0 as _, &chunk, &mut hash)?;
+
+    // Copy hash to user
+    unsafe { copy_to_user_struct(&mut *hash_len_ptr, &hash_len)? };
+    unsafe { copy_to_user(hash_slice, &hash, hash_len * size_of::<u8>())? };
     Ok(())
 }
 
 /// optee中只支持NoPad，此处实现了Padding模式的拓展
 /// 实际使用中，若要保持ALG类型一致，请使用CipherPaddingMode::None作为参数
-pub fn syscall_cipher_init(
+pub fn tee_cryp_cipher_init(
     id: u32,
     iv: Option<&[u8]>,
     padding_mode: CipherPaddingMode,
@@ -1003,21 +1012,18 @@ pub fn syscall_cipher_init(
     crypto_cipher_init(cs.clone(), key.as_slice(), iv, padding_mode)
 }
 
-pub fn scn_cipher_init(arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> TeeResult {
+pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> TeeResult {
     let iv_ptr = arg1 as *const u8;
     let iv_len = arg2 as usize;
     let padding_mode_val = arg3 as u32;
 
     // 转换IV
-    let iv: Option<&[u8]> = if iv_ptr.is_null() {
-        if iv_len != 0 {
-            return Err(TEE_ERROR_BAD_PARAMETERS);
-        }
+    let iv: Option<Box<[u8]>> = if iv_ptr.is_null() || iv_len == 0 {
         None
-    } else if iv_len == 0 {
-        Some(&[])
     } else {
-        Some(unsafe { core::slice::from_raw_parts(iv_ptr, iv_len) })
+        let iv_slice = unsafe { core::slice::from_raw_parts(iv_ptr, iv_len) };
+        let iv_option = bb_memdup_user(iv_slice)?;
+        Some(iv_option)
     };
 
     let padding_mode = match padding_mode_val {
@@ -1029,19 +1035,22 @@ pub fn scn_cipher_init(arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> Te
         _ => return Err(TEE_ERROR_BAD_PARAMETERS),
     };
 
-    syscall_cipher_init(arg0 as _, iv, padding_mode)
+    match iv {
+        Some(iv) => tee_cryp_cipher_init(arg0 as _, Some(&iv), padding_mode),
+        None => tee_cryp_cipher_init(arg0 as _, None, padding_mode),
+    }
 }
 
 /// 注意:
 /// 对于ECB模式而言，每次只能传入一个块数据，即input.len() == block_size
-/// 需要多次调用syscall_cipher_update()函数
+/// 需要多次调用tee_cryp_cipher_update()函数
 /// 对于其他加密模式，可以一次性传入所有加密数据，也可以多次传入
 /// 多次调用时，输出区域不要重叠
 ///
 /// 在使用除ECB外的其他模式时，请确保output长度至少比input大一个block_size
 /// 多余的一个block_size输出是为潜在的填充值所设定
 /// SM4的block_size为16字节
-pub fn syscall_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
+pub fn tee_cryp_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1061,7 +1070,7 @@ pub fn syscall_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
     crypto_cipher_update(cs.clone(), input, output)
 }
 
-pub fn scn_cipher_update(
+pub fn syscall_cipher_update(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1073,26 +1082,33 @@ pub fn scn_cipher_update(
 
     // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let dst_ptr = arg3 as *mut u8;
-    let mut dst_len = unsafe { *(arg4 as *mut usize) };
+
+    let mut dst_len_ptr = arg4 as *mut usize;
+    let mut dst_len: usize = 0;
 
     let src = if src_ptr.is_null() || src_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     } else {
-        unsafe { core::slice::from_raw_parts(src_ptr, src_len) }
+        let src_slice = unsafe { core::slice::from_raw_parts(src_ptr, src_len) };
+        bb_memdup_user(src_slice)?
     };
 
-    let mut dst = if dst_ptr.is_null() || dst_len == 0 {
+    if dst_ptr.is_null() || dst_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) }
-    };
+    }
+    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
+    let mut dst = bb_memdup_user(dst_slice)?;
 
-    dst_len = syscall_cipher_update(arg0 as _, src, dst)?;
+    dst_len = tee_cryp_cipher_update(arg0 as _, &src, &mut dst)?;
+
+    // Copy dst to user
+    unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
+    unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
     Ok(())
 }
 
 /// 用于处理最后一个数据块的填充和加密
-pub fn syscall_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
+pub fn tee_cryp_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1106,12 +1122,12 @@ pub fn syscall_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeResu
 
     drop(cs_guard);
 
-    let mut len = syscall_cipher_update(id, input, output)?;
+    let mut len = tee_cryp_cipher_update(id, input, output)?;
     len += crypto_cipher_final(cs.clone(), &mut output[len..])?;
     Ok(len)
 }
 
-pub fn scn_cipher_final(
+pub fn syscall_cipher_final(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1123,25 +1139,31 @@ pub fn scn_cipher_final(
 
     // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let dst_ptr = arg3 as *mut u8;
-    let mut dst_len = unsafe { *(arg4 as *mut usize) };
+    let mut dst_len_ptr = arg4 as *mut usize;
+    let mut dst_len: usize = 0;
 
     let src = if src_ptr.is_null() || src_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     } else {
-        unsafe { core::slice::from_raw_parts(src_ptr, src_len) }
+        let src_slice = unsafe { core::slice::from_raw_parts(src_ptr, src_len) };
+        bb_memdup_user(src_slice)?
     };
 
-    let mut dst = if dst_ptr.is_null() || dst_len == 0 {
+    if dst_ptr.is_null() || dst_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) }
-    };
+    }
+    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
+    let mut dst = bb_memdup_user(dst_slice)?;
 
-    dst_len = syscall_cipher_final(arg0 as _, src, dst)?;
+    dst_len = tee_cryp_cipher_final(arg0 as _, &src, &mut dst)?;
+
+    // Copy dst to user
+    unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
+    unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
     Ok(())
 }
 
-pub fn syscall_authenc_init(id: u32, nonce: &[u8], padding_mode: CipherPaddingMode) -> TeeResult {
+pub fn tee_cryp_authenc_init(id: u32, nonce: &[u8], padding_mode: CipherPaddingMode) -> TeeResult {
     let mut cs = tee_cryp_state_get(id)?;
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -1172,7 +1194,7 @@ pub fn syscall_authenc_init(id: u32, nonce: &[u8], padding_mode: CipherPaddingMo
     crypto_authenc_init(cs.clone(), key.as_slice(), nonce, padding_mode)
 }
 
-pub fn syscall_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
+pub fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
 
@@ -1191,15 +1213,15 @@ pub fn syscall_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
     crypto_authenc_update_aad(cs.clone(), aad)
 }
 
-pub fn syscall_authenc_update_payload(
+pub fn tee_cryp_authenc_update_payload(
     id: u32,
     input: &[u8],
     output: &mut [u8],
 ) -> TeeResult<usize> {
-    syscall_cipher_update(id, input, output)
+    tee_cryp_cipher_update(id, input, output)
 }
 
-pub fn syscall_authenc_enc_final(
+pub fn tee_cryp_authenc_enc_final(
     id: u32,
     input: Option<&[u8]>,
     output: &mut [u8],
@@ -1220,7 +1242,7 @@ pub fn syscall_authenc_enc_final(
     crypto_authenc_enc_final(cs.clone(), input, output, tag)
 }
 
-pub fn syscall_authenc_dec_final(
+pub fn tee_cryp_authenc_dec_final(
     id: u32,
     input: Option<&[u8]>,
     output: &mut [u8],
@@ -1241,7 +1263,7 @@ pub fn syscall_authenc_dec_final(
     crypto_authenc_dec_final(cs.clone(), input, output, tag)
 }
 
-pub fn syscall_asymm_operate(
+pub fn tee_cryp_asymm_operate(
     id: u32,
     input: &[u8],
     output: &mut [u8],
@@ -1319,7 +1341,7 @@ pub fn syscall_asymm_operate(
     }
 }
 
-pub fn syscall_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResult {
+pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResult {
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
 
@@ -1381,10 +1403,10 @@ pub mod tests_cryp {
             assert!(res.is_ok());
             let id = res.unwrap() as u32;
 
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM3, TEE_OperationMode::TEE_MODE_DIGEST, None, None, &mut state1);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM3, TEE_OperationMode::TEE_MODE_DIGEST, None, None, &mut state1);
             assert!(res.is_ok());
 
-            let res = syscall_cryp_state_alloc(TEE_ALG_AES_ECB_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(id), None, &mut state2);
+            let res = tee_cryp_state_alloc(TEE_ALG_AES_ECB_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(id), None, &mut state2);
             assert!(res.is_ok());
 
             let res = tee_cryp_state_get(state1);
@@ -1407,10 +1429,10 @@ pub mod tests_cryp {
             assert!(guard2.mode == TEE_OperationMode::TEE_MODE_DECRYPT);
             drop(guard2);
 
-            let res = syscall_cryp_state_free(state1);
+            let res = tee_cryp_state_free(state1);
             assert!(res.is_ok());
 
-            let res = syscall_cryp_state_free(state2);
+            let res = tee_cryp_state_free(state2);
             assert!(res.is_ok());
 
             match tee_cryp_state_get(state1) {
@@ -1429,19 +1451,19 @@ pub mod tests_cryp {
 
         fn test_cryp_hash_sm3(){
             let mut state: u32 = 0;
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM3, TEE_OperationMode::TEE_MODE_DIGEST, None, None, &mut state);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM3, TEE_OperationMode::TEE_MODE_DIGEST, None, None, &mut state);
             assert!(res.is_ok());
 
-            let res = syscall_hash_init(state);
+            let res = tee_cryp_hash_init(state);
             assert!(res.is_ok());
 
             let data = b"abc";
 
-            let res = syscall_hash_update(state, &data[..]);
+            let res = tee_cryp_hash_update(state, &data[..]);
             assert!(res.is_ok());
 
             let mut hash: [u8; 32] = [0; 32];
-            let res = syscall_hash_final(state, &[], &mut hash);
+            let res = tee_cryp_hash_final(state, &[], &mut hash);
             assert!(res.is_ok());
             let hash_size = res.unwrap();
 
@@ -1484,19 +1506,19 @@ pub mod tests_cryp {
             let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
             drop(obj);
 
-            let res = syscall_cryp_state_alloc(TEE_ALG_HMAC_SM3, TEE_OperationMode::TEE_MODE_MAC, Some(obj_id as _), None, &mut state);
+            let res = tee_cryp_state_alloc(TEE_ALG_HMAC_SM3, TEE_OperationMode::TEE_MODE_MAC, Some(obj_id as _), None, &mut state);
             assert!(res.is_ok());
 
-            let res = syscall_hash_init(state);
+            let res = tee_cryp_hash_init(state);
             assert!(res.is_ok());
 
             let data = b"abc";
 
-            let res = syscall_hash_update(state, &data[..]);
+            let res = tee_cryp_hash_update(state, &data[..]);
             assert!(res.is_ok());
 
             let mut hash: [u8; 32] = [0; 32];
-            let res = syscall_hash_final(state, &[], &mut hash);
+            let res = tee_cryp_hash_final(state, &[], &mut hash);
             assert!(res.is_ok());
             let hash_size = res.unwrap();
 
@@ -1539,23 +1561,23 @@ pub mod tests_cryp {
             let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
             drop(obj);
 
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM4_ECB_NOPAD, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM4_ECB_NOPAD, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
             assert!(res.is_ok());
 
             let data1 = b"abcdefghabcdefgh";
             let data2 = b"1234567890987654";
 
-            let res = syscall_cipher_init(state, None, CipherPaddingMode::None);
+            let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
             assert!(res.is_ok());
 
             let mut out = [0u8; 32];
             let mut total_len = 0;
 
-            let res = syscall_cipher_update(state, &data1[..], &mut out[total_len..]);
+            let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
-            let res = syscall_cipher_update(state, &data2[..], &mut out[total_len..]);
+            let res = tee_cryp_cipher_update(state, &data2[..], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
@@ -1597,23 +1619,23 @@ pub mod tests_cryp {
             let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
             drop(obj);
 
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM4_ECB_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM4_ECB_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
             assert!(res.is_ok());
 
             let data1: [u8; 16] = [0x9b, 0x46, 0x5b, 0x81, 0x3f, 0xea, 0x31, 0xd6, 0x78, 0xe9, 0xad, 0x06, 0x00, 0x21, 0x53, 0x48];
             let data2: [u8; 16] = [0x6e, 0x51, 0x8c, 0xae, 0xe0, 0xe1, 0x0f, 0x6e, 0xb8, 0x95, 0x5c, 0x2e, 0x38, 0x24, 0x81, 0xd7];
 
-            let res = syscall_cipher_init(state, None, CipherPaddingMode::None);
+            let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
             assert!(res.is_ok());
 
             let mut out = [0u8; 32];
             let mut total_len = 0;
 
-            let res = syscall_cipher_update(state, &data1[..], &mut out[total_len..]);
+            let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
-            let res = syscall_cipher_update(state, &data2[..], &mut out[total_len..]);
+            let res = tee_cryp_cipher_update(state, &data2[..], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
@@ -1654,24 +1676,24 @@ pub mod tests_cryp {
             let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
             drop(obj);
 
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM4_CBC_NOPAD, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM4_CBC_NOPAD, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
             assert!(res.is_ok());
 
             let data = b"abcdefghabcdefgh1234567890987654";
             let iv = b"1234qwerasdfzxcv";
 
-            let res = syscall_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
+            let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
             assert!(res.is_ok());
 
             let mut out = [0u8; 48];
             let mut total_len = 0;
 
-            let res = syscall_cipher_update(state, &data[..], &mut out[total_len..]);
+            let res = tee_cryp_cipher_update(state, &data[..], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
             // 处理填充
-            let res = syscall_cipher_final(state, &[], &mut out[total_len..]);
+            let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
@@ -1714,7 +1736,7 @@ pub mod tests_cryp {
             let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
             drop(obj);
 
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM4_CBC_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM4_CBC_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
             assert!(res.is_ok());
 
             // 解密的数据需要包括一个block_size大小的填充
@@ -1723,18 +1745,18 @@ pub mod tests_cryp {
                 0xf3, 0x4f, 0xa5, 0xa9, 0x0c, 0x02, 0x39, 0xcc, 0x76, 0x1b, 0x4f, 0xe2, 0xb1, 0xbc, 0xd1, 0x96];
             let iv = b"1234qwerasdfzxcv";
 
-            let res = syscall_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
+            let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
             assert!(res.is_ok());
 
             // 输出区域大小仍然需要比输入数据大一个block_size
             let mut out = [0u8; 64];
             let mut total_len = 0;
 
-            let res = syscall_cipher_update(state, &data[..], &mut out[total_len..]);
+            let res = tee_cryp_cipher_update(state, &data[..], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
-            let res = syscall_cipher_final(state, &[], &mut out[total_len..]);
+            let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
             assert!(res.is_ok());
             total_len += res.unwrap();
 
@@ -1776,7 +1798,7 @@ pub mod tests_cryp {
            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
            drop(obj);
 
-           let res = syscall_cryp_state_alloc(TEE_ALG_SM4_GCM, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
+           let res = tee_cryp_state_alloc(TEE_ALG_SM4_GCM, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
            assert!(res.is_ok());
 
            let data: [u8; 64] =
@@ -1795,17 +1817,17 @@ pub mod tests_cryp {
            let mut out = [0u8; 80];
            let mut total_len = 0;
 
-           let res = syscall_authenc_init(state, &nonce, CipherPaddingMode::None);
+           let res = tee_cryp_authenc_init(state, &nonce, CipherPaddingMode::None);
            assert!(res.is_ok());
 
-           let res = syscall_authenc_update_aad(state, &ad);
+           let res = tee_cryp_authenc_update_aad(state, &ad);
            assert!(res.is_ok());
 
-           let res = syscall_authenc_update_payload(state, &data[..], &mut out[total_len..]);
+           let res = tee_cryp_authenc_update_payload(state, &data[..], &mut out[total_len..]);
            assert!(res.is_ok());
            total_len += res.unwrap();
 
-           let res = syscall_authenc_enc_final(state, None, &mut out[total_len..], &mut tag);
+           let res = tee_cryp_authenc_enc_final(state, None, &mut out[total_len..], &mut tag);
            assert!(res.is_ok());
            total_len += res.unwrap();
 
@@ -1856,7 +1878,7 @@ pub mod tests_cryp {
            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
            drop(obj);
 
-           let res = syscall_cryp_state_alloc(TEE_ALG_SM4_GCM, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
+           let res = tee_cryp_state_alloc(TEE_ALG_SM4_GCM, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
            assert!(res.is_ok());
 
            let data: [u8; 64] =
@@ -1875,17 +1897,17 @@ pub mod tests_cryp {
            let mut out = [0u8; 80];
            let mut total_len = 0;
 
-           let res = syscall_authenc_init(state, &nonce, CipherPaddingMode::None);
+           let res = tee_cryp_authenc_init(state, &nonce, CipherPaddingMode::None);
            assert!(res.is_ok());
 
-           let res = syscall_authenc_update_aad(state, &ad);
+           let res = tee_cryp_authenc_update_aad(state, &ad);
            assert!(res.is_ok());
 
-           let res = syscall_authenc_update_payload(state, &data[..], &mut out[total_len..]);
+           let res = tee_cryp_authenc_update_payload(state, &data[..], &mut out[total_len..]);
            assert!(res.is_ok());
            total_len += res.unwrap();
 
-           let res = syscall_authenc_dec_final(state, None, &mut out[total_len..], &tag);
+           let res = tee_cryp_authenc_dec_final(state, None, &mut out[total_len..], &tag);
            assert!(res.is_ok());
 
            assert_eq!(total_len, 64);
@@ -1932,22 +1954,22 @@ pub mod tests_cryp {
             assert!(res.is_ok());
 
             let mut state: u32 = 0;
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_SIGN, Some(obj_id as _), None, &mut state);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_SIGN, Some(obj_id as _), None, &mut state);
             assert!(res.is_ok());
 
             let mut state_pub: u32 = 0;
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_VERIFY, Some(obj_id_pub as _), None, &mut state_pub);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_VERIFY, Some(obj_id_pub as _), None, &mut state_pub);
             assert!(res.is_ok());
 
             let data = b"SIGNATURE TEST SIGNATURE TEST SI";
             let mut signature1 = [0u8; 141];
             let mut signature2 = [0u8; 141];
 
-            let res = syscall_asymm_operate(state, data, &mut signature1, None);
+            let res = tee_cryp_asymm_operate(state, data, &mut signature1, None);
             assert!(res.is_ok());
             let len = res.unwrap();
 
-            let res = syscall_asymm_verify(state_pub, data, &signature1[..len]);
+            let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len]);
             assert!(res.is_ok());
        }
     }
@@ -1983,11 +2005,11 @@ pub mod tests_cryp {
             assert!(res.is_ok());
 
             let mut state_enc: u32 = 0;
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id_pub as _), None, &mut state_enc);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id_pub as _), None, &mut state_enc);
             assert!(res.is_ok());
 
             let mut state_dec: u32 = 0;
-            let res = syscall_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state_dec);
+            let res = tee_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state_dec);
             assert!(res.is_ok());
 
             let data = b"SIGNATURE TEST SIGNATURE TEST SI";
@@ -1996,26 +2018,26 @@ pub mod tests_cryp {
             let mut clear1 = [0u8; 141];
             let mut clear2 = [0u8; 141];
 
-            let res = syscall_asymm_operate(state_enc, data, &mut cipher1, None);
+            let res = tee_cryp_asymm_operate(state_enc, data, &mut cipher1, None);
             assert!(res.is_ok());
-            let len1 = res.unwrap();
+            let mut len1 = res.unwrap();
 
-            let res = syscall_asymm_operate(state_enc, data, &mut cipher2, None);
+            let res = tee_cryp_asymm_operate(state_enc, data, &mut cipher2, None);
             assert!(res.is_ok());
-            let len1 = res.unwrap();
+            let mut len2 = res.unwrap();
 
-            assert_ne!(cipher1[..len1], cipher2[..len1]);
+            assert_ne!(cipher1[..len1], cipher2[..len2]);
 
-            let res = syscall_asymm_operate(state_dec, &cipher1[..len1], &mut clear1, None);
+            let res = tee_cryp_asymm_operate(state_dec, &cipher1[..len1], &mut clear1, None);
             assert!(res.is_ok());
-            let len = res.unwrap();
+            let len3 = res.unwrap();
 
-            let res = syscall_asymm_operate(state_dec, &cipher2[..len1], &mut clear2, None);
+            let res = tee_cryp_asymm_operate(state_dec, &cipher2[..len2], &mut clear2, None);
             assert!(res.is_ok());
-            let len = res.unwrap();
+            let len4 = res.unwrap();
 
-            assert_eq!(&clear1[..len], &clear2[..len]);
-            assert_eq!(&clear1[..len], data);
+            assert_eq!(&clear1[..len3], &clear2[..len4]);
+            assert_eq!(&clear1[..len3], data);
        }
     }
 
