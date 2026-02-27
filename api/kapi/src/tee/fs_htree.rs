@@ -6,6 +6,7 @@ use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{fmt, fmt::Debug, ptr::NonNull};
 
 use bytemuck::{Pod, Zeroable};
+use cfg_if::cfg_if;
 use mbedtls::{
     cipher::{Authenticated, Cipher, CipherData, Decryption, Encryption, Fresh, Operation, raw},
     error::HiError::PemAllocFailed,
@@ -14,13 +15,15 @@ use mbedtls::{
 use memoffset::offset_of;
 use subtle::ConstantTimeEq;
 use tee_raw_sys::{
-    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_AES_GCM, TEE_ALG_HMAC_SHA256, TEE_ALG_SHA256,
-    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_CORRUPT_OBJECT, TEE_ERROR_GENERIC, TEE_ERROR_MAC_INVALID,
-    TEE_ERROR_NOT_SUPPORTED, TEE_ERROR_SECURITY, TEE_ERROR_SHORT_BUFFER, TEE_OperationMode,
-    TEE_UUID,
+    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_AES_GCM, TEE_ALG_HMAC_SHA256, TEE_ALG_HMAC_SM3, TEE_ALG_SHA256,
+    TEE_ALG_SM3, TEE_ALG_SM4_ECB_NOPAD, TEE_ALG_SM4_GCM, TEE_ERROR_BAD_PARAMETERS,
+    TEE_ERROR_CORRUPT_OBJECT, TEE_ERROR_GENERIC, TEE_ERROR_MAC_INVALID, TEE_ERROR_NOT_SUPPORTED,
+    TEE_ERROR_SECURITY, TEE_ERROR_SHORT_BUFFER, TEE_OperationMode, TEE_UUID,
 };
 
-use super::utee_defines::{TEE_AES_BLOCK_SIZE, TEE_SHA256_HASH_SIZE};
+use super::utee_defines::{
+    TEE_AES_BLOCK_SIZE, TEE_SHA256_HASH_SIZE, TEE_SM3_HASH_SIZE, TEE_SM4_BLOCK_SIZE,
+};
 use crate::tee::{
     TeeResult,
     common::file_ops::FileVariant,
@@ -35,21 +38,32 @@ use crate::tee::{
 };
 
 pub const TEE_FS_HTREE_IV_SIZE: usize = 16;
-pub const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SHA256_HASH_SIZE;
 pub const TEE_FS_HTREE_FEK_SIZE: usize = 16;
 pub const TEE_FS_HTREE_TAG_SIZE: usize = 16;
 
 pub const TEE_FS_HTREE_CHIP_ID_SIZE: usize = 32;
-pub const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SHA256;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "tee_ss_smx")] {
+        pub const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SM3;
+        pub const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SM3_HASH_SIZE;
+        pub const TEE_FS_HTREE_ENC_ALG: TeeAlg = TEE_ALG_SM4_ECB_NOPAD;
+        pub const TEE_FS_HTREE_ENC_SIZE: usize = TEE_SM4_BLOCK_SIZE;
+        pub const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_SM4_GCM;
+        pub const TEE_FS_HTREE_HMAC_ALG: TeeAlg = TEE_ALG_HMAC_SM3;
+    } else {
+        pub const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SHA256;
+        pub const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SHA256_HASH_SIZE;
+        pub const TEE_FS_HTREE_ENC_ALG: TeeAlg = TEE_ALG_AES_ECB_NOPAD;
+        pub const TEE_FS_HTREE_ENC_SIZE: usize = TEE_AES_BLOCK_SIZE;
+        pub const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_AES_GCM;
+        pub const TEE_FS_HTREE_HMAC_ALG: TeeAlg = TEE_ALG_HMAC_SHA256;
+    }
+}
 pub const TEE_FS_HTREE_TSK_SIZE: usize = TEE_FS_HTREE_HASH_SIZE;
-pub const TEE_FS_HTREE_ENC_ALG: TeeAlg = TEE_ALG_AES_ECB_NOPAD;
-pub const TEE_FS_HTREE_ENC_SIZE: usize = TEE_AES_BLOCK_SIZE;
 pub const TEE_FS_HTREE_SSK_SIZE: usize = TEE_FS_HTREE_HASH_SIZE;
 
 pub const HTREE_NODE_COMMITTED_BLOCK: u32 = 1 << 0; // 即 0x1
-
-pub const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_AES_GCM;
-pub const TEE_FS_HTREE_HMAC_ALG: TeeAlg = TEE_ALG_HMAC_SHA256;
 
 #[inline]
 fn block_num_to_node_id(num: usize) -> usize {
@@ -872,6 +886,12 @@ fn create_cipher<M: Operation>(
     match alg {
         TEE_ALG_AES_GCM => Cipher::<M, Authenticated, Fresh>::new(
             raw::CipherId::Aes,
+            raw::CipherMode::GCM,
+            key_bits as u32,
+        )
+        .map_err(|_| TEE_ERROR_NOT_SUPPORTED),
+        TEE_ALG_SM4_GCM => Cipher::<M, Authenticated, Fresh>::new(
+            raw::CipherId::SM4,
             raw::CipherMode::GCM,
             key_bits as u32,
         )
@@ -2188,7 +2208,7 @@ mod tests_htree_basic {
             HtreeNode::set_right(&mut root, right_child);
             // Create the TeeFsHtree structure
             let mut ht = TeeFsHtree {
-                root: root,
+                root,
                 data: TeeFsHtreeData::default(),
                 storage: Box::new(TeeFsFdAux::new()),
             };
@@ -3089,7 +3109,7 @@ pub mod tests_fs_htree {
             info!("fd_back: {:?}", fd_back);
             // 先创建文件 (create = true)
             let ht_create = tee_fs_htree_open(
-                Box::new(TeeFsFdAux { fd: fd }),
+                Box::new(TeeFsFdAux { fd }),
                 true,
                 Some(&mut hash),
                 Some(&uuid),

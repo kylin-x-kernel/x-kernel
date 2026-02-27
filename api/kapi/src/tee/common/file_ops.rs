@@ -408,7 +408,7 @@ pub mod tests_file_ops {
         using TestResult;
 
         fn test_file_ops_read() {
-            let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT) as u32, 0o644);
+            let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT), 0o644);
             assert!(fd.is_ok());
             let mut fd = fd.unwrap();
             // // write 1024 bytes to file
@@ -437,8 +437,7 @@ pub mod tests_file_ops {
             assert_eq!(n, 4);
             assert_eq!(buf, [0xBB; 4]);
             // truncate file to 4 bytes
-            let n = fd.ftruncate(4).expect("Failed to truncate file");
-            assert_eq!(n, ());
+            fd.ftruncate(4).expect("Failed to truncate file");
             // get file size
             let size = tee_get_file_size("/tmp/test.txt").expect("Failed to get file size");
             assert_eq!(size, 4);
@@ -453,7 +452,7 @@ pub mod tests_file_ops {
             assert!(!FileVariant::exists(path));
             // create file
             {
-                let fd = FileVariant::open(path, (O_RDWR | O_CREAT) as u32, 0o644);
+                let fd = FileVariant::open(path, (O_RDWR | O_CREAT), 0o644);
                 assert!(fd.is_ok());
             }
             // check if file exists

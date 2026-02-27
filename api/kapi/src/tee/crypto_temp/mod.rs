@@ -6,6 +6,7 @@
 //       !!! DO NOT ADD NEW FUNCTIONS TO THIS FILE !!!
 // TODO: Remove this file after the crypto module are implemented.
 
-pub mod aes_cbc;
+pub mod aes_ecb;
 pub mod crypto_hash_temp;
 pub mod hash;
+pub mod sm4_ecb;

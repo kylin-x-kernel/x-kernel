@@ -2827,7 +2827,7 @@ pub mod tests_tee_svc_cryp {
                 )
             };
             let value: [u32; 2] = [unsafe { *(attr_bytes.as_ptr() as *const u32) }, 0];
-            assert_eq!(value[0], 0xAABBCCDD as u32);
+            assert_eq!(value[0], 0xAABBCCDD_u32);
             assert_eq!(size_of_val(&value), 8);
 
             // test tee_u32_to_big_endian
@@ -3012,7 +3012,7 @@ pub mod tests_tee_svc_cryp {
             let mut offs_read: size_t = 0;
             let result = op_u32_from_binary_helper(&mut read_value, &buffer, &mut offs_read);
             assert!(result.is_ok());
-            assert_eq!(read_value, 0x99AABBCC as u32);
+            assert_eq!(read_value, 0x99AABBCC_u32);
             assert_eq!(offs_read, 4);
         }
     }
@@ -3057,7 +3057,7 @@ pub mod tests_tee_svc_cryp {
 
             //attr[..4].copy_from_slice(value_bytes);
             let mut offs: size_t = 0;
-            let result = op_attr_value_from_binary(&mut attr, &value_bytes, &mut offs);
+            let result = op_attr_value_from_binary(&mut attr, value_bytes, &mut offs);
             // info!("result: {:?}, offs: {}, attr: {:?}", result, offs, attr);
             assert!(result.is_ok());
             assert_eq!(offs, 4);
@@ -3302,7 +3302,7 @@ pub mod tests_tee_svc_cryp {
                 let e_len = long2byte(e, &mut e_bytes);
                 tee_init_ref_attribute(
                     &mut usr_params[0],
-                    TEE_ATTR_RSA_PUBLIC_EXPONENT as u32,
+                    TEE_ATTR_RSA_PUBLIC_EXPONENT,
                     &e_bytes[..e_len as usize],
                     e_len,
                 );
@@ -3340,7 +3340,7 @@ pub mod tests_tee_svc_cryp {
         if e != 0 {
             assert_eq!(rsa_keypair.e.as_mpi(), &Mpi::new(e as i64).unwrap());
         } else {
-            assert_eq!(rsa_keypair.e.as_mpi(), &Mpi::new(65537 as i64).unwrap());
+            assert_eq!(rsa_keypair.e.as_mpi(), &Mpi::new(65537_i64).unwrap());
         }
 
         TestResult::Ok
@@ -3429,8 +3429,8 @@ pub mod tests_tee_svc_cryp {
                 content:
                     content {
                         value: Value {
-                            a: 0 as u32,
-                            b: 0 as u32,
+                            a: 0_u32,
+                            b: 0_u32,
                         },
                     }
             };
@@ -3439,8 +3439,8 @@ pub mod tests_tee_svc_cryp {
             let mut usr_attrs: [utee_attribute; 2] = [utee_attribute::default(); 2];
             // index 0 is value attribute
             usr_attrs[0].attribute_id = TEE_ATTR_FLAG_VALUE;
-            usr_attrs[0].a = 0x11223344 as u64;
-            usr_attrs[0].b = 0x55667788 as u64;
+            usr_attrs[0].a = 0x11223344_u64;
+            usr_attrs[0].b = 0x55667788_u64;
             // index 1 is memref attribute
             // allocate memory for memref
             let mem: [u8; 16] = [0xAA; 16];
@@ -3452,8 +3452,8 @@ pub mod tests_tee_svc_cryp {
             let result = copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs, &mut attrs);
             assert!(result.is_ok());
             assert_eq!(attrs[0].attributeID, TEE_ATTR_FLAG_VALUE);
-            assert_eq!(unsafe { attrs[0].content.value.a }, 0x11223344 as u32);
-            assert_eq!(unsafe { attrs[0].content.value.b }, 0x55667788 as u32);
+            assert_eq!(unsafe { attrs[0].content.value.a }, 0x11223344_u32);
+            assert_eq!(unsafe { attrs[0].content.value.b }, 0x55667788_u32);
             assert_eq!(attrs[1].attributeID, 0);
             assert_eq!(unsafe { attrs[1].content.memref.buffer }, mem_ptr);
             assert_eq!(unsafe { attrs[1].content.memref.size }, mem.len());

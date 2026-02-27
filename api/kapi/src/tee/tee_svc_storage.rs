@@ -1621,7 +1621,7 @@ pub mod tests_tee_svc_storage {
 
             // step 2 : read the object
             let data_read = vec![0u8; data_create.len()];
-            let mut count = 0 as u64;
+            let mut count = 0_u64;
             let result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
             assert!(result.is_ok());
             tee_debug!("data: {:?}, count: 0x{:X?}", data_read, count);
@@ -1641,7 +1641,7 @@ pub mod tests_tee_svc_storage {
 
             // step 5 : read
             let data_read = vec![0u8; data_write.len()];
-            let mut count = 0 as u64;
+            let mut count = 0_u64;
             let result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
             assert!(result.is_ok());
             tee_debug!("data: {:?}, count: 0x{:X?}", data_read, count);
@@ -1656,15 +1656,15 @@ pub mod tests_tee_svc_storage {
             assert!(result.is_ok());
             // step 7 : read
             let data_read = vec![0u8; data_create.len()];
-            let mut count = 0 as u64;
+            let mut count = 0_u64;
             let result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
             assert!(result.is_ok());
             tee_debug!("data: {:?}, count: 0x{:X?}", data_read, count);
             assert_eq!(data_read, b"test_data");
             assert_eq!(count, data_create.len() as u64);
             // read failed because the object is truncated
-            let data_read = vec![0u8; 1];
-            let mut count = 0 as u64;
+            let mut data_read = [0u8; 1];
+            let mut count = 0_u64;
             let _result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
             // assert!(result.is_err());
             assert_eq!(count, 0);

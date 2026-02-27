@@ -5,31 +5,45 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::mem::size_of;
 
+use cfg_if::cfg_if;
 use ksync::Mutex;
 use lazy_static::lazy_static;
 use mbedtls::hash;
 use static_assertions::const_assert;
 use tee_raw_sys::{
-    TEE_ALG_AES_ECB_NOPAD, TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_GENERIC, TEE_ERROR_NOT_IMPLEMENTED,
-    TEE_OperationMode, TEE_UUID,
+    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_HMAC_SHA256, TEE_ALG_HMAC_SM3, TEE_ALG_SM4_ECB_NOPAD,
+    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_GENERIC, TEE_ERROR_NOT_IMPLEMENTED, TEE_OperationMode,
+    TEE_UUID,
 };
 
 use super::{
     TeeResult,
     huk_subkey::{HUK_SUBKEY_MAX_LEN, HukSubkeyUsage, huk_subkey_derive},
     otp_stubs::{TeeHwUniqueKey, tee_otp_get_hw_unique_key},
-    utee_defines::{TEE_SHA256_HASH_SIZE, TeeAlg},
+    utee_defines::{TEE_SHA256_HASH_SIZE, TEE_SM3_HASH_SIZE, TeeAlg},
 };
 use crate::tee::crypto_temp::{
-    aes_cbc::MbedAesCbcCtx,
-    crypto_hash_temp::{CryptoCipherCtx, CryptoCipherOps},
+    aes_ecb::MbedAesEcbCtx,
+    crypto_hash_temp::{CryptoCipherCtx, CryptoCipherOps, tee_alg_to_hmac_type},
+    sm4_ecb::MbedSm4EcbCtx,
 };
 
-const TEE_FS_KM_SSK_SIZE: usize = TEE_SHA256_HASH_SIZE;
 const TEE_FS_KM_CHIP_ID_LENGTH: usize = 32;
-const TEE_FS_KM_TSK_SIZE: usize = TEE_SHA256_HASH_SIZE;
 pub const TEE_FS_KM_FEK_SIZE: usize = 16; /* bytes */
 
+cfg_if::cfg_if! {
+    if #[cfg(feature = "tee_ss_smx")] {
+        const TEE_FS_KM_SSK_SIZE: usize = TEE_SM3_HASH_SIZE;
+        const TEE_FS_KM_TSK_SIZE: usize = TEE_SM3_HASH_SIZE;
+        const TEE_FS_KM_HMAC_ALG: u32 = TEE_ALG_HMAC_SM3;
+        const TEE_FS_KM_ENC_FEK_ALG: u32 = TEE_ALG_SM4_ECB_NOPAD;
+    } else {
+        const TEE_FS_KM_SSK_SIZE: usize = TEE_SHA256_HASH_SIZE;
+        const TEE_FS_KM_TSK_SIZE: usize = TEE_SHA256_HASH_SIZE;
+        const TEE_FS_KM_HMAC_ALG: u32 = TEE_ALG_HMAC_SHA256;
+        const TEE_FS_KM_ENC_FEK_ALG: u32 = TEE_ALG_AES_ECB_NOPAD;
+    }
+}
 #[derive(Debug, Clone)]
 pub struct TeeFsSsk {
     pub is_init: bool,
@@ -71,7 +85,11 @@ lazy_static! {
 pub fn crypto_cipher_alloc_ctx(algo: TeeAlg) -> Result<Box<dyn CryptoCipherOps>, TeeResult> {
     match algo {
         TEE_ALG_AES_ECB_NOPAD => {
-            let ctx: MbedAesCbcCtx = *MbedAesCbcCtx::alloc_cipher_ctx()?;
+            let ctx: MbedAesEcbCtx = *MbedAesEcbCtx::alloc_cipher_ctx()?;
+            Ok(Box::new(ctx))
+        }
+        TEE_ALG_SM4_ECB_NOPAD => {
+            let ctx: MbedSm4EcbCtx = *MbedSm4EcbCtx::alloc_cipher_ctx()?;
             Ok(Box::new(ctx))
         }
         _ => Err(Err(TEE_ERROR_NOT_IMPLEMENTED)),
@@ -84,8 +102,9 @@ pub fn do_hmac(out_key: &mut [u8], in_key: &[u8], message: &[u8]) -> TeeResult {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    let mut mac =
-        hash::Hmac::new(hash::Type::Sha256, in_key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let hmac_type = tee_alg_to_hmac_type(TEE_FS_KM_HMAC_ALG)?;
+
+    let mut mac = hash::Hmac::new(hmac_type, in_key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
 
     mac.update(message).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
 
@@ -152,7 +171,7 @@ pub fn tee_fs_fek_crypt(
         let dummy = [0u8, 1];
         do_hmac(&mut tsk, ssk_key_slice, &dummy)?;
     }
-    match crypto_cipher_alloc_ctx(TEE_ALG_AES_ECB_NOPAD) {
+    match crypto_cipher_alloc_ctx(TEE_FS_KM_ENC_FEK_ALG) {
         Ok(mut ctx) => {
             ctx.init(mode, Some(&tsk), None, None).inspect_err(|_| {
                 error!("tee_fs_fek_crypt: ctx.init failed");

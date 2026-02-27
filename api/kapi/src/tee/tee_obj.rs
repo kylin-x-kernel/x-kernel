@@ -180,12 +180,14 @@ pub mod tests_tee_obj {
         using TestResult;
 
         fn test_tee_obj_add_get() {
-            let mut obj = tee_obj::default();
-            obj.busy = true;
+            let mut obj = tee_obj {
+                busy: true,
+                ..Default::default()
+            };
             let obj_id = tee_obj_add(obj).expect("Failed to add tee_obj");
             info!("Added tee_obj with id {}", obj_id);
             let retrieved_obj = tee_obj_get(obj_id).expect("Failed to get tee_obj");
-            assert_eq!(retrieved_obj.lock().busy, true);
+            assert!(retrieved_obj.lock().busy);
         }
     }
 

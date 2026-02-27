@@ -6,12 +6,17 @@ use alloc::boxed::Box;
 
 use mbedtls::hash::{Md, Type};
 use tee_raw_sys::{
-    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_HMAC_SHA256, TEE_ALG_HMAC_SHA512, TEE_ALG_MD5, TEE_ALG_SHA256,
-    TEE_ALG_SHA512, TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE, TEE_ERROR_NOT_IMPLEMENTED,
-    TEE_OperationMode,
+    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_HMAC_MD5, TEE_ALG_HMAC_SHA1, TEE_ALG_HMAC_SHA256,
+    TEE_ALG_HMAC_SHA512, TEE_ALG_HMAC_SM3, TEE_ALG_MD5, TEE_ALG_SHA256, TEE_ALG_SHA512,
+    TEE_ALG_SM3, TEE_ALG_SM4_ECB_NOPAD, TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE,
+    TEE_ERROR_NOT_IMPLEMENTED, TEE_OperationMode,
 };
 
-use crate::tee::{TeeResult, crypto_temp::aes_cbc::MbedAesCbcCtx, utee_defines::TeeAlg};
+use crate::tee::{
+    TeeResult,
+    crypto_temp::{aes_ecb::MbedAesEcbCtx, sm4_ecb::MbedSm4EcbCtx},
+    utee_defines::TeeAlg,
+};
 
 pub trait HashOps {
     fn init(&mut self, key: &[u8]) -> TeeResult;
@@ -142,7 +147,7 @@ pub trait CryptoCipherOps {
     ) -> TeeResult;
     fn finalize(&mut self);
     fn free_ctx(&mut self);
-    fn copy_state(&self, dst_ctx: &mut MbedAesCbcCtx);
+    fn copy_state(&self, dst_ctx: &mut MbedAesEcbCtx);
 }
 
 pub trait CryptoCipherCtx {
@@ -169,6 +174,20 @@ fn tee_alg_to_hash_type(value: TeeAlg) -> Result<Type, u32> {
         TEE_ALG_MD5 => Ok(Type::Md5),
         TEE_ALG_SHA256 => Ok(Type::Sha256),
         TEE_ALG_SHA512 => Ok(Type::Sha512),
+        TEE_ALG_SM3 => Ok(Type::SM3),
+        _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
+    }
+}
+
+/// Convert TeeAlg to mbedtls::hash::Type
+/// This is a helper function instead of TryFrom implementation due to Rust's orphan rule
+pub fn tee_alg_to_hmac_type(value: TeeAlg) -> TeeResult<Type> {
+    match value {
+        TEE_ALG_HMAC_MD5 => Ok(Type::Md5),
+        TEE_ALG_HMAC_SHA1 => Ok(Type::Sha1),
+        TEE_ALG_HMAC_SHA256 => Ok(Type::Sha256),
+        TEE_ALG_HMAC_SHA512 => Ok(Type::Sha512),
+        TEE_ALG_HMAC_SM3 => Ok(Type::SM3),
         _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
     }
 }
@@ -176,7 +195,11 @@ fn tee_alg_to_hash_type(value: TeeAlg) -> Result<Type, u32> {
 pub fn crypto_cipher_alloc_ctx(algo: TeeAlg) -> Result<Box<dyn CryptoCipherOps>, TeeResult> {
     match algo {
         TEE_ALG_AES_ECB_NOPAD => {
-            let ctx: MbedAesCbcCtx = *MbedAesCbcCtx::alloc_cipher_ctx()?;
+            let ctx: MbedAesEcbCtx = *MbedAesEcbCtx::alloc_cipher_ctx()?;
+            Ok(Box::new(ctx))
+        }
+        TEE_ALG_SM4_ECB_NOPAD => {
+            let ctx: MbedSm4EcbCtx = *MbedSm4EcbCtx::alloc_cipher_ctx()?;
             Ok(Box::new(ctx))
         }
         _ => Err(Err(TEE_ERROR_NOT_IMPLEMENTED)),

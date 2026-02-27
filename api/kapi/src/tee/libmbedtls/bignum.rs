@@ -227,8 +227,7 @@ pub mod tests_tee_bignum {
             // Test bin2bn and bn2bin
             let mut bn_from_bin = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
             let bin_data = vec![0xF2, 0x34, 0x56, 0x78];
-            let ret = crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
-            assert_eq!(ret, ());
+            crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
             let mut bin_out = vec![0u8; 4];
             crypto_bignum_bn2bin(&bn_from_bin, &mut bin_out).expect("Failed to convert bn to bin");
             assert_eq!(bin_data, bin_out);
@@ -242,8 +241,7 @@ pub mod tests_tee_bignum {
             // Test bin with prefix zeros
             let mut bn_from_bin = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
             let bin_data = vec![0x00, 0x00, 0x56, 0x78];
-            let ret = crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
-            assert_eq!(ret, ());
+            crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
             let mut bin_out = vec![5u8; 4];
             crypto_bignum_bn2bin(&bn_from_bin, &mut bin_out).expect("Failed to convert bn to bin");
             assert_eq!(&[0x56, 0x78, 5, 5], bin_out.as_bytes());

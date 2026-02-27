@@ -30,9 +30,11 @@ tee = [
     "dep:rand_chacha",
     "dep:mbedtls",
     "dep:mbedtls-sys-auto",
+    "tee_ss_smx",
 ]
 tee_test = ["tee"]
 tee_cfg_memtag = []
+tee_ss_smx = []
 sev = ["dep:kcpu"]
 x86_csv = ["dep:kcpu"]
 

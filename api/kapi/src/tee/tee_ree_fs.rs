@@ -1388,7 +1388,7 @@ pub mod tests_tee_ree_fs {
         fn test_get_offs_size_head() {
             // Case 1: Head type, version 0
             let result = get_offs_size(TeeFsHtreeType::Head, 0, 0);
-            assert_eq!(result.unwrap(), (0 as usize, HTREE_IMAGE_SIZE_TEST)); // (0, 256)
+            assert_eq!(result.unwrap(), (0_usize, HTREE_IMAGE_SIZE_TEST)); // (0, 256)
 
             // Case 2: Head type, version 1
             let result = get_offs_size(TeeFsHtreeType::Head, 0, 1);
@@ -1512,10 +1512,11 @@ pub mod tests_tee_ree_fs {
                 clockSeqAndNode: [0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78],
             };
 
-            let mut dfh = TeeFsDirfileFileh::default();
-            dfh.file_number = 0x12345678;
-            dfh.hash = [0x01; TEE_FS_HTREE_HASH_SIZE];
-            dfh.idx = 1;
+            let mut dfh = TeeFsDirfileFileh {
+                file_number: 0x12345678,
+                hash: [0x01; TEE_FS_HTREE_HASH_SIZE],
+                idx: 1,
+            };
 
             let mut hash = [0u8; TEE_FS_HTREE_HASH_SIZE];
 

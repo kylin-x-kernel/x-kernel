@@ -4,6 +4,11 @@
 
 use alloc::{format, string::String};
 
+use rand_chacha::{
+    ChaCha20Rng,
+    rand_core::{RngCore, SeedableRng},
+};
+
 #[inline]
 pub const fn bit32(nr: u32) -> u32 {
     1u32 << nr
@@ -67,6 +72,12 @@ pub fn slice_fmt(data: &[u8]) -> String {
         + "data: "
         + &hex::encode_upper(&data[..show_len])
         + if len > min_len { "..." } else { "" }
+}
+
+pub fn random_bytes(data: &mut [u8]) {
+    let seed = khal::time::now_ticks();
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    rng.fill_bytes(data);
 }
 
 #[cfg(feature = "tee_test")]

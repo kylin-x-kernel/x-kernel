@@ -471,9 +471,7 @@ fn test_corrupt_type(
 
     let mut n: usize = 0;
     let res = (|| -> TeeResult {
-        let mut result: TeeResult = Ok(());
-
-        let result = loop {
+        loop {
             let mut aux2 = aux.clone();
             {
                 let aux_inner = aux.inner.lock();
@@ -542,9 +540,7 @@ fn test_corrupt_type(
             if n >= size0 {
                 n = size0 - 1;
             }
-        };
-
-        result
+        }
     })();
 
     if res.is_err() {

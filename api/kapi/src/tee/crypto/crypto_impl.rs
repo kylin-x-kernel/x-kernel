@@ -262,8 +262,10 @@ pub mod tests_tee_crypto_impl {
         using TestResult;
 
         fn test_crypto_ecc_keypair_ops_generate() {
-            let mut keypair = ecc_keypair::default();
-            keypair.curve = TEE_ECC_CURVE_SM2;
+            let mut keypair = ecc_keypair {
+                curve: TEE_ECC_CURVE_SM2,
+                ..Default::default()
+            };
             let key_size = 256;
             let result = EccKeypair::<Sm2DsaKeyPair>::new(&mut keypair).generate(key_size);
             info!("Generated ECC key: {:X?}", result);

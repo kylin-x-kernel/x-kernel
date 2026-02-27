@@ -409,7 +409,7 @@ pub mod tests_tee_pobj {
             let obj_id = [0x12, 0x34, 0x56, 0x78];
             {
                 let result = tee_pobj_get(&TEE_UUID::default(), &obj_id, obj_id.len() as u32, 0, tee_pobj_usage::TEE_POBJ_USAGE_ENUM, &REE_FS_OPS);
-                assert_eq!(result.is_ok(), true);
+                assert!(result.is_ok());
                 // check VecQueue size
                 let mut pobjs = POBJS.inner.lock();
                 assert_eq!(pobjs.len(), 1);
@@ -426,7 +426,7 @@ pub mod tests_tee_pobj {
             // 2. get the same pobj
             {
                 let result = tee_pobj_get(&TEE_UUID::default(), &obj_id, obj_id.len() as u32, 0, tee_pobj_usage::TEE_POBJ_USAGE_ENUM, &REE_FS_OPS);
-                assert_eq!(result.is_ok(), true);
+                assert!(result.is_ok());
                 // check VecQueue size
                 let mut pobjs = POBJS.inner.lock();
                 assert_eq!(pobjs.len(), 1);

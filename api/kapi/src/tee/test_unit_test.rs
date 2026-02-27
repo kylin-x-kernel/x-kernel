@@ -13,7 +13,7 @@ use crate::tee::TeeResult;
 use crate::tee::{
     bitstring::tests_bitstring::TEST_BITSTRING, common::file_ops::tests_file_ops::TEST_FILE_OPS,
     crypto::crypto_impl::tests_tee_crypto_impl::TEST_TEE_CRYPTO_IMPL,
-    crypto_temp::aes_cbc::tests_aes_cbc::TEST_TEE_AES_CBC,
+    crypto_temp::aes_ecb::tests_aes_ecb::TEST_TEE_AES_ECB,
     fs_dirfile::tests_tee_fs_dirfile::TEST_TEE_FS_DIRFILE, fs_htree::tests_fs_htree::TEST_FS_HTREE,
     fs_htree_tests::tests_fs_htree_tests::TEST_FS_HTREE_TESTS,
     huk_subkey::tests_huk_subkey::TEST_HUK_SUBKEY_DERIVE,
@@ -53,7 +53,7 @@ pub fn tee_unit_test() {
             TEST_FS_HTREE_TESTS,
             TEST_RNG_SOFTWARE,
             TEST_TEE_CRYPTO_IMPL,
-            TEST_TEE_AES_CBC,
+            TEST_TEE_AES_ECB,
             TEST_TEE_CRYP,
         ]
     );
