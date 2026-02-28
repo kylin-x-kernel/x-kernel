@@ -235,8 +235,8 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
 
             cfg_if::cfg_if! {
                 if #[cfg(target_arch = "aarch64")] {
-                    let len = uctx.x[6] as usize;
-                    let obj_ptr = uctx.x[7] as *mut c_uint;
+                    len = uctx.x[6] as usize;
+                    obj_ptr = uctx.x[7] as *mut c_uint;
                 } else if #[cfg(target_arch = "x86_64")] {
                     len = uctx.r12 as usize;
                     obj_ptr = uctx.r13 as *mut c_uint;
