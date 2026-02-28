@@ -1,14 +1,8 @@
 # Available arguments:
 # * General options:
-#     - `ARCH`: Target architecture: x86_64, riscv64, aarch64, loongarch64
-#     - `PLAT`: Package name of the target platform crate.
-#     - `PLAT_CONFIG`: Path to the platform configuration file.
-#     - `MODE`: Build mode: release, debug
-#     - `LOG:` Logging level: warn, error, info, debug, trace
 #     - `V`: Verbose level: (empty), 1, 2
 #     - `TARGET_DIR`: Artifact output directory (cargo target directory)
 #     - `EXTRA_CONFIG`: Extra config specification file
-#     - `OUT_CONFIG`: Final config file that takes effect
 #     - `UIMAGE`: To generate U-Boot image
 #     - `LD_SCRIPT`: Use a custom linker script file.
 # * App options:
@@ -35,84 +29,48 @@
 # Enable unstable features
 export RUSTC_BOOTSTRAP := 1
 export DWARF := y
-# General options
-ARCH ?= aarch64
-PLAT ?= $(ARCH)-qemu-virt
-PLAT_CONFIG ?=
-MODE ?= release
-LOG ?= warn
+
 V ?=
 LTO ?=
 TARGET_DIR ?= $(PWD)/target
 EXTRA_CONFIG ?=
-OUT_CONFIG ?= $(PWD)/.platconfig.toml
 UIMAGE ?= n
 export UNITTEST ?= n
 
 # App options
 A := $(PWD)/entry
 APP ?= $(A)
-FEATURES ?=
-APP_FEATURES ?=
-
-# QEMU options
-BLK ?= y
-NET ?= y
-GRAPHIC ?= n
-INPUT ?= y
-VSOCK ?= y
-BUS ?= pci
-MEM ?= 1g
-ACCEL ?= y
-ICOUNT ?= n
-QEMU_ARGS ?=
-
-export DISK_IMG ?= $(PWD)/disk.img
-QEMU_LOG ?= n
-NET_DUMP ?= n
-NET_DEV ?= user
-VFIO_PCI ?=
-VHOST ?= n
-
-# Network options
-IP ?= 10.0.2.15
-GW ?= 10.0.2.2
 
 export MEMTRACK := n
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += kapi/memtrack
 endif
 
-# App type
-ifeq ($(wildcard $(APP)),)
-  $(error Application path "$(APP)" is not valid)
-endif
-
 .DEFAULT_GOAL := all
 
-ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build disasm run justrun debug clippy defconfig oldconfig),)
+BUILD_TARGETS := all build run justrun debug clippy disasm rootfs
+KCONFIG_TARGETS := menuconfig defconfig saveconfig oldconfig
+CLEAN_TARGETS := clean clean_c distclean
+UTILITY_TARGETS := clippy doc doc_check_missing fmt unittest unittest_no_fail_fast
+
+NON_BUILD_TARGETS := $(KCONFIG_TARGETS) $(CLEAN_TARGETS) $(UTILITY_TARGETS)
+
+CURRENT_GOAL := $(or $(MAKECMDGOALS),$(.DEFAULT_GOAL))
+
+IS_BUILD := $(filter $(BUILD_TARGETS),$(CURRENT_GOAL))
+IS_NON_BUILD := $(filter $(NON_BUILD_TARGETS),$(CURRENT_GOAL))
+
 # Install dependencies
 include scripts/make/deps.mk
-# Platform resolving
-include scripts/make/platform.mk
-# Configuration generation
-include scripts/make/config.mk
-# Feature parsing
-include scripts/make/features.mk
+
+# .config check
+ifneq ($(IS_BUILD),)
+ifeq ($(wildcard .config),)
+  $(error ❌ No .config found. Please run: make menuconfig)
 endif
 
-# Target
-ifeq ($(ARCH), x86_64)
-  TARGET := x86_64-unknown-none
-else ifeq ($(ARCH), aarch64)
-  TARGET := aarch64-unknown-none-softfloat
-else ifeq ($(ARCH), riscv64)
-  TARGET := riscv64gc-unknown-none-elf
-else ifeq ($(ARCH), loongarch64)
-  TARGET := loongarch64-unknown-none-softfloat
-else
-  $(error "ARCH" must be one of "x86_64", "riscv64", "aarch64" or "loongarch64")
-endif
+include scripts/make/kconfig.mk
+include scripts/make/deps.mk
 
 export K_ARCH=$(ARCH)
 export K_MODE=$(MODE)
@@ -120,14 +78,6 @@ export K_LOG=$(LOG)
 export K_TARGET=$(TARGET)
 export K_IP=$(IP)
 export K_GW=$(GW)
-
-ifneq ($(filter $(MAKECMDGOALS),unittest unittest_no_fail_fast clippy doc doc_check_missing),)
-  # When running unit tests or other tests unrelated to a specific platform,
-  # set `PLAT_CONFIG_PATH` to empty for dummy config
-  unexport PLAT_CONFIG_PATH
-else
-  export PLAT_CONFIG_PATH=$(OUT_CONFIG)
-endif
 
 # Binutils
 CROSS_COMPILE ?= $(ARCH)-linux-musl-
@@ -142,7 +92,7 @@ GDB ?= gdb
 
 # Paths
 OUT_DIR ?= $(PWD)
-LD_SCRIPT ?= $(TARGET_DIR)/$(TARGET)/$(MODE)/linker_$(PLAT_NAME).lds
+LD_SCRIPT ?= $(abspath $(TARGET_DIR)/$(TARGET)/$(MODE)/linker_$(PLAT_NAME).lds)
 
 APP_NAME := xkernel
 OUT_ELF := $(OUT_DIR)/$(APP_NAME)_$(PLAT_NAME).elf
@@ -156,6 +106,7 @@ endif
 
 all: build
 
+include scripts/make/features.mk
 include scripts/make/utils.mk
 include scripts/make/build.mk
 include scripts/make/qemu.mk
@@ -167,6 +118,17 @@ endif
 
 ROOTFS_URL = https://github.com/Starry-OS/rootfs/releases/download/20250917
 ROOTFS_IMG = rootfs-$(ARCH).img
+
+endif # end of IS_BUILD
+
+
+menuconfig:
+	@xconf menuconfig -k Kconfig -s .
+	@if [ -f .config ]; then \
+		echo "✅ Configuration saved to .config"; \
+	else \
+		echo "ℹ️  No changes saved"; \
+	fi
 
 rootfs:
 	@if [ ! -f $(ROOTFS_IMG) ]; then \
@@ -180,12 +142,27 @@ teefs:
 	$(MAKE) -C tee_apps ARCH=$(ARCH)
 
 defconfig:
-	$(call defconfig)
+	@xconf saveconfig -o .config -k Kconfig -s .
+	@echo "✅ Default configuration saved to .config"
+
+saveconfig:
+	@xconf saveconfig -o .config -k Kconfig -s .
 
 oldconfig:
-	$(call oldconfig)
+	@if [ ! -f .config ]; then \
+		echo "$(RED_C)Error$(END_C): .config not found."; \
+		echo "Please run 'make defconfig' or 'make menuconfig' first."; \
+		exit 1; \
+	fi
+	@xconf oldconfig -c .config -k Kconfig -s .
 
-build: $(OUT_DIR) $(FINAL_IMG)
+# Generate const definitions before build
+gen-const:
+	@echo "📝 Generating Rust const definitions from .config..."
+	@xconf gen-const
+	@echo "✅ Generated config.rs"
+
+build: gen-const $(OUT_DIR) $(FINAL_IMG)
 
 disasm:
 	$(OBJDUMP) $(OUT_ELF) | less
@@ -233,13 +210,18 @@ else
 endif
 
 clean: clean_c
-	rm -rf $(APP)/*.bin $(APP)/*.elf $(OUT_CONFIG)
+	rm -rf $(APP)/*.bin $(APP)/*.elf
 	cargo clean
+	@rm -f target/kbuild/config.rs .cargo/config.toml
+
+distclean: clean
+	@rm -f .config .config.old auto.conf autoconf.h
+	@echo "✅ Removed all configuration files"
 
 clean_c::
 	rm -rf $(app-objs)
 
-.PHONY: all defconfig oldconfig \
+.PHONY: all defconfig oldconfig menuconfig saveconfig gen-const \
 	build disasm run justrun debug \
 	clippy doc doc_check_missing fmt fmt_c unittest unittest_no_fail_fast \
-	disk_img clean clean_c
+	disk_img clean distclean clean_c

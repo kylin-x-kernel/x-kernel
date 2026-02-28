@@ -9,7 +9,7 @@ use x86_64::registers::{
     model_specific::EferFlags,
 };
 
-use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET, SEV_CBIT_POS};
+use kbuild_config::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET, SEV_CBIT_POS};
 const MULTIBOOT_HEADER_FLAGS: usize = 0x0001_0002;
 const MULTIBOOT_HEADER_MAGIC: usize = 0x1BADB002;
 pub(super) const MULTIBOOT_BOOTLOADER_MAGIC: usize = 0x2BADB002;

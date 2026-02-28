@@ -44,6 +44,16 @@ make ARCH=loongarch64 rootfs
 ```
 Or you can build your own root filesystem image(only supported ext4 and musl for now)
 
+### 3. Configuration kernel
+You can configure the kernel from the starter configuration with the following command:
+```bash
+make menuconfig
+```
+or you can directly copy your own .config file to the kernel source directory,
+```bash
+cp platforms/aarch64-qemu-virst/defconfig .config
+```
+
 ### 3. Build and run on QEMU
 You can build and run the kernel on QEMU with the following commands:
 

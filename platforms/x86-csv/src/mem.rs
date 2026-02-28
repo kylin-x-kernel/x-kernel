@@ -7,10 +7,8 @@ use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 use lazyinit::LazyInit;
 use multiboot::information::{MemoryManagement, MemoryType, Multiboot, PAddr};
 
-use crate::config::{
-    devices::MMIO_RANGES,
-    plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
-};
+use kbuild_config::{MMIO_RANGES, PHYS_VIRT_OFFSET, PHYS_MEM_BASE, PHYS_MEM_SIZE};
+
 const MAX_REGIONS: usize = 16;
 static RAM_REGIONS: LazyInit<Vec<MemRange, MAX_REGIONS>> = LazyInit::new();
 pub fn init(multiboot_info_ptr: usize) {
@@ -27,11 +25,11 @@ pub fn init(multiboot_info_ptr: usize) {
     if regions.is_empty() {
         kplat::kprintln!(
             "multiboot memory map empty, fallback to config: base={:#x}, size={:#x}",
-            PHYS_MEMORY_BASE,
-            PHYS_MEMORY_SIZE
+            PHYS_MEM_BASE,
+            PHYS_MEM_SIZE
         );
         regions
-            .push((PHYS_MEMORY_BASE as usize, PHYS_MEMORY_SIZE as usize))
+            .push((PHYS_MEM_BASE as usize, PHYS_MEM_SIZE as usize))
             .unwrap();
     } else {
         kplat::kprintln!("multiboot memory regions: {}", regions.len());
@@ -64,8 +62,8 @@ impl HwMemory for HwMemoryImpl {
 
     fn dma_regions() -> &'static [MemRange] {
         &[(
-            crate::config::plat::DMA_MEM_BASE,
-            crate::config::plat::DMA_MEM_SIZE,
+            kbuild_config::DMA_MEM_BASE,
+            kbuild_config::DMA_MEM_SIZE,
         )]
     }
 
@@ -84,8 +82,8 @@ impl HwMemory for HwMemoryImpl {
 
     fn kernel_layout() -> (VirtAddr, usize) {
         (
-            va!(crate::config::plat::KERNEL_ASPACE_BASE),
-            crate::config::plat::KERNEL_ASPACE_SIZE,
+            va!(kbuild_config::KERNEL_ASPACE_BASE),
+            kbuild_config::KERNEL_ASPACE_SIZE,
         )
     }
 }

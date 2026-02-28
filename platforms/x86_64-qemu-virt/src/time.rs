@@ -10,7 +10,7 @@ use raw_cpuid::CpuId;
 const LAPIC_TICKS_PER_SEC: u64 = 1_000_000_000;
 static mut NANOS_TO_LAPIC_TICKS_RATIO: Ratio = Ratio::zero();
 static mut INIT_TICK: u64 = 0;
-static mut CPU_FREQ_MHZ: u64 = crate::config::devices::TIMER_FREQUENCY as u64 / 1_000_000;
+static mut CPU_FREQ_MHZ: u64 = kbuild_config::TIMER_FREQUENCY_HZ as u64 / 1_000_000;
 static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
 /// Performs early timer initialization and TSC calibration.
 pub fn early_init() {
@@ -73,11 +73,11 @@ impl GlobalTimer for GlobalTimerImpl {
     }
 
     fn freq() -> u64 {
-        crate::config::devices::TIMER_FREQUENCY as u64
+        kbuild_config::TIMER_FREQUENCY_HZ as u64
     }
 
     fn interrupt_id() -> usize {
-        crate::config::devices::TIMER_IRQ
+        kbuild_config::TIMER_IRQ
     }
 
     fn arm_timer(deadline_ns: u64) {

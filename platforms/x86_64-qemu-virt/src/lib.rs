@@ -19,12 +19,7 @@ mod mem;
 mod mp;
 mod power;
 mod time;
-pub mod config {
-    platconfig_macros::include_configs!(
-        path_env = "PLAT_CONFIG_PATH",
-        fallback = "platconfig.toml"
-    );
-}
+
 fn current_cpu_id() -> usize {
     match raw_cpuid::CpuId::new().get_feature_info() {
         Some(finfo) => finfo.initial_local_apic_id() as usize,

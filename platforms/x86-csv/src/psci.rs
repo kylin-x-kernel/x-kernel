@@ -7,7 +7,7 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use log::{debug, info, warn};
 
-use crate::config::plat::{DMA_MEM_BASE, DMA_MEM_SIZE};
+use kbuild_config::{DMA_MEM_BASE, DMA_MEM_SIZE};
 const PAGE_SIZE: usize = 0x1000;
 const MAX_PAGES: usize = DMA_MEM_SIZE / PAGE_SIZE;
 const BITMAP_SIZE: usize = (MAX_PAGES + 63) / 64;

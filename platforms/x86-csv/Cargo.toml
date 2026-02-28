@@ -25,6 +25,7 @@ heapless = "0.9"
 platconfig-macros = { workspace = true }
 kcpu = { workspace = true }
 kplat = { workspace = true }
+kbuild_config = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"
