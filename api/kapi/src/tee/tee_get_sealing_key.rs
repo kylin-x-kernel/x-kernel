@@ -396,3 +396,36 @@ pub unsafe fn compare_mnonce(
 ) -> bool {
     a == b
 }
+
+#[cfg(all(target_arch = "x86_64", feature = "x86_csv", feature = "tee_test"))]
+pub mod tests_tee_get_sealing_key {
+    use unittest::{
+        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+    };
+
+    use super::*;
+
+    test_fn! {
+        using TestResult;
+
+        fn test_tee_get_sealing_key() {
+            let mut key_buf = [0u8; 16];
+            let result = unsafe { vmmcall_get_sealing_key(key_buf.as_mut_ptr(), 16) };
+            assert!(result.is_ok());
+            assert!(key_buf.iter().all(|x| *x != 0));
+
+            let mut key_buf2 = [0u8; 16];
+            let result2 = unsafe { vmmcall_get_sealing_key(key_buf2.as_mut_ptr(), 16) };
+            assert!(result2.is_ok());
+            assert!(key_buf2.iter().all(|x| *x != 0));
+            assert!(key_buf == key_buf2);
+        }
+    }
+
+    tests_name! {
+        TEST_TEE_GET_SEALING_KEY;
+        tee_get_sealing_key;
+        //------------------------
+        test_tee_get_sealing_key,
+    }
+}

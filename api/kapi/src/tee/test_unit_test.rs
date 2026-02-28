@@ -10,6 +10,8 @@ use unittest::{
 
 #[cfg(feature = "tee_test")]
 use crate::tee::TeeResult;
+#[cfg(all(target_arch = "x86_64", feature = "x86_csv", feature = "tee_test"))]
+use crate::tee::tee_get_sealing_key::tests_tee_get_sealing_key::TEST_TEE_GET_SEALING_KEY;
 use crate::tee::{
     bitstring::tests_bitstring::TEST_BITSTRING, common::file_ops::tests_file_ops::TEST_FILE_OPS,
     crypto::crypto_impl::tests_tee_crypto_impl::TEST_TEE_CRYPTO_IMPL,
@@ -57,6 +59,8 @@ pub fn tee_unit_test() {
             TEST_TEE_CRYP,
         ]
     );
+    #[cfg(all(target_arch = "x86_64", feature = "x86_csv", feature = "tee_test"))]
+    run_tests!(runner, TEST_TEE_GET_SEALING_KEY);
 
     if tests_failed() {
         error!("!!! SOME TESTS FAILED, NEED TO BE FIXED !!!");
