@@ -5,6 +5,10 @@ members = [
     "xtask/cargo-platconfig",
     "xtask/crate_rootfs",
     "xtask/kconfig-gen",
+# build config system
+    "xtask/xconfig",
+    "util/kbuild_config",
+
     "platforms/bootloader",
     "tee_apps/sh",
     "tee_apps/tee_app1",
@@ -135,11 +139,12 @@ rsext4 = { path = "fs/rsext4", default-features = false }
 # util Crates
 macros = { path = "util/macros" }
 kinit_setup = { path = "util/kinit_setup" }
-platconfig = { path = "util/platconfig" }
 platconfig-macros = { path = "util/platconfig-macros" }
 klogger = { path = "util/klogger" }
 backtrace = { path = "util/backtrace" }
 kerrno = { path = "util/kerrno" }
 unittest = { path = "util/unittest" }
+kbuild_config = { path = "util/kbuild_config" }
+
 kconfig-gen = { path = "xtask/kconfig-gen" }
 smoltcp = { version = "0.12.0", package = "x-smoltcp", default-features = false }
