@@ -1,0 +1,225 @@
+mainmenu "X-kernel Configuration"
+
+choice
+    prompt "Build Type"
+    default BUILD_TYPE_RELEASE
+
+config BUILD_TYPE_RELEASE
+    bool "Release Build"
+    help
+      A release build with optimizations enabled and debug information disabled.
+config BUILD_TYPE_DEBUG
+    bool "Debug Build"
+    help
+        A debug build with optimizations disabled and debug information enabled.
+endchoice
+
+choice
+    prompt "LOG Level"
+    default LOG_LEVEL_WARN
+
+config LOG_LEVEL_ERROR
+    bool "Error Level Logging"
+
+config LOG_LEVEL_WARN
+    bool "Warning Level Logging"
+
+config LOG_LEVEL_INFO
+    bool "Info Level Logging"
+
+config LOG_LEVEL_DEBUG
+    bool "Debug Level Logging"
+
+config LOG_LEVEL_TRACE
+    bool "Trace Level Logging"
+
+endchoice
+
+choice
+    prompt "Target Architecture"
+    default ARCH_AARCH64
+
+config ARCH_AARCH64
+    bool "AArch64 (ARM 64-bit)"
+
+config ARCH_RISCV64
+    bool "RISC-V 64-bit"
+
+config ARCH_X86_64
+    bool "x86_64"
+
+config ARCH_LOONGARCH64
+    bool "LoongArch 64-bit"
+
+endchoice
+
+config ARCH
+    string
+    default "aarch64" if ARCH_AARCH64
+    default "riscv64" if ARCH_RISCV64
+    default "x86_64" if ARCH_X86_64
+    default "loongarch64" if ARCH_LOONGARCH64
+    help
+      The name of the selected architecture.
+
+menu "Platform Selection"
+
+if ARCH_AARCH64
+
+choice
+    prompt "AArch64 Platform"
+    default PLATFORM_AARCH64_QEMU_VIRT
+
+    config PLATFORM_AARCH64_QEMU_VIRT
+        bool "QEMU ARM64 Virtual Machine"
+
+    config PLATFORM_AARCH64_CROSVM_VIRT
+        bool "CROSVM ARM64 Virtual Machine"
+
+    config PLATFORM_AARCH64_RASPI
+        bool "Raspberry Pi 4B"
+endchoice
+
+endif # ARCH_AARCH64
+
+if ARCH_RISCV64
+
+choice
+    prompt "RISC-V 64 Platform"
+    default PLATFORM_RISCV64_QEMU_VIRT
+
+config PLATFORM_RISCV64_QEMU_VIRT
+    bool "QEMU RISC-V 64 Virtual Machine"
+
+endchoice
+
+endif # ARCH_RISCV64
+
+if ARCH_X86_64
+
+choice
+    prompt "x86_64 Platform"
+    default PLATFORM_X86_64_QEMU_VIRT
+
+config PLATFORM_X86_64_QEMU_VIRT
+    bool "QEMU x86_64 Virtual Machine"
+
+config PLATFORM_X86_CSV
+    bool "x86 CSV Platform"
+
+endchoice
+
+endif # ARCH_X86_64
+
+if ARCH_LOONGARCH64
+
+choice
+    prompt "LoongArch64 Platform"
+    default PLATFORM_LOONGARCH64_QEMU_VIRT
+
+config PLATFORM_LOONGARCH64_QEMU_VIRT
+    bool "QEMU LoongArch64 Virtual Machine"
+
+endchoice
+
+endif # ARCH_LOONGARCH64
+
+config PLATFORM
+    string
+    default "aarch64-qemu-virt" if PLATFORM_AARCH64_QEMU_VIRT
+    default "aarch64-crosvm-virt" if PLATFORM_AARCH64_CROSVM_VIRT
+    default "aarch64-raspi4b" if PLATFORM_AARCH64_RASPI
+    default "riscv64-qemu-virt" if PLATFORM_RISCV64_QEMU_VIRT
+    default "x86_64-qemu-virt" if PLATFORM_X86_64_QEMU_VIRT
+    default "x86-csv" if PLATFORM_X86_CSV
+    default "loongarch64-qemu-virt" if PLATFORM_LOONGARCH64_QEMU_VIRT
+    help
+      The name of the selected platform.
+
+endmenu # Platform Selection
+
+menu "Kernel Features"
+
+config PHYS_MEM_BASE
+    hex "Physical Memory Base Address"
+    default 0x40000000
+    help
+      Specify the base physical address of the system memory.
+
+config PHYS_MEM_SIZE
+    hex "Physical Memory Size"
+    default 0x40000000
+    help
+      Specify the size of the physical memory.
+
+config KERNEL_BASE_PADDR
+    hex "Kernel Base Physical Address"
+    default 0x80000000
+    help
+      Specify the base physical address where the kernel is loaded.
+
+config KERNEL_BASE_VADDR
+    hex "Kernel Base Virtual Address"
+    default 0xFFFF800000000000
+    help
+      Specify the base virtual address where the kernel is mapped.
+
+config KERNEL_ASPACE_BASE
+    hex "Kernel Address Space Base"
+    default 0xFFFF000000000000
+    help
+      Specify the base address of the kernel's address space.
+
+config KERNEL_ASPACE_SIZE
+    hex "Kernel Address Space Size"
+    default 0x0000FFFFFFFF0000
+    help
+      Specify the size of the kernel's address space.
+
+config PHYS_VIRT_OFFSET
+    hex "Physical to Virtual Address Offset"
+    default 0xFFFF000000000000
+    help
+      Specify the offset used to convert physical addresses to virtual addresses.
+
+config TASK_STACK_SIZE
+    hex "Task Stack Size (bytes)"
+    default 0x40000
+    help
+      Specify the stack size for each task in bytes.
+
+config BOOT_STACK_SIZE
+    hex "Boot Stack Size (bytes)"
+    default 0x40000
+    help
+      Specify the stack size for the boot process in bytes.
+
+config CPU_NUM
+    usize "Number of CPUs"
+    default 4
+    help
+      Specify the number of CPUs to simulate in the kernel.
+
+config TICKS_PER_SECOND
+    u32 "Ticks Per Second"
+    default 100
+    help
+      Specify the number of timer ticks per second.
+
+config SEV_CBIT_POS
+    u32 "SEV CBIT Position"
+    depends on ARCH_X86_64
+    default 47
+    help
+      Specify the bit position of the SEV CBIT in the page table entries.
+
+config TIMER_FREQUENCY_HZ
+    u32 "Timer Frequency (Hz)"
+    depends on ARCH_X86_64
+    default 4000000000
+    help
+      Specify the frequency of the timer in hertz.
+
+endmenu
+
+source "drivers/Kconfig"
