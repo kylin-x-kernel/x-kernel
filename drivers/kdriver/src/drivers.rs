@@ -94,7 +94,7 @@ cfg_if::cfg_if! {
             fn probe_global() -> Option<DeviceEnum> {
                 let sdmmc = unsafe {
                     block::sdmmc::SdMmcDriver::new(
-                        khal::mem::p2v(platconfig::devices::SDMMC_PADDR.into()).into(),
+                        khal::mem::p2v(kbuild_config::SDMMC_PADDR.into()).into(),
                     )
                 };
                 Some(DeviceEnum::from_block(sdmmc))
@@ -138,7 +138,7 @@ cfg_if::cfg_if! {
                 {
                     let ahci = unsafe {
                         block::ahci::AhciDriver::<AhciHalImpl>::new(
-                            khal::mem::p2v(platconfig::devices::AHCI_PADDR.into()).into(),
+                            khal::mem::p2v(kbuild_config::AHCI_PADDR.into()).into(),
                         )?
                     };
                     Some(DeviceEnum::from_block(ahci))

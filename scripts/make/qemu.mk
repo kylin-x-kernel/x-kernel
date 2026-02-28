@@ -1,5 +1,28 @@
 # QEMU arguments
 
+# QEMU options
+BLK ?= y
+NET ?= y
+GRAPHIC ?= n
+INPUT ?= y
+VSOCK ?= y
+BUS ?= pci
+MEM ?= 1g
+ACCEL ?= y
+ICOUNT ?= n
+QEMU_ARGS ?=
+
+export DISK_IMG ?= $(PWD)/disk.img
+QEMU_LOG ?= n
+NET_DUMP ?= n
+NET_DEV ?= user
+VFIO_PCI ?=
+VHOST ?= n
+
+# Network options
+IP ?= 10.0.2.15
+GW ?= 10.0.2.2
+
 QEMU := qemu-system-$(ARCH)
 
 ifeq ($(BUS), mmio)

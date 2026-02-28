@@ -26,7 +26,6 @@ irq = []
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
-platconfig.workspace = true
 kcpu = { workspace = true }
 kplat.workspace = true
 cfg-if.workspace = true
@@ -43,4 +42,4 @@ unittest.workspace = true
 
 
 [build-dependencies]
-platconfig.workspace = true
+kbuild_config.workspace = true

@@ -49,8 +49,8 @@ fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
 /// Creates a new address space for kernel itself.
 pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
     let mut vmspace = AddrSpace::new_empty(
-        va!(platconfig::plat::KERNEL_ASPACE_BASE),
-        platconfig::plat::KERNEL_ASPACE_SIZE,
+        va!(kbuild_config::KERNEL_ASPACE_BASE as _),
+        kbuild_config::KERNEL_ASPACE_SIZE as _,
     )?;
     for region in memory_regions() {
         // mapped range should contain the whole region if it is not aligned.
@@ -84,7 +84,7 @@ pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
     #[cfg(feature = "sev")]
     {
-        let cbit_pos = platconfig::plat::SEV_CBIT_POS;
+        let cbit_pos = kbuild_config::SEV_CBIT_POS;
         debug!("SEV C-Bit position = {}", cbit_pos);
         if cbit_pos > 0 {
             page_table::x86_64::init_sev_cbit(cbit_pos as u8);
@@ -100,7 +100,7 @@ pub fn init_memory_management() {
     let mut root = kernel_page_table_root();
     #[cfg(feature = "sev")]
     {
-        let cbit_pos = platconfig::plat::SEV_CBIT_POS;
+        let cbit_pos = kbuild_config::SEV_CBIT_POS;
         if cbit_pos != 0 {
             root = PhysAddr::from(root.as_usize() | (1usize << cbit_pos));
             debug!("root: {:?}", root);

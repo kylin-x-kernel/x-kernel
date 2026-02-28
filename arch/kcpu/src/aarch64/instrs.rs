@@ -209,4 +209,5 @@ unsafe extern "C" {
 }
 
 /// Alias for compatibility with other architectures
+#[cfg(feature = "uspace")]
 pub use raw_copy_from_user as user_copy;

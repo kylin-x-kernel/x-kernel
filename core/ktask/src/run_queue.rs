@@ -57,8 +57,8 @@ percpu_static! {
 /// Access to this variable is marked as `unsafe` because it contains `MaybeUninit` references,
 /// which require careful handling to avoid undefined behavior. The array should be fully
 /// initialized before being accessed to ensure safe usage.
-static mut RUN_QUEUES: [MaybeUninit<&'static mut RunQueue>; platconfig::plat::CPU_NUM] =
-    [ARRAY_REPEAT_VALUE; platconfig::plat::CPU_NUM];
+static mut RUN_QUEUES: [MaybeUninit<&'static mut RunQueue>; kbuild_config::CPU_NUM] =
+    [ARRAY_REPEAT_VALUE; kbuild_config::CPU_NUM];
 #[allow(clippy::declare_interior_mutable_const)] // It's ok because it's used only for initialization `RUN_QUEUES`.
 const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut RunQueue> = MaybeUninit::uninit();
 
@@ -102,7 +102,7 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
 ///
 /// This function will panic if `cpu_mask` is empty, indicating that there are no available CPUs for task execution.
 #[cfg(feature = "smp")]
-// The modulo operation is safe here because `platconfig::plat::CPU_NUM` is always greater than 1 with "smp" enabled.
+// The modulo operation is safe here because `kbuild_config::CPU_NUM` is always greater than 1 with "smp" enabled.
 #[allow(clippy::modulo_one)]
 #[inline]
 fn select_run_queue_index(cpumask: KCpuMask) -> usize {
@@ -113,7 +113,7 @@ fn select_run_queue_index(cpumask: KCpuMask) -> usize {
 
     // Round-robin selection of the run queue index.
     loop {
-        let index = RUN_QUEUE_INDEX.fetch_add(1, Ordering::SeqCst) % platconfig::plat::CPU_NUM;
+        let index = RUN_QUEUE_INDEX.fetch_add(1, Ordering::SeqCst) % kbuild_config::CPU_NUM;
         if cpumask.get(index) {
             return index;
         }
@@ -439,7 +439,7 @@ impl RunQueue {
         let gc_task = TaskInner::new(
             || block_on(poll_fn(poll_gc)),
             "gc".into(),
-            platconfig::TASK_STACK_SIZE,
+            kbuild_config::TASK_STACK_SIZE,
         )
         .into_arc();
         // gc task should be pinned to the current CPU.

@@ -75,7 +75,7 @@ pub fn init() {
 ///
 /// Returns `KipiError::InvalidCpuId` if `dest_cpu` exceeds system CPU count.
 pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()> {
-    let cpu_num = platconfig::plat::CPU_NUM;
+    let cpu_num = kbuild_config::CPU_NUM;
 
     // Error handling: check CPU ID validity
     if dest_cpu >= cpu_num {
@@ -102,7 +102,7 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()>
 pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     info!("Send IPI event to all other CPUs");
     let current_cpu_id = this_cpu_id();
-    let cpu_num = platconfig::plat::CPU_NUM;
+    let cpu_num = kbuild_config::CPU_NUM;
     let callback = callback.into();
 
     // Execute callback on current CPU immediately

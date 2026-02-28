@@ -14,7 +14,7 @@ pub use kplat::interrupts::{
     unreg_handler as unregister,
 };
 #[cfg(feature = "ipi")]
-pub use platconfig::devices::IPI_IRQ;
+pub use kbuild_config::IPI_IRQ;
 
 static IRQ_HOOK: AtomicUsize = AtomicUsize::new(0);
 

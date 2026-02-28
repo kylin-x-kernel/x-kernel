@@ -13,3 +13,4 @@ categories.workspace = true
 
 [dependencies]
 virtio-drivers.workspace = true
+kbuild_config.workspace = true

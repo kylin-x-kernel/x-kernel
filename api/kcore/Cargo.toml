@@ -10,7 +10,6 @@ repository.workspace = true
 
 [dependencies]
 backtrace.workspace = true
-platconfig.workspace = true
 kerrno.workspace = true
 kfeat.workspace = true
 fs-ng-vfs.workspace = true
@@ -47,6 +46,7 @@ strum = { workspace = true }
 weak-map = "0.1.1"
 xmas-elf = "0.9"
 unittest.workspace = true
+kbuild_config = { workspace = true }
 
 [target.'cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))'.dependencies]
 memspace = { workspace = true, features = ["copy"] }

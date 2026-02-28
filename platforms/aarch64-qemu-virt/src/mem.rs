@@ -6,15 +6,14 @@
 
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 
-use crate::config::{
-    devices::MMIO_RANGES,
-    plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
+use kbuild_config::{
+    MMIO_RANGES,PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET,
 };
 struct HwMemoryImpl;
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {
     fn ram_regions() -> &'static [MemRange] {
-        &[(PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE)]
+        &[(PHYS_MEM_BASE, PHYS_MEM_SIZE)]
     }
 
     /// Returns all reserved physical memory ranges on the platform.
@@ -32,8 +31,8 @@ impl HwMemory for HwMemoryImpl {
 
     fn dma_regions() -> &'static [MemRange] {
         &[(
-            crate::config::plat::DMA_MEM_BASE,
-            crate::config::plat::DMA_MEM_SIZE,
+            kbuild_config::DMA_MEM_BASE,
+            kbuild_config::DMA_MEM_SIZE,
         )]
     }
 
@@ -47,8 +46,8 @@ impl HwMemory for HwMemoryImpl {
 
     fn kernel_layout() -> (VirtAddr, usize) {
         (
-            va!(crate::config::plat::KERNEL_ASPACE_BASE),
-            crate::config::plat::KERNEL_ASPACE_SIZE,
+            va!(kbuild_config::KERNEL_ASPACE_BASE),
+            kbuild_config::KERNEL_ASPACE_SIZE,
         )
     }
 }

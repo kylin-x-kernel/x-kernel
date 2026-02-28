@@ -32,7 +32,6 @@ pmu = ["khal/pmu"]
 [dependencies]
 kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
-platconfig.workspace = true
 kerrno.workspace = true
 fbdevice = { workspace = true, optional = true }
 # display = { workspace = true, optional = true }
@@ -54,3 +53,4 @@ crate_interface.workspace = true
 kinit_setup.workspace = true
 indoc = "2"
 percpu.workspace = true
+kbuild_config = { workspace = true }

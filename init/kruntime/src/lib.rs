@@ -95,7 +95,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
 fn is_init_ok() -> bool {
-    INITED_CPUS.load(Ordering::Acquire) == platconfig::plat::CPU_NUM
+    INITED_CPUS.load(Ordering::Acquire) == kbuild_config::CPU_NUM
 }
 
 struct DmaPageTableImpl;
@@ -138,13 +138,13 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
             backtrace = {}
             smp = {}
         "},
-        platconfig::ARCH,
-        platconfig::PLATFORM,
+        kbuild_config::ARCH,
+        kbuild_config::PLATFORM,
         option_env!("K_TARGET").unwrap_or(""),
         option_env!("K_MODE").unwrap_or(""),
         option_env!("K_LOG").unwrap_or(""),
         backtrace::is_enabled(),
-        platconfig::plat::CPU_NUM,
+        kbuild_config::CPU_NUM,
     );
     #[cfg(feature = "rtc")]
     kprintln!(
@@ -284,7 +284,7 @@ fn init_allocator() {
 fn init_interrupt() {
     // Setup timer interrupt handler
     const PERIODIC_INTERVAL_NANOS: u64 =
-        khal::time::NANOS_PER_SEC / platconfig::TICKS_PER_SEC as u64;
+        khal::time::NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
 
     #[percpu::def_percpu]
     static NEXT_DEADLINE: u64 = 0;
@@ -311,7 +311,7 @@ fn init_interrupt() {
     });
 
     #[cfg(feature = "pmu")]
-    khal::irq::register(platconfig::devices::PMU_IRQ, || {
+    khal::irq::register(kbuild_config::PMU_IRQ, || {
         debug!(
             "PMU interrupt received on cpu {}",
             khal::percpu::this_cpu_id()

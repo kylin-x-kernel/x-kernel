@@ -16,10 +16,10 @@ sev = []
 [dependencies]
 alloc-engine.workspace = true
 kalloc.workspace = true
-platconfig.workspace = true
 kerrno.workspace = true
 khal = { workspace = true, features = ["paging"] }
 crate_interface.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true
+kbuild_config = { workspace = true }

@@ -20,7 +20,7 @@ use linux_raw_sys::{
     system::{new_utsname, sysinfo},
 };
 use osvm::{VirtMutPtr, write_vm_mem};
-use platconfig::ARCH;
+use kbuild_config::ARCH;
 
 /// Get the real user ID of the current process
 pub fn sys_getuid() -> KResult<isize> {

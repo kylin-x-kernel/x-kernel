@@ -277,7 +277,7 @@ pub fn spawn_alarm_task() {
     ktask::spawn_raw(
         || block_on(alarm_task()),
         "alarm_task".to_owned(),
-        platconfig::TASK_STACK_SIZE,
+        kbuild_config::TASK_STACK_SIZE,
     );
 }
 

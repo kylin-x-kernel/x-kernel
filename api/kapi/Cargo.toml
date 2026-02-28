@@ -39,9 +39,9 @@ sev = ["dep:kcpu"]
 x86_csv = ["dep:kcpu"]
 
 [dependencies]
+kbuild_config = { workspace = true }
 kalloc.workspace = true
 backtrace.workspace = true
-platconfig.workspace = true
 unittest = { workspace = true }
 rust-dice = { workspace = true, optional = true }
 mbedtls = { workspace = true, optional = true }

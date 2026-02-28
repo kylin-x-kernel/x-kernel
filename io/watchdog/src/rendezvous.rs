@@ -100,7 +100,7 @@ pub fn arrived_bitmap() -> usize {
 
 #[inline]
 pub fn all_arrived_mask() -> usize {
-    let n = platconfig::plat::CPU_NUM;
+    let n = kbuild_config::CPU_NUM;
     if n >= usize::BITS as usize {
         usize::MAX
     } else {

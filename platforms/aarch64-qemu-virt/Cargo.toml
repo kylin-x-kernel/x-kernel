@@ -18,10 +18,10 @@ pmu = ["kplat/pmu"]
 [dependencies]
 log = "0.4"
 page_table = { workspace = true }
-platconfig-macros = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv2"]}
 kcpu = { workspace = true }
 kplat = { workspace = true }
+kbuild_config = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

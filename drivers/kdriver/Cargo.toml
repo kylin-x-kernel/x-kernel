@@ -11,7 +11,7 @@ documentation.workspace = true
 
 [features]
 bus-mmio = []
-bus-pci = ["dep:pci", "dep:khal", "dep:platconfig"]
+bus-pci = ["dep:pci", "dep:khal"]
 pci-mmio = ["bus-pci"]
 net = ["dep:net"]
 block = ["dep:block"]
@@ -23,7 +23,7 @@ crosvm = ["pci-mmio", "dep:hashbrown", "dep:ksync"]
 sev = ["pci-mmio", "kdma/sev", "dep:hashbrown", "dep:ksync"]
 
 # Enabled by features `virtio-*`
-virtio = ["dep:virtio", "dep:kalloc", "dep:khal", "dep:platconfig"]
+virtio = ["dep:virtio", "dep:kalloc", "dep:khal"]
 
 virtio-blk = ["block", "virtio", "virtio/block"]
 virtio-net = ["net", "virtio", "virtio/net"]
@@ -32,14 +32,13 @@ virtio-input = ["input", "virtio", "virtio/input"]
 virtio-socket = ["vsock", "virtio", "virtio/socket"]
 ramdisk = ["block", "block/ramdisk"]
 # bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
-# sdmmc = ["block", "block/sdmmc", "dep:khal", "dep:platconfig"]
-# ahci = ["block", "block/ahci", "dep:khal", "dep:platconfig"]
+# sdmmc = ["block", "block/sdmmc", "dep:khal" ]
+# ahci = ["block", "block/ahci", "dep:khal" ]
 
 default = ["bus-pci"]
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
-platconfig = { workspace = true, optional = true }
 kdma.workspace = true
 driver_base = { workspace = true }
 block = { workspace = true, optional = true }
@@ -63,6 +62,7 @@ smallvec = { version = "1.15", features = ["const_generics", "union"] }
 
 ksync = { workspace = true, optional = true }
 hashbrown = { workspace = true, optional = true }
+kbuild_config = { workspace = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 arm-gic-driver = { version = "0.15", optional = true }

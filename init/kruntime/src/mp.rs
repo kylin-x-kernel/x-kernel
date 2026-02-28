@@ -6,7 +6,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use khal::mem::{VirtAddr, v2p};
-use platconfig::{TASK_STACK_SIZE, plat::CPU_NUM};
+use kbuild_config::{TASK_STACK_SIZE, CPU_NUM};
 
 #[unsafe(link_section = ".bss.stack")]
 static mut SECONDARY_BOOT_STACK: [[u8; TASK_STACK_SIZE]; CPU_NUM - 1] =
@@ -64,7 +64,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     }
 
     #[cfg(feature = "pmu")]
-    khal::irq::enable(platconfig::devices::PMU_IRQ, true);
+    khal::irq::enable(kbuild_config::PMU_IRQ, true);
 
     khal::asm::enable_local();
 
