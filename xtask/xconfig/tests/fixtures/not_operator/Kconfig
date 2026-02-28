@@ -1,0 +1,34 @@
+config PREEMPT
+	bool "Preemptive kernel"
+	default n
+	help
+	  Enable kernel preemption.
+
+config ADVANCED_FEATURES
+	bool "Advanced features"
+	default y
+	help
+	  Enable advanced kernel features.
+
+config SCHEDULER_RT
+	bool "Real-time scheduler"
+	depends on ADVANCED_FEATURES && !PREEMPT
+	help
+	  Enable real-time scheduler support.
+	  This requires ADVANCED_FEATURES=y and PREEMPT=n
+
+config FEATURE_A
+	bool "Feature A"
+	default n
+
+config FEATURE_B
+	bool "Feature B"
+	depends on !FEATURE_A
+	help
+	  Feature B conflicts with Feature A.
+
+config FEATURE_C
+	bool "Feature C"
+	depends on !(FEATURE_A && FEATURE_B)
+	help
+	  Complex NOT expression test.

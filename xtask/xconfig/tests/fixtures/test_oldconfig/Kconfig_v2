@@ -1,0 +1,11 @@
+config OPTION_A
+    bool "Option A"
+    default y
+
+config OPTION_B
+    string "Option B"
+    default "hello"
+
+config OPTION_C
+    bool "Option C (new)"
+    default n

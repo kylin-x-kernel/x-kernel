@@ -1,0 +1,11 @@
+config ARM
+	bool "ARM architecture"
+    depends on HAVE_ARCH
+	default n
+	help
+	  Support for ARM architecture.
+
+config ARM64
+	bool "64-bit ARM support"
+    imply ARM
+	default n

@@ -1,0 +1,2 @@
+# This file tests circular reference detection
+source "recursive/Kconfig"

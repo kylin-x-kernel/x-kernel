@@ -1,0 +1,7 @@
+mainmenu "Source Test"
+
+config MAIN_CONFIG
+	bool "Main config"
+	default y
+
+source "sub/Kconfig"

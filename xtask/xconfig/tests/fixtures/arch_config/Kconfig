@@ -1,0 +1,69 @@
+mainmenu "Test Arch Config"
+
+choice
+    prompt "Target Architecture"
+    default ARCH_AARCH64
+
+config ARCH_AARCH64
+    bool "AArch64 (ARM 64-bit)"
+
+config ARCH_RISCV64
+    bool "RISC-V 64-bit"
+
+config ARCH_X86_64
+    bool "x86_64"
+
+endchoice
+
+config ARCH
+    string
+    default "aarch64" if ARCH_AARCH64
+    default "riscv64" if ARCH_RISCV64
+    default "x86_64" if ARCH_X86_64
+
+menu "Platform Selection"
+
+if ARCH_AARCH64
+
+choice
+    prompt "AArch64 Platform"
+    default PLATFORM_AARCH64_QEMU_VIRT
+
+config PLATFORM_AARCH64_QEMU_VIRT
+    bool "QEMU ARM64 Virtual Machine"
+
+config PLATFORM_AARCH64_CROSVM_VIRT
+    bool "CROSVM ARM64 Virtual Machine"
+
+endchoice
+
+config PMU_IRQ
+    u32 "PMU IRQ number"
+    default 23
+
+config PSCI_METHOD
+    string "PSCI method"
+    default "hvc"
+
+endif # ARCH_AARCH64
+
+if ARCH_X86_64
+
+choice
+    prompt "x86_64 Platform"
+    default PLATFORM_X86_64_QEMU_VIRT
+
+config PLATFORM_X86_64_QEMU_VIRT
+    bool "QEMU x86_64 Virtual Machine"
+
+endchoice
+
+endif # ARCH_X86_64
+
+endmenu
+
+config PLATFORM
+    string
+    default "aarch64-qemu-virt" if PLATFORM_AARCH64_QEMU_VIRT
+    default "aarch64-crosvm-virt" if PLATFORM_AARCH64_CROSVM_VIRT
+    default "x86_64-qemu-virt" if PLATFORM_X86_64_QEMU_VIRT

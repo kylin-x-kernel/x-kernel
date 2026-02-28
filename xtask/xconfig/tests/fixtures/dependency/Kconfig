@@ -1,0 +1,37 @@
+config BASE_LIB
+bool "Base library support"
+default n
+help
+  Enable base library support required by other features.
+
+config FEATURE_A
+bool "Feature A"
+depends on BASE_LIB
+select HELPER_MODULE
+help
+  Feature A that depends on BASE_LIB and selects HELPER_MODULE.
+
+config HELPER_MODULE
+bool "Helper module"
+default n
+help
+  Helper module that can be selected by other options.
+
+config FEATURE_B
+bool "Feature B"
+imply OPTIONAL_FEATURE
+help
+  Feature B that implies OPTIONAL_FEATURE.
+
+config OPTIONAL_FEATURE
+bool "Optional feature"
+default n
+help
+  Optional feature that is suggested but not required.
+
+config TRISTATE_OPTION
+tristate "Tristate option"
+depends on BASE_LIB
+default m
+help
+  A tristate option for testing.

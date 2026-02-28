@@ -1,0 +1,11 @@
+config TEST_BOOL
+	bool "Test boolean option"
+	default y
+
+config TEST_STRING
+	string "Test string option"
+	default "hello"
+
+config TEST_INT
+	u32 "Test integer option"
+	default 42

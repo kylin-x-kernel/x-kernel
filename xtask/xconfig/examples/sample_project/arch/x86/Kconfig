@@ -1,0 +1,10 @@
+config X86
+	bool "x86 architecture"
+	default n
+	help
+	  Support for x86 architecture.
+
+config X86_64
+	bool "64-bit support"
+	depends on X86
+	default y

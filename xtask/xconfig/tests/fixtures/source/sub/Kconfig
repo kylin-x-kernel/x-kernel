@@ -1,0 +1,4 @@
+config SUB_CONFIG
+	bool "Sub config"
+	default y
+	depends on MAIN_CONFIG

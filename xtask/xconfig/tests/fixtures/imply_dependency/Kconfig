@@ -1,0 +1,35 @@
+config C
+bool "Enable C"
+default n
+help
+  Base dependency.
+
+config B
+bool "Enable B"
+depends on C
+help
+  B depends on C.
+
+config A
+bool "Enable A"
+imply B
+help
+  A implies B.
+
+config D
+bool "Enable D"
+default n
+
+config E
+bool "Enable E"
+depends on D
+
+config F
+bool "Enable F"
+depends on E
+
+config G
+bool "Enable G"
+imply F
+help
+  G implies F (with deeper dependency chain).

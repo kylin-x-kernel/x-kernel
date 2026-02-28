@@ -1,0 +1,42 @@
+mainmenu "Test Conditional Defaults"
+
+choice
+    prompt "Target Architecture"
+    default ARCH_AARCH64
+
+config ARCH_AARCH64
+    bool "AArch64"
+
+config ARCH_RISCV64
+    bool "RISC-V 64"
+
+config ARCH_X86_64
+    bool "x86_64"
+
+endchoice
+
+config ARCH
+    string
+    default "aarch64" if ARCH_AARCH64
+    default "riscv64" if ARCH_RISCV64
+    default "x86_64" if ARCH_X86_64
+    default "unknown"
+    help
+      The name of the selected architecture.
+
+config PLATFORM
+    string
+    default "qemu-virt" if ARCH_AARCH64
+    default "sifive-u" if ARCH_RISCV64
+    help
+      Platform name based on architecture.
+
+config DEFAULT_VALUE
+    string
+    default "fallback"
+
+config NUMERIC_VALUE
+    int
+    default 10 if ARCH_AARCH64
+    default 20 if ARCH_RISCV64
+    default 5

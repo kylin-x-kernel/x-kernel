@@ -1,0 +1,29 @@
+mainmenu "Sample Project Configuration"
+
+config HAVE_ARCH
+	bool
+	default y
+
+menu "Architecture Selection"
+
+source "arch/x86/Kconfig"
+source "arch/arm/Kconfig"
+
+endmenu
+
+menu "Kernel Configuration"
+
+source "kernel/Kconfig"
+
+endmenu
+
+config DEBUG
+	bool "Enable debugging"
+	default n
+	help
+	  Enable debugging features.
+
+config VERBOSE
+	bool "Verbose output"
+	depends on DEBUG
+	default n

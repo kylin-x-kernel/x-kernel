@@ -1,0 +1,56 @@
+config KERNEL_VERSION
+	string "Kernel version"
+	default "1.0.0"
+	help
+	  Enter the kernel version string.
+
+config MAX_CPUS
+	u32 "Maximum number of CPUs"
+	default 8
+	help
+	  Maximum number of CPUs supported.
+
+config MEMORY_BASE
+	hex "Memory base address"
+	default 0x80000000
+	help
+	  Base address of system memory.
+
+config LOG_LEVEL_NUM
+	u32 "Log level (0-7)"
+	default 4
+	help
+	  Kernel log level: 0=emerg, 7=debug
+
+config PREEMPT
+	bool "Preemptible kernel"
+	default n
+	help
+	  Enable kernel preemption.
+
+config ADVANCED_FEATURES
+	bool "Advanced kernel features"
+	default n
+	help
+	  Enable advanced kernel features.
+
+config SCHEDULER_RT
+	bool "Real-time scheduler"
+	depends on ADVANCED_FEATURES
+	select PREEMPT
+	help
+	  Enable real-time scheduler support.
+	  This automatically enables kernel preemption.
+
+config MEMORY_HOTPLUG
+	bool "Memory hotplug support"
+	depends on ADVANCED_FEATURES
+	help
+	  Support for hot-plugging memory modules.
+
+config PROFILING
+	bool "Profiling support"
+	imply ADVANCED_FEATURES
+	help
+	  Enable kernel profiling.
+	  This implies advanced features but doesn't require them.
