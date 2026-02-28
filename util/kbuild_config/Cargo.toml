@@ -1,0 +1,15 @@
+[package]
+name = "kbuild_config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Configuration for kbuild"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords = ["kbuild"]
+categories = ["os", "no-std"]
+
+[package.metadata.kbuild]
+enabled = true

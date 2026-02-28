@@ -20,3 +20,10 @@
 
 # Cargo lock
 Cargo.lock
+
+# Kconfig build artifacts
+.config
+.config.old
+auto.conf
+autoconf.h
+target/kbuild/
