@@ -141,3 +141,9 @@ kerrno = { path = "util/kerrno" }
 unittest = { path = "util/unittest" }
 kconfig-gen = { path = "xtask/kconfig-gen" }
 smoltcp = { version = "0.12.0", package = "x-smoltcp", default-features = false }
+
+[patch.crates-io]
+mbedtls-sys-auto-smx = { git = "https://gitee.com/luodeb/rust-mbedtls.git", branch = "debin/fix_build" }
+mbedtls-smx = { git = "https://gitee.com/luodeb/rust-mbedtls.git", branch = "debin/fix_build" }
+mbedtls-build-helper = { git = "https://gitee.com/luodeb/rust-mbedtls.git", branch = "debin/fix_build" }
+mbedtls-platform-support-smx = { git = "https://gitee.com/luodeb/rust-mbedtls.git", branch = "debin/fix_build" }
