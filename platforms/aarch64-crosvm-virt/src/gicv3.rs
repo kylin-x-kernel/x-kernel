@@ -17,7 +17,7 @@ use kplat::{
 use kspin::SpinNoIrq;
 use log::*;
 
-use crate::config::plat::CPU_NUM;
+use kbuild_config::CPU_NUM;
 static GICD_INIT: AtomicBool = AtomicBool::new(false);
 const MAX_IRQ_COUNT: usize = 1024;
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();

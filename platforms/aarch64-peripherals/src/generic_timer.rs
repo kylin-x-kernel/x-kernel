@@ -83,7 +83,7 @@ macro_rules! time_if_impl {
             }
 
             fn interrupt_id() -> usize {
-                crate::config::devices::TIMER_IRQ
+                kbuild_config::TIMER_IRQ
             }
 
             fn arm_timer(deadline_ns: u64) {

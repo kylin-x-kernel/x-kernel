@@ -27,6 +27,7 @@ rs_fdtree = { workspace = true }
 spin = "0.9"
 lazyinit = "0.2"
 arm-gic.workspace = true
+kbuild_config = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

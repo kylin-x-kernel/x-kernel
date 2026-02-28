@@ -10,8 +10,9 @@ use kplat::{
 use log::*;
 
 #[allow(unused_imports)]
-use crate::config::devices::{GICD_PADDR, GICR_PADDR, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR};
-use crate::{config::plat::PSCI_METHOD, serial::*};
+use kbuild_config::{GICC_PADDR as GICR_PADDR, GICD_PADDR, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR, PSCI_METHOD};
+use crate::serial::*;
+
 /// Platform-specific `BootHandler` implementation.
 struct BootHandlerImpl;
 #[impl_dev_interface]

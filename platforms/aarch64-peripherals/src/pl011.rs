@@ -76,7 +76,7 @@ macro_rules! console_if_impl {
 
             fn write_data_atomic(bytes: &[u8]) {
                 let uart_base =
-                    kplat::memory::p2v(kplat::memory::pa!(crate::config::devices::UART_PADDR));
+                    kplat::memory::p2v(kplat::memory::pa!(kbuild_config::UART_PADDR));
                 $crate::pl011::write_data_force(uart_base, bytes);
             }
 
@@ -85,7 +85,7 @@ macro_rules! console_if_impl {
             }
 
             fn interrupt_id() -> Option<usize> {
-                Some(crate::config::devices::UART_IRQ as _)
+                Some(kbuild_config::UART_IRQ as _)
             }
         }
     };

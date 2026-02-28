@@ -11,7 +11,7 @@ macro_rules! nmi_if_impl {
         #[impl_dev_interface]
         impl kplat::nm_irq::NmiDef for $name {
             fn init(threshold: u64) -> bool {
-                $crate::gic::set_prio(crate::config::devices::PMU_IRQ, 0);
+                $crate::gic::set_prio(kbuild_config::PMU_IRQ, 0);
                 $crate::pmu::init_cycle_counter(threshold)
             }
 

@@ -341,7 +341,7 @@ macro_rules! irq_if_impl {
             }
 
             fn dispatch_irq(irq: usize) -> Option<usize> {
-                let pmu_irq = crate::config::devices::PMU_IRQ;
+                let pmu_irq = kbuild_config::PMU_IRQ;
                 $crate::gic::dispatch_irq_irq(irq, pmu_irq)
             }
 
