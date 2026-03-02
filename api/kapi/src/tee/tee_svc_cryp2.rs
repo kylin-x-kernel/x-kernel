@@ -266,94 +266,6 @@ pub fn is_xof_algo(algo: u32) -> bool {
     algo == TEE_ALG_SHAKE128 || algo == TEE_ALG_SHAKE256
 }
 
-/// Hash final syscall implementation in Rust
-///
-/// Finalizes a hash or MAC computation and returns the result.
-/// This function demonstrates comprehensive use of memory tagging functions
-/// (`memtag_strip_tag` and `memtag_strip_tag_const`).
-///
-/// # Arguments
-/// * `state` - Handle to the crypto operation state
-/// * `chunk` - Pointer to final data chunk (may be tagged)
-/// * `chunk_size` - Size of final data chunk
-/// * `hash` - Pointer to buffer to receive hash/MAC result
-/// * `hash_len` - Pointer to receive actual hash length written
-///
-/// # Returns
-/// * `TEE_SUCCESS` on success
-/// * `TEE_ERROR_BAD_PARAMETERS` if parameters are invalid
-/// * `TEE_ERROR_BAD_STATE` if crypto state is not initialized
-/// * `TEE_ERROR_SHORT_BUFFER` if hash buffer is too small
-///
-/// # Memory Tagging
-/// Both input pointers (`chunk`, `hash`) are stripped of memory tags:
-/// - `memtag_strip_tag_const(chunk)` - for input data (const)
-/// - `memtag_strip_tag(hash)` - for output buffer (mutable)
-///
-/// # XOF Support
-/// For XOF (Extendable Output Function) algorithms like SHAKE128/256:
-/// - Hash size is unlimited (caller specifies length)
-/// - Final hash length returned as provided buffer size
-///
-/// # Example
-/// ```
-/// let state = 0x12345678; // Crypto state handle
-/// let chunk = 0xAB00000012345678; // Tagged input pointer
-/// let hash_buf = 0xCD00000087654321; // Tagged output pointer
-/// let mut hash_len = 0u64;
-///
-/// sys_tee_scn_hash_final(state, chunk, 32, hash_buf, &mut hash_len)?;
-/// // Result: hash_len bytes written to hash_buf
-/// ```
-pub(crate) fn sys_tee_scn_hash_final(
-    _state: usize,
-    _chunk: usize,
-    _chunk_size: usize,
-    _hash: usize,
-    _hash_len: vaddr_t,
-) -> TeeResult {
-    // TODO
-    Ok(())
-}
-
-/// Process final MAC operation
-///
-/// # Arguments
-/// * `crypto_state` - Mutable reference to crypto operation state
-/// * `chunk` - Pointer to final data chunk
-/// * `chunk_size` - Size of final data chunk
-/// * `hash` - Pointer to output MAC buffer
-/// * `hlen` - Input/output: buffer size / actual MAC length written
-fn process_mac_final(
-    _crypto_state: &mut TeeCrypState,
-    _chunk: usize,
-    _chunk_size: usize,
-    _hash: usize,
-    _hlen: &mut usize,
-) -> TeeResult {
-    // TODO
-    Ok(())
-}
-
-/// Process final hash digest operation
-///
-/// # Arguments
-/// * `crypto_state` - Mutable reference to crypto operation state
-/// * `chunk` - Pointer to final data chunk
-/// * `chunk_size` - Size of final data chunk
-/// * `hash` - Pointer to output hash buffer
-/// * `hlen` - Input/output: buffer size / actual hash length written
-fn process_digest_final(
-    _crypto_state: &mut TeeCrypState,
-    _chunk: usize,
-    _chunk_size: usize,
-    _hash: usize,
-    _hlen: &mut usize,
-) -> TeeResult {
-    // TODO
-    Ok(())
-}
-
 /// Get the digest (hash) output size for the specified algorithm
 ///
 /// # Arguments
@@ -459,67 +371,6 @@ fn put_user_u64(dst: &mut usize, src: &u64) -> TeeResult {
 
     *dst = d as usize;
 
-    Ok(())
-}
-
-/// Updates a hash or MAC operation with new data chunk
-///
-/// This function adds a data chunk to an ongoing cryptographic hash or MAC operation.
-/// The operation must have been previously initialized with `sys_tee_scn_hash_init`.
-///
-/// # Arguments
-/// * `state` - Handle to the crypto operation state
-/// * `chunk` - Pointer to the data chunk to process
-/// * `chunk_size` - Size of the data chunk in bytes
-///
-/// # Returns
-/// * `TeeResult` - Returns `TEE_SUCCESS` on success, or error code:
-///   - `TEE_ERROR_BAD_STATE` if operation not initialized
-///   - `TEE_ERROR_BAD_PARAMETERS` for invalid parameters
-///   - `TEE_ERROR_OUT_OF_MEMORY` if memory allocation fails
-///
-/// # Errors
-/// - Returns error if cryptographic context is invalid or operation type unsupported
-/// - Fails if unable to copy user-provided data to kernel space
-///
-/// # Safety
-/// - Requires valid user-space pointers for data chunk
-/// - Must be called with valid cryptographic state handle
-pub(crate) fn sys_tee_scn_hash_update(
-    _state: usize,
-    _chunk: usize,
-    _chunk_size: usize,
-) -> TeeResult {
-    // TODO
-    Ok(())
-}
-
-/// Initializes a hash or MAC operation with the given state
-///
-/// This function initializes a cryptographic operation (either hash or MAC) using the provided state.
-/// For hash operations, it initializes the SM3 hash context. For MAC operations, it retrieves the
-/// key from the associated object and initializes the SM3 HMAC context.
-///
-/// # Arguments
-/// * `state` - The virtual address identifier of the cryptographic state to initialize
-/// * `_iv` - Initialization vector (currently unused, reserved for future use)
-/// * `_iv_len` - Length of the initialization vector (currently unused, reserved for future use)
-///
-/// # Returns
-/// * `TeeResult` - Returns TEE_SUCCESS on successful initialization, or appropriate error code:
-///   - TEE_ERROR_BAD_STATE: If the cryptographic context cannot be downcast to expected type
-///   - TEE_ERROR_BAD_PARAMETERS: If the key object is not initialized or has invalid parameters
-///   - Other error codes from underlying crypto operations
-///
-/// # Algorithm Support
-/// - TEE_OPERATION_DIGEST: Initializes SM3 hash context
-/// - TEE_OPERATION_MAC: Initializes SM3 HMAC context with the provided key
-///
-/// # State Management
-/// - Updates the cryptographic state to `CrypState::Initialized` after successful initialization
-/// - Verifies that the key object is properly initialized before using it for MAC operations
-pub(crate) fn sys_tee_scn_hash_init(_state: usize, _iv: usize, _iv_len: usize) -> TeeResult {
-    // TODO
     Ok(())
 }
 
@@ -762,6 +613,29 @@ pub fn tee_cryp_state_alloc(
     Ok(())
 }
 
+pub fn syscall_cryp_state_alloc(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> TeeResult {
+    let mut state = 0u32;
+    let mode = match arg1 {
+        0 => TEE_OperationMode::TEE_MODE_ENCRYPT,
+        1 => TEE_OperationMode::TEE_MODE_DECRYPT,
+        2 => TEE_OperationMode::TEE_MODE_SIGN,
+        3 => TEE_OperationMode::TEE_MODE_VERIFY,
+        4 => TEE_OperationMode::TEE_MODE_MAC,
+        5 => TEE_OperationMode::TEE_MODE_DIGEST,
+        6 => TEE_OperationMode::TEE_MODE_DERIVE,
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+    };
+    let key1 = if arg2 == 0 { None } else { Some(arg2 as u32) };
+    let key2 = if arg3 == 0 { None } else { Some(arg3 as u32) };
+    tee_cryp_state_alloc(arg0 as _, mode, key1, key2, &mut state)
+}
+
 // 复制一个TeeCrypState
 pub fn tee_cryp_state_copy(_dst_id: u32, _src_id: u32) -> TeeResult {
     // TODO:需要改动mbedtls，后续再进行实现
@@ -781,9 +655,17 @@ pub fn tee_cryp_state_copy(_dst_id: u32, _src_id: u32) -> TeeResult {
     Ok(())
 }
 
+pub fn syscall_cryp_state_copy(arg0: usize, arg1: usize) -> TeeResult {
+    tee_cryp_state_copy(arg0 as _, arg1 as _)
+}
+
 // 删除一个TeeCrypState
 pub fn tee_cryp_state_free(id: u32) -> TeeResult {
     cryp_state_free(id)
+}
+
+pub fn syscall_cryp_state_free(arg0: usize) -> TeeResult {
+    tee_cryp_state_free(arg0 as _)
 }
 
 // 根据id获取一个TeeCrypState
@@ -931,6 +813,7 @@ pub fn syscall_hash_final(
     let hash_ptr = arg3 as *mut u8;
     let mut hash_len_ptr = arg4 as *mut usize;
     let mut hash_len: usize = 0;
+    unsafe { copy_from_user_struct(&mut hash_len, &*hash_len_ptr)? };
 
     let chunk_slice: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
         &[]
@@ -1012,10 +895,9 @@ pub fn tee_cryp_cipher_init(
     crypto_cipher_init(cs.clone(), key.as_slice(), iv, padding_mode)
 }
 
-pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> TeeResult {
+pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     let iv_ptr = arg1 as *const u8;
     let iv_len = arg2;
-    let padding_mode_val = arg3 as u32;
 
     // 转换IV
     let iv: Option<Box<[u8]>> = if iv_ptr.is_null() || iv_len == 0 {
@@ -1026,18 +908,9 @@ pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize, arg3: usize) -
         Some(iv_option)
     };
 
-    let padding_mode = match padding_mode_val {
-        0 => CipherPaddingMode::Pkcs7,
-        1 => CipherPaddingMode::IsoIec78164,
-        2 => CipherPaddingMode::AnsiX923,
-        3 => CipherPaddingMode::Zeros,
-        4 => CipherPaddingMode::None,
-        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
-    };
-
     match iv {
-        Some(iv) => tee_cryp_cipher_init(arg0 as _, Some(&iv), padding_mode),
-        None => tee_cryp_cipher_init(arg0 as _, None, padding_mode),
+        Some(iv) => tee_cryp_cipher_init(arg0 as _, Some(&iv), CipherPaddingMode::Pkcs7),
+        None => tee_cryp_cipher_init(arg0 as _, None, CipherPaddingMode::Pkcs7),
     }
 }
 
@@ -1085,6 +958,7 @@ pub fn syscall_cipher_update(
 
     let mut dst_len_ptr = arg4 as *mut usize;
     let mut dst_len: usize = 0;
+    unsafe { copy_from_user_struct(&mut dst_len, &*dst_len_ptr)? };
 
     let src = if src_ptr.is_null() || src_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -1141,6 +1015,7 @@ pub fn syscall_cipher_final(
     let dst_ptr = arg3 as *mut u8;
     let mut dst_len_ptr = arg4 as *mut usize;
     let mut dst_len: usize = 0;
+    unsafe { copy_from_user_struct(&mut dst_len, &*dst_len_ptr)? };
 
     let src = if src_ptr.is_null() || src_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -1163,7 +1038,7 @@ pub fn syscall_cipher_final(
     Ok(())
 }
 
-pub fn tee_cryp_authenc_init(id: u32, nonce: &[u8], padding_mode: CipherPaddingMode) -> TeeResult {
+pub fn tee_cryp_authenc_init(id: u32, nonce: &[u8]) -> TeeResult {
     let mut cs = tee_cryp_state_get(id)?;
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -1191,7 +1066,24 @@ pub fn tee_cryp_authenc_init(id: u32, nonce: &[u8], padding_mode: CipherPaddingM
     };
 
     drop(cs_guard);
-    crypto_authenc_init(cs.clone(), key.as_slice(), nonce, padding_mode)
+    crypto_authenc_init(cs.clone(), key.as_slice(), nonce)
+}
+
+pub fn syscall_authenc_init(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    _arg3: usize,
+    _arg4: usize,
+    _arg5: usize,
+) -> TeeResult {
+    let nonce_ptr = arg1 as *const u8;
+    let nonce_len = arg2 as usize;
+
+    let nonce_slice = unsafe { core::slice::from_raw_parts(nonce_ptr, nonce_len) };
+    let nonce = bb_memdup_user(nonce_slice)?;
+
+    tee_cryp_authenc_init(arg0 as _, &nonce)
 }
 
 pub fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
@@ -1213,12 +1105,32 @@ pub fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
     crypto_authenc_update_aad(cs.clone(), aad)
 }
 
+pub fn syscall_authenc_update_aad(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
+    let aad_ptr = arg1 as *const u8;
+    let aad_len = arg2 as usize;
+
+    let aad_slice = unsafe { core::slice::from_raw_parts(aad_ptr, aad_len) };
+    let aad = bb_memdup_user(aad_slice)?;
+
+    tee_cryp_authenc_update_aad(arg0 as _, &aad)
+}
+
 pub fn tee_cryp_authenc_update_payload(
     id: u32,
     input: &[u8],
     output: &mut [u8],
 ) -> TeeResult<usize> {
     tee_cryp_cipher_update(id, input, output)
+}
+
+pub fn syscall_authenc_update_payload(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> TeeResult {
+    syscall_cipher_update(arg0, arg1, arg2, arg3, arg4)
 }
 
 pub fn tee_cryp_authenc_enc_final(
@@ -1242,6 +1154,65 @@ pub fn tee_cryp_authenc_enc_final(
     crypto_authenc_enc_final(cs.clone(), input, output, tag)
 }
 
+pub fn syscall_authenc_enc_final(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> TeeResult {
+    let src_ptr = arg1 as *const u8;
+    let src_len = arg2 as usize;
+
+    // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
+    let dst_ptr = arg3 as *mut u8;
+    let mut dst_len_ptr = arg4 as *mut usize;
+    let mut dst_len: usize = 0;
+    unsafe { copy_from_user_struct(&mut dst_len, &*dst_len_ptr)? };
+
+    let src = if src_ptr.is_null() || src_len == 0 {
+        None
+    } else {
+        let src_slice = unsafe { core::slice::from_raw_parts(src_ptr, src_len) };
+        let src_option = bb_memdup_user(src_slice)?;
+        Some(src_option)
+    };
+
+    if dst_ptr.is_null() || dst_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
+    let mut dst = bb_memdup_user(dst_slice)?;
+
+    let tag_ptr = arg5 as *mut u8;
+    let mut tag_len_ptr = arg6 as *mut usize;
+    let mut tag_len: usize = 0;
+    unsafe { copy_from_user_struct(&mut tag_len, &*tag_len_ptr)? };
+
+    if tag_ptr.is_null() || tag_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let tag_slice = unsafe { core::slice::from_raw_parts_mut(tag_ptr, tag_len) };
+    let mut tag = bb_memdup_user(tag_slice)?;
+
+    match src {
+        Some(src) => {
+            dst_len = tee_cryp_authenc_enc_final(arg0 as _, Some(&src), &mut dst, &mut tag)?;
+        }
+        None => {
+            dst_len = tee_cryp_authenc_enc_final(arg0 as _, None, &mut dst, &mut tag)?;
+        }
+    };
+
+    // Copy to user
+    unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
+    unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
+    unsafe { copy_to_user(tag_slice, &tag, tag_len * size_of::<u8>())? };
+    Ok(())
+}
+
 pub fn tee_cryp_authenc_dec_final(
     id: u32,
     input: Option<&[u8]>,
@@ -1261,6 +1232,62 @@ pub fn tee_cryp_authenc_dec_final(
 
     drop(cs_guard);
     crypto_authenc_dec_final(cs.clone(), input, output, tag)
+}
+
+pub fn syscall_authenc_dec_final(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> TeeResult {
+    let src_ptr = arg1 as *const u8;
+    let src_len = arg2 as usize;
+
+    // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
+    let dst_ptr = arg3 as *mut u8;
+    let mut dst_len_ptr = arg4 as *mut usize;
+    let mut dst_len: usize = 0;
+    unsafe { copy_from_user_struct(&mut dst_len, &*dst_len_ptr)? };
+
+    let src = if src_ptr.is_null() || src_len == 0 {
+        None
+    } else {
+        let src_slice = unsafe { core::slice::from_raw_parts(src_ptr, src_len) };
+        let src_option = bb_memdup_user(src_slice)?;
+        Some(src_option)
+    };
+
+    if dst_ptr.is_null() || dst_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
+    let mut dst = bb_memdup_user(dst_slice)?;
+
+    let tag_ptr = arg5 as *const u8;
+    let mut tag_len = arg6 as usize;
+
+    if tag_ptr.is_null() || tag_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let tag_slice = unsafe { core::slice::from_raw_parts(tag_ptr, tag_len) };
+    let tag = bb_memdup_user(tag_slice)?;
+
+    match src {
+        Some(src) => {
+            dst_len = tee_cryp_authenc_dec_final(arg0 as _, Some(&src), &mut dst, &tag)?;
+        }
+        None => {
+            dst_len = tee_cryp_authenc_dec_final(arg0 as _, None, &mut dst, &tag)?;
+        }
+    };
+
+    // Copy to user
+    unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
+    unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
+    Ok(())
 }
 
 pub fn tee_cryp_asymm_operate(
@@ -1341,6 +1368,47 @@ pub fn tee_cryp_asymm_operate(
     }
 }
 
+/// arg1与arg2参数与RSASSA有关
+/// 暂未进行处理，目前只支持ECC和SM2
+pub fn syscall_asymm_operate(
+    arg0: usize,
+    _arg1: usize,
+    _arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> TeeResult {
+    let src_ptr = arg3 as *const u8;
+    let src_len = arg4 as usize;
+
+    // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
+    let dst_ptr = arg5 as *mut u8;
+    let mut dst_len_ptr = arg6 as *mut usize;
+    let mut dst_len: usize = 0;
+    unsafe { copy_from_user_struct(&mut dst_len, &*dst_len_ptr)? };
+
+    let src = if src_ptr.is_null() || src_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    } else {
+        let src_slice = unsafe { core::slice::from_raw_parts(src_ptr, src_len) };
+        bb_memdup_user(src_slice)?
+    };
+
+    if dst_ptr.is_null() || dst_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
+    let mut dst = bb_memdup_user(dst_slice)?;
+
+    dst_len = tee_cryp_asymm_operate(arg0 as _, &src, &mut dst, None)?;
+
+    // Copy to user
+    unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
+    unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
+    Ok(())
+}
+
 pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResult {
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1378,6 +1446,43 @@ pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResul
         }
         _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
+}
+
+/// arg1与arg2参数与RSASSA有关
+/// 暂未进行处理，目前只支持ECC和SM2
+pub fn syscall_asymm_verify(
+    arg0: usize,
+    _arg1: usize,
+    _arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> TeeResult {
+    let data_ptr = arg3 as *const u8;
+    let data_len = arg4 as usize;
+
+    let sig_ptr = arg5 as *mut u8;
+    let mut sig_len = arg6 as usize;
+
+    let data = if data_ptr.is_null() || data_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    } else {
+        let data_slice = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
+        bb_memdup_user(data_slice)?
+    };
+
+    if sig_ptr.is_null() || sig_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let sig_slice = unsafe { core::slice::from_raw_parts_mut(sig_ptr, sig_len) };
+    let mut sig = bb_memdup_user(sig_slice)?;
+
+    tee_cryp_asymm_verify(arg0 as _, &data, &mut sig)?;
+
+    // Copy to user
+    unsafe { copy_to_user(sig_slice, &sig, sig_len * size_of::<u8>())? };
+    Ok(())
 }
 
 #[cfg(feature = "tee_test")]
@@ -1817,7 +1922,7 @@ pub mod tests_cryp {
            let mut out = [0u8; 80];
            let mut total_len = 0;
 
-           let res = tee_cryp_authenc_init(state, &nonce, CipherPaddingMode::None);
+           let res = tee_cryp_authenc_init(state, &nonce);
            assert!(res.is_ok());
 
            let res = tee_cryp_authenc_update_aad(state, &ad);
@@ -1897,7 +2002,7 @@ pub mod tests_cryp {
            let mut out = [0u8; 80];
            let mut total_len = 0;
 
-           let res = tee_cryp_authenc_init(state, &nonce, CipherPaddingMode::None);
+           let res = tee_cryp_authenc_init(state, &nonce);
            assert!(res.is_ok());
 
            let res = tee_cryp_authenc_update_aad(state, &ad);

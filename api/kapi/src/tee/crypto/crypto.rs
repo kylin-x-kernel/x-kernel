@@ -602,7 +602,6 @@ pub(crate) fn crypto_authenc_init(
     cs: Arc<Mutex<TeeCrypState>>,
     key: &[u8],
     nonce: &[u8],
-    padding_mode: CipherPaddingMode,
 ) -> TeeResult {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -611,14 +610,6 @@ pub(crate) fn crypto_authenc_init(
     let mut cipher_id = CipherId::None;
     let mut cipher_mode = CipherMode::None;
     let mut cipher_op = Operation::None;
-
-    let cipher_padding = match padding_mode {
-        CipherPaddingMode::None => CipherPadding::None,
-        CipherPaddingMode::Pkcs7 => CipherPadding::Pkcs7,
-        CipherPaddingMode::Zeros => CipherPadding::Zeros,
-        CipherPaddingMode::AnsiX923 => CipherPadding::AnsiX923,
-        CipherPaddingMode::IsoIec78164 => CipherPadding::IsoIec78164,
-    };
 
     match mode {
         TEE_OperationMode::TEE_MODE_ENCRYPT => cipher_op = Operation::Encrypt,
@@ -643,7 +634,6 @@ pub(crate) fn crypto_authenc_init(
             .set_key(cipher_op, key)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS);
         cipher.set_iv(nonce).map_err(|_| TEE_ERROR_BAD_PARAMETERS);
-        cipher.set_padding(cipher_padding);
         cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS);
         cs_guard.state = CrypState::Initialized;
         cs_guard.ctx = CrypCtx::CipherCtx(cipher);

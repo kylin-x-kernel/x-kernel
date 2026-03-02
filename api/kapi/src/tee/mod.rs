@@ -34,8 +34,11 @@ use crate::tee::{
         syscall_cryp_obj_reset, syscall_cryp_obj_restrict_usage, syscall_obj_generate_key,
     },
     tee_svc_cryp2::{
-        CipherPaddingMode, syscall_cipher_final, syscall_cipher_init, syscall_cipher_update,
-        syscall_hash_final, syscall_hash_init, syscall_hash_update,
+        CipherPaddingMode, syscall_asymm_operate, syscall_asymm_verify, syscall_authenc_dec_final,
+        syscall_authenc_enc_final, syscall_authenc_init, syscall_authenc_update_aad,
+        syscall_authenc_update_payload, syscall_cipher_final, syscall_cipher_init,
+        syscall_cipher_update, syscall_cryp_state_alloc, syscall_cryp_state_copy,
+        syscall_cryp_state_free, syscall_hash_final, syscall_hash_init, syscall_hash_update,
     },
     tee_svc_storage::{
         syscall_storage_alloc_enum, syscall_storage_free_enum, syscall_storage_next_enum,
@@ -159,6 +162,18 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
             sys_tee_scn_set_ta_time(teetime_ref)
         }
 
+        Sysno::tee_scn_cryp_state_alloc => syscall_cryp_state_alloc(
+            uctx.arg0(),
+            uctx.arg1(),
+            uctx.arg2(),
+            uctx.arg3(),
+            uctx.arg4(),
+        ),
+
+        Sysno::tee_scn_cryp_state_copy => syscall_cryp_state_copy(uctx.arg0(), uctx.arg1()),
+
+        Sysno::tee_scn_cryp_state_free => syscall_cryp_state_free(uctx.arg0()),
+
         Sysno::tee_scn_hash_init => syscall_hash_init(uctx.arg0()),
 
         Sysno::tee_scn_hash_update => syscall_hash_update(uctx.arg0(), uctx.arg1(), uctx.arg2()),
@@ -171,9 +186,7 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
             uctx.arg4(),
         ),
 
-        Sysno::tee_scn_cipher_init => {
-            syscall_cipher_init(uctx.arg0(), uctx.arg1(), uctx.arg2(), uctx.arg3())
-        }
+        Sysno::tee_scn_cipher_init => syscall_cipher_init(uctx.arg0(), uctx.arg1(), uctx.arg2()),
 
         Sysno::tee_scn_cipher_update => syscall_cipher_update(
             uctx.arg0(),
@@ -219,6 +232,111 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         }
 
         Sysno::tee_scn_cryp_obj_copy => syscall_cryp_obj_copy(uctx.arg0() as _, uctx.arg1() as _),
+
+        Sysno::tee_scn_authenc_init => syscall_authenc_init(
+            uctx.arg0(),
+            uctx.arg1(),
+            uctx.arg2(),
+            uctx.arg3(),
+            uctx.arg4(),
+            uctx.arg5(),
+        ),
+
+        Sysno::tee_scn_authenc_update_aad => {
+            syscall_authenc_update_aad(uctx.arg0(), uctx.arg1(), uctx.arg2())
+        }
+
+        Sysno::tee_scn_authenc_update_payload => syscall_authenc_update_payload(
+            uctx.arg0(),
+            uctx.arg1(),
+            uctx.arg2(),
+            uctx.arg3(),
+            uctx.arg4(),
+        ),
+
+        Sysno::tee_scn_authenc_enc_final => {
+            let mut tag_len: usize = 0;
+
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "aarch64")] {
+                    tag_len = uctx.x[6] as usize;
+                } else if #[cfg(target_arch = "x86_64")] {
+                    tag_len = uctx.r12 as usize;
+                }
+            }
+            syscall_authenc_enc_final(
+                uctx.arg0(),
+                uctx.arg1(),
+                uctx.arg2(),
+                uctx.arg3(),
+                uctx.arg4(),
+                uctx.arg5(),
+                tag_len,
+            )
+        }
+
+        Sysno::tee_scn_authenc_dec_final => {
+            let mut tag_len: usize = 0;
+
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "aarch64")] {
+                    tag_len = uctx.x[6] as usize;
+                } else if #[cfg(target_arch = "x86_64")] {
+                    tag_len = uctx.r12 as usize;
+                }
+            }
+            syscall_authenc_dec_final(
+                uctx.arg0(),
+                uctx.arg1(),
+                uctx.arg2(),
+                uctx.arg3(),
+                uctx.arg4(),
+                uctx.arg5(),
+                tag_len,
+            )
+        }
+
+        Sysno::tee_scn_asymm_operate => {
+            let mut dst_len: usize = 0;
+
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "aarch64")] {
+                    dst_len = uctx.x[6] as usize;
+                } else if #[cfg(target_arch = "x86_64")] {
+                    dst_len = uctx.r12 as usize;
+                }
+            }
+            syscall_asymm_operate(
+                uctx.arg0(),
+                uctx.arg1(),
+                uctx.arg2(),
+                uctx.arg3(),
+                uctx.arg4(),
+                uctx.arg5(),
+                dst_len,
+            )
+        }
+
+        Sysno::tee_scn_asymm_verify => {
+            let mut sig_len: usize = 0;
+
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "aarch64")] {
+                    sig_len = uctx.x[6] as usize;
+                } else if #[cfg(target_arch = "x86_64")] {
+                    sig_len = uctx.r12 as usize;
+                }
+            }
+            syscall_asymm_verify(
+                uctx.arg0(),
+                uctx.arg1(),
+                uctx.arg2(),
+                uctx.arg3(),
+                uctx.arg4(),
+                uctx.arg5(),
+                sig_len,
+            )
+        }
 
         Sysno::tee_scn_storage_obj_open => syscall_storage_obj_open(
             uctx.arg0() as _,
