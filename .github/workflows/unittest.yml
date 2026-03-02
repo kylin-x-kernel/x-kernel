@@ -70,14 +70,17 @@ jobs:
           cp rootfs-${{ matrix.arch }}.img disk.img
           echo "Rootfs prepared: disk.img"
 
-      - name: Build X-Kernel with unit tests
+      - name: Prepare .config
         run: |
-          make ARCH=${{ matrix.arch }} UNITTEST=y defconfig
-          make ARCH=${{ matrix.arch }} UNITTEST=y build
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            cp ./platforms/aarch64-qemu-virt/defconfig .config
+          elif [ "${{ matrix.arch }}" = "x86_64" ]; then
+            cp ./platforms/x86_64-qemu-virt/defconfig .config
+          fi
 
       - name: Run kernel unit tests
         run: |
-          timeout 120 make ARCH=${{ matrix.arch }} UNITTEST=y SMP=${{ env.SMP }} VSOCK=n run | tee unittest-output.log || true
+          timeout 120 make UNITTEST=y VSOCK=n run | tee unittest-output.log || true
           
           if grep -q "UNITTEST_STATUS: TESTS_FAILED" unittest-output.log; then
             echo "❌ Unit tests failed!"
