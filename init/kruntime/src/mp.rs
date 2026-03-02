@@ -5,8 +5,8 @@
 //! SMP bring-up helpers for the runtime.
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
 use khal::mem::{VirtAddr, v2p};
-use kbuild_config::{TASK_STACK_SIZE, CPU_NUM};
 
 #[unsafe(link_section = ".bss.stack")]
 static mut SECONDARY_BOOT_STACK: [[u8; TASK_STACK_SIZE]; CPU_NUM - 1] =

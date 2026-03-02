@@ -1,6 +1,9 @@
-use crate::kconfig::ast::{Entry, Expr, Property};
-use crate::kconfig::symbol::SymbolTable;
 use std::collections::HashMap;
+
+use crate::kconfig::{
+    ast::{Entry, Expr, Property},
+    symbol::SymbolTable,
+};
 
 #[derive(Debug, Clone)]
 pub struct Dependency {

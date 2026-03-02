@@ -1,7 +1,7 @@
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::kconfig::Parser;
-use xconfig::ui::state::ConfigState;
+use xconfig::{kconfig::Parser, ui::state::ConfigState};
 
 /// Test that entries inside `if` blocks are properly processed and displayed in menu tree
 #[test]
@@ -120,17 +120,20 @@ endmenu
     // The menu should contain the platform-specific configs from inside the if blocks
     assert!(
         platform_item_ids.contains(&"PLATFORM_QEMU".to_string()),
-        "Platform Selection menu should contain PLATFORM_QEMU from if ARCH_AARCH64 block. Found: {:?}",
+        "Platform Selection menu should contain PLATFORM_QEMU from if ARCH_AARCH64 block. Found: \
+         {:?}",
         platform_item_ids
     );
     assert!(
         platform_item_ids.contains(&"PLATFORM_CROSVM".to_string()),
-        "Platform Selection menu should contain PLATFORM_CROSVM from if ARCH_AARCH64 block. Found: {:?}",
+        "Platform Selection menu should contain PLATFORM_CROSVM from if ARCH_AARCH64 block. \
+         Found: {:?}",
         platform_item_ids
     );
     assert!(
         platform_item_ids.contains(&"PLATFORM_RISCV_QEMU".to_string()),
-        "Platform Selection menu should contain PLATFORM_RISCV_QEMU from if ARCH_RISCV64 block. Found: {:?}",
+        "Platform Selection menu should contain PLATFORM_RISCV_QEMU from if ARCH_RISCV64 block. \
+         Found: {:?}",
         platform_item_ids
     );
 }

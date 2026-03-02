@@ -1,12 +1,5 @@
-use crate::error::Result;
-use crate::kconfig::{Expr, SymbolTable, SymbolType};
-use crate::ui::dependency_resolver::{DependencyError, DependencyResolver};
-use crate::ui::events::EventResult;
-use crate::ui::rendering::Theme;
-use crate::ui::state::{
-    ConfigState, ConfigValue, MenuItem, MenuItemKind, NavigationState, TristateValue,
-};
-use crate::ui::utils::FuzzySearcher;
+use std::{io::Write, time::Duration};
+
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use ratatui::{
     Frame, Terminal,
@@ -16,10 +9,19 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
-use std::time::Duration;
 
-use crate::debug_log;
-use std::io::Write;
+use crate::{
+    debug_log,
+    error::Result,
+    kconfig::{Expr, SymbolTable, SymbolType},
+    ui::{
+        dependency_resolver::{DependencyError, DependencyResolver},
+        events::EventResult,
+        rendering::Theme,
+        state::{ConfigState, ConfigValue, MenuItem, MenuItemKind, NavigationState, TristateValue},
+        utils::FuzzySearcher,
+    },
+};
 /// Maximum number of dependency violations to display in error dialog
 const MAX_DISPLAYED_VIOLATIONS: usize = 5;
 
@@ -245,7 +247,6 @@ impl MenuConfigApp {
         }
     }
 
-
     /// Get the current visible items list (with filtering applied)
     /// This ensures consistent behavior across all navigation methods
     fn get_visible_items(&self) -> Vec<MenuItem> {
@@ -254,11 +255,11 @@ impl MenuConfigApp {
             let results = searcher.search(&self.config_state.all_items);
             results.into_iter().map(|r| r.item).collect::<Vec<_>>()
         } else {
-            self.config_state.get_items_for_path(&self.navigation.current_path)
+            self.config_state
+                .get_items_for_path(&self.navigation.current_path)
         };
         self.filter_visible_items(items)
     }
-
 
     /// Filter menu items based on visibility rules:
     /// 1. Items without prompts are hidden (internal variables)
@@ -1522,8 +1523,9 @@ impl MenuConfigApp {
     }
 
     fn save_config(&mut self) -> Result<()> {
-        use crate::config::ConfigWriter;
         use std::path::Path;
+
+        use crate::config::ConfigWriter;
 
         // Audit before saving
         let violations = self.audit_all_dependencies();
@@ -1799,36 +1801,37 @@ impl MenuConfigApp {
 
     fn validate_range(input: &str) -> Option<String> {
         let trimmed = input.trim();
-        
+
         // Must start with [ and end with ]
         if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
             return None;
         }
-        
+
         // Empty array is valid
         if trimmed == "[]" {
             return Some(trimmed.to_string());
         }
-        
+
         // Use safer stripping approach
-        let inner = trimmed.strip_prefix('[')
+        let inner = trimmed
+            .strip_prefix('[')
             .and_then(|s| s.strip_suffix(']'))?;
-        
+
         // Split by comma and check each element
         let items: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-        
+
         // Must have at least one non-empty item
         if items.iter().all(|s| s.is_empty()) {
             return None;
         }
-        
+
         // Reconstruct with consistent spacing
         let normalized_items: Vec<String> = items
             .iter()
             .filter(|s| !s.is_empty())
             .map(|s| s.trim().to_string())
             .collect();
-        
+
         Some(format!("[{}]", normalized_items.join(", ")))
     }
 
@@ -1869,7 +1872,8 @@ impl MenuConfigApp {
                         self.symbol_table.set_value_tracked(symbol, value.clone());
                         self.status_message = Some(format!("✓ {} = {}", symbol, value));
                     } else {
-                        self.status_message = Some("✗ Invalid range (use [item1, item2, ...] format)".to_string());
+                        self.status_message =
+                            Some("✗ Invalid range (use [item1, item2, ...] format)".to_string());
                         return Ok(());
                     }
                 }

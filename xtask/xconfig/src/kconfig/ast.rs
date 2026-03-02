@@ -132,8 +132,7 @@ impl Default for Property {
 impl Property {
     /// Evaluate conditional defaults in order and return the first matching value
     pub fn evaluate_default(&self, symbol_table: &crate::kconfig::SymbolTable) -> Option<String> {
-        use crate::kconfig::expr::evaluate_expr;
-        use crate::kconfig::shell_expr::evaluate_shell_expr;
+        use crate::kconfig::{expr::evaluate_expr, shell_expr::evaluate_shell_expr};
 
         for default in &self.defaults {
             // Check condition (if any)

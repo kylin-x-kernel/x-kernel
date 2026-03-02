@@ -1,9 +1,11 @@
-use crate::config::ConfigReader;
-use crate::error::Result;
-use crate::kconfig::{Parser, SymbolTable};
-use crate::ui::dependency_resolver::DependencyResolver;
-use std::collections::HashSet;
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
+
+use crate::{
+    config::ConfigReader,
+    error::Result,
+    kconfig::{Parser, SymbolTable},
+    ui::dependency_resolver::DependencyResolver,
+};
 
 pub struct OldConfigLoader {
     kconfig_path: String,

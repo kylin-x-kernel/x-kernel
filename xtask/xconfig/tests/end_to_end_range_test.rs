@@ -1,8 +1,13 @@
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::config::{ConfigReader, ConfigWriter};
-use xconfig::kconfig::{Parser, SymbolTable, SymbolType};
-use xconfig::kconfig::ast::{Entry, RangeType, RustType};
+use xconfig::{
+    config::{ConfigReader, ConfigWriter},
+    kconfig::{
+        Parser, SymbolTable, SymbolType,
+        ast::{Entry, RangeType, RustType},
+    },
+};
 
 #[test]
 fn test_explicit_tuple_type_annotation() {
@@ -26,7 +31,10 @@ config TEST_MMIO_BASE
     if let Err(e) = &parse_result {
         eprintln!("Parse error: {}", e);
     }
-    assert!(parse_result.is_ok(), "Failed to parse Kconfig with tuple type annotation");
+    assert!(
+        parse_result.is_ok(),
+        "Failed to parse Kconfig with tuple type annotation"
+    );
     let ast = parse_result.unwrap();
 
     // Find config and verify type annotation
@@ -82,7 +90,10 @@ config TEST_IRQ_LIST
     let config = config.unwrap();
 
     assert!(
-        matches!(&config.symbol_type, SymbolType::Range(RangeType::Primitive(RustType::U32))),
+        matches!(
+            &config.symbol_type,
+            SymbolType::Range(RangeType::Primitive(RustType::U32))
+        ),
         "Expected Range(Primitive(U32)), got {:?}",
         config.symbol_type
     );
@@ -117,7 +128,10 @@ config TEST_NAMES
     let config = config.unwrap();
 
     assert!(
-        matches!(&config.symbol_type, SymbolType::Range(RangeType::StringArray)),
+        matches!(
+            &config.symbol_type,
+            SymbolType::Range(RangeType::StringArray)
+        ),
         "Expected Range(StringArray), got {:?}",
         config.symbol_type
     );
@@ -148,10 +162,10 @@ fn test_range_config_write_read_roundtrip() {
 
     // Build a symbol table manually (simulating loaded config)
     let mut symbols = SymbolTable::new();
-    symbols.add_symbol("TEST_RANGES".to_string(), SymbolType::Range(RangeType::Tuple(vec![
-        RustType::Usize,
-        RustType::Usize,
-    ])));
+    symbols.add_symbol(
+        "TEST_RANGES".to_string(),
+        SymbolType::Range(RangeType::Tuple(vec![RustType::Usize, RustType::Usize])),
+    );
     symbols.set_value("TEST_RANGES", "[(0x1000_0000,0x2000_0000)]".to_string());
 
     // Write to .config
@@ -165,7 +179,10 @@ fn test_range_config_write_read_roundtrip() {
         "Config file should contain range values without extra quotes. Got: {}",
         config_content
     );
-    assert!(!config_content.contains("\"["), "Config should not have extra quotes around arrays");
+    assert!(
+        !config_content.contains("\"["),
+        "Config should not have extra quotes around arrays"
+    );
 
     // Read .config back
     let config = ConfigReader::read(&config_path).unwrap();
@@ -196,7 +213,10 @@ config TEST_HEX_MIXED
     if let Err(e) = &parse_result {
         eprintln!("Parse error: {}", e);
     }
-    assert!(parse_result.is_ok(), "Failed to parse Kconfig with tuple type annotation");
+    assert!(
+        parse_result.is_ok(),
+        "Failed to parse Kconfig with tuple type annotation"
+    );
     let ast = parse_result.unwrap();
 
     let config = ast.entries.iter().find_map(|entry| {

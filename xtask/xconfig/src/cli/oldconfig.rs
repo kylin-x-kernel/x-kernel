@@ -1,6 +1,9 @@
-use crate::config::{ConfigWriter, OldConfigLoader};
-use crate::error::Result;
 use std::path::PathBuf;
+
+use crate::{
+    config::{ConfigWriter, OldConfigLoader},
+    error::Result,
+};
 
 pub fn oldconfig_command(
     config: PathBuf,

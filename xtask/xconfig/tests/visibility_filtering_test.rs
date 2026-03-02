@@ -1,7 +1,10 @@
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::kconfig::{Parser, SymbolTable, SymbolType};
-use xconfig::ui::app::MenuConfigApp;
+use xconfig::{
+    kconfig::{Parser, SymbolTable, SymbolType},
+    ui::app::MenuConfigApp,
+};
 
 /// Test that items inside `if` blocks are hidden when the condition is false
 #[test]

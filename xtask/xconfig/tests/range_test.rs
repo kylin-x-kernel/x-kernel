@@ -1,8 +1,10 @@
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::config::writer::ConfigWriter;
-use xconfig::kconfig::{SymbolTable, SymbolType};
-use xconfig::kconfig::ast::RangeType;
+use xconfig::{
+    config::writer::ConfigWriter,
+    kconfig::{SymbolTable, SymbolType, ast::RangeType},
+};
 
 #[test]
 fn test_range_config_writer() {
@@ -12,16 +14,28 @@ fn test_range_config_writer() {
     let mut symbols = SymbolTable::new();
 
     // Add range configs with different element types
-    symbols.add_symbol("TEST_RANGE_NUMBERS".to_string(), SymbolType::Range(RangeType::Unknown));
+    symbols.add_symbol(
+        "TEST_RANGE_NUMBERS".to_string(),
+        SymbolType::Range(RangeType::Unknown),
+    );
     symbols.set_value("TEST_RANGE_NUMBERS", "[1,2,3,4,5]".to_string());
 
-    symbols.add_symbol("TEST_RANGE_STRINGS".to_string(), SymbolType::Range(RangeType::Unknown));
+    symbols.add_symbol(
+        "TEST_RANGE_STRINGS".to_string(),
+        SymbolType::Range(RangeType::Unknown),
+    );
     symbols.set_value("TEST_RANGE_STRINGS", "[apple,banana,cherry]".to_string());
 
-    symbols.add_symbol("TEST_RANGE_HEX".to_string(), SymbolType::Range(RangeType::Unknown));
+    symbols.add_symbol(
+        "TEST_RANGE_HEX".to_string(),
+        SymbolType::Range(RangeType::Unknown),
+    );
     symbols.set_value("TEST_RANGE_HEX", "[0x10,0x20,0x30]".to_string());
 
-    symbols.add_symbol("TEST_RANGE_EMPTY".to_string(), SymbolType::Range(RangeType::Unknown));
+    symbols.add_symbol(
+        "TEST_RANGE_EMPTY".to_string(),
+        SymbolType::Range(RangeType::Unknown),
+    );
     symbols.set_value("TEST_RANGE_EMPTY", "[]".to_string());
 
     // Add a normal u32 to verify no regression
@@ -61,4 +75,3 @@ fn test_range_config_writer() {
         "Range should not have quotes around brackets"
     );
 }
-

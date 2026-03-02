@@ -6,6 +6,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "ipi")]
+pub use kbuild_config::IPI_IRQ;
 use kcpu::excp::{IRQ, register_trap_handler};
 #[cfg(feature = "ipi")]
 pub use kplat::interrupts::{TargetCpu, notify_cpu};
@@ -13,8 +15,6 @@ pub use kplat::interrupts::{
     dispatch_irq, enable, reg_handler as register, restore, save_disable, set_prio,
     unreg_handler as unregister,
 };
-#[cfg(feature = "ipi")]
-pub use kbuild_config::IPI_IRQ;
 
 static IRQ_HOOK: AtomicUsize = AtomicUsize::new(0);
 

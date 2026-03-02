@@ -10,14 +10,13 @@ use core::{
 
 use aarch64_cpu::registers::*;
 use arm_gic::gicv3::*;
+use kbuild_config::CPU_NUM;
 use kplat::{
     interrupts::{Handler, HandlerTable},
     memory::VirtAddr,
 };
 use kspin::SpinNoIrq;
 use log::*;
-
-use kbuild_config::CPU_NUM;
 static GICD_INIT: AtomicBool = AtomicBool::new(false);
 const MAX_IRQ_COUNT: usize = 1024;
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();

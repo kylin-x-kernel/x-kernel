@@ -1,7 +1,7 @@
-use crate::error::{KconfigError, Result};
-use crate::kconfig::ast::Expr;
-use crate::kconfig::shell_expr::evaluate_shell_expr;
-use crate::kconfig::symbol::SymbolTable;
+use crate::{
+    error::{KconfigError, Result},
+    kconfig::{ast::Expr, shell_expr::evaluate_shell_expr, symbol::SymbolTable},
+};
 
 pub fn evaluate_expr(expr: &Expr, symbols: &SymbolTable) -> Result<bool> {
     match expr {

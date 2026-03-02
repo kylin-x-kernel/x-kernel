@@ -1,10 +1,12 @@
-use crate::error::{KconfigError, Result};
-use crate::kconfig::ast::{RangeType, RustType, SymbolType};
-use crate::kconfig::SymbolTable;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
-use std::path::Path;
+use std::{collections::HashMap, fs::File, io::Write, path::Path};
+
+use crate::{
+    error::{KconfigError, Result},
+    kconfig::{
+        SymbolTable,
+        ast::{RangeType, RustType, SymbolType},
+    },
+};
 
 /// ConfigGenerator generates build system configuration files.
 ///
@@ -155,7 +157,10 @@ impl ConfigGenerator {
             // Specific integer types: use the exact declared Rust type
             st if st.is_integer_type() => {
                 let rust_type = Self::symbol_type_primitive_str(st);
-                content.push_str(&format!("pub const {}: {} = {};\n\n", key, rust_type, value));
+                content.push_str(&format!(
+                    "pub const {}: {} = {};\n\n",
+                    key, rust_type, value
+                ));
                 Ok(true)
             }
 
@@ -522,9 +527,7 @@ impl ConfigGenerator {
                 }
                 ')' if !in_quotes => {
                     if depth == 0 {
-                        return Err(KconfigError::Config(
-                            "Unmatched closing parenthesis".into(),
-                        ));
+                        return Err(KconfigError::Config("Unmatched closing parenthesis".into()));
                     }
                     depth -= 1;
                     if depth == 0 {

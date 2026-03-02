@@ -1,7 +1,6 @@
-use std::sync::OnceLock;
-
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::OnceLock;
 
 // Helper function to check if debug logging is enabled
 // Cached to avoid repeated environment lookups

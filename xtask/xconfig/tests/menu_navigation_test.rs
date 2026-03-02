@@ -1,6 +1,9 @@
 use std::path::PathBuf;
-use xconfig::kconfig::Parser;
-use xconfig::ui::state::{ConfigState, MenuItemKind};
+
+use xconfig::{
+    kconfig::Parser,
+    ui::state::{ConfigState, MenuItemKind},
+};
 
 /// Test that menu navigation returns the correct items for each menu
 #[test]

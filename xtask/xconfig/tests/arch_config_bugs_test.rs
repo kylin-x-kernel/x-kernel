@@ -1,9 +1,12 @@
 /// Tests for Bug 1: ARCH config value is incorrect when loading defconfig with ARCH_X86_64=y
 /// Tests for Bug 2: Cross-architecture configuration pollution from defconfig
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::config::ConfigReader;
-use xconfig::kconfig::{Parser, SymbolTable};
+use xconfig::{
+    config::ConfigReader,
+    kconfig::{Parser, SymbolTable},
+};
 
 /// Helper: build symbol table from entries (matching menuconfig behavior)
 fn extract_symbols_from_entries(
@@ -102,10 +105,7 @@ fn enforce_choice_mutual_exclusion(
 /// Helper: re-evaluate conditional defaults.
 /// Derived symbols (no prompt) are ALWAYS recalculated (Linux Kconfig semantics).
 /// User-editable symbols (has prompt) are only recalculated if not from_config.
-fn reevaluate_defaults(
-    entries: &[xconfig::kconfig::ast::Entry],
-    symbol_table: &mut SymbolTable,
-) {
+fn reevaluate_defaults(entries: &[xconfig::kconfig::ast::Entry], symbol_table: &mut SymbolTable) {
     use xconfig::kconfig::ast::Entry;
     for entry in entries {
         match entry {
@@ -180,8 +180,7 @@ fn filter_by_if_conditions(
     symbol_conditions: &std::collections::HashMap<String, Vec<xconfig::kconfig::ast::Expr>>,
     symbol_table: &mut SymbolTable,
 ) {
-    use xconfig::kconfig::ast::SymbolType;
-    use xconfig::kconfig::expr::evaluate_expr;
+    use xconfig::kconfig::{ast::SymbolType, expr::evaluate_expr};
 
     for (name, conditions) in symbol_conditions {
         let all_satisfied = conditions
@@ -281,15 +280,15 @@ PLATFORM_X86_64_QEMU_VIRT=y
     assert_eq!(
         symbol_table.get_value("PLATFORM"),
         Some("x86_64-qemu-virt".to_string()),
-        "Broken defconfig: PLATFORM should be auto-corrected to 'x86_64-qemu-virt' (derived symbol)"
+        "Broken defconfig: PLATFORM should be auto-corrected to 'x86_64-qemu-virt' (derived \
+         symbol)"
     );
 }
 
 /// Bug 1: When loading a defconfig with ARCH_X86_64=y, ARCH should be "x86_64" not "aarch64"
 #[test]
 fn test_arch_value_correct_for_x86_64_defconfig() {
-    let kconfig_path =
-        std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
+    let kconfig_path = std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
     let srctree = std::path::PathBuf::from("tests/fixtures/arch_config");
 
     let temp_dir = TempDir::new().unwrap();
@@ -321,8 +320,7 @@ fn test_arch_value_correct_for_x86_64_defconfig() {
 /// Bug 1: When loading a defconfig with ARCH_AARCH64=y, ARCH should be "aarch64"
 #[test]
 fn test_arch_value_correct_for_aarch64_defconfig() {
-    let kconfig_path =
-        std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
+    let kconfig_path = std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
     let srctree = std::path::PathBuf::from("tests/fixtures/arch_config");
 
     let temp_dir = TempDir::new().unwrap();
@@ -344,8 +342,7 @@ fn test_arch_value_correct_for_aarch64_defconfig() {
 /// the aarch64-specific configs should be filtered out.
 #[test]
 fn test_cross_arch_pollution_filtered() {
-    let kconfig_path =
-        std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
+    let kconfig_path = std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
     let srctree = std::path::PathBuf::from("tests/fixtures/arch_config");
 
     let temp_dir = TempDir::new().unwrap();
@@ -394,8 +391,7 @@ PSCI_METHOD=hvc
 /// Verify that aarch64-specific configs are preserved when ARCH_AARCH64=y
 #[test]
 fn test_aarch64_configs_preserved_for_aarch64() {
-    let kconfig_path =
-        std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
+    let kconfig_path = std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
     let srctree = std::path::PathBuf::from("tests/fixtures/arch_config");
 
     let temp_dir = TempDir::new().unwrap();

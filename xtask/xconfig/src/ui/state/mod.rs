@@ -1,9 +1,12 @@
-use crate::kconfig::ast::{Choice, Comment, Config, Entry, Menu, MenuConfig};
-use crate::kconfig::{Expr, SymbolType};
-use std::collections::HashMap;
-use std::io::Write;
+use std::{collections::HashMap, io::Write};
 
-use crate::debug_log;
+use crate::{
+    debug_log,
+    kconfig::{
+        Expr, SymbolType,
+        ast::{Choice, Comment, Config, Entry, Menu, MenuConfig},
+    },
+};
 
 // Helper function to normalize menu/comment IDs by replacing spaces with underscores
 // This ensures consistent ID format and prevents issues with space-containing keys
@@ -325,7 +328,8 @@ impl ConfigState {
         if_condition: Option<&Expr>,
     ) {
         debug_log!(
-            "[MenuTree] collect_items: parent_id=\"{}\", depth={}, entries_count={}, if_condition={}",
+            "[MenuTree] collect_items: parent_id=\"{}\", depth={}, entries_count={}, \
+             if_condition={}",
             parent_id,
             depth,
             entries.len(),

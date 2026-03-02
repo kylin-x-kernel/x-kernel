@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use xconfig::kconfig::Parser;
-use xconfig::ui::app::MenuConfigApp;
+
+use xconfig::{kconfig::Parser, ui::app::MenuConfigApp};
 
 #[test]
 fn test_search_result_item_location() {

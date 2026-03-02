@@ -1,6 +1,9 @@
 use std::path::PathBuf;
-use xconfig::kconfig::{Parser, SymbolTable, SymbolType};
-use xconfig::ui::app::MenuConfigApp;
+
+use xconfig::{
+    kconfig::{Parser, SymbolTable, SymbolType},
+    ui::app::MenuConfigApp,
+};
 
 /// Test that MenuConfigApp can be created with initialized values
 /// This verifies the critical fix for checkbox state display

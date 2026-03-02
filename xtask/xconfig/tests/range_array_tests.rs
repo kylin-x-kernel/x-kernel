@@ -1,6 +1,9 @@
 use std::path::PathBuf;
-use xconfig::kconfig::ast::{Entry, RangeType, RustType, SymbolType};
-use xconfig::kconfig::Parser;
+
+use xconfig::kconfig::{
+    Parser,
+    ast::{Entry, RangeType, RustType, SymbolType},
+};
 
 #[test]
 fn test_parse_range_array_numbers() {
@@ -26,12 +29,18 @@ fn test_parse_range_array_numbers() {
         None
     });
 
-    assert!(range_config.is_some(), "TEST_RANGE_NUMBERS config not found");
+    assert!(
+        range_config.is_some(),
+        "TEST_RANGE_NUMBERS config not found"
+    );
     let range_config = range_config.unwrap();
 
     // Verify the symbol type is Range with a Primitive(U32) annotation
     assert!(
-        matches!(&range_config.symbol_type, SymbolType::Range(RangeType::Primitive(RustType::U32))),
+        matches!(
+            &range_config.symbol_type,
+            SymbolType::Range(RangeType::Primitive(RustType::U32))
+        ),
         "Expected Range(Primitive(U32)), got {:?}",
         range_config.symbol_type
     );
@@ -65,7 +74,10 @@ fn test_parse_range_array_hex() {
 
     // Verify the symbol type is Range with a Primitive(Usize) annotation
     assert!(
-        matches!(&hex_config.symbol_type, SymbolType::Range(RangeType::Primitive(RustType::Usize))),
+        matches!(
+            &hex_config.symbol_type,
+            SymbolType::Range(RangeType::Primitive(RustType::Usize))
+        ),
         "Expected Range(Primitive(Usize)), got {:?}",
         hex_config.symbol_type
     );
@@ -93,12 +105,18 @@ fn test_parse_range_array_identifiers() {
         None
     });
 
-    assert!(id_config.is_some(), "TEST_RANGE_IDENTIFIERS config not found");
+    assert!(
+        id_config.is_some(),
+        "TEST_RANGE_IDENTIFIERS config not found"
+    );
     let id_config = id_config.unwrap();
 
     // Verify the symbol type is Range with a StringArray annotation
     assert!(
-        matches!(&id_config.symbol_type, SymbolType::Range(RangeType::StringArray)),
+        matches!(
+            &id_config.symbol_type,
+            SymbolType::Range(RangeType::StringArray)
+        ),
         "Expected Range(StringArray), got {:?}",
         id_config.symbol_type
     );

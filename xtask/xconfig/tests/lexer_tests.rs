@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+
 use xconfig::kconfig::{Lexer, Token};
 
 #[test]
@@ -134,7 +135,6 @@ fn test_lexer_array_hex_values() {
     }
     assert!(matches!(lexer.next_token().unwrap(), Token::RBracket));
 }
-
 
 #[test]
 fn test_lexer_hex_with_underscores() {

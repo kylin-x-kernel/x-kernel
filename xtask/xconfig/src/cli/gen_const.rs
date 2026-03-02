@@ -1,11 +1,17 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
-use crate::config::ConfigGenerator;
-use crate::error::Result;
-use crate::kconfig::ast::{Entry, SymbolType};
-use crate::kconfig::Parser;
+use crate::{
+    config::ConfigGenerator,
+    error::Result,
+    kconfig::{
+        Parser,
+        ast::{Entry, SymbolType},
+    },
+};
 
 /// Generate Rust const definitions from .config file
 pub fn gen_const_command(

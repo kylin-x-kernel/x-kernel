@@ -1,5 +1,7 @@
-use crate::error::{KconfigError, Result};
-use crate::kconfig::symbol::SymbolTable;
+use crate::{
+    error::{KconfigError, Result},
+    kconfig::symbol::SymbolTable,
+};
 
 /// Evaluates a shell expression like $(if condition,then,else) or $(VAR_NAME)
 pub fn evaluate_shell_expr(expr: &str, symbols: &SymbolTable) -> Result<String> {
@@ -184,7 +186,8 @@ mod tests {
         symbols.set_value("ARCH_X86_64", "n".to_string());
         symbols.set_value("ARCH_LOONGARCH64", "n".to_string());
 
-        let expr = "$(if $(ARCH_AARCH64),aarch64,$(if $(ARCH_RISCV64),riscv64,$(if $(ARCH_X86_64),x86_64,$(if $(ARCH_LOONGARCH64),loongarch64,unknown))))";
+        let expr = "$(if $(ARCH_AARCH64),aarch64,$(if $(ARCH_RISCV64),riscv64,$(if \
+                    $(ARCH_X86_64),x86_64,$(if $(ARCH_LOONGARCH64),loongarch64,unknown))))";
         let result = evaluate_shell_expr(expr, &symbols).unwrap();
         assert_eq!(result, "riscv64");
     }

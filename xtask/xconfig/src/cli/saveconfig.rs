@@ -1,8 +1,11 @@
-use crate::config::{ConfigGenerator, ConfigWriter};
-use crate::error::Result;
-use crate::kconfig::Parser;
-use crate::ui::dependency_resolver::DependencyResolver;
 use std::path::PathBuf;
+
+use crate::{
+    config::{ConfigGenerator, ConfigWriter},
+    error::Result,
+    kconfig::Parser,
+    ui::dependency_resolver::DependencyResolver,
+};
 
 pub fn saveconfig_command(output: PathBuf, kconfig: PathBuf, srctree: PathBuf) -> Result<()> {
     println!("Saving configuration...");
@@ -75,8 +78,7 @@ fn extract_symbols_internal(
     symbols: &mut crate::kconfig::SymbolTable,
     apply_defaults: bool,
 ) {
-    use crate::kconfig::ast::Entry;
-    use crate::kconfig::expr::evaluate_expr;
+    use crate::kconfig::{ast::Entry, expr::evaluate_expr};
 
     for entry in entries {
         match entry {
@@ -152,8 +154,8 @@ fn extract_symbols_internal(
             Entry::If(if_entry) => {
                 // Only apply defaults inside this if-block when its condition is satisfied.
                 // Symbols are always registered regardless of condition.
-                let condition_met = apply_defaults
-                    && evaluate_expr(&if_entry.condition, symbols).unwrap_or(false);
+                let condition_met =
+                    apply_defaults && evaluate_expr(&if_entry.condition, symbols).unwrap_or(false);
                 extract_symbols_internal(&if_entry.entries, symbols, condition_met);
             }
             _ => {}

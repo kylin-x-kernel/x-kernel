@@ -1,5 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::path::PathBuf;
+
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use xconfig::kconfig::Parser;
 
 fn bench_parse_simple(c: &mut Criterion) {

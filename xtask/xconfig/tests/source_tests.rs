@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+
 use xconfig::kconfig::Parser;
 
 #[test]

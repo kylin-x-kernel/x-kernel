@@ -1,7 +1,7 @@
 use std::io::Write;
+
 use tempfile::NamedTempFile;
-use xconfig::kconfig::Parser;
-use xconfig::ui::state::ConfigState;
+use xconfig::{kconfig::Parser, ui::state::ConfigState};
 
 /// Test that choice options have parent_choice field set correctly
 #[test]

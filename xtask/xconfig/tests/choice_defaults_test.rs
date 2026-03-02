@@ -1,7 +1,10 @@
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::kconfig::{Parser, SymbolTable};
-use xconfig::ui::app::MenuConfigApp;
+use xconfig::{
+    kconfig::{Parser, SymbolTable},
+    ui::app::MenuConfigApp,
+};
 
 /// Test that a Choice with a default option has that option selected
 #[test]
@@ -143,8 +146,7 @@ fn extract_symbols_from_entries(
     entries: &[xconfig::kconfig::ast::Entry],
     symbol_table: &mut SymbolTable,
 ) {
-    use xconfig::kconfig::Expr;
-    use xconfig::kconfig::ast::Entry;
+    use xconfig::kconfig::{Expr, ast::Entry};
 
     for entry in entries {
         match entry {

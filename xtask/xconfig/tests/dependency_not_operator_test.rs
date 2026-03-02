@@ -1,6 +1,9 @@
 use std::path::PathBuf;
-use xconfig::kconfig::{Parser, SymbolTable, SymbolType};
-use xconfig::ui::dependency_resolver::DependencyResolver;
+
+use xconfig::{
+    kconfig::{Parser, SymbolTable, SymbolType},
+    ui::dependency_resolver::DependencyResolver,
+};
 
 #[test]
 fn test_not_operator_allows_enable_when_negated_symbol_disabled() {
@@ -195,7 +198,8 @@ fn test_not_operator_with_and_precedence() {
         if should_allow {
             assert!(
                 result.is_ok(),
-                "SCHEDULER_RT should be allowed when ADVANCED_FEATURES={} and PREEMPT={}. Error: {:?}",
+                "SCHEDULER_RT should be allowed when ADVANCED_FEATURES={} and PREEMPT={}. Error: \
+                 {:?}",
                 advanced,
                 preempt,
                 result.err()

@@ -1,7 +1,10 @@
 use std::path::PathBuf;
+
 use tempfile::TempDir;
-use xconfig::config::{ConfigGenerator, ConfigReader, ConfigWriter, OldConfigLoader};
-use xconfig::kconfig::{Parser, SymbolTable, SymbolType};
+use xconfig::{
+    config::{ConfigGenerator, ConfigReader, ConfigWriter, OldConfigLoader},
+    kconfig::{Parser, SymbolTable, SymbolType},
+};
 
 #[test]
 fn test_complete_workflow() {
@@ -236,9 +239,12 @@ fn test_full_workflow() {
 
     // 3. Modify Kconfig (add new symbol)
     let kconfig_v2 = temp_dir.path().join("Kconfig_v2");
-    std::fs::write(&kconfig_v2, 
-        "config TEST_A\n    bool \"Test A\"\n    default y\n\nconfig TEST_B\n    bool \"Test B\"\n    default n\n"
-    ).unwrap();
+    std::fs::write(
+        &kconfig_v2,
+        "config TEST_A\n    bool \"Test A\"\n    default y\n\nconfig TEST_B\n    bool \"Test \
+         B\"\n    default n\n",
+    )
+    .unwrap();
 
     // 4. Run oldconfig
     let loader = OldConfigLoader::new(&kconfig_v2, temp_dir.path());

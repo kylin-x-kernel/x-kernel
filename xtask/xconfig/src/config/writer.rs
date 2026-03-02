@@ -1,8 +1,6 @@
-use crate::error::Result;
-use crate::kconfig::SymbolTable;
-use std::fs::File;
-use std::io::Write;
-use std::path::Path;
+use std::{fs::File, io::Write, path::Path};
+
+use crate::{error::Result, kconfig::SymbolTable};
 
 pub struct ConfigWriter;
 

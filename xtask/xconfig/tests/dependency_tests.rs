@@ -1,6 +1,9 @@
 use std::path::PathBuf;
-use xconfig::kconfig::{Parser, SymbolTable, SymbolType};
-use xconfig::ui::dependency_resolver::DependencyResolver;
+
+use xconfig::{
+    kconfig::{Parser, SymbolTable, SymbolType},
+    ui::dependency_resolver::DependencyResolver,
+};
 
 #[test]
 fn test_dependency_resolver_initialization() {

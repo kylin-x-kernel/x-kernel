@@ -12,6 +12,7 @@
 
 use core::ffi::c_char;
 
+use kbuild_config::ARCH;
 use kcore::task::processes;
 use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
@@ -20,7 +21,6 @@ use linux_raw_sys::{
     system::{new_utsname, sysinfo},
 };
 use osvm::{VirtMutPtr, write_vm_mem};
-use kbuild_config::ARCH;
 
 /// Get the real user ID of the current process
 pub fn sys_getuid() -> KResult<isize> {

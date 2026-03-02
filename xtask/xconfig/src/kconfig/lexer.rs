@@ -1,5 +1,6 @@
-use crate::error::{KconfigError, Result};
 use std::path::PathBuf;
+
+use crate::error::{KconfigError, Result};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -273,7 +274,7 @@ impl Lexer {
 
     fn read_hex_as_string(&mut self) -> String {
         let mut result = String::new();
-        
+
         // Read "0x" or "0X"
         if self.current_char() == Some('0') {
             result.push('0');
@@ -283,7 +284,7 @@ impl Lexer {
             result.push(self.current_char().unwrap());
             self.advance();
         }
-        
+
         // Read hex digits AND underscores
         while let Some(ch) = self.current_char() {
             if ch.is_ascii_hexdigit() || ch == '_' {
@@ -293,7 +294,7 @@ impl Lexer {
                 break;
             }
         }
-        
+
         result
     }
 

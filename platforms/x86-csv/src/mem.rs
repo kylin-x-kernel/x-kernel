@@ -3,11 +3,10 @@
 // See LICENSES for license details.
 
 use heapless::Vec;
+use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET};
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
 use lazyinit::LazyInit;
 use multiboot::information::{MemoryManagement, MemoryType, Multiboot, PAddr};
-
-use kbuild_config::{MMIO_RANGES, PHYS_VIRT_OFFSET, PHYS_MEM_BASE, PHYS_MEM_SIZE};
 
 const MAX_REGIONS: usize = 16;
 static RAM_REGIONS: LazyInit<Vec<MemRange, MAX_REGIONS>> = LazyInit::new();
@@ -61,10 +60,7 @@ impl HwMemory for HwMemoryImpl {
     }
 
     fn dma_regions() -> &'static [MemRange] {
-        &[(
-            kbuild_config::DMA_MEM_BASE,
-            kbuild_config::DMA_MEM_SIZE,
-        )]
+        &[(kbuild_config::DMA_MEM_BASE, kbuild_config::DMA_MEM_SIZE)]
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.

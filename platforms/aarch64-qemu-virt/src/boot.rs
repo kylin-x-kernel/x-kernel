@@ -4,12 +4,11 @@
 
 //! Boot entry and early page table setup for aarch64-qemu-virt.
 
+use kbuild_config::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 use kplat::memory::{PageAligned, pa};
 use page_table::{
     PageTableEntry as GenericPTE, PagingFlags as MappingFlags, aarch64::A64PageEntry as A64PTE,
 };
-
-use kbuild_config::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 #[unsafe(link_section = ".data")]

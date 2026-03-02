@@ -6,12 +6,11 @@
 
 use core::arch::global_asm;
 
+use kbuild_config::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 use x86_64::registers::{
     control::{Cr0Flags, Cr4Flags},
     model_specific::EferFlags,
 };
-
-use kbuild_config::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 const MULTIBOOT_HEADER_FLAGS: usize = 0x0001_0002;
 const MULTIBOOT_HEADER_MAGIC: usize = 0x1BADB002;
 pub(super) const MULTIBOOT_BOOTLOADER_MAGIC: usize = 0x2BADB002;

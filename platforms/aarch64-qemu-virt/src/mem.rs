@@ -4,11 +4,8 @@
 
 //! Memory layout definitions for aarch64-qemu-virt.
 
+use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET};
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
-
-use kbuild_config::{
-    MMIO_RANGES,PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET,
-};
 struct HwMemoryImpl;
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {
@@ -30,10 +27,7 @@ impl HwMemory for HwMemoryImpl {
     }
 
     fn dma_regions() -> &'static [MemRange] {
-        &[(
-            kbuild_config::DMA_MEM_BASE,
-            kbuild_config::DMA_MEM_SIZE,
-        )]
+        &[(kbuild_config::DMA_MEM_BASE, kbuild_config::DMA_MEM_SIZE)]
     }
 
     fn p2v(paddr: PhysAddr) -> VirtAddr {

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use xconfig::kconfig::Parser;
-use xconfig::ui::state::ConfigState;
+
+use xconfig::{kconfig::Parser, ui::state::ConfigState};
 
 #[test]
 fn test_dependency_tracking() {

@@ -1,8 +1,10 @@
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::config::{ConfigReader, ConfigWriter};
-use xconfig::kconfig::{SymbolTable, SymbolType};
-use xconfig::kconfig::ast::RangeType;
+use xconfig::{
+    config::{ConfigReader, ConfigWriter},
+    kconfig::{SymbolTable, SymbolType, ast::RangeType},
+};
 
 #[test]
 fn test_config_reader() {
@@ -264,7 +266,10 @@ fn test_config_writer_none_values_by_type() {
     symbols.add_symbol("HEX_NONE".to_string(), SymbolType::Hex);
     // value is None by default
 
-    symbols.add_symbol("RANGE_NONE".to_string(), SymbolType::Range(RangeType::Unknown));
+    symbols.add_symbol(
+        "RANGE_NONE".to_string(),
+        SymbolType::Range(RangeType::Unknown),
+    );
     // value is None by default
 
     // Add some symbols with values for comparison
@@ -304,5 +309,8 @@ fn test_config_writer_none_values_by_type() {
     );
 
     // Symbol with value should appear
-    assert!(content.contains("BOOL_SET=y"), "Bool with value should appear");
+    assert!(
+        content.contains("BOOL_SET=y"),
+        "Bool with value should appear"
+    );
 }

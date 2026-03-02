@@ -1,6 +1,4 @@
-use std::env;
-use std::fs;
-use std::path::Path;
+use std::{env, fs, path::Path};
 
 fn main() {
     // Get the path to the generated config.rs

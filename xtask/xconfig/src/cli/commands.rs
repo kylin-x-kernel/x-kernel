@@ -1,8 +1,12 @@
-use crate::config::{ConfigGenerator, ConfigReader};
-use crate::error::Result;
-use crate::kconfig::{Parser, SymbolTable};
-use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
+
+use clap::{Parser as ClapParser, Subcommand};
+
+use crate::{
+    config::{ConfigGenerator, ConfigReader},
+    error::Result,
+    kconfig::{Parser, SymbolTable},
+};
 
 #[derive(ClapParser, Debug)]
 #[command(name = "xconf")]

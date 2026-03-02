@@ -106,7 +106,7 @@ fn config_pci_device<C: ConfigurationAccess>(
 impl AllDevices {
     /// Enumerate PCI devices and register matching drivers.
     pub(crate) fn probe_bus_devices(&mut self) {
-        let base_vaddr = p2v((kbuild_config::PCI_ECAM_BASE).into() );
+        let base_vaddr = p2v((kbuild_config::PCI_ECAM_BASE).into());
         let mut root = {
             #[cfg(feature = "pci-mmio")]
             {
@@ -125,7 +125,7 @@ impl AllDevices {
             .get(1)
             .map(|range| PciRangeAllocator::new(range.0, range.1));
 
-        for bus in 0..= kbuild_config::PCI_BUS_END as u8 {
+        for bus in 0..=kbuild_config::PCI_BUS_END as u8 {
             for (bdf, dev_info) in root.enumerate_bus(bus) {
                 debug!("PCI {bdf}: {dev_info}");
                 if dev_info.header_type != HeaderType::Standard {

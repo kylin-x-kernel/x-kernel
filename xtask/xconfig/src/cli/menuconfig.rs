@@ -1,14 +1,17 @@
-use crate::config::ConfigReader;
-use crate::error::Result;
-use crate::kconfig::Parser;
-use crate::ui::{MenuConfigApp, dependency_resolver::DependencyResolver};
+use std::{io, path::PathBuf};
+
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use std::io;
-use std::path::PathBuf;
+
+use crate::{
+    config::ConfigReader,
+    error::Result,
+    kconfig::Parser,
+    ui::{MenuConfigApp, dependency_resolver::DependencyResolver},
+};
 
 pub fn menuconfig_command(kconfig: PathBuf, srctree: PathBuf) -> Result<()> {
     println!("Loading configuration...");
@@ -341,8 +344,7 @@ fn filter_by_if_conditions(
     symbol_conditions: &std::collections::HashMap<String, Vec<crate::kconfig::ast::Expr>>,
     symbol_table: &mut crate::kconfig::SymbolTable,
 ) {
-    use crate::kconfig::ast::SymbolType;
-    use crate::kconfig::expr::evaluate_expr;
+    use crate::kconfig::{ast::SymbolType, expr::evaluate_expr};
 
     for (name, conditions) in symbol_conditions {
         let all_satisfied = conditions

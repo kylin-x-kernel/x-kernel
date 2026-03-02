@@ -1,5 +1,6 @@
-use crate::kconfig::ast::SymbolType;
 use std::collections::HashMap;
+
+use crate::kconfig::ast::SymbolType;
 
 #[derive(Debug, Clone)]
 pub struct Symbol {

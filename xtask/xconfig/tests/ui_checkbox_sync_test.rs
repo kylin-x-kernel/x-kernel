@@ -29,8 +29,11 @@
 //! 4. Verify checkbox updates immediately: [✓] ↔ [ ] (bool) or [✓] → [M] → [ ] (tristate)
 
 use std::path::PathBuf;
-use xconfig::kconfig::{Parser, SymbolTable, SymbolType};
-use xconfig::ui::app::MenuConfigApp;
+
+use xconfig::{
+    kconfig::{Parser, SymbolTable, SymbolType},
+    ui::app::MenuConfigApp,
+};
 
 /// Test that verifies MenuConfigApp creation with boolean symbols
 ///

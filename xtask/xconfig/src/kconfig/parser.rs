@@ -1,9 +1,16 @@
-use crate::error::{KconfigError, Result};
-use crate::kconfig::ast::*;
-use crate::kconfig::lexer::{Lexer, Token};
-use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use crate::{
+    error::{KconfigError, Result},
+    kconfig::{
+        ast::*,
+        lexer::{Lexer, Token},
+    },
+};
 
 /// Map an integer-type token to the corresponding [`SymbolType`] variant.
 ///
@@ -22,7 +29,10 @@ fn token_to_integer_symbol_type(token: &Token) -> SymbolType {
         Token::I64 => SymbolType::I64,
         Token::I128 => SymbolType::I128,
         Token::Isize => SymbolType::Isize,
-        _ => unreachable!("token_to_integer_symbol_type called with non-integer token: {:?}", token),
+        _ => unreachable!(
+            "token_to_integer_symbol_type called with non-integer token: {:?}",
+            token
+        ),
     }
 }
 
@@ -371,7 +381,7 @@ impl Parser {
                 }
                 Token::Default => {
                     self.advance()?;
-                    
+
                     // For rangetype configs, the default is a type annotation, not a value
                     if matches!(symbol_type, SymbolType::Range(_))
                         && matches!(self.current_context().current_token, Token::LBracket)
@@ -380,14 +390,16 @@ impl Parser {
                         symbol_type = SymbolType::Range(range_type);
                     } else {
                         // Check if it's an array literal
-                        let value = if matches!(self.current_context().current_token, Token::LBracket) {
-                            self.parse_array_literal()?
-                        } else {
-                            self.parse_expr()?
-                        };
+                        let value =
+                            if matches!(self.current_context().current_token, Token::LBracket) {
+                                self.parse_array_literal()?
+                            } else {
+                                self.parse_expr()?
+                            };
 
                         // Check for optional 'if' condition
-                        let condition = if matches!(self.current_context().current_token, Token::If) {
+                        let condition = if matches!(self.current_context().current_token, Token::If)
+                        {
                             self.advance()?; // consume 'if'
                             Some(self.parse_expr()?)
                         } else {
@@ -753,13 +765,13 @@ impl Parser {
 
     fn parse_array_literal(&mut self) -> Result<Expr> {
         self.expect(Token::LBracket)?;
-        
+
         let mut elements = Vec::new();
         let mut content = String::from("[");
-        
+
         loop {
             self.skip_newlines()?;
-            
+
             // Check if we've reached the end of the array
             match &self.current_context().current_token {
                 Token::RBracket => {
@@ -776,7 +788,7 @@ impl Parser {
                 }
                 _ => {}
             }
-            
+
             // Parse array element
             let element = self.parse_array_element()?;
             if !content.ends_with('[') {
@@ -784,7 +796,7 @@ impl Parser {
             }
             content.push_str(&element);
             elements.push(element);
-            
+
             // Check for comma or end of array
             self.skip_newlines()?;
             if matches!(self.current_context().current_token, Token::Comma) {
@@ -793,14 +805,14 @@ impl Parser {
             }
             // Allow whitespace-separated elements (no comma required)
         }
-        
+
         // Return the entire array as a Const expression
         Ok(Expr::Const(content))
     }
 
     fn parse_array_element(&mut self) -> Result<String> {
         let token = self.current_context().current_token.clone();
-        
+
         match token {
             Token::Number(n) => {
                 self.advance()?;
@@ -832,9 +844,9 @@ impl Parser {
                 return Err(KconfigError::Syntax {
                     file: self.current_file.clone(),
                     line: self.current_context().lexer.current_line(),
-                    message:
-                        "Empty array type annotation: must specify element type, e.g. [(u64, u64)]"
-                            .to_string(),
+                    message: "Empty array type annotation: must specify element type, e.g. [(u64, \
+                              u64)]"
+                        .to_string(),
                 });
             }
             Token::LParen => {

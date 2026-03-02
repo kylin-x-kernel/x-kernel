@@ -3,14 +3,16 @@
 // See LICENSES for license details.
 
 //! Platform boot hooks for early and final initialization.
+#[allow(unused_imports)]
+use kbuild_config::{
+    GICC_PADDR as GICR_PADDR, GICD_PADDR, PSCI_METHOD, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR,
+};
 use kplat::{
     boot::BootHandler,
     memory::{p2v, pa},
 };
 use log::*;
 
-#[allow(unused_imports)]
-use kbuild_config::{GICC_PADDR as GICR_PADDR, GICD_PADDR, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR, PSCI_METHOD};
 use crate::serial::*;
 
 /// Platform-specific `BootHandler` implementation.

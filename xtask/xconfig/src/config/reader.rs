@@ -1,7 +1,6 @@
+use std::{collections::HashMap, fs, path::Path};
+
 use crate::error::Result;
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 
 pub struct ConfigReader;
 

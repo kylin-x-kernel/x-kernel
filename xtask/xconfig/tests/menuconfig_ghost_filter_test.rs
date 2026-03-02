@@ -3,10 +3,13 @@
 //! Verifies that configs with unsatisfied dependencies are cleared when loading .config
 
 use std::fs;
+
 use tempfile::TempDir;
-use xconfig::config::ConfigReader;
-use xconfig::kconfig::{Parser, SymbolTable};
-use xconfig::ui::dependency_resolver::DependencyResolver;
+use xconfig::{
+    config::ConfigReader,
+    kconfig::{Parser, SymbolTable},
+    ui::dependency_resolver::DependencyResolver,
+};
 
 /// Helper to simulate menuconfig loading behavior
 fn simulate_menuconfig_load(
