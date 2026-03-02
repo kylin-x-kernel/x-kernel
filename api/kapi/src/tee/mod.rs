@@ -50,6 +50,7 @@ use crate::tee::{
 #[macro_use]
 mod macros;
 
+mod arch;
 mod bitstring;
 mod common;
 mod config;
@@ -72,8 +73,6 @@ mod tee_cancel;
 mod tee_fs;
 mod tee_fs_key_manager;
 mod tee_generic;
-#[cfg(feature = "x86_csv")]
-mod tee_get_sealing_key;
 mod tee_inter_ta;
 mod tee_misc;
 mod tee_obj;

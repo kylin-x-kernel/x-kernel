@@ -863,7 +863,7 @@ pub fn tee_cryp_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
 
 pub fn syscall_hash_update(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     let chunk_ptr = arg1 as *const u8;
-    let chunk_len = arg2 as usize;
+    let chunk_len = arg2;
 
     let chunk_slice: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -925,7 +925,7 @@ pub fn syscall_hash_final(
     arg4: usize,
 ) -> TeeResult {
     let chunk_ptr = arg1 as *const u8;
-    let chunk_len = arg2 as usize;
+    let chunk_len = arg2;
 
     // 输入的hash_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let hash_ptr = arg3 as *mut u8;
@@ -944,7 +944,7 @@ pub fn syscall_hash_final(
     }
 
     let hash_slice = unsafe { core::slice::from_raw_parts_mut(hash_ptr, hash_len) };
-    let mut hash = bb_memdup_user(&hash_slice)?;
+    let mut hash = bb_memdup_user(hash_slice)?;
 
     hash_len = tee_cryp_hash_final(arg0 as _, &chunk, &mut hash)?;
 
@@ -1014,7 +1014,7 @@ pub fn tee_cryp_cipher_init(
 
 pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> TeeResult {
     let iv_ptr = arg1 as *const u8;
-    let iv_len = arg2 as usize;
+    let iv_len = arg2;
     let padding_mode_val = arg3 as u32;
 
     // 转换IV
@@ -1078,7 +1078,7 @@ pub fn syscall_cipher_update(
     arg4: usize,
 ) -> TeeResult {
     let src_ptr = arg1 as *const u8;
-    let src_len = arg2 as usize;
+    let src_len = arg2;
 
     // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let dst_ptr = arg3 as *mut u8;
@@ -1135,7 +1135,7 @@ pub fn syscall_cipher_final(
     arg4: usize,
 ) -> TeeResult {
     let src_ptr = arg1 as *const u8;
-    let src_len = arg2 as usize;
+    let src_len = arg2;
 
     // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let dst_ptr = arg3 as *mut u8;

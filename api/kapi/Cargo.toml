@@ -105,7 +105,7 @@ uuid = { version = "0.8", default-features = false, optional = true }
 hex = { version = "0.4", default-features = false, optional = true, features = [
     "alloc",
 ] }
-
+cty = "0.2"
 kcore.workspace = true
 
 subtle = { version = "2", default-features = false }
