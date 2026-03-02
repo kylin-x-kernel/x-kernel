@@ -157,7 +157,7 @@ oldconfig:
 	@xconf oldconfig -c .config -k Kconfig -s .
 
 # Generate const definitions before build
-gen-const:
+gen-const: .config
 	@echo "📝 Generating Rust const definitions from .config..."
 	@xconf gen-const
 	@echo "✅ Generated config.rs"
@@ -180,7 +180,7 @@ debug: build
 	  -ex 'continue' \
 	  -ex 'disp /16i $$pc'
 
-clippy:
+clippy: gen-const
 ifeq ($(origin ARCH), command line)
 	$(call cargo_clippy,--target $(TARGET))
 else
