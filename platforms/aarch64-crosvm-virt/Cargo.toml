@@ -16,7 +16,6 @@ rtc = []
 [dependencies]
 log = "0.4"
 page_table = { workspace = true }
-platconfig-macros = { workspace = true }
 kspin = "0.1"
 dw_apb_uart = "0.1"
 kcpu = { workspace = true }

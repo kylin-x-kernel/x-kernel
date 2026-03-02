@@ -62,7 +62,7 @@ config UART_PADDR
       Define the base address for the UART (Universal Asynchronous Receiver-Transmitter) device.
 
 config UART_IRQ
-    u32 "UART IRQ Number"
+    usize "UART IRQ Number"
     depends on ARCH_AARCH64
     default 33
     help
@@ -83,7 +83,7 @@ config GICD_PADDR
       Define the base address for the GICD (Generic Interrupt Controller Distributor).
 
 config PMU_IRQ
-    u32 "PMU IRQ Number"
+    usize "PMU IRQ Number"
     default 23
     depends on ARCH_AARCH64
     default 23
@@ -98,7 +98,7 @@ config TIMER_IRQ
       Define the interrupt number for the system timer.
 
 config IPI_IRQ
-    u32 "IPI IRQ Number"
+    usize "IPI IRQ Number"
     default 1
     help
       Define the interrupt number for Inter-Processor Interrupts (IPI).

@@ -19,9 +19,9 @@ kspin = { workspace = true }
 lazyinit = "0.2"
 log = "0.4"
 
-platconfig-macros = { workspace = true }
 kcpu = { workspace = true }
 kplat = { workspace = true }
+kbuild_config = { workspace = true }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 loongArch64 = "0.2.4"

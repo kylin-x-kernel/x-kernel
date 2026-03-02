@@ -19,9 +19,9 @@ lazyinit = "0.2"
 log = "0.4"
 
 percpu = { workspace = true }
-platconfig-macros = { workspace = true }
 kcpu = { workspace = true }
 kplat = { workspace = true }
+kbuild_config = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = "0.14"

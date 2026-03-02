@@ -22,7 +22,6 @@ lazyinit = "0.2"
 int_ratio = "0.1"
 percpu = { workspace = true }
 heapless = "0.9"
-platconfig-macros = { workspace = true }
 kcpu = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }

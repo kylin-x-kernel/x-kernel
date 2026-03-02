@@ -2,9 +2,7 @@
 resolver = "2"
 members = [
     "entry",
-    "xtask/cargo-platconfig",
     "xtask/crate_rootfs",
-    "xtask/kconfig-gen",
 # build config system
     "xtask/xconfig",
     "util/kbuild_config",
@@ -69,7 +67,6 @@ slab_allocator = { path = "core/slab_allocator" }
 
 # Platform Abstraction Layer
 kplat = { path = "platforms/kplat" }
-kplat-macros = { path = "platforms/kplat-macros" }
 aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
 x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 x86-csv = { path = "platforms/x86-csv" }
@@ -139,7 +136,6 @@ rsext4 = { path = "fs/rsext4", default-features = false }
 # util Crates
 macros = { path = "util/macros" }
 kinit_setup = { path = "util/kinit_setup" }
-platconfig-macros = { path = "util/platconfig-macros" }
 klogger = { path = "util/klogger" }
 backtrace = { path = "util/backtrace" }
 kerrno = { path = "util/kerrno" }

@@ -15,9 +15,3 @@ mod irq;
 mod mem;
 mod power;
 mod time;
-pub mod config {
-    platconfig_macros::include_configs!(
-        path_env = "PLAT_CONFIG_PATH",
-        fallback = "platconfig.toml"
-    );
-}
