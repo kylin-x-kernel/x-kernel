@@ -1,10 +1,9 @@
 use core::{cell::RefCell, ptr::NonNull};
 
 use virtio_drivers::{
-    BufferDirection, Error, Hal, PhysAddr, Result,
-    transport::{DeviceStatus, DeviceType, InterruptStatus, Transport},
+    BufferDirection, Hal, PhysAddr, Result,
+    transport::{DeviceStatus, DeviceType, Transport},
 };
-use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 extern crate alloc;
 use alloc::alloc::{Layout, alloc, dealloc};
@@ -20,7 +19,7 @@ unsafe impl Hal for MockHal {
             panic!("MockHal: dma_alloc failed");
         }
         unsafe { ptr.write_bytes(0, pages * 4096) }; // Zero memory
-        (ptr as PhysAddr, NonNull::new(ptr).unwrap())
+        (ptr as usize, NonNull::new(ptr).unwrap())
     }
 
     unsafe fn dma_dealloc(paddr: PhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
@@ -34,7 +33,7 @@ unsafe impl Hal for MockHal {
     }
 
     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> PhysAddr {
-        buffer.as_ptr() as *mut u8 as PhysAddr
+        buffer.as_ptr() as *mut u8 as usize
     }
 
     unsafe fn unshare(_paddr: PhysAddr, _buffer: NonNull<[u8]>, _direction: BufferDirection) {}
@@ -111,50 +110,14 @@ impl Transport for MockTransport {
         false
     }
 
-    fn ack_interrupt(&mut self) -> InterruptStatus {
-        InterruptStatus::empty()
+    fn ack_interrupt(&mut self) -> bool {
+        false
     }
 
-    fn read_config_generation(&self) -> u32 {
-        0
-    }
-
-    fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> Result<T> {
-        let size = core::mem::size_of::<T>();
-        let config = self.config_space.borrow();
-        if offset
-            .checked_add(size)
-            .is_none_or(|end| end > config.len())
-        {
-            return Err(Error::ConfigSpaceTooSmall);
-        }
-
-        let mut value = core::mem::MaybeUninit::<T>::uninit();
+    fn config_space<T: 'static>(&self) -> Result<NonNull<T>> {
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                config.as_ptr().add(offset),
-                value.as_mut_ptr() as *mut u8,
-                size,
-            );
-            Ok(value.assume_init())
+            let ptr = self.config_space.borrow_mut().as_mut_ptr() as *mut T;
+            Ok(NonNull::new_unchecked(ptr))
         }
-    }
-
-    fn write_config_space<T: IntoBytes + Immutable>(
-        &mut self,
-        offset: usize,
-        value: T,
-    ) -> Result<()> {
-        let bytes = value.as_bytes();
-        let mut config = self.config_space.borrow_mut();
-        if offset
-            .checked_add(bytes.len())
-            .is_none_or(|end| end > config.len())
-        {
-            return Err(Error::ConfigSpaceTooSmall);
-        }
-
-        config[offset..offset + bytes.len()].copy_from_slice(bytes);
-        Ok(())
     }
 }
