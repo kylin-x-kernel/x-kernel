@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 磁盘节点模块
 //!
 //! 定义了 ext4 文件系统的 inode 结构和相关操作。

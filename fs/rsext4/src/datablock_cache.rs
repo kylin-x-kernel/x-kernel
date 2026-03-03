@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! 数据块缓存模块
 //!
 //! 提供文件和目录数据块的缓存管理，支持延迟写回和LRU淘汰

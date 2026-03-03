@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use crate::define_pmu_register;
 // define_pmu_register!(pmccfiltr_el0, PMCCFILTR_EL0, "PMCCFILTR_EL0");
 define_pmu_register!(pmccntr_el0, PMCCNTR_EL0, "PMCCNTR_EL0");

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 超级块实现模块
 //!
 //! 定义了 ext4 文件系统的超级块结构，包含文件系统的基本元数据和参数。

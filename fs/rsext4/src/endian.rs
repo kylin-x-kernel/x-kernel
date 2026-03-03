@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 字节序转换辅助模块
 //!
 //! Ext4 磁盘格式使用小端序（Little Endian）

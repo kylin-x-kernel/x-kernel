@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 目录操作模块
 //!
 //! 提供对 ext4 文件系统中目录的创建、删除、遍历等操作功能。

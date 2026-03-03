@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 块设备实现
 //!
 //! 定义了块设备的抽象接口和实现，为文件系统提供底层存储支持

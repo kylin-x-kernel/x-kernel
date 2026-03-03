@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # ext4_backend
 //!
 //! ext4 文件系统的核心实现模块，提供对 ext4 文件系统的底层操作支持。

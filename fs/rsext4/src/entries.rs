@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 目录条目模块
 //!
 //! 定义了 ext4 文件系统中目录条目的数据结构和操作。

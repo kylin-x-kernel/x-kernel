@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # ext4 API
 //!
 //! 提供 ext4 文件系统的高级 API 接口，包括文件系统挂载、文件操作等功能。

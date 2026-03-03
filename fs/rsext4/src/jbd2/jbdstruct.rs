@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # JBD2 数据结构定义
 //!
 //! 定义了 JBD2 日志系统使用的各种数据结构。

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! Slab allocator for `no_std` systems. It uses multiple slabs with blocks of
 //! different sizes and a [buddy_system_allocator] for blocks larger than 4096
 //! bytes.

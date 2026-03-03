@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # JBD2 日志系统实现
 //!
 //! 实现了 ext4 文件系统的日志功能，确保事务的原子性和一致性。

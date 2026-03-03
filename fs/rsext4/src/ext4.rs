@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # Ext4 文件系统主调用入口
 //!
 //! 提供 ext4 文件系统的核心实现，包括文件系统挂载、卸载、文件操作等高层接口。

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 配置常量定义
 //!
 //! 定义了 ext4 文件系统实现中使用的各种配置常量，包括块大小、

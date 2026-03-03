@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! This module offers a convenient way to enable only a subset of logging levels
 //! for just this `fatfs` crate only without changing the logging levels
 //! of other crates in a given project.

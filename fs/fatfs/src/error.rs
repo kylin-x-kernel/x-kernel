@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 /// Error enum with all errors that can be returned by functions from this crate
 ///
 /// Generic parameter `T` is a type of external error returned by the user provided storage

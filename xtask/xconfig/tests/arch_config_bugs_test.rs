@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 /// Tests for Bug 1: ARCH config value is incorrect when loading defconfig with ARCH_X86_64=y
 /// Tests for Bug 2: Cross-architecture configuration pollution from defconfig
 use std::fs;

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 文件操作模块
 //!
 //! 提供对 ext4 文件系统中文件的读写、创建、删除等操作功能。

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 错误处理模块
 //!
 //! 定义了 rsext4 库中使用的所有错误类型，提供清晰的错误信息以便调试和处理

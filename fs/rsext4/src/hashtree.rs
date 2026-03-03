@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 //! # 目录条目 HashTree 实现
 //!
 //! 提供基于哈希树的目录查找功能，替代线性搜索以提高大型目录的性能

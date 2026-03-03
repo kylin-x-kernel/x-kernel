@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 #[test]
 fn test_elf_parser() {
     let elf_bytes = include_bytes!("ld-linux-x86-64.so.2");
