@@ -93,7 +93,7 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     let salt = "Hygon CSV Sealing Key";
     Hkdf::hkdf(MdType::SM3, &salt.as_bytes(), sealing_key, &[], huk_key)
         .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
+    // warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
     Ok(())
 }
 
