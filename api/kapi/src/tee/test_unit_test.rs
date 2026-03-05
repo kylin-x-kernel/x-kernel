@@ -15,14 +15,14 @@ use crate::tee::arch::x86_64::hygon_csv::tests_hygon_csv_get_sealing_key::TEST_H
 use crate::tee::{
     bitstring::tests_bitstring::TEST_BITSTRING, common::file_ops::tests_file_ops::TEST_FILE_OPS,
     crypto::crypto_impl::tests_tee_crypto_impl::TEST_TEE_CRYPTO_IMPL,
-    crypto_temp::aes_ecb::tests_aes_ecb::TEST_TEE_AES_ECB,
     fs_dirfile::tests_tee_fs_dirfile::TEST_TEE_FS_DIRFILE, fs_htree::tests_fs_htree::TEST_FS_HTREE,
     fs_htree_tests::tests_fs_htree_tests::TEST_FS_HTREE_TESTS,
     huk_subkey::tests_huk_subkey::TEST_HUK_SUBKEY_DERIVE,
     libmbedtls::bignum::tests_tee_bignum::TEST_TEE_BIGNUM,
-    rng_software::tests_rng_software::TEST_RNG_SOFTWARE, tee_misc::tests_tee_misc::TEST_TEE_MISC,
-    tee_obj::tests_tee_obj::TEST_TEE_OBJ, tee_pobj::tests_tee_pobj::TEST_TEE_POBJ,
-    tee_ree_fs::tests_tee_ree_fs::TEST_TEE_REE_FS,
+    rng_software::tests_rng_software::TEST_RNG_SOFTWARE,
+    tee_fs_key_manager::tests_tee_fs_key_manager::TEST_TEE_FS_KEY_MANAGER,
+    tee_misc::tests_tee_misc::TEST_TEE_MISC, tee_obj::tests_tee_obj::TEST_TEE_OBJ,
+    tee_pobj::tests_tee_pobj::TEST_TEE_POBJ, tee_ree_fs::tests_tee_ree_fs::TEST_TEE_REE_FS,
     tee_session::tests_tee_session::TEST_TEE_SESSION,
     tee_svc_cryp::tests_tee_svc_cryp::TEST_TEE_SVC_CRYP, tee_svc_cryp2::tests_cryp::TEST_TEE_CRYP,
     tee_svc_storage::tests_tee_svc_storage::TEST_TEE_SVC_STORAGE,
@@ -55,8 +55,8 @@ pub fn tee_unit_test() {
             TEST_FS_HTREE_TESTS,
             TEST_RNG_SOFTWARE,
             TEST_TEE_CRYPTO_IMPL,
-            TEST_TEE_AES_ECB,
             TEST_TEE_CRYP,
+            TEST_TEE_FS_KEY_MANAGER,
         ]
     );
     #[cfg(all(target_arch = "x86_64", feature = "x86_csv", feature = "tee_test"))]

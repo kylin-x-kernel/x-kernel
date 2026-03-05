@@ -1078,7 +1078,7 @@ pub fn syscall_authenc_init(
     _arg5: usize,
 ) -> TeeResult {
     let nonce_ptr = arg1 as *const u8;
-    let nonce_len = arg2 as usize;
+    let nonce_len = arg2;
 
     let nonce_slice = unsafe { core::slice::from_raw_parts(nonce_ptr, nonce_len) };
     let nonce = bb_memdup_user(nonce_slice)?;
@@ -1107,7 +1107,7 @@ pub fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
 
 pub fn syscall_authenc_update_aad(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     let aad_ptr = arg1 as *const u8;
-    let aad_len = arg2 as usize;
+    let aad_len = arg2;
 
     let aad_slice = unsafe { core::slice::from_raw_parts(aad_ptr, aad_len) };
     let aad = bb_memdup_user(aad_slice)?;
@@ -1164,7 +1164,7 @@ pub fn syscall_authenc_enc_final(
     arg6: usize,
 ) -> TeeResult {
     let src_ptr = arg1 as *const u8;
-    let src_len = arg2 as usize;
+    let src_len = arg2;
 
     // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let dst_ptr = arg3 as *mut u8;
@@ -1244,7 +1244,7 @@ pub fn syscall_authenc_dec_final(
     arg6: usize,
 ) -> TeeResult {
     let src_ptr = arg1 as *const u8;
-    let src_len = arg2 as usize;
+    let src_len = arg2;
 
     // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let dst_ptr = arg3 as *mut u8;
@@ -1267,7 +1267,7 @@ pub fn syscall_authenc_dec_final(
     let mut dst = bb_memdup_user(dst_slice)?;
 
     let tag_ptr = arg5 as *const u8;
-    let mut tag_len = arg6 as usize;
+    let mut tag_len = arg6;
 
     if tag_ptr.is_null() || tag_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -1380,7 +1380,7 @@ pub fn syscall_asymm_operate(
     arg6: usize,
 ) -> TeeResult {
     let src_ptr = arg3 as *const u8;
-    let src_len = arg4 as usize;
+    let src_len = arg4;
 
     // 输入的dst_len长度应该为缓冲区长度，最后函数返回值为实际长度
     let dst_ptr = arg5 as *mut u8;
@@ -1460,10 +1460,10 @@ pub fn syscall_asymm_verify(
     arg6: usize,
 ) -> TeeResult {
     let data_ptr = arg3 as *const u8;
-    let data_len = arg4 as usize;
+    let data_len = arg4;
 
     let sig_ptr = arg5 as *mut u8;
-    let mut sig_len = arg6 as usize;
+    let mut sig_len = arg6;
 
     let data = if data_ptr.is_null() || data_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -1478,7 +1478,7 @@ pub fn syscall_asymm_verify(
     let sig_slice = unsafe { core::slice::from_raw_parts_mut(sig_ptr, sig_len) };
     let mut sig = bb_memdup_user(sig_slice)?;
 
-    tee_cryp_asymm_verify(arg0 as _, &data, &mut sig)?;
+    tee_cryp_asymm_verify(arg0 as _, &data, &sig)?;
 
     // Copy to user
     unsafe { copy_to_user(sig_slice, &sig, sig_len * size_of::<u8>())? };

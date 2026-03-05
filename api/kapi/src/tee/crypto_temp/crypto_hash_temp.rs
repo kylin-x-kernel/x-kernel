@@ -12,11 +12,7 @@ use tee_raw_sys::{
     TEE_ERROR_NOT_IMPLEMENTED, TEE_OperationMode,
 };
 
-use crate::tee::{
-    TeeResult,
-    crypto_temp::{aes_ecb::MbedAesEcbCtx, sm4_ecb::MbedSm4EcbCtx},
-    utee_defines::TeeAlg,
-};
+use crate::tee::{TeeResult, utee_defines::TeeAlg};
 
 pub trait HashOps {
     fn init(&mut self, key: &[u8]) -> TeeResult;
@@ -130,26 +126,6 @@ pub fn crypto_mac_alloc_ctx(algorithm: TeeAlg) -> Result<Box<dyn HashOps>, TeeRe
         _ => Err(Err(TEE_ERROR_BAD_PARAMETERS)),
     }
 }
-
-pub trait CryptoCipherOps {
-    fn init(
-        &mut self,
-        mode: TEE_OperationMode,
-        key1: Option<&[u8]>,
-        key2: Option<&[u8]>,
-        iv: Option<&[u8]>,
-    ) -> TeeResult;
-    fn update(
-        &mut self,
-        last_block: bool,
-        data: Option<&[u8]>,
-        dst: Option<&mut [u8]>,
-    ) -> TeeResult;
-    fn finalize(&mut self);
-    fn free_ctx(&mut self);
-    fn copy_state(&self, dst_ctx: &mut MbedAesEcbCtx);
-}
-
 pub trait CryptoCipherCtx {
     type Context;
 
@@ -189,20 +165,6 @@ pub fn tee_alg_to_hmac_type(value: TeeAlg) -> TeeResult<Type> {
         TEE_ALG_HMAC_SHA512 => Ok(Type::Sha512),
         TEE_ALG_HMAC_SM3 => Ok(Type::SM3),
         _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
-    }
-}
-
-pub fn crypto_cipher_alloc_ctx(algo: TeeAlg) -> Result<Box<dyn CryptoCipherOps>, TeeResult> {
-    match algo {
-        TEE_ALG_AES_ECB_NOPAD => {
-            let ctx: MbedAesEcbCtx = *MbedAesEcbCtx::alloc_cipher_ctx()?;
-            Ok(Box::new(ctx))
-        }
-        TEE_ALG_SM4_ECB_NOPAD => {
-            let ctx: MbedSm4EcbCtx = *MbedSm4EcbCtx::alloc_cipher_ctx()?;
-            Ok(Box::new(ctx))
-        }
-        _ => Err(Err(TEE_ERROR_NOT_IMPLEMENTED)),
     }
 }
 
