@@ -18,4 +18,5 @@ default = []
 [dependencies]
 cfg-if = { workspace = true }
 crate_interface = {workspace = true}
+karch = { workspace = true }
 unittest.workspace = true

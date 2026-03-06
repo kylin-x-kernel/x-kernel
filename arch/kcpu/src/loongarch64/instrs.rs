@@ -4,95 +4,23 @@
 
 //! Wrapper functions for assembly instructions.
 
-use core::arch::asm;
-
-use loongArch64::register::{ecfg, eentry, pgdh, pgdl};
-use memaddr::PhysAddr;
-
 pub use karch::{
     await_interrupts, enable_fp, enable_lsx, flush_tlb, read_thread_pointer, stop_cpu,
     write_thread_pointer,
 };
 // Re-exported with legacy names for backward compatibility.
-pub use karch::{disable_irq as disable_local, enable_irq as enable_local, irq_enabled as is_enabled};
+pub use karch::{disable_local_irq as disable_local, enable_local_irq as enable_local, local_irq_enabled as is_enabled};
 
-/// Reads the current page table root register for user space (`PGDL`).
-///
-/// Returns the physical address of the page table root.
-#[inline]
-pub fn read_user_page_table() -> PhysAddr {
-    PhysAddr::from(pgdl::read().base())
-}
+pub use karch::{
+    read_kernel_page_table, read_user_page_table, restore_irq, save_irq_and_disable,
+    write_kernel_page_table, write_pwc, write_trap_vector_base, write_user_page_table,
+};
 
-/// Reads the current page table root register for kernel space (`PGDH`).
-///
-/// Returns the physical address of the page table root.
-#[inline]
-pub fn read_kernel_page_table() -> PhysAddr {
-    PhysAddr::from(pgdh::read().base())
-}
-
-/// Writes the register to update the current page table root for user space
-/// (`PGDL`).
-///
-/// Note that the TLB is **NOT** flushed after this operation.
-///
-/// # Safety
-///
-/// This function is unsafe as it changes the virtual memory address space.
-pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
-    pgdl::set_base(root_paddr.as_usize() as _);
-}
-
-/// Writes the register to update the current page table root for kernel space
-/// (`PGDH`).
-///
-/// Note that the TLB is **NOT** flushed after this operation.
-///
-/// # Safety
-///
-/// This function is unsafe as it changes the virtual memory address space.
-pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
-    pgdh::set_base(root_paddr.as_usize());
-}
-
-/// Writes the Exception Entry Base Address register (`EENTRY`).
-///
-/// It also set the Exception Configuration register (`ECFG`) to `VS=0`.
-///
-/// - ECFG: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#exception-configuration>
-/// - EENTRY: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#exception-entry-base-address>
-///
-/// # Safety
-///
-/// This function is unsafe as it changes the exception handling behavior of the
-/// current CPU.
+/// Deprecated: use [`write_trap_vector_base`] instead.
+#[deprecated(note = "Use `write_trap_vector_base` instead")]
 #[inline]
 pub unsafe fn write_exception_entry_base(eentry: usize) {
-    ecfg::set_vs(0);
-    eentry::set_eentry(eentry);
-}
-
-/// Writes the Page Walk Controller registers (`PWCL` and `PWCH`).
-///
-/// # Safety
-///
-/// This function is unsafe as it changes the page walk configuration such as
-/// levels and starting bits.
-///
-/// - `PWCL`: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-lower-half-address-space>
-/// - `PWCH`: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-higher-half-address-space>
-#[inline]
-pub unsafe fn write_pwc(pwcl: u32, pwch: u32) {
-    unsafe {
-        asm!(
-            include_asm_macros!(),
-            "csrwr {}, LA_CSR_PWCL",
-            "csrwr {}, LA_CSR_PWCH",
-            in(reg) pwcl,
-            in(reg) pwch
-        )
-    }
+    unsafe { write_trap_vector_base(eentry) }
 }
 
 #[cfg(feature = "uspace")]

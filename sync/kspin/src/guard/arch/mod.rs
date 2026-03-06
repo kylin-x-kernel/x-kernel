@@ -3,23 +3,19 @@
 // See LICENSES for license details.
 
 //! Architecture-specific IRQ save/restore helpers.
-#![cfg_attr(not(target_os = "none"), allow(dead_code, unused_imports))]
+//!
+//! Delegates to [`karch`] for a unified implementation across all supported
+//! architectures.
+#![cfg_attr(not(target_os = "none"), allow(dead_code))]
 
-cfg_if::cfg_if! {
-    if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
-        mod x86;
-        pub use self::x86::*;
-    } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
-        mod riscv;
-        pub use self::riscv::*;
-    } else if #[cfg(target_arch = "aarch64")] {
-        mod aarch64;
-        pub use self::aarch64::*;
-    } else if #[cfg(target_arch = "loongarch64")] {
-        mod loongarch64;
-        pub use self::loongarch64::*;
-    } else if #[cfg(target_arch = "arm")] {
-        mod arm;
-        pub use self::arm::*;
-    }
+/// Saves and disables local interrupts, returning the saved state.
+#[inline]
+pub fn save_disable() -> usize {
+    karch::save_irq_and_disable()
+}
+
+/// Restores local interrupt state from the saved flags.
+#[inline]
+pub fn restore(flags: usize) {
+    karch::restore_irq(flags)
 }

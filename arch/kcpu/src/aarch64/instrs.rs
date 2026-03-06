@@ -4,7 +4,6 @@
 
 //! Wrapper functions for assembly instructions.
 
-use aarch64_cpu::registers::*;
 use memaddr::PhysAddr;
 
 pub use karch::{
@@ -12,96 +11,32 @@ pub use karch::{
     read_thread_pointer, stop_cpu, write_thread_pointer,
 };
 // Re-exported with legacy names for backward compatibility.
-pub use karch::{disable_irq as disable_local, enable_irq as enable_local, irq_enabled as is_enabled};
+pub use karch::{disable_local_irq as disable_local, enable_local_irq as enable_local, local_irq_enabled as is_enabled};
 
-/// Reads the current page table root register for kernel space (`TTBR1_EL1`).
-///
-/// When the "arm-el2" feature is enabled,
-/// TTBR0_EL2 is dedicated to the Hypervisor's Stage-2 page table base address.
-///
-/// Returns the physical address of the page table root.
+pub use karch::{
+    read_kernel_page_table, read_user_page_table, save_irq_and_disable, restore_irq,
+    write_kernel_page_table, write_user_page_table, write_trap_vector_base,
+};
+
+/// Deprecated: use [`read_kernel_page_table`] instead.
+#[deprecated(note = "Use `read_kernel_page_table` instead")]
 #[inline]
 pub fn kernel_pt_root() -> PhysAddr {
-    let pt_root_reg: usize;
-
-    #[cfg(not(feature = "arm-el2"))]
-    {
-        pt_root_reg = TTBR1_EL1.get() as usize;
-    }
-
-    #[cfg(feature = "arm-el2")]
-    {
-        pt_root_reg = TTBR0_EL2.get() as usize;
-    }
-
-    pa!(pt_root_reg)
+    read_kernel_page_table()
 }
 
-/// Reads the current page table root register for user space (`TTBR0_EL1`).
-///
-/// When the "arm-el2" feature is enabled, for user-mode programs,
-/// virtualization is completely transparent to them, so there is no need to modify
-///
-/// Returns the physical address of the page table root.
+/// Deprecated: use [`read_user_page_table`] instead.
+#[deprecated(note = "Use `read_user_page_table` instead")]
 #[inline]
 pub fn user_pt_root() -> PhysAddr {
-    let val = TTBR0_EL1.get();
-    pa!(val as usize)
+    read_user_page_table()
 }
 
-/// Writes the register to update the current page table root for kernel space
-/// (`TTBR1_EL1`).
-///
-/// When the "arm-el2" feature is enabled,
-/// TTBR0_EL2 is dedicated to the Hypervisor's Stage-2 page table base address.
-///
-/// Note that the TLB is **NOT** flushed after this operation.
-///
-/// # Safety
-///
-/// This function is unsafe as it changes the virtual memory address space.
-#[inline]
-pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
-    #[cfg(not(feature = "arm-el2"))]
-    {
-        // kernel space page table use TTBR1 (0xffff_0000_0000_0000..0xffff_ffff_ffff_ffff)
-        TTBR1_EL1.set(root_paddr.as_usize() as _);
-    }
-
-    #[cfg(feature = "arm-el2")]
-    {
-        // kernel space page table at EL2 use TTBR0_EL2 (0x0000_0000_0000_0000..0x0000_ffff_ffff_ffff)
-        TTBR0_EL2.set(root_paddr.as_usize() as _);
-    }
-}
-
-/// Writes the register to update the current page table root for user space
-/// (`TTBR1_EL0`).
-/// When the "arm-el2" feature is enabled, for user-mode programs,
-/// virtualization is completely transparent to them, so there is no need to modify
-///
-/// Note that the TLB is **NOT** flushed after this operation.
-///
-/// # Safety
-///
-/// This function is unsafe as it changes the virtual memory address space.
-#[inline]
-pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
-    TTBR0_EL1.set(root_paddr.as_usize() as _);
-}
-
-/// Writes exception vector base address register (`VBAR_EL1`).
-///
-/// # Safety
-///
-/// This function is unsafe as it changes the exception handling behavior of the
-/// current CPU.
+/// Deprecated: use [`write_trap_vector_base`] instead.
+#[deprecated(note = "Use `write_trap_vector_base` instead")]
 #[inline]
 pub unsafe fn write_exception_vector_base(vbar: usize) {
-    #[cfg(not(feature = "arm-el2"))]
-    VBAR_EL1.set(vbar as _);
-    #[cfg(feature = "arm-el2")]
-    VBAR_EL2.set(vbar as _);
+    unsafe { write_trap_vector_base(vbar) }
 }
 
 #[cfg(feature = "uspace")]

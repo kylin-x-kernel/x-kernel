@@ -111,7 +111,7 @@ pub fn init_trap() {
         fn exception_vector_base();
     }
     unsafe {
-        crate::instrs::write_exception_vector_base(exception_vector_base as *const () as usize);
+        crate::instrs::write_trap_vector_base(exception_vector_base as *const () as usize);
         crate::instrs::write_user_page_table(0.into());
     }
 }

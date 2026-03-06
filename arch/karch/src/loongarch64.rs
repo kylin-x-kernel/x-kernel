@@ -6,8 +6,8 @@
 
 use core::arch::asm;
 
-use loongArch64::register::crmd;
-use memaddr::VirtAddr;
+use loongArch64::register::{crmd, ecfg, eentry, pgdh, pgdl};
+use memaddr::{PhysAddr, VirtAddr};
 
 /// Flushes the TLB.
 ///
@@ -44,7 +44,7 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
 /// Halt the current CPU.
 #[inline]
 pub fn stop_cpu() {
-    disable_irq();
+    disable_local_irq();
     unsafe { loongArch64::asm::idle() }
 }
 
@@ -58,20 +58,65 @@ pub fn await_interrupts() {
 
 /// Allows the current CPU to respond to interrupts.
 #[inline]
-pub fn enable_irq() {
+pub fn enable_local_irq() {
     crmd::set_ie(true)
 }
 
 /// Makes the current CPU ignore interrupts.
 #[inline]
-pub fn disable_irq() {
+pub fn disable_local_irq() {
     crmd::set_ie(false)
 }
 
 /// Returns whether the current CPU is allowed to respond to interrupts.
 #[inline]
-pub fn irq_enabled() -> bool {
+pub fn local_irq_enabled() -> bool {
     crmd::read().ie()
+}
+
+/// Deprecated: use [`enable_local_irq`] instead.
+#[deprecated(note = "Use `enable_local_irq` instead")]
+#[inline]
+pub fn enable_irq() {
+    enable_local_irq()
+}
+
+/// Deprecated: use [`disable_local_irq`] instead.
+#[deprecated(note = "Use `disable_local_irq` instead")]
+#[inline]
+pub fn disable_irq() {
+    disable_local_irq()
+}
+
+/// Deprecated: use [`local_irq_enabled`] instead.
+#[deprecated(note = "Use `local_irq_enabled` instead")]
+#[inline]
+pub fn irq_enabled() -> bool {
+    local_irq_enabled()
+}
+
+/// Saves the current local interrupt state and disables interrupts atomically.
+///
+/// Returns the saved CRMD value with the IE bit. Pass it to [`restore_irq`]
+/// to restore the previous interrupt state.
+#[inline]
+pub fn save_irq_and_disable() -> usize {
+    /// Interrupt Enable bit mask in CRMD.
+    const IE_MASK: usize = 1 << 2;
+    let mut flags: usize = 0;
+    // csrxchg atomically reads CRMD and clears the IE bit
+    unsafe { asm!("csrxchg {}, {}, 0x0", inout(reg) flags, in(reg) IE_MASK) };
+    flags & IE_MASK
+}
+
+/// Restores local interrupt state from a value previously returned by
+/// [`save_irq_and_disable`].
+#[inline]
+pub fn restore_irq(flags: usize) {
+    /// Interrupt Enable bit mask in CRMD.
+    const IE_MASK: usize = 1 << 2;
+    // csrxchg atomically restores the IE bit
+    unsafe { asm!("csrxchg {}, {}, 0x0", in(reg) flags, in(reg) IE_MASK) };
 }
 
 /// Reads the thread pointer of the current CPU (`$tp`).
@@ -110,4 +155,88 @@ pub fn enable_fp() {
 #[inline]
 pub fn enable_lsx() {
     loongArch64::register::euen::set_sxe(true);
+}
+
+/// Reads the current page table root register for user space (`PGDL`).
+///
+/// Returns the physical address of the page table root.
+#[inline]
+pub fn read_user_page_table() -> PhysAddr {
+    PhysAddr::from(pgdl::read().base())
+}
+
+/// Reads the current page table root register for kernel space (`PGDH`).
+///
+/// Returns the physical address of the page table root.
+#[inline]
+pub fn read_kernel_page_table() -> PhysAddr {
+    PhysAddr::from(pgdh::read().base())
+}
+
+/// Writes the register to update the current page table root for user space
+/// (`PGDL`).
+///
+/// Note that the TLB is **NOT** flushed after this operation.
+///
+/// # Safety
+///
+/// This function is unsafe as it changes the virtual memory address space.
+#[inline]
+pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
+    pgdl::set_base(root_paddr.as_usize() as _);
+}
+
+/// Writes the register to update the current page table root for kernel space
+/// (`PGDH`).
+///
+/// Note that the TLB is **NOT** flushed after this operation.
+///
+/// # Safety
+///
+/// This function is unsafe as it changes the virtual memory address space.
+#[inline]
+pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
+    pgdh::set_base(root_paddr.as_usize());
+}
+
+/// Writes the Exception Entry Base Address register (`EENTRY`).
+///
+/// It also sets the Exception Configuration register (`ECFG`) to `VS=0`.
+///
+/// - ECFG: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#exception-configuration>
+/// - EENTRY: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#exception-entry-base-address>
+///
+/// # Safety
+///
+/// This function is unsafe as it changes the exception handling behavior of the
+/// current CPU.
+#[inline]
+pub unsafe fn write_trap_vector_base(addr: usize) {
+    ecfg::set_vs(0);
+    eentry::set_eentry(addr);
+}
+
+/// Writes the Page Walk Controller registers (`PWCL` and `PWCH`).
+///
+/// The CSR numbers are inlined as numeric constants:
+/// - `PWCL` = CSR 0x1c (lower-half page walk controller)
+/// - `PWCH` = CSR 0x1d (higher-half page walk controller)
+///
+/// # Safety
+///
+/// This function is unsafe as it changes the page walk configuration such as
+/// levels and starting bits.
+///
+/// - `PWCL` (CSR 0x1c): <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-lower-half-address-space>
+/// - `PWCH` (CSR 0x1d): <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-higher-half-address-space>
+#[inline]
+pub unsafe fn write_pwc(pwcl: u32, pwch: u32) {
+    unsafe {
+        asm!(
+            "csrwr {}, 0x1c",
+            "csrwr {}, 0x1d",
+            in(reg) pwcl,
+            in(reg) pwch
+        )
+    }
 }

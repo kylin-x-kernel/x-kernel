@@ -51,6 +51,6 @@ pub fn init_trap() {
             fn exception_entry_base();
         }
         core::arch::asm!(include_asm_macros!(), "csrwr $r0, KSAVE_KSP");
-        crate::instrs::write_exception_entry_base(exception_entry_base as usize);
+        crate::instrs::write_trap_vector_base(exception_entry_base as usize);
     }
 }
