@@ -9,8 +9,8 @@ mod cpu;
 mod fp;
 mod irq;
 mod mmu;
-mod tls;
 mod tlb;
+mod tls;
 mod trap;
 
 pub use cache::{flush_dcache_line, flush_icache_all};
@@ -24,6 +24,6 @@ pub use irq::{
 pub use mmu::{
     read_kernel_page_table, read_user_page_table, write_kernel_page_table, write_user_page_table,
 };
-pub use tls::{read_thread_pointer, write_thread_pointer};
 pub use tlb::flush_tlb;
+pub use tls::{read_thread_pointer, write_thread_pointer};
 pub use trap::write_trap_vector_base;

@@ -20,4 +20,3 @@ unsafe extern "C" {
     /// while a value > 0 indicates failure.
     pub fn user_copy(dst: *mut u8, src: *const u8, size: usize) -> usize;
 }
-

@@ -7,7 +7,6 @@
 //! This crate provides a uniform API across all supported architectures for
 //! TLB flush, cache maintenance, CPU halt, interrupt management, thread pointer
 //! access, and FP/SIMD enable operations.
-//!
 #![doc = include_str!("../README.md")]
 #![no_std]
 

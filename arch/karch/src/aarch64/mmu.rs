@@ -4,7 +4,7 @@
 
 //! MMU/page table operations for AArch64.
 
-use aarch64_cpu::registers::{TTBR0_EL1, TTBR1_EL1, Readable, Writeable};
+use aarch64_cpu::registers::{Readable, TTBR0_EL1, TTBR1_EL1, Writeable};
 use memaddr::PhysAddr;
 
 /// Reads the current page table root register for kernel space.

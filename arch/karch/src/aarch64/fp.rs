@@ -4,7 +4,10 @@
 
 //! Floating-point/SIMD operations for AArch64.
 
-use aarch64_cpu::{asm::barrier, registers::{CPACR_EL1, Writeable}};
+use aarch64_cpu::{
+    asm::barrier,
+    registers::{CPACR_EL1, Writeable},
+};
 
 /// Enable FP/SIMD instructions by setting the `FPEN` field in `CPACR_EL1`.
 #[inline]

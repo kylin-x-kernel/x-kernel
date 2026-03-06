@@ -3,9 +3,7 @@
 // See LICENSES for license details.
 
 //! GICv3 initialization and IRQ routing helpers.
-use core::{
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use aarch64_cpu::registers::*;
 use arm_gic::gicv3::*;

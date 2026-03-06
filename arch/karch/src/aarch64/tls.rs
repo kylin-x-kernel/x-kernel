@@ -4,7 +4,7 @@
 
 //! Thread-local storage operations for AArch64.
 
-use aarch64_cpu::registers::{TPIDR_EL0, Readable, Writeable};
+use aarch64_cpu::registers::{Readable, TPIDR_EL0, Writeable};
 
 /// Reads the thread pointer of the current CPU (`TPIDR_EL0`).
 ///

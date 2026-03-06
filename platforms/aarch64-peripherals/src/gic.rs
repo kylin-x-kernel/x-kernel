@@ -8,7 +8,6 @@ use core::arch::asm;
 #[cfg(feature = "pmr")]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-
 #[cfg(all(feature = "gicv2", not(feature = "gicv3")))]
 use arm_gic_driver::v2::*;
 #[cfg(feature = "gicv3")]

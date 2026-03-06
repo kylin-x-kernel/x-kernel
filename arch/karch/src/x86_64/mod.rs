@@ -8,8 +8,8 @@ mod cpu;
 mod hypercall;
 mod irq;
 mod mmu;
-mod tls;
 mod tlb;
+mod tls;
 
 pub use cpu::{await_interrupts, stop_cpu};
 pub use hypercall::hypercall;
@@ -21,5 +21,5 @@ pub use irq::{
 pub use mmu::{
     read_kernel_page_table, read_user_page_table, write_kernel_page_table, write_user_page_table,
 };
-pub use tls::{read_thread_pointer, write_thread_pointer};
 pub use tlb::flush_tlb;
+pub use tls::{read_thread_pointer, write_thread_pointer};
