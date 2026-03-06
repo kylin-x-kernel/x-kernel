@@ -7,8 +7,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET};
 use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
+use ktypes::Once;
 use rs_fdtree::LinuxFdt;
-use spin::Once;
 
 const FDT_MEM_SIZE: usize = 0x20_0000;
 static FDT_MEM_BASE: AtomicUsize = AtomicUsize::new(0);

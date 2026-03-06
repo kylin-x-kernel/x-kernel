@@ -4,7 +4,7 @@
 
 //! PSCI wrappers and KVM guard-granule helpers.
 use kplat::psci::PsciOp;
-use spin::Once;
+use ktypes::Once;
 
 use crate::serial::{boot_print_str, boot_print_usize};
 pub static GUARD_GRANULE: Once<usize> = Once::new();

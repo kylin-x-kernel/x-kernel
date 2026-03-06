@@ -24,10 +24,10 @@ kplat = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv3"] }
 aarch64-cpu = "10.0"
 rs_fdtree = { workspace = true }
-spin = "0.9"
 lazyinit = "0.2"
 arm-gic.workspace = true
 kbuild_config = { workspace = true }
+ktypes = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

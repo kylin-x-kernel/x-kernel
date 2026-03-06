@@ -4,8 +4,6 @@
 
 //! Wrapper functions for assembly instructions.
 
-use memaddr::PhysAddr;
-
 #[cfg(feature = "uspace")]
 core::arch::global_asm!(include_str!("copy_user.S"));
 

@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::ptr::NonNull;
 
-use spin::Mutex;
+use ksync::Mutex;
 
 use crate::{DriverError, DriverResult};
 

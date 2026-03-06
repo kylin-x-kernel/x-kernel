@@ -4,9 +4,9 @@
 
 //! Device tree parsing helpers for the platform.
 use kplat::memory::{VirtAddr, p2v, pa};
+use ktypes::Once;
 use log::*;
 use rs_fdtree::{InterruptController, LinuxFdt};
-use spin::Once;
 pub static FDT: Once<LinuxFdt> = Once::new();
 /// Parse and cache the FDT pointed to by the bootloader.
 pub(crate) fn init_fdt(fdt_paddr: VirtAddr) {
