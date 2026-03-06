@@ -16,6 +16,6 @@ pub fn init_trap() {
     unsafe {
         #[cfg(feature = "uspace")]
         riscv::register::sstatus::set_sum();
-        crate::instrs::write_trap_vector_base(trap_vector_base as *const () as usize);
+        karch::write_trap_vector_base(trap_vector_base as *const () as usize);
     }
 }

@@ -85,7 +85,7 @@ impl UserContext {
             unsafe fn enter_user(uctx: &mut UserContext) -> ArchTrap;
         }
 
-        crate::instrs::disable_local(); // updated module reference from asm -> instrs
+        karch::disable_local_irq(); // updated module reference from asm -> instrs
         let trap_kind = unsafe { enter_user(self) };
 
         let ret = match trap_kind {
@@ -125,7 +125,7 @@ impl UserContext {
             }
         };
 
-        crate::instrs::enable_local();
+        karch::enable_local_irq();
         ret
     }
 }

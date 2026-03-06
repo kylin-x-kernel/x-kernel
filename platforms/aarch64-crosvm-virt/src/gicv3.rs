@@ -4,7 +4,6 @@
 
 //! GICv3 initialization and IRQ routing helpers.
 use core::{
-    arch::asm,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -228,29 +227,6 @@ pub fn dispatch_irq_irq(_unused: usize) -> Option<usize> {
     }
     Some(irq)
 }
-#[inline]
-pub fn enable_local() {
-    unsafe { asm!("msr daifclr, #2") };
-}
-#[inline]
-pub fn disable_local() {
-    unsafe { asm!("msr daifset, #2") };
-}
-#[inline]
-pub fn is_enabled() -> bool {
-    !DAIF.matches_all(DAIF::I::Masked)
-}
-#[inline]
-pub fn save_disable() -> usize {
-    let flags: usize;
-    unsafe { asm!("mrs {}, daif", out(reg) flags) };
-    disable_local();
-    flags
-}
-#[inline]
-pub fn restore(flags: usize) {
-    unsafe { asm!("msr daif, {}", in(reg) flags) };
-}
 #[macro_export]
 macro_rules! irq_if_impl {
     ($name:ident) => {
@@ -279,26 +255,6 @@ macro_rules! irq_if_impl {
 
             fn set_prio(_irq: usize, _priority: u8) {
                 todo!()
-            }
-
-            fn save_disable() -> usize {
-                $crate::gicv3::save_disable()
-            }
-
-            fn restore(flag: usize) {
-                $crate::gicv3::restore(flag);
-            }
-
-            fn enable_local() {
-                $crate::gicv3::enable_local();
-            }
-
-            fn disable_local() {
-                $crate::gicv3::disable_local();
-            }
-
-            fn is_enabled() -> bool {
-                $crate::gicv3::is_enabled()
             }
         }
     };

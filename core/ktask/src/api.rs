@@ -67,14 +67,6 @@ impl kspin::KernelGuardIf for KernelGuardIfImpl {
             curr.enable_preempt(true);
         }
     }
-
-    fn save_disable() -> usize {
-        khal::irq::save_disable()
-    }
-
-    fn restore(flags: usize) {
-        khal::irq::restore(flags);
-    }
 }
 
 /// Gets the current task, or returns [`None`] if the current task is not
@@ -242,7 +234,7 @@ pub fn run_idle() -> ! {
     loop {
         yield_now();
         trace!("idle task: waiting for IRQs...");
-        khal::asm::await_interrupts();
+        karch::await_interrupts();
     }
 }
 

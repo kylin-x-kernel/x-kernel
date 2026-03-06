@@ -35,16 +35,4 @@ pub trait IntrManager {
     fn notify_cpu(id: usize, target: TargetCpu);
     /// Sets the priority for the given interrupt.
     fn set_prio(id: usize, prio: u8);
-
-    /// Saves and disables local interrupt state.
-    fn save_disable() -> usize;
-    /// Restores local interrupt state saved by `save_disable`.
-    fn restore(flags: usize);
-
-    /// Enables local interrupts on the current CPU.
-    fn enable_local();
-    /// Disables local interrupts on the current CPU.
-    fn disable_local();
-    /// Returns whether local interrupts are enabled.
-    fn is_enabled() -> bool;
 }

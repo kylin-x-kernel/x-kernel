@@ -18,7 +18,6 @@ use x86_64::{
 
 use super::{
     TrapFrame,
-    asm::{read_thread_pointer, write_thread_pointer},
     excp::{IRQ_VECTOR_END, IRQ_VECTOR_START, LEGACY_SYSCALL_VECTOR, err_code_to_flags},
     gdt,
 };
@@ -79,17 +78,17 @@ impl UserContext {
         assert_eq!(self.cs, gdt::UCODE64.0 as _);
         assert_eq!(self.ss, gdt::UDATA.0 as _);
 
-        crate::instrs::disable_local();
+        karch::disable_local_irq();
 
-        let kernel_fs_base = read_thread_pointer();
-        unsafe { write_thread_pointer(self.fs_base as _) };
+        let kernel_fs_base = karch::read_thread_pointer();
+        unsafe { karch::write_thread_pointer(self.fs_base as _) };
         KernelGsBase::write(x86_64::VirtAddr::new_truncate(self.gs_base));
 
         unsafe { enter_user(self) };
 
         self.gs_base = KernelGsBase::read().as_u64();
-        self.fs_base = read_thread_pointer() as _;
-        unsafe { write_thread_pointer(kernel_fs_base) };
+        self.fs_base = karch::read_thread_pointer() as _;
+        unsafe { karch::write_thread_pointer(kernel_fs_base) };
 
         let cr2 = Cr2::read().unwrap().as_u64() as usize;
         let vector = self.vector as u8;
@@ -112,7 +111,7 @@ impl UserContext {
             }),
         };
 
-        crate::instrs::enable_local();
+        karch::enable_local_irq();
         ret
     }
 }

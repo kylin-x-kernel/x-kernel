@@ -114,24 +114,4 @@ impl IntrManager for IntrManagerImpl {
     fn set_prio(irq: usize, priority: u8) {
         todo!()
     }
-
-    fn save_disable() -> usize {
-        todo!()
-    }
-
-    fn restore(flag: usize) {
-        todo!()
-    }
-
-    fn enable_local() {
-        todo!()
-    }
-
-    fn disable_local() {
-        todo!()
-    }
-
-    fn is_enabled() -> bool {
-        todo!()
-    }
 }

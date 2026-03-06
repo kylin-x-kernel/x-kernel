@@ -91,7 +91,7 @@ pub unsafe fn init_mmu(root_paddr: PhysAddr) {
     TTBR1_EL1.set(root_paddr);
 
     // Flush the entire TLB
-    crate::instrs::flush_tlb(None);
+    karch::flush_tlb(None);
 
     // Enable the MMU and turn on I-cache and D-cache
     SCTLR_EL1.modify(SCTLR_EL1::M::Enable + SCTLR_EL1::C::Cacheable + SCTLR_EL1::I::Cacheable);
@@ -111,7 +111,7 @@ pub fn init_trap() {
         fn exception_vector_base();
     }
     unsafe {
-        crate::instrs::write_trap_vector_base(exception_vector_base as *const () as usize);
-        crate::instrs::write_user_page_table(0.into());
+        karch::write_trap_vector_base(exception_vector_base as *const () as usize);
+        karch::write_user_page_table(0.into());
     }
 }

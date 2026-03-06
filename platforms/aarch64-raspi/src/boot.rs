@@ -39,7 +39,7 @@ unsafe fn init_boot_page_table() {
 }
 unsafe fn enable_fp() {
     #[cfg(feature = "fp-simd")]
-    kcpu::instrs::enable_fp();
+    karch::enable_fp();
 }
 /// Primary CPU entry point from the boot loader.
 #[unsafe(naked)]

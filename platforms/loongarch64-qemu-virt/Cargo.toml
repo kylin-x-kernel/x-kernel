@@ -20,6 +20,7 @@ lazyinit = "0.2"
 log = "0.4"
 
 kcpu = { workspace = true }
+karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 

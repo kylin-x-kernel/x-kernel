@@ -521,7 +521,7 @@ impl RunQueue {
     fn switch_to(&mut self, prev_task: CurrentTask, next_task: KtaskRef) {
         // Make sure that IRQs are disabled by kernel guard or other means.
         assert!(
-            !khal::asm::is_enabled(),
+            !karch::local_irq_enabled(),
             "IRQs must be disabled during scheduling"
         );
         trace!(

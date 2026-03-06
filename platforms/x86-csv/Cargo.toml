@@ -23,6 +23,7 @@ int_ratio = "0.1"
 percpu = { workspace = true }
 heapless = "0.9"
 kcpu = { workspace = true }
+karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 

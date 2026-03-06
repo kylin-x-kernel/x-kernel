@@ -29,6 +29,7 @@ arm-gic-driver = "0.15"
 uart_16550 = "0.4"
 arm_pl031 = "0.2"
 kcpu = { workspace = true }
+karch = { workspace = true }
 kplat = { workspace = true }
 aarch64-pmuv3 = { workspace = true, optional = true }
 percpu = { workspace = true }

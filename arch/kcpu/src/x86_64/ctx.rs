@@ -299,7 +299,7 @@ impl TaskContext {
             rsp: 0,
             fs_base: 0,
             #[cfg(feature = "uspace")]
-            cr3: crate::instrs::read_kernel_page_table(),
+            cr3: karch::read_kernel_page_table(),
             #[cfg(feature = "fp-simd")]
             ext_state: ExtendedState::default(),
         }
@@ -348,13 +348,13 @@ impl TaskContext {
         }
         #[cfg(feature = "tls")]
         unsafe {
-            self.fs_base = crate::instrs::read_thread_pointer();
-            crate::instrs::write_thread_pointer(next_ctx.fs_base);
+            self.fs_base = karch::read_thread_pointer();
+            karch::write_thread_pointer(next_ctx.fs_base);
         }
         #[cfg(feature = "uspace")]
         unsafe {
             if next_ctx.cr3 != self.cr3 {
-                crate::instrs::write_user_page_table(next_ctx.cr3);
+                karch::write_user_page_table(next_ctx.cr3);
                 // writing to CR3 has flushed the TLB
             }
         }

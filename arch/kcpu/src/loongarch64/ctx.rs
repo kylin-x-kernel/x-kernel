@@ -301,14 +301,14 @@ impl TaskContext {
     pub fn switch_to(&mut self, next_ctx: &Self) {
         #[cfg(feature = "tls")]
         {
-            self.tp = crate::instrs::read_thread_pointer();
-            unsafe { crate::instrs::write_thread_pointer(next_ctx.tp) };
+            self.tp = karch::read_thread_pointer();
+            unsafe { karch::write_thread_pointer(next_ctx.tp) };
         }
         #[cfg(feature = "uspace")]
         {
             if self.pgdl != next_ctx.pgdl {
-                unsafe { crate::instrs::write_user_page_table(pa!(next_ctx.pgdl)) };
-                crate::instrs::flush_tlb(None); // currently flush the entire TLB
+                unsafe { karch::write_user_page_table(pa!(next_ctx.pgdl)) };
+                karch::flush_tlb(None); // currently flush the entire TLB
             }
         }
         #[cfg(feature = "fp-simd")]

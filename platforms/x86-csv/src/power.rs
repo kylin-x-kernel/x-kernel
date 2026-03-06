@@ -23,10 +23,10 @@ impl SysCtrl for PowerImpl {
         } else {
             unsafe { PortWriteOnly::new(0x604).write(0x2000u16) };
         }
-        kcpu::instrs::stop_cpu();
+        karch::stop_cpu();
         warn!("It should shutdown!");
         loop {
-            kcpu::instrs::stop_cpu();
+            karch::stop_cpu();
         }
     }
 }

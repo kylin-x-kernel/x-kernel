@@ -54,3 +54,4 @@ kinit_setup.workspace = true
 indoc = "2"
 percpu.workspace = true
 kbuild_config = { workspace = true }
+karch = { workspace = true }

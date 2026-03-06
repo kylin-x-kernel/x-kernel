@@ -30,11 +30,11 @@ pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
 
     // Configure page table walking
     unsafe {
-        crate::instrs::write_pwc(LA64MetaData::PWCL_VALUE, LA64MetaData::PWCH_VALUE);
-        crate::instrs::write_kernel_page_table(root_paddr);
-        crate::instrs::write_user_page_table(pa!(0));
+        karch::write_pwc(LA64MetaData::PWCL_VALUE, LA64MetaData::PWCH_VALUE);
+        karch::write_kernel_page_table(root_paddr);
+        karch::write_user_page_table(pa!(0));
     }
-    crate::instrs::flush_tlb(None);
+    karch::flush_tlb(None);
 
     // Enable mapped address translation mode
     crmd::set_pg(true);
@@ -51,6 +51,6 @@ pub fn init_trap() {
             fn exception_entry_base();
         }
         core::arch::asm!(include_asm_macros!(), "csrwr $r0, KSAVE_KSP");
-        crate::instrs::write_trap_vector_base(exception_entry_base as usize);
+        karch::write_trap_vector_base(exception_entry_base as usize);
     }
 }

@@ -10,7 +10,7 @@ mod idt;
 
 pub mod instrs;
 pub use instrs as asm;
-pub use instrs::hypercall;
+pub use karch::hypercall;
 pub mod boot;
 
 mod excp;

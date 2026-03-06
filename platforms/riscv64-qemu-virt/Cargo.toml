@@ -20,6 +20,7 @@ log = "0.4"
 
 percpu = { workspace = true }
 kcpu = { workspace = true }
+karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 

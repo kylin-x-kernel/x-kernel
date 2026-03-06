@@ -320,5 +320,5 @@ fn init_interrupt() {
     });
 
     // Enable IRQs before starting app
-    khal::asm::enable_local();
+    karch::enable_local_irq();
 }

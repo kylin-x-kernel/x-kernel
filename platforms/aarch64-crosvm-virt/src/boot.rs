@@ -61,7 +61,7 @@ extern "C" fn kernel_main_test() {
 /// Enable FP/SIMD usage if supported by build features.
 unsafe fn enable_fp() {
     #[cfg(feature = "fp-simd")]
-    kcpu::instrs::enable_fp();
+    karch::enable_fp();
 }
 #[unsafe(naked)]
 #[unsafe(no_mangle)]

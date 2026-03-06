@@ -20,8 +20,8 @@ unsafe fn init_boot_page_table() {
 }
 unsafe fn init_mmu() {
     unsafe {
-        kcpu::instrs::write_kernel_page_table(pa!(&raw const BOOT_PT_SV39 as usize));
-        kcpu::instrs::flush_tlb(None);
+        karch::write_kernel_page_table(pa!(&raw const BOOT_PT_SV39 as usize));
+        karch::flush_tlb(None);
     }
 }
 #[unsafe(naked)]

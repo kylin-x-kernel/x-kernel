@@ -57,7 +57,7 @@ impl UserContext {
             fn enter_user(uctx: &mut UserContext);
         }
 
-        crate::instrs::disable_local();
+        karch::disable_local_irq();
         unsafe { enter_user(self) };
 
         let scause = scause::read();
@@ -89,7 +89,7 @@ impl UserContext {
             ReturnReason::Unknown
         };
 
-        crate::instrs::enable_local();
+        karch::enable_local_irq();
         ret
     }
 }

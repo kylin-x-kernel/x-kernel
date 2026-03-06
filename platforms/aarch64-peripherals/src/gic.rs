@@ -3,11 +3,12 @@
 // See LICENSES for license details.
 
 //! GIC interrupt controller integration for AArch64 platforms.
+#[cfg(feature = "pmr")]
 use core::arch::asm;
 #[cfg(feature = "pmr")]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use aarch64_cpu::registers::{DAIF, Readable};
+
 #[cfg(all(feature = "gicv2", not(feature = "gicv3")))]
 use arm_gic_driver::v2::*;
 #[cfg(feature = "gicv3")]
@@ -244,82 +245,6 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
         }
     }
 }
-/// Enable local IRQ handling.
-#[cfg(not(feature = "pmr"))]
-#[inline]
-pub fn enable_local() {
-    unsafe { asm!("msr daifclr, #2") };
-}
-/// Disable local IRQ handling.
-#[cfg(not(feature = "pmr"))]
-#[inline]
-pub fn disable_local() {
-    unsafe { asm!("msr daifset, #2") };
-}
-/// Test whether local IRQs are enabled.
-#[cfg(not(feature = "pmr"))]
-#[inline]
-pub fn is_enabled() -> bool {
-    !DAIF.matches_all(DAIF::I::Masked)
-}
-/// Save flags and disable local IRQ handling.
-#[cfg(not(feature = "pmr"))]
-#[inline]
-pub fn save_disable() -> usize {
-    let flags: usize;
-    unsafe { asm!("mrs {}, daif", out(reg) flags) };
-    disable_local();
-    flags
-}
-/// Restore local IRQ flags previously saved.
-#[cfg(not(feature = "pmr"))]
-#[inline]
-pub fn restore(flags: usize) {
-    unsafe { asm!("msr daif, {}", in(reg) flags) };
-}
-/// Enable local IRQ handling with PMR unmasking.
-#[cfg(feature = "pmr")]
-#[inline]
-pub fn enable_local() {
-    set_prio_mask(0xff);
-    unsafe { asm!("msr daifclr, #2") };
-}
-/// Disable local IRQ handling while keeping PMR state.
-#[cfg(feature = "pmr")]
-#[inline]
-pub fn disable_local() {
-    open_high_priority_irq_mode();
-}
-/// Test whether local IRQs are enabled given PMR state.
-#[cfg(feature = "pmr")]
-#[inline]
-pub fn is_enabled() -> bool {
-    !DAIF.matches_all(DAIF::I::Masked) && get_priority_mask() > 0xa0
-}
-/// Save PMR/flags and disable local IRQ handling.
-#[cfg(feature = "pmr")]
-#[inline]
-pub fn save_disable() -> usize {
-    if is_gic_initialized() {
-        let pmr = get_priority_mask();
-        set_prio_mask(0x80);
-        pmr as usize
-    } else {
-        let flags: usize;
-        unsafe { asm!("mrs {}, daif; msr daifset, #2", out(reg) flags) };
-        flags
-    }
-}
-/// Restore PMR/flags previously saved.
-#[cfg(feature = "pmr")]
-#[inline]
-pub fn restore(flags: usize) {
-    if is_gic_initialized() {
-        set_prio_mask(flags as u8);
-    } else {
-        unsafe { asm!("msr daif, {}", in(reg) flags) };
-    }
-}
 /// Implement `kplat::interrupts::IntrManager` using this GIC backend.
 #[allow(clippy::crate_in_macro_def)]
 #[macro_export]
@@ -351,26 +276,6 @@ macro_rules! irq_if_impl {
 
             fn set_prio(irq: usize, priority: u8) {
                 $crate::gic::set_prio(irq, priority);
-            }
-
-            fn save_disable() -> usize {
-                $crate::gic::save_disable()
-            }
-
-            fn restore(flag: usize) {
-                $crate::gic::restore(flag);
-            }
-
-            fn enable_local() {
-                $crate::gic::enable_local();
-            }
-
-            fn disable_local() {
-                $crate::gic::disable_local();
-            }
-
-            fn is_enabled() -> bool {
-                $crate::gic::is_enabled()
             }
         }
     };

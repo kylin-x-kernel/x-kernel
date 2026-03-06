@@ -28,3 +28,4 @@ memset = { workspace = true }
 page_table = { workspace = true, optional = true }
 unittest.workspace = true
 kbuild_config = { workspace = true }
+karch = { workspace = true }

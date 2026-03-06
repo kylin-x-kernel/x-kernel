@@ -14,7 +14,7 @@ impl SysCtrl for PowerImpl {
     fn shutdown() -> ! {
         log::info!("Shutting down...");
         loop {
-            kcpu::instrs::stop_cpu();
+            karch::stop_cpu();
         }
     }
 }

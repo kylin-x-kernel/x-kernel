@@ -12,7 +12,7 @@ use kcpu::excp::{IRQ, register_trap_handler};
 #[cfg(feature = "ipi")]
 pub use kplat::interrupts::{TargetCpu, notify_cpu};
 pub use kplat::interrupts::{
-    dispatch_irq, enable, reg_handler as register, restore, save_disable, set_prio,
+    dispatch_irq, enable, reg_handler as register, set_prio,
     unreg_handler as unregister,
 };
 

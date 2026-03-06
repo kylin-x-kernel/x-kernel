@@ -106,16 +106,16 @@ pub fn init_memory_management() {
             debug!("root: {:?}", root);
         }
     }
-    unsafe { khal::asm::write_kernel_page_table(root) };
+    unsafe { karch::write_kernel_page_table(root) };
     // flush all TLB
-    khal::asm::flush_tlb(None);
+    karch::flush_tlb(None);
 }
 
 /// Initializes kernel paging for secondary CPUs.
 pub fn init_memory_management_secondary() {
-    unsafe { khal::asm::write_kernel_page_table(kernel_page_table_root()) };
+    unsafe { karch::write_kernel_page_table(kernel_page_table_root()) };
     // flush all TLB
-    khal::asm::flush_tlb(None);
+    karch::flush_tlb(None);
 }
 
 #[cfg(unittest)]

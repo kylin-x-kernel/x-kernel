@@ -99,7 +99,7 @@ pub fn shutdown() -> ! {
     psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0).ok();
     warn!("It should shutdown!");
     loop {
-        kcpu::instrs::stop_cpu();
+        karch::stop_cpu();
     }
 }
 /// Power on a target CPU with the given entry point and argument.

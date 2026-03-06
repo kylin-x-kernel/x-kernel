@@ -353,7 +353,7 @@ impl TaskContext {
     pub fn new() -> Self {
         Self {
             #[cfg(feature = "uspace")]
-            satp: crate::instrs::read_kernel_page_table(),
+            satp: karch::read_kernel_page_table(),
             ..Default::default()
         }
     }
@@ -382,13 +382,13 @@ impl TaskContext {
     pub fn switch_to(&mut self, next_ctx: &Self) {
         #[cfg(feature = "tls")]
         {
-            self.tp = crate::instrs::read_thread_pointer();
-            unsafe { crate::instrs::write_thread_pointer(next_ctx.tp) };
+            self.tp = karch::read_thread_pointer();
+            unsafe { karch::write_thread_pointer(next_ctx.tp) };
         }
         #[cfg(feature = "uspace")]
         if self.satp != next_ctx.satp {
-            unsafe { crate::instrs::write_user_page_table(next_ctx.satp) };
-            crate::instrs::flush_tlb(None); // currently flush the entire TLB
+            unsafe { karch::write_user_page_table(next_ctx.satp) };
+            karch::flush_tlb(None); // currently flush the entire TLB
         }
         #[cfg(feature = "fp-simd")]
         {

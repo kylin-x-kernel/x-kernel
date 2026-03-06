@@ -81,15 +81,6 @@
 //!     fn disable_preempt() {
 //!         // Your implementation
 //!     }
-//!
-//!     fn save_disable() -> usize {
-//!         // Your implementation
-//!         0
-//!     }
-//!
-//!     fn restore(flags: usize) {
-//!         // Your implementation
-//!     }
 //! }
 //! ```
 

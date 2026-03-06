@@ -19,6 +19,7 @@ page_table = { workspace = true }
 kspin = "0.1"
 dw_apb_uart = "0.1"
 kcpu = { workspace = true }
+karch = { workspace = true }
 kplat = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv3"] }
 aarch64-cpu = "10.0"

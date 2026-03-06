@@ -6,37 +6,25 @@
 
 use memaddr::PhysAddr;
 
-pub use karch::{
-    await_interrupts, enable_fp, flush_dcache_line, flush_icache_all, flush_tlb,
-    read_thread_pointer, stop_cpu, write_thread_pointer,
-};
-// Re-exported with legacy names for backward compatibility.
-pub use karch::{disable_local_irq as disable_local, enable_local_irq as enable_local, local_irq_enabled as is_enabled};
-
-pub use karch::{
-    read_kernel_page_table, read_user_page_table, save_irq_and_disable, restore_irq,
-    write_kernel_page_table, write_user_page_table, write_trap_vector_base,
-};
-
-/// Deprecated: use [`read_kernel_page_table`] instead.
-#[deprecated(note = "Use `read_kernel_page_table` instead")]
+/// Deprecated: use [`karch::read_kernel_page_table`] instead.
+#[deprecated(note = "Use `karch::read_kernel_page_table` instead")]
 #[inline]
 pub fn kernel_pt_root() -> PhysAddr {
-    read_kernel_page_table()
+    karch::read_kernel_page_table()
 }
 
-/// Deprecated: use [`read_user_page_table`] instead.
-#[deprecated(note = "Use `read_user_page_table` instead")]
+/// Deprecated: use [`karch::read_user_page_table`] instead.
+#[deprecated(note = "Use `karch::read_user_page_table` instead")]
 #[inline]
 pub fn user_pt_root() -> PhysAddr {
-    read_user_page_table()
+    karch::read_user_page_table()
 }
 
-/// Deprecated: use [`write_trap_vector_base`] instead.
-#[deprecated(note = "Use `write_trap_vector_base` instead")]
+/// Deprecated: use [`karch::write_trap_vector_base`] instead.
+#[deprecated(note = "Use `karch::write_trap_vector_base` instead")]
 #[inline]
 pub unsafe fn write_exception_vector_base(vbar: usize) {
-    unsafe { write_trap_vector_base(vbar) }
+    unsafe { karch::write_trap_vector_base(vbar) }
 }
 
 #[cfg(feature = "uspace")]

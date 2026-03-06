@@ -4,23 +4,11 @@
 
 //! Wrapper functions for assembly instructions.
 
-pub use karch::{
-    await_interrupts, enable_fp, enable_lsx, flush_tlb, read_thread_pointer, stop_cpu,
-    write_thread_pointer,
-};
-// Re-exported with legacy names for backward compatibility.
-pub use karch::{disable_local_irq as disable_local, enable_local_irq as enable_local, local_irq_enabled as is_enabled};
-
-pub use karch::{
-    read_kernel_page_table, read_user_page_table, restore_irq, save_irq_and_disable,
-    write_kernel_page_table, write_pwc, write_trap_vector_base, write_user_page_table,
-};
-
-/// Deprecated: use [`write_trap_vector_base`] instead.
-#[deprecated(note = "Use `write_trap_vector_base` instead")]
+/// Deprecated: use [`karch::write_trap_vector_base`] instead.
+#[deprecated(note = "Use `karch::write_trap_vector_base` instead")]
 #[inline]
 pub unsafe fn write_exception_entry_base(eentry: usize) {
-    unsafe { write_trap_vector_base(eentry) }
+    unsafe { karch::write_trap_vector_base(eentry) }
 }
 
 #[cfg(feature = "uspace")]

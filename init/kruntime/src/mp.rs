@@ -66,7 +66,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     #[cfg(feature = "pmu")]
     khal::irq::enable(kbuild_config::PMU_IRQ, true);
 
-    khal::asm::enable_local();
+    karch::enable_local_irq();
 
     #[cfg(feature = "watchdog")]
     watchdog::init_secondary();

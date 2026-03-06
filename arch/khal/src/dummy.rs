@@ -142,18 +142,4 @@ impl IntrManager for DummyIrq {
     fn notify_cpu(_irq: usize, _target: TargetCpu) {}
 
     fn set_prio(_irq: usize, _priority: u8) {}
-
-    fn save_disable() -> usize {
-        0
-    }
-
-    fn restore(_flag: usize) {}
-
-    fn enable_local() {}
-
-    fn disable_local() {}
-
-    fn is_enabled() -> bool {
-        false
-    }
 }

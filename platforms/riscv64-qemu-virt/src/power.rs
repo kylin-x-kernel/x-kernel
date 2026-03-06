@@ -22,7 +22,7 @@ impl SysCtrl for PowerImpl {
         sbi_rt::system_reset(sbi_rt::Shutdown, sbi_rt::NoReason);
         warn!("It should shutdown!");
         loop {
-            kcpu::instrs::stop_cpu();
+            karch::stop_cpu();
         }
     }
 }

@@ -46,8 +46,8 @@ unsafe fn init_boot_page_table() {
 fn enable_fp_simd() {
     #[cfg(feature = "fp-simd")]
     {
-        kcpu::instrs::enable_fp();
-        kcpu::instrs::enable_lsx();
+        karch::enable_fp();
+        karch::enable_lsx();
     }
 }
 fn init_mmu() {

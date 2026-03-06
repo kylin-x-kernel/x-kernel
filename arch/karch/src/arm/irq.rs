@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! ARM low-level architecture operations.
+//! Interrupt control operations for ARM.
 
 use core::arch::asm;
 

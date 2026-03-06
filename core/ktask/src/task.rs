@@ -693,7 +693,7 @@ extern "C" fn task_entry() -> ! {
         crate::run_queue::clear_prev_task_on_cpu();
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
-    khal::asm::enable_local();
+    karch::enable_local_irq();
     let task = crate::current();
     if let Some(entry) = task.entry.take() {
         entry()

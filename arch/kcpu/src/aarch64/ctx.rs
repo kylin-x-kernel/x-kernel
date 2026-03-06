@@ -253,8 +253,8 @@ impl TaskContext {
     pub fn switch_to(&mut self, next_ctx: &Self) {
         #[cfg(feature = "tls")]
         {
-            self.tpidr_el0 = crate::instrs::read_thread_pointer() as _;
-            unsafe { crate::instrs::write_thread_pointer(next_ctx.tpidr_el0 as _) };
+            self.tpidr_el0 = karch::read_thread_pointer() as _;
+            unsafe { karch::write_thread_pointer(next_ctx.tpidr_el0 as _) };
         }
         #[cfg(feature = "fp-simd")]
         {
@@ -263,8 +263,8 @@ impl TaskContext {
         }
         #[cfg(feature = "uspace")]
         if self.ttbr0_el1 != next_ctx.ttbr0_el1 {
-            unsafe { crate::instrs::write_user_page_table(next_ctx.ttbr0_el1) };
-            crate::instrs::flush_tlb(None); // currently flush the entire TLB
+            unsafe { karch::write_user_page_table(next_ctx.ttbr0_el1) };
+            karch::flush_tlb(None); // currently flush the entire TLB
         }
         unsafe { context_switch(self, next_ctx) }
     }

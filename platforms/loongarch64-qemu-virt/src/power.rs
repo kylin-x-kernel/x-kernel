@@ -20,10 +20,10 @@ impl SysCtrl for PowerImpl {
         let halt_addr = p2v(pa!(GED_PADDR)).as_mut_ptr();
         info!("Shutting down...");
         unsafe { halt_addr.write_volatile(0x34) };
-        kcpu::instrs::stop_cpu();
+        karch::stop_cpu();
         warn!("It should shutdown!");
         loop {
-            kcpu::instrs::stop_cpu();
+            karch::stop_cpu();
         }
     }
 }

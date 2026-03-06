@@ -20,6 +20,7 @@ log = "0.4"
 page_table = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv2"]}
 kcpu = { workspace = true }
+karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 
