@@ -211,7 +211,7 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
             };
         }
         TargetCpu::Specific(cpu_id) => {
-            let apic_id = raw_apic_id(cpu_id);
+            let apic_id = raw_apic_id(cpu_id as u8);
             unsafe {
                 local_apic().send_ipi(interrupt_id as _, apic_id as _);
             };
@@ -241,7 +241,6 @@ pub fn dispatch_irq(vector: usize) -> Option<usize> {
         IRQ_HANDLER_TABLE.handle(vector);
         unsafe { local_apic().end_of_interrupt() };
         return Some(vector);
-        vector
     } else if vector >= MSIX_VECTOR_BASE as usize {
         // MSI-X vector range: the vector IS the IRQ identifier.
         // MSI-X is edge-triggered, so no masking is needed on dispatch.

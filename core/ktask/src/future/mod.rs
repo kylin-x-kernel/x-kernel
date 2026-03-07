@@ -78,15 +78,13 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
                     // and we'll re-enter the loop to poll again.
                     rq.blocked_resched(woke);
                 } else {
-                    // The waker fired between poll() returning Pending and
-                    // us acquiring the lock. Clear the flag and yield so
-                    // we re-poll promptly.
-                    // We cannot just drop(woke) without clearing, otherwise
-                    // the next iteration will see woke=true and never block.
+                    // ③ woke = true: waker fired between poll() returning
+                    // Pending and us acquiring the lock.
+                    // Clear under the current lock hold, then drop.
+                    // If an interrupt sets woke=true after drop(), the next
+                    // loop iteration will see it correctly.
+                    *woke = false;
                     drop(woke);
-                    // Clear woke under a fresh lock acquisition to avoid
-                    // holding it across yield_now().
-                    *kwaker.woke.lock() = false;
                     crate::yield_now();
                 }
             }

@@ -177,13 +177,12 @@ pub fn probe_pci_device<H: VirtIoHal>(
 /// treat 0xFF as "no IRQ".
 #[cfg(target_arch = "x86_64")]
 fn legacy_irq_for_bdf(config: &::pci::PciConfigAccess, bdf: DeviceFunction) -> usize {
-    // Offset 0x3C contains the Interrupt Line register in bits 7:0.
     let word = config.read_word(bdf, 0x3C);
     let irq_line = (word & 0xFF) as usize;
-    if irq_line == 0xFF {
+    if irq_line == 0xFF || irq_line == 0 {
         log::warn!(
-            "PCI device {:?}: Interrupt Line not assigned (0xFF), legacy IRQ unavailable",
-            bdf
+            "PCI device {:?}: Interrupt Line not assigned ({:#x}), legacy IRQ unavailable",
+            bdf, irq_line
         );
     }
     irq_line
