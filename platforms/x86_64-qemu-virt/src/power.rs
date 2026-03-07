@@ -19,7 +19,7 @@ impl SysCtrl for PowerImpl {
         info!("Shutting down...");
         if cfg!(feature = "reboot-on-system-off") {
             kplat::kprintln!("System will reboot, press any key to continue ...");
-            while super::console::getchar().is_none() {}
+            while x86_peripherals::ns16550::getchar().is_none() {}
             kplat::kprintln!("Rebooting ...");
             unsafe { PortWriteOnly::new(0x64).write(0xfeu8) };
         } else {

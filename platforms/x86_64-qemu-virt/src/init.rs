@@ -10,8 +10,8 @@ struct BootHandlerImpl;
 impl BootHandler for BootHandlerImpl {
     fn early_init(_cpu_id: usize, mbi: usize) {
         kcpu::boot::init_trap();
-        crate::console::init();
-        crate::time::early_init();
+        x86_peripherals::ns16550::init();
+        x86_peripherals::tsc_timer::early_init();
         crate::mem::init(mbi);
     }
 
@@ -21,13 +21,13 @@ impl BootHandler for BootHandlerImpl {
     }
 
     fn final_init(_cpu_id: usize, _arg: usize) {
-        crate::apic::init_primary();
-        crate::time::init_primary();
+        x86_peripherals::apic::init_primary(kplat::memory::pa!(0xFEC0_0000));
+        x86_peripherals::tsc_timer::init_primary();
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: usize) {
-        crate::apic::init_secondary();
-        crate::time::init_secondary();
+        x86_peripherals::apic::init_secondary();
+        x86_peripherals::tsc_timer::init_secondary();
     }
 }

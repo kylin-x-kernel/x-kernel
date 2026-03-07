@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 fp-simd = ["kcpu/fp-simd"]
-rtc = ["x86_rtc"]
+rtc = ["x86-peripherals/rtc"]
 smp = ["kplat/smp", "kspin/smp"]
 reboot-on-system-off = []
 
@@ -19,22 +19,19 @@ kspin = { workspace = true }
 log = { workspace = true }
 bitflags = "2.6"
 lazyinit = "0.2"
-int_ratio = "0.1"
 percpu = { workspace = true }
 heapless = "0.9"
 kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
+x86-peripherals = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"
 x86_64 = { workspace = true }
-x2apic = "0.5"
 multiboot = "0.8"
 raw-cpuid = "11.5"
-uart_16550 = "0.4"
-x86_rtc = { version = "0.1", optional = true }
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-none"]

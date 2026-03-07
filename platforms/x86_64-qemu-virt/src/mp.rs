@@ -39,8 +39,8 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
 /// Starts a secondary CPU with the given APIC ID and stack.
 pub fn start_secondary_cpu(apic_id: usize, stack_top: PhysAddr) {
     unsafe { setup_startup_page(stack_top) };
-    let apic_id = super::apic::raw_apic_id(apic_id as u8);
-    let lapic = super::apic::local_apic();
+    let apic_id = x86_peripherals::apic::raw_apic_id(apic_id as u8);
+    let lapic = x86_peripherals::apic::local_apic();
     unsafe { lapic.send_init_ipi(apic_id) };
     spin_wait(Duration::from_millis(10));
     unsafe { lapic.send_sipi(START_PAGE_IDX, apic_id) };

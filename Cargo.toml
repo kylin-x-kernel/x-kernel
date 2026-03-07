@@ -76,6 +76,7 @@ riscv64-qemu-virt = { path = "platforms/riscv64-qemu-virt" }
 loongarch64-qemu-virt = { path = "platforms/loongarch64-qemu-virt" }
 aarch64-peripherals = { path = "platforms/aarch64-peripherals", default-features = false }
 aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }
+x86-peripherals = { path = "platforms/x86-peripherals" }
 
 # Third Crates
 arm-gic = { path = "drivers/arm-gic" }

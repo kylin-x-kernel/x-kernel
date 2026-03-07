@@ -8,16 +8,18 @@
 extern crate log;
 #[macro_use]
 extern crate kplat;
-mod apic;
 mod boot;
-mod console;
 mod init;
 mod mem;
 #[cfg(feature = "smp")]
 mod mp;
 mod power;
 pub mod psci;
-mod time;
+
+x86_peripherals::console_if_impl!(ConsoleImpl, irq = None);
+x86_peripherals::time_if_impl!(GlobalTimerImpl);
+x86_peripherals::irq_if_impl!(IntrManagerImpl);
+
 fn current_cpu_id() -> usize {
     match raw_cpuid::CpuId::new().get_feature_info() {
         Some(finfo) => finfo.initial_local_apic_id() as usize,
