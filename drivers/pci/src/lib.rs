@@ -64,8 +64,7 @@ impl PciConfigAccess {
             Cam::MmioCam => 8,
             Cam::Ecam => 12,
         };
-        let address = (bdf << shift) | (register_offset as u32 & !0x3);
-        address
+        (bdf << shift) | (register_offset as u32 & !0x3)
     }
 
     /// Reads a 32-bit word from PCI configuration space.

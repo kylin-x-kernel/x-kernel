@@ -32,7 +32,7 @@ pub fn init() {
 #[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! console_if_impl {
-    ($name:ident, irq = $irq:expr) => {
+    ($name:ident,irq = $irq:expr) => {
         struct $name;
         #[impl_dev_interface]
         impl kplat::io::ConsoleIf for $name {

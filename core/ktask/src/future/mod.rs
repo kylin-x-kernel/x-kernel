@@ -70,7 +70,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
         match fut.as_mut().poll(&mut cx) {
             Poll::Pending => {
                 let mut rq = current_run_queue::<NoPreemptIrqSave>();
-                let woke = kwaker.woke.lock();
+                let mut woke = kwaker.woke.lock();
                 if !*woke {
                     // blocked_resched() will set *woke = false and drop
                     // the guard internally before rescheduling. When this

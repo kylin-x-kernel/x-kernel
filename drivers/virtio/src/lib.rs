@@ -182,7 +182,8 @@ fn legacy_irq_for_bdf(config: &::pci::PciConfigAccess, bdf: DeviceFunction) -> u
     if irq_line == 0xFF || irq_line == 0 {
         log::warn!(
             "PCI device {:?}: Interrupt Line not assigned ({:#x}), legacy IRQ unavailable",
-            bdf, irq_line
+            bdf,
+            irq_line
         );
     }
     irq_line
