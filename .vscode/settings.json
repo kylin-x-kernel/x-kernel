@@ -10,6 +10,7 @@
     "qemu", "smp", "unittest"
   ],
   "rust-analyzer.cargo.extraEnv": {
+    "RUSTC_BOOTSTRAP": "1",
     "RUSTFLAGS": "--cfg unittest --check-cfg cfg(unittest)"
   }
 }

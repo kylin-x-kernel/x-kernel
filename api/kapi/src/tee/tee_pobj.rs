@@ -360,95 +360,92 @@ pub fn tee_pobj_rename(obj: &mut tee_pobj, obj_id: &[u8], obj_id_len: u32) -> Te
     Ok(())
 }
 
-#[cfg(feature = "tee_test")]
-pub mod tests_tee_pobj {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+#[unittest::mod_test]
+mod tests {
+    use crate::tee::{
+        tee_pobj::{
+            POBJS, TEE_DATA_FLAG_SHARE_READ, TEE_DATA_FLAG_SHARE_WRITE, TEE_UUID, tee_pobj,
+            tee_pobj_get, tee_pobj_usage, with_pobj_usage_lock,
+        },
+        tee_ree_fs::{REE_FS_OPS, TeeFileOperations},
     };
-
-    use super::*;
-
-    test_fn! {
-        using TestResult;
-
-        fn test_tee_pobj_default() {
-            let pobj = tee_pobj::default();
-            assert_eq!(pobj.obj_id_len, 0);
-        }
+    #[unittest::def_test]
+    fn test_tee_pobj_default() {
+        let pobj = tee_pobj::default();
+        assert_eq!(pobj.obj_id_len, 0);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_with_pobj_usage_lock() {
-            let mut pobj = tee_pobj::default();
-            let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || {
-                Ok(())
-            });
-            assert_eq!(result, Ok::<(), ()>(()));
-            // set flag
-            pobj.flags = TEE_DATA_FLAG_SHARE_WRITE;
-            let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || {
-                Ok(())
-            });
-            assert_eq!(result, Ok::<(), ()>(()));
-            // set flag
-            pobj.flags = TEE_DATA_FLAG_SHARE_READ;
-            let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || {
-                Ok(())
-            });
-            assert_eq!(result, Ok::<(), ()>(()));
-        }
+    #[unittest::def_test]
+    fn test_with_pobj_usage_lock() {
+        let mut pobj = tee_pobj::default();
+        let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || Ok(()));
+        assert_eq!(result, Ok::<(), ()>(()));
+        // set flag
+        pobj.flags = TEE_DATA_FLAG_SHARE_WRITE;
+        let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || Ok(()));
+        assert_eq!(result, Ok::<(), ()>(()));
+        // set flag
+        pobj.flags = TEE_DATA_FLAG_SHARE_READ;
+        let result: Result<(), ()> = with_pobj_usage_lock(pobj.flags, || Ok(()));
+        assert_eq!(result, Ok::<(), ()>(()));
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_tee_pobj_get() {
-            // 1. create a new pobj
-            let obj_id = [0x12, 0x34, 0x56, 0x78];
-            {
-                let result = tee_pobj_get(&TEE_UUID::default(), &obj_id, obj_id.len() as u32, 0, tee_pobj_usage::TEE_POBJ_USAGE_ENUM, &REE_FS_OPS);
-                assert!(result.is_ok());
-                // check VecQueue size
-                let mut pobjs = POBJS.inner.lock();
-                assert_eq!(pobjs.len(), 1);
-                // check pobj
-                let pobj = result.unwrap();
-                let pobj_guard = pobj.read();
-                assert_eq!(pobj_guard.obj_id, obj_id.to_vec().into_boxed_slice());
-                assert_eq!(pobj_guard.obj_id_len, obj_id.len() as u32);
-                assert_eq!(pobj_guard.flags, 0);
-                assert_eq!(pobj_guard.fops.unwrap() as *const TeeFileOperations, &REE_FS_OPS as *const TeeFileOperations);
-                let echo = (pobj_guard.fops.unwrap().echo)();
-                assert_eq!(echo, "TeeFileOperations->echo");
-            }
-            // 2. get the same pobj
-            {
-                let result = tee_pobj_get(&TEE_UUID::default(), &obj_id, obj_id.len() as u32, 0, tee_pobj_usage::TEE_POBJ_USAGE_ENUM, &REE_FS_OPS);
-                assert!(result.is_ok());
-                // check VecQueue size
-                let mut pobjs = POBJS.inner.lock();
-                assert_eq!(pobjs.len(), 1);
-                // check pobj
-                let pobj = result.unwrap();
-                let pobj_guard = pobj.read();
-                assert_eq!(pobj_guard.obj_id, obj_id.to_vec().into_boxed_slice());
-                assert_eq!(pobj_guard.obj_id_len, obj_id.len() as u32);
-                assert_eq!(pobj_guard.flags, 0);
-                assert_eq!(pobj_guard.fops.unwrap() as *const TeeFileOperations, &REE_FS_OPS as *const TeeFileOperations);
-                let echo = (pobj_guard.fops.unwrap().echo)();
-                assert_eq!(echo, "TeeFileOperations->echo");
-            }
+    #[unittest::def_test]
+    fn test_tee_pobj_get() {
+        // 1. create a new pobj
+        let obj_id = [0x12, 0x34, 0x56, 0x78];
+        {
+            let result = tee_pobj_get(
+                &TEE_UUID::default(),
+                &obj_id,
+                obj_id.len() as u32,
+                0,
+                tee_pobj_usage::TEE_POBJ_USAGE_ENUM,
+                &REE_FS_OPS,
+            );
+            assert!(result.is_ok());
+            // check VecQueue size
+            let mut pobjs = POBJS.inner.lock();
+            assert_eq!(pobjs.len(), 1);
+            // check pobj
+            let pobj = result.unwrap();
+            let pobj_guard = pobj.read();
+            assert_eq!(pobj_guard.obj_id, obj_id.to_vec().into_boxed_slice());
+            assert_eq!(pobj_guard.obj_id_len, obj_id.len() as u32);
+            assert_eq!(pobj_guard.flags, 0);
+            assert_eq!(
+                pobj_guard.fops.unwrap() as *const TeeFileOperations,
+                &REE_FS_OPS as *const TeeFileOperations
+            );
+            let echo = (pobj_guard.fops.unwrap().echo)();
+            assert_eq!(echo, "TeeFileOperations->echo");
         }
-    }
-
-    tests_name! {
-        TEST_TEE_POBJ;
-        tee_pobj;
-        //------------------------
-        test_tee_pobj_default,
-        test_with_pobj_usage_lock,
-        test_tee_pobj_get,
+        // 2. get the same pobj
+        {
+            let result = tee_pobj_get(
+                &TEE_UUID::default(),
+                &obj_id,
+                obj_id.len() as u32,
+                0,
+                tee_pobj_usage::TEE_POBJ_USAGE_ENUM,
+                &REE_FS_OPS,
+            );
+            assert!(result.is_ok());
+            // check VecQueue size
+            let mut pobjs = POBJS.inner.lock();
+            assert_eq!(pobjs.len(), 1);
+            // check pobj
+            let pobj = result.unwrap();
+            let pobj_guard = pobj.read();
+            assert_eq!(pobj_guard.obj_id, obj_id.to_vec().into_boxed_slice());
+            assert_eq!(pobj_guard.obj_id_len, obj_id.len() as u32);
+            assert_eq!(pobj_guard.flags, 0);
+            assert_eq!(
+                pobj_guard.fops.unwrap() as *const TeeFileOperations,
+                &REE_FS_OPS as *const TeeFileOperations
+            );
+            let echo = (pobj_guard.fops.unwrap().echo)();
+            assert_eq!(echo, "TeeFileOperations->echo");
+        }
     }
 }

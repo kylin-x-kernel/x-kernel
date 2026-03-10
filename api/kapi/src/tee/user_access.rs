@@ -11,37 +11,22 @@ use tee_raw_sys::{libc_compat::size_t, *};
 use super::TeeResult;
 
 pub(crate) fn copy_from_user(kaddr: &mut [u8], uaddr: &[u8], len: size_t) -> TeeResult {
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "tee_test")] {
-            kaddr[..len].copy_from_slice(&uaddr[..len]);
-            Ok(())
-        } else {
-            read_vm_mem(uaddr.as_ptr(), unsafe {
-                transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut kaddr[..len])
-            })
-            .map_err(|error| match error {
-                MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
-                _ => TEE_ERROR_GENERIC,
-            })?;
-            Ok(())
-        }
-    }
+    read_vm_mem(uaddr.as_ptr(), unsafe {
+        transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut kaddr[..len])
+    })
+    .map_err(|error| match error {
+        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
+        _ => TEE_ERROR_GENERIC,
+    })?;
+    Ok(())
 }
 
 pub(crate) fn copy_to_user(uaddr: &mut [u8], kaddr: &[u8], _len: size_t) -> TeeResult {
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "tee_test")] {
-            uaddr[.._len].copy_from_slice(&kaddr[.._len]);
-            Ok(())
-        } else {
-            write_vm_mem(uaddr.as_mut_ptr(), kaddr)
-            .map_err(|error| match error {
-                MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
-                _ => TEE_ERROR_GENERIC,
-            })?;
-            Ok(())
-        }
-    }
+    write_vm_mem(uaddr.as_mut_ptr(), kaddr).map_err(|error| match error {
+        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
+        _ => TEE_ERROR_GENERIC,
+    })?;
+    Ok(())
 }
 
 pub fn copy_from_user_u64(s: &mut u64, user_s: &u64) -> TeeResult {
@@ -177,92 +162,78 @@ pub(crate) fn exit_user_access() {
     // In OP-TEE, this dispatch_irqs returning from user context
 }
 
-#[cfg(any(test, feature = "tee_test"))]
+#[unittest::mod_test]
 pub mod tests_user_access {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
 
     use super::*;
+    use crate::unittest_task::{TestUserBuffer, TestUserValue};
 
-    test_fn! {
-        using TestResult;
-
-        fn test_copy_from_user() {
-            let user_data: [u8; 5] = [1, 2, 3, 4, 5];
-            let mut kernel_data: [u8; 5] = [0; 5];
-
-            copy_from_user(&mut kernel_data, &user_data, 5).unwrap();
-            assert_eq!(kernel_data, user_data);
-        }
+    fn user_buffer_from_bytes(bytes: &[u8]) -> TestUserBuffer {
+        let buffer = TestUserBuffer::new(bytes.len()).unwrap();
+        buffer.write_bytes(bytes).unwrap();
+        buffer
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_copy_from_user() {
+        let user_data = [1, 2, 3, 4, 5];
+        let mut user_data_buf = user_buffer_from_bytes(&user_data);
+        let mut kernel_data: [u8; 5] = [0; 5];
 
-        fn test_copy_to_user() {
-            let kernel_data: [u8; 5] = [10, 20, 30, 40, 50];
-            let mut user_data: [u8; 5] = [0; 5];
-
-            copy_to_user(&mut user_data, &kernel_data, 5).unwrap();
-            assert_eq!(user_data, kernel_data);
-        }
+        copy_from_user(
+            &mut kernel_data,
+            user_data_buf.as_user_slice(user_data.len()),
+            5,
+        )
+        .unwrap();
+        assert_eq!(kernel_data, user_data);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_copy_to_user() {
+        let kernel_data = [10, 20, 30, 40, 50];
+        let mut user_data = TestUserBuffer::new(kernel_data.len()).unwrap();
 
-        fn test_copy_from_user_u64() {
-            let user_value: u64 = 0x1122334455667788;
-            let mut kernel_value: u64 = 0;
-
-            copy_from_user_u64(&mut kernel_value, &user_value).unwrap();
-            assert_eq!(kernel_value, user_value);
-
-            // test copy_to_user_u64
-            let mut user_value_out: u64 = 1;
-            copy_to_user_u64(&mut user_value_out, &kernel_value).unwrap();
-            assert_eq!(user_value_out, kernel_value);
-        }
+        copy_to_user(user_data.as_user_slice(kernel_data.len()), &kernel_data, 5).unwrap();
+        let user_data_bytes = user_data.read_bytes(kernel_data.len()).unwrap();
+        assert_eq!(user_data_bytes.as_slice(), &kernel_data);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_copy_from_user_u64() {
+        let mut user_value = TestUserValue::<u64>::from_value(0x1122334455667788).unwrap();
+        let mut kernel_value: u64 = 0;
 
-        fn test_bb_alloc_free() {
-            let kbuf = bb_alloc(10).unwrap();
-            assert_eq!(kbuf.len(), 10);
-            bb_free(kbuf, 10);
-        }
+        copy_from_user_u64(&mut kernel_value, user_value.as_user_ref()).unwrap();
+        assert_eq!(kernel_value, user_value.read());
+
+        let mut user_value_out = TestUserValue::<u64>::from_value(1).unwrap();
+        copy_to_user_u64(user_value_out.as_user_ref(), &kernel_value).unwrap();
+        assert_eq!(user_value_out.read(), kernel_value);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_bb_memdup_user() {
-            let src = [1, 2, 3, 4, 5];
-            let buf = bb_memdup_user(&src).unwrap();
-            assert_eq!(&buf[..], &src[..]);
-        }
+    #[unittest::def_test]
+    fn test_bb_alloc_free() {
+        let kbuf = bb_alloc(10).unwrap();
+        assert!(kbuf.iter().all(|byte| *byte == 0));
+        assert_eq!(kbuf.len(), 10);
+        bb_free(kbuf, 10);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_bb_memdup_user_private() {
-            let src = [1, 2, 3, 4, 5];
-            let buf = bb_memdup_user_private(&src).unwrap();
-            assert_eq!(&buf[..], &src[..]);
-        }
+    #[unittest::def_test(custom)]
+    fn test_bb_memdup_user() {
+        let src = [1, 2, 3, 4, 5];
+        let mut src_user = user_buffer_from_bytes(&src);
+        let buf = bb_memdup_user(src_user.as_user_slice(src.len())).unwrap();
+        assert_eq!(&buf[..], &src[..]);
     }
-    tests_name! {
-        TEST_USER_ACCESS;
-        user_access;
-        // test_copy_from_user,
-        // test_copy_to_user,
-        // test_copy_from_user_u64,
-        test_bb_alloc_free,
-        test_bb_memdup_user,
-        test_bb_memdup_user_private,
+
+    #[unittest::def_test(custom)]
+    fn test_bb_memdup_user_private() {
+        let src = [1, 2, 3, 4, 5];
+        let mut src_user = user_buffer_from_bytes(&src);
+        let buf = bb_memdup_user_private(src_user.as_user_slice(src.len())).unwrap();
+        assert_eq!(&buf[..], &src[..]);
     }
 }

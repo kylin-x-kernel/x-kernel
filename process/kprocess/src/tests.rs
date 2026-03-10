@@ -16,14 +16,17 @@ fn ensure_init() -> Arc<Process> {
     if let Some(p) = INIT_PROC.get() {
         return p.clone();
     }
-    // Assume pid 1 is fine for init in tests
+
+    // In unittest mode, INIT_PROC may already have been initialized by a
+    // synthetic runtime used by earlier tests. If not, create one here.
     Process::new_init(1)
 }
 
 #[def_test]
 fn test_process_lifecycle() {
     let init = ensure_init();
-    assert_eq!(init.pid(), 1);
+    assert!(INIT_PROC.get().is_some());
+    assert!(init.parent().is_none());
 
     // Test Fork
     let child_pid = 100;

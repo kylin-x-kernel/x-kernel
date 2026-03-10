@@ -8,5 +8,5 @@ make APP_FEATURES="tee, qemu" run
 
 To run tee unit tests:
 ```bash
-make APP_FEATURES="tee_test, qemu" run
+make UNITTEST=y run
 ```

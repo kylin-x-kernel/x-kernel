@@ -101,6 +101,8 @@ x86_csv = [
 
 
 [dependencies]
+fs-ng-vfs.workspace = true
+minicov = "0.3.8"
 kdriver.workspace = true
 kerrno.workspace = true
 kfeat.workspace = true

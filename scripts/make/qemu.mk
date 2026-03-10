@@ -141,6 +141,8 @@ endif
 define run_qemu
   @printf "    $(CYAN_C)Running$(END_C) on qemu...\n"
   $(call run_cmd,$(QEMU),$(qemu_args-y))
+  @printf "    $(CYAN_C)Finished$(END_C) running on qemu.\n"
+  $(if $(filter y,$(UNITTEST)),$(call coverage_report))
 endef
 
 define run_qemu_debug

@@ -2052,420 +2052,406 @@ pub fn tee_fs_htree_truncate(ht: &mut TeeFsHtree, block_num: usize) -> TeeResult
     Ok(())
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 mod tests_htree_basic {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
 
     use super::*;
 
     //-------- test suites --------
-    test_fn! {
-        using TestResult;
-
-        pub fn test_iv_offset_matches_hash_size() {
-            let iv_offset = offset_of!(TeeFsHtreeNodeImage, iv);
-            assert_eq!(iv_offset, TEE_FS_HTREE_HASH_SIZE);
-        }
+    #[unittest::def_test]
+    pub fn test_iv_offset_matches_hash_size() {
+        let iv_offset = offset_of!(TeeFsHtreeNodeImage, iv);
+        assert_eq!(iv_offset, TEE_FS_HTREE_HASH_SIZE);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_calc_node_hash() {
+        let mut node = HtreeNode::default();
+        let meta = TeeFsHtreeMeta::default();
+        let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-        pub fn test_calc_node_hash() {
-            let mut node =  HtreeNode::default();
-            let meta = TeeFsHtreeMeta::default();
-            let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
+        let res = calc_node_hash_with_type(TEE_ALG_SHA256, &mut node, Some(&meta), &mut digest);
+        assert!(res.is_ok());
 
-            let res = calc_node_hash_with_type(TEE_ALG_SHA256, &mut node, Some(&meta), &mut digest);
-            assert!(res.is_ok());
-
-            // the same asn sha256([0u8, 42]);
-            let hex_string = hex::encode(digest);
-            assert_eq!(hex_string, "094c4931fdb2f2af417c9e0322a9716006e8211fe9017f671ac6e3251300acca");
-            debug!("digest = {:02x?}", digest);
-        }
+        // the same asn sha256([0u8, 42]);
+        let hex_string = hex::encode(digest);
+        assert_eq!(
+            hex_string,
+            "094c4931fdb2f2af417c9e0322a9716006e8211fe9017f671ac6e3251300acca"
+        );
+        debug!("digest = {:02x?}", digest);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_construct_tree_with_children() {
+        let root_node_image = TeeFsHtreeNodeImage::default();
+        let left_node_image = TeeFsHtreeNodeImage::default();
+        let right_node_image = TeeFsHtreeNodeImage::default();
 
-        pub fn test_construct_tree_with_children() {
-            let root_node_image = TeeFsHtreeNodeImage::default();
-            let left_node_image = TeeFsHtreeNodeImage::default();
-            let right_node_image = TeeFsHtreeNodeImage::default();
+        let mut root = HtreeNode::new(0, root_node_image);
+        let left = HtreeNode::new(1, left_node_image);
+        let right = HtreeNode::new(2, right_node_image);
 
-            let mut root = HtreeNode::new(0, root_node_image);
-            let left = HtreeNode::new(1, left_node_image);
-            let right = HtreeNode::new(2, right_node_image);
+        let meta = TeeFsHtreeMeta::default();
 
-            let meta = TeeFsHtreeMeta::default();
+        HtreeNode::set_left(&mut root, left);
+        HtreeNode::set_right(&mut root, right);
 
-            HtreeNode::set_left(&mut root, left);
-            HtreeNode::set_right(&mut root, right);
+        let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-            let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
+        let res = calc_node_hash_with_type(TEE_ALG_SHA256, &root, Some(&meta), &mut digest);
+        assert!(res.is_ok());
 
-            let res = calc_node_hash_with_type(TEE_ALG_SHA256, &root, Some(&meta), &mut digest);
-            assert!(res.is_ok());
-
-            // the same asn sha256([0u8, 42+32+32]);
-            let hex_string = hex::encode(digest);
-            assert_eq!(hex_string, "34dbd6bf55d0d075d666181d9278b8387482a8b5804e44e1ddaafe6876dadc15");
-            debug!("digest = {:02x?}", digest);
-        }
+        // the same asn sha256([0u8, 42+32+32]);
+        let hex_string = hex::encode(digest);
+        assert_eq!(
+            hex_string,
+            "34dbd6bf55d0d075d666181d9278b8387482a8b5804e44e1ddaafe6876dadc15"
+        );
+        debug!("digest = {:02x?}", digest);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_field_offsets_and_relevant_slice() {
+        let node = TeeFsHtreeNodeImage {
+            hash: [0xAA; TEE_FS_HTREE_HASH_SIZE],
+            iv: [0xBB; TEE_FS_HTREE_IV_SIZE],
+            tag: [0xCC; TEE_FS_HTREE_TAG_SIZE],
+            flags: 0x1234,
+        };
 
-        pub fn test_field_offsets_and_relevant_slice() {
-            let node = TeeFsHtreeNodeImage {
-                hash: [0xAA; TEE_FS_HTREE_HASH_SIZE],
-                iv: [0xBB; TEE_FS_HTREE_IV_SIZE],
-                tag: [0xCC; TEE_FS_HTREE_TAG_SIZE],
-                flags: 0x1234,
-            };
+        // let all_bytes = bytemuck::bytes_of(&node);
+        let all_bytes: &[u8] = node.as_bytes();
+        let iv_offset = offset_of!(TeeFsHtreeNodeImage, iv);
+        let flags_offset = offset_of!(TeeFsHtreeNodeImage, flags);
+        let flags_size = core::mem::size_of::<u16>();
 
-            // let all_bytes = bytemuck::bytes_of(&node);
-            let all_bytes: &[u8] = node.as_bytes();
-            let iv_offset = offset_of!(TeeFsHtreeNodeImage, iv);
-            let flags_offset = offset_of!(TeeFsHtreeNodeImage, flags);
-            let flags_size = core::mem::size_of::<u16>();
+        let relevant = &all_bytes[iv_offset..flags_offset + flags_size];
 
-            let relevant = &all_bytes[iv_offset..flags_offset + flags_size];
+        assert_eq!(iv_offset, TEE_FS_HTREE_HASH_SIZE);
+        assert_eq!(
+            flags_offset,
+            TEE_FS_HTREE_HASH_SIZE + TEE_FS_HTREE_IV_SIZE + TEE_FS_HTREE_TAG_SIZE
+        );
+        assert_eq!(flags_size, 2);
+        assert_eq!(
+            relevant.len(),
+            TEE_FS_HTREE_IV_SIZE + TEE_FS_HTREE_TAG_SIZE + 2
+        );
 
-            assert_eq!(iv_offset, TEE_FS_HTREE_HASH_SIZE);
-            assert_eq!(flags_offset, TEE_FS_HTREE_HASH_SIZE+TEE_FS_HTREE_IV_SIZE+TEE_FS_HTREE_TAG_SIZE);
-            assert_eq!(flags_size, 2);
-            assert_eq!(relevant.len(), TEE_FS_HTREE_IV_SIZE+TEE_FS_HTREE_TAG_SIZE+2);
-
-            assert_eq!(&relevant[..16], &[0xBB; 16]);         // iv
-            assert_eq!(&relevant[16..32], &[0xCC; 16]);       // tag
-            assert_eq!(&relevant[32..34], &0x1234u16.to_le_bytes()); // flags（小端）
-        }
+        assert_eq!(&relevant[..16], &[0xBB; 16]); // iv
+        assert_eq!(&relevant[16..32], &[0xCC; 16]); // tag
+        assert_eq!(&relevant[32..34], &0x1234u16.to_le_bytes()); // flags（小端）
     }
 
-    test_fn! {
-        using TestResult;
-
-        pub fn test_htree_structure_and_access() {
-            // 创建根节点
-            let mut root = HtreeNode::new(0, TeeFsHtreeNodeImage {
+    #[unittest::def_test]
+    pub fn test_htree_structure_and_access() {
+        // 创建根节点
+        let mut root = HtreeNode::new(
+            0,
+            TeeFsHtreeNodeImage {
                 hash: [0x00; TEE_FS_HTREE_HASH_SIZE],
                 iv: [0x01; TEE_FS_HTREE_IV_SIZE],
                 tag: [0x02; TEE_FS_HTREE_TAG_SIZE],
                 flags: 0,
-            });
+            },
+        );
 
-            // 创建左子节点
-            let left = HtreeNode::new(1, TeeFsHtreeNodeImage {
+        // 创建左子节点
+        let left = HtreeNode::new(
+            1,
+            TeeFsHtreeNodeImage {
                 hash: [0x11; TEE_FS_HTREE_HASH_SIZE],
                 iv: [0x12; TEE_FS_HTREE_IV_SIZE],
                 tag: [0x13; TEE_FS_HTREE_TAG_SIZE],
                 flags: 1,
-            });
+            },
+        );
 
-            // 创建右子节点
-            let right = HtreeNode::new(2, TeeFsHtreeNodeImage {
+        // 创建右子节点
+        let right = HtreeNode::new(
+            2,
+            TeeFsHtreeNodeImage {
                 hash: [0x21; TEE_FS_HTREE_HASH_SIZE],
                 iv: [0x22; TEE_FS_HTREE_IV_SIZE],
                 tag: [0x23; TEE_FS_HTREE_TAG_SIZE],
                 flags: 2,
-            });
+            },
+        );
 
-            HtreeNode::set_left(&mut root, left);
-            HtreeNode::set_right(&mut root, right);
+        HtreeNode::set_left(&mut root, left);
+        HtreeNode::set_right(&mut root, right);
 
-            {
-                assert!(root.left.is_some());
-                assert!(root.right.is_some());
+        {
+            assert!(root.left.is_some());
+            assert!(root.right.is_some());
 
-                let left_ref = root.left.as_ref().unwrap();
-                assert_eq!(left_ref.id, 1);
+            let left_ref = root.left.as_ref().unwrap();
+            assert_eq!(left_ref.id, 1);
 
-                let right_ref = root.right.as_ref().unwrap();
-                assert_eq!(right_ref.id, 2);
-            }
+            let right_ref = root.right.as_ref().unwrap();
+            assert_eq!(right_ref.id, 2);
+        }
 
-            {
-                let left_ref = root.left.as_ref().unwrap();
-                let left_parent = left_ref.parent.as_ref().unwrap();
-                assert_eq!(left_parent.as_ptr(), &root as *const HtreeNode as *mut HtreeNode); // 指向同一个 root
+        {
+            let left_ref = root.left.as_ref().unwrap();
+            let left_parent = left_ref.parent.as_ref().unwrap();
+            assert_eq!(
+                left_parent.as_ptr(),
+                &root as *const HtreeNode as *mut HtreeNode
+            ); // 指向同一个 root
 
-                let right_ref = root.right.as_ref().unwrap();
-                let right_parent = right_ref.parent.as_ref().unwrap();
-                assert_eq!(right_parent.as_ptr(), &root as *const HtreeNode as *mut HtreeNode);
-            }
+            let right_ref = root.right.as_ref().unwrap();
+            let right_parent = right_ref.parent.as_ref().unwrap();
+            assert_eq!(
+                right_parent.as_ptr(),
+                &root as *const HtreeNode as *mut HtreeNode
+            );
+        }
 
-            {
-                let left_mut = root.left.get_mut().unwrap();
-                left_mut.dirty = true;
-                assert!(left_mut.dirty);
-            }
+        {
+            let left_mut = root.left.get_mut().unwrap();
+            left_mut.dirty = true;
+            assert!(left_mut.dirty);
         }
     }
 
-    test_fn! {
-        using TestResult;
-        pub fn test_init_root_node_sets_fields_and_hash() {
-            let mut ht = TeeFsHtree {
-                root: HtreeNode::new(0, TeeFsHtreeNodeImage::default()),
-                data: TeeFsHtreeData::default(),
-                storage: Box::new(TeeFsFdAux::new()),
-            };
-            let result = init_root_node(&mut ht);
+    #[unittest::def_test]
+    pub fn test_init_root_node_sets_fields_and_hash() {
+        let mut ht = TeeFsHtree {
+            root: HtreeNode::new(0, TeeFsHtreeNodeImage::default()),
+            data: TeeFsHtreeData::default(),
+            storage: Box::new(TeeFsFdAux::new()),
+        };
+        let result = init_root_node(&mut ht);
 
-            assert!(result.is_ok());
-            assert_eq!(ht.root.id, 1);
-            assert!(ht.root.dirty);
-            let hex_string = hex::encode(ht.root.node.hash);
-            assert_eq!(hex_string, "094c4931fdb2f2af417c9e0322a9716006e8211fe9017f671ac6e3251300acca");
-        }
+        assert!(result.is_ok());
+        assert_eq!(ht.root.id, 1);
+        assert!(ht.root.dirty);
+        let hex_string = hex::encode(ht.root.node.hash);
+        assert_eq!(
+            hex_string,
+            "094c4931fdb2f2af417c9e0322a9716006e8211fe9017f671ac6e3251300acca"
+        );
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_calc_and_verify_tree() {
+        // 1. Create a sample tree
+        let node_image_root = TeeFsHtreeNodeImage::default();
+        let node_image_l = TeeFsHtreeNodeImage::default();
+        let node_image_r = TeeFsHtreeNodeImage::default();
+        let node_image_ll = TeeFsHtreeNodeImage::default();
+        let node_image_lr = TeeFsHtreeNodeImage::default();
 
-        pub fn test_calc_and_verify_tree() {
-            // 1. Create a sample tree
-            let node_image_root = TeeFsHtreeNodeImage::default();
-            let node_image_l = TeeFsHtreeNodeImage::default();
-            let node_image_r = TeeFsHtreeNodeImage::default();
-            let node_image_ll = TeeFsHtreeNodeImage::default();
-            let node_image_lr = TeeFsHtreeNodeImage::default();
+        let mut root = HtreeNode::new(1, node_image_root);
+        let mut left_child = HtreeNode::new(2, node_image_l);
+        let right_child = HtreeNode::new(3, node_image_r);
+        let left_left_child = HtreeNode::new(4, node_image_ll);
+        let left_right_child = HtreeNode::new(5, node_image_lr);
 
-            let mut root = HtreeNode::new(1, node_image_root);
-            let mut left_child = HtreeNode::new(2, node_image_l);
-            let right_child = HtreeNode::new(3, node_image_r);
-            let left_left_child = HtreeNode::new(4, node_image_ll);
-            let left_right_child = HtreeNode::new(5, node_image_lr);
+        HtreeNode::set_left(&mut left_child, left_left_child);
+        HtreeNode::set_right(&mut left_child, left_right_child);
+        HtreeNode::set_left(&mut root, left_child);
+        HtreeNode::set_right(&mut root, right_child);
+        // Create the TeeFsHtree structure
+        let mut ht = TeeFsHtree {
+            root,
+            data: TeeFsHtreeData::default(),
+            storage: Box::new(TeeFsFdAux::new()),
+        };
+        debug!("Verify tree completed.");
+        let calc_result = calc_tree(&mut ht);
+        assert!(
+            calc_result.is_ok(),
+            "Calc tree failed: {:?}",
+            calc_result.unwrap_err()
+        );
 
-            HtreeNode::set_left(&mut left_child, left_left_child);
-            HtreeNode::set_right(&mut left_child, left_right_child);
-            HtreeNode::set_left(&mut root, left_child);
-            HtreeNode::set_right(&mut root, right_child);
-            // Create the TeeFsHtree structure
-            let mut ht = TeeFsHtree {
-                root,
-                data: TeeFsHtreeData::default(),
-                storage: Box::new(TeeFsFdAux::new()),
-            };
-            debug!("Verify tree completed.");
-            let calc_result = calc_tree(&mut ht);
-            assert!(calc_result.is_ok(), "Calc tree failed: {:?}", calc_result.unwrap_err());
+        // 3. Verify tree hashes
+        let verify_result = verify_tree(&mut ht);
+        assert!(
+            verify_result.is_ok(),
+            "Verify tree failed: {:?}",
+            verify_result.unwrap_err()
+        );
 
-            // 3. Verify tree hashes
-            let verify_result = verify_tree(&mut ht);
-            assert!(verify_result.is_ok(), "Verify tree failed: {:?}", verify_result.unwrap_err());
-
-            let _print_result = print_tree_hash(&mut ht);
-            assert!(verify_result.is_ok(), "Verify tree failed: {:?}", verify_result.unwrap_err());
-        }
+        let _print_result = print_tree_hash(&mut ht);
+        assert!(
+            verify_result.is_ok(),
+            "Verify tree failed: {:?}",
+            verify_result.unwrap_err()
+        );
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_verify_node_after_calc() {
+        let mut ht = TeeFsHtree::default();
+        ht.data.imeta.meta.length = 100;
 
-        pub fn test_verify_node_after_calc() {
-            let mut ht = TeeFsHtree::default();
-            ht.data.imeta.meta.length = 100;
+        let mut node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
 
-            let mut node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
+        // 先计算节点哈希
+        let storage = ht.storage.as_ref();
+        let calc_result = calc_node(&mut node, &ht.data, storage);
+        assert!(calc_result.is_ok());
 
-            // 先计算节点哈希
-            let storage = ht.storage.as_ref();
-            let calc_result = calc_node(&mut node, &ht.data, storage);
-            assert!(calc_result.is_ok());
-
-            // 再验证节点
-            let verify_result = verify_node(&node, &ht.data);
-            assert!(verify_result.is_ok());
-        }
+        // 再验证节点
+        let verify_result = verify_node(&node, &ht.data);
+        assert!(verify_result.is_ok());
     }
 
-    test_fn! {
-        using TestResult;
-        pub fn test_verify_node_without_calc() {
-            let ht = TeeFsHtree::default();
-            let node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
+    #[unittest::def_test]
+    pub fn test_verify_node_without_calc() {
+        let ht = TeeFsHtree::default();
+        let node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
 
-            // 不计算直接验证（应该失败）
-            assert!(verify_node(&node, &ht.data).is_err());
-        }
+        // 不计算直接验证（应该失败）
+        assert!(verify_node(&node, &ht.data).is_err());
     }
 
-    test_fn! {
-        using TestResult;
-        pub fn test_verify_node_with_parent_after_calc() {
-            let ht = TeeFsHtree::default();
-            let parent = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
-            let mut child = HtreeNode::new(2, TeeFsHtreeNodeImage::default());
+    #[unittest::def_test]
+    pub fn test_verify_node_with_parent_after_calc() {
+        let ht = TeeFsHtree::default();
+        let parent = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
+        let mut child = HtreeNode::new(2, TeeFsHtreeNodeImage::default());
 
-            // 设置父子关系
-            child.parent = NonNull::new(&parent as *const HtreeNode as *mut HtreeNode);
+        // 设置父子关系
+        child.parent = NonNull::new(&parent as *const HtreeNode as *mut HtreeNode);
 
-            // 先计算子节点哈希
-            let storage = ht.storage.as_ref();
-            let calc_result = calc_node(&mut child, &ht.data, storage);
-            assert!(calc_result.is_ok());
+        // 先计算子节点哈希
+        let storage = ht.storage.as_ref();
+        let calc_result = calc_node(&mut child, &ht.data, storage);
+        assert!(calc_result.is_ok());
 
-            // 再验证子节点
-            let verify_result = verify_node(&child, &ht.data);
-            assert!(verify_result.is_ok());
-        }
+        // 再验证子节点
+        let verify_result = verify_node(&child, &ht.data);
+        assert!(verify_result.is_ok());
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_update_verify_root() {
+        let mut ht = TeeFsHtree::default();
+        ht.data.uuid = TEE_UUID {
+            timeLow: 1,
+            timeMid: 2,
+            timeHiAndVersion: 3,
+            clockSeqAndNode: [4; 8],
+        };
+        ht.data.imeta.meta.length = 100;
+        ht.data.imeta.max_node_id = 5;
 
-        pub fn test_update_verify_root() {
-            let mut ht = TeeFsHtree::default();
-            ht.data.uuid = TEE_UUID {
-                timeLow: 1,
-                timeMid: 2,
-                timeHiAndVersion: 3,
-                clockSeqAndNode: [4; 8],
-            };
-            ht.data.imeta.meta.length = 100;
-            ht.data.imeta.max_node_id = 5;
+        // 生成 fek
+        tee_fs_fek_crypt(
+            Some(&ht.data.uuid),
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(&ht.data.fek),
+            TEE_FS_KM_FEK_SIZE,
+            Some(&mut ht.data.head.enc_fek),
+        )
+        .unwrap();
 
-            // 生成 fek
-            tee_fs_fek_crypt(
-                Some(&ht.data.uuid),
-                TEE_OperationMode::TEE_MODE_ENCRYPT,
-                Some(&ht.data.fek),
-                TEE_FS_KM_FEK_SIZE,
-                Some(&mut ht.data.head.enc_fek),
-            )
-            .unwrap();
+        // 更新根节点
+        update_root(&mut ht).unwrap();
+        assert_eq!(ht.data.head.counter, 1);
 
-            // 更新根节点
-            update_root(&mut ht).unwrap();
-            assert_eq!(ht.data.head.counter, 1);
+        // 验证根节点
+        verify_root(&mut ht).unwrap();
 
-            // 验证根节点
-            verify_root(&mut ht).unwrap();
-
-            // 验证解密后的数据
-            assert_eq!(ht.data.imeta.meta.length, 100);
-            assert_eq!(ht.data.imeta.max_node_id, 5);
-        }
+        // 验证解密后的数据
+        assert_eq!(ht.data.imeta.meta.length, 100);
+        assert_eq!(ht.data.imeta.max_node_id, 5);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_update_root_multiple_times() {
+        let mut ht = TeeFsHtree::default();
+        ht.data.uuid = TEE_UUID {
+            timeLow: 1,
+            timeMid: 2,
+            timeHiAndVersion: 3,
+            clockSeqAndNode: [4; 8],
+        };
+        ht.data.imeta.meta.length = 200;
+        ht.data.imeta.max_node_id = 10;
 
-        pub fn test_update_root_multiple_times() {
-            let mut ht = TeeFsHtree::default();
-            ht.data.uuid = TEE_UUID {
-                timeLow: 1,
-                timeMid: 2,
-                timeHiAndVersion: 3,
-                clockSeqAndNode: [4; 8],
-            };
-            ht.data.imeta.meta.length = 200;
-            ht.data.imeta.max_node_id = 10;
+        tee_fs_fek_crypt(
+            Some(&ht.data.uuid),
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(&ht.data.fek),
+            TEE_FS_KM_FEK_SIZE,
+            Some(&mut ht.data.head.enc_fek),
+        )
+        .unwrap();
 
-            tee_fs_fek_crypt(
-                Some(&ht.data.uuid),
-                TEE_OperationMode::TEE_MODE_ENCRYPT,
-                Some(&ht.data.fek),
-                TEE_FS_KM_FEK_SIZE,
-                Some(&mut ht.data.head.enc_fek),
-            )
-            .unwrap();
+        // 多次更新
+        update_root(&mut ht).unwrap();
+        assert_eq!(ht.data.head.counter, 1);
 
-            // 多次更新
-            update_root(&mut ht).unwrap();
-            assert_eq!(ht.data.head.counter, 1);
+        update_root(&mut ht).unwrap();
+        assert_eq!(ht.data.head.counter, 2);
 
-            update_root(&mut ht).unwrap();
-            assert_eq!(ht.data.head.counter, 2);
+        update_root(&mut ht).unwrap();
+        assert_eq!(ht.data.head.counter, 3);
 
-            update_root(&mut ht).unwrap();
-            assert_eq!(ht.data.head.counter, 3);
-
-            verify_root(&mut ht).unwrap();
-        }
+        verify_root(&mut ht).unwrap();
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_verify_root_without_update() {
+        let mut ht = TeeFsHtree::default();
+        ht.data.uuid = TEE_UUID {
+            timeLow: 1,
+            timeMid: 2,
+            timeHiAndVersion: 3,
+            clockSeqAndNode: [4; 8],
+        };
+        ht.data.head.imeta = [0x00; TEE_FS_HTREE_IMETA_SIZE]; // 未加密数据
 
-        pub fn test_verify_root_without_update() {
-            let mut ht = TeeFsHtree::default();
-            ht.data.uuid = TEE_UUID {
-                timeLow: 1,
-                timeMid: 2,
-                timeHiAndVersion: 3,
-                clockSeqAndNode: [4; 8],
-            };
-            ht.data.head.imeta = [0x00; TEE_FS_HTREE_IMETA_SIZE]; // 未加密数据
-
-            assert!(verify_root(&mut ht).is_err());
-        }
+        assert!(verify_root(&mut ht).is_err());
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 mod tests_node_id_to_level {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert_eq;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
-
-        pub fn test_node_id_to_level_basic() {
-            assert_eq!(node_id_to_level(1), 1);
-            assert_eq!(node_id_to_level(2), 2);
-            assert_eq!(node_id_to_level(3), 2);
-            assert_eq!(node_id_to_level(4), 3);
-            assert_eq!(node_id_to_level(7), 3);
-            assert_eq!(node_id_to_level(8), 4);
-            assert_eq!(node_id_to_level(15), 4);
-            assert_eq!(node_id_to_level(16), 5);
-        }
+    #[unittest::def_test]
+    pub fn test_node_id_to_level_basic() {
+        assert_eq!(node_id_to_level(1), 1);
+        assert_eq!(node_id_to_level(2), 2);
+        assert_eq!(node_id_to_level(3), 2);
+        assert_eq!(node_id_to_level(4), 3);
+        assert_eq!(node_id_to_level(7), 3);
+        assert_eq!(node_id_to_level(8), 4);
+        assert_eq!(node_id_to_level(15), 4);
+        assert_eq!(node_id_to_level(16), 5);
     }
 
-    test_fn! {
-        using TestResult;
-
-        pub fn test_node_id_to_level_high_values() {
-            assert_eq!(node_id_to_level(1023), 10); // 2^10 - 1
-            assert_eq!(node_id_to_level(1024), 11); // 2^10
-            assert_eq!(node_id_to_level(1 << 30), 31);
-        }
+    #[unittest::def_test]
+    pub fn test_node_id_to_level_high_values() {
+        assert_eq!(node_id_to_level(1023), 10); // 2^10 - 1
+        assert_eq!(node_id_to_level(1024), 11); // 2^10
+        assert_eq!(node_id_to_level(1 << 30), 31);
     }
 
-    test_fn! {
-        using TestResult;
-
-        #[should_panic]
-        pub fn test_node_id_zero_should_panic() {
-            node_id_to_level(0);
-        }
+    #[should_panic]
+    pub fn test_node_id_zero_should_panic() {
+        node_id_to_level(0);
     }
 
-    test_fn! {
-        using TestResult;
-
-        #[should_panic]
-        pub fn test_node_id_max_should_panic() {
-            node_id_to_level(usize::MAX);
-        }
+    #[should_panic]
+    pub fn test_node_id_max_should_panic() {
+        node_id_to_level(usize::MAX);
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 mod tests_find_closest_node {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert_eq;
 
     use super::*;
 
@@ -2497,135 +2483,132 @@ mod tests_find_closest_node {
         }
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_find_closest_node_exact_match() {
+        let mut ht = build_test_tree();
 
-        pub fn test_find_closest_node_exact_match() {
-            let mut ht = build_test_tree();
+        // 查找存在的节点：根节点
+        let found = find_closest_node(&mut ht, 1);
+        assert_eq!(found.id, 1, "应找到根节点 ID 1");
+        let found = find_node(&mut ht, 1).unwrap();
+        assert_eq!(found.id, 1, "应找到根节点 ID 1");
+        let found = find_node(&mut ht, 100).is_some();
+        assert_eq!(found, false, "应找到根节点 ID 1");
 
-            // 查找存在的节点：根节点
-            let found = find_closest_node(&mut ht, 1);
-            assert_eq!(found.id, 1, "应找到根节点 ID 1");
-            let found = find_node(&mut ht, 1).unwrap();
-            assert_eq!(found.id, 1, "应找到根节点 ID 1");
-            let found = find_node(&mut ht, 100).is_some();
-            assert_eq!(found, false, "应找到根节点 ID 1");
+        // 查找存在的节点：左子节点
+        let found = find_closest_node(&mut ht, 2);
+        assert_eq!(found.id, 2, "应找到节点 ID 2");
 
-            // 查找存在的节点：左子节点
-            let found = find_closest_node(&mut ht, 2);
-            assert_eq!(found.id, 2, "应找到节点 ID 2");
+        // 查找存在的节点：右子节点
+        let found = find_closest_node(&mut ht, 3);
+        assert_eq!(found.id, 3, "应找到节点 ID 3");
 
-            // 查找存在的节点：右子节点
-            let found = find_closest_node(&mut ht, 3);
-            assert_eq!(found.id, 3, "应找到节点 ID 3");
+        // 查找存在的叶子节点
+        let found = find_closest_node(&mut ht, 4);
+        assert_eq!(found.id, 4, "应找到叶子节点 ID 4");
 
-            // 查找存在的叶子节点
-            let found = find_closest_node(&mut ht, 4);
-            assert_eq!(found.id, 4, "应找到叶子节点 ID 4");
+        let found = find_closest_node(&mut ht, 5);
+        assert_eq!(found.id, 5, "应找到叶子节点 ID 5");
 
-            let found = find_closest_node(&mut ht, 5);
-            assert_eq!(found.id, 5, "应找到叶子节点 ID 5");
-
-            let found = find_closest_node(&mut ht, 6);
-            assert_eq!(found.id, 6, "应找到叶子节点 ID 6");
-        }
+        let found = find_closest_node(&mut ht, 6);
+        assert_eq!(found.id, 6, "应找到叶子节点 ID 6");
     }
 
-    test_fn! {
-        using TestResult;
-        pub fn test_find_closest_node_non_existent_path_left() {
-            let mut ht = build_test_tree();
+    #[unittest::def_test]
+    pub fn test_find_closest_node_non_existent_path_left() {
+        let mut ht = build_test_tree();
 
-            // 查找一个不存在但其父节点存在的节点：
-            // 目标 ID 7 (111) -> 路径: 1(root) -> 3(right) -> 7(right of 3)
-            // 节点 3 (ID 3) 有左子节点 (ID 6)，但没有右子节点。
-            // find_closest_node 应该找到节点 3。
-            let found = find_closest_node(&mut ht, 7);
-            assert_eq!(found.id, 3, "目标 ID 7 不存在，应返回最近的父节点 ID 3");
+        // 查找一个不存在但其父节点存在的节点：
+        // 目标 ID 7 (111) -> 路径: 1(root) -> 3(right) -> 7(right of 3)
+        // 节点 3 (ID 3) 有左子节点 (ID 6)，但没有右子节点。
+        // find_closest_node 应该找到节点 3。
+        let found = find_closest_node(&mut ht, 7);
+        assert_eq!(found.id, 3, "目标 ID 7 不存在，应返回最近的父节点 ID 3");
 
-            let found = find_closest_node(&mut ht, 9);
-            assert_eq!(found.id, 4, "目标 ID 9 不存在，应返回最近的父节点 ID 4");
+        let found = find_closest_node(&mut ht, 9);
+        assert_eq!(found.id, 4, "目标 ID 9 不存在，应返回最近的父节点 ID 4");
 
-            let found = find_closest_node(&mut ht, 16);
-            assert_eq!(found.id, 4, "目标 ID 16 不存在，应返回最近的父节点 ID 4");
-        }
+        let found = find_closest_node(&mut ht, 16);
+        assert_eq!(found.id, 4, "目标 ID 16 不存在，应返回最近的父节点 ID 4");
     }
 
-    test_fn! {
-        using TestResult;
-        pub fn test_find_closest_node_non_existent_path_deep() {
-            let mut ht = build_test_tree();
+    #[unittest::def_test]
+    pub fn test_find_closest_node_non_existent_path_deep() {
+        let mut ht = build_test_tree();
 
-            // 查找一个更深层级，且路径完全不存在的节点：
-            // 目标 ID 10 (1010) -> 路径: 1(root) -> 2(left) -> 4(left) -> 8(left of 4) -> 16(left of 8) -> etc.
-            // 我们的树在 ID 4 之后没有子节点。
-            // 步骤：
-            // 1. `node_id_to_level(10)` 是 4。
-            // 2. 第一步：`bit_idx = 4 - (0+1) - 1 = 2`。`(10 >> 2) & 1 = (2)&1 = 0` -> 走左子树，到 `node2` (ID 2)。
-            // 3. 第二步：`bit_idx = 4 - (1+1) - 1 = 1`。`(10 >> 1) & 1 = (5)&1 = 1` -> 走右子树，到 `node5` (ID 5)。
-            // 4. 第三步：`bit_idx = 4 - (2+1) - 1 = 0`。`(10 >> 0) & 1 = (10)&1 = 0` -> 走左子树。`node5` 没有左子节点。
-            // 所以，应该返回 `node5` (ID 5)。
-            let found = find_closest_node(&mut ht, 10);
-            assert_eq!(found.id, 5, "目标 ID 10 不存在，应返回路径上最近的节点 ID 5");
+        // 查找一个更深层级，且路径完全不存在的节点：
+        // 目标 ID 10 (1010) -> 路径: 1(root) -> 2(left) -> 4(left) -> 8(left of 4) -> 16(left of 8) -> etc.
+        // 我们的树在 ID 4 之后没有子节点。
+        // 步骤：
+        // 1. `node_id_to_level(10)` 是 4。
+        // 2. 第一步：`bit_idx = 4 - (0+1) - 1 = 2`。`(10 >> 2) & 1 = (2)&1 = 0` -> 走左子树，到 `node2` (ID 2)。
+        // 3. 第二步：`bit_idx = 4 - (1+1) - 1 = 1`。`(10 >> 1) & 1 = (5)&1 = 1` -> 走右子树，到 `node5` (ID 5)。
+        // 4. 第三步：`bit_idx = 4 - (2+1) - 1 = 0`。`(10 >> 0) & 1 = (10)&1 = 0` -> 走左子树。`node5` 没有左子节点。
+        // 所以，应该返回 `node5` (ID 5)。
+        let found = find_closest_node(&mut ht, 10);
+        assert_eq!(
+            found.id, 5,
+            "目标 ID 10 不存在，应返回路径上最近的节点 ID 5"
+        );
 
-            // 查找 ID 15 (1111)
-            // 1. `node_id_to_level(15)` 是 4。
-            // 2. `bit_idx = 2`. `(15 >> 2) & 1 = (3)&1 = 1` -> 走右子树，到 `node3` (ID 3)。
-            // 3. `bit_idx = 1`. `(15 >> 1) & 1 = (7)&1 = 1` -> 走右子树。`node3` 没有右子节点。
-            // 所以，应该返回 `node3` (ID 3)。
-            let found = find_closest_node(&mut ht, 15);
-            assert_eq!(found.id, 3, "目标 ID 15 不存在，应返回路径上最近的节点 ID 3");
-        }
+        // 查找 ID 15 (1111)
+        // 1. `node_id_to_level(15)` 是 4。
+        // 2. `bit_idx = 2`. `(15 >> 2) & 1 = (3)&1 = 1` -> 走右子树，到 `node3` (ID 3)。
+        // 3. `bit_idx = 1`. `(15 >> 1) & 1 = (7)&1 = 1` -> 走右子树。`node3` 没有右子节点。
+        // 所以，应该返回 `node3` (ID 3)。
+        let found = find_closest_node(&mut ht, 15);
+        assert_eq!(
+            found.id, 3,
+            "目标 ID 15 不存在，应返回路径上最近的节点 ID 3"
+        );
     }
 
-    test_fn! {
-        using TestResult;
-
-        #[should_panic]
-        pub fn test_find_closest_node_target_is_zero() {
-            let mut ht = build_test_tree();
-            // 如果目标 ID 是 0，根据逻辑应返回根节点。
-            let found = find_closest_node(&mut ht, 1);
-            assert_eq!(found.id, 1, "目标 ID 0 应返回根节点 ID 1");
-        }
+    #[unittest::def_test]
+    #[should_panic]
+    pub fn test_find_closest_node_target_is_zero() {
+        let mut ht = build_test_tree();
+        // 如果目标 ID 是 0，根据逻辑应返回根节点。
+        let found = find_closest_node(&mut ht, 1);
+        assert_eq!(found.id, 1, "目标 ID 0 应返回根节点 ID 1");
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_find_closest_node_empty_tree_or_only_root() {
+        // 测试只有根节点的树
+        let root_node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
+        let mut ht = TeeFsHtree {
+            root: root_node,
+            data: TeeFsHtreeData::default(),
+            storage: Box::new(TeeFsFdAux::new()),
+        };
 
-        pub fn test_find_closest_node_empty_tree_or_only_root() {
-            // 测试只有根节点的树
-            let root_node = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
-            let mut ht = TeeFsHtree {
-                root: root_node,
-                data: TeeFsHtreeData::default(),
-                storage: Box::new(TeeFsFdAux::new()),
-            };
+        // 查找根节点
+        let found = find_closest_node(&mut ht, 1);
+        assert_eq!(found.id, 1, "只有根节点的树，查找根节点");
 
-            // 查找根节点
-            let found = find_closest_node(&mut ht, 1);
-            assert_eq!(found.id, 1, "只有根节点的树，查找根节点");
+        // 查找不存在的子节点 (例如 ID 2，左子节点)
+        let found = find_closest_node(&mut ht, 2);
+        assert_eq!(
+            found.id, 1,
+            "只有根节点的树，查找不存在的子节点应返回根节点"
+        );
 
-            // 查找不存在的子节点 (例如 ID 2，左子节点)
-            let found = find_closest_node(&mut ht, 2);
-            assert_eq!(found.id, 1, "只有根节点的树，查找不存在的子节点应返回根节点");
-
-            // 查找不存在的子节点 (例如 ID 3，右子节点)
-            let found = find_closest_node(&mut ht, 3);
-            assert_eq!(found.id, 1, "只有根节点的树，查找不存在的子节点应返回根节点");
-        }
+        // 查找不存在的子节点 (例如 ID 3，右子节点)
+        let found = find_closest_node(&mut ht, 3);
+        assert_eq!(
+            found.id, 1,
+            "只有根节点的树，查找不存在的子节点应返回根节点"
+        );
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 mod tests_get_node {
     //-------- test framework import --------
     //-------- local tests import --------
     use alloc::collections::VecDeque;
 
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{TestResult, assert, assert_eq};
 
     use super::*;
 
@@ -2694,125 +2677,111 @@ mod tests_get_node {
     }
 
     // 测试场景 1: 查找已存在的根节点 (create = false)
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_get_node_root_exists_no_create() {
+        let mut ht = build_root_only_tree();
+        let initial_max_id = ht.data.imeta.max_node_id;
 
-        pub fn test_get_node_root_exists_no_create() {
-            let mut ht = build_root_only_tree();
-            let initial_max_id = ht.data.imeta.max_node_id;
-
-            let result = get_node(&mut ht, false, 1);
-            assert!(result.is_ok());
-            let node = result.unwrap();
-            assert_eq!(node.id, 1);
-            assert_eq!(ht.data.imeta.max_node_id, initial_max_id); // max_node_id 不应改变
-            assert_tree_structure(&ht, &[1], initial_max_id); // 树结构不变
-        }
+        let result = get_node(&mut ht, false, 1);
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.id, 1);
+        assert_eq!(ht.data.imeta.max_node_id, initial_max_id); // max_node_id 不应改变
+        assert_tree_structure(&ht, &[1], initial_max_id); // 树结构不变
     }
 
     // 测试场景 2: 查找已存在的叶子节点 (create = false)
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_get_node_leaf_exists_no_create() {
+        let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
+        let initial_max_id = ht.data.imeta.max_node_id;
 
-        pub fn test_get_node_leaf_exists_no_create() {
-            let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
-            let initial_max_id = ht.data.imeta.max_node_id;
-
-            let result = get_node(&mut ht, false, 4);
-            assert!(result.is_ok());
-            let node = result.unwrap();
-            assert_eq!(node.id, 4);
-            assert_eq!(ht.data.imeta.max_node_id, initial_max_id);
-            assert_tree_structure(&ht, &[1, 2, 3, 4], initial_max_id);
-        }
+        let result = get_node(&mut ht, false, 4);
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.id, 4);
+        assert_eq!(ht.data.imeta.max_node_id, initial_max_id);
+        assert_tree_structure(&ht, &[1, 2, 3, 4], initial_max_id);
     }
 
     // 测试场景 3: 查找已存在的中间节点 (create = false)
-    test_fn! {
-        using TestResult;
-        pub fn test_get_node_intermediate_exists_no_create() {
-            let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
-            let initial_max_id = ht.data.imeta.max_node_id;
+    #[unittest::def_test]
+    pub fn test_get_node_intermediate_exists_no_create() {
+        let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
+        let initial_max_id = ht.data.imeta.max_node_id;
 
-            let node = get_node(&mut ht, false, 2).unwrap();
-            assert_eq!(node.id, 2);
-            assert_eq!(ht.data.imeta.max_node_id, initial_max_id);
-            assert_tree_structure(&ht, &[1, 2, 3, 4], initial_max_id);
-        }
+        let node = get_node(&mut ht, false, 2).unwrap();
+        assert_eq!(node.id, 2);
+        assert_eq!(ht.data.imeta.max_node_id, initial_max_id);
+        assert_tree_structure(&ht, &[1, 2, 3, 4], initial_max_id);
     }
     // // 测试场景 4: 查找不存在的节点 (create = false)
-    test_fn! {
-        using TestResult;
-        pub fn test_get_node_not_exists_no_create() {
-            let mut ht = build_root_only_tree(); // 只有根节点 1
-            let initial_max_id = ht.data.imeta.max_node_id;
+    #[unittest::def_test]
+    pub fn test_get_node_not_exists_no_create() {
+        let mut ht = build_root_only_tree(); // 只有根节点 1
+        let initial_max_id = ht.data.imeta.max_node_id;
 
-            let result = get_node(&mut ht, false, 5); // 5 不存在
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert_eq!(err, TEE_ERROR_GENERIC);
-            assert_eq!(ht.data.imeta.max_node_id, initial_max_id); // max_node_id 不应改变
-            assert_tree_structure(&ht, &[1], initial_max_id); // 树结构不变
-        }
+        let result = get_node(&mut ht, false, 5); // 5 不存在
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err, TEE_ERROR_GENERIC);
+        assert_eq!(ht.data.imeta.max_node_id, initial_max_id); // max_node_id 不应改变
+        assert_tree_structure(&ht, &[1], initial_max_id); // 树结构不变
     }
     // 测试场景 5: 查找已存在的节点 (create = true) - 不应有副作用
-    test_fn! {
-        using TestResult;
-        pub fn test_get_node_exists_with_create_no_side_effects() {
-            let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
-            let initial_max_id = ht.data.imeta.max_node_id;
+    #[unittest::def_test]
+    pub fn test_get_node_exists_with_create_no_side_effects() {
+        let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
+        let initial_max_id = ht.data.imeta.max_node_id;
 
-            let result = get_node(&mut ht, true, 3); // 3 已经存在
-            assert!(result.is_ok());
-            let node = result.unwrap();
-            assert_eq!(node.id, 3);
-            assert_eq!(ht.data.imeta.max_node_id, initial_max_id); // max_node_id 不应改变
-            assert_tree_structure(&ht, &[1, 2, 3, 4], initial_max_id); // 树结构不变
-        }
+        let result = get_node(&mut ht, true, 3); // 3 已经存在
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.id, 3);
+        assert_eq!(ht.data.imeta.max_node_id, initial_max_id); // max_node_id 不应改变
+        assert_tree_structure(&ht, &[1, 2, 3, 4], initial_max_id); // 树结构不变
     }
     // 测试场景 6: 创建一个需要补齐路径上的一个节点的场景 (左子节点)
     // 初始: 1-2-4。 目标: 5 (2的右子节点)
     // `get_node` 的 `for n in current_id..=node_id` 循环: `for n in 4..=5`
     // 预期 `find_closest_node(ht, 5)` 返回 2。
     // 循环会处理 `n=4` (已存在), `n=5` (不存在，创建)。
-    test_fn! {
-        using TestResult;
-        pub fn test_get_node_create_single_missing_left_child() {
-            let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
-            // 确保 ID=5 (2的右子) 不存在
-            assert!(ht.root.left.as_ref().unwrap().right.is_none());
+    #[unittest::def_test]
+    pub fn test_get_node_create_single_missing_left_child() {
+        let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
+        // 确保 ID=5 (2的右子) 不存在
+        assert!(ht.root.left.as_ref().unwrap().right.is_none());
 
-            let result = get_node(&mut ht, true, 5); // 路径 1 -> 2 -> 5
-            assert!(result.is_ok());
+        let result = get_node(&mut ht, true, 5); // 路径 1 -> 2 -> 5
+        assert!(result.is_ok());
 
-            // 先获取 node 的 id 和 parent，然后释放借用
-            let (node_id, parent_ptr) = {
-                let node = result.unwrap();
-                let id = node.id;
-                let parent = node.parent;
-                (id, parent)
-            };
-            assert_eq!(node_id, 5);
+        // 先获取 node 的 id 和 parent，然后释放借用
+        let (node_id, parent_ptr) = {
+            let node = result.unwrap();
+            let id = node.id;
+            let parent = node.parent;
+            (id, parent)
+        };
+        assert_eq!(node_id, 5);
 
-            // 验证 max_node_id 是否更新
-            assert_eq!(ht.data.imeta.max_node_id, 5);
+        // 验证 max_node_id 是否更新
+        assert_eq!(ht.data.imeta.max_node_id, 5);
 
-            // 验证树结构 (注意：根据您的 `get_node` 实现，这里可能需要调整期望的树结构)
-            // 期望是: 1-2-3-4-5 (5是2的右子)
-            assert_tree_structure(&ht, &[1, 2, 3, 4, 5], 5); // 期望 5 在树中
+        // 验证树结构 (注意：根据您的 `get_node` 实现，这里可能需要调整期望的树结构)
+        // 期望是: 1-2-3-4-5 (5是2的右子)
+        assert_tree_structure(&ht, &[1, 2, 3, 4, 5], 5); // 期望 5 在树中
 
-            // 额外验证连接
-            let node2_from_tree = ht.root.left.get_ref().unwrap();
-            assert!(node2_from_tree.right.is_some());
-            assert_eq!(node2_from_tree.right.as_ref().unwrap().id, 5);
+        // 额外验证连接
+        let node2_from_tree = ht.root.left.get_ref().unwrap();
+        assert!(node2_from_tree.right.is_some());
+        assert_eq!(node2_from_tree.right.as_ref().unwrap().id, 5);
 
-            // 验证 parent 指针
-            if let Some(parent_ptr) = parent_ptr {
-                let parent_ref = unsafe { &*parent_ptr.as_ptr() };
-                assert_eq!(parent_ref.id, 2);
-            } else {
-                panic!("Node 5 should have a parent");
-            }
+        // 验证 parent 指针
+        if let Some(parent_ptr) = parent_ptr {
+            let parent_ref = unsafe { &*parent_ptr.as_ptr() };
+            assert_eq!(parent_ref.id, 2);
+        } else {
+            panic!("Node 5 should have a parent");
         }
     }
     // 测试场景 7: 创建一个需要补齐路径上的一个节点的场景 (右子节点)
@@ -2820,437 +2789,349 @@ mod tests_get_node {
     // `get_node` 的 `for n in current_id..=node_id` 循环: `for n in 3..=6`
     // 预期 `find_closest_node(ht, 6)` 返回 3。
     // 循环会处理 `n=3` (已存在), `n=4,5` (不存在，但不在路径上), `n=6` (不存在，创建)。
-    test_fn! {
-        using TestResult;
-        pub fn test_get_node_create_single_missing_right_child() {
-            let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
-            // 确保 ID=6 (3的左子) 不存在
-            assert!(ht.root.right.get_ref().unwrap().left.is_none());
+    #[unittest::def_test]
+    pub fn test_get_node_create_single_missing_right_child() {
+        let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
+        // 确保 ID=6 (3的左子) 不存在
+        assert!(ht.root.right.get_ref().unwrap().left.is_none());
 
-            let result = get_node(&mut ht, true, 6); // 路径 1 -> 3 -> 6
-            assert!(result.is_ok());
-            let (node_id, parent_ptr) = {
-                let node = result.unwrap();
-                let id = node.id;
-                let parent = node.parent;
-                (id, parent)
-            };
-            assert_eq!(node_id, 6);
+        let result = get_node(&mut ht, true, 6); // 路径 1 -> 3 -> 6
+        assert!(result.is_ok());
+        let (node_id, parent_ptr) = {
+            let node = result.unwrap();
+            let id = node.id;
+            let parent = node.parent;
+            (id, parent)
+        };
+        assert_eq!(node_id, 6);
 
-            assert_eq!(ht.data.imeta.max_node_id, 6);
+        assert_eq!(ht.data.imeta.max_node_id, 6);
 
-            // 注意：根据 `for n in current_id..=node_id` 的行为，
-            // 可能会创建额外的节点。这个测试的预期行为将基于 `get_node` 的实际实现。
-            // 对于这个版本，`n=4,5` 会被处理。
-            // `find_closest_node(ht, 4)` 可能返回 2 (如果 4 存在) 或 1 (如果 4 不存在)
-            // `find_closest_node(ht, 5)` 可能返回 2 (如果 5 不存在) 或 1 (如果 5 不存在)
-            // 预期ID序列可能变长: 1, 2, 3, 4, [5], 6.
-            // 如果 4 存在，那么 5 将被创建并连接到 2 的右侧。
-            // 如果 4 不存在，则 4 将被创建并连接到 2 的左侧。
-            // 鉴于 `build_partial_tree` 包含 4，所以 5 会被创建。
-            // 期望的结构: 1, 2, 3, 4, 5 (2的右), 6 (3的左)
-            assert_tree_structure(&ht, &[1, 2, 3, 4, 5, 6], 6);
+        // 注意：根据 `for n in current_id..=node_id` 的行为，
+        // 可能会创建额外的节点。这个测试的预期行为将基于 `get_node` 的实际实现。
+        // 对于这个版本，`n=4,5` 会被处理。
+        // `find_closest_node(ht, 4)` 可能返回 2 (如果 4 存在) 或 1 (如果 4 不存在)
+        // `find_closest_node(ht, 5)` 可能返回 2 (如果 5 不存在) 或 1 (如果 5 不存在)
+        // 预期ID序列可能变长: 1, 2, 3, 4, [5], 6.
+        // 如果 4 存在，那么 5 将被创建并连接到 2 的右侧。
+        // 如果 4 不存在，则 4 将被创建并连接到 2 的左侧。
+        // 鉴于 `build_partial_tree` 包含 4，所以 5 会被创建。
+        // 期望的结构: 1, 2, 3, 4, 5 (2的右), 6 (3的左)
+        assert_tree_structure(&ht, &[1, 2, 3, 4, 5, 6], 6);
 
-            // 额外验证连接
-            let node3_from_tree = ht.root.right.get_ref().unwrap();
-            assert!(node3_from_tree.left.is_some());
-            assert_eq!(node3_from_tree.left.as_ref().unwrap().id, 6);
-            if let Some(parent_ptr) = parent_ptr {
-                let parent_ref = unsafe { &*parent_ptr.as_ptr() };
-                assert_eq!(parent_ref.id, 3);
-            } else {
-                panic!("Node 6 should have a parent");
-            }
+        // 额外验证连接
+        let node3_from_tree = ht.root.right.get_ref().unwrap();
+        assert!(node3_from_tree.left.is_some());
+        assert_eq!(node3_from_tree.left.as_ref().unwrap().id, 6);
+        if let Some(parent_ptr) = parent_ptr {
+            let parent_ref = unsafe { &*parent_ptr.as_ptr() };
+            assert_eq!(parent_ref.id, 3);
+        } else {
+            panic!("Node 6 should have a parent");
         }
     }
     // 测试场景 8: 创建多个中间缺失节点 (所有在路径上，但非连续ID)
     // 初始: 只有 1。 目标: 4 (路径: 1 -> 2 -> 4)
     // `get_node` 的 `for n in current_id..=node_id` 循环: `for n in 1..=4`
     // 预期会创建 2 和 4，但也会不必要地处理 3。
-    test_fn! {
-        using TestResult;
-        pub fn test_get_node_create_multiple_missing_nodes_linear_ids() {
-            let mut ht = build_root_only_tree(); // 只有根节点 1
-            let result = get_node(&mut ht, true, 4); // 路径 1 -> 2 -> 4
-            assert!(result.is_ok());
-            let created_node_arc = result.unwrap();
-            assert_eq!(created_node_arc.id, 4);
+    #[unittest::def_test]
+    pub fn test_get_node_create_multiple_missing_nodes_linear_ids() {
+        let mut ht = build_root_only_tree(); // 只有根节点 1
+        let result = get_node(&mut ht, true, 4); // 路径 1 -> 2 -> 4
+        assert!(result.is_ok());
+        let created_node_arc = result.unwrap();
+        assert_eq!(created_node_arc.id, 4);
 
-            assert_eq!(ht.data.imeta.max_node_id, 4);
+        assert_eq!(ht.data.imeta.max_node_id, 4);
 
-            // 预期会创建 2, 3, 4。 3 是 1 的右子。
-            // 结构: 1(root) -> 2(L), 3(R) -> 4(2L)
-            assert_tree_structure(&ht, &[1, 2, 3, 4], 4);
+        // 预期会创建 2, 3, 4。 3 是 1 的右子。
+        // 结构: 1(root) -> 2(L), 3(R) -> 4(2L)
+        assert_tree_structure(&ht, &[1, 2, 3, 4], 4);
 
-            // 额外验证连接
-            let root = ht.root;
-            assert!(root.left.is_some());
-            assert_eq!(root.left.as_ref().unwrap().id, 2);
-            assert!(root.right.is_some()); // ID=3 应该被创建
-            assert_eq!(root.right.as_ref().unwrap().id, 3);
+        // 额外验证连接
+        let root = ht.root;
+        assert!(root.left.is_some());
+        assert_eq!(root.left.as_ref().unwrap().id, 2);
+        assert!(root.right.is_some()); // ID=3 应该被创建
+        assert_eq!(root.right.as_ref().unwrap().id, 3);
 
-            let node2_from_tree = root.left.get_ref().unwrap();
-            assert!(node2_from_tree.left.is_some());
-            assert_eq!(node2_from_tree.left.as_ref().unwrap().id, 4);
-        }
+        let node2_from_tree = root.left.get_ref().unwrap();
+        assert!(node2_from_tree.left.is_some());
+        assert_eq!(node2_from_tree.left.as_ref().unwrap().id, 4);
     }
     // 测试场景 9: 创建更深层次的节点，验证 max_node_id 更新
     // 初始: 1,2,3,4。 目标: 8 (路径: 1 -> 2 -> 4 -> 8)
     // `get_node` 的 `for n in current_id..=node_id` 循环: `for n in 4..=8`
     // 预期会处理 4, 5, 6, 7, 8。
     // 5, 6, 7 不在路径上。
-    test_fn! {
-        using TestResult;
-        pub fn test_get_node_create_deeper_node_and_max_id_update() {
-            let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
-            let _initial_max_id = ht.data.imeta.max_node_id; // 初始为 4
+    #[unittest::def_test]
+    pub fn test_get_node_create_deeper_node_and_max_id_update() {
+        let mut ht = build_partial_tree(); // 包含 1, 2, 3, 4
+        let _initial_max_id = ht.data.imeta.max_node_id; // 初始为 4
 
-            let result = get_node(&mut ht, true, 8); // 路径 1 -> 2 -> 4 -> 8
-            assert!(result.is_ok());
-            let created_node_arc = result.unwrap();
-            assert_eq!(created_node_arc.id, 8);
+        let result = get_node(&mut ht, true, 8); // 路径 1 -> 2 -> 4 -> 8
+        assert!(result.is_ok());
+        let created_node_arc = result.unwrap();
+        assert_eq!(created_node_arc.id, 8);
 
-            // max_node_id 应该更新到 8
-            assert_eq!(ht.data.imeta.max_node_id, 8);
+        // max_node_id 应该更新到 8
+        assert_eq!(ht.data.imeta.max_node_id, 8);
 
-            // 验证树结构：这会非常复杂，因为 5, 6, 7 都会被不必要地创建和连接。
-            // 预期 ID 序列：1, 2, 3, 4, 5(2的右), 6(3的左), 7(3的右), 8(4的左)
-            assert_tree_structure(&ht, &[1, 2, 3, 4, 5, 6, 7, 8], 8);
+        // 验证树结构：这会非常复杂，因为 5, 6, 7 都会被不必要地创建和连接。
+        // 预期 ID 序列：1, 2, 3, 4, 5(2的右), 6(3的左), 7(3的右), 8(4的左)
+        assert_tree_structure(&ht, &[1, 2, 3, 4, 5, 6, 7, 8], 8);
 
-            // 额外验证路径上的连接
-            let node4_from_tree = ht.root
-                .left.get_ref().unwrap()
-                .left.get_ref().unwrap();
-            assert!(node4_from_tree.left.is_some());
-            assert_eq!(node4_from_tree.left.get_ref().unwrap().id, 8);
-        }
+        // 额外验证路径上的连接
+        let node4_from_tree = ht.root.left.get_ref().unwrap().left.get_ref().unwrap();
+        assert!(node4_from_tree.left.is_some());
+        assert_eq!(node4_from_tree.left.get_ref().unwrap().id, 8);
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 mod tests_authenc_funcs {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_authenc_functions() {
+        // 1. 创建测试用的 TeeFsHtree
+        let mut ht = TeeFsHtree::default();
 
-        pub fn test_authenc_functions() {
-            // 1. 创建测试用的 TeeFsHtree
-            let mut ht = TeeFsHtree::default();
+        // 初始化必要的字段
+        ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.counter = 12345;
+        ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
 
-            // 初始化必要的字段
-            ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.counter = 12345;
-            ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
+        // 设置根节点的哈希
+        ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
 
-            // 设置根节点的哈希
-            ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
+        // 2. 创建测试数据
+        let test_data = b"Hello, TEE World!.";
+        let mut plaintext = [0u8; 64];
+        plaintext[..test_data.len()].copy_from_slice(test_data);
 
-            // 2. 创建测试数据
-            let test_data = b"Hello, TEE World!.";
-            let mut plaintext = [0u8; 64];
-            plaintext[..test_data.len()].copy_from_slice(test_data);
+        // 3. 测试加密流程
+        // 创建节点镜像用于加密
+        let mut node_image = TeeFsHtreeNodeImage::default();
+        node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
 
-            // 3. 测试加密流程
-            // 创建节点镜像用于加密
-            let mut node_image = TeeFsHtreeNodeImage::default();
-            node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
+        // 初始化加密上下文
+        let encrypt_cipher = authenc_init::<Encryption>(
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            &mut ht,
+            Some(&mut node_image),
+            plaintext.len(),
+            None,
+        )
+        .expect("Failed to initialize encryption cipher");
 
-            // 初始化加密上下文
-            let encrypt_cipher = authenc_init::<Encryption>(
-                TEE_OperationMode::TEE_MODE_ENCRYPT,
-                &mut ht,
-                Some(&mut node_image),
-                plaintext.len(),
-                None,
-            )
-            .expect("Failed to initialize encryption cipher");
+        // 执行加密
+        let mut ciphertext = [0u8; 64];
+        let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
 
-            // 执行加密
-            let mut ciphertext = [0u8; 64];
-            let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
+        authenc_encrypt_final(encrypt_cipher, &mut tag, &plaintext, &mut ciphertext)
+            .expect("Encryption failed");
 
-            authenc_encrypt_final(encrypt_cipher, &mut tag, &plaintext, &mut ciphertext)
-                .expect("Encryption failed");
+        // 4. 测试解密流程
+        // 初始化解密上下文
+        let decrypt_cipher = authenc_init::<Decryption>(
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            &mut ht,
+            Some(&mut node_image),
+            ciphertext.len(),
+            None,
+        )
+        .expect("Failed to initialize decryption cipher");
 
-            // 4. 测试解密流程
-            // 初始化解密上下文
-            let decrypt_cipher = authenc_init::<Decryption>(
-                TEE_OperationMode::TEE_MODE_DECRYPT,
-                &mut ht,
-                Some(&mut node_image),
-                ciphertext.len(),
-                None,
-            )
-            .expect("Failed to initialize decryption cipher");
+        // 执行解密
+        let mut decrypted = [0u8; 64];
 
-            // 执行解密
-            let mut decrypted = [0u8; 64];
+        authenc_decrypt_final(decrypt_cipher, &tag, &ciphertext, &mut decrypted)
+            .expect("Decryption failed");
 
-            authenc_decrypt_final(decrypt_cipher, &tag, &ciphertext, &mut decrypted)
-                .expect("Decryption failed");
+        // 5. 验证结果
+        assert_eq!(&plaintext[..test_data.len()], test_data);
+        assert_eq!(&decrypted[..test_data.len()], test_data);
 
-            // 5. 验证结果
-            assert_eq!(&plaintext[..test_data.len()], test_data);
-            assert_eq!(&decrypted[..test_data.len()], test_data);
+        // 验证加密和解密的数据不同（加密成功）
+        assert_ne!(
+            &plaintext[..test_data.len()],
+            &ciphertext[..test_data.len()]
+        );
 
-            // 验证加密和解密的数据不同（加密成功）
-            assert_ne!(
-                &plaintext[..test_data.len()],
-                &ciphertext[..test_data.len()]
-            );
-
-            debug!("Encryption/Decryption test passed!");
-            debug!(
-                "Original: {:?}",
-                String::from_utf8_lossy(&plaintext[..test_data.len()])
-            );
-            debug!(
-                "Decrypted: {:?}",
-                String::from_utf8_lossy(&decrypted[..test_data.len()])
-            );
-        }
+        debug!("Encryption/Decryption test passed!");
+        debug!(
+            "Original: {:?}",
+            String::from_utf8_lossy(&plaintext[..test_data.len()])
+        );
+        debug!(
+            "Decrypted: {:?}",
+            String::from_utf8_lossy(&decrypted[..test_data.len()])
+        );
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_authenc_roundtrip_no_node_image() {
+        let mut ht = TeeFsHtree::default();
+        ht.data.fek = [0x11; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.enc_fek = [0x22; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.counter = 1;
+        ht.data.head.iv = [0x33; TEE_FS_HTREE_IV_SIZE];
+        ht.root.node.hash = [0x44; TEE_FS_HTREE_HASH_SIZE];
 
-        pub fn test_authenc_roundtrip_no_node_image() {
-            let mut ht = TeeFsHtree::default();
-            ht.data.fek = [0x11; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.enc_fek = [0x22; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.counter = 1;
-            ht.data.head.iv = [0x33; TEE_FS_HTREE_IV_SIZE];
-            ht.root.node.hash = [0x44; TEE_FS_HTREE_HASH_SIZE];
+        let msg = b"roundtrip-no-node-image";
+        let mut plain = [0u8; 32];
+        plain[..msg.len()].copy_from_slice(msg);
 
-            let msg = b"roundtrip-no-node-image";
-            let mut plain = [0u8; 32];
-            plain[..msg.len()].copy_from_slice(msg);
+        let enc = authenc_init::<Encryption>(
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            &mut ht,
+            None,
+            msg.len(),
+            None,
+        )
+        .unwrap();
+        let mut crypt = [0u8; 32];
+        let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
+        authenc_encrypt_final(enc, &mut tag, &plain[..msg.len()], &mut crypt[..msg.len()]).unwrap();
 
-            let enc = authenc_init::<Encryption>(TEE_OperationMode::TEE_MODE_ENCRYPT, &mut ht, None, msg.len(), None)
-                .unwrap();
-            let mut crypt = [0u8; 32];
-            let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
-            authenc_encrypt_final(enc, &mut tag, &plain[..msg.len()], &mut crypt[..msg.len()]).unwrap();
+        assert_ne!(&plain[..msg.len()], &crypt[..msg.len()]);
 
-            assert_ne!(&plain[..msg.len()], &crypt[..msg.len()]);
+        let dec = authenc_init::<Decryption>(
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            &mut ht,
+            None,
+            msg.len(),
+            None,
+        )
+        .unwrap();
+        let mut out = [0u8; 32];
+        authenc_decrypt_final(dec, &tag, &crypt[..msg.len()], &mut out[..msg.len()]).unwrap();
 
-            let dec = authenc_init::<Decryption>(TEE_OperationMode::TEE_MODE_DECRYPT, &mut ht, None, msg.len(), None)
-                .unwrap();
-            let mut out = [0u8; 32];
-            authenc_decrypt_final(dec, &tag, &crypt[..msg.len()], &mut out[..msg.len()]).unwrap();
-
-            assert_eq!(&out[..msg.len()], msg);
-        }
+        assert_eq!(&out[..msg.len()], msg);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    pub fn test_authenc_empty_data() {
+        let mut ht = TeeFsHtree::default();
+        ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.counter = 1;
+        ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
+        ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
 
-        pub fn test_authenc_empty_data() {
-            let mut ht = TeeFsHtree::default();
-            ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.counter = 1;
-            ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
-            ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
+        let mut node_image = TeeFsHtreeNodeImage::default();
+        node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
 
-            let mut node_image = TeeFsHtreeNodeImage::default();
-            node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
+        let enc = authenc_init::<Encryption>(
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            &mut ht,
+            Some(&mut node_image),
+            0,
+            None,
+        )
+        .unwrap();
+        let mut crypt = [0u8; 0];
+        let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
+        authenc_encrypt_final(enc, &mut tag, &[], &mut crypt).unwrap();
 
-            let enc = authenc_init::<Encryption>(
-                TEE_OperationMode::TEE_MODE_ENCRYPT,
-                &mut ht,
-                Some(&mut node_image),
-                0,
-                None,
-            )
-            .unwrap();
-            let mut crypt = [0u8; 0];
-            let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
-            authenc_encrypt_final(enc, &mut tag, &[], &mut crypt).unwrap();
-
-            let dec = authenc_init::<Decryption>(
-                TEE_OperationMode::TEE_MODE_DECRYPT,
-                &mut ht,
-                Some(&mut node_image),
-                0,
-                None,
-            )
-            .unwrap();
-            let mut out = [0u8; 0];
-            authenc_decrypt_final(dec, &tag, &[], &mut out).unwrap();
-        }
+        let dec = authenc_init::<Decryption>(
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            &mut ht,
+            Some(&mut node_image),
+            0,
+            None,
+        )
+        .unwrap();
+        let mut out = [0u8; 0];
+        authenc_decrypt_final(dec, &tag, &[], &mut out).unwrap();
     }
 
-    test_fn! {
-        using TestResult;
-        pub fn test_authenc_wrong_tag() {
-            let mut ht = TeeFsHtree::default();
-            ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
-            ht.data.head.counter = 1;
-            ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
-            ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
+    #[unittest::def_test]
+    pub fn test_authenc_wrong_tag() {
+        let mut ht = TeeFsHtree::default();
+        ht.data.fek = [0x01; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.enc_fek = [0x02; TEE_FS_HTREE_FEK_SIZE];
+        ht.data.head.counter = 1;
+        ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
+        ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
 
-            let mut node_image = TeeFsHtreeNodeImage::default();
-            node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
+        let mut node_image = TeeFsHtreeNodeImage::default();
+        node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
 
-            let enc = authenc_init::<Encryption>(
-                TEE_OperationMode::TEE_MODE_ENCRYPT,
-                &mut ht,
-                Some(&mut node_image),
-                4,
-                None,
-            )
-            .unwrap();
-            let mut crypt = [0u8; 4];
-            let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
-            authenc_encrypt_final(enc, &mut tag, b"test", &mut crypt).unwrap();
+        let enc = authenc_init::<Encryption>(
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            &mut ht,
+            Some(&mut node_image),
+            4,
+            None,
+        )
+        .unwrap();
+        let mut crypt = [0u8; 4];
+        let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
+        authenc_encrypt_final(enc, &mut tag, b"test", &mut crypt).unwrap();
 
-            let dec = authenc_init::<Decryption>(
-                TEE_OperationMode::TEE_MODE_DECRYPT,
-                &mut ht,
-                Some(&mut node_image),
-                4,
-                None,
-            )
-            .unwrap();
-            let mut out = [0u8; 4];
-            tag[0] ^= 1;
-            assert!(authenc_decrypt_final(dec, &tag, &crypt, &mut out).is_err());
-        }
+        let dec = authenc_init::<Decryption>(
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            &mut ht,
+            Some(&mut node_image),
+            4,
+            None,
+        )
+        .unwrap();
+        let mut out = [0u8; 4];
+        tag[0] ^= 1;
+        assert!(authenc_decrypt_final(dec, &tag, &crypt, &mut out).is_err());
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_fs_htree {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
 
     use super::*;
     use crate::tee::common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT};
 
-    test_fn! {
-        using TestResult;
-        fn test_tee_fs_htree_open() {
-            let fd = FileVariant::open("test_fs_htree_open.bin", FS_OFLAG_DEFAULT, FS_MODE_644).unwrap();
+    #[unittest::def_test(custom)]
+    fn test_tee_fs_htree_open() {
+        let fd =
+            FileVariant::open("test_fs_htree_open.bin", FS_OFLAG_DEFAULT, FS_MODE_644).unwrap();
 
-            let uuid = TEE_UUID { timeLow: 1, timeMid: 2, timeHiAndVersion: 3, clockSeqAndNode: [4; 8] };
-            let mut hash = [0u8; TEE_FS_HTREE_HASH_SIZE];
+        let uuid = TEE_UUID {
+            timeLow: 1,
+            timeMid: 2,
+            timeHiAndVersion: 3,
+            clockSeqAndNode: [4; 8],
+        };
+        let mut hash = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-            let fd_back = fd;
-            info!("fd_back: {:?}", fd_back);
-            // 先创建文件 (create = true)
-            let ht_create = tee_fs_htree_open(
-                Box::new(TeeFsFdAux { fd }),
-                true,
-                Some(&mut hash),
-                Some(&uuid),
-            ).unwrap();
+        let fd_back = fd;
+        info!("fd_back: {:?}", fd_back);
+        // 先创建文件 (create = true)
+        let ht_create = tee_fs_htree_open(
+            Box::new(TeeFsFdAux { fd }),
+            true,
+            Some(&mut hash),
+            Some(&uuid),
+        )
+        .unwrap();
 
-            assert_eq!(ht_create.data.uuid, uuid);
-            assert!(ht_create.data.dirty==false);
+        assert_eq!(ht_create.data.uuid, uuid);
+        assert!(ht_create.data.dirty == false);
 
-            // 再打开文件 (create = false)
-            let ht_open = tee_fs_htree_open(
-                Box::new(TeeFsFdAux { fd: fd_back }),
-                false,
-                Some(&mut hash),
-                Some(&uuid),
-            ).unwrap();
+        // 再打开文件 (create = false)
+        let ht_open = tee_fs_htree_open(
+            Box::new(TeeFsFdAux { fd: fd_back }),
+            false,
+            Some(&mut hash),
+            Some(&uuid),
+        )
+        .unwrap();
 
-            assert_eq!(ht_open.data.uuid, uuid);
-            assert!(!ht_open.data.dirty);
-        }
-    }
-
-    use crate::tee::fs_htree::{
-        tests_authenc_funcs::{
-            test_authenc_empty_data, test_authenc_functions, test_authenc_roundtrip_no_node_image,
-            test_authenc_wrong_tag,
-        },
-        tests_find_closest_node::{
-            test_find_closest_node_empty_tree_or_only_root, test_find_closest_node_exact_match,
-            test_find_closest_node_non_existent_path_deep,
-            test_find_closest_node_non_existent_path_left, test_find_closest_node_target_is_zero,
-        },
-        tests_get_node::{
-            test_get_node_create_deeper_node_and_max_id_update,
-            test_get_node_create_multiple_missing_nodes_linear_ids,
-            test_get_node_create_single_missing_left_child,
-            test_get_node_create_single_missing_right_child,
-            test_get_node_exists_with_create_no_side_effects,
-            test_get_node_intermediate_exists_no_create, test_get_node_not_exists_no_create,
-            test_get_node_root_exists_no_create,
-        },
-        tests_htree_basic::{
-            test_calc_and_verify_tree, test_calc_node_hash, test_construct_tree_with_children,
-            test_field_offsets_and_relevant_slice, test_htree_structure_and_access,
-            test_init_root_node_sets_fields_and_hash, test_iv_offset_matches_hash_size,
-            test_update_root_multiple_times, test_update_verify_root, test_verify_node_after_calc,
-            test_verify_node_with_parent_after_calc, test_verify_node_without_calc,
-            test_verify_root_without_update,
-        },
-        tests_node_id_to_level::{
-            test_node_id_max_should_panic, test_node_id_to_level_basic,
-            test_node_id_to_level_high_values, test_node_id_zero_should_panic,
-        },
-    };
-    tests_name! {
-        TEST_FS_HTREE;
-        fs_htree;
-        //------------------------
-        test_tee_fs_htree_open,
-        //------------------------
-        // tests_htree_basic
-        test_iv_offset_matches_hash_size,
-        test_calc_node_hash,
-        test_construct_tree_with_children,
-        test_field_offsets_and_relevant_slice,
-        test_htree_structure_and_access,
-        test_init_root_node_sets_fields_and_hash,
-        test_calc_and_verify_tree,
-        test_verify_node_after_calc,
-        test_verify_node_without_calc,
-        test_verify_node_with_parent_after_calc,
-        test_update_verify_root,
-        test_update_root_multiple_times,
-        test_verify_root_without_update,
-        //------------------------
-        // tests_node_id_to_level
-        test_node_id_to_level_basic,
-        test_node_id_to_level_high_values,
-        // test_node_id_zero_should_panic,
-        // test_node_id_max_should_panic,
-        //------------------------
-        // tests_find_closest_node
-        test_find_closest_node_exact_match,
-        test_find_closest_node_non_existent_path_left,
-        test_find_closest_node_non_existent_path_deep,
-        test_find_closest_node_target_is_zero,
-        test_find_closest_node_empty_tree_or_only_root,
-        //------------------------
-        // tests_get_node
-        test_get_node_root_exists_no_create,
-        test_get_node_intermediate_exists_no_create,
-        test_get_node_not_exists_no_create,
-        test_get_node_exists_with_create_no_side_effects,
-        test_get_node_create_single_missing_left_child,
-        test_get_node_create_single_missing_right_child,
-        test_get_node_create_multiple_missing_nodes_linear_ids,
-        test_get_node_create_deeper_node_and_max_id_update,
-        //------------------------
-        // tests_authenc_funcs
-        test_authenc_functions,
-        test_authenc_roundtrip_no_node_image,
-        test_authenc_empty_data,
-        test_authenc_wrong_tag,
+        assert_eq!(ht_open.data.uuid, uuid);
+        assert!(!ht_open.data.dirty);
     }
 }

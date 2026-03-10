@@ -2767,7 +2767,7 @@ pub fn syscall_obj_generate_key(
     Ok(())
 }
 
-#[cfg(feature = "tee_test")]
+#[cfg(unittest)]
 fn long2byte(value: u64, ch: &mut [u8]) -> u32 {
     // Convert value to big-endian byte array
     // Store valid bytes from the beginning of the array (ch[0..len])
@@ -2794,7 +2794,7 @@ fn long2byte(value: u64, ch: &mut [u8]) -> u32 {
     num_bytes as u32
 }
 
-#[cfg(feature = "tee_test")]
+#[cfg(unittest)]
 fn tee_init_ref_attribute(attr: &mut utee_attribute, attributeID: u32, buffer: &[u8], length: u32) {
     if (attributeID & TEE_ATTR_FLAG_VALUE) != 0 {
         panic!("attributeID is value attribute");
@@ -2804,515 +2804,492 @@ fn tee_init_ref_attribute(attr: &mut utee_attribute, attributeID: u32, buffer: &
     attr.b = length as u64;
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_tee_svc_cryp {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{TestResult, assert, assert_eq, test_framework::TestDescriptor};
     use zerocopy::IntoBytes;
 
     use super::*;
+    use crate::unittest_task::TestUserValue;
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_tee_svc_cryp_utils() {
+        // test attr_bytes from u32
+        let a_u32: u32 = 0xAABBCCDD;
+        let attr = &a_u32;
+        let attr_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(
+                (attr as *const u32) as *const u8,
+                core::mem::size_of::<u32>(),
+            )
+        };
+        let value: [u32; 2] = [unsafe { *(attr_bytes.as_ptr() as *const u32) }, 0];
+        assert_eq!(value[0], 0xAABBCCDD_u32);
+        assert_eq!(size_of_val(&value), 8);
 
-        fn test_tee_svc_cryp_utils() {
-            // test attr_bytes from u32
-            let a_u32: u32 = 0xAABBCCDD;
-            let attr = &a_u32;
-            let attr_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    (attr as *const u32) as *const u8,
-                    core::mem::size_of::<u32>(),
-                )
-            };
-            let value: [u32; 2] = [unsafe { *(attr_bytes.as_ptr() as *const u32) }, 0];
-            assert_eq!(value[0], 0xAABBCCDD_u32);
-            assert_eq!(size_of_val(&value), 8);
+        // test tee_u32_to_big_endian
+        let val: u32 = 0x12345678;
+        let be_val = tee_u32_to_big_endian(val);
+        assert_eq!(be_val, 0x78563412);
+        assert_eq!(be_val.as_bytes(), &[0x12, 0x34, 0x56, 0x78]);
 
-            // test tee_u32_to_big_endian
-            let val: u32 = 0x12345678;
-            let be_val = tee_u32_to_big_endian(val);
-            assert_eq!(be_val, 0x78563412);
-            assert_eq!(be_val.as_bytes(), &[0x12, 0x34, 0x56, 0x78]);
+        // test op_u32_to_binary_helper
+        let mut buffer: [u8; 8] = [0; 8];
+        let mut offs: size_t = 0;
+        op_u32_to_binary_helper(0x11223344, &mut buffer, &mut offs).unwrap();
+        assert_eq!(offs, 4);
+        assert_eq!(&buffer[0..4], &[0x11, 0x22, 0x33, 0x44]);
 
-            // test op_u32_to_binary_helper
-            let mut buffer: [u8; 8] = [0; 8];
-            let mut offs: size_t = 0;
-            op_u32_to_binary_helper(0x11223344, &mut buffer, &mut offs).unwrap();
-            assert_eq!(offs, 4);
-            assert_eq!(&buffer[0..4], &[0x11, 0x22, 0x33, 0x44]);
+        // test op_u32_to_binary_helper with offset
+        op_u32_to_binary_helper(0x55667788, &mut buffer, &mut offs).unwrap();
+        assert_eq!(offs, 8);
+        assert_eq!(&buffer[4..8], &[0x55, 0x66, 0x77, 0x88]);
 
-            // test op_u32_to_binary_helper with offset
-            op_u32_to_binary_helper(0x55667788, &mut buffer, &mut offs).unwrap();
-            assert_eq!(offs, 8);
-            assert_eq!(&buffer[4..8], &[0x55, 0x66, 0x77, 0x88]);
+        // test overflow
+        let mut small_buffer: [u8; 4] = [0; 4];
+        let mut offs_overflow: size_t = usize::MAX - 2;
+        let result = op_u32_to_binary_helper(0x99AABBCC, &mut small_buffer, &mut offs_overflow);
+        assert_eq!(result.err(), Some(TEE_ERROR_OVERFLOW));
 
-            // test overflow
-            let mut small_buffer: [u8; 4] = [0; 4];
-            let mut offs_overflow: size_t = usize::MAX - 2;
-            let result = op_u32_to_binary_helper(0x99AABBCC, &mut small_buffer, &mut offs_overflow);
-            assert_eq!(result.err(), Some(TEE_ERROR_OVERFLOW));
-
-            // test insufficient buffer
-            let mut insufficient_buffer: [u8; 4] = [0; 4];
-            let mut offs_insufficient: size_t = 2;
-            let result = op_u32_to_binary_helper(0x11223344, &mut insufficient_buffer, &mut offs_insufficient);
-            assert!(result.is_ok());
-            assert_eq!(offs_insufficient, 6);
-            assert_eq!(&insufficient_buffer, &[0; 4]); // buffer remains unchanged
-        }
+        // test insufficient buffer
+        let mut insufficient_buffer: [u8; 4] = [0; 4];
+        let mut offs_insufficient: size_t = 2;
+        let result =
+            op_u32_to_binary_helper(0x11223344, &mut insufficient_buffer, &mut offs_insufficient);
+        assert!(result.is_ok());
+        assert_eq!(offs_insufficient, 6);
+        assert_eq!(&insufficient_buffer, &[0; 4]); // buffer remains unchanged
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_tee_svc_find_type_props() {
-            let props = tee_svc_find_type_props(TEE_TYPE_AES);
-            assert!(props.is_some());
-            let props = props.unwrap();
-            assert_eq!(props.obj_type, TEE_TYPE_AES);
-            assert_eq!(props.min_size, 128);
-            assert_eq!(props.max_size, 256);
-        }
+    #[unittest::def_test]
+    fn test_tee_svc_find_type_props() {
+        let props = tee_svc_find_type_props(TEE_TYPE_AES);
+        assert!(props.is_some());
+        let props = props.unwrap();
+        assert_eq!(props.obj_type, TEE_TYPE_AES);
+        assert_eq!(props.min_size, 128);
+        assert_eq!(props.max_size, 256);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_op_attr_secret_value_from_user() {
+        // 测试基础数据
+        let mut user_key = crate::unittest_task::user_vec![0xAAu8; 16];
+        let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
 
-        fn test_op_attr_secret_value_from_user() {
-            // 测试基础数据
-            let user_key: [u8; 16] = [0xAA; 16];
-            let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
+        // 从用户空间导入密钥
+        op_attr_secret_value_from_user(&mut secret_wrapper, user_key.as_user_slice()).unwrap();
 
-            // 从用户空间导入密钥
-            op_attr_secret_value_from_user(&mut secret_wrapper, &user_key).unwrap();
+        // 验证密钥大小和内容
+        assert_eq!(secret_wrapper.secret().key_size, 16);
+        assert_eq!(secret_wrapper.secret().alloc_size, 32);
+        assert_eq!(&secret_wrapper.data()[..16], &user_key.read());
 
-            // 验证密钥大小和内容
-            assert_eq!(secret_wrapper.secret().key_size, 16);
-            assert_eq!(secret_wrapper.secret().alloc_size, 32);
-            assert_eq!(&secret_wrapper.data()[..16], &user_key);
-
-            // 测试长度超出分配大小的情况
-            let long_user_key: [u8; 40] = [0xBB; 40];
-            let result = op_attr_secret_value_from_user(&mut secret_wrapper, &long_user_key);
-            assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
-        }
+        // 测试长度超出分配大小的情况
+        let mut long_user_key = crate::unittest_task::user_vec![0xBBu8; 40];
+        let result =
+            op_attr_secret_value_from_user(&mut secret_wrapper, long_user_key.as_user_slice());
+        assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_op_attr_secret_value_to_user() {
-            // 准备测试数据
-            let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
-            let key_data: [u8; 16] = [0xCC; 16];
-            // 手动设置密钥数据和大小
-            {
-                let data_slice = secret_wrapper.data_mut();
-                data_slice[..16].copy_from_slice(&key_data);
-                secret_wrapper.secret_mut().key_size = 16;
-            }
-            // 测试函数
-            let mut size: u64 = 0;
-            // 第一次调用，size 为 0，应该返回 TEE_ERROR_SHORT_BUFFER
-            let result = op_attr_secret_value_to_user(&secret_wrapper, None, &mut size);
-            assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
-
-            // 第二次调用，提供足够大的 buffer
-            let mut user_buffer: [u8; 32] = [0; 32];
-            size = 32;
-            let result = op_attr_secret_value_to_user(
-                &secret_wrapper,
-                Some(&mut user_buffer),
-                &mut size,
-            );
-            assert!(result.is_ok());
-            // 验证返回的 size 和数据内容
-            assert_eq!(size, 16);
-            assert_eq!(&user_buffer[0..16], &key_data[0..16]);
+    #[unittest::def_test(custom)]
+    fn test_op_attr_secret_value_to_user() {
+        // 准备测试数据
+        let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
+        let key_data: [u8; 16] = [0xCC; 16];
+        // 手动设置密钥数据和大小
+        {
+            let data_slice = secret_wrapper.data_mut();
+            data_slice[..16].copy_from_slice(&key_data);
+            secret_wrapper.secret_mut().key_size = 16;
         }
+        // 测试函数
+        let mut size = TestUserValue::<u64>::from_value(0).unwrap();
+        // 第一次调用，size 为 0，应该返回 TEE_ERROR_SHORT_BUFFER
+        let result = op_attr_secret_value_to_user(&secret_wrapper, None, size.as_user_ref());
+        assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
+        assert_eq!(size.read(), 16);
+
+        // 第二次调用，提供足够大的 buffer
+        let mut user_buffer = crate::unittest_task::user_vec![0u8; 32];
+        size.write(32);
+        let result = op_attr_secret_value_to_user(
+            &secret_wrapper,
+            Some(user_buffer.as_user_slice()),
+            size.as_user_ref(),
+        );
+        assert!(result.is_ok());
+        // 验证返回的 size 和数据内容
+        assert_eq!(size.read(), 16);
+        assert_eq!(&user_buffer.read()[0..16], &key_data[0..16]);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_op_attr_secret_value_to_binary() {
-            // 准备测试数据
-            let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
-            let key_data: [u8; 16] = [0xDD; 16];
-            // 手动设置密钥数据和大小
-            {
-                let data_slice = secret_wrapper.data_mut();
-                data_slice[..16].copy_from_slice(&key_data);
-                secret_wrapper.secret_mut().key_size = 16;
-            }
-            // 准备目标缓冲区
-            let mut buffer: [u8; 64] = [0; 64];
-            let mut offs: size_t = 0;
-            // 调用函数进行序列化
-            let result = op_attr_secret_value_to_binary(&secret_wrapper, &mut buffer, &mut offs);
-            assert!(result.is_ok());
-            // 验证偏移量
-            assert_eq!(offs, 4 + 16); // 4 bytes for key_size + 16 bytes for key data
-            // 验证序列化内容
-            let expected_key_size_bytes: [u8; 4] = [0x00, 0x00, 0x00, 0x10]; // big-endian
-            assert_eq!(&buffer[0..4], &expected_key_size_bytes);
-            assert_eq!(&buffer[4..20], &key_data);
-
-            // test op_attr_secret_value_from_binary
-            let mut new_secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
-            let mut offs_from: size_t = 0;
-            let result = op_attr_secret_value_from_binary(
-                &mut new_secret_wrapper,
-                &buffer,
-                &mut offs_from,
-            );
-            assert!(result.is_ok());
-            // 验证偏移量
-            assert_eq!(offs_from, 4 + 16);
-            // 验证反序列化内容
-            assert_eq!(new_secret_wrapper.secret().key_size, 16);
-            assert_eq!(new_secret_wrapper.secret().alloc_size, 32);
-            assert_eq!(&new_secret_wrapper.data()[..16], &key_data);
+    #[unittest::def_test]
+    fn test_op_attr_secret_value_to_binary() {
+        // 准备测试数据
+        let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
+        let key_data: [u8; 16] = [0xDD; 16];
+        // 手动设置密钥数据和大小
+        {
+            let data_slice = secret_wrapper.data_mut();
+            data_slice[..16].copy_from_slice(&key_data);
+            secret_wrapper.secret_mut().key_size = 16;
         }
+        // 准备目标缓冲区
+        let mut buffer: [u8; 64] = [0; 64];
+        let mut offs: size_t = 0;
+        // 调用函数进行序列化
+        let result = op_attr_secret_value_to_binary(&secret_wrapper, &mut buffer, &mut offs);
+        assert!(result.is_ok());
+        // 验证偏移量
+        assert_eq!(offs, 4 + 16); // 4 bytes for key_size + 16 bytes for key data
+        // 验证序列化内容
+        let expected_key_size_bytes: [u8; 4] = [0x00, 0x00, 0x00, 0x10]; // big-endian
+        assert_eq!(&buffer[0..4], &expected_key_size_bytes);
+        assert_eq!(&buffer[4..20], &key_data);
+
+        // test op_attr_secret_value_from_binary
+        let mut new_secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
+        let mut offs_from: size_t = 0;
+        let result =
+            op_attr_secret_value_from_binary(&mut new_secret_wrapper, &buffer, &mut offs_from);
+        assert!(result.is_ok());
+        // 验证偏移量
+        assert_eq!(offs_from, 4 + 16);
+        // 验证反序列化内容
+        assert_eq!(new_secret_wrapper.secret().key_size, 16);
+        assert_eq!(new_secret_wrapper.secret().alloc_size, 32);
+        assert_eq!(&new_secret_wrapper.data()[..16], &key_data);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_op_u32_from_binary_helper() {
+        let data: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let mut offs: size_t = 0;
+        let mut value: u32 = 0;
 
-        fn test_op_u32_from_binary_helper() {
-            let data: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-            let mut offs: size_t = 0;
-            let mut value: u32 = 0;
+        // 第一次读取
+        let result = op_u32_from_binary_helper(&mut value, &data, &mut offs);
+        assert!(result.is_ok());
+        assert_eq!(value, 0x11223344);
+        assert_eq!(offs, 4);
 
-            // 第一次读取
-            let result = op_u32_from_binary_helper(&mut value, &data, &mut offs);
-            assert!(result.is_ok());
-            assert_eq!(value, 0x11223344);
-            assert_eq!(offs, 4);
+        // 第二次读取
+        let result = op_u32_from_binary_helper(&mut value, &data, &mut offs);
+        assert!(result.is_ok());
+        assert_eq!(value, 0x55667788);
+        assert_eq!(offs, 8);
 
-            // 第二次读取
-            let result = op_u32_from_binary_helper(&mut value, &data, &mut offs);
-            assert!(result.is_ok());
-            assert_eq!(value, 0x55667788);
-            assert_eq!(offs, 8);
+        // 测试读取超出边界
+        let result = op_u32_from_binary_helper(&mut value, &data, &mut offs);
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
 
-            // 测试读取超出边界
-            let result = op_u32_from_binary_helper(&mut value, &data, &mut offs);
-            assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
-
-            // call op_u32_to_binary_helper
-            let mut buffer: [u8; 4] = [0; 4];
-            let mut offs_write: size_t = 0;
-            op_u32_to_binary_helper(0x99AABBCC, &mut buffer, &mut offs_write).unwrap();
-            assert_eq!(offs_write, 4);
-            assert_eq!(&buffer, &[0x99, 0xAA, 0xBB, 0xCC]);
-            // read back
-            let mut read_value: u32 = 0;
-            let mut offs_read: size_t = 0;
-            let result = op_u32_from_binary_helper(&mut read_value, &buffer, &mut offs_read);
-            assert!(result.is_ok());
-            assert_eq!(read_value, 0x99AABBCC_u32);
-            assert_eq!(offs_read, 4);
-        }
+        // call op_u32_to_binary_helper
+        let mut buffer: [u8; 4] = [0; 4];
+        let mut offs_write: size_t = 0;
+        op_u32_to_binary_helper(0x99AABBCC, &mut buffer, &mut offs_write).unwrap();
+        assert_eq!(offs_write, 4);
+        assert_eq!(&buffer, &[0x99, 0xAA, 0xBB, 0xCC]);
+        // read back
+        let mut read_value: u32 = 0;
+        let mut offs_read: size_t = 0;
+        let result = op_u32_from_binary_helper(&mut read_value, &buffer, &mut offs_read);
+        assert!(result.is_ok());
+        assert_eq!(read_value, 0x99AABBCC_u32);
+        assert_eq!(offs_read, 4);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_op_attr_value_to_user() {
+        let mut attr: [u8; 8] = [0; 8];
+        // 设置属性值为 0x11223344
+        let value: u32 = 0x11223344;
+        let value_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(
+                &value as *const u32 as *const u8,
+                core::mem::size_of::<u32>(),
+            )
+        };
+        attr[..4].copy_from_slice(value_bytes);
 
-        fn test_op_attr_value_to_user() {
-            let mut attr: [u8; 8] = [0; 8];
-            // 设置属性值为 0x11223344
-            let value: u32 = 0x11223344;
-            let value_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    &value as *const u32 as *const u8,
-                    core::mem::size_of::<u32>(),
-                )
-            };
-            attr[..4].copy_from_slice(value_bytes);
+        let mut size = TestUserValue::<u64>::from_value(8).unwrap();
+        let mut user_buffer = crate::unittest_task::user_vec![0u8; 8];
 
-            let mut size: u64 = 8;
-            let mut user_buffer: [u8; 8] = [0; 8];
-
-            let result = op_attr_value_to_user(&attr, &mut user_buffer, &mut size);
-            assert!(result.is_ok());
-            assert_eq!(size, 8);
-            assert_eq!(&user_buffer[..4], value_bytes);
-        }
+        let result = op_attr_value_to_user(&attr, user_buffer.as_user_slice(), size.as_user_ref());
+        assert!(result.is_ok());
+        assert_eq!(size.read(), 8);
+        assert_eq!(&user_buffer.read()[..4], value_bytes);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_op_attr_value_from_binary() {
+        let mut attr: [u8; 8] = [0; 8];
+        let value: u32 = 0x11223344;
+        let value_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(
+                &value as *const u32 as *const u8,
+                core::mem::size_of::<u32>(),
+            )
+        };
 
-        fn test_op_attr_value_from_binary() {
-            let mut attr: [u8; 8] = [0; 8];
-            let value: u32 = 0x11223344;
-            let value_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    &value as *const u32 as *const u8,
-                    core::mem::size_of::<u32>(),
-                )
-            };
+        // attr[..4].copy_from_slice(value_bytes);
+        let mut offs: size_t = 0;
+        let result = op_attr_value_from_binary(&mut attr, value_bytes, &mut offs);
+        // info!("result: {:?}, offs: {}, attr: {:?}", result, offs, attr);
+        assert!(result.is_ok());
+        assert_eq!(offs, 4);
+        assert_eq!(&attr[..4], &[0x11, 0x22, 0x33, 0x44]);
 
-            //attr[..4].copy_from_slice(value_bytes);
-            let mut offs: size_t = 0;
-            let result = op_attr_value_from_binary(&mut attr, value_bytes, &mut offs);
-            // info!("result: {:?}, offs: {}, attr: {:?}", result, offs, attr);
-            assert!(result.is_ok());
-            assert_eq!(offs, 4);
-            assert_eq!(&attr[..4], &[0x11, 0x22, 0x33, 0x44]);
-
-            // // test op_attr_value_to_binary
-            let mut buffer: [u8; 8] = [0; 8];
-            let mut offs_write: size_t = 0;
-            let result = op_attr_value_to_binary(&attr, &mut buffer, &mut offs_write);
-            assert!(result.is_ok());
-            assert_eq!(offs_write, 4);
-            assert_eq!(&buffer[..4], value_bytes);
-        }
+        // // test op_attr_value_to_binary
+        let mut buffer: [u8; 8] = [0; 8];
+        let mut offs_write: size_t = 0;
+        let result = op_attr_value_to_binary(&attr, &mut buffer, &mut offs_write);
+        assert!(result.is_ok());
+        assert_eq!(offs_write, 4);
+        assert_eq!(&buffer[..4], value_bytes);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_tee_obj_set_type() {
+        // test with TEE_TYPE_AES
+        let mut obj = tee_obj::default();
+        let result = tee_obj_set_type(&mut obj, TEE_TYPE_AES, 256);
+        assert!(result.is_ok());
+        assert_eq!(obj.info.objectType, TEE_TYPE_AES);
+        assert_eq!(obj.info.maxObjectSize, 256);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.info.handleFlags, 0);
+        assert_eq!(obj.info.dataSize, 0);
+        assert_eq!(obj.info.dataPosition, 0);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-        fn test_tee_obj_set_type() {
-            // test with TEE_TYPE_AES
-            let mut obj = tee_obj::default();
-            let result = tee_obj_set_type(&mut obj, TEE_TYPE_AES, 256);
-            assert!(result.is_ok());
-            assert_eq!(obj.info.objectType, TEE_TYPE_AES);
-            assert_eq!(obj.info.maxObjectSize, 256);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.info.handleFlags, 0);
-            assert_eq!(obj.info.dataSize, 0);
-            assert_eq!(obj.info.dataPosition, 0);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
-
-            let mut obj = tee_obj::default();
-            let result = tee_obj_set_type(&mut obj, TEE_TYPE_ECDSA_PUBLIC_KEY, 256);
-            assert!(result.is_ok());
-            assert_eq!(obj.info.objectType, TEE_TYPE_ECDSA_PUBLIC_KEY);
-            assert_eq!(obj.info.maxObjectSize, 256);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.info.handleFlags, 0);
-            assert_eq!(obj.info.dataSize, 0);
-            assert_eq!(obj.info.dataPosition, 0);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::ecc_public_key(_)));
-        }
+        let mut obj = tee_obj::default();
+        let result = tee_obj_set_type(&mut obj, TEE_TYPE_ECDSA_PUBLIC_KEY, 256);
+        assert!(result.is_ok());
+        assert_eq!(obj.info.objectType, TEE_TYPE_ECDSA_PUBLIC_KEY);
+        assert_eq!(obj.info.maxObjectSize, 256);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.info.handleFlags, 0);
+        assert_eq!(obj.info.dataSize, 0);
+        assert_eq!(obj.info.dataPosition, 0);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::ecc_public_key(_)));
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_cryptoattrref_u32() {
-            // test CryptoAttrRef::U32
-            let mut value: u32 = 0;
-            let value_c: [u32; 2] = [0x11223344, 0];
-            let value_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    &value_c as *const [u32; 2] as *const u8,
-                    core::mem::size_of::<[u32; 2]>(),
-                )
-            };
-            {
-                let mut attr_ref = CryptoAttrRef::U32(&mut value);
-                let result = attr_ref.update_from_user(value_bytes);
-                assert!(result.is_ok());
-            }
-            assert_eq!(value, 0x11223344);
-
-            let mut buffer: [u8; 8] = [0; 8];
-            let mut size: u64 = 8;
-            {
-                let attr_ref = CryptoAttrRef::U32(&mut value);
-                let result = attr_ref.to_user(&mut buffer, &mut size);
-                assert!(result.is_ok());
-            }
-            assert_eq!(size, 8);
-            assert_eq!(&buffer, value_bytes);
+    #[unittest::def_test(custom)]
+    fn test_cryptoattrref_u32() {
+        // test CryptoAttrRef::U32
+        let mut value: u32 = 0;
+        let value_c: [u32; 2] = [0x11223344, 0];
+        let value_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(
+                &value_c as *const [u32; 2] as *const u8,
+                core::mem::size_of::<[u32; 2]>(),
+            )
+        };
+        {
+            let mut attr_ref = CryptoAttrRef::U32(&mut value);
+            let mut value_bytes_user = crate::unittest_task::user_vec![0u8; 8];
+            value_bytes_user.copy_from_slice(value_bytes);
+            let result = attr_ref.update_from_user(value_bytes_user.as_user_slice());
+            assert!(result.is_ok());
         }
+        assert_eq!(value, 0x11223344);
+
+        let mut buffer = crate::unittest_task::user_vec![0u8; 8];
+        let mut size = TestUserValue::<u64>::from_value(8).unwrap();
+        {
+            let attr_ref = CryptoAttrRef::U32(&mut value);
+            let result = attr_ref.to_user(buffer.as_user_slice(), size.as_user_ref());
+            assert!(result.is_ok());
+        }
+        assert_eq!(size.read(), 8);
+        assert_eq!(&buffer.read(), value_bytes);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_cryptoattrref_bignum() {
-            // test CryptoAttrRef::BigNum
-            let bn = BigNum::new(0x11223344).unwrap();
-            let mut buffer: [u8; 4] = [0; 4];
-            let mut size: u64 = 4;
-            let result = bn.to_user(&mut buffer, &mut size);
-            assert!(result.is_ok());
-            assert_eq!(size, 4);
-            // assert_eq!(&buffer, value_bytes);
-            // from user with buffer
-            let mut bn_from = BigNum::new(0).unwrap();
-            let result = bn_from.update_from_user(&buffer);
-            assert!(result.is_ok());
-            assert_eq!(bn_from, bn);
-        }
+    #[unittest::def_test(custom)]
+    fn test_cryptoattrref_bignum() {
+        // test CryptoAttrRef::BigNum
+        let bn = BigNum::new(0x11223344).unwrap();
+        let mut buffer = crate::unittest_task::user_vec![0u8; 4];
+        let mut size = TestUserValue::<u64>::from_value(4).unwrap();
+        let result = bn.to_user(buffer.as_user_slice(), size.as_user_ref());
+        assert!(result.is_ok());
+        assert_eq!(size.read(), 4);
+        // assert_eq!(&buffer, value_bytes);
+        // from user with buffer
+        let mut bn_from = BigNum::new(0).unwrap();
+        let result = bn_from.update_from_user(buffer.as_user_slice());
+        assert!(result.is_ok());
+        assert_eq!(bn_from, bn);
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_secret_value() {
+        // set secret value data to
+        let mut secret = tee_cryp_obj_secret_wrapper::new(16);
+        secret.secret_mut().key_size = 16;
+        secret.data_mut()[..16].copy_from_slice(&[0xaa; 16]);
 
-        fn test_secret_value() {
-            // set secret value data to
-            let mut secret = tee_cryp_obj_secret_wrapper::new(16);
-            secret.secret_mut().key_size = 16;
-            secret.data_mut()[..16].copy_from_slice(&[0xaa; 16]);
+        // 1. test tee_cryp_obj_secret_wrapper to user
+        // - test to_user
+        let mut buffer = crate::unittest_task::user_vec![0u8; 16];
+        let mut size = TestUserValue::<u64>::from_value(16).unwrap();
+        let result = secret.to_user(buffer.as_user_slice(), size.as_user_ref());
+        assert!(result.is_ok());
+        assert_eq!(size.read(), 16);
+        assert_eq!(&buffer.read()[..], &secret.data()[..16]);
+        // - test update_from_user
+        let mut secret_dest = tee_cryp_obj_secret_wrapper::new(16);
+        let result = secret_dest.update_from_user(buffer.as_user_slice());
+        assert!(result.is_ok());
+        assert_eq!(secret_dest.secret().key_size, secret.secret().key_size);
+        assert_eq!(&secret_dest.data()[..16], &secret.data()[..16]);
+        //  - test to_binary
+        let mut data: [u8; 16 + size_of::<u32>()] = [0x55; 16 + size_of::<u32>()];
+        let mut offs: usize = 0;
+        let result = secret_dest.to_binary(&mut data, &mut offs);
+        assert!(result.is_ok());
+        assert_eq!(offs, 16 + size_of::<u32>());
+        assert_eq!(
+            &data[..size_of::<u32>()],
+            &secret_dest.secret().key_size.to_be_bytes()
+        );
+        assert_eq!(
+            &data[size_of::<u32>()..16 + size_of::<u32>()],
+            &secret_dest.data()[..16]
+        );
+        //  - test update_from_binary
+        let mut secret_from = tee_cryp_obj_secret_wrapper::new(16);
+        offs = 0;
+        let result = secret_from.update_from_binary(&data, &mut offs);
+        assert!(result.is_ok());
+        assert_eq!(offs, 16 + size_of::<u32>());
+        assert_eq!(secret_from.secret().key_size, secret_dest.secret().key_size);
+        assert_eq!(&secret_from.data()[..16], &secret_dest.data()[..16]);
 
-            // 1. test tee_cryp_obj_secret_wrapper to user
-            // - test to_user
-            let mut buffer: [u8; 16] = [0; 16];
-            let mut size: u64 = 16;
-            let result = secret.to_user(&mut buffer, &mut size);
-            assert!(result.is_ok());
-            assert_eq!(size, 16);
-            assert_eq!(&buffer[..16], &secret.data()[..16]);
-            // - test update_from_user
-            let mut secret_dest = tee_cryp_obj_secret_wrapper::new(16);
-            let result = secret_dest.update_from_user(&buffer);
-            assert!(result.is_ok());
-            assert_eq!(secret_dest.secret().key_size, secret.secret().key_size);
-            assert_eq!(&secret_dest.data()[..16], &secret.data()[..16]);
-            //  - test to_binary
-            let mut data: [u8; 16+size_of::<u32>()] = [0x55; 16+size_of::<u32>()];
-            let mut offs: usize = 0;
-            let result = secret_dest.to_binary(&mut data, &mut offs);
-            assert!(result.is_ok());
-            assert_eq!(offs, 16+size_of::<u32>());
-            assert_eq!(&data[..size_of::<u32>()], &secret_dest.secret().key_size.to_be_bytes());
-            assert_eq!(&data[size_of::<u32>()..16+size_of::<u32>()], &secret_dest.data()[..16]);
-            //  - test update_from_binary
-            let mut secret_from = tee_cryp_obj_secret_wrapper::new(16);
-            offs = 0;
-            let result = secret_from.update_from_binary(&data, &mut offs);
-            assert!(result.is_ok());
-            assert_eq!(offs, 16+size_of::<u32>());
-            assert_eq!(secret_from.secret().key_size, secret_dest.secret().key_size);
-            assert_eq!(&secret_from.data()[..16], &secret_dest.data()[..16]);
+        // - test update_from_obj
+        let mut secret_dest = tee_cryp_obj_secret_wrapper::new(16);
+        let result =
+            secret_dest.update_from_obj(&TeeCryptObjAttr::secret_value(secret_from.clone()));
+        assert!(result.is_ok());
+        assert_eq!(secret_dest.secret().key_size, secret_from.secret().key_size);
+        assert_eq!(&secret_dest.data(), &secret_from.data());
 
-            // - test update_from_obj
-            let mut secret_dest = tee_cryp_obj_secret_wrapper::new(16);
-            let result = secret_dest.update_from_obj(&TeeCryptObjAttr::secret_value(secret_from.clone()));
-            assert!(result.is_ok());
-            assert_eq!(secret_dest.secret().key_size, secret_from.secret().key_size);
-            assert_eq!(&secret_dest.data(), &secret_from.data());
-
-            // 2. test CryptoAttrRef::SecretValue
-            // clear buffer
-            buffer.fill(0);
-            size = 16;
-            let attr_ref = CryptoAttrRef::SecretValue(&mut secret);
-            let result = attr_ref.to_user(&mut buffer, &mut size);
-            assert!(result.is_ok());
-            assert_eq!(size, 16);
-            assert_eq!(&buffer[..16], &secret.data()[..16]);
-        }
+        // 2. test CryptoAttrRef::SecretValue
+        // clear buffer
+        buffer.write([0; 16]);
+        size.write(16);
+        let attr_ref = CryptoAttrRef::SecretValue(&mut secret);
+        let result = attr_ref.to_user(buffer.as_user_slice(), size.as_user_ref());
+        assert!(result.is_ok());
+        assert_eq!(size.read(), 16);
+        assert_eq!(&buffer.read()[..], &secret.data()[..16]);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_syscall_cryp_obj_alloc() {
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, &mut obj_id);
-            assert!(result.is_ok());
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type).unwrap();
-            let obj = obj_arc.lock();
-            assert_eq!(obj.info.objectType, TEE_TYPE_ECDSA_PUBLIC_KEY);
-            assert_eq!(obj.info.maxObjectSize, 256);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.info.handleFlags, 0);
-            assert_eq!(obj.info.dataSize, 0);
-            assert_eq!(obj.info.dataPosition, 0);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::ecc_public_key(_)));
-        }
+    #[unittest::def_test(custom)]
+    fn test_syscall_cryp_obj_alloc() {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result =
+            syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type).unwrap();
+        let obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_ECDSA_PUBLIC_KEY);
+        assert_eq!(obj.info.maxObjectSize, 256);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.info.handleFlags, 0);
+        assert_eq!(obj.info.dataSize, 0);
+        assert_eq!(obj.info.dataPosition, 0);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::ecc_public_key(_)));
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_syscall_cryp_obj_get_attr() {
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, &mut obj_id);
-            assert!(result.is_ok());
-            let _buffer: [u8; 8] = [1; 8];
-            let _size: u64 = 8;
-            // TODO: need to implement syscall_cryp_obj_get_attr
-            // let result = syscall_cryp_obj_get_attr(obj_id, TEE_ATTR_ECC_CURVE as c_ulong, &mut buffer, &mut size);
-            // info!("result: {:x?}, size: {}, buffer: {:?}", result, size, buffer);
-            // assert!(result.is_ok());
-            // assert_eq!(size, 8);
-            // assert_eq!(&buffer[..4], &[0x00, 0x00, 0x00, 0x00]);
-        }
+    #[unittest::def_test(custom)]
+    fn test_syscall_cryp_obj_get_attr() {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result =
+            syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let _obj_id = obj_id.read();
+        let _buffer: [u8; 8] = [1; 8];
+        let _size: u64 = 8;
+        // TODO: need to implement syscall_cryp_obj_get_attr
+        // let result = syscall_cryp_obj_get_attr(obj_id, TEE_ATTR_ECC_CURVE as c_ulong, &mut buffer, &mut size);
+        // info!("result: {:x?}, size: {}, buffer: {:?}", result, size, buffer);
+        // assert!(result.is_ok());
+        // assert_eq!(size, 8);
+        // assert_eq!(&buffer[..4], &[0x00, 0x00, 0x00, 0x00]);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_syscall_cryp_generate_key_ecc_keypair() {
-            // alloc sm2 key pair
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, &mut obj_id);
-            assert!(result.is_ok());
-            // sm2 no need usr_params
-            let result = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
-            assert!(result.is_ok());
-            // get attr from obj
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let obj = obj_arc.lock();
-            assert_eq!(obj.info.objectType, TEE_TYPE_SM2_DSA_KEYPAIR);
-            assert_eq!(obj.info.maxObjectSize, 256);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
-            // get ecc_keypair from obj
-            let ecc_keypair = match &obj.attr[0] {
-                TeeCryptObj::ecc_keypair(ecc_keypair) => ecc_keypair,
-                _ => panic!("ecc_keypair not found"),
-            };
-            assert_eq!(ecc_keypair.curve, TEE_ECC_CURVE_SM2);
-            tee_debug!("ecc_keypair: {:#?}", ecc_keypair);
-            let d_len = ecc_keypair.d.byte_length().unwrap();
-            let x_len = ecc_keypair.x.byte_length().unwrap();
-            let y_len = ecc_keypair.y.byte_length().unwrap();
-            assert!(d_len == 31 || d_len == 32);
-            assert!(x_len == 31 || x_len == 32);
-            assert!(y_len == 31 || y_len == 32);
-        }
+    #[unittest::def_test(custom)]
+    fn test_syscall_cryp_generate_key_ecc_keypair() {
+        // alloc sm2 key pair
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result =
+            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
+        // sm2 no need usr_params
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
+        assert!(result.is_ok());
+        // get attr from obj
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM2_DSA_KEYPAIR);
+        assert_eq!(obj.info.maxObjectSize, 256);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
+        // get ecc_keypair from obj
+        let ecc_keypair = match &obj.attr[0] {
+            TeeCryptObj::ecc_keypair(ecc_keypair) => ecc_keypair,
+            _ => panic!("ecc_keypair not found"),
+        };
+        assert_eq!(ecc_keypair.curve, TEE_ECC_CURVE_SM2);
+        tee_debug!("ecc_keypair: {:#?}", ecc_keypair);
+        let d_len = ecc_keypair.d.byte_length().unwrap();
+        let x_len = ecc_keypair.x.byte_length().unwrap();
+        let y_len = ecc_keypair.y.byte_length().unwrap();
+        assert!(d_len == 31 || d_len == 32);
+        assert!(x_len == 31 || x_len == 32);
+        assert!(y_len == 31 || y_len == 32);
     }
 
     // Helper function to test RSA keypair generation and verification
     fn test_rsa_keypair(key_size: usize, e: u64) -> TestResult {
         let mut e_bytes: [u8; 8] = [0; 8];
-        let mut usr_params: [utee_attribute; 1] = [utee_attribute::default(); 1];
+        let mut usr_params = crate::unittest_task::user_vec![utee_attribute::default(); 1];
+        let mut usr_exp = crate::unittest_task::user_vec![0u8; 8];
 
         let (usr_params, param_count) = {
             if e == 0 {
                 (core::ptr::null(), 0)
             } else {
                 let e_len = long2byte(e, &mut e_bytes);
+                usr_exp[..e_len as usize].copy_from_slice(&e_bytes[..e_len as usize]);
                 tee_init_ref_attribute(
                     &mut usr_params[0],
                     TEE_ATTR_RSA_PUBLIC_EXPONENT,
-                    &e_bytes[..e_len as usize],
+                    &usr_exp[..e_len as usize],
                     e_len,
                 );
                 (usr_params.as_ptr(), 1)
             }
         };
 
-        let mut obj_id: c_uint = 0;
-        let result = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, key_size as _, &mut obj_id);
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(
+            TEE_TYPE_RSA_KEYPAIR as _,
+            key_size as _,
+            obj_id.as_user_ref(),
+        );
         assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
         let result =
             syscall_obj_generate_key(obj_id as c_ulong, key_size as _, usr_params, param_count);
@@ -3346,21 +3323,19 @@ pub mod tests_tee_svc_cryp {
         TestResult::Ok
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_syscall_cryp_generate_key_rsa() {
-            // step1: test without usr_params (use default exponent 65537)
-            if let TestResult::Failed = test_rsa_keypair(2048, 0) {
-                return TestResult::Failed;
-            }
-            // step2: test with custom exponent
-            if let TestResult::Failed = test_rsa_keypair(2048, 65539) {
-                return TestResult::Failed;
-            }
-            // step3: test with custom exponent 65537
-            if let TestResult::Failed = test_rsa_keypair(2048, 65537) {
-                return TestResult::Failed;
-            }
+    #[unittest::def_test(custom)]
+    fn test_syscall_cryp_generate_key_rsa() {
+        // step1: test without usr_params (use default exponent 65537)
+        if let TestResult::Failed = test_rsa_keypair(2048, 0) {
+            return TestResult::Failed;
+        }
+        // step2: test with custom exponent
+        if let TestResult::Failed = test_rsa_keypair(2048, 65539) {
+            return TestResult::Failed;
+        }
+        // step3: test with custom exponent 65537
+        if let TestResult::Failed = test_rsa_keypair(2048, 65537) {
+            return TestResult::Failed;
         }
     }
 
@@ -3371,9 +3346,10 @@ pub mod tests_tee_svc_cryp {
             key_size
         );
         // alloc sm4 key
-        let mut obj_id: c_uint = 0;
-        let result = syscall_cryp_obj_alloc(key_type as _, key_size as _, &mut obj_id);
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(key_type as _, key_size as _, obj_id.as_user_ref());
         assert!(result.is_ok());
+        let obj_id = obj_id.read();
         // assert!(obj_id != 0);
         // secret key no need usr_params
         let result =
@@ -3400,102 +3376,63 @@ pub mod tests_tee_svc_cryp {
         TestResult::Ok
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_syscall_cryp_generate_key_sm4() {
-            if let TestResult::Failed = test_syscall_cryp_generate_secret_key(TEE_TYPE_SM4 as _, 128) {
-                return TestResult::Failed;
-            }
+    #[unittest::def_test(custom)]
+    fn test_syscall_cryp_generate_key_sm4() {
+        if let TestResult::Failed = test_syscall_cryp_generate_secret_key(TEE_TYPE_SM4 as _, 128) {
+            return TestResult::Failed;
         }
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_syscall_cryp_generate_key_hmac_sm3() {
-            if let TestResult::Failed = test_syscall_cryp_generate_secret_key(TEE_TYPE_HMAC_SM3 as _, 128) {
-                return TestResult::Failed;
-            }
+    #[unittest::def_test(custom)]
+    fn test_syscall_cryp_generate_key_hmac_sm3() {
+        if let TestResult::Failed =
+            test_syscall_cryp_generate_secret_key(TEE_TYPE_HMAC_SM3 as _, 128)
+        {
+            return TestResult::Failed;
         }
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_copy_in_attrs() {
+        let tee_attr_value = TEE_Attribute {
+            attributeID: 0,
+            content: content {
+                value: Value { a: 0_u32, b: 0_u32 },
+            },
+        };
 
-        fn test_copy_in_attrs() {
-            let tee_attr_value = TEE_Attribute {
-                attributeID: 0,
-                content:
-                    content {
-                        value: Value {
-                            a: 0_u32,
-                            b: 0_u32,
-                        },
-                    }
-            };
-
-            let mut attrs: [TEE_Attribute; 2] = [tee_attr_value; 2];
-            let mut usr_attrs: [utee_attribute; 2] = [utee_attribute::default(); 2];
-            // index 0 is value attribute
-            usr_attrs[0].attribute_id = TEE_ATTR_FLAG_VALUE;
-            usr_attrs[0].a = 0x11223344_u64;
-            usr_attrs[0].b = 0x55667788_u64;
-            // index 1 is memref attribute
-            // allocate memory for memref
-            let mem: [u8; 16] = [0xAA; 16];
-            let mem_ptr = mem.as_ptr() as *mut c_void;
-            usr_attrs[1].attribute_id &= !TEE_ATTR_FLAG_VALUE;
-            usr_attrs[1].a = mem_ptr as u64;
-            usr_attrs[1].b = mem.len() as u64;
-            // copy in attrs
-            let result = copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs, &mut attrs);
-            assert!(result.is_ok());
-            assert_eq!(attrs[0].attributeID, TEE_ATTR_FLAG_VALUE);
-            assert_eq!(unsafe { attrs[0].content.value.a }, 0x11223344_u32);
-            assert_eq!(unsafe { attrs[0].content.value.b }, 0x55667788_u32);
-            assert_eq!(attrs[1].attributeID, 0);
-            assert_eq!(unsafe { attrs[1].content.memref.buffer }, mem_ptr);
-            assert_eq!(unsafe { attrs[1].content.memref.size }, mem.len());
-        }
+        let mut attrs: [TEE_Attribute; 2] = [tee_attr_value; 2];
+        let mut usr_attrs = crate::unittest_task::user_vec![utee_attribute::default(); 2];
+        // index 0 is value attribute
+        usr_attrs[0].attribute_id = TEE_ATTR_FLAG_VALUE;
+        usr_attrs[0].a = 0x11223344_u64;
+        usr_attrs[0].b = 0x55667788_u64;
+        // index 1 is memref attribute
+        // allocate memory for memref
+        let mem = crate::unittest_task::user_vec![0xAAu8; 16];
+        let mem_ptr = mem.as_user_ptr() as *mut c_void;
+        usr_attrs[1].attribute_id &= !TEE_ATTR_FLAG_VALUE;
+        usr_attrs[1].a = mem_ptr as u64;
+        usr_attrs[1].b = 16;
+        // copy in attrs
+        let result = copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs, &mut attrs);
+        assert!(result.is_ok());
+        assert_eq!(attrs[0].attributeID, TEE_ATTR_FLAG_VALUE);
+        assert_eq!(unsafe { attrs[0].content.value.a }, 0x11223344_u32);
+        assert_eq!(unsafe { attrs[0].content.value.b }, 0x55667788_u32);
+        assert_eq!(attrs[1].attributeID, 0);
+        assert_eq!(unsafe { attrs[1].content.memref.buffer }, mem_ptr);
+        assert_eq!(unsafe { attrs[1].content.memref.size }, 16);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_mpi_write_binary() {
-            let m = Mpi::new(256).unwrap();
-            let mut e: u32 = 0;
-            unsafe {
-                mpi_write_binary((&m).into(), &mut e as *mut u32 as *mut u8, size_of::<u32>());
-            }
-            let e = tee_u32_from_big_endian(e);
-            assert_eq!(e, 256);
+    #[unittest::def_test]
+    fn test_mpi_write_binary() {
+        let m = Mpi::new(256).unwrap();
+        let mut e: u32 = 0;
+        unsafe {
+            mpi_write_binary((&m).into(), &mut e as *mut u32 as *mut u8, size_of::<u32>());
         }
-    }
-    tests_name! {
-        TEST_TEE_SVC_CRYP;
-        tee_svc_cryp;
-        //------------------------
-        test_tee_svc_cryp_utils,
-        test_tee_svc_find_type_props,
-        test_op_attr_secret_value_from_user,
-        test_op_attr_secret_value_to_user,
-        test_op_attr_secret_value_to_binary,
-        test_op_u32_from_binary_helper,
-        test_op_attr_value_to_user,
-        test_op_attr_value_from_binary,
-        test_tee_obj_set_type,
-        test_cryptoattrref_u32,
-        test_cryptoattrref_bignum,
-        test_secret_value,
-        test_syscall_cryp_obj_alloc,
-        test_syscall_cryp_obj_get_attr,
-        test_copy_in_attrs,
-        test_syscall_cryp_generate_key_ecc_keypair,
-        test_syscall_cryp_generate_key_rsa,
-        test_syscall_cryp_generate_key_sm4,
-        test_syscall_cryp_generate_key_hmac_sm3,
-        test_mpi_write_binary,
+        let e = tee_u32_from_big_endian(e);
+        assert_eq!(e, 256);
     }
 }

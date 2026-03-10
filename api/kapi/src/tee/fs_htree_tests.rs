@@ -643,30 +643,18 @@ fn test_write_read(num_blocks: usize) -> TeeResult {
     Ok(())
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_fs_htree_tests {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn core_fs_htree_tests() {
+        let result = test_write_read(10);
+        assert!(result.is_ok());
 
-        fn core_fs_htree_tests() {
-            let result = test_write_read(10);
-            assert!(result.is_ok());
-
-            let result = test_corrupt(5);
-            assert!(result.is_ok());
-        }
-    }
-
-    tests_name! {
-        TEST_FS_HTREE_TESTS;
-        fs_htree_tests;
-        //------------------------
-        core_fs_htree_tests,
+        let result = test_corrupt(5);
+        assert!(result.is_ok());
     }
 }

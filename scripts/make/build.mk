@@ -35,13 +35,6 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
   endif
 endif
 
-ifeq ($(UNITTEST), y)
-  RUSTFLAGS += --cfg unittest --check-cfg cfg(unittest)
-  APP_FEAT += unittest
-else
-  RUSTFLAGS += --check-cfg cfg(unittest)
-endif
-
 export RUSTFLAGS
 _cargo_build:
 	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME)\n"

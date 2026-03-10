@@ -80,28 +80,16 @@ pub fn random_bytes(data: &mut [u8]) {
     rng.fill_bytes(data);
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_utils {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert_eq;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
-
-        fn test_slice_fmt() {
-            let data = [0x12, 0x34, 0x56, 0x78];
-            let result = slice_fmt(&data);
-            assert_eq!(result, "len: 0x4, data: 12345678");
-        }
-    }
-
-    tests_name! {
-        TEST_TEE_UTILS;
-        //------------------------
-        utils;
-        test_slice_fmt
+    #[unittest::def_test]
+    fn test_slice_fmt() {
+        let data = [0x12, 0x34, 0x56, 0x78];
+        let result = slice_fmt(&data);
+        assert_eq!(result, "len: 0x4, data: 12345678");
     }
 }

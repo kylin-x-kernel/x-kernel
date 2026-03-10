@@ -1414,22 +1414,21 @@ pub fn syscall_storage_next_enum(
     res
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_tee_svc_storage {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
 
     use super::*;
+    use crate::unittest_task::{TestUserBuffer, TestUserValue};
 
     const TEE_DIRNAME_BUFFER_REQUIRED_LEN: usize = tee_b2hs_hsbuf_size(TEE_UUID_HEX_LEN) + 1;
 
-    test_fn! {
-        using TestResult;
-
-        fn test_size_of_val() {
-            assert_eq!(size_of_val(&tee_svc_storage_head::default()), size_of::<tee_svc_storage_head>());
-        }
+    #[unittest::def_test]
+    fn test_size_of_val() {
+        assert_eq!(
+            size_of_val(&tee_svc_storage_head::default()),
+            size_of::<tee_svc_storage_head>()
+        );
     }
 
     // Helper to create a TeeUuid from its raw byte representation for predictable testing
@@ -1446,304 +1445,336 @@ pub mod tests_tee_svc_storage {
         }
     }
 
+    fn user_buffer_from_bytes(bytes: &[u8]) -> TestUserBuffer {
+        let buffer = TestUserBuffer::new(bytes.len()).unwrap();
+        buffer.write_bytes(bytes).unwrap();
+        buffer
+    }
+
     // --- Tests for tee_svc_storage_create_dirname ---
 
-    test_fn! {
-        using TestResult;
-        fn test_create_dirname_standard_uuid() {
-            let uuid_bytes: [u8; 16] = [
-                0x78, 0x56, 0x34, 0x12, // time_low (reversed for LE)
-                0xBC, 0x9A,             // time_mid (reversed for LE)
-                0xF0, 0xDE,             // time_hi_and_version (reversed for LE)
-                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // clock_seq_and_node
-            ];
-            let uuid = create_uuid_from_bytes(uuid_bytes);
+    #[unittest::def_test]
+    fn test_create_dirname_standard_uuid() {
+        let uuid_bytes: [u8; 16] = [
+            0x78, 0x56, 0x34, 0x12, 0xBC, 0x9A, 0xF0, 0xDE, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+        let uuid = create_uuid_from_bytes(uuid_bytes);
+        let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
+        let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
 
-            // Use the defined constant for buffer size
-            let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
-            let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
-
-            assert!(result.is_ok());
-            // Verify the string content, excluding the final null terminator for str::from_utf8
-            assert_eq!(str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(), "/78563412BC9AF0DE1122334455667788");
-            // Verify the final null terminator
-            assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
-        }
+        assert!(result.is_ok());
+        assert_eq!(
+            str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(),
+            "/78563412BC9AF0DE1122334455667788"
+        );
+        assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_create_dirname_all_zeros_uuid() {
-            let uuid = TEE_UUID {
-                timeLow: 0, timeMid: 0, timeHiAndVersion: 0, clockSeqAndNode: [0; 8],
-            };
-            let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
-            let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
+    #[unittest::def_test]
+    fn test_create_dirname_all_zeros_uuid() {
+        let uuid = TEE_UUID {
+            timeLow: 0,
+            timeMid: 0,
+            timeHiAndVersion: 0,
+            clockSeqAndNode: [0; 8],
+        };
+        let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
+        let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
 
-            assert!(result.is_ok());
-            assert_eq!(str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(), "/00000000000000000000000000000000");
-            assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
-        }
+        assert!(result.is_ok());
+        assert_eq!(
+            str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(),
+            "/00000000000000000000000000000000"
+        );
+        assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_create_dirname_specific_uuid_values() {
-            let uuid_bytes: [u8; 16] = [
-                0x01, 0x02, 0x03, 0x04,
-                0x05, 0x06,
-                0x07, 0x08,
-                0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            ];
-            let uuid = create_uuid_from_bytes(uuid_bytes);
-            let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
-            let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
+    #[unittest::def_test]
+    fn test_create_dirname_specific_uuid_values() {
+        let uuid_bytes: [u8; 16] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10,
+        ];
+        let uuid = create_uuid_from_bytes(uuid_bytes);
+        let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
+        let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
 
-            assert!(result.is_ok());
-            assert_eq!(str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(), "/0102030405060708090A0B0C0D0E0F10");
-            assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
-        }
+        assert!(result.is_ok());
+        assert_eq!(
+            str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(),
+            "/0102030405060708090A0B0C0D0E0F10"
+        );
+        assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_create_dirname_short_buffer() {
-            let uuid = TEE_UUID {
-                timeLow: 0, timeMid: 0, timeHiAndVersion: 0, clockSeqAndNode: [0; 8],
-            };
-            // Provide a buffer one byte smaller than required
-            let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1];
-            let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
+    #[unittest::def_test]
+    fn test_create_dirname_short_buffer() {
+        let uuid = TEE_UUID {
+            timeLow: 0,
+            timeMid: 0,
+            timeHiAndVersion: 0,
+            clockSeqAndNode: [0; 8],
+        };
+        let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1];
+        let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
 
-            assert!(result.is_err());
-            assert_eq!(result.unwrap_err(), TEE_ERROR_SHORT_BUFFER);
-        }
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), TEE_ERROR_SHORT_BUFFER);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_create_dirname_empty_buffer() {
-            let uuid = TEE_UUID {
-                timeLow: 0, timeMid: 0, timeHiAndVersion: 0, clockSeqAndNode: [0; 8],
-            };
-            let mut buf = [0u8; 0];
-            let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
+    #[unittest::def_test]
+    fn test_create_dirname_empty_buffer() {
+        let uuid = TEE_UUID {
+            timeLow: 0,
+            timeMid: 0,
+            timeHiAndVersion: 0,
+            clockSeqAndNode: [0; 8],
+        };
+        let mut buf = [0u8; 0];
+        let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
 
-            assert!(result.is_err());
-            assert_eq!(result.unwrap_err(), TEE_ERROR_SHORT_BUFFER);
-        }
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), TEE_ERROR_SHORT_BUFFER);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_create_dirname_exact_buffer() {
-            let uuid = TEE_UUID {
-                timeLow: 0xAABBCCDD, timeMid: 0xEEFF, timeHiAndVersion: 0x1122, clockSeqAndNode: [0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA],
-            };
-            let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
-            let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
+    #[unittest::def_test]
+    fn test_create_dirname_exact_buffer() {
+        let uuid = TEE_UUID {
+            timeLow: 0xAABBCCDD,
+            timeMid: 0xEEFF,
+            timeHiAndVersion: 0x1122,
+            clockSeqAndNode: [0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA],
+        };
+        let mut buf = [0u8; TEE_DIRNAME_BUFFER_REQUIRED_LEN];
+        let result = tee_svc_storage_create_dirname(&mut buf, &uuid);
 
-            assert!(result.is_ok());
-            // Expected hex string based on LE byte order:
-            // AABBCCDD -> "DDCCBBAA"
-            // EEFF     -> "FFEE"
-            // 1122     -> "2211"
-            // 33..AA   -> "33445566778899AA"
-            assert_eq!(str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(), "/DDCCBBAAFFEE221133445566778899AA");
-            assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
-        }
+        assert!(result.is_ok());
+        assert_eq!(
+            str::from_utf8(&buf[..TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1]).unwrap(),
+            "/DDCCBBAAFFEE221133445566778899AA"
+        );
+        assert_eq!(buf[TEE_DIRNAME_BUFFER_REQUIRED_LEN - 1], 0);
     }
 
     // --- Additional tests for tee_b2hs if needed ---
 
-    test_fn! {
-        using TestResult;
-        fn test_tee_b2hs_uppercase_conversion() {
-            let b = &[0xab, 0xcd, 0xef];
-            let mut hs = [0u8; tee_b2hs_hsbuf_size(3)]; // 3 bytes * 2 hex chars + 1 null = 7
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 6); // Returns length without null
-            assert_eq!(str::from_utf8(&hs[..6]).unwrap(), "ABCDEF");
-            assert_eq!(hs[6], 0); // Verify null terminator
-            warn!("Hello from test debug");
-        }
+    #[unittest::def_test]
+    fn test_tee_b2hs_uppercase_conversion() {
+        let b = &[0xab, 0xcd, 0xef];
+        let mut hs = [0u8; tee_b2hs_hsbuf_size(3)];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 6);
+        assert_eq!(str::from_utf8(&hs[..6]).unwrap(), "ABCDEF");
+        assert_eq!(hs[6], 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_tee_b2hs_null_termination() {
-            let b = &[0x12];
-            let mut hs = [0u8; tee_b2hs_hsbuf_size(1)]; // 1 byte * 2 hex chars + 1 null = 3
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 2);
-            assert_eq!(str::from_utf8(&hs[..2]).unwrap(), "12");
-            assert_eq!(hs[2], 0); // Verify null terminator
-        }
+    #[unittest::def_test]
+    fn test_tee_b2hs_null_termination() {
+        let b = &[0x12];
+        let mut hs = [0u8; tee_b2hs_hsbuf_size(1)];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(str::from_utf8(&hs[..2]).unwrap(), "12");
+        assert_eq!(hs[2], 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_tee_b2hs_short_output_buffer() {
-            let b = &[0x12, 0x34]; // Needs 4 hex chars + 1 null = 5 bytes
-            let mut hs = [0u8; tee_b2hs_hsbuf_size(2) - 1]; // Provide 1 byte less than required
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_err());
-        }
+    #[unittest::def_test]
+    fn test_tee_b2hs_short_output_buffer() {
+        let b = &[0x12, 0x34];
+        let mut hs = [0u8; tee_b2hs_hsbuf_size(2) - 1];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_err());
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_syscall_storage_obj_create_type_data() {
-            // step 1 : create a new object
-            let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
-            let object_id = "test_object_create";
-            let object_id_len = object_id.len();
-            let flags = TEE_DATA_FLAG_ACCESS_READ
-                | TEE_DATA_FLAG_ACCESS_WRITE
-                | TEE_DATA_FLAG_ACCESS_WRITE_META
-                | TEE_DATA_FLAG_OVERWRITE;
-            // TEE_TYPE_DATA has no attributes
-            let attr = TEE_HANDLE_NULL;
-            let data_create = b"test_data";
-            let len = data_create.len();
-            let mut obj = 0 as c_uint;
-            let result = syscall_storage_obj_create(storage_id,
-                object_id.as_ptr() as *mut c_void, object_id_len,
-                flags as c_ulong,
-                attr as c_ulong,
-                data_create.as_ptr() as *mut c_void,
-                len,
-                &mut obj as *mut c_uint);
-            tee_debug!("result: {:X?}", result);
-            assert!(result.is_ok());
+    #[unittest::def_test(custom)]
+    fn test_syscall_storage_obj_create_type_data() {
+        let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
+        let object_id = "test_object_create";
+        let flags = TEE_DATA_FLAG_ACCESS_READ
+            | TEE_DATA_FLAG_ACCESS_WRITE
+            | TEE_DATA_FLAG_ACCESS_WRITE_META
+            | TEE_DATA_FLAG_OVERWRITE;
+        let attr = TEE_HANDLE_NULL;
+        let data_create = b"test_data";
 
-            // step 2 : read the object
-            let data_read = vec![0u8; data_create.len()];
-            let mut count = 0_u64;
-            let result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
-            assert!(result.is_ok());
-            tee_debug!("data: {:?}, count: 0x{:X?}", data_read, count);
-            assert_eq!(data_read, b"test_data");
-            assert_eq!(count, data_create.len() as u64);
-            // assert_eq!(str::from_utf8(&data[..len]).unwrap(), "test_data");
+        let object_id_user = user_buffer_from_bytes(object_id.as_bytes());
+        let data_create_user = user_buffer_from_bytes(data_create);
+        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
 
-            // step 3 : syscall_storage_obj_write
-            let data_write = b"TEST_DATA";
-            let len = data_write.len();
-            let result = syscall_storage_obj_write(obj as c_ulong, data_write.as_ptr() as *mut c_void, len);
-            assert!(result.is_ok());
+        let result = syscall_storage_obj_create(
+            storage_id,
+            object_id_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id.len(),
+            flags as c_ulong,
+            attr as c_ulong,
+            data_create_user.as_user_ptr::<u8>() as *mut c_void,
+            data_create.len(),
+            obj.as_user_ref(),
+        );
+        assert!(result.is_ok());
 
-            // step 4 : seek
-            let result = syscall_storage_obj_seek(obj as c_ulong, -(data_write.len() as i32), TEE_DATA_SEEK_CUR as c_ulong);
-            assert!(result.is_ok());
+        let obj_id = obj.read() as c_ulong;
 
-            // step 5 : read
-            let data_read = vec![0u8; data_write.len()];
-            let mut count = 0_u64;
-            let result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
-            assert!(result.is_ok());
-            tee_debug!("data: {:?}, count: 0x{:X?}", data_read, count);
-            assert_eq!(data_read, b"TEST_DATA");
-            assert_eq!(count, data_write.len() as u64);
+        let data_read = TestUserBuffer::new(data_create.len()).unwrap();
+        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let result = syscall_storage_obj_read(
+            obj_id,
+            data_read.as_user_ptr::<u8>() as *mut c_void,
+            data_create.len(),
+            count.as_user_ref(),
+        );
+        assert!(result.is_ok());
+        let data_read_back = data_read.read_bytes(data_create.len()).unwrap();
+        assert_eq!(data_read_back.as_slice(), data_create);
+        assert_eq!(count.read(), data_create.len() as u64);
 
-            // step 6 : truncate
-            let len = data_create.len();
-            let result = syscall_storage_obj_trunc(obj as c_ulong, len);
-            assert!(result.is_ok());
-            let result = syscall_storage_obj_seek(obj as c_ulong, 0, TEE_DATA_SEEK_SET as c_ulong);
-            assert!(result.is_ok());
-            // step 7 : read
-            let data_read = vec![0u8; data_create.len()];
-            let mut count = 0_u64;
-            let result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
-            assert!(result.is_ok());
-            tee_debug!("data: {:?}, count: 0x{:X?}", data_read, count);
-            assert_eq!(data_read, b"test_data");
-            assert_eq!(count, data_create.len() as u64);
-            // read failed because the object is truncated
-            let mut data_read = [0u8; 1];
-            let mut count = 0_u64;
-            let _result = syscall_storage_obj_read(obj as c_ulong, data_read.as_ptr() as *mut c_void, data_read.len(), &mut count);
-            // assert!(result.is_err());
-            assert_eq!(count, 0);
-            // seek to the overflow position , is ok
-            let result = syscall_storage_obj_seek(obj as c_ulong, (data_create.len() + 1) as i32, TEE_DATA_SEEK_SET as c_ulong);
-            assert!(result.is_ok());
+        let data_write = b"TEST_DATA";
+        let data_write_user = user_buffer_from_bytes(data_write);
+        let result = syscall_storage_obj_write(
+            obj_id,
+            data_write_user.as_user_ptr::<u8>() as *mut c_void,
+            data_write.len(),
+        );
+        assert!(result.is_ok());
 
-            // step 7 : get info to check size
-            let mut info = utee_object_info::default();
-            let result = syscall_cryp_obj_get_info(obj as c_ulong, &mut info);
+        let result = syscall_storage_obj_seek(
+            obj_id,
+            -(data_write.len() as i32),
+            TEE_DATA_SEEK_CUR as c_ulong,
+        );
+        assert!(result.is_ok());
 
-            tee_debug!("info: {:?}", info);
-            assert!(result.is_ok());
-            assert_eq!(info.data_size, data_create.len() as u32);
-            assert!(info.handle_flags&(TEE_HANDLE_FLAG_PERSISTENT
-                | TEE_HANDLE_FLAG_INITIALIZED
-                | TEE_DATA_FLAG_ACCESS_READ
-                | TEE_DATA_FLAG_ACCESS_WRITE
-                | TEE_DATA_FLAG_ACCESS_WRITE_META) != 0);
-            assert_eq!(info.obj_type, TEE_TYPE_DATA);
+        let data_read = TestUserBuffer::new(data_write.len()).unwrap();
+        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let result = syscall_storage_obj_read(
+            obj_id,
+            data_read.as_user_ptr::<u8>() as *mut c_void,
+            data_write.len(),
+            count.as_user_ref(),
+        );
+        assert!(result.is_ok());
+        let data_read_back = data_read.read_bytes(data_write.len()).unwrap();
+        assert_eq!(data_read_back.as_slice(), data_write);
+        assert_eq!(count.read(), data_write.len() as u64);
 
-            // step 8 : rename object
-            let object_id_new = "test_object_new";
-            let object_id_new_len = object_id_new.len();
-            let result = syscall_storage_obj_rename(obj as c_ulong, object_id_new.as_ptr() as *mut c_void, object_id_new_len);
-            tee_debug!("result: {:X?}", result);
-            assert!(result.is_ok());
+        let result = syscall_storage_obj_trunc(obj_id, data_create.len());
+        assert!(result.is_ok());
+        let result = syscall_storage_obj_seek(obj_id, 0, TEE_DATA_SEEK_SET as c_ulong);
+        assert!(result.is_ok());
 
-            // // step 9 : get info to check size
-            // let mut info = utee_object_info::default();
-            // let result = syscall_cryp_obj_get_info(obj as c_ulong, &mut info);
+        let data_read = TestUserBuffer::new(data_create.len()).unwrap();
+        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let result = syscall_storage_obj_read(
+            obj_id,
+            data_read.as_user_ptr::<u8>() as *mut c_void,
+            data_create.len(),
+            count.as_user_ref(),
+        );
+        assert!(result.is_ok());
+        let data_read_back = data_read.read_bytes(data_create.len()).unwrap();
+        assert_eq!(data_read_back.as_slice(), data_create);
+        assert_eq!(count.read(), data_create.len() as u64);
 
-            // step 8 : close the object
-            let obj_id = obj as c_ulong;
-            let result = syscall_storage_obj_del(obj_id);
-            assert!(result.is_ok());
-            // check if the object is deleted
-            let result = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(matches!(result, Err(TEE_ERROR_ITEM_NOT_FOUND)));
-        }
+        let data_read = TestUserBuffer::new(1).unwrap();
+        let mut count = TestUserValue::<u64>::from_value(0).unwrap();
+        let _result = syscall_storage_obj_read(
+            obj_id,
+            data_read.as_user_ptr::<u8>() as *mut c_void,
+            1,
+            count.as_user_ref(),
+        );
+        assert_eq!(count.read(), 0);
+
+        let result = syscall_storage_obj_seek(
+            obj_id,
+            (data_create.len() + 1) as i32,
+            TEE_DATA_SEEK_SET as c_ulong,
+        );
+        assert!(result.is_ok());
+
+        let mut info =
+            TestUserValue::<utee_object_info>::from_value(utee_object_info::default()).unwrap();
+        let result = syscall_cryp_obj_get_info(obj_id, info.as_user_ref());
+        assert!(result.is_ok());
+        let info = info.read();
+        assert_eq!(info.data_size, data_create.len() as u32);
+        assert!(
+            info.handle_flags
+                & (TEE_HANDLE_FLAG_PERSISTENT
+                    | TEE_HANDLE_FLAG_INITIALIZED
+                    | TEE_DATA_FLAG_ACCESS_READ
+                    | TEE_DATA_FLAG_ACCESS_WRITE
+                    | TEE_DATA_FLAG_ACCESS_WRITE_META)
+                != 0
+        );
+        assert_eq!(info.obj_type, TEE_TYPE_DATA);
+
+        let object_id_new = "test_object_new";
+        let object_id_new_user = user_buffer_from_bytes(object_id_new.as_bytes());
+        let result = syscall_storage_obj_rename(
+            obj_id,
+            object_id_new_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id_new.len(),
+        );
+        assert!(result.is_ok());
+
+        let result = syscall_storage_obj_del(obj_id);
+        assert!(result.is_ok());
+        let result = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(matches!(result, Err(TEE_ERROR_ITEM_NOT_FOUND)));
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_syscall_storage_init() {
-        }
-    }
+    #[unittest::def_test]
+    fn test_syscall_storage_init() {}
 
-    test_fn! {
-        using TestResult;
-        fn test_syscall_storage_obj_open() {
-            let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
-            let object_id = "test_object";
-            let object_id_len = object_id.len();
-            let flags = TEE_DATA_FLAG_ACCESS_READ | TEE_DATA_FLAG_ACCESS_WRITE;
-            let mut obj = 0 as c_uint  ;
-            let result = syscall_storage_obj_open(storage_id, object_id.as_ptr() as *mut c_void, object_id_len, flags as c_ulong, &mut obj as *mut c_uint);
-            info!("result: Err(0x{:X})", result.unwrap_err());
-            assert!(result.is_ok());
-        }
-    }
+    #[unittest::def_test(custom)]
+    fn test_syscall_storage_obj_open() {
+        let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
+        let object_id = "test_object";
+        let create_flags = TEE_DATA_FLAG_ACCESS_READ
+            | TEE_DATA_FLAG_ACCESS_WRITE
+            | TEE_DATA_FLAG_ACCESS_WRITE_META
+            | TEE_DATA_FLAG_OVERWRITE;
+        let open_flags = TEE_DATA_FLAG_ACCESS_READ
+            | TEE_DATA_FLAG_ACCESS_WRITE
+            | TEE_DATA_FLAG_ACCESS_WRITE_META;
+        let data_create = b"test_data";
 
-    tests_name! {
-        TEST_TEE_SVC_STORAGE;
-        tee_svc_storage;
-        //------------------------
-        test_size_of_val,
-        test_create_dirname_standard_uuid,
-        test_create_dirname_all_zeros_uuid,
-        test_create_dirname_specific_uuid_values,
-        test_create_dirname_short_buffer,
-        test_create_dirname_empty_buffer,
-        test_create_dirname_exact_buffer,
-        test_tee_b2hs_uppercase_conversion,
-        test_tee_b2hs_null_termination,
-        test_tee_b2hs_short_output_buffer,
-        //------------------------
-        test_syscall_storage_init,
-        // test_syscall_storage_obj_open,
-        test_syscall_storage_obj_create_type_data,
+        let object_id_create_user = user_buffer_from_bytes(object_id.as_bytes());
+        let data_create_user = user_buffer_from_bytes(data_create);
+        let mut created_obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_storage_obj_create(
+            storage_id,
+            object_id_create_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id.len(),
+            create_flags as c_ulong,
+            TEE_HANDLE_NULL as c_ulong,
+            data_create_user.as_user_ptr::<u8>() as *mut c_void,
+            data_create.len(),
+            created_obj.as_user_ref(),
+        );
+        assert!(result.is_ok());
+
+        let created_obj_id = created_obj.read() as c_ulong;
+        let result = syscall_cryp_obj_close(created_obj_id);
+        assert!(result.is_ok());
+
+        let object_id_user = user_buffer_from_bytes(object_id.as_bytes());
+        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_storage_obj_open(
+            storage_id,
+            object_id_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id.len(),
+            open_flags as c_ulong,
+            obj.as_user_ref(),
+        );
+        assert!(result.is_ok());
+
+        let opened_obj_id = obj.read() as c_ulong;
+        let result = syscall_storage_obj_del(opened_obj_id);
+        assert!(result.is_ok());
     }
 }

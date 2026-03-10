@@ -6,7 +6,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{Error, Item, ItemFn, ItemMod, parse_macro_input};
+use syn::{Error, Ident, Item, ItemFn, ItemMod, Token, parse_macro_input, punctuated::Punctuated};
 
 /// Register a constructor function to be called before `main`.
 ///
@@ -145,18 +145,35 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `#[def_test]` - Normal test
 /// - `#[def_test(ignore)]` - Test will be skipped
 /// - `#[def_test(should_panic)]` - Test expects panic (not fully supported in no_std)
+/// - `#[def_test(custom)]` - Test runs through unittest's custom executor
 #[proc_macro_attribute]
 pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
-    generate_function_test(attr, input)
+    let args = parse_macro_input!(attr with Punctuated::<Ident, Token![,]>::parse_terminated);
+    generate_function_test(args, input)
 }
 
 /// Generate test code for a single function
-fn generate_function_test(attr: TokenStream, input: ItemFn) -> TokenStream {
-    // Parse attributes
-    let attr_str = attr.to_string();
-    let ignore = attr_str.contains("ignore");
-    let should_panic = attr_str.contains("should_panic");
+fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> TokenStream {
+    let mut ignore = false;
+    let mut should_panic = false;
+    let mut use_custom_executor = false;
+
+    for arg in args {
+        match arg.to_string().as_str() {
+            "ignore" => ignore = true,
+            "should_panic" => should_panic = true,
+            "custom" => use_custom_executor = true,
+            other => {
+                return Error::new(
+                    arg.span(),
+                    format!("unsupported def_test argument: {other}"),
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
 
     let fn_name = &input.sig.ident;
     let fn_attrs = &input.attrs;
@@ -194,6 +211,11 @@ fn generate_function_test(attr: TokenStream, input: ItemFn) -> TokenStream {
 
     let ignore_val = ignore;
     let should_panic_val = should_panic;
+    let execution_mode = if use_custom_executor {
+        quote!(unittest::TestExecutionMode::Custom)
+    } else {
+        quote!(unittest::TestExecutionMode::Standard)
+    };
     let fn_name_str = fn_name.to_string();
 
     // Use linker section to collect test descriptors
@@ -210,6 +232,7 @@ fn generate_function_test(attr: TokenStream, input: ItemFn) -> TokenStream {
             #fn_name,
             #should_panic_val,
             #ignore_val,
+            #execution_mode,
         );
     };
 

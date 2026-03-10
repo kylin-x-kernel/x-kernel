@@ -1485,681 +1485,792 @@ pub fn syscall_asymm_verify(
     Ok(())
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_cryp {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
-    use crate::tee::tee_svc_cryp::{
-        syscall_cryp_obj_alloc, syscall_cryp_obj_copy, syscall_obj_generate_key,
+    use crate::{
+        tee::tee_svc_cryp::{
+            syscall_cryp_obj_alloc, syscall_cryp_obj_copy, syscall_obj_generate_key,
+        },
+        unittest_task::TestUserValue,
     };
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_cryp_state() {
+        let mut state1: u32 = 0;
+        let mut state2: u32 = 0;
+        let mut test_obj = tee_obj::default();
 
-        fn test_cryp_state(){
-            let mut state1: u32 = 0;
-            let mut state2: u32 = 0;
-            let mut test_obj = tee_obj::default();
+        let res = tee_obj_add(test_obj);
+        assert!(res.is_ok());
+        let id = res.unwrap() as u32;
 
-            let res = tee_obj_add(test_obj);
-            assert!(res.is_ok());
-            let id = res.unwrap() as u32;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut state1,
+        );
+        assert!(res.is_ok());
 
-            let res = tee_cryp_state_alloc(TEE_ALG_SM3, TEE_OperationMode::TEE_MODE_DIGEST, None, None, &mut state1);
-            assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_AES_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(id),
+            None,
+            &mut state2,
+        );
+        assert!(res.is_ok());
 
-            let res = tee_cryp_state_alloc(TEE_ALG_AES_ECB_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(id), None, &mut state2);
-            assert!(res.is_ok());
+        let res = tee_cryp_state_get(state1);
+        assert!(res.is_ok());
+        let cs1 = res.unwrap();
 
-            let res = tee_cryp_state_get(state1);
-            assert!(res.is_ok());
-            let cs1 = res.unwrap();
+        let guard1 = cs1.lock();
+        assert_eq!(guard1.id, state1);
+        assert_eq!(guard1.algo, TEE_ALG_SM3);
+        assert!(guard1.mode == TEE_OperationMode::TEE_MODE_DIGEST);
+        drop(guard1);
 
-            let guard1 = cs1.lock();
-            assert_eq!(guard1.id, state1);
-            assert_eq!(guard1.algo, TEE_ALG_SM3);
-            assert!(guard1.mode == TEE_OperationMode::TEE_MODE_DIGEST);
-            drop(guard1);
+        let res = tee_cryp_state_get(state2);
+        assert!(res.is_ok());
+        let cs2 = res.unwrap();
 
-            let res = tee_cryp_state_get(state2);
-            assert!(res.is_ok());
-            let cs2 = res.unwrap();
+        let guard2 = cs2.lock();
+        assert_eq!(guard2.id, state2);
+        assert_eq!(guard2.algo, TEE_ALG_AES_ECB_NOPAD);
+        assert!(guard2.mode == TEE_OperationMode::TEE_MODE_DECRYPT);
+        drop(guard2);
 
-            let guard2 = cs2.lock();
-            assert_eq!(guard2.id, state2);
-            assert_eq!(guard2.algo, TEE_ALG_AES_ECB_NOPAD);
-            assert!(guard2.mode == TEE_OperationMode::TEE_MODE_DECRYPT);
-            drop(guard2);
+        let res = tee_cryp_state_free(state1);
+        assert!(res.is_ok());
 
-            let res = tee_cryp_state_free(state1);
-            assert!(res.is_ok());
+        let res = tee_cryp_state_free(state2);
+        assert!(res.is_ok());
 
-            let res = tee_cryp_state_free(state2);
-            assert!(res.is_ok());
-
-            match tee_cryp_state_get(state1) {
-                Err(e) => assert_eq!(e, TEE_ERROR_ITEM_NOT_FOUND),
-                Ok(_) => panic!("Expected error, but got Ok"),
-            }
-            match tee_cryp_state_get(state2) {
-                Err(e) => assert_eq!(e, TEE_ERROR_ITEM_NOT_FOUND),
-                Ok(_) => panic!("Expected error, but got Ok"),
-            }
+        match tee_cryp_state_get(state1) {
+            Err(e) => assert_eq!(e, TEE_ERROR_ITEM_NOT_FOUND),
+            Ok(_) => panic!("Expected error, but got Ok"),
+        }
+        match tee_cryp_state_get(state2) {
+            Err(e) => assert_eq!(e, TEE_ERROR_ITEM_NOT_FOUND),
+            Ok(_) => panic!("Expected error, but got Ok"),
         }
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_cryp_hash_sm3() {
+        let mut state: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-        fn test_cryp_hash_sm3(){
-            let mut state: u32 = 0;
-            let res = tee_cryp_state_alloc(TEE_ALG_SM3, TEE_OperationMode::TEE_MODE_DIGEST, None, None, &mut state);
-            assert!(res.is_ok());
+        let res = tee_cryp_hash_init(state);
+        assert!(res.is_ok());
 
-            let res = tee_cryp_hash_init(state);
-            assert!(res.is_ok());
+        let data = b"abc";
 
-            let data = b"abc";
+        let res = tee_cryp_hash_update(state, &data[..]);
+        assert!(res.is_ok());
 
-            let res = tee_cryp_hash_update(state, &data[..]);
-            assert!(res.is_ok());
+        let mut hash: [u8; 32] = [0; 32];
+        let res = tee_cryp_hash_final(state, &[], &mut hash);
+        assert!(res.is_ok());
+        let hash_size = res.unwrap();
 
-            let mut hash: [u8; 32] = [0; 32];
-            let res = tee_cryp_hash_final(state, &[], &mut hash);
-            assert!(res.is_ok());
-            let hash_size = res.unwrap();
-
-            assert_eq!(hash_size, 32);
-            assert_eq!(hash, [0x66, 0xc7, 0xf0, 0xf4, 0x62, 0xee, 0xed, 0xd9, 0xd1, 0xf2, 0xd4, 0x6b, 0xdc, 0x10, 0xe4, 0xe2, 0x41, 0x67,
-                0xc4, 0x87, 0x5c, 0xf2, 0xf7, 0xa2, 0x29, 0x7d, 0xa0, 0x2b, 0x8f, 0x4b, 0xa8, 0xe0]);
-        }
+        assert_eq!(hash_size, 32);
+        assert_eq!(
+            hash,
+            [
+                0x66, 0xc7, 0xf0, 0xf4, 0x62, 0xee, 0xed, 0xd9, 0xd1, 0xf2, 0xd4, 0x6b, 0xdc, 0x10,
+                0xe4, 0xe2, 0x41, 0x67, 0xc4, 0x87, 0x5c, 0xf2, 0xf7, 0xa2, 0x29, 0x7d, 0xa0, 0x2b,
+                0x8f, 0x4b, 0xa8, 0xe0
+            ]
+        );
     }
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_cryp_hmac_sm3() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
-        fn test_cryp_hmac_sm3(){
-            let mut state: u32 = 0;
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, &mut obj_id);
-            assert!(result.is_ok());
+        // 随机生成密钥
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
 
-            // 随机生成密钥
-            let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
-            assert!(result.is_ok());
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
 
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let mut obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_HMAC_SM3);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-            assert_eq!(obj.info.objectType, TEE_TYPE_HMAC_SM3);
-            assert_eq!(obj.info.maxObjectSize, 128);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+        let key = b"abcdefghabcdefgh";
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(key as &[u8]);
+        assert_eq!(secret.key(), key);
 
-            let key = b"abcdefghabcdefgh";
-            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-            secret.set_secret_data(key as &[u8]);
-            assert_eq!(secret.key(), key);
+        // 赋值固定的key用于验证结果
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
 
-            // 赋值固定的key用于验证结果
-            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-            drop(obj);
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_HMAC_SM3,
+            TEE_OperationMode::TEE_MODE_MAC,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-            let res = tee_cryp_state_alloc(TEE_ALG_HMAC_SM3, TEE_OperationMode::TEE_MODE_MAC, Some(obj_id as _), None, &mut state);
-            assert!(res.is_ok());
+        let res = tee_cryp_hash_init(state);
+        assert!(res.is_ok());
 
-            let res = tee_cryp_hash_init(state);
-            assert!(res.is_ok());
+        let data = b"abc";
 
-            let data = b"abc";
+        let res = tee_cryp_hash_update(state, &data[..]);
+        assert!(res.is_ok());
 
-            let res = tee_cryp_hash_update(state, &data[..]);
-            assert!(res.is_ok());
+        let mut hash: [u8; 32] = [0; 32];
+        let res = tee_cryp_hash_final(state, &[], &mut hash);
+        assert!(res.is_ok());
+        let hash_size = res.unwrap();
 
-            let mut hash: [u8; 32] = [0; 32];
-            let res = tee_cryp_hash_final(state, &[], &mut hash);
-            assert!(res.is_ok());
-            let hash_size = res.unwrap();
-
-            assert_eq!(hash_size, 32);
-            assert_eq!(hash, [0x99, 0x67, 0xaf, 0x42, 0x68, 0xd7, 0xf6, 0x96, 0x40, 0xca, 0xb9, 0x99, 0x35, 0x18, 0x0f,
-                0xb3, 0xc6, 0x9b, 0xc5, 0x82, 0xa2, 0xb9, 0x7f, 0xa7, 0x53, 0xb2, 0x6c, 0x58, 0x10, 0xaa, 0xa0, 0x37]);
-
-        }
+        assert_eq!(hash_size, 32);
+        assert_eq!(
+            hash,
+            [
+                0x99, 0x67, 0xaf, 0x42, 0x68, 0xd7, 0xf6, 0x96, 0x40, 0xca, 0xb9, 0x99, 0x35, 0x18,
+                0x0f, 0xb3, 0xc6, 0x9b, 0xc5, 0x82, 0xa2, 0xb9, 0x7f, 0xa7, 0x53, 0xb2, 0x6c, 0x58,
+                0x10, 0xaa, 0xa0, 0x37
+            ]
+        );
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_cryp_sm4_ecb_encrypt(){
-            let mut state: u32 = 0;
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, &mut obj_id);
-            assert!(result.is_ok());
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm4_ecb_encrypt() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
-            // 随机生成密钥
-            let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
-            assert!(result.is_ok());
+        // 随机生成密钥
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
 
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let mut obj = obj_arc.lock();
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
 
-            assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
-            assert_eq!(obj.info.maxObjectSize, 128);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-            let key = b"abcdefghabcdefgh";
-            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-            secret.set_secret_data(key as &[u8]);
-            assert_eq!(secret.key(), key);
+        let key = b"abcdefghabcdefgh";
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(key as &[u8]);
+        assert_eq!(secret.key(), key);
 
-            // 赋值固定的key用于验证结果
-            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-            drop(obj);
+        // 赋值固定的key用于验证结果
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
 
-            let res = tee_cryp_state_alloc(TEE_ALG_SM4_ECB_NOPAD, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
-            assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-            let data1 = b"abcdefghabcdefgh";
-            let data2 = b"1234567890987654";
+        let data1 = b"abcdefghabcdefgh";
+        let data2 = b"1234567890987654";
 
-            let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
-            assert!(res.is_ok());
+        let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
+        assert!(res.is_ok());
 
-            let mut out = [0u8; 32];
-            let mut total_len = 0;
+        let mut out = [0u8; 32];
+        let mut total_len = 0;
 
-            let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            let res = tee_cryp_cipher_update(state, &data2[..], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        let res = tee_cryp_cipher_update(state, &data2[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            assert_eq!(total_len, 32);
-            assert_eq!(out, [0x1b, 0x22, 0x97, 0x80, 0x2e, 0x42, 0xe4, 0xe6, 0xfb, 0x7d, 0xce, 0x53, 0x25, 0xd8, 0x02, 0x09,
-                0x53, 0x34, 0x8f, 0xa1, 0xd9, 0xc7, 0x46, 0x75, 0x25, 0x3c, 0x97, 0xae, 0xfd, 0xdd, 0xa0, 0xe7]);
-        }
+        assert_eq!(total_len, 32);
+        assert_eq!(
+            out,
+            [
+                0x1b, 0x22, 0x97, 0x80, 0x2e, 0x42, 0xe4, 0xe6, 0xfb, 0x7d, 0xce, 0x53, 0x25, 0xd8,
+                0x02, 0x09, 0x53, 0x34, 0x8f, 0xa1, 0xd9, 0xc7, 0x46, 0x75, 0x25, 0x3c, 0x97, 0xae,
+                0xfd, 0xdd, 0xa0, 0xe7
+            ]
+        );
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_cryp_sm4_ecb_decrypt(){
-            let mut state: u32 = 0;
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, &mut obj_id);
-            assert!(result.is_ok());
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm4_ecb_decrypt() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
-            // 随机生成密钥
-            let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
-            assert!(result.is_ok());
+        // 随机生成密钥
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
 
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let mut obj = obj_arc.lock();
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
 
-            assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
-            assert_eq!(obj.info.maxObjectSize, 128);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-            let key = b"abcdefgh12345678";
-            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-            secret.set_secret_data(key as &[u8]);
-            assert_eq!(secret.key(), key);
+        let key = b"abcdefgh12345678";
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(key as &[u8]);
+        assert_eq!(secret.key(), key);
 
-            // 赋值固定的key用于验证结果
-            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-            drop(obj);
+        // 赋值固定的key用于验证结果
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
 
-            let res = tee_cryp_state_alloc(TEE_ALG_SM4_ECB_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
-            assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-            let data1: [u8; 16] = [0x9b, 0x46, 0x5b, 0x81, 0x3f, 0xea, 0x31, 0xd6, 0x78, 0xe9, 0xad, 0x06, 0x00, 0x21, 0x53, 0x48];
-            let data2: [u8; 16] = [0x6e, 0x51, 0x8c, 0xae, 0xe0, 0xe1, 0x0f, 0x6e, 0xb8, 0x95, 0x5c, 0x2e, 0x38, 0x24, 0x81, 0xd7];
+        let data1: [u8; 16] = [
+            0x9b, 0x46, 0x5b, 0x81, 0x3f, 0xea, 0x31, 0xd6, 0x78, 0xe9, 0xad, 0x06, 0x00, 0x21,
+            0x53, 0x48,
+        ];
+        let data2: [u8; 16] = [
+            0x6e, 0x51, 0x8c, 0xae, 0xe0, 0xe1, 0x0f, 0x6e, 0xb8, 0x95, 0x5c, 0x2e, 0x38, 0x24,
+            0x81, 0xd7,
+        ];
 
-            let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
-            assert!(res.is_ok());
+        let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
+        assert!(res.is_ok());
 
-            let mut out = [0u8; 32];
-            let mut total_len = 0;
+        let mut out = [0u8; 32];
+        let mut total_len = 0;
 
-            let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            let res = tee_cryp_cipher_update(state, &data2[..], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        let res = tee_cryp_cipher_update(state, &data2[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            assert_eq!(total_len, 32);
-            assert_eq!(out, *b"abcdefghijklmnop1234567887654321");
-        }
+        assert_eq!(total_len, 32);
+        assert_eq!(out, *b"abcdefghijklmnop1234567887654321");
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_cryp_sm4_cbc_encrypt(){
-            let mut state: u32 = 0;
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, &mut obj_id);
-            assert!(result.is_ok());
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm4_cbc_encrypt() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
-            // 随机生成密钥
-            let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
-            assert!(result.is_ok());
+        // 随机生成密钥
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
 
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let mut obj = obj_arc.lock();
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
 
-            assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
-            assert_eq!(obj.info.maxObjectSize, 128);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-            let key = b"abcdefghabcdefgh";
-            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-            secret.set_secret_data(key as &[u8]);
-            assert_eq!(secret.key(), key);
+        let key = b"abcdefghabcdefgh";
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(key as &[u8]);
+        assert_eq!(secret.key(), key);
 
-            // 赋值固定的key用于验证结果
-            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-            drop(obj);
+        // 赋值固定的key用于验证结果
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
 
-            let res = tee_cryp_state_alloc(TEE_ALG_SM4_CBC_NOPAD, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
-            assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_CBC_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-            let data = b"abcdefghabcdefgh1234567890987654";
-            let iv = b"1234qwerasdfzxcv";
+        let data = b"abcdefghabcdefgh1234567890987654";
+        let iv = b"1234qwerasdfzxcv";
 
-            let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
-            assert!(res.is_ok());
+        let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
+        assert!(res.is_ok());
 
-            let mut out = [0u8; 48];
-            let mut total_len = 0;
+        let mut out = [0u8; 48];
+        let mut total_len = 0;
 
-            let res = tee_cryp_cipher_update(state, &data[..], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        let res = tee_cryp_cipher_update(state, &data[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            // 处理填充
-            let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        // 处理填充
+        let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            assert_eq!(total_len, 48);
-            assert_eq!(&out[..total_len], [0xce, 0x3b, 0x91, 0x3b, 0x42, 0xf3, 0x9d, 0x3d, 0x61, 0xfb, 0x75, 0x2f, 0xff, 0x81, 0x51, 0xc6,
-                0x13, 0xf1, 0x0a, 0x8b, 0xb9, 0x5c, 0x8e, 0xe1, 0x59, 0x56, 0x6c, 0xc9, 0xcb, 0x91, 0x57, 0xf8,
-                0xf3, 0x4f, 0xa5, 0xa9, 0x0c, 0x02, 0x39, 0xcc, 0x76, 0x1b, 0x4f, 0xe2, 0xb1, 0xbc, 0xd1, 0x96]);
-        }
+        assert_eq!(total_len, 48);
+        assert_eq!(
+            &out[..total_len],
+            [
+                0xce, 0x3b, 0x91, 0x3b, 0x42, 0xf3, 0x9d, 0x3d, 0x61, 0xfb, 0x75, 0x2f, 0xff, 0x81,
+                0x51, 0xc6, 0x13, 0xf1, 0x0a, 0x8b, 0xb9, 0x5c, 0x8e, 0xe1, 0x59, 0x56, 0x6c, 0xc9,
+                0xcb, 0x91, 0x57, 0xf8, 0xf3, 0x4f, 0xa5, 0xa9, 0x0c, 0x02, 0x39, 0xcc, 0x76, 0x1b,
+                0x4f, 0xe2, 0xb1, 0xbc, 0xd1, 0x96
+            ]
+        );
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_cryp_sm4_cbc_decrypt(){
-            let mut state: u32 = 0;
-            let mut obj_id: c_uint = 0;
-            let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, &mut obj_id);
-            assert!(result.is_ok());
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm4_cbc_decrypt() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
-            // 随机生成密钥
-            let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
-            assert!(result.is_ok());
+        // 随机生成密钥
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
 
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let mut obj = obj_arc.lock();
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
 
-            assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
-            assert_eq!(obj.info.maxObjectSize, 128);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-            let key = b"abcdefghabcdefgh";
-            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-            secret.set_secret_data(key as &[u8]);
-            assert_eq!(secret.key(), key);
+        let key = b"abcdefghabcdefgh";
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(key as &[u8]);
+        assert_eq!(secret.key(), key);
 
-            // 赋值固定的key用于验证结果
-            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-            drop(obj);
+        // 赋值固定的key用于验证结果
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
 
-            let res = tee_cryp_state_alloc(TEE_ALG_SM4_CBC_NOPAD, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
-            assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_CBC_NOPAD,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-            // 解密的数据需要包括一个block_size大小的填充
-            let data: [u8; 48] = [0xce, 0x3b, 0x91, 0x3b, 0x42, 0xf3, 0x9d, 0x3d, 0x61, 0xfb, 0x75, 0x2f, 0xff, 0x81, 0x51, 0xc6,
-                0x13, 0xf1, 0x0a, 0x8b, 0xb9, 0x5c, 0x8e, 0xe1, 0x59, 0x56, 0x6c, 0xc9, 0xcb, 0x91, 0x57, 0xf8,
-                0xf3, 0x4f, 0xa5, 0xa9, 0x0c, 0x02, 0x39, 0xcc, 0x76, 0x1b, 0x4f, 0xe2, 0xb1, 0xbc, 0xd1, 0x96];
-            let iv = b"1234qwerasdfzxcv";
+        // 解密的数据需要包括一个block_size大小的填充
+        let data: [u8; 48] = [
+            0xce, 0x3b, 0x91, 0x3b, 0x42, 0xf3, 0x9d, 0x3d, 0x61, 0xfb, 0x75, 0x2f, 0xff, 0x81,
+            0x51, 0xc6, 0x13, 0xf1, 0x0a, 0x8b, 0xb9, 0x5c, 0x8e, 0xe1, 0x59, 0x56, 0x6c, 0xc9,
+            0xcb, 0x91, 0x57, 0xf8, 0xf3, 0x4f, 0xa5, 0xa9, 0x0c, 0x02, 0x39, 0xcc, 0x76, 0x1b,
+            0x4f, 0xe2, 0xb1, 0xbc, 0xd1, 0x96,
+        ];
+        let iv = b"1234qwerasdfzxcv";
 
-            let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
-            assert!(res.is_ok());
+        let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
+        assert!(res.is_ok());
 
-            // 输出区域大小仍然需要比输入数据大一个block_size
-            let mut out = [0u8; 64];
-            let mut total_len = 0;
+        // 输出区域大小仍然需要比输入数据大一个block_size
+        let mut out = [0u8; 64];
+        let mut total_len = 0;
 
-            let res = tee_cryp_cipher_update(state, &data[..], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        let res = tee_cryp_cipher_update(state, &data[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
-            assert!(res.is_ok());
-            total_len += res.unwrap();
+        let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-            assert_eq!(total_len, 32);
-            assert_eq!(&out[..32], *b"abcdefghabcdefgh1234567890987654");
-        }
+        assert_eq!(total_len, 32);
+        assert_eq!(&out[..32], *b"abcdefghabcdefgh1234567890987654");
     }
 
-    test_fn! {
-       using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm4_gcm_encrypt() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
-       fn test_cryp_sm4_gcm_encrypt(){
-           let mut state: u32 = 0;
-           let mut obj_id: c_uint = 0;
-           let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, &mut obj_id);
-           assert!(result.is_ok());
+        // 随机生成密钥
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
 
-           // 随机生成密钥
-           let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
-           assert!(result.is_ok());
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
 
-           let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-           assert!(obj_arc.is_ok());
-           let obj_arc = obj_arc.unwrap();
-           let mut obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-           assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
-           assert_eq!(obj.info.maxObjectSize, 128);
-           assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-           assert_eq!(obj.attr.len(), 1);
-           assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+        let key: [u8; 16] = [
+            0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC,
+            0xE4, 0x67,
+        ];
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(&key);
+        assert_eq!(secret.key(), key);
 
-           let key: [u8; 16] = [0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC, 0xE4, 0x67];
-           let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-           secret.set_secret_data(&key);
-           assert_eq!(secret.key(), key);
+        // 赋值固定的key用于验证结果
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
 
-           // 赋值固定的key用于验证结果
-           let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-           drop(obj);
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-           let res = tee_cryp_state_alloc(TEE_ALG_SM4_GCM, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id as _), None, &mut state);
-           assert!(res.is_ok());
+        let data: [u8; 64] = [
+            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
+            0xBB, 0xBB, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xDD, 0xDD, 0xDD, 0xDD,
+            0xDD, 0xDD, 0xDD, 0xDD, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        ];
+        let nonce: [u8; 12] = [
+            0xA3, 0x33, 0x06, 0x38, 0xA8, 0x09, 0xBA, 0x35, 0x8D, 0x6C, 0x09, 0x8E,
+        ];
+        let ad: [u8; 20] = [
+            0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD,
+            0xBE, 0xEF, 0xAB, 0xAD, 0xDA, 0xD2,
+        ];
+        let mut tag = [0u8; 16];
+        let mut out = [0u8; 80];
+        let mut total_len = 0;
 
-           let data: [u8; 64] =
-           [0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
-           0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
-           0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
-           0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD,
-           0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
-           0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-           0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
-           0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA];
-           let nonce: [u8; 12] = [0xA3, 0x33, 0x06, 0x38, 0xA8, 0x09, 0xBA, 0x35, 0x8D, 0x6C, 0x09, 0x8E];
-           let ad: [u8; 20] = [0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED,
-           0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xAB, 0xAD, 0xDA, 0xD2];
-           let mut tag = [0u8; 16];
-           let mut out = [0u8; 80];
-           let mut total_len = 0;
+        let res = tee_cryp_authenc_init(state, &nonce);
+        assert!(res.is_ok());
 
-           let res = tee_cryp_authenc_init(state, &nonce);
-           assert!(res.is_ok());
+        let res = tee_cryp_authenc_update_aad(state, &ad);
+        assert!(res.is_ok());
 
-           let res = tee_cryp_authenc_update_aad(state, &ad);
-           assert!(res.is_ok());
+        let res = tee_cryp_authenc_update_payload(state, &data[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-           let res = tee_cryp_authenc_update_payload(state, &data[..], &mut out[total_len..]);
-           assert!(res.is_ok());
-           total_len += res.unwrap();
+        let res = tee_cryp_authenc_enc_final(state, None, &mut out[total_len..], &mut tag);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-           let res = tee_cryp_authenc_enc_final(state, None, &mut out[total_len..], &mut tag);
-           assert!(res.is_ok());
-           total_len += res.unwrap();
-
-           assert_eq!(total_len, 64);
-           assert_eq!(&out[..64],
-           [0x0C, 0x29, 0xFC, 0x49, 0x07, 0x11, 0x9F, 0x99,
-           0xC4, 0x92, 0xE2, 0xFA, 0x7B, 0x63, 0x3F, 0x4E,
-           0x16, 0x5B, 0xE5, 0x35, 0x85, 0xAB, 0xED, 0x71,
-           0x8B, 0xA3, 0x9C, 0xAB, 0x80, 0xA0, 0x63, 0x92,
-           0x73, 0x1E, 0x5C, 0xE6, 0xE3, 0x58, 0x1D, 0xCA,
-           0xF1, 0x19, 0x03, 0x7D, 0x99, 0x8A, 0x0F, 0x52,
-           0x2D, 0x68, 0x0A, 0x9D, 0xCB, 0x40, 0x5A, 0xAD,
-           0xF8, 0x00, 0xC0, 0xC7, 0x98, 0xBA, 0xE3, 0x8A]);
-           assert_eq!(tag, [0x19, 0x7F, 0x6C, 0xC5, 0x52, 0x3D, 0xA3, 0x6A, 0x3B, 0x2C, 0x42, 0x92, 0x44, 0xC4, 0x70, 0xAA]);
-       }
+        assert_eq!(total_len, 64);
+        assert_eq!(
+            &out[..64],
+            [
+                0x0C, 0x29, 0xFC, 0x49, 0x07, 0x11, 0x9F, 0x99, 0xC4, 0x92, 0xE2, 0xFA, 0x7B, 0x63,
+                0x3F, 0x4E, 0x16, 0x5B, 0xE5, 0x35, 0x85, 0xAB, 0xED, 0x71, 0x8B, 0xA3, 0x9C, 0xAB,
+                0x80, 0xA0, 0x63, 0x92, 0x73, 0x1E, 0x5C, 0xE6, 0xE3, 0x58, 0x1D, 0xCA, 0xF1, 0x19,
+                0x03, 0x7D, 0x99, 0x8A, 0x0F, 0x52, 0x2D, 0x68, 0x0A, 0x9D, 0xCB, 0x40, 0x5A, 0xAD,
+                0xF8, 0x00, 0xC0, 0xC7, 0x98, 0xBA, 0xE3, 0x8A
+            ]
+        );
+        assert_eq!(
+            tag,
+            [
+                0x19, 0x7F, 0x6C, 0xC5, 0x52, 0x3D, 0xA3, 0x6A, 0x3B, 0x2C, 0x42, 0x92, 0x44, 0xC4,
+                0x70, 0xAA
+            ]
+        );
     }
 
-    test_fn! {
-       using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm4_gcm_decrypt() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
 
-       fn test_cryp_sm4_gcm_decrypt(){
-           let mut state: u32 = 0;
-           let mut obj_id: c_uint = 0;
-           let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, &mut obj_id);
-           assert!(result.is_ok());
+        // 随机生成密钥
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
 
-           // 随机生成密钥
-           let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
-           assert!(result.is_ok());
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
 
-           let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-           assert!(obj_arc.is_ok());
-           let obj_arc = obj_arc.unwrap();
-           let mut obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
 
-           assert_eq!(obj.info.objectType, TEE_TYPE_SM4);
-           assert_eq!(obj.info.maxObjectSize, 128);
-           assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-           assert_eq!(obj.attr.len(), 1);
-           assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+        let key: [u8; 16] = [
+            0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC,
+            0xE4, 0x67,
+        ];
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(&key);
+        assert_eq!(secret.key(), key);
 
-           let key: [u8; 16] = [0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC, 0xE4, 0x67];
-           let mut secret = tee_cryp_obj_secret_wrapper::new(32);
-           secret.set_secret_data(&key);
-           assert_eq!(secret.key(), key);
+        // 赋值固定的key用于验证结果
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
 
-           // 赋值固定的key用于验证结果
-           let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
-           drop(obj);
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_GCM,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-           let res = tee_cryp_state_alloc(TEE_ALG_SM4_GCM, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state);
-           assert!(res.is_ok());
+        let data: [u8; 64] = [
+            0x0C, 0x29, 0xFC, 0x49, 0x07, 0x11, 0x9F, 0x99, 0xC4, 0x92, 0xE2, 0xFA, 0x7B, 0x63,
+            0x3F, 0x4E, 0x16, 0x5B, 0xE5, 0x35, 0x85, 0xAB, 0xED, 0x71, 0x8B, 0xA3, 0x9C, 0xAB,
+            0x80, 0xA0, 0x63, 0x92, 0x73, 0x1E, 0x5C, 0xE6, 0xE3, 0x58, 0x1D, 0xCA, 0xF1, 0x19,
+            0x03, 0x7D, 0x99, 0x8A, 0x0F, 0x52, 0x2D, 0x68, 0x0A, 0x9D, 0xCB, 0x40, 0x5A, 0xAD,
+            0xF8, 0x00, 0xC0, 0xC7, 0x98, 0xBA, 0xE3, 0x8A,
+        ];
+        let nonce: [u8; 12] = [
+            0xA3, 0x33, 0x06, 0x38, 0xA8, 0x09, 0xBA, 0x35, 0x8D, 0x6C, 0x09, 0x8E,
+        ];
+        let ad: [u8; 20] = [
+            0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD,
+            0xBE, 0xEF, 0xAB, 0xAD, 0xDA, 0xD2,
+        ];
+        let tag = [
+            0x19, 0x7F, 0x6C, 0xC5, 0x52, 0x3D, 0xA3, 0x6A, 0x3B, 0x2C, 0x42, 0x92, 0x44, 0xC4,
+            0x70, 0xAA,
+        ];
+        let mut out = [0u8; 80];
+        let mut total_len = 0;
 
-           let data: [u8; 64] =
-           [0x0C, 0x29, 0xFC, 0x49, 0x07, 0x11, 0x9F, 0x99,
-           0xC4, 0x92, 0xE2, 0xFA, 0x7B, 0x63, 0x3F, 0x4E,
-           0x16, 0x5B, 0xE5, 0x35, 0x85, 0xAB, 0xED, 0x71,
-           0x8B, 0xA3, 0x9C, 0xAB, 0x80, 0xA0, 0x63, 0x92,
-           0x73, 0x1E, 0x5C, 0xE6, 0xE3, 0x58, 0x1D, 0xCA,
-           0xF1, 0x19, 0x03, 0x7D, 0x99, 0x8A, 0x0F, 0x52,
-           0x2D, 0x68, 0x0A, 0x9D, 0xCB, 0x40, 0x5A, 0xAD,
-           0xF8, 0x00, 0xC0, 0xC7, 0x98, 0xBA, 0xE3, 0x8A];
-           let nonce: [u8; 12] = [0xA3, 0x33, 0x06, 0x38, 0xA8, 0x09, 0xBA, 0x35, 0x8D, 0x6C, 0x09, 0x8E];
-           let ad: [u8; 20] = [0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED,
-           0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xAB, 0xAD, 0xDA, 0xD2];
-           let tag = [0x19, 0x7F, 0x6C, 0xC5, 0x52, 0x3D, 0xA3, 0x6A, 0x3B, 0x2C, 0x42, 0x92, 0x44, 0xC4, 0x70, 0xAA];
-           let mut out = [0u8; 80];
-           let mut total_len = 0;
+        let res = tee_cryp_authenc_init(state, &nonce);
+        assert!(res.is_ok());
 
-           let res = tee_cryp_authenc_init(state, &nonce);
-           assert!(res.is_ok());
+        let res = tee_cryp_authenc_update_aad(state, &ad);
+        assert!(res.is_ok());
 
-           let res = tee_cryp_authenc_update_aad(state, &ad);
-           assert!(res.is_ok());
+        let res = tee_cryp_authenc_update_payload(state, &data[..], &mut out[total_len..]);
+        assert!(res.is_ok());
+        total_len += res.unwrap();
 
-           let res = tee_cryp_authenc_update_payload(state, &data[..], &mut out[total_len..]);
-           assert!(res.is_ok());
-           total_len += res.unwrap();
+        let res = tee_cryp_authenc_dec_final(state, None, &mut out[total_len..], &tag);
+        assert!(res.is_ok());
 
-           let res = tee_cryp_authenc_dec_final(state, None, &mut out[total_len..], &tag);
-           assert!(res.is_ok());
-
-           assert_eq!(total_len, 64);
-           assert_eq!(&out[..64],
-           [0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
-           0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
-           0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
-           0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD,
-           0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
-           0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-           0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
-           0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
-       }
+        assert_eq!(total_len, 64);
+        assert_eq!(
+            &out[..64],
+            [
+                0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
+                0xBB, 0xBB, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xDD, 0xDD, 0xDD, 0xDD,
+                0xDD, 0xDD, 0xDD, 0xDD, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+                0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA
+            ]
+        );
     }
 
-    test_fn! {
-       using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm2_sign_verify() {
+        // alloc sm2 key pair
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, obj_id.as_user_ref());
+        assert!(res.is_ok());
+        let obj_id = obj_id.read();
+        // sm2 no need usr_params
+        let res = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
+        assert!(res.is_ok());
+        // get attr from obj
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM2_DSA_KEYPAIR);
+        assert_eq!(obj.info.maxObjectSize, 256);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
+        drop(obj);
 
-       fn test_cryp_sm2_sign_verify(){
-            // alloc sm2 key pair
-            let mut obj_id: c_uint = 0;
-            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, &mut obj_id);
-            assert!(res.is_ok());
-            // sm2 no need usr_params
-            let res = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
-            assert!(res.is_ok());
-            // get attr from obj
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let obj = obj_arc.lock();
-            assert_eq!(obj.info.objectType, TEE_TYPE_SM2_DSA_KEYPAIR);
-            assert_eq!(obj.info.maxObjectSize, 256);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
-            drop(obj);
+        let mut obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let res = syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_DSA_PUBLIC_KEY as _,
+            256,
+            obj_id_pub.as_user_ref(),
+        );
+        assert!(res.is_ok());
+        let obj_id_pub = obj_id_pub.read();
 
-            let mut obj_id_pub: c_uint = 0;
-            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, &mut obj_id_pub);
-            assert!(res.is_ok());
+        let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
+        assert!(res.is_ok());
 
-            let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
-            assert!(res.is_ok());
+        let mut state: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM2_DSA_SM3,
+            TEE_OperationMode::TEE_MODE_SIGN,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
 
-            let mut state: u32 = 0;
-            let res = tee_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_SIGN, Some(obj_id as _), None, &mut state);
-            assert!(res.is_ok());
+        let mut state_pub: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM2_DSA_SM3,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(obj_id_pub as _),
+            None,
+            &mut state_pub,
+        );
+        assert!(res.is_ok());
 
-            let mut state_pub: u32 = 0;
-            let res = tee_cryp_state_alloc(TEE_ALG_SM2_DSA_SM3, TEE_OperationMode::TEE_MODE_VERIFY, Some(obj_id_pub as _), None, &mut state_pub);
-            assert!(res.is_ok());
+        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+        let mut signature1 = [0u8; 141];
+        let mut signature2 = [0u8; 141];
 
-            let data = b"SIGNATURE TEST SIGNATURE TEST SI";
-            let mut signature1 = [0u8; 141];
-            let mut signature2 = [0u8; 141];
+        let res = tee_cryp_asymm_operate(state, data, &mut signature1, None);
+        assert!(res.is_ok());
+        let len = res.unwrap();
 
-            let res = tee_cryp_asymm_operate(state, data, &mut signature1, None);
-            assert!(res.is_ok());
-            let len = res.unwrap();
-
-            let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len]);
-            assert!(res.is_ok());
-       }
+        let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len]);
+        assert!(res.is_ok());
     }
 
-    test_fn! {
-       using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm2_enc_dec() {
+        // alloc sm2 key pair
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_KEYPAIR as _, 256, obj_id.as_user_ref());
+        assert!(res.is_ok());
+        let obj_id = obj_id.read();
+        // sm2 no need usr_params
+        let res = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
+        assert!(res.is_ok());
+        // get attr from obj
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM2_PKE_KEYPAIR);
+        assert_eq!(obj.info.maxObjectSize, 256);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
+        drop(obj);
 
-       fn test_cryp_sm2_enc_dec(){
-            // alloc sm2 key pair
-            let mut obj_id: c_uint = 0;
-            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_KEYPAIR as _, 256, &mut obj_id);
-            assert!(res.is_ok());
-            // sm2 no need usr_params
-            let res = syscall_obj_generate_key(obj_id as c_ulong, 256, core::ptr::null(), 0);
-            assert!(res.is_ok());
-            // get attr from obj
-            let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
-            assert!(obj_arc.is_ok());
-            let obj_arc = obj_arc.unwrap();
-            let obj = obj_arc.lock();
-            assert_eq!(obj.info.objectType, TEE_TYPE_SM2_PKE_KEYPAIR);
-            assert_eq!(obj.info.maxObjectSize, 256);
-            assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
-            assert_eq!(obj.attr.len(), 1);
-            assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
-            drop(obj);
+        let mut obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let res = syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_PKE_PUBLIC_KEY as _,
+            256,
+            obj_id_pub.as_user_ref(),
+        );
+        assert!(res.is_ok());
+        let obj_id_pub = obj_id_pub.read();
 
-            let mut obj_id_pub: c_uint = 0;
-            let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_PUBLIC_KEY as _, 256, &mut obj_id_pub);
-            assert!(res.is_ok());
+        let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
+        assert!(res.is_ok());
 
-            let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
-            assert!(res.is_ok());
+        let mut state_enc: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM2_PKE,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id_pub as _),
+            None,
+            &mut state_enc,
+        );
+        assert!(res.is_ok());
 
-            let mut state_enc: u32 = 0;
-            let res = tee_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_ENCRYPT, Some(obj_id_pub as _), None, &mut state_enc);
-            assert!(res.is_ok());
+        let mut state_dec: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM2_PKE,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state_dec,
+        );
+        assert!(res.is_ok());
 
-            let mut state_dec: u32 = 0;
-            let res = tee_cryp_state_alloc(TEE_ALG_SM2_PKE, TEE_OperationMode::TEE_MODE_DECRYPT, Some(obj_id as _), None, &mut state_dec);
-            assert!(res.is_ok());
+        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+        let mut cipher1 = [0u8; 141];
+        let mut cipher2 = [0u8; 141];
+        let mut clear1 = [0u8; 141];
+        let mut clear2 = [0u8; 141];
 
-            let data = b"SIGNATURE TEST SIGNATURE TEST SI";
-            let mut cipher1 = [0u8; 141];
-            let mut cipher2 = [0u8; 141];
-            let mut clear1 = [0u8; 141];
-            let mut clear2 = [0u8; 141];
+        let res = tee_cryp_asymm_operate(state_enc, data, &mut cipher1, None);
+        assert!(res.is_ok());
+        let mut len1 = res.unwrap();
 
-            let res = tee_cryp_asymm_operate(state_enc, data, &mut cipher1, None);
-            assert!(res.is_ok());
-            let mut len1 = res.unwrap();
+        let res = tee_cryp_asymm_operate(state_enc, data, &mut cipher2, None);
+        assert!(res.is_ok());
+        let mut len2 = res.unwrap();
 
-            let res = tee_cryp_asymm_operate(state_enc, data, &mut cipher2, None);
-            assert!(res.is_ok());
-            let mut len2 = res.unwrap();
+        assert_ne!(&cipher1[..len1], &cipher2[..len2]);
 
-            assert_ne!(cipher1[..len1], cipher2[..len2]);
+        let res = tee_cryp_asymm_operate(state_dec, &cipher1[..len1], &mut clear1, None);
+        assert!(res.is_ok());
+        let len3 = res.unwrap();
 
-            let res = tee_cryp_asymm_operate(state_dec, &cipher1[..len1], &mut clear1, None);
-            assert!(res.is_ok());
-            let len3 = res.unwrap();
+        let res = tee_cryp_asymm_operate(state_dec, &cipher2[..len2], &mut clear2, None);
+        assert!(res.is_ok());
+        let len4 = res.unwrap();
 
-            let res = tee_cryp_asymm_operate(state_dec, &cipher2[..len2], &mut clear2, None);
-            assert!(res.is_ok());
-            let len4 = res.unwrap();
-
-            assert_eq!(&clear1[..len3], &clear2[..len4]);
-            assert_eq!(&clear1[..len3], data);
-       }
-    }
-
-    tests_name! {
-        TEST_TEE_CRYP;
-        tee_svc_cryp2;
-        //------------------------
-        test_cryp_state,
-        test_cryp_hash_sm3,
-        test_cryp_hmac_sm3,
-        test_cryp_sm4_ecb_encrypt,
-        test_cryp_sm4_ecb_decrypt,
-        test_cryp_sm4_cbc_encrypt,
-        test_cryp_sm4_cbc_decrypt,
-        test_cryp_sm4_gcm_encrypt,
-        test_cryp_sm4_gcm_decrypt,
-        test_cryp_sm2_sign_verify,
-        test_cryp_sm2_enc_dec,
+        assert_eq!(&clear1[..len3], &clear2[..len4]);
+        assert_eq!(&clear1[..len3], data);
     }
 }

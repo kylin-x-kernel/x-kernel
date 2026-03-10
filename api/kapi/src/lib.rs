@@ -26,6 +26,8 @@ pub mod task;
 pub mod tee;
 pub mod terminal;
 pub mod time;
+#[cfg(unittest)]
+pub mod unittest_task;
 pub mod vfs;
 
 /// Initializes VFS, /proc/interrupts accounting, and alarm task.

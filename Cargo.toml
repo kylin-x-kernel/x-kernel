@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "entry",
+    "xtask/convert_cov",
     "xtask/crate_rootfs",
+    "xtask/extract_cov",
 # build config system
     "xtask/xconfig",
     "util/kbuild_config",

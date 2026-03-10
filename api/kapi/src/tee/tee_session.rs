@@ -149,13 +149,18 @@ where
     f(concrete)
 }
 
+#[cfg(unittest)]
+pub fn set_tee_session_ctx(thread: &kcore::task::Thread) {
+    thread.set_tee_session_ctx(Box::new(TeeSessionCtx::default()));
+}
+
 /// TEE Trusted Application Context
 /// This structure holds the global state for TA
 /// All sessions in TA share this context
 #[derive(Debug)]
 pub struct TeeTaCtx {
     /// Test-only field, used only in test builds
-    #[cfg(any(test, feature = "tee_test"))]
+    #[cfg(unittest)]
     pub for_test_only: u32,
     pub session_dispatch_irq: u32,
     pub open_sessions: HashMap<u32, SessionIdentity>,
@@ -165,7 +170,7 @@ pub struct TeeTaCtx {
 impl Default for TeeTaCtx {
     fn default() -> Self {
         TeeTaCtx {
-            #[cfg(feature = "tee_test")]
+            #[cfg(unittest)]
             for_test_only: 0,
             session_dispatch_irq: 0,
             open_sessions: HashMap::new(),
@@ -209,77 +214,58 @@ where
 
 // Test module for TEE session functionality
 // Only compiled when the tee_test feature is enabled
-#[cfg(any(test, feature = "tee_test"))]
+#[unittest::mod_test]
 pub mod tests_tee_session {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert_eq;
 
     use super::*;
 
     // Test function for basic tee_ta_ctx operations
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_tee_ta_ctx() {
+        let test_only;
+        {
+            let ta_ctx = TEE_TA_CTX.read();
+            test_only = ta_ctx.for_test_only;
+        }
 
-        fn test_tee_ta_ctx() {
-            // Test reading from TEE_TA_CTX
-            let test_only;
-            {
-                let ta_ctx = TEE_TA_CTX.read();
-                test_only = ta_ctx.for_test_only;
-            }
+        {
+            let mut ta_ctx = TEE_TA_CTX.write();
+            ta_ctx.for_test_only = test_only + 1;
+            assert_eq!(ta_ctx.for_test_only, test_only + 1);
+        }
 
-            // Test writing to TEE_TA_CTX
-            {
-                let mut ta_ctx = TEE_TA_CTX.write();
-                ta_ctx.for_test_only = test_only + 1;
-                assert_eq!(ta_ctx.for_test_only, test_only + 1);
-            }
-
-            // Read again to verify the write was successful
-            {
-                let ta_ctx = TEE_TA_CTX.read();
-                assert_eq!(ta_ctx.for_test_only, test_only + 1);
-            }
+        {
+            let ta_ctx = TEE_TA_CTX.read();
+            assert_eq!(ta_ctx.for_test_only, test_only + 1);
         }
     }
 
     // Test function for with_tee_ta_ctx helper functions
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_with_tee_ta_ctx() {
+        let mut test_only: u32 = 0;
+        with_tee_ta_ctx(|ta_ctx| {
+            test_only = ta_ctx.for_test_only;
+            Ok(())
+        })
+        .unwrap();
 
-        fn test_with_tee_ta_ctx() {
-            let mut test_only: u32 = 0;
-            // Test with_tee_ta_ctx (immutable reference)
-            with_tee_ta_ctx(|ta_ctx| {
-                test_only = ta_ctx.for_test_only;
-                Ok(())
-            }).unwrap();
+        let mut new_value = 0;
+        with_tee_ta_ctx_mut(|ta_ctx| {
+            ta_ctx.for_test_only = test_only + 1;
+            new_value = ta_ctx.for_test_only;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(new_value, test_only + 1);
 
-            let mut new_value = 0;
-            // Test with_tee_ta_ctx_mut (mutable reference)
-            with_tee_ta_ctx_mut(|ta_ctx| {
-                ta_ctx.for_test_only = test_only + 1;
-                new_value = ta_ctx.for_test_only;
-                Ok(())
-            }).unwrap();
-            assert_eq!(new_value, test_only + 1);
-
-            new_value = 0;
-            // Verify the change persists
-            with_tee_ta_ctx(|ta_ctx| {
-                new_value = ta_ctx.for_test_only;
-                Ok(())
-            }).unwrap();
-            assert_eq!(new_value, test_only + 1);
-        }
-    }
-
-    // Test suite definition
-    tests_name! {
-        TEST_TEE_SESSION;
-        tee_session;
-        test_tee_ta_ctx,
-        test_with_tee_ta_ctx,
+        new_value = 0;
+        with_tee_ta_ctx(|ta_ctx| {
+            new_value = ta_ctx.for_test_only;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(new_value, test_only + 1);
     }
 }

@@ -67,41 +67,26 @@ impl RngCallback for TeeSoftwareRng {
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_rng_software {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert_ne;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
-
-        fn test_get_rand() {
-            let mut buf1 = [0u8; 10];
-            let mut buf2 = [0u8; 10];
-            tee_software_get_rand(&mut buf1);
-            tee_software_get_rand(&mut buf2);
-            assert_ne!(buf1, buf2);
-        }
+    #[unittest::def_test]
+    fn test_get_rand() {
+        let mut buf1 = [0u8; 10];
+        let mut buf2 = [0u8; 10];
+        tee_software_get_rand(&mut buf1);
+        tee_software_get_rand(&mut buf2);
+        assert_ne!(buf1, buf2);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_tee_software_rng() {
-            let rng = TeeSoftwareRng::new();
-            let mut buf = [0u8; 10];
-            unsafe { TeeSoftwareRng::call(rng.data_ptr(), buf.as_mut_ptr(), buf.len()) };
-            assert_ne!(buf, [0u8; 10]);
-        }
-    }
-
-    tests_name! {
-        TEST_RNG_SOFTWARE;
-        //------------------------
-        rng_software;
-        test_get_rand,
-        test_tee_software_rng,
+    #[unittest::def_test]
+    fn test_tee_software_rng() {
+        let rng = TeeSoftwareRng::new();
+        let mut buf = [0u8; 10];
+        unsafe { TeeSoftwareRng::call(rng.data_ptr(), buf.as_mut_ptr(), buf.len()) };
+        assert_ne!(buf, [0u8; 10]);
     }
 }

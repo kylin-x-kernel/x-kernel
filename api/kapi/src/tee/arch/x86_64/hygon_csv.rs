@@ -97,39 +97,27 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     Ok(())
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "x86_csv", feature = "tee_test"))]
+#[cfg(all(target_arch = "x86_64", feature = "x86_csv"))]
+#[unittest::mod_test]
 pub mod tests_hygon_csv_get_sealing_key {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_hygon_csv_get_sealing_key() {
+        let result = get_sealing_key();
+        assert!(result.is_ok());
+        let key_buf = result.unwrap();
+        assert!(key_buf.len() == 32);
+        assert!(key_buf.iter().any(|&x| x != 0));
 
-        fn test_hygon_csv_get_sealing_key() {
-            let result = get_sealing_key();
-            assert!(result.is_ok());
-            let key_buf = result.unwrap();
-            assert!(key_buf.len() == 32);
-            assert!(key_buf.iter().any(|&x| x != 0));
+        let result2 = get_sealing_key();
+        assert!(result2.is_ok());
+        let key_buf2 = result2.unwrap();
+        assert!(key_buf2.len() == 32);
+        assert!(key_buf2.iter().any(|&x| x != 0));
 
-            let result2 = get_sealing_key();
-            assert!(result2.is_ok());
-            let key_buf2 = result2.unwrap();
-            assert!(key_buf2.len() == 32);
-            assert!(key_buf2.iter().any(|&x| x != 0));
-
-            // should be equal
-            assert!(key_buf == key_buf2);
-        }
-    }
-
-    tests_name! {
-        TEST_HYGON_CSV_GET_SEALING_KEY;
-        hygon_csv_get_sealing_key;
-        //------------------------
-        test_hygon_csv_get_sealing_key,
+        assert!(key_buf == key_buf2);
     }
 }

@@ -1,0 +1,9 @@
+[package]
+name = "extract_cov"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rsext4 = { workspace = true, default-features = false }

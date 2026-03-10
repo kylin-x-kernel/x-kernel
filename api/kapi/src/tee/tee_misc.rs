@@ -55,185 +55,133 @@ pub fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, ()> {
     Ok(expected_len)
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_tee_misc {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
-
-        fn test_b2hs_empty_input() {
-            let b = &[];
-            let mut hs = [0u8; 1]; // Need space for the null terminator
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 0);
-            assert_eq!(hs[0], 0); // Null terminator should be present
-        }
+    #[unittest::def_test]
+    fn test_b2hs_empty_input() {
+        let b = &[];
+        let mut hs = [0u8; 1];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(hs[0], 0);
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_b2hs_single_byte() {
-            let b = &[0xAB];
-            let mut hs = [0u8; 3]; // "AB" + null terminator
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 2);
-            assert_eq!(str::from_utf8(&hs[..2]).unwrap(), "AB");
-            assert_eq!(hs[2], 0);
-        }
+    #[unittest::def_test]
+    fn test_b2hs_single_byte() {
+        let b = &[0xAB];
+        let mut hs = [0u8; 3];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(str::from_utf8(&hs[..2]).unwrap(), "AB");
+        assert_eq!(hs[2], 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_b2hs_multiple_bytes() {
-            let b = &[0x12, 0x34, 0xCD, 0xEF];
-            let mut hs = [0u8; 9]; // 4 bytes * 2 hex chars + null terminator
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 8);
-            assert_eq!(str::from_utf8(&hs[..8]).unwrap(), "1234CDEF");
-            assert_eq!(hs[8], 0);
-        }
+    #[unittest::def_test]
+    fn test_b2hs_multiple_bytes() {
+        let b = &[0x12, 0x34, 0xCD, 0xEF];
+        let mut hs = [0u8; 9];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 8);
+        assert_eq!(str::from_utf8(&hs[..8]).unwrap(), "1234CDEF");
+        assert_eq!(hs[8], 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_b2hs_short_buffer() {
-            let b = &[0x12, 0x34]; // Needs 4 hex chars + 1 null = 5 bytes
-            let mut hs = [0u8; 4]; // Too short
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_err());
-        }
+    #[unittest::def_test]
+    fn test_b2hs_short_buffer() {
+        let b = &[0x12, 0x34];
+        let mut hs = [0u8; 4];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_err());
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_b2hs_exact_buffer_size() {
-            let b = &[0xAA]; // Needs 2 hex chars + 1 null = 3 bytes
-            let mut hs = [0u8; 3]; // Exact size
-            let result = tee_b2hs(b, &mut hs);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 2);
-            assert_eq!(str::from_utf8(&hs[..2]).unwrap(), "AA");
-            assert_eq!(hs[2], 0);
-        }
+    #[unittest::def_test]
+    fn test_b2hs_exact_buffer_size() {
+        let b = &[0xAA];
+        let mut hs = [0u8; 3];
+        let result = tee_b2hs(b, &mut hs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(str::from_utf8(&hs[..2]).unwrap(), "AA");
+        assert_eq!(hs[2], 0);
     }
 
-    // --- Tests for tee_hs2b ---
-
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_empty_input() {
-            let hs = &[];
-            let mut b = [0u8; 0];
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 0);
-        }
+    #[unittest::def_test]
+    fn test_hs2b_empty_input() {
+        let hs = &[];
+        let mut b = [0u8; 0];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_single_byte_hex() {
-            let hs = b"AB";
-            let mut b = [0u8; 1];
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 1);
-            assert_eq!(b[0], 0xAB);
-        }
+    #[unittest::def_test]
+    fn test_hs2b_single_byte_hex() {
+        let hs = b"AB";
+        let mut b = [0u8; 1];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(b[0], 0xAB);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_multiple_bytes_hex() {
-            let hs = b"1234cdef";
-            let mut b = [0u8; 4];
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 4);
-            assert_eq!(b, [0x12, 0x34, 0xCD, 0xEF]);
-        }
+    #[unittest::def_test]
+    fn test_hs2b_multiple_bytes_hex() {
+        let hs = b"1234cdef";
+        let mut b = [0u8; 4];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 4);
+        assert_eq!(b, [0x12, 0x34, 0xCD, 0xEF]);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_odd_length_hex() {
-            let hs = b"123"; // Odd length
-            let mut b = [0u8; 2];
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_err());
-        }
+    #[unittest::def_test]
+    fn test_hs2b_odd_length_hex() {
+        let hs = b"123";
+        let mut b = [0u8; 2];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_err());
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_short_buffer() {
-            let hs = b"1234"; // Needs 2 bytes output
-            let mut b = [0u8; 1]; // Too short
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_err());
-        }
+    #[unittest::def_test]
+    fn test_hs2b_short_buffer() {
+        let hs = b"1234";
+        let mut b = [0u8; 1];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_err());
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_invalid_hex_chars() {
-            let hs = b"12gx"; // 'g' is an invalid hex character
-            let mut b = [0u8; 2];
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_err()); // `decode_to_slice` will return an error
-        }
+    #[unittest::def_test]
+    fn test_hs2b_invalid_hex_chars() {
+        let hs = b"12gx";
+        let mut b = [0u8; 2];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_err());
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_uppercase_hex() {
-            let hs = b"ABCDEF";
-            let mut b = [0u8; 3];
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 3);
-            assert_eq!(b, [0xAB, 0xCD, 0xEF]);
-        }
+    #[unittest::def_test]
+    fn test_hs2b_uppercase_hex() {
+        let hs = b"ABCDEF";
+        let mut b = [0u8; 3];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(b, [0xAB, 0xCD, 0xEF]);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_hs2b_mixed_case_hex() {
-            let hs = b"aBcDeF";
-            let mut b = [0u8; 3];
-            let result = tee_hs2b(hs, &mut b);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), 3);
-            assert_eq!(b, [0xAB, 0xCD, 0xEF]);
-        }
-    }
-
-    tests_name! {
-        TEST_TEE_MISC;
-        tee_misc;
-        //------------------------
-        test_b2hs_empty_input,
-        test_b2hs_single_byte,
-        test_b2hs_multiple_bytes,
-        test_b2hs_short_buffer,
-        test_b2hs_exact_buffer_size,
-        test_hs2b_empty_input,
-        test_hs2b_single_byte_hex,
-        test_hs2b_multiple_bytes_hex,
-        test_hs2b_odd_length_hex,
-        test_hs2b_short_buffer,
-        test_hs2b_invalid_hex_chars,
-        test_hs2b_uppercase_hex,
-        test_hs2b_mixed_case_hex,
+    #[unittest::def_test]
+    fn test_hs2b_mixed_case_hex() {
+        let hs = b"aBcDeF";
+        let mut b = [0u8; 3];
+        let result = tee_hs2b(hs, &mut b);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(b, [0xAB, 0xCD, 0xEF]);
     }
 }

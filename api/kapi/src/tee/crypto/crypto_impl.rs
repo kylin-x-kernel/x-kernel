@@ -251,39 +251,28 @@ impl<A: EccPublicKeyCanFree> crypto_ecc_public_ops_free for EccPublicKey<A> {
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_tee_crypto_impl {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert;
 
     use super::*;
-    test_fn! {
-        using TestResult;
 
-        fn test_crypto_ecc_keypair_ops_generate() {
-            let mut keypair = ecc_keypair {
-                curve: TEE_ECC_CURVE_SM2,
-                ..Default::default()
-            };
-            let key_size = 256;
-            let result = EccKeypair::<Sm2DsaKeyPair>::new(&mut keypair).generate(key_size);
-            info!("Generated ECC key: {:X?}", result);
-            assert!(result.is_ok());
+    #[unittest::def_test]
+    fn test_crypto_ecc_keypair_ops_generate() {
+        let mut keypair = ecc_keypair {
+            curve: TEE_ECC_CURVE_SM2,
+            ..Default::default()
+        };
+        let key_size = 256;
+        let result = EccKeypair::<Sm2DsaKeyPair>::new(&mut keypair).generate(key_size);
+        info!("Generated ECC key: {:X?}", result);
+        assert!(result.is_ok());
 
-            let mut d = vec![0u8; 32];
-            let mut x = vec![0u8; 32];
-            let mut y = vec![0u8; 32];
-            assert!(crypto_bignum_bn2bin(&keypair.d, &mut d).is_ok());
-            assert!(crypto_bignum_bn2bin(&keypair.x, &mut x).is_ok());
-            assert!(crypto_bignum_bn2bin(&keypair.y, &mut y).is_ok());
-        }
-    }
-
-    tests_name! {
-        TEST_TEE_CRYPTO_IMPL;
-        crypto_impl;
-        //------------------------
-        test_crypto_ecc_keypair_ops_generate,
+        let mut d = vec![0u8; 32];
+        let mut x = vec![0u8; 32];
+        let mut y = vec![0u8; 32];
+        assert!(crypto_bignum_bn2bin(&keypair.d, &mut d).is_ok());
+        assert!(crypto_bignum_bn2bin(&keypair.x, &mut x).is_ok());
+        assert!(crypto_bignum_bn2bin(&keypair.y, &mut y).is_ok());
     }
 }

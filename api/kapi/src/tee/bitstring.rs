@@ -74,57 +74,39 @@ pub fn bit_ffc(name: &[u8], nbits: usize, value: &mut isize) {
     *value = val;
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_bitstring {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::assert_eq;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_bit_ffc() {
+        let mut val: isize;
 
-        fn test_bit_ffc() {
-            let mut val: isize;
+        let bits = [0x00];
+        val = -2;
+        bit_ffc(&bits, 8, &mut val);
+        assert_eq!(val, 0);
 
-            // case 1: 全 0 => 第 0 位清除
-            let bits = [0x00];
-            val = -2;
-            bit_ffc(&bits, 8, &mut val);
-            assert_eq!(val, 0);
+        let bits = [0x01];
+        val = -2;
+        bit_ffc(&bits, 8, &mut val);
+        assert_eq!(val, 1);
 
-            // case 2: 00000001b => 第 1 位清除
-            let bits = [0x01];
-            val = -2;
-            bit_ffc(&bits, 8, &mut val);
-            assert_eq!(val, 1);
+        let bits = [0xff];
+        val = -2;
+        bit_ffc(&bits, 8, &mut val);
+        assert_eq!(val, -1);
 
-            // case 3: 11111111b => 全部 1 => 没有清除位
-            let bits = [0xff];
-            val = -2;
-            bit_ffc(&bits, 8, &mut val);
-            assert_eq!(val, -1);
+        let bits = [0xff, 0b11110111];
+        val = -2;
+        bit_ffc(&bits, 16, &mut val);
+        assert_eq!(val, 11);
 
-            // case 4: 跨字节查找
-            // byte0 = 0xff (全 1), byte1 = 0b11110111 (bit[11]=0)
-            let bits = [0xff, 0b11110111];
-            val = -2;
-            bit_ffc(&bits, 16, &mut val);
-            assert_eq!(val, 11);
-
-            // case 5: 越界限制 — nbits < 实际位数
-            let bits = [0x7f]; // 01111111 => bit[7]=0
-            val = -2;
-            bit_ffc(&bits, 7, &mut val); // 只检查前 7 位（0..6）
-            assert_eq!(val, -1);
-        }
-    }
-
-    tests_name! {
-        TEST_BITSTRING;
-        //------------------------
-        bitstring;
-        test_bit_ffc
+        let bits = [0x7f];
+        val = -2;
+        bit_ffc(&bits, 7, &mut val);
+        assert_eq!(val, -1);
     }
 }

@@ -169,32 +169,14 @@ pub fn tee_obj_close(obj_id: u32) -> TeeResult {
     Ok(())
 }
 
-#[cfg(feature = "tee_test")]
-pub mod tests_tee_obj {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
+#[unittest::def_test(custom)]
+fn test_tee_obj_add_get() {
+    let mut obj = tee_obj {
+        busy: true,
+        ..Default::default()
     };
-
-    use super::*;
-    test_fn! {
-        using TestResult;
-
-        fn test_tee_obj_add_get() {
-            let mut obj = tee_obj {
-                busy: true,
-                ..Default::default()
-            };
-            let obj_id = tee_obj_add(obj).expect("Failed to add tee_obj");
-            info!("Added tee_obj with id {}", obj_id);
-            let retrieved_obj = tee_obj_get(obj_id).expect("Failed to get tee_obj");
-            assert!(retrieved_obj.lock().busy);
-        }
-    }
-
-    tests_name! {
-        TEST_TEE_OBJ;
-        tee_obj;
-        //------------------------
-        test_tee_obj_add_get,
-    }
+    let obj_id = tee_obj_add(obj).expect("Failed to add tee_obj");
+    info!("Added tee_obj with id {}", obj_id);
+    let retrieved_obj = tee_obj_get(obj_id).expect("Failed to get tee_obj");
+    assert!(retrieved_obj.lock().busy);
 }

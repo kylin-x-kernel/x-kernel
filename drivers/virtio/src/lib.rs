@@ -98,9 +98,11 @@ pub fn probe_pci_device<H: VirtIoHal>(
     #[cfg(target_arch = "x86_64")]
     let irq = {
         #[allow(unused_imports)]
-        use khal::irq::{alloc_msix_vector, current_apic_id};
+        use ::pci::msix::{
+            MsixTableEntry, configure_msix_entry, enable_msix, find_msix_capability,
+        };
         #[allow(unused_imports)]
-        use ::pci::msix::{MsixTableEntry, configure_msix_entry, enable_msix, find_msix_capability};
+        use khal::irq::{alloc_msix_vector, current_apic_id};
 
         // TODO: after virtio-drivers supports multiple MSI-X vectors, we should allocate and
         // configure

@@ -798,7 +798,7 @@ pub struct TeeFileOperations {
     pub readdir: fn(d: &mut TeeFsDir, ent: &mut tee_fs_dirent) -> TeeResult,
 
     pub closedir: fn(d: &mut TeeFsDir) -> TeeResult,
-    #[cfg(feature = "tee_test")]
+    #[cfg(unittest)]
     pub echo: fn() -> String,
 }
 
@@ -1123,7 +1123,7 @@ pub fn ree_fs_remove(po: &tee_pobj) -> TeeResult {
     ret
 }
 
-#[cfg(feature = "tee_test")]
+#[cfg(unittest)]
 fn ree_fs_echo() -> String {
     "TeeFileOperations->echo".to_string()
 }
@@ -1142,7 +1142,7 @@ pub static REE_FS_OPS: TeeFileOperations = TeeFileOperations {
     opendir: ree_fs_opendir_rpc,
     closedir: ree_fs_closedir_rpc,
     readdir: ree_fs_readdir_rpc,
-    #[cfg(feature = "tee_test")]
+    #[cfg(unittest)]
     echo: ree_fs_echo,
 };
 
@@ -1371,11 +1371,9 @@ pub fn ree_fs_readdir_rpc(d: &mut TeeFsDir, ent: &mut tee_fs_dirent) -> TeeResul
     }
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_tee_ree_fs {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
 
     use super::*;
 
@@ -1383,219 +1381,132 @@ pub mod tests_tee_ree_fs {
     const HTREE_IMAGE_SIZE_TEST: usize = size_of::<super::TeeFsHtreeImage>(); // 256
     const BLOCK_NODES_TEST: usize = BLOCK_SIZE / (NODE_SIZE_TEST * 2); // 4096 / (66 * 2) = 31
 
-    test_fn! {
-        using TestResult;
-        fn test_get_offs_size_head() {
-            // Case 1: Head type, version 0
-            let result = get_offs_size(TeeFsHtreeType::Head, 0, 0);
-            assert_eq!(result.unwrap(), (0_usize, HTREE_IMAGE_SIZE_TEST)); // (0, 256)
+    #[unittest::def_test]
+    fn test_get_offs_size_head() {
+        let result = get_offs_size(TeeFsHtreeType::Head, 0, 0);
+        assert_eq!(result.unwrap(), (0_usize, HTREE_IMAGE_SIZE_TEST));
 
-            // Case 2: Head type, version 1
-            let result = get_offs_size(TeeFsHtreeType::Head, 0, 1);
-            assert_eq!(result.unwrap(), (HTREE_IMAGE_SIZE_TEST, HTREE_IMAGE_SIZE_TEST)); // (256, 256)
+        let result = get_offs_size(TeeFsHtreeType::Head, 0, 1);
+        assert_eq!(
+            result.unwrap(),
+            (HTREE_IMAGE_SIZE_TEST, HTREE_IMAGE_SIZE_TEST)
+        );
 
-            // Case 3: Head type, arbitrary idx (should be ignored for Head)
-            let result = get_offs_size(TeeFsHtreeType::Head, 100, 0);
-            assert_eq!(result.unwrap(), (0, HTREE_IMAGE_SIZE_TEST)); // (0, 256)
-        }
+        let result = get_offs_size(TeeFsHtreeType::Head, 100, 0);
+        assert_eq!(result.unwrap(), (0, HTREE_IMAGE_SIZE_TEST));
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_get_offs_size_node() {
-            // Case 4: Node type, first node in first block_nodes group (idx 0), version 0
-            // pbn = 1 + ((0 / 31) * 31 * 2) = 1
-            // offs = 1 * 4096 + 2 * 66 * (0 % 31) + 66 * 0 = 4096 + 0 + 0 = 4096
-            let result = get_offs_size(TeeFsHtreeType::Node, 0, 0);
-            assert_eq!(result.unwrap(), (4096, NODE_SIZE_TEST));
-
-            // Case 5: Node type, first node in first block_nodes group (idx 0), version 1
-            // offs = 1 * 4096 + 2 * 66 * 0 + 66 * 1 = 4096 + 66 = 4162
-            let result = get_offs_size(TeeFsHtreeType::Node, 0, 1);
-            assert_eq!(result.unwrap(), (4162, NODE_SIZE_TEST));
-
-            // Case 6: Node type, last node in first block_nodes group (idx 30), version 0
-            // pbn = 1 + ((30 / 31) * 31 * 2) = 1
-            // offs = 1 * 4096 + 2 * 66 * (30 % 31) + 66 * 0 = 4096 + 3960 = 8056
-            let result = get_offs_size(TeeFsHtreeType::Node, 30, 0);
-            assert_eq!(result.unwrap(), (8056, NODE_SIZE_TEST));
-
-            // Case 7: Node type, last node in first block_nodes group (idx 30), version 1
-            // offs = 1 * 4096 + 2 * 66 * 30 + 66 * 1 = 4096 + 3960 + 66 = 8122
-            let result = get_offs_size(TeeFsHtreeType::Node, 30, 1);
-            assert_eq!(result.unwrap(), (8122, NODE_SIZE_TEST));
-
-            // Case 8: Node type, first node in second block_nodes group (idx 31), version 0
-            // pbn = 1 + ((31 / 31) * 31 * 2) = 1 + (1 * 62) = 63
-            // offs = 63 * 4096 + 2 * 66 * (31 % 31) + 66 * 0 = 25792 + 0 + 0 = 25792
-            let result = get_offs_size(TeeFsHtreeType::Node, 31, 0);
-            assert_eq!(result.unwrap(), (258048, NODE_SIZE_TEST));
-
-            // Case 9: Node type, first node in second block_nodes group (idx 31), version 1
-            // offs = 63 * 4096 + 2 * 66 * 0 + 66 * 1 = 25792 + 66 = 25858
-            let result = get_offs_size(TeeFsHtreeType::Node, 31, 1);
-            assert_eq!(result.unwrap(), (258114, NODE_SIZE_TEST));
-        }
+    #[unittest::def_test]
+    fn test_get_offs_size_node() {
+        let result = get_offs_size(TeeFsHtreeType::Node, 0, 0);
+        assert_eq!(result.unwrap(), (4096, NODE_SIZE_TEST));
+        let result = get_offs_size(TeeFsHtreeType::Node, 0, 1);
+        assert_eq!(result.unwrap(), (4162, NODE_SIZE_TEST));
+        let result = get_offs_size(TeeFsHtreeType::Node, 30, 0);
+        assert_eq!(result.unwrap(), (8056, NODE_SIZE_TEST));
+        let result = get_offs_size(TeeFsHtreeType::Node, 30, 1);
+        assert_eq!(result.unwrap(), (8122, NODE_SIZE_TEST));
+        let result = get_offs_size(TeeFsHtreeType::Node, 31, 0);
+        assert_eq!(result.unwrap(), (258048, NODE_SIZE_TEST));
+        let result = get_offs_size(TeeFsHtreeType::Node, 31, 1);
+        assert_eq!(result.unwrap(), (258114, NODE_SIZE_TEST));
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_get_offs_size_block() {
-            let _block_nodes_x2_minus_1 = BLOCK_NODES_TEST * 2 - 1; // 31 * 2 - 1 = 61
-
-            // Case 10: Block type, first data block (idx 0), version 0
-            // bidx = 2 * 0 + 0 = 0
-            // pbn = 2 + 0 + 0 / 61 = 2
-            // offs = 2 * 4096 = 8192
-            let result = get_offs_size(TeeFsHtreeType::Block, 0, 0);
-            assert_eq!(result.unwrap(), (8192, BLOCK_SIZE));
-
-            // Case 11: Block type, first data block (idx 0), version 1
-            // bidx = 2 * 0 + 1 = 1
-            // pbn = 2 + 1 + 1 / 61 = 3
-            // offs = 3 * 4096 = 12288
-            let result = get_offs_size(TeeFsHtreeType::Block, 0, 1);
-            assert_eq!(result.unwrap(), (12288, BLOCK_SIZE));
-
-            // Case 12: Block type, last data block in first block_nodes group (idx 30), version 0
-            // bidx = 2 * 30 + 0 = 60
-            // pbn = 2 + 60 + 60 / 61 = 62
-            // offs = 62 * 4096 = 253952
-            let result = get_offs_size(TeeFsHtreeType::Block, 30, 0);
-            assert_eq!(result.unwrap(), (253952, BLOCK_SIZE));
-
-            // Case 13: Block type, last data block in first block_nodes group (idx 30), version 1
-            // bidx = 2 * 30 + 1 = 61
-            // pbn = 2 + 61 + 61 / 61 = 63 + 1 = 64  (Note: this is where the code's logic differs from comments)
-            // offs = 64 * 4096 = 262144
-            let result = get_offs_size(TeeFsHtreeType::Block, 30, 1);
-            assert_eq!(result.unwrap(), (262144, BLOCK_SIZE));
-
-            // Case 14: Block type, first data block in second block_nodes group (idx 31), version 0
-            // bidx = 2 * 31 + 0 = 62
-            // pbn = 2 + 62 + 62 / 61 = 64 + 1 = 65
-            // offs = 65 * 4096 = 266240
-            let result = get_offs_size(TeeFsHtreeType::Block, 31, 0);
-            assert_eq!(result.unwrap(), (266240, BLOCK_SIZE));
-
-            // Case 15: Block type, first data block in second block_nodes group (idx 31), version 1
-            // bidx = 2 * 31 + 1 = 63
-            // pbn = 2 + 63 + 63 / 61 = 65 + 1 = 66
-            // offs = 66 * 4096 = 270336
-            let result = get_offs_size(TeeFsHtreeType::Block, 31, 1);
-            assert_eq!(result.unwrap(), (270336, BLOCK_SIZE));
-        }
+    #[unittest::def_test]
+    fn test_get_offs_size_block() {
+        let _block_nodes_x2_minus_1 = BLOCK_NODES_TEST * 2 - 1;
+        let result = get_offs_size(TeeFsHtreeType::Block, 0, 0);
+        assert_eq!(result.unwrap(), (8192, BLOCK_SIZE));
+        let result = get_offs_size(TeeFsHtreeType::Block, 0, 1);
+        assert_eq!(result.unwrap(), (12288, BLOCK_SIZE));
+        let result = get_offs_size(TeeFsHtreeType::Block, 30, 0);
+        assert_eq!(result.unwrap(), (253952, BLOCK_SIZE));
+        let result = get_offs_size(TeeFsHtreeType::Block, 30, 1);
+        assert_eq!(result.unwrap(), (262144, BLOCK_SIZE));
+        let result = get_offs_size(TeeFsHtreeType::Block, 31, 0);
+        assert_eq!(result.unwrap(), (266240, BLOCK_SIZE));
+        let result = get_offs_size(TeeFsHtreeType::Block, 31, 1);
+        assert_eq!(result.unwrap(), (270336, BLOCK_SIZE));
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_get_offs_size_unsupported_type() {
-            // Case 16: Unsupported type should return an error
-            let result = get_offs_size(TeeFsHtreeType::UnsupportedType, 0, 0);
-            assert_eq!(result.unwrap_err(), TEE_ERROR_GENERIC);
-        }
+    #[unittest::def_test]
+    fn test_get_offs_size_unsupported_type() {
+        let result = get_offs_size(TeeFsHtreeType::UnsupportedType, 0, 0);
+        assert_eq!(result.unwrap_err(), TEE_ERROR_GENERIC);
     }
 
-    test_fn! {
-        using TestResult;
-        fn test_ree_fs_primitive_operations() {
-            // use crate::fs_dirfile::TeeFsDirfileFileh;
-            // use crate::fs_htree::TEE_FS_HTREE_HASH_SIZE;
-            // use crate::tee_api_types::TeeUuid;
-            // use crate::tee_ree_fs::{ree_fs_open_primitive, ree_fs_read_primitive, ree_fs_write_primitive};
+    #[unittest::def_test(custom)]
+    fn test_ree_fs_primitive_operations() {
+        let uuid = TEE_UUID {
+            timeLow: 0x12345678,
+            timeMid: 0x1234,
+            timeHiAndVersion: 0x5678,
+            clockSeqAndNode: [0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78],
+        };
 
-            // 创建测试用的 UUID 和 DFH
-            let uuid = TEE_UUID {
-                timeLow: 0x12345678,
-                timeMid: 0x1234,
-                timeHiAndVersion: 0x5678,
-                clockSeqAndNode: [0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78],
-            };
+        let dfh = TeeFsDirfileFileh {
+            file_number: 0x12345678,
+            hash: [0x01; TEE_FS_HTREE_HASH_SIZE],
+            idx: 1,
+        };
 
-            let mut dfh = TeeFsDirfileFileh {
-                file_number: 0x12345678,
-                hash: [0x01; TEE_FS_HTREE_HASH_SIZE],
-                idx: 1,
-            };
+        let mut hash = [0u8; TEE_FS_HTREE_HASH_SIZE];
+        let mut fdp =
+            ree_fs_open_primitive(Some(&uuid), true, Some(&mut hash), Some(&dfh)).unwrap();
 
-            let mut hash = [0u8; TEE_FS_HTREE_HASH_SIZE];
+        assert_eq!(fdp.uuid, uuid);
+        assert_eq!(fdp.dfh.file_number, dfh.file_number);
 
-            // 1. 使用 create = true 调用 ree_fs_open_primitive 创建文件
-            let mut fdp = ree_fs_open_primitive(Some(&uuid), true, Some(&mut hash), Some(&dfh)).unwrap();
+        let test_data =
+            b"Hello, TEE World! This is a test message for ree_fs_primitive operations.";
+        let write_result = ree_fs_write_primitive(&mut fdp, 0, test_data, &[], test_data.len());
+        assert!(write_result.is_ok());
 
-            // 验证文件创建成功
-            assert_eq!(fdp.uuid, uuid);
-            assert_eq!(fdp.dfh.file_number, dfh.file_number);
+        let mut read_buffer = vec![0u8; test_data.len()];
+        let mut read_len = read_buffer.len();
+        let read_result =
+            ree_fs_read_primitive(&mut fdp, 0, &mut read_buffer, &mut [], &mut read_len);
+        assert!(read_result.is_ok());
+        assert_eq!(read_len, test_data.len());
+        assert_eq!(&read_buffer[..read_len], test_data);
 
-            // 2. 调用 ree_fs_write_primitive 写入数据
-            let test_data = b"Hello, TEE World! This is a test message for ree_fs_primitive operations.";
-            let write_result = ree_fs_write_primitive(&mut fdp, 0, test_data, &[], test_data.len());
-            assert!(write_result.is_ok());
+        let mut partial_buffer = vec![0u8; 10];
+        let mut partial_len = partial_buffer.len();
+        let partial_read_result =
+            ree_fs_read_primitive(&mut fdp, 0, &mut partial_buffer, &mut [], &mut partial_len);
+        assert!(partial_read_result.is_ok());
+        assert_eq!(partial_len, 10);
+        assert_eq!(&partial_buffer[..partial_len], &test_data[..10]);
 
-            // 3. 调用 ree_fs_read_primitive 读取数据
-            let mut read_buffer = vec![0u8; test_data.len()];
-            let mut read_len = read_buffer.len();
-            let read_result = ree_fs_read_primitive(&mut fdp, 0, &mut read_buffer, &mut [], &mut read_len);
-            assert!(read_result.is_ok());
+        let mut mid_buffer = vec![0u8; 15];
+        let mut mid_len = mid_buffer.len();
+        let mid_read_result =
+            ree_fs_read_primitive(&mut fdp, 10, &mut mid_buffer, &mut [], &mut mid_len);
+        assert!(mid_read_result.is_ok());
+        assert_eq!(mid_len, 15);
+        assert_eq!(&mid_buffer[..mid_len], &test_data[10..25]);
 
-            // 验证读取的数据长度
-            assert_eq!(read_len, test_data.len());
+        let additional_data = b" Additional data appended to the file.";
+        let additional_write_result = ree_fs_write_primitive(
+            &mut fdp,
+            test_data.len(),
+            additional_data,
+            &[],
+            additional_data.len(),
+        );
+        assert!(additional_write_result.is_ok());
 
-            // 验证读取的数据内容
-            assert_eq!(&read_buffer[..read_len], test_data);
+        let total_len = test_data.len() + additional_data.len();
+        let mut full_buffer = vec![0u8; total_len];
+        let mut full_len = full_buffer.len();
+        let full_read_result =
+            ree_fs_read_primitive(&mut fdp, 0, &mut full_buffer, &mut [], &mut full_len);
+        assert!(full_read_result.is_ok());
+        assert_eq!(full_len, total_len);
 
-            // 4. 测试部分读取
-            let mut partial_buffer = vec![0u8; 10];
-            let mut partial_len = partial_buffer.len();
-            let partial_read_result =
-                ree_fs_read_primitive(&mut fdp, 0, &mut partial_buffer, &mut [], &mut partial_len);
-            assert!(partial_read_result.is_ok());
-            assert_eq!(partial_len, 10);
-            assert_eq!(&partial_buffer[..partial_len], &test_data[..10]);
-
-            // 5. 测试从中间位置读取
-            let mut mid_buffer = vec![0u8; 15];
-            let mut mid_len = mid_buffer.len();
-            let mid_read_result = ree_fs_read_primitive(&mut fdp, 10, &mut mid_buffer, &mut [], &mut mid_len);
-            assert!(mid_read_result.is_ok());
-            assert_eq!(mid_len, 15);
-            assert_eq!(&mid_buffer[..mid_len], &test_data[10..25]);
-
-            // 6. 测试写入更多数据
-            let additional_data = b" Additional data appended to the file.";
-            let additional_write_result =
-                ree_fs_write_primitive(&mut fdp, test_data.len(), additional_data, &[], additional_data.len());
-            assert!(additional_write_result.is_ok());
-
-            // 7. 读取完整数据（包括追加的数据）
-            let total_len = test_data.len() + additional_data.len();
-            let mut full_buffer = vec![0u8; total_len];
-            let mut full_len = full_buffer.len();
-            let full_read_result = ree_fs_read_primitive(&mut fdp, 0, &mut full_buffer, &mut [], &mut full_len);
-            assert!(full_read_result.is_ok());
-            assert_eq!(full_len, total_len);
-
-            // 验证完整数据
-            let mut expected_full_data = Vec::new();
-            expected_full_data.extend_from_slice(test_data);
-            expected_full_data.extend_from_slice(additional_data);
-            assert_eq!(&full_buffer[..full_len], expected_full_data.as_slice());
-
-            // Cleanup: close and remove the test file
-            // Note: File system is persistent, so we need to explicitly remove the file
-            // Rust's Drop trait only releases memory objects, not filesystem files
-            // let _ = tee_fs_rpc_remove_dfh(Some(&fdp.dfh));
-        }
-    }
-
-    tests_name! {
-        TEST_TEE_REE_FS;
-        tee_ree_fs;
-        //------------------------
-        test_get_offs_size_head,
-        test_get_offs_size_node,
-        test_get_offs_size_block,
-        test_get_offs_size_unsupported_type,
-        test_ree_fs_primitive_operations,
+        let mut expected_full_data = Vec::new();
+        expected_full_data.extend_from_slice(test_data);
+        expected_full_data.extend_from_slice(additional_data);
+        assert_eq!(&full_buffer[..full_len], expected_full_data.as_slice());
     }
 }

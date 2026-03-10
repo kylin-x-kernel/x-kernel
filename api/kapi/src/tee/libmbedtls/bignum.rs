@@ -187,76 +187,58 @@ pub fn crypto_bignum_clear(bn: &mut BigNum) {
     bn.clear();
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_tee_bignum {
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
     use zerocopy::IntoBytes;
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test]
+    fn test_tee_bignum() {
+        assert_eq!(bits_to_limbs(0), 0);
+        assert_eq!(bits_to_limbs(1), 1);
+        assert_eq!(bits_to_limbs(bil - 1), 1);
+        assert_eq!(bits_to_limbs(bil), 1);
+        assert_eq!(bits_to_limbs(bil + 1), 2);
+        assert_eq!(bits_to_limbs(bil * 2), 2);
 
-        fn test_tee_bignum() {
-            // Test bits_to_limbs
-            assert_eq!(bits_to_limbs(0), 0);
-            assert_eq!(bits_to_limbs(1), 1);
-            assert_eq!(bits_to_limbs(bil - 1), 1);
-            assert_eq!(bits_to_limbs(bil), 1);
-            assert_eq!(bits_to_limbs(bil + 1), 2);
-            assert_eq!(bits_to_limbs(bil * 2), 2);
-            // Test allocation
-            let bn = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
-            // Test copy
-            let mut bn_copy = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
-            crypto_bignum_copy(&mut bn_copy, &bn);
-            assert_eq!(crypto_bignum_compare(&bn, &bn_copy), Ordering::Equal);
-            // Test bin2bn with zero data
-            let zero_data = vec![0u8; 1];
-            let mut bn_zero = crypto_bignum_allocate(128).expect("Failed to allocate BigNum");
-            crypto_bignum_bin2bn(&zero_data, &mut bn_zero).expect("Failed to convert bin to bn");
-            // let num_bytes = crypto_bignum_num_bytes(&bn_zero).expect("Failed to get num bytes");
-            assert_eq!(bn_zero.as_u32().unwrap(), 0);
-            // let mut bin_out = vec![1u8; 1];
-            // crypto_bignum_bn2bin(&bn_zero, &mut bin_out).expect("Failed to convert bn to bin");
-            // assert_eq!(bin_out, zero_data);
+        let bn = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
+        let mut bn_copy = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
+        crypto_bignum_copy(&mut bn_copy, &bn);
+        assert_eq!(crypto_bignum_compare(&bn, &bn_copy), Ordering::Equal);
 
-            // Test compare
-            // Test bin2bn and bn2bin
-            let mut bn_from_bin = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
-            let bin_data = vec![0xF2, 0x34, 0x56, 0x78];
-            crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
-            let mut bin_out = vec![0u8; 4];
-            crypto_bignum_bn2bin(&bn_from_bin, &mut bin_out).expect("Failed to convert bn to bin");
-            assert_eq!(bin_data, bin_out);
-            // Test num_bytes and num_bits
-            let num_bytes = crypto_bignum_num_bytes(&bn_from_bin).expect("Failed to get num bytes");
-            let num_bits = crypto_bignum_num_bits(&bn_from_bin).expect("Failed to get num bits");
-            assert_eq!(num_bytes, 4);
-            assert_eq!(num_bits, 32);
-            // Test clear
-            crypto_bignum_clear(&mut bn_from_bin);
-            // Test bin with prefix zeros
-            let mut bn_from_bin = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
-            let bin_data = vec![0x00, 0x00, 0x56, 0x78];
-            crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
-            let mut bin_out = vec![5u8; 4];
-            crypto_bignum_bn2bin(&bn_from_bin, &mut bin_out).expect("Failed to convert bn to bin");
-            assert_eq!(&[0x56, 0x78, 5, 5], bin_out.as_bytes());
-            // Test free
-            crypto_bignum_free(bn);
-            crypto_bignum_free(bn_copy);
-            crypto_bignum_free(bn_zero);
-            crypto_bignum_free(bn_from_bin);
-        }
-    }
+        let zero_data = vec![0u8; 1];
+        let mut bn_zero = crypto_bignum_allocate(128).expect("Failed to allocate BigNum");
+        crypto_bignum_bin2bn(&zero_data, &mut bn_zero).expect("Failed to convert bin to bn");
+        assert_eq!(bn_zero.as_u32().unwrap(), 0);
 
-    tests_name! {
-        TEST_TEE_BIGNUM;
-        bignum;
-        //------------------------
-        test_tee_bignum,
+        let mut bn_from_bin = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
+        let bin_data = vec![0xF2, 0x34, 0x56, 0x78];
+        crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
+        let mut bin_out = vec![0u8; 4];
+        crypto_bignum_bn2bin(&bn_from_bin, &mut bin_out).expect("Failed to convert bn to bin");
+        assert_eq!(bin_data, bin_out);
+
+        let num_bytes = crypto_bignum_num_bytes(&bn_from_bin).expect("Failed to get num bytes");
+        let num_bits = crypto_bignum_num_bits(&bn_from_bin).expect("Failed to get num bits");
+        assert_eq!(num_bytes, 4);
+        assert_eq!(num_bits, 32);
+
+        crypto_bignum_clear(&mut bn_from_bin);
+        assert_eq!(bn_from_bin.as_u32().unwrap(), 0);
+
+        let mut bn_from_bin = crypto_bignum_allocate(1024).expect("Failed to allocate BigNum");
+        let bin_data = vec![0x00, 0x00, 0x56, 0x78];
+        crypto_bignum_bin2bn(&bin_data, &mut bn_from_bin).expect("Failed to convert bin to bn");
+        let mut bin_out = vec![5u8; 4];
+        crypto_bignum_bn2bin(&bn_from_bin, &mut bin_out).expect("Failed to convert bn to bin");
+        assert_eq!(&[0x56, 0x78, 5, 5], bin_out.as_bytes());
+        assert!(crypto_bignum_num_bits(&bn_from_bin).unwrap() > 0);
+
+        crypto_bignum_free(bn);
+        crypto_bignum_free(bn_copy);
+        crypto_bignum_free(bn_zero);
+        crypto_bignum_free(bn_from_bin);
     }
 }

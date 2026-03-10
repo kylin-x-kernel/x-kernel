@@ -15,7 +15,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use super::test_framework_basic::TestResult;
+use super::TestResult;
 
 impl TestResult {
     pub fn is_ok(&self) -> bool {
@@ -64,6 +64,31 @@ impl Default for TestStats {
 
 pub static TEST_FAILED_FLAG: AtomicBool = AtomicBool::new(false);
 
+pub type CustomTestExecutor = fn(&TestDescriptor) -> TestResult;
+
+static CUSTOM_TEST_EXECUTOR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TestExecutionMode {
+    Standard = 0,
+    Custom   = 1,
+}
+
+pub fn register_custom_test_executor(executor: CustomTestExecutor) {
+    CUSTOM_TEST_EXECUTOR.store(executor as usize, Ordering::Release);
+}
+
+fn custom_test_executor() -> Option<CustomTestExecutor> {
+    let executor = CUSTOM_TEST_EXECUTOR.load(Ordering::Acquire);
+    if executor == 0 {
+        None
+    } else {
+        Some(unsafe { core::mem::transmute::<usize, CustomTestExecutor>(executor) })
+    }
+}
+
 // Testable trait
 pub trait Testable {
     fn run(&self) -> TestResult;
@@ -85,6 +110,7 @@ pub struct TestDescriptor {
     pub test_fn: fn() -> TestResult,
     pub should_panic: bool,
     pub ignore: bool,
+    pub execution_mode: TestExecutionMode,
 }
 
 impl TestDescriptor {
@@ -94,6 +120,7 @@ impl TestDescriptor {
         test_fn: fn() -> TestResult,
         should_panic: bool,
         ignore: bool,
+        execution_mode: TestExecutionMode,
     ) -> Self {
         Self {
             name,
@@ -101,6 +128,7 @@ impl TestDescriptor {
             test_fn,
             should_panic,
             ignore,
+            execution_mode,
         }
     }
 
@@ -115,8 +143,19 @@ impl Testable for TestDescriptor {
             return TestResult::Ignored;
         }
 
-        // Execute the test function
-        (self.test_fn)()
+        match self.execution_mode {
+            TestExecutionMode::Standard => (self.test_fn)(),
+            TestExecutionMode::Custom => custom_test_executor().map_or_else(
+                || {
+                    error!(
+                        "custom test executor is not registered for {}:{}",
+                        self.module, self.name
+                    );
+                    TestResult::Failed
+                },
+                |executor| executor(self),
+            ),
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -355,33 +394,37 @@ impl Default for TestRunner {
 
 #[doc(hidden)]
 pub fn __log_assert_eq_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
+    file: &str,
+    line: u32,
     left_expr: &str,
     left_val: &T,
     right_expr: &str,
     right_val: &U,
 ) {
     error!(
-        "assert_eq! failed: {} ({:x?}) == {} ({:x?})",
-        left_expr, left_val, right_expr, right_val
+        "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?})",
+        file, line, left_expr, left_val, right_expr, right_val
     );
 }
 
 #[doc(hidden)]
 pub fn __log_assert_ne_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
+    file: &str,
+    line: u32,
     left_expr: &str,
     left_val: &T,
     right_expr: &str,
     right_val: &U,
 ) {
     error!(
-        "assert_ne! failed: {} ({:x?}) != {} ({:x?})",
-        left_expr, left_val, right_expr, right_val
+        "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?})",
+        file, line, left_expr, left_val, right_expr, right_val
     );
 }
 
 #[doc(hidden)]
-pub fn __log_assert_failure(cond_expr: &str) {
-    error!("assert! failed: {}", cond_expr);
+pub fn __log_assert_failure(file: &str, line: u32, cond_expr: &str) {
+    error!("assert! failed at {}:{}: {}", file, line, cond_expr);
 }
 
 // Basic assertion macros
@@ -392,6 +435,8 @@ macro_rules! assert_eq {
         let right_val = &$right;
         if left_val != right_val {
             $crate::__log_assert_eq_failure(
+                file!(),
+                line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
@@ -405,6 +450,8 @@ macro_rules! assert_eq {
         let right_val = &$right;
         if left_val != right_val {
             $crate::__log_assert_eq_failure(
+                file!(),
+                line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
@@ -422,6 +469,8 @@ macro_rules! assert_ne {
         let right_val = &$right;
         if left_val == right_val {
             $crate::__log_assert_ne_failure(
+                file!(),
+                line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
@@ -435,6 +484,8 @@ macro_rules! assert_ne {
         let right_val = &$right;
         if left_val == right_val {
             $crate::__log_assert_ne_failure(
+                file!(),
+                line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
@@ -449,13 +500,13 @@ macro_rules! assert_ne {
 macro_rules! assert {
     ($cond:expr) => {
         if !$cond {
-            $crate::__log_assert_failure(stringify!($cond));
+            $crate::__log_assert_failure(file!(), line!(), stringify!($cond));
             return $crate::TestResult::Failed;
         }
     };
     ($cond:expr, $($arg:tt)*) => {
         if !$cond {
-            $crate::__log_assert_failure(stringify!($cond));
+            $crate::__log_assert_failure(file!(), line!(), stringify!($cond));
             return $crate::TestResult::Failed;
         }
     };
@@ -465,13 +516,15 @@ macro_rules! assert {
 #[macro_export]
 macro_rules! tests {
     ($($test_name:ident,)*) => {
-        pub static TEST_SUITE: &[TestDescriptor] = &[
+        pub static TEST_SUITE: &[$crate::TestDescriptor] = &[
             $(
-                TestDescriptor::new(
+                $crate::TestDescriptor::new(
                     stringify!($test_name),
+                    module_path!(),
                     $test_name,
                     false, // should_panic
                     false, // ignore
+                    $crate::TestExecutionMode::Standard,
                 ),
             )*
         ];
@@ -481,14 +534,15 @@ macro_rules! tests {
 #[macro_export]
 macro_rules! tests_name {
     ($suite_name:ident; $module_name:ident; $($test_name:ident),* $(,)?) => {
-        pub static $suite_name: &[TestDescriptor] = &[
+        pub static $suite_name: &[$crate::TestDescriptor] = &[
             $(
-                TestDescriptor::new(
+                $crate::TestDescriptor::new(
                     stringify!($test_name),
                     stringify!($module_name),
                     $test_name,
                     false, // should_panic
                     false, // ignore
+                    $crate::TestExecutionMode::Standard,
                 ),
             )*
         ];

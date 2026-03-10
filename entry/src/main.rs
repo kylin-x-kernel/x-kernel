@@ -53,8 +53,22 @@ fn main() {
 #[unsafe(no_mangle)]
 fn main() {
     kapi::init();
+    kapi::unittest_task::register_unittest_runtime();
 
-    use alloc::sync::Arc;
+    {
+        let cx = kfs::FS_CONTEXT.lock();
+        let root = cx.root_dir().clone();
+        let fs_ops = kfs::FsOperations::new(root);
+
+        warn!("Cleaning up stale coverage data if exists...");
+        if let Err(err) = fs_ops.remove_file("/.llvm-cov/default.profraw") {
+            if err.canonicalize() != fs_ng_vfs::VfsError::NotFound {
+                warn!("Failed to remove stale coverage data: {:?}", err);
+            }
+        }
+    }
+
+    use alloc::{sync::Arc, vec::Vec};
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use ktask::spawn;
@@ -78,6 +92,32 @@ fn main() {
     // We use yield_now() to let the scheduler run the test task.
     while !finished.load(Ordering::Acquire) {
         ktask::yield_now();
+    }
+
+    info!("Writing LLVM coverage data to /.llvm-cov/default.profraw ...");
+    let mut cov = Vec::new();
+    if let Err(e) = unsafe { minicov::capture_coverage(&mut cov) } {
+        error!("capture_coverage failed: {:?}", e);
+    } else if !cov.is_empty() {
+        let cx = kfs::FS_CONTEXT.lock();
+        let root = cx.root_dir().clone();
+        let fs_ops = kfs::FsOperations::new(root);
+
+        let _ = fs_ops.create_dir("/.llvm-cov", fs_ng_vfs::NodePermission::default());
+        if let Err(e) = fs_ops.write("/.llvm-cov/default.profraw", &cov) {
+            error!("Failed to write coverage data: {:?}", e);
+        } else {
+            info!(
+                "Coverage data successfully written! Size: {} bytes",
+                cov.len()
+            );
+        }
+
+        if let Err(e) = cx.root_dir().filesystem().flush() {
+            error!("Failed to flush filesystem: {:?}", e);
+        }
+    } else {
+        info!("No coverage data to write.");
     }
 
     info!("Unit tests completed, shutting down...");

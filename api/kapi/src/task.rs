@@ -24,6 +24,10 @@ use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use osvm::{VirtMutPtr, VirtPtr};
 
+#[cfg(unittest)]
+pub use crate::unittest_task::{
+    TestUserArray, TestUserBuffer, TestUserValue, run_with_test_user_thread,
+};
 use crate::{
     signal::{check_signals, unblock_next_signal},
     syscall::dispatch_irq_syscall,

@@ -95,3 +95,82 @@ pub unsafe extern "C" fn __memcpy_chk(
     }
     dest
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, len: usize) -> *mut c_void {
+    if dest.is_null() || src.is_null() {
+        return dest;
+    }
+
+    let mut index = 0;
+    while index < len {
+        unsafe {
+            *(dest as *mut u8).add(index) = *(src as *const u8).add(index);
+        }
+        index += 1;
+    }
+    dest
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, len: usize) -> *mut c_void {
+    if dest.is_null() || src.is_null() || core::ptr::eq(dest, src.cast_mut()) {
+        return dest;
+    }
+
+    let dest_ptr = dest as *mut u8;
+    let src_ptr = src as *const u8;
+    if (dest_ptr as usize) < (src_ptr as usize) || (dest_ptr as usize) >= (src_ptr as usize + len) {
+        let mut index = 0;
+        while index < len {
+            unsafe {
+                *dest_ptr.add(index) = *src_ptr.add(index);
+            }
+            index += 1;
+        }
+    } else {
+        let mut index = len;
+        while index != 0 {
+            index -= 1;
+            unsafe {
+                *dest_ptr.add(index) = *src_ptr.add(index);
+            }
+        }
+    }
+    dest
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memset(dest: *mut c_void, value: c_int, len: usize) -> *mut c_void {
+    if dest.is_null() {
+        return dest;
+    }
+
+    let byte = value as u8;
+    let mut index = 0;
+    while index < len {
+        unsafe {
+            *(dest as *mut u8).add(index) = byte;
+        }
+        index += 1;
+    }
+    dest
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcmp(lhs: *const c_void, rhs: *const c_void, len: usize) -> c_int {
+    if core::ptr::eq(lhs, rhs) || len == 0 {
+        return 0;
+    }
+
+    let mut index = 0;
+    while index < len {
+        let left = unsafe { *(lhs as *const u8).add(index) };
+        let right = unsafe { *(rhs as *const u8).add(index) };
+        if left != right {
+            return left as c_int - right as c_int;
+        }
+        index += 1;
+    }
+    0
+}

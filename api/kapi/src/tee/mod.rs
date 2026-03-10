@@ -16,8 +16,6 @@ use khal::uspace::UserContext;
 use linux_sysno::Sysno;
 use tee_raw_sys::{TEE_ERROR_NOT_SUPPORTED, TeeTime};
 
-#[cfg(feature = "tee_test")]
-use crate::tee::test_unit_test::sys_tee_scn_test;
 use crate::tee::{
     tee_cancel::{
         sys_tee_scn_get_cancellation_flag, sys_tee_scn_mask_cancellation,
@@ -60,8 +58,6 @@ mod config;
 mod crypto;
 mod fs_dirfile;
 mod fs_htree;
-#[cfg(feature = "tee_test")]
-mod fs_htree_tests;
 mod huk_subkey;
 mod libmbedtls;
 mod libutee;
@@ -87,8 +83,6 @@ mod tee_svc_cryp2;
 mod tee_svc_storage;
 mod tee_ta_manager;
 mod tee_time;
-#[cfg(feature = "tee_test")]
-pub mod test_unit_test;
 mod types_ext;
 mod user_access;
 mod user_ta;
@@ -99,6 +93,8 @@ mod vm;
 pub type TeeResult<T = ()> = Result<T, u32>;
 
 pub use tee_api_defines_extensions::*;
+#[cfg(unittest)]
+pub use tee_session::set_tee_session_ctx;
 
 /// Dispatch TEE-specific syscalls from the userspace context
 pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
@@ -418,8 +414,6 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
-        #[cfg(feature = "tee_test")]
-        Sysno::tee_scn_test => sys_tee_scn_test(),
         _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
 }

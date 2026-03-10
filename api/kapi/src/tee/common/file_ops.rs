@@ -395,111 +395,68 @@ pub fn file_ops_test() {
     let _n = fd.write(&buf).expect("Failed to write file");
 }
 
-#[cfg(feature = "tee_test")]
+#[unittest::mod_test]
 pub mod tests_file_ops {
     use rand::{Rng, distr::Alphanumeric};
-    use unittest::{
-        test_fn, test_framework::TestDescriptor, test_framework_basic::TestResult, tests_name,
-    };
+    use unittest::{assert, assert_eq};
 
     use super::*;
 
-    test_fn! {
-        using TestResult;
+    #[unittest::def_test(custom)]
+    fn test_file_ops_read() {
+        let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT), 0o644);
+        assert!(fd.is_ok());
+        let mut fd = fd.unwrap();
+        let buf = [0xAA; 8];
+        let n = fd.write(&buf).expect("Failed to write file");
+        assert_eq!(n, 8);
+        let pos = fd.seek(SeekFrom::Start(0)).expect("Failed to seek");
+        assert_eq!(pos, 0);
+        let mut buf = [0; 8];
+        let n = fd.read(&mut buf).expect("Failed to read file");
+        assert_eq!(n, 8);
+        assert_eq!(buf, [0xAA; 8]);
+        let mut buf = [0; 4];
+        let n = fd.pread(&mut buf, 4).expect("Failed to pread file");
+        assert_eq!(n, 4);
+        assert_eq!(buf, [0xAA; 4]);
+        let n = fd.pwrite(&[0xBB; 4], 4).expect("Failed to pwrite file");
+        assert_eq!(n, 4);
+        let mut buf = [0; 4];
+        let n = fd.pread(&mut buf, 4).expect("Failed to pread file");
+        assert_eq!(n, 4);
+        assert_eq!(buf, [0xBB; 4]);
+        fd.ftruncate(4).expect("Failed to truncate file");
+        let size = tee_get_file_size("/tmp/test.txt").expect("Failed to get file size");
+        assert_eq!(size, 4);
+    }
 
-        fn test_file_ops_read() {
-            let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT), 0o644);
+    #[unittest::def_test(custom)]
+    fn test_file_ops_exists() {
+        let path = "/tmp/test.txt.not_exists";
+        assert!(!FileVariant::exists(path));
+        {
+            let fd = FileVariant::open(path, (O_RDWR | O_CREAT), 0o644);
             assert!(fd.is_ok());
-            let mut fd = fd.unwrap();
-            // // write 1024 bytes to file
-            let buf = [0xAA; 8];
-            let n = fd.write(&buf).expect("Failed to write file");
-            assert_eq!(n, 8);
-            // seek to 4 bytes from the beginning
-            let pos = fd.seek(SeekFrom::Start(0)).expect("Failed to seek");
-            assert_eq!(pos, 0);
-            // // read 1024 bytes from file
-            let mut buf = [0; 8];
-            let n = fd.read(&mut buf).expect("Failed to read file");
-            assert_eq!(n, 8);
-            assert_eq!(buf, [0xAA; 8]);
-            // pread 4 bytes from file at offset 4
-            let mut buf = [0; 4];
-            let n = fd.pread(&mut buf, 4).expect("Failed to pread file");
-            assert_eq!(n, 4);
-            assert_eq!(buf, [0xAA; 4]);
-            // pwrite 4 bytes to file at offset 4
-            let n = fd.pwrite(&[0xBB; 4], 4).expect("Failed to pwrite file");
-            assert_eq!(n, 4);
-            // read 4 bytes from file at offset 4
-            let mut buf = [0; 4];
-            let n = fd.pread(&mut buf, 4).expect("Failed to pread file");
-            assert_eq!(n, 4);
-            assert_eq!(buf, [0xBB; 4]);
-            // truncate file to 4 bytes
-            fd.ftruncate(4).expect("Failed to truncate file");
-            // get file size
-            let size = tee_get_file_size("/tmp/test.txt").expect("Failed to get file size");
-            assert_eq!(size, 4);
         }
+        assert!(FileVariant::exists(path));
+        {
+            let n = FileVariant::remove_file(path);
+            assert!(n.is_ok());
+        }
+        assert!(!FileVariant::exists(path));
     }
 
-    test_fn! {
-        using TestResult;
-
-        fn test_file_ops_exists() {
-            let path = "/tmp/test.txt.not_exists";
-            assert!(!FileVariant::exists(path));
-            // create file
-            {
-                let fd = FileVariant::open(path, (O_RDWR | O_CREAT), 0o644);
-                assert!(fd.is_ok());
-            }
-            // check if file exists
-            assert!(FileVariant::exists(path));
-            // remove file
-            {
-                let n = FileVariant::remove_file(path);
-                assert!(n.is_ok());
-            }
-            // check if file exists
-            assert!(!FileVariant::exists(path));
-            // // remove file again
-            // {
-            //     let n = FileVariant::remove(path);
-            //     assert!(n.is_ok());
-            // }
-        }
-    }
-
-    test_fn! {
-
-        using TestResult;
-
-        fn test_file_ops_create_dir() {
-            // create a radom path in /tmp/
-            let path = "/tmp/test_create_dir/";
-            let n = FileVariant::create_dir(path);
-            assert!(n.is_ok());
-            // check if directory exists
-            assert!(FileVariant::exists(path));
-            // create dir again
-            let n = FileVariant::create_dir(path);
-            assert!(n.is_ok());
-            // remove directory
-            let n = FileVariant::remove_dir(path);
-            assert!(n.is_ok());
-            // check if directory no longer exists
-            assert!(!FileVariant::exists(path));
-        }
-    }
-    tests_name! {
-        TEST_FILE_OPS;
-        file_ops;
-        //------------------------
-
-        test_file_ops_read,
-        test_file_ops_exists,
-        test_file_ops_create_dir,
+    #[unittest::def_test(custom)]
+    fn test_file_ops_create_dir() {
+        let path = "/tmp/test_create_dir/";
+        let n = FileVariant::create_dir(path);
+        assert!(n.is_ok());
+        assert!(FileVariant::exists(path));
+        let n = FileVariant::create_dir(path);
+        assert!(n.is_ok());
+        let n = FileVariant::remove_dir(path);
+        assert!(n.is_ok());
+        assert!(!FileVariant::exists(path));
     }
 }
