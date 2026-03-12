@@ -217,8 +217,13 @@ curl -f -L "\${IMG_URL}/rootfs-${arch}.img.xz" -o rootfs-${arch}.img.xz
 xz -df rootfs-${arch}.img.xz
 cp rootfs-${arch}.img disk.img
 
+TIMEOUT=120
+if [ "${arch}" = "aarch64" ]; then
+    TIMEOUT=360
+fi
+
 set +e
-timeout 120 stdbuf -oL -eL make UNITTEST=y VSOCK=n run | tee unittest-output.log
+timeout \${TIMEOUT} stdbuf -oL -eL make UNITTEST=y VSOCK=n run | tee unittest-output.log
 status=\${PIPESTATUS[0]}
 set -e
 

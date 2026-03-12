@@ -19,7 +19,10 @@ use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
 use kprocess::Pid;
 use ksignal::api::SignalActions;
-use ksync::{Mutex, spin::SpinNoIrq};
+use ksync::{
+    Mutex,
+    spin::{NoPreempt, SpinNoIrq},
+};
 use ktask::{KTaskExt, TaskExt, current};
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use osvm::{read_vm_mem, write_vm_mem};
@@ -73,7 +76,10 @@ impl InstalledTestThread {
         let page_table_root = thr.proc_data.aspace.lock().page_table_root();
         let task_ptr = current_task_ptr();
         let previous_page_table_root = karch::read_user_page_table();
-        unsafe {
+
+        let previous_task_ext = unsafe {
+            let _no_preempt = NoPreempt::new();
+
             if let Some(ext) = (*task_ptr).task_ext() {
                 ext.on_leave();
             }
@@ -85,15 +91,20 @@ impl InstalledTestThread {
 
             let previous_task_ext =
                 core::mem::replace((*task_ptr).task_ext_mut(), Some(KTaskExt::from_impl(thr)));
+
+            previous_task_ext
+        };
+
+        unsafe {
             if let Some(ext) = (*task_ptr).task_ext() {
                 ext.on_enter();
             }
-
-            Ok(Self {
-                previous_task_ext,
-                previous_page_table_root,
-            })
         }
+
+        Ok(Self {
+            previous_task_ext,
+            previous_page_table_root,
+        })
     }
 }
 
@@ -101,16 +112,21 @@ impl Drop for InstalledTestThread {
     fn drop(&mut self) {
         let task_ptr = current_task_ptr();
         unsafe {
-            if let Some(ext) = (*task_ptr).task_ext() {
-                ext.on_leave();
+            {
+                let _no_preempt = NoPreempt::new();
+
+                if let Some(ext) = (*task_ptr).task_ext() {
+                    ext.on_leave();
+                }
+
+                let ctx_ptr: *mut khal::context::TaskContext =
+                    (*task_ptr).ctx() as *const _ as *mut _;
+                (*ctx_ptr).set_page_table_root(self.previous_page_table_root);
+                karch::write_user_page_table(self.previous_page_table_root);
+                karch::flush_tlb(None);
+
+                *(*task_ptr).task_ext_mut() = self.previous_task_ext.take();
             }
-
-            let ctx_ptr: *mut khal::context::TaskContext = (*task_ptr).ctx() as *const _ as *mut _;
-            (*ctx_ptr).set_page_table_root(self.previous_page_table_root);
-            karch::write_user_page_table(self.previous_page_table_root);
-            karch::flush_tlb(None);
-
-            *(*task_ptr).task_ext_mut() = self.previous_task_ext.take();
             if let Some(ext) = (*task_ptr).task_ext() {
                 ext.on_enter();
             }
