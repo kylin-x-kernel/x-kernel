@@ -148,6 +148,7 @@ fn translate_virtio_event<H: Hal, T: Transport>(
         VsockEventType::Connected => Ok(VsockDriverEventType::Connected(cid)),
         VsockEventType::Received { length } => Ok(VsockDriverEventType::Received(cid, length)),
         VsockEventType::Disconnected { reason: _ } => Ok(VsockDriverEventType::Disconnected(cid)),
+        VsockEventType::CreditUpdate => Ok(VsockDriverEventType::CreditUpdate(cid)),
         _ => Ok(VsockDriverEventType::Unknown),
     }
 }

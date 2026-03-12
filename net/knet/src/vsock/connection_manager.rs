@@ -8,6 +8,7 @@ use alloc::{collections::BTreeMap, sync::Arc};
 use kerrno::{KError, KResult, k_bail};
 use kpoll::PollSet;
 use ksync::Mutex;
+use ktask::WaitQueue;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 
 use super::{VsockAddr, VsockConnId};
@@ -35,6 +36,9 @@ pub struct Connection {
     rx_producer: HeapProd<u8>,
     rx_consumer: HeapCons<u8>,
 
+    /// wait queues for tx due to InsufficientBufferSpaceInPeer
+    tx_wait_queue: WaitQueue,
+
     /// Waker lists
     rx_wakers: PollSet,
     connect_wakers: PollSet,
@@ -59,6 +63,7 @@ impl Connection {
             peer_addr,
             rx_producer,
             rx_consumer,
+            tx_wait_queue: WaitQueue::default(),
             rx_wakers: PollSet::new(),
             connect_wakers: PollSet::new(),
             rx_closed: false,
@@ -130,6 +135,17 @@ impl Connection {
             );
             0
         }
+    }
+
+    #[inline]
+    pub fn wait_for_tx(&self) {
+        self.tx_wait_queue
+            .wait_timeout(core::time::Duration::from_millis(10));
+    }
+
+    #[inline]
+    pub fn tx_wait_queue_notify(&mut self) {
+        self.tx_wait_queue.notify_all(true);
     }
 
     #[inline]
@@ -475,6 +491,19 @@ impl VsockConnectionManager {
             conn_guard.state = ConnectionState::Connected;
             conn_guard.wake_connect();
             trace!("Connection {:?} established", conn_id);
+        }
+        Ok(())
+    }
+
+    /// handle credit update (by driver event)
+    /// The code for credit_update has been completed in the virtio_driver layer.
+    /// The purpose of credit_update here is to correspond to events and
+    /// notify which tasks failed to be sent due to credit not being updated
+    pub fn on_credit_update(&mut self, conn_id: VsockConnId) -> KResult<()> {
+        if let Some(conn) = self.connections.get(&conn_id) {
+            let mut conn_guard = conn.lock();
+            conn_guard.tx_wait_queue_notify();
+            trace!("Connection {:?} tx wait queue notified", conn_id);
         }
         Ok(())
     }

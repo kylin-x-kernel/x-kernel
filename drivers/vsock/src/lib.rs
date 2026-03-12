@@ -49,6 +49,8 @@ pub enum VsockDriverEventType {
     Received(VsockConnId, usize),
     /// A connection was disconnected.
     Disconnected(VsockConnId),
+    /// Credit Update
+    CreditUpdate(VsockConnId),
     /// Unknown or unsupported event.
     Unknown,
 }
