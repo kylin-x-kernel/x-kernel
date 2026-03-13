@@ -25,12 +25,15 @@ pub struct SharedPages {
 impl SharedPages {
     /// Allocate a new set of shared pages.
     pub fn new(size: usize, pgsize: PageSize) -> KResult<Self> {
-        Ok(Self {
-            phys_pages: (0..divide_page(size, pgsize))
-                .map(|_| alloc_frame(true, pgsize))
-                .collect::<KResult<_>>()?,
+        let num_pages = divide_page(size, pgsize);
+        let mut result = Self {
+            phys_pages: Vec::with_capacity(num_pages),
             size: pgsize,
-        })
+        };
+        for _ in 0..num_pages {
+            result.phys_pages.push(alloc_frame(true, pgsize)?);
+        }
+        Ok(result)
     }
 
     /// Return the number of pages.

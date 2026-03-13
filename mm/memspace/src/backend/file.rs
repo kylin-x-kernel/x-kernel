@@ -27,23 +27,26 @@ pub struct FileBackendInner {
     cache: CachedFile,
     flags: FileFlags,
     offset_page: u32,
-    dispatch_irq: AtomicUsize,
-    futex_dispatch_irq: Arc<()>,
+    handle: AtomicUsize,
+    futex_handle: Arc<()>,
 }
 impl Drop for FileBackendInner {
     fn drop(&mut self) {
-        let dispatch_irq = self.dispatch_irq.load(Ordering::Acquire);
-        if dispatch_irq != 0 {
+        let handle = self.handle.load(Ordering::Acquire);
+        if handle != 0 {
             unsafe {
-                self.cache.remove_evict_listener(dispatch_irq);
+                self.cache.remove_evict_listener(handle);
             }
         }
     }
 }
 impl FileBackendInner {
-    pub fn register_listener(self: &Arc<Self>, aspace: &Arc<Mutex<AddrSpace>>) -> usize {
+    pub fn register_listener(self: &Arc<Self>, aspace: &Arc<Mutex<AddrSpace>>) {
+        if self.handle.load(Ordering::Acquire) != 0 {
+            panic!("Listener already registered");
+        }
         let aspace = Arc::downgrade(aspace);
-        self.cache.add_evict_listener({
+        let handle = self.cache.add_evict_listener({
             let this = Arc::downgrade(self);
             move |pn, _page| {
                 let Some(this) = this.upgrade() else {
@@ -61,7 +64,8 @@ impl FileBackendInner {
                 };
                 this.on_evict(pn, &mut aspace);
             }
-        })
+        });
+        self.handle.store(handle, Ordering::Release);
     }
 
     fn on_evict(self: &Arc<Self>, pn: u32, aspace: &mut AddrSpace) {
@@ -106,8 +110,8 @@ impl FileBackend {
     }
 
     /// Returns a weak handle used to dispatch futex-related events.
-    pub fn futex_dispatch_irq(&self) -> Weak<()> {
-        Arc::downgrade(&self.0.futex_dispatch_irq)
+    pub fn futex_handle(&self) -> Weak<()> {
+        Arc::downgrade(&self.0.futex_handle)
     }
 }
 
@@ -224,8 +228,8 @@ impl BackendOps for FileBackend {
             cache: self.0.cache.clone(),
             flags: self.0.flags,
             offset_page: self.0.offset_page,
-            dispatch_irq: AtomicUsize::new(0),
-            futex_dispatch_irq: self.0.futex_dispatch_irq.clone(),
+            handle: AtomicUsize::new(0),
+            futex_handle: self.0.futex_handle.clone(),
         });
         inner.register_listener(new_aspace);
         Ok(Backend::File(FileBackend(inner)))
@@ -246,8 +250,8 @@ impl Backend {
             cache,
             flags,
             offset_page,
-            dispatch_irq: AtomicUsize::new(0),
-            futex_dispatch_irq: Arc::new(()),
+            handle: AtomicUsize::new(0),
+            futex_handle: Arc::new(()),
         });
         inner.register_listener(aspace);
         Self::File(FileBackend(inner))

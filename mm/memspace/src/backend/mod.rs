@@ -167,9 +167,12 @@ impl MemorySetBackend for Backend {
         new_flags: Self::Flags,
         pgtbl: &mut Self::PageTable,
     ) -> bool {
-        pgtbl
-            .modify()
-            .protect_region(start, size, new_flags)
-            .is_ok()
+        let range = VirtAddrRange::from_start_size(start, size);
+        let mut modifier = pgtbl.modify();
+        if let Err(err) = BackendOps::on_protect(self, range, new_flags, &mut modifier) {
+            warn!("Failed to protect area: {:?}", err);
+            return false;
+        }
+        modifier.protect_region(start, size, new_flags).is_ok()
     }
 }
