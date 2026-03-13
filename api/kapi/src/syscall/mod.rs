@@ -651,7 +651,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         _ => {
             #[cfg(feature = "tee")]
             {
-                use tee_raw_sys::TEE_SUCCESS;
+                use tee_kernel::TEE_SUCCESS;
 
                 use crate::tee::dispatch_irq_tee_syscall;
 

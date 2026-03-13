@@ -23,11 +23,14 @@ pub mod socket;
 pub mod syscall;
 pub mod task;
 #[cfg(feature = "tee")]
-pub mod tee;
+pub use tee_kernel::tee;
 pub mod terminal;
 pub mod time;
+
 #[cfg(unittest)]
-pub mod unittest_task;
+mod unittest_task;
+#[cfg(unittest)]
+pub use unittest_task::{register_unittest_runtime, run_with_test_user_thread};
 pub mod vfs;
 
 /// Initializes VFS, /proc/interrupts accounting, and alarm task.

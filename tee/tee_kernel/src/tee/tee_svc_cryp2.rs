@@ -1491,10 +1491,10 @@ pub mod tests_cryp {
 
     use super::*;
     use crate::{
+        TestUserValue,
         tee::tee_svc_cryp::{
             syscall_cryp_obj_alloc, syscall_cryp_obj_copy, syscall_obj_generate_key,
         },
-        unittest_task::TestUserValue,
     };
 
     #[unittest::def_test(custom)]

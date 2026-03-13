@@ -1,0 +1,21 @@
+[package]
+name = "unittest_support"
+description = "Shared unittest user-memory helpers for X-Kernel crates"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kalloc.workspace = true
+kcore.workspace = true
+kerrno.workspace = true
+khal.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+memaddr.workspace = true
+memspace.workspace = true
+osvm.workspace = true

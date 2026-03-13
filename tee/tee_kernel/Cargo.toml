@@ -1,0 +1,77 @@
+[package]
+name = "tee_kernel"
+description = "TEE support crate extracted from kapi for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = ["linux_sysno/tee", "kalloc/tee", "tee_ss_smx"]
+tee_cfg_memtag = []
+tee_ss_smx = []
+x86_csv = ["dep:kcpu"]
+
+[dependencies]
+kalloc.workspace = true
+unittest.workspace = true
+unittest_support.workspace = true
+rust-dice = { workspace = true, optional = true }
+mbedtls = { workspace = true }
+mbedtls-sys-auto = { workspace = true }
+ktypes.workspace = true
+kcpu = { workspace = true, optional = true }
+kerrno.workspace = true
+kfeat.workspace = true
+fs-ng-vfs.workspace = true
+kfs.workspace = true
+khal.workspace = true
+karch.workspace = true
+kio.workspace = true
+klogger.workspace = true
+memspace.workspace = true
+knet.workspace = true
+kpoll.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+bitflags.workspace = true
+bytemuck.workspace = true
+cfg-if.workspace = true
+chrono = { version = "0.4.41", default-features = false }
+hashbrown = { workspace = true }
+lazy_static = { workspace = true }
+linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
+memaddr.workspace = true
+osvm.workspace = true
+kprocess.workspace = true
+linux_sysno.workspace = true
+zerocopy = { version = "0.8.26", features = ["derive"] }
+bincode = { version = "2.0.1", default-features = false, features = ["alloc", "derive"] }
+tee_raw_sys = { workspace = true }
+uuid = { version = "0.8", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+cty = "0.2"
+kcore.workspace = true
+subtle = { version = "2", default-features = false }
+static_assertions = "1.1.0"
+memoffset = { version = "0.9", default-features = false }
+flatten_objects = "0.2.4"
+rand_chacha = { version = "0.3", default-features = false }
+scope-local = { workspace = true }
+slab = { workspace = true }
+rand = { version = "0.9.1", default-features = false, features = [
+    "alloc",
+    "small_rng",
+] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86 = "0.52"
+
+[target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
+riscv = "0.14"
+
+# [dev-dependencies]
+# kapi = { path = "../../api/kapi" }

@@ -205,7 +205,7 @@ doc_check_missing:
 	$(call cargo_doc)
 
 fmt:
-	cargo +nightly fmt --all
+	cargo +nightly-2026-03-08 fmt --all
 
 unittest:
 	$(call unit_test)

@@ -167,7 +167,7 @@ pub mod tests_user_access {
     use unittest::{assert, assert_eq};
 
     use super::*;
-    use crate::unittest_task::{TestUserBuffer, TestUserValue};
+    use crate::{TestUserBuffer, TestUserValue};
 
     fn user_buffer_from_bytes(bytes: &[u8]) -> TestUserBuffer {
         let buffer = TestUserBuffer::new(bytes.len()).unwrap();

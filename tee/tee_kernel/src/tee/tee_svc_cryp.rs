@@ -2810,7 +2810,7 @@ pub mod tests_tee_svc_cryp {
     use zerocopy::IntoBytes;
 
     use super::*;
-    use crate::unittest_task::TestUserValue;
+    use crate::TestUserValue;
 
     #[unittest::def_test]
     fn test_tee_svc_cryp_utils() {
@@ -2874,7 +2874,7 @@ pub mod tests_tee_svc_cryp {
     #[unittest::def_test(custom)]
     fn test_op_attr_secret_value_from_user() {
         // 测试基础数据
-        let mut user_key = crate::unittest_task::user_vec![0xAAu8; 16];
+        let mut user_key = crate::user_vec![0xAAu8; 16];
         let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(32);
 
         // 从用户空间导入密钥
@@ -2886,7 +2886,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(&secret_wrapper.data()[..16], &user_key.read());
 
         // 测试长度超出分配大小的情况
-        let mut long_user_key = crate::unittest_task::user_vec![0xBBu8; 40];
+        let mut long_user_key = crate::user_vec![0xBBu8; 40];
         let result =
             op_attr_secret_value_from_user(&mut secret_wrapper, long_user_key.as_user_slice());
         assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
@@ -2911,7 +2911,7 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(size.read(), 16);
 
         // 第二次调用，提供足够大的 buffer
-        let mut user_buffer = crate::unittest_task::user_vec![0u8; 32];
+        let mut user_buffer = crate::user_vec![0u8; 32];
         size.write(32);
         let result = op_attr_secret_value_to_user(
             &secret_wrapper,
@@ -3013,7 +3013,7 @@ pub mod tests_tee_svc_cryp {
         attr[..4].copy_from_slice(value_bytes);
 
         let mut size = TestUserValue::<u64>::from_value(8).unwrap();
-        let mut user_buffer = crate::unittest_task::user_vec![0u8; 8];
+        let mut user_buffer = crate::user_vec![0u8; 8];
 
         let result = op_attr_value_to_user(&attr, user_buffer.as_user_slice(), size.as_user_ref());
         assert!(result.is_ok());
@@ -3090,14 +3090,14 @@ pub mod tests_tee_svc_cryp {
         };
         {
             let mut attr_ref = CryptoAttrRef::U32(&mut value);
-            let mut value_bytes_user = crate::unittest_task::user_vec![0u8; 8];
+            let mut value_bytes_user = crate::user_vec![0u8; 8];
             value_bytes_user.copy_from_slice(value_bytes);
             let result = attr_ref.update_from_user(value_bytes_user.as_user_slice());
             assert!(result.is_ok());
         }
         assert_eq!(value, 0x11223344);
 
-        let mut buffer = crate::unittest_task::user_vec![0u8; 8];
+        let mut buffer = crate::user_vec![0u8; 8];
         let mut size = TestUserValue::<u64>::from_value(8).unwrap();
         {
             let attr_ref = CryptoAttrRef::U32(&mut value);
@@ -3112,7 +3112,7 @@ pub mod tests_tee_svc_cryp {
     fn test_cryptoattrref_bignum() {
         // test CryptoAttrRef::BigNum
         let bn = BigNum::new(0x11223344).unwrap();
-        let mut buffer = crate::unittest_task::user_vec![0u8; 4];
+        let mut buffer = crate::user_vec![0u8; 4];
         let mut size = TestUserValue::<u64>::from_value(4).unwrap();
         let result = bn.to_user(buffer.as_user_slice(), size.as_user_ref());
         assert!(result.is_ok());
@@ -3134,7 +3134,7 @@ pub mod tests_tee_svc_cryp {
 
         // 1. test tee_cryp_obj_secret_wrapper to user
         // - test to_user
-        let mut buffer = crate::unittest_task::user_vec![0u8; 16];
+        let mut buffer = crate::user_vec![0u8; 16];
         let mut size = TestUserValue::<u64>::from_value(16).unwrap();
         let result = secret.to_user(buffer.as_user_slice(), size.as_user_ref());
         assert!(result.is_ok());
@@ -3263,8 +3263,8 @@ pub mod tests_tee_svc_cryp {
     // Helper function to test RSA keypair generation and verification
     fn test_rsa_keypair(key_size: usize, e: u64) -> TestResult {
         let mut e_bytes: [u8; 8] = [0; 8];
-        let mut usr_params = crate::unittest_task::user_vec![utee_attribute::default(); 1];
-        let mut usr_exp = crate::unittest_task::user_vec![0u8; 8];
+        let mut usr_params = crate::user_vec![utee_attribute::default(); 1];
+        let mut usr_exp = crate::user_vec![0u8; 8];
 
         let (usr_params, param_count) = {
             if e == 0 {
@@ -3402,14 +3402,14 @@ pub mod tests_tee_svc_cryp {
         };
 
         let mut attrs: [TEE_Attribute; 2] = [tee_attr_value; 2];
-        let mut usr_attrs = crate::unittest_task::user_vec![utee_attribute::default(); 2];
+        let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
         // index 0 is value attribute
         usr_attrs[0].attribute_id = TEE_ATTR_FLAG_VALUE;
         usr_attrs[0].a = 0x11223344_u64;
         usr_attrs[0].b = 0x55667788_u64;
         // index 1 is memref attribute
         // allocate memory for memref
-        let mem = crate::unittest_task::user_vec![0xAAu8; 16];
+        let mem = crate::user_vec![0xAAu8; 16];
         let mem_ptr = mem.as_user_ptr() as *mut c_void;
         usr_attrs[1].attribute_id &= !TEE_ATTR_FLAG_VALUE;
         usr_attrs[1].a = mem_ptr as u64;

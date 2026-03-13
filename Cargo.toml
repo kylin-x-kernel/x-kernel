@@ -114,6 +114,7 @@ strum = { version = "0.27", default-features = false, features = ["derive"] }
 x86_64 = { version = "0.15.2", features = ["instructions"] }
 
 # Tee Crates
+ tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 mbedtls = { version = "0.13", package = "mbedtls-smx", default-features = false, features = [
     "no_std_deps",
@@ -144,6 +145,7 @@ klogger = { path = "util/klogger" }
 backtrace = { path = "util/backtrace" }
 kerrno = { path = "util/kerrno" }
 unittest = { path = "util/unittest" }
+unittest_support = { path = "util/unittest_support" }
 kbuild_config = { path = "util/kbuild_config" }
 
 kconfig-gen = { path = "xtask/kconfig-gen" }

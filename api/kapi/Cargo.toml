@@ -21,27 +21,17 @@ dice = [
     "dep:mbedtls",
 ]
 tee = [
-    "linux_sysno/tee",
-    "kalloc/tee",
-    "dep:tee_raw_sys",
-    "dep:bincode",
-    "dep:uuid",
-    "dep:hex",
-    "dep:rand_chacha",
-    "dep:mbedtls",
-    "dep:mbedtls-sys-auto",
-    "tee_ss_smx",
+    "dep:tee_kernel",
 ]
-tee_cfg_memtag = []
-tee_ss_smx = []
 sev = ["dep:kcpu"]
-x86_csv = ["dep:kcpu"]
+x86_csv = ["tee_kernel/x86_csv"]
 
 [dependencies]
 kbuild_config = { workspace = true }
 kalloc.workspace = true
 backtrace.workspace = true
 unittest = { workspace = true }
+unittest_support.workspace = true
 rust-dice = { workspace = true, optional = true }
 mbedtls = { workspace = true, optional = true }
 mbedtls-sys-auto = { workspace = true, optional = true }
@@ -95,16 +85,8 @@ ksignal.workspace = true
 osvm.workspace = true
 linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
+tee_kernel = { workspace = true, optional = true }
 
-bincode = { version = "2.0.1", default-features = false, optional = true, features = [
-    "alloc",
-    "derive",
-] }
-tee_raw_sys = { workspace = true, optional = true }
-uuid = { version = "0.8", default-features = false, optional = true }
-hex = { version = "0.4", default-features = false, optional = true, features = [
-    "alloc",
-] }
 cty = "0.2"
 kcore.workspace = true
 

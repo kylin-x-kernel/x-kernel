@@ -1419,7 +1419,7 @@ pub mod tests_tee_svc_storage {
     use unittest::{assert, assert_eq};
 
     use super::*;
-    use crate::unittest_task::{TestUserBuffer, TestUserValue};
+    use crate::{TestUserBuffer, TestUserValue};
 
     const TEE_DIRNAME_BUFFER_REQUIRED_LEN: usize = tee_b2hs_hsbuf_size(TEE_UUID_HEX_LEN) + 1;
 

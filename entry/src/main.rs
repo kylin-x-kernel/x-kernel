@@ -53,7 +53,7 @@ fn main() {
 #[unsafe(no_mangle)]
 fn main() {
     kapi::init();
-    kapi::unittest_task::register_unittest_runtime();
+    kapi::register_unittest_runtime();
 
     {
         let cx = kfs::FS_CONTEXT.lock();
