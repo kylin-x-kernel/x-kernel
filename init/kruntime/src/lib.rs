@@ -74,13 +74,14 @@ impl klogger::LoggerAdapter for LogIfImpl {
 
     fn cpu_id() -> Option<usize> {
         #[cfg(feature = "smp")]
-        if is_init_ok() {
-            Some(khal::percpu::this_cpu_id())
-        } else {
-            None
+        {
+            is_init_ok().then_some(khal::percpu::this_cpu_id())
         }
+
         #[cfg(not(feature = "smp"))]
-        Some(0)
+        {
+            Some(0)
+        }
     }
 
     fn task_id() -> Option<u64> {
@@ -159,13 +160,13 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
     khal::mem::init();
     info!("Found physcial memory regions:");
-    for r in khal::mem::memory_regions() {
+    for memory_region in khal::mem::memory_regions() {
         info!(
             "  [{:x?}, {:x?}) {} ({:?})",
-            r.paddr,
-            r.paddr + r.size,
-            r.name,
-            r.flags
+            memory_region.paddr,
+            memory_region.paddr + memory_region.size,
+            memory_region.name,
+            memory_region.flags
         );
     }
 
@@ -292,11 +293,18 @@ fn init_interrupt() {
     fn update_timer() {
         let now_ns = khal::time::monotonic_time_nanos();
         // Safety: we have disabled preemption in IRQ handler.
-        let mut deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
-        if now_ns >= deadline {
-            deadline = now_ns + PERIODIC_INTERVAL_NANOS;
-        }
-        unsafe { NEXT_DEADLINE.write_current_raw(deadline + PERIODIC_INTERVAL_NANOS) };
+        let current_deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
+
+        // Use the later of the existing deadline or "now + interval" as
+        // the timer deadline, and record the following tick accordingly.
+        let deadline = if now_ns < current_deadline {
+            current_deadline
+        } else {
+            now_ns + PERIODIC_INTERVAL_NANOS
+        };
+
+        let next_deadline = deadline + PERIODIC_INTERVAL_NANOS;
+        unsafe { NEXT_DEADLINE.write_current_raw(next_deadline) };
         khal::time::arm_timer(deadline);
     }
 
