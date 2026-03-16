@@ -333,5 +333,11 @@ fi
 owner="\$(stat -c '%u:%g' "\${reference_path}")"
 chown -R "\${owner}" "\${workspace_path}" || true
 chmod -R u+rwX "\${workspace_path}" || true
+
+tmp_path="\${workspace_path}@tmp"
+if [[ -e "\${tmp_path}" ]]; then
+    chown -R "\${owner}" "\${tmp_path}" || true
+    chmod -R u+rwX "\${tmp_path}" || true
+fi
 """
 }
