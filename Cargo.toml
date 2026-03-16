@@ -68,7 +68,7 @@ kapi = { path = "api/kapi" }
 kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
 kernel-elf-parser = { path = "core/kernel_elf_parser" }
-slab_allocator = { path = "core/slab_allocator" }
+slab_allocator = { version = "0.4", package = "ax_slab_allocator"}
 
 # Platform Abstraction Layer
 kplat = { path = "platforms/kplat" }
