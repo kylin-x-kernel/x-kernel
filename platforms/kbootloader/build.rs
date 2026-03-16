@@ -1,18 +1,18 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSES for license details.
-
-//! Build script for generating the platform linker script.
-
 use std::{io::Result, path::Path};
 
-/// Entry point for build script.
 fn main() {
+    println!("cargo:rerun-if-changed=linker.lds.S");
+    println!("cargo:rerun-if-changed=build.rs");
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let platform = kbuild_config::PLATFORM;
     if platform != "unknown" {
         gen_linker_script(&arch, platform).unwrap();
     }
+
+    // println!("cargo:rustc-link-arg=-T{}", linker_script_path.display());
+    // println!("cargo:rustc-link-arg=-pie");
+    // println!("cargo:rustc-link-arg=-Bsymbolic");
+    // println!("cargo:rustc-link-arg=--no-dynamic-linker");
 }
 
 /// Generates a linker script for the given target arch and platform.
@@ -31,6 +31,7 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
         "%KERNEL_BASE%",
         &format!("{:#x}", kbuild_config::KERNEL_BASE_VADDR),
     );
+
     let ld_content = ld_content.replace("%CPU_NUM%", &format!("{}", kbuild_config::CPU_NUM));
     let ld_content = ld_content.replace(
         "%DWARF%",

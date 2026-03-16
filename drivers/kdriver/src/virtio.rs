@@ -202,11 +202,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 let ptr = dma_info.cpu_addr;
                 #[cfg(feature = "crosvm")]
                 {
-                    if let Ok(shared_paddr) = usize::try_from(paddr) {
-                        dma_share(shared_paddr, pages * PAGE_SIZE);
-                    } else {
-                        log::error!("dma_alloc share failed: paddr {paddr:#x} does not fit usize");
-                    }
+                    dma_share(paddr, pages * PAGE_SIZE);
                 }
                 // bus_addr is the physical address for DMA
                 (paddr, ptr)
@@ -230,7 +226,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
         #[cfg(feature = "crosvm")]
         {
-            dma_unshare(paddr as usize, pages * 0x1000);
+            dma_unshare(paddr, pages * 0x1000);
         }
         0
     }
@@ -319,7 +315,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             // For crosvm, call unshare_dma_buffer before freeing
             #[cfg(feature = "crosvm")]
             {
-                dma_unshare(paddr as usize, aligned_size);
+                dma_unshare(paddr, aligned_size);
             }
 
             // Free the bounce buffer via kdma

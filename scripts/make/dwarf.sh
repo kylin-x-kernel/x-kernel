@@ -26,19 +26,30 @@ SECTIONS=(
     debug_str_offsets
 )
 
+# Step 1: Dump all .debug_* sections to temporary files (in parallel)
 for section in "${SECTIONS[@]}"; do
-    $OBJCOPY $ELF --dump-section .$section=$section.bin 2> /dev/null || touch $section.bin &
+    $OBJCOPY "$ELF" --dump-section ".$section=$section.bin" 2> /dev/null || touch "$section.bin" &
 done
 wait
-$OBJCOPY $ELF --strip-debug
 
-cmd=($OBJCOPY $ELF)
+# Step 2: Strip debug info from the ELF.
+# This removes all .debug_* sections and the SHT_SYMTAB_SHNDX table
+# that references them, producing a clean ELF.
+$OBJCOPY "$ELF" --strip-debug
+
+# Step 3: Re-add the debug data as non-dot-prefixed sections (e.g. "debug_info")
+# using --add-section instead of --update-section + --rename-section.
+# This avoids the llvm-objcopy bug where SHN_XINDEX entries become
+# inconsistent after combined update+rename operations.
+cmd=($OBJCOPY "$ELF")
 for section in "${SECTIONS[@]}"; do
-    cmd+=(--update-section $section=$section.bin)
-    cmd+=(--rename-section $section=.$section)
+    if [ -s "$section.bin" ]; then
+        cmd+=(--update-section "$section=$section.bin")
+    fi
 done
-${cmd[@]}
+"${cmd[@]}"
 
+# Step 4: Clean up temporary files
 for section in "${SECTIONS[@]}"; do
-    rm -f $section.bin
+    rm -f "$section.bin"
 done

@@ -13,17 +13,21 @@ use kplat::{
 };
 use log::*;
 
-use crate::serial::*;
+fn map_kvm_guarded_mmio() {
+    crate::psci::kvm_guard_granule_init();
+    crate::psci::do_xmap_granules(0x7200_0000, 0x100_0000);
+    crate::psci::do_xmap_granules(0x7000_0000, 0x200_0000);
+    crate::psci::do_xmap_granules(0x3ffb_0000, 0x20_0000);
+    crate::psci::do_xmap_granules(0x2000, 0x1000);
+}
 
-/// Platform-specific `BootHandler` implementation.
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
     /// Perform early, minimal init before the allocator is ready.
     fn early_init(_cpu_id: usize, dtb: usize) {
-        boot_print_str("[boot] platform init early\r\n");
+        map_kvm_guarded_mmio();
         crate::mem::early_init(dtb);
-        kcpu::boot::init_trap();
         aarch64_peripherals::ns16550a::early_init(p2v(pa!(UART_PADDR)));
         aarch64_peripherals::psci::init(PSCI_METHOD);
         aarch64_peripherals::generic_timer::early_init();
@@ -32,9 +36,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
-    fn early_init_ap(_cpu_id: usize) {
-        kcpu::boot::init_trap();
-    }
+    fn early_init_ap(_cpu_id: usize) {}
 
     /// Finish platform init after core subsystems are online.
     fn final_init(cpu_id: usize, dtb: usize) {

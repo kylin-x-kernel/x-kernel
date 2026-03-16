@@ -97,12 +97,12 @@ impl DiceNodeInfo<'static> {
             }
             buffer
         };
-        let mut handover_buf = vec![0u8; size as usize];
+        let mut handover_buf = vec![0u8; size];
         let hash: Vec<u8> = get_process_hash()?;
         let handover = dice_main_flow_chain_codehash(&handover_data, &hash, &mut handover_buf)
             .map_err(|_| KError::InvalidInput)?;
         let (cdi_attest, cdi_seal, chain) =
-            dice_parse_handover(&handover).map_err(|_| KError::InvalidInput)?;
+            dice_parse_handover(handover).map_err(|_| KError::InvalidInput)?;
 
         Ok((cdi_attest.to_vec(), cdi_seal.to_vec(), chain.to_vec()))
     }
@@ -163,5 +163,5 @@ pub extern "C" fn get_rand(output: usize, len: usize) -> u32 {
     let buf = unsafe { core::slice::from_raw_parts_mut(output as *mut u8, len) };
     let mut rand = GLOBAL_RAND.lock();
     rand.fill_bytes(buf);
-    return 0;
+    0
 }

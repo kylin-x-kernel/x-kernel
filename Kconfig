@@ -220,6 +220,29 @@ config TIMER_FREQUENCY_HZ
     help
       Specify the frequency of the timer in hertz.
 
+if ARCH_AARCH64
+
+config BOOT_DEVICE_MM
+    rangetype "Boot Device Memory Ranges"
+    default [(usize, usize)]
+    help
+      List of 1 GiB-aligned (start, end) physical address intervals to be
+      mapped as Device memory in the early boot page table.  The boot page
+      table uses L1 block entries (1 GiB granularity), so both start and end
+      must be multiples of 0x40000000.  Typically covers MMIO and UART ranges
+      needed before the MMU is enabled.
+
+config BOOT_NORMAL_MM
+    rangetype "Boot Normal Memory Ranges"
+    default [(usize, usize)]
+    help
+      List of 1 GiB-aligned (start, end) physical address intervals to be
+      mapped as Normal (Read/Write/Execute) memory in the early boot page
+      table.  Both start and end must be multiples of 0x40000000.  Must
+      cover the physical address range where the kernel image is loaded.
+
+endif # ARCH_AARCH64
+
 endmenu
 
 source "drivers/Kconfig"

@@ -5,8 +5,6 @@
 //! PSCI wrappers and KVM guard-granule helpers.
 use kplat::psci::PsciOp;
 use ktypes::Once;
-
-use crate::serial::{boot_print_str, boot_print_usize};
 pub static GUARD_GRANULE: Once<usize> = Once::new();
 const ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID: u32 =
     ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((4) & 0xFFFF);
@@ -35,10 +33,8 @@ pub fn kvm_guard_granule_init() {
         psci_hvc_call(ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, 0, 0, 0);
     assert_eq!(guard_has_range, 0x1);
     GUARD_GRANULE.call_once(|| guard_granule);
-    boot_print_str("KVM MMIO guard granule: ");
-    boot_print_usize(guard_granule);
 }
-fn __invoke_mmioguard(phys_addr: usize, nr_granules: usize, map: bool) -> usize {
+fn __invoke_mmioguard(phys_addr: usize, _nr_granules: usize, map: bool) -> usize {
     let func_id: u32 = if map {
         ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((10) & 0xFFFF)
     } else {
@@ -46,20 +42,9 @@ fn __invoke_mmioguard(phys_addr: usize, nr_granules: usize, map: bool) -> usize 
     };
     let (result, done) = psci_hvc_call(func_id, phys_addr, 1, 0);
     if result != 0 {
-        boot_print_str("[error] psci_hvc_call failed\r\n");
-        boot_print_str("    func = ");
-        boot_print_usize(func_id as _);
-        boot_print_str("    arg0 = ");
-        boot_print_usize(phys_addr);
-        boot_print_str("    arg1 = ");
-        boot_print_usize(nr_granules);
-        boot_print_str("    ret0 = ");
-        boot_print_usize(result);
-        boot_print_str("    ret1 = ");
-        boot_print_usize(done);
         panic!();
     }
-    return done;
+    done
 }
 fn __do_xmap_granules(phys_addr: usize, nr_granules: usize, map: bool) -> usize {
     let mut nr_xmapped = 0;
@@ -69,13 +54,12 @@ fn __do_xmap_granules(phys_addr: usize, nr_granules: usize, map: bool) -> usize 
         let __nr_xmapped = __invoke_mmioguard(phys_addr, nr_granules as usize, map);
         nr_xmapped += __nr_xmapped;
         if __nr_xmapped as isize > nr_granules {
-            boot_print_str("[warning] __invoke_mmioguard");
             break;
         }
         phys_addr += __nr_xmapped * { GUARD_GRANULE.get().unwrap() };
         nr_granules -= __nr_xmapped as isize;
     }
-    return nr_xmapped;
+    nr_xmapped
 }
 /// Map a physical MMIO range via the KVM guard-granule interface.
 pub fn do_xmap_granules(phys_addr: usize, size: usize) {

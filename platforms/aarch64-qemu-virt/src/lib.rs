@@ -7,8 +7,9 @@
 #![no_std]
 #[macro_use]
 extern crate kplat;
+// Force-link kbootloader so that _start and boot code are included in the final binary.
+extern crate kbootloader;
 
-mod boot;
 mod init;
 mod mem;
 mod power;

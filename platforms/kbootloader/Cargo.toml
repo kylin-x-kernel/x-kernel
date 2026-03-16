@@ -1,0 +1,32 @@
+[package]
+name = "kbootloader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["bootloader", "x-kernel", "multi-arch", "position-independent"]
+description = "Position-independent bootloader for x-kernel (multi-arch)"
+
+[features]
+default = []
+fp-simd = []
+
+[dependencies]
+kbuild_config = { workspace = true }
+linkme = { workspace = true }
+
+# Architecture-specific dependencies
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+aarch64-cpu = "10.0"
+karch = { workspace = true }
+page_table = { workspace = true }
+memaddr = { workspace = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86 = "0.52"
+x86_64 = { workspace = true }
+
+[build-dependencies]
+kbuild_config.workspace = true

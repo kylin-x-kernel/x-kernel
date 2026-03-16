@@ -19,7 +19,7 @@ arm-el2 = ["karch/arm-el2"]
 backtrace = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
-linkme = "0.3"
+linkme = { workspace = true }
 log = "0.4"
 cfg-if = "1.0"
 memaddr = { workspace = true }

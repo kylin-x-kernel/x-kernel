@@ -25,6 +25,8 @@ mod lang_items;
 #[cfg(feature = "smp")]
 mod mp;
 
+use kbootloader::{PRIMARY_KERNEL_ENTRY, register_boot_init};
+
 #[cfg(feature = "smp")]
 pub use self::mp::rust_main_secondary;
 
@@ -118,13 +120,11 @@ impl kdma::DmaPageTableIf for DmaPageTableImpl {
 ///
 /// `cpu_id` is the logic ID of the current CPU, and `arg` is passed from the
 /// bootloader (typically the device tree blob address).
-///
-/// In multi-core environment, this function is called on the primary core, and
 /// secondary cores call [`rust_main_secondary`].
-#[cfg_attr(not(test), kplat::main)]
+#[register_boot_init(PRIMARY_KERNEL_ENTRY)]
 pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
-    unsafe { khal::mem::clear_bss() };
     khal::percpu::init_primary(cpu_id);
+    kcpu::init_trap();
     khal::early_init(cpu_id, arg);
 
     kprintln!("{}", LOGO);

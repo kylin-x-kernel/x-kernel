@@ -9,18 +9,19 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-fp-simd = ["kcpu/fp-simd"]
+fp-simd = ["kcpu/fp-simd", "kbootloader/fp-simd"]
 smp = ["kplat/smp"]
 rtc = []
 
 [dependencies]
 log = "0.4"
-page_table = { workspace = true }
 kspin = "0.1"
 dw_apb_uart = "0.1"
 kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
+kbootloader = { workspace = true }
+linkme = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv3"] }
 aarch64-cpu = "10.0"
 rs_fdtree = { workspace = true }

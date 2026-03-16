@@ -12,6 +12,7 @@ pub mod instrs;
 pub use instrs as asm;
 pub use karch::hypercall;
 pub mod boot;
+pub use boot::init_trap;
 
 mod excp;
 

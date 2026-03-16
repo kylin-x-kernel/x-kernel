@@ -41,6 +41,7 @@ kdma.workspace = true
 memaddr.workspace = true
 kfs = { workspace = true, optional = true }
 khal.workspace = true
+kcpu.workspace = true
 kipi = { workspace = true, optional = true }
 klogger.workspace = true
 memspace = { workspace = true, optional = true }
@@ -55,3 +56,5 @@ indoc = "2"
 percpu.workspace = true
 kbuild_config = { workspace = true }
 karch = { workspace = true }
+kbootloader = { workspace = true }
+linkme = { workspace = true }

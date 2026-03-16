@@ -4,17 +4,14 @@
 
 use core::time::Duration;
 
+use kbootloader::arch::{AP_START_PAGE_IDX, AP_START_PAGE_PADDR};
 use kplat::{
     memory::{PAGE_SIZE_4K, PhysAddr, pa},
     timer::spin_wait,
 };
 
-const START_PAGE_IDX: u8 = 6;
-const START_PAGE_PADDR: PhysAddr = pa!(START_PAGE_IDX as usize * PAGE_SIZE_4K);
-core::arch::global_asm!(
-    include_str!("ap_start.S"),
-    start_page_paddr = const START_PAGE_PADDR.as_usize(),
-);
+const START_PAGE_PADDR: PhysAddr = pa!(AP_START_PAGE_PADDR);
+
 unsafe fn setup_startup_page(stack_top: PhysAddr) {
     unsafe extern "C" {
         fn ap_entry32();
@@ -40,7 +37,7 @@ pub fn start_secondary_cpu(apic_id: usize, stack_top: PhysAddr) {
     let lapic = x86_peripherals::apic::local_apic();
     unsafe { lapic.send_init_ipi(apic_id) };
     spin_wait(Duration::from_millis(10));
-    unsafe { lapic.send_sipi(START_PAGE_IDX, apic_id) };
+    unsafe { lapic.send_sipi(AP_START_PAGE_IDX, apic_id) };
     spin_wait(Duration::from_micros(200));
-    unsafe { lapic.send_sipi(START_PAGE_IDX, apic_id) };
+    unsafe { lapic.send_sipi(AP_START_PAGE_IDX, apic_id) };
 }

@@ -103,8 +103,7 @@ fn end_of_interrupt(irq: usize) {
     GicV3::end_interrupt(IntId::from(irq as u32));
 }
 fn get_and_acknowledge_interrupt() -> usize {
-    let irq = u32::from(GicV3::get_and_acknowledge_interrupt().unwrap()) as usize;
-    return irq;
+    u32::from(GicV3::get_and_acknowledge_interrupt().unwrap()) as usize
 }
 /// Send a software-generated interrupt to target CPUs.
 pub fn notify_cpu(irq: usize, target: kplat::interrupts::TargetCpu) {
@@ -121,11 +120,11 @@ pub fn notify_cpu(irq: usize, target: kplat::interrupts::TargetCpu) {
 }
 #[allow(dead_code)]
 fn test_manual_trigger() {
-    let gicd_base = 0xffff00003fff0000 as usize;
+    let gicd_base = 0xffff00003fff0000_usize;
     info!("=== Manual Trigger Test ===");
     unsafe {
-        core::ptr::write_volatile((gicd_base + 0x200 + 1 * 4) as *mut u32, 0x1);
-        let ispendr = core::ptr::read_volatile((gicd_base + 0x200 + 1 * 4) as *const u32);
+        core::ptr::write_volatile((gicd_base + 0x200 + 4) as *mut u32, 0x1);
+        let ispendr = core::ptr::read_volatile((gicd_base + 0x200 + 4) as *const u32);
         info!("Manual trigger: ISPENDR = {:#x}", ispendr);
     }
     for _ in 0..1000 {
@@ -136,7 +135,7 @@ fn test_manual_trigger() {
 #[allow(dead_code)]
 fn debug_irq_32() {
     let irq = 32;
-    let gicd_base = 0xffff00003fff0000 as usize;
+    let gicd_base = 0xffff00003fff0000_usize;
     unsafe {
         let isenabler =
             core::ptr::read_volatile((gicd_base + 0x100 + (irq / 32) * 4) as *const u32);

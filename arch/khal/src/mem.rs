@@ -24,23 +24,6 @@ pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
     ALL_MEM_REGIONS.iter().cloned()
 }
 
-/// Fills the `.bss` section with zeros.
-///
-/// It requires the symbols `_sbss` and `_ebss` to be defined in the linker script.
-///
-/// # Safety
-///
-/// This function is unsafe because it writes `.bss` section directly.
-pub unsafe fn clear_bss() {
-    unsafe {
-        core::slice::from_raw_parts_mut(
-            _sbss as *mut u8,
-            (_ebss as *mut u8).offset_from_unsigned(_sbss as *mut u8),
-        )
-        .fill(0);
-    }
-}
-
 /// Initializes physical memory regions.
 pub fn init() {
     let mut all_regions = Vec::new();

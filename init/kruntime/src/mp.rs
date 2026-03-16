@@ -5,6 +5,7 @@
 //! SMP bring-up helpers for the runtime.
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use kbootloader::{SECOND_KERNEL_ENTRY, register_boot_init};
 use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
 use khal::mem::{VirtAddr, v2p};
 
@@ -38,9 +39,10 @@ pub fn start_secondary_cpus(primary_cpu_id: usize) {
 /// The main entry point of the runtime for secondary cores.
 ///
 /// It is called from the bootstrapping code in the specific platform crate.
-#[kplat::secondary_main]
+#[register_boot_init(SECOND_KERNEL_ENTRY)]
 pub fn rust_main_secondary(cpu_id: usize) -> ! {
     khal::percpu::init_secondary(cpu_id);
+    kcpu::init_trap();
     khal::early_init_secondary(cpu_id);
 
     ENTERED_CPUS.fetch_add(1, Ordering::Release);

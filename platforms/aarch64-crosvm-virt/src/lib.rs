@@ -6,14 +6,13 @@
 #![no_std]
 #[macro_use]
 extern crate kplat;
-mod boot;
+extern crate kbootloader;
 pub mod fdt;
 mod gicv3;
 mod init;
 mod mem;
 mod power;
 pub mod psci;
-mod serial;
 aarch64_peripherals::ns16550_console_if_impl!(ConsoleImpl);
 aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
 irq_if_impl!(IntrManagerImpl);

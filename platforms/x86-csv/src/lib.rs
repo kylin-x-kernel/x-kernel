@@ -8,7 +8,7 @@
 extern crate log;
 #[macro_use]
 extern crate kplat;
-mod boot;
+extern crate kbootloader;
 mod init;
 mod mem;
 #[cfg(feature = "smp")]
@@ -19,21 +19,3 @@ pub mod psci;
 x86_peripherals::console_if_impl!(ConsoleImpl, irq = None);
 x86_peripherals::time_if_impl!(GlobalTimerImpl);
 x86_peripherals::irq_if_impl!(IntrManagerImpl);
-
-fn current_cpu_id() -> usize {
-    match raw_cpuid::CpuId::new().get_feature_info() {
-        Some(finfo) => finfo.initial_local_apic_id() as usize,
-        None => 0,
-    }
-}
-unsafe extern "C" fn rust_entry(magic: usize, mbi: usize) {
-    if magic == self::boot::MULTIBOOT_BOOTLOADER_MAGIC {
-        kplat::entry(current_cpu_id(), mbi);
-    }
-}
-unsafe extern "C" fn rust_entry_secondary(_magic: usize) {
-    #[cfg(feature = "smp")]
-    if _magic == self::boot::MULTIBOOT_BOOTLOADER_MAGIC {
-        kplat::entry_secondary(current_cpu_id());
-    }
-}

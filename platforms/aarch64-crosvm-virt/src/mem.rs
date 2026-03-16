@@ -6,7 +6,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET};
-use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
+use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, p2v, pa, va};
 use ktypes::Once;
 use rs_fdtree::LinuxFdt;
 
@@ -17,16 +17,16 @@ static DICE_MEM_BASE: AtomicUsize = AtomicUsize::new(0);
 static DICE_MEM_SIZE: AtomicUsize = AtomicUsize::new(0);
 /// Capture FDT/DICE memory ranges before the allocator is initialized.
 pub(crate) fn early_init(fdt_paddr: usize) {
+    let fdt_va = p2v(pa!(fdt_paddr));
     FDT_MEM_BASE.store(fdt_paddr, Ordering::SeqCst);
-    let fdt = unsafe { LinuxFdt::from_ptr(fdt_paddr as *const u8).expect("Failed to parse FDT") };
-    fdt.dice().map(|dice_node| {
-        let dice = dice_node;
-        for reg in dice.regions().expect("DICE regions") {
-            DICE_MEM_BASE.store(reg.starting_address as usize, Ordering::SeqCst);
-            DICE_MEM_SIZE.store(reg.size as usize, Ordering::SeqCst);
-            break;
-        }
-    });
+    let fdt =
+        unsafe { LinuxFdt::from_ptr(fdt_va.as_usize() as *const u8).expect("Failed to parse FDT") };
+    if let Some(dice) = fdt.dice()
+        && let Some(reg) = dice.regions().expect("DICE regions").next()
+    {
+        DICE_MEM_BASE.store(reg.starting_address as usize, Ordering::SeqCst);
+        DICE_MEM_SIZE.store(reg.size, Ordering::SeqCst);
+    }
 }
 /// Platform-specific memory description for the kernel.
 struct HwMemoryImpl;

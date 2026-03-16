@@ -23,9 +23,6 @@ pub mod sys;
 pub mod timer;
 
 pub use crate_interface::impl_interface as impl_dev_interface;
-pub use kplat_macros::main;
-#[cfg(feature = "smp")]
-pub use kplat_macros::secondary_main;
 
 #[doc(hidden)]
 pub mod __priv {
@@ -41,20 +38,4 @@ macro_rules! check_str_eq {
     ($l:expr, $r:expr $(,)?) => {
         const _: () = assert!($crate::__priv::str_eq!($l, $r), "String mismatch",);
     };
-}
-
-/// Primary CPU entry point invoked by the platform startup.
-pub fn entry(id: usize, dtb: usize) -> ! {
-    unsafe { __kplat_main(id, dtb) }
-}
-
-/// Secondary CPU entry point (SMP only).
-#[cfg(feature = "smp")]
-pub fn entry_secondary(id: usize) -> ! {
-    unsafe { __kplat_secondary_main(id) }
-}
-
-unsafe extern "Rust" {
-    fn __kplat_main(id: usize, dtb: usize) -> !;
-    fn __kplat_secondary_main(id: usize) -> !;
 }

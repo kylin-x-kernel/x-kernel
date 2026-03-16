@@ -10,15 +10,15 @@ pub extern "C" fn _boot_print_usize(num: usize) {
     let mut cnt = 0;
     boot_print_str("0x");
     if num == 0 {
-        boot_serial_send('0' as u8);
+        boot_serial_send(b'0');
     } else {
         loop {
             if num == 0 {
                 break;
             }
             msg[cnt] = match (num & 0xf) as u8 {
-                n if n < 10 => n + '0' as u8,
-                n => n - 10 + 'a' as u8,
+                n if n < 10 => n + b'0',
+                n => n - 10 + b'a',
             };
             cnt += 1;
             num >>= 4;
@@ -29,7 +29,9 @@ pub extern "C" fn _boot_print_usize(num: usize) {
     }
     boot_print_str("\r\n");
 }
+
 #[unsafe(no_mangle)]
+#[unsafe(link_section = ".idmap.text")]
 /// Write a string to the boot UART.
 pub fn boot_print_str(data: &str) {
     for byte in data.bytes() {
@@ -46,13 +48,16 @@ pub fn boot_print_usize(num: usize) {
 pub struct Uart {
     base_address: usize,
 }
+
 impl Uart {
     /// Create a UART instance backed by an MMIO base address.
+    #[unsafe(link_section = ".idmap.text")]
     pub const fn new(base_address: usize) -> Self {
         Self { base_address }
     }
 
     /// Write a byte to the UART TX register.
+    #[unsafe(link_section = ".idmap.text")]
     pub fn put(&self, c: u8) -> Option<u8> {
         let ptr = self.base_address as *mut u8;
         unsafe {
@@ -61,7 +66,9 @@ impl Uart {
         Some(c)
     }
 }
-static BOOT_SERIAL: Uart = Uart::new(0x3f8);
+
+// change this to adapt to different hardware.  The default is the standard PC COM1 port.
+static BOOT_SERIAL: Uart = Uart::new(kbuild_config::UART_PADDR);
 #[allow(dead_code)]
 pub fn print_el1_reg(switch: bool) {
     if !switch {
@@ -113,7 +120,9 @@ macro_rules! boot_print_reg {
         boot_print_usize(reg);
     };
 }
+
 #[allow(unused)]
+#[unsafe(link_section = ".idmap.text")]
 /// Send a single byte to the boot UART.
 pub fn boot_serial_send(data: u8) {
     unsafe { BOOT_SERIAL.put(data) };

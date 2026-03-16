@@ -10,6 +10,7 @@ members = [
     "util/kbuild_config",
 
     "platforms/bootloader",
+    "platforms/kbootloader",
     "tee_apps/sh",
     "tee_apps/tee_app1",
     "tee_apps/tee_app2",
@@ -71,6 +72,7 @@ slab_allocator = { path = "core/slab_allocator" }
 
 # Platform Abstraction Layer
 kplat = { path = "platforms/kplat" }
+kbootloader = { path = "platforms/kbootloader" }
 aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
 x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 x86-csv = { path = "platforms/x86-csv" }

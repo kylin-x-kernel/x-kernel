@@ -1,10 +1,14 @@
 # Bootstrapping from 32-bit with the Multiboot specification.
 # See https://www.gnu.org/software/grub/manual/multiboot/multiboot.html
+#
+# Unified multiboot entry for x86_64-qemu-virt and x86-csv.
+# The {cbit_mask} argument is 0 for non-SEV platforms and (1 << SEV_CBIT_POS)
+# for CSV/SEV platforms such as x86-csv.
 
 .section .text.boot
 .code32
-.global _start
-_start:
+.global _start32
+_start32:
     mov     edi, eax        # arg1: magic: 0x2BADB002
     mov     esi, ebx        # arg2: multiboot info
     jmp     bsp_entry32
@@ -19,7 +23,7 @@ multiboot_header:
     .int    _skernel - {offset}                 # load_addr
     .int    _edata - {offset}                   # load_end
     .int    _ebss - {offset}                    # bss_end_addr
-    .int    _start - {offset}                   # entry_addr
+    .int    _start32 - {offset}                 # entry_addr  (32-bit multiboot entry for GRUB/QEMU)
 
 # Common code in 32-bit, prepare states to enter 64-bit.
 .macro ENTRY32_COMMON
@@ -72,6 +76,11 @@ bsp_entry32:
 ap_entry32:
     ENTRY32_COMMON
     ljmp    0x10, offset ap_entry64 - {offset}     # 0x10 is code64 segment
+
+.code64
+.global _start
+_start:
+    jmp     bsp_entry64
 
 .code64
 bsp_entry64:
@@ -132,13 +141,13 @@ ap_entry64:
 .Ltmp_pdpt_low:
 .set i, 0
 .rept 512
-    .quad 0x40000000 * i | 0x83  # PRESENT | WRITABLE | HUGE_PAGE | paddr(0x4000_0000 * i)
+    .quad 0x40000000 * i | 0x83 | {cbit_mask}  # PRESENT | WRITABLE | HUGE_PAGE | paddr | C-bit
     .set i, i + 1
 .endr
 
 .Ltmp_pdpt_high:
 .set i, 0
 .rept 512
-    .quad 0x40000000 * i | 0x83  # PRESENT | WRITABLE | HUGE_PAGE | paddr(0x4000_0000 * i)
+    .quad 0x40000000 * i | 0x83 | {cbit_mask}  # PRESENT | WRITABLE | HUGE_PAGE | paddr | C-bit
     .set i, i + 1
 .endr
