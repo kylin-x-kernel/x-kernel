@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
+//
+// This file reuses the implementation from Rust's standard library
+// (std::io::buffered::linewriter) for a no_std environment.
+// Because this project cannot depend on the standard library directly,
+// a local copy is maintained in this repository.
+//
+// Source: https://github.com/rust-lang/rust/blob/main/library/std/src/io/buffered/linewriter.rs
+// License: MIT
 
 mod shim;
 

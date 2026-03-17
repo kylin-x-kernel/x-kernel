@@ -14,6 +14,24 @@ extern crate log;
 #[macro_use]
 extern crate memaddr;
 
+macro_rules! impl_user_context_deref {
+    ($target:ty, $field:tt) => {
+        impl core::ops::Deref for UserContext {
+            type Target = $target;
+
+            fn deref(&self) -> &Self::Target {
+                &self.$field
+            }
+        }
+
+        impl core::ops::DerefMut for UserContext {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.$field
+            }
+        }
+    };
+}
+
 #[macro_use]
 pub mod excp;
 

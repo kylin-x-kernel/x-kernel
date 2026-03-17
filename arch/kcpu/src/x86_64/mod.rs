@@ -20,7 +20,7 @@ mod excp;
 pub mod userspace;
 
 pub use self::ctx::{
-    ExceptionContext as TrapFrame, ExceptionContext, ExtendedState, FxsaveArea, TaskContext,
+    ExceptionContext as TrapFrame, ExceptionContext, ExtendedState, FxStateBlock, TaskContext,
 };
 
 #[cfg(all(unittest, target_arch = "x86_64"))]

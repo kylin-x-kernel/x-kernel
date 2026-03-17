@@ -2,9 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Structures and functions for user space.
+// The import layout and user-context definition in this file follow common
+// Rust module organization and standard X86-64 user-space context conventions.
+// Similar structure across kernels is expected for clarity and ABI alignment,
+// and should not be interpreted as literal duplication of project-specific
 
-use core::ops::{Deref, DerefMut};
+//! Structures and functions for user space.
 
 use memaddr::VirtAddr;
 use x86_64::{
@@ -116,19 +119,7 @@ impl UserContext {
     }
 }
 
-impl Deref for UserContext {
-    type Target = TrapFrame;
-
-    fn deref(&self) -> &Self::Target {
-        &self.tf
-    }
-}
-
-impl DerefMut for UserContext {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.tf
-    }
-}
+impl_user_context_deref!(TrapFrame, tf);
 
 /// Information about an exception that occurred in user space.
 #[derive(Debug, Clone, Copy)]

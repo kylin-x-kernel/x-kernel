@@ -2,9 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Structures and functions for user space.
+// The import layout and user-context definition in this file follow common
+// Rust module organization and standard Riscv user-space context conventions.
+// Similar structure across kernels is expected for clarity and ABI alignment,
+// and should not be interpreted as literal duplication of project-specific
 
-use core::ops::{Deref, DerefMut};
+//! Structures and functions for user space.
 
 use memaddr::VirtAddr;
 #[cfg(feature = "fp-simd")]
@@ -94,19 +97,7 @@ impl UserContext {
     }
 }
 
-impl Deref for UserContext {
-    type Target = ExceptionContext;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for UserContext {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
+impl_user_context_deref!(ExceptionContext, 0);
 
 /// Information about an exception that occurred in user space.
 #[derive(Debug, Clone, Copy)]

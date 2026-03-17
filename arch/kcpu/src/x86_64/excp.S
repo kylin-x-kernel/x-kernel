@@ -1,10 +1,21 @@
-# Reference: <https://github.com/asterinas/asterinas/blob/257b0c63b1f039e1ec4fd94c2c7bd549f8db2830/ostd/src/arch/x86/trap/trap.S>
-#            <https://github.com/asterinas/asterinas/blob/257b0c63b1f039e1ec4fd94c2c7bd549f8db2830/ostd/src/arch/x86/trap/syscall.S>
+# Parts of this file derived from code from Asterinas:
+# https://github.com/asterinas/asterinas/blob/257b0c63b1f039e1ec4fd94c2c7bd549f8db2830/ostd/src/arch/x86/trap/trap.S
+# The referenced upstream code is licensed under MPL-2.0.
 
 .code64
 .equ NUM_INT, 256
 
 .altmacro
+.macro PUSH2, r1, r2
+    push    \r1
+    push    \r2
+.endm
+
+.macro POP2, r1, r2
+    pop     \r1
+    pop     \r2
+.endm
+
 .macro DEF_HANDLER, i
 .Ltrap_handler_\i:
 .if \i == 8 || (\i >= 10 && \i <= 14) || \i == 17 || \i == 21 || \i == 29 || \i == 30
@@ -32,39 +43,37 @@ trap_handler_table:
 .endr
 
 .macro PUSH_GENERAL_REGS
-    push    r15
-    push    r14
-    push    r13
-    push    r12
-    push    r11
-    push    r10
-    push    r9
-    push    r8
-    push    rdi
-    push    rsi
-    push    rbp
-    push    rbx
-    push    rdx
-    push    rcx
+    PUSH2   r15, r14
+    PUSH2   r13, r12
+    PUSH2   r11, r10
+    PUSH2   r9, r8
+    PUSH2   rdi, rsi
+    PUSH2   rbp, rbx
+    PUSH2   rdx, rcx
     push    rax
 .endm
 
 .macro POP_GENERAL_REGS
     pop     rax
-    pop     rcx
-    pop     rdx
-    pop     rbx
-    pop     rbp
-    pop     rsi
-    pop     rdi
-    pop     r8
-    pop     r9
-    pop     r10
-    pop     r11
-    pop     r12
-    pop     r13
-    pop     r14
-    pop     r15
+    POP2    rcx, rdx
+    POP2    rbx, rbp
+    POP2    rsi, rdi
+    POP2    r8, r9
+    POP2    r10, r11
+    POP2    r12, r13
+    POP2    r14, r15
+.endm
+
+.macro PUSH_KERNEL_CTX
+    PUSH2   rbp, rbx
+    PUSH2   r12, r13
+    PUSH2   r14, r15
+.endm
+
+.macro POP_KERNEL_CTX
+    POP2    r15, r14
+    POP2    r13, r12
+    POP2    rbx, rbp
 .endm
 
 .section .text
@@ -113,23 +122,13 @@ syscall_entry:
 
     # restore kernel context
     mov     rsp, [rsp + {trapframe_size}]
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    pop     rbp
+    POP_KERNEL_CTX
     ret
 
 .global enter_user
 enter_user:
     # save kernel context
-    push rbp
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
+    PUSH_KERNEL_CTX
     mov [rdi + {trapframe_size}], rsp
 
     mov rsp, rdi

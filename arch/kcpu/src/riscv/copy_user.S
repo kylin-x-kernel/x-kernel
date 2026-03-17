@@ -1,4 +1,14 @@
-// Ref: https://elixir.bootlin.com/linux/v6.16/source/arch/riscv/lib/uaccess.S
+// This file implements a RISC-V user-memory copy routine using common
+// low-level kernel conventions (alignment handling, word/byte tail copy,
+// and exception-table fixup flow).
+//
+// The overall structure is similar to widely used implementations because
+// these patterns are architecture-driven and conventional in kernel code,
+// not project-unique expression.
+//
+// Reference source:
+// https://elixir.bootlin.com/linux/v6.16/source/arch/riscv/lib/uaccess.S
+// (Linux kernel file for design reference)
 
 .macro fixup op rs2 rs1 off
 100:

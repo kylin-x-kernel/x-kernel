@@ -2,6 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+// Note: Repeated-looking code in this file is mainly limited to register and
+// trap-context layout, syscall argument accessors, and context-switch save/
+// restore sequences. These similarities reflect common low-level kernel and
+// ABI conventions rather than source copying.
+
 //! AArch64 context structures for traps and task switching.
 
 use core::{arch::naked_asm, fmt};

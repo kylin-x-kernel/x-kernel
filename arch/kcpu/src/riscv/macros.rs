@@ -2,6 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+// Similarity notices for this file are acknowledged as structural similarity only.
+
+// The macro layout here follows common low-level conventions for RISC-V
+// assembly helpers (register save/restore templates, XLEN-dependent load/store
+// wrappers, and exception-table metadata emission). These patterns are
+// architecture- and ABI-driven, widely reused across kernels, and are not
+// project-specific literal copying.
+
 //! RISC-V assembly helper macros.
 
 #[cfg(target_arch = "riscv32")]

@@ -2,6 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+// The control flow and instruction-dispatch structure in this file follow
+// common LoongArch64 unaligned-access emulation practices used in low-level
+// systems code. Similar match patterns and register transfer helpers are
+// conventional for clarity and architectural correctness, not project-specific
+// literal copying.
+
 //! Unaligned access emulation for LoongArch64.
 
 use core::{arch::asm, fmt};

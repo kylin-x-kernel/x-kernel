@@ -41,14 +41,19 @@ macro_rules! color_fmt {
 #[repr(u8)]
 #[allow(dead_code)]
 enum AnsiColor {
-    Black         = 30,
-    Red           = 31,
-    Green         = 32,
-    Yellow        = 33,
-    Blue          = 34,
-    Magenta       = 35,
-    Cyan          = 36,
-    White         = 37,
+    Black   = 30,
+    Red     = 31,
+    Green   = 32,
+    Yellow  = 33,
+    Blue    = 34,
+    Magenta = 35,
+    Cyan    = 36,
+    White   = 37,
+}
+
+#[repr(u8)]
+#[allow(dead_code)]
+enum AnsiBrightColor {
     BrightBlack   = 90,
     BrightRed     = 91,
     BrightGreen   = 92,
@@ -82,27 +87,33 @@ impl Write for KernelLogger {
     }
 }
 
+#[inline]
+fn get_level_color(level: Level) -> u8 {
+    match level {
+        Level::Error => AnsiColor::Red as u8,
+        Level::Warn => AnsiColor::Yellow as u8,
+        Level::Info => AnsiColor::Green as u8,
+        Level::Debug => AnsiColor::Cyan as u8,
+        Level::Trace => AnsiBrightColor::BrightBlack as u8,
+    }
+}
+
 impl Log for KernelLogger {
     #[inline]
     fn enabled(&self, _metadata: &Metadata) -> bool {
         true
     }
 
+    fn flush(&self) {}
+
     fn log(&self, record: &Record) {
         if !self.enabled(record.metadata()) {
             return;
         }
 
-        let level = record.level();
         let line = record.line().unwrap_or(0);
         let path = record.target();
-        let color = match level {
-            Level::Error => AnsiColor::Red,
-            Level::Warn => AnsiColor::Yellow,
-            Level::Info => AnsiColor::Green,
-            Level::Debug => AnsiColor::Cyan,
-            Level::Trace => AnsiColor::BrightBlack,
-        };
+        let color = get_level_color(record.level());
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "std")] {
@@ -154,8 +165,6 @@ impl Log for KernelLogger {
             }
         }
     }
-
-    fn flush(&self) {}
 }
 
 pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {

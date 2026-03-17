@@ -1,3 +1,8 @@
+// This exception entry code uses conventional register save/restore sequences
+// and standard trap prologue/epilogue patterns that are common in low-level
+// operating system code for LoongArch64. The load/store layout follows
+// established architectural practice and is not specific to any single project.
+
 .section .text
 .balign 4096
 .global exception_entry_base

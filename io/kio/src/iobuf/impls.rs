@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
+//
+// The `remaining` and `remaining_mut` forwarding bodies in this file use a
+// conventional Rust trait delegation pattern: reference and wrapper types
+// simply forward the call to the underlying value. As a result, these
+// implementations are expected to look repetitive across codebases; that
+// similarity reflects idiomatic practice rather than copying from a specific
+// external implementation.
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};

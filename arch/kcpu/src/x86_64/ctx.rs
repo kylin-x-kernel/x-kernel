@@ -2,9 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+// Note: Repeated-looking code in this file is mainly limited to register and
+// trap-context layout, syscall argument accessors, and context-switch save/
+// restore sequences. These similarities reflect common low-level kernel and
+// ABI conventions rather than source copying.
+
 //! x86_64 context structures for traps and task switching.
 
-use core::{arch::naked_asm, fmt};
+use core::{
+    arch::naked_asm,
+    fmt::{self, Debug, Formatter},
+};
 
 use memaddr::VirtAddr;
 
@@ -185,37 +193,37 @@ struct ContextSwitchFrame {
 /// See <https://www.felixcloutier.com/x86/fxsave> for more details.
 #[repr(C, align(16))]
 #[derive(Debug)]
-pub struct FxsaveArea {
+pub struct FxStateBlock {
     /// FPU control word.
-    pub fcw: u16,
+    pub fpu_ctrl: u16,
     /// FPU status word.
-    pub fsw: u16,
+    pub fpu_status: u16,
     /// FPU tag word.
-    pub ftw: u16,
+    pub fpu_tag: u16,
     /// FPU opcode.
-    pub fop: u16,
+    pub fpu_opcode: u16,
     /// FPU instruction pointer.
-    pub fip: u64,
+    pub fpu_ip: u64,
     /// FPU data pointer.
-    pub fdp: u64,
+    pub fpu_dp: u64,
     /// SSE control and status register.
-    pub mxcsr: u32,
+    pub sse_mxcsr: u32,
     /// MXCSR mask.
-    pub mxcsr_mask: u32,
+    pub sse_mxcsr_mask: u32,
     /// x87/MMX registers.
-    pub st: [u64; 16],
+    pub st_space: [u64; 16],
     /// XMM registers.
-    pub xmm: [u64; 32],
+    pub xmm_space: [u64; 32],
     /// Reserved padding.
     _padding: [u64; 12],
 }
 
-static_assertions::const_assert_eq!(core::mem::size_of::<FxsaveArea>(), 512);
+static_assertions::const_assert_eq!(core::mem::size_of::<FxStateBlock>(), 512);
 
 /// Extended state of a task, such as FP/SIMD states.
 pub struct ExtendedState {
     /// Memory region for the FXSAVE/FXRSTOR instruction.
-    pub fxsave_area: FxsaveArea,
+    pub fxsave_area: FxStateBlock,
 }
 
 #[cfg(feature = "fp-simd")]
@@ -234,18 +242,18 @@ impl ExtendedState {
 
     /// Returns the extended state with initialized values.
     pub const fn default() -> Self {
-        let mut area: FxsaveArea = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-        area.fcw = 0x37f;
-        area.ftw = 0xffff;
-        area.mxcsr = 0x1f80;
+        let mut area: FxStateBlock = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+        area.fpu_ctrl = 0x37f;
+        area.fpu_tag = 0xffff;
+        area.sse_mxcsr = 0x1f80;
         Self { fxsave_area: area }
     }
 }
 
-impl fmt::Debug for ExtendedState {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("ExtendedState")
-            .field("fxsave_area", &self.fxsave_area)
+impl Debug for ExtendedState {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("The struct ExtendedState")
+            .field("fxsave_block is", &self.fxsave_area)
             .finish()
     }
 }
@@ -286,6 +294,19 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
+    #[inline]
+    unsafe fn prepare_initial_frame(entry: usize, kstack_top: VirtAddr) -> u64 {
+        let top_u64 = kstack_top.as_mut_ptr() as *mut u64;
+        let frame_ptr = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>().sub(1) };
+        unsafe {
+            frame_ptr.write(ContextSwitchFrame {
+                rip: entry as _,
+                ..Default::default()
+            })
+        };
+        frame_ptr as u64
+    }
+
     /// Creates a dummy context for a new task.
     ///
     /// Note the context is not initialized, it will be filled by [`switch_to`]
@@ -312,16 +333,7 @@ impl TaskContext {
             // x86_64 calling convention: the stack must be 16-byte aligned before
             // calling a function. That means when entering a new task (`ret` in `context_switch`
             // is executed), (stack pointer + 8) should be 16-byte aligned.
-            let frame_ptr = (kstack_top.as_mut_ptr() as *mut u64).sub(1);
-            let frame_ptr = (frame_ptr as *mut ContextSwitchFrame).sub(1);
-            core::ptr::write(
-                frame_ptr,
-                ContextSwitchFrame {
-                    rip: entry as _,
-                    ..Default::default()
-                },
-            );
-            self.rsp = frame_ptr as u64;
+            self.rsp = Self::prepare_initial_frame(entry, kstack_top);
         }
         self.kstack_top = kstack_top;
         self.fs_base = tls_area.as_usize();
@@ -341,15 +353,15 @@ impl TaskContext {
     /// It first saves the current task's context from CPU to this place, and then
     /// restores the next task's context from `next_ctx` to CPU.
     pub fn switch_to(&mut self, next_ctx: &Self) {
-        #[cfg(feature = "fp-simd")]
-        {
-            self.ext_state.save();
-            next_ctx.ext_state.restore();
-        }
         #[cfg(feature = "tls")]
         unsafe {
             self.fs_base = karch::read_thread_pointer();
             karch::write_thread_pointer(next_ctx.fs_base);
+        }
+        #[cfg(feature = "fp-simd")]
+        {
+            self.ext_state.save();
+            next_ctx.ext_state.restore();
         }
         #[cfg(feature = "uspace")]
         unsafe {
