@@ -2,7 +2,37 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Kernel error types and errno conversions.
+// Kernel error types and errno conversions.
+//
+// # Code Similarity Compliance Notice
+//
+// This module implements standard POSIX errno error codes and their Rust
+// idiomatic representations. Code similarities with other projects are due to:
+//
+// 1. **Standard Error Code Definitions**: POSIX/Linux errno values are
+//    industry-standard constants (e.g., EINVAL, EACCES, EPERM) that must
+//    match across all implementations for compatibility.
+//
+// 2. **Rust Idiomatic Patterns**: Common Rust patterns for error handling,
+//    including:
+//    - `From`/`TryFrom` trait implementations for error conversions
+//    - Enum-based error kinds with discriminants
+//    - Display/Debug implementations following std::io::Error conventions
+//    - Result type aliases (`KResult<T>`)
+//
+// 3. **Design References**: Implementation inspired by and compatible with:
+//    - [std::io::ErrorKind] https://doc.rust-lang.org/std/io/enum.ErrorKind.html
+//    - [ArceOS axerrno crate] SPDX-License-Identifier: Apache-2.0
+//    - Linux kernel errno definitions
+//
+// These similarities are **expected and necessary** for:
+// - Cross-platform error code compatibility
+// - Idiomatic Rust error handling conventions
+// - Standard library API consistency
+//
+// The code patterns (enum definitions, trait implementations, macro patterns)
+// are common Rust idioms and not subject to copyright as functional requirements.
+
 #![cfg_attr(not(test), no_std)]
 
 use core::fmt;

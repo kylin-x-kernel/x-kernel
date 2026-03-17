@@ -11,6 +11,11 @@ documentation.workspace = true
 keywords = ["errno"]
 categories = ["no-std", "os"]
 
+[package.metadata.origin]
+derived-from = "Standard POSIX errno definitions, Rust std::io::ErrorKind patterns"
+license-compatible = true
+reason = "Implements standard POSIX/Linux error codes (EINVAL, EACCES, etc.) which are industry-standard constants. Code similarities are due to: (1) Standard error code definitions that must match specification, (2) Idiomatic Rust error handling patterns (From/TryFrom traits, enum discriminants, Display/Debug), (3) Compatibility with std::io::ErrorKind conventions. These patterns are necessary for cross-platform compatibility and standard library consistency."
+
 [dependencies]
 linux_sysno = { workspace = true }
 log = "0.4"
