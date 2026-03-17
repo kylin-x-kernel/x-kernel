@@ -21,6 +21,7 @@
 #![allow(rustdoc::broken_intra_doc_links)]
 
 /// All supported device kinds.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DeviceKind {
     /// Block storage device (e.g., disk).
@@ -37,8 +38,24 @@ pub enum DeviceKind {
     Vsock,
 }
 
+impl DeviceKind {
+    /// Stable short name for the device category.
+    pub const fn as_str(self) -> &'static str {
+        use DeviceKind::*;
+
+        match self {
+            Block => "block",
+            Char => "char",
+            Net => "net",
+            Display => "display",
+            Input => "input",
+            Vsock => "vsock",
+        }
+    }
+}
+
 /// The error type for driver operation failures.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DriverError {
     /// An entity already exists.
     AlreadyExists,
@@ -59,29 +76,36 @@ pub enum DriverError {
 }
 
 impl DriverError {
+    /// Whether the caller may retry the operation later.
+    pub const fn should_retry(self) -> bool {
+        matches!(self, Self::WouldBlock | Self::ResourceBusy)
+    }
+
     /// Stable error message for display/logging.
-    pub const fn message(&self) -> &'static str {
+    pub const fn message(self) -> &'static str {
+        use DriverError::*;
+
         match self {
-            DriverError::AlreadyExists => "Entity already exists",
-            DriverError::WouldBlock => "Try again",
-            DriverError::BadState => "Bad state",
-            DriverError::InvalidInput => "Invalid parameter",
-            DriverError::Io => "Input/output error",
-            DriverError::NoMemory => "Not enough memory",
-            DriverError::ResourceBusy => "Resource is busy",
-            DriverError::Unsupported => "Unsupported operation",
+            AlreadyExists => "Entity already exists",
+            WouldBlock => "Try again",
+            BadState => "Bad state",
+            InvalidInput => "Invalid parameter",
+            Io => "Input/output error",
+            NoMemory => "Not enough memory",
+            ResourceBusy => "Resource is busy",
+            Unsupported => "Unsupported operation",
         }
     }
 }
 
 impl core::fmt::Display for DriverError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.message())
+        f.write_str((*self).message())
     }
 }
 
 /// A specialized `Result` type for device operations.
-pub type DriverResult<T = ()> = Result<T, DriverError>;
+pub type DriverResult<T = ()> = core::result::Result<T, DriverError>;
 
 /// Common operations that require all device drivers to implement.
 pub trait DriverOps: Send + Sync {
