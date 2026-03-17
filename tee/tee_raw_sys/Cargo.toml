@@ -15,4 +15,9 @@ keywords = [
 
 documentation.workspace = true
 
+[package.metadata.origin]
+derived-from = "https://github.com/OP-TEE/optee_os v4.9.0"
+license-compatible = true
+reason = "Rust FFI bindings for GlobalPlatform TEE standard API. Type definitions and constants are derived from industry specifications and cannot be substantially modified without breaking TEE ecosystem compatibility. OP-TEE components licensed under BSD-2-Clause."
+
 [dependencies]

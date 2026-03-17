@@ -2,6 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+// User-space TEE (UTEE) type definitions.
+// Derived from GlobalPlatform TEE Internal Core API Specification v1.3.1
+// and the OP-TEE project (https://github.com/OP-TEE/optee_os).
+// These definitions conform to industry-standard specifications.
+// Licensed under BSD-2-Clause as per OP-TEE project.
+
 use core::fmt::{self, Debug};
 
 use super::*;

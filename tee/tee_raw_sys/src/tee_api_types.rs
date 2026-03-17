@@ -2,6 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+// Type definitions and constants for GlobalPlatform TEE Internal Core API.
+// Derived from GlobalPlatform TEE Internal Core API Specification v0.11
+// and the OP-TEE project (https://github.com/OP-TEE/optee_os).
+// These definitions conform to industry-standard specifications.
+// Licensed under BSD-2-Clause as per OP-TEE project.
+
 use core::{ffi::*, fmt, fmt::Debug};
 
 use super::TEE_ATTR_FLAG_VALUE;

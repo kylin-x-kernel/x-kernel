@@ -2,6 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+// Type definitions and constants for GlobalPlatform TEE Internal Core API.
+// Derived from GlobalPlatform TEE Internal Core API Specification v1.3.1
+// and the OP-TEE project (https://github.com/OP-TEE/optee_os).
+// These definitions conform to industry-standard specifications and cannot be
+// substantially modified without breaking compatibility.
+// Licensed under BSD-2-Clause as per OP-TEE project.
+// SPDX-License-Identifier: BSD-2-Clause
+
 use core::ptr::null;
 
 use super::tee_api_types::*;
