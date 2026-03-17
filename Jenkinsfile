@@ -12,7 +12,6 @@ pipeline {
 
     options {
         skipDefaultCheckout(true)
-        disableConcurrentBuilds()
         timestamps()
     }
 
@@ -31,17 +30,21 @@ pipeline {
             steps {
                 script {
                     prepareSource()
+                    ciResults['Prepare Source'] = [status: 'passed']
+                }
+            }
+            post {
+                failure {
+                    script { ciResults['Prepare Source'] = [status: 'failed', detail: '源码准备失败（可能是分支分叉需要 rebase）'] }
                 }
             }
         }
 
         stage('Rustfmt') {
             steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    script {
-                        runRustfmt()
-                        ciResults['Rustfmt'] = [status: 'passed']
-                    }
+                script {
+                    runRustfmt()
+                    ciResults['Rustfmt'] = [status: 'passed']
                 }
             }
             post {
@@ -51,63 +54,61 @@ pipeline {
             }
         }
 
-        stage('Clippy: x86_64') {
-            steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    script {
-                        runClippy('x86_64')
-                        ciResults['Clippy: x86_64'] = [status: 'passed']
+        stage('Clippy') {
+            parallel {
+                stage('Clippy: x86_64-qemu-virt') {
+                    steps {
+                        script {
+                            runClippy('x86_64-qemu-virt')
+                            ciResults['Clippy: x86_64-qemu-virt'] = [status: 'passed']
+                        }
                     }
+                    post { failure { script { ciResults['Clippy: x86_64-qemu-virt'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] } } }
                 }
-            }
-            post {
-                failure {
-                    script { ciResults['Clippy: x86_64'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] }
+                stage('Clippy: aarch64-qemu-virt') {
+                    steps {
+                        script {
+                            runClippy('aarch64-qemu-virt')
+                            ciResults['Clippy: aarch64-qemu-virt'] = [status: 'passed']
+                        }
+                    }
+                    post { failure { script { ciResults['Clippy: aarch64-qemu-virt'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] } } }
                 }
+                stage('Clippy: x86-csv') {
+                    steps {
+                        script {
+                            runClippy('x86-csv')
+                            ciResults['Clippy: x86-csv'] = [status: 'passed']
+                        }
+                    }
+                    post { failure { script { ciResults['Clippy: x86-csv'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] } } }
+                }
+                // TODO: 恢复 Clippy: aarch64-crosvm-virt（待 rust-dice/crosvm 修好后）
+                // stage('Clippy: aarch64-crosvm-virt') { ... }
             }
         }
 
-        stage('Clippy: aarch64') {
-            steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    script {
-                        runClippy('aarch64')
-                        ciResults['Clippy: aarch64'] = [status: 'passed']
+        stage('Build Only') {
+            parallel {
+                stage('Build: x86-csv') {
+                    steps {
+                        script {
+                            runBuildOnly('x86-csv')
+                            ciResults['Build: x86-csv'] = [status: 'passed']
+                        }
                     }
+                    post { failure { script { ciResults['Build: x86-csv'] = [status: 'failed', detail: 'make build 编译失败'] } } }
                 }
-            }
-            post {
-                failure {
-                    script { ciResults['Clippy: aarch64'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] }
-                }
+                // TODO: 恢复 Build: aarch64-crosvm-virt（待 rust-dice/crosvm 修好后）
+                // stage('Build: aarch64-crosvm-virt') { ... }
             }
         }
 
-        stage('Build Only: x86-csv') {
+        stage('Runtime: x86_64') {
             steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    script {
-                        runBuildOnly('x86-csv')
-                        ciResults['Build: x86-csv'] = [status: 'passed']
-                    }
-                }
-            }
-            post {
-                failure {
-                    script { ciResults['Build: x86-csv'] = [status: 'failed', detail: 'make build 编译失败'] }
-                }
-            }
-        }
-
-
-
-        stage('Runtime Validation: x86_64') {
-            steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    script {
-                        executeBuildAndTest('x86_64')
-                        ciResults['Runtime: x86_64'] = [status: 'passed']
-                    }
+                script {
+                    executeBuildAndTest('x86_64')
+                    ciResults['Runtime: x86_64'] = [status: 'passed']
                 }
             }
             post {
@@ -117,13 +118,11 @@ pipeline {
             }
         }
 
-        stage('Runtime Validation: aarch64') {
+        stage('Runtime: aarch64') {
             steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    script {
-                        executeBuildAndTest('aarch64')
-                        ciResults['Runtime: aarch64'] = [status: 'passed']
-                    }
+                script {
+                    executeBuildAndTest('aarch64')
+                    ciResults['Runtime: aarch64'] = [status: 'passed']
                 }
             }
             post {
@@ -137,14 +136,12 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: '**/artifacts/**/*', allowEmptyArchive: true
-            archiveArtifacts artifacts: '**/logs/**/*', allowEmptyArchive: true
-            archiveArtifacts artifacts: '**/unittest-output.log', allowEmptyArchive: true
-            archiveArtifacts artifacts: '**/coverage-html/**/*', allowEmptyArchive: true
-            archiveArtifacts artifacts: '**/coverage.info', allowEmptyArchive: true
-            archiveArtifacts artifacts: '**/coverage.xml', allowEmptyArchive: true
-            archiveArtifacts artifacts: '**/coverage.txt', allowEmptyArchive: true
+            archiveArtifacts artifacts: [
+                '**/artifacts/**/*', '**/logs/**/*', '**/unittest-output.log',
+                '**/coverage-html/**/*', '**/coverage.info', '**/coverage.xml', '**/coverage.txt'
+            ].join(','), allowEmptyArchive: true
             script {
+                restoreReplayGiteeEnv()
                 def coverageSummary = collectCoverageSummary()
                 def comment = buildCiComment(ciResults, coverageSummary)
                 notifyGiteePullRequest(comment)
@@ -172,8 +169,8 @@ cargo +nightly-2026-03-08 fmt --all --check
     }
 }
 
-def runClippy(String arch) {
-    ws("${WORKSPACE}/clippy-${arch}") {
+def runClippy(String platform) {
+    ws("${WORKSPACE}/clippy-${platform}") {
         def stageWorkspace = pwd()
         fixWorkspaceOwnership(stageWorkspace)
         try {
@@ -182,10 +179,13 @@ def runClippy(String arch) {
 
             sh """#!/bin/bash
 set -euo pipefail
-cp ${defconfigFor(arch)} .config
-${clippyTargetSetupFor(arch)}
+cp platforms/${platform}/defconfig .config
+rustup target add ${rustupTargetFor(platform)} || true
 make clippy
 """
+        } catch (e) {
+            ciResults["Clippy: ${platform}"] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误']
+            throw e
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
         }
@@ -202,10 +202,13 @@ def runBuildOnly(String platform) {
 
             sh """#!/bin/bash
 set -euo pipefail
-${prepareBuildConfigFor(platform)}
-${buildTargetSetupFor(platform)}
+cp platforms/${platform}/defconfig .config
+rustup target add ${rustupTargetFor(platform)} || true
 stdbuf -oL -eL make build
 """
+        } catch (e) {
+            ciResults["Build: ${platform}"] = [status: 'failed', detail: 'make build 编译失败']
+            throw e
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
         }
@@ -316,6 +319,29 @@ echo "HTML coverage report generated at ${htmlOut}/"
 """
 }
 
+def restoreReplayGiteeEnv() {
+    if (env.giteePullRequestIid?.trim()) return
+    try {
+        def cause = currentBuild.rawBuild?.getCause(
+            org.jenkinsci.plugins.workflow.cps.replay.ReplayCause)
+        if (!cause) return
+        def originalEnv = cause.getOriginal()
+            .getEnvironment(hudson.model.TaskListener.NULL)
+        ['giteePullRequestIid', 'giteePullRequestId',
+         'giteePullRequestTargetProjectId', 'giteeSourceBranch',
+         'giteeTargetBranch', 'giteeTargetNamespace', 'giteeTargetRepoName',
+         'giteeSourceNamespace', 'giteeSourceRepoName'].each { key ->
+            def val = originalEnv?.get(key)?.trim()
+            if (val) env."${key}" = val
+        }
+        if (env.giteePullRequestIid?.trim()) {
+            echo "Replay detected: restored PR context from build #${cause.getOriginalNumber()}"
+        }
+    } catch (e) {
+        echo "Replay context restore skipped: ${e.message}"
+    }
+}
+
 def prepareSource() {
     ws("${WORKSPACE}/source-cache") {
         def sourceWorkspace = pwd()
@@ -324,20 +350,36 @@ def prepareSource() {
             deleteDir()
             checkoutProject()
             markSafeDirectory()
-            stash name: sourceStashName(), includes: '**', useDefaultExcludes: false
+            if (env.giteePullRequestIid?.trim()) {
+                checkNotDiverged()
+            }
+            stash name: "x-kernel-source-${env.BUILD_NUMBER}", includes: '**', useDefaultExcludes: false
         } finally {
             fixWorkspaceOwnership(sourceWorkspace)
         }
     }
 }
 
-def restoreSource() {
-    unstash sourceStashName()
-    markSafeDirectory()
+def checkNotDiverged() {
+    def targetBranch = env.giteeTargetBranch ?: env.DEFAULT_BRANCH
+    def result = sh(script: """#!/bin/bash
+set -euo pipefail
+git fetch origin ${targetBranch} --quiet
+BASE=\$(git merge-base HEAD origin/${targetBranch})
+TARGET=\$(git rev-parse origin/${targetBranch})
+if [ "\$BASE" != "\$TARGET" ]; then
+    echo "DIVERGED"
+fi
+""", returnStdout: true).trim()
+
+    if (result == 'DIVERGED') {
+        error("该 PR 与目标分支 `${targetBranch}` 存在冲突，请先执行 rebase 后再重新提交。")
+    }
 }
 
-def sourceStashName() {
-    return 'x-kernel-source'
+def restoreSource() {
+    unstash "x-kernel-source-${env.BUILD_NUMBER}"
+    markSafeDirectory()
 }
 
 def checkoutProject() {
@@ -367,68 +409,14 @@ def notifyGiteePullRequest(String message) {
     }
 }
 
-def prepareBuildConfigFor(String platform) {
-    switch (platform) {
-        case 'x86-csv':
-        case 'aarch64-crosvm-virt':
-            return """
-cp ${buildDefconfigFor(platform)} .config
-"""
-        default:
-            error("Unsupported build-only platform: ${platform}")
-    }
-}
-
-def buildDefconfigFor(String platform) {
-    switch (platform) {
-        case 'x86-csv':
-            return 'platforms/x86-csv/defconfig'
-        case 'aarch64-crosvm-virt':
-            return 'platforms/aarch64-crosvm-virt/defconfig'
-        default:
-            error("Unsupported build-only platform: ${platform}")
-    }
-}
-
 def defconfigFor(String arch) {
-    switch (arch) {
-        case 'aarch64':
-            return 'platforms/aarch64-qemu-virt/defconfig'
-        case 'x86_64':
-            return 'platforms/x86_64-qemu-virt/defconfig'
-        default:
-            error("Unsupported architecture: ${arch}")
-    }
+    return "platforms/${arch}-qemu-virt/defconfig"
 }
 
-def clippyTargetSetupFor(String arch) {
-    switch (arch) {
-        case 'aarch64':
-            return '''
-rustup target add aarch64-unknown-none-softfloat || true
-'''
-        case 'x86_64':
-            return '''
-rustup target add x86_64-unknown-none || true
-'''
-        default:
-            error("Unsupported architecture: ${arch}")
-    }
-}
-
-def buildTargetSetupFor(String platform) {
-    switch (platform) {
-        case 'x86-csv':
-            return '''
-rustup target add x86_64-unknown-none || true
-'''
-        case 'aarch64-crosvm-virt':
-            return '''
-rustup target add aarch64-unknown-none-softfloat || true
-'''
-        default:
-            error("Unsupported build-only platform: ${platform}")
-    }
+def rustupTargetFor(String platform) {
+    if (platform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
+    if (platform.startsWith('x86')) return 'x86_64-unknown-none'
+    error("Unsupported platform: ${platform}")
 }
 
 def fixWorkspaceOwnership(String workspacePath) {
@@ -552,9 +540,14 @@ def collectCoverageSummary() {
 
 def buildCiComment(Map results, String coverageSummary = '') {
     def stagesUrl = "${env.BUILD_URL}stages/"
+    // TODO: 恢复 aarch64-crosvm-virt 时补回 'Clippy: aarch64-crosvm-virt', 'Build: aarch64-crosvm-virt'
     def stageOrder = [
-        'Rustfmt', 'Clippy: x86_64', 'Clippy: aarch64',
-        'Build: x86-csv', 'Runtime: x86_64', 'Runtime: aarch64'
+        'Prepare Source',
+        'Rustfmt',
+        'Clippy: x86_64-qemu-virt', 'Clippy: aarch64-qemu-virt',
+        'Clippy: x86-csv',
+        'Build: x86-csv',
+        'Runtime: x86_64', 'Runtime: aarch64'
     ]
     def normalizedResults = [:]
     stageOrder.each { name ->

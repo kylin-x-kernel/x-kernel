@@ -12,7 +12,6 @@ pipeline {
 
     options {
         skipDefaultCheckout(true)
-        disableConcurrentBuilds()
         timestamps()
     }
 
@@ -76,6 +75,7 @@ pipeline {
         always {
             archiveArtifacts artifacts: '**/tee-test-output.log', allowEmptyArchive: true
             script {
+                restoreReplayGiteeEnv()
                 def comment = buildTeeComment(teeResults)
                 notifyGiteePullRequest(comment)
                 fixWorkspaceOwnership(env.WORKSPACE)
@@ -236,6 +236,29 @@ ${rows}
     return errorBlocks ? "${table}\n${errorBlocks}" : table
 }
 
+def restoreReplayGiteeEnv() {
+    if (env.giteePullRequestIid?.trim()) return
+    try {
+        def cause = currentBuild.rawBuild?.getCause(
+            org.jenkinsci.plugins.workflow.cps.replay.ReplayCause)
+        if (!cause) return
+        def originalEnv = cause.getOriginal()
+            .getEnvironment(hudson.model.TaskListener.NULL)
+        ['giteePullRequestIid', 'giteePullRequestId',
+         'giteePullRequestTargetProjectId', 'giteeSourceBranch',
+         'giteeTargetBranch', 'giteeTargetNamespace', 'giteeTargetRepoName',
+         'giteeSourceNamespace', 'giteeSourceRepoName'].each { key ->
+            def val = originalEnv?.get(key)?.trim()
+            if (val) env."${key}" = val
+        }
+        if (env.giteePullRequestIid?.trim()) {
+            echo "Replay detected: restored PR context from build #${cause.getOriginalNumber()}"
+        }
+    } catch (e) {
+        echo "Replay context restore skipped: ${e.message}"
+    }
+}
+
 def prepareSource() {
     ws("${WORKSPACE}/source-cache") {
         def sourceWorkspace = pwd()
@@ -244,15 +267,35 @@ def prepareSource() {
             deleteDir()
             checkoutProject()
             markSafeDirectory()
-            stash name: 'x-kernel-source', includes: '**', useDefaultExcludes: false
+            if (env.giteePullRequestIid?.trim()) {
+                checkNotDiverged()
+            }
+            stash name: "x-kernel-source-${env.BUILD_NUMBER}", includes: '**', useDefaultExcludes: false
         } finally {
             fixWorkspaceOwnership(sourceWorkspace)
         }
     }
 }
 
+def checkNotDiverged() {
+    def targetBranch = env.giteeTargetBranch ?: env.DEFAULT_BRANCH
+    def result = sh(script: """#!/bin/bash
+set -euo pipefail
+git fetch origin ${targetBranch} --quiet
+BASE=\$(git merge-base HEAD origin/${targetBranch})
+TARGET=\$(git rev-parse origin/${targetBranch})
+if [ "\$BASE" != "\$TARGET" ]; then
+    echo "DIVERGED"
+fi
+""", returnStdout: true).trim()
+
+    if (result == 'DIVERGED') {
+        error("该 PR 与目标分支 `${targetBranch}` 存在冲突，请先执行 rebase 后再重新提交。")
+    }
+}
+
 def restoreSource() {
-    unstash 'x-kernel-source'
+    unstash "x-kernel-source-${env.BUILD_NUMBER}"
     markSafeDirectory()
 }
 
