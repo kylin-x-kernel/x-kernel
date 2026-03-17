@@ -44,10 +44,10 @@ use crate::guard::BaseGuard;
 /// } // Lock released, IRQs and preemption restored
 /// ```
 pub struct SpinLock<G: BaseGuard, T: ?Sized> {
-    _phantom: PhantomData<G>,
+    marker: PhantomData<G>,
     #[cfg(feature = "smp")]
-    lock: AtomicBool,
-    data: UnsafeCell<T>,
+    flag: AtomicBool,
+    storage: UnsafeCell<T>,
 }
 
 /// RAII guard for spinlock.
@@ -55,11 +55,11 @@ pub struct SpinLock<G: BaseGuard, T: ?Sized> {
 /// Provides mutable access to the protected data and automatically
 /// releases the lock when dropped.
 pub struct SpinLockGuard<'a, G: BaseGuard, T: ?Sized + 'a> {
-    _phantom: &'a PhantomData<G>,
+    token: &'a PhantomData<G>,
     guard_state: G::State,
-    data: *mut T,
+    ptr: *mut T,
     #[cfg(feature = "smp")]
-    lock: &'a AtomicBool,
+    flag_ref: &'a AtomicBool,
 }
 
 // Same unsafe impls as `std::sync::Mutex`
@@ -71,17 +71,17 @@ impl<G: BaseGuard, T> SpinLock<G, T> {
     #[inline(always)]
     pub const fn new(data: T) -> Self {
         Self {
-            _phantom: PhantomData,
-            data: UnsafeCell::new(data),
+            marker: PhantomData,
+            storage: UnsafeCell::new(data),
             #[cfg(feature = "smp")]
-            lock: AtomicBool::new(false),
+            flag: AtomicBool::new(false),
         }
     }
 
     /// Consume the lock and return the inner value.
     #[inline(always)]
     pub fn into_inner(self) -> T {
-        self.data.into_inner()
+        self.storage.into_inner()
     }
 }
 
@@ -97,13 +97,16 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
 
         #[cfg(feature = "smp")]
         {
-            // Try to acquire using weak CAS in a loop
-            while self
-                .lock
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
-                // Spin until lock appears available
+            // Opportunistic acquire: weak CAS in a loop, with a secondary
+            // spin phase while the lock appears taken.
+            loop {
+                if self
+                    .flag
+                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
                 while self.is_locked() {
                     core::hint::spin_loop();
                 }
@@ -111,11 +114,11 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
         }
 
         SpinLockGuard {
-            _phantom: &PhantomData,
+            token: &PhantomData,
             guard_state,
-            data: unsafe { &mut *self.data.get() },
+            ptr: unsafe { &mut *self.storage.get() },
             #[cfg(feature = "smp")]
-            lock: &self.lock,
+            flag_ref: &self.flag,
         }
     }
 
@@ -129,7 +132,7 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
     pub fn is_locked(&self) -> bool {
         #[cfg(feature = "smp")]
         {
-            self.lock.load(Ordering::Relaxed)
+            self.flag.load(Ordering::Relaxed)
         }
         #[cfg(not(feature = "smp"))]
         {
@@ -146,7 +149,7 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
 
         #[cfg(feature = "smp")]
         let is_unlocked = self
-            .lock
+            .flag
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok();
 
@@ -155,11 +158,11 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
 
         if is_unlocked {
             Some(SpinLockGuard {
-                _phantom: &PhantomData,
+                token: &PhantomData,
                 guard_state,
-                data: unsafe { &mut *self.data.get() },
+                ptr: unsafe { &mut *self.storage.get() },
                 #[cfg(feature = "smp")]
-                lock: &self.lock,
+                flag_ref: &self.flag,
             })
         } else {
             G::release(guard_state);
@@ -176,7 +179,7 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
     #[inline(always)]
     pub unsafe fn force_unlock(&self) {
         #[cfg(feature = "smp")]
-        self.lock.store(false, Ordering::Release);
+        self.flag.store(false, Ordering::Release);
     }
 
     /// Get mutable reference (zero-cost).
@@ -185,7 +188,7 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
     /// no actual locking is needed.
     #[inline(always)]
     pub fn get_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.data.get() }
+        unsafe { &mut *self.storage.get() }
     }
 }
 
@@ -213,14 +216,14 @@ impl<G: BaseGuard, T: ?Sized> Deref for SpinLockGuard<'_, G, T> {
 
     #[inline(always)]
     fn deref(&self) -> &T {
-        unsafe { &*self.data }
+        unsafe { &*self.ptr }
     }
 }
 
 impl<G: BaseGuard, T: ?Sized> DerefMut for SpinLockGuard<'_, G, T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.data }
+        unsafe { &mut *self.ptr }
     }
 }
 
@@ -234,7 +237,7 @@ impl<G: BaseGuard, T: ?Sized> Drop for SpinLockGuard<'_, G, T> {
     #[inline(always)]
     fn drop(&mut self) {
         #[cfg(feature = "smp")]
-        self.lock.store(false, Ordering::Release);
+        self.flag_ref.store(false, Ordering::Release);
 
         G::release(self.guard_state);
     }

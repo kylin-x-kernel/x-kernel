@@ -30,21 +30,21 @@ use crate::guard::BaseGuard;
 /// For single-core environment (without the "smp" feature), we remove the lock
 /// state, CPU can always get the lock if we follow the proper guard in use.
 pub struct BaseSpinLock<G: BaseGuard, T: ?Sized> {
-    _phantom: PhantomData<G>,
+    guard_kind: PhantomData<G>,
     #[cfg(feature = "smp")]
-    lock: AtomicBool,
-    data: UnsafeCell<T>,
+    busy_flag: AtomicBool,
+    storage: UnsafeCell<T>,
 }
 
 /// A guard that provides mutable data access.
 ///
 /// When the guard falls out of scope it will release the lock.
 pub struct BaseSpinLockGuard<'a, G: BaseGuard, T: ?Sized + 'a> {
-    _phantom: &'a PhantomData<G>,
-    irq_state: G::State,
-    data: *mut T,
+    guard_type: &'a PhantomData<G>,
+    irq_token: G::State,
+    slot: *mut T,
     #[cfg(feature = "smp")]
-    lock: &'a AtomicBool,
+    flag_ref: &'a AtomicBool,
 }
 
 // Same unsafe impls as `std::sync::Mutex`
@@ -56,10 +56,10 @@ impl<G: BaseGuard, T> BaseSpinLock<G, T> {
     #[inline(always)]
     pub const fn new(data: T) -> Self {
         Self {
-            _phantom: PhantomData,
-            data: UnsafeCell::new(data),
+            guard_kind: PhantomData,
+            storage: UnsafeCell::new(data),
             #[cfg(feature = "smp")]
-            lock: AtomicBool::new(false),
+            busy_flag: AtomicBool::new(false),
         }
     }
 
@@ -68,8 +68,8 @@ impl<G: BaseGuard, T> BaseSpinLock<G, T> {
     pub fn into_inner(self) -> T {
         // We know statically that there are no outstanding references to
         // `self` so there's no need to lock.
-        let BaseSpinLock { data, .. } = self;
-        data.into_inner()
+        let BaseSpinLock { storage, .. } = self;
+        storage.into_inner()
     }
 }
 
@@ -83,25 +83,27 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
         let irq_state = G::acquire();
         #[cfg(feature = "smp")]
         {
-            // Can fail to lock even if the spinlock is not locked. May be more efficient than `try_lock`
-            // when called in a loop.
-            while self
-                .lock
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
-                // Wait until the lock looks unlocked before retrying
+            // Fast path: optimistic attempt; if it fails, spin until the flag
+            // becomes available again.
+            loop {
+                if self
+                    .busy_flag
+                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
                 while self.is_locked() {
                     core::hint::spin_loop();
                 }
             }
         }
         BaseSpinLockGuard {
-            _phantom: &PhantomData,
-            irq_state,
-            data: unsafe { &mut *self.data.get() },
+            guard_type: &PhantomData,
+            irq_token: irq_state,
+            slot: unsafe { &mut *self.storage.get() },
             #[cfg(feature = "smp")]
-            lock: &self.lock,
+            flag_ref: &self.busy_flag,
         }
     }
 
@@ -115,7 +117,7 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
     pub fn is_locked(&self) -> bool {
         cfg_if::cfg_if! {
             if #[cfg(feature = "smp")] {
-                self.lock.load(Ordering::Relaxed)
+                self.busy_flag.load(Ordering::Relaxed)
             } else {
                 false
             }
@@ -129,12 +131,11 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "smp")] {
-                // The reason for using a strong compare_exchange is explained here:
-                // https://github.com/Amanieu/parking_lot/pull/207#issuecomment-575869107
+                // Strong CAS avoids spurious failures in the contended fast-path.
                 let is_unlocked = self
-                .lock
-                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok();
+                    .busy_flag
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok();
             } else {
                 let is_unlocked = true;
             }
@@ -142,11 +143,11 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
 
         if is_unlocked {
             Some(BaseSpinLockGuard {
-                _phantom: &PhantomData,
-                irq_state,
-                data: unsafe { &mut *self.data.get() },
+                guard_type: &PhantomData,
+                irq_token: irq_state,
+                slot: unsafe { &mut *self.storage.get() },
                 #[cfg(feature = "smp")]
-                lock: &self.lock,
+                flag_ref: &self.busy_flag,
             })
         } else {
             G::release(irq_state);
@@ -164,7 +165,7 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
     #[inline(always)]
     pub unsafe fn force_unlock(&self) {
         #[cfg(feature = "smp")]
-        self.lock.store(false, Ordering::Release);
+        self.busy_flag.store(false, Ordering::Release);
     }
 
     /// Returns a mutable reference to the underlying data.
@@ -176,7 +177,7 @@ impl<G: BaseGuard, T: ?Sized> BaseSpinLock<G, T> {
     pub fn get_mut(&mut self) -> &mut T {
         // We know statically that there are no other references to `self`, so
         // there's no need to lock the inner mutex.
-        unsafe { &mut *self.data.get() }
+        unsafe { &mut *self.storage.get() }
     }
 }
 
@@ -204,7 +205,7 @@ impl<G: BaseGuard, T: ?Sized> Deref for BaseSpinLockGuard<'_, G, T> {
     #[inline(always)]
     fn deref(&self) -> &T {
         // We know statically that only we are referencing data
-        unsafe { &*self.data }
+        unsafe { &*self.slot }
     }
 }
 
@@ -212,7 +213,7 @@ impl<G: BaseGuard, T: ?Sized> DerefMut for BaseSpinLockGuard<'_, G, T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
         // We know statically that only we are referencing data
-        unsafe { &mut *self.data }
+        unsafe { &mut *self.slot }
     }
 }
 
@@ -228,8 +229,8 @@ impl<G: BaseGuard, T: ?Sized> Drop for BaseSpinLockGuard<'_, G, T> {
     #[inline(always)]
     fn drop(&mut self) {
         #[cfg(feature = "smp")]
-        self.lock.store(false, Ordering::Release);
-        G::release(self.irq_state);
+        self.flag_ref.store(false, Ordering::Release);
+        G::release(self.irq_token);
     }
 }
 
@@ -273,176 +274,177 @@ mod tests {
     struct NonCopy(i32);
 
     #[test]
-    fn smoke() {
-        let m = SpinMutex::<_>::new(());
-        drop(m.lock());
-        drop(m.lock());
+    fn basic_lock_unlock() {
+        let simple_lock = SpinMutex::<_>::new(());
+        drop(simple_lock.lock());
+        drop(simple_lock.lock());
     }
 
     #[test]
     #[cfg(feature = "smp")]
     fn lots_and_lots() {
-        static M: SpinMutex<()> = SpinMutex::<_>::new(());
-        static mut CNT: u32 = 0;
-        const J: u32 = 1000;
-        const K: u32 = 3;
+        static GLOBAL_MUTEX: SpinMutex<()> = SpinMutex::<_>::new(());
+        static mut COUNTER: u32 = 0;
+        const INNER_ITERS: u32 = 1000;
+        const THREAD_PAIRS: u32 = 3;
 
-        fn inc() {
-            for _ in 0..J {
+        fn bump_shared_counter() {
+            for _ in 0..INNER_ITERS {
                 unsafe {
-                    let _g = M.lock();
-                    CNT += 1;
+                    let guard = GLOBAL_MUTEX.lock();
+                    COUNTER += 1;
+                    core::mem::drop(guard);
                 }
             }
         }
 
-        let (tx, rx) = channel();
-        let mut ts = Vec::new();
-        for _ in 0..K {
-            let tx2 = tx.clone();
-            ts.push(thread::spawn(move || {
-                inc();
-                tx2.send(()).unwrap();
+        let (sender, receiver) = channel();
+        let mut worker_handles = Vec::new();
+        for _ in 0..THREAD_PAIRS {
+            let notifier1 = sender.clone();
+            worker_handles.push(thread::spawn(move || {
+                bump_shared_counter();
+                notifier1.send(()).unwrap();
             }));
-            let tx2 = tx.clone();
-            ts.push(thread::spawn(move || {
-                inc();
-                tx2.send(()).unwrap();
+            let notifier2 = sender.clone();
+            worker_handles.push(thread::spawn(move || {
+                bump_shared_counter();
+                notifier2.send(()).unwrap();
             }));
         }
 
-        drop(tx);
-        for _ in 0..2 * K {
-            rx.recv().unwrap();
+        drop(sender);
+        for _ in 0..(2 * THREAD_PAIRS) {
+            receiver.recv().unwrap();
         }
-        assert_eq!(unsafe { CNT }, J * K * 2);
+        assert_eq!(unsafe { COUNTER }, INNER_ITERS * THREAD_PAIRS * 2);
 
-        for t in ts {
-            t.join().unwrap();
+        for handle in worker_handles {
+            handle.join().unwrap();
         }
     }
 
     #[test]
     #[cfg(feature = "smp")]
     fn try_lock() {
-        let mutex = SpinMutex::<_>::new(42);
+        let guarded_value = SpinMutex::<_>::new(42);
 
-        // First lock succeeds
-        let a = mutex.try_lock();
-        assert_eq!(a.as_ref().map(|r| **r), Some(42));
+        // First attempt should succeed
+        let first = guarded_value.try_lock();
+        assert_eq!(first.as_ref().map(|r| **r), Some(42));
 
-        // Additional lock fails
-        let b = mutex.try_lock();
-        assert!(b.is_none());
+        // Second simultaneous attempt must fail
+        let second = guarded_value.try_lock();
+        assert!(second.is_none());
 
-        // After dropping lock, it succeeds again
-        ::core::mem::drop(a);
-        let c = mutex.try_lock();
-        assert_eq!(c.as_ref().map(|r| **r), Some(42));
+        // After releasing the first guard, a new attempt should succeed
+        ::core::mem::drop(first);
+        let third = guarded_value.try_lock();
+        assert_eq!(third.as_ref().map(|r| **r), Some(42));
     }
 
     #[test]
     fn test_irq_lock_restored() {
-        let m = TestSpinIrq::new(());
-        let _a = m.lock();
+        let irq_lock = TestSpinIrq::new(());
+        let guard = irq_lock.lock();
         assert_eq!(unsafe { IRQ_CNT }, 1);
-        ::core::mem::drop(_a);
+        ::core::mem::drop(guard);
         assert_eq!(unsafe { IRQ_CNT }, 0);
     }
 
     #[test]
     #[cfg(feature = "smp")]
     fn test_irq_try_lock_failed() {
-        let m = TestSpinIrq::new(());
-        let _a = m.lock();
+        let irq_guarded = TestSpinIrq::new(());
+        let primary = irq_guarded.lock();
         assert_eq!(unsafe { IRQ_CNT }, 1);
-        let b = m.try_lock();
-        assert!(b.is_none());
+        let competing = irq_guarded.try_lock();
+        assert!(competing.is_none());
         assert_eq!(unsafe { IRQ_CNT }, 1);
-        drop(_a);
+        drop(primary);
     }
 
     #[test]
     fn test_into_inner() {
-        let m = SpinMutex::<_>::new(NonCopy(10));
-        assert_eq!(m.into_inner(), NonCopy(10));
+        let wrapper = SpinMutex::<_>::new(NonCopy(10));
+        assert_eq!(wrapper.into_inner(), NonCopy(10));
     }
 
     #[test]
     fn test_into_inner_drop() {
-        struct Foo(Arc<AtomicUsize>);
-        impl Drop for Foo {
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
-        let num_drops = Arc::new(AtomicUsize::new(0));
-        let m = SpinMutex::<_>::new(Foo(num_drops.clone()));
-        assert_eq!(num_drops.load(Ordering::SeqCst), 0);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mutex = SpinMutex::<_>::new(DropCounter(drops.clone()));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
         {
-            let _inner = m.into_inner();
-            assert_eq!(num_drops.load(Ordering::SeqCst), 0);
+            let inner = mutex.into_inner();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            core::mem::drop(inner);
         }
-        assert_eq!(num_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn test_mutex_arc_nested() {
-        // Tests nested mutexes and access
-        // to underlying data.
-        let arc = Arc::new(SpinMutex::<_>::new(1));
-        let arc2 = Arc::new(SpinMutex::<_>::new(arc));
-        let (tx, rx) = channel();
-        let t = thread::spawn(move || {
-            let lock = arc2.lock();
-            let lock2 = lock.lock();
-            assert_eq!(*lock2, 1);
-            tx.send(()).unwrap();
+        // Exercise nested spin locks behind `Arc` and validate access to inner data.
+        let outer = Arc::new(SpinMutex::<_>::new(1));
+        let nested = Arc::new(SpinMutex::<_>::new(outer));
+        let (sender, receiver) = channel();
+        let worker = thread::spawn(move || {
+            let first_guard = nested.lock();
+            let second_guard = first_guard.lock();
+            assert_eq!(*second_guard, 1);
+            sender.send(()).unwrap();
         });
-        rx.recv().unwrap();
-        t.join().unwrap();
+        receiver.recv().unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
     fn test_mutex_arc_access_in_unwind() {
-        let arc = Arc::new(SpinMutex::<_>::new(1));
-        let arc2 = arc.clone();
+        let shared = Arc::new(SpinMutex::<_>::new(1));
+        let captured = shared.clone();
         let _ = thread::spawn(move || {
             struct Unwinder {
-                i: Arc<SpinMutex<i32>>,
+                handle: Arc<SpinMutex<i32>>,
             }
             impl Drop for Unwinder {
                 fn drop(&mut self) {
-                    *self.i.lock() += 1;
+                    *self.handle.lock() += 1;
                 }
             }
-            let _u = Unwinder { i: arc2 };
+            let _scope = Unwinder { handle: captured };
             panic!();
         })
         .join();
-        let lock = arc.lock();
-        assert_eq!(*lock, 2);
+        let final_guard = shared.lock();
+        assert_eq!(*final_guard, 2);
     }
 
     #[test]
     fn test_mutex_unsized() {
-        let mutex: &SpinMutex<[i32]> = &SpinMutex::<_>::new([1, 2, 3]);
+        let slice_mutex: &SpinMutex<[i32]> = &SpinMutex::<_>::new([1, 2, 3]);
         {
-            let b = &mut *mutex.lock();
-            b[0] = 4;
-            b[2] = 5;
+            let slice = &mut *slice_mutex.lock();
+            slice[0] = 4;
+            slice[2] = 5;
         }
-        let comp: &[i32] = &[4, 2, 5];
-        assert_eq!(&*mutex.lock(), comp);
+        let expected: &[i32] = &[4, 2, 5];
+        assert_eq!(&*slice_mutex.lock(), expected);
     }
 
     #[test]
     fn test_mutex_force_lock() {
-        let lock = SpinMutex::<_>::new(());
-        ::std::mem::forget(lock.lock());
+        let raw_lock = SpinMutex::<_>::new(());
+        ::std::mem::forget(raw_lock.lock());
         unsafe {
-            lock.force_unlock();
+            raw_lock.force_unlock();
         }
-        assert!(lock.try_lock().is_some());
+        assert!(raw_lock.try_lock().is_some());
     }
 }
