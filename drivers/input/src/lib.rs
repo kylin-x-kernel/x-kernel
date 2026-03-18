@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Common traits and types for graphics display device drivers.
-
 //! Common traits and types for input device drivers.
 
 #![no_std]
@@ -33,25 +31,28 @@ impl EventType {
     /// Maximum event type value.
     pub const MAX: u8 = 0x1f;
 
-    /// Return the bitset length for the given event type.
-    pub const fn bits_count(&self) -> usize {
-        match self {
-            EventType::Synchronization => 0x10,
-            EventType::Key => 0x300,
-            EventType::Relative => 0x10,
-            EventType::Absolute => 0x40,
-            EventType::Misc => 0x08,
-            EventType::Switch => 0x12,
-            EventType::Led => 0x10,
-            EventType::Sound => 0x08,
-            EventType::ForceFeedback => 0x80,
+    const fn bit_len_of(kind: Self) -> usize {
+        use EventType::*;
+
+        match kind {
+            Synchronization | Relative | Led => 0x10,
+            Key => 0x300,
+            Absolute => 0x40,
+            Misc | Sound => 0x08,
+            Switch => 0x12,
+            ForceFeedback => 0x80,
         }
+    }
+
+    /// Return the bitset length for the given event type.
+    pub const fn bits_count(self) -> usize {
+        Self::bit_len_of(self)
     }
 }
 
 /// An input event, as defined by the Linux input subsystem.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct Event {
     /// Event category (matches `EventType`).
     pub event_type: u16,
@@ -61,9 +62,25 @@ pub struct Event {
     pub value: u32,
 }
 
+impl Event {
+    /// Builds an input event from raw evdev-compatible fields.
+    pub const fn new(event_type: u16, code: u16, value: u32) -> Self {
+        Self {
+            event_type,
+            code,
+            value,
+        }
+    }
+
+    /// Returns whether the event belongs to the given category.
+    pub const fn is_type(self, kind: EventType) -> bool {
+        self.event_type == kind as u16
+    }
+}
+
 /// Identification tuple for an input device.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct InputDeviceId {
     /// The bustype identifier.
     pub bus_type: u16,
@@ -75,9 +92,24 @@ pub struct InputDeviceId {
     pub version: u16,
 }
 
+impl InputDeviceId {
+    /// Empty/default identifier used when the device does not expose IDs.
+    pub const UNKNOWN: Self = Self::new(0, 0, 0, 0);
+
+    /// Creates a device identifier tuple.
+    pub const fn new(bus_type: u16, vendor: u16, product: u16, version: u16) -> Self {
+        Self {
+            bus_type,
+            vendor,
+            product,
+            version,
+        }
+    }
+}
+
 /// Axis information for absolute input devices.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct AbsInfo {
     /// The minimum value for the axis.
     pub min: u32,
@@ -89,6 +121,19 @@ pub struct AbsInfo {
     pub flat: u32,
     /// The resolution for values reported for the axis.
     pub res: u32,
+}
+
+impl AbsInfo {
+    /// Creates an absolute-axis descriptor.
+    pub const fn new(min: u32, max: u32, fuzz: u32, flat: u32, res: u32) -> Self {
+        Self {
+            min,
+            max,
+            fuzz,
+            flat,
+            res,
+        }
+    }
 }
 
 /// Operations that require an input device driver to implement.
