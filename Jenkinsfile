@@ -145,6 +145,7 @@ pipeline {
                 def coverageSummary = collectCoverageSummary()
                 def comment = buildCiComment(ciResults, coverageSummary)
                 notifyGiteePullRequest(comment)
+                reportGiteeCommitStatus('citestttt')
                 fixWorkspaceOwnership(env.WORKSPACE)
             }
             cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
@@ -419,6 +420,27 @@ def rustupTargetFor(String platform) {
     error("Unsupported platform: ${platform}")
 }
 
+def reportGiteeCommitStatus(String context) {
+    if (!env.giteePullRequestIid?.trim()) return
+    try {
+        def sha = env.giteeAfterCommitSha ?: sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+        def state = currentBuild.currentResult == 'SUCCESS' ? 'success' : 'failure'
+        def targetUrl = env.BUILD_URL ?: ''
+        def namespace = env.giteeTargetNamespace ?: 'openkylin'
+        def repo = env.giteeTargetRepoName ?: 'x-kernel'
+        withCredentials([string(credentialsId: 'ci-bot', variable: 'GITEE_TOKEN')]) {
+            sh """#!/bin/bash
+curl -s -o /dev/null -w "%{http_code}" -X POST \\
+  "https://gitee.com/api/v5/repos/${namespace}/${repo}/statuses/${sha}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"access_token":"'"${GITEE_TOKEN}"'","state":"${state}","target_url":"${targetUrl}","description":"Jenkins CI","context":"${context}"}' || true
+"""
+        }
+    } catch (e) {
+        echo "reportGiteeCommitStatus skipped: ${e.message}"
+    }
+}
+
 def fixWorkspaceOwnership(String workspacePath) {
     if (!workspacePath?.trim()) {
         return
@@ -596,6 +618,10 @@ ${rows}
             '```' + "\n${detail}\n" + '```' + "\n</details>"
     }.join('\n')
 
-    def body = table + coverageBlock
-    return errorBlocks ? "${body}\n${errorBlocks}" : body
+    def details = coverageBlock + (errorBlocks ? "${errorBlocks}\n" : '')
+    def body = table + details
+    if (!allPassed) {
+        return table + "\n\n<details>\n<summary>查看构建详情</summary>\n\n" + details + "\n</details>"
+    }
+    return body
 }

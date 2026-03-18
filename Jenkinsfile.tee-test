@@ -78,6 +78,7 @@ pipeline {
                 restoreReplayGiteeEnv()
                 def comment = buildTeeComment(teeResults)
                 notifyGiteePullRequest(comment)
+                reportGiteeCommitStatus('tee-test')
                 fixWorkspaceOwnership(env.WORKSPACE)
             }
             cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
@@ -233,7 +234,12 @@ ${rows}
             "\n### ${label} — ${arch}\n\n" + '```' + "\n${r.errorSnippet.take(800)}\n" + '```'
         }.join('\n')
 
-    return errorBlocks ? "${table}\n${errorBlocks}" : table
+    def details = errorBlocks ? "${errorBlocks}\n" : ''
+    def body = table + details
+    if (!allPassed) {
+        return table + "\n\n<details>\n<summary>查看测试详情</summary>\n\n" + details + "\n</details>"
+    }
+    return body
 }
 
 def restoreReplayGiteeEnv() {
@@ -352,6 +358,27 @@ rustup target add x86_64-unknown-linux-musl || true
 '''
         default:
             error("Unsupported architecture: ${arch}")
+    }
+}
+
+def reportGiteeCommitStatus(String context) {
+    if (!env.giteePullRequestIid?.trim()) return
+    try {
+        def sha = env.giteeAfterCommitSha ?: sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+        def state = currentBuild.currentResult == 'SUCCESS' ? 'success' : 'failure'
+        def targetUrl = env.BUILD_URL ?: ''
+        def namespace = env.giteeTargetNamespace ?: 'openkylin'
+        def repo = env.giteeTargetRepoName ?: 'x-kernel'
+        withCredentials([string(credentialsId: 'ci-bot', variable: 'GITEE_TOKEN')]) {
+            sh """#!/bin/bash
+curl -s -o /dev/null -w "%{http_code}" -X POST \\
+  "https://gitee.com/api/v5/repos/${namespace}/${repo}/statuses/${sha}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"access_token":"'"${GITEE_TOKEN}"'","state":"${state}","target_url":"${targetUrl}","description":"Jenkins CI","context":"${context}"}' || true
+"""
+        }
+    } catch (e) {
+        echo "reportGiteeCommitStatus skipped: ${e.message}"
     }
 }
 
