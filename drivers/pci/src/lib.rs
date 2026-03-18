@@ -92,41 +92,76 @@ impl PciConfigAccess {
     }
 }
 
-/// Used to allocate MMIO regions for PCI BARs.
+/// Sequential allocator for MMIO address space used by PCI Base Address Registers.
+///
+/// This allocator manages a contiguous range of physical addresses and dispenses
+/// aligned chunks suitable for memory-mapped I/O regions. Each allocation must
+/// be power-of-two sized and will be naturally aligned to that size.
 pub struct PciRangeAllocator {
-    _start: u64,
-    end: u64,
-    current: u64,
+    _begin_addr: u64,
+    end_addr: u64,
+    cursor_addr: u64,
 }
 
 impl PciRangeAllocator {
-    /// Creates a new allocator from a memory range.
-    pub const fn new(base: u64, size: u64) -> Self {
-        Self {
-            _start: base,
-            end: base + size,
-            current: base,
-        }
-    }
-
-    /// Allocates a memory region with the given size.
+    /// Constructs a new allocator managing the specified address range.
     ///
-    /// The `size` should be a power of 2, and the returned value is also a
-    /// multiple of `size`.
-    pub fn alloc_buf(&mut self, size: u64) -> Option<u64> {
-        if !size.is_power_of_two() {
-            return None;
+    /// # Arguments
+    ///
+    /// * `start` - The starting physical address of the MMIO region
+    /// * `length` - The total size in bytes of the allocatable region
+    pub const fn new(start: u64, length: u64) -> Self {
+        Self {
+            _begin_addr: start,
+            end_addr: start.saturating_add(length),
+            cursor_addr: start,
         }
-        let ret = align_up(self.current, size);
-        if ret + size > self.end {
-            return None;
-        }
-
-        self.current = ret + size;
-        Some(ret)
     }
-}
 
-const fn align_up(addr: u64, align: u64) -> u64 {
-    (addr + align - 1) & !(align - 1)
+    /// Attempts to allocate an aligned MMIO region of the requested size.
+    ///
+    /// # Arguments
+    ///
+    /// * `length` - The requested allocation size. Must be a power of two.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(address)` - The base address of the allocated region, aligned to `length`
+    /// * `None` - If `length` is not a power of two or insufficient space remains
+    ///
+    /// # Alignment guarantee
+    ///
+    /// The returned address is guaranteed to be a multiple of `length`, ensuring
+    /// natural alignment for the allocated region.
+    pub fn alloc_buf(&mut self, length: u64) -> Option<u64> {
+        // Validate that length is a power of two (required for alignment)
+        if length == 0 || (length & (length.wrapping_sub(1))) != 0 {
+            return None;
+        }
+
+        // Calculate the aligned starting address for this allocation
+        let aligned_addr = self.compute_aligned_address(length)?;
+
+        // Verify that the full allocation fits within our managed range
+        let allocation_end = aligned_addr.checked_add(length)?;
+        if allocation_end > self.end_addr {
+            return None;
+        }
+
+        // Commit the allocation by advancing our free pointer
+        self.cursor_addr = allocation_end;
+        Some(aligned_addr)
+    }
+
+    /// Computes the next address aligned to the given boundary.
+    ///
+    /// Returns `None` if alignment calculation would overflow.
+    fn compute_aligned_address(&self, alignment: u64) -> Option<u64> {
+        // Calculate the alignment mask (e.g., for alignment=4096, mask=4095)
+        let alignment_mask = alignment.wrapping_sub(1);
+
+        // Apply ceiling alignment: (addr + mask) & ~mask
+        let adjusted = self.cursor_addr.checked_add(alignment_mask)?;
+        Some(adjusted & !alignment_mask)
+    }
 }
