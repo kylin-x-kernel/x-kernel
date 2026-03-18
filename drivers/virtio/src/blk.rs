@@ -5,13 +5,18 @@
 //! VirtIO block driver adapter.
 use block::BlockDriverOps;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
-use virtio_drivers::{Hal, device::blk::VirtIOBlk as InnerDev, transport::Transport};
+use virtio_drivers::{
+    Hal,
+    device::blk::{SECTOR_SIZE, VirtIOBlk as InnerDev},
+    transport::Transport,
+};
 
 use crate::as_driver_error;
 
 /// The VirtIO block device driver.
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
-    inner: InnerDev<H, T>,
+    device: InnerDev<H, T>,
+    sector_size: usize,
 }
 
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
@@ -21,9 +26,27 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
     pub fn try_new(transport: T) -> DriverResult<Self> {
+        let device = Self::init_device(transport)?;
         Ok(Self {
-            inner: InnerDev::new(transport).map_err(as_driver_error)?,
+            device,
+            sector_size: SECTOR_SIZE,
         })
+    }
+
+    fn init_device(transport: T) -> DriverResult<InnerDev<H, T>> {
+        InnerDev::new(transport).map_err(as_driver_error)
+    }
+
+    fn read_sector(&mut self, sector: u64, out_buf: &mut [u8]) -> DriverResult {
+        self.device
+            .read_blocks(sector as usize, out_buf)
+            .map_err(as_driver_error)
+    }
+
+    fn write_sector(&mut self, sector: u64, in_buf: &[u8]) -> DriverResult {
+        self.device
+            .write_blocks(sector as usize, in_buf)
+            .map_err(as_driver_error)
     }
 }
 
@@ -40,24 +63,20 @@ impl<H: Hal, T: Transport> DriverOps for VirtIoBlkDev<H, T> {
 impl<H: Hal, T: Transport> BlockDriverOps for VirtIoBlkDev<H, T> {
     #[inline]
     fn num_blocks(&self) -> u64 {
-        self.inner.capacity()
+        self.device.capacity()
     }
 
     #[inline]
     fn block_size(&self) -> usize {
-        virtio_drivers::device::blk::SECTOR_SIZE
+        self.sector_size
     }
 
     fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        self.inner
-            .read_blocks(block_id as _, buf)
-            .map_err(as_driver_error)
+        self.read_sector(block_id, buf)
     }
 
     fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
-        self.inner
-            .write_blocks(block_id as _, buf)
-            .map_err(as_driver_error)
+        self.write_sector(block_id, buf)
     }
 
     fn flush(&mut self) -> DriverResult {

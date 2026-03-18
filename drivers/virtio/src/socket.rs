@@ -18,6 +18,23 @@ use crate::as_driver_error;
 /// Default buffer size for VirtIO socket device (32KB).
 const DEFAULT_BUFFER_SIZE: usize = 32 * 1024;
 
+struct ConnectionArgs {
+    peer_addr: VsockAddr,
+    host_port: u32,
+}
+
+impl ConnectionArgs {
+    fn from_conn_id(conn_id: VsockConnId) -> Self {
+        Self {
+            peer_addr: VsockAddr {
+                cid: conn_id.peer_addr.cid as _,
+                port: conn_id.peer_addr.port as _,
+            },
+            host_port: conn_id.local_port,
+        }
+    }
+}
+
 /// The VirtIO socket device driver.
 pub struct VirtIoSocketDev<H: Hal, T: Transport> {
     inner: InnerDev<H, T>,
@@ -30,10 +47,43 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
     pub fn try_new(transport: T) -> DriverResult<Self> {
-        let virtio_socket = VirtIOSocket::<H, _>::new(transport).map_err(as_driver_error)?;
+        let virtio_socket = Self::open_socket(transport)?;
         Ok(Self {
             inner: InnerDev::new_with_capacity(virtio_socket, DEFAULT_BUFFER_SIZE as u32),
         })
+    }
+
+    fn open_socket(transport: T) -> DriverResult<VirtIOSocket<H, T>> {
+        VirtIOSocket::<H, _>::new(transport).map_err(as_driver_error)
+    }
+
+    fn translate_event(event: VsockEvent) -> VsockDriverEventType {
+        let connection = VsockConnId {
+            peer_addr: vsock::VsockAddr {
+                cid: event.source.cid as _,
+                port: event.source.port as _,
+            },
+            local_port: event.destination.port,
+        };
+
+        match event.event_type {
+            VsockEventType::ConnectionRequest => {
+                VsockDriverEventType::ConnectionRequest(connection)
+            }
+            VsockEventType::Connected => VsockDriverEventType::Connected(connection),
+            VsockEventType::Received { length } => {
+                VsockDriverEventType::Received(connection, length)
+            }
+            VsockEventType::Disconnected { .. } => VsockDriverEventType::Disconnected(connection),
+            VsockEventType::CreditUpdate => VsockDriverEventType::CreditUpdate(connection),
+            _ => VsockDriverEventType::Unknown,
+        }
+    }
+
+    fn refresh_credit(&mut self, connection: &ConnectionArgs) {
+        let _ = self
+            .inner
+            .update_credit(connection.peer_addr, connection.host_port);
     }
 }
 
@@ -47,16 +97,6 @@ impl<H: Hal, T: Transport> DriverOps for VirtIoSocketDev<H, T> {
     }
 }
 
-fn extract_addr_and_port(cid: VsockConnId) -> (VsockAddr, u32) {
-    (
-        VsockAddr {
-            cid: cid.peer_addr.cid as _,
-            port: cid.peer_addr.port as _,
-        },
-        cid.local_port,
-    )
-}
-
 impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
     fn guest_cid(&self) -> u64 {
         self.inner.guest_cid()
@@ -67,88 +107,58 @@ impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
     }
 
     fn connect(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        let (peer_addr, src_port) = extract_addr_and_port(cid);
+        let connection = ConnectionArgs::from_conn_id(cid);
         self.inner
-            .connect(peer_addr, src_port)
+            .connect(connection.peer_addr, connection.host_port)
             .map_err(as_driver_error)
     }
 
     fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
-        let (peer_addr, src_port) = extract_addr_and_port(cid);
-        match self.inner.send(peer_addr, src_port, buf) {
+        let connection = ConnectionArgs::from_conn_id(cid);
+        match self
+            .inner
+            .send(connection.peer_addr, connection.host_port, buf)
+        {
             Ok(()) => Ok(buf.len()),
             Err(e) => Err(as_driver_error(e)),
         }
     }
 
     fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
-        let (peer_addr, src_port) = extract_addr_and_port(cid);
+        let connection = ConnectionArgs::from_conn_id(cid);
         let res = self
             .inner
-            .recv(peer_addr, src_port, buf)
+            .recv(connection.peer_addr, connection.host_port, buf)
             .map_err(as_driver_error);
-        let _ = self.inner.update_credit(peer_addr, src_port);
+        self.refresh_credit(&connection);
         res
     }
 
     fn recv_avail(&mut self, cid: VsockConnId) -> DriverResult<usize> {
-        let (peer_addr, src_port) = extract_addr_and_port(cid);
+        let connection = ConnectionArgs::from_conn_id(cid);
         self.inner
-            .recv_buffer_available_bytes(peer_addr, src_port)
+            .recv_buffer_available_bytes(connection.peer_addr, connection.host_port)
             .map_err(as_driver_error)
     }
 
     fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        let (peer_addr, src_port) = extract_addr_and_port(cid);
+        let connection = ConnectionArgs::from_conn_id(cid);
         self.inner
-            .shutdown(peer_addr, src_port)
+            .shutdown(connection.peer_addr, connection.host_port)
             .map_err(as_driver_error)
     }
 
     fn abort(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        let (peer_addr, src_port) = extract_addr_and_port(cid);
+        let connection = ConnectionArgs::from_conn_id(cid);
         self.inner
-            .force_close(peer_addr, src_port)
+            .force_close(connection.peer_addr, connection.host_port)
             .map_err(as_driver_error)
     }
 
     fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEventType>> {
-        match self.inner.poll() {
-            Ok(None) => {
-                // no event
-                Ok(None)
-            }
-            Ok(Some(event)) => {
-                // translate event
-                let result = translate_virtio_event(event, &mut self.inner)?;
-                Ok(Some(result))
-            }
-            Err(e) => {
-                // error
-                Err(as_driver_error(e))
-            }
-        }
-    }
-}
-
-fn translate_virtio_event<H: Hal, T: Transport>(
-    event: VsockEvent,
-    _inner: &mut InnerDev<H, T>,
-) -> DriverResult<VsockDriverEventType> {
-    let cid = VsockConnId {
-        peer_addr: vsock::VsockAddr {
-            cid: event.source.cid as _,
-            port: event.source.port as _,
-        },
-        local_port: event.destination.port,
-    };
-
-    match event.event_type {
-        VsockEventType::ConnectionRequest => Ok(VsockDriverEventType::ConnectionRequest(cid)),
-        VsockEventType::Connected => Ok(VsockDriverEventType::Connected(cid)),
-        VsockEventType::Received { length } => Ok(VsockDriverEventType::Received(cid, length)),
-        VsockEventType::Disconnected { reason: _ } => Ok(VsockDriverEventType::Disconnected(cid)),
-        VsockEventType::CreditUpdate => Ok(VsockDriverEventType::CreditUpdate(cid)),
-        _ => Ok(VsockDriverEventType::Unknown),
+        let Some(event) = self.inner.poll().map_err(as_driver_error)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::translate_event(event)))
     }
 }
