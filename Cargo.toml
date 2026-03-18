@@ -137,7 +137,8 @@ pci = { path = "drivers/pci" }
 vsock = { path = "drivers/vsock" }
 virtio = { path = "drivers/virtio" }
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
-fatfs = { path = "fs/fatfs", default-features = false }
+fatfs ={ version = "0.1.0-pre.0", default-features = false, package = "axfatfs"}
+
 rsext4 = { path = "fs/rsext4", default-features = false }
 
 # util Crates
