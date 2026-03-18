@@ -15,6 +15,6 @@ pub struct InterruptController<'b, 'a> {
 impl<'b, 'a: 'b> InterruptController<'b, 'a> {
     /// returns compatible property
     pub fn compatible(self) -> Option<&'a str> {
-        self.node.compatible().and_then(|comp| comp.first())
+        self.node.compatible()
     }
 }

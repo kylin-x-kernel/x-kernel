@@ -2,15 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux kernel nodes
-pub mod chosen;
+//! Minimal Linux kernel nodes
 pub mod dice;
 pub mod interrupt;
-pub mod memory;
-pub mod reserved_memory;
 
-pub use chosen::Chosen;
 pub use dice::Dice;
 pub use interrupt::InterruptController;
-pub use memory::Memory;
-pub use reserved_memory::ReservedMemory;
