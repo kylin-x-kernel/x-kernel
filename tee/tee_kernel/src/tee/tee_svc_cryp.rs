@@ -1138,9 +1138,9 @@ impl tee_crypto_ops for tee_cryp_obj_secret_wrapper {
 
 pub static TEE_CRYP_OBJ_SECRET_VALUE_ATTRS: [tee_cryp_obj_type_attrs; 1] =
     [tee_cryp_obj_type_attrs {
-        attr_id: 1,
-        flags: 0,
-        ops_index: 1,
+        attr_id: TEE_ATTR_SECRET_VALUE,
+        flags: (TEE_TYPE_ATTR_REQUIRED | TEE_TYPE_ATTR_SIZE_INDICATOR) as _,
+        ops_index: ATTR_OPS_INDEX_SECRET as _,
     }];
 
 pub const fn prop(

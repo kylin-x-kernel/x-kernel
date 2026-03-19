@@ -52,7 +52,8 @@ pub fn huk_subkey_derive(
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    tee_otp_get_hw_unique_key(&mut huk)?;
+    tee_otp_get_hw_unique_key(&mut huk)
+        .inspect_err(|_| error!("tee_otp_get_hw_unique_key failed"))?;
 
     // 打印 HUK 值
     tee_debug!("HUK derived: {:?}", huk.data);
