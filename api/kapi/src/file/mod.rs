@@ -280,6 +280,113 @@ pub fn close_file_like(fd: c_int) -> KResult {
     Ok(())
 }
 
+#[cfg(unittest)]
+mod kstat_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn test_kstat_default() {
+        let kstat = Kstat::default();
+        assert_eq!(kstat.dev, 0);
+        assert_eq!(kstat.ino, 1);
+        assert_eq!(kstat.nlink, 1);
+        assert_eq!(kstat.mode, 0);
+        assert_eq!(kstat.uid, 1);
+        assert_eq!(kstat.gid, 1);
+        assert_eq!(kstat.size, 0);
+        assert_eq!(kstat.blksize, 4096);
+        assert_eq!(kstat.blocks, 0);
+        assert_eq!(kstat.atime, Duration::default());
+        assert_eq!(kstat.mtime, Duration::default());
+        assert_eq!(kstat.ctime, Duration::default());
+    }
+
+    #[def_test]
+    fn test_kstat_to_stat() {
+        let kstat = Kstat {
+            dev: 42,
+            ino: 100,
+            nlink: 3,
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+            size: 4096,
+            blksize: 512,
+            blocks: 8,
+            rdev: DeviceId::default(),
+            atime: Duration::new(1000, 500_000_000),
+            mtime: Duration::new(2000, 0),
+            ctime: Duration::new(3000, 123_456_789),
+        };
+
+        let s: stat = kstat.into();
+        assert_eq!(s.st_dev, 42);
+        assert_eq!(s.st_ino, 100);
+        assert_eq!(s.st_nlink, 3);
+        assert_eq!(s.st_mode, 0o755);
+        assert_eq!(s.st_uid, 1000);
+        assert_eq!(s.st_gid, 1000);
+        assert_eq!(s.st_size, 4096);
+        assert_eq!(s.st_blksize, 512);
+        assert_eq!(s.st_blocks, 8);
+        assert_eq!(s.st_atime, 1000);
+        assert_eq!(s.st_atime_nsec, 500_000_000);
+        assert_eq!(s.st_mtime, 2000);
+        assert_eq!(s.st_mtime_nsec, 0);
+        assert_eq!(s.st_ctime, 3000);
+        assert_eq!(s.st_ctime_nsec, 123_456_789);
+    }
+
+    #[def_test]
+    fn test_kstat_to_statx() {
+        let kstat = Kstat {
+            dev: (5u64 << 32) | 10,
+            ino: 200,
+            nlink: 2,
+            mode: 0o644,
+            uid: 500,
+            gid: 500,
+            size: 8192,
+            blksize: 4096,
+            blocks: 16,
+            rdev: DeviceId::default(),
+            atime: Duration::new(100, 999_999_999),
+            mtime: Duration::new(200, 0),
+            ctime: Duration::new(300, 1),
+        };
+
+        let sx: statx = kstat.into();
+        assert_eq!(sx.stx_ino, 200);
+        assert_eq!(sx.stx_nlink, 2);
+        assert_eq!(sx.stx_mode, 0o644);
+        assert_eq!(sx.stx_uid, 500);
+        assert_eq!(sx.stx_gid, 500);
+        assert_eq!(sx.stx_size, 8192);
+        assert_eq!(sx.stx_blksize, 4096);
+        assert_eq!(sx.stx_blocks, 16);
+        assert_eq!(sx.stx_dev_major, 5);
+        assert_eq!(sx.stx_dev_minor, 10);
+        assert_eq!(sx.stx_atime.tv_sec, 100);
+        assert_eq!(sx.stx_atime.tv_nsec, 999_999_999);
+        assert_eq!(sx.stx_mtime.tv_sec, 200);
+        assert_eq!(sx.stx_mtime.tv_nsec, 0);
+        assert_eq!(sx.stx_ctime.tv_sec, 300);
+        assert_eq!(sx.stx_ctime.tv_nsec, 1);
+    }
+
+    #[def_test]
+    fn test_kstat_default_to_stat_zeroed() {
+        let s: stat = Kstat::default().into();
+        assert_eq!(s.st_dev, 0);
+        assert_eq!(s.st_size, 0);
+        assert_eq!(s.st_blksize, 4096);
+        assert_eq!(s.st_ino, 1);
+        assert_eq!(s.st_nlink, 1);
+    }
+}
+
 pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { FILE_LIMIT }>) -> KResult<()> {
     assert_eq!(fd_table.count(), 0);
     let cx = FS_CONTEXT.lock();

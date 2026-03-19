@@ -424,4 +424,34 @@ pub mod tests_shm {
         inner.detach_process(1);
         assert_eq!(inner.attach_count(), 0);
     }
+
+    #[def_test]
+    fn test_bibtree_remove_by_key_and_value() {
+        let mut map: BiBTreeMap<u32, u32> = BiBTreeMap::new();
+        map.insert(1, 10);
+        map.insert(2, 20);
+
+        assert_eq!(map.remove_by_key(&1), Some(10));
+        assert_eq!(map.get_by_key(&1), None);
+        assert_eq!(map.get_by_value(&10), None);
+
+        assert_eq!(map.remove_by_value(&20), Some(2));
+        assert_eq!(map.get_by_key(&2), None);
+        assert_eq!(map.get_by_value(&20), None);
+        assert_eq!(map.remove_by_key(&99), None);
+        assert_eq!(map.remove_by_value(&99), None);
+    }
+
+    #[def_test]
+    fn test_shminner_map_to_phys_and_mode_mismatch() {
+        let mut inner = ShmInner::new(7, 8, 5000, MappingFlags::READ | MappingFlags::WRITE, 9);
+        assert_eq!(inner.page_num, 2);
+        assert!(inner.phys_pages.is_none());
+        assert!(
+            inner
+                .try_update(5000, MappingFlags::READ | MappingFlags::WRITE, 10)
+                .is_ok()
+        );
+        assert!(inner.try_update(5000, MappingFlags::READ, 10).is_err());
+    }
 }

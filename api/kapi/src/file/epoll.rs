@@ -581,4 +581,62 @@ mod epoll_tests {
         let result = epoll.poll_events(&mut events);
         assert_eq!(result, Err(KError::WouldBlock));
     }
+
+    #[def_test]
+    fn test_epoll_poll_no_events() {
+        use kpoll::Pollable;
+        let epoll = Epoll::new();
+        let events = epoll.poll();
+        assert!(!events.contains(IoEvents::IN));
+    }
+
+    #[def_test]
+    fn test_epoll_poll_events_empty() {
+        let epoll = Epoll::new();
+        let mut out = [epoll_event { events: 0, data: 0 }; 4];
+        let result = epoll.poll_events(&mut out);
+        assert_eq!(result, Err(KError::WouldBlock));
+    }
+
+    #[def_test]
+    fn test_epoll_delete_nonexistent() {
+        let epoll = Epoll::new();
+        let result = epoll.delete(999);
+        assert!(result.is_err());
+    }
+
+    #[def_test]
+    fn test_epoll_modify_nonexistent() {
+        let epoll = Epoll::new();
+        let event = EpollEvent {
+            events: IoEvents::IN,
+            user_data: 0,
+        };
+        let result = epoll.modify(999, event, EpollFlags::empty());
+        assert!(result.is_err());
+    }
+
+    #[def_test]
+    fn test_epoll_default() {
+        let epoll = Epoll::default();
+        assert_eq!(epoll.path(), "anon_inode:[eventpoll]");
+    }
+
+    #[def_test]
+    fn test_consume_result_variants() {
+        let ev1 = EpollEvent {
+            events: IoEvents::IN,
+            user_data: 1,
+        };
+        let ev2 = EpollEvent {
+            events: IoEvents::IN,
+            user_data: 2,
+        };
+        let keep = ConsumeResult::EventAndKeep(ev1);
+        let remove = ConsumeResult::EventAndRemove(ev2);
+        let none = ConsumeResult::NoEvent;
+        assert!(!matches!(keep, ConsumeResult::NoEvent));
+        assert!(!matches!(remove, ConsumeResult::NoEvent));
+        assert!(matches!(none, ConsumeResult::NoEvent));
+    }
 }

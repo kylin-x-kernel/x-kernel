@@ -50,4 +50,11 @@ pub mod tests_config {
         assert!(USER_HEAP_SIZE > 0);
         assert!(USER_HEAP_SIZE_MAX >= USER_HEAP_SIZE);
     }
+
+    #[def_test]
+    fn test_signal_trampoline_and_heap_base_ordering() {
+        assert!(SIGNAL_TRAMPOLINE > USER_SPACE_BASE);
+        assert!(USER_HEAP_BASE >= USER_SPACE_BASE);
+        assert!(USER_HEAP_BASE + USER_HEAP_SIZE <= USER_SPACE_BASE + USER_SPACE_SIZE);
+    }
 }

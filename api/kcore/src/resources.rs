@@ -95,4 +95,27 @@ pub mod tests_resources {
         );
         assert_eq!(limits[RLIMIT_NOFILE].current, FILE_LIMIT as u64);
     }
+
+    #[def_test]
+    fn test_rlimits_index_mut_updates_selected_limit() {
+        let mut limits = Rlimits::default();
+        limits[RLIMIT_NOFILE] = Rlimit::new(128, 256);
+
+        assert_eq!(limits[RLIMIT_NOFILE].current, 128);
+        assert_eq!(limits[RLIMIT_NOFILE].max, 256);
+        assert_eq!(
+            limits[RLIMIT_STACK].current,
+            crate::config::USER_STACK_SIZE as u64
+        );
+    }
+
+    #[def_test]
+    fn test_rlimits_preserve_stack_max_default() {
+        let limits = Rlimits::default();
+        assert_eq!(
+            limits[RLIMIT_STACK].max,
+            crate::config::USER_STACK_SIZE as u64
+        );
+        assert_eq!(limits[RLIMIT_NOFILE].max, FILE_LIMIT as u64);
+    }
 }

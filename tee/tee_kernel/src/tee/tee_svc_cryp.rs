@@ -2963,6 +2963,21 @@ pub mod tests_tee_svc_cryp {
     }
 
     #[unittest::def_test]
+    fn test_op_attr_secret_value_from_binary_rejects_bad_inputs() {
+        let mut secret_wrapper = tee_cryp_obj_secret_wrapper::new(8);
+        let mut offs: size_t = 0;
+
+        let truncated = [0x00, 0x00, 0x00, 0x04, 0xAA, 0xBB];
+        let result = op_attr_secret_value_from_binary(&mut secret_wrapper, &truncated, &mut offs);
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+
+        let oversized = [0x00, 0x00, 0x00, 0x10];
+        offs = 0;
+        let result = op_attr_secret_value_from_binary(&mut secret_wrapper, &oversized, &mut offs);
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    }
+
+    #[unittest::def_test]
     fn test_op_u32_from_binary_helper() {
         let data: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
         let mut offs: size_t = 0;
@@ -3021,6 +3036,19 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(&user_buffer.read()[..4], value_bytes);
     }
 
+    #[unittest::def_test(custom)]
+    fn test_op_attr_value_to_user_short_buffer() {
+        let mut attr: [u8; 8] = [0; 8];
+        let value: u32 = 0x11223344;
+        attr[..4].copy_from_slice(&value.to_ne_bytes());
+
+        let mut size = TestUserValue::<u64>::from_value(4).unwrap();
+        let mut user_buffer = crate::user_vec![0u8; 4];
+
+        let result = op_attr_value_to_user(&attr, user_buffer.as_user_slice(), size.as_user_ref());
+        assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
+    }
+
     #[unittest::def_test]
     fn test_op_attr_value_from_binary() {
         let mut attr: [u8; 8] = [0; 8];
@@ -3075,6 +3103,18 @@ pub mod tests_tee_svc_cryp {
         assert_eq!(obj.info.dataPosition, 0);
         assert_eq!(obj.attr.len(), 1);
         assert!(matches!(obj.attr[0], TeeCryptObj::ecc_public_key(_)));
+    }
+
+    #[unittest::def_test]
+    fn test_tee_obj_set_type_rejects_invalid_reuse_and_key_size() {
+        let mut obj = tee_obj::default();
+        obj.attr.push(TeeCryptObj::None);
+        let result = tee_obj_set_type(&mut obj, TEE_TYPE_DATA, 0);
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_STATE));
+
+        let mut data_obj = tee_obj::default();
+        let result = tee_obj_set_type(&mut data_obj, TEE_TYPE_DATA, 1);
+        assert_eq!(result.err(), Some(TEE_ERROR_NOT_SUPPORTED));
     }
 
     #[unittest::def_test(custom)]

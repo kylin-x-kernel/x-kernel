@@ -280,4 +280,18 @@ pub mod tests_futex {
         assert!(table.get(&key).is_none());
         assert!(table.is_empty());
     }
+
+    #[def_test]
+    fn test_futextable_get_missing_and_persist_with_multiple_guards() {
+        let table = FutexTable::new();
+        let key = FutexKey::Private { address: 0x2000 };
+        assert!(table.get(&key).is_none());
+
+        let guard1 = table.get_or_insert(&key);
+        let guard2 = table.get(&key).unwrap();
+        drop(guard1);
+        assert!(table.get(&key).is_some());
+        drop(guard2);
+        assert!(table.get(&key).is_none());
+    }
 }

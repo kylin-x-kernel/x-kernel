@@ -1416,7 +1416,7 @@ pub fn syscall_storage_next_enum(
 
 #[unittest::mod_test]
 pub mod tests_tee_svc_storage {
-    use unittest::{assert, assert_eq};
+    use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
     use crate::{TestUserBuffer, TestUserValue};
@@ -1589,6 +1589,15 @@ pub mod tests_tee_svc_storage {
         assert!(result.is_err());
     }
 
+    #[unittest::def_test]
+    fn test_tee_b2hs_empty_input() {
+        let mut hs = [0u8; tee_b2hs_hsbuf_size(0)];
+        let result = tee_b2hs(&[], &mut hs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(hs, [0]);
+    }
+
     #[unittest::def_test(custom)]
     fn test_syscall_storage_obj_create_type_data() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
@@ -1731,6 +1740,36 @@ pub mod tests_tee_svc_storage {
     fn test_syscall_storage_init() {}
 
     #[unittest::def_test(custom)]
+    fn test_syscall_storage_obj_create_rejects_invalid_parameters() {
+        let object_id = user_buffer_from_bytes(b"invalid_create");
+        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+
+        let result = syscall_storage_obj_create(
+            TEE_STORAGE_PRIVATE as c_ulong,
+            object_id.as_user_ptr::<u8>() as *mut c_void,
+            "invalid_create".len(),
+            1u64 << 63,
+            TEE_HANDLE_NULL as c_ulong,
+            core::ptr::null_mut(),
+            0,
+            obj.as_user_ref(),
+        );
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+
+        let result = syscall_storage_obj_create(
+            TEE_STORAGE_PRIVATE as c_ulong,
+            object_id.as_user_ptr::<u8>() as *mut c_void,
+            "invalid_create".len(),
+            TEE_DATA_FLAG_ACCESS_READ as c_ulong,
+            TEE_HANDLE_NULL as c_ulong,
+            core::ptr::null_mut(),
+            4,
+            obj.as_user_ref(),
+        );
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    }
+
+    #[unittest::def_test(custom)]
     fn test_syscall_storage_obj_open() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
         let object_id = "test_object";
@@ -1775,6 +1814,63 @@ pub mod tests_tee_svc_storage {
 
         let opened_obj_id = obj.read() as c_ulong;
         let result = syscall_storage_obj_del(opened_obj_id);
+        assert!(result.is_ok());
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_syscall_storage_obj_open_rejects_invalid_parameters() {
+        let object_id = user_buffer_from_bytes(b"missing_object");
+        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+
+        let result = syscall_storage_obj_open(
+            TEE_STORAGE_PRIVATE as c_ulong,
+            object_id.as_user_ptr::<u8>() as *mut c_void,
+            "missing_object".len(),
+            1u64 << 62,
+            obj.as_user_ref(),
+        );
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+
+        let result = syscall_storage_obj_open(
+            TEE_STORAGE_PRIVATE as c_ulong,
+            object_id.as_user_ptr::<u8>() as *mut c_void,
+            "missing_object".len(),
+            TEE_DATA_FLAG_ACCESS_READ as c_ulong,
+            obj.as_user_ref(),
+        );
+        assert!(result.is_err());
+        assert_ne!(result.unwrap_err(), TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_syscall_storage_obj_seek_rejects_invalid_whence() {
+        let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
+        let object_id = "seek_invalid_whence";
+        let data_create = b"seek_data";
+        let object_id_user = user_buffer_from_bytes(object_id.as_bytes());
+        let data_create_user = user_buffer_from_bytes(data_create);
+        let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+
+        let result = syscall_storage_obj_create(
+            storage_id,
+            object_id_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id.len(),
+            (TEE_DATA_FLAG_ACCESS_READ
+                | TEE_DATA_FLAG_ACCESS_WRITE
+                | TEE_DATA_FLAG_ACCESS_WRITE_META
+                | TEE_DATA_FLAG_OVERWRITE) as c_ulong,
+            TEE_HANDLE_NULL as c_ulong,
+            data_create_user.as_user_ptr::<u8>() as *mut c_void,
+            data_create.len(),
+            obj.as_user_ref(),
+        );
+        assert!(result.is_ok());
+
+        let obj_id = obj.read() as c_ulong;
+        let result = syscall_storage_obj_seek(obj_id, 0, 0xFFFF_FFFF);
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+
+        let result = syscall_storage_obj_del(obj_id);
         assert!(result.is_ok());
     }
 }

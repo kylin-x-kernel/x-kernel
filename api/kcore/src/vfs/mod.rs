@@ -46,12 +46,28 @@ impl<T: FileNodeOps> From<Arc<T>> for NodeOpsMux {
 /// Unit tests.
 #[cfg(unittest)]
 pub mod tests_vfs {
-    use alloc::sync::Arc;
+    use alloc::{boxed::Box, sync::Arc};
 
     use fs_ng_vfs::{DirNodeOps, VfsError, WeakDirEntry};
     use unittest::{TestResult, def_test};
 
     use super::{DirMapping, NodeOpsMux, SimpleDirOps, dummy_stat_fs};
+
+    struct NonCacheableDir;
+
+    impl SimpleDirOps for NonCacheableDir {
+        fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = alloc::borrow::Cow<'a, str>> + 'a> {
+            Box::new(core::iter::empty())
+        }
+
+        fn lookup_child(&self, _name: &str) -> fs_ng_vfs::VfsResult<NodeOpsMux> {
+            Err(VfsError::NotFound)
+        }
+
+        fn supports_dentry_cache(&self) -> bool {
+            false
+        }
+    }
 
     fn dummy_dir_maker() -> super::DirMaker {
         Arc::new(|_this: WeakDirEntry| -> Arc<dyn DirNodeOps> {
@@ -94,6 +110,52 @@ pub mod tests_vfs {
         assert!(matches!(
             chained.lookup_child("missing"),
             Err(VfsError::NotFound)
+        ));
+    }
+
+    #[def_test]
+    fn test_dirmapping_overwrite_existing_child() {
+        let mut map = DirMapping::new();
+        map.add("node", NodeOpsMux::from(dummy_dir_maker()));
+        map.add("node", NodeOpsMux::from(dummy_dir_maker()));
+        assert!(matches!(map.lookup_child("node"), Ok(NodeOpsMux::Dir(_))));
+    }
+
+    #[def_test]
+    fn test_chained_dir_ops_supports_dentry_cache_when_both_do() {
+        let left = DirMapping::new();
+        let right = DirMapping::new();
+        assert!(left.chain(right).supports_dentry_cache());
+        assert!(
+            !DirMapping::new()
+                .chain(NonCacheableDir)
+                .supports_dentry_cache()
+        );
+    }
+
+    #[def_test]
+    fn test_chained_dir_ops_prefers_left_non_notfound_error() {
+        struct ErrorDir;
+
+        impl SimpleDirOps for ErrorDir {
+            fn child_names<'a>(
+                &'a self,
+            ) -> Box<dyn Iterator<Item = alloc::borrow::Cow<'a, str>> + 'a> {
+                Box::new(core::iter::empty())
+            }
+
+            fn lookup_child(&self, _name: &str) -> fs_ng_vfs::VfsResult<NodeOpsMux> {
+                Err(VfsError::PermissionDenied)
+            }
+        }
+
+        let mut right = DirMapping::new();
+        right.add("node", NodeOpsMux::from(dummy_dir_maker()));
+
+        let chained = ErrorDir.chain(right);
+        assert!(matches!(
+            chained.lookup_child("node"),
+            Err(VfsError::PermissionDenied)
         ));
     }
 }

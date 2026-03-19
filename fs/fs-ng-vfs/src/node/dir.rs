@@ -409,3 +409,533 @@ impl DirNode {
         }
     }
 }
+
+#[cfg(unittest)]
+mod tests_dir {
+    use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+    use core::{
+        any::Any,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    use kpoll::{IoEvents, Pollable};
+    use unittest::def_test;
+
+    use super::{DirEntrySink, DirNode, DirNodeOps, OpenOptions};
+    use crate::{
+        DirEntry, FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeOps,
+        NodePermission, NodeType, Reference, StatFs, VfsError, VfsResult, path::MAX_NAME_LEN,
+    };
+
+    struct MockFilesystem;
+
+    impl FilesystemOps for MockFilesystem {
+        fn name(&self) -> &str {
+            "mockfs"
+        }
+
+        fn root_dir(&self) -> DirEntry {
+            panic!("root_dir is not used in these tests")
+        }
+
+        fn stat(&self) -> VfsResult<StatFs> {
+            Ok(StatFs {
+                fs_type: 0,
+                block_size: 0,
+                blocks: 0,
+                blocks_free: 0,
+                blocks_available: 0,
+                file_count: 0,
+                free_file_count: 0,
+                name_length: MAX_NAME_LEN as u32,
+                fragment_size: 0,
+                mount_flags: 0,
+            })
+        }
+    }
+
+    struct MockFileNodeOps {
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+        data: crate::Mutex<Vec<u8>>,
+        owner: crate::Mutex<Option<(u32, u32)>>,
+    }
+
+    impl MockFileNodeOps {
+        fn new(fs: Arc<MockFilesystem>, inode: u64) -> Self {
+            Self {
+                fs,
+                inode,
+                data: crate::Mutex::new(Vec::new()),
+                owner: crate::Mutex::new(None),
+            }
+        }
+    }
+
+    impl NodeOps for MockFileNodeOps {
+        fn inode(&self) -> u64 {
+            self.inode
+        }
+
+        fn metadata(&self) -> VfsResult<Metadata> {
+            Ok(Metadata {
+                device: 0,
+                inode: self.inode,
+                nlink: 1,
+                mode: NodePermission::default(),
+                node_type: NodeType::RegularFile,
+                uid: 0,
+                gid: 0,
+                size: self.data.lock().len() as u64,
+                block_size: 512,
+                blocks: 1,
+                rdev: Default::default(),
+                atime: Duration::ZERO,
+                mtime: Duration::ZERO,
+                ctime: Duration::ZERO,
+            })
+        }
+
+        fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+            *self.owner.lock() = update.owner;
+            Ok(())
+        }
+
+        fn filesystem(&self) -> &dyn FilesystemOps {
+            self.fs.as_ref()
+        }
+
+        fn sync(&self, _data_only: bool) -> VfsResult<()> {
+            Ok(())
+        }
+
+        fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
+        }
+    }
+
+    impl Pollable for MockFileNodeOps {
+        fn poll(&self) -> IoEvents {
+            IoEvents::IN | IoEvents::OUT
+        }
+
+        fn register(&self, _context: &mut core::task::Context<'_>, _events: IoEvents) {}
+    }
+
+    impl FileNodeOps for MockFileNodeOps {
+        fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+            Ok(0)
+        }
+
+        fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
+            Ok(0)
+        }
+
+        fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
+            Ok((buf.len(), buf.len() as u64))
+        }
+
+        fn set_len(&self, len: u64) -> VfsResult<()> {
+            self.data.lock().resize(len as usize, 0);
+            Ok(())
+        }
+
+        fn set_symlink(&self, target: &str) -> VfsResult<()> {
+            *self.data.lock() = target.as_bytes().to_vec();
+            Ok(())
+        }
+    }
+
+    struct MockDirNodeOps {
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+        cacheable: bool,
+        next_inode: AtomicUsize,
+        lookup_count: AtomicUsize,
+        entries: crate::Mutex<BTreeMap<String, DirEntry>>,
+    }
+
+    impl MockDirNodeOps {
+        fn new(fs: Arc<MockFilesystem>, inode: u64, cacheable: bool) -> Self {
+            Self {
+                fs,
+                inode,
+                cacheable,
+                next_inode: AtomicUsize::new(100),
+                lookup_count: AtomicUsize::new(0),
+                entries: crate::Mutex::new(BTreeMap::new()),
+            }
+        }
+
+        fn insert_entry(&self, name: &str, entry: DirEntry) {
+            self.entries.lock().insert(String::from(name), entry);
+        }
+    }
+
+    impl NodeOps for MockDirNodeOps {
+        fn inode(&self) -> u64 {
+            self.inode
+        }
+
+        fn metadata(&self) -> VfsResult<Metadata> {
+            Ok(Metadata {
+                device: 0,
+                inode: self.inode,
+                nlink: 1,
+                mode: NodePermission::default(),
+                node_type: NodeType::Directory,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                block_size: 512,
+                blocks: 1,
+                rdev: Default::default(),
+                atime: Duration::ZERO,
+                mtime: Duration::ZERO,
+                ctime: Duration::ZERO,
+            })
+        }
+
+        fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
+            Ok(())
+        }
+
+        fn filesystem(&self) -> &dyn FilesystemOps {
+            self.fs.as_ref()
+        }
+
+        fn sync(&self, _data_only: bool) -> VfsResult<()> {
+            Ok(())
+        }
+
+        fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
+        }
+    }
+
+    impl DirNodeOps for MockDirNodeOps {
+        fn read_dir(&self, _offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+            let mut count = 0;
+            for (index, (name, entry)) in self.entries.lock().iter().enumerate() {
+                if !sink.accept(name, entry.inode(), entry.node_type(), index as u64 + 1) {
+                    break;
+                }
+                count += 1;
+            }
+            Ok(count)
+        }
+
+        fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+            self.lookup_count.fetch_add(1, Ordering::Relaxed);
+            self.entries
+                .lock()
+                .get(name)
+                .cloned()
+                .ok_or(VfsError::NotFound)
+        }
+
+        fn supports_dentry_cache(&self) -> bool {
+            self.cacheable
+        }
+
+        fn create(
+            &self,
+            name: &str,
+            node_type: NodeType,
+            _permission: NodePermission,
+        ) -> VfsResult<DirEntry> {
+            let inode = self.next_inode.fetch_add(1, Ordering::Relaxed) as u64;
+            let entry = match node_type {
+                NodeType::Directory => DirEntry::new_dir(
+                    |_| DirNode::new(Arc::new(MockDirNodeOps::new(self.fs.clone(), inode, true))),
+                    Reference::new(None, String::from(name)),
+                ),
+                _ => DirEntry::new_file(
+                    FileNode::new(Arc::new(MockFileNodeOps::new(self.fs.clone(), inode))),
+                    node_type,
+                    Reference::new(None, String::from(name)),
+                ),
+            };
+            self.entries
+                .lock()
+                .insert(String::from(name), entry.clone());
+            Ok(entry)
+        }
+
+        fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
+            self.entries.lock().insert(String::from(name), node.clone());
+            Ok(node.clone())
+        }
+
+        fn unlink(&self, name: &str) -> VfsResult<()> {
+            self.entries.lock().remove(name).ok_or(VfsError::NotFound)?;
+            Ok(())
+        }
+
+        fn rename(&self, src_name: &str, _dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+            let entry = self
+                .entries
+                .lock()
+                .remove(src_name)
+                .ok_or(VfsError::NotFound)?;
+            self.entries.lock().insert(String::from(dst_name), entry);
+            Ok(())
+        }
+    }
+
+    fn make_file_entry(
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+        name: &str,
+    ) -> (DirEntry, Arc<MockFileNodeOps>) {
+        let ops = Arc::new(MockFileNodeOps::new(fs, inode));
+        let entry = DirEntry::new_file(
+            FileNode::new(ops.clone()),
+            NodeType::RegularFile,
+            Reference::new(None, String::from(name)),
+        );
+        (entry, ops)
+    }
+
+    #[def_test]
+    fn test_open_options_default_values() {
+        let options = OpenOptions::default();
+        assert!(!options.create);
+        assert!(!options.create_new);
+        assert_eq!(options.node_type, NodeType::RegularFile);
+        assert_eq!(options.permission.bits(), NodePermission::default().bits());
+        assert!(options.user.is_none());
+    }
+
+    #[def_test]
+    fn test_dirnode_lookup_uses_cache_when_enabled() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs.clone(), 1, true));
+        let dir = DirNode::new(ops.clone());
+        let (entry, _) = make_file_entry(fs, 11, "cached");
+        ops.insert_entry("cached", entry.clone());
+
+        let first = dir.lookup("cached").unwrap();
+        let second = dir.lookup("cached").unwrap();
+
+        assert!(first.ptr_eq(&second));
+        assert!(dir.lookup_cache("cached").is_some());
+        assert_eq!(ops.lookup_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test]
+    fn test_dirnode_lookup_without_cache_hits_backend_each_time() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs.clone(), 2, false));
+        let dir = DirNode::new(ops.clone());
+        let (entry, _) = make_file_entry(fs, 12, "dynamic");
+        ops.insert_entry("dynamic", entry.clone());
+
+        assert!(dir.lookup_cache("dynamic").is_none());
+        assert!(
+            dir.insert_cache(String::from("dynamic"), entry.clone())
+                .is_none()
+        );
+        assert!(dir.lookup("dynamic").unwrap().ptr_eq(&entry));
+        assert!(dir.lookup("dynamic").unwrap().ptr_eq(&entry));
+        assert_eq!(ops.lookup_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[def_test]
+    fn test_dirnode_lookup_rejects_names_too_long() {
+        let fs = Arc::new(MockFilesystem);
+        let dir = DirNode::new(Arc::new(MockDirNodeOps::new(fs, 3, true)));
+        let name = "a".repeat(MAX_NAME_LEN + 1);
+
+        let result = dir.lookup(&name);
+        assert!(matches!(result, Err(VfsError::NameTooLong)));
+    }
+
+    #[def_test]
+    fn test_open_file_handles_existing_and_missing_entries() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs.clone(), 4, true));
+        let dir = DirNode::new(ops.clone());
+        let (existing, _) = make_file_entry(fs, 13, "exists");
+        ops.insert_entry("exists", existing.clone());
+
+        let exists_err = dir.open_file(
+            "exists",
+            &OpenOptions {
+                create_new: true,
+                ..OpenOptions::default()
+            },
+        );
+        assert!(matches!(exists_err, Err(VfsError::AlreadyExists)));
+
+        let missing_err = dir.open_file("missing", &OpenOptions::default());
+        assert!(matches!(missing_err, Err(VfsError::NotFound)));
+    }
+
+    #[def_test]
+    fn test_open_file_create_updates_owner_metadata() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs, 5, true));
+        let dir = DirNode::new(ops);
+        let owner = (1000, 1001);
+        let entry = dir
+            .open_file(
+                "created",
+                &OpenOptions {
+                    create: true,
+                    user: Some(owner),
+                    ..OpenOptions::default()
+                },
+            )
+            .unwrap();
+
+        let file = entry.downcast::<MockFileNodeOps>().unwrap();
+        assert_eq!(*file.owner.lock(), Some(owner));
+    }
+
+    #[def_test]
+    fn test_dirnode_link_inserts_cache_and_has_children_skips_dot_entries() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs.clone(), 6, true));
+        let dir = DirNode::new(ops);
+        let (entry, _) = make_file_entry(fs, 21, "linked");
+
+        let linked = dir.link("linked", &entry).unwrap();
+        assert!(linked.ptr_eq(&entry));
+        assert!(dir.lookup_cache("linked").unwrap().ptr_eq(&entry));
+        assert!(dir.has_children().unwrap());
+    }
+
+    #[def_test]
+    fn test_dirnode_unlink_rejects_type_mismatch_and_clears_cache() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs.clone(), 7, true));
+        let dir = DirNode::new(ops);
+        let file = dir
+            .create("file", NodeType::RegularFile, NodePermission::default())
+            .unwrap();
+        let child_dir = dir
+            .create("subdir", NodeType::Directory, NodePermission::default())
+            .unwrap();
+
+        assert!(matches!(
+            dir.unlink("file", true),
+            Err(VfsError::NotADirectory)
+        ));
+        assert!(matches!(
+            dir.unlink("subdir", false),
+            Err(VfsError::IsADirectory)
+        ));
+
+        dir.unlink("file", false).unwrap();
+        assert!(dir.lookup_cache("file").is_none());
+        assert!(!file.ptr_eq(&child_dir));
+    }
+
+    #[def_test]
+    fn test_dirnode_create_validates_special_and_long_names() {
+        let fs = Arc::new(MockFilesystem);
+        let dir = DirNode::new(Arc::new(MockDirNodeOps::new(fs, 8, true)));
+        let too_long = "b".repeat(MAX_NAME_LEN + 1);
+
+        assert!(matches!(
+            dir.create(".", NodeType::RegularFile, NodePermission::default()),
+            Err(VfsError::InvalidInput)
+        ));
+        assert!(matches!(
+            dir.create(&too_long, NodeType::RegularFile, NodePermission::default()),
+            Err(VfsError::NameTooLong)
+        ));
+    }
+
+    #[def_test]
+    fn test_dirnode_rename_rejects_non_empty_dir_and_dir_target_for_file() {
+        let fs = Arc::new(MockFilesystem);
+        let src_ops = Arc::new(MockDirNodeOps::new(fs.clone(), 9, true));
+        let dst_ops = Arc::new(MockDirNodeOps::new(fs.clone(), 10, true));
+        let src_dir = DirNode::new(src_ops.clone());
+        let dst_dir = DirNode::new(dst_ops.clone());
+
+        src_dir
+            .create("src", NodeType::RegularFile, NodePermission::default())
+            .unwrap();
+        let dst_entry = dst_dir
+            .create("dst", NodeType::Directory, NodePermission::default())
+            .unwrap();
+        dst_entry
+            .as_dir()
+            .unwrap()
+            .create("child", NodeType::RegularFile, NodePermission::default())
+            .unwrap();
+
+        assert!(matches!(
+            src_dir.rename("src", &dst_dir, "dst"),
+            Err(VfsError::IsADirectory)
+        ));
+
+        let src_subdir = src_dir
+            .create("srcdir", NodeType::Directory, NodePermission::default())
+            .unwrap();
+        let dst_subdir = dst_dir
+            .create("dstdir", NodeType::Directory, NodePermission::default())
+            .unwrap();
+        dst_subdir
+            .as_dir()
+            .unwrap()
+            .create("nested", NodeType::RegularFile, NodePermission::default())
+            .unwrap();
+
+        assert!(matches!(
+            src_subdir.as_dir().unwrap().rename(".", &dst_dir, "dstdir"),
+            Err(VfsError::InvalidInput)
+        ));
+        assert!(matches!(
+            src_dir.rename("srcdir", &dst_dir, "dstdir"),
+            Err(VfsError::DirectoryNotEmpty)
+        ));
+    }
+
+    #[def_test]
+    fn test_dirnode_rename_same_dir_updates_cache() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs, 11, true));
+        let dir = DirNode::new(ops);
+
+        let original = dir
+            .create("old", NodeType::RegularFile, NodePermission::default())
+            .unwrap();
+        assert!(dir.lookup_cache("old").is_some());
+
+        dir.rename("old", &dir, "new").unwrap();
+
+        assert!(dir.lookup_cache("old").is_none());
+        let renamed = dir.lookup("new").unwrap();
+        assert_eq!(renamed.name(), "old");
+        assert_eq!(renamed.inode(), original.inode());
+    }
+
+    #[def_test]
+    fn test_dirnode_forget_recursively_clears_child_caches() {
+        let fs = Arc::new(MockFilesystem);
+        let ops = Arc::new(MockDirNodeOps::new(fs, 12, true));
+        let dir = DirNode::new(ops);
+
+        let child = dir
+            .create("child", NodeType::Directory, NodePermission::default())
+            .unwrap();
+        child
+            .as_dir()
+            .unwrap()
+            .create("leaf", NodeType::RegularFile, NodePermission::default())
+            .unwrap();
+
+        assert!(dir.lookup_cache("child").is_some());
+        assert!(child.as_dir().unwrap().lookup_cache("leaf").is_some());
+
+        dir.forget();
+
+        assert!(dir.lookup_cache("child").is_none());
+        assert!(child.as_dir().unwrap().lookup_cache("leaf").is_none());
+    }
+}

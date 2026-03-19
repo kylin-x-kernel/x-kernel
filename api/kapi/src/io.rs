@@ -181,3 +181,37 @@ impl IoBufMut for IoVectorBufIo {
         self.inner.len
     }
 }
+
+#[cfg(unittest)]
+mod io_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn test_iovec_layout() {
+        assert_eq!(
+            core::mem::size_of::<IoVec>(),
+            core::mem::size_of::<*mut u8>() + core::mem::size_of::<isize>()
+        );
+    }
+
+    #[def_test]
+    fn test_io_vector_buf_default() {
+        let buf = IoVectorBuf::default();
+        assert_eq!(buf.iovcnt, 0);
+        assert_eq!(buf.len, 0);
+    }
+
+    #[def_test]
+    fn test_io_vector_buf_io_remaining() {
+        let buf = IoVectorBuf {
+            iovs: core::ptr::null(),
+            iovcnt: 0,
+            len: 42,
+        };
+        let io = buf.into_io();
+        assert_eq!(io.remaining(), 42);
+        assert_eq!(io.remaining_mut(), 42);
+    }
+}

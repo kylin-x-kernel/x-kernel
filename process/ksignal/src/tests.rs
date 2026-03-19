@@ -6,9 +6,22 @@
 
 #![cfg(unittest)]
 
+use alloc::format;
+
+use kspin::SpinNoIrq;
 use unittest::{assert, assert_eq, def_test};
 
-use crate::{DefaultSignalAction, PendingSignals, SignalInfo, SignalSet, Signo};
+use crate::{
+    DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
+    SignalInfo, SignalSet, SignalStack, Signo,
+    api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
+};
+
+fn new_thread_manager() -> alloc::sync::Arc<ThreadSignalManager> {
+    let actions = alloc::sync::Arc::new(SpinNoIrq::new(SignalActions::default()));
+    let proc = alloc::sync::Arc::new(ProcessSignalManager::new(actions, 0));
+    ThreadSignalManager::new(1, proc)
+}
 
 #[def_test]
 fn test_signo_properties() {
@@ -130,4 +143,250 @@ fn test_pending_signals_rt() {
 
     let d3 = pending.dequeue_signal(&mask);
     assert!(d3.is_none());
+}
+
+#[def_test]
+fn test_signo_default_action_full() {
+    use DefaultSignalAction::*;
+    let expected: &[(Signo, DefaultSignalAction)] = &[
+        (Signo::SIGHUP, Terminate),
+        (Signo::SIGINT, Terminate),
+        (Signo::SIGQUIT, CoreDump),
+        (Signo::SIGILL, CoreDump),
+        (Signo::SIGTRAP, CoreDump),
+        (Signo::SIGABRT, CoreDump),
+        (Signo::SIGBUS, CoreDump),
+        (Signo::SIGFPE, CoreDump),
+        (Signo::SIGKILL, Terminate),
+        (Signo::SIGUSR1, Terminate),
+        (Signo::SIGSEGV, CoreDump),
+        (Signo::SIGUSR2, Terminate),
+        (Signo::SIGPIPE, Terminate),
+        (Signo::SIGALRM, Terminate),
+        (Signo::SIGTERM, Terminate),
+        (Signo::SIGSTKFLT, Terminate),
+        (Signo::SIGCHLD, Ignore),
+        (Signo::SIGCONT, Continue),
+        (Signo::SIGSTOP, Stop),
+        (Signo::SIGTSTP, Stop),
+        (Signo::SIGTTIN, Stop),
+        (Signo::SIGTTOU, Stop),
+        (Signo::SIGURG, Ignore),
+        (Signo::SIGXCPU, CoreDump),
+        (Signo::SIGXFSZ, CoreDump),
+        (Signo::SIGVTALRM, Terminate),
+        (Signo::SIGPROF, Terminate),
+        (Signo::SIGWINCH, Ignore),
+        (Signo::SIGIO, Terminate),
+        (Signo::SIGPWR, Terminate),
+        (Signo::SIGSYS, CoreDump),
+        (Signo::SIGRTMIN, Ignore),
+    ];
+    for &(sig, action) in expected {
+        assert_eq!(sig.default_action(), action);
+    }
+}
+
+#[def_test]
+fn test_signal_info_code_and_errno() {
+    let info = SignalInfo::new_kernel(Signo::SIGINT);
+    assert_eq!(info.signo(), Signo::SIGINT);
+    assert_eq!(info.code(), linux_raw_sys::general::SI_KERNEL as i32);
+    assert_eq!(info.errno(), 0);
+
+    let user_info = SignalInfo::new_user(Signo::SIGUSR1, 42, 1234);
+    assert_eq!(user_info.signo(), Signo::SIGUSR1);
+    assert_eq!(user_info.code(), 42);
+}
+
+#[def_test]
+fn test_signal_info_debug() {
+    let info = SignalInfo::new_kernel(Signo::SIGTERM);
+    let dbg = format!("{:?}", info);
+    assert!(dbg.contains("SignalInfo"));
+    assert!(dbg.contains("SIGTERM"));
+}
+
+#[def_test]
+fn test_signal_set_bitwise_ops() {
+    let mut a = SignalSet::default();
+    a.add(Signo::SIGINT);
+    a.add(Signo::SIGKILL);
+
+    let mut b = SignalSet::default();
+    b.add(Signo::SIGKILL);
+    b.add(Signo::SIGUSR1);
+
+    let or_set = a | b;
+    assert!(or_set.has(Signo::SIGINT));
+    assert!(or_set.has(Signo::SIGKILL));
+    assert!(or_set.has(Signo::SIGUSR1));
+
+    let and_set = a & b;
+    assert!(!and_set.has(Signo::SIGINT));
+    assert!(and_set.has(Signo::SIGKILL));
+    assert!(!and_set.has(Signo::SIGUSR1));
+
+    let not_a = !a;
+    assert!(!not_a.has(Signo::SIGINT));
+    assert!(!not_a.has(Signo::SIGKILL));
+    assert!(not_a.has(Signo::SIGUSR1));
+}
+
+#[def_test]
+fn test_signal_set_assign_ops() {
+    let mut a = SignalSet::default();
+    a.add(Signo::SIGINT);
+
+    let mut b = SignalSet::default();
+    b.add(Signo::SIGKILL);
+
+    a |= b;
+    assert!(a.has(Signo::SIGINT));
+    assert!(a.has(Signo::SIGKILL));
+
+    a &= b;
+    assert!(!a.has(Signo::SIGINT));
+    assert!(a.has(Signo::SIGKILL));
+}
+
+#[def_test]
+fn test_signal_set_debug() {
+    let mut set = SignalSet::default();
+    set.add(Signo::SIGINT);
+    set.add(Signo::SIGTERM);
+    let dbg = format!("{:?}", set);
+    assert!(dbg.contains("SIGINT"));
+    assert!(dbg.contains("SIGTERM"));
+}
+
+#[def_test]
+fn test_signal_set_kernel_sigset_roundtrip() {
+    let mut set = SignalSet::default();
+    set.add(Signo::SIGINT);
+    set.add(Signo::SIGKILL);
+    set.add(Signo::SIGRTMIN);
+
+    let kernel: linux_raw_sys::general::kernel_sigset_t = set.into();
+    let restored = SignalSet::from(kernel);
+    assert!(restored.has(Signo::SIGINT));
+    assert!(restored.has(Signo::SIGKILL));
+    assert!(restored.has(Signo::SIGRTMIN));
+    assert!(!restored.has(Signo::SIGUSR1));
+}
+
+#[def_test]
+fn test_signal_stack_default_disabled() {
+    let stack = SignalStack::default();
+    assert_eq!(stack.sp, 0);
+    assert_eq!(stack.size, 0);
+    assert!(stack.disabled());
+
+    let active_stack = SignalStack {
+        sp: 0x1000,
+        flags: 0,
+        size: 4096,
+    };
+    assert!(!active_stack.disabled());
+}
+
+#[def_test]
+fn test_signal_action_default() {
+    let action = SignalAction::default();
+    assert!(matches!(
+        action.disposition,
+        crate::SignalDisposition::Default
+    ));
+    assert!(action.mask.is_empty());
+}
+
+#[def_test]
+fn test_thread_signal_manager_blocked_and_stack_helpers() {
+    let thread = new_thread_manager();
+
+    let mut set = SignalSet::default();
+    set.add(Signo::SIGTERM);
+    set.add(Signo::SIGKILL);
+    set.add(Signo::SIGSTOP);
+
+    let old = thread.set_blocked(set);
+    assert!(old.is_empty());
+    assert!(thread.signal_blocked(Signo::SIGTERM));
+    assert!(!thread.signal_blocked(Signo::SIGKILL));
+    assert!(!thread.signal_blocked(Signo::SIGSTOP));
+
+    let stack = SignalStack {
+        sp: 0x4000,
+        flags: 0,
+        size: 8192,
+    };
+    thread.set_stack(stack.clone());
+    let got = thread.stack();
+    assert_eq!(got.sp, stack.sp);
+    assert_eq!(got.flags, stack.flags);
+    assert_eq!(got.size, stack.size);
+}
+
+#[def_test]
+fn test_thread_signal_manager_send_signal_and_pending_merge() {
+    let thread = new_thread_manager();
+
+    assert!(thread.send_signal(SignalInfo::new_kernel(Signo::SIGTERM)));
+    assert!(thread.pending().has(Signo::SIGTERM));
+
+    let target = thread
+        .process()
+        .send_signal(SignalInfo::new_kernel(Signo::SIGUSR1));
+    assert_eq!(target, Some(1));
+    let pending = thread.pending();
+    assert!(pending.has(Signo::SIGTERM));
+    assert!(pending.has(Signo::SIGUSR1));
+}
+
+#[def_test]
+fn test_thread_signal_manager_send_signal_ignored_and_blocked_paths() {
+    let thread = new_thread_manager();
+
+    thread.process().actions.lock()[Signo::SIGUSR1].disposition = SignalDisposition::Ignore;
+    assert!(!thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
+    assert!(!thread.pending().has(Signo::SIGUSR1));
+
+    let mut set = SignalSet::default();
+    set.add(Signo::SIGTERM);
+    thread.set_blocked(set);
+    assert!(!thread.send_signal(SignalInfo::new_kernel(Signo::SIGTERM)));
+    assert!(thread.pending().has(Signo::SIGTERM));
+}
+
+#[def_test]
+fn test_process_signal_manager_can_restart_and_signal_ignored() {
+    let thread = new_thread_manager();
+    let proc = thread.process();
+
+    assert!(!proc.can_restart(Signo::SIGTERM));
+    proc.actions.lock()[Signo::SIGTERM].flags |= SignalActionFlags::RESTART;
+    assert!(proc.can_restart(Signo::SIGTERM));
+
+    assert!(proc.signal_ignored(Signo::SIGCHLD));
+    proc.actions.lock()[Signo::SIGTERM].disposition = SignalDisposition::Ignore;
+    assert!(proc.signal_ignored(Signo::SIGTERM));
+}
+
+#[def_test]
+fn test_process_signal_manager_pending_and_ignored_send() {
+    let thread = new_thread_manager();
+    let proc = thread.process();
+
+    proc.actions.lock()[Signo::SIGUSR2].disposition = SignalDisposition::Ignore;
+    assert_eq!(
+        proc.send_signal(SignalInfo::new_kernel(Signo::SIGUSR2)),
+        None
+    );
+    assert!(!proc.pending().has(Signo::SIGUSR2));
+
+    assert_eq!(
+        proc.send_signal(SignalInfo::new_kernel(Signo::SIGINT)),
+        Some(1)
+    );
+    assert!(proc.pending().has(Signo::SIGINT));
 }

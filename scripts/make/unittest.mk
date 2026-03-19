@@ -7,6 +7,7 @@ cov_export := $(out_target)/coverage.info
 cov_text := $(out_target)/coverage.txt
 cov_html := $(out_target)/coverage.html
 cov_xml := $(out_target)/coverage.xml
+cov_ignore_regex := '/target/|/api/kapi/src/syscall/|/api/linux_sysno/src/|/platforms/kbootloader/'
 
 ifeq ($(UNITTEST), y)
   RUSTFLAGS += --cfg unittest --check-cfg cfg(unittest) \
@@ -27,11 +28,13 @@ define coverage_report
   @$(EXTRACT_COV) --image $(DISK_IMG) --profraw-path /.llvm-cov/default.profraw --out-path $(cov_profraw)
   @printf "    $(CYAN_C)Extracted$(END_C) raw coverage data to $(notdir $(cov_profraw)).\n"
   @rust-profdata merge -o $(cov_prodata) $(cov_profraw)
-  @printf "    $(CYAN_C)Merged$(END_C) raw coverage data into $(notdir $(cov_text)).\n"
-  @rust-cov report $(OUT_ELF) --instr-profile=$(cov_prodata) --ignore-filename-regex='/.cargo/registry' > $(cov_text)
-  @printf "    $(CYAN_C)Generated$(END_C) text coverage report at $(notdir $(cov_export)).\n"
-  @rust-cov export $(OUT_ELF) --instr-profile=$(cov_prodata) --format=lcov --ignore-filename-regex='/.cargo/registry' > $(cov_export)
-  @printf "    $(CYAN_C)Exported$(END_C) lcov data to $(notdir $(cov_xml)).\n"
+  @printf "    $(CYAN_C)Merged$(END_C) raw coverage data into $(notdir $(cov_prodata)).\n"
+  @rust-cov report $(OUT_ELF) --instr-profile=$(cov_prodata) \
+    --ignore-filename-regex=$(cov_ignore_regex) $(CURDIR) > $(cov_text)
+  @printf "    $(CYAN_C)Generated$(END_C) text coverage report at $(notdir $(cov_text)).\n"
+  @rust-cov export $(OUT_ELF) --instr-profile=$(cov_prodata) --format=lcov \
+    --ignore-filename-regex=$(cov_ignore_regex) $(CURDIR) > $(cov_export)
+  @printf "    $(CYAN_C)Exported$(END_C) lcov data to $(notdir $(cov_export)).\n"
   @$(CONVERT_COV) $(cov_export) $(cov_xml) --base-dir $(CURDIR)
   @printf "    $(CYAN_C)Finished$(END_C) generating Cobertura XML at $(notdir $(cov_xml)).\n"
 endef

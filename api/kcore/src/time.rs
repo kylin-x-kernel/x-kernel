@@ -284,6 +284,9 @@ pub fn spawn_alarm_task() {
 /// Unit tests.
 #[cfg(unittest)]
 pub mod tests_time {
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
     use ksignal::Signo;
     use unittest::def_test;
 
@@ -312,5 +315,126 @@ pub mod tests_time {
         assert_eq!(u.subsec_nanos(), 0);
         assert_eq!(s.as_secs(), 0);
         assert_eq!(s.subsec_nanos(), 0);
+    }
+
+    #[def_test]
+    fn test_time_value_from_nanos_basic() {
+        let tv = super::time_value_from_nanos(0);
+        assert_eq!(tv.as_secs(), 0);
+        assert_eq!(tv.subsec_nanos(), 0);
+    }
+
+    #[def_test]
+    fn test_time_value_from_nanos_subsec() {
+        let tv = super::time_value_from_nanos(500_000_000);
+        assert_eq!(tv.as_secs(), 0);
+        assert_eq!(tv.subsec_nanos(), 500_000_000);
+    }
+
+    #[def_test]
+    fn test_time_value_from_nanos_multi_sec() {
+        let tv = super::time_value_from_nanos(2_500_000_000);
+        assert_eq!(tv.as_secs(), 2);
+        assert_eq!(tv.subsec_nanos(), 500_000_000);
+    }
+
+    #[def_test]
+    fn test_timemanager_get_itimer_default() {
+        let tm = TimeManager::new();
+        for ty in [ITimerType::Real, ITimerType::Virtual, ITimerType::Prof] {
+            let (interval, remained) = tm.get_itimer(ty);
+            assert_eq!(interval.as_secs(), 0);
+            assert_eq!(remained.as_secs(), 0);
+        }
+    }
+
+    #[def_test]
+    fn test_timemanager_set_state() {
+        let mut tm = TimeManager::new();
+        tm.set_state(super::TimerState::User);
+        tm.set_state(super::TimerState::Kernel);
+        tm.set_state(super::TimerState::None);
+        let (u, s) = tm.output();
+        assert_eq!(u.as_secs(), 0);
+        assert_eq!(s.as_secs(), 0);
+    }
+
+    #[def_test]
+    fn test_itimer_update_zero_remained() {
+        let mut timer = super::ITimer::default();
+        assert!(!timer.update(100));
+    }
+
+    #[def_test]
+    fn test_itimer_update_counts_down_without_firing() {
+        let mut timer = super::ITimer {
+            interval_ns: 0,
+            remained_ns: 10,
+        };
+        assert!(!timer.update(3));
+        assert_eq!(timer.remained_ns, 7);
+    }
+
+    #[def_test]
+    fn test_itimer_update_fires_and_resets_to_interval() {
+        let mut timer = super::ITimer {
+            interval_ns: 0,
+            remained_ns: 5,
+        };
+        assert!(timer.update(5));
+        assert_eq!(timer.remained_ns, 0);
+    }
+
+    #[def_test]
+    fn test_timemanager_set_itimer_returns_previous_values() {
+        let mut tm = TimeManager::new();
+
+        let (old_interval, old_remained) = tm.set_itimer(ITimerType::Real, 11, 22);
+        assert_eq!(old_interval.as_secs(), 0);
+        assert_eq!(old_remained.as_secs(), 0);
+
+        let (old_interval, old_remained) = tm.set_itimer(ITimerType::Real, 33, 44);
+        assert_eq!(old_interval.subsec_nanos(), 11);
+        assert_eq!(old_remained.subsec_nanos(), 22);
+
+        let (interval, remained) = tm.get_itimer(ITimerType::Real);
+        assert_eq!(interval.subsec_nanos(), 33);
+        assert_eq!(remained.subsec_nanos(), 44);
+    }
+
+    #[def_test]
+    fn test_timemanager_update_itimer_emits_signal_on_expiration() {
+        let mut tm = TimeManager::new();
+        tm.itimers[ITimerType::Real as usize] = super::ITimer {
+            interval_ns: 0,
+            remained_ns: 1,
+        };
+
+        let emitted = RefCell::new(Vec::new());
+        tm.update_itimer(ITimerType::Real, 1, |signo| {
+            emitted.borrow_mut().push(signo)
+        });
+
+        assert_eq!(emitted.borrow().as_slice(), &[Signo::SIGALRM]);
+        let (_, remained) = tm.get_itimer(ITimerType::Real);
+        assert_eq!(remained.subsec_nanos(), 0);
+    }
+
+    #[def_test]
+    fn test_timemanager_update_itimer_no_emit_before_expiration() {
+        let mut tm = TimeManager::new();
+        tm.itimers[ITimerType::Prof as usize] = super::ITimer {
+            interval_ns: 0,
+            remained_ns: 10,
+        };
+
+        let emitted = RefCell::new(Vec::new());
+        tm.update_itimer(ITimerType::Prof, 3, |signo| {
+            emitted.borrow_mut().push(signo)
+        });
+
+        assert!(emitted.borrow().is_empty());
+        let (_, remained) = tm.get_itimer(ITimerType::Prof);
+        assert_eq!(remained.subsec_nanos(), 7);
     }
 }

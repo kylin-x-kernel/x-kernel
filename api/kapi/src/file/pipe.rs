@@ -293,4 +293,120 @@ mod pipe_tests {
         assert_eq!(S_IFIFO, 0o010000);
         assert_eq!(FIONREAD, 0x541B);
     }
+
+    #[def_test]
+    fn test_pipe_initial_capacity() {
+        let (read_end, _write_end) = Pipe::new();
+        assert_eq!(read_end.capacity(), RING_BUFFER_INIT_SIZE);
+    }
+
+    #[def_test]
+    fn test_pipe_not_closed_both_alive() {
+        let (read_end, write_end) = Pipe::new();
+        assert!(!read_end.closed());
+        assert!(!write_end.closed());
+    }
+
+    #[def_test]
+    fn test_pipe_closed_when_other_dropped() {
+        let (read_end, write_end) = Pipe::new();
+        drop(write_end);
+        assert!(read_end.closed());
+    }
+
+    #[def_test]
+    fn test_pipe_closed_read_dropped() {
+        let (read_end, write_end) = Pipe::new();
+        drop(read_end);
+        assert!(write_end.closed());
+    }
+
+    #[def_test]
+    fn test_pipe_nonblocking_default() {
+        let (read_end, write_end) = Pipe::new();
+        assert!(!read_end.nonblocking());
+        assert!(!write_end.nonblocking());
+    }
+
+    #[def_test]
+    fn test_pipe_set_nonblocking() {
+        let (read_end, write_end) = Pipe::new();
+        read_end.set_nonblocking(true).unwrap();
+        assert!(read_end.nonblocking());
+        assert!(!write_end.nonblocking());
+
+        write_end.set_nonblocking(true).unwrap();
+        assert!(write_end.nonblocking());
+    }
+
+    #[def_test]
+    fn test_pipe_stat_read_end() {
+        let (read_end, _write_end) = Pipe::new();
+        let stat = read_end.stat().unwrap();
+        assert_eq!(stat.mode, S_IFIFO | 0o444);
+    }
+
+    #[def_test]
+    fn test_pipe_stat_write_end() {
+        let (_read_end, write_end) = Pipe::new();
+        let stat = write_end.stat().unwrap();
+        assert_eq!(stat.mode, S_IFIFO | 0o222);
+    }
+
+    #[def_test]
+    fn test_pipe_path_format() {
+        let (read_end, _write_end) = Pipe::new();
+        let path = read_end.path();
+        assert!(path.starts_with("pipe:["));
+        assert!(path.ends_with("]"));
+    }
+
+    #[def_test]
+    fn test_pipe_poll_empty() {
+        use kpoll::Pollable;
+        let (read_end, write_end) = Pipe::new();
+        let r_events = read_end.poll();
+        assert!(!r_events.contains(IoEvents::IN));
+        let w_events = write_end.poll();
+        assert!(w_events.contains(IoEvents::OUT));
+    }
+
+    #[def_test]
+    fn test_pipe_poll_closed() {
+        use kpoll::Pollable;
+        let (read_end, write_end) = Pipe::new();
+        drop(write_end);
+        let events = read_end.poll();
+        assert!(events.contains(IoEvents::HUP));
+    }
+
+    #[def_test]
+    fn test_pipe_resize() {
+        let (read_end, _write_end) = Pipe::new();
+        read_end.resize(4096).unwrap();
+        assert_eq!(read_end.capacity(), 4096);
+    }
+
+    #[def_test]
+    fn test_pipe_resize_rounds_up() {
+        let (read_end, _write_end) = Pipe::new();
+        read_end.resize(5000).unwrap();
+        assert_eq!(read_end.capacity(), 8192);
+    }
+
+    #[def_test]
+    fn test_pipe_read_wrong_end() {
+        let (_read_end, write_end) = Pipe::new();
+        let mut buf = [0u8; 10];
+        let mut dst = kio::Cursor::new(buf.as_mut_slice());
+        assert!(write_end.read(&mut dst).is_err());
+    }
+
+    #[def_test]
+    fn test_pipe_write_wrong_end() {
+        let (read_end, _write_end) = Pipe::new();
+        let data = b"hello";
+        let mut src = kio::Cursor::new(data.as_slice());
+        assert!(read_end.write(&mut src).is_err());
+    }
 }

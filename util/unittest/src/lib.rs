@@ -4,6 +4,8 @@
 
 #![no_std]
 
+extern crate self as unittest;
+
 #[macro_use]
 extern crate log;
 extern crate alloc;

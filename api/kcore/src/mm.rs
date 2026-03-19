@@ -413,10 +413,12 @@ unsafe impl VirtMemIo for Vm {
 /// Unit tests.
 #[cfg(unittest)]
 pub mod tests_mm {
+    use khal::paging::MappingFlags;
     use osvm::MemError;
     use unittest::def_test;
+    use xmas_elf::program::{FLAG_R, FLAG_W, FLAG_X, Flags};
 
-    use super::{USER_SPACE_BASE, USER_SPACE_SIZE, check_access};
+    use super::{USER_SPACE_BASE, USER_SPACE_SIZE, check_access, mapping_flags};
 
     #[def_test]
     fn test_check_access_valid() {
@@ -433,5 +435,48 @@ pub mod tests_mm {
     fn test_check_access_invalid_len() {
         let res = check_access(USER_SPACE_BASE, USER_SPACE_SIZE + 1);
         assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+
+    #[def_test]
+    fn test_check_access_zero_len_and_upper_boundary() {
+        assert!(check_access(USER_SPACE_BASE, 0).is_ok());
+        assert!(check_access(USER_SPACE_BASE + USER_SPACE_SIZE - 1, 1).is_ok());
+        assert!(check_access(USER_SPACE_BASE + USER_SPACE_SIZE, 0).is_err());
+    }
+
+    #[def_test]
+    fn test_check_access_end_overflow_rejected() {
+        let res = check_access(USER_SPACE_BASE + USER_SPACE_SIZE - 1, 2);
+        assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+
+    #[def_test]
+    fn test_mapping_flags_sets_user_and_requested_permissions() {
+        let none = mapping_flags(Flags(0));
+        assert_eq!(none, MappingFlags::USER);
+
+        let read = mapping_flags(Flags(FLAG_R));
+        assert!(read.contains(MappingFlags::USER | MappingFlags::READ));
+        assert!(!read.contains(MappingFlags::WRITE));
+
+        let write_exec = mapping_flags(Flags(FLAG_W | FLAG_X));
+        assert!(write_exec.contains(MappingFlags::USER | MappingFlags::WRITE));
+        assert!(write_exec.contains(MappingFlags::EXECUTE));
+        assert!(!write_exec.contains(MappingFlags::READ));
+    }
+
+    #[def_test]
+    fn test_check_access_rejects_far_above_user_space() {
+        let res = check_access(USER_SPACE_BASE + USER_SPACE_SIZE + 0x1000, 1);
+        assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+
+    #[def_test]
+    fn test_mapping_flags_all_bits_combination() {
+        let flags = mapping_flags(Flags(FLAG_R | FLAG_W | FLAG_X));
+        assert!(flags.contains(MappingFlags::USER));
+        assert!(flags.contains(MappingFlags::READ));
+        assert!(flags.contains(MappingFlags::WRITE));
+        assert!(flags.contains(MappingFlags::EXECUTE));
     }
 }

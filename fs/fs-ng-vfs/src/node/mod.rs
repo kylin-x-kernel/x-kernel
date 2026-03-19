@@ -442,3 +442,363 @@ impl Pollable for DirEntry {
         }
     }
 }
+
+#[cfg(unittest)]
+mod tests_node {
+    use alloc::{string::String, sync::Arc, vec::Vec};
+    use core::{
+        any::Any,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    use kpoll::{IoEvents, Pollable};
+    use unittest::def_test;
+
+    use super::{
+        DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, NodeOps, Reference,
+        TypeMap,
+    };
+    use crate::{
+        FilesystemOps, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, VfsError,
+        VfsResult,
+    };
+
+    struct MockFilesystem;
+
+    impl FilesystemOps for MockFilesystem {
+        fn name(&self) -> &str {
+            "mockfs"
+        }
+
+        fn root_dir(&self) -> DirEntry {
+            panic!("root_dir is not used in these tests")
+        }
+
+        fn stat(&self) -> VfsResult<StatFs> {
+            Ok(StatFs {
+                fs_type: 0,
+                block_size: 0,
+                blocks: 0,
+                blocks_free: 0,
+                blocks_available: 0,
+                file_count: 0,
+                free_file_count: 0,
+                name_length: 255,
+                fragment_size: 0,
+                mount_flags: 0,
+            })
+        }
+    }
+
+    struct MockFileNodeOps {
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+        data: crate::Mutex<Vec<u8>>,
+        owner: crate::Mutex<Option<(u32, u32)>>,
+        update_count: AtomicUsize,
+    }
+
+    impl MockFileNodeOps {
+        fn new(fs: Arc<MockFilesystem>, inode: u64, data: &[u8]) -> Self {
+            Self {
+                fs,
+                inode,
+                data: crate::Mutex::new(data.to_vec()),
+                owner: crate::Mutex::new(None),
+                update_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl NodeOps for MockFileNodeOps {
+        fn inode(&self) -> u64 {
+            self.inode
+        }
+
+        fn metadata(&self) -> VfsResult<Metadata> {
+            Ok(Metadata {
+                device: 0,
+                inode: self.inode,
+                nlink: 1,
+                mode: NodePermission::default(),
+                node_type: NodeType::Unknown,
+                uid: 0,
+                gid: 0,
+                size: self.data.lock().len() as u64,
+                block_size: 512,
+                blocks: 1,
+                rdev: Default::default(),
+                atime: Duration::ZERO,
+                mtime: Duration::ZERO,
+                ctime: Duration::ZERO,
+            })
+        }
+
+        fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+            *self.owner.lock() = update.owner;
+            self.update_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn filesystem(&self) -> &dyn FilesystemOps {
+            self.fs.as_ref()
+        }
+
+        fn sync(&self, _data_only: bool) -> VfsResult<()> {
+            Ok(())
+        }
+
+        fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
+        }
+    }
+
+    impl Pollable for MockFileNodeOps {
+        fn poll(&self) -> IoEvents {
+            IoEvents::IN | IoEvents::OUT
+        }
+
+        fn register(&self, _context: &mut core::task::Context<'_>, _events: IoEvents) {}
+    }
+
+    impl FileNodeOps for MockFileNodeOps {
+        fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+            let data = self.data.lock();
+            let start = offset as usize;
+            if start >= data.len() {
+                return Ok(0);
+            }
+            let count = buf.len().min(data.len() - start);
+            buf[..count].copy_from_slice(&data[start..start + count]);
+            Ok(count)
+        }
+
+        fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+            let mut data = self.data.lock();
+            let start = offset as usize;
+            if start + buf.len() > data.len() {
+                data.resize(start + buf.len(), 0);
+            }
+            data[start..start + buf.len()].copy_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
+            let mut data = self.data.lock();
+            data.extend_from_slice(buf);
+            Ok((buf.len(), data.len() as u64))
+        }
+
+        fn set_len(&self, len: u64) -> VfsResult<()> {
+            self.data.lock().resize(len as usize, 0);
+            Ok(())
+        }
+
+        fn set_symlink(&self, target: &str) -> VfsResult<()> {
+            *self.data.lock() = target.as_bytes().to_vec();
+            Ok(())
+        }
+    }
+
+    struct MockDirNodeOps {
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+    }
+
+    impl MockDirNodeOps {
+        fn new(fs: Arc<MockFilesystem>, inode: u64) -> Self {
+            Self { fs, inode }
+        }
+    }
+
+    impl NodeOps for MockDirNodeOps {
+        fn inode(&self) -> u64 {
+            self.inode
+        }
+
+        fn metadata(&self) -> VfsResult<Metadata> {
+            Ok(Metadata {
+                device: 0,
+                inode: self.inode,
+                nlink: 1,
+                mode: NodePermission::default(),
+                node_type: NodeType::Directory,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                block_size: 512,
+                blocks: 1,
+                rdev: Default::default(),
+                atime: Duration::ZERO,
+                mtime: Duration::ZERO,
+                ctime: Duration::ZERO,
+            })
+        }
+
+        fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
+            Ok(())
+        }
+
+        fn filesystem(&self) -> &dyn FilesystemOps {
+            self.fs.as_ref()
+        }
+
+        fn sync(&self, _data_only: bool) -> VfsResult<()> {
+            Ok(())
+        }
+
+        fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
+        }
+    }
+
+    impl DirNodeOps for MockDirNodeOps {
+        fn read_dir(&self, _offset: u64, _sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+            Ok(0)
+        }
+
+        fn lookup(&self, _name: &str) -> VfsResult<DirEntry> {
+            Err(VfsError::NotFound)
+        }
+
+        fn create(
+            &self,
+            _name: &str,
+            _node_type: NodeType,
+            _permission: NodePermission,
+        ) -> VfsResult<DirEntry> {
+            Err(VfsError::OperationNotSupported)
+        }
+
+        fn link(&self, _name: &str, _node: &DirEntry) -> VfsResult<DirEntry> {
+            Err(VfsError::OperationNotSupported)
+        }
+
+        fn unlink(&self, _name: &str) -> VfsResult<()> {
+            Err(VfsError::OperationNotSupported)
+        }
+
+        fn rename(&self, _src_name: &str, _dst_dir: &DirNode, _dst_name: &str) -> VfsResult<()> {
+            Err(VfsError::OperationNotSupported)
+        }
+    }
+
+    fn make_file_entry(
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+        parent: Option<DirEntry>,
+        name: &str,
+    ) -> (DirEntry, Arc<MockFileNodeOps>) {
+        let ops = Arc::new(MockFileNodeOps::new(fs, inode, b"payload"));
+        let entry = DirEntry::new_file(
+            FileNode::new(ops.clone()),
+            NodeType::RegularFile,
+            Reference::new(parent, String::from(name)),
+        );
+        (entry, ops)
+    }
+
+    #[def_test]
+    fn test_reference_root_and_key() {
+        let root = Reference::root();
+        assert_eq!(root.key(), (0, String::new()));
+
+        let fs = Arc::new(MockFilesystem);
+        let (parent, _) = make_file_entry(fs, 1, None, "parent");
+        let child = Reference::new(Some(parent.clone()), String::from("child"));
+        let key = child.key();
+
+        assert_eq!(key.1, "child");
+        assert_ne!(key.0, 0);
+    }
+
+    #[def_test]
+    fn test_typemap_insert_get_and_get_or_insert() {
+        let mut map = TypeMap::new();
+        assert!(map.get::<u32>().is_none());
+
+        map.insert(7_u32);
+        assert_eq!(*map.get::<u32>().unwrap(), 7);
+
+        let created = map.get_or_insert_with::<u32>(|| 99);
+        assert_eq!(*created, 7);
+
+        let text = map.get_or_insert_with::<String>(|| String::from("node"));
+        assert_eq!(text.as_str(), "node");
+        assert_eq!(map.get::<String>().unwrap().as_str(), "node");
+    }
+
+    #[def_test]
+    fn test_direntry_file_helpers_and_userdata() {
+        let fs = Arc::new(MockFilesystem);
+        let (entry, ops) = make_file_entry(fs, 2, None, "leaf");
+
+        assert!(entry.is_file());
+        assert!(!entry.is_dir());
+        assert_eq!(entry.name(), "leaf");
+        assert_eq!(entry.filesystem().name(), "mockfs");
+        assert_eq!(entry.node_type(), NodeType::RegularFile);
+        assert!(matches!(entry.as_dir(), Err(VfsError::NotADirectory)));
+        assert_eq!(entry.as_file().unwrap().inode(), 2);
+
+        let metadata = entry.metadata().unwrap();
+        assert_eq!(metadata.node_type, NodeType::RegularFile);
+        assert_eq!(metadata.size, 7);
+
+        let weak = entry.downgrade();
+        assert!(weak.upgrade().unwrap().ptr_eq(&entry));
+
+        entry.user_data().insert(42_u32);
+        assert_eq!(*entry.user_data().get::<u32>().unwrap(), 42);
+
+        assert_eq!(ops.update_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[def_test]
+    fn test_direntry_parent_path_and_ancestor_helpers() {
+        let fs = Arc::new(MockFilesystem);
+        let root = DirEntry::new_dir(
+            |_| DirNode::new(Arc::new(MockDirNodeOps::new(fs.clone(), 10))),
+            Reference::root(),
+        );
+        let child = DirEntry::new_dir(
+            |_| DirNode::new(Arc::new(MockDirNodeOps::new(fs.clone(), 11))),
+            Reference::new(Some(root.clone()), String::from("child")),
+        );
+        let (leaf, _) = make_file_entry(fs, 12, Some(child.clone()), "leaf");
+
+        assert!(root.is_root_of_mount());
+        assert_eq!(child.parent().unwrap().as_ptr(), root.as_ptr());
+        assert_eq!(leaf.absolute_path().unwrap().as_str(), "/child/leaf");
+        assert!(root.is_ancestor_of(&leaf).unwrap());
+        assert!(child.is_ancestor_of(&leaf).unwrap());
+        assert!(!leaf.is_ancestor_of(&child).unwrap());
+    }
+
+    #[def_test]
+    fn test_direntry_read_link_and_downcast_paths() {
+        let fs = Arc::new(MockFilesystem);
+        let (regular, _) = make_file_entry(fs.clone(), 20, None, "plain");
+        let symlink_ops = Arc::new(MockFileNodeOps::new(fs.clone(), 21, b"/tmp/target"));
+        let symlink = DirEntry::new_file(
+            FileNode::new(symlink_ops.clone()),
+            NodeType::Symlink,
+            Reference::new(None, String::from("ln")),
+        );
+        let dir = DirEntry::new_dir(
+            |_| DirNode::new(Arc::new(MockDirNodeOps::new(fs, 22))),
+            Reference::new(None, String::from("dir")),
+        );
+
+        assert!(matches!(regular.read_link(), Err(VfsError::InvalidData)));
+        assert_eq!(symlink.read_link().unwrap(), "/tmp/target");
+        assert!(regular.downcast::<MockFileNodeOps>().is_ok());
+        assert!(matches!(
+            symlink.downcast::<MockDirNodeOps>(),
+            Err(VfsError::InvalidInput)
+        ));
+        assert!(dir.as_dir().is_ok());
+        assert!(matches!(dir.as_file(), Err(VfsError::IsADirectory)));
+    }
+}

@@ -1493,7 +1493,8 @@ pub mod tests_cryp {
     use crate::{
         TestUserValue,
         tee::tee_svc_cryp::{
-            syscall_cryp_obj_alloc, syscall_cryp_obj_copy, syscall_obj_generate_key,
+            syscall_cryp_obj_alloc, syscall_cryp_obj_close, syscall_cryp_obj_copy,
+            syscall_obj_generate_key,
         },
     };
 
@@ -1561,6 +1562,54 @@ pub mod tests_cryp {
         }
     }
 
+    #[unittest::def_test]
+    fn test_translate_compat_algo_maps_legacy_values() {
+        assert_eq!(
+            translate_compat_algo(TEE_ALG_ECDSA_P192),
+            TEE_ALG_ECDSA_SHA1
+        );
+        assert_eq!(
+            translate_compat_algo(TEE_ALG_ECDSA_P256),
+            TEE_ALG_ECDSA_SHA256
+        );
+        assert_eq!(
+            translate_compat_algo(TEE_ALG_ECDH_P384),
+            TEE_ALG_ECDH_DERIVE_SHARED_SECRET
+        );
+        assert_eq!(translate_compat_algo(TEE_ALG_SM3), TEE_ALG_SM3);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_state_alloc_rejects_busy_key() {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
+
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
+
+        let mut state1: u32 = 0;
+        let result = tee_cryp_state_alloc(
+            TEE_ALG_SM4_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id),
+            None,
+            &mut state1,
+        );
+        assert!(result.is_ok());
+
+        let mut state2: u32 = 0;
+        let result = tee_cryp_state_alloc(
+            TEE_ALG_SM4_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id),
+            None,
+            &mut state2,
+        );
+        assert_eq!(result.err(), Some(TEE_ERROR_BUSY));
+    }
+
     #[unittest::def_test(custom)]
     fn test_cryp_hash_sm3() {
         let mut state: u32 = 0;
@@ -1595,6 +1644,29 @@ pub mod tests_cryp {
                 0x8f, 0x4b, 0xa8, 0xe0
             ]
         );
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_hash_requires_init_and_enough_output() {
+        let mut state: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
+
+        let result = tee_cryp_hash_update(state, b"abc");
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_STATE));
+
+        let result = tee_cryp_hash_init(state);
+        assert!(result.is_ok());
+
+        let mut hash = [0u8; 8];
+        let result = tee_cryp_hash_final(state, &[], &mut hash);
+        assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
     }
 
     #[unittest::def_test(custom)]
@@ -1729,6 +1801,38 @@ pub mod tests_cryp {
                 0xfd, 0xdd, 0xa0, 0xe7
             ]
         );
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_cipher_update_rejects_uninitialized_state_and_short_buffer() {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
+
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
+
+        let mut state: u32 = 0;
+        let result = tee_cryp_state_alloc(
+            TEE_ALG_SM4_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id),
+            None,
+            &mut state,
+        );
+        assert!(result.is_ok());
+
+        let input = *b"abcdefghabcdefgh";
+        let mut short = [0u8; 8];
+        let result = tee_cryp_cipher_update(state, &input, &mut short);
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_STATE));
+
+        let result = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
+        assert!(result.is_ok());
+
+        let result = tee_cryp_cipher_update(state, &input, &mut short);
+        assert_eq!(result.err(), Some(TEE_ERROR_SHORT_BUFFER));
     }
 
     #[unittest::def_test(custom)]
@@ -2033,6 +2137,33 @@ pub mod tests_cryp {
                 0x70, 0xAA
             ]
         );
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_authenc_requires_ae_state() {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
+
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
+
+        let mut state: u32 = 0;
+        let result = tee_cryp_state_alloc(
+            TEE_ALG_SM4_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id),
+            None,
+            &mut state,
+        );
+        assert!(result.is_ok());
+
+        let result = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
+        assert!(result.is_ok());
+
+        let result = tee_cryp_authenc_update_aad(state, b"aad");
+        assert_eq!(result.err(), Some(TEE_ERROR_BAD_STATE));
     }
 
     #[unittest::def_test(custom)]

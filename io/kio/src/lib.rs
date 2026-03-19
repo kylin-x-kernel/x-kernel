@@ -29,6 +29,7 @@ mod write;
 
 mod test_cursor;
 mod test_iobuf;
+mod test_read_write;
 mod test_seek;
 
 pub use self::{buffered::*, iobuf::*, read::*, seek::*, utils::*, write::*};

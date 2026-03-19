@@ -314,4 +314,58 @@ mod eventfd_tests {
         assert!(events.contains(IoEvents::IN));
         assert!(!events.contains(IoEvents::OUT));
     }
+
+    #[def_test]
+    fn test_eventfd_write_then_read() {
+        let eventfd = EventFd::new(0, false);
+
+        let value = 5_u64.to_ne_bytes();
+        let mut src = kio::Cursor::new(value.as_slice());
+        assert_eq!(
+            eventfd.write(&mut src).unwrap(),
+            core::mem::size_of::<u64>()
+        );
+        assert!(eventfd.poll().contains(IoEvents::IN));
+
+        let mut out = [0u8; 8];
+        let mut dst = kio::Cursor::new(out.as_mut_slice());
+        assert_eq!(eventfd.read(&mut dst).unwrap(), core::mem::size_of::<u64>());
+        assert_eq!(u64::from_ne_bytes(out), 5);
+        assert!(!eventfd.poll().contains(IoEvents::IN));
+    }
+
+    #[def_test]
+    fn test_eventfd_semaphore_read_keeps_remaining_count() {
+        let eventfd = EventFd::new(3, true);
+
+        let mut out = [0u8; 8];
+        let mut dst = kio::Cursor::new(out.as_mut_slice());
+        assert_eq!(eventfd.read(&mut dst).unwrap(), core::mem::size_of::<u64>());
+        assert_eq!(u64::from_ne_bytes(out), 3);
+
+        let events = eventfd.poll();
+        assert!(events.contains(IoEvents::IN));
+        assert!(events.contains(IoEvents::OUT));
+    }
+
+    #[def_test]
+    fn test_eventfd_invalid_write_value() {
+        let eventfd = EventFd::new(0, false);
+        let value = u64::MAX.to_ne_bytes();
+        let mut src = kio::Cursor::new(value.as_slice());
+        assert_eq!(eventfd.write(&mut src), Err(KError::InvalidInput));
+    }
+
+    #[def_test]
+    fn test_eventfd_small_buffers_fail() {
+        let eventfd = EventFd::new(1, false);
+
+        let mut small_out = [0u8; 4];
+        let mut dst = kio::Cursor::new(small_out.as_mut_slice());
+        assert_eq!(eventfd.read(&mut dst), Err(KError::InvalidInput));
+
+        let value = 1_u64.to_ne_bytes();
+        let mut src = kio::Cursor::new(value[..4].as_ref());
+        assert_eq!(eventfd.write(&mut src), Err(KError::InvalidInput));
+    }
 }

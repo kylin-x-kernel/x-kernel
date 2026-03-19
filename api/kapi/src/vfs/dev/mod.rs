@@ -155,6 +155,120 @@ impl DeviceOps for CpuDmaLatency {
     }
 }
 
+#[cfg(unittest)]
+mod dev_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn test_null_read_returns_zero() {
+        let dev = Null;
+        let mut buf = [0xFFu8; 64];
+        let n = dev.read_at(&mut buf, 0).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[def_test]
+    fn test_null_write_accepts_all() {
+        let dev = Null;
+        let data = [1u8; 128];
+        let n = dev.write_at(&data, 0).unwrap();
+        assert_eq!(n, 128);
+    }
+
+    #[def_test]
+    fn test_zero_read_fills_zeros() {
+        let dev = Zero;
+        let mut buf = [0xFFu8; 32];
+        let n = dev.read_at(&mut buf, 0).unwrap();
+        assert_eq!(n, 32);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[def_test]
+    fn test_zero_write_accepts_all() {
+        let dev = Zero;
+        let data = [42u8; 64];
+        let n = dev.write_at(&data, 0).unwrap();
+        assert_eq!(n, 64);
+    }
+
+    #[def_test]
+    fn test_full_read_fills_zeros() {
+        let dev = Full;
+        let mut buf = [0xFFu8; 16];
+        let n = dev.read_at(&mut buf, 0).unwrap();
+        assert_eq!(n, 16);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[def_test]
+    fn test_full_write_returns_error() {
+        let dev = Full;
+        let data = [1u8; 8];
+        assert!(dev.write_at(&data, 0).is_err());
+    }
+
+    #[def_test]
+    fn test_random_read_fills_buffer() {
+        let dev = Random::new();
+        let mut buf = [0u8; 64];
+        let n = dev.read_at(&mut buf, 0).unwrap();
+        assert_eq!(n, 64);
+        assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    #[def_test]
+    fn test_random_write_accepts_all() {
+        let dev = Random::new();
+        let data = [0u8; 32];
+        let n = dev.write_at(&data, 0).unwrap();
+        assert_eq!(n, 32);
+    }
+
+    #[def_test]
+    fn test_random_two_reads_differ() {
+        let dev = Random::new();
+        let mut buf1 = [0u8; 32];
+        let mut buf2 = [0u8; 32];
+        dev.read_at(&mut buf1, 0).unwrap();
+        dev.read_at(&mut buf2, 0).unwrap();
+        assert_ne!(buf1, buf2);
+    }
+
+    #[def_test]
+    fn test_cpu_dma_latency_read_error() {
+        let dev = CpuDmaLatency;
+        let mut buf = [0u8; 4];
+        assert!(dev.read_at(&mut buf, 0).is_err());
+    }
+
+    #[def_test]
+    fn test_cpu_dma_latency_write_ok() {
+        let dev = CpuDmaLatency;
+        let data = [0u8; 4];
+        let n = dev.write_at(&data, 0).unwrap();
+        assert_eq!(n, 4);
+    }
+
+    #[def_test]
+    fn test_null_flags() {
+        let dev = Null;
+        let flags = dev.flags();
+        assert!(flags.contains(NodeFlags::NON_CACHEABLE));
+        assert!(flags.contains(NodeFlags::STREAM));
+    }
+
+    #[def_test]
+    fn test_zero_flags() {
+        let dev = Zero;
+        let flags = dev.flags();
+        assert!(flags.contains(NodeFlags::NON_CACHEABLE));
+        assert!(flags.contains(NodeFlags::STREAM));
+    }
+}
+
 /// Build the devfs filesystem with all standard device entries
 fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     let mut root = DirMapping::new();

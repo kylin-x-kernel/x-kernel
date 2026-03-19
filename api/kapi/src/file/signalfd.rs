@@ -200,5 +200,43 @@ mod signalfd_tests {
     #[def_test]
     fn test_signalfd_siginfo_size() {
         assert_eq!(SIGNALFD_SIGINFO_SIZE, 128);
+        assert_eq!(core::mem::size_of::<SignalfdSiginfo>(), 128);
+    }
+
+    #[def_test]
+    fn test_signalfd_nonblocking() {
+        let sfd = Signalfd::new(SignalSet::default());
+        assert!(!sfd.nonblocking());
+
+        sfd.set_nonblocking(true).unwrap();
+        assert!(sfd.nonblocking());
+
+        sfd.set_nonblocking(false).unwrap();
+        assert!(!sfd.nonblocking());
+    }
+
+    #[def_test]
+    fn test_signalfd_update_mask() {
+        let sfd = Signalfd::new(SignalSet::default());
+        let new_mask = SignalSet::default();
+        sfd.update_mask(new_mask);
+    }
+
+    #[def_test]
+    fn test_signalfd_write_returns_error() {
+        let sfd = Signalfd::new(SignalSet::default());
+        let data = b"test";
+        let mut src = kio::Cursor::new(data.as_slice());
+        assert!(sfd.write(&mut src).is_err());
+    }
+
+    #[def_test]
+    fn test_signalfd_siginfo_from_signal_info() {
+        use ksignal::Signo;
+        let sig = SignalInfo::new_kernel(Signo::SIGUSR1);
+        let info = SignalfdSiginfo::from_signal_info(&sig);
+        assert_eq!(info.ssi_signo, Signo::SIGUSR1 as u32);
+        assert_eq!(info.ssi_fd, -1);
+        assert_eq!(info.ssi_pid, 0);
     }
 }

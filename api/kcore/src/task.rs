@@ -539,9 +539,17 @@ pub fn send_signal_to_process_group(pgid: Pid, sig: Option<SignalInfo>) -> KResu
 /// Unit tests.
 #[cfg(unittest)]
 pub mod tests_task {
+    use alloc::sync::Arc;
+
+    use kerrno::KError;
+    use ksignal::SignalInfo;
     use unittest::def_test;
 
-    use super::{AssumeSync, TaskStat};
+    use super::{
+        AssumeSync, FutexTables, TaskStat, cleanup_task_tables, get_process_data,
+        get_process_group, get_session, get_task, processes, send_signal_to_process,
+        send_signal_to_process_group, send_signal_to_thread, tasks,
+    };
 
     #[def_test]
     fn test_assume_sync_deref() {
@@ -568,5 +576,79 @@ pub mod tests_task {
         };
         let text = alloc::format!("{stat}");
         assert!(text.starts_with("7 (init) R "));
+    }
+
+    #[def_test]
+    fn test_futextables_get_or_insert_reuses_existing_table() {
+        let mut tables = FutexTables::new();
+        let first = tables.get_or_insert(0x1234);
+        let second = tables.get_or_insert(0x1234);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(tables.map.len(), 1);
+        assert_eq!(tables.operations, 2);
+    }
+
+    #[def_test]
+    fn test_futextables_cleanup_drops_stale_entries_on_threshold() {
+        let mut tables = FutexTables::new();
+        let stale = tables.get_or_insert(1);
+        drop(stale);
+
+        tables.operations = 99;
+        let fresh = tables.get_or_insert(2);
+
+        assert_eq!(tables.operations, 0);
+        assert!(!tables.map.contains_key(&1));
+        assert!(tables.map.contains_key(&2));
+        assert_eq!(Arc::strong_count(&fresh), 2);
+    }
+
+    #[def_test]
+    fn test_cleanup_task_tables_on_empty_tables() {
+        cleanup_task_tables();
+    }
+
+    #[def_test]
+    fn test_task_tables_empty_queries_return_empty_or_not_found() {
+        cleanup_task_tables();
+
+        let _ = tasks();
+        let _ = processes();
+        assert!(matches!(get_task(12345), Err(KError::NoSuchProcess)));
+        assert!(matches!(
+            get_process_data(12345),
+            Err(KError::NoSuchProcess)
+        ));
+        assert!(matches!(
+            get_process_group(12345),
+            Err(KError::NoSuchProcess)
+        ));
+        assert!(matches!(get_session(12345), Err(KError::NoSuchProcess)));
+    }
+
+    #[def_test]
+    fn test_send_signal_helpers_propagate_missing_target_errors() {
+        cleanup_task_tables();
+
+        assert!(matches!(
+            send_signal_to_thread(
+                None,
+                22222,
+                Some(SignalInfo::new_kernel(ksignal::Signo::SIGTERM))
+            ),
+            Err(KError::NoSuchProcess)
+        ));
+        assert!(matches!(
+            send_signal_to_process(22222, Some(SignalInfo::new_kernel(ksignal::Signo::SIGTERM))),
+            Err(KError::NoSuchProcess)
+        ));
+        assert!(matches!(
+            send_signal_to_process_group(
+                22222,
+                Some(SignalInfo::new_kernel(ksignal::Signo::SIGTERM))
+            ),
+            Err(KError::NoSuchProcess)
+        ));
     }
 }
