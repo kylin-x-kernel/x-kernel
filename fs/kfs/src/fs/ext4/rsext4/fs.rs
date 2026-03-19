@@ -65,6 +65,17 @@ impl Ext4Filesystem {
     pub(crate) fn lock(&self) -> MutexGuard<'_, Ext4State> {
         self.inner.lock()
     }
+
+    pub(crate) fn sync_to_disk(&self) -> VfsResult<()> {
+        let mut state = self.inner.lock();
+        let (fs, dev) = state.split();
+        fs.bitmap_cache.flush_all(dev).map_err(into_vfs_err)?;
+        fs.inodetable_cahce.flush_all(dev).map_err(into_vfs_err)?;
+        fs.datablock_cache.flush_all(dev).map_err(into_vfs_err)?;
+        fs.sync_superblock(dev).map_err(into_vfs_err)?;
+        fs.sync_group_descriptors(dev).map_err(into_vfs_err)?;
+        dev.cantflush().map_err(into_vfs_err)
+    }
 }
 
 unsafe impl Send for Ext4Filesystem {}
@@ -103,10 +114,6 @@ impl FilesystemOps for Ext4Filesystem {
     }
 
     fn flush(&self) -> VfsResult<()> {
-        let mut state = self.inner.lock();
-        let (fs, dev) = state.split();
-        fs.inodetable_cahce.flush_all(dev).map_err(into_vfs_err)?;
-        fs.datablock_cache.flush_all(dev).map_err(into_vfs_err)?;
-        dev.cantflush().map_err(into_vfs_err)
+        self.sync_to_disk()
     }
 }
