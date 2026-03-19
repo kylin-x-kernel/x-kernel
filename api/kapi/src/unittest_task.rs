@@ -20,6 +20,7 @@ use ksync::{
 use ktask::{KTaskExt, TaskExt, current};
 use memaddr::PhysAddr;
 use unittest::{TestDescriptor, TestResult};
+use unittest_support::TestUserBuffer;
 
 static NEXT_TEST_PROCESS_ID: AtomicU32 = AtomicU32::new(0x7000_0000);
 fn alloc_test_process_id() -> Pid {
@@ -143,6 +144,41 @@ where
     (test.test_fn)()
 }
 
+const USER_TEST_STACK_SIZE: usize = 64 * 1024;
+
+pub fn run_with_test_user_stack<F>(test: &TestDescriptor, init_thread: F) -> TestResult
+where
+    F: FnOnce(&Thread),
+{
+    let _installed_thread = match InstalledTestThread::install(init_thread) {
+        Ok(guard) => guard,
+        Err(error) => {
+            error!(
+                "failed to install unittest user-thread runtime for {}:{}: {error:?}",
+                test.module, test.name
+            );
+            return TestResult::Failed;
+        }
+    };
+
+    let user_stack = match TestUserBuffer::new(USER_TEST_STACK_SIZE) {
+        Ok(stack) => stack,
+        Err(error) => {
+            error!(
+                "failed to allocate user test stack for {}:{}: {error:?}",
+                test.module, test.name
+            );
+            return TestResult::Failed;
+        }
+    };
+
+    let stack_top = user_stack.as_user_ptr::<u8>() as usize + user_stack.len();
+
+    // Keep preemption disabled while running on a temporary userspace stack.
+    let _no_preempt = NoPreempt::new();
+    unsafe { unittest::run_test_on_user_stack(test, stack_top) }
+}
+
 #[cfg(feature = "tee")]
 fn init_unittest_thread(thread: &Thread) {
     crate::tee::set_tee_session_ctx(thread);
@@ -154,5 +190,8 @@ fn init_unittest_thread(_: &Thread) {}
 pub fn register_unittest_runtime() {
     unittest::register_custom_test_executor(|test| {
         run_with_test_user_thread(test, init_unittest_thread)
+    });
+    unittest::register_user_test_executor(|test| {
+        run_with_test_user_stack(test, init_unittest_thread)
     });
 }

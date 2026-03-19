@@ -65,8 +65,11 @@ impl Default for TestStats {
 pub static TEST_FAILED_FLAG: AtomicBool = AtomicBool::new(false);
 
 pub type CustomTestExecutor = fn(&TestDescriptor) -> TestResult;
+pub type UserTestExecutor = fn(&TestDescriptor) -> TestResult;
 
 static CUSTOM_TEST_EXECUTOR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+static USER_TEST_EXECUTOR: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,10 +77,15 @@ static CUSTOM_TEST_EXECUTOR: core::sync::atomic::AtomicUsize =
 pub enum TestExecutionMode {
     Standard = 0,
     Custom   = 1,
+    User     = 2,
 }
 
 pub fn register_custom_test_executor(executor: CustomTestExecutor) {
     CUSTOM_TEST_EXECUTOR.store(executor as usize, Ordering::Release);
+}
+
+pub fn register_user_test_executor(executor: UserTestExecutor) {
+    USER_TEST_EXECUTOR.store(executor as usize, Ordering::Release);
 }
 
 fn custom_test_executor() -> Option<CustomTestExecutor> {
@@ -86,6 +94,15 @@ fn custom_test_executor() -> Option<CustomTestExecutor> {
         None
     } else {
         Some(unsafe { core::mem::transmute::<usize, CustomTestExecutor>(executor) })
+    }
+}
+
+fn user_test_executor() -> Option<UserTestExecutor> {
+    let executor = USER_TEST_EXECUTOR.load(Ordering::Acquire);
+    if executor == 0 {
+        None
+    } else {
+        Some(unsafe { core::mem::transmute::<usize, UserTestExecutor>(executor) })
     }
 }
 
@@ -149,6 +166,16 @@ impl Testable for TestDescriptor {
                 || {
                     error!(
                         "custom test executor is not registered for {}:{}",
+                        self.module, self.name
+                    );
+                    TestResult::Failed
+                },
+                |executor| executor(self),
+            ),
+            TestExecutionMode::User => user_test_executor().map_or_else(
+                || {
+                    error!(
+                        "user test executor is not registered for {}:{}",
                         self.module, self.name
                     );
                     TestResult::Failed

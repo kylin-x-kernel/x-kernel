@@ -146,6 +146,7 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `#[def_test(ignore)]` - Test will be skipped
 /// - `#[def_test(should_panic)]` - Test expects panic (not fully supported in no_std)
 /// - `#[def_test(custom)]` - Test runs through unittest's custom executor
+/// - `#[def_test(user)]` - Test runs through unittest's user-stack executor
 #[proc_macro_attribute]
 pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
@@ -158,12 +159,14 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
     let mut ignore = false;
     let mut should_panic = false;
     let mut use_custom_executor = false;
+    let mut use_user_executor = false;
 
     for arg in args {
         match arg.to_string().as_str() {
             "ignore" => ignore = true,
             "should_panic" => should_panic = true,
             "custom" => use_custom_executor = true,
+            "user" => use_user_executor = true,
             other => {
                 return Error::new(
                     arg.span(),
@@ -173,6 +176,15 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
                 .into();
             }
         }
+    }
+
+    if use_custom_executor && use_user_executor {
+        return Error::new(
+            input.sig.ident.span(),
+            "def_test(custom, user) is not supported; choose one execution mode",
+        )
+        .to_compile_error()
+        .into();
     }
 
     let fn_name = &input.sig.ident;
@@ -211,7 +223,9 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
 
     let ignore_val = ignore;
     let should_panic_val = should_panic;
-    let execution_mode = if use_custom_executor {
+    let execution_mode = if use_user_executor {
+        quote!(unittest::TestExecutionMode::User)
+    } else if use_custom_executor {
         quote!(unittest::TestExecutionMode::Custom)
     } else {
         quote!(unittest::TestExecutionMode::Standard)

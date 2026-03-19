@@ -190,14 +190,13 @@ pub mod tests_user_access {
         assert_eq!(kernel_data, user_data);
     }
 
-    #[unittest::def_test(custom)]
+    #[unittest::def_test(user)]
     fn test_copy_to_user() {
         let kernel_data = [10, 20, 30, 40, 50];
-        let mut user_data = TestUserBuffer::new(kernel_data.len()).unwrap();
+        let mut user_data: [u8; 5] = [0; 5];
 
-        copy_to_user(user_data.as_user_slice(kernel_data.len()), &kernel_data, 5).unwrap();
-        let user_data_bytes = user_data.read_bytes(kernel_data.len()).unwrap();
-        assert_eq!(user_data_bytes.as_slice(), &kernel_data);
+        copy_to_user(&mut user_data, &kernel_data, kernel_data.len()).unwrap();
+        assert_eq!(user_data, kernel_data);
     }
 
     #[unittest::def_test(custom)]

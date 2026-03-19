@@ -187,7 +187,11 @@ const PAGE_SIZE: usize = 0x1000; // 4KB page size
 pub struct VirtIoHalImpl;
 
 unsafe impl VirtIoHal for VirtIoHalImpl {
-    fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
+    fn dma_alloc(
+        pages: usize,
+        _direction: BufferDirection,
+        _access_platform: bool,
+    ) -> (PhysAddr, NonNull<u8>) {
         use core::alloc::Layout;
         // For AMD SEV, use kdma which handles SHARED flag (clears C-Bit)
         let size = pages * PAGE_SIZE;
@@ -215,7 +219,12 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     }
 
     #[allow(unused_variables)]
-    unsafe fn dma_dealloc(paddr: PhysAddr, vaddr: NonNull<u8>, pages: usize) -> i32 {
+    unsafe fn dma_dealloc(
+        paddr: PhysAddr,
+        vaddr: NonNull<u8>,
+        pages: usize,
+        _access_platform: bool,
+    ) -> i32 {
         use core::alloc::Layout;
         let size = pages * PAGE_SIZE;
         let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
@@ -239,7 +248,11 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
     #[allow(unused_variables)]
     #[inline]
-    unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> PhysAddr {
+    unsafe fn share(
+        buffer: NonNull<[u8]>,
+        direction: BufferDirection,
+        _access_platform: bool,
+    ) -> PhysAddr {
         #[cfg(any(feature = "sev", feature = "crosvm"))]
         {
             use core::{
@@ -291,7 +304,12 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
     #[inline]
     #[allow(unused_variables)]
-    unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection) {
+    unsafe fn unshare(
+        paddr: PhysAddr,
+        buffer: NonNull<[u8]>,
+        direction: BufferDirection,
+        _access_platform: bool,
+    ) {
         #[cfg(any(feature = "sev", feature = "crosvm"))]
         {
             use core::{

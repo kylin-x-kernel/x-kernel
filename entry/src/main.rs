@@ -15,6 +15,21 @@ extern crate kruntime;
 #[cfg(feature = "unittest")]
 mod unittest_simple;
 
+#[cfg(feature = "unittest")]
+fn unittest_crate_filter() -> Option<&'static str> {
+    match option_env!("UNITTEST_CRATE") {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        None => None,
+    }
+}
+
 #[cfg(not(feature = "unittest"))]
 mod entry;
 
@@ -77,7 +92,11 @@ fn main() {
     let finished_clone = finished.clone();
 
     spawn(move || {
-        let test_passed = unittest::test_run_ok();
+        let crate_filter = unittest_crate_filter();
+        if let Some(crate_filter) = crate_filter {
+            warn!("Running unit tests with crate filter: {}", crate_filter);
+        }
+        let test_passed = unittest::test_run_ok_filtered(crate_filter);
 
         if test_passed {
             warn!("=== UNITTEST_STATUS: ALL_TESTS_PASSED ===");

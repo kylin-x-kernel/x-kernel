@@ -17,7 +17,11 @@ pub struct MockHal;
 
 // MockHal implementation for unit testing
 unsafe impl Hal for MockHal {
-    fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
+    fn dma_alloc(
+        pages: usize,
+        _direction: BufferDirection,
+        _access_platform: bool,
+    ) -> (PhysAddr, NonNull<u8>) {
         let layout = Layout::from_size_align(pages * 4096, 4096).unwrap();
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
@@ -27,7 +31,12 @@ unsafe impl Hal for MockHal {
         (ptr as PhysAddr, NonNull::new(ptr).unwrap())
     }
 
-    unsafe fn dma_dealloc(paddr: PhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
+    unsafe fn dma_dealloc(
+        paddr: PhysAddr,
+        _vaddr: NonNull<u8>,
+        pages: usize,
+        _access_platform: bool,
+    ) -> i32 {
         let layout = Layout::from_size_align(pages * 4096, 4096).unwrap();
         unsafe { dealloc(paddr as *mut u8, layout) };
         0
@@ -37,11 +46,21 @@ unsafe impl Hal for MockHal {
         NonNull::new(paddr as *mut u8).unwrap()
     }
 
-    unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> PhysAddr {
+    unsafe fn share(
+        buffer: NonNull<[u8]>,
+        _direction: BufferDirection,
+        _access_platform: bool,
+    ) -> PhysAddr {
         buffer.as_ptr() as *mut u8 as PhysAddr
     }
 
-    unsafe fn unshare(_paddr: PhysAddr, _buffer: NonNull<[u8]>, _direction: BufferDirection) {}
+    unsafe fn unshare(
+        _paddr: PhysAddr,
+        _buffer: NonNull<[u8]>,
+        _direction: BufferDirection,
+        _access_platform: bool,
+    ) {
+    }
 }
 
 pub struct MockTransport {

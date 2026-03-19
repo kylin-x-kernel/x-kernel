@@ -5,6 +5,7 @@
 #     - `EXTRA_CONFIG`: Extra config specification file
 #     - `UIMAGE`: To generate U-Boot image
 #     - `LD_SCRIPT`: Use a custom linker script file.
+#     - `UNITTEST_CRATE`: Filter unittest by crate name (or comma-separated crate names)
 # * App options:
 #     - `A` or `APP`: Path to the application
 #     - `FEATURES`: Features os modules to be enabled.
@@ -38,6 +39,7 @@ TARGET_DIR ?= $(PWD)/target
 EXTRA_CONFIG ?=
 UIMAGE ?= n
 export UNITTEST ?= n
+export UNITTEST_CRATE ?=
 
 # App options
 A := $(PWD)/entry

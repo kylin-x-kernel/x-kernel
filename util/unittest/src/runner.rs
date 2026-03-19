@@ -34,14 +34,50 @@ fn get_tests() -> &'static [TestDescriptor] {
 }
 
 /// Group tests by module path
-fn group_tests_by_module(tests: &[TestDescriptor]) -> BTreeMap<&'static str, Vec<&TestDescriptor>> {
-    let mut grouped: BTreeMap<&'static str, Vec<&TestDescriptor>> = BTreeMap::new();
+fn group_tests_by_module<'a>(
+    tests: &'a [&'a TestDescriptor],
+) -> BTreeMap<&'static str, Vec<&'a TestDescriptor>> {
+    let mut grouped: BTreeMap<&'static str, Vec<&'a TestDescriptor>> = BTreeMap::new();
 
     for test in tests {
-        grouped.entry(test.module).or_default().push(test);
+        grouped.entry(test.module).or_default().push(*test);
     }
 
     grouped
+}
+
+fn normalize_crate_filter(crate_filter: Option<&str>) -> Vec<&str> {
+    crate_filter.map_or_else(Vec::new, |raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect()
+    })
+}
+
+fn module_matches_crate(module: &str, crate_name: &str) -> bool {
+    module == crate_name
+        || module
+            .strip_prefix(crate_name)
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
+fn select_tests_by_crate<'a>(
+    tests: &'a [TestDescriptor],
+    crate_filters: &[&str],
+) -> Vec<&'a TestDescriptor> {
+    if crate_filters.is_empty() {
+        return tests.iter().collect();
+    }
+
+    tests
+        .iter()
+        .filter(|test| {
+            crate_filters
+                .iter()
+                .any(|crate_name| module_matches_crate(test.module, crate_name))
+        })
+        .collect()
 }
 
 /// Run all registered unit tests
@@ -58,6 +94,14 @@ fn group_tests_by_module(tests: &[TestDescriptor]) -> BTreeMap<&'static str, Vec
 /// unittest::test_run();
 /// ```
 pub fn test_run() -> TestStats {
+    test_run_filtered(None)
+}
+
+/// Run unit tests with optional crate filter.
+///
+/// `crate_filter` supports a single crate name or multiple crate names
+/// separated by commas, for example: `"tee_kernel,kfs"`.
+pub fn test_run_filtered(crate_filter: Option<&str>) -> TestStats {
     // Reset the failed flag
     TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
 
@@ -73,8 +117,25 @@ pub fn test_run() -> TestStats {
         return TestStats::new();
     }
 
+    let crate_filters = normalize_crate_filter(crate_filter);
+    let selected_tests = select_tests_by_crate(tests, &crate_filters);
+
+    if selected_tests.is_empty() {
+        warn!("================================");
+        if crate_filters.is_empty() {
+            warn!("No tests found!");
+        } else {
+            warn!(
+                "No tests found for crate filter: {}",
+                crate_filters.join(",")
+            );
+        }
+        warn!("================================");
+        return TestStats::new();
+    }
+
     // Group tests by module and run them
-    let grouped = group_tests_by_module(tests);
+    let grouped = group_tests_by_module(&selected_tests);
     runner.run_tests_grouped("unittest", &grouped);
 
     runner.get_stats()
@@ -82,6 +143,17 @@ pub fn test_run() -> TestStats {
 
 /// Run all tests and return whether all tests passed
 pub fn test_run_ok() -> bool {
-    let stats = test_run();
+    test_run_ok_filtered(None)
+}
+
+/// Run tests with optional crate filter and return whether all tests passed.
+///
+/// When filter is provided but no test matches, this returns `false`.
+pub fn test_run_ok_filtered(crate_filter: Option<&str>) -> bool {
+    let has_filter = !normalize_crate_filter(crate_filter).is_empty();
+    let stats = test_run_filtered(crate_filter);
+    if has_filter && stats.total == 0 {
+        return false;
+    }
     stats.failed == 0
 }
