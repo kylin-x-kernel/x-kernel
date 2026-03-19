@@ -305,16 +305,21 @@ impl<T> core::ops::IndexMut<Sysno> for SysnoMap<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    extern crate alloc;
+    use alloc::{format, vec::Vec};
+
+    use unittest::{assert, assert_eq, def_test};
+
     use super::*;
 
-    #[test]
+    #[def_test]
     fn test_default() {
         assert_eq!(SysnoMap::<u8>::new().count(), 0);
     }
 
-    #[test]
+    #[def_test]
     fn test_is_empty() {
         let mut map = SysnoMap::new();
         assert!(map.is_empty());
@@ -326,7 +331,7 @@ mod tests {
         assert_eq!(map.get(Sysno::openat), None);
     }
 
-    #[test]
+    #[def_test]
     fn test_count() {
         let mut map = SysnoMap::new();
         assert_eq!(map.count(), 0);
@@ -339,7 +344,7 @@ mod tests {
         assert_eq!(map.values().sum::<u8>(), 51);
     }
 
-    #[test]
+    #[def_test]
     fn test_fn() {
         let mut map = SysnoMap::<fn() -> i32>::new();
         map.insert(Sysno::openat, || 1);
@@ -348,7 +353,7 @@ mod tests {
         assert_eq!(map.get(Sysno::close).unwrap()(), -1);
     }
 
-    #[test]
+    #[def_test]
     fn test_fn_macro() {
         type Handler = fn() -> i32;
         let map = SysnoMap::from_iter([
@@ -359,7 +364,7 @@ mod tests {
         assert_eq!(map.get(Sysno::close).unwrap()(), -1);
     }
 
-    #[test]
+    #[def_test]
     fn test_insert_remove() {
         let mut map = SysnoMap::new();
         assert_eq!(map.insert(Sysno::openat, 42), None);
@@ -377,8 +382,7 @@ mod tests {
         assert_eq!(map.remove(Sysno::openat), None);
     }
 
-    #[cfg(feature = "std")]
-    #[test]
+    #[def_test]
     fn test_debug() {
         let map = SysnoMap::from_iter([(Sysno::read, 42), (Sysno::openat, 10)]);
         let result = format!("{:?}", map);
@@ -392,20 +396,19 @@ mod tests {
         assert!(result.contains("openat: 10"));
     }
 
-    #[cfg(feature = "std")]
-    #[test]
+    #[def_test]
     fn test_iter() {
         let map = SysnoMap::from_iter([(Sysno::read, 42), (Sysno::openat, 10)]);
         assert_eq!(map.iter().collect::<Vec<_>>().len(), 2);
     }
 
-    #[test]
+    #[def_test]
     fn test_into_iter() {
         let map = SysnoMap::from_iter([(Sysno::read, 42), (Sysno::openat, 10)]);
         assert_eq!((&map).into_iter().count(), 2);
     }
 
-    #[test]
+    #[def_test]
     fn test_init_all() {
         let map = SysnoMap::init_all(&42);
         assert_eq!(map.get(Sysno::openat), Some(&42));

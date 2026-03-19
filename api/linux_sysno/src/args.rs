@@ -148,11 +148,13 @@ macro_rules! syscall_args {
     };
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    use unittest::{assert_eq, def_test};
+
     use super::*;
 
-    #[test]
+    #[def_test]
     fn syscall_args_macro_test() {
         assert_eq!(
             syscall_args!(1, 2, 3, 4, 5, 6),
@@ -172,7 +174,7 @@ mod tests {
         assert_eq!(syscall_args!(), SyscallArgs::new(0, 0, 0, 0, 0, 0));
     }
 
-    #[test]
+    #[def_test]
     fn syscall_args_from_u64_slice() {
         assert_eq!(
             SyscallArgs::from(&[1, 2, 3, 4, 5, 6]),

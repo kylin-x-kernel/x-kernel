@@ -36,6 +36,7 @@ serde = ["dep:serde", "serde_repr"]
 thumb-mode = []
 
 [dependencies]
+unittest.workspace = true
 serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
 serde_repr = { version = "0.1", optional = true }
 

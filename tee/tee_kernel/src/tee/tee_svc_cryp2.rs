@@ -1019,7 +1019,7 @@ pub fn tee_cryp_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
     drop(cs_guard);
 
     let mut len = 0;
-    if input != &[] {
+    if !input.is_empty() {
         len = tee_cryp_cipher_update(id, input, output)?;
     }
 

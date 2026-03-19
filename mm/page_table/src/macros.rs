@@ -40,26 +40,26 @@ macro_rules! walk_page_table {
     ($self:expr, $vaddr:expr, $table_fn:ident, $next_fn:ident, $is_mut:ident) => {{
         let vaddr: usize = $vaddr.into();
         let p3 = if M::LEVELS == 3 {
-            crate::walk_page_table!(@call $self, $table_fn, $self.root_paddr(), $is_mut)
+            $crate::walk_page_table!(@call $self, $table_fn, $self.root_paddr(), $is_mut)
         } else if M::LEVELS == 4 {
-            let p4 = crate::walk_page_table!(@call $self, $table_fn, $self.root_paddr(), $is_mut);
-            crate::walk_page_table!(@call_next $self, $next_fn, p4, p4_idx(vaddr), $is_mut)?
+            let p4 = $crate::walk_page_table!(@call $self, $table_fn, $self.root_paddr(), $is_mut);
+            $crate::walk_page_table!(@call_next $self, $next_fn, p4, p4_idx(vaddr), $is_mut)?
         } else {
             unreachable!()
         };
-        let p3e_is_huge = crate::walk_page_table!(@is_huge p3, p3_idx(vaddr));
+        let p3e_is_huge = $crate::walk_page_table!(@is_huge p3, p3_idx(vaddr));
         if p3e_is_huge {
-            return Ok((crate::walk_page_table!(@get p3, p3_idx(vaddr), $is_mut), PageSize::Size1G));
+            return Ok(($crate::walk_page_table!(@get p3, p3_idx(vaddr), $is_mut), PageSize::Size1G));
         }
 
-        let p2 = crate::walk_page_table!(@call_next $self, $next_fn, p3, p3_idx(vaddr), $is_mut)?;
-        let p2e_is_huge = crate::walk_page_table!(@is_huge p2, p2_idx(vaddr));
+        let p2 = $crate::walk_page_table!(@call_next $self, $next_fn, p3, p3_idx(vaddr), $is_mut)?;
+        let p2e_is_huge = $crate::walk_page_table!(@is_huge p2, p2_idx(vaddr));
         if p2e_is_huge {
-            return Ok((crate::walk_page_table!(@get p2, p2_idx(vaddr), $is_mut), PageSize::Size2M));
+            return Ok(($crate::walk_page_table!(@get p2, p2_idx(vaddr), $is_mut), PageSize::Size2M));
         }
 
-        let p1 = crate::walk_page_table!(@call_next $self, $next_fn, p2, p2_idx(vaddr), $is_mut)?;
-        Ok((crate::walk_page_table!(@get p1, p1_idx(vaddr), $is_mut), PageSize::Size4K))
+        let p1 = $crate::walk_page_table!(@call_next $self, $next_fn, p2, p2_idx(vaddr), $is_mut)?;
+        Ok(($crate::walk_page_table!(@get p1, p1_idx(vaddr), $is_mut), PageSize::Size4K))
     }};
     (@call $self:expr, $fn:ident, $arg:expr, mut) => { $self.$fn($arg) };
     (@call $self:expr, $fn:ident, $arg:expr, ref) => { $self.$fn($arg) };

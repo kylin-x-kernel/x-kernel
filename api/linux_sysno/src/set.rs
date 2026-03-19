@@ -408,11 +408,16 @@ impl<'de> Deserialize<'de> for SysnoSet {
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod tests {
+    extern crate alloc;
+    use alloc::{format, vec, vec::Vec};
+
+    use unittest::{assert, assert_eq, def_test};
+
     use super::*;
 
-    #[test]
+    #[def_test]
     fn test_words() {
         assert_eq!(words::<u64>(42), 1);
         assert_eq!(words::<u64>(0), 0);
@@ -420,7 +425,7 @@ mod tests {
         assert_eq!(words::<()>(42), 0);
     }
 
-    #[test]
+    #[def_test]
     fn test_bits_per() {
         assert_eq!(bits_per::<()>(), 0);
         assert_eq!(bits_per::<u8>(), 8);
@@ -428,12 +433,12 @@ mod tests {
         assert_eq!(bits_per::<u64>(), 64);
     }
 
-    #[test]
+    #[def_test]
     fn test_default() {
         assert_eq!(SysnoSet::default(), SysnoSet::empty());
     }
 
-    #[test]
+    #[def_test]
     fn test_const_new() {
         static SYSCALLS: SysnoSet = SysnoSet::new(&[Sysno::openat, Sysno::read, Sysno::close]);
 
@@ -443,7 +448,7 @@ mod tests {
         assert!(!SYSCALLS.contains(Sysno::write));
     }
 
-    #[test]
+    #[def_test]
     fn test_contains() {
         let set = SysnoSet::empty();
         assert!(!set.contains(Sysno::openat));
@@ -456,7 +461,7 @@ mod tests {
         assert!(set.contains(Sysno::last()));
     }
 
-    #[test]
+    #[def_test]
     fn test_is_empty() {
         let mut set = SysnoSet::empty();
         assert!(set.is_empty());
@@ -468,7 +473,7 @@ mod tests {
         assert!(!set.is_empty());
     }
 
-    #[test]
+    #[def_test]
     fn test_count() {
         let mut set = SysnoSet::empty();
         assert_eq!(set.count(), 0);
@@ -477,7 +482,7 @@ mod tests {
         assert_eq!(set.count(), 2);
     }
 
-    #[test]
+    #[def_test]
     fn test_insert() {
         let mut set = SysnoSet::empty();
         assert!(set.insert(Sysno::openat));
@@ -489,7 +494,7 @@ mod tests {
         assert_eq!(set.count(), 3);
     }
 
-    #[test]
+    #[def_test]
     fn test_remove() {
         let mut set = SysnoSet::all();
         assert!(set.remove(Sysno::openat));
@@ -497,8 +502,7 @@ mod tests {
         assert!(set.contains(Sysno::close));
     }
 
-    #[cfg(feature = "std")]
-    #[test]
+    #[def_test]
     fn test_from_iter() {
         let set = SysnoSet::from_iter(vec![Sysno::openat, Sysno::read, Sysno::close]);
         assert!(set.contains(Sysno::openat));
@@ -507,7 +511,7 @@ mod tests {
         assert_eq!(set.count(), 3);
     }
 
-    #[test]
+    #[def_test]
     fn test_all() {
         let mut all = SysnoSet::all();
         assert_eq!(all.count(), Sysno::count());
@@ -521,7 +525,7 @@ mod tests {
         assert_eq!(all.count(), 0);
     }
 
-    #[test]
+    #[def_test]
     fn test_union() {
         let a = SysnoSet::new(&[Sysno::read, Sysno::openat, Sysno::close]);
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
@@ -531,7 +535,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn test_bitorassign() {
         let mut a = SysnoSet::new(&[Sysno::read, Sysno::openat, Sysno::close]);
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
@@ -545,7 +549,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn test_bitor() {
         let a = SysnoSet::new(&[Sysno::read, Sysno::openat, Sysno::close]);
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
@@ -555,7 +559,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn test_intersection() {
         let a = SysnoSet::new(&[Sysno::read, Sysno::openat, Sysno::close]);
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
@@ -565,14 +569,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[def_test]
     fn test_difference() {
         let a = SysnoSet::new(&[Sysno::read, Sysno::openat, Sysno::close]);
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
         assert_eq!(a.difference(&b), SysnoSet::new(&[Sysno::read]));
     }
 
-    #[test]
+    #[def_test]
     fn test_symmetric_difference() {
         let a = SysnoSet::new(&[Sysno::read, Sysno::openat, Sysno::close]);
         let b = SysnoSet::new(&[Sysno::write, Sysno::openat, Sysno::close]);
@@ -582,8 +586,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "std")]
-    #[test]
+    #[def_test]
     fn test_iter() {
         let syscalls = &[Sysno::read, Sysno::openat, Sysno::close];
         let set = SysnoSet::new(syscalls);
@@ -591,12 +594,12 @@ mod tests {
         assert_eq!(set.iter().collect::<Vec<_>>().len(), 3);
     }
 
-    #[test]
+    #[def_test]
     fn test_iter_full() {
         assert_eq!(SysnoSet::all().iter().count(), Sysno::count());
     }
 
-    #[test]
+    #[def_test]
     fn test_into_iter() {
         let syscalls = &[Sysno::read, Sysno::openat, Sysno::close];
         let set = SysnoSet::new(syscalls);
@@ -604,8 +607,7 @@ mod tests {
         assert_eq!(set.into_iter().count(), 3);
     }
 
-    #[cfg(feature = "std")]
-    #[test]
+    #[def_test]
     fn test_debug() {
         let syscalls = &[Sysno::openat, Sysno::read];
         let set = SysnoSet::new(syscalls);
@@ -619,14 +621,13 @@ mod tests {
         assert!(result.contains("openat"));
     }
 
-    #[cfg(feature = "std")]
-    #[test]
+    #[def_test]
     fn test_iter_empty() {
         assert_eq!(SysnoSet::empty().iter().collect::<Vec<_>>(), &[]);
     }
 
     #[cfg(feature = "serde")]
-    #[test]
+    #[def_test]
     fn test_serde_roundtrip() {
         let syscalls = SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::close, Sysno::openat]);
 

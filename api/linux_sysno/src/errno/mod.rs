@@ -118,65 +118,32 @@ impl ErrnoSentinel for usize {
     }
 }
 
-#[cfg(test)]
+#[cfg(unittest)]
 mod test {
+    extern crate alloc;
+    use alloc::format;
+
+    use unittest::{assert_eq, def_test};
+
     use super::*;
 
-    #[test]
+    #[def_test]
     fn basic() {
         assert_eq!(Errno::ENOENT.name(), Some("ENOENT"));
         assert_eq!(
             Errno::ENOENT.description(),
             Some("No such file or directory")
         );
-        #[cfg(feature = "std")]
-        {
-            assert_eq!(
-                format!("{}", Errno::ENOENT),
-                "-2 ENOENT (No such file or directory)"
-            );
-            assert_eq!(format!("{:?}", Errno::ENOENT), "ENOENT");
-        }
+        assert_eq!(
+            format!("{}", Errno::ENOENT),
+            "-2 ENOENT (No such file or directory)"
+        );
+        assert_eq!(format!("{:?}", Errno::ENOENT), "ENOENT");
     }
 
-    #[test]
+    #[def_test]
     fn from_ret() {
         assert_eq!(Errno::from_ret(-2isize as usize), Err(Errno::ENOENT));
         assert_eq!(Errno::from_ret(2), Ok(2));
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn io_error() {
-        use std::io;
-
-        assert_eq!(
-            io::Error::from(Errno::ENOENT).kind(),
-            io::ErrorKind::NotFound
-        );
-
-        assert_eq!(
-            Errno::from_io_error(io::Error::from_raw_os_error(2)),
-            Some(Errno::ENOENT)
-        );
-
-        assert_eq!(
-            Errno::from_io_error(io::Error::new(io::ErrorKind::Other, "")),
-            None
-        );
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn last_errno() {
-        assert_eq!(
-            Errno::result(unsafe {
-                libc::open(
-                    b"this_should_not_exist\0".as_ptr() as *const _,
-                    libc::O_RDONLY,
-                )
-            }),
-            Err(Errno::ENOENT)
-        );
     }
 }
