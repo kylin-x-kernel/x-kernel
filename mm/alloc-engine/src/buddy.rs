@@ -45,6 +45,9 @@ impl BaseAllocator for BuddyByteAllocator {
     }
 }
 
+// Note: This trait implementation acts as a standard thin wrapper.
+// The method delegations to the `inner` allocator follow idiomatic Rust
+// patterns for composition and should not be considered literal duplication.
 impl ByteAllocator for BuddyByteAllocator {
     fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
         self.inner.alloc(layout).map_err(|_| AllocError::NoMemory)

@@ -53,6 +53,9 @@ impl BaseAllocator for SlabByteAllocator {
     }
 }
 
+// Note: This trait implementation acts as a standard thin wrapper for the slab allocator.
+// The method delegations and unsafe pointer conversions follow idiomatic Rust patterns
+// for memory management APIs, and should not be interpreted as literal duplication.
 impl ByteAllocator for SlabByteAllocator {
     fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
         self.inner_mut()

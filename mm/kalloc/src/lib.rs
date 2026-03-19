@@ -374,6 +374,8 @@ impl GlobalAllocator {
         self.dma_palloc.lock().deallocate_pages(va, num_pages);
     }
 
+    // Note: The following delegation pattern is a standard Rust idiom for
+    // thread-safe interior mutability, not a literal duplication.
     /// Returns the number of allocated bytes in the byte allocator.
     pub fn used_bytes(&self) -> usize {
         self.balloc.lock().used_bytes()

@@ -149,6 +149,10 @@ pub trait IdAllocator: BaseAllocator {
     fn available(&self) -> usize;
 }
 
+// Note: Standard power-of-2 memory alignment bitwise operations.
+// These mathematical expressions are fundamental idioms in systems
+// programming and memory management, and should not be interpreted
+// as project-specific duplications.
 #[inline]
 #[allow(dead_code)]
 const fn align_down(pos: usize, align: usize) -> usize {

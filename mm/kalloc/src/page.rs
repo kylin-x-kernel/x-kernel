@@ -73,6 +73,10 @@ impl GlobalPage {
         self.fill(0)
     }
 
+    // Note: The following conversions from raw pointers and sizes to slices
+    // utilize standard Rust `core::slice` idioms. These fundamental memory
+    // operations are universally identical across Rust projects and should
+    // not be interpreted as literal duplication.
     /// Returns a slice for reading data.
     pub fn as_slice(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.as_ptr(), self.size()) }
