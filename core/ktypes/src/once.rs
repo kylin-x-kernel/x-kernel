@@ -31,8 +31,10 @@ use core::{
 /// });
 /// ```
 pub struct Once<T = ()> {
-    status: AtomicStatus,
-    data: UnsafeCell<MaybeUninit<T>>,
+    /// Atomic state tracking initialization progress
+    state: AtomicStatus,
+    /// Internal storage for the lazy-initialized value
+    storage: UnsafeCell<MaybeUninit<T>>,
 }
 
 impl<T> Default for Once<T> {
@@ -43,13 +45,14 @@ impl<T> Default for Once<T> {
 
 impl<T: fmt::Debug> fmt::Debug for Once<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut d = f.debug_tuple("Once");
-        let d = if let Some(x) = self.get() {
-            d.field(&x)
-        } else {
-            d.field(&format_args!("<uninit>"))
+        // Build debug representation based on current state
+        let mut formatter = f.debug_tuple("OnceCell");
+
+        let formatter = match self.get() {
+            Some(value) => formatter.field(&value),
+            None => formatter.field(&format_args!("<not-ready>")),
         };
-        d.finish()
+        formatter.finish()
     }
 }
 
@@ -67,15 +70,15 @@ mod status {
     #[repr(transparent)]
     pub struct AtomicStatus(AtomicU8);
 
-    // Four states that a Once can be in, encoded into the lower bits of `status` in
-    // the Once structure.
+    // Four possible states for the Once cell, encoded in the atomic u8 storage.
+    // These represent the lifecycle: uninitialized -> executing -> done/failed
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub enum Status {
-        Incomplete = 0x00,
-        Running    = 0x01,
-        Complete   = 0x02,
-        Panicked   = 0x03,
+        Uninitialized = 0x00,
+        Initializing  = 0x01,
+        Ready         = 0x02,
+        Failed        = 0x03,
     }
     impl Status {
         // Construct a status from an inner u8 integer.
@@ -91,22 +94,22 @@ mod status {
     impl AtomicStatus {
         #[inline(always)]
         pub const fn new(status: Status) -> Self {
-            // SAFETY: We got the value directly from status, so transmuting back is fine.
+            // Convert Status enum to underlying u8 representation
             Self(AtomicU8::new(status as u8))
         }
 
         #[inline(always)]
         pub fn load(&self, ordering: Ordering) -> Status {
-            // SAFETY: We know that the inner integer must have been constructed from a Status in
-            // the first place.
-            unsafe { Status::new_unchecked(self.0.load(ordering)) }
+            // The invariant ensures the loaded u8 is a valid Status variant
+            let raw_value = self.0.load(ordering);
+            unsafe { Status::new_unchecked(raw_value) }
         }
 
         #[inline(always)]
         pub fn store(&self, status: Status, ordering: Ordering) {
-            // SAFETY: While not directly unsafe, this is safe because the value was retrieved from
-            // a status, thus making transmutation safe.
-            self.0.store(status as u8, ordering);
+            // Store the enum discriminant value directly
+            let raw_value = status as u8;
+            self.0.store(raw_value, ordering);
         }
 
         #[inline(always)]
@@ -117,23 +120,23 @@ mod status {
             success: Ordering,
             failure: Ordering,
         ) -> Result<Status, Status> {
-            match self
-                .0
-                .compare_exchange(old as u8, new as u8, success, failure)
-            {
-                // SAFETY: A compare exchange will always return a value that was later stored into
-                // the atomic u8, but due to the invariant that it must be a valid Status, we know
-                // that both Ok(_) and Err(_) will be safely transmutable.
-                Ok(ok) => Ok(unsafe { Status::new_unchecked(ok) }),
-                Err(err) => Err(unsafe { Status::new_unchecked(err) }),
+            // Try to atomically swap old state with new state
+            let old_raw = old as u8;
+            let new_raw = new as u8;
+            let result = self.0.compare_exchange(old_raw, new_raw, success, failure);
+
+            // Convert result values back to Status enum
+            match result {
+                Ok(current) => Ok(unsafe { Status::new_unchecked(current) }),
+                Err(actual) => Err(unsafe { Status::new_unchecked(actual) }),
             }
         }
 
         #[inline(always)]
         pub fn get_mut(&mut self) -> &mut Status {
-            // SAFETY: Since we know that the u8 inside must be a valid Status, we can safely cast
-            // it to a &mut Status.
-            unsafe { &mut *((self.0.get_mut() as *mut u8).cast::<Status>()) }
+            // Direct mutable access is safe with exclusive reference
+            let ptr = self.0.get_mut() as *mut u8;
+            unsafe { &mut *(ptr.cast::<Status>()) }
         }
     }
 }
@@ -216,109 +219,105 @@ impl<T> Once<T> {
     /// }
     /// ```
     pub fn try_call_once<F: FnOnce() -> Result<T, E>, E>(&self, f: F) -> Result<&T, E> {
-        if let Some(value) = self.get() {
-            Ok(value)
-        } else {
-            self.try_call_once_slow(f)
+        // Fast path: check if already initialized
+        if let Some(existing_value) = self.get() {
+            return Ok(existing_value);
         }
+
+        // Slow path: perform initialization
+        self.try_call_once_slow(f)
     }
 
     #[cold]
     fn try_call_once_slow<F: FnOnce() -> Result<T, E>, E>(&self, f: F) -> Result<&T, E> {
         loop {
-            let xchg = self.status.compare_exchange(
-                Status::Incomplete,
-                Status::Running,
+            // Attempt to transition from uninitialized to initializing state
+            let exchange_result = self.state.compare_exchange(
+                Status::Uninitialized,
+                Status::Initializing,
                 Ordering::Acquire,
                 Ordering::Acquire,
             );
 
-            match xchg {
-                Ok(_must_be_state_incomplete) => {
-                    // Impl is defined after the match for readability
+            match exchange_result {
+                Ok(_) => {
+                    // Successfully claimed initialization responsibility
+                    // Implementation continues below
                 }
-                Err(Status::Panicked) => panic!("Once panicked"),
-                Err(Status::Running) => match self.poll() {
-                    Some(v) => return Ok(v),
-                    None => continue,
-                },
-                Err(Status::Complete) => {
+                Err(Status::Failed) => {
+                    panic!("OnceCell has failed during a previous initialization attempt")
+                }
+                Err(Status::Initializing) => {
+                    // Another thread is initializing, wait for completion
+                    match self.poll() {
+                        Some(completed_value) => return Ok(completed_value),
+                        None => continue,
+                    }
+                }
+                Err(Status::Ready) => {
+                    // Another thread completed initialization
                     return Ok(unsafe {
-                        // SAFETY: The status is Complete
-                        self.force_get()
+                        // SAFETY: Status is Ready, so value is initialized
+                        self.get_value_unchecked()
                     });
                 }
-                Err(Status::Incomplete) => {
-                    // The compare_exchange failed, so this shouldn't ever be reached,
-                    // however if we decide to switch to compare_exchange_weak it will
-                    // be safer to leave this here than hit an unreachable
+                Err(Status::Uninitialized) => {
+                    // CAS failed spuriously, retry
                     continue;
                 }
             }
 
-            // The compare-exchange succeeded, so we shall initialize it.
+            // We own the initialization process now
+            // Set up panic guard to mark cell as failed on panic
+            let panic_guard = PanicGuard { state: &self.state };
 
-            // We use a guard (Finish) to catch panics caused by builder
-            let finish = Finish {
-                status: &self.status,
-            };
-            let val = match f() {
-                Ok(val) => val,
-                Err(err) => {
-                    // If an error occurs, clean up everything and leave.
-                    core::mem::forget(finish);
-                    self.status.store(Status::Incomplete, Ordering::Release);
-                    return Err(err);
+            // Execute the initialization function
+            let initialized_value = match f() {
+                Ok(result) => result,
+                Err(error) => {
+                    // Initialization failed, reset to uninitialized
+                    core::mem::forget(panic_guard);
+                    self.state.store(Status::Uninitialized, Ordering::Release);
+                    return Err(error);
                 }
             };
+
+            // Write the initialized value to storage
             unsafe {
                 // SAFETY:
-                // `UnsafeCell`/deref: currently the only accessor, mutably
-                // and immutably by cas exclusion.
-                // `write`: pointer comes from `MaybeUninit`.
-                (*self.data.get()).as_mut_ptr().write(val);
+                // - We have exclusive write access via CAS
+                // - Pointer is derived from MaybeUninit
+                let storage_ptr = (*self.storage.get()).as_mut_ptr();
+                storage_ptr.write(initialized_value);
             };
-            // If there were to be a panic with unwind enabled, the code would
-            // short-circuit and never reach the point where it writes the inner data.
-            // The destructor for Finish will run, and poison the Once to ensure that other
-            // threads accessing it do not exhibit unwanted behavior, if there were to be
-            // any inconsistency in data structures caused by the panicking thread.
-            //
-            // However, f() is expected in the general case not to panic. In that case, we
-            // simply forget the guard, bypassing its destructor. We could theoretically
-            // clear a flag instead, but this eliminates the call to the destructor at
-            // compile time, and unconditionally poisons during an eventual panic, if
-            // unwinding is enabled.
-            core::mem::forget(finish);
 
-            // SAFETY: Release is required here, so that all memory accesses done in the
-            // closure when initializing, become visible to other threads that perform Acquire
-            // loads.
-            //
-            // And, we also know that the changes this thread has done will not magically
-            // disappear from our cache, so it does not need to be AcqRel.
-            self.status.store(Status::Complete, Ordering::Release);
+            // Initialization succeeded, disarm panic guard
+            core::mem::forget(panic_guard);
 
-            // This next line is mainly an optimization.
-            return unsafe { Ok(self.force_get()) };
+            // Mark as ready and make writes visible to other threads
+            self.state.store(Status::Ready, Ordering::Release);
+
+            // Return the initialized value
+            return unsafe { Ok(self.get_value_unchecked()) };
         }
     }
 
-    /// Spins until the [`Once`] contains a value.
+    /// Blocks until the [`Once`] contains a value.
     ///
     /// Note that in releases prior to `0.7`, this function had the behaviour of [`Once::poll`].
     ///
     /// # Panics
     ///
-    /// This function will panic if the [`Once`] previously panicked while attempting
+    /// This function will panic if the [`Once`] previously failed while attempting
     /// to initialize. This is similar to the poisoning behaviour of `std::sync`'s
     /// primitives.
     pub fn wait(&self) -> &T {
         loop {
-            match self.poll() {
-                Some(x) => break x,
-                None => core::hint::spin_loop(), // We spin,
+            if let Some(ready_value) = self.poll() {
+                return ready_value;
             }
+            // Yield to other threads while waiting
+            core::hint::spin_loop();
         }
     }
 
@@ -329,19 +328,26 @@ impl<T> Once<T> {
     ///
     /// # Panics
     ///
-    /// This function will panic if the [`Once`] previously panicked while attempting
+    /// This function will panic if the [`Once`] previously failed while attempting
     /// to initialize. This is similar to the poisoning behaviour of `std::sync`'s
     /// primitives.
     pub fn poll(&self) -> Option<&T> {
         loop {
-            // SAFETY: Acquire is safe here, because if the status is COMPLETE, then we want to make
-            // sure that all memory accessed done while initializing that value, are visible when
-            // we return a reference to the inner data after this load.
-            match self.status.load(Ordering::Acquire) {
-                Status::Incomplete => return None,
-                Status::Running => core::hint::spin_loop(), // We spin
-                Status::Complete => return Some(unsafe { self.force_get() }),
-                Status::Panicked => panic!("Once previously poisoned by a panicked"),
+            // Check current initialization state
+            let current_state = self.state.load(Ordering::Acquire);
+
+            match current_state {
+                Status::Uninitialized => return None,
+                Status::Initializing => {
+                    // Spin while another thread is initializing
+                    core::hint::spin_loop();
+                }
+                Status::Ready => {
+                    return Some(unsafe { self.get_value_unchecked() });
+                }
+                Status::Failed => {
+                    panic!("OnceCell was contaminated by a previous panic")
+                }
             }
         }
     }
@@ -351,8 +357,8 @@ impl<T> Once<T> {
     /// Initialization constant of [`Once`].
     #[allow(clippy::declare_interior_mutable_const)]
     pub const INIT: Self = Self {
-        status: AtomicStatus::new(Status::Incomplete),
-        data: UnsafeCell::new(MaybeUninit::uninit()),
+        state: AtomicStatus::new(Status::Uninitialized),
+        storage: UnsafeCell::new(MaybeUninit::uninit()),
     };
 
     /// Creates a new [`Once`].
@@ -363,8 +369,8 @@ impl<T> Once<T> {
     /// Creates a new initialized [`Once`].
     pub const fn initialized(data: T) -> Self {
         Self {
-            status: AtomicStatus::new(Status::Complete),
-            data: UnsafeCell::new(MaybeUninit::new(data)),
+            state: AtomicStatus::new(Status::Ready),
+            storage: UnsafeCell::new(MaybeUninit::new(data)),
         }
     }
 
@@ -374,42 +380,43 @@ impl<T> Once<T> {
     /// initialized is UB, unless this method has already been written to from a pointer coming
     /// from this method.
     pub fn as_mut_ptr(&self) -> *mut T {
-        // SAFETY:
-        // * MaybeUninit<T> always has exactly the same layout as T
-        self.data.get().cast::<T>()
+        // MaybeUninit<T> and T have identical memory layout
+        self.storage.get().cast::<T>()
     }
 
-    /// Get a reference to the initialized instance. Must only be called once COMPLETE.
-    unsafe fn force_get(&self) -> &T {
+    /// Get a reference to the initialized value. Must only be called when Ready.
+    unsafe fn get_value_unchecked(&self) -> &T {
         // SAFETY:
-        // * `UnsafeCell`/inner deref: data never changes again
-        // * `MaybeUninit`/outer deref: data was initialized
-        unsafe { &*(*self.data.get()).as_ptr() }
+        // - Caller ensures value is initialized
+        // - Data is immutable after initialization
+        unsafe { &*(*self.storage.get()).as_ptr() }
     }
 
-    /// Get a reference to the initialized instance. Must only be called once COMPLETE.
-    unsafe fn force_get_mut(&mut self) -> &mut T {
+    /// Get a mutable reference to the initialized value. Must only be called when Ready.
+    unsafe fn get_value_mut_unchecked(&mut self) -> &mut T {
         // SAFETY:
-        // * `UnsafeCell`/inner deref: data never changes again
-        // * `MaybeUninit`/outer deref: data was initialized
-        unsafe { &mut *(*self.data.get()).as_mut_ptr() }
+        // - Caller ensures value is initialized
+        // - We have exclusive mutable access
+        unsafe { &mut *(*self.storage.get()).as_mut_ptr() }
     }
 
-    /// Get a reference to the initialized instance. Must only be called once COMPLETE.
-    unsafe fn force_into_inner(self) -> T {
+    /// Extract the initialized value. Must only be called when Ready.
+    unsafe fn extract_value_unchecked(self) -> T {
         // SAFETY:
-        // * `UnsafeCell`/inner deref: data never changes again
-        // * `MaybeUninit`/outer deref: data was initialized
-        unsafe { (*self.data.get()).as_ptr().read() }
+        // - Caller ensures value is initialized
+        // - We own the Once, so we can move the value out
+        unsafe { (*self.storage.get()).as_ptr().read() }
     }
 
     /// Returns a reference to the inner value if the [`Once`] has been initialized.
     pub fn get(&self) -> Option<&T> {
-        // SAFETY: Just as with `poll`, Acquire is safe here because we want to be able to see the
-        // nonatomic stores done when initializing, once we have loaded and checked the status.
-        match self.status.load(Ordering::Acquire) {
-            Status::Complete => Some(unsafe { self.force_get() }),
-            _ => None,
+        // Check if initialization is complete
+        let current_state = self.state.load(Ordering::Acquire);
+
+        if current_state == Status::Ready {
+            Some(unsafe { self.get_value_unchecked() })
+        } else {
+            None
         }
     }
 
@@ -423,12 +430,12 @@ impl<T> Once<T> {
     /// checking initialization is unacceptable and the `Once` has already been initialized.
     pub unsafe fn get_unchecked(&self) -> &T {
         debug_assert_eq!(
-            self.status.load(Ordering::SeqCst),
-            Status::Complete,
-            "Attempted to access an uninitialized Once. If this was run without debug checks, \
+            self.state.load(Ordering::SeqCst),
+            Status::Ready,
+            "Attempted to access an uninitialized OnceCell. If this was run without debug checks, \
              this would be undefined behaviour. This is a serious bug and you must fix it.",
         );
-        unsafe { self.force_get() }
+        unsafe { self.get_value_unchecked() }
     }
 
     /// Returns a mutable reference to the inner value if the [`Once`] has been initialized.
@@ -436,9 +443,10 @@ impl<T> Once<T> {
     /// Because this method requires a mutable reference to the [`Once`], no synchronization
     /// overhead is required to access the inner value. In effect, it is zero-cost.
     pub fn get_mut(&mut self) -> Option<&mut T> {
-        match *self.status.get_mut() {
-            Status::Complete => Some(unsafe { self.force_get_mut() }),
-            _ => None,
+        if *self.state.get_mut() == Status::Ready {
+            Some(unsafe { self.get_value_mut_unchecked() })
+        } else {
+            None
         }
     }
 
@@ -452,12 +460,12 @@ impl<T> Once<T> {
     /// checking initialization is unacceptable and the `Once` has already been initialized.
     pub unsafe fn get_mut_unchecked(&mut self) -> &mut T {
         debug_assert_eq!(
-            self.status.load(Ordering::SeqCst),
-            Status::Complete,
-            "Attempted to access an unintialized Once.  If this was to run without debug checks, \
-             this would be undefined behavior.  This is a serious bug and you must fix it.",
+            self.state.load(Ordering::SeqCst),
+            Status::Ready,
+            "Attempted to access an uninitialized OnceCell. If this was run without debug checks, \
+             this would be undefined behavior. This is a serious bug and you must fix it.",
         );
-        unsafe { self.force_get_mut() }
+        unsafe { self.get_value_mut_unchecked() }
     }
 
     /// Returns a the inner value if the [`Once`] has been initialized.
@@ -465,9 +473,10 @@ impl<T> Once<T> {
     /// Because this method requires ownership of the [`Once`], no synchronization overhead
     /// is required to access the inner value. In effect, it is zero-cost.
     pub fn try_into_inner(mut self) -> Option<T> {
-        match *self.status.get_mut() {
-            Status::Complete => Some(unsafe { self.force_into_inner() }),
-            _ => None,
+        if *self.state.get_mut() == Status::Ready {
+            Some(unsafe { self.extract_value_unchecked() })
+        } else {
+            None
         }
     }
 
@@ -480,12 +489,12 @@ impl<T> Once<T> {
     /// option check.
     pub unsafe fn into_inner_unchecked(self) -> T {
         debug_assert_eq!(
-            self.status.load(Ordering::SeqCst),
-            Status::Complete,
-            "Attempted to access an unintialized Once.  If this was to run without debug checks, \
-             this would be undefined behavior.  This is a serious bug and you must fix it.",
+            self.state.load(Ordering::SeqCst),
+            Status::Ready,
+            "Attempted to access an uninitialized OnceCell. If this was run without debug checks, \
+             this would be undefined behavior. This is a serious bug and you must fix it.",
         );
-        unsafe { self.force_into_inner() }
+        unsafe { self.extract_value_unchecked() }
     }
 
     /// Checks whether the value has been initialized.
@@ -494,8 +503,7 @@ impl<T> Once<T> {
     /// therefore it is safe to access the value directly via
     /// [`get_unchecked`](Self::get_unchecked) if this returns true.
     pub fn is_completed(&self) -> bool {
-        // TODO: Add a similar variant for Relaxed?
-        self.status.load(Ordering::Acquire) == Status::Complete
+        self.state.load(Ordering::Acquire) == Status::Ready
     }
 }
 
@@ -507,29 +515,25 @@ impl<T> From<T> for Once<T> {
 
 impl<T> Drop for Once<T> {
     fn drop(&mut self) {
-        // No need to do any atomic access here, we have &mut!
-        if *self.status.get_mut() == Status::Complete {
+        // Exclusive mutable access means no atomic operations needed
+        if *self.state.get_mut() == Status::Ready {
             unsafe {
-                // TODO: Use MaybeUninit::assume_init_drop once stabilised
-                core::ptr::drop_in_place((*self.data.get()).as_mut_ptr());
+                // Value is initialized, so we must drop it
+                core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
             }
         }
     }
 }
 
-struct Finish<'a> {
-    status: &'a AtomicStatus,
+struct PanicGuard<'a> {
+    state: &'a AtomicStatus,
 }
 
-impl<'a> Drop for Finish<'a> {
+impl<'a> Drop for PanicGuard<'a> {
     fn drop(&mut self) {
-        // While using Relaxed here would most likely not be an issue, we use SeqCst anyway.
-        // This is mainly because panics are not meant to be fast at all, but also because if
-        // there were to be a compiler bug which reorders accesses within the same thread,
-        // where it should not, we want to be sure that the panic really is handled, and does
-        // not cause additional problems. SeqCst will therefore help guarding against such
-        // bugs.
-        self.status.store(Status::Panicked, Ordering::SeqCst);
+        // Mark the cell as failed if we're unwinding from a panic
+        // SeqCst ensures proper ordering even in presence of compiler bugs
+        self.state.store(Status::Failed, Ordering::SeqCst);
     }
 }
 

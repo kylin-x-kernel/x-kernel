@@ -45,19 +45,24 @@ use crate::once::Once;
 /// }
 /// ```
 pub struct Lazy<T, F = fn() -> T> {
-    cell: Once<T>,
-    init: Cell<Option<F>>,
+    /// Underlying once-initialized storage container
+    value_storage: Once<T>,
+    /// Factory function holder with interior mutability pattern
+    factory: Cell<Option<F>>,
 }
 
 impl<T: fmt::Debug, F> fmt::Debug for Lazy<T, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut d = f.debug_tuple("Lazy");
-        let d = if let Some(x) = self.cell.get() {
-            d.field(&x)
-        } else {
-            d.field(&format_args!("<uninit>"))
+        // Build debug representation as tuple structure
+        let mut debug_builder = f.debug_tuple("LazyValue");
+
+        // Display content based on initialization state
+        let debug_builder = match self.value_storage.get() {
+            Some(content) => debug_builder.field(&content),
+            None => debug_builder.field(&format_args!("<uninit>")),
         };
-        d.finish()
+
+        debug_builder.finish()
     }
 }
 
@@ -74,8 +79,8 @@ impl<T, F> Lazy<T, F> {
     /// function.
     pub const fn new(f: F) -> Self {
         Self {
-            cell: Once::new(),
-            init: Cell::new(Some(f)),
+            value_storage: Once::new(),
+            factory: Cell::new(Some(f)),
         }
     }
 
@@ -85,7 +90,7 @@ impl<T, F> Lazy<T, F> {
     /// explicitly knows that it has exclusive access to the inner data. Note that reading from
     /// this pointer is UB until initialized or directly written to.
     pub fn as_mut_ptr(&self) -> *mut T {
-        self.cell.as_mut_ptr()
+        self.value_storage.as_mut_ptr()
     }
 }
 
@@ -105,9 +110,15 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// assert_eq!(&*lazy, &92);
     /// ```
     pub fn force(this: &Self) -> &T {
-        this.cell.call_once(|| match this.init.take() {
-            Some(f) => f(),
-            None => panic!("Lazy instance has previously been poisoned"),
+        // Ensure single initialization through once-cell mechanism
+        this.value_storage.call_once(|| {
+            // Retrieve and invoke the factory function
+            let factory_fn = this.factory.take();
+            if let Some(creator) = factory_fn {
+                creator()
+            } else {
+                panic!("LazyValue has been contaminated by previous panic")
+            }
         })
     }
 }
