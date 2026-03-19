@@ -620,7 +620,9 @@ pub fn syscall_cryp_state_alloc(
     arg3: usize,
     arg4: usize,
 ) -> TeeResult {
+    let mut state_ptr = arg4 as *mut u32;
     let mut state = 0u32;
+    unsafe { copy_from_user_struct(&mut state, &*state_ptr)? };
     let mode = match arg1 {
         0 => TEE_OperationMode::TEE_MODE_ENCRYPT,
         1 => TEE_OperationMode::TEE_MODE_DECRYPT,
@@ -633,7 +635,10 @@ pub fn syscall_cryp_state_alloc(
     };
     let key1 = if arg2 == 0 { None } else { Some(arg2 as u32) };
     let key2 = if arg3 == 0 { None } else { Some(arg3 as u32) };
-    tee_cryp_state_alloc(arg0 as _, mode, key1, key2, &mut state)
+
+    tee_cryp_state_alloc(arg0 as _, mode, key1, key2, &mut state)?;
+    unsafe { copy_to_user_struct(&mut *state_ptr, &state)? };
+    Ok(())
 }
 
 // 复制一个TeeCrypState
@@ -659,8 +664,26 @@ pub fn syscall_cryp_state_copy(arg0: usize, arg1: usize) -> TeeResult {
     tee_cryp_state_copy(arg0 as _, arg1 as _)
 }
 
-// 删除一个TeeCrypState
+// 删除一个TeeCrypState，并设定密钥对象busy状态为false
 pub fn tee_cryp_state_free(id: u32) -> TeeResult {
+    let mut cs = tee_cryp_state_get(id)?;
+    let cs_guard = cs.lock();
+    let key1 = cs_guard.key1;
+    let key2 = cs_guard.key2;
+    drop(cs_guard);
+
+    if let Some(key1) = key1 {
+        let mut o = tee_obj_get(key1 as _)?;
+        let mut o_guard = o.lock();
+        o_guard.busy = false;
+    }
+
+    if let Some(key2) = key2 {
+        let mut o = tee_obj_get(key2 as _)?;
+        let mut o_guard = o.lock();
+        o_guard.busy = false;
+    }
+
     cryp_state_free(id)
 }
 
@@ -815,12 +838,11 @@ pub fn syscall_hash_final(
     let mut hash_len: usize = 0;
     unsafe { copy_from_user_struct(&mut hash_len, &*hash_len_ptr)? };
 
-    let chunk_slice: &[u8] = if chunk_ptr.is_null() || chunk_len == 0 {
-        &[]
+    let chunk: Box<[u8]> = if chunk_ptr.is_null() || chunk_len == 0 {
+        Box::new([])
     } else {
-        unsafe { core::slice::from_raw_parts(chunk_ptr, chunk_len) }
+        bb_memdup_user(unsafe { core::slice::from_raw_parts(chunk_ptr, chunk_len) })?
     };
-    let chunk = bb_memdup_user(chunk_slice)?;
 
     if hash_ptr.is_null() || hash_len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -909,8 +931,8 @@ pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     };
 
     match iv {
-        Some(iv) => tee_cryp_cipher_init(arg0 as _, Some(&iv), CipherPaddingMode::Pkcs7),
-        None => tee_cryp_cipher_init(arg0 as _, None, CipherPaddingMode::Pkcs7),
+        Some(iv) => tee_cryp_cipher_init(arg0 as _, Some(&iv), CipherPaddingMode::None),
+        None => tee_cryp_cipher_init(arg0 as _, None, CipherPaddingMode::None),
     }
 }
 
@@ -961,7 +983,7 @@ pub fn syscall_cipher_update(
     unsafe { copy_from_user_struct(&mut dst_len, &*dst_len_ptr)? };
 
     let src = if src_ptr.is_null() || src_len == 0 {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+        Box::new([])
     } else {
         let src_slice = unsafe { core::slice::from_raw_parts(src_ptr, src_len) };
         bb_memdup_user(src_slice)?
@@ -996,7 +1018,11 @@ pub fn tee_cryp_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
 
     drop(cs_guard);
 
-    let mut len = tee_cryp_cipher_update(id, input, output)?;
+    let mut len = 0;
+    if input != &[] {
+        len = tee_cryp_cipher_update(id, input, output)?;
+    }
+
     len += crypto_cipher_final(cs.clone(), &mut output[len..])?;
     Ok(len)
 }
@@ -1018,7 +1044,7 @@ pub fn syscall_cipher_final(
     unsafe { copy_from_user_struct(&mut dst_len, &*dst_len_ptr)? };
 
     let src = if src_ptr.is_null() || src_len == 0 {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+        Box::new([])
     } else {
         let src_slice = unsafe { core::slice::from_raw_parts(src_ptr, src_len) };
         bb_memdup_user(src_slice)?
@@ -1781,7 +1807,8 @@ pub mod tests_cryp {
         let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
         assert!(res.is_ok());
 
-        let mut out = [0u8; 32];
+        // 由于mbedtls限制，输出缓冲区需要比输入数据长至少一个block_size
+        let mut out = [0u8; 48];
         let mut total_len = 0;
 
         let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
@@ -1792,9 +1819,14 @@ pub mod tests_cryp {
         assert!(res.is_ok());
         total_len += res.unwrap();
 
+        let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0);
+
+        let output = &out[..32];
         assert_eq!(total_len, 32);
         assert_eq!(
-            out,
+            output,
             [
                 0x1b, 0x22, 0x97, 0x80, 0x2e, 0x42, 0xe4, 0xe6, 0xfb, 0x7d, 0xce, 0x53, 0x25, 0xd8,
                 0x02, 0x09, 0x53, 0x34, 0x8f, 0xa1, 0xd9, 0xc7, 0x46, 0x75, 0x25, 0x3c, 0x97, 0xae,
@@ -1888,7 +1920,7 @@ pub mod tests_cryp {
         let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
         assert!(res.is_ok());
 
-        let mut out = [0u8; 32];
+        let mut out = [0u8; 48];
         let mut total_len = 0;
 
         let res = tee_cryp_cipher_update(state, &data1[..], &mut out[total_len..]);
@@ -1899,8 +1931,13 @@ pub mod tests_cryp {
         assert!(res.is_ok());
         total_len += res.unwrap();
 
+        let res = tee_cryp_cipher_final(state, &[], &mut out[total_len..]);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0);
+
+        let output = &out[..32];
         assert_eq!(total_len, 32);
-        assert_eq!(out, *b"abcdefghijklmnop1234567887654321");
+        assert_eq!(output, *b"abcdefghijklmnop1234567887654321");
     }
 
     #[unittest::def_test(custom)]
