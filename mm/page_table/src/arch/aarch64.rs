@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::fmt;
-
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{
@@ -137,13 +135,11 @@ pub struct A64PageEntry(u64);
 
 impl A64PageEntry {
     const PADDR_MASK: u64 = 0x0000_ffff_ffff_f000;
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
 }
 
 impl PageTableEntry for A64PageEntry {
+    crate::impl_pte_common_ops!(Arm64Attr, Self::PADDR_MASK);
+
     fn new_page(paddr: PhysAddr, flags: PagingFlags, is_huge: bool) -> Self {
         let mut a = Arm64Attr::from(flags);
         if is_huge {
@@ -159,32 +155,12 @@ impl PageTableEntry for A64PageEntry {
         Self(a.bits() | (paddr.as_usize() as u64 & Self::PADDR_MASK))
     }
 
-    fn paddr(&self) -> PhysAddr {
-        PhysAddr::from((self.0 & Self::PADDR_MASK) as usize)
-    }
-
-    fn flags(&self) -> PagingFlags {
-        Arm64Attr::from_bits_truncate(self.0).into()
-    }
-
-    fn set_paddr(&mut self, paddr: PhysAddr) {
-        self.0 = (self.0 & !Self::PADDR_MASK) | (paddr.as_usize() as u64 & Self::PADDR_MASK);
-    }
-
     fn set_flags(&mut self, flags: PagingFlags, is_huge: bool) {
         let mut a = Arm64Attr::from(flags);
         if is_huge {
             a.remove(Arm64Attr::NON_BLOCK);
         }
         self.0 = (self.0 & Self::PADDR_MASK) | a.bits();
-    }
-
-    fn bits(self) -> usize {
-        self.0 as usize
-    }
-
-    fn is_unused(&self) -> bool {
-        self.0 == 0
     }
 
     fn is_present(&self) -> bool {
@@ -195,20 +171,9 @@ impl PageTableEntry for A64PageEntry {
         let a = Arm64Attr::from_bits_truncate(self.0);
         a.contains(Arm64Attr::VALID) && !a.contains(Arm64Attr::NON_BLOCK)
     }
-
-    fn clear(&mut self) {
-        self.0 = 0;
-    }
 }
 
-impl fmt::Debug for A64PageEntry {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("A64PageEntry")
-            .field("paddr", &self.paddr())
-            .field("flags", &self.flags())
-            .finish()
-    }
-}
+crate::impl_pte_debug!(A64PageEntry);
 
 pub struct A64PagingMetaData;
 

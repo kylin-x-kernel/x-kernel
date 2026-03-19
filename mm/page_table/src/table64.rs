@@ -98,30 +98,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     }
 
     fn get_entry(&self, vaddr: M::VirtAddr) -> PtResult<(&PTE, PageSize)> {
-        let vaddr: usize = vaddr.into();
-        let p3 = if M::LEVELS == 3 {
-            self.table_of(self.root_paddr())
-        } else if M::LEVELS == 4 {
-            let p4 = self.table_of(self.root_paddr());
-            let p4e = &p4[p4_idx(vaddr)];
-            self.next_table(p4e)?
-        } else {
-            unreachable!()
-        };
-        let p3e = &p3[p3_idx(vaddr)];
-        if p3e.is_huge() {
-            return Ok((p3e, PageSize::Size1G));
-        }
-
-        let p2 = self.next_table(p3e)?;
-        let p2e = &p2[p2_idx(vaddr)];
-        if p2e.is_huge() {
-            return Ok((p2e, PageSize::Size2M));
-        }
-
-        let p1 = self.next_table(p2e)?;
-        let p1e = &p1[p1_idx(vaddr)];
-        Ok((p1e, PageSize::Size4K))
+        crate::walk_page_table!(self, vaddr, table_of, next_table, ref)
     }
 
     fn dealloc_tree(&self, table_paddr: PhysAddr, level: usize) {
@@ -227,30 +204,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     }
 
     fn get_entry_mut(&mut self, vaddr: M::VirtAddr) -> PtResult<(&mut PTE, PageSize)> {
-        let vaddr: usize = vaddr.into();
-        let p3 = if M::LEVELS == 3 {
-            self.table_of_mut(self.root_paddr())
-        } else if M::LEVELS == 4 {
-            let p4 = self.table_of_mut(self.root_paddr());
-            let p4e = &mut p4[p4_idx(vaddr)];
-            self.next_table_mut(p4e)?
-        } else {
-            unreachable!()
-        };
-        let p3e = &mut p3[p3_idx(vaddr)];
-        if p3e.is_huge() {
-            return Ok((p3e, PageSize::Size1G));
-        }
-
-        let p2 = self.next_table_mut(p3e)?;
-        let p2e = &mut p2[p2_idx(vaddr)];
-        if p2e.is_huge() {
-            return Ok((p2e, PageSize::Size2M));
-        }
-
-        let p1 = self.next_table_mut(p2e)?;
-        let p1e = &mut p1[p1_idx(vaddr)];
-        Ok((p1e, PageSize::Size4K))
+        crate::walk_page_table!(self, vaddr, table_of_mut, next_table_mut, mut)
     }
 
     fn get_entry_mut_or_create(
@@ -258,30 +212,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         vaddr: M::VirtAddr,
         page_size: PageSize,
     ) -> PtResult<&mut PTE> {
-        let vaddr: usize = vaddr.into();
-        let p3 = if M::LEVELS == 3 {
-            self.table_of_mut(self.root_paddr())
-        } else if M::LEVELS == 4 {
-            let p4 = self.table_of_mut(self.root_paddr());
-            let p4e = &mut p4[p4_idx(vaddr)];
-            self.next_table_mut_or_create(p4e)?
-        } else {
-            unreachable!()
-        };
-        let p3e = &mut p3[p3_idx(vaddr)];
-        if page_size == PageSize::Size1G {
-            return Ok(p3e);
-        }
-
-        let p2 = self.next_table_mut_or_create(p3e)?;
-        let p2e = &mut p2[p2_idx(vaddr)];
-        if page_size == PageSize::Size2M {
-            return Ok(p2e);
-        }
-
-        let p1 = self.next_table_mut_or_create(p2e)?;
-        let p1e = &mut p1[p1_idx(vaddr)];
-        Ok(p1e)
+        crate::walk_page_table_create!(self, vaddr, page_size)
     }
 
     pub fn map(

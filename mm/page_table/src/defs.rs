@@ -29,6 +29,8 @@ impl fmt::Debug for PagingFlags {
 
 /// Trait implemented by architecture-specific page table entries.
 pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
+    const EMPTY: Self;
+
     fn new_page(paddr: PhysAddr, flags: PagingFlags, is_huge: bool) -> Self;
     fn new_table(paddr: PhysAddr) -> Self;
     fn paddr(&self) -> PhysAddr;
@@ -36,10 +38,19 @@ pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
     fn set_paddr(&mut self, paddr: PhysAddr);
     fn set_flags(&mut self, flags: PagingFlags, is_huge: bool);
     fn bits(self) -> usize;
-    fn is_unused(&self) -> bool;
+
+    #[inline]
+    fn is_unused(&self) -> bool {
+        self.bits() == 0
+    }
+
     fn is_present(&self) -> bool;
     fn is_huge(&self) -> bool;
-    fn clear(&mut self);
+
+    #[inline]
+    fn clear(&mut self) {
+        *self = Self::EMPTY;
+    }
 }
 
 /// Page table operation errors.

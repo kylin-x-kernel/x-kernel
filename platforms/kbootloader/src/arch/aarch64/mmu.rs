@@ -44,7 +44,7 @@ impl<T, const N: usize> core::ops::IndexMut<usize> for PageAligned<[T; N]> {
 /// Level-0 boot page table (shared between TTBR0 and TTBR1).
 #[unsafe(link_section = ".data.boot_page_table")]
 static mut BOOT_PT_L0: PageAligned<[A64PageEntry; 512]> =
-    PageAligned::new([A64PageEntry::empty(); 512]);
+    PageAligned::new([A64PageEntry::EMPTY; 512]);
 
 /// Level-1 page table for the identity map / kernel map.
 ///
@@ -52,7 +52,7 @@ static mut BOOT_PT_L0: PageAligned<[A64PageEntry; 512]> =
 /// covers both the low (identity) and high (virtual kernel) windows.
 #[unsafe(link_section = ".data.boot_page_table")]
 static mut BOOT_PT_L1: PageAligned<[A64PageEntry; 512]> =
-    PageAligned::new([A64PageEntry::empty(); 512]);
+    PageAligned::new([A64PageEntry::EMPTY; 512]);
 
 /// Build the minimal boot page tables required to switch the MMU on.
 ///
@@ -192,14 +192,7 @@ pub unsafe fn init_mmu() {
     SCTLR_EL1.set(SCTLR_EL1.get() | (1 << 23));
     barrier::isb(barrier::SY);
 
-    super::serial::boot_print_str("[boot] MMU enabled, root page table at PA ");
-    super::serial::boot_print_usize(root_pa);
-    super::serial::boot_print_str("\r\n");
     unsafe extern "C" {
         fn _start();
     }
-    let start_pa: usize = _start as *const () as _;
-    super::serial::boot_print_str("start PA is ");
-    super::serial::boot_print_usize(start_pa);
-    super::serial::boot_print_str("\r\n");
 }

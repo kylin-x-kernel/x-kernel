@@ -5,6 +5,9 @@
 //! Generic page table abstractions and implementations.
 #![cfg_attr(not(test), no_std)]
 
+#[macro_use]
+mod macros;
+
 mod arch;
 mod defs;
 mod table64;

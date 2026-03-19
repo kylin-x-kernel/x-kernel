@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::fmt;
-
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{
@@ -75,13 +73,11 @@ pub struct Rv64PageEntry(u64);
 
 impl Rv64PageEntry {
     const PADDR_MASK: u64 = (1 << 54) - (1 << 10);
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
 }
 
 impl PageTableEntry for Rv64PageEntry {
+    const EMPTY: Self = Self(0);
+
     fn new_page(paddr: PhysAddr, flags: PagingFlags, _is_huge: bool) -> Self {
         let f = RvFlags::from(flags) | RvFlags::A | RvFlags::D;
         Self(f.bits() as u64 | ((paddr.as_usize() >> 2) as u64 & Self::PADDR_MASK))
@@ -112,10 +108,6 @@ impl PageTableEntry for Rv64PageEntry {
         self.0 as usize
     }
 
-    fn is_unused(&self) -> bool {
-        self.0 == 0
-    }
-
     fn is_present(&self) -> bool {
         RvFlags::from_bits_truncate(self.0 as usize).contains(RvFlags::V)
     }
@@ -124,20 +116,9 @@ impl PageTableEntry for Rv64PageEntry {
         let f = RvFlags::from_bits_truncate(self.0 as usize);
         f.contains(RvFlags::V) && (f.contains(RvFlags::R) || f.contains(RvFlags::X))
     }
-
-    fn clear(&mut self) {
-        self.0 = 0;
-    }
 }
 
-impl fmt::Debug for Rv64PageEntry {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Rv64PageEntry")
-            .field("paddr", &self.paddr())
-            .field("flags", &self.flags())
-            .finish()
-    }
-}
+crate::impl_pte_debug!(Rv64PageEntry);
 
 pub trait SvVirtAddr: memaddr::MemoryAddr + Send + Sync {
     fn flush_tlb(vaddr: Option<Self>);

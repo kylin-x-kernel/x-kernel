@@ -2,10 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::{
-    fmt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use memaddr::{PhysAddr, VirtAddr};
 pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;
@@ -84,13 +81,11 @@ pub struct X64PageEntry(u64);
 
 impl X64PageEntry {
     const PADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
 }
 
 impl PageTableEntry for X64PageEntry {
+    const EMPTY: Self = Self(0);
+
     fn new_page(paddr: PhysAddr, flags: PagingFlags, is_huge: bool) -> Self {
         let mut f = PTF::from(flags);
         if is_huge {
@@ -150,10 +145,6 @@ impl PageTableEntry for X64PageEntry {
         self.0 as usize
     }
 
-    fn is_unused(&self) -> bool {
-        self.0 == 0
-    }
-
     fn is_present(&self) -> bool {
         PTF::from_bits_truncate(self.0).contains(PTF::PRESENT)
     }
@@ -161,20 +152,9 @@ impl PageTableEntry for X64PageEntry {
     fn is_huge(&self) -> bool {
         PTF::from_bits_truncate(self.0).contains(PTF::HUGE_PAGE)
     }
-
-    fn clear(&mut self) {
-        self.0 = 0;
-    }
 }
 
-impl fmt::Debug for X64PageEntry {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut f = f.debug_struct("X64PageEntry");
-        f.field("paddr", &self.paddr());
-        f.field("flags", &self.flags());
-        f.finish()
-    }
-}
+crate::impl_pte_debug!(X64PageEntry);
 
 pub struct X64PagingMetaData;
 
