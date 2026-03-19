@@ -121,6 +121,10 @@ impl TestUserBuffer {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn as_user_ptr<T>(&self) -> *mut T {
         assert!(size_of::<T>() <= self.len);
         self.user_addr as *mut T
@@ -206,6 +210,10 @@ impl<T, const N: usize> TestUserArray<T, N> {
 
     pub fn len(&self) -> usize {
         N
+    }
+
+    pub fn is_empty(&self) -> bool {
+        N == 0
     }
 
     pub fn as_user_slice(&mut self) -> &mut [T] {

@@ -53,6 +53,7 @@ enum AnsiColor {
 
 #[repr(u8)]
 #[allow(dead_code)]
+#[allow(clippy::enum_variant_names)]
 enum AnsiBrightColor {
     BrightBlack   = 90,
     BrightRed     = 91,

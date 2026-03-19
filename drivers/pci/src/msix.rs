@@ -10,7 +10,7 @@
 //! - Dynamically allocated, no hardcoded IRQ numbers
 //! - Direct to CPU, no IO-APIC routing needed
 
-use super::{Command, DeviceFunction, PciConfigAccess, PciRoot};
+use super::{Command, ConfigurationAccess, DeviceFunction, PciConfigAccess, PciRoot};
 
 /// PCI MSI-X capability ID.
 pub const MSIX_CAP_ID: u8 = 0x11;
@@ -79,8 +79,8 @@ impl MsixTableEntry {
 /// Scans the PCI capability list and returns the parsed MSI-X capability, if present.
 ///
 /// Returns `None` if the device does not advertise MSI-X (capability ID 0x11).
-pub fn find_msix_capability(
-    root: &PciRoot,
+pub fn find_msix_capability<C: ConfigurationAccess>(
+    root: &PciRoot<C>,
     config: &PciConfigAccess,
     bdf: DeviceFunction,
 ) -> Option<MsixCapability> {
@@ -117,8 +117,8 @@ pub fn find_msix_capability(
 ///
 /// Sets the MSI-X Enable bit in Message Control and disables legacy INTx by
 /// setting `Command::INTERRUPT_DISABLE`.
-pub fn enable_msix(
-    root: &mut PciRoot,
+pub fn enable_msix<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
     config: &mut PciConfigAccess,
     bdf: DeviceFunction,
     cap: &MsixCapability,

@@ -44,9 +44,10 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     }
 
     fn load_event_bits(&mut self, event_type: EventType, out: &mut [u8]) -> DriverResult<bool> {
-        let written =
-            self.inner
-                .query_config_select(InputConfigSelect::EvBits, event_type as u8, out);
+        let written = self
+            .inner
+            .query_config_select(InputConfigSelect::EvBits, event_type as u8, out)
+            .map_err(as_driver_error)?;
         Ok(written != 0)
     }
 }

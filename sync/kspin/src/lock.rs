@@ -55,8 +55,7 @@ pub struct SpinLock<G: BaseGuard, T: ?Sized> {
 /// Provides mutable access to the protected data and automatically
 /// releases the lock when dropped.
 pub struct SpinLockGuard<'a, G: BaseGuard, T: ?Sized + 'a> {
-    #[allow(dead_code)]
-    token: &'a PhantomData<G>,
+    _token: &'a PhantomData<G>,
     guard_state: G::State,
     ptr: *mut T,
     #[cfg(feature = "smp")]
@@ -115,7 +114,7 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
         }
 
         SpinLockGuard {
-            token: &PhantomData,
+            _token: &PhantomData,
             guard_state,
             ptr: unsafe { &mut *self.storage.get() },
             #[cfg(feature = "smp")]
@@ -159,7 +158,7 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
 
         if is_unlocked {
             Some(SpinLockGuard {
-                token: &PhantomData,
+                _token: &PhantomData,
                 guard_state,
                 ptr: unsafe { &mut *self.storage.get() },
                 #[cfg(feature = "smp")]

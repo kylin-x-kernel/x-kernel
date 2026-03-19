@@ -58,7 +58,7 @@ pub use virtio_drivers::{
 
 #[cfg(feature = "socket")]
 pub use self::socket::VirtIoSocketDev;
-use self::virtio_pci_bus::{DeviceFunction, DeviceFunctionInfo, PciRoot};
+use self::virtio_pci_bus::{ConfigurationAccess, DeviceFunction, DeviceFunctionInfo, PciRoot};
 
 /// Try to probe a VirtIO MMIO device from the given memory region.
 ///
@@ -66,14 +66,14 @@ use self::virtio_pci_bus::{DeviceFunction, DeviceFunctionInfo, PciRoot};
 /// for later operations. Otherwise, returns [`None`].
 pub fn probe_mmio_device(
     reg_base: *mut u8,
-    _reg_size: usize,
-) -> Option<(DeviceKind, MmioTransport)> {
+    reg_size: usize,
+) -> Option<(DeviceKind, MmioTransport<'static>)> {
     use core::ptr::NonNull;
 
     use virtio_drivers::transport::mmio::VirtIOHeader;
 
     let header = NonNull::new(reg_base as *mut VirtIOHeader).unwrap();
-    let transport = unsafe { MmioTransport::new(header) }.ok()?;
+    let transport = unsafe { MmioTransport::new(header, reg_size) }.ok()?;
     let dev_kind = as_device_kind(transport.device_type())?;
     Some((dev_kind, transport))
 }
@@ -82,8 +82,8 @@ pub fn probe_mmio_device(
 ///
 /// If the device is recognized, returns the device type and a transport object
 /// for later operations. Otherwise, returns [`None`].
-pub fn probe_pci_device<H: VirtIoHal>(
-    root: &mut PciRoot,
+pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
     bdf: DeviceFunction,
     dev_info: &DeviceFunctionInfo,
     config: &mut ::pci::PciConfigAccess,
@@ -166,7 +166,7 @@ pub fn probe_pci_device<H: VirtIoHal>(
         PCI_IRQ_BASE + (bdf.device & 3) as usize
     };
 
-    let transport = PciTransport::new::<H>(root, bdf).ok()?;
+    let transport = PciTransport::new::<H, C>(root, bdf).ok()?;
     log::info!("PCI virtio device at {:?}: IRQ = {}", bdf, irq);
     Some((dev_kind, transport, irq))
 }
@@ -224,9 +224,7 @@ pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
             OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(..) => {
                 DriverError::InvalidInput
             }
-            UnexpectedDataInPacket | PeerSocketShutdown | NoResponseReceived | ConnectionFailed => {
-                DriverError::Io
-            }
+            UnexpectedDataInPacket | PeerSocketShutdown => DriverError::Io,
             InsufficientBufferSpaceInPeer => DriverError::WouldBlock,
             RecycledWrongBuffer => DriverError::BadState,
         },

@@ -5,7 +5,8 @@
 //! PCI bus probing and BAR configuration.
 use khal::mem::p2v;
 use pci::{
-    BarInfo, Cam, Command, DeviceFunction, HeaderType, MemoryBarType, PciRangeAllocator, PciRoot,
+    BarInfo, Cam, Command, ConfigurationAccess, DeviceFunction, HeaderType, MemoryBarType, MmioCam,
+    PciRangeAllocator, PciRoot,
 };
 
 use crate::{AllDevices, prelude::*};
@@ -13,14 +14,21 @@ use crate::{AllDevices, prelude::*};
 const PCI_BAR_NUM: u8 = 6;
 
 /// Configure PCI BARs and enable the device.
-fn config_pci_device(
-    root: &mut PciRoot,
+fn config_pci_device<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
     bdf: DeviceFunction,
     allocator: &mut Option<PciRangeAllocator>,
 ) -> DriverResult {
     let mut bar = 0;
     while bar < PCI_BAR_NUM {
-        let info = root.bar_info(bdf, bar).unwrap();
+        let info = match root.bar_info(bdf, bar).unwrap() {
+            Some(info) => info,
+            None => {
+                bar += 1;
+                continue;
+            }
+        };
+
         if let BarInfo::Memory {
             address_type,
             address,
@@ -44,7 +52,14 @@ fn config_pci_device(
         }
 
         // read the BAR info again after assignment.
-        let info = root.bar_info(bdf, bar).unwrap();
+        let info = match root.bar_info(bdf, bar).unwrap() {
+            Some(info) => info,
+            None => {
+                bar += 1;
+                continue;
+            }
+        };
+        let takes_two = info.takes_two_entries();
         match info {
             BarInfo::IO { address, size } => {
                 if address > 0 && size > 0 {
@@ -62,7 +77,7 @@ fn config_pci_device(
                         "  BAR {}: MEM [{:#x}, {:#x}){}{}",
                         bar,
                         address,
-                        address + size as u64,
+                        address + size,
                         if address_type == MemoryBarType::Width64 {
                             " 64bit"
                         } else {
@@ -75,7 +90,7 @@ fn config_pci_device(
         }
 
         bar += 1;
-        if info.takes_two_entries() {
+        if takes_two {
             bar += 1;
         }
     }
@@ -96,11 +111,13 @@ impl AllDevices {
         let mut root = {
             #[cfg(feature = "pci-mmio")]
             {
-                unsafe { PciRoot::new(base_vaddr.as_mut_ptr(), Cam::MmioCam) }
+                let cam = unsafe { MmioCam::new(base_vaddr.as_mut_ptr(), Cam::MmioCam) };
+                PciRoot::new(cam)
             }
             #[cfg(not(feature = "pci-mmio"))]
             {
-                unsafe { PciRoot::new(base_vaddr.as_mut_ptr(), Cam::Ecam) }
+                let cam = unsafe { MmioCam::new(base_vaddr.as_mut_ptr(), Cam::Ecam) };
+                PciRoot::new(cam)
             }
         };
 
