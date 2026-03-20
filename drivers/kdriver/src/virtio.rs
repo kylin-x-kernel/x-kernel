@@ -346,7 +346,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                     let paddr_usize = paddr as usize;
                     NonNull::new(p2v(paddr_usize.into()).as_mut_ptr()).unwrap()
                 },
-                bus_addr: kdma::DmaBusAddress::new(paddr as u64),
+                bus_addr: kdma::DmaBusAddress::new(paddr),
             };
             unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
         }

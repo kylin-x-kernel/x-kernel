@@ -29,6 +29,7 @@ pipeline {
         stage('Prepare Source') {
             steps {
                 script {
+                    currentBuild.description = "PR#${env.giteePullRequestIid ?: 'manual'}"
                     prepareSource()
                     ciResults['Prepare Source'] = [status: 'passed']
                 }
@@ -142,10 +143,17 @@ pipeline {
             ].join(','), allowEmptyArchive: true
             script {
                 restoreReplayGiteeEnv()
+                deleteOldCiComments()
                 def coverageSummary = collectCoverageSummary()
-                def comment = buildCiComment(ciResults, coverageSummary)
+                def teeInfo = waitForTeeTest()
+                def comment = buildCombinedComment(ciResults, coverageSummary, teeInfo)
                 notifyGiteePullRequest(comment)
-                reportGiteeCommitStatus('citestttt')
+                if (currentBuild.currentResult == 'SUCCESS' && teeInfo.result == 'SUCCESS') {
+                    echo "Both citestttt and tee-test passed, marking test as passed"
+                    giteeTestPass()
+                } else if (currentBuild.currentResult != 'SUCCESS') {
+                    giteeTestReset()
+                }
                 fixWorkspaceOwnership(env.WORKSPACE)
             }
             cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
@@ -402,6 +410,47 @@ def markSafeDirectory() {
     sh "git config --global --add safe.directory ${pwd()}"
 }
 
+def deleteOldCiComments() {
+    if (!env.giteePullRequestIid?.trim()) return
+    try {
+        def prNumber = env.giteePullRequestIid
+        def namespace = env.giteeTargetNamespace ?: 'openkylin'
+        def repo = env.giteeTargetRepoName ?: 'x-kernel'
+        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
+            def ids = sh(script: """#!/bin/bash
+curl -sS --max-time 15 \
+  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/comments?page=1&per_page=100' \
+  --data-urlencode "access_token=\${GITEE_TOKEN}" | \
+  python3 -c "
+import json, sys
+comments = json.load(sys.stdin)
+for c in comments:
+    body = c.get('body', '')
+    user = c.get('user', {}).get('login', '')
+    ctype = c.get('comment_type', '')
+    if ctype == 'pr_comment' and '<!-- x-kernel-ci -->' in body:
+        print(c['id'])
+"
+""", returnStdout: true).trim()
+
+            if (ids) {
+                ids.split('\n').each { commentId ->
+                    if (commentId?.trim()) {
+                        sh(script: """#!/bin/bash
+curl -sS --max-time 10 -X DELETE \
+  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/comments/${commentId.trim()}' \
+  --data-urlencode "access_token=\${GITEE_TOKEN}" || true
+""")
+                        echo "Deleted old CI comment #${commentId.trim()}"
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        echo "deleteOldCiComments skipped: ${e.message}"
+    }
+}
+
 def notifyGiteePullRequest(String message) {
     if (env.giteePullRequestIid?.trim()) {
         addGiteeMRComment comment: message
@@ -420,24 +469,93 @@ def rustupTargetFor(String platform) {
     error("Unsupported platform: ${platform}")
 }
 
-def reportGiteeCommitStatus(String context) {
+def waitForTeeTest(int timeoutMinutes = 30) {
+    def prId = env.giteePullRequestIid
+    if (!prId?.trim()) {
+        echo "No PR ID, skipping tee-test check"
+        return [result: 'UNKNOWN', description: '']
+    }
+    def jenkinsUrl = env.JENKINS_URL ?: 'http://10.42.30.102:8088/'
+    def prTag = "PR#${prId}"
+    def maxAttempts = timeoutMinutes * 2
+    echo "Waiting for tee-test build with ${prTag} (timeout: ${timeoutMinutes}min)..."
+
+    for (int i = 0; i < maxAttempts; i++) {
+        try {
+            def json = sh(script: "curl -g -s --max-time 10 '${jenkinsUrl}job/tee-test/api/json?tree=builds[number,result,building,description]{0,20}'",
+                          returnStdout: true).trim()
+            def output = sh(script: """#!/bin/bash
+echo '${json.replace("'", "'\\''")}' | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for b in data.get('builds', []):
+    desc = b.get('description') or ''
+    if '${prTag}' in desc:
+        if b.get('building'):
+            print('RUNNING|')
+        else:
+            print(str(b.get('result', 'UNKNOWN')) + '|' + desc)
+        sys.exit(0)
+print('NOT_FOUND|')
+"
+""", returnStdout: true).trim()
+
+            def parts = output.split('\\|', 2)
+            def result = parts[0]
+            def desc = parts.length > 1 ? parts[1] : ''
+
+            if (result == 'SUCCESS' || result == 'FAILURE' || result == 'ABORTED' || result == 'UNSTABLE') {
+                echo "tee-test for ${prTag}: ${result} (desc: ${desc})"
+                return [result: result, description: desc]
+            }
+            echo "tee-test for ${prTag}: ${result}, waiting... (${i + 1}/${maxAttempts})"
+        } catch (e) {
+            echo "Error checking tee-test: ${e.message}"
+        }
+        sleep(30)
+    }
+    echo "Timed out waiting for tee-test"
+    return [result: 'TIMEOUT', description: '']
+}
+
+def giteeTestPass() {
     if (!env.giteePullRequestIid?.trim()) return
     try {
-        def sha = env.giteeAfterCommitSha ?: sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-        def state = currentBuild.currentResult == 'SUCCESS' ? 'success' : 'failure'
-        def targetUrl = env.BUILD_URL ?: ''
+        def prNumber = env.giteePullRequestIid
         def namespace = env.giteeTargetNamespace ?: 'openkylin'
         def repo = env.giteeTargetRepoName ?: 'x-kernel'
-        withCredentials([string(credentialsId: 'ci-bot', variable: 'GITEE_TOKEN')]) {
-            sh """#!/bin/bash
-curl -s -o /dev/null -w "%{http_code}" -X POST \\
-  "https://gitee.com/api/v5/repos/${namespace}/${repo}/statuses/${sha}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"access_token":"'"${GITEE_TOKEN}"'","state":"${state}","target_url":"${targetUrl}","description":"Jenkins CI","context":"${context}"}' || true
-"""
+        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
+            sh(script: """#!/bin/bash
+resp=\$(curl -sS -w '\\n%{http_code}' --max-time 15 \
+  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/test' \
+  --data-urlencode "access_token=\${GITEE_TOKEN}" \
+  --data-urlencode 'force=true' 2>&1) || true
+code=\$(echo "\$resp" | tail -1)
+echo "Gitee test pass: HTTP \$code"
+""")
         }
     } catch (e) {
-        echo "reportGiteeCommitStatus skipped: ${e.message}"
+        echo "giteeTestPass skipped: ${e.message}"
+    }
+}
+
+def giteeTestReset() {
+    if (!env.giteePullRequestIid?.trim()) return
+    try {
+        def prNumber = env.giteePullRequestIid
+        def namespace = env.giteeTargetNamespace ?: 'openkylin'
+        def repo = env.giteeTargetRepoName ?: 'x-kernel'
+        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
+            sh(script: """#!/bin/bash
+resp=\$(curl -sS -w '\\n%{http_code}' --max-time 15 -X PATCH \
+  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/testers' \
+  --data-urlencode "access_token=\${GITEE_TOKEN}" 2>&1) || true
+code=\$(echo "\$resp" | tail -1)
+echo "Gitee test reset: HTTP \$code"
+""")
+        }
+    } catch (e) {
+        echo "giteeTestReset skipped: ${e.message}"
     }
 }
 
@@ -558,6 +676,66 @@ def collectCoverageSummary() {
     if (rows.isEmpty()) return ''
     def header = "| 架构 | 行覆盖率 | 函数覆盖率 | 区域覆盖率 | 总行数 | 未覆盖行 |\n|------|---------|-----------|-----------|--------|---------|"
     return header + '\n' + rows.join('\n')
+}
+
+def parseTeeDescription(String desc) {
+    // Format: "PR#58|x86_64:228/0/passed|aarch64:228/0/passed"
+    def teeResults = [:]
+    if (!desc?.trim()) return teeResults
+    desc.split('\\|').each { part ->
+        def m = part =~ /^(x86_64|aarch64):(\d+)\/(\d+)\/(.+)$/
+        if (m.matches()) {
+            teeResults[m.group(1)] = [
+                arch: m.group(1),
+                passed: m.group(2) as int,
+                failed: m.group(3) as int,
+                status: m.group(4)
+            ]
+        }
+    }
+    return teeResults
+}
+
+def buildTeeSection(Map teeInfo) {
+    def result = teeInfo.result ?: 'UNKNOWN'
+    def teeResults = parseTeeDescription(teeInfo.description ?: '')
+
+    if (result == 'TIMEOUT' || result == 'NOT_FOUND' || result == 'UNKNOWN') {
+        return "\n### TEE 功能测试\n\n⏳ 等待超时或未找到对应构建\n"
+    }
+
+    ['x86_64', 'aarch64'].each { arch ->
+        if (!teeResults.containsKey(arch)) {
+            teeResults[arch] = [arch: arch, passed: 0, failed: 0, status: 'failed']
+        }
+    }
+
+    def allPassed = result == 'SUCCESS'
+    def header = allPassed ? '### ✅ TEE 功能测试通过' : '### ❌ TEE 功能测试失败'
+    def rows = ['x86_64', 'aarch64'].collect { arch ->
+        def r = teeResults[arch]
+        def total = r.passed + r.failed
+        def icon = r.status == 'passed' ? '✅' : '❌'
+        "| ${arch} | ${r.passed} | ${r.failed} | ${total} | ${icon} |"
+    }.join('\n')
+
+    return """\
+
+${header}
+
+| 架构 | 通过 | 失败 | 合计 | 状态 |
+|------|------|------|------|------|
+${rows}"""
+}
+
+def buildCombinedComment(Map ciResults, String coverageSummary, Map teeInfo) {
+    def ciComment = buildCiComment(ciResults, coverageSummary)
+    def teeSection = buildTeeSection(teeInfo)
+    def allGreen = currentBuild.currentResult == 'SUCCESS' && teeInfo.result == 'SUCCESS'
+    def overallHeader = allGreen
+        ? '## ✅ CI 全部通过'
+        : '## ❌ CI 未全部通过'
+    return "<!-- x-kernel-ci -->\n${overallHeader}\n\n${ciComment}\n${teeSection}"
 }
 
 def buildCiComment(Map results, String coverageSummary = '') {

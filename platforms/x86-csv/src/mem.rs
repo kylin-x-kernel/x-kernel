@@ -27,9 +27,7 @@ pub fn init(multiboot_info_ptr: usize) {
             PHYS_MEM_BASE,
             PHYS_MEM_SIZE
         );
-        regions
-            .push((PHYS_MEM_BASE as usize, PHYS_MEM_SIZE as usize))
-            .unwrap();
+        regions.push((PHYS_MEM_BASE, PHYS_MEM_SIZE)).unwrap();
     } else {
         kplat::kprintln!("multiboot memory regions: {}", regions.len());
     }

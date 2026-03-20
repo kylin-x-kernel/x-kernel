@@ -28,7 +28,7 @@ define cargo_build
   $(call run_cmd,cargo -C $(1) build,$(build_args) --features "$(strip $(2))")
 endef
 
-clippy_args := -A unsafe_op_in_unsafe_fn
+clippy_args := -A unsafe_op_in_unsafe_fn -D warnings
 
 define cargo_clippy
   $(call run_cmd,cargo -Z unstable-options -C $(APP) clippy,-p $(rust_package) --target $(TARGET) --features "$(strip $(KFEAT) $(APP_FEAT))" $(1) $(verbose) -- $(clippy_args))

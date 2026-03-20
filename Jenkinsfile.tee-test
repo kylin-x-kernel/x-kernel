@@ -27,6 +27,7 @@ pipeline {
         stage('Prepare Source') {
             steps {
                 script {
+                    currentBuild.description = "PR#${env.giteePullRequestIid ?: 'manual'}"
                     prepareSource()
                 }
             }
@@ -76,9 +77,7 @@ pipeline {
             archiveArtifacts artifacts: '**/tee-test-output.log', allowEmptyArchive: true
             script {
                 restoreReplayGiteeEnv()
-                def comment = buildTeeComment(teeResults)
-                notifyGiteePullRequest(comment)
-                reportGiteeCommitStatus('tee-test')
+                encodeTeeResultsToDescription(teeResults)
                 fixWorkspaceOwnership(env.WORKSPACE)
             }
             cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
@@ -192,6 +191,21 @@ def extractSnippet(String log, String keyword, int contextLines) {
         }
     }
     return snippetLines.take(30).join('\n')
+}
+
+def encodeTeeResultsToDescription(Map results) {
+    ['x86_64', 'aarch64'].each { arch ->
+        if (!results.containsKey(arch)) {
+            results[arch] = [arch: arch, passed: 0, failed: 0, status: 'failed', errorSnippet: '']
+        }
+    }
+    def parts = ['x86_64', 'aarch64'].collect { arch ->
+        def r = results[arch]
+        "${arch}:${r.passed}/${r.failed}/${r.status}"
+    }
+    def prId = env.giteePullRequestIid ?: 'manual'
+    currentBuild.description = "PR#${prId}|${parts.join('|')}"
+    echo "tee-test description: ${currentBuild.description}"
 }
 
 def buildTeeComment(Map results) {
@@ -358,27 +372,6 @@ rustup target add x86_64-unknown-linux-musl || true
 '''
         default:
             error("Unsupported architecture: ${arch}")
-    }
-}
-
-def reportGiteeCommitStatus(String context) {
-    if (!env.giteePullRequestIid?.trim()) return
-    try {
-        def sha = env.giteeAfterCommitSha ?: sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-        def state = currentBuild.currentResult == 'SUCCESS' ? 'success' : 'failure'
-        def targetUrl = env.BUILD_URL ?: ''
-        def namespace = env.giteeTargetNamespace ?: 'openkylin'
-        def repo = env.giteeTargetRepoName ?: 'x-kernel'
-        withCredentials([string(credentialsId: 'ci-bot', variable: 'GITEE_TOKEN')]) {
-            sh """#!/bin/bash
-curl -s -o /dev/null -w "%{http_code}" -X POST \\
-  "https://gitee.com/api/v5/repos/${namespace}/${repo}/statuses/${sha}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"access_token":"'"${GITEE_TOKEN}"'","state":"${state}","target_url":"${targetUrl}","description":"Jenkins CI","context":"${context}"}' || true
-"""
-        }
-    } catch (e) {
-        echo "reportGiteeCommitStatus skipped: ${e.message}"
     }
 }
 

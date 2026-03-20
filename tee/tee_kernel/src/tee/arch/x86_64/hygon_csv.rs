@@ -49,7 +49,7 @@ fn construct_user_data() -> TeeResult<Box<csv_guest_user_data_attestation_t>> {
     Ok(udata)
 }
 
-fn get_csv_report(user_data: &Box<csv_guest_user_data_attestation_t>) -> TeeResult<Box<Vec<u8>>> {
+fn get_csv_report(user_data: &csv_guest_user_data_attestation_t) -> TeeResult<Vec<u8>> {
     let kernel_buf_size = PAGE_SIZE as usize;
     // Allocate a kernel buffer for the attestation request/response
     // We use a page-aligned buffer for the hypercall
@@ -57,12 +57,8 @@ fn get_csv_report(user_data: &Box<csv_guest_user_data_attestation_t>) -> TeeResu
 
     // Copy user_data to kernel buffer
     let user_data_size = size_of::<csv_guest_user_data_attestation_t>();
-    let user_data_bytes = unsafe {
-        slice::from_raw_parts(
-            user_data.as_ref() as *const csv_guest_user_data_attestation_t as *const u8,
-            user_data_size,
-        )
-    };
+    let user_data_bytes =
+        unsafe { slice::from_raw_parts(ptr::from_ref(user_data).cast::<u8>(), user_data_size) };
     kernel_buf[..user_data_size].copy_from_slice(user_data_bytes);
 
     // get physical addr
@@ -75,23 +71,22 @@ fn get_csv_report(user_data: &Box<csv_guest_user_data_attestation_t>) -> TeeResu
         kernel_buf_size as u64,
     );
 
-    Ok(kernel_buf)
+    Ok(*kernel_buf)
 }
 
-fn get_sealing_key() -> TeeResult<Box<Vec<u8>>> {
+fn get_sealing_key() -> TeeResult<Vec<u8>> {
     let user_data = construct_user_data()?;
     let report_data = get_csv_report(&user_data)?;
     let report_ptr = report_data.as_ptr() as *mut csv_attestation_report_t;
     let sealing_key = unsafe { (*report_ptr).sealing_key };
 
-    Ok(Box::new(sealing_key.to_vec()))
+    Ok(sealing_key.to_vec())
 }
 
 pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
-    let sealing_key_box = get_sealing_key()?;
-    let sealing_key = sealing_key_box.as_ref();
+    let sealing_key = get_sealing_key()?;
     let salt = "Hygon CSV Sealing Key";
-    Hkdf::hkdf(MdType::SM3, &salt.as_bytes(), sealing_key, &[], huk_key)
+    Hkdf::hkdf(MdType::SM3, salt.as_bytes(), &sealing_key, &[], huk_key)
         .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
     // warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
     Ok(())

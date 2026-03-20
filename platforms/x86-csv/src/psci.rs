@@ -9,7 +9,7 @@ use lazyinit::LazyInit;
 use log::{debug, info, warn};
 const PAGE_SIZE: usize = 0x1000;
 const MAX_PAGES: usize = DMA_MEM_SIZE / PAGE_SIZE;
-const BITMAP_SIZE: usize = (MAX_PAGES + 63) / 64;
+const BITMAP_SIZE: usize = MAX_PAGES.div_ceil(64);
 struct SharedMemAllocator {
     bitmap: [u64; BITMAP_SIZE],
     next_hint: usize,
@@ -79,7 +79,7 @@ impl SharedMemAllocator {
     }
 
     fn free_pages(&mut self, paddr: usize, pages: usize) {
-        if paddr < DMA_MEM_BASE || paddr >= DMA_MEM_BASE + DMA_MEM_SIZE {
+        if !(DMA_MEM_BASE..DMA_MEM_BASE + DMA_MEM_SIZE).contains(&paddr) {
             warn!(
                 "free_pages: address {:#x} is outside shared memory region",
                 paddr
@@ -142,7 +142,7 @@ pub fn free_shared_pages(paddr: usize, pages: usize) {
     SHARED_ALLOCATOR.lock().free_pages(paddr, pages);
 }
 pub fn is_shared_memory(paddr: usize) -> bool {
-    paddr >= DMA_MEM_BASE && paddr < DMA_MEM_BASE + DMA_MEM_SIZE
+    (DMA_MEM_BASE..DMA_MEM_BASE + DMA_MEM_SIZE).contains(&paddr)
 }
 pub fn shared_memory_range() -> (usize, usize) {
     (DMA_MEM_BASE, DMA_MEM_BASE + DMA_MEM_SIZE)
