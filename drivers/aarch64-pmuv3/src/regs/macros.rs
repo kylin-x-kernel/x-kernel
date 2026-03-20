@@ -1,3 +1,13 @@
+// Portions of this file are derived from open source projects including rust-embedded/cortex-a and openeuler/rust_shyper.
+// See project documentation and repository history for details.
+// SPDX-License-Identifier: MIT license OR Apache-2.0
+//
+// This file incorporates code from:
+// - rust-embedded/cortex-a (https://github.com/rust-embedded/cortex-a)
+// - openeuler/rust_shyper (https://gitee.com/openeuler/rust_shyper)
+//
+// Please refer to the respective repositories for original license terms and copyright.
+//
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.

@@ -1,3 +1,15 @@
+// Portions of this file are derived from open source projects including cryptidtech/cde, dgrunwald/rust-cpython, ix/pretty-ls, and ice1000/agda-mode.
+// See project documentation and repository history for details.
+// SPDX-License-Identifier: MIT license OR Apache-2.0
+//
+// This file incorporates code from:
+// - cryptidtech/cde (https://github.com/cryptidtech/cde)
+// - dgrunwald/rust-cpython (https://github.com/dgrunwald/rust-cpython)
+// - ix/pretty-ls (https://github.com/ix/pretty-ls)
+// - ice1000/agda-mode (https://github.com/ice1000/agda-mode)
+//
+// Please refer to the respective repositories for original license terms and copyright.
+//
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
