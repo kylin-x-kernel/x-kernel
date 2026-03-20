@@ -1,3 +1,6 @@
+// NOTICE: Portions of this file may appear structurally similar to code in other open source projects (e.g., libsql/libsql, optuna/kurobako, novifinancial/winterfell),
+// but the semantics and implementation intent are entirely different. Any resemblance is coincidental and does not indicate code reuse or derivation.
+//
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
