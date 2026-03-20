@@ -136,7 +136,7 @@ net = { path = "drivers/net" }
 pci = { path = "drivers/pci" }
 vsock = { path = "drivers/vsock" }
 virtio = { path = "drivers/virtio" }
-virtio-drivers = { version = "0.13.0", default-features = false, package = "kvirtiodrivers" }
+virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers"}
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
 fatfs ={ version = "0.1.0-pre.0", default-features = false, package = "axfatfs"}
 
