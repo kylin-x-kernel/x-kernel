@@ -7,10 +7,15 @@ members = [
     "xtask/extract_cov",
 # build config system
     "xtask/xconfig",
+    "boot/boot-info",
+    "boot/kernel-elf-loader",
+    "boot/x86-boot-common",
     "util/kbuild_config",
+    "mm/kaddr_layout",
 
-    "platforms/bootloader",
-    "platforms/kbootloader",
+    "boot/x86_64-uefi-loader",
+    "boot/kernel-boot",
+    "boot/x86_64-boot-stub",
     "tee_apps/sh",
     "tee_apps/tee_app1",
     "tee_apps/tee_app2",
@@ -72,7 +77,11 @@ slab_allocator = { version = "0.4", package = "ax_slab_allocator"}
 
 # Platform Abstraction Layer
 kplat = { path = "platforms/kplat" }
-kbootloader = { path = "platforms/kbootloader" }
+kernel_boot = { path = "boot/kernel-boot", package = "kernel-boot" }
+boot_info = { path = "boot/boot-info", package = "boot-info" }
+kernel_elf_loader = { path = "boot/kernel-elf-loader", package = "kernel-elf-loader" }
+x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
+kaddr_layout = { path = "mm/kaddr_layout" }
 aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
 x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 x86-csv = { path = "platforms/x86-csv" }

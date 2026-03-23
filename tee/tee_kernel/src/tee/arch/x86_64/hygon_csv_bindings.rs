@@ -558,6 +558,7 @@ pub struct csv_rtmr_req {
 }
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
+#[allow(clippy::upper_case_acronyms)]
 pub struct CCEL {
     pub Signature: [cty::c_char; 4usize],
     pub Length: u32,

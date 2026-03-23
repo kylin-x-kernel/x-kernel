@@ -25,7 +25,7 @@ mod lang_items;
 #[cfg(feature = "smp")]
 mod mp;
 
-use kbootloader::{PRIMARY_KERNEL_ENTRY, register_boot_init};
+use kernel_boot::{PRIMARY_KERNEL_ENTRY, register_boot_init};
 
 #[cfg(feature = "smp")]
 pub use self::mp::rust_main_secondary;
@@ -119,14 +119,17 @@ impl kdma::DmaPageTableIf for DmaPageTableImpl {
 /// It is called from the bootstrapping code in the specific platform crate (see
 /// [`kplat::main`]).
 ///
-/// `cpu_id` is the logic ID of the current CPU, and `arg` is passed from the
-/// bootloader (typically the device tree blob address).
-/// secondary cores call [`rust_main_secondary`].
+/// `arg` is the unified bootloader handoff payload (`BootInfo*`) for the
+/// primary CPU. Secondary cores call [`rust_main_secondary`].
 #[register_boot_init(PRIMARY_KERNEL_ENTRY)]
-pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
+pub fn rust_main(arg: usize) -> ! {
+    let boot_info = khal::boot_info(arg);
+    let cpu_id = boot_info.cpu_id;
+
+    kaddr_layout::set_kimage_voffset(kaddr_layout::KIMAGE_VADDR - boot_info.kernel_load_paddr);
     khal::percpu::init_primary(cpu_id);
     kcpu::init_trap();
-    khal::early_init(cpu_id, arg);
+    khal::early_init(boot_info);
 
     kprintln!("{}", LOGO);
     kprintln!(
@@ -156,7 +159,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     klogger::init_klogger();
     klogger::set_log_level(option_env!("K_LOG").unwrap_or("")); // no effect if set `log-level-*` features
     info!("Logging is enabled.");
-    info!("Primary CPU {cpu_id} started, arg = {arg:#x}.");
+    info!("Primary CPU {cpu_id} started, boot_info = {arg:#x}.");
 
     khal::mem::init();
     info!("Found physcial memory regions:");
@@ -179,7 +182,6 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         unsafe extern "C" {
             safe static _stext: [u8; 0];
             safe static _etext: [u8; 0];
-            safe static _edata: [u8; 0];
         }
 
         let ip_range = Range {
@@ -187,8 +189,12 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
             end: _etext.as_ptr() as usize,
         };
 
+        // fp_range must cover both:
+        //   - KIMAGE_VADDR stacks (primary CPU task stacks, linked at KIMAGE_VADDR)
+        //   - Linear-map stacks (secondary CPU boot stacks, at PA + PAGE_OFFSET)
+        // So start from PAGE_OFFSET rather than _edata.
         let fp_range = Range {
-            start: _edata.as_ptr() as usize,
+            start: kaddr_layout::PAGE_OFFSET,
             end: usize::MAX,
         };
 
@@ -199,7 +205,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     memspace::init_memory_management();
 
     info!("Initialize platform devices...");
-    khal::final_init(cpu_id, arg);
+    khal::final_init(boot_info);
 
     ktask::init_scheduler();
 
@@ -224,7 +230,9 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     }
 
     #[cfg(feature = "smp")]
-    self::mp::start_secondary_cpus(cpu_id);
+    {
+        self::mp::start_secondary_cpus(cpu_id);
+    }
 
     info!("Initialize interrupt handlers...");
     init_interrupt();

@@ -6,7 +6,7 @@
 #![no_std]
 #[macro_use]
 extern crate kplat;
-extern crate kbootloader;
+extern crate kernel_boot;
 pub mod fdt;
 mod gicv3;
 mod init;

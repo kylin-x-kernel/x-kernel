@@ -12,7 +12,9 @@ use super::ArchBacktrace;
 pub struct X86_64;
 
 impl ArchBacktrace for X86_64 {
-    const FP_ALIGNMENT: usize = 16;
+    // x86_64 only requires frame pointers to be naturally pointer-aligned.
+    // Requiring 16-byte alignment rejects valid `rbp` chains in optimized code.
+    const FP_ALIGNMENT: usize = core::mem::size_of::<usize>();
     const FRAME_OFFSET: usize = 0;
 
     fn current_fp() -> usize {

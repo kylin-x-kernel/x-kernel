@@ -49,6 +49,9 @@ impl<'a> Unwinder<'a> {
                 Err(_) => break, // Stop on first invalid frame
             };
 
+            // Always record the current frame before deciding whether to continue.
+            frames.push(frame);
+
             // Check for cycles
             if frame.fp == prev_fp {
                 log::warn!("Detected frame pointer cycle at {:#x}", fp);
@@ -63,15 +66,15 @@ impl<'a> Unwinder<'a> {
             if let Some(large_stack_end) = fp.checked_add(self.config.max_stack_size)
                 && frame.fp >= large_stack_end
             {
-                return Err(BacktraceError::StackTooLarge {
-                    fp: frame.fp,
-                    prev_fp,
-                    size: frame.fp,
-                });
+                log::warn!(
+                    "Stack frame too large: {:#x} bytes between fp {:#x} and next fp {:#x}, \
+                     stopping unwind",
+                    frame.fp - fp,
+                    fp,
+                    frame.fp
+                );
+                break;
             }
-
-            // Add frame
-            frames.push(frame);
 
             // Move to next frame
             prev_fp = fp;

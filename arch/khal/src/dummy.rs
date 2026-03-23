@@ -23,12 +23,12 @@ struct DummyIrq;
 
 #[impl_dev_interface]
 impl BootHandler for DummyInit {
-    fn early_init(_cpu_id: usize, _arg: usize) {}
+    fn early_init(_boot_info: &kplat::boot::BootInfo) {}
 
     #[cfg(feature = "smp")]
     fn early_init_ap(_cpu_id: usize) {}
 
-    fn final_init(_cpu_id: usize, _arg: usize) {}
+    fn final_init(_boot_info: &kplat::boot::BootInfo) {}
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: usize) {}

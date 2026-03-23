@@ -19,6 +19,9 @@ int_ratio = "0.1"
 lazyinit = "0.2"
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
+kaddr_layout = { workspace = true }
+boot_info = { workspace = true }
+multiboot2 = "0.24"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { workspace = true }

@@ -9,7 +9,7 @@ use addr2line::Context;
 use ktypes::Once;
 // Only import in non-test builds
 #[cfg(not(test))]
-use log::{error, info};
+use log::{error, info, warn};
 #[cfg(not(test))]
 use paste::paste;
 
@@ -82,24 +82,67 @@ pub fn init() {
 
             let default_section = DwarfReader::new(&[], gimli::RunTimeEndian::default());
 
-            match Context::from_sections(
-                debug_abbrev.into(),
-                debug_addr.into(),
-                debug_aranges.into(),
-                debug_info.into(),
-                debug_line.into(),
-                debug_line_str.into(),
-                debug_ranges.into(),
-                debug_rnglists.into(),
-                debug_str.into(),
-                debug_str_offsets.into(),
-                default_section,
-            ) {
+            let try_init = |debug_addr: DwarfReader,
+                            debug_aranges: DwarfReader,
+                            debug_rnglists: DwarfReader,
+                            debug_str_offsets: DwarfReader|
+             -> Result<Context<DwarfReader>, gimli::Error> {
+                Context::from_sections(
+                    debug_abbrev.into(),
+                    debug_addr.into(),
+                    debug_aranges.into(),
+                    debug_info.into(),
+                    debug_line.into(),
+                    debug_line_str.into(),
+                    debug_ranges.into(),
+                    debug_rnglists.into(),
+                    debug_str.into(),
+                    debug_str_offsets.into(),
+                    default_section,
+                )
+            };
+
+            let mut init_result =
+                try_init(debug_addr, debug_aranges, debug_rnglists, debug_str_offsets);
+            let mut degraded = false;
+
+            if let Err(e) = &init_result {
+                warn!(
+                    "DWARF init failed with full sections ({e}); sizes: abbrev={:#x} addr={:#x} \
+                     aranges={:#x} info={:#x} line={:#x} line_str={:#x} ranges={:#x} \
+                     rnglists={:#x} str={:#x} str_offsets={:#x}",
+                    debug_abbrev.len(),
+                    debug_addr.len(),
+                    debug_aranges.len(),
+                    debug_info.len(),
+                    debug_line.len(),
+                    debug_line_str.len(),
+                    debug_ranges.len(),
+                    debug_rnglists.len(),
+                    debug_str.len(),
+                    debug_str_offsets.len(),
+                );
+                init_result = try_init(
+                    default_section,
+                    default_section,
+                    default_section,
+                    default_section,
+                );
+                degraded = true;
+            }
+
+            match init_result {
                 Ok(ctx) => {
                     unsafe {
                         CONTEXT = Some(ctx);
                     }
-                    info!("Initialized addr2line context successfully.");
+                    if degraded {
+                        warn!(
+                            "Initialized addr2line context after ignoring optional DWARF sections."
+                        );
+                    } else {
+                        info!("Initialized addr2line context successfully.");
+                    }
                 }
                 Err(e) => {
                     error!("Failed to initialize addr2line context: {e}");
@@ -192,6 +235,11 @@ fn fmt_frame<R: gimli::Reader>(
 
 #[cfg(not(test))]
 pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) -> fmt::Result {
+    if frames.is_empty() {
+        writeln!(f, "  <no frames captured>")?;
+        return Ok(());
+    }
+
     #[allow(static_mut_refs)]
     if unsafe { CONTEXT.is_none() } {
         // In test mode, symbolication is not available
@@ -208,15 +256,41 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
         // In kernel mode, this is an error
         #[cfg(not(test))]
         {
-            return write!(f, "Backtracing is not initialized.");
+            writeln!(f, "Backtracing is not initialized. Raw frames:")?;
+            for (i, frame) in frames.iter().enumerate() {
+                writeln!(f, "  {i:>4}: {frame}")?;
+            }
+            return Ok(());
         }
     }
 
-    // Normal symbolication
-    for (i, (raw, frame)) in FrameIter::new(frames).enumerate() {
-        write!(f, "{i:>4}")?;
-        fmt_frame(f, &frame)?;
-        writeln!(f, " with {raw}")?;
+    #[allow(static_mut_refs)]
+    let ctx = unsafe { CONTEXT.as_ref().unwrap() };
+
+    // Symbolicate each raw frame individually and always preserve a raw fallback.
+    for (i, raw) in frames.iter().enumerate() {
+        let mut symbolized = false;
+
+        for ip in [raw.adjust_ip(), raw.ip] {
+            let Some(mut iter) = ctx.find_frames(ip as _).skip_all_loads().ok() else {
+                continue;
+            };
+
+            while let Ok(Some(frame)) = iter.next() {
+                symbolized = true;
+                write!(f, "{i:>4}")?;
+                fmt_frame(f, &frame)?;
+                writeln!(f, " with {raw}")?;
+            }
+
+            if symbolized {
+                break;
+            }
+        }
+
+        if !symbolized {
+            writeln!(f, "{i:>4}: <no DWARF symbol> with {raw}")?;
+        }
     }
 
     Ok(())

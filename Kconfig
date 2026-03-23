@@ -152,18 +152,6 @@ config PHYS_MEM_SIZE
     help
       Specify the size of the physical memory.
 
-config KERNEL_BASE_PADDR
-    hex "Kernel Base Physical Address"
-    default 0x80000000
-    help
-      Specify the base physical address where the kernel is loaded.
-
-config KERNEL_BASE_VADDR
-    hex "Kernel Base Virtual Address"
-    default 0xFFFF800000000000
-    help
-      Specify the base virtual address where the kernel is mapped.
-
 config KERNEL_ASPACE_BASE
     hex "Kernel Address Space Base"
     default 0xFFFF000000000000
@@ -175,12 +163,6 @@ config KERNEL_ASPACE_SIZE
     default 0x0000FFFFFFFF0000
     help
       Specify the size of the kernel's address space.
-
-config PHYS_VIRT_OFFSET
-    hex "Physical to Virtual Address Offset"
-    default 0xFFFF000000000000
-    help
-      Specify the offset used to convert physical addresses to virtual addresses.
 
 config TASK_STACK_SIZE
     hex "Task Stack Size (bytes)"

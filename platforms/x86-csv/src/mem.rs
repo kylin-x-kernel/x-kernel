@@ -2,50 +2,39 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use boot_info::BootInfo;
 use heapless::Vec;
-use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET};
-use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
+use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE};
+use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, default_p2v, default_v2p, va};
 use lazyinit::LazyInit;
-use multiboot::information::{MemoryManagement, MemoryType, Multiboot, PAddr};
+use x86_peripherals::bootmem::for_each_ram_region;
 
 const MAX_REGIONS: usize = 16;
 static RAM_REGIONS: LazyInit<Vec<MemRange, MAX_REGIONS>> = LazyInit::new();
-pub fn init(multiboot_info_ptr: usize) {
-    let mut mm = HwMemoryImpl;
-    let info = unsafe { Multiboot::from_ptr(multiboot_info_ptr as _, &mut mm).unwrap() };
+pub fn init(boot_info: &BootInfo) {
     let mut regions = Vec::new();
-    for r in info.memory_regions().unwrap() {
-        if r.memory_type() == MemoryType::Available {
-            regions
-                .push((r.base_address() as usize, r.length() as usize))
-                .unwrap();
-        }
-    }
+    for_each_ram_region(boot_info, |start, size| {
+        regions.push((start, size)).unwrap()
+    });
     if regions.is_empty() {
         kplat::kprintln!(
-            "multiboot memory map empty, fallback to config: base={:#x}, size={:#x}",
+            "boot memory map empty, protocol={:?}, fallback to config: base={:#x}, size={:#x}",
+            boot_info.protocol(),
             PHYS_MEM_BASE,
             PHYS_MEM_SIZE
         );
         regions.push((PHYS_MEM_BASE, PHYS_MEM_SIZE)).unwrap();
     } else {
-        kplat::kprintln!("multiboot memory regions: {}", regions.len());
+        kplat::kprintln!(
+            "{:?} memory regions: {}",
+            boot_info.protocol(),
+            regions.len()
+        );
     }
     RAM_REGIONS.init_once(regions);
 }
+
 struct HwMemoryImpl;
-impl MemoryManagement for HwMemoryImpl {
-    unsafe fn paddr_to_slice(&self, addr: PAddr, size: usize) -> Option<&'static [u8]> {
-        let ptr = Self::p2v(pa!(addr as usize)).as_ptr();
-        Some(unsafe { core::slice::from_raw_parts(ptr, size) })
-    }
-
-    unsafe fn allocate(&mut self, _length: usize) -> Option<(PAddr, &mut [u8])> {
-        None
-    }
-
-    unsafe fn deallocate(&mut self, _addr: PAddr) {}
-}
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {
     /// Returns all physical memory (RAM) ranges on the platform.
@@ -67,11 +56,11 @@ impl HwMemory for HwMemoryImpl {
     }
 
     fn p2v(paddr: PhysAddr) -> VirtAddr {
-        va!(paddr.as_usize() + PHYS_VIRT_OFFSET)
+        default_p2v(paddr)
     }
 
     fn v2p(vaddr: VirtAddr) -> PhysAddr {
-        pa!(vaddr.as_usize() - PHYS_VIRT_OFFSET)
+        default_v2p(vaddr)
     }
 
     fn kernel_layout() -> (VirtAddr, usize) {

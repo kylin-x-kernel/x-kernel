@@ -20,7 +20,7 @@ use khal::{
     trap::{PAGE_FAULT, register_trap_handler},
 };
 use kio::prelude::*;
-use ktask::current;
+use ktask::{current, current_may_uninit};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use osvm::{load_vec, load_vec_until_null, read_vm_mem, write_vm_mem};
 
@@ -259,7 +259,9 @@ pub(crate) use nullable;
 fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
     debug!("Page fault at {vaddr:#x}, access_flags: {access_flags:#x?}");
 
-    let curr = current();
+    let Some(curr) = current_may_uninit() else {
+        return false;
+    };
     let Some(thr) = curr.try_as_thread() else {
         return false;
     };

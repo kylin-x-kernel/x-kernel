@@ -1,0 +1,14 @@
+[package]
+name = "x86-boot-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shared x86 boot helpers for unified Multiboot and UEFI startup"
+
+[dependencies]
+kaddr_layout = { workspace = true }
+kernel_elf_loader = { workspace = true }
+boot_info = { workspace = true }

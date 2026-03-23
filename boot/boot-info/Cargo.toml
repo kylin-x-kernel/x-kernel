@@ -1,0 +1,12 @@
+[package]
+name = "boot-info"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Shared boot handoff protocol for x-kernel boot loaders"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords = ["boot", "bootloader", "protocol"]
+categories = ["no-std", "os"]

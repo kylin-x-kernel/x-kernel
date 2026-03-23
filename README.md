@@ -61,15 +61,30 @@ make build
 ```
 this will create a kernel image from .config
 
+For `x86_64`, `make build` also creates boot media artifacts in the project root:
+
+- `xkernel_<platform>.bzimg`: LinuxBoot/direct boot image
+- `xkernel_<platform>.uefi.img`: UEFI FAT boot disk containing `BOOTX64.EFI`, `axboot.toml`, and the kernel ELF
+
 ### 5. Build and run on QEMU
 we support directly running the kernel on QEMU
 
-```
+```bash
 cp platforms/aarch64-qemu-virt/defconfig .config
 make run
+
 cp platforms/x86_64-qemu-virt/defconfig .config
+# Default x86_64 QEMU flow: LinuxBoot/direct boot
 make run
+
+# Optional x86_64 UEFI flow: OVMF + generated UEFI boot disk
+make run UEFI=y
+
+# x86-csv UEFI + SEV launch helper
+bash scripts/start.sh
 ```
+
+For the x86_64 UEFI flow, the host needs OVMF firmware files (for example `/usr/share/OVMF/OVMF_CODE_4M.fd` and `OVMF_VARS_4M.fd`).
 
 ## License
 This project is now released under the Apache License 2.0. See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for details.

@@ -8,7 +8,7 @@ use kbuild_config::{
     GICC_PADDR as GICR_PADDR, GICD_PADDR, PSCI_METHOD, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR,
 };
 use kplat::{
-    boot::BootHandler,
+    boot::{BootHandler, BootInfo},
     memory::{p2v, pa},
 };
 use log::*;
@@ -25,7 +25,8 @@ struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
     /// Perform early, minimal init before the allocator is ready.
-    fn early_init(_cpu_id: usize, dtb: usize) {
+    fn early_init(boot_info: &BootInfo) {
+        let dtb = boot_info.dtb_addr;
         map_kvm_guarded_mmio();
         crate::mem::early_init(dtb);
         aarch64_peripherals::ns16550a::early_init(p2v(pa!(UART_PADDR)));
@@ -39,8 +40,9 @@ impl BootHandler for BootHandlerImpl {
     fn early_init_ap(_cpu_id: usize) {}
 
     /// Finish platform init after core subsystems are online.
-    fn final_init(cpu_id: usize, dtb: usize) {
-        info!("cpu_id {}", cpu_id);
+    fn final_init(boot_info: &BootInfo) {
+        let dtb = boot_info.dtb_addr;
+        info!("cpu_id {}", boot_info.cpu_id);
         crate::fdt::init_fdt(p2v(pa!(dtb)));
         crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
         info!("set UART IRQ {} as edge trigger", UART_IRQ);

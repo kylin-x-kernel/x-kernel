@@ -13,7 +13,7 @@ impl SysCtrl for PowerImpl {
     fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
         use kplat::memory::{v2p, va};
         let entry_paddr = v2p(va!(
-            kbootloader::arch::_start_secondary as *const () as usize
+            kernel_boot::arch::_start_secondary as *const () as usize
         ));
         aarch64_peripherals::psci::cpu_on(cpu_id, entry_paddr.as_usize(), stack_top_paddr);
     }

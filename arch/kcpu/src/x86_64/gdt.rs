@@ -7,7 +7,7 @@
 use x86_64::{
     PrivilegeLevel,
     instructions::tables::load_tss,
-    registers::segmentation::{CS, Segment, SegmentSelector},
+    registers::segmentation::{CS, DS, ES, SS, Segment, SegmentSelector},
     structures::{
         gdt::{Descriptor, GlobalDescriptorTable},
         tss::TaskStateSegment,
@@ -41,6 +41,9 @@ pub(super) fn init() {
     let tss = gdt.append(Descriptor::tss_segment(unsafe { TSS.current_ref_raw() }));
     gdt.load();
     unsafe {
+        DS::set_reg(KDATA);
+        ES::set_reg(KDATA);
+        SS::set_reg(KDATA);
         CS::set_reg(KCODE64);
         load_tss(tss);
     }

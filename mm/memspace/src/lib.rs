@@ -56,8 +56,15 @@ pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
         // mapped range should contain the whole region if it is not aligned.
         let start = region.paddr.align_down_4k();
         let end = (region.paddr + region.size).align_up_4k();
+        // Kernel-image sections store their linked virtual address in `vaddr`.
+        // Use it directly so they are mapped at KIMAGE_VADDR rather than the
+        // linear-map address (PAGE_OFFSET + PA).
+        let target_va = match region.vaddr {
+            Some(v) => v.align_down_4k(),
+            None => p2v(start),
+        };
         vmspace.map_linear(
-            p2v(start),
+            target_va,
             start,
             end - start,
             mem_to_mapping_flags(region.flags),

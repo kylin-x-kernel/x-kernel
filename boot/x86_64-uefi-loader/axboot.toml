@@ -1,0 +1,2 @@
+# bootloader config
+kernel_paths = ["xkernel_x86-csv.elf"]

@@ -9,13 +9,13 @@ use kbuild_config::{
     GICC_PADDR, GICD_PADDR, PSCI_METHOD, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR,
 };
 use kplat::{
-    boot::BootHandler,
+    boot::{BootHandler, BootInfo},
     memory::{p2v, pa},
 };
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
-    fn early_init(_cpu_id: usize, _dtb: usize) {
+    fn early_init(_boot_info: &BootInfo) {
         aarch64_peripherals::pl011::early_init(p2v(pa!(UART_PADDR)));
         aarch64_peripherals::psci::init(PSCI_METHOD);
         aarch64_peripherals::generic_timer::early_init();
@@ -26,7 +26,7 @@ impl BootHandler for BootHandlerImpl {
     #[cfg(feature = "smp")]
     fn early_init_ap(_cpu_id: usize) {}
 
-    fn final_init(_cpu_id: usize, _dtb: usize) {
+    fn final_init(_boot_info: &BootInfo) {
         aarch64_peripherals::gic::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICC_PADDR)));
         aarch64_peripherals::gic::init_gicc();
         aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);

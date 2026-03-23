@@ -229,9 +229,17 @@ pub struct FileDescriptor {
     pub cloexec: bool,
 }
 
+fn new_fd_table() -> Arc<RwLock<FlattenObjects<FileDescriptor, { FILE_LIMIT }>>> {
+    let mut table = Arc::<RwLock<FlattenObjects<FileDescriptor, { FILE_LIMIT }>>>::new_uninit();
+    Arc::get_mut(&mut table)
+        .expect("newly allocated Arc must be unique")
+        .write(RwLock::new(FlattenObjects::new()));
+    unsafe { table.assume_init() }
+}
+
 scope_local::scope_local! {
     /// The current file descriptor table.
-    pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, { FILE_LIMIT }>>> = Arc::default();
+    pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, { FILE_LIMIT }>>> = new_fd_table();
 }
 
 /// Retrieves a file-like object from the file descriptor table.

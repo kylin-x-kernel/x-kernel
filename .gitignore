@@ -2,6 +2,7 @@
 .DS_Store
 *.elf
 *.bin
+*.bzimg
 *.dbg
 **/target/
 /.platconfig.*

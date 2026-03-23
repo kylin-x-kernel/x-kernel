@@ -33,33 +33,41 @@ pub fn init() {
         }
     };
 
-    // Push regions in kernel image
+    // Push regions in kernel image.
+    // v2p() now correctly handles KIMAGE_VADDR symbols via kaddr_layout::kimage_voffset().
+    // The linked VA is stored in `vaddr` so new_kernel_layout() maps sections
+    // at KIMAGE_VADDR rather than the linear-map address.
     push(MemoryRegion {
         paddr: v2p(addr_of_sym!(_stext).into()),
+        vaddr: Some(va!(addr_of_sym!(_stext))),
         size: addr_of_sym!(_etext) - addr_of_sym!(_stext),
         flags: MemFlags::RSVD | MemFlags::R | MemFlags::X,
         name: ".text",
     });
     push(MemoryRegion {
         paddr: v2p(addr_of_sym!(_srodata).into()),
+        vaddr: Some(va!(addr_of_sym!(_srodata))),
         size: addr_of_sym!(_erodata) - addr_of_sym!(_srodata),
         flags: MemFlags::RSVD | MemFlags::R,
         name: ".rodata",
     });
     push(MemoryRegion {
         paddr: v2p(addr_of_sym!(_sdata).into()),
+        vaddr: Some(va!(addr_of_sym!(_sdata))),
         size: addr_of_sym!(_edata) - addr_of_sym!(_sdata),
         flags: MemFlags::RSVD | MemFlags::R | MemFlags::W,
         name: ".data .tdata .tbss .percpu",
     });
     push(MemoryRegion {
         paddr: v2p(addr_of_sym!(boot_stack).into()),
+        vaddr: Some(va!(addr_of_sym!(boot_stack))),
         size: addr_of_sym!(boot_stack_top) - addr_of_sym!(boot_stack),
         flags: MemFlags::RSVD | MemFlags::R | MemFlags::W,
         name: "boot stack",
     });
     push(MemoryRegion {
         paddr: v2p(addr_of_sym!(_sbss).into()),
+        vaddr: Some(va!(addr_of_sym!(_sbss))),
         size: addr_of_sym!(_ebss) - addr_of_sym!(_sbss),
         flags: MemFlags::RSVD | MemFlags::R | MemFlags::W,
         name: ".bss",

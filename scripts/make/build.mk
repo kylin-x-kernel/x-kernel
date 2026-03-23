@@ -39,7 +39,9 @@ export RUSTFLAGS
 _cargo_build:
 	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME)\n"
 	$(call cargo_build,$(APP),$(KFEAT) $(APP_FEAT))
-	@cp $(rust_elf) $(OUT_ELF)
+
+$(OUT_ELF): $(CONFIG_RS) _cargo_build | $(OUT_DIR)
+	$(call run_cmd,cp,$(rust_elf) $@)
 
 $(OUT_DIR):
 	$(call run_cmd,mkdir,-p $@)
@@ -67,7 +69,6 @@ endif
 $(OUT_UIMG): $(OUT_BIN)
 	$(call run_cmd,mkimage,\
 		-A $(uimg_arch) -O linux -T kernel -C none \
-		-a $(KERNEL_BASE_PADDR) \
 		-d $(OUT_BIN) $@)
 
 .PHONY: _cargo_build _dwarf

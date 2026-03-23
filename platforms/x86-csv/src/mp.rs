@@ -4,7 +4,7 @@
 
 use core::time::Duration;
 
-use kbootloader::arch::{AP_START_PAGE_IDX, AP_START_PAGE_PADDR};
+use kernel_boot::arch::{AP_START_PAGE_IDX, AP_START_PAGE_PADDR};
 use kplat::{
     memory::{PAGE_SIZE_4K, PhysAddr, pa},
     timer::spin_wait,
@@ -29,7 +29,8 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
         );
     }
     start_page[U64_PER_PAGE - 2] = stack_top.as_usize() as u64;
-    start_page[U64_PER_PAGE - 1] = ap_entry32 as *const () as usize as _;
+    start_page[U64_PER_PAGE - 1] =
+        kplat::memory::v2p((ap_entry32 as *const () as usize).into()).as_usize() as _;
 }
 pub fn start_secondary_cpu(apic_id: usize, stack_top: PhysAddr) {
     unsafe { setup_startup_page(stack_top) };

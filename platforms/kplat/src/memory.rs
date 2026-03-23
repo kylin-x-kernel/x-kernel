@@ -86,6 +86,13 @@ impl<T> DerefMut for PageAligned<T> {
 pub struct MemoryRegion {
     /// Physical start address.
     pub paddr: PhysAddr,
+    /// Optional override for the virtual address of this region.
+    ///
+    /// When `Some`, `new_kernel_layout` uses this address instead of computing
+    /// it from `p2v(paddr)`.  Used by kernel-image sections whose link address
+    /// (`KIMAGE_VADDR + offset`) differs from the linear-map address
+    /// (`PAGE_OFFSET + PA`).
+    pub vaddr: Option<VirtAddr>,
     /// Size in bytes.
     pub size: usize,
     /// Region attributes.
@@ -98,6 +105,7 @@ impl MemoryRegion {
     pub const fn new_ram(s: usize, n: usize, name: &'static str) -> Self {
         Self {
             paddr: PhysAddr::from_usize(s),
+            vaddr: None,
             size: n,
             flags: RAM_DEF,
             name,
@@ -107,6 +115,7 @@ impl MemoryRegion {
     pub const fn new_mmio(s: usize, n: usize, name: &'static str) -> Self {
         Self {
             paddr: PhysAddr::from_usize(s),
+            vaddr: None,
             size: n,
             flags: MMIO_DEF,
             name,
@@ -116,6 +125,7 @@ impl MemoryRegion {
     pub const fn new_rsvd(s: usize, n: usize, name: &'static str) -> Self {
         Self {
             paddr: PhysAddr::from_usize(s),
+            vaddr: None,
             size: n,
             flags: RSVD_DEF,
             name,
@@ -125,6 +135,7 @@ impl MemoryRegion {
     pub const fn new_dma(s: usize, n: usize, name: &'static str) -> Self {
         Self {
             paddr: PhysAddr::from_usize(s),
+            vaddr: None,
             size: n,
             flags: DMA_DEF,
             name,
@@ -148,6 +159,16 @@ pub trait HwMemory {
     fn v2p(va: VirtAddr) -> PhysAddr;
     /// Returns the kernel virtual layout base and size.
     fn kernel_layout() -> (VirtAddr, usize);
+}
+
+#[inline]
+pub fn default_p2v(paddr: PhysAddr) -> VirtAddr {
+    VirtAddr::from_usize(kaddr_layout::p2v(paddr.as_usize()))
+}
+
+#[inline]
+pub fn default_v2p(vaddr: VirtAddr) -> PhysAddr {
+    PhysAddr::from_usize(kaddr_layout::v2p(vaddr.as_usize()))
 }
 
 /// Returns total RAM size in bytes.

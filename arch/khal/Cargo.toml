@@ -26,6 +26,7 @@ irq = []
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
+boot_info = { workspace = true }
 kcpu = { workspace = true }
 kplat.workspace = true
 cfg-if.workspace = true

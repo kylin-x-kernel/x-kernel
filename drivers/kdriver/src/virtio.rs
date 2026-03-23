@@ -162,7 +162,8 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
         let cam = Cam::MmioCam;
         #[cfg(not(feature = "pci-mmio"))]
         let cam = Cam::Ecam;
-        let base_vaddr = p2v((kbuild_config::PCI_ECAM_BASE).into());
+        let (pci_config_base, _) = crate::pci_config_space();
+        let base_vaddr = khal::mem::p2v((pci_config_base as usize).into());
         let mut config = unsafe { PciConfigAccess::new(base_vaddr.as_mut_ptr(), cam) };
 
         if let Some((ty, transport, irq)) =
@@ -206,7 +207,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 let ptr = dma_info.cpu_addr;
                 #[cfg(feature = "crosvm")]
                 {
-                    dma_share(paddr, pages * PAGE_SIZE);
+                    dma_share(paddr as usize, pages * PAGE_SIZE);
                 }
                 // bus_addr is the physical address for DMA
                 (paddr, ptr)
@@ -235,7 +236,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
         #[cfg(feature = "crosvm")]
         {
-            dma_unshare(paddr, pages * 0x1000);
+            dma_unshare(paddr as usize, pages * 0x1000);
         }
         0
     }
@@ -336,7 +337,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             // For crosvm, call unshare_dma_buffer before freeing
             #[cfg(feature = "crosvm")]
             {
-                dma_unshare(paddr, aligned_size);
+                dma_unshare(paddr as usize, aligned_size);
             }
 
             // Free the bounce buffer via kdma

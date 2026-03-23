@@ -1,0 +1,10 @@
+[package]
+name = "kaddr_layout"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Shared kernel virtual layout constants and helpers"

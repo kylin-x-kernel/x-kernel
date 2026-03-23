@@ -14,6 +14,7 @@
 #     - `BLK`: Enable storage devices (virtio-blk)
 #     - `NET`: Enable network devices (virtio-net)
 #     - `GRAPHIC`: Enable display devices and graphic output (virtio-gpu)
+#     - `UEFI`: Boot x86_64 via OVMF and the generated `.uefi.img` instead of the default LinuxBoot/direct-boot image
 #     - `BUS`: Device bus type: mmio, pci
 #     - `MEM`: Memory size (default is 128M)
 #     - `DISK_IMG`: Path to the virtual disk image
@@ -86,6 +87,8 @@ export K_GW=$(GW)
 # Binutils
 CROSS_COMPILE ?= $(ARCH)-linux-musl-
 CC := $(CROSS_COMPILE)gcc
+# A temp export for rust-dice, after we change to real rust dice we need remove it
+export CC
 AR := $(CROSS_COMPILE)ar
 RANLIB := $(CROSS_COMPILE)ranlib
 LD := rust-lld -flavor gnu
@@ -182,10 +185,10 @@ disasm:
 
 run: build justrun
 
-justrun:
+justrun: $(QEMU_RUN_DEPS)
 	$(call run_qemu)
 
-debug: build
+debug: build $(QEMU_RUN_DEPS)
 	$(call run_qemu_debug) &
 	$(GDB) $(OUT_ELF) \
 	  -ex 'target remote localhost:1234' \

@@ -103,7 +103,6 @@ pub mod context {
 pub use kcpu::instrs as asm;
 #[cfg(feature = "uspace")]
 pub use kcpu::userspace as uspace;
-pub use kplat::boot::final_init;
 #[cfg(feature = "smp")]
 pub use kplat::boot::{
     early_init_ap as early_init_secondary, final_init_ap as final_init_secondary,
@@ -120,11 +119,23 @@ pub mod pmu {
         PerfCb, on_overflow as dispatch_irq_overflows, reg_cb as register_overflow_handler,
     };
 }
-/// Initializes the platform and boot argument.
+#[inline]
+pub fn boot_info(arg: usize) -> &'static boot_info::BootInfo {
+    let boot_info = unsafe { &*(arg as *const boot_info::BootInfo) };
+    assert!(boot_info.is_valid(), "invalid boot info");
+    boot_info
+}
+
+/// Initializes the platform from the unified boot handoff payload.
 /// This function should be called as early as possible.
-pub fn early_init(cpu_id: usize, arg: usize) {
-    dtb::init(arg);
-    kplat::boot::early_init(cpu_id, arg);
+pub fn early_init(boot_info: &boot_info::BootInfo) {
+    dtb::init(boot_info.dtb_addr);
+    kplat::boot::early_init(boot_info);
+}
+
+/// Completes platform initialization from the unified boot handoff payload.
+pub fn final_init(boot_info: &boot_info::BootInfo) {
+    kplat::boot::final_init(boot_info);
 }
 
 macro_rules! addr_of_sym {

@@ -1,0 +1,16 @@
+[package]
+name = "x86_64-boot-stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Low-address Multiboot2 stub for loading the higher-half x-kernel on x86_64"
+
+[dependencies]
+boot_info = { workspace = true }
+kernel_elf_loader = { workspace = true }
+kaddr_layout = { workspace = true }
+x86_boot_common = { workspace = true }
+multiboot2 = { version = "0.24.1", default-features = false }

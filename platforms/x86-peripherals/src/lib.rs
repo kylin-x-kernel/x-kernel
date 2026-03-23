@@ -7,6 +7,8 @@
 #![no_std]
 #[macro_use]
 extern crate log;
+pub mod acpi;
 pub mod apic;
+pub mod bootmem;
 pub mod ns16550;
 pub mod tsc_timer;

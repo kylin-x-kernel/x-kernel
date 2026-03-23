@@ -33,6 +33,9 @@ mod virtio;
 
 pub mod prelude;
 
+#[cfg(feature = "bus-pci")]
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
 #[allow(unused_imports)]
 use self::prelude::*;
 #[cfg(feature = "block")]
@@ -42,6 +45,38 @@ pub use self::structs::DisplayDevice;
 #[cfg(feature = "net")]
 pub use self::structs::NetDevice;
 pub use self::structs::{DeviceContainer, DeviceEnum};
+
+#[cfg(feature = "bus-pci")]
+static PCI_CONFIG_BASE_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bus-pci")]
+static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);
+
+#[cfg(feature = "bus-pci")]
+pub fn set_pci_config_space(base: u64, bus_end: u8) {
+    PCI_CONFIG_BASE_OVERRIDE.store(base, Ordering::Relaxed);
+    PCI_BUS_END_OVERRIDE.store(bus_end as u32, Ordering::Relaxed);
+}
+
+#[cfg(feature = "bus-pci")]
+pub fn pci_config_space() -> (u64, u8) {
+    let base = PCI_CONFIG_BASE_OVERRIDE.load(Ordering::Relaxed);
+    let bus_end = PCI_BUS_END_OVERRIDE.load(Ordering::Relaxed);
+    if base != 0 && bus_end != u32::MAX {
+        (base, bus_end as u8)
+    } else {
+        (
+            kbuild_config::PCI_ECAM_BASE as u64,
+            kbuild_config::PCI_BUS_END as u8,
+        )
+    }
+}
+
+#[cfg(feature = "bus-pci")]
+pub fn pci_config_space_overridden() -> bool {
+    let base = PCI_CONFIG_BASE_OVERRIDE.load(Ordering::Relaxed);
+    let bus_end = PCI_BUS_END_OVERRIDE.load(Ordering::Relaxed);
+    base != 0 && bus_end != u32::MAX
+}
 
 /// A structure that contains all device drivers, organized by their category.
 #[derive(Default)]

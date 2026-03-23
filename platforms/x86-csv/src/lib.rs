@@ -8,7 +8,7 @@
 extern crate log;
 #[macro_use]
 extern crate kplat;
-extern crate kbootloader;
+extern crate kernel_boot;
 mod init;
 mod mem;
 #[cfg(feature = "smp")]

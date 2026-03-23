@@ -15,8 +15,6 @@ ifneq ($(wildcard .config),)
   # APPEND CPU_NUM TO CONFIG_VALUES
   CONFIG_VALUES += $(shell awk '/CPU_NUM=[0-9]+/ { print $$0 }' .config 2>/dev/null)
 
-  # Append KERNEL_BASE_PADDR=XXX TO CONFIG_VALUES
-  CONFIG_VALUES += $(shell awk '/KERNEL_BASE_PADDR=0x[0-9a-fA-F]+/ { print $$0 }' .config 2>/dev/null)
   # Parse architecture (only if CONFIG_VALUES is not empty)
   ifneq ($(CONFIG_VALUES),)
     ifeq ($(findstring ARCH_AARCH64=y,$(CONFIG_VALUES)),ARCH_AARCH64=y)
@@ -74,14 +72,6 @@ ifneq ($(wildcard .config),)
    	$(error "`CPU_NUM` is not defined in the .config file")
     endif
 
-    # Parse KERNEL_BASE_PADDR
-    KERNEL_BASE_PADDR_FROM_CONFIG := $(shell awk -F= '/KERNEL_BASE_PADDR=0x[0-9a-fA-F]+/ { print $$2 }' .config 2>/dev/null)
-    ifneq ($(KERNEL_BASE_PADDR_FROM_CONFIG),)
-      KERNEL_BASE_PADDR := $(KERNEL_BASE_PADDR_FROM_CONFIG)
-    else
-      $(error "`KERNEL_BASE_PADDR` is not defined in the .config file")
-    endif
-
 
     # Use config values as defaults, but allow command line override
     ARCH ?= $(ARCH_FROM_CONFIG)
@@ -95,8 +85,7 @@ ifneq ($(wildcard .config),)
     $(info "MODE from .config: $(MODE)")
     $(info "LOG from .config: $(LOG)")
     $(info "SMP from .config: $(SMP)")
-    $(info "KERNEL_BASE_PADDR from .config: $(KERNEL_BASE_PADDR)")
-    export ARCH PLAT MODE LOG SMP KERNEL_BASE_PADDR
+    export ARCH PLAT MODE LOG SMP
   endif
 endif
 

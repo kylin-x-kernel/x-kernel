@@ -5,8 +5,10 @@
 //! Physical memory layout and address translation helpers.
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE, PHYS_VIRT_OFFSET};
-use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, p2v, pa, va};
+use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE};
+use kplat::memory::{
+    HwMemory, MemRange, PhysAddr, VirtAddr, default_p2v, default_v2p, p2v, pa, va,
+};
 use ktypes::Once;
 use rs_fdtree::LinuxFdt;
 
@@ -64,11 +66,11 @@ impl HwMemory for HwMemoryImpl {
     }
 
     fn p2v(paddr: PhysAddr) -> VirtAddr {
-        va!(paddr.as_usize() + PHYS_VIRT_OFFSET)
+        default_p2v(paddr)
     }
 
     fn v2p(vaddr: VirtAddr) -> PhysAddr {
-        pa!(vaddr.as_usize() - PHYS_VIRT_OFFSET)
+        default_v2p(vaddr)
     }
 
     fn kernel_layout() -> (VirtAddr, usize) {

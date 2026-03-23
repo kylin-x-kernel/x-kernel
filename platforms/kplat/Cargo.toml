@@ -15,10 +15,13 @@ pmu = []
 
 [dependencies]
 memaddr = { workspace = true }
+kaddr_layout = { workspace = true }
+boot_info = { workspace = true }
 bitflags = "2.6"
 crate_interface = "0.1"
 handler_table = { version = "0.1.2" }
 const-str = "0.6.2"
+karch.workspace = true
 kplat-macros = { path = "../kplat-macros" }
 kspin = "0.1"
 percpu = { workspace = true }

@@ -7,7 +7,7 @@ cov_export := $(out_target)/coverage.info
 cov_text := $(out_target)/coverage.txt
 cov_html := $(out_target)/coverage.html
 cov_xml := $(out_target)/coverage.xml
-cov_ignore_regex := '/target/|/api/kapi/src/syscall/|/api/linux_sysno/src/|/platforms/kbootloader/'
+cov_ignore_regex := '/target/|/api/kapi/src/syscall/|/api/linux_sysno/src/|/boot/kernel-boot/'
 
 ifeq ($(UNITTEST), y)
   RUSTFLAGS += --cfg unittest --check-cfg cfg(unittest) \

@@ -5,8 +5,8 @@
 //! SMP bring-up helpers for the runtime.
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kbootloader::{SECOND_KERNEL_ENTRY, register_boot_init};
 use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
+use kernel_boot::{SECOND_KERNEL_ENTRY, register_boot_init};
 use khal::mem::{VirtAddr, v2p};
 
 #[unsafe(link_section = ".bss.stack")]

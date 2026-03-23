@@ -9,7 +9,7 @@ use pci::{
     PciRangeAllocator, PciRoot,
 };
 
-use crate::{AllDevices, prelude::*};
+use crate::{AllDevices, pci_config_space, pci_config_space_overridden, prelude::*};
 
 const PCI_BAR_NUM: u8 = 6;
 
@@ -107,7 +107,18 @@ fn config_pci_device<C: ConfigurationAccess>(
 impl AllDevices {
     /// Enumerate PCI devices and register matching drivers.
     pub(crate) fn probe_bus_devices(&mut self) {
-        let base_vaddr = p2v((kbuild_config::PCI_ECAM_BASE).into());
+        let (pci_config_base, pci_bus_end) = pci_config_space();
+        info!(
+            "PCI config space: source={}, ecam={:#x}, bus_end={:#x}",
+            if pci_config_space_overridden() {
+                "runtime"
+            } else {
+                "static"
+            },
+            pci_config_base,
+            pci_bus_end
+        );
+        let base_vaddr = p2v((pci_config_base as usize).into());
         let mut root = {
             #[cfg(feature = "pci-mmio")]
             {
@@ -126,7 +137,7 @@ impl AllDevices {
             .get(1)
             .map(|range| PciRangeAllocator::new(range.0, range.1));
 
-        for bus in 0..=kbuild_config::PCI_BUS_END as u8 {
+        for bus in 0..=pci_bus_end {
             for (bdf, dev_info) in root.enumerate_bus(bus) {
                 debug!("PCI {bdf}: {dev_info}");
                 if dev_info.header_type != HeaderType::Standard {
