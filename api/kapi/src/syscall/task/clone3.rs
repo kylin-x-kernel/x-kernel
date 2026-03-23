@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! The `clone3` system call.
+//!
+//! `clone3` is the modern interface for creating new processes/threads, superseding the
+//! legacy `clone` syscall. It takes a pointer to a `clone_args` struct instead of
+//! encoding everything in register arguments, which allows for extensibility and
+//! cleaner 64-bit flag handling.
+
+use core::mem::{self, MaybeUninit};
+
+use kerrno::{KError, KResult};
+use khal::uspace::UserContext;
+use linux_raw_sys::general::clone_args;
+
+use super::clone::{CloneFlags, CloneRequest};
+
+/// Minimum size of clone_args (the original v0 layout: flags through tls, 8 fields × 8 bytes).
+const CLONE_ARGS_SIZE_VER0: usize = 64;
+
+pub fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KResult<isize> {
+    if size < CLONE_ARGS_SIZE_VER0 {
+        return Err(KError::InvalidInput);
+    }
+
+    // Zero-init then copy min(size, sizeof) bytes from user space so that
+    // fields beyond the caller's struct version default to zero.
+    let mut kargs_uninit = MaybeUninit::<clone_args>::zeroed();
+    let read_size = core::cmp::min(size, mem::size_of::<clone_args>());
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(
+            kargs_uninit.as_mut_ptr() as *mut MaybeUninit<u8>,
+            read_size,
+        )
+    };
+    osvm::read_vm_mem(cl_args as *const u8, dst)?;
+    // SAFETY: clone_args is #[repr(C)] with all-u64 fields; every bit pattern is valid,
+    // and any unread tail was zero-filled above.
+    let kargs = unsafe { kargs_uninit.assume_init() };
+
+    debug!(
+        "sys_clone3 <= flags: {:#x}, exit_signal: {}, stack: {:#x}, stack_size: {:#x}, ptid: \
+         {:#x}, ctid: {:#x}, tls: {:#x}, pidfd: {:#x}",
+        kargs.flags,
+        kargs.exit_signal,
+        kargs.stack,
+        kargs.stack_size,
+        kargs.parent_tid,
+        kargs.child_tid,
+        kargs.tls,
+        kargs.pidfd,
+    );
+
+    let mut req = CloneRequest::new();
+
+    req.set_flags(CloneFlags::from_bits_truncate(kargs.flags))
+        .set_exit_signal(kargs.exit_signal)
+        .set_stack_with_size(kargs.stack, kargs.stack_size)
+        .set_parent_tid(kargs.parent_tid as usize)
+        .set_child_tid(kargs.child_tid as usize)
+        .set_tls(kargs.tls as usize)
+        .set_pidfd(kargs.pidfd as usize);
+
+    req.do_clone(uctx)
+}
