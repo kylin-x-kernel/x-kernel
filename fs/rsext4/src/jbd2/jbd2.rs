@@ -180,6 +180,24 @@ impl JBD2DEVSYSTEM {
         // 至此，commit已经完成，metadata数据已经安全:）
         block_dev.flush().expect("Jouranl block write failed!");
         self.sequence += 1;
+
+        // Keep journal superblock in sync with in-memory state so reboot-time replay
+        // can start from a consistent point and e2fsck won't see stale journal head.
+        self.jbd2_super_block.s_sequence = self.sequence;
+        self.jbd2_super_block.s_start = 0;
+        self.head = 0;
+
+        let sb_block = self.start_block;
+        let mut sb_data = [0u8; BLOCK_SIZE];
+        block_dev
+            .read(&mut sb_data, sb_block, 1)
+            .expect("Read journal superblock failed");
+        self.jbd2_super_block.to_disk_bytes(&mut sb_data[0..1024]);
+        block_dev
+            .write(&sb_data, sb_block, 1)
+            .expect("Write journal superblock failed");
+        block_dev.flush().expect("Jouranl block write failed!");
+
         debug!(
             "[JBD2 commit] end: tid={} new_sequence={}",
             tid, self.sequence

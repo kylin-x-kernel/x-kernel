@@ -7,7 +7,8 @@ use alloc::sync::Arc;
 use core::cell::OnceCell;
 
 use fs_ng_vfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, StatFs, VfsError, VfsResult,
+    path::MAX_NAME_LEN,
 };
 use kdriver::BlockDevice as KBlockDevice;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
@@ -40,7 +41,7 @@ pub struct Ext4Filesystem {
 impl Ext4Filesystem {
     /// Create a new ext4 filesystem instance backed by a block device.
     pub fn new(dev: KBlockDevice) -> VfsResult<Filesystem> {
-        let mut dev = Jbd2Dev::initial_jbd2dev(0, Ext4Disk(dev), false);
+        let mut dev = Jbd2Dev::initial_jbd2dev(0, Ext4Disk(dev), true);
         let fs = rsext4::mount(&mut dev).map_err(into_vfs_err)?;
 
         let fs = Arc::new(Self {
@@ -74,7 +75,28 @@ impl Ext4Filesystem {
         fs.datablock_cache.flush_all(dev).map_err(into_vfs_err)?;
         fs.sync_superblock(dev).map_err(into_vfs_err)?;
         fs.sync_group_descriptors(dev).map_err(into_vfs_err)?;
+        // Ensure pending metadata journal transaction queue is committed on sync/fsync.
+        if dev.is_use_journal() {
+            dev.umount_commit();
+        }
         dev.cantflush().map_err(into_vfs_err)
+    }
+
+    pub(crate) fn range_shift(
+        location: &Location,
+        offset: u64,
+        len: u64,
+        insert: bool,
+    ) -> VfsResult<()> {
+        let inode = location
+            .entry()
+            .downcast::<Inode>()
+            .map_err(|_| VfsError::Unsupported)?;
+        if insert {
+            inode.insert_range(offset, len)
+        } else {
+            inode.collapse_range(offset, len)
+        }
     }
 }
 

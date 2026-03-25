@@ -6,7 +6,8 @@ use alloc::sync::Arc;
 use core::cell::OnceCell;
 
 use fs_ng_vfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, StatFs, VfsError, VfsResult,
+    path::MAX_NAME_LEN,
 };
 use kdriver::BlockDevice as KBlockDevice;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
@@ -42,6 +43,15 @@ impl Ext4Filesystem {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, LwExt4Filesystem> {
         self.inner.lock()
+    }
+
+    pub(crate) fn range_shift(
+        _location: &Location,
+        _offset: u64,
+        _len: u64,
+        _insert: bool,
+    ) -> VfsResult<()> {
+        Err(VfsError::Unsupported)
     }
 }
 

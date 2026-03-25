@@ -18,7 +18,7 @@ use kcore::{
     vfs::{Device, DeviceMmap},
 };
 use kerrno::{KError, KResult};
-use kfs::FileBackend;
+use kfs::{CachedFile, FileBackend};
 use khal::paging::{MappingFlags, PageSize};
 use ktask::current;
 use linux_raw_sys::general::*;
@@ -208,35 +208,41 @@ pub fn sys_mmap(
                         )
                     }
                     FileBackend::Direct(loc) => {
-                        let device = loc
-                            .entry()
-                            .downcast::<Device>()
-                            .map_err(|_| KError::NoSuchDevice)?;
-
-                        match device.mmap() {
-                            DeviceMmap::None => {
-                                return Err(KError::NoSuchDevice);
-                            }
-                            DeviceMmap::ReadOnly => {
-                                Backend::new_cow(start, page_size, backend, offset as u64, None)
-                            }
-                            DeviceMmap::Physical(mut range) => {
-                                range.start += offset;
-                                if range.is_empty() {
-                                    return Err(KError::InvalidInput);
+                        if let Ok(device) = loc.entry().downcast::<Device>() {
+                            match device.mmap() {
+                                DeviceMmap::None => {
+                                    return Err(KError::NoSuchDevice);
                                 }
-                                length = length.min(range.size().align_down(page_size));
-                                Backend::new_linear(
-                                    start.as_usize() as isize - range.start.as_usize() as isize,
-                                )
+                                DeviceMmap::ReadOnly => {
+                                    Backend::new_cow(start, page_size, backend, offset as u64, None)
+                                }
+                                DeviceMmap::Physical(mut range) => {
+                                    range.start += offset;
+                                    if range.is_empty() {
+                                        return Err(KError::InvalidInput);
+                                    }
+                                    length = length.min(range.size().align_down(page_size));
+                                    Backend::new_linear(
+                                        start.as_usize() as isize - range.start.as_usize() as isize,
+                                    )
+                                }
+                                DeviceMmap::Cache(cache) => Backend::new_file(
+                                    start,
+                                    cache,
+                                    file.flags(),
+                                    offset,
+                                    &curr.as_thread().proc_data.aspace,
+                                ),
                             }
-                            DeviceMmap::Cache(cache) => Backend::new_file(
+                        } else {
+                            // Preserve MAP_SHARED semantics for direct-opened regular files.
+                            Backend::new_file(
                                 start,
-                                cache,
+                                CachedFile::get_or_create(loc.clone()),
                                 file.flags(),
                                 offset,
                                 &curr.as_thread().proc_data.aspace,
-                            ),
+                            )
                         }
                     }
                 }

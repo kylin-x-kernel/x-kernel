@@ -541,11 +541,23 @@ pub fn sys_renameat2(
 }
 
 pub fn sys_sync() -> KResult<isize> {
-    warn!("dummy sys_sync");
+    let root = FS_CONTEXT.lock().root_dir().clone();
+    root.filesystem().flush()?;
     Ok(0)
 }
 
-pub fn sys_syncfs(_fd: i32) -> KResult<isize> {
-    warn!("dummy sys_syncfs");
-    Ok(0)
+pub fn sys_syncfs(fd: i32) -> KResult<isize> {
+    let file_like = get_file_like(fd)?;
+
+    if let Some(file) = file_like.downcast_ref::<crate::file::File>() {
+        file.inner().location().filesystem().flush()?;
+        return Ok(0);
+    }
+
+    if let Some(dir) = file_like.downcast_ref::<Directory>() {
+        dir.inner().filesystem().flush()?;
+        return Ok(0);
+    }
+
+    Err(KError::InvalidInput)
 }

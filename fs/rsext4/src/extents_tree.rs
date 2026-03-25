@@ -828,6 +828,10 @@ impl<'a> ExtentTree<'a> {
             return Err(BlockDevError::InvalidInput);
         }
 
+        // Deletion can split one extent into two and temporarily grow an inline
+        // root leaf past inode capacity (max=4). Rebalance before persisting root.
+        Self::rebalance_inline_root_if_needed(fs, block_dev, &mut root)?;
+
         let en_max = inline_eh_max_for_node(&root);
         match &mut root {
             ExtentNode::Leaf { header, entries } => {
@@ -842,7 +846,7 @@ impl<'a> ExtentTree<'a> {
                     hdr.eh_magic = Ext4ExtentHeader::EXT4_EXT_MAGIC;
                     hdr.eh_depth = 0;
                     hdr.eh_entries = 0;
-                    hdr.eh_max = (15usize * 4usize.saturating_sub(Ext4ExtentHeader::disk_size())
+                    hdr.eh_max = ((15usize * 4usize).saturating_sub(Ext4ExtentHeader::disk_size())
                         / Ext4Extent::disk_size()) as u16;
                     let empty_root = ExtentNode::Leaf {
                         header: hdr,
@@ -948,6 +952,7 @@ impl<'a> ExtentTree<'a> {
         match split_result {
             None => {
                 // 没有发生根节点分裂，只需将更新后的根节点写回 Inode
+                Self::rebalance_inline_root_if_needed(fs, block_dev, &mut root)?;
                 debug!(
                     "ExtentTree::insert_extent: no root split, writing updated root back to inode"
                 );
@@ -1012,6 +1017,173 @@ impl<'a> ExtentTree<'a> {
                 Ok(())
             }
         }
+    }
+
+    fn rebalance_inline_root_if_needed<B: BlockDevice>(
+        fs: &mut Ext4FileSystem,
+        block_dev: &mut Jbd2Dev<B>,
+        root: &mut ExtentNode,
+    ) -> BlockDevResult<()> {
+        let inline_bytes = 15usize * 4usize;
+        let hdr_size = Ext4ExtentHeader::disk_size();
+        let entry_size = match root {
+            ExtentNode::Leaf { .. } => Ext4Extent::disk_size(),
+            ExtentNode::Index { .. } => Ext4ExtentIdx::disk_size(),
+        };
+        let inline_max = (inline_bytes.saturating_sub(hdr_size) / entry_size) as u16;
+
+        let need_split = match root {
+            ExtentNode::Leaf { entries, .. } => entries.len() > inline_max as usize,
+            ExtentNode::Index { entries, .. } => entries.len() > inline_max as usize,
+        };
+        if !need_split {
+            return Ok(());
+        }
+
+        let block_eh_max = Self::calc_block_eh_max();
+
+        match root {
+            ExtentNode::Leaf { header, entries } => {
+                let split_idx = entries.len() / 2;
+                let right_entries = entries.split_off(split_idx);
+                let left_entries = entries.clone();
+
+                let left_header = Ext4ExtentHeader {
+                    eh_magic: Ext4ExtentHeader::EXT4_EXT_MAGIC,
+                    eh_entries: left_entries.len() as u16,
+                    eh_max: block_eh_max,
+                    eh_depth: 0,
+                    eh_generation: 0,
+                };
+                let right_header = Ext4ExtentHeader {
+                    eh_magic: Ext4ExtentHeader::EXT4_EXT_MAGIC,
+                    eh_entries: right_entries.len() as u16,
+                    eh_max: block_eh_max,
+                    eh_depth: 0,
+                    eh_generation: 0,
+                };
+
+                let left_block = fs.alloc_block(block_dev)?;
+                let right_block = fs.alloc_block(block_dev)?;
+
+                let left_node = ExtentNode::Leaf {
+                    header: left_header,
+                    entries: left_entries,
+                };
+                let right_node = ExtentNode::Leaf {
+                    header: right_header,
+                    entries: right_entries,
+                };
+
+                Self::write_node_to_block(block_dev, left_block as u32, &left_node, block_eh_max)?;
+                Self::write_node_to_block(
+                    block_dev,
+                    right_block as u32,
+                    &right_node,
+                    block_eh_max,
+                )?;
+
+                let left_key = Self::get_node_start_block(&left_node);
+                let right_key = Self::get_node_start_block(&right_node);
+
+                *header = Ext4ExtentHeader {
+                    eh_magic: Ext4ExtentHeader::EXT4_EXT_MAGIC,
+                    eh_entries: 2,
+                    eh_max: inline_max,
+                    eh_depth: 1,
+                    eh_generation: 0,
+                };
+                *root = ExtentNode::Index {
+                    header: *header,
+                    entries: vec![
+                        Ext4ExtentIdx {
+                            ei_block: left_key,
+                            ei_leaf_lo: (left_block & 0xFFFF_FFFF) as u32,
+                            ei_leaf_hi: ((left_block >> 32) & 0xFFFF) as u16,
+                            ei_unused: 0,
+                        },
+                        Ext4ExtentIdx {
+                            ei_block: right_key,
+                            ei_leaf_lo: (right_block & 0xFFFF_FFFF) as u32,
+                            ei_leaf_hi: ((right_block >> 32) & 0xFFFF) as u16,
+                            ei_unused: 0,
+                        },
+                    ],
+                };
+            }
+            ExtentNode::Index { header, entries } => {
+                let split_idx = entries.len() / 2;
+                let right_entries = entries.split_off(split_idx);
+                let left_entries = entries.clone();
+
+                let child_depth = header.eh_depth;
+                let left_header = Ext4ExtentHeader {
+                    eh_magic: Ext4ExtentHeader::EXT4_EXT_MAGIC,
+                    eh_entries: left_entries.len() as u16,
+                    eh_max: block_eh_max,
+                    eh_depth: child_depth,
+                    eh_generation: 0,
+                };
+                let right_header = Ext4ExtentHeader {
+                    eh_magic: Ext4ExtentHeader::EXT4_EXT_MAGIC,
+                    eh_entries: right_entries.len() as u16,
+                    eh_max: block_eh_max,
+                    eh_depth: child_depth,
+                    eh_generation: 0,
+                };
+
+                let left_block = fs.alloc_block(block_dev)?;
+                let right_block = fs.alloc_block(block_dev)?;
+
+                let left_node = ExtentNode::Index {
+                    header: left_header,
+                    entries: left_entries,
+                };
+                let right_node = ExtentNode::Index {
+                    header: right_header,
+                    entries: right_entries,
+                };
+
+                Self::write_node_to_block(block_dev, left_block as u32, &left_node, block_eh_max)?;
+                Self::write_node_to_block(
+                    block_dev,
+                    right_block as u32,
+                    &right_node,
+                    block_eh_max,
+                )?;
+
+                let left_key = Self::get_node_start_block(&left_node);
+                let right_key = Self::get_node_start_block(&right_node);
+                let new_root_depth = child_depth.saturating_add(1);
+
+                *header = Ext4ExtentHeader {
+                    eh_magic: Ext4ExtentHeader::EXT4_EXT_MAGIC,
+                    eh_entries: 2,
+                    eh_max: inline_max,
+                    eh_depth: new_root_depth,
+                    eh_generation: 0,
+                };
+                *root = ExtentNode::Index {
+                    header: *header,
+                    entries: vec![
+                        Ext4ExtentIdx {
+                            ei_block: left_key,
+                            ei_leaf_lo: (left_block & 0xFFFF_FFFF) as u32,
+                            ei_leaf_hi: ((left_block >> 32) & 0xFFFF) as u16,
+                            ei_unused: 0,
+                        },
+                        Ext4ExtentIdx {
+                            ei_block: right_key,
+                            ei_leaf_lo: (right_block & 0xFFFF_FFFF) as u32,
+                            ei_leaf_hi: ((right_block >> 32) & 0xFFFF) as u16,
+                            ei_unused: 0,
+                        },
+                    ],
+                };
+            }
+        }
+
+        Ok(())
     }
 
     /// 递归插入函数
@@ -1382,9 +1554,10 @@ impl<'a> ExtentTree<'a> {
         dev: &mut Jbd2Dev<B>,
         block_id: u32,
         node: &ExtentNode,
-        eh_max: u16,
+        _eh_max: u16,
     ) -> BlockDevResult<()> {
         let hdr_size = Ext4ExtentHeader::disk_size();
+        let block_eh_max = Self::calc_block_eh_max();
         // 读取块
         dev.read_block(block_id)?;
         let buf = dev.buffer_mut();
@@ -1394,7 +1567,7 @@ impl<'a> ExtentTree<'a> {
                 let et_size = Ext4Extent::disk_size();
                 // 确保 header 中的 max 正确（因为内存中的 node 可能来自 root，max 很小）
                 let mut disk_header = *header;
-                disk_header.eh_max = eh_max;
+                disk_header.eh_max = block_eh_max;
                 // 写 header
                 disk_header.to_disk_bytes(&mut buf[0..hdr_size]);
                 // 写 extents
@@ -1409,7 +1582,7 @@ impl<'a> ExtentTree<'a> {
             ExtentNode::Index { header, entries } => {
                 let idx_size = Ext4ExtentIdx::disk_size();
                 let mut disk_header = *header;
-                disk_header.eh_max = eh_max;
+                disk_header.eh_max = block_eh_max;
 
                 // 写 header
                 disk_header.to_disk_bytes(&mut buf[0..hdr_size]);

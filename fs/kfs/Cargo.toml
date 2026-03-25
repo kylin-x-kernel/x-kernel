@@ -15,7 +15,7 @@ fat = ["dep:fatfs"]
 ext4-lwext4 = ["dep:lwext4_rust"]
 ext4-rsext4 = ["dep:rsext4"]
 ext4-ext4_rs = ["dep:ext4_rs"]
-ext4 = ["ext4-lwext4"]
+ext4 = ["ext4-rsext4"]
 
 times = []
 std = []

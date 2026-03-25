@@ -26,7 +26,9 @@ pub fn resolve_inode_block<B: BlockDevice>(
     if inode.have_extend_header_and_use_extend() {
         let mut tree = ExtentTree::new(inode);
         if let Some(ext) = tree.find_extent(block_dev, logical_block)? {
-            let mut len = ext.ee_len as u32;
+            let raw_len = ext.ee_len as u32;
+            let is_unwritten = (raw_len & 0x8000) != 0;
+            let mut len = raw_len;
             // 最高位表示 uninitialized 标志，长度使用低 15 位
             if (len & 0x8000) != 0 {
                 len &= 0x7FFF;
@@ -40,6 +42,12 @@ pub fn resolve_inode_block<B: BlockDevice>(
                 return Ok(None);
             }
 
+            // Unwritten(uninitialized) extents represent logical holes and must
+            // read as zeroes until converted to initialized extents by writes.
+            if is_unwritten {
+                return Ok(None);
+            }
+
             let base = ((ext.ee_start_hi as u64) << 32) | ext.ee_start_lo as u64;
             let phys = base + (logical_block - start_lbn) as u64;
             if phys > u32::MAX as u64 {
@@ -47,8 +55,7 @@ pub fn resolve_inode_block<B: BlockDevice>(
             }
             return Ok(Some(phys as u32));
         }
-        error!("Can't find proper extend for this logical block");
-        Err(BlockDevError::ReadError)
+        Ok(None)
     } else {
         error!("Only Support Extend mode!");
         Err(BlockDevError::Unsupported)
@@ -65,7 +72,12 @@ pub fn resolve_inode_block_allextend<B: BlockDevice>(
     }
 
     fn push_extent_blocks(out: &mut Vec<(u32, u64)>, ext: &Ext4Extent) {
-        let mut len = ext.ee_len as u32;
+        let raw_len = ext.ee_len as u32;
+        // Unwritten extent must be treated as hole when building lbn->pbn map.
+        if (raw_len & 0x8000) != 0 {
+            return;
+        }
+        let mut len = raw_len;
         // 最高位表示 uninitialized 标志，长度使用低 15 位
         if (len & 0x8000) != 0 {
             len &= 0x7FFF;

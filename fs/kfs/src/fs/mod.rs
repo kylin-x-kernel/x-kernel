@@ -10,7 +10,7 @@ mod fat;
 mod ext4;
 
 use cfg_if::cfg_if;
-use fs_ng_vfs::{Filesystem, VfsResult};
+use fs_ng_vfs::{Filesystem, Location, VfsError, VfsResult};
 use kdriver::BlockDevice as KBlockDevice;
 
 /// Create the default filesystem instance for the given block device.
@@ -24,4 +24,19 @@ pub fn new_default(_dev: KBlockDevice) -> VfsResult<Filesystem> {
             panic!("No filesystem feature enabled");
         }
     }
+}
+
+pub(crate) fn range_shift(
+    location: &Location,
+    offset: u64,
+    len: u64,
+    insert: bool,
+) -> VfsResult<()> {
+    #[cfg(feature = "ext4")]
+    {
+        return ext4::Ext4Filesystem::range_shift(location, offset, len, insert);
+    }
+
+    #[allow(unreachable_code)]
+    Err(VfsError::Unsupported)
 }

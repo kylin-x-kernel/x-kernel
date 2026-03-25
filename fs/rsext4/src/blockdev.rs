@@ -190,6 +190,10 @@ impl<B: BlockDevice> Jbd2Dev<B> {
         self.journal_use
     }
 
+    pub fn journal_sequence(&self) -> Option<u32> {
+        self.systeam.as_ref().map(|s| s.sequence)
+    }
+
     /// 外部重放journal日志入口 注意性能影响
     pub fn journal_replay(&mut self) {
         if self.journal_use {
@@ -229,14 +233,17 @@ impl<B: BlockDevice> Jbd2Dev<B> {
 
     /// 防止滥用，仅仅umount调用，确保事务缓存全部提交完毕
     pub fn umount_commit(&mut self) {
-        if self.journal_use {
-            self.systeam
-                .as_mut()
-                .unwrap()
+        if !self.journal_use {
+            trace!("Journal disabled, skip commit");
+            return;
+        }
+
+        if let Some(system) = self.systeam.as_mut() {
+            system
                 .commit_transaction(&mut self.inner.dev)
                 .expect("Translation commit failed!!!");
         } else {
-            warn!("Jouranl not use , no thing to commit")
+            trace!("Journal enabled but system uninitialized, skip commit");
         }
     }
 
@@ -278,7 +285,9 @@ impl<B: BlockDevice> Jbd2Dev<B> {
         // 先写入缓存
         if systeam.commit_queue.len() > JBD2_BUFFER_MAX {
             // 缓存已满 直接提交，然后再塞入缓存
-            let _ = systeam.commit_transaction(raw_dev);
+            systeam
+                .commit_transaction(raw_dev)
+                .map_err(|_| BlockDevError::IoError)?;
             // 赛入缓存
             systeam.commit_queue.push(updates);
             trace!("[JBD2 BUFFER] BUFFER IS FULL ,FLUSHED!")
@@ -351,7 +360,9 @@ impl<B: BlockDevice> Jbd2Dev<B> {
             // 先写入缓存
             if systeam.commit_queue.len() > JBD2_BUFFER_MAX {
                 // 缓存已满 直接提交，然后再塞入缓存
-                let _ = systeam.commit_transaction(raw_dev);
+                systeam
+                    .commit_transaction(raw_dev)
+                    .map_err(|_| BlockDevError::IoError)?;
                 // 赛入缓存
                 systeam.commit_queue.push(updates);
                 trace!("[JBD2 BUFFER] BUFFER IS FULL ,FLUSHED!")

@@ -47,6 +47,26 @@ impl Pollable for DummyFd {
     fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
 }
 
+fn write_zeros_range(file: &kfs::FileBackend, start: u64, end: u64) -> KResult<()> {
+    if end <= start {
+        return Ok(());
+    }
+
+    let zeros = [0u8; 4096];
+    let mut pos = start;
+    let mut remaining = end - start;
+    while remaining > 0 {
+        let write_len = remaining.min(zeros.len() as u64) as usize;
+        let written = file.write_at(&zeros[..write_len], pos)?;
+        if written == 0 {
+            return Err(KError::WriteZero);
+        }
+        pos += written as u64;
+        remaining -= written as u64;
+    }
+    Ok(())
+}
+
 /// Creates a dummy file descriptor for unsupported syscalls.
 pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
     // Check if running under QEMU - if so, report unsupported to let QEMU fall back to alternatives
@@ -141,15 +161,137 @@ pub fn sys_fallocate(
     len: __kernel_off_t,
 ) -> KResult<isize> {
     debug!("sys_fallocate <= fd: {fd}, mode: {mode}, offset: {offset}, len: {len}");
-    // Allocate/deallocate disk space for a file
-    if mode != 0 {
+    // Allocate/deallocate disk space for a file.
+    // Supported modes:
+    // - preallocate (mode 0, optionally KEEP_SIZE)
+    // - PUNCH_HOLE (requires KEEP_SIZE)
+    // - ZERO_RANGE (with/without KEEP_SIZE)
+    // - COLLAPSE_RANGE (byte-range remove)
+    // - INSERT_RANGE (byte-range insert zeroes)
+    // - UNSHARE_RANGE (no-op on non-reflink backend)
+    const FALLOC_FL_KEEP_SIZE: u32 = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
+    const FALLOC_FL_COLLAPSE_RANGE: u32 = 0x08;
+    const FALLOC_FL_ZERO_RANGE: u32 = 0x10;
+    const FALLOC_FL_INSERT_RANGE: u32 = 0x20;
+    const FALLOC_FL_UNSHARE_RANGE: u32 = 0x40;
+
+    if offset < 0 || len < 0 {
         return Err(KError::InvalidInput);
     }
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let keep_size = (mode & FALLOC_FL_KEEP_SIZE) != 0;
+    let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
+
     let f = File::from_fd(fd)?;
     let inner = f.inner();
     let file = inner.access(FileFlags::WRITE)?;
-    // Ensure file is at least as large as offset + len
-    file.set_len(file.location().len()?.max(offset as u64 + len as u64))?;
+
+    let start = offset as u64;
+    let len_u = len as u64;
+    let end = start.checked_add(len_u).ok_or(KError::InvalidInput)?;
+    let old_size = file.location().len()?;
+
+    match base_mode {
+        // Standard preallocation behavior in our current implementation.
+        0 => {
+            if !keep_size {
+                let target_size = old_size.max(end);
+                if target_size > old_size {
+                    // Some backends may delay i_size visibility on set_len-only growth.
+                    // Force EOF advancement with a single-byte write at target_size - 1.
+                    let z = [0u8; 1];
+                    let written = file.write_at(&z[..], target_size - 1)?;
+                    if written != 1 {
+                        return Err(KError::WriteZero);
+                    }
+                }
+            }
+        }
+        // Emulate punch hole by zeroing existing file range.
+        FALLOC_FL_PUNCH_HOLE => {
+            // Linux requires KEEP_SIZE for PUNCH_HOLE.
+            if !keep_size {
+                return Err(KError::InvalidInput);
+            }
+            let target_end = end.min(old_size);
+            if target_end <= start {
+                return Ok(0);
+            }
+
+            write_zeros_range(file, start, target_end)?;
+        }
+        // Emulate zero-range by writing zeros to the range.
+        FALLOC_FL_ZERO_RANGE => {
+            // KEEP_SIZE: only affect visible bytes in current file size.
+            // Avoid temporary i_size growth, which can perturb extent metadata
+            // on backends with incomplete hole/truncate handling.
+            let target_end = if keep_size { end.min(old_size) } else { end };
+            if target_end <= start {
+                return Ok(0);
+            }
+
+            if !keep_size && target_end > old_size {
+                file.set_len(target_end)?;
+            }
+
+            write_zeros_range(file, start, target_end)?;
+        }
+        // On non-reflink filesystems, emulate unshare by preallocating range semantics.
+        FALLOC_FL_UNSHARE_RANGE => {
+            if !keep_size {
+                let target_size = old_size.max(end);
+                if target_size > old_size {
+                    let z = [0u8; 1];
+                    let written = file.write_at(&z[..], target_size - 1)?;
+                    if written != 1 {
+                        return Err(KError::WriteZero);
+                    }
+                }
+            }
+        }
+        // Remove [start, end) and shift following bytes left.
+        FALLOC_FL_COLLAPSE_RANGE => {
+            // Linux does not allow KEEP_SIZE with COLLAPSE_RANGE.
+            if keep_size {
+                return Err(KError::InvalidInput);
+            }
+            if end > old_size {
+                return Err(KError::InvalidInput);
+            }
+            if start >= old_size {
+                return Err(KError::InvalidInput);
+            }
+
+            let removed = end - start;
+            if removed == 0 {
+                return Ok(0);
+            }
+            file.collapse_range(start, removed)?;
+        }
+        // Insert zero-filled [start, start+len) and shift tail right.
+        FALLOC_FL_INSERT_RANGE => {
+            // Linux does not allow KEEP_SIZE with INSERT_RANGE.
+            if keep_size {
+                return Err(KError::InvalidInput);
+            }
+            if start > old_size {
+                return Err(KError::InvalidInput);
+            }
+
+            let insert_len = len_u;
+            if insert_len == 0 {
+                return Ok(0);
+            }
+            file.insert_range(start, insert_len)?;
+        }
+        // Other mode combinations are not supported.
+        _ => return Err(KError::Unsupported),
+    }
+
     Ok(0)
 }
 
@@ -264,11 +406,10 @@ pub fn sys_pwritev2(
     _flags: u32,
 ) -> KResult<isize> {
     debug!("sys_pwritev2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
-    // Vectored write at specific offset with optional flags
-    // NOTE: Currently this reads instead of writes - likely a bug
+    // Vectored write at specific offset with optional flags.
     let f = File::from_fd(fd)?;
     f.inner()
-        .read_at(IoVectorBuf::new(iov, iovcnt)?.into_io(), offset as _)
+        .write_at(IoVectorBuf::new(iov, iovcnt)?.into_io(), offset as _)
         .map(|n| n as _)
 }
 

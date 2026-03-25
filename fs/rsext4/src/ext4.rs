@@ -300,7 +300,9 @@ impl Ext4FileSystem {
                 let ino = fs.superblock.s_lpf_ino;
                 debug!("Lost+found inode recorded in superblock: {ino}");
             } else {
-                warn!("s_lpf_ino is 0, lost+found not recorded in superblock");
+                // Some ext4 images do not persist this optional hint field.
+                // We verify /lost+found by path scan below and create it when missing.
+                debug!("s_lpf_ino is 0, lost+found inode hint missing in superblock");
             }
 
             // 2. 通过路径做一次校验（不会在失败时创建新目录）
@@ -310,7 +312,9 @@ impl Ext4FileSystem {
                 }
                 None => {
                     info!("/lost+found not found by path scan;will create!");
-                    create_lost_found_directory(&mut fs, block_dev).ok();
+                    if create_lost_found_directory(&mut fs, block_dev).is_err() {
+                        warn!("/lost+found missing and create failed");
+                    }
                 }
             }
         }
@@ -334,8 +338,8 @@ impl Ext4FileSystem {
                     // dump_journal_inode(&mut fs, block_dev);
                 }
             }
-            // 实际启用Journal
-            if block_dev.is_use_journal() {
+            // 实际启用Journal（仅在文件系统具备 journal 时）
+            if block_dev.is_use_journal() && fs.superblock.has_journal() {
                 // 到这里为止：journal inode 一定存在
                 // 初始化 jbd2：读入 journal 超级块并塞进 Jbd2Dev
                 let mut j_inode = fs

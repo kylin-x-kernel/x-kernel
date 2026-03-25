@@ -521,6 +521,10 @@ impl CachedFile {
         if self.in_memory {
             page.data().fill(0);
         } else {
+            // Always zero-fill first so short reads leave a defined zero tail.
+            // This is required for mmap semantics: bytes past EOF in the last
+            // mapped page must read as zero.
+            page.data().fill(0);
             file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
         }
         cache.put(pn, page);
@@ -625,31 +629,64 @@ impl CachedFile {
         let old_len = file.len()?;
         file.set_len(len)?;
 
-        let old_last_page = (old_len / PAGE_SIZE as u64) as u32;
-        let new_last_page = (len / PAGE_SIZE as u64) as u32;
+        let page_size_u64 = PAGE_SIZE as u64;
+        let old_last_page = if old_len == 0 {
+            None
+        } else {
+            Some(((old_len - 1) / page_size_u64) as u32)
+        };
+        let new_last_page = if len == 0 {
+            None
+        } else {
+            Some(((len - 1) / page_size_u64) as u32)
+        };
+
         if old_len < len {
-            let mut guard = self.shared.page_cache.lock();
-            if let Some(page) = guard.get_mut(&old_last_page) {
-                let page_start = old_last_page as u64 * PAGE_SIZE as u64;
-                let old_page_offset = (old_len - page_start) as usize;
-                let new_page_offset = (len - page_start).min(PAGE_SIZE as u64) as usize;
-                page.data()[old_page_offset..new_page_offset].fill(0);
+            // Growing file size should expose zeros in the new range.
+            if let Some(old_pn) = old_last_page {
+                let mut guard = self.shared.page_cache.lock();
+                if let Some(page) = guard.get_mut(&old_pn) {
+                    let page_start = old_pn as u64 * page_size_u64;
+                    let old_page_offset = (old_len - page_start) as usize;
+                    let new_page_offset = (len - page_start).min(page_size_u64) as usize;
+                    if old_page_offset < new_page_offset {
+                        page.data()[old_page_offset..new_page_offset].fill(0);
+                    }
+                }
             }
-        } else if old_last_page > new_last_page {
-            // For truncating, we need to remove all pages that are beyond the
-            // new length
-            // TODO(mivik): can this be more efficient?
+        } else if old_len > len {
+            // Truncating: clear tail of the new last page (if partial), then
+            // drop all cached pages beyond EOF.
             let mut guard = self.shared.page_cache.lock();
+
+            if let Some(new_pn) = new_last_page {
+                let tail_off = (len % page_size_u64) as usize;
+                if tail_off != 0
+                    && let Some(page) = guard.get_mut(&new_pn)
+                {
+                    page.data()[tail_off..].fill(0);
+                    // Keep the page dirty so the valid prefix [0, tail_off)
+                    // can still be written back if it was modified earlier.
+                    if !self.in_memory {
+                        page.dirty = true;
+                    }
+                }
+            }
+
             let keys = guard
                 .iter()
                 .map(|(k, _)| *k)
-                .filter(|it| *it > new_last_page)
+                .filter(|pn| match new_last_page {
+                    Some(last) => *pn > last,
+                    None => true,
+                })
                 .collect::<Vec<_>>();
+
             for pn in keys {
                 if let Some(mut page) = guard.pop(&pn)
                     && !self.in_memory
                 {
-                    // Don't write back pages since they're discarded
+                    // Don't write back pages since they're beyond new EOF.
                     page.dirty = false;
                     self.evict_cache(file, pn, &mut page)?;
                 }
@@ -697,6 +734,8 @@ pub enum FileBackend {
 }
 
 impl FileBackend {
+    const DIRECT_IO_CHUNK_SIZE: usize = 4096;
+
     pub(crate) fn new_direct(location: Location) -> Self {
         Self::Direct(location)
     }
@@ -708,25 +747,73 @@ impl FileBackend {
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => cached.read_at(dst, offset),
-            Self::Direct(loc) => dst.read_from(&mut kio::read_fn(|buf| {
-                loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
-                    offset += *read as u64;
-                })
-            })),
+            Self::Direct(loc) => {
+                let mut total = 0usize;
+                let file = loc.entry().as_file()?;
+                let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
+
+                while !dst.is_full() {
+                    let want = chunk.len().min(dst.remaining_mut());
+                    if want == 0 {
+                        break;
+                    }
+
+                    let read = file.read_at(&mut chunk[..want], offset)?;
+                    if read == 0 {
+                        break;
+                    }
+                    offset += read as u64;
+
+                    let mut consumed = 0usize;
+                    while consumed < read {
+                        let written = dst.write(&chunk[consumed..read])?;
+                        if written == 0 {
+                            return Err(VfsError::WriteZero);
+                        }
+                        consumed += written;
+                    }
+
+                    total += read;
+
+                    if read < want {
+                        break;
+                    }
+                }
+
+                Ok(total)
+            }
         }
     }
 
     pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => cached.write_at(src, offset),
-            Self::Direct(loc) => src.write_to(&mut kio::write_fn(|buf| {
-                loc.entry()
-                    .as_file()?
-                    .write_at(buf, offset)
-                    .inspect(|written| {
-                        offset += *written as u64;
-                    })
-            })),
+            Self::Direct(loc) => {
+                let mut total = 0usize;
+                let file = loc.entry().as_file()?;
+                let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
+
+                while !src.is_empty() {
+                    let read = src.read(&mut chunk)?;
+                    if read == 0 {
+                        break;
+                    }
+
+                    let mut written_in_chunk = 0usize;
+                    while written_in_chunk < read {
+                        let written = file.write_at(&chunk[written_in_chunk..read], offset)?;
+                        if written == 0 {
+                            return Err(VfsError::WriteZero);
+                        }
+                        written_in_chunk += written;
+                        offset += written as u64;
+                    }
+
+                    total += read;
+                }
+
+                Ok(total)
+            }
         }
     }
 
@@ -734,14 +821,33 @@ impl FileBackend {
         match self {
             Self::Cached(cached) => cached.append(src),
             Self::Direct(loc) => {
-                let mut end = 0;
-                src.write_to(&mut kio::write_fn(|buf| {
-                    loc.entry().as_file()?.append(buf).map(|(n, offset)| {
-                        end = offset;
-                        n
-                    })
-                }))
-                .map(|n| (n, end))
+                let mut total = 0usize;
+                let mut end = loc.len()?;
+                let mut chunk = [0u8; 4096];
+
+                while !src.is_empty() {
+                    let read = src.read(&mut chunk)?;
+                    if read == 0 {
+                        break;
+                    }
+
+                    let mut written_in_chunk = 0usize;
+                    while written_in_chunk < read {
+                        let (written, new_end) = loc
+                            .entry()
+                            .as_file()?
+                            .append(&chunk[written_in_chunk..read])?;
+                        if written == 0 {
+                            return Err(VfsError::WriteZero);
+                        }
+                        written_in_chunk += written;
+                        end = new_end;
+                    }
+
+                    total += read;
+                }
+
+                Ok((total, end))
             }
         }
     }
@@ -765,6 +871,14 @@ impl FileBackend {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => loc.entry().as_file()?.set_len(len),
         }
+    }
+
+    pub fn collapse_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        crate::fs::range_shift(self.location(), offset, len, false)
+    }
+
+    pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        crate::fs::range_shift(self.location(), offset, len, true)
     }
 }
 

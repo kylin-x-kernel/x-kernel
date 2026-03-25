@@ -109,6 +109,26 @@ impl Inode {
         let (fs, dev) = state.split();
         Self::update_ctime_with(fs, dev, ino)
     }
+
+    pub fn collapse_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        {
+            let mut state = self.fs.lock();
+            let (fs, dev) = state.split();
+            rsext4::file::collapse_range_with_ino(dev, fs, self.ino, offset, len)
+                .map_err(into_vfs_err)?;
+        }
+        self.fs.sync_to_disk()
+    }
+
+    pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        {
+            let mut state = self.fs.lock();
+            let (fs, dev) = state.split();
+            rsext4::file::insert_range_with_ino(dev, fs, self.ino, offset, len)
+                .map_err(into_vfs_err)?;
+        }
+        self.fs.sync_to_disk()
+    }
 }
 
 impl NodeOps for Inode {
@@ -238,9 +258,6 @@ impl FileNodeOps for Inode {
         let start_lbn = start_off / block_bytes;
         let end_lbn = (end_off - 1) / block_bytes;
 
-        let extent_map = rsext4::loopfile::resolve_inode_block_allextend(fs, dev, &mut inode)
-            .map_err(into_vfs_err)?;
-
         let mut written = 0usize;
         for lbn in start_lbn..=end_lbn {
             let lbn_start = lbn * block_bytes;
@@ -253,10 +270,12 @@ impl FileNodeOps for Inode {
                 continue;
             }
 
-            if let Some(&phys) = extent_map.get(&(lbn as u32)) {
+            if let Some(phys) = rsext4::loopfile::resolve_inode_block(dev, &mut inode, lbn as u32)
+                .map_err(into_vfs_err)?
+            {
                 let cached = fs
                     .datablock_cache
-                    .get_or_load(dev, phys)
+                    .get_or_load(dev, phys as u64)
                     .map_err(into_vfs_err)?;
                 let data = &cached.data[..block_bytes as usize];
                 buf[written..written + copy_len as usize]

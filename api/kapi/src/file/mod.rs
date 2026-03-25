@@ -25,7 +25,10 @@ use kio::prelude::*;
 use kpoll::Pollable;
 use ksync::RwLock;
 use ktask::current;
-use linux_raw_sys::general::{RLIMIT_NOFILE, stat, statx, statx_timestamp};
+use linux_raw_sys::general::{
+    RLIMIT_NOFILE, S_IFMT, S_IFREG, STATX_ATTR_WRITE_ATOMIC, STATX_WRITE_ATOMIC, stat, statx,
+    statx_timestamp,
+};
 
 pub use self::{
     fs::{Directory, File, ResolveAtResult, metadata_to_kstat, resolve_at, with_fs},
@@ -116,10 +119,13 @@ impl From<Kstat> for stat {
 
 impl From<Kstat> for statx {
     fn from(value: Kstat) -> Self {
+        const ATOMIC_WRITE_UNIT: u32 = 4096;
+
         // SAFETY: valid for statx
         let mut statx: statx = unsafe { core::mem::zeroed() };
         statx.stx_blksize = value.blksize as _;
-        statx.stx_attributes = value.mode as _;
+        statx.stx_attributes = 0;
+        statx.stx_attributes_mask = STATX_ATTR_WRITE_ATOMIC as _;
         statx.stx_nlink = value.nlink as _;
         statx.stx_uid = value.uid as _;
         statx.stx_gid = value.gid as _;
@@ -143,6 +149,15 @@ impl From<Kstat> for statx {
 
         statx.stx_dev_major = (value.dev >> 32) as _;
         statx.stx_dev_minor = value.dev as _;
+
+        if value.mode & S_IFMT == S_IFREG {
+            statx.stx_attributes |= STATX_ATTR_WRITE_ATOMIC as u64;
+            statx.stx_atomic_write_unit_min = ATOMIC_WRITE_UNIT;
+            statx.stx_atomic_write_unit_max = ATOMIC_WRITE_UNIT;
+            statx.stx_atomic_write_unit_max_opt = ATOMIC_WRITE_UNIT;
+            statx.stx_atomic_write_segments_max = 1;
+            statx.stx_mask |= STATX_WRITE_ATOMIC;
+        }
 
         statx
     }
