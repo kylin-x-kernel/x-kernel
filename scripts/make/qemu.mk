@@ -90,6 +90,7 @@ endif
 
 ifeq ($(UEFI), y)
 qemu_args-x86_64 := \
+  -cpu max \
   -machine $(machine) \
   -drive if=pflash,format=raw,unit=0,file=$(OVMF_CODE),readonly=on \
   -drive if=pflash,format=raw,unit=1,file=$(OVMF_VARS) \
