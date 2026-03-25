@@ -5,7 +5,7 @@ def ciResults = [:]
 pipeline {
     agent {
         docker {
-            image 'yeanwang/x-kernel-builder:v1.3'
+            image 'yeanwang/x-kernel-builder:v1.4'
             args '-v /var/run/docker.sock:/var/run/docker.sock -v /var/jenkins_home/cargo/registry:/usr/local/cargo/registry --privileged -u root:root'
         }
     }
@@ -75,33 +75,17 @@ pipeline {
                     }
                     post { failure { script { ciResults['Clippy: aarch64-qemu-virt'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] } } }
                 }
-                stage('Clippy: x86-csv') {
+                stage('Clippy+Build: x86-csv') {
                     steps {
                         script {
-                            runClippy('x86-csv')
-                            ciResults['Clippy: x86-csv'] = [status: 'passed']
+                            runClippyAndBuild('x86-csv')
+                            ciResults['Clippy+Build: x86-csv'] = [status: 'passed']
                         }
                     }
-                    post { failure { script { ciResults['Clippy: x86-csv'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] } } }
+                    post { failure { script { ciResults['Clippy+Build: x86-csv'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
                 }
                 // TODO: 恢复 Clippy: aarch64-crosvm-virt（待 rust-dice/crosvm 修好后）
                 // stage('Clippy: aarch64-crosvm-virt') { ... }
-            }
-        }
-
-        stage('Build Only') {
-            parallel {
-                stage('Build: x86-csv') {
-                    steps {
-                        script {
-                            runBuildOnly('x86-csv')
-                            ciResults['Build: x86-csv'] = [status: 'passed']
-                        }
-                    }
-                    post { failure { script { ciResults['Build: x86-csv'] = [status: 'failed', detail: 'make build 编译失败'] } } }
-                }
-                // TODO: 恢复 Build: aarch64-crosvm-virt（待 rust-dice/crosvm 修好后）
-                // stage('Build: aarch64-crosvm-virt') { ... }
             }
         }
 
@@ -149,7 +133,7 @@ pipeline {
                 def comment = buildCombinedComment(ciResults, coverageSummary, teeInfo)
                 notifyGiteePullRequest(comment)
                 if (currentBuild.currentResult == 'SUCCESS' && teeInfo.result == 'SUCCESS') {
-                    echo "Both citestttt and tee-test passed, marking test as passed"
+                    echo "Both CI test and tee-test passed, marking test as passed"
                     giteeTestPass()
                 } else if (currentBuild.currentResult != 'SUCCESS') {
                     giteeTestReset()
@@ -192,17 +176,14 @@ cp platforms/${platform}/defconfig .config
 rustup target add ${rustupTargetFor(platform)} || true
 make clippy
 """
-        } catch (e) {
-            ciResults["Clippy: ${platform}"] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误']
-            throw e
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
         }
     }
 }
 
-def runBuildOnly(String platform) {
-    ws("${WORKSPACE}/build-${platform}") {
+def runClippyAndBuild(String platform) {
+    ws("${WORKSPACE}/clippy-build-${platform}") {
         def stageWorkspace = pwd()
         fixWorkspaceOwnership(stageWorkspace)
         try {
@@ -213,11 +194,9 @@ def runBuildOnly(String platform) {
 set -euo pipefail
 cp platforms/${platform}/defconfig .config
 rustup target add ${rustupTargetFor(platform)} || true
+make clippy
 stdbuf -oL -eL make build
 """
-        } catch (e) {
-            ciResults["Build: ${platform}"] = [status: 'failed', detail: 'make build 编译失败']
-            throw e
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
         }
@@ -393,15 +372,24 @@ def restoreSource() {
 
 def checkoutProject() {
     if (env.giteePullRequestIid?.trim()) {
-        checkout scm
+        def sourceRepo = env.giteeSourceRepoHttpUrl ?: env.PROJECT_REPO
+        def sourceBranch = env.giteeSourceBranch
+        if (!sourceBranch?.trim()) {
+            echo "WARN: giteeSourceBranch not set, falling back to checkout scm"
+            checkout scm
+            return
+        }
+        checkout([
+            $class: 'GitSCM',
+            branches: [[name: "*/${sourceBranch}"]],
+            userRemoteConfigs: [[url: sourceRepo]]
+        ])
         return
     }
 
     checkout([
         $class: 'GitSCM',
         branches: [[name: "*/${env.DEFAULT_BRANCH}"]],
-        doGenerateSubmoduleConfigurations: false,
-        extensions: [],
         userRemoteConfigs: [[url: env.PROJECT_REPO]]
     ])
 }
@@ -482,10 +470,10 @@ def waitForTeeTest(int timeoutMinutes = 30) {
 
     for (int i = 0; i < maxAttempts; i++) {
         try {
-            def json = sh(script: "curl -g -s --max-time 10 '${jenkinsUrl}job/tee-test/api/json?tree=builds[number,result,building,description]{0,20}'",
-                          returnStdout: true).trim()
             def output = sh(script: """#!/bin/bash
-echo '${json.replace("'", "'\\''")}' | python3 -c "
+set +e
+json=\$(curl -g -s --max-time 10 '${jenkinsUrl}job/tee-test/api/json?tree=builds[number,result,building,description]{0,20}')
+echo "\${json}" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for b in data.get('builds', []):
@@ -740,13 +728,12 @@ def buildCombinedComment(Map ciResults, String coverageSummary, Map teeInfo) {
 
 def buildCiComment(Map results, String coverageSummary = '') {
     def stagesUrl = "${env.BUILD_URL}stages/"
-    // TODO: 恢复 aarch64-crosvm-virt 时补回 'Clippy: aarch64-crosvm-virt', 'Build: aarch64-crosvm-virt'
+    // TODO: 恢复 aarch64-crosvm-virt 时补回 'Clippy+Build: aarch64-crosvm-virt'
     def stageOrder = [
         'Prepare Source',
         'Rustfmt',
         'Clippy: x86_64-qemu-virt', 'Clippy: aarch64-qemu-virt',
-        'Clippy: x86-csv',
-        'Build: x86-csv',
+        'Clippy+Build: x86-csv',
         'Runtime: x86_64', 'Runtime: aarch64'
     ]
     def normalizedResults = [:]

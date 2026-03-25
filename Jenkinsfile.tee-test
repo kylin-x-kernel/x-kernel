@@ -208,54 +208,6 @@ def encodeTeeResultsToDescription(Map results) {
     echo "tee-test description: ${currentBuild.description}"
 }
 
-def buildTeeComment(Map results) {
-    def stagesUrl = "${env.BUILD_URL}stages/"
-
-    // 确保两个架构都有结果记录，没有的补充为失败
-    ['x86_64', 'aarch64'].each { arch ->
-        if (!results.containsKey(arch)) {
-            results[arch] = [arch: arch, passed: 0, failed: 0, status: 'failed', errorSnippet: '未执行或提前失败，请查看 Jenkins 日志']
-        }
-    }
-
-    def allPassed = results.values().every { it.status == 'passed' }
-    def header = allPassed
-        ? "## ✅ TEE 功能测试通过"
-        : "## ❌ TEE 功能测试失败"
-
-    def rows = ['x86_64', 'aarch64'].collect { arch ->
-        def r = results[arch]
-        def total = r.passed + r.failed
-        def statusIcon = r.status == 'passed' ? '✅' : (r.status == 'panic' ? '💥' : (r.status == 'timeout' ? '⏱' : '❌'))
-        "| ${arch} | ${r.passed} | ${r.failed} | ${total} | ${statusIcon} |"
-    }.join('\n')
-
-    def table = """\
-${header}
-
-| 架构 | 通过 | 失败 | 合计 | 状态 |
-|------|------|------|------|------|
-${rows}
-
-🔗 [查看详细日志 (Jenkins Stages)](${stagesUrl})
-- Job: `${env.JOB_NAME}`  Build: `#${env.BUILD_NUMBER}`"""
-
-    def errorBlocks = ['x86_64', 'aarch64']
-        .findAll { arch -> results[arch]?.status != 'passed' && results[arch]?.errorSnippet?.trim() }
-        .collect { arch ->
-            def r = results[arch]
-            def label = r.status == 'panic' ? '💥 Panic' : (r.status == 'timeout' ? '⏱ 超时' : '❌ 失败')
-            "\n### ${label} — ${arch}\n\n" + '```' + "\n${r.errorSnippet.take(800)}\n" + '```'
-        }.join('\n')
-
-    def details = errorBlocks ? "${errorBlocks}\n" : ''
-    def body = table + details
-    if (!allPassed) {
-        return table + "\n\n<details>\n<summary>查看测试详情</summary>\n\n" + details + "\n</details>"
-    }
-    return body
-}
-
 def restoreReplayGiteeEnv() {
     if (env.giteePullRequestIid?.trim()) return
     try {
@@ -338,23 +290,8 @@ def markSafeDirectory() {
     sh "git config --global --add safe.directory ${pwd()}"
 }
 
-def notifyGiteePullRequest(String message) {
-    if (env.giteePullRequestIid?.trim()) {
-        addGiteeMRComment comment: message
-    } else {
-        echo "Skipping Gitee PR comment (not a PR build). Message:\n${message}"
-    }
-}
-
 def defconfigFor(String arch) {
-    switch (arch) {
-        case 'aarch64':
-            return 'platforms/aarch64-qemu-virt/defconfig'
-        case 'x86_64':
-            return 'platforms/x86_64-qemu-virt/defconfig'
-        default:
-            error("Unsupported architecture: ${arch}")
-    }
+    return "platforms/${arch}-qemu-virt/defconfig"
 }
 
 def runtimeTargetSetupFor(String arch) {
