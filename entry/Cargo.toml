@@ -20,7 +20,7 @@ kernel = [
     "kfeat/uspace",
 ]
 
-tee = ["kapi/tee", "kcore/tee"]
+tee = ["kcore/tee", "ksyscall/tee"]
 smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
 
@@ -34,11 +34,12 @@ qemu = [
     "kfeat/fp-simd",
     "kfeat/display",
     "kfeat/input",
-    "kapi/input",
+    "kserveices/input",
     "kfeat/vsock",
-    "kapi/vsock",
+    "ksyscall/vsock",
+    "kserveices/vsock",
     "kfeat/fs-times",
-    "kapi/dev-log",
+    "kserveices/dev-log",
     "pci",
     "tee"
 ]
@@ -64,17 +65,18 @@ aarch64_crosvm_virt = [
     "kfeat/fp-simd",
     "kfeat/display",
     "kfeat/input",
-    "kapi/input",
+    "kserveices/input",
     "kfeat/vsock",
-    "kapi/vsock",
+    "ksyscall/vsock",
+    "kserveices/vsock",
     "dep:aarch64-crosvm-virt",
     "pci",
     "smp",
     # auxilary features
     "kfeat/fs-times",
-    "kapi/dev-log",
+    "kserveices/dev-log",
     "kfeat/crosvm",
-    "kapi/dice",
+    "kserveices/dice",
 ]
 
 # higuang csv platform
@@ -82,19 +84,20 @@ x86_csv = [
     "kernel",
     "kfeat/display",
     "kfeat/input",
-    "kapi/input",
+    "kserveices/input",
 
     "kfeat/vsock",
-    "kapi/vsock",
+    "ksyscall/vsock",
+    "kserveices/vsock",
     "kfeat/sev",
-    "kapi/sev",
+    "kserveices/sev",
     "dep:x86-csv",
     "pci",
 
     # auxilary features
     "kfeat/fs-times",
-    "kapi/dev-log",
-    "kapi/x86_csv",
+    "kserveices/dev-log",
+    "kserveices/x86_csv",
 
     "tee"
 ]
@@ -117,7 +120,8 @@ linkme.workspace = true
 linux-raw-sys.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
-kapi.workspace = true
+ksyscall.workspace = true
+kserveices.workspace = true
 kcore.workspace = true
 unittest = { workspace = true, optional = true }
 

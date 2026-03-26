@@ -8,7 +8,6 @@ use alloc::{
     sync::Arc,
 };
 
-use kapi::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
 use kcore::{
     mm::{copy_from_kernel, load_user_app, new_user_aspace_empty},
     task::{ProcessData, Thread, add_task_to_table},
@@ -16,6 +15,7 @@ use kcore::{
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
+use kserveices::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
 
@@ -42,7 +42,7 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
 
-    let mut task = new_user_task(name, uctx, 0);
+    let mut task = new_user_task(name, uctx, 0, ksyscall::dispatch_irq_syscall);
     task.ctx_mut().set_page_table_root(uspace.page_table_root());
 
     let pid = task.id().as_u64() as Pid;
@@ -61,7 +61,7 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
     );
     {
         let mut scope = proc_data.scope.write();
-        kapi::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
+        kserveices::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
             .expect("Failed to add stdio");
     }
     let thr = Thread::new(pid, proc_data);

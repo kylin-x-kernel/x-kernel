@@ -5,7 +5,6 @@
 *.bzimg
 *.dbg
 **/target/
-/.platconfig.*
 *.img
 /kernel-rv
 /kernel-la

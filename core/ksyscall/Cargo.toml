@@ -1,0 +1,44 @@
+[package]
+name = "ksyscall"
+description = "Kernel syscall crate for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+vsock = ["knet/vsock", "kserveices/vsock"]
+tee = [
+    "dep:tee_kernel",
+    "kserveices/tee",
+]
+
+[dependencies]
+kserveices = { workspace = true }
+kbuild_config = { workspace = true }
+kerrno.workspace = true
+fs-ng-vfs.workspace = true
+kfs.workspace = true
+khal.workspace = true
+kio.workspace = true
+klogger.workspace = true
+memspace.workspace = true
+knet.workspace = true
+kpoll.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+bitflags.workspace = true
+bitmaps = { version = "3.2.1", default-features = false }
+bytemuck.workspace = true
+kspin.workspace = true
+linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
+memaddr.workspace = true
+kprocess.workspace = true
+ksignal.workspace = true
+osvm.workspace = true
+linux_sysno.workspace = true
+tee_kernel = { workspace = true, optional = true }
+kcore.workspace = true
+num_enum = { version = "0.7", default-features = false }

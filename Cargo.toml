@@ -1,26 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
+    # kernel entry
     "entry",
-    "xtask/convert_cov",
-    "xtask/crate_rootfs",
-    "xtask/extract_cov",
-# build config system
-    "xtask/xconfig",
-    "boot/boot-info",
-    "boot/kernel-elf-loader",
-    "boot/x86-boot-common",
-    "util/kbuild_config",
-    "mm/kaddr_layout",
-
-    "boot/x86_64-uefi-loader",
-    "boot/kernel-boot",
-    "boot/x86_64-boot-stub",
-    "tee_apps/sh",
-    "tee_apps/tee_app1",
-    "tee_apps/tee_app2",
+    # build config system
+    "xtask/*",
+    # boot and loader
+    "boot/*",
+    # tee userspace apps
+    "tee_apps/*",
 ]
-exclude = []
+exclude = [
+    # platform-specific boot code that is not intended to be built as part of the main workspace
+    "boot/x86_64-linuxboot",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -35,75 +28,107 @@ keywords = ["kylin-x-kernel", "kernel"]
 categories = ["os", "no-std"]
 
 [workspace.dependencies]
-# x-kernel Modules
+# Internal: API and core services
+kcore = { path = "core/kcore" }
 kfeat = { path = "api/kfeat" }
-kruntime = { path = "init/kruntime" }
-kalloc = { path = "mm/kalloc" }
-fbdevice = { path = "io/fbdevice" }
-kdriver = { path = "drivers/kdriver" }
-kdma = { path = "io/kdma" }
-kfs = { path = "fs/kfs" }
-khal = { path = "arch/khal" }
-inputdev = { path = "io/inputdev" }
-kipi = { path = "arch/kipi" }
-memspace = { path = "mm/memspace" }
-knet = { path = "net/knet" }
-ksync = { path = "core/ksync" }
-ktask = { path = "core/ktask" }
-watchdog = { path = "io/watchdog" }
-kcpu = { path = "arch/kcpu" }
-karch = { path = "arch/karch" }
-
-
-# x-kernel Crates
-alloc-engine = { path = "mm/alloc-engine" }
-page_table = { path = "mm/page_table" }
-fs-ng-vfs = { path = "fs/fs-ng-vfs" }
-kio = { path = "io/kio" }
-kpoll = { path = "core/kpoll" }
-memaddr = { path = "mm/memaddr" }
-memset = { path = "mm/memset" }
-kspin = { path = "sync/kspin" }
-ktypes = { path = "core/ktypes" }
-
-# x-kernel userspace Modules
+kserveices = { path = "core/kservices" }
 ksignal = { path = "process/ksignal" }
-kcore = { path = "api/kcore" }
-kapi = { path = "api/kapi" }
-kprocess = { path = "process/kprocess" }
-osvm = { path = "process/osvm" }
-kernel-elf-parser = { path = "core/kernel_elf_parser" }
-slab_allocator = { version = "0.4", package = "ax_slab_allocator"}
+ksyscall = { path = "core/ksyscall" }
 
-# Platform Abstraction Layer
+# Internal: architecture and platform support
+karch = { path = "arch/karch" }
+kcpu = { path = "arch/kcpu" }
+khal = { path = "arch/khal" }
+kipi = { path = "arch/kipi" }
 kplat = { path = "platforms/kplat" }
-kernel_boot = { path = "boot/kernel-boot", package = "kernel-boot" }
+
+# Internal: boot and loader
 boot_info = { path = "boot/boot-info", package = "boot-info" }
+kernel_boot = { path = "boot/kernel-boot", package = "kernel-boot" }
+kernel-elf-parser = { path = "boot/kernel_elf_parser" }
 kernel_elf_loader = { path = "boot/kernel-elf-loader", package = "kernel-elf-loader" }
 x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
-kaddr_layout = { path = "mm/kaddr_layout" }
-aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
-x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
-x86-csv = { path = "platforms/x86-csv" }
-riscv64-qemu-virt = { path = "platforms/riscv64-qemu-virt" }
-loongarch64-qemu-virt = { path = "platforms/loongarch64-qemu-virt" }
-aarch64-peripherals = { path = "platforms/aarch64-peripherals", default-features = false }
-aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }
-x86-peripherals = { path = "platforms/x86-peripherals" }
 
-# Third Crates
+# Internal: core runtime, sync, task and process
+kpoll = { path = "core/kpoll" }
+kprocess = { path = "process/kprocess" }
+kruntime = { path = "core/kruntime" }
+kspin = { path = "core/kspin" }
+ksync = { path = "core/ksync" }
+ktask = { path = "core/ktask" }
+ktypes = { path = "core/ktypes" }
+osvm = { path = "process/osvm" }
+
+# Internal: memory and filesystem
+alloc-engine = { path = "mm/alloc-engine" }
+fs-ng-vfs = { path = "fs/fs-ng-vfs" }
+kaddr_layout = { path = "mm/kaddr_layout" }
+kalloc = { path = "mm/kalloc" }
+kfs = { path = "fs/kfs" }
+memaddr = { path = "mm/memaddr" }
+memset = { path = "mm/memset" }
+memspace = { path = "mm/memspace" }
+page_table = { path = "mm/page_table" }
+rsext4 = { path = "fs/rsext4", default-features = false }
+
+# Internal: IO and network subsystem
+fbdevice = { path = "io/fbdevice" }
+inputdev = { path = "io/inputdev" }
+kdma = { path = "io/kdma" }
+kio = { path = "io/kio" }
+knet = { path = "net/knet" }
+watchdog = { path = "io/watchdog" }
+
+# Internal: drivers
+aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
 arm-gic = { path = "drivers/arm-gic" }
+block = { path = "drivers/block" }
+display = { path = "drivers/display" }
+driver_base = { path = "drivers/driver_base" }
+input = { path = "drivers/input" }
+kdriver = { path = "drivers/kdriver" }
+net = { path = "drivers/net" }
+pci = { path = "drivers/pci" }
 rs_fdtree = { path = "drivers/rs-fdtree" }
-linux_sysno = { path = "api/linux_sysno", default-features = false }
-# printf-compat = { path = "util/printf-compat", default-features = false }
+virtio = { path = "drivers/virtio" }
+vsock = { path = "drivers/vsock" }
+
+# Internal: platform variants
+aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }
+aarch64-peripherals = { path = "platforms/aarch64-peripherals", default-features = false }
+aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
+loongarch64-qemu-virt = { path = "platforms/loongarch64-qemu-virt" }
+riscv64-qemu-virt = { path = "platforms/riscv64-qemu-virt" }
+x86-csv = { path = "platforms/x86-csv" }
+x86-peripherals = { path = "platforms/x86-peripherals" }
+x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
+
+# Internal: tee
+tee_kernel = { path = "tee/tee_kernel" }
+tee_raw_sys = { path = "tee/tee_raw_sys" }
+
+# Internal: utilities and tooling
+backtrace = { path = "util/backtrace" }
+kbuild_config = { path = "util/kbuild_config" }
+kerrno = { path = "util/kerrno" }
+klogger = { path = "util/klogger" }
+macros = { path = "util/macros" }
+unittest = { path = "util/unittest" }
+unittest_support = { path = "util/unittest_support" }
+
+# External crates
 bitflags = "2.10"
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
+chrono = { version = "0.4", default-features = false }
+crate_interface = "0.1.4"
+enum_dispatch = "0.3"
 event-listener = { version = "5.4.0", default-features = false }
 extern-trait = "0.2"
+fatfs = { version = "0.1.0-pre.0", default-features = false, package = "axfatfs" }
 hashbrown = "0.16"
 lazy_static = { version = "1.5", features = ["spin_no_std"] }
-linkme = "0.3.33"
+lazyinit = "0.2"
 linux-raw-sys = { version = "0.11", default-features = false, features = [
     "no_std",
     "general",
@@ -111,55 +136,24 @@ linux-raw-sys = { version = "0.11", default-features = false, features = [
     "prctl",
     "system",
 ] }
-scope-local = "0.1"
-slab = { version = "0.4.9", default-features = false }
-spin = "0.10"
-log = "0.4"
-percpu = "0.2"
-lazyinit = "0.2"
-crate_interface = "0.1.4"
-chrono = { version = "0.4", default-features = false }
-enum_dispatch = "0.3"
+linux_sysno = { path = "api/linux_sysno", default-features = false }
+linkme = "0.3.33"
 lock_api = { version = "0.4", default-features = false }
-strum = { version = "0.27", default-features = false, features = ["derive"] }
-x86_64 = { version = "0.15.2", features = ["instructions"] }
-
-# Tee Crates
- tee_kernel = { path = "tee/tee_kernel" }
-tee_raw_sys = { path = "tee/tee_raw_sys" }
+log = "0.4"
 mbedtls = { version = "0.13", package = "mbedtls-smx", default-features = false, features = [
     "no_std_deps",
 ] }
-mbedtls-sys-auto = { version = "2.28", package = "mbedtls-sys-auto-smx", default-features = false, features = [
-] }
 mbedtls-build-helper = "0.1"
 mbedtls-platform-support-smx = { version = "0.1", package = "mbedtls-platform-support-smx", default-features = false }
+mbedtls-sys-auto = { version = "2.28", package = "mbedtls-sys-auto-smx", default-features = false, features = [
+] }
+percpu = "0.2"
 rust-dice = { version = "0.1", default-features = false }
-
-# Driver Crates
-driver_base = { path = "drivers/driver_base" }
-block = { path = "drivers/block" }
-display = { path = "drivers/display" }
-input = { path = "drivers/input" }
-net = { path = "drivers/net" }
-pci = { path = "drivers/pci" }
-vsock = { path = "drivers/vsock" }
-virtio = { path = "drivers/virtio" }
-virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers"}
-aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
-fatfs ={ version = "0.1.0-pre.0", default-features = false, package = "axfatfs"}
-
-rsext4 = { path = "fs/rsext4", default-features = false }
-
-# util Crates
-macros = { path = "util/macros" }
-kinit_setup = { path = "util/kinit_setup" }
-klogger = { path = "util/klogger" }
-backtrace = { path = "util/backtrace" }
-kerrno = { path = "util/kerrno" }
-unittest = { path = "util/unittest" }
-unittest_support = { path = "util/unittest_support" }
-kbuild_config = { path = "util/kbuild_config" }
-
-kconfig-gen = { path = "xtask/kconfig-gen" }
+scope-local = "0.1"
+slab = { version = "0.4.9", default-features = false }
+slab_allocator = { version = "0.4", package = "ax_slab_allocator" }
 smoltcp = { version = "0.12.0", package = "x-smoltcp", default-features = false }
+spin = "0.10"
+strum = { version = "0.27", default-features = false, features = ["derive"] }
+virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
+x86_64 = { version = "0.15.2", features = ["instructions"] }

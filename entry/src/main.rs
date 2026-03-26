@@ -42,7 +42,7 @@ fn main() {
     use alloc::{borrow::ToOwned, vec::Vec};
 
     use kfs::FS_CONTEXT;
-    kapi::init();
+    kserveices::init();
 
     let args = CMDLINE
         .iter()
@@ -67,8 +67,8 @@ fn main() {
 #[cfg(feature = "unittest")]
 #[unsafe(no_mangle)]
 fn main() {
-    kapi::init();
-    kapi::register_unittest_runtime();
+    kserveices::init();
+    kserveices::register_unittest_runtime();
 
     {
         let cx = kfs::FS_CONTEXT.lock();
