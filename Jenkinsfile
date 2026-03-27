@@ -84,8 +84,15 @@ pipeline {
                     }
                     post { failure { script { ciResults['Clippy+Build: x86-csv'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
                 }
-                // TODO: 恢复 Clippy: aarch64-crosvm-virt（待 rust-dice/crosvm 修好后）
-                // stage('Clippy: aarch64-crosvm-virt') { ... }
+                stage('Clippy+Build: aarch64-crosvm-virt') {
+                    steps {
+                        script {
+                            runClippyAndBuild('aarch64-crosvm-virt')
+                            ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'passed']
+                        }
+                    }
+                    post { failure { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
+                }
             }
         }
 
@@ -728,12 +735,11 @@ def buildCombinedComment(Map ciResults, String coverageSummary, Map teeInfo) {
 
 def buildCiComment(Map results, String coverageSummary = '') {
     def stagesUrl = "${env.BUILD_URL}stages/"
-    // TODO: 恢复 aarch64-crosvm-virt 时补回 'Clippy+Build: aarch64-crosvm-virt'
     def stageOrder = [
         'Prepare Source',
         'Rustfmt',
         'Clippy: x86_64-qemu-virt', 'Clippy: aarch64-qemu-virt',
-        'Clippy+Build: x86-csv',
+        'Clippy+Build: x86-csv', 'Clippy+Build: aarch64-crosvm-virt',
         'Runtime: x86_64', 'Runtime: aarch64'
     ]
     def normalizedResults = [:]
