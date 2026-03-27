@@ -28,8 +28,8 @@ use ksync::Mutex;
 use lazy_static::lazy_static;
 use mbedtls::{
     cipher::raw::Cipher,
-    hash::{Hmac, Md},
-    pk::{Pk, RsaPadding},
+    hash::{Hmac, Md, Type as MdType},
+    pk::{Pk, RsaPadding, Type as PkType},
 };
 use tee_raw_sys::{libc_compat::size_t, *};
 
@@ -95,7 +95,7 @@ use crate::{
                 crypto_acipher_rsassa_verify, crypto_acipher_sm2_pke_decrypt,
                 crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final, crypto_authenc_enc_final,
                 crypto_authenc_init, crypto_authenc_update_aad, crypto_cipher_final,
-                crypto_cipher_init, crypto_cipher_update,
+                crypto_cipher_init, crypto_cipher_update, crypto_ecc_init, crypto_rsa_init,
             },
         },
         libmbedtls::bignum::BigNum,
@@ -512,6 +512,117 @@ fn tee_svc_cryp_check_key_type(o: &tee_obj, algo: u32, mode: TEE_OperationMode) 
     Ok(())
 }
 
+fn get_rsaes_padding_mode(algo: u32) -> RsaPadding {
+    match algo {
+        TEE_ALG_RSAES_PKCS1_V1_5 => RsaPadding::Pkcs1V15,
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5 => RsaPadding::Pkcs1V21 { mgf: MdType::Md5 },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1 => RsaPadding::Pkcs1V21 { mgf: MdType::Sha1 },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha224,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha256,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha384,
+        },
+        TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha512,
+        },
+        _ => RsaPadding::None,
+    }
+}
+
+fn get_rsassa_padding_mode(algo: u32) -> RsaPadding {
+    match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA256
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA384
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 => RsaPadding::Pkcs1V15,
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => RsaPadding::Pkcs1V21 { mgf: MdType::Md5 },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => RsaPadding::Pkcs1V21 { mgf: MdType::Sha1 },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha224,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha256,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha384,
+        },
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => RsaPadding::Pkcs1V21 {
+            mgf: MdType::Sha512,
+        },
+        _ => RsaPadding::None,
+    }
+}
+
+fn get_dsa_type(algo: u32) -> PkType {
+    match algo {
+        TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
+        | TEE_ALG_ECDSA_SHA512 => PkType::Eckey,
+        TEE_ALG_SM2_DSA_SM3 => PkType::SM2,
+        _ => PkType::None,
+    }
+}
+
+fn tee_cryp_asymm_init(
+    cs: Arc<Mutex<TeeCrypState>>,
+    algo: u32,
+    mode: TEE_OperationMode,
+) -> TeeResult {
+    match algo {
+        TEE_ALG_RSA_NOPAD => match mode {
+            TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_DECRYPT => {
+                crypto_rsa_init(cs.clone(), RsaPadding::None, mode)
+            }
+            _ => return Err(TEE_ERROR_GENERIC),
+        },
+        TEE_ALG_SM2_PKE => match mode {
+            TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_DECRYPT => {
+                crypto_ecc_init(cs.clone(), PkType::SM2)
+            }
+            _ => return Err(TEE_ERROR_GENERIC),
+        },
+        TEE_ALG_RSAES_PKCS1_V1_5
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => match mode {
+            TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_DECRYPT => {
+                crypto_rsa_init(cs.clone(), get_rsaes_padding_mode(algo), mode)
+            }
+            _ => Err(TEE_ERROR_GENERIC),
+        },
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA256
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA384
+        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA512
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => match mode {
+            TEE_OperationMode::TEE_MODE_SIGN | TEE_OperationMode::TEE_MODE_VERIFY => {
+                crypto_rsa_init(cs.clone(), get_rsaes_padding_mode(algo), mode)
+            }
+            _ => Err(TEE_ERROR_GENERIC),
+        },
+        TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
+        | TEE_ALG_ECDSA_SHA512 | TEE_ALG_SM2_DSA_SM3 => {
+            crypto_ecc_init(cs.clone(), get_dsa_type(algo))
+        }
+        _ => Ok(()),
+    }
+}
+
 // 创建一个TeeCrypState
 pub fn tee_cryp_state_alloc(
     algo: u32,
@@ -610,7 +721,9 @@ pub fn tee_cryp_state_alloc(
         let _ = vacant.insert(arc_cs);
         Ok(())
     });
-    Ok(())
+
+    let cs = tee_cryp_state_get(*state)?;
+    tee_cryp_asymm_init(cs.clone(), algo, mode)
 }
 
 pub fn syscall_cryp_state_alloc(
