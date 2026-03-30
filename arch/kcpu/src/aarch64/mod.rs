@@ -12,7 +12,24 @@ mod excp;
 
 pub mod userspace;
 
+use aarch64_cpu::{
+    asm::barrier,
+    registers::{CNTKCTL_EL1, ReadWriteable},
+};
+
 pub use self::ctx::{ExceptionContext as TrapFrame, ExceptionContext, FpState, TaskContext};
+
+/// Enable EL0 access to generic timer registers used by user runtimes.
+#[inline]
+fn enable_user_timer_access() {
+    CNTKCTL_EL1.modify(
+        CNTKCTL_EL1::EL0PCTEN::TrappedNone
+            + CNTKCTL_EL1::EL0VCTEN::TrappedNone
+            + CNTKCTL_EL1::EL0VTEN::TrappedNone
+            + CNTKCTL_EL1::EL0PTEN::TrappedNone,
+    );
+    barrier::isb(barrier::SY);
+}
 
 /// Initializes trap handling on the current CPU.
 ///
@@ -20,6 +37,7 @@ pub use self::ctx::{ExceptionContext as TrapFrame, ExceptionContext, FpState, Ta
 /// block low address access.
 pub fn init_trap() {
     crate::userspace_common::init_exception_table();
+    enable_user_timer_access();
     unsafe extern "C" {
         fn exception_vector_base();
     }

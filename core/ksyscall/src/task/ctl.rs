@@ -117,6 +117,14 @@ pub fn sys_prctl(
         }
         PR_SET_SECCOMP => {}
         PR_MCE_KILL => {}
+        PR_SET_VMA => {
+            // Allow user space to set anonymous VMA names (e.g. Go runtime).
+            // We currently do not persist VMA metadata, but returning success
+            // keeps behavior compatible with Linux for this common path.
+            if arg2 as u32 != PR_SET_VMA_ANON_NAME {
+                return Err(KError::InvalidInput);
+            }
+        }
         PR_SET_MM => {
             // not implemented; but avoid annoying warnings
             return Err(KError::InvalidInput);
