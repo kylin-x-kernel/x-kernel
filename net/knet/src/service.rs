@@ -14,10 +14,10 @@ use ktask::future::sleep_until;
 use smoltcp::{
     iface::{Interface, SocketSet},
     time::Instant,
-    wire::{HardwareAddress, IpAddress, IpListenEndpoint},
+    wire::{HardwareAddress, IpAddress, IpCidr, IpListenEndpoint},
 };
 
-use crate::{SOCKET_SET, router::Router};
+use crate::{SOCKET_SET, netlink::RtnetlinkState, router::Router};
 
 fn now() -> Instant {
     Instant::from_micros_const((wall_time_nanos() / NANOS_PER_MICROS) as i64)
@@ -91,5 +91,20 @@ impl Service {
                 device.register_rx_waker(waker);
             }
         }
+    }
+
+    pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
+        self.router.sync_netlink(state);
+        self.iface.update_ip_addrs(|ip_addrs| {
+            ip_addrs.clear();
+            for addr in &state.addrs {
+                if let IpAddress::Ipv4(ipv4) = addr.address {
+                    let _ = ip_addrs.push(IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
+                        ipv4,
+                        addr.prefix_len,
+                    )));
+                }
+            }
+        });
     }
 }

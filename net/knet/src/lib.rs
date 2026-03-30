@@ -25,6 +25,7 @@ mod consts;
 mod device;
 mod general;
 mod listen_table;
+pub mod netlink;
 pub mod options;
 mod router;
 mod service;
@@ -49,7 +50,7 @@ use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
 pub use socket::*;
 
 use crate::{
-    consts::{GATEWAY, IP, IP_PREFIX},
+    consts::{GATEWAY, IP, IP_PREFIX, STANDARD_MTU},
     device::{EthernetDevice, LoopbackDevice},
     listen_table::ListenTable,
     router::{Router, Rule},
@@ -77,10 +78,12 @@ pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
         lo_ip.address().into(),
     ));
 
+    let mut eth0_mac = None;
     let eth0_ip = if let Some(dev) = net_devs.take_one() {
         info!("  use NIC 0: {:?}", dev.name());
 
         let eth0_address = EthernetAddress(dev.mac().0);
+        eth0_mac = Some(dev.mac().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0_dev = router.add_device(Box::new(EthernetDevice::new(
@@ -118,6 +121,16 @@ pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
         }
     });
     SERVICE.init_once(Mutex::new(service));
+
+    let netlink_state = netlink::build_initial_state(
+        lo_ip.into(),
+        eth0_ip.map(Into::into),
+        eth0_mac,
+        GATEWAY.parse().ok(),
+        STANDARD_MTU as u32,
+    );
+    netlink::init_route_state(netlink_state.clone());
+    SERVICE.lock().sync_netlink(&netlink_state);
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());

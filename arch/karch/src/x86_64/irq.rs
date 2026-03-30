@@ -4,6 +4,7 @@
 
 //! Interrupt control operations for x86_64.
 
+#[cfg(target_os = "none")]
 use core::arch::asm;
 
 use x86_64::instructions::interrupts;

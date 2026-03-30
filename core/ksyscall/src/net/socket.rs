@@ -18,6 +18,7 @@ use kerrno::{KError, KResult, LinuxError};
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
     Shutdown, SocketAddrEx, SocketOps,
+    netlink::NetlinkSocket,
     tcp::TcpSocket,
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixDomainSocket},
@@ -27,8 +28,8 @@ use ktask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{
-        AF_INET, AF_UNIX, AF_VSOCK, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR,
-        SOCK_DGRAM, SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
+        AF_INET, AF_NETLINK, AF_UNIX, AF_VSOCK, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR,
+        SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
     },
 };
 
@@ -68,12 +69,18 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             // Unix domain datagram socket
             knet::Socket::Unix(Box::new(UnixDomainSocket::new(DgramTransport::new(pid))))
         }
+        (AF_NETLINK, SOCK_RAW) | (AF_NETLINK, SOCK_DGRAM) => {
+            if proto > i32::MAX as u32 {
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32)))
+        }
         #[cfg(feature = "vsock")]
         (AF_VSOCK, SOCK_STREAM) => {
             // Virtio socket (hypervisor communication)
             knet::Socket::Vsock(Box::new(VsockSocket::new(VsockStreamTransport::new())))
         }
-        (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) => {
+        (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) | (AF_NETLINK, _) => {
             // Socket type not supported for this domain
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
             return Err(KError::from(LinuxError::ESOCKTNOSUPPORT));

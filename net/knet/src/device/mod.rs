@@ -17,6 +17,8 @@ pub use loopback::*;
 #[cfg(feature = "vsock")]
 pub use vsock::*;
 
+use crate::netlink::{AddrState, LinkState, NeighState};
+
 /// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
@@ -33,4 +35,13 @@ pub trait NetDevice: Send + Sync {
 
     /// Register a waker for receive readiness.
     fn register_rx_waker(&self, waker: &Waker);
+
+    /// Synchronize data-plane device state from the netlink control plane.
+    fn sync_netlink(
+        &mut self,
+        _link: Option<&LinkState>,
+        _addrs: &[AddrState],
+        _neighs: &[NeighState],
+    ) {
+    }
 }

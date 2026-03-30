@@ -10,13 +10,17 @@ use smoltcp::{
     phy::{DeviceCapabilities, Medium},
     storage::PacketMetadata,
     time::Instant,
-    wire::{IpAddress, IpCidr, IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet, TcpPacket},
+    wire::{
+        IpAddress, IpCidr, IpProtocol, IpVersion, Ipv4Address, Ipv4Cidr, Ipv4Packet, Ipv6Packet,
+        TcpPacket,
+    },
 };
 
 use crate::{
     LISTEN_TABLE,
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::NetDevice,
+    netlink::{RT_TABLE_MAIN, RTN_UNICAST, RtnetlinkState},
 };
 
 #[derive(Debug)]
@@ -62,6 +66,10 @@ impl RouteTable {
             .iter()
             .find(|rule| rule.filter.contains_addr(dst))
     }
+
+    pub fn clear(&mut self) {
+        self.rules.clear();
+    }
 }
 
 pub struct Router {
@@ -95,6 +103,54 @@ impl Router {
     pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
         self.devices.len() - 1
+    }
+
+    pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
+        for (dev_index, device) in self.devices.iter_mut().enumerate() {
+            let ifindex = dev_index as i32 + 1;
+            let link = state.links.iter().find(|link| link.index == ifindex);
+            let addrs: Vec<_> = state
+                .addrs
+                .iter()
+                .copied()
+                .filter(|addr| addr.index == ifindex as u32)
+                .collect();
+            let neighs: Vec<_> = state
+                .neighs
+                .iter()
+                .copied()
+                .filter(|neigh| neigh.ifindex == ifindex as u32)
+                .collect();
+            device.sync_netlink(link, &addrs, &neighs);
+        }
+
+        self.table.clear();
+        for route in state.routes.iter().filter(|route| {
+            route.family == 2 && route.table == RT_TABLE_MAIN && route.route_type == RTN_UNICAST
+        }) {
+            let dev = route.oif.saturating_sub(1) as usize;
+            if dev >= self.devices.len() {
+                continue;
+            }
+
+            let filter = match route
+                .dst
+                .unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED))
+            {
+                IpAddress::Ipv4(addr) => IpCidr::Ipv4(Ipv4Cidr::new(addr, route.dst_len)),
+                IpAddress::Ipv6(_) => continue,
+            };
+            let src = route
+                .prefsrc
+                .or_else(|| {
+                    state.addrs.iter().find_map(|addr| {
+                        (addr.index == route.oif && addr.family == 2).then_some(addr.address)
+                    })
+                })
+                .unwrap_or(filter.address());
+            self.table
+                .add_rule(Rule::new(filter, route.gateway, dev, src));
+        }
     }
 
     pub fn poll(&mut self, timestamp: Instant) {

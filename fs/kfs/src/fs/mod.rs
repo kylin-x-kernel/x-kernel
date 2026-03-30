@@ -27,14 +27,14 @@ pub fn new_default(_dev: KBlockDevice) -> VfsResult<Filesystem> {
 }
 
 pub(crate) fn range_shift(
-    location: &Location,
-    offset: u64,
-    len: u64,
-    insert: bool,
+    _location: &Location,
+    _offset: u64,
+    _len: u64,
+    _insert: bool,
 ) -> VfsResult<()> {
     #[cfg(feature = "ext4")]
     {
-        return ext4::Ext4Filesystem::range_shift(location, offset, len, insert);
+        return ext4::Ext4Filesystem::range_shift(_location, _offset, _len, _insert);
     }
 
     #[allow(unreachable_code)]

@@ -23,6 +23,7 @@ use smoltcp::{
 use crate::{
     consts::{ETHERNET_MAX_PENDING_PACKETS, STANDARD_MTU},
     device::NetDevice as NetDeviceOps,
+    netlink::{AddrState, LinkState, NeighState},
 };
 
 const EMPTY_MAC: EthernetAddress = EthernetAddress([0; 6]);
@@ -342,6 +343,37 @@ impl NetDeviceOps for EthernetDevice {
     fn register_rx_waker(&self, waker: &Waker) {
         if let Some(irq) = self.inner.irq() {
             register_irq_waker(irq, waker);
+        }
+    }
+
+    fn sync_netlink(
+        &mut self,
+        link: Option<&LinkState>,
+        addrs: &[AddrState],
+        neighs: &[NeighState],
+    ) {
+        if let Some(link) = link {
+            self.name = link.name.clone();
+        }
+
+        if let Some(addr) = addrs.iter().find_map(|addr| match addr.address {
+            IpAddress::Ipv4(ipv4) => Some((ipv4, addr.prefix_len)),
+            IpAddress::Ipv6(_) => None,
+        }) {
+            self.ip = Ipv4Cidr::new(addr.0, addr.1);
+        }
+
+        self.neighbors.clear();
+        for neigh in neighs {
+            if let (IpAddress::Ipv4(ipv4), Some(lladdr)) = (neigh.dst, neigh.lladdr) {
+                self.neighbors.insert(
+                    IpAddress::Ipv4(ipv4),
+                    Some(ArpNeighbor {
+                        hardware_address: EthernetAddress(lladdr),
+                        expires_at: Instant::from_millis(i64::MAX),
+                    }),
+                );
+            }
         }
     }
 }
