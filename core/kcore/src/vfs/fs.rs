@@ -18,6 +18,11 @@ use super::DirMaker;
 
 /// Returns a dummy filesystem statistics.
 pub fn dummy_stat_fs(fs_type: u32) -> StatFs {
+    dummy_stat_fs_with_flags(fs_type, 0)
+}
+
+/// Returns a dummy filesystem statistics with mount flags.
+pub fn dummy_stat_fs_with_flags(fs_type: u32, mount_flags: u32) -> StatFs {
     StatFs {
         fs_type,
         block_size: 512,
@@ -30,7 +35,7 @@ pub fn dummy_stat_fs(fs_type: u32) -> StatFs {
 
         name_length: MAX_NAME_LEN as _,
         fragment_size: 0,
-        mount_flags: 0,
+        mount_flags,
     }
 }
 
@@ -38,6 +43,7 @@ pub fn dummy_stat_fs(fs_type: u32) -> StatFs {
 pub struct SimpleFs {
     name: String,
     fs_type: u32,
+    mount_flags: u32,
     inodes: Mutex<Slab<()>>,
     root: Mutex<Option<DirEntry>>,
 }
@@ -49,9 +55,20 @@ impl SimpleFs {
         fs_type: u32,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
     ) -> Filesystem {
+        Self::new_with_flags(name, fs_type, 0, root)
+    }
+
+    /// Creates a new simple filesystem with explicit mount flags.
+    pub fn new_with_flags(
+        name: String,
+        fs_type: u32,
+        mount_flags: u32,
+        root: impl FnOnce(Arc<Self>) -> DirMaker,
+    ) -> Filesystem {
         let fs = Arc::new(Self {
             name,
             fs_type,
+            mount_flags,
             inodes: Mutex::new(Slab::new()),
             root: Mutex::new(None),
         });
@@ -86,7 +103,7 @@ impl FilesystemOps for SimpleFs {
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
-        Ok(dummy_stat_fs(self.fs_type))
+        Ok(dummy_stat_fs_with_flags(self.fs_type, self.mount_flags))
     }
 }
 

@@ -21,7 +21,10 @@ pub mod tty;
 use alloc::{format, sync::Arc};
 use core::any::Any;
 
-use fs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsResult};
+use fs_ng_vfs::{
+    DeviceId, Filesystem, NodeFlags, NodeType, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME,
+    VfsResult,
+};
 use kcore::vfs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFs};
 use kerrno::KError;
 use ksync::Mutex;
@@ -33,7 +36,12 @@ const RANDOM_SEED: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 
 /// Create a new devfs filesystem for device access
 pub(crate) fn new_devfs() -> Filesystem {
-    SimpleFs::new_with("devfs".into(), 0x01021994, builder)
+    SimpleFs::new_with_flags(
+        "devfs".into(),
+        0x01021994,
+        ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME,
+        builder,
+    )
 }
 
 /// /dev/null device - discards all writes and returns empty on reads

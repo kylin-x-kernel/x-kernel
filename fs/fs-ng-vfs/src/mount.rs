@@ -7,6 +7,7 @@ use alloc::{
     string::String,
     sync::{Arc, Weak},
     vec,
+    vec::Vec,
 };
 use core::{
     iter, mem,
@@ -101,6 +102,15 @@ impl Mountpoint {
     /// Returns the mountpoint's synthetic device ID.
     pub fn device(self: &Arc<Self>) -> u64 {
         self.device
+    }
+
+    /// Returns a snapshot of direct child mountpoints currently attached here.
+    pub fn child_mounts(self: &Arc<Self>) -> Vec<Arc<Self>> {
+        self.child_mounts
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect()
     }
 }
 

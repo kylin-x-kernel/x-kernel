@@ -65,7 +65,7 @@ _start:
     .byte   0x01                    // relocatable_kernel
     .byte   21                      // min_alignment
     .word   0x0001                  // xloadflags: XLF_KERNEL_64
-    .long   0x00000000              // cmdline_size
+    .long   0x00000800              // cmdline_size (2 KiB command line buffer)
     .long   0x00000000              // hardware_subarch
     .quad   0x0000000000000000      // hardware_subarch_data
 payload_offset_field:

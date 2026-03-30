@@ -11,90 +11,26 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{ffi::CStr, iter};
+use core::{ffi::CStr, iter, str};
 
-use fs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
+use fs_ng_vfs::{NodeType, VfsError, VfsResult};
 use indoc::indoc;
 use kcore::{
-    task::{AsThread, TaskStat, get_task, tasks},
-    vfs::{
-        DirMaker, DirMapping, NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile,
-        SimpleFileOperation, SimpleFs,
-    },
+    task::{AsThread, TaskStat, get_process_data, get_task, processes},
+    vfs::{NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile, SimpleFileOperation, SimpleFs},
 };
 use kprocess::Process;
 use ktask::{KtaskRef, WeakKtaskRef, current};
 
-use crate::file::FD_TABLE;
-
-const DUMMY_MEMINFO: &str = indoc! {"
-    MemTotal:       32536204 kB
-    MemFree:         5506524 kB
-    MemAvailable:   18768344 kB
-    Buffers:            3264 kB
-    Cached:         14454588 kB
-    SwapCached:            0 kB
-    Active:         18229700 kB
-    Inactive:        6540624 kB
-    Active(anon):   11380224 kB
-    Inactive(anon):        0 kB
-    Active(file):    6849476 kB
-    Inactive(file):  6540624 kB
-    Unevictable:      930088 kB
-    Mlocked:            1136 kB
-    SwapTotal:       4194300 kB
-    SwapFree:        4194300 kB
-    Zswap:                 0 kB
-    Zswapped:              0 kB
-    Dirty:             47952 kB
-    Writeback:             0 kB
-    AnonPages:      10992512 kB
-    Mapped:          1361184 kB
-    Shmem:           1068056 kB
-    KReclaimable:     341440 kB
-    Slab:             628996 kB
-    SReclaimable:     341440 kB
-    SUnreclaim:       287556 kB
-    KernelStack:       28704 kB
-    PageTables:        85308 kB
-    SecPageTables:      2084 kB
-    NFS_Unstable:          0 kB
-    Bounce:                0 kB
-    WritebackTmp:          0 kB
-    CommitLimit:    20462400 kB
-    Committed_AS:   45105316 kB
-    VmallocTotal:   34359738367 kB
-    VmallocUsed:      205924 kB
-    VmallocChunk:          0 kB
-    Percpu:            23840 kB
-    HardwareCorrupted:     0 kB
-    AnonHugePages:   1417216 kB
-    ShmemHugePages:        0 kB
-    ShmemPmdMapped:        0 kB
-    FileHugePages:    477184 kB
-    FilePmdMapped:    288768 kB
-    CmaTotal:              0 kB
-    CmaFree:               0 kB
-    Unaccepted:            0 kB
-    HugePages_Total:       0
-    HugePages_Free:        0
-    HugePages_Rsvd:        0
-    HugePages_Surp:        0
-    Hugepagesize:       2048 kB
-    Hugetlb:               0 kB
-    DirectMap4k:     1739900 kB
-    DirectMap2M:    31492096 kB
-    DirectMap1G:     1048576 kB
-"};
-
-/// Create a new procfs filesystem for process information
-pub fn new_procfs() -> Filesystem {
-    SimpleFs::new_with("proc".into(), 0x9fa0, builder)
-}
+use crate::{
+    hooks::ProcFsHooks,
+    mounts::{render_mountinfo, render_mountstats, render_proc_mounts},
+};
 
 struct ProcessTaskDir {
     fs: Arc<SimpleFs>,
     process: Weak<Process>,
+    hooks: ProcFsHooks,
 }
 
 impl SimpleDirOps for ProcessTaskDir {
@@ -123,6 +59,7 @@ impl SimpleDirOps for ProcessTaskDir {
             Arc::new(ThreadDir {
                 fs: self.fs.clone(),
                 task: Arc::downgrade(&task),
+                hooks: self.hooks,
             }),
         )))
     }
@@ -142,16 +79,33 @@ fn task_status(task: &KtaskRef) -> String {
         Cpus_allowed:\t1\n\
         Cpus_allowed_list:\t0\n\
         Mems_allowed:\t1\n\
-        Mems_allowed_list:\t0",
+        Mems_allowed_list:\t0\n",
         task.as_thread().proc_data.proc.pid(),
         task.id().as_u64()
     )
 }
 
-/// The /proc/[pid]/fd directory
+fn format_oom_score_adj(value: i32) -> Vec<u8> {
+    format!("{value}\n").into_bytes()
+}
+
+fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    str::from_utf8(data)
+        .ok()
+        .map(str::trim)
+        .and_then(|it| it.parse::<i32>().ok())
+        .map(Some)
+        .ok_or(VfsError::InvalidInput)
+}
+
 struct ThreadFdDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
+    hooks: ProcFsHooks,
 }
 
 impl SimpleDirOps for ThreadFdDir {
@@ -159,10 +113,8 @@ impl SimpleDirOps for ThreadFdDir {
         let Some(task) = self.task.upgrade() else {
             return Box::new(iter::empty());
         };
-        let ids = FD_TABLE
-            .scope(&task.as_thread().proc_data.scope.read())
-            .read()
-            .ids()
+        let ids = (self.hooks.fd_ids)(&task)
+            .into_iter()
             .map(|id| Cow::Owned(id.to_string()))
             .collect::<Vec<_>>();
         Box::new(ids.into_iter())
@@ -172,14 +124,7 @@ impl SimpleDirOps for ThreadFdDir {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-        let path = FD_TABLE
-            .scope(&task.as_thread().proc_data.scope.read())
-            .read()
-            .get(fd as _)
-            .ok_or(VfsError::NotFound)?
-            .inner
-            .path()
-            .into_owned();
+        let path = (self.hooks.fd_path)(&task, fd)?;
         Ok(SimpleFile::new(fs, NodeType::Symlink, move || Ok(path.clone())).into())
     }
 
@@ -188,10 +133,63 @@ impl SimpleDirOps for ThreadFdDir {
     }
 }
 
-/// The /proc/[pid] directory
 struct ThreadDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
+    hooks: ProcFsHooks,
+}
+
+const PROC_NS_BASE: u64 = 0xf000_0000;
+
+fn namespace_inode(kind: &str) -> u64 {
+    match kind {
+        "mnt" => PROC_NS_BASE + 1,
+        "pid" => PROC_NS_BASE + 2,
+        "net" => PROC_NS_BASE + 3,
+        "ipc" => PROC_NS_BASE + 4,
+        "uts" => PROC_NS_BASE + 5,
+        "user" => PROC_NS_BASE + 6,
+        "cgroup" => PROC_NS_BASE + 7,
+        _ => PROC_NS_BASE,
+    }
+}
+
+fn namespace_link_target(kind: &str) -> String {
+    format!("{kind}:[{}]", namespace_inode(kind))
+}
+
+struct ThreadNsDir {
+    fs: Arc<SimpleFs>,
+}
+
+impl SimpleDirOps for ThreadNsDir {
+    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+        Box::new(
+            ["mnt", "pid", "net", "ipc", "uts", "user", "cgroup"]
+                .into_iter()
+                .map(Cow::Borrowed),
+        )
+    }
+
+    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+        if !matches!(
+            name,
+            "mnt" | "pid" | "net" | "ipc" | "uts" | "user" | "cgroup"
+        ) {
+            return Err(VfsError::NotFound);
+        }
+        let target = namespace_link_target(name);
+        Ok(
+            SimpleFile::new(self.fs.clone(), NodeType::Symlink, move || {
+                Ok(target.clone())
+            })
+            .into(),
+        )
+    }
+
+    fn supports_dentry_cache(&self) -> bool {
+        false
+    }
 }
 
 impl SimpleDirOps for ThreadDir {
@@ -204,6 +202,10 @@ impl SimpleDirOps for ThreadDir {
                 "task",
                 "maps",
                 "mounts",
+                "mountinfo",
+                "mountstats",
+                "cgroup",
+                "ns",
                 "cmdline",
                 "comm",
                 "exe",
@@ -226,15 +228,11 @@ impl SimpleDirOps for ThreadDir {
             "oom_score_adj" => SimpleFile::new_regular(
                 fs,
                 RwFile::new(move |req| match req {
-                    SimpleFileOperation::Read => Ok(Some(
-                        task.as_thread().oom_score_adj().to_string().into_bytes(),
-                    )),
+                    SimpleFileOperation::Read => {
+                        Ok(Some(format_oom_score_adj(task.as_thread().oom_score_adj())))
+                    }
                     SimpleFileOperation::Write(data) => {
-                        if !data.is_empty() {
-                            let value = str::from_utf8(data)
-                                .ok()
-                                .and_then(|it| it.parse::<i32>().ok())
-                                .ok_or(VfsError::InvalidInput)?;
+                        if let Some(value) = parse_oom_score_adj_input(data)? {
                             task.as_thread().set_oom_score_adj(value);
                         }
                         Ok(None)
@@ -247,6 +245,7 @@ impl SimpleDirOps for ThreadDir {
                 Arc::new(ProcessTaskDir {
                     fs,
                     process: Arc::downgrade(&task.as_thread().proc_data.proc),
+                    hooks: self.hooks,
                 }),
             )
             .into(),
@@ -259,10 +258,15 @@ impl SimpleDirOps for ThreadDir {
                 "})
             })
             .into(),
-            "mounts" => SimpleFile::new_regular(fs, move || {
-                Ok("proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n")
-            })
-            .into(),
+            "mounts" => {
+                SimpleFile::new_regular(fs.clone(), move || Ok(render_proc_mounts())).into()
+            }
+            "mountinfo" => {
+                SimpleFile::new_regular(fs.clone(), move || Ok(render_mountinfo())).into()
+            }
+            "mountstats" => SimpleFile::new_regular(fs, move || Ok(render_mountstats())).into(),
+            "cgroup" => SimpleFile::new_regular(fs.clone(), move || Ok("0::/\n")).into(),
+            "ns" => SimpleDir::new_maker(fs.clone(), Arc::new(ThreadNsDir { fs })).into(),
             "cmdline" => SimpleFile::new_regular(fs, move || {
                 let cmdline = task.as_thread().proc_data.cmdline.read();
                 let mut buf = Vec::new();
@@ -310,6 +314,7 @@ impl SimpleDirOps for ThreadDir {
                 Arc::new(ThreadFdDir {
                     fs,
                     task: Arc::downgrade(&task),
+                    hooks: self.hooks,
                 }),
             )
             .into(),
@@ -322,15 +327,23 @@ impl SimpleDirOps for ThreadDir {
     }
 }
 
-/// Handles /proc/[pid] & /proc/self
-struct ProcFsHandler(Arc<SimpleFs>);
+pub struct ProcFsHandler {
+    fs: Arc<SimpleFs>,
+    hooks: ProcFsHooks,
+}
+
+impl ProcFsHandler {
+    pub fn new(fs: Arc<SimpleFs>, hooks: ProcFsHooks) -> Self {
+        Self { fs, hooks }
+    }
+}
 
 impl SimpleDirOps for ProcFsHandler {
     fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
         Box::new(
-            tasks()
+            processes()
                 .into_iter()
-                .map(|task| task.id().as_u64().to_string().into())
+                .map(|proc_data| Cow::Owned(proc_data.proc.pid().to_string()))
                 .chain([Cow::Borrowed("self")]),
         )
     }
@@ -339,17 +352,23 @@ impl SimpleDirOps for ProcFsHandler {
         let task = if name == "self" {
             current().clone()
         } else {
-            let tid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-            get_task(tid).map_err(|_| VfsError::NotFound)?
+            let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
+            let proc_data = get_process_data(pid).map_err(|_| VfsError::NotFound)?;
+            proc_data
+                .proc
+                .threads()
+                .into_iter()
+                .find_map(|tid| get_task(tid).ok())
+                .ok_or(VfsError::NotFound)?
         };
-        let node = NodeOpsMux::Dir(SimpleDir::new_maker(
-            self.0.clone(),
+        Ok(NodeOpsMux::Dir(SimpleDir::new_maker(
+            self.fs.clone(),
             Arc::new(ThreadDir {
-                fs: self.0.clone(),
+                fs: self.fs.clone(),
                 task: Arc::downgrade(&task),
+                hooks: self.hooks,
             }),
-        ));
-        Ok(node)
+        )))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -357,60 +376,48 @@ impl SimpleDirOps for ProcFsHandler {
     }
 }
 
-fn builder(fs: Arc<SimpleFs>) -> DirMaker {
-    let mut root = DirMapping::new();
-    root.add(
-        "mounts",
-        SimpleFile::new_regular(fs.clone(), || {
-            Ok("proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n")
-        }),
-    );
-    root.add(
-        "meminfo",
-        SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_MEMINFO)),
-    );
-    root.add(
-        "meminfo2",
-        SimpleFile::new_regular(fs.clone(), || {
-            let allocator = kalloc::global_allocator();
-            Ok(format!("{:?}\n", allocator.usages()))
-        }),
-    );
-    root.add(
-        "instret",
-        SimpleFile::new_regular(fs.clone(), || {
-            #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-            {
-                Ok(format!("{}\n", riscv::register::instret::read64()))
-            }
-            #[cfg(not(any(target_arch = "riscv32", target_arch = "riscv64")))]
-            {
-                Ok("0\n".to_string())
-            }
-        }),
-    );
-    root.add(
-        "interrupts",
-        SimpleFile::new_regular(fs.clone(), || Ok(format!("0: {}", crate::time::irq_cnt()))),
-    );
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert_eq, def_test};
 
-    root.add("sys", {
-        let mut sys = DirMapping::new();
+    use super::{
+        format_oom_score_adj, namespace_inode, namespace_link_target, parse_oom_score_adj_input,
+    };
 
-        sys.add("kernel", {
-            let mut kernel = DirMapping::new();
+    #[def_test]
+    fn test_namespace_inode_has_expected_known_values() {
+        assert_eq!(namespace_inode("mnt"), 0xf000_0001);
+        assert_eq!(namespace_inode("pid"), 0xf000_0002);
+        assert_eq!(namespace_inode("net"), 0xf000_0003);
+    }
 
-            kernel.add(
-                "pid_max",
-                SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
-            );
+    #[def_test]
+    fn test_namespace_inode_unknown_uses_base_value() {
+        assert_eq!(namespace_inode("unknown"), 0xf000_0000);
+    }
 
-            SimpleDir::new_maker(fs.clone(), Arc::new(kernel))
-        });
+    #[def_test]
+    fn test_namespace_link_target_formats_inode_reference() {
+        assert_eq!(namespace_link_target("mnt"), "mnt:[4026531841]");
+    }
 
-        SimpleDir::new_maker(fs.clone(), Arc::new(sys))
-    });
+    #[def_test]
+    fn test_format_oom_score_adj_appends_newline() {
+        assert_eq!(format_oom_score_adj(200), b"200\n");
+    }
 
-    let proc_dir = ProcFsHandler(fs.clone());
-    SimpleDir::new_maker(fs, Arc::new(proc_dir.chain(root)))
+    #[def_test]
+    fn test_parse_oom_score_adj_accepts_newline_terminated_input() {
+        assert_eq!(parse_oom_score_adj_input(b"100\n").unwrap(), Some(100));
+    }
+
+    #[def_test]
+    fn test_parse_oom_score_adj_accepts_empty_input_as_noop() {
+        assert_eq!(parse_oom_score_adj_input(b"").unwrap(), None);
+    }
+
+    #[def_test]
+    fn test_parse_oom_score_adj_rejects_invalid_input() {
+        assert!(parse_oom_score_adj_input(b"abc\n").is_err());
+    }
 }

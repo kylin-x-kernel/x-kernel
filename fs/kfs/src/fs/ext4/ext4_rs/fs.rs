@@ -8,8 +8,8 @@ use core::cell::OnceCell;
 
 use ext4_rs::Ext4;
 use fs_ng_vfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, StatFs, VfsError, VfsResult,
-    path::MAX_NAME_LEN,
+    DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, ST_RELATIME, StatFs,
+    VfsError, VfsResult, path::MAX_NAME_LEN,
 };
 use kdriver::BlockDevice as KBlockDevice;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
@@ -85,7 +85,7 @@ impl FilesystemOps for Ext4Filesystem {
 
             name_length: MAX_NAME_LEN as _,
             fragment_size: 0,
-            mount_flags: 0,
+            mount_flags: ST_RELATIME,
         })
     }
 

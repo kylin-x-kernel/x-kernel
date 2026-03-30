@@ -36,6 +36,12 @@ unsafe extern "C" {
     static __image_end: u8;
 }
 
+#[derive(Clone, Copy)]
+struct BootCmdline {
+    addr: usize,
+    len: usize,
+}
+
 global_asm!(
     include_str!("boot.S"),
     entry = sym rust_entry,
@@ -59,8 +65,10 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, source_image_paddr: usize) -> ! {
-    let (loaded, protocol, protocol_info_paddr, rsdp_paddr) = if magic == MAGIC as usize {
-        load_multiboot_kernel(mbi, source_image_paddr)
+    let (loaded, protocol, protocol_info_paddr, rsdp_paddr, cmdline) = if magic == MAGIC as usize {
+        let (loaded, protocol, protocol_info_paddr, rsdp_paddr) =
+            load_multiboot_kernel(mbi, source_image_paddr);
+        (loaded, protocol, protocol_info_paddr, rsdp_paddr, None)
     } else if magic == X86_LINUX_BOOT_MAGIC as usize {
         load_linuxboot_kernel(mbi, source_image_paddr)
     } else {
@@ -94,6 +102,9 @@ unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, source_image_paddr: us
         .with_boot_runtime(boot_runtime_start, boot_runtime_end - boot_runtime_start);
         if rsdp_paddr != 0 {
             BOOT_INFO = BOOT_INFO.with_rsdp(rsdp_paddr);
+        }
+        if let Some(cmdline) = cmdline {
+            BOOT_INFO = BOOT_INFO.with_cmdline(cmdline.addr + PAGE_OFFSET, cmdline.len);
         }
         switch_page_table(pml4, 0);
         jump_to_kernel(
@@ -139,7 +150,13 @@ fn load_multiboot_kernel(
 fn load_linuxboot_kernel(
     boot_params_paddr: usize,
     source_image_paddr: usize,
-) -> (LoadedKernel, BootProtocol, usize, usize) {
+) -> (
+    LoadedKernel,
+    BootProtocol,
+    usize,
+    usize,
+    Option<BootCmdline>,
+) {
     let params = LinuxBootParams::new(boot_params_paddr).expect("missing linux boot params");
     let payload_offset = params
         .payload_offset()
@@ -161,11 +178,17 @@ fn load_linuxboot_kernel(
         source_image_paddr as u64,
     );
 
+    let cmdline = params.cmdline().map(|cmdline| BootCmdline {
+        addr: cmdline.as_ptr() as usize,
+        len: cmdline.len(),
+    });
+
     (
         loaded,
         BootProtocol::LinuxBoot,
         boot_params_paddr,
         params.acpi_rsdp_addr() as usize,
+        cmdline,
     )
 }
 

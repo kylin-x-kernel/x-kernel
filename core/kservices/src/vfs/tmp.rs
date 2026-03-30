@@ -11,7 +11,7 @@ use fs_ng_vfs::{
     Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
 };
 use hashbrown::HashMap;
-use kcore::vfs::dummy_stat_fs;
+use kcore::vfs::dummy_stat_fs_with_flags;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use slab::Slab;
@@ -55,6 +55,7 @@ impl Borrow<str> for FileName {
 
 /// A simple in-memory filesystem that supports basic file operations.
 pub struct MemoryFs {
+    mount_flags: u32,
     inodes: Mutex<Slab<Arc<Inode>>>,
     root: Mutex<Option<DirEntry>>,
 }
@@ -64,7 +65,14 @@ impl MemoryFs {
     /// Create a new empty in-memory filesystem (tmpfs)
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Filesystem {
+        Self::new_with_flags(0)
+    }
+
+    /// Create a new tmpfs instance with explicit statfs mount flags.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new_with_flags(mount_flags: u32) -> Filesystem {
         let fs = Arc::new(Self {
+            mount_flags,
             inodes: Mutex::new(Slab::new()),
             root: Mutex::default(),
         });
@@ -96,7 +104,7 @@ impl FilesystemOps for MemoryFs {
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
-        Ok(dummy_stat_fs(0x01021994))
+        Ok(dummy_stat_fs_with_flags(0x01021994, self.mount_flags))
     }
 }
 

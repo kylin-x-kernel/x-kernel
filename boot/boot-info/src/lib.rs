@@ -17,8 +17,11 @@ pub const X86_LINUX_BOOT_MAGIC: u32 = 0x584b_4c42;
 /// Current BootInfo structure version.
 pub const BOOT_INFO_VERSION: u32 = 1;
 pub const X86_LINUX_BOOT_E820_MAX_ENTRIES: usize = 128;
+const X86_LINUX_BOOT_LEGACY_CMDLINE_MAX: usize = 255;
 const X86_LINUX_BOOT_PARAMS_ACPI_RSDP_ADDR_OFFSET: usize = 0x70;
 const X86_LINUX_BOOT_PARAMS_E820_ENTRIES_OFFSET: usize = 0x1e8;
+const X86_LINUX_BOOT_PARAMS_CMD_LINE_PTR_OFFSET: usize = 0x228;
+const X86_LINUX_BOOT_PARAMS_CMDLINE_SIZE_OFFSET: usize = 0x238;
 const X86_LINUX_BOOT_PARAMS_E820_TABLE_OFFSET: usize = 0x2d0;
 const X86_LINUX_BOOT_PARAMS_PAYLOAD_OFFSET_OFFSET: usize = 0x248;
 const X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET: usize = 0x24c;
@@ -118,6 +121,13 @@ impl BootInfo {
     pub const fn with_boot_runtime(mut self, paddr: usize, size: usize) -> Self {
         self.boot_runtime_paddr = paddr;
         self.boot_runtime_size = size;
+        self
+    }
+
+    #[inline]
+    pub const fn with_cmdline(mut self, addr: usize, len: usize) -> Self {
+        self.cmdline_addr = addr;
+        self.cmdline_len = len;
         self
     }
 
@@ -247,6 +257,29 @@ impl LinuxBootParams {
             + index * mem::size_of::<X86LinuxE820Entry>())
             as *const X86LinuxE820Entry;
         Some(unsafe { ptr::read_unaligned(entry_ptr) })
+    }
+
+    #[inline]
+    pub fn cmdline_ptr(self) -> Option<usize> {
+        let ptr = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_CMD_LINE_PTR_OFFSET) } as usize;
+        (ptr != 0).then_some(ptr)
+    }
+
+    #[inline]
+    pub fn cmdline_size(self) -> Option<usize> {
+        let size = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_CMDLINE_SIZE_OFFSET) } as usize;
+        (size != 0).then_some(size)
+    }
+
+    pub fn cmdline(self) -> Option<&'static str> {
+        let ptr = self.cmdline_ptr()?;
+        let max_len = self
+            .cmdline_size()
+            .unwrap_or(X86_LINUX_BOOT_LEGACY_CMDLINE_MAX);
+        let scan_len = max_len.checked_add(1)?;
+        let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, scan_len) };
+        let nul_pos = bytes.iter().position(|&byte| byte == 0)?;
+        core::str::from_utf8(&bytes[..nul_pos]).ok()
     }
 
     #[inline]

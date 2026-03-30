@@ -7,7 +7,8 @@ use alloc::sync::Arc;
 use core::marker::PhantomPinned;
 
 use fs_ng_vfs::{
-    DirEntry, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, Filesystem, FilesystemOps, Reference, ST_RELATIME, StatFs, VfsResult,
+    path::MAX_NAME_LEN,
 };
 use kdriver::BlockDevice as KBlockDevice;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
@@ -102,7 +103,7 @@ impl FilesystemOps for FatFilesystem {
 
             name_length: MAX_NAME_LEN as _,
             fragment_size: 0,
-            mount_flags: 0,
+            mount_flags: ST_RELATIME,
         })
     }
 }

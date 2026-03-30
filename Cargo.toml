@@ -65,6 +65,7 @@ fs-ng-vfs = { path = "fs/fs-ng-vfs" }
 kaddr_layout = { path = "mm/kaddr_layout" }
 kalloc = { path = "mm/kalloc" }
 kfs = { path = "fs/kfs" }
+procfs = { path = "fs/procfs" }
 memaddr = { path = "mm/memaddr" }
 memset = { path = "mm/memset" }
 memspace = { path = "mm/memspace" }

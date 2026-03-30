@@ -11,11 +11,38 @@
 
 use core::ffi::{c_char, c_void};
 
+use fs_ng_vfs::{ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
 use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
 use kserveices::mm::vm_load_string;
 
 use crate::kernel::vfs::MemoryFs;
+
+fn mount_flags_from_sys_mount(flags: i32) -> u32 {
+    let flags = flags as u32;
+    let mut mount_flags = ST_RELATIME;
+    if flags & linux_raw_sys::general::MS_RDONLY != 0 {
+        mount_flags |= ST_RDONLY;
+    }
+    if flags & linux_raw_sys::general::MS_NOSUID != 0 {
+        mount_flags |= ST_NOSUID;
+    }
+    if flags & linux_raw_sys::general::MS_NODEV != 0 {
+        mount_flags |= ST_NODEV;
+    }
+    if flags & linux_raw_sys::general::MS_NOEXEC != 0 {
+        mount_flags |= ST_NOEXEC;
+    }
+    if flags & linux_raw_sys::general::MS_NOATIME != 0 {
+        mount_flags |= ST_NOATIME;
+    }
+    if flags & linux_raw_sys::general::MS_RELATIME == 0
+        && flags & linux_raw_sys::general::MS_NOATIME != 0
+    {
+        mount_flags &= !ST_RELATIME;
+    }
+    mount_flags
+}
 
 /// Mount a filesystem at the specified target path
 ///
@@ -25,7 +52,7 @@ pub fn sys_mount(
     source: *const c_char,
     target: *const c_char,
     fs_type: *const c_char,
-    _flags: i32,
+    flags: i32,
     _data: *const c_void,
 ) -> KResult<isize> {
     // Load filesystem type string from user memory
@@ -40,7 +67,7 @@ pub fn sys_mount(
     }
 
     // Create a new in-memory filesystem instance
-    let fs = MemoryFs::new();
+    let fs = MemoryFs::new_with_flags(mount_flags_from_sys_mount(flags));
 
     // Resolve the target mount point path and attach the filesystem
     let target = FS_CONTEXT.lock().resolve(target)?;
