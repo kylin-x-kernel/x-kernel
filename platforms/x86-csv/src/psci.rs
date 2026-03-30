@@ -2,11 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kbuild_config::{DMA_MEM_BASE, DMA_MEM_SIZE};
+use kbuild_config::DMA_MEM_SIZE;
 use kplat::psci::PsciOp;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use log::{debug, info, warn};
+
+use crate::mem::dma_region;
 const PAGE_SIZE: usize = 0x1000;
 const MAX_PAGES: usize = DMA_MEM_SIZE / PAGE_SIZE;
 const BITMAP_SIZE: usize = MAX_PAGES.div_ceil(64);
@@ -40,7 +42,7 @@ impl SharedMemAllocator {
                 self.set_page_allocated(i);
                 self.next_hint = i + 1;
                 self.allocated_pages += 1;
-                return Some(DMA_MEM_BASE + i * PAGE_SIZE);
+                return Some(dma_base() + i * PAGE_SIZE);
             }
         }
         for i in 0..self.next_hint {
@@ -48,7 +50,7 @@ impl SharedMemAllocator {
                 self.set_page_allocated(i);
                 self.next_hint = i + 1;
                 self.allocated_pages += 1;
-                return Some(DMA_MEM_BASE + i * PAGE_SIZE);
+                return Some(dma_base() + i * PAGE_SIZE);
             }
         }
         None
@@ -69,7 +71,7 @@ impl SharedMemAllocator {
                     }
                     self.allocated_pages += pages;
                     self.next_hint = start + pages;
-                    return Some(DMA_MEM_BASE + start * PAGE_SIZE);
+                    return Some(dma_base() + start * PAGE_SIZE);
                 }
             } else {
                 count = 0;
@@ -79,14 +81,15 @@ impl SharedMemAllocator {
     }
 
     fn free_pages(&mut self, paddr: usize, pages: usize) {
-        if !(DMA_MEM_BASE..DMA_MEM_BASE + DMA_MEM_SIZE).contains(&paddr) {
+        let dma_base = dma_base();
+        if !(dma_base..dma_base + DMA_MEM_SIZE).contains(&paddr) {
             warn!(
                 "free_pages: address {:#x} is outside shared memory region",
                 paddr
             );
             return;
         }
-        let start_page = (paddr - DMA_MEM_BASE) / PAGE_SIZE;
+        let start_page = (paddr - dma_base) / PAGE_SIZE;
         for i in 0..pages {
             let page_idx = start_page + i;
             if page_idx < MAX_PAGES {
@@ -123,9 +126,10 @@ impl SharedMemAllocator {
 static SHARED_ALLOCATOR: LazyInit<SpinNoIrq<SharedMemAllocator>> = LazyInit::new();
 pub fn init() {
     SHARED_ALLOCATOR.init_once(SpinNoIrq::new(SharedMemAllocator::new()));
+    let dma_base = dma_base();
     info!(
         "SEV shared memory pool initialized: base={:#x}, size={:#x} ({} pages)",
-        DMA_MEM_BASE, DMA_MEM_SIZE, MAX_PAGES
+        dma_base, DMA_MEM_SIZE, MAX_PAGES
     );
 }
 pub fn alloc_shared_pages(pages: usize) -> Option<usize> {
@@ -142,10 +146,18 @@ pub fn free_shared_pages(paddr: usize, pages: usize) {
     SHARED_ALLOCATOR.lock().free_pages(paddr, pages);
 }
 pub fn is_shared_memory(paddr: usize) -> bool {
-    (DMA_MEM_BASE..DMA_MEM_BASE + DMA_MEM_SIZE).contains(&paddr)
+    let dma_base = dma_base();
+    (dma_base..dma_base + DMA_MEM_SIZE).contains(&paddr)
 }
 pub fn shared_memory_range() -> (usize, usize) {
-    (DMA_MEM_BASE, DMA_MEM_BASE + DMA_MEM_SIZE)
+    let dma_base = dma_base();
+    (dma_base, dma_base + DMA_MEM_SIZE)
+}
+
+fn dma_base() -> usize {
+    dma_region()
+        .map(|(base, _)| base)
+        .expect("x86 CSV DMA region not initialized")
 }
 struct PsciImpl;
 #[impl_dev_interface]

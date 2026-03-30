@@ -7,11 +7,15 @@
 .set BOOT_PARAMS_ADDR,        0x7000
 .set BOOT_PARAMS_SEG,         0x0700
 .set BOOT_PARAMS_SENTINEL,    0x01ef
+.set BOOT_PARAMS_ACPI_RSDP_ADDR, 0x0070
 .set BOOT_PARAMS_E820_ENTRIES, 0x01e8
 .set BOOT_PARAMS_E820_TABLE,  0x02d0
 .set DIRECT_BOOT_STACK,       0x8000
 .set PROTECTED_KERNEL_LOAD,   0x00100000
 .set LINUX_BOOT_MAGIC,        0x584b4c42
+.set BDA_EBDA_SEG_PTR,        0x040e
+.set BIOS_RSDP_SEARCH_START,  0x000e0000
+.set BIOS_RSDP_SEARCH_SIZE,   0x00020000
 
 .code16
 .section .setup, "ax"
@@ -134,6 +138,9 @@ start_of_setup:
     mov     es, ax
     mov     ax, bp
     mov     byte ptr es:[BOOT_PARAMS_E820_ENTRIES], al
+    call    detect_rsdp
+    mov     dword ptr es:[BOOT_PARAMS_ACPI_RSDP_ADDR], eax
+    mov     dword ptr es:[BOOT_PARAMS_ACPI_RSDP_ADDR + 4], 0
 
     mov     ax, cs
     mov     ds, ax
@@ -157,6 +164,75 @@ start_of_setup:
     or      eax, 1
     mov     cr0, eax
     ljmp    0x10, offset protected_mode_entry - _start
+
+detect_rsdp:
+    push    ds
+    xor     ax, ax
+    mov     ds, ax
+    mov     ax, word ptr ds:[BDA_EBDA_SEG_PTR]
+    test    ax, ax
+    jz      .Ldetect_rsdp_high
+    mov     cx, 0x40
+    call    scan_rsdp_segments
+    test    eax, eax
+    jnz     .Ldetect_rsdp_done
+
+.Ldetect_rsdp_high:
+    mov     ax, BIOS_RSDP_SEARCH_START >> 4
+    mov     cx, BIOS_RSDP_SEARCH_SIZE >> 4
+    call    scan_rsdp_segments
+
+.Ldetect_rsdp_done:
+    pop     ds
+    ret
+
+scan_rsdp_segments:
+    push    si
+
+.Lscan_rsdp_next:
+    test    cx, cx
+    jz      .Lscan_rsdp_not_found
+    mov     ds, ax
+    xor     si, si
+    cmp     word ptr ds:[si], 0x5352
+    jne     .Lscan_rsdp_advance
+    cmp     word ptr ds:[si + 2], 0x2044
+    jne     .Lscan_rsdp_advance
+    cmp     word ptr ds:[si + 4], 0x5450
+    jne     .Lscan_rsdp_advance
+    cmp     word ptr ds:[si + 6], 0x2052
+    jne     .Lscan_rsdp_advance
+    call    rsdp_checksum_ok
+    jne     .Lscan_rsdp_advance
+    movzx   eax, ax
+    shl     eax, 4
+    pop     si
+    ret
+
+.Lscan_rsdp_advance:
+    inc     ax
+    dec     cx
+    jmp     .Lscan_rsdp_next
+
+.Lscan_rsdp_not_found:
+    xor     eax, eax
+    pop     si
+    ret
+
+rsdp_checksum_ok:
+    push    cx
+    push    si
+    xor     dx, dx
+    mov     cx, 20
+
+.Lrsdp_checksum_next:
+    add     dl, byte ptr ds:[si]
+    inc     si
+    loop    .Lrsdp_checksum_next
+    or      dl, dl
+    pop     si
+    pop     cx
+    ret
 
 .code32
 protected_mode_entry:

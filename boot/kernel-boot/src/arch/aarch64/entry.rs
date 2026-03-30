@@ -38,7 +38,7 @@ static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 
 /// Storage for the boot arguments passed in x0-x3 by firmware/bootloader.
 #[unsafe(link_section = ".data")]
-static mut SAVED_BOOT_ARGS: [u64; 4] = [0; 4];
+pub(super) static mut SAVED_BOOT_ARGS: [u64; 4] = [0; 4];
 
 /// Unified boot info passed from the AArch64 boot entry into the kernel.
 static mut AARCH64_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::DeviceTree);
@@ -249,9 +249,9 @@ pub unsafe extern "C" fn __primary_switched(
             .with_cpu_id(cpu_id)
             .with_cpu_count(kbuild_config::CPU_NUM);
     }
-    let boot_info_ptr = core::ptr::addr_of!(AARCH64_BOOT_INFO) as usize;
-
     super::serial::boot_print_str("[boot] Entered primary switched entry\n");
+    super::mmu::map_boot_linear_ram_from_dtb(dtb_paddr);
+    let boot_info_ptr = core::ptr::addr_of!(AARCH64_BOOT_INFO) as usize;
     call_kernel_entry!(PRIMARY_KERNEL_ENTRY, boot_info_ptr)
 }
 

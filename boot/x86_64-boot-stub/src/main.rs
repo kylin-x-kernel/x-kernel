@@ -82,15 +82,18 @@ unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, source_image_paddr: us
         }
     };
     unsafe {
+        let boot_runtime_start = (&raw const __image_start as usize) & !0xfff;
+        let boot_runtime_end = align_up(&raw const __image_end as u64, 0x1000) as usize;
         BOOT_INFO = build_boot_info(
             protocol,
-            protocol_info_paddr + PAGE_OFFSET,
+            protocol_info_paddr,
             loaded.load_paddr as usize,
             0,
             1,
-        );
+        )
+        .with_boot_runtime(boot_runtime_start, boot_runtime_end - boot_runtime_start);
         if rsdp_paddr != 0 {
-            BOOT_INFO = BOOT_INFO.with_rsdp(rsdp_paddr + PAGE_OFFSET);
+            BOOT_INFO = BOOT_INFO.with_rsdp(rsdp_paddr);
         }
         switch_page_table(pml4, 0);
         jump_to_kernel(

@@ -14,7 +14,6 @@ memtrack = ["kfeat/dwarf", "kalloc/tracking", "dep:gimli"]
 vsock = ["knet/vsock"]
 dev-log = []
 dice = [
-	"dep:aarch64-crosvm-virt",
 	"kalloc/dice",
 	"dep:rand_chacha",
 	"dep:rust-dice",
@@ -47,7 +46,6 @@ inputdev = { workspace = true, optional = true }
 kio.workspace = true
 klogger.workspace = true
 knet.workspace = true
-aarch64-crosvm-virt = { workspace = true, optional = true }
 kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true
@@ -65,6 +63,8 @@ lazy_static = { workspace = true }
 linkme.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 memaddr.workspace = true
+of.workspace = true
+num_enum = { version = "0.7", default-features = false }
 rand = { version = "0.9.1", default-features = false, features = [
 	"alloc",
 	"small_rng",

@@ -8,6 +8,7 @@
 extern crate log;
 pub mod generic_timer;
 pub mod gic;
+pub mod memory;
 #[cfg(any(feature = "nmi-pmu", feature = "nmi-sdei"))]
 pub mod nmi;
 pub mod ns16550a;

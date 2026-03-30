@@ -6,16 +6,16 @@
 
 use heapless::Vec;
 pub use kplat::memory::{
-    MemFlags, MemoryRegion, dma_regions, kernel_layout, mmio_regions, p2v, ram_regions,
-    rsvd_regions, total_ram, v2p,
+    MemFlags, MemoryRegion, ReservedKind, dma_regions, kernel_layout, mmio_regions, p2v,
+    ram_regions, total_ram, v2p,
 };
 use kplat::memory::{check_overlap, sub_ranges};
 use lazyinit::LazyInit;
 pub use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 
-use crate::addr_of_sym;
+use crate::{addr_of_sym, rsvd_mem};
 
-const MAX_REGIONS: usize = 128;
+const MAX_REGIONS: usize = 256;
 
 static ALL_MEM_REGIONS: LazyInit<Vec<MemoryRegion, MAX_REGIONS>> = LazyInit::new();
 
@@ -73,28 +73,35 @@ pub fn init() {
         name: ".bss",
     });
 
+    let kernel_start = v2p(addr_of_sym!(_skernel).into()).as_usize();
+    let kernel_end = v2p(addr_of_sym!(_ekernel).into()).as_usize();
+    let reserved = rsvd_mem::reserved_regions(kernel_start, kernel_end - kernel_start);
     // Push MMIO & reserved regions
     for &(start, size) in mmio_regions() {
         push(MemoryRegion::new_mmio(start, size, "mmio"));
     }
-    for &(start, size) in rsvd_regions() {
-        push(MemoryRegion::new_rsvd(start, size, "reserved"));
-    }
-    for &(start, size) in dma_regions() {
-        push(MemoryRegion::new_dma(start, size, "dma"));
+
+    for region in &reserved {
+        match region.kind {
+            ReservedKind::KernelImage => {}
+            ReservedKind::Dma => push(MemoryRegion::new_dma(
+                region.start,
+                region.size,
+                region.name,
+            )),
+            _ => push(MemoryRegion::new_rsvd(
+                region.start,
+                region.size,
+                region.name,
+            )),
+        }
     }
 
-    // Combine kernel image range and reserved ranges
-    let kernel_start = v2p(addr_of_sym!(_skernel).into()).as_usize();
-    let kernel_size = addr_of_sym!(_ekernel) - addr_of_sym!(_skernel);
-    let mut reserved_ranges = rsvd_regions()
+    let mut reserved_ranges = reserved
         .iter()
-        .cloned()
-        .chain(core::iter::once((kernel_start, kernel_size))) // kernel image range is also reserved
-        .chain(dma_regions().iter().cloned()) // DMA regions are also reserved
+        .map(|region| region.range())
         .collect::<Vec<_, MAX_REGIONS>>();
 
-    // Remove all reserved ranges from RAM ranges, and push the remaining as free memory
     reserved_ranges.sort_unstable_by_key(|&(start, _size)| start);
     sub_ranges(ram_regions(), &reserved_ranges, |(start, size)| {
         push(MemoryRegion::new_ram(start, size, "free memory"));
@@ -110,7 +117,6 @@ pub fn init() {
 
     ALL_MEM_REGIONS.init_once(all_regions);
 }
-
 unsafe extern "C" {
     fn _stext();
     fn _etext();

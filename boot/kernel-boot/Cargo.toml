@@ -25,6 +25,7 @@ aarch64-cpu = "10.0"
 karch = { workspace = true }
 page_table = { workspace = true }
 memaddr = { workspace = true }
+of = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"

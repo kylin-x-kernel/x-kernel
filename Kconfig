@@ -140,18 +140,6 @@ endmenu # Platform Selection
 
 menu "Kernel Features"
 
-config PHYS_MEM_BASE
-    hex "Physical Memory Base Address"
-    default 0x40000000
-    help
-      Specify the base physical address of the system memory.
-
-config PHYS_MEM_SIZE
-    hex "Physical Memory Size"
-    default 0x40000000
-    help
-      Specify the size of the physical memory.
-
 config KERNEL_ASPACE_BASE
     hex "Kernel Address Space Base"
     default 0xFFFF000000000000
@@ -213,15 +201,6 @@ config BOOT_DEVICE_MM
       table uses L1 block entries (1 GiB granularity), so both start and end
       must be multiples of 0x40000000.  Typically covers MMIO and UART ranges
       needed before the MMU is enabled.
-
-config BOOT_NORMAL_MM
-    rangetype "Boot Normal Memory Ranges"
-    default [(usize, usize)]
-    help
-      List of 1 GiB-aligned (start, end) physical address intervals to be
-      mapped as Normal (Read/Write/Execute) memory in the early boot page
-      table.  Both start and end must be multiples of 0x40000000.  Must
-      cover the physical address range where the kernel image is loaded.
 
 endif # ARCH_AARCH64
 

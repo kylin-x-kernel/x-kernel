@@ -24,6 +24,13 @@ mod bitmap;
 #[cfg(feature = "bitmap")]
 pub use bitmap::BitmapPageAllocator;
 
+#[cfg(feature = "buddy-page")]
+mod buddy_page;
+#[cfg(feature = "buddy-page")]
+pub use buddy_page::BuddyPageAllocator;
+#[cfg(feature = "buddy-page")]
+pub use buddy_slab_allocator::AddrTranslator;
+
 #[cfg(feature = "buddy")]
 mod buddy;
 #[cfg(feature = "buddy")]

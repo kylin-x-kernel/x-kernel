@@ -2,12 +2,40 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::boot::BootInfo;
-pub(crate) use x86_peripherals::acpi::find_mcfg;
+pub(crate) fn init() {
+    let rsdp_addr = ::acpi::rsdp_addr().unwrap_or(0);
+    kprintln!("ACPI init: rsdp_addr={:#x}", rsdp_addr);
+    if let Some((madt, entries)) = ::acpi::find_madt_from_init() {
+        kprintln!(
+            "ACPI MADT: lapic={:#x} flags={:#x}",
+            madt.local_apic_address,
+            madt.flags
+        );
+        for entry in entries {
+            match entry {
+                ::acpi::MadtEntry::LocalApic(cpu) if cpu.enabled() => {
+                    kprintln!(
+                        "ACPI MADT LAPIC: uid={} apic_id={}",
+                        cpu.processor_uid,
+                        cpu.apic_id
+                    );
+                }
+                ::acpi::MadtEntry::IoApic(io_apic) => {
+                    kprintln!(
+                        "ACPI MADT IOAPIC: id={} addr={:#x} gsi_base={}",
+                        io_apic.id,
+                        io_apic.address,
+                        io_apic.global_system_interrupt_base
+                    );
+                }
+                _ => {}
+            }
+        }
+    } else {
+        kprintln!("ACPI MADT not found");
+    }
 
-pub(crate) fn init(boot_info: &BootInfo) {
-    kprintln!("ACPI init: rsdp_addr={:#x}", boot_info.rsdp_addr);
-    let Some(mcfg) = find_mcfg(boot_info.rsdp_addr) else {
+    let Some(mcfg) = ::acpi::find_mcfg_from_init() else {
         kprintln!("ACPI MCFG not found, fallback to static PCI ECAM config");
         return;
     };

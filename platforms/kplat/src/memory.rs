@@ -10,6 +10,7 @@ use core::{
 };
 
 use kplat_macros::device_interface;
+use memaddr::MemoryAddr;
 pub use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, pa, va};
 
 bitflags::bitflags! {
@@ -57,6 +58,66 @@ pub const DMA_DEF: MemFlags = MemFlags::R
 
 /// A memory range represented as (start, size).
 pub type MemRange = (usize, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedKind {
+    Firmware,
+    Acpi,
+    Persistent,
+    Unusable,
+    BootRuntime,
+    Initrd,
+    KernelImage,
+    Dma,
+    DevicePrivate,
+    Platform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedSource {
+    DeviceTree,
+    Acpi,
+    BootProtocol,
+    Kernel,
+    Platform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservedRegion {
+    pub start: usize,
+    pub size: usize,
+    pub kind: ReservedKind,
+    pub source: ReservedSource,
+    pub name: &'static str,
+}
+
+impl ReservedRegion {
+    pub const EMPTY: Self = Self::new(0, 0, ReservedKind::Platform, ReservedSource::Platform, "");
+
+    pub const fn new(
+        start: usize,
+        size: usize,
+        kind: ReservedKind,
+        source: ReservedSource,
+        name: &'static str,
+    ) -> Self {
+        Self {
+            start,
+            size,
+            kind,
+            source,
+            name,
+        }
+    }
+
+    pub const fn range(self) -> MemRange {
+        (self.start, self.size)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.size == 0
+    }
+}
 
 #[repr(align(4096))]
 /// Wrapper that enforces 4K alignment for static values.
@@ -147,8 +208,11 @@ impl MemoryRegion {
 pub trait HwMemory {
     /// Returns RAM ranges provided by the platform.
     fn ram_regions() -> &'static [MemRange];
-    /// Returns reserved ranges provided by the platform.
-    fn rsvd_regions() -> &'static [MemRange];
+    /// Returns firmware/boot reserved RAM ranges provided by the platform.
+    ///
+    /// This must not include kernel-image or DMA carveout ranges, which are
+    /// added by the common memory layer.
+    fn firmware_reserved_regions() -> &'static [ReservedRegion];
     /// Returns MMIO ranges provided by the platform.
     fn mmio_regions() -> &'static [MemRange];
     /// Returns DMA-capable ranges provided by the platform.
@@ -174,6 +238,26 @@ pub fn default_v2p(vaddr: VirtAddr) -> PhysAddr {
 /// Returns total RAM size in bytes.
 pub fn total_ram() -> usize {
     ram_regions().iter().map(|r| r.1).sum()
+}
+
+/// Selects a 32-bit reachable DMA carveout from RAM.
+pub fn select_dma32_region(ram_regions: &[MemRange], size: usize) -> Option<MemRange> {
+    let size = size.align_up_4k();
+    const DMA_LIMIT_32BIT: usize = 0x1_0000_0000;
+
+    for &(start, region_size) in ram_regions.iter().rev() {
+        let region_end = start.checked_add(region_size)?.min(DMA_LIMIT_32BIT);
+        if region_end <= start || region_end - start < size {
+            continue;
+        }
+
+        let base = (region_end - size).align_down_4k();
+        if base >= start {
+            return Some((base, size));
+        }
+    }
+
+    None
 }
 
 /// Error returned when two ranges overlap.

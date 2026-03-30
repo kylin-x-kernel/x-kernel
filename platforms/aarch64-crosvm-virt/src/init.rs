@@ -28,7 +28,7 @@ impl BootHandler for BootHandlerImpl {
     fn early_init(boot_info: &BootInfo) {
         let dtb = boot_info.dtb_addr;
         map_kvm_guarded_mmio();
-        crate::mem::early_init(dtb);
+        crate::mem::early_init(dtb, boot_info.kernel_load_paddr);
         aarch64_peripherals::ns16550a::early_init(p2v(pa!(UART_PADDR)));
         aarch64_peripherals::psci::init(PSCI_METHOD);
         aarch64_peripherals::generic_timer::early_init();
@@ -41,9 +41,7 @@ impl BootHandler for BootHandlerImpl {
 
     /// Finish platform init after core subsystems are online.
     fn final_init(boot_info: &BootInfo) {
-        let dtb = boot_info.dtb_addr;
         info!("cpu_id {}", boot_info.cpu_id);
-        crate::fdt::init_fdt(p2v(pa!(dtb)));
         crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
         info!("set UART IRQ {} as edge trigger", UART_IRQ);
         crate::gicv3::set_trigger(UART_IRQ, true);

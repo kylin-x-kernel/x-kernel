@@ -17,7 +17,7 @@ sev = []
 alloc-engine.workspace = true
 kalloc.workspace = true
 kerrno.workspace = true
-khal = { workspace = true, features = ["paging"] }
+khal = { workspace = true }
 crate_interface.workspace = true
 kspin.workspace = true
 log.workspace = true

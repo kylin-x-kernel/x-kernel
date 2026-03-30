@@ -27,11 +27,7 @@ pub(crate) fn build_multiboot_info<'a>(
         let start = desc.phys_start;
         let len = desc.page_count * 4096;
         let end = start + len;
-        let mtype = if is_available_memory(desc.ty) {
-            1u32
-        } else {
-            2u32
-        };
+        let mtype = desc.ty.0;
         let entry = MbMmapEntry {
             size: (mem::size_of::<MbMmapEntry>() - 4) as u32,
             addr: start,
@@ -44,7 +40,7 @@ pub(crate) fn build_multiboot_info<'a>(
         }
         mmap_length += mem::size_of::<MbMmapEntry>() as u32;
 
-        if mtype == 1 {
+        if is_available_memory(desc.ty) {
             if end <= 0x100000 {
                 mem_lower_kb += (len / 1024) as u32;
             } else if start >= 0x100000 {

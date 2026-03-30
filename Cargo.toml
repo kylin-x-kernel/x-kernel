@@ -92,6 +92,8 @@ pci = { path = "drivers/pci" }
 rs_fdtree = { path = "drivers/rs-fdtree" }
 virtio = { path = "drivers/virtio" }
 vsock = { path = "drivers/vsock" }
+acpi = { path = "drivers/acpi" }
+of = { path = "drivers/of" }
 
 # Internal: platform variants
 aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }

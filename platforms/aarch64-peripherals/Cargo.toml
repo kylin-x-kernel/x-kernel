@@ -18,10 +18,14 @@ nmi-pmu = ["pmr", "pmu", "kplat/nmi"]
 nmi-sdei = []
 
 [dependencies]
+memaddr = { workspace = true }
 kspin = { workspace = true }
+ktypes = { workspace = true }
 log = "0.4"
 int_ratio = "0.1"
 lazyinit = "0.2"
+heapless = "0.9"
+of = { workspace = true }
 page_table = { workspace = true }
 aarch64-cpu = "10.0"
 arm_pl011 = "0.1"

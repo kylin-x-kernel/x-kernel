@@ -15,7 +15,8 @@ use kplat::{
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
-    fn early_init(_boot_info: &BootInfo) {
+    fn early_init(boot_info: &BootInfo) {
+        crate::mem::early_init(boot_info.dtb_addr, boot_info.kernel_load_paddr);
         aarch64_peripherals::pl011::early_init(p2v(pa!(UART_PADDR)));
         aarch64_peripherals::psci::init(PSCI_METHOD);
         aarch64_peripherals::generic_timer::early_init();

@@ -3,57 +3,61 @@
 // See LICENSES for license details.
 
 //! Physical memory layout and address translation helpers.
-use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kbuild_config::{MMIO_RANGES, PHYS_MEM_BASE, PHYS_MEM_SIZE};
+use aarch64_peripherals::memory::{Aarch64MemState, collect_firmware_reserved_regions};
+use kbuild_config::{DMA_MEM_SIZE, MMIO_RANGES};
 use kplat::memory::{
-    HwMemory, MemRange, PhysAddr, VirtAddr, default_p2v, default_v2p, p2v, pa, va,
+    HwMemory, MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr,
+    default_p2v, default_v2p, va,
 };
-use ktypes::Once;
-use rs_fdtree::LinuxFdt;
 
-const FDT_MEM_SIZE: usize = 0x20_0000;
-static FDT_MEM_BASE: AtomicUsize = AtomicUsize::new(0);
-static FDT_MEM: Once<[MemRange; 2]> = Once::new();
-static DICE_MEM_BASE: AtomicUsize = AtomicUsize::new(0);
-static DICE_MEM_SIZE: AtomicUsize = AtomicUsize::new(0);
+// Platform runtime RAM-region capacity. Boot-time DTB parsing has its own cap
+// in `boot/kernel-boot/.../mmu.rs`; keep them aligned conceptually so both
+// stages accept the same class of DTBs.
+const MAX_RAM_REGIONS: usize = 8;
+const MAX_FW_RESERVED_REGIONS: usize = 32;
+static MEM_STATE: Aarch64MemState<MAX_RAM_REGIONS, MAX_FW_RESERVED_REGIONS> =
+    Aarch64MemState::new();
 /// Capture FDT/DICE memory ranges before the allocator is initialized.
-pub(crate) fn early_init(fdt_paddr: usize) {
-    let fdt_va = p2v(pa!(fdt_paddr));
-    FDT_MEM_BASE.store(fdt_paddr, Ordering::SeqCst);
-    let fdt =
-        unsafe { LinuxFdt::from_ptr(fdt_va.as_usize() as *const u8).expect("Failed to parse FDT") };
-    if let Some(dice) = fdt.dice()
-        && let Some(reg) = dice.regions().expect("DICE regions").next()
-    {
-        DICE_MEM_BASE.store(reg.starting_address as usize, Ordering::SeqCst);
-        DICE_MEM_SIZE.store(reg.size, Ordering::SeqCst);
+pub(crate) fn early_init(fdt_paddr: usize, kernel_load_paddr: usize) {
+    let mut extra = [ReservedRegion::EMPTY; 1];
+    let mut extra_count = 0;
+    if let Some(reg) = of::dice_region() {
+        extra[extra_count] = ReservedRegion::new(
+            reg.starting_address as usize,
+            reg.size,
+            ReservedKind::DevicePrivate,
+            ReservedSource::DeviceTree,
+            "dice",
+        );
+        extra_count += 1;
     }
+    let (regions, count) = collect_firmware_reserved_regions::<MAX_FW_RESERVED_REGIONS>(
+        fdt_paddr,
+        default_p2v,
+        &extra[..extra_count],
+    );
+    MEM_STATE.init_with_exclusions(
+        DMA_MEM_SIZE,
+        regions,
+        count,
+        &[kernel_image_exclusion(kernel_load_paddr)],
+    );
 }
 /// Platform-specific memory description for the kernel.
 struct HwMemoryImpl;
 #[impl_dev_interface]
 impl HwMemory for HwMemoryImpl {
     fn ram_regions() -> &'static [MemRange] {
-        &[(PHYS_MEM_BASE, PHYS_MEM_SIZE)]
+        MEM_STATE.ram_regions()
     }
 
     /// Returns all reserved physical memory ranges on the platform.
     ///
     /// Reserved memory can be contained in [`ram_regions`], they are not
     /// allocatable but should be mapped to kernel's address space.
-    fn rsvd_regions() -> &'static [MemRange] {
-        FDT_MEM
-            .call_once(|| {
-                [
-                    (FDT_MEM_BASE.load(Ordering::Relaxed), FDT_MEM_SIZE),
-                    (
-                        DICE_MEM_BASE.load(Ordering::Relaxed),
-                        DICE_MEM_SIZE.load(Ordering::Relaxed),
-                    ),
-                ]
-            })
-            .as_ref()
+    fn firmware_reserved_regions() -> &'static [ReservedRegion] {
+        MEM_STATE.firmware_reserved_regions()
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.
@@ -62,7 +66,7 @@ impl HwMemory for HwMemoryImpl {
     }
 
     fn dma_regions() -> &'static [MemRange] {
-        &[(kbuild_config::DMA_MEM_BASE, kbuild_config::DMA_MEM_SIZE)]
+        MEM_STATE.dma_regions()
     }
 
     fn p2v(paddr: PhysAddr) -> VirtAddr {
@@ -79,4 +83,14 @@ impl HwMemory for HwMemoryImpl {
             kbuild_config::KERNEL_ASPACE_SIZE,
         )
     }
+}
+
+fn kernel_image_exclusion(kernel_load_paddr: usize) -> MemRange {
+    unsafe extern "C" {
+        fn _skernel();
+        fn _ekernel();
+    }
+
+    let kernel_size = (_ekernel as *const () as usize) - (_skernel as *const () as usize);
+    (kernel_load_paddr, kernel_size)
 }

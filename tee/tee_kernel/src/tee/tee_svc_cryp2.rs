@@ -578,13 +578,13 @@ fn tee_cryp_asymm_init(
             TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_DECRYPT => {
                 crypto_rsa_init(cs.clone(), RsaPadding::None, mode)
             }
-            _ => return Err(TEE_ERROR_GENERIC),
+            _ => Err(TEE_ERROR_GENERIC),
         },
         TEE_ALG_SM2_PKE => match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_DECRYPT => {
                 crypto_ecc_init(cs.clone(), PkType::SM2)
             }
-            _ => return Err(TEE_ERROR_GENERIC),
+            _ => Err(TEE_ERROR_GENERIC),
         },
         TEE_ALG_RSAES_PKCS1_V1_5
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5

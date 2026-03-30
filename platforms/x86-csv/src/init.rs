@@ -9,6 +9,7 @@ impl BootHandler for BootHandlerImpl {
     fn early_init(boot_info: &BootInfo) {
         x86_peripherals::ns16550::init();
         x86_peripherals::tsc_timer::early_init();
+        x86_peripherals::bootmem::init_ap_trampoline_page(boot_info);
         crate::mem::init(boot_info);
     }
 
@@ -17,7 +18,13 @@ impl BootHandler for BootHandlerImpl {
 
     fn final_init(_boot_info: &BootInfo) {
         crate::psci::init();
-        x86_peripherals::apic::init_primary(kplat::memory::pa!(0xFEC0_0000));
+        let io_apic_paddr = ::acpi::find_io_apic_from_init()
+            .map(|entry| kplat::memory::pa!(entry.address as usize))
+            .unwrap_or_else(|| {
+                warn!("ACPI MADT IOAPIC not found, fallback to static IOAPIC base");
+                kplat::memory::pa!(0xFEC0_0000)
+            });
+        x86_peripherals::apic::init_primary(io_apic_paddr);
         x86_peripherals::tsc_timer::init_primary();
     }
 

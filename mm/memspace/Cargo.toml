@@ -16,7 +16,7 @@ kalloc = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
 fs-ng-vfs = { workspace = true }
-khal = { workspace = true, features = ["paging"] }
+khal = { workspace = true }
 ksync = { workspace = true }
 ktask = { workspace = true }
 enum_dispatch = { workspace = true }
@@ -25,7 +25,7 @@ lazyinit = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
 memset = { workspace = true }
-page_table = { workspace = true, optional = true }
+page_table = { workspace = true }
 unittest.workspace = true
 kbuild_config = { workspace = true }
 karch = { workspace = true }

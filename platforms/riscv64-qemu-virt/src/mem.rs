@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, pa, va};
+use kplat::memory::{HwMemory, MemRange, PhysAddr, ReservedRegion, VirtAddr, pa, va};
 
 use crate::config::{
     devices::MMIO_RANGES,
@@ -20,7 +20,7 @@ impl HwMemory for HwMemoryImpl {
         )]
     }
 
-    fn rsvd_regions() -> &'static [MemRange] {
+    fn firmware_reserved_regions() -> &'static [ReservedRegion] {
         &[]
     }
 

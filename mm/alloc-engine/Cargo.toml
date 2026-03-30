@@ -10,9 +10,10 @@ repository.workspace = true
 
 [features]
 default = ["page-alloc-256m"]
-full = ["bitmap", "tlsf", "slab", "buddy", "allocator_api", "page-alloc-256m"]
+full = ["bitmap", "buddy-page", "tlsf", "slab", "buddy", "allocator_api", "page-alloc-256m"]
 
 bitmap = ["dep:bitmap-allocator"]
+buddy-page = ["dep:buddy_slab_allocator"]
 
 tlsf = ["dep:rlsf"]
 slab = ["dep:slab_allocator"]
@@ -34,6 +35,7 @@ rlsf = { version = "0.2", optional = true }
 buddy_system_allocator = { version = "0.10", default-features = false, optional = true }
 slab_allocator = { workspace = true, optional = true }
 bitmap-allocator = { version = "0.2", optional = true }
+buddy_slab_allocator = { package = "buddy-slab-allocator", version = "0.2", optional = true, features = ["tracking", "log"] }
 unittest.workspace = true
 
 [dev-dependencies]

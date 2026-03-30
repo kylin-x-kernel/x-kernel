@@ -64,10 +64,31 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         self.properties().find(|prop| prop.name == name)
     }
 
+    /// Returns an iterator over all compatible strings, in firmware order.
+    pub fn compatibles(self) -> impl Iterator<Item = &'a str> + 'b {
+        let mut bytes = self
+            .property("compatible")
+            .map(|prop| prop.value)
+            .unwrap_or(&[]);
+        core::iter::from_fn(move || {
+            if bytes.is_empty() {
+                return None;
+            }
+            let end = bytes.iter().position(|&b| b == 0)?;
+            let compat = core::str::from_utf8(&bytes[..end]).ok()?;
+            bytes = &bytes[end + 1..];
+            Some(compat)
+        })
+    }
+
     /// Returns the first compatible string if present.
     pub fn compatible(self) -> Option<&'a str> {
-        let property = self.property("compatible")?;
-        CStr::new(property.value)?.as_str()
+        self.compatibles().next()
+    }
+
+    /// Returns whether the node matches any compatible string in its list.
+    pub fn is_compatible(self, compatible: &str) -> bool {
+        self.compatibles().any(|candidate| candidate == compatible)
     }
 }
 
@@ -316,6 +337,31 @@ pub(crate) fn find_node<'b, 'a: 'b>(
     }
 
     None
+}
+
+pub(crate) fn reserved_memory_regions<'b, 'a: 'b>(
+    header: &'b LinuxFdt<'a>,
+) -> impl Iterator<Item = MemoryRegion> + 'b {
+    let reserved = find_node(
+        &mut FdtData::new(header.structs_block()),
+        "/reserved-memory",
+        header,
+        None,
+    )
+    .map(|node| node.props);
+
+    all_nodes(header)
+        .filter(move |node| {
+            let Some(reserved_props) = reserved else {
+                return false;
+            };
+            let Some(parent_props) = node.parent_props else {
+                return false;
+            };
+            parent_props.as_ptr() == reserved_props.as_ptr()
+                && parent_props.len() == reserved_props.len()
+        })
+        .flat_map(|node| node.reg().into_iter().flatten())
 }
 
 pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) {

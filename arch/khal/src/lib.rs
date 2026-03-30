@@ -41,17 +41,15 @@ extern crate memaddr;
 
 // mod dummy;
 
-pub mod dtb;
 pub mod mem;
 pub mod percpu;
+pub mod rsvd_mem;
 pub mod time;
 
 #[cfg(feature = "tls")]
 pub mod tls;
 
 pub mod irq;
-
-#[cfg(feature = "paging")]
 pub mod paging;
 
 /// Console input and output.
@@ -129,7 +127,26 @@ pub fn boot_info(arg: usize) -> &'static boot_info::BootInfo {
 /// Initializes the platform from the unified boot handoff payload.
 /// This function should be called as early as possible.
 pub fn early_init(boot_info: &boot_info::BootInfo) {
-    dtb::init(boot_info.dtb_addr);
+    let dtb_vaddr = if boot_info.dtb_addr != 0 {
+        Some(mem::p2v(boot_info.dtb_addr.into()).as_usize() as *const u8)
+    } else {
+        None
+    };
+    if let Some(ptr) = dtb_vaddr {
+        let _ = unsafe { of::init_device_tree_ptr(ptr) };
+        info!("device tree initialized");
+        if let Some(model) = of::root_model() {
+            info!("of root model: {model}");
+        }
+        if let Some(compatible) = of::root_compatible() {
+            info!("of root compatible: {compatible}");
+        }
+        if let Some(bootargs) = of::chosen_bootargs() {
+            info!("of chosen bootargs: {bootargs}");
+        }
+    } else if boot_info.rsdp_addr != 0 {
+        let _ = acpi::init(boot_info.rsdp_addr);
+    }
     kplat::boot::early_init(boot_info);
 }
 

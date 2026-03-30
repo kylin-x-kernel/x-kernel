@@ -5,4 +5,4 @@
 mod handoff;
 pub mod protocols;
 
-pub use protocols::{AP_START_PAGE_IDX, AP_START_PAGE_PADDR, MULTIBOOT_BOOTLOADER_MAGIC};
+pub use protocols::MULTIBOOT_BOOTLOADER_MAGIC;

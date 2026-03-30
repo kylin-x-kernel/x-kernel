@@ -5,6 +5,4 @@
 pub mod linux;
 pub mod multiboot;
 
-pub use multiboot::{
-    AP_START_PAGE_IDX, AP_START_PAGE_PADDR, MULTIBOOT_BOOTLOADER_MAGIC, SEV_CBIT_MASK,
-};
+pub use multiboot::{MULTIBOOT_BOOTLOADER_MAGIC, SEV_CBIT_MASK};

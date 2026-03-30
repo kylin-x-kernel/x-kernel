@@ -50,21 +50,11 @@ pub const SEV_CBIT_MASK: u64 = if SEV_CBIT_POS == 0 {
     1u64 << SEV_CBIT_POS
 };
 
-/// Page index of the AP real-mode startup page (physical address = index × 4 KiB).
-///
-/// Both x86_64 platforms use page 6 (0x6000). Exported so `mp.rs` can derive
-/// the physical address and the SIPI vector from a single source of truth.
-pub const AP_START_PAGE_IDX: u8 = 6;
-pub const AP_START_PAGE_PADDR: usize = AP_START_PAGE_IDX as usize * 0x1000;
-
 /// Boot stack for the primary CPU.
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 
-global_asm!(
-    include_str!("ap_start.S"),
-    start_page_paddr = const AP_START_PAGE_PADDR,
-);
+global_asm!(include_str!("ap_start.S"));
 
 global_asm!(
     include_str!("multiboot.S"),

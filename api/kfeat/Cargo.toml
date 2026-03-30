@@ -28,15 +28,12 @@ crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 sev = ["dma", "kdriver/sev", "memspace/sev"]
 
 # Memory
-alloc = ["kalloc", "kruntime/alloc"]
 alloc-tlsf = ["kalloc/tlsf"]
 alloc-slab = ["kalloc/slab"]
 alloc-buddy = ["kalloc/buddy"]
-alloc-level-1 = ["kalloc/level-1", "alloc"]
 page-alloc-64g = ["kalloc/page-alloc-64g"]                   # up to 64G memory capacity
 page-alloc-4g = ["kalloc/page-alloc-4g"]                     # up to 4G memory capacity
-paging = ["alloc", "khal/paging", "kruntime/paging"]
-dma = ["alloc", "paging"]
+dma = []
 
 task-ext = ["ktask/task-ext"]
 sched-fifo = ["ktask/sched-fifo"]
@@ -45,24 +42,20 @@ sched-cfs = ["ktask/sched-cfs"]
 
 # File system
 fs = [
-    "alloc",
-    "paging",
     "kdriver/virtio-blk",
     "dep:kfs",
     "kruntime/fs",
-] # TODO: try to remove "paging"
+]
 fs-ext4 = ["fs", "kfs/ext4"]
 fs-fat = ["fs", "kfs/fat"]
 fs-times = ["fs", "kfs/times"]
 
 # Networking
-net = ["alloc", "paging", "kdriver/virtio-net", "dep:knet", "kruntime/net"]
+net = ["kdriver/virtio-net", "dep:knet", "kruntime/net"]
 vsock = ["net", "kdriver/virtio-socket", "kruntime/vsock", "knet/vsock"]
 
 # Display
 display = [
-    "alloc",
-    "paging",
     "kdriver/virtio-gpu",
     "dep:fbdevice",
     "kruntime/display",
@@ -70,8 +63,6 @@ display = [
 
 # Input
 input = [
-    "alloc",
-    "paging",
     "kdriver/virtio-input",
     "dep:inputdev",
     "kruntime/input",
@@ -86,7 +77,7 @@ bus-pci = ["kdriver/bus-pci"]
 driver-ramdisk = ["kdriver/ramdisk", "kfs?/use-ramdisk"]
 
 # Backtrace
-dwarf = ["alloc", "backtrace/dwarf"]
+dwarf = ["backtrace/dwarf"]
 
 # Watchdog
 watchdog = ["kruntime/watchdog"]
@@ -96,7 +87,7 @@ pmu = ["kruntime/pmu"]
 
 [dependencies]
 memspace = { workspace = true, optional = true }
-kalloc = { workspace = true, optional = true }
+kalloc.workspace = true
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true

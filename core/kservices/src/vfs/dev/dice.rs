@@ -6,12 +6,12 @@
 use alloc::{vec, vec::Vec};
 use core::any::Any;
 
-use aarch64_crosvm_virt::fdt::dice_reg;
 use kcore::vfs::DeviceOps;
 use kerrno::{KError, KResult};
 use ksync::Mutex;
 use ktypes::Lazy;
-use memaddr::VirtAddr;
+use memaddr::{VirtAddr, pa};
+use of::dice_region;
 use rand_chacha::{
     ChaCha8Rng,
     rand_core::{RngCore, SeedableRng},
@@ -37,7 +37,9 @@ impl DiceNodeInfo<'static> {
     pub fn new() -> Self {
         DiceNodeInfo {
             _compatible: DICE_COMPATIBLE,
-            regions: dice_reg().unwrap(),
+            regions: dice_region()
+                .map(|reg| (khal::mem::p2v(pa!(reg.starting_address as usize)), reg.size))
+                .unwrap(),
             _no_map: false,
         }
     }

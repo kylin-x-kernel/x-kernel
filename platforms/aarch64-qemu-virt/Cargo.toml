@@ -24,6 +24,8 @@ karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }
+of = { workspace = true }
+ktypes = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

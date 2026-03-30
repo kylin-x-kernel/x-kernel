@@ -28,6 +28,7 @@ karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 kaddr_layout = { workspace = true }
+acpi = { workspace = true }
 kdriver = { workspace = true }
 pci = { workspace = true }
 x86-peripherals = { workspace = true }

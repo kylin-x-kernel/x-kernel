@@ -37,6 +37,8 @@ pub struct BootInfo {
     pub phys_virt_offset: usize,
     pub dtb_addr: usize,
     pub rsdp_addr: usize,
+    pub boot_runtime_paddr: usize,
+    pub boot_runtime_size: usize,
     pub ramdisk_addr: usize,
     pub ramdisk_size: usize,
     pub cmdline_addr: usize,
@@ -59,6 +61,8 @@ impl BootInfo {
             phys_virt_offset: 0,
             dtb_addr: 0,
             rsdp_addr: 0,
+            boot_runtime_paddr: 0,
+            boot_runtime_size: 0,
             ramdisk_addr: 0,
             ramdisk_size: 0,
             cmdline_addr: 0,
@@ -108,6 +112,23 @@ impl BootInfo {
         self.ramdisk_addr = addr;
         self.ramdisk_size = size;
         self
+    }
+
+    #[inline]
+    pub const fn with_boot_runtime(mut self, paddr: usize, size: usize) -> Self {
+        self.boot_runtime_paddr = paddr;
+        self.boot_runtime_size = size;
+        self
+    }
+
+    #[inline]
+    pub const fn boot_runtime_paddr(&self) -> usize {
+        self.boot_runtime_paddr
+    }
+
+    #[inline]
+    pub const fn boot_runtime_size(&self) -> usize {
+        self.boot_runtime_size
     }
 
     #[inline]
@@ -161,6 +182,14 @@ impl fmt::Debug for BootInfo {
             )
             .field("dtb_addr", &format_args!("{:#x}", self.dtb_addr))
             .field("rsdp_addr", &format_args!("{:#x}", self.rsdp_addr))
+            .field(
+                "boot_runtime",
+                &format_args!(
+                    "{:#x}..{:#x}",
+                    self.boot_runtime_paddr(),
+                    self.boot_runtime_paddr() + self.boot_runtime_size()
+                ),
+            )
             .field(
                 "ramdisk",
                 &format_args!(

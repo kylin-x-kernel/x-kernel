@@ -16,18 +16,18 @@ fp-simd = ["kcpu/fp-simd",]
 rtc = []
 nmi = ["kplat/nmi"]
 pmu = []
-paging = ["dep:kalloc", "dep:page_table"]
 tls = ["kcpu/tls"]
-uspace = ["paging", "kcpu/uspace"]
+uspace = ["kcpu/uspace"]
 crosvm = []
 
 ipi = []
 irq = []
 
 [dependencies]
-kalloc = { workspace = true, optional = true }
+kalloc = { workspace = true }
 boot_info = { workspace = true }
 kcpu = { workspace = true }
+karch = { workspace = true }
 kplat.workspace = true
 cfg-if.workspace = true
 heapless = "0.9"
@@ -36,9 +36,10 @@ lazyinit.workspace = true
 linkme = { version = "0.3.33" }
 log.workspace = true
 memaddr.workspace = true
-page_table = { workspace = true, optional = true }
+page_table = { workspace = true }
 percpu.workspace = true
-fdt-parser = "0.4"
+acpi = { workspace = true }
+of = { workspace = true }
 unittest.workspace = true
 
 

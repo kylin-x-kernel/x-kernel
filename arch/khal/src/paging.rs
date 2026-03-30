@@ -20,6 +20,10 @@ pub struct PagingHandlerImpl;
 
 impl PagingHandler for PagingHandlerImpl {
     fn alloc_frame() -> Option<PhysAddr> {
+        assert!(
+            kalloc::is_page_allocator_ready(),
+            "page-table allocation requested before page allocator initialization"
+        );
         global_allocator()
             .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageTable)
             .map(|vaddr| v2p(vaddr.into()))
@@ -56,7 +60,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(all(unittest, feature = "paging"))]
+#[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_paging {
     use unittest::def_test;

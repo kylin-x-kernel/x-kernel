@@ -17,7 +17,12 @@ pub use error::FdtError;
 use header::FdtHeader;
 pub use kernel_nodes::{Dice, InterruptController};
 pub use node::{FdtNode, MemoryRegion, NodeProperty, RegIter};
-use parsing::{CStr, FdtData};
+use parsing::{BigEndianU64, CStr, FdtData};
+
+#[derive(Debug, Clone, Copy)]
+pub struct MemReserveIter<'a> {
+    stream: FdtData<'a>,
+}
 
 /// A flattened devicetree located somewhere in memory
 #[derive(Clone, Copy)]
@@ -107,8 +112,22 @@ impl<'a> LinuxFdt<'a> {
         node::all_nodes(self)
     }
 
+    pub fn mem_reservations(&self) -> MemReserveIter<'a> {
+        MemReserveIter {
+            stream: FdtData::new(self.mem_rsvmap_block()),
+        }
+    }
+
+    pub fn reserved_memory_regions(&self) -> impl Iterator<Item = MemoryRegion> + '_ {
+        node::reserved_memory_regions(self)
+    }
+
     fn structs_block(&self) -> &'a [u8] {
         &self.data[self.header.struct_range()]
+    }
+
+    fn mem_rsvmap_block(&self) -> &'a [u8] {
+        &self.data[self.header.mem_rsvmap_range()]
     }
 
     pub(crate) fn string_at_offset(&self, offset: usize) -> Option<&'a str> {
@@ -117,5 +136,23 @@ impl<'a> LinuxFdt<'a> {
 
     fn strings_block(&self) -> &'a [u8] {
         &self.data[self.header.strings_range()]
+    }
+}
+
+impl<'a> Iterator for MemReserveIter<'a> {
+    type Item = MemoryRegion;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let address = BigEndianU64::from_bytes(self.stream.remaining())?.get() as usize;
+        self.stream.skip(8);
+        let size = BigEndianU64::from_bytes(self.stream.remaining())?.get() as usize;
+        self.stream.skip(8);
+        if address == 0 && size == 0 {
+            return None;
+        }
+        Some(MemoryRegion {
+            starting_address: address as *const u8,
+            size,
+        })
     }
 }

@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! TTBR0/TTBR1 → BOOT_PT_L0
-//!   L0[0]   → BOOT_PT_L1        (linear map: PA → PAGE_OFFSET + PA, 1 GiB blocks)
+//!   L0[0]   → BOOT_PT_L1        (early linear map for device/DTB access)
 //!   L0[256] → BOOT_PT_L1_KIMAGE (kernel image area at KIMAGE_VADDR)
 //!               └─ L1[0] → BOOT_PT_L2_KIMAGE (2 MiB blocks mapping PA(kernel) → KIMAGE_VADDR)
 //! ```
@@ -23,7 +23,7 @@
 
 use aarch64_cpu::{asm::barrier, registers::*};
 use kaddr_layout::KIMAGE_VADDR;
-use kbuild_config::{BOOT_DEVICE_MM, BOOT_NORMAL_MM};
+use kbuild_config::BOOT_DEVICE_MM;
 use memaddr::PhysAddr;
 use page_table::{
     PageTableEntry, PagingFlags,
@@ -38,6 +38,12 @@ const GIB: usize = 0x4000_0000;
 
 /// 2 MiB in bytes (L2 block granularity).
 const MIB_2: usize = 0x20_0000;
+/// Boot-time DTB RAM parser capacity.
+///
+/// Keep this in sync with platform-layer `MAX_RAM_REGIONS` values so boot-time
+/// linear-map coverage and later `khal::mem::init()` region discovery don't
+/// silently disagree about how many `/memory` ranges are supported.
+const MAX_BOOT_RAM_REGIONS: usize = 16;
 
 /// A page-aligned wrapper used to place page table arrays in the correct
 /// linker section with the required 4 KiB alignment.
@@ -69,7 +75,7 @@ impl<T, const N: usize> core::ops::IndexMut<usize> for PageAligned<[T; N]> {
 static mut BOOT_PT_L0: PageAligned<[A64PageEntry; PT_ENTRIES]> =
     PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
 
-/// Level-1 page table for the linear map (BOOT_DEVICE_MM + BOOT_NORMAL_MM).
+/// Level-1 page table for the early linear map.
 ///
 /// L0[0] → this table; covers the first 512 GiB of physical address space.
 #[unsafe(link_section = ".data.boot_page_table")]
@@ -115,9 +121,9 @@ macro_rules! phys_addr_of {
 ///
 /// Creates two sets of mappings:
 ///
-/// 1. **Linear map** (same as before KASLR support):
+/// 1. **Early linear map**:
 ///    - `BOOT_DEVICE_MM` → Device RW  (1 GiB blocks)
-///    - `BOOT_NORMAL_MM` → Normal RWX (1 GiB blocks)
+///    - DTB block → Normal RWX (1 GiB block if needed)
 ///      via `L0[0] → BOOT_PT_L1`
 ///
 /// 2. **Kernel image map** (new):
@@ -183,19 +189,51 @@ pub unsafe fn create_boot_page_tables() {
     }
 
     // -----------------------------------------------------------------------
-    // Linear map: normal memory (1 GiB blocks) via L1
+    // Early normal-memory fallbacks:
+    //
+    // 1. Map the current kernel physical block so execution can continue at the
+    //    current low physical PC immediately after the MMU is enabled, before
+    //    we branch to the high KIMAGE virtual address.
+    // 2. Map the firmware-provided DTB block so early_init() can consume the
+    //    device tree before the runtime linear map is rebuilt.
+    //
+    // Without the explicit kernel-block fallback, platforms whose firmware
+    // places the kernel outside BOOT_DEVICE_MM (for example crosvm) will fault
+    // as soon as SCTLR_EL1.M is set because the current low PC stops being
+    // translated.
     // -----------------------------------------------------------------------
-    for &(start, end) in BOOT_NORMAL_MM {
-        let mut addr = start;
-        while addr < end {
+    let kernel_l1_idx = kernel_start_pa / GIB;
+    assert!(
+        kernel_l1_idx < PT_ENTRIES,
+        "kernel outside early linear map window"
+    );
+    if !unsafe { BOOT_PT_L1[kernel_l1_idx].is_present() } {
+        let block_base = kernel_start_pa & !(GIB - 1);
+        unsafe {
+            BOOT_PT_L1[kernel_l1_idx] = A64PageEntry::new_page(
+                PhysAddr::from(block_base),
+                PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
+                true,
+            );
+        }
+    }
+
+    let dtb_paddr = unsafe { super::entry::SAVED_BOOT_ARGS[0] as usize };
+    if dtb_paddr != 0 {
+        let dtb_l1_idx = dtb_paddr / GIB;
+        assert!(
+            dtb_l1_idx < PT_ENTRIES,
+            "DTB outside early linear map window"
+        );
+        if !unsafe { BOOT_PT_L1[dtb_l1_idx].is_present() } {
+            let block_base = dtb_paddr & !(GIB - 1);
             unsafe {
-                BOOT_PT_L1[addr / GIB] = A64PageEntry::new_page(
-                    PhysAddr::from(addr),
+                BOOT_PT_L1[dtb_l1_idx] = A64PageEntry::new_page(
+                    PhysAddr::from(block_base),
                     PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
-                    true, // 1 GiB block
+                    true,
                 );
             }
-            addr += GIB;
         }
     }
 
@@ -233,6 +271,53 @@ pub unsafe fn create_boot_page_tables() {
 
     // Ensure all page table writes complete before enabling the MMU.
     barrier::dsb(barrier::SY);
+}
+
+fn map_linear_block(block_base: usize, flags: PagingFlags) {
+    let l1_idx = block_base / GIB;
+    assert!(
+        l1_idx < PT_ENTRIES,
+        "physical address outside early linear map window"
+    );
+    unsafe {
+        // Preserve any boot-time mapping that is already present. In
+        // particular, the block containing the kernel image / secondary
+        // trampoline must remain executable until all CPUs have completed the
+        // early boot path.
+        if BOOT_PT_L1[l1_idx].is_present() {
+            return;
+        }
+        BOOT_PT_L1[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true);
+    }
+}
+
+pub fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
+    if dtb_paddr == 0 {
+        return;
+    }
+
+    let Ok((regions, count)) = (unsafe {
+        of::read_memory_regions_from_ptr::<MAX_BOOT_RAM_REGIONS>(dtb_paddr as *const u8)
+    }) else {
+        panic!("invalid device tree pointer: {dtb_paddr:#x}");
+    };
+
+    for region in &regions[..count] {
+        if region.size == 0 {
+            continue;
+        }
+        let start = region.starting_address as usize & !(GIB - 1);
+        let end = ((region.starting_address as usize) + region.size + GIB - 1) & !(GIB - 1);
+        let mut addr = start;
+        while addr < end {
+            map_linear_block(addr, PagingFlags::READ | PagingFlags::WRITE);
+            addr += GIB;
+        }
+    }
+
+    barrier::dsb(barrier::SY);
+    karch::flush_tlb(None);
+    barrier::isb(barrier::SY);
 }
 
 /// Configure MMU registers and enable the MMU.

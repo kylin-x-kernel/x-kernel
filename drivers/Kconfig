@@ -31,12 +31,6 @@ config PCI_RANGES
     help
       Specify the address ranges for PCI devices.
 
-config DMA_MEM_BASE
-    hex "DMA Memory Base Address"
-    default 0x40000000
-    help
-      Specify the base address for Direct Memory Access (DMA) memory.
-
 config DMA_MEM_SIZE
     hex "DMA Memory Size"
     default 0x200000
@@ -105,4 +99,3 @@ config IPI_IRQ
 
 endmenu # IRQ Configuration
 endmenu # Drivers Basic Configuration
-

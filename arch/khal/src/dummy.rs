@@ -9,7 +9,7 @@ use kplat::{
     impl_dev_interface,
     interrupts::{Handler, IntrManager, TargetCpu},
     io::ConsoleIf,
-    memory::{HwMemory, MemRange},
+    memory::{HwMemory, MemRange, ReservedRegion},
     sys::SysCtrl,
     timer::GlobalTimer,
 };
@@ -59,7 +59,7 @@ impl HwMemory for DummyMem {
         &[]
     }
 
-    fn rsvd_regions() -> &'static [MemRange] {
+    fn firmware_reserved_regions() -> &'static [ReservedRegion] {
         &[]
     }
 

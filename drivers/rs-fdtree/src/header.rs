@@ -51,6 +51,10 @@ impl FdtHeader {
         start..end
     }
 
+    pub(crate) fn mem_rsvmap_range(&self) -> core::ops::RangeFrom<usize> {
+        (self.off_mem_rsvmap.get() as usize)..
+    }
+
     pub(crate) fn from_bytes(bytes: &mut FdtData<'_>) -> Option<Self> {
         Some(Self {
             magic: bytes.u32()?,

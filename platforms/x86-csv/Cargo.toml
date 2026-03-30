@@ -27,6 +27,7 @@ kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
+acpi = { workspace = true }
 x86-peripherals = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

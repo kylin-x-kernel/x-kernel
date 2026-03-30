@@ -107,6 +107,102 @@ fn build_dice_dtb() -> Vec<u8> {
     dtb
 }
 
+fn build_reserved_memory_dtb() -> Vec<u8> {
+    const FDT_MAGIC: u32 = 0xd00dfeed;
+    const FDT_BEGIN_NODE: u32 = 1;
+    const FDT_END_NODE: u32 = 2;
+    const FDT_PROP: u32 = 3;
+    const FDT_END: u32 = 5;
+
+    fn push_be32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn push_be64(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn push_name(buf: &mut Vec<u8>, name: &[u8]) {
+        buf.extend_from_slice(name);
+        buf.push(0);
+        while buf.len() % 4 != 0 {
+            buf.push(0);
+        }
+    }
+
+    fn push_prop(buf: &mut Vec<u8>, name_off: u32, value: &[u8]) {
+        push_be32(buf, FDT_PROP);
+        push_be32(buf, value.len() as u32);
+        push_be32(buf, name_off);
+        buf.extend_from_slice(value);
+        while buf.len() % 4 != 0 {
+            buf.push(0);
+        }
+    }
+
+    let strings = b"#address-cells\0#size-cells\0reg\0";
+    let off_addr_cells = 0u32;
+    let off_size_cells = 15u32;
+    let off_reg = 27u32;
+
+    let mut structs = Vec::new();
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"");
+    push_prop(&mut structs, off_addr_cells, &2u32.to_be_bytes());
+    push_prop(&mut structs, off_size_cells, &2u32.to_be_bytes());
+
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"reserved-memory");
+    push_prop(&mut structs, off_addr_cells, &2u32.to_be_bytes());
+    push_prop(&mut structs, off_size_cells, &2u32.to_be_bytes());
+
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"region@81000000");
+    let reg = [
+        0u32.to_be_bytes(),
+        0x8100_0000u32.to_be_bytes(),
+        0u32.to_be_bytes(),
+        0x2000u32.to_be_bytes(),
+        0u32.to_be_bytes(),
+        0x8200_0000u32.to_be_bytes(),
+        0u32.to_be_bytes(),
+        0x3000u32.to_be_bytes(),
+    ]
+    .concat();
+    push_prop(&mut structs, off_reg, &reg);
+    push_be32(&mut structs, FDT_END_NODE);
+
+    push_be32(&mut structs, FDT_END_NODE);
+    push_be32(&mut structs, FDT_END_NODE);
+    push_be32(&mut structs, FDT_END);
+
+    let header_size = 10 * 4;
+    let mem_rsvmap_size = 32;
+    let off_mem_rsvmap = header_size as u32;
+    let off_dt_struct = (header_size + mem_rsvmap_size) as u32;
+    let off_dt_strings = off_dt_struct + structs.len() as u32;
+    let totalsize = off_dt_strings + strings.len() as u32;
+
+    let mut dtb = Vec::new();
+    push_be32(&mut dtb, FDT_MAGIC);
+    push_be32(&mut dtb, totalsize);
+    push_be32(&mut dtb, off_dt_struct);
+    push_be32(&mut dtb, off_dt_strings);
+    push_be32(&mut dtb, off_mem_rsvmap);
+    push_be32(&mut dtb, 17);
+    push_be32(&mut dtb, 16);
+    push_be32(&mut dtb, 0);
+    push_be32(&mut dtb, strings.len() as u32);
+    push_be32(&mut dtb, structs.len() as u32);
+    push_be64(&mut dtb, 0x8000_0000);
+    push_be64(&mut dtb, 0x1000);
+    push_be64(&mut dtb, 0);
+    push_be64(&mut dtb, 0);
+    dtb.extend_from_slice(&structs);
+    dtb.extend_from_slice(strings);
+    dtb
+}
+
 #[test]
 fn dice_node_regions() {
     let dtb = build_dice_dtb();
@@ -116,4 +212,22 @@ fn dice_node_regions() {
 
     assert_eq!(region.starting_address as usize, 0x1234_5000);
     assert_eq!(region.size, 0x1000);
+}
+
+#[test]
+fn memreserve_and_reserved_memory_regions() {
+    let dtb = build_reserved_memory_dtb();
+    let fdt = LinuxFdt::new(&dtb).unwrap();
+
+    let memreserve = fdt.mem_reservations().collect::<Vec<_>>();
+    assert_eq!(memreserve.len(), 1);
+    assert_eq!(memreserve[0].starting_address as usize, 0x8000_0000);
+    assert_eq!(memreserve[0].size, 0x1000);
+
+    let reserved = fdt.reserved_memory_regions().collect::<Vec<_>>();
+    assert_eq!(reserved.len(), 2);
+    assert_eq!(reserved[0].starting_address as usize, 0x8100_0000);
+    assert_eq!(reserved[0].size, 0x2000);
+    assert_eq!(reserved[1].starting_address as usize, 0x8200_0000);
+    assert_eq!(reserved[1].size, 0x3000);
 }

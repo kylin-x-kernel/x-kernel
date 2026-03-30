@@ -6,99 +6,54 @@
 
 use boot_info::BootInfo;
 use heapless::Vec;
-use kbuild_config::MMIO_RANGES;
-use kplat::memory::{HwMemory, MemRange, PhysAddr, VirtAddr, default_p2v, default_v2p, va};
-use lazyinit::LazyInit;
+use kbuild_config::{DMA_MEM_SIZE, MMIO_RANGES};
+use kplat::memory::{
+    HwMemory, MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr,
+    default_p2v, default_v2p, va,
+};
 use pci::{BarInfo, Cam, HeaderType, MmioCam, PciRoot};
-use x86_peripherals::bootmem::for_each_ram_region;
-
-use crate::acpi;
+use x86_peripherals::memory::{X86MemState, push_merged_region};
 
 const MAX_REGIONS: usize = 128;
 const MAX_MMIO_RANGES: usize = 64;
-static RAM_REGIONS: LazyInit<Vec<MemRange, MAX_REGIONS>> = LazyInit::new();
-static MMIO_REGIONS: LazyInit<Vec<MemRange, MAX_MMIO_RANGES>> = LazyInit::new();
+static MEM_STATE: X86MemState<MAX_REGIONS, MAX_REGIONS, MAX_MMIO_RANGES> = X86MemState::new();
 /// Initializes RAM region list from boot protocol memory descriptors.
 pub fn init(boot_info: &BootInfo) {
-    let mut regions = Vec::new();
-    let mut mmio_regions = Vec::new();
-    for &range in MMIO_RANGES.iter() {
-        mmio_regions.push(range).unwrap();
+    MEM_STATE.init(
+        boot_info,
+        &[ReservedRegion::new(
+            0,
+            0x200000,
+            ReservedKind::Platform,
+            ReservedSource::Platform,
+            "legacy low memory",
+        )],
+        MMIO_RANGES,
+        DMA_MEM_SIZE,
+        &[kernel_image_exclusion(boot_info.kernel_load_paddr)],
+        |mmio_regions| {
+            if let Some(mcfg) = ::acpi::find_mcfg_from_init()
+                && let Some((ecam_start, ecam_size)) = mcfg.ecam_region()
+            {
+                push_merged_region(mmio_regions, ecam_start, ecam_size);
+                collect_pci_bar_regions(
+                    mmio_regions,
+                    mcfg.base_address as usize,
+                    mcfg.start_bus,
+                    mcfg.end_bus,
+                );
+            }
+        },
+    );
+
+    kplat::kprintln!(
+        "{:?} memory regions: {}",
+        boot_info.protocol(),
+        MEM_STATE.ram_regions().len()
+    );
+    for (idx, (start, size)) in MEM_STATE.ram_regions().iter().enumerate() {
+        kplat::kprintln!("  ram[{idx}] = {start:#x}..{:#x}", start + size);
     }
-
-    if let Some(mcfg) = acpi::find_mcfg(boot_info.rsdp_addr) {
-        let ecam_start = mcfg.base_address as usize + ((mcfg.start_bus as usize) << 20);
-        let ecam_size = ((mcfg.end_bus as usize - mcfg.start_bus as usize) + 1) << 20;
-        push_mmio_region(&mut mmio_regions, ecam_start, ecam_size);
-        collect_pci_bar_regions(&mut mmio_regions, ecam_start, mcfg.start_bus, mcfg.end_bus);
-    }
-
-    for_each_ram_region(boot_info, |start, size| {
-        push_ram_region(&mut regions, start, size)
-    });
-    if regions.is_empty() {
-        kplat::kprintln!(
-            "boot memory map empty, protocol={:?}, fallback to config: base={:#x}, size={:#x}",
-            boot_info.protocol(),
-            kbuild_config::PHYS_MEM_BASE,
-            kbuild_config::PHYS_MEM_SIZE
-        );
-        regions
-            .push((kbuild_config::PHYS_MEM_BASE, kbuild_config::PHYS_MEM_SIZE))
-            .unwrap();
-    } else {
-        kplat::kprintln!(
-            "{:?} memory regions: {}",
-            boot_info.protocol(),
-            regions.len()
-        );
-        for (idx, (start, size)) in regions.iter().enumerate() {
-            kplat::kprintln!("  ram[{idx}] = {start:#x}..{:#x}", start + size);
-        }
-    }
-    RAM_REGIONS.init_once(regions);
-    MMIO_REGIONS.init_once(mmio_regions);
-}
-
-fn push_ram_region(regions: &mut Vec<MemRange, MAX_REGIONS>, start: usize, size: usize) {
-    if size == 0 {
-        return;
-    }
-
-    if let Some((prev_start, prev_size)) = regions.last_mut()
-        && *prev_start + *prev_size == start
-    {
-        *prev_size += size;
-        return;
-    }
-
-    regions.push((start, size)).unwrap();
-}
-
-fn push_mmio_region(regions: &mut Vec<MemRange, MAX_MMIO_RANGES>, start: usize, size: usize) {
-    if size == 0 {
-        return;
-    }
-
-    let mut merged_start = start;
-    let mut merged_end = start + size;
-    let mut index = 0;
-    while index < regions.len() {
-        let (existing_start, existing_size) = regions[index];
-        let existing_end = existing_start + existing_size;
-        if merged_end < existing_start || merged_start > existing_end {
-            index += 1;
-            continue;
-        }
-
-        merged_start = merged_start.min(existing_start);
-        merged_end = merged_end.max(existing_end);
-        regions.swap_remove(index);
-    }
-
-    regions
-        .push((merged_start, merged_end - merged_start))
-        .unwrap();
 }
 
 fn collect_pci_bar_regions(
@@ -124,7 +79,7 @@ fn collect_pci_bar_regions(
                     && address > 0
                     && size > 0
                 {
-                    push_mmio_region(regions, address as usize, size as usize);
+                    push_merged_region(regions, address as usize, size as usize);
                 }
 
                 bar += 1;
@@ -141,20 +96,20 @@ struct HwMemoryImpl;
 impl HwMemory for HwMemoryImpl {
     /// Returns all physical memory (RAM) ranges on the platform.
     fn ram_regions() -> &'static [MemRange] {
-        RAM_REGIONS.as_slice()
+        MEM_STATE.ram_regions()
     }
 
-    fn rsvd_regions() -> &'static [MemRange] {
-        &[(0, 0x200000)]
+    fn firmware_reserved_regions() -> &'static [ReservedRegion] {
+        MEM_STATE.firmware_reserved_regions()
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.
     fn mmio_regions() -> &'static [MemRange] {
-        MMIO_REGIONS.as_slice()
+        MEM_STATE.mmio_regions()
     }
 
     fn dma_regions() -> &'static [MemRange] {
-        &[(kbuild_config::DMA_MEM_BASE, kbuild_config::DMA_MEM_SIZE)]
+        MEM_STATE.dma_regions()
     }
 
     fn p2v(paddr: PhysAddr) -> VirtAddr {
@@ -171,4 +126,14 @@ impl HwMemory for HwMemoryImpl {
             kbuild_config::KERNEL_ASPACE_SIZE,
         )
     }
+}
+
+fn kernel_image_exclusion(kernel_load_paddr: usize) -> MemRange {
+    unsafe extern "C" {
+        fn _skernel();
+        fn _ekernel();
+    }
+
+    let kernel_size = (_ekernel as *const () as usize) - (_skernel as *const () as usize);
+    (kernel_load_paddr, kernel_size)
 }

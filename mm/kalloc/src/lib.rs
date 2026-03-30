@@ -16,15 +16,29 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     fmt,
     ptr::NonNull,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[allow(unused_imports)]
-use alloc_engine::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, PageAllocator};
+use alloc_engine::{
+    AddrTranslator, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
+};
+use kaddr_layout::v2p;
 use kspin::SpinNoIrq;
 use strum::{IntoStaticStr, VariantArray};
 
 const PAGE_SIZE: usize = 0x1000;
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
+
+struct KernelAddrTranslator;
+
+impl AddrTranslator for KernelAddrTranslator {
+    fn virt_to_phys(&self, va: usize) -> Option<usize> {
+        Some(v2p(va))
+    }
+}
+
+static KERNEL_ADDR_TRANSLATOR: KernelAddrTranslator = KernelAddrTranslator;
 
 mod page;
 pub use page::GlobalPage;
@@ -107,14 +121,17 @@ impl fmt::Debug for Usages {
 /// the byte allocator.
 ///
 /// Currently, [`TlsfByteAllocator`] is used as the byte allocator, while
-/// [`BitmapPageAllocator`] is used as the page allocator.
+/// [`BuddyPageAllocator`] is used as the page allocator.
 ///
 /// [`TlsfByteAllocator`]: alloc_engine::TlsfByteAllocator
 pub struct GlobalAllocator {
     balloc: SpinNoIrq<DefaultByteAllocator>,
-    #[cfg(not(feature = "level-1"))]
-    palloc: SpinNoIrq<BitmapPageAllocator<PAGE_SIZE>>,
-    dma_palloc: SpinNoIrq<BitmapPageAllocator<PAGE_SIZE>>,
+    /// Whether the byte allocator already owns a bootstrap heap region.
+    heap_ready: AtomicBool,
+    /// Whether the page allocator has at least one usable memory region.
+    page_ready: AtomicBool,
+    palloc: SpinNoIrq<BuddyPageAllocator<PAGE_SIZE>>,
+    dma_palloc: SpinNoIrq<BuddyPageAllocator<PAGE_SIZE>>,
     usages: SpinNoIrq<Usages>,
 }
 
@@ -129,9 +146,10 @@ impl GlobalAllocator {
     pub const fn new() -> Self {
         Self {
             balloc: SpinNoIrq::new(DefaultByteAllocator::new()),
-            #[cfg(not(feature = "level-1"))]
-            palloc: SpinNoIrq::new(BitmapPageAllocator::new()),
-            dma_palloc: SpinNoIrq::new(BitmapPageAllocator::new()),
+            heap_ready: AtomicBool::new(false),
+            page_ready: AtomicBool::new(false),
+            palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
+            dma_palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
             usages: SpinNoIrq::new(Usages::new()),
         }
     }
@@ -151,36 +169,40 @@ impl GlobalAllocator {
 
     /// Initializes the allocator with the given region.
     ///
-    /// It firstly adds the whole region to the page allocator, then allocates
-    /// a small region (32 KB) to initialize the byte allocator. Therefore,
-    /// the given region must be larger than 32 KB.
+    /// This is the legacy "initialize both page allocator and byte allocator"
+    /// entry used by paths that already have a stable runtime memory region.
     pub fn init(&self, va: usize, size: usize) {
         assert!(size > MIN_HEAP_SIZE);
-        #[cfg(not(feature = "level-1"))]
-        {
-            let heap_size = MIN_HEAP_SIZE;
-            self.palloc.lock().init_region(va, size);
-            let heap_addr = self
-                .alloc_pages(heap_size / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap)
-                .unwrap();
+        self.init_or_extend_page_allocator(va, size)
+            .expect("failed to initialize page allocator");
+        self.bootstrap_heap_if_needed()
+            .expect("failed to initialize heap memory");
+    }
 
-            self.balloc.lock().init_region(heap_addr, heap_size);
-        }
-        #[cfg(feature = "level-1")]
-        {
-            self.balloc.lock().init_region(va, size);
-        }
+    pub fn init_page_allocator(&self, va: usize, size: usize) {
+        self.init_or_extend_page_allocator(va, size)
+            .expect("failed to initialize page allocator");
     }
 
     pub fn init_dma_page_allocator(&self, va: usize, size: usize) {
+        self.configure_dma_page_allocator();
         self.dma_palloc.lock().init_region(va, size);
+    }
+
+    pub fn is_page_allocator_ready(&self) -> bool {
+        self.page_ready.load(Ordering::Acquire)
     }
 
     /// Add the given region to the allocator.
     ///
-    /// It will add the whole region to the byte allocator.
+    /// By default new memory first becomes available to the page allocator.
     pub fn add_memory(&self, va: usize, size: usize) -> AllocResult {
-        self.balloc.lock().add_region(va, size)
+        self.init_or_extend_page_allocator(va, size)?;
+
+        if !self.heap_ready.load(Ordering::Acquire) {
+            self.bootstrap_heap_if_needed()?;
+        }
+        Ok(())
     }
 
     /// Allocate arbitrary number of bytes. Returns the left bound of the
@@ -190,48 +212,32 @@ impl GlobalAllocator {
     /// memory, it asks the page allocator for more memory and adds it to the
     /// byte allocator.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        #[cfg(feature = "level-1")]
-        {
-            self.alloc_level1(layout)
-        }
-        #[cfg(not(feature = "level-1"))]
-        {
-            self.alloc_level2(layout)
-        }
-    }
-
-    #[cfg(feature = "level-1")]
-    fn alloc_level1(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        // single-level allocator: only use the byte allocator.
-        let mut balloc = self.balloc.lock();
-        let ptr = balloc.allocate(layout)?;
-        self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-        Ok(ptr)
-    }
-
-    #[cfg(not(feature = "level-1"))]
-    fn alloc_level2(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        // simple two-level allocator: if no heap memory, allocate from the page allocator.
         let mut balloc = self.balloc.lock();
         loop {
-            if let Ok(ptr) = balloc.allocate(layout) {
+            let heap_ready = self.heap_ready.load(Ordering::Acquire);
+            if heap_ready && let Ok(ptr) = balloc.allocate(layout) {
                 self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
                 return Ok(ptr);
-            } else {
-                let old_size = balloc.total_bytes();
-                let exp_size = old_size
-                    .max(layout.size())
-                    .next_power_of_two()
-                    .max(PAGE_SIZE);
+            }
 
-                let mut req_size = exp_size;
-                let min_size = PAGE_SIZE.max(layout.size());
-                loop {
-                    let heap_addr = match self.alloc_pages(
-                        req_size / PAGE_SIZE,
-                        PAGE_SIZE,
-                        UsageKind::RustHeap,
-                    ) {
+            let old_size = if heap_ready { balloc.total_bytes() } else { 0 };
+            let exp_size = old_size
+                .max(layout.size())
+                .next_power_of_two()
+                .max(PAGE_SIZE);
+
+            let mut req_size = exp_size;
+            let min_size = if heap_ready {
+                PAGE_SIZE.max(layout.size())
+            } else {
+                MIN_HEAP_SIZE.max(layout.size())
+            };
+            loop {
+                if !heap_ready {
+                    req_size = (req_size + MIN_HEAP_SIZE - 1) & !(MIN_HEAP_SIZE - 1);
+                }
+                let heap_addr =
+                    match self.alloc_pages(req_size / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap) {
                         Ok(addr) => addr,
                         Err(err) => {
                             req_size /= 2;
@@ -241,14 +247,18 @@ impl GlobalAllocator {
                             continue;
                         }
                     };
-                    debug!(
-                        "expand heap memory: [{:#x}, {:#x})",
-                        heap_addr,
-                        heap_addr + req_size
-                    );
+                debug!(
+                    "expand heap memory: [{:#x}, {:#x})",
+                    heap_addr,
+                    heap_addr + req_size
+                );
+                if heap_ready {
                     balloc.add_region(heap_addr, req_size)?;
-                    break;
+                } else {
+                    balloc.init_region(heap_addr, req_size);
+                    self.heap_ready.store(true, Ordering::Release);
                 }
+                break;
             }
         }
     }
@@ -279,23 +289,15 @@ impl GlobalAllocator {
         align_pow2: usize,
         kind: UsageKind,
     ) -> AllocResult<usize> {
-        #[cfg(feature = "level-1")]
-        {
-            // single-level allocator: allocate from the byte allocator.
-            let mut balloc = self.balloc.lock();
-            let layout = Layout::from_size_align(num_pages * PAGE_SIZE, align_pow2).unwrap();
-            let ptr = balloc.allocate(layout)?;
+        debug_assert!(
+            self.page_ready.load(Ordering::Acquire),
+            "page allocator is not initialized"
+        );
+        let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
+        if !matches!(kind, UsageKind::RustHeap) {
             self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
-            Ok(ptr.as_ptr() as usize)
         }
-        #[cfg(not(feature = "level-1"))]
-        {
-            let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
-            if !matches!(kind, UsageKind::RustHeap) {
-                self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
-            }
-            Ok(addr)
-        }
+        Ok(addr)
     }
 
     /// Allocates contiguous DMA pages.
@@ -329,22 +331,14 @@ impl GlobalAllocator {
         align_pow2: usize,
         kind: UsageKind,
     ) -> AllocResult<usize> {
-        #[cfg(feature = "level-1")]
-        {
-            let _ = (va, num_pages, align_pow2, kind);
-            unimplemented!("level-1 allocator does not support alloc_pages_at")
+        let addr = self
+            .palloc
+            .lock()
+            .allocate_pages_at(va, num_pages, align_pow2)?;
+        if kind != UsageKind::RustHeap {
+            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
         }
-        #[cfg(not(feature = "level-1"))]
-        {
-            let addr = self
-                .palloc
-                .lock()
-                .allocate_pages_at(va, num_pages, align_pow2)?;
-            if kind != UsageKind::RustHeap {
-                self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
-            }
-            Ok(addr)
-        }
+        Ok(addr)
     }
 
     /// Gives back the allocated pages starts from `va` to the page allocator.
@@ -356,15 +350,6 @@ impl GlobalAllocator {
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
-        #[cfg(feature = "level-1")]
-        {
-            // single-level allocator: deallocate to the byte allocator.
-            let mut balloc = self.balloc.lock();
-            let layout = Layout::from_size_align(num_pages * PAGE_SIZE, PAGE_SIZE).unwrap();
-            let ptr = NonNull::new(va as *mut u8).unwrap();
-            balloc.deallocate(ptr, layout);
-        }
-        #[cfg(not(feature = "level-1"))]
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
@@ -372,6 +357,40 @@ impl GlobalAllocator {
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
         self.dma_palloc.lock().deallocate_pages(va, num_pages);
+    }
+
+    fn configure_page_allocator(&self) {
+        self.palloc
+            .lock()
+            .set_addr_translator(&KERNEL_ADDR_TRANSLATOR);
+    }
+
+    fn configure_dma_page_allocator(&self) {
+        self.dma_palloc
+            .lock()
+            .set_addr_translator(&KERNEL_ADDR_TRANSLATOR);
+    }
+
+    fn init_or_extend_page_allocator(&self, va: usize, size: usize) -> AllocResult {
+        self.configure_page_allocator();
+        if self.page_ready.load(Ordering::Acquire) {
+            self.palloc.lock().add_region(va, size)?;
+        } else {
+            self.palloc.lock().init_region(va, size);
+            self.page_ready.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn bootstrap_heap_if_needed(&self) -> AllocResult {
+        if self.heap_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let heap_addr =
+            self.alloc_pages(MIN_HEAP_SIZE / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap)?;
+        self.balloc.lock().init_region(heap_addr, MIN_HEAP_SIZE);
+        self.heap_ready.store(true, Ordering::Release);
+        Ok(())
     }
 
     // Note: The following delegation pattern is a standard Rust idiom for
@@ -388,23 +407,11 @@ impl GlobalAllocator {
 
     /// Returns the number of allocated pages in the page allocator.
     pub fn used_pages(&self) -> usize {
-        #[cfg(feature = "level-1")]
-        {
-            self.used_bytes().div_ceil(PAGE_SIZE)
-        }
-        #[cfg(not(feature = "level-1"))]
-        {
-            self.palloc.lock().used_pages()
-        }
+        self.palloc.lock().used_pages()
     }
 
     /// Returns the number of available pages in the page allocator.
     pub fn available_pages(&self) -> usize {
-        #[cfg(feature = "level-1")]
-        {
-            self.available_bytes().div_ceil(PAGE_SIZE)
-        }
-        #[cfg(not(feature = "level-1"))]
         self.palloc.lock().available_pages()
     }
 
@@ -508,7 +515,7 @@ pub fn global_allocator() -> &'static GlobalAllocator {
 /// is valid and not being used by others, so that the allocated memory is also
 /// valid.
 ///
-/// This function should be called only once, and before any allocation.
+/// The first call bootstraps the allocator, and later calls extend it.
 pub fn global_init(va: usize, size: usize) {
     debug!(
         "initialize global allocator at: [{:#x}, {:#x})",
@@ -540,6 +547,10 @@ pub fn global_init_dma_page_allocator(va: usize, size: usize) {
         va + size
     );
     GLOBAL_ALLOCATOR.init_dma_page_allocator(va, size);
+}
+
+pub fn is_page_allocator_ready() -> bool {
+    GLOBAL_ALLOCATOR.is_page_allocator_ready()
 }
 
 #[cfg(unittest)]

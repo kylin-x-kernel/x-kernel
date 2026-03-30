@@ -89,6 +89,10 @@ pub fn kernel_page_table_root() -> PhysAddr {
 /// fine-grained kernel page table.
 pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
+    assert!(
+        kalloc::is_page_allocator_ready(),
+        "kernel page allocator must be initialized before init_memory_management()"
+    );
     #[cfg(feature = "sev")]
     {
         let cbit_pos = kbuild_config::SEV_CBIT_POS;
@@ -120,6 +124,10 @@ pub fn init_memory_management() {
 
 /// Initializes kernel paging for secondary CPUs.
 pub fn init_memory_management_secondary() {
+    assert!(
+        KERNEL_ASPACE.get().is_some(),
+        "kernel address space must be initialized before secondary MMU activation"
+    );
     unsafe { karch::write_kernel_page_table(kernel_page_table_root()) };
     // flush all TLB
     karch::flush_tlb(None);

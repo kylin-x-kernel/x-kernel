@@ -4,7 +4,6 @@
 
 //! # Cargo Features
 //!
-//! - `alloc`: Enable global memory allocator.
 //! - `paging`: Enable page table manipulation support.
 //! - `smp`: Enable SMP (symmetric multiprocessing) support.
 //! - `fs`: Enable filesystem support.
@@ -28,6 +27,7 @@ mod mp;
 mod init_setup;
 
 use kernel_boot::{PRIMARY_KERNEL_ENTRY, register_boot_init};
+use kplat::memory::MemFlags;
 
 #[cfg(feature = "smp")]
 pub use self::mp::rust_main_secondary;
@@ -99,6 +99,19 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
+const MAX_REGION_LOG_SUMMARIES: usize = 64;
+const REGION_LOG_SUMMARY_THRESHOLD: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
+struct RegionLogSummary {
+    name: &'static str,
+    flags: MemFlags,
+    count: usize,
+    total_size: usize,
+    first_start: usize,
+    last_end: usize,
+}
+
 fn is_init_ok() -> bool {
     INITED_CPUS.load(Ordering::Acquire) == kbuild_config::CPU_NUM
 }
@@ -164,20 +177,11 @@ pub fn rust_main(arg: usize) -> ! {
     info!("Primary CPU {cpu_id} started, boot_info = {arg:#x}.");
 
     khal::mem::init();
-    info!("Found physcial memory regions:");
-    for memory_region in khal::mem::memory_regions() {
-        info!(
-            "  [{:x?}, {:x?}) {} ({:?})",
-            memory_region.paddr,
-            memory_region.paddr + memory_region.size,
-            memory_region.name,
-            memory_region.flags
-        );
-    }
+    log_memory_regions();
 
-    #[cfg(feature = "alloc")]
     init_allocator();
-
+    memspace::init_memory_management();
+    finish_allocator_init();
     {
         use core::ops::Range;
 
@@ -202,9 +206,6 @@ pub fn rust_main(arg: usize) -> ! {
 
         backtrace::init(ip_range, fp_range);
     }
-
-    #[cfg(feature = "paging")]
-    memspace::init_memory_management();
 
     info!("Initialize platform devices...");
     khal::final_init(boot_info);
@@ -256,40 +257,104 @@ pub fn rust_main(arg: usize) -> ! {
     ktask::exit(0);
 }
 
-#[cfg(feature = "alloc")]
-fn init_allocator() {
-    use khal::mem::{MemFlags, memory_regions, p2v, v2p};
+fn log_memory_regions() {
+    use heapless::Vec;
 
-    info!("Initialize global memory allocator...");
-    info!("  use {} allocator.", kalloc::global_allocator().name());
-
-    let free_regions = || memory_regions().filter(|r| r.flags.contains(MemFlags::FREE));
-
-    unsafe extern "C" {
-        safe static _ekernel: [u8; 0];
-    }
-    let kernel_end_paddr = v2p(_ekernel.as_ptr().addr().into());
-
-    let init_region = free_regions()
-        // First try to find a free memory region after the kernel image
-        .find(|r| r.paddr >= kernel_end_paddr)
-        // Otherwise just use the largest free memory region
-        .or_else(|| free_regions().max_by_key(|r| r.size))
-        .expect("no free memory region found!!");
-
-    kalloc::global_init(p2v(init_region.paddr).as_usize(), init_region.size);
-
-    for r in free_regions() {
-        if r.paddr != init_region.paddr {
-            kalloc::global_add_memory(p2v(r.paddr).as_usize(), r.size)
-                .expect("add heap memory region failed");
+    let mut summaries = Vec::<RegionLogSummary, MAX_REGION_LOG_SUMMARIES>::new();
+    for region in khal::mem::memory_regions() {
+        let start = region.paddr.as_usize();
+        let end = start + region.size;
+        if let Some(summary) = summaries.iter_mut().find(|summary| {
+            summary.name == region.name && summary.flags.bits() == region.flags.bits()
+        }) {
+            summary.count += 1;
+            summary.total_size += region.size;
+            summary.first_start = summary.first_start.min(start);
+            summary.last_end = summary.last_end.max(end);
+        } else {
+            summaries
+                .push(RegionLogSummary {
+                    name: region.name,
+                    flags: region.flags,
+                    count: 1,
+                    total_size: region.size,
+                    first_start: start,
+                    last_end: end,
+                })
+                .expect("too many region log summaries");
         }
     }
 
-    let dma_regions = || memory_regions().filter(|r| r.flags.contains(MemFlags::UNCACHED));
-    for r in dma_regions() {
-        kalloc::global_init_dma_page_allocator(p2v(r.paddr).as_usize(), r.size);
+    info!("Found physcial memory regions:");
+    for region in khal::mem::memory_regions() {
+        let summary = summaries
+            .iter()
+            .find(|summary| {
+                summary.name == region.name && summary.flags.bits() == region.flags.bits()
+            })
+            .expect("missing memory region log summary");
+        if should_summarize_region(summary) {
+            continue;
+        }
+        info!(
+            "  [{:x?}, {:x?}) {} ({:?})",
+            region.paddr,
+            region.paddr + region.size,
+            region.name,
+            region.flags
+        );
     }
+
+    for summary in summaries {
+        if !should_summarize_region(&summary) {
+            continue;
+        }
+        info!(
+            "  {}: {} regions, total {:#x}, span [PA:{:#x}, PA:{:#x}) ({:?})",
+            summary.name,
+            summary.count,
+            summary.total_size,
+            summary.first_start,
+            summary.last_end,
+            summary.flags
+        );
+    }
+}
+
+fn should_summarize_region(summary: &RegionLogSummary) -> bool {
+    summary.count >= REGION_LOG_SUMMARY_THRESHOLD && summary.name.starts_with("uefi ")
+}
+
+fn init_allocator() {
+    use khal::mem::{MemFlags, dma_regions, memory_regions, p2v};
+
+    info!("Initialize global memory allocator...");
+    info!("  use {} allocator.", kalloc::global_allocator().name());
+    let mut free_regions = memory_regions().filter(|r| r.flags.contains(MemFlags::FREE));
+    if let Some(region) = free_regions.next() {
+        kalloc::global_init(p2v(region.paddr).as_usize(), region.size);
+    }
+    for region in free_regions {
+        kalloc::global_add_memory(p2v(region.paddr).as_usize(), region.size)
+            .expect("failed to add free region to allocator");
+    }
+
+    for &(start, size) in dma_regions() {
+        kalloc::global_init_dma_page_allocator(p2v(start.into()).as_usize(), size);
+    }
+}
+
+fn finish_allocator_init() {
+    let allocator = kalloc::global_allocator();
+    info!(
+        "Allocator state: heap used={:#x}, heap avail={:#x}, pages used={}, pages avail={}, \
+         usages={:?}",
+        allocator.used_bytes(),
+        allocator.available_bytes(),
+        allocator.used_pages(),
+        allocator.available_pages(),
+        allocator.usages()
+    );
 }
 
 fn init_interrupt() {
