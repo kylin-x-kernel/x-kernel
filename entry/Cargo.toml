@@ -13,11 +13,9 @@ kernel = [
     "kfeat/alloc-slab",
     "kfeat/fs-ext4",
     "kfeat/net",
-    "kfeat/page-alloc-4g",
     "kfeat/rtc",
     "kfeat/sched-rr",
     "kfeat/task-ext",
-    "kfeat/uspace",
 ]
 
 tee = ["kcore/tee", "ksyscall/tee"]

@@ -8,13 +8,11 @@
 ///
 /// In detail, it initializes the trap vector on RISC-V platforms.
 pub fn init_trap() {
-    #[cfg(feature = "uspace")]
     crate::userspace_common::init_exception_table();
     unsafe extern "C" {
         fn trap_vector_base();
     }
     unsafe {
-        #[cfg(feature = "uspace")]
         riscv::register::sstatus::set_sum();
         karch::write_trap_vector_base(trap_vector_base as *const () as usize);
     }

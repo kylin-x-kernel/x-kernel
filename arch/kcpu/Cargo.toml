@@ -12,7 +12,6 @@ repository.workspace = true
 default = []
 fp-simd = []
 tls = []
-uspace = []
 arm-el2 = ["karch/arm-el2"]
 
 [dependencies]

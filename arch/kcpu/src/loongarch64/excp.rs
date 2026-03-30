@@ -30,7 +30,6 @@ fn dispatch_irq_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFla
     if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
-    #[cfg(feature = "uspace")]
     if tf.fixup_exception() {
         return;
     }

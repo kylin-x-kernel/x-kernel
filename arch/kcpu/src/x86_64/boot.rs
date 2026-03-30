@@ -17,9 +17,8 @@ pub fn init_percpu(cpu_id: usize) {
 
 /// Initializes trap handling on the current CPU.
 ///
-/// In detail, it initializes the GDT, IDT on x86_64 platforms. If the `uspace`
-/// feature is enabled, it also initializes relevant model-specific registers to
-/// configure the handler for `syscall` instruction.
+/// In detail, it initializes the GDT, IDT on x86_64 platforms and relevant
+/// model-specific registers to configure the handler for `syscall` instruction.
 ///
 /// # Notes
 /// Before calling this function, the initialization function of the [`percpu`]
@@ -28,10 +27,8 @@ pub fn init_percpu(cpu_id: usize) {
 ///
 /// [`percpu`]: https://docs.rs/percpu/latest/percpu/index.html
 pub fn init_trap() {
-    #[cfg(feature = "uspace")]
     crate::userspace_common::init_exception_table();
     super::gdt::init();
     super::idt::init();
-    #[cfg(feature = "uspace")]
     super::userspace::init_syscall();
 }

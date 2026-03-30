@@ -9,7 +9,7 @@
 //! - [`ByteAllocator`]: Byte-granularity memory allocator. (e.g.,
 //!   [`BuddyByteAllocator`], [`SlabByteAllocator`])
 //! - [`PageAllocator`]: Page-granularity memory allocator. (e.g.,
-//!   [`BitmapPageAllocator`])
+//!   [`BuddyPageAllocator`])
 //! - [`IdAllocator`]: Used to allocate unique IDs.
 
 #![no_std]
@@ -18,11 +18,6 @@
 #[allow(unused_imports)]
 #[macro_use]
 extern crate alloc;
-
-#[cfg(feature = "bitmap")]
-mod bitmap;
-#[cfg(feature = "bitmap")]
-pub use bitmap::BitmapPageAllocator;
 
 #[cfg(feature = "buddy-page")]
 mod buddy_page;

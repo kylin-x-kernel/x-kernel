@@ -16,7 +16,6 @@ pub use boot::init_trap;
 
 mod excp;
 
-#[cfg(feature = "uspace")]
 pub mod userspace;
 
 pub use self::ctx::{

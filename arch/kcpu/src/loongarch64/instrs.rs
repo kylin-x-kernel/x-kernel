@@ -11,10 +11,8 @@ pub unsafe fn write_exception_entry_base(eentry: usize) {
     unsafe { karch::write_trap_vector_base(eentry) }
 }
 
-#[cfg(feature = "uspace")]
 core::arch::global_asm!(include_asm_macros!(), include_str!("copy_user.S"));
 
-#[cfg(feature = "uspace")]
 unsafe extern "C" {
     /// Copies data from source to destination, where addresses may be in user
     /// space. Equivalent to memcpy.

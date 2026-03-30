@@ -216,7 +216,6 @@ pub struct TaskContext {
     /// Thread Pointer
     pub tpidr_el0: u64,
     /// The `ttbr0_el1` register value, i.e., the page table root.
-    #[cfg(feature = "uspace")]
     pub ttbr0_el1: memaddr::PhysAddr,
     #[cfg(feature = "fp-simd")]
     pub fp_state: FpState,
@@ -246,7 +245,6 @@ impl TaskContext {
     ///
     /// The hardware register for user page table root (`ttbr0_el1` for aarch64 in EL1)
     /// will be updated to the next task's after [`Self::switch_to`].
-    #[cfg(feature = "uspace")]
     pub fn set_page_table_root(&mut self, ttbr0_el1: memaddr::PhysAddr) {
         self.ttbr0_el1 = ttbr0_el1;
     }
@@ -266,7 +264,6 @@ impl TaskContext {
             self.fp_state.save();
             next_ctx.fp_state.restore();
         }
-        #[cfg(feature = "uspace")]
         if self.ttbr0_el1 != next_ctx.ttbr0_el1 {
             unsafe { karch::write_user_page_table(next_ctx.ttbr0_el1) };
             karch::flush_tlb(None); // currently flush the entire TLB

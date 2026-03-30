@@ -17,7 +17,6 @@ rtc = []
 nmi = ["kplat/nmi"]
 pmu = []
 tls = ["kcpu/tls"]
-uspace = ["kcpu/uspace"]
 crosvm = []
 
 ipi = []

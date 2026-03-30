@@ -15,7 +15,6 @@ pub mod instrs;
 pub use instrs as asm;
 pub mod boot;
 
-#[cfg(feature = "uspace")]
 pub mod userspace;
 
 pub use self::{

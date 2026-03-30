@@ -4,10 +4,8 @@
 
 //! Wrapper functions for assembly instructions.
 
-#[cfg(feature = "uspace")]
 core::arch::global_asm!(include_str!("copy_user.S"));
 
-#[cfg(feature = "uspace")]
 unsafe extern "C" {
     /// Copies data from source to destination, where addresses may be in user
     /// space. Equivalent to memcpy.
@@ -22,5 +20,4 @@ unsafe extern "C" {
 }
 
 /// Alias for compatibility with other architectures
-#[cfg(feature = "uspace")]
 pub use raw_copy_from_user as user_copy;

@@ -18,8 +18,6 @@ smp = ["khal/smp", "kruntime/smp", "ktask?/smp", "kspin/smp"]
 # Floating point/SIMD
 fp-simd = ["khal/fp-simd"]
 
-# User space support
-uspace = ["khal/uspace"]
 
 # Interrupts
 ipi = [ "dep:kipi", "khal/ipi", "kruntime/ipi"]
@@ -31,8 +29,6 @@ sev = ["dma", "kdriver/sev", "memspace/sev"]
 alloc-tlsf = ["kalloc/tlsf"]
 alloc-slab = ["kalloc/slab"]
 alloc-buddy = ["kalloc/buddy"]
-page-alloc-64g = ["kalloc/page-alloc-64g"]                   # up to 64G memory capacity
-page-alloc-4g = ["kalloc/page-alloc-4g"]                     # up to 4G memory capacity
 dma = []
 
 task-ext = ["ktask/task-ext"]

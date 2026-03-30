@@ -41,7 +41,6 @@ pub use active_exception_context::{
     ExceptionContextGuard, active_exception_context, with_active_exception_context,
 };
 
-#[cfg(feature = "uspace")]
 mod userspace_common;
 
 cfg_if::cfg_if! {

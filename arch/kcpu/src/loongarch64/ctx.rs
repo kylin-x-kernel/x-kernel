@@ -268,7 +268,6 @@ pub struct TaskContext {
     pub s: [usize; 10],
     /// Thread Pointer
     pub tp: usize,
-    #[cfg(feature = "uspace")]
     /// user page table root
     pub pgdl: usize,
     #[cfg(feature = "fp-simd")]
@@ -294,7 +293,6 @@ impl TaskContext {
     ///
     /// The hardware register for user page table root (`pgdl` for loongarch64)
     /// will be updated to the next task's after [`Self::switch_to`].
-    #[cfg(feature = "uspace")]
     pub fn set_page_table_root(&mut self, pgdl: memaddr::PhysAddr) {
         self.pgdl = pgdl.as_usize();
     }
@@ -309,7 +307,6 @@ impl TaskContext {
             self.tp = karch::read_thread_pointer();
             unsafe { karch::write_thread_pointer(next_ctx.tp) };
         }
-        #[cfg(feature = "uspace")]
         {
             if self.pgdl != next_ctx.pgdl {
                 unsafe { karch::write_user_page_table(pa!(next_ctx.pgdl)) };

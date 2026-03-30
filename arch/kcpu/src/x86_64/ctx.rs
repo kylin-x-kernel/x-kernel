@@ -289,7 +289,6 @@ pub struct TaskContext {
     #[cfg(feature = "fp-simd")]
     pub ext_state: ExtendedState,
     /// The `CR3` register value, i.e., the page table root.
-    #[cfg(feature = "uspace")]
     pub cr3: memaddr::PhysAddr,
 }
 
@@ -319,7 +318,6 @@ impl TaskContext {
             kstack_top: va!(0),
             rsp: 0,
             fs_base: 0,
-            #[cfg(feature = "uspace")]
             cr3: karch::read_kernel_page_table(),
             #[cfg(feature = "fp-simd")]
             ext_state: ExtendedState::default(),
@@ -343,7 +341,6 @@ impl TaskContext {
     ///
     /// The hardware register for page table root (`CR3` for x86) will be
     /// updated to the next task's after [`Self::switch_to`].
-    #[cfg(feature = "uspace")]
     pub fn set_page_table_root(&mut self, cr3: memaddr::PhysAddr) {
         self.cr3 = cr3;
     }
@@ -363,7 +360,6 @@ impl TaskContext {
             self.ext_state.save();
             next_ctx.ext_state.restore();
         }
-        #[cfg(feature = "uspace")]
         unsafe {
             if next_ctx.cr3 != self.cr3 {
                 karch::write_user_page_table(next_ctx.cr3);

@@ -25,7 +25,7 @@
 //! - `paging`: Enable page table manipulation.
 //! - `tls`: Enable kernel space thread-local storage support.
 //! - `rtc`: Enable real-time clock support.
-//! - `uspace`: Enable user space support.
+//! - User space support is always enabled.
 
 #![no_std]
 #![feature(doc_cfg)]
@@ -98,9 +98,7 @@ pub mod context {
     };
 }
 
-pub use kcpu::instrs as asm;
-#[cfg(feature = "uspace")]
-pub use kcpu::userspace as uspace;
+pub use kcpu::{instrs as asm, userspace as uspace};
 #[cfg(feature = "smp")]
 pub use kplat::boot::{
     early_init_ap as early_init_secondary, final_init_ap as final_init_secondary,

@@ -341,7 +341,6 @@ pub struct TaskContext {
     /// Thread Pointer
     pub tp: usize,
     /// The `satp` register value, i.e., the page table root.
-    #[cfg(feature = "uspace")]
     pub satp: memaddr::PhysAddr,
     #[cfg(feature = "fp-simd")]
     pub fp_state: FpState,
@@ -357,7 +356,6 @@ impl TaskContext {
     /// [`switch_to`]: TaskContext::switch_to
     pub fn new() -> Self {
         Self {
-            #[cfg(feature = "uspace")]
             satp: karch::read_kernel_page_table(),
             ..Default::default()
         }
@@ -375,7 +373,6 @@ impl TaskContext {
     ///
     /// The hardware register for page table root (`satp` for riscv64) will be
     /// updated to the next task's after [`Self::switch_to`].
-    #[cfg(feature = "uspace")]
     pub fn set_page_table_root(&mut self, satp: memaddr::PhysAddr) {
         self.satp = satp;
     }
@@ -390,7 +387,6 @@ impl TaskContext {
             self.tp = karch::read_thread_pointer();
             unsafe { karch::write_thread_pointer(next_ctx.tp) };
         }
-        #[cfg(feature = "uspace")]
         if self.satp != next_ctx.satp {
             unsafe { karch::write_user_page_table(next_ctx.satp) };
             karch::flush_tlb(None); // currently flush the entire TLB

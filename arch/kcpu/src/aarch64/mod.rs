@@ -10,7 +10,6 @@ pub mod instrs;
 
 mod excp;
 
-#[cfg(feature = "uspace")]
 pub mod userspace;
 
 pub use self::ctx::{ExceptionContext as TrapFrame, ExceptionContext, FpState, TaskContext};
@@ -20,7 +19,6 @@ pub use self::ctx::{ExceptionContext as TrapFrame, ExceptionContext, FpState, Ta
 /// In detail, it initializes the exception vector, and sets `TTBR0_EL1` to 0 to
 /// block low address access.
 pub fn init_trap() {
-    #[cfg(feature = "uspace")]
     crate::userspace_common::init_exception_table();
     unsafe extern "C" {
         fn exception_vector_base();

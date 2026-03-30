@@ -34,9 +34,9 @@ define cargo_clippy
   $(call run_cmd,cargo -Z unstable-options -C $(APP) clippy,-p $(rust_package) --target $(TARGET) --features "$(strip $(KFEAT) $(APP_FEAT))" $(1) $(verbose) -- $(clippy_args))
 endef
 
-subdirs := api arch core drivers fs io mm net process sync tee util
-all_packages := \
-  $(foreach dir,$(subdirs),$(shell ls $(CURDIR)/$(dir)))
+package_roots := api arch boot core drivers fs io mm net process tee util
+crate_dirs := $(sort $(foreach root,$(package_roots),$(dir $(wildcard $(CURDIR)/$(root)/*/Cargo.toml))))
+all_packages := $(notdir $(patsubst %/,%,$(crate_dirs)))
 
 define cargo_doc
   $(call run_cmd,cargo doc,--no-deps --all-features --workspace $(verbose))
