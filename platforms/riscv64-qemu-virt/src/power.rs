@@ -13,7 +13,9 @@ impl SysCtrl for PowerImpl {
             warn!("HSM SBI extension is not supported for current SEE.");
             return;
         }
-        let entry = v2p(va!(crate::boot::_start_secondary as *const () as usize));
+        let entry = v2p(va!(
+            kernel_boot::arch::_start_secondary as *const () as usize
+        ));
         sbi_rt::hart_start(cpu_id, entry.as_usize(), stack_top_paddr);
     }
 

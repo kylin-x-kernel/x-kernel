@@ -16,6 +16,8 @@ pub mod boot;
 
 pub mod userspace;
 
+pub use boot::init_trap;
+
 pub use self::ctx::{
     ExceptionContext as TrapFrame, ExceptionContext, FpState, GeneralRegisters, TaskContext,
 };

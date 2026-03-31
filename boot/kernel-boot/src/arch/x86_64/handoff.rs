@@ -97,9 +97,10 @@ fn get_cpu_id() -> usize {
 }
 
 #[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, kimage_voffset: usize) {
-    kaddr_layout::set_kimage_voffset(kimage_voffset);
+pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg: usize) {
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
+        let kimage_voffset = handoff_arg;
+        kaddr_layout::set_kimage_voffset(kimage_voffset);
         unsafe { init_ap_boot_state() };
         let cpu_id = get_cpu_id();
         let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;

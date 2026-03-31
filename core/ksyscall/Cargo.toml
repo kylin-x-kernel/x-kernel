@@ -22,6 +22,7 @@ kerrno.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
+karch.workspace = true
 kio.workspace = true
 klogger.workspace = true
 memspace.workspace = true
@@ -42,3 +43,6 @@ linux_sysno.workspace = true
 tee_kernel = { workspace = true, optional = true }
 kcore.workspace = true
 num_enum = { version = "0.7", default-features = false }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv = "0.14"

@@ -18,7 +18,6 @@ use ksync::{
     spin::{NoPreempt, SpinNoIrq},
 };
 use ktask::{KTaskExt, TaskExt, current};
-use memaddr::PhysAddr;
 use unittest::{TestDescriptor, TestResult};
 use unittest_support::TestUserBuffer;
 
@@ -34,7 +33,7 @@ fn current_task_ptr() -> *mut ktask::TaskInner {
 
 struct InstalledTestThread {
     previous_task_ext: Option<KTaskExt>,
-    previous_page_table_root: PhysAddr,
+    previous_page_table_root: karch::HwPageTableRoot,
 }
 
 impl InstalledTestThread {
@@ -77,8 +76,8 @@ impl InstalledTestThread {
             }
 
             let ctx_ptr: *mut khal::context::TaskContext = (*task_ptr).ctx() as *const _ as *mut _;
-            (*ctx_ptr).set_page_table_root(page_table_root);
-            karch::write_user_page_table(page_table_root);
+            (*ctx_ptr).set_page_table_root(page_table_root.into());
+            karch::write_user_page_table(page_table_root.into());
             karch::flush_tlb(None);
 
             let previous_task_ext =

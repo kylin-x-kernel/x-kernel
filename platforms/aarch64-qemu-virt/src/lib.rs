@@ -14,6 +14,10 @@ mod init;
 mod mem;
 mod power;
 
+struct DmaPlatformImpl;
+
+kplat::default_dma_if_impl!(DmaPlatformImpl);
+
 aarch64_peripherals::console_if_impl!(ConsoleImpl);
 aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
 aarch64_peripherals::irq_if_impl!(IntrManagerImpl);

@@ -18,6 +18,10 @@ mod mem;
 mod mp;
 mod power;
 
+struct DmaPlatformImpl;
+
+kplat::default_dma_if_impl!(DmaPlatformImpl);
+
 x86_peripherals::console_if_impl!(ConsoleImpl, irq = Some(4));
 x86_peripherals::time_if_impl!(GlobalTimerImpl);
 x86_peripherals::irq_if_impl!(IntrManagerImpl);

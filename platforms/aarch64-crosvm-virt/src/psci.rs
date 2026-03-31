@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! PSCI wrappers and KVM guard-granule helpers.
-use kplat::psci::PsciOp;
+use kplat::dma::PlatformDmaIf;
 use ktypes::Once;
 pub static GUARD_GRANULE: Once<usize> = Once::new();
 const ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID: u32 =
@@ -67,46 +67,54 @@ pub fn do_xmap_granules(phys_addr: usize, size: usize) {
     let ret = __do_xmap_granules(phys_addr, nr_granules, true);
     assert_eq!(ret, nr_granules);
 }
-struct PsciImpl;
+struct DmaPlatformImpl;
 #[impl_dev_interface]
-impl PsciOp for PsciImpl {
-    /// Unshare DMA buffers with the hypervisor.
-    fn dma_unshare(paddr: usize, size: usize) {
-        let page_size = 0x1000;
-        let pages = size / page_size;
-        for i in 0..pages {
-            let (ret0, _ret1) = psci_hvc_call(
-                ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID,
-                paddr + page_size * i,
-                1,
-                0,
-            );
-            if ret0 != 0 {
-                log::warn!(
-                    "[virtio hal impl] cannot unshare 0x{:x}",
-                    paddr + page_size * i
-                );
-            }
-        }
+impl PlatformDmaIf for DmaPlatformImpl {
+    fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
+        dma_share_pages(paddr, size);
+        Ok(())
     }
 
-    /// Share DMA buffers with the hypervisor.
-    fn dma_share(paddr: usize, size: usize) {
-        let page_size = 0x1000;
-        let pages = size / page_size;
-        for i in 0..pages {
-            let (ret0, _ret1) = psci_hvc_call(
-                ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID,
-                paddr + page_size * i,
-                1,
-                0,
+    fn release(paddr: usize, size: usize) -> kerrno::KResult {
+        dma_unshare_pages(paddr, size);
+        Ok(())
+    }
+}
+
+fn dma_unshare_pages(paddr: usize, size: usize) {
+    let page_size = 0x1000;
+    let pages = size / page_size;
+    for i in 0..pages {
+        let (ret0, _ret1) = psci_hvc_call(
+            ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID,
+            paddr + page_size * i,
+            1,
+            0,
+        );
+        if ret0 != 0 {
+            log::warn!(
+                "[virtio hal impl] cannot unshare 0x{:x}",
+                paddr + page_size * i
             );
-            if ret0 != 0 {
-                log::warn!(
-                    "[virtio hal impl] cannot share 0x{:x}",
-                    paddr + page_size * i
-                );
-            }
+        }
+    }
+}
+
+fn dma_share_pages(paddr: usize, size: usize) {
+    let page_size = 0x1000;
+    let pages = size / page_size;
+    for i in 0..pages {
+        let (ret0, _ret1) = psci_hvc_call(
+            ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID,
+            paddr + page_size * i,
+            1,
+            0,
+        );
+        if ret0 != 0 {
+            log::warn!(
+                "[virtio hal impl] cannot share 0x{:x}",
+                paddr + page_size * i
+            );
         }
     }
 }

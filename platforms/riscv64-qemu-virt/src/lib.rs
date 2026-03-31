@@ -8,10 +8,15 @@
 extern crate log;
 #[macro_use]
 extern crate kplat;
-mod boot;
+// Force-link kernel_boot so that _start and boot code are included in the final binary.
+extern crate kernel_boot;
 mod console;
 mod init;
 mod irq;
 mod mem;
 mod power;
 mod time;
+
+struct DmaPlatformImpl;
+
+kplat::default_dma_if_impl!(DmaPlatformImpl);

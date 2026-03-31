@@ -6,8 +6,7 @@
 
 use heapless::Vec;
 use kplat::memory::{
-    MemRange, ReservedKind, ReservedRegion, ReservedSource, dma_regions, firmware_reserved_regions,
-    sub_ranges,
+    MemRange, ReservedKind, ReservedRegion, ReservedSource, firmware_reserved_regions, sub_ranges,
 };
 
 const MAX_RESERVED_REGIONS: usize = 128;
@@ -44,19 +43,6 @@ pub fn reserved_regions(
         ),
     );
 
-    for &(start, size) in dma_regions() {
-        push_reserved_region(
-            &mut reserved,
-            ReservedRegion::new(
-                start,
-                size,
-                ReservedKind::Dma,
-                ReservedSource::Kernel,
-                "dma",
-            ),
-        );
-    }
-
     reserved
 }
 
@@ -68,9 +54,6 @@ fn exclusion_ranges(
     exclusions
         .push((kernel_start, kernel_size))
         .expect("too many exclusion ranges");
-    for &range in dma_regions() {
-        exclusions.push(range).expect("too many exclusion ranges");
-    }
     exclusions.sort_unstable_by_key(|&(start, _)| start);
     exclusions
 }

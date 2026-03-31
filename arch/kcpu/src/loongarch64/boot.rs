@@ -31,8 +31,8 @@ pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
     // Configure page table walking
     unsafe {
         karch::write_pwc(LA64MetaData::PWCL_VALUE, LA64MetaData::PWCH_VALUE);
-        karch::write_kernel_page_table(root_paddr);
-        karch::write_user_page_table(pa!(0));
+        karch::write_kernel_page_table(root_paddr.into());
+        karch::write_user_page_table(pa!(0).into());
     }
     karch::flush_tlb(None);
 

@@ -289,7 +289,7 @@ pub struct TaskContext {
     #[cfg(feature = "fp-simd")]
     pub ext_state: ExtendedState,
     /// The `CR3` register value, i.e., the page table root.
-    pub cr3: memaddr::PhysAddr,
+    pub cr3: karch::HwPageTableRoot,
 }
 
 impl TaskContext {
@@ -341,7 +341,7 @@ impl TaskContext {
     ///
     /// The hardware register for page table root (`CR3` for x86) will be
     /// updated to the next task's after [`Self::switch_to`].
-    pub fn set_page_table_root(&mut self, cr3: memaddr::PhysAddr) {
+    pub fn set_page_table_root(&mut self, cr3: karch::HwPageTableRoot) {
         self.cr3 = cr3;
     }
 

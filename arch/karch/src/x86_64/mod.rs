@@ -19,7 +19,8 @@ pub use irq::{
     restore_irq, save_irq_and_disable,
 };
 pub use mmu::{
-    read_kernel_page_table, read_user_page_table, write_kernel_page_table, write_user_page_table,
+    HwPageTableRoot, read_kernel_page_table, read_user_page_table, write_kernel_page_table,
+    write_user_page_table,
 };
 pub use tlb::flush_tlb;
 pub use tls::{read_thread_pointer, write_thread_pointer};

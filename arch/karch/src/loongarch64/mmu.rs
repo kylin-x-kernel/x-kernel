@@ -9,20 +9,43 @@ use core::arch::asm;
 use loongArch64::register::{pgdh, pgdl};
 use memaddr::PhysAddr;
 
+/// Hardware-ready page-table root value.
+#[repr(transparent)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HwPageTableRoot(usize);
+
+impl HwPageTableRoot {
+    #[inline]
+    pub const fn new(raw: usize) -> Self {
+        Self(raw)
+    }
+
+    #[inline]
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl From<PhysAddr> for HwPageTableRoot {
+    fn from(root_paddr: PhysAddr) -> Self {
+        HwPageTableRoot::new(root_paddr.as_usize())
+    }
+}
+
 /// Reads the current page table root register for user space (`PGDL`).
 ///
-/// Returns the physical address of the page table root.
+/// Returns the hardware-ready page table root value.
 #[inline]
-pub fn read_user_page_table() -> PhysAddr {
-    PhysAddr::from(pgdl::read().base())
+pub fn read_user_page_table() -> HwPageTableRoot {
+    PhysAddr::from(pgdl::read().base()).into()
 }
 
 /// Reads the current page table root register for kernel space (`PGDH`).
 ///
-/// Returns the physical address of the page table root.
+/// Returns the hardware-ready page table root value.
 #[inline]
-pub fn read_kernel_page_table() -> PhysAddr {
-    PhysAddr::from(pgdh::read().base())
+pub fn read_kernel_page_table() -> HwPageTableRoot {
+    PhysAddr::from(pgdh::read().base()).into()
 }
 
 /// Writes the register to update the current page table root for user space
@@ -34,8 +57,8 @@ pub fn read_kernel_page_table() -> PhysAddr {
 ///
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
-pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
-    pgdl::set_base(root_paddr.as_usize() as _);
+pub unsafe fn write_user_page_table(root: HwPageTableRoot) {
+    pgdl::set_base(root.as_usize() as _);
 }
 
 /// Writes the register to update the current page table root for kernel space
@@ -47,8 +70,8 @@ pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
 ///
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
-pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
-    pgdh::set_base(root_paddr.as_usize());
+pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
+    pgdh::set_base(root.as_usize());
 }
 
 /// Writes the Page Walk Controller registers (`PWCL` and `PWCH`).

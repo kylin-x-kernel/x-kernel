@@ -17,3 +17,7 @@ mod mem;
 mod mp;
 mod power;
 mod time;
+
+struct DmaPlatformImpl;
+
+kplat::default_dma_if_impl!(DmaPlatformImpl);

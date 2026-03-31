@@ -2,16 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kaddr_layout::PAGE_OFFSET;
+use kbuild_config::{UART_IRQ, UART_PADDR};
 use kplat::io::ConsoleIf;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use uart_16550::MmioSerialPort;
 
-use crate::config::{devices::UART_PADDR, plat::PHYS_VIRT_OFFSET};
 static UART: LazyInit<SpinNoIrq<MmioSerialPort>> = LazyInit::new();
 pub(crate) fn early_init() {
     UART.init_once({
-        let mut uart = unsafe { MmioSerialPort::new(UART_PADDR + PHYS_VIRT_OFFSET) };
+        let mut uart = unsafe { MmioSerialPort::new(UART_PADDR + PAGE_OFFSET) };
         uart.init();
         SpinNoIrq::new(uart)
     });
@@ -44,6 +45,6 @@ impl ConsoleIf for ConsoleImpl {
     }
 
     fn interrupt_id() -> Option<usize> {
-        Some(crate::config::devices::UART_IRQ)
+        Some(UART_IRQ)
     }
 }

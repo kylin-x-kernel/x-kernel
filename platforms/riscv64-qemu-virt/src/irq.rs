@@ -8,6 +8,7 @@ use core::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+use kaddr_layout::PAGE_OFFSET;
 use kplat::{
     cpu::id as this_cpu_id,
     interrupts::{Handler, HandlerTable, IntrManager, TargetCpu},
@@ -17,7 +18,7 @@ use riscv::register::sie;
 use riscv_plic::Plic;
 use sbi_rt::HartMask;
 
-use crate::config::{devices::PLIC_PADDR, plat::PHYS_VIRT_OFFSET};
+const PLIC_PADDR: usize = 0x0c00_0000;
 pub(super) const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
 #[allow(unused)]
 pub(super) const S_SOFT: usize = INTC_IRQ_BASE + 1;
@@ -28,7 +29,7 @@ static IPI_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 pub const MAX_IRQ_COUNT: usize = 1024;
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 static PLIC: SpinNoIrq<Plic> = SpinNoIrq::new(unsafe {
-    Plic::new(NonNull::new((PHYS_VIRT_OFFSET + PLIC_PADDR) as *mut _).unwrap())
+    Plic::new(NonNull::new((PLIC_PADDR + PAGE_OFFSET) as *mut _).unwrap())
 });
 fn this_context() -> usize {
     let hart_id = this_cpu_id();

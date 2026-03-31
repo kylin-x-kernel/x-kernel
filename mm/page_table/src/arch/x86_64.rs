@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use memaddr::{PhysAddr, VirtAddr};
 pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;
 
@@ -12,23 +10,57 @@ use crate::{
     table64::{PageTable64, PageTableMut},
 };
 
-/// Global C-Bit mask for AMD SEV.
-/// This is initialized once and then used for all page table operations.
-static SEV_CBIT_MASK: AtomicU64 = AtomicU64::new(0);
+const SEV_CBIT_MASK: Option<u64> = if kbuild_config::SEV_CBIT_POS == 0 {
+    None
+} else {
+    Some(1u64 << kbuild_config::SEV_CBIT_POS)
+};
 
-/// Initialize the SEV C-Bit mask.
-/// This should be called early during boot on AMD SEV platforms.
-#[inline(never)]
-pub fn init_sev_cbit(cbit_position: u8) {
-    if cbit_position > 0 && cbit_position < 64 {
-        SEV_CBIT_MASK.store(1u64 << cbit_position, Ordering::SeqCst);
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct EncodedPtePhys(u64);
+
+impl EncodedPtePhys {
+    #[inline]
+    fn from_page(flags: PagingFlags, paddr: PhysAddr) -> Self {
+        let cbit = if flags.contains(PagingFlags::SHARED) {
+            0
+        } else {
+            SEV_CBIT_MASK.unwrap_or(0)
+        };
+        Self((paddr.as_usize() as u64 | cbit) & X64PageEntry::PADDR_MASK)
     }
-}
 
-/// Get the current SEV C-Bit mask.
-#[inline]
-fn get_sev_cbit_mask() -> u64 {
-    SEV_CBIT_MASK.load(Ordering::SeqCst)
+    #[inline]
+    fn from_table(paddr: PhysAddr) -> Self {
+        Self((paddr.as_usize() as u64 | SEV_CBIT_MASK.unwrap_or(0)) & X64PageEntry::PADDR_MASK)
+    }
+
+    #[inline]
+    fn from_raw(raw: u64) -> Self {
+        Self(raw & X64PageEntry::PADDR_MASK)
+    }
+
+    #[inline]
+    fn raw(self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn paddr(self) -> PhysAddr {
+        let paddr = self.0 & !SEV_CBIT_MASK.unwrap_or(0);
+        PhysAddr::from((paddr & X64PageEntry::PADDR_MASK) as usize)
+    }
+
+    #[inline]
+    fn is_shared(self) -> bool {
+        SEV_CBIT_MASK.is_some_and(|mask| (self.0 & mask) == 0)
+    }
+
+    #[inline]
+    fn with_paddr(self, paddr: PhysAddr) -> Self {
+        Self::from_raw((paddr.as_usize() as u64) | (self.0 & SEV_CBIT_MASK.unwrap_or(0)))
+    }
 }
 
 impl From<PTF> for PagingFlags {
@@ -91,38 +123,29 @@ impl PageTableEntry for X64PageEntry {
         if is_huge {
             f |= PTF::HUGE_PAGE;
         }
-        // Add C-Bit for AMD SEV encrypted pages, but NOT for shared memory
-        let cbit = if flags.contains(PagingFlags::SHARED) {
-            0
-        } else {
-            get_sev_cbit_mask()
-        };
-        let paddr_with_cbit = paddr.as_usize() as u64 | cbit;
-        Self(f.bits() | (paddr_with_cbit & Self::PADDR_MASK))
+        Self(f.bits() | EncodedPtePhys::from_page(flags, paddr).raw())
     }
 
     fn new_table(paddr: PhysAddr) -> Self {
         let f = PTF::PRESENT | PTF::WRITABLE | PTF::USER_ACCESSIBLE;
-        // Page table pages are always encrypted (with C-Bit)
-        let paddr_with_cbit = paddr.as_usize() as u64 | get_sev_cbit_mask();
-        Self(f.bits() | (paddr_with_cbit & Self::PADDR_MASK))
+        Self(f.bits() | EncodedPtePhys::from_table(paddr).raw())
     }
 
     fn paddr(&self) -> PhysAddr {
-        // Remove C-Bit when returning physical address
-        let paddr = (self.0 & Self::PADDR_MASK) & !get_sev_cbit_mask();
-        PhysAddr::from((paddr & Self::PADDR_MASK) as usize)
+        EncodedPtePhys::from_raw(self.0).paddr()
     }
 
     fn flags(&self) -> PagingFlags {
-        PTF::from_bits_truncate(self.0).into()
+        let mut flags: PagingFlags = PTF::from_bits_truncate(self.0).into();
+        if self.is_present() && EncodedPtePhys::from_raw(self.0).is_shared() {
+            flags |= PagingFlags::SHARED;
+        }
+        flags
     }
 
     fn set_paddr(&mut self, paddr: PhysAddr) {
-        // Preserve the current C-Bit state: if the page was shared (no C-Bit), keep it that way
-        let current_cbit = self.0 & get_sev_cbit_mask();
-        let paddr_with_cbit = paddr.as_usize() as u64 | current_cbit;
-        self.0 = (self.0 & !Self::PADDR_MASK) | (paddr_with_cbit & Self::PADDR_MASK)
+        let encoded = EncodedPtePhys::from_raw(self.0).with_paddr(paddr);
+        self.0 = (self.0 & !Self::PADDR_MASK) | encoded.raw();
     }
 
     fn set_flags(&mut self, flags: PagingFlags, is_huge: bool) {
@@ -130,15 +153,8 @@ impl PageTableEntry for X64PageEntry {
         if is_huge {
             f |= PTF::HUGE_PAGE;
         }
-        // Get current physical address (without C-Bit)
-        let paddr = (self.0 & Self::PADDR_MASK) & !get_sev_cbit_mask();
-        // Add C-Bit for encrypted pages, but NOT for shared memory
-        let cbit = if flags.contains(PagingFlags::SHARED) {
-            0
-        } else {
-            get_sev_cbit_mask()
-        };
-        self.0 = f.bits() | ((paddr | cbit) & Self::PADDR_MASK)
+        let encoded = EncodedPtePhys::from_page(flags, EncodedPtePhys::from_raw(self.0).paddr());
+        self.0 = f.bits() | encoded.raw()
     }
 
     fn bits(self) -> usize {

@@ -27,6 +27,17 @@ const fn lower_half_split_layout() -> LayoutConsts {
     }
 }
 
+const fn riscv64_layout() -> LayoutConsts {
+    LayoutConsts {
+        pg_va_bits: 39,
+        page_offset: 0xffff_ffc0_0000_0000,
+        // QEMU virt loads the kernel at 0x8020_0000, so keep the linked image
+        // inside the Sv39 higher-half linear map window.
+        kimage_vaddr: 0xffff_ffc0_8020_0000,
+        kimage_vsize: 0x4000_0000,
+    }
+}
+
 const fn x86_64_layout() -> LayoutConsts {
     LayoutConsts {
         pg_va_bits: 48,
@@ -47,7 +58,8 @@ const fn fallback_layout() -> LayoutConsts {
 
 pub fn for_arch(arch: &str) -> LayoutConsts {
     match arch {
-        "aarch64" | "riscv32" | "riscv64" | "loongarch64" => lower_half_split_layout(),
+        "aarch64" | "riscv32" | "loongarch64" => lower_half_split_layout(),
+        "riscv64" => riscv64_layout(),
         "x86_64" => x86_64_layout(),
         _ => fallback_layout(),
     }
@@ -57,8 +69,10 @@ pub fn for_arch(arch: &str) -> LayoutConsts {
 const CURRENT_LAYOUT: LayoutConsts = lower_half_split_layout();
 #[cfg(target_arch = "x86_64")]
 const CURRENT_LAYOUT: LayoutConsts = x86_64_layout();
-#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[cfg(target_arch = "riscv32")]
 const CURRENT_LAYOUT: LayoutConsts = lower_half_split_layout();
+#[cfg(target_arch = "riscv64")]
+const CURRENT_LAYOUT: LayoutConsts = riscv64_layout();
 #[cfg(target_arch = "loongarch64")]
 const CURRENT_LAYOUT: LayoutConsts = lower_half_split_layout();
 #[cfg(not(any(
@@ -87,6 +101,10 @@ static KIMAGE_VOFFSET: AtomicUsize = AtomicUsize::new(0);
 /// Records the kernel-image VA-to-PA offset established during early boot.
 #[inline]
 pub fn set_kimage_voffset(offset: usize) {
+    let current = KIMAGE_VOFFSET.load(Ordering::Relaxed);
+    if current != 0 && current != offset {
+        panic!("kimage voffset changed unexpectedly: old={current:#x}, new={offset:#x}");
+    }
     KIMAGE_VOFFSET.store(offset, Ordering::Relaxed);
 }
 

@@ -6,8 +6,8 @@
 
 use heapless::Vec;
 pub use kplat::memory::{
-    MemFlags, MemoryRegion, ReservedKind, dma_regions, kernel_layout, mmio_regions, p2v,
-    ram_regions, total_ram, v2p,
+    MemFlags, MemoryRegion, ReservedKind, kernel_layout, mmio_regions, p2v, ram_regions, total_ram,
+    v2p,
 };
 use kplat::memory::{check_overlap, sub_ranges};
 use lazyinit::LazyInit;

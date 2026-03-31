@@ -3,14 +3,14 @@
 // See LICENSES for license details.
 
 use boot_info::BootInfo;
-use kbuild_config::{DMA_MEM_SIZE, MMIO_RANGES};
+use kbuild_config::MMIO_RANGES;
 use kplat::memory::{
     HwMemory, MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr,
     default_p2v, default_v2p, va,
 };
 use x86_peripherals::memory::X86MemState;
 
-const MAX_REGIONS: usize = 16;
+const MAX_REGIONS: usize = 128;
 static MEM_STATE: X86MemState<MAX_REGIONS, MAX_REGIONS, MAX_REGIONS> = X86MemState::new();
 pub fn init(boot_info: &BootInfo) {
     MEM_STATE.init(
@@ -23,8 +23,6 @@ pub fn init(boot_info: &BootInfo) {
             "legacy low memory",
         )],
         MMIO_RANGES,
-        DMA_MEM_SIZE,
-        &[kernel_image_exclusion(boot_info.kernel_load_paddr)],
         |_| {},
     );
     kplat::kprintln!(
@@ -32,10 +30,6 @@ pub fn init(boot_info: &BootInfo) {
         boot_info.protocol(),
         MEM_STATE.ram_regions().len()
     );
-}
-
-pub(crate) fn dma_region() -> Option<MemRange> {
-    MEM_STATE.dma_regions().first().copied()
 }
 
 struct HwMemoryImpl;
@@ -48,10 +42,6 @@ impl HwMemory for HwMemoryImpl {
 
     fn firmware_reserved_regions() -> &'static [ReservedRegion] {
         MEM_STATE.firmware_reserved_regions()
-    }
-
-    fn dma_regions() -> &'static [MemRange] {
-        MEM_STATE.dma_regions()
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.
@@ -73,14 +63,4 @@ impl HwMemory for HwMemoryImpl {
             kbuild_config::KERNEL_ASPACE_SIZE,
         )
     }
-}
-
-fn kernel_image_exclusion(kernel_load_paddr: usize) -> MemRange {
-    unsafe extern "C" {
-        fn _skernel();
-        fn _ekernel();
-    }
-
-    let kernel_size = (_ekernel as *const () as usize) - (_skernel as *const () as usize);
-    (kernel_load_paddr, kernel_size)
 }

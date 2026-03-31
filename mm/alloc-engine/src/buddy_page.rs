@@ -29,6 +29,16 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
     pub fn set_addr_translator(&mut self, translator: &'static dyn AddrTranslator) {
         self.inner.set_addr_translator(translator);
     }
+
+    pub fn allocate_pages_lowmem(
+        &mut self,
+        num_pages: usize,
+        align_pow2: usize,
+    ) -> AllocResult<usize> {
+        self.inner
+            .alloc_pages_lowmem(num_pages, align_pow2)
+            .map_err(map_alloc_error)
+    }
 }
 
 fn map_alloc_error(err: BuddyAllocError) -> AllocError {

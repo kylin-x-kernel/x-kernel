@@ -10,12 +10,12 @@
 
 extern crate alloc;
 
+mod bounce_pool;
 mod dma;
 
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::AllocResult;
-// Re-export the interface trait for implementors
 pub use dma::DmaPageTableIf;
 use memaddr::PhysAddr;
 
@@ -30,6 +30,12 @@ use self::dma::ALLOCATOR;
 #[inline]
 pub const fn p2b(paddr: PhysAddr) -> DmaBusAddress {
     DmaBusAddress::new((paddr.as_usize() + kbuild_config::PHYS_BUS_OFFSET) as u64)
+}
+
+/// Converts a bus address back to a physical address.
+#[inline]
+pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
+    ((baddr.as_u64() as usize) - kbuild_config::PHYS_BUS_OFFSET).into()
 }
 
 /// Allocates **coherent** memory that meets Direct Memory Access (DMA)
@@ -51,6 +57,7 @@ pub const fn p2b(paddr: PhysAddr) -> DmaBusAddress {
 /// This function is unsafe because it directly interacts with the global
 /// allocator, which can potentially cause memory leaks or other issues if not
 /// used correctly.
+#[track_caller]
 pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
     unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
 }
@@ -68,8 +75,53 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
 ///
 /// This function is unsafe because it directly interacts with the global allocator,
 /// which can potentially cause memory leaks or other issues if not used correctly.
+#[track_caller]
 pub unsafe fn deallocate_dma_memory(dma: DMAInfo, layout: Layout) {
     unsafe { ALLOCATOR.lock().deallocate_dma_memory(dma, layout) }
+}
+
+/// Direction for a temporary DMA mapping of an existing buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaDirection {
+    DriverToDevice,
+    DeviceToDriver,
+    Bidirectional,
+}
+
+/// Maps an existing buffer for temporary DMA access.
+///
+/// The current backend always stages the mapping through pooled coherent bounce
+/// memory. Keeping this behind `kdma` lets future implementations restore
+/// direct-map optimizations with stricter page-granularity safety checks
+/// without changing driver code.
+///
+/// # Safety
+///
+/// `buffer` must be valid and remain exclusively owned until it is later passed
+/// to [`unmap_dma_buffer`].
+pub unsafe fn map_dma_buffer(
+    buffer: NonNull<[u8]>,
+    direction: DmaDirection,
+) -> AllocResult<DMAInfo> {
+    unsafe { ALLOCATOR.lock().map_dma_buffer(buffer, direction) }
+}
+
+/// Unmaps a previously mapped DMA buffer and synchronizes data back if needed.
+///
+/// # Safety
+///
+/// `dma_addr` must be the bus address previously returned by
+/// [`map_dma_buffer`] for the same `buffer`.
+pub unsafe fn unmap_dma_buffer(
+    dma_addr: DmaBusAddress,
+    buffer: NonNull<[u8]>,
+    direction: DmaDirection,
+) {
+    unsafe {
+        ALLOCATOR
+            .lock()
+            .unmap_dma_buffer(dma_addr, buffer, direction)
+    }
 }
 
 /// A bus memory address.

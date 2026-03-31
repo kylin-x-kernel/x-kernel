@@ -12,6 +12,11 @@ mod mem;
 mod power;
 #[cfg(feature = "smp")]
 mod mp;
+
+struct DmaPlatformImpl;
+
+kplat::default_dma_if_impl!(DmaPlatformImpl);
+
 kplat_aarch64_peripherals::console_if_impl!(ConsoleImpl);
 kplat_aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
 #[cfg(feature = "irq")]

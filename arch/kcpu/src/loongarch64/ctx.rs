@@ -269,7 +269,7 @@ pub struct TaskContext {
     /// Thread Pointer
     pub tp: usize,
     /// user page table root
-    pub pgdl: usize,
+    pub pgdl: karch::HwPageTableRoot,
     #[cfg(feature = "fp-simd")]
     /// Floating Point Unit states
     pub fpu: FpuState,
@@ -293,8 +293,8 @@ impl TaskContext {
     ///
     /// The hardware register for user page table root (`pgdl` for loongarch64)
     /// will be updated to the next task's after [`Self::switch_to`].
-    pub fn set_page_table_root(&mut self, pgdl: memaddr::PhysAddr) {
-        self.pgdl = pgdl.as_usize();
+    pub fn set_page_table_root(&mut self, pgdl: karch::HwPageTableRoot) {
+        self.pgdl = pgdl;
     }
 
     /// Switches to another task.
@@ -309,7 +309,7 @@ impl TaskContext {
         }
         {
             if self.pgdl != next_ctx.pgdl {
-                unsafe { karch::write_user_page_table(pa!(next_ctx.pgdl)) };
+                unsafe { karch::write_user_page_table(next_ctx.pgdl) };
                 karch::flush_tlb(None); // currently flush the entire TLB
             }
         }

@@ -215,8 +215,6 @@ pub trait HwMemory {
     fn firmware_reserved_regions() -> &'static [ReservedRegion];
     /// Returns MMIO ranges provided by the platform.
     fn mmio_regions() -> &'static [MemRange];
-    /// Returns DMA-capable ranges provided by the platform.
-    fn dma_regions() -> &'static [MemRange];
     /// Converts a physical address to virtual.
     fn p2v(pa: PhysAddr) -> VirtAddr;
     /// Converts a virtual address to physical.

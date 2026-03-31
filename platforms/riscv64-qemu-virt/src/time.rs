@@ -2,18 +2,21 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kaddr_layout::PAGE_OFFSET;
+use kbuild_config::RTC_PADDR;
 use kplat::timer::{GlobalTimer, NS_SEC};
 use riscv::register::time;
-const NANOS_PER_TICK: u64 = NS_SEC / crate::config::devices::TIMER_FREQUENCY as u64;
+
+const TIMER_FREQUENCY: usize = 10_000_000;
+const TIMER_IRQ: usize = 0x8000_0000_0000_0005;
+const NANOS_PER_TICK: u64 = NS_SEC / TIMER_FREQUENCY as u64;
 static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
 pub(super) fn early_init() {
-    #[cfg(feature = "rtc")]
-    use crate::config::{devices::RTC_PADDR, plat::PHYS_VIRT_OFFSET};
     #[cfg(feature = "rtc")]
     if RTC_PADDR != 0 {
         use riscv_goldfish::Rtc;
         let epoch_time_nanos =
-            Rtc::new(RTC_PADDR + PHYS_VIRT_OFFSET).get_unix_timestamp() * 1_000_000_000;
+            Rtc::new(RTC_PADDR + PAGE_OFFSET).get_unix_timestamp() * 1_000_000_000;
         unsafe {
             RTC_EPOCHOFFSET_NANOS =
                 epoch_time_nanos - GlobalTimerImpl::t2ns(GlobalTimerImpl::now_ticks());
@@ -43,11 +46,11 @@ impl GlobalTimer for GlobalTimerImpl {
     }
 
     fn freq() -> u64 {
-        crate::config::devices::TIMER_FREQUENCY as u64
+        TIMER_FREQUENCY as u64
     }
 
     fn interrupt_id() -> usize {
-        crate::config::devices::TIMER_IRQ
+        TIMER_IRQ
     }
 
     fn arm_timer(deadline_ns: u64) {

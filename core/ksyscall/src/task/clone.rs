@@ -235,7 +235,7 @@ impl CloneRequest {
         let new_proc_data = if self.flags.contains(CloneFlags::THREAD) {
             new_task
                 .ctx_mut()
-                .set_page_table_root(old_proc_data.aspace.lock().page_table_root());
+                .set_page_table_root(old_proc_data.aspace.lock().page_table_root().into());
             old_proc_data.clone()
         } else {
             let proc = if self.flags.contains(CloneFlags::PARENT) {
@@ -255,7 +255,7 @@ impl CloneRequest {
             };
             new_task
                 .ctx_mut()
-                .set_page_table_root(aspace.lock().page_table_root());
+                .set_page_table_root(aspace.lock().page_table_root().into());
 
             let signal_actions = if self.flags.contains(CloneFlags::SIGHAND) {
                 old_proc_data.signal.actions.clone()

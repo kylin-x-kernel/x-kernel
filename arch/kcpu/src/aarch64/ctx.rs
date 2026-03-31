@@ -216,7 +216,7 @@ pub struct TaskContext {
     /// Thread Pointer
     pub tpidr_el0: u64,
     /// The `ttbr0_el1` register value, i.e., the page table root.
-    pub ttbr0_el1: memaddr::PhysAddr,
+    pub ttbr0_el1: karch::HwPageTableRoot,
     #[cfg(feature = "fp-simd")]
     pub fp_state: FpState,
 }
@@ -245,7 +245,7 @@ impl TaskContext {
     ///
     /// The hardware register for user page table root (`ttbr0_el1` for aarch64 in EL1)
     /// will be updated to the next task's after [`Self::switch_to`].
-    pub fn set_page_table_root(&mut self, ttbr0_el1: memaddr::PhysAddr) {
+    pub fn set_page_table_root(&mut self, ttbr0_el1: karch::HwPageTableRoot) {
         self.ttbr0_el1 = ttbr0_el1;
     }
 

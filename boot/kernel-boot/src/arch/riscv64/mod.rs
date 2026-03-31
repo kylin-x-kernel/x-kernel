@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use log::info;
+//! Unified position-independent boot layer for x-kernel (RISC-V 64 support).
 
-pub fn init() {
-    info!("SEV shared memory uses lowmem pages from the global allocator");
-}
+mod entry;
+mod mmu;
+
+pub use entry::_start_secondary;

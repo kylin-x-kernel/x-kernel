@@ -24,6 +24,7 @@ ipi = [ "dep:kipi", "khal/ipi", "kruntime/ipi"]
 
 crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 sev = ["dma", "kdriver/sev", "memspace/sev"]
+dma-trace = ["kdriver/dma-trace"]
 
 # Memory
 alloc-tlsf = ["kalloc/tlsf"]

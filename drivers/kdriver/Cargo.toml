@@ -21,6 +21,7 @@ vsock = ["dep:vsock"]
 
 crosvm = ["pci-mmio", "dep:hashbrown", "dep:ksync"]
 sev = ["pci-mmio", "kdma/sev", "dep:hashbrown", "dep:ksync"]
+dma-trace = ["kdma/dma-trace"]
 
 # Enabled by features `virtio-*`
 virtio = ["dep:virtio", "dep:kalloc", "dep:khal"]

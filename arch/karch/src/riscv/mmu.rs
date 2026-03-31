@@ -7,15 +7,38 @@
 use memaddr::PhysAddr;
 use riscv::register::satp;
 
+/// Hardware-ready page-table root value.
+#[repr(transparent)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HwPageTableRoot(usize);
+
+impl HwPageTableRoot {
+    #[inline]
+    pub const fn new(raw: usize) -> Self {
+        Self(raw)
+    }
+
+    #[inline]
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl From<PhysAddr> for HwPageTableRoot {
+    fn from(root_paddr: PhysAddr) -> Self {
+        HwPageTableRoot::new(root_paddr.as_usize())
+    }
+}
+
 /// Reads the current page table root register for user space (`satp`).
 ///
 /// RISC-V does not have a separate page table root register for user and
 /// kernel space, so this operation is the same as [`read_kernel_page_table`].
 ///
-/// Returns the physical address of the page table root.
+/// Returns the hardware-ready page table root value.
 #[inline]
-pub fn read_user_page_table() -> PhysAddr {
-    PhysAddr::from(satp::read().ppn() << 12)
+pub fn read_user_page_table() -> HwPageTableRoot {
+    PhysAddr::from(satp::read().ppn() << 12).into()
 }
 
 /// Reads the current page table root register for kernel space (`satp`).
@@ -23,9 +46,9 @@ pub fn read_user_page_table() -> PhysAddr {
 /// RISC-V does not have a separate page table root register for user and
 /// kernel space, so this operation is the same as [`read_user_page_table`].
 ///
-/// Returns the physical address of the page table root.
+/// Returns the hardware-ready page table root value.
 #[inline]
-pub fn read_kernel_page_table() -> PhysAddr {
+pub fn read_kernel_page_table() -> HwPageTableRoot {
     read_user_page_table()
 }
 
@@ -41,8 +64,8 @@ pub fn read_kernel_page_table() -> PhysAddr {
 ///
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
-pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
-    unsafe { satp::set(satp::Mode::Sv39, 0, root_paddr.as_usize() >> 12) };
+pub unsafe fn write_user_page_table(root: HwPageTableRoot) {
+    unsafe { satp::set(satp::Mode::Sv39, 0, root.as_usize() >> 12) };
 }
 
 /// Writes the register to update the current page table root for kernel space
@@ -57,6 +80,6 @@ pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
 ///
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
-pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
-    unsafe { write_user_page_table(root_paddr) };
+pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
+    unsafe { write_user_page_table(root) };
 }

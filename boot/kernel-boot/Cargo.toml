@@ -32,6 +32,12 @@ x86 = "0.52"
 x86_64 = { workspace = true }
 karch = { workspace = true }
 
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv = "0.14"
+karch = { workspace = true }
+memaddr = { workspace = true }
+of = { workspace = true }
+
 [build-dependencies]
 kbuild_config.workspace = true
 kaddr_layout.workspace = true

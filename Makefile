@@ -83,6 +83,9 @@ export K_LOG=$(LOG)
 export K_TARGET=$(TARGET)
 export K_IP=$(IP)
 export K_GW=$(GW)
+export KBUILD_BUILD_MACHINE ?= $(shell printf '%s@%s' "$$(id -un 2>/dev/null || whoami)" "$$(hostname 2>/dev/null)")
+export KBUILD_BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+export KBUILD_BUILD_INFO ?= machine=$(KBUILD_BUILD_MACHINE);time=$(KBUILD_BUILD_TIME)
 
 # Binutils
 CROSS_COMPILE ?= $(ARCH)-linux-musl-
@@ -168,7 +171,6 @@ oldconfig:
 	@$(XCONF) oldconfig -c .config -k Kconfig -s .
 
 
-# 只在 .config 更新时才生成
 $(CONFIG_RS): .config
 	@echo "📝 Generating Rust const definitions from .config..."
 	@$(XCONF) gen-const

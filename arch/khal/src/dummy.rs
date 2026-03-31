@@ -67,10 +67,6 @@ impl HwMemory for DummyMem {
         &[]
     }
 
-    fn dma_regions() -> &'static [MemRange] {
-        &[]
-    }
-
     fn p2v(_paddr: memaddr::PhysAddr) -> memaddr::VirtAddr {
         va!(0)
     }

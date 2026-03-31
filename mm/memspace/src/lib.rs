@@ -93,31 +93,10 @@ pub fn init_memory_management() {
         kalloc::is_page_allocator_ready(),
         "kernel page allocator must be initialized before init_memory_management()"
     );
-    #[cfg(feature = "sev")]
-    {
-        let cbit_pos = kbuild_config::SEV_CBIT_POS;
-        debug!("SEV C-Bit position = {}", cbit_pos);
-        if cbit_pos > 0 {
-            page_table::x86_64::init_sev_cbit(cbit_pos as u8);
-            // Ensure the C-Bit initialization is visible before creating page tables
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            debug!("SEV C-Bit initialized: mask = {:#x}", 1usize << cbit_pos);
-        }
-    }
     let kernel_layout = new_kernel_layout().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_layout);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
-    #[allow(unused_mut)]
-    let mut root = kernel_page_table_root();
-    #[cfg(feature = "sev")]
-    {
-        let cbit_pos = kbuild_config::SEV_CBIT_POS;
-        if cbit_pos != 0 {
-            root = PhysAddr::from(root.as_usize() | (1usize << cbit_pos));
-            debug!("root: {:?}", root);
-        }
-    }
-    unsafe { karch::write_kernel_page_table(root) };
+    unsafe { karch::write_kernel_page_table(kernel_page_table_root().into()) };
     // flush all TLB
     karch::flush_tlb(None);
 }
@@ -128,7 +107,7 @@ pub fn init_memory_management_secondary() {
         KERNEL_ASPACE.get().is_some(),
         "kernel address space must be initialized before secondary MMU activation"
     );
-    unsafe { karch::write_kernel_page_table(kernel_page_table_root()) };
+    unsafe { karch::write_kernel_page_table(kernel_page_table_root().into()) };
     // flush all TLB
     karch::flush_tlb(None);
 }

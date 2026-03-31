@@ -17,6 +17,7 @@ pmu = []
 memaddr = { workspace = true }
 kaddr_layout = { workspace = true }
 boot_info = { workspace = true }
+kerrno = { workspace = true }
 bitflags = "2.6"
 crate_interface = "0.1"
 handler_table = { version = "0.1.2" }

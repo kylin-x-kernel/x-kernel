@@ -8,8 +8,6 @@ use core::{marker::PhantomData, ptr::NonNull};
 use cfg_if::cfg_if;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
 use khal::mem::p2v;
-#[cfg(feature = "crosvm")]
-use khal::psci::{dma_share, dma_unshare};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 use crate::{DeviceEnum, drivers::DriverProbe};
@@ -205,10 +203,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 }
                 let paddr = dma_info.bus_addr.as_u64() as PhysAddr;
                 let ptr = dma_info.cpu_addr;
-                #[cfg(feature = "crosvm")]
-                {
-                    dma_share(paddr as usize, pages * PAGE_SIZE);
-                }
                 // bus_addr is the physical address for DMA
                 (paddr, ptr)
             }
@@ -234,10 +228,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             bus_addr: kdma::DmaBusAddress::new(paddr),
         };
         unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
-        #[cfg(feature = "crosvm")]
-        {
-            dma_unshare(paddr as usize, pages * 0x1000);
-        }
         0
     }
 
@@ -254,53 +244,10 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) -> PhysAddr {
-        #[cfg(any(feature = "sev", feature = "crosvm"))]
-        {
-            use core::{
-                alloc::Layout,
-                sync::atomic::{Ordering, fence},
-            };
-
-            let len = buffer.len();
-            let aligned_size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let layout = Layout::from_size_align(aligned_size, PAGE_SIZE).unwrap();
-
-            // Allocate a bounce buffer using kdma (with SHARED flag)
-            let dma_info = unsafe { kdma::allocate_dma_memory(layout) }
-                .expect("failed to allocate shared bounce buffer via kdma");
-            let paddr = dma_info.bus_addr.as_u64() as PhysAddr;
-            let vaddr = dma_info.cpu_addr.as_ptr() as usize;
-            // For crosvm, also call share_dma_buffer
-            #[cfg(feature = "crosvm")]
-            {
-                dma_share(paddr as usize, aligned_size);
-            }
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            // If data flows from driver to device, copy to shared buffer
-            if direction != BufferDirection::DeviceToDriver {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        buffer.as_ptr() as *const u8,
-                        vaddr as *mut u8,
-                        len,
-                    );
-                }
-                // Ensure the copy is not optimized away and is visible
-                core::sync::atomic::fence(Ordering::SeqCst);
-            }
-
-            // Full memory barrier to ensure data is visible to the device
-            fence(Ordering::SeqCst);
-
-            paddr
-        }
-
-        #[cfg(not(any(feature = "crosvm", feature = "sev")))]
-        {
-            let vaddr = buffer.as_ptr() as *mut u8 as usize;
-            let paddr_usize: usize = khal::mem::v2p(vaddr.into()).into();
-            paddr_usize as PhysAddr
-        }
+        unsafe { kdma::map_dma_buffer(buffer, dma_direction(direction)) }
+            .expect("failed to map shared DMA buffer via kdma")
+            .bus_addr
+            .as_u64() as PhysAddr
     }
 
     #[inline]
@@ -311,45 +258,20 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) {
-        #[cfg(any(feature = "sev", feature = "crosvm"))]
-        {
-            use core::{
-                alloc::Layout,
-                sync::atomic::{Ordering, fence},
-            };
+        unsafe {
+            kdma::unmap_dma_buffer(
+                kdma::DmaBusAddress::new(paddr),
+                buffer,
+                dma_direction(direction),
+            )
+        };
+    }
+}
 
-            let len = buffer.len();
-            let aligned_size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            fence(Ordering::SeqCst);
-
-            // If data flows from device to driver, copy back from shared buffer
-            if direction != BufferDirection::DriverToDevice {
-                let paddr_usize = paddr as usize;
-                let shared_ptr = p2v(paddr_usize.into()).as_ptr();
-                unsafe {
-                    core::ptr::copy_nonoverlapping(shared_ptr, buffer.as_ptr() as *mut u8, len);
-                }
-                // Ensure the copy is not optimized away and create a final
-                // ordering point before we proceed.
-                core::sync::atomic::fence(Ordering::SeqCst);
-            }
-
-            // For crosvm, call unshare_dma_buffer before freeing
-            #[cfg(feature = "crosvm")]
-            {
-                dma_unshare(paddr as usize, aligned_size);
-            }
-
-            // Free the bounce buffer via kdma
-            let layout = Layout::from_size_align(aligned_size, PAGE_SIZE).unwrap();
-            let dma_info = kdma::DMAInfo {
-                cpu_addr: {
-                    let paddr_usize = paddr as usize;
-                    NonNull::new(p2v(paddr_usize.into()).as_mut_ptr()).unwrap()
-                },
-                bus_addr: kdma::DmaBusAddress::new(paddr),
-            };
-            unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
-        }
+const fn dma_direction(direction: BufferDirection) -> kdma::DmaDirection {
+    match direction {
+        BufferDirection::DriverToDevice => kdma::DmaDirection::DriverToDevice,
+        BufferDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,
+        BufferDirection::Both => kdma::DmaDirection::Bidirectional,
     }
 }

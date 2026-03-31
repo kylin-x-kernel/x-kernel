@@ -6,7 +6,7 @@
 
 use boot_info::BootInfo;
 use heapless::Vec;
-use kbuild_config::{DMA_MEM_SIZE, MMIO_RANGES};
+use kbuild_config::MMIO_RANGES;
 use kplat::memory::{
     HwMemory, MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr,
     default_p2v, default_v2p, va,
@@ -29,8 +29,6 @@ pub fn init(boot_info: &BootInfo) {
             "legacy low memory",
         )],
         MMIO_RANGES,
-        DMA_MEM_SIZE,
-        &[kernel_image_exclusion(boot_info.kernel_load_paddr)],
         |mmio_regions| {
             if let Some(mcfg) = ::acpi::find_mcfg_from_init()
                 && let Some((ecam_start, ecam_size)) = mcfg.ecam_region()
@@ -108,10 +106,6 @@ impl HwMemory for HwMemoryImpl {
         MEM_STATE.mmio_regions()
     }
 
-    fn dma_regions() -> &'static [MemRange] {
-        MEM_STATE.dma_regions()
-    }
-
     fn p2v(paddr: PhysAddr) -> VirtAddr {
         default_p2v(paddr)
     }
@@ -126,14 +120,4 @@ impl HwMemory for HwMemoryImpl {
             kbuild_config::KERNEL_ASPACE_SIZE,
         )
     }
-}
-
-fn kernel_image_exclusion(kernel_load_paddr: usize) -> MemRange {
-    unsafe extern "C" {
-        fn _skernel();
-        fn _ekernel();
-    }
-
-    let kernel_size = (_ekernel as *const () as usize) - (_skernel as *const () as usize);
-    (kernel_load_paddr, kernel_size)
 }

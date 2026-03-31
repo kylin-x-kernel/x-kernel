@@ -341,7 +341,7 @@ pub struct TaskContext {
     /// Thread Pointer
     pub tp: usize,
     /// The `satp` register value, i.e., the page table root.
-    pub satp: memaddr::PhysAddr,
+    pub satp: karch::HwPageTableRoot,
     #[cfg(feature = "fp-simd")]
     pub fp_state: FpState,
 }
@@ -373,7 +373,7 @@ impl TaskContext {
     ///
     /// The hardware register for page table root (`satp` for riscv64) will be
     /// updated to the next task's after [`Self::switch_to`].
-    pub fn set_page_table_root(&mut self, satp: memaddr::PhysAddr) {
+    pub fn set_page_table_root(&mut self, satp: karch::HwPageTableRoot) {
         self.satp = satp;
     }
 

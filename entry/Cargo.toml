@@ -21,6 +21,7 @@ kernel = [
 tee = ["kcore/tee", "ksyscall/tee"]
 smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
+dma-trace = ["kfeat/dma-trace"]
 
 # Stubs
 pci = ["kfeat/bus-pci"]
@@ -39,7 +40,6 @@ qemu = [
     "kfeat/fs-times",
     "kserveices/dev-log",
     "pci",
-    "tee"
 ]
 
 # aarch64-qemu-virt platform
@@ -47,13 +47,14 @@ aarch64_qemu_virt = [
     "kernel",
     "qemu",
     "smp",
+    "tee",
     # "kfeat/watchdog",
     "dep:aarch64-qemu-virt",
 ]
 
-x86_64_qemu_virt = ["kernel", "qemu", "dep:x86_64-qemu-virt"]
+x86_64_qemu_virt = ["kernel", "qemu", "dep:x86_64-qemu-virt", "tee"]
 
-riscv64_qemu_virt = ["kernel", "qemu", "dep:riscv64-qemu-virt"]
+riscv64_qemu_virt = [ "kernel", "qemu", "smp", "dep:riscv64-qemu-virt"]
 
 loongarch64_qemu_virt = ["kernel", "qemu", "dep:loongarch64-qemu-virt"]
 
@@ -75,6 +76,7 @@ aarch64_crosvm_virt = [
     "kserveices/dev-log",
     "kfeat/crosvm",
     "kserveices/dice",
+    "tee",
 ]
 
 # higuang csv platform
@@ -97,7 +99,7 @@ x86_csv = [
     "kserveices/dev-log",
     "kserveices/x86_csv",
 
-    "tee"
+    "tee",
 ]
 
 
@@ -108,6 +110,7 @@ kdriver.workspace = true
 kerrno.workspace = true
 kfeat.workspace = true
 kfs.workspace = true
+karch.workspace = true
 khal.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
@@ -136,7 +139,7 @@ features = ["fp-simd", "rtc"]
 [dependencies.riscv64-qemu-virt]
 workspace = true
 optional = true
-features = ["fp-simd", "rtc"]
+features = ["fp-simd", "smp", "rtc"]
 
 [dependencies.loongarch64-qemu-virt]
 workspace = true

@@ -12,5 +12,6 @@ description = "Low-address Multiboot2 stub for loading the higher-half x-kernel 
 boot_info = { workspace = true }
 kernel_elf_loader = { workspace = true }
 kaddr_layout = { workspace = true }
+kbuild_config = { workspace = true }
 x86_boot_common = { workspace = true }
 multiboot2 = { version = "0.24.1", default-features = false }

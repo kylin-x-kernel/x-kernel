@@ -131,7 +131,6 @@ pub struct GlobalAllocator {
     /// Whether the page allocator has at least one usable memory region.
     page_ready: AtomicBool,
     palloc: SpinNoIrq<BuddyPageAllocator<PAGE_SIZE>>,
-    dma_palloc: SpinNoIrq<BuddyPageAllocator<PAGE_SIZE>>,
     usages: SpinNoIrq<Usages>,
 }
 
@@ -149,7 +148,6 @@ impl GlobalAllocator {
             heap_ready: AtomicBool::new(false),
             page_ready: AtomicBool::new(false),
             palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
-            dma_palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
             usages: SpinNoIrq::new(Usages::new()),
         }
     }
@@ -182,11 +180,6 @@ impl GlobalAllocator {
     pub fn init_page_allocator(&self, va: usize, size: usize) {
         self.init_or_extend_page_allocator(va, size)
             .expect("failed to initialize page allocator");
-    }
-
-    pub fn init_dma_page_allocator(&self, va: usize, size: usize) {
-        self.configure_dma_page_allocator();
-        self.dma_palloc.lock().init_region(va, size);
     }
 
     pub fn is_page_allocator_ready(&self) -> bool {
@@ -307,10 +300,14 @@ impl GlobalAllocator {
         align_pow2: usize,
         kind: UsageKind,
     ) -> AllocResult<usize> {
+        debug_assert!(
+            self.page_ready.load(Ordering::Acquire),
+            "page allocator is not initialized"
+        );
         let addr = self
-            .dma_palloc
+            .palloc
             .lock()
-            .allocate_pages(num_pages, align_pow2)?;
+            .allocate_pages_lowmem(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
             self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
         }
@@ -356,17 +353,11 @@ impl GlobalAllocator {
     /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
-        self.dma_palloc.lock().deallocate_pages(va, num_pages);
+        self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
     fn configure_page_allocator(&self) {
         self.palloc
-            .lock()
-            .set_addr_translator(&KERNEL_ADDR_TRANSLATOR);
-    }
-
-    fn configure_dma_page_allocator(&self) {
-        self.dma_palloc
             .lock()
             .set_addr_translator(&KERNEL_ADDR_TRANSLATOR);
     }
@@ -538,15 +529,6 @@ pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
         va + size
     );
     GLOBAL_ALLOCATOR.add_memory(va, size)
-}
-
-pub fn global_init_dma_page_allocator(va: usize, size: usize) {
-    debug!(
-        "initialize global DMA page allocator at: [{:#x}, {:#x})",
-        va,
-        va + size
-    );
-    GLOBAL_ALLOCATOR.init_dma_page_allocator(va, size);
 }
 
 pub fn is_page_allocator_ready() -> bool {

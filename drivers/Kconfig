@@ -31,12 +31,6 @@ config PCI_RANGES
     help
       Specify the address ranges for PCI devices.
 
-config DMA_MEM_SIZE
-    hex "DMA Memory Size"
-    default 0x200000
-    help
-      Define the size of the memory allocated for Direct Memory Access (DMA).
-
 config MMIO_RANGES
     rangetype "MMIO Address Ranges"
     default [(usize, usize)]
@@ -45,19 +39,16 @@ config MMIO_RANGES
 
 config RTC_PADDR
     hex "RTC Base Address"
-    depends on ARCH_AARCH64
     help
       Define the base address for the RTC (Real-Time Clock) device.
 
 config UART_PADDR
     hex "UART Base Address"
-    depends on ARCH_AARCH64
     help
       Define the base address for the UART (Universal Asynchronous Receiver-Transmitter) device.
 
 config UART_IRQ
     usize "UART IRQ Number"
-    depends on ARCH_AARCH64
     default 33
     help
       Define the interrupt number for the UART device.

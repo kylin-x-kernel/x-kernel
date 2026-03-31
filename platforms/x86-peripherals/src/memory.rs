@@ -4,27 +4,21 @@
 
 use boot_info::BootInfo;
 use heapless::Vec;
-use kplat::memory::{
-    MemRange, ReservedKind, ReservedRegion, ReservedSource, select_dma32_region, sub_ranges,
-};
+use kplat::memory::{MemRange, ReservedKind, ReservedRegion, ReservedSource, sub_ranges};
 use ktypes::Once;
 
 use crate::bootmem::{BootMemoryKind, for_each_memory_region};
-
-const MAX_DMA_FILTER_RANGES: usize = 128;
 
 pub struct PlatformMemoryRegions<const RAM: usize, const RSVD: usize, const MMIO: usize> {
     pub ram: Vec<MemRange, RAM>,
     pub reserved: Vec<ReservedRegion, RSVD>,
     pub mmio: Vec<MemRange, MMIO>,
-    pub dma: Vec<MemRange, 1>,
 }
 
 pub struct X86MemState<const RAM: usize, const RSVD: usize, const MMIO: usize> {
     ram_regions: Once<Vec<MemRange, RAM>>,
     reserved_regions: Once<Vec<ReservedRegion, RSVD>>,
     mmio_regions: Once<Vec<MemRange, MMIO>>,
-    dma_regions: Once<Vec<MemRange, 1>>,
 }
 
 impl<const RAM: usize, const RSVD: usize, const MMIO: usize> X86MemState<RAM, RSVD, MMIO> {
@@ -33,7 +27,6 @@ impl<const RAM: usize, const RSVD: usize, const MMIO: usize> X86MemState<RAM, RS
             ram_regions: Once::new(),
             reserved_regions: Once::new(),
             mmio_regions: Once::new(),
-            dma_regions: Once::new(),
         }
     }
 
@@ -42,8 +35,6 @@ impl<const RAM: usize, const RSVD: usize, const MMIO: usize> X86MemState<RAM, RS
         boot_info: &BootInfo,
         initial_reserved: &[ReservedRegion],
         static_mmio: &[MemRange],
-        dma_size: usize,
-        dma_exclusions: &[MemRange],
         populate_mmio: F,
     ) where
         F: FnOnce(&mut Vec<MemRange, MMIO>),
@@ -52,15 +43,12 @@ impl<const RAM: usize, const RSVD: usize, const MMIO: usize> X86MemState<RAM, RS
             boot_info,
             initial_reserved,
             static_mmio,
-            dma_size,
-            dma_exclusions,
             populate_mmio,
         );
 
         self.ram_regions.call_once(|| regions.ram);
         self.reserved_regions.call_once(|| regions.reserved);
         self.mmio_regions.call_once(|| regions.mmio);
-        self.dma_regions.call_once(|| regions.dma);
     }
 
     pub fn ram_regions(&'static self) -> &'static [MemRange] {
@@ -82,13 +70,6 @@ impl<const RAM: usize, const RSVD: usize, const MMIO: usize> X86MemState<RAM, RS
             .get()
             .map(|ranges| ranges.as_slice())
             .expect("x86 MMIO regions are not initialized")
-    }
-
-    pub fn dma_regions(&'static self) -> &'static [MemRange] {
-        self.dma_regions
-            .get()
-            .map(|ranges| ranges.as_slice())
-            .unwrap_or(&[])
     }
 }
 
@@ -152,8 +133,6 @@ pub fn collect_platform_regions<const RAM: usize, const RSVD: usize, const MMIO:
     boot_info: &BootInfo,
     initial_reserved: &[ReservedRegion],
     static_mmio: &[MemRange],
-    dma_size: usize,
-    dma_exclusions: &[MemRange],
     populate_mmio: F,
 ) -> PlatformMemoryRegions<RAM, RSVD, MMIO>
 where
@@ -174,24 +153,11 @@ where
     populate_mmio(&mut mmio);
 
     let reserved = subtract_reserved_ranges::<RSVD>(&reserved, &mmio);
-    let dma = if dma_size == 0 {
-        Vec::new()
-    } else {
-        let region = select_dma32_region_excluding_ranges(
-            ram.as_slice(),
-            reserved.as_slice(),
-            dma_exclusions,
-            dma_size,
-        )
-        .expect("failed to reserve x86 DMA carveout from RAM");
-        Vec::from_slice(&[region]).expect("single DMA region")
-    };
 
     PlatformMemoryRegions {
         ram,
         reserved,
         mmio,
-        dma,
     }
 }
 
@@ -239,27 +205,6 @@ fn subtract_reserved_ranges<const N: usize>(
     }
     sort_and_merge_reserved(&mut filtered);
     filtered
-}
-
-fn select_dma32_region_excluding_ranges(
-    ram_regions: &[MemRange],
-    reserved_regions: &[ReservedRegion],
-    extra_exclusions: &[MemRange],
-    size: usize,
-) -> Option<MemRange> {
-    let mut cut = Vec::<MemRange, MAX_DMA_FILTER_RANGES>::new();
-    for region in reserved_regions {
-        cut.push(region.range())
-            .expect("too many reserved ranges for x86 DMA filtering");
-    }
-    for &range in extra_exclusions {
-        cut.push(range)
-            .expect("too many exclusion ranges for x86 DMA filtering");
-    }
-    sort_and_merge_ranges(&mut cut);
-
-    let filtered = subtract_ranges::<MAX_DMA_FILTER_RANGES>(ram_regions, cut.as_slice());
-    select_dma32_region(filtered.as_slice(), size)
 }
 
 fn push_reserved_non_overlapping<const N: usize>(

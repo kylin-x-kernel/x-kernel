@@ -7,7 +7,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{Error, FnArg, ItemTrait, TraitItem};
+use syn::{Error, FnArg, ItemTrait, TraitItem, Type};
 fn err_ts(e: Error) -> TokenStream {
     e.to_compile_error().into()
 }
@@ -48,6 +48,25 @@ pub fn device_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[crate::__priv::interface_def]
         #tr
         #(#defs)*
+    }
+    .into()
+}
+
+/// Generates a default empty implementation for `kplat::dma::PlatformDmaIf`.
+#[proc_macro]
+pub fn default_dma_if_impl(item: TokenStream) -> TokenStream {
+    let impl_ty = syn::parse_macro_input!(item as Type);
+    quote! {
+        #[kplat::impl_dev_interface]
+        impl kplat::dma::PlatformDmaIf for #impl_ty {
+            fn prepare(_pa: usize, _size: usize) -> kplat::kerrno::KResult {
+                Ok(())
+            }
+
+            fn release(_pa: usize, _size: usize) -> kplat::kerrno::KResult {
+                Ok(())
+            }
+        }
     }
     .into()
 }

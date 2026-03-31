@@ -43,7 +43,7 @@ pub fn init_trap() {
     }
     unsafe {
         karch::write_trap_vector_base(exception_vector_base as *const () as usize);
-        karch::write_user_page_table(0.into());
+        karch::write_user_page_table(memaddr::PhysAddr::from(0usize).into());
     }
 }
 

@@ -12,12 +12,14 @@ documentation.workspace = true
 
 [features]
 sev = []
+dma-trace = []
 
 [dependencies]
-alloc-engine.workspace = true
+alloc-engine = { workspace = true, features = ["tlsf"] }
 kalloc.workspace = true
 kerrno.workspace = true
 khal = { workspace = true }
+kplat = { workspace = true }
 crate_interface.workspace = true
 kspin.workspace = true
 log.workspace = true

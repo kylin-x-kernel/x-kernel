@@ -24,6 +24,7 @@ mod lang_items;
 #[cfg(feature = "smp")]
 mod mp;
 
+mod dma_integration;
 mod init_setup;
 
 use kernel_boot::{PRIMARY_KERNEL_ENTRY, register_boot_init};
@@ -116,19 +117,6 @@ fn is_init_ok() -> bool {
     INITED_CPUS.load(Ordering::Acquire) == kbuild_config::CPU_NUM
 }
 
-struct DmaPageTableImpl;
-
-#[crate_interface::impl_interface]
-impl kdma::DmaPageTableIf for DmaPageTableImpl {
-    fn protect(
-        vaddr: memaddr::VirtAddr,
-        size: usize,
-        flags: khal::paging::MappingFlags,
-    ) -> kerrno::KResult {
-        memspace::kernel_layout().lock().protect(vaddr, size, flags)
-    }
-}
-
 /// The main entry point of the runtime.
 ///
 /// It is called from the bootstrapping code in the specific platform crate (see
@@ -147,12 +135,16 @@ pub fn rust_main(arg: usize) -> ! {
     khal::early_init(boot_info);
 
     kprintln!("{}", LOGO);
+    let build_machine = option_env!("KBUILD_BUILD_MACHINE").unwrap_or("unknown");
+    let build_time = option_env!("KBUILD_BUILD_TIME").unwrap_or("unknown");
     kprintln!(
         indoc::indoc! {"
             arch = {}
             platform = {}
             target = {}
             build_mode = {}
+            build_machine = {}
+            build_time = {}
             log_level = {}
             backtrace = {}
             smp = {}
@@ -161,6 +153,8 @@ pub fn rust_main(arg: usize) -> ! {
         kbuild_config::PLATFORM,
         option_env!("K_TARGET").unwrap_or(""),
         option_env!("K_MODE").unwrap_or(""),
+        build_machine,
+        build_time,
         option_env!("K_LOG").unwrap_or(""),
         backtrace::is_enabled(),
         kbuild_config::CPU_NUM,
@@ -326,7 +320,7 @@ fn should_summarize_region(summary: &RegionLogSummary) -> bool {
 }
 
 fn init_allocator() {
-    use khal::mem::{MemFlags, dma_regions, memory_regions, p2v};
+    use khal::mem::{MemFlags, memory_regions, p2v};
 
     info!("Initialize global memory allocator...");
     info!("  use {} allocator.", kalloc::global_allocator().name());
@@ -337,10 +331,6 @@ fn init_allocator() {
     for region in free_regions {
         kalloc::global_add_memory(p2v(region.paddr).as_usize(), region.size)
             .expect("failed to add free region to allocator");
-    }
-
-    for &(start, size) in dma_regions() {
-        kalloc::global_init_dma_page_allocator(p2v(start.into()).as_usize(), size);
     }
 }
 

@@ -31,6 +31,8 @@ arm-gic.workspace = true
 kbuild_config = { workspace = true }
 ktypes = { workspace = true }
 boot_info = { workspace = true }
+kdma = { workspace = true }
+kerrno = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

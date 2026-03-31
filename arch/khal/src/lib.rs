@@ -66,11 +66,6 @@ pub mod power {
     pub use kplat::sys::shutdown;
 }
 
-#[cfg(feature = "crosvm")]
-pub mod psci {
-    pub use kplat::psci::{dma_share, dma_unshare};
-}
-
 /// Trap handling.
 pub mod trap {
     pub use kcpu::excp::{IRQ, PAGE_FAULT, PageFaultFlags, register_trap_handler};
