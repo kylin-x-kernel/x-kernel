@@ -85,6 +85,18 @@ pub struct CowBackend {
 }
 
 impl CowBackend {
+    /// Returns the virtual start address of the mapping.
+    pub const fn start(&self) -> VirtAddr {
+        self.start
+    }
+
+    /// Returns the underlying file mapping information when present.
+    pub fn file_mapping(&self) -> Option<(&FileBackend, u64)> {
+        self.file
+            .as_ref()
+            .map(|(file, file_start, _file_end)| (file, *file_start))
+    }
+
     fn alloc_new_frame(&self, zeroed: bool) -> KResult<PhysAddr> {
         let frame = alloc_frame(zeroed, self.size)?;
         FRAME_TABLE.lock().init_frame(frame);

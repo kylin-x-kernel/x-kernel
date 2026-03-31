@@ -2,79 +2,150 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    format,
-    string::{String, ToString},
-    sync::Arc,
+use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+
+use kalloc::UsageKind;
+use kcore::vfs::{
+    DirMaker, DirMapping, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs,
 };
 
-use indoc::indoc;
-use kcore::vfs::{DirMaker, DirMapping, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs};
+use crate::{hooks::ProcFsHooks, mounts::ProcMountIter, task::ProcFsHandler};
 
-use crate::{hooks::ProcFsHooks, mounts::render_proc_mounts, task::ProcFsHandler};
-
-const DUMMY_MEMINFO: &str = indoc! {"
-    MemTotal:       32536204 kB
-    MemFree:         5506524 kB
-    MemAvailable:   18768344 kB
-    Buffers:            3264 kB
-    Cached:         14454588 kB
-    SwapCached:            0 kB
-    Active:         18229700 kB
-    Inactive:        6540624 kB
-    Active(anon):   11380224 kB
-    Inactive(anon):        0 kB
-    Active(file):    6849476 kB
-    Inactive(file):  6540624 kB
-    Unevictable:      930088 kB
-    Mlocked:            1136 kB
-    SwapTotal:       4194300 kB
-    SwapFree:        4194300 kB
-    Zswap:                 0 kB
-    Zswapped:              0 kB
-    Dirty:             47952 kB
-    Writeback:             0 kB
-    AnonPages:      10992512 kB
-    Mapped:          1361184 kB
-    Shmem:           1068056 kB
-    KReclaimable:     341440 kB
-    Slab:             628996 kB
-    SReclaimable:     341440 kB
-    SUnreclaim:       287556 kB
-    KernelStack:       28704 kB
-    PageTables:        85308 kB
-    SecPageTables:      2084 kB
-    NFS_Unstable:          0 kB
-    Bounce:                0 kB
-    WritebackTmp:          0 kB
-    CommitLimit:    20462400 kB
-    Committed_AS:   45105316 kB
-    VmallocTotal:   34359738367 kB
-    VmallocUsed:      205924 kB
-    VmallocChunk:          0 kB
-    Percpu:            23840 kB
-    HardwareCorrupted:     0 kB
-    AnonHugePages:   1417216 kB
-    ShmemHugePages:        0 kB
-    ShmemPmdMapped:        0 kB
-    FileHugePages:    477184 kB
-    FilePmdMapped:    288768 kB
-    CmaTotal:              0 kB
-    CmaFree:               0 kB
-    Unaccepted:            0 kB
-    HugePages_Total:       0
-    HugePages_Free:        0
-    HugePages_Rsvd:        0
-    HugePages_Surp:        0
-    Hugepagesize:       2048 kB
-    Hugetlb:               0 kB
-    DirectMap4k:     1739900 kB
-    DirectMap2M:    31492096 kB
-    DirectMap1G:     1048576 kB
-"};
+const KB: usize = 1024;
+const PAGE_SIZE: usize = 0x1000;
 
 fn render_interrupts(irq_count: usize) -> String {
     format!("0: {}\n", irq_count)
+}
+
+fn bytes_to_kib(bytes: usize) -> usize {
+    bytes / KB
+}
+
+struct MeminfoIter {
+    lines: Vec<String>,
+    next_index: usize,
+}
+
+struct InterruptsIter {
+    hooks: ProcFsHooks,
+    emitted: bool,
+}
+
+impl InterruptsIter {
+    fn new(hooks: ProcFsHooks) -> Self {
+        Self {
+            hooks,
+            emitted: false,
+        }
+    }
+}
+
+impl MeminfoIter {
+    fn new() -> Self {
+        let mut iter = Self {
+            lines: Vec::new(),
+            next_index: 0,
+        };
+        iter.rewind();
+        iter
+    }
+}
+
+impl SeqIterator for MeminfoIter {
+    type Item = String;
+
+    fn rewind(&mut self) {
+        let allocator = kalloc::global_allocator();
+        let usages = allocator.usages();
+        let used_pages = allocator.used_pages();
+        let free_pages = allocator.available_pages();
+        let total_pages = used_pages + free_pages;
+        let total_kib = total_pages * PAGE_SIZE / KB;
+        let free_kib = free_pages * PAGE_SIZE / KB;
+        let cache_kib = bytes_to_kib(usages.get(UsageKind::PageCache));
+        let heap_kib = bytes_to_kib(usages.get(UsageKind::RustHeap));
+        let page_table_kib = bytes_to_kib(usages.get(UsageKind::PageTable));
+        let user_kib = bytes_to_kib(usages.get(UsageKind::VirtMem));
+        let dma_kib = bytes_to_kib(usages.get(UsageKind::Dma));
+        let available_kib = free_kib + cache_kib;
+
+        self.lines = vec![
+            format!("MemTotal:{total_kib:>15} kB\n"),
+            format!("MemFree:{free_kib:>16} kB\n"),
+            format!("MemAvailable:{available_kib:>11} kB\n"),
+            format!("Buffers:{:>16} kB\n", 0),
+            format!("Cached:{cache_kib:>17} kB\n"),
+            format!("SwapCached:{:>13} kB\n", 0),
+            format!("Active:{:>18} kB\n", 0),
+            format!("Inactive:{:>16} kB\n", 0),
+            format!("SwapTotal:{:>14} kB\n", 0),
+            format!("SwapFree:{:>15} kB\n", 0),
+            format!("Dirty:{:>19} kB\n", 0),
+            format!("Writeback:{:>15} kB\n", 0),
+            format!("AnonPages:{user_kib:>15} kB\n"),
+            format!("Mapped:{user_kib:>17} kB\n"),
+            format!("Shmem:{:>18} kB\n", 0),
+            format!("Slab:{heap_kib:>19} kB\n"),
+            format!("SReclaimable:{:>11} kB\n", 0),
+            format!("SUnreclaim:{heap_kib:>13} kB\n"),
+            format!("PageTables:{page_table_kib:>13} kB\n"),
+            format!("KernelStack:{:>12} kB\n", 0),
+            format!("NFS_Unstable:{:>11} kB\n", 0),
+            format!("Bounce:{:>17} kB\n", 0),
+            format!("CmaTotal:{dma_kib:>14} kB\n"),
+            format!("HugePages_Total:{:>8}\n", 0),
+            format!("HugePages_Free:{:>9}\n", 0),
+            format!("Hugepagesize:{:>11} kB\n", 2048),
+            format!("DirectMap4k:{total_kib:>13} kB\n"),
+            format!("DirectMap2M:{:>13} kB\n", 0),
+        ];
+        self.next_index = 0;
+    }
+
+    fn start(&mut self) -> Option<Self::Item> {
+        self.rewind();
+        self.next()
+    }
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.lines.get(self.next_index).cloned();
+        if item.is_some() {
+            self.next_index += 1;
+        }
+        item
+    }
+
+    fn show(&self, item: &Self::Item, buf: &mut String) -> core::fmt::Result {
+        buf.push_str(item);
+        Ok(())
+    }
+}
+
+impl SeqIterator for InterruptsIter {
+    type Item = usize;
+
+    fn rewind(&mut self) {
+        self.emitted = false;
+    }
+
+    fn start(&mut self) -> Option<Self::Item> {
+        self.rewind();
+        self.next()
+    }
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.emitted {
+            return None;
+        }
+        self.emitted = true;
+        Some((self.hooks.irq_count)())
+    }
+
+    fn show(&self, item: &Self::Item, buf: &mut String) -> core::fmt::Result {
+        buf.push_str(&render_interrupts(*item));
+        Ok(())
+    }
 }
 
 pub fn builder(fs: Arc<SimpleFs>, hooks: ProcFsHooks) -> DirMaker {
@@ -84,17 +155,17 @@ pub fn builder(fs: Arc<SimpleFs>, hooks: ProcFsHooks) -> DirMaker {
         SimpleFile::new_regular(fs.clone(), || {
             Ok(match khal::cmdline() {
                 Some(cmdline) if !cmdline.is_empty() => format!("{cmdline}\n"),
-                _ => "\n".to_string(),
+                _ => String::from("\n"),
             })
         }),
     );
     root.add(
         "mounts",
-        SimpleFile::new_regular(fs.clone(), || Ok(render_proc_mounts())),
+        SeqFileNode::new_regular(fs.clone(), ProcMountIter::mounts()),
     );
     root.add(
         "meminfo",
-        SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_MEMINFO)),
+        SeqFileNode::new_regular(fs.clone(), MeminfoIter::new()),
     );
     root.add(
         "meminfo2",
@@ -112,15 +183,13 @@ pub fn builder(fs: Arc<SimpleFs>, hooks: ProcFsHooks) -> DirMaker {
             }
             #[cfg(not(any(target_arch = "riscv32", target_arch = "riscv64")))]
             {
-                Ok("0\n".to_string())
+                Ok(String::from("0\n"))
             }
         }),
     );
     root.add(
         "interrupts",
-        SimpleFile::new_regular(fs.clone(), move || {
-            Ok(render_interrupts((hooks.irq_count)()))
-        }),
+        SeqFileNode::new_regular(fs.clone(), InterruptsIter::new(hooks)),
     );
 
     root.add("sys", {
@@ -146,10 +215,15 @@ pub fn builder(fs: Arc<SimpleFs>, hooks: ProcFsHooks) -> DirMaker {
 mod tests {
     use unittest::{assert_eq, def_test};
 
-    use super::render_interrupts;
+    use super::{bytes_to_kib, render_interrupts};
 
     #[def_test]
     fn test_render_interrupts_includes_trailing_newline() {
         assert_eq!(render_interrupts(867), "0: 867\n");
+    }
+
+    #[def_test]
+    fn test_bytes_to_kib_rounds_down() {
+        assert_eq!(bytes_to_kib(4097), 4);
     }
 }

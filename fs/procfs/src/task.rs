@@ -14,18 +14,21 @@ use alloc::{
 use core::{ffi::CStr, iter, str};
 
 use fs_ng_vfs::{NodeType, VfsError, VfsResult};
-use indoc::indoc;
 use kcore::{
+    config::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP},
     task::{AsThread, TaskStat, get_process_data, get_task, processes},
-    vfs::{NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile, SimpleFileOperation, SimpleFs},
+    vfs::{
+        NodeOpsMux, RwFile, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile,
+        SimpleFileOperation, SimpleFs,
+    },
 };
+use khal::paging::MappingFlags;
 use kprocess::Process;
 use ktask::{KtaskRef, WeakKtaskRef, current};
+use memaddr::VirtAddr;
+use memspace::backend::Backend;
 
-use crate::{
-    hooks::ProcFsHooks,
-    mounts::{render_mountinfo, render_mountstats, render_proc_mounts},
-};
+use crate::{hooks::ProcFsHooks, mounts::ProcMountIter};
 
 struct ProcessTaskDir {
     fs: Arc<SimpleFs>,
@@ -100,6 +103,197 @@ fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
         .and_then(|it| it.parse::<i32>().ok())
         .map(Some)
         .ok_or(VfsError::InvalidInput)
+}
+
+fn maps_permissions(flags: MappingFlags) -> [u8; 4] {
+    [
+        if flags.contains(MappingFlags::READ) {
+            b'r'
+        } else {
+            b'-'
+        },
+        if flags.contains(MappingFlags::WRITE) {
+            b'w'
+        } else {
+            b'-'
+        },
+        if flags.contains(MappingFlags::EXECUTE) {
+            b'x'
+        } else {
+            b'-'
+        },
+        if flags.contains(MappingFlags::SHARED) {
+            b's'
+        } else {
+            b'p'
+        },
+    ]
+}
+
+fn special_mapping_name(start: usize, end: usize, heap_top: usize) -> Option<&'static str> {
+    let heap_start = USER_HEAP_BASE;
+    if start < heap_top && end > heap_start {
+        return Some("[heap]");
+    }
+
+    let stack_start = USER_STACK_TOP - USER_STACK_SIZE;
+    if start < USER_STACK_TOP && end > stack_start {
+        return Some("[stack]");
+    }
+
+    if start <= SIGNAL_TRAMPOLINE && end > SIGNAL_TRAMPOLINE {
+        return Some("[sigtramp]");
+    }
+
+    None
+}
+
+#[derive(Clone)]
+struct MapsEntry {
+    start: usize,
+    end: usize,
+    flags: MappingFlags,
+    offset: u64,
+    inode: u64,
+    path: Option<String>,
+    name: Option<&'static str>,
+}
+
+fn backend_file_mapping(
+    area_start: VirtAddr,
+    backend: &Backend,
+) -> Option<(u64, u64, Option<String>)> {
+    match backend {
+        Backend::Cow(cow) => {
+            let (file, file_start) = cow.file_mapping()?;
+            let rel = area_start.as_usize().saturating_sub(cow.start().as_usize()) as u64;
+            let inode = file.location().inode();
+            let path = file
+                .location()
+                .absolute_path()
+                .ok()
+                .map(|it| it.to_string());
+            Some((file_start + rel, inode, path))
+        }
+        Backend::File(file) => {
+            let inode = file.cache().location().inode();
+            let path = file
+                .cache()
+                .location()
+                .absolute_path()
+                .ok()
+                .map(|it| it.to_string());
+            Some((file.offset_for(area_start), inode, path))
+        }
+        _ => None,
+    }
+}
+
+const PROC_MAPS_ADDR_WIDTH: usize = 12;
+const PROC_MAPS_PATH_COLUMN: usize = 73;
+
+fn render_maps_line(item: &MapsEntry) -> String {
+    let perms = maps_permissions(item.flags);
+    let mut line = format!(
+        "{:0width$x}-{:0width$x} {} {:08x} 00:00 {}",
+        item.start,
+        item.end,
+        core::str::from_utf8(&perms).unwrap(),
+        item.offset,
+        item.inode,
+        width = PROC_MAPS_ADDR_WIDTH,
+    );
+
+    if let Some(name) = item.name {
+        if line.len() < PROC_MAPS_PATH_COLUMN {
+            for _ in line.len()..PROC_MAPS_PATH_COLUMN {
+                line.push(' ');
+            }
+        } else {
+            line.push(' ');
+        }
+        line.push_str(name);
+    } else if let Some(path) = item.path.as_deref() {
+        if line.len() < PROC_MAPS_PATH_COLUMN {
+            for _ in line.len()..PROC_MAPS_PATH_COLUMN {
+                line.push(' ');
+            }
+        } else {
+            line.push(' ');
+        }
+        line.push_str(path);
+    }
+
+    line.push('\n');
+    line
+}
+
+struct MapsIter {
+    task: WeakKtaskRef,
+    entries: Vec<MapsEntry>,
+    next_index: usize,
+}
+
+impl MapsIter {
+    fn new(task: WeakKtaskRef) -> Self {
+        let mut iter = Self {
+            task,
+            entries: Vec::new(),
+            next_index: 0,
+        };
+        iter.rewind();
+        iter
+    }
+}
+
+impl SeqIterator for MapsIter {
+    type Item = MapsEntry;
+
+    fn rewind(&mut self) {
+        self.entries.clear();
+        self.next_index = 0;
+
+        let Some(task) = self.task.upgrade() else {
+            return;
+        };
+
+        let proc_data = &task.as_thread().proc_data;
+        let heap_top = proc_data.get_heap_top();
+        let aspace = proc_data.aspace.lock();
+        for area in aspace.areas() {
+            let start = area.start().as_usize();
+            let end = area.end().as_usize();
+            let (offset, inode, path) =
+                backend_file_mapping(area.start(), area.backend()).unwrap_or((0, 0, None));
+            self.entries.push(MapsEntry {
+                start,
+                end,
+                flags: area.flags(),
+                offset,
+                inode,
+                path,
+                name: special_mapping_name(start, end, heap_top),
+            });
+        }
+    }
+
+    fn start(&mut self) -> Option<Self::Item> {
+        self.rewind();
+        self.next()
+    }
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.entries.get(self.next_index).cloned();
+        if item.is_some() {
+            self.next_index += 1;
+        }
+        item
+    }
+
+    fn show(&self, item: &Self::Item, buf: &mut String) -> core::fmt::Result {
+        buf.push_str(&render_maps_line(item));
+        Ok(())
+    }
 }
 
 struct ThreadFdDir {
@@ -249,22 +443,10 @@ impl SimpleDirOps for ThreadDir {
                 }),
             )
             .into(),
-            "maps" => SimpleFile::new_regular(fs, move || {
-                Ok(indoc! {"
-                    7f000000-7f001000 r--p 00000000 00:00 0          [vdso]
-                    7f001000-7f003000 r-xp 00001000 00:00 0          [vdso]
-                    7f003000-7f005000 r--p 00003000 00:00 0          [vdso]
-                    7f005000-7f007000 rw-p 00005000 00:00 0          [vdso]
-                "})
-            })
-            .into(),
-            "mounts" => {
-                SimpleFile::new_regular(fs.clone(), move || Ok(render_proc_mounts())).into()
-            }
-            "mountinfo" => {
-                SimpleFile::new_regular(fs.clone(), move || Ok(render_mountinfo())).into()
-            }
-            "mountstats" => SimpleFile::new_regular(fs, move || Ok(render_mountstats())).into(),
+            "maps" => SeqFileNode::new_regular(fs, MapsIter::new(Arc::downgrade(&task))).into(),
+            "mounts" => SeqFileNode::new_regular(fs.clone(), ProcMountIter::mounts()).into(),
+            "mountinfo" => SeqFileNode::new_regular(fs.clone(), ProcMountIter::mountinfo()).into(),
+            "mountstats" => SeqFileNode::new_regular(fs, ProcMountIter::mountstats()).into(),
             "cgroup" => SimpleFile::new_regular(fs.clone(), move || Ok("0::/\n")).into(),
             "ns" => SimpleDir::new_maker(fs.clone(), Arc::new(ThreadNsDir { fs })).into(),
             "cmdline" => SimpleFile::new_regular(fs, move || {
@@ -378,10 +560,13 @@ impl SimpleDirOps for ProcFsHandler {
 
 #[cfg(unittest)]
 mod tests {
+    use khal::paging::MappingFlags;
     use unittest::{assert_eq, def_test};
 
     use super::{
-        format_oom_score_adj, namespace_inode, namespace_link_target, parse_oom_score_adj_input,
+        MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, format_oom_score_adj,
+        maps_permissions, namespace_inode, namespace_link_target, parse_oom_score_adj_input,
+        render_maps_line, special_mapping_name,
     };
 
     #[def_test]
@@ -419,5 +604,49 @@ mod tests {
     #[def_test]
     fn test_parse_oom_score_adj_rejects_invalid_input() {
         assert!(parse_oom_score_adj_input(b"abc\n").is_err());
+    }
+
+    #[def_test]
+    fn test_maps_permissions_formats_shared_exec() {
+        assert_eq!(
+            maps_permissions(MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::SHARED),
+            *b"r-xs"
+        );
+    }
+
+    #[def_test]
+    fn test_special_mapping_name_recognizes_heap_and_stack() {
+        assert_eq!(
+            special_mapping_name(
+                super::USER_HEAP_BASE,
+                super::USER_HEAP_BASE + 0x1000,
+                super::USER_HEAP_BASE + 0x2000
+            ),
+            Some("[heap]")
+        );
+        assert_eq!(
+            special_mapping_name(
+                super::USER_STACK_TOP - 0x1000,
+                super::USER_STACK_TOP,
+                super::USER_HEAP_BASE
+            ),
+            Some("[stack]")
+        );
+    }
+
+    #[def_test]
+    fn test_render_maps_line_aligns_path_column() {
+        let line = render_maps_line(&MapsEntry {
+            start: 0x4000_0000,
+            end: 0x4000_1000,
+            flags: MappingFlags::READ | MappingFlags::WRITE,
+            offset: 0,
+            inode: 42,
+            path: Some("/bin/test".into()),
+            name: None,
+        });
+
+        assert_eq!(&line[..PROC_MAPS_ADDR_WIDTH], "000040000000");
+        assert_eq!(line.chars().nth(PROC_MAPS_PATH_COLUMN), Some('/'));
     }
 }

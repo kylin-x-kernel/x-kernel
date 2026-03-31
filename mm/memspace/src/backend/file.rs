@@ -94,6 +94,23 @@ impl FileBackendInner {
 #[derive(Clone)]
 pub struct FileBackend(Arc<FileBackendInner>);
 impl FileBackend {
+    /// Returns the virtual start address of the mapping.
+    pub fn start(&self) -> VirtAddr {
+        self.0.start
+    }
+
+    /// Returns the file offset in bytes for the given virtual address.
+    pub fn offset_for(&self, addr: VirtAddr) -> u64 {
+        let base = self.0.start.as_usize();
+        let rel = addr.as_usize().saturating_sub(base) as u64;
+        self.0.offset_page as u64 * PAGE_SIZE_4K as u64 + rel
+    }
+
+    /// Returns the cached file backing this mapping.
+    pub fn cache(&self) -> &CachedFile {
+        &self.0.cache
+    }
+
     fn check_flags(&self, flags: MappingFlags) -> KResult {
         let mut required_flags = FileFlags::empty();
         if flags.contains(MappingFlags::READ) {
