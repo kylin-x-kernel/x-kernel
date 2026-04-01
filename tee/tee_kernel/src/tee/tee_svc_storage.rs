@@ -353,7 +353,6 @@ pub fn syscall_storage_obj_open(
 
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
     let uuid = Uuid::parse_str(&uuid)?;
-    // let uuid = Uuid::new_raw(0, 0, 0, [0; 8]);
 
     tee_debug!("syscall_storage_obj_open: step 1 : tee_pobj_get");
     let po = tee_pobj_get(

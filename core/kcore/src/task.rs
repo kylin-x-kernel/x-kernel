@@ -12,8 +12,6 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-#[cfg(feature = "tee")]
-use core::any::Any;
 use core::{
     cell::RefCell,
     ops::Deref,
@@ -34,6 +32,8 @@ use ktask::{KtaskRef, TaskExt, TaskInner, WeakKtaskRef, current};
 use lazy_static::lazy_static;
 use memspace::AddrSpace;
 use scope_local::{ActiveScope, Scope};
+#[cfg(feature = "tee")]
+pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 use weak_map::WeakMap;
 
 pub use self::stat::TaskStat;
@@ -55,15 +55,6 @@ impl<T> Deref for AssumeSync<T> {
     fn deref(&self) -> &Self::Target {
         &self.0
     }
-}
-
-/// Tee session context trait
-#[cfg(feature = "tee")]
-pub trait TeeSessionCtxTrait {
-    /// Get the any reference of the tee session context
-    fn as_any(&self) -> &dyn Any;
-    /// Get the any mutable reference of the tee session context
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 /// The inner data of a thread.
@@ -251,6 +242,10 @@ pub struct ProcessData {
 
     /// The default mask for file permissions.
     umask: AtomicU32,
+
+    /// Tee TA context
+    #[cfg(feature = "tee")]
+    pub tee_ta_ctx: RwLock<TeeTaCtx>,
 }
 
 impl ProcessData {
@@ -265,6 +260,8 @@ impl ProcessData {
     ) -> Arc<Self> {
         Arc::new(Self {
             proc,
+            #[cfg(feature = "tee")]
+            tee_ta_ctx: RwLock::new(TeeTaCtx::new(&exe_path)),
             exe_path: RwLock::new(exe_path),
             cmdline: RwLock::new(cmdline),
             aspace,

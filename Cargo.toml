@@ -109,6 +109,7 @@ x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 # Internal: tee
 tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
+tee_task_iface = { path = "tee/tee_task_iface" }
 
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }

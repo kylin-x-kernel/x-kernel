@@ -72,6 +72,12 @@ pub fn sys_execve(
     *proc_data.exe_path.write() = loc.absolute_path()?.to_string();
     *proc_data.cmdline.write() = Arc::new(args);
 
+    #[cfg(feature = "tee")]
+    proc_data
+        .tee_ta_ctx
+        .write()
+        .set_uuid(loc.absolute_path()?.to_string().as_str());
+
     proc_data.set_heap_top(USER_HEAP_BASE);
 
     *proc_data.signal.actions.lock() = Default::default();

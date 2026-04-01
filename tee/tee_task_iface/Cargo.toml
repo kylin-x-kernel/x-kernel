@@ -1,0 +1,17 @@
+[package]
+name = "tee_task_iface"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shared TEE-related task APIs (traits) for x-kernel."
+keywords = ["tee", "kernel", "extensions"]
+categories = ["os", "no-std"]
+documentation.workspace = true
+
+[dependencies]
+hashbrown = { workspace = true }
+uuid = { version = "0.8", default-features = false }
+unittest.workspace = true

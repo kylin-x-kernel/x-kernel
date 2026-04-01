@@ -9,23 +9,17 @@ use alloc::{
 };
 use core::{any::Any, default::Default};
 
-use hashbrown::HashMap;
 use kcore::task::{AsThread, TeeSessionCtxTrait};
 use ksync::{Mutex, RwLock};
 use ktask::current;
 use slab::Slab;
 use tee_raw_sys::*;
+use tee_task_iface::TeeTaCtx;
 
 use crate::tee::{
     TeeResult, tee_obj::tee_obj, tee_svc_cryp2::TeeCrypState, tee_svc_storage::tee_storage_enum,
-    tee_ta_manager::SessionIdentity, user_ta::user_ta_ctx, uuid::Uuid,
+    user_ta::user_ta_ctx,
 };
-
-scope_local::scope_local! {
-    /// Global TEE TA (Trusted Application) context shared across all sessions
-    /// This stores global state and resources for the TEE environment
-    pub static TEE_TA_CTX: Arc<RwLock<TeeTaCtx>> = Arc::default();
-}
 
 /// TEE Session Context
 /// This context stores per-session information and state for a client session
@@ -154,30 +148,6 @@ pub fn set_tee_session_ctx(thread: &kcore::task::Thread) {
     thread.set_tee_session_ctx(Box::new(TeeSessionCtx::default()));
 }
 
-/// TEE Trusted Application Context
-/// This structure holds the global state for TA
-/// All sessions in TA share this context
-#[derive(Debug)]
-pub struct TeeTaCtx {
-    /// Test-only field, used only in test builds
-    #[cfg(unittest)]
-    pub for_test_only: u32,
-    pub session_dispatch_irq: u32,
-    pub open_sessions: HashMap<u32, SessionIdentity>,
-    pub uuid: String,
-}
-
-impl Default for TeeTaCtx {
-    fn default() -> Self {
-        TeeTaCtx {
-            #[cfg(unittest)]
-            for_test_only: 0,
-            session_dispatch_irq: 0,
-            open_sessions: HashMap::new(),
-            uuid: Uuid::default().to_string(),
-        }
-    }
-}
 /// Acquire a mutable reference to the global tee_ta_ctx
 /// Executes the provided closure with the mutable reference
 /// The closure pattern ensures proper lock release
@@ -191,8 +161,9 @@ pub fn with_tee_ta_ctx_mut<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&mut TeeTaCtx) -> TeeResult<R>,
 {
-    let mut ta_ctx = TEE_TA_CTX.write();
-    f(&mut ta_ctx)
+    let current_task = current();
+    let mut lock = current_task.as_thread().proc_data.tee_ta_ctx.write();
+    f(&mut lock)
 }
 
 /// Acquire an immutable reference to the global tee_ta_ctx
@@ -208,8 +179,9 @@ pub fn with_tee_ta_ctx<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&TeeTaCtx) -> TeeResult<R>,
 {
-    let ta_ctx = TEE_TA_CTX.read();
-    f(&ta_ctx)
+    let current_task = current();
+    let lock = current_task.as_thread().proc_data.tee_ta_ctx.read();
+    f(&lock)
 }
 
 // Test module for TEE session functionality
@@ -220,52 +192,36 @@ pub mod tests_tee_session {
 
     use super::*;
 
-    // Test function for basic tee_ta_ctx operations
-    #[unittest::def_test]
-    fn test_tee_ta_ctx() {
-        let test_only;
-        {
-            let ta_ctx = TEE_TA_CTX.read();
-            test_only = ta_ctx.for_test_only;
-        }
-
-        {
-            let mut ta_ctx = TEE_TA_CTX.write();
-            ta_ctx.for_test_only = test_only + 1;
-            assert_eq!(ta_ctx.for_test_only, test_only + 1);
-        }
-
-        {
-            let ta_ctx = TEE_TA_CTX.read();
-            assert_eq!(ta_ctx.for_test_only, test_only + 1);
-        }
-    }
-
     // Test function for with_tee_ta_ctx helper functions
-    #[unittest::def_test]
+    #[unittest::def_test(custom)]
     fn test_with_tee_ta_ctx() {
-        let mut test_only: u32 = 0;
+        let mut uuid_back: String = String::new();
+
         with_tee_ta_ctx(|ta_ctx| {
-            test_only = ta_ctx.for_test_only;
+            uuid_back = ta_ctx.uuid.clone();
             Ok(())
         })
         .unwrap();
+        assert_eq!(uuid_back, "00000000-0000-0000-0000-000000000000");
 
-        let mut new_value = 0;
         with_tee_ta_ctx_mut(|ta_ctx| {
-            ta_ctx.for_test_only = test_only + 1;
-            new_value = ta_ctx.for_test_only;
+            ta_ctx.uuid = "936da01f-9abd-4d9d-80c7-02af85c822a8".to_string();
             Ok(())
         })
         .unwrap();
-        assert_eq!(new_value, test_only + 1);
 
-        new_value = 0;
+        let mut uuid_modify: String = String::new();
         with_tee_ta_ctx(|ta_ctx| {
-            new_value = ta_ctx.for_test_only;
+            uuid_modify = ta_ctx.uuid.clone();
             Ok(())
         })
         .unwrap();
-        assert_eq!(new_value, test_only + 1);
+        assert_eq!(uuid_modify, "936da01f-9abd-4d9d-80c7-02af85c822a8");
+
+        with_tee_ta_ctx_mut(|ta_ctx| {
+            ta_ctx.uuid = uuid_back;
+            Ok(())
+        })
+        .unwrap();
     }
 }

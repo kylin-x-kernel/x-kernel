@@ -12,18 +12,13 @@ use knet::{
 };
 use ktask::current;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND, TEE_SUCCESS, utee_params};
+use tee_task_iface::SessionIdentity;
 
 use crate::tee::{
     TeeResult,
     protocal::{Parameters, TeeRequest, TeeResponse},
     tee_session::{with_tee_ta_ctx, with_tee_ta_ctx_mut},
 };
-
-#[derive(Debug, Clone)]
-pub struct SessionIdentity {
-    pub uuid: String,
-    pub session_id: u32,
-}
 
 pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     // Connect to dest TA via Unix socket
