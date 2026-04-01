@@ -1009,6 +1009,8 @@ pub(crate) fn crypto_acipher_rsassa_verify(
     }
 }
 
+/// 使用ECDSA时，传入的数据是hash值
+/// 使用SM2时，传入的数据是原始数据
 pub(crate) fn crypto_acipher_ecc_sign(
     cs: Arc<Mutex<TeeCrypState>>,
     input: &[u8],
@@ -1032,13 +1034,21 @@ pub(crate) fn crypto_acipher_ecc_sign(
 
     if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
         let mut rng = TeeSoftwareRng::new();
-        pk.sign(md_type, input, output, &mut rng)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        match algo {
+            TEE_ALG_SM2_DSA_SM3 => pk
+                .sm2_sign(md_type, input, output, &mut rng)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            _ => pk
+                .sign(md_type, input, output, &mut rng)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
+/// 使用ECDSA时，传入的数据是hash值
+/// 使用SM2时，传入的数据是原始数据
 pub(crate) fn crypto_acipher_ecc_verify(
     cs: Arc<Mutex<TeeCrypState>>,
     hash: &[u8],
@@ -1061,8 +1071,14 @@ pub(crate) fn crypto_acipher_ecc_verify(
     let mut cs_guard = cs.lock();
 
     if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
-        pk.verify(md_type, hash, signature)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        match algo {
+            TEE_ALG_SM2_DSA_SM3 => pk
+                .sm2_verify(md_type, hash, signature)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            _ => pk
+                .verify(md_type, hash, signature)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }

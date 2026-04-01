@@ -1626,6 +1626,7 @@ pub fn syscall_asymm_verify(
 
 #[unittest::mod_test]
 pub mod tests_cryp {
+    use mbedtls::bignum::Mpi;
     use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
@@ -2463,13 +2464,80 @@ pub mod tests_cryp {
 
         let data = b"SIGNATURE TEST SIGNATURE TEST SI";
         let mut signature1 = [0u8; 141];
-        let mut signature2 = [0u8; 141];
 
         let res = tee_cryp_asymm_operate(state, data, &mut signature1, None);
         assert!(res.is_ok());
         let len = res.unwrap();
 
         let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len]);
+        assert!(res.is_ok());
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm2_verify_with_pub_key() {
+        // alloc sm2 key pair
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let res =
+            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
+        assert!(res.is_ok());
+        let obj_id = obj_id.read();
+
+        // get attr from obj
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_SM2_DSA_PUBLIC_KEY);
+        assert_eq!(obj.info.maxObjectSize, 256);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::ecc_public_key(_)));
+
+        let pubkey: [u8; 64] = [
+            0xa5, 0x2f, 0x69, 0x51, 0xd8, 0x49, 0x4d, 0x4a, 0xec, 0xf8, 0x23, 0xdf, 0xee, 0x1c,
+            0x34, 0x36, 0x7a, 0x39, 0xe7, 0x09, 0xa3, 0xdb, 0x7e, 0x32, 0x9d, 0x73, 0x8a, 0xe9,
+            0xfe, 0x40, 0xee, 0x72, 0x52, 0x83, 0x5b, 0x95, 0xb4, 0xcb, 0xeb, 0x3b, 0x5e, 0x40,
+            0xea, 0x23, 0x91, 0xd6, 0x09, 0x00, 0xdb, 0xf1, 0x7d, 0xc7, 0xd3, 0xc8, 0xe9, 0xa4,
+            0xfe, 0x81, 0xca, 0x73, 0x70, 0xdc, 0x80, 0xc6,
+        ];
+        let sig: [u8; 70] = [
+            0x30, 0x44, 0x02, 0x20, 0x25, 0xe1, 0xce, 0x81, 0xc9, 0xbf, 0x92, 0x6b, 0xf3, 0xd0,
+            0x25, 0xb5, 0xc8, 0x39, 0x97, 0x9b, 0x84, 0xd1, 0x79, 0x62, 0x86, 0x99, 0x30, 0x8e,
+            0x6e, 0x2d, 0x9d, 0x3c, 0xd8, 0x24, 0xe9, 0xd6, 0x02, 0x20, 0x34, 0xa6, 0x35, 0x27,
+            0x8a, 0x03, 0xff, 0x98, 0x24, 0xcc, 0x5f, 0x4f, 0x34, 0x29, 0x8d, 0xec, 0x2d, 0x8d,
+            0xb0, 0xfa, 0xb4, 0x2b, 0x00, 0x82, 0xc4, 0x67, 0xa9, 0x56, 0xeb, 0x3a, 0xcb, 0xca,
+        ];
+        let res = ecc_public_key::new(TEE_TYPE_SM2_DSA_PUBLIC_KEY, 512);
+        assert!(res.is_ok());
+        let mut ecc_key = res.unwrap();
+
+        let res = Mpi::from_binary(&pubkey[..32]);
+        assert!(res.is_ok());
+        let x = res.unwrap();
+
+        let res = Mpi::from_binary(&pubkey[32..]);
+        assert!(res.is_ok());
+        let y = res.unwrap();
+
+        ecc_key.x = BigNum::from_mpi(x);
+        ecc_key.y = BigNum::from_mpi(y);
+
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::ecc_public_key(ecc_key));
+        drop(obj);
+
+        let mut state: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM2_DSA_SM3,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
+
+        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+
+        let res = tee_cryp_asymm_verify(state, data, &sig);
         assert!(res.is_ok());
     }
 
