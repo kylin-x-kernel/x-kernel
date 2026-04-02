@@ -8,7 +8,7 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use log::{debug, error, info};
+use log::{debug, error};
 
 use crate::{
     blockdev::*, config::*, disknode::*, entries::*, error::*, ext4::*, extents_tree::*,
@@ -198,14 +198,14 @@ pub fn get_file_inode<B: BlockDevice>(
                 let total_size = current_inode.size() as usize;
                 let block_bytes = BLOCK_SIZE;
                 let blocks = resolve_inode_block_allextend(fs, block_dev, &mut current_inode)?;
-                info!(
+                debug!(
                     "Directory inode size: {} bytes, blocks used: {}",
                     &total_size,
                     &blocks.len()
                 );
 
                 for (idx, phys) in blocks.iter().enumerate() {
-                    info!("Scan dir block idx {} phys {}", &idx, phys.1);
+                    debug!("Scan dir block idx {} phys {}", &idx, phys.1);
                     let cached_block = fs.datablock_cache.get_or_load(block_dev, *phys.1)?;
                     let block_data = &cached_block.data[..block_bytes];
 

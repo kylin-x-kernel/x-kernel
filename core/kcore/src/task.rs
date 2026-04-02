@@ -495,7 +495,7 @@ pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo
     }
 
     if let Some(sig) = sig {
-        info!("Send signal {:?} to thread {}", sig.signo(), tid);
+        debug!("Send signal {:?} to thread {}", sig.signo(), tid);
         send_signal_thread_inner(&task, thread, sig);
     }
 
@@ -508,7 +508,7 @@ pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> 
 
     if let Some(sig) = sig {
         let signo = sig.signo();
-        info!("Send signal {signo:?} to process {pid}");
+        debug!("Send signal {signo:?} to process {pid}");
         if let Some(tid) = proc_data.signal.send_signal(sig)
             && let Ok(task) = get_task(tid)
         {
