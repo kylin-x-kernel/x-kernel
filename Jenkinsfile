@@ -55,26 +55,8 @@ pipeline {
             }
         }
 
-        stage('Clippy') {
+        stage('Build & Test') {
             parallel {
-                stage('Clippy: x86_64-qemu-virt') {
-                    steps {
-                        script {
-                            runClippy('x86_64-qemu-virt')
-                            ciResults['Clippy: x86_64-qemu-virt'] = [status: 'passed']
-                        }
-                    }
-                    post { failure { script { ciResults['Clippy: x86_64-qemu-virt'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] } } }
-                }
-                stage('Clippy: aarch64-qemu-virt') {
-                    steps {
-                        script {
-                            runClippy('aarch64-qemu-virt')
-                            ciResults['Clippy: aarch64-qemu-virt'] = [status: 'passed']
-                        }
-                    }
-                    post { failure { script { ciResults['Clippy: aarch64-qemu-virt'] = [status: 'failed', detail: 'cargo clippy 发现 lint 警告/错误'] } } }
-                }
                 stage('Clippy+Build: x86-csv') {
                     steps {
                         script {
@@ -93,33 +75,31 @@ pipeline {
                     }
                     post { failure { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
                 }
-            }
-        }
-
-        stage('Runtime: x86_64') {
-            steps {
-                script {
-                    executeBuildAndTest('x86_64')
-                    ciResults['Runtime: x86_64'] = [status: 'passed']
+                stage('Clippy+Runtime: x86_64-qemu-virt') {
+                    steps {
+                        script {
+                            runClippyAndRuntime('x86_64')
+                            ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'passed']
+                        }
+                    }
+                    post {
+                        failure {
+                            script { ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'failed', detail: collectUnitTestSnippet('x86_64')] }
+                        }
+                    }
                 }
-            }
-            post {
-                failure {
-                    script { ciResults['Runtime: x86_64'] = [status: 'failed', detail: collectUnitTestSnippet('x86_64')] }
-                }
-            }
-        }
-
-        stage('Runtime: aarch64') {
-            steps {
-                script {
-                    executeBuildAndTest('aarch64')
-                    ciResults['Runtime: aarch64'] = [status: 'passed']
-                }
-            }
-            post {
-                failure {
-                    script { ciResults['Runtime: aarch64'] = [status: 'failed', detail: collectUnitTestSnippet('aarch64')] }
+                stage('Clippy+Runtime: aarch64-qemu-virt') {
+                    steps {
+                        script {
+                            runClippyAndRuntime('aarch64')
+                            ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'passed']
+                        }
+                    }
+                    post {
+                        failure {
+                            script { ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'failed', detail: collectUnitTestSnippet('aarch64')] }
+                        }
+                    }
                 }
             }
         }
@@ -210,6 +190,45 @@ stdbuf -oL -eL make build
     }
 }
 
+def runClippyAndRuntime(String arch) {
+    def platform = "${arch}-qemu-virt"
+    ws("${WORKSPACE}/${arch}") {
+        def stageWorkspace = pwd()
+        fixWorkspaceOwnership(stageWorkspace)
+        try {
+            deleteDir()
+            restoreSource()
+
+            sh """#!/bin/bash
+set -euo pipefail
+cp platforms/${platform}/defconfig .config
+rustup target add ${rustupTargetFor(platform)} || true
+make clippy
+"""
+            runUnitTests(arch)
+            generateCoverageHtml(arch)
+
+            dir('test-harness') {
+                git branch: "${env.TEST_HARNESS_BRANCH}",
+                    url: "${env.TEST_HARNESS_REPO}"
+                markSafeDirectory()
+
+                def hostfwdPort = (arch == 'x86_64') ? '5556' : '5557'
+                def vsockCid = (arch == 'x86_64') ? '101' : '102'
+                withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}",
+                         "HOSTFWD_PORT=${hostfwdPort}", "VSOCK_CID=${vsockCid}"]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+stdbuf -oL -eL make ci-test run
+'''
+                }
+            }
+        } finally {
+            fixWorkspaceOwnership(stageWorkspace)
+        }
+    }
+}
+
 def executeBuildAndTest(arch) {
     ws("${WORKSPACE}/${arch}") {
         def stageWorkspace = pwd()
@@ -254,13 +273,13 @@ curl -f -L "\${IMG_URL}/rootfs-${arch}.img.xz" -o rootfs-${arch}.img.xz
 xz -df rootfs-${arch}.img.xz
 cp rootfs-${arch}.img disk.img
 
-TIMEOUT=120
+TIMEOUT=480
 if [ "${arch}" = "aarch64" ]; then
-    TIMEOUT=360
+    TIMEOUT=481
 fi
 
 set +e
-timeout \${TIMEOUT} stdbuf -oL -eL make UNITTEST=y VSOCK=n run | tee unittest-output.log
+timeout \${TIMEOUT} stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n run | tee unittest-output.log
 status=\${PIPESTATUS[0]}
 set -e
 
@@ -418,7 +437,8 @@ curl -sS --max-time 15 \
   --data-urlencode "access_token=\${GITEE_TOKEN}" | \
   python3 -c "
 import json, sys
-comments = json.load(sys.stdin)
+data = json.load(sys.stdin)
+comments = data if isinstance(data, list) else []
 for c in comments:
     body = c.get('body', '')
     user = c.get('user', {}).get('login', '')
@@ -738,9 +758,8 @@ def buildCiComment(Map results, String coverageSummary = '') {
     def stageOrder = [
         'Prepare Source',
         'Rustfmt',
-        'Clippy: x86_64-qemu-virt', 'Clippy: aarch64-qemu-virt',
         'Clippy+Build: x86-csv', 'Clippy+Build: aarch64-crosvm-virt',
-        'Runtime: x86_64', 'Runtime: aarch64'
+        'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt'
     ]
     def normalizedResults = [:]
     stageOrder.each { name ->

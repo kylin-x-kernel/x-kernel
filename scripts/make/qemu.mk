@@ -23,6 +23,8 @@ VHOST ?= n
 # Network options
 IP ?= 10.0.2.15
 GW ?= 10.0.2.2
+HOSTFWD_PORT ?= 5555
+VSOCK_CID ?= 103
 
 QEMU := qemu-system-$(ARCH)
 QEMU_RUN_DEPS :=
@@ -125,7 +127,7 @@ qemu_args-$(NET) += \
   -device virtio-net-$(vdev-suffix),netdev=net0
 
 ifeq ($(NET_DEV), user)
-  qemu_args-$(NET) += -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
+  qemu_args-$(NET) += -netdev user,id=net0,hostfwd=tcp::$(HOSTFWD_PORT)-:5555,hostfwd=udp::$(HOSTFWD_PORT)-:5555
 else ifeq ($(NET_DEV), tap)
   qemu_args-$(NET) += -netdev tap,id=net0,script=scripts/net/qemu-ifup.sh,downscript=no,vhost=$(VHOST),vhostforce=$(VHOST)
   QEMU := sudo $(QEMU)
@@ -157,7 +159,7 @@ qemu_args-$(INPUT) += \
   -device virtio-mouse-pci -device virtio-keyboard-pci
 
 qemu_args-$(VSOCK) += \
-  -device vhost-vsock-pci,id=virtiosocket0,guest-cid=103
+  -device vhost-vsock-pci,id=virtiosocket0,guest-cid=$(VSOCK_CID)
 
 ifeq ($(QEMU_LOG), y)
   qemu_args-y += -D qemu.log -d in_asm,int,mmu,pcall,cpu_reset,guest_errors
