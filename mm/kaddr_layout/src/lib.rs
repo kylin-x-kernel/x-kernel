@@ -6,75 +6,45 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+mod aarch64;
+mod fallback;
+mod riscv64;
+mod x86_64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayoutConsts {
     pub pg_va_bits: usize,
+    pub kernel_aspace_base: usize,
+    pub kernel_aspace_size: usize,
+    pub linear_map_vaddr: usize,
+    pub linear_map_vsize: usize,
     pub page_offset: usize,
+    pub iomap_vaddr: usize,
+    pub iomap_vsize: usize,
     pub kimage_vaddr: usize,
     pub kimage_vsize: usize,
 }
 
-const fn lower_half_split_layout() -> LayoutConsts {
-    const PG_VA_BITS: usize = 48;
-    let page_offset = (-(1i64 << PG_VA_BITS)) as usize;
-    let kimage_vsize = (1usize << PG_VA_BITS) / 0x10;
-    let modules_vsize = kimage_vsize * 0x8;
-    LayoutConsts {
-        pg_va_bits: PG_VA_BITS,
-        page_offset,
-        kimage_vaddr: page_offset + modules_vsize,
-        kimage_vsize,
-    }
-}
-
-const fn riscv64_layout() -> LayoutConsts {
-    LayoutConsts {
-        pg_va_bits: 39,
-        page_offset: 0xffff_ffc0_0000_0000,
-        // QEMU virt loads the kernel at 0x8020_0000, so keep the linked image
-        // inside the Sv39 higher-half linear map window.
-        kimage_vaddr: 0xffff_ffc0_8020_0000,
-        kimage_vsize: 0x4000_0000,
-    }
-}
-
-const fn x86_64_layout() -> LayoutConsts {
-    LayoutConsts {
-        pg_va_bits: 48,
-        page_offset: 0xffff_8000_0000_0000,
-        kimage_vaddr: 0xffff_ff80_0000_0000,
-        kimage_vsize: 0x0000_0080_0000_0000,
-    }
-}
-
-const fn fallback_layout() -> LayoutConsts {
-    LayoutConsts {
-        pg_va_bits: 48,
-        page_offset: 0xffff_0000_0000_0000,
-        kimage_vaddr: 0xffff_8000_0000_0000,
-        kimage_vsize: 0x0010_0000_0000_0000,
-    }
-}
-
 pub fn for_arch(arch: &str) -> LayoutConsts {
     match arch {
-        "aarch64" | "riscv32" | "loongarch64" => lower_half_split_layout(),
-        "riscv64" => riscv64_layout(),
-        "x86_64" => x86_64_layout(),
-        _ => fallback_layout(),
+        "aarch64" => aarch64::LAYOUT,
+        "riscv64" => riscv64::LAYOUT,
+        "x86_64" => x86_64::LAYOUT,
+        "riscv32" | "loongarch64" => fallback::LAYOUT,
+        _ => fallback::LAYOUT,
     }
 }
 
 #[cfg(target_arch = "aarch64")]
-const CURRENT_LAYOUT: LayoutConsts = lower_half_split_layout();
+const CURRENT_LAYOUT: LayoutConsts = aarch64::LAYOUT;
 #[cfg(target_arch = "x86_64")]
-const CURRENT_LAYOUT: LayoutConsts = x86_64_layout();
+const CURRENT_LAYOUT: LayoutConsts = x86_64::LAYOUT;
 #[cfg(target_arch = "riscv32")]
-const CURRENT_LAYOUT: LayoutConsts = lower_half_split_layout();
+const CURRENT_LAYOUT: LayoutConsts = fallback::LAYOUT;
 #[cfg(target_arch = "riscv64")]
-const CURRENT_LAYOUT: LayoutConsts = riscv64_layout();
+const CURRENT_LAYOUT: LayoutConsts = riscv64::LAYOUT;
 #[cfg(target_arch = "loongarch64")]
-const CURRENT_LAYOUT: LayoutConsts = lower_half_split_layout();
+const CURRENT_LAYOUT: LayoutConsts = fallback::LAYOUT;
 #[cfg(not(any(
     target_arch = "aarch64",
     target_arch = "x86_64",
@@ -82,10 +52,16 @@ const CURRENT_LAYOUT: LayoutConsts = lower_half_split_layout();
     target_arch = "riscv64",
     target_arch = "loongarch64"
 )))]
-const CURRENT_LAYOUT: LayoutConsts = fallback_layout();
+const CURRENT_LAYOUT: LayoutConsts = fallback::LAYOUT;
 
 pub const PG_VA_BITS: usize = CURRENT_LAYOUT.pg_va_bits;
+pub const KERNEL_ASPACE_BASE: usize = CURRENT_LAYOUT.kernel_aspace_base;
+pub const KERNEL_ASPACE_SIZE: usize = CURRENT_LAYOUT.kernel_aspace_size;
+pub const LINEAR_MAP_VADDR: usize = CURRENT_LAYOUT.linear_map_vaddr;
+pub const LINEAR_MAP_VSIZE: usize = CURRENT_LAYOUT.linear_map_vsize;
 pub const PAGE_OFFSET: usize = CURRENT_LAYOUT.page_offset;
+pub const IOMAP_VADDR: usize = CURRENT_LAYOUT.iomap_vaddr;
+pub const IOMAP_VSIZE: usize = CURRENT_LAYOUT.iomap_vsize;
 pub const KIMAGE_VADDR: usize = CURRENT_LAYOUT.kimage_vaddr;
 pub const KIMAGE_VSIZE: usize = CURRENT_LAYOUT.kimage_vsize;
 
@@ -115,30 +91,61 @@ pub fn kimage_voffset() -> usize {
 }
 
 /// Convert a physical address to its linear-map virtual address.
-///
-/// `p2v(pa) = pa + PAGE_OFFSET`.
 #[inline]
 pub fn p2v(pa: usize) -> usize {
     pa + PAGE_OFFSET
 }
 
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "riscv64"
+))]
+#[inline]
+const fn in_window(va: usize, start: usize, size: usize) -> bool {
+    va >= start && (va - start) < size
+}
+
 /// Convert a virtual address to its physical address.
 ///
-/// Architectures with runtime kernel-image relocation keep the linear map and
-/// kernel image in different virtual regions, so kernel-image addresses must
-/// subtract the runtime `kimage_voffset`.
+/// AArch64/x86_64 keep the linked kernel image in a dedicated higher-half
+/// window distinct from the linear map, so kernel-image VAs must subtract the
+/// runtime `kimage_voffset()`.
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 #[inline]
 pub fn v2p(va: usize) -> usize {
-    if va >= KIMAGE_VADDR {
+    if in_window(va, KIMAGE_VADDR, KIMAGE_VSIZE) {
         va - kimage_voffset()
-    } else {
+    } else if in_window(va, LINEAR_MAP_VADDR, LINEAR_MAP_VSIZE) {
         va - PAGE_OFFSET
+    } else {
+        panic!("v2p only supports linear-map or kernel-image addresses: {va:#x}");
     }
 }
 
 /// Convert a virtual address to its physical address.
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+///
+/// RISC-V currently uses a dedicated kernel-image alias window too, so it
+/// shares the same split logic as AArch64/x86_64.
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub fn v2p(va: usize) -> usize {
+    if in_window(va, KIMAGE_VADDR, KIMAGE_VSIZE) {
+        va - kimage_voffset()
+    } else if in_window(va, LINEAR_MAP_VADDR, LINEAR_MAP_VSIZE) {
+        va - PAGE_OFFSET
+    } else {
+        panic!("v2p only supports linear-map or kernel-image addresses: {va:#x}");
+    }
+}
+
+/// Fallback architectures still translate kernel VAs through the linear-map
+/// offset only.
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "riscv64"
+)))]
 #[inline]
 pub fn v2p(va: usize) -> usize {
     va - PAGE_OFFSET

@@ -74,10 +74,6 @@ impl HwMemory for DummyMem {
     fn v2p(_vaddr: memaddr::VirtAddr) -> memaddr::PhysAddr {
         pa!(0)
     }
-
-    fn kernel_layout() -> (memaddr::VirtAddr, usize) {
-        (va!(0), 0)
-    }
 }
 
 #[impl_dev_interface]

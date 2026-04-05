@@ -51,11 +51,4 @@ impl HwMemory for HwMemoryImpl {
             pa!(vaddr - PHYS_VIRT_OFFSET)
         }
     }
-
-    fn kernel_layout() -> (VirtAddr, usize) {
-        (
-            va!(crate::config::plat::KERNEL_ASPACE_BASE),
-            crate::config::plat::KERNEL_ASPACE_SIZE,
-        )
-    }
 }

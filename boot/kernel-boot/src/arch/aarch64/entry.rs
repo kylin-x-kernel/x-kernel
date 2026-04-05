@@ -110,7 +110,7 @@ pub unsafe extern "C" fn primary_entry() -> ! {
         //   SP_virt = SP_phys + (KIMAGE_VADDR - PA(_start))
         // Compute PA(_start) via adrp and derive the adjustment.
         "adrp    x8, {kernel_start}",          // x8 = PA(_start), page-aligned
-        "mov     x9, {kimage_vaddr}",           // x9 = KIMAGE_VADDR (compile-time const)
+        "ldr     x9, ={kimage_vaddr}",          // x9 = KIMAGE_VADDR (compile-time const)
         "sub     x8, x9, x8",                  // x8 = KIMAGE_VADDR - PA(_start) = kimage_voffset
         "add     sp, sp, x8",
 
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         // PAGE_OFFSET+PA, so we must use kimage_voffset here to keep SP valid
         // after init_memory_management_secondary() switches to the runtime page table.
         "adrp    x8, {kernel_start}",
-        "mov     x9, {kimage_vaddr}",
+        "ldr     x9, ={kimage_vaddr}",
         "sub     x8, x9, x8",           // x8 = kimage_voffset
         "add     sp, sp, x8",
         "mov     x0, x19",               // cpu_id

@@ -70,3 +70,18 @@ pub fn default_dma_if_impl(item: TokenStream) -> TokenStream {
     }
     .into()
 }
+
+/// Generates a default empty implementation for `kplat::mmio::PlatformMmioIf`.
+#[proc_macro]
+pub fn default_mmio_if_impl(item: TokenStream) -> TokenStream {
+    let impl_ty = syn::parse_macro_input!(item as Type);
+    quote! {
+        #[kplat::impl_dev_interface]
+        impl kplat::mmio::PlatformMmioIf for #impl_ty {
+            fn prepare(_pa: usize, _size: usize) -> kplat::kerrno::KResult {
+                Ok(())
+            }
+        }
+    }
+    .into()
+}

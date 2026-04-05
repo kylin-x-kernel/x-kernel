@@ -5,10 +5,10 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use heapless::Vec;
-use kbuild_config::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE, MMIO_RANGES};
+use kbuild_config::MMIO_RANGES;
 use kplat::memory::{
     HwMemory, MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr,
-    default_p2v, default_v2p, sub_ranges, va,
+    default_p2v, default_v2p, sub_ranges,
 };
 use ktypes::Once;
 use of::{dtb_total_size_from_ptr, read_memory_regions, read_reserved_memory_regions};
@@ -94,10 +94,6 @@ impl HwMemory for HwMemoryImpl {
 
     fn v2p(vaddr: VirtAddr) -> PhysAddr {
         default_v2p(vaddr)
-    }
-
-    fn kernel_layout() -> (VirtAddr, usize) {
-        (va!(KERNEL_ASPACE_BASE), KERNEL_ASPACE_SIZE)
     }
 }
 

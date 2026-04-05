@@ -15,6 +15,7 @@ pub mod dma;
 pub mod interrupts;
 pub mod io;
 pub mod memory;
+pub mod mmio;
 #[cfg(feature = "nmi")]
 pub mod nm_irq;
 #[cfg(feature = "pmu")]
@@ -24,7 +25,7 @@ pub mod timer;
 
 pub use crate_interface::impl_interface as impl_dev_interface;
 pub use kerrno;
-pub use kplat_macros::default_dma_if_impl;
+pub use kplat_macros::{default_dma_if_impl, default_mmio_if_impl};
 
 #[doc(hidden)]
 pub mod __priv {

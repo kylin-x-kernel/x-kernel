@@ -219,8 +219,6 @@ pub trait HwMemory {
     fn p2v(pa: PhysAddr) -> VirtAddr;
     /// Converts a virtual address to physical.
     fn v2p(va: VirtAddr) -> PhysAddr;
-    /// Returns the kernel virtual layout base and size.
-    fn kernel_layout() -> (VirtAddr, usize);
 }
 
 #[inline]

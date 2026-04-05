@@ -140,18 +140,6 @@ endmenu # Platform Selection
 
 menu "Kernel Features"
 
-config KERNEL_ASPACE_BASE
-    hex "Kernel Address Space Base"
-    default 0xFFFF000000000000
-    help
-      Specify the base address of the kernel's address space.
-
-config KERNEL_ASPACE_SIZE
-    hex "Kernel Address Space Size"
-    default 0x0000FFFFFFFF0000
-    help
-      Specify the size of the kernel's address space.
-
 config TASK_STACK_SIZE
     hex "Task Stack Size (bytes)"
     default 0x40000

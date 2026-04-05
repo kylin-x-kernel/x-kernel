@@ -18,5 +18,7 @@ mod power;
 mod time;
 
 struct DmaPlatformImpl;
+struct MmioPlatformImpl;
 
 kplat::default_dma_if_impl!(DmaPlatformImpl);
+kplat::default_mmio_if_impl!(MmioPlatformImpl);

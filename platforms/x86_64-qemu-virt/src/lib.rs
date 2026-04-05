@@ -19,8 +19,10 @@ mod mp;
 mod power;
 
 struct DmaPlatformImpl;
+struct MmioPlatformImpl;
 
 kplat::default_dma_if_impl!(DmaPlatformImpl);
+kplat::default_mmio_if_impl!(MmioPlatformImpl);
 
 x86_peripherals::console_if_impl!(ConsoleImpl, irq = Some(4));
 x86_peripherals::time_if_impl!(GlobalTimerImpl);

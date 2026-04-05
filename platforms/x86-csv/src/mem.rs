@@ -6,7 +6,7 @@ use boot_info::BootInfo;
 use kbuild_config::MMIO_RANGES;
 use kplat::memory::{
     HwMemory, MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr,
-    default_p2v, default_v2p, va,
+    default_p2v, default_v2p,
 };
 use x86_peripherals::memory::X86MemState;
 
@@ -55,12 +55,5 @@ impl HwMemory for HwMemoryImpl {
 
     fn v2p(vaddr: VirtAddr) -> PhysAddr {
         default_v2p(vaddr)
-    }
-
-    fn kernel_layout() -> (VirtAddr, usize) {
-        (
-            va!(kbuild_config::KERNEL_ASPACE_BASE),
-            kbuild_config::KERNEL_ASPACE_SIZE,
-        )
     }
 }

@@ -12,7 +12,9 @@ extern crate alloc;
 
 mod aspace;
 pub mod backend;
+mod iomap;
 
+use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
 use kerrno::LinuxResult;
 use khal::{
     mem::{MemFlags, memory_regions, p2v},
@@ -22,7 +24,13 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{MemoryAddr, PhysAddr, va};
 
-pub use self::aspace::AddrSpace;
+pub use self::{
+    aspace::AddrSpace,
+    iomap::{
+        DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device,
+        register_device_region, register_fixed_device_region,
+    },
+};
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();
 
@@ -48,10 +56,7 @@ fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
 
 /// Creates a new address space for kernel itself.
 pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
-    let mut vmspace = AddrSpace::new_empty(
-        va!(kbuild_config::KERNEL_ASPACE_BASE as _),
-        kbuild_config::KERNEL_ASPACE_SIZE as _,
-    )?;
+    let mut vmspace = AddrSpace::new_empty(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
     for region in memory_regions() {
         // mapped range should contain the whole region if it is not aligned.
         let start = region.paddr.align_down_4k();

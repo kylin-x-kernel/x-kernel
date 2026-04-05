@@ -4,7 +4,7 @@
 
 //! Early boot page table setup and MMU initialisation for RISC-V Sv39.
 
-use kaddr_layout::PAGE_OFFSET;
+use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::MMIO_RANGES;
 use memaddr::PhysAddr;
 
@@ -217,6 +217,7 @@ unsafe fn map_kernel_image(kernel_start_pa: usize, kernel_end_pa: usize) {
     let size = kernel_end_pa.saturating_sub(kernel_start_pa);
     unsafe {
         map_range_2m(kernel_start_pa, kernel_start_pa, size, PTE_RWX);
+        map_range_2m(KIMAGE_VADDR, kernel_start_pa, size, PTE_RWX);
         map_range_2m(
             PAGE_OFFSET + kernel_start_pa,
             kernel_start_pa,

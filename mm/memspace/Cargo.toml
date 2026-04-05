@@ -17,6 +17,7 @@ kerrno = { workspace = true }
 kfs = { workspace = true }
 fs-ng-vfs = { workspace = true }
 khal = { workspace = true }
+kplat = { workspace = true }
 ksync = { workspace = true }
 ktask = { workspace = true }
 enum_dispatch = { workspace = true }
@@ -29,3 +30,4 @@ page_table = { workspace = true }
 unittest.workspace = true
 kbuild_config = { workspace = true }
 karch = { workspace = true }
+kaddr_layout = { workspace = true }
