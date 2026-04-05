@@ -55,18 +55,6 @@ config UART_IRQ
 
 menu "IRQ Configuration"
 
-config GICC_PADDR
-    hex "GICC Base Address"
-    depends on ARCH_AARCH64
-    help
-      Define the base address for the GICC (Generic Interrupt Controller CPU Interface).
-
-config GICD_PADDR
-    hex "GICD Base Address"
-    depends on ARCH_AARCH64
-    help
-      Define the base address for the GICD (Generic Interrupt Controller Distributor).
-
 config PMU_IRQ
     usize "PMU IRQ Number"
     default 23

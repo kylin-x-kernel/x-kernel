@@ -6,7 +6,11 @@
 use kplat::boot::{BootHandler, BootInfo};
 use kplat::memory::{pa, p2v};
 #[allow(unused_imports)]
-use crate::config::devices::{GICC_PADDR, GICD_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR};
+use crate::config::devices::{TIMER_IRQ, UART_IRQ, UART_PADDR};
+
+const GICD_PADDR: usize = 0xFF84_1000;
+const GICC_PADDR: usize = 0xFF84_2000;
+
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {

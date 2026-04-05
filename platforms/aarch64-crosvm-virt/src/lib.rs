@@ -7,7 +7,6 @@
 #[macro_use]
 extern crate kplat;
 extern crate kernel_boot;
-mod gicv3;
 mod init;
 mod mem;
 mod power;
@@ -18,4 +17,4 @@ kplat::default_mmio_if_impl!(MmioPlatformImpl);
 
 aarch64_peripherals::ns16550_console_if_impl!(ConsoleImpl);
 aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
-irq_if_impl!(IntrManagerImpl);
+aarch64_peripherals::irq_if_impl!(IntrManagerImpl);

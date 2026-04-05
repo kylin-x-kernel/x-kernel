@@ -4,14 +4,17 @@
 
 //! Platform boot hooks for early and final initialization.
 #[allow(unused_imports)]
-use kbuild_config::{
-    GICC_PADDR as GICR_PADDR, GICD_PADDR, PSCI_METHOD, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR,
-};
+use kbuild_config::{PSCI_METHOD, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR};
 use kplat::{
     boot::{BootHandler, BootInfo},
-    memory::{p2v, pa},
+    memory::{PhysAddr, p2v, pa},
 };
 use log::*;
+
+const GICD_PADDR: usize = 0x3fff_0000;
+const GICR_PADDR: usize = 0x3ffb_0000;
+const GICD_MMIO_SIZE: usize = 0x1_0000;
+const GICR_MMIO_SIZE: usize = 0x20_0000;
 
 fn map_kvm_guarded_mmio() {
     crate::psci::kvm_guard_granule_init();
@@ -42,16 +45,30 @@ impl BootHandler for BootHandlerImpl {
     /// Finish platform init after core subsystems are online.
     fn final_init(boot_info: &BootInfo) {
         info!("cpu_id {}", boot_info.cpu_id);
-        crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
+        // Crosvm's DT description is not reliable enough for GIC discovery yet,
+        // so keep the controller resource description static for now.
+        let gic = aarch64_peripherals::gic::GicConfig {
+            version: aarch64_peripherals::gic::GicVersion::V3,
+            gicd: aarch64_peripherals::gic::GicMmioRegion {
+                paddr: PhysAddr::from_usize(GICD_PADDR),
+                size: GICD_MMIO_SIZE,
+            },
+            gicc: None,
+            gicr: Some(aarch64_peripherals::gic::GicMmioRegion {
+                paddr: PhysAddr::from_usize(GICR_PADDR),
+                size: GICR_MMIO_SIZE,
+            }),
+        };
+        aarch64_peripherals::gic::init(gic);
         info!("set UART IRQ {} as edge trigger", UART_IRQ);
-        crate::gicv3::set_trigger(UART_IRQ, true);
+        aarch64_peripherals::gic::set_trigger(UART_IRQ, true);
         aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 
     #[cfg(feature = "smp")]
     /// Finalize per-CPU setup on secondary cores.
     fn final_init_ap(_cpu_id: usize) {
-        crate::gicv3::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICR_PADDR)));
+        aarch64_peripherals::gic::init_current_cpu();
         aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 }

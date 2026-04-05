@@ -5,9 +5,7 @@
 //! Platform initialization hooks for aarch64-qemu-virt.
 
 #[allow(unused_imports)]
-use kbuild_config::{
-    GICC_PADDR, GICD_PADDR, PSCI_METHOD, RTC_PADDR, TIMER_IRQ, UART_IRQ, UART_PADDR,
-};
+use kbuild_config::{PSCI_METHOD, RTC_PADDR, TIMER_IRQ, UART_PADDR};
 use kplat::{
     boot::{BootHandler, BootInfo},
     memory::{p2v, pa},
@@ -28,14 +26,13 @@ impl BootHandler for BootHandlerImpl {
     fn early_init_ap(_cpu_id: usize) {}
 
     fn final_init(_boot_info: &BootInfo) {
-        aarch64_peripherals::gic::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICC_PADDR)));
-        aarch64_peripherals::gic::init_gicc();
+        aarch64_peripherals::gic::init_from_device_tree();
         aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: usize) {
-        aarch64_peripherals::gic::init_gicc();
+        aarch64_peripherals::gic::init_current_cpu();
         aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
     }
 }

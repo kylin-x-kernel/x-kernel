@@ -53,8 +53,3 @@ uart-irq = 0x99                 # uint
 timer-irq = 30                  # uint
 # IPI interrupt num
 ipi-irq = 1                     # uint
-
-# GIC CPU Interface base address
-gicc-paddr = 0xFF84_2000        # uint
-# GIC Distributor base address
-gicd-paddr = 0xFF84_1000        # uint

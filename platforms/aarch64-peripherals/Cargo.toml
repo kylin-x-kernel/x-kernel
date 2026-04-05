@@ -10,8 +10,6 @@ repository.workspace = true
 
 [features]
 default = []
-gicv2 = []
-gicv3 = []
 pmr = []
 pmu = ["dep:aarch64-pmuv3", "kplat/pmu"]
 nmi-pmu = ["pmr", "pmu", "kplat/nmi"]
@@ -19,6 +17,7 @@ nmi-sdei = []
 
 [dependencies]
 memaddr = { workspace = true }
+memspace = { workspace = true }
 kspin = { workspace = true }
 ktypes = { workspace = true }
 log = "0.4"
@@ -29,7 +28,7 @@ of = { workspace = true }
 page_table = { workspace = true }
 aarch64-cpu = "10.0"
 arm_pl011 = "0.1"
-arm-gic-driver = "0.15"
+arm-gic-driver = "0.16"
 uart_16550 = "0.4"
 arm_pl031 = "0.2"
 kcpu = { workspace = true }

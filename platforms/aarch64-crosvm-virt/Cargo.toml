@@ -22,12 +22,11 @@ karch = { workspace = true }
 kplat = { workspace = true }
 kernel_boot = { workspace = true }
 linkme = { workspace = true }
-aarch64-peripherals = { workspace = true, default-features = false, features = ["gicv3"] }
+aarch64-peripherals = { workspace = true, default-features = false }
 aarch64-cpu = "10.0"
 rs_fdtree = { workspace = true }
 of = { workspace = true }
 lazyinit = "0.2"
-arm-gic.workspace = true
 kbuild_config = { workspace = true }
 ktypes = { workspace = true }
 boot_info = { workspace = true }
