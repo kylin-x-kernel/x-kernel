@@ -2,18 +2,115 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Time-related operations.
+//! Unified time capability exposed by `khal`.
 
 pub use core::time::Duration;
 pub type TimeValue = Duration;
 
-// Aliases for kplat names if needed locally or exposed
-pub use kplat::timer::{
-    MS_SEC, NS_MS, NS_SEC, NS_SEC as NANOS_PER_SEC, NS_US, NS_US as NANOS_PER_MICROS, US_SEC,
-    arm_timer, freq, interrupt_id, now, now as monotonic_time, now_ns as monotonic_time_nanos,
-    now_ns, now_ticks, ns2t, offset_ns, spin_until, spin_wait, t2ns, wall as wall_time, wall,
-    wall_ns as wall_time_nanos, wall_ns,
-};
+use crate_interface::{call_interface, def_interface};
+
+use crate::rtc;
+
+pub const MILLIS_PER_SEC: u64 = 1_000;
+pub const MICROS_PER_SEC: u64 = 1_000_000;
+pub const NANOS_PER_SEC: u64 = 1_000_000_000;
+pub const NANOS_PER_MILLIS: u64 = 1_000_000;
+pub const NANOS_PER_MICROS: u64 = 1_000;
+
+pub use MICROS_PER_SEC as US_SEC;
+pub use MILLIS_PER_SEC as MS_SEC;
+pub use NANOS_PER_MICROS as NS_US;
+pub use NANOS_PER_MILLIS as NS_MS;
+pub use NANOS_PER_SEC as NS_SEC;
+
+#[def_interface]
+pub trait MonotonicTimerIf {
+    /// Returns the current monotonic timer tick count.
+    fn now_ticks() -> u64;
+    /// Converts monotonic timer ticks to nanoseconds.
+    fn t2ns(ticks: u64) -> u64;
+    /// Returns the monotonic timer frequency in Hz.
+    fn freq() -> u64;
+    /// Converts monotonic nanoseconds to timer ticks.
+    fn ns2t(nanos: u64) -> u64;
+    /// Returns the monotonic timer interrupt ID.
+    fn interrupt_id() -> usize;
+    /// Arms the monotonic timer to trigger at the given deadline (in ns).
+    fn arm_timer(deadline: u64);
+}
+
+#[inline]
+pub fn now_ticks() -> u64 {
+    call_interface!(MonotonicTimerIf::now_ticks)
+}
+
+#[inline]
+pub fn t2ns(ticks: u64) -> u64 {
+    call_interface!(MonotonicTimerIf::t2ns, ticks)
+}
+
+#[inline]
+pub fn freq() -> u64 {
+    call_interface!(MonotonicTimerIf::freq)
+}
+
+#[inline]
+pub fn ns2t(nanos: u64) -> u64 {
+    call_interface!(MonotonicTimerIf::ns2t, nanos)
+}
+
+#[inline]
+pub fn interrupt_id() -> usize {
+    call_interface!(MonotonicTimerIf::interrupt_id)
+}
+
+#[inline]
+pub fn arm_timer(deadline: u64) {
+    call_interface!(MonotonicTimerIf::arm_timer, deadline)
+}
+
+#[inline]
+pub fn now_ns() -> u64 {
+    t2ns(now_ticks())
+}
+
+#[inline]
+pub fn now() -> TimeValue {
+    TimeValue::from_nanos(now_ns())
+}
+
+pub use now as monotonic_time;
+pub use now_ns as monotonic_time_nanos;
+
+#[inline]
+pub fn offset_ns() -> u64 {
+    rtc::offset_ns()
+}
+
+#[inline]
+pub fn wall_ns() -> u64 {
+    now_ns() + offset_ns()
+}
+
+#[inline]
+pub fn wall() -> TimeValue {
+    TimeValue::from_nanos(wall_ns())
+}
+
+pub use wall as wall_time;
+pub use wall_ns as wall_time_nanos;
+
+#[inline]
+pub fn spin_until(deadline: TimeValue) {
+    while now() < deadline {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+pub fn spin_wait(dur: Duration) {
+    spin_until(now() + dur);
+}
 
 /// Busy-wait for the given duration.
 pub fn busy_wait(dur: Duration) {

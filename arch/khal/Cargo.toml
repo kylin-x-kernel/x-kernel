@@ -37,6 +37,7 @@ log.workspace = true
 memaddr.workspace = true
 page_table = { workspace = true }
 percpu.workspace = true
+crate_interface.workspace = true
 acpi = { workspace = true }
 of = { workspace = true }
 unittest.workspace = true

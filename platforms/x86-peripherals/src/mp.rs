@@ -10,8 +10,9 @@ use kplat::{
     memory::{PAGE_SIZE_4K, PhysAddr, pa},
     timer::spin_wait,
 };
+use x86_apic as apic;
 
-use crate::{apic, bootmem::ap_trampoline_page_paddr};
+use crate::bootmem::ap_trampoline_page_paddr;
 
 unsafe fn setup_startup_page(stack_top: PhysAddr) {
     unsafe extern "C" {

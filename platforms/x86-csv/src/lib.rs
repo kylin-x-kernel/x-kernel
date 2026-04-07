@@ -23,5 +23,5 @@ kplat::default_dma_if_impl!(DmaPlatformImpl);
 kplat::default_mmio_if_impl!(MmioPlatformImpl);
 
 x86_peripherals::console_if_impl!(ConsoleImpl, irq = None);
-x86_peripherals::time_if_impl!(GlobalTimerImpl);
-x86_peripherals::irq_if_impl!(IntrManagerImpl);
+timer_driver::x86_lapic_tsc_timer_if_impl!(GlobalTimerImpl);
+x86_apic::irq_if_impl!(IntrManagerImpl);

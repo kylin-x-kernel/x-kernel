@@ -2,11 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::timer::GlobalTimer;
+use khal::time::{MonotonicTimerIf, NANOS_PER_MILLIS, NANOS_PER_SEC};
 use lazyinit::LazyInit;
 use loongArch64::time::Time;
 static NANOS_PER_TICK: LazyInit<u64> = LazyInit::new();
-static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
 pub(super) fn init_percpu() {
     use loongArch64::reg_handler::tcfg;
     tcfg::set_init_val(0);
@@ -43,30 +42,24 @@ fn init_rtc() {
             extract_bits(toy_low, 4..10),
         )
         .unwrap()
-        .with_nanosecond(extract_bits(toy_low, 0..4) * kplat::timer::NANOS_PER_MILLIS as u32)
+        .with_nanosecond(extract_bits(toy_low, 0..4) * NANOS_PER_MILLIS as u32)
         .unwrap();
     if let Some(epoch_time_nanos) = date_time.timestamp_nanos_opt() {
-        unsafe {
-            RTC_EPOCHOFFSET_NANOS =
-                epoch_time_nanos as u64 - GlobalTimerImpl::t2ns(GlobalTimerImpl::now_ticks());
-        }
+        rtc_driver::init_offset_ns(
+            epoch_time_nanos as u64 - GlobalTimerImpl::t2ns(GlobalTimerImpl::now_ticks()),
+        );
     }
 }
 pub(super) fn early_init() {
-    NANOS_PER_TICK
-        .init_once(kplat::timer::NANOS_PER_SEC / loongArch64::time::get_timer_freq() as u64);
+    NANOS_PER_TICK.init_once(NANOS_PER_SEC / loongArch64::time::get_timer_freq() as u64);
     #[cfg(feature = "rtc")]
     init_rtc();
 }
 struct GlobalTimerImpl;
-#[impl_dev_interface]
-impl GlobalTimer for GlobalTimerImpl {
+#[kplat::impl_dev_interface]
+impl MonotonicTimerIf for GlobalTimerImpl {
     fn now_ticks() -> u64 {
         Time::read() as _
-    }
-
-    fn offset_ns() -> u64 {
-        unsafe { RTC_EPOCHOFFSET_NANOS }
     }
 
     fn t2ns(ticks: u64) -> u64 {

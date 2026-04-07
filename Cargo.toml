@@ -95,6 +95,9 @@ virtio = { path = "drivers/virtio" }
 vsock = { path = "drivers/vsock" }
 acpi = { path = "drivers/acpi" }
 of = { path = "drivers/of" }
+rtc_driver = { path = "drivers/rtc", package = "rtc-driver" }
+timer_driver = { path = "drivers/timer", package = "timer-driver" }
+x86_apic = { path = "drivers/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
 aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }

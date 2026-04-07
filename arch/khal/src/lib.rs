@@ -46,6 +46,7 @@ extern crate memaddr;
 pub mod mem;
 pub mod percpu;
 pub mod rsvd_mem;
+pub mod rtc;
 pub mod time;
 
 #[cfg(feature = "tls")]

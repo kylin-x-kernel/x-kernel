@@ -21,7 +21,6 @@ memspace = { workspace = true }
 kspin = { workspace = true }
 ktypes = { workspace = true }
 log = "0.4"
-int_ratio = "0.1"
 lazyinit = "0.2"
 heapless = "0.9"
 of = { workspace = true }
@@ -30,7 +29,6 @@ aarch64-cpu = "10.0"
 arm_pl011 = "0.1"
 arm-gic-driver = "0.16"
 uart_16550 = "0.4"
-arm_pl031 = "0.2"
 kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }

@@ -21,8 +21,10 @@ log = "0.4"
 
 kcpu = { workspace = true }
 karch = { workspace = true }
+khal = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
+rtc_driver = { workspace = true }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 loongArch64 = "0.2.4"

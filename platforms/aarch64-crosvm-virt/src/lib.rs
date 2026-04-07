@@ -16,5 +16,5 @@ struct MmioPlatformImpl;
 kplat::default_mmio_if_impl!(MmioPlatformImpl);
 
 aarch64_peripherals::ns16550_console_if_impl!(ConsoleImpl);
-aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
+timer_driver::arm_generic_timer_if_impl!(GlobalTimerImpl);
 aarch64_peripherals::irq_if_impl!(IntrManagerImpl);

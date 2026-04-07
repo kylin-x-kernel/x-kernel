@@ -34,9 +34,18 @@ impl BootHandler for BootHandlerImpl {
         crate::mem::early_init(dtb, boot_info.kernel_load_paddr);
         aarch64_peripherals::ns16550a::early_init(p2v(pa!(UART_PADDR)));
         aarch64_peripherals::psci::init(PSCI_METHOD);
-        aarch64_peripherals::generic_timer::early_init();
+        timer_driver::arm_generic::init(timer_driver::arm_generic::TimerConfig::platform_static(
+            TIMER_IRQ,
+        ));
         #[cfg(feature = "rtc")]
-        aarch64_peripherals::pl031::early_init(p2v(pa!(RTC_PADDR)));
+        rtc_driver::init(
+            rtc_driver::RtcConfig::mmio_mapped(
+                rtc_driver::RtcKind::Pl031,
+                p2v(pa!(RTC_PADDR)),
+                rtc_driver::RtcSource::PlatformStatic,
+            ),
+            timer_driver::arm_generic::t2ns(timer_driver::arm_generic::now_ticks()),
+        );
     }
 
     #[cfg(feature = "smp")]
@@ -62,13 +71,13 @@ impl BootHandler for BootHandlerImpl {
         aarch64_peripherals::gic::init(gic);
         info!("set UART IRQ {} as edge trigger", UART_IRQ);
         aarch64_peripherals::gic::set_trigger(UART_IRQ, true);
-        aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
+        timer_driver::arm_generic::init_percpu();
     }
 
     #[cfg(feature = "smp")]
     /// Finalize per-CPU setup on secondary cores.
     fn final_init_ap(_cpu_id: usize) {
         aarch64_peripherals::gic::init_current_cpu();
-        aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
+        timer_driver::arm_generic::init_percpu();
     }
 }

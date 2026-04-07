@@ -11,12 +11,12 @@ use kplat::{
     io::ConsoleIf,
     memory::{HwMemory, MemRange, ReservedRegion},
     sys::SysCtrl,
-    timer::GlobalTimer,
 };
 
 struct DummyInit;
 struct DummyConsole;
 struct DummyMem;
+struct DummyRtc;
 struct DummyTime;
 struct DummyPower;
 struct DummyIrq;
@@ -53,6 +53,13 @@ impl ConsoleIf for DummyConsole {
     }
 }
 
+#[crate_interface::impl_interface]
+impl crate::rtc::RtcIf for DummyRtc {
+    fn offset_ns() -> u64 {
+        0
+    }
+}
+
 #[impl_dev_interface]
 impl HwMemory for DummyMem {
     fn ram_regions() -> &'static [MemRange] {
@@ -77,7 +84,7 @@ impl HwMemory for DummyMem {
 }
 
 #[impl_dev_interface]
-impl GlobalTimer for DummyTime {
+impl crate::time::MonotonicTimerIf for DummyTime {
     fn now_ticks() -> u64 {
         0
     }
@@ -88,10 +95,6 @@ impl GlobalTimer for DummyTime {
 
     fn ns2t(nanos: u64) -> u64 {
         nanos
-    }
-
-    fn offset_ns() -> u64 {
-        0
     }
 
     fn freq() -> u64 {

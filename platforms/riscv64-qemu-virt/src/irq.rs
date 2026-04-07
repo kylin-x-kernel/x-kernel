@@ -22,7 +22,7 @@ const PLIC_PADDR: usize = 0x0c00_0000;
 pub(super) const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
 #[allow(unused)]
 pub(super) const S_SOFT: usize = INTC_IRQ_BASE + 1;
-pub(super) const S_TIMER: usize = INTC_IRQ_BASE + 5;
+pub const S_TIMER: usize = INTC_IRQ_BASE + 5;
 pub(super) const S_EXT: usize = INTC_IRQ_BASE + 9;
 static TIMER_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 static IPI_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());

@@ -5,11 +5,7 @@
 //! x86 platform peripheral drivers and helpers.
 #![cfg(target_arch = "x86_64")]
 #![no_std]
-#[macro_use]
-extern crate log;
-pub mod apic;
 pub mod bootmem;
 pub mod memory;
 pub mod mp;
 pub mod ns16550;
-pub mod tsc_timer;

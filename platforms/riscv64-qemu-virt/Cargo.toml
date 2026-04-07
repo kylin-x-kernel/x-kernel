@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 fp-simd = ["kcpu/fp-simd"]
-rtc = ["dep:riscv_goldfish"]
+rtc = ["rtc_driver/goldfish"]
 smp = ["kplat/smp"]
 
 [dependencies]
@@ -28,10 +28,11 @@ kplat = { workspace = true }
 kbuild_config = { workspace = true }
 ktypes = { workspace = true }
 of = { workspace = true }
+rtc_driver = { workspace = true }
+timer_driver = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = "0.14"
-riscv_goldfish = { version = "0.1", optional = true }
 riscv_plic = { version = "0.2" }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
 uart_16550 = "0.4.0"

@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
-rtc = ["x86-peripherals/rtc"]
+rtc = ["rtc_driver/cmos"]
 smp = ["kplat/smp", "kspin/smp"]
 reboot-on-system-off = []
 
@@ -32,6 +32,9 @@ acpi = { workspace = true }
 kdriver = { workspace = true }
 pci = { workspace = true }
 x86-peripherals = { workspace = true }
+x86_apic = { workspace = true }
+rtc_driver = { workspace = true }
+timer_driver = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { workspace = true }
