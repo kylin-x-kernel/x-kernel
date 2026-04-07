@@ -17,9 +17,15 @@ use kerrno::KError;
 use khal::time::{TimeValue, wall_time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct TimerKey {
+pub(crate) struct TimerKey {
     deadline: TimeValue,
     key: u64,
+}
+
+#[derive(Debug)]
+pub struct TimerHandle {
+    key: TimerKey,
+    cpu_id: usize,
 }
 
 struct TimerRuntime {
@@ -59,6 +65,19 @@ impl TimerRuntime {
         }
     }
 
+    fn add_with_waker(&mut self, deadline: TimeValue, waker: Waker) -> Option<TimerKey> {
+        if deadline <= wall_time() {
+            return None;
+        }
+        let key = TimerKey {
+            deadline,
+            key: self.key,
+        };
+        self.wheel.insert(key, waker);
+        self.key += 1;
+        Some(key)
+    }
+
     fn cancel(&mut self, key: &TimerKey) {
         self.wheel.remove(key);
     }
@@ -88,7 +107,6 @@ percpu_static! {
 
 #[allow(dead_code)]
 pub(crate) fn check_timer_events() {
-    // SAFETY: only called in timer::check_events
     unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.wake();
 }
 
@@ -96,6 +114,21 @@ fn with_current<R>(f: impl FnOnce(&mut TimerRuntime) -> R) -> R {
     // FIXME: optimize `percpu` crate! should disable irq and provide more apis
     let _g = kspin::NoPreemptIrqSave::new();
     f(unsafe { TIMER_RUNTIME.current_ref_mut_raw() })
+}
+
+/// Registers a timer that fires `waker` when `deadline` is reached.
+/// Returns `None` if `deadline` has already passed.
+pub fn register_timer(deadline: TimeValue, waker: Waker) -> Option<TimerHandle> {
+    let _g = kspin::NoPreemptIrqSave::new();
+    let cpu_id = khal::percpu::this_cpu_id();
+    let key = unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.add_with_waker(deadline, waker)?;
+    Some(TimerHandle { key, cpu_id })
+}
+
+/// Cancels a previously registered timer. Safe to call from any CPU.
+pub fn cancel_timer(handle: &TimerHandle) {
+    let _g = kspin::NoPreemptIrqSave::new();
+    unsafe { TIMER_RUNTIME.remote_ref_mut_raw(handle.cpu_id) }.cancel(&handle.key);
 }
 
 /// Future returned by `sleep` and `sleep_until`.

@@ -11,6 +11,7 @@ mod net;
 mod pidfd;
 mod pipe;
 pub mod signalfd;
+pub mod timerfd;
 
 use alloc::{borrow::Cow, sync::Arc};
 use core::{ffi::c_int, time::Duration};

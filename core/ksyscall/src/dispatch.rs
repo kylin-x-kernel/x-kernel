@@ -620,9 +620,18 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
             uctx.arg3() as _,
         ),
 
+        // timer file descriptors
+        Sysno::timerfd_create => sys_timerfd_create(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::timerfd_settime => sys_timerfd_settime(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
+        Sysno::timerfd_gettime => sys_timerfd_gettime(uctx.arg0() as _, uctx.arg1() as _),
+
         // dummy fds
-        Sysno::timerfd_create
-        | Sysno::fanotify_init
+        Sysno::fanotify_init
         | Sysno::inotify_init1
         | Sysno::userfaultfd
         | Sysno::perf_event_open
