@@ -1403,7 +1403,7 @@ pub fn syscall_cryp_obj_reset(obj_id: c_ulong) -> TeeResult {
     let o_arc = tee_obj_get(obj_id as tee_obj_id_type)?;
     let mut o = o_arc.lock();
 
-    if o.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT != 0 {
+    if o.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT == 0 {
         tee_obj_attr_clear(&mut o);
         o.info.objectSize = 0;
         o.info.objectUsage = TEE_USAGE_DEFAULT;

@@ -720,10 +720,7 @@ pub fn tee_cryp_state_alloc(
         let arc_cs = Arc::new(Mutex::new(cs));
         let _ = vacant.insert(arc_cs);
         Ok(())
-    });
-
-    let cs = tee_cryp_state_get(*state)?;
-    tee_cryp_asymm_init(cs.clone(), algo, mode)
+    })
 }
 
 pub fn syscall_cryp_state_alloc(
@@ -1443,12 +1440,20 @@ pub fn tee_cryp_asymm_operate(
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
     let mode = cs_guard.mode;
+    let cryp_state = cs_guard.state;
     let label = match label {
         Some(label) => label,
         None => &[],
     };
-
     drop(cs_guard);
+
+    if cryp_state != CrypState::Initialized {
+        tee_cryp_asymm_init(cs.clone(), algo, mode)?;
+        let mut cs_guard = cs.lock();
+        cs_guard.state = CrypState::Initialized;
+        drop(cs_guard);
+    }
+
     match algo {
         TEE_ALG_RSA_NOPAD => match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT => {
@@ -1556,7 +1561,15 @@ pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResul
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
     let mode = cs_guard.mode;
+    let cryp_state = cs_guard.state;
     drop(cs_guard);
+
+    if cryp_state != CrypState::Initialized {
+        tee_cryp_asymm_init(cs.clone(), algo, mode)?;
+        let mut cs_guard = cs.lock();
+        cs_guard.state = CrypState::Initialized;
+        drop(cs_guard);
+    }
 
     if mode != TEE_OperationMode::TEE_MODE_VERIFY {
         return Err(TEE_ERROR_BAD_STATE);
