@@ -76,6 +76,17 @@ config TIMER_IRQ
     help
       Define the interrupt number for the system timer.
 
+config ARM_GENERIC_TIMER_MODE
+    string "ARM generic timer mode"
+    depends on ARCH_AARCH64
+    default "physical"
+    help
+      Select which architected timer view EL1 should use.
+      - "physical": use CNTPCT_EL0/CNTP_* registers.
+      - "virtual": use CNTVCT_EL0/CNTV_* registers.
+      For virtcca-like guests where EL1 physical timer access is trapped,
+      set this to "virtual".
+
 config IPI_IRQ
     usize "IPI IRQ Number"
     default 1

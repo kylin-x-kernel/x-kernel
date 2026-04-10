@@ -118,6 +118,9 @@ impl From<PagingFlags> for Arm64Attr {
         if f.contains(PagingFlags::USER) {
             a |= Self::AP_EL0;
         }
+        if f.contains(PagingFlags::SHARED) {
+            a |= Self::NS;
+        }
         let mem_attr = if f.contains(PagingFlags::DEVICE) {
             Arm64MemAttr::Device
         } else if f.contains(PagingFlags::UNCACHED) {
