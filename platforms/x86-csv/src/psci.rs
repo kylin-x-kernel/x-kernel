@@ -1,9 +1,0 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSES for license details.
-
-use log::info;
-
-pub fn init() {
-    info!("SEV shared memory uses lowmem pages from the global allocator");
-}

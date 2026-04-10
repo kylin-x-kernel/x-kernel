@@ -57,15 +57,6 @@ pipeline {
 
         stage('Build & Test') {
             parallel {
-                stage('Clippy+Build: x86-csv') {
-                    steps {
-                        script {
-                            runClippyAndBuild('x86-csv')
-                            ciResults['Clippy+Build: x86-csv'] = [status: 'passed']
-                        }
-                    }
-                    post { failure { script { ciResults['Clippy+Build: x86-csv'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
-                }
                 stage('Clippy+Build: aarch64-crosvm-virt') {
                     steps {
                         script {

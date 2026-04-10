@@ -3,50 +3,23 @@
 // See LICENSES for license details.
 
 //! Early boot page table setup and MMU initialisation for AArch64.
-//!
-//! All code in this module that runs before the MMU is enabled lives in
-//! `.idmap.text` and uses only PC-relative addressing to obtain physical
-//! addresses of data.
-//!
-//! Page table structure after [`create_boot_page_tables`]:
-//!
-//! ```text
-//! TTBR0/TTBR1 → BOOT_PT_L0
-//!   L0[0]   → BOOT_PT_L1        (early linear map for device/DTB access)
-//!   L0[256] → BOOT_PT_L1_KIMAGE (kernel image area at KIMAGE_VADDR)
-//!               └─ L1[0] → BOOT_PT_L2_KIMAGE (2 MiB blocks mapping PA(kernel) → KIMAGE_VADDR)
-//! ```
-//!
-//! `KIMAGE_VADDR` is the fixed virtual address at which the kernel image is
-//! linked.  The physical load address is detected at runtime via `adrp _start`.
-//! This allows the kernel to be loaded at any physical address.
 
 use aarch64_cpu::{asm::barrier, registers::*};
 use kaddr_layout::KIMAGE_VADDR;
-use kbuild_config::BOOT_DEVICE_MM;
 use memaddr::PhysAddr;
 use page_table::{
     PageTableEntry, PagingFlags,
     aarch64::{A64PageEntry, Arm64MemAttr},
 };
 
-/// Number of entries in each page table level (9-bit index for 4 KiB pages).
+use super::serial::BOOT_UART_BOOT_VADDR;
+use crate::bootconsole_config;
+
 const PT_ENTRIES: usize = 512;
-
-/// 1 GiB in bytes (L1 block granularity).
 const GIB: usize = 0x4000_0000;
-
-/// 2 MiB in bytes (L2 block granularity).
 const MIB_2: usize = 0x20_0000;
-/// Boot-time DTB RAM parser capacity.
-///
-/// Keep this in sync with platform-layer `MAX_RAM_REGIONS` values so boot-time
-/// linear-map coverage and later `khal::mem::init()` region discovery don't
-/// silently disagree about how many `/memory` ranges are supported.
 const MAX_BOOT_RAM_REGIONS: usize = 16;
 
-/// A page-aligned wrapper used to place page table arrays in the correct
-/// linker section with the required 4 KiB alignment.
 #[repr(C, align(4096))]
 struct PageAligned<T>(T);
 
@@ -70,37 +43,34 @@ impl<T, const N: usize> core::ops::IndexMut<usize> for PageAligned<[T; N]> {
     }
 }
 
-/// Level-0 boot page table (shared between TTBR0 and TTBR1).
 #[unsafe(link_section = ".data.boot_page_table")]
-static mut BOOT_PT_L0: PageAligned<[A64PageEntry; PT_ENTRIES]> =
+static mut BOOT_PT_L0_TTBR0: PageAligned<[A64PageEntry; PT_ENTRIES]> =
     PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
 
-/// Level-1 page table for the early linear map.
-///
-/// L0[0] → this table; covers the first 512 GiB of physical address space.
 #[unsafe(link_section = ".data.boot_page_table")]
-static mut BOOT_PT_L1: PageAligned<[A64PageEntry; PT_ENTRIES]> =
+static mut BOOT_PT_L0_TTBR1: PageAligned<[A64PageEntry; PT_ENTRIES]> =
     PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
 
-/// Level-1 page table for the KIMAGE virtual address region.
-///
-/// L0[256] → this table; covers 0xFFFF_8000_0000_0000 .. 0xFFFF_FFFF_FFFF_FFFF.
+#[unsafe(link_section = ".data.boot_page_table")]
+static mut BOOT_PT_L1_IDMAP: PageAligned<[A64PageEntry; PT_ENTRIES]> =
+    PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
+
+#[unsafe(link_section = ".data.boot_page_table")]
+static mut BOOT_PT_L1_LINEAR: PageAligned<[A64PageEntry; PT_ENTRIES]> =
+    PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
+
 #[unsafe(link_section = ".data.boot_page_table")]
 static mut BOOT_PT_L1_KIMAGE: PageAligned<[A64PageEntry; PT_ENTRIES]> =
     PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
 
-/// Level-2 page table for fine-grained (2 MiB) kernel image mapping.
-///
-/// L1_KIMAGE[0] → this table; maps up to 1 GiB at 2 MiB granularity.
 #[unsafe(link_section = ".data.boot_page_table")]
 static mut BOOT_PT_L2_KIMAGE: PageAligned<[A64PageEntry; PT_ENTRIES]> =
     PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
 
-/// Return the physical address of a static symbol via PC-relative `adrp`.
-///
-/// This macro must be used in `.idmap.text` code (before MMU is on) where all
-/// symbol references must be physical addresses obtained via PC-relative
-/// addressing.
+#[unsafe(link_section = ".data.boot_page_table")]
+static mut BOOT_PT_L2_BOOT_UART: PageAligned<[A64PageEntry; PT_ENTRIES]> =
+    PageAligned::new([A64PageEntry::EMPTY; PT_ENTRIES]);
+
 macro_rules! phys_addr_of {
     ($sym:expr) => {{
         let pa: usize;
@@ -117,142 +87,77 @@ macro_rules! phys_addr_of {
     }};
 }
 
-/// Build the boot page tables required to switch the MMU on.
-///
-/// Creates two sets of mappings:
-///
-/// 1. **Early linear map**:
-///    - `BOOT_DEVICE_MM` → Device RW  (1 GiB blocks)
-///    - DTB block → Normal RWX (1 GiB block if needed)
-///      via `L0[0] → BOOT_PT_L1`
-///
-/// 2. **Kernel image map** (new):
-///    - Physical kernel image (detected at runtime via `adrp`) →
-///      `KIMAGE_VADDR` (2 MiB blocks)
-///      via `L0[256] → BOOT_PT_L1_KIMAGE → BOOT_PT_L2_KIMAGE`
-///
-/// Both TTBR0 and TTBR1 point to the same L0 table.
-///
-/// # Safety
-///
-/// Must be called before the MMU is enabled.
-#[unsafe(link_section = ".idmap.text")]
-pub unsafe fn create_boot_page_tables() {
-    // -----------------------------------------------------------------------
-    // Get physical addresses of the page tables via PC-relative addressing.
-    // -----------------------------------------------------------------------
-    let l1_pa = phys_addr_of!(BOOT_PT_L1);
-    let l1_kimage_pa = phys_addr_of!(BOOT_PT_L1_KIMAGE);
-    let l2_kimage_pa = phys_addr_of!(BOOT_PT_L2_KIMAGE);
-
-    // -----------------------------------------------------------------------
-    // Get the actual physical load address of the kernel image at runtime.
-    // Using adrp gives the physical address of _start since the bootloader
-    // code runs in physical address space before the MMU is enabled.
-    // -----------------------------------------------------------------------
-    unsafe extern "C" {
-        fn _start();
-        fn _ekernel();
-    }
-    let kernel_start_pa = phys_addr_of!(_start);
-    let kernel_end_pa = phys_addr_of!(_ekernel);
-
-    // -----------------------------------------------------------------------
-    // L0 setup
-    // -----------------------------------------------------------------------
-    unsafe {
-        // L0[0] → L1 (linear map: first 512 GiB)
-        BOOT_PT_L0[0] = A64PageEntry::new_table(PhysAddr::from(l1_pa));
-
-        // L0[256] → L1_KIMAGE (KIMAGE region: 0xFFFF_8000_0000_0000 +)
-        // KIMAGE_VADDR = 0xFFFF_8000_0000_0000; L0 index (via TTBR1) = bit[47:39]
-        // of (KIMAGE_VADDR & 0x0000_FFFF_FFFF_FFFF) = 0x0000_8000_0000_0000 >> 39 = 256.
-        let kimage_l0_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 39;
-        BOOT_PT_L0[kimage_l0_idx] = A64PageEntry::new_table(PhysAddr::from(l1_kimage_pa));
-    }
-
-    // -----------------------------------------------------------------------
-    // Linear map: device memory (1 GiB blocks) via L1
-    // -----------------------------------------------------------------------
-    for &(start, end) in BOOT_DEVICE_MM {
-        let mut addr = start;
-        while addr < end {
-            unsafe {
-                BOOT_PT_L1[addr / GIB] = A64PageEntry::new_page(
-                    PhysAddr::from(addr),
-                    PagingFlags::READ | PagingFlags::WRITE | PagingFlags::DEVICE,
-                    true, // 1 GiB block
-                );
-            }
-            addr += GIB;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Early normal-memory fallbacks:
-    //
-    // 1. Map the current kernel physical block so execution can continue at the
-    //    current low physical PC immediately after the MMU is enabled, before
-    //    we branch to the high KIMAGE virtual address.
-    // 2. Map the firmware-provided DTB block so early_init() can consume the
-    //    device tree before the runtime linear map is rebuilt.
-    //
-    // Without the explicit kernel-block fallback, platforms whose firmware
-    // places the kernel outside BOOT_DEVICE_MM (for example crosvm) will fault
-    // as soon as SCTLR_EL1.M is set because the current low PC stops being
-    // translated.
-    // -----------------------------------------------------------------------
-    let kernel_l1_idx = kernel_start_pa / GIB;
+fn map_boot_idmap_block_if_absent(block_base: usize, flags: PagingFlags) {
+    let l1_idx = block_base / GIB;
     assert!(
-        kernel_l1_idx < PT_ENTRIES,
-        "kernel outside early linear map window"
+        l1_idx < PT_ENTRIES,
+        "physical address outside boot idmap window"
     );
-    if !unsafe { BOOT_PT_L1[kernel_l1_idx].is_present() } {
-        let block_base = kernel_start_pa & !(GIB - 1);
-        unsafe {
-            BOOT_PT_L1[kernel_l1_idx] = A64PageEntry::new_page(
-                PhysAddr::from(block_base),
-                PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
-                true,
-            );
+    unsafe {
+        if BOOT_PT_L1_IDMAP[l1_idx].is_present() {
+            return;
         }
+        BOOT_PT_L1_IDMAP[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true);
     }
+}
 
-    let dtb_paddr = unsafe { super::entry::SAVED_BOOT_ARGS[0] as usize };
-    if dtb_paddr != 0 {
-        let dtb_l1_idx = dtb_paddr / GIB;
-        assert!(
-            dtb_l1_idx < PT_ENTRIES,
-            "DTB outside early linear map window"
+fn map_boot_linear_block_if_absent(block_base: usize, flags: PagingFlags) {
+    let l1_idx = block_base / GIB;
+    assert!(
+        l1_idx < PT_ENTRIES,
+        "physical address outside boot linear map window"
+    );
+    unsafe {
+        if BOOT_PT_L1_LINEAR[l1_idx].is_present() {
+            return;
+        }
+        BOOT_PT_L1_LINEAR[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true);
+    }
+}
+
+unsafe fn create_boot_minimal_maps(kernel_start_pa: usize, dtb_paddr: usize) {
+    if let Some(uart_paddr) = bootconsole_config::mmio_addr() {
+        let uart_block_base = uart_paddr & !(GIB - 1);
+        map_boot_idmap_block_if_absent(
+            uart_block_base,
+            PagingFlags::READ | PagingFlags::WRITE | PagingFlags::DEVICE,
         );
-        if !unsafe { BOOT_PT_L1[dtb_l1_idx].is_present() } {
-            let block_base = dtb_paddr & !(GIB - 1);
-            unsafe {
-                BOOT_PT_L1[dtb_l1_idx] = A64PageEntry::new_page(
-                    PhysAddr::from(block_base),
-                    PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
-                    true,
-                );
-            }
-        }
     }
 
-    // -----------------------------------------------------------------------
-    // KIMAGE map: L1_KIMAGE[0] → L2_KIMAGE
-    // L1 index for KIMAGE_VADDR: bit[38:30] of (KIMAGE_VADDR & 0x0000_FFFF_FFFF_FFFF)
-    // = 0x0000_8000_0000_0000 bits[38:30] = 0, so L1_KIMAGE[0].
-    // -----------------------------------------------------------------------
+    let kernel_block_base = kernel_start_pa & !(GIB - 1);
+    map_boot_idmap_block_if_absent(
+        kernel_block_base,
+        PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
+    );
+    map_boot_linear_block_if_absent(
+        kernel_block_base,
+        PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
+    );
+
+    if dtb_paddr != 0 {
+        let dtb_block_base = dtb_paddr & !(GIB - 1);
+        map_boot_idmap_block_if_absent(
+            dtb_block_base,
+            PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
+        );
+        map_boot_linear_block_if_absent(
+            dtb_block_base,
+            PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
+        );
+    }
+}
+
+unsafe fn create_boot_kimage_map(
+    kernel_start_pa: usize,
+    kernel_end_pa: usize,
+    l2_kimage_pa: usize,
+) {
     unsafe {
         let kimage_l1_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 30 & (PT_ENTRIES - 1);
         BOOT_PT_L1_KIMAGE[kimage_l1_idx] = A64PageEntry::new_table(PhysAddr::from(l2_kimage_pa));
     }
 
-    // -----------------------------------------------------------------------
-    // KIMAGE map: 2 MiB blocks in L2 mapping physical kernel to KIMAGE_VADDR
-    // -----------------------------------------------------------------------
-    // Round kernel_start_pa down to 2 MiB alignment.
     let pa_base = kernel_start_pa & !(MIB_2 - 1);
-    // Round kernel_end_pa up to 2 MiB alignment.
     let pa_end = (kernel_end_pa + MIB_2 - 1) & !(MIB_2 - 1);
 
     let mut pa = pa_base;
@@ -262,36 +167,79 @@ pub unsafe fn create_boot_page_tables() {
             BOOT_PT_L2_KIMAGE[l2_idx] = A64PageEntry::new_page(
                 PhysAddr::from(pa),
                 PagingFlags::READ | PagingFlags::WRITE | PagingFlags::EXECUTE,
-                true, // 2 MiB block
+                true,
             );
         }
         pa += MIB_2;
         l2_idx += 1;
     }
-
-    // Ensure all page table writes complete before enabling the MMU.
-    barrier::dsb(barrier::SY);
 }
 
-fn map_linear_block(block_base: usize, flags: PagingFlags) {
-    let l1_idx = block_base / GIB;
-    assert!(
-        l1_idx < PT_ENTRIES,
-        "physical address outside early linear map window"
-    );
+unsafe fn create_boot_uart_map(l2_boot_uart_pa: usize) {
+    let Some(boot_console_paddr) = bootconsole_config::mmio_addr() else {
+        return;
+    };
+
+    let boot_uart_l1_idx = (BOOT_UART_BOOT_VADDR & !0xFFFF_0000_0000_0000) >> 30 & (PT_ENTRIES - 1);
+    let boot_uart_l2_idx = (BOOT_UART_BOOT_VADDR >> 21) & (PT_ENTRIES - 1);
+    let boot_uart_block_pa = boot_console_paddr & !(MIB_2 - 1);
+    let kimage_l1_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 30 & (PT_ENTRIES - 1);
+
     unsafe {
-        // Preserve any boot-time mapping that is already present. In
-        // particular, the block containing the kernel image / secondary
-        // trampoline must remain executable until all CPUs have completed the
-        // early boot path.
-        if BOOT_PT_L1[l1_idx].is_present() {
-            return;
+        if boot_uart_l1_idx == kimage_l1_idx {
+            assert!(
+                !BOOT_PT_L2_KIMAGE[boot_uart_l2_idx].is_present(),
+                "boot UART VA overlaps kernel-image boot map"
+            );
+            BOOT_PT_L2_KIMAGE[boot_uart_l2_idx] = A64PageEntry::new_page(
+                PhysAddr::from(boot_uart_block_pa),
+                PagingFlags::READ | PagingFlags::WRITE | PagingFlags::DEVICE,
+                true,
+            );
+        } else {
+            BOOT_PT_L1_KIMAGE[boot_uart_l1_idx] =
+                A64PageEntry::new_table(PhysAddr::from(l2_boot_uart_pa));
+            BOOT_PT_L2_BOOT_UART[boot_uart_l2_idx] = A64PageEntry::new_page(
+                PhysAddr::from(boot_uart_block_pa),
+                PagingFlags::READ | PagingFlags::WRITE | PagingFlags::DEVICE,
+                true,
+            );
         }
-        BOOT_PT_L1[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true);
     }
 }
 
-pub fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
+#[unsafe(link_section = ".idmap.text")]
+pub unsafe fn create_boot_page_tables() {
+    let l1_idmap_pa = phys_addr_of!(BOOT_PT_L1_IDMAP);
+    let l1_linear_pa = phys_addr_of!(BOOT_PT_L1_LINEAR);
+    let l1_kimage_pa = phys_addr_of!(BOOT_PT_L1_KIMAGE);
+    let l2_kimage_pa = phys_addr_of!(BOOT_PT_L2_KIMAGE);
+    let l2_boot_uart_pa = phys_addr_of!(BOOT_PT_L2_BOOT_UART);
+
+    unsafe extern "C" {
+        fn _start();
+        fn _ekernel();
+    }
+    let kernel_start_pa = phys_addr_of!(_start);
+    let kernel_end_pa = phys_addr_of!(_ekernel);
+
+    unsafe {
+        BOOT_PT_L0_TTBR0[0] = A64PageEntry::new_table(PhysAddr::from(l1_idmap_pa));
+        BOOT_PT_L0_TTBR1[0] = A64PageEntry::new_table(PhysAddr::from(l1_linear_pa));
+
+        let kimage_l0_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 39;
+        BOOT_PT_L0_TTBR1[kimage_l0_idx] = A64PageEntry::new_table(PhysAddr::from(l1_kimage_pa));
+    }
+
+    let dtb_paddr = unsafe { super::entry::SAVED_BOOT_ARGS[0] as usize };
+    unsafe { create_boot_minimal_maps(kernel_start_pa, dtb_paddr) };
+    unsafe { create_boot_kimage_map(kernel_start_pa, kernel_end_pa, l2_kimage_pa) };
+    unsafe { create_boot_uart_map(l2_boot_uart_pa) };
+
+    barrier::dsb(barrier::SY);
+}
+
+pub fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
     if dtb_paddr == 0 {
         return;
     }
@@ -310,7 +258,7 @@ pub fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
         let end = ((region.starting_address as usize) + region.size + GIB - 1) & !(GIB - 1);
         let mut addr = start;
         while addr < end {
-            map_linear_block(addr, PagingFlags::READ | PagingFlags::WRITE);
+            map_boot_linear_block_if_absent(addr, PagingFlags::READ | PagingFlags::WRITE);
             addr += GIB;
         }
     }
@@ -320,25 +268,13 @@ pub fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
     barrier::isb(barrier::SY);
 }
 
-/// Configure MMU registers and enable the MMU.
-///
-/// Sets `MAIR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1` and then turns
-/// the MMU on via `SCTLR_EL1`.
-///
-/// # Safety
-///
-/// Must be called after [`create_boot_page_tables`] and before any code
-/// that relies on virtual addresses.
 #[unsafe(link_section = ".idmap.text")]
 pub unsafe fn init_mmu() {
-    // Obtain physical address of L0 page table via PC-relative addressing.
-    let root_pa = phys_addr_of!(BOOT_PT_L0);
+    let ttbr0_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR0);
+    let ttbr1_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR1);
 
-    // Program memory attributes.
     MAIR_EL1.set(Arm64MemAttr::MAIR_VALUE);
 
-    // Configure TCR_EL1: 4 KiB granule, 48-bit VA, 48-bit PA, inner-shareable
-    // write-back cacheable walks for both TTBR0 (T0SZ=16) and TTBR1 (T1SZ=16).
     let tcr_flags0 = TCR_EL1::EPD0::EnableTTBR0Walks
         + TCR_EL1::TG0::KiB_4
         + TCR_EL1::SH0::Inner
@@ -354,29 +290,13 @@ pub unsafe fn init_mmu() {
     TCR_EL1.write(TCR_EL1::IPS::Bits_48 + tcr_flags0 + tcr_flags1);
     barrier::isb(barrier::SY);
 
-    // Point both TTBR0 and TTBR1 at the same L0 table so that low (identity)
-    // and high (kernel) virtual addresses are both accessible right after the
-    // MMU is enabled.
-    let root_pa_u64 = root_pa as u64;
-    TTBR0_EL1.set(root_pa_u64);
-    TTBR1_EL1.set(root_pa_u64);
+    TTBR0_EL1.set(ttbr0_root_pa as u64);
+    TTBR1_EL1.set(ttbr1_root_pa as u64);
 
-    // Flush the entire TLB before enabling the MMU.
     karch::flush_tlb(None);
 
-    // Enable the MMU and turn on I-cache and D-cache.
     SCTLR_EL1.modify(SCTLR_EL1::M::Enable + SCTLR_EL1::C::Cacheable + SCTLR_EL1::I::Cacheable);
-    // Disable SPAN
     SCTLR_EL1.set(SCTLR_EL1.get() | (1 << 23));
     barrier::isb(barrier::SY);
-
-    unsafe extern "C" {
-        fn _start();
-    }
-    let start_pa: usize = phys_addr_of!(_start);
-    super::serial::boot_print_str("[boot] kernel start PA: ");
-    super::serial::boot_print_usize(start_pa);
-    super::serial::boot_print_str(", KIMAGE_VADDR: ");
-    super::serial::boot_print_usize(KIMAGE_VADDR);
-    super::serial::boot_print_str("\r\n");
+    super::serial::activate_boot_map();
 }

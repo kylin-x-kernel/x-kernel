@@ -9,12 +9,14 @@ use kplat_macros::device_interface;
 
 #[device_interface]
 pub trait BootHandler {
-    /// Early initialization on the boot CPU.
-    fn early_init(boot_info: &BootInfo);
+    /// Platform-specific boot-memory preparation before common memory assembly.
+    fn prepare_boot_memory(boot_info: &BootInfo);
 
-    #[cfg(feature = "smp")]
-    /// Early initialization on an application processor (SMP only).
-    fn early_init_ap(id: usize);
+    /// Firmware-specific platform initialization after DT/ACPI parsing.
+    fn firmware_init(boot_info: &BootInfo);
+
+    /// Early driver initialization after runtime page tables are active.
+    fn early_driver_init();
 
     /// Final initialization on the boot CPU.
     fn final_init(boot_info: &BootInfo);

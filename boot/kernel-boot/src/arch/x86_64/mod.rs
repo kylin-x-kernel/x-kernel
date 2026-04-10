@@ -4,5 +4,6 @@
 
 mod handoff;
 pub mod protocols;
+pub(crate) mod serial;
 
 pub use protocols::MULTIBOOT_BOOTLOADER_MAGIC;

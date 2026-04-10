@@ -17,6 +17,7 @@ kfs.workspace = true
 khal.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
+memspace_file.workspace = true
 kprocess.workspace = true
 ktask.workspace = true
 unittest.workspace = true

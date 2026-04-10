@@ -11,7 +11,7 @@ struct PowerImpl;
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
     fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
-        use kplat::memory::{v2p, va};
+        use khal::mem::{v2p, va};
         let entry_paddr = v2p(va!(
             kernel_boot::arch::_start_secondary as *const () as usize
         ));

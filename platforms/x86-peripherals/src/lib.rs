@@ -8,4 +8,3 @@
 pub mod bootmem;
 pub mod memory;
 pub mod mp;
-pub mod ns16550;

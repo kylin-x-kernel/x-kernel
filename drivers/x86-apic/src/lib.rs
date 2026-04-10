@@ -12,12 +12,9 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use kplat::{
-    interrupts::{HandlerTable, TargetCpu},
-    memory::PhysAddr,
-};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
+use memaddr::{PhysAddr, pa};
 use memspace::iomap_device;
 use x2apic::{
     ioapic::{IoApic, IrqFlags},
@@ -31,14 +28,10 @@ pub const APIC_ERROR_VECTOR: u8 = 0xf2;
 pub const MSIX_VECTOR_BASE: u8 = 0x40;
 pub const IO_APIC_VECTOR_BASE: usize = 0x20;
 
-const MAX_IRQ_COUNT: usize = 256;
-
 static mut LOCAL_APIC: MaybeUninit<LocalApic> = MaybeUninit::uninit();
 static mut IS_X2APIC: bool = false;
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
 static MSIX_VECTOR_COUNTER: AtomicU8 = AtomicU8::new(MSIX_VECTOR_BASE);
-
-pub static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 
 #[unsafe(export_name = "__kplat_alloc_msix_vector")]
 pub fn alloc_msix_vector() -> Option<u8> {
@@ -66,7 +59,7 @@ pub fn current_apic_id() -> u8 {
         .map_or(0, |f| f.initial_local_apic_id())
 }
 
-pub fn enable(irq: usize, enabled: bool) {
+pub fn set_irq_enabled(irq: usize, enabled: bool) {
     if irq >= MSIX_VECTOR_BASE as usize {
         return;
     }
@@ -84,6 +77,10 @@ pub fn enable(irq: usize, enabled: bool) {
             }
         }
     }
+}
+
+pub fn end_of_interrupt() {
+    unsafe { local_apic().end_of_interrupt() };
 }
 
 #[allow(static_mut_refs)]
@@ -122,12 +119,8 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
         unsafe { IS_X2APIC = true };
     } else {
         info!("Using xAPIC.");
-        let base_vaddr = iomap_device(
-            kplat::memory::pa!(unsafe { xapic_base() } as usize),
-            0x1000,
-            "lapic",
-        )
-        .unwrap_or_else(|err| panic!("failed to iomap LAPIC: {err:?}"));
+        let base_vaddr = iomap_device(pa!(unsafe { xapic_base() } as usize), 0x1000, "lapic")
+            .unwrap_or_else(|err| panic!("failed to iomap LAPIC: {err:?}"));
         builder.set_xapic_base(base_vaddr.as_usize() as u64);
     }
     let mut lapic = builder.build().unwrap();
@@ -170,102 +163,26 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
     IO_APIC.init_once(SpinNoIrq::new(io_apic));
 }
 
-pub fn init_from_firmware() {
-    let io_apic_paddr = ::acpi::find_io_apic_from_init()
-        .map(|entry| kplat::memory::pa!(entry.address as usize))
-        .unwrap_or_else(|| {
-            warn!("ACPI MADT IOAPIC not found, fallback to static IOAPIC base");
-            kplat::memory::pa!(0xFEC0_0000)
-        });
-    init_primary(io_apic_paddr);
-}
-
 pub fn init_secondary() {
     unsafe { local_apic().enable() };
 }
 
-pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
-    match target {
-        TargetCpu::Self_ => unsafe {
-            local_apic().send_ipi_self(interrupt_id as _);
-        },
-        TargetCpu::Specific(cpu_id) => {
-            let apic_id = raw_apic_id(cpu_id as u8);
-            unsafe {
-                local_apic().send_ipi(interrupt_id as _, apic_id as _);
-            };
-        }
-        TargetCpu::AllButSelf { me: _, total: _ } => {
-            use x2apic::lapic::IpiAllShorthand;
-            unsafe {
-                local_apic().send_ipi_all(interrupt_id as _, IpiAllShorthand::AllExcludingSelf);
-            };
-        }
+pub fn send_ipi_self(interrupt_id: usize) {
+    unsafe {
+        local_apic().send_ipi_self(interrupt_id as _);
     }
 }
 
-pub fn dispatch_irq(vector: usize) -> Option<usize> {
-    let irq = if vector >= APIC_TIMER_VECTOR as usize {
-        trace!("LAPIC IRQ {}", vector);
-        IRQ_HANDLER_TABLE.handle(vector);
-        unsafe { local_apic().end_of_interrupt() };
-        return Some(vector);
-    } else if vector >= MSIX_VECTOR_BASE as usize {
-        let irq = vector;
-        trace!("MSI-X IRQ {}", irq);
-        IRQ_HANDLER_TABLE.handle(irq);
-        unsafe { local_apic().end_of_interrupt() };
-        return Some(irq);
-    } else if vector >= IO_APIC_VECTOR_BASE {
-        vector - IO_APIC_VECTOR_BASE
-    } else {
-        return None;
+pub fn send_ipi(interrupt_id: usize, cpu_id: usize) {
+    let apic_id = raw_apic_id(cpu_id as u8);
+    unsafe {
+        local_apic().send_ipi(interrupt_id as _, apic_id as _);
     };
-
-    trace!("IRQ {}", irq);
-    if !IRQ_HANDLER_TABLE.handle(irq) {
-        enable(irq, false);
-    }
-    unsafe { local_apic().end_of_interrupt() };
-    Some(irq)
 }
 
-#[allow(clippy::crate_in_macro_def)]
-#[macro_export]
-macro_rules! irq_if_impl {
-    ($name:ident) => {
-        struct $name;
-        #[impl_dev_interface]
-        impl kplat::interrupts::IntrManager for $name {
-            fn enable(irq: usize, enabled: bool) {
-                $crate::enable(irq, enabled);
-            }
-
-            fn reg_handler(irq: usize, handler: kplat::interrupts::Handler) -> bool {
-                if $crate::IRQ_HANDLER_TABLE.register_handler(irq, handler) {
-                    Self::enable(irq, true);
-                    return true;
-                }
-                warn!("reg_handler handler for IRQ {} failed", irq);
-                false
-            }
-
-            fn unreg_handler(irq: usize) -> Option<kplat::interrupts::Handler> {
-                Self::enable(irq, false);
-                $crate::IRQ_HANDLER_TABLE.unregister_handler(irq)
-            }
-
-            fn dispatch_irq(vector: usize) -> Option<usize> {
-                $crate::dispatch_irq(vector)
-            }
-
-            fn notify_cpu(interrupt_id: usize, target: kplat::interrupts::TargetCpu) {
-                $crate::notify_cpu(interrupt_id, target);
-            }
-
-            fn set_prio(_irq: usize, _priority: u8) {
-                todo!()
-            }
-        }
+pub fn send_ipi_all_but_self(interrupt_id: usize) {
+    use x2apic::lapic::IpiAllShorthand;
+    unsafe {
+        local_apic().send_ipi_all(interrupt_id as _, IpiAllShorthand::AllExcludingSelf);
     };
 }

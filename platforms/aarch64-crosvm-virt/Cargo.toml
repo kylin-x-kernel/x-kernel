@@ -23,6 +23,9 @@ kplat = { workspace = true }
 kernel_boot = { workspace = true }
 linkme = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false }
+console_driver = { workspace = true, features = ["ns16550-mmio"] }
+irq_driver = { workspace = true }
+khal = { workspace = true }
 aarch64-cpu = "10.0"
 rs_fdtree = { workspace = true }
 of = { workspace = true }
@@ -34,6 +37,7 @@ kdma = { workspace = true }
 kerrno = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
+memspace = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

@@ -52,6 +52,7 @@ ktask.workspace = true
 bitflags.workspace = true
 bitmaps = { version = "3.2.1", default-features = false }
 bytemuck.workspace = true
+lazyinit.workspace = true
 chrono = { version = "0.4.41", default-features = false }
 downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
 flatten_objects = "0.2.4"

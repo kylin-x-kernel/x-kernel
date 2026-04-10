@@ -3,15 +3,62 @@
 // See LICENSES for license details.
 
 //! VirtIO network driver adapter.
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 
 use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
 use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDriverOps};
+use kspin::SpinNoIrq;
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
 use crate::as_driver_error;
 
 const NET_BUF_LEN: usize = 1526;
+
+trait VirtIoNetIrqAck: Send + Sync {
+    fn ack_interrupt(&self) -> bool;
+}
+
+struct VirtIoNetIrqHandle<H: Hal, T: Transport, const QS: usize> {
+    inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+}
+
+unsafe impl<H: Hal, T: Transport, const QS: usize> Send for VirtIoNetIrqHandle<H, T, QS> {}
+unsafe impl<H: Hal, T: Transport, const QS: usize> Sync for VirtIoNetIrqHandle<H, T, QS> {}
+
+impl<H: Hal, T: Transport, const QS: usize> VirtIoNetIrqAck for VirtIoNetIrqHandle<H, T, QS> {
+    fn ack_interrupt(&self) -> bool {
+        !self.inner.lock().ack_interrupt().is_empty()
+    }
+}
+
+static NET_IRQ_HANDLES: SpinNoIrq<Vec<Arc<dyn VirtIoNetIrqAck>>> = SpinNoIrq::new(Vec::new());
+static REGISTERED_NET_IRQS: SpinNoIrq<BTreeSet<usize>> = SpinNoIrq::new(BTreeSet::new());
+
+fn handle_virtio_net_irq() {
+    let handles = NET_IRQ_HANDLES.lock();
+    handles.iter().for_each(|irq_handle| {
+        let _ = irq_handle.ack_interrupt();
+    });
+}
+
+fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: usize>(
+    irq: usize,
+    inner: &Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+) -> DriverResult {
+    NET_IRQ_HANDLES
+        .lock()
+        .push(Arc::new(VirtIoNetIrqHandle::<H, T, QS> {
+            inner: inner.clone(),
+        }));
+
+    if REGISTERED_NET_IRQS.lock().insert(irq) && !khal::irq::register(irq, handle_virtio_net_irq) {
+        NET_IRQ_HANDLES.lock().pop();
+        REGISTERED_NET_IRQS.lock().remove(&irq);
+        return Err(DriverError::ResourceBusy);
+    }
+
+    Ok(())
+}
 
 /// The VirtIO network device driver.
 ///
@@ -21,20 +68,22 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     tx_buffers: [Option<NetBufBox>; QS],
     free_tx_bufs: Vec<NetBufBox>,
     buf_pool: Arc<NetBufPool>,
-    inner: InnerDev<H, T, QS>,
+    inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
     irq: Option<usize>,
 }
 
 unsafe impl<H: Hal, T: Transport, const QS: usize> Send for VirtIoNetDev<H, T, QS> {}
 unsafe impl<H: Hal, T: Transport, const QS: usize> Sync for VirtIoNetDev<H, T, QS> {}
 
-impl<H: Hal, T: Transport, const QS: usize> VirtIoNetDev<H, T, QS> {
+impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, T, QS> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
     pub fn try_new(transport: T, irq: Option<usize>) -> DriverResult<Self> {
         // 0. Create a new driver instance.
         const NONE_BUF: Option<NetBufBox> = None;
-        let inner = InnerDev::new(transport).map_err(as_driver_error)?;
+        let inner = Arc::new(SpinNoIrq::new(
+            InnerDev::new(transport).map_err(as_driver_error)?,
+        ));
         let rx_buffers = [NONE_BUF; QS];
         let tx_buffers = [NONE_BUF; QS];
         let buf_pool = NetBufPool::new(2 * QS, NET_BUF_LEN)?;
@@ -55,6 +104,7 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetDev<H, T, QS> {
             // Safe because the buffer lives as long as the queue.
             let token = unsafe {
                 dev.inner
+                    .lock()
                     .receive_begin(rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
             };
@@ -68,10 +118,15 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetDev<H, T, QS> {
             // Fill header
             let hdr_len = dev
                 .inner
+                .lock()
                 .fill_buffer_header(tx_buf.buffer_mut())
                 .or(Err(DriverError::InvalidInput))?;
             tx_buf.set_hdr_len(hdr_len);
             dev.free_tx_bufs.push(tx_buf);
+        }
+
+        if let Some(irq) = dev.irq {
+            register_virtio_net_irq(irq, &dev.inner)?;
         }
 
         // 3. Return the driver instance.
@@ -96,17 +151,17 @@ impl<H: Hal, T: Transport, const QS: usize> DriverOps for VirtIoNetDev<H, T, QS>
 impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, QS> {
     #[inline]
     fn mac(&self) -> MacAddress {
-        MacAddress(self.inner.mac_address())
+        MacAddress(self.inner.lock().mac_address())
     }
 
     #[inline]
     fn can_tx(&self) -> bool {
-        !self.free_tx_bufs.is_empty() && self.inner.can_send()
+        !self.free_tx_bufs.is_empty() && self.inner.lock().can_send()
     }
 
     #[inline]
     fn can_rx(&self) -> bool {
-        self.inner.poll_receive().is_some()
+        self.inner.lock().poll_receive().is_some()
     }
 
     #[inline]
@@ -125,6 +180,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
         // it lives as long as the queue.
         let new_token = unsafe {
             self.inner
+                .lock()
                 .receive_begin(rx_buf.buffer_mut())
                 .map_err(as_driver_error)?
         };
@@ -138,12 +194,20 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
     }
 
     fn recycle_tx(&mut self) -> DriverResult {
-        while let Some(token) = self.inner.poll_transmit() {
+        loop {
+            let token = {
+                let mut inner = self.inner.lock();
+                inner.poll_transmit()
+            };
+            let Some(token) = token else {
+                break;
+            };
             let tx_buf = self.tx_buffers[token as usize]
                 .take()
                 .ok_or(DriverError::BadState)?;
             unsafe {
                 self.inner
+                    .lock()
                     .transmit_complete(token, tx_buf.frame())
                     .map_err(as_driver_error)?;
             }
@@ -159,6 +223,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
         // 1. send payload.
         let token = unsafe {
             self.inner
+                .lock()
                 .transmit_begin(tx_buf.frame())
                 .map_err(as_driver_error)?
         };
@@ -167,14 +232,19 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
     }
 
     fn recv(&mut self) -> DriverResult<NetBufHandle> {
-        self.inner.ack_interrupt();
-        if let Some(token) = self.inner.poll_receive() {
+        self.inner.lock().ack_interrupt();
+        let token = {
+            let inner = self.inner.lock();
+            inner.poll_receive()
+        };
+        if let Some(token) = token {
             let mut rx_buf = self.rx_buffers[token as usize]
                 .take()
                 .ok_or(DriverError::BadState)?;
             // Safe because the buffer lives as long as the queue.
             let (hdr_len, pkt_len) = unsafe {
                 self.inner
+                    .lock()
                     .receive_complete(token, rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
             };

@@ -86,7 +86,7 @@ pub fn init_percpu() {
     let irq = interrupt_id();
     CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET);
     CNTP_TVAL_EL0.set(0);
-    kplat::interrupts::enable(irq, true);
+    khal::irq::enable(irq, true);
 }
 
 #[inline]
@@ -193,38 +193,4 @@ fn read_be_u32(spec: &[u8], index: usize) -> Option<u32> {
     let start = index.checked_mul(4)?;
     let bytes: [u8; 4] = spec.get(start..start + 4)?.try_into().ok()?;
     Some(u32::from_be_bytes(bytes))
-}
-
-#[macro_export]
-#[allow(clippy::crate_in_macro_def)]
-macro_rules! arm_generic_timer_if_impl {
-    ($name:ident) => {
-        struct $name;
-        #[impl_dev_interface]
-        impl kplat::timer::PlatMonotonicTimer for $name {
-            fn now_ticks() -> u64 {
-                $crate::arm_generic::now_ticks()
-            }
-
-            fn t2ns(ticks: u64) -> u64 {
-                $crate::arm_generic::t2ns(ticks)
-            }
-
-            fn ns2t(nanos: u64) -> u64 {
-                $crate::arm_generic::ns2t(nanos)
-            }
-
-            fn freq() -> u64 {
-                $crate::arm_generic::freq()
-            }
-
-            fn interrupt_id() -> usize {
-                $crate::arm_generic::interrupt_id()
-            }
-
-            fn arm_timer(deadline_ns: u64) {
-                $crate::arm_generic::arm_timer(deadline_ns)
-            }
-        }
-    };
 }

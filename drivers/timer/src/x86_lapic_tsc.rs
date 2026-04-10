@@ -2,15 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use int_ratio::Ratio;
+use log::info;
 use raw_cpuid::CpuId;
 
 use crate::TimerSource;
 
 const LAPIC_TICKS_PER_SEC: u64 = 1_000_000_000;
-static TIMER_IRQ: AtomicUsize = AtomicUsize::new(0);
 static mut NANOS_TO_LAPIC_TICKS_RATIO: Ratio = Ratio::zero();
 static mut INIT_TICK: u64 = 0;
 static mut CPU_FREQ_MHZ: u64 = 0;
@@ -46,15 +44,13 @@ impl khal::time::MonotonicTimerIf for X86LapicTscMonotonicTimer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimerConfig {
-    pub irq: usize,
     pub nominal_frequency_hz: u64,
     pub source: TimerSource,
 }
 
 impl TimerConfig {
-    pub const fn platform_static(irq: usize, nominal_frequency_hz: u64) -> Self {
+    pub const fn platform_static(nominal_frequency_hz: u64) -> Self {
         Self {
-            irq,
             nominal_frequency_hz,
             source: TimerSource::PlatformStatic,
         }
@@ -62,12 +58,10 @@ impl TimerConfig {
 }
 
 pub fn early_init(config: TimerConfig) {
-    assert!(config.irq != 0, "x86 LAPIC/TSC timer IRQ must be non-zero");
     assert!(
         config.nominal_frequency_hz >= 1_000_000,
         "x86 LAPIC/TSC timer frequency must be at least 1MHz"
     );
-    TIMER_IRQ.store(config.irq, Ordering::Relaxed);
     unsafe {
         CPU_FREQ_MHZ = config.nominal_frequency_hz / 1_000_000;
     }
@@ -79,7 +73,7 @@ pub fn early_init(config: TimerConfig) {
     {
         unsafe { CPU_FREQ_MHZ = freq as u64 }
     }
-    kplat::kprintln!("TSC frequency: {} MHz", unsafe { CPU_FREQ_MHZ });
+    info!("TSC frequency: {} MHz", unsafe { CPU_FREQ_MHZ });
     unsafe {
         INIT_TICK = core::arch::x86_64::_rdtsc();
     }
@@ -124,9 +118,7 @@ pub fn freq() -> u64 {
 
 #[inline]
 pub fn interrupt_id() -> usize {
-    let irq = TIMER_IRQ.load(Ordering::Relaxed);
-    assert!(irq != 0, "x86 LAPIC/TSC timer not initialized");
-    irq
+    x86_apic::APIC_TIMER_VECTOR as usize
 }
 
 pub fn arm_timer(deadline_ns: u64) {
@@ -141,38 +133,4 @@ pub fn arm_timer(deadline_ns: u64) {
             lapic.set_timer_initial(1);
         }
     }
-}
-
-#[macro_export]
-#[allow(clippy::crate_in_macro_def)]
-macro_rules! x86_lapic_tsc_timer_if_impl {
-    ($name:ident) => {
-        struct $name;
-        #[impl_dev_interface]
-        impl kplat::timer::PlatMonotonicTimer for $name {
-            fn now_ticks() -> u64 {
-                $crate::x86_lapic_tsc::now_ticks()
-            }
-
-            fn t2ns(ticks: u64) -> u64 {
-                $crate::x86_lapic_tsc::t2ns(ticks)
-            }
-
-            fn ns2t(nanos: u64) -> u64 {
-                $crate::x86_lapic_tsc::ns2t(nanos)
-            }
-
-            fn freq() -> u64 {
-                $crate::x86_lapic_tsc::freq()
-            }
-
-            fn interrupt_id() -> usize {
-                $crate::x86_lapic_tsc::interrupt_id()
-            }
-
-            fn arm_timer(deadline_ns: u64) {
-                $crate::x86_lapic_tsc::arm_timer(deadline_ns)
-            }
-        }
-    };
 }

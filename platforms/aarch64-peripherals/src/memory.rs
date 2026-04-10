@@ -7,7 +7,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use heapless::Vec;
-use kplat::memory::{
+use khal::mem::{
     MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr, sub_ranges,
 };
 use ktypes::Once;

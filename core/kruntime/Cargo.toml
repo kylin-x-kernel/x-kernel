@@ -30,6 +30,7 @@ pmu = ["khal/pmu"]
 [dependencies]
 kalloc.workspace = true
 backtrace.workspace = true
+boot_info.workspace = true
 kerrno.workspace = true
 fbdevice = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }

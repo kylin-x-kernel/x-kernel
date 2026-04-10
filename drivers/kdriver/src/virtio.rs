@@ -7,14 +7,13 @@ use core::{marker::PhantomData, ptr::NonNull};
 
 use cfg_if::cfg_if;
 use driver_base::{DeviceKind, DriverOps, DriverResult};
-use khal::mem::p2v;
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
-use crate::{DeviceEnum, drivers::DriverProbe};
+use crate::{DeviceEnum, drivers::DriverProbe, iomap_mmio};
 
 cfg_if! {
     if #[cfg(bus = "pci")] {
-        use pci::{Cam, PciConfigAccess, PciRoot, DeviceFunction, DeviceFunctionInfo, ConfigurationAccess};
+        use pci::{MmioCam, PciConfigAccess, PciRoot, DeviceFunction, DeviceFunctionInfo};
         type VirtIoTransport = virtio::PciTransport;
     } else if #[cfg(bus =  "mmio")] {
         type VirtIoTransport = virtio::MmioTransport<'static>;
@@ -116,8 +115,19 @@ pub struct VirtIoDriver<D: VirtIoDevMeta + ?Sized>(PhantomData<D>);
 impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     #[cfg(bus = "mmio")]
     fn probe_mmio(mmio_base: usize, mmio_size: usize) -> Option<DeviceEnum> {
-        let base_vaddr = p2v(mmio_base.into());
-        if let Some((ty, transport)) = virtio::probe_mmio_device(base_vaddr.as_mut_ptr(), mmio_size)
+        let base_vaddr = match iomap_mmio(mmio_base, mmio_size, "virtio-mmio") {
+            Ok(vaddr) => vaddr,
+            Err(err) => {
+                warn!(
+                    "failed to map MMIO device at [PA:{:#x}, PA:{:#x}): {:?}",
+                    mmio_base,
+                    mmio_base + mmio_size,
+                    err
+                );
+                return None;
+            }
+        };
+        if let Some((ty, transport)) = virtio::probe_mmio_device(base_vaddr.as_ptr(), mmio_size)
             && ty == D::DEVICE_TYPE
         {
             match D::try_new(transport, None) {
@@ -137,8 +147,9 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     }
 
     #[cfg(bus = "pci")]
-    fn probe_pci<C: ConfigurationAccess>(
-        root: &mut PciRoot<C>,
+    fn probe_pci(
+        root: &mut PciRoot<MmioCam<'static>>,
+        config: &mut PciConfigAccess,
         bdf: DeviceFunction,
         dev_info: &DeviceFunctionInfo,
     ) -> Option<DeviceEnum> {
@@ -154,18 +165,8 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             _ => return None,
         }
 
-        // Create a PciConfigAccess for reading/writing arbitrary config space
-        // registers (e.g. for MSI-X capability setup).
-        #[cfg(feature = "pci-mmio")]
-        let cam = Cam::MmioCam;
-        #[cfg(not(feature = "pci-mmio"))]
-        let cam = Cam::Ecam;
-        let (pci_config_base, _) = crate::pci_config_space();
-        let base_vaddr = khal::mem::p2v((pci_config_base as usize).into());
-        let mut config = unsafe { PciConfigAccess::new(base_vaddr.as_mut_ptr(), cam) };
-
         if let Some((ty, transport, irq)) =
-            virtio::probe_pci_device::<VirtIoHalImpl, C>(root, bdf, dev_info, &mut config)
+            virtio::probe_pci_device::<VirtIoHalImpl, MmioCam<'static>>(root, bdf, dev_info, config)
             && ty == D::DEVICE_TYPE
         {
             match D::try_new(transport, Some(irq)) {
@@ -232,9 +233,9 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     }
 
     #[inline]
-    unsafe fn mmio_phys_to_virt(paddr: PhysAddr, _size: usize) -> NonNull<u8> {
-        let paddr_usize: usize = paddr as usize;
-        NonNull::new(p2v(paddr_usize.into()).as_mut_ptr()).unwrap()
+    unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
+        iomap_mmio(paddr as usize, size, "virtio-mmio-hal")
+            .expect("failed to iomap virtio MMIO region")
     }
 
     #[allow(unused_variables)]

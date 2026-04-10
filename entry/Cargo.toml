@@ -79,30 +79,6 @@ aarch64_crosvm_virt = [
     "tee",
 ]
 
-# higuang csv platform
-x86_csv = [
-    "kernel",
-    "kfeat/display",
-    "kfeat/input",
-    "kserveices/input",
-
-    "kfeat/vsock",
-    "ksyscall/vsock",
-    "kserveices/vsock",
-    "kfeat/sev",
-    "kserveices/sev",
-    "dep:x86-csv",
-    "pci",
-
-    # auxilary features
-    "kfeat/fs-times",
-    "kserveices/dev-log",
-    "kserveices/x86_csv",
-
-    "tee",
-]
-
-
 [dependencies]
 fs-ng-vfs.workspace = true
 minicov = "0.3.8"
@@ -150,12 +126,6 @@ features = ["fp-simd", "rtc"]
 workspace = true
 optional = true
 features = ["fp-simd", "smp", "rtc"]
-
-[dependencies.x86-csv]
-workspace = true
-optional = true
-features = ["fp-simd", "rtc"]
-
 
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]

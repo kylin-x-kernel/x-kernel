@@ -12,7 +12,6 @@ mod boot;
 mod console;
 mod init;
 mod irq;
-mod mem;
 #[cfg(feature = "smp")]
 mod mp;
 mod power;

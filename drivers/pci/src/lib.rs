@@ -12,12 +12,257 @@
 
 #![no_std]
 
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+};
+
 pub use virtio_drivers::transport::pci::bus::{
     BarInfo, Cam, CapabilityInfo, Command, ConfigurationAccess, DeviceFunction, DeviceFunctionInfo,
     HeaderType, MemoryBarType, MmioCam, PciError, PciRoot, Status,
 };
 
 pub mod msix;
+
+static PCI_CONFIG_BASE_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciConfigSource {
+    Static,
+    DeviceTree,
+    RuntimeOverride,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciInitError {
+    NoMemory,
+    InvalidRange,
+    MappingFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyInterruptRoute {
+    pub irq: usize,
+    pub trigger: of::InterruptTrigger,
+    pub controller: of::InterruptControllerKind,
+}
+
+impl PciInitError {
+    fn from_iomap(err: memspace::IoMapError) -> Self {
+        match err {
+            memspace::IoMapError::NoMemory => Self::NoMemory,
+            memspace::IoMapError::InvalidRange => Self::InvalidRange,
+            memspace::IoMapError::MappingFailed => Self::MappingFailed,
+        }
+    }
+}
+
+pub fn set_pci_config_space(base: u64, bus_end: u8) {
+    PCI_CONFIG_BASE_OVERRIDE.store(base, Ordering::Relaxed);
+    PCI_BUS_END_OVERRIDE.store(bus_end as u32, Ordering::Relaxed);
+}
+
+pub fn pci_config_space() -> (u64, u8, PciConfigSource) {
+    let base = PCI_CONFIG_BASE_OVERRIDE.load(Ordering::Relaxed);
+    let bus_end = PCI_BUS_END_OVERRIDE.load(Ordering::Relaxed);
+    if base != 0 && bus_end != u32::MAX {
+        log::info!(
+            "PCI config from runtime override: ecam={:#x} bus_end={:#x}",
+            base,
+            bus_end
+        );
+        return (base, bus_end as u8, PciConfigSource::RuntimeOverride);
+    }
+
+    if let Some(host) = of::generic_pci_host_info()
+        && host.bus_start == 0
+    {
+        log::info!(
+            "PCI host from device tree: cam={:?} ecam={:#x} size={:#x} bus_range={:#x}..={:#x}",
+            host.cam,
+            host.ecam_base,
+            host.ecam_size,
+            host.bus_start,
+            host.bus_end
+        );
+        return (host.ecam_base, host.bus_end, PciConfigSource::DeviceTree);
+    }
+
+    log::info!(
+        "PCI config from kbuild: ecam={:#x} bus_end={:#x}",
+        kbuild_config::PCI_ECAM_BASE as u64,
+        kbuild_config::PCI_BUS_END as u8
+    );
+    (
+        kbuild_config::PCI_ECAM_BASE as u64,
+        kbuild_config::PCI_BUS_END as u8,
+        PciConfigSource::Static,
+    )
+}
+
+pub fn pci_ecam_size(bus_end: u8, cam: Cam) -> usize {
+    let buses = bus_end as usize + 1;
+    let bus_stride = match cam {
+        Cam::MmioCam => 1usize << 16,
+        Cam::Ecam => 1usize << 20,
+    };
+    buses * bus_stride
+}
+
+pub fn iomap_mmio(
+    paddr: usize,
+    size: usize,
+    name: &'static str,
+) -> Result<NonNull<u8>, PciInitError> {
+    let vaddr = memspace::iomap_device(paddr.into(), size, name).map_err(|err| {
+        log::warn!(
+            "failed to iomap {name} at [PA:{:#x}, PA:{:#x}): {:?}",
+            paddr,
+            paddr.saturating_add(size),
+            err
+        );
+        PciInitError::from_iomap(err)
+    })?;
+    NonNull::new(vaddr.as_mut_ptr()).ok_or(PciInitError::MappingFailed)
+}
+
+pub struct PciBus {
+    root: PciRoot<MmioCam<'static>>,
+    config: PciConfigAccess,
+    config_base: u64,
+    bus_end: u8,
+    source: PciConfigSource,
+}
+
+impl PciBus {
+    pub fn new(cam: Cam) -> Result<Self, PciInitError> {
+        let (config_base, bus_end, source) = pci_config_space();
+        if source == PciConfigSource::DeviceTree
+            && let Some(host) = of::generic_pci_host_info()
+        {
+            let expected = match cam {
+                Cam::MmioCam => of::PciHostCam::Cam,
+                Cam::Ecam => of::PciHostCam::Ecam,
+            };
+            if host.cam != expected {
+                log::warn!(
+                    "PCI DT host advertises {:?} but build selected {:?}; falling back to static \
+                     config",
+                    host.cam,
+                    cam
+                );
+                return Self::new_static(cam);
+            }
+            log::info!(
+                "PCI bus using DT host: cam={:?} ecam={:#x} bus_end={:#x}",
+                cam,
+                config_base,
+                bus_end
+            );
+        }
+        let ecam_size = pci_ecam_size(bus_end, cam);
+        let base_vaddr = iomap_mmio(config_base as usize, ecam_size, "pci-ecam")?;
+        let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
+        let root = PciRoot::new(mmio_cam);
+        let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
+        Ok(Self {
+            root,
+            config,
+            config_base,
+            bus_end,
+            source,
+        })
+    }
+
+    fn new_static(cam: Cam) -> Result<Self, PciInitError> {
+        let config_base = kbuild_config::PCI_ECAM_BASE as u64;
+        let bus_end = kbuild_config::PCI_BUS_END as u8;
+        let ecam_size = pci_ecam_size(bus_end, cam);
+        let base_vaddr = iomap_mmio(config_base as usize, ecam_size, "pci-ecam")?;
+        let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
+        let root = PciRoot::new(mmio_cam);
+        let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
+        Ok(Self {
+            root,
+            config,
+            config_base,
+            bus_end,
+            source: PciConfigSource::Static,
+        })
+    }
+
+    pub fn config_base(&self) -> u64 {
+        self.config_base
+    }
+
+    pub fn bus_end(&self) -> u8 {
+        self.bus_end
+    }
+
+    pub fn source(&self) -> PciConfigSource {
+        self.source
+    }
+
+    pub fn parts_mut(&mut self) -> (&mut PciRoot<MmioCam<'static>>, &mut PciConfigAccess) {
+        (&mut self.root, &mut self.config)
+    }
+}
+
+pub fn pci_bar_allocation_range() -> Option<(u64, u64, PciConfigSource)> {
+    if let Some(range) = of::generic_pci_non_prefetchable_mem_range() {
+        log::info!(
+            "PCI BAR allocator from device tree: cpu_base={:#x} size={:#x} prefetchable={}",
+            range.cpu_base,
+            range.size,
+            range.prefetchable
+        );
+        return Some((range.cpu_base, range.size, PciConfigSource::DeviceTree));
+    }
+
+    let range = kbuild_config::PCI_RANGES
+        .get(1)
+        .copied()
+        .map(|(start, len)| (start, len, PciConfigSource::Static));
+    if let Some((start, len, _)) = range {
+        log::info!(
+            "PCI BAR allocator from kbuild: cpu_base={:#x} size={:#x}",
+            start,
+            len
+        );
+    }
+    range
+}
+
+pub fn legacy_interrupt_route(
+    config: &PciConfigAccess,
+    bdf: DeviceFunction,
+) -> Option<LegacyInterruptRoute> {
+    let word = config.read_word(bdf, 0x3C);
+    let pin = ((word >> 8) & 0xff) as u8;
+    if pin == 0 || pin == 0xff {
+        log::info!(
+            "PCI legacy IRQ route: bdf={:?} pin not programmed (pin={:#x})",
+            bdf,
+            pin
+        );
+        return None;
+    }
+    let irq = of::generic_pci_legacy_interrupt(bdf.bus, bdf.device, bdf.function, pin)?;
+    log::info!(
+        "PCI legacy IRQ from device tree: bdf={:?} pin=INT{} irq={} trigger={:?} controller={:?}",
+        bdf,
+        pin,
+        irq.irq,
+        irq.trigger,
+        irq.controller
+    );
+    Some(LegacyInterruptRoute {
+        irq: irq.irq,
+        trigger: irq.trigger,
+        controller: irq.controller,
+    })
+}
 
 /// Provides read/write access to PCI configuration space registers.
 ///
@@ -101,6 +346,93 @@ pub struct PciRangeAllocator {
     _begin_addr: u64,
     end_addr: u64,
     cursor_addr: u64,
+}
+
+pub fn configure_device<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    allocator: &mut Option<PciRangeAllocator>,
+) -> Result<(), PciInitError> {
+    let mut bar = 0;
+    while bar < 6 {
+        let info = match root.bar_info(bdf, bar).unwrap() {
+            Some(info) => info,
+            None => {
+                bar += 1;
+                continue;
+            }
+        };
+
+        if let BarInfo::Memory {
+            address_type,
+            address,
+            size,
+            ..
+        } = info
+            && size > 0
+            && address == 0
+        {
+            let new_addr = allocator
+                .as_mut()
+                .expect("No memory ranges available for PCI BARs!")
+                .alloc_buf(size as _)
+                .ok_or(PciInitError::NoMemory)?;
+            if address_type == MemoryBarType::Width32 {
+                root.set_bar_32(bdf, bar, new_addr as _);
+            } else if address_type == MemoryBarType::Width64 {
+                root.set_bar_64(bdf, bar, new_addr);
+            }
+        }
+
+        let info = match root.bar_info(bdf, bar).unwrap() {
+            Some(info) => info,
+            None => {
+                bar += 1;
+                continue;
+            }
+        };
+        let takes_two = info.takes_two_entries();
+        match info {
+            BarInfo::IO { address, size } => {
+                if address > 0 && size > 0 {
+                    log::debug!("  BAR {}: IO  [{:#x}, {:#x})", bar, address, address + size);
+                }
+            }
+            BarInfo::Memory {
+                address_type,
+                prefetchable,
+                address,
+                size,
+            } => {
+                if address > 0 && size > 0 {
+                    log::debug!(
+                        "  BAR {}: MEM [{:#x}, {:#x}){}{}",
+                        bar,
+                        address,
+                        address + size,
+                        if address_type == MemoryBarType::Width64 {
+                            " 64bit"
+                        } else {
+                            ""
+                        },
+                        if prefetchable { " pref" } else { "" },
+                    );
+                }
+            }
+        }
+
+        bar += 1;
+        if takes_two {
+            bar += 1;
+        }
+    }
+
+    let (_status, cmd) = root.get_status_command(bdf);
+    root.set_command(
+        bdf,
+        cmd | Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
+    );
+    Ok(())
 }
 
 impl PciRangeAllocator {

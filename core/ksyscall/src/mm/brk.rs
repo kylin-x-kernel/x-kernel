@@ -17,7 +17,7 @@ use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
 use ktask::current;
 use memaddr::{VirtAddr, align_up_4k};
-use memspace::backend::Backend;
+use memspace_file::new_alloc;
 
 pub fn sys_brk(addr: usize) -> KResult<isize> {
     let curr = current();
@@ -53,7 +53,7 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
                     expand_size,
                     MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
                     false,
-                    Backend::new_alloc(expand_start, PageSize::Size4K),
+                    new_alloc(expand_start, PageSize::Size4K),
                 )
                 .is_err()
         {

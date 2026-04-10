@@ -108,37 +108,3 @@ pub fn arm_timer(deadline_ns: u64) {
 pub fn rtc_now_nanos() -> u64 {
     t2ns(now_ticks())
 }
-
-#[macro_export]
-#[allow(clippy::crate_in_macro_def)]
-macro_rules! riscv_sbi_timer_if_impl {
-    ($name:ident) => {
-        struct $name;
-        #[impl_dev_interface]
-        impl kplat::timer::PlatMonotonicTimer for $name {
-            fn now_ticks() -> u64 {
-                $crate::riscv_sbi::now_ticks()
-            }
-
-            fn t2ns(ticks: u64) -> u64 {
-                $crate::riscv_sbi::t2ns(ticks)
-            }
-
-            fn ns2t(nanos: u64) -> u64 {
-                $crate::riscv_sbi::ns2t(nanos)
-            }
-
-            fn freq() -> u64 {
-                $crate::riscv_sbi::freq()
-            }
-
-            fn interrupt_id() -> usize {
-                $crate::riscv_sbi::interrupt_id()
-            }
-
-            fn arm_timer(deadline_ns: u64) {
-                $crate::riscv_sbi::arm_timer(deadline_ns)
-            }
-        }
-    };
-}

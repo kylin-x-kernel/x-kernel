@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kplat::memory::{PhysAddr, VirtAddr};
+use khal::mem::{PhysAddr, VirtAddr};
 
 #[cfg(all(feature = "cmos", target_arch = "x86_64"))]
 pub mod cmos;
@@ -98,9 +98,7 @@ pub fn init_unix_timestamp_offset(unix_seconds: u64, now_nanos: u64) {
 
 pub fn config_from_device_tree() -> Option<RtcConfig> {
     #[cfg(feature = "pl031")]
-    if let Some(config) =
-        mmio_config_from_device_tree("arm,pl031", RtcKind::Pl031, RtcSource::DeviceTree)
-    {
+    if let Some(config) = pl031_config_from_device_tree() {
         return Some(config);
     }
 
@@ -114,6 +112,56 @@ pub fn config_from_device_tree() -> Option<RtcConfig> {
     }
 
     None
+}
+
+#[cfg(feature = "pl031")]
+fn pl031_config_from_device_tree() -> Option<RtcConfig> {
+    if let Some(config) =
+        mmio_config_from_device_tree("arm,pl031", RtcKind::Pl031, RtcSource::DeviceTree)
+    {
+        return Some(config);
+    }
+
+    const PL031_PRIMECELL_PERIPHID: u32 = 0x41030;
+    let node = of::fdt()?.all_nodes().find(|node| {
+        node.compatibles()
+            .any(|compatible| compatible == "arm,primecell")
+            && of::property_u32(*node, "arm,primecell-periphid") == Some(PL031_PRIMECELL_PERIPHID)
+    })?;
+    let reg = node.reg()?.next()?;
+    Some(RtcConfig::mmio(
+        RtcKind::Pl031,
+        PhysAddr::from_usize(reg.starting_address as usize),
+        reg.size,
+        RtcSource::DeviceTree,
+    ))
+}
+
+#[cfg(any(feature = "pl031", feature = "goldfish"))]
+pub fn init_from_device_tree(now_nanos: u64) -> Option<RtcConfig> {
+    let config = config_from_device_tree()?;
+    let mapped = match config {
+        RtcConfig {
+            kind,
+            transport: RtcTransport::Mmio { paddr, size },
+            source,
+        } => {
+            let name = match kind {
+                RtcKind::Goldfish => "goldfish-rtc",
+                RtcKind::Pl031 => "pl031",
+                RtcKind::Cmos => "rtc",
+            };
+            RtcConfig::mmio_mapped(
+                kind,
+                memspace::iomap_device(paddr, size, name)
+                    .unwrap_or_else(|err| panic!("failed to iomap {name}: {err:?}")),
+                source,
+            )
+        }
+        other => panic!("unsupported rtc configuration: {other:?}"),
+    };
+    init(mapped, now_nanos);
+    Some(mapped)
 }
 
 pub fn init(config: RtcConfig, _now_nanos: u64) {

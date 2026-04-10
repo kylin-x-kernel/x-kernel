@@ -1,0 +1,37 @@
+[package]
+name = "irq-driver"
+description = "IRQ chip drivers with kplat-compatible integration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+pmr = []
+nmi-pmu = ["pmr", "kplat/nmi"]
+
+[dependencies]
+kbuild_config = { workspace = true }
+khal = { workspace = true }
+kplat = { workspace = true }
+kspin = { workspace = true }
+lazyinit = "0.2"
+log = "0.4"
+memaddr = { workspace = true }
+memspace = { workspace = true }
+of = { workspace = true }
+arm-gic-driver = "0.16"
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv = "0.14"
+riscv_plic = { version = "0.2" }
+sbi-rt = { version = "0.0.3", features = ["legacy"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_apic = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["aarch64-unknown-none", "riscv64gc-unknown-none-elf"]

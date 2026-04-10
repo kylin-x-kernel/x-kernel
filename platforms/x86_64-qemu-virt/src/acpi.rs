@@ -4,9 +4,9 @@
 
 pub(crate) fn init() {
     let rsdp_addr = ::acpi::rsdp_addr().unwrap_or(0);
-    kprintln!("ACPI init: rsdp_addr={:#x}", rsdp_addr);
+    khal::kprintln!("ACPI init: rsdp_addr={:#x}", rsdp_addr);
     if let Some((madt, entries)) = ::acpi::find_madt_from_init() {
-        kprintln!(
+        khal::kprintln!(
             "ACPI MADT: lapic={:#x} flags={:#x}",
             madt.local_apic_address,
             madt.flags
@@ -14,14 +14,14 @@ pub(crate) fn init() {
         for entry in entries {
             match entry {
                 ::acpi::MadtEntry::LocalApic(cpu) if cpu.enabled() => {
-                    kprintln!(
+                    khal::kprintln!(
                         "ACPI MADT LAPIC: uid={} apic_id={}",
                         cpu.processor_uid,
                         cpu.apic_id
                     );
                 }
                 ::acpi::MadtEntry::IoApic(io_apic) => {
-                    kprintln!(
+                    khal::kprintln!(
                         "ACPI MADT IOAPIC: id={} addr={:#x} gsi_base={}",
                         io_apic.id,
                         io_apic.address,
@@ -32,16 +32,16 @@ pub(crate) fn init() {
             }
         }
     } else {
-        kprintln!("ACPI MADT not found");
+        khal::kprintln!("ACPI MADT not found");
     }
 
     let Some(mcfg) = ::acpi::find_mcfg_from_init() else {
-        kprintln!("ACPI MCFG not found, fallback to static PCI ECAM config");
+        khal::kprintln!("ACPI MCFG not found, fallback to static PCI ECAM config");
         return;
     };
 
     if mcfg.pci_segment != 0 {
-        kprintln!(
+        khal::kprintln!(
             "ignoring ACPI MCFG segment {} base={:#x}",
             mcfg.pci_segment,
             mcfg.base_address
@@ -49,7 +49,7 @@ pub(crate) fn init() {
         return;
     }
 
-    kprintln!(
+    khal::kprintln!(
         "ACPI MCFG: ecam={:#x}, buses={:#x}..={:#x}",
         mcfg.base_address,
         mcfg.start_bus,

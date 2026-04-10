@@ -28,6 +28,8 @@ boot_info = { workspace = true }
 kcpu = { workspace = true }
 karch = { workspace = true }
 kplat.workspace = true
+kbuild_config.workspace = true
+kernel_boot.workspace = true
 cfg-if.workspace = true
 heapless = "0.9"
 kspin.workspace = true
@@ -35,13 +37,19 @@ lazyinit.workspace = true
 linkme = { version = "0.3.33" }
 log.workspace = true
 memaddr.workspace = true
+kaddr_layout.workspace = true
 page_table = { workspace = true }
 percpu.workspace = true
 crate_interface.workspace = true
 acpi = { workspace = true }
 of = { workspace = true }
 unittest.workspace = true
+bitflags = { workspace = true }
+handler_table = "0.1.2"
 
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+multiboot2 = "0.24"
 
 [build-dependencies]
 kbuild_config.workspace = true

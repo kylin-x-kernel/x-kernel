@@ -3,11 +3,16 @@
 // See LICENSES for license details.
 
 static DTB_DATA: &[u8] = include_bytes!("../dtb/test.dtb");
+static CROSVM_DTB_DATA: &[u8] = include_bytes!("../dtb/crosvm.dtb");
 
 use rs_fdtree::LinuxFdt;
 
 fn setup() -> LinuxFdt<'static> {
     LinuxFdt::new(DTB_DATA).unwrap()
+}
+
+fn setup_crosvm() -> LinuxFdt<'static> {
+    LinuxFdt::new(CROSVM_DTB_DATA).unwrap()
 }
 
 #[test]
@@ -230,4 +235,62 @@ fn memreserve_and_reserved_memory_regions() {
     assert_eq!(reserved[0].size, 0x2000);
     assert_eq!(reserved[1].starting_address as usize, 0x8200_0000);
     assert_eq!(reserved[1].size, 0x3000);
+}
+
+#[test]
+fn crosvm_dtb_parses_nodes_after_chosen() {
+    let fdt = setup_crosvm();
+    let names = fdt.all_nodes().map(|node| node.name).collect::<Vec<_>>();
+
+    let chosen = names.iter().position(|&name| name == "chosen").unwrap();
+    let reserved = names
+        .iter()
+        .position(|&name| name == "reserved-memory")
+        .unwrap_or_else(|| panic!("reserved-memory missing, nodes={names:?}"));
+    let cpus = names
+        .iter()
+        .position(|&name| name == "cpus")
+        .unwrap_or_else(|| panic!("cpus missing, nodes={names:?}"));
+    let intc = names
+        .iter()
+        .position(|&name| name == "intc")
+        .unwrap_or_else(|| panic!("intc missing, nodes={names:?}"));
+    let timer = names
+        .iter()
+        .position(|&name| name == "timer")
+        .unwrap_or_else(|| panic!("timer missing, nodes={names:?}"));
+    let pci = names
+        .iter()
+        .position(|&name| name == "pci")
+        .unwrap_or_else(|| panic!("pci missing, nodes={names:?}"));
+
+    assert!(reserved > chosen);
+    assert!(cpus > reserved);
+    assert!(intc > cpus);
+    assert!(timer > intc);
+    assert!(pci > timer);
+}
+
+#[test]
+fn crosvm_dtb_exposes_both_dice_nodes() {
+    let fdt = setup_crosvm();
+
+    let chosen_dice = fdt.dice().unwrap().regions().unwrap().next().unwrap();
+    assert_eq!(chosen_dice.starting_address as usize, 0x7fe2_3000);
+    assert_eq!(chosen_dice.size, 0x1000);
+
+    let reserved_dice = fdt
+        .find_node("/reserved-memory/dice")
+        .unwrap_or_else(|| panic!("reserved-memory dice missing"))
+        .reg()
+        .unwrap()
+        .next()
+        .unwrap();
+    assert_eq!(reserved_dice.starting_address as usize, 0x7fe2_3000);
+    assert_eq!(reserved_dice.size, 0x1000);
+
+    let reserved = fdt.reserved_memory_regions().collect::<Vec<_>>();
+    assert!(reserved.iter().any(|region| {
+        region.starting_address as usize == 0x7fe2_3000 && region.size == 0x1000
+    }));
 }

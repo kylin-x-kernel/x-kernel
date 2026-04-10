@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::memory::{Aligned4K, pa, va};
+use khal::mem::{Aligned4K, pa, v2p, va};
 use page_table::{
     PageTableEntry as GenericPTE, PagingFlags as MappingFlags,
     loongarch64::La64PageEntry as LA64PTE,
@@ -20,9 +20,9 @@ static mut BOOT_PT_L2: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empt
 unsafe fn init_boot_page_table() {
     unsafe {
         let l1_va = va!(&raw const BOOT_PT_L1 as usize);
-        BOOT_PT_L0[0x100] = LA64PTE::new_table(kplat::memory::v2p(l1_va));
+        BOOT_PT_L0[0x100] = LA64PTE::new_table(v2p(l1_va));
         let l2_va = va!(&raw const BOOT_PT_L2 as usize);
-        BOOT_PT_L1[0] = LA64PTE::new_table(kplat::memory::v2p(l2_va));
+        BOOT_PT_L1[0] = LA64PTE::new_table(v2p(l2_va));
         for i in 0..512 {
             BOOT_PT_L2[i] = LA64PTE::new_page(
                 pa!(i << 21),
@@ -51,10 +51,7 @@ fn enable_fp_simd() {
     }
 }
 fn init_mmu() {
-    kcpu::boot::init_mmu(
-        kplat::memory::v2p(va!(&raw const BOOT_PT_L0 as usize)),
-        PHYS_BOOT_OFFSET,
-    );
+    kcpu::boot::init_mmu(v2p(va!(&raw const BOOT_PT_L0 as usize)), PHYS_BOOT_OFFSET);
 }
 const BOOT_TO_VIRT: usize = PHYS_VIRT_OFFSET - PHYS_BOOT_OFFSET;
 #[unsafe(naked)]

@@ -4,18 +4,15 @@
 
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
+use crate::irq::TargetCpu;
 use kplat::{
     boot::BootHandler,
     impl_dev_interface,
-    interrupts::{Handler, IntrManager, TargetCpu},
-    io::ConsoleIf,
-    memory::{HwMemory, MemRange, ReservedRegion},
     sys::SysCtrl,
 };
 
 struct DummyInit;
 struct DummyConsole;
-struct DummyMem;
 struct DummyRtc;
 struct DummyTime;
 struct DummyPower;
@@ -23,10 +20,11 @@ struct DummyIrq;
 
 #[impl_dev_interface]
 impl BootHandler for DummyInit {
-    fn early_init(_boot_info: &kplat::boot::BootInfo) {}
+    fn prepare_boot_memory(_boot_info: &kplat::boot::BootInfo) {}
 
-    #[cfg(feature = "smp")]
-    fn early_init_ap(_cpu_id: usize) {}
+    fn firmware_init(_boot_info: &kplat::boot::BootInfo) {}
+
+    fn early_driver_init() {}
 
     fn final_init(_boot_info: &kplat::boot::BootInfo) {}
 
@@ -35,7 +33,7 @@ impl BootHandler for DummyInit {
 }
 
 #[impl_dev_interface]
-impl ConsoleIf for DummyConsole {
+impl crate::console::ConsoleIf for DummyConsole {
     fn write_data(_bytes: &[u8]) {
         unimplemented!()
     }
@@ -57,29 +55,6 @@ impl ConsoleIf for DummyConsole {
 impl crate::rtc::RtcIf for DummyRtc {
     fn offset_ns() -> u64 {
         0
-    }
-}
-
-#[impl_dev_interface]
-impl HwMemory for DummyMem {
-    fn ram_regions() -> &'static [MemRange] {
-        &[]
-    }
-
-    fn firmware_reserved_regions() -> &'static [ReservedRegion] {
-        &[]
-    }
-
-    fn mmio_regions() -> &'static [MemRange] {
-        &[]
-    }
-
-    fn p2v(_paddr: memaddr::PhysAddr) -> memaddr::VirtAddr {
-        va!(0)
-    }
-
-    fn v2p(_vaddr: memaddr::VirtAddr) -> memaddr::PhysAddr {
-        pa!(0)
     }
 }
 
@@ -119,16 +94,10 @@ impl SysCtrl for DummyPower {
 }
 
 #[impl_dev_interface]
-impl IntrManager for DummyIrq {
+impl crate::irq::IntrManagerIf for DummyIrq {
+    fn configure(_desc: crate::irq::IrqDesc) {}
+
     fn enable(_irq: usize, _enabled: bool) {}
-
-    fn reg_handler(_irq: usize, _handler: Handler) -> bool {
-        false
-    }
-
-    fn unreg_handler(_irq: usize) -> Option<Handler> {
-        None
-    }
 
     fn dispatch_irq(_irq: usize) -> Option<usize> {
         None

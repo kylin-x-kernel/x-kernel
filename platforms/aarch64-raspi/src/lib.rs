@@ -8,7 +8,6 @@
 extern crate kplat;
 mod boot;
 mod init;
-mod mem;
 mod power;
 #[cfg(feature = "smp")]
 mod mp;
@@ -19,7 +18,5 @@ struct MmioPlatformImpl;
 kplat::default_dma_if_impl!(DmaPlatformImpl);
 kplat::default_mmio_if_impl!(MmioPlatformImpl);
 
-kplat_aarch64_peripherals::console_if_impl!(ConsoleImpl);
-kplat_aarch64_peripherals::time_if_impl!(GlobalTimerImpl);
 #[cfg(feature = "irq")]
 kplat_aarch64_peripherals::irq_if_impl!(IntrManagerImpl);

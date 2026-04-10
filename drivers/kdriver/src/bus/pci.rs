@@ -3,149 +3,53 @@
 // See LICENSES for license details.
 
 //! PCI bus probing and BAR configuration.
-use khal::mem::p2v;
 use pci::{
-    BarInfo, Cam, Command, ConfigurationAccess, DeviceFunction, HeaderType, MemoryBarType, MmioCam,
-    PciRangeAllocator, PciRoot,
+    Cam, HeaderType, PciBus, PciConfigSource, PciRangeAllocator, configure_device,
+    pci_bar_allocation_range,
 };
 
-use crate::{AllDevices, pci_config_space, pci_config_space_overridden, prelude::*};
-
-const PCI_BAR_NUM: u8 = 6;
-
-/// Configure PCI BARs and enable the device.
-fn config_pci_device<C: ConfigurationAccess>(
-    root: &mut PciRoot<C>,
-    bdf: DeviceFunction,
-    allocator: &mut Option<PciRangeAllocator>,
-) -> DriverResult {
-    let mut bar = 0;
-    while bar < PCI_BAR_NUM {
-        let info = match root.bar_info(bdf, bar).unwrap() {
-            Some(info) => info,
-            None => {
-                bar += 1;
-                continue;
-            }
-        };
-
-        if let BarInfo::Memory {
-            address_type,
-            address,
-            size,
-            ..
-        } = info
-        {
-            // if the BAR address is not assigned, call the allocator and assign it.
-            if size > 0 && address == 0 {
-                let new_addr = allocator
-                    .as_mut()
-                    .expect("No memory ranges available for PCI BARs!")
-                    .alloc_buf(size as _)
-                    .ok_or(DriverError::NoMemory)?;
-                if address_type == MemoryBarType::Width32 {
-                    root.set_bar_32(bdf, bar, new_addr as _);
-                } else if address_type == MemoryBarType::Width64 {
-                    root.set_bar_64(bdf, bar, new_addr);
-                }
-            }
-        }
-
-        // read the BAR info again after assignment.
-        let info = match root.bar_info(bdf, bar).unwrap() {
-            Some(info) => info,
-            None => {
-                bar += 1;
-                continue;
-            }
-        };
-        let takes_two = info.takes_two_entries();
-        match info {
-            BarInfo::IO { address, size } => {
-                if address > 0 && size > 0 {
-                    debug!("  BAR {}: IO  [{:#x}, {:#x})", bar, address, address + size);
-                }
-            }
-            BarInfo::Memory {
-                address_type,
-                prefetchable,
-                address,
-                size,
-            } => {
-                if address > 0 && size > 0 {
-                    debug!(
-                        "  BAR {}: MEM [{:#x}, {:#x}){}{}",
-                        bar,
-                        address,
-                        address + size,
-                        if address_type == MemoryBarType::Width64 {
-                            " 64bit"
-                        } else {
-                            ""
-                        },
-                        if prefetchable { " pref" } else { "" },
-                    );
-                }
-            }
-        }
-
-        bar += 1;
-        if takes_two {
-            bar += 1;
-        }
-    }
-
-    // Enable the device.
-    let (_status, cmd) = root.get_status_command(bdf);
-    root.set_command(
-        bdf,
-        cmd | Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
-    );
-    Ok(())
-}
+use crate::{AllDevices, prelude::*};
 
 impl AllDevices {
     /// Enumerate PCI devices and register matching drivers.
     pub(crate) fn probe_bus_devices(&mut self) {
-        let (pci_config_base, pci_bus_end) = pci_config_space();
-        info!(
-            "PCI config space: source={}, ecam={:#x}, bus_end={:#x}",
-            if pci_config_space_overridden() {
-                "runtime"
-            } else {
-                "static"
-            },
-            pci_config_base,
-            pci_bus_end
-        );
-        let base_vaddr = p2v((pci_config_base as usize).into());
-        let mut root = {
-            #[cfg(feature = "pci-mmio")]
-            {
-                let cam = unsafe { MmioCam::new(base_vaddr.as_mut_ptr(), Cam::MmioCam) };
-                PciRoot::new(cam)
-            }
-            #[cfg(not(feature = "pci-mmio"))]
-            {
-                let cam = unsafe { MmioCam::new(base_vaddr.as_mut_ptr(), Cam::Ecam) };
-                PciRoot::new(cam)
+        #[cfg(feature = "pci-mmio")]
+        let cam_kind = Cam::MmioCam;
+        #[cfg(not(feature = "pci-mmio"))]
+        let cam_kind = Cam::Ecam;
+        let mut bus = match PciBus::new(cam_kind) {
+            Ok(bus) => bus,
+            Err(err) => {
+                error!("failed to initialize PCI bus: {:?}", err);
+                return;
             }
         };
+        info!(
+            "PCI config space: source={}, ecam={:#x}, bus_end={:#x}",
+            match bus.source() {
+                PciConfigSource::RuntimeOverride => "runtime-override",
+                PciConfigSource::DeviceTree => "device-tree",
+                PciConfigSource::Static => "static",
+            },
+            bus.config_base(),
+            bus.bus_end()
+        );
 
         // PCI 32-bit MMIO space
-        let mut allocator = kbuild_config::PCI_RANGES
-            .get(1)
-            .map(|range| PciRangeAllocator::new(range.0, range.1));
+        let mut allocator =
+            pci_bar_allocation_range().map(|(start, len, _)| PciRangeAllocator::new(start, len));
 
+        let pci_bus_end = bus.bus_end();
+        let (root, config) = bus.parts_mut();
         for bus in 0..=pci_bus_end {
             for (bdf, dev_info) in root.enumerate_bus(bus) {
                 debug!("PCI {bdf}: {dev_info}");
                 if dev_info.header_type != HeaderType::Standard {
                     continue;
                 }
-                match config_pci_device(&mut root, bdf, &mut allocator) {
+                match configure_device(root, bdf, &mut allocator) {
                     Ok(_) => for_each_drivers!(type Driver, {
-                        if let Some(dev) = Driver::probe_pci(&mut root, bdf, &dev_info) {
+                        if let Some(dev) = Driver::probe_pci(root, config, bdf, &dev_info) {
                             info!(
                                 "registered a new {:?} device at {}: {:?}",
                                 dev.device_kind(),
@@ -156,7 +60,7 @@ impl AllDevices {
                             continue; // skip to the next device
                         }
                     }),
-                    Err(e) => warn!("failed to enable PCI device at {bdf}({dev_info}): {e:?}"),
+                    Err(e) => warn!("failed to enable PCI device at {bdf}({dev_info}): {:?}", e),
                 }
             }
         }

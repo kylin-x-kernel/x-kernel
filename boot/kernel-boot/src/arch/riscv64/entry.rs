@@ -127,6 +127,11 @@ pub unsafe extern "C" fn __primary_switched(
     }
 
     kaddr_layout::set_kimage_voffset(kimage_voffset);
+    // Keep the linear-map console handoff in Rust after BSS is cleared and the
+    // runtime kimage offset is established. Do not add boot-console logging in
+    // the init_mmu() -> __primary_switched() window unless this activation is
+    // moved earlier again.
+    super::serial::activate_linear_map();
 
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
     unsafe {
@@ -135,6 +140,11 @@ pub unsafe extern "C" fn __primary_switched(
             .with_kernel_load_paddr(kernel_load_paddr)
             .with_phys_virt_offset(PAGE_OFFSET)
             .with_dtb(dtb_paddr)
+            .with_boot_console_mmio(
+                kbuild_config::BOOT_CONSOLE_ADDR,
+                0x1000,
+                PAGE_OFFSET + kbuild_config::BOOT_CONSOLE_ADDR,
+            )
             .with_cpu_id(cpu_id)
             .with_cpu_count(CPU_NUM);
     }

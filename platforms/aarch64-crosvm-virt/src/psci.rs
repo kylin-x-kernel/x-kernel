@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! PSCI wrappers and KVM guard-granule helpers.
-use kplat::dma::PlatformDmaIf;
+use kplat::{dma::PlatformDmaIf, mmio::PlatformMmioIf};
 use ktypes::Once;
 pub static GUARD_GRANULE: Once<usize> = Once::new();
 const ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID: u32 =
@@ -68,6 +68,7 @@ pub fn do_xmap_granules(phys_addr: usize, size: usize) {
     assert_eq!(ret, nr_granules);
 }
 struct DmaPlatformImpl;
+struct MmioPlatformImpl;
 #[impl_dev_interface]
 impl PlatformDmaIf for DmaPlatformImpl {
     fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
@@ -77,6 +78,14 @@ impl PlatformDmaIf for DmaPlatformImpl {
 
     fn release(paddr: usize, size: usize) -> kerrno::KResult {
         dma_unshare_pages(paddr, size);
+        Ok(())
+    }
+}
+
+#[impl_dev_interface]
+impl PlatformMmioIf for MmioPlatformImpl {
+    fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
+        do_xmap_granules(paddr, size);
         Ok(())
     }
 }

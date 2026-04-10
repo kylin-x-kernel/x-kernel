@@ -55,6 +55,7 @@ pub fn build_boot_info(
         .with_protocol_info_addr(protocol_info_addr)
         .with_kernel_load_paddr(kernel_load_paddr)
         .with_phys_virt_offset(PAGE_OFFSET)
+        .with_boot_console_ioport(kbuild_config::BOOT_CONSOLE_ADDR as u16)
         .with_cpu_id(cpu_id)
         .with_cpu_count(cpu_count)
 }

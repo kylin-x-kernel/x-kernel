@@ -17,6 +17,7 @@ lazyinit = "0.2"
 heapless = "0.9"
 ktypes = { workspace = true }
 kplat = { workspace = true }
+khal = { workspace = true }
 kbuild_config = { workspace = true }
 kaddr_layout = { workspace = true }
 boot_info = { workspace = true }

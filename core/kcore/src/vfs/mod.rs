@@ -83,7 +83,7 @@ pub mod tests_vfs {
         assert_eq!(stat.fs_type, 0x1234);
         assert_eq!(stat.block_size, 512);
         assert_eq!(stat.blocks, 100);
-        assert_eq!(stat.name_length, fs_ng_vfs::path::MAX_NAME_LEN as _);
+        assert_eq!(stat.name_length, fs_ng_vfs::path::MAX_NAME_LEN as u32);
     }
 
     #[def_test]

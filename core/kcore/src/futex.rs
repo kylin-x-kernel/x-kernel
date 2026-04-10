@@ -30,6 +30,7 @@ use memspace::{
     AddrSpace,
     backend::{Backend, SharedPages},
 };
+use memspace_file::FileBackend;
 
 use crate::task::AsThread;
 
@@ -137,7 +138,15 @@ impl FutexKey {
                         region: Ok(Arc::downgrade(backend.pages())),
                     };
                 }
-                Backend::File(file) => {
+                _ if area
+                    .backend()
+                    .downcast_dynamic_ref::<FileBackend>()
+                    .is_some() =>
+                {
+                    let file = area
+                        .backend()
+                        .downcast_dynamic_ref::<FileBackend>()
+                        .expect("checked above");
                     return Self::Shared {
                         offset: address - area.start().as_usize(),
                         region: Err(file.futex_handle()),

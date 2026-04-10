@@ -4,19 +4,45 @@
 
 //! Platform initialization hooks for x86_64-qemu-virt.
 
-use kbuild_config::{TIMER_FREQUENCY_HZ, TIMER_IRQ};
+use kbuild_config::TIMER_FREQUENCY_HZ;
+use khal::mem::pa;
 use kplat::boot::{BootHandler, BootInfo};
+
+fn io_apic_paddr_from_firmware_or_fallback() -> khal::mem::PhysAddr {
+    ::acpi::find_apic_from_init()
+        .and_then(|info| info.io_apic_address)
+        .map(|addr| pa!(addr))
+        .unwrap_or_else(|| {
+            warn!("ACPI MADT IOAPIC not found, fallback to static IOAPIC base");
+            pa!(0xFEC0_0000)
+        })
+}
+
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
-    fn early_init(boot_info: &BootInfo) {
-        x86_peripherals::ns16550::init();
+    fn prepare_boot_memory(boot_info: &BootInfo) {
+        x86_peripherals::bootmem::init_ap_trampoline_page(boot_info);
+    }
+
+    fn firmware_init(_boot_info: &BootInfo) {}
+
+    fn early_driver_init() {
         timer_driver::x86_lapic_tsc::early_init(
-            timer_driver::x86_lapic_tsc::TimerConfig::platform_static(
-                TIMER_IRQ,
-                TIMER_FREQUENCY_HZ as u64,
-            ),
+            timer_driver::x86_lapic_tsc::TimerConfig::platform_static(TIMER_FREQUENCY_HZ as u64),
         );
+        kernel_boot::bootln!("timer init");
+        console_driver::init(console_driver::ConsoleConfig::ioport(
+            console_driver::boot_console_io_port(),
+            Some(
+                khal::irq::IrqDesc::new(4, khal::irq::IrqTrigger::EdgeRising)
+                    .with_source(khal::irq::IrqSource::PlatformStatic)
+                    .with_controller(khal::irq::IrqControllerKind::IoApic)
+                    .with_domain(khal::irq::IO_APIC_DOMAIN),
+            ),
+            console_driver::ConsoleSource::PlatformStatic,
+        ));
+        kernel_boot::bootln!("console driver init");
         #[cfg(feature = "rtc")]
         rtc_driver::init(
             rtc_driver::RtcConfig::platform(
@@ -25,22 +51,14 @@ impl BootHandler for BootHandlerImpl {
             ),
             timer_driver::x86_lapic_tsc::t2ns(timer_driver::x86_lapic_tsc::now_ticks()),
         );
-        x86_peripherals::bootmem::init_ap_trampoline_page(boot_info);
-        crate::mem::init(boot_info);
+        kernel_boot::bootln!("rtc init");
         crate::acpi::init();
+        kernel_boot::bootln!("acpi init");
     }
 
-    #[cfg(feature = "smp")]
-    fn early_init_ap(_cpu_id: usize) {}
-
     fn final_init(_boot_info: &BootInfo) {
-        let io_apic_paddr = ::acpi::find_io_apic_from_init()
-            .map(|entry| kplat::memory::pa!(entry.address as usize))
-            .unwrap_or_else(|| {
-                warn!("ACPI MADT IOAPIC not found, fallback to static IOAPIC base");
-                kplat::memory::pa!(0xFEC0_0000)
-            });
-        x86_apic::init_primary(io_apic_paddr);
+        x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback());
+        console_driver::register_input_irq_handler();
         timer_driver::x86_lapic_tsc::init_primary();
     }
 

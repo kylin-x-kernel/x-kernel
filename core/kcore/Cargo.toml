@@ -18,6 +18,7 @@ khal.workspace = true
 kio.workspace = true
 klogger.workspace = true
 memspace.workspace = true
+memspace_file.workspace = true
 kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true

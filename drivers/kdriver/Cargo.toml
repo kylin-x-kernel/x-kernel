@@ -11,7 +11,7 @@ documentation.workspace = true
 
 [features]
 bus-mmio = []
-bus-pci = ["dep:pci", "dep:khal"]
+bus-pci = ["dep:pci", "dep:khal", "dep:memspace"]
 pci-mmio = ["bus-pci"]
 net = ["dep:net"]
 block = ["dep:block"]
@@ -24,7 +24,7 @@ sev = ["pci-mmio", "kdma/sev", "dep:hashbrown", "dep:ksync"]
 dma-trace = ["kdma/dma-trace"]
 
 # Enabled by features `virtio-*`
-virtio = ["dep:virtio", "dep:kalloc", "dep:khal"]
+virtio = ["dep:virtio", "dep:kalloc", "dep:khal", "dep:memspace"]
 
 virtio-blk = ["block", "virtio", "virtio/block"]
 virtio-net = ["net", "virtio", "virtio/net"]
@@ -51,6 +51,7 @@ vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
 kerrno = { workspace = true, optional = true }
 khal = { workspace = true, optional = true }
+memspace = { workspace = true, optional = true }
 cfg-if.workspace = true
 crate_interface.workspace = true
 log.workspace = true

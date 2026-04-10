@@ -11,7 +11,6 @@ extern crate kplat;
 extern crate kernel_boot;
 
 mod init;
-mod mem;
 mod power;
 
 struct DmaPlatformImpl;
@@ -19,10 +18,6 @@ struct MmioPlatformImpl;
 
 kplat::default_dma_if_impl!(DmaPlatformImpl);
 kplat::default_mmio_if_impl!(MmioPlatformImpl);
-
-aarch64_peripherals::console_if_impl!(ConsoleImpl);
-timer_driver::arm_generic_timer_if_impl!(GlobalTimerImpl);
-aarch64_peripherals::irq_if_impl!(IntrManagerImpl);
 #[cfg(feature = "pmu")]
 aarch64_peripherals::pmu_if_impl!(PerfMgrImpl);
 #[cfg(feature = "nmi")]

@@ -5,7 +5,7 @@
 //! Early boot page table setup and MMU initialisation for RISC-V Sv39.
 
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
-use kbuild_config::MMIO_RANGES;
+use kbuild_config::{BOOT_CONSOLE_ADDR, BOOT_CONSOLE_TYPE};
 use memaddr::PhysAddr;
 
 const PT_ENTRIES: usize = 512;
@@ -186,8 +186,15 @@ unsafe fn map_range_2m(va: usize, pa: usize, size: usize, flags: u64) {
 
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_mmio_linear_ranges() {
-    for &(start, size) in MMIO_RANGES {
-        unsafe { map_range_2m(PAGE_OFFSET + start, start, size, PTE_RW) };
+    if BOOT_CONSOLE_TYPE == "mmio" && BOOT_CONSOLE_ADDR != 0 {
+        unsafe {
+            map_range_2m(
+                PAGE_OFFSET + BOOT_CONSOLE_ADDR,
+                BOOT_CONSOLE_ADDR,
+                PAGE_SIZE,
+                PTE_RW,
+            )
+        };
     }
 }
 

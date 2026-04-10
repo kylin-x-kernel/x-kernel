@@ -38,8 +38,6 @@ ifneq ($(wildcard .config),)
       PLAT_FROM_CONFIG := riscv64-qemu-virt
     else ifeq ($(findstring PLATFORM_X86_64_QEMU_VIRT=y,$(CONFIG_VALUES)),PLATFORM_X86_64_QEMU_VIRT=y)
       PLAT_FROM_CONFIG := x86_64-qemu-virt
-    else ifeq ($(findstring PLATFORM_X86_CSV=y,$(CONFIG_VALUES)),PLATFORM_X86_CSV=y)
-      PLAT_FROM_CONFIG := x86-csv
     else ifeq ($(findstring PLATFORM_LOONGARCH64_QEMU_VIRT=y,$(CONFIG_VALUES)),PLATFORM_LOONGARCH64_QEMU_VIRT=y)
       PLAT_FROM_CONFIG := loongarch64-qemu-virt
     endif

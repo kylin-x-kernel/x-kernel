@@ -4,10 +4,12 @@
 
 //! Async helpers built on top of pollable I/O and IRQ wakers.
 
+use alloc::collections::{BTreeMap, btree_map::Entry};
 use core::{future::poll_fn, task::Poll};
 
 use kerrno::{KError, KResult};
-use kpoll::{IoEvents, Pollable};
+use kpoll::{IoEvents, PollSet, Pollable};
+use kspin::SpinNoIrq;
 
 /// A helper to wrap a synchronous non-blocking I/O function into an
 /// asynchronous function.
@@ -46,31 +48,23 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
 
 /// Registers a waker for the given IRQ number.
 pub fn register_irq_waker(irq: usize, waker: &core::task::Waker) {
-    use alloc::collections::{BTreeMap, btree_map::Entry};
-
-    use kpoll::PollSet;
-    use kspin::SpinNoIrq;
-
     static POLL_IRQ: SpinNoIrq<BTreeMap<usize, PollSet>> = SpinNoIrq::new(BTreeMap::new());
 
     fn irq_hook(irq: usize) {
-        if let Some(s) = POLL_IRQ.lock().get(&irq) {
-            s.wake();
+        if let Some(set) = POLL_IRQ.lock().get(&irq) {
+            set.wake();
         }
     }
 
     match POLL_IRQ.lock().entry(irq) {
         Entry::Vacant(e) => {
-            khal::irq::register_irq_hook(irq_hook);
+            assert!(
+                khal::irq::subscribe_wakeup(irq, irq_hook),
+                "failed to subscribe IRQ wakeup for irq={irq}"
+            );
             e.insert(PollSet::new())
         }
         Entry::Occupied(e) => e.into_mut(),
     }
     .register(waker);
-
-    // With MSI-X (edge-triggered), enabling the IRQ here is safe: an
-    // edge-triggered interrupt fires once per assertion and does not re-fire
-    // while the line is held. There is no risk of a spurious wakeup loop
-    // during the poll phase.
-    khal::irq::enable(irq, true);
 }

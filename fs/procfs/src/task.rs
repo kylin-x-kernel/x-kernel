@@ -27,6 +27,7 @@ use kprocess::Process;
 use ktask::{KtaskRef, WeakKtaskRef, current};
 use memaddr::VirtAddr;
 use memspace::backend::Backend;
+use memspace_file::{CowBackend, FileBackend};
 
 use crate::{hooks::ProcFsHooks, mounts::ProcMountIter};
 
@@ -163,29 +164,27 @@ fn backend_file_mapping(
     area_start: VirtAddr,
     backend: &Backend,
 ) -> Option<(u64, u64, Option<String>)> {
-    match backend {
-        Backend::Cow(cow) => {
-            let (file, file_start) = cow.file_mapping()?;
-            let rel = area_start.as_usize().saturating_sub(cow.start().as_usize()) as u64;
-            let inode = file.location().inode();
-            let path = file
-                .location()
-                .absolute_path()
-                .ok()
-                .map(|it| it.to_string());
-            Some((file_start + rel, inode, path))
-        }
-        Backend::File(file) => {
-            let inode = file.cache().location().inode();
-            let path = file
-                .cache()
-                .location()
-                .absolute_path()
-                .ok()
-                .map(|it| it.to_string());
-            Some((file.offset_for(area_start), inode, path))
-        }
-        _ => None,
+    if let Some(cow) = backend.downcast_dynamic_ref::<CowBackend>() {
+        let (file, file_start) = cow.file_mapping()?;
+        let rel = area_start.as_usize().saturating_sub(cow.start().as_usize()) as u64;
+        let inode = file.location().inode();
+        let path = file
+            .location()
+            .absolute_path()
+            .ok()
+            .map(|it| it.to_string());
+        Some((file_start + rel, inode, path))
+    } else if let Some(file) = backend.downcast_dynamic_ref::<FileBackend>() {
+        let inode = file.cache().location().inode();
+        let path = file
+            .cache()
+            .location()
+            .absolute_path()
+            .ok()
+            .map(|it| it.to_string());
+        Some((file.offset_for(area_start), inode, path))
+    } else {
+        None
     }
 }
 

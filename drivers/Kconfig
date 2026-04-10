@@ -31,27 +31,32 @@ config PCI_RANGES
     help
       Specify the address ranges for PCI devices.
 
-config MMIO_RANGES
-    rangetype "MMIO Address Ranges"
-    default [(usize, usize)]
+config BOOT_CONSOLE_TYPE
+    string "Boot console transport"
+    default "mmio" if ARCH_AARCH64
+    default "mmio" if ARCH_RISCV64
+    default "ioport" if ARCH_X86_64
     help
-      Specify the address ranges for Memory-Mapped I/O (MMIO) devices.
+      Select how the boot console is accessed before the runtime console is
+      initialized.
+      - "mmio": BOOT_CONSOLE_ADDR is a physical MMIO base address.
+      - "ioport": BOOT_CONSOLE_ADDR is a legacy x86 I/O port base.
+      Set BOOT_CONSOLE_ADDR to 0 to disable boot-stage console output.
+
+config BOOT_CONSOLE_ADDR
+    hex "Boot console base address"
+    default 0x0
+    default 0x3f8 if ARCH_X86_64
+    help
+      Define the boot console base address used only for boot-time diagnostics
+      before the runtime console driver is initialized.
+      For BOOT_CONSOLE_TYPE="mmio", this is a physical MMIO base address.
+      For BOOT_CONSOLE_TYPE="ioport", this is a legacy I/O port base.
 
 config RTC_PADDR
     hex "RTC Base Address"
     help
       Define the base address for the RTC (Real-Time Clock) device.
-
-config UART_PADDR
-    hex "UART Base Address"
-    help
-      Define the base address for the UART (Universal Asynchronous Receiver-Transmitter) device.
-
-config UART_IRQ
-    usize "UART IRQ Number"
-    default 33
-    help
-      Define the interrupt number for the UART device.
 
 menu "IRQ Configuration"
 
@@ -66,6 +71,7 @@ config PMU_IRQ
 
 config TIMER_IRQ
     usize "Timer IRQ Number"
+    depends on !ARCH_X86_64
     default 30
     help
       Define the interrupt number for the system timer.

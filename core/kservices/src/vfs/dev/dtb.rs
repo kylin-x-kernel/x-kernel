@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+use alloc::{boxed::Box, vec};
+use core::any::Any;
+
+use fs_ng_vfs::{NodeFlags, VfsResult};
+use kcore::vfs::DeviceOps;
+use lazyinit::LazyInit;
+use memaddr::PhysAddr;
+
+static DTB_SNAPSHOT: LazyInit<Box<[u8]>> = LazyInit::new();
+
+pub(crate) fn capture_snapshot() {
+    let Some((paddr, size)) = khal::firmware::dtb_capture_region() else {
+        return;
+    };
+    if DTB_SNAPSHOT.get().is_some() {
+        return;
+    }
+
+    let mut snapshot = vec![0u8; size];
+    let src = khal::mem::p2v(PhysAddr::from_usize(paddr)).as_usize() as *const u8;
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, snapshot.as_mut_ptr(), size);
+    }
+    DTB_SNAPSHOT.init_once(snapshot.into_boxed_slice());
+    info!("Captured DTB snapshot: paddr={:#x} size={:#x}", paddr, size);
+}
+
+pub(crate) fn snapshot_available() -> bool {
+    DTB_SNAPSHOT.get().is_some()
+}
+
+pub(crate) struct DtbSnapshot;
+
+impl DeviceOps for DtbSnapshot {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        let Some(snapshot) = DTB_SNAPSHOT.get() else {
+            return Ok(0);
+        };
+        let offset = offset as usize;
+        if offset >= snapshot.len() {
+            return Ok(0);
+        }
+        let len = buf.len().min(snapshot.len() - offset);
+        buf[..len].copy_from_slice(&snapshot[offset..offset + len]);
+        Ok(len)
+    }
+
+    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        Ok(0)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn flags(&self) -> NodeFlags {
+        NodeFlags::NON_CACHEABLE
+    }
+}

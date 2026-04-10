@@ -10,5 +10,6 @@ repository.workspace = true
 
 [dependencies]
 kaddr_layout = { workspace = true }
+kernel_boot = { workspace = true }
 kplat = { workspace = true }
 lazyinit.workspace = true

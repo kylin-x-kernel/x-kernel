@@ -8,7 +8,7 @@
 
 use driver_base::DeviceKind;
 #[cfg(feature = "bus-pci")]
-use pci::{ConfigurationAccess, DeviceFunction, DeviceFunctionInfo, PciRoot};
+use pci::{DeviceFunction, DeviceFunctionInfo, MmioCam, PciConfigAccess, PciRoot};
 
 pub use super::dummy::*;
 use crate::DeviceEnum;
@@ -30,8 +30,9 @@ pub trait DriverProbe {
 
     #[cfg(bus = "pci")]
     /// Probe a PCI device described by BDF and device info.
-    fn probe_pci<C: ConfigurationAccess>(
-        _root: &mut PciRoot<C>,
+    fn probe_pci(
+        _root: &mut PciRoot<MmioCam<'static>>,
+        _config: &mut PciConfigAccess,
         _bdf: DeviceFunction,
         _dev_info: &DeviceFunctionInfo,
     ) -> Option<DeviceEnum> {
@@ -171,8 +172,9 @@ cfg_if::cfg_if! {
         register_net_driver!(IxgbeDriver, net::ixgbe::IxgbeNic<IxgbeHalImpl, 1024, 1>);
         impl DriverProbe for IxgbeDriver {
             #[cfg(bus = "pci")]
-            fn probe_pci<C: pci::ConfigurationAccess>(
-                root: &mut pci::PciRoot<C>,
+            fn probe_pci(
+                root: &mut pci::PciRoot<pci::MmioCam<'static>>,
+                _config: &mut pci::PciConfigAccess,
                 bdf: pci::DeviceFunction,
                 dev_info: &pci::DeviceFunctionInfo,
             ) -> Option<crate::DeviceEnum> {

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::memory::PhysAddr;
+use khal::mem::PhysAddr;
 use loongArch64::ipi::{csr_mail_send, notify_cpu_single};
 
 use crate::config::plat::{PHYS_BOOT_OFFSET, PHYS_VIRT_OFFSET};

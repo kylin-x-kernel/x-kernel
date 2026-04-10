@@ -112,6 +112,16 @@ impl<'a> LinuxFdt<'a> {
         node::all_nodes(self)
     }
 
+    /// Finds a node by an absolute device-tree path.
+    pub fn find_node(&self, path: &str) -> Option<node::FdtNode<'_, 'a>> {
+        node::find_node(
+            &mut parsing::FdtData::new(self.structs_block()),
+            path,
+            self,
+            None,
+        )
+    }
+
     pub fn mem_reservations(&self) -> MemReserveIter<'a> {
         MemReserveIter {
             stream: FdtData::new(self.mem_rsvmap_block()),

@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! SMP bring-up helpers for Raspberry Pi.
-use kplat::memory::{PhysAddr, pa, p2v, va, v2p};
+use khal::mem::{p2v, v2p, PhysAddr, pa, va};
 static mut SECONDARY_STACK_TOP: usize = 0;
 const CPU_SPIN_TABLE: [PhysAddr; 4] = [pa!(0xd8), pa!(0xe0), pa!(0xe8), pa!(0xf0)];
 #[unsafe(naked)]

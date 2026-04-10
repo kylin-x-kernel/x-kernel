@@ -3,6 +3,10 @@ use std::{io::Result, path::Path};
 fn main() {
     println!("cargo:rerun-if-changed=linker.lds.S");
     println!("cargo:rerun-if-changed=build.rs");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
+    let target_config_path = workspace_root.join("target/kbuild/config.rs");
+    println!("cargo:rerun-if-changed={}", target_config_path.display());
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let platform = kbuild_config::PLATFORM;
     if platform != "unknown" {

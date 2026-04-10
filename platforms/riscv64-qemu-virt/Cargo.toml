@@ -19,6 +19,9 @@ kspin = { workspace = true }
 lazyinit = "0.2"
 log = "0.4"
 
+irq_driver = { workspace = true }
+khal = { workspace = true }
+console_driver = { workspace = true, features = ["ns16550-mmio"] }
 kernel_boot = { workspace = true }
 percpu = { workspace = true }
 kcpu = { workspace = true }
@@ -30,10 +33,9 @@ ktypes = { workspace = true }
 of = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
+memspace = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
-riscv = "0.14"
-riscv_plic = { version = "0.2" }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
 uart_16550 = "0.4.0"
 

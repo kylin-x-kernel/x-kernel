@@ -31,7 +31,7 @@
 #![feature(doc_cfg)]
 #![allow(rustdoc::broken_intra_doc_links)]
 
-use lazyinit::LazyInit;
+extern crate alloc;
 
 #[allow(unused_imports)]
 #[macro_use]
@@ -43,9 +43,10 @@ extern crate memaddr;
 
 // mod dummy;
 
+pub mod console;
+pub mod firmware;
 pub mod mem;
 pub mod percpu;
-pub mod rsvd_mem;
 pub mod rtc;
 pub mod time;
 
@@ -54,11 +55,7 @@ pub mod tls;
 
 pub mod irq;
 pub mod paging;
-
-/// Console input and output.
-pub mod console {
-    pub use kplat::io::{interrupt_id, read_data, write_data};
-}
+pub use firmware::cmdline;
 
 /// CPU power management.
 pub mod power {
@@ -98,9 +95,7 @@ pub mod context {
 
 pub use kcpu::{instrs as asm, userspace as uspace};
 #[cfg(feature = "smp")]
-pub use kplat::boot::{
-    early_init_ap as early_init_secondary, final_init_ap as final_init_secondary,
-};
+pub use kplat::boot::final_init_ap as final_init_secondary;
 
 #[cfg(feature = "nmi")]
 pub mod nmi {
@@ -120,62 +115,8 @@ pub fn boot_info(arg: usize) -> &'static boot_info::BootInfo {
     boot_info
 }
 
-const CMDLINE_BUF_SIZE: usize = 2048;
-static CMDLINE: LazyInit<([u8; CMDLINE_BUF_SIZE], usize)> = LazyInit::new();
-
-/// Returns the kernel command line from the unified boot handoff.
-///
-/// BootInfo-provided command line takes precedence. When it is absent,
-/// fall back to `/chosen/bootargs` from the device tree.
-pub fn cmdline() -> Option<&'static str> {
-    if let Some((buf, len)) = CMDLINE.get() {
-        if *len > 0 {
-            return core::str::from_utf8(&buf[..*len]).ok();
-        }
-        return None;
-    }
-    of::chosen_bootargs()
-}
-
-/// Initializes the platform from the unified boot handoff payload.
-/// This function should be called as early as possible.
-pub fn early_init(boot_info: &boot_info::BootInfo) {
-    let dtb_vaddr = if boot_info.dtb_addr != 0 {
-        Some(mem::p2v(boot_info.dtb_addr.into()).as_usize() as *const u8)
-    } else {
-        None
-    };
-    if let Some(ptr) = dtb_vaddr {
-        let _ = unsafe { of::init_device_tree_ptr(ptr) };
-        info!("device tree initialized");
-        if let Some(model) = of::root_model() {
-            info!("of root model: {model}");
-        }
-        if let Some(compatible) = of::root_compatible() {
-            info!("of root compatible: {compatible}");
-        }
-        if let Some(bootargs) = of::chosen_bootargs() {
-            info!("of chosen bootargs: {bootargs}");
-        }
-    } else if boot_info.rsdp_addr != 0 {
-        let _ = acpi::init(boot_info.rsdp_addr);
-    }
-    let mut cmdline_buf = [0; CMDLINE_BUF_SIZE];
-    let cmdline_len = if let Some(cmdline) = boot_info.cmdline() {
-        let bytes = cmdline.as_bytes();
-        let len = bytes.len().min(CMDLINE_BUF_SIZE);
-        cmdline_buf[..len].copy_from_slice(&bytes[..len]);
-        len
-    } else if let Some(cmdline) = of::chosen_bootargs() {
-        let bytes = cmdline.as_bytes();
-        let len = bytes.len().min(CMDLINE_BUF_SIZE);
-        cmdline_buf[..len].copy_from_slice(&bytes[..len]);
-        len
-    } else {
-        0
-    };
-    CMDLINE.init_once((cmdline_buf, cmdline_len));
-    kplat::boot::early_init(boot_info);
+pub fn early_driver_init() {
+    kplat::boot::early_driver_init();
 }
 
 /// Completes platform initialization from the unified boot handoff payload.

@@ -53,7 +53,7 @@ fn init_common() {
                 // Strong rendezvous: MUST wait until all CPUs are in NMI.
                 rv::wait_all_arrived_strong();
 
-                kplat::kprint_atomic!(
+                khal::kprint_atomic!(
                     "[watchdog] failure detected on cpu {}, failed_task={:?}, arrived_mask={:#x}",
                     this_cpu,
                     fail_name,

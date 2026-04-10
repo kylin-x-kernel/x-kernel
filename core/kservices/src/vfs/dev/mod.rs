@@ -7,6 +7,7 @@
 mod csv_guest;
 #[cfg(all(feature = "dice", target_os = "none"))]
 mod dice;
+mod dtb;
 #[cfg(feature = "input")]
 mod event;
 mod fb;
@@ -42,6 +43,10 @@ pub(crate) fn new_devfs() -> Filesystem {
         ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME,
         builder,
     )
+}
+
+pub(crate) fn capture_firmware_dtb_snapshot() {
+    dtb::capture_snapshot();
 }
 
 /// /dev/null device - discards all writes and returns empty on reads
@@ -453,6 +458,18 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(csv_guest::CsvGuestDevice::new()),
         ),
     );
+
+    if dtb::snapshot_available() {
+        root.add(
+            "firmware-dtb",
+            Device::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(30, 2),
+                Arc::new(dtb::DtbSnapshot),
+            ),
+        );
+    }
 
     SimpleDir::new_maker(fs, Arc::new(root))
 }

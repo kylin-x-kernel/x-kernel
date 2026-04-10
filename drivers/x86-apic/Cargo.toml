@@ -1,6 +1,6 @@
 [package]
 name = "x86-apic"
-description = "x86 APIC and LAPIC timer drivers"
+description = "x86 APIC backend shared by IRQ and timer drivers"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -16,6 +16,7 @@ acpi = { workspace = true }
 kplat = { workspace = true }
 kspin = { workspace = true }
 memspace = { workspace = true }
+memaddr = { workspace = true }
 log = "0.4"
 lazyinit = "0.2"
 

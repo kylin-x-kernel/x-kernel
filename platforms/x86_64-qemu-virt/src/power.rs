@@ -11,16 +11,16 @@ struct PowerImpl;
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
     fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
-        use kplat::memory::pa;
+        use khal::mem::pa;
         crate::mp::start_secondary_cpu(cpu_id, pa!(stack_top_paddr))
     }
 
     fn shutdown() -> ! {
         info!("Shutting down...");
         if cfg!(feature = "reboot-on-system-off") {
-            kplat::kprintln!("System will reboot, press any key to continue ...");
-            while x86_peripherals::ns16550::getchar().is_none() {}
-            kplat::kprintln!("Rebooting ...");
+            khal::kprintln!("System will reboot, press any key to continue ...");
+            while console_driver::getchar().is_none() {}
+            khal::kprintln!("Rebooting ...");
             unsafe { PortWriteOnly::new(0x64).write(0xfeu8) };
         } else {
             unsafe { PortWriteOnly::new(0x604).write(0x2000u16) };

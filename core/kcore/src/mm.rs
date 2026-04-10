@@ -21,7 +21,8 @@ use kspin::IrqSave;
 use ksync::Mutex;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
-use memspace::{AddrSpace, backend::Backend};
+use memspace::AddrSpace;
+use memspace_file::{new_alloc, new_cow};
 use osvm::{MemError, MemResult, VirtMemIo};
 use ouroboros::self_referencing;
 
@@ -116,7 +117,7 @@ fn map_elf<'a>(
 
         // Note that `offset` might not be aligned to 4K here, and it's
         // backend's responsibility to properly dispatch_irq it.
-        let backend = Backend::new_cow(
+        let backend = new_cow(
             seg_start,
             PageSize::Size4K,
             FileBackend::Cached(cache.clone()),
@@ -325,7 +326,7 @@ pub fn load_user_app(
         ustack_size,
         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
         false,
-        Backend::new_alloc(ustack_start, PageSize::Size4K),
+        new_alloc(ustack_start, PageSize::Size4K),
     )?;
 
     let stack_data = app_stack_region(args, envs, &auxv, ustack_top.into());
@@ -345,7 +346,7 @@ pub fn load_user_app(
         heap_size,
         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
         true,
-        Backend::new_alloc(heap_start, PageSize::Size4K),
+        new_alloc(heap_start, PageSize::Size4K),
     )?;
 
     Ok((entry, user_sp))

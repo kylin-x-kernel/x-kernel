@@ -19,6 +19,7 @@ cmos = ["dep:x86_rtc"]
 khal = { workspace = true }
 kplat = { workspace = true }
 of = { workspace = true }
+memspace = { workspace = true }
 riscv_goldfish = { version = "0.1", optional = true }
 arm_pl031 = { version = "0.2", optional = true }
 x86_rtc = { version = "0.1", optional = true }

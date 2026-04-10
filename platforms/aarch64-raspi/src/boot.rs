@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Boot-time page table setup and entry stubs for Raspberry Pi.
-use kplat::memory::{Aligned4K, pa};
+use khal::mem::{Aligned4K, pa};
 use page_table::{PageTableEntry as GenericPTE, PagingFlags as MappingFlags, aarch64::A64PageEntry as A64PTE};
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 #[unsafe(link_section = ".bss.stack")]

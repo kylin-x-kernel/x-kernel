@@ -17,7 +17,7 @@ mod iomap;
 use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
 use kerrno::LinuxResult;
 use khal::{
-    mem::{MemFlags, memory_regions, p2v},
+    mem::{MemFlags, MemoryRegion, memory_regions, p2v},
     paging::MappingFlags,
 };
 use kspin::SpinNoIrq;
@@ -54,26 +54,32 @@ fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
     flags
 }
 
+fn map_memory_region(vmspace: &mut AddrSpace, region: MemoryRegion) -> LinuxResult<()> {
+    let start = region.paddr.align_down_4k();
+    let end = (region.paddr + region.size).align_up_4k();
+    let target_va = match region.vaddr {
+        Some(v) => v.align_down_4k(),
+        None => p2v(start),
+    };
+    vmspace.map_linear(
+        target_va,
+        start,
+        end - start,
+        mem_to_mapping_flags(region.flags),
+    )?;
+    Ok(())
+}
+
 /// Creates a new address space for kernel itself.
 pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
     let mut vmspace = AddrSpace::new_empty(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
     for region in memory_regions() {
-        // mapped range should contain the whole region if it is not aligned.
-        let start = region.paddr.align_down_4k();
-        let end = (region.paddr + region.size).align_up_4k();
-        // Kernel-image sections store their linked virtual address in `vaddr`.
-        // Use it directly so they are mapped at KIMAGE_VADDR rather than the
-        // linear-map address (PAGE_OFFSET + PA).
-        let target_va = match region.vaddr {
-            Some(v) => v.align_down_4k(),
-            None => p2v(start),
-        };
-        vmspace.map_linear(
-            target_va,
-            start,
-            end - start,
-            mem_to_mapping_flags(region.flags),
-        )?;
+        map_memory_region(&mut vmspace, region)?;
+    }
+    for region in device_regions() {
+        let mut mapped = MemoryRegion::new_mmio(region.paddr.as_usize(), region.size, region.name);
+        mapped.vaddr = region.vaddr;
+        map_memory_region(&mut vmspace, mapped)?;
     }
     Ok(vmspace)
 }

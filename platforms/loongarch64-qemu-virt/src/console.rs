@@ -2,15 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::{
-    io::ConsoleIf,
-    mem::{p2v, pa},
-};
+use khal::console::ConsoleIf;
+use kplat::mem::{p2v, pa};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use uart_16550::MmioSerialPort;
 
-use crate::config::devices::UART_PADDR;
+const UART_PADDR: usize = 0x1fe0_01e0;
+const UART_IRQ: usize = 10;
 static UART: LazyInit<SpinNoIrq<MmioSerialPort>> = LazyInit::new();
 pub(crate) fn early_init() {
     UART.init_once({
@@ -48,6 +47,6 @@ impl ConsoleIf for ConsoleImpl {
 
     #[cfg(feature = "irq")]
     fn interrupt_id() -> Option<usize> {
-        Some(crate::config::devices::UART_IRQ)
+        Some(UART_IRQ)
     }
 }

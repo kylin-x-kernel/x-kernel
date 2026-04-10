@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::interrupts::{Handler, HandlerTable, IntrManager, TargetCpu};
+use khal::irq::TargetCpu;
 use loongArch64::reg_handler::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
@@ -11,8 +11,6 @@ use loongArch64::reg_handler::{
 use crate::config::devices::{EIOINTC_IRQ, TIMER_IRQ};
 mod eiointc;
 mod pch_pic;
-pub const MAX_IRQ_COUNT: usize = 12;
-static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 pub(crate) fn init() {
     eiointc::init();
     pch_pic::init();
@@ -42,7 +40,9 @@ impl IrqType {
 }
 struct IntrManagerImpl;
 #[impl_dev_interface]
-impl IntrManager for IntrManagerImpl {
+impl khal::irq::IntrManagerIf for IntrManagerImpl {
+    fn configure(_desc: khal::irq::IrqDesc) {}
+
     fn enable(irq: usize, enabled: bool) {
         let irq = IrqType::new(irq);
         match irq {
@@ -67,21 +67,6 @@ impl IntrManager for IntrManagerImpl {
         }
     }
 
-    fn reg_handler(irq: usize, handler: Handler) -> bool {
-        if IRQ_HANDLER_TABLE.reg_handler_handler(irq, handler) {
-            Self::enable(irq, true);
-            return true;
-        }
-        warn!("reg_handler handler for IRQ {} failed", irq);
-        false
-    }
-
-    fn unreg_handler(irq: usize) -> Option<Handler> {
-        IRQ_HANDLER_TABLE
-            .unreg_handler_handler(irq)
-            .inspect(|_| Self::enable(irq, false))
-    }
-
     fn dispatch_irq(irq: usize) -> Option<usize> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
@@ -92,9 +77,6 @@ impl IntrManager for IntrManagerImpl {
             irq = IrqType::Ex(ex_irq);
         }
         trace!("IRQ {irq:?}");
-        if !IRQ_HANDLER_TABLE.dispatch_irq(irq.as_usize()) {
-            debug!("Undispatch_irqd IRQ {irq:?}");
-        }
         match irq {
             IrqType::Timer => {
                 ticlr::clear_timer_interrupt();

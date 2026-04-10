@@ -9,8 +9,9 @@
 use core::{mem, slice, str};
 
 use kaddr_layout::PAGE_OFFSET;
-use kplat::memory::MemRange;
 use lazyinit::LazyInit;
+
+type MemRange = (usize, usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcpiDesc {
@@ -73,6 +74,12 @@ pub struct McfgAllocation {
 pub struct MadtInfo {
     pub local_apic_address: u32,
     pub flags: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApicInfo {
+    pub local_apic_address: usize,
+    pub io_apic_address: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,7 +146,7 @@ pub fn find_mcfg_from_init() -> Option<McfgAllocation> {
 pub fn find_madt() -> Option<(MadtInfo, MadtEntryIter)> {
     let (table_addr, header) = find_table(*b"APIC")?;
     if header.length < (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32 {
-        kplat::kprintln!("ACPI: MADT too short at {:#x}", table_addr);
+        kernel_boot::bootln!("ACPI: MADT too short at {:#x}", table_addr);
         return None;
     }
     let madt_addr = table_addr + mem::size_of::<AcpiSdtHeader>();
@@ -166,7 +173,7 @@ pub fn find_madt_from_init() -> Option<(MadtInfo, MadtEntryIter)> {
 pub fn find_madt_from_rsdp(rsdp_addr: usize) -> Option<(MadtInfo, MadtEntryIter)> {
     let (table_addr, header) = find_table_from_rsdp(rsdp_addr, *b"APIC")?;
     if header.length < (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32 {
-        kplat::kprintln!("ACPI: MADT too short at {:#x}", table_addr);
+        kernel_boot::bootln!("ACPI: MADT too short at {:#x}", table_addr);
         return None;
     }
     let madt_addr = table_addr + mem::size_of::<AcpiSdtHeader>();
@@ -188,6 +195,18 @@ pub fn find_madt_from_rsdp(rsdp_addr: usize) -> Option<(MadtInfo, MadtEntryIter)
 
 pub fn find_local_apic_address_from_init() -> Option<usize> {
     find_madt_from_init().map(|(info, _)| info.local_apic_address as usize)
+}
+
+pub fn find_apic_from_init() -> Option<ApicInfo> {
+    let (info, entries) = find_madt_from_init()?;
+    let io_apic_address = entries.into_iter().find_map(|entry| match entry {
+        MadtEntry::IoApic(io_apic) => Some(io_apic.address as usize),
+        _ => None,
+    });
+    Some(ApicInfo {
+        local_apic_address: info.local_apic_address as usize,
+        io_apic_address,
+    })
 }
 
 pub fn find_io_apic_from_init() -> Option<IoApicEntry> {
@@ -222,7 +241,7 @@ pub fn find_mcfg(rsdp_addr: usize) -> Option<McfgAllocation> {
     let rsdp_revision = rsdp.revision;
     let rsdt_addr = rsdp.rsdt_addr;
     let xsdt_addr = rsdp.xsdt_addr;
-    kplat::kprintln!(
+    kernel_boot::bootln!(
         "ACPI: RSDP revision={} rsdt={:#x} xsdt={:#x}",
         rsdp_revision,
         rsdt_addr,
@@ -242,27 +261,27 @@ pub fn find_mcfg(rsdp_addr: usize) -> Option<McfgAllocation> {
 
 fn validate_rsdp(rsdp_addr: usize) -> Option<&'static Rsdp> {
     if rsdp_addr == 0 {
-        kplat::kprintln!("ACPI: missing RSDP address");
+        kernel_boot::bootln!("ACPI: missing RSDP address");
         return None;
     }
 
     let rsdp = ptr_from_addr::<Rsdp>(rsdp_addr);
     if rsdp.signature != *b"RSD PTR " {
-        kplat::kprintln!("ACPI: bad RSDP signature at {:#x}", rsdp_addr);
+        kernel_boot::bootln!("ACPI: bad RSDP signature at {:#x}", rsdp_addr);
         return None;
     }
     if !checksum_ok(bytes_from_addr(rsdp_addr, 20)) {
-        kplat::kprintln!("ACPI: bad RSDP v1 checksum at {:#x}", rsdp_addr);
+        kernel_boot::bootln!("ACPI: bad RSDP v1 checksum at {:#x}", rsdp_addr);
         return None;
     }
 
     if rsdp.revision >= 2 {
         if rsdp.length < mem::size_of::<Rsdp>() as u32 {
-            kplat::kprintln!("ACPI: short RSDP v2 length at {:#x}", rsdp_addr);
+            kernel_boot::bootln!("ACPI: short RSDP v2 length at {:#x}", rsdp_addr);
             return None;
         }
         if !checksum_ok(bytes_from_addr(rsdp_addr, rsdp.length as usize)) {
-            kplat::kprintln!("ACPI: bad RSDP v2 checksum at {:#x}", rsdp_addr);
+            kernel_boot::bootln!("ACPI: bad RSDP v2 checksum at {:#x}", rsdp_addr);
             return None;
         }
     }
@@ -280,14 +299,14 @@ fn find_table_xsdt(xsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
             entries_len,
         )
     };
-    kplat::kprintln!("ACPI: XSDT at {:#x} entries={}", xsdt_addr, entries_len);
+    kernel_boot::bootln!("ACPI: XSDT at {:#x} entries={}", xsdt_addr, entries_len);
     for entry in entries.iter().copied() {
         if has_signature(entry as usize, signature) {
-            kplat::kprintln!("ACPI: found MCFG at {:#x}", entry);
+            kernel_boot::bootln!("ACPI: found MCFG at {:#x}", entry);
             return Some(entry as usize);
         }
     }
-    kplat::kprintln!("ACPI: MCFG not present in XSDT");
+    kernel_boot::bootln!("ACPI: MCFG not present in XSDT");
     None
 }
 
@@ -301,14 +320,14 @@ fn find_table_rsdt(rsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
             entries_len,
         )
     };
-    kplat::kprintln!("ACPI: RSDT at {:#x} entries={}", rsdt_addr, entries_len);
+    kernel_boot::bootln!("ACPI: RSDT at {:#x} entries={}", rsdt_addr, entries_len);
     for entry in entries.iter().copied() {
         if has_signature(entry as usize, signature) {
-            kplat::kprintln!("ACPI: found MCFG at {:#x}", entry);
+            kernel_boot::bootln!("ACPI: found MCFG at {:#x}", entry);
             return Some(entry as usize);
         }
     }
-    kplat::kprintln!("ACPI: MCFG not present in RSDT");
+    kernel_boot::bootln!("ACPI: MCFG not present in RSDT");
     None
 }
 
@@ -327,7 +346,7 @@ impl Iterator for MadtEntryIter {
         while self.current + mem::size_of::<MadtEntryHeader>() <= self.end {
             let header = ptr_from_addr::<MadtEntryHeader>(self.current);
             if header.length < mem::size_of::<MadtEntryHeader>() as u8 {
-                kplat::kprintln!("ACPI: invalid MADT entry length {}", header.length);
+                kernel_boot::bootln!("ACPI: invalid MADT entry length {}", header.length);
                 return None;
             }
 
@@ -336,7 +355,10 @@ impl Iterator for MadtEntryIter {
             let entry_end = match entry_addr.checked_add(entry_len) {
                 Some(end) if end <= self.end => end,
                 _ => {
-                    kplat::kprintln!("ACPI: MADT entry at {:#x} exceeds table bounds", entry_addr);
+                    kernel_boot::bootln!(
+                        "ACPI: MADT entry at {:#x} exceeds table bounds",
+                        entry_addr
+                    );
                     return None;
                 }
             };
@@ -372,7 +394,7 @@ fn parse_mcfg(mcfg_addr: usize) -> Option<McfgAllocation> {
     let header = validate_sdt_header(mcfg_addr, Some(*b"MCFG"))?;
     let entries_base = mem::size_of::<AcpiSdtHeader>() + 8;
     if header.length < entries_base as u32 {
-        kplat::kprintln!("ACPI: MCFG too short at {:#x}", mcfg_addr);
+        kernel_boot::bootln!("ACPI: MCFG too short at {:#x}", mcfg_addr);
         return None;
     }
 
@@ -389,7 +411,7 @@ fn parse_mcfg(mcfg_addr: usize) -> Option<McfgAllocation> {
             start_bus: entry.start_bus,
             end_bus: entry.end_bus,
         };
-        kplat::kprintln!(
+        kernel_boot::bootln!(
             "ACPI: MCFG entry base={:#x} seg={} buses={:#x}..={:#x}",
             alloc.base_address,
             alloc.pci_segment,
@@ -402,7 +424,7 @@ fn parse_mcfg(mcfg_addr: usize) -> Option<McfgAllocation> {
     }
 
     if selected.is_none() {
-        kplat::kprintln!("ACPI: no usable MCFG segment 0 entry found");
+        kernel_boot::bootln!("ACPI: no usable MCFG segment 0 entry found");
     }
     selected
 }
@@ -417,17 +439,17 @@ fn validate_sdt_header(
 ) -> Option<AcpiSdtHeader> {
     let header = read_sdt_header(table_addr);
     if header.length < mem::size_of::<AcpiSdtHeader>() as u32 {
-        kplat::kprintln!("ACPI: short SDT length at {:#x}", table_addr);
+        kernel_boot::bootln!("ACPI: short SDT length at {:#x}", table_addr);
         return None;
     }
     if let Some(expected) = expected_signature
         && header.signature != expected
     {
-        kplat::kprintln!("ACPI: bad SDT signature at {:#x}", table_addr);
+        kernel_boot::bootln!("ACPI: bad SDT signature at {:#x}", table_addr);
         return None;
     }
     if !checksum_ok(sdt_bytes(table_addr, header.length)) {
-        kplat::kprintln!("ACPI: bad SDT checksum at {:#x}", table_addr);
+        kernel_boot::bootln!("ACPI: bad SDT checksum at {:#x}", table_addr);
         return None;
     }
     Some(header)

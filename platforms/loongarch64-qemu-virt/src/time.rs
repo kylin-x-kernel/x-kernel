@@ -11,12 +11,12 @@ pub(super) fn init_percpu() {
     tcfg::set_init_val(0);
     tcfg::set_periodic(false);
     tcfg::set_en(true);
-    kplat::interrupts::enable(crate::config::devices::TIMER_IRQ, true);
+    khal::irq::enable(crate::config::devices::TIMER_IRQ, true);
 }
 #[cfg(feature = "rtc")]
 fn init_rtc() {
     use chrono::{TimeZone, Timelike, Utc};
-    use kplat::memory::{PhysAddr, p2v, pa};
+    use khal::mem::{PhysAddr, p2v, pa};
     const SYS_TOY_READ0: usize = 0x2C;
     const SYS_TOY_READ1: usize = 0x30;
     const SYS_RTCCTRL: usize = 0x40;

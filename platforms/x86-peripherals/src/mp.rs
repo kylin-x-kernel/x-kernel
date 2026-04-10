@@ -6,9 +6,9 @@
 
 use core::time::Duration;
 
-use kplat::{
-    memory::{PAGE_SIZE_4K, PhysAddr, pa},
-    timer::spin_wait,
+use khal::{
+    mem::{PAGE_SIZE_4K, PhysAddr, p2v, pa, v2p},
+    time::spin_wait,
 };
 use x86_apic as apic;
 
@@ -26,7 +26,7 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
     }
 
     let start_page_paddr = ap_trampoline_page_paddr();
-    let start_page_ptr = kplat::memory::p2v(pa!(start_page_paddr)).as_mut_ptr();
+    let start_page_ptr = p2v(pa!(start_page_paddr)).as_mut_ptr();
     let start_page = unsafe { core::slice::from_raw_parts_mut(start_page_ptr, PAGE_SIZE_4K) };
     let image_base = ap_start as *const () as usize;
     let image_size = ap_end as *const () as usize - image_base;
@@ -46,7 +46,7 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
     let protected_entry_off =
         core::ptr::addr_of!(x86_ap_patch_protected_entry) as usize - image_base;
     let gdt_base_off = core::ptr::addr_of!(x86_ap_patch_gdt_base) as usize - image_base;
-    let ap_entry32_paddr = kplat::memory::v2p((ap_entry32 as *const () as usize).into()).as_usize();
+    let ap_entry32_paddr = v2p((ap_entry32 as *const () as usize).into()).as_usize();
 
     unsafe {
         start_page_ptr

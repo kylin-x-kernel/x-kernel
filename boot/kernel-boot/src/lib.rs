@@ -26,4 +26,24 @@ macro_rules! call_kernel_entry {
 
 pub mod arch;
 pub use boot_info as bootinfo;
+pub mod bootconsole;
+pub(crate) mod bootconsole_config;
 pub mod size_const;
+
+#[macro_export]
+macro_rules! bootlog {
+    ($($arg:tt)*) => {{
+        $crate::bootconsole::log(::core::format_args!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! bootln {
+    () => {{
+        $crate::bootconsole::write_str("\n");
+    }};
+    ($($arg:tt)*) => {{
+        $crate::bootconsole::log(::core::format_args!($($arg)*));
+        $crate::bootconsole::write_str("\n");
+    }};
+}

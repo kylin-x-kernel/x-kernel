@@ -153,5 +153,3 @@ extern crate loongarch64_qemu_virt;
 extern crate riscv64_qemu_virt;
 #[cfg(feature = "x86_64_qemu_virt")]
 extern crate x86_64_qemu_virt;
-#[cfg(feature = "x86_csv")]
-extern crate x86_csv;

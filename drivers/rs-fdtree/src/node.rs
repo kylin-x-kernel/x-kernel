@@ -64,6 +64,28 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         self.properties().find(|prop| prop.name == name)
     }
 
+    /// Returns the named property from the direct parent node if present.
+    pub fn parent_property(self, name: &str) -> Option<NodeProperty<'a>> {
+        let props = self.parent_props?;
+        let mut stream = FdtData::new(props);
+        let mut done = false;
+
+        core::iter::from_fn(move || {
+            if stream.is_empty() || done {
+                return None;
+            }
+
+            stream.skip_nops();
+            if stream.peek_u32()?.get() != FDT_PROP {
+                done = true;
+                return None;
+            }
+
+            Some(NodeProperty::parse(&mut stream, self.header))
+        })
+        .find(|prop| prop.name == name)
+    }
+
     /// Returns an iterator over all compatible strings, in firmware order.
     pub fn compatibles(self) -> impl Iterator<Item = &'a str> + 'b {
         let mut bytes = self
@@ -105,9 +127,11 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
             return None;
         }
 
+        stream.skip_nops();
         while stream.peek_u32()?.get() == FDT_END_NODE {
             parent_index = parent_index.saturating_sub(1);
             stream.skip(4);
+            stream.skip_nops();
         }
 
         if stream.peek_u32()?.get() == FDT_END {
@@ -128,8 +152,10 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
         parent_index += 1;
         parents[parent_index] = curr_node;
 
+        stream.skip_nops();
         while stream.peek_u32()?.get() == FDT_PROP {
             let _ = NodeProperty::parse(&mut stream, header);
+            stream.skip_nops();
         }
 
         Some(FdtNode {
@@ -323,9 +349,14 @@ pub(crate) fn find_node<'b, 'a: 'b>(
 
     while stream.peek_u32()?.get() == FDT_PROP {
         let _ = NodeProperty::parse(stream, header);
+        stream.skip_nops();
     }
 
-    while stream.peek_u32()?.get() == FDT_BEGIN_NODE {
+    loop {
+        stream.skip_nops();
+        if stream.peek_u32()?.get() != FDT_BEGIN_NODE {
+            break;
+        }
         if let Some(node) = find_node(stream, next_part, header, parent_props) {
             return Some(node);
         }
@@ -374,11 +405,17 @@ pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<
     let full_name_len = unit_name.len() + 1;
     skip_4_aligned(stream, full_name_len);
 
+    stream.skip_nops();
     while stream.peek_u32().unwrap().get() == FDT_PROP {
         NodeProperty::parse(stream, header);
+        stream.skip_nops();
     }
 
-    while stream.peek_u32().unwrap().get() == FDT_BEGIN_NODE {
+    loop {
+        stream.skip_nops();
+        if stream.peek_u32().unwrap().get() != FDT_BEGIN_NODE {
+            break;
+        }
         skip_current_node(stream, header);
     }
 

@@ -8,7 +8,7 @@ struct PowerImpl;
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
     fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
-        use kplat::memory::{v2p, va};
+        use khal::mem::{v2p, va};
         if sbi_rt::probe_extension(sbi_rt::Hsm).is_unavailable() {
             warn!("HSM SBI extension is not supported for current SEE.");
             return;

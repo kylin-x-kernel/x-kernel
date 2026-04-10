@@ -21,10 +21,188 @@ pub enum FirmwareInitError {
 
 static FDT: LazyInit<LinuxFdt<'static>> = LazyInit::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptTrigger {
+    EdgeRising,
+    EdgeFalling,
+    LevelHigh,
+    LevelLow,
+    Unknown(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptControllerKind {
+    Gic,
+    Plic,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciHostCam {
+    Cam,
+    Ecam,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciHostInfo {
+    pub cam: PciHostCam,
+    pub ecam_base: u64,
+    pub ecam_size: u64,
+    pub bus_start: u8,
+    pub bus_end: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciRangeInfo {
+    pub cpu_base: u64,
+    pub size: u64,
+    pub prefetchable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptInfo {
+    pub irq: usize,
+    pub trigger: InterruptTrigger,
+    pub controller: InterruptControllerKind,
+}
+
 fn property_str<'b, 'a>(node: FdtNode<'b, 'a>, name: &str) -> Option<&'a str> {
     let prop = node.property(name)?;
     let cstr = CStr::from_bytes_until_nul(prop.value).ok()?;
     cstr.to_str().ok()
+}
+
+fn property_u32_cells<const N: usize>(
+    node: FdtNode<'static, 'static>,
+    name: &str,
+) -> Option<[u32; N]> {
+    let value = node.property(name)?.value;
+    if value.len() < N * 4 {
+        return None;
+    }
+
+    let mut cells = [0u32; N];
+    for (idx, chunk) in value.chunks_exact(4).take(N).enumerate() {
+        cells[idx] = u32::from_be_bytes(chunk.try_into().ok()?);
+    }
+    Some(cells)
+}
+
+pub fn property_u32(node: FdtNode<'static, 'static>, name: &str) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        node.property(name)?.value.get(..4)?.try_into().ok()?,
+    ))
+}
+
+fn parent_property_u32(node: FdtNode<'static, 'static>, name: &str) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        node.parent_property(name)?
+            .value
+            .get(..4)?
+            .try_into()
+            .ok()?,
+    ))
+}
+
+fn parse_cells_u64(cells: &[u32]) -> Option<u64> {
+    match cells {
+        [value] => Some(*value as u64),
+        [hi, lo] => Some(((*hi as u64) << 32) | (*lo as u64)),
+        _ => None,
+    }
+}
+
+fn parse_gic_trigger(flags: u32) -> InterruptTrigger {
+    match flags & 0xf {
+        1 => InterruptTrigger::EdgeRising,
+        2 => InterruptTrigger::EdgeFalling,
+        4 => InterruptTrigger::LevelHigh,
+        8 => InterruptTrigger::LevelLow,
+        other => InterruptTrigger::Unknown(other),
+    }
+}
+
+fn parse_gic_interrupt(cells: &[u32]) -> Option<InterruptInfo> {
+    match *cells {
+        [0, irq, flags, ..] => Some(InterruptInfo {
+            irq: 32 + irq as usize,
+            trigger: parse_gic_trigger(flags),
+            controller: InterruptControllerKind::Gic,
+        }),
+        [1, irq, flags, ..] => Some(InterruptInfo {
+            irq: 16 + irq as usize,
+            trigger: parse_gic_trigger(flags),
+            controller: InterruptControllerKind::Gic,
+        }),
+        [irq, ..] => Some(InterruptInfo {
+            irq: irq as usize,
+            trigger: InterruptTrigger::Unknown(0),
+            controller: InterruptControllerKind::Gic,
+        }),
+        _ => None,
+    }
+}
+
+fn parse_plic_interrupt(cells: &[u32]) -> Option<InterruptInfo> {
+    match *cells {
+        [irq, ..] => Some(InterruptInfo {
+            irq: irq as usize,
+            trigger: InterruptTrigger::Unknown(0),
+            controller: InterruptControllerKind::Plic,
+        }),
+        _ => None,
+    }
+}
+
+fn controller_kind(node: FdtNode<'static, 'static>) -> InterruptControllerKind {
+    if node.compatibles().any(|compatible| {
+        matches!(
+            compatible,
+            "arm,gic-400"
+                | "arm,cortex-a15-gic"
+                | "arm,cortex-a7-gic"
+                | "arm,gic-v2"
+                | "arm,gic-v3"
+                | "arm,gic-v4"
+        )
+    }) {
+        InterruptControllerKind::Gic
+    } else if node
+        .compatibles()
+        .any(|compatible| matches!(compatible, "sifive,plic-1.0.0" | "riscv,plic0"))
+    {
+        InterruptControllerKind::Plic
+    } else {
+        InterruptControllerKind::Unknown
+    }
+}
+
+fn parse_interrupt_by_controller(
+    controller: InterruptControllerKind,
+    cells: &[u32],
+) -> Option<InterruptInfo> {
+    match controller {
+        InterruptControllerKind::Gic => parse_gic_interrupt(cells),
+        InterruptControllerKind::Plic => parse_plic_interrupt(cells),
+        _ => None,
+    }
+}
+
+fn find_node_by_phandle(phandle: u32) -> Option<FdtNode<'static, 'static>> {
+    fdt()?.all_nodes().find(|node| {
+        property_u32(*node, "phandle").or_else(|| property_u32(*node, "linux,phandle"))
+            == Some(phandle)
+    })
+}
+
+fn interrupt_parent_node(node: FdtNode<'static, 'static>) -> Option<FdtNode<'static, 'static>> {
+    let phandle = property_u32(node, "interrupt-parent").or_else(|| {
+        node.parent_property("interrupt-parent")
+            .and_then(|prop| prop.value.get(..4))
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_be_bytes)
+    })?;
+    find_node_by_phandle(phandle)
 }
 
 pub fn fdt() -> Option<&'static LinuxFdt<'static>> {
@@ -75,6 +253,216 @@ pub fn find_compatible(compatible: &str) -> Option<FdtNode<'static, 'static>> {
     fdt()?
         .all_nodes()
         .find(|node| node.is_compatible(compatible))
+}
+
+pub fn generic_pci_host() -> Option<FdtNode<'static, 'static>> {
+    find_compatible("pci-host-ecam-generic").or_else(|| find_compatible("pci-host-cam-generic"))
+}
+
+pub fn find_node(path: &str) -> Option<FdtNode<'static, 'static>> {
+    fdt()?.find_node(path)
+}
+
+pub fn chosen_stdout_path() -> Option<&'static str> {
+    let node = find_node("/chosen")?;
+    property_str(node, "stdout-path").or_else(|| property_str(node, "linux,stdout-path"))
+}
+
+pub fn aliases_node() -> Option<FdtNode<'static, 'static>> {
+    find_node("/aliases")
+}
+
+pub fn resolve_node(path_or_alias: &str) -> Option<FdtNode<'static, 'static>> {
+    let key = path_or_alias.split(':').next()?;
+    if key.starts_with('/') {
+        return find_node(key);
+    }
+
+    let alias_value = property_str(aliases_node()?, key)?;
+    find_node(alias_value.split(':').next()?)
+}
+
+/// Returns the first interrupt specifier for a device node.
+pub fn first_interrupt_desc(node: FdtNode<'static, 'static>) -> Option<InterruptInfo> {
+    if let Some(parent) = interrupt_parent_node(node) {
+        let controller = controller_kind(parent);
+        if let Some(cells) = property_u32_cells::<3>(node, "interrupts")
+            && let Some(irq) = parse_interrupt_by_controller(controller, &cells)
+        {
+            return Some(irq);
+        }
+
+        if let Some(cells) = property_u32_cells::<1>(node, "interrupts")
+            && let Some(irq) = parse_interrupt_by_controller(controller, &cells)
+        {
+            return Some(irq);
+        }
+    }
+
+    if let Some(cells) = property_u32_cells::<4>(node, "interrupts-extended") {
+        let controller_node = find_node_by_phandle(cells[0])?;
+        let controller = controller_kind(controller_node);
+        let irq = parse_interrupt_by_controller(controller, &cells[1..])?;
+        return Some(irq);
+    }
+
+    if let Some(cells) = property_u32_cells::<2>(node, "interrupts-extended") {
+        let controller_node = find_node_by_phandle(cells[0])?;
+        let controller = controller_kind(controller_node);
+        let irq = parse_interrupt_by_controller(controller, &cells[1..])?;
+        return Some(irq);
+    }
+
+    None
+}
+
+pub fn generic_pci_host_info() -> Option<PciHostInfo> {
+    let node = generic_pci_host()?;
+    let cam = if node.is_compatible("pci-host-cam-generic") {
+        PciHostCam::Cam
+    } else {
+        PciHostCam::Ecam
+    };
+    let reg = node.reg()?.next()?;
+    let [bus_start, bus_end] = property_u32_cells::<2>(node, "bus-range").unwrap_or([0, 0xff]);
+    Some(PciHostInfo {
+        cam,
+        ecam_base: reg.starting_address as usize as u64,
+        ecam_size: reg.size as u64,
+        bus_start: bus_start as u8,
+        bus_end: bus_end as u8,
+    })
+}
+
+pub fn generic_pci_non_prefetchable_mem_range() -> Option<PciRangeInfo> {
+    const PCI_ADDR_SPACE_MASK: u32 = 0x0300_0000;
+    const PCI_ADDR_SPACE_MEM32: u32 = 0x0200_0000;
+    const PCI_ADDR_SPACE_MEM64: u32 = 0x0300_0000;
+    const PCI_ADDR_PREFETCH: u32 = 0x4000_0000;
+
+    let node = generic_pci_host()?;
+    let child = node.cell_sizes();
+    let parent_address_cells = parent_property_u32(node, "#address-cells").unwrap_or(2) as usize;
+    let total_cells = child.address_cells + parent_address_cells + child.size_cells;
+    let value = node.property("ranges")?.value;
+    if total_cells == 0 || value.len() < total_cells * 4 {
+        return None;
+    }
+
+    let mut preferred = None;
+    let mut fallback = None;
+    for chunk in value.chunks_exact(total_cells * 4) {
+        let mut cells = [0u32; 7];
+        if total_cells > cells.len() {
+            return None;
+        }
+        for (idx, word) in chunk.chunks_exact(4).enumerate() {
+            cells[idx] = u32::from_be_bytes(word.try_into().ok()?);
+        }
+        let flags = cells[0];
+        let space = flags & PCI_ADDR_SPACE_MASK;
+        if space != PCI_ADDR_SPACE_MEM32 && space != PCI_ADDR_SPACE_MEM64 {
+            continue;
+        }
+        let parent_start = child.address_cells;
+        let parent_end = parent_start + parent_address_cells;
+        let size_end = parent_end + child.size_cells;
+        let cpu_base = parse_cells_u64(&cells[parent_start..parent_end])?;
+        let size = parse_cells_u64(&cells[parent_end..size_end])?;
+        let range = PciRangeInfo {
+            cpu_base,
+            size,
+            prefetchable: (flags & PCI_ADDR_PREFETCH) != 0,
+        };
+        if !range.prefetchable {
+            preferred = Some(range);
+            break;
+        }
+        fallback = Some(range);
+    }
+
+    preferred.or(fallback)
+}
+
+pub fn generic_pci_legacy_interrupt(
+    bus: u8,
+    device: u8,
+    function: u8,
+    pin: u8,
+) -> Option<InterruptInfo> {
+    let node = generic_pci_host()?;
+    let child_address_cells = node.cell_sizes().address_cells;
+    let child_interrupt_cells = property_u32(node, "#interrupt-cells").unwrap_or(1) as usize;
+    let key_cells = child_address_cells + child_interrupt_cells;
+    if child_address_cells != 3 || child_interrupt_cells == 0 {
+        return None;
+    }
+
+    let mut key = [0u32; 4];
+    key[0] = ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8);
+    key[1] = 0;
+    key[2] = 0;
+    key[3] = pin as u32;
+
+    let mask_bytes = node.property("interrupt-map-mask")?.value;
+    if mask_bytes.len() < key_cells * 4 {
+        return None;
+    }
+    let mut mask = [0u32; 4];
+    for (idx, word) in mask_bytes.chunks_exact(4).take(key_cells).enumerate() {
+        mask[idx] = u32::from_be_bytes(word.try_into().ok()?);
+    }
+
+    let map = node.property("interrupt-map")?.value;
+    let mut offset = 0usize;
+    while offset + (key_cells + 1) * 4 <= map.len() {
+        let mut child = [0u32; 4];
+        for (idx, slot) in child.iter_mut().enumerate().take(key_cells) {
+            let start = offset + idx * 4;
+            *slot = u32::from_be_bytes(map[start..start + 4].try_into().ok()?);
+        }
+        offset += key_cells * 4;
+
+        let phandle = u32::from_be_bytes(map[offset..offset + 4].try_into().ok()?);
+        offset += 4;
+        let controller_node = find_node_by_phandle(phandle)?;
+        let parent_address_cells =
+            property_u32(controller_node, "#address-cells").unwrap_or(0) as usize;
+        let parent_interrupt_cells =
+            property_u32(controller_node, "#interrupt-cells").unwrap_or(0) as usize;
+        let parent_total_cells = parent_address_cells + parent_interrupt_cells;
+        if offset + parent_total_cells * 4 > map.len() {
+            return None;
+        }
+
+        let mut parent = [0u32; 4];
+        if parent_total_cells > parent.len() {
+            return None;
+        }
+        for (idx, slot) in parent.iter_mut().enumerate().take(parent_total_cells) {
+            let start = offset + idx * 4;
+            *slot = u32::from_be_bytes(map[start..start + 4].try_into().ok()?);
+        }
+        offset += parent_total_cells * 4;
+
+        let matched = child
+            .iter()
+            .zip(mask.iter())
+            .zip(key.iter())
+            .take(key_cells)
+            .all(|((&child, &mask), &key)| (child & mask) == (key & mask));
+        if !matched {
+            continue;
+        }
+
+        let controller = controller_kind(controller_node);
+        return parse_interrupt_by_controller(
+            controller,
+            &parent[parent_address_cells..parent_total_cells],
+        );
+    }
+
+    None
 }
 
 pub fn interrupt_controller() -> Option<InterruptController<'static, 'static>> {

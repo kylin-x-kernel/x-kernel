@@ -2,11 +2,11 @@
 .code32
 .macro SERIAL_PUTC imm
 1:
-    mov     dx, 0x3fd
+    mov     dx, {boot_console_lsr_port}
     in      al, dx
     test    al, 0x20
     jz      1b
-    mov     dx, 0x3f8
+    mov     dx, {boot_console_data_port}
     mov     al, \imm
     out     dx, al
 .endm
@@ -15,11 +15,11 @@
     push    rax
     push    rdx
 1:
-    mov     dx, 0x3fd
+    mov     dx, {boot_console_lsr_port}
     in      al, dx
     test    al, 0x20
     jz      1b
-    mov     dx, 0x3f8
+    mov     dx, {boot_console_data_port}
     mov     al, \imm
     out     dx, al
     pop     rdx

@@ -43,7 +43,6 @@ pub fn start_secondary_cpus(primary_cpu_id: usize) {
 pub fn rust_main_secondary(cpu_id: usize) -> ! {
     khal::percpu::init_secondary(cpu_id);
     kcpu::init_trap();
-    khal::early_init_secondary(cpu_id);
 
     ENTERED_CPUS.fetch_add(1, Ordering::Release);
     info!("Secondary CPU {cpu_id} started.");

@@ -23,6 +23,9 @@ const IA32_EFER_MSR: u32 = 0xC000_0080;
 const BOOT_STACK_SIZE: usize = 64 * 1024;
 const MAX_KERNEL_PT: usize = 128;
 const FINAL_PT_POOL_PAGES: usize = 5 + MAX_KERNEL_PT;
+const UART_DATA_OFFSET: u16 = 0;
+const UART_LSR_OFFSET: u16 = 5;
+const UART_LSR_THR_EMPTY: u8 = 1 << 5;
 
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
@@ -49,6 +52,8 @@ global_asm!(
     boot_stack_size = const BOOT_STACK_SIZE,
     mb_magic = const MAGIC,
     linux_magic = const X86_LINUX_BOOT_MAGIC,
+    boot_console_data_port = const boot_console_data_port(),
+    boot_console_lsr_port = const boot_console_lsr_port(),
     cr0 = const CR0,
     cr4 = const CR4,
     efer_msr = const IA32_EFER_MSR,
@@ -193,26 +198,44 @@ fn load_linuxboot_kernel(
 }
 
 fn serial_putc(byte: u8) {
+    if boot_console_io_port().is_none() {
+        return;
+    }
     unsafe {
         loop {
             let mut ready: u8;
             core::arch::asm!(
                 "in al, dx",
-                in("dx") 0x3fdu16,
+                in("dx") boot_console_lsr_port(),
                 out("al") ready,
                 options(nomem, nostack, preserves_flags)
             );
-            if ready & 0x20 != 0 {
+            if ready & UART_LSR_THR_EMPTY != 0 {
                 break;
             }
         }
         core::arch::asm!(
             "out dx, al",
-            in("dx") 0x3f8u16,
+            in("dx") boot_console_data_port(),
             in("al") byte,
             options(nomem, nostack, preserves_flags)
         );
     }
+}
+
+fn boot_console_io_port() -> Option<u16> {
+    if kbuild_config::BOOT_CONSOLE_TYPE != "ioport" || kbuild_config::BOOT_CONSOLE_ADDR == 0 {
+        return None;
+    }
+    Some(kbuild_config::BOOT_CONSOLE_ADDR as u16)
+}
+
+const fn boot_console_data_port() -> u16 {
+    kbuild_config::BOOT_CONSOLE_ADDR as u16 + UART_DATA_OFFSET
+}
+
+const fn boot_console_lsr_port() -> u16 {
+    boot_console_data_port() + UART_LSR_OFFSET
 }
 
 struct LoadedKernel {

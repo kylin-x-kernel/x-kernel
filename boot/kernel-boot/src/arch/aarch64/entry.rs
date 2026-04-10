@@ -25,7 +25,7 @@ use boot_info::{BootInfo, BootProtocol};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::BOOT_STACK_SIZE;
 
-use super::{el, mmu};
+use super::{el, mmu, serial};
 
 // Linux ARM64 Boot Protocol image flags.
 const FLAG_LE: usize = 0b0;
@@ -246,12 +246,24 @@ pub unsafe extern "C" fn __primary_switched(
             .with_kernel_load_paddr(kernel_load_paddr)
             .with_phys_virt_offset(PAGE_OFFSET)
             .with_dtb(dtb_paddr)
+            .with_boot_console_mmio(
+                kbuild_config::BOOT_CONSOLE_ADDR,
+                0x1000,
+                serial::BOOT_UART_BOOT_VADDR,
+            )
             .with_cpu_id(cpu_id)
             .with_cpu_count(kbuild_config::CPU_NUM);
     }
-    super::serial::boot_print_str("[boot] Entered primary switched entry\n");
-    super::mmu::map_boot_linear_ram_from_dtb(dtb_paddr);
+    crate::bootln!(
+        "entered primary switched cpu={} dtb={:#x} kimage_voffset={:#x}",
+        cpu_id,
+        dtb_paddr,
+        kimage_voffset
+    );
+    super::mmu::extend_boot_linear_ram_from_dtb(dtb_paddr);
+    crate::bootln!("boot linear RAM map extended from DT");
     let boot_info_ptr = core::ptr::addr_of!(AARCH64_BOOT_INFO) as usize;
+    crate::bootln!("handoff to kruntime boot_info={boot_info_ptr:#x}");
     call_kernel_entry!(PRIMARY_KERNEL_ENTRY, boot_info_ptr)
 }
 

@@ -61,18 +61,5 @@ pci-ranges = [
     [0x7000_0000, 0x200_0000],         # 32-bit MMIO space
     #[0x80_0000_0000, 0x80_0000_0000],   # 64-bit MMIO space
 ]  							# [(uint, uint)]
-# 16650 UART Address
-uart-paddr = 0x3f8        # uint
-# UART IRQ number (SPI, 1)
-uart-irq = 32                # uint
-# Timer interrupt num (PPI, physical timer).
-timer-irq = 30                  # uint
 # IPI interrupt num
 ipi-irq = 1                   # uint
-
-# GIC V3 Addresses
-gicd-paddr = 0x3fff_0000     # uint
-gicr-paddr = 0x3ffb_0000     # uint
-
-# RTC (PL030) Address
-rtc-paddr = 0x2000          # uint

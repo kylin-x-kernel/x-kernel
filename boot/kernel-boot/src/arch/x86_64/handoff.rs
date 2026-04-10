@@ -109,6 +109,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
                 .with_protocol_info_addr(mbi)
                 .with_kernel_load_paddr(kernel_load_paddr)
                 .with_phys_virt_offset(PAGE_OFFSET)
+                .with_boot_console_ioport(kbuild_config::BOOT_CONSOLE_ADDR as u16)
                 .with_cpu_id(cpu_id)
                 .with_cpu_count(kbuild_config::CPU_NUM);
         }

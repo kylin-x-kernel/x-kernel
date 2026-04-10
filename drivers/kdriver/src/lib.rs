@@ -34,7 +34,7 @@ mod virtio;
 pub mod prelude;
 
 #[cfg(feature = "bus-pci")]
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+pub use pci::set_pci_config_space;
 
 #[allow(unused_imports)]
 use self::prelude::*;
@@ -46,36 +46,26 @@ pub use self::structs::DisplayDevice;
 pub use self::structs::NetDevice;
 pub use self::structs::{DeviceContainer, DeviceEnum};
 
-#[cfg(feature = "bus-pci")]
-static PCI_CONFIG_BASE_OVERRIDE: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "bus-pci")]
-static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);
-
-#[cfg(feature = "bus-pci")]
-pub fn set_pci_config_space(base: u64, bus_end: u8) {
-    PCI_CONFIG_BASE_OVERRIDE.store(base, Ordering::Relaxed);
-    PCI_BUS_END_OVERRIDE.store(bus_end as u32, Ordering::Relaxed);
-}
-
-#[cfg(feature = "bus-pci")]
-pub fn pci_config_space() -> (u64, u8) {
-    let base = PCI_CONFIG_BASE_OVERRIDE.load(Ordering::Relaxed);
-    let bus_end = PCI_BUS_END_OVERRIDE.load(Ordering::Relaxed);
-    if base != 0 && bus_end != u32::MAX {
-        (base, bus_end as u8)
-    } else {
-        (
-            kbuild_config::PCI_ECAM_BASE as u64,
-            kbuild_config::PCI_BUS_END as u8,
-        )
-    }
-}
-
-#[cfg(feature = "bus-pci")]
-pub fn pci_config_space_overridden() -> bool {
-    let base = PCI_CONFIG_BASE_OVERRIDE.load(Ordering::Relaxed);
-    let bus_end = PCI_BUS_END_OVERRIDE.load(Ordering::Relaxed);
-    base != 0 && bus_end != u32::MAX
+#[cfg(any(feature = "bus-pci", feature = "virtio"))]
+fn iomap_mmio(
+    paddr: usize,
+    size: usize,
+    name: &'static str,
+) -> DriverResult<core::ptr::NonNull<u8>> {
+    let vaddr = memspace::iomap_device(paddr.into(), size, name).map_err(|err| {
+        warn!(
+            "failed to iomap {name} at [PA:{:#x}, PA:{:#x}): {:?}",
+            paddr,
+            paddr.saturating_add(size),
+            err
+        );
+        match err {
+            memspace::IoMapError::NoMemory => DriverError::NoMemory,
+            memspace::IoMapError::InvalidRange => DriverError::InvalidInput,
+            _ => DriverError::Io,
+        }
+    })?;
+    core::ptr::NonNull::new(vaddr.as_mut_ptr()).ok_or(DriverError::BadState)
 }
 
 /// A structure that contains all device drivers, organized by their category.

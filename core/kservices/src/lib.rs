@@ -34,6 +34,7 @@ pub use unittest_task::{register_unittest_runtime, run_with_test_user_thread};
 /// Initializes VFS, /proc/interrupts accounting, and alarm task.
 pub fn init() {
     info!("Initialize VFS...");
+    vfs::dev::capture_firmware_dtb_snapshot();
     vfs::mount_all().expect("Failed to mount vfs");
 
     info!("Initialize /proc/interrupts...");

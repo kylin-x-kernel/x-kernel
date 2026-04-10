@@ -10,10 +10,7 @@ extern crate log;
 extern crate kplat;
 // Force-link kernel_boot so that _start and boot code are included in the final binary.
 extern crate kernel_boot;
-mod console;
 mod init;
-mod irq;
-mod mem;
 mod power;
 
 struct DmaPlatformImpl;
@@ -21,5 +18,3 @@ struct MmioPlatformImpl;
 
 kplat::default_dma_if_impl!(DmaPlatformImpl);
 kplat::default_mmio_if_impl!(MmioPlatformImpl);
-
-timer_driver::riscv_sbi_timer_if_impl!(GlobalTimerImpl);

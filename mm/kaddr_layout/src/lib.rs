@@ -64,6 +64,22 @@ pub const IOMAP_VADDR: usize = CURRENT_LAYOUT.iomap_vaddr;
 pub const IOMAP_VSIZE: usize = CURRENT_LAYOUT.iomap_vsize;
 pub const KIMAGE_VADDR: usize = CURRENT_LAYOUT.kimage_vaddr;
 pub const KIMAGE_VSIZE: usize = CURRENT_LAYOUT.kimage_vsize;
+pub const BOOT_IO_VADDR: usize = IOMAP_VADDR;
+pub const BOOT_IO_VSIZE: usize = IOMAP_VSIZE;
+/// Boot-only MMIO slots are sized to a 2 MiB block so the early page-table
+/// layout can reserve devices on a coarse, architecture-friendly boundary
+/// without encoding full physical addresses into virtual addresses.
+pub const BOOT_IO_SLOT_SIZE: usize = 0x20_0000;
+pub const BOOT_UART_SLOT: usize = 0;
+pub const BOOT_UART_SLOT_VADDR: usize = BOOT_IO_VADDR + BOOT_UART_SLOT * BOOT_IO_SLOT_SIZE;
+
+const fn is_power_of_two(value: usize) -> bool {
+    value != 0 && (value & (value - 1)) == 0
+}
+
+const _: () = assert!(is_power_of_two(BOOT_IO_SLOT_SIZE));
+const _: () = assert!(BOOT_IO_VSIZE == 0 || BOOT_IO_SLOT_SIZE <= BOOT_IO_VSIZE);
+const _: () = assert!(BOOT_IO_VSIZE == 0 || BOOT_UART_SLOT < (BOOT_IO_VSIZE / BOOT_IO_SLOT_SIZE));
 
 /// Runtime offset from physical kernel load address to the linked kernel-image
 /// virtual address.

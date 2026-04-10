@@ -5,7 +5,7 @@
 use core::{mem, ptr};
 
 use boot_info::{BootInfo, BootProtocol, LinuxBootParams, X86LinuxE820EntryType};
-use kplat::memory::ReservedKind;
+use khal::mem::ReservedKind;
 use ktypes::Once;
 use multiboot2::{BootInformation, BootInformationHeader, MemoryAreaType};
 

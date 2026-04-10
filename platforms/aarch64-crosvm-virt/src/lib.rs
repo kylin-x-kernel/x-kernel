@@ -8,13 +8,5 @@
 extern crate kplat;
 extern crate kernel_boot;
 mod init;
-mod mem;
 mod power;
 pub mod psci;
-struct MmioPlatformImpl;
-
-kplat::default_mmio_if_impl!(MmioPlatformImpl);
-
-aarch64_peripherals::ns16550_console_if_impl!(ConsoleImpl);
-timer_driver::arm_generic_timer_if_impl!(GlobalTimerImpl);
-aarch64_peripherals::irq_if_impl!(IntrManagerImpl);

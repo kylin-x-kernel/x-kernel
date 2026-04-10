@@ -12,16 +12,12 @@ extern crate kplat_macros;
 pub mod boot;
 pub mod cpu;
 pub mod dma;
-pub mod interrupts;
-pub mod io;
-pub mod memory;
 pub mod mmio;
 #[cfg(feature = "nmi")]
 pub mod nm_irq;
 #[cfg(feature = "pmu")]
 pub mod perf;
 pub mod sys;
-pub mod timer;
 
 pub use crate_interface::impl_interface as impl_dev_interface;
 pub use kerrno;

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::memory::VirtAddr;
+use khal::mem::VirtAddr;
 
 pub fn init_mapped(vaddr: VirtAddr, now_nanos: u64) {
     if vaddr.as_usize() == 0 {

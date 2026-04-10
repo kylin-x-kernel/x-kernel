@@ -25,6 +25,7 @@ use ktask::current;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::backend::{Backend, SharedPages};
+use memspace_file::{new_alloc, new_cow, new_file};
 use osvm::{load_vec, write_vm_mem};
 
 bitflags::bitflags! {
@@ -198,7 +199,7 @@ pub fn sys_mmap(
                 match file.backend()?.clone() {
                     FileBackend::Cached(cache) => {
                         // TODO(mivik): file mmap page size
-                        Backend::new_file(
+                        new_file(
                             start,
                             cache,
                             file.flags(),
@@ -213,7 +214,7 @@ pub fn sys_mmap(
                                     return Err(KError::NoSuchDevice);
                                 }
                                 DeviceMmap::ReadOnly => {
-                                    Backend::new_cow(start, page_size, backend, offset as u64, None)
+                                    new_cow(start, page_size, backend, offset as u64, None)
                                 }
                                 DeviceMmap::Physical(mut range) => {
                                     range.start += offset;
@@ -225,7 +226,7 @@ pub fn sys_mmap(
                                         start.as_usize() as isize - range.start.as_usize() as isize,
                                     )
                                 }
-                                DeviceMmap::Cache(cache) => Backend::new_file(
+                                DeviceMmap::Cache(cache) => new_file(
                                     start,
                                     cache,
                                     file.flags(),
@@ -235,7 +236,7 @@ pub fn sys_mmap(
                             }
                         } else {
                             // Preserve MAP_SHARED semantics for direct-opened regular files.
-                            Backend::new_file(
+                            new_file(
                                 start,
                                 CachedFile::get_or_create(loc.clone()),
                                 file.flags(),
@@ -253,9 +254,9 @@ pub fn sys_mmap(
             if let Some(file) = file {
                 // Private mapping from a file
                 let backend = file.inner().backend()?.clone();
-                Backend::new_cow(start, page_size, backend, offset as u64, None)
+                new_cow(start, page_size, backend, offset as u64, None)
             } else {
-                Backend::new_alloc(start, page_size)
+                new_alloc(start, page_size)
             }
         }
         _ => return Err(KError::InvalidInput),

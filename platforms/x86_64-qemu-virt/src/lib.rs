@@ -10,10 +10,10 @@
 extern crate log;
 #[macro_use]
 extern crate kplat;
+extern crate irq_driver as _;
 mod acpi;
 extern crate kernel_boot;
 mod init;
-mod mem;
 #[cfg(feature = "smp")]
 mod mp;
 mod power;
@@ -23,7 +23,3 @@ struct MmioPlatformImpl;
 
 kplat::default_dma_if_impl!(DmaPlatformImpl);
 kplat::default_mmio_if_impl!(MmioPlatformImpl);
-
-x86_peripherals::console_if_impl!(ConsoleImpl, irq = Some(4));
-timer_driver::x86_lapic_tsc_timer_if_impl!(GlobalTimerImpl);
-x86_apic::irq_if_impl!(IntrManagerImpl);

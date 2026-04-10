@@ -27,8 +27,10 @@ mod mp;
 mod dma_integration;
 mod init_setup;
 
+use boot_info::BootConsoleTransport;
 use kernel_boot::{PRIMARY_KERNEL_ENTRY, register_boot_init};
-use kplat::memory::MemFlags;
+use khal::mem::MemFlags;
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 #[cfg(feature = "smp")]
 pub use self::mp::rust_main_secondary;
@@ -117,6 +119,32 @@ fn is_init_ok() -> bool {
     INITED_CPUS.load(Ordering::Acquire) == kbuild_config::CPU_NUM
 }
 
+fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {
+    if boot_info.boot_console_transport != BootConsoleTransport::Mmio {
+        return;
+    }
+    if boot_info.boot_console_addr == 0
+        || boot_info.boot_console_vaddr == 0
+        || boot_info.boot_console_size == 0
+    {
+        return;
+    }
+
+    let paddr = PhysAddr::from_usize(boot_info.boot_console_addr);
+    let vaddr = VirtAddr::from_usize(boot_info.boot_console_vaddr);
+    assert_eq!(
+        paddr.align_offset_4k(),
+        vaddr.align_offset_4k(),
+        "boot console MMIO VA/PA offset mismatch"
+    );
+
+    let start = paddr.align_down_4k();
+    let size = (paddr.align_offset_4k() + boot_info.boot_console_size).align_up(PAGE_SIZE_4K);
+    let mapped = vaddr.align_down_4k();
+    memspace::register_fixed_device_region(start, size, "boot-uart", mapped)
+        .expect("failed to register boot console runtime region");
+}
+
 /// The main entry point of the runtime.
 ///
 /// It is called from the bootstrapping code in the specific platform crate (see
@@ -130,9 +158,18 @@ pub fn rust_main(arg: usize) -> ! {
     let cpu_id = boot_info.cpu_id;
 
     kaddr_layout::set_kimage_voffset(kaddr_layout::KIMAGE_VADDR - boot_info.kernel_load_paddr);
+    kernel_boot::bootln!("kruntime primary start cpu={} boot_info={arg:#x}", cpu_id);
+    khal::firmware::init(boot_info);
     khal::percpu::init_primary(cpu_id);
     kcpu::init_trap();
-    khal::early_init(boot_info);
+    khal::mem::init(boot_info);
+    kernel_boot::bootln!("kruntime memory regions ready");
+    init_allocator();
+    kernel_boot::bootln!("kruntime allocator ready");
+    register_boot_console_runtime_region(boot_info);
+    memspace::init_memory_management();
+    kernel_boot::bootln!("memory space map ready");
+    khal::early_driver_init();
 
     kprintln!("{}", LOGO);
     let build_machine = option_env!("KBUILD_BUILD_MACHINE").unwrap_or("unknown");
@@ -169,13 +206,6 @@ pub fn rust_main(arg: usize) -> ! {
     klogger::set_log_level(option_env!("K_LOG").unwrap_or("")); // no effect if set `log-level-*` features
     info!("Logging is enabled.");
     info!("Primary CPU {cpu_id} started, boot_info = {arg:#x}.");
-
-    khal::mem::init();
-    log_memory_regions();
-
-    init_allocator();
-    memspace::init_memory_management();
-    finish_allocator_init();
     {
         use core::ops::Range;
 
@@ -238,6 +268,8 @@ pub fn rust_main(arg: usize) -> ! {
     watchdog::init_primary();
 
     init_setup::init_cb();
+    finish_allocator_init();
+    log_memory_regions();
 
     info!("Primary CPU {cpu_id} init OK.");
     INITED_CPUS.fetch_add(1, Ordering::Release);
@@ -253,6 +285,48 @@ pub fn rust_main(arg: usize) -> ! {
 
 fn log_memory_regions() {
     use heapless::Vec;
+
+    fn log_region(region: &khal::mem::MemoryRegion) {
+        if let Some(vaddr) = region.vaddr {
+            info!(
+                "  [{:x?}, {:x?}) [VA:{:#x}, VA:{:#x}) {} ({:?})",
+                region.paddr,
+                region.paddr + region.size,
+                vaddr.as_usize(),
+                vaddr.as_usize() + region.size,
+                region.name,
+                region.flags
+            );
+        } else {
+            info!(
+                "  [{:x?}, {:x?}) {} ({:?})",
+                region.paddr,
+                region.paddr + region.size,
+                region.name,
+                region.flags
+            );
+        }
+    }
+
+    fn log_device_region(region: &memspace::DeviceRegion) {
+        if let Some(vaddr) = region.vaddr {
+            info!(
+                "  [PA:{:#x}, PA:{:#x}) [VA:{:#x}, VA:{:#x}) {}",
+                region.paddr.as_usize(),
+                region.paddr.as_usize() + region.size,
+                vaddr.as_usize(),
+                vaddr.as_usize() + region.size,
+                region.name,
+            );
+        } else {
+            info!(
+                "  [PA:{:#x}, PA:{:#x}) {}",
+                region.paddr.as_usize(),
+                region.paddr.as_usize() + region.size,
+                region.name,
+            );
+        }
+    }
 
     let mut summaries = Vec::<RegionLogSummary, MAX_REGION_LOG_SUMMARIES>::new();
     for region in khal::mem::memory_regions() {
@@ -290,13 +364,7 @@ fn log_memory_regions() {
         if should_summarize_region(summary) {
             continue;
         }
-        info!(
-            "  [{:x?}, {:x?}) {} ({:?})",
-            region.paddr,
-            region.paddr + region.size,
-            region.name,
-            region.flags
-        );
+        log_region(&region);
     }
 
     for summary in summaries {
@@ -312,6 +380,14 @@ fn log_memory_regions() {
             summary.last_end,
             summary.flags
         );
+    }
+
+    let device_regions = memspace::device_regions().collect::<Vec<_, MAX_REGION_LOG_SUMMARIES>>();
+    if !device_regions.is_empty() {
+        info!("Found runtime device/iomap regions:");
+        for region in device_regions {
+            log_device_region(&region);
+        }
     }
 }
 

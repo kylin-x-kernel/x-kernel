@@ -7,4 +7,4 @@ mod entry;
 pub use entry::_start_secondary;
 
 mod mmu;
-mod serial;
+pub(crate) mod serial;

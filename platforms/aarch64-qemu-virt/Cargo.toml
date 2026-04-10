@@ -12,13 +12,16 @@ repository.workspace = true
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["rtc_driver/pl031"]
 smp = ["kplat/smp"]
-nmi = ["aarch64-peripherals/nmi-pmu", "kplat/nmi", "pmu"]
+nmi = ["aarch64-peripherals/nmi-pmu", "irq_driver/nmi-pmu", "kplat/nmi", "pmu"]
 pmu = ["kplat/pmu"]
 
 [dependencies]
 log = "0.4"
 page_table = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false }
+console_driver = { workspace = true, features = ["pl011"] }
+irq_driver = { workspace = true }
+khal = { workspace = true }
 kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
@@ -28,6 +31,7 @@ of = { workspace = true }
 ktypes = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
+memspace = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

@@ -4,7 +4,7 @@
 
 use boot_info::BootInfo;
 use heapless::Vec;
-use kplat::memory::{MemRange, ReservedKind, ReservedRegion, ReservedSource, sub_ranges};
+use khal::mem::{MemRange, ReservedKind, ReservedRegion, ReservedSource, sub_ranges};
 use ktypes::Once;
 
 use crate::bootmem::{BootMemoryKind, for_each_memory_region};

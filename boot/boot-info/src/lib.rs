@@ -15,7 +15,7 @@ pub const BOOT_INFO_MAGIC: u64 = 0x424f_4f54_494e_464f;
 pub const X86_LINUX_BOOT_MAGIC: u32 = 0x584b_4c42;
 
 /// Current BootInfo structure version.
-pub const BOOT_INFO_VERSION: u32 = 1;
+pub const BOOT_INFO_VERSION: u32 = 2;
 pub const X86_LINUX_BOOT_E820_MAX_ENTRIES: usize = 128;
 const X86_LINUX_BOOT_LEGACY_CMDLINE_MAX: usize = 255;
 const X86_LINUX_BOOT_PARAMS_ACPI_RSDP_ADDR_OFFSET: usize = 0x70;
@@ -46,6 +46,11 @@ pub struct BootInfo {
     pub ramdisk_size: usize,
     pub cmdline_addr: usize,
     pub cmdline_len: usize,
+    pub boot_console_transport: BootConsoleTransport,
+    pub _boot_console_reserved: [u8; 7],
+    pub boot_console_addr: usize,
+    pub boot_console_vaddr: usize,
+    pub boot_console_size: usize,
     pub cpu_id: usize,
     pub cpu_count: usize,
     pub framebuffer: Option<FrameBufferInfo>,
@@ -70,6 +75,11 @@ impl BootInfo {
             ramdisk_size: 0,
             cmdline_addr: 0,
             cmdline_len: 0,
+            boot_console_transport: BootConsoleTransport::None,
+            _boot_console_reserved: [0; 7],
+            boot_console_addr: 0,
+            boot_console_vaddr: 0,
+            boot_console_size: 0,
             cpu_id: 0,
             cpu_count: 0,
             framebuffer: None,
@@ -128,6 +138,32 @@ impl BootInfo {
     pub const fn with_cmdline(mut self, addr: usize, len: usize) -> Self {
         self.cmdline_addr = addr;
         self.cmdline_len = len;
+        self
+    }
+
+    #[inline]
+    pub const fn with_boot_console_mmio(mut self, paddr: usize, size: usize, vaddr: usize) -> Self {
+        self.boot_console_transport = if paddr == 0 || size == 0 || vaddr == 0 {
+            BootConsoleTransport::None
+        } else {
+            BootConsoleTransport::Mmio
+        };
+        self.boot_console_addr = paddr;
+        self.boot_console_vaddr = vaddr;
+        self.boot_console_size = size;
+        self
+    }
+
+    #[inline]
+    pub const fn with_boot_console_ioport(mut self, port: u16) -> Self {
+        self.boot_console_transport = if port == 0 {
+            BootConsoleTransport::None
+        } else {
+            BootConsoleTransport::IoPort
+        };
+        self.boot_console_addr = port as usize;
+        self.boot_console_vaddr = 0;
+        self.boot_console_size = 1;
         self
     }
 
@@ -207,6 +243,19 @@ impl fmt::Debug for BootInfo {
                     self.ramdisk_addr,
                     self.ramdisk_addr + self.ramdisk_size
                 ),
+            )
+            .field("boot_console_transport", &self.boot_console_transport)
+            .field(
+                "boot_console_addr",
+                &format_args!("{:#x}", self.boot_console_addr),
+            )
+            .field(
+                "boot_console_vaddr",
+                &format_args!("{:#x}", self.boot_console_vaddr),
+            )
+            .field(
+                "boot_console_size",
+                &format_args!("{:#x}", self.boot_console_size),
             )
             .field("cpu_id", &self.cpu_id)
             .field("cpu_count", &self.cpu_count)
@@ -347,6 +396,14 @@ pub enum BootProtocol {
     OpenSBI    = 6,
     UBoot      = 7,
     Bios       = 8,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootConsoleTransport {
+    None   = 0,
+    Mmio   = 1,
+    IoPort = 2,
 }
 
 #[repr(C)]

@@ -155,16 +155,7 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
     };
 
     #[cfg(not(target_arch = "x86_64"))]
-    let irq = {
-        let _ = &config; // not used on non-x86_64 platforms
-        #[cfg(target_arch = "loongarch64")]
-        const PCI_IRQ_BASE: usize = 0x10;
-        #[cfg(target_arch = "aarch64")]
-        const PCI_IRQ_BASE: usize = 0x23;
-        #[cfg(target_arch = "riscv64")]
-        const PCI_IRQ_BASE: usize = 0x20;
-        PCI_IRQ_BASE + (bdf.device & 3) as usize
-    };
+    let irq = { legacy_irq_for_bdf(config, bdf) };
 
     let transport = PciTransport::new::<H, C>(root, bdf).ok()?;
     log::info!("PCI virtio device at {:?}: IRQ = {}", bdf, irq);
@@ -188,7 +179,70 @@ fn legacy_irq_for_bdf(config: &::pci::PciConfigAccess, bdf: DeviceFunction) -> u
             irq_line
         );
     }
-    irq_line
+    if irq_line == 0xFF || irq_line == 0 {
+        irq_line
+    } else {
+        khal::irq::map(khal::irq::io_apic_irq_desc(irq_line))
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn legacy_irq_for_bdf(config: &::pci::PciConfigAccess, bdf: DeviceFunction) -> usize {
+    if let Some(route) = ::pci::legacy_interrupt_route(config, bdf) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            let desc = match route.trigger {
+                of::InterruptTrigger::EdgeRising => khal::irq::gic_edge_irq_desc(route.irq),
+                of::InterruptTrigger::LevelHigh
+                | of::InterruptTrigger::LevelLow
+                | of::InterruptTrigger::EdgeFalling
+                | of::InterruptTrigger::Unknown(_) => khal::irq::gic_level_irq_desc(route.irq),
+            };
+            let virq = khal::irq::map(desc);
+            log::info!(
+                "virtio PCI IRQ via device tree: bdf={:?} hwirq={} virq={} trigger={:?}",
+                bdf,
+                route.irq,
+                virq,
+                route.trigger
+            );
+            return virq;
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            return khal::irq::map(khal::irq::plic_irq_desc(route.irq));
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            return route.irq;
+        }
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    const PCI_IRQ_BASE: usize = 0x10;
+    #[cfg(target_arch = "aarch64")]
+    const PCI_IRQ_BASE: usize = 0x23;
+    #[cfg(target_arch = "riscv64")]
+    const PCI_IRQ_BASE: usize = 0x20;
+    let hwirq = PCI_IRQ_BASE + (bdf.device & 3) as usize;
+    log::info!(
+        "virtio PCI IRQ fallback: bdf={:?} hwirq={} base={:#x}",
+        bdf,
+        hwirq,
+        PCI_IRQ_BASE
+    );
+    #[cfg(target_arch = "aarch64")]
+    {
+        khal::irq::map(khal::irq::gic_level_irq_desc(hwirq))
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        khal::irq::map(khal::irq::plic_irq_desc(hwirq))
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        hwirq
+    }
 }
 
 const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {

@@ -3,13 +3,13 @@
 // See LICENSES for license details.
 
 //! Raspberry Pi boot initialization hooks.
+use crate::config::devices::TIMER_IRQ;
+use khal::mem::{p2v, pa};
 use kplat::boot::{BootHandler, BootInfo};
-use kplat::memory::{pa, p2v};
-#[allow(unused_imports)]
-use crate::config::devices::{TIMER_IRQ, UART_IRQ, UART_PADDR};
 
 const GICD_PADDR: usize = 0xFF84_1000;
 const GICC_PADDR: usize = 0xFF84_2000;
+const UART_PADDR: usize = 0xFE20_1000;
 
 struct BootHandlerImpl;
 #[impl_dev_interface]
@@ -26,10 +26,7 @@ impl BootHandler for BootHandlerImpl {
     fn final_init(_boot_info: &BootInfo) {
         #[cfg(feature = "irq")]
         {
-            kplat_aarch64_peripherals::gic::init_gic(
-                p2v(pa!(GICD_PADDR)),
-                p2v(pa!(GICC_PADDR)),
-            );
+            kplat_aarch64_peripherals::gic::init_gic(p2v(pa!(GICD_PADDR)), p2v(pa!(GICC_PADDR)));
             kplat_aarch64_peripherals::gic::init_gicc();
             kplat_aarch64_peripherals::generic_timer::enable_local(TIMER_IRQ);
         }
