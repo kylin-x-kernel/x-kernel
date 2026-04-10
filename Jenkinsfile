@@ -749,7 +749,7 @@ def buildCiComment(Map results, String coverageSummary = '') {
     def stageOrder = [
         'Prepare Source',
         'Rustfmt',
-        'Clippy+Build: x86-csv', 'Clippy+Build: aarch64-crosvm-virt',
+        'Clippy+Build: aarch64-crosvm-virt',
         'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt'
     ]
     def normalizedResults = [:]
