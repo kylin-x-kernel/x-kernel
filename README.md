@@ -1,4 +1,7 @@
 # X-Kernel
+
+This project is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS), an experimental monolithic OS based on [ArceOS](https://github.com/arceos-org/arceos), developed by Tsinghua University.
+
 ## Supported Architectures
 
 - [x] RISC-V 64
