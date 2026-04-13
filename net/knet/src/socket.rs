@@ -132,7 +132,7 @@ impl Debug for RecvOptions<'_> {
 }
 
 /// Kind of shutdown operation to perform on a socket.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Shutdown {
     Read,
     Write,

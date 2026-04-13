@@ -743,6 +743,18 @@ pub fn build_initial_state(
         });
         state.routes.push(RouteState {
             family: wire_route::FAMILY_IPV4,
+            dst_len: 32,
+            table: wire_route::TABLE_MAIN,
+            protocol: wire_route::PROTOCOL_BOOT,
+            scope: wire_route::SCOPE_HOST,
+            route_type: wire_route::TYPE_UNICAST,
+            oif: 1,
+            dst: Some(eth0_ip.address()),
+            gateway: None,
+            prefsrc: Some(eth0_ip.address()),
+        });
+        state.routes.push(RouteState {
+            family: wire_route::FAMILY_IPV4,
             dst_len: 0,
             table: wire_route::TABLE_MAIN,
             protocol: wire_route::PROTOCOL_BOOT,

@@ -14,7 +14,7 @@ use core::{
 
 use futures_util::{FutureExt, select_biased};
 use kerrno::KError;
-use khal::time::{TimeValue, wall_time};
+use khal::time::{TimeValue, monotonic_time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TimerKey {
@@ -42,7 +42,7 @@ impl TimerRuntime {
     }
 
     fn add(&mut self, deadline: TimeValue) -> Option<TimerKey> {
-        if deadline <= wall_time() {
+        if deadline <= monotonic_time() {
             return None;
         }
 
@@ -66,7 +66,7 @@ impl TimerRuntime {
     }
 
     fn add_with_waker(&mut self, deadline: TimeValue, waker: Waker) -> Option<TimerKey> {
-        if deadline <= wall_time() {
+        if deadline <= monotonic_time() {
             return None;
         }
         let key = TimerKey {
@@ -87,7 +87,7 @@ impl TimerRuntime {
             return;
         }
 
-        let now = wall_time();
+        let now = monotonic_time();
 
         let pending = self.wheel.split_off(&TimerKey {
             deadline: now,
@@ -111,7 +111,6 @@ pub(crate) fn check_timer_events() {
 }
 
 fn with_current<R>(f: impl FnOnce(&mut TimerRuntime) -> R) -> R {
-    // FIXME: optimize `percpu` crate! should disable irq and provide more apis
     let _g = kspin::NoPreemptIrqSave::new();
     f(unsafe { TIMER_RUNTIME.current_ref_mut_raw() })
 }
@@ -151,7 +150,7 @@ impl Drop for TimerFuture {
 
 /// Waits until `duration` has elapsed.
 pub async fn sleep(duration: Duration) {
-    sleep_until(wall_time() + duration).await
+    sleep_until(monotonic_time() + duration).await
 }
 
 /// Waits until `deadline` is reached.
@@ -186,7 +185,7 @@ pub async fn timeout<F: IntoFuture>(
     f: F,
 ) -> Result<F::Output, Elapsed> {
     timeout_at(
-        duration.and_then(|x| x.checked_add(khal::time::wall_time())),
+        duration.and_then(|x| x.checked_add(khal::time::monotonic_time())),
         f,
     )
     .await

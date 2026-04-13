@@ -4,7 +4,7 @@
 
 //! `timerfd` implementation.
 //!
-//! Armed timers register into the percpu `TimerRuntime` via
+//! Armed timers register into the global `TimerRuntime` via
 //! [`ktask::future::register_timer`]; on expiry the waker accumulates
 //! expirations and re-registers periodic timers
 
@@ -31,11 +31,11 @@ fn clock_now(clock_id: u32) -> Duration {
     }
 }
 
-/// Convert a clock-domain deadline to wall-time domain (TimerRuntime uses `wall_time()`).
-fn to_wall_deadline(clock_id: u32, deadline: Duration) -> Duration {
+/// Convert a clock-domain deadline to the timer runtime domain (monotonic time).
+fn to_timer_deadline(clock_id: u32, deadline: Duration) -> Duration {
     match clock_id {
-        CLOCK_MONOTONIC | CLOCK_BOOTTIME => deadline + Duration::from_nanos(time::offset_ns()),
-        _ => deadline,
+        CLOCK_MONOTONIC | CLOCK_BOOTTIME => deadline,
+        _ => deadline.saturating_sub(Duration::from_nanos(time::offset_ns())),
     }
 }
 
@@ -127,7 +127,7 @@ impl TimerFd {
                 None => return,
             };
 
-            let handle = register_timer(to_wall_deadline(self.clock_id, dl), self.make_waker());
+            let handle = register_timer(to_timer_deadline(self.clock_id, dl), self.make_waker());
             if let Some(h) = handle {
                 *self.timer_handle.lock() = Some(h);
                 return;

@@ -40,7 +40,6 @@ use crate::{
 
 /// Create a new socket of the specified domain, type, and protocol
 pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
-    debug!("sys_socket <= domain: {domain}, ty: {raw_ty}, proto: {proto}");
     // Extract the type bits (lower 8 bits, ignoring flags like SOCK_CLOEXEC)
     let ty = raw_ty & 0xFF;
 
@@ -103,7 +102,6 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
 /// Bind a socket to a local address
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
-    debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
 
     Socket::from_fd(fd)?.bind(addr)?;
 
@@ -113,7 +111,6 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<
 /// Initiate a connection to a remote address
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
-    debug!("sys_connect <= fd: {fd}, addr: {addr:?}");
 
     Socket::from_fd(fd)?.connect(addr).map_err(|e| {
         if e == KError::WouldBlock {
@@ -128,8 +125,6 @@ pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResu
 
 /// Mark a socket as ready to accept incoming connections
 pub fn sys_listen(fd: i32, backlog: i32) -> KResult<isize> {
-    debug!("sys_listen <= fd: {fd}, backlog: {backlog}");
-
     if backlog < 0 && backlog != -1 {
         return Err(KError::InvalidInput);
     }
@@ -151,8 +146,6 @@ pub fn sys_accept4(
     addrlen: UserPtr<socklen_t>,
     flags: u32,
 ) -> KResult<isize> {
-    debug!("sys_accept <= fd: {fd}, flags: {flags}");
-
     let cloexec = flags & O_CLOEXEC != 0;
 
     let socket = Socket::from_fd(fd)?;
@@ -161,9 +154,8 @@ pub fn sys_accept4(
         socket.set_nonblocking(true)?;
     }
 
-    let remote_addr = socket.local_addr()?;
+    let remote_addr = socket.peer_addr()?;
     let fd = socket.add_to_fd_table(cloexec).map(|fd| fd as isize)?;
-    debug!("sys_accept => fd: {fd}, addr: {remote_addr:?}");
 
     if !addr.is_null() {
         remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
@@ -174,8 +166,6 @@ pub fn sys_accept4(
 
 /// Shut down all or part of a full-duplex connection
 pub fn sys_shutdown(fd: i32, how: u32) -> KResult<isize> {
-    debug!("sys_shutdown <= fd: {fd}, how: {how:?}");
-
     let socket = Socket::from_fd(fd)?;
     let how = match how {
         SHUT_RD => Shutdown::Read,
@@ -190,10 +180,9 @@ pub fn sys_shutdown(fd: i32, how: u32) -> KResult<isize> {
 pub fn sys_socketpair(
     domain: u32,
     raw_ty: u32,
-    proto: u32,
+    _proto: u32,
     fds: UserPtr<[i32; 2]>,
 ) -> KResult<isize> {
-    debug!("sys_socketpair <= domain: {domain}, ty: {raw_ty}, proto: {proto}");
     let ty = raw_ty & 0xFF;
 
     if domain != AF_UNIX {

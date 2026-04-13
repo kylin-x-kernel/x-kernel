@@ -30,7 +30,6 @@ impl<'a> SocketSetWrapper<'a> {
 
     pub fn add<T: AnySocket<'a>>(&self, socket: T) -> SocketHandle {
         let dispatch_irq = self.inner.lock().add(socket);
-        debug!("socket {}: created", dispatch_irq);
         self.new_socket.notify(1);
         dispatch_irq
     }
@@ -81,6 +80,5 @@ impl<'a> SocketSetWrapper<'a> {
 
     pub fn remove(&self, dispatch_irq: SocketHandle) {
         self.inner.lock().remove(dispatch_irq);
-        debug!("socket {}: destroyed", dispatch_irq);
     }
 }

@@ -79,9 +79,26 @@ fn test_build_initial_state_contains_links_and_routes() {
 
     assert_eq!(state.links.len(), 2);
     assert_eq!(state.addrs.len(), 2);
-    assert_eq!(state.routes.len(), 2);
     assert_eq!(state.links[0].name, "lo");
     assert_eq!(state.links[1].name, "eth0");
+    assert!(state.routes.iter().any(|route| {
+        route.dst == Some(IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)))
+            && route.dst_len == 8
+            && route.scope == wire_route::SCOPE_HOST
+            && route.gateway.is_none()
+    }));
+    assert!(state.routes.iter().any(|route| {
+        route.dst == Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)))
+            && route.dst_len == 32
+            && route.scope == wire_route::SCOPE_HOST
+            && route.gateway.is_none()
+    }));
+    assert!(state.routes.iter().any(|route| {
+        route.dst.is_none()
+            && route.dst_len == 0
+            && route.scope == wire_route::SCOPE_UNIVERSE
+            && route.gateway == Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2)))
+    }));
 }
 
 #[def_test]

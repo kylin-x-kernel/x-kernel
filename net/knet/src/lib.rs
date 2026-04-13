@@ -153,4 +153,5 @@ pub fn init_vsock(mut vsock_devs: DeviceContainer<VsockDevice>) {
 
 pub fn poll_interfaces() {
     while SERVICE.lock().poll(&mut SOCKET_SET.inner.lock()) {}
+    LISTEN_TABLE.wake_ready_acceptors();
 }

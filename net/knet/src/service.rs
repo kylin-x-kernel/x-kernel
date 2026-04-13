@@ -3,14 +3,15 @@
 // See LICENSES for license details.
 
 //! Network service wrapper around smoltcp interface.
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     pin::Pin,
     task::{Context, Waker},
 };
 
-use khal::time::{NANOS_PER_MICROS, TimeValue, wall_time_nanos};
-use ktask::future::sleep_until;
+use khal::time::{NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos};
+use kpoll::PollSet;
+use ktask::future::sleep;
 use smoltcp::{
     iface::{Interface, SocketSet},
     time::Instant,
@@ -20,13 +21,15 @@ use smoltcp::{
 use crate::{SOCKET_SET, netlink::RtnetlinkState, router::Router};
 
 fn now() -> Instant {
-    Instant::from_micros_const((wall_time_nanos() / NANOS_PER_MICROS) as i64)
+    Instant::from_micros_const((monotonic_time_nanos() / NANOS_PER_MICROS) as i64)
 }
 
 pub struct Service {
     pub iface: Interface,
     router: Router,
     timeout: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    timeout_deadline: Option<TimeValue>,
+    timeout_poll: Arc<PollSet>,
 }
 impl Service {
     pub fn new(mut router: Router) -> Self {
@@ -37,6 +40,8 @@ impl Service {
             iface,
             router,
             timeout: None,
+            timeout_deadline: None,
+            timeout_poll: Arc::new(PollSet::new()),
         }
     }
 
@@ -67,23 +72,40 @@ impl Service {
     }
 
     pub fn register_rx_waker(&mut self, mask: u32, waker: &Waker) {
-        let next = self.iface.poll_at(now(), &SOCKET_SET.inner.lock());
+        self.timeout_poll.register(waker);
+
+        let current = now();
+        let next = self.iface.poll_at(current, &SOCKET_SET.inner.lock());
 
         if let Some(t) = next {
-            let next = TimeValue::from_micros(t.total_micros() as _);
+            let delay_micros = t.total_micros().saturating_sub(current.total_micros()) as u64;
+            let delay = core::time::Duration::from_micros(delay_micros);
+            let deadline = monotonic_time() + delay;
 
-            // drop old timeout future
-            self.timeout = None;
+            let should_reset = match self.timeout_deadline {
+                None => true,
+                Some(old_deadline) => monotonic_time() >= old_deadline || deadline < old_deadline,
+            };
 
-            let mut fut = Box::pin(sleep_until(next));
-            let mut cx = Context::from_waker(waker);
+            if should_reset {
+                self.timeout = None;
+                self.timeout_deadline = Some(deadline);
 
-            if fut.as_mut().poll(&mut cx).is_ready() {
-                waker.wake_by_ref();
-                return;
-            } else {
-                self.timeout = Some(fut);
+                let mut fut = Box::pin(sleep(delay));
+                let wake = Waker::from(self.timeout_poll.clone());
+                let mut cx = Context::from_waker(&wake);
+
+                if fut.as_mut().poll(&mut cx).is_ready() {
+                    self.timeout_deadline = None;
+                    self.timeout_poll.wake();
+                    return;
+                } else {
+                    self.timeout = Some(fut);
+                }
             }
+        } else {
+            self.timeout = None;
+            self.timeout_deadline = None;
         }
 
         for (i, device) in self.router.devices.iter().enumerate() {

@@ -214,7 +214,7 @@ pub fn yield_now() {
 
 /// Current task is going to sleep for the given duration.
 pub fn sleep(dur: core::time::Duration) {
-    sleep_until(khal::time::wall_time() + dur);
+    sleep_until(khal::time::monotonic_time() + dur);
 }
 
 /// Current task is going to sleep, it will be woken up at the given deadline.

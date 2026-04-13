@@ -7,7 +7,7 @@
 use core::time::Duration;
 
 use event_listener::{Event, listener};
-use khal::time::wall_time;
+use khal::time::monotonic_time;
 
 use crate::future::{block_on, timeout_at};
 
@@ -85,7 +85,7 @@ impl WaitQueue {
     /// Blocks the current task and put it into the wait queue, until other tasks
     /// notify it, or the given duration has elapsed.
     pub fn wait_timeout(&self, dur: Duration) -> bool {
-        let deadline = wall_time() + dur;
+        let deadline = monotonic_time() + dur;
         block_on(async {
             listener!(self.event => listener);
             timeout_at(Some(deadline), listener).await.is_err()
@@ -101,13 +101,13 @@ impl WaitQueue {
     where
         F: FnMut() -> bool,
     {
-        let deadline = wall_time() + dur;
+        let deadline = monotonic_time() + dur;
         block_on(async {
             loop {
                 if condition() {
                     return false;
                 }
-                if wall_time() >= deadline {
+                if monotonic_time() >= deadline {
                     return true;
                 }
                 listener!(self.event => listener);

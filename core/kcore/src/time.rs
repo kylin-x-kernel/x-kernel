@@ -8,7 +8,7 @@ use alloc::{borrow::ToOwned, collections::binary_heap::BinaryHeap, sync::Arc};
 use core::{mem, time::Duration};
 
 use event_listener::{Event, listener};
-use khal::time::{NANOS_PER_SEC, TimeValue, monotonic_time_nanos, wall_time};
+use khal::time::{NANOS_PER_SEC, TimeValue, monotonic_time, monotonic_time_nanos};
 use ksignal::Signo;
 use ksync::Mutex;
 use ktask::{
@@ -108,7 +108,7 @@ impl ITimer {
 
     pub fn renew_timer(&self) {
         if self.remained_ns > 0 {
-            let deadline = wall_time() + Duration::from_nanos(self.remained_ns as u64);
+            let deadline = monotonic_time() + Duration::from_nanos(self.remained_ns as u64);
             let mut guard = ALARM_LIST.lock();
             let should_wake = guard.peek().is_none_or(|it| it.deadline > deadline);
             guard.push(Entry {
@@ -244,7 +244,7 @@ async fn alarm_task() {
             continue;
         };
 
-        let now = wall_time();
+        let now = monotonic_time();
         if deadline <= now {
             // 任务已到期，执行它
             if let Some(task) = task_weak.upgrade() {

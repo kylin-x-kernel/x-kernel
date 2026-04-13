@@ -7,6 +7,7 @@ use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec};
 use core::ops::DerefMut;
 
 use kerrno::{KError, KResult};
+use kpoll::PollSet;
 use ksync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},
@@ -23,7 +24,15 @@ const PORT_NUM: usize = 65536;
 
 struct ListenTableEntry {
     listen_endpoint: IpListenEndpoint,
-    syn_queue: VecDeque<SocketHandle>,
+    syn_queue: VecDeque<PendingConn>,
+    accept_queue: VecDeque<PendingConn>,
+    accept_poll: PollSet,
+}
+
+struct PendingConn {
+    src: IpEndpoint,
+    dst: IpEndpoint,
+    dispatch_irq: SocketHandle,
 }
 
 impl ListenTableEntry {
@@ -32,14 +41,19 @@ impl ListenTableEntry {
         Self {
             listen_endpoint,
             syn_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
+            accept_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
+            accept_poll: PollSet::new(),
         }
     }
 }
 
 impl Drop for ListenTableEntry {
     fn drop(&mut self) {
-        for &dispatch_irq in &self.syn_queue {
-            SOCKET_SET.remove(dispatch_irq);
+        for conn in &self.syn_queue {
+            SOCKET_SET.remove(conn.dispatch_irq);
+        }
+        for conn in &self.accept_queue {
+            SOCKET_SET.remove(conn.dispatch_irq);
         }
     }
 }
@@ -81,7 +95,6 @@ impl ListenTable {
     }
 
     pub fn unlisten(&self, port: u16) {
-        debug!("TCP socket unlisten on {}", port);
         *self.tcp[port as usize].lock() = None;
     }
 
@@ -90,13 +103,23 @@ impl ListenTable {
     }
 
     pub fn can_accept(&self, port: u16) -> KResult<bool> {
-        if let Some(entry) = self.listen_entry(port).lock().as_ref() {
-            Ok(entry
-                .syn_queue
-                .iter()
-                .any(|&dispatch_irq| is_connected(dispatch_irq)))
+        if let Some(entry) = self.listen_entry(port).lock().as_mut() {
+            prune_closed(&mut entry.syn_queue);
+            prune_closed(&mut entry.accept_queue);
+            promote_ready(&mut entry.syn_queue, &mut entry.accept_queue);
+            Ok(!entry.accept_queue.is_empty())
         } else {
             warn!("accept before listen");
+            Err(KError::InvalidInput)
+        }
+    }
+
+    pub fn register_accept_waker(&self, port: u16, waker: &core::task::Waker) -> KResult<()> {
+        if let Some(entry) = self.listen_entry(port).lock().as_ref() {
+            entry.accept_poll.register(waker);
+            Ok(())
+        } else {
+            warn!("register accept waker before listen");
             Err(KError::InvalidInput)
         }
     }
@@ -109,27 +132,18 @@ impl ListenTable {
             return Err(KError::InvalidInput);
         };
 
-        let syn_queue: &mut VecDeque<SocketHandle> = &mut entry.syn_queue;
-        let idx = syn_queue
-            .iter()
-            .enumerate()
-            .find_map(|(idx, &dispatch_irq)| is_connected(dispatch_irq).then_some(idx))
-            .ok_or(KError::WouldBlock)?; // wait for connection
-        if idx > 0 {
-            warn!(
-                "slow SYN queue enumeration: index = {}, len = {}!",
-                idx,
-                syn_queue.len()
-            );
-        }
-        let dispatch_irq = syn_queue.swap_remove_front(idx).unwrap();
+        prune_closed(&mut entry.syn_queue);
+        prune_closed(&mut entry.accept_queue);
+        promote_ready(&mut entry.syn_queue, &mut entry.accept_queue);
+        let conn = entry.accept_queue.pop_front().ok_or(KError::WouldBlock)?;
         // If the connection is reset, return ConnectionReset error
         // Otherwise, return the dispatch_irq and the address tuple
-        if is_closed(dispatch_irq) {
+        if is_closed(conn.dispatch_irq) {
             warn!("accept failed: connection reset");
+            SOCKET_SET.remove(conn.dispatch_irq);
             Err(KError::ConnectionReset)
         } else {
-            Ok(dispatch_irq)
+            Ok(conn.dispatch_irq)
         }
     }
 
@@ -140,8 +154,18 @@ impl ListenTable {
         sockets: &mut SocketSet<'_>,
     ) {
         if let Some(entry) = self.listen_entry(dst.port).lock().deref_mut() {
+            prune_closed(&mut entry.syn_queue);
+            prune_closed(&mut entry.accept_queue);
+            if entry
+                .syn_queue
+                .iter()
+                .chain(entry.accept_queue.iter())
+                .any(|conn| conn.src == src && conn.dst == dst)
+            {
+                return;
+            }
             // TODO(mivik): accept address check
-            if entry.syn_queue.len() >= LISTEN_QUEUE_SIZE {
+            if entry.syn_queue.len() + entry.accept_queue.len() >= LISTEN_QUEUE_SIZE {
                 // SYN queue is full, drop the packet
                 warn!("SYN queue overflow!");
                 return;
@@ -159,18 +183,32 @@ impl ListenTable {
                 return;
             }
             let dispatch_irq = sockets.add(socket);
-            debug!(
-                "TCP socket {}: prepare for connection {} -> {}",
-                dispatch_irq, src, entry.listen_endpoint
-            );
-            entry.syn_queue.push_back(dispatch_irq);
+            entry.syn_queue.push_back(PendingConn {
+                src,
+                dst,
+                dispatch_irq,
+            });
+        }
+    }
+
+    pub fn wake_ready_acceptors(&self) {
+        for entry in self.tcp.iter() {
+            let mut guard = entry.lock();
+            let Some(entry) = guard.as_mut() else {
+                continue;
+            };
+            prune_closed(&mut entry.syn_queue);
+            prune_closed(&mut entry.accept_queue);
+            if promote_ready(&mut entry.syn_queue, &mut entry.accept_queue) {
+                entry.accept_poll.wake();
+            }
         }
     }
 }
 
 fn is_connected(dispatch_irq: SocketHandle) -> bool {
     SOCKET_SET.with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| {
-        !matches!(socket.state(), State::Listen | State::SynReceived)
+        matches!(socket.state(), State::Established | State::CloseWait)
     })
 }
 
@@ -178,4 +216,34 @@ fn is_closed(dispatch_irq: SocketHandle) -> bool {
     SOCKET_SET.with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| {
         matches!(socket.state(), State::Closed)
     })
+}
+
+fn prune_closed(syn_queue: &mut VecDeque<PendingConn>) {
+    let len = syn_queue.len();
+    for _ in 0..len {
+        let conn = syn_queue.pop_front().unwrap();
+        if is_closed(conn.dispatch_irq) {
+            SOCKET_SET.remove(conn.dispatch_irq);
+        } else {
+            syn_queue.push_back(conn);
+        }
+    }
+}
+
+fn promote_ready(
+    syn_queue: &mut VecDeque<PendingConn>,
+    accept_queue: &mut VecDeque<PendingConn>,
+) -> bool {
+    let mut moved = false;
+    let len = syn_queue.len();
+    for _ in 0..len {
+        let conn = syn_queue.pop_front().unwrap();
+        if is_connected(conn.dispatch_irq) {
+            accept_queue.push_back(conn);
+            moved = true;
+        } else {
+            syn_queue.push_back(conn);
+        }
+    }
+    moved
 }
