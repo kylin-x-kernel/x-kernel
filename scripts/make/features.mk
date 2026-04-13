@@ -6,10 +6,6 @@ kfeat_prefix := kfeat/
 kfeat :=
 config_kfeat := $(shell ./scripts/make/kfeat_features.sh .config)
 
-ifeq ($(filter $(LOG),off error warn info debug trace),)
-  $(error "LOG" must be one of "off", "error", "warn", "info", "debug", "trace")
-endif
-
 ifeq ($(BUS),mmio)
   kfeat += bus-mmio
 endif

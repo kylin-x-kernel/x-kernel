@@ -9,9 +9,6 @@ ifneq ($(wildcard .config),)
   # Read .config once and extract ARCH and PLAT in a single pass
   CONFIG_VALUES := $(shell awk '/ARCH_[A-Z0-9_]+=y/ { print $$0 } /PLATFORM_[A-Z0-9_]+=y/ { print $$0 } /BUILD_TYPE_[A-Z]+=y/ { print $$0 }' .config 2>/dev/null)
 
-  # Append LOG_LEVEL_XXX TO CONFIG_VALUES
-  CONFIG_VALUES += $(shell awk '/LOG_LEVEL_[A-Z0-9_]+=y/ { print $$0 }' .config 2>/dev/null)
-
   # APPEND CPU_NUM TO CONFIG_VALUES
   CONFIG_VALUES += $(shell awk '/CPU_NUM=[0-9]+/ { print $$0 }' .config 2>/dev/null)
   CONFIG_VALUES += $(shell awk '/KFEAT_DWARF=y/ { print $$0 }' .config 2>/dev/null)
@@ -50,19 +47,6 @@ ifneq ($(wildcard .config),)
       BUILD_TYPE_FROM_CONFIG := release
     endif
 
-    # Parse log level
-    ifeq ($(findstring LOG_LEVEL_ERROR=y,$(CONFIG_VALUES)),LOG_LEVEL_ERROR=y)
-      LOG_LEVEL_FROM_CONFIG := error
-    else ifeq ($(findstring LOG_LEVEL_WARN=y,$(CONFIG_VALUES)),LOG_LEVEL_WARN=y)
-      LOG_LEVEL_FROM_CONFIG := warn
-    else ifeq ($(findstring LOG_LEVEL_INFO=y,$(CONFIG_VALUES)),LOG_LEVEL_INFO=y)
-      LOG_LEVEL_FROM_CONFIG := info
-    else ifeq ($(findstring LOG_LEVEL_DEBUG=y,$(CONFIG_VALUES)),LOG_LEVEL_DEBUG=y)
-      LOG_LEVEL_FROM_CONFIG := debug
-    else ifeq ($(findstring LOG_LEVEL_TRACE=y,$(CONFIG_VALUES)),LOG_LEVEL_TRACE=y)
-      LOG_LEVEL_FROM_CONFIG := trace
-    endif
-
     ifeq ($(findstring KFEAT_DWARF=y,$(CONFIG_VALUES)),KFEAT_DWARF=y)
       DWARF_FROM_CONFIG := y
     else
@@ -83,16 +67,14 @@ ifneq ($(wildcard .config),)
     PLAT ?= $(PLAT_FROM_CONFIG)
     PLAT_NAME ?= $(PLAT)
     MODE ?= $(BUILD_TYPE_FROM_CONFIG)
-    LOG ?= $(LOG_LEVEL_FROM_CONFIG)
     DWARF ?= $(DWARF_FROM_CONFIG)
     $(info CONFIG_VALUES: $(CONFIG_VALUES))
     $(info "ARCH from .config: $(ARCH)")
     $(info "PLAT from .config: $(PLAT)")
     $(info "MODE from .config: $(MODE)")
-    $(info "LOG from .config: $(LOG)")
     $(info "DWARF from .config: $(DWARF)")
     $(info "SMP from .config: $(SMP)")
-    export ARCH PLAT MODE LOG SMP DWARF
+    export ARCH PLAT MODE SMP DWARF
   endif
 endif
 

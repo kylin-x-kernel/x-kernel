@@ -78,7 +78,6 @@ include scripts/make/deps.mk
 
 export K_ARCH=$(ARCH)
 export K_MODE=$(MODE)
-export K_LOG=$(LOG)
 export K_TARGET=$(TARGET)
 export K_IP=$(IP)
 export K_GW=$(GW)

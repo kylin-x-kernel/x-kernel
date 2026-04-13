@@ -105,6 +105,22 @@ static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 const MAX_REGION_LOG_SUMMARIES: usize = 64;
 const REGION_LOG_SUMMARY_THRESHOLD: usize = 8;
 
+const fn configured_log_level() -> &'static str {
+    if kbuild_config::LOG_LEVEL_ERROR {
+        "error"
+    } else if kbuild_config::LOG_LEVEL_WARN {
+        "warn"
+    } else if kbuild_config::LOG_LEVEL_INFO {
+        "info"
+    } else if kbuild_config::LOG_LEVEL_DEBUG {
+        "debug"
+    } else if kbuild_config::LOG_LEVEL_TRACE {
+        "trace"
+    } else {
+        "off"
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RegionLogSummary {
     name: &'static str,
@@ -192,7 +208,7 @@ pub fn rust_main(arg: usize) -> ! {
         option_env!("K_MODE").unwrap_or(""),
         build_machine,
         build_time,
-        option_env!("K_LOG").unwrap_or(""),
+        configured_log_level(),
         backtrace::is_enabled(),
         kbuild_config::CPU_NUM,
     );
@@ -203,7 +219,7 @@ pub fn rust_main(arg: usize) -> ! {
     );
 
     klogger::init_klogger();
-    klogger::set_log_level(option_env!("K_LOG").unwrap_or("")); // no effect if set `log-level-*` features
+    klogger::set_log_level(configured_log_level()); // no effect if set `log-level-*` features
     info!("Logging is enabled.");
     info!("Primary CPU {cpu_id} started, boot_info = {arg:#x}.");
     {
