@@ -30,7 +30,6 @@
 
 # Enable unstable features
 export RUSTC_BOOTSTRAP := 1
-export DWARF := y
 export DISK_IMG ?= $(PWD)/disk.img
 XCONF = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --manifest-path xtask/xconfig/Cargo.toml --bin xconf --
 

@@ -402,6 +402,13 @@ impl ConfigState {
                     for option in &choice.options {
                         let mut opt_item = MenuItem::from_config(option, depth + 1);
                         opt_item.parent_choice = Some(choice_id.clone());
+                        // Choice-level depends_on applies to every choice option as well.
+                        if let Some(choice_depends) = choice.depends.as_ref() {
+                            opt_item.depends_on = Some(Self::combine_conditions(
+                                opt_item.depends_on.as_ref(),
+                                choice_depends,
+                            ));
+                        }
                         // Combine if_condition with option's depends_on as well
                         if let Some(if_cond) = if_condition {
                             opt_item.depends_on = Some(Self::combine_conditions(

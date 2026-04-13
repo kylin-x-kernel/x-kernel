@@ -1,0 +1,32 @@
+menu "Memory Management"
+
+config KFEAT_ALLOC
+    bool "Enable kernel dynamic allocation"
+    default y
+    help
+      Enable the kernel heap allocator stack. This gates allocator-related
+      crates and the byte allocator implementation selection.
+
+choice
+    prompt "Kernel byte allocator"
+    depends on KFEAT_ALLOC
+    default KFEAT_ALLOC_SLAB
+
+config KFEAT_ALLOC_SLAB
+    bool "SLAB"
+    help
+      Use the slab byte allocator implementation.
+
+config KFEAT_ALLOC_TLSF
+    bool "TLSF"
+    help
+      Use the two-level segregated fit byte allocator implementation.
+
+config KFEAT_ALLOC_BUDDY
+    bool "Buddy"
+    help
+      Use the buddy-system byte allocator implementation.
+
+endchoice
+
+endmenu

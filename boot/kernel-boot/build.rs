@@ -32,7 +32,7 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
     let ld_content = ld_content.replace("%CPU_NUM%", &format!("{}", kbuild_config::CPU_NUM));
     let ld_content = ld_content.replace(
         "%DWARF%",
-        if std::env::var("DWARF").is_ok_and(|v| v == "y") {
+        if kbuild_config::KFEAT_DWARF {
             r#"debug_abbrev : { . += SIZEOF(.debug_abbrev); }
     debug_addr : { . += SIZEOF(.debug_addr); }
     debug_aranges : { . += SIZEOF(.debug_aranges); }

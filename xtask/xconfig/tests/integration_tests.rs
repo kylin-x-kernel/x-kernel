@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use tempfile::TempDir;
 use xconfig::{
@@ -63,6 +63,18 @@ fn test_complete_workflow() {
     assert!(autoconf_h.contains("#define TEST_INT \"42\""));
     // Should NOT contain CONFIG_ prefix
     assert!(!autoconf_h.contains("CONFIG_"));
+
+    let config_rs_path = temp_dir.path().join("config.rs");
+    let mut type_map = HashMap::new();
+    type_map.insert("TEST_BOOL".to_string(), SymbolType::Bool);
+    type_map.insert("TEST_STRING".to_string(), SymbolType::String);
+    type_map.insert("TEST_INT".to_string(), SymbolType::U32);
+    ConfigGenerator::generate_rust_consts(temp_dir.path(), &config, &type_map).unwrap();
+
+    let config_rs = std::fs::read_to_string(&config_rs_path).unwrap();
+    assert!(config_rs.contains("pub const TEST_BOOL: bool = true;"));
+    assert!(config_rs.contains("pub const TEST_STRING: &str = \"hello\";"));
+    assert!(config_rs.contains("pub const TEST_INT: u32 = 42;"));
 }
 
 #[test]

@@ -27,9 +27,10 @@ sev = ["dma", "kdriver/sev", "memspace/sev"]
 dma-trace = ["kdriver/dma-trace"]
 
 # Memory
-alloc-tlsf = ["kalloc/tlsf"]
-alloc-slab = ["kalloc/slab"]
-alloc-buddy = ["kalloc/buddy"]
+alloc = ["dep:alloc-engine", "dep:kalloc"]
+alloc_tlsf = ["alloc", "alloc-engine/tlsf", "kalloc/tlsf"]
+alloc_slab = ["alloc", "alloc-engine/slab", "kalloc/slab"]
+alloc_buddy = ["alloc", "alloc-engine/buddy", "kalloc/buddy"]
 dma = []
 
 task-ext = ["ktask/task-ext"]
@@ -83,8 +84,9 @@ watchdog = ["kruntime/watchdog"]
 pmu = ["kruntime/pmu"]
 
 [dependencies]
+alloc-engine = { workspace = true, optional = true }
 memspace = { workspace = true, optional = true }
-kalloc.workspace = true
+kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true

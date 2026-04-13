@@ -48,6 +48,9 @@ mod tracking;
 #[cfg(feature = "tracking")]
 pub use tracking::*;
 
+#[cfg(not(any(feature = "slab", feature = "buddy", feature = "tlsf")))]
+compile_error!("kalloc requires one of the allocator features: slab, buddy, or tlsf");
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "slab")] {
         /// The default byte allocator.

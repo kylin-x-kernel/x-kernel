@@ -81,7 +81,8 @@ impl ConfigGenerator {
     /// Generate `config.rs` with strictly typed Rust constants derived from a
     /// parsed `.config` map and the authoritative Kconfig `SymbolType` map.
     ///
-    /// - Bool/Tristate symbols are intentionally skipped (passed via `--cfg` flags).
+    /// - Bool symbols are emitted as `bool`.
+    /// - Tristate symbols are emitted as `&str`.
     /// - Integer types (`u8`...`isize`) use the exact declared Rust primitive.
     /// - `hex` values are emitted as `usize`.
     /// - `string` values are emitted as `&str`.
@@ -106,11 +107,6 @@ impl ConfigGenerator {
 
         for key in sorted_keys {
             let value = &config[key];
-
-            // Skip boolean configs (y/n/m) -- handled via --cfg
-            if value == "y" || value == "n" || value == "m" {
-                continue;
-            }
 
             content.push_str("#[allow(dead_code)]\n");
 
@@ -144,8 +140,23 @@ impl ConfigGenerator {
         symbol_type: &SymbolType,
     ) -> Result<bool> {
         match symbol_type {
-            // Bool/Tristate values are passed via --cfg flags; should already have been skipped above.
-            SymbolType::Bool | SymbolType::Tristate => Ok(false),
+            SymbolType::Bool => {
+                let bool_value = match value {
+                    "y" => "true",
+                    "n" => "false",
+                    other => {
+                        eprintln!("⚠️  Warning: Invalid bool value for {}: {}", key, other);
+                        return Ok(false);
+                    }
+                };
+                content.push_str(&format!("pub const {}: bool = {};\n\n", key, bool_value));
+                Ok(true)
+            }
+
+            SymbolType::Tristate => {
+                content.push_str(&format!("pub const {}: &str = \"{}\";\n\n", key, value));
+                Ok(true)
+            }
 
             SymbolType::String => {
                 content.push_str(&format!("pub const {}: &str = \"{}\";\n\n", key, value));

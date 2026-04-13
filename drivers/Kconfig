@@ -69,13 +69,6 @@ config PMU_IRQ
     help
       Define the interrupt number for the Performance Monitoring Unit (PMU).
 
-config TIMER_IRQ
-    usize "Timer IRQ Number"
-    depends on !ARCH_X86_64
-    default 30
-    help
-      Define the interrupt number for the system timer.
-
 config ARM_GENERIC_TIMER_MODE
     string "ARM generic timer mode"
     depends on ARCH_AARCH64

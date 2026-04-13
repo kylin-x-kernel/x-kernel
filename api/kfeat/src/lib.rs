@@ -14,9 +14,9 @@
 //!     - `ipi`: Enable Inter-Processor Interrupts (IPIs).
 //! - Memory
 //!     - `alloc`: Enable dynamic memory allocation.
-//!     - `alloc-tlsf`: Use the TLSF allocator.
-//!     - `alloc-slab`: Use the slab allocator.
-//!     - `alloc-buddy`: Use the buddy system allocator.
+//!     - `alloc_tlsf`: Use the TLSF allocator.
+//!     - `alloc_slab`: Use the slab allocator.
+//!     - `alloc_buddy`: Use the buddy system allocator.
 //!     - `paging`: Enable page table manipulation.
 //!     - `tls`: Enable thread-local storage.
 //! - Task management

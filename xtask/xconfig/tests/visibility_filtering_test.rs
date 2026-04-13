@@ -171,6 +171,71 @@ endif
     );
 }
 
+/// Test that choice-level dependencies also hide the choice options themselves.
+#[test]
+fn test_choice_depends_hides_options() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+
+    let kconfig_content = r#"
+config KFEAT_ALLOC
+    bool "Enable kernel dynamic allocation"
+    default y
+
+choice
+    prompt "Kernel byte allocator"
+    depends on KFEAT_ALLOC
+    default KFEAT_ALLOC_SLAB
+
+config KFEAT_ALLOC_SLAB
+    bool "SLAB"
+
+config KFEAT_ALLOC_TLSF
+    bool "TLSF"
+
+config KFEAT_ALLOC_BUDDY
+    bool "Buddy"
+
+endchoice
+"#;
+
+    fs::write(&kconfig_path, kconfig_content).unwrap();
+
+    let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+    let ast = parser.parse().unwrap();
+
+    let mut symbol_table = SymbolTable::new();
+    symbol_table.add_symbol("KFEAT_ALLOC".to_string(), SymbolType::Bool);
+    symbol_table.add_symbol("KFEAT_ALLOC_SLAB".to_string(), SymbolType::Bool);
+    symbol_table.add_symbol("KFEAT_ALLOC_TLSF".to_string(), SymbolType::Bool);
+    symbol_table.add_symbol("KFEAT_ALLOC_BUDDY".to_string(), SymbolType::Bool);
+    symbol_table.set_value("KFEAT_ALLOC", "n".to_string());
+
+    let app = MenuConfigApp::new(ast.entries, symbol_table).unwrap();
+
+    let items = app.config_state().get_items_for_path(&[]);
+    let visible = app.filter_visible_items(items);
+
+    assert!(
+        !visible
+            .iter()
+            .any(|item| item.label == "Kernel byte allocator"),
+        "choice should not be visible when KFEAT_ALLOC=n"
+    );
+    assert!(
+        !visible.iter().any(|item| item.id == "KFEAT_ALLOC_SLAB"),
+        "KFEAT_ALLOC_SLAB should not be visible when parent choice depends_on is false"
+    );
+    assert!(
+        !visible.iter().any(|item| item.id == "KFEAT_ALLOC_TLSF"),
+        "KFEAT_ALLOC_TLSF should not be visible when parent choice depends_on is false"
+    );
+    assert!(
+        !visible.iter().any(|item| item.id == "KFEAT_ALLOC_BUDDY"),
+        "KFEAT_ALLOC_BUDDY should not be visible when parent choice depends_on is false"
+    );
+}
+
 /// Test that configs without prompts are hidden
 #[test]
 fn test_no_prompt_hidden() {

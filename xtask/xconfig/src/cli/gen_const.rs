@@ -2,14 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use crate::{
-    config::ConfigGenerator,
+    config::{ConfigGenerator, ConfigReader},
     error::Result,
     kconfig::{
         Parser,
@@ -29,7 +25,7 @@ pub fn gen_const_command(
     println!("Output: {}", output_dir.display());
 
     // Parse .config file
-    let config_map = parse_config(&config)?;
+    let config_map = ConfigReader::read(&config)?;
 
     // Parse Kconfig file to obtain the authoritative symbol types
     let mut parser = Parser::new(&kconfig, &srctree)?;
@@ -78,38 +74,4 @@ fn collect_types(entries: &[Entry], map: &mut HashMap<String, SymbolType>) {
             _ => {}
         }
     }
-}
-
-/// Parse .config file
-/// Now expects standardized format:
-/// - Bool: CONFIG_X=y or # CONFIG_X is not set
-/// - Int: CONFIG_X=123 (no quotes)
-/// - Hex: CONFIG_X=0xff (no quotes)
-/// - String: CONFIG_X="value" (with quotes)
-fn parse_config(config_path: &Path) -> Result<HashMap<String, String>> {
-    let content = fs::read_to_string(config_path)?;
-
-    let mut config = HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-
-            // Remove quotes if present (for backward compatibility)
-            let value = if value.starts_with('"') && value.ends_with('"') {
-                &value[1..value.len() - 1]
-            } else {
-                value
-            };
-
-            config.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    Ok(config)
 }

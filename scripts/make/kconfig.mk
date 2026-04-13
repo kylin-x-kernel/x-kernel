@@ -14,6 +14,7 @@ ifneq ($(wildcard .config),)
 
   # APPEND CPU_NUM TO CONFIG_VALUES
   CONFIG_VALUES += $(shell awk '/CPU_NUM=[0-9]+/ { print $$0 }' .config 2>/dev/null)
+  CONFIG_VALUES += $(shell awk '/KFEAT_DWARF=y/ { print $$0 }' .config 2>/dev/null)
 
   # Parse architecture (only if CONFIG_VALUES is not empty)
   ifneq ($(CONFIG_VALUES),)
@@ -62,6 +63,12 @@ ifneq ($(wildcard .config),)
       LOG_LEVEL_FROM_CONFIG := trace
     endif
 
+    ifeq ($(findstring KFEAT_DWARF=y,$(CONFIG_VALUES)),KFEAT_DWARF=y)
+      DWARF_FROM_CONFIG := y
+    else
+      DWARF_FROM_CONFIG := n
+    endif
+
     # Parse CPU_NUM
     CPU_NUM_FROM_CONFIG := $(shell awk -F= '/CPU_NUM=[0-9]+/ { print $$2 }' .config 2>/dev/null)
     ifneq ($(CPU_NUM_FROM_CONFIG),)
@@ -77,13 +84,15 @@ ifneq ($(wildcard .config),)
     PLAT_NAME ?= $(PLAT)
     MODE ?= $(BUILD_TYPE_FROM_CONFIG)
     LOG ?= $(LOG_LEVEL_FROM_CONFIG)
+    DWARF ?= $(DWARF_FROM_CONFIG)
     $(info CONFIG_VALUES: $(CONFIG_VALUES))
     $(info "ARCH from .config: $(ARCH)")
     $(info "PLAT from .config: $(PLAT)")
     $(info "MODE from .config: $(MODE)")
     $(info "LOG from .config: $(LOG)")
+    $(info "DWARF from .config: $(DWARF)")
     $(info "SMP from .config: $(SMP)")
-    export ARCH PLAT MODE LOG SMP
+    export ARCH PLAT MODE LOG SMP DWARF
   endif
 endif
 

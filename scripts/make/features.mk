@@ -4,6 +4,7 @@
 
 kfeat_prefix := kfeat/
 kfeat :=
+config_kfeat := $(shell ./scripts/make/kfeat_features.sh .config)
 
 ifeq ($(filter $(LOG),off error warn info debug trace),)
   $(error "LOG" must be one of "off", "error", "warn", "info", "debug", "trace")
@@ -13,9 +14,7 @@ ifeq ($(BUS),mmio)
   kfeat += bus-mmio
 endif
 
-ifeq ($(DWARF),y)
-  kfeat += dwarf
-endif
+kfeat += $(config_kfeat)
 
 APP_FEATURES += $(subst -,_,$(PLAT))
 
