@@ -516,8 +516,8 @@ fn syscall_storage_obj_create_inner(
     obj_is_null: bool,
 ) -> CreateInnerResult {
     // === 获取 attr_o ===
-    let attr_o = if attr != TEE_HANDLE_NULL as _ {
-        match tee_obj_get(attr as _) {
+    let attr_o = if attr != TEE_HANDLE_NULL as c_ulong {
+        match tee_obj_get(attr) {
             Ok(o) => {
                 let guard = o.lock();
                 if guard.info.handleFlags & TEE_HANDLE_FLAG_INITIALIZED == 0 {

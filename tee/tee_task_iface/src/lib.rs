@@ -1,10 +1,21 @@
+//! Shared TEE-related task APIs (traits and helpers).
+//!
+//! # Cargo features
+//!
+//! - **`tee_ta_sign`** — Enables the `tasign` submodule (TA ELF signature verification),
+//!   pulls in `tasign` / `kfs` / `kerrno` / `log`, and links `tasign-kernel-shim` for mbedTLS
+//!   libc shims on bare-metal. Without this feature, `tasign` is not compiled.
 #![no_std]
 
 extern crate alloc;
+#[cfg(feature = "tee_ta_sign")]
+extern crate tasign_kernel_shim;
 
 use core::any::Any;
 
 pub mod ta_ctx;
+#[cfg(feature = "tee_ta_sign")]
+pub mod tasign;
 
 pub use ta_ctx::{SessionIdentity, TeeTaCtx};
 

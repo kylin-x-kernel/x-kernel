@@ -17,7 +17,7 @@ kernel = [
     "kfeat/task-ext",
 ]
 
-tee = ["kcore/tee", "ksyscall/tee"]
+tee = ["kcore/tee", "ksyscall/tee", "kcore/tee_ta_sign"]
 smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
 dma-trace = ["kfeat/dma-trace"]

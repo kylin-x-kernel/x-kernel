@@ -5,6 +5,9 @@ use alloc::string::{String, ToString};
 use hashbrown::HashMap;
 use uuid as uuid_crate;
 
+/// Length of a TA basename `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.ta` (hyphenated UUID + `.ta`).
+const TA_UUID_DOT_TA_EXAMPLE: &str = "936da01f-9abd-4d9d-80c7-02af85c822a8.ta";
+
 /// Identity of a TA session, stored in `TeeTaCtx.open_sessions`.
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
@@ -47,6 +50,21 @@ impl TeeTaCtx {
         }
     }
 
+    /// True when the path's final component is `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.ta`
+    /// (same character length as `936da01f-9abd-4d9d-80c7-02af85c822a8.ta`, hyphenated UUID) — not arbitrary `*.ta` names.
+    pub fn is_ta(path: &str) -> bool {
+        let Some(name) = path.rsplit('/').next() else {
+            return false;
+        };
+        if name.len() != TA_UUID_DOT_TA_EXAMPLE.len() || !name.ends_with(".ta") {
+            return false;
+        }
+        let Some(stem) = name.strip_suffix(".ta") else {
+            return false;
+        };
+        uuid_crate::Uuid::parse_str(stem).is_ok()
+    }
+
     pub fn new(path: &str) -> Self {
         let mut ctx = Self::default();
         ctx.set_uuid(path);
@@ -76,5 +94,16 @@ pub mod tests_ta_ctx {
         assert!(ta_ctx.uuid.is_empty());
         ta_ctx.set_uuid("/tee/ta/936DA01F-9ABD-4D9D-80C7-02AF85C822A8.ta");
         assert_eq!(ta_ctx.uuid, "936DA01F-9ABD-4D9D-80C7-02AF85C822A8");
+
+        assert!(TeeTaCtx::is_ta(
+            "/tee/ta/936da01f-9abd-4d9d-80c7-02af85c822a8.ta"
+        ));
+        assert!(TeeTaCtx::is_ta(
+            "/tee/ta/936DA01F-9ABD-4D9D-80C7-02AF85C822A8.ta"
+        ));
+        assert!(!TeeTaCtx::is_ta("/tee/ta/foo.ta"));
+        assert!(!TeeTaCtx::is_ta(
+            "/tee/ta/936da01f9abd4d9d80c702af85c822a8.ta"
+        ));
     }
 }

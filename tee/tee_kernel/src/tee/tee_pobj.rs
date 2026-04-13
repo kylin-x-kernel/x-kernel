@@ -362,6 +362,8 @@ pub fn tee_pobj_rename(obj: &mut tee_pobj, obj_id: &[u8], obj_id_len: u32) -> Te
 
 #[unittest::mod_test]
 mod tests {
+    use core::sync::atomic::Ordering;
+
     use crate::tee::{
         tee_pobj::{
             POBJS, TEE_DATA_FLAG_SHARE_READ, TEE_DATA_FLAG_SHARE_WRITE, TEE_UUID, tee_pobj,

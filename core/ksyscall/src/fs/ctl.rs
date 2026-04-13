@@ -14,7 +14,7 @@
 
 use alloc::{ffi::CString, vec, vec::Vec};
 use core::{
-    ffi::{c_char, c_int},
+    ffi::{c_char, c_int, c_long},
     mem::offset_of,
     time::Duration,
 };
@@ -247,7 +247,7 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> KResult<is
     debug!("sys_unlinkat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     with_fs(dirfd, |fs| {
-        if flags == AT_REMOVEDIR as _ {
+        if flags == AT_REMOVEDIR as usize {
             fs.remove_dir(path)?;
         } else {
             fs.remove_file(path)?;
@@ -258,7 +258,7 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> KResult<is
 
 #[cfg(target_arch = "x86_64")]
 pub fn sys_rmdir(path: *const c_char) -> KResult<isize> {
-    sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR as _)
+    sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR as usize)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -476,8 +476,8 @@ pub fn sys_utimensat(
     }
     fn utime_to_duration(time: &timespec) -> Option<KResult<Duration>> {
         match time.tv_nsec {
-            val if val == UTIME_OMIT as _ => None,
-            val if val == UTIME_NOW as _ => Some(Ok(wall_time())),
+            val if val == UTIME_OMIT as c_long => None,
+            val if val == UTIME_NOW as c_long => Some(Ok(wall_time())),
             _ => Some(time.try_into_time_value()),
         }
     }

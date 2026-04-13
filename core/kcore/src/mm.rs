@@ -171,7 +171,18 @@ impl ElfCacheEntry {
             }
             .map_err(map_elf_error)
         }) {
-            Ok(e) => Ok(Ok(e)),
+            Ok(e) => {
+                #[cfg(feature = "tee_ta_sign")]
+                {
+                    let abs = e.borrow_cache().location().absolute_path()?;
+                    let exec_path: &str = abs.as_ref();
+                    tee_task_iface::tasign::verify_ta_elf_signature_if_applicable(
+                        exec_path,
+                        e.borrow_cache(),
+                    )?;
+                }
+                Ok(Ok(e))
+            }
             Err((_, heads)) => Ok(Err(heads.data)),
         }
     }

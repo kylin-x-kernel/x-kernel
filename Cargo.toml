@@ -115,6 +115,8 @@ x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }
+tasign = { version = "0.1", default-features = false }
+tasign_kernel_shim = { version = "0.1", package = "tasign-kernel-shim" }
 
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }
