@@ -1,6 +1,7 @@
 #!/usr/bin/env groovy
 
 def ciResults = [:]
+def teeResults = [:]
 
 pipeline {
     agent {
@@ -13,12 +14,14 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         timestamps()
+        parallelsAlwaysFailFast()
     }
 
     environment {
         CI = 'true'
         PROJECT_REPO = 'https://gitee.com/openkylin/x-kernel'
         DEFAULT_BRANCH = 'main'
+        LIBUTEE_REPO = 'https://gitee.com/openkylin/rust-libutee'
         TEST_HARNESS_REPO = 'https://gitee.com/openkylin/starry-test-harness'
         TEST_HARNESS_BRANCH = 'master'
         CARGO_TERM_COLOR = 'always'
@@ -92,6 +95,42 @@ pipeline {
                         }
                     }
                 }
+                stage('TEE: x86_64') {
+                    steps {
+                        script {
+                            teeResults['x86_64'] = runTeeStorageTest('x86_64')
+                            ciResults['TEE: x86_64'] = [status: 'passed']
+                        }
+                    }
+                    post {
+                        failure {
+                            script {
+                                if (!teeResults.containsKey('x86_64')) {
+                                    teeResults['x86_64'] = [arch: 'x86_64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
+                                }
+                                ciResults['TEE: x86_64'] = [status: 'failed', detail: teeResults['x86_64']?.errorSnippet ?: 'TEE 测试失败']
+                            }
+                        }
+                    }
+                }
+                stage('TEE: aarch64') {
+                    steps {
+                        script {
+                            teeResults['aarch64'] = runTeeStorageTest('aarch64')
+                            ciResults['TEE: aarch64'] = [status: 'passed']
+                        }
+                    }
+                    post {
+                        failure {
+                            script {
+                                if (!teeResults.containsKey('aarch64')) {
+                                    teeResults['aarch64'] = [arch: 'aarch64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
+                                }
+                                ciResults['TEE: aarch64'] = [status: 'failed', detail: teeResults['aarch64']?.errorSnippet ?: 'TEE 测试失败']
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -101,19 +140,18 @@ pipeline {
         always {
             archiveArtifacts artifacts: [
                 '**/artifacts/**/*', '**/logs/**/*', '**/unittest-output.log',
+                '**/tee-test-output.log',
                 '**/coverage-html/**/*', '**/coverage.info', '**/coverage.xml', '**/coverage.txt'
             ].join(','), allowEmptyArchive: true
             script {
                 restoreReplayGiteeEnv()
                 deleteOldCiComments()
                 def coverageSummary = collectCoverageSummary()
-                def teeInfo = waitForTeeTest()
-                def comment = buildCombinedComment(ciResults, coverageSummary, teeInfo)
+                def comment = buildCombinedComment(ciResults, coverageSummary, teeResults)
                 notifyGiteePullRequest(comment)
-                if (currentBuild.currentResult == 'SUCCESS' && teeInfo.result == 'SUCCESS') {
-                    echo "Both CI test and tee-test passed, marking test as passed"
+                if (currentBuild.currentResult == 'SUCCESS') {
                     giteeTestPass()
-                } else if (currentBuild.currentResult != 'SUCCESS') {
+                } else {
                     giteeTestReset()
                 }
                 fixWorkspaceOwnership(env.WORKSPACE)
@@ -134,26 +172,6 @@ def runRustfmt() {
 set -euo pipefail
 cargo +nightly-2026-03-08 fmt --all --check
 '''
-        } finally {
-            fixWorkspaceOwnership(stageWorkspace)
-        }
-    }
-}
-
-def runClippy(String platform) {
-    ws("${WORKSPACE}/clippy-${platform}") {
-        def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
-        try {
-            deleteDir()
-            restoreSource()
-
-            sh """#!/bin/bash
-set -euo pipefail
-cp platforms/${platform}/defconfig .config
-rustup target add ${rustupTargetFor(platform)} || true
-make clippy
-"""
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
         }
@@ -208,36 +226,6 @@ make clippy
                 def vsockCid = (arch == 'x86_64') ? '101' : '102'
                 withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}",
                          "HOSTFWD_PORT=${hostfwdPort}", "VSOCK_CID=${vsockCid}"]) {
-                    sh '''#!/bin/bash
-set -euo pipefail
-stdbuf -oL -eL make ci-test run
-'''
-                }
-            }
-        } finally {
-            fixWorkspaceOwnership(stageWorkspace)
-        }
-    }
-}
-
-def executeBuildAndTest(arch) {
-    ws("${WORKSPACE}/${arch}") {
-        def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
-        try {
-            deleteDir()
-            restoreSource()
-            echo "Verifying architecture: ${arch}"
-
-            runUnitTests(arch)
-            generateCoverageHtml(arch)
-
-            dir('test-harness') {
-                git branch: "${env.TEST_HARNESS_BRANCH}",
-                    url: "${env.TEST_HARNESS_REPO}"
-                markSafeDirectory()
-
-                withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}"]) {
                     sh '''#!/bin/bash
 set -euo pipefail
 stdbuf -oL -eL make ci-test run
@@ -475,55 +463,6 @@ def rustupTargetFor(String platform) {
     error("Unsupported platform: ${platform}")
 }
 
-def waitForTeeTest(int timeoutMinutes = 30) {
-    def prId = env.giteePullRequestIid
-    if (!prId?.trim()) {
-        echo "No PR ID, skipping tee-test check"
-        return [result: 'UNKNOWN', description: '']
-    }
-    def jenkinsUrl = env.JENKINS_URL ?: 'http://10.42.30.102:8088/'
-    def prTag = "PR#${prId}"
-    def maxAttempts = timeoutMinutes * 2
-    echo "Waiting for tee-test build with ${prTag} (timeout: ${timeoutMinutes}min)..."
-
-    for (int i = 0; i < maxAttempts; i++) {
-        try {
-            def output = sh(script: """#!/bin/bash
-set +e
-json=\$(curl -g -s --max-time 10 '${jenkinsUrl}job/tee-test/api/json?tree=builds[number,result,building,description]{0,20}')
-echo "\${json}" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for b in data.get('builds', []):
-    desc = b.get('description') or ''
-    if '${prTag}' in desc:
-        if b.get('building'):
-            print('RUNNING|')
-        else:
-            print(str(b.get('result', 'UNKNOWN')) + '|' + desc)
-        sys.exit(0)
-print('NOT_FOUND|')
-"
-""", returnStdout: true).trim()
-
-            def parts = output.split('\\|', 2)
-            def result = parts[0]
-            def desc = parts.length > 1 ? parts[1] : ''
-
-            if (result == 'SUCCESS' || result == 'FAILURE' || result == 'ABORTED' || result == 'UNSTABLE') {
-                echo "tee-test for ${prTag}: ${result} (desc: ${desc})"
-                return [result: result, description: desc]
-            }
-            echo "tee-test for ${prTag}: ${result}, waiting... (${i + 1}/${maxAttempts})"
-        } catch (e) {
-            echo "Error checking tee-test: ${e.message}"
-        }
-        sleep(30)
-    }
-    echo "Timed out waiting for tee-test"
-    return [result: 'TIMEOUT', description: '']
-}
-
 def giteeTestPass() {
     if (!env.giteePullRequestIid?.trim()) return
     try {
@@ -658,6 +597,116 @@ def collectUnitTestSnippet(String arch) {
     }
 }
 
+def runTeeStorageTest(String arch) {
+    def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '']
+    def muslTarget = "${arch}-unknown-linux-musl"
+    def muslLinker = "${arch}-linux-musl-gcc"
+    def targetUpper = muslTarget.toUpperCase().replaceAll('-', '_')
+    def teeHostfwdPort = (arch == 'x86_64') ? '5558' : '5559'
+    def teeVsockCid = (arch == 'x86_64') ? '104' : '105'
+
+    ws("${WORKSPACE}/tee-test-${arch}") {
+        def stageWorkspace = pwd()
+        fixWorkspaceOwnership(stageWorkspace)
+        try {
+            deleteDir()
+            restoreSource()
+
+            sh """#!/bin/bash
+set -euo pipefail
+
+${runtimeTargetSetupFor(arch)}
+rustup +nightly-2026-03-08 target add ${muslTarget} || true
+
+LIBUTEE_DIR=\$(mktemp -d)
+trap 'rm -rf "\${LIBUTEE_DIR}"' EXIT
+
+echo "==> Cloning rust-libutee..."
+git clone --depth 1 ${env.LIBUTEE_REPO} "\${LIBUTEE_DIR}"
+git config --global --add safe.directory "\${LIBUTEE_DIR}"
+
+echo "==> Building storage_test for ${muslTarget}..."
+( cd "\${LIBUTEE_DIR}" && CC=${muslLinker} cargo +nightly-2026-03-08 build --bin storage_test --release --target ${muslTarget} )
+
+echo "==> Building tee_apps/sh with TEE_INIT_APPS=/tee/storage_test..."
+TEE_INIT_APPS="/tee/storage_test" RUSTFLAGS= CC=${muslLinker} \\
+  CARGO_TARGET_${targetUpper}_LINKER=${muslLinker} \\
+  cargo build --release --target ${muslTarget} --manifest-path tee_apps/sh/Cargo.toml
+
+echo "==> Creating rootfs..."
+env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run -p crate_rootfs --release -- \\
+  --image disk.img --size-bytes 64M \\
+  --copy target/${muslTarget}/release/sh:/bin/sh \\
+  --copy "\${LIBUTEE_DIR}/target/${muslTarget}/release/storage_test":/tee/storage_test
+
+echo "==> Building kernel..."
+cp ${defconfigFor(arch)} .config
+make build
+
+echo "==> Running TEE storage test..."
+set +e
+timeout 300 stdbuf -oL -eL make HOSTFWD_PORT=${teeHostfwdPort} VSOCK_CID=${teeVsockCid} justrun 2>&1 | tee tee-test-output.log
+QEMU_STATUS=\${PIPESTATUS[0]}
+set -e
+
+if [ "\${QEMU_STATUS}" -eq 124 ]; then
+    echo "TEE_RESULT: TIMEOUT"
+elif [ "\${QEMU_STATUS}" -ne 0 ]; then
+    echo "TEE_RESULT: QEMU_ERROR(\${QEMU_STATUS})"
+fi
+"""
+
+            def logText = readFile("${stageWorkspace}/tee-test-output.log")
+            result.passed = logText.split('<<< test success', -1).length - 1
+            result.failed = logText.split('<<< test failed', -1).length - 1
+
+            if (logText.contains('TEE_RESULT: TIMEOUT')) {
+                result.status = 'timeout'
+                result.errorSnippet = "QEMU 运行超时（300s），测试未能完成\n通过: ${result.passed}，失败: ${result.failed}"
+            } else if (logText.contains('TEE_RESULT: QEMU_ERROR')) {
+                result.status = 'failed'
+                result.errorSnippet = extractSnippet(logText, 'TEE_RESULT: QEMU_ERROR', 5)
+            } else if (logText.contains('panicked at')) {
+                result.status = 'panic'
+                result.errorSnippet = extractSnippet(logText, 'panicked at', 8)
+            } else if (result.failed > 0) {
+                result.status = 'failed'
+                result.errorSnippet = extractSnippet(logText, '<<< test failed', 5)
+            } else if (result.passed > 0) {
+                result.status = 'passed'
+            } else {
+                result.status = 'no_output'
+                result.errorSnippet = '未检测到任何测试输出，QEMU 可能未正常启动'
+            }
+
+            if (result.status != 'passed') {
+                error("TEE Storage Test ${arch}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
+            }
+
+        } finally {
+            fixWorkspaceOwnership(stageWorkspace)
+        }
+    }
+
+    return result
+}
+
+def extractSnippet(String log, String keyword, int contextLines) {
+    def lines = log.split('\n')
+    def snippetLines = []
+    for (int i = 0; i < lines.size(); i++) {
+        if (lines[i].contains(keyword)) {
+            def from = Math.max(0, i - 2)
+            def to = Math.min(lines.size() - 1, i + contextLines)
+            for (int j = from; j <= to; j++) {
+                snippetLines << lines[j]
+            }
+            if (snippetLines.size() >= 30) break
+        }
+    }
+    return snippetLines.take(30).join('\n')
+}
+
 def collectCoverageSummary() {
     def rows = []
     ['x86_64', 'aarch64'].each { arch ->
@@ -684,45 +733,24 @@ def collectCoverageSummary() {
     return header + '\n' + rows.join('\n')
 }
 
-def parseTeeDescription(String desc) {
-    // Format: "PR#58|x86_64:228/0/passed|aarch64:228/0/passed"
-    def teeResults = [:]
-    if (!desc?.trim()) return teeResults
-    desc.split('\\|').each { part ->
-        def m = part =~ /^(x86_64|aarch64):(\d+)\/(\d+)\/(.+)$/
-        if (m.matches()) {
-            teeResults[m.group(1)] = [
-                arch: m.group(1),
-                passed: m.group(2) as int,
-                failed: m.group(3) as int,
-                status: m.group(4)
-            ]
-        }
-    }
-    return teeResults
-}
-
-def buildTeeSection(Map teeInfo) {
-    def result = teeInfo.result ?: 'UNKNOWN'
-    def teeResults = parseTeeDescription(teeInfo.description ?: '')
-
-    if (result == 'TIMEOUT' || result == 'NOT_FOUND' || result == 'UNKNOWN') {
-        return "\n### TEE 功能测试\n\n⏳ 等待超时或未找到对应构建\n"
+def buildTeeSection(Map teeResults) {
+    if (teeResults.isEmpty()) {
+        return "\n### TEE 功能测试\n\n⏭ TEE 阶段未执行（可能被 failFast 终止）\n"
     }
 
     ['x86_64', 'aarch64'].each { arch ->
         if (!teeResults.containsKey(arch)) {
-            teeResults[arch] = [arch: arch, passed: 0, failed: 0, status: 'failed']
+            teeResults[arch] = [arch: arch, passed: 0, failed: 0, status: 'not_run']
         }
     }
 
-    def allPassed = result == 'SUCCESS'
+    def allPassed = teeResults.every { k, v -> v.status == 'passed' }
     def header = allPassed ? '### ✅ TEE 功能测试通过' : '### ❌ TEE 功能测试失败'
     def rows = ['x86_64', 'aarch64'].collect { arch ->
         def r = teeResults[arch]
-        def total = r.passed + r.failed
-        def icon = r.status == 'passed' ? '✅' : '❌'
-        "| ${arch} | ${r.passed} | ${r.failed} | ${total} | ${icon} |"
+        def total = (r.passed ?: 0) + (r.failed ?: 0)
+        def icon = r.status == 'passed' ? '✅' : (r.status == 'not_run' ? '⏭' : '❌')
+        "| ${arch} | ${r.passed ?: 0} | ${r.failed ?: 0} | ${total} | ${icon} |"
     }.join('\n')
 
     return """\
@@ -734,10 +762,10 @@ ${header}
 ${rows}"""
 }
 
-def buildCombinedComment(Map ciResults, String coverageSummary, Map teeInfo) {
+def buildCombinedComment(Map ciResults, String coverageSummary, Map teeResults) {
     def ciComment = buildCiComment(ciResults, coverageSummary)
-    def teeSection = buildTeeSection(teeInfo)
-    def allGreen = currentBuild.currentResult == 'SUCCESS' && teeInfo.result == 'SUCCESS'
+    def teeSection = buildTeeSection(teeResults)
+    def allGreen = currentBuild.currentResult == 'SUCCESS'
     def overallHeader = allGreen
         ? '## ✅ CI 全部通过'
         : '## ❌ CI 未全部通过'
@@ -750,7 +778,8 @@ def buildCiComment(Map results, String coverageSummary = '') {
         'Prepare Source',
         'Rustfmt',
         'Clippy+Build: aarch64-crosvm-virt',
-        'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt'
+        'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt',
+        'TEE: x86_64', 'TEE: aarch64'
     ]
     def normalizedResults = [:]
     stageOrder.each { name ->
