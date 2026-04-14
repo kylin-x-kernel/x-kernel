@@ -35,8 +35,9 @@ use crate::tee::{
         CipherPaddingMode, syscall_asymm_operate, syscall_asymm_verify, syscall_authenc_dec_final,
         syscall_authenc_enc_final, syscall_authenc_init, syscall_authenc_update_aad,
         syscall_authenc_update_payload, syscall_cipher_final, syscall_cipher_init,
-        syscall_cipher_update, syscall_cryp_state_alloc, syscall_cryp_state_copy,
-        syscall_cryp_state_free, syscall_hash_final, syscall_hash_init, syscall_hash_update,
+        syscall_cipher_update, syscall_cryp_random_number_generate, syscall_cryp_state_alloc,
+        syscall_cryp_state_copy, syscall_cryp_state_free, syscall_hash_final, syscall_hash_init,
+        syscall_hash_update,
     },
     tee_svc_storage::{
         syscall_storage_alloc_enum, syscall_storage_free_enum, syscall_storage_next_enum,
@@ -227,6 +228,10 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         }
 
         Sysno::tee_scn_cryp_obj_copy => syscall_cryp_obj_copy(uctx.arg0() as _, uctx.arg1() as _),
+
+        Sysno::tee_scn_cryp_random_number_generate => {
+            syscall_cryp_random_number_generate(uctx.arg0() as _, uctx.arg1() as _)
+        }
 
         Sysno::tee_scn_authenc_init => syscall_authenc_init(
             uctx.arg0(),

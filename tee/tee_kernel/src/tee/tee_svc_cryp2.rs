@@ -100,6 +100,7 @@ use crate::{
         },
         libmbedtls::bignum::BigNum,
         memtag::{memtag_strip_tag, memtag_strip_tag_const},
+        rng_software::crypto_rng_read,
         tee_session::{with_tee_session_ctx, with_tee_session_ctx_mut},
         tee_svc_cryp::{CryptoAttrRef, TeeCryptObjAttrOps, tee_crypto_ops},
         user_access::bb_memdup_user,
@@ -1171,6 +1172,21 @@ pub fn syscall_cipher_final(
     // Copy dst to user
     unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
     unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
+    Ok(())
+}
+
+pub fn syscall_cryp_random_number_generate(arg0: usize, arg1: usize) -> TeeResult {
+    let buf_ptr = arg0 as *mut u8;
+    let buf_len = arg1;
+
+    if buf_ptr.is_null() || buf_len == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_len) };
+    let mut buf = bb_memdup_user(buf_slice)?;
+    crypto_rng_read(&mut buf)?;
+
+    unsafe { copy_to_user(buf_slice, &buf, buf_len * size_of::<u8>())? };
     Ok(())
 }
 
