@@ -33,6 +33,9 @@ pub enum DeviceEnum {
     /// Vsock device.
     #[cfg(feature = "vsock")]
     Vsock(VsockDevice),
+    /// 9P filesystem device.
+    #[cfg(feature = "virtio_9p")]
+    Virtio9p(Virtio9pDevice),
 }
 
 impl DriverOps for DeviceEnum {
@@ -50,6 +53,8 @@ impl DriverOps for DeviceEnum {
             Self::Input(_) => DeviceKind::Input,
             #[cfg(feature = "vsock")]
             Self::Vsock(_) => DeviceKind::Vsock,
+            #[cfg(feature = "virtio_9p")]
+            Self::Virtio9p(_) => DeviceKind::Virtio9p,
             _ => unreachable!(),
         }
     }
@@ -68,6 +73,8 @@ impl DriverOps for DeviceEnum {
             Self::Input(dev) => dev.name(),
             #[cfg(feature = "vsock")]
             Self::Vsock(dev) => dev.name(),
+            #[cfg(feature = "virtio_9p")]
+            Self::Virtio9p(dev) => dev.name(),
             _ => unreachable!(),
         }
     }

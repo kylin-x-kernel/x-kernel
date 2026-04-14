@@ -13,10 +13,20 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
+#[cfg(feature = "fs9p")]
+use alloc::borrow::ToOwned;
+
 mod test_path_resolver;
 mod test_working_context;
 
-use kdriver::{BlockDevice as KBlockDevice, DeviceContainer, prelude::*};
+#[cfg(feature = "fs9p")]
+use fs_ng_vfs::{
+    NodePermission,
+    path::{Path, PathBuf},
+};
+#[cfg(feature = "fs9p")]
+use kdriver::Virtio9pDevice;
+use kdriver::{BlockDevice, DeviceContainer, prelude::*};
 
 #[cfg(feature = "fat")]
 mod disk;
@@ -36,7 +46,7 @@ pub use path_resolver::PathResolver;
 pub use working_context::WorkingContext;
 
 /// Initialize the filesystem subsystem and mount the root filesystem.
-pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
+pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
     info!("Initialize filesystem subsystem...");
 
     let dev = {
@@ -60,4 +70,38 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
 
     let mp = fs_ng_vfs::Mountpoint::new_root(&fs);
     ROOT_FS_CONTEXT.call_once(|| FsContext::new(mp.root_location()));
+}
+
+#[cfg(feature = "fs9p")]
+pub fn mount_9pfilesystems(mut virtio_9p_devs: DeviceContainer<Virtio9pDevice>, mount_path: &str) {
+    let dev_9p = virtio_9p_devs
+        .take_one()
+        .expect("No virtio-9p device found!");
+    info!("Mount 9P filesystem...");
+    info!("  use virtio-9p device: {:?}", dev_9p.name());
+    info!("  mount tag: {:?}", dev_9p.mount_tag());
+
+    let fs = fs::new_9p_filesystem(dev_9p).expect("Failed to initialize filesystem");
+    info!("  filesystem type: {:?}", fs.name());
+    let mut fs_ctx = FS_CONTEXT.lock();
+    ensure_mount_path(&mut fs_ctx, mount_path).expect("Failed to prepare 9P mount path");
+    fs_ctx
+        .resolve(mount_path)
+        .and_then(|loc| loc.mount(&fs).map(|_| ()))
+        .expect("Failed to mount 9P filesystem");
+    info!("  mounted at: {:?}", mount_path);
+}
+
+#[cfg(feature = "fs9p")]
+fn ensure_mount_path(fs: &mut FsContext, mount_path: &str) -> fs_ng_vfs::VfsResult<()> {
+    const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
+
+    let mut path = PathBuf::new();
+    for comp in Path::new(mount_path).components() {
+        path.push(comp.as_str());
+        if fs.resolve(&path).is_err() {
+            fs.create_dir(&path, DIR_PERMISSION)?;
+        }
+    }
+    Ok(())
 }

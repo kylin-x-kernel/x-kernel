@@ -7,7 +7,7 @@
     "entry/Cargo.toml",
   ],
   "rust-analyzer.cargo.features": [
-    "qemu", "smp", "unittest"
+    "qemu", "smp", "unittest",
   ],
   "rust-analyzer.cargo.extraEnv": {
     "RUSTC_BOOTSTRAP": "1",

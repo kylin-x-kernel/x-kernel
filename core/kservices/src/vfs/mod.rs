@@ -15,7 +15,7 @@ use fs_ng_vfs::{
 };
 use kcore::task::AsThread;
 pub use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
-use kerrno::LinuxResult;
+use kerrno::{LinuxError, LinuxResult};
 use kfs::{FS_CONTEXT, FsContext};
 use ktask::KtaskRef;
 use procfs::ProcFsHooks;
@@ -43,11 +43,19 @@ fn procfs_fd_path(task: &KtaskRef, fd: u32) -> VfsResult<String> {
 
 /// Mount a filesystem at the specified path, creating the path if it doesn't exist
 fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()> {
-    if fs.resolve(path).is_err() {
-        fs.create_dir(path, DIR_PERMISSION)?;
+    match fs.resolve(path) {
+        Ok(loc) => {
+            if loc.check_is_dir().is_err() {
+                // Path exists but is not a directory, replace it with a directory.
+                fs.remove_file(path)?;
+                fs.create_dir(path, DIR_PERMISSION)?;
+            }
+        }
+        Err(_) => {
+            fs.create_dir(path, DIR_PERMISSION)?;
+        }
     }
     fs.resolve(path)?.mount(&mount_fs)?;
-    info!("Mounted {} at {}", mount_fs.name(), path);
     Ok(())
 }
 
@@ -89,11 +97,21 @@ pub fn mount_all() -> LinuxResult<()> {
         }
     }
     path.push("subsystem");
-    fs.symlink("whatever", &path)?;
+    if let Err(err) = fs.symlink("whatever", &path) {
+        let linux_err = LinuxError::from(err);
+        if linux_err != LinuxError::EEXIST {
+            return Err(linux_err);
+        }
+    }
     drop(fs);
 
     #[cfg(feature = "dev-log")]
-    dev::bind_dev_log().expect("Failed to bind /dev/log");
+    if let Err(err) = dev::bind_dev_log() {
+        if err != LinuxError::ENOSYS && err != LinuxError::EOPNOTSUPP {
+            return Err(err);
+        }
+        warn!("/dev/log not available: {err}");
+    }
 
     Ok(())
 }

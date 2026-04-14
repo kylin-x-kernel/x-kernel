@@ -7,6 +7,7 @@ GRAPHIC ?= n
 INPUT ?= y
 VSOCK ?= y
 UEFI ?= n
+VIRTIO_9P ?= n
 BUS ?= pci
 MEM ?= 1g
 ACCEL ?= y
@@ -160,6 +161,9 @@ qemu_args-$(INPUT) += \
 
 qemu_args-$(VSOCK) += \
   -device vhost-vsock-pci,id=virtiosocket0,guest-cid=$(VSOCK_CID)
+
+qemu_args-$(VIRTIO_9P) += \
+  -virtfs local,path=$(PWD)/shared,mount_tag=hostshare,security_model=none,id=hostshare0
 
 ifeq ($(QEMU_LOG), y)
   qemu_args-y += -D qemu.log -d in_asm,int,mmu,pcall,cpu_reset,guest_errors

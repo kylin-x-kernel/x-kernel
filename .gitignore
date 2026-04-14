@@ -27,3 +27,4 @@ Cargo.lock
 auto.conf
 autoconf.h
 target/kbuild/
+/shared

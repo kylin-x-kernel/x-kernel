@@ -6,7 +6,7 @@
 //!
 //! Combines PathResolver and WorkingContext to provide high-level filesystem operations.
 
-use alloc::{collections::vec_deque::VecDeque, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, collections::vec_deque::VecDeque, string::String, vec::Vec};
 
 use fs_ng_vfs::{
     Location, Metadata, NodePermission, NodeType, VfsResult,
@@ -14,6 +14,8 @@ use fs_ng_vfs::{
 };
 use kio::{Read, Write};
 
+#[cfg(feature = "fs9p")]
+use crate::fs::fs9p::Inode as Fs9pInode;
 use crate::{File, PathResolver, ReadDir, WorkingContext};
 
 /// Filesystem operations - combines path resolution and working context
@@ -199,8 +201,18 @@ impl FsOperations {
         if dir.lookup_no_follow(name).is_ok() {
             return Err(fs_ng_vfs::VfsError::AlreadyExists);
         }
+
         let symlink = dir.create(name, NodeType::Symlink, NodePermission::default())?;
-        symlink.entry().as_file()?.set_symlink(target.as_ref())?;
+        if let Err(err) = symlink.entry().as_file()?.set_symlink(target.as_ref()) {
+            error!(
+                "symlink: set_symlink failed target={} link_name={} fs={} err={:?}",
+                target.as_ref(),
+                name,
+                dir.filesystem().name(),
+                err
+            );
+            return Err(err);
+        }
         Ok(symlink)
     }
 

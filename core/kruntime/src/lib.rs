@@ -252,13 +252,16 @@ pub fn rust_main(arg: usize) -> ! {
 
     ktask::init_scheduler();
 
-    #[cfg(any(feature = "fs", feature = "net", feature = "display"))]
+    #[cfg(any(feature = "fs", feature = "fs9p", feature = "net", feature = "display"))]
     {
         #[allow(unused_variables)]
         let all_devices = kdriver::init_drivers();
 
         #[cfg(feature = "fs")]
         kfs::init_filesystems(all_devices.block);
+
+        #[cfg(feature = "fs9p")]
+        kfs::mount_9pfilesystems(all_devices.virtio_9p, "/mnt/hostshare");
 
         #[cfg(feature = "net")]
         knet::init_network(all_devices.net);

@@ -3,7 +3,7 @@
 #   - `APP_FEAT`: features to be enabled for the Rust app.
 
 kfeat_prefix := kfeat/
-kfeat :=
+kfeat := $(strip $(shell echo $(FEATURES) | tr ',' ' '))
 config_kfeat := $(shell ./scripts/make/kfeat_features.sh .config)
 
 ifeq ($(BUS),mmio)

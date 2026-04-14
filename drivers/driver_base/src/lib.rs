@@ -36,6 +36,8 @@ pub enum DeviceKind {
     Input,
     /// Vsock device (e.g., virtio-vsock).
     Vsock,
+    /// 9P filesystem device (e.g., virtio-9p).
+    Virtio9p,
 }
 
 impl DeviceKind {
@@ -50,6 +52,7 @@ impl DeviceKind {
             Display => "display",
             Input => "input",
             Vsock => "vsock",
+            Virtio9p => "virtio-9p",
         }
     }
 }

@@ -44,6 +44,8 @@ pub use self::structs::BlockDevice;
 pub use self::structs::DisplayDevice;
 #[cfg(feature = "net")]
 pub use self::structs::NetDevice;
+#[cfg(feature = "virtio_9p")]
+pub use self::structs::Virtio9pDevice;
 pub use self::structs::{DeviceContainer, DeviceEnum};
 
 #[cfg(any(feature = "bus-pci", feature = "virtio"))]
@@ -86,6 +88,9 @@ pub struct AllDevices {
     /// All vsock device drivers.
     #[cfg(feature = "vsock")]
     pub vsock: DeviceContainer<VsockDevice>,
+    #[cfg(feature = "virtio_9p")]
+    /// All virtio-9p device drivers.
+    pub virtio_9p: DeviceContainer<Virtio9pDevice>,
 }
 
 impl AllDevices {
@@ -123,6 +128,8 @@ impl AllDevices {
             DeviceEnum::Input(dev) => self.input.push(dev),
             #[cfg(feature = "vsock")]
             DeviceEnum::Vsock(dev) => self.vsock.push(dev),
+            #[cfg(feature = "virtio_9p")]
+            DeviceEnum::Virtio9p(dev) => self.virtio_9p.push(dev),
         }
     }
 }

@@ -31,6 +31,8 @@ virtio-net = ["net", "virtio", "virtio/net"]
 virtio-gpu = ["display", "virtio", "virtio/gpu"]
 virtio-input = ["input", "virtio", "virtio/input"]
 virtio-socket = ["vsock", "virtio", "virtio/socket"]
+virtio_9p = ["virtio", "virtio/virtio_9p"]
+
 ramdisk = ["block", "block/ramdisk"]
 # bcm2835-sdhci = ["block", "block/bcm2835-sdhci"]
 # sdmmc = ["block", "block/sdmmc", "dep:khal" ]

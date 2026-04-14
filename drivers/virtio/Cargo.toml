@@ -18,6 +18,7 @@ gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]
 socket = ["alloc", "dep:vsock"]
+virtio_9p = ["alloc"]
 
 [dependencies]
 driver_base = { workspace = true }

@@ -4,7 +4,7 @@
 
 use core::bstr::ByteStr;
 
-use kerrno::LinuxResult;
+use kerrno::{KErrorKind, LinuxError, LinuxResult};
 use knet::{
     RecvOptions, SocketAddrEx, SocketOps,
     unix::{DgramTransport, UnixAddr, UnixDomainSocket},
@@ -13,7 +13,17 @@ use knet::{
 /// Bind /dev/log as a Unix domain socket for syslog messages
 pub fn bind_dev_log() -> LinuxResult<()> {
     let server = UnixDomainSocket::new(DgramTransport::new(1));
-    server.bind(SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into())))?;
+    if let Err(err) = server.bind(SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into()))) {
+        let kind = KErrorKind::try_from(err);
+        if matches!(
+            kind,
+            Ok(KErrorKind::Unsupported | KErrorKind::OperationNotSupported)
+        ) {
+            warn!("/dev/log not supported: {err}");
+            return Ok(());
+        }
+        return Err(LinuxError::from(err));
+    }
     ktask::spawn_with_name(
         move || {
             let mut buf = [0u8; 65536];
