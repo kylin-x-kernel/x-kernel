@@ -52,6 +52,8 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     // target/<target_triple>/<mode>/linker_xxxx.lds
     let out_path = Path::new(&out_dir).join("../../..").join(fname);
+    // Tell cargo to re-run this script if the output linker script is missing.
+    println!("cargo:rerun-if-changed={}", out_path.display());
     std::fs::write(out_path, ld_content)?;
     Ok(())
 }

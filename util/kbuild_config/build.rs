@@ -17,7 +17,13 @@ fn main() {
         .unwrap()
         .parent()
         .unwrap();
-    let target_config_path = workspace_root.join("target/kbuild/config.rs");
+    let target_dir = env::var("TARGET_DIR")
+        .unwrap_or_else(|_| workspace_root.join("target").to_string_lossy().into_owned());
+    let plat_name = env::var("K_PLAT_NAME").unwrap_or_else(|_| "default".to_string());
+    let target_config_path = Path::new(&target_dir)
+        .join("kbuild")
+        .join(plat_name)
+        .join("config.rs");
 
     if target_config_path.exists() {
         // Copy the generated config
@@ -36,4 +42,8 @@ fn main() {
         config_rs_path.display()
     );
     println!("cargo:rerun-if-changed={}", target_config_path.display());
+    // Declare env vars that affect the build output so parallel platform
+    // builds each get their own build-script fingerprint and OUT_DIR.
+    println!("cargo:rerun-if-env-changed=K_PLAT_NAME");
+    println!("cargo:rerun-if-env-changed=TARGET_DIR");
 }

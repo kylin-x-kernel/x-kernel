@@ -211,8 +211,8 @@ $(OUT_LINUXBOOT): $(LINUXBOOT_SETUP_BIN) $(BOOTSTUB_RAW_BIN) $(BOOTSTUB_ELF) $(O
 endif
 
 $(BOOTSTUB_ELF): $(BOOTSTUB_SOURCES)
-	@printf '$(WHITE_C)cd$(END_C) $(GRAY_C)$(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --release --config target.x86_64-unknown-none.rustflags=[]$(END_C)\n'
-	@cd $(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --release --config 'target.x86_64-unknown-none.rustflags=[]'
+	@printf '$(WHITE_C)cd$(END_C) $(GRAY_C)$(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --target-dir $(TARGET_DIR) --release --config target.x86_64-unknown-none.rustflags=[]$(END_C)\n'
+	@cd $(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --target-dir $(TARGET_DIR) --release --config 'target.x86_64-unknown-none.rustflags=[]'
 
 $(BOOTLOADER_EFI): $(BOOTLOADER_SOURCES)
 	@printf '$(WHITE_C)cd$(END_C) $(GRAY_C)$(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTLOADER_PKG) --target x86_64-unknown-uefi --target-dir $(TARGET_DIR) --release$(END_C)\n'

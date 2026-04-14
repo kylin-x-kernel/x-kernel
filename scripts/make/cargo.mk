@@ -31,7 +31,7 @@ endef
 clippy_args := -A unsafe_op_in_unsafe_fn -D warnings
 
 define cargo_clippy
-  $(call run_cmd,cargo -Z unstable-options -C $(APP) clippy,-p $(rust_package) --target $(TARGET) --features "$(strip $(KFEAT) $(APP_FEAT))" $(1) $(verbose) -- $(clippy_args))
+  $(call run_cmd,cargo -Z unstable-options -C $(APP) clippy,-p $(rust_package) --target $(TARGET) --target-dir $(TARGET_DIR) --features "$(strip $(KFEAT) $(APP_FEAT))" $(1) $(verbose) -- $(clippy_args))
 endef
 
 package_roots := api arch boot core drivers fs io mm net process tee util

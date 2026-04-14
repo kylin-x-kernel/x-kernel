@@ -31,11 +31,13 @@
 # Enable unstable features
 export RUSTC_BOOTSTRAP := 1
 export DISK_IMG ?= $(PWD)/disk.img
-XCONF = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --manifest-path xtask/xconfig/Cargo.toml --bin xconf --
 
 V ?=
 LTO ?=
 TARGET_DIR ?= $(PWD)/target
+export TARGET_DIR
+XCONF_TARGET_DIR ?= $(TARGET_DIR)/tools/xconf
+XCONF = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(XCONF_TARGET_DIR) --manifest-path xtask/xconfig/Cargo.toml --bin xconf --offline --
 EXTRA_CONFIG ?=
 UIMAGE ?= n
 export UNITTEST ?= n
@@ -79,6 +81,7 @@ include scripts/make/deps.mk
 export K_ARCH=$(ARCH)
 export K_MODE=$(MODE)
 export K_TARGET=$(TARGET)
+export K_PLAT_NAME=$(PLAT_NAME)
 export K_IP=$(IP)
 export K_GW=$(GW)
 export KBUILD_BUILD_MACHINE ?= $(shell printf '%s@%s' "$$(id -un 2>/dev/null || whoami)" "$$(hostname 2>/dev/null)")
@@ -101,9 +104,10 @@ GDB ?= gdb
 # Paths
 OUT_DIR ?= $(PWD)
 LD_SCRIPT ?= $(abspath $(TARGET_DIR)/$(TARGET)/$(MODE)/linker_$(PLAT_NAME).lds)
+KBUILD_CONFIG_DIR := $(TARGET_DIR)/kbuild/$(PLAT_NAME)
 
 # Generate Rust const definitions from .config
-CONFIG_RS := $(TARGET_DIR)/kbuild/config.rs
+CONFIG_RS := $(KBUILD_CONFIG_DIR)/config.rs
 
 APP_NAME := xkernel
 OUT_ELF := $(OUT_DIR)/$(APP_NAME)_$(PLAT_NAME).elf
@@ -171,7 +175,7 @@ oldconfig:
 
 $(CONFIG_RS): .config
 	@echo "📝 Generating Rust const definitions from .config..."
-	@$(XCONF) gen-const
+	@$(XCONF) gen-const -o $(KBUILD_CONFIG_DIR)
 	@echo "✅ Generated config.rs"
 
 
@@ -227,8 +231,8 @@ endif
 
 clean: clean_c
 	rm -rf $(APP)/*.bin $(APP)/*.elf
-	cargo clean
-	@rm -f target/kbuild/config.rs .cargo/config.toml
+	cargo clean --target-dir $(TARGET_DIR)
+	@rm -rf $(TARGET_DIR)/kbuild .cargo/config.toml
 
 distclean: clean
 	@rm -f .config .config.old auto.conf autoconf.h

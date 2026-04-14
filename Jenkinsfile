@@ -7,13 +7,14 @@ pipeline {
     agent {
         docker {
             image 'yeanwang/x-kernel-builder:v1.4'
-            args '-v /var/run/docker.sock:/var/run/docker.sock -v /var/jenkins_home/cargo/registry:/usr/local/cargo/registry --privileged -u root:root'
+            args '-v /var/run/docker.sock:/var/run/docker.sock -v /var/jenkins_home/cargo/registry:/usr/local/cargo/registry -v /var/jenkins_home/xkernel-target:/xkernel-target --privileged -u root:root'
         }
     }
 
     options {
         skipDefaultCheckout(true)
         timestamps()
+        disableConcurrentBuilds()
         parallelsAlwaysFailFast()
     }
 
@@ -26,6 +27,7 @@ pipeline {
         TEST_HARNESS_BRANCH = 'master'
         CARGO_TERM_COLOR = 'always'
         PYTHONUNBUFFERED = '1'
+        TARGET_DIR = '/xkernel-target'
     }
 
     stages {
@@ -178,8 +180,8 @@ cargo +nightly-2026-03-08 fmt --all --check
     }
 }
 
-def runClippyAndBuild(String platform) {
-    ws("${WORKSPACE}/clippy-build-${platform}") {
+def runClippy(String platform) {
+    ws("${WORKSPACE}/clippy-${platform}") {
         def stageWorkspace = pwd()
         fixWorkspaceOwnership(stageWorkspace)
         try {
@@ -191,8 +193,35 @@ set -euo pipefail
 cp platforms/${platform}/defconfig .config
 rustup target add ${rustupTargetFor(platform)} || true
 make clippy
+"""
+        } finally {
+            fixWorkspaceOwnership(stageWorkspace)
+        }
+    }
+}
+
+def runClippyAndBuild(String platform) {
+    ws("${WORKSPACE}/clippy-build-${platform}") {
+        def stageWorkspace = pwd()
+        def arch = archForPlatform(platform)
+        def buildTargetDir = targetDirForArch(arch)
+        fixWorkspaceOwnership(stageWorkspace)
+        try {
+            deleteDir()
+            restoreSource()
+
+            withEnv(["TARGET_DIR=${buildTargetDir}"]) {
+            sh """#!/bin/bash
+set -euo pipefail
+echo "DEBUG: TARGET_DIR=\${TARGET_DIR}"
+echo "DEBUG: Listing ${buildTargetDir}..."
+ls -lh ${buildTargetDir} 2>/dev/null || echo "Target dir not yet created"
+cp platforms/${platform}/defconfig .config
+rustup target add ${rustupTargetFor(platform)} || true
+make clippy
 stdbuf -oL -eL make build
 """
+            }
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
         }
@@ -201,6 +230,7 @@ stdbuf -oL -eL make build
 
 def runClippyAndRuntime(String arch) {
     def platform = "${arch}-qemu-virt"
+    def runtimeTargetDir = targetDirForArch(arch)
     ws("${WORKSPACE}/${arch}") {
         def stageWorkspace = pwd()
         fixWorkspaceOwnership(stageWorkspace)
@@ -208,12 +238,50 @@ def runClippyAndRuntime(String arch) {
             deleteDir()
             restoreSource()
 
-            sh """#!/bin/bash
+            withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
+                sh """#!/bin/bash
 set -euo pipefail
+echo "DEBUG: TARGET_DIR=\${TARGET_DIR}"
+echo "DEBUG: Listing ${runtimeTargetDir}..."
+ls -lh ${runtimeTargetDir} 2>/dev/null || echo "Target dir not yet created"
 cp platforms/${platform}/defconfig .config
 rustup target add ${rustupTargetFor(platform)} || true
 make clippy
 """
+                runUnitTests(arch)
+                generateCoverageHtml(arch)
+
+                dir('test-harness') {
+                    git branch: "${env.TEST_HARNESS_BRANCH}",
+                        url: "${env.TEST_HARNESS_REPO}"
+                    markSafeDirectory()
+
+                    def hostfwdPort = (arch == 'x86_64') ? '5556' : '5557'
+                    def vsockCid = (arch == 'x86_64') ? '101' : '102'
+                    withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}",
+                             "HOSTFWD_PORT=${hostfwdPort}", "VSOCK_CID=${vsockCid}"]) {
+                        sh '''#!/bin/bash
+set -euo pipefail
+stdbuf -oL -eL make ci-test run
+'''
+                    }
+                }
+            }
+        } finally {
+            fixWorkspaceOwnership(stageWorkspace)
+        }
+    }
+}
+
+def executeBuildAndTest(arch) {
+    ws("${WORKSPACE}/${arch}") {
+        def stageWorkspace = pwd()
+        fixWorkspaceOwnership(stageWorkspace)
+        try {
+            deleteDir()
+            restoreSource()
+            echo "Verifying architecture: ${arch}"
+
             runUnitTests(arch)
             generateCoverageHtml(arch)
 
@@ -222,10 +290,7 @@ make clippy
                     url: "${env.TEST_HARNESS_REPO}"
                 markSafeDirectory()
 
-                def hostfwdPort = (arch == 'x86_64') ? '5556' : '5557'
-                def vsockCid = (arch == 'x86_64') ? '101' : '102'
-                withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}",
-                         "HOSTFWD_PORT=${hostfwdPort}", "VSOCK_CID=${vsockCid}"]) {
+                withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}"]) {
                     sh '''#!/bin/bash
 set -euo pipefail
 stdbuf -oL -eL make ci-test run
@@ -400,7 +465,29 @@ def checkoutProject() {
 }
 
 def markSafeDirectory() {
-    sh "git config --global --add safe.directory ${pwd()}"
+    sh '''#!/bin/bash
+set -euo pipefail
+
+dir="$(pwd)"
+for i in $(seq 1 20); do
+    if git config --global --add safe.directory "$dir" 2>/tmp/git-safe-dir.err; then
+        exit 0
+    fi
+
+    if grep -q "could not lock config file" /tmp/git-safe-dir.err; then
+        rm -f /tmp/git-safe-dir.err
+        sleep 0.2
+        continue
+    fi
+
+    cat /tmp/git-safe-dir.err >&2 || true
+    exit 1
+done
+
+echo "WARN: failed to set git safe.directory due to persistent lock contention" >&2
+cat /tmp/git-safe-dir.err >&2 || true
+exit 1
+'''
 }
 
 def deleteOldCiComments() {
@@ -461,6 +548,16 @@ def rustupTargetFor(String platform) {
     if (platform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
     if (platform.startsWith('x86')) return 'x86_64-unknown-none'
     error("Unsupported platform: ${platform}")
+}
+
+def archForPlatform(String platform) {
+    if (platform.startsWith('aarch64')) return 'aarch64'
+    if (platform.startsWith('x86_64')) return 'x86_64'
+    error("Unsupported platform: ${platform}")
+}
+
+def targetDirForArch(String arch) {
+    return "/xkernel-target/runtime-${arch}"
 }
 
 def giteeTestPass() {
@@ -604,6 +701,7 @@ def runTeeStorageTest(String arch) {
     def targetUpper = muslTarget.toUpperCase().replaceAll('-', '_')
     def teeHostfwdPort = (arch == 'x86_64') ? '5558' : '5559'
     def teeVsockCid = (arch == 'x86_64') ? '104' : '105'
+    def teeTargetDir = "/xkernel-target/tee-${arch}"
 
     ws("${WORKSPACE}/tee-test-${arch}") {
         def stageWorkspace = pwd()
@@ -612,18 +710,22 @@ def runTeeStorageTest(String arch) {
             deleteDir()
             restoreSource()
 
+            withEnv(["TARGET_DIR=${teeTargetDir}"]) {
             sh """#!/bin/bash
 set -euo pipefail
 
 ${runtimeTargetSetupFor(arch)}
 rustup +nightly-2026-03-08 target add ${muslTarget} || true
 
-LIBUTEE_DIR=\$(mktemp -d)
-trap 'rm -rf "\${LIBUTEE_DIR}"' EXIT
+LIBUTEE_DIR="/xkernel-target/libutee-${arch}"
+mkdir -p "\${LIBUTEE_DIR}"
 
-echo "==> Cloning rust-libutee..."
-git clone --depth 1 ${env.LIBUTEE_REPO} "\${LIBUTEE_DIR}"
-git config --global --add safe.directory "\${LIBUTEE_DIR}"
+echo "==> Syncing rust-libutee..."
+if [ -d "\${LIBUTEE_DIR}/.git" ]; then
+    git -C "\${LIBUTEE_DIR}" fetch --depth 1 origin HEAD && git -C "\${LIBUTEE_DIR}" reset --hard FETCH_HEAD
+else
+    git clone --depth 1 ${env.LIBUTEE_REPO} "\${LIBUTEE_DIR}"
+fi
 
 echo "==> Building storage_test for ${muslTarget}..."
 ( cd "\${LIBUTEE_DIR}" && CC=${muslLinker} cargo +nightly-2026-03-08 build --bin storage_test --release --target ${muslTarget} )
@@ -631,21 +733,26 @@ echo "==> Building storage_test for ${muslTarget}..."
 echo "==> Building tee_apps/sh with TEE_INIT_APPS=/tee/storage_test..."
 TEE_INIT_APPS="/tee/storage_test" RUSTFLAGS= CC=${muslLinker} \\
   CARGO_TARGET_${targetUpper}_LINKER=${muslLinker} \\
-  cargo build --release --target ${muslTarget} --manifest-path tee_apps/sh/Cargo.toml
+  cargo build --release --target ${muslTarget} --manifest-path tee_apps/sh/Cargo.toml \\
+  --target-dir "\${TARGET_DIR}/tee-apps"
 
 echo "==> Creating rootfs..."
-env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run -p crate_rootfs --release -- \\
+env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run -p crate_rootfs --release \\
+  --target-dir "\${TARGET_DIR}/crate-rootfs" -- \\
   --image disk.img --size-bytes 64M \\
-  --copy target/${muslTarget}/release/sh:/bin/sh \\
+  --copy "\${TARGET_DIR}/tee-apps/${muslTarget}/release/sh":/bin/sh \\
   --copy "\${LIBUTEE_DIR}/target/${muslTarget}/release/storage_test":/tee/storage_test
 
 echo "==> Building kernel..."
+echo "DEBUG: TARGET_DIR=\${TARGET_DIR}"
+echo "DEBUG: Listing ${teeTargetDir}..."
+ls -lh ${teeTargetDir} 2>/dev/null || echo "Target dir not yet created"
 cp ${defconfigFor(arch)} .config
 make build
 
 echo "==> Running TEE storage test..."
 set +e
-timeout 300 stdbuf -oL -eL make HOSTFWD_PORT=${teeHostfwdPort} VSOCK_CID=${teeVsockCid} justrun 2>&1 | tee tee-test-output.log
+timeout 360 stdbuf -oL -eL make HOSTFWD_PORT=${teeHostfwdPort} VSOCK_CID=${teeVsockCid} justrun 2>&1 | tee tee-test-output.log
 QEMU_STATUS=\${PIPESTATUS[0]}
 set -e
 
@@ -655,6 +762,7 @@ elif [ "\${QEMU_STATUS}" -ne 0 ]; then
     echo "TEE_RESULT: QEMU_ERROR(\${QEMU_STATUS})"
 fi
 """
+            }
 
             def logText = readFile("${stageWorkspace}/tee-test-output.log")
             result.passed = logText.split('<<< test success', -1).length - 1
@@ -662,7 +770,7 @@ fi
 
             if (logText.contains('TEE_RESULT: TIMEOUT')) {
                 result.status = 'timeout'
-                result.errorSnippet = "QEMU 运行超时（300s），测试未能完成\n通过: ${result.passed}，失败: ${result.failed}"
+                result.errorSnippet = "QEMU 运行超时（360s），测试未能完成\n通过: ${result.passed}，失败: ${result.failed}"
             } else if (logText.contains('TEE_RESULT: QEMU_ERROR')) {
                 result.status = 'failed'
                 result.errorSnippet = extractSnippet(logText, 'TEE_RESULT: QEMU_ERROR', 5)
