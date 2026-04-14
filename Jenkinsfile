@@ -71,6 +71,15 @@ pipeline {
                     }
                     post { failure { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
                 }
+                stage('Clippy+Build: riscv64-qemu-virt') {
+                    steps {
+                        script {
+                            runClippyAndBuild('riscv64-qemu-virt')
+                            ciResults['Clippy+Build: riscv64-qemu-virt'] = [status: 'passed']
+                        }
+                    }
+                    post { failure { script { ciResults['Clippy+Build: riscv64-qemu-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
+                }
                 stage('Clippy+Runtime: x86_64-qemu-virt') {
                     steps {
                         script {
@@ -547,12 +556,14 @@ def defconfigFor(String arch) {
 def rustupTargetFor(String platform) {
     if (platform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
     if (platform.startsWith('x86')) return 'x86_64-unknown-none'
+    if (platform.startsWith('riscv64')) return 'riscv64gc-unknown-none-elf'
     error("Unsupported platform: ${platform}")
 }
 
 def archForPlatform(String platform) {
     if (platform.startsWith('aarch64')) return 'aarch64'
     if (platform.startsWith('x86_64')) return 'x86_64'
+    if (platform.startsWith('riscv64')) return 'riscv64'
     error("Unsupported platform: ${platform}")
 }
 
@@ -644,6 +655,11 @@ rustup target add aarch64-unknown-linux-musl || true
 rustup target add x86_64-unknown-none || true
 rustup target add x86_64-unknown-linux-musl || true
 '''
+        case 'riscv64':
+            return '''
+rustup target add riscv64gc-unknown-none-elf || true
+rustup target add riscv64gc-unknown-linux-musl || true
+'''
         default:
             error("Unsupported architecture: ${arch}")
     }
@@ -655,6 +671,8 @@ def targetTripleFor(String arch) {
             return 'aarch64-unknown-none-softfloat'
         case 'x86_64':
             return 'x86_64-unknown-none'
+        case 'riscv64':
+            return 'riscv64gc-unknown-none-elf'
         default:
             error("Unsupported architecture: ${arch}")
     }
@@ -886,6 +904,7 @@ def buildCiComment(Map results, String coverageSummary = '') {
         'Prepare Source',
         'Rustfmt',
         'Clippy+Build: aarch64-crosvm-virt',
+        'Clippy+Build: riscv64-qemu-virt',
         'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt',
         'TEE: x86_64', 'TEE: aarch64'
     ]
