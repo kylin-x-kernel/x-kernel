@@ -15,22 +15,17 @@ smp = ["kplat/smp", "kspin/smp"]
 reboot-on-system-off = []
 
 [dependencies]
-boot_info = { workspace = true }
 kernel_boot = { workspace = true }
 kspin = { workspace = true }
 log = "0.4"
 bitflags = "2.6"
-lazyinit = "0.2"
 percpu = { workspace = true }
-heapless = "0.9"
 kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
-kaddr_layout = { workspace = true }
 acpi = { workspace = true }
 kdriver = { workspace = true }
-pci = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-ioport"] }
 x86-peripherals = { workspace = true }
 irq_driver = { workspace = true }
@@ -41,7 +36,6 @@ timer_driver = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { workspace = true }
-multiboot2 = "0.24"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-none"]

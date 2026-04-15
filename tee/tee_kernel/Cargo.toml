@@ -25,28 +25,20 @@ mbedtls-sys-auto = { workspace = true }
 ktypes.workspace = true
 kcpu = { workspace = true, optional = true }
 kerrno.workspace = true
-kfeat.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
-karch.workspace = true
 kio.workspace = true
 klogger.workspace = true
-memspace.workspace = true
 knet.workspace = true
-kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 bitflags.workspace = true
 bytemuck.workspace = true
 cfg-if.workspace = true
-chrono = { version = "0.4.41", default-features = false }
-hashbrown = { workspace = true }
 lazy_static = { workspace = true }
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
-memaddr.workspace = true
 osvm.workspace = true
-kprocess.workspace = true
 linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
 bincode = { version = "2.0.1", default-features = false, features = ["alloc", "derive"] }
@@ -67,12 +59,6 @@ rand = { version = "0.9.1", default-features = false, features = [
     "alloc",
     "small_rng",
 ] }
-
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-x86 = "0.52"
-
-[target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
-riscv = "0.14"
 
 # [dev-dependencies]
 # kapi = { path = "../../api/kapi" }

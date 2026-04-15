@@ -18,7 +18,6 @@ boot_info = { workspace = true }
 kerrno = { workspace = true }
 crate_interface = "0.1"
 const-str = "0.6.2"
-karch.workspace = true
 kplat-macros = { path = "../kplat-macros" }
 kspin = "0.1"
 percpu = { workspace = true }

@@ -17,21 +17,16 @@ pmu = ["kplat/pmu"]
 
 [dependencies]
 log = "0.4"
-page_table = { workspace = true }
 aarch64-peripherals = { workspace = true, default-features = false }
 console_driver = { workspace = true, features = ["pl011"] }
 irq_driver = { workspace = true }
 khal = { workspace = true }
 kcpu = { workspace = true }
-karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }
-of = { workspace = true }
-ktypes = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
-memspace = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

@@ -27,7 +27,6 @@ kalloc = { workspace = true }
 boot_info = { workspace = true }
 firmware_handoff = { workspace = true }
 kcpu = { workspace = true }
-karch = { workspace = true }
 kplat.workspace = true
 kbuild_config.workspace = true
 kernel_boot.workspace = true

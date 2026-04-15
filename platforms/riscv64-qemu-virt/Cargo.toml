@@ -14,9 +14,6 @@ rtc = ["rtc_driver/goldfish"]
 smp = ["kplat/smp"]
 
 [dependencies]
-heapless = "0.9"
-kspin = { workspace = true }
-lazyinit = "0.2"
 log = "0.4"
 
 irq_driver = { workspace = true }
@@ -26,18 +23,13 @@ kernel_boot = { workspace = true }
 percpu = { workspace = true }
 kcpu = { workspace = true }
 karch = { workspace = true }
-kaddr_layout = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
-ktypes = { workspace = true }
-of = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
-memspace = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
-uart_16550 = "0.4.0"
 
 [package.metadata.docs.rs]
 targets = ["riscv64gc-unknown-none-elf"]

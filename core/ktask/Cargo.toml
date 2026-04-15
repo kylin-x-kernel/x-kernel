@@ -44,6 +44,5 @@ lazyinit = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
 percpu = { workspace = true }
-kplat = { workspace = true }
 kbuild_config = { workspace = true }
 karch = { workspace = true }

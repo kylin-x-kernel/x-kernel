@@ -10,7 +10,6 @@ description = "Low-address Multiboot2 stub for loading the higher-half x-kernel 
 
 [dependencies]
 boot_info = { workspace = true }
-kernel_elf_loader = { workspace = true }
 kaddr_layout = { workspace = true }
 kbuild_config = { workspace = true }
 x86_boot_common = { workspace = true }

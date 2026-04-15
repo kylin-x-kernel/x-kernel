@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 // Portions of this file are derived from open source projects including rust-embedded/cortex-a and tock/tock.
 // See project documentation and repository history for details.
 // SPDX-License-Identifier: MIT license OR Apache-2.0
@@ -8,9 +12,6 @@
 //
 // Please refer to the respective repositories for original license terms and copyright.
 //
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSES for license details.
 
 use tock_registers::{
     interfaces::{Readable, Writeable},

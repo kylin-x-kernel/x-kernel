@@ -32,7 +32,6 @@ memspace = { workspace = true }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 loongArch64 = "0.2.4"
-page_table = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["loongarch64-unknown-none"]

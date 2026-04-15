@@ -58,14 +58,12 @@ downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
 flatten_objects = "0.2.4"
 gimli = { version = "*", default-features = false, optional = true }
 hashbrown = { workspace = true }
-indoc = "2"
 kspin.workspace = true
 lazy_static = { workspace = true }
 linkme.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 memaddr.workspace = true
 of.workspace = true
-num_enum = { version = "0.7", default-features = false }
 rand = { version = "0.9.1", default-features = false, features = [
 	"alloc",
 	"small_rng",
@@ -82,5 +80,3 @@ tee_kernel = { workspace = true, optional = true }
 kcore.workspace = true
 procfs.workspace = true
 
-[target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
-riscv = "0.14"

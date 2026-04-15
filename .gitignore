@@ -21,6 +21,10 @@
 # Cargo lock
 Cargo.lock
 
+# Python
+__pycache__
+venv
+
 # Kconfig build artifacts
 .config
 .config.old

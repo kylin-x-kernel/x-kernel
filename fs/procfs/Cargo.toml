@@ -10,7 +10,6 @@ repository.workspace = true
 
 [dependencies]
 fs-ng-vfs.workspace = true
-indoc = "2"
 kalloc.workspace = true
 kcore.workspace = true
 kfs.workspace = true

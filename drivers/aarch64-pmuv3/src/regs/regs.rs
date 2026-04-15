@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 // Portions of this file are derived from open source projects including cryptidtech/cde, dgrunwald/rust-cpython, ix/pretty-ls, and ice1000/agda-mode.
 // See project documentation and repository history for details.
 // SPDX-License-Identifier: MIT license OR Apache-2.0
@@ -10,9 +14,6 @@
 //
 // Please refer to the respective repositories for original license terms and copyright.
 //
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSES for license details.
 
 use crate::define_pmu_register;
 // define_pmu_register!(pmccfiltr_el0, PMCCFILTR_EL0, "PMCCFILTR_EL0");

@@ -9,22 +9,13 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-kspin = { workspace = true }
 log = "0.4"
-int_ratio = "0.1"
-lazyinit = "0.2"
 ktypes = { workspace = true }
-kplat = { workspace = true }
 khal = { workspace = true }
 kbuild_config = { workspace = true }
-kaddr_layout = { workspace = true }
 boot_info = { workspace = true }
 multiboot2 = "0.24"
 x86_apic = { workspace = true }
-
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-x86_64 = { workspace = true }
-uart_16550 = "0.4"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-none"]

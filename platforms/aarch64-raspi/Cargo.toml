@@ -17,7 +17,6 @@ smp = ["kplat/smp"]
 log = "0.4"
 aarch64-cpu = "10.0"
 page_table = { workspace = true }
-aarch64-peripherals = { version = "0.3.0", path = "../kplat-aarch64-peripherals" }
 kcpu = { workspace = true }
 karch = { workspace = true }
 khal = { workspace = true }

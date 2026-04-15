@@ -17,17 +17,11 @@ nmi-sdei = []
 
 [dependencies]
 memaddr = { workspace = true }
-kspin = { workspace = true }
 ktypes = { workspace = true }
 log = "0.4"
 lazyinit = "0.2"
 heapless = "0.9"
 of = { workspace = true }
-page_table = { workspace = true }
-aarch64-cpu = "10.0"
-arm_pl011 = "0.1"
-uart_16550 = "0.4"
-kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
 khal = { workspace = true }

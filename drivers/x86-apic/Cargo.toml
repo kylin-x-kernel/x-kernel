@@ -12,8 +12,6 @@ repository.workspace = true
 default = []
 
 [dependencies]
-acpi = { workspace = true }
-kplat = { workspace = true }
 kspin = { workspace = true }
 memspace = { workspace = true }
 memaddr = { workspace = true }

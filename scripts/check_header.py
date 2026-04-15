@@ -1,4 +1,5 @@
 import os
+import sys
 
 EXPECTED_HEADER = """// SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
@@ -58,4 +59,6 @@ def add_missing_headers(missing_list):
 if __name__ == "__main__":
     # 指定项目根目录运行，默认为当前目录 '.'
     missing_files = check_rs_file_headers(".")
+    if missing_files:
+        sys.exit(1)
     add_missing_headers(missing_files)

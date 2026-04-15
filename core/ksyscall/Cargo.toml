@@ -22,7 +22,6 @@ kerrno.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
-karch.workspace = true
 kio.workspace = true
 klogger.workspace = true
 memspace.workspace = true

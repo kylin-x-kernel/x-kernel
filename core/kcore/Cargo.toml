@@ -7,14 +7,13 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+
 [dependencies]
 backtrace.workspace = true
 kerrno.workspace = true
-kfeat.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
-kio.workspace = true
 klogger.workspace = true
 memspace.workspace = true
 memspace_file.workspace = true
@@ -33,7 +32,6 @@ kspin.workspace = true
 lazy_static = { workspace = true }
 linkme.workspace = true
 linux-raw-sys.workspace = true
-lock_api = { version = "0.4.13", features = ["arc_lock"] }
 memaddr.workspace = true
 ouroboros = { version = "0.18.5", default-features = false }
 percpu = { workspace = true }

@@ -41,7 +41,6 @@ serde = { version = "1.0", default-features = false, features = ["derive"], opti
 serde_repr = { version = "0.1", optional = true }
 
 [dev-dependencies]
-libc = "0.2"
 serde_json = "1"
 
 [package.metadata.docs.rs]

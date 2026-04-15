@@ -93,7 +93,6 @@ kfs = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
-klogger.workspace = true
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
 ksync = { workspace = true, optional = true }

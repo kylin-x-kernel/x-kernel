@@ -17,9 +17,5 @@ ktask = { workspace = true, features = ["watchdog"] }
 cfg-if.workspace = true
 log.workspace = true
 percpu.workspace = true
-lazyinit.workspace = true
-kspin.workspace = true
 backtrace.workspace = true
-ksync = { workspace = true, features = ["watchdog"] }
-kplat.workspace = true
 kbuild_config = { workspace = true }

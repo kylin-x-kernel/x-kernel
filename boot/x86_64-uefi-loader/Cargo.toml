@@ -9,8 +9,6 @@ repository.workspace = true
 description = "UEFI loader that prepares and enters the x86_64 x-kernel image"
 
 [dependencies]
-kaddr_layout = { workspace = true }
-kernel_elf_loader = { workspace = true }
 boot_info = { workspace = true }
 kbuild_config = { workspace = true }
 x86_boot_common = { workspace = true }
