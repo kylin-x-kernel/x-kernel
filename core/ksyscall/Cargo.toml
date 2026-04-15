@@ -9,14 +9,14 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-vsock = ["knet/vsock", "kserveices/vsock"]
+vsock = ["knet/vsock", "kservices/vsock"]
 tee = [
     "dep:tee_kernel",
-    "kserveices/tee",
+    "kservices/tee",
 ]
 
 [dependencies]
-kserveices = { workspace = true }
+kservices = { workspace = true }
 kbuild_config = { workspace = true }
 kerrno.workspace = true
 fs-ng-vfs.workspace = true

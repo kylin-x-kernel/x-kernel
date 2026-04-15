@@ -10,7 +10,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use kerrno::{KError, KResult};
-use kserveices::mm::{UserConstPtr, UserPtr};
+use kservices::mm::{UserConstPtr, UserPtr};
 use linux_raw_sys::net::{SCM_RIGHTS, SOL_SOCKET, cmsghdr};
 
 use crate::file::{FileLike, get_file_like};

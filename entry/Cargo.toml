@@ -31,12 +31,12 @@ qemu = [
     "kfeat/fp-simd",
     "kfeat/display",
     "kfeat/input",
-    "kserveices/input",
+    "kservices/input",
     "kfeat/vsock",
     "ksyscall/vsock",
-    "kserveices/vsock",
+    "kservices/vsock",
     "kfeat/fs-times",
-    "kserveices/dev-log",
+    "kservices/dev-log",
     "pci",
 ]
 
@@ -61,18 +61,18 @@ aarch64_crosvm_virt = [
     "kfeat/fp-simd",
     "kfeat/display",
     "kfeat/input",
-    "kserveices/input",
+    "kservices/input",
     "kfeat/vsock",
     "ksyscall/vsock",
-    "kserveices/vsock",
+    "kservices/vsock",
     "dep:aarch64-crosvm-virt",
     "pci",
     "smp",
     # auxilary features
     "kfeat/fs-times",
-    "kserveices/dev-log",
+    "kservices/dev-log",
     "kfeat/crosvm",
-    "kserveices/dice",
+    "kservices/dice",
 ]
 
 [dependencies]
@@ -89,7 +89,7 @@ cfg-if.workspace = true
 linkme.workspace = true
 kprocess.workspace = true
 ksyscall.workspace = true
-kserveices.workspace = true
+kservices.workspace = true
 kcore.workspace = true
 unittest = { workspace = true, optional = true }
 

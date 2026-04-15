@@ -11,7 +11,7 @@
 
 use kerrno::KResult;
 use knet::SocketOps;
-use kserveices::mm::UserPtr;
+use kservices::mm::UserPtr;
 use linux_raw_sys::net::{sockaddr, socklen_t};
 
 use crate::{

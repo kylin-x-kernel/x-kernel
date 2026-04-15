@@ -14,7 +14,7 @@ use core::ffi::{c_char, c_void};
 use fs_ng_vfs::{ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
 use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
-use kserveices::mm::vm_load_string;
+use kservices::mm::vm_load_string;
 
 use crate::kernel::vfs::MemoryFs;
 

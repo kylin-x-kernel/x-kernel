@@ -15,7 +15,7 @@ use core::time::Duration;
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kpoll::IoEvents;
-use kserveices::{
+use kservices::{
     mm::{UserConstPtr, UserPtr},
     nullable,
     signal::with_replacen_blocked,

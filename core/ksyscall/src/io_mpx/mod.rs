@@ -19,7 +19,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::task::Context;
 
 use kpoll::{IoEvents, Pollable};
-use kserveices::file::FileLike;
+use kservices::file::FileLike;
 
 pub use self::{epoll::*, poll::*, select::*};
 

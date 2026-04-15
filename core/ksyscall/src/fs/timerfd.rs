@@ -10,7 +10,7 @@
 //! - Timer query (timerfd_gettime)
 
 use kerrno::{KError, KResult};
-use kserveices::{
+use kservices::{
     file::{FileLike, add_file_like, timerfd::TimerFd},
     time::TimeValueLike,
 };

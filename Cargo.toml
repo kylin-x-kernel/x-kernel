@@ -31,7 +31,7 @@ categories = ["os", "no-std"]
 # Internal: API and core services
 kcore = { path = "core/kcore" }
 kfeat = { path = "api/kfeat" }
-kserveices = { path = "core/kservices" }
+kservices = { path = "core/kservices" }
 ksignal = { path = "process/ksignal" }
 ksyscall = { path = "core/ksyscall" }
 

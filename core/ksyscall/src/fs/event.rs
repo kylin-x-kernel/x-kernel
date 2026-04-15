@@ -10,7 +10,7 @@
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kserveices::file::{FileLike, add_file_like, event::EventFd};
+use kservices::file::{FileLike, add_file_like, event::EventFd};
 use linux_raw_sys::general::{EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
 
 bitflags! {

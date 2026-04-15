@@ -23,7 +23,7 @@ use knet::{
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixDomainSocket},
 };
-use kserveices::mm::{UserConstPtr, UserPtr};
+use kservices::mm::{UserConstPtr, UserPtr};
 use ktask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},

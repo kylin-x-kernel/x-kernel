@@ -22,7 +22,7 @@ use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kprocess::Pid;
-use kserveices::task::new_user_task;
+use kservices::task::new_user_task;
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};

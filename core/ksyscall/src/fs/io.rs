@@ -21,7 +21,7 @@ use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
-use kserveices::mm::{UserConstPtr, VmBytes, VmBytesMut};
+use kservices::mm::{UserConstPtr, VmBytes, VmBytesMut};
 use ktask::current;
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;

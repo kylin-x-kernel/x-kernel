@@ -20,7 +20,7 @@ use khal::{
     paging::{MappingFlags, PageSize},
     time::monotonic_time_nanos,
 };
-use kserveices::{mm::UserPtr, nullable};
+use kservices::{mm::UserPtr, nullable};
 use ksync::Mutex;
 use ktask::current;
 use linux_raw_sys::general::*;

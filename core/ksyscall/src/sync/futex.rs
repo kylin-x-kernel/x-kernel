@@ -17,7 +17,7 @@ use kcore::{
     task::{AsThread, get_task},
 };
 use kerrno::{KError, KResult, LinuxError};
-use kserveices::time::TimeValueLike;
+use kservices::time::TimeValueLike;
 use ktask::current;
 use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,

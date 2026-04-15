@@ -20,7 +20,7 @@ use kcore::{
 use kerrno::{KError, KResult};
 use kfs::{CachedFile, FileBackend};
 use khal::paging::{MappingFlags, PageSize};
-use kserveices::file::{File, FileLike};
+use kservices::file::{File, FileLike};
 use ktask::current;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};

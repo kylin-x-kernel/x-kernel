@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kpoll::IoEvents;
-use kserveices::{
+use kservices::{
     mm::{UserConstPtr, UserPtr},
     nullable,
     signal::with_replacen_blocked,

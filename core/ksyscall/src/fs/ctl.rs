@@ -24,7 +24,7 @@ use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, FsContext};
 use khal::time::wall_time;
-use kserveices::{mm::vm_load_string, time::TimeValueLike};
+use kservices::{mm::vm_load_string, time::TimeValueLike};
 use ktask::current;
 use linux_raw_sys::{
     general::*,
@@ -546,7 +546,7 @@ pub fn sys_sync() -> KResult<isize> {
 pub fn sys_syncfs(fd: i32) -> KResult<isize> {
     let file_like = get_file_like(fd)?;
 
-    if let Some(file) = file_like.downcast_ref::<kserveices::file::File>() {
+    if let Some(file) = file_like.downcast_ref::<kservices::file::File>() {
         file.inner().location().filesystem().flush()?;
         return Ok(0);
     }

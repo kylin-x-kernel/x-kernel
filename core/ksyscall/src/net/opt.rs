@@ -11,7 +11,7 @@
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::options::{Configurable, GetSocketOption, SetSocketOption};
-use kserveices::mm::{UserConstPtr, UserPtr};
+use kservices::mm::{UserConstPtr, UserPtr};
 use linux_raw_sys::net::socklen_t;
 
 use crate::file::{FileLike, Socket};
@@ -23,7 +23,7 @@ const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 mod conv {
     use kerrno::{KError, KResult};
     use knet::options::UnixCredentials;
-    use kserveices::time::TimeValueLike;
+    use kservices::time::TimeValueLike;
     use linux_raw_sys::{general::timeval, net::ucred};
 
     pub struct Int<T>(T);

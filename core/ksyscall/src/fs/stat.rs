@@ -15,7 +15,7 @@ use core::ffi::{c_char, c_int};
 use fs_ng_vfs::{Location, NodePermission};
 use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
-use kserveices::mm::vm_load_string;
+use kservices::mm::vm_load_string;
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
 };

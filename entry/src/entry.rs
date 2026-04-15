@@ -15,7 +15,7 @@ use kcore::{
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
-use kserveices::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
+use kservices::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
 
@@ -62,7 +62,7 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
     );
     {
         let mut scope = proc_data.scope.write();
-        kserveices::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
+        kservices::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
             .expect("Failed to add stdio");
     }
     let thr = Thread::new(pid, proc_data);

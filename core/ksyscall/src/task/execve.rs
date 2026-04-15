@@ -16,7 +16,7 @@ use kcore::{config::USER_HEAP_BASE, mm::load_user_app, task::AsThread};
 use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
-use kserveices::mm::vm_load_string;
+use kservices::mm::vm_load_string;
 use ktask::current;
 use osvm::load_vec_until_null;
 

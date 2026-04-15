@@ -1,5 +1,5 @@
 [package]
-name = "kserveices"
+name = "kservices"
 description = "Kernel services crate"
 version.workspace = true
 edition.workspace = true

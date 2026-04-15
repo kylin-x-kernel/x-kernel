@@ -13,7 +13,7 @@ use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
-use kserveices::mm::UserConstPtr;
+use kservices::mm::UserConstPtr;
 use linux_raw_sys::general::MFD_CLOEXEC;
 
 use crate::file::{File, FileLike};

@@ -13,7 +13,7 @@ use core::ffi::c_char;
 
 use kcore::task::{AsThread, get_process_data};
 use kerrno::{KError, KResult};
-use kserveices::mm::vm_load_string;
+use kservices::mm::vm_load_string;
 use ktask::current;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};

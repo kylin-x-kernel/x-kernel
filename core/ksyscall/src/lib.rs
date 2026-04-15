@@ -28,11 +28,11 @@ mod task;
 mod time;
 
 pub use dispatch::dispatch_irq_syscall;
-pub use kserveices::{file, io};
+pub use kservices::{file, io};
 pub use sys::sys_getrandom;
 pub mod kernel {
-    pub use kserveices::vfs;
+    pub use kservices::vfs;
 }
-pub use kserveices::{socket, terminal};
+pub use kservices::{socket, terminal};
 #[cfg(feature = "tee")]
 pub use tee_kernel::tee;

@@ -13,7 +13,7 @@
 use kcore::task::{get_process_data, get_process_group};
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
-use kserveices::time::TimeValueLike;
+use kservices::time::TimeValueLike;
 use ktask::{
     KCpuMask, current,
     future::{block_on, interruptible, sleep},

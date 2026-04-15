@@ -12,7 +12,7 @@ use core::ffi::c_int;
 
 use bitflags::bitflags;
 use kerrno::KResult;
-use kserveices::file::{FileLike, Pipe, close_file_like};
+use kservices::file::{FileLike, Pipe, close_file_like};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtMutPtr;
 

@@ -19,7 +19,7 @@ use kcore::task::{
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kprocess::Pid;
-use kserveices::{
+use kservices::{
     signal::{block_next_signal, check_signals},
     time::TimeValueLike,
 };

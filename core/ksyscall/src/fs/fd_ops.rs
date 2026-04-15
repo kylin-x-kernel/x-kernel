@@ -22,7 +22,7 @@ use fs_ng_vfs::{DirEntry, FileNode, Location, NodePermission, NodeType, Referenc
 use kcore::{task::AsThread, vfs::Device};
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
-use kserveices::mm::{UserPtr, vm_load_string};
+use kservices::mm::{UserPtr, vm_load_string};
 use ktask::current;
 use linux_raw_sys::general::*;
 

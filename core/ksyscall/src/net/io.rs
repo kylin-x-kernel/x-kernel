@@ -16,7 +16,7 @@ use core::net::Ipv4Addr;
 use kerrno::{KError, KResult};
 use kio::prelude::*;
 use knet::{CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps};
-use kserveices::mm::{UserConstPtr, UserPtr, VmBytes, VmBytesMut};
+use kservices::mm::{UserConstPtr, UserPtr, VmBytes, VmBytesMut};
 use linux_raw_sys::net::{
     MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, msghdr, sockaddr, socklen_t,
 };

@@ -81,7 +81,7 @@ tee = [
     "dep:tee_task_iface",
     "kcore/tee",
     "ksyscall/tee",
-    "kserveices/tee",
+    "kservices/tee",
 ]
 tee_ta_sign = ["kcore/tee_ta_sign", "tee_task_iface/tee_ta_sign"]
 huk_key = ["tee_kernel/huk_key"]
@@ -106,7 +106,7 @@ inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
-kserveices = { workspace = true }
+kservices = { workspace = true }
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 ksyscall = { workspace = true }
