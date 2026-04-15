@@ -9,12 +9,10 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-acpi = { workspace = true }
 kspin = { workspace = true }
 log = "0.4"
 int_ratio = "0.1"
 lazyinit = "0.2"
-heapless = "0.9"
 ktypes = { workspace = true }
 kplat = { workspace = true }
 khal = { workspace = true }

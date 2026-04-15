@@ -92,15 +92,12 @@ fn test_menu_content_alignment() {
     );
 
     // Check that Kernel Features contains kernel-related config items
-    let has_kernel_configs = kernel_items.iter().any(|item| {
-        item.id == "KERNEL_BASE_PADDR"
-            || item.id == "CPU_NUM"
-            || item.id == "SMP"
-            || item.id == "FP_SIMD"
-    });
+    let has_kernel_configs = kernel_items
+        .iter()
+        .any(|item| item.id == "CPU_NUM" || item.id == "SMP" || item.id == "FP_SIMD");
     assert!(
         has_kernel_configs,
-        "Kernel Features should contain kernel config items like KERNEL_BASE_PADDR, but got: {:?}",
+        "Kernel Features should contain kernel config items like CPU_NUM, but got: {:?}",
         kernel_items.iter().map(|i| &i.id).collect::<Vec<_>>()
     );
 
@@ -130,10 +127,8 @@ fn test_menu_content_alignment() {
     );
 
     // Verify that menus don't have wrong content
-    // Platform Selection should NOT have KERNEL_BASE_PADDR
-    let platform_has_kernel_config = platform_items
-        .iter()
-        .any(|item| item.id == "KERNEL_BASE_PADDR");
+    // Platform Selection should NOT have Kernel Features content
+    let platform_has_kernel_config = platform_items.iter().any(|item| item.id == "CPU_NUM");
     assert!(
         !platform_has_kernel_config,
         "Platform Selection should NOT contain Kernel Features content"

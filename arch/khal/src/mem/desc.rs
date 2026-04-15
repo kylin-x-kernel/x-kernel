@@ -36,6 +36,24 @@ pub enum ReservedSource {
     Platform,
 }
 
+impl ReservedSource {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::DeviceTree => "device tree",
+            Self::Acpi => "acpi",
+            Self::BootProtocol => "boot protocol",
+            Self::Kernel => "kernel",
+            Self::Platform => "platform",
+        }
+    }
+}
+
+impl fmt::Display for ReservedSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReservedRegion {
     pub start: usize,
@@ -177,6 +195,31 @@ impl MemoryRegion {
             size: n,
             flags: RSVD_DEF,
             name,
+        }
+    }
+}
+
+impl fmt::Display for MemoryRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let start = self.paddr;
+        let end = self.paddr + self.size;
+        if let Some(vaddr) = self.vaddr {
+            write!(
+                f,
+                "[{:x?}, {:x?}) [VA:{:#x}, VA:{:#x}) {} ({:?})",
+                start,
+                end,
+                vaddr.as_usize(),
+                vaddr.as_usize() + self.size,
+                self.name,
+                self.flags
+            )
+        } else {
+            write!(
+                f,
+                "[{:x?}, {:x?}) {} ({:?})",
+                start, end, self.name, self.flags
+            )
         }
     }
 }

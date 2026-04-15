@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod aarch64;
 mod fallback;
+mod loongarch64;
 mod riscv64;
 mod x86_64;
 
@@ -30,7 +31,8 @@ pub fn for_arch(arch: &str) -> LayoutConsts {
         "aarch64" => aarch64::LAYOUT,
         "riscv64" => riscv64::LAYOUT,
         "x86_64" => x86_64::LAYOUT,
-        "riscv32" | "loongarch64" => fallback::LAYOUT,
+        "riscv32" => fallback::LAYOUT,
+        "loongarch64" => loongarch64::LAYOUT,
         _ => fallback::LAYOUT,
     }
 }
@@ -44,7 +46,7 @@ const CURRENT_LAYOUT: LayoutConsts = fallback::LAYOUT;
 #[cfg(target_arch = "riscv64")]
 const CURRENT_LAYOUT: LayoutConsts = riscv64::LAYOUT;
 #[cfg(target_arch = "loongarch64")]
-const CURRENT_LAYOUT: LayoutConsts = fallback::LAYOUT;
+const CURRENT_LAYOUT: LayoutConsts = loongarch64::LAYOUT;
 #[cfg(not(any(
     target_arch = "aarch64",
     target_arch = "x86_64",
@@ -114,6 +116,7 @@ pub fn p2v(pa: usize) -> usize {
 
 #[cfg(any(
     target_arch = "aarch64",
+    target_arch = "loongarch64",
     target_arch = "x86_64",
     target_arch = "riscv64"
 ))]
@@ -143,7 +146,7 @@ pub fn v2p(va: usize) -> usize {
 ///
 /// RISC-V currently uses a dedicated kernel-image alias window too, so it
 /// shares the same split logic as AArch64/x86_64.
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 #[inline]
 pub fn v2p(va: usize) -> usize {
     if in_window(va, KIMAGE_VADDR, KIMAGE_VSIZE) {
@@ -159,6 +162,7 @@ pub fn v2p(va: usize) -> usize {
 /// offset only.
 #[cfg(not(any(
     target_arch = "aarch64",
+    target_arch = "loongarch64",
     target_arch = "x86_64",
     target_arch = "riscv64"
 )))]

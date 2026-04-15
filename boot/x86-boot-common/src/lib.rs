@@ -6,7 +6,7 @@
 
 use core::ptr;
 
-use boot_info::{BootInfo, BootProtocol};
+use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::PAGE_OFFSET;
 use kernel_elf_loader::KernelElf;
 
@@ -52,6 +52,8 @@ pub fn build_boot_info(
     cpu_count: usize,
 ) -> BootInfo {
     BootInfo::new(protocol)
+        .with_memory_description_root(MemoryDescriptionRoot::X86BootProtocol)
+        .with_hardware_description_root(HardwareDescriptionRoot::None)
         .with_protocol_info_addr(protocol_info_addr)
         .with_kernel_load_paddr(kernel_load_paddr)
         .with_phys_virt_offset(PAGE_OFFSET)

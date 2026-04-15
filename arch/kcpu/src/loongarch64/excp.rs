@@ -9,7 +9,7 @@ use loongArch64::register::{
     estat::{self, Exception, Trap},
 };
 
-use super::context::ExceptionContext;
+use super::ctx::ExceptionContext;
 use crate::excp::PageFaultFlags;
 
 core::arch::global_asm!(

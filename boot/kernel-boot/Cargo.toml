@@ -38,6 +38,15 @@ karch = { workspace = true }
 memaddr = { workspace = true }
 of = { workspace = true }
 
+[target.'cfg(target_arch = "loongarch64")'.dependencies]
+firmware_handoff = { workspace = true }
+loongArch64 = "0.2.4"
+karch = { workspace = true }
+kcpu = { workspace = true }
+memaddr = { workspace = true }
+of = { workspace = true }
+page_table = { workspace = true }
+
 [build-dependencies]
 kbuild_config.workspace = true
 kaddr_layout.workspace = true

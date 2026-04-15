@@ -7,7 +7,10 @@
 
 use core::{arch::global_asm, ptr, slice};
 
-use boot_info::{BOOT_INFO_MAGIC, BootInfo, BootProtocol, LinuxBootParams, X86_LINUX_BOOT_MAGIC};
+use boot_info::{
+    BOOT_INFO_MAGIC, BootInfo, BootProtocol, HardwareDescriptionRoot, LinuxBootParams,
+    X86_LINUX_BOOT_MAGIC,
+};
 use kaddr_layout::PAGE_OFFSET;
 use multiboot2::{BootInformation, BootInformationHeader, MAGIC, MemoryAreaType};
 use x86_boot_common::{
@@ -106,7 +109,9 @@ unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, source_image_paddr: us
         )
         .with_boot_runtime(boot_runtime_start, boot_runtime_end - boot_runtime_start);
         if rsdp_paddr != 0 {
-            BOOT_INFO = BOOT_INFO.with_rsdp(rsdp_paddr);
+            BOOT_INFO = BOOT_INFO
+                .with_hardware_description_root(HardwareDescriptionRoot::Acpi)
+                .with_rsdp(rsdp_paddr);
         }
         if let Some(cmdline) = cmdline {
             BOOT_INFO = BOOT_INFO.with_cmdline(cmdline.addr + PAGE_OFFSET, cmdline.len);

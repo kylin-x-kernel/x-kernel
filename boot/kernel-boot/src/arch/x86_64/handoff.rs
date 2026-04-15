@@ -9,7 +9,9 @@
 //! separate makes it easier to replace the current monolithic Multiboot path
 //! with a Linux-style low-address boot stub later.
 
-use boot_info::{BOOT_INFO_MAGIC, BootInfo, BootProtocol};
+use boot_info::{
+    BOOT_INFO_MAGIC, BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot,
+};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 
 use super::protocols::{MULTIBOOT_BOOTLOADER_MAGIC, SEV_CBIT_MASK};
@@ -106,6 +108,8 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
         unsafe {
             X86_BOOT_INFO = BootInfo::new(BootProtocol::Multiboot2)
+                .with_memory_description_root(MemoryDescriptionRoot::X86BootProtocol)
+                .with_hardware_description_root(HardwareDescriptionRoot::None)
                 .with_protocol_info_addr(mbi)
                 .with_kernel_load_paddr(kernel_load_paddr)
                 .with_phys_virt_offset(PAGE_OFFSET)

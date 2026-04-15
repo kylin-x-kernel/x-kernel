@@ -8,12 +8,10 @@ use core::any::Any;
 use fs_ng_vfs::{NodeFlags, VfsResult};
 use kcore::vfs::DeviceOps;
 use lazyinit::LazyInit;
-use memaddr::PhysAddr;
-
 static DTB_SNAPSHOT: LazyInit<Box<[u8]>> = LazyInit::new();
 
 pub(crate) fn capture_snapshot() {
-    let Some((paddr, size)) = khal::firmware::dtb_capture_region() else {
+    let Some((paddr, vaddr, size)) = khal::firmware::dtb_capture_region() else {
         return;
     };
     if DTB_SNAPSHOT.get().is_some() {
@@ -21,12 +19,15 @@ pub(crate) fn capture_snapshot() {
     }
 
     let mut snapshot = vec![0u8; size];
-    let src = khal::mem::p2v(PhysAddr::from_usize(paddr)).as_usize() as *const u8;
+    let src = vaddr as *const u8;
     unsafe {
         core::ptr::copy_nonoverlapping(src, snapshot.as_mut_ptr(), size);
     }
     DTB_SNAPSHOT.init_once(snapshot.into_boxed_slice());
-    info!("Captured DTB snapshot: paddr={:#x} size={:#x}", paddr, size);
+    info!(
+        "Captured DTB snapshot: paddr={:#x} vaddr={:#x} size={:#x}",
+        paddr, vaddr, size
+    );
 }
 
 pub(crate) fn snapshot_available() -> bool {

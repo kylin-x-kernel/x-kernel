@@ -38,7 +38,7 @@ LTO ?=
 TARGET_DIR ?= $(PWD)/target
 export TARGET_DIR
 XCONF_TARGET_DIR ?= $(TARGET_DIR)/tools/xconf
-XCONF = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(XCONF_TARGET_DIR) --manifest-path xtask/xconfig/Cargo.toml --bin xconf --offline --
+XCONF = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(XCONF_TARGET_DIR) --manifest-path xtask/xconfig/Cargo.toml --bin xconf --
 EXTRA_CONFIG ?=
 UIMAGE ?= n
 export UNITTEST ?= n

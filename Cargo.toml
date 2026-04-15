@@ -44,6 +44,7 @@ kplat = { path = "platforms/kplat" }
 
 # Internal: boot and loader
 boot_info = { path = "boot/boot-info", package = "boot-info" }
+firmware_handoff = { path = "boot/firmware-handoff", package = "firmware-handoff" }
 kernel_boot = { path = "boot/kernel-boot", package = "kernel-boot" }
 kernel-elf-parser = { path = "boot/kernel_elf_parser" }
 kernel_elf_loader = { path = "boot/kernel-elf-loader", package = "kernel-elf-loader" }

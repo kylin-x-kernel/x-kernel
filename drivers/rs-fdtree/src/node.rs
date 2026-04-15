@@ -64,6 +64,17 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         self.properties().find(|prop| prop.name == name)
     }
 
+    /// Returns the named property interpreted as a C-string.
+    pub fn property_str(self, name: &str) -> Option<&'a str> {
+        let prop = self.property(name)?;
+        CStr::new(prop.value)?.as_str()
+    }
+
+    /// Returns the named property interpreted as a big-endian u32.
+    pub fn property_u32(self, name: &str) -> Option<u32> {
+        Some(BigEndianU32::from_bytes(self.property(name)?.value)?.get())
+    }
+
     /// Returns the named property from the direct parent node if present.
     pub fn parent_property(self, name: &str) -> Option<NodeProperty<'a>> {
         let props = self.parent_props?;
@@ -84,6 +95,12 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
             Some(NodeProperty::parse(&mut stream, self.header))
         })
         .find(|prop| prop.name == name)
+    }
+
+    /// Returns the named property from the direct parent node interpreted as a
+    /// big-endian u32.
+    pub fn parent_property_u32(self, name: &str) -> Option<u32> {
+        Some(BigEndianU32::from_bytes(self.parent_property(name)?.value)?.get())
     }
 
     /// Returns an iterator over all compatible strings, in firmware order.
@@ -373,6 +390,12 @@ pub(crate) fn find_node<'b, 'a: 'b>(
 pub(crate) fn reserved_memory_regions<'b, 'a: 'b>(
     header: &'b LinuxFdt<'a>,
 ) -> impl Iterator<Item = MemoryRegion> + 'b {
+    reserved_memory_nodes(header).flat_map(|node| node.reg().into_iter().flatten())
+}
+
+pub(crate) fn reserved_memory_nodes<'b, 'a: 'b>(
+    header: &'b LinuxFdt<'a>,
+) -> impl Iterator<Item = FdtNode<'b, 'a>> + 'b {
     let reserved = find_node(
         &mut FdtData::new(header.structs_block()),
         "/reserved-memory",
@@ -381,16 +404,26 @@ pub(crate) fn reserved_memory_regions<'b, 'a: 'b>(
     )
     .map(|node| node.props);
 
+    all_nodes(header).filter(move |node| {
+        let Some(reserved_props) = reserved else {
+            return false;
+        };
+        let Some(parent_props) = node.parent_props else {
+            return false;
+        };
+        parent_props.as_ptr() == reserved_props.as_ptr()
+            && parent_props.len() == reserved_props.len()
+    })
+}
+
+pub(crate) fn memory_regions<'b, 'a: 'b>(
+    header: &'b LinuxFdt<'a>,
+) -> impl Iterator<Item = MemoryRegion> + 'b {
     all_nodes(header)
-        .filter(move |node| {
-            let Some(reserved_props) = reserved else {
-                return false;
-            };
-            let Some(parent_props) = node.parent_props else {
-                return false;
-            };
-            parent_props.as_ptr() == reserved_props.as_ptr()
-                && parent_props.len() == reserved_props.len()
+        .filter(|node| {
+            let is_memory_name = node.name == "memory" || node.name.starts_with("memory@");
+            let is_memory_type = node.property_str("device_type") == Some("memory");
+            is_memory_name || is_memory_type
         })
         .flat_map(|node| node.reg().into_iter().flatten())
 }

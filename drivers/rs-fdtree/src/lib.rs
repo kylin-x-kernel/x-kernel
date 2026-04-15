@@ -15,7 +15,7 @@ mod parsing;
 
 pub use error::FdtError;
 use header::FdtHeader;
-pub use kernel_nodes::{Dice, InterruptController};
+pub use kernel_nodes::{Chosen, Dice, InterruptController};
 pub use node::{FdtNode, MemoryRegion, NodeProperty, RegIter};
 use parsing::{BigEndianU64, CStr, FdtData};
 
@@ -96,15 +96,19 @@ impl<'a> LinuxFdt<'a> {
         Some(InterruptController { node: ic_node })
     }
 
-    /// Returns the `/chosen/dice` node if present.
+    /// Returns the `/chosen` node if present.
+    pub fn chosen(&self) -> Option<Chosen<'_, 'a>> {
+        self.find_node("/chosen").map(|node| Chosen { node })
+    }
+
+    /// Returns the Open DICE node under `/reserved-memory` if present.
     pub fn dice(&self) -> Option<Dice<'_, 'a>> {
-        node::find_node(
-            &mut FdtData::new(self.structs_block()),
-            "/chosen/dice",
-            self,
-            None,
-        )
-        .map(|node| Dice { node })
+        self.find_node("/reserved-memory/dice")
+            .or_else(|| {
+                self.find_compatible("google,open-dice")
+                    .or_else(|| self.find_compatible("kylin,open-dice"))
+            })
+            .map(|node| Dice { node })
     }
 
     /// Returns an iterator over all of the nodes in the devicetree, depth-first
@@ -128,8 +132,46 @@ impl<'a> LinuxFdt<'a> {
         }
     }
 
+    pub fn memory_regions(&self) -> impl Iterator<Item = MemoryRegion> + '_ {
+        node::memory_regions(self)
+    }
+
     pub fn reserved_memory_regions(&self) -> impl Iterator<Item = MemoryRegion> + '_ {
         node::reserved_memory_regions(self)
+    }
+
+    pub fn reserved_memory_nodes(&self) -> impl Iterator<Item = node::FdtNode<'_, 'a>> + '_ {
+        node::reserved_memory_nodes(self)
+    }
+
+    pub fn chosen_bootargs(&self) -> Option<&'a str> {
+        self.chosen()?.bootargs()
+    }
+
+    pub fn chosen_stdout_path(&self) -> Option<&'a str> {
+        self.chosen()?.stdout_path()
+    }
+
+    pub fn root_model(&self) -> Option<&'a str> {
+        self.find_node("/")?.property_str("model")
+    }
+
+    pub fn root_compatible(&self) -> Option<&'a str> {
+        self.find_node("/")?.compatible()
+    }
+
+    pub fn find_compatible(&self, compatible: &str) -> Option<node::FdtNode<'_, 'a>> {
+        self.all_nodes().find(|node| node.is_compatible(compatible))
+    }
+
+    pub fn resolve_node(&self, path_or_alias: &str) -> Option<node::FdtNode<'_, 'a>> {
+        let key = path_or_alias.split(':').next()?;
+        if key.starts_with('/') {
+            return self.find_node(key);
+        }
+
+        let alias_value = self.find_node("/aliases")?.property_str(key)?;
+        self.find_node(alias_value.split(':').next()?)
     }
 
     fn structs_block(&self) -> &'a [u8] {

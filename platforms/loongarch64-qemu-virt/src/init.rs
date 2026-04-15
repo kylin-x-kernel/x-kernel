@@ -2,29 +2,28 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kplat::boot::BootHandler;
+use kplat::boot::{BootHandler, BootInfo};
+
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
-    fn early_init(_cpu_id: usize, _mbi: usize) {
-        kcpu::boot::init_trap();
-        crate::console::early_init();
+    fn prepare_boot_memory(_boot_info: &BootInfo) {}
+
+    fn firmware_init(_boot_info: &BootInfo) {}
+
+    fn early_driver_init() {
         crate::time::early_init();
-    }
-
-    #[cfg(feature = "smp")]
-    fn early_init_secondary(_cpu_id: usize) {
-        kcpu::boot::init_trap();
-    }
-
-    fn final_init(_cpu_id: usize, _arg: usize) {
-        #[cfg(feature = "irq")]
         crate::irq::init();
+        console_driver::init_from_device_tree().expect("failed to parse console from device tree");
+        console_driver::register_input_irq_handler();
+    }
+
+    fn final_init(_boot_info: &BootInfo) {
         crate::time::init_percpu();
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_secondary(_cpu_id: usize) {
+    fn final_init_ap(_cpu_id: usize) {
         crate::time::init_percpu();
     }
 }

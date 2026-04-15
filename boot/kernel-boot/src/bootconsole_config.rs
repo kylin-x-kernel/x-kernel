@@ -4,13 +4,21 @@
 
 //! Shared boot console configuration helpers.
 
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "loongarch64"
+))]
 #[inline]
 pub(crate) fn is_mmio_configured() -> bool {
     kbuild_config::BOOT_CONSOLE_TYPE == "mmio" && kbuild_config::BOOT_CONSOLE_ADDR != 0
 }
 
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "loongarch64"
+))]
 #[inline]
 pub(crate) fn mmio_addr() -> Option<usize> {
     if is_mmio_configured() {

@@ -173,7 +173,6 @@ pub fn rust_main(arg: usize) -> ! {
     let boot_info = khal::boot_info(arg);
     let cpu_id = boot_info.cpu_id;
 
-    kaddr_layout::set_kimage_voffset(kaddr_layout::KIMAGE_VADDR - boot_info.kernel_load_paddr);
     kernel_boot::bootln!("kruntime primary start cpu={} boot_info={arg:#x}", cpu_id);
     khal::firmware::init(boot_info);
     khal::percpu::init_primary(cpu_id);
@@ -306,24 +305,16 @@ fn log_memory_regions() {
     use heapless::Vec;
 
     fn log_region(region: &khal::mem::MemoryRegion) {
-        if let Some(vaddr) = region.vaddr {
-            info!(
-                "  [{:x?}, {:x?}) [VA:{:#x}, VA:{:#x}) {} ({:?})",
-                region.paddr,
-                region.paddr + region.size,
-                vaddr.as_usize(),
-                vaddr.as_usize() + region.size,
-                region.name,
-                region.flags
-            );
+        let reserved_source = if region.flags.contains(khal::mem::MemFlags::RSVD) {
+            khal::mem::reserved::describe_reserved_memory_region(region)
+                .map(|reserved| reserved.source)
         } else {
-            info!(
-                "  [{:x?}, {:x?}) {} ({:?})",
-                region.paddr,
-                region.paddr + region.size,
-                region.name,
-                region.flags
-            );
+            None
+        };
+        if let Some(source) = reserved_source {
+            info!("  {} [source={}]", region, source);
+        } else {
+            info!("  {}", region);
         }
     }
 

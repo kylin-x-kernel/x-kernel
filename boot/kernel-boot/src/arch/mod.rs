@@ -16,3 +16,8 @@ pub use self::x86_64::*;
 pub mod riscv64;
 #[cfg(target_arch = "riscv64")]
 pub use self::riscv64::*;
+
+#[cfg(target_arch = "loongarch64")]
+pub mod loongarch64;
+#[cfg(target_arch = "loongarch64")]
+pub use self::loongarch64::*;

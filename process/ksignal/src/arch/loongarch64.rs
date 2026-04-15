@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! LoongArch64 signal frame layout and trampoline.
-use kcpu::{GeneralRegisters, uspace::UserContext};
+use kcpu::{GeneralRegisters, userspace::UserContext};
 
 use crate::{SignalSet, SignalStack};
 

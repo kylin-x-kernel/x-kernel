@@ -15,7 +15,7 @@ pub const BOOT_INFO_MAGIC: u64 = 0x424f_4f54_494e_464f;
 pub const X86_LINUX_BOOT_MAGIC: u32 = 0x584b_4c42;
 
 /// Current BootInfo structure version.
-pub const BOOT_INFO_VERSION: u32 = 2;
+pub const BOOT_INFO_VERSION: u32 = 5;
 pub const X86_LINUX_BOOT_E820_MAX_ENTRIES: usize = 128;
 const X86_LINUX_BOOT_LEGACY_CMDLINE_MAX: usize = 255;
 const X86_LINUX_BOOT_PARAMS_ACPI_RSDP_ADDR_OFFSET: usize = 0x70;
@@ -32,13 +32,18 @@ const X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET: usize = 0x24c;
 pub struct BootInfo {
     pub magic: u64,
     pub version: u32,
-    pub _reserved: u32,
     pub protocol: BootProtocol,
+    pub memory_description_root: MemoryDescriptionRoot,
+    pub hardware_description_root: HardwareDescriptionRoot,
+    pub _reserved: [u8; 1],
     pub arch_flags: u32,
     pub protocol_info_addr: usize,
     pub kernel_load_paddr: usize,
     pub phys_virt_offset: usize,
     pub dtb_addr: usize,
+    pub dtb_vaddr: usize,
+    pub uefi_memmap_addr: usize,
+    pub uefi_memmap_vaddr: usize,
     pub rsdp_addr: usize,
     pub boot_runtime_paddr: usize,
     pub boot_runtime_size: usize,
@@ -61,13 +66,18 @@ impl BootInfo {
         Self {
             magic: BOOT_INFO_MAGIC,
             version: BOOT_INFO_VERSION,
-            _reserved: 0,
             protocol,
+            memory_description_root: MemoryDescriptionRoot::Unknown,
+            hardware_description_root: HardwareDescriptionRoot::None,
+            _reserved: [0; 1],
             arch_flags: 0,
             protocol_info_addr: 0,
             kernel_load_paddr: 0,
             phys_virt_offset: 0,
             dtb_addr: 0,
+            dtb_vaddr: 0,
+            uefi_memmap_addr: 0,
+            uefi_memmap_vaddr: 0,
             rsdp_addr: 0,
             boot_runtime_paddr: 0,
             boot_runtime_size: 0,
@@ -96,6 +106,28 @@ impl BootInfo {
         self.protocol
     }
 
+    #[inline]
+    pub const fn with_memory_description_root(mut self, root: MemoryDescriptionRoot) -> Self {
+        self.memory_description_root = root;
+        self
+    }
+
+    #[inline]
+    pub const fn memory_description_root(&self) -> MemoryDescriptionRoot {
+        self.memory_description_root
+    }
+
+    #[inline]
+    pub const fn with_hardware_description_root(mut self, root: HardwareDescriptionRoot) -> Self {
+        self.hardware_description_root = root;
+        self
+    }
+
+    #[inline]
+    pub const fn hardware_description_root(&self) -> HardwareDescriptionRoot {
+        self.hardware_description_root
+    }
+
     pub fn cmdline(&self) -> Option<&str> {
         if self.cmdline_addr == 0 || self.cmdline_len == 0 {
             return None;
@@ -109,15 +141,56 @@ impl BootInfo {
     }
 
     #[inline]
-    pub const fn with_dtb(mut self, addr: usize) -> Self {
-        self.dtb_addr = addr;
+    pub const fn with_dtb(mut self, paddr: usize, vaddr: usize) -> Self {
+        self.dtb_addr = paddr;
+        self.dtb_vaddr = vaddr;
         self
+    }
+
+    #[inline]
+    pub const fn has_dtb(&self) -> bool {
+        self.dtb_addr != 0 && self.dtb_vaddr != 0
+    }
+
+    #[inline]
+    pub const fn dtb_ptr(&self) -> Option<*const u8> {
+        if !self.has_dtb() {
+            None
+        } else {
+            Some(self.dtb_vaddr as *const u8)
+        }
+    }
+
+    #[inline]
+    pub const fn with_uefi_memmap(mut self, paddr: usize, vaddr: usize) -> Self {
+        self.uefi_memmap_addr = paddr;
+        self.uefi_memmap_vaddr = vaddr;
+        self
+    }
+
+    #[inline]
+    pub const fn has_uefi_memmap(&self) -> bool {
+        self.uefi_memmap_addr != 0 && self.uefi_memmap_vaddr != 0
+    }
+
+    #[inline]
+    pub const fn uefi_memmap_ptr(&self) -> Option<*const u8> {
+        if !self.has_uefi_memmap() {
+            None
+        } else {
+            Some(self.uefi_memmap_vaddr as *const u8)
+        }
     }
 
     #[inline]
     pub const fn with_rsdp(mut self, addr: usize) -> Self {
         self.rsdp_addr = addr;
         self
+    }
+
+    #[inline]
+    pub const fn has_acpi(&self) -> bool {
+        self.rsdp_addr != 0
     }
 
     #[inline]
@@ -214,6 +287,8 @@ impl fmt::Debug for BootInfo {
             .field("magic", &format_args!("{:#x}", self.magic))
             .field("version", &self.version)
             .field("protocol", &self.protocol)
+            .field("memory_description_root", &self.memory_description_root)
+            .field("hardware_description_root", &self.hardware_description_root)
             .field(
                 "protocol_info_addr",
                 &format_args!("{:#x}", self.protocol_info_addr),
@@ -227,6 +302,15 @@ impl fmt::Debug for BootInfo {
                 &format_args!("{:#x}", self.phys_virt_offset),
             )
             .field("dtb_addr", &format_args!("{:#x}", self.dtb_addr))
+            .field("dtb_vaddr", &format_args!("{:#x}", self.dtb_vaddr))
+            .field(
+                "uefi_memmap_addr",
+                &format_args!("{:#x}", self.uefi_memmap_addr),
+            )
+            .field(
+                "uefi_memmap_vaddr",
+                &format_args!("{:#x}", self.uefi_memmap_vaddr),
+            )
             .field("rsdp_addr", &format_args!("{:#x}", self.rsdp_addr))
             .field(
                 "boot_runtime",
@@ -396,6 +480,46 @@ pub enum BootProtocol {
     OpenSBI    = 6,
     UBoot      = 7,
     Bios       = 8,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryDescriptionRoot {
+    Unknown         = 0,
+    DeviceTree      = 1,
+    UefiMemmap      = 2,
+    X86BootProtocol = 3,
+}
+
+impl MemoryDescriptionRoot {
+    #[inline]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::DeviceTree => "device tree",
+            Self::UefiMemmap => "uefi memmap",
+            Self::X86BootProtocol => "x86 boot protocol",
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareDescriptionRoot {
+    None       = 0,
+    DeviceTree = 1,
+    Acpi       = 2,
+}
+
+impl HardwareDescriptionRoot {
+    #[inline]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DeviceTree => "device tree",
+            Self::Acpi => "acpi",
+        }
+    }
 }
 
 #[repr(u8)]

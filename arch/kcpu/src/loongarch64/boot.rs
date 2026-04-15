@@ -2,43 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Helper functions to initialize the CPU states on systems bootstrapping.
-
-use loongArch64::register::{crmd, stlbps, tlbidx, tlbrehi, tlbrentry};
-use memaddr::PhysAddr;
-use page_table::loongarch64::LA64MetaData;
-
-/// Initializes TLB and MMU related registers on the current CPU.
-///
-/// It sets the TLB Refill exception entry (`TLBRENTY`), page table root address,
-/// and finally enables the mapped address translation mode.
-///
-/// - TLBRENTY: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#tlb-refill-exception-entry-base-address>
-/// - CRMD: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#current-mode-information>
-pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
-    unsafe extern "C" {
-        fn dispatch_irq_tlb_refill();
-    }
-
-    // Configure TLB
-    const PS_4K: usize = 0x0c; // Page Size 4KB
-    let tlbrentry_paddr = pa!(dispatch_irq_tlb_refill as usize - phys_virt_offset);
-    tlbidx::set_ps(PS_4K);
-    stlbps::set_ps(PS_4K);
-    tlbrehi::set_ps(PS_4K);
-    tlbrentry::set_tlbrentry(tlbrentry_paddr.as_usize());
-
-    // Configure page table walking
-    unsafe {
-        karch::write_pwc(LA64MetaData::PWCL_VALUE, LA64MetaData::PWCH_VALUE);
-        karch::write_kernel_page_table(root_paddr.into());
-        karch::write_user_page_table(pa!(0).into());
-    }
-    karch::flush_tlb(None);
-
-    // Enable mapped address translation mode
-    crmd::set_pg(true);
-}
+//! Helper functions to initialize LoongArch64 CPU bootstrap state.
 
 /// Initializes trap handling on the current CPU.
 ///
@@ -46,10 +10,9 @@ pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
 pub fn init_trap() {
     crate::userspace_common::init_exception_table();
     unsafe {
-        extern "C" {
+        unsafe extern "C" {
             fn exception_entry_base();
         }
-        core::arch::asm!(include_asm_macros!(), "csrwr $r0, KSAVE_KSP");
-        karch::write_trap_vector_base(exception_entry_base as usize);
+        karch::init_trap_state(exception_entry_base as *const () as usize);
     }
 }

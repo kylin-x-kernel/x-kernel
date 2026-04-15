@@ -6,11 +6,10 @@
 
 #![no_std]
 
-use core::ffi::CStr;
-
 use lazyinit::LazyInit;
 pub use rs_fdtree::{
-    Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion, NodeProperty, RegIter,
+    Chosen, Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion, NodeProperty,
+    RegIter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,10 +65,10 @@ pub struct InterruptInfo {
     pub controller: InterruptControllerKind,
 }
 
-fn property_str<'b, 'a>(node: FdtNode<'b, 'a>, name: &str) -> Option<&'a str> {
-    let prop = node.property(name)?;
-    let cstr = CStr::from_bytes_until_nul(prop.value).ok()?;
-    cstr.to_str().ok()
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NamedMemoryRegion {
+    pub region: crate::MemoryRegion,
+    pub name: &'static str,
 }
 
 fn property_u32_cells<const N: usize>(
@@ -89,19 +88,7 @@ fn property_u32_cells<const N: usize>(
 }
 
 pub fn property_u32(node: FdtNode<'static, 'static>, name: &str) -> Option<u32> {
-    Some(u32::from_be_bytes(
-        node.property(name)?.value.get(..4)?.try_into().ok()?,
-    ))
-}
-
-fn parent_property_u32(node: FdtNode<'static, 'static>, name: &str) -> Option<u32> {
-    Some(u32::from_be_bytes(
-        node.parent_property(name)?
-            .value
-            .get(..4)?
-            .try_into()
-            .ok()?,
-    ))
+    node.property_u32(name)
 }
 
 fn parse_cells_u64(cells: &[u32]) -> Option<u64> {
@@ -220,6 +207,10 @@ pub unsafe fn dtb_total_size_from_ptr(ptr: *const u8) -> Result<usize, FirmwareI
     Ok(fdt.total_size())
 }
 
+pub fn dtb_total_size() -> Option<usize> {
+    Some(fdt()?.total_size())
+}
+
 /// Initialize the global DTB handle from a raw pointer.
 ///
 /// # Safety
@@ -233,26 +224,19 @@ pub unsafe fn init_device_tree_ptr(ptr: *const u8) -> Result<(), FirmwareInitErr
 }
 
 pub fn chosen_bootargs() -> Option<&'static str> {
-    let node = fdt()?.all_nodes().find(|node| node.name == "chosen")?;
-    property_str(node, "bootargs")
+    fdt()?.chosen_bootargs()
 }
 
 pub fn root_model() -> Option<&'static str> {
-    let node = fdt()?.all_nodes().find(|node| node.name == "/")?;
-    property_str(node, "model")
+    fdt()?.root_model()
 }
 
 pub fn root_compatible() -> Option<&'static str> {
-    fdt()?
-        .all_nodes()
-        .find(|node| node.name == "/")?
-        .compatible()
+    fdt()?.root_compatible()
 }
 
 pub fn find_compatible(compatible: &str) -> Option<FdtNode<'static, 'static>> {
-    fdt()?
-        .all_nodes()
-        .find(|node| node.is_compatible(compatible))
+    fdt()?.find_compatible(compatible)
 }
 
 pub fn generic_pci_host() -> Option<FdtNode<'static, 'static>> {
@@ -264,22 +248,15 @@ pub fn find_node(path: &str) -> Option<FdtNode<'static, 'static>> {
 }
 
 pub fn chosen_stdout_path() -> Option<&'static str> {
-    let node = find_node("/chosen")?;
-    property_str(node, "stdout-path").or_else(|| property_str(node, "linux,stdout-path"))
+    fdt()?.chosen_stdout_path()
 }
 
-pub fn aliases_node() -> Option<FdtNode<'static, 'static>> {
-    find_node("/aliases")
+pub fn chosen() -> Option<Chosen<'static, 'static>> {
+    fdt()?.chosen()
 }
 
 pub fn resolve_node(path_or_alias: &str) -> Option<FdtNode<'static, 'static>> {
-    let key = path_or_alias.split(':').next()?;
-    if key.starts_with('/') {
-        return find_node(key);
-    }
-
-    let alias_value = property_str(aliases_node()?, key)?;
-    find_node(alias_value.split(':').next()?)
+    fdt()?.resolve_node(path_or_alias)
 }
 
 /// Returns the first interrupt specifier for a device node.
@@ -342,7 +319,7 @@ pub fn generic_pci_non_prefetchable_mem_range() -> Option<PciRangeInfo> {
 
     let node = generic_pci_host()?;
     let child = node.cell_sizes();
-    let parent_address_cells = parent_property_u32(node, "#address-cells").unwrap_or(2) as usize;
+    let parent_address_cells = node.parent_property_u32("#address-cells").unwrap_or(2) as usize;
     let total_cells = child.address_cells + parent_address_cells + child.size_cells;
     let value = node.property("ranges")?.value;
     if total_cells == 0 || value.len() < total_cells * 4 {
@@ -473,8 +450,8 @@ pub fn dice_region() -> Option<crate::MemoryRegion> {
     fdt()?.dice()?.regions()?.next()
 }
 
-fn collect_memory_regions_from_fdt<const N: usize>(
-    fdt: &LinuxFdt<'_>,
+fn collect_regions<const N: usize>(
+    source: impl Iterator<Item = crate::MemoryRegion>,
 ) -> ([crate::MemoryRegion; N], usize) {
     let mut regions = [crate::MemoryRegion {
         starting_address: core::ptr::null(),
@@ -482,72 +459,24 @@ fn collect_memory_regions_from_fdt<const N: usize>(
     }; N];
     let mut count = 0;
 
-    for node in fdt.all_nodes() {
-        let is_memory_name = node.name == "memory" || node.name.starts_with("memory@");
-        let is_memory_type = node
-            .property("device_type")
-            .and_then(|prop| CStr::from_bytes_until_nul(prop.value).ok())
-            .is_some_and(|device_type| device_type.to_bytes() == b"memory");
-        if !is_memory_name && !is_memory_type {
+    for region in source {
+        if region.size == 0 {
             continue;
         }
-
-        let Some(node_regions) = node.reg() else {
-            continue;
-        };
-        for region in node_regions {
-            if count == N {
-                return (regions, count);
-            }
-            regions[count] = region;
-            count += 1;
+        if count == N {
+            return (regions, count);
         }
+        regions[count] = region;
+        count += 1;
     }
 
     (regions, count)
 }
 
-/// Read `/memory` regions directly from a DTB pointer without touching the
-/// global DTB state.
-///
-/// # Safety
-///
-/// `ptr` must point to a valid, readable DTB blob for the duration of this
-/// call.
-pub unsafe fn read_memory_regions_from_ptr<const N: usize>(
-    ptr: *const u8,
-) -> Result<([crate::MemoryRegion; N], usize), FirmwareInitError> {
-    let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
-    Ok(collect_memory_regions_from_fdt(&fdt))
-}
-
-pub fn read_memory_regions<const N: usize>() -> ([crate::MemoryRegion; N], usize) {
-    fdt().map(collect_memory_regions_from_fdt).unwrap_or((
-        [crate::MemoryRegion {
-            starting_address: core::ptr::null(),
-            size: 0,
-        }; N],
-        0,
-    ))
-}
-
-pub fn read_reserved_memory_regions<const N: usize>() -> ([crate::MemoryRegion; N], usize) {
-    let mut regions = [crate::MemoryRegion {
-        starting_address: core::ptr::null(),
-        size: 0,
-    }; N];
-    let mut count = 0;
-
-    if let Some(fdt) = fdt() {
-        for region in fdt.mem_reservations().chain(fdt.reserved_memory_regions()) {
-            if region.size == 0 {
-                continue;
-            }
-            assert!(count < N, "too many reserved memory regions in device tree");
-            regions[count] = region;
-            count += 1;
-        }
-    }
+fn collect_reserved_regions<const N: usize>(
+    source: impl Iterator<Item = crate::MemoryRegion>,
+) -> ([crate::MemoryRegion; N], usize) {
+    let (mut regions, mut count) = collect_regions(source);
 
     if count != 0 {
         regions[..count].sort_unstable_by_key(|region| region.starting_address as usize);
@@ -570,4 +499,114 @@ pub fn read_reserved_memory_regions<const N: usize>() -> ([crate::MemoryRegion; 
     }
 
     (regions, count)
+}
+
+fn collect_named_regions<const N: usize>(
+    source: impl Iterator<Item = NamedMemoryRegion>,
+) -> ([NamedMemoryRegion; N], usize) {
+    let mut regions = [NamedMemoryRegion {
+        region: crate::MemoryRegion {
+            starting_address: core::ptr::null(),
+            size: 0,
+        },
+        name: "",
+    }; N];
+    let mut count = 0;
+
+    for region in source {
+        if region.region.size == 0 {
+            continue;
+        }
+        if count == N {
+            return (regions, count);
+        }
+        regions[count] = region;
+        count += 1;
+    }
+
+    (regions, count)
+}
+
+/// Read `/memory` regions directly from a DTB pointer without touching the
+/// global DTB state.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid, readable DTB blob for the duration of this
+/// call.
+pub unsafe fn read_memory_regions_from_ptr<const N: usize>(
+    ptr: *const u8,
+) -> Result<([crate::MemoryRegion; N], usize), FirmwareInitError> {
+    let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
+    Ok(collect_regions(fdt.memory_regions()))
+}
+
+/// Read reserved-memory and memreserve entries directly from a DTB pointer
+/// without touching the global DTB state.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid, readable DTB blob for the duration of this
+/// call.
+pub unsafe fn read_reserved_memory_regions_from_ptr<const N: usize>(
+    ptr: *const u8,
+) -> Result<([crate::MemoryRegion; N], usize), FirmwareInitError> {
+    let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
+    Ok(collect_reserved_regions(
+        fdt.mem_reservations().chain(fdt.reserved_memory_regions()),
+    ))
+}
+
+pub fn read_memory_regions<const N: usize>() -> ([crate::MemoryRegion; N], usize) {
+    fdt()
+        .map(|fdt| collect_regions(fdt.memory_regions()))
+        .unwrap_or((
+            [crate::MemoryRegion {
+                starting_address: core::ptr::null(),
+                size: 0,
+            }; N],
+            0,
+        ))
+}
+
+pub fn read_reserved_memory_regions<const N: usize>() -> ([crate::MemoryRegion; N], usize) {
+    fdt()
+        .map(|fdt| {
+            collect_reserved_regions(fdt.mem_reservations().chain(fdt.reserved_memory_regions()))
+        })
+        .unwrap_or((
+            [crate::MemoryRegion {
+                starting_address: core::ptr::null(),
+                size: 0,
+            }; N],
+            0,
+        ))
+}
+
+pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegion; N], usize) {
+    fdt()
+        .map(|fdt| {
+            let memreserve = fdt.mem_reservations().map(|region| NamedMemoryRegion {
+                region,
+                name: "dtb memreserve",
+            });
+            let reserved_nodes = fdt.reserved_memory_nodes().flat_map(|node| {
+                let name = node.compatible().unwrap_or(node.name);
+                node.reg()
+                    .into_iter()
+                    .flatten()
+                    .map(move |region| NamedMemoryRegion { region, name })
+            });
+            collect_named_regions(memreserve.chain(reserved_nodes))
+        })
+        .unwrap_or((
+            [NamedMemoryRegion {
+                region: crate::MemoryRegion {
+                    starting_address: core::ptr::null(),
+                    size: 0,
+                },
+                name: "",
+            }; N],
+            0,
+        ))
 }

@@ -8,8 +8,6 @@
 extern crate log;
 #[macro_use]
 extern crate kplat;
-mod boot;
-mod console;
 mod init;
 mod irq;
 #[cfg(feature = "smp")]

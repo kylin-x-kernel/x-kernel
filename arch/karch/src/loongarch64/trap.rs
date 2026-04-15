@@ -4,6 +4,8 @@
 
 //! Exception/trap vector operations for LoongArch64.
 
+use core::arch::asm;
+
 use loongArch64::register::{ecfg, eentry};
 
 /// Writes the Exception Entry Base Address register (`EENTRY`).
@@ -21,4 +23,20 @@ use loongArch64::register::{ecfg, eentry};
 pub unsafe fn write_trap_vector_base(addr: usize) {
     ecfg::set_vs(0);
     eentry::set_eentry(addr);
+}
+
+/// Initializes the current CPU's trap-vector hardware state.
+///
+/// This clears the kernel scratch stack slot used by the trap entry and then
+/// programs the exception vector base.
+///
+/// # Safety
+///
+/// This changes trap-entry state for the current CPU.
+#[inline]
+pub unsafe fn init_trap_state(addr: usize) {
+    unsafe {
+        asm!("csrwr $r0, 0x30");
+        write_trap_vector_base(addr);
+    }
 }

@@ -67,6 +67,28 @@ pub fn append_reserved_memory_regions(
     reserved_ranges
 }
 
+pub fn describe_reserved_memory_region(region: &MemoryRegion) -> Option<ReservedRegion> {
+    let start = region.paddr.as_usize();
+    let end = start.checked_add(region.size)?;
+
+    described_reserved_regions()
+        .iter()
+        .copied()
+        .find(|reserved| {
+            let reserved_end = reserved.start + reserved.size;
+            reserved.name == region.name && start >= reserved.start && end <= reserved_end
+        })
+        .or_else(|| {
+            (region.name == "kernel image").then_some(ReservedRegion::new(
+                start,
+                region.size,
+                ReservedKind::KernelImage,
+                ReservedSource::Kernel,
+                "kernel image",
+            ))
+        })
+}
+
 fn exclusion_ranges(
     kernel_start: usize,
     kernel_size: usize,

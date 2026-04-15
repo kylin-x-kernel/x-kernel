@@ -180,7 +180,7 @@ $(UEFI_CFG): $(OUT_ELF)
 	@printf "    $(GREEN_C)Generating$(END_C) axboot config \"$(notdir $@)\" ...\n"
 	@printf '# bootloader config\nkernel_paths = ["%s"]\n' "$(notdir $(OUT_ELF))" > $@
 
-$(OUT_UEFI_IMG): $(OUT_ELF) _dwarf $(BOOTLOADER_EFI) $(UEFI_CFG)
+$(OUT_UEFI_IMG): $(OUT_ELF) _dwarf bootloader-build $(BOOTLOADER_EFI) $(UEFI_CFG)
 	@printf "    $(GREEN_C)Creating$(END_C) x86_64 UEFI disk image \"$(notdir $@)\" ...\n"
 	$(call run_cmd,rm,-f $@)
 	$(call make_disk_image,fat32,$@,$(UEFI_IMG_SIZE_MIB))
@@ -209,7 +209,7 @@ $(BOOTSTUB_RAW_BIN): $(BOOTSTUB_ELF)
 	@printf "    $(GREEN_C)Generating$(END_C) x86_64 bootstub raw image \"$(notdir $@)\" ...\n"
 	$(call run_cmd,rust-objcopy,--binary-architecture=x86_64 $< --strip-all -O binary $@)
 
-$(OUT_LINUXBOOT): $(LINUXBOOT_SETUP_BIN) $(BOOTSTUB_RAW_BIN) $(BOOTSTUB_ELF) $(OUT_ELF) _dwarf $(LINUXBOOT_MKIMG)
+$(OUT_LINUXBOOT): $(LINUXBOOT_SETUP_BIN) bootstub-build $(BOOTSTUB_RAW_BIN) $(BOOTSTUB_ELF) $(OUT_ELF) _dwarf $(LINUXBOOT_MKIMG)
 	@printf "    $(GREEN_C)Creating$(END_C) x86_64 direct boot image \"$(notdir $@)\" ...\n"
 	$(call run_cmd,python3,$(LINUXBOOT_MKIMG) --setup $(LINUXBOOT_SETUP_BIN) --stub-elf $(BOOTSTUB_ELF) --stub-bin $(BOOTSTUB_RAW_BIN) --kernel $(OUT_ELF) --output $@)
 endif
@@ -218,9 +218,16 @@ $(BOOTSTUB_ELF): $(BOOTSTUB_SOURCES)
 	@printf '$(WHITE_C)cd$(END_C) $(GRAY_C)$(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --target-dir $(TARGET_DIR) --release --config target.x86_64-unknown-none.rustflags=[]$(END_C)\n'
 	@cd $(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --target-dir $(TARGET_DIR) --release --config 'target.x86_64-unknown-none.rustflags=[]'
 
-$(BOOTLOADER_EFI): $(BOOTLOADER_SOURCES)
+bootstub-build:
+	@printf '$(WHITE_C)cd$(END_C) $(GRAY_C)$(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --target-dir $(TARGET_DIR) --release --config target.x86_64-unknown-none.rustflags=[]$(END_C)\n'
+	@cd $(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTSTUB_PKG) --target x86_64-unknown-none --target-dir $(TARGET_DIR) --release --config 'target.x86_64-unknown-none.rustflags=[]'
+
+bootloader-build:
 	@printf '$(WHITE_C)cd$(END_C) $(GRAY_C)$(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTLOADER_PKG) --target x86_64-unknown-uefi --target-dir $(TARGET_DIR) --release$(END_C)\n'
 	@cd $(PWD) && env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo build -p $(BOOTLOADER_PKG) --target x86_64-unknown-uefi --target-dir $(TARGET_DIR) --release
+
+$(BOOTLOADER_EFI): $(BOOTLOADER_SOURCES)
+	@:
 
 ifeq ($(ACCEL),)
   ifneq ($(findstring -microsoft, $(shell uname -r | tr '[:upper:]' '[:lower:]')),)

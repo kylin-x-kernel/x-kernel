@@ -6,7 +6,7 @@
 
 use core::arch::naked_asm;
 
-use boot_info::{BootInfo, BootProtocol};
+use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::{BOOT_STACK_SIZE, CPU_NUM};
 #[cfg(feature = "fp-simd")]
@@ -136,10 +136,12 @@ pub unsafe extern "C" fn __primary_switched(
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
     unsafe {
         RISCV_BOOT_INFO = BootInfo::new(BootProtocol::OpenSBI)
+            .with_memory_description_root(MemoryDescriptionRoot::DeviceTree)
+            .with_hardware_description_root(HardwareDescriptionRoot::DeviceTree)
             .with_protocol_info_addr(dtb_paddr)
             .with_kernel_load_paddr(kernel_load_paddr)
             .with_phys_virt_offset(PAGE_OFFSET)
-            .with_dtb(dtb_paddr)
+            .with_dtb(dtb_paddr, kaddr_layout::p2v(dtb_paddr))
             .with_boot_console_mmio(
                 kbuild_config::BOOT_CONSOLE_ADDR,
                 0x1000,

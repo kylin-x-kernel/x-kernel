@@ -9,28 +9,30 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-fp-simd = ["kcpu/fp-simd"]
+fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["dep:chrono"]
 smp = ["kplat/smp", "kspin/smp"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, optional = true }
-handler_table = "0.1.2"
+console_driver = { workspace = true, features = ["ns16550-mmio"] }
 kspin = { workspace = true }
 lazyinit = "0.2"
 log = "0.4"
 
 kcpu = { workspace = true }
 karch = { workspace = true }
+kaddr_layout = { workspace = true }
 khal = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
+kernel_boot = { workspace = true }
 rtc_driver = { workspace = true }
+memspace = { workspace = true }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 loongArch64 = "0.2.4"
 page_table = { workspace = true }
-uart_16550 = "0.4.0"
 
 [package.metadata.docs.rs]
 targets = ["loongarch64-unknown-none"]

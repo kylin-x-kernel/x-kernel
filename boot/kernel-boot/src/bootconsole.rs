@@ -6,6 +6,8 @@ use core::fmt::{self, Write};
 
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::serial as imp;
+#[cfg(target_arch = "loongarch64")]
+use crate::arch::loongarch64::serial as imp;
 #[cfg(target_arch = "riscv64")]
 use crate::arch::riscv64::serial as imp;
 #[cfg(target_arch = "x86_64")]
@@ -13,6 +15,7 @@ use crate::arch::x86_64::serial as imp;
 
 #[cfg(not(any(
     target_arch = "aarch64",
+    target_arch = "loongarch64",
     target_arch = "riscv64",
     target_arch = "x86_64"
 )))]

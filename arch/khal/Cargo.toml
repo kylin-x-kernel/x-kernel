@@ -25,6 +25,7 @@ irq = []
 [dependencies]
 kalloc = { workspace = true }
 boot_info = { workspace = true }
+firmware_handoff = { workspace = true }
 kcpu = { workspace = true }
 karch = { workspace = true }
 kplat.workspace = true

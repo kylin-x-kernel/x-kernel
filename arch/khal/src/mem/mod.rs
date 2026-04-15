@@ -5,7 +5,7 @@
 //! Physical memory management.
 
 mod desc;
-mod reserved;
+pub mod reserved;
 mod source;
 
 use heapless::Vec;

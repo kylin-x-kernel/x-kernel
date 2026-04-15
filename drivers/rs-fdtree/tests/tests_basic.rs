@@ -57,10 +57,11 @@ fn build_dice_dtb() -> Vec<u8> {
         }
     }
 
-    let strings = b"#address-cells\0#size-cells\0reg\0";
+    let strings = b"#address-cells\0#size-cells\0compatible\0reg\0";
     let off_addr_cells = 0u32;
     let off_size_cells = 15u32;
-    let off_reg = 27u32;
+    let off_compatible = 27u32;
+    let off_reg = 38u32;
 
     let mut structs = Vec::new();
     push_be32(&mut structs, FDT_BEGIN_NODE);
@@ -69,7 +70,7 @@ fn build_dice_dtb() -> Vec<u8> {
     push_prop(&mut structs, off_size_cells, &2u32.to_be_bytes());
 
     push_be32(&mut structs, FDT_BEGIN_NODE);
-    push_name(&mut structs, b"chosen");
+    push_name(&mut structs, b"reserved-memory");
     push_prop(&mut structs, off_addr_cells, &2u32.to_be_bytes());
     push_prop(&mut structs, off_size_cells, &2u32.to_be_bytes());
 
@@ -82,6 +83,7 @@ fn build_dice_dtb() -> Vec<u8> {
         0x1000u32.to_be_bytes(),
     ]
     .concat();
+    push_prop(&mut structs, off_compatible, b"google,open-dice\0");
     push_prop(&mut structs, off_reg, &reg);
     push_be32(&mut structs, FDT_END_NODE);
     push_be32(&mut structs, FDT_END_NODE);
@@ -208,6 +210,113 @@ fn build_reserved_memory_dtb() -> Vec<u8> {
     dtb
 }
 
+fn build_chosen_memory_dtb() -> Vec<u8> {
+    const FDT_MAGIC: u32 = 0xd00dfeed;
+    const FDT_BEGIN_NODE: u32 = 1;
+    const FDT_END_NODE: u32 = 2;
+    const FDT_PROP: u32 = 3;
+    const FDT_END: u32 = 5;
+
+    fn push_be32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn push_name(buf: &mut Vec<u8>, name: &[u8]) {
+        buf.extend_from_slice(name);
+        buf.push(0);
+        while buf.len() % 4 != 0 {
+            buf.push(0);
+        }
+    }
+
+    fn push_prop(buf: &mut Vec<u8>, name_off: u32, value: &[u8]) {
+        push_be32(buf, FDT_PROP);
+        push_be32(buf, value.len() as u32);
+        push_be32(buf, name_off);
+        buf.extend_from_slice(value);
+        while buf.len() % 4 != 0 {
+            buf.push(0);
+        }
+    }
+
+    let strings =
+        b"#address-cells\0#size-cells\0bootargs\0stdout-path\0device_type\0reg\0serial0\0";
+    let off_addr_cells = 0u32;
+    let off_size_cells = 15u32;
+    let off_bootargs = 27u32;
+    let off_stdout_path = 36u32;
+    let off_device_type = 48u32;
+    let off_reg = 60u32;
+    let off_serial0 = 64u32;
+
+    let mut structs = Vec::new();
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"");
+    push_prop(&mut structs, off_addr_cells, &2u32.to_be_bytes());
+    push_prop(&mut structs, off_size_cells, &2u32.to_be_bytes());
+
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"chosen");
+    push_prop(&mut structs, off_bootargs, b"console=ttyS0\0");
+    push_prop(&mut structs, off_stdout_path, b"serial0:115200n8\0");
+    push_be32(&mut structs, FDT_END_NODE);
+
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"aliases");
+    push_prop(&mut structs, off_serial0, b"/soc/uart@10000000\0");
+    push_be32(&mut structs, FDT_END_NODE);
+
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"memory@80000000");
+    push_prop(&mut structs, off_device_type, b"memory\0");
+    let reg = [
+        0u32.to_be_bytes(),
+        0x8000_0000u32.to_be_bytes(),
+        0u32.to_be_bytes(),
+        0x4000_0000u32.to_be_bytes(),
+    ]
+    .concat();
+    push_prop(&mut structs, off_reg, &reg);
+    push_be32(&mut structs, FDT_END_NODE);
+
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"soc");
+    push_prop(&mut structs, off_addr_cells, &2u32.to_be_bytes());
+    push_prop(&mut structs, off_size_cells, &2u32.to_be_bytes());
+
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    push_name(&mut structs, b"uart@10000000");
+    push_prop(&mut structs, off_reg, &reg[..16]);
+    push_be32(&mut structs, FDT_END_NODE);
+
+    push_be32(&mut structs, FDT_END_NODE);
+    push_be32(&mut structs, FDT_END_NODE);
+    push_be32(&mut structs, FDT_END);
+
+    let header_size = 10 * 4;
+    let mem_rsvmap_size = 16;
+    let off_mem_rsvmap = header_size as u32;
+    let off_dt_struct = (header_size + mem_rsvmap_size) as u32;
+    let off_dt_strings = off_dt_struct + structs.len() as u32;
+    let totalsize = off_dt_strings + strings.len() as u32;
+
+    let mut dtb = Vec::new();
+    push_be32(&mut dtb, FDT_MAGIC);
+    push_be32(&mut dtb, totalsize);
+    push_be32(&mut dtb, off_dt_struct);
+    push_be32(&mut dtb, off_dt_strings);
+    push_be32(&mut dtb, off_mem_rsvmap);
+    push_be32(&mut dtb, 17);
+    push_be32(&mut dtb, 16);
+    push_be32(&mut dtb, 0);
+    push_be32(&mut dtb, strings.len() as u32);
+    push_be32(&mut dtb, structs.len() as u32);
+    dtb.extend_from_slice(&[0; 16]);
+    dtb.extend_from_slice(&structs);
+    dtb.extend_from_slice(strings);
+    dtb
+}
+
 #[test]
 fn dice_node_regions() {
     let dtb = build_dice_dtb();
@@ -235,6 +344,24 @@ fn memreserve_and_reserved_memory_regions() {
     assert_eq!(reserved[0].size, 0x2000);
     assert_eq!(reserved[1].starting_address as usize, 0x8200_0000);
     assert_eq!(reserved[1].size, 0x3000);
+}
+
+#[test]
+fn chosen_alias_and_memory_helpers() {
+    let dtb = build_chosen_memory_dtb();
+    let fdt = LinuxFdt::new(&dtb).unwrap();
+
+    assert_eq!(fdt.chosen_bootargs(), Some("console=ttyS0"));
+    assert_eq!(fdt.chosen_stdout_path(), Some("serial0:115200n8"));
+    assert_eq!(fdt.root_compatible(), None);
+
+    let uart = fdt.resolve_node("serial0").unwrap();
+    assert_eq!(uart.name, "uart@10000000");
+
+    let memory = fdt.memory_regions().collect::<Vec<_>>();
+    assert_eq!(memory.len(), 1);
+    assert_eq!(memory[0].starting_address as usize, 0x8000_0000);
+    assert_eq!(memory[0].size, 0x4000_0000);
 }
 
 #[test]
@@ -275,9 +402,9 @@ fn crosvm_dtb_parses_nodes_after_chosen() {
 fn crosvm_dtb_exposes_both_dice_nodes() {
     let fdt = setup_crosvm();
 
-    let chosen_dice = fdt.dice().unwrap().regions().unwrap().next().unwrap();
-    assert_eq!(chosen_dice.starting_address as usize, 0x7fe2_3000);
-    assert_eq!(chosen_dice.size, 0x1000);
+    let dice = fdt.dice().unwrap().regions().unwrap().next().unwrap();
+    assert_eq!(dice.starting_address as usize, 0x7fe2_3000);
+    assert_eq!(dice.size, 0x1000);
 
     let reserved_dice = fdt
         .find_node("/reserved-memory/dice")

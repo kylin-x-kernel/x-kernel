@@ -6,7 +6,7 @@
 
 use core::arch::asm;
 
-use loongArch64::register::{pgdh, pgdl};
+use loongArch64::register::{crmd, pgdh, pgdl, stlbps, tlbidx, tlbrehi, tlbrentry};
 use memaddr::PhysAddr;
 
 /// Hardware-ready page-table root value.
@@ -30,6 +30,11 @@ impl From<PhysAddr> for HwPageTableRoot {
     fn from(root_paddr: PhysAddr) -> Self {
         HwPageTableRoot::new(root_paddr.as_usize())
     }
+}
+
+#[inline]
+pub fn encode_page_table_root(root_paddr: PhysAddr) -> HwPageTableRoot {
+    root_paddr.into()
 }
 
 /// Reads the current page table root register for user space (`PGDL`).
@@ -97,4 +102,36 @@ pub unsafe fn write_pwc(pwcl: u32, pwch: u32) {
             in(reg) pwch
         )
     }
+}
+
+/// Initializes the current CPU's boot-time MMU state.
+///
+/// This programs the refill page size, refill entry, page-walk configuration,
+/// kernel/user roots, flushes stale TLB state, and finally enables paged
+/// translation.
+///
+/// # Safety
+///
+/// This changes the active address-translation state of the current CPU.
+#[inline]
+pub unsafe fn init_mmu(
+    root: HwPageTableRoot,
+    user_root: HwPageTableRoot,
+    pwcl: u32,
+    pwch: u32,
+    tlbrentry_addr: usize,
+    page_size_shift: usize,
+) {
+    tlbidx::set_ps(page_size_shift);
+    stlbps::set_ps(page_size_shift);
+    tlbrehi::set_ps(page_size_shift);
+    tlbrentry::set_tlbrentry(tlbrentry_addr);
+
+    unsafe {
+        write_pwc(pwcl, pwch);
+        write_kernel_page_table(root);
+        write_user_page_table(user_root);
+    }
+    crate::flush_tlb(None);
+    crmd::set_pg(true);
 }

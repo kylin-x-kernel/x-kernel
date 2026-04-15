@@ -105,7 +105,7 @@ impl PageTableEntry for La64PageEntry {
     }
 
     fn new_table(paddr: PhysAddr) -> Self {
-        Self(LaFlags::V.bits() | (paddr.as_usize() as u64 & Self::PADDR_MASK))
+        Self(paddr.as_usize() as u64 & Self::PADDR_MASK)
     }
 
     fn set_flags(&mut self, flags: PagingFlags, is_huge: bool) {

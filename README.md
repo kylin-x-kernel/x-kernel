@@ -7,7 +7,7 @@ This project is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS), a
 - [x] RISC-V 64
 - [x] LoongArch64
 - [x] AArch64
-- [ ] x86_64 (work in progress)
+- [x] x86_64
 
 ## Supported Platforms
 - [x] QEMU

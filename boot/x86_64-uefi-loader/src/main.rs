@@ -9,7 +9,7 @@ extern crate alloc;
 
 use core::ptr;
 
-use boot_info::{BOOT_INFO_MAGIC, BootInfo, BootProtocol};
+use boot_info::{BOOT_INFO_MAGIC, BootInfo, BootProtocol, HardwareDescriptionRoot};
 use log::{error, info};
 use uefi::{
     boot::AllocateType,
@@ -123,6 +123,7 @@ fn efi_main() -> Status {
                 0,
                 kbuild_config::CPU_NUM,
             )
+            .with_hardware_description_root(HardwareDescriptionRoot::Acpi)
             .with_rsdp(rsdp_addr),
         );
     }

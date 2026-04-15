@@ -2,28 +2,34 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kbuild_config::RTC_PADDR;
 use khal::time::{MonotonicTimerIf, NANOS_PER_MILLIS, NANOS_PER_SEC};
 use lazyinit::LazyInit;
-use loongArch64::time::Time;
+use loongArch64::{register::tcfg, time::Time};
+
+const TIMER_IRQ: usize = 11;
+
 static NANOS_PER_TICK: LazyInit<u64> = LazyInit::new();
 pub(super) fn init_percpu() {
-    use loongArch64::reg_handler::tcfg;
     tcfg::set_init_val(0);
     tcfg::set_periodic(false);
     tcfg::set_en(true);
-    khal::irq::enable(crate::config::devices::TIMER_IRQ, true);
+    khal::irq::enable(TIMER_IRQ, true);
 }
 #[cfg(feature = "rtc")]
 fn init_rtc() {
     use chrono::{TimeZone, Timelike, Utc};
-    use khal::mem::{PhysAddr, p2v, pa};
+    use khal::mem::PhysAddr;
     const SYS_TOY_READ0: usize = 0x2C;
     const SYS_TOY_READ1: usize = 0x30;
     const SYS_RTCCTRL: usize = 0x40;
     const TOY_ENABLE: u32 = 1 << 11;
     const OSC_ENABLE: u32 = 1 << 8;
-    const LS7A_RTC_VADDR: PhysAddr = pa!(crate::config::devices::RTC_PADDR);
-    let rtc_base_ptr = p2v(LS7A_RTC_VADDR).as_mut_ptr();
+    const LS7A_RTC_SIZE: usize = 0x1000;
+    let rtc_base =
+        memspace::iomap_device(PhysAddr::from_usize(RTC_PADDR), LS7A_RTC_SIZE, "ls7a-rtc")
+            .unwrap_or_else(|err| panic!("failed to iomap ls7a rtc: {err:?}"));
+    let rtc_base_ptr = rtc_base.as_mut_ptr();
     fn extract_bits(value: u32, range: core::ops::Range<u32>) -> u32 {
         (value >> range.start) & ((1 << (range.end - range.start)) - 1)
     }
@@ -71,15 +77,14 @@ impl MonotonicTimerIf for GlobalTimerImpl {
     }
 
     fn freq() -> u64 {
-        crate::config::devices::TIMER_FREQUENCY as u64
+        loongArch64::time::get_timer_freq() as u64
     }
 
     fn interrupt_id() -> usize {
-        crate::config::devices::TIMER_IRQ
+        TIMER_IRQ
     }
 
     fn arm_timer(deadline_ns: u64) {
-        use loongArch64::reg_handler::tcfg;
         let ticks_now = Self::now_ticks();
         let ticks_deadline = Self::ns2t(deadline_ns);
         let init_value = ticks_deadline - ticks_now;

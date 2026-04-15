@@ -6,17 +6,11 @@ use boot_info::BootInfo;
 use kernel_boot::bootln;
 
 use super::{CMDLINE_BUF_SIZE, DTB_CAPTURE_SIZE, state};
-use crate::mem;
 
 pub(super) fn init(boot_info: &BootInfo) {
-    let dtb_vaddr = if boot_info.dtb_addr != 0 {
-        Some(mem::p2v(boot_info.dtb_addr.into()).as_usize() as *const u8)
-    } else {
-        None
-    };
-    if let Some(ptr) = dtb_vaddr {
+    if let Some(ptr) = boot_info.dtb_ptr() {
         bootln!("firmware: DTB at {:#x}", boot_info.dtb_addr);
-        state::init_dtb_capture(boot_info.dtb_addr, DTB_CAPTURE_SIZE);
+        state::init_dtb_capture(boot_info.dtb_addr, boot_info.dtb_vaddr, DTB_CAPTURE_SIZE);
         bootln!(
             "firmware: DTB capture region={:#x}..{:#x}",
             boot_info.dtb_addr,
@@ -33,10 +27,21 @@ pub(super) fn init(boot_info: &BootInfo) {
         } else {
             bootln!("firmware: chosen bootargs=<none>");
         }
-    } else if boot_info.rsdp_addr != 0 {
+    }
+
+    if boot_info.rsdp_addr != 0 {
         bootln!("firmware: ACPI RSDP at {:#x}", boot_info.rsdp_addr);
         let _ = acpi::init(boot_info.rsdp_addr);
     }
+
+    bootln!(
+        "firmware: hwdesc source={}",
+        boot_info.hardware_description_root().name()
+    );
+    bootln!(
+        "firmware: memory source={}",
+        boot_info.memory_description_root().name()
+    );
     kplat::boot::firmware_init(boot_info);
 
     let mut cmdline_buf = [0; CMDLINE_BUF_SIZE];

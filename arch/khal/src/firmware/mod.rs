@@ -6,7 +6,7 @@
 use boot_info::BootInfo;
 use memaddr::MemoryAddr;
 
-use crate::mem::{self, MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource};
+use crate::mem::{self, MemRange, ReservedKind, ReservedRegion, ReservedSource};
 
 mod init;
 mod memory_source;
@@ -28,24 +28,34 @@ pub fn init_memory_description(boot_info: &boot_info::BootInfo) {
     memory_source::init_memory_description(boot_info);
 }
 
+pub fn init_platform_memory_description(
+    ram_regions: &[MemRange],
+    reserved_regions: &[ReservedRegion],
+) {
+    memory_source::init_platform_memory_description(ram_regions, reserved_regions);
+}
+
 fn dtb_reserved_region(dtb_paddr: usize) -> Option<ReservedRegion> {
     if dtb_paddr == 0 {
         return None;
     }
-    let dtb_va = mem::p2v(PhysAddr::from_usize(dtb_paddr));
-    let dtb_size = unsafe { of::dtb_total_size_from_ptr(dtb_va.as_usize() as *const u8) }.ok()?;
+    let dtb_size = of::dtb_total_size()?;
     let start = dtb_paddr.align_down_4k();
     let end = dtb_paddr.checked_add(dtb_size)?.align_up_4k();
     Some(firmware_reserved_region(start, end - start))
 }
 
 fn firmware_reserved_region(start: usize, size: usize) -> ReservedRegion {
+    firmware_reserved_region_named(start, size, FIRMWARE_RESERVED_NAME)
+}
+
+fn firmware_reserved_region_named(start: usize, size: usize, name: &'static str) -> ReservedRegion {
     ReservedRegion::new(
         start,
         size,
         ReservedKind::Firmware,
         ReservedSource::DeviceTree,
-        FIRMWARE_RESERVED_NAME,
+        name,
     )
 }
 

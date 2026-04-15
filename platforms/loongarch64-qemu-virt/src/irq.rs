@@ -3,12 +3,14 @@
 // See LICENSES for license details.
 
 use khal::irq::TargetCpu;
-use loongArch64::reg_handler::{
+use loongArch64::register::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
 };
 
-use crate::config::devices::{EIOINTC_IRQ, TIMER_IRQ};
+const TIMER_IRQ: usize = 11;
+const EIOINTC_IRQ: usize = 3;
+
 mod eiointc;
 mod pch_pic;
 pub(crate) fn init() {
@@ -93,7 +95,7 @@ impl khal::irq::IntrManagerIf for IntrManagerImpl {
         todo!()
     }
 
-    fn set_prio(irq: usize, priority: u8) {
+    fn set_prio(_irq: usize, _priority: u8) {
         todo!()
     }
 }
