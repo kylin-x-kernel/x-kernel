@@ -26,6 +26,7 @@ pipeline {
         TEST_HARNESS_REPO = 'https://gitee.com/openkylin/starry-test-harness'
         TEST_HARNESS_BRANCH = 'master'
         CARGO_TERM_COLOR = 'always'
+        CARGO_REGISTRIES_CRATES_IO_PROTOCOL = 'sparse'
         PYTHONUNBUFFERED = '1'
         TARGET_DIR = '/xkernel-target'
     }
@@ -34,6 +35,7 @@ pipeline {
         stage('Prepare Source') {
             steps {
                 script {
+                    env.ROOT_WS = env.WORKSPACE
                     currentBuild.description = "PR#${env.giteePullRequestIid ?: 'manual'}"
                     prepareSource()
                     ciResults['Prepare Source'] = [status: 'passed']
@@ -56,6 +58,20 @@ pipeline {
             post {
                 failure {
                     script { ciResults['Rustfmt'] = [status: 'failed', detail: 'cargo fmt --check 发现格式问题'] }
+                }
+            }
+        }
+
+        stage('Prefetch Dependencies') {
+            steps {
+                script {
+                    prefetchCargoDeps()
+                    ciResults['Prefetch Dependencies'] = [status: 'passed']
+                }
+            }
+            post {
+                failure {
+                    script { ciResults['Prefetch Dependencies'] = [status: 'failed', detail: 'cargo fetch 失败'] }
                 }
             }
         }
@@ -113,16 +129,12 @@ pipeline {
                             ciResults['TEE: x86_64'] = [status: 'passed']
                         }
                     }
-                    post {
-                        failure {
-                            script {
-                                if (!teeResults.containsKey('x86_64')) {
-                                    teeResults['x86_64'] = [arch: 'x86_64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
-                                }
-                                ciResults['TEE: x86_64'] = [status: 'failed', detail: teeResults['x86_64']?.errorSnippet ?: 'TEE 测试失败']
-                            }
+                    post { failure { script {
+                        if (!teeResults.containsKey('x86_64')) {
+                            teeResults['x86_64'] = [arch: 'x86_64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
                         }
-                    }
+                        ciResults['TEE: x86_64'] = [status: 'failed', detail: teeResults['x86_64']?.errorSnippet ?: 'TEE 测试失败']
+                    } } }
                 }
                 stage('TEE: aarch64') {
                     steps {
@@ -131,16 +143,12 @@ pipeline {
                             ciResults['TEE: aarch64'] = [status: 'passed']
                         }
                     }
-                    post {
-                        failure {
-                            script {
-                                if (!teeResults.containsKey('aarch64')) {
-                                    teeResults['aarch64'] = [arch: 'aarch64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
-                                }
-                                ciResults['TEE: aarch64'] = [status: 'failed', detail: teeResults['aarch64']?.errorSnippet ?: 'TEE 测试失败']
-                            }
+                    post { failure { script {
+                        if (!teeResults.containsKey('aarch64')) {
+                            teeResults['aarch64'] = [arch: 'aarch64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
                         }
-                    }
+                        ciResults['TEE: aarch64'] = [status: 'failed', detail: teeResults['aarch64']?.errorSnippet ?: 'TEE 测试失败']
+                    } } }
                 }
             }
         }
@@ -158,7 +166,7 @@ pipeline {
                 restoreReplayGiteeEnv()
                 deleteOldCiComments()
                 def coverageSummary = collectCoverageSummary()
-                def comment = buildCombinedComment(ciResults, coverageSummary, teeResults)
+                def comment = buildCombinedComment(ciResults, coverageSummary)
                 notifyGiteePullRequest(comment)
                 if (currentBuild.currentResult == 'SUCCESS') {
                     giteeTestPass()
@@ -172,8 +180,41 @@ pipeline {
     }
 }
 
+def prefetchCargoDeps() {
+    ws("${env.ROOT_WS}/prefetch") {
+        def stageWorkspace = pwd()
+        fixWorkspaceOwnership(stageWorkspace)
+        try {
+            deleteDir()
+            restoreSource()
+            sh '''#!/bin/bash
+set -euo pipefail
+echo "==> Prefetching cargo dependencies for all platforms..."
+
+rustup target add aarch64-unknown-none-softfloat x86_64-unknown-none || true
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
+rustup +nightly-2026-03-08 target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
+
+for platform in x86_64-qemu-virt aarch64-qemu-virt aarch64-crosvm-virt; do
+    arch="${platform%%-*}"
+    target="$([ "$arch" = "aarch64" ] && echo aarch64-unknown-none-softfloat || echo x86_64-unknown-none)"
+    cp "platforms/${platform}/defconfig" .config
+    cargo fetch --manifest-path entry/Cargo.toml --target "$target" || true
+done
+
+cargo fetch --manifest-path tee_apps/sh/Cargo.toml || true
+cargo fetch --manifest-path xtask/crate_rootfs/Cargo.toml || true
+
+echo "==> Dependency prefetch complete"
+'''
+        } finally {
+            fixWorkspaceOwnership(stageWorkspace)
+        }
+    }
+}
+
 def runRustfmt() {
-    ws("${WORKSPACE}/rustfmt") {
+    ws("${env.ROOT_WS}/rustfmt") {
         def stageWorkspace = pwd()
         fixWorkspaceOwnership(stageWorkspace)
         try {
@@ -189,28 +230,8 @@ cargo +nightly-2026-03-08 fmt --all --check
     }
 }
 
-def runClippy(String platform) {
-    ws("${WORKSPACE}/clippy-${platform}") {
-        def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
-        try {
-            deleteDir()
-            restoreSource()
-
-            sh """#!/bin/bash
-set -euo pipefail
-cp platforms/${platform}/defconfig .config
-rustup target add ${rustupTargetFor(platform)} || true
-make clippy
-"""
-        } finally {
-            fixWorkspaceOwnership(stageWorkspace)
-        }
-    }
-}
-
 def runClippyAndBuild(String platform) {
-    ws("${WORKSPACE}/clippy-build-${platform}") {
+    ws("${env.ROOT_WS}/clippy-build-${platform}") {
         def stageWorkspace = pwd()
         def arch = archForPlatform(platform)
         def buildTargetDir = targetDirForArch(arch)
@@ -226,7 +247,7 @@ echo "DEBUG: TARGET_DIR=\${TARGET_DIR}"
 echo "DEBUG: Listing ${buildTargetDir}..."
 ls -lh ${buildTargetDir} 2>/dev/null || echo "Target dir not yet created"
 cp platforms/${platform}/defconfig .config
-rustup target add ${rustupTargetFor(platform)} || true
+rustup target add ${targetTripleFor(platform)} || true
 make clippy
 stdbuf -oL -eL make build
 """
@@ -240,7 +261,7 @@ stdbuf -oL -eL make build
 def runClippyAndRuntime(String arch) {
     def platform = "${arch}-qemu-virt"
     def runtimeTargetDir = targetDirForArch(arch)
-    ws("${WORKSPACE}/${arch}") {
+    ws("${env.ROOT_WS}/${arch}") {
         def stageWorkspace = pwd()
         fixWorkspaceOwnership(stageWorkspace)
         try {
@@ -250,11 +271,8 @@ def runClippyAndRuntime(String arch) {
             withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
                 sh """#!/bin/bash
 set -euo pipefail
-echo "DEBUG: TARGET_DIR=\${TARGET_DIR}"
-echo "DEBUG: Listing ${runtimeTargetDir}..."
-ls -lh ${runtimeTargetDir} 2>/dev/null || echo "Target dir not yet created"
 cp platforms/${platform}/defconfig .config
-rustup target add ${rustupTargetFor(platform)} || true
+rustup target add ${targetTripleFor(platform)} || true
 make clippy
 """
                 runUnitTests(arch)
@@ -282,42 +300,9 @@ stdbuf -oL -eL make ci-test run
     }
 }
 
-def executeBuildAndTest(arch) {
-    ws("${WORKSPACE}/${arch}") {
-        def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
-        try {
-            deleteDir()
-            restoreSource()
-            echo "Verifying architecture: ${arch}"
-
-            runUnitTests(arch)
-            generateCoverageHtml(arch)
-
-            dir('test-harness') {
-                git branch: "${env.TEST_HARNESS_BRANCH}",
-                    url: "${env.TEST_HARNESS_REPO}"
-                markSafeDirectory()
-
-                withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}"]) {
-                    sh '''#!/bin/bash
-set -euo pipefail
-stdbuf -oL -eL make ci-test run
-'''
-                }
-            }
-        } finally {
-            fixWorkspaceOwnership(stageWorkspace)
-        }
-    }
-}
-
 def runUnitTests(String arch) {
     sh """#!/bin/bash
 set -euo pipefail
-
-cp ${defconfigFor(arch)} .config
-${runtimeTargetSetupFor(arch)}
 
 ROOTFS_VERSION=20260302
 IMG_URL="https://gitee.com/openkylin/x-kernel-image/releases/download/\${ROOTFS_VERSION}"
@@ -370,8 +355,9 @@ exit 1
 
 def generateCoverageHtml(String arch) {
     def triple = targetTripleFor(arch)
-    def covInfo = "target/${triple}/release/coverage.info"
-    def htmlOut = "target/${triple}/release/coverage-html"
+    def baseDir = targetDirForArch(arch)
+    def covInfo = "${baseDir}/${triple}/release/coverage.info"
+    def htmlOut = "${baseDir}/${triple}/release/coverage-html"
     sh """#!/bin/bash
 set -euo pipefail
 if [ ! -f "${covInfo}" ]; then
@@ -410,7 +396,7 @@ def restoreReplayGiteeEnv() {
 }
 
 def prepareSource() {
-    ws("${WORKSPACE}/source-cache") {
+    ws("${env.ROOT_WS}/source-cache") {
         def sourceWorkspace = pwd()
         fixWorkspaceOwnership(sourceWorkspace)
         try {
@@ -420,7 +406,6 @@ def prepareSource() {
             if (env.giteePullRequestIid?.trim()) {
                 checkNotDiverged()
             }
-            stash name: "x-kernel-source-${env.BUILD_NUMBER}", includes: '**', useDefaultExcludes: false
         } finally {
             fixWorkspaceOwnership(sourceWorkspace)
         }
@@ -445,7 +430,7 @@ fi
 }
 
 def restoreSource() {
-    unstash "x-kernel-source-${env.BUILD_NUMBER}"
+    sh "tar cf - -C '${env.ROOT_WS}/source-cache' . | tar xf -"
     markSafeDirectory()
 }
 
@@ -553,13 +538,6 @@ def defconfigFor(String arch) {
     return "platforms/${arch}-qemu-virt/defconfig"
 }
 
-def rustupTargetFor(String platform) {
-    if (platform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
-    if (platform.startsWith('x86')) return 'x86_64-unknown-none'
-    if (platform.startsWith('riscv64')) return 'riscv64gc-unknown-none-elf'
-    error("Unsupported platform: ${platform}")
-}
-
 def archForPlatform(String platform) {
     if (platform.startsWith('aarch64')) return 'aarch64'
     if (platform.startsWith('x86_64')) return 'x86_64'
@@ -571,28 +549,10 @@ def targetDirForArch(String arch) {
     return "/xkernel-target/runtime-${arch}"
 }
 
-def giteeTestPass() {
-    if (!env.giteePullRequestIid?.trim()) return
-    try {
-        def prNumber = env.giteePullRequestIid
-        def namespace = env.giteeTargetNamespace ?: 'openkylin'
-        def repo = env.giteeTargetRepoName ?: 'x-kernel'
-        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
-            sh(script: """#!/bin/bash
-resp=\$(curl -sS -w '\\n%{http_code}' --max-time 15 \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/test' \
-  --data-urlencode "access_token=\${GITEE_TOKEN}" \
-  --data-urlencode 'force=true' 2>&1) || true
-code=\$(echo "\$resp" | tail -1)
-echo "Gitee test pass: HTTP \$code"
-""")
-        }
-    } catch (e) {
-        echo "giteeTestPass skipped: ${e.message}"
-    }
-}
+def giteeTestPass() { giteePrApi('POST', 'test', 'pass', '--data-urlencode \'force=true\'') }
+def giteeTestReset() { giteePrApi('PATCH', 'testers', 'reset', '') }
 
-def giteeTestReset() {
+def giteePrApi(String method, String endpoint, String label, String extraArgs) {
     if (!env.giteePullRequestIid?.trim()) return
     try {
         def prNumber = env.giteePullRequestIid
@@ -600,15 +560,15 @@ def giteeTestReset() {
         def repo = env.giteeTargetRepoName ?: 'x-kernel'
         withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
             sh(script: """#!/bin/bash
-resp=\$(curl -sS -w '\\n%{http_code}' --max-time 15 -X PATCH \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/testers' \
-  --data-urlencode "access_token=\${GITEE_TOKEN}" 2>&1) || true
+resp=\$(curl -sS -w '\\n%{http_code}' --max-time 15 -X ${method} \
+  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/${endpoint}' \
+  --data-urlencode "access_token=\${GITEE_TOKEN}" ${extraArgs} 2>&1) || true
 code=\$(echo "\$resp" | tail -1)
-echo "Gitee test reset: HTTP \$code"
+echo "Gitee test ${label}: HTTP \$code"
 """)
         }
     } catch (e) {
-        echo "giteeTestReset skipped: ${e.message}"
+        echo "Gitee test ${label} skipped: ${e.message}"
     }
 }
 
@@ -665,22 +625,16 @@ rustup target add riscv64gc-unknown-linux-musl || true
     }
 }
 
-def targetTripleFor(String arch) {
-    switch (arch) {
-        case 'aarch64':
-            return 'aarch64-unknown-none-softfloat'
-        case 'x86_64':
-            return 'x86_64-unknown-none'
-        case 'riscv64':
-            return 'riscv64gc-unknown-none-elf'
-        default:
-            error("Unsupported architecture: ${arch}")
-    }
+def targetTripleFor(String archOrPlatform) {
+    if (archOrPlatform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
+    if (archOrPlatform.startsWith('x86')) return 'x86_64-unknown-none'
+    if (archOrPlatform.startsWith('riscv64')) return 'riscv64gc-unknown-none-elf'
+    error("Unsupported arch/platform: ${archOrPlatform}")
 }
 
 def collectUnitTestSnippet(String arch) {
     try {
-        def logFile = "${WORKSPACE}/${arch}/unittest-output.log"
+        def logFile = "${env.ROOT_WS}/${arch}/unittest-output.log"
         if (!fileExists(logFile)) {
             return '未找到 unittest-output.log，阶段可能在日志创建前失败，请查看 Jenkins Stages 详情。'
         }
@@ -721,7 +675,7 @@ def runTeeStorageTest(String arch) {
     def teeVsockCid = (arch == 'x86_64') ? '104' : '105'
     def teeTargetDir = "/xkernel-target/tee-${arch}"
 
-    ws("${WORKSPACE}/tee-test-${arch}") {
+    ws("${env.ROOT_WS}/tee-test-${arch}") {
         def stageWorkspace = pwd()
         fixWorkspaceOwnership(stageWorkspace)
         try {
@@ -838,9 +792,9 @@ def collectCoverageSummary() {
     ['x86_64', 'aarch64'].each { arch ->
         try {
             def triple = targetTripleFor(arch)
-            def covFile = "${WORKSPACE}/${arch}/target/${triple}/release/coverage.txt"
-            if (fileExists(covFile)) {
-                def content = readFile(covFile)
+            def covFile = "${targetDirForArch(arch)}/${triple}/release/coverage.txt"
+            def content = sh(script: "cat '${covFile}' 2>/dev/null || true", returnStdout: true).trim()
+            if (content) {
                 def lines = content.split('\n')
                 def totalLine = lines.find { it.contains('TOTAL') }
                 if (totalLine) {
@@ -859,49 +813,20 @@ def collectCoverageSummary() {
     return header + '\n' + rows.join('\n')
 }
 
-def buildTeeSection(Map teeResults) {
-    if (teeResults.isEmpty()) {
-        return "\n### TEE 功能测试\n\n⏭ TEE 阶段未执行（可能被 failFast 终止）\n"
-    }
-
-    ['x86_64', 'aarch64'].each { arch ->
-        if (!teeResults.containsKey(arch)) {
-            teeResults[arch] = [arch: arch, passed: 0, failed: 0, status: 'not_run']
-        }
-    }
-
-    def allPassed = teeResults.every { k, v -> v.status == 'passed' }
-    def header = allPassed ? '### ✅ TEE 功能测试通过' : '### ❌ TEE 功能测试失败'
-    def rows = ['x86_64', 'aarch64'].collect { arch ->
-        def r = teeResults[arch]
-        def total = (r.passed ?: 0) + (r.failed ?: 0)
-        def icon = r.status == 'passed' ? '✅' : (r.status == 'not_run' ? '⏭' : '❌')
-        "| ${arch} | ${r.passed ?: 0} | ${r.failed ?: 0} | ${total} | ${icon} |"
-    }.join('\n')
-
-    return """\
-
-${header}
-
-| 架构 | 通过 | 失败 | 合计 | 状态 |
-|------|------|------|------|------|
-${rows}"""
-}
-
-def buildCombinedComment(Map ciResults, String coverageSummary, Map teeResults) {
+def buildCombinedComment(Map ciResults, String coverageSummary) {
     def ciComment = buildCiComment(ciResults, coverageSummary)
-    def teeSection = buildTeeSection(teeResults)
     def allGreen = currentBuild.currentResult == 'SUCCESS'
     def overallHeader = allGreen
         ? '## ✅ CI 全部通过'
         : '## ❌ CI 未全部通过'
-    return "<!-- x-kernel-ci -->\n${overallHeader}\n\n${ciComment}\n${teeSection}"
+    return "<!-- x-kernel-ci -->\n${overallHeader}\n\n${ciComment}"
 }
 
 def buildCiComment(Map results, String coverageSummary = '') {
     def stagesUrl = "${env.BUILD_URL}stages/"
     def stageOrder = [
         'Prepare Source',
+        'Prefetch Dependencies',
         'Rustfmt',
         'Clippy+Build: aarch64-crosvm-virt',
         'Clippy+Build: riscv64-qemu-virt',
