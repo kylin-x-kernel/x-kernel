@@ -12,7 +12,7 @@
 use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
-use bitmaps::Bitmap;
+use bytemuck::AnyBitPattern;
 use kerrno::{KError, KResult};
 use kpoll::IoEvents;
 use kserveices::{
@@ -23,46 +23,106 @@ use kserveices::{
 };
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
-use linux_raw_sys::{
-    general::*,
-    select_macros::{FD_ISSET, FD_SET, FD_ZERO},
-};
+use linux_raw_sys::general::*;
+use osvm::{VirtMutPtr, VirtPtr};
 
 use super::FdPollSet;
 use crate::{file::FD_TABLE, signal::check_sigset_size};
 
-struct FdSet(Bitmap<{ __FD_SETSIZE as usize }>);
+const FD_SETSIZE: usize = __FD_SETSIZE as usize;
+
+const POLLIN_SET: IoEvents = IoEvents::IN
+    .union(IoEvents::RDNORM)
+    .union(IoEvents::RDBAND)
+    .union(IoEvents::HUP)
+    .union(IoEvents::ERR);
+const POLLOUT_SET: IoEvents = IoEvents::OUT
+    .union(IoEvents::WRNORM)
+    .union(IoEvents::WRBAND)
+    .union(IoEvents::ERR);
+const POLLEX_SET: IoEvents = IoEvents::PRI;
+
+/// Internal file descriptor set with a memory layout identical to user-space
+/// `fd_set` / `__kernel_fd_set`, serving as both the transfer type (via
+/// `read_vm` / `write_vm`) and the operation type (via `set` / `is_set` /
+/// `clear`).
+#[repr(C)]
+#[derive(Clone, Copy, AnyBitPattern)]
+pub(crate) struct FdSet {
+    fds_bits: [usize; FD_SETSIZE / usize::BITS as usize],
+}
 
 impl FdSet {
-    fn new(nfds: usize, fds: Option<&__kernel_fd_set>) -> Self {
-        let mut bitmap = Bitmap::new();
-        if let Some(fds) = fds {
-            for i in 0..nfds {
-                if unsafe { FD_ISSET(i as _, fds) } {
-                    bitmap.set(i, true);
-                }
-            }
+    fn zeroed() -> Self {
+        Self {
+            fds_bits: [0; FD_SETSIZE / usize::BITS as usize],
         }
-        Self(bitmap)
+    }
+
+    fn set(&mut self, fd: usize) {
+        debug_assert!(fd < FD_SETSIZE);
+        self.fds_bits[fd / usize::BITS as usize] |= 1 << (fd % usize::BITS as usize);
+    }
+
+    fn is_set(&self, fd: usize) -> bool {
+        debug_assert!(fd < FD_SETSIZE);
+        (self.fds_bits[fd / usize::BITS as usize] & (1 << (fd % usize::BITS as usize))) != 0
+    }
+
+    fn clear(&mut self) {
+        self.fds_bits.fill(0);
+    }
+
+    /// Read an `FdSet` from user space. Returns `None` if the pointer is null.
+    fn read_from_user(ptr: UserPtr<Self>, nfds: usize) -> KResult<Option<Self>> {
+        if ptr.is_null() {
+            return Ok(None);
+        }
+        let mut fdset: Self = ptr.address().as_ptr_of::<Self>().read_vm()?;
+        let full_words = nfds / usize::BITS as usize;
+        let remaining = nfds % usize::BITS as usize;
+        if remaining > 0 && full_words < fdset.fds_bits.len() {
+            fdset.fds_bits[full_words] &= (1usize << remaining) - 1;
+        }
+        for w in fdset
+            .fds_bits
+            .iter_mut()
+            .skip(full_words + usize::from(remaining > 0))
+        {
+            *w = 0;
+        }
+        Ok(Some(fdset))
+    }
+
+    /// Write this `FdSet` back to user space.
+    fn write_to_user(&self, ptr: UserPtr<Self>) -> KResult<()> {
+        if ptr.is_null() {
+            return Ok(());
+        }
+        ptr.address().as_mut_ptr_of::<Self>().write_vm(*self)?;
+        Ok(())
     }
 }
 
 impl fmt::Debug for FdSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(&self.0).finish()
+        f.debug_list()
+            .entries((0..FD_SETSIZE).filter(|&i| self.is_set(i)))
+            .finish()
     }
 }
 
 /// Monitor multiple file descriptors for readability, writability, or exceptional conditions
 fn do_select(
     nfds: u32,
-    readfds: UserPtr<__kernel_fd_set>,
-    writefds: UserPtr<__kernel_fd_set>,
-    exceptfds: UserPtr<__kernel_fd_set>,
+    readfds: UserPtr<FdSet>,
+    writefds: UserPtr<FdSet>,
+    exceptfds: UserPtr<FdSet>,
     timeout: Option<Duration>,
     sigmask: UserConstPtr<SignalSetWithSize>,
 ) -> KResult<isize> {
-    if nfds > __FD_SETSIZE {
+    let nfds = nfds as usize;
+    if nfds > FD_SETSIZE {
         return Err(KError::InvalidInput);
     }
     let sigmask = if let Some(sigmask) = nullable!(sigmask.get_as_ref())? {
@@ -73,76 +133,70 @@ fn do_select(
         None
     };
 
-    let mut readfds = nullable!(readfds.get_as_mut())?;
-    let mut writefds = nullable!(writefds.get_as_mut())?;
-    let mut exceptfds = nullable!(exceptfds.get_as_mut())?;
+    let read_set = FdSet::read_from_user(readfds, nfds)?;
+    let write_set = FdSet::read_from_user(writefds, nfds)?;
+    let except_set = FdSet::read_from_user(exceptfds, nfds)?;
 
-    let read_set = FdSet::new(nfds as _, readfds.as_deref());
-    let write_set = FdSet::new(nfds as _, writefds.as_deref());
-    let except_set = FdSet::new(nfds as _, exceptfds.as_deref());
+    let read_fds = read_set.unwrap_or_else(FdSet::zeroed);
+    let write_fds = write_set.unwrap_or_else(FdSet::zeroed);
+    let except_fds = except_set.unwrap_or_else(FdSet::zeroed);
 
     debug!(
-        "sys_select <= nfds: {nfds} sets: [read: {read_set:?}, write: {write_set:?}, except: \
-         {except_set:?}] timeout: {timeout:?}"
+        "sys_select <= nfds: {nfds} sets: [read: {read_fds:?}, write: {write_fds:?}, except: \
+         {except_fds:?}] timeout: {timeout:?}"
     );
 
     let fd_table = FD_TABLE.read();
-    let fd_bitmap = read_set.0 | write_set.0 | except_set.0;
-    let fd_count = fd_bitmap.len();
-    let mut fds = Vec::with_capacity(fd_count);
-    let mut fd_indices = Vec::with_capacity(fd_count);
-    for fd in fd_bitmap.into_iter() {
+    let mut fds = Vec::with_capacity(nfds);
+    let mut fd_indices = Vec::with_capacity(nfds);
+    for fd in 0..nfds {
+        let is_read = read_fds.is_set(fd);
+        let is_write = write_fds.is_set(fd);
+        let is_except = except_fds.is_set(fd);
+        if !is_read && !is_write && !is_except {
+            continue;
+        }
         let f = fd_table
             .get(fd)
             .ok_or(KError::BadFileDescriptor)?
             .inner
             .clone();
         let mut events = IoEvents::empty();
-        events.set(IoEvents::IN, read_set.0.get(fd));
-        events.set(IoEvents::OUT, write_set.0.get(fd));
-        events.set(IoEvents::ERR, except_set.0.get(fd));
-        if !events.is_empty() {
-            fds.push((f, events));
-            fd_indices.push(fd);
-        }
+        events.set(IoEvents::IN, is_read);
+        events.set(IoEvents::OUT, is_write);
+        events.set(IoEvents::PRI, is_except);
+        fds.push((f, events));
+        fd_indices.push(fd);
     }
 
     drop(fd_table);
     let fds = FdPollSet(fds);
 
-    if let Some(readfds) = readfds.as_deref_mut() {
-        unsafe { FD_ZERO(readfds) };
-    }
-    if let Some(writefds) = writefds.as_deref_mut() {
-        unsafe { FD_ZERO(writefds) };
-    }
-    if let Some(exceptfds) = exceptfds.as_deref_mut() {
-        unsafe { FD_ZERO(exceptfds) };
-    }
-    with_replacen_blocked(sigmask.copied(), || {
+    let mut res_in = FdSet::zeroed();
+    let mut res_out = FdSet::zeroed();
+    let mut res_ex = FdSet::zeroed();
+
+    let result = with_replacen_blocked(sigmask.copied(), || {
         match block_on(future::timeout(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {
+                res_in.clear();
+                res_out.clear();
+                res_ex.clear();
                 let mut res = 0usize;
-                for ((fd, interested), index) in fds.0.iter().zip(fd_indices.iter().copied()) {
-                    let events = fd.poll() & *interested;
-                    if events.contains(IoEvents::IN)
-                        && let Some(set) = readfds.as_deref_mut()
-                    {
+                for ((fd, _), index) in fds.0.iter().zip(fd_indices.iter().copied()) {
+                    let revents = fd.poll();
+                    if read_fds.is_set(index) && revents.intersects(POLLIN_SET) {
                         res += 1;
-                        unsafe { FD_SET(index as _, set) };
+                        res_in.set(index);
                     }
-                    if events.contains(IoEvents::OUT)
-                        && let Some(set) = writefds.as_deref_mut()
-                    {
+                    if write_fds.is_set(index) && revents.intersects(POLLOUT_SET) {
                         res += 1;
-                        unsafe { FD_SET(index as _, set) };
+                        res_out.set(index);
                     }
-                    if events.contains(IoEvents::ERR)
-                        && let Some(set) = exceptfds.as_deref_mut()
-                    {
+                    if except_fds.is_set(index) && revents.intersects(POLLEX_SET) {
                         res += 1;
-                        unsafe { FD_SET(index as _, set) };
+                        res_ex.set(index);
                     }
                 }
                 if res > 0 {
@@ -155,16 +209,26 @@ fn do_select(
             Ok(r) => r,
             Err(_) => Ok(0),
         }
-    })
+    });
+
+    // Only write back fd_sets on success; on error (e.g. EINTR) the
+    // contents are unspecified per POSIX, so skip the unnecessary copy-out.
+    if result.is_ok() {
+        res_in.write_to_user(readfds)?;
+        res_out.write_to_user(writefds)?;
+        res_ex.write_to_user(exceptfds)?;
+    }
+
+    result
 }
 
 /// Select file descriptors with microsecond timeout
 #[cfg(target_arch = "x86_64")]
 pub fn sys_select(
     nfds: u32,
-    readfds: UserPtr<__kernel_fd_set>,
-    writefds: UserPtr<__kernel_fd_set>,
-    exceptfds: UserPtr<__kernel_fd_set>,
+    readfds: UserPtr<FdSet>,
+    writefds: UserPtr<FdSet>,
+    exceptfds: UserPtr<FdSet>,
     timeout: UserConstPtr<timeval>,
 ) -> KResult<isize> {
     do_select(
@@ -189,9 +253,9 @@ pub struct SignalSetWithSize {
 /// Select file descriptors with nanosecond timeout and signal masking
 pub fn sys_pselect6(
     nfds: u32,
-    readfds: UserPtr<__kernel_fd_set>,
-    writefds: UserPtr<__kernel_fd_set>,
-    exceptfds: UserPtr<__kernel_fd_set>,
+    readfds: UserPtr<FdSet>,
+    writefds: UserPtr<FdSet>,
+    exceptfds: UserPtr<FdSet>,
     timeout: UserConstPtr<timespec>,
     sigmask: UserConstPtr<SignalSetWithSize>,
 ) -> KResult<isize> {
