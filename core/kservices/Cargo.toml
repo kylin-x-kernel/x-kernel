@@ -22,7 +22,6 @@ dice = [
 tee = [
 	"dep:tee_kernel",
 ]
-sev = ["dep:kcpu"]
 x86_csv = ["tee_kernel/x86_csv"]
 
 [dependencies]
@@ -35,7 +34,6 @@ mbedtls = { workspace = true, optional = true }
 fbdevice.workspace = true
 kdriver.workspace = true
 ktypes.workspace = true
-kcpu = { workspace = true, optional = true }
 kerrno.workspace = true
 kfeat.workspace = true
 fs-ng-vfs.workspace = true
