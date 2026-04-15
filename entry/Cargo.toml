@@ -17,7 +17,6 @@ kernel = [
     "kfeat/task-ext",
 ]
 
-tee = ["kcore/tee", "ksyscall/tee", "kcore/tee_ta_sign"]
 smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
 dma-trace = ["kfeat/dma-trace"]
@@ -46,12 +45,11 @@ aarch64_qemu_virt = [
     "kernel",
     "qemu",
     "smp",
-    "tee",
     # "kfeat/watchdog",
     "dep:aarch64-qemu-virt",
 ]
 
-x86_64_qemu_virt = ["kernel", "qemu", "dep:x86_64-qemu-virt", "tee"]
+x86_64_qemu_virt = ["kernel", "qemu", "dep:x86_64-qemu-virt"]
 
 riscv64_qemu_virt = [ "kernel", "qemu", "smp", "dep:riscv64-qemu-virt"]
 
@@ -75,7 +73,6 @@ aarch64_crosvm_virt = [
     "kserveices/dev-log",
     "kfeat/crosvm",
     "kserveices/dice",
-    "tee",
 ]
 
 [dependencies]

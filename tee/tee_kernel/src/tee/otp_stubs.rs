@@ -17,7 +17,7 @@ pub fn tee_otp_get_hw_unique_key(hwkey: &mut TeeHwUniqueKey) -> TeeResult {
     hwkey.data.fill(0xAA);
     info!("tee_otp_get_hw_unique_key");
     cfg_if! {
-        if #[cfg(all(target_arch = "x86_64", feature = "x86_csv"))] {
+        if #[cfg(feature = "huk_key")] {
             use crate::tee::arch::x86_64::hygon_csv::get_huk_key;
             info!("get_huk_key from CSV sealing key");
             get_huk_key(&mut hwkey.data)?;

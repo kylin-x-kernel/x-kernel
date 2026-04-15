@@ -19,6 +19,9 @@ KFEAT_ALLOC=y
 KFEAT_ALLOC_SLAB=y
 # KFEAT_ALLOC_TLSF is not set
 KFEAT_DWARF=y
+# KFEAT_HUK_KEY is not set
+# KFEAT_TEE is not set
+# KFEAT_TEE_TA_SIGN is not set
 # LOG_LEVEL_DEBUG is not set
 # LOG_LEVEL_ERROR is not set
 # LOG_LEVEL_INFO is not set

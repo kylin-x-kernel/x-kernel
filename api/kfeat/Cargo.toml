@@ -75,6 +75,17 @@ driver-ramdisk = ["kdriver/ramdisk", "kfs?/use-ramdisk"]
 # Backtrace
 dwarf = ["backtrace/dwarf"]
 
+# TEE
+tee = [
+    "dep:tee_kernel",
+    "dep:tee_task_iface",
+    "kcore/tee",
+    "ksyscall/tee",
+    "kserveices/tee",
+]
+tee_ta_sign = ["kcore/tee_ta_sign", "tee_task_iface/tee_ta_sign"]
+huk_key = ["tee_kernel/huk_key"]
+
 # Watchdog
 watchdog = ["kruntime/watchdog"]
 
@@ -88,12 +99,17 @@ kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true
+kcore = { workspace = true }
 kfs = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
+kserveices = { workspace = true }
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
+ksyscall = { workspace = true }
 kspin = { workspace = true, optional = true }
+tee_kernel = { workspace = true, optional = true }
+tee_task_iface = { workspace = true, optional = true }

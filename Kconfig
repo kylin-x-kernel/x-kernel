@@ -185,5 +185,6 @@ config KFEAT_DWARF
 endmenu
 
 source "mm/Kconfig"
+source "tee/Kconfig"
 
 source "drivers/Kconfig"

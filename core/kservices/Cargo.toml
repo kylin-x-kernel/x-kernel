@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 input = ["dep:inputdev"]
-memtrack = ["kfeat/dwarf", "kalloc/tracking", "dep:gimli"]
+memtrack = ["kalloc/tracking", "dep:gimli"]
 vsock = ["knet/vsock"]
 dev-log = []
 dice = [
@@ -22,7 +22,6 @@ dice = [
 tee = [
 	"dep:tee_kernel",
 ]
-x86_csv = ["tee_kernel/x86_csv"]
 
 [dependencies]
 kalloc.workspace = true
@@ -35,7 +34,6 @@ fbdevice.workspace = true
 kdriver.workspace = true
 ktypes.workspace = true
 kerrno.workspace = true
-kfeat.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
@@ -77,4 +75,3 @@ zerocopy = { version = "0.8.26", features = ["derive"] }
 tee_kernel = { workspace = true, optional = true }
 kcore.workspace = true
 procfs.workspace = true
-

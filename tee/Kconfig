@@ -1,0 +1,29 @@
+menu "Trusted Execution Environment (TEE)"
+
+config KFEAT_TEE
+    bool "Enable TEE support"
+    help
+      Enable the kernel's TEE integration, including TEE syscalls, task
+      loading hooks, and the platform/runtime support used by current TEE
+      capable targets.
+
+if KFEAT_TEE
+
+config KFEAT_TEE_TA_SIGN
+    bool "Enable TA ELF signature verification"
+    help
+      Enable `.ta_signature` verification for TA ELF images loaded through the
+      TEE path.
+
+config KFEAT_HUK_KEY
+    bool "Enable HUK key derivation"
+    depends on ARCH_X86_64
+    help
+      Enable the TEE hardware unique key path. The current implementation is
+      backed by the x86_64 CSV sealing key flow, so it must be enabled only
+      after TEE support is turned on.
+
+endif #KFEAT_TEE
+
+
+endmenu

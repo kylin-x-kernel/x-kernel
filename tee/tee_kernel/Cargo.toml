@@ -13,7 +13,7 @@ documentation.workspace = true
 default = ["linux_sysno/tee", "kalloc/tee", "tee_ss_smx"]
 tee_cfg_memtag = []
 tee_ss_smx = []
-x86_csv = ["dep:kcpu"]
+huk_key = ["dep:kcpu"]
 
 [dependencies]
 kalloc.workspace = true
