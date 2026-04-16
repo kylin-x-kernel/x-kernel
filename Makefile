@@ -58,7 +58,7 @@ endif
 BUILD_TARGETS := all build run justrun debug clippy disasm rootfs
 KCONFIG_TARGETS := menuconfig defconfig saveconfig oldconfig
 CLEAN_TARGETS := clean clean_c distclean
-UTILITY_TARGETS := clippy doc doc_check_missing fmt unittest unittest_no_fail_fast
+UTILITY_TARGETS := clippy check_deps check_header doc doc_check_missing fmt unittest unittest_no_fail_fast
 
 NON_BUILD_TARGETS := $(KCONFIG_TARGETS) $(CLEAN_TARGETS) $(UTILITY_TARGETS)
 
@@ -201,7 +201,13 @@ debug: build $(QEMU_RUN_DEPS)
 	  -ex 'continue' \
 	  -ex 'disp /16i $$pc'
 
-clippy: $(CONFIG_RS)
+check_deps:
+	python3 scripts/check_deps.py
+
+check_header:
+	python3 scripts/check_header.py
+
+clippy: check_deps check_header $(CONFIG_RS)
 ifeq ($(origin ARCH), command line)
 	$(call cargo_clippy,--target $(TARGET))
 else
