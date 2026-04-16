@@ -292,3 +292,12 @@ pub const TEE_MEMREF_1_USED: u32 = 0x00000002;
 pub const TEE_MEMREF_2_USED: u32 = 0x00000004;
 pub const TEE_MEMREF_3_USED: u32 = 0x00000008;
 pub const TEE_SE_READER_NAME_MAX: u32 = 20;
+
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug, PartialEq)]
+pub struct ta_head {
+    pub uuid: TEE_UUID,
+    pub stack_size: u32,
+    pub flags: u32,
+    pub depr_entry: u64,
+}

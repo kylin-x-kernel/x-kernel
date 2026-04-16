@@ -14,6 +14,8 @@ use alloc::{
 use core::{ffi::CStr, iter, str};
 
 use fs_ng_vfs::{NodeType, VfsError, VfsResult};
+#[cfg(feature = "tee")]
+use kcore::vfs::DirMapping;
 use kcore::{
     config::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP},
     task::{AsThread, TaskStat, get_process_data, get_task, processes},
@@ -29,6 +31,8 @@ use memaddr::VirtAddr;
 use memspace::backend::Backend;
 use memspace_file::{CowBackend, FileBackend};
 
+#[cfg(feature = "tee")]
+use crate::tee::{has_ta_info, make_ta_info_dir};
 use crate::{hooks::ProcFsHooks, mounts::ProcMountIter};
 
 struct ProcessTaskDir {
@@ -58,14 +62,7 @@ impl SimpleDirOps for ProcessTaskDir {
             return Err(VfsError::NotFound);
         }
 
-        Ok(NodeOpsMux::Dir(SimpleDir::new_maker(
-            self.fs.clone(),
-            Arc::new(ThreadDir {
-                fs: self.fs.clone(),
-                task: Arc::downgrade(&task),
-                hooks: self.hooks,
-            }),
-        )))
+        Ok(make_thread_dir(self.fs.clone(), &task, self.hooks))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -332,6 +329,29 @@ struct ThreadDir {
     hooks: ProcFsHooks,
 }
 
+fn make_thread_dir(fs: Arc<SimpleFs>, task: &KtaskRef, hooks: ProcFsHooks) -> NodeOpsMux {
+    let thread_dir = ThreadDir {
+        fs: fs.clone(),
+        task: Arc::downgrade(task),
+        hooks,
+    };
+
+    #[cfg(feature = "tee")]
+    if has_ta_info(task) {
+        let mut ext = DirMapping::new();
+        ext.add(
+            "ta_info",
+            make_ta_info_dir(fs.clone(), Arc::downgrade(task)),
+        );
+        return NodeOpsMux::Dir(SimpleDir::new_maker(
+            fs.clone(),
+            Arc::new(thread_dir.chain(ext)),
+        ));
+    }
+
+    NodeOpsMux::Dir(SimpleDir::new_maker(fs, Arc::new(thread_dir)))
+}
+
 const PROC_NS_BASE: u64 = 0xf000_0000;
 
 fn namespace_inode(kind: &str) -> u64 {
@@ -542,14 +562,7 @@ impl SimpleDirOps for ProcFsHandler {
                 .find_map(|tid| get_task(tid).ok())
                 .ok_or(VfsError::NotFound)?
         };
-        Ok(NodeOpsMux::Dir(SimpleDir::new_maker(
-            self.fs.clone(),
-            Arc::new(ThreadDir {
-                fs: self.fs.clone(),
-                task: Arc::downgrade(&task),
-                hooks: self.hooks,
-            }),
-        )))
+        Ok(make_thread_dir(self.fs.clone(), &task, self.hooks))
     }
 
     fn supports_dentry_cache(&self) -> bool {

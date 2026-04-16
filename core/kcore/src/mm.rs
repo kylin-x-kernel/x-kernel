@@ -174,10 +174,7 @@ impl ElfCacheEntry {
             Ok(e) => {
                 #[cfg(feature = "tee_ta_sign")]
                 {
-                    let abs = e.borrow_cache().location().absolute_path()?;
-                    let exec_path: &str = abs.as_ref();
-                    tee_task_iface::tasign::verify_ta_elf_signature_if_applicable(
-                        exec_path,
+                    tee_task_iface::tasign::verify_ta_elf_on_load_and_cache_ta_head(
                         e.borrow_cache(),
                     )?;
                 }
@@ -275,6 +272,8 @@ static ELF_LOADER: Mutex<ElfLoader> = Mutex::new(ElfLoader::new());
 /// Useful for removing noises during memory leak detect.
 pub fn clear_elf_cache() {
     ELF_LOADER.lock().0.flush();
+    #[cfg(feature = "tee_ta_sign")]
+    tee_task_iface::tasign::clear_ta_head_cache();
 }
 
 /// Load the user app to the user address space.

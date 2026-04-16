@@ -21,6 +21,7 @@ dice = [
 ]
 tee = [
 	"dep:tee_kernel",
+	"procfs/tee",
 ]
 
 [dependencies]

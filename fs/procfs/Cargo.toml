@@ -8,6 +8,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[features]
+tee = ["kcore/tee", "dep:tee_task_iface"]
+
 [dependencies]
 fs-ng-vfs.workspace = true
 kalloc.workspace = true
@@ -20,6 +23,7 @@ memspace_file.workspace = true
 kprocess.workspace = true
 ktask.workspace = true
 unittest.workspace = true
+tee_task_iface = { workspace = true, optional = true }
 
 [target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
 riscv = "0.14"

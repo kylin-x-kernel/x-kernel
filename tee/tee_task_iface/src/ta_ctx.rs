@@ -7,7 +7,11 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 
 use hashbrown::HashMap;
+use log::{info, warn};
+use tee_raw_sys::ta_head;
 use uuid as uuid_crate;
+
+use crate::tasign::bytes_to_ta_head;
 
 /// Length of a TA basename `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.ta` (hyphenated UUID + `.ta`).
 const TA_UUID_DOT_TA_EXAMPLE: &str = "936da01f-9abd-4d9d-80c7-02af85c822a8.ta";
@@ -25,6 +29,7 @@ pub struct TeeTaCtx {
     pub session_dispatch_irq: u32,
     pub open_sessions: HashMap<u32, SessionIdentity>,
     pub uuid: String,
+    pub ta_head: ta_head,
 }
 
 impl Default for TeeTaCtx {
@@ -33,6 +38,7 @@ impl Default for TeeTaCtx {
             session_dispatch_irq: 0,
             open_sessions: HashMap::new(),
             uuid: uuid_crate::Uuid::default().to_string(),
+            ta_head: ta_head::default(),
         }
     }
 }
@@ -73,6 +79,21 @@ impl TeeTaCtx {
         let mut ctx = Self::default();
         ctx.set_uuid(path);
         ctx
+    }
+
+    pub fn init_ta_ctx(&mut self, path: &str, ta_head: &[u8]) {
+        if Self::is_ta(path) {
+            self.set_uuid(path);
+            match bytes_to_ta_head(ta_head) {
+                Ok(head) => {
+                    self.ta_head = head;
+                    info!("ta_head: {:X?}", self.ta_head);
+                }
+                Err(err) => {
+                    warn!("parse ta_head failed: {:?}", err);
+                }
+            }
+        }
     }
 }
 

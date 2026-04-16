@@ -10,6 +10,8 @@ mod hooks;
 mod mounts;
 mod root;
 mod task;
+#[cfg(feature = "tee")]
+mod tee;
 
 use fs_ng_vfs::{Filesystem, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME};
 pub use hooks::ProcFsHooks;

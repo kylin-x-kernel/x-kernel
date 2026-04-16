@@ -20,6 +20,7 @@ use core::any::Any;
 pub mod ta_ctx;
 #[cfg(feature = "tee_ta_sign")]
 pub mod tasign;
+pub mod tee_procfs;
 
 pub use ta_ctx::{SessionIdentity, TeeTaCtx};
 

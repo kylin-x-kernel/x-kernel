@@ -73,10 +73,14 @@ pub fn sys_execve(
     *proc_data.cmdline.write() = Arc::new(args);
 
     #[cfg(feature = "tee")]
-    proc_data
-        .tee_ta_ctx
-        .write()
-        .set_uuid(loc.absolute_path()?.to_string().as_str());
+    {
+        proc_data.tee_ta_ctx.write().init_ta_ctx(
+            loc.absolute_path()?.to_string().as_str(),
+            tee_task_iface::tasign::get_ta_head_cached(path.as_str())?
+                .unwrap_or_default()
+                .as_slice(),
+        );
+    }
 
     proc_data.set_heap_top(USER_HEAP_BASE);
 

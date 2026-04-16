@@ -18,8 +18,10 @@ tee_ta_sign = [
     "dep:kerrno",
     "dep:kfs",
     "dep:log",
+    "dep:spin",
     "dep:tasign",
     "dep:tasign_kernel_shim",
+    "dep:xmas-elf",
 ]
 
 [dependencies]
@@ -29,5 +31,8 @@ unittest.workspace = true
 kerrno = { workspace = true, optional = true }
 kfs = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
+spin = { workspace = true, optional = true }
 tasign = { workspace = true, optional = true, features = ["kernel-verify"] }
 tasign_kernel_shim = { workspace = true, optional = true }
+xmas-elf = { version = "0.9", default-features = false, optional = true }
+tee_raw_sys.workspace = true

@@ -12,6 +12,7 @@ repository.workspace = true
 vsock = ["knet/vsock", "kservices/vsock"]
 tee = [
     "dep:tee_kernel",
+    "dep:tee_task_iface",
     "kservices/tee",
 ]
 
@@ -40,6 +41,7 @@ ksignal.workspace = true
 osvm.workspace = true
 linux_sysno.workspace = true
 tee_kernel = { workspace = true, optional = true }
+tee_task_iface = { workspace = true, optional = true, features = ["tee_ta_sign"] }
 kcore.workspace = true
 num_enum = { version = "0.7", default-features = false }
 
