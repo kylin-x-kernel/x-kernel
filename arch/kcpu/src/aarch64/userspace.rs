@@ -105,6 +105,11 @@ impl UserContext {
 
                 match esr.read_as_enum(ESR_EL1::EC) {
                     Some(ESR_EL1::EC::Value::SVC64) => ReturnReason::Syscall,
+                    Some(ESR_EL1::EC::Value::TrappedWFIorWFE) => {
+                        let next_ip = self.ip() + 4;
+                        self.set_ip(next_ip);
+                        ReturnReason::Interrupt
+                    }
                     Some(ESR_EL1::EC::Value::InstrAbortLowerEL) if check_page_fault(iss) => {
                         ReturnReason::PageFault(
                             va!(far),
@@ -147,12 +152,78 @@ pub struct ExceptionInfo {
 impl ExceptionInfo {
     /// Returns a generalized kind of this exception.
     pub fn kind(&self) -> ExceptionKind {
-        match self.esr.read_as_enum(ESR_EL1::EC) {
-            Some(ESR_EL1::EC::Value::BreakpointLowerEL) => ExceptionKind::Breakpoint,
-            Some(ESR_EL1::EC::Value::IllegalExecutionState) => ExceptionKind::IllegalInstruction,
-            Some(ESR_EL1::EC::Value::PCAlignmentFault)
-            | Some(ESR_EL1::EC::Value::SPAlignmentFault) => ExceptionKind::Misaligned,
-            _ => ExceptionKind::Other,
-        }
+        exception_kind_from_ec(self.esr.read_as_enum(ESR_EL1::EC))
+    }
+}
+
+fn exception_kind_from_ec(ec: Option<ESR_EL1::EC::Value>) -> ExceptionKind {
+    use ESR_EL1::EC::Value;
+
+    match ec {
+        Some(
+            Value::BreakpointLowerEL
+            | Value::BreakpointCurrentEL
+            | Value::SoftwareStepLowerEL
+            | Value::SoftwareStepCurrentEL
+            | Value::WatchpointLowerEL
+            | Value::WatchpointCurrentEL
+            | Value::Bkpt32
+            | Value::Brk64,
+        ) => ExceptionKind::Breakpoint,
+        Some(Value::PCAlignmentFault | Value::SPAlignmentFault) => ExceptionKind::Misaligned,
+        Some(
+            Value::Unknown
+            | Value::TrappedMCRorMRC
+            | Value::TrappedMCRRorMRRC
+            | Value::TrappedMCRorMRC2
+            | Value::TrappedLDCorSTC
+            | Value::TrappedFP
+            | Value::TrappedMRRC
+            | Value::BranchTarget
+            | Value::IllegalExecutionState
+            | Value::TrappedMsrMrs
+            | Value::TrappedSve
+            | Value::PointerAuth,
+        ) => ExceptionKind::IllegalInstruction,
+        _ => ExceptionKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aarch64_cpu::registers::ESR_EL1;
+
+    use super::{ExceptionKind, exception_kind_from_ec};
+
+    #[test]
+    fn classifies_instruction_traps_as_illegal_instruction() {
+        assert_eq!(
+            exception_kind_from_ec(Some(ESR_EL1::EC::Value::TrappedFP)),
+            ExceptionKind::IllegalInstruction
+        );
+        assert_eq!(
+            exception_kind_from_ec(Some(ESR_EL1::EC::Value::TrappedMsrMrs)),
+            ExceptionKind::IllegalInstruction
+        );
+        assert_eq!(
+            exception_kind_from_ec(Some(ESR_EL1::EC::Value::TrappedSve)),
+            ExceptionKind::IllegalInstruction
+        );
+    }
+
+    #[test]
+    fn keeps_breakpoint_and_alignment_classes_distinct() {
+        assert_eq!(
+            exception_kind_from_ec(Some(ESR_EL1::EC::Value::Brk64)),
+            ExceptionKind::Breakpoint
+        );
+        assert_eq!(
+            exception_kind_from_ec(Some(ESR_EL1::EC::Value::PCAlignmentFault)),
+            ExceptionKind::Misaligned
+        );
+        assert_eq!(
+            exception_kind_from_ec(Some(ESR_EL1::EC::Value::TrappedWFIorWFE)),
+            ExceptionKind::Other
+        );
     }
 }

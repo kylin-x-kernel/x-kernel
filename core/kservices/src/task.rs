@@ -145,32 +145,41 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> 
 }
 
 /// Process robust futex list on thread exit and wake waiting threads.
-pub fn exit_robust_list(head: *const RobustListHead) -> KResult<()> {
-    // Reference: https://elixir.bootlin.com/linux/v6.13.6/source/kernel/futex/core.c#L777
-
+///
+/// Silently returns on any sign of list-walking problem, matching Linux behavior.
+/// Reference: <https://elixir.bootlin.com/linux/v6.13.6/source/kernel/futex/core.c#L1154>
+pub fn exit_robust_list(head: *const RobustListHead) {
     let mut limit = ROBUST_LIST_LIMIT;
 
     let end_ptr = unsafe { &raw const (*head).list };
-    let head = head.read_vm()?;
+    let Some(head) = head.read_vm().ok() else {
+        return;
+    };
     let mut entry = head.list.next;
     let offset = head.futex_offset;
     let pending = head.list_op_pending;
 
     while !core::ptr::eq(entry, end_ptr) {
-        let next_entry = entry.read_vm()?.next;
-        if entry != pending {
-            dispatch_irq_futex_death(entry, offset)?;
+        let Some(next_entry) = entry.read_vm().map(|e| e.next).ok() else {
+            return;
+        };
+        // A pending lock might already be on the list, so don't process it twice.
+        if entry != pending && dispatch_irq_futex_death(entry, offset).is_err() {
+            return;
         }
         entry = next_entry;
 
         limit -= 1;
         if limit == 0 {
-            return Err(KError::FilesystemLoop);
+            break;
         }
         ktask::yield_now();
     }
 
-    Ok(())
+    // Handle the pending entry separately after the list traversal.
+    if !pending.is_null() {
+        let _ = dispatch_irq_futex_death(pending, offset);
+    }
 }
 
 /// Exit the current thread or process group and perform cleanup.
@@ -191,10 +200,8 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         ktask::yield_now();
     }
     let head = thr.robust_list_head() as *const RobustListHead;
-    if !head.is_null()
-        && let Err(err) = exit_robust_list(head)
-    {
-        warn!("exit robust list failed: {err:?}");
+    if !head.is_null() {
+        exit_robust_list(head);
     }
 
     let process = &thr.proc_data.proc;
