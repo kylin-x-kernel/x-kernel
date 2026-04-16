@@ -695,6 +695,32 @@ impl CachedFile {
         Ok(())
     }
 
+    fn flush_and_evict_from(&self, offset: u64) -> VfsResult<()> {
+        if self.in_memory {
+            return Ok(());
+        }
+        let file = self.inner.entry().as_file()?;
+        let start_pn = (offset / PAGE_SIZE as u64) as u32;
+        let mut guard = self.shared.page_cache.lock();
+
+        let keys = guard
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|pn| *pn >= start_pn)
+            .collect::<Vec<_>>();
+
+        for pn in keys {
+            if let Some(mut page) = guard.pop(&pn)
+                && let Err(e) = self.evict_cache(file, pn, &mut page)
+            {
+                guard.push(pn, page);
+                return Err(e);
+            }
+        }
+        file.sync(false)?;
+        Ok(())
+    }
+
     pub fn sync(&self, data_only: bool) -> VfsResult<()> {
         if self.in_memory {
             return Ok(());
@@ -874,10 +900,16 @@ impl FileBackend {
     }
 
     pub fn collapse_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        if let Self::Cached(cached) = self {
+            cached.flush_and_evict_from(offset)?;
+        }
         crate::fs::range_shift(self.location(), offset, len, false)
     }
 
     pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        if let Self::Cached(cached) = self {
+            cached.flush_and_evict_from(offset)?;
+        }
         crate::fs::range_shift(self.location(), offset, len, true)
     }
 }
