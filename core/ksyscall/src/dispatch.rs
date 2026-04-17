@@ -611,6 +611,19 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
             uctx.arg3().into(),
             uctx.arg4() as _,
         ),
+        Sysno::sendmmsg => sys_sendmmsg(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
+        Sysno::recvmmsg => sys_recvmmsg(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4().into(),
+        ),
 
         // signal file descriptors
         Sysno::signalfd4 => sys_signalfd4(
@@ -644,23 +657,26 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         Sysno::timer_create | Sysno::timer_gettime | Sysno::timer_settime => Ok(0),
 
+        // sync_file_range: return success (no-op, same as fsync for directories)
+        Sysno::sync_file_range => Ok(0),
+
+        // Known benign unimplemented syscalls (glibc handles ENOSYS gracefully)
+        Sysno::rseq => {
+            debug!("sys_rseq: not implemented, returning ENOSYS");
+            Err(kerrno::KError::Unsupported)
+        }
+
+        // TEE syscalls (>=500)
+        #[cfg(feature = "tee")]
+        _ if uctx.sysno() >= 500 => match tee_kernel::tee::dispatch_irq_tee_syscall(sysno, uctx) {
+            Ok(_) => Ok(tee_kernel::TEE_SUCCESS as isize),
+            Err(errno) => Ok(errno as isize),
+        },
+
         _ => {
-            #[cfg(feature = "tee")]
-            {
-                use tee_kernel::TEE_SUCCESS;
-
-                use crate::tee::dispatch_irq_tee_syscall;
-
-                match dispatch_irq_tee_syscall(sysno, uctx) {
-                    Ok(_) => Ok(TEE_SUCCESS as isize),
-                    Err(errno) => Ok(errno as isize),
-                }
-            }
-            #[cfg(not(feature = "tee"))]
-            {
-                warn!("Unimplemented syscall: {sysno}");
-                Err(kerrno::KError::Unsupported)
-            }
+            let tid = ktask::current().id().as_u64() as u32;
+            warn!("Unimplemented syscall: {sysno} (tid={tid})");
+            Err(kerrno::KError::Unsupported)
         }
     };
     debug!("Syscall {sysno} return {result:?}");

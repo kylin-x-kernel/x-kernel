@@ -17,7 +17,7 @@ use core::{
     task::Context,
 };
 
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use kfs::{FS_CONTEXT, FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
@@ -28,7 +28,7 @@ use linux_sysno::Sysno;
 use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::{
-    file::{File, FileLike, Pipe, get_file_like},
+    file::{Directory, File, FileLike, Pipe, get_file_like},
     io::{IoVec, IoVectorBuf},
 };
 
@@ -124,8 +124,31 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<is
         2 => SeekFrom::End(offset as _),
         _ => return Err(KError::InvalidInput),
     };
-    let off = File::from_fd(fd)?.inner().seek(pos)?;
-    Ok(off as _)
+    let any_file = get_file_like(fd)?;
+
+    if let Ok(f) = any_file.clone().downcast_arc::<File>() {
+        let off = f.inner().seek(pos)?;
+        return Ok(off as _);
+    }
+
+    if let Ok(d) = any_file.downcast_arc::<Directory>() {
+        let mut off = d.offset.lock();
+        let new_pos = match pos {
+            SeekFrom::Start(pos) => pos,
+            SeekFrom::End(delta) => d
+                .inner()
+                .len()?
+                .checked_add_signed(delta)
+                .ok_or(KError::InvalidInput)?,
+            SeekFrom::Current(delta) => {
+                off.checked_add_signed(delta).ok_or(KError::InvalidInput)?
+            }
+        };
+        *off = new_pos;
+        return Ok(new_pos as _);
+    }
+
+    Err(KError::from(LinuxError::ESPIPE))
 }
 
 /// Truncates a file to a specified length by path.
@@ -298,18 +321,26 @@ pub fn sys_fallocate(
 /// Synchronizes a file's in-core state with storage.
 pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
-    // Synchronize file to disk - syncs both data and metadata
-    let f = File::from_fd(fd)?;
-    f.inner().sync(false)?;
+    let any_file = get_file_like(fd)?;
+    if let Ok(f) = any_file.clone().downcast_arc::<File>() {
+        f.inner().sync(false)?;
+    } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
+        d.inner().sync(false)?;
+    }
+    // For other non-file fds (socket/pipe/etc.), fsync is a no-op.
     Ok(0)
 }
 
 /// Synchronizes a file's data (not metadata) with storage.
 pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
-    // Synchronize file data to disk - only syncs data, not metadata
-    let f = File::from_fd(fd)?;
-    f.inner().sync(true)?;
+    let any_file = get_file_like(fd)?;
+    if let Ok(f) = any_file.clone().downcast_arc::<File>() {
+        f.inner().sync(true)?;
+    } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
+        d.inner().sync(true)?;
+    }
+    // For other non-file fds (socket/pipe/etc.), fdatasync is a no-op.
     Ok(0)
 }
 
