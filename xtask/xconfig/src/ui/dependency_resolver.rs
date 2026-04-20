@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::kconfig::{
     ast::{Entry, Expr, Property},
@@ -77,12 +77,37 @@ impl DependencyResolver {
                 }
                 Entry::Choice(choice) => {
                     for option in &choice.options {
-                        self.process_config(&option.name, &option.properties);
+                        self.process_choice_option(
+                            &option.name,
+                            &option.properties,
+                            choice.depends.as_ref(),
+                        );
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    fn process_choice_option(
+        &mut self,
+        name: &str,
+        properties: &Property,
+        choice_depends: Option<&Expr>,
+    ) {
+        let merged_depends = match (&properties.depends, choice_depends) {
+            (Some(option_depends), Some(choice_depends)) => Some(Expr::And(
+                Box::new(option_depends.clone()),
+                Box::new(choice_depends.clone()),
+            )),
+            (Some(option_depends), None) => Some(option_depends.clone()),
+            (None, Some(choice_depends)) => Some(choice_depends.clone()),
+            (None, None) => None,
+        };
+
+        let mut merged_properties = properties.clone();
+        merged_properties.depends = merged_depends;
+        self.process_config(name, &merged_properties);
     }
 
     fn process_config(&mut self, name: &str, properties: &Property) {
@@ -256,19 +281,32 @@ impl DependencyResolver {
     /// Check for conflicts when disabling a symbol
     pub fn check_disable_cascade(&self, symbol: &str, symbol_table: &SymbolTable) -> Vec<String> {
         let mut affected = Vec::new();
+        let mut visited = HashSet::new();
+        self.collect_disable_cascade(symbol, symbol_table, &mut visited, &mut affected);
+        affected
+    }
 
-        // Find all symbols that depend on this one
-        for (dependent, deps) in &self.depends_map {
-            if symbol_table.is_enabled(dependent) {
-                for dep in deps {
-                    if dep.symbol == symbol {
-                        affected.push(dependent.clone());
-                    }
-                }
-            }
+    fn collect_disable_cascade(
+        &self,
+        symbol: &str,
+        symbol_table: &SymbolTable,
+        visited: &mut HashSet<String>,
+        affected: &mut Vec<String>,
+    ) {
+        if !visited.insert(symbol.to_string()) {
+            return;
         }
 
-        affected
+        for (dependent, deps) in &self.depends_map {
+            if !symbol_table.is_enabled(dependent) || visited.contains(dependent) {
+                continue;
+            }
+
+            if deps.iter().any(|dep| dep.symbol == symbol) {
+                affected.push(dependent.clone());
+                self.collect_disable_cascade(dependent, symbol_table, visited, affected);
+            }
+        }
     }
 
     /// Format an expression as a human-readable string

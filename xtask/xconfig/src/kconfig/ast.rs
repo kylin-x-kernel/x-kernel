@@ -151,6 +151,9 @@ impl Property {
             match &default.value {
                 Expr::Const(val) => return Some(val.clone()),
                 Expr::Symbol(sym) => {
+                    if matches!(sym.as_str(), "y" | "m" | "n") {
+                        return Some(sym.clone());
+                    }
                     if let Some(value) = symbol_table.get_value(sym) {
                         return Some(value);
                     }

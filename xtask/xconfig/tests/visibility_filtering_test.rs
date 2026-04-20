@@ -247,7 +247,7 @@ config VISIBLE_OPTION
     bool "This should be visible"
 
 config INTERNAL_VAR
-    int
+    i32
     default 100
 
 config ANOTHER_VISIBLE
@@ -267,7 +267,7 @@ config HIDDEN_HEX
     // Create symbol table
     let mut symbol_table = SymbolTable::new();
     symbol_table.add_symbol("VISIBLE_OPTION".to_string(), SymbolType::Bool);
-    symbol_table.add_symbol("INTERNAL_VAR".to_string(), SymbolType::U32);
+    symbol_table.add_symbol("INTERNAL_VAR".to_string(), SymbolType::I32);
     symbol_table.add_symbol("ANOTHER_VISIBLE".to_string(), SymbolType::String);
     symbol_table.add_symbol("HIDDEN_HEX".to_string(), SymbolType::Hex);
 
@@ -358,7 +358,7 @@ config VISIBLE_FEATURE_OPTION
     bool "Visible Feature Option"
 
 config HIDDEN_INTERNAL_VAR
-    int
+    i32
     default 42
 
 endif

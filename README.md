@@ -37,18 +37,41 @@ sudo apt install qemu-system
 
 ### 2. Config kernel
 
-#### start from a default configuration
+#### start from a platform defconfig
 ```bash
 cp platforms/aarch64-qemu-virt/defconfig .config
+make defconfig
 ```
 
+`make defconfig` expands the copied minimal `defconfig` into a full `.config`.
+
 #### change configuration
-if you want to change the kernel configuration, you can use the following command to open the menuconfig interface:
+If you want to change the kernel configuration, use the following command to open the menuconfig interface:
 ```bash
 make menuconfig
 ```
 
-this will generate a .config file in the root directory of the project, which will be used for building the kernel.
+This updates the `.config` file in the project root, which is then used for builds.
+
+#### refresh an existing configuration after Kconfig changes
+```bash
+make oldconfig
+```
+
+This is the Linux-style interactive refresh flow: it reloads the current `.config` and asks you to confirm values for newly introduced symbols.
+
+```bash
+make olddefconfig
+```
+
+This is the non-interactive Linux-style refresh flow: it reloads the current `.config` and automatically fills newly introduced symbols with their Kconfig defaults.
+
+#### save the current configuration back to a minimal defconfig
+```bash
+make savedefconfig
+```
+
+This writes a minimized `./defconfig` containing only values that differ from Kconfig defaults. It is useful when updating a platform defconfig after menuconfig changes.
 
 ### 3. Prepare rootfs
 Directly run the following commands to build the root filesystem image for the desired architecture:

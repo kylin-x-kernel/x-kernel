@@ -56,7 +56,7 @@ endif
 .DEFAULT_GOAL := all
 
 BUILD_TARGETS := all build run justrun debug clippy disasm rootfs
-KCONFIG_TARGETS := menuconfig defconfig saveconfig oldconfig
+KCONFIG_TARGETS := menuconfig defconfig saveconfig savedefconfig oldconfig olddefconfig
 CLEAN_TARGETS := clean clean_c distclean
 UTILITY_TARGETS := clippy check_deps check_header doc doc_check_missing fmt unittest unittest_no_fail_fast
 
@@ -159,11 +159,25 @@ teefs:
 	$(MAKE) -C tee_apps ARCH=$(ARCH)
 
 defconfig:
-	@$(XCONF) saveconfig -o .config -k Kconfig -s .
-	@echo "✅ Default configuration saved to .config"
+	@if [ ! -f .config ]; then \
+		echo "$(RED_C)Error$(END_C): .config not found."; \
+		echo "Please copy a platform defconfig to .config first."; \
+		exit 1; \
+	fi
+	@$(XCONF) defconfig .config -k Kconfig -s .
+	@echo "✅ Default configuration expanded into .config"
 
 saveconfig:
 	@$(XCONF) saveconfig -o .config -k Kconfig -s .
+
+savedefconfig:
+	@if [ ! -f .config ]; then \
+		echo "$(RED_C)Error$(END_C): .config not found."; \
+		echo "Please run 'make defconfig' or 'make menuconfig' first."; \
+		exit 1; \
+	fi
+	@$(XCONF) savedefconfig -c .config -o defconfig -k Kconfig -s .
+	@echo "✅ Minimal defconfig saved to ./defconfig"
 
 oldconfig:
 	@if [ ! -f .config ]; then \
@@ -172,6 +186,15 @@ oldconfig:
 		exit 1; \
 	fi
 	@$(XCONF) oldconfig -c .config -k Kconfig -s .
+
+olddefconfig:
+	@if [ ! -f .config ]; then \
+		echo "$(RED_C)Error$(END_C): .config not found."; \
+		echo "Please run 'make defconfig' or 'make menuconfig' first."; \
+		exit 1; \
+	fi
+	@$(XCONF) olddefconfig -c .config -k Kconfig -s .
+	@echo "✅ New symbols refreshed from Kconfig defaults"
 
 
 $(CONFIG_RS): .config
@@ -250,7 +273,7 @@ clean_c::
 
 # Note: gen-const is kept as PHONY to allow manual invocation,
 # but the actual dependency is on $(CONFIG_RS) which is file-based
-.PHONY: all defconfig oldconfig menuconfig saveconfig gen-const \
+.PHONY: all defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const \
 	build disasm run justrun debug \
 	clippy doc doc_check_missing fmt fmt_c unittest unittest_no_fail_fast \
 	disk_img clean distclean clean_c

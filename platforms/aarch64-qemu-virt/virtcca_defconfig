@@ -20,6 +20,11 @@ KFEAT_ALLOC=y
 KFEAT_ALLOC_SLAB=y
 # KFEAT_ALLOC_TLSF is not set
 # KFEAT_DWARF is not set
+KFEAT_FS=y
+# KFEAT_FS_9P is not set
+KFEAT_FS_EXT4=y
+# KFEAT_FS_FAT is not set
+KFEAT_FS_TIMES=y
 # LOG_LEVEL_DEBUG is not set
 # LOG_LEVEL_ERROR is not set
 # LOG_LEVEL_INFO is not set

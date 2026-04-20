@@ -1,0 +1,40 @@
+menu "File Systems"
+
+config KFEAT_FS
+    bool "Enable filesystem support"
+    default y
+    help
+      Enable the kernel filesystem stack and related runtime support.
+
+choice
+    prompt "Default filesystem"
+    depends on KFEAT_FS
+    default KFEAT_FS_EXT4
+
+config KFEAT_FS_EXT4
+    bool "ext4"
+    help
+      Use ext4 as the default root filesystem backend.
+
+config KFEAT_FS_FAT
+    bool "FAT"
+    help
+      Use FAT as the default root filesystem backend.
+
+endchoice
+
+config KFEAT_FS_TIMES
+    bool "Enable filesystem timestamps"
+    depends on KFEAT_FS
+    help
+      Enable timestamp-related filesystem behavior in the shared VFS and
+      filesystem backends.
+
+config KFEAT_FS_9P
+    bool "Enable 9P filesystem support"
+    depends on KFEAT_FS
+    help
+      Enable the 9P filesystem client used for shared-directory mounts such as
+      QEMU hostshare.
+
+endmenu

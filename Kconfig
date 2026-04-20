@@ -184,6 +184,7 @@ config KFEAT_DWARF
 
 endmenu
 
+source "fs/Kconfig"
 source "mm/Kconfig"
 source "tee/Kconfig"
 

@@ -9,60 +9,19 @@
 use std::fs;
 
 use tempfile::TempDir;
-use xconfig::{
-    config::ConfigReader,
-    kconfig::{Parser, SymbolTable},
-    ui::dependency_resolver::DependencyResolver,
-};
+use xconfig::{config::ConfigEngine, kconfig::SymbolTable};
 
-/// Helper to simulate menuconfig loading behavior
+/// Helper to simulate menuconfig loading behavior via ConfigEngine
 fn simulate_menuconfig_load(
     kconfig_path: &std::path::Path,
     srctree: &std::path::Path,
     config_path: &std::path::Path,
 ) -> SymbolTable {
-    let mut parser = Parser::new(kconfig_path, srctree).unwrap();
-    let ast = parser.parse().unwrap();
-
-    let mut symbol_table = SymbolTable::new();
-
-    // Extract symbols (simplified symbol extraction matching menuconfig_command behavior)
-    use xconfig::kconfig::ast::Entry;
-    for entry in &ast.entries {
-        if let Entry::Config(config) = entry {
-            symbol_table.add_symbol(config.name.clone(), config.symbol_type.clone());
-            if let Some(default_value) = config.properties.evaluate_default(&symbol_table) {
-                symbol_table.set_value(&config.name, default_value);
-            }
-        }
-    }
-
-    // Load .config
+    let mut engine = ConfigEngine::from_kconfig(kconfig_path, srctree).unwrap();
     if config_path.exists() {
-        let config_values = ConfigReader::read(config_path).unwrap();
-        for (name, value) in config_values {
-            symbol_table.set_value(&name, value);
-            symbol_table.mark_from_config(&name);
-        }
+        engine.load_menuconfig_config(config_path).unwrap();
     }
-
-    // Apply ghost filtering (the fix)
-    let mut dep_resolver = DependencyResolver::new();
-    dep_resolver.build_from_entries(&ast.entries);
-
-    let ghost_names: Vec<String> = symbol_table
-        .all_symbols()
-        .filter(|(name, sym)| {
-            sym.value.is_some() && dep_resolver.can_enable(name, &symbol_table).is_err()
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-
-    for name in ghost_names {
-        symbol_table.clear_value(&name);
-    }
-
-    symbol_table
+    engine.into_symbols()
 }
 
 #[test]

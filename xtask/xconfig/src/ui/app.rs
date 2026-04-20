@@ -15,6 +15,7 @@ use ratatui::{
 };
 
 use crate::{
+    config::ConfigEngine,
     debug_log,
     error::Result,
     kconfig::{Expr, SymbolTable, SymbolType},
@@ -72,9 +73,8 @@ pub enum DialogType {
 
 pub struct MenuConfigApp {
     config_state: ConfigState,
-    symbol_table: SymbolTable,
+    engine: ConfigEngine,
     navigation: NavigationState,
-    dependency_resolver: DependencyResolver,
 
     // Search state
     search_active: bool,
@@ -100,10 +100,16 @@ impl MenuConfigApp {
         entries: Vec<crate::kconfig::ast::Entry>,
         symbol_table: SymbolTable,
     ) -> Result<Self> {
-        // Build dependency maps
         let mut dependency_resolver = DependencyResolver::new();
         dependency_resolver.build_from_entries(&entries);
+        Self::new_with_resolver(entries, symbol_table, dependency_resolver)
+    }
 
+    pub fn new_with_resolver(
+        entries: Vec<crate::kconfig::ast::Entry>,
+        symbol_table: SymbolTable,
+        dependency_resolver: DependencyResolver,
+    ) -> Result<Self> {
         let mut config_state = ConfigState::build_from_entries(&entries);
 
         // Initialize values from symbol table
@@ -138,9 +144,8 @@ impl MenuConfigApp {
 
         Ok(Self {
             config_state,
-            symbol_table,
+            engine: ConfigEngine::from_parts(entries, symbol_table, dependency_resolver),
             navigation: NavigationState::new(),
-            dependency_resolver,
             search_active: false,
             search_query: String::new(),
             focus: PanelFocus::MenuTree,
@@ -292,7 +297,7 @@ impl MenuConfigApp {
 
                 // Rule 2: Check depends_on condition
                 if let Some(depends_expr) = &item.depends_on {
-                    return evaluator.evaluate(depends_expr, &self.symbol_table);
+                    return evaluator.evaluate(depends_expr, self.engine.symbols());
                 }
 
                 true
@@ -303,6 +308,11 @@ impl MenuConfigApp {
     /// Get reference to config_state (for testing)
     pub fn config_state(&self) -> &ConfigState {
         &self.config_state
+    }
+
+    #[cfg(test)]
+    pub fn engine(&self) -> &ConfigEngine {
+        &self.engine
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
@@ -946,21 +956,32 @@ impl MenuConfigApp {
     }
 
     fn handle_cascade_warning_dialog_key(&mut self, key: KeyEvent) -> Result<EventResult> {
-        // Extract symbol before any mutable operations
-        let symbol = if let Some(DialogType::CascadeWarning { symbol, .. }) = &self.dialog_type {
-            symbol.clone()
-        } else {
-            return Ok(EventResult::Continue);
-        };
+        // Extract dialog data before any mutable operations
+        let (symbol, affected) =
+            if let Some(DialogType::CascadeWarning { symbol, affected }) = &self.dialog_type {
+                (symbol.clone(), affected.clone())
+            } else {
+                return Ok(EventResult::Continue);
+            };
 
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                // Proceed with disabling
-                let new_val = ConfigValue::Bool(false);
-                self.apply_value_change(&symbol, new_val)?;
+                // Disable affected dependents first, then the requested symbol.
+                for affected_symbol in &affected {
+                    self.apply_value_change(affected_symbol, ConfigValue::Bool(false))?;
+                }
+                self.apply_value_change(&symbol, ConfigValue::Bool(false))?;
                 self.sync_ui_state_from_symbol_table()?;
                 self.update_enabled_states()?;
-                self.status_message = Some(format!(" {} disabled", symbol));
+                self.status_message = if affected.is_empty() {
+                    Some(format!(" {} disabled", symbol))
+                } else {
+                    Some(format!(
+                        " {} disabled (also disabled: {})",
+                        symbol,
+                        affected.join(", ")
+                    ))
+                };
                 self.dialog_type = None;
                 Ok(EventResult::Continue)
             }
@@ -984,7 +1005,7 @@ impl MenuConfigApp {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 // Enable implied symbols
                 for symbol in &implied {
-                    self.symbol_table.set_value(symbol, "y".to_string());
+                    self.engine.set_value(symbol, "y".to_string());
                 }
                 self.sync_ui_state_from_symbol_table()?;
                 self.update_enabled_states()?;
@@ -1290,18 +1311,13 @@ impl MenuConfigApp {
 
             if is_enabling {
                 // Check dependencies before enabling
-                match self
-                    .dependency_resolver
-                    .can_enable(&item_id, &self.symbol_table)
-                {
+                match self.engine.can_enable(&item_id) {
                     Ok(_) => {
                         // Apply the change
                         self.apply_value_change(&item_id, new_val.clone())?;
 
                         // Apply select cascade
-                        let selected = self
-                            .dependency_resolver
-                            .apply_selects(&item_id, &mut self.symbol_table);
+                        let selected = self.engine.apply_selects(&item_id);
                         if !selected.is_empty() {
                             self.status_message = Some(format!(
                                 " {} enabled (also enabled: {})",
@@ -1313,9 +1329,7 @@ impl MenuConfigApp {
                         }
 
                         // Check for implied symbols
-                        let implied = self
-                            .dependency_resolver
-                            .get_implied_symbols(&item_id, &self.symbol_table);
+                        let implied = self.engine.get_implied_symbols(&item_id);
                         if !implied.is_empty() {
                             // Show suggestion dialog
                             self.dialog_type = Some(DialogType::ImplySuggestion { implied });
@@ -1329,15 +1343,10 @@ impl MenuConfigApp {
                 }
             } else {
                 // Disabling
-                match self
-                    .dependency_resolver
-                    .can_disable(&item_id, &self.symbol_table)
-                {
+                match self.engine.can_disable(&item_id) {
                     Ok(_) => {
                         // Check what will be affected
-                        let affected = self
-                            .dependency_resolver
-                            .check_disable_cascade(&item_id, &self.symbol_table);
+                        let affected = self.engine.check_disable_cascade(&item_id);
 
                         if !affected.is_empty() {
                             // Warn user
@@ -1435,8 +1444,7 @@ impl MenuConfigApp {
             ConfigValue::Range(r) => r,
         };
 
-        self.symbol_table
-            .set_value_tracked(item_id, value_str.clone());
+        self.engine.set_value_tracked(item_id, value_str.clone());
 
         // Track modification
         let original = self.config_state.original_values.get(item_id).cloned();
@@ -1456,10 +1464,7 @@ impl MenuConfigApp {
         for item in &mut self.config_state.all_items {
             if let MenuItemKind::Config { .. } | MenuItemKind::MenuConfig { .. } = &item.kind {
                 // Check if dependencies are met
-                item.is_enabled = self
-                    .dependency_resolver
-                    .can_enable(&item.id, &self.symbol_table)
-                    .is_ok();
+                item.is_enabled = self.engine.can_enable(&item.id).is_ok();
             }
         }
 
@@ -1467,10 +1472,7 @@ impl MenuConfigApp {
         for (_key, items) in self.config_state.menu_tree.iter_mut() {
             for item in items {
                 if let MenuItemKind::Config { .. } | MenuItemKind::MenuConfig { .. } = &item.kind {
-                    item.is_enabled = self
-                        .dependency_resolver
-                        .can_enable(&item.id, &self.symbol_table)
-                        .is_ok();
+                    item.is_enabled = self.engine.can_enable(&item.id).is_ok();
                 }
             }
         }
@@ -1486,7 +1488,7 @@ impl MenuConfigApp {
             if let MenuItemKind::Config { symbol_type } | MenuItemKind::MenuConfig { symbol_type } =
                 &item.kind
             {
-                if let Some(value) = self.symbol_table.get_value(&item.id) {
+                if let Some(value) = self.engine.get_value(&item.id) {
                     item.value = Some(Self::parse_value(&value, symbol_type));
                 }
             }
@@ -1498,7 +1500,7 @@ impl MenuConfigApp {
                 if let MenuItemKind::Config { symbol_type }
                 | MenuItemKind::MenuConfig { symbol_type } = &item.kind
                 {
-                    if let Some(value) = self.symbol_table.get_value(&item.id) {
+                    if let Some(value) = self.engine.get_value(&item.id) {
                         item.value = Some(Self::parse_value(&value, symbol_type));
                     }
                 }
@@ -1510,26 +1512,11 @@ impl MenuConfigApp {
 
     /// Audit all enabled symbols to ensure their dependencies are satisfied
     fn audit_all_dependencies(&self) -> Vec<String> {
-        let mut violations = Vec::new();
-
-        for (symbol_name, _symbol) in self.symbol_table.all_symbols() {
-            if self.symbol_table.is_enabled(symbol_name) {
-                if let Err(e) = self
-                    .dependency_resolver
-                    .can_enable(symbol_name, &self.symbol_table)
-                {
-                    violations.push(format!("{}: {}", symbol_name, e));
-                }
-            }
-        }
-
-        violations
+        self.engine.audit_dependency_violations()
     }
 
     fn save_config(&mut self) -> Result<()> {
         use std::path::Path;
-
-        use crate::config::ConfigWriter;
 
         // Audit before saving
         let violations = self.audit_all_dependencies();
@@ -1573,13 +1560,13 @@ impl MenuConfigApp {
             return Ok(());
         }
 
-        ConfigWriter::write(Path::new(".config"), &self.symbol_table)?;
+        self.engine.write_config(Path::new(".config"))?;
 
         // Clear modified symbols after save
         self.config_state.modified_symbols.clear();
 
         // Update original values
-        for (name, symbol) in self.symbol_table.all_symbols() {
+        for (name, symbol) in self.engine.symbols().all_symbols() {
             if let Some(value) = &symbol.value {
                 self.config_state
                     .original_values
@@ -1845,15 +1832,14 @@ impl MenuConfigApp {
                 DialogType::EditString { symbol, .. } => {
                     let new_value = self.input_buffer.clone();
                     self.update_config_value(symbol, ConfigValue::String(new_value.clone()))?;
-                    self.symbol_table
+                    self.engine
                         .set_value_tracked(symbol, format!("\"{}\"", new_value));
                     self.status_message = Some(format!("✓ {} updated", symbol));
                 }
                 DialogType::EditInt { symbol, .. } => {
                     if let Some(value) = Self::validate_int(&self.input_buffer) {
                         self.update_config_value(symbol, ConfigValue::Int(value))?;
-                        self.symbol_table
-                            .set_value_tracked(symbol, value.to_string());
+                        self.engine.set_value_tracked(symbol, value.to_string());
                         self.status_message = Some(format!("✓ {} = {}", symbol, value));
                     } else {
                         self.status_message = Some("✗ Invalid integer".to_string());
@@ -1863,7 +1849,7 @@ impl MenuConfigApp {
                 DialogType::EditHex { symbol, .. } => {
                     if let Some(value) = Self::validate_hex(&self.input_buffer) {
                         self.update_config_value(symbol, ConfigValue::Hex(value.clone()))?;
-                        self.symbol_table.set_value_tracked(symbol, value.clone());
+                        self.engine.set_value_tracked(symbol, value.clone());
                         self.status_message = Some(format!("✓ {} = {}", symbol, value));
                     } else {
                         self.status_message = Some("✗ Invalid hex (use 0xABC format)".to_string());
@@ -1873,7 +1859,7 @@ impl MenuConfigApp {
                 DialogType::EditRange { symbol, .. } => {
                     if let Some(value) = Self::validate_range(&self.input_buffer) {
                         self.update_config_value(symbol, ConfigValue::Range(value.clone()))?;
-                        self.symbol_table.set_value_tracked(symbol, value.clone());
+                        self.engine.set_value_tracked(symbol, value.clone());
                         self.status_message = Some(format!("✓ {} = {}", symbol, value));
                     } else {
                         self.status_message =
@@ -2045,7 +2031,13 @@ impl MenuConfigApp {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::kconfig::{Parser, SymbolTable};
 
     #[test]
     fn test_validate_int() {
@@ -2150,5 +2142,103 @@ mod tests {
             MenuConfigApp::parse_value("invalid", &SymbolType::Hex),
             ConfigValue::Hex("invalid".to_string())
         );
+    }
+
+    #[test]
+    fn test_cascade_disable_clears_dependent_symbols() {
+        let temp_dir = TempDir::new().unwrap();
+        let kconfig_path = temp_dir.path().join("Kconfig");
+
+        let kconfig_content = r#"
+config KFEAT_FS
+    bool "Enable filesystem support"
+    default y
+
+config KFEAT_FS_EXT4
+    bool "ext4"
+    depends on KFEAT_FS
+
+config KFEAT_FS_TIMES
+    bool "Enable filesystem timestamps"
+    depends on KFEAT_FS_EXT4
+"#;
+
+        fs::write(&kconfig_path, kconfig_content).unwrap();
+
+        let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+        let ast = parser.parse().unwrap();
+
+        let mut symbol_table = SymbolTable::new();
+        symbol_table.add_symbol("KFEAT_FS".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("KFEAT_FS_EXT4".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("KFEAT_FS_TIMES".to_string(), SymbolType::Bool);
+        symbol_table.set_value("KFEAT_FS", "y".to_string());
+        symbol_table.set_value("KFEAT_FS_EXT4", "y".to_string());
+        symbol_table.set_value("KFEAT_FS_TIMES", "y".to_string());
+
+        let mut app = MenuConfigApp::new(ast.entries, symbol_table).unwrap();
+        let affected = app.engine().check_disable_cascade("KFEAT_FS");
+        assert_eq!(
+            affected,
+            vec!["KFEAT_FS_EXT4".to_string(), "KFEAT_FS_TIMES".to_string()]
+        );
+
+        app.dialog_type = Some(DialogType::CascadeWarning {
+            symbol: "KFEAT_FS".to_string(),
+            affected,
+        });
+        let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        app.handle_cascade_warning_dialog_key(key).unwrap();
+
+        assert_eq!(app.engine().get_value("KFEAT_FS").as_deref(), Some("n"));
+        assert_eq!(
+            app.engine().get_value("KFEAT_FS_EXT4").as_deref(),
+            Some("n")
+        );
+        assert_eq!(
+            app.engine().get_value("KFEAT_FS_TIMES").as_deref(),
+            Some("n")
+        );
+    }
+
+    #[test]
+    fn test_choice_depends_propagates_to_options_for_dependency_checks() {
+        let temp_dir = TempDir::new().unwrap();
+        let kconfig_path = temp_dir.path().join("Kconfig");
+
+        let kconfig_content = r#"
+config KFEAT_FS
+    bool "Enable filesystem support"
+    default n
+
+choice
+    prompt "Default filesystem"
+    depends on KFEAT_FS
+    default KFEAT_FS_EXT4
+
+config KFEAT_FS_EXT4
+    bool "ext4"
+
+config KFEAT_FS_FAT
+    bool "fat"
+
+endchoice
+"#;
+
+        fs::write(&kconfig_path, kconfig_content).unwrap();
+
+        let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+        let ast = parser.parse().unwrap();
+
+        let mut symbol_table = SymbolTable::new();
+        symbol_table.add_symbol("KFEAT_FS".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("KFEAT_FS_EXT4".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("KFEAT_FS_FAT".to_string(), SymbolType::Bool);
+        symbol_table.set_value("KFEAT_FS", "n".to_string());
+        symbol_table.set_value("KFEAT_FS_EXT4", "y".to_string());
+
+        let app = MenuConfigApp::new(ast.entries, symbol_table).unwrap();
+
+        assert!(app.engine().can_enable("KFEAT_FS_EXT4").is_err());
     }
 }

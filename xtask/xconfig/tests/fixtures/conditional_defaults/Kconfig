@@ -36,7 +36,7 @@ config DEFAULT_VALUE
     default "fallback"
 
 config NUMERIC_VALUE
-    int
+    i32
     default 10 if ARCH_AARCH64
     default 20 if ARCH_RISCV64
     default 5

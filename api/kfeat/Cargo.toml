@@ -41,10 +41,10 @@ sched-cfs = ["ktask/sched-cfs"]
 fs = [
     "dep:kfs",
 ]
-fs-ext4 = ["fs", "kfs/ext4", "kdriver/virtio-blk", "kruntime/fs"]
-fs-fat = ["fs", "kfs/fat", "kdriver/virtio-blk", "kruntime/fs"]
-fs-9p = ["fs", "kfs/fs9p", "kdriver/virtio_9p", "kruntime/fs9p"]
-fs-times = ["fs", "kfs/times"]
+fs_ext4 = ["kfs/ext4", "kdriver/virtio-blk", "kruntime/fs"]
+fs_fat = ["kfs/fat", "kdriver/virtio-blk", "kruntime/fs"]
+fs_9p = ["kfs/fs9p", "kdriver/virtio_9p", "kruntime/fs9p"]
+fs_times = ["kfs/times"]
 
 # Networking
 net = ["kdriver/virtio-net", "dep:knet", "kruntime/net"]
