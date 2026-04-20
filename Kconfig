@@ -181,11 +181,11 @@ config KFEAT_DWARF
       Keep DWARF sections in the image and enable backtrace symbolication
       support in the kernel.
 
-
 endmenu
 
 source "fs/Kconfig"
 source "mm/Kconfig"
+source "net/Kconfig"
 source "tee/Kconfig"
 
 source "drivers/Kconfig"

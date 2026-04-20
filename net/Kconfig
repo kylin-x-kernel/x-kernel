@@ -1,0 +1,14 @@
+menu "Networking"
+
+config KFEAT_NET
+    bool "Enable networking support"
+    help
+      Enable the kernel networking stack and NIC driver integration.
+
+config KFEAT_VSOCK
+    bool "Enable virtio-vsock support"
+    depends on KFEAT_NET
+    help
+      Enable AF_VSOCK support for guest and host communication.
+
+endmenu

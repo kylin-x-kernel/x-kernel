@@ -48,7 +48,13 @@ fs_times = ["kfs/times"]
 
 # Networking
 net = ["kdriver/virtio-net", "dep:knet", "kruntime/net"]
-vsock = ["net", "kdriver/virtio-socket", "kruntime/vsock", "knet/vsock"]
+vsock = [
+    "kdriver/virtio-socket",
+    "kruntime/vsock",
+    "knet/vsock",
+    "ksyscall/vsock",
+    "kservices/vsock",
+]
 
 # Display
 display = [

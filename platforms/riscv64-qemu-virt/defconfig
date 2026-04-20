@@ -23,6 +23,8 @@ KFEAT_FS=y
 KFEAT_FS_EXT4=y
 KFEAT_FS_TIMES=y
 # KFEAT_HUK_KEY is not set
+KFEAT_NET=y
+KFEAT_VSOCK=y
 # KFEAT_TEE is not set
 # KFEAT_TEE_TA_SIGN is not set
 # LOG_LEVEL_DEBUG is not set

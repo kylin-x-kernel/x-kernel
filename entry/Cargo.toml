@@ -10,7 +10,6 @@ homepage.workspace = true
 [features]
 # all of platforms should enable default features
 kernel = [
-    "kfeat/net",
     "kfeat/rtc",
     "kfeat/sched-rr",
     "kfeat/task-ext",
@@ -31,9 +30,6 @@ qemu = [
     "kfeat/display",
     "kfeat/input",
     "kservices/input",
-    "kfeat/vsock",
-    "ksyscall/vsock",
-    "kservices/vsock",
     "kservices/dev-log",
     "pci",
 ]
@@ -60,9 +56,6 @@ aarch64_crosvm_virt = [
     "kfeat/display",
     "kfeat/input",
     "kservices/input",
-    "kfeat/vsock",
-    "ksyscall/vsock",
-    "kservices/vsock",
     "dep:aarch64-crosvm-virt",
     "pci",
     "smp",
