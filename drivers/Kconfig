@@ -87,4 +87,42 @@ config IPI_IRQ
       Define the interrupt number for Inter-Processor Interrupts (IPI).
 
 endmenu # IRQ Configuration
+
+menu "Device Drivers Features"
+
+choice
+    prompt "System Bus Type"
+    default KFEAT_BUS_PCI
+
+config KFEAT_BUS_PCI
+    bool "PCI Bus Support"
+    help
+      Enable PCI bus support.
+
+config KFEAT_BUS_MMIO
+    bool "MMIO Bus Support"
+    help
+      Enable MMIO bus support.
+
+endchoice
+
+config KFEAT_RTC
+    bool "RTC (Real Time Clock) Support"
+    default y
+    help
+      Enable Real Time Clock driver subsystem.
+
+config KFEAT_DISPLAY
+    bool "Display Driver Support"
+    default y
+    help
+      Enable display driver support (virtio-gpu, fbdevice, etc).
+
+config KFEAT_INPUT
+    bool "Input Driver Support"
+    default y
+    help
+      Enable input driver support (virtio-input, inputdev, etc).
+endmenu   # Device Drivers Features
+
 endmenu # Drivers Basic Configuration

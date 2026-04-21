@@ -68,14 +68,15 @@ input = [
     "kdriver/virtio-input",
     "dep:inputdev",
     "kruntime/input",
+    "kservices/input",
 ]
 
 # Real Time Clock (RTC) Driver.
 rtc = ["khal/rtc", "kruntime/rtc"]
 
 # Device drivers
-bus-mmio = ["kdriver/bus-mmio"]
-bus-pci = ["kdriver/bus-pci"]
+bus_mmio = ["kdriver/bus-mmio"]
+bus_pci = ["kdriver/bus-pci"]
 driver-ramdisk = ["kdriver/ramdisk", "kfs?/use-ramdisk"]
 
 # Backtrace

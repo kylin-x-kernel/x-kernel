@@ -6,10 +6,6 @@ kfeat_prefix := kfeat/
 kfeat := $(strip $(shell echo $(FEATURES) | tr ',' ' '))
 config_kfeat := $(shell ./scripts/make/kfeat_features.sh .config)
 
-ifeq ($(BUS),mmio)
-  kfeat += bus-mmio
-endif
-
 kfeat += $(config_kfeat)
 
 APP_FEATURES += $(subst -,_,$(PLAT))

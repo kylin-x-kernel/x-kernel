@@ -10,7 +10,6 @@ homepage.workspace = true
 [features]
 # all of platforms should enable default features
 kernel = [
-    "kfeat/rtc",
     "kfeat/sched-rr",
     "kfeat/task-ext",
 ]
@@ -20,18 +19,12 @@ unittest = ["dep:unittest"]
 dma-trace = ["kfeat/dma-trace"]
 
 # Stubs
-pci = ["kfeat/bus-pci"]
-mmio = ["kfeat/bus-mmio"]
 
 # qemu default platforms enabled drivers
 qemu = [
     "kernel",
     "kfeat/fp-simd",
-    "kfeat/display",
-    "kfeat/input",
-    "kservices/input",
     "kservices/dev-log",
-    "pci",
 ]
 
 # aarch64-qemu-virt platform
@@ -53,11 +46,7 @@ loongarch64_qemu_virt = ["kernel", "qemu", "dep:loongarch64-qemu-virt"]
 aarch64_crosvm_virt = [
     "kernel",
     "kfeat/fp-simd",
-    "kfeat/display",
-    "kfeat/input",
-    "kservices/input",
     "dep:aarch64-crosvm-virt",
-    "pci",
     "smp",
     # auxilary features
     "kservices/dev-log",
