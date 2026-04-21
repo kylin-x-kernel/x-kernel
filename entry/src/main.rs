@@ -62,6 +62,10 @@ fn main() {
         .filesystem()
         .flush()
         .expect("Failed to flush rootfs");
+    drop(cx);
+
+    info!("Init process finished, powering off...");
+    khal::power::shutdown();
 }
 
 #[cfg(feature = "unittest")]

@@ -14,7 +14,6 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         timestamps()
-        disableConcurrentBuilds()
         parallelsAlwaysFailFast()
     }
 
@@ -183,7 +182,6 @@ pipeline {
 def prefetchCargoDeps() {
     ws("${env.ROOT_WS}/prefetch") {
         def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
         try {
             deleteDir()
             restoreSource()
@@ -195,9 +193,14 @@ rustup target add aarch64-unknown-none-softfloat x86_64-unknown-none || true
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
 rustup +nightly-2026-03-08 target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
 
+declare -A ARCH_TARGET=(
+    [aarch64]=aarch64-unknown-none-softfloat
+    [x86_64]=x86_64-unknown-none
+    [riscv64]=riscv64gc-unknown-none-elf
+)
 for platform in x86_64-qemu-virt aarch64-qemu-virt aarch64-crosvm-virt; do
     arch="${platform%%-*}"
-    target="$([ "$arch" = "aarch64" ] && echo aarch64-unknown-none-softfloat || echo x86_64-unknown-none)"
+    target="${ARCH_TARGET[$arch]}"
     cp "platforms/${platform}/defconfig" .config
     cargo fetch --manifest-path entry/Cargo.toml --target "$target" || true
 done
@@ -216,7 +219,6 @@ echo "==> Dependency prefetch complete"
 def runRustfmt() {
     ws("${env.ROOT_WS}/rustfmt") {
         def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
         try {
             deleteDir()
             restoreSource()
@@ -233,9 +235,7 @@ cargo +nightly-2026-03-08 fmt --all --check
 def runClippyAndBuild(String platform) {
     ws("${env.ROOT_WS}/clippy-build-${platform}") {
         def stageWorkspace = pwd()
-        def arch = archForPlatform(platform)
-        def buildTargetDir = targetDirForArch(arch)
-        fixWorkspaceOwnership(stageWorkspace)
+        def buildTargetDir = "/xkernel-target/build-${platform}"
         try {
             deleteDir()
             restoreSource()
@@ -243,11 +243,7 @@ def runClippyAndBuild(String platform) {
             withEnv(["TARGET_DIR=${buildTargetDir}"]) {
             sh """#!/bin/bash
 set -euo pipefail
-echo "DEBUG: TARGET_DIR=\${TARGET_DIR}"
-echo "DEBUG: Listing ${buildTargetDir}..."
-ls -lh ${buildTargetDir} 2>/dev/null || echo "Target dir not yet created"
 cp platforms/${platform}/defconfig .config
-rustup target add ${targetTripleFor(platform)} || true
 make clippy
 stdbuf -oL -eL make build
 """
@@ -263,7 +259,6 @@ def runClippyAndRuntime(String arch) {
     def runtimeTargetDir = targetDirForArch(arch)
     ws("${env.ROOT_WS}/${arch}") {
         def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
         try {
             deleteDir()
             restoreSource()
@@ -272,21 +267,27 @@ def runClippyAndRuntime(String arch) {
                 sh """#!/bin/bash
 set -euo pipefail
 cp platforms/${platform}/defconfig .config
-rustup target add ${targetTripleFor(platform)} || true
 make clippy
 """
                 runUnitTests(arch)
                 generateCoverageHtml(arch)
+                copyCoverageToWorkspace(arch)
+
+                sh """#!/bin/bash
+set -euo pipefail
+cp platforms/${platform}/defconfig .config
+stdbuf -oL -eL make build
+"""
 
                 dir('test-harness') {
                     git branch: "${env.TEST_HARNESS_BRANCH}",
                         url: "${env.TEST_HARNESS_REPO}"
                     markSafeDirectory()
 
-                    def hostfwdPort = (arch == 'x86_64') ? '5556' : '5557'
-                    def vsockCid = (arch == 'x86_64') ? '101' : '102'
-                    withEnv(["XKERNEL_ROOT=${pwd()}/..", "ARCH=${arch}",
-                             "HOSTFWD_PORT=${hostfwdPort}", "VSOCK_CID=${vsockCid}"]) {
+                    withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
+                             "STARRY_SKIP_BUILD=1",
+                             "ROOTFS_CACHE_DIR=/xkernel-target/rootfs-cache",
+                             "GUEST_CASES_TARGET_DIR=${runtimeTargetDir}/guest-cases-${arch}"]) {
                         sh '''#!/bin/bash
 set -euo pipefail
 stdbuf -oL -eL make ci-test run
@@ -305,11 +306,16 @@ def runUnitTests(String arch) {
 set -euo pipefail
 
 ROOTFS_VERSION=20260302
-IMG_URL="https://gitee.com/openkylin/x-kernel-image/releases/download/\${ROOTFS_VERSION}"
+ROOTFS_CACHE="/xkernel-target/rootfs-cache"
+ROOTFS_CACHED="\${ROOTFS_CACHE}/rootfs-${arch}.img"
+mkdir -p "\${ROOTFS_CACHE}"
 
-curl -f -L "\${IMG_URL}/rootfs-${arch}.img.xz" -o rootfs-${arch}.img.xz
-xz -df rootfs-${arch}.img.xz
-cp rootfs-${arch}.img disk.img
+if [ ! -f "\${ROOTFS_CACHED}" ]; then
+    IMG_URL="https://gitee.com/openkylin/x-kernel-image/releases/download/\${ROOTFS_VERSION}"
+    curl -f -L "\${IMG_URL}/rootfs-${arch}.img.xz" -o "\${ROOTFS_CACHED}.xz"
+    xz -df "\${ROOTFS_CACHED}.xz"
+fi
+cp --reflink=auto "\${ROOTFS_CACHED}" disk.img
 
 TIMEOUT=480
 if [ "${arch}" = "aarch64" ]; then
@@ -320,6 +326,11 @@ set +e
 timeout \${TIMEOUT} stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n run | tee unittest-output.log
 status=\${PIPESTATUS[0]}
 set -e
+
+if [ "\${status}" -eq 124 ]; then
+    echo "Unit test timed out after \${TIMEOUT}s"
+    exit 1
+fi
 
 if grep -q "UNITTEST_STATUS: TESTS_FAILED" unittest-output.log; then
     echo "Unit tests failed"
@@ -346,6 +357,7 @@ fi
 
 if [ "\${status}" -ne 0 ]; then
     echo "Unit test command exited with status \${status}"
+    exit 1
 fi
 
 echo "Unable to determine test result from unit test output"
@@ -369,6 +381,22 @@ if ! command -v genhtml &>/dev/null; then
 fi
 genhtml "${covInfo}" --output-directory "${htmlOut}" --title "x-kernel coverage (${arch})"
 echo "HTML coverage report generated at ${htmlOut}/"
+"""
+}
+
+def copyCoverageToWorkspace(String arch) {
+    def triple = targetTripleFor(arch)
+    def baseDir = targetDirForArch(arch)
+    def srcDir = "${baseDir}/${triple}/release"
+    sh """#!/bin/bash
+set -euo pipefail
+mkdir -p coverage-artifacts
+for f in coverage-html coverage.info coverage.xml coverage.txt; do
+    src="${srcDir}/\${f}"
+    if [ -e "\${src}" ]; then
+        cp -r "\${src}" coverage-artifacts/
+    fi
+done
 """
 }
 
@@ -398,7 +426,6 @@ def restoreReplayGiteeEnv() {
 def prepareSource() {
     ws("${env.ROOT_WS}/source-cache") {
         def sourceWorkspace = pwd()
-        fixWorkspaceOwnership(sourceWorkspace)
         try {
             deleteDir()
             checkoutProject()
@@ -463,23 +490,25 @@ def markSafeDirectory() {
 set -euo pipefail
 
 dir="$(pwd)"
+errfile=$(mktemp /tmp/git-safe-dir.XXXXXX)
+trap 'rm -f "$errfile"' EXIT
+
 for i in $(seq 1 20); do
-    if git config --global --add safe.directory "$dir" 2>/tmp/git-safe-dir.err; then
+    if git config --global --add safe.directory "$dir" 2>"$errfile"; then
         exit 0
     fi
 
-    if grep -q "could not lock config file" /tmp/git-safe-dir.err; then
-        rm -f /tmp/git-safe-dir.err
+    if grep -q "could not lock config file" "$errfile"; then
         sleep 0.2
         continue
     fi
 
-    cat /tmp/git-safe-dir.err >&2 || true
+    cat "$errfile" >&2 || true
     exit 1
 done
 
 echo "WARN: failed to set git safe.directory due to persistent lock contention" >&2
-cat /tmp/git-safe-dir.err >&2 || true
+cat "$errfile" >&2 || true
 exit 1
 '''
 }
@@ -549,6 +578,17 @@ def targetDirForArch(String arch) {
     return "/xkernel-target/runtime-${arch}"
 }
 
+def allocateFreePort() {
+    return sh(script: "python3 -c \"import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()\"",
+              returnStdout: true).trim().toInteger()
+}
+
+def allocateFreeCid() {
+    def build = env.BUILD_NUMBER?.toInteger() ?: 1
+    def stage = env.STAGE_NAME?.hashCode()?.abs() ?: 0
+    return 100 + ((build * 7 + stage) % 2000000)
+}
+
 def giteeTestPass() { giteePrApi('POST', 'test', 'pass', '--data-urlencode \'force=true\'') }
 def giteeTestReset() { giteePrApi('PATCH', 'testers', 'reset', '') }
 
@@ -577,29 +617,31 @@ def fixWorkspaceOwnership(String workspacePath) {
         return
     }
 
-    sh """#!/bin/bash
+    withEnv(["_FIX_WS_PATH=${workspacePath}"]) {
+        sh '''#!/bin/bash
 set -euo pipefail
-workspace_path='${workspacePath}'
-reference_path="\$(dirname "\${workspace_path}")"
+workspace_path="${_FIX_WS_PATH}"
+reference_path="$(dirname "${workspace_path}")"
 
-if [[ ! -e "\${reference_path}" ]]; then
+if [[ ! -e "${reference_path}" ]]; then
     exit 0
 fi
 
-if [[ ! -e "\${workspace_path}" ]]; then
+if [[ ! -e "${workspace_path}" ]]; then
     exit 0
 fi
 
-owner="\$(stat -c '%u:%g' "\${reference_path}")"
-chown -R "\${owner}" "\${workspace_path}" || true
-chmod -R u+rwX "\${workspace_path}" || true
+owner="$(stat -c '%u:%g' "${reference_path}")"
+chown -R "${owner}" "${workspace_path}" || true
+chmod -R u+rwX "${workspace_path}" || true
 
-tmp_path="\${workspace_path}@tmp"
-if [[ -e "\${tmp_path}" ]]; then
-    chown -R "\${owner}" "\${tmp_path}" || true
-    chmod -R u+rwX "\${tmp_path}" || true
+tmp_path="${workspace_path}@tmp"
+if [[ -e "${tmp_path}" ]]; then
+    chown -R "${owner}" "${tmp_path}" || true
+    chmod -R u+rwX "${tmp_path}" || true
 fi
-"""
+'''
+    }
 }
 
 def runtimeTargetSetupFor(String arch) {
@@ -671,13 +713,12 @@ def runTeeStorageTest(String arch) {
     def muslTarget = "${arch}-unknown-linux-musl"
     def muslLinker = "${arch}-linux-musl-gcc"
     def targetUpper = muslTarget.toUpperCase().replaceAll('-', '_')
-    def teeHostfwdPort = (arch == 'x86_64') ? '5558' : '5559'
-    def teeVsockCid = (arch == 'x86_64') ? '104' : '105'
     def teeTargetDir = "/xkernel-target/tee-${arch}"
 
     ws("${env.ROOT_WS}/tee-test-${arch}") {
         def stageWorkspace = pwd()
-        fixWorkspaceOwnership(stageWorkspace)
+        def teeHostfwdPort = allocateFreePort()
+        def teeVsockCid = allocateFreeCid()
         try {
             deleteDir()
             restoreSource()
@@ -716,22 +757,19 @@ env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run -p crate_rootfs --release \\
   --copy "\${LIBUTEE_DIR}/target/${muslTarget}/release/storage_test":/tee/storage_test
 
 echo "==> Building kernel..."
-echo "DEBUG: TARGET_DIR=\${TARGET_DIR}"
-echo "DEBUG: Listing ${teeTargetDir}..."
-ls -lh ${teeTargetDir} 2>/dev/null || echo "Target dir not yet created"
 cp ${defconfigFor(arch)} .config
 make build
 
 echo "==> Running TEE storage test..."
 set +e
-timeout 360 stdbuf -oL -eL make HOSTFWD_PORT=${teeHostfwdPort} VSOCK_CID=${teeVsockCid} justrun 2>&1 | tee tee-test-output.log
+timeout 600 stdbuf -oL -eL make HOSTFWD_PORT=${teeHostfwdPort} VSOCK_CID=${teeVsockCid} justrun 2>&1 | tee tee-test-output.log
 QEMU_STATUS=\${PIPESTATUS[0]}
 set -e
 
 if [ "\${QEMU_STATUS}" -eq 124 ]; then
-    echo "TEE_RESULT: TIMEOUT"
+    echo "TEE_RESULT: TIMEOUT" | tee -a tee-test-output.log
 elif [ "\${QEMU_STATUS}" -ne 0 ]; then
-    echo "TEE_RESULT: QEMU_ERROR(\${QEMU_STATUS})"
+    echo "TEE_RESULT: QEMU_ERROR(\${QEMU_STATUS})" | tee -a tee-test-output.log
 fi
 """
             }
@@ -815,11 +853,7 @@ def collectCoverageSummary() {
 
 def buildCombinedComment(Map ciResults, String coverageSummary) {
     def ciComment = buildCiComment(ciResults, coverageSummary)
-    def allGreen = currentBuild.currentResult == 'SUCCESS'
-    def overallHeader = allGreen
-        ? '## ✅ CI 全部通过'
-        : '## ❌ CI 未全部通过'
-    return "<!-- x-kernel-ci -->\n${overallHeader}\n\n${ciComment}"
+    return "<!-- x-kernel-ci -->\n${ciComment}"
 }
 
 def buildCiComment(Map results, String coverageSummary = '') {
@@ -866,8 +900,7 @@ ${rows}
     if (coverageSummary?.trim()) {
         def baseUrl = "${env.BUILD_URL}artifact"
         def links = ['x86_64', 'aarch64'].collect { arch ->
-            def triple = (arch == 'aarch64') ? 'aarch64-unknown-none-softfloat' : 'x86_64-unknown-none'
-            "[${arch} HTML 报告](${baseUrl}/${arch}/target/${triple}/release/coverage-html/index.html)"
+            "[${arch} HTML 报告](${baseUrl}/${arch}/coverage-artifacts/coverage-html/index.html)"
         }.join(' | ')
         coverageBlock = "\n### 📊 代码覆盖率\n\n${coverageSummary}\n\n${links}\n"
     }
