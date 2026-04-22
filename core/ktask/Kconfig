@@ -1,0 +1,39 @@
+menu "Task Scheduler"
+
+choice
+    prompt "Scheduler algorithm"
+    default KFEAT_SCHED_EEVDF
+
+config KFEAT_SCHED_FIFO
+    bool "FIFO cooperative scheduler"
+    help
+      Use the FIFO cooperative scheduler. Tasks run to completion
+      unless they explicitly yield.
+
+config KFEAT_SCHED_RR
+    bool "Round-robin preemptive scheduler"
+    help
+      Use the Round-robin preemptive scheduler. Each task gets a fixed
+      time slice and is rotated fairly.
+
+config KFEAT_SCHED_CFS
+    bool "CFS (Completely Fair Scheduler)"
+    help
+      Use the Completely Fair Scheduler. Tasks are scheduled based on
+      virtual runtime to ensure proportional CPU share.
+
+config KFEAT_SCHED_EEVDF
+    bool "EEVDF (Earliest Eligible Virtual Deadline First)"
+    help
+      Use the EEVDF scheduler. Tasks are scheduled by virtual deadline
+      with eligibility checks, providing latency-sensitive fairness.
+
+endchoice
+
+config KFEAT_TASK_EXT
+    bool "Enable task extended data"
+    default y
+    help
+      Allow attaching user-defined extension data to each task.
+
+endmenu

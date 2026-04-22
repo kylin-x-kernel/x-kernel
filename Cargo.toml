@@ -57,6 +57,7 @@ kruntime = { path = "core/kruntime" }
 kspin = { path = "core/kspin" }
 ksync = { path = "core/ksync" }
 ktask = { path = "core/ktask" }
+ksched = { path = "core/ksched" }
 ktypes = { path = "core/ktypes" }
 osvm = { path = "process/osvm" }
 

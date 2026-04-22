@@ -1,64 +1,120 @@
+#!/usr/bin/env python3
+"""
+Scan all .rs files in the workspace for the expected license header.
+Optionally add missing headers with --fix.
+
+Usage:
+    # Check only (default) — report missing headers, exit 1 if any found
+    python3 scripts/check_header.py
+
+    # Actually add missing headers
+    python3 scripts/check_header.py --fix
+"""
+
+import argparse
 import os
 import sys
+
 
 EXPECTED_HEADER = """// SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details."""
 
-def check_rs_file_headers(root_dir="."):
+
+def find_project_root():
+    """Find the workspace root by looking for the root Cargo.toml with [workspace]."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    parent = script_dir
+    while True:
+        cargo_toml = os.path.join(parent, "Cargo.toml")
+        if os.path.exists(cargo_toml):
+            with open(cargo_toml, 'r') as f:
+                if "[workspace]" in f.read():
+                    return parent
+        next_parent = os.path.dirname(parent)
+        if next_parent == parent:
+            break
+        parent = next_parent
+    return os.getcwd()
+
+
+def check_rs_file_headers(root_dir):
     """
-    检查指定目录下的所有 .rs 文件是否包含预期的文件头。
-    返回一个缺失文件头的文件路径列表。
+    Check all .rs files under root_dir for the expected license header.
+    Returns a list of file paths (relative to root_dir) missing the header.
     """
-    missing_headers_list = []
-    
+    missing = []
+
     for root, dirs, files in os.walk(root_dir):
-        # 忽略 target 目录以加快搜索速度
         if 'target' in dirs:
             dirs.remove('target')
-            
-        for file in files:
-            if file.endswith(".rs"):
-                file_path = os.path.join(root, file)
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        # 读取文件的前几行（假设头信息在前 10 行内），以避免读取整个大文件
-                        lines = [f.readline() for _ in range(10)]
-                        content_head = "".join(lines)
-                        
-                        if EXPECTED_HEADER not in content_head:
-                            missing_headers_list.append(file_path)
-                except Exception as e:
-                    print(f"无法读取文件 {file_path}: {e}")
-                    
-    return missing_headers_list
+        if '.git' in dirs:
+            dirs.remove('.git')
 
-def add_missing_headers(missing_list):
-    """
-    为缺失文件头的文件添加版权头信息。
-    """
-    if not missing_list:
-        print("🎉 恭喜！所有的 .rs 文件都包含了指定的版权头信息。")
-        return
+        for fname in files:
+            if not fname.endswith(".rs"):
+                continue
 
-    print(f"⚠️ 发现 {len(missing_list)} 个 .rs 文件缺失指定的版权头信息，正在添加...")
-    print("-" * 50)
-    for path in missing_list:
+            file_path = os.path.join(root, fname)
+            rel_path = os.path.relpath(file_path, root_dir)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    head = "".join(f.readline() for _ in range(10))
+                    if EXPECTED_HEADER not in head:
+                        missing.append(rel_path)
+            except Exception as e:
+                print(f"  {rel_path} — failed to read: {e}")
+
+    return missing
+
+
+def add_missing_headers(root_dir, missing_list):
+    """
+    Add the license header to files that are missing it.
+    """
+    for rel_path in missing_list:
+        file_path = os.path.join(root_dir, rel_path)
         try:
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            
-            with open(path, 'w', encoding='utf-8') as f:
+
+            with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(EXPECTED_HEADER + "\n\n" + content)
-            print(f"已添加: {path}")
+            print(f"    >> Added: {rel_path}")
         except Exception as e:
-            print(f"❌ 无法处理文件 {path}: {e}")
-    print("-" * 50)
-    print("✅ 处理完成！")
+            print(f"    >> Failed: {rel_path}: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Find and optionally add missing license headers in .rs files",
+    )
+    parser.add_argument("--fix", action="store_true",
+                        help="Add missing headers (default: check only)")
+    args = parser.parse_args()
+
+    root = find_project_root()
+    print(f"Project root: {root}\n")
+
+    missing = check_rs_file_headers(root)
+
+    print(f"{'=' * 60}")
+    print(f"Total files missing header: {len(missing)}")
+    if missing:
+        for path in missing:
+            print(f"  {path}")
+
+    if missing:
+        if args.fix:
+            print()
+            add_missing_headers(root, missing)
+            print(f"\nAdded headers to {len(missing)} file(s).")
+        else:
+            print(f"\nRun with --fix to add missing headers.")
+            sys.exit(1)
+    else:
+        print("All .rs files have the expected license header.")
+
 
 if __name__ == "__main__":
-    # 指定项目根目录运行，默认为当前目录 '.'
-    missing_files = check_rs_file_headers(".")
-    if missing_files:
-        sys.exit(1)
-    add_missing_headers(missing_files)
+    main()

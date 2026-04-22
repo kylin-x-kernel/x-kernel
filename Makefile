@@ -227,8 +227,14 @@ debug: build $(QEMU_RUN_DEPS)
 check_deps:
 	python3 scripts/check_deps.py
 
+deps:
+	python3 scripts/check_deps.py --fix
+
 check_header:
 	python3 scripts/check_header.py
+
+header:
+	python3 scripts/check_header.py --fix
 
 clippy: check_deps check_header $(CONFIG_RS)
 ifeq ($(origin ARCH), command line)

@@ -15,8 +15,8 @@ use khal::context::TrapFrame;
 use kspin::NoPreemptIrqSave;
 
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue};
-#[doc(cfg(feature = "task-ext"))]
-#[cfg(feature = "task-ext")]
+#[doc(cfg(feature = "task_ext"))]
+#[cfg(feature = "task_ext")]
 pub use crate::task::{KTaskExt, TaskExt};
 pub use crate::{
     task::{CurrentTask, TaskId, TaskInner, TaskState},
@@ -35,18 +35,25 @@ pub type KCpuMask = cpumask::CpuMask<{ kbuild_config::CPU_NUM }>;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "sched-rr")] {
+cfg_select! {
+    feature = "sched_rr" => {
         const MAX_TIME_SLICE: usize = 5;
-        pub(crate) type KTask = axsched::RRTask<TaskInner, MAX_TIME_SLICE>;
-        pub(crate) type Scheduler = axsched::RRScheduler<TaskInner, MAX_TIME_SLICE>;
-    } else if #[cfg(feature = "sched-cfs")] {
+        pub(crate) type KTask = ksched::RRTask<TaskInner, MAX_TIME_SLICE>;
+        pub(crate) type Scheduler = ksched::RRScheduler<TaskInner, MAX_TIME_SLICE>;
+    }
+    feature = "sched_cfs" => {
         pub(crate) type KTask = axsched::CFSTask<TaskInner>;
         pub(crate) type Scheduler = axsched::CFScheduler<TaskInner>;
-    } else {
+    }
+    feature = "sched_eevdf" => {
+        const MAX_TIME_SLICE: usize = 5;
+        pub(crate) type KTask = ksched::EevdfEntity<TaskInner, MAX_TIME_SLICE>;
+        pub(crate) type Scheduler = ksched::EevdfScheduler<TaskInner, MAX_TIME_SLICE>;
+    }
+    _ => {
         // If no scheduler features are set, use FIFO as the default.
-        pub(crate) type KTask = axsched::FifoTask<TaskInner>;
-        pub(crate) type Scheduler = axsched::FifoScheduler<TaskInner>;
+        pub(crate) type KTask = ksched::FifoTask<TaskInner>;
+        pub(crate) type Scheduler = ksched::FifoScheduler<TaskInner>;
     }
 }
 

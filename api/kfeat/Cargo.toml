@@ -32,10 +32,12 @@ alloc_slab = ["alloc", "alloc-engine/slab", "kalloc/slab"]
 alloc_buddy = ["alloc", "alloc-engine/buddy", "kalloc/buddy"]
 dma = []
 
-task-ext = ["ktask/task-ext"]
-sched-fifo = ["ktask/sched-fifo"]
-sched-rr = ["ktask/sched-rr"]
-sched-cfs = ["ktask/sched-cfs"]
+# Task scheduler (driven by core/ktask/Kconfig)
+task_ext = ["ktask/task_ext"]
+sched_fifo = ["ktask/sched_fifo"]
+sched_rr = ["ktask/sched_rr"]
+sched_cfs = ["ktask/sched_cfs"]
+sched_eevdf = ["ktask/sched_eevdf"]
 
 # File system
 fs = [

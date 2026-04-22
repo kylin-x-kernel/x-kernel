@@ -19,11 +19,6 @@
 //!     - `alloc_buddy`: Use the buddy system allocator.
 //!     - `paging`: Enable page table manipulation.
 //!     - `tls`: Enable thread-local storage.
-//! - Task management
-//!     - `multitask`: Enable multi-threading support.
-//!     - `sched-fifo`: Use the FIFO cooperative scheduler.
-//!     - `sched-rr`: Use the Round-robin preemptive scheduler.
-//!     - `sched-cfs`: Use the Completely Fair Scheduler (CFS) preemptive scheduler.
 //! - Upperlayer stacks (fs, net, display)
 //!     - `fs`: Enable file system support.
 //!     - `myfs`: Allow users to define their custom filesystems to override the default.

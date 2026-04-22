@@ -13,9 +13,9 @@ use core::{
     task::{Context, Poll},
 };
 
-use axsched::BaseScheduler;
 use futures_util::task::AtomicWaker;
 use khal::percpu::this_cpu_id;
+use ksched::BaseScheduler;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
@@ -541,7 +541,7 @@ impl RunQueue {
         #[cfg(feature = "smp")]
         next_task.set_on_cpu(true);
 
-        #[cfg(feature = "task-ext")]
+        #[cfg(feature = "task_ext")]
         {
             use crate::TaskExt;
 

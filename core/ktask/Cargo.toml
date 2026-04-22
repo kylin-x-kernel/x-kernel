@@ -13,14 +13,15 @@ description = "x-kernel task management module"
 default = []
 
 watchdog = ["dep:backtrace"]
-task-ext = ["dep:extern-trait"]
+task_ext = ["dep:extern-trait"]
 tls = ["khal/tls"]
 preempt = ["percpu/preempt", "kspin/preempt"]
 smp = ["kspin/smp"]
 
-sched-fifo = []
-sched-rr = ["preempt"]
-sched-cfs = ["preempt"]
+sched_fifo = []
+sched_rr = ["preempt"]
+sched_cfs = ["preempt"]
+sched_eevdf = ["preempt"]
 
 test = ["percpu/sp-naive"]
 
@@ -29,7 +30,7 @@ kerrno.workspace = true
 khal.workspace = true
 backtrace = { workspace = true, optional = true }
 kpoll = { workspace = true }
-axsched = { version = "0.3" }
+ksched = { workspace = true }
 cfg-if.workspace = true
 cpumask = { version = "0.1" }
 crate_interface = { workspace = true }

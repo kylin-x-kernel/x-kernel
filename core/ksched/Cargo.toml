@@ -1,0 +1,15 @@
+[package]
+name = "ksched"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "x-kernel scheduler algorithms in a unified interface"
+
+[dependencies]
+linked_list_r4l = "0.3"
+log = "0.4"
+unittest = { workspace = true }

@@ -50,7 +50,7 @@ pub enum TaskState {
 /// User-defined task extended data.
 /// # Safety
 /// See [`extern_trait`].
-#[cfg(feature = "task-ext")]
+#[cfg(feature = "task_ext")]
 #[extern_trait::extern_trait(
     /// The impl proxy type for [`TaskExt`].
     pub KTaskExt
@@ -121,7 +121,7 @@ pub struct TaskInner {
     kstack: Option<TaskStack>,
     ctx: UnsafeCell<TaskContext>,
 
-    #[cfg(feature = "task-ext")]
+    #[cfg(feature = "task_ext")]
     task_ext: Option<KTaskExt>,
 
     #[cfg(feature = "tls")]
@@ -219,13 +219,13 @@ impl TaskInner {
     }
 
     /// Returns a reference to the task extended data.
-    #[cfg(feature = "task-ext")]
+    #[cfg(feature = "task_ext")]
     pub fn task_ext(&self) -> Option<&KTaskExt> {
         self.task_ext.as_ref()
     }
 
     /// Returns a mutable reference to the task extended data.
-    #[cfg(feature = "task-ext")]
+    #[cfg(feature = "task_ext")]
     pub fn task_ext_mut(&mut self) -> &mut Option<KTaskExt> {
         &mut self.task_ext
     }
@@ -418,7 +418,7 @@ impl TaskInner {
             wait_for_exit: AtomicWaker::new(),
             kstack: None,
             ctx: UnsafeCell::new(TaskContext::new()),
-            #[cfg(feature = "task-ext")]
+            #[cfg(feature = "task_ext")]
             task_ext: None,
             #[cfg(feature = "tls")]
             tls: TlsArea::alloc(),
