@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::{
@@ -488,7 +488,13 @@ impl MenuConfigApp {
                 }),
         );
 
-        frame.render_widget(list, area);
+        // Use a stateful list so the viewport auto-scrolls to keep the
+        // selected item visible when the menu is taller than the area.
+        let mut list_state = ListState::default();
+        list_state = list_state.with_offset(self.navigation.scroll_offset);
+        list_state.select(Some(self.navigation.selected_index));
+        frame.render_stateful_widget(list, area, &mut list_state);
+        self.navigation.scroll_offset = list_state.offset();
     }
 
     fn create_list_item(&self, item: &MenuItem, is_selected: bool) -> ListItem<'_> {
@@ -901,6 +907,10 @@ impl MenuConfigApp {
                             self.navigation.current_path = path;
                             self.navigation.selected_index = index;
                             self.navigation.scroll_offset = 0;
+                            // The position stack only makes sense for the
+                            // enter/back path; jumping to an arbitrary item
+                            // invalidates it.
+                            self.navigation.position_stack.clear();
                             self.status_message = Some(format!(" Jumped to {}", item_label));
                             navigated = true;
                         }
@@ -1131,6 +1141,12 @@ impl MenuConfigApp {
         );
 
         if item.has_children {
+            // Remember where we were in the parent menu so `go_back` can
+            // restore the selection instead of resetting to the top.
+            self.navigation.position_stack.push((
+                self.navigation.selected_index,
+                self.navigation.scroll_offset,
+            ));
             self.navigation.current_path.push(item.id.clone());
 
             debug_log!("    ✅ Entering submenu");
@@ -1156,8 +1172,10 @@ impl MenuConfigApp {
                 "    ✅ Popped, current_path after: {:?}",
                 self.navigation.current_path
             );
-            self.navigation.selected_index = 0;
-            self.navigation.scroll_offset = 0;
+            // Restore the selection we had before entering this submenu.
+            let (selected, offset) = self.navigation.position_stack.pop().unwrap_or((0, 0));
+            self.navigation.selected_index = selected;
+            self.navigation.scroll_offset = offset;
         } else {
             debug_log!("    ❌ Already at root, cannot go back");
         }

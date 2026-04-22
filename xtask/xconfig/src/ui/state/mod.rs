@@ -217,6 +217,9 @@ pub struct NavigationState {
     pub current_path: Vec<String>,
     pub selected_index: usize,
     pub scroll_offset: usize,
+    /// Saved (selected_index, scroll_offset) for each parent menu in
+    /// `current_path`, so going back restores the previous cursor position.
+    pub position_stack: Vec<(usize, usize)>,
 }
 
 impl NavigationState {
@@ -225,6 +228,7 @@ impl NavigationState {
             current_path: Vec::new(),
             selected_index: 0,
             scroll_offset: 0,
+            position_stack: Vec::new(),
         }
     }
 }
