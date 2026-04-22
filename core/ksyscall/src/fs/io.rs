@@ -321,26 +321,26 @@ pub fn sys_fallocate(
 /// Synchronizes a file's in-core state with storage.
 pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
-    let any_file = get_file_like(fd)?;
+    // Synchronize file to disk - syncs both data and metadata
+    let any_file = crate::file::get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(false)?;
     } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
         d.inner().sync(false)?;
     }
-    // For other non-file fds (socket/pipe/etc.), fsync is a no-op.
     Ok(0)
 }
 
 /// Synchronizes a file's data (not metadata) with storage.
 pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
-    let any_file = get_file_like(fd)?;
+    // Synchronize file data to disk - only syncs data, not metadata
+    let any_file = crate::file::get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(true)?;
     } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
         d.inner().sync(true)?;
     }
-    // For other non-file fds (socket/pipe/etc.), fdatasync is a no-op.
     Ok(0)
 }
 
