@@ -506,7 +506,16 @@ pub mod tests_irq {
 
     #[def_test]
     fn test_irq_handler_returns_true() {
-        assert!(irq_handler(0));
+        #[cfg(target_arch = "riscv64")]
+        const IRQ_NUM: usize = (1usize << (usize::BITS - 1)) + 1;
+
+        #[cfg(target_arch = "x86_64")]
+        const IRQ_NUM: usize = 0x10;
+
+        #[cfg(target_arch = "aarch64")]
+        const IRQ_NUM: usize = 0;
+
+        assert!(irq_handler(IRQ_NUM));
     }
 
     #[def_test]
