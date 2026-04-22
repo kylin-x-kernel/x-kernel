@@ -224,7 +224,7 @@ pub fn get_file_inode<B: BlockDevice>(
 
         let inode_num_u32 = inode_num as u32;
 
-        let (block_num, offset, _group_idx) = fs.inodetable_cahce.calc_inode_location(
+        let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
             inode_num_u32,
             fs.superblock.s_inodes_per_group,
             inode_table_start,
@@ -232,7 +232,7 @@ pub fn get_file_inode<B: BlockDevice>(
         );
 
         let cached_inode = fs
-            .inodetable_cahce
+            .inodetable_cache
             .get_or_load(block_dev, inode_num, block_num, offset)?;
         current_inode = cached_inode.inode;
         current_ino_num = inode_num_u32;

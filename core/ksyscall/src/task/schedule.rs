@@ -182,3 +182,34 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
         _ => Err(KError::InvalidInput),
     }
 }
+
+pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
+    debug!("sys_setpriority <= which: {which}, who: {who}, prio: {prio}");
+
+    if !(-20..=19).contains(&prio) {
+        return Err(KError::InvalidInput);
+    }
+
+    match which {
+        PRIO_PROCESS => {
+            if who != 0 {
+                let _proc = get_process_data(who)?;
+            }
+            Ok(0)
+        }
+        PRIO_PGRP => {
+            if who != 0 {
+                let _pg = get_process_group(who)?;
+            }
+            Ok(0)
+        }
+        PRIO_USER => {
+            if who == 0 {
+                Ok(0)
+            } else {
+                Err(KError::NoSuchProcess)
+            }
+        }
+        _ => Err(KError::InvalidInput),
+    }
+}

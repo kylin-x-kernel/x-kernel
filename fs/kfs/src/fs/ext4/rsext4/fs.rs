@@ -39,6 +39,22 @@ pub struct Ext4Filesystem {
 }
 
 impl Ext4Filesystem {
+    /// Write dirty ext4 state back to data blocks and metadata structures, but
+    /// do not force journal commit or device cache flush yet.
+    ///
+    /// Keeping data-block writeback ahead of metadata commit preserves the
+    /// ordered-mode durability requirement.
+    fn writeback_locked(
+        fs: &mut rsext4::Ext4FileSystem,
+        dev: &mut Jbd2Dev<Ext4Disk>,
+    ) -> VfsResult<()> {
+        fs.datablock_cache.flush_all(dev).map_err(into_vfs_err)?;
+        fs.bitmap_cache.flush_all(dev).map_err(into_vfs_err)?;
+        fs.inodetable_cache.flush_all(dev).map_err(into_vfs_err)?;
+        fs.sync_superblock(dev).map_err(into_vfs_err)?;
+        fs.sync_group_descriptors(dev).map_err(into_vfs_err)
+    }
+
     /// Create a new ext4 filesystem instance backed by a block device.
     pub fn new(dev: KBlockDevice) -> VfsResult<Filesystem> {
         let mut dev = Jbd2Dev::initial_jbd2dev(0, Ext4Disk(dev), true);
@@ -67,15 +83,18 @@ impl Ext4Filesystem {
         self.inner.lock()
     }
 
+    pub(crate) fn writeback_to_disk(&self) -> VfsResult<()> {
+        let mut state = self.inner.lock();
+        let (fs, dev) = state.split();
+        Self::writeback_locked(fs, dev)
+    }
+
     pub(crate) fn sync_to_disk(&self) -> VfsResult<()> {
         let mut state = self.inner.lock();
         let (fs, dev) = state.split();
-        fs.bitmap_cache.flush_all(dev).map_err(into_vfs_err)?;
-        fs.inodetable_cahce.flush_all(dev).map_err(into_vfs_err)?;
-        fs.datablock_cache.flush_all(dev).map_err(into_vfs_err)?;
-        fs.sync_superblock(dev).map_err(into_vfs_err)?;
-        fs.sync_group_descriptors(dev).map_err(into_vfs_err)?;
-        // Ensure pending metadata journal transaction queue is committed on sync/fsync.
+        Self::writeback_locked(fs, dev)?;
+        // Explicit sync must force the pending metadata journal transaction and
+        // then flush the device so the prior writeback becomes durable.
         if dev.is_use_journal() {
             dev.umount_commit();
         }

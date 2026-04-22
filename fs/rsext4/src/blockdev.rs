@@ -172,8 +172,32 @@ pub struct Jbd2Dev<B: BlockDevice> {
 
 /// jbd2代理blockdev
 /// 只记录metadata
-/// 采用Jouranl超级快注入的思想，必须需要使用mount来给块设备注入超级块，之后才能使用日志。
+/// 采用Journal超级块注入的思想，必须需要使用mount来给块设备注入超级块，之后才能使用日志。
 impl<B: BlockDevice> Jbd2Dev<B> {
+    fn enqueue_journal_update(
+        systeam: &mut JBD2DEVSYSTEM,
+        raw_dev: &mut B,
+        update: Jbd2Update,
+    ) -> BlockDevResult<()> {
+        if let Some(existing) = systeam
+            .commit_queue
+            .iter_mut()
+            .find(|queued| queued.0 == update.0)
+        {
+            *existing = update;
+            return Ok(());
+        }
+
+        if systeam.commit_queue.len() >= JBD2_BUFFER_MAX {
+            systeam
+                .commit_transaction(raw_dev)
+                .map_err(|_| BlockDevError::IoError)?;
+        }
+
+        systeam.commit_queue.push(update);
+        Ok(())
+    }
+
     /// 你拿到我之后应该先把超级块给我传进来吧
     pub fn initial_jbd2dev(_mode: u8, block_dev: B, use_journal: bool) -> Self {
         let block_dev = BlockDev::new(block_dev);
@@ -204,7 +228,7 @@ impl<B: BlockDevice> Jbd2Dev<B> {
                 .expect("jbd2dev are not initial,please initial the jbd2dev first!");
             jbd_sys.replay(&mut *dev);
         } else {
-            warn!("Jouranl function not turn ,please turn on this function and retry!");
+            warn!("Journal function not turn ,please turn on this function and retry!");
         }
     }
 
@@ -282,26 +306,8 @@ impl<B: BlockDevice> Jbd2Dev<B> {
         // 使用原始底层块设备提交事务
         let raw_dev = self.inner.device_mut();
 
-        // 先写入缓存
-        if systeam.commit_queue.len() > JBD2_BUFFER_MAX {
-            // 缓存已满 直接提交，然后再塞入缓存
-            systeam
-                .commit_transaction(raw_dev)
-                .map_err(|_| BlockDevError::IoError)?;
-            // 赛入缓存
-            systeam.commit_queue.push(updates);
-            trace!("[JBD2 BUFFER] BUFFER IS FULL ,FLUSHED!")
-        } else {
-            // 赛入缓存
-            systeam.commit_queue.push(updates);
-        }
-
-        if self._mode == 0 {
-            // ordered模式
-            // 再写入主盘
-            self.inner.write_block(block_id)?;
-        }
-
+        Self::enqueue_journal_update(systeam, raw_dev, updates)?;
+        trace!("[JBD2 BUFFER] queued metadata block {block_id}");
         Ok(())
     }
 
@@ -357,19 +363,7 @@ impl<B: BlockDevice> Jbd2Dev<B> {
             boxbuf[..].copy_from_slice(&buf[off..off + BLOCK_SIZE]);
             let updates = Jbd2Update((block_id + i) as u64, boxbuf);
 
-            // 先写入缓存
-            if systeam.commit_queue.len() > JBD2_BUFFER_MAX {
-                // 缓存已满 直接提交，然后再塞入缓存
-                systeam
-                    .commit_transaction(raw_dev)
-                    .map_err(|_| BlockDevError::IoError)?;
-                // 赛入缓存
-                systeam.commit_queue.push(updates);
-                trace!("[JBD2 BUFFER] BUFFER IS FULL ,FLUSHED!")
-            } else {
-                // 赛入缓存
-                systeam.commit_queue.push(updates);
-            }
+            Self::enqueue_journal_update(systeam, raw_dev, updates)?;
         }
 
         Ok(())

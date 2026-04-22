@@ -117,7 +117,7 @@ impl Inode {
             rsext4::file::collapse_range_with_ino(dev, fs, self.ino, offset, len)
                 .map_err(into_vfs_err)?;
         }
-        self.fs.sync_to_disk()
+        Ok(())
     }
 
     pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
@@ -127,7 +127,7 @@ impl Inode {
             rsext4::file::insert_range_with_ino(dev, fs, self.ino, offset, len)
                 .map_err(into_vfs_err)?;
         }
-        self.fs.sync_to_disk()
+        Ok(())
     }
 }
 
@@ -184,7 +184,7 @@ impl NodeOps for Inode {
             })
             .map_err(into_vfs_err)?;
         }
-        self.fs.sync_to_disk()
+        Ok(())
     }
 
     fn len(&self) -> VfsResult<u64> {
@@ -302,7 +302,6 @@ impl FileNodeOps for Inode {
             rsext4::file::write_file_with_ino(dev, fs, self.ino, offset, buf)
                 .map_err(into_vfs_err)?;
         }
-        self.fs.sync_to_disk()?;
         Ok(buf.len())
     }
 
@@ -316,7 +315,6 @@ impl FileNodeOps for Inode {
                 .map_err(into_vfs_err)?;
             length
         };
-        self.fs.sync_to_disk()?;
         Ok((buf.len(), length + buf.len() as u64))
     }
 
@@ -326,7 +324,7 @@ impl FileNodeOps for Inode {
             let (fs, dev) = state.split();
             rsext4::file::truncate_with_ino(dev, fs, self.ino, len).map_err(into_vfs_err)?;
         }
-        self.fs.sync_to_disk()
+        Ok(())
     }
 
     fn set_symlink(&self, target: &str) -> VfsResult<()> {
@@ -408,7 +406,7 @@ impl FileNodeOps for Inode {
             .map_err(into_vfs_err)?;
         }
 
-        self.fs.sync_to_disk()
+        Ok(())
     }
 }
 
@@ -517,8 +515,6 @@ impl DirNodeOps for Inode {
             ino
         };
 
-        self.fs.sync_to_disk()?;
-
         let reference = Reference::new(
             self.this.as_ref().and_then(WeakDirEntry::upgrade),
             name.to_owned(),
@@ -561,7 +557,6 @@ impl DirNodeOps for Inode {
             rsext4::file::link(fs, dev, &link_path, &target_path);
             Self::update_ctime_with(fs, dev, node.inode() as u32)?;
         }
-        self.fs.sync_to_disk()?;
         self.lookup_locked(name)
     }
 
@@ -579,7 +574,7 @@ impl DirNodeOps for Inode {
             }
             rsext4::file::unlink(fs, dev, &path);
         }
-        self.fs.sync_to_disk()
+        Ok(())
     }
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
@@ -591,7 +586,7 @@ impl DirNodeOps for Inode {
             let (fs, dev) = state.split();
             rsext4::file::rename(dev, fs, &src_path, &dst_path).map_err(into_vfs_err)?;
         }
-        self.fs.sync_to_disk()
+        Ok(())
     }
 }
 

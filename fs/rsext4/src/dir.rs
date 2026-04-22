@@ -6,7 +6,7 @@
 //!
 //! 提供对 ext4 文件系统中目录的创建、删除、遍历等操作功能。
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use log::{debug, error};
 
@@ -26,6 +26,16 @@ pub enum FileError {
     DirNotFound,
     /// 文件未找到
     FileNotFound,
+}
+
+pub(crate) fn remember_dir_block(fs: &mut Ext4FileSystem, block_num: u64) {
+    fs.datablock_cache.remember_metadata_block(block_num);
+}
+
+pub(crate) fn remember_dir_blocks(fs: &mut Ext4FileSystem, blocks: &BTreeMap<u32, u64>) {
+    for &phys in blocks.values() {
+        remember_dir_block(fs, phys);
+    }
 }
 
 /// 合法化路径：去掉重复的 '/'
@@ -109,6 +119,7 @@ pub fn get_inode_with_num<B: BlockDevice>(
                 Some(b) => b,
                 None => continue,
             };
+            remember_dir_block(fs, phys as u64);
 
             let cached_block = fs.datablock_cache.get_or_load(device, phys as u64)?;
             let block_data = &cached_block.data[..block_bytes];
@@ -131,7 +142,7 @@ pub fn get_inode_with_num<B: BlockDevice>(
             .ok_or(BlockDevError::Corrupted)?
             .inode_table();
 
-        let (block_num, offset, _group_idx) = fs.inodetable_cahce.calc_inode_location(
+        let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
             inode_num as u32,
             fs.superblock.s_inodes_per_group,
             inode_table_start,
@@ -139,7 +150,7 @@ pub fn get_inode_with_num<B: BlockDevice>(
         );
 
         let cached_inode = fs
-            .inodetable_cahce
+            .inodetable_cache
             .get_or_load(device, inode_num, block_num, offset)?;
         current_inode = cached_inode.inode;
         current_ino = inode_num as u32;
@@ -180,6 +191,7 @@ pub fn insert_dir_entry<B: BlockDevice>(
     let mut inserted = false;
 
     let blocks = resolve_inode_block_allextend(fs, device, parent_inode)?;
+    remember_dir_blocks(fs, &blocks);
 
     for lbn in 0..total_blocks {
         if inserted {
@@ -272,6 +284,7 @@ pub fn insert_dir_entry<B: BlockDevice>(
 
     // 所有现有逻辑块都无法容纳新目录项：为目录分配一个新数据块，并扩展 inode 映射
     let new_block = fs.alloc_block(device)?;
+    remember_dir_block(fs, new_block);
 
     // 更新 parent_inode 的块映射（extent 或直接块）和大小统计
     let block_bytes = BLOCK_SIZE;
@@ -311,14 +324,14 @@ pub fn insert_dir_entry<B: BlockDevice>(
         Some(desc) => desc.inode_table(),
         None => return Err(BlockDevError::Corrupted),
     };
-    let (p_block_num, p_offset, _pg) = fs.inodetable_cahce.calc_inode_location(
+    let (p_block_num, p_offset, _pg) = fs.inodetable_cache.calc_inode_location(
         parent_ino_num,
         fs.superblock.s_inodes_per_group,
         inode_table_start,
         BLOCK_SIZE,
     );
 
-    fs.inodetable_cahce.modify(
+    fs.inodetable_cache.modify(
         device,
         parent_ino_num as u64,
         p_block_num,
@@ -493,6 +506,7 @@ pub fn mkdir_with_ino<B: BlockDevice>(
 
     // 初始化新目录的数据块：写 '.' 和 '..'
     {
+        remember_dir_block(fs, data_block);
         let cached = fs.datablock_cache.create_new(data_block);
         let data = &mut cached.data;
 
@@ -569,14 +583,14 @@ pub fn mkdir_with_ino<B: BlockDevice>(
                 return None;
             }
         };
-        let (p_block_num, p_offset, _pg) = fs.inodetable_cahce.calc_inode_location(
+        let (p_block_num, p_offset, _pg) = fs.inodetable_cache.calc_inode_location(
             parent_ino_num,
             fs.superblock.s_inodes_per_group,
             p_inode_table_start,
             BLOCK_SIZE,
         );
 
-        let _ = fs.inodetable_cahce.modify(
+        let _ = fs.inodetable_cache.modify(
             device,
             parent_ino_num as u64,
             p_block_num,
@@ -636,6 +650,7 @@ pub fn create_root_directory_entry<B: BlockDevice>(
 
     //  写入目录项 . 和 ..
     {
+        remember_dir_block(fs, data_block);
         let cached = fs.datablock_cache.create_new(data_block);
         let data = &mut cached.data;
 
@@ -727,6 +742,7 @@ pub fn create_lost_found_directory<B: BlockDevice>(
 
     //  初始化 lost+found 目录块（".", ".."）
     {
+        remember_dir_block(fs, data_block);
         let cached = fs.datablock_cache.create_new(data_block);
         let data = &mut cached.data;
 
@@ -792,6 +808,7 @@ pub fn create_lost_found_directory<B: BlockDevice>(
     let mut root_inode = fs.get_root(block_dev)?;
     let root_block = resolve_inode_block(block_dev, &mut root_inode, 0)?
         .expect("lost+found logical_block can't map to physical blcok!");
+    remember_dir_block(fs, root_block as u64);
 
     if root_block == 0 {
         return Err(BlockDevError::Corrupted);
@@ -850,14 +867,14 @@ pub fn create_lost_found_directory<B: BlockDevice>(
         Some(desc) => desc.inode_table(),
         None => return Err(BlockDevError::Corrupted),
     };
-    let (block_num, offset, _group_idx) = fs.inodetable_cahce.calc_inode_location(
+    let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
         fs.root_inode,
         fs.superblock.s_inodes_per_group,
         inode_table_start,
         BLOCK_SIZE,
     );
 
-    fs.inodetable_cahce.modify(
+    fs.inodetable_cache.modify(
         block_dev,
         fs.root_inode as u64,
         block_num,

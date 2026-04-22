@@ -50,7 +50,7 @@ pub const DEFAULT_INODE_SIZE: u16 = 256;
 // ============================================================================
 /// Inodecahe数量
 pub const INODE_CACHE_MAX: usize = 128;
-/// Datablock cahce数量
+/// Datablock cache数量
 pub const DATABLOCK_CACHE_MAX: usize = 128;
 /// BITMAP cache数量
 pub const BITMAP_CACHE_MAX: usize = 128;

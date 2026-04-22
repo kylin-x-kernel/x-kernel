@@ -16,21 +16,25 @@ use crate::{
 };
 
 impl JBD2DEVSYSTEM {
+    fn write_journal_superblock<B: BlockDevice>(&self, block_dev: &mut B) {
+        let sb_block = self.start_block;
+        let mut sb_data = [0u8; BLOCK_SIZE];
+        block_dev
+            .read(&mut sb_data, sb_block, 1)
+            .expect("Read journal superblock failed");
+        self.jbd2_super_block.to_disk_bytes(&mut sb_data[0..1024]);
+        block_dev
+            .write(&sb_data, sb_block, 1)
+            .expect("Write journal superblock failed");
+    }
+
     /// 计算下一个日志块的位置(处理回绕),返回当前的（可以直接用，直接写，已经处理过偏移）!
     pub fn set_next_log_block<B: BlockDevice>(&mut self, block_dev: &mut B) -> u32 {
         // 处理第一次使用journal提交
         if self.jbd2_super_block.s_start == 0 {
             // 更新内存的s_start
             self.jbd2_super_block.s_start = self.jbd2_super_block.s_first;
-            // 写入超级块
-            let mut sb_data = [0u8; BLOCK_SIZE];
-            block_dev
-                .read(&mut sb_data, self.start_block, 1)
-                .expect("Read superblock failed");
-            self.jbd2_super_block.to_disk_bytes(&mut sb_data);
-            block_dev
-                .write(&sb_data, self.start_block, 1)
-                .expect("Write superblock failed");
+            self.write_journal_superblock(block_dev);
             self.head += 1;
             let mut target_use = self.start_block + self.jbd2_super_block.s_start + self.head - 1;
             // 处理环绕
@@ -85,7 +89,8 @@ impl JBD2DEVSYSTEM {
         };
         new_jbd_header.to_disk_bytes(&mut desc_buffer[0..JournalHeaderS::disk_size()]);
 
-        let mut current_offset = 12; //跳过头
+        let mut current_offset = JBD2_DESCRIPTOR_HEADER_SIZE; // 跳过头
+        let mut first_tag = true;
         // 写many tag，目前开发测试简化为一个descriptor块能塞下:)
         for (idx, update) in self.commit_queue.iter().enumerate() {
             // 检查逃逸escape 如果数据块开头也是jbd2_magic 要标志逃逸
@@ -100,6 +105,10 @@ impl JBD2DEVSYSTEM {
                 debug!("JOURNAL ERROR ,Updates data escape!!!");
             }
 
+            if !first_tag {
+                tag.t_flags |= JBD2_FLAG_SAME_UUID;
+            }
+
             // 最后一个
             if idx == self.commit_queue.len() - 1 {
                 tag.t_flags |= JBD2_FLAG_LAST_TAG;
@@ -108,8 +117,15 @@ impl JBD2DEVSYSTEM {
                 "[JBD2 commit] tid={} tag_idx={} t_blocknr={} t_flags=0x{:x}",
                 tid, idx, tag.t_blocknr, tag.t_flags,
             );
-            tag.to_disk_bytes(&mut desc_buffer[current_offset..current_offset + 8]);
-            current_offset += 8;
+            tag.to_disk_bytes(&mut desc_buffer[current_offset..current_offset + JBD2_TAG_SIZE]);
+            current_offset += JBD2_TAG_SIZE;
+
+            if first_tag {
+                desc_buffer[current_offset..current_offset + JBD2_UUID_SIZE]
+                    .copy_from_slice(&self.jbd2_super_block.s_uuid);
+                current_offset += JBD2_UUID_SIZE;
+                first_tag = false;
+            }
         }
 
         // 实际写入盘 这里可以直接写
@@ -117,7 +133,7 @@ impl JBD2DEVSYSTEM {
         debug!("[JBD2 commit] tid={tid} descriptor_block_id={block_id} (absolute)");
         block_dev
             .write(&desc_buffer, block_id, 1)
-            .expect("Jouranl block write failed!");
+            .expect("Journal block write failed!");
 
         let mut no_escape: Vec<(u64, [u8; BLOCK_SIZE])> = Vec::new();
         // 逃逸处理
@@ -143,14 +159,10 @@ impl JBD2DEVSYSTEM {
             );
             block_dev
                 .write(&up.1, metadata_journal_block_id, 1)
-                .expect("Jouranl block write failed!");
+                .expect("Journal block write failed!");
         }
 
-        block_dev.flush().expect("Jouranl block write failed!");
-
-        // 清空update缓存
-        self.commit_queue.clear();
-        debug!("[JBD2 BUFFER] BUFFER ALREADY CLEA");
+        block_dev.flush().expect("Journal block write failed!");
 
         // 写入Commit Block
 
@@ -176,27 +188,31 @@ impl JBD2DEVSYSTEM {
         debug!("[JBD2 commit] tid={tid} commit_block_id={commit_block_id} (absolute)");
         block_dev
             .write(&commit_buffer, commit_block_id, 1)
-            .expect("Jouranl block write failed!");
-        // 至此，commit已经完成，metadata数据已经安全:）
-        block_dev.flush().expect("Jouranl block write failed!");
+            .expect("Journal block write failed!");
+        // 至此事务已经 durable 地记录在 journal 中，但还不能立刻把 journal 标 clean；
+        // 需要先完成 checkpoint，把 metadata 写回 home blocks。
+        block_dev.flush().expect("Journal block write failed!");
+
+        for update in self.commit_queue.iter() {
+            debug!("[JBD2 checkpoint] tid={} home_phys_block={}", tid, update.0);
+            block_dev
+                .write(&update.1[..], update.0 as u32, 1)
+                .expect("Checkpoint block write failed!");
+        }
+        block_dev.flush().expect("Journal checkpoint flush failed!");
+
+        self.commit_queue.clear();
+        debug!("[JBD2 BUFFER] BUFFER ALREADY CLEA");
+
         self.sequence += 1;
 
-        // Keep journal superblock in sync with in-memory state so reboot-time replay
-        // can start from a consistent point and e2fsck won't see stale journal head.
+        // Journal can be marked clean only after the committed metadata has
+        // reached their home blocks.
         self.jbd2_super_block.s_sequence = self.sequence;
         self.jbd2_super_block.s_start = 0;
         self.head = 0;
-
-        let sb_block = self.start_block;
-        let mut sb_data = [0u8; BLOCK_SIZE];
-        block_dev
-            .read(&mut sb_data, sb_block, 1)
-            .expect("Read journal superblock failed");
-        self.jbd2_super_block.to_disk_bytes(&mut sb_data[0..1024]);
-        block_dev
-            .write(&sb_data, sb_block, 1)
-            .expect("Write journal superblock failed");
-        block_dev.flush().expect("Jouranl block write failed!");
+        self.write_journal_superblock(block_dev);
+        block_dev.flush().expect("Journal block write failed!");
 
         debug!(
             "[JBD2 commit] end: tid={} new_sequence={}",
@@ -255,7 +271,7 @@ impl JBD2DEVSYSTEM {
                 break;
             }
 
-            let hdr = JournalHeaderS::from_disk_bytes(&desc_buf[0..12]);
+            let hdr = JournalHeaderS::from_disk_bytes(&desc_buf[0..JBD2_DESCRIPTOR_HEADER_SIZE]);
             debug!(
                 "[JBD2 replay] descriptor: phys_block={} h_magic=0x{:x} h_blocktype={} \
                  h_sequence={} expect_seq={}",
@@ -272,10 +288,10 @@ impl JBD2DEVSYSTEM {
 
             // 2) 解析 descriptor 里的 tags
             let mut tags: Vec<JournalBlockTagS> = Vec::new();
-            let mut off = 12usize; // 跳过 header
+            let mut off = JBD2_DESCRIPTOR_HEADER_SIZE; // 跳过 header
             let mut tag_idx = 0usize;
-            while off + 8 <= BLOCK_SIZE {
-                let tag = JournalBlockTagS::from_disk_bytes(&desc_buf[off..off + 8]);
+            while off + JBD2_TAG_SIZE <= BLOCK_SIZE {
+                let tag = JournalBlockTagS::from_disk_bytes(&desc_buf[off..off + JBD2_TAG_SIZE]);
 
                 // 注意：t_blocknr==0 在 ext4 上是合法的（例如 superblock/group desc 等元数据），
                 // 不能直接用 "t_blocknr==0" 当作 tag 结束条件。
@@ -283,7 +299,7 @@ impl JBD2DEVSYSTEM {
                 if tag.t_blocknr == 0
                     && tag.t_checksum == 0
                     && tag.t_flags == 0
-                    && desc_buf[off + 8..].iter().all(|b| *b == 0)
+                    && desc_buf[off + JBD2_TAG_SIZE..].iter().all(|b| *b == 0)
                 {
                     break;
                 }
@@ -294,8 +310,19 @@ impl JBD2DEVSYSTEM {
                 );
 
                 let last = (tag.t_flags & JBD2_FLAG_LAST_TAG) != 0;
+                let same_uuid = (tag.t_flags & JBD2_FLAG_SAME_UUID) != 0;
                 tags.push(tag);
-                off += 8;
+                off += JBD2_TAG_SIZE;
+                if !same_uuid {
+                    if off + JBD2_UUID_SIZE > BLOCK_SIZE {
+                        debug!(
+                            "[JBD2 replay] descriptor uuid truncated: tid={} tag_idx={}",
+                            expect_seq, tag_idx
+                        );
+                        return;
+                    }
+                    off += JBD2_UUID_SIZE;
+                }
                 tag_idx += 1;
 
                 if last {
@@ -443,7 +470,7 @@ pub fn dump_journal_inode<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &m
         .clone();
     let sb = JournalSuperBllockS::from_disk_bytes(&journal_data);
     debug!("Journal Superblock:{sb:?}");
-    debug!("Jouranl Inode:{indo:?}");
+    debug!("Journal Inode:{indo:?}");
 }
 
 /// jouranl目录创建 journal超级块写入
@@ -480,7 +507,7 @@ pub fn create_journal_entry<B: BlockDevice>(
         inode.i_blocks_lo = (inode_size / 512) as u32;
         inode.i_block = jour_inode.i_block;
     })
-    .expect("Jouranl inode create faild!");
+    .expect("Journal inode create faild!");
 
     let jbd2_sb = JournalSuperBllockS {
         s_maxlen: (free_block.len() - 1) as u32,
@@ -488,6 +515,7 @@ pub fn create_journal_entry<B: BlockDevice>(
         s_blocksize: BLOCK_SIZE_U32,
         s_sequence: 1,
         s_first: 1,
+        s_uuid: fs.superblock.s_uuid,
         ..Default::default()
     };
 

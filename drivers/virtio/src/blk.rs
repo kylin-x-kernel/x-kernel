@@ -80,7 +80,7 @@ impl<H: Hal, T: Transport> BlockDriverOps for VirtIoBlkDev<H, T> {
     }
 
     fn flush(&mut self) -> DriverResult {
-        Ok(())
+        self.device.flush().map_err(as_driver_error)
     }
 }
 

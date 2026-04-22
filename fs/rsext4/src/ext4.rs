@@ -40,7 +40,7 @@ use crate::{
 /// * `block_allocator` - 块分配器，管理数据块的分配和释放
 /// * `inode_allocator` - Inode分配器，管理inode的分配和释放
 /// * `bitmap_cache` - 位图缓存，按需加载，使用LRU淘汰策略
-/// * `inodetable_cahce` - Inode表缓存
+/// * `inodetable_cache` - Inode表缓存
 /// * `datablock_cache` - 数据块缓存
 /// * `root_inode` - 根目录inode号
 /// * `group_count` - 块组数量
@@ -58,7 +58,7 @@ pub struct Ext4FileSystem {
     /// 位图缓存（按需加载，LRU淘汰）
     pub bitmap_cache: BitmapCache,
     /// InodeTable缓存
-    pub inodetable_cahce: InodeCache,
+    pub inodetable_cache: InodeCache,
     /// DataBlock缓存
     pub datablock_cache: DataBlockCache,
     /// 根目录inode号
@@ -177,14 +177,14 @@ impl Ext4FileSystem {
             Some(desc) => desc.inode_table(),
             None => return Err(BlockDevError::Corrupted),
         };
-        let (block_num, offset, _group_idx) = self.inodetable_cahce.calc_inode_location(
+        let (block_num, offset, _group_idx) = self.inodetable_cache.calc_inode_location(
             self.root_inode,
             self.superblock.s_inodes_per_group,
             inode_table_start,
             BLOCK_SIZE,
         );
         let result =
-            self.inodetable_cahce
+            self.inodetable_cache
                 .get_or_load(block_dev, root_inode_num, block_num, offset)?;
         debug!("Root inode i_mode: {}", result.inode.i_mode);
         debug!("Root inode detail: {:?}", result.inode);
@@ -267,7 +267,7 @@ impl Ext4FileSystem {
             inode_allocator,
             bitmap_cache,
             root_inode: 2, // Ext4根目录固定为inode 2
-            inodetable_cahce: inode_cache,
+            inodetable_cache: inode_cache,
             datablock_cache,
             group_count,
             mounted: true,
@@ -441,7 +441,7 @@ impl Ext4FileSystem {
             .flush_all(block_dev)
             .expect("flush failed!");
         fs.bitmap_cache.flush_all(block_dev).expect("flush failed!");
-        fs.inodetable_cahce
+        fs.inodetable_cache
             .flush_all(block_dev)
             .expect("flush failed!");
 
@@ -513,7 +513,7 @@ impl Ext4FileSystem {
         info!("Flushing bitmap cache...");
         self.bitmap_cache.flush_all(block_dev)?;
         debug!("Bitmap cache flushed");
-        self.inodetable_cahce.flush_all(block_dev)?;
+        self.inodetable_cache.flush_all(block_dev)?;
         debug!("Inode table cache flushed");
         self.datablock_cache.flush_all(block_dev)?;
         debug!("Data block cache flushed");
@@ -656,14 +656,14 @@ impl Ext4FileSystem {
             .ok_or(BlockDevError::Corrupted)?
             .inode_table();
 
-        let (block_num, offset, _g) = self.inodetable_cahce.calc_inode_location(
+        let (block_num, offset, _g) = self.inodetable_cache.calc_inode_location(
             inode_num,
             self.superblock.s_inodes_per_group,
             inode_table_start,
             BLOCK_SIZE,
         );
 
-        self.inodetable_cahce
+        self.inodetable_cache
             .modify(block_dev, inode_num as u64, block_num, offset, f)
     }
 
@@ -681,7 +681,7 @@ impl Ext4FileSystem {
             .ok_or(BlockDevError::Corrupted)?
             .inode_table();
 
-        let (block_num, offset, _g) = self.inodetable_cahce.calc_inode_location(
+        let (block_num, offset, _g) = self.inodetable_cache.calc_inode_location(
             inode_num,
             self.superblock.s_inodes_per_group,
             inode_table_start,
@@ -689,7 +689,7 @@ impl Ext4FileSystem {
         );
 
         let cached =
-            self.inodetable_cahce
+            self.inodetable_cache
                 .get_or_load(block_dev, inode_num as u64, block_num, offset)?;
         Ok(cached.inode)
     }
@@ -908,6 +908,9 @@ impl Ext4FileSystem {
         if !did_free {
             return Ok(());
         }
+
+        self.datablock_cache.invalidate(global_block);
+
         let desc = self
             .get_group_desc_mut(group_idx)
             .ok_or(BlockDevError::Corrupted)?;

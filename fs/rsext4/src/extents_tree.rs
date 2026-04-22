@@ -1444,6 +1444,15 @@ impl<'a> ExtentTree<'a> {
                     Some(child_phy_block as u32),
                 )?;
 
+                let new_child_key = Self::get_node_start_block(&child_node);
+                if entries[idx_pos].ei_block != new_child_key {
+                    debug!(
+                        "insert_recursive: updating child index key from {} to {}",
+                        entries[idx_pos].ei_block, new_child_key
+                    );
+                    entries[idx_pos].ei_block = new_child_key;
+                }
+
                 //  处理子节点返回的结果
                 if let Some(split_info) = child_split_res {
                     // 子节点分裂了，需要将 split_info 插入到当前的 Index 节点
@@ -1561,6 +1570,7 @@ impl<'a> ExtentTree<'a> {
         // 读取块
         dev.read_block(block_id)?;
         let buf = dev.buffer_mut();
+        buf.fill(0);
 
         match node {
             ExtentNode::Leaf { header, entries } => {

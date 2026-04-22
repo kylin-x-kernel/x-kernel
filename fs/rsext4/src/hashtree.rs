@@ -548,7 +548,7 @@ mod tests {
             block_allocator: BlockAllocator::new(&superblock),
             inode_allocator: InodeAllocator::new(&superblock),
             bitmap_cache: BitmapCache::new(100),
-            inodetable_cahce: InodeCache::new(100, inode_size),
+            inodetable_cache: InodeCache::new(100, inode_size),
             datablock_cache: DataBlockCache::new(100, 4096),
             root_inode: 2,
             group_count: 1,

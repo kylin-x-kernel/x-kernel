@@ -87,6 +87,7 @@ impl SeekableDisk {
             self.dev.write_block(self.block_id, &self.write_buffer)?;
             self.write_buffer_dirty = false;
         }
+        self.dev.flush()?;
         Ok(())
     }
 

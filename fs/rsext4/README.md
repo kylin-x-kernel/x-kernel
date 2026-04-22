@@ -237,7 +237,7 @@
  ```rust
         // Flush dirty caches
         self.bitmap_cache.flush_all(block_dev)?;
-        self.inodetable_cahce.flush_all(block_dev)?;
+        self.inodetable_cache.flush_all(block_dev)?;
         self.datablock_cache.flush_all(block_dev)?;
 
         //同步group_desc 和 super_block计数
@@ -260,5 +260,4 @@
 
  ```
  
-
 

@@ -360,6 +360,32 @@ fn recompute_extent_inode_iblocks<B: BlockDevice>(
     Ok(())
 }
 
+fn free_inode_storage<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    fs: &mut Ext4FileSystem,
+    inode: &mut Ext4Inode,
+) -> BlockDevResult<()> {
+    let mut used_blocks: Vec<u64> = resolve_inode_block_allextend(fs, device, inode)?
+        .into_values()
+        .collect();
+
+    if inode.have_extend_header_and_use_extend() {
+        let tree = ExtentTree::new(inode);
+        if let Some(root) = tree.load_root_from_inode() {
+            collect_extent_tree_blocks(device, &root, &mut used_blocks)?;
+        }
+    }
+
+    used_blocks.sort_unstable();
+    used_blocks.dedup();
+
+    for blk in used_blocks {
+        fs.free_block(device, blk)?;
+    }
+
+    Ok(())
+}
+
 pub fn collapse_range_with_ino<B: BlockDevice>(
     device: &mut Jbd2Dev<B>,
     fs: &mut Ext4FileSystem,
@@ -807,6 +833,7 @@ pub fn mv<B: BlockDevice>(
     let mut src_ino: Option<u32> = None;
     let mut src_ft: Option<u8> = None;
     if let Ok(blocks) = resolve_inode_block_allextend(fs, block_dev, &mut old_parent_inode) {
+        remember_dir_blocks(fs, &blocks);
         for phys in blocks {
             let cached = match fs.datablock_cache.get_or_load(block_dev, phys.1) {
                 Ok(v) => v,
@@ -842,6 +869,7 @@ pub fn mv<B: BlockDevice>(
                 Ok(Some(b)) => b,
                 _ => continue,
             };
+            remember_dir_block(fs, phys as u64);
             let cached = match fs.datablock_cache.get_or_load(block_dev, phys as u64) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -973,6 +1001,7 @@ pub fn mv<B: BlockDevice>(
                     return Err(BlockDevError::Corrupted);
                 }
             };
+            remember_dir_block(fs, first_blk as u64);
             let _ = fs
                 .datablock_cache
                 .modify(block_dev, first_blk as u64, |data| {
@@ -1040,6 +1069,7 @@ pub fn unlink<B: BlockDevice>(
             return;
         }
     };
+    remember_dir_blocks(fs, &blocks);
 
     for &phys in blocks.values() {
         let cached = match fs.datablock_cache.get_or_load(block_dev, phys) {
@@ -1093,20 +1123,9 @@ pub fn unlink<B: BlockDevice>(
 
     // 如果此时link数为0就调用deletefile删除对应文件.   这里不复用deletefile，因为需要额外的定位
     if new_links == 0 {
-        let mut used_blocks: Vec<u64> =
-            match resolve_inode_block_allextend(fs, block_dev, &mut target_inode) {
-                Ok(v) => v.into_values().collect(),
-                Err(e) => {
-                    warn!("Parse inode blocks failed (unlink free): {e:?}");
-                    return;
-                }
-            };
-        used_blocks.sort();
-        for blk in used_blocks {
-            if let Err(e) = fs.free_block(block_dev, blk) {
-                warn!("free_block failed for blk {blk}: {e:?}");
-                return;
-            }
+        if let Err(e) = free_inode_storage(block_dev, fs, &mut target_inode) {
+            warn!("free inode storage failed for inode {target_ino}: {e:?}");
+            return;
         }
         if let Err(e) = fs.free_inode(block_dev, target_ino) {
             warn!("free_inode failed for inode {target_ino}: {e:?}");
@@ -1196,6 +1215,7 @@ pub fn link<B: BlockDevice>(
         .flatten()
         && let Ok(blocks) = resolve_inode_block_allextend(fs, block_dev, &mut lp_inode)
     {
+        remember_dir_blocks(fs, &blocks);
         for &phys in blocks.values() {
             let cached = match fs.datablock_cache.get_or_load(block_dev, phys) {
                 Ok(v) => v,
@@ -1291,6 +1311,7 @@ pub fn remove_inodeentry_from_parentdir<B: BlockDevice>(
             Ok(Some(b)) => b,
             _ => continue,
         };
+        remember_dir_block(fs, phys as u64);
         let _ = fs.datablock_cache.modify(block_dev, phys as u64, |data| {
             if removed {
                 return;
@@ -1423,6 +1444,7 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
                     return;
                 }
             };
+            remember_dir_blocks(fs, &dir_blocks);
 
             let mut to_descend: Vec<(
                 alloc::string::String,
@@ -1563,26 +1585,12 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
         }
 
         // 然后仿照deletefile的逻辑释放entry对应的inode的blocks和inode。
-        let used_blocks: Vec<u64> =
-            match resolve_inode_block_allextend(fs, block_dev, &mut cur_inode) {
-                Ok(v) => v.into_values().collect(),
-                Err(e) => {
-                    warn!(
-                        "Parse dir blocks failed (freeing): {:?} path={}",
-                        e, frame.path
-                    );
-                    return;
-                }
-            };
-
-        for blk in used_blocks {
-            if let Err(e) = fs.free_block(block_dev, blk) {
-                warn!(
-                    "free_block failed for blk {}: {:?} path={}",
-                    blk, e, frame.path
-                );
-                return;
-            }
+        if let Err(e) = free_inode_storage(block_dev, fs, &mut cur_inode) {
+            warn!(
+                "free inode storage failed for dir inode {}: {:?} path={}",
+                frame.ino_num, e, frame.path
+            );
+            return;
         }
         if let Err(e) = fs.free_inode(block_dev, frame.ino_num) {
             warn!(
@@ -1629,13 +1637,6 @@ pub fn delete_file<B: BlockDevice>(
         return;
     }
 
-    // 统计block（i_blocks 以 512 字节为单位，换算成数据块个数）
-    let mut inode_used_blocks: Vec<u64> =
-        resolve_inode_block_allextend(fs, block_dev, &mut target_inode)
-            .expect("Parse inode extend failed")
-            .into_values()
-            .collect();
-    inode_used_blocks.sort(); //排序block
     // link-1
     target_inode.i_links_count = target_inode.i_links_count.saturating_sub(1);
     // update target inode link
@@ -1651,12 +1652,9 @@ pub fn delete_file<B: BlockDevice>(
         debug!("Will free inode:{ino_num} path:{path}");
         // 设置dtime(删除时的时间戳) 太小会触发PR_1_LOW_DTIME问题，inode存在并且正常使用时应该为0.
 
-        // 释放inode所有的datablock
-        for blk in inode_used_blocks {
-            if let Err(e) = fs.free_block(block_dev, blk) {
-                warn!("free_block failed for blk {blk}: {e:?}");
-                return;
-            }
+        if let Err(e) = free_inode_storage(block_dev, fs, &mut target_inode) {
+            warn!("free inode storage failed for inode {ino_num}: {e:?}");
+            return;
         }
         // 释放inode
         if let Err(e) = fs.free_inode(block_dev, ino_num) {
