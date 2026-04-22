@@ -24,6 +24,7 @@ use crate::vsock::VsockSocket;
 use crate::{
     netlink::{NetlinkAddr, NetlinkSocket},
     options::{Configurable, GetSocketOption, SetSocketOption},
+    raw::RawSocket,
     tcp::TcpSocket,
     udp::UdpSocket,
     unix::{UnixAddr, UnixDomainSocket},
@@ -223,6 +224,7 @@ impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
 pub enum Socket {
     Udp(Box<UdpSocket>),
     Tcp(Box<TcpSocket>),
+    Raw(Box<RawSocket>),
     Unix(Box<UnixDomainSocket>),
     Netlink(Box<NetlinkSocket>),
     #[cfg(feature = "vsock")]
@@ -234,6 +236,7 @@ impl Pollable for Socket {
         match self {
             Socket::Tcp(tcp) => tcp.poll(),
             Socket::Udp(udp) => udp.poll(),
+            Socket::Raw(raw) => raw.poll(),
             Socket::Unix(unix) => unix.poll(),
             Socket::Netlink(netlink) => netlink.poll(),
             #[cfg(feature = "vsock")]
@@ -245,6 +248,7 @@ impl Pollable for Socket {
         match self {
             Socket::Tcp(tcp) => tcp.register(context, events),
             Socket::Udp(udp) => udp.register(context, events),
+            Socket::Raw(raw) => raw.register(context, events),
             Socket::Unix(unix) => unix.register(context, events),
             Socket::Netlink(netlink) => netlink.register(context, events),
             #[cfg(feature = "vsock")]

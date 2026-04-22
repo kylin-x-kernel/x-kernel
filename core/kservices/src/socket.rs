@@ -87,7 +87,7 @@ impl SocketAddrExt for SocketAddr {
 impl SocketAddrExt for SocketAddrV4 {
     /// Read IPv4 socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
-        if addrlen != size_of::<sockaddr_in>() as socklen_t {
+        if addrlen < size_of::<sockaddr_in>() as socklen_t {
             return Err(KError::InvalidInput);
         }
         let addr_in = addr.cast::<sockaddr_in>().get_as_ref()?;
@@ -123,7 +123,7 @@ impl SocketAddrExt for SocketAddrV4 {
 impl SocketAddrExt for SocketAddrV6 {
     /// Read IPv6 socket address from user space
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
-        if addrlen != size_of::<sockaddr_in6>() as socklen_t {
+        if addrlen < size_of::<sockaddr_in6>() as socklen_t {
             return Err(KError::InvalidInput);
         }
         let addr_in6 = addr.cast::<sockaddr_in6>().get_as_ref()?;

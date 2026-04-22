@@ -19,6 +19,7 @@ use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
     Shutdown, SocketAddrEx, SocketOps,
     netlink::NetlinkSocket,
+    raw::{IpProtocol, IpVersion, RawSocket},
     tcp::TcpSocket,
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixDomainSocket},
@@ -28,8 +29,9 @@ use ktask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{
-        AF_INET, AF_NETLINK, AF_UNIX, AF_VSOCK, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR,
-        SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
+        AF_INET, AF_INET6, AF_NETLINK, AF_UNIX, AF_VSOCK, IPPROTO_ICMP, IPPROTO_ICMPV6,
+        IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW,
+        SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
     },
 };
 
@@ -60,6 +62,21 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             }
             knet::Socket::Udp(Box::new(UdpSocket::new()))
         }
+        (AF_INET, SOCK_RAW) => {
+            if proto != IPPROTO_ICMP as u32 {
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp)))
+        }
+        (AF_INET6, SOCK_RAW) => {
+            if proto != IPPROTO_ICMPV6 {
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            knet::Socket::Raw(Box::new(RawSocket::new(
+                IpVersion::Ipv6,
+                IpProtocol::Icmpv6,
+            )))
+        }
         (AF_UNIX, SOCK_STREAM) => {
             // Unix domain stream socket
             knet::Socket::Unix(Box::new(UnixDomainSocket::new(StreamTransport::new(pid))))
@@ -79,7 +96,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             // Virtio socket (hypervisor communication)
             knet::Socket::Vsock(Box::new(VsockSocket::new(VsockStreamTransport::new())))
         }
-        (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) | (AF_NETLINK, _) => {
+        (AF_INET, _) | (AF_INET6, _) | (AF_UNIX, _) | (AF_VSOCK, _) | (AF_NETLINK, _) => {
             // Socket type not supported for this domain
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
             return Err(KError::from(LinuxError::ESOCKTNOSUPPORT));
