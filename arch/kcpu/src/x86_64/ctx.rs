@@ -243,8 +243,11 @@ impl ExtendedState {
     /// Returns the extended state with initialized values.
     pub const fn default() -> Self {
         let mut area: FxStateBlock = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-        area.fpu_ctrl = 0x37f;
-        area.fpu_tag = 0xffff;
+        area.fpu_ctrl = 0x037f;
+        area.fpu_status = 0;
+        // FXSAVE stores the abridged tag word. A clean `fninit` state saves as 0,
+        // not 0xffff like the legacy x87 environment format.
+        area.fpu_tag = 0;
         area.sse_mxcsr = 0x1f80;
         Self { fxsave_area: area }
     }
