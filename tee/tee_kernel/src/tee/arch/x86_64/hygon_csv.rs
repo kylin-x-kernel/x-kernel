@@ -91,8 +91,7 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     // warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
     Ok(())
 }
-
-#[cfg(all(target_arch = "x86_64", feature = "huk_key"))]
+#[cfg(feature = "csv_huk_key")]
 #[unittest::mod_test]
 pub mod tests_hygon_csv_get_sealing_key {
     use unittest::assert;

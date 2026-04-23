@@ -15,13 +15,23 @@ config KFEAT_TEE_TA_SIGN
       Enable `.ta_signature` verification for TA ELF images loaded through the
       TEE path.
 
-config KFEAT_HUK_KEY
-    bool "Enable HUK key derivation"
-    depends on ARCH_X86_64
+config KFEAT_VIRTCCA_HUK_KEY
+    bool "Enable VirtCCA HUK key derivation"
+    depends on ARCH_AARCH64
+    default n
     help
-      Enable the TEE hardware unique key path. The current implementation is
-      backed by the x86_64 CSV sealing key flow, so it must be enabled only
-      after TEE support is turned on.
+      Enable the TEE hardware unique key path for ARM VirtCCA guests.
+      The key is derived from the VirtCCA image key flow, so enable this
+      only when running in a VirtCCA confidential guest environment.
+
+config KFEAT_CSV_HUK_KEY
+    bool "Enable CSV HUK key derivation"
+    depends on ARCH_X86_64
+    default n
+    help
+      Enable the TEE hardware unique key path for x86_64 CSV guests.
+      The key is derived from the CSV sealing key flow, so enable this
+      only when running in a CSV confidential guest environment.
 
 endif #KFEAT_TEE
 

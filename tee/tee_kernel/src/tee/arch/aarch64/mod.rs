@@ -2,7 +2,5 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(target_arch = "aarch64")]
-pub mod aarch64;
-#[cfg(target_arch = "x86_64")]
-pub mod x86_64;
+#[cfg(feature = "virtcca_huk_key")]
+pub mod virtcca;

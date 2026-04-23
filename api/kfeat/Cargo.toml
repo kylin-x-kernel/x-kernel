@@ -93,13 +93,15 @@ tee = [
     "kservices/tee",
 ]
 tee_ta_sign = ["kcore/tee_ta_sign", "tee_task_iface/tee_ta_sign"]
-huk_key = ["tee_kernel/huk_key"]
+csv_huk_key = ["tee_kernel/csv_huk_key"]
+virtcca_huk_key = ["tee_kernel/virtcca_huk_key"]
 
 # Watchdog
 watchdog = ["kruntime/watchdog"]
 
 # Pmu
 pmu = ["kruntime/pmu"]
+
 
 [dependencies]
 alloc-engine = { workspace = true, optional = true }

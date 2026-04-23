@@ -13,7 +13,8 @@ documentation.workspace = true
 default = ["linux_sysno/tee", "kalloc/tee", "tee_ss_smx"]
 tee_cfg_memtag = []
 tee_ss_smx = []
-huk_key = ["dep:kcpu"]
+csv_huk_key = ["dep:kcpu"]
+virtcca_huk_key = []
 
 [dependencies]
 kalloc.workspace = true
@@ -48,6 +49,7 @@ uuid = { version = "0.8", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 cty = "0.2"
 kcore.workspace = true
+kbuild_config.workspace = true
 subtle = { version = "2", default-features = false }
 static_assertions = "1.1.0"
 memoffset = { version = "0.9", default-features = false }
