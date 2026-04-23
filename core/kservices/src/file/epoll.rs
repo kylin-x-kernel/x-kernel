@@ -369,6 +369,7 @@ impl Epoll {
     pub fn poll_events(&self, out: &mut [epoll_event]) -> KResult<usize> {
         trace!("Epoll: poll_events called, out.len()={}", out.len());
         let mut count = 0;
+        let mut deferred_keep = alloc::vec::Vec::new();
         loop {
             let weak_interest = {
                 let mut queue = self.inner.ready_queue.lock();
@@ -407,10 +408,7 @@ impl Epoll {
                         data: event.user_data,
                     };
                     count += 1;
-                    self.inner
-                        .ready_queue
-                        .lock()
-                        .push_back(Arc::downgrade(&interest));
+                    deferred_keep.push(Arc::downgrade(&interest));
                 }
                 ConsumeResult::EventAndRemove(event) => {
                     out[count] = epoll_event {
@@ -425,6 +423,13 @@ impl Epoll {
                     interest.mark_not_in_queue();
                     self.register_waker_only(&interest);
                 }
+            }
+        }
+
+        if !deferred_keep.is_empty() {
+            let mut queue = self.inner.ready_queue.lock();
+            for interest in deferred_keep {
+                queue.push_back(interest);
             }
         }
 

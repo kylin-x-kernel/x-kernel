@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! TCP listen table and backlog management.
-use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec, vec::Vec};
 use core::ops::DerefMut;
 
 use kerrno::{KError, KResult};
@@ -154,8 +154,8 @@ impl ListenTable {
         sockets: &mut SocketSet<'_>,
     ) {
         if let Some(entry) = self.listen_entry(dst.port).lock().deref_mut() {
-            prune_closed(&mut entry.syn_queue);
-            prune_closed(&mut entry.accept_queue);
+            prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
+            prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
             if entry
                 .syn_queue
                 .iter()
@@ -228,6 +228,27 @@ fn prune_closed(syn_queue: &mut VecDeque<PendingConn>) {
             syn_queue.push_back(conn);
         }
     }
+}
+
+fn prune_closed_in_socket_set(syn_queue: &mut VecDeque<PendingConn>, sockets: &mut SocketSet<'_>) {
+    let mut closed = Vec::new();
+    syn_queue.retain(|conn| {
+        let keep = !is_closed_in_socket_set(conn.dispatch_irq, sockets);
+        if !keep {
+            closed.push(conn.dispatch_irq);
+        }
+        keep
+    });
+    for dispatch_irq in closed {
+        sockets.remove(dispatch_irq);
+    }
+}
+
+fn is_closed_in_socket_set(dispatch_irq: SocketHandle, sockets: &SocketSet<'_>) -> bool {
+    matches!(
+        sockets.get::<tcp::Socket>(dispatch_irq).state(),
+        State::Closed
+    )
 }
 
 fn promote_ready(
