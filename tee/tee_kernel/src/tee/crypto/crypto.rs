@@ -20,7 +20,8 @@ use mbedtls_sys_auto::mpi_write_binary;
 use tee_raw_sys::*;
 
 use crate::tee::{
-    TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5, TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5, TeeResult,
+    TEE_ALG_DES3_CMAC, TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5, TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5,
+    TeeResult,
     crypto::crypto_impl::{
         EccAlgoKeyPair, EccComKeyPair, EccKeypair, Sm2DsaKeyPair, Sm2KepKeyPair, Sm2PkeKeyPair,
         crypto_ecc_keypair_ops, crypto_ecc_keypair_ops_generate,
@@ -415,25 +416,44 @@ pub(crate) trait CryptoMacCtx {
 pub(crate) fn crypto_mac_init(cs: Arc<Mutex<TeeCrypState>>, key: &[u8]) -> TeeResult {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    let mut md_type: MdType = MdType::None;
-
     match algo {
-        TEE_ALG_HMAC_MD5 => md_type = MdType::Md5,
-        TEE_ALG_HMAC_SHA1 => md_type = MdType::Sha1,
-        TEE_ALG_HMAC_SHA224 => md_type = MdType::Sha224,
-        TEE_ALG_HMAC_SHA256 => md_type = MdType::Sha256,
-        TEE_ALG_HMAC_SHA384 => md_type = MdType::Sha384,
-        TEE_ALG_HMAC_SHA512 => md_type = MdType::Sha512,
-        TEE_ALG_HMAC_SM3 => md_type = MdType::SM3,
-        _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
-    }
-
-    if let Ok(hmac) = Hmac::new(md_type, key) {
-        cs_guard.ctx = CrypCtx::HmacCtx(hmac);
-        cs_guard.state = CrypState::Initialized;
-        Ok(())
-    } else {
-        Err(TEE_ERROR_NOT_IMPLEMENTED)
+        TEE_ALG_HMAC_MD5 | TEE_ALG_HMAC_SHA1 | TEE_ALG_HMAC_SHA224 | TEE_ALG_HMAC_SHA256
+        | TEE_ALG_HMAC_SHA384 | TEE_ALG_HMAC_SHA512 | TEE_ALG_HMAC_SM3 => {
+            let md_type = match algo {
+                TEE_ALG_HMAC_MD5 => MdType::Md5,
+                TEE_ALG_HMAC_SHA1 => MdType::Sha1,
+                TEE_ALG_HMAC_SHA224 => MdType::Sha224,
+                TEE_ALG_HMAC_SHA256 => MdType::Sha256,
+                TEE_ALG_HMAC_SHA384 => MdType::Sha384,
+                TEE_ALG_HMAC_SHA512 => MdType::Sha512,
+                TEE_ALG_HMAC_SM3 => MdType::SM3,
+                _ => MdType::None,
+            };
+            if let Ok(hmac) = Hmac::new(md_type, key) {
+                cs_guard.ctx = CrypCtx::HmacCtx(hmac);
+                cs_guard.state = CrypState::Initialized;
+                Ok(())
+            } else {
+                Err(TEE_ERROR_NOT_IMPLEMENTED)
+            }
+        }
+        TEE_ALG_AES_CMAC | TEE_ALG_DES3_CMAC | TEE_ALG_SM4_CMAC => {
+            let (cipher_id, cipher_mode) = match algo {
+                TEE_ALG_AES_CMAC => (CipherId::Aes, CipherMode::ECB),
+                TEE_ALG_DES3_CMAC => (CipherId::Des3, CipherMode::ECB),
+                TEE_ALG_SM4_CMAC => (CipherId::SM4, CipherMode::ECB),
+                _ => (CipherId::None, CipherMode::None),
+            };
+            let mut cipher = Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as _)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cipher
+                .cmac_starts(key)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::CmacCtx(cipher);
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
     }
 }
 
@@ -443,6 +463,9 @@ pub(crate) fn crypto_mac_update(cs: Arc<Mutex<TeeCrypState>>, data: &[u8]) -> Te
 
     match &mut guard.ctx {
         CrypCtx::HmacCtx(hmac) => hmac.update(data).map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        CrypCtx::CmacCtx(cipher) => cipher
+            .cmac_update(data)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
@@ -453,10 +476,15 @@ pub(crate) fn crypto_mac_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) ->
 
     let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Others);
 
-    if let CrypCtx::HmacCtx(hmac) = ctx {
-        hmac.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
-    } else {
-        Err(TEE_ERROR_BAD_PARAMETERS)
+    match ctx {
+        CrypCtx::HmacCtx(hmac) => hmac.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        CrypCtx::CmacCtx(mut cipher) => {
+            cipher
+                .cmac_finish(hash)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            Ok(cipher.block_size())
+        }
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 

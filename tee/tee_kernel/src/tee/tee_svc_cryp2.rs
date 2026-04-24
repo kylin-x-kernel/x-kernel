@@ -189,6 +189,7 @@ pub(crate) enum CrypCtx {
     HashCtx(Md),
     AsyCtx(Pk),
     HmacCtx(Hmac),
+    CmacCtx(Cipher),
     Others,
 }
 
@@ -753,21 +754,33 @@ pub fn syscall_cryp_state_alloc(
 }
 
 // 复制一个TeeCrypState
-pub fn tee_cryp_state_copy(_dst_id: u32, _src_id: u32) -> TeeResult {
-    // TODO:需要改动mbedtls，后续再进行实现
-    // with_tee_session_ctx_mut(|ctx|{
-    // let cs_dst = tee_cryp_state_get(dst_id)?;
-    // let cs_src = tee_cryp_state_get(src_id)?;
-    //
-    // if (cs_dst.lock().algo != cs_src.lock().algo || cs_dst.lock().mode != cs_src.lock().mode) {
-    // return Err(TEE_ERROR_BAD_PARAMETERS);
-    // }
-    //
-    // cs_dst.lock().ctx = cs_src.lock().ctx.clone();
-    // cs_dst.lock().state = cs_src.lock().state;
-    // cs_dst.lock().ctx_finalize = cs_src.lock().ctx_finalize;
-    // Ok(())
-    // })?;
+pub fn tee_cryp_state_copy(dst_id: u32, src_id: u32) -> TeeResult {
+    let cs_dst = tee_cryp_state_get(dst_id)?;
+    let cs_src = tee_cryp_state_get(src_id)?;
+
+    if dst_id == src_id {
+        return Ok(());
+    }
+
+    let mut dst_guard = cs_dst.lock();
+    let src_guard = cs_src.lock();
+
+    if dst_guard.algo != src_guard.algo || dst_guard.mode != src_guard.mode {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let copied_ctx = match &src_guard.ctx {
+        CrypCtx::CipherCtx(cipher) => CrypCtx::CipherCtx(cipher.clone()),
+        CrypCtx::CmacCtx(cipher) => CrypCtx::CmacCtx(cipher.clone()),
+        CrypCtx::HashCtx(md) => CrypCtx::HashCtx(md.clone()),
+        CrypCtx::HmacCtx(hmac) => CrypCtx::HmacCtx(hmac.clone()),
+        _ => return Err(TEE_ERROR_BAD_STATE),
+    };
+
+    dst_guard.ctx = copied_ctx;
+    dst_guard.state = src_guard.state;
+    dst_guard.ctx_finalize = src_guard.ctx_finalize;
+
     Ok(())
 }
 
@@ -1899,6 +1912,277 @@ pub mod tests_cryp {
                 0x99, 0x67, 0xaf, 0x42, 0x68, 0xd7, 0xf6, 0x96, 0x40, 0xca, 0xb9, 0x99, 0x35, 0x18,
                 0x0f, 0xb3, 0xc6, 0x9b, 0xc5, 0x82, 0xa2, 0xb9, 0x7f, 0xa7, 0x53, 0xb2, 0x6c, 0x58,
                 0x10, 0xaa, 0xa0, 0x37
+            ]
+        );
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_state_copy_sm3_hash() {
+        let mut src_state: u32 = 0;
+        let mut dst_state: u32 = 0;
+
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut src_state,
+        );
+        assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut dst_state,
+        );
+        assert!(res.is_ok());
+
+        let res = tee_cryp_hash_init(src_state);
+        assert!(res.is_ok());
+        let res = tee_cryp_hash_update(src_state, b"abc");
+        assert!(res.is_ok());
+
+        let res = tee_cryp_state_copy(dst_state, src_state);
+        assert!(res.is_ok());
+
+        let mut src_hash = [0u8; 32];
+        let mut dst_hash = [0u8; 32];
+        let src_len = tee_cryp_hash_final(src_state, &[], &mut src_hash);
+        let dst_len = tee_cryp_hash_final(dst_state, &[], &mut dst_hash);
+        assert!(src_len.is_ok());
+        assert!(dst_len.is_ok());
+        assert_eq!(src_len.unwrap(), 32);
+        assert_eq!(dst_len.unwrap(), 32);
+
+        assert_eq!(
+            src_hash,
+            [
+                0x66, 0xc7, 0xf0, 0xf4, 0x62, 0xee, 0xed, 0xd9, 0xd1, 0xf2, 0xd4, 0x6b, 0xdc, 0x10,
+                0xe4, 0xe2, 0x41, 0x67, 0xc4, 0x87, 0x5c, 0xf2, 0xf7, 0xa2, 0x29, 0x7d, 0xa0, 0x2b,
+                0x8f, 0x4b, 0xa8, 0xe0
+            ]
+        );
+        assert_eq!(dst_hash, src_hash);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_state_copy_hmac_sm3() {
+        let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut src_state: u32 = 0;
+        let mut dst_state: u32 = 0;
+        let key = b"abcdefghabcdefgh";
+
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, src_obj_id.as_user_ref());
+        assert!(res.is_ok());
+        let src_obj_id = src_obj_id.read();
+
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, dst_obj_id.as_user_ref());
+        assert!(res.is_ok());
+        let dst_obj_id = dst_obj_id.read();
+
+        let src_obj = tee_obj_get(src_obj_id as tee_obj_id_type);
+        assert!(src_obj.is_ok());
+        let src_obj = src_obj.unwrap();
+        let mut src_obj_guard = src_obj.lock();
+        let mut src_secret = tee_cryp_obj_secret_wrapper::new(32);
+        src_secret.set_secret_data(key);
+        let _ = core::mem::replace(
+            &mut src_obj_guard.attr[0],
+            TeeCryptObj::obj_secret(src_secret),
+        );
+        drop(src_obj_guard);
+
+        let dst_obj = tee_obj_get(dst_obj_id as tee_obj_id_type);
+        assert!(dst_obj.is_ok());
+        let dst_obj = dst_obj.unwrap();
+        let mut dst_obj_guard = dst_obj.lock();
+        let mut dst_secret = tee_cryp_obj_secret_wrapper::new(32);
+        dst_secret.set_secret_data(key);
+        let _ = core::mem::replace(
+            &mut dst_obj_guard.attr[0],
+            TeeCryptObj::obj_secret(dst_secret),
+        );
+        drop(dst_obj_guard);
+
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_HMAC_SM3,
+            TEE_OperationMode::TEE_MODE_MAC,
+            Some(src_obj_id as _),
+            None,
+            &mut src_state,
+        );
+        assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_HMAC_SM3,
+            TEE_OperationMode::TEE_MODE_MAC,
+            Some(dst_obj_id as _),
+            None,
+            &mut dst_state,
+        );
+        assert!(res.is_ok());
+
+        let res = tee_cryp_hash_init(src_state);
+        assert!(res.is_ok());
+        let res = tee_cryp_hash_update(src_state, b"abc");
+        assert!(res.is_ok());
+
+        let res = tee_cryp_state_copy(dst_state, src_state);
+        assert!(res.is_ok());
+
+        let mut src_hash = [0u8; 32];
+        let mut dst_hash = [0u8; 32];
+        let src_len = tee_cryp_hash_final(src_state, &[], &mut src_hash);
+        let dst_len = tee_cryp_hash_final(dst_state, &[], &mut dst_hash);
+        assert!(src_len.is_ok());
+        assert!(dst_len.is_ok());
+        assert_eq!(src_len.unwrap(), 32);
+        assert_eq!(dst_len.unwrap(), 32);
+        assert_eq!(dst_hash, src_hash);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_state_copy_sm4_cbc_ctx() {
+        let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut src_state: u32 = 0;
+        let mut dst_state: u32 = 0;
+        let key = b"abcdefghabcdefgh";
+        let iv = b"1234qwerasdfzxcv";
+        let data1 = b"abcdefghabcdefgh";
+        let data2 = b"1234567890987654";
+
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, src_obj_id.as_user_ref());
+        assert!(res.is_ok());
+        let src_obj_id = src_obj_id.read();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, dst_obj_id.as_user_ref());
+        assert!(res.is_ok());
+        let dst_obj_id = dst_obj_id.read();
+
+        let src_obj = tee_obj_get(src_obj_id as tee_obj_id_type);
+        assert!(src_obj.is_ok());
+        let src_obj = src_obj.unwrap();
+        let mut src_obj_guard = src_obj.lock();
+        let mut src_secret = tee_cryp_obj_secret_wrapper::new(32);
+        src_secret.set_secret_data(key);
+        let _ = core::mem::replace(
+            &mut src_obj_guard.attr[0],
+            TeeCryptObj::obj_secret(src_secret),
+        );
+        drop(src_obj_guard);
+
+        let dst_obj = tee_obj_get(dst_obj_id as tee_obj_id_type);
+        assert!(dst_obj.is_ok());
+        let dst_obj = dst_obj.unwrap();
+        let mut dst_obj_guard = dst_obj.lock();
+        let mut dst_secret = tee_cryp_obj_secret_wrapper::new(32);
+        dst_secret.set_secret_data(key);
+        let _ = core::mem::replace(
+            &mut dst_obj_guard.attr[0],
+            TeeCryptObj::obj_secret(dst_secret),
+        );
+        drop(dst_obj_guard);
+
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_CBC_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(src_obj_id as _),
+            None,
+            &mut src_state,
+        );
+        assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_SM4_CBC_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(dst_obj_id as _),
+            None,
+            &mut dst_state,
+        );
+        assert!(res.is_ok());
+
+        let res = tee_cryp_cipher_init(src_state, Some(iv), CipherPaddingMode::None);
+        assert!(res.is_ok());
+
+        // 参考现有 CBC 用例，update 输出缓冲区留出额外 block 空间
+        let mut out1 = [0u8; 32];
+        let mut out2_src = [0u8; 32];
+        let mut out2_dst = [0u8; 32];
+
+        let res = tee_cryp_cipher_update(src_state, data1, &mut out1);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 16);
+
+        let res = tee_cryp_state_copy(dst_state, src_state);
+        assert!(res.is_ok());
+
+        let res = tee_cryp_cipher_update(src_state, data2, &mut out2_src);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 16);
+        let res = tee_cryp_cipher_update(dst_state, data2, &mut out2_dst);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 16);
+
+        assert_eq!(&out2_dst[..16], &out2_src[..16]);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_cmac_aes() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let obj_id = obj_id.read();
+
+        let result = syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0);
+        assert!(result.is_ok());
+
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
+
+        assert_eq!(obj.info.objectType, TEE_TYPE_AES);
+        assert_eq!(obj.info.maxObjectSize, 128);
+        assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
+        assert_eq!(obj.attr.len(), 1);
+        assert!(matches!(obj.attr[0], TeeCryptObj::obj_secret(_)));
+
+        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f";
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(key as &[u8]);
+        assert_eq!(secret.key(), key);
+
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
+
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_AES_CMAC,
+            TEE_OperationMode::TEE_MODE_MAC,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        );
+        assert!(res.is_ok());
+
+        let res = tee_cryp_hash_init(state);
+        assert!(res.is_ok());
+
+        let data = b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff";
+        let res = tee_cryp_hash_update(state, data);
+        assert!(res.is_ok());
+
+        let mut hash: [u8; 16] = [0; 16];
+        let res = tee_cryp_hash_final(state, &[], &mut hash);
+        assert!(res.is_ok());
+        let hash_size = res.unwrap();
+
+        assert_eq!(hash_size, 16);
+        assert_eq!(
+            hash,
+            [
+                0x38, 0x7b, 0x36, 0x22, 0x8b, 0xa7, 0x77, 0x44, 0x5b, 0xaf, 0xa0, 0x36, 0x45, 0xb9,
+                0x40, 0x10
             ]
         );
     }
