@@ -33,6 +33,22 @@ config KFEAT_CSV_HUK_KEY
       The key is derived from the CSV sealing key flow, so enable this
       only when running in a CSV confidential guest environment.
 
+config KFEAT_TA_VERIFY_WITH_ROOT
+    bool "Enable TA ELF signature verification with root certificate"
+    depends on KFEAT_TEE_TA_SIGN
+    default n
+    help
+      Enable TA ELF signature verification using an embedded PEM root CA chain.
+      The certificate is compiled into the kernel image; enable only when you
+      intend to enforce chain verification against that trust anchor.
+
+      Third-party builds may supply their own root certificate: place a PEM file
+      named tee-ta-sign-root.pem under tee/tee_task_iface/certs (this path and
+      filename are required for the embedded include).
+
+      The default PEM checked in-tree is sourced from Kylin Desktop V10/V11
+      certaide-kylin package file bjcasm2.p7b (converted to PEM).
+
 endif #KFEAT_TEE
 
 

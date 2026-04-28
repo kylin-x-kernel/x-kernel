@@ -17,6 +17,8 @@ use tee_raw_sys::ta_head;
 use crate::ta_ctx::TeeTaCtx;
 
 const TA_HEAD_FIFO_CAP: usize = 32;
+#[cfg(feature = "ta_verify_with_root")]
+const TA_VERIFY_CA_PEM: &[u8] = include_bytes!("../certs/tee-ta-sign-root.pem");
 
 struct TaHeadFifoCache {
     map: HashMap<String, Option<Vec<u8>>>,
@@ -82,7 +84,14 @@ pub fn verify_ta_elf_signature_if_applicable(
         "verify_elf_signature_with_limits: image.len: {}",
         image.len()
     );
-    tasign::verify_elf_signature(image.as_slice(), None)
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "ta_verify_with_root")] {
+            let ca_pem = Some(TA_VERIFY_CA_PEM);
+        } else {
+            let ca_pem = None;
+        }
+    }
+    tasign::verify_elf_signature(image.as_slice(), ca_pem)
         .map_err(|_| KError::InvalidExecutable)
         .inspect_err(|err| {
             error!("verify ta elf signature failed: {:?}", err);

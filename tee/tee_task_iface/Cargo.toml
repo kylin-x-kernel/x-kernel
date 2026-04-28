@@ -23,8 +23,12 @@ tee_ta_sign = [
     "dep:tasign_kernel_shim",
     "dep:xmas-elf",
 ]
+# Enable certificate-chain verification by embedding the built-in CA PEM.
+# Effective only when `tee_ta_sign` is also enabled.
+ta_verify_with_root = ["tee_ta_sign"]
 
 [dependencies]
+cfg-if = { workspace = true }
 hashbrown = { workspace = true }
 uuid = { version = "0.8", default-features = false }
 unittest.workspace = true

@@ -9,6 +9,8 @@
 //! - **`tee_ta_sign`** — Enables the `tasign` submodule (TA ELF signature verification),
 //!   pulls in `tasign` / `kfs` / `kerrno` / `log`, and links `tasign-kernel-shim` for mbedTLS
 //!   libc shims on bare-metal. Without this feature, `tasign` is not compiled.
+//! - **`ta_verify_with_root`** — Uses an embedded CA PEM to verify certificate chain during
+//!   TA signature verification (depends on `tee_ta_sign`).
 #![no_std]
 
 extern crate alloc;
