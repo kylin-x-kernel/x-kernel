@@ -630,6 +630,9 @@ pub(crate) fn crypto_authenc_init(
     cs: Arc<Mutex<TeeCrypState>>,
     key: &[u8],
     nonce: &[u8],
+    aad_len: Option<usize>,
+    tag_len: Option<usize>,
+    payload_len: Option<usize>,
 ) -> TeeResult {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -654,6 +657,14 @@ pub(crate) fn crypto_authenc_init(
             cipher_id = CipherId::SM4;
             cipher_mode = CipherMode::GCM;
         }
+        TEE_ALG_AES_CCM => {
+            cipher_id = CipherId::Aes;
+            cipher_mode = CipherMode::CCM;
+        }
+        TEE_ALG_SM4_CCM => {
+            cipher_id = CipherId::SM4;
+            cipher_mode = CipherMode::CCM;
+        }
         _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
     }
 
@@ -663,6 +674,14 @@ pub(crate) fn crypto_authenc_init(
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS);
         cipher.set_iv(nonce).map_err(|_| TEE_ERROR_BAD_PARAMETERS);
         cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS);
+        if cipher_mode == CipherMode::CCM {
+            let payload_len = payload_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+            let aad_len = aad_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+            let tag_len = tag_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+            cipher
+                .starts_ccm(payload_len, aad_len, tag_len)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        }
         cs_guard.state = CrypState::Initialized;
         cs_guard.ctx = CrypCtx::CipherCtx(cipher);
         Ok(())
@@ -673,8 +692,14 @@ pub(crate) fn crypto_authenc_init(
 
 pub(crate) fn crypto_authenc_update_aad(cs: Arc<Mutex<TeeCrypState>>, aad: &[u8]) -> TeeResult {
     let mut cs_guard = cs.lock();
+    let algo = cs_guard.algo;
     if let CrypCtx::CipherCtx(cipher) = &mut cs_guard.ctx {
-        cipher.update_ad(aad).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        match algo {
+            TEE_ALG_AES_CCM | TEE_ALG_SM4_CCM => cipher
+                .update_ad_ccm(aad)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            _ => cipher.update_ad(aad).map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }

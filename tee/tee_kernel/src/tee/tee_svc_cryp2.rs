@@ -1203,7 +1203,13 @@ pub fn syscall_cryp_random_number_generate(arg0: usize, arg1: usize) -> TeeResul
     Ok(())
 }
 
-pub fn tee_cryp_authenc_init(id: u32, nonce: &[u8]) -> TeeResult {
+pub fn tee_cryp_authenc_init(
+    id: u32,
+    nonce: &[u8],
+    aad_len: Option<usize>,
+    tag_len: Option<usize>,
+    payload_len: Option<usize>,
+) -> TeeResult {
     let mut cs = tee_cryp_state_get(id)?;
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -1231,16 +1237,23 @@ pub fn tee_cryp_authenc_init(id: u32, nonce: &[u8]) -> TeeResult {
     };
 
     drop(cs_guard);
-    crypto_authenc_init(cs.clone(), key.as_slice(), nonce)
+    crypto_authenc_init(
+        cs.clone(),
+        key.as_slice(),
+        nonce,
+        aad_len,
+        tag_len,
+        payload_len,
+    )
 }
 
 pub fn syscall_authenc_init(
     arg0: usize,
     arg1: usize,
     arg2: usize,
-    _arg3: usize,
-    _arg4: usize,
-    _arg5: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
 ) -> TeeResult {
     let nonce_ptr = arg1 as *const u8;
     let nonce_len = arg2;
@@ -1248,7 +1261,11 @@ pub fn syscall_authenc_init(
     let nonce_slice = unsafe { core::slice::from_raw_parts(nonce_ptr, nonce_len) };
     let nonce = bb_memdup_user(nonce_slice)?;
 
-    tee_cryp_authenc_init(arg0 as _, &nonce)
+    let aad_len = if arg4 == 0 { None } else { Some(arg4) };
+    let tag_len = if arg3 == 0 { None } else { Some(arg3) };
+    let payload_len = if arg5 == 0 { None } else { Some(arg5) };
+
+    tee_cryp_authenc_init(arg0 as _, &nonce, aad_len, tag_len, payload_len)
 }
 
 pub fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
@@ -2569,7 +2586,7 @@ pub mod tests_cryp {
         let mut out = [0u8; 80];
         let mut total_len = 0;
 
-        let res = tee_cryp_authenc_init(state, &nonce);
+        let res = tee_cryp_authenc_init(state, &nonce, None, None, None);
         assert!(res.is_ok());
 
         let res = tee_cryp_authenc_update_aad(state, &ad);
@@ -2628,6 +2645,119 @@ pub mod tests_cryp {
 
         let result = tee_cryp_authenc_update_aad(state, b"aad");
         assert_eq!(result.err(), Some(TEE_ERROR_BAD_STATE));
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_aes_ccm_encrypt_decrypt() {
+        let mut enc_state: u32 = 0;
+        let mut dec_state: u32 = 0;
+        let mut enc_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut dec_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, enc_obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let enc_obj_id = enc_obj_id.read();
+
+        let result = syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dec_obj_id.as_user_ref());
+        assert!(result.is_ok());
+        let dec_obj_id = dec_obj_id.read();
+
+        let key = [
+            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d,
+            0x4e, 0x4f,
+        ];
+        let nonce = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16];
+        let aad = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+        let plain = [0x20, 0x21, 0x22, 0x23];
+        let cipher_expect = [0x71, 0x62, 0x01, 0x5b];
+        let tag_expect = [0x4d, 0xac, 0x25, 0x5d];
+
+        let enc_obj = tee_obj_get(enc_obj_id as tee_obj_id_type);
+        assert!(enc_obj.is_ok());
+        let enc_obj = enc_obj.unwrap();
+        let mut enc_obj_guard = enc_obj.lock();
+        let mut enc_secret = tee_cryp_obj_secret_wrapper::new(32);
+        enc_secret.set_secret_data(&key);
+        let _ = core::mem::replace(
+            &mut enc_obj_guard.attr[0],
+            TeeCryptObj::obj_secret(enc_secret),
+        );
+        drop(enc_obj_guard);
+
+        let dec_obj = tee_obj_get(dec_obj_id as tee_obj_id_type);
+        assert!(dec_obj.is_ok());
+        let dec_obj = dec_obj.unwrap();
+        let mut dec_obj_guard = dec_obj.lock();
+        let mut dec_secret = tee_cryp_obj_secret_wrapper::new(32);
+        dec_secret.set_secret_data(&key);
+        let _ = core::mem::replace(
+            &mut dec_obj_guard.attr[0],
+            TeeCryptObj::obj_secret(dec_secret),
+        );
+        drop(dec_obj_guard);
+
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_AES_CCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(enc_obj_id as _),
+            None,
+            &mut enc_state,
+        );
+        assert!(res.is_ok());
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_AES_CCM,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(dec_obj_id as _),
+            None,
+            &mut dec_state,
+        );
+        assert!(res.is_ok());
+
+        let res = tee_cryp_authenc_init(
+            enc_state,
+            &nonce,
+            Some(aad.len()),
+            Some(tag_expect.len()),
+            Some(plain.len()),
+        );
+        assert!(res.is_ok());
+        let res = tee_cryp_authenc_update_aad(enc_state, &aad);
+        assert!(res.is_ok());
+
+        let mut enc_out = [0u8; 20];
+        let res = tee_cryp_authenc_update_payload(enc_state, &plain, &mut enc_out);
+        assert!(res.is_ok());
+        let enc_len = res.unwrap();
+        assert_eq!(enc_len, plain.len());
+        assert_eq!(&enc_out[..enc_len], &cipher_expect);
+
+        let mut tag = [0u8; 4];
+        let res = tee_cryp_authenc_enc_final(enc_state, None, &mut enc_out[enc_len..], &mut tag);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0);
+        assert_eq!(tag, tag_expect);
+
+        let res = tee_cryp_authenc_init(
+            dec_state,
+            &nonce,
+            Some(aad.len()),
+            Some(tag_expect.len()),
+            Some(cipher_expect.len()),
+        );
+        assert!(res.is_ok());
+        let res = tee_cryp_authenc_update_aad(dec_state, &aad);
+        assert!(res.is_ok());
+
+        let mut dec_out = [0u8; 20];
+        let res = tee_cryp_authenc_update_payload(dec_state, &cipher_expect, &mut dec_out);
+        assert!(res.is_ok());
+        let dec_len = res.unwrap();
+        assert_eq!(dec_len, plain.len());
+        assert_eq!(&dec_out[..dec_len], &plain);
+
+        let res = tee_cryp_authenc_dec_final(dec_state, None, &mut dec_out[dec_len..], &tag_expect);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0);
     }
 
     #[unittest::def_test(custom)]
@@ -2695,7 +2825,7 @@ pub mod tests_cryp {
         let mut out = [0u8; 80];
         let mut total_len = 0;
 
-        let res = tee_cryp_authenc_init(state, &nonce);
+        let res = tee_cryp_authenc_init(state, &nonce, None, None, None);
         assert!(res.is_ok());
 
         let res = tee_cryp_authenc_update_aad(state, &ad);
