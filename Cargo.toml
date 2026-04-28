@@ -171,3 +171,4 @@ strum = { version = "0.27", default-features = false, features = ["derive"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 x86_64 = { version = "0.15.2", features = ["instructions"] }
 fs9p = { path = "fs/fs9p", default-features = false }
+buddy-slab-allocator = "0.4"

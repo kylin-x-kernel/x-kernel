@@ -4,10 +4,7 @@
 
 //! Buddy allocation in page-granularity.
 
-use buddy_slab_allocator::{
-    AddrTranslator, AllocError as BuddyAllocError, BaseAllocator as BuddyBaseAllocator,
-    CompositePageAllocator, PageAllocator as BuddyPageAllocatorTrait,
-};
+use buddy_slab_allocator::{AllocError as BuddyAllocError, BuddyAllocator};
 
 use crate::{AllocError, AllocResult, BaseAllocator, PageAllocator};
 
@@ -15,21 +12,18 @@ use crate::{AllocError, AllocResult, BaseAllocator, PageAllocator};
 ///
 /// [slab allocator]: ../slab_allocator/index.html
 pub struct BuddyPageAllocator<const PAGE_SIZE: usize> {
-    inner: CompositePageAllocator<PAGE_SIZE>,
+    inner: BuddyAllocator<PAGE_SIZE>,
 }
 
 impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
     /// Creates a new empty `BuddyPageAllocator`.
     pub const fn new() -> Self {
         Self {
-            inner: CompositePageAllocator::new(),
+            inner: BuddyAllocator::new(),
         }
     }
 
-    pub fn set_addr_translator(&mut self, translator: &'static dyn AddrTranslator) {
-        self.inner.set_addr_translator(translator);
-    }
-
+    /// Allocate pages whose physical address is below 4 GiB (DMA32 zone).
     pub fn allocate_pages_lowmem(
         &mut self,
         num_pages: usize,
@@ -52,11 +46,17 @@ fn map_alloc_error(err: BuddyAllocError) -> AllocError {
 
 impl<const PAGE_SIZE: usize> BaseAllocator for BuddyPageAllocator<PAGE_SIZE> {
     fn init_region(&mut self, start: usize, size: usize) {
-        BuddyBaseAllocator::init(&mut self.inner, start, size);
+        let region = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
+        unsafe {
+            self.inner
+                .init(region)
+                .expect("buddy allocator init failed");
+        }
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
-        BuddyBaseAllocator::add_memory(&mut self.inner, start, size).map_err(map_alloc_error)
+        let region = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
+        unsafe { self.inner.add_region(region).map_err(map_alloc_error) }
     }
 }
 
@@ -64,34 +64,36 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
     const PAGE_SIZE: usize = PAGE_SIZE;
 
     fn allocate_pages(&mut self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
-        BuddyPageAllocatorTrait::alloc_pages(&mut self.inner, num_pages, align_pow2)
+        self.inner
+            .alloc_pages(num_pages, align_pow2)
             .map_err(map_alloc_error)
     }
 
     fn deallocate_pages(&mut self, base: usize, num_pages: usize) {
-        BuddyPageAllocatorTrait::dealloc_pages(&mut self.inner, base, num_pages);
+        self.inner.dealloc_pages(base, num_pages);
     }
 
     fn allocate_pages_at(
         &mut self,
         base: usize,
-        num_pages: usize,
-        align_pow2: usize,
+        _num_pages: usize,
+        _align_pow2: usize,
     ) -> AllocResult<usize> {
-        BuddyPageAllocatorTrait::alloc_pages_at(&mut self.inner, base, num_pages, align_pow2)
-            .map_err(map_alloc_error)
+        // v0.4.0 BuddyAllocator does not support alloc_pages_at
+        let _ = base;
+        Err(AllocError::InvalidInput)
     }
 
     fn total_pages(&self) -> usize {
-        BuddyPageAllocatorTrait::total_pages(&self.inner)
+        self.inner.total_pages()
     }
 
     fn used_pages(&self) -> usize {
-        BuddyPageAllocatorTrait::used_pages(&self.inner)
+        self.inner.total_pages() - self.inner.free_pages()
     }
 
     fn available_pages(&self) -> usize {
-        BuddyPageAllocatorTrait::available_pages(&self.inner)
+        self.inner.free_pages()
     }
 }
 

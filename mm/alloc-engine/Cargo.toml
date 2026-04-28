@@ -12,7 +12,7 @@ repository.workspace = true
 default = []
 full = ["buddy-page", "tlsf", "slab", "buddy", "allocator_api"]
 
-buddy-page = ["dep:buddy_slab_allocator"]
+buddy-page = ["dep:buddy-slab-allocator"]
 
 tlsf = ["dep:rlsf"]
 slab = ["dep:slab_allocator"]
@@ -28,7 +28,7 @@ kerrno = { workspace = true, optional = true }
 rlsf = { version = "0.2", optional = true }
 buddy_system_allocator = { version = "0.10", default-features = false, optional = true }
 slab_allocator = { workspace = true, optional = true }
-buddy_slab_allocator = { package = "buddy-slab-allocator", version = "0.2", optional = true, features = ["tracking", "log"] }
+buddy-slab-allocator = { workspace = true, optional = true }
 unittest.workspace = true
 
 [dev-dependencies]

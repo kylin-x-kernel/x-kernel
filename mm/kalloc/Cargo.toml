@@ -16,6 +16,7 @@ tracking = ["dep:percpu", "dep:backtrace"]
 
 [dependencies]
 alloc-engine = { workspace = true, features = ["buddy-page"] }
+buddy-slab-allocator = { workspace = true }
 backtrace = { workspace = true, optional = true }
 cfg-if.workspace = true
 kaddr_layout.workspace = true

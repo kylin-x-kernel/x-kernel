@@ -189,7 +189,7 @@ def prefetchCargoDeps() {
 set -euo pipefail
 echo "==> Prefetching cargo dependencies for all platforms..."
 
-rustup target add aarch64-unknown-none-softfloat x86_64-unknown-none || true
+rustup target add aarch64-unknown-none-softfloat x86_64-unknown-none x86_64-unknown-uefi || true
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
 rustup +nightly-2026-03-08 target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
 

@@ -20,8 +20,10 @@ use core::{
 };
 
 #[allow(unused_imports)]
-use alloc_engine::{
-    AddrTranslator, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
+use alloc_engine::{AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator};
+use buddy_slab_allocator::{
+    SlabPoolTrait, SlabTrait,
+    eii::{slab_pool_impl, virt_to_phys_impl},
 };
 use kaddr_layout::v2p;
 use kspin::SpinNoIrq;
@@ -30,15 +32,52 @@ use strum::{IntoStaticStr, VariantArray};
 const PAGE_SIZE: usize = 0x1000;
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
 
-struct KernelAddrTranslator;
-
-impl AddrTranslator for KernelAddrTranslator {
-    fn virt_to_phys(&self, va: usize) -> Option<usize> {
-        Some(v2p(va))
-    }
+#[virt_to_phys_impl]
+fn kernel_virt_to_phys(vaddr: usize) -> usize {
+    v2p(vaddr)
 }
 
-static KERNEL_ADDR_TRANSLATOR: KernelAddrTranslator = KernelAddrTranslator;
+struct KernelSlabPool;
+impl SlabTrait for KernelSlabPool {
+    fn cpu_id(&self) -> usize {
+        0
+    }
+
+    fn page_size(&self) -> usize {
+        PAGE_SIZE
+    }
+
+    fn alloc(
+        &self,
+        _layout: Layout,
+    ) -> buddy_slab_allocator::AllocResult<buddy_slab_allocator::SlabAllocResult> {
+        Err(buddy_slab_allocator::AllocError::NoMemory)
+    }
+
+    fn add_slab(&self, _size_class: buddy_slab_allocator::SizeClass, _base: usize, _bytes: usize) {}
+
+    fn dealloc_local(
+        &self,
+        _ptr: NonNull<u8>,
+        _layout: Layout,
+    ) -> buddy_slab_allocator::SlabDeallocResult {
+        buddy_slab_allocator::SlabDeallocResult::Done
+    }
+}
+static KERNEL_SLAB_POOL: KernelSlabPool = KernelSlabPool;
+impl SlabPoolTrait for KernelSlabPool {
+    fn current_slab(&self) -> &dyn SlabTrait {
+        &KERNEL_SLAB_POOL
+    }
+
+    fn owner_slab(&self, _cpu_idx: usize) -> &dyn SlabTrait {
+        &KERNEL_SLAB_POOL
+    }
+}
+#[slab_pool_impl]
+fn kernel_slab_pool() -> &'static dyn SlabPoolTrait {
+    &KERNEL_SLAB_POOL
+}
 
 mod page;
 pub use page::GlobalPage;
@@ -359,14 +398,7 @@ impl GlobalAllocator {
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
-    fn configure_page_allocator(&self) {
-        self.palloc
-            .lock()
-            .set_addr_translator(&KERNEL_ADDR_TRANSLATOR);
-    }
-
     fn init_or_extend_page_allocator(&self, va: usize, size: usize) -> AllocResult {
-        self.configure_page_allocator();
         if self.page_ready.load(Ordering::Acquire) {
             self.palloc.lock().add_region(va, size)?;
         } else {

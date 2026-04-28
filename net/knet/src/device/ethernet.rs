@@ -306,20 +306,17 @@ impl NetDeviceOps for EthernetDevice {
         }
 
         let need_request = match self.neighbors.get(&next_hop) {
-            Some(Some(neighbor)) => {
-                if neighbor.expires_at > timestamp {
-                    Self::send_to(
-                        &mut self.inner,
-                        neighbor.hardware_address,
-                        ip_packet.len(),
-                        |buf| buf.copy_from_slice(ip_packet),
-                        EthernetProtocol::Ipv4,
-                    );
-                    return false;
-                } else {
-                    true
-                }
+            Some(Some(neighbor)) if neighbor.expires_at > timestamp => {
+                Self::send_to(
+                    &mut self.inner,
+                    neighbor.hardware_address,
+                    ip_packet.len(),
+                    |buf| buf.copy_from_slice(ip_packet),
+                    EthernetProtocol::Ipv4,
+                );
+                return false;
             }
+            Some(Some(_)) => true,
             // Request already sent
             Some(None) => false,
             None => true,

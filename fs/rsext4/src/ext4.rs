@@ -1370,7 +1370,7 @@ fn build_uninit_group_desc(
     desc.bg_inode_table_lo = gl.group_inode_table_startblocks as u32;
 
     // 理论空闲块数：整组减去元数据块
-    let used_meta = gl.metadata_blocks_in_group as u32;
+    let used_meta = gl.metadata_blocks_in_group;
     let free_blocks = layout.blocks_per_group.saturating_sub(used_meta);
 
     if group_id == 0 {

@@ -18,7 +18,6 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(doc_cfg)]
 #![feature(linkage)]
-#![feature(cfg_select)]
 
 #[cfg(test)]
 mod tests;
