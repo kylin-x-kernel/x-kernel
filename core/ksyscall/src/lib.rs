@@ -17,7 +17,6 @@ extern crate alloc;
 mod dispatch;
 mod fs;
 mod io_mpx;
-mod ipc;
 mod mm;
 mod net;
 mod resources;

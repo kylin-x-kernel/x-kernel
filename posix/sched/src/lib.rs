@@ -26,8 +26,8 @@ use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, PRIO_PGRP, PRIO_PROCESS, PRIO_USER,
     SCHED_RR, TIMER_ABSTIME, timespec,
 };
-use osvm::{VirtMutPtr, VirtPtr, load_vec, write_vm_mem};
-use posix_types::TimeValueLike;
+use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
 pub fn sys_sched_yield() -> KResult<isize> {
     ktask::yield_now();
@@ -48,7 +48,7 @@ fn sleep_impl(clock: impl Fn() -> TimeValue, dur: TimeValue) -> TimeValue {
 }
 
 /// Sleep some nanoseconds
-pub fn sys_nanosleep(req: *const timespec, rem: *mut timespec) -> KResult<isize> {
+pub fn sys_nanosleep(req: UserConstPtr<timespec>, rem: UserPtr<timespec>) -> KResult<isize> {
     // FIXME: AnyBitPattern
     let req = unsafe { req.read_uninit()?.assume_init() }.try_into_time_value()?;
     debug!("sys_nanosleep <= req: {req:?}");
@@ -69,8 +69,8 @@ pub fn sys_nanosleep(req: *const timespec, rem: *mut timespec) -> KResult<isize>
 pub fn sys_clock_nanosleep(
     clock_id: __kernel_clockid_t,
     flags: u32,
-    req: *const timespec,
-    rem: *mut timespec,
+    req: UserConstPtr<timespec>,
+    rem: UserPtr<timespec>,
 ) -> KResult<isize> {
     let clock = match clock_id as u32 {
         CLOCK_REALTIME => khal::time::wall_time,
@@ -103,7 +103,11 @@ pub fn sys_clock_nanosleep(
     }
 }
 
-pub fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, user_mask: *mut u8) -> KResult<isize> {
+pub fn sys_sched_getaffinity(
+    pid: i32,
+    cpusetsize: usize,
+    user_mask: UserPtr<u8>,
+) -> KResult<isize> {
     if cpusetsize * 8 < kbuild_config::CPU_NUM {
         return Err(KError::InvalidInput);
     }
@@ -116,14 +120,18 @@ pub fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, user_mask: *mut u8) ->
     let mask = current().cpumask();
     let mask_bytes = mask.as_bytes();
 
-    write_vm_mem(user_mask, mask_bytes)?;
+    user_mask.write_vm_slice(mask_bytes)?;
 
     Ok(mask_bytes.len() as _)
 }
 
-pub fn sys_sched_setaffinity(_pid: i32, cpusetsize: usize, user_mask: *const u8) -> KResult<isize> {
+pub fn sys_sched_setaffinity(
+    _pid: i32,
+    cpusetsize: usize,
+    user_mask: UserConstPtr<u8>,
+) -> KResult<isize> {
     let size = cpusetsize.min(kbuild_config::CPU_NUM.div_ceil(8));
-    let user_mask = load_vec(user_mask, size)?;
+    let user_mask = user_mask.load_vm_vec(size)?;
     let mut cpu_mask = KCpuMask::new();
 
     for i in 0..(size * 8).min(kbuild_config::CPU_NUM) {
@@ -142,11 +150,11 @@ pub fn sys_sched_getscheduler(_pid: i32) -> KResult<isize> {
     Ok(SCHED_RR as _)
 }
 
-pub fn sys_sched_setscheduler(_pid: i32, _policy: i32, _param: *const ()) -> KResult<isize> {
+pub fn sys_sched_setscheduler(_pid: i32, _policy: i32, _param: UserConstPtr<()>) -> KResult<isize> {
     Ok(0)
 }
 
-pub fn sys_sched_getparam(_pid: i32, _param: *mut ()) -> KResult<isize> {
+pub fn sys_sched_getparam(_pid: i32, _param: UserPtr<()>) -> KResult<isize> {
     Ok(0)
 }
 

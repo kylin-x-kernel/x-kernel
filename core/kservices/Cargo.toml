@@ -75,4 +75,5 @@ osvm.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
 tee_kernel = { workspace = true, optional = true }
 kcore.workspace = true
+posix-ipc.workspace = true
 procfs.workspace = true

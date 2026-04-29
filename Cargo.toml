@@ -66,6 +66,7 @@ kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
 
 # Internal: POSIX ABI compatibility
+posix-ipc = { path = "posix/ipc" }
 posix-sched = { path = "posix/sched" }
 posix-types = { path = "posix/types" }
 

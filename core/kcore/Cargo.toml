@@ -21,7 +21,6 @@ kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 bitflags.workspace = true
-bytemuck = { workspace = true, features = ["derive"] }
 cfg-if.workspace = true
 event-listener.workspace = true
 extern-trait.workspace = true

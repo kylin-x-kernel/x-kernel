@@ -10,7 +10,9 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+bytemuck = { workspace = true }
 kerrno = { workspace = true }
 khal = { workspace = true }
 linux-raw-sys = { workspace = true }
+osvm = { workspace = true }
 unittest = { workspace = true}

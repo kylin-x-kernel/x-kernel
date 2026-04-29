@@ -2,28 +2,32 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Inter-process communication syscalls.
+//! POSIX IPC syscall implementations.
 //!
-//! This module implements IPC mechanisms including:
-//! - Message queues (msgget, msgsnd, msgrcv, etc.)
-//! - Shared memory (shmget, shmat, shmdt, etc.)
-//! - Semaphores (semget, semop, semctl, etc.)
-//! - IPC permission and control operations
+//! - Message queues (msgget, msgsnd, msgrcv, msgctl)
+//! - Shared memory (shmget, shmat, shmdt, shmctl)
 
-use core::sync::atomic::{AtomicI32, Ordering};
+#![no_std]
 
-use kcore::shm::IpcPerm;
+#[macro_use]
+extern crate klogger;
 
-static IPC_ID: AtomicI32 = AtomicI32::new(0);
-
-/// Returns the next IPC identifier.
-fn next_ipc_id() -> i32 {
-    IPC_ID.fetch_add(1, Ordering::Relaxed)
-}
+extern crate alloc;
 
 mod msg;
 mod shm;
+
+use core::sync::atomic::{AtomicI32, Ordering};
+
+use posix_types::IpcPerm;
+
 pub use self::{msg::*, shm::*};
+
+static IPC_ID: AtomicI32 = AtomicI32::new(0);
+
+fn next_ipc_id() -> i32 {
+    IPC_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 // IPC command constants
 const IPC_PRIVATE: i32 = 0;
@@ -44,9 +48,7 @@ const GROUP_WRITE: u32 = 0o020;
 const OTHER_READ: u32 = 0o004;
 const OTHER_WRITE: u32 = 0o002;
 
-/// Checks whether the current user has IPC permission for the given entry.
 fn has_ipc_permission(perm: &IpcPerm, current_uid: u32, current_gid: u32, is_write: bool) -> bool {
-    // root user has all permissions
     if current_uid == 0 {
         return true;
     }

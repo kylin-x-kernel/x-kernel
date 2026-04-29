@@ -9,7 +9,6 @@ use core::{ffi::c_long, sync::atomic::Ordering};
 use bytemuck::AnyBitPattern;
 use kcore::{
     futex::FutexKey,
-    shm::SHM_MANAGER,
     task::{
         AsThread, get_process_data, get_task, send_signal_to_process, send_signal_to_thread,
         set_timer_state,
@@ -23,6 +22,7 @@ use ksignal::{SignalInfo, Signo};
 use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_ipc::SHM_MANAGER;
 
 use crate::signal::{check_signals, unblock_next_signal};
 

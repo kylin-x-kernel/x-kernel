@@ -10,7 +10,6 @@
 //! The module is organized into submodules for different categories:
 //! - `fs`: File system operations
 //! - `io_mpx`: I/O multiplexing (select, poll, epoll)
-//! - `ipc`: Inter-process communication
 //! - `mm`: Memory management
 //! - `net`: Network operations
 //! - `resources`: Resource limits and usage
@@ -23,10 +22,10 @@
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
+use posix_ipc::*;
 
 use crate::{
-    fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
-    time::*,
+    fs::*, io_mpx::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*, time::*,
 };
 
 /// Dispatches a syscall from the given user context.
@@ -378,24 +377,24 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         // task sched
         Sysno::sched_yield => sys_sched_yield(),
-        Sysno::nanosleep => sys_nanosleep(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::nanosleep => sys_nanosleep(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::clock_nanosleep => sys_clock_nanosleep(
             uctx.arg0() as _,
             uctx.arg1() as _,
-            uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg2().into(),
+            uctx.arg3().into(),
         ),
         Sysno::sched_getaffinity => {
-            sys_sched_getaffinity(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
+            sys_sched_getaffinity(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into())
         }
         Sysno::sched_setaffinity => {
-            sys_sched_setaffinity(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
+            sys_sched_setaffinity(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into())
         }
         Sysno::sched_getscheduler => sys_sched_getscheduler(uctx.arg0() as _),
         Sysno::sched_setscheduler => {
-            sys_sched_setscheduler(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
+            sys_sched_setscheduler(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into())
         }
-        Sysno::sched_getparam => sys_sched_getparam(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::sched_getparam => sys_sched_getparam(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::getpriority => sys_getpriority(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::setpriority => sys_setpriority(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
 
@@ -536,18 +535,18 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::msgget => sys_msgget(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::msgsnd => sys_msgsnd(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
         Sysno::msgrcv => sys_msgrcv(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
             uctx.arg4() as _,
         ),
-        Sysno::msgctl => sys_msgctl(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::msgctl => sys_msgctl(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into()),
 
         // shm
         Sysno::shmget => sys_shmget(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
