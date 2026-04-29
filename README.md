@@ -74,9 +74,11 @@ make savedefconfig
 This writes a minimized `./defconfig` containing only values that differ from Kconfig defaults. It is useful when updating a platform defconfig after menuconfig changes.
 
 ### 3. Prepare rootfs
-Directly run the following commands to build the root filesystem image for the desired architecture:
+Download a pre-built root filesystem image:
 ```bash
-make rootfs
+make rootfs                        # alpine-busybox (musl, default)
+make rootfs ROOTFS_VARIANT=debian-busybox # debian-busybox (glibc)
+make rootfs ROOTFS_VARIANT=debian-systemd # debian-systemd (glibc)
 ```
 Or you can build your own root filesystem image(only supported ext4 and musl for now)
 

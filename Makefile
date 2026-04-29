@@ -133,8 +133,9 @@ else ifeq ($(PLAT_NAME), aarch64-bsta1000b)
   include scripts/make/bsta1000b-fada.mk
 endif
 
-ROOTFS_URL = https://gitee.com/openkylin/x-kernel-image/releases/download/20260302/
-ROOTFS_IMG = rootfs-$(ARCH).img
+ROOTFS_URL = https://gitee.com/openkylin/x-kernel-image/releases/download/rootfs
+ROOTFS_VARIANT ?= alpine-busybox
+ROOTFS_IMG = x-kernel-$(ROOTFS_VARIANT)-$(ARCH).img
 
 endif # end of IS_BUILD
 
