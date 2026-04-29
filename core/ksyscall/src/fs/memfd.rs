@@ -14,7 +14,7 @@ use core::ffi::c_char;
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
 use kservices::mm::UserConstPtr;
-use linux_raw_sys::general::MFD_CLOEXEC;
+use linux_raw_sys::general::{MFD_CLOEXEC, O_RDWR};
 
 use crate::file::{File, FileLike};
 
@@ -34,7 +34,9 @@ pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isiz
                 .open(&fs, &name)?
                 .into_file()?;
             let cloexec = flags & MFD_CLOEXEC != 0;
-            return File::new(file).add_to_fd_table(cloexec).map(|fd| fd as _);
+            return File::new(file, O_RDWR)
+                .add_to_fd_table(cloexec)
+                .map(|fd| fd as _);
         }
     }
     Err(KError::TooManyOpenFiles)

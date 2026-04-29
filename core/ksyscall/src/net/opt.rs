@@ -106,6 +106,7 @@ macro_rules! call_dispatch {
             (PROTO_TCP, TCP_INFO) => TcpInfo,
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
+            (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,
         }
     }};
     ($dispatch:ident, $in:expr, $($pat:pat => $which:ident $(as $conv:ty)?),* $(,)?) => {
@@ -196,6 +197,7 @@ pub fn sys_setsockopt(
             socket.set_option(SetSocketOption::$which(&mut val))?;
         };
     }
+
     call_dispatch!(dispatch, (level, optname));
 
     Ok(0)

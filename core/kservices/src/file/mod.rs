@@ -27,8 +27,8 @@ use kpoll::Pollable;
 use ksync::RwLock;
 use ktask::current;
 use linux_raw_sys::general::{
-    RLIMIT_NOFILE, S_IFMT, S_IFREG, STATX_ATTR_WRITE_ATOMIC, STATX_WRITE_ATOMIC, stat, statx,
-    statx_timestamp,
+    O_RDONLY, O_WRONLY, RLIMIT_NOFILE, S_IFMT, S_IFREG, STATX_ATTR_WRITE_ATOMIC,
+    STATX_WRITE_ATOMIC, stat, statx, statx_timestamp,
 };
 
 pub use self::{
@@ -203,6 +203,11 @@ pub trait FileLike: Pollable + DowncastSync {
     /// Performs I/O control operations.
     fn ioctl(&self, _cmd: u32, _arg: usize) -> KResult<usize> {
         Err(KError::NotATty)
+    }
+
+    /// Returns the open flags for this file (e.g., O_RDONLY, O_WRONLY, O_RDWR).
+    fn open_flags(&self) -> u32 {
+        0
     }
 
     /// Returns whether this file is in non-blocking mode.
@@ -417,6 +422,13 @@ mod kstat_tests {
 /// resources are properly released. Without this, parent processes blocking on
 /// pipe reads will never receive EOF.
 pub fn close_all_fds() {
+    // CLONE_FILES may share the same fd table across multiple tasks/processes.
+    // In that case, an exiting sharer must not clear the whole table, or other
+    // live sharers (including the parent) will lose stdout/stderr unexpectedly.
+    if Arc::strong_count(&FD_TABLE) > 1 {
+        return;
+    }
+
     let mut table = FD_TABLE.write();
     let ids: alloc::vec::Vec<usize> = table.ids().collect();
     let mut removed = alloc::vec::Vec::with_capacity(ids.len());
@@ -436,14 +448,15 @@ pub fn close_all_fds() {
 pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, { FILE_LIMIT }>) -> KResult<()> {
     assert_eq!(fd_table.count(), 0);
     let cx = FS_CONTEXT.lock();
-    let open = |options: &mut OpenOptions| {
+    let open = |options: &mut OpenOptions, flags| {
         KResult::Ok(Arc::new(File::new(
             options.open(&cx, "/dev/console")?.into_file()?,
+            flags,
         )))
     };
 
-    let tty_in = open(OpenOptions::new().read(true).write(false))?;
-    let tty_out = open(OpenOptions::new().read(false).write(true))?;
+    let tty_in = open(OpenOptions::new().read(true).write(false), O_RDONLY as _)?;
+    let tty_out = open(OpenOptions::new().read(false).write(true), O_WRONLY as _)?;
     fd_table
         .add(FileDescriptor {
             inner: tty_in,

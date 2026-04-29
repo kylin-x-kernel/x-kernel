@@ -13,7 +13,7 @@ use knet::{
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
 use kpoll::{IoEvents, Pollable};
-use linux_raw_sys::general::S_IFSOCK;
+use linux_raw_sys::general::{O_RDWR, S_IFSOCK};
 
 use super::{FileLike, Kstat};
 use crate::file::{IoDst, IoSrc, get_file_like};
@@ -72,6 +72,10 @@ impl FileLike for Socket {
     /// Returns a string representation of the socket address.
     fn path(&self) -> Cow<'_, str> {
         format!("socket:[{}]", self as *const _ as usize).into()
+    }
+
+    fn open_flags(&self) -> u32 {
+        O_RDWR
     }
 
     /// Converts a file descriptor to a socket reference.

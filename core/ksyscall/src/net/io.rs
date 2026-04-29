@@ -14,11 +14,9 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{net::Ipv4Addr, time::Duration};
 
 use kerrno::{KError, KResult};
+use khal::time::wall_time;
 use kio::prelude::*;
-use knet::{
-    CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps,
-    options::{Configurable, GetSocketOption, SetSocketOption},
-};
+use knet::{CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps};
 use kservices::mm::{UserConstPtr, UserPtr, VmBytes, VmBytesMut};
 use linux_raw_sys::{
     general::timespec,
@@ -226,7 +224,10 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> 
 
 /// Send multiple datagrams in one syscall.
 pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) -> KResult<isize> {
-    if vlen == 0 || vlen > MMSG_MAX_VLEN {
+    if vlen == 0 {
+        return Ok(0);
+    }
+    if vlen > MMSG_MAX_VLEN {
         return Err(KError::InvalidInput);
     }
 
@@ -266,55 +267,59 @@ pub fn sys_recvmmsg(
     flags: u32,
     timeout: UserConstPtr<timespec>,
 ) -> KResult<isize> {
-    if vlen == 0 || vlen > MMSG_MAX_VLEN {
+    if vlen == 0 {
+        return Ok(0);
+    }
+    if vlen > MMSG_MAX_VLEN {
         return Err(KError::InvalidInput);
     }
 
     let timeout = parse_recvmmsg_timeout(timeout)?;
-    let socket = Socket::from_fd(fd)?;
-    let mut old_timeout = Duration::from_nanos(0);
-    socket.get_option(GetSocketOption::ReceiveTimeout(&mut old_timeout))?;
-
-    if let Some(timeout) = timeout {
-        socket.set_option(SetSocketOption::ReceiveTimeout(&timeout))?;
-    }
+    // TODO: deadline is only checked between recv_impl calls. If a single
+    // recv_impl blocks waiting for data (socket has nothing to read), the
+    // deadline cannot interrupt it. Needs a non-blocking recv path or
+    // SO_RCVTIMEO support at the socket layer to fix.
+    let deadline = timeout.map(|t| wall_time() + t);
 
     let msgvec = msgvec.get_as_mut_slice(vlen as usize)?;
     let mut received = 0;
-    let result = (|| {
-        for msg in msgvec.iter_mut() {
-            match recv_impl(
-                fd,
-                IoVectorBuf::new(msg.msg_hdr.msg_iov as *mut IoVec, msg.msg_hdr.msg_iovlen)?
-                    .into_io(),
-                flags,
-                UserPtr::from(msg.msg_hdr.msg_name as usize),
-                UserPtr::from(&mut msg.msg_hdr.msg_namelen as *mut _ as *mut socklen_t),
-                (!msg.msg_hdr.msg_control.is_null()).then(|| {
-                    CMsgBuilder::new(
-                        UserPtr::from(msg.msg_hdr.msg_control as *mut cmsghdr),
-                        &mut msg.msg_hdr.msg_controllen,
-                    )
-                }),
-            ) {
-                Ok(n) => {
-                    msg.msg_len = n as u32;
-                    received += 1;
+    for msg in msgvec.iter_mut() {
+        if let Some(deadline) = deadline
+            && wall_time() >= deadline
+        {
+            if received == 0 {
+                return Err(KError::WouldBlock);
+            }
+            break;
+        }
+
+        let recv = recv_impl(
+            fd,
+            IoVectorBuf::new(msg.msg_hdr.msg_iov as *mut IoVec, msg.msg_hdr.msg_iovlen)?.into_io(),
+            flags,
+            UserPtr::from(msg.msg_hdr.msg_name as usize),
+            UserPtr::from(&mut msg.msg_hdr.msg_namelen as *mut _ as *mut socklen_t),
+            (!msg.msg_hdr.msg_control.is_null()).then(|| {
+                CMsgBuilder::new(
+                    UserPtr::from(msg.msg_hdr.msg_control as *mut cmsghdr),
+                    &mut msg.msg_hdr.msg_controllen,
+                )
+            }),
+        );
+
+        match recv {
+            Ok(n) => {
+                msg.msg_len = n as u32;
+                received += 1;
+            }
+            Err(e) => {
+                if received == 0 {
+                    return Err(e);
                 }
-                Err(e) => {
-                    if received == 0 {
-                        return Err(e);
-                    }
-                    break;
-                }
+                break;
             }
         }
-        Ok(received)
-    })();
-
-    if timeout.is_some() {
-        socket.set_option(SetSocketOption::ReceiveTimeout(&old_timeout))?;
     }
 
-    result
+    Ok(received)
 }

@@ -177,3 +177,50 @@ make clean_c     # C object files only
 make rootfs      # Download rootfs image
 make disk_img    # Create empty FAT32 disk image
 ```
+
+### Add Autostart via Rootfs Only
+
+If you want to add autostart behavior without changing kernel source files, you can inject a script into `disk.img` only.
+
+This rootfs uses `/etc/profile` to source `/etc/profile.d/*.sh`, so a script in `/etc/profile.d/` runs on login shell startup.
+
+```bash
+# 1) Build or refresh rootfs image
+make rootfs ARCH=aarch64
+
+# 2) Prepare an autostart hook script locally
+cat > /tmp/99-xkernel-autostart.sh << 'EOF'
+#!/bin/sh
+[ -n "${XKERNEL_AUTOSTART_DONE:-}" ] && return 0
+export XKERNEL_AUTOSTART_DONE=1
+
+echo "[autostart] profile.d startup hook triggered"
+date
+
+# Put your app startup command here
+# /path/to/your/app --arg1 --arg2 &
+EOF
+
+# 3) Inject into rootfs image (ext4)
+debugfs -w -R "write /tmp/99-xkernel-autostart.sh /etc/profile.d/99-xkernel-autostart.sh" disk.img
+
+# 4) Verify file content in image
+debugfs -R "cat /etc/profile.d/99-xkernel-autostart.sh" disk.img
+
+# 5) Boot and verify
+make run VSOCK=n
+```
+
+Expected runtime log contains:
+
+```text
+[autostart] profile.d startup hook triggered
+```
+
+Rollback:
+
+```bash
+debugfs -w -R "rm /etc/profile.d/99-xkernel-autostart.sh" disk.img
+```
+
+Note for fish users: if heredoc handling is unstable in your shell integration, use `printf`/`echo` pipeline to create the temporary script file.

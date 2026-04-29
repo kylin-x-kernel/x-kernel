@@ -18,7 +18,7 @@ use core::{
 };
 
 use bitflags::bitflags;
-use fs_ng_vfs::{DirEntry, FileNode, Location, NodePermission, NodeType, Reference};
+use fs_ng_vfs::{DirEntry, FileNode, Location, NodeType, Reference};
 use kcore::{task::AsThread, vfs::Device};
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
@@ -117,7 +117,7 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
                     file = kfs::File::new(FileBackend::Direct(loc), file.flags());
                 }
             }
-            Arc::new(File::new(file))
+            Arc::new(File::new(file, flags))
         }
         OpenResult::Dir(dir) => Arc::new(Directory::new(dir)),
     };
@@ -284,18 +284,9 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
         F_GETFL => {
             let f = get_file_like(fd)?;
 
-            let mut ret = 0;
+            let mut ret = f.open_flags();
             if f.nonblocking() {
                 ret |= O_NONBLOCK;
-            }
-
-            let perm = NodePermission::from_bits_truncate(f.stat()?.mode as _);
-            if perm.contains(NodePermission::OWNER_WRITE) {
-                if perm.contains(NodePermission::OWNER_READ) {
-                    ret |= O_RDWR;
-                } else {
-                    ret |= O_WRONLY;
-                }
             }
 
             Ok(ret as _)

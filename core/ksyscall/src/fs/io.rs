@@ -325,10 +325,12 @@ pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     let any_file = crate::file::get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(false)?;
+        return Ok(0);
     } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
         d.inner().sync(false)?;
+        return Ok(0);
     }
-    Ok(0)
+    Err(KError::from(LinuxError::EINVAL))
 }
 
 /// Synchronizes a file's data (not metadata) with storage.
@@ -338,10 +340,12 @@ pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     let any_file = crate::file::get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(true)?;
+        return Ok(0);
     } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
         d.inner().sync(true)?;
+        return Ok(0);
     }
-    Ok(0)
+    Err(KError::from(LinuxError::EINVAL))
 }
 
 /// Provides access pattern advice for a file region.

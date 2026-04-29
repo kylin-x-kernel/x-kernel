@@ -123,15 +123,17 @@ pub fn metadata_to_kstat(metadata: &Metadata) -> Kstat {
 /// Manages blocking/non-blocking I/O and provides file operations through the `FileLike` trait.
 pub struct File {
     inner: kfs::File,
+    open_flags: u32,
     /// Non-blocking flag for this file descriptor
     nonblock: AtomicBool,
 }
 
 impl File {
     /// Creates a new file wrapper from the underlying kernel file.
-    pub fn new(inner: kfs::File) -> Self {
+    pub fn new(inner: kfs::File, open_flags: u32) -> Self {
         Self {
             inner,
+            open_flags,
             nonblock: AtomicBool::new(false),
         }
     }
@@ -197,6 +199,11 @@ impl FileLike for File {
     /// Returns whether non-blocking mode is enabled.
     fn nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Acquire)
+    }
+
+    /// Returns the open flags for this file (e.g., O_RDONLY, O_WRONLY, O_RDWR).
+    fn open_flags(&self) -> u32 {
+        self.open_flags
     }
 
     /// Returns the absolute path of the file.

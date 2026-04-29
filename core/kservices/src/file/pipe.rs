@@ -18,7 +18,10 @@ use ktask::{
     current,
     future::{block_on, poll_io},
 };
-use linux_raw_sys::{general::S_IFIFO, ioctl::FIONREAD};
+use linux_raw_sys::{
+    general::{O_RDONLY, O_WRONLY, S_IFIFO},
+    ioctl::FIONREAD,
+};
 use memaddr::PAGE_SIZE_4K;
 use osvm::VirtMutPtr;
 use ringbuf::{
@@ -217,6 +220,11 @@ impl FileLike for Pipe {
     /// Returns a string representation of the pipe.
     fn path(&self) -> Cow<'_, str> {
         format!("pipe:[{}]", self as *const _ as usize).into()
+    }
+
+    /// Returns the open flags for this pipe end (O_RDONLY for read end, O_WRONLY for write end).
+    fn open_flags(&self) -> u32 {
+        if self.is_read() { O_RDONLY } else { O_WRONLY }
     }
 
     /// Sets or clears the non-blocking flag.
