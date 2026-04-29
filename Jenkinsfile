@@ -6,8 +6,8 @@ def teeResults = [:]
 pipeline {
     agent {
         docker {
-            image 'yeanwang/x-kernel-builder:v1.4'
-            args '-v /var/run/docker.sock:/var/run/docker.sock -v /var/jenkins_home/cargo/registry:/usr/local/cargo/registry -v /var/jenkins_home/xkernel-target:/xkernel-target --privileged -u root:root'
+            image 'yeanwang/x-kernel-builder:v1.5'
+            args '-v /var/run/docker.sock:/var/run/docker.sock -v /var/jenkins_home/cargo/registry:/usr/local/cargo/registry -v /var/jenkins_home/.rustup/toolchains:/usr/local/rustup/toolchains -v /var/jenkins_home/xkernel-target:/xkernel-target --privileged -u root:root'
         }
     }
 
@@ -24,8 +24,10 @@ pipeline {
         LIBUTEE_REPO = 'https://gitee.com/openkylin/rust-libutee'
         TEST_HARNESS_REPO = 'https://gitee.com/openkylin/starry-test-harness'
         TEST_HARNESS_BRANCH = 'master'
+        AUX_RUST_TOOLCHAIN = 'nightly-2026-03-08'
         CARGO_TERM_COLOR = 'always'
         CARGO_REGISTRIES_CRATES_IO_PROTOCOL = 'sparse'
+        RUSTUP_PERMIT_COPY_RENAME = '1'
         PYTHONUNBUFFERED = '1'
         TARGET_DIR = '/xkernel-target'
     }
@@ -43,6 +45,20 @@ pipeline {
             post {
                 failure {
                     script { ciResults['Prepare Source'] = [status: 'failed', detail: '源码准备失败（可能是分支分叉需要 rebase）'] }
+                }
+            }
+        }
+
+        stage('Check Environment') {
+            steps {
+                script {
+                    checkBuildEnvironment()
+                    ciResults['Check Environment'] = [status: 'passed']
+                }
+            }
+            post {
+                failure {
+                    script { ciResults['Check Environment'] = [status: 'failed', detail: 'Rust 工具链组件或 target 安装失败'] }
                 }
             }
         }
@@ -189,10 +205,6 @@ def prefetchCargoDeps() {
 set -euo pipefail
 echo "==> Prefetching cargo dependencies for all platforms..."
 
-rustup target add aarch64-unknown-none-softfloat x86_64-unknown-none x86_64-unknown-uefi || true
-rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
-rustup +nightly-2026-03-08 target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl || true
-
 declare -A ARCH_TARGET=(
     [aarch64]=aarch64-unknown-none-softfloat
     [x86_64]=x86_64-unknown-none
@@ -216,6 +228,103 @@ echo "==> Dependency prefetch complete"
     }
 }
 
+def checkBuildEnvironment() {
+    ws("${env.ROOT_WS}/env-check") {
+        def stageWorkspace = pwd()
+        try {
+            deleteDir()
+            restoreSource()
+            sh '''#!/bin/bash
+set -euo pipefail
+
+echo "==> Checking Rust build environment..."
+NIGHTLY_TOOLCHAIN="${AUX_RUST_TOOLCHAIN}"
+
+retry() {
+    local attempts="$1"
+    shift
+    local i
+    for i in $(seq 1 "${attempts}"); do
+        "$@" && return 0
+        if [ "${i}" = "${attempts}" ]; then
+            return 1
+        fi
+        echo "Command failed, retrying (${i}/${attempts}): $*" >&2
+        sleep 5
+    done
+}
+
+eval "$(
+python3 <<'PY'
+import shlex
+import tomllib
+
+with open("rust-toolchain.toml", "rb") as f:
+    toolchain = tomllib.load(f)["toolchain"]
+
+def array(name, values):
+    print(f"{name}=(" + " ".join(shlex.quote(v) for v in values) + ")")
+
+print("XKERNEL_TOOLCHAIN=" + shlex.quote(toolchain["channel"]))
+array("XKERNEL_COMPONENTS", toolchain.get("components", []))
+array("XKERNEL_TARGETS", toolchain.get("targets", []))
+PY
+)"
+
+DEFAULT_EXTRA_TARGETS=(
+    x86_64-unknown-uefi
+    x86_64-unknown-linux-musl
+    aarch64-unknown-linux-musl
+    riscv64gc-unknown-linux-musl
+)
+NIGHTLY_TARGETS=(
+    x86_64-unknown-linux-musl
+    aarch64-unknown-linux-musl
+    riscv64gc-unknown-linux-musl
+)
+
+dedup_words() {
+    printf '%s\n' "$@" | awk 'NF && !seen[$0]++'
+}
+
+mapfile -t DEFAULT_TARGETS < <(dedup_words "${XKERNEL_TARGETS[@]}" "${DEFAULT_EXTRA_TARGETS[@]}")
+
+default_install_args=("${XKERNEL_TOOLCHAIN}" --profile minimal --no-self-update)
+for component in "${XKERNEL_COMPONENTS[@]}"; do
+    default_install_args+=(--component "${component}")
+done
+for target in "${DEFAULT_TARGETS[@]}"; do
+    default_install_args+=(--target "${target}")
+done
+
+nightly_install_args=("${NIGHTLY_TOOLCHAIN}" --profile minimal --component rustfmt --no-self-update)
+for target in "${NIGHTLY_TARGETS[@]}"; do
+    nightly_install_args+=(--target "${target}")
+done
+
+echo "==> Installing x-kernel toolchain: ${XKERNEL_TOOLCHAIN}"
+retry 3 rustup toolchain install "${default_install_args[@]}"
+
+echo "==> Installing auxiliary nightly toolchain: ${NIGHTLY_TOOLCHAIN}"
+retry 3 rustup toolchain install "${nightly_install_args[@]}"
+
+echo "==> Active default toolchain"
+cargo --version
+rustc --version
+rustup show active-toolchain
+
+echo "==> Installed default targets"
+rustup target list --installed
+
+echo "==> Installed nightly targets"
+rustup +"${NIGHTLY_TOOLCHAIN}" target list --installed
+'''
+        } finally {
+            fixWorkspaceOwnership(stageWorkspace)
+        }
+    }
+}
+
 def runRustfmt() {
     ws("${env.ROOT_WS}/rustfmt") {
         def stageWorkspace = pwd()
@@ -224,7 +333,7 @@ def runRustfmt() {
             restoreSource()
             sh '''#!/bin/bash
 set -euo pipefail
-cargo +nightly-2026-03-08 fmt --all --check
+cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
 '''
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
@@ -644,29 +753,6 @@ fi
     }
 }
 
-def runtimeTargetSetupFor(String arch) {
-    switch (arch) {
-        case 'aarch64':
-            return '''
-rustup target add aarch64-unknown-none || true
-rustup target add aarch64-unknown-none-softfloat || true
-rustup target add aarch64-unknown-linux-musl || true
-'''
-        case 'x86_64':
-            return '''
-rustup target add x86_64-unknown-none || true
-rustup target add x86_64-unknown-linux-musl || true
-'''
-        case 'riscv64':
-            return '''
-rustup target add riscv64gc-unknown-none-elf || true
-rustup target add riscv64gc-unknown-linux-musl || true
-'''
-        default:
-            error("Unsupported architecture: ${arch}")
-    }
-}
-
 def targetTripleFor(String archOrPlatform) {
     if (archOrPlatform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
     if (archOrPlatform.startsWith('x86')) return 'x86_64-unknown-none'
@@ -727,9 +813,6 @@ def runTeeStorageTest(String arch) {
             sh """#!/bin/bash
 set -euo pipefail
 
-${runtimeTargetSetupFor(arch)}
-rustup +nightly-2026-03-08 target add ${muslTarget} || true
-
 LIBUTEE_DIR="/xkernel-target/libutee-${arch}"
 mkdir -p "\${LIBUTEE_DIR}"
 
@@ -741,7 +824,7 @@ else
 fi
 
 echo "==> Building storage_test for ${muslTarget}..."
-( cd "\${LIBUTEE_DIR}" && CC=${muslLinker} cargo +nightly-2026-03-08 build --bin storage_test --release --target ${muslTarget} )
+( cd "\${LIBUTEE_DIR}" && CC=${muslLinker} cargo +"\${AUX_RUST_TOOLCHAIN}" build --bin storage_test --release --target ${muslTarget} )
 
 echo "==> Building tee_apps/sh with TEE_INIT_APPS=/tee/storage_test..."
 TEE_INIT_APPS="/tee/storage_test" RUSTFLAGS= CC=${muslLinker} \\
@@ -860,8 +943,9 @@ def buildCiComment(Map results, String coverageSummary = '') {
     def stagesUrl = "${env.BUILD_URL}stages/"
     def stageOrder = [
         'Prepare Source',
-        'Prefetch Dependencies',
+        'Check Environment',
         'Rustfmt',
+        'Prefetch Dependencies',
         'Clippy+Build: aarch64-crosvm-virt',
         'Clippy+Build: riscv64-qemu-virt',
         'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt',
