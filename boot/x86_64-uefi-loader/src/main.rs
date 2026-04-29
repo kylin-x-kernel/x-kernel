@@ -238,7 +238,7 @@ fn sev_cbit_mask() -> u64 {
 
 #[cfg(target_arch = "x86_64")]
 fn cpuid(eax: u32, ecx: u32) -> (u32, u32, u32, u32) {
-    let r = unsafe { core::arch::x86_64::__cpuid_count(eax, ecx) };
+    let r = core::arch::x86_64::__cpuid_count(eax, ecx);
     (r.eax, r.ebx, r.ecx, r.edx)
 }
 

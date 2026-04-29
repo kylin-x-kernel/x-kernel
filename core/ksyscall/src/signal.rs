@@ -19,10 +19,7 @@ use kcore::task::{
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kprocess::Pid;
-use kservices::{
-    signal::{block_next_signal, check_signals},
-    time::TimeValueLike,
-};
+use kservices::signal::{block_next_signal, check_signals};
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
 use ktask::{
     current,
@@ -33,6 +30,7 @@ use linux_raw_sys::general::{
     timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::TimeValueLike;
 
 /// Validates that the signal set size matches the expected size.
 pub(crate) fn check_sigset_size(size: usize) -> KResult<()> {

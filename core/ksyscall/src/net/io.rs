@@ -19,10 +19,7 @@ use knet::{
     CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
-use kservices::{
-    mm::{UserConstPtr, UserPtr, VmBytes, VmBytesMut},
-    time::TimeValueLike,
-};
+use kservices::mm::{UserConstPtr, UserPtr, VmBytes, VmBytesMut};
 use linux_raw_sys::{
     general::timespec,
     net::{
@@ -67,6 +64,7 @@ fn parse_send_cmsgs(control_ptr: usize, control_len: usize) -> KResult<Vec<CMsgD
 
     Ok(cmsg)
 }
+use posix_types::TimeValueLike;
 
 use crate::{
     file::{FileLike, Socket, add_file_like},

@@ -4,6 +4,7 @@ channel = "1.95.0"
 components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
 targets = [
     "x86_64-unknown-none",
+    "x86_64-unknown-uefi",
     "riscv64gc-unknown-none-elf",
     "aarch64-unknown-none-softfloat",
     "loongarch64-unknown-none-softfloat",

@@ -1,0 +1,21 @@
+[package]
+name = "posix-sched"
+description = "POSIX scheduling syscall implementations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kbuild_config = { workspace = true }
+kcore = { workspace = true }
+kerrno = { workspace = true }
+khal = { workspace = true }
+klogger = { workspace = true }
+ktask = { workspace = true }
+linux-raw-sys = { workspace = true }
+osvm = { workspace = true }
+posix-types = { workspace = true }

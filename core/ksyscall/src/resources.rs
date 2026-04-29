@@ -10,10 +10,10 @@ use kcore::task::{AsThread, Thread, get_process_data, get_task};
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kprocess::Pid;
-use kservices::time::TimeValueLike;
 use ktask::current;
 use linux_raw_sys::general::{__kernel_old_timeval, RLIM_NLIMITS, rlimit64, rusage};
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::TimeValueLike;
 
 /// Get and/or set resource limits for a process
 pub fn sys_prlimit64(

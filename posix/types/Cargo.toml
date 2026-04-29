@@ -1,0 +1,16 @@
+[package]
+name = "posix-types"
+description = "POSIX/Linux ABI type conversions"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kerrno = { workspace = true }
+khal = { workspace = true }
+linux-raw-sys = { workspace = true }
+unittest = { workspace = true}

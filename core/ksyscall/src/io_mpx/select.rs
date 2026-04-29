@@ -19,12 +19,12 @@ use kservices::{
     mm::{UserConstPtr, UserPtr},
     nullable,
     signal::with_replacen_blocked,
-    time::TimeValueLike,
 };
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::*;
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::TimeValueLike;
 
 use super::FdPollSet;
 use crate::{file::FD_TABLE, signal::check_sigset_size};

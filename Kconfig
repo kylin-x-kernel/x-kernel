@@ -187,6 +187,6 @@ source "fs/Kconfig"
 source "mm/Kconfig"
 source "net/Kconfig"
 source "tee/Kconfig"
-source "core/ktask/Kconfig"
+source "task/Kconfig"
 
 source "drivers/Kconfig"

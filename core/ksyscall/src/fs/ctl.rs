@@ -24,13 +24,14 @@ use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, FsContext};
 use khal::time::wall_time;
-use kservices::{mm::vm_load_string, time::TimeValueLike};
+use kservices::mm::vm_load_string;
 use ktask::current;
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},
 };
 use osvm::{VirtPtr, write_vm_mem};
+use posix_types::TimeValueLike;
 
 use crate::file::{Directory, FileLike, get_file_like, resolve_at, with_fs};
 

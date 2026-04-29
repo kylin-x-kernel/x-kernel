@@ -1,0 +1,5 @@
+menu "Task Scheduling and Synchronization"
+
+source "task/ktask/Kconfig"
+
+endmenu

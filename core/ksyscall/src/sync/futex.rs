@@ -17,13 +17,13 @@ use kcore::{
     task::{AsThread, get_task},
 };
 use kerrno::{KError, KResult, LinuxError};
-use kservices::time::TimeValueLike;
 use ktask::current;
 use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
     FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::TimeValueLike;
 
 /// Helper to ensure a value is non-negative (unsigned interpretation)
 fn assert_unsigned(value: u32) -> KResult<u32> {

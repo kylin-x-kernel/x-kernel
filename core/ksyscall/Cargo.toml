@@ -43,6 +43,8 @@ linux_sysno.workspace = true
 tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true, features = ["tee_ta_sign"] }
 kcore.workspace = true
+posix-sched.workspace = true
+posix-types.workspace = true
 num_enum = { version = "0.7", default-features = false }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]

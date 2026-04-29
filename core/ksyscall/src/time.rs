@@ -12,7 +12,6 @@
 use kcore::{task::AsThread, time::ITimerType};
 use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
-use kservices::time::TimeValueLike;
 use ktask::current;
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
@@ -20,6 +19,7 @@ use linux_raw_sys::general::{
     CLOCK_THREAD_CPUTIME_ID, itimerval, timespec, timeval,
 };
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::TimeValueLike;
 
 /// Get the current time from the specified clock
 pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KResult<isize> {

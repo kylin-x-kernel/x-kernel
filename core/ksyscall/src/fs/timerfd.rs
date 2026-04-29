@@ -10,15 +10,13 @@
 //! - Timer query (timerfd_gettime)
 
 use kerrno::{KError, KResult};
-use kservices::{
-    file::{FileLike, add_file_like, timerfd::TimerFd},
-    time::TimeValueLike,
-};
+use kservices::file::{FileLike, add_file_like, timerfd::TimerFd};
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME,
     itimerspec, timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::TimeValueLike;
 
 /// Creates a timerfd file descriptor.
 pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {

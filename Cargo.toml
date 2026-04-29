@@ -50,16 +50,24 @@ kernel-elf-parser = { path = "boot/kernel_elf_parser" }
 kernel_elf_loader = { path = "boot/kernel-elf-loader", package = "kernel-elf-loader" }
 x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 
-# Internal: core runtime, sync, task and process
-kpoll = { path = "core/kpoll" }
-kprocess = { path = "process/kprocess" }
+# Internal: core runtime and services
 kruntime = { path = "core/kruntime" }
-kspin = { path = "core/kspin" }
-ksync = { path = "core/ksync" }
-ktask = { path = "core/ktask" }
-ksched = { path = "core/ksched" }
 ktypes = { path = "core/ktypes" }
+
+# Internal: task scheduling and synchronization
+kpoll = { path = "task/kpoll" }
+kspin = { path = "task/kspin" }
+ksync = { path = "task/ksync" }
+ktask = { path = "task/ktask" }
+ksched = { path = "task/ksched" }
+
+# Internal: process management
+kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
+
+# Internal: POSIX ABI compatibility
+posix-sched = { path = "posix/sched" }
+posix-types = { path = "posix/types" }
 
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
