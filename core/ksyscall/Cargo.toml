@@ -25,8 +25,6 @@ kfs.workspace = true
 khal.workspace = true
 kio.workspace = true
 klogger.workspace = true
-memspace.workspace = true
-memspace_file.workspace = true
 knet.workspace = true
 kpoll.workspace = true
 ktask.workspace = true
@@ -34,7 +32,6 @@ bitflags.workspace = true
 bytemuck.workspace = true
 kspin.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
-memaddr.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
 osvm.workspace = true
@@ -43,6 +40,7 @@ tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true, features = ["tee_ta_sign"] }
 kcore.workspace = true
 posix-ipc.workspace = true
+posix-mm.workspace = true
 posix-sched.workspace = true
 posix-types.workspace = true
 num_enum = { version = "0.7", default-features = false }

@@ -3,13 +3,6 @@
 // See LICENSES for license details.
 
 //! Memory mapping syscalls.
-//!
-//! This module implements virtual memory mapping operations including:
-//! - Memory mapping (mmap, mmap2, etc.)
-//! - Memory unmapping (munmap)
-//! - Memory protection (mprotect)
-//! - Memory synchronization (msync)
-//! - Memory advice (madvise)
 
 use alloc::sync::Arc;
 
@@ -26,7 +19,7 @@ use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::backend::{Backend, SharedPages};
 use memspace_file::{new_alloc, new_cow, new_file};
-use osvm::{load_vec, write_vm_mem};
+use posix_types::{UserConstPtr, UserPtr};
 
 bitflags::bitflags! {
     /// `PROT_*` flags for use with [`sys_mmap`].
@@ -328,8 +321,10 @@ pub fn sys_mremap(addr: usize, old_size: usize, new_size: usize, flags: u32) -> 
     )? as usize;
 
     let copy_len = new_size.min(old_size);
-    let data = load_vec(addr.as_ptr(), copy_len)?;
-    write_vm_mem(new_addr as *mut u8, &data)?;
+    let src: UserConstPtr<u8> = addr.as_usize().into();
+    let dst: UserPtr<u8> = new_addr.into();
+    let data = src.load_vm_vec(copy_len)?;
+    dst.write_vm_slice(&data)?;
 
     sys_munmap(addr.as_usize(), old_size)?;
 

@@ -3,11 +3,6 @@
 // See LICENSES for license details.
 
 //! Heap management syscalls.
-//!
-//! This module implements heap memory management operations including:
-//! - Heap size adjustment (brk, sbrk, etc.)
-//! - Heap boundary queries
-//! - Dynamic memory expansion and contraction
 
 use kcore::{
     config::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX},

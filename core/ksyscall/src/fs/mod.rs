@@ -16,7 +16,6 @@ mod ctl;
 mod event;
 mod fd_ops;
 mod io;
-mod memfd;
 mod mount;
 mod pidfd;
 mod pipe;
@@ -25,6 +24,6 @@ mod stat;
 mod timerfd;
 
 pub use self::{
-    ctl::*, event::*, fd_ops::*, io::*, memfd::*, mount::*, pidfd::*, pipe::*, signalfd::*,
-    stat::*, timerfd::*,
+    ctl::*, event::*, fd_ops::*, io::*, mount::*, pidfd::*, pipe::*, signalfd::*, stat::*,
+    timerfd::*,
 };

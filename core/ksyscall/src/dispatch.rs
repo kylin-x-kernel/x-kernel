@@ -23,10 +23,9 @@ use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
 use posix_ipc::*;
+use posix_mm::*;
 
-use crate::{
-    fs::*, io_mpx::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*, time::*,
-};
+use crate::{fs::*, io_mpx::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*, time::*};
 
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
@@ -357,7 +356,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         ),
         Sysno::munmap => sys_munmap(uctx.arg0(), uctx.arg1() as _),
         Sysno::mprotect => sys_mprotect(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::mincore => sys_mincore(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::mincore => sys_mincore(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into()),
         Sysno::mremap => sys_mremap(
             uctx.arg0(),
             uctx.arg1() as _,

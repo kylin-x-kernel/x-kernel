@@ -3,20 +3,15 @@
 // See LICENSES for license details.
 
 //! Memory file descriptor syscalls.
-//!
-//! This module implements memory file operations including:
-//! - Memory file creation (memfd_create, etc.)
-//! - Memfd flags and operations
 
 use alloc::format;
 use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, OpenOptions};
-use kservices::mm::UserConstPtr;
+use kservices::file::{File, FileLike};
 use linux_raw_sys::general::{MFD_CLOEXEC, O_RDWR};
-
-use crate::file::{File, FileLike};
+use posix_types::UserConstPtr;
 
 // TODO: correct memfd implementation
 

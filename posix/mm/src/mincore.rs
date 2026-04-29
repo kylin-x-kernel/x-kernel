@@ -3,10 +3,6 @@
 // See LICENSES for license details.
 
 //! Memory resident status syscalls.
-//!
-//! This module implements memory residency checking operations including:
-//! - Check page residency in memory (mincore, etc.)
-//! - Memory presence queries
 
 use alloc::vec;
 
@@ -15,7 +11,7 @@ use kerrno::{KError, KResult};
 use khal::paging::MappingFlags;
 use ktask::current;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
-use osvm::write_vm_mem;
+use posix_types::UserPtr;
 
 /// Check whether pages are resident in memory.
 ///
@@ -44,7 +40,7 @@ use osvm::write_vm_mem;
 /// - EFAULT: vec points to invalid address
 /// - EINVAL: addr not page-aligned
 /// - ENOMEM: length > (TASK_SIZE - addr), negative length, or unmapped memory
-pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> KResult<isize> {
+pub fn sys_mincore(addr: usize, length: usize, vec: UserPtr<u8>) -> KResult<isize> {
     let start_addr = VirtAddr::from(addr);
 
     // EINVAL: addr must be a multiple of the page size
@@ -57,7 +53,7 @@ pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> KResult<isize> {
         return Err(KError::BadAddress);
     }
 
-    debug!("sys_mincore <= addr: {addr:#x}, length: {length:#x}, vec: {vec:?}");
+    debug!("sys_mincore <= addr: {addr:#x}, length: {length:#x}");
 
     // Special case: length=0
     // According to Linux kernel (mm/mincore.c), length=0 returns success
@@ -113,8 +109,7 @@ pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> KResult<isize> {
     }
 
     // EFAULT: Write result to user space
-    // write_vm_mem will return EFAULT if vec is invalid
-    write_vm_mem(vec, result.as_slice())?;
+    vec.write_vm_slice(result.as_slice())?;
 
     Ok(0)
 }
