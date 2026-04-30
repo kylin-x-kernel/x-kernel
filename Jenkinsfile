@@ -102,14 +102,14 @@ pipeline {
                     }
                     post { failure { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
                 }
-                stage('Clippy+Build: riscv64-qemu-virt') {
+                stage('Clippy+Runtime: riscv64-qemu-virt') {
                     steps {
                         script {
-                            runClippyAndBuild('riscv64-qemu-virt')
-                            ciResults['Clippy+Build: riscv64-qemu-virt'] = [status: 'passed']
+                            runClippyAndRuntime('riscv64')
+                            ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'passed']
                         }
                     }
-                    post { failure { script { ciResults['Clippy+Build: riscv64-qemu-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
+                    post { failure { script { ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'failed', detail: collectUnitTestSnippet('riscv64')] } } }
                 }
                 stage('Clippy+Runtime: x86_64-qemu-virt') {
                     steps {
@@ -393,6 +393,24 @@ stdbuf -oL -eL make build
                         url: "${env.TEST_HARNESS_REPO}"
                     markSafeDirectory()
 
+                    def hostfwdPort
+                    def vsockCid
+                    switch (arch) {
+                        case 'x86_64':
+                            hostfwdPort = '5556'
+                            vsockCid = '101'
+                            break
+                        case 'aarch64':
+                            hostfwdPort = '5557'
+                            vsockCid = '102'
+                            break
+                        case 'riscv64':
+                            hostfwdPort = '5560'
+                            vsockCid = '103'
+                            break
+                        default:
+                            error("Unsupported runtime test architecture: ${arch}")
+                    }
                     withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                              "STARRY_SKIP_BUILD=1",
                              "ROOTFS_CACHE_DIR=/xkernel-target/rootfs-cache",
@@ -947,8 +965,7 @@ def buildCiComment(Map results, String coverageSummary = '') {
         'Rustfmt',
         'Prefetch Dependencies',
         'Clippy+Build: aarch64-crosvm-virt',
-        'Clippy+Build: riscv64-qemu-virt',
-        'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt',
+        'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt','Clippy+Runtime: riscv64-qemu-virt',
         'TEE: x86_64', 'TEE: aarch64'
     ]
     def normalizedResults = [:]

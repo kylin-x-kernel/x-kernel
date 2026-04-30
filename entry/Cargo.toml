@@ -9,6 +9,7 @@ homepage.workspace = true
 
 [features]
 # all of platforms should enable default features
+
 smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
 dma-trace = ["kfeat/dma-trace"]
@@ -16,10 +17,7 @@ dma-trace = ["kfeat/dma-trace"]
 # Stubs
 
 # qemu default platforms enabled drivers
-qemu = [
-    "kfeat/fp-simd",
-    "kservices/dev-log",
-]
+qemu = ["kfeat/fp-simd", "kservices/dev-log"]
 
 # aarch64-qemu-virt platform
 aarch64_qemu_virt = [
