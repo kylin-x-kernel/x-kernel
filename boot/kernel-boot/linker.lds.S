@@ -65,6 +65,20 @@ SECTIONS
         _ex_table_end = .;
     }
 
+    .tracepoint :
+    {
+        __start_tracepoint = .;
+        KEEP(*(.tracepoint))
+        __stop_tracepoint = .;
+    }
+
+    .__static_keys :
+    {
+        __start___static_keys = .;
+        KEEP(*(__static_keys))
+        __stop___static_keys = .;
+    }
+
     .tdata ALIGN(0x10) : {
         _stdata = .;
         *(.tdata .tdata.*)

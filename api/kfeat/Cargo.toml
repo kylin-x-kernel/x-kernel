@@ -103,6 +103,8 @@ watchdog = ["kruntime/watchdog"]
 # Pmu
 pmu = ["kruntime/pmu"]
 
+# Tracepoint
+tracepoint = ["ktracing/tracepoint"]
 
 [dependencies]
 alloc-engine = { workspace = true, optional = true }
@@ -125,3 +127,4 @@ ksyscall = { workspace = true }
 kspin = { workspace = true, optional = true }
 tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
+ktracing = { workspace = true, optional = true }

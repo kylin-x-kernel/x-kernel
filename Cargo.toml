@@ -53,6 +53,7 @@ x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 # Internal: core runtime and services
 kruntime = { path = "core/kruntime" }
 ktypes = { path = "core/ktypes" }
+ktracing = { path = "core/ktracing" }
 
 # Internal: task scheduling and synchronization
 kpoll = { path = "task/kpoll" }
@@ -181,4 +182,6 @@ strum = { version = "0.27", default-features = false, features = ["derive"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 x86_64 = { version = "0.15.2", features = ["instructions"] }
 fs9p = { path = "fs/fs9p", default-features = false }
+ktracepoint = "0.5"
+static-keys = "0.8"
 buddy-slab-allocator = "0.4"
