@@ -6,113 +6,67 @@
 use alloc::{vec, vec::Vec};
 use core::any::Any;
 
+use dice_driver::{DICE_IOCTL_GET_HANDOVER, DICE_IOCTL_GET_RAW_HANDOVER};
 use kcore::vfs::DeviceOps;
 use kerrno::{KError, KResult};
 use ksync::Mutex;
 use ktypes::Lazy;
-use memaddr::{VirtAddr, pa};
-use of::dice_region;
+use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
 use rand_chacha::{
     ChaCha8Rng,
     rand_core::{RngCore, SeedableRng},
 };
 
-/// DICE节点信息
-#[derive(Debug, Clone, Copy)]
-/// DICE (Device Identifier Composition Engine) node information
-/// Used for DICE handover data processing in TEE contexts
-pub struct DiceNodeInfo<'a> {
-    /// 兼容性字符串（静态借用）
-    pub _compatible: &'a str,
-    /// 内存区域信息 (起始地址, 大小)
-    pub regions: (VirtAddr, usize),
-    /// 是否标记为no-map
-    pub _no_map: bool,
-}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiceNodeInfo;
 
-const DICE_COMPATIBLE: &str = "kylin,open-dice";
-const MAX_DICE_DATA_SIZE: usize = 0x1000; // 4KB
+type DiceUserBuffer = [usize; 3];
 
-impl DiceNodeInfo<'static> {
+impl DiceNodeInfo {
     pub fn new() -> Self {
-        DiceNodeInfo {
-            _compatible: DICE_COMPATIBLE,
-            regions: dice_region()
-                .map(|reg| (khal::mem::p2v(pa!(reg.starting_address as usize)), reg.size))
-                .unwrap(),
-            _no_map: false,
-        }
+        Self
     }
 
-    fn sys_dice_get_handover(
-        &self,
-        handover_ptr: usize,
-        handover_size: usize,
-        handover_out_size: usize,
-    ) -> KResult<usize> {
-        let (cdi_attest, cdi_seal, chain) = self.parse_handover_data()?;
-        let handover_out_size_ptr = handover_out_size as *mut usize;
-        let len = cdi_attest.len() + cdi_seal.len() + chain.len();
+    fn copy_to_user(&self, arg: usize, data: &[u8]) -> KResult<usize> {
+        let [handover_ptr, handover_size, handover_out_size] =
+            (arg as *const DiceUserBuffer).read_vm()?;
 
-        unsafe {
-            *handover_out_size_ptr = len;
-        };
-
-        if handover_size < len {
+        (handover_out_size as *mut usize).write_vm(data.len())?;
+        if handover_size < data.len() {
             return Err(KError::InvalidInput);
         }
 
-        // 安全写入输出缓冲区
-        let handover_buffer =
-            unsafe { core::slice::from_raw_parts_mut(handover_ptr as *mut u8, handover_size) };
+        write_vm_mem(handover_ptr as *mut u8, data)?;
+        Ok(data.len())
+    }
 
-        handover_buffer[..cdi_attest.len()].copy_from_slice(&cdi_attest);
-        handover_buffer[cdi_attest.len()..cdi_attest.len() + cdi_seal.len()]
-            .copy_from_slice(&cdi_seal);
-        handover_buffer[cdi_attest.len() + cdi_seal.len()..len].copy_from_slice(&chain);
-
-        warn!("dice : get handover success.");
+    fn sys_dice_get_handover(&self, arg: usize) -> KResult<usize> {
+        let hash = get_process_hash()?;
+        let handover = dice_driver::derive_handover_data(&hash)?;
+        let len = self.copy_to_user(arg, &handover)?;
+        warn!("dice : get derived handover success.");
         Ok(len)
     }
 
-    fn parse_handover_data(&self) -> KResult<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        use rust_dice::{dice_main_flow_chain_codehash, dice_parse_handover};
-
-        let (addr, size) = self.regions;
-
-        let handover_data = if size > MAX_DICE_DATA_SIZE || size == 0 {
-            return Err(KError::InvalidInput);
-        } else {
-            let mut buffer = Vec::new();
-            buffer
-                .try_reserve_exact(size)
-                .map_err(|_| KError::NoMemory)?;
-
-            unsafe {
-                buffer.set_len(size);
-                // 安全拷贝内存
-                core::ptr::copy_nonoverlapping(
-                    addr.as_usize() as *const u8,
-                    buffer.as_mut_ptr(),
-                    size,
-                );
-            }
-            buffer
-        };
-        let mut handover_buf = vec![0u8; size];
-        let hash: Vec<u8> = get_process_hash()?;
-        let handover = dice_main_flow_chain_codehash(&handover_data, &hash, &mut handover_buf)
-            .map_err(|_| KError::InvalidInput)?;
-        let (cdi_attest, cdi_seal, chain) =
-            dice_parse_handover(handover).map_err(|_| KError::InvalidInput)?;
-
-        Ok((cdi_attest.to_vec(), cdi_seal.to_vec(), chain.to_vec()))
+    fn sys_dice_get_raw_handover(&self, arg: usize) -> KResult<usize> {
+        let handover = dice_driver::read_raw_handover_data()?;
+        let len = self.copy_to_user(arg, &handover)?;
+        warn!("dice : get raw handover success.");
+        Ok(len)
     }
 }
 
-impl DeviceOps for DiceNodeInfo<'static> {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> KResult<usize> {
-        unreachable!()
+impl DeviceOps for DiceNodeInfo {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> KResult<usize> {
+        let data = dice_driver::read_raw_handover_data()?;
+        let offset = usize::try_from(offset).map_err(|_| KError::InvalidInput)?;
+        if offset >= data.len() {
+            return Ok(0);
+        }
+
+        let len = buf.len().min(data.len() - offset);
+        buf[..len].copy_from_slice(&data[offset..offset + len]);
+        Ok(len)
     }
 
     fn write_at(&self, _buf: &[u8], _offset: u64) -> KResult<usize> {
@@ -120,12 +74,11 @@ impl DeviceOps for DiceNodeInfo<'static> {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
-        if cmd == 0x90007A00 {
-            let ptr = arg as *const usize;
-            let handover = unsafe { core::slice::from_raw_parts_mut(ptr as *mut usize, 3) };
-            return self.sys_dice_get_handover(handover[0], handover[1], handover[2]);
+        match cmd {
+            DICE_IOCTL_GET_HANDOVER => self.sys_dice_get_handover(arg),
+            DICE_IOCTL_GET_RAW_HANDOVER => self.sys_dice_get_raw_handover(arg),
+            _ => Err(KError::InvalidInput),
         }
-        Err(KError::InvalidInput)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -162,8 +115,8 @@ static GLOBAL_RAND: Lazy<Mutex<ChaCha8Rng>> = Lazy::new(|| {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn get_rand(output: usize, len: usize) -> u32 {
-    let buf = unsafe { core::slice::from_raw_parts_mut(output as *mut u8, len) };
+    let mut buf = vec![0u8; len];
     let mut rand = GLOBAL_RAND.lock();
-    rand.fill_bytes(buf);
-    0
+    rand.fill_bytes(&mut buf);
+    write_vm_mem(output as *mut u8, &buf).map_or(1, |_| 0)
 }

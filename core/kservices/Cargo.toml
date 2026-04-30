@@ -16,8 +16,8 @@ dev-log = []
 dice = [
 	"kalloc/dice",
 	"dep:rand_chacha",
-	"dep:rust-dice",
 	"dep:mbedtls",
+	"dep:dice_driver",
 ]
 tee = [
 	"dep:tee_kernel",
@@ -29,8 +29,8 @@ kalloc.workspace = true
 backtrace.workspace = true
 unittest = { workspace = true }
 unittest_support.workspace = true
-rust-dice = { workspace = true, optional = true }
 mbedtls = { workspace = true, optional = true }
+dice_driver = { workspace = true, optional = true }
 fbdevice.workspace = true
 kdriver.workspace = true
 ktypes.workspace = true
@@ -60,7 +60,6 @@ lazy_static = { workspace = true }
 linkme.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 memaddr.workspace = true
-of.workspace = true
 rand = { version = "0.9.1", default-features = false, features = [
 	"alloc",
 	"small_rng",
