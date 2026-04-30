@@ -68,6 +68,7 @@ osvm = { path = "process/osvm" }
 
 # Internal: POSIX ABI compatibility
 posix-ipc = { path = "posix/ipc" }
+posix-fs = { path = "posix/fs" }
 posix-mm = { path = "posix/mm" }
 posix-sched = { path = "posix/sched" }
 posix-types = { path = "posix/types" }

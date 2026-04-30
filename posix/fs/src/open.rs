@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Linux open/openat compatibility entry points.
+
+use alloc::{format, string::ToString, sync::Arc};
+use core::ffi::{c_char, c_int};
+
+use fs_ng_vfs::{DirEntry, FileNode, Location, NodeType, Reference};
+use kcore::{task::AsThread, vfs::Device};
+use kerrno::{KError, KResult};
+use kfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
+use kservices::{
+    file::{Directory, File, FileLike, add_file_like},
+    vfs::dev::tty,
+};
+use ktask::current;
+use linux_raw_sys::general::*;
+use posix_types::UserConstPtr;
+
+use crate::path::{PathSource, resolve_open_path_source, with_fs};
+
+fn current_effective_ids() -> (u32, u32) {
+    (0, 0)
+}
+
+/// Converts Linux open flags into internal `OpenOptions`.
+fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32)) -> OpenOptions {
+    let flags = flags as u32;
+    let mut options = OpenOptions::new();
+    options.mode(mode).user(uid, gid);
+
+    match flags & 0b11 {
+        O_RDONLY => options.read(true),
+        O_WRONLY => options.write(true),
+        _ => options.read(true).write(true),
+    };
+
+    if flags & O_APPEND != 0 {
+        options.append(true);
+    }
+    if flags & O_TRUNC != 0 {
+        options.truncate(true);
+    }
+    if flags & O_CREAT != 0 {
+        options.create(true);
+    }
+    if flags & O_PATH != 0 {
+        options.path(true);
+    }
+    if flags & O_EXCL != 0 {
+        options.create_new(true);
+    }
+    if flags & O_DIRECTORY != 0 {
+        options.directory(true);
+    }
+    if flags & O_NOFOLLOW != 0 {
+        options.no_follow(true);
+    }
+    if flags & O_DIRECT != 0 {
+        options.direct(true);
+    }
+    options
+}
+
+fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
+    let f: Arc<dyn FileLike> = match result {
+        OpenResult::File(mut file) => {
+            if let Ok(device) = file.location().entry().downcast::<Device>() {
+                let inner = device.inner().as_any();
+                if let Some(ptmx) = inner.downcast_ref::<tty::Ptmx>() {
+                    let (master, pty_number) = ptmx.create_pty()?;
+                    let pts = FS_CONTEXT.lock().resolve("/dev/pts")?;
+                    let entry = DirEntry::new_file(
+                        FileNode::new(master),
+                        NodeType::CharacterDevice,
+                        Reference::new(Some(pts.entry().clone()), pty_number.to_string()),
+                    );
+                    let loc = Location::new(file.location().mountpoint().clone(), entry);
+                    file = kfs::File::new(FileBackend::Direct(loc), file.flags());
+                } else if inner.is::<tty::CurrentTty>() {
+                    let term = current()
+                        .as_thread()
+                        .proc_data
+                        .proc
+                        .group()
+                        .session()
+                        .terminal()
+                        .ok_or(KError::NotFound)?;
+                    let path = if term.is::<tty::NTtyDriver>() {
+                        "/dev/console".to_string()
+                    } else if let Some(pts) = term.downcast_ref::<tty::PtyDriver>() {
+                        format!("/dev/pts/{}", pts.pty_number())
+                    } else {
+                        panic!("unknown terminal type")
+                    };
+                    let loc = FS_CONTEXT.lock().resolve(&path)?;
+                    file = kfs::File::new(FileBackend::Direct(loc), file.flags());
+                }
+            }
+            Arc::new(File::new(file, flags))
+        }
+        OpenResult::Dir(dir) => Arc::new(Directory::new(dir)),
+    };
+    if flags & O_NONBLOCK != 0 {
+        f.set_nonblocking(true)?;
+    }
+    add_file_like(f, flags & O_CLOEXEC != 0)
+}
+
+/// Opens a file relative to a directory file descriptor.
+pub fn sys_openat(
+    dirfd: c_int,
+    path: UserConstPtr<c_char>,
+    flags: i32,
+    mode: __kernel_mode_t,
+) -> KResult<isize> {
+    let path = path.load_string()?;
+    debug!("sys_openat <= {dirfd} {path:?} {flags:#o} {mode:#o}");
+    let raw_flags = flags as u32;
+
+    let mode = mode & !current().as_thread().proc_data.umask();
+    let options = flags_to_options(flags, mode, current_effective_ids());
+
+    if let PathSource::Resolved(path) = resolve_open_path_source(dirfd, Some(&path), raw_flags)?
+        && path.is_procfd()
+    {
+        return options
+            .open_loc(path.location().ok_or(KError::InvalidInput)?)
+            .and_then(|it| add_to_fd(it, flags as _))
+            .map(|fd| fd as isize);
+    }
+    with_fs(dirfd, |fs| options.open(fs, path))
+        .and_then(|it| add_to_fd(it, flags as _))
+        .map(|fd| fd as isize)
+}
+
+/// Opens a file by path.
+#[cfg(target_arch = "x86_64")]
+pub fn sys_open(path: UserConstPtr<c_char>, flags: i32, mode: __kernel_mode_t) -> KResult<isize> {
+    sys_openat(AT_FDCWD as _, path, flags, mode)
+}

@@ -2,49 +2,38 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! File metadata and status syscalls.
-//!
-//! This module implements file metadata and status operations including:
-//! - File metadata queries (stat, fstat, lstat, fstatat, statx, etc.)
-//! - Filesystem information (statfs, fstatfs, etc.)
-//! - File access checks (faccessat, etc.)
-//! - File type and permission queries
+//! Linux stat and access compatibility entry points.
 
 use core::ffi::{c_char, c_int};
 
 use fs_ng_vfs::{Location, NodePermission};
 use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
-use kservices::mm::vm_load_string;
+use kservices::file::{File, FileLike};
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
 };
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtMutPtr;
+use posix_types::{UserConstPtr, UserPtr};
 
-use crate::file::{File, FileLike, resolve_at};
+use crate::path::resolve_at;
 
 /// Get the file metadata by `path` and write into `statbuf`.
-///
-/// Return 0 if success.
 #[cfg(target_arch = "x86_64")]
-pub fn sys_stat(path: *const c_char, statbuf: *mut stat) -> KResult<isize> {
+pub fn sys_stat(path: UserConstPtr<c_char>, statbuf: UserPtr<stat>) -> KResult<isize> {
     use linux_raw_sys::general::AT_FDCWD;
 
     sys_fstatat(AT_FDCWD, path, statbuf, 0)
 }
 
 /// Get file metadata by `fd` and write into `statbuf`.
-///
-/// Return 0 if success.
-pub fn sys_fstat(fd: i32, statbuf: *mut stat) -> KResult<isize> {
-    sys_fstatat(fd, core::ptr::null(), statbuf, AT_EMPTY_PATH)
+pub fn sys_fstat(fd: i32, statbuf: UserPtr<stat>) -> KResult<isize> {
+    sys_fstatat(fd, UserConstPtr::default(), statbuf, AT_EMPTY_PATH)
 }
 
 /// Get the metadata of the symbolic link and write into `buf`.
-///
-/// Return 0 if success.
 #[cfg(target_arch = "x86_64")]
-pub fn sys_lstat(path: *const c_char, statbuf: *mut stat) -> KResult<isize> {
+pub fn sys_lstat(path: UserConstPtr<c_char>, statbuf: UserPtr<stat>) -> KResult<isize> {
     use linux_raw_sys::general::{AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
     sys_fstatat(AT_FDCWD, path, statbuf, AT_SYMLINK_NOFOLLOW)
@@ -53,11 +42,14 @@ pub fn sys_lstat(path: *const c_char, statbuf: *mut stat) -> KResult<isize> {
 /// Gets file metadata relative to a directory file descriptor.
 pub fn sys_fstatat(
     dirfd: i32,
-    path: *const c_char,
-    statbuf: *mut stat,
+    path: UserConstPtr<c_char>,
+    statbuf: UserPtr<stat>,
     flags: u32,
 ) -> KResult<isize> {
-    let path = path.check_non_null().map(vm_load_string).transpose()?;
+    let path = path
+        .check_non_null()
+        .map(UserConstPtr::load_string)
+        .transpose()?;
 
     debug!("sys_fstatat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
@@ -70,39 +62,15 @@ pub fn sys_fstatat(
 /// Gets extended file metadata (statx).
 pub fn sys_statx(
     dirfd: c_int,
-    path: *const c_char,
+    path: UserConstPtr<c_char>,
     flags: u32,
     _mask: u32,
-    statxbuf: *mut statx,
+    statxbuf: UserPtr<statx>,
 ) -> KResult<isize> {
-    // `statx()` uses pathname, dirfd, and flags to identify the target
-    // file in one of the following ways:
-
-    // An absolute pathname(situation 1)
-    //        If pathname begins with a slash, then it is an absolute
-    //        pathname that identifies the target file.  In this case,
-    //        dirfd is ignored.
-
-    // A relative pathname(situation 2)
-    //        If pathname is a string that begins with a character other
-    //        than a slash and dirfd is AT_FDCWD, then pathname is a
-    //        relative pathname that is interpreted relative to the
-    //        process's current working directory.
-
-    // A directory-relative pathname(situation 3)
-    //        If pathname is a string that begins with a character other
-    //        than a slash and dirfd is a file descriptor that refers to
-    //        a directory, then pathname is a relative pathname that is
-    //        interpreted relative to the directory referred to by dirfd.
-    //        (See openat(2) for an explanation of why this is useful.)
-
-    // By file descriptor(situation 4)
-    //        If pathname is an empty string (or NULL since Linux 6.11)
-    //        and the AT_EMPTY_PATH flag is specified in flags (see
-    //        below), then the target file is the one referred to by the
-    //        file descriptor dirfd.
-
-    let path = path.check_non_null().map(vm_load_string).transpose()?;
+    let path = path
+        .check_non_null()
+        .map(UserConstPtr::load_string)
+        .transpose()?;
     debug!("sys_statx <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     statxbuf.write_vm(resolve_at(dirfd, path.as_deref(), flags)?.stat()?.into())?;
@@ -111,15 +79,23 @@ pub fn sys_statx(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_access(path: *const c_char, mode: u32) -> KResult<isize> {
+pub fn sys_access(path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
     use linux_raw_sys::general::AT_FDCWD;
 
     sys_faccessat2(AT_FDCWD, path, mode, 0)
 }
 
 /// Checks file accessibility with additional flags.
-pub fn sys_faccessat2(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) -> KResult<isize> {
-    let path = path.check_non_null().map(vm_load_string).transpose()?;
+pub fn sys_faccessat2(
+    dirfd: c_int,
+    path: UserConstPtr<c_char>,
+    mode: u32,
+    flags: u32,
+) -> KResult<isize> {
+    let path = path
+        .check_non_null()
+        .map(UserConstPtr::load_string)
+        .transpose()?;
     debug!("sys_faccessat2 <= dirfd: {dirfd}, path: {path:?}, mode: {mode}, flags: {flags}");
 
     let file = resolve_at(dirfd, path.as_deref(), flags)?;
@@ -145,10 +121,8 @@ pub fn sys_faccessat2(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) 
     Ok(0)
 }
 
-/// Builds a `statfs` snapshot for the filesystem at `loc`.
 fn statfs(loc: &Location) -> KResult<statfs> {
     let stat = loc.filesystem().stat()?;
-    // FIXME: Zeroable
     let mut result: statfs = unsafe { core::mem::zeroed() };
     result.f_type = stat.fs_type as _;
     result.f_bsize = stat.block_size as _;
@@ -157,7 +131,6 @@ fn statfs(loc: &Location) -> KResult<statfs> {
     result.f_bavail = stat.blocks_available as _;
     result.f_files = stat.file_count as _;
     result.f_ffree = stat.free_file_count as _;
-    // TODO: fsid
     result.f_fsid = __kernel_fsid_t {
         val: [0, loc.mountpoint().device() as _],
     };
@@ -168,8 +141,8 @@ fn statfs(loc: &Location) -> KResult<statfs> {
 }
 
 /// Gets filesystem statistics by path.
-pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> KResult<isize> {
-    let path = vm_load_string(path)?;
+pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<isize> {
+    let path = path.load_string()?;
     debug!("sys_statfs <= path: {path:?}");
 
     buf.write_vm(statfs(
@@ -183,7 +156,7 @@ pub fn sys_statfs(path: *const c_char, buf: *mut statfs) -> KResult<isize> {
 }
 
 /// Gets filesystem statistics by file descriptor.
-pub fn sys_fstatfs(fd: i32, buf: *mut statfs) -> KResult<isize> {
+pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     debug!("sys_fstatfs <= fd: {fd}");
 
     buf.write_vm(statfs(File::from_fd(fd)?.inner().location())?)?;

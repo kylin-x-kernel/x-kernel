@@ -126,10 +126,10 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         // fd ops
         #[cfg(target_arch = "x86_64")]
-        Sysno::open => sys_open(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::open => sys_open(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::openat => sys_openat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
@@ -277,13 +277,13 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         // fs mount
         Sysno::mount => sys_mount(
-            uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg0().into(),
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
-            uctx.arg4() as _,
+            uctx.arg4().into(),
         ) as _,
-        Sysno::umount2 => sys_umount2(uctx.arg0() as _, uctx.arg1() as _) as _,
+        Sysno::umount2 => sys_umount2(uctx.arg0().into(), uctx.arg1() as _) as _,
 
         // pipe
         Sysno::pipe2 => sys_pipe2(uctx.arg0() as _, uctx.arg1() as _),
@@ -308,41 +308,41 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         // fs stat
         #[cfg(target_arch = "x86_64")]
-        Sysno::stat => sys_stat(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::fstat => sys_fstat(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::stat => sys_stat(uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::fstat => sys_fstat(uctx.arg0() as _, uctx.arg1().into()),
         #[cfg(target_arch = "x86_64")]
-        Sysno::lstat => sys_lstat(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::lstat => sys_lstat(uctx.arg0().into(), uctx.arg1().into()),
         #[cfg(target_arch = "x86_64")]
         Sysno::newfstatat => sys_fstatat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
         #[cfg(not(target_arch = "x86_64"))]
         Sysno::fstatat => sys_fstatat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
         Sysno::statx => sys_statx(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
-            uctx.arg4() as _,
+            uctx.arg4().into(),
         ),
         #[cfg(target_arch = "x86_64")]
-        Sysno::access => sys_access(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::access => sys_access(uctx.arg0().into(), uctx.arg1() as _),
         Sysno::faccessat | Sysno::faccessat2 => sys_faccessat2(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
-        Sysno::statfs => sys_statfs(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::fstatfs => sys_fstatfs(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::statfs => sys_statfs(uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::fstatfs => sys_fstatfs(uctx.arg0() as _, uctx.arg1().into()),
 
         // mm
         Sysno::brk => sys_brk(uctx.arg0() as _),

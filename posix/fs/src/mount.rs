@@ -2,21 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Filesystem mounting syscalls.
-//!
-//! This module implements filesystem mounting and unmounting operations including:
-//! - Mount filesystem (mount, etc.)
-//! - Unmount filesystem (umount, umount2, etc.)
-//! - Mount operations and flags
+//! Linux mount and umount compatibility entry points.
 
 use core::ffi::{c_char, c_void};
 
 use fs_ng_vfs::{ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
 use kerrno::{KError, KResult};
 use kfs::FS_CONTEXT;
-use kservices::mm::vm_load_string;
-
-use crate::kernel::vfs::MemoryFs;
+use kservices::vfs::MemoryFs;
+use posix_types::UserConstPtr;
 
 fn mount_flags_from_sys_mount(flags: i32) -> u32 {
     let flags = flags as u32;
@@ -44,48 +38,35 @@ fn mount_flags_from_sys_mount(flags: i32) -> u32 {
     mount_flags
 }
 
-/// Mount a filesystem at the specified target path
-///
-/// Currently only supports tmpfs (temporary memory-based filesystem).
-/// The source is loaded from user memory but not validated since tmpfs doesn't use source device names.
+/// Mount a filesystem at the specified target path.
 pub fn sys_mount(
-    source: *const c_char,
-    target: *const c_char,
-    fs_type: *const c_char,
+    source: UserConstPtr<c_char>,
+    target: UserConstPtr<c_char>,
+    fs_type: UserConstPtr<c_char>,
     flags: i32,
-    _data: *const c_void,
+    _data: UserConstPtr<c_void>,
 ) -> KResult<isize> {
-    // Load filesystem type string from user memory
-    let source = vm_load_string(source)?;
-    let target = vm_load_string(target)?;
-    let fs_type = vm_load_string(fs_type)?;
+    let source = source.load_string()?;
+    let target = target.load_string()?;
+    let fs_type = fs_type.load_string()?;
     debug!("sys_mount <= source: {source:?}, target: {target:?}, fs_type: {fs_type:?}");
 
-    // Only tmpfs is supported - reject unsupported filesystem types
     if fs_type != "tmpfs" {
         return Err(KError::NoSuchDevice);
     }
 
-    // Create a new in-memory filesystem instance
     let fs = MemoryFs::new_with_flags(mount_flags_from_sys_mount(flags));
-
-    // Resolve the target mount point path and attach the filesystem
     let target = FS_CONTEXT.lock().resolve(target)?;
     target.mount(&fs)?;
 
     Ok(0)
 }
 
-/// Unmount a filesystem at the specified target path
-///
-/// Removes the filesystem mounted at the target path and detaches it from the directory tree.
-/// The mounted filesystem must be empty or the unmount may fail depending on the filesystem implementation.
-pub fn sys_umount2(target: *const c_char, _flags: i32) -> KResult<isize> {
-    // Load target path from user memory
-    let target = vm_load_string(target)?;
+/// Unmount a filesystem at the specified target path.
+pub fn sys_umount2(target: UserConstPtr<c_char>, _flags: i32) -> KResult<isize> {
+    let target = target.load_string()?;
     debug!("sys_umount2 <= target: {target:?}");
 
-    // Resolve the mount point path and detach the filesystem
     let target = FS_CONTEXT.lock().resolve(target)?;
     target.unmount()?;
     Ok(0)

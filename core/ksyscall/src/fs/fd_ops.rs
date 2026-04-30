@@ -5,161 +5,24 @@
 //! File descriptor operations.
 //!
 //! This module implements file descriptor manipulation syscalls including:
-//! - Opening and closing files (open, openat, close, etc.)
+//! - Closing files (close, close_range, etc.)
 //! - File descriptor duplication (dup, dup2, dup3, etc.)
 //! - File descriptor flags and control (fcntl, etc.)
-//! - Directory operations (opendir, closedir, etc.)
 
-use alloc::{format, string::ToString, sync::Arc};
 use core::{
-    ffi::{c_char, c_int},
+    ffi::c_int,
     mem,
     ops::{Deref, DerefMut},
 };
 
 use bitflags::bitflags;
-use fs_ng_vfs::{DirEntry, FileNode, Location, NodeType, Reference};
-use kcore::{task::AsThread, vfs::Device};
+use kcore::task::AsThread;
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
-use kservices::mm::{UserPtr, vm_load_string};
+use kservices::{file::FileLike, mm::UserPtr};
 use ktask::current;
 use linux_raw_sys::general::*;
 
-use crate::{
-    file::{
-        Directory, FD_TABLE, File, FileLike, Pipe, add_file_like, close_file_like, get_file_like,
-        with_fs,
-    },
-    kernel::vfs::dev::tty,
-    sys::{sys_getegid, sys_geteuid},
-};
-
-/// Convert open flags to [`OpenOptions`].
-/// Interprets Linux open() flags and converts them to our internal OpenOptions format.
-/// Converts Linux open flags into internal `OpenOptions`.
-fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32)) -> OpenOptions {
-    let flags = flags as u32;
-    let mut options = OpenOptions::new();
-    options.mode(mode).user(uid, gid);
-
-    // Extract access mode (read-only, write-only, or read-write) from the lower 2 bits
-    match flags & 0b11 {
-        O_RDONLY => options.read(true),
-        O_WRONLY => options.write(true),
-        _ => options.read(true).write(true), // O_RDWR or unspecified defaults to read-write
-    };
-
-    // Process individual flag bits
-    if flags & O_APPEND != 0 {
-        options.append(true); // Append writes to end of file
-    }
-    if flags & O_TRUNC != 0 {
-        options.truncate(true); // Truncate file to zero length
-    }
-    if flags & O_CREAT != 0 {
-        options.create(true); // Create file if it doesn't exist
-    }
-    if flags & O_PATH != 0 {
-        options.path(true); // Open for pathname operations only
-    }
-    if flags & O_EXCL != 0 {
-        options.create_new(true); // Fail if file exists (requires O_CREAT)
-    }
-    if flags & O_DIRECTORY != 0 {
-        options.directory(true); // Ensure path is a directory
-    }
-    if flags & O_NOFOLLOW != 0 {
-        options.no_follow(true); // Don't follow symbolic links
-    }
-    if flags & O_DIRECT != 0 {
-        options.direct(true); // Direct I/O, bypassing cache
-    }
-    options
-}
-
-/// Adds an opened file or directory to the fd table.
-fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
-    let f: Arc<dyn FileLike> = match result {
-        OpenResult::File(mut file) => {
-            // /dev/xx handling
-            if let Ok(device) = file.location().entry().downcast::<Device>() {
-                let inner = device.inner().as_any();
-                if let Some(ptmx) = inner.downcast_ref::<tty::Ptmx>() {
-                    // Opening /dev/ptmx creates a new pseudo-terminal
-                    let (master, pty_number) = ptmx.create_pty()?;
-                    // TODO: this is cursed
-                    let pts = FS_CONTEXT.lock().resolve("/dev/pts")?;
-                    let entry = DirEntry::new_file(
-                        FileNode::new(master),
-                        NodeType::CharacterDevice,
-                        Reference::new(Some(pts.entry().clone()), pty_number.to_string()),
-                    );
-                    let loc = Location::new(file.location().mountpoint().clone(), entry);
-                    file = kfs::File::new(FileBackend::Direct(loc), file.flags());
-                } else if inner.is::<tty::CurrentTty>() {
-                    let term = current()
-                        .as_thread()
-                        .proc_data
-                        .proc
-                        .group()
-                        .session()
-                        .terminal()
-                        .ok_or(KError::NotFound)?;
-                    let path = if term.is::<tty::NTtyDriver>() {
-                        "/dev/console".to_string()
-                    } else if let Some(pts) = term.downcast_ref::<tty::PtyDriver>() {
-                        format!("/dev/pts/{}", pts.pty_number())
-                    } else {
-                        panic!("unknown terminal type")
-                    };
-                    let loc = FS_CONTEXT.lock().resolve(&path)?;
-                    file = kfs::File::new(FileBackend::Direct(loc), file.flags());
-                }
-            }
-            Arc::new(File::new(file, flags))
-        }
-        OpenResult::Dir(dir) => Arc::new(Directory::new(dir)),
-    };
-    if flags & O_NONBLOCK != 0 {
-        f.set_nonblocking(true)?;
-    }
-    add_file_like(f, flags & O_CLOEXEC != 0)
-}
-
-/// Open or create a file.
-/// fd: file descriptor
-/// filename: file path to be opened or created
-/// flags: open flags
-/// mode: see man 7 inode
-/// return new file descriptor if succeed, or return -1.
-/// Opens a file relative to a directory file descriptor.
-pub fn sys_openat(
-    dirfd: c_int,
-    path: *const c_char,
-    flags: i32,
-    mode: __kernel_mode_t,
-) -> KResult<isize> {
-    let path = vm_load_string(path)?;
-    debug!("sys_openat <= {dirfd} {path:?} {flags:#o} {mode:#o}");
-
-    let mode = mode & !current().as_thread().proc_data.umask();
-
-    let options = flags_to_options(flags, mode, (sys_geteuid()? as _, sys_getegid()? as _));
-    with_fs(dirfd, |fs| options.open(fs, path))
-        .and_then(|it| add_to_fd(it, flags as _))
-        .map(|fd| fd as isize)
-}
-
-/// Open a file by `filename` and insert it into the file descriptor table.
-///
-/// Return its index in the file table (`fd`). Return `EMFILE` if it already
-/// has the maximum number of files open.
-#[cfg(target_arch = "x86_64")]
-/// Opens a file by path.
-pub fn sys_open(path: *const c_char, flags: i32, mode: __kernel_mode_t) -> KResult<isize> {
-    sys_openat(AT_FDCWD as _, path, flags, mode)
-}
+use crate::file::{FD_TABLE, Pipe, add_file_like, close_file_like, get_file_like};
 
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {

@@ -9,11 +9,12 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use core::ptr;
+use alloc::{string::String, vec::Vec};
+use core::{ffi::c_char, ptr};
 
 use bytemuck::AnyBitPattern;
-use osvm::{VirtMutPtr, VirtPtr, load_vec, write_vm_mem};
+use kerrno::{KError, KResult};
+use osvm::{VirtMutPtr, VirtPtr, load_vec, load_vec_until_null, write_vm_mem};
 
 /// A mutable pointer to user-space memory.
 ///
@@ -153,5 +154,14 @@ impl<T> VirtPtr for UserConstPtr<T> {
 
     fn as_ptr(self) -> *const Self::Target {
         self.0
+    }
+}
+
+impl UserConstPtr<c_char> {
+    /// Load a null-terminated string from user memory.
+    pub fn load_string(self) -> KResult<String> {
+        #[allow(clippy::unnecessary_cast)]
+        let bytes = load_vec_until_null(self.0 as *const u8)?;
+        String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
     }
 }
