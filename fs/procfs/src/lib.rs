@@ -12,6 +12,7 @@ mod root;
 mod task;
 #[cfg(feature = "tee")]
 mod tee;
+mod tracing;
 
 use fs_ng_vfs::{Filesystem, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME};
 pub use hooks::ProcFsHooks;

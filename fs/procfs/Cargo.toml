@@ -22,6 +22,7 @@ memspace.workspace = true
 memspace_file.workspace = true
 kprocess.workspace = true
 ktask.workspace = true
+ktracing.workspace = true
 unittest.workspace = true
 tee_task_iface = { workspace = true, optional = true }
 

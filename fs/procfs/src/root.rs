@@ -9,7 +9,9 @@ use kcore::vfs::{
     DirMaker, DirMapping, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs,
 };
 
-use crate::{hooks::ProcFsHooks, mounts::ProcMountIter, task::ProcFsHandler};
+use crate::{
+    hooks::ProcFsHooks, mounts::ProcMountIter, task::ProcFsHandler, tracing::tracing_dir_maker,
+};
 
 const KB: usize = 1024;
 const PAGE_SIZE: usize = 0x1000;
@@ -191,7 +193,7 @@ pub fn builder(fs: Arc<SimpleFs>, hooks: ProcFsHooks) -> DirMaker {
         "interrupts",
         SeqFileNode::new_regular(fs.clone(), InterruptsIter::new(hooks)),
     );
-
+    root.add("tracing", tracing_dir_maker(fs.clone()));
     root.add("sys", {
         let mut sys = DirMapping::new();
 

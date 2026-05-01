@@ -6,7 +6,10 @@
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::mem;
 
 use khal::paging::MappingFlags;
@@ -62,9 +65,7 @@ unsafe impl lock_api::RawMutex for TraceRawLock {
 pub fn trace_point_manager() -> &'static TracingEventsManager<TraceRawLock, Kops> {
     TRACE_MANAGER.call_once(|| {
         static_keys::global_init();
-        let manager =
-            global_init_events::<TraceRawLock, Kops>().expect("failed to initialize trace events");
-        manager
+        global_init_events::<TraceRawLock, Kops>().expect("failed to initialize trace events")
     })
 }
 
@@ -81,6 +82,68 @@ pub fn dump_trace_records() -> String {
         snapshot.pop();
     }
     out
+}
+
+fn with_event<R>(
+    subsystem: &str,
+    event: &str,
+    f: impl FnOnce(&ktracepoint::EventInfo<TraceRawLock, Kops>) -> R,
+) -> Option<R> {
+    let manager = trace_point_manager();
+    let subsystem = manager.get_subsystem(subsystem)?;
+    let event = subsystem.get_event(event)?;
+    Some(f(&event))
+}
+
+/// Return all tracing subsystem names.
+pub fn subsystem_names() -> Vec<String> {
+    trace_point_manager().subsystem_names()
+}
+
+/// Return all event names under a subsystem.
+pub fn event_names(subsystem: &str) -> Vec<String> {
+    trace_point_manager()
+        .get_subsystem(subsystem)
+        .map(|subsystem| subsystem.event_names())
+        .unwrap_or_default()
+}
+
+/// Read the textual enable state of an event.
+pub fn event_enable_state(subsystem: &str, event: &str) -> Option<String> {
+    with_event(subsystem, event, |event| {
+        event.enable_file().read().to_string()
+    })
+}
+
+/// Update an event's enable state using the first byte of the user input.
+pub fn write_event_enable(subsystem: &str, event: &str, data: &[u8]) -> bool {
+    let Some(enable) = data
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .map(char::from)
+    else {
+        return false;
+    };
+    with_event(subsystem, event, |event| {
+        event.enable_file().write(enable);
+        match enable {
+            '1' => event.tracepoint().enable_event(),
+            '0' => event.tracepoint().disable_event(),
+            _ => {}
+        }
+    })
+    .is_some()
+}
+
+/// Read an event's format description.
+pub fn event_format(subsystem: &str, event: &str) -> Option<String> {
+    with_event(subsystem, event, |event| event.format_file().read())
+}
+
+/// Read an event's numeric ID.
+pub fn event_id(subsystem: &str, event: &str) -> Option<String> {
+    with_event(subsystem, event, |event| event.id_file().read())
 }
 
 pub struct Kops;
