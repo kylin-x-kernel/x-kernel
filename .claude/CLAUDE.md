@@ -224,3 +224,7 @@ debugfs -w -R "rm /etc/profile.d/99-xkernel-autostart.sh" disk.img
 ```
 
 Note for fish users: if heredoc handling is unstable in your shell integration, use `printf`/`echo` pipeline to create the temporary script file.
+
+## Coding Guidelines
+
+When writing or reviewing Rust kernel code, read and follow `.claude/skills/asterinas-coding-guidelines/SKILL.md`.
