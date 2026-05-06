@@ -63,6 +63,9 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
         core::hint::spin_loop();
     }
 
+    #[cfg(any(feature = "ipi", all(feature = "smp", feature = "crosvm")))]
+    khal::irq::enable(kbuild_config::IPI_IRQ, true);
+
     #[cfg(feature = "pmu")]
     khal::irq::enable(kbuild_config::PMU_IRQ, true);
 

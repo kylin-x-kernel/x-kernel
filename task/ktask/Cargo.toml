@@ -22,6 +22,7 @@ sched_fifo = []
 sched_rr = ["preempt"]
 sched_cfs = ["preempt"]
 sched_eevdf = ["preempt"]
+crosvm = []
 
 test = ["percpu/sp-naive"]
 

@@ -12,6 +12,8 @@ use aarch64_cpu::registers::{
     Readable, Writeable,
 };
 use int_ratio::Ratio;
+#[cfg(feature = "crosvm")]
+use log::info;
 
 use crate::TimerSource;
 
@@ -19,6 +21,13 @@ static TIMER_IRQ: AtomicUsize = AtomicUsize::new(0);
 static TIMER_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 static TIMER_MODE: AtomicUsize = AtomicUsize::new(TimerMode::Physical as usize);
 static TIMER_INIT_TICKS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "crosvm")]
+static TICK_RESUME_OFFSET: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "crosvm")]
+#[percpu::def_percpu]
+static LAST_LOGICAL_TICKS: u64 = 0;
+#[cfg(feature = "crosvm")]
+static IPI_FIXUP_PENDING: AtomicUsize = AtomicUsize::new(0);
 static mut CNTPCT_TO_NANOS_RATIO: Ratio = Ratio::zero();
 static mut NANOS_TO_CNTPCT_RATIO: Ratio = Ratio::zero();
 
@@ -109,6 +118,11 @@ impl khal::time::MonotonicTimerIf for ArmGenericMonotonicTimer {
     fn arm_timer(deadline_ns: u64) {
         arm_timer(deadline_ns)
     }
+
+    #[cfg(feature = "crosvm")]
+    fn handle_idle_return(previous_ticks: u64) -> bool {
+        handle_idle_return(previous_ticks)
+    }
 }
 
 pub fn init(config: TimerConfig) {
@@ -120,6 +134,8 @@ pub fn init(config: TimerConfig) {
         TimerMode::Virtual => raw_now_ticks(),
     };
     TIMER_INIT_TICKS.store(init_ticks, Ordering::Relaxed);
+    #[cfg(feature = "crosvm")]
+    TICK_RESUME_OFFSET.store(0, Ordering::Relaxed);
 
     let freq = config.frequency_hz.unwrap_or_else(|| CNTFRQ_EL0.get());
     assert!(freq != 0, "ARM generic timer frequency must be non-zero");
@@ -135,6 +151,17 @@ pub fn init(config: TimerConfig) {
 }
 
 pub fn init_percpu() {
+    #[cfg(feature = "crosvm")]
+    unsafe {
+        LAST_LOGICAL_TICKS.write_current_raw(logical_ticks(
+            raw_now_ticks(),
+            TICK_RESUME_OFFSET.load(Ordering::Relaxed),
+        ));
+    }
+    rearm_local_timer_irq();
+}
+
+fn rearm_local_timer_irq() {
     let irq = interrupt_id();
     match mode() {
         TimerMode::Physical => {
@@ -151,7 +178,71 @@ pub fn init_percpu() {
 
 #[inline]
 pub fn now_ticks() -> u64 {
-    raw_now_ticks().saturating_sub(TIMER_INIT_TICKS.load(Ordering::Relaxed))
+    #[cfg(feature = "crosvm")]
+    {
+        track_logical_ticks(logical_ticks(
+            raw_now_ticks(),
+            TICK_RESUME_OFFSET.load(Ordering::Relaxed),
+        ))
+    }
+
+    #[cfg(not(feature = "crosvm"))]
+    {
+        raw_now_ticks().saturating_sub(TIMER_INIT_TICKS.load(Ordering::Relaxed))
+    }
+}
+
+#[cfg(feature = "crosvm")]
+pub fn handle_idle_return(previous_ticks: u64) -> bool {
+    let raw = raw_now_ticks();
+    let cpu_id = khal::percpu::this_cpu_id();
+    let old_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
+    let current_ticks = logical_ticks(raw, old_offset);
+    let repaired = if current_ticks < previous_ticks {
+        install_resume_offset(raw, previous_ticks)
+    } else {
+        false
+    };
+
+    let new_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
+    let fixed_ticks = track_logical_ticks(logical_ticks(raw_now_ticks(), new_offset));
+    if repaired {
+        let repair_ticks = fixed_ticks.saturating_sub(current_ticks);
+        info!(
+            "[PM-DBG] cpu{} repaired timer regression: before={}, current={}, after={}, \
+             repair_ticks={}, repair_ns={}, raw_ticks={}, offset={}=>{}",
+            cpu_id,
+            previous_ticks,
+            current_ticks,
+            fixed_ticks,
+            repair_ticks,
+            t2ns(repair_ticks),
+            raw,
+            old_offset,
+            new_offset
+        );
+        rearm_local_timer_irq();
+        request_remote_timer_fixup();
+    }
+    repaired
+}
+
+#[cfg(feature = "crosvm")]
+pub fn handle_ipi_fixup() {
+    let cpu_id = khal::percpu::this_cpu_id();
+    let bit = 1usize << cpu_id;
+    let pending = IPI_FIXUP_PENDING.fetch_and(!bit, Ordering::AcqRel);
+    if pending & bit == 0 {
+        return;
+    }
+
+    let offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
+    let fixed_ticks = track_logical_ticks(logical_ticks(raw_now_ticks(), offset));
+    rearm_local_timer_irq();
+    info!(
+        "[PM-DBG] cpu{} applied remote timer fixup via IPI: logical_ticks={}, offset={}",
+        cpu_id, fixed_ticks, offset
+    );
 }
 
 #[inline]
@@ -272,6 +363,76 @@ fn read_be_u32(spec: &[u8], index: usize) -> Option<u32> {
 #[inline]
 fn mode() -> TimerMode {
     TimerMode::from_usize(TIMER_MODE.load(Ordering::Relaxed))
+}
+
+#[cfg(feature = "crosvm")]
+#[inline]
+fn logical_ticks(raw_ticks: u64, resume_offset: u64) -> u64 {
+    raw_ticks
+        .wrapping_add(resume_offset)
+        .saturating_sub(TIMER_INIT_TICKS.load(Ordering::Relaxed))
+}
+
+#[cfg(feature = "crosvm")]
+#[inline]
+fn track_logical_ticks(ticks: u64) -> u64 {
+    // Safety: this only accesses the current CPU's percpu timer state.
+    let last = unsafe { LAST_LOGICAL_TICKS.read_current_raw() };
+    if ticks > last {
+        unsafe { LAST_LOGICAL_TICKS.write_current_raw(ticks) };
+        ticks
+    } else {
+        last
+    }
+}
+
+#[cfg(feature = "crosvm")]
+fn install_resume_offset(raw_ticks: u64, target_ticks: u64) -> bool {
+    loop {
+        let current_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
+        let desired_offset = target_ticks
+            .saturating_add(TIMER_INIT_TICKS.load(Ordering::Relaxed))
+            .saturating_sub(raw_ticks);
+        if desired_offset <= current_offset {
+            return false;
+        }
+        match TICK_RESUME_OFFSET.compare_exchange(
+            current_offset,
+            desired_offset,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(_) => continue,
+        }
+    }
+}
+
+#[cfg(feature = "crosvm")]
+fn request_remote_timer_fixup() {
+    if kbuild_config::CPU_NUM <= 1 {
+        return;
+    }
+
+    let current_cpu = khal::percpu::this_cpu_id();
+    let all_cpus_mask = if kbuild_config::CPU_NUM >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        (1usize << kbuild_config::CPU_NUM) - 1
+    };
+    let remote_mask = all_cpus_mask & !(1usize << current_cpu);
+    if remote_mask == 0 {
+        return;
+    }
+
+    IPI_FIXUP_PENDING.fetch_or(remote_mask, Ordering::AcqRel);
+    khal::irq::notify_cpu(
+        kbuild_config::IPI_IRQ,
+        khal::irq::TargetCpu::AllButSelf {
+            me: current_cpu,
+            total: kbuild_config::CPU_NUM,
+        },
+    );
 }
 
 #[inline]

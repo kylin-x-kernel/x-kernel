@@ -24,7 +24,7 @@ vsock = ["net", "dep:kdriver"]
 
 rtc = []
 # driver-dyn = ["kdriver/dyn"]
-crosvm = ["vsock", "kfs/crosvm"]
+crosvm = ["vsock", "kfs/crosvm", "ktask/crosvm", "timer_driver/crosvm"]
 watchdog = ["dep:watchdog"]
 pmu = ["khal/pmu"]
 
@@ -48,6 +48,7 @@ memspace = { workspace = true }
 knet = { workspace = true, optional = true }
 kplat = { workspace = true }
 ktask = { workspace = true }
+timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 chrono.workspace = true
 crate_interface.workspace = true

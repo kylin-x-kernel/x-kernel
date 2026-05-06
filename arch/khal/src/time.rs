@@ -37,6 +37,10 @@ pub trait MonotonicTimerIf {
     fn interrupt_id() -> usize;
     /// Arms the monotonic timer to trigger at the given deadline (in ns).
     fn arm_timer(deadline: u64);
+    /// Allows the timer backend to handle counter/timer repair after idle returns.
+    fn handle_idle_return(_previous_ticks: u64) -> bool {
+        false
+    }
 }
 
 #[inline]
@@ -67,6 +71,11 @@ pub fn interrupt_id() -> usize {
 #[inline]
 pub fn arm_timer(deadline: u64) {
     call_interface!(MonotonicTimerIf::arm_timer, deadline)
+}
+
+#[inline]
+pub fn handle_idle_return(previous_ticks: u64) -> bool {
+    call_interface!(MonotonicTimerIf::handle_idle_return, previous_ticks)
 }
 
 #[inline]

@@ -279,6 +279,9 @@ pub fn rust_main(arg: usize) -> ! {
         self::mp::start_secondary_cpus(cpu_id);
     }
 
+    #[cfg(feature = "ipi")]
+    kipi::init();
+
     info!("Initialize interrupt handlers...");
     init_interrupt();
 
@@ -437,12 +440,10 @@ fn init_interrupt() {
     // Setup timer interrupt handler
     const PERIODIC_INTERVAL_NANOS: u64 =
         khal::time::NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
-
     #[percpu::def_percpu]
     static NEXT_DEADLINE: u64 = 0;
 
-    fn update_timer() {
-        let now_ns = khal::time::monotonic_time_nanos();
+    fn update_timer(now_ns: u64) {
         // Safety: we have disabled preemption in IRQ handler.
         let current_deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
 
@@ -460,12 +461,16 @@ fn init_interrupt() {
     }
 
     khal::irq::register(khal::time::interrupt_id(), || {
-        update_timer();
+        let now_ns = khal::time::monotonic_time_nanos();
+        update_timer(now_ns);
         ktask::on_timer_tick();
     });
 
-    #[cfg(feature = "ipi")]
-    khal::irq::register(khal::irq::IPI_IRQ, || {
+    #[cfg(any(feature = "ipi", all(feature = "smp", feature = "crosvm")))]
+    khal::irq::register(kbuild_config::IPI_IRQ, || {
+        #[cfg(all(target_arch = "aarch64", feature = "crosvm"))]
+        timer_driver::arm_generic::handle_ipi_fixup();
+        #[cfg(feature = "ipi")]
         kipi::ipi_handler();
     });
 

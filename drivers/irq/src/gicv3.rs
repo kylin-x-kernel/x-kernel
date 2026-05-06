@@ -59,7 +59,6 @@ pub fn dispatch_irq() -> Option<usize> {
         return None;
     }
     let irq = ack.to_u32() as usize;
-    trace!("Handling IRQ: {ack:?}");
     TRAP_OP.eoi1(ack);
     if TRAP_OP.eoi_mode() {
         TRAP_OP.dir(ack);

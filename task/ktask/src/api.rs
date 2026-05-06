@@ -240,8 +240,24 @@ pub fn exit(exit_code: i32) -> ! {
 pub fn run_idle() -> ! {
     loop {
         yield_now();
-        trace!("idle task: waiting for IRQs...");
+        #[cfg(feature = "crosvm")]
+        let cntpct_before = khal::time::now_ticks();
         karch::await_interrupts();
+
+        #[cfg(feature = "crosvm")]
+        {
+            let repaired = khal::time::handle_idle_return(cntpct_before);
+            let cntpct_after = khal::time::now_ticks();
+            if !repaired && cntpct_after < cntpct_before {
+                warn!(
+                    "[PM-DBG] idle WFI returned with counter regression! before={}, after={}, \
+                     delta={}",
+                    cntpct_before,
+                    cntpct_after,
+                    cntpct_before.wrapping_sub(cntpct_after)
+                );
+            }
+        }
     }
 }
 
