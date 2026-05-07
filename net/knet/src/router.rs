@@ -253,6 +253,7 @@ fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
         let src_addr = (src_addr, tcp_packet.src_port()).into();
         let dst_addr = (dst_addr, tcp_packet.dst_port()).into();
         let is_first = tcp_packet.syn() && !tcp_packet.ack();
+        LISTEN_TABLE.note_tcp_packet(dst_addr);
         if is_first {
             LISTEN_TABLE.incoming_tcp_packet(src_addr, dst_addr, sockets);
         }

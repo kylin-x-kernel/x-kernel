@@ -58,6 +58,8 @@ pub struct RawSocket {
 impl RawSocket {
     pub fn new(ip_version: IpVersion, ip_protocol: IpProtocol) -> Self {
         let dispatch_irq = SOCKET_SET.add(new_raw_socket(ip_version, ip_protocol));
+        let general = GeneralOptions::new();
+        general.set_device_mask(u32::MAX);
         Self {
             dispatch_irq,
             ip_version,
@@ -66,7 +68,7 @@ impl RawSocket {
             ttl: RwLock::new(None),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
-            general: GeneralOptions::new(),
+            general,
         }
     }
 
@@ -375,6 +377,14 @@ impl Pollable for RawSocket {
     }
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
+        self.with_smol_socket(|socket| {
+            if events.contains(IoEvents::IN) {
+                socket.register_recv_waker(context.waker());
+            }
+            if events.contains(IoEvents::OUT) {
+                socket.register_send_waker(context.waker());
+            }
+        });
         if events.intersects(IoEvents::IN | IoEvents::OUT) {
             self.general.register_rx_waker(context.waker());
         }

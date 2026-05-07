@@ -108,7 +108,8 @@ pub fn sys_setitimer(
 
     let (interval, remained) = match new_value.check_non_null() {
         Some(new_value) => {
-            // FIXME: AnyBitPattern
+            // SAFETY: `read_uninit` reads the user-provided `itimerval` by value,
+            // and `itimerval` is a plain Linux ABI struct with no invalid bit patterns.
             let new_value = unsafe { new_value.read_uninit()?.assume_init() };
             (
                 new_value.it_interval.try_into_time_value()?.as_nanos() as usize,

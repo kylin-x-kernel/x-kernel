@@ -18,7 +18,7 @@ use smoltcp::{
     wire::{HardwareAddress, IpAddress, IpCidr, IpListenEndpoint},
 };
 
-use crate::{SOCKET_SET, netlink::RtnetlinkState, router::Router};
+use crate::{LISTEN_TABLE, SOCKET_SET, netlink::RtnetlinkState, router::Router};
 
 fn now() -> Instant {
     Instant::from_micros_const((monotonic_time_nanos() / NANOS_PER_MICROS) as i64)
@@ -50,6 +50,7 @@ impl Service {
 
         self.router.poll(timestamp);
         self.iface.poll(timestamp, &mut self.router, sockets);
+        LISTEN_TABLE.wake_touched_acceptors(sockets);
         self.router.dispatch(timestamp)
     }
 
@@ -62,13 +63,16 @@ impl Service {
 
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
         match endpoint.addr {
-            Some(addr) => self
-                .router
-                .table
-                .lookup(&addr)
-                .map_or(0, |it| 1u32 << it.dev),
+            Some(addr) => self.device_mask_for_addr(&addr),
             None => u32::MAX,
         }
+    }
+
+    pub fn device_mask_for_addr(&self, addr: &IpAddress) -> u32 {
+        self.router
+            .table
+            .lookup(addr)
+            .map_or(u32::MAX, |it| 1u32 << it.dev)
     }
 
     pub fn register_rx_waker(&mut self, mask: u32, waker: &Waker) {

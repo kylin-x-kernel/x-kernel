@@ -3,9 +3,9 @@
 // See LICENSES for license details.
 
 //! TCP listen table and backlog management.
-use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec, vec::Vec};
-use core::ops::DerefMut;
+use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 
+use hashbrown::HashMap;
 use kerrno::{KError, KResult};
 use kpoll::PollSet;
 use ksync::Mutex;
@@ -20,13 +20,12 @@ use crate::{
     consts::{LISTEN_QUEUE_SIZE, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
 };
 
-const PORT_NUM: usize = 65536;
-
 struct ListenTableEntry {
-    listen_endpoint: IpListenEndpoint,
     syn_queue: VecDeque<PendingConn>,
     accept_queue: VecDeque<PendingConn>,
     accept_poll: PollSet,
+    touched: bool,
+    closed: bool,
 }
 
 struct PendingConn {
@@ -37,113 +36,144 @@ struct PendingConn {
 
 impl ListenTableEntry {
     /// Create a new listen table entry for the given endpoint.
-    pub fn new(listen_endpoint: IpListenEndpoint) -> Self {
+    fn new() -> Self {
         Self {
-            listen_endpoint,
             syn_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
             accept_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
             accept_poll: PollSet::new(),
-        }
-    }
-}
-
-impl Drop for ListenTableEntry {
-    fn drop(&mut self) {
-        for conn in &self.syn_queue {
-            SOCKET_SET.remove(conn.dispatch_irq);
-        }
-        for conn in &self.accept_queue {
-            SOCKET_SET.remove(conn.dispatch_irq);
+            touched: false,
+            closed: false,
         }
     }
 }
 
 pub struct ListenTable {
-    tcp: TcpListenTable,
+    entries: Mutex<HashMap<IpListenEndpoint, ListenEntry>>,
 }
 
-type TcpListenTable = Box<[Arc<Mutex<Option<Box<ListenTableEntry>>>>]>;
+type ListenEntry = Arc<Mutex<ListenTableEntry>>;
 
 impl ListenTable {
     /// Create an empty listen table.
     pub fn new() -> Self {
-        let tcp = unsafe {
-            let mut buf = Box::new_uninit_slice(PORT_NUM);
-            for i in 0..PORT_NUM {
-                buf[i].write(Arc::default());
-            }
-            buf.assume_init()
-        };
-        Self { tcp }
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
     }
 
-    pub fn can_listen(&self, port: u16) -> bool {
-        self.tcp[port as usize].lock().is_none()
+    pub fn can_listen(&self, endpoint: IpListenEndpoint) -> bool {
+        let entries = self.entries.lock();
+        !Self::listen_conflicts(&entries, endpoint)
     }
 
     pub fn listen(&self, listen_endpoint: IpListenEndpoint) -> KResult {
         let port = listen_endpoint.port;
         assert_ne!(port, 0);
-        let mut entry = self.tcp[port as usize].lock();
-        if entry.is_none() {
-            *entry = Some(Box::new(ListenTableEntry::new(listen_endpoint)));
-            Ok(())
-        } else {
-            warn!("socket already listening on port {port}");
-            Err(KError::AddrInUse)
+
+        let mut entries = self.entries.lock();
+        if Self::listen_conflicts(&entries, listen_endpoint) {
+            warn!("socket already listening on {listen_endpoint:?}");
+            return Err(KError::AddrInUse);
+        }
+
+        entries.insert(
+            listen_endpoint,
+            Arc::new(Mutex::new(ListenTableEntry::new())),
+        );
+        Ok(())
+    }
+
+    pub fn unlisten(&self, endpoint: IpListenEndpoint) {
+        let entry = {
+            let mut entries = self.entries.lock();
+            entries.remove(&endpoint)
+        };
+
+        let Some(entry) = entry else {
+            return;
+        };
+
+        let handles = {
+            let mut entry = entry.lock();
+            entry.closed = true;
+            entry.drain_handles()
+        };
+
+        for handle in handles {
+            SOCKET_SET.remove(handle);
         }
     }
 
-    pub fn unlisten(&self, port: u16) {
-        *self.tcp[port as usize].lock() = None;
-    }
-
-    fn listen_entry(&self, port: u16) -> Arc<Mutex<Option<Box<ListenTableEntry>>>> {
-        self.tcp[port as usize].clone()
-    }
-
-    pub fn can_accept(&self, port: u16) -> KResult<bool> {
-        if let Some(entry) = self.listen_entry(port).lock().as_mut() {
-            prune_closed(&mut entry.syn_queue);
-            prune_closed(&mut entry.accept_queue);
-            promote_ready(&mut entry.syn_queue, &mut entry.accept_queue);
-            Ok(!entry.accept_queue.is_empty())
-        } else {
-            warn!("accept before listen");
-            Err(KError::InvalidInput)
-        }
-    }
-
-    pub fn register_accept_waker(&self, port: u16, waker: &core::task::Waker) -> KResult<()> {
-        if let Some(entry) = self.listen_entry(port).lock().as_ref() {
-            entry.accept_poll.register(waker);
-            Ok(())
-        } else {
-            warn!("register accept waker before listen");
-            Err(KError::InvalidInput)
-        }
-    }
-
-    pub fn accept(&self, port: u16) -> KResult<SocketHandle> {
-        let entry = self.listen_entry(port);
-        let mut table = entry.lock();
-        let Some(entry) = table.deref_mut() else {
+    pub fn can_accept(&self, endpoint: IpListenEndpoint) -> KResult<bool> {
+        let Some(entry) = self.get_entry(&endpoint) else {
             warn!("accept before listen");
             return Err(KError::InvalidInput);
         };
 
-        prune_closed(&mut entry.syn_queue);
-        prune_closed(&mut entry.accept_queue);
-        promote_ready(&mut entry.syn_queue, &mut entry.accept_queue);
-        let conn = entry.accept_queue.pop_front().ok_or(KError::WouldBlock)?;
-        // If the connection is reset, return ConnectionReset error
-        // Otherwise, return the dispatch_irq and the address tuple
-        if is_closed(conn.dispatch_irq) {
+        let entry = entry.lock();
+        Ok(!entry.accept_queue.is_empty())
+    }
+
+    pub fn register_accept_waker(
+        &self,
+        endpoint: IpListenEndpoint,
+        waker: &core::task::Waker,
+    ) -> KResult<()> {
+        let Some(entry) = self.get_entry(&endpoint) else {
+            warn!("register accept waker before listen");
+            return Err(KError::InvalidInput);
+        };
+
+        let entry = entry.lock();
+        entry.accept_poll.register(waker);
+        if !entry.accept_queue.is_empty() {
+            entry.accept_poll.wake();
+        }
+        Ok(())
+    }
+
+    pub fn accept(&self, endpoint: IpListenEndpoint) -> KResult<SocketHandle> {
+        let Some(entry) = self.get_entry(&endpoint) else {
+            warn!("accept before listen");
+            return Err(KError::InvalidInput);
+        };
+
+        let mut entry = entry.lock();
+
+        loop {
+            let conn = entry.accept_queue.pop_front().ok_or(KError::WouldBlock)?;
+            if !is_closed(conn.dispatch_irq) {
+                return Ok(conn.dispatch_irq);
+            }
+
             warn!("accept failed: connection reset");
             SOCKET_SET.remove(conn.dispatch_irq);
-            Err(KError::ConnectionReset)
-        } else {
-            Ok(conn.dispatch_irq)
+        }
+    }
+
+    pub fn note_tcp_packet(&self, dst: IpEndpoint) {
+        let Some((_, entry)) = self.lookup_entry(dst) else {
+            return;
+        };
+
+        entry.lock().touched = true;
+    }
+
+    pub fn wake_touched_acceptors(&self, sockets: &mut SocketSet<'_>) {
+        let entries = {
+            let entries = self.entries.lock();
+            entries.values().cloned().collect::<Vec<_>>()
+        };
+
+        for entry in entries {
+            let mut entry = entry.lock();
+            if entry.closed || !entry.touched {
+                continue;
+            }
+            entry.touched = false;
+            if refresh_entry_in_socket_set(&mut entry, sockets) {
+                entry.accept_poll.wake();
+            }
         }
     }
 
@@ -153,63 +183,108 @@ impl ListenTable {
         dst: IpEndpoint,
         sockets: &mut SocketSet<'_>,
     ) {
-        if let Some(entry) = self.listen_entry(dst.port).lock().deref_mut() {
-            prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
-            prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
-            if entry
-                .syn_queue
-                .iter()
-                .chain(entry.accept_queue.iter())
-                .any(|conn| conn.src == src && conn.dst == dst)
-            {
-                return;
-            }
-            // TODO(mivik): accept address check
-            if entry.syn_queue.len() + entry.accept_queue.len() >= LISTEN_QUEUE_SIZE {
-                // SYN queue is full, drop the packet
-                warn!("SYN queue overflow!");
-                return;
-            }
+        let Some((endpoint, entry)) = self.lookup_entry(dst) else {
+            return;
+        };
 
-            let mut socket = smoltcp::socket::tcp::Socket::new(
-                SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]),
-                SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]),
-            );
-            if let Err(err) = socket.listen(IpListenEndpoint {
-                addr: None,
-                port: dst.port,
-            }) {
-                warn!("Failed to listen on {}: {:?}", entry.listen_endpoint, err);
-                return;
-            }
-            let dispatch_irq = sockets.add(socket);
-            entry.syn_queue.push_back(PendingConn {
-                src,
-                dst,
-                dispatch_irq,
-            });
+        let mut entry = entry.lock();
+        if entry.closed {
+            return;
         }
+
+        prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
+        prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
+        if entry
+            .syn_queue
+            .iter()
+            .chain(entry.accept_queue.iter())
+            .any(|conn| conn.src == src && conn.dst == dst)
+        {
+            return;
+        }
+        // TODO(mivik): accept address check
+        if entry.syn_queue.len() + entry.accept_queue.len() >= LISTEN_QUEUE_SIZE {
+            warn!("listen backlog overflow!");
+            return;
+        }
+
+        let mut socket = smoltcp::socket::tcp::Socket::new(
+            SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]),
+            SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]),
+        );
+        if let Err(err) = socket.listen(IpListenEndpoint {
+            addr: Some(dst.addr),
+            port: dst.port,
+        }) {
+            warn!("Failed to listen on {}: {:?}", endpoint, err);
+            return;
+        }
+        let dispatch_irq = sockets.add(socket);
+        entry.syn_queue.push_back(PendingConn {
+            src,
+            dst,
+            dispatch_irq,
+        });
     }
 
-    pub fn wake_ready_acceptors(&self) {
-        for entry in self.tcp.iter() {
-            let mut guard = entry.lock();
-            let Some(entry) = guard.as_mut() else {
-                continue;
-            };
-            prune_closed(&mut entry.syn_queue);
-            prune_closed(&mut entry.accept_queue);
-            if promote_ready(&mut entry.syn_queue, &mut entry.accept_queue) {
-                entry.accept_poll.wake();
-            }
+    fn get_entry(&self, endpoint: &IpListenEndpoint) -> Option<ListenEntry> {
+        let entries = self.entries.lock();
+        entries.get(endpoint).cloned()
+    }
+
+    fn lookup_entry(&self, dst: IpEndpoint) -> Option<(IpListenEndpoint, ListenEntry)> {
+        let entries = self.entries.lock();
+        Self::lookup_endpoint(&entries, dst).and_then(|endpoint| {
+            entries
+                .get(&endpoint)
+                .cloned()
+                .map(|entry| (endpoint, entry))
+        })
+    }
+
+    fn lookup_endpoint(
+        entries: &HashMap<IpListenEndpoint, ListenEntry>,
+        dst: IpEndpoint,
+    ) -> Option<IpListenEndpoint> {
+        // This only selects a candidate endpoint; callers must re-check the entry
+        // after taking the listen table lock.
+        let exact = IpListenEndpoint {
+            addr: Some(dst.addr),
+            port: dst.port,
+        };
+        if entries.contains_key(&exact) {
+            return Some(exact);
         }
+
+        let wildcard = IpListenEndpoint {
+            addr: None,
+            port: dst.port,
+        };
+        entries.contains_key(&wildcard).then_some(wildcard)
+    }
+
+    fn listen_conflicts(
+        entries: &HashMap<IpListenEndpoint, ListenEntry>,
+        endpoint: IpListenEndpoint,
+    ) -> bool {
+        entries.keys().any(|old| {
+            old.port == endpoint.port
+                && (old.addr.is_none() || endpoint.addr.is_none() || old.addr == endpoint.addr)
+        })
     }
 }
 
-fn is_connected(dispatch_irq: SocketHandle) -> bool {
-    SOCKET_SET.with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| {
-        matches!(socket.state(), State::Established | State::CloseWait)
-    })
+impl ListenTableEntry {
+    fn drain_handles(&mut self) -> Vec<SocketHandle> {
+        let mut handles = Vec::new();
+        while let Some(conn) = self.syn_queue.pop_front() {
+            handles.push(conn.dispatch_irq);
+        }
+        while let Some(conn) = self.accept_queue.pop_front() {
+            handles.push(conn.dispatch_irq);
+        }
+        handles
+    }
 }
 
 fn is_closed(dispatch_irq: SocketHandle) -> bool {
@@ -218,16 +293,10 @@ fn is_closed(dispatch_irq: SocketHandle) -> bool {
     })
 }
 
-fn prune_closed(syn_queue: &mut VecDeque<PendingConn>) {
-    let len = syn_queue.len();
-    for _ in 0..len {
-        let conn = syn_queue.pop_front().unwrap();
-        if is_closed(conn.dispatch_irq) {
-            SOCKET_SET.remove(conn.dispatch_irq);
-        } else {
-            syn_queue.push_back(conn);
-        }
-    }
+fn refresh_entry_in_socket_set(entry: &mut ListenTableEntry, sockets: &mut SocketSet<'_>) -> bool {
+    prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
+    prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
+    promote_ready_in_socket_set(&mut entry.syn_queue, &mut entry.accept_queue, sockets)
 }
 
 fn prune_closed_in_socket_set(syn_queue: &mut VecDeque<PendingConn>, sockets: &mut SocketSet<'_>) {
@@ -251,15 +320,25 @@ fn is_closed_in_socket_set(dispatch_irq: SocketHandle, sockets: &SocketSet<'_>) 
     )
 }
 
-fn promote_ready(
+fn is_connected_in_socket_set(dispatch_irq: SocketHandle, sockets: &SocketSet<'_>) -> bool {
+    matches!(
+        sockets.get::<tcp::Socket>(dispatch_irq).state(),
+        State::Established | State::CloseWait
+    )
+}
+
+fn promote_ready_in_socket_set(
     syn_queue: &mut VecDeque<PendingConn>,
     accept_queue: &mut VecDeque<PendingConn>,
+    sockets: &SocketSet<'_>,
 ) -> bool {
     let mut moved = false;
     let len = syn_queue.len();
     for _ in 0..len {
-        let conn = syn_queue.pop_front().unwrap();
-        if is_connected(conn.dispatch_irq) {
+        let Some(conn) = syn_queue.pop_front() else {
+            break;
+        };
+        if is_connected_in_socket_set(conn.dispatch_irq, sockets) {
             accept_queue.push_back(conn);
             moved = true;
         } else {

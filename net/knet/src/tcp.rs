@@ -80,9 +80,18 @@ impl TcpSocket {
         result.with_smol_socket(|socket| {
             result
                 .general
-                .set_device_mask(SERVICE.lock().device_mask_for(&socket.get_bound_endpoint()));
+                .set_device_mask(Self::device_mask_for_connected_socket(socket));
         });
         result
+    }
+
+    fn device_mask_for_connected_socket(socket: &smol::Socket) -> u32 {
+        let service = SERVICE.lock();
+        if let Some(remote_endpoint) = socket.remote_endpoint() {
+            service.device_mask_for_addr(&remote_endpoint.addr)
+        } else {
+            service.device_mask_for(&socket.get_bound_endpoint())
+        }
     }
 }
 
@@ -136,11 +145,9 @@ impl TcpSocket {
             smol::State::SynSent => false, // wait for connection
             smol::State::Established => {
                 self.state.set(State::Connected); // connected
-                debug!(
-                    "TCP socket {}: connected to {}",
-                    self.dispatch_irq,
-                    socket.remote_endpoint().unwrap(),
-                );
+                if let Some(remote) = socket.remote_endpoint() {
+                    debug!("TCP socket {}: connected to {}", self.dispatch_irq, remote);
+                }
                 true
             }
             _ => {
@@ -171,12 +178,12 @@ impl TcpSocket {
 
     fn poll_listener(&self) -> IoEvents {
         let mut events = IoEvents::empty();
-        events.set(
-            IoEvents::IN,
-            LISTEN_TABLE
-                .can_accept(self.bound_endpoint().unwrap().port)
-                .unwrap(),
-        );
+        let readable = self
+            .bound_endpoint()
+            .ok()
+            .and_then(|endpoint| LISTEN_TABLE.can_accept(endpoint).ok())
+            .unwrap_or(false);
+        events.set(IoEvents::IN, readable);
         events
     }
 }
@@ -303,8 +310,9 @@ impl SocketOps for TcpSocket {
                 }
                 self.with_smol_socket(|socket| {
                     socket.set_bound_endpoint(bound_endpoint);
-                    self.general
-                        .set_device_mask(SERVICE.lock().device_mask_for(&bound_endpoint));
+                    self.general.set_device_mask(
+                        SERVICE.lock().device_mask_for_addr(&remote_endpoint.addr),
+                    );
                     socket
                         .connect(
                             crate::SERVICE.lock().iface.context(),
@@ -358,11 +366,11 @@ impl SocketOps for TcpSocket {
             k_bail!(InvalidInput, "not listening");
         }
 
-        let bound_port = self.bound_endpoint()?.port;
+        let bound_endpoint = self.bound_endpoint()?;
         self.general.recv_poller(self, || {
             poll_interfaces();
             LISTEN_TABLE
-                .accept(bound_port)
+                .accept(bound_endpoint)
                 .map(|dispatch_irq| Socket::Tcp(Box::new(TcpSocket::new_connected(dispatch_irq))))
         })
     }
@@ -468,7 +476,7 @@ impl SocketOps for TcpSocket {
         // listener
         if let Ok(guard) = self.state.lock(State::Listening) {
             guard.transit(State::Closed, || {
-                LISTEN_TABLE.unlisten(self.bound_endpoint()?.port);
+                LISTEN_TABLE.unlisten(self.bound_endpoint()?);
                 poll_interfaces();
                 Ok(())
             })?;
@@ -500,7 +508,7 @@ impl Pollable for TcpSocket {
             && events.contains(IoEvents::IN)
             && let Ok(endpoint) = self.bound_endpoint()
         {
-            let _ = LISTEN_TABLE.register_accept_waker(endpoint.port, context.waker());
+            let _ = LISTEN_TABLE.register_accept_waker(endpoint, context.waker());
         }
         if events.contains(IoEvents::RDHUP) {
             self.poll_rx_closed.register(context.waker());
@@ -534,7 +542,13 @@ fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
         } else {
             *curr += 1;
         }
-        if LISTEN_TABLE.can_listen(port) && SOCKET_SET.bind_check(local_addr, port).is_ok() {
+        let listen_endpoint = IpListenEndpoint {
+            addr: (!local_addr.is_unspecified()).then_some(local_addr),
+            port,
+        };
+        if LISTEN_TABLE.can_listen(listen_endpoint)
+            && SOCKET_SET.bind_check(local_addr, port).is_ok()
+        {
             return Ok(port);
         }
         tries += 1;
