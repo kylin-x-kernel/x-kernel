@@ -51,6 +51,7 @@ kernel_elf_loader = { path = "boot/kernel-elf-loader", package = "kernel-elf-loa
 x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 
 # Internal: core runtime and services
+kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
 ktypes = { path = "core/ktypes" }
 ktracing = { path = "core/ktracing" }
@@ -67,6 +68,7 @@ kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
 
 # Internal: POSIX ABI compatibility
+posix-credentials = { path = "posix/credentials" }
 posix-ipc = { path = "posix/ipc" }
 posix-fs = { path = "posix/fs" }
 posix-mm = { path = "posix/mm" }

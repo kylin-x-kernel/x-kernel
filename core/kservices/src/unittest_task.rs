@@ -10,6 +10,7 @@ use alloc::{string::ToString, sync::Arc, vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kcore::task::{ProcessData, Thread};
+use kcred::Credentials;
 use kerrno::KResult;
 use kprocess::Pid;
 use ksignal::api::SignalActions;
@@ -60,6 +61,7 @@ impl InstalledTestThread {
             aspace,
             Arc::new(SpinNoIrq::new(SignalActions::default())),
             None,
+            Credentials::root(),
         );
         let thr = Thread::new(tid, proc_data);
         init_thread(&thr);

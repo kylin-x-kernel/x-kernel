@@ -38,6 +38,7 @@ kerrno.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
+kcred.workspace = true
 karch.workspace = true
 inputdev = { workspace = true, optional = true }
 kio.workspace = true

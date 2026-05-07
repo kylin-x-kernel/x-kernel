@@ -5,7 +5,6 @@
 //! System information and control syscalls.
 //!
 //! This module provides syscalls for querying and manipulating system information including:
-//! - User and group ID operations (getuid, geteuid, setuid, setgid, etc.)
 //! - System information (uname, sysinfo, etc.)
 //! - Process information queries
 //! - Hostname management
@@ -14,60 +13,13 @@ use core::ffi::c_char;
 
 use kbuild_config::ARCH;
 use kcore::task::processes;
-use kerrno::{KError, KResult};
+use kerrno::KResult;
 use kfs::FS_CONTEXT;
 use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
 };
 use osvm::{VirtMutPtr, write_vm_mem};
-
-/// Get the real user ID of the current process
-pub fn sys_getuid() -> KResult<isize> {
-    Ok(0)
-}
-
-/// Get the effective user ID of the current process
-pub fn sys_geteuid() -> KResult<isize> {
-    Ok(0)
-}
-
-/// Get the real group ID of the current process
-pub fn sys_getgid() -> KResult<isize> {
-    Ok(0)
-}
-
-/// Get the effective group ID of the current process
-pub fn sys_getegid() -> KResult<isize> {
-    Ok(0)
-}
-
-/// Set the user ID of the current process
-pub fn sys_setuid(_uid: u32) -> KResult<isize> {
-    debug!("sys_setuid <= uid: {_uid}");
-    Ok(0)
-}
-
-/// Set the group ID of the current process
-pub fn sys_setgid(_gid: u32) -> KResult<isize> {
-    debug!("sys_setgid <= gid: {_gid}");
-    Ok(0)
-}
-
-/// Get the supplementary group IDs of the current process
-pub fn sys_getgroups(size: usize, list: *mut u32) -> KResult<isize> {
-    debug!("sys_getgroups <= size: {size}");
-    if size < 1 {
-        return Err(KError::InvalidInput);
-    }
-    write_vm_mem(list, &[0])?;
-    Ok(1)
-}
-
-/// Set the supplementary group IDs of the current process
-pub fn sys_setgroups(_size: usize, _list: *const u32) -> KResult<isize> {
-    Ok(0)
-}
 
 const fn pad_str(info: &str) -> [c_char; 65] {
     let mut data: [c_char; 65] = [0; 65];

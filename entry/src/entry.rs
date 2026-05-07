@@ -12,6 +12,7 @@ use kcore::{
     mm::{copy_from_kernel, load_user_app, new_user_aspace_empty},
     task::{ProcessData, Thread, add_task_to_table},
 };
+use kcred::Credentials;
 use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
@@ -59,6 +60,7 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
         Arc::new(Mutex::new(uspace)),
         Arc::default(),
         None,
+        Credentials::root(),
     );
     {
         let mut scope = proc_data.scope.write();

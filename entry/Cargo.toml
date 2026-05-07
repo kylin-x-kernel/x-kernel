@@ -50,6 +50,7 @@ minicov = "0.3.8"
 kfeat.workspace = true
 kfs.workspace = true
 khal.workspace = true
+kcred.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
 ksync.workspace = true

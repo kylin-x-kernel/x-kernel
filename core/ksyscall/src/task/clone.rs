@@ -269,6 +269,7 @@ impl CloneRequest {
                 aspace,
                 signal_actions,
                 exit_signal,
+                old_proc_data.credentials.read().clone(),
             );
             proc_data.set_umask(old_proc_data.umask());
             // Inherit heap pointers from parent to ensure child's heap state is consistent after fork

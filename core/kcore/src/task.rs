@@ -20,6 +20,7 @@ use core::{
 
 use extern_trait::extern_trait;
 use hashbrown::HashMap;
+use kcred::Credentials;
 use kerrno::{KError, KResult};
 use kpoll::PollSet;
 use kprocess::{Pid, Process, ProcessGroup, Session};
@@ -243,6 +244,9 @@ pub struct ProcessData {
     /// The default mask for file permissions.
     umask: AtomicU32,
 
+    /// POSIX credentials shared by all threads in this process.
+    pub credentials: RwLock<Credentials>,
+
     /// Tee TA context
     #[cfg(feature = "tee")]
     pub tee_ta_ctx: RwLock<TeeTaCtx>,
@@ -257,6 +261,7 @@ impl ProcessData {
         aspace: Arc<Mutex<AddrSpace>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
         exit_signal: Option<Signo>,
+        credentials: Credentials,
     ) -> Arc<Self> {
         Arc::new(Self {
             proc,
@@ -282,6 +287,8 @@ impl ProcessData {
             futex_table: Arc::new(FutexTable::new()),
 
             umask: AtomicU32::new(0o022),
+
+            credentials: RwLock::new(credentials),
         })
     }
 
