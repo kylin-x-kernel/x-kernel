@@ -15,7 +15,7 @@ use super::connection_manager::*;
 use crate::{
     RecvFlags, RecvOptions, SendOptions, Shutdown,
     general::GeneralOptions,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     state::*,
     vsock::{VsockAddr, VsockConnId, VsockTransport, VsockTransportOps},
 };
@@ -49,11 +49,11 @@ impl Default for VsockStreamTransport {
 }
 
 impl Configurable for VsockStreamTransport {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         self.general.get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
         self.general.set_option_inner(opt)
     }
 }

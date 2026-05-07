@@ -21,6 +21,7 @@ use crate::{
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::NetDevice,
     netlink::{RT_TABLE_MAIN, RTN_UNICAST, RtnetlinkState},
+    udp_err,
 };
 
 #[derive(Debug)]
@@ -227,35 +228,53 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     }
 }
 
-fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
-    let (protocol, src_addr, dst_addr, payload) = match IpVersion::of_packet(buf).unwrap() {
+fn parse_ip_packet(buf: &[u8]) -> Option<(IpProtocol, IpAddress, IpAddress, &[u8])> {
+    let version = IpVersion::of_packet(buf).unwrap_or(IpVersion::Ipv4);
+    match version {
         IpVersion::Ipv4 => {
-            let ip_packet = Ipv4Packet::new_unchecked(buf);
-            (
+            let ip_packet = Ipv4Packet::new_checked(buf).ok()?;
+            Some((
                 ip_packet.next_header(),
                 IpAddress::Ipv4(ip_packet.src_addr()),
                 IpAddress::Ipv4(ip_packet.dst_addr()),
                 ip_packet.payload(),
-            )
+            ))
         }
         IpVersion::Ipv6 => {
-            let ip_packet = Ipv6Packet::new_unchecked(buf);
-            (
+            let ip_packet = Ipv6Packet::new_checked(buf).ok()?;
+            Some((
                 ip_packet.next_header(),
                 IpAddress::Ipv6(ip_packet.src_addr()),
                 IpAddress::Ipv6(ip_packet.dst_addr()),
                 ip_packet.payload(),
-            )
+            ))
         }
+    }
+}
+
+fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
+    let Some((protocol, src_addr, dst_addr, payload)) = parse_ip_packet(buf) else {
+        return;
     };
     if protocol == IpProtocol::Tcp {
-        let tcp_packet = TcpPacket::new_unchecked(payload);
+        let Ok(tcp_packet) = TcpPacket::new_checked(payload) else {
+            return;
+        };
         let src_addr = (src_addr, tcp_packet.src_port()).into();
         let dst_addr = (dst_addr, tcp_packet.dst_port()).into();
         let is_first = tcp_packet.syn() && !tcp_packet.ack();
         LISTEN_TABLE.note_tcp_packet(dst_addr);
         if is_first {
             LISTEN_TABLE.incoming_tcp_packet(src_addr, dst_addr, sockets);
+        }
+    }
+}
+
+fn snoop_udp_error_packet(buf: &[u8]) {
+    match IpVersion::of_packet(buf).unwrap_or(IpVersion::Ipv4) {
+        IpVersion::Ipv4 => udp_err::inspect_icmpv4_error(buf),
+        IpVersion::Ipv6 => {
+            // UDP error queue currently supports only ICMPv4 error delivery.
         }
     }
 }
@@ -271,6 +290,7 @@ impl<'a> smoltcp::phy::RxToken for RxToken<'a> {
     }
 
     fn preprocess(&self, sockets: &mut SocketSet) {
+        snoop_udp_error_packet(self.0);
         snoop_tcp_packet(self.0, sockets);
     }
 }

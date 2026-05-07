@@ -8,12 +8,111 @@
 //! in socket I/O operations, including file descriptor passing and other protocol-specific data.
 
 use alloc::{sync::Arc, vec::Vec};
+use core::{mem::size_of, net::SocketAddr, ptr};
 
-use kerrno::{KError, KResult};
+use bytemuck::{NoUninit, bytes_of};
+use kerrno::{KError, KResult, LinuxError};
+use knet::UdpRecvError;
 use kservices::mm::{UserConstPtr, UserPtr};
-use linux_raw_sys::net::{SCM_RIGHTS, SOL_SOCKET, cmsghdr};
+use linux_raw_sys::net::{
+    AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
+    sockaddr_in,
+};
 
 use crate::file::{FileLike, get_file_like};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockExtendedErr {
+    ee_errno: u32,
+    ee_origin: u8,
+    ee_type: u8,
+    ee_code: u8,
+    ee_pad: u8,
+    ee_info: u32,
+    ee_data: u32,
+}
+
+const _: [u8; 16] = [0; size_of::<SockExtendedErr>()];
+
+// SAFETY: `SockExtendedErr` is a `repr(C)` Linux ABI structure made only of
+// integer fields. Its field order is `u32, u8, u8, u8, u8, u32, u32`, which
+// leaves no padding bytes; the size assertion above keeps this ABI expectation
+// checked at compile time.
+unsafe impl NoUninit for SockExtendedErr {}
+
+fn write_sock_extended_err(data: &mut [u8], err: &SockExtendedErr) -> KResult<()> {
+    if data.len() < size_of::<SockExtendedErr>() {
+        return Err(KError::from(LinuxError::ENOBUFS));
+    }
+    data[..size_of::<SockExtendedErr>()].copy_from_slice(bytes_of(err));
+    Ok(())
+}
+
+fn write_sockaddr_in(data: &mut [u8], addr: Option<SocketAddr>) -> KResult<()> {
+    if data.len() < size_of::<sockaddr_in>() {
+        return Err(KError::from(LinuxError::ENOBUFS));
+    }
+    let sa = match addr {
+        Some(SocketAddr::V4(addr)) => sockaddr_in {
+            sin_family: AF_INET as _,
+            sin_port: addr.port().to_be(),
+            sin_addr: in_addr {
+                s_addr: u32::from_be_bytes(addr.ip().octets()).to_be(),
+            },
+            __pad: [0; 8],
+        },
+        _ => sockaddr_in {
+            sin_family: AF_UNSPEC as _,
+            sin_port: 0,
+            sin_addr: in_addr { s_addr: 0 },
+            __pad: [0; 8],
+        },
+    };
+
+    // SAFETY: `sockaddr_in` is fully initialized above and `data` has been
+    // checked to fit it at runtime. The cmsg payload is a byte slice, so its
+    // address is not guaranteed to satisfy `sockaddr_in` alignment.
+    unsafe {
+        ptr::write_unaligned(data.as_mut_ptr().cast::<sockaddr_in>(), sa);
+    }
+    Ok(())
+}
+
+fn write_ip_recverr(
+    data: &mut [u8],
+    header: &SockExtendedErr,
+    offender: Option<SocketAddr>,
+) -> KResult<usize> {
+    debug_assert_eq!(size_of::<SockExtendedErr>(), 16);
+    debug_assert_eq!(size_of::<sockaddr_in>(), 16);
+
+    let body_len = size_of::<SockExtendedErr>() + size_of::<sockaddr_in>();
+    if data.len() < body_len {
+        return Err(KError::from(LinuxError::ENOBUFS));
+    }
+
+    let (err_buf, addr_buf) = data[..body_len].split_at_mut(size_of::<SockExtendedErr>());
+    write_sock_extended_err(err_buf, header)?;
+    write_sockaddr_in(addr_buf, offender)?;
+    Ok(body_len)
+}
+
+pub fn push_ip_recverr_cmsg(builder: &mut CMsgBuilder<'_>, err: UdpRecvError) -> KResult<bool> {
+    builder.push(IPPROTO_IP as u32, IP_RECVERR, |data| {
+        let header = SockExtendedErr {
+            ee_errno: err.errno.into_raw() as u32,
+            ee_origin: err.origin,
+            ee_type: err.ty,
+            ee_code: err.code,
+            ee_pad: 0,
+            ee_info: err.info,
+            ee_data: err.data,
+        };
+
+        write_ip_recverr(data, &header, err.offender)
+    })
+}
 
 /// Control message types for socket operations (ancillary data)
 pub enum CMsg {
@@ -78,20 +177,21 @@ impl<'a> CMsgBuilder<'a> {
         ty: u32,
         body: impl FnOnce(&mut [u8]) -> KResult<usize>,
     ) -> KResult<bool> {
-        let Some(body_capacity) = (self.capacity - *self.len).checked_sub(size_of::<cmsghdr>())
-        else {
+        let Some(remaining) = self.capacity.checked_sub(*self.len) else {
             return Ok(false);
         };
-
-        let hdr = self.hdr.get_as_mut()?;
-        hdr.cmsg_level = level as _;
-        hdr.cmsg_type = ty as _;
+        let Some(body_capacity) = remaining.checked_sub(size_of::<cmsghdr>()) else {
+            return Ok(false);
+        };
 
         let data = UserPtr::<u8>::from(self.hdr.address().as_usize() + size_of::<cmsghdr>())
             .get_as_mut_slice(body_capacity)?;
         let body_len = body(data)?;
 
         let cmsg_len = size_of::<cmsghdr>() + body_len;
+        let hdr = self.hdr.get_as_mut()?;
+        hdr.cmsg_level = level as _;
+        hdr.cmsg_type = ty as _;
         hdr.cmsg_len = cmsg_len;
         self.hdr = UserPtr::from(hdr as *const _ as usize + cmsg_len);
         *self.len += cmsg_len;

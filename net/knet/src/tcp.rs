@@ -26,7 +26,7 @@ use crate::{
     RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
     state::*,
 };
@@ -189,11 +189,11 @@ impl TcpSocket {
 }
 
 impl Configurable for TcpSocket {
-    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
-        if self.general.get_option_inner(option)? {
-            return Ok(true);
+        if self.general.get_option_inner(option)?.is_yes() {
+            return Ok(OptionHandled::Yes);
         }
 
         match option {
@@ -216,16 +216,16 @@ impl Configurable for TcpSocket {
             O::TcpInfo(_) => {
                 // TODO(mivik): implement TCP_INFO
             }
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 
-    fn set_option_inner(&self, option: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, option: SetSocketOption) -> KResult<OptionHandled> {
         use SetSocketOption as O;
 
-        if self.general.set_option_inner(option)? {
-            return Ok(true);
+        if self.general.set_option_inner(option)?.is_yes() {
+            return Ok(OptionHandled::Yes);
         }
 
         match option {
@@ -239,9 +239,9 @@ impl Configurable for TcpSocket {
                     socket.set_keep_alive(keep_alive.then(|| Duration::from_secs(75)));
                 });
             }
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 }
 impl SocketOps for TcpSocket {

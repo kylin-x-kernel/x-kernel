@@ -10,20 +10,25 @@
 //! - Out-of-band data handling
 //! - Ancillary data (control messages)
 
-use alloc::{boxed::Box, vec::Vec};
-use core::{net::Ipv4Addr, time::Duration};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::{any::TypeId, net::Ipv4Addr, time::Duration};
 
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use khal::time::wall_time;
 use kio::prelude::*;
-use knet::{CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps};
+use knet::{
+    CMsgData, KernelCmsg, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps,
+    UdpRecvError,
+};
 use kservices::mm::{UserConstPtr, UserPtr, VmBytes, VmBytesMut};
 use linux_raw_sys::{
     general::timespec,
     net::{
-        MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
+        MSG_CTRUNC, MSG_ERRQUEUE, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr,
+        msghdr, sockaddr, socklen_t,
     },
 };
+use posix_types::TimeValueLike;
 
 // Linux ABI for sendmmsg/recvmmsg limits vlen to UIO_MAXIOV (1024).
 const MMSG_MAX_VLEN: u32 = 1024;
@@ -62,7 +67,6 @@ fn parse_send_cmsgs(control_ptr: usize, control_len: usize) -> KResult<Vec<CMsgD
 
     Ok(cmsg)
 }
-use posix_types::TimeValueLike;
 
 use crate::{
     file::{FileLike, Socket, add_file_like},
@@ -70,6 +74,58 @@ use crate::{
     net::{CMsg, CMsgBuilder},
     socket::SocketAddrExt,
 };
+
+enum SocketCmsg {
+    Rights { fds: Vec<Arc<dyn FileLike>> },
+    IpRecvError(UdpRecvError),
+}
+
+fn into_socket_cmsg(cmsg: CMsgData) -> Option<SocketCmsg> {
+    // `CMsgData` is the type-erased boundary between `ksyscall` and `knet`.
+    // Send-side cmsgs carry `ksyscall`-owned `CMsg`, while receive-side
+    // asynchronous errors are produced by `knet` as `KernelCmsg`.
+    let type_id = cmsg.as_ref().type_id();
+    if type_id == TypeId::of::<CMsg>() {
+        let cmsg = cmsg.downcast::<CMsg>().ok()?;
+        return Some(match *cmsg {
+            CMsg::Rights { fds } => SocketCmsg::Rights { fds },
+        });
+    }
+    if type_id == TypeId::of::<KernelCmsg>() {
+        let cmsg = cmsg.downcast::<KernelCmsg>().ok()?;
+        return Some(match *cmsg {
+            KernelCmsg::IpRecvError(err) => SocketCmsg::IpRecvError(err),
+        });
+    }
+
+    None
+}
+
+fn push_socket_cmsg(builder: &mut CMsgBuilder<'_>, cmsg: SocketCmsg) -> KResult<bool> {
+    match cmsg {
+        SocketCmsg::Rights { fds } => builder.push(SOL_SOCKET, SCM_RIGHTS, |data| {
+            let body_len = fds
+                .len()
+                .checked_mul(size_of::<i32>())
+                .ok_or(KError::from(LinuxError::ENOBUFS))?;
+            if data.len() < body_len {
+                return Err(KError::from(LinuxError::ENOBUFS));
+            }
+
+            let mut written = 0;
+            for (f, chunk) in fds
+                .into_iter()
+                .zip(data[..body_len].chunks_exact_mut(size_of::<i32>()))
+            {
+                let fd = add_file_like(f, false)?;
+                chunk.copy_from_slice(&fd.to_ne_bytes());
+                written += size_of::<i32>();
+            }
+            Ok(written)
+        }),
+        SocketCmsg::IpRecvError(err) => crate::net::push_ip_recverr_cmsg(builder, err),
+    }
+}
 
 /// Send data on a socket with optional destination address and ancillary data
 fn send_impl(
@@ -135,6 +191,7 @@ fn recv_impl(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
     cmsg_builder: Option<CMsgBuilder>,
+    msg_flags: Option<&mut u32>,
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
@@ -145,6 +202,9 @@ fn recv_impl(
     }
     if flags & MSG_TRUNC != 0 {
         recv_flags |= RecvFlags::TRUNCATE;
+    }
+    if flags & MSG_ERRQUEUE != 0 {
+        recv_flags |= RecvFlags::ERRQUEUE;
     }
 
     let mut cmsg = Vec::new();
@@ -164,27 +224,36 @@ fn recv_impl(
         remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
     }
 
+    let mut cmsg_truncated = false;
     if let Some(mut builder) = cmsg_builder {
         for cmsg in cmsg {
-            let Ok(cmsg) = cmsg.downcast::<CMsg>() else {
+            let Some(cmsg) = into_socket_cmsg(cmsg) else {
                 warn!("received unexpected cmsg");
                 continue;
             };
+            let push_result = push_socket_cmsg(&mut builder, cmsg);
 
-            let pushed = match *cmsg {
-                CMsg::Rights { fds } => builder.push(SOL_SOCKET, SCM_RIGHTS, |data| {
-                    let mut written = 0;
-                    for (f, chunk) in fds.into_iter().zip(data.chunks_exact_mut(size_of::<i32>())) {
-                        let fd = add_file_like(f, false)?;
-                        chunk.copy_from_slice(&fd.to_ne_bytes());
-                        written += size_of::<i32>();
-                    }
-                    Ok(written)
-                })?,
-            };
-            if !pushed {
-                break;
+            match push_result {
+                Ok(true) => {}
+                Ok(false) => {
+                    cmsg_truncated = true;
+                    break;
+                }
+                Err(e) if e == KError::from(LinuxError::ENOBUFS) => {
+                    cmsg_truncated = true;
+                    break;
+                }
+                Err(e) => return Err(e),
             }
+        }
+    }
+
+    if let Some(msg_flags) = msg_flags {
+        if flags & MSG_ERRQUEUE != 0 {
+            *msg_flags |= MSG_ERRQUEUE;
+        }
+        if cmsg_truncated {
+            *msg_flags |= MSG_CTRUNC;
         }
     }
 
@@ -201,12 +270,21 @@ pub fn sys_recvfrom(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    recv_impl(fd, VmBytesMut::new(buf, len), flags, addr, addrlen, None)
+    recv_impl(
+        fd,
+        VmBytesMut::new(buf, len),
+        flags,
+        addr,
+        addrlen,
+        None,
+        None,
+    )
 }
 
 /// Receive data with vectored I/O and ancillary data (control messages)
 pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.get_as_mut()?;
+    msg.msg_flags = 0;
     recv_impl(
         fd,
         IoVectorBuf::new(msg.msg_iov as *mut IoVec, msg.msg_iovlen)?.into_io(),
@@ -219,6 +297,7 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> 
                 &mut msg.msg_controllen,
             )
         }),
+        Some(&mut msg.msg_flags),
     )
 }
 
@@ -292,8 +371,8 @@ pub fn sys_recvmmsg(
             }
             break;
         }
-
-        let recv = recv_impl(
+        msg.msg_hdr.msg_flags = 0;
+        match recv_impl(
             fd,
             IoVectorBuf::new(msg.msg_hdr.msg_iov as *mut IoVec, msg.msg_hdr.msg_iovlen)?.into_io(),
             flags,
@@ -305,9 +384,8 @@ pub fn sys_recvmmsg(
                     &mut msg.msg_hdr.msg_controllen,
                 )
             }),
-        );
-
-        match recv {
+            Some(&mut msg.msg_hdr.msg_flags),
+        ) {
             Ok(n) => {
                 msg.msg_len = n as u32;
                 received += 1;

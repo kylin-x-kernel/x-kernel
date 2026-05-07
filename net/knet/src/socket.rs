@@ -23,7 +23,7 @@ use kpoll::{IoEvents, Pollable};
 use crate::vsock::VsockSocket;
 use crate::{
     netlink::{NetlinkAddr, NetlinkSocket},
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     raw::RawSocket,
     tcp::TcpSocket,
     udp::UdpSocket,
@@ -99,10 +99,37 @@ bitflags! {
         /// the real size of the datagram, even when it is larger than the
         /// buffer.
         const TRUNCATE = 0x02;
+        /// Receive a pending asynchronous error instead of data.
+        const ERRQUEUE = 0x04;
     }
 }
 
 pub type CMsgData = Box<dyn Any + Send + Sync>;
+
+pub const SO_EE_ORIGIN_NONE: u8 = 0;
+pub const SO_EE_ORIGIN_LOCAL: u8 = 1;
+pub const SO_EE_ORIGIN_ICMP: u8 = 2;
+pub const SO_EE_ORIGIN_ICMP6: u8 = 3;
+pub const SO_EE_ORIGIN_TXSTATUS: u8 = 4;
+pub const SO_EE_ORIGIN_TIMESTAMPING: u8 = SO_EE_ORIGIN_TXSTATUS;
+
+/// A UDP error queued by `IP_RECVERR`.
+#[derive(Debug, Clone)]
+pub struct UdpRecvError {
+    pub errno: LinuxError,
+    pub origin: u8,
+    pub ty: u8,
+    pub code: u8,
+    pub info: u32,
+    pub data: u32,
+    pub offender: Option<SocketAddr>,
+}
+
+/// Ancillary data produced by the networking stack itself.
+#[derive(Debug, Clone)]
+pub enum KernelCmsg {
+    IpRecvError(UdpRecvError),
+}
 
 /// Options for sending data to a socket.
 ///

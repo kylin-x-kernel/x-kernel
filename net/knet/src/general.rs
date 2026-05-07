@@ -15,7 +15,7 @@ use ktask::future::{block_on, poll_io, timeout};
 
 use crate::{
     SERVICE,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
 /// General options for all sockets.
@@ -111,7 +111,7 @@ impl GeneralOptions {
     }
 }
 impl Configurable for GeneralOptions {
-    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
         match option {
             O::Error(error) => {
@@ -130,15 +130,12 @@ impl Configurable for GeneralOptions {
             O::ReceiveTimeout(timeout) => {
                 **timeout = Duration::from_nanos(self.recv_timeout_nanos.load(Ordering::Relaxed));
             }
-            O::RecvErr(val) => {
-                **val = false;
-            }
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 
-    fn set_option_inner(&self, option: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, option: SetSocketOption) -> KResult<OptionHandled> {
         use SetSocketOption as O;
 
         match option {
@@ -159,11 +156,8 @@ impl Configurable for GeneralOptions {
             O::SendBuffer(_) | O::ReceiveBuffer(_) => {
                 // TODO(mivik): implement buffer size options
             }
-            O::RecvErr(_) => {
-                // TODO: Retrieve ICMP errors via errqueue
-            }
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 }

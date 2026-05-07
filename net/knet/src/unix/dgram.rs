@@ -16,7 +16,7 @@ use ksync::{Mutex, RwLock};
 use crate::{
     CMsgData, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
     general::GeneralOptions,
-    options::{Configurable, GetSocketOption, SetSocketOption, UnixCredentials},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps, lookup_bind_entry},
 };
 
@@ -106,11 +106,11 @@ impl DgramTransport {
 }
 
 impl Configurable for DgramTransport {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
-        if self.options.get_option_inner(opt)? {
-            return Ok(true);
+        if self.options.get_option_inner(opt)?.is_yes() {
+            return Ok(OptionHandled::Yes);
         }
 
         match opt {
@@ -121,23 +121,23 @@ impl Configurable for DgramTransport {
                 // socket.
                 **cred = UnixCredentials::new(self.pid);
             }
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
         use SetSocketOption as O;
 
-        if self.options.set_option_inner(opt)? {
-            return Ok(true);
+        if self.options.set_option_inner(opt)?.is_yes() {
+            return Ok(OptionHandled::Yes);
         }
 
         match opt {
             O::PassCredentials(_) => {}
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 }
 #[async_trait]

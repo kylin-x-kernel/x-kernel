@@ -24,7 +24,7 @@ use lazy_static::lazy_static;
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
 use crate::{
     RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
 #[derive(Default, Clone, Debug)]
@@ -154,11 +154,11 @@ impl UnixDomainSocket {
     }
 }
 impl Configurable for UnixDomainSocket {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         self.transport.get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
         self.transport.set_option_inner(opt)
     }
 }

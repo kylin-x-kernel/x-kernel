@@ -34,6 +34,7 @@ mod socket;
 pub(crate) mod state;
 pub mod tcp;
 pub mod udp;
+mod udp_err;
 pub mod unix;
 #[cfg(feature = "vsock")]
 pub mod vsock;
@@ -135,6 +136,7 @@ pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
+    udp_err::init_udp_error_registry();
 }
 
 /// Init vsock subsystem by vsock devices.

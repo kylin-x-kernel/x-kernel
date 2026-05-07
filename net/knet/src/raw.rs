@@ -27,7 +27,7 @@ use crate::{
     RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
 };
 
@@ -119,11 +119,11 @@ impl RawSocket {
 }
 
 impl Configurable for RawSocket {
-    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
-        if self.general.get_option_inner(option)? {
-            return Ok(true);
+        if self.general.get_option_inner(option)?.is_yes() {
+            return Ok(OptionHandled::Yes);
         }
 
         match option {
@@ -136,16 +136,16 @@ impl Configurable for RawSocket {
             O::ReceiveBuffer(size) => {
                 **size = RAW_RX_BUF_LEN;
             }
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 
-    fn set_option_inner(&self, option: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, option: SetSocketOption) -> KResult<OptionHandled> {
         use SetSocketOption as O;
 
-        if self.general.set_option_inner(option)? {
-            return Ok(true);
+        if self.general.set_option_inner(option)?.is_yes() {
+            return Ok(OptionHandled::Yes);
         }
 
         match option {
@@ -155,9 +155,9 @@ impl Configurable for RawSocket {
                 }
                 *self.ttl.write() = Some(*ttl);
             }
-            _ => return Ok(false),
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 }
 

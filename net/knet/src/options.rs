@@ -77,40 +77,47 @@ define_options! {
     NonBlocking(bool),
 }
 
+/// Whether a socket option is handled by a specific socket implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OptionHandled {
+    Yes,
+    No,
+}
+
+impl OptionHandled {
+    pub fn is_yes(self) -> bool {
+        self == Self::Yes
+    }
+}
+
 /// Trait for configurable socket-like objects.
 #[enum_dispatch]
 pub trait Configurable {
-    /// Get a socket option, returns `true` if the socket supports the option.
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool>;
-    /// Set a socket option, returns `true` if the socket supports the option.
-    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool>;
+    /// Get a socket option if the socket supports it.
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled>;
+    /// Set a socket option if the socket supports it.
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled>;
 
     fn get_option(&self, mut opt: GetSocketOption) -> KResult {
-        self.get_option_inner(&mut opt).and_then(|supported| {
-            if !supported {
-                Err(KError::from(LinuxError::ENOPROTOOPT))
-            } else {
-                Ok(())
-            }
-        })
+        match self.get_option_inner(&mut opt)? {
+            OptionHandled::Yes => Ok(()),
+            OptionHandled::No => Err(KError::from(LinuxError::ENOPROTOOPT)),
+        }
     }
     fn set_option(&self, opt: SetSocketOption) -> KResult {
-        self.set_option_inner(opt).and_then(|supported| {
-            if !supported {
-                Err(KError::from(LinuxError::ENOPROTOOPT))
-            } else {
-                Ok(())
-            }
-        })
+        match self.set_option_inner(opt)? {
+            OptionHandled::Yes => Ok(()),
+            OptionHandled::No => Err(KError::from(LinuxError::ENOPROTOOPT)),
+        }
     }
 }
 
 impl<T: Configurable + ?Sized> Configurable for Box<T> {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         (**self).get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
         (**self).set_option_inner(opt)
     }
 }

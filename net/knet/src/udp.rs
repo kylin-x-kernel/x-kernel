@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! UDP socket implementation.
-use alloc::vec;
+use alloc::{boxed::Box, sync::Arc, vec};
 use core::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     task::Context,
@@ -22,11 +22,15 @@ use smoltcp::{
 };
 
 use crate::{
-    RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    KernelCmsg, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx,
+    SocketOps,
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
     general::GeneralOptions,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
+    udp_err::{
+        QueuedUdpError, UdpErrorState, register_udp_error_state, unregister_udp_error_state,
+    },
 };
 
 pub(crate) fn new_udp_socket() -> smol::Socket<'static> {
@@ -42,7 +46,7 @@ pub struct UdpSocket {
     dispatch_irq: SocketHandle,
     local_addr: RwLock<Option<IpEndpoint>>,
     peer_addr: RwLock<Option<(IpEndpoint, IpAddress)>>,
-
+    err_state: Arc<UdpErrorState>,
     general: GeneralOptions,
 }
 
@@ -52,12 +56,13 @@ impl UdpSocket {
     pub fn new() -> Self {
         let socket = new_udp_socket();
         let dispatch_irq = SOCKET_SET.add(socket);
+        let err_state = Arc::new(UdpErrorState::new(dispatch_irq));
 
         Self {
             dispatch_irq,
             local_addr: RwLock::new(None),
             peer_addr: RwLock::new(None),
-
+            err_state,
             general: GeneralOptions::new(),
         }
     }
@@ -75,44 +80,56 @@ impl UdpSocket {
 }
 
 impl Configurable for UdpSocket {
-    fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<bool> {
-        use GetSocketOption as O;
-
-        if self.general.get_option_inner(option)? {
-            return Ok(true);
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
+        if let GetSocketOption::Error(error) = opt {
+            // Drive pending RX work before reading SO_ERROR. UDP asynchronous
+            // errors are discovered from incoming ICMP packets during
+            // RxToken::preprocess(), while x-kernel currently advances the
+            // network stack from explicit poll sites rather than a background
+            // softirq.
+            poll_interfaces();
+            **error = self.err_state.consume_socket_error();
+            return Ok(OptionHandled::Yes);
         }
-        match option {
-            O::Ttl(ttl) => {
+        if self.general.get_option_inner(opt)?.is_yes() {
+            return Ok(OptionHandled::Yes);
+        }
+        match opt {
+            GetSocketOption::Ttl(ttl) => {
                 self.with_smol_socket(|socket| {
                     **ttl = socket.hop_limit().unwrap_or(64);
                 });
             }
-            O::SendBuffer(size) => {
+            GetSocketOption::SendBuffer(size) => {
                 **size = UDP_TX_BUF_LEN;
             }
-            O::ReceiveBuffer(size) => {
+            GetSocketOption::ReceiveBuffer(size) => {
                 **size = UDP_RX_BUF_LEN;
             }
-            _ => return Ok(false),
+            GetSocketOption::RecvErr(recv_err) => {
+                **recv_err = self.err_state.recv_err_enabled();
+            }
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 
-    fn set_option_inner(&self, option: SetSocketOption) -> KResult<bool> {
-        use SetSocketOption as O;
-
-        if self.general.set_option_inner(option)? {
-            return Ok(true);
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
+        if self.general.set_option_inner(opt)?.is_yes() {
+            return Ok(OptionHandled::Yes);
         }
-        match option {
-            O::Ttl(ttl) => {
+        match opt {
+            SetSocketOption::Ttl(ttl) => {
                 self.with_smol_socket(|socket| {
                     socket.set_hop_limit(Some(*ttl));
                 });
             }
-            _ => return Ok(false),
+            SetSocketOption::RecvErr(recv_err) => {
+                self.err_state.set_recv_err(*recv_err);
+            }
+            _ => return Ok(OptionHandled::No),
         }
-        Ok(true)
+        Ok(OptionHandled::Yes)
     }
 }
 impl SocketOps for UdpSocket {
@@ -148,6 +165,8 @@ impl SocketOps for UdpSocket {
             .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
 
         *guard = Some(local_endpoint);
+        self.err_state.set_local_addr(Some(local_endpoint));
+        register_udp_error_state(self.err_state.clone());
         info!("UDP socket {}: bound on {}", self.dispatch_irq, endpoint);
         Ok(())
     }
@@ -165,6 +184,7 @@ impl SocketOps for UdpSocket {
         let remote_addr = IpEndpoint::from(remote_addr);
         let src = SERVICE.lock().get_source_address(&remote_addr.addr);
         *guard = Some((remote_addr, src));
+        self.err_state.set_peer_addr(Some((remote_addr, src)));
         debug!(
             "UDP socket {}: connected to {}",
             self.dispatch_irq, remote_addr
@@ -223,7 +243,48 @@ impl SocketOps for UdpSocket {
         })
     }
 
-    fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
+    fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
+        if options.flags.contains(RecvFlags::ERRQUEUE) {
+            return self.general.recv_poller(self, || {
+                poll_interfaces();
+                let error = if options.flags.contains(RecvFlags::PEEK) {
+                    self.err_state.peek_error()
+                } else {
+                    self.err_state.pop_error()
+                };
+                let Some(error) = error else {
+                    return Err(KError::WouldBlock);
+                };
+                let QueuedUdpError {
+                    payload,
+                    addr,
+                    cmsg: recv_error,
+                } = error;
+
+                if let Some(from) = options.from.as_deref_mut() {
+                    *from = SocketAddrEx::Ip(addr);
+                }
+                if let Some(cmsg) = options.cmsg.as_deref_mut() {
+                    cmsg.push(Box::new(KernelCmsg::IpRecvError(recv_error)));
+                }
+
+                let read = dst.write(&payload)?;
+                if read < payload.len() {
+                    warn!(
+                        "UDP error payload truncated: {} -> {} bytes",
+                        payload.len(),
+                        read
+                    );
+                }
+
+                Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
+                    payload.len()
+                } else {
+                    read
+                })
+            });
+        }
+
         if self.local_addr.read().is_none() {
             k_bail!(NotConnected);
         }
@@ -325,10 +386,12 @@ impl Pollable for UdpSocket {
         }
 
         let mut events = IoEvents::empty();
+        let has_error = self.err_state.has_pending_error();
         self.with_smol_socket(|socket| {
-            events.set(IoEvents::IN, socket.can_recv());
+            events.set(IoEvents::IN, socket.can_recv() || has_error);
             events.set(IoEvents::OUT, socket.can_send());
         });
+        events.set(IoEvents::ERR, has_error);
         events
     }
 
@@ -336,12 +399,16 @@ impl Pollable for UdpSocket {
         if events.intersects(IoEvents::IN | IoEvents::OUT) {
             self.general.register_rx_waker(context.waker());
         }
+        if events.intersects(IoEvents::IN | IoEvents::ERR) {
+            self.err_state.register_error_waker(context.waker());
+        }
     }
 }
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         self.shutdown(Shutdown::Both).ok();
+        unregister_udp_error_state(self.dispatch_irq);
         SOCKET_SET.remove(self.dispatch_irq);
     }
 }

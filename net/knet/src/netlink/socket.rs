@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
 /// Minimal AF_NETLINK socket.
@@ -105,11 +105,11 @@ pub fn publish_kobject_uevent(group: u32, payload: &[u8]) {
 }
 
 impl Configurable for NetlinkSocket {
-    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<bool> {
+    fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         self.inner.general.get_option_inner(opt)
     }
 
-    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<bool> {
+    fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
         self.inner.general.set_option_inner(opt)
     }
 }
