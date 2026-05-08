@@ -61,11 +61,58 @@ unsafe impl lock_api::RawMutex for TraceRawLock {
     }
 }
 
+ktracepoint::define_event_trace!(
+    sched_wakeup,
+    TP_lock(crate::TraceRawLock),
+    TP_kops(crate::Kops),
+    TP_system(sched),
+    TP_PROTO(woken_tid: u64),
+    TP_STRUCT__entry { woken_tid: u64, ts_ns: u64 },
+    TP_fast_assign {
+        woken_tid: woken_tid,
+        ts_ns: khal::time::monotonic_time_nanos(),
+    },
+    TP_ident(__entry),
+    TP_printk(format_args!(
+        "woken_tid={} ts_ns={}",
+        __entry.woken_tid,
+        __entry.ts_ns
+    ))
+);
+
+ktracepoint::define_event_trace!(
+    sched_switch,
+    TP_lock(crate::TraceRawLock),
+    TP_kops(crate::Kops),
+    TP_system(sched),
+    TP_PROTO(prev_tid: u64, next_tid: u64),
+    TP_STRUCT__entry {
+        prev_tid: u64,
+        next_tid: u64,
+        ts_ns: u64,
+    },
+    TP_fast_assign {
+        prev_tid: prev_tid,
+        next_tid: next_tid,
+        ts_ns: khal::time::monotonic_time_nanos(),
+    },
+    TP_ident(__entry),
+    TP_printk(format_args!(
+        "prev_tid={} next_tid={} ts_ns={}",
+        __entry.prev_tid,
+        __entry.next_tid,
+        __entry.ts_ns
+    ))
+);
+
 /// Initialize global tracepoint manager once.
 pub fn trace_point_manager() -> &'static TracingEventsManager<TraceRawLock, Kops> {
     TRACE_MANAGER.call_once(|| {
         static_keys::global_init();
-        global_init_events::<TraceRawLock, Kops>().expect("failed to initialize trace events")
+        let manager =
+            global_init_events::<TraceRawLock, Kops>().expect("failed to initialize trace events");
+        ktask::register_sched_trace_hooks(trace_sched_wakeup, trace_sched_switch);
+        manager
     })
 }
 
@@ -123,7 +170,9 @@ pub fn write_event_enable(subsystem: &str, event: &str, data: &[u8]) -> bool {
         .find(|byte| !byte.is_ascii_whitespace())
         .map(char::from)
     else {
-        return false;
+        // `echo 1 > enable` uses O_TRUNC; VFS may issue an empty `write` while truncating.
+        // Treat whitespace-only payloads as a successful no-op so redirection works.
+        return true;
     };
     with_event(subsystem, event, |event| {
         event.enable_file().write(enable);

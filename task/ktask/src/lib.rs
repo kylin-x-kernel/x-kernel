@@ -34,8 +34,12 @@ mod api;
 mod global_task_queue;
 mod task;
 mod timers;
+mod tracing_hooks;
 mod wait_queue;
 
 pub mod future;
 
-pub use self::api::{sleep, sleep_until, yield_now, *};
+pub use self::{
+    api::{sleep, sleep_until, yield_now, *},
+    tracing_hooks::register_sched_trace_hooks,
+};

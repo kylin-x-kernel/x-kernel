@@ -23,6 +23,7 @@ use crate::{
     KCpuMask, KtaskRef, Scheduler, TaskInner,
     future::block_on,
     task::{CurrentTask, TaskState},
+    tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
 
 macro_rules! percpu_static {
@@ -257,6 +258,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
     /// which means the task is already unblocked by other cores.
     pub fn unblock_task(&mut self, task: KtaskRef, resched: bool) {
         let task_id_name = task.id_name();
+        let task_id = task.id().as_u64();
         // Try to change the state of the task from `Blocked` to `Ready`,
         // if successful, the task will be put into this run queue,
         // otherwise, the task is already unblocked by other cores.
@@ -269,6 +271,10 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
             debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
+
+            // Fire the task wakeup tracepoint.
+            fire_task_wakeup(task_id);
+
             // Note: when the task is unblocked on another CPU's run queue,
             // we just ingiore the `resched` flag.
             if resched && cpu_id == this_cpu_id() {
@@ -535,6 +541,9 @@ impl RunQueue {
         if prev_task.ptr_eq(&next_task) {
             return;
         }
+
+        // Fire the context switch tracepoint.
+        fire_context_switch(prev_task.id().as_u64(), next_task.id().as_u64());
 
         // Claim the task as running, we do this before switching to it
         // such that any running task will have this set.
