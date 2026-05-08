@@ -2183,7 +2183,7 @@ pub fn tee_obj_attr_clear(o: &mut tee_obj) -> TeeResult {
 /// * `attrs` - kernel space attributes
 /// # Returns
 /// * `TeeResult` - the result of the operation
-fn copy_in_attrs(
+pub(crate) fn copy_in_attrs(
     _uctx: &mut user_ta_ctx,
     usr_attrs: &[utee_attribute],
     attrs: &mut [TEE_Attribute],

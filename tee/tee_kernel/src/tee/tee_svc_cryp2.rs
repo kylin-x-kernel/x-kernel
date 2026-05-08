@@ -39,6 +39,7 @@ use super::{
     crypto::crypto::{
         CryptoHashCtx, CryptoMacCtx, crypto_hash_final, crypto_hash_init, crypto_hash_update,
         crypto_mac_final, crypto_mac_init, crypto_mac_update, ecc_keypair, ecc_public_key,
+        rsa_keypair,
     },
     crypto::{sm3_hash::SM3HashCtx, sm3_hmac::SM3HmacCtx},
     libmbedtls::bignum::{
@@ -74,8 +75,8 @@ use super::{
 // use core::ptr::NonNull;
 use super::{
     tee_svc_cryp::{
-        TeeCryptObj, get_user_u64_as_size_t, tee_cryp_obj_secret, tee_cryp_obj_secret_wrapper,
-        tee_cryp_obj_type_props,
+        TeeCryptObj, copy_in_attrs, get_user_u64_as_size_t, tee_cryp_obj_secret,
+        tee_cryp_obj_secret_wrapper, tee_cryp_obj_type_props,
     },
     types_ext::vaddr_t,
 };
@@ -613,7 +614,7 @@ fn tee_cryp_asymm_init(
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => match mode {
             TEE_OperationMode::TEE_MODE_SIGN | TEE_OperationMode::TEE_MODE_VERIFY => {
-                crypto_rsa_init(cs.clone(), get_rsaes_padding_mode(algo), mode)
+                crypto_rsa_init(cs.clone(), get_rsassa_padding_mode(algo), mode)
             }
             _ => Err(TEE_ERROR_GENERIC),
         },
@@ -1558,17 +1559,58 @@ pub fn tee_cryp_asymm_operate(
     }
 }
 
-/// arg1与arg2参数与RSASSA有关
-/// 暂未进行处理，目前只支持ECC和SM2
+/// 与 OP-TEE `syscall_asymm_operate` 一致：`arg1` 为 `utee_attribute` 数组指针，`arg2` 为元素个数。
+/// 用于 RSA-OAEP 的 `TEE_ATTR_RSA_OAEP_LABEL` 等 memref 参数（从用户态拷入内核后再参与运算）。
 pub fn syscall_asymm_operate(
     arg0: usize,
-    _arg1: usize,
-    _arg2: usize,
+    arg1: usize,
+    arg2: usize,
     arg3: usize,
     arg4: usize,
     arg5: usize,
     arg6: usize,
 ) -> TeeResult {
+    let usr_params_ptr = arg1 as *const utee_attribute;
+    let num_params = arg2;
+
+    if num_params != 0 && usr_params_ptr.is_null() {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let params_attrs: Option<Box<[TEE_Attribute]>> = if num_params == 0 {
+        None
+    } else {
+        let attr_null = TEE_Attribute::default();
+        let mut attrs = vec![attr_null; num_params].into_boxed_slice();
+        let usr_attrs_slice = unsafe { core::slice::from_raw_parts(usr_params_ptr, num_params) };
+        copy_in_attrs(&mut user_ta_ctx::default(), usr_attrs_slice, &mut attrs)?;
+        Some(attrs)
+    };
+
+    let mut label_buf: Option<Box<[u8]>> = None;
+    if let Some(ref attrs) = params_attrs {
+        for attr in attrs.iter() {
+            if attr.attributeID != TEE_ATTR_RSA_OAEP_LABEL {
+                continue;
+            }
+            if attr.attributeID & TEE_ATTR_FLAG_VALUE != 0 {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
+            let (buf, len) = unsafe {
+                (
+                    attr.content.memref.buffer as *const u8,
+                    attr.content.memref.size,
+                )
+            };
+            if len != 0 && buf.is_null() {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
+            let usr_label = unsafe { core::slice::from_raw_parts(buf, len) };
+            label_buf = Some(bb_memdup_user(usr_label)?);
+            break;
+        }
+    }
+
     let src_ptr = arg3 as *const u8;
     let src_len = arg4;
 
@@ -1591,7 +1633,8 @@ pub fn syscall_asymm_operate(
     let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
     let mut dst = bb_memdup_user(dst_slice)?;
 
-    dst_len = tee_cryp_asymm_operate(arg0 as _, &src, &mut dst, None)?;
+    let label_ref = label_buf.as_deref();
+    dst_len = tee_cryp_asymm_operate(arg0 as _, &src, &mut dst, label_ref)?;
 
     // Copy to user
     unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
@@ -1685,7 +1728,7 @@ pub fn syscall_asymm_verify(
 
 #[unittest::mod_test]
 pub mod tests_cryp {
-    use mbedtls::bignum::Mpi;
+    use mbedtls::{bignum::Mpi, pk::Pk};
     use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
@@ -3064,5 +3107,459 @@ pub mod tests_cryp {
 
         assert_eq!(&clear1[..len3], &clear2[..len4]);
         assert_eq!(&clear1[..len3], data);
+    }
+
+    const RSA_TEST_DER: &'static [u8] = &[
+        0x30, 0x82, 0x04, 0xa3, 0x02, 0x01, 0x00, 0x02, 0x82, 0x01, 0x01, 0x00, 0x8d, 0x76, 0xa1,
+        0x2e, 0xb6, 0xc0, 0xe5, 0x1e, 0x1a, 0x06, 0x74, 0x13, 0x57, 0x6a, 0xc2, 0x6c, 0x02, 0x9d,
+        0x82, 0x91, 0x5b, 0xb0, 0xe5, 0xa9, 0x7f, 0xe0, 0x6d, 0x3f, 0xc0, 0x94, 0x88, 0x8e, 0x72,
+        0xd4, 0x4a, 0xc1, 0xf5, 0x54, 0x71, 0x63, 0x10, 0xaa, 0xef, 0x9d, 0xa5, 0x1a, 0xdc, 0x00,
+        0x82, 0x2d, 0xea, 0x5f, 0x5b, 0xe8, 0x73, 0x6e, 0x03, 0xf8, 0x07, 0x90, 0x8c, 0xd5, 0x52,
+        0xf5, 0x6d, 0xfc, 0x4d, 0xe5, 0x6a, 0x87, 0x5a, 0x85, 0xf7, 0x34, 0x85, 0x9a, 0x19, 0x3a,
+        0x74, 0x46, 0x1e, 0xcb, 0x30, 0x77, 0x8d, 0x68, 0x8a, 0xb8, 0xfd, 0x6e, 0xbc, 0xee, 0xd2,
+        0xd0, 0xb3, 0xd0, 0x1c, 0x44, 0x29, 0xd0, 0xd6, 0x91, 0xb5, 0xa8, 0xc1, 0xe3, 0x88, 0x64,
+        0x40, 0x16, 0x31, 0x6c, 0xdc, 0x4b, 0xba, 0x69, 0xc3, 0xcd, 0x8d, 0x4a, 0xd8, 0x7d, 0xf4,
+        0xa7, 0xe2, 0xe8, 0xc5, 0x01, 0x6f, 0xcc, 0x91, 0x22, 0x81, 0x52, 0x83, 0x11, 0x28, 0xb3,
+        0x97, 0x1d, 0x57, 0xa2, 0x2a, 0x01, 0x77, 0x65, 0x87, 0x3e, 0xdc, 0x6c, 0x7f, 0x0a, 0xca,
+        0x95, 0x04, 0x6a, 0x4e, 0x47, 0xa4, 0xfb, 0xa1, 0x42, 0x19, 0x0f, 0x80, 0x14, 0xed, 0xf9,
+        0x4a, 0x42, 0x9c, 0x6f, 0xef, 0x0f, 0x82, 0x51, 0xbb, 0x46, 0x66, 0xc6, 0xfd, 0xd9, 0x01,
+        0x93, 0x6d, 0xda, 0x36, 0xc7, 0x58, 0x37, 0x4b, 0xa7, 0xdb, 0xbd, 0xb2, 0x6f, 0x5b, 0x33,
+        0x4b, 0x78, 0x70, 0x7e, 0xe8, 0x02, 0xdd, 0x5f, 0xa4, 0x2f, 0xea, 0x3c, 0x6b, 0xfb, 0x51,
+        0xe1, 0x19, 0x21, 0x9f, 0x52, 0xd6, 0x29, 0x53, 0x09, 0x98, 0xbc, 0x3e, 0x3b, 0xb3, 0xdc,
+        0x25, 0x13, 0x36, 0x1b, 0x24, 0xf4, 0x33, 0xdd, 0xdf, 0xa8, 0xd6, 0xe8, 0x97, 0x11, 0x2f,
+        0x9a, 0x81, 0xc1, 0xb6, 0xf1, 0x7b, 0xa5, 0xa4, 0x2c, 0xda, 0x41, 0xb6, 0x11, 0x02, 0x03,
+        0x01, 0x00, 0x01, 0x02, 0x82, 0x01, 0x00, 0x38, 0x98, 0xb9, 0xab, 0xe2, 0xda, 0x11, 0xd0,
+        0x95, 0x40, 0xf7, 0xb7, 0xb5, 0x45, 0xb5, 0x3b, 0x59, 0x60, 0x83, 0x18, 0x7c, 0xc2, 0xad,
+        0x5f, 0xbf, 0x15, 0x9f, 0x1f, 0xde, 0x80, 0x8e, 0x91, 0xcf, 0x47, 0x38, 0x11, 0x99, 0x81,
+        0x8b, 0x4b, 0xc3, 0x23, 0x60, 0x72, 0x85, 0xd7, 0xd5, 0x25, 0x2e, 0xf0, 0x07, 0xd0, 0xd7,
+        0x08, 0x8d, 0x05, 0xfa, 0xf8, 0x84, 0xae, 0x44, 0x6a, 0x24, 0xa2, 0xa4, 0xba, 0x48, 0xbf,
+        0xfc, 0x7a, 0xe2, 0xb0, 0xae, 0x52, 0x89, 0x11, 0x39, 0xfe, 0xb4, 0xfe, 0x48, 0xdb, 0xaa,
+        0x2c, 0x6a, 0x9a, 0xe4, 0xc5, 0x56, 0x3f, 0xb3, 0xbf, 0x29, 0x00, 0xee, 0xaf, 0xd8, 0x5f,
+        0x3d, 0x0b, 0x9c, 0x8c, 0xf7, 0x4c, 0xe9, 0x25, 0x8b, 0x2f, 0xf0, 0xa3, 0xf0, 0x6a, 0x49,
+        0x48, 0xd2, 0xef, 0xf5, 0xb2, 0x8b, 0x50, 0xe2, 0x84, 0xa2, 0x19, 0x79, 0x22, 0xff, 0x8e,
+        0x16, 0xbe, 0x00, 0x70, 0xc4, 0x6d, 0xd0, 0x29, 0x54, 0x28, 0x99, 0x97, 0x84, 0xc9, 0xaf,
+        0xd8, 0xb6, 0xb1, 0x44, 0x6d, 0x4a, 0x74, 0x82, 0x4e, 0xde, 0x44, 0x1c, 0x47, 0x11, 0x52,
+        0x86, 0x48, 0xd7, 0x78, 0x52, 0xa9, 0x98, 0x20, 0x9d, 0x83, 0x39, 0x3d, 0xe5, 0xd6, 0xed,
+        0x94, 0x6a, 0x67, 0xd0, 0x65, 0x23, 0xf6, 0xdd, 0xe1, 0xe3, 0xed, 0xe9, 0x6b, 0x85, 0xcb,
+        0x91, 0x0b, 0xcd, 0xc4, 0x6b, 0xe4, 0x90, 0xd4, 0xeb, 0x7b, 0x80, 0x0b, 0x67, 0x9d, 0xb5,
+        0x37, 0x0b, 0x83, 0x7d, 0x79, 0x45, 0x6b, 0x60, 0x7d, 0x6f, 0xe3, 0xe0, 0x5e, 0x92, 0xf6,
+        0x13, 0x67, 0xd2, 0xd4, 0xdc, 0x43, 0x5f, 0xd8, 0xee, 0xf5, 0x28, 0x05, 0x64, 0x78, 0x6a,
+        0x6f, 0xaf, 0xef, 0x64, 0x52, 0x93, 0x70, 0x4f, 0x9a, 0xab, 0xce, 0x4a, 0x51, 0x63, 0x2a,
+        0xf1, 0x33, 0xfd, 0xd8, 0x1e, 0xf9, 0xef, 0xf1, 0x02, 0x81, 0x81, 0x00, 0xcf, 0xa7, 0x89,
+        0x75, 0xdd, 0x09, 0x66, 0x8b, 0x4e, 0xda, 0x52, 0x38, 0x4a, 0xc3, 0x7c, 0xca, 0x90, 0x68,
+        0x4a, 0xbb, 0x78, 0x14, 0xc1, 0x83, 0x24, 0xb2, 0x2e, 0x39, 0x20, 0x8a, 0x00, 0x97, 0x8d,
+        0xf3, 0x21, 0x5a, 0xad, 0x03, 0xc7, 0xb2, 0xe9, 0x17, 0x10, 0x85, 0x63, 0x23, 0xe3, 0xc9,
+        0x73, 0x91, 0xa8, 0x5a, 0x8d, 0xb6, 0x40, 0x0f, 0x98, 0xb8, 0x2a, 0x8f, 0x7e, 0x59, 0x80,
+        0x8a, 0xee, 0xb9, 0xe9, 0x9b, 0x2e, 0x83, 0xd4, 0x85, 0xc1, 0xdc, 0x1e, 0xc9, 0x44, 0x48,
+        0x2a, 0x13, 0x06, 0x09, 0x02, 0x3e, 0x3f, 0xfb, 0xf2, 0xe8, 0x1a, 0x2d, 0xec, 0x40, 0xea,
+        0x0e, 0x2b, 0x7f, 0xf3, 0x79, 0xdc, 0x11, 0x3b, 0x0d, 0xb8, 0x3f, 0x4f, 0x06, 0x02, 0x17,
+        0x7c, 0x79, 0xa7, 0x36, 0x56, 0xef, 0xcd, 0x1a, 0x41, 0x00, 0x2c, 0xe8, 0x2e, 0x55, 0x9b,
+        0x10, 0xea, 0x19, 0xb2, 0xe3, 0x02, 0x81, 0x81, 0x00, 0xae, 0x66, 0x06, 0x29, 0xcd, 0x44,
+        0x6b, 0x4d, 0xb0, 0x1e, 0xba, 0xb8, 0x4f, 0x5e, 0x06, 0xaa, 0x02, 0x58, 0xc9, 0xb5, 0x46,
+        0x68, 0xe0, 0xaf, 0x48, 0x48, 0x82, 0x45, 0xd2, 0x9c, 0xa5, 0x2d, 0x9d, 0xe6, 0x7a, 0x16,
+        0xe6, 0xba, 0x8c, 0xe9, 0x2b, 0x61, 0xaf, 0x40, 0x8c, 0xab, 0x38, 0x17, 0x4e, 0xe1, 0xf7,
+        0x0d, 0x52, 0xb8, 0x78, 0xcc, 0x4d, 0xcb, 0xdc, 0xe4, 0xb7, 0x4f, 0x41, 0xdf, 0xde, 0x34,
+        0x20, 0x5f, 0xac, 0x45, 0x6f, 0xed, 0xcd, 0xc0, 0x4d, 0x88, 0x7a, 0xf4, 0xc9, 0x8a, 0xa4,
+        0xf7, 0x40, 0x41, 0x4d, 0xb6, 0x98, 0x1f, 0x2a, 0x42, 0x42, 0x62, 0xd2, 0xb1, 0xef, 0x84,
+        0x94, 0x87, 0x09, 0xfe, 0xf1, 0xba, 0xb2, 0xb8, 0x6c, 0x99, 0xb2, 0x77, 0xa6, 0xd8, 0x91,
+        0x07, 0xb5, 0xd9, 0x7d, 0xe8, 0x59, 0xc0, 0xfa, 0x5a, 0x55, 0xf4, 0x3a, 0x82, 0xf4, 0x78,
+        0xa1, 0x7b, 0x02, 0x81, 0x80, 0x3f, 0x6e, 0xfa, 0x7a, 0xda, 0xce, 0xe8, 0x58, 0x5d, 0xfa,
+        0x2b, 0x6b, 0xae, 0xcb, 0x10, 0xf0, 0x00, 0x35, 0x1b, 0xbf, 0x30, 0xeb, 0x86, 0x41, 0xbd,
+        0x90, 0x00, 0xb6, 0xca, 0xcd, 0xdd, 0x68, 0x6e, 0xa0, 0x7a, 0xeb, 0xec, 0x36, 0x5f, 0x66,
+        0xb3, 0xf5, 0xab, 0xc2, 0x53, 0x8a, 0xbf, 0x26, 0xe6, 0xfa, 0xf3, 0xe6, 0xd5, 0xab, 0x7a,
+        0xde, 0x48, 0xd4, 0xd9, 0x8b, 0x84, 0x19, 0x6b, 0x3f, 0x05, 0xb6, 0x1d, 0x3a, 0x9e, 0x76,
+        0xff, 0x10, 0xed, 0x2b, 0x84, 0xec, 0x0e, 0xc3, 0xcc, 0xb6, 0x8a, 0xfd, 0x6d, 0x85, 0xfe,
+        0x9d, 0xc4, 0x92, 0x4a, 0x8d, 0x04, 0xc2, 0xbf, 0xbd, 0x1c, 0x64, 0xb5, 0xc7, 0xe0, 0x06,
+        0x13, 0x78, 0x19, 0x74, 0x9d, 0x7b, 0x44, 0x60, 0x50, 0x52, 0x09, 0x56, 0x7c, 0x30, 0x3d,
+        0x03, 0x6c, 0x1f, 0xd5, 0x98, 0x07, 0xaf, 0x76, 0xf3, 0x2f, 0xd0, 0x31, 0xe9, 0x02, 0x81,
+        0x81, 0x00, 0xa6, 0x61, 0x77, 0x67, 0xd2, 0x09, 0x80, 0x45, 0xb1, 0xcc, 0xdf, 0x5e, 0x8f,
+        0x79, 0xa8, 0xe9, 0xf1, 0x2b, 0x3b, 0xe4, 0xd1, 0xb3, 0xa5, 0x08, 0x14, 0xf1, 0xf8, 0x37,
+        0x1c, 0xe3, 0x8d, 0x42, 0xa3, 0xee, 0x0a, 0x74, 0x66, 0xd3, 0x7b, 0x33, 0xc8, 0xcb, 0x7d,
+        0x23, 0x1c, 0x11, 0x0d, 0x86, 0x4f, 0x1f, 0x8d, 0x4f, 0x0c, 0xa8, 0x29, 0xb6, 0xe0, 0x51,
+        0xaa, 0x00, 0x1a, 0x52, 0x67, 0x0a, 0x69, 0x37, 0x59, 0xdb, 0x6c, 0xc3, 0x22, 0x31, 0xc1,
+        0xa5, 0xc1, 0x52, 0x7f, 0xdb, 0xa1, 0x9b, 0xc0, 0x1e, 0x93, 0x12, 0xba, 0x4d, 0x85, 0x7b,
+        0xd6, 0x19, 0x38, 0xb4, 0x87, 0x46, 0x72, 0xb8, 0x0d, 0xeb, 0x77, 0x41, 0xde, 0xe4, 0xbb,
+        0x34, 0xef, 0x87, 0x02, 0x98, 0xdc, 0x78, 0xa8, 0x84, 0xae, 0x9d, 0x3c, 0x5d, 0xbb, 0xa3,
+        0x3c, 0x35, 0x8a, 0xe3, 0x62, 0x1f, 0x25, 0x95, 0x20, 0x99, 0x02, 0x81, 0x80, 0x5b, 0xfb,
+        0x99, 0x65, 0xaa, 0x0d, 0x55, 0xf5, 0x66, 0x27, 0x95, 0xc8, 0xb2, 0x68, 0x7f, 0x8b, 0xd3,
+        0x26, 0xd1, 0x51, 0x68, 0xe3, 0x5f, 0x84, 0x1b, 0x13, 0xbf, 0xec, 0xb4, 0x92, 0x09, 0xa8,
+        0x0c, 0xac, 0x5f, 0x99, 0x3a, 0xd5, 0xda, 0xdd, 0xee, 0xba, 0x1c, 0xce, 0x92, 0x7c, 0x54,
+        0xd4, 0xf8, 0x6a, 0xc3, 0xb3, 0x07, 0xea, 0xce, 0x18, 0xad, 0x8e, 0x26, 0x5e, 0x54, 0xa1,
+        0x87, 0x77, 0x6a, 0x7b, 0x23, 0x2e, 0x76, 0xb6, 0x3a, 0xe7, 0xd9, 0x67, 0x0d, 0x7e, 0x19,
+        0xd9, 0x6e, 0x2c, 0xe0, 0x00, 0xd6, 0x8e, 0xd2, 0x5a, 0xc9, 0x59, 0x44, 0x58, 0xd8, 0x73,
+        0x15, 0x0f, 0x17, 0x63, 0x3e, 0xef, 0x74, 0x2f, 0xfe, 0xbd, 0x50, 0x07, 0x5f, 0x7d, 0x15,
+        0x23, 0xab, 0xc2, 0x77, 0x6d, 0xc9, 0x3d, 0x08, 0x1a, 0x88, 0xdd, 0x45, 0x26, 0xd9, 0x2d,
+        0xe9, 0xde, 0xb9, 0x58, 0x36, 0x5f,
+    ];
+
+    /// 与 mbedtls `Pk::from_private_key(TEST_DER, …)` 相同思路：从 PKCS#8 DER 注入 `rsa_keypair`，供 OAEP/PSS 等路径使用。
+    fn rsa_keypair_from_pkcs8_der(der: &'static [u8]) -> rsa_keypair {
+        let res = Pk::from_private_key(der, None);
+        ::core::assert!(res.is_ok());
+        let pk = res.unwrap();
+        let res = rsa_keypair::new(TEE_TYPE_RSA_KEYPAIR, 2048);
+        ::core::assert!(res.is_ok());
+        let mut kp = res.unwrap();
+        let res = pk.rsa_public_modulus();
+        ::core::assert!(res.is_ok());
+        kp.n = BigNum::from_mpi(res.unwrap());
+        let res = pk.rsa_public_exponent();
+        ::core::assert!(res.is_ok());
+        let exp = res.unwrap();
+        let res = Mpi::new(exp as i64);
+        ::core::assert!(res.is_ok());
+        kp.e = BigNum::from_mpi(res.unwrap());
+        let res = pk.rsa_private_exponent();
+        ::core::assert!(res.is_ok());
+        kp.d = BigNum::from_mpi(res.unwrap());
+        let res = pk.rsa_private_prime1();
+        ::core::assert!(res.is_ok());
+        kp.p = BigNum::from_mpi(res.unwrap());
+        let res = pk.rsa_private_prime2();
+        ::core::assert!(res.is_ok());
+        kp.q = BigNum::from_mpi(res.unwrap());
+        let res = pk.rsa_crt_dp();
+        ::core::assert!(res.is_ok());
+        kp.dp = BigNum::from_mpi(res.unwrap());
+        let res = pk.rsa_crt_dq();
+        ::core::assert!(res.is_ok());
+        kp.dq = BigNum::from_mpi(res.unwrap());
+        let res = pk.rsa_crt_qp();
+        ::core::assert!(res.is_ok());
+        kp.qp = BigNum::from_mpi(res.unwrap());
+        kp
+    }
+
+    fn install_rsa_test_der_key_objects() -> (u32, u32) {
+        let res = TestUserValue::<c_uint>::from_value(0);
+        ::core::assert!(res.is_ok());
+        let mut kp_obj = res.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        ::core::assert!(res.is_ok());
+        let kp_id = kp_obj.read();
+
+        let rsa_kp = rsa_keypair_from_pkcs8_der(RSA_TEST_DER);
+        let obj_arc = tee_obj_get(kp_id as tee_obj_id_type);
+        ::core::assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::rsa_keypair(rsa_kp));
+        obj.have_attrs = (1u32 << 8) - 1;
+        obj.info.objectSize = 2048;
+        obj.info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
+        drop(obj);
+
+        let res = TestUserValue::<c_uint>::from_value(0);
+        ::core::assert!(res.is_ok());
+        let mut pub_obj = res.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        ::core::assert!(res.is_ok());
+        let pub_id = pub_obj.read();
+        let res = syscall_cryp_obj_copy(pub_id as _, kp_id as _);
+        ::core::assert!(res.is_ok());
+        (kp_id, pub_id)
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_oaep_sha256_encrypt_decrypt_with_label() {
+        let (kp_id, pub_id) = install_rsa_test_der_key_objects();
+
+        let mut st_enc: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(pub_id),
+            None,
+            &mut st_enc,
+        );
+        assert!(res.is_ok());
+
+        let mut st_dec: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(kp_id),
+            None,
+            &mut st_dec,
+        );
+        assert!(res.is_ok());
+
+        let plain = b"testing123";
+        let label = b"MY_LABEL";
+        let mut cipher = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st_enc, plain, &mut cipher, Some(label));
+        assert!(res.is_ok());
+        let cipher_len = res.unwrap();
+        assert_eq!(cipher_len, cipher.len());
+
+        let mut out = [0u8; 32];
+        let res = tee_cryp_asymm_operate(st_dec, &cipher, &mut out, Some(label));
+        assert!(res.is_ok());
+        let out_len = res.unwrap();
+        assert_eq!(out_len, plain.len());
+        assert_eq!(&out[..out_len], plain.as_slice());
+
+        let res = tee_cryp_asymm_operate(st_dec, &cipher, &mut out, Some(b"WRONG_LABEL"));
+        assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_pkcs1_v15_encrypt_decrypt_random_key() {
+        let kp_obj = TestUserValue::<c_uint>::from_value(0);
+        assert!(kp_obj.is_ok());
+        let mut kp_obj = kp_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        assert!(res.is_ok());
+        let kp_id = kp_obj.read();
+
+        let res = syscall_obj_generate_key(kp_id as c_ulong, 2048, core::ptr::null(), 0);
+        assert!(res.is_ok());
+
+        let obj_arc = tee_obj_get(kp_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_RSA_KEYPAIR);
+        assert_eq!(obj.info.maxObjectSize, 2048);
+        assert!(matches!(obj.attr[0], TeeCryptObj::rsa_keypair(_)));
+        drop(obj);
+
+        let pub_obj = TestUserValue::<c_uint>::from_value(0);
+        assert!(pub_obj.is_ok());
+        let mut pub_obj = pub_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        assert!(res.is_ok());
+        let pub_id = pub_obj.read();
+
+        let res = syscall_cryp_obj_copy(pub_id as _, kp_id as _);
+        assert!(res.is_ok());
+
+        let mut st_enc: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_V1_5,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(pub_id),
+            None,
+            &mut st_enc,
+        );
+        assert!(res.is_ok());
+
+        let mut st_dec: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_V1_5,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(kp_id),
+            None,
+            &mut st_dec,
+        );
+        assert!(res.is_ok());
+
+        let plain = b"random 2048-bit rsa pkcs#1 v1.5";
+        let mut cipher = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st_enc, plain, &mut cipher, None);
+        assert!(res.is_ok());
+        let cipher_len = res.unwrap();
+        assert_eq!(cipher_len, cipher.len());
+
+        let mut out = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st_dec, &cipher[..cipher_len], &mut out, None);
+        assert!(res.is_ok());
+        let out_len = res.unwrap();
+        assert_eq!(out_len, plain.len());
+        assert_eq!(&out[..out_len], plain.as_slice());
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_oaep_sha256_encrypt_decrypt_random_key_with_label() {
+        let kp_obj = TestUserValue::<c_uint>::from_value(0);
+        assert!(kp_obj.is_ok());
+        let mut kp_obj = kp_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        assert!(res.is_ok());
+        let kp_id = kp_obj.read();
+
+        let res = syscall_obj_generate_key(kp_id as c_ulong, 2048, core::ptr::null(), 0);
+        assert!(res.is_ok());
+
+        let obj_arc = tee_obj_get(kp_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_RSA_KEYPAIR);
+        assert_eq!(obj.info.maxObjectSize, 2048);
+        assert!(matches!(obj.attr[0], TeeCryptObj::rsa_keypair(_)));
+        drop(obj);
+
+        let pub_obj = TestUserValue::<c_uint>::from_value(0);
+        assert!(pub_obj.is_ok());
+        let mut pub_obj = pub_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        assert!(res.is_ok());
+        let pub_id = pub_obj.read();
+
+        let res = syscall_cryp_obj_copy(pub_id as _, kp_id as _);
+        assert!(res.is_ok());
+
+        let mut st_enc: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(pub_id),
+            None,
+            &mut st_enc,
+        );
+        assert!(res.is_ok());
+
+        let mut st_dec: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(kp_id),
+            None,
+            &mut st_dec,
+        );
+        assert!(res.is_ok());
+
+        let plain = b"testing123";
+        let label = b"MY_LABEL";
+        let mut cipher = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st_enc, plain, &mut cipher, Some(label));
+        assert!(res.is_ok());
+        let cipher_len = res.unwrap();
+        assert_eq!(cipher_len, cipher.len());
+
+        let mut out = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st_dec, &cipher[..cipher_len], &mut out, Some(label));
+        assert!(res.is_ok());
+        let out_len = res.unwrap();
+        assert_eq!(out_len, plain.len());
+        assert_eq!(&out[..out_len], plain.as_slice());
+
+        let res = tee_cryp_asymm_operate(
+            st_dec,
+            &cipher[..cipher_len],
+            &mut out,
+            Some(b"WRONG_LABEL"),
+        );
+        assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_pss_sha256_sign_verify_random_key() {
+        let kp_obj = TestUserValue::<c_uint>::from_value(0);
+        assert!(kp_obj.is_ok());
+        let mut kp_obj = kp_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp_obj.as_user_ref());
+        assert!(res.is_ok());
+        let kp_id = kp_obj.read();
+
+        let res = syscall_obj_generate_key(kp_id as c_ulong, 2048, core::ptr::null(), 0);
+        assert!(res.is_ok());
+
+        let obj_arc = tee_obj_get(kp_id as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        assert_eq!(obj.info.objectType, TEE_TYPE_RSA_KEYPAIR);
+        assert!(matches!(obj.attr[0], TeeCryptObj::rsa_keypair(_)));
+        drop(obj);
+
+        let pub_obj = TestUserValue::<c_uint>::from_value(0);
+        assert!(pub_obj.is_ok());
+        let mut pub_obj = pub_obj.unwrap();
+        let res = syscall_cryp_obj_alloc(TEE_TYPE_RSA_PUBLIC_KEY as _, 2048, pub_obj.as_user_ref());
+        assert!(res.is_ok());
+        let pub_id = pub_obj.read();
+
+        let res = syscall_cryp_obj_copy(pub_id as _, kp_id as _);
+        assert!(res.is_ok());
+
+        let mut st_sign: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_SIGN,
+            Some(kp_id),
+            None,
+            &mut st_sign,
+        );
+        assert!(res.is_ok());
+
+        let mut st_vfy: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(pub_id),
+            None,
+            &mut st_vfy,
+        );
+        assert!(res.is_ok());
+
+        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+        let mut sig = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st_sign, data, &mut sig, None);
+        assert!(res.is_ok());
+        let sig_len = res.unwrap();
+
+        let res = tee_cryp_asymm_verify(st_vfy, data, &sig[..sig_len]);
+        assert!(res.is_ok());
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_pss_sha256_sign_verify() {
+        let (kp_id, pub_id) = install_rsa_test_der_key_objects();
+
+        let mut st_sign: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_SIGN,
+            Some(kp_id),
+            None,
+            &mut st_sign,
+        );
+        assert!(res.is_ok());
+
+        let mut st_vfy: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(pub_id),
+            None,
+            &mut st_vfy,
+        );
+        assert!(res.is_ok());
+
+        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+        let mut sig = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st_sign, data, &mut sig, None);
+        assert!(res.is_ok());
+        let sig_len = res.unwrap();
+
+        let res = tee_cryp_asymm_verify(st_vfy, data, &sig[..sig_len]);
+        assert!(res.is_ok());
+
+        let mut bad = sig;
+        bad[sig_len - 1] ^= 0xff;
+        let res = tee_cryp_asymm_verify(st_vfy, data, &bad[..sig_len]);
+        assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_nopad_sign_operate_rejected() {
+        let (kp_id, _pub_id) = install_rsa_test_der_key_objects();
+
+        let mut st: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_RSA_NOPAD,
+            TEE_OperationMode::TEE_MODE_SIGN,
+            Some(kp_id),
+            None,
+            &mut st,
+        );
+        assert!(res.is_ok());
+
+        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
+        let mut out = [0u8; 256];
+        let res = tee_cryp_asymm_operate(st, data, &mut out, None);
+        assert_eq!(res.err(), Some(TEE_ERROR_GENERIC));
     }
 }
