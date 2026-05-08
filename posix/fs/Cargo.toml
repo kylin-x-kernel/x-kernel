@@ -16,11 +16,15 @@ bitflags.workspace = true
 kcore.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
+khal.workspace = true
+kio.workspace = true
 klogger.workspace = true
+kpoll.workspace = true
 kservices.workspace = true
 ktask.workspace = true
 fs-ng-vfs.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
+linux_sysno.workspace = true
 osvm.workspace = true
 posix-types.workspace = true
 unittest.workspace = true

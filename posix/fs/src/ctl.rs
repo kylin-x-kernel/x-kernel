@@ -24,16 +24,16 @@ use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use kfs::{FS_CONTEXT, FsContext};
 use khal::time::wall_time;
-use kservices::mm::vm_load_string;
+use kservices::file::{Directory, FileLike, get_file_like};
 use ktask::current;
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},
 };
-use osvm::{VirtPtr, write_vm_mem};
-use posix_types::TimeValueLike;
+use osvm::VirtPtr;
+use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
-use crate::file::{Directory, FileLike, get_file_like, resolve_at, with_fs};
+use crate::path::{resolve_at, with_fs};
 
 /// The ioctl() system call manipulates the underlying device parameters
 /// of special files.
@@ -63,8 +63,8 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
 }
 
 /// Changes the current working directory.
-pub fn sys_chdir(path: *const c_char) -> KResult<isize> {
-    let path = vm_load_string(path)?;
+pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
+    let path = path.load_string()?;
     debug!("sys_chdir <= path: {path}");
 
     let mut fs = FS_CONTEXT.lock();
@@ -83,13 +83,13 @@ pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_mkdir(path: *const c_char, mode: u32) -> KResult<isize> {
+pub fn sys_mkdir(path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
     sys_mkdirat(AT_FDCWD, path, mode)
 }
 
 /// Changes the root directory of the calling process.
-pub fn sys_chroot(path: *const c_char) -> KResult<isize> {
-    let path = vm_load_string(path)?;
+pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
+    let path = path.load_string()?;
     debug!("sys_chroot <= path: {path}");
 
     let mut fs = FS_CONTEXT.lock();
@@ -102,8 +102,8 @@ pub fn sys_chroot(path: *const c_char) -> KResult<isize> {
 }
 
 /// Creates a directory relative to a directory file descriptor.
-pub fn sys_mkdirat(dirfd: i32, path: *const c_char, mode: u32) -> KResult<isize> {
-    let path = vm_load_string(path)?;
+pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
+    let path = path.load_string()?;
     debug!("sys_mkdirat <= dirfd: {dirfd}, path: {path}, mode: {mode}");
 
     let mode = mode & !current().as_thread().proc_data.umask();
@@ -171,8 +171,11 @@ impl DirBuffer {
 }
 
 /// Reads directory entries in linux_dirent64 format.
-pub fn sys_getdents64(fd: i32, buf: *mut u8, len: usize) -> KResult<isize> {
-    debug!("sys_getdents64 <= fd: {fd}, buf: {buf:?}, len: {len}");
+pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
+    debug!(
+        "sys_getdents64 <= fd: {fd}, buf: {:?}, len: {len}",
+        buf.as_ptr()
+    );
 
     let mut buffer = DirBuffer::new(len);
 
@@ -195,7 +198,7 @@ pub fn sys_getdents64(fd: i32, buf: *mut u8, len: usize) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    write_vm_mem(buf, &buffer.buf)?;
+    buf.write_vm_slice(&buffer.buf)?;
 
     Ok(buffer.offset as _)
 }
@@ -208,13 +211,16 @@ pub fn sys_getdents64(fd: i32, buf: *mut u8, len: usize) -> KResult<isize> {
 /// Creates a hard link to an existing file.
 pub fn sys_linkat(
     old_dirfd: c_int,
-    old_path: *const c_char,
+    old_path: UserConstPtr<c_char>,
     new_dirfd: c_int,
-    new_path: *const c_char,
+    new_path: UserConstPtr<c_char>,
     flags: u32,
 ) -> KResult<isize> {
-    let old_path = old_path.check_non_null().map(vm_load_string).transpose()?;
-    let new_path = vm_load_string(new_path)?;
+    let old_path = old_path
+        .check_non_null()
+        .map(UserConstPtr::load_string)
+        .transpose()?;
+    let new_path = new_path.load_string()?;
     debug!(
         "sys_linkat <= old_dirfd: {old_dirfd}, old_path: {old_path:?}, new_dirfd: {new_dirfd}, \
          new_path: {new_path}, flags: {flags}"
@@ -238,7 +244,7 @@ pub fn sys_linkat(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_link(old_path: *const c_char, new_path: *const c_char) -> KResult<isize> {
+pub fn sys_link(old_path: UserConstPtr<c_char>, new_path: UserConstPtr<c_char>) -> KResult<isize> {
     sys_linkat(AT_FDCWD, old_path, AT_FDCWD, new_path, 0)
 }
 
@@ -248,8 +254,8 @@ pub fn sys_link(old_path: *const c_char, new_path: *const c_char) -> KResult<isi
 /// flags: can be 0 or AT_REMOVEDIR
 /// return 0 when success, else return -1
 /// Removes a directory entry (file or directory).
-pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> KResult<isize> {
-    let path = vm_load_string(path)?;
+pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KResult<isize> {
+    let path = path.load_string()?;
 
     debug!("sys_unlinkat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
@@ -264,17 +270,17 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> KResult<is
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_rmdir(path: *const c_char) -> KResult<isize> {
+pub fn sys_rmdir(path: UserConstPtr<c_char>) -> KResult<isize> {
     sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR as usize)
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_unlink(path: *const c_char) -> KResult<isize> {
+pub fn sys_unlink(path: UserConstPtr<c_char>) -> KResult<isize> {
     sys_unlinkat(AT_FDCWD, path, 0)
 }
 
 /// Gets the current working directory path.
-pub fn sys_getcwd(buf: *mut u8, size: isize) -> KResult<isize> {
+pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
     let size: usize = size.try_into().map_err(|_| KError::BadAddress)?;
     if buf.is_null() {
         return Ok(0);
@@ -287,7 +293,7 @@ pub fn sys_getcwd(buf: *mut u8, size: isize) -> KResult<isize> {
     let cwd = cwd.as_bytes_with_nul();
 
     if cwd.len() <= size {
-        write_vm_mem(buf, cwd)?;
+        buf.write_vm_slice(cwd)?;
         // FIXME: it is said that this should return 0
         Ok(buf.as_ptr() as _)
     } else {
@@ -296,18 +302,18 @@ pub fn sys_getcwd(buf: *mut u8, size: isize) -> KResult<isize> {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_symlink(target: *const c_char, linkpath: *const c_char) -> KResult<isize> {
+pub fn sys_symlink(target: UserConstPtr<c_char>, linkpath: UserConstPtr<c_char>) -> KResult<isize> {
     sys_symlinkat(target, AT_FDCWD, linkpath)
 }
 
 /// Creates a symbolic link relative to a directory file descriptor.
 pub fn sys_symlinkat(
-    target: *const c_char,
+    target: UserConstPtr<c_char>,
     new_dirfd: i32,
-    linkpath: *const c_char,
+    linkpath: UserConstPtr<c_char>,
 ) -> KResult<isize> {
-    let target = vm_load_string(target)?;
-    let linkpath = vm_load_string(linkpath)?;
+    let target = target.load_string()?;
+    let linkpath = linkpath.load_string()?;
     debug!("sys_symlinkat <= target: {target:?}, new_dirfd: {new_dirfd}, linkpath: {linkpath:?}");
 
     with_fs(new_dirfd, |fs| {
@@ -317,18 +323,18 @@ pub fn sys_symlinkat(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_readlink(path: *const c_char, buf: *mut u8, size: usize) -> KResult<isize> {
+pub fn sys_readlink(path: UserConstPtr<c_char>, buf: UserPtr<u8>, size: usize) -> KResult<isize> {
     sys_readlinkat(AT_FDCWD, path, buf, size)
 }
 
 /// Reads the target of a symbolic link.
 pub fn sys_readlinkat(
     dirfd: i32,
-    path: *const c_char,
-    buf: *mut u8,
+    path: UserConstPtr<c_char>,
+    buf: UserPtr<u8>,
     size: usize,
 ) -> KResult<isize> {
-    let path = vm_load_string(path)?;
+    let path = path.load_string()?;
 
     debug!("sys_readlinkat <= dirfd: {dirfd}, path: {path:?}");
 
@@ -336,35 +342,38 @@ pub fn sys_readlinkat(
         let entry = fs.resolve_no_follow(path)?;
         let link = entry.read_link()?;
         let read = size.min(link.len());
-        write_vm_mem(buf, &link.as_bytes()[..read])?;
+        buf.write_vm_slice(&link.as_bytes()[..read])?;
         Ok(read as isize)
     })
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_chown(path: *const c_char, uid: i32, gid: i32) -> KResult<isize> {
+pub fn sys_chown(path: UserConstPtr<c_char>, uid: i32, gid: i32) -> KResult<isize> {
     sys_fchownat(AT_FDCWD, path, uid, gid, 0)
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_lchown(path: *const c_char, uid: i32, gid: i32) -> KResult<isize> {
+pub fn sys_lchown(path: UserConstPtr<c_char>, uid: i32, gid: i32) -> KResult<isize> {
     use linux_raw_sys::general::AT_SYMLINK_NOFOLLOW;
     sys_fchownat(AT_FDCWD, path, uid, gid, AT_SYMLINK_NOFOLLOW)
 }
 
 pub fn sys_fchown(fd: i32, uid: i32, gid: i32) -> KResult<isize> {
-    sys_fchownat(fd, core::ptr::null(), uid, gid, AT_EMPTY_PATH)
+    sys_fchownat(fd, UserConstPtr::default(), uid, gid, AT_EMPTY_PATH)
 }
 
 /// Changes file ownership relative to a directory file descriptor.
 pub fn sys_fchownat(
     dirfd: i32,
-    path: *const c_char,
+    path: UserConstPtr<c_char>,
     uid: i32,
     gid: i32,
     flags: u32,
 ) -> KResult<isize> {
-    let path = path.check_non_null().map(vm_load_string).transpose()?;
+    let path = path
+        .check_non_null()
+        .map(UserConstPtr::load_string)
+        .transpose()?;
     let loc = resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
         .ok_or(KError::BadFileDescriptor)?;
@@ -389,18 +398,26 @@ pub fn sys_fchownat(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_chmod(path: *const c_char, mode: u32) -> KResult<isize> {
+pub fn sys_chmod(path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
     sys_fchmodat(AT_FDCWD, path, mode, 0)
 }
 
 /// Changes file permissions by file descriptor.
 pub fn sys_fchmod(fd: i32, mode: u32) -> KResult<isize> {
-    sys_fchmodat(fd, core::ptr::null(), mode, AT_EMPTY_PATH)
+    sys_fchmodat(fd, UserConstPtr::default(), mode, AT_EMPTY_PATH)
 }
 
 /// Changes file permissions relative to a directory file descriptor.
-pub fn sys_fchmodat(dirfd: i32, path: *const c_char, mode: u32, flags: u32) -> KResult<isize> {
-    let path = path.check_non_null().map(vm_load_string).transpose()?;
+pub fn sys_fchmodat(
+    dirfd: i32,
+    path: UserConstPtr<c_char>,
+    mode: u32,
+    flags: u32,
+) -> KResult<isize> {
+    let path = path
+        .check_non_null()
+        .map(UserConstPtr::load_string)
+        .transpose()?;
     resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
         .ok_or(KError::BadFileDescriptor)?
@@ -413,12 +430,15 @@ pub fn sys_fchmodat(dirfd: i32, path: *const c_char, mode: u32, flags: u32) -> K
 
 fn update_times(
     dirfd: i32,
-    path: *const c_char,
+    path: UserConstPtr<c_char>,
     atime: Option<Duration>,
     mtime: Option<Duration>,
     flags: u32,
 ) -> KResult<()> {
-    let path = path.check_non_null().map(vm_load_string).transpose()?;
+    let path = path
+        .check_non_null()
+        .map(UserConstPtr::load_string)
+        .transpose()?;
     resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
         .ok_or(KError::BadFileDescriptor)?
@@ -439,7 +459,7 @@ pub struct utimbuf {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_utime(path: *const c_char, times: *const utimbuf) -> KResult<isize> {
+pub fn sys_utime(path: UserConstPtr<c_char>, times: UserConstPtr<utimbuf>) -> KResult<isize> {
     let (atime, mtime) = if let Some(times) = times.check_non_null() {
         // FIXME: AnyBitPattern
         let times = unsafe { times.read_uninit()?.assume_init() };
@@ -457,8 +477,8 @@ pub fn sys_utime(path: *const c_char, times: *const utimbuf) -> KResult<isize> {
 
 #[cfg(target_arch = "x86_64")]
 pub fn sys_utimes(
-    path: *const c_char,
-    times: *const [linux_raw_sys::general::timeval; 2],
+    path: UserConstPtr<c_char>,
+    times: UserConstPtr<[linux_raw_sys::general::timeval; 2]>,
 ) -> KResult<isize> {
     let (atime, mtime) = if let Some(times) = times.check_non_null() {
         // FIXME: AnyBitPattern
@@ -474,8 +494,8 @@ pub fn sys_utimes(
 
 pub fn sys_utimensat(
     dirfd: i32,
-    path: *const c_char,
-    times: *const [timespec; 2],
+    path: UserConstPtr<c_char>,
+    times: UserConstPtr<[timespec; 2]>,
     mut flags: u32,
 ) -> KResult<isize> {
     if path.is_null() {
@@ -509,28 +529,31 @@ pub fn sys_utimensat(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_rename(old_path: *const c_char, new_path: *const c_char) -> KResult<isize> {
+pub fn sys_rename(
+    old_path: UserConstPtr<c_char>,
+    new_path: UserConstPtr<c_char>,
+) -> KResult<isize> {
     sys_renameat(AT_FDCWD, old_path, AT_FDCWD, new_path)
 }
 
 pub fn sys_renameat(
     old_dirfd: i32,
-    old_path: *const c_char,
+    old_path: UserConstPtr<c_char>,
     new_dirfd: i32,
-    new_path: *const c_char,
+    new_path: UserConstPtr<c_char>,
 ) -> KResult<isize> {
     sys_renameat2(old_dirfd, old_path, new_dirfd, new_path, 0)
 }
 
 pub fn sys_renameat2(
     old_dirfd: i32,
-    old_path: *const c_char,
+    old_path: UserConstPtr<c_char>,
     new_dirfd: i32,
-    new_path: *const c_char,
+    new_path: UserConstPtr<c_char>,
     flags: u32,
 ) -> KResult<isize> {
-    let old_path = vm_load_string(old_path)?;
-    let new_path = vm_load_string(new_path)?;
+    let old_path = old_path.load_string()?;
+    let new_path = new_path.load_string()?;
     debug!(
         "sys_renameat2 <= old_dirfd: {old_dirfd}, old_path: {old_path:?}, new_dirfd: {new_dirfd}, \
          new_path: {new_path}, flags: {flags}"

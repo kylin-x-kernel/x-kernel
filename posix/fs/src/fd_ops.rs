@@ -18,11 +18,11 @@ use core::{
 use bitflags::bitflags;
 use kcore::task::AsThread;
 use kerrno::{KError, KResult};
-use kservices::{file::FileLike, mm::UserPtr};
+use kservices::file::{FD_TABLE, FileLike, Pipe, add_file_like, close_file_like, get_file_like};
 use ktask::current;
 use linux_raw_sys::general::*;
-
-use crate::file::{FD_TABLE, Pipe, add_file_like, close_file_like, get_file_like};
+use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::UserPtr;
 
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {
@@ -137,7 +137,9 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
         F_OFD_SETLK | F_OFD_SETLKW => Ok(0),
         F_GETLK | F_OFD_GETLK => {
             let arg = UserPtr::<flock64>::from(arg);
-            arg.get_as_mut()?.l_type = F_UNLCK as _;
+            let mut lock = unsafe { arg.read_uninit()?.assume_init() };
+            lock.l_type = F_UNLCK as _;
+            arg.write_vm(lock)?;
             Ok(0)
         }
         F_SETFL => {

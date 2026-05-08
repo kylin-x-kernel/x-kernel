@@ -21,16 +21,16 @@ use kerrno::{KError, KResult, LinuxError};
 use kfs::{FS_CONTEXT, FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
-use kservices::mm::{UserConstPtr, VmBytes, VmBytesMut};
+use kservices::{
+    file::{Directory, File, FileLike, Pipe, get_file_like},
+    io::{IoVec, IoVectorBuf},
+    mm::{VmBytes, VmBytesMut},
+};
 use ktask::current;
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtMutPtr, VirtPtr};
-
-use crate::{
-    file::{Directory, File, FileLike, Pipe, get_file_like},
-    io::{IoVec, IoVectorBuf},
-};
+use posix_types::{UserConstPtr, UserPtr};
 
 struct DummyFd;
 impl FileLike for DummyFd {
@@ -82,35 +82,35 @@ pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
 /// Read data from the file indicated by `fd`.
 ///
 /// Return the read size if success.
-pub fn sys_read(fd: i32, buf: *mut u8, len: usize) -> KResult<isize> {
-    debug!("sys_read <= fd: {fd}, buf: {buf:p}, len: {len}");
+pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
+    debug!("sys_read <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
     // Get the file object and perform the read operation into the user buffer
-    Ok(get_file_like(fd)?.read(&mut VmBytesMut::new(buf, len))? as _)
+    Ok(get_file_like(fd)?.read(&mut VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
 }
 
 /// Vectored read into multiple buffers.
-pub fn sys_readv(fd: i32, iov: *const IoVec, iovcnt: usize) -> KResult<isize> {
+pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_readv <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored read - read data into multiple buffers in a single operation
     let f = get_file_like(fd)?;
-    f.read(&mut IoVectorBuf::new(iov, iovcnt)?.into_io())
+    f.read(&mut IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io())
         .map(|n| n as _)
 }
 
 /// Write data to the file indicated by `fd`.
 ///
 /// Return the written size if success.
-pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> KResult<isize> {
-    debug!("sys_write <= fd: {fd}, buf: {buf:p}, len: {len}");
-    Ok(get_file_like(fd)?.write(&mut VmBytes::new(buf, len))? as _)
+pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
+    debug!("sys_write <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
+    Ok(get_file_like(fd)?.write(&mut VmBytes::new(buf.as_ptr(), len))? as _)
 }
 
 /// Vectored write from multiple buffers.
-pub fn sys_writev(fd: i32, iov: *const IoVec, iovcnt: usize) -> KResult<isize> {
+pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored write - write data from multiple buffers in a single operation
     let f = get_file_like(fd)?;
-    f.write(&mut IoVectorBuf::new(iov, iovcnt)?.into_io())
+    f.write(&mut IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io())
         .map(|n| n as _)
 }
 
@@ -153,7 +153,7 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<is
 
 /// Truncates a file to a specified length by path.
 pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResult<isize> {
-    let path = path.get_as_str()?;
+    let path = path.load_string()?;
     debug!("sys_truncate <= {path:?} {length}");
     // Truncate file to specified length - opens file by path
     if length < 0 {
@@ -322,11 +322,11 @@ pub fn sys_fallocate(
 pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
     // Synchronize file to disk - syncs both data and metadata
-    let any_file = crate::file::get_file_like(fd)?;
+    let any_file = kservices::file::get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(false)?;
         return Ok(0);
-    } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
+    } else if let Ok(d) = any_file.downcast_arc::<kservices::file::Directory>() {
         d.inner().sync(false)?;
         return Ok(0);
     }
@@ -337,11 +337,11 @@ pub fn sys_fsync(fd: c_int) -> KResult<isize> {
 pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
     // Synchronize file data to disk - only syncs data, not metadata
-    let any_file = crate::file::get_file_like(fd)?;
+    let any_file = kservices::file::get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(true)?;
         return Ok(0);
-    } else if let Ok(d) = any_file.downcast_arc::<crate::file::Directory>() {
+    } else if let Ok(d) = any_file.downcast_arc::<kservices::file::Directory>() {
         d.inner().sync(true)?;
         return Ok(0);
     }
@@ -368,20 +368,27 @@ pub fn sys_fadvise64(
 }
 
 /// Reads from a file at a given offset without changing the file position.
-pub fn sys_pread64(fd: c_int, buf: *mut u8, len: usize, offset: __kernel_off_t) -> KResult<isize> {
+pub fn sys_pread64(
+    fd: c_int,
+    buf: UserPtr<u8>,
+    len: usize,
+    offset: __kernel_off_t,
+) -> KResult<isize> {
     // Read from file at specific offset without changing file position
     let f = File::from_fd(fd)?;
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
-    let read = f.inner().read_at(VmBytesMut::new(buf, len), offset as _)?;
+    let read = f
+        .inner()
+        .read_at(VmBytesMut::new(buf.as_ptr().cast_mut(), len), offset as _)?;
     Ok(read as _)
 }
 
 /// Writes to a file at a given offset without changing the file position.
 pub fn sys_pwrite64(
     fd: c_int,
-    buf: *const u8,
+    buf: UserConstPtr<u8>,
     len: usize,
     offset: __kernel_off_t,
 ) -> KResult<isize> {
@@ -390,14 +397,16 @@ pub fn sys_pwrite64(
         return Ok(0);
     }
     let f = File::from_fd(fd)?;
-    let write = f.inner().write_at(VmBytes::new(buf, len), offset as _)?;
+    let write = f
+        .inner()
+        .write_at(VmBytes::new(buf.as_ptr(), len), offset as _)?;
     Ok(write as _)
 }
 
 /// Vectored read at a given offset.
 pub fn sys_preadv(
     fd: c_int,
-    iov: *const IoVec,
+    iov: UserConstPtr<IoVec>,
     iovcnt: usize,
     offset: __kernel_off_t,
 ) -> KResult<isize> {
@@ -408,7 +417,7 @@ pub fn sys_preadv(
 /// Vectored write at a given offset.
 pub fn sys_pwritev(
     fd: c_int,
-    iov: *const IoVec,
+    iov: UserConstPtr<IoVec>,
     iovcnt: usize,
     offset: __kernel_off_t,
 ) -> KResult<isize> {
@@ -419,7 +428,7 @@ pub fn sys_pwritev(
 /// Vectored read at a given offset with flags.
 pub fn sys_preadv2(
     fd: c_int,
-    iov: *const IoVec,
+    iov: UserConstPtr<IoVec>,
     iovcnt: usize,
     offset: __kernel_off_t,
     _flags: u32,
@@ -428,14 +437,17 @@ pub fn sys_preadv2(
     // Vectored read at specific offset with optional flags
     let f = File::from_fd(fd)?;
     f.inner()
-        .read_at(IoVectorBuf::new(iov, iovcnt)?.into_io(), offset as _)
+        .read_at(
+            IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io(),
+            offset as _,
+        )
         .map(|n| n as _)
 }
 
 /// Vectored write at a given offset with flags.
 pub fn sys_pwritev2(
     fd: c_int,
-    iov: *const IoVec,
+    iov: UserConstPtr<IoVec>,
     iovcnt: usize,
     offset: __kernel_off_t,
     _flags: u32,
@@ -444,15 +456,18 @@ pub fn sys_pwritev2(
     // Vectored write at specific offset with optional flags.
     let f = File::from_fd(fd)?;
     f.inner()
-        .write_at(IoVectorBuf::new(iov, iovcnt)?.into_io(), offset as _)
+        .write_at(
+            IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io(),
+            offset as _,
+        )
         .map(|n| n as _)
 }
 
 /// Helper for sendfile and copy_file_range operations
 /// Abstracts both fixed position (via offset pointer) and current position reads/writes
 enum SendFile {
-    Direct(Arc<dyn FileLike>),   // Use current file position
-    Offset(Arc<File>, *mut u64), // Use fixed offset from user space
+    Direct(Arc<dyn FileLike>),       // Use current file position
+    Offset(Arc<File>, UserPtr<u64>), // Use fixed offset from user space
 }
 
 impl SendFile {
@@ -532,7 +547,12 @@ fn do_send(mut src: SendFile, mut dst: SendFile, len: usize) -> KResult<usize> {
 
 /// Efficiently transfer data from in_fd to out_fd without going through user space
 /// Transfers data from one file descriptor to another.
-pub fn sys_sendfile(out_fd: c_int, in_fd: c_int, offset: *mut u64, len: usize) -> KResult<isize> {
+pub fn sys_sendfile(
+    out_fd: c_int,
+    in_fd: c_int,
+    offset: UserPtr<u64>,
+    len: usize,
+) -> KResult<isize> {
     debug!(
         "sys_sendfile <= out_fd: {}, in_fd: {}, offset: {}, len: {}",
         out_fd,
@@ -562,9 +582,9 @@ pub fn sys_sendfile(out_fd: c_int, in_fd: c_int, offset: *mut u64, len: usize) -
 /// Copies a range of bytes between two file descriptors.
 pub fn sys_copy_file_range(
     fd_in: c_int,
-    off_in: *mut u64,
+    off_in: UserPtr<u64>,
     fd_out: c_int,
-    off_out: *mut u64,
+    off_out: UserPtr<u64>,
     len: usize,
     _flags: u32,
 ) -> KResult<isize> {
@@ -603,9 +623,9 @@ pub fn sys_copy_file_range(
 /// Splice can connect pipes to regular files or between pipes without user-space buffering
 pub fn sys_splice(
     fd_in: c_int,
-    off_in: *mut i64,
+    off_in: UserPtr<i64>,
     fd_out: c_int,
-    off_out: *mut i64,
+    off_out: UserPtr<i64>,
     len: usize,
     _flags: u32,
 ) -> KResult<isize> {

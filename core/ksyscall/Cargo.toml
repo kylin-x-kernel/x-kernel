@@ -20,7 +20,6 @@ tee = [
 kservices = { workspace = true }
 kbuild_config = { workspace = true }
 kerrno.workspace = true
-fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
 kio.workspace = true

@@ -42,44 +42,44 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
     let result = match sysno {
         // fs ctl
         Sysno::ioctl => sys_ioctl(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::chdir => sys_chdir(uctx.arg0() as _),
+        Sysno::chdir => sys_chdir(uctx.arg0().into()),
         Sysno::fchdir => sys_fchdir(uctx.arg0() as _),
-        Sysno::chroot => sys_chroot(uctx.arg0() as _),
+        Sysno::chroot => sys_chroot(uctx.arg0().into()),
         #[cfg(target_arch = "x86_64")]
-        Sysno::mkdir => sys_mkdir(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::mkdirat => sys_mkdirat(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::getdents64 => sys_getdents64(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::mkdir => sys_mkdir(uctx.arg0().into(), uctx.arg1() as _),
+        Sysno::mkdirat => sys_mkdirat(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::getdents64 => sys_getdents64(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
         #[cfg(target_arch = "x86_64")]
-        Sysno::link => sys_link(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::link => sys_link(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::linkat => sys_linkat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg3().into(),
             uctx.arg4() as _,
         ),
         #[cfg(target_arch = "x86_64")]
-        Sysno::rmdir => sys_rmdir(uctx.arg0() as _),
+        Sysno::rmdir => sys_rmdir(uctx.arg0().into()),
         #[cfg(target_arch = "x86_64")]
-        Sysno::unlink => sys_unlink(uctx.arg0() as _),
-        Sysno::unlinkat => sys_unlinkat(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::getcwd => sys_getcwd(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::unlink => sys_unlink(uctx.arg0().into()),
+        Sysno::unlinkat => sys_unlinkat(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::getcwd => sys_getcwd(uctx.arg0().into(), uctx.arg1() as _),
         #[cfg(target_arch = "x86_64")]
-        Sysno::symlink => sys_symlink(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::symlinkat => sys_symlinkat(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::symlink => sys_symlink(uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::symlinkat => sys_symlinkat(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2().into()),
         #[cfg(target_arch = "x86_64")]
-        Sysno::rename => sys_rename(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::rename => sys_rename(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::renameat => sys_renameat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg3().into(),
         ),
         Sysno::renameat2 => sys_renameat2(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg3().into(),
             uctx.arg4() as _,
         ),
         Sysno::sync => sys_sync(),
@@ -87,42 +87,42 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         // file ops
         #[cfg(target_arch = "x86_64")]
-        Sysno::chown => sys_chown(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::chown => sys_chown(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2() as _),
         #[cfg(target_arch = "x86_64")]
-        Sysno::lchown => sys_lchown(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::lchown => sys_lchown(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::fchown => sys_fchown(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::fchownat => sys_fchownat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
             uctx.arg4() as _,
         ),
         #[cfg(target_arch = "x86_64")]
-        Sysno::chmod => sys_chmod(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::chmod => sys_chmod(uctx.arg0().into(), uctx.arg1() as _),
         Sysno::fchmod => sys_fchmod(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::fchmodat | Sysno::fchmodat2 => sys_fchmodat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
         #[cfg(target_arch = "x86_64")]
-        Sysno::readlink => sys_readlink(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::readlink => sys_readlink(uctx.arg0().into(), uctx.arg1().into(), uctx.arg2() as _),
         Sysno::readlinkat => sys_readlinkat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
         #[cfg(target_arch = "x86_64")]
-        Sysno::utime => sys_utime(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::utime => sys_utime(uctx.arg0().into(), uctx.arg1().into()),
         #[cfg(target_arch = "x86_64")]
-        Sysno::utimes => sys_utimes(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::utimes => sys_utimes(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::utimensat => sys_utimensat(
             uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
 
@@ -145,10 +145,10 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::flock => sys_flock(uctx.arg0() as _, uctx.arg1() as _),
 
         // io
-        Sysno::read => sys_read(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::readv => sys_readv(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::write => sys_write(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::writev => sys_writev(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::read => sys_read(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::readv => sys_readv(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::write => sys_write(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::writev => sys_writev(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
         Sysno::lseek => sys_lseek(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::truncate => sys_truncate(uctx.arg0().into(), uctx.arg1() as _),
         Sysno::ftruncate => sys_ftruncate(uctx.arg0() as _, uctx.arg1() as _),
@@ -168,38 +168,38 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         ),
         Sysno::pread64 => sys_pread64(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
         Sysno::pwrite64 => sys_pwrite64(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
         Sysno::preadv => sys_preadv(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
         Sysno::pwritev => sys_pwritev(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
         Sysno::preadv2 => sys_preadv2(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
             uctx.arg4() as _,
         ),
         Sysno::pwritev2 => sys_pwritev2(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
             uctx.arg3() as _,
             uctx.arg4() as _,
@@ -207,22 +207,22 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::sendfile => sys_sendfile(
             uctx.arg0() as _,
             uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
         Sysno::copy_file_range => sys_copy_file_range(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg3().into(),
             uctx.arg4() as _,
             uctx.arg5() as _,
         ),
         Sysno::splice => sys_splice(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg3().into(),
             uctx.arg4() as _,
             uctx.arg5() as _,
         ),
@@ -288,9 +288,9 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::umount2 => sys_umount2(uctx.arg0().into(), uctx.arg1() as _) as _,
 
         // pipe
-        Sysno::pipe2 => sys_pipe2(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::pipe2 => sys_pipe2(uctx.arg0().into(), uctx.arg1() as _),
         #[cfg(target_arch = "x86_64")]
-        Sysno::pipe => sys_pipe2(uctx.arg0() as _, 0),
+        Sysno::pipe => sys_pipe2(uctx.arg0().into(), 0),
 
         // event
         Sysno::eventfd2 => sys_eventfd2(uctx.arg0() as _, uctx.arg1() as _),

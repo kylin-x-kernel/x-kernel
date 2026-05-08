@@ -15,6 +15,7 @@ use kerrno::KResult;
 use kservices::file::{FileLike, Pipe, close_file_like};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtMutPtr;
+use posix_types::UserPtr;
 
 bitflags! {
     /// Flags for the `pipe2` syscall.
@@ -28,7 +29,7 @@ bitflags! {
 }
 
 /// Creates a pipe and returns the read/write file descriptors.
-pub fn sys_pipe2(fds: *mut [c_int; 2], flags: u32) -> KResult<isize> {
+pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
     let flags = {
         let new_flags = PipeFlags::from_bits_truncate(flags);
         if new_flags.bits() != flags {
