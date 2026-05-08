@@ -515,6 +515,9 @@ pub mod tests_irq {
         #[cfg(target_arch = "aarch64")]
         const IRQ_NUM: usize = 0;
 
+        #[cfg(target_arch = "loongarch64")]
+        const IRQ_NUM: usize = 0;
+
         assert!(irq_handler(IRQ_NUM));
     }
 

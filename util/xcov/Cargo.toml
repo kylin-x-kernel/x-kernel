@@ -1,0 +1,24 @@
+[package]
+name = "xcov"
+description = "Pure Rust code coverage and PGO support for no_std and embedded programs"
+keywords = ["coverage", "no_std", "llvm-cov", "pgo", "profiling"]
+categories = ["development-tools", "no-std", "embedded"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = []
+
+[dependencies]
+portable-atomic = { version = "1.13", default-features = false, features = ["require-cas"] }
+unittest = { workspace = true }
+
+[[test]]
+name = "ffi_equivalence"
+path = "tests/ffi_equivalence.rs"
