@@ -435,10 +435,9 @@ impl core::fmt::Display for IncompatibleCoverageData {
 
 /// Captures the current code coverage data and writes it to the given writer.
 ///
-/// # Safety
-///
-/// Must not be called concurrently with other profiling operations.
-pub unsafe fn capture_coverage<Writer: CoverageWriter>(
+/// This function is not thread-safe: concurrent calls or concurrent execution
+/// of instrumented code may produce inaccurate coverage data.
+pub fn capture_coverage<Writer: CoverageWriter>(
     writer: &mut Writer,
 ) -> Result<(), CoverageWriteError> {
     let size = buffer::get_size_for_buffer();
@@ -466,10 +465,9 @@ pub unsafe fn capture_coverage<Writer: CoverageWriter>(
 
 /// Merges the given coverage data into the current counters.
 ///
-/// # Safety
-///
-/// Must not be called concurrently with other profiling operations.
-pub unsafe fn merge_coverage(data: &[u8]) -> Result<(), IncompatibleCoverageData> {
+/// This function is not thread-safe: concurrent calls or concurrent execution
+/// of instrumented code may produce inaccurate coverage data.
+pub fn merge_coverage(data: &[u8]) -> Result<(), IncompatibleCoverageData> {
     let result = unsafe { merge::merge_from_buffer(data.as_ptr(), data.len() as u64) };
     if result != 0 {
         Err(IncompatibleCoverageData)

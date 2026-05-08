@@ -119,7 +119,7 @@ fn main() {
 
     info!("Writing LLVM coverage data to /.llvm-cov/default.profraw ...");
     let mut cov = Vec::new();
-    if let Err(e) = unsafe { xcov::capture_coverage(&mut cov) } {
+    if let Err(e) = xcov::capture_coverage(&mut cov) {
         error!("capture_coverage failed: {:?}", e);
     } else if !cov.is_empty() {
         let cx = kfs::FS_CONTEXT.lock();

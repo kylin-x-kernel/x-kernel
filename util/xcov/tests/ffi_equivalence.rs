@@ -217,10 +217,10 @@ fn reset_coverage_is_callable() {
 
 #[test]
 fn capture_coverage_signature() {
-    // capture_coverage is unsafe, takes &mut Writer, returns Result.
+    // capture_coverage takes &mut Writer, returns Result.
     // Without actual instrumentation data, it returns Err on macOS.
     let mut buf: Vec<u8> = Vec::new();
-    let result = unsafe { xcov::capture_coverage(&mut buf) };
+    let result = xcov::capture_coverage(&mut buf);
     // On macOS without instrumentation, sections are empty so buffer is 0-size.
     // With empty sections, write_buffer may succeed with just a header,
     // or may fail. Either way the function type signature is verified.
@@ -229,9 +229,9 @@ fn capture_coverage_signature() {
 
 #[test]
 fn merge_coverage_signature() {
-    // merge_coverage is unsafe, takes &[u8], returns Result.
+    // merge_coverage takes &[u8], returns Result.
     let data = [0u8; 64];
-    let result = unsafe { xcov::merge_coverage(&data) };
+    let result = xcov::merge_coverage(&data);
     let _typed: Result<(), xcov::IncompatibleCoverageData> = result;
 }
 
@@ -356,7 +356,7 @@ fn empty_sections_mean_coverage_disabled() {
 #[test]
 fn merge_rejects_incompatible_data() {
     let buf = [0u8; 256];
-    let result = unsafe { xcov::merge_coverage(&buf) };
+    let result = xcov::merge_coverage(&buf);
     assert!(result.is_err());
 }
 

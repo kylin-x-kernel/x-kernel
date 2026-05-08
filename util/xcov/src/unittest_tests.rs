@@ -269,7 +269,7 @@ mod behavior_tests {
     #[def_test]
     fn merge_rejects_incompatible_data() {
         let buf = [0u8; 256];
-        let result = unsafe { crate::merge_coverage(&buf) };
+        let result = crate::merge_coverage(&buf);
         assert!(result.is_err());
     }
 
@@ -358,7 +358,7 @@ mod behavior_tests {
     #[def_test]
     fn merge_coverage_signature() {
         let data = [0u8; 64];
-        let result = unsafe { crate::merge_coverage(&data) };
+        let result = crate::merge_coverage(&data);
         let _typed: Result<(), crate::IncompatibleCoverageData> = result;
     }
 }
@@ -550,6 +550,6 @@ mod api_tests {
     #[def_test]
     fn capture_coverage_uses_alloc() {
         let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        let _ = unsafe { crate::capture_coverage(&mut buf) };
+        let _ = crate::capture_coverage(&mut buf);
     }
 }
