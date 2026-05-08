@@ -21,10 +21,14 @@ pub fn tee_otp_get_hw_unique_key(hwkey: &mut TeeHwUniqueKey) -> TeeResult {
             use crate::tee::arch::x86_64::hygon_csv::get_huk_key;
             info!("get_huk_key from CSV sealing key");
             get_huk_key(&mut hwkey.data)?;
+        } else if #[cfg(feature = "dice_huk_key")] {
+            use crate::tee::arch::aarch64::dice::get_huk_key;
+            info!("get_huk_key from DICE CDI seal");
+            get_huk_key(&mut hwkey.data)?;
         } else if #[cfg(feature = "virtcca_huk_key")] {
-                use crate::tee::arch::aarch64::virtcca::get_huk_key;
-                info!("get_huk_key from VirtCCA");
-                get_huk_key(&mut hwkey.data)?;
+            use crate::tee::arch::aarch64::virtcca::get_huk_key;
+            info!("get_huk_key from VirtCCA");
+            get_huk_key(&mut hwkey.data)?;
         }
     }
     Ok(())

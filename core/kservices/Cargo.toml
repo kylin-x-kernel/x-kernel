@@ -18,6 +18,7 @@ dice = [
 	"dep:rand_chacha",
 	"dep:mbedtls",
 	"dep:dice_driver",
+	"tee_kernel/dice_huk_key",
 ]
 tee = [
 	"dep:tee_kernel",

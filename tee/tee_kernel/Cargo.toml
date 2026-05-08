@@ -14,6 +14,8 @@ default = ["linux_sysno/tee", "kalloc/tee", "tee_ss_smx"]
 tee_cfg_memtag = []
 tee_ss_smx = []
 csv_huk_key = ["dep:kcpu"]
+# dice_huk_key and virtcca_huk_key are mutually exclusive (compile_error in tee/arch/aarch64/mod.rs).
+dice_huk_key = ["dep:dice_driver", "dep:rust-dice"]
 virtcca_huk_key = []
 
 [dependencies]
@@ -25,6 +27,7 @@ mbedtls = { workspace = true }
 mbedtls-sys-auto = { workspace = true }
 ktypes.workspace = true
 kcpu = { workspace = true, optional = true }
+dice_driver = { workspace = true, optional = true }
 kerrno.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
