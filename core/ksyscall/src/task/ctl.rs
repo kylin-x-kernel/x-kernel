@@ -11,10 +11,10 @@
 
 use core::ffi::c_char;
 
-use kcore::task::{AsThread, get_process_data};
 use kerrno::{KError, KResult};
 use kservices::mm::vm_load_string;
 use ktask::current;
+use kthread::get_process_state;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
 
@@ -28,7 +28,7 @@ fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> KResult<()>
         header_ptr.write_vm(header)?;
         return Err(KError::InvalidInput);
     }
-    let _ = get_process_data(header.pid as u32)?;
+    let _ = get_process_state(header.pid as u32)?;
     Ok(())
 }
 
@@ -53,12 +53,6 @@ pub fn sys_capset(
     validate_cap_header(header)?;
 
     Ok(0)
-}
-
-pub fn sys_umask(mask: u32) -> KResult<isize> {
-    let curr = current();
-    let old = curr.as_thread().proc_data.replace_umask(mask);
-    Ok(old as isize)
 }
 
 pub fn sys_get_mempolicy(

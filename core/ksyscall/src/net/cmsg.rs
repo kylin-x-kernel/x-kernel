@@ -12,14 +12,13 @@ use core::{mem::size_of, net::SocketAddr, ptr};
 
 use bytemuck::{NoUninit, bytes_of};
 use kerrno::{KError, KResult, LinuxError};
+use kfd::FileLike;
 use knet::UdpRecvError;
 use kservices::mm::{UserConstPtr, UserPtr};
 use linux_raw_sys::net::{
     AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
     sockaddr_in,
 };
-
-use crate::file::{FileLike, get_file_like};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -121,7 +120,7 @@ pub enum CMsg {
 }
 impl CMsg {
     /// Parse a control message header and extract its data
-    pub fn parse(hdr: &cmsghdr) -> KResult<Self> {
+    pub fn parse(resources: &kthread::ProcessResources, hdr: &cmsghdr) -> KResult<Self> {
         if hdr.cmsg_len < size_of::<cmsghdr>() {
             return Err(KError::InvalidInput);
         }
@@ -140,7 +139,7 @@ impl CMsg {
                     if fd < 0 {
                         return Err(KError::BadFileDescriptor);
                     }
-                    let f = get_file_like(fd)?;
+                    let f = resources.get_file_like(fd)?;
                     fds.push(f);
                 }
                 Self::Rights { fds }

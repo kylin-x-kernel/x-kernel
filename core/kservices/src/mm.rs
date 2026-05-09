@@ -13,14 +13,15 @@ use core::{
     ptr, slice, str,
 };
 
-use kcore::{mm::access_user_memory, task::AsThread};
+use kcore::mm::access_user_memory;
 use kerrno::{KError, KResult};
 use khal::{
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},
 };
 use kio::prelude::*;
-use ktask::{current, current_may_uninit};
+use ktask::current_may_uninit;
+use kthread::AsThread;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use osvm::{load_vec, load_vec_until_null, read_vm_mem, write_vm_mem};
 
@@ -31,8 +32,8 @@ fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> 
         return Err(KError::BadAddress);
     }
 
-    let curr = current();
-    let mut aspace = curr.as_thread().proc_data.aspace.lock();
+    let current_thread = kthread::current_thread();
+    let mut aspace = current_thread.process_state().address_space().lock();
 
     if !aspace.can_access_range(start, layout.size(), access_flags) {
         return Err(KError::BadAddress);
@@ -75,8 +76,8 @@ fn check_null_terminated<T: PartialEq + Default>(
                 // TODO: this is inefficient, but we have to do this instead of
                 // querying the page table since the page might has not been
                 // allocated yet.
-                let curr = current();
-                let aspace = curr.as_thread().proc_data.aspace.lock();
+                let current_thread = kthread::current_thread();
+                let aspace = current_thread.process_state().address_space().lock();
                 if !aspace.can_access_range(page, PAGE_SIZE_4K, access_flags) {
                     return Err(KError::BadAddress);
                 }
@@ -269,8 +270,8 @@ fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool 
         return false;
     }
 
-    thr.proc_data
-        .aspace
+    thr.proc_state
+        .address_space()
         .lock()
         .dispatch_irq_page_fault(vaddr, access_flags)
 }

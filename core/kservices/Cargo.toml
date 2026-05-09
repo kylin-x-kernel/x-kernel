@@ -22,6 +22,7 @@ dice = [
 ]
 tee = [
 	"dep:tee_kernel",
+	"kthread/tee",
 	"procfs/tee",
 ]
 
@@ -33,9 +34,11 @@ unittest_support.workspace = true
 mbedtls = { workspace = true, optional = true }
 dice_driver = { workspace = true, optional = true }
 fbdevice.workspace = true
+kfd.workspace = true
 kdriver.workspace = true
 ktypes.workspace = true
 kerrno.workspace = true
+kbuild_config.workspace = true
 fs-ng-vfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
@@ -53,7 +56,6 @@ bitmaps = { version = "3.2.1", default-features = false }
 bytemuck.workspace = true
 lazyinit.workspace = true
 chrono = { version = "0.4.41", default-features = false }
-downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
 flatten_objects = "0.2.4"
 gimli = { version = "*", default-features = false, optional = true }
 hashbrown = { workspace = true }
@@ -68,9 +70,9 @@ rand = { version = "0.9.1", default-features = false, features = [
 ] }
 rand_chacha = { version = "0.3", default-features = false, optional = true }
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
-scope-local.workspace = true
 slab.workspace = true
 kprocess.workspace = true
+kthread.workspace = true
 ksignal.workspace = true
 osvm.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }

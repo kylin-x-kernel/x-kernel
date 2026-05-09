@@ -18,8 +18,8 @@ mod select;
 use alloc::{sync::Arc, vec::Vec};
 use core::task::Context;
 
+use kfd::FileLike;
 use kpoll::{IoEvents, Pollable};
-use kservices::file::FileLike;
 
 pub use self::{epoll::*, poll::*, select::*};
 

@@ -8,4 +8,7 @@ mod fs;
 
 pub use file::*;
 // Re-export the wrapper FsContext for backward compatibility
-pub use fs::{FS_CONTEXT, FsContext, ROOT_FS_CONTEXT, ReadDir, ReadDirEntry};
+pub use fs::{
+    FsContext, KERNEL_FS_CONTEXT, ROOT_FS_CONTEXT, ReadDir, ReadDirEntry, kernel_fs_context,
+    new_process_fs_context,
+};

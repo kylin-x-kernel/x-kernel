@@ -9,17 +9,15 @@
 //! - Time queries (gettimeofday, gettime, etc.)
 //! - Timer management (setitimer, getitimer, timer_*, etc.)
 //! - Time conversions and utilities
-use kcore::{task::AsThread, time::ITimerType};
 use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time, monotonic_time_nanos, ns2t, wall_time};
-use ktask::current;
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
     CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
     CLOCK_THREAD_CPUTIME_ID, itimerval, timespec, timeval,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use posix_types::TimeValueLike;
+use posix_types::{ITimerType, TimeValueLike};
 
 /// Get the current time from the specified clock
 pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KResult<isize> {
@@ -29,7 +27,7 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KRe
             monotonic_time()
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            let (utime, stime) = current().as_thread().time.borrow().output();
+            let (utime, stime) = kthread::current_thread().time.borrow().output();
             utime + stime
         }
         _ => {
@@ -73,7 +71,7 @@ pub struct Tms {
 
 /// Get timing information including user and system CPU time
 pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
-    let (utime, stime) = current().as_thread().time.borrow().output();
+    let (utime, stime) = kthread::current_thread().time.borrow().output();
     let utime = utime.as_micros() as usize;
     let stime = stime.as_micros() as usize;
     tms.write_vm(Tms {
@@ -88,7 +86,7 @@ pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
 /// Get the current value of a timer
 pub fn sys_getitimer(which: i32, value: *mut itimerval) -> KResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
-    let (it_interval, it_value) = current().as_thread().time.borrow().get_itimer(ty);
+    let (it_interval, it_value) = kthread::current_thread().time.borrow().get_itimer(ty);
 
     value.write_vm(itimerval {
         it_interval: timeval::from_time_value(it_interval),
@@ -104,7 +102,6 @@ pub fn sys_setitimer(
     old_value: *mut itimerval,
 ) -> KResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
-    let curr = current();
 
     let (interval, remained) = match new_value.check_non_null() {
         Some(new_value) => {
@@ -121,8 +118,7 @@ pub fn sys_setitimer(
 
     debug!("sys_setitimer <= type: {ty:?}, interval: {interval:?}, remained: {remained:?}");
 
-    let old = curr
-        .as_thread()
+    let old = kthread::current_thread()
         .time
         .borrow_mut()
         .set_itimer(ty, interval, remained);

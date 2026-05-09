@@ -8,15 +8,17 @@ use alloc::{borrow::Cow, format, sync::Arc};
 use core::{ffi::c_int, ops::Deref, task::Context};
 
 use kerrno::{KError, KResult};
+use kfd::FdTable;
 use knet::{
     SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
 use kpoll::{IoEvents, Pollable};
+use ksync::RwLock;
 use linux_raw_sys::general::{O_RDWR, S_IFSOCK};
 
 use super::{FileLike, Kstat};
-use crate::file::{IoDst, IoSrc, get_file_like};
+use crate::file::{IoDst, IoSrc};
 
 /// Socket wrapper providing file-like interface for network sockets.
 ///
@@ -79,11 +81,13 @@ impl FileLike for Socket {
     }
 
     /// Converts a file descriptor to a socket reference.
-    fn from_fd(fd: c_int) -> KResult<Arc<Self>>
+    fn from_fd(fd_table: &RwLock<FdTable>, fd: c_int) -> KResult<Arc<Self>>
     where
         Self: Sized + 'static,
     {
-        get_file_like(fd)?
+        fd_table
+            .read()
+            .get_file_like(fd)?
             .downcast_arc()
             .map_err(|_| KError::NotASocket)
     }

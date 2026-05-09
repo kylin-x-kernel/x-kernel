@@ -18,6 +18,7 @@ kdriver = { workspace = true, features = ["net"] }
 khal = { workspace = true }
 ksync = { workspace = true }
 ktask = { workspace = true }
+kthread = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
 fs-ng-vfs = { workspace = true }

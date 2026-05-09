@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Time management module.
+//! Process-side timer runtime.
+
+#![no_std]
+
+extern crate alloc;
 
 use alloc::{borrow::ToOwned, collections::binary_heap::BinaryHeap, sync::Arc};
 use core::{mem, time::Duration};
@@ -12,13 +16,12 @@ use khal::time::{NANOS_PER_SEC, TimeValue, monotonic_time, monotonic_time_nanos}
 use ksignal::Signo;
 use ksync::Mutex;
 use ktask::{
-    WeakKtaskRef, current,
+    TaskInner, WeakKtaskRef, current,
     future::{block_on, timeout_at},
 };
+use ktypes::Once;
 use lazy_static::lazy_static;
-use strum::FromRepr;
-
-use crate::task::poll_timer;
+use posix_types::ITimerType;
 
 fn time_value_from_nanos(nanos: usize) -> TimeValue {
     let secs = nanos as u64 / NANOS_PER_SEC;
@@ -30,17 +33,21 @@ struct Entry {
     deadline: Duration,
     task: WeakKtaskRef,
 }
+
 impl PartialEq for Entry {
     fn eq(&self, other: &Self) -> bool {
         self.deadline == other.deadline
     }
 }
+
 impl Eq for Entry {}
+
 impl PartialOrd for Entry {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
+
 impl Ord for Entry {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         other.deadline.cmp(&self.deadline)
@@ -49,66 +56,52 @@ impl Ord for Entry {
 
 lazy_static! {
     static ref ALARM_LIST: Mutex<BinaryHeap<Entry>> = Mutex::new(BinaryHeap::new());
-    static ref EVENT_NEW_TIMER: Event = Event::new();
 }
 
-/// The type of interval timer.
-#[repr(i32)]
-#[allow(non_camel_case_types)]
-#[derive(Eq, PartialEq, Debug, Clone, Copy, FromRepr)]
-pub enum ITimerType {
-    /// 统计系统实际运行时间
-    Real    = 0,
-    /// 统计用户态运行时间
-    Virtual = 1,
-    /// 统计进程的所有用户态/内核态运行时间
-    Prof    = 2,
-}
+static EVENT_NEW_TIMER: Event = Event::new();
+static EXPIRED_TASK_HANDLER: Once<fn(&TaskInner)> = Once::new();
 
-impl ITimerType {
-    /// Returns the signal number associated with this timer type.
-    pub fn signo(&self) -> Signo {
-        match self {
-            ITimerType::Real => Signo::SIGALRM,
-            ITimerType::Virtual => Signo::SIGVTALRM,
-            ITimerType::Prof => Signo::SIGPROF,
-        }
+fn timer_signal(ty: ITimerType) -> Signo {
+    match ty {
+        ITimerType::Real => Signo::SIGALRM,
+        ITimerType::Virtual => Signo::SIGVTALRM,
+        ITimerType::Prof => Signo::SIGPROF,
     }
 }
 
 #[derive(Default)]
 struct ITimer {
     interval_ns: usize,
-    remained_ns: usize,
+    remaining_ns: usize,
 }
 
 impl ITimer {
-    pub fn new(interval_ns: usize, remained_ns: usize) -> Self {
+    fn new(interval_ns: usize, remaining_ns: usize) -> Self {
         let result = Self {
             interval_ns,
-            remained_ns,
+            remaining_ns,
         };
         result.renew_timer();
         result
     }
 
-    pub fn update(&mut self, delta: usize) -> bool {
-        if self.remained_ns == 0 {
+    fn update(&mut self, delta: usize) -> bool {
+        if self.remaining_ns == 0 {
             return false;
         }
-        if self.remained_ns > delta {
-            self.remained_ns -= delta;
+        if self.remaining_ns > delta {
+            self.remaining_ns -= delta;
             false
         } else {
-            self.remained_ns = self.interval_ns;
+            self.remaining_ns = self.interval_ns;
             self.renew_timer();
             true
         }
     }
 
-    pub fn renew_timer(&self) {
-        if self.remained_ns > 0 {
-            let deadline = monotonic_time() + Duration::from_nanos(self.remained_ns as u64);
+    fn renew_timer(&self) {
+        if self.remaining_ns > 0 {
+            let deadline = monotonic_time() + Duration::from_nanos(self.remaining_ns as u64);
             let mut guard = ALARM_LIST.lock();
             let should_wake = guard.peek().is_none_or(|it| it.deadline > deadline);
             guard.push(Entry {
@@ -134,8 +127,7 @@ pub enum TimerState {
     Kernel,
 }
 
-// TODO(mivik): preempting does not change the timer state currently
-/// A manager for time-related operations.
+/// A manager for per-thread timer and CPU-time accounting.
 pub struct TimeManager {
     utime_ns: usize,
     stime_ns: usize,
@@ -151,7 +143,8 @@ impl Default for TimeManager {
 }
 
 impl TimeManager {
-    pub(crate) fn new() -> Self {
+    /// Creates a new [`TimeManager`].
+    pub fn new() -> Self {
         Self {
             utime_ns: 0,
             stime_ns: 0,
@@ -168,8 +161,7 @@ impl TimeManager {
         (utime, stime)
     }
 
-    /// Polls the time manager to update the timers and emit signals if
-    /// necessary.
+    /// Polls the time manager to update timers and emit signals if necessary.
     pub fn poll(&mut self, emitter: impl Fn(Signo)) {
         let now_ns = monotonic_time_nanos() as usize;
         let delta = now_ns - self.last_wall_ns;
@@ -200,15 +192,15 @@ impl TimeManager {
         &mut self,
         ty: ITimerType,
         interval_ns: usize,
-        remained_ns: usize,
+        remaining_ns: usize,
     ) -> (TimeValue, TimeValue) {
         let old = mem::replace(
             &mut self.itimers[ty as usize],
-            ITimer::new(interval_ns, remained_ns),
+            ITimer::new(interval_ns, remaining_ns),
         );
         (
             time_value_from_nanos(old.interval_ns),
-            time_value_from_nanos(old.remained_ns),
+            time_value_from_nanos(old.remaining_ns),
         )
     }
 
@@ -217,15 +209,20 @@ impl TimeManager {
         let itimer = &self.itimers[ty as usize];
         (
             time_value_from_nanos(itimer.interval_ns),
-            time_value_from_nanos(itimer.remained_ns),
+            time_value_from_nanos(itimer.remaining_ns),
         )
     }
 
     fn update_itimer(&mut self, ty: ITimerType, delta: usize, emitter: impl Fn(Signo)) {
         if self.itimers[ty as usize].update(delta) {
-            emitter(ty.signo());
+            emitter(timer_signal(ty));
         }
     }
+}
+
+/// Registers the callback used to handle expired timer tasks.
+pub fn register_expired_task_handler(handler: fn(&TaskInner)) {
+    EXPIRED_TASK_HANDLER.call_once(|| handler);
 }
 
 async fn alarm_task() {
@@ -246,19 +243,16 @@ async fn alarm_task() {
 
         let now = monotonic_time();
         if deadline <= now {
-            // 任务已到期，执行它
-            if let Some(task) = task_weak.upgrade() {
-                poll_timer(&task);
+            if let Some(task) = task_weak.upgrade()
+                && let Some(handler) = EXPIRED_TASK_HANDLER.get()
+            {
+                handler(&task);
             }
 
-            // 从队列中移除
             let mut guard = ALARM_LIST.lock();
             assert!(guard.pop().is_some_and(|it| it.deadline == deadline));
         } else {
-            // 任务未到期，等待到 deadline 或新任务插入
             listener!(EVENT_NEW_TIMER => listener);
-
-            // 检查队列头是否还是同一个任务
             if ALARM_LIST
                 .lock()
                 .peek()
@@ -281,35 +275,25 @@ pub fn spawn_alarm_task() {
     );
 }
 
-/// Unit tests.
 #[cfg(unittest)]
-pub mod tests_time {
+mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
     use ksignal::Signo;
+    use posix_types::ITimerType;
     use unittest::def_test;
 
-    use super::{ITimerType, TimeManager};
-
     #[def_test]
-    fn test_itimer_signo() {
-        assert_eq!(ITimerType::Real.signo(), Signo::SIGALRM);
-        assert_eq!(ITimerType::Virtual.signo(), Signo::SIGVTALRM);
-        assert_eq!(ITimerType::Prof.signo(), Signo::SIGPROF);
-    }
-
-    #[def_test]
-    fn test_itimer_from_repr() {
-        assert_eq!(ITimerType::from_repr(0), Some(ITimerType::Real));
-        assert_eq!(ITimerType::from_repr(1), Some(ITimerType::Virtual));
-        assert_eq!(ITimerType::from_repr(2), Some(ITimerType::Prof));
-        assert_eq!(ITimerType::from_repr(3), None);
+    fn test_timer_signal_mapping() {
+        assert_eq!(super::timer_signal(ITimerType::Real), Signo::SIGALRM);
+        assert_eq!(super::timer_signal(ITimerType::Virtual), Signo::SIGVTALRM);
+        assert_eq!(super::timer_signal(ITimerType::Prof), Signo::SIGPROF);
     }
 
     #[def_test]
     fn test_timemanager_default_output() {
-        let tm = TimeManager::new();
+        let tm = super::TimeManager::new();
         let (u, s) = tm.output();
         assert_eq!(u.as_secs(), 0);
         assert_eq!(u.subsec_nanos(), 0);
@@ -340,7 +324,7 @@ pub mod tests_time {
 
     #[def_test]
     fn test_timemanager_get_itimer_default() {
-        let tm = TimeManager::new();
+        let tm = super::TimeManager::new();
         for ty in [ITimerType::Real, ITimerType::Virtual, ITimerType::Prof] {
             let (interval, remained) = tm.get_itimer(ty);
             assert_eq!(interval.as_secs(), 0);
@@ -350,7 +334,7 @@ pub mod tests_time {
 
     #[def_test]
     fn test_timemanager_set_state() {
-        let mut tm = TimeManager::new();
+        let mut tm = super::TimeManager::new();
         tm.set_state(super::TimerState::User);
         tm.set_state(super::TimerState::Kernel);
         tm.set_state(super::TimerState::None);
@@ -369,25 +353,25 @@ pub mod tests_time {
     fn test_itimer_update_counts_down_without_firing() {
         let mut timer = super::ITimer {
             interval_ns: 0,
-            remained_ns: 10,
+            remaining_ns: 10,
         };
         assert!(!timer.update(3));
-        assert_eq!(timer.remained_ns, 7);
+        assert_eq!(timer.remaining_ns, 7);
     }
 
     #[def_test]
     fn test_itimer_update_fires_and_resets_to_interval() {
         let mut timer = super::ITimer {
             interval_ns: 0,
-            remained_ns: 5,
+            remaining_ns: 5,
         };
         assert!(timer.update(5));
-        assert_eq!(timer.remained_ns, 0);
+        assert_eq!(timer.remaining_ns, 0);
     }
 
     #[def_test]
     fn test_timemanager_set_itimer_returns_previous_values() {
-        let mut tm = TimeManager::new();
+        let mut tm = super::TimeManager::new();
 
         let (old_interval, old_remained) = tm.set_itimer(ITimerType::Real, 11, 22);
         assert_eq!(old_interval.as_secs(), 0);
@@ -404,10 +388,10 @@ pub mod tests_time {
 
     #[def_test]
     fn test_timemanager_update_itimer_emits_signal_on_expiration() {
-        let mut tm = TimeManager::new();
+        let mut tm = super::TimeManager::new();
         tm.itimers[ITimerType::Real as usize] = super::ITimer {
             interval_ns: 0,
-            remained_ns: 1,
+            remaining_ns: 1,
         };
 
         let emitted = RefCell::new(Vec::new());
@@ -422,10 +406,10 @@ pub mod tests_time {
 
     #[def_test]
     fn test_timemanager_update_itimer_no_emit_before_expiration() {
-        let mut tm = TimeManager::new();
+        let mut tm = super::TimeManager::new();
         tm.itimers[ITimerType::Prof as usize] = super::ITimer {
             interval_ns: 0,
-            remained_ns: 10,
+            remaining_ns: 10,
         };
 
         let emitted = RefCell::new(Vec::new());

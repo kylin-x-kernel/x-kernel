@@ -13,14 +13,16 @@ vsock = ["knet/vsock", "kservices/vsock"]
 tee = [
     "dep:tee_kernel",
     "dep:tee_task_iface",
+    "kthread/tee",
     "kservices/tee",
 ]
 
 [dependencies]
+kaddr_layout.workspace = true
+kfd.workspace = true
 kservices = { workspace = true }
 kbuild_config = { workspace = true }
 kerrno.workspace = true
-kfs.workspace = true
 khal.workspace = true
 kio.workspace = true
 klogger.workspace = true
@@ -32,7 +34,9 @@ bytemuck.workspace = true
 kspin.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 kprocess.workspace = true
+kthread.workspace = true
 ksignal.workspace = true
+ksync.workspace = true
 osvm.workspace = true
 linux_sysno.workspace = true
 tee_kernel = { workspace = true, optional = true }
@@ -42,7 +46,10 @@ posix-credentials.workspace = true
 posix-fs.workspace = true
 posix-ipc.workspace = true
 posix-mm.workspace = true
+posix-process.workspace = true
 posix-sched.workspace = true
+posix-signal.workspace = true
+posix-sync.workspace = true
 posix-types.workspace = true
 num_enum = { version = "0.7", default-features = false }
 

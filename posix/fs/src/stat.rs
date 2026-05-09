@@ -8,8 +8,8 @@ use core::ffi::{c_char, c_int};
 
 use fs_ng_vfs::{Location, NodePermission};
 use kerrno::{KError, KResult};
-use kfs::FS_CONTEXT;
-use kservices::file::{File, FileLike};
+use kservices::file::File;
+use kthread::current_process_state;
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
 };
@@ -146,7 +146,8 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
     debug!("sys_statfs <= path: {path:?}");
 
     buf.write_vm(statfs(
-        &FS_CONTEXT
+        &current_process_state()
+            .fs_context()
             .lock()
             .resolve(path)?
             .mountpoint()
@@ -159,6 +160,8 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
 pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     debug!("sys_fstatfs <= fd: {fd}");
 
-    buf.write_vm(statfs(File::from_fd(fd)?.inner().location())?)?;
+    let proc_state = current_process_state();
+    let file = proc_state.resources.get_file_like_as::<File>(fd)?;
+    buf.write_vm(statfs(file.inner().location())?)?;
     Ok(0)
 }

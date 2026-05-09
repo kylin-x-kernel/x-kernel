@@ -6,15 +6,12 @@
 
 use alloc::sync::Arc;
 
-use kcore::{
-    task::AsThread,
-    vfs::{Device, DeviceMmap},
-};
+use kcore::vfs::{Device, DeviceMmap};
 use kerrno::{KError, KResult};
 use kfs::{CachedFile, FileBackend};
 use khal::paging::{MappingFlags, PageSize};
-use kservices::file::{File, FileLike};
-use ktask::current;
+use kservices::file::File;
+use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::backend::{Backend, SharedPages};
@@ -105,8 +102,8 @@ pub fn sys_mmap(
         return Err(KError::InvalidInput);
     }
 
-    let curr = current();
-    let mut aspace = curr.as_thread().proc_data.aspace.lock();
+    let proc_state = current_process_state();
+    let mut aspace = proc_state.address_space().lock();
     let permission_flags = MmapProt::from_bits_truncate(prot);
     // TODO: check illegal flags for mmap
     let map_flags = match MmapFlags::from_bits(flags) {
@@ -179,7 +176,7 @@ pub fn sys_mmap(
     };
 
     let file = if fd > 0 {
-        Some(File::from_fd(fd)?)
+        Some(proc_state.resources.get_file_like_as::<File>(fd)?)
     } else {
         None
     };
@@ -197,7 +194,7 @@ pub fn sys_mmap(
                             cache,
                             file.flags(),
                             offset,
-                            &curr.as_thread().proc_data.aspace,
+                            proc_state.address_space(),
                         )
                     }
                     FileBackend::Direct(loc) => {
@@ -224,7 +221,7 @@ pub fn sys_mmap(
                                     cache,
                                     file.flags(),
                                     offset,
-                                    &curr.as_thread().proc_data.aspace,
+                                    proc_state.address_space(),
                                 ),
                             }
                         } else {
@@ -234,7 +231,7 @@ pub fn sys_mmap(
                                 CachedFile::get_or_create(loc.clone()),
                                 file.flags(),
                                 offset,
-                                &curr.as_thread().proc_data.aspace,
+                                proc_state.address_space(),
                             )
                         }
                     }
@@ -263,8 +260,8 @@ pub fn sys_mmap(
 
 pub fn sys_munmap(addr: usize, length: usize) -> KResult<isize> {
     debug!("sys_munmap <= addr: {addr:#x}, length: {length:x}");
-    let curr = current();
-    let mut aspace = curr.as_thread().proc_data.aspace.lock();
+    let proc_state = current_process_state();
+    let mut aspace = proc_state.address_space().lock();
     let length = align_up_4k(length);
     let start_addr = VirtAddr::from(addr);
     aspace.unmap(start_addr, length)?;
@@ -282,8 +279,8 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let curr = current();
-    let mut aspace = curr.as_thread().proc_data.aspace.lock();
+    let proc_state = current_process_state();
+    let mut aspace = proc_state.address_space().lock();
     let length = align_up_4k(length);
     let start_addr = VirtAddr::from(addr);
     aspace.protect(start_addr, length, permission_flags.into())?;
@@ -304,8 +301,8 @@ pub fn sys_mremap(addr: usize, old_size: usize, new_size: usize, flags: u32) -> 
     }
     let addr = VirtAddr::from(addr);
 
-    let curr = current();
-    let aspace = curr.as_thread().proc_data.aspace.lock();
+    let proc_state = current_process_state();
+    let aspace = proc_state.address_space().lock();
     let old_size = align_up_4k(old_size);
     let new_size = align_up_4k(new_size);
 

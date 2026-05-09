@@ -14,25 +14,31 @@ use core::{
 
 use fs_ng_vfs::{Location, Metadata, NodeFlags};
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, FsContext};
+use kfd::FdTable;
+use kfs::FsContext;
 use kpoll::{IoEvents, Pollable};
-use ksync::Mutex;
+use ksync::{Mutex, RwLock};
 use ktask::future::{block_on, poll_io};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
-use super::{FileLike, Kstat, get_file_like};
+use super::{FileLike, Kstat};
 use crate::file::{IoDst, IoSrc};
 
 /// Executes a function with the file system context for the given directory file descriptor.
 ///
+/// This helper intentionally uses `kthread::current_fs_context()` because it is
+/// shared by both syscall paths and kernel-service callers.
+///
 /// If `dirfd` is `AT_FDCWD`, uses the current directory context.
 /// Otherwise, resolves the directory from the given file descriptor and uses it as the base.
 pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
-    let mut fs = FS_CONTEXT.lock();
+    let fs_context = kthread::current_fs_context();
+    let mut fs = fs_context.lock();
     if dirfd == AT_FDCWD {
         f(&mut fs)
     } else {
-        let dir = Directory::from_fd(dirfd)?.inner.clone();
+        let dir = kthread::current_resources().get_file_like_as::<Directory>(dirfd)?;
+        let dir = dir.inner.clone();
         f(&mut fs.with_current_dir(dir)?)
     }
 }
@@ -75,7 +81,7 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
             if flags & AT_EMPTY_PATH == 0 {
                 return Err(KError::NotFound);
             }
-            let file_like = get_file_like(dirfd)?;
+            let file_like = kthread::current_resources().get_file_like(dirfd)?;
             let f = file_like.clone();
             Ok(if let Some(file) = f.downcast_ref::<File>() {
                 ResolveAtResult::File(file.inner().backend()?.location().clone())
@@ -212,17 +218,21 @@ impl FileLike for File {
     }
 
     /// Converts a file descriptor to a file reference.
-    fn from_fd(fd: c_int) -> KResult<Arc<Self>>
+    fn from_fd(fd_table: &RwLock<FdTable>, fd: c_int) -> KResult<Arc<Self>>
     where
         Self: Sized + 'static,
     {
-        get_file_like(fd)?.downcast_arc().map_err(|any| {
-            if any.is::<Directory>() {
-                KError::IsADirectory
-            } else {
-                KError::BrokenPipe
-            }
-        })
+        fd_table
+            .read()
+            .get_file_like(fd)?
+            .downcast_arc()
+            .map_err(|any| {
+                if any.is::<Directory>() {
+                    KError::IsADirectory
+                } else {
+                    KError::BrokenPipe
+                }
+            })
     }
 }
 impl Pollable for File {
@@ -283,8 +293,10 @@ impl FileLike for Directory {
     }
 
     /// Converts a file descriptor to a directory reference.
-    fn from_fd(fd: c_int) -> KResult<Arc<Self>> {
-        get_file_like(fd)?
+    fn from_fd(fd_table: &RwLock<FdTable>, fd: c_int) -> KResult<Arc<Self>> {
+        fd_table
+            .read()
+            .get_file_like(fd)?
             .downcast_arc()
             .map_err(|_| KError::NotADirectory)
     }

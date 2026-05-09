@@ -22,7 +22,7 @@ use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
 
-use crate::file::{FileLike, get_file_like};
+use crate::file::FileLike;
 
 pub struct EpollEvent {
     /// Interested I/O events.
@@ -105,8 +105,8 @@ struct EntryKey {
     file: Weak<dyn FileLike>,
 }
 impl EntryKey {
-    fn new(fd: i32) -> KResult<Self> {
-        let file = get_file_like(fd)?;
+    fn new_for_current(fd: i32) -> KResult<Self> {
+        let file = kthread::current_resources().get_file_like(fd)?;
         Ok(Self {
             fd,
             file: Arc::downgrade(&file),
@@ -317,7 +317,7 @@ impl Epoll {
 
     /// Adds a file descriptor interest to the epoll instance.
     pub fn add(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
-        let key = EntryKey::new(fd)?;
+        let key = EntryKey::new_for_current(fd)?;
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
         let mut guard = self.inner.interests.lock();
         if guard.contains_key(&key) {
@@ -332,7 +332,7 @@ impl Epoll {
 
     /// Modifies an existing interest for the given file descriptor.
     pub fn modify(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
-        let key = EntryKey::new(fd)?;
+        let key = EntryKey::new_for_current(fd)?;
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
 
         let mut guard = self.inner.interests.lock();
@@ -355,7 +355,7 @@ impl Epoll {
 
     /// Removes an existing interest for the given file descriptor.
     pub fn delete(&self, fd: i32) -> KResult<()> {
-        let key = EntryKey::new(fd)?;
+        let key = EntryKey::new_for_current(fd)?;
         self.inner
             .interests
             .lock()
@@ -603,14 +603,14 @@ mod epoll_tests {
         assert_eq!(result, Err(KError::WouldBlock));
     }
 
-    #[def_test]
+    #[def_test(custom)]
     fn test_epoll_delete_nonexistent() {
         let epoll = Epoll::new();
         let result = epoll.delete(999);
         assert!(result.is_err());
     }
 
-    #[def_test]
+    #[def_test(custom)]
     fn test_epoll_modify_nonexistent() {
         let epoll = Epoll::new();
         let event = EpollEvent {

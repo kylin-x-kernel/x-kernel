@@ -10,7 +10,8 @@
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kservices::file::{FileLike, add_file_like, event::EventFd};
+use kfd::FileLike;
+use kservices::file::event::EventFd;
 use linux_raw_sys::general::{EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
 
 bitflags! {
@@ -34,5 +35,7 @@ pub fn sys_eventfd2(initval: u32, flags: u32) -> KResult<isize> {
 
     let event_fd = EventFd::new(initval as _, flags.contains(EventFdFlags::SEMAPHORE));
     event_fd.set_nonblocking(flags.contains(EventFdFlags::NONBLOCK))?;
-    add_file_like(event_fd as _, flags.contains(EventFdFlags::CLOEXEC)).map(|fd| fd as _)
+    kthread::current_resources()
+        .add_file_like(event_fd as _, flags.contains(EventFdFlags::CLOEXEC))
+        .map(|fd| fd as _)
 }

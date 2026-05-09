@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Time-related POSIX type conversions.
+//! ABI-facing time structure conversions.
 
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;

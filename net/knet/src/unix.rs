@@ -14,7 +14,7 @@ use enum_dispatch::enum_dispatch;
 use fs_ng_vfs::NodeType;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, OpenOptions};
+use kfs::OpenOptions;
 use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
@@ -99,7 +99,9 @@ pub(crate) fn lookup_bind_entry<R>(
             }
         }
         UnixAddr::Path(path) => {
-            let loc = FS_CONTEXT.lock().resolve(path.as_ref())?;
+            let loc = kthread::current_fs_context()
+                .lock()
+                .resolve(path.as_ref())?;
             if loc.metadata()?.node_type != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
@@ -126,7 +128,7 @@ fn lookup_or_create_bind_entry<R>(
                 .write(true)
                 .create(true)
                 .node_type(NodeType::Socket)
-                .open(&FS_CONTEXT.lock(), path.as_ref())?
+                .open(&kthread::current_fs_context().lock(), path.as_ref())?
                 .into_location();
             if loc.metadata()?.node_type != NodeType::Socket {
                 return Err(KError::NotASocket);

@@ -13,7 +13,6 @@ use alloc::{
 use core::{any::Any, ffi::c_uint, fmt::Debug, ptr};
 
 use ksync::{Mutex, RwLock};
-use scope_local::scope_local;
 use tee_raw_sys::{TEE_STORAGE_PRIVATE, *};
 
 use super::{
@@ -1185,19 +1184,18 @@ fn commit_dirh_writes(dirh: &mut TeeFsDirfileDirh) -> TeeResult {
     tee_fs_dirfile_commit_writes(dirh, None)
 }
 
-/// Process level directory handle cache
-/// Using scope_local! to implement, the directory handle will be automatically cleaned up when the process exits, solving the fd invalid problem
+/// Process-local directory handle cache.
+///
+/// The cache lives in the owning [`ProcessState`] instead of a global TEE map,
+/// so its lifetime matches the process lifetime and stale handles cannot leak
+/// across processes.
 ///
 /// Different from OP-TEE:
-/// - OP-TEE: ree_fs_dirh is a global variable in the TEE kernel, shared by multiple TAs
-/// - StarryOS: DIR_HANDLE_MANAGER is a process level variable, each process is independent
+/// - OP-TEE keeps `ree_fs_dirh` as a TEE-global object shared by multiple TAs.
+/// - X-Kernel keeps one cache per process.
 ///
-/// This design has the following advantages:
-/// 1. The fd and cache life cycle are consistent, and the cache will be automatically cleaned up when the process exits
-/// 2. No need to manually call reset
-/// 3. Code is more concise
-///
-/// TODO: multi-process support must be implemented
+/// This keeps the handle/cache lifecycle aligned with process exit and avoids a
+/// manual reset path.
 pub struct ReeFsDirh {
     /// Directory handle cache
     handle: Option<Box<TeeFsDirfileDirh>>,
@@ -1269,23 +1267,24 @@ impl Drop for ReeFsDirh {
     }
 }
 
-// 进程级目录句柄管理器
-// 使用 scope_local! 实现进程级存储，进程退出时自动清理
-// 使用 Arc<Mutex<...>> 与 TEE_FD_TABLE 的设计保持一致
-scope_local! {
-    /// 进程级目录句柄缓存
-    /// 使用 Arc<Mutex<...>> 保证线程安全，与 TEE_FD_TABLE 设计一致
-    pub static DIR_HANDLE_MANAGER: Arc<Mutex<ReeFsDirh>> = Arc::new(Mutex::new(ReeFsDirh::new()));
+type DirHandleManager = Arc<Mutex<ReeFsDirh>>;
+
+fn current_dir_handle_manager() -> TeeResult<DirHandleManager> {
+    kthread::current_process_state()
+        .get_or_init_tee_runtime_private(|| Mutex::new(ReeFsDirh::new()))
+        .map_err(|_| TEE_ERROR_GENERIC)
 }
 
 /// 获取目录句柄
 pub fn get_dirh() -> TeeResult<*mut TeeFsDirfileDirh> {
-    DIR_HANDLE_MANAGER.lock().get_dirh()
+    current_dir_handle_manager()?.lock().get_dirh()
 }
 
 /// 释放目录句柄引用
 pub fn put_dirh_primitive(close: bool) -> TeeResult {
-    DIR_HANDLE_MANAGER.lock().put_dirh_primitive(close)
+    current_dir_handle_manager()?
+        .lock()
+        .put_dirh_primitive(close)
 }
 
 /// 释放目录句柄

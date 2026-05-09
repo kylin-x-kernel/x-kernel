@@ -8,17 +8,15 @@ use alloc::{
     sync::Arc,
 };
 
-use kcore::{
-    mm::{copy_from_kernel, load_user_app, new_user_aspace_empty},
-    task::{ProcessData, Thread, add_task_to_table},
-};
+use kcore::mm::{copy_from_kernel, load_user_app, new_user_aspace_empty};
 use kcred::Credentials;
-use kfs::FS_CONTEXT;
+use kfs::{kernel_fs_context, new_process_fs_context};
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
-use kservices::{file::FD_TABLE, task::new_user_task, vfs::dev::tty::N_TTY};
+use kservices::{task::new_user_task, vfs::dev::tty::N_TTY};
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
+use kthread::{ProcessState, ProcessStateConfig, Thread, add_task_to_table};
 
 /// Create and run the init process with the given argv/envp.
 pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
@@ -29,7 +27,7 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
         })
         .expect("Failed to create user address space");
 
-    let loc = FS_CONTEXT
+    let loc = kernel_fs_context()
         .lock()
         .resolve(&args[0])
         .expect("Failed to resolve executable path");
@@ -53,21 +51,23 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
 
     N_TTY.bind_to(&proc).expect("Failed to bind ntty");
 
-    let proc_data = ProcessData::new(
+    let proc_state = ProcessState::new(
         proc,
         path.to_string(),
         Arc::new(args.to_vec()),
         Arc::new(Mutex::new(uspace)),
+        new_process_fs_context(),
         Arc::default(),
         None,
         Credentials::root(),
+        ProcessStateConfig::default(),
     );
     {
-        let mut scope = proc_data.scope.write();
-        kservices::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
+        let fs_context = proc_state.fs_context().lock();
+        kservices::file::add_stdio(&mut proc_state.resources.fd_table().write(), &fs_context)
             .expect("Failed to add stdio");
     }
-    let thr = Thread::new(pid, proc_data);
+    let thr = Thread::new(pid, proc_state);
 
     *task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
 

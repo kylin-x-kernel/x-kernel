@@ -24,10 +24,10 @@ use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::*;
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_signal::check_sigset_size;
 use posix_types::TimeValueLike;
 
 use super::FdPollSet;
-use crate::{file::FD_TABLE, signal::check_sigset_size};
 
 const FD_SETSIZE: usize = __FD_SETSIZE as usize;
 
@@ -146,7 +146,8 @@ fn do_select(
          {except_fds:?}] timeout: {timeout:?}"
     );
 
-    let fd_table = FD_TABLE.read();
+    let fd_table = kthread::current_process_state().resources.fd_table();
+    let fd_table = fd_table.read();
     let mut fds = Vec::with_capacity(nfds);
     let mut fd_indices = Vec::with_capacity(nfds);
     for fd in 0..nfds {
@@ -159,7 +160,7 @@ fn do_select(
         let f = fd_table
             .get(fd)
             .ok_or(KError::BadFileDescriptor)?
-            .inner
+            .inner()
             .clone();
         let mut events = IoEvents::empty();
         events.set(IoEvents::IN, is_read);

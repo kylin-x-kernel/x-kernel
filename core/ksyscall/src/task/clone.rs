@@ -14,22 +14,18 @@
 use alloc::sync::Arc;
 
 use bitflags::bitflags;
-use kcore::{
-    mm::copy_from_kernel,
-    task::{AsThread, ProcessData, Thread, add_task_to_table},
-};
+use kcore::mm::copy_from_kernel;
 use kerrno::{KError, KResult};
-use kfs::FS_CONTEXT;
+use kfd::{FdTable, FileLike};
 use khal::uspace::UserContext;
 use kprocess::Pid;
-use kservices::task::new_user_task;
+use kservices::{file::PidFd, task::new_user_task};
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};
+use kthread::{ProcessState, ProcessStateConfig, Thread, add_task_to_table};
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
-
-use crate::file::{FD_TABLE, FileLike, PidFd};
 
 bitflags! {
     /// Options for use with [`sys_clone`] and [`sys_clone3`].
@@ -218,7 +214,8 @@ impl CloneRequest {
         };
 
         let curr = current();
-        let old_proc_data = &curr.as_thread().proc_data;
+        let current_thread = kthread::current_thread();
+        let old_proc_data = current_thread.process_state();
 
         let mut new_task = new_user_task(
             &curr.name(),
@@ -233,9 +230,13 @@ impl CloneRequest {
         }
 
         let new_proc_data = if self.flags.contains(CloneFlags::THREAD) {
-            new_task
-                .ctx_mut()
-                .set_page_table_root(old_proc_data.aspace.lock().page_table_root().into());
+            new_task.ctx_mut().set_page_table_root(
+                old_proc_data
+                    .address_space()
+                    .lock()
+                    .page_table_root()
+                    .into(),
+            );
             old_proc_data.clone()
         } else {
             let proc = if self.flags.contains(CloneFlags::PARENT) {
@@ -246,9 +247,9 @@ impl CloneRequest {
             .fork(tid);
 
             let aspace = if self.flags.contains(CloneFlags::VM) {
-                old_proc_data.aspace.clone()
+                old_proc_data.address_space().clone()
             } else {
-                let mut aspace = old_proc_data.aspace.lock();
+                let mut aspace = old_proc_data.address_space().lock();
                 let aspace = aspace.try_clone()?;
                 copy_from_kernel(&mut aspace.lock())?;
                 aspace
@@ -262,48 +263,46 @@ impl CloneRequest {
             } else {
                 Arc::new(SpinNoIrq::new(old_proc_data.signal.actions.lock().clone()))
             };
-            let proc_data = ProcessData::new(
+            let fs_context = if self.flags.contains(CloneFlags::FS) {
+                old_proc_data.fs_context().clone()
+            } else {
+                Arc::new(ksync::Mutex::new(old_proc_data.fs_context().lock().clone()))
+            };
+            let proc_state = ProcessState::new(
                 proc,
-                old_proc_data.exe_path.read().clone(),
-                old_proc_data.cmdline.read().clone(),
+                old_proc_data.exe_path().read().clone(),
+                old_proc_data.cmdline().read().clone(),
                 aspace,
+                fs_context,
                 signal_actions,
                 exit_signal,
                 old_proc_data.credentials.read().clone(),
+                ProcessStateConfig::default(),
             );
-            proc_data.set_umask(old_proc_data.umask());
+            proc_state.set_umask(old_proc_data.umask());
             // Inherit heap pointers from parent to ensure child's heap state is consistent after fork
-            proc_data.set_heap_top(old_proc_data.get_heap_top());
+            proc_state.set_heap_top(old_proc_data.heap_top());
 
-            {
-                let mut scope = proc_data.scope.write();
-                if self.flags.contains(CloneFlags::FILES) {
-                    FD_TABLE.scope_mut(&mut scope).clone_from(&FD_TABLE);
-                } else {
-                    FD_TABLE
-                        .scope_mut(&mut scope)
-                        .write()
-                        .clone_from(&FD_TABLE.read());
-                }
-
-                if self.flags.contains(CloneFlags::FS) {
-                    FS_CONTEXT.scope_mut(&mut scope).clone_from(&FS_CONTEXT);
-                } else {
-                    FS_CONTEXT
-                        .scope_mut(&mut scope)
-                        .lock()
-                        .clone_from(&FS_CONTEXT.lock());
-                }
+            if self.flags.contains(CloneFlags::FILES) {
+                proc_state
+                    .resources
+                    .replace_fd_table(old_proc_data.resources.fd_table());
+            } else {
+                let fd_table = FdTable::clone_shared_from(&old_proc_data.resources.fd_table());
+                proc_state.resources.replace_fd_table(fd_table);
             }
 
-            proc_data
+            proc_state
         };
 
         new_proc_data.proc.add_thread(tid);
 
         if self.flags.contains(CloneFlags::PIDFD) {
             let pidfd = PidFd::new(&new_proc_data);
-            (self.pidfd as *mut i32).write_vm(pidfd.add_to_fd_table(true)?)?;
+            let fd_table = old_proc_data.resources.fd_table();
+            let max_nofile = old_proc_data.resources.max_nofile();
+            (self.pidfd as *mut i32)
+                .write_vm(pidfd.add_to_fd_table(&fd_table, max_nofile, true)?)?;
         }
 
         let thr = Thread::new(tid, new_proc_data);

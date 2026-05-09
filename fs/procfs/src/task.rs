@@ -14,19 +14,17 @@ use alloc::{
 use core::{ffi::CStr, iter, str};
 
 use fs_ng_vfs::{NodeType, VfsError, VfsResult};
+use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 #[cfg(feature = "tee")]
 use kcore::vfs::DirMapping;
-use kcore::{
-    config::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP},
-    task::{AsThread, TaskStat, get_process_data, get_task, processes},
-    vfs::{
-        NodeOpsMux, RwFile, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile,
-        SimpleFileOperation, SimpleFs,
-    },
+use kcore::vfs::{
+    NodeOpsMux, RwFile, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile,
+    SimpleFileOperation, SimpleFs,
 };
 use khal::paging::MappingFlags;
 use kprocess::Process;
 use ktask::{KtaskRef, WeakKtaskRef, current};
+use kthread::{AsThread, TaskStat, get_process_state, get_task, processes};
 use memaddr::VirtAddr;
 use memspace::backend::Backend;
 use memspace_file::{CowBackend, FileBackend};
@@ -58,7 +56,7 @@ impl SimpleDirOps for ProcessTaskDir {
         let process = self.process.upgrade().ok_or(VfsError::NotFound)?;
         let tid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
         let task = get_task(tid).map_err(|_| VfsError::NotFound)?;
-        if task.as_thread().proc_data.proc.pid() != process.pid() {
+        if task.as_thread().proc_state.proc.pid() != process.pid() {
             return Err(VfsError::NotFound);
         }
 
@@ -81,7 +79,7 @@ fn task_status(task: &KtaskRef) -> String {
         Cpus_allowed_list:\t0\n\
         Mems_allowed:\t1\n\
         Mems_allowed_list:\t0\n",
-        task.as_thread().proc_data.proc.pid(),
+        task.as_thread().proc_state.proc.pid(),
         task.id().as_u64()
     )
 }
@@ -253,9 +251,9 @@ impl SeqIterator for MapsIter {
             return;
         };
 
-        let proc_data = &task.as_thread().proc_data;
-        let heap_top = proc_data.get_heap_top();
-        let aspace = proc_data.aspace.lock();
+        let proc_state = &task.as_thread().proc_state;
+        let heap_top = proc_state.heap_top();
+        let aspace = proc_state.address_space().lock();
         for area in aspace.areas() {
             let start = area.start().as_usize();
             let end = area.end().as_usize();
@@ -457,7 +455,7 @@ impl SimpleDirOps for ThreadDir {
                 fs.clone(),
                 Arc::new(ProcessTaskDir {
                     fs,
-                    process: Arc::downgrade(&task.as_thread().proc_data.proc),
+                    process: Arc::downgrade(&task.as_thread().proc_state.proc),
                     hooks: self.hooks,
                 }),
             )
@@ -469,7 +467,7 @@ impl SimpleDirOps for ThreadDir {
             "cgroup" => SimpleFile::new_regular(fs.clone(), move || Ok("0::/\n")).into(),
             "ns" => SimpleDir::new_maker(fs.clone(), Arc::new(ThreadNsDir { fs })).into(),
             "cmdline" => SimpleFile::new_regular(fs, move || {
-                let cmdline = task.as_thread().proc_data.cmdline.read();
+                let cmdline = task.as_thread().proc_state.cmdline().read();
                 let mut buf = Vec::new();
                 for arg in cmdline.iter() {
                     buf.extend_from_slice(arg.as_bytes());
@@ -507,7 +505,7 @@ impl SimpleDirOps for ThreadDir {
             )
             .into(),
             "exe" => SimpleFile::new(fs, NodeType::Symlink, move || {
-                Ok(task.as_thread().proc_data.exe_path.read().clone())
+                Ok(task.as_thread().proc_state.exe_path().read().clone())
             })
             .into(),
             "fd" => SimpleDir::new_maker(
@@ -544,7 +542,7 @@ impl SimpleDirOps for ProcFsHandler {
         Box::new(
             processes()
                 .into_iter()
-                .map(|proc_data| Cow::Owned(proc_data.proc.pid().to_string()))
+                .map(|proc_state| Cow::Owned(proc_state.proc.pid().to_string()))
                 .chain([Cow::Borrowed("self")]),
         )
     }
@@ -554,8 +552,8 @@ impl SimpleDirOps for ProcFsHandler {
             current().clone()
         } else {
             let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-            let proc_data = get_process_data(pid).map_err(|_| VfsError::NotFound)?;
-            proc_data
+            let proc_state = get_process_state(pid).map_err(|_| VfsError::NotFound)?;
+            proc_state
                 .proc
                 .threads()
                 .into_iter()

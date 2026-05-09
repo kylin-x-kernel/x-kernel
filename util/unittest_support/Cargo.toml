@@ -10,10 +10,11 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+kaddr_layout.workspace = true
 kalloc.workspace = true
-kcore.workspace = true
 kerrno.workspace = true
 khal.workspace = true
+kthread.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 memaddr.workspace = true

@@ -142,6 +142,12 @@ config TASK_STACK_SIZE
     help
       Specify the stack size for each task in bytes.
 
+config KERNEL_STACK_SIZE
+    hex "Kernel Thread Stack Size (bytes)"
+    default 0x40000
+    help
+      Specify the stack size for kernel worker threads in bytes.
+
 config BOOT_STACK_SIZE
     hex "Boot Stack Size (bytes)"
     default 0x40000

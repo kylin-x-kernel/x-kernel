@@ -9,15 +9,11 @@ use core::{
     task::Context,
 };
 
-use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, SignalSet};
 use ksync::RwLock;
-use ktask::{
-    current,
-    future::{block_on, poll_io},
-};
+use ktask::future::{block_on, poll_io};
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::file::{FileLike, IoDst, IoSrc};
@@ -108,8 +104,7 @@ impl Signalfd {
     /// Check if there are any pending signals matching the mask
     fn has_pending_signals(&self) -> bool {
         let mask = self.mask();
-        let curr = current();
-        let signal = &curr.as_thread().signal;
+        let signal = &kthread::current_thread().signal;
         let pending = signal.pending();
         !(pending & mask).is_empty()
     }
@@ -117,8 +112,7 @@ impl Signalfd {
     /// Dequeue a signal matching the mask
     fn dequeue_signal(&self) -> Option<SignalInfo> {
         let mask = self.mask();
-        let curr = current();
-        let signal = &curr.as_thread().signal;
+        let signal = &kthread::current_thread().signal;
         signal.dequeue_signal(&mask)
     }
 }

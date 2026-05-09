@@ -6,15 +6,11 @@ use alloc::sync::{Arc, Weak};
 use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
 
 use fs_ng_vfs::NodeFlags;
-use kcore::{
-    task::AsThread,
-    vfs::{DeviceOps, SimpleFs},
-};
+use kcore::vfs::{DeviceOps, SimpleFs};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, Pollable};
 use kprocess::Process;
 use ksync::Mutex;
-use ktask::current;
 use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::terminal::{
@@ -134,10 +130,9 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
                 (arg as *mut u32).write_vm(foreground.pgid())?;
             }
             TIOCSPGRP => {
-                let curr = current();
                 self.terminal
                     .job_control
-                    .set_foreground(&curr.as_thread().proc_data.proc.group())?;
+                    .set_foreground(&kthread::current_thread().proc_state.proc.group())?;
             }
             TIOCGWINSZ => {
                 (arg as *mut WindowSize).write_vm(*self.terminal.window_size.lock())?;
@@ -153,12 +148,11 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
                 self.this
                     .upgrade()
                     .unwrap()
-                    .bind_to(&current().as_thread().proc_data.proc)?;
+                    .bind_to(&kthread::current_thread().proc_state.proc)?;
             }
             TIOCNOTTY => {
-                if current()
-                    .as_thread()
-                    .proc_data
+                if kthread::current_thread()
+                    .proc_state
                     .proc
                     .group()
                     .session()

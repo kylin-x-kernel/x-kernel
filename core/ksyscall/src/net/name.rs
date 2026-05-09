@@ -14,10 +14,7 @@ use knet::SocketOps;
 use kservices::mm::UserPtr;
 use linux_raw_sys::net::{sockaddr, socklen_t};
 
-use crate::{
-    file::{FileLike, Socket},
-    socket::SocketAddrExt,
-};
+use crate::{file::Socket, socket::SocketAddrExt};
 
 /// Get the local address bound to a socket
 pub fn sys_getsockname(
@@ -25,7 +22,7 @@ pub fn sys_getsockname(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let socket = Socket::from_fd(fd)?;
+    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     let local_addr = socket.local_addr()?;
     debug!("sys_getsockname <= fd: {fd}, addr: {local_addr:?}");
 
@@ -39,7 +36,7 @@ pub fn sys_getpeername(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let socket = Socket::from_fd(fd)?;
+    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     let peer_addr = socket.peer_addr()?;
     debug!("sys_getpeername <= fd: {fd}, addr: {peer_addr:?}");
 

@@ -4,20 +4,16 @@
 
 //! Heap management syscalls.
 
-use kcore::{
-    config::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX},
-    task::AsThread,
-};
+use kaddr_layout::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX};
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
-use ktask::current;
+use kthread::current_process_state;
 use memaddr::{VirtAddr, align_up_4k};
 use memspace_file::new_alloc;
 
 pub fn sys_brk(addr: usize) -> KResult<isize> {
-    let curr = current();
-    let proc_data = &curr.as_thread().proc_data;
-    let current_top = proc_data.get_heap_top() as usize;
+    let proc_state = current_process_state();
+    let current_top = proc_state.heap_top();
     let heap_limit = USER_HEAP_BASE + USER_HEAP_SIZE_MAX;
 
     if addr == 0 {
@@ -40,8 +36,8 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
         let expand_size = new_top_aligned.saturating_sub(expand_start.as_usize());
 
         if expand_size > 0
-            && proc_data
-                .aspace
+            && proc_state
+                .address_space()
                 .lock()
                 .map(
                     expand_start,
@@ -60,8 +56,8 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
         let shrink_size = current_top_aligned.saturating_sub(shrink_start.as_usize());
 
         if shrink_size > 0
-            && proc_data
-                .aspace
+            && proc_state
+                .address_space()
                 .lock()
                 .unmap(shrink_start, shrink_size)
                 .is_err()
@@ -70,6 +66,6 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
         }
     }
 
-    proc_data.set_heap_top(addr);
+    proc_state.set_heap_top(addr);
     Ok(addr as isize)
 }

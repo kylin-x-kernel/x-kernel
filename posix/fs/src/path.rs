@@ -8,12 +8,12 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::ffi::c_int;
 
 use fs_ng_vfs::{Location, Metadata};
-use kcore::task::{AsThread, get_process_data};
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, FsContext};
-use kservices::file::{Directory, FD_TABLE, File, FileLike, Kstat, get_file_like};
-use ktask::current;
-use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_NOFOLLOW, O_PATH};
+use kfd::{FileLike, Kstat};
+pub use kservices::file::with_fs;
+use kservices::file::{Directory, File};
+use kthread::{current_process_state, current_thread, get_process_state};
+use linux_raw_sys::general::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, O_NOFOLLOW, O_PATH};
 
 /// The coarse shape of a path string before any runtime resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,17 +109,6 @@ pub fn classify_procfd_path(path: &str, current_pid: u32) -> ParsedProcFdPath {
     }
 
     ParsedProcFdPath::Parsed(ProcFdPath { pid, fd })
-}
-
-/// Executes a function with the file system context for the given directory file descriptor.
-pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
-    let mut fs = FS_CONTEXT.lock();
-    if dirfd == AT_FDCWD {
-        f(&mut fs)
-    } else {
-        let dir = Directory::from_fd(dirfd)?.inner().clone();
-        f(&mut fs.with_current_dir(dir)?)
-    }
 }
 
 /// Result of resolving a path at a given directory.
@@ -228,23 +217,20 @@ fn resolve_empty_path(dirfd: c_int, flags: u32) -> KResult<PathSource> {
     if flags & AT_EMPTY_PATH == 0 {
         return Err(KError::NotFound);
     }
-    let file_like = get_file_like(dirfd)?;
+    let proc_state = current_process_state();
+    let file_like = proc_state.resources.get_file_like(dirfd)?;
     ResolvedPath::from_file_like(file_like.path().into_owned(), file_like).map(PathSource::Resolved)
-}
-
-fn current_pid() -> u32 {
-    current().as_thread().proc_data.proc.pid()
 }
 
 fn is_live_procfd_path(path: &str) -> bool {
     matches!(
-        classify_path(path, current_pid()),
+        classify_path(path, current_thread().pid()),
         ClassifiedPath::ProcFd(_)
     )
 }
 
 fn resolve_live_procfd(path: &str) -> KResult<Option<ResolvedPath>> {
-    let current_pid = current_pid();
+    let current_pid = current_thread().pid();
     let procfd = match classify_path(path, current_pid) {
         ClassifiedPath::Plain(_) => return Ok(None),
         ClassifiedPath::InvalidProcFd => return Err(KError::NotFound),
@@ -314,13 +300,13 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
 }
 
 fn procfd_entry(pid: u32, fd: c_int) -> KResult<Arc<dyn FileLike>> {
-    let proc_data = get_process_data(pid)?;
-    let scope = proc_data.scope.read();
-    FD_TABLE
-        .scope(&scope)
+    let proc_state = get_process_state(pid)?;
+    proc_state
+        .resources
+        .fd_table()
         .read()
         .get(fd as usize)
-        .map(|entry| entry.inner.clone())
+        .map(|entry| entry.inner().clone())
         .ok_or(KError::BadFileDescriptor)
 }
 

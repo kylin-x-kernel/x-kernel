@@ -9,14 +9,13 @@
 //! - Pidfd operations (pidfd_getfd, pidfd_send_signal, etc.)
 //! - Process monitoring through pidfds
 
-use kcore::task::{get_process_data, send_signal_to_process};
-use kerrno::{KError, KResult};
-use ksignal::SignalInfo;
+use alloc::sync::Arc;
 
-use crate::{
-    file::{FD_TABLE, FileLike, PidFd, add_file_like},
-    signal::make_queue_signal_info,
-};
+use kerrno::{KError, KResult};
+use kservices::file::PidFd;
+use ksignal::SignalInfo;
+use kthread::{get_process_state, send_signal_to_process};
+use posix_signal::make_queue_signal_info;
 
 /// Create a process file descriptor (pidfd) for the specified process
 ///
@@ -31,13 +30,15 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    // Get the process data for the specified PID
-    let task = get_process_data(pid)?;
+    // Get the process state for the specified PID
+    let task = get_process_state(pid)?;
     // Create a new pidfd object wrapping the process
     let fd = PidFd::new(&task);
 
     // Add the pidfd to the current process's file descriptor table
-    fd.add_to_fd_table(true).map(|fd| fd as _)
+    kthread::current_resources()
+        .add_file_like(Arc::new(fd), true)
+        .map(|fd| fd as _)
 }
 
 /// Get a duplicate of a file descriptor from another process using its pidfd
@@ -48,20 +49,20 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
 pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize> {
     debug!("sys_pidfd_getfd <= pidfd: {pidfd}, target_fd: {target_fd}, flags: {flags}");
 
-    // Get the pidfd object and validate it
-    let pidfd = PidFd::from_fd(pidfd)?;
-    // Get the process data that this pidfd refers to
-    let proc_data = pidfd.process_data()?;
+    let pidfd = kthread::current_resources().get_file_like_as::<PidFd>(pidfd)?;
+    // Get the process state that this pidfd refers to
+    let proc_state = pidfd.process_state()?;
     // Access the target process's file descriptor table within its scope
-    FD_TABLE
-        .scope(&proc_data.scope.read())
+    proc_state
+        .resources
+        .fd_table()
         .read()
         // Get the file descriptor at the specified index
         .get(target_fd as usize)
         .ok_or(KError::BadFileDescriptor)
         // Duplicate the file and add it to current process's fd table
         .and_then(|fd| {
-            let fd = add_file_like(fd.inner.clone(), true)?;
+            let fd = kthread::current_resources().add_file_like(fd.inner().clone(), true)?;
             Ok(fd as isize)
         })
 }
@@ -82,9 +83,8 @@ pub fn sys_pidfd_send_signal(
         return Err(KError::InvalidInput);
     }
 
-    // Get the pidfd object and retrieve the process it refers to
-    let pidfd = PidFd::from_fd(pidfd)?;
-    let pid = pidfd.process_data()?.proc.pid();
+    let pidfd = kthread::current_resources().get_file_like_as::<PidFd>(pidfd)?;
+    let pid = pidfd.process_state()?.proc.pid();
 
     // Create signal info from user-provided data and send the signal
     let sig = make_queue_signal_info(pid, signo, sig)?;

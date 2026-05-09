@@ -6,7 +6,6 @@
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
-use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use khal::{
     paging::{MappingFlags, PageSize},
@@ -14,7 +13,7 @@ use khal::{
 };
 use kprocess::Pid;
 use ksync::Mutex;
-use ktask::current;
+use kthread::current_process_state;
 use linux_raw_sys::{ctypes::c_ushort, general::*};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::backend::{Backend, SharedPages};
@@ -330,7 +329,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
         mapping_flags.insert(MappingFlags::EXECUTE);
     }
 
-    let cur_pid = current().as_thread().proc_data.proc.pid();
+    let cur_pid = kthread::current_thread().pid();
     let mut shm_manager = SHM_MANAGER.lock();
 
     if key != IPC_PRIVATE
@@ -372,10 +371,9 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
         mapping_flags.remove(MappingFlags::WRITE);
     }
 
-    let curr = current();
-    let proc_data = &curr.as_thread().proc_data;
-    let pid = proc_data.proc.pid();
-    let mut aspace = proc_data.aspace.lock();
+    let proc_state = current_process_state();
+    let pid = proc_state.proc.pid();
+    let mut aspace = proc_state.address_space().lock();
 
     let start_aligned = memaddr::align_down_4k(addr);
     let length = shm_inner.page_num * PAGE_SIZE_4K;
@@ -454,10 +452,9 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> KResult<isize>
 pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
     let shmaddr = VirtAddr::from(shmaddr);
 
-    let curr = current();
-    let proc_data = &curr.as_thread().proc_data;
+    let proc_state = current_process_state();
 
-    let pid = proc_data.proc.pid();
+    let pid = proc_state.proc.pid();
     let shmid = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
@@ -474,7 +471,7 @@ pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
     let mut shm_inner = shm_inner.lock();
     let va_range = shm_inner.get_addr_range(pid).ok_or(KError::InvalidInput)?;
 
-    let mut aspace = proc_data.aspace.lock();
+    let mut aspace = proc_state.address_space().lock();
     aspace.unmap(va_range.start, va_range.size())?;
 
     let mut shm_manager = SHM_MANAGER.lock();

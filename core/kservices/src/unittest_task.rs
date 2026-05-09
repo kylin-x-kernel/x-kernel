@@ -9,7 +9,6 @@
 use alloc::{string::ToString, sync::Arc, vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kcore::task::{ProcessData, Thread};
 use kcred::Credentials;
 use kerrno::KResult;
 use kprocess::Pid;
@@ -19,6 +18,7 @@ use ksync::{
     spin::{NoPreempt, SpinNoIrq},
 };
 use ktask::{KTaskExt, TaskExt, current};
+use kthread::{ProcessState, ProcessStateConfig, Thread};
 use unittest::{TestDescriptor, TestResult};
 use unittest_support::TestUserBuffer;
 
@@ -54,19 +54,21 @@ impl InstalledTestThread {
         let proc = kprocess::Process::new_init(pid);
         proc.add_thread(tid);
 
-        let proc_data = ProcessData::new(
+        let proc_state = ProcessState::new(
             proc,
             "[unittest-user]".to_string(),
             Arc::new(vec![]),
             aspace,
+            kfs::new_process_fs_context(),
             Arc::new(SpinNoIrq::new(SignalActions::default())),
             None,
             Credentials::root(),
+            ProcessStateConfig::default(),
         );
-        let thr = Thread::new(tid, proc_data);
+        let thr = Thread::new(tid, proc_state);
         init_thread(&thr);
 
-        let page_table_root = thr.proc_data.aspace.lock().page_table_root();
+        let page_table_root = thr.proc_state.address_space().lock().page_table_root();
         let task_ptr = current_task_ptr();
         let previous_page_table_root = karch::read_user_page_table();
 

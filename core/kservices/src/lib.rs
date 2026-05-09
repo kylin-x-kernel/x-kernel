@@ -43,5 +43,5 @@ pub fn init() {
     });
 
     info!("Initialize alarm...");
-    kcore::time::spawn_alarm_task();
+    kthread::spawn_alarm_task();
 }

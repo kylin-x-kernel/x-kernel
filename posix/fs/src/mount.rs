@@ -8,8 +8,8 @@ use core::ffi::{c_char, c_void};
 
 use fs_ng_vfs::{ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
 use kerrno::{KError, KResult};
-use kfs::FS_CONTEXT;
 use kservices::vfs::MemoryFs;
+use kthread::current_process_state;
 use posix_types::UserConstPtr;
 
 fn mount_flags_from_sys_mount(flags: i32) -> u32 {
@@ -56,7 +56,10 @@ pub fn sys_mount(
     }
 
     let fs = MemoryFs::new_with_flags(mount_flags_from_sys_mount(flags));
-    let target = FS_CONTEXT.lock().resolve(target)?;
+    let target = current_process_state()
+        .fs_context()
+        .lock()
+        .resolve(target)?;
     target.mount(&fs)?;
 
     Ok(0)
@@ -67,7 +70,10 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, _flags: i32) -> KResult<isize> 
     let target = target.load_string()?;
     debug!("sys_umount2 <= target: {target:?}");
 
-    let target = FS_CONTEXT.lock().resolve(target)?;
+    let target = current_process_state()
+        .fs_context()
+        .lock()
+        .resolve(target)?;
     target.unmount()?;
     Ok(0)
 }

@@ -10,9 +10,8 @@
 //! - Socket binding and connection (bind, connect, listen, etc.)
 //! - Socket shutdown (shutdown, etc.)
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 
-use kcore::task::AsThread;
 use kerrno::{KError, KResult, LinuxError};
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
@@ -25,7 +24,6 @@ use knet::{
     unix::{DgramTransport, StreamTransport, UnixDomainSocket},
 };
 use kservices::mm::{UserConstPtr, UserPtr};
-use ktask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{
@@ -45,7 +43,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     // Extract the type bits (lower 8 bits, ignoring flags like SOCK_CLOEXEC)
     let ty = raw_ty & 0xFF;
 
-    let pid = current().as_thread().proc_data.proc.pid();
+    let pid = kthread::current_thread().pid();
     // Create the appropriate socket type based on domain and type
     let socket = match (domain, ty) {
         (AF_INET, SOCK_STREAM) => {
@@ -107,14 +105,18 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     }
     let cloexec = raw_ty & O_CLOEXEC != 0;
 
-    socket.add_to_fd_table(cloexec).map(|fd| fd as isize)
+    kthread::current_resources()
+        .add_file_like(Arc::new(socket), cloexec)
+        .map(|fd| fd as isize)
 }
 
 /// Bind a socket to a local address
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
 
-    Socket::from_fd(fd)?.bind(addr)?;
+    kthread::current_resources()
+        .get_file_like_as::<Socket>(fd)?
+        .bind(addr)?;
 
     Ok(0)
 }
@@ -123,13 +125,16 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
 
-    Socket::from_fd(fd)?.connect(addr).map_err(|e| {
-        if e == KError::WouldBlock {
-            KError::InProgress
-        } else {
-            e
-        }
-    })?;
+    kthread::current_resources()
+        .get_file_like_as::<Socket>(fd)?
+        .connect(addr)
+        .map_err(|e| {
+            if e == KError::WouldBlock {
+                KError::InProgress
+            } else {
+                e
+            }
+        })?;
 
     Ok(0)
 }
@@ -140,7 +145,9 @@ pub fn sys_listen(fd: i32, backlog: i32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    Socket::from_fd(fd)?.listen()?;
+    kthread::current_resources()
+        .get_file_like_as::<Socket>(fd)?
+        .listen()?;
 
     Ok(0)
 }
@@ -159,14 +166,16 @@ pub fn sys_accept4(
 ) -> KResult<isize> {
     let cloexec = flags & O_CLOEXEC != 0;
 
-    let socket = Socket::from_fd(fd)?;
+    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     let socket = Socket(socket.accept()?);
     if flags & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
     }
 
     let remote_addr = socket.peer_addr()?;
-    let fd = socket.add_to_fd_table(cloexec).map(|fd| fd as isize)?;
+    let fd = kthread::current_resources()
+        .add_file_like(Arc::new(socket), cloexec)
+        .map(|fd| fd as isize)?;
 
     if !addr.is_null() {
         remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
@@ -177,7 +186,7 @@ pub fn sys_accept4(
 
 /// Shut down all or part of a full-duplex connection
 pub fn sys_shutdown(fd: i32, how: u32) -> KResult<isize> {
-    let socket = Socket::from_fd(fd)?;
+    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     let how = match how {
         SHUT_RD => Shutdown::Read,
         SHUT_WR => Shutdown::Write,
@@ -200,7 +209,7 @@ pub fn sys_socketpair(
         return Err(KError::from(LinuxError::EAFNOSUPPORT));
     }
 
-    let pid = current().as_thread().proc_data.proc.pid();
+    let pid = kthread::current_thread().pid();
     let (sock1, sock2) = match ty {
         SOCK_STREAM => {
             let (sock1, sock2) = StreamTransport::new_pair(pid);
@@ -225,8 +234,8 @@ pub fn sys_socketpair(
     let cloexec = raw_ty & O_CLOEXEC != 0;
 
     *fds.get_as_mut()? = [
-        sock1.add_to_fd_table(cloexec)?,
-        sock2.add_to_fd_table(cloexec)?,
+        kthread::current_resources().add_file_like(Arc::new(sock1), cloexec)?,
+        kthread::current_resources().add_file_like(Arc::new(sock2), cloexec)?,
     ];
     Ok(0)
 }

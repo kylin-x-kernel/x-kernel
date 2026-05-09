@@ -14,7 +14,7 @@
 //! - `net`: Network operations
 //! - `posix-credentials`: POSIX credential operations
 //! - `resources`: Resource limits and usage
-//! - `signal`: Signal handling
+//! - `posix-signal`: Signal handling
 //! - `sync`: Synchronization primitives
 //! - `sys`: System information and control
 //! - `task`: Process and thread management
@@ -26,8 +26,10 @@ use linux_sysno::Sysno;
 use posix_credentials::*;
 use posix_ipc::*;
 use posix_mm::*;
+use posix_process::*;
+use posix_signal::*;
 
-use crate::{fs::*, io_mpx::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*, time::*};
+use crate::{fs::*, io_mpx::*, net::*, resources::*, sync::*, sys::*, task::*, time::*};
 
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
@@ -374,7 +376,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::getpid => sys_getpid(),
         Sysno::getppid => sys_getppid(),
         Sysno::gettid => sys_gettid(),
-        Sysno::getrusage => sys_getrusage(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::getrusage => sys_getrusage(uctx.arg0() as _, uctx.arg1().into()),
 
         // task sched
         Sysno::sched_yield => sys_sched_yield(),
@@ -465,7 +467,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
             uctx.arg2() as _,
             uctx.arg3() as _,
         ),
-        Sysno::rt_sigpending => sys_rt_sigpending(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::rt_sigpending => sys_rt_sigpending(uctx.arg0().into(), uctx.arg1() as _),
         Sysno::rt_sigreturn => sys_rt_sigreturn(uctx),
         Sysno::rt_sigtimedwait => sys_rt_sigtimedwait(
             uctx,
@@ -491,19 +493,19 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
             uctx.arg3() as _,
             uctx.arg4() as _,
         ),
-        Sysno::sigaltstack => sys_sigaltstack(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::sigaltstack => sys_sigaltstack(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::futex => sys_futex(
-            uctx.arg0() as _,
+            uctx.arg0().into(),
             uctx.arg1() as _,
             uctx.arg2() as _,
             uctx.arg3() as _,
-            uctx.arg4() as _,
+            uctx.arg4().into(),
             uctx.arg5() as _,
         ),
         Sysno::get_robust_list => {
-            sys_get_robust_list(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
+            sys_get_robust_list(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2().into())
         }
-        Sysno::set_robust_list => sys_set_robust_list(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::set_robust_list => sys_set_robust_list(uctx.arg0().into(), uctx.arg1() as _),
 
         // sys
         Sysno::getuid => sys_getuid(),

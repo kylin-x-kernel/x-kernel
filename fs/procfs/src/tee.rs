@@ -7,31 +7,29 @@
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 
 use fs_ng_vfs::{VfsError, VfsResult};
-use kcore::{
-    task::AsThread,
-    vfs::{NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs},
-};
+use kcore::vfs::{NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs};
 use ktask::{KtaskRef, WeakKtaskRef};
+use kthread::AsThread;
 use tee_task_iface::tee_procfs::{
     has_ta_info as tee_has_ta_info, render_ta_ctx_uuid as tee_render_ta_ctx_uuid,
     render_ta_head as tee_render_ta_head,
 };
 
 pub fn has_ta_info(task: &KtaskRef) -> bool {
-    let proc_data = &task.as_thread().proc_data;
-    let ta_ctx = proc_data.tee_ta_ctx.read();
+    let proc_state = &task.as_thread().proc_state;
+    let ta_ctx = proc_state.tee_ta_ctx.read();
     tee_has_ta_info(&ta_ctx)
 }
 
 pub fn render_ta_ctx_uuid(task: &KtaskRef) -> Vec<u8> {
-    let proc_data = &task.as_thread().proc_data;
-    let ta_ctx = proc_data.tee_ta_ctx.read();
+    let proc_state = &task.as_thread().proc_state;
+    let ta_ctx = proc_state.tee_ta_ctx.read();
     tee_render_ta_ctx_uuid(&ta_ctx)
 }
 
 pub fn render_ta_head(task: &KtaskRef) -> Vec<u8> {
-    let proc_data = &task.as_thread().proc_data;
-    let ta_ctx = proc_data.tee_ta_ctx.read();
+    let proc_state = &task.as_thread().proc_state;
+    let ta_ctx = proc_state.tee_ta_ctx.read();
     tee_render_ta_head(&ta_ctx)
 }
 

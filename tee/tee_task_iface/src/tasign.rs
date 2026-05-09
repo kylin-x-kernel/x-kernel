@@ -9,7 +9,7 @@ use core::convert::AsRef;
 
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kfs::{CachedFile, FS_CONTEXT};
+use kfs::{CachedFile, kernel_fs_context};
 use log::{error, info};
 use spin::{Lazy, Mutex};
 use tee_raw_sys::ta_head;
@@ -130,9 +130,14 @@ pub fn verify_ta_elf_on_load_and_cache_ta_head(cache: &CachedFile) -> KResult<()
     Ok(())
 }
 
-/// Cache lookup by canonical path; on miss, [`verify_ta_elf_signature_if_applicable`] and store `ta_head`.
+/// Cache lookup by canonical absolute path; on miss, verifies the image and
+/// stores the resulting `ta_head`.
+///
+/// Callers should pass the resolved absolute executable path rather than the
+/// raw user-provided exec path so lookup stays independent of per-process cwd
+/// or chroot state.
 pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
-    let loc = FS_CONTEXT.lock().resolve(path)?;
+    let loc = kernel_fs_context().lock().resolve(path)?;
     let abs = loc.absolute_path()?;
     let key: String = String::from(AsRef::<str>::as_ref(&abs));
 

@@ -12,9 +12,8 @@
 use core::ffi::c_char;
 
 use kbuild_config::ARCH;
-use kcore::task::processes;
 use kerrno::KResult;
-use kfs::FS_CONTEXT;
+use kthread::{current_process_fs_context, processes};
 use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
@@ -86,7 +85,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
         "/dev/urandom"
     };
 
-    let f = FS_CONTEXT.lock().resolve(path)?;
+    let f = current_process_fs_context().lock().resolve(path)?;
     let mut kbuf = alloc::vec![0; len];
     let len = f.entry().as_file()?.read_at(&mut kbuf, 0)?;
 

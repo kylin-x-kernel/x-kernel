@@ -15,15 +15,15 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use kcore::task::AsThread;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
 use ksync::Mutex;
 use ktask::current;
+use kthread::AsThread;
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use osvm::{read_vm_mem, write_vm_mem};
 
-static NEXT_TEST_USER_ADDR: AtomicUsize = AtomicUsize::new(kcore::config::USER_HEAP_BASE);
+static NEXT_TEST_USER_ADDR: AtomicUsize = AtomicUsize::new(kaddr_layout::USER_HEAP_BASE);
 
 #[macro_export]
 macro_rules! __unittest_support_user_vec {
@@ -50,7 +50,7 @@ impl TestUserBuffer {
     pub fn new(len: usize) -> KResult<Self> {
         let current_task = current();
         let thread = current_task.try_as_thread().ok_or(KError::BadState)?;
-        let aspace = thread.proc_data.aspace.clone();
+        let aspace = thread.proc_state.address_space().clone();
         let mapped_size = len.max(1).next_multiple_of(PAGE_SIZE_4K);
         let num_pages = mapped_size / PAGE_SIZE_4K;
         let kernel_va = kalloc::global_allocator()

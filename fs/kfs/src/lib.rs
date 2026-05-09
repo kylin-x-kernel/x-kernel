@@ -15,6 +15,7 @@ extern crate log;
 
 #[cfg(feature = "fs9p")]
 use alloc::borrow::ToOwned;
+use alloc::sync::Arc;
 
 mod test_path_resolver;
 mod test_working_context;
@@ -27,6 +28,7 @@ use fs_ng_vfs::{
 #[cfg(feature = "fs9p")]
 use kdriver::Virtio9pDevice;
 use kdriver::{BlockDevice, DeviceContainer, prelude::*};
+use ksync::Mutex;
 
 #[cfg(feature = "fat")]
 mod disk;
@@ -69,7 +71,9 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
     info!("  filesystem type: {:?}", fs.name());
 
     let mp = fs_ng_vfs::Mountpoint::new_root(&fs);
-    ROOT_FS_CONTEXT.call_once(|| FsContext::new(mp.root_location()));
+    let root_context = FsContext::new(mp.root_location());
+    ROOT_FS_CONTEXT.call_once(|| root_context.clone());
+    KERNEL_FS_CONTEXT.call_once(|| Arc::new(Mutex::new(root_context)));
 }
 
 #[cfg(feature = "fs9p")]
@@ -83,7 +87,7 @@ pub fn mount_9pfilesystems(mut virtio_9p_devs: DeviceContainer<Virtio9pDevice>, 
 
     let fs = fs::new_9p_filesystem(dev_9p).expect("Failed to initialize filesystem");
     info!("  filesystem type: {:?}", fs.name());
-    let mut fs_ctx = FS_CONTEXT.lock();
+    let mut fs_ctx = kernel_fs_context().lock();
     ensure_mount_path(&mut fs_ctx, mount_path).expect("Failed to prepare 9P mount path");
     fs_ctx
         .resolve(mount_path)

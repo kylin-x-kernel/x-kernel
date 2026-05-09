@@ -10,6 +10,7 @@
 //! - Event waiting (epoll_wait, epoll_pwait, etc.)
 //! - High-performance event notification
 
+use alloc::sync::Arc;
 use core::time::Duration;
 
 use bitflags::bitflags;
@@ -25,15 +26,10 @@ use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
 };
+use posix_signal::check_sigset_size;
 use posix_types::TimeValueLike;
 
-use crate::{
-    file::{
-        FileLike,
-        epoll::{Epoll, EpollEvent, EpollFlags},
-    },
-    signal::check_sigset_size,
-};
+use crate::file::epoll::{Epoll, EpollEvent, EpollFlags};
 
 bitflags! {
     /// Flags for the `epoll_create` syscall.
@@ -47,8 +43,12 @@ bitflags! {
 pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
     let flags = EpollCreateFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_epoll_create1 <= flags: {flags:?}");
-    Epoll::new()
-        .add_to_fd_table(flags.contains(EpollCreateFlags::CLOEXEC))
+    let resources = kthread::current_resources();
+    resources
+        .add_file_like(
+            Arc::new(Epoll::new()),
+            flags.contains(EpollCreateFlags::CLOEXEC),
+        )
         .map(|fd| fd as isize)
 }
 
@@ -59,7 +59,7 @@ pub fn sys_epoll_ctl(
     fd: i32,
     event: UserConstPtr<epoll_event>,
 ) -> KResult<isize> {
-    let epoll = Epoll::from_fd(epfd)?;
+    let epoll = kthread::current_resources().get_file_like_as::<Epoll>(epfd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
@@ -104,7 +104,7 @@ fn do_epoll_wait(
     check_sigset_size(sigsetsize)?;
     debug!("sys_epoll_wait <= epfd: {epfd}, maxevents: {maxevents}, timeout: {timeout:?}");
 
-    let epoll = Epoll::from_fd(epfd)?;
+    let epoll = kthread::current_resources().get_file_like_as::<Epoll>(epfd)?;
 
     if maxevents <= 0 {
         return Err(KError::InvalidInput);

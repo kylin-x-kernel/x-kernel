@@ -11,7 +11,7 @@ use alloc::{
 
 use fs_ng_vfs::{Mountpoint, ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
 use kcore::vfs::SeqIterator;
-use kfs::FS_CONTEXT;
+use kthread::current_process_state;
 
 #[derive(Clone)]
 pub(crate) struct ProcMountEntry {
@@ -187,7 +187,8 @@ fn make_mount_entry(mount: &Arc<Mountpoint>, parent_id: u64, mount_id: u64) -> P
 }
 
 fn root_mountpoint() -> Arc<Mountpoint> {
-    let fs = FS_CONTEXT.lock();
+    let proc_state = current_process_state();
+    let fs = proc_state.fs_context().lock();
     fs.root_dir().mountpoint().clone()
 }
 

@@ -6,7 +6,7 @@ use core::ffi::c_int;
 
 use fs_ng_vfs::{Location, Metadata};
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, FsContext};
+use kfs::FsContext;
 use linux_raw_sys::general::{AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
@@ -14,7 +14,10 @@ pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) ->
         return Err(KError::InvalidInput);
     }
 
-    let mut fs = FS_CONTEXT.lock();
+    // TEE file helpers are callable from both process and kernel-task paths,
+    // so they must use the shared current-path filesystem view.
+    let fs_context = kthread::current_fs_context();
+    let mut fs = fs_context.lock();
     f(&mut fs)
 }
 

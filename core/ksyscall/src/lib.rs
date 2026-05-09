@@ -19,7 +19,6 @@ mod fs;
 mod io_mpx;
 mod net;
 mod resources;
-mod signal;
 mod sync;
 mod sys;
 mod task;

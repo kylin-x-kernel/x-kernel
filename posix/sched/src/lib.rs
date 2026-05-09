@@ -15,13 +15,13 @@
 #[macro_use]
 extern crate klogger;
 
-use kcore::task::{get_process_data, get_process_group};
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use ktask::{
     KCpuMask, current,
     future::{block_on, interruptible, sleep},
 };
+use kthread::{get_process_group, get_process_state};
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, PRIO_PGRP, PRIO_PROCESS, PRIO_USER,
     SCHED_RR, TIMER_ABSTIME, timespec,
@@ -164,7 +164,7 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
     match which {
         PRIO_PROCESS => {
             if who != 0 {
-                let _proc = get_process_data(who)?;
+                let _proc = get_process_state(who)?;
             }
             Ok(20)
         }
@@ -195,7 +195,7 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
     match which {
         PRIO_PROCESS => {
             if who != 0 {
-                let _proc = get_process_data(who)?;
+                let _proc = get_process_state(who)?;
             }
             Ok(0)
         }

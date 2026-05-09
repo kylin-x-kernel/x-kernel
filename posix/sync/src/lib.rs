@@ -2,31 +2,26 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Futex syscalls.
-//!
-//! This module implements fast userspace mutex (futex) operations including:
-//! - Futex wait and wake operations
-//! - Futex requeue operations
-//! - Robust futex lists
-//! - Priority-inheritance futexes
+//! POSIX/Linux synchronization syscall implementations.
 
-use core::sync::atomic::Ordering;
+#![no_std]
 
-use kcore::{
-    futex::FutexKey,
-    task::{AsThread, get_task},
-};
+#[macro_use]
+extern crate klogger;
+
+use core::{mem::size_of, sync::atomic::Ordering};
+
 use kerrno::{KError, KResult, LinuxError};
-use ktask::current;
+use kthread::{AsThread, FutexKey, current_futex_key, get_task};
 use linux_raw_sys::general::{
-    FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
-    FUTEX_WAKE_BITSET, robust_list_head, timespec,
+    FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT,
+    FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use posix_types::TimeValueLike;
+use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
-/// Helper to ensure a value is non-negative (unsigned interpretation)
-fn assert_unsigned(value: u32) -> KResult<u32> {
+/// Returns an error if the value would be negative when interpreted as signed.
+fn validate_non_negative(value: u32) -> KResult<u32> {
     if (value as i32) < 0 {
         Err(KError::InvalidInput)
     } else {
@@ -34,41 +29,49 @@ fn assert_unsigned(value: u32) -> KResult<u32> {
     }
 }
 
+fn current_key_for_futex_op(address: usize, futex_op: u32) -> FutexKey {
+    if futex_op & FUTEX_PRIVATE_FLAG != 0 {
+        FutexKey::Private { address }
+    } else {
+        current_futex_key(address)
+    }
+}
+
 /// Fast userspace mutex (futex) system call.
+///
 /// Implements Linux futex semantics for efficient synchronization primitives.
+/// See <https://man7.org/linux/man-pages/man2/futex.2.html>.
 pub fn sys_futex(
-    uaddr: *const u32,
+    uaddr: UserPtr<u32>,
     futex_op: u32,
     value: u32,
-    timeout: *const timespec,
-    uaddr2: *mut u32,
+    timeout_or_value2: usize,
+    uaddr2: UserPtr<u32>,
     value3: u32,
 ) -> KResult<isize> {
     debug!(
-        "sys_futex <= uaddr: {uaddr:?}, futex_op: {futex_op}, value: {value}, uaddr2: {uaddr2:?}, \
-         value3: {value3}",
+        "sys_futex <= uaddr: {:?}, futex_op: {futex_op}, value: {value}, uaddr2: {:?}, value3: \
+         {value3}",
+        uaddr.as_ptr(),
+        uaddr2.as_ptr(),
     );
 
-    // Create a unique key for this futex (by virtual address and process)
-    let key = FutexKey::new_current(uaddr.addr());
+    let key = current_key_for_futex_op(uaddr.as_ptr() as usize, futex_op);
 
-    let curr = current();
-    let thr = curr.as_thread();
-    let proc_data = &thr.proc_data;
-    // Get the futex table for the current process
-    let futex_table = proc_data.futex_table_for(&key);
+    let thr = kthread::current_thread();
+    let proc_state = &thr.proc_state;
+    let futex_table = proc_state.futex_table_for(&key);
 
-    // Extract the command (lower bits) from the futex_op
     let command = futex_op & (FUTEX_CMD_MASK as u32);
     match command {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
-            // Fast path: Check if the value at uaddr matches the expected value
             if uaddr.read_vm()? != value {
                 return Err(KError::WouldBlock);
             }
 
-            let timeout = if let Some(ts) = timeout.check_non_null() {
-                // FIXME: AnyBitPattern
+            let timeout = if let Some(ts) =
+                UserConstPtr::<timespec>::from(timeout_or_value2).check_non_null()
+            {
                 let ts = unsafe { ts.read_uninit()?.assume_init() }.try_into_time_value()?;
                 Some(ts)
             } else {
@@ -111,15 +114,15 @@ pub fn sys_futex(
             Ok(count as _)
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
-            assert_unsigned(value)?;
+            validate_non_negative(value)?;
             if command == FUTEX_CMP_REQUEUE && uaddr.read_vm()? != value3 {
                 return Err(KError::WouldBlock);
             }
-            let value2 = assert_unsigned(timeout.addr() as u32)?;
+            let value2 = validate_non_negative(timeout_or_value2 as u32)?;
 
             let futex = futex_table.get(&key);
-            let key2 = FutexKey::new_current(uaddr2.addr());
-            let table2 = proc_data.futex_table_for(&key2);
+            let key2 = current_key_for_futex_op(uaddr2.as_ptr() as usize, futex_op);
+            let table2 = proc_state.futex_table_for(&key2);
             let futex2 = table2.get_or_insert(&key2);
 
             let mut count = 0;
@@ -137,8 +140,8 @@ pub fn sys_futex(
 
 pub fn sys_get_robust_list(
     tid: u32,
-    head: *mut *const robust_list_head,
-    size: *mut usize,
+    head: UserPtr<*const robust_list_head>,
+    size: UserPtr<usize>,
 ) -> KResult<isize> {
     let task = get_task(tid)?;
     head.write_vm(task.as_thread().robust_list_head() as _)?;
@@ -147,11 +150,11 @@ pub fn sys_get_robust_list(
     Ok(0)
 }
 
-pub fn sys_set_robust_list(head: *const robust_list_head, size: usize) -> KResult<isize> {
+pub fn sys_set_robust_list(head: UserConstPtr<robust_list_head>, size: usize) -> KResult<isize> {
     if size != size_of::<robust_list_head>() {
         return Err(KError::InvalidInput);
     }
-    current().as_thread().set_robust_list_head(head.addr());
+    kthread::current_thread().set_robust_list_head(head.as_ptr() as usize);
 
     Ok(0)
 }

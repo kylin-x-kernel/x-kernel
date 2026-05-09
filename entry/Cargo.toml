@@ -58,6 +58,7 @@ ktask.workspace = true
 cfg-if.workspace = true
 linkme.workspace = true
 kprocess.workspace = true
+kthread.workspace = true
 ksyscall.workspace = true
 kservices.workspace = true
 kcore.workspace = true

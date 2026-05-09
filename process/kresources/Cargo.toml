@@ -1,0 +1,18 @@
+[package]
+name = "kresources"
+description = "Process resource owners for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kfd.workspace = true
+kerrno.workspace = true
+krlimit.workspace = true
+ksync.workspace = true
+linux-raw-sys = { workspace = true, features = ["general"] }
+unittest.workspace = true

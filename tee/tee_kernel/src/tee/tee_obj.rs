@@ -11,10 +11,10 @@ use core::{default, ffi::c_ulong, fmt, fmt::Debug};
 
 use bincode::de;
 use flatten_objects::FlattenObjects;
-use kcore::task::{AsThread, TeeSessionCtxTrait};
 use kerrno::{KError, KResult};
 use ksync::{Mutex, RwLock};
 use ktask::current;
+use kthread::{AsThread, TeeSessionCtxTrait};
 use slab::Slab;
 use tee_raw_sys::{libc_compat::size_t, *};
 

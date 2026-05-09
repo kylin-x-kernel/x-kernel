@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 bitflags.workspace = true
+kfd.workspace = true
 kcore.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
@@ -21,7 +22,7 @@ kio.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
 kservices.workspace = true
-ktask.workspace = true
+kthread.workspace = true
 fs-ng-vfs.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 linux_sysno.workspace = true

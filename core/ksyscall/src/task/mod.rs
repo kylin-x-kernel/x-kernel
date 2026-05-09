@@ -22,4 +22,6 @@ mod wait;
 
 pub use posix_sched::*;
 
-pub use self::{clone::*, clone3::*, ctl::*, execve::*, exit::*, job::*, thread::*, wait::*};
+#[cfg(target_arch = "x86_64")]
+pub use self::thread::*;
+pub use self::{clone::*, clone3::*, ctl::*, execve::*, exit::*, wait::*};

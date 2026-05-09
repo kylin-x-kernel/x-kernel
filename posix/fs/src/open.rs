@@ -8,14 +8,14 @@ use alloc::{format, string::ToString, sync::Arc};
 use core::ffi::{c_char, c_int};
 
 use fs_ng_vfs::{DirEntry, FileNode, Location, NodeType, Reference};
-use kcore::{task::AsThread, vfs::Device};
+use kcore::vfs::Device;
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
+use kfs::{FileBackend, OpenOptions, OpenResult};
 use kservices::{
-    file::{Directory, File, FileLike, add_file_like},
+    file::{Directory, File, FileLike},
     vfs::dev::tty,
 };
-use ktask::current;
+use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use posix_types::UserConstPtr;
 
@@ -71,7 +71,10 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
                 let inner = device.inner().as_any();
                 if let Some(ptmx) = inner.downcast_ref::<tty::Ptmx>() {
                     let (master, pty_number) = ptmx.create_pty()?;
-                    let pts = FS_CONTEXT.lock().resolve("/dev/pts")?;
+                    let pts = current_process_state()
+                        .fs_context()
+                        .lock()
+                        .resolve("/dev/pts")?;
                     let entry = DirEntry::new_file(
                         FileNode::new(master),
                         NodeType::CharacterDevice,
@@ -80,9 +83,8 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
                     let loc = Location::new(file.location().mountpoint().clone(), entry);
                     file = kfs::File::new(FileBackend::Direct(loc), file.flags());
                 } else if inner.is::<tty::CurrentTty>() {
-                    let term = current()
-                        .as_thread()
-                        .proc_data
+                    let term = kthread::current_thread()
+                        .process_state()
                         .proc
                         .group()
                         .session()
@@ -95,7 +97,9 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
                     } else {
                         panic!("unknown terminal type")
                     };
-                    let loc = FS_CONTEXT.lock().resolve(&path)?;
+                    let loc = kthread::current_process_fs_context()
+                        .lock()
+                        .resolve(&path)?;
                     file = kfs::File::new(FileBackend::Direct(loc), file.flags());
                 }
             }
@@ -106,7 +110,9 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
     if flags & O_NONBLOCK != 0 {
         f.set_nonblocking(true)?;
     }
-    add_file_like(f, flags & O_CLOEXEC != 0)
+    current_process_state()
+        .resources
+        .add_file_like(f, flags & O_CLOEXEC != 0)
 }
 
 /// Opens a file relative to a directory file descriptor.
@@ -120,7 +126,7 @@ pub fn sys_openat(
     debug!("sys_openat <= {dirfd} {path:?} {flags:#o} {mode:#o}");
     let raw_flags = flags as u32;
 
-    let mode = mode & !current().as_thread().proc_data.umask();
+    let mode = mode & !kthread::current_thread().process_state().umask();
     let options = flags_to_options(flags, mode, current_effective_ids());
 
     if let PathSource::Resolved(path) = resolve_open_path_source(dirfd, Some(&path), raw_flags)?

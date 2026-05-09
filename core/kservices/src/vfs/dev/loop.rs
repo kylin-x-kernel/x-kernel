@@ -18,8 +18,6 @@ use linux_raw_sys::{
 };
 use osvm::{VirtMutPtr, VirtPtr};
 
-use crate::file::get_file_like;
-
 /// /dev/loopX devices
 /// Loop device for attaching regular files as block devices
 pub struct LoopDevice {
@@ -91,7 +89,7 @@ impl DeviceOps for LoopDevice {
                 if fd < 0 {
                     return Err(KError::BadFileDescriptor);
                 }
-                let f = get_file_like(fd)?;
+                let f = kthread::current_resources().get_file_like(fd)?;
                 let Some(file) = f.downcast_ref::<crate::file::File>() else {
                     return Err(KError::InvalidInput);
                 };

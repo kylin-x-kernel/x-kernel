@@ -11,10 +11,11 @@
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::options::{Configurable, GetSocketOption, SetSocketOption};
-use kservices::mm::{UserConstPtr, UserPtr};
+use kservices::{
+    file::Socket,
+    mm::{UserConstPtr, UserPtr},
+};
 use linux_raw_sys::net::socklen_t;
-
-use crate::file::{FileLike, Socket};
 
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
@@ -147,7 +148,7 @@ pub fn sys_getsockopt(
         val.cast().get_as_mut()
     }
 
-    let socket = Socket::from_fd(fd)?;
+    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     macro_rules! dispatch {
         ($which:ident) => {
             socket.get_option(GetSocketOption::$which(get(optval, optlen)?))?;
@@ -187,7 +188,7 @@ pub fn sys_setsockopt(
         val.cast().get_as_ref()
     }
 
-    let socket = Socket::from_fd(fd)?;
+    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     macro_rules! dispatch {
         ($which:ident) => {
             socket.set_option(SetSocketOption::$which(get(optval, optlen)?))?;

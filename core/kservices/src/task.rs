@@ -7,19 +7,16 @@
 use core::{ffi::c_long, sync::atomic::Ordering};
 
 use bytemuck::AnyBitPattern;
-use kcore::{
-    futex::FutexKey,
-    task::{
-        AsThread, get_process_data, get_task, send_signal_to_process, send_signal_to_thread,
-        set_timer_state,
-    },
-    time::TimerState,
-};
+use kbuild_config::KERNEL_STACK_SIZE;
 use kerrno::{KError, KResult};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kprocess::Pid;
 use ksignal::{SignalInfo, Signo};
 use ktask::{TaskInner, current};
+use kthread::{
+    TimerState, current_futex_key, get_process_state, get_task, send_signal_to_process,
+    send_signal_to_thread, set_timer_state,
+};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_ipc::SHM_MANAGER;
@@ -43,8 +40,8 @@ pub fn new_user_task(
 
             info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
 
-            let thr = curr.as_thread();
-            while !thr.pending_exit() {
+            let thr = kthread::current_thread();
+            while !thr.is_exiting() {
                 let reason = uctx.run();
 
                 set_timer_state(&curr, TimerState::Kernel);
@@ -53,14 +50,14 @@ pub fn new_user_task(
                     ReturnReason::Syscall => dispatch_syscall(&mut uctx),
                     ReturnReason::PageFault(addr, flags) => {
                         if !thr
-                            .proc_data
-                            .aspace
+                            .proc_state
+                            .address_space()
                             .lock()
                             .dispatch_irq_page_fault(addr, flags)
                         {
                             info!(
                                 "{:?}: segmentation fault at {:#x} {:?}",
-                                thr.proc_data.proc, addr, flags
+                                thr.proc_state.proc, addr, flags
                             );
                             raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV))
                                 .expect("Failed to send SIGSEGV");
@@ -93,7 +90,7 @@ pub fn new_user_task(
                 }
 
                 if !unblock_next_signal() {
-                    while check_signals(thr, &mut uctx, None) {}
+                    while check_signals(&thr, &mut uctx, None) {}
                 }
 
                 set_timer_state(&curr, TimerState::User);
@@ -101,7 +98,7 @@ pub fn new_user_task(
             }
         },
         name.into(),
-        kcore::config::KERNEL_STACK_SIZE,
+        KERNEL_STACK_SIZE,
     )
 }
 
@@ -131,10 +128,9 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> 
         .checked_add_signed(offset)
         .ok_or(KError::InvalidInput)?;
     let address: usize = address.try_into().map_err(|_| KError::InvalidInput)?;
-    let key = FutexKey::new_current(address);
+    let key = current_futex_key(address);
 
-    let curr = current();
-    let futex_table = curr.as_thread().proc_data.futex_table_for(&key);
+    let futex_table = kthread::current_thread().proc_state.futex_table_for(&key);
 
     let Some(futex) = futex_table.get(&key) else {
         return Ok(());
@@ -185,14 +181,14 @@ pub fn exit_robust_list(head: *const RobustListHead) {
 /// Exit the current thread or process group and perform cleanup.
 pub fn do_exit(exit_code: i32, group_exit: bool) {
     let curr = current();
-    let thr = curr.as_thread();
+    let thr = kthread::current_thread();
 
     info!("{} exit with code: {}", curr.id_name(), exit_code);
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
     if clear_child_tid.write_vm(0).is_ok() {
-        let key = FutexKey::new_current(clear_child_tid as usize);
-        let table = thr.proc_data.futex_table_for(&key);
+        let key = current_futex_key(clear_child_tid as usize);
+        let table = thr.proc_state.futex_table_for(&key);
         let guard = table.get(&key);
         if let Some(futex) = guard {
             futex.wq.wake(1, u32::MAX);
@@ -204,25 +200,27 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         exit_robust_list(head);
     }
 
-    let process = &thr.proc_data.proc;
+    let process = &thr.proc_state.proc;
     if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {
         // Close all file descriptors before marking the process as exited.
         // This ensures pipe write ends and other resources are properly released,
         // so parent processes blocking on pipe reads will receive EOF.
-        crate::file::close_all_fds();
+        thr.proc_state.resources.close_all_fds();
 
         process.exit();
         if let Some(parent) = process.parent() {
-            if let Some(signo) = thr.proc_data.exit_signal {
+            if let Some(signo) = thr.proc_state.exit_signal() {
                 let _ = send_signal_to_process(parent.pid(), Some(SignalInfo::new_kernel(signo)));
             }
-            if let Ok(data) = get_process_data(parent.pid()) {
-                data.child_exit_event.wake();
+            if let Ok(data) = get_process_state(parent.pid()) {
+                data.child_exit_event().wake();
             }
         }
-        thr.proc_data.exit_event.wake();
+        thr.proc_state.exit_event().wake();
 
         SHM_MANAGER.lock().clear_proc_shm(process.pid());
+        #[cfg(feature = "tee")]
+        thr.proc_state.clear_tee_runtime_private();
     }
     if group_exit && !process.is_group_exited() {
         process.group_exit();
@@ -236,12 +234,11 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
 /// Sends a fatal signal to the current process.
 pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
-    let curr = current();
-    let proc_data = &curr.as_thread().proc_data;
+    let proc_state = &kthread::current_thread().proc_state;
 
     let signo = sig.signo();
     info!("Send fatal signal {signo:?} to the current process");
-    if let Some(tid) = proc_data.signal.send_signal(sig)
+    if let Some(tid) = proc_state.signal.send_signal(sig)
         && let Ok(task) = get_task(tid)
     {
         task.interrupt();

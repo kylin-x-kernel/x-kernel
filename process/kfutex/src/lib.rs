@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Futex implementation.
+//! Process-side futex primitives.
+
+#![no_std]
+
+extern crate alloc;
 
 use alloc::{
     collections::vec_deque::VecDeque,
@@ -21,10 +25,7 @@ use hashbrown::HashMap;
 use kerrno::KResult;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
-use ktask::{
-    current,
-    future::{self, block_on, interruptible},
-};
+use ktask::future::{self, block_on, interruptible};
 use memaddr::VirtAddr;
 use memspace::{
     AddrSpace,
@@ -32,13 +33,12 @@ use memspace::{
 };
 use memspace_file::FileBackend;
 
-use crate::task::AsThread;
-
 /// Wait queue used by futex.
 #[derive(Default)]
 pub struct WaitQueue {
     queue: SpinNoIrq<VecDeque<(Waker, u32)>>,
 }
+
 impl WaitQueue {
     /// Creates a new `WaitQueue`.
     pub fn new() -> Self {
@@ -158,11 +158,6 @@ impl FutexKey {
         Self::Private { address }
     }
 
-    /// Shortcut to create a `FutexKey` for the current task's address space.
-    pub fn new_current(address: usize) -> Self {
-        Self::new(&current().as_thread().proc_data.aspace.lock(), address)
-    }
-
     fn as_usize(&self) -> usize {
         match self {
             FutexKey::Private { address } => *address,
@@ -215,8 +210,8 @@ impl FutexTable {
         })
     }
 
-    /// Gets the wait queue associated with the given address, or inserts a a
-    /// new one if it doesn't exist.
+    /// Gets the wait queue associated with the given address, or inserts a new
+    /// one if it doesn't exist.
     pub fn get_or_insert(&self, key: &FutexKey) -> FutexGuard<'_> {
         let key = key.as_usize();
         let mut table = self.0.lock();
@@ -254,9 +249,8 @@ impl Drop for FutexGuard<'_> {
     }
 }
 
-/// Unit tests.
 #[cfg(unittest)]
-pub mod tests_futex {
+mod tests_futex {
     use unittest::def_test;
 
     use super::*;

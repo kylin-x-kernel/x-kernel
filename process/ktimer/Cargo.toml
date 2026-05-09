@@ -1,0 +1,23 @@
+[package]
+name = "ktimer"
+description = "Process-side timer runtime for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+event-listener = { workspace = true, default-features = false }
+kbuild_config.workspace = true
+khal.workspace = true
+ksignal.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+ktypes.workspace = true
+lazy_static = { workspace = true }
+posix-types.workspace = true
+unittest.workspace = true
+

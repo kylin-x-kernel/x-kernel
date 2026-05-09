@@ -41,7 +41,7 @@ pub const CMDLINE: &[&str] = &["/bin/sh", "-c", include_str!("init.sh")];
 fn main() {
     use alloc::{borrow::ToOwned, vec::Vec};
 
-    use kfs::FS_CONTEXT;
+    use kfs::kernel_fs_context;
     kservices::init();
 
     let args = CMDLINE
@@ -54,7 +54,7 @@ fn main() {
     let exit_code = entry::run_initproc(&args, &envs);
     info!("Init process exited with code: {exit_code:?}");
 
-    let cx = FS_CONTEXT.lock();
+    let cx = kernel_fs_context().lock();
     cx.root_dir()
         .unmount_all()
         .expect("Failed to unmount all filesystems");
@@ -75,7 +75,7 @@ fn main() {
     kservices::register_unittest_runtime();
 
     {
-        let cx = kfs::FS_CONTEXT.lock();
+        let cx = kfs::kernel_fs_context().lock();
         let root = cx.root_dir().clone();
         let fs_ops = kfs::FsOperations::new(root);
 
@@ -122,7 +122,7 @@ fn main() {
     if let Err(e) = xcov::capture_coverage(&mut cov) {
         error!("capture_coverage failed: {:?}", e);
     } else if !cov.is_empty() {
-        let cx = kfs::FS_CONTEXT.lock();
+        let cx = kfs::kernel_fs_context().lock();
         let root = cx.root_dir().clone();
         let fs_ops = kfs::FsOperations::new(root);
 

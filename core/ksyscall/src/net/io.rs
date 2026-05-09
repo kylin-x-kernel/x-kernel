@@ -42,7 +42,11 @@ fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Dur
     Ok(Some(Duration::new(tv.as_secs(), tv.subsec_nanos())))
 }
 
-fn parse_send_cmsgs(control_ptr: usize, control_len: usize) -> KResult<Vec<CMsgData>> {
+fn parse_send_cmsgs(
+    resources: &kthread::ProcessResources,
+    control_ptr: usize,
+    control_len: usize,
+) -> KResult<Vec<CMsgData>> {
     let mut cmsg = Vec::new();
     if control_ptr == 0 || control_len == 0 {
         return Ok(cmsg);
@@ -61,7 +65,7 @@ fn parse_send_cmsgs(control_ptr: usize, control_len: usize) -> KResult<Vec<CMsgD
             return Err(KError::InvalidInput);
         }
 
-        cmsg.push(Box::new(CMsg::parse(hdr)?) as CMsgData);
+        cmsg.push(Box::new(CMsg::parse(resources, hdr)?) as CMsgData);
         ptr += hdr.cmsg_len;
     }
 
@@ -69,7 +73,7 @@ fn parse_send_cmsgs(control_ptr: usize, control_len: usize) -> KResult<Vec<CMsgD
 }
 
 use crate::{
-    file::{FileLike, Socket, add_file_like},
+    file::{FileLike, Socket},
     io::{IoVec, IoVectorBuf},
     net::{CMsg, CMsgBuilder},
     socket::SocketAddrExt,
@@ -101,7 +105,11 @@ fn into_socket_cmsg(cmsg: CMsgData) -> Option<SocketCmsg> {
     None
 }
 
-fn push_socket_cmsg(builder: &mut CMsgBuilder<'_>, cmsg: SocketCmsg) -> KResult<bool> {
+fn push_socket_cmsg(
+    resources: &kthread::ProcessResources,
+    builder: &mut CMsgBuilder<'_>,
+    cmsg: SocketCmsg,
+) -> KResult<bool> {
     match cmsg {
         SocketCmsg::Rights { fds } => builder.push(SOL_SOCKET, SCM_RIGHTS, |data| {
             let body_len = fds
@@ -117,7 +125,7 @@ fn push_socket_cmsg(builder: &mut CMsgBuilder<'_>, cmsg: SocketCmsg) -> KResult<
                 .into_iter()
                 .zip(data[..body_len].chunks_exact_mut(size_of::<i32>()))
             {
-                let fd = add_file_like(f, false)?;
+                let fd = resources.add_file_like(f, false)?;
                 chunk.copy_from_slice(&fd.to_ne_bytes());
                 written += size_of::<i32>();
             }
@@ -144,7 +152,7 @@ fn send_impl(
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
-    let socket = Socket::from_fd(fd)?;
+    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     let sent = socket.send(
         &mut src,
         SendOptions {
@@ -172,7 +180,12 @@ pub fn sys_sendto(
 /// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.get_as_ref()?;
-    let cmsg = parse_send_cmsgs(msg.msg_control as usize, msg.msg_controllen)?;
+    let resources = kthread::current_resources();
+    let cmsg = parse_send_cmsgs(
+        resources.as_ref(),
+        msg.msg_control as usize,
+        msg.msg_controllen,
+    )?;
     send_impl(
         fd,
         IoVectorBuf::new(msg.msg_iov as *const IoVec, msg.msg_iovlen)?.into_io(),
@@ -195,7 +208,9 @@ fn recv_impl(
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
-    let socket = Socket::from_fd(fd)?;
+    let proc_state = kthread::current_process_state();
+    let resources = proc_state.resources.clone();
+    let socket = resources.get_file_like_as::<Socket>(fd)?;
     let mut recv_flags = RecvFlags::empty();
     if flags & MSG_PEEK != 0 {
         recv_flags |= RecvFlags::PEEK;
@@ -231,7 +246,7 @@ fn recv_impl(
                 warn!("received unexpected cmsg");
                 continue;
             };
-            let push_result = push_socket_cmsg(&mut builder, cmsg);
+            let push_result = push_socket_cmsg(resources.as_ref(), &mut builder, cmsg);
 
             match push_result {
                 Ok(true) => {}
@@ -311,9 +326,14 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
     }
 
     let msgvec = msgvec.get_as_mut_slice(vlen as usize)?;
+    let resources = kthread::current_resources();
     let mut sent = 0;
     for msg in msgvec.iter_mut() {
-        let cmsg = parse_send_cmsgs(msg.msg_hdr.msg_control as usize, msg.msg_hdr.msg_controllen)?;
+        let cmsg = parse_send_cmsgs(
+            resources.as_ref(),
+            msg.msg_hdr.msg_control as usize,
+            msg.msg_hdr.msg_controllen,
+        )?;
         match send_impl(
             fd,
             IoVectorBuf::new(msg.msg_hdr.msg_iov as *const IoVec, msg.msg_hdr.msg_iovlen)?

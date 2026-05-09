@@ -15,11 +15,6 @@ extern crate alloc;
 #[macro_use]
 extern crate klogger;
 
-pub mod config;
-pub mod futex;
 mod lrucache;
 pub mod mm;
-pub mod resources;
-pub mod task;
-pub mod time;
 pub mod vfs;

@@ -4,10 +4,10 @@
 
 //! Shared helpers for POSIX credential syscalls.
 
-use kcore::task::AsThread;
 use kcred::{CredentialError, Credentials};
 use kerrno::KError;
 use ktask::current;
+use kthread::AsThread;
 
 /// Linux syscall value meaning "do not change this ID".
 pub(crate) const NO_CHANGE_ID: u32 = u32::MAX;
@@ -20,14 +20,14 @@ pub(crate) fn optional_id(id: u32) -> Option<u32> {
 /// Runs a closure with a read-only snapshot of the current process credentials.
 pub(crate) fn with_credentials<R>(f: impl FnOnce(&Credentials) -> R) -> R {
     let curr = current();
-    let credentials = curr.as_thread().proc_data.credentials.read();
+    let credentials = curr.as_thread().proc_state.credentials.read();
     f(&credentials)
 }
 
 /// Runs a closure with mutable access to the current process credentials.
 pub(crate) fn with_credentials_mut<R>(f: impl FnOnce(&mut Credentials) -> R) -> R {
     let curr = current();
-    let mut credentials = curr.as_thread().proc_data.credentials.write();
+    let mut credentials = curr.as_thread().proc_state.credentials.write();
     f(&mut credentials)
 }
 

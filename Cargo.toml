@@ -64,6 +64,12 @@ ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }
 
 # Internal: process management
+kfutex = { path = "process/kfutex" }
+kfd = { path = "process/kfd" }
+krlimit = { path = "process/krlimit" }
+kresources = { path = "process/kresources" }
+kthread = { path = "process/kthread" }
+ktimer = { path = "process/ktimer" }
 kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
 
@@ -72,7 +78,10 @@ posix-credentials = { path = "posix/credentials" }
 posix-ipc = { path = "posix/ipc" }
 posix-fs = { path = "posix/fs" }
 posix-mm = { path = "posix/mm" }
+posix-process = { path = "posix/process" }
 posix-sched = { path = "posix/sched" }
+posix-signal = { path = "posix/signal" }
+posix-sync = { path = "posix/sync" }
 posix-types = { path = "posix/types" }
 
 # Internal: memory and filesystem
@@ -178,7 +187,6 @@ mbedtls-sys-auto = { version = "2.28", package = "mbedtls-sys-auto-smx", default
 ] }
 percpu = "0.2"
 rust-dice = { version = "0.1", default-features = false }
-scope-local = "0.1"
 slab = { version = "0.4.9", default-features = false }
 slab_allocator = { version = "0.4", package = "ax_slab_allocator" }
 smoltcp = { version = "0.12.0", package = "x-smoltcp", default-features = false }
@@ -190,3 +198,6 @@ fs9p = { path = "fs/fs9p", default-features = false }
 ktracepoint = "0.5"
 static-keys = "0.8"
 buddy-slab-allocator = "0.4"
+downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
+flatten_objects = "0.2.4"
+weak-map = "0.1.1"

@@ -10,11 +10,11 @@ use core::{
     task::{Poll, Waker},
 };
 
-use kcore::task::send_signal_to_process_group;
 use kerrno::{KError, KResult};
 use kpoll::PollSet;
 use ksignal::SignalInfo;
 use ktask::future::block_on;
+use kthread::send_signal_to_process_group;
 use linux_raw_sys::general::{
     ECHOCTL, ECHOK, ICRNL, IGNCR, ISIG, VEOF, VERASE, VKILL, VMIN, VTIME,
 };

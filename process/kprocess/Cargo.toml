@@ -10,8 +10,8 @@ description = "Process management for X-Kernel"
 
 [dependencies]
 kspin = { workspace = true }
-lazyinit = "0.2.1"
-weak-map = "0.1"
+lazyinit.workspace = true
+weak-map.workspace = true
 unittest.workspace = true
 
 [dev-dependencies]

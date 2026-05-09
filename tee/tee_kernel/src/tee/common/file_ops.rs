@@ -6,14 +6,12 @@ use alloc::{format, sync::Arc, vec::Vec};
 use core::ffi::c_int;
 
 use fs_ng_vfs::{NodePermission, VfsError};
-use kcore::task::AsThread;
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, File, FileBackend, FileFlags, OpenOptions, OpenResult};
+use kfs::{File, FileBackend, FileFlags, OpenOptions, OpenResult};
 use kio::{Seek, SeekFrom};
 use ksync::RwLock;
-use ktask::current;
+use kthread;
 use linux_raw_sys::general::*;
-use scope_local::scope_local;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
 
@@ -27,9 +25,10 @@ pub const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR | O_SYNC;
 pub const FS_OFLAG_RW: u32 = O_RDWR | O_SYNC;
 pub const FS_OFLAG_RW_TRUNC: u32 = O_RDWR | O_TRUNC | O_SYNC;
 
-scope_local::scope_local! {
-    /// The open objects for TA.
-    pub static TEE_FD_TABLE: Arc<RwLock<Slab<Arc<File>>>> = Arc::default();
+type TeeFdTable = Arc<RwLock<Slab<Arc<File>>>>;
+
+fn current_tee_fd_table() -> TeeFdTable {
+    kthread::current_process_state().tee_fd_table().clone()
 }
 
 /// Convert open flags to [`OpenOptions`].
@@ -159,7 +158,7 @@ fn add_to_fd(result: OpenResult, _flags: u32) -> KResult<isize> {
         }
     };
 
-    let fd = TEE_FD_TABLE.write().insert(Arc::new(f));
+    let fd = current_tee_fd_table().write().insert(Arc::new(f));
     Ok(fd as isize)
 }
 
@@ -167,7 +166,7 @@ fn with_file<F, R>(file: &FileVariant, f: F) -> TeeResult<R>
 where
     F: FnOnce(&Arc<File>) -> TeeResult<R>,
 {
-    let file_arc = TEE_FD_TABLE
+    let file_arc = current_tee_fd_table()
         .read()
         .get(file.fd as usize)
         .ok_or_else(|| {
@@ -186,7 +185,7 @@ impl FileVariant {
             flags,
             mode
         );
-        let mode = mode & !current().as_thread().proc_data.umask();
+        let mode = mode & !kthread::current_process_state().umask();
 
         let options = flags_to_options(flags as c_int, mode as __kernel_mode_t, (0, 0));
         let fd = with_fs(AT_FDCWD, |fs| options.open(fs, path))
@@ -366,7 +365,7 @@ impl TeeFileLike for FileVariant {
         if self.fd < 0 {
             return Ok(()); // already closed
         }
-        TEE_FD_TABLE
+        current_tee_fd_table()
             .write()
             .try_remove(self.fd as usize)
             .ok_or_else(|| {

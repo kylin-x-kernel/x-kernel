@@ -20,12 +20,10 @@ use core::{
 };
 
 use fs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, path::Path};
-use kcore::task::AsThread;
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, FsContext};
+use kfs::FsContext;
 use khal::time::wall_time;
-use kservices::file::{Directory, FileLike, get_file_like};
-use ktask::current;
+use kservices::file::Directory;
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},
@@ -34,12 +32,11 @@ use osvm::VirtPtr;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
 use crate::path::{resolve_at, with_fs};
-
 /// The ioctl() system call manipulates the underlying device parameters
 /// of special files.
 pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
     debug!("sys_ioctl <= fd: {fd}, cmd: {cmd}, arg: {arg}");
-    let f = get_file_like(fd)?;
+    let f = kthread::current_resources().get_file_like(fd)?;
     if cmd == FIONBIO {
         let val = (arg as *const u8).read_vm()?;
         if val != 0 && val != 1 {
@@ -67,7 +64,8 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chdir <= path: {path}");
 
-    let mut fs = FS_CONTEXT.lock();
+    let proc_state = kthread::current_process_state();
+    let mut fs = proc_state.fs_context().lock();
     let entry = fs.resolve(path)?;
     fs.set_current_dir(entry)?;
     Ok(0)
@@ -78,7 +76,10 @@ pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
     let entry = with_fs(dirfd, |fs| Ok(fs.current_dir().clone()))?;
-    FS_CONTEXT.lock().set_current_dir(entry)?;
+    kthread::current_process_state()
+        .fs_context()
+        .lock()
+        .set_current_dir(entry)?;
     Ok(0)
 }
 
@@ -92,7 +93,8 @@ pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chroot <= path: {path}");
 
-    let mut fs = FS_CONTEXT.lock();
+    let proc_state = kthread::current_process_state();
+    let mut fs = proc_state.fs_context().lock();
     let loc = fs.resolve(path)?;
     if loc.node_type() != NodeType::Directory {
         return Err(KError::NotADirectory);
@@ -106,7 +108,7 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
     let path = path.load_string()?;
     debug!("sys_mkdirat <= dirfd: {dirfd}, path: {path}, mode: {mode}");
 
-    let mode = mode & !current().as_thread().proc_data.umask();
+    let mode = mode & !kthread::current_thread().process_state().umask();
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
     with_fs(dirfd, |fs| match fs.create_dir(&path, mode) {
@@ -179,7 +181,7 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
 
     let mut buffer = DirBuffer::new(len);
 
-    let dir = Directory::from_fd(fd)?;
+    let dir = kthread::current_resources().get_file_like_as::<Directory>(fd)?;
     let mut dir_offset = dir.offset.lock();
 
     let mut has_remaining = false;
@@ -286,7 +288,11 @@ pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
         return Ok(0);
     }
 
-    let cwd = FS_CONTEXT.lock().current_dir().absolute_path()?;
+    let cwd = kthread::current_process_state()
+        .fs_context()
+        .lock()
+        .current_dir()
+        .absolute_path()?;
     debug!("sys_getcwd => cwd: {cwd}");
 
     let cwd = CString::new(cwd.as_str()).map_err(|_| KError::InvalidInput)?;
@@ -568,13 +574,17 @@ pub fn sys_renameat2(
 }
 
 pub fn sys_sync() -> KResult<isize> {
-    let root = FS_CONTEXT.lock().root_dir().clone();
+    let root = kthread::current_process_state()
+        .fs_context()
+        .lock()
+        .root_dir()
+        .clone();
     root.filesystem().flush()?;
     Ok(0)
 }
 
 pub fn sys_syncfs(fd: i32) -> KResult<isize> {
-    let file_like = get_file_like(fd)?;
+    let file_like = kthread::current_resources().get_file_like(fd)?;
 
     if let Some(file) = file_like.downcast_ref::<kservices::file::File>() {
         file.inner().location().filesystem().flush()?;

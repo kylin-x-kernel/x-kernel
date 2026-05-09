@@ -9,15 +9,12 @@ use core::{
     task::Context,
 };
 
-use kcore::task::{AsThread, send_signal_to_process};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, Signo};
 use ksync::Mutex;
-use ktask::{
-    current,
-    future::{block_on, poll_io},
-};
+use ktask::future::{block_on, poll_io};
+use kthread::send_signal_to_process;
 use linux_raw_sys::{
     general::{O_RDONLY, O_WRONLY, S_IFIFO},
     ioctl::FIONREAD,
@@ -129,9 +126,8 @@ impl Pipe {
 
 /// Sends SIGPIPE signal to the current process.
 fn raise_pipe() {
-    let curr = current();
     send_signal_to_process(
-        curr.as_thread().proc_data.proc.pid(),
+        kthread::current_thread().pid(),
         Some(SignalInfo::new_kernel(Signo::SIGPIPE)),
     )
     .expect("Failed to send SIGPIPE");

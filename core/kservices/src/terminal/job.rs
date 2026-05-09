@@ -5,12 +5,10 @@
 use alloc::sync::{Arc, Weak};
 use core::task::Context;
 
-use kcore::task::AsThread;
 use kerrno::{KResult, k_bail};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kprocess::{ProcessGroup, Session};
 use kspin::SpinNoIrq;
-use ktask::current;
 
 pub struct JobControl {
     foreground: SpinNoIrq<Weak<ProcessGroup>>,
@@ -38,7 +36,7 @@ impl JobControl {
         self.foreground
             .lock()
             .upgrade()
-            .is_none_or(|pg| Arc::ptr_eq(&current().as_thread().proc_data.proc.group(), &pg))
+            .is_none_or(|pg| Arc::ptr_eq(&kthread::current_thread().proc_state.proc.group(), &pg))
     }
 
     /// Get the current foreground process group

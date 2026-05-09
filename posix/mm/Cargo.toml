@@ -10,13 +10,14 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+kaddr_layout = { workspace = true }
 kcore = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
 khal = { workspace = true }
 klogger = { workspace = true }
+kthread = { workspace = true }
 kservices = { workspace = true }
-ktask = { workspace = true }
 linux-raw-sys = { workspace = true }
 memaddr = { workspace = true }
 memspace = { workspace = true }

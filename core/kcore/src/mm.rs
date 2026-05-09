@@ -9,9 +9,10 @@ use core::{ffi::CStr, hint::unlikely, iter, mem::MaybeUninit};
 
 use extern_trait::extern_trait;
 use fs_ng_vfs::Location;
+use kaddr_layout::{USER_SPACE_BASE, USER_SPACE_SIZE};
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
-use kfs::{CachedFile, FS_CONTEXT, FileBackend};
+use kfs::{CachedFile, FileBackend};
 use khal::{
     asm::user_copy,
     mem::v2p,
@@ -20,23 +21,20 @@ use khal::{
 use kspin::IrqSave;
 use ksync::Mutex;
 use ktask::current;
+use kthread::AsThread;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::AddrSpace;
 use memspace_file::{new_alloc, new_cow};
 use osvm::{MemError, MemResult, VirtMemIo};
 use ouroboros::self_referencing;
 
-use crate::{
-    config::{USER_SPACE_BASE, USER_SPACE_SIZE},
-    lrucache::LruCache,
-    task::AsThread,
-};
+use crate::lrucache::LruCache;
 
 /// Creates a new empty user address space.
 pub fn new_user_aspace_empty() -> KResult<AddrSpace> {
     AddrSpace::new_empty(
-        VirtAddr::from_usize(crate::config::USER_SPACE_BASE),
-        crate::config::USER_SPACE_SIZE,
+        VirtAddr::from_usize(kaddr_layout::USER_SPACE_BASE),
+        kaddr_layout::USER_SPACE_SIZE,
     )
 }
 
@@ -57,7 +55,7 @@ pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> KResult {
 pub fn map_trampoline(aspace: &mut AddrSpace) -> KResult {
     let signal_trampoline_paddr = v2p(ksignal::arch::signal_trampoline_address().into());
     aspace.map_linear(
-        crate::config::SIGNAL_TRAMPOLINE.into(),
+        kaddr_layout::SIGNAL_TRAMPOLINE.into(),
         signal_trampoline_paddr,
         PAGE_SIZE_4K,
         MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER,
@@ -195,7 +193,7 @@ impl ElfLoader {
     }
 
     fn load(&mut self, uspace: &mut AddrSpace, path: &str) -> KResult<LoadResult> {
-        let loc = FS_CONTEXT.lock().resolve(path)?;
+        let loc = kthread::current_fs_context().lock().resolve(path)?;
 
         if !self.0.access(|e| e.borrow_cache().location().ptr_eq(&loc)) {
             match ElfCacheEntry::load(loc)? {
@@ -234,7 +232,7 @@ impl ElfLoader {
         };
 
         let (elf, ldso) = if let Some(ldso) = ldso {
-            let loc = FS_CONTEXT.lock().resolve(ldso)?;
+            let loc = kthread::current_fs_context().lock().resolve(ldso)?;
             if !self.0.access(|e| e.borrow_cache().location().ptr_eq(&loc)) {
                 let e = ElfCacheEntry::load(loc)?.map_err(|_| KError::InvalidInput)?;
                 self.0.put(e);
@@ -248,9 +246,9 @@ impl ElfLoader {
             (entry, None)
         };
 
-        let elf = map_elf(uspace, crate::config::USER_SPACE_BASE, elf)?;
+        let elf = map_elf(uspace, kaddr_layout::USER_SPACE_BASE, elf)?;
         let ldso = ldso
-            .map(|elf| map_elf(uspace, crate::config::USER_INTERP_BASE, elf))
+            .map(|elf| map_elf(uspace, kaddr_layout::USER_INTERP_BASE, elf))
             .transpose()?;
 
         let entry = VirtAddr::from_usize(
@@ -326,8 +324,8 @@ pub fn load_user_app(
         }
     };
 
-    let ustack_top = VirtAddr::from_usize(crate::config::USER_STACK_TOP);
-    let ustack_size = crate::config::USER_STACK_SIZE;
+    let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);
+    let ustack_size = kaddr_layout::USER_STACK_SIZE;
     let ustack_start = ustack_top - ustack_size;
     debug!("Mapping user stack: {ustack_start:#x?} -> {ustack_top:#x?}");
 
@@ -349,8 +347,8 @@ pub fn load_user_app(
     )?;
     uspace.write(user_sp, stack_data.as_slice())?;
 
-    let heap_start = VirtAddr::from_usize(crate::config::USER_HEAP_BASE);
-    let heap_size = crate::config::USER_HEAP_SIZE;
+    let heap_start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE);
+    let heap_size = kaddr_layout::USER_HEAP_SIZE;
     uspace.map(
         heap_start,
         heap_size,

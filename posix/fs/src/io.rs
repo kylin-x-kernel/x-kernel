@@ -18,15 +18,15 @@ use core::{
 };
 
 use kerrno::{KError, KResult, LinuxError};
-use kfs::{FS_CONTEXT, FileFlags, OpenOptions};
+use kfd::FileLike;
+use kfs::{FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
 use kservices::{
-    file::{Directory, File, FileLike, Pipe, get_file_like},
+    file::{Directory, File, Pipe},
     io::{IoVec, IoVectorBuf},
     mm::{VmBytes, VmBytesMut},
 };
-use ktask::current;
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtMutPtr, VirtPtr};
@@ -70,13 +70,15 @@ fn write_zeros_range(file: &kfs::FileBackend, start: u64, end: u64) -> KResult<(
 /// Creates a dummy file descriptor for unsupported syscalls.
 pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
     // Check if running under QEMU - if so, report unsupported to let QEMU fall back to alternatives
-    if current().name().starts_with("qemu-") {
+    if kthread::current_task_name().starts_with("qemu-") {
         // We need to be honest to qemu, since it can automatically fallback to
         // other strategies.
         return Err(KError::Unsupported);
     }
     warn!("Dummy fd created: {sysno}");
-    DummyFd.add_to_fd_table(false).map(|fd| fd as isize)
+    kthread::current_resources()
+        .add_file_like(Arc::new(DummyFd), false)
+        .map(|fd| fd as isize)
 }
 
 /// Read data from the file indicated by `fd`.
@@ -85,14 +87,16 @@ pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
 pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_read <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
     // Get the file object and perform the read operation into the user buffer
-    Ok(get_file_like(fd)?.read(&mut VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
+    Ok(kthread::current_resources()
+        .get_file_like(fd)?
+        .read(&mut VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
 }
 
 /// Vectored read into multiple buffers.
 pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_readv <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored read - read data into multiple buffers in a single operation
-    let f = get_file_like(fd)?;
+    let f = kthread::current_resources().get_file_like(fd)?;
     f.read(&mut IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io())
         .map(|n| n as _)
 }
@@ -102,14 +106,16 @@ pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<is
 /// Return the written size if success.
 pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
-    Ok(get_file_like(fd)?.write(&mut VmBytes::new(buf.as_ptr(), len))? as _)
+    Ok(kthread::current_resources()
+        .get_file_like(fd)?
+        .write(&mut VmBytes::new(buf.as_ptr(), len))? as _)
 }
 
 /// Vectored write from multiple buffers.
 pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored write - write data from multiple buffers in a single operation
-    let f = get_file_like(fd)?;
+    let f = kthread::current_resources().get_file_like(fd)?;
     f.write(&mut IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io())
         .map(|n| n as _)
 }
@@ -124,7 +130,7 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<is
         2 => SeekFrom::End(offset as _),
         _ => return Err(KError::InvalidInput),
     };
-    let any_file = get_file_like(fd)?;
+    let any_file = kthread::current_resources().get_file_like(fd)?;
 
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         let off = f.inner().seek(pos)?;
@@ -161,7 +167,7 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
     }
     let file = OpenOptions::new()
         .write(true)
-        .open(&FS_CONTEXT.lock(), path)?
+        .open(&kthread::current_process_fs_context().lock(), path)?
         .into_file()?;
     file.access(FileFlags::WRITE)?.set_len(length as _)?;
     Ok(0)
@@ -171,7 +177,7 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
 pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     debug!("sys_ftruncate <= {fd} {length}");
     // Truncate file descriptor to specified length
-    let f = File::from_fd(fd)?;
+    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     f.inner().access(FileFlags::WRITE)?.set_len(length as _)?;
     Ok(0)
 }
@@ -209,7 +215,7 @@ pub fn sys_fallocate(
     let keep_size = (mode & FALLOC_FL_KEEP_SIZE) != 0;
     let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
 
-    let f = File::from_fd(fd)?;
+    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     let inner = f.inner();
     let file = inner.access(FileFlags::WRITE)?;
 
@@ -322,11 +328,11 @@ pub fn sys_fallocate(
 pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
     // Synchronize file to disk - syncs both data and metadata
-    let any_file = kservices::file::get_file_like(fd)?;
+    let any_file = kthread::current_resources().get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(false)?;
         return Ok(0);
-    } else if let Ok(d) = any_file.downcast_arc::<kservices::file::Directory>() {
+    } else if let Ok(d) = any_file.downcast_arc::<Directory>() {
         d.inner().sync(false)?;
         return Ok(0);
     }
@@ -337,11 +343,11 @@ pub fn sys_fsync(fd: c_int) -> KResult<isize> {
 pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
     // Synchronize file data to disk - only syncs data, not metadata
-    let any_file = kservices::file::get_file_like(fd)?;
+    let any_file = kthread::current_resources().get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
         f.inner().sync(true)?;
         return Ok(0);
-    } else if let Ok(d) = any_file.downcast_arc::<kservices::file::Directory>() {
+    } else if let Ok(d) = any_file.downcast_arc::<Directory>() {
         d.inner().sync(true)?;
         return Ok(0);
     }
@@ -358,7 +364,10 @@ pub fn sys_fadvise64(
     debug!("sys_fadvise64 <= fd: {fd}, offset: {offset}, len: {len}, advice: {advice}");
     // Provide hints to kernel about how file will be accessed
     // Currently not fully implemented - pipes are not supported
-    if Pipe::from_fd(fd).is_ok() {
+    if kthread::current_resources()
+        .get_file_like_as::<Pipe>(fd)
+        .is_ok()
+    {
         return Err(KError::BrokenPipe);
     }
     if advice > 5 {
@@ -375,7 +384,7 @@ pub fn sys_pread64(
     offset: __kernel_off_t,
 ) -> KResult<isize> {
     // Read from file at specific offset without changing file position
-    let f = File::from_fd(fd)?;
+    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
@@ -396,7 +405,7 @@ pub fn sys_pwrite64(
     if len == 0 {
         return Ok(0);
     }
-    let f = File::from_fd(fd)?;
+    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     let write = f
         .inner()
         .write_at(VmBytes::new(buf.as_ptr(), len), offset as _)?;
@@ -435,7 +444,7 @@ pub fn sys_preadv2(
 ) -> KResult<isize> {
     debug!("sys_preadv2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
     // Vectored read at specific offset with optional flags
-    let f = File::from_fd(fd)?;
+    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     f.inner()
         .read_at(
             IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io(),
@@ -454,7 +463,7 @@ pub fn sys_pwritev2(
 ) -> KResult<isize> {
     debug!("sys_pwritev2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
     // Vectored write at specific offset with optional flags.
-    let f = File::from_fd(fd)?;
+    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     f.inner()
         .write_at(
             IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io(),
@@ -562,18 +571,19 @@ pub fn sys_sendfile(
     );
 
     // Source can use fixed offset or current file position
+    let resources = kthread::current_resources();
     let src = if !offset.is_null() {
         // Check offset fits in 32-bit range (legacy syscall limitation)
         if offset.read_vm()? > u32::MAX as u64 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(File::from_fd(in_fd)?, offset)
+        SendFile::Offset(resources.get_file_like_as::<File>(in_fd)?, offset)
     } else {
-        SendFile::Direct(get_file_like(in_fd)?)
+        SendFile::Direct(resources.get_file_like(in_fd)?)
     };
 
     // Destination always uses current file position
-    let dst = SendFile::Direct(get_file_like(out_fd)?);
+    let dst = SendFile::Direct(resources.get_file_like(out_fd)?);
 
     do_send(src, dst, len).map(|n| n as _)
 }
@@ -603,17 +613,18 @@ pub fn sys_copy_file_range(
     // TODO: check same file and overlap
 
     // Source can use fixed offset or current file position
+    let resources = kthread::current_resources();
     let src = if !off_in.is_null() {
-        SendFile::Offset(File::from_fd(fd_in)?, off_in)
+        SendFile::Offset(resources.get_file_like_as::<File>(fd_in)?, off_in)
     } else {
-        SendFile::Direct(get_file_like(fd_in)?)
+        SendFile::Direct(resources.get_file_like(fd_in)?)
     };
 
     // Destination can also use fixed offset or current file position
     let dst = if !off_out.is_null() {
-        SendFile::Offset(File::from_fd(fd_out)?, off_out)
+        SendFile::Offset(resources.get_file_like_as::<File>(fd_out)?, off_out)
     } else {
-        SendFile::Direct(get_file_like(fd_out)?)
+        SendFile::Direct(resources.get_file_like(fd_out)?)
     };
 
     do_send(src, dst, len).map(|n| n as _)
@@ -642,8 +653,12 @@ pub fn sys_splice(
     // Track if we have a pipe - at least one must be present for splice
     let mut has_pipe = false;
 
+    let resources = kthread::current_resources();
+
     // Dummy file descriptors cannot be spliced
-    if DummyFd::from_fd(fd_in).is_ok() || DummyFd::from_fd(fd_out).is_ok() {
+    if resources.get_file_like_as::<DummyFd>(fd_in).is_ok()
+        || resources.get_file_like_as::<DummyFd>(fd_out).is_ok()
+    {
         return Err(KError::BadFileDescriptor);
     }
 
@@ -653,10 +668,10 @@ pub fn sys_splice(
         if off_in.read_vm()? < 0 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(File::from_fd(fd_in)?, off_in.cast())
+        SendFile::Offset(resources.get_file_like_as::<File>(fd_in)?, off_in.cast())
     } else {
         // Try to use as pipe first
-        if let Ok(src) = Pipe::from_fd(fd_in) {
+        if let Ok(src) = resources.get_file_like_as::<Pipe>(fd_in) {
             // Pipe must be readable
             if !src.is_read() {
                 return Err(KError::BadFileDescriptor);
@@ -664,12 +679,12 @@ pub fn sys_splice(
             has_pipe = true;
         }
         // Path-only files (opened without O_RDWR/O_WRONLY) cannot be spliced
-        if let Ok(file) = File::from_fd(fd_in)
+        if let Ok(file) = resources.get_file_like_as::<File>(fd_in)
             && file.inner().is_path()
         {
             return Err(KError::InvalidInput);
         }
-        SendFile::Direct(get_file_like(fd_in)?)
+        SendFile::Direct(resources.get_file_like(fd_in)?)
     };
 
     // Setup destination: either with fixed offset or using current position
@@ -678,10 +693,10 @@ pub fn sys_splice(
         if off_out.read_vm()? < 0 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(File::from_fd(fd_out)?, off_out.cast())
+        SendFile::Offset(resources.get_file_like_as::<File>(fd_out)?, off_out.cast())
     } else {
         // Try to use as pipe first
-        if let Ok(dst) = Pipe::from_fd(fd_out) {
+        if let Ok(dst) = resources.get_file_like_as::<Pipe>(fd_out) {
             // Pipe must be writable
             if !dst.is_write() {
                 return Err(KError::BadFileDescriptor);
@@ -689,13 +704,13 @@ pub fn sys_splice(
             has_pipe = true;
         }
         // APPEND mode files cannot be spliced (offset cannot be changed)
-        if let Ok(file) = File::from_fd(fd_out)
+        if let Ok(file) = resources.get_file_like_as::<File>(fd_out)
             && file.inner().access(FileFlags::APPEND).is_ok()
         {
             return Err(KError::InvalidInput);
         }
         // Verify destination is writable with a write probe
-        let f = get_file_like(fd_out)?;
+        let f = resources.get_file_like(fd_out)?;
         f.write(&mut b"".as_slice())?;
         SendFile::Direct(f)
     };

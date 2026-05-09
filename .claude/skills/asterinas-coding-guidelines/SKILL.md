@@ -250,6 +250,119 @@ through public APIs (including their documentation).
 A module's public surface
 should contain only what its consumers need.
 
+### Encode current-context semantics in APIs (`current-context-semantics`) {#current-context-semantics}
+
+When code needs a "current" resource,
+the API should state whether it requires
+a current **process thread**
+or only a current **execution path**.
+Do not force callers to infer this from hidden assumptions.
+
+For filesystem context access in x-kernel:
+
+- Use `kthread::current_process_fs_context()`
+  for process-only paths
+  such as syscalls and POSIX helpers.
+- Use `kthread::current_fs_context()`
+  for shared helpers
+  that may run from either a user thread
+  or a kernel task.
+- Prefer passing `&FsContext` or `Arc<Mutex<FsContext>>`
+  into deeper helpers
+  rather than reading current context implicitly.
+
+### Use the correct fd abstraction layer (`fd-abstraction-layers`) {#fd-abstraction-layers}
+
+File descriptor operations use a three-layer architecture.
+Each layer has a clear responsibility.
+Callers must use the highest layer
+that satisfies their need.
+
+| Layer | Crate | Type | Responsibility |
+|-------|-------|------|----------------|
+| Low-level | `kfd` | `FdTable` | Table storage, insert/remove, no policy |
+| Process | `kresources` | `ProcessResources` | Per-process wrappers with rlimit enforcement |
+| Current-context | `kthread` | `current_resources()` | Shortcut for the current process |
+
+#### Low-level: `kfd::FdTable`
+
+`FdTable` owns the descriptor storage.
+Its methods are thin table operations:
+`get`, `add`, `remove`, `add_at`, `clone_from`.
+They take `&mut self` and enforce no resource-limit policy.
+
+Use this layer only when building new process-level wrappers
+or when you already hold a direct `&mut FdTable` reference.
+
+#### Process: `kresources::ProcessResources`
+
+`ProcessResources` wraps `Arc<RwLock<FdTable>>`
+and exposes named methods that enforce process policy
+(rlimit checks, close-on-exec semantics, unsharing).
+
+```rust
+// Good — uses the process layer
+let resources = current_resources();
+let file = resources.get_file_like(fd)?;
+let new_fd = resources.add_file_like(file, cloexec)?;
+resources.close_file_like(fd)?;
+```
+
+```rust
+// Bad — reaches into the fd_table Arc directly
+// from code that only cares about the current process
+let fd_table = current_process_state().resources.fd_table();
+let file = fd_table.read().get_file_like(fd)?;
+```
+
+Internal helpers use `with_fd_table`
+to avoid cloning the `Arc` for single-access operations:
+
+```rust
+fn with_fd_table<R>(&self, access_fn: impl FnOnce(&RwLock<FdTable>) -> R) -> R {
+    let fd_table = self.fd_table.read();
+    access_fn((*fd_table).as_ref())
+}
+```
+
+#### Current-context: `kthread::current_resources()`
+
+For code that operates on the *current* process
+(typical in syscall handlers),
+use `kthread::current_resources()`.
+It returns `Arc<ProcessResources>`
+and avoids the verbose
+`current_process_state().resources.clone()` spell.
+
+```rust
+// Good — concise, uses the current-context shortcut
+use kthread::current_resources;
+let file = current_resources().get_file_like(fd)?;
+```
+
+#### Type-specific lookups: `get_file_like_as`
+
+`ProcessResources::get_file_like_as::<T>` delegates
+to `T::from_fd(fd_table, fd)` rather than
+a generic `downcast`.
+This preserves type-specific error codes
+(e.g., `NotASocket` instead of a generic `InvalidInput`).
+
+```rust
+// Good — returns NotASocket on mismatch
+let socket = current_resources().get_file_like_as::<Socket>(fd)?;
+
+// Bad — returns InvalidInput on mismatch
+let file = current_resources().get_file_like(fd)?;
+let socket = file.downcast_arc::<Socket>().map_err(|_| KError::InvalidInput)?;
+```
+
+#### Encapsulation: `FileDescriptor` fields are private
+
+`FileDescriptor` in `kfd` exposes its fields through getters
+(`inner()`, `cloexec()`, `set_cloexec()`).
+Direct field access is not permitted outside `kfd`.
+
 ### Validate at boundaries, trust internally (`validate-at-boundaries`) {#validate-at-boundaries}
 
 Designate certain interfaces as validation boundaries.
@@ -1121,43 +1234,18 @@ Use `crit!` or `emerg!` only for failures immediately before a halt or abort.
 A log statement that fires on every syscall
 or every timer tick must use `debug!`.
 
-#### Define a log prefix for each crate (`log-prefix`) {#log-prefix}
+#### Keep log prefixes consistent with the active logger (`log-prefix`) {#log-prefix}
 
-Every OSTD-based crate must define a `__log_prefix` macro at its crate root (in `lib.rs`),
-before any `mod` declarations.
-This labels all log messages from the crate:
+Only define a `__log_prefix` macro
+when the active logger consumes it
+and it adds useful signal
+beyond the default module, file, or line metadata.
 
-```rust
-// Set this crate's log prefix for `ostd::log`.
-macro_rules! __log_prefix {
-    () => {
-        "virtio: "
-    };
-}
-```
-
-Convention: use the lowercase crate name (without `aster_` prefix), followed by `: `.
-For example: `"virtio: "`, `"pci: "`, `"uart: "`.
-
-Subsystem modules within a crate can override the prefix
-by defining their own `__log_prefix` at the top of `mod.rs`:
-
-```rust
-// Set this module's log prefix for `ostd::log`.
-macro_rules! __log_prefix {
-    () => {
-        "net: "
-    };
-}
-```
-
-Child modules inherit the override automatically.
-
-Do not put `#[rustfmt::skip]` or any other attribute on `__log_prefix` definitions —
-it causes a compiler ambiguity error (E0659).
+If the current logger already prints
+clear source-location context,
+prefer not to add a redundant prefix macro.
 
 Do not use manual bracket prefixes like `[IOMMU]` or `[Virtio]:`.
-The `__log_prefix` mechanism replaces them.
 
 ### Memory and Resource Management
 

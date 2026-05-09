@@ -12,15 +12,13 @@
 use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::ffi::c_char;
 
-use kcore::{config::USER_HEAP_BASE, mm::load_user_app, task::AsThread};
+use kaddr_layout::USER_HEAP_BASE;
+use kcore::mm::load_user_app;
 use kerrno::{KError, KResult};
-use kfs::FS_CONTEXT;
 use khal::uspace::UserContext;
 use kservices::mm::vm_load_string;
 use ktask::current;
 use osvm::load_vec_until_null;
-
-use crate::file::FD_TABLE;
 
 pub fn sys_execve(
     uctx: &mut UserContext,
@@ -53,53 +51,47 @@ pub fn sys_execve(
     debug!("sys_execve <= path: {path:?}, args: {args:?}, envs: {envs:?}");
 
     let curr = current();
-    let proc_data = &curr.as_thread().proc_data;
+    let current_thread = kthread::current_thread();
+    let proc_state = current_thread.process_state();
 
-    if proc_data.proc.threads().len() > 1 {
+    if proc_state.proc.threads().len() > 1 {
         // TODO: dispatch_irq multi-thread case
         error!("sys_execve: multi-thread not supported");
         return Err(KError::WouldBlock);
     }
 
-    let mut aspace = proc_data.aspace.lock();
+    let mut aspace = proc_state.address_space().lock();
     let (entry_point, user_stack_base) =
         load_user_app(&mut aspace, Some(path.as_str()), &args, &envs)?;
     drop(aspace);
 
-    let loc = FS_CONTEXT.lock().resolve(&path)?;
+    let loc = proc_state.fs_context().lock().resolve(&path)?;
+    let absolute_path = loc.absolute_path()?.to_string();
     curr.set_name(loc.name());
 
-    *proc_data.exe_path.write() = loc.absolute_path()?.to_string();
-    *proc_data.cmdline.write() = Arc::new(args);
+    *proc_state.exe_path().write() = absolute_path.clone();
+    *proc_state.cmdline().write() = Arc::new(args);
 
     #[cfg(feature = "tee")]
     {
-        proc_data.tee_ta_ctx.write().init_ta_ctx(
-            loc.absolute_path()?.to_string().as_str(),
-            tee_task_iface::tasign::get_ta_head_cached(path.as_str())?
+        proc_state.tee_ta_ctx.write().init_ta_ctx(
+            absolute_path.as_str(),
+            tee_task_iface::tasign::get_ta_head_cached(absolute_path.as_str())?
                 .unwrap_or_default()
                 .as_slice(),
         );
     }
 
-    proc_data.set_heap_top(USER_HEAP_BASE);
-    proc_data.credentials.write().apply_exec();
+    proc_state.set_heap_top(USER_HEAP_BASE);
+    proc_state.credentials.write().apply_exec();
 
-    *proc_data.signal.actions.lock() = Default::default();
+    *proc_state.signal.actions.lock() = Default::default();
 
     // Clear set_child_tid after exec since the original address is no longer valid
-    curr.as_thread().set_clear_child_tid(0);
+    kthread::current_thread().set_clear_child_tid(0);
 
     // Close CLOEXEC file descriptors
-    let mut fd_table = FD_TABLE.write();
-    let cloexec_fds = fd_table
-        .ids()
-        .filter(|it| fd_table.get(*it).unwrap().cloexec)
-        .collect::<Vec<_>>();
-    for fd in cloexec_fds {
-        fd_table.remove(fd);
-    }
-    drop(fd_table);
+    proc_state.resources.close_cloexec_files();
 
     uctx.set_ip(entry_point.as_usize());
     uctx.set_sp(user_stack_base.as_usize());

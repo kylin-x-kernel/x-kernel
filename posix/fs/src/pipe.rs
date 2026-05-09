@@ -8,11 +8,13 @@
 //! - Pipe creation (pipe, pipe2, etc.)
 //! - Pipe flags and configuration (O_CLOEXEC, O_NONBLOCK, etc.)
 
+use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use bitflags::bitflags;
 use kerrno::KResult;
-use kservices::file::{FileLike, Pipe, close_file_like};
+use kfd::FileLike;
+use kservices::file::Pipe;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtMutPtr;
 use posix_types::UserPtr;
@@ -44,10 +46,11 @@ pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
         read_end.set_nonblocking(true)?;
         write_end.set_nonblocking(true)?;
     }
-    let read_fd = read_end.add_to_fd_table(cloexec)?;
-    let write_fd = write_end
-        .add_to_fd_table(cloexec)
-        .inspect_err(|_| close_file_like(read_fd).unwrap())?;
+    let resources = kthread::current_resources();
+    let read_fd = resources.add_file_like(Arc::new(read_end), cloexec)?;
+    let write_fd = resources
+        .add_file_like(Arc::new(write_end), cloexec)
+        .inspect_err(|_| resources.close_file_like(read_fd).unwrap())?;
 
     fds.write_vm([read_fd, write_fd])?;
 

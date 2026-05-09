@@ -6,11 +6,10 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kcore::task::{AsThread, Thread};
 use kerrno::KResult;
 use khal::uspace::UserContext;
 use ksignal::{SignalOSAction, SignalSet};
-use ktask::current;
+use kthread::Thread;
 
 use crate::task::do_exit;
 
@@ -64,8 +63,7 @@ pub fn with_replacen_blocked<R>(
     blocked: Option<SignalSet>,
     f: impl FnOnce() -> KResult<R>,
 ) -> KResult<R> {
-    let curr = current();
-    let sig = &curr.as_thread().signal;
+    let sig = &kthread::current_thread().signal;
 
     let old_blocked = blocked.map(|set| sig.set_blocked(set));
     f().inspect(|_| {

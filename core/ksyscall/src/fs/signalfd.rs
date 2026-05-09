@@ -14,11 +14,9 @@ use kerrno::{KError, KResult};
 use ksignal::SignalSet;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use osvm::VirtPtr;
+use posix_signal::check_sigset_size;
 
-use crate::{
-    file::{FileLike, add_file_like, signalfd::Signalfd},
-    signal::check_sigset_size,
-};
+use crate::file::{FileLike, signalfd::Signalfd};
 
 // SFD flag definitions (if not available in linux_raw_sys)
 const SFD_CLOEXEC: u32 = O_CLOEXEC;
@@ -67,7 +65,7 @@ pub fn sys_signalfd4(
 
     // If fd is not -1, we should modify the existing signalfd
     if fd != -1 {
-        let signalfd = Signalfd::from_fd(fd)?;
+        let signalfd = kthread::current_resources().get_file_like_as::<Signalfd>(fd)?;
         signalfd.update_mask(mask);
         signalfd.set_nonblocking(flags.contains(SignalfdFlags::NONBLOCK))?;
         return Ok(fd as _);
@@ -77,6 +75,7 @@ pub fn sys_signalfd4(
     let signalfd = Signalfd::new(mask);
     signalfd.set_nonblocking(flags.contains(SignalfdFlags::NONBLOCK))?;
 
-    // Add to file descriptor table
-    add_file_like(signalfd as _, flags.contains(SignalfdFlags::CLOEXEC)).map(|fd| fd as _)
+    kthread::current_resources()
+        .add_file_like(signalfd as _, flags.contains(SignalfdFlags::CLOEXEC))
+        .map(|fd| fd as _)
 }

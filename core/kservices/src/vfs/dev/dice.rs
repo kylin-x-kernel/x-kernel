@@ -89,14 +89,13 @@ impl DeviceOps for DiceNodeInfo {
 fn get_process_hash() -> KResult<Vec<u8>> {
     use alloc::format;
 
-    use kcore::task::AsThread;
-    use kfs::FS_CONTEXT;
-    use ktask::current;
+    use kthread::current_process_state;
     use mbedtls::hash::{Md, Type};
 
-    let pid = current().as_thread().proc_data.proc.pid();
+    let pid = kthread::current_thread().pid();
     let proc_exe_path = format!("/proc/{}/exe", pid);
-    let fs = FS_CONTEXT.lock();
+    let proc_state = current_process_state();
+    let fs = proc_state.fs_context().lock();
     let data = fs.read(proc_exe_path).unwrap();
 
     let mut sm3_result = vec![0u8; 32];

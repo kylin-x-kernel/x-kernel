@@ -12,11 +12,8 @@ use core::{
 
 use backtrace::Backtrace;
 use fs_ng_vfs::{NodeFlags, VfsResult};
-use kcore::{
-    mm::clear_elf_cache,
-    task::{cleanup_task_tables, tasks},
-    vfs::DeviceOps,
-};
+use kcore::{mm::clear_elf_cache, vfs::DeviceOps};
+use kthread::{cleanup_task_tables, tasks};
 
 static STAMPED_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -52,8 +49,8 @@ impl MemoryCategory {
                 "kcore::mm::ElfLoader::load" => {
                     return Some("elf cache");
                 }
-                "kcore::task::ProcessData::new" => {
-                    return Some("process data");
+                "kcore::task::ProcessState::new" => {
+                    return Some("process state");
                 }
                 "kprocess::process::Process::new" => {
                     return Some("process");

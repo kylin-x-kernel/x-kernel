@@ -13,13 +13,10 @@ use alloc::vec::Vec;
 use core::{future::poll_fn, task::Poll};
 
 use bitflags::bitflags;
-use kcore::task::AsThread;
 use kerrno::{KError, KResult, LinuxError};
 use kprocess::{Pid, Process};
-use ktask::{
-    current,
-    future::{block_on, interruptible},
-};
+use ktask::future::{block_on, interruptible};
+use kthread::{AsThread, get_process_state, get_task};
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
@@ -74,9 +71,9 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
     let options = WaitOptions::from_bits_truncate(options);
     info!("sys_waitpid <= pid: {pid:?}, options: {options:?}");
 
-    let curr = current();
-    let proc_data = &curr.as_thread().proc_data;
-    let proc = &proc_data.proc;
+    let current_thread = kthread::current_thread();
+    let proc_state = current_thread.process_state();
+    let proc = &proc_state.proc;
 
     let pid = if pid == -1 {
         WaitPid::Any
@@ -88,7 +85,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
         WaitPid::Pgid(-pid as _)
     };
 
-    // FIXME: add back support for WALL & WCLONE, since ProcessData may drop before
+    // FIXME: add back support for WALL & WCLONE, since ProcessState may drop before
     // Process now.
     let children = proc
         .children()
@@ -102,6 +99,21 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
     let check_children = || {
         if let Some(child) = children.iter().find(|child| child.is_zombie()) {
             if !options.contains(WaitOptions::WNOWAIT) {
+                // Accumulate reaped child's CPU time into the parent.
+                if let Ok(child_proc_state) = get_process_state(child.pid()) {
+                    let (mut utime_ns, mut stime_ns) = child_proc_state.child_time_ns();
+                    for tid in child.threads() {
+                        if let Ok(task) = get_task(tid) {
+                            let thr = task.as_thread();
+                            let (u, s) = thr.time.borrow().output();
+                            utime_ns +=
+                                u.as_secs() as usize * 1_000_000_000 + u.subsec_nanos() as usize;
+                            stime_ns +=
+                                s.as_secs() as usize * 1_000_000_000 + s.subsec_nanos() as usize;
+                        }
+                    }
+                    proc_state.accumulate_child_time(utime_ns, stime_ns);
+                }
                 child.free();
             }
             if let Some(exit_code) = exit_code.check_non_null() {
@@ -119,7 +131,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
         match check_children().transpose() {
             Some(res) => Poll::Ready(res),
             None => {
-                proc_data.child_exit_event.register(cx.waker());
+                proc_state.child_exit_event().register(cx.waker());
                 Poll::Pending
             }
         }

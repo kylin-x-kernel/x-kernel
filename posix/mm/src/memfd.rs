@@ -4,12 +4,13 @@
 
 //! Memory file descriptor syscalls.
 
-use alloc::format;
+use alloc::{format, sync::Arc};
 use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
-use kfs::{FS_CONTEXT, OpenOptions};
-use kservices::file::{File, FileLike};
+use kfs::OpenOptions;
+use kservices::file::File;
+use kthread::{current_process_fs_context, current_process_state};
 use linux_raw_sys::general::{MFD_CLOEXEC, O_RDWR};
 use posix_types::UserConstPtr;
 
@@ -20,7 +21,7 @@ pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isiz
     // This is cursed
     for id in 0..0xffff {
         let name = format!("/tmp/memfd-{id:04x}");
-        let fs = FS_CONTEXT.lock().clone();
+        let fs = current_process_fs_context().lock().clone();
         if fs.resolve(&name).is_err() {
             let file = OpenOptions::new()
                 .read(true)
@@ -29,8 +30,10 @@ pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isiz
                 .open(&fs, &name)?
                 .into_file()?;
             let cloexec = flags & MFD_CLOEXEC != 0;
-            return File::new(file, O_RDWR)
-                .add_to_fd_table(cloexec)
+            let proc_state = current_process_state();
+            return proc_state
+                .resources
+                .add_file_like(Arc::new(File::new(file, O_RDWR)), cloexec)
                 .map(|fd| fd as _);
         }
     }

@@ -1,0 +1,20 @@
+[package]
+name = "posix-process"
+description = "POSIX process syscall implementations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kerrno.workspace = true
+khal.workspace = true
+kprocess.workspace = true
+ktask.workspace = true
+kthread.workspace = true
+linux-raw-sys.workspace = true
+osvm.workspace = true
+posix-types.workspace = true

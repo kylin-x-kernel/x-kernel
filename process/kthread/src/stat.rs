@@ -8,11 +8,9 @@ use kerrno::KResult;
 use ksignal::Signo;
 use ktask::{TaskInner, TaskState};
 
-use crate::task::AsThread;
+use crate::AsThread;
 
 /// Represents the `/proc/[pid]/stat` file.
-///
-/// See ['https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html'] for details.
 #[derive(Default)]
 pub struct TaskStat {
     /// Process ID.
@@ -61,7 +59,7 @@ pub struct TaskStat {
     pub starttime: u64,
     /// Virtual memory size in bytes.
     pub vsize: u64,
-    /// Resident Set Size.
+    /// Resident set size.
     pub rss: i64,
     /// Soft limit for RSS.
     pub rsslim: u64,
@@ -103,30 +101,30 @@ pub struct TaskStat {
     pub guest_time: u64,
     /// Guest time of children.
     pub cguest_time: u64,
-    /// Address above which program initialized and uninitialized data are placed.
+    /// Address above which initialized and uninitialized data are placed.
     pub start_data: u64,
-    /// Address below which program initialized and uninitialized data are placed.
+    /// Address below which initialized and uninitialized data are placed.
     pub end_data: u64,
-    /// Address above which program heap can be expanded with brk.
+    /// Address above which heap can be expanded with `brk`.
     pub start_brk: u64,
-    /// Address above which program command-line arguments are placed.
+    /// Address above which command-line arguments are placed.
     pub arg_start: u64,
-    /// Address below which program command-line arguments are placed.
+    /// Address below which command-line arguments are placed.
     pub arg_end: u64,
-    /// Address above which program environment is placed.
+    /// Address above which environment is placed.
     pub env_start: u64,
-    /// Address below which program environment is placed.
+    /// Address below which environment is placed.
     pub env_end: u64,
     /// The thread's exit status.
     pub exit_code: i32,
 }
 
 impl TaskStat {
-    /// Create a new [`TaskStat`] from a [`KtaskRef`].
+    /// Creates a new [`TaskStat`] from a [`TaskInner`].
     pub fn from_thread(task: &TaskInner) -> KResult<Self> {
         let thread = task.as_thread();
-        let proc_data = &thread.proc_data;
-        let proc = &proc_data.proc;
+        let proc_state = &thread.proc_state;
+        let proc = &proc_state.proc;
 
         let pid = proc.pid();
         let comm = task.name();
@@ -147,7 +145,7 @@ impl TaskStat {
             pgrp,
             session,
             num_threads: proc.threads().len() as u32,
-            exit_signal: proc_data.exit_signal.unwrap_or(Signo::SIGCHLD) as u8,
+            exit_signal: proc_state.exit_signal().unwrap_or(Signo::SIGCHLD) as u8,
             exit_code: proc.exit_code(),
             ..Default::default()
         })
@@ -220,5 +218,33 @@ impl fmt::Display for TaskStat {
              {delayacct_blkio_ticks} {guest_time} {cguest_time} {start_data} {end_data} \
              {start_brk} {arg_start} {arg_end} {env_start} {env_end} {exit_code}",
         )
+    }
+}
+
+#[cfg(unittest)]
+mod tests_stat {
+    use unittest::def_test;
+
+    use super::TaskStat;
+
+    #[def_test]
+    fn test_taskstat_display_default() {
+        let stat = TaskStat::default();
+        let text = alloc::format!("{stat}");
+        let text = text.trim_end();
+        assert!(text.starts_with("0 ("));
+        assert!(text.ends_with(" 0"));
+    }
+
+    #[def_test]
+    fn test_taskstat_display_custom() {
+        let stat = TaskStat {
+            pid: 7,
+            comm: "init".into(),
+            state: 'R',
+            ..Default::default()
+        };
+        let text = alloc::format!("{stat}");
+        assert!(text.starts_with("7 (init) R "));
     }
 }

@@ -22,10 +22,10 @@ use kservices::{
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
+use posix_signal::check_sigset_size;
 use posix_types::TimeValueLike;
 
 use super::FdPollSet;
-use crate::{file::get_file_like, signal::check_sigset_size};
 
 /// Monitor multiple file descriptors for I/O events with optional timeout
 fn do_poll(
@@ -43,7 +43,7 @@ fn do_poll(
             // Skip -1
             continue;
         }
-        match get_file_like(fd.fd) {
+        match kthread::current_resources().get_file_like(fd.fd) {
             Ok(f) => {
                 fds.push((
                     f,

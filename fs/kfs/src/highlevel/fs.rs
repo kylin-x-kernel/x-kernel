@@ -30,15 +30,19 @@ use crate::fs_operations::FsOperations as FsContextImpl;
 /// Global root filesystem context initializer.
 pub static ROOT_FS_CONTEXT: Once<FsContext> = Once::new();
 
-scope_local::scope_local! {
-    /// Thread-local filesystem context handle.
-    pub static FS_CONTEXT: Arc<Mutex<FsContext>> =
-        Arc::new(Mutex::new(
-            ROOT_FS_CONTEXT
-                .get()
-                .expect("Root FS context not initialized")
-                .clone(),
-        ));
+/// Kernel-default filesystem context shared by boot and kernel-task paths.
+pub static KERNEL_FS_CONTEXT: Once<Arc<Mutex<FsContext>>> = Once::new();
+
+/// Returns the kernel-default filesystem context.
+pub fn kernel_fs_context() -> &'static Arc<Mutex<FsContext>> {
+    KERNEL_FS_CONTEXT
+        .get()
+        .expect("kernel FS context not initialized")
+}
+
+/// Creates a new process-owned filesystem context from the kernel defaults.
+pub fn new_process_fs_context() -> Arc<Mutex<FsContext>> {
+    Arc::new(Mutex::new(kernel_fs_context().lock().clone()))
 }
 
 /// Directory entry returned by `ReadDir`.
