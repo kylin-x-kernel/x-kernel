@@ -77,6 +77,7 @@ osvm = { path = "process/osvm" }
 posix-credentials = { path = "posix/credentials" }
 posix-ipc = { path = "posix/ipc" }
 posix-fs = { path = "posix/fs" }
+posix-io-mpx = { path = "posix/io-mpx" }
 posix-mm = { path = "posix/mm" }
 posix-process = { path = "posix/process" }
 posix-sched = { path = "posix/sched" }

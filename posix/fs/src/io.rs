@@ -29,7 +29,7 @@ use kservices::{
 };
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
 
 struct DummyFd;

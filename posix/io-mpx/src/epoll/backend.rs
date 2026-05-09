@@ -3,11 +3,13 @@
 // See LICENSES for license details.
 
 //! Epoll instance and interest management.
+
 use alloc::{
     borrow::Cow,
     collections::vec_deque::VecDeque,
     sync::{Arc, Weak},
     task::Wake,
+    vec::Vec,
 };
 use core::{
     hash::{Hash, Hasher},
@@ -18,12 +20,12 @@ use core::{
 use bitflags::bitflags;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
+use kfd::FileLike;
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
 
-use crate::file::FileLike;
-
+/// A ready event returned by an [`Epoll`] instance.
 pub struct EpollEvent {
     /// Interested I/O events.
     pub events: IoEvents,
@@ -32,7 +34,7 @@ pub struct EpollEvent {
 }
 
 bitflags! {
-    /// Flags for the entries in the `epoll` instance.
+    /// Flags for entries in an `epoll` instance.
     #[derive(Debug, Clone, Copy, Default)]
     pub struct EpollFlags: u32 {
         const EDGE_TRIGGER = EPOLLET;
@@ -40,14 +42,14 @@ bitflags! {
     }
 }
 
-/// Interest trigger mode
+/// Interest trigger mode.
 #[derive(Debug, Clone, Copy)]
 enum TriggerMode {
-    /// Level-triggered: until the condition is cleared
+    /// Level-triggered: until the condition is cleared.
     Level,
-    /// Edge-triggered: only notify when the condition changes
+    /// Edge-triggered: only notify when the condition changes.
     Edge,
-    /// One-shot: notify only once
+    /// One-shot: notify only once.
     OneShot { fired: bool },
 }
 
@@ -62,17 +64,11 @@ impl TriggerMode {
         }
     }
 
-    // return should notify and new mode
     fn should_notify(&self) -> (bool, Self) {
         match self {
-            TriggerMode::Level => {
-                // LT: always notify
-                (true, *self)
-            }
-            // if we could wake, we need notify
+            TriggerMode::Level => (true, *self),
             TriggerMode::Edge => (true, TriggerMode::Edge),
             TriggerMode::OneShot { fired } => {
-                // ONESHOT: 只触发一次
                 if *fired {
                     (false, *self)
                 } else {
@@ -91,11 +87,11 @@ impl TriggerMode {
 }
 
 enum ConsumeResult {
-    // success and should keep in ready list
+    /// Return an event and keep the interest queued for another level-triggered poll.
     EventAndKeep(EpollEvent),
-    // success and hould remove ready list
+    /// Return an event and remove only this ready-queue entry after consumption.
     EventAndRemove(EpollEvent),
-    // no event and should remove ready list
+    /// Return no event and drop this ready-queue entry.
     NoEvent,
 }
 
@@ -104,6 +100,7 @@ struct EntryKey {
     fd: i32,
     file: Weak<dyn FileLike>,
 }
+
 impl EntryKey {
     fn new_for_current(fd: i32) -> KResult<Self> {
         let file = kthread::current_resources().get_file_like(fd)?;
@@ -124,6 +121,7 @@ impl Hash for EntryKey {
         (self.fd, self.file.as_ptr()).hash(state);
     }
 }
+
 impl PartialEq for EntryKey {
     fn eq(&self, other: &Self) -> bool {
         self.fd == other.fd && Weak::ptr_eq(&self.file, &other.file)
@@ -174,8 +172,6 @@ impl EpollInterest {
     fn consume(&self, file: &dyn FileLike) -> ConsumeResult {
         let current_events = file.poll();
         let matched = current_events & self.event.events;
-
-        // not ready
         if matched.is_empty() {
             return ConsumeResult::NoEvent;
         }
@@ -192,13 +188,11 @@ impl EpollInterest {
             return ConsumeResult::NoEvent;
         }
 
-        // create event
         let event = EpollEvent {
             events: matched,
             user_data: self.event.user_data,
         };
 
-        // shoud still keep in ready?
         match *mode {
             TriggerMode::Level => ConsumeResult::EventAndKeep(event),
             TriggerMode::Edge | TriggerMode::OneShot { .. } => ConsumeResult::EventAndRemove(event),
@@ -220,7 +214,6 @@ impl Wake for InterestWaker {
         let Some(epoll) = self.epoll.upgrade() else {
             return;
         };
-
         let Some(interest) = self.interest.upgrade() else {
             return;
         };
@@ -255,6 +248,7 @@ impl Default for EpollInner {
     }
 }
 
+/// An `epoll` file-like object.
 #[derive(Default)]
 pub struct Epoll {
     inner: Arc<EpollInner>,
@@ -266,12 +260,10 @@ impl Epoll {
         Self::default()
     }
 
-    // only register waker, not add to ready queue
     fn register_waker_only(&self, interest: &Arc<EpollInterest>) {
         let Some(file) = interest.key.get_file() else {
             return;
         };
-
         if !interest.is_enabled() {
             return;
         }
@@ -285,12 +277,10 @@ impl Epoll {
         file.register(&mut context, interest.event.events);
     }
 
-    // for add/modify
     fn check_and_register_waker(&self, interest: &Arc<EpollInterest>) {
         let Some(file) = interest.key.get_file() else {
             return;
         };
-
         if !interest.is_enabled() {
             return;
         }
@@ -301,7 +291,6 @@ impl Epoll {
         }));
 
         let current = file.poll() & interest.event.events;
-
         if !current.is_empty() {
             waker.wake_by_ref();
         } else {
@@ -337,18 +326,16 @@ impl Epoll {
 
         let mut guard = self.inner.interests.lock();
         let old = guard.get_mut(&key).ok_or(KError::NotFound)?;
-
-        // update new interest if old already in ready queue
         if old.is_in_queue() {
             interest.in_ready_queue.store(true, Ordering::Release);
         }
         *old = Arc::clone(&interest);
         drop(guard);
+
         trace!(
             "Epoll: modify fd={}, events={:?}",
             fd, interest.event.events
         );
-        // reset waker
         self.check_and_register_waker(&interest);
         Ok(())
     }
@@ -368,8 +355,9 @@ impl Epoll {
     /// Polls for ready events and writes them into `out`.
     pub fn poll_events(&self, out: &mut [epoll_event]) -> KResult<usize> {
         trace!("Epoll: poll_events called, out.len()={}", out.len());
+
         let mut count = 0;
-        let mut deferred_keep = alloc::vec::Vec::new();
+        let mut deferred_keep = Vec::new();
         loop {
             let weak_interest = {
                 let mut queue = self.inner.ready_queue.lock();
@@ -379,18 +367,15 @@ impl Epoll {
             let Some(weak_interest) = weak_interest else {
                 break;
             };
-
             if count >= out.len() {
                 self.inner.ready_queue.lock().push_front(weak_interest);
                 break;
             }
 
             let Some(interest) = weak_interest.upgrade() else {
-                continue; // interest already removed
+                continue;
             };
-
             let Some(file) = interest.key.get_file() else {
-                // file already closed remove interests
                 self.inner.interests.lock().remove(&interest.key);
                 interest.mark_not_in_queue();
                 continue;
@@ -470,15 +455,12 @@ mod epoll_tests {
 
     use super::*;
 
-    /// Test basic Epoll creation
     #[def_test]
     fn test_epoll_creation() {
         let epoll = Epoll::new();
-        // Check that it implements FileLike correctly
         assert_eq!(epoll.path(), "anon_inode:[eventpoll]");
     }
 
-    /// Test EpollFlags bitflags
     #[def_test]
     fn test_epoll_flags() {
         assert_eq!(EpollFlags::EDGE_TRIGGER.bits(), EPOLLET);
@@ -492,68 +474,48 @@ mod epoll_tests {
         assert!(flags.contains(EpollFlags::EDGE_TRIGGER | EpollFlags::ONESHOT));
     }
 
-    /// Test TriggerMode creation from flags
     #[def_test]
     fn test_trigger_mode_from_flags() {
         match TriggerMode::from_flags(EpollFlags::empty()) {
-            TriggerMode::Level => {} // Correct
+            TriggerMode::Level => {}
             _ => panic!("Expected Level trigger"),
         }
 
         match TriggerMode::from_flags(EpollFlags::EDGE_TRIGGER) {
-            TriggerMode::Edge => {} // Correct
+            TriggerMode::Edge => {}
             _ => panic!("Expected Edge trigger"),
         }
 
         match TriggerMode::from_flags(EpollFlags::ONESHOT) {
-            TriggerMode::OneShot { fired: false } => {} // Correct
+            TriggerMode::OneShot { fired: false } => {}
             _ => panic!("Expected OneShot with fired=false"),
         }
 
-        // Test combined flags (ONESHOT takes precedence?)
         match TriggerMode::from_flags(EpollFlags::EDGE_TRIGGER | EpollFlags::ONESHOT) {
-            TriggerMode::OneShot { fired: false } => {} // ONESHOT should take precedence
+            TriggerMode::OneShot { fired: false } => {}
             _ => panic!("Expected OneShot with fired=false"),
         }
     }
 
-    /// Test TriggerMode should_notify logic
     #[def_test]
     fn test_trigger_mode_should_notify() {
-        // Level trigger: always notify
         let (should_notify, new_mode) = TriggerMode::Level.should_notify();
         assert!(should_notify);
-        match new_mode {
-            TriggerMode::Level => {} // Correct
-            _ => panic!("Should remain Level"),
-        }
+        assert!(matches!(new_mode, TriggerMode::Level));
 
-        // Edge trigger: notify
         let (should_notify, new_mode) = TriggerMode::Edge.should_notify();
         assert!(should_notify);
-        match new_mode {
-            TriggerMode::Edge => {} // Correct
-            _ => panic!("Should remain Edge"),
-        }
+        assert!(matches!(new_mode, TriggerMode::Edge));
 
-        // OneShot first time: notify and become fired
         let (should_notify, new_mode) = TriggerMode::OneShot { fired: false }.should_notify();
         assert!(should_notify);
-        match new_mode {
-            TriggerMode::OneShot { fired: true } => {} // Correct
-            _ => panic!("Should become fired=true"),
-        }
+        assert!(matches!(new_mode, TriggerMode::OneShot { fired: true }));
 
-        // OneShot after fired: don't notify
         let (should_notify, new_mode) = TriggerMode::OneShot { fired: true }.should_notify();
         assert!(!should_notify);
-        match new_mode {
-            TriggerMode::OneShot { fired: true } => {} // Correct
-            _ => panic!("Should remain fired=true"),
-        }
+        assert!(matches!(new_mode, TriggerMode::OneShot { fired: true }));
     }
 
-    /// Test TriggerMode is_enabled
     #[def_test]
     fn test_trigger_mode_is_enabled() {
         assert!(TriggerMode::Level.is_enabled());
@@ -562,34 +524,29 @@ mod epoll_tests {
         assert!(!TriggerMode::OneShot { fired: true }.is_enabled());
     }
 
-    /// Test EpollEvent creation
     #[def_test]
     fn test_epoll_event() {
         let event = EpollEvent {
             events: IoEvents::IN | IoEvents::OUT,
-            user_data: 0x12345678,
+            user_data: 0x1234_5678,
         };
 
         assert!(event.events.contains(IoEvents::IN));
         assert!(event.events.contains(IoEvents::OUT));
         assert!(!event.events.contains(IoEvents::ERR));
-        assert_eq!(event.user_data, 0x12345678);
+        assert_eq!(event.user_data, 0x1234_5678);
     }
 
-    /// Test poll_events with zero-length buffer
     #[def_test]
     fn test_poll_events_zero_buffer() {
         let epoll = Epoll::new();
         let mut events = [];
 
-        // Zero buffer should return WouldBlock (no space for events)
-        let result = epoll.poll_events(&mut events);
-        assert_eq!(result, Err(KError::WouldBlock));
+        assert_eq!(epoll.poll_events(&mut events), Err(KError::WouldBlock));
     }
 
     #[def_test]
     fn test_epoll_poll_no_events() {
-        use kpoll::Pollable;
         let epoll = Epoll::new();
         let events = epoll.poll();
         assert!(!events.contains(IoEvents::IN));
@@ -599,15 +556,13 @@ mod epoll_tests {
     fn test_epoll_poll_events_empty() {
         let epoll = Epoll::new();
         let mut out = [epoll_event { events: 0, data: 0 }; 4];
-        let result = epoll.poll_events(&mut out);
-        assert_eq!(result, Err(KError::WouldBlock));
+        assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
     }
 
     #[def_test(custom)]
     fn test_epoll_delete_nonexistent() {
         let epoll = Epoll::new();
-        let result = epoll.delete(999);
-        assert!(result.is_err());
+        assert!(epoll.delete(999).is_err());
     }
 
     #[def_test(custom)]
@@ -617,8 +572,7 @@ mod epoll_tests {
             events: IoEvents::IN,
             user_data: 0,
         };
-        let result = epoll.modify(999, event, EpollFlags::empty());
-        assert!(result.is_err());
+        assert!(epoll.modify(999, event, EpollFlags::empty()).is_err());
     }
 
     #[def_test]
@@ -629,17 +583,16 @@ mod epoll_tests {
 
     #[def_test]
     fn test_consume_result_variants() {
-        let ev1 = EpollEvent {
+        let keep = ConsumeResult::EventAndKeep(EpollEvent {
             events: IoEvents::IN,
             user_data: 1,
-        };
-        let ev2 = EpollEvent {
+        });
+        let remove = ConsumeResult::EventAndRemove(EpollEvent {
             events: IoEvents::IN,
             user_data: 2,
-        };
-        let keep = ConsumeResult::EventAndKeep(ev1);
-        let remove = ConsumeResult::EventAndRemove(ev2);
+        });
         let none = ConsumeResult::NoEvent;
+
         assert!(!matches!(keep, ConsumeResult::NoEvent));
         assert!(!matches!(remove, ConsumeResult::NoEvent));
         assert!(matches!(none, ConsumeResult::NoEvent));

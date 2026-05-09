@@ -17,7 +17,7 @@ use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT,
     FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
 /// Returns an error if the value would be negative when interpreted as signed.

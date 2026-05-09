@@ -17,7 +17,6 @@ use kprocess::{Pid, Process};
 use ktask::current;
 use kthread::{AsThread, ProcessState, Thread, get_process_group, get_process_state, get_task};
 use linux_raw_sys::general::{__kernel_old_timeval, rusage};
-use osvm::VirtMutPtr;
 use posix_types::{TimeValueLike, UserPtr};
 
 /// Returns the process ID of the current process.

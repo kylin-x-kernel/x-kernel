@@ -26,7 +26,7 @@ use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, PRIO_PGRP, PRIO_PROCESS, PRIO_USER,
     SCHED_RR, TIMER_ABSTIME, timespec,
 };
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
 pub fn sys_sched_yield() -> KResult<isize> {

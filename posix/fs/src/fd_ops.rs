@@ -15,7 +15,7 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kservices::file::Pipe;
 use linux_raw_sys::general::*;
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_types::UserPtr;
 
 /// Closes the specified file descriptor.

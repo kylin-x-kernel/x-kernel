@@ -13,7 +13,6 @@ use kthread::current_process_state;
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
 };
-use osvm::VirtMutPtr;
 use posix_types::{UserConstPtr, UserPtr};
 
 use crate::path::resolve_at;

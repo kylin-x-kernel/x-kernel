@@ -24,6 +24,7 @@ use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
 use posix_credentials::*;
+use posix_io_mpx::*;
 use posix_ipc::*;
 use posix_mm::*;
 use posix_process::*;

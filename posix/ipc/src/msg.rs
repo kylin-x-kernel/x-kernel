@@ -14,7 +14,7 @@ use kprocess::Pid;
 use ksync::Mutex;
 use kthread::current_process_state;
 use linux_raw_sys::general::*;
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_types::{IpcPerm, UserConstPtr, UserPtr};
 
 use super::{

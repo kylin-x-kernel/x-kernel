@@ -6,7 +6,6 @@
 
 use kcred::{Gid, Uid};
 use kerrno::KResult;
-use osvm::VirtMutPtr;
 use posix_types::UserPtr;
 
 use crate::helpers::{

@@ -16,7 +16,6 @@ use kerrno::KResult;
 use kfd::FileLike;
 use kservices::file::Pipe;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
-use osvm::VirtMutPtr;
 use posix_types::UserPtr;
 
 bitflags! {

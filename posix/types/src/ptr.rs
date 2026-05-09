@@ -5,20 +5,39 @@
 //! User-space pointer wrappers for POSIX syscalls.
 //!
 //! Provides [`UserPtr`] and [`UserConstPtr`] that wrap raw user-space pointers
-//! with typed `read_vm`/`write_vm` access via the `osvm` traits.
+//! with copy-from-user / copy-to-user helpers for syscall ABI values.
 
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
-use core::{ffi::c_char, ptr};
+use core::{
+    ffi::c_char,
+    mem::{MaybeUninit, size_of, size_of_val},
+    ptr, slice,
+};
 
 use bytemuck::AnyBitPattern;
 use kerrno::{KError, KResult};
-use osvm::{VirtMutPtr, VirtPtr, load_vec, load_vec_until_null, write_vm_mem};
+use osvm::{VirtMutPtr, VirtPtr, load_vec_until_null, read_vm_bytes, write_vm_bytes};
+
+fn as_uninit_bytes<T>(value: &mut MaybeUninit<T>) -> &mut [MaybeUninit<u8>] {
+    unsafe {
+        slice::from_raw_parts_mut(value.as_mut_ptr().cast::<MaybeUninit<u8>>(), size_of::<T>())
+    }
+}
+
+fn spare_as_uninit_bytes<T>(spare: &mut [MaybeUninit<T>]) -> &mut [MaybeUninit<u8>] {
+    unsafe {
+        slice::from_raw_parts_mut(
+            spare.as_mut_ptr().cast::<MaybeUninit<u8>>(),
+            size_of_val(spare),
+        )
+    }
+}
 
 /// A mutable pointer to user-space memory.
 ///
-/// Supports typed reads and writes via the `VirtPtr`/`VirtMutPtr` traits.
+/// Provides copy-to-user helpers for syscall ABI values.
 #[repr(transparent)]
 pub struct UserPtr<T>(*mut T);
 
@@ -70,9 +89,15 @@ impl<T> UserPtr<T> {
         UserPtr(self.0 as *mut U)
     }
 
+    /// Write a value to user memory with copy-to-user semantics.
+    pub fn write_vm(self, value: T) -> osvm::MemResult {
+        self.write_vm_slice(slice::from_ref(&value))
+    }
+
     /// Write a slice of values to user memory.
     pub fn write_vm_slice(self, data: &[T]) -> osvm::MemResult {
-        write_vm_mem(self.0, data)
+        let bytes = unsafe { slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) };
+        write_vm_bytes(self.0.cast::<u8>(), bytes)
     }
 }
 
@@ -88,7 +113,7 @@ impl<T> VirtMutPtr for UserPtr<T> {}
 
 /// A read-only pointer to user-space memory.
 ///
-/// Supports typed reads via the `VirtPtr` trait.
+/// Provides copy-from-user helpers for syscall ABI values.
 #[repr(transparent)]
 pub struct UserConstPtr<T>(*const T);
 
@@ -140,12 +165,34 @@ impl<T> UserConstPtr<T> {
         UserConstPtr(self.0 as *const U)
     }
 
+    /// Read into an uninitialized buffer with copy-from-user semantics.
+    pub fn read_uninit(self) -> osvm::MemResult<MaybeUninit<T>> {
+        let mut value = MaybeUninit::<T>::uninit();
+        read_vm_bytes(self.0.cast::<u8>(), as_uninit_bytes(&mut value))?;
+        Ok(value)
+    }
+
+    /// Read a typed value from user memory with copy-from-user semantics.
+    pub fn read_vm(self) -> osvm::MemResult<T>
+    where
+        T: AnyBitPattern,
+    {
+        let value = self.read_uninit()?;
+        Ok(unsafe { value.assume_init() })
+    }
+
     /// Load a vector of values from user memory.
     pub fn load_vm_vec(self, len: usize) -> osvm::MemResult<Vec<T>>
     where
         T: AnyBitPattern,
     {
-        load_vec(self.0, len)
+        let mut vec = Vec::with_capacity(len);
+        read_vm_bytes(
+            self.0.cast::<u8>(),
+            spare_as_uninit_bytes(&mut vec.spare_capacity_mut()[..len]),
+        )?;
+        unsafe { vec.set_len(len) };
+        Ok(vec)
     }
 }
 

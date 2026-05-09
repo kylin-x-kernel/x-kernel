@@ -4,7 +4,6 @@
 
 //! File descriptor abstractions and concrete file-like implementations.
 
-pub mod epoll;
 pub mod event;
 mod fs;
 mod net;

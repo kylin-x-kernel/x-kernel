@@ -17,7 +17,7 @@ use kthread::current_process_state;
 use linux_raw_sys::{ctypes::c_ushort, general::*};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::backend::{Backend, SharedPages};
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_types::{IpcPerm, UserPtr};
 
 use super::{IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, next_ipc_id};

@@ -1,6 +1,6 @@
 [package]
-name = "posix-process"
-description = "POSIX process syscall implementations"
+name = "posix-io-mpx"
+description = "POSIX I/O multiplexing syscall implementations"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -10,10 +10,18 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+bitflags.workspace = true
+hashbrown.workspace = true
 kerrno.workspace = true
-khal.workspace = true
-kprocess.workspace = true
+kfd.workspace = true
+klogger.workspace = true
+kpoll.workspace = true
+kservices.workspace = true
+ksignal.workspace = true
+kspin.workspace = true
 ktask.workspace = true
 kthread.workspace = true
 linux-raw-sys.workspace = true
+posix-signal.workspace = true
 posix-types.workspace = true
+unittest.workspace = true

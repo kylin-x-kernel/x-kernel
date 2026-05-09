@@ -50,6 +50,11 @@ pub fn read_vm_mem<T>(p: *const T, out: &mut [MaybeUninit<T>]) -> MemResult {
     MemImpl::new().read_mem(p.addr(), out.as_bytes_mut())
 }
 
+/// Read raw bytes from virtual memory without imposing typed alignment.
+pub fn read_vm_bytes(p: *const u8, out: &mut [MaybeUninit<u8>]) -> MemResult {
+    MemImpl::new().read_mem(p.addr(), out)
+}
+
 /// Write a typed slice to virtual memory.
 pub fn write_vm_mem<T>(p: *mut T, src: &[T]) -> MemResult {
     if !p.is_aligned() {
@@ -57,6 +62,11 @@ pub fn write_vm_mem<T>(p: *mut T, src: &[T]) -> MemResult {
     }
     let bytes = unsafe { slice::from_raw_parts(src.as_ptr().cast::<u8>(), size_of_val(src)) };
     MemImpl::new().write_mem(p.addr(), bytes)
+}
+
+/// Write raw bytes to virtual memory without imposing typed alignment.
+pub fn write_vm_bytes(p: *mut u8, src: &[u8]) -> MemResult {
+    MemImpl::new().write_mem(p.addr(), src)
 }
 
 mod ptrs;
