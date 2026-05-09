@@ -18,9 +18,11 @@ pub fn poll_timer(task: &TaskInner) {
     let Ok(mut time) = thread.time.try_borrow_mut() else {
         return;
     };
-    time.poll(|signo| {
+    let signals = time.poll();
+    drop(time);
+    for signo in signals.into_iter().flatten() {
         send_signal_thread_inner(task, thread, SignalInfo::new_kernel(signo));
-    });
+    }
 }
 
 /// Sets the timer state for a task.
@@ -31,10 +33,12 @@ pub fn set_timer_state(task: &TaskInner, state: TimerState) {
     let Ok(mut time) = thread.time.try_borrow_mut() else {
         return;
     };
-    time.poll(|signo| {
-        send_signal_thread_inner(task, thread, SignalInfo::new_kernel(signo));
-    });
+    let signals = time.poll();
     time.set_state(state);
+    drop(time);
+    for signo in signals.into_iter().flatten() {
+        send_signal_thread_inner(task, thread, SignalInfo::new_kernel(signo));
+    }
 }
 
 fn send_signal_thread_inner(task: &TaskInner, thread: &Thread, sig: SignalInfo) {

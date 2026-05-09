@@ -60,6 +60,7 @@ lazy_static! {
 
 static EVENT_NEW_TIMER: Event = Event::new();
 static EXPIRED_TASK_HANDLER: Once<fn(&TaskInner)> = Once::new();
+const ITIMER_SIGNAL_CAPACITY: usize = 3;
 
 fn timer_signal(ty: ITimerType) -> Signo {
     match ty {
@@ -161,24 +162,43 @@ impl TimeManager {
         (utime, stime)
     }
 
-    /// Polls the time manager to update timers and emit signals if necessary.
-    pub fn poll(&mut self, emitter: impl Fn(Signo)) {
+    /// Polls the time manager and returns expired timer signals.
+    pub fn poll(&mut self) -> [Option<Signo>; ITIMER_SIGNAL_CAPACITY] {
         let now_ns = monotonic_time_nanos() as usize;
         let delta = now_ns - self.last_wall_ns;
+        let mut signals = [None; ITIMER_SIGNAL_CAPACITY];
+        let mut signal_count = 0;
         match self.state {
             TimerState::User => {
                 self.utime_ns += delta;
-                self.update_itimer(ITimerType::Virtual, delta, &emitter);
-                self.update_itimer(ITimerType::Prof, delta, &emitter);
+                Self::push_signal(
+                    &mut signals,
+                    &mut signal_count,
+                    self.update_itimer(ITimerType::Virtual, delta),
+                );
+                Self::push_signal(
+                    &mut signals,
+                    &mut signal_count,
+                    self.update_itimer(ITimerType::Prof, delta),
+                );
             }
             TimerState::Kernel => {
                 self.stime_ns += delta;
-                self.update_itimer(ITimerType::Prof, delta, &emitter);
+                Self::push_signal(
+                    &mut signals,
+                    &mut signal_count,
+                    self.update_itimer(ITimerType::Prof, delta),
+                );
             }
             TimerState::None => {}
         }
-        self.update_itimer(ITimerType::Real, delta, &emitter);
+        Self::push_signal(
+            &mut signals,
+            &mut signal_count,
+            self.update_itimer(ITimerType::Real, delta),
+        );
         self.last_wall_ns = now_ns;
+        signals
     }
 
     /// Updates the timer state.
@@ -213,9 +233,20 @@ impl TimeManager {
         )
     }
 
-    fn update_itimer(&mut self, ty: ITimerType, delta: usize, emitter: impl Fn(Signo)) {
-        if self.itimers[ty as usize].update(delta) {
-            emitter(timer_signal(ty));
+    fn update_itimer(&mut self, ty: ITimerType, delta: usize) -> Option<Signo> {
+        self.itimers[ty as usize]
+            .update(delta)
+            .then(|| timer_signal(ty))
+    }
+
+    fn push_signal(
+        signals: &mut [Option<Signo>; ITIMER_SIGNAL_CAPACITY],
+        signal_count: &mut usize,
+        signo: Option<Signo>,
+    ) {
+        if let Some(signo) = signo {
+            signals[*signal_count] = Some(signo);
+            *signal_count += 1;
         }
     }
 }
@@ -277,9 +308,6 @@ pub fn spawn_alarm_task() {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::vec::Vec;
-    use core::cell::RefCell;
-
     use ksignal::Signo;
     use posix_types::ITimerType;
     use unittest::def_test;
@@ -394,12 +422,9 @@ mod tests {
             remaining_ns: 1,
         };
 
-        let emitted = RefCell::new(Vec::new());
-        tm.update_itimer(ITimerType::Real, 1, |signo| {
-            emitted.borrow_mut().push(signo)
-        });
+        let emitted = tm.update_itimer(ITimerType::Real, 1);
 
-        assert_eq!(emitted.borrow().as_slice(), &[Signo::SIGALRM]);
+        assert_eq!(emitted, Some(Signo::SIGALRM));
         let (_, remained) = tm.get_itimer(ITimerType::Real);
         assert_eq!(remained.subsec_nanos(), 0);
     }
@@ -412,12 +437,9 @@ mod tests {
             remaining_ns: 10,
         };
 
-        let emitted = RefCell::new(Vec::new());
-        tm.update_itimer(ITimerType::Prof, 3, |signo| {
-            emitted.borrow_mut().push(signo)
-        });
+        let emitted = tm.update_itimer(ITimerType::Prof, 3);
 
-        assert!(emitted.borrow().is_empty());
+        assert_eq!(emitted, None);
         let (_, remained) = tm.get_itimer(ITimerType::Prof);
         assert_eq!(remained.subsec_nanos(), 7);
     }
