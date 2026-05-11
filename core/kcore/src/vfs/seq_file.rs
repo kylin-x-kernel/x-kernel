@@ -7,13 +7,13 @@
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, cmp::min, fmt, task::Context};
 
-use fs_ng_vfs::{
-    FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
-    NodeType, VfsError, VfsResult,
-};
 use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
+use kvfs::{
+    FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
+    NodeType, VfsError, VfsResult,
+};
 
 use super::{SimpleFs, SimpleFsNode};
 

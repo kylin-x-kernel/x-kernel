@@ -9,15 +9,15 @@ mod tmp;
 
 use alloc::{string::String, vec::Vec};
 
-use fs_ng_vfs::{
-    Filesystem, NodePermission, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME, VfsError, VfsResult,
-    path::{Path, PathBuf},
-};
 pub use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 use kerrno::{LinuxError, LinuxResult};
 use kfs::{FsContext, kernel_fs_context};
 use ktask::KtaskRef;
 use kthread::AsThread;
+use kvfs::{
+    Filesystem, NodePermission, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME, VfsError, VfsResult,
+    path::{Path, PathBuf},
+};
 use procfs::ProcFsHooks;
 pub use tmp::MemoryFs;
 

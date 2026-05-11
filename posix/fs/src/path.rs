@@ -7,12 +7,12 @@
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::ffi::c_int;
 
-use fs_ng_vfs::{Location, Metadata};
 use kerrno::{KError, KResult};
 use kfd::{FileLike, Kstat};
 pub use kservices::file::with_fs;
 use kservices::file::{Directory, File};
 use kthread::{current_process_state, current_thread, get_process_state};
+use kvfs::{Location, Metadata};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, O_NOFOLLOW, O_PATH};
 
 /// The coarse shape of a path string before any runtime resolution.

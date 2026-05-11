@@ -1,0 +1,31 @@
+[package]
+name = "procfs"
+description = "Procfs support crate for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+tee = ["kcore/tee", "kthread/tee", "dep:tee_task_iface"]
+
+[dependencies]
+kvfs.workspace = true
+kaddr_layout.workspace = true
+kalloc.workspace = true
+kcore.workspace = true
+khal.workspace = true
+memaddr.workspace = true
+memspace.workspace = true
+memspace_file.workspace = true
+kprocess.workspace = true
+kthread.workspace = true
+ktask.workspace = true
+ktracing.workspace = true
+unittest.workspace = true
+tee_task_iface = { workspace = true, optional = true }
+
+[target.'cfg(any(target_arch = "riscv32", target_arch = "riscv64"))'.dependencies]
+riscv = "0.14"

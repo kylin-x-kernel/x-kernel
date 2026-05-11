@@ -5,9 +5,9 @@
 use alloc::sync::Arc;
 use core::any::Any;
 
-use fs_ng_vfs::{DeviceId, NodeType};
 use kcore::vfs::{Device, DeviceOps, SimpleFs};
 use kerrno::KResult;
+use kvfs::{DeviceId, NodeType};
 
 /// Master pseudoterminal device (/dev/ptmx)
 pub struct Ptmx(pub Arc<SimpleFs>);

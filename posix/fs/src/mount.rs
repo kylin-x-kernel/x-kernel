@@ -6,10 +6,10 @@
 
 use core::ffi::{c_char, c_void};
 
-use fs_ng_vfs::{ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
 use kerrno::{KError, KResult};
 use kservices::vfs::MemoryFs;
 use kthread::current_process_state;
+use kvfs::{ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
 use posix_types::UserConstPtr;
 
 fn mount_flags_from_sys_mount(flags: i32) -> u32 {

@@ -87,17 +87,17 @@ posix-types = { path = "posix/types" }
 
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
-fs-ng-vfs = { path = "fs/fs-ng-vfs" }
+kvfs = { path = "fs/foundation/kvfs" }
 kaddr_layout = { path = "mm/kaddr_layout" }
 kalloc = { path = "mm/kalloc" }
-kfs = { path = "fs/kfs" }
-procfs = { path = "fs/procfs" }
+kfs = { path = "fs/runtime/kfs" }
+procfs = { path = "fs/filesystems/procfs" }
 memaddr = { path = "mm/memaddr" }
 memset = { path = "mm/memset" }
 memspace = { path = "mm/memspace" }
 memspace_file = { path = "mm/memspace-file", package = "memspace-file" }
 page_table = { path = "mm/page_table" }
-rsext4 = { path = "fs/rsext4", default-features = false }
+rsext4 = { path = "fs/filesystems/rsext4", default-features = false }
 
 # Internal: IO and network subsystem
 fbdevice = { path = "io/fbdevice" }
@@ -195,7 +195,7 @@ spin = "0.10"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 x86_64 = { version = "0.15.2", features = ["instructions"] }
-fs9p = { path = "fs/fs9p", default-features = false }
+fs9p = { path = "fs/filesystems/fs9p", default-features = false }
 ktracepoint = "0.5"
 static-keys = "0.8"
 buddy-slab-allocator = "0.4"

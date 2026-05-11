@@ -4,9 +4,9 @@
 
 use core::ffi::c_int;
 
-use fs_ng_vfs::{Location, Metadata};
 use kerrno::{KError, KResult};
 use kfs::FsContext;
+use kvfs::{Location, Metadata};
 use linux_raw_sys::general::{AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {

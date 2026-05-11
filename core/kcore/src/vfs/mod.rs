@@ -16,7 +16,7 @@ pub use dev::*;
 pub use dir::*;
 pub use file::*;
 pub use fs::*;
-use fs_ng_vfs::{DirNodeOps, FileNodeOps, WeakDirEntry};
+use kvfs::{DirNodeOps, FileNodeOps, WeakDirEntry};
 pub use seq_file::*;
 
 /// A callback that builds a `Arc<dyn DirNodeOps>` for a given
@@ -50,7 +50,7 @@ impl<T: FileNodeOps> From<Arc<T>> for NodeOpsMux {
 pub mod tests_vfs {
     use alloc::{boxed::Box, sync::Arc};
 
-    use fs_ng_vfs::{DirNodeOps, VfsError, WeakDirEntry};
+    use kvfs::{DirNodeOps, VfsError, WeakDirEntry};
     use unittest::{TestResult, def_test};
 
     use super::{DirMapping, NodeOpsMux, SimpleDirOps, dummy_stat_fs};
@@ -62,7 +62,7 @@ pub mod tests_vfs {
             Box::new(core::iter::empty())
         }
 
-        fn lookup_child(&self, _name: &str) -> fs_ng_vfs::VfsResult<NodeOpsMux> {
+        fn lookup_child(&self, _name: &str) -> kvfs::VfsResult<NodeOpsMux> {
             Err(VfsError::NotFound)
         }
 
@@ -83,7 +83,7 @@ pub mod tests_vfs {
         assert_eq!(stat.fs_type, 0x1234);
         assert_eq!(stat.block_size, 512);
         assert_eq!(stat.blocks, 100);
-        assert_eq!(stat.name_length, fs_ng_vfs::path::MAX_NAME_LEN as u32);
+        assert_eq!(stat.name_length, kvfs::path::MAX_NAME_LEN as u32);
     }
 
     #[def_test]
@@ -146,7 +146,7 @@ pub mod tests_vfs {
                 Box::new(core::iter::empty())
             }
 
-            fn lookup_child(&self, _name: &str) -> fs_ng_vfs::VfsResult<NodeOpsMux> {
+            fn lookup_child(&self, _name: &str) -> kvfs::VfsResult<NodeOpsMux> {
                 Err(VfsError::PermissionDenied)
             }
         }

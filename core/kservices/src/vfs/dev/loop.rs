@@ -7,11 +7,11 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
-use fs_ng_vfs::{DeviceId, NodeFlags, VfsResult};
 use kcore::vfs::{DeviceMmap, DeviceOps};
 use kerrno::{KError, KResult, LinuxError};
 use kfs::FileBackend;
 use ksync::Mutex;
+use kvfs::{DeviceId, NodeFlags, VfsResult};
 use linux_raw_sys::{
     ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKRAGET, BLKRASET, BLKROGET, BLKROSET},
     loop_device::{LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info},

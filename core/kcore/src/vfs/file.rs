@@ -7,12 +7,12 @@
 use alloc::{borrow::Cow, sync::Arc, vec::Vec};
 use core::{any::Any, cmp::Ordering, task::Context};
 
-use fs_ng_vfs::{
+use inherit_methods_macro::inherit_methods;
+use kpoll::{IoEvents, Pollable};
+use kvfs::{
     FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
     NodeType, VfsError, VfsResult,
 };
-use inherit_methods_macro::inherit_methods;
-use kpoll::{IoEvents, Pollable};
 
 use super::fs::{SimpleFs, SimpleFsNode};
 

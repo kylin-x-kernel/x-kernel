@@ -7,7 +7,6 @@
 use alloc::{format, string::ToString, sync::Arc};
 use core::ffi::{c_char, c_int};
 
-use fs_ng_vfs::{DirEntry, FileNode, Location, NodeType, Reference};
 use kcore::vfs::Device;
 use kerrno::{KError, KResult};
 use kfs::{FileBackend, OpenOptions, OpenResult};
@@ -16,6 +15,7 @@ use kservices::{
     vfs::dev::tty,
 };
 use kthread::current_process_state;
+use kvfs::{DirEntry, FileNode, Location, NodeType, Reference};
 use linux_raw_sys::general::*;
 use posix_types::UserConstPtr;
 

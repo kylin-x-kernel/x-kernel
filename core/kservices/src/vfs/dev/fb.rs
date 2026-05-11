@@ -4,12 +4,12 @@
 
 use core::{any::Any, slice};
 
-use fs_ng_vfs::{NodeFlags, VfsError, VfsResult};
 use kcore::vfs::{DeviceMmap, DeviceOps};
 #[allow(unused_imports)]
 use kdriver::prelude::DisplayDriverOps;
 use kerrno::KError;
 use khal::mem::v2p;
+use kvfs::{NodeFlags, VfsError, VfsResult};
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
 

@@ -24,7 +24,7 @@ pub use self::{
 mod tests {
     use core::time::Duration;
 
-    use fs_ng_vfs::DeviceId;
+    use kvfs::DeviceId;
     use linux_raw_sys::general::stat;
     use unittest::def_test;
 

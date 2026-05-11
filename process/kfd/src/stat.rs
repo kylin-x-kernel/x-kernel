@@ -6,7 +6,7 @@
 
 use core::time::Duration;
 
-use fs_ng_vfs::DeviceId;
+use kvfs::DeviceId;
 use linux_raw_sys::general::{
     S_IFMT, S_IFREG, STATX_ATTR_WRITE_ATOMIC, STATX_WRITE_ATOMIC, stat, statx, statx_timestamp,
 };

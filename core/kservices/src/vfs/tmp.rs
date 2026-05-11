@@ -5,15 +5,15 @@
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{any::Any, borrow::Borrow, cmp::Ordering, task::Context, time::Duration};
 
-use fs_ng_vfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
-    FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType,
-    Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
-};
 use hashbrown::HashMap;
 use kcore::vfs::dummy_stat_fs_with_flags;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
+use kvfs::{
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
+    FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType,
+    Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
+};
 use slab::Slab;
 
 #[derive(PartialEq, Eq, Hash, Clone)]

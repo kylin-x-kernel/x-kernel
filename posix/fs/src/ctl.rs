@@ -19,11 +19,11 @@ use core::{
     time::Duration,
 };
 
-use fs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, path::Path};
 use kerrno::{KError, KResult};
 use kfs::FsContext;
 use khal::time::wall_time;
 use kservices::file::Directory;
+use kvfs::{MetadataUpdate, NodePermission, NodeType, path::Path};
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},

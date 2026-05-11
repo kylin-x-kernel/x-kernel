@@ -5,12 +5,12 @@
 use alloc::{format, sync::Arc, vec::Vec};
 use core::ffi::c_int;
 
-use fs_ng_vfs::{NodePermission, VfsError};
 use kerrno::{KError, KResult};
 use kfs::{File, FileBackend, FileFlags, OpenOptions, OpenResult};
 use kio::{Seek, SeekFrom};
 use ksync::RwLock;
 use kthread;
+use kvfs::{NodePermission, VfsError};
 use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};

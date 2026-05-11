@@ -12,13 +12,13 @@ use core::{
     task::Context,
 };
 
-use fs_ng_vfs::{Location, Metadata, NodeFlags};
 use kerrno::{KError, KResult};
 use kfd::FdTable;
 use kfs::FsContext;
 use kpoll::{IoEvents, Pollable};
 use ksync::{Mutex, RwLock};
 use ktask::future::{block_on, poll_io};
+use kvfs::{Location, Metadata, NodeFlags};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 use super::{FileLike, Kstat};

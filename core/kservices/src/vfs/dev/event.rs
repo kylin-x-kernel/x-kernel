@@ -6,7 +6,6 @@ use alloc::{format, sync::Arc};
 use core::{any::Any, task::Context, time::Duration};
 
 use bitmaps::Bitmap;
-use fs_ng_vfs::{DeviceId, NodeFlags, NodeType, VfsResult};
 use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 #[allow(unused_imports)]
 use kdriver::prelude::{
@@ -16,6 +15,7 @@ use kerrno::{KError, KResult};
 use khal::time::wall_time;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
+use kvfs::{DeviceId, NodeFlags, NodeType, VfsResult};
 use linux_raw_sys::{
     general::{__kernel_old_time_t, __kernel_suseconds_t},
     ioctl::{EVIOCGID, EVIOCGRAB, EVIOCGVERSION},

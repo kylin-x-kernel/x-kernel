@@ -5,12 +5,12 @@
 use alloc::sync::{Arc, Weak};
 use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
 
-use fs_ng_vfs::NodeFlags;
 use kcore::vfs::{DeviceOps, SimpleFs};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, Pollable};
 use kprocess::Process;
 use ksync::Mutex;
+use kvfs::NodeFlags;
 use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::terminal::{

@@ -7,13 +7,13 @@
 use alloc::sync::Arc;
 use core::{any::Any, task::Context};
 
-use fs_ng_vfs::{
-    DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps,
-    NodePermission, NodeType, VfsError, VfsResult,
-};
 use inherit_methods_macro::inherit_methods;
 use kfs::CachedFile;
 use kpoll::{IoEvents, Pollable};
+use kvfs::{
+    DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps,
+    NodePermission, NodeType, VfsError, VfsResult,
+};
 use memaddr::PhysAddrRange;
 
 use super::{SimpleFs, SimpleFsNode};

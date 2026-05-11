@@ -23,7 +23,7 @@ klogger.workspace = true
 kpoll.workspace = true
 kservices.workspace = true
 kthread.workspace = true
-fs-ng-vfs.workspace = true
+kvfs.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 linux_sysno.workspace = true
 osvm.workspace = true

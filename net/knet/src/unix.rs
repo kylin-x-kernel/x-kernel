@@ -11,7 +11,6 @@ use core::task::Context;
 
 use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
-use fs_ng_vfs::NodeType;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
 use kfs::OpenOptions;
@@ -19,6 +18,7 @@ use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
+use kvfs::NodeType;
 use lazy_static::lazy_static;
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};

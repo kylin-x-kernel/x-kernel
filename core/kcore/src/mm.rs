@@ -8,7 +8,6 @@ use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
 use core::{ffi::CStr, hint::unlikely, iter, mem::MaybeUninit};
 
 use extern_trait::extern_trait;
-use fs_ng_vfs::Location;
 use kaddr_layout::{USER_SPACE_BASE, USER_SPACE_SIZE};
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
@@ -22,6 +21,7 @@ use kspin::IrqSave;
 use ksync::Mutex;
 use ktask::current;
 use kthread::AsThread;
+use kvfs::Location;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::AddrSpace;
 use memspace_file::{new_alloc, new_cow};

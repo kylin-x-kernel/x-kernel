@@ -5,8 +5,8 @@
 use alloc::{boxed::Box, vec};
 use core::any::Any;
 
-use fs_ng_vfs::{NodeFlags, VfsResult};
 use kcore::vfs::DeviceOps;
+use kvfs::{NodeFlags, VfsResult};
 use lazyinit::LazyInit;
 static DTB_SNAPSHOT: LazyInit<Box<[u8]>> = LazyInit::new();
 

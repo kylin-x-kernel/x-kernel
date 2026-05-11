@@ -45,7 +45,7 @@ aarch64_crosvm_virt = [
 ]
 
 [dependencies]
-fs-ng-vfs.workspace = true
+kvfs.workspace = true
 xcov.workspace = true
 kfeat.workspace = true
 kfs.workspace = true

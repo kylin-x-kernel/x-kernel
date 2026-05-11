@@ -11,9 +11,9 @@ use core::{
 };
 
 use backtrace::Backtrace;
-use fs_ng_vfs::{NodeFlags, VfsResult};
 use kcore::{mm::clear_elf_cache, vfs::DeviceOps};
 use kthread::{cleanup_task_tables, tasks};
+use kvfs::{NodeFlags, VfsResult};
 
 static STAMPED_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -68,8 +68,8 @@ impl MemoryCategory {
                 "ktask::timers::set_alarm_wakeup" => {
                     return Some("timer");
                 }
-                "fs_ng_vfs::node::dir::DirNode::lookup_locked"
-                | "fs_ng_vfs::node::dir::DirNode::create_locked" => {
+                "kvfs::node::dir::DirNode::lookup_locked"
+                | "kvfs::node::dir::DirNode::create_locked" => {
                     return Some("dentry");
                 }
                 "ext4_user_malloc" => {

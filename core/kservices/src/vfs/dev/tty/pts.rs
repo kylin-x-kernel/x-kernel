@@ -6,10 +6,10 @@ use alloc::{borrow::Cow, boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use flatten_objects::FlattenObjects;
-use fs_ng_vfs::{DeviceId, NodeType, VfsResult};
 use kcore::vfs::{Device, NodeOpsMux, SimpleDirOps, SimpleFs};
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
+use kvfs::{DeviceId, NodeType, VfsResult};
 
 use super::pty::PtyDriver;
 

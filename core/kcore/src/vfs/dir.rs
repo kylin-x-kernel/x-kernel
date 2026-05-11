@@ -13,12 +13,12 @@ use alloc::{
 };
 use core::any::Any;
 
-use fs_ng_vfs::{
+use inherit_methods_macro::inherit_methods;
+use kvfs::{
     DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FilesystemOps, Metadata, MetadataUpdate,
     NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
     path::{DOT, DOTDOT},
 };
-use inherit_methods_macro::inherit_methods;
 
 use super::{DirMaker, NodeOpsMux, SimpleFs, SimpleFsNode};
 

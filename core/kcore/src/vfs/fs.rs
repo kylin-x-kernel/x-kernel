@@ -7,11 +7,11 @@
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, time::Duration};
 
-use fs_ng_vfs::{
+use ksync::Mutex;
+use kvfs::{
     DeviceId, DirEntry, DirNode, Filesystem, FilesystemOps, Metadata, MetadataUpdate, NodeOps,
     NodePermission, NodeType, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
 };
-use ksync::Mutex;
 use slab::Slab;
 
 use super::DirMaker;

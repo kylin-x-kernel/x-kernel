@@ -21,13 +21,13 @@ pub mod tty;
 use alloc::{format, sync::Arc};
 use core::any::Any;
 
-use fs_ng_vfs::{
-    DeviceId, Filesystem, NodeFlags, NodeType, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME,
-    VfsResult,
-};
 use kcore::vfs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFs};
 use kerrno::KError;
 use ksync::Mutex;
+use kvfs::{
+    DeviceId, Filesystem, NodeFlags, NodeType, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME,
+    VfsResult,
+};
 #[cfg(feature = "dev-log")]
 pub use log::bind_dev_log;
 use rand::{RngCore, SeedableRng, rngs::SmallRng};

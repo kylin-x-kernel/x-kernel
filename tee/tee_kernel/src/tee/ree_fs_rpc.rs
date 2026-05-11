@@ -4,7 +4,7 @@
 
 use alloc::string::{String, ToString};
 
-use fs_ng_vfs::VfsError;
+use kvfs::VfsError;
 use tee_raw_sys::{TEE_ERROR_BAD_FORMAT, TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM_NOT_FOUND};
 
 use super::{

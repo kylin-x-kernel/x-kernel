@@ -81,7 +81,7 @@ fn main() {
 
         warn!("Cleaning up stale coverage data if exists...");
         if let Err(err) = fs_ops.remove_file("/.llvm-cov/default.profraw") {
-            if err.canonicalize() != fs_ng_vfs::VfsError::NotFound {
+            if err.canonicalize() != kvfs::VfsError::NotFound {
                 warn!("Failed to remove stale coverage data: {:?}", err);
             }
         }
@@ -126,7 +126,7 @@ fn main() {
         let root = cx.root_dir().clone();
         let fs_ops = kfs::FsOperations::new(root);
 
-        let _ = fs_ops.create_dir("/.llvm-cov", fs_ng_vfs::NodePermission::default());
+        let _ = fs_ops.create_dir("/.llvm-cov", kvfs::NodePermission::default());
         if let Err(e) = fs_ops.write("/.llvm-cov/default.profraw", &cov) {
             error!("Failed to write coverage data: {:?}", e);
         } else {
