@@ -16,10 +16,11 @@ use khal::{
     asm::user_copy,
     mem::v2p,
     paging::{MappingFlags, PageSize},
+    trap::{PAGE_FAULT, register_trap_handler},
 };
 use kspin::IrqSave;
 use ksync::Mutex;
-use ktask::current;
+use ktask::{current, current_may_uninit};
 use kthread::AsThread;
 use kvfs::Location;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
@@ -372,6 +373,26 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     let result = f();
     thr.set_accessing_user_memory(false);
     result
+}
+
+#[register_trap_handler(PAGE_FAULT)]
+fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
+    let Some(curr) = current_may_uninit() else {
+        return false;
+    };
+    let Some(thread) = curr.try_as_thread() else {
+        return false;
+    };
+
+    if unlikely(!thread.is_accessing_user_memory()) {
+        return false;
+    }
+
+    thread
+        .process_state()
+        .address_space()
+        .lock()
+        .dispatch_irq_page_fault(vaddr, access_flags)
 }
 
 #[allow(dead_code)]

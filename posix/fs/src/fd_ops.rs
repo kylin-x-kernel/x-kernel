@@ -15,7 +15,6 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kservices::file::Pipe;
 use linux_raw_sys::general::*;
-use osvm::VirtPtr;
 use posix_types::UserPtr;
 
 /// Closes the specified file descriptor.
@@ -111,7 +110,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
         F_OFD_SETLK | F_OFD_SETLKW => Ok(0),
         F_GETLK | F_OFD_GETLK => {
             let arg = UserPtr::<flock64>::from(arg);
-            let mut lock = unsafe { arg.read_uninit()?.assume_init() };
+            let mut lock = arg.read_vm()?;
             lock.l_type = F_UNLCK as _;
             arg.write_vm(lock)?;
             Ok(0)

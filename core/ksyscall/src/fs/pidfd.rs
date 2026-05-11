@@ -13,9 +13,9 @@ use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
 use kservices::file::PidFd;
-use ksignal::SignalInfo;
 use kthread::{get_process_state, send_signal_to_process};
 use posix_signal::make_queue_signal_info;
+use posix_types::{UserConstPtr, k_siginfo};
 
 /// Create a process file descriptor (pidfd) for the specified process
 ///
@@ -70,12 +70,12 @@ pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize>
 /// Send a signal to the process referenced by the pidfd
 ///
 /// This allows sending signals to processes using their process file descriptors.
-/// The signal can optionally carry additional data via SignalInfo.
+/// The signal can optionally carry additional data via `siginfo_t`.
 /// Flags must be 0 (no additional options currently supported).
 pub fn sys_pidfd_send_signal(
     pidfd: i32,
     signo: u32,
-    sig: *mut SignalInfo,
+    sig: UserConstPtr<k_siginfo>,
     flags: u32,
 ) -> KResult<isize> {
     // No flags are currently supported - must be 0

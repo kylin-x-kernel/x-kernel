@@ -20,7 +20,7 @@ use knet::{
     CMsgData, KernelCmsg, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps,
     UdpRecvError,
 };
-use kservices::mm::{UserConstPtr, UserPtr, VmBytes, VmBytesMut};
+use kservices::mm::{VmBytes, VmBytesMut};
 use linux_raw_sys::{
     general::timespec,
     net::{
@@ -28,7 +28,8 @@ use linux_raw_sys::{
         msghdr, sockaddr, socklen_t,
     },
 };
-use posix_types::TimeValueLike;
+use osvm::{VirtPtr, write_vm_mem};
+use posix_types::{IoVec, IoVectorBuf, TimeValueLike, UserConstPtr, UserPtr};
 
 // Linux ABI for sendmmsg/recvmmsg limits vlen to UIO_MAXIOV (1024).
 const MMSG_MAX_VLEN: u32 = 1024;
@@ -37,8 +38,7 @@ fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Dur
     if timeout.is_null() {
         return Ok(None);
     }
-    let ts = timeout.get_as_ref()?;
-    let tv = (*ts).try_into_time_value()?;
+    let tv = timeout.read_vm()?.try_into_time_value()?;
     Ok(Some(Duration::new(tv.as_secs(), tv.subsec_nanos())))
 }
 
@@ -60,12 +60,13 @@ fn parse_send_cmsgs(
             break;
         }
 
-        let hdr = UserConstPtr::<cmsghdr>::from(ptr).get_as_ref()?;
+        let hdr_ptr = UserConstPtr::<cmsghdr>::from(ptr);
+        let hdr = hdr_ptr.read_vm()?;
         if hdr.cmsg_len < size_of::<cmsghdr>() || ptr_end - ptr < hdr.cmsg_len {
             return Err(KError::InvalidInput);
         }
 
-        cmsg.push(Box::new(CMsg::parse(resources, hdr)?) as CMsgData);
+        cmsg.push(Box::new(CMsg::parse(resources, hdr_ptr, hdr)?) as CMsgData);
         ptr += hdr.cmsg_len;
     }
 
@@ -74,7 +75,6 @@ fn parse_send_cmsgs(
 
 use crate::{
     file::{FileLike, Socket},
-    io::{IoVec, IoVectorBuf},
     net::{CMsg, CMsgBuilder},
     socket::SocketAddrExt,
 };
@@ -179,7 +179,7 @@ pub fn sys_sendto(
 
 /// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
-    let msg = msg.get_as_ref()?;
+    let msg = msg.read_vm()?;
     let resources = kthread::current_resources();
     let cmsg = parse_send_cmsgs(
         resources.as_ref(),
@@ -188,7 +188,11 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<is
     )?;
     send_impl(
         fd,
-        IoVectorBuf::new(msg.msg_iov as *const IoVec, msg.msg_iovlen)?.into_io(),
+        IoVectorBuf::from_iovecs(IoVec::load_from_user(
+            posix_types::UserConstPtr::from(msg.msg_iov as usize),
+            msg.msg_iovlen,
+        )?)?
+        .into_io(),
         flags,
         UserConstPtr::from(msg.msg_name as usize),
         msg.msg_namelen as socklen_t,
@@ -236,7 +240,9 @@ fn recv_impl(
     )?;
 
     if let Some(remote_addr) = remote_addr {
-        remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
+        let mut addrlen_value = addrlen.read_vm()?;
+        remote_addr.write_to_user(addr, &mut addrlen_value)?;
+        addrlen.write_vm(addrlen_value)?;
     }
 
     let mut cmsg_truncated = false;
@@ -298,22 +304,28 @@ pub fn sys_recvfrom(
 
 /// Receive data with vectored I/O and ancillary data (control messages)
 pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> {
-    let msg = msg.get_as_mut()?;
-    msg.msg_flags = 0;
-    recv_impl(
+    let mut msg_value = msg.read_vm()?;
+    msg_value.msg_flags = 0;
+    let result = recv_impl(
         fd,
-        IoVectorBuf::new(msg.msg_iov as *mut IoVec, msg.msg_iovlen)?.into_io(),
+        IoVectorBuf::from_iovecs(IoVec::load_from_user(
+            posix_types::UserConstPtr::from(msg_value.msg_iov as usize),
+            msg_value.msg_iovlen,
+        )?)?
+        .into_io(),
         flags,
-        UserPtr::from(msg.msg_name as usize),
-        UserPtr::from(&mut msg.msg_namelen as *mut _ as *mut socklen_t),
-        (!msg.msg_control.is_null()).then(|| {
+        UserPtr::from(msg_value.msg_name as usize),
+        UserPtr::from(&mut msg_value.msg_namelen as *mut _ as *mut socklen_t),
+        (!msg_value.msg_control.is_null()).then(|| {
             CMsgBuilder::new(
-                UserPtr::from(msg.msg_control as *mut cmsghdr),
-                &mut msg.msg_controllen,
+                UserPtr::from(msg_value.msg_control as *mut cmsghdr),
+                &mut msg_value.msg_controllen,
             )
         }),
-        Some(&mut msg.msg_flags),
-    )
+        Some(&mut msg_value.msg_flags),
+    );
+    write_vm_mem(msg.as_ptr().cast_mut(), core::slice::from_ref(&msg_value))?;
+    result
 }
 
 /// Send multiple datagrams in one syscall.
@@ -325,10 +337,10 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
         return Err(KError::InvalidInput);
     }
 
-    let msgvec = msgvec.get_as_mut_slice(vlen as usize)?;
+    let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
     let resources = kthread::current_resources();
     let mut sent = 0;
-    for msg in msgvec.iter_mut() {
+    for msg in msgvec_value.iter_mut() {
         let cmsg = parse_send_cmsgs(
             resources.as_ref(),
             msg.msg_hdr.msg_control as usize,
@@ -336,8 +348,11 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
         )?;
         match send_impl(
             fd,
-            IoVectorBuf::new(msg.msg_hdr.msg_iov as *const IoVec, msg.msg_hdr.msg_iovlen)?
-                .into_io(),
+            IoVectorBuf::from_iovecs(IoVec::load_from_user(
+                posix_types::UserConstPtr::from(msg.msg_hdr.msg_iov as usize),
+                msg.msg_hdr.msg_iovlen,
+            )?)?
+            .into_io(),
             flags,
             UserConstPtr::from(msg.msg_hdr.msg_name as usize),
             msg.msg_hdr.msg_namelen as socklen_t,
@@ -348,12 +363,18 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
                 sent += 1;
             }
             Err(e) => {
+                if sent > 0 {
+                    write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
+                }
                 if sent == 0 {
                     return Err(e);
                 }
                 break;
             }
         }
+    }
+    if sent > 0 {
+        write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
     }
     Ok(sent)
 }
@@ -380,9 +401,9 @@ pub fn sys_recvmmsg(
     // SO_RCVTIMEO support at the socket layer to fix.
     let deadline = timeout.map(|t| wall_time() + t);
 
-    let msgvec = msgvec.get_as_mut_slice(vlen as usize)?;
+    let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
     let mut received = 0;
-    for msg in msgvec.iter_mut() {
+    for msg in msgvec_value.iter_mut() {
         if let Some(deadline) = deadline
             && wall_time() >= deadline
         {
@@ -394,7 +415,11 @@ pub fn sys_recvmmsg(
         msg.msg_hdr.msg_flags = 0;
         match recv_impl(
             fd,
-            IoVectorBuf::new(msg.msg_hdr.msg_iov as *mut IoVec, msg.msg_hdr.msg_iovlen)?.into_io(),
+            IoVectorBuf::from_iovecs(IoVec::load_from_user(
+                posix_types::UserConstPtr::from(msg.msg_hdr.msg_iov as usize),
+                msg.msg_hdr.msg_iovlen,
+            )?)?
+            .into_io(),
             flags,
             UserPtr::from(msg.msg_hdr.msg_name as usize),
             UserPtr::from(&mut msg.msg_hdr.msg_namelen as *mut _ as *mut socklen_t),
@@ -411,6 +436,7 @@ pub fn sys_recvmmsg(
                 received += 1;
             }
             Err(e) => {
+                write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
                 if received == 0 {
                     return Err(e);
                 }
@@ -419,5 +445,8 @@ pub fn sys_recvmmsg(
         }
     }
 
+    if received > 0 {
+        write_vm_mem(msgvec.as_ptr().cast_mut(), &msgvec_value)?;
+    }
     Ok(received)
 }

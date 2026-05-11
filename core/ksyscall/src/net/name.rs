@@ -11,8 +11,8 @@
 
 use kerrno::KResult;
 use knet::SocketOps;
-use kservices::mm::UserPtr;
 use linux_raw_sys::net::{sockaddr, socklen_t};
+use posix_types::UserPtr;
 
 use crate::{file::Socket, socket::SocketAddrExt};
 
@@ -26,7 +26,9 @@ pub fn sys_getsockname(
     let local_addr = socket.local_addr()?;
     debug!("sys_getsockname <= fd: {fd}, addr: {local_addr:?}");
 
-    local_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
+    let mut addrlen_value = addrlen.read_vm()?;
+    local_addr.write_to_user(addr, &mut addrlen_value)?;
+    addrlen.write_vm(addrlen_value)?;
     Ok(0)
 }
 
@@ -40,6 +42,8 @@ pub fn sys_getpeername(
     let peer_addr = socket.peer_addr()?;
     debug!("sys_getpeername <= fd: {fd}, addr: {peer_addr:?}");
 
-    peer_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
+    let mut addrlen_value = addrlen.read_vm()?;
+    peer_addr.write_to_user(addr, &mut addrlen_value)?;
+    addrlen.write_vm(addrlen_value)?;
     Ok(0)
 }

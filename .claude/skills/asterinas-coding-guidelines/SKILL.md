@@ -374,6 +374,110 @@ must be validated at the syscall boundary.
 Once validated, internal kernel functions
 may trust these values without re-validation.
 
+### Copy user memory at syscall boundaries (`syscall-user-copy`) {#syscall-user-copy}
+
+POSIX syscall frontends must treat user pointers
+as copy-in / copy-out handles,
+not borrowed references into user memory.
+
+Use [`posix_types::UserConstPtr`] and [`posix_types::UserPtr`]
+at the syscall boundary.
+Copy user input into kernel-owned values immediately,
+and copy results back to user memory only at the end
+of the syscall path.
+Do not pass user pointers deeper into subsystem logic
+once a kernel value can be formed.
+
+For typed copy-in,
+prefer `read_vm()`.
+For typed copy-out,
+prefer `write_vm()` / `write_vm_slice()`.
+For raw byte buffers and strings,
+use the byte/string helpers instead of inventing ad-hoc pointer access.
+
+Do not open-code syscall copies with
+`read_uninit()?.assume_init()`,
+local `read_user_*` helpers,
+or borrowed user-memory slice tricks.
+If a type cannot safely participate in the generic typed helpers
+because of padding or Rust representation issues,
+introduce an explicit raw ABI wrapper
+and convert that wrapper at the syscall boundary.
+
+This keeps Linux-style copy semantics consistent:
+unaligned user addresses are accepted for byte-copy helpers,
+fault handling stays inside the shared user-copy path,
+and subsystem code only sees validated kernel-owned data.
+
+### Separate ABI carriers from kernel semantic types (`abi-carrier-separation`) {#abi-carrier-separation}
+
+If a type appears directly in
+[`posix_types::UserConstPtr<T>`] or [`posix_types::UserPtr<T>`],
+it is part of the user-visible ABI boundary,
+not a purely internal semantic type.
+
+For POSIX/Linux-facing code in x-kernel:
+
+- Put raw ABI carrier types in `posix-types`.
+  This includes both standardized external layouts
+  and project-defined raw wrappers
+  such as `k_sigaction`, `k_sigset`, `k_siginfo`, `k_sigaltstack`,
+  `msqid_ds`, `shmid_ds`, and `msgbuf`.
+- Keep subsystem semantic types in the owning subsystem crate.
+  Examples:
+  `SignalSet`, `SignalInfo`, `SignalStack`, and `SignalAction`
+  belong to `ksignal` as in-kernel semantic types.
+- Convert between raw ABI carriers and semantic types
+  immediately at the syscall boundary.
+  Do not pass raw carriers deeper into subsystem logic
+  once a semantic kernel value can be formed.
+- Do not implement `UserRead` / `UserWrite`
+  on semantic kernel types
+  merely to make syscall code shorter.
+  If user-copy is needed,
+  introduce or reuse an explicit raw ABI carrier instead.
+
+This rule keeps representation concerns,
+padding/layout constraints,
+and Linux ABI compatibility
+out of subsystem semantic types.
+
+### Keep nullable-pointer semantics explicit (`nullable-user-pointers`) {#nullable-user-pointers}
+
+`UserConstPtr` and `UserPtr`
+describe how to copy user memory.
+They do not by themselves encode whether `NULL`
+is a valid syscall argument.
+
+If a syscall argument is optional,
+check that explicitly at the syscall boundary
+with `check_non_null()` or the local equivalent.
+If a syscall argument is required,
+read or write it directly
+and let the normal fault/error path apply.
+
+Do not hide optional-pointer semantics
+inside generic user-copy helpers.
+Whether `NULL` is legal
+is part of the syscall ABI contract,
+not part of the pointer-copy mechanism.
+
+### Preserve Linux syscall argument shapes (`linux-abi-argument-shapes`) {#linux-abi-argument-shapes}
+
+Keep Linux syscall argument shapes intact
+unless a wrapper carries a real invariant
+or materially improves correctness.
+
+For example,
+`ioctl(fd, cmd, arg)` should keep `arg: usize`
+at the syscall boundary,
+because the third argument is a raw ABI slot
+whose meaning depends on `cmd`.
+Interpret that slot in each command branch
+with `UserConstPtr<T>` / `UserPtr<T>` or scalar decoding as needed,
+rather than introducing a thin wrapper
+that merely renames the raw integer.
+
 ---
 
 # Rust Guidelines

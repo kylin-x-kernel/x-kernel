@@ -30,7 +30,7 @@ knet.workspace = true
 kpoll.workspace = true
 ktask.workspace = true
 bitflags.workspace = true
-bytemuck.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
 kspin.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 kprocess.workspace = true

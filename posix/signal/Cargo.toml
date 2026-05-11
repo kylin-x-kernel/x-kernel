@@ -19,5 +19,4 @@ ksignal.workspace = true
 ktask.workspace = true
 kthread.workspace = true
 linux-raw-sys.workspace = true
-osvm.workspace = true
 posix-types.workspace = true

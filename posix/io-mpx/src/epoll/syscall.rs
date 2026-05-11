@@ -11,26 +11,14 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kpoll::IoEvents;
 use kservices::signal::with_replacen_blocked;
-use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
 };
 use posix_signal::check_sigset_size;
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
+use posix_types::{TimeValueLike, UserConstPtr, UserPtr, k_sigset};
 
 use super::{Epoll, EpollEvent, EpollFlags};
-
-fn read_user_value<T>(ptr: UserConstPtr<T>) -> KResult<T> {
-    // SAFETY: The caller chooses a syscall ABI type that is consumed by value at
-    // the syscall boundary, so copying bytes out of user memory and assuming the
-    // resulting value is initialized matches Linux `copy_from_user` semantics.
-    unsafe {
-        ptr.read_uninit()
-            .map(|value| value.assume_init())
-            .map_err(Into::into)
-    }
-}
 
 bitflags! {
     /// Flags for the `epoll_create1` syscall.
@@ -64,7 +52,7 @@ pub fn sys_epoll_ctl(
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
-        let event = read_user_value(event)?;
+        let event = event.read_vm()?;
         let events = IoEvents::from_bits_truncate(event.events);
         let flags =
             EpollFlags::from_bits(event.events & !events.bits()).ok_or(KError::InvalidInput)?;
@@ -99,7 +87,7 @@ fn do_epoll_wait(
     events: UserPtr<epoll_event>,
     maxevents: i32,
     timeout: Option<Duration>,
-    sigmask: UserConstPtr<SignalSet>,
+    sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
@@ -114,9 +102,12 @@ fn do_epoll_wait(
     // mutable user slice, so we stage ready events in kernel memory and copy them
     // back once polling completes.
     let mut output = vec![epoll_event { events: 0, data: 0 }; maxevents as usize];
-    let sigmask = sigmask.check_non_null().map(read_user_value).transpose()?;
+    let sigmask = sigmask
+        .check_non_null()
+        .map(UserConstPtr::read_vm)
+        .transpose()?;
 
-    let ready = with_replacen_blocked(sigmask, || {
+    let ready = with_replacen_blocked(sigmask.map(Into::into), || {
         match block_on(future::timeout(
             timeout,
             poll_io(epoll.as_ref(), IoEvents::IN, false, || {
@@ -138,7 +129,7 @@ pub fn sys_epoll_pwait(
     events: UserPtr<epoll_event>,
     maxevents: i32,
     timeout: i32,
-    sigmask: UserConstPtr<SignalSet>,
+    sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     let timeout = match timeout {
@@ -155,12 +146,12 @@ pub fn sys_epoll_pwait2(
     events: UserPtr<epoll_event>,
     maxevents: i32,
     timeout: UserConstPtr<timespec>,
-    sigmask: UserConstPtr<SignalSet>,
+    sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     let timeout = timeout
         .check_non_null()
-        .map(read_user_value)
+        .map(UserConstPtr::read_vm)
         .transpose()?
         .map(|timeout| timeout.try_into_time_value())
         .transpose()?;

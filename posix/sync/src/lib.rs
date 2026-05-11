@@ -72,7 +72,7 @@ pub fn sys_futex(
             let timeout = if let Some(ts) =
                 UserConstPtr::<timespec>::from(timeout_or_value2).check_non_null()
             {
-                let ts = unsafe { ts.read_uninit()?.assume_init() }.try_into_time_value()?;
+                let ts = ts.read_vm()?.try_into_time_value()?;
                 Some(ts)
             } else {
                 None

@@ -18,7 +18,8 @@ use linux_raw_sys::{
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
 };
-use osvm::{VirtMutPtr, write_vm_mem};
+use osvm::write_vm_mem;
+use posix_types::UserPtr;
 
 const fn pad_str(info: &str) -> [c_char; 65] {
     let mut data: [c_char; 65] = [0; 65];
@@ -41,13 +42,13 @@ const UTSNAME: new_utsname = new_utsname {
 };
 
 /// Get system information including OS name, version, and hardware platform
-pub fn sys_uname(name: *mut new_utsname) -> KResult<isize> {
+pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
     name.write_vm(UTSNAME)?;
     Ok(0)
 }
 
 /// Get general system information such as process count and memory unit
-pub fn sys_sysinfo(info: *mut sysinfo) -> KResult<isize> {
+pub fn sys_sysinfo(info: UserPtr<sysinfo>) -> KResult<isize> {
     // FIXME: Zeroable
     let mut kinfo: sysinfo = unsafe { core::mem::zeroed() };
     kinfo.procs = processes().len() as _;

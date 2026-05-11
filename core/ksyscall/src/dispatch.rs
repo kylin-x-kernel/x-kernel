@@ -304,7 +304,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::pidfd_send_signal => sys_pidfd_send_signal(
             uctx.arg0() as _,
             uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
 
@@ -417,11 +417,11 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::prlimit64 => sys_prlimit64(
             uctx.arg0() as _,
             uctx.arg1() as _,
-            uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg2().into(),
+            uctx.arg3().into(),
         ),
-        Sysno::capget => sys_capget(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::capset => sys_capset(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::capget => sys_capget(uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::capset => sys_capset(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::umask => sys_umask(uctx.arg0() as _),
         Sysno::setreuid => sys_setreuid(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::setregid => sys_setregid(uctx.arg0() as _, uctx.arg1() as _),
@@ -458,40 +458,40 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         // signal
         Sysno::rt_sigprocmask => sys_rt_sigprocmask(
             uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
         Sysno::rt_sigaction => sys_rt_sigaction(
             uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
         Sysno::rt_sigpending => sys_rt_sigpending(uctx.arg0().into(), uctx.arg1() as _),
         Sysno::rt_sigreturn => sys_rt_sigreturn(uctx),
         Sysno::rt_sigtimedwait => sys_rt_sigtimedwait(
             uctx,
-            uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg0().into(),
+            uctx.arg1().into(),
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
-        Sysno::rt_sigsuspend => sys_rt_sigsuspend(uctx, uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::rt_sigsuspend => sys_rt_sigsuspend(uctx, uctx.arg0().into(), uctx.arg1() as _),
         Sysno::kill => sys_kill(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::tkill => sys_tkill(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::tgkill => sys_tgkill(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::rt_sigqueueinfo => sys_rt_sigqueueinfo(
             uctx.arg0() as _,
             uctx.arg1() as _,
-            uctx.arg2() as _,
+            uctx.arg2().into(),
             uctx.arg3() as _,
         ),
         Sysno::rt_tgsigqueueinfo => sys_rt_tgsigqueueinfo(
             uctx.arg0() as _,
             uctx.arg1() as _,
             uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg3().into(),
             uctx.arg4() as _,
         ),
         Sysno::sigaltstack => sys_sigaltstack(uctx.arg0().into(), uctx.arg1().into()),
@@ -525,8 +525,8 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::setfsgid => sys_setfsgid(uctx.arg0() as _),
         Sysno::getgroups => sys_getgroups(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::setgroups => sys_setgroups(uctx.arg0() as _, uctx.arg1().into()),
-        Sysno::uname => sys_uname(uctx.arg0() as _),
-        Sysno::sysinfo => sys_sysinfo(uctx.arg0() as _),
+        Sysno::uname => sys_uname(uctx.arg0().into()),
+        Sysno::sysinfo => sys_sysinfo(uctx.arg0().into()),
         Sysno::syslog => sys_syslog(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::getrandom => sys_getrandom(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::seccomp => sys_seccomp(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
@@ -537,12 +537,12 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::membarrier => sys_membarrier(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
 
         // time
-        Sysno::gettimeofday => sys_gettimeofday(uctx.arg0() as _),
-        Sysno::times => sys_times(uctx.arg0() as _),
-        Sysno::clock_gettime => sys_clock_gettime(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::clock_getres => sys_clock_getres(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::getitimer => sys_getitimer(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::setitimer => sys_setitimer(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::gettimeofday => sys_gettimeofday(uctx.arg0().into()),
+        Sysno::times => sys_times(uctx.arg0().into()),
+        Sysno::clock_gettime => sys_clock_gettime(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::clock_getres => sys_clock_getres(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::getitimer => sys_getitimer(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::setitimer => sys_setitimer(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2().into()),
 
         // msg
         Sysno::msgget => sys_msgget(uctx.arg0() as _, uctx.arg1() as _),
@@ -641,7 +641,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         // signal file descriptors
         Sysno::signalfd4 => sys_signalfd4(
             uctx.arg0() as _,
-            uctx.arg1() as _,
+            uctx.arg1().into(),
             uctx.arg2(),
             uctx.arg3() as _,
         ),
@@ -651,10 +651,10 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         Sysno::timerfd_settime => sys_timerfd_settime(
             uctx.arg0() as _,
             uctx.arg1() as _,
-            uctx.arg2() as _,
-            uctx.arg3() as _,
+            uctx.arg2().into(),
+            uctx.arg3().into(),
         ),
-        Sysno::timerfd_gettime => sys_timerfd_gettime(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::timerfd_gettime => sys_timerfd_gettime(uctx.arg0() as _, uctx.arg1().into()),
 
         // dummy fds
         Sysno::fanotify_init

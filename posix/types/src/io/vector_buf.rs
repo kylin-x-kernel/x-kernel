@@ -2,65 +2,62 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Scatter-gather I/O helpers for user memory buffers.
+//! Sequential scatter-gather I/O helpers over kernel-owned iovecs.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::mem::{self, MaybeUninit};
 
-use bytemuck::AnyBitPattern;
 use kerrno::{KError, KResult};
 use kio::prelude::*;
-use osvm::{VirtPtr, read_vm_mem, write_vm_mem};
+use osvm::{read_vm_mem, write_vm_mem};
 
-/// I/O vector representing a single buffer segment
-#[repr(C)]
-#[derive(Debug, Copy, Clone, AnyBitPattern)]
-pub struct IoVec {
-    /// Base address of the buffer in user memory.
-    pub iov_base: *mut u8,
-    /// Length of the buffer in bytes.
-    pub iov_len: isize,
-}
+use super::IoVec;
 
-/// A collection of I/O vectors for scatter-gather operations
+/// A collection of I/O vectors for scatter-gather operations.
 #[derive(Default)]
 pub struct IoVectorBuf {
-    /// Pointer to the user-space iovec array.
-    iovs: *const IoVec,
-    /// Number of iovec entries.
-    iovcnt: usize,
+    /// Kernel-owned descriptors copied from the syscall boundary.
+    iovs: Vec<IoVec>,
     /// Remaining total length across all segments.
     len: usize,
 }
 
 impl IoVectorBuf {
-    /// Create a new I/O vector buffer from a user-space iovec array
-    pub fn new(iovs: *const IoVec, iovcnt: usize) -> KResult<Self> {
-        if iovcnt > 1024 {
+    /// Creates an I/O vector buffer from kernel-owned iovec descriptors.
+    pub fn from_iovecs(iovs: Vec<IoVec>) -> KResult<Self> {
+        if iovs.len() > 1024 {
             return Err(KError::InvalidInput);
         }
-        let mut len = 0;
-        for i in 0..iovcnt {
-            let iov = iovs.wrapping_add(i).read_vm()?;
+
+        let mut len = 0usize;
+        for iov in &iovs {
             if iov.iov_len < 0 {
                 return Err(KError::InvalidInput);
             }
-            len += iov.iov_len as usize;
+            len = len
+                .checked_add(iov.iov_len as usize)
+                .ok_or(KError::InvalidInput)?;
         }
-        Ok(Self { iovs, iovcnt, len })
+
+        Ok(Self { iovs, len })
     }
 
-    /// Read from iovec segments using a custom function
+    /// Reads from iovec segments using a custom function.
+    ///
+    /// The pointers passed to `read_fn` point into user memory.
+    /// The closure must use `read_vm_mem` or equivalent to access them safely.
     pub fn read_with(
         self,
-        mut f: impl FnMut(*const u8, usize) -> KResult<usize>,
+        mut read_fn: impl FnMut(*const u8, usize) -> KResult<usize>,
     ) -> KResult<usize> {
         let mut count = 0;
-        for i in 0..self.iovcnt {
-            let iov = self.iovs.wrapping_add(i).read_vm()?;
+        for iov in &self.iovs {
             if iov.iov_len == 0 {
                 continue;
             }
-            let read = f(iov.iov_base, iov.iov_len as usize)?;
+            let read = read_fn(iov.iov_base, iov.iov_len as usize)?;
             if read == 0 {
                 break;
             }
@@ -69,15 +66,20 @@ impl IoVectorBuf {
         Ok(count)
     }
 
-    /// Write to iovec segments using a custom function
-    pub fn fill_with(self, mut f: impl FnMut(*mut u8, usize) -> KResult<usize>) -> KResult<usize> {
+    /// Writes to iovec segments using a custom function.
+    ///
+    /// The pointers passed to `write_fn` point into user memory.
+    /// The closure must use `write_vm_mem` or equivalent to access them safely.
+    pub fn fill_with(
+        self,
+        mut write_fn: impl FnMut(*mut u8, usize) -> KResult<usize>,
+    ) -> KResult<usize> {
         let mut count = 0;
-        for i in 0..self.iovcnt {
-            let iov = self.iovs.wrapping_add(i).read_vm()?;
+        for iov in &self.iovs {
             if iov.iov_len == 0 {
                 continue;
             }
-            let written = f(iov.iov_base, iov.iov_len as usize)?;
+            let written = write_fn(iov.iov_base, iov.iov_len as usize)?;
             if written == 0 {
                 break;
             }
@@ -86,7 +88,7 @@ impl IoVectorBuf {
         Ok(count)
     }
 
-    /// Convert to a sequential I/O reader/writer over iovec segments
+    /// Converts to a sequential I/O reader/writer over iovec segments.
     pub fn into_io(self) -> IoVectorBufIo {
         IoVectorBufIo {
             inner: self,
@@ -96,7 +98,7 @@ impl IoVectorBuf {
     }
 }
 
-/// Sequential reader/writer for I/O vector buffers
+/// Sequential reader/writer for I/O vector buffers.
 pub struct IoVectorBufIo {
     inner: IoVectorBuf,
     start: usize,
@@ -105,8 +107,8 @@ pub struct IoVectorBufIo {
 
 impl IoVectorBufIo {
     fn skip_empty(&mut self) -> KResult<()> {
-        while self.start < self.inner.iovcnt {
-            let iov = self.inner.iovs.wrapping_add(self.start).read_vm()?;
+        while self.start < self.inner.iovs.len() {
+            let iov = self.inner.iovs[self.start];
             if iov.iov_len as usize > self.offset {
                 break;
             }
@@ -122,10 +124,10 @@ impl Read for IoVectorBufIo {
         let mut count = 0;
         loop {
             self.skip_empty()?;
-            if self.start >= self.inner.iovcnt {
+            if self.start >= self.inner.iovs.len() {
                 break;
             }
-            let iov = self.inner.iovs.wrapping_add(self.start).read_vm()?;
+            let iov = self.inner.iovs[self.start];
             let len = (iov.iov_len as usize - self.offset).min(buf.len() - count);
             if len == 0 {
                 break;
@@ -134,7 +136,7 @@ impl Read for IoVectorBufIo {
                 mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buf[count..count + len])
             })?;
             self.offset += len;
-            self.inner.len -= len;
+            self.inner.len = self.inner.len.saturating_sub(len);
             count += len;
         }
         Ok(count)
@@ -146,10 +148,10 @@ impl Write for IoVectorBufIo {
         let mut count = 0;
         loop {
             self.skip_empty()?;
-            if self.start >= self.inner.iovcnt {
+            if self.start >= self.inner.iovs.len() {
                 break;
             }
-            let iov = self.inner.iovs.wrapping_add(self.start).read_vm()?;
+            let iov = self.inner.iovs[self.start];
             let len = (iov.iov_len as usize - self.offset).min(buf.len() - count);
             if len == 0 {
                 break;
@@ -159,7 +161,7 @@ impl Write for IoVectorBufIo {
                 &buf[count..count + len],
             )?;
             self.offset += len;
-            self.inner.len -= len;
+            self.inner.len = self.inner.len.saturating_sub(len);
             count += len;
         }
         Ok(count)
@@ -183,31 +185,22 @@ impl IoBufMut for IoVectorBufIo {
 }
 
 #[cfg(unittest)]
-mod io_tests {
+mod tests {
     use unittest::def_test;
 
     use super::*;
 
     #[def_test]
-    fn test_iovec_layout() {
-        assert_eq!(
-            core::mem::size_of::<IoVec>(),
-            core::mem::size_of::<*mut u8>() + core::mem::size_of::<isize>()
-        );
-    }
-
-    #[def_test]
     fn test_io_vector_buf_default() {
         let buf = IoVectorBuf::default();
-        assert_eq!(buf.iovcnt, 0);
+        assert_eq!(buf.iovs.len(), 0);
         assert_eq!(buf.len, 0);
     }
 
     #[def_test]
     fn test_io_vector_buf_io_remaining() {
         let buf = IoVectorBuf {
-            iovs: core::ptr::null(),
-            iovcnt: 0,
+            iovs: Vec::new(),
             len: 42,
         };
         let io = buf.into_io();

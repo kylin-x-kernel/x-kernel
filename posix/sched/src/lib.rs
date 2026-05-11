@@ -49,8 +49,7 @@ fn sleep_impl(clock: impl Fn() -> TimeValue, dur: TimeValue) -> TimeValue {
 
 /// Sleep some nanoseconds
 pub fn sys_nanosleep(req: UserConstPtr<timespec>, rem: UserPtr<timespec>) -> KResult<isize> {
-    // FIXME: AnyBitPattern
-    let req = unsafe { req.read_uninit()?.assume_init() }.try_into_time_value()?;
+    let req = req.read_vm()?.try_into_time_value()?;
     debug!("sys_nanosleep <= req: {req:?}");
 
     let actual = sleep_impl(khal::time::monotonic_time, req);
@@ -81,7 +80,7 @@ pub fn sys_clock_nanosleep(
         }
     };
 
-    let req = unsafe { req.read_uninit()?.assume_init() }.try_into_time_value()?;
+    let req = req.read_vm()?.try_into_time_value()?;
     debug!("sys_clock_nanosleep <= clock_id: {clock_id}, flags: {flags}, req: {req:?}");
 
     let dur = if flags & TIMER_ABSTIME != 0 {

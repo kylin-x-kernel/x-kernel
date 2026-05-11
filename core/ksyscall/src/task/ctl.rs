@@ -16,13 +16,13 @@ use kservices::mm::vm_load_string;
 use ktask::current;
 use kthread::get_process_state;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
-use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
+use osvm::write_vm_mem;
+use posix_types::UserPtr;
 
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
 
-fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> KResult<()> {
-    // FIXME: AnyBitPattern
-    let mut header = unsafe { header_ptr.read_uninit()?.assume_init() };
+fn validate_cap_header(header_ptr: UserPtr<__user_cap_header_struct>) -> KResult<()> {
+    let mut header = header_ptr.read_vm()?;
     if header.version != CAPABILITY_VERSION_3 {
         header.version = CAPABILITY_VERSION_3;
         header_ptr.write_vm(header)?;
@@ -33,8 +33,8 @@ fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> KResult<()>
 }
 
 pub fn sys_capget(
-    header: *mut __user_cap_header_struct,
-    data: *mut __user_cap_data_struct,
+    header: UserPtr<__user_cap_header_struct>,
+    data: UserPtr<__user_cap_data_struct>,
 ) -> KResult<isize> {
     validate_cap_header(header)?;
 
@@ -47,8 +47,8 @@ pub fn sys_capget(
 }
 
 pub fn sys_capset(
-    header: *mut __user_cap_header_struct,
-    _data: *mut __user_cap_data_struct,
+    header: UserPtr<__user_cap_header_struct>,
+    _data: UserPtr<__user_cap_data_struct>,
 ) -> KResult<isize> {
     validate_cap_header(header)?;
 

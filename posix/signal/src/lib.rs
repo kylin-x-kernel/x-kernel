@@ -29,15 +29,15 @@ use kthread::{
     processes, send_signal_to_process, send_signal_to_process_group, send_signal_to_thread,
 };
 use linux_raw_sys::general::{
-    MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, kernel_sigaction, siginfo,
-    timespec,
+    MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, timespec,
 };
-use osvm::{VirtMutPtr, VirtPtr};
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
+use posix_types::{
+    TimeValueLike, UserConstPtr, UserPtr, k_sigaction, k_sigaltstack, k_siginfo, k_sigset,
+};
 
 /// Validates that the signal set size matches the expected size.
 pub fn check_sigset_size(size: usize) -> KResult<()> {
-    if size != size_of::<SignalSet>() && size != 0 {
+    if size != size_of::<k_sigset>() && size != 0 {
         return Err(KError::InvalidInput);
     }
     Ok(())
@@ -53,8 +53,8 @@ fn parse_signo(signo: u32) -> KResult<Signo> {
 /// See <https://man7.org/linux/man-pages/man2/rt_sigprocmask.2.html>.
 pub fn sys_rt_sigprocmask(
     how: i32,
-    set: *const SignalSet,
-    oldset: *mut SignalSet,
+    set: UserConstPtr<k_sigset>,
+    oldset: UserPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
@@ -63,14 +63,11 @@ pub fn sys_rt_sigprocmask(
     let old = signal.blocked();
 
     if let Some(oldset) = oldset.check_non_null() {
-        oldset.write_vm(old)?;
+        oldset.write_vm(old.into())?;
     }
 
     if let Some(set) = set.check_non_null() {
-        // SAFETY: `read_uninit` validates that the user pointer is accessible and
-        // reads the bytes into a local buffer. On success the buffer is fully
-        // initialized, making `assume_init` sound.
-        let set = unsafe { set.read_uninit()?.assume_init() };
+        let set: SignalSet = set.read_vm()?.into();
         let set = match how as u32 {
             SIG_BLOCK => old | set,
             SIG_UNBLOCK => old & !set,
@@ -90,8 +87,8 @@ pub fn sys_rt_sigprocmask(
 /// See <https://man7.org/linux/man-pages/man2/rt_sigaction.2.html>.
 pub fn sys_rt_sigaction(
     signo: u32,
-    act: *const kernel_sigaction,
-    oldact: *mut kernel_sigaction,
+    act: UserConstPtr<k_sigaction>,
+    oldact: UserPtr<k_sigaction>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
@@ -107,9 +104,7 @@ pub fn sys_rt_sigaction(
         oldact.write_vm(actions[signo].clone().into())?;
     }
     if let Some(act) = act.check_non_null() {
-        // SAFETY: `read_uninit` validates user-pointer accessibility and reads the
-        // bytes; on success the value is fully initialized.
-        let act = unsafe { act.read_uninit()?.assume_init() }.into();
+        let act = act.read_vm()?.into();
         debug!("sys_rt_sigaction <= signo: {signo:?}, act: {act:?}");
         actions[signo] = act;
     }
@@ -119,9 +114,9 @@ pub fn sys_rt_sigaction(
 /// Returns the set of pending signals.
 ///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigpending.2.html>.
-pub fn sys_rt_sigpending(set: UserPtr<SignalSet>, sigsetsize: usize) -> KResult<isize> {
+pub fn sys_rt_sigpending(set: UserPtr<k_sigset>, sigsetsize: usize) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
-    set.write_vm(kthread::current_thread().signal.pending())?;
+    set.write_vm(kthread::current_thread().signal.pending().into())?;
     Ok(0)
 }
 
@@ -192,16 +187,14 @@ pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
 pub fn make_queue_signal_info(
     tgid: Pid,
     signo: u32,
-    sig: *const SignalInfo,
+    sig: UserConstPtr<k_siginfo>,
 ) -> KResult<Option<SignalInfo>> {
     if signo == 0 {
         return Ok(None);
     }
 
     let signo = parse_signo(signo)?;
-    // SAFETY: `read_uninit` validates the user pointer and reads the data; on success
-    // the value is fully initialized.
-    let mut sig = unsafe { sig.read_uninit()?.assume_init() };
+    let mut sig: SignalInfo = sig.read_vm()?.into();
     sig.set_signo(signo);
     if kthread::current_thread().pid() != tgid && (sig.code() >= 0 || sig.code() == SI_TKILL) {
         return Err(KError::OperationNotPermitted);
@@ -213,7 +206,7 @@ pub fn make_queue_signal_info(
 pub fn sys_rt_sigqueueinfo(
     tgid: Pid,
     signo: u32,
-    sig: *const SignalInfo,
+    sig: UserConstPtr<k_siginfo>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
@@ -228,7 +221,7 @@ pub fn sys_rt_tgsigqueueinfo(
     tgid: Pid,
     tid: Pid,
     signo: u32,
-    sig: *const SignalInfo,
+    sig: UserConstPtr<k_siginfo>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
@@ -252,19 +245,16 @@ pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
 /// See <https://man7.org/linux/man-pages/man2/rt_sigtimedwait.2.html>.
 pub fn sys_rt_sigtimedwait(
     uctx: &mut UserContext,
-    set: *const SignalSet,
-    info: *mut siginfo,
-    timeout: *const timespec,
+    set: UserConstPtr<k_sigset>,
+    info: UserPtr<k_siginfo>,
+    timeout: UserConstPtr<timespec>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
 
-    // SAFETY: `read_uninit` validates the user pointer and reads the data; on success
-    // the value is fully initialized.
-    let set = unsafe { set.read_uninit()?.assume_init() };
+    let set: SignalSet = set.read_vm()?.into();
     let timeout = if let Some(ts) = timeout.check_non_null() {
-        // SAFETY: Same as above — `read_uninit` succeeded, so the value is initialized.
-        let ts = unsafe { ts.read_uninit()?.assume_init() };
+        let ts = ts.read_vm()?;
         Some(ts.try_into_time_value()?)
     } else {
         None
@@ -299,12 +289,13 @@ pub fn sys_rt_sigtimedwait(
     let Some(sig) = sig else {
         return Ok(0);
     };
+    let signo = sig.signo();
 
     if let Some(info) = info.check_non_null() {
-        info.write_vm(sig.0)?;
+        info.write_vm(sig.into())?;
     }
 
-    Ok(sig.signo() as _)
+    Ok(signo as _)
 }
 
 /// Replaces the signal mask and suspends execution until a signal is delivered.
@@ -312,7 +303,7 @@ pub fn sys_rt_sigtimedwait(
 /// See <https://man7.org/linux/man-pages/man2/sigsuspend.2.html>.
 pub fn sys_rt_sigsuspend(
     uctx: &mut UserContext,
-    set: *const SignalSet,
+    set: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
@@ -320,9 +311,7 @@ pub fn sys_rt_sigsuspend(
     let current = current();
     let current_thread = kthread::current_thread();
 
-    // SAFETY: `read_uninit` validates the user pointer and reads the data; on success
-    // the value is fully initialized.
-    let set = unsafe { set.read_uninit()?.assume_init() };
+    let set: SignalSet = set.read_vm()?.into();
     let old_blocked = current_thread.signal.set_blocked(set);
 
     uctx.set_retval(-LinuxError::EINTR.into_raw() as usize);
@@ -341,19 +330,17 @@ pub fn sys_rt_sigsuspend(
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigaltstack.2.html>.
 pub fn sys_sigaltstack(
-    ss: UserConstPtr<SignalStack>,
-    old_ss: UserPtr<SignalStack>,
+    ss: UserConstPtr<k_sigaltstack>,
+    old_ss: UserPtr<k_sigaltstack>,
 ) -> KResult<isize> {
     let signal = &kthread::current_thread().signal;
 
     if let Some(old_ss) = old_ss.check_non_null() {
-        old_ss.write_vm(signal.stack())?;
+        old_ss.write_vm(signal.stack().into())?;
     }
 
     if let Some(ss) = ss.check_non_null() {
-        // SAFETY: `read_uninit` validates the user pointer and reads the data; on
-        // success the value is fully initialized.
-        let ss = unsafe { ss.read_uninit()?.assume_init() };
+        let ss: SignalStack = ss.read_vm()?.into();
         if ss.size <= MINSIGSTKSZ as usize {
             return Err(KError::NoMemory);
         }

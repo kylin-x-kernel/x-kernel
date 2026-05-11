@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, sync::Arc};
+use alloc::{format, sync::Arc, vec};
 use core::{any::Any, task::Context, time::Duration};
 
 use bitmaps::Bitmap;
@@ -20,9 +20,9 @@ use linux_raw_sys::{
     general::{__kernel_old_time_t, __kernel_suseconds_t},
     ioctl::{EVIOCGID, EVIOCGRAB, EVIOCGVERSION},
 };
+use posix_types::{InputId, UserPtr};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-use crate::mm::UserPtr;
 const KEY_CNT: usize = EventType::Key.bits_count();
 
 struct Inner {
@@ -97,12 +97,15 @@ impl EventDev {
     }
 
     fn get_event_bits(&self, arg: usize, size: usize, ty: u8) -> KResult<usize> {
-        let bits = UserPtr::<u8>::from(arg).get_as_mut_slice(size)?;
+        let user_bits = UserPtr::<u8>::from(arg);
         if ty == 0 {
-            Ok(copy_bytes(self.ev_bits.as_bytes(), bits))
+            let len = self.ev_bits.as_bytes().len().min(size);
+            user_bits.write_vm_slice(&self.ev_bits.as_bytes()[..len])?;
+            Ok(len)
         } else {
             let ty = EventType::from_repr(ty).ok_or(KError::InvalidInput)?;
-            match self.inner.lock().device.get_event_bits(ty, bits) {
+            let mut bits = vec![0u8; size];
+            match self.inner.lock().device.get_event_bits(ty, &mut bits) {
                 Ok(true) => {}
                 Ok(false) => {
                     debug!("No events for {ty:?}");
@@ -111,25 +114,22 @@ impl EventDev {
                     warn!("Failed to get event bits: {err:?}");
                 }
             }
-            Ok(bits.len().min(ty.bits_count().div_ceil(8)))
+            let len = bits.len().min(ty.bits_count().div_ceil(8));
+            user_bits.write_vm_slice(&bits[..len])?;
+            Ok(len)
         }
     }
 }
 
-fn copy_bytes(src: &[u8], dst: &mut [u8]) -> usize {
-    let len = src.len().min(dst.len());
-    dst[..len].copy_from_slice(&src[..len]);
-    len
-}
-
 fn return_str(arg: usize, size: usize, s: &str) -> KResult<usize> {
-    let slice = UserPtr::<u8>::from(arg).get_as_mut_slice(size)?;
-    Ok(copy_bytes(s.as_bytes(), slice))
+    let len = s.len().min(size);
+    UserPtr::<u8>::from(arg).write_vm_slice(&s.as_bytes()[..len])?;
+    Ok(len)
 }
 fn return_zero_bits(arg: usize, size: usize, bits: usize) -> KResult<usize> {
-    let slice = UserPtr::<u8>::from(arg).get_as_mut_slice(size)?;
-    let len = bits.div_ceil(8).min(slice.len());
-    slice[..len].fill(0);
+    let len = bits.div_ceil(8).min(size);
+    let zeros = vec![0u8; len];
+    UserPtr::<u8>::from(arg).write_vm_slice(&zeros)?;
     Ok(len)
 }
 
@@ -210,12 +210,17 @@ impl DeviceOps for EventDev {
     fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
             EVIOCGVERSION => {
-                *UserPtr::<u32>::from(arg).get_as_mut()? = 0x10001;
+                UserPtr::<u32>::from(arg).write_vm(0x10001)?;
                 Ok(0)
             }
             EVIOCGID => {
-                *UserPtr::<InputDeviceId>::from(arg).get_as_mut()? =
-                    self.inner.lock().device.device_id();
+                let device_id = self.inner.lock().device.device_id();
+                UserPtr::<InputId>::from(arg).write_vm(InputId {
+                    bus_type: device_id.bus_type,
+                    vendor: device_id.vendor,
+                    product: device_id.product,
+                    version: device_id.version,
+                })?;
                 Ok(0)
             }
             EVIOCGRAB => Ok(0),
@@ -266,11 +271,10 @@ impl DeviceOps for EventDev {
                             }
                             // EVIOCGKEY
                             0x18 => {
-                                let bits = UserPtr::<u8>::from(arg).get_as_mut_slice(size)?;
-                                return Ok(copy_bytes(
-                                    self.inner.lock().key_state.as_bytes(),
-                                    bits,
-                                ));
+                                let key_bits = self.inner.lock().key_state.as_bytes().to_vec();
+                                let len = key_bits.len().min(size);
+                                UserPtr::<u8>::from(arg).write_vm_slice(&key_bits[..len])?;
+                                return Ok(len);
                             }
                             // EVIOCGLED
                             0x19 => {

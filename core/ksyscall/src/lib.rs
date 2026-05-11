@@ -25,7 +25,7 @@ mod task;
 mod time;
 
 pub use dispatch::dispatch_irq_syscall;
-pub use kservices::{file, io};
+pub use kservices::file;
 pub use sys::sys_getrandom;
 pub mod kernel {
     pub use kservices::vfs;

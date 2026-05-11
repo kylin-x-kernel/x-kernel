@@ -23,7 +23,6 @@ use knet::{
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixDomainSocket},
 };
-use kservices::mm::{UserConstPtr, UserPtr};
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{
@@ -32,6 +31,7 @@ use linux_raw_sys::{
         socklen_t,
     },
 };
+use posix_types::{UserConstPtr, UserPtr};
 
 use crate::{
     file::{FileLike, Socket},
@@ -178,7 +178,9 @@ pub fn sys_accept4(
         .map(|fd| fd as isize)?;
 
     if !addr.is_null() {
-        remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
+        let mut addrlen_value = addrlen.read_vm()?;
+        remote_addr.write_to_user(addr, &mut addrlen_value)?;
+        addrlen.write_vm(addrlen_value)?;
     }
 
     Ok(fd)
@@ -233,9 +235,9 @@ pub fn sys_socketpair(
     }
     let cloexec = raw_ty & O_CLOEXEC != 0;
 
-    *fds.get_as_mut()? = [
+    fds.write_vm([
         kthread::current_resources().add_file_like(Arc::new(sock1), cloexec)?,
         kthread::current_resources().add_file_like(Arc::new(sock2), cloexec)?,
-    ];
+    ])?;
     Ok(0)
 }

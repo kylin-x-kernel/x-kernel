@@ -24,13 +24,12 @@ use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
 use kservices::{
     file::{Directory, File, Pipe},
-    io::{IoVec, IoVectorBuf},
     mm::{VmBytes, VmBytesMut},
 };
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::VirtPtr;
-use posix_types::{UserConstPtr, UserPtr};
+use posix_types::{IoVec, IoVectorBuf, UserConstPtr, UserPtr};
 
 struct DummyFd;
 impl FileLike for DummyFd {
@@ -97,8 +96,8 @@ pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<is
     debug!("sys_readv <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored read - read data into multiple buffers in a single operation
     let f = kthread::current_resources().get_file_like(fd)?;
-    f.read(&mut IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io())
-        .map(|n| n as _)
+    let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
+    f.read(&mut iov.into_io()).map(|n| n as _)
 }
 
 /// Write data to the file indicated by `fd`.
@@ -116,8 +115,8 @@ pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<i
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored write - write data from multiple buffers in a single operation
     let f = kthread::current_resources().get_file_like(fd)?;
-    f.write(&mut IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io())
-        .map(|n| n as _)
+    let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
+    f.write(&mut iov.into_io()).map(|n| n as _)
 }
 
 /// Repositions the read/write file offset.
@@ -445,11 +444,9 @@ pub fn sys_preadv2(
     debug!("sys_preadv2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
     // Vectored read at specific offset with optional flags
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     f.inner()
-        .read_at(
-            IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io(),
-            offset as _,
-        )
+        .read_at(iov.into_io(), offset as _)
         .map(|n| n as _)
 }
 
@@ -464,11 +461,9 @@ pub fn sys_pwritev2(
     debug!("sys_pwritev2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
     // Vectored write at specific offset with optional flags.
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     f.inner()
-        .write_at(
-            IoVectorBuf::new(iov.as_ptr(), iovcnt)?.into_io(),
-            offset as _,
-        )
+        .write_at(iov.into_io(), offset as _)
         .map(|n| n as _)
 }
 

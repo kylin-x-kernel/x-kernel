@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::{
     mem::size_of,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    str,
 };
 
 use kerrno::{KError, KResult, LinuxError};
@@ -16,8 +17,10 @@ use kerrno::{KError, KResult, LinuxError};
 use knet::vsock::VsockAddr;
 use knet::{SocketAddrEx, netlink::NetlinkAddr, unix::UnixAddr};
 use linux_raw_sys::net::*;
-
-use crate::mm::{UserConstPtr, UserPtr};
+use osvm::VirtPtr;
+#[cfg(feature = "vsock")]
+use posix_types::net::socket_addr::sockaddr_vm;
+use posix_types::{UserConstPtr, UserPtr, net::socket_addr::sockaddr_nl};
 
 /// Trait to extend [`SocketAddr`] and its variants with methods for reading
 /// from and writing to user space.
@@ -39,7 +42,7 @@ fn read_family(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<u16>
     if size_of::<__kernel_sa_family_t>() > addrlen as usize {
         return Err(KError::InvalidInput);
     }
-    let family = *addr.cast::<__kernel_sa_family_t>().get_as_ref()?;
+    let family = addr.cast::<__kernel_sa_family_t>().read_vm()?;
     Ok(family)
 }
 /// Cast a reference to a byte slice
@@ -49,9 +52,7 @@ unsafe fn cast_to_slice<T>(value: &T) -> &[u8] {
 /// Write socket address data to user-space buffer
 fn fill_addr(addr: UserPtr<sockaddr>, addrlen: &mut socklen_t, data: &[u8]) -> KResult<()> {
     let len = (*addrlen as usize).min(data.len());
-    addr.cast::<u8>()
-        .get_as_mut_slice(len)?
-        .copy_from_slice(&data[..len]);
+    addr.cast::<u8>().write_vm_slice(&data[..len])?;
     *addrlen = data.len() as _;
     Ok(())
 }
@@ -90,7 +91,7 @@ impl SocketAddrExt for SocketAddrV4 {
         if addrlen < size_of::<sockaddr_in>() as socklen_t {
             return Err(KError::InvalidInput);
         }
-        let addr_in = addr.cast::<sockaddr_in>().get_as_ref()?;
+        let addr_in = addr.cast::<sockaddr_in>().read_vm()?;
         if addr_in.sin_family as u32 != AF_INET {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
@@ -126,7 +127,7 @@ impl SocketAddrExt for SocketAddrV6 {
         if addrlen < size_of::<sockaddr_in6>() as socklen_t {
             return Err(KError::InvalidInput);
         }
-        let addr_in6 = addr.cast::<sockaddr_in6>().get_as_ref()?;
+        let addr_in6 = addr.cast::<sockaddr_in6>().read_vm()?;
         if addr_in6.sin6_family as u32 != AF_INET6 {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
@@ -168,8 +169,8 @@ impl SocketAddrExt for UnixAddr {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
         let offset = size_of::<__kernel_sa_family_t>();
-        let ptr = UserConstPtr::<u8>::from(addr.address().as_usize() + offset);
-        let data = ptr.get_as_slice(addrlen as usize - offset)?;
+        let ptr = UserConstPtr::<u8>::from(addr.as_ptr() as usize + offset);
+        let data = ptr.load_vm_vec(addrlen as usize - offset)?;
         Ok(if data.is_empty() {
             Self::Unbound
         } else if data[0] == 0 {
@@ -213,22 +214,12 @@ impl SocketAddrExt for UnixAddr {
     }
 }
 
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct sockaddr_nl {
-    pub nl_family: __kernel_sa_family_t,
-    pub nl_pad: u16,
-    pub nl_pid: u32,
-    pub nl_groups: u32,
-}
-
 impl SocketAddrExt for NetlinkAddr {
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
         if addrlen != size_of::<sockaddr_nl>() as socklen_t {
             return Err(KError::InvalidInput);
         }
-        let addr_nl = addr.cast::<sockaddr_nl>().get_as_ref()?;
+        let addr_nl = addr.cast::<sockaddr_nl>().read_vm()?;
         if addr_nl.nl_family as u32 != AF_NETLINK {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
@@ -253,20 +244,6 @@ impl SocketAddrExt for NetlinkAddr {
     }
 }
 
-// This type should be provided by linux_raw_sys but it's missing.
-// See https://github.com/sunfishcode/linux-raw-sys/issues/169
-#[cfg(feature = "vsock")]
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct sockaddr_vm {
-    pub svm_family: __kernel_sa_family_t,
-    pub svm_reserved1: u16,
-    pub svm_port: u32,
-    pub svm_cid: u32,
-    pub svm_zero: [u8; 4],
-}
-
 /// SocketAddrExt implementation for Vsock addresses
 #[cfg(feature = "vsock")]
 impl SocketAddrExt for VsockAddr {
@@ -276,7 +253,7 @@ impl SocketAddrExt for VsockAddr {
             return Err(KError::InvalidInput);
         }
 
-        let addr_vsock = addr.cast::<sockaddr_vm>().get_as_ref()?;
+        let addr_vsock = addr.cast::<sockaddr_vm>().read_vm()?;
         if addr_vsock.svm_family as u32 != AF_VSOCK {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }

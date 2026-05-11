@@ -7,6 +7,7 @@ use core::{fmt, mem};
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use linux_raw_sys::general::{SI_KERNEL, SS_DISABLE, kernel_sigset_t, siginfo_t};
+use posix_types::{k_sigaltstack, k_siginfo, k_sigset};
 use strum::{EnumIter, FromRepr, IntoEnumIterator};
 
 use crate::DefaultSignalAction;
@@ -184,15 +185,25 @@ impl SignalSet {
 
 impl From<SignalSet> for kernel_sigset_t {
     fn from(value: SignalSet) -> Self {
-        // SAFETY: `kernel_sigset_t` always has the same layout as `[c_ulong; 1]`.
-        unsafe { mem::transmute::<u64, kernel_sigset_t>(value.0) }
+        k_sigset::from(value).into()
     }
 }
 
 impl From<kernel_sigset_t> for SignalSet {
     fn from(value: kernel_sigset_t) -> Self {
-        // SAFETY: `kernel_sigset_t` always has the same layout as `[c_ulong; 1]`.
-        Self(unsafe { mem::transmute::<kernel_sigset_t, u64>(value) })
+        k_sigset::from(value).into()
+    }
+}
+
+impl From<SignalSet> for k_sigset {
+    fn from(value: SignalSet) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<k_sigset> for SignalSet {
+    fn from(value: k_sigset) -> Self {
+        Self(value.0)
     }
 }
 
@@ -279,8 +290,40 @@ impl fmt::Debug for SignalInfo {
     }
 }
 
-/// Signal stack. Compatible with `struct sigaltstack` in libc.
-#[repr(C)]
+impl From<SignalInfo> for k_siginfo {
+    fn from(value: SignalInfo) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<k_siginfo> for SignalInfo {
+    fn from(value: k_siginfo) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<SignalStack> for k_sigaltstack {
+    fn from(value: SignalStack) -> Self {
+        Self {
+            sp: value.sp,
+            flags: value.flags,
+            abi_pad: 0,
+            size: value.size,
+        }
+    }
+}
+
+impl From<k_sigaltstack> for SignalStack {
+    fn from(value: k_sigaltstack) -> Self {
+        Self {
+            sp: value.sp,
+            flags: value.flags,
+            size: value.size,
+        }
+    }
+}
+
+/// Signal handler stack configuration.
 #[derive(Clone)]
 pub struct SignalStack {
     pub sp: usize,

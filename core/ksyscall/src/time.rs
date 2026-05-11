@@ -16,11 +16,10 @@ use linux_raw_sys::general::{
     CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
     CLOCK_THREAD_CPUTIME_ID, itimerval, timespec, timeval,
 };
-use osvm::{VirtMutPtr, VirtPtr};
-use posix_types::{ITimerType, TimeValueLike};
+use posix_types::{ITimerType, TimeValueLike, Tms, UserConstPtr, UserPtr};
 
 /// Get the current time from the specified clock
-pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KResult<isize> {
+pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: UserPtr<timespec>) -> KResult<isize> {
     let now = match clock_id as u32 {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => wall_time(),
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
@@ -41,13 +40,13 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> KRe
 }
 
 /// Get the current time of day
-pub fn sys_gettimeofday(ts: *mut timeval) -> KResult<isize> {
+pub fn sys_gettimeofday(ts: UserPtr<timeval>) -> KResult<isize> {
     ts.write_vm(timeval::from_time_value(wall_time()))?;
     Ok(0)
 }
 
 /// Get the resolution of the specified clock
-pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: *mut timespec) -> KResult<isize> {
+pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: UserPtr<timespec>) -> KResult<isize> {
     if clock_id as u32 != CLOCK_MONOTONIC && clock_id as u32 != CLOCK_REALTIME {
         warn!("Called sys_clock_getres for unsupported clock {clock_id}");
     }
@@ -57,20 +56,8 @@ pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: *mut timespec) -> KRe
     Ok(0)
 }
 
-#[repr(C)]
-pub struct Tms {
-    /// user time
-    tms_utime: usize,
-    /// system time
-    tms_stime: usize,
-    /// user time of children
-    tms_cutime: usize,
-    /// system time of children
-    tms_cstime: usize,
-}
-
 /// Get timing information including user and system CPU time
-pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
+pub fn sys_times(tms: UserPtr<Tms>) -> KResult<isize> {
     let (utime, stime) = kthread::current_thread().time.borrow().output();
     let utime = utime.as_micros() as usize;
     let stime = stime.as_micros() as usize;
@@ -84,7 +71,7 @@ pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
 }
 
 /// Get the current value of a timer
-pub fn sys_getitimer(which: i32, value: *mut itimerval) -> KResult<isize> {
+pub fn sys_getitimer(which: i32, value: UserPtr<itimerval>) -> KResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
     let (it_interval, it_value) = kthread::current_thread().time.borrow().get_itimer(ty);
 
@@ -98,16 +85,14 @@ pub fn sys_getitimer(which: i32, value: *mut itimerval) -> KResult<isize> {
 /// Set a timer to deliver a signal after a specified interval
 pub fn sys_setitimer(
     which: i32,
-    new_value: *const itimerval,
-    old_value: *mut itimerval,
+    new_value: UserConstPtr<itimerval>,
+    old_value: UserPtr<itimerval>,
 ) -> KResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
 
     let (interval, remained) = match new_value.check_non_null() {
         Some(new_value) => {
-            // SAFETY: `read_uninit` reads the user-provided `itimerval` by value,
-            // and `itimerval` is a plain Linux ABI struct with no invalid bit patterns.
-            let new_value = unsafe { new_value.read_uninit()?.assume_init() };
+            let new_value = new_value.read_vm()?;
             (
                 new_value.it_interval.try_into_time_value()?.as_nanos() as usize,
                 new_value.it_value.try_into_time_value()?.as_nanos() as usize,

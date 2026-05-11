@@ -13,8 +13,8 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use ksignal::SignalSet;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
-use osvm::VirtPtr;
 use posix_signal::check_sigset_size;
+use posix_types::{UserConstPtr, k_sigset};
 
 use crate::file::{FileLike, signalfd::Signalfd};
 
@@ -48,7 +48,7 @@ bitflags! {
 /// * `flags` - Flags to control the operation.
 pub fn sys_signalfd4(
     fd: i32,
-    mask: *const SignalSet,
+    mask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
     flags: u32,
 ) -> KResult<isize> {
@@ -61,7 +61,7 @@ pub fn sys_signalfd4(
     }
 
     // Read the signal mask from user space before handling the request mode.
-    let mask = unsafe { mask.read_uninit()?.assume_init() };
+    let mask: SignalSet = mask.read_vm()?.into();
 
     // If fd is not -1, we should modify the existing signalfd
     if fd != -1 {

@@ -7,7 +7,6 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::mem::size_of;
 
-use bytemuck::AnyBitPattern;
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time_nanos;
 use kprocess::Pid;
@@ -15,54 +14,12 @@ use ksync::Mutex;
 use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
-use posix_types::{IpcPerm, UserConstPtr, UserPtr};
+use posix_types::{IpcPerm, UserConstPtr, UserPtr, msgbuf, msginfo, msqid_ds};
 
 use super::{
     IPC_CREAT, IPC_EXCL, IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, MSG_INFO, MSG_STAT,
     has_ipc_permission, next_ipc_id,
 };
-
-/// Data structure describing a message queue.
-#[repr(C)]
-#[derive(Clone, Copy, AnyBitPattern)]
-pub struct msqid_ds {
-    pub msg_perm: IpcPerm,
-    pub msg_stime: __kernel_time_t,
-    pub msg_rtime: __kernel_time_t,
-    pub msg_ctime: __kernel_time_t,
-    pub msg_cbytes: __kernel_size_t,
-    pub msg_qnum: __kernel_size_t,
-    pub msg_qbytes: __kernel_size_t,
-    pub msg_lspid: __kernel_pid_t,
-    pub msg_lrpid: __kernel_pid_t,
-}
-
-impl msqid_ds {
-    fn new(key: i32, mode: __kernel_mode_t, pid: __kernel_pid_t, uid: u32, gid: u32) -> Self {
-        Self {
-            msg_perm: IpcPerm {
-                key,
-                uid,
-                gid,
-                cuid: uid,
-                cgid: gid,
-                mode,
-                seq: 0,
-                pad: 0,
-                unused0: 0,
-                unused1: 0,
-            },
-            msg_stime: 0,
-            msg_rtime: 0,
-            msg_ctime: monotonic_time_nanos() as __kernel_time_t,
-            msg_cbytes: 0,
-            msg_qnum: 0,
-            msg_qbytes: MSGMNB as __kernel_size_t,
-            msg_lspid: pid,
-            msg_lrpid: pid,
-        }
-    }
-}
 
 pub struct Message {
     pub mtype: i64,
@@ -79,7 +36,28 @@ pub struct MessageQueue {
 impl MessageQueue {
     pub fn new(key: i32, mode: __kernel_mode_t, pid: Pid, uid: u32, gid: u32) -> Self {
         MessageQueue {
-            msqid_ds: msqid_ds::new(key, mode, pid as __kernel_pid_t, uid, gid),
+            msqid_ds: msqid_ds {
+                msg_perm: IpcPerm {
+                    key,
+                    uid,
+                    gid,
+                    cuid: uid,
+                    cgid: gid,
+                    mode,
+                    seq: 0,
+                    pad: 0,
+                    unused0: 0,
+                    unused1: 0,
+                },
+                msg_stime: 0,
+                msg_rtime: 0,
+                msg_ctime: monotonic_time_nanos() as __kernel_time_t,
+                msg_cbytes: 0,
+                msg_qnum: 0,
+                msg_qbytes: MSGMNB as __kernel_size_t,
+                msg_lspid: pid as __kernel_pid_t,
+                msg_lrpid: pid as __kernel_pid_t,
+            },
             messages: Vec::new(),
             total_bytes: 0,
             mark_removed: false,
@@ -245,13 +223,6 @@ bitflags::bitflags! {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct UserMsgbuf {
-    pub mtype: i64,
-    pub mtext: [u8; 0],
-}
-
 pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
     let proc_state = current_process_state();
     let current_uid: u32 = 0;
@@ -326,7 +297,7 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
 
 pub fn sys_msgsnd(
     msqid: i32,
-    msgp: UserConstPtr<UserMsgbuf>,
+    msgp: UserConstPtr<msgbuf>,
     msgsz: usize,
     msgflg: i32,
 ) -> KResult<isize> {
@@ -394,7 +365,7 @@ pub fn sys_msgsnd(
 
 pub fn sys_msgrcv(
     msqid: i32,
-    msgp: UserPtr<UserMsgbuf>,
+    msgp: UserPtr<msgbuf>,
     msgsz: usize,
     msgtyp: i64,
     msgflg: i32,
@@ -526,19 +497,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
     }
 
     if cmd == IPC_INFO {
-        #[repr(C)]
-        struct MsgInfo {
-            msgpool: i32,
-            msgmap: i32,
-            msgmax: i32,
-            msgmnb: i32,
-            msgmni: i32,
-            msgssz: i32,
-            msgtql: i32,
-            msgseg: u16,
-        }
-
-        let info = MsgInfo {
+        let info = msginfo {
             msgpool: 0,
             msgmap: 0,
             msgmax: MSGMAX as i32,
@@ -547,9 +506,10 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
             msgssz: 0,
             msgtql: 0,
             msgseg: 0,
+            pad: 0,
         };
 
-        let ptr = buf.cast::<MsgInfo>();
+        let ptr = buf.cast::<msginfo>();
         ptr.write_vm(info)?;
         return Ok(0);
     }

@@ -14,7 +14,6 @@ extern crate klogger;
 extern crate alloc;
 
 pub mod file;
-pub mod io;
 pub mod mm;
 pub mod signal;
 pub mod socket;

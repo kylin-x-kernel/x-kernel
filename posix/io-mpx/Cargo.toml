@@ -17,7 +17,6 @@ kfd.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
 kservices.workspace = true
-ksignal.workspace = true
 kspin.workspace = true
 ktask.workspace = true
 kthread.workspace = true

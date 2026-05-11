@@ -3,16 +3,18 @@
 // See LICENSES for license details.
 
 //! Signal actions and sigaction conversions.
+
 use core::ffi::c_ulong;
 
 use bitflags::bitflags;
 use linux_raw_sys::{
     general::{
-        __kernel_sighandler_t, __sigrestore_t, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_RESTART,
-        SA_SIGINFO, kernel_sigaction,
+        __sigrestore_t, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_RESTART, SA_SIGINFO,
+        kernel_sigaction,
     },
     signal_macros::sig_ign,
 };
+use posix_types::k_sigaction;
 
 use crate::SignalSet;
 
@@ -61,17 +63,6 @@ bitflags! {
     }
 }
 
-// FIXME: replace with `kernel_sigaction` after finishing above "TODO"s for `SignalSet`
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-#[allow(non_camel_case_types)]
-pub struct k_sigaction {
-    handler: __kernel_sighandler_t,
-    flags: c_ulong,
-    restorer: __sigrestore_t,
-    pub mask: SignalSet,
-}
-
 #[derive(Debug, Default, Clone)]
 pub enum SignalDisposition {
     #[default]
@@ -94,36 +85,57 @@ pub struct SignalAction {
 
 impl From<SignalAction> for kernel_sigaction {
     fn from(value: SignalAction) -> Self {
+        let value = k_sigaction::from(value);
+
         // FIXME: Zeroable
         let mut result: kernel_sigaction = unsafe { core::mem::zeroed() };
-
-        result.sa_flags = value.flags.bits() as _;
-        result.sa_mask = value.mask.into();
-        match &value.disposition {
-            SignalDisposition::Default => {
-                result.sa_handler_kernel = None;
-            }
-            SignalDisposition::Ignore => {
-                result.sa_handler_kernel = sig_ign();
-            }
-            SignalDisposition::Handler(handler) => {
-                result.sa_handler_kernel = Some(*handler);
-            }
-        }
+        result.sa_handler_kernel = value.handler;
+        result.sa_flags = value.flags;
         #[cfg(sa_restorer)]
         {
             result.sa_restorer = value.restorer;
         }
+        result.sa_mask = value.mask.into();
 
         result
     }
 }
 
+impl From<SignalAction> for k_sigaction {
+    fn from(value: SignalAction) -> Self {
+        Self {
+            handler: match value.disposition {
+                SignalDisposition::Default => None,
+                SignalDisposition::Ignore => sig_ign(),
+                SignalDisposition::Handler(handler) => Some(handler),
+            },
+            flags: value.flags.bits() as _,
+            restorer: value.restorer,
+            mask: value.mask.into(),
+        }
+    }
+}
+
 impl From<kernel_sigaction> for SignalAction {
     fn from(value: kernel_sigaction) -> Self {
-        let flags = SignalActionFlags::from_bits_truncate(value.sa_flags);
+        k_sigaction {
+            handler: value.sa_handler_kernel,
+            flags: value.sa_flags,
+            #[cfg(sa_restorer)]
+            restorer: value.sa_restorer,
+            #[cfg(not(sa_restorer))]
+            restorer: None,
+            mask: value.sa_mask.into(),
+        }
+        .into()
+    }
+}
+
+impl From<k_sigaction> for SignalAction {
+    fn from(value: k_sigaction) -> Self {
+        let flags = SignalActionFlags::from_bits_truncate(value.flags);
         let disposition = {
-            match value.sa_handler_kernel {
+            match value.handler {
                 None => {
                     // SIG_DFL
                     SignalDisposition::Default
@@ -141,7 +153,7 @@ impl From<kernel_sigaction> for SignalAction {
 
         #[cfg(sa_restorer)]
         let restorer = if flags.contains(SignalActionFlags::RESTORER) {
-            value.sa_restorer
+            value.restorer
         } else {
             None
         };
@@ -150,7 +162,7 @@ impl From<kernel_sigaction> for SignalAction {
 
         SignalAction {
             flags,
-            mask: value.sa_mask.into(),
+            mask: value.mask.into(),
             disposition,
             restorer,
         }

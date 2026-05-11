@@ -6,10 +6,14 @@
 
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
+#[cfg(target_arch = "x86_64")]
+use linux_raw_sys::general::__kernel_old_time_t;
 use linux_raw_sys::general::{
     __kernel_old_timespec, __kernel_old_timeval, __kernel_sock_timeval, __kernel_timespec,
-    timespec, timeval,
+    itimerspec, itimerval, timespec, timeval,
 };
+
+use crate::{UserRead, UserWrite};
 
 /// Convert between kernel `TimeValue` and Linux time structures.
 pub trait TimeValueLike {
@@ -133,6 +137,26 @@ impl TimeValueLike for __kernel_sock_timeval {
             self.tv_usec as u32 * 1000,
         ))
     }
+}
+
+unsafe impl UserRead for itimerspec {}
+unsafe impl UserRead for itimerval {}
+unsafe impl UserRead for timespec {}
+unsafe impl UserRead for timeval {}
+#[cfg(target_arch = "x86_64")]
+unsafe impl UserRead for utimbuf {}
+
+unsafe impl UserWrite for itimerspec {}
+unsafe impl UserWrite for itimerval {}
+unsafe impl UserWrite for timespec {}
+unsafe impl UserWrite for timeval {}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct utimbuf {
+    pub actime: __kernel_old_time_t,
+    pub modtime: __kernel_old_time_t,
 }
 
 #[cfg(unittest)]

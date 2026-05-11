@@ -16,7 +16,6 @@ use core::{
     ptr, slice,
 };
 
-use bytemuck::AnyBitPattern;
 use kerrno::{KError, KResult};
 use osvm::{VirtMutPtr, VirtPtr, load_vec_until_null, read_vm_bytes, write_vm_bytes};
 
@@ -34,6 +33,44 @@ fn spare_as_uninit_bytes<T>(spare: &mut [MaybeUninit<T>]) -> &mut [MaybeUninit<u
         )
     }
 }
+
+/// A by-value syscall ABI object that can be copied from user memory.
+///
+/// # Safety
+///
+/// Implementers must ensure that any byte pattern copied from user memory is a
+/// valid initialized value of `Self`.
+pub unsafe trait UserRead {}
+
+/// A by-value syscall ABI object that can be copied to user memory.
+///
+/// # Safety
+///
+/// Implementers must ensure that values of `Self` always expose a fully
+/// initialized byte representation when viewed as raw bytes for copy-to-user.
+/// In practice this means the type must not contain implicit padding bytes, or
+/// it must model those bytes as explicit fields that are always initialized.
+pub unsafe trait UserWrite {}
+
+macro_rules! impl_user_read_for_scalars {
+    ($($ty:ty),* $(,)?) => {
+        $(unsafe impl UserRead for $ty {})*
+    };
+}
+
+impl_user_read_for_scalars!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+macro_rules! impl_user_write_for_scalars {
+    ($($ty:ty),* $(,)?) => {
+        $(unsafe impl UserWrite for $ty {})*
+    };
+}
+
+impl_user_write_for_scalars!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+unsafe impl<T: UserRead, const N: usize> UserRead for [T; N] where [T; N]: Copy {}
+unsafe impl<T: UserWrite, const N: usize> UserWrite for [T; N] {}
+unsafe impl<T> UserWrite for *const T {}
+unsafe impl<T> UserWrite for *mut T {}
 
 /// A mutable pointer to user-space memory.
 ///
@@ -89,13 +126,45 @@ impl<T> UserPtr<T> {
         UserPtr(self.0 as *mut U)
     }
 
+    /// Converts this mutable user pointer to a read-only one.
+    pub fn as_const(self) -> UserConstPtr<T> {
+        UserConstPtr(self.0.cast_const())
+    }
+
+    /// Read into an uninitialized buffer with copy-from-user semantics.
+    pub fn read_uninit(self) -> osvm::MemResult<MaybeUninit<T>> {
+        self.as_const().read_uninit()
+    }
+
+    /// Read a by-value syscall ABI object from user memory.
+    pub fn read_vm(self) -> osvm::MemResult<T>
+    where
+        T: UserRead,
+    {
+        self.as_const().read_vm()
+    }
+
+    /// Load a vector of values from user memory.
+    pub fn load_vm_vec(self, len: usize) -> osvm::MemResult<Vec<T>>
+    where
+        T: UserRead,
+    {
+        self.as_const().load_vm_vec(len)
+    }
+
     /// Write a value to user memory with copy-to-user semantics.
-    pub fn write_vm(self, value: T) -> osvm::MemResult {
+    pub fn write_vm(self, value: T) -> osvm::MemResult
+    where
+        T: UserWrite,
+    {
         self.write_vm_slice(slice::from_ref(&value))
     }
 
     /// Write a slice of values to user memory.
-    pub fn write_vm_slice(self, data: &[T]) -> osvm::MemResult {
+    pub fn write_vm_slice(self, data: &[T]) -> osvm::MemResult
+    where
+        T: UserWrite,
+    {
         let bytes = unsafe { slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) };
         write_vm_bytes(self.0.cast::<u8>(), bytes)
     }
@@ -143,6 +212,12 @@ impl<T> From<*const T> for UserConstPtr<T> {
     }
 }
 
+impl<T> From<UserPtr<T>> for UserConstPtr<T> {
+    fn from(value: UserPtr<T>) -> Self {
+        value.as_const()
+    }
+}
+
 impl<T> Default for UserConstPtr<T> {
     fn default() -> Self {
         Self(ptr::null())
@@ -172,10 +247,10 @@ impl<T> UserConstPtr<T> {
         Ok(value)
     }
 
-    /// Read a typed value from user memory with copy-from-user semantics.
+    /// Read a by-value syscall ABI object from user memory.
     pub fn read_vm(self) -> osvm::MemResult<T>
     where
-        T: AnyBitPattern,
+        T: UserRead,
     {
         let value = self.read_uninit()?;
         Ok(unsafe { value.assume_init() })
@@ -184,7 +259,7 @@ impl<T> UserConstPtr<T> {
     /// Load a vector of values from user memory.
     pub fn load_vm_vec(self, len: usize) -> osvm::MemResult<Vec<T>>
     where
-        T: AnyBitPattern,
+        T: UserRead,
     {
         let mut vec = Vec::with_capacity(len);
         read_vm_bytes(

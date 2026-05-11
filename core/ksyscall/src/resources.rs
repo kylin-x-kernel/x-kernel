@@ -9,14 +9,14 @@ use kerrno::{KError, KResult};
 use kprocess::Pid;
 use kthread::get_process_state;
 use linux_raw_sys::general::{RLIM_NLIMITS, rlimit64};
-use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::{UserConstPtr, UserPtr};
 
 /// Get and/or set resource limits for a process
 pub fn sys_prlimit64(
     pid: Pid,
     resource: u32,
-    new_limit: *const rlimit64,
-    old_limit: *mut rlimit64,
+    new_limit: UserConstPtr<rlimit64>,
+    old_limit: UserPtr<rlimit64>,
 ) -> KResult<isize> {
     if resource >= RLIM_NLIMITS {
         return Err(KError::InvalidInput);
@@ -32,8 +32,7 @@ pub fn sys_prlimit64(
     }
 
     if let Some(new_limit) = new_limit.check_non_null() {
-        // FIXME: AnyBitPattern
-        let new_limit = unsafe { new_limit.read_uninit()?.assume_init() };
+        let new_limit = new_limit.read_vm()?;
         if new_limit.rlim_cur > new_limit.rlim_max {
             return Err(KError::InvalidInput);
         }

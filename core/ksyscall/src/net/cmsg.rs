@@ -7,18 +7,19 @@
 //! This module provides parsing and handling of control messages (ancillary data)
 //! in socket I/O operations, including file descriptor passing and other protocol-specific data.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{mem::size_of, net::SocketAddr, ptr};
 
 use bytemuck::{NoUninit, bytes_of};
 use kerrno::{KError, KResult, LinuxError};
 use kfd::FileLike;
 use knet::UdpRecvError;
-use kservices::mm::{UserConstPtr, UserPtr};
 use linux_raw_sys::net::{
     AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
     sockaddr_in,
 };
+use osvm::{VirtPtr, write_vm_mem};
+use posix_types::{UserConstPtr, UserPtr};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -120,14 +121,17 @@ pub enum CMsg {
 }
 impl CMsg {
     /// Parse a control message header and extract its data
-    pub fn parse(resources: &kthread::ProcessResources, hdr: &cmsghdr) -> KResult<Self> {
+    pub fn parse(
+        resources: &kthread::ProcessResources,
+        hdr_ptr: UserConstPtr<cmsghdr>,
+        hdr: cmsghdr,
+    ) -> KResult<Self> {
         if hdr.cmsg_len < size_of::<cmsghdr>() {
             return Err(KError::InvalidInput);
         }
 
-        let data =
-            UserConstPtr::<u8>::from((hdr as *const cmsghdr as usize) + size_of::<cmsghdr>())
-                .get_as_slice(hdr.cmsg_len - size_of::<cmsghdr>())?;
+        let data = UserConstPtr::<u8>::from(hdr_ptr.as_ptr() as usize + size_of::<cmsghdr>())
+            .load_vm_vec(hdr.cmsg_len - size_of::<cmsghdr>())?;
         Ok(match (hdr.cmsg_level as u32, hdr.cmsg_type as u32) {
             (SOL_SOCKET, SCM_RIGHTS) => {
                 if data.len() % size_of::<i32>() != 0 {
@@ -183,16 +187,21 @@ impl<'a> CMsgBuilder<'a> {
             return Ok(false);
         };
 
-        let data = UserPtr::<u8>::from(self.hdr.address().as_usize() + size_of::<cmsghdr>())
-            .get_as_mut_slice(body_capacity)?;
-        let body_len = body(data)?;
+        let mut data = vec![0u8; body_capacity];
+        let body_len = body(&mut data)?;
 
         let cmsg_len = size_of::<cmsghdr>() + body_len;
-        let hdr = self.hdr.get_as_mut()?;
-        hdr.cmsg_level = level as _;
-        hdr.cmsg_type = ty as _;
-        hdr.cmsg_len = cmsg_len;
-        self.hdr = UserPtr::from(hdr as *const _ as usize + cmsg_len);
+        UserPtr::<u8>::from(self.hdr.as_ptr() as usize + size_of::<cmsghdr>())
+            .write_vm_slice(&data[..body_len])?;
+
+        let hdr = cmsghdr {
+            cmsg_len,
+            cmsg_level: level as _,
+            cmsg_type: ty as _,
+        };
+        write_vm_mem(self.hdr.as_ptr().cast_mut(), core::slice::from_ref(&hdr))?;
+
+        self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + cmsg_len);
         *self.len += cmsg_len;
         Ok(true)
     }

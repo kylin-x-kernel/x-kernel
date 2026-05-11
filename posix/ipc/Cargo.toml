@@ -22,5 +22,4 @@ memspace = { workspace = true }
 osvm = { workspace = true }
 posix-types = { workspace = true }
 bitflags = { workspace = true }
-bytemuck = { workspace = true, features = ["derive"] }
 unittest.workspace = true

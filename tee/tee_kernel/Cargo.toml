@@ -38,7 +38,7 @@ knet.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 bitflags.workspace = true
-bytemuck.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
 cfg-if.workspace = true
 lazy_static = { workspace = true }
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }

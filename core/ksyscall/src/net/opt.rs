@@ -9,13 +9,14 @@
 //! - Set socket options (setsockopt, etc.)
 //! - Socket-level, IP-level, TCP-level, and other protocol options
 
+use core::mem::MaybeUninit;
+
 use kerrno::{KError, KResult, LinuxError};
 use knet::options::{Configurable, GetSocketOption, SetSocketOption};
-use kservices::{
-    file::Socket,
-    mm::{UserConstPtr, UserPtr},
-};
+use kservices::file::Socket;
 use linux_raw_sys::net::socklen_t;
+use osvm::{VirtPtr, read_vm_mem, write_vm_mem};
+use posix_types::{UserConstPtr, UserPtr};
 
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
@@ -128,39 +129,43 @@ pub fn sys_getsockopt(
     level: u32,
     optname: u32,
     optval: UserPtr<u8>,
-    optlen: UserPtr<socklen_t>,
+    optlen_ptr: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let optlen = optlen.get_as_mut()?;
+    let mut optlen = optlen_ptr.read_vm()?;
     debug!(
-        "sys_getsockopt <= fd: {}, level: {}, optname: {}, optval: {:?}, optlen: {}",
-        fd,
-        level,
-        optname,
-        optval.address(),
-        optlen,
+        "sys_getsockopt <= fd: {}, level: {}, optname: {}, optlen: {}",
+        fd, level, optname, optlen,
     );
 
-    fn get<'a, T: 'static>(val: UserPtr<u8>, len: &mut socklen_t) -> KResult<&'a mut T> {
+    fn put<T>(dst: UserPtr<u8>, len: &mut socklen_t, value: &T) -> KResult<()> {
         if (*len as usize) < size_of::<T>() {
             return Err(KError::InvalidInput);
         }
         *len = size_of::<T>() as socklen_t;
-        val.cast().get_as_mut()
+        write_vm_mem(
+            dst.cast::<T>().as_ptr().cast_mut(),
+            core::slice::from_ref(value),
+        )
+        .map_err(Into::into)
     }
 
     let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     macro_rules! dispatch {
         ($which:ident) => {
-            socket.get_option(GetSocketOption::$which(get(optval, optlen)?))?;
+            let mut val = Default::default();
+            socket.get_option(GetSocketOption::$which(&mut val))?;
+            put(optval, &mut optlen, &val)?;
         };
         ($which:ident as $conv:ty) => {
             let mut val = Default::default();
             socket.get_option(GetSocketOption::$which(&mut val))?;
-            *get(optval, optlen)? = <$conv>::rust_to_sys(val)?;
+            let sys_val = <$conv>::rust_to_sys(val)?;
+            put(optval, &mut optlen, &sys_val)?;
         };
     }
     call_dispatch!(dispatch, (level, optname));
 
+    optlen_ptr.write_vm(optlen)?;
     Ok(0)
 }
 
@@ -173,28 +178,29 @@ pub fn sys_setsockopt(
     optlen: socklen_t,
 ) -> KResult<isize> {
     debug!(
-        "sys_setsockopt <= fd: {}, level: {}, optname: {}, optval: {:?}, optlen: {}",
-        fd,
-        level,
-        optname,
-        optval.address(),
-        optlen
+        "sys_setsockopt <= fd: {}, level: {}, optname: {}, optlen: {}",
+        fd, level, optname, optlen
     );
 
-    fn get<'a, T: 'static>(val: UserConstPtr<u8>, len: socklen_t) -> KResult<&'a T> {
+    fn get<T: Copy>(val: UserConstPtr<u8>, len: socklen_t) -> KResult<T> {
         if len as usize != size_of::<T>() {
             return Err(KError::InvalidInput);
         }
-        val.cast().get_as_ref()
+        let mut value = MaybeUninit::<T>::uninit();
+        read_vm_mem(val.cast::<T>().as_ptr(), core::slice::from_mut(&mut value))
+            .map_err(KError::from)?;
+        Ok(unsafe { value.assume_init() })
     }
 
     let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
     macro_rules! dispatch {
         ($which:ident) => {
-            socket.set_option(SetSocketOption::$which(get(optval, optlen)?))?;
+            let val = get(optval, optlen)?;
+            socket.set_option(SetSocketOption::$which(&val))?;
         };
         ($which:ident as $conv:ty) => {
-            let mut val = <$conv>::sys_to_rust(*get(optval, optlen)?)?;
+            let sys_val = get(optval, optlen)?;
+            let mut val = <$conv>::sys_to_rust(sys_val)?;
             socket.set_option(SetSocketOption::$which(&mut val))?;
         };
     }

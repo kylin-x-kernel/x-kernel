@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! ABI-facing input device structures.
+
+use crate::UserWrite;
+
+/// The Linux `struct input_id` carrier used by evdev ioctls such as `EVIOCGID`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InputId {
+    pub bus_type: u16,
+    pub vendor: u16,
+    pub product: u16,
+    pub version: u16,
+}
+
+unsafe impl UserWrite for InputId {}

@@ -53,7 +53,7 @@ ksync.workspace = true
 ktask.workspace = true
 bitflags.workspace = true
 bitmaps = { version = "3.2.1", default-features = false }
-bytemuck.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
 lazyinit.workspace = true
 chrono = { version = "0.4.41", default-features = false }
 flatten_objects = "0.2.4"
@@ -75,6 +75,7 @@ kprocess.workspace = true
 kthread.workspace = true
 ksignal.workspace = true
 osvm.workspace = true
+posix-types.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
 tee_kernel = { workspace = true, optional = true }
 kcore.workspace = true

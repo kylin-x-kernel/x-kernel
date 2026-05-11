@@ -14,51 +14,36 @@ use khal::{
 use kprocess::Pid;
 use ksync::Mutex;
 use kthread::current_process_state;
-use linux_raw_sys::{ctypes::c_ushort, general::*};
+use linux_raw_sys::general::*;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::backend::{Backend, SharedPages};
 use osvm::VirtPtr;
-use posix_types::{IpcPerm, UserPtr};
+use posix_types::{IpcPerm, UserPtr, shmid_ds};
 
 use super::{IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, next_ipc_id};
 
-/// Data structure describing a shared memory segment.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::AnyBitPattern)]
-pub struct ShmidDs {
-    shm_perm: IpcPerm,
-    shm_segsz: __kernel_size_t,
-    shm_atime: __kernel_time_t,
-    shm_dtime: __kernel_time_t,
-    pub shm_ctime: __kernel_time_t,
-    shm_cpid: __kernel_pid_t,
-    shm_lpid: __kernel_pid_t,
-    shm_nattch: c_ushort,
-}
-
-impl ShmidDs {
-    fn new(key: i32, size: usize, mode: __kernel_mode_t, pid: __kernel_pid_t) -> Self {
-        Self {
-            shm_perm: IpcPerm {
-                key,
-                uid: 0,
-                gid: 0,
-                cuid: 0,
-                cgid: 0,
-                mode,
-                seq: 0,
-                pad: 0,
-                unused0: 0,
-                unused1: 0,
-            },
-            shm_segsz: size as __kernel_size_t,
-            shm_atime: 0,
-            shm_dtime: 0,
-            shm_ctime: 0,
-            shm_cpid: pid,
-            shm_lpid: pid,
-            shm_nattch: 0,
-        }
+fn new_shmid_ds(key: i32, size: usize, mode: __kernel_mode_t, pid: __kernel_pid_t) -> shmid_ds {
+    shmid_ds {
+        shm_perm: IpcPerm {
+            key,
+            uid: 0,
+            gid: 0,
+            cuid: 0,
+            cgid: 0,
+            mode,
+            seq: 0,
+            pad: 0,
+            unused0: 0,
+            unused1: 0,
+        },
+        shm_segsz: size as __kernel_size_t,
+        shm_atime: 0,
+        shm_dtime: 0,
+        shm_ctime: 0,
+        shm_cpid: pid,
+        shm_lpid: pid,
+        shm_nattch: 0,
+        abi_pad: [0; 6],
     }
 }
 
@@ -70,7 +55,7 @@ pub struct ShmInner {
     pub phys_pages: Option<Arc<SharedPages>>,
     pub rmid: bool,
     pub mapping_flags: MappingFlags,
-    pub shmid_ds: ShmidDs,
+    pub shmid_ds: shmid_ds,
 }
 
 impl ShmInner {
@@ -82,12 +67,7 @@ impl ShmInner {
             phys_pages: None,
             rmid: false,
             mapping_flags,
-            shmid_ds: ShmidDs::new(
-                key,
-                size,
-                mapping_flags.bits() as __kernel_mode_t,
-                pid as __kernel_pid_t,
-            ),
+            shmid_ds: new_shmid_ds(key, size, mapping_flags.bits() as __kernel_mode_t, pid as _),
         }
     }
 
@@ -423,7 +403,7 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     Ok(start_addr.as_usize() as isize)
 }
 
-pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> KResult<isize> {
+pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<shmid_ds>) -> KResult<isize> {
     let shm_inner = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager

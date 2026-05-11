@@ -6,6 +6,10 @@
 
 mod abi;
 mod itimer;
+mod tms;
 
 pub use abi::TimeValueLike;
+#[cfg(target_arch = "x86_64")]
+pub use abi::utimbuf;
 pub use itimer::ITimerType;
+pub use tms::Tms;

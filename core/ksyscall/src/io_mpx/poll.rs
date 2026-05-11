@@ -14,16 +14,12 @@ use alloc::vec::Vec;
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kpoll::IoEvents;
-use kservices::{
-    mm::{UserConstPtr, UserPtr},
-    nullable,
-    signal::with_replacen_blocked,
-};
+use kservices::signal::with_replacen_blocked;
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
 use posix_signal::check_sigset_size;
-use posix_types::TimeValueLike;
+use posix_types::{TimeValueLike, UserConstPtr, UserPtr, k_sigset};
 
 use super::FdPollSet;
 
@@ -105,13 +101,17 @@ fn do_poll(
 /// Poll file descriptors with millisecond timeout
 #[cfg(target_arch = "x86_64")]
 pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
-    let fds = fds.get_as_mut_slice(nfds as usize)?;
+    let mut poll_fds = fds.load_vm_vec(nfds as usize)?;
     let timeout = if timeout < 0 {
         None
     } else {
         Some(TimeValue::from_millis(timeout as u64))
     };
-    do_poll(fds, timeout, None)
+    let result = do_poll(&mut poll_fds, timeout, None);
+    if result.is_ok() {
+        fds.write_vm_slice(&poll_fds)?;
+    }
+    result
 }
 
 /// Poll file descriptors with high-precision timeout and signal masking
@@ -119,14 +119,26 @@ pub fn sys_ppoll(
     fds: UserPtr<pollfd>,
     nfds: i32,
     timeout: UserConstPtr<timespec>,
-    sigmask: UserConstPtr<SignalSet>,
+    sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     check_sigset_size(sigsetsize)?;
-    let fds = fds.get_as_mut_slice(nfds.try_into().map_err(|_| KError::InvalidInput)?)?;
-    let timeout = nullable!(timeout.get_as_ref())?
-        .map(|ts| ts.try_into_time_value())
-        .transpose()?;
+    let nfds = nfds.try_into().map_err(|_| KError::InvalidInput)?;
+    let mut poll_fds = fds.load_vm_vec(nfds)?;
+    let timeout = if timeout.is_null() {
+        None
+    } else {
+        Some(timeout.read_vm()?.try_into_time_value()?)
+    };
     // TODO: dispatch_irq signal
-    do_poll(fds, timeout, nullable!(sigmask.get_as_ref())?.copied())
+    let sigmask = if sigmask.is_null() {
+        None
+    } else {
+        Some(sigmask.read_vm()?.into())
+    };
+    let result = do_poll(&mut poll_fds, timeout, sigmask);
+    if result.is_ok() {
+        fds.write_vm_slice(&poll_fds)?;
+    }
+    result
 }
