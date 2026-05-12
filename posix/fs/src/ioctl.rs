@@ -7,7 +7,7 @@
 use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
-use linux_raw_sys::ioctl::{FIONBIO, TIOCGWINSZ};
+use linux_raw_sys::ioctl::{FIONBIO, TCGETS, TIOCGWINSZ};
 use posix_types::UserConstPtr;
 
 /// The `ioctl()` syscall manipulates the underlying device parameters
@@ -27,8 +27,9 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
         .map(|result| result as isize)
         .inspect_err(|err| {
             if *err == KError::NotATty {
-                // glibc likes to call `TIOCGWINSZ` on non-terminal files.
-                if cmd == TIOCGWINSZ {
+                // TIOCGWINSZ / TCGETS on non-terminal fds are normal
+                // (isatty() calls TCGETS to check if fd is a terminal)
+                if cmd == TIOCGWINSZ || cmd == TCGETS {
                     return;
                 }
                 warn!("Unsupported ioctl command: {cmd} for fd: {fd}");
