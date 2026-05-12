@@ -11,7 +11,7 @@ extern crate alloc;
 
 mod credentials;
 
-pub use credentials::{CredentialError, Credentials, Gid, Uid};
+pub use credentials::{AccessCredentials, AccessIdKind, CredentialError, Credentials, Gid, Uid};
 
 #[cfg(unittest)]
 mod tests;

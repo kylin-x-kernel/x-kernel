@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kcred = { workspace = true }
 kerrno = { workspace = true}
 kpoll = { workspace = true }
 bitflags = "2.10"

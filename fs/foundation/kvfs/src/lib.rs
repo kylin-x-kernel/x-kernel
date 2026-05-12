@@ -12,6 +12,7 @@ mod fs;
 mod mount;
 mod node;
 pub mod path;
+mod permission;
 mod types;
 
 mod test_path;
@@ -20,6 +21,7 @@ mod test_types;
 pub use fs::*;
 pub use mount::*;
 pub use node::*;
+pub use permission::*;
 pub use types::*;
 
 pub type VfsError = kerrno::KError;

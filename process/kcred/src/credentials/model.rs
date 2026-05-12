@@ -4,7 +4,7 @@
 
 //! Credential state and POSIX/Linux set-ID transitions.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use super::{CredentialError, Gid, Uid};
 
@@ -19,7 +19,7 @@ pub struct Credentials {
     egid: Gid,
     sgid: Gid,
     fsgid: Gid,
-    supplementary_groups: Vec<Gid>,
+    supplementary_groups: Arc<[Gid]>,
 }
 
 impl Credentials {
@@ -39,7 +39,7 @@ impl Credentials {
             egid: gid,
             sgid: gid,
             fsgid: gid,
-            supplementary_groups: Vec::new(),
+            supplementary_groups: Arc::from([]),
         }
     }
 
@@ -83,8 +83,13 @@ impl Credentials {
         self.fsgid
     }
 
-    /// Returns a snapshot of the supplementary group list.
-    pub fn supplementary_groups(&self) -> Vec<Gid> {
+    /// Returns the supplementary group list.
+    pub fn supplementary_groups(&self) -> &[Gid] {
+        &self.supplementary_groups
+    }
+
+    /// Returns a shared snapshot of the supplementary group list.
+    pub fn supplementary_groups_snapshot(&self) -> Arc<[Gid]> {
         self.supplementary_groups.clone()
     }
 
@@ -308,7 +313,7 @@ impl Credentials {
     /// duplicate entries for syscall-visible output.
     pub fn set_supplementary_groups(&mut self, mut groups: Vec<Gid>) {
         groups.sort_unstable();
-        self.supplementary_groups = groups;
+        self.supplementary_groups = Arc::from(groups);
     }
 
     /// Sets real, effective, and saved user IDs. Filesystem UID tracks the

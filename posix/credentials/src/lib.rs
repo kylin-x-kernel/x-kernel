@@ -19,4 +19,13 @@ mod groups;
 mod helpers;
 mod ids;
 
-pub use self::{groups::*, ids::*};
+pub use kcred::AccessCredentials;
+
+pub use self::{
+    groups::*,
+    helpers::{
+        current_fs_ids, snapshot_effective_credentials, snapshot_fs_credentials,
+        snapshot_real_credentials,
+    },
+    ids::*,
+};

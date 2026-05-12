@@ -18,7 +18,7 @@ fn test_credentials_root_initial_state() {
     assert_eq!(credentials.egid(), 0);
     assert_eq!(credentials.sgid(), 0);
     assert_eq!(credentials.fsgid(), 0);
-    assert_eq!(credentials.supplementary_groups(), alloc::vec![]);
+    assert_eq!(credentials.supplementary_groups(), &[]);
 }
 
 #[def_test]
@@ -191,5 +191,5 @@ fn test_supplementary_groups_are_sorted_and_preserve_duplicates() {
 
     credentials.set_supplementary_groups(alloc::vec![3, 1, 3, 2]);
 
-    assert_eq!(credentials.supplementary_groups(), alloc::vec![1, 2, 3, 3]);
+    assert_eq!(credentials.supplementary_groups(), &[1, 2, 3, 3]);
 }

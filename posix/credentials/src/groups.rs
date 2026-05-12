@@ -21,7 +21,7 @@ pub fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let groups = with_credentials(|credentials| credentials.supplementary_groups());
+    let groups = with_credentials(|credentials| credentials.supplementary_groups_snapshot());
     if size == 0 {
         return Ok(groups.len() as isize);
     }
@@ -32,7 +32,7 @@ pub fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
 
     if !groups.is_empty() {
         list.check_non_null().ok_or(KError::BadAddress)?;
-        list.write_vm_slice(&groups)?;
+        list.write_vm_slice(groups.as_ref())?;
     }
     Ok(groups.len() as isize)
 }

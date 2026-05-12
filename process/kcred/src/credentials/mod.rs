@@ -4,11 +4,13 @@
 
 //! POSIX process credentials.
 
+mod access;
 mod error;
 mod group;
 mod model;
 mod user;
 
+pub use access::{AccessCredentials, AccessIdKind};
 pub use error::CredentialError;
 pub use group::Gid;
 pub use model::Credentials;

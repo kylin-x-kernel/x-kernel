@@ -2,9 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Shared helpers for POSIX credential syscalls.
+//! Shared helpers for POSIX credential syscalls and DAC checks.
 
-use kcred::{CredentialError, Credentials};
+use kcred::{AccessCredentials, AccessIdKind, CredentialError, Credentials};
 use kerrno::KError;
 use ktask::current;
 use kthread::AsThread;
@@ -36,4 +36,32 @@ pub(crate) fn credential_error(err: CredentialError) -> KError {
     match err {
         CredentialError::PermissionDenied => KError::OperationNotPermitted,
     }
+}
+
+/// Returns the current filesystem UID and GID.
+pub fn current_fs_ids() -> (u32, u32) {
+    let curr = current();
+    let credentials = curr.as_thread().proc_state.credentials.read();
+    (credentials.fsuid(), credentials.fsgid())
+}
+
+/// Returns the real-ID credential snapshot for `access(2)` checks.
+pub fn snapshot_real_credentials() -> AccessCredentials {
+    let curr = current();
+    let credentials = curr.as_thread().proc_state.credentials.read();
+    credentials.access_snapshot(AccessIdKind::Real)
+}
+
+/// Returns the effective-ID credential snapshot for `AT_EACCESS` checks.
+pub fn snapshot_effective_credentials() -> AccessCredentials {
+    let curr = current();
+    let credentials = curr.as_thread().proc_state.credentials.read();
+    credentials.access_snapshot(AccessIdKind::Effective)
+}
+
+/// Returns the filesystem credential snapshot for open-time DAC checks.
+pub fn snapshot_fs_credentials() -> AccessCredentials {
+    let curr = current();
+    let credentials = curr.as_thread().proc_state.credentials.read();
+    credentials.access_snapshot(AccessIdKind::Filesystem)
 }

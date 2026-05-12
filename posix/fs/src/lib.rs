@@ -15,9 +15,9 @@ mod dir;
 mod fd_ops;
 mod io;
 mod ioctl;
-mod link;
 mod metadata;
 mod mount;
+mod namei;
 mod open;
 mod path;
 mod pipe;
@@ -25,6 +25,6 @@ mod stat;
 mod sync;
 
 pub use self::{
-    dir::*, fd_ops::*, io::*, ioctl::*, link::*, metadata::*, mount::*, open::*, path::*, pipe::*,
+    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, path::*, pipe::*,
     stat::*, sync::*,
 };
