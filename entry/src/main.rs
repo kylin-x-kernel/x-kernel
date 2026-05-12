@@ -10,6 +10,7 @@
 extern crate klogger;
 
 extern crate alloc;
+extern crate kfeat;
 extern crate kruntime;
 
 #[cfg(feature = "unittest")]
@@ -146,14 +147,3 @@ fn main() {
     info!("Unit tests completed, shutting down...");
     khal::power::shutdown();
 }
-
-#[cfg(feature = "aarch64_crosvm_virt")]
-extern crate aarch64_crosvm_virt;
-#[cfg(feature = "aarch64_qemu_virt")]
-extern crate aarch64_qemu_virt;
-#[cfg(feature = "loongarch64_qemu_virt")]
-extern crate loongarch64_qemu_virt;
-#[cfg(feature = "riscv64_qemu_virt")]
-extern crate riscv64_qemu_virt;
-#[cfg(feature = "x86_64_qemu_virt")]
-extern crate x86_64_qemu_virt;

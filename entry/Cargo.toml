@@ -8,41 +8,8 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-# all of platforms should enable default features
-
-smp = ["kfeat/smp"]
 unittest = ["dep:unittest"]
 dma-trace = ["kfeat/dma-trace"]
-
-# Stubs
-
-# qemu default platforms enabled drivers
-qemu = ["kfeat/fp-simd", "kservices/dev-log"]
-
-# aarch64-qemu-virt platform
-aarch64_qemu_virt = [
-    "qemu",
-    "smp",
-    # "kfeat/watchdog",
-    "dep:aarch64-qemu-virt",
-]
-
-x86_64_qemu_virt = ["qemu", "dep:x86_64-qemu-virt"]
-
-riscv64_qemu_virt = ["qemu", "smp", "dep:riscv64-qemu-virt"]
-
-loongarch64_qemu_virt = ["qemu", "dep:loongarch64-qemu-virt"]
-
-# pkvm platform
-aarch64_crosvm_virt = [
-    "kfeat/fp-simd",
-    "dep:aarch64-crosvm-virt",
-    "smp",
-    # auxilary features
-    "kservices/dev-log",
-    "kfeat/crosvm",
-    "kservices/dice",
-]
 
 [dependencies]
 kvfs.workspace = true
@@ -63,31 +30,6 @@ ksyscall.workspace = true
 kservices.workspace = true
 kcore.workspace = true
 unittest = { workspace = true, optional = true }
-
-[dependencies.aarch64-qemu-virt]
-workspace = true
-optional = true
-features = ["fp-simd", "smp", "rtc"]
-
-[dependencies.x86_64-qemu-virt]
-workspace = true
-optional = true
-features = ["fp-simd", "rtc"]
-
-[dependencies.riscv64-qemu-virt]
-workspace = true
-optional = true
-features = ["fp-simd", "smp", "rtc"]
-
-[dependencies.loongarch64-qemu-virt]
-workspace = true
-optional = true
-features = ["fp-simd", "rtc"]
-
-[dependencies.aarch64-crosvm-virt]
-workspace = true
-optional = true
-features = ["fp-simd", "smp", "rtc"]
 
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]

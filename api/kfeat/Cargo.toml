@@ -13,7 +13,15 @@ description = "Top-level feature selection for x-kernel"
 default = []
 
 # Multicore
-smp = ["khal/smp", "kruntime/smp", "ktask?/smp", "kspin/smp"]
+smp = [
+    "khal/smp",
+    "kruntime/smp",
+    "ktask?/smp",
+    "kspin/smp",
+    "aarch64-qemu-virt?/smp",
+    "aarch64-crosvm-virt?/smp",
+    "riscv64-qemu-virt?/smp",
+]
 
 # Floating point/SIMD
 fp-simd = ["khal/fp-simd"]
@@ -24,6 +32,40 @@ ipi = [ "dep:kipi", "khal/ipi", "kruntime/ipi"]
 
 crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 dma-trace = ["kdriver/dma-trace"]
+dev_log = ["kservices/dev-log"]
+dice = ["kservices/dice"]
+
+# Platform wiring
+platform_aarch64_qemu_virt = [
+    "dep:aarch64-qemu-virt",
+    "fp-simd",
+    "smp",
+    "dev_log",
+]
+platform_x86_64_qemu_virt = [
+    "dep:x86_64-qemu-virt",
+    "fp-simd",
+    "dev_log",
+]
+platform_riscv64_qemu_virt = [
+    "dep:riscv64-qemu-virt",
+    "fp-simd",
+    "smp",
+    "dev_log",
+]
+platform_loongarch64_qemu_virt = [
+    "dep:loongarch64-qemu-virt",
+    "fp-simd",
+    "dev_log",
+]
+platform_aarch64_crosvm_virt = [
+    "dep:aarch64-crosvm-virt",
+    "fp-simd",
+    "smp",
+    "crosvm",
+    "dev_log",
+    "dice",
+]
 
 # Memory
 alloc = ["dep:alloc-engine", "dep:kalloc"]
@@ -116,6 +158,11 @@ kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true
+aarch64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
+aarch64-crosvm-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
+x86_64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
+riscv64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
+loongarch64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
 kcore = { workspace = true }
 kfs = { workspace = true, optional = true }
 khal.workspace = true

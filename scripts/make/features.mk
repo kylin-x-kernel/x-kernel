@@ -8,7 +8,5 @@ config_kfeat := $(shell ./scripts/make/kfeat_features.sh .config)
 
 kfeat += $(config_kfeat)
 
-APP_FEATURES += $(subst -,_,$(PLAT))
-
 KFEAT := $(strip $(addprefix $(kfeat_prefix),$(kfeat)))
 APP_FEAT := $(strip $(shell echo $(APP_FEATURES) | tr ',' ' '))
