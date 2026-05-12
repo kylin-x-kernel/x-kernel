@@ -51,6 +51,7 @@ posix-process.workspace = true
 posix-sched.workspace = true
 posix-signal.workspace = true
 posix-sync.workspace = true
+posix-time.workspace = true
 posix-types.workspace = true
 num_enum = { version = "0.7", default-features = false }
 

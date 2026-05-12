@@ -2,16 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Resource limit syscalls.
-//!
-//! This module provides the `prlimit64` syscall.
+//! POSIX resource-limit syscalls.
+
 use kerrno::{KError, KResult};
 use kprocess::Pid;
 use kthread::get_process_state;
 use linux_raw_sys::general::{RLIM_NLIMITS, rlimit64};
 use posix_types::{UserConstPtr, UserPtr};
 
-/// Get and/or set resource limits for a process
+/// Gets and/or sets resource limits for a process.
 pub fn sys_prlimit64(
     pid: Pid,
     resource: u32,
@@ -49,4 +48,14 @@ pub fn sys_prlimit64(
     }
 
     Ok(0)
+}
+
+/// Returns the current resource limits of the calling process.
+pub fn sys_getrlimit(resource: u32, old_limit: UserPtr<rlimit64>) -> KResult<isize> {
+    sys_prlimit64(0, resource, UserConstPtr::from(0usize), old_limit)
+}
+
+/// Updates the resource limits of the calling process.
+pub fn sys_setrlimit(resource: u32, new_limit: UserConstPtr<rlimit64>) -> KResult<isize> {
+    sys_prlimit64(0, resource, new_limit, UserPtr::from(0usize))
 }

@@ -6,16 +6,20 @@
 //!
 //! - Signal mask manipulation (`rt_sigprocmask`, `rt_sigaction`, `rt_sigpending`)
 //! - Signal delivery (`kill`, `tkill`, `tgkill`, realtime queueing)
+//! - Interval timers (`getitimer`, `setitimer`)
 //! - Signal wait/return flow (`rt_sigreturn`, `rt_sigtimedwait`, `rt_sigsuspend`)
 //! - Alternate signal stack (`sigaltstack`)
 
 #![no_std]
+
+mod itimer;
 
 #[macro_use]
 extern crate klogger;
 
 use core::{future::poll_fn, task::Poll};
 
+pub use itimer::{sys_getitimer, sys_setitimer};
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kprocess::Pid;

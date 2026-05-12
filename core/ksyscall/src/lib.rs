@@ -18,11 +18,9 @@ mod dispatch;
 mod fs;
 mod io_mpx;
 mod net;
-mod resources;
 mod sync;
 mod sys;
 mod task;
-mod time;
 
 pub use dispatch::dispatch_irq_syscall;
 pub use kservices::file;

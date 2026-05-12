@@ -13,12 +13,10 @@
 //! - `mm`: Memory management
 //! - `net`: Network operations
 //! - `posix-credentials`: POSIX credential operations
-//! - `resources`: Resource limits and usage
 //! - `posix-signal`: Signal handling
 //! - `sync`: Synchronization primitives
 //! - `sys`: System information and control
 //! - `task`: Process and thread management
-//! - `time`: Time-related operations
 
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
@@ -29,8 +27,9 @@ use posix_ipc::*;
 use posix_mm::*;
 use posix_process::*;
 use posix_signal::*;
+use posix_time::*;
 
-use crate::{fs::*, io_mpx::*, net::*, resources::*, sync::*, sys::*, task::*, time::*};
+use crate::{fs::*, io_mpx::*, net::*, sync::*, sys::*, task::*};
 
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
@@ -420,6 +419,8 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
             uctx.arg2().into(),
             uctx.arg3().into(),
         ),
+        Sysno::getrlimit => sys_getrlimit(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::setrlimit => sys_setrlimit(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::capget => sys_capget(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::capset => sys_capset(uctx.arg0().into(), uctx.arg1().into()),
         Sysno::umask => sys_umask(uctx.arg0() as _),
@@ -538,7 +539,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         // time
         Sysno::gettimeofday => sys_gettimeofday(uctx.arg0().into()),
-        Sysno::times => sys_times(uctx.arg0() as _),
+        Sysno::times => sys_times(uctx.arg0().into()),
         Sysno::clock_gettime => sys_clock_gettime(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::clock_getres => sys_clock_getres(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::getitimer => sys_getitimer(uctx.arg0() as _, uctx.arg1().into()),

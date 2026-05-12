@@ -86,6 +86,7 @@ posix-process = { path = "posix/process" }
 posix-sched = { path = "posix/sched" }
 posix-signal = { path = "posix/signal" }
 posix-sync = { path = "posix/sync" }
+posix-time = { path = "posix/time" }
 posix-types = { path = "posix/types" }
 
 # Internal: memory and filesystem

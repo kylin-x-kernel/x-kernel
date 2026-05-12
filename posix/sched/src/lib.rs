@@ -4,213 +4,25 @@
 
 //! POSIX scheduling syscall implementations.
 //!
-//! - Yield control (sched_yield)
-//! - Sleep operations (nanosleep, clock_nanosleep)
+//! - Yield control (`sched_yield`)
+//! - Sleep operations (`nanosleep`, `clock_nanosleep`)
 //! - Scheduling priority (getpriority, setpriority)
 //! - CPU affinity (sched_setaffinity, sched_getaffinity)
 //! - Scheduler policy (sched_getscheduler, sched_setscheduler, sched_getparam)
 
 #![no_std]
 
+mod affinity;
+mod policy;
+mod priority;
+mod sleep;
+mod yielding;
+
 #[macro_use]
 extern crate klogger;
 
-use kerrno::{KError, KResult};
-use khal::time::TimeValue;
-use ktask::{
-    KCpuMask, current,
-    future::{block_on, interruptible, sleep},
-};
-use kthread::{get_process_group, get_process_state};
-use linux_raw_sys::general::{
-    __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, PRIO_PGRP, PRIO_PROCESS, PRIO_USER,
-    SCHED_RR, TIMER_ABSTIME, timespec,
-};
-use osvm::VirtPtr;
-use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
-
-pub fn sys_sched_yield() -> KResult<isize> {
-    ktask::yield_now();
-    Ok(0)
-}
-
-fn sleep_impl(clock: impl Fn() -> TimeValue, dur: TimeValue) -> TimeValue {
-    debug!("sleep_impl <= {dur:?}");
-
-    let start = clock();
-
-    // TODO: currently ignoring concrete clock type
-    // We detect EINTR manually if the slept time is not enough.
-    // Block on interruptible sleep - returns early if interrupted by signals
-    let _ = block_on(interruptible(sleep(dur)));
-
-    clock() - start
-}
-
-/// Sleep some nanoseconds
-pub fn sys_nanosleep(req: UserConstPtr<timespec>, rem: UserPtr<timespec>) -> KResult<isize> {
-    let req = req.read_vm()?.try_into_time_value()?;
-    debug!("sys_nanosleep <= req: {req:?}");
-
-    let actual = sleep_impl(khal::time::monotonic_time, req);
-
-    if let Some(diff) = req.checked_sub(actual) {
-        debug!("sys_nanosleep => rem: {diff:?}");
-        if let Some(rem) = rem.check_non_null() {
-            rem.write_vm(timespec::from_time_value(diff))?;
-        }
-        Err(KError::Interrupted)
-    } else {
-        Ok(0)
-    }
-}
-
-pub fn sys_clock_nanosleep(
-    clock_id: __kernel_clockid_t,
-    flags: u32,
-    req: UserConstPtr<timespec>,
-    rem: UserPtr<timespec>,
-) -> KResult<isize> {
-    let clock = match clock_id as u32 {
-        CLOCK_REALTIME => khal::time::wall_time,
-        CLOCK_MONOTONIC => khal::time::monotonic_time,
-        _ => {
-            warn!("Unsupported clock_id: {clock_id}");
-            return Err(KError::InvalidInput);
-        }
-    };
-
-    let req = req.read_vm()?.try_into_time_value()?;
-    debug!("sys_clock_nanosleep <= clock_id: {clock_id}, flags: {flags}, req: {req:?}");
-
-    let dur = if flags & TIMER_ABSTIME != 0 {
-        req.saturating_sub(clock())
-    } else {
-        req
-    };
-
-    let actual = sleep_impl(clock, dur);
-
-    if let Some(diff) = dur.checked_sub(actual) {
-        debug!("sys_clock_nanosleep => rem: {diff:?}");
-        if let Some(rem) = rem.check_non_null() {
-            rem.write_vm(timespec::from_time_value(diff))?;
-        }
-        Err(KError::Interrupted)
-    } else {
-        Ok(0)
-    }
-}
-
-pub fn sys_sched_getaffinity(
-    pid: i32,
-    cpusetsize: usize,
-    user_mask: UserPtr<u8>,
-) -> KResult<isize> {
-    if cpusetsize * 8 < kbuild_config::CPU_NUM {
-        return Err(KError::InvalidInput);
-    }
-
-    // TODO: support other threads
-    if pid != 0 {
-        return Err(KError::OperationNotPermitted);
-    }
-
-    let mask = current().cpumask();
-    let mask_bytes = mask.as_bytes();
-
-    user_mask.write_vm_slice(mask_bytes)?;
-
-    Ok(mask_bytes.len() as _)
-}
-
-pub fn sys_sched_setaffinity(
-    _pid: i32,
-    cpusetsize: usize,
-    user_mask: UserConstPtr<u8>,
-) -> KResult<isize> {
-    let size = cpusetsize.min(kbuild_config::CPU_NUM.div_ceil(8));
-    let user_mask = user_mask.load_vm_vec(size)?;
-    let mut cpu_mask = KCpuMask::new();
-
-    for i in 0..(size * 8).min(kbuild_config::CPU_NUM) {
-        if user_mask[i / 8] & (1 << (i % 8)) != 0 {
-            cpu_mask.set(i, true);
-        }
-    }
-
-    // TODO: support other threads
-    ktask::set_current_affinity(cpu_mask);
-
-    Ok(0)
-}
-
-pub fn sys_sched_getscheduler(_pid: i32) -> KResult<isize> {
-    Ok(SCHED_RR as _)
-}
-
-pub fn sys_sched_setscheduler(_pid: i32, _policy: i32, _param: UserConstPtr<()>) -> KResult<isize> {
-    Ok(0)
-}
-
-pub fn sys_sched_getparam(_pid: i32, _param: UserPtr<()>) -> KResult<isize> {
-    Ok(0)
-}
-
-pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
-    debug!("sys_getpriority <= which: {which}, who: {who}");
-
-    match which {
-        PRIO_PROCESS => {
-            if who != 0 {
-                let _proc = get_process_state(who)?;
-            }
-            Ok(20)
-        }
-        PRIO_PGRP => {
-            if who != 0 {
-                let _pg = get_process_group(who)?;
-            }
-            Ok(20)
-        }
-        PRIO_USER => {
-            if who == 0 {
-                Ok(20)
-            } else {
-                Err(KError::NoSuchProcess)
-            }
-        }
-        _ => Err(KError::InvalidInput),
-    }
-}
-
-pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
-    debug!("sys_setpriority <= which: {which}, who: {who}, prio: {prio}");
-
-    if !(-20..=19).contains(&prio) {
-        return Err(KError::InvalidInput);
-    }
-
-    match which {
-        PRIO_PROCESS => {
-            if who != 0 {
-                let _proc = get_process_state(who)?;
-            }
-            Ok(0)
-        }
-        PRIO_PGRP => {
-            if who != 0 {
-                let _pg = get_process_group(who)?;
-            }
-            Ok(0)
-        }
-        PRIO_USER => {
-            if who == 0 {
-                Ok(0)
-            } else {
-                Err(KError::NoSuchProcess)
-            }
-        }
-        _ => Err(KError::InvalidInput),
-    }
-}
+pub use affinity::{sys_sched_getaffinity, sys_sched_setaffinity};
+pub use policy::{sys_sched_getparam, sys_sched_getscheduler, sys_sched_setscheduler};
+pub use priority::{sys_getpriority, sys_setpriority};
+pub use sleep::{sys_clock_nanosleep, sys_nanosleep};
+pub use yielding::sys_sched_yield;
