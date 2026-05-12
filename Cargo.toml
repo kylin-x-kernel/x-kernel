@@ -54,7 +54,10 @@ x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
 ktypes = { path = "core/ktypes" }
+
+# Internal: tracing and debugging
 ktracing = { path = "core/ktracing" }
+kbpf = { path = "core/kbpf" }
 
 # Internal: task scheduling and synchronization
 kpoll = { path = "task/kpoll" }

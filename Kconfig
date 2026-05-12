@@ -194,5 +194,6 @@ source "mm/Kconfig"
 source "net/Kconfig"
 source "tee/Kconfig"
 source "task/Kconfig"
+source "core/kbpf/Kconfig"
 
 source "drivers/Kconfig"

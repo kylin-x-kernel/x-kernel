@@ -106,6 +106,9 @@ pmu = ["kruntime/pmu"]
 # Tracepoint
 tracepoint = ["ktracing/tracepoint"]
 
+# eBPF
+ebpf = ["dep:kbpf"]
+
 [dependencies]
 alloc-engine = { workspace = true, optional = true }
 memspace = { workspace = true, optional = true }
@@ -128,3 +131,4 @@ kspin = { workspace = true, optional = true }
 tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
 ktracing = { workspace = true, optional = true }
+kbpf = { workspace = true, optional = true }

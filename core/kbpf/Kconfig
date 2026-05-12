@@ -1,0 +1,24 @@
+menu "eBPF"
+
+config KFEAT_EBPF
+    bool "Enable eBPF execution engine"
+    default n
+    help
+      Enable the in-kernel eBPF interpreter (crate `kbpf`).
+
+      Provides a minimal BPF virtual machine that can execute eBPF
+      bytecode programs and dispatch to host-registered helper
+      functions following the Linux eBPF helper ABI
+      (`fn(r1, r2, r3, r4, r5) -> r0`, all `u64`).
+
+      The execution engine is being built up incrementally. The BPF
+      verifier, the standard Linux helper-function set, BPF maps,
+      ELF/relocation handling, tracepoint / kprobe attachment glue,
+      and the `bpf(2)` syscall surface are not yet implemented;
+      enabling this option only links the interpreter into the
+      kernel build.
+
+      Disable for production builds until the eBPF stack is
+      feature-complete. When in doubt, say N.
+
+endmenu
