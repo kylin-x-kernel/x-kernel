@@ -538,7 +538,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
 
         // time
         Sysno::gettimeofday => sys_gettimeofday(uctx.arg0().into()),
-        Sysno::times => sys_times(uctx.arg0().into()),
+        Sysno::times => sys_times(uctx.arg0() as _),
         Sysno::clock_gettime => sys_clock_gettime(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::clock_getres => sys_clock_getres(uctx.arg0() as _, uctx.arg1().into()),
         Sysno::getitimer => sys_getitimer(uctx.arg0() as _, uctx.arg1().into()),

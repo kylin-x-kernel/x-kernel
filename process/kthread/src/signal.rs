@@ -15,9 +15,10 @@ pub fn poll_timer(task: &TaskInner) {
     let Some(thread) = task.try_as_thread() else {
         return;
     };
-    let Ok(mut time) = thread.time.try_borrow_mut() else {
-        return;
-    };
+    // Timer accounting now uses a real mutex because syscall paths such as
+    // getrusage read other threads' time managers. Waiting here preserves
+    // timer delivery instead of silently dropping this polling round.
+    let mut time = thread.time.lock();
     let signals = time.poll();
     drop(time);
     for signo in signals.into_iter().flatten() {
@@ -30,9 +31,10 @@ pub fn set_timer_state(task: &TaskInner, state: TimerState) {
     let Some(thread) = task.try_as_thread() else {
         return;
     };
-    let Ok(mut time) = thread.time.try_borrow_mut() else {
-        return;
-    };
+    // The transition between user and kernel timing states must be applied
+    // even when another CPU is reading the same time manager for resource
+    // accounting, so this path waits instead of skipping the state update.
+    let mut time = thread.time.lock();
     let signals = time.poll();
     time.set_state(state);
     drop(time);

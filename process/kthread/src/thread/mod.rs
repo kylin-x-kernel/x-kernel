@@ -6,7 +6,7 @@ mod core;
 mod current;
 mod task_ext;
 
-pub use core::{AssumeSync, CurrentThread, Thread};
+pub use core::{CurrentThread, Thread};
 
 pub use current::{
     current_fs_context, current_process_fs_context, current_process_state, current_task_name,

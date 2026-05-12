@@ -45,7 +45,7 @@ pub use stat::TaskStat;
 #[cfg(feature = "tee")]
 pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 pub use thread::{
-    AsThread, AssumeSync, CurrentThread, Thread, current_fs_context, current_process_fs_context,
+    AsThread, CurrentThread, Thread, current_fs_context, current_process_fs_context,
     current_process_state, current_task_name, current_thread, with_current_thread,
 };
 pub use timer::{TimeManager, TimerState, spawn_alarm_task};

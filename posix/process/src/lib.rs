@@ -101,7 +101,7 @@ struct Rusage {
 
 impl Rusage {
     fn from_thread(thread: &Thread) -> Self {
-        let (utime, stime) = thread.time.borrow().output();
+        let (utime, stime) = thread.time.lock().output();
         Self { utime, stime }
     }
 

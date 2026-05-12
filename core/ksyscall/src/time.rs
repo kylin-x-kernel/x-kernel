@@ -16,6 +16,7 @@ use linux_raw_sys::general::{
     CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
     CLOCK_THREAD_CPUTIME_ID, itimerval, timespec, timeval,
 };
+use osvm::VirtMutPtr;
 use posix_types::{ITimerType, TimeValueLike, Tms, UserConstPtr, UserPtr};
 
 /// Get the current time from the specified clock
@@ -26,7 +27,7 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: UserPtr<timespec>) ->
             monotonic_time()
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            let (utime, stime) = kthread::current_thread().time.borrow().output();
+            let (utime, stime) = kthread::current_thread().time.lock().output();
             utime + stime
         }
         _ => {
@@ -57,8 +58,8 @@ pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: UserPtr<timespec>) ->
 }
 
 /// Get timing information including user and system CPU time
-pub fn sys_times(tms: UserPtr<Tms>) -> KResult<isize> {
-    let (utime, stime) = kthread::current_thread().time.borrow().output();
+pub fn sys_times(tms: *mut Tms) -> KResult<isize> {
+    let (utime, stime) = kthread::current_thread().time.lock().output();
     let utime = utime.as_micros() as usize;
     let stime = stime.as_micros() as usize;
     tms.write_vm(Tms {
@@ -73,7 +74,7 @@ pub fn sys_times(tms: UserPtr<Tms>) -> KResult<isize> {
 /// Get the current value of a timer
 pub fn sys_getitimer(which: i32, value: UserPtr<itimerval>) -> KResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
-    let (it_interval, it_value) = kthread::current_thread().time.borrow().get_itimer(ty);
+    let (it_interval, it_value) = kthread::current_thread().time.lock().get_itimer(ty);
 
     value.write_vm(itimerval {
         it_interval: timeval::from_time_value(it_interval),
@@ -105,7 +106,7 @@ pub fn sys_setitimer(
 
     let old = kthread::current_thread()
         .time
-        .borrow_mut()
+        .lock()
         .set_itimer(ty, interval, remained);
 
     if let Some(old_value) = old_value.check_non_null() {

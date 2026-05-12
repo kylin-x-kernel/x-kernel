@@ -3,15 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::{
-    cell::RefCell,
-    ops::Deref,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
-};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 use kprocess::Pid;
 use ksignal::api::ThreadSignalManager;
-#[cfg(feature = "tee")]
 use ksync::Mutex;
 use ktask::KtaskRef;
 use ktimer::TimeManager;
@@ -19,23 +14,6 @@ use ktimer::TimeManager;
 use tee_task_iface::TeeSessionCtxTrait;
 
 use crate::ProcessState;
-
-/// A wrapper type that assumes the inner type is `Sync`.
-#[repr(transparent)]
-pub struct AssumeSync<T>(pub T);
-
-// SAFETY: `AssumeSync` wraps `RefCell<TimeManager>`, which is only ever accessed from the
-// owning thread (single-threaded access). No concurrent mutation occurs, so marking it
-// `Sync` is sound as long as all access remains single-threaded.
-unsafe impl<T> Sync for AssumeSync<T> {}
-
-impl<T> Deref for AssumeSync<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 /// The current user thread handle.
 pub struct CurrentThread(pub(super) KtaskRef);
@@ -55,7 +33,7 @@ pub struct Thread {
     pub signal: Arc<ThreadSignalManager>,
 
     /// The time manager.
-    pub time: AssumeSync<RefCell<TimeManager>>,
+    pub time: Mutex<TimeManager>,
 
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
@@ -79,7 +57,7 @@ impl Thread {
             proc_state,
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
-            time: AssumeSync(RefCell::new(TimeManager::new())),
+            time: Mutex::new(TimeManager::new()),
             oom_score_adj: AtomicI32::new(200),
             exit: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
@@ -158,18 +136,5 @@ impl Thread {
     /// Returns the process ID of this thread's process.
     pub fn pid(&self) -> Pid {
         self.process_state().proc.pid()
-    }
-}
-
-#[cfg(unittest)]
-mod tests_thread {
-    use unittest::def_test;
-
-    use super::AssumeSync;
-
-    #[def_test]
-    fn test_assume_sync_deref() {
-        let value = AssumeSync(42_u32);
-        assert_eq!(*value, 42);
     }
 }
