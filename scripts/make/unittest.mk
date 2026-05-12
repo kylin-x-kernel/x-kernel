@@ -18,10 +18,7 @@ else
   RUSTFLAGS += --check-cfg cfg(unittest)
 endif
 
-ifeq ($(ARCH), x86_64)
-  CFLAGS_x86_64_unknown_none += -mcmodel=large
-  export CFLAGS_x86_64_unknown_none
-else ifeq ($(ARCH), riscv64)
+ifeq ($(ARCH), riscv64)
   TARGET_CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
   CFLAGS_riscv64gc_unknown_none_elf += -march=rv64gc -mabi=lp64d -mcmodel=medany
   export TARGET_CFLAGS

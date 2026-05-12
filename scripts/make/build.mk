@@ -33,6 +33,12 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
     export CARGO_PROFILE_RELEASE_LTO=true
     export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
   endif
+
+  ifeq ($(ARCH), x86_64)
+    # Bare-metal x86_64 C code runs on kernel stacks, so it must not use the SysV red zone.
+    CFLAGS_x86_64_unknown_none += -mcmodel=large -mno-red-zone
+    export CFLAGS_x86_64_unknown_none
+  endif
 endif
 
 export RUSTFLAGS
