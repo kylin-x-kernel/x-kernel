@@ -15,6 +15,7 @@ pub mod path;
 mod permission;
 mod types;
 
+mod test_mount;
 mod test_path;
 mod test_types;
 

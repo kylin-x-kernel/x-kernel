@@ -9,7 +9,7 @@ use inherit_methods_macro::inherit_methods;
 
 use crate::{DirEntry, VfsResult};
 
-/// Filesystem is mounted read-only.
+/// Mount read-only.
 pub const ST_RDONLY: u32 = 0x1;
 /// Ignore set-user-ID and set-group-ID bits.
 pub const ST_NOSUID: u32 = 0x2;
@@ -17,10 +17,14 @@ pub const ST_NOSUID: u32 = 0x2;
 pub const ST_NODEV: u32 = 0x4;
 /// Disallow program execution.
 pub const ST_NOEXEC: u32 = 0x8;
-/// Do not update access times.
+/// Do not update file access times.
 pub const ST_NOATIME: u32 = 0x400;
+/// Do not update directory access times.
+pub const ST_NODIRATIME: u32 = 0x800;
 /// Update access time relative to mtime/ctime.
 pub const ST_RELATIME: u32 = 0x1000;
+/// Do not follow symlinks.
+pub const ST_NOSYMFOLLOW: u32 = 0x2000;
 
 /// Filesystem statistics returned by [`FilesystemOps::stat`].
 pub struct StatFs {

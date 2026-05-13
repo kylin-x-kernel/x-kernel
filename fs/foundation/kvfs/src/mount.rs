@@ -21,9 +21,36 @@ use kpoll::{IoEvents, Pollable};
 
 use crate::{
     DirEntry, DirEntrySink, Filesystem, FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard,
-    NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, TypeMap, VfsError, VfsResult,
+    NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, ST_RDONLY, TypeMap, VfsError,
+    VfsResult,
     path::{DOT, DOTDOT, PathBuf},
 };
+
+bitflags::bitflags! {
+    /// Per-mount flags, converted from the user-visible `MS_*` constants
+    /// during the `mount(2)` syscall.
+    ///
+    /// See [`per_mount_flags`] in `posix/fs/src/mount.rs` for the mapping.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct MountFlags: u32 {
+        /// Mount read-only.
+        const RDONLY = 0x40;
+        /// Ignore set-user-ID and set-group-ID bits on executables.
+        const NOSUID = 0x01;
+        /// Disallow access to device special files on this mount.
+        const NODEV = 0x02;
+        /// Disallow program execution from this mount.
+        const NOEXEC = 0x04;
+        /// Do not update file access times.
+        const NOATIME = 0x08;
+        /// Do not update directory access times.
+        const NODIRATIME = 0x10;
+        /// Update access time relative to mtime/ctime (the default).
+        const RELATIME = 0x20;
+        /// Do not follow symlinks on this mount.
+        const NOSYMFOLLOW = 0x80;
+    }
+}
 
 /// A mounted filesystem instance and its relationships.
 #[derive(Debug)]
@@ -37,11 +64,27 @@ pub struct Mountpoint {
     child_mounts: Mutex<HashMap<ReferenceKey, Weak<Self>>>,
     /// Device ID
     device: u64,
+    /// Per-mount flags.
+    flags: MountFlags,
+    /// Mount that this one covers (for overmount).
+    ///
+    /// When a new mount is created at a location that already has a mount,
+    /// the old mount is stored here so it can be restored on unmount.
+    covers: Mutex<Option<Arc<Self>>>,
 }
 
 impl Mountpoint {
-    /// Create a new mountpoint for a filesystem at an optional parent location.
+    /// Creates a new mountpoint for a filesystem at an optional parent location.
     pub fn new(fs: &Filesystem, location_in_parent: Option<Location>) -> Arc<Self> {
+        Self::new_with_flags(fs, location_in_parent, MountFlags::empty())
+    }
+
+    /// Creates a new mountpoint with per-mount flags.
+    pub fn new_with_flags(
+        fs: &Filesystem,
+        location_in_parent: Option<Location>,
+        flags: MountFlags,
+    ) -> Arc<Self> {
         static DEVICE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
         let root = fs.root_dir();
@@ -50,12 +93,19 @@ impl Mountpoint {
             location: location_in_parent,
             child_mounts: Mutex::default(),
             device: DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            flags,
+            covers: Mutex::default(),
         })
     }
 
-    /// Create a root mountpoint for a filesystem.
+    /// Creates a root mountpoint for a filesystem.
     pub fn new_root(fs: &Filesystem) -> Arc<Self> {
         Self::new(fs, None)
+    }
+
+    /// Creates a root mountpoint with per-mount flags.
+    pub fn new_root_with_flags(fs: &Filesystem, flags: MountFlags) -> Arc<Self> {
+        Self::new_with_flags(fs, None, flags)
     }
 
     /// Return a `Location` representing the mountpoint root.
@@ -93,7 +143,12 @@ impl Mountpoint {
     /// by checking if each root directory has a mountpoint attached.
     pub(crate) fn resolve_final_mount(self: &Arc<Self>) -> Arc<Mountpoint> {
         let mut mountpoint = self.clone();
-        while let Some(mount) = mountpoint.root.as_dir().unwrap().mountpoint() {
+        while let Some(mount) = mountpoint
+            .root
+            .as_dir()
+            .expect("mount root must be a directory")
+            .mountpoint()
+        {
             mountpoint = mount;
         }
         mountpoint
@@ -102,6 +157,16 @@ impl Mountpoint {
     /// Returns the mountpoint's synthetic device ID.
     pub fn device(self: &Arc<Self>) -> u64 {
         self.device
+    }
+
+    /// Returns this mountpoint's flags.
+    pub fn flags(&self) -> MountFlags {
+        self.flags
+    }
+
+    /// Returns whether this mountpoint is mounted read-only.
+    pub fn is_readonly(&self) -> bool {
+        self.flags.contains(MountFlags::RDONLY)
     }
 
     /// Returns a snapshot of direct child mountpoints currently attached here.
@@ -172,6 +237,11 @@ impl Location {
     }
 
     /// Returns the name of this location within its parent directory.
+    ///
+    /// When this location is a mount root, the name is taken from the mountpoint's
+    /// parent location chain (the directory where the mount was attached). This
+    /// recursion terminates because the topmost mount has no parent location
+    /// and returns the empty string.
     pub fn name(&self) -> &str {
         if self.is_root_of_mount() {
             self.mountpoint.location.as_ref().map_or("", Location::name)
@@ -183,7 +253,7 @@ impl Location {
     /// Returns the parent location, if any.
     pub fn parent(&self) -> Option<Self> {
         if !self.is_root_of_mount() {
-            return Some(self.with_entry(self.entry.parent().unwrap()));
+            return Some(self.with_entry(self.entry.parent()?));
         }
         self.mountpoint.location()?.parent()
     }
@@ -201,6 +271,28 @@ impl Location {
     /// Ensure the location refers to a file.
     pub fn check_is_file(&self) -> VfsResult<()> {
         self.entry.as_file().map(|_| ())
+    }
+
+    /// Returns whether this location's mountpoint is read-only.
+    pub fn is_mount_readonly(&self) -> bool {
+        self.mountpoint.is_readonly()
+    }
+
+    /// Returns whether this location is effectively read-only.
+    pub fn is_effectively_readonly(&self) -> bool {
+        self.is_mount_readonly()
+            || self
+                .filesystem()
+                .stat()
+                .is_ok_and(|stat| stat.mount_flags & ST_RDONLY != 0)
+    }
+
+    /// Ensures this location can be modified.
+    pub fn check_writable_mount(&self) -> VfsResult<()> {
+        if self.is_effectively_readonly() {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+        Ok(())
     }
 
     /// Returns metadata with the mountpoint device ID applied.
@@ -265,6 +357,7 @@ impl Location {
         node_type: NodeType,
         permission: NodePermission,
     ) -> VfsResult<Self> {
+        self.check_writable_mount()?;
         self.entry
             .as_dir()?
             .create(name, node_type, permission)
@@ -273,6 +366,7 @@ impl Location {
 
     /// Create a hard link to an existing node.
     pub fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
+        self.check_writable_mount()?;
         if !Arc::ptr_eq(&self.mountpoint, &node.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
@@ -284,6 +378,7 @@ impl Location {
 
     /// Rename an entry within the same mountpoint.
     pub fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
+        self.check_writable_mount()?;
         if !Arc::ptr_eq(&self.mountpoint, &dst_dir.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
@@ -297,6 +392,7 @@ impl Location {
 
     /// Remove a file or directory entry.
     pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
+        self.check_writable_mount()?;
         self.entry.as_dir()?.unlink(name, is_dir)
     }
 
@@ -313,13 +409,41 @@ impl Location {
         self.entry.as_dir()?.read_dir(offset, sink)
     }
 
-    /// Mount a filesystem at this location.
+    /// Mounts a filesystem at this location.
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {
+        self.mount_with_flags(fs, MountFlags::empty())
+    }
+
+    /// Mounts a filesystem with per-mount flags at this location.
+    ///
+    /// # Lock ordering
+    ///
+    /// Acquires `mount_at_this_dir` (target dentry) then `parent.child_mounts`.
+    /// The apparent reverse order with `unmount` is safe because `child_mounts`
+    /// belongs to a different `Mountpoint`:
+    ///
+    /// ```text
+    ///   mount_on(D in M):   lock D.mount_at_this_dir → lock M.child_mounts
+    ///   unmount(C from D):  lock C.child_mounts       → lock D.mount_at_this_dir
+    /// ```
+    ///
+    /// If both race, the mount thread holds `D.mount_at_this_dir` and wants
+    /// `M.child_mounts`; the unmount thread holds `C.child_mounts` and wants
+    /// `D.mount_at_this_dir`.  The mount thread is never blocked on a lock
+    /// the unmount thread holds (`M.child_mounts ≠ C.child_mounts`), so it
+    /// finishes first and releases `D.mount_at_this_dir`.
+    pub fn mount_with_flags(
+        &self,
+        fs: &Filesystem,
+        flags: MountFlags,
+    ) -> VfsResult<Arc<Mountpoint>> {
         let mut mountpoint = self.entry.as_dir()?.mount_at_this_dir.lock();
-        if mountpoint.is_some() {
-            return Err(VfsError::ResourceBusy);
+        let result = Mountpoint::new_with_flags(fs, Some(self.clone()), flags);
+        // Overmount: the new mount covers any existing mount at this location.
+        // The old mount is stashed so it can be restored on unmount.
+        if let Some(old) = mountpoint.take() {
+            *result.covers.lock() = Some(old);
         }
-        let result = Mountpoint::new(fs, Some(self.clone()));
         *mountpoint = Some(result.clone());
         self.mountpoint
             .child_mounts
@@ -329,18 +453,52 @@ impl Location {
     }
 
     /// Unmount the filesystem rooted at this location.
+    ///
+    /// # Lock ordering
+    ///
+    /// Acquires `parent.mount_at_this_dir` → `self.child_mounts` →
+    /// `parent.child_mounts`.  The `parent.mount_at_this_dir → parent.child_mounts`
+    /// tail matches `mount_with_flags`; `self.child_mounts` is a distinct
+    /// instance so no deadlock.  The `child_mounts` check is done under
+    /// `mount_at_this_dir` to close the TOCTOU window.
     pub fn unmount(&self) -> VfsResult<()> {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
-        if !self.mountpoint.child_mounts.lock().is_empty() {
-            return Err(VfsError::ResourceBusy);
+        if !self.entry.ptr_eq(&self.mountpoint.root) {
+            return Err(VfsError::InvalidInput);
         }
-        assert!(self.entry.ptr_eq(&self.mountpoint.root));
-        self.entry.as_dir()?.forget();
         if let Some(parent_loc) = &self.mountpoint.location {
-            *parent_loc.entry.as_dir()?.mount_at_this_dir.lock() = None;
+            let mut mount_slot = parent_loc.entry.as_dir()?.mount_at_this_dir.lock();
+            // Guard against overmount race: self must still be the visible mount
+            // at this dentry after we acquired the lock.
+            if !mount_slot
+                .as_ref()
+                .is_some_and(|m| Arc::ptr_eq(m, &self.mountpoint))
+            {
+                return Err(VfsError::InvalidInput);
+            }
+            // Re-check child_mounts under mount_slot to close the TOCTOU window
+            // between the earlier check and acquiring mount_slot.
+            if !self.mountpoint.child_mounts.lock().is_empty() {
+                return Err(VfsError::ResourceBusy);
+            }
+            let mut parent_children = parent_loc.mountpoint.child_mounts.lock();
+            let covered = self.mountpoint.covers.lock().take();
+            *mount_slot = covered.clone();
+            match covered {
+                Some(ref m) => {
+                    parent_children.insert(parent_loc.entry.key(), Arc::downgrade(m));
+                }
+                None => {
+                    parent_children.remove(&parent_loc.entry.key());
+                }
+            }
+            // Drop parent locks before forget.  Order matches mount_with_flags.
         }
+        // forget() after parent state is committed — if the parent update
+        // failed we must not have destroyed the dentry cache prematurely.
+        self.entry.as_dir()?.forget();
         Ok(())
     }
 
@@ -349,11 +507,24 @@ impl Location {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
-        let children = mem::take(&mut *self.mountpoint.child_mounts.lock());
-        for (_, child) in children {
-            if let Some(child) = child.upgrade() {
-                child.root_location().unmount_all()?;
+        let mut children = self.mountpoint.child_mounts.lock();
+        let remaining = mem::take(&mut *children);
+        drop(children);
+        let mut failed = false;
+        for (key, child) in remaining {
+            if let Some(m) = child.upgrade()
+                && let Err(_e) = m.root_location().unmount_all()
+            {
+                failed = true;
+                // Re-insert so the child is not orphaned.
+                self.mountpoint
+                    .child_mounts
+                    .lock()
+                    .insert(key, Arc::downgrade(&m));
             }
+        }
+        if failed {
+            return Err(VfsError::ResourceBusy);
         }
         self.unmount()
     }
