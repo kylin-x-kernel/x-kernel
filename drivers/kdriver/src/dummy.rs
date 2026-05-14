@@ -191,7 +191,7 @@ cfg_if! {
             fn abort(&mut self, _cid: VsockConnId) -> DriverResult<()> {
                 Err(DriverError::Unsupported)
             }
-            fn poll_event(&mut self, _buf: &mut [u8]) -> DriverResult<Option<VsockDriverEventType>> {
+            fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEventType>> {
                 Err(DriverError::Unsupported)
             }
         }

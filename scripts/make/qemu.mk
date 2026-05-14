@@ -8,7 +8,7 @@ INPUT ?= y
 VSOCK ?= y
 UEFI ?= n
 VIRTIO_9P ?= n
-BUS ?= pci
+# VIRTIO_BUS default is set per-platform below. User can still override on the command line.
 MEM ?= 1g
 ACCEL ?= y
 ICOUNT ?= n
@@ -69,12 +69,34 @@ ifeq ($(ARCH), x86_64)
   endif
 endif
 
-ifeq ($(BUS), mmio)
-  vdev-suffix := device
-else ifeq ($(BUS), pci)
-  vdev-suffix := pci
+# Default virtio transport is derived from the platform's Kconfig
+# (KFEAT_VIRTIO_BUS_*) parsed in scripts/make/kconfig.mk. The bus is a board
+# property, not a user-required global switch. The user can still override via
+# `make ... VIRTIO_BUS=pci|mmio`.
+ifeq ($(findstring KFEAT_VIRTIO_BUS_PCI=y,$(CONFIG_VALUES)),KFEAT_VIRTIO_BUS_PCI=y)
+  VIRTIO_BUS ?= pci
+else ifeq ($(findstring KFEAT_VIRTIO_BUS_MMIO=y,$(CONFIG_VALUES)),KFEAT_VIRTIO_BUS_MMIO=y)
+  VIRTIO_BUS ?= mmio
 else
-  $(error "BUS" must be one of "mmio" or "pci")
+  # Platform did not declare a virtio bus (e.g. boards without virtio).
+  VIRTIO_BUS ?=
+endif
+
+ifeq ($(VIRTIO_BUS),mmio)
+  vdev-suffix := device
+else ifeq ($(VIRTIO_BUS),pci)
+  vdev-suffix := pci
+else ifneq ($(VIRTIO_BUS),)
+  $(error VIRTIO_BUS must be one of "mmio" or "pci" (got "$(VIRTIO_BUS)"))
+endif
+
+# If a virtio device is enabled but no transport bus is configured, fail with
+# a clear message instead of producing a malformed QEMU command line.
+virtio-needed := $(filter y,$(BLK) $(NET) $(GRAPHIC) $(VIRTIO_9P))
+ifneq ($(virtio-needed),)
+  ifeq ($(vdev-suffix),)
+    $(error VIRTIO_BUS must be set to "mmio" or "pci" (or KFEAT_VIRTIO_BUS_PCI/KFEAT_VIRTIO_BUS_MMIO selected in .config) when virtio devices (BLK/NET/GRAPHIC/VIRTIO_9P) are enabled)
+  endif
 endif
 
 ifeq ($(ARCH), x86_64)

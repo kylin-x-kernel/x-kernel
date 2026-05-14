@@ -24,8 +24,6 @@ kcpu = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
-acpi = { workspace = true }
-kdriver = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-ioport"] }
 x86-peripherals = { workspace = true }
 irq_driver = { workspace = true }

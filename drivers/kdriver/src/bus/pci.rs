@@ -28,7 +28,7 @@ impl AllDevices {
             "PCI config space: source={}, ecam={:#x}, bus_end={:#x}",
             match bus.source() {
                 PciConfigSource::RuntimeOverride => "runtime-override",
-                PciConfigSource::DeviceTree => "device-tree",
+                PciConfigSource::Firmware => "firmware",
                 PciConfigSource::Static => "static",
             },
             bus.config_base(),

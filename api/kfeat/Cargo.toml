@@ -28,7 +28,7 @@ fp-simd = ["khal/fp-simd"]
 
 
 # Interrupts
-ipi = [ "dep:kipi", "khal/ipi", "kruntime/ipi"]
+ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi"]
 
 crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 dma-trace = ["kdriver/dma-trace"]
@@ -42,11 +42,7 @@ platform_aarch64_qemu_virt = [
     "smp",
     "dev_log",
 ]
-platform_x86_64_qemu_virt = [
-    "dep:x86_64-qemu-virt",
-    "fp-simd",
-    "dev_log",
-]
+platform_x86_64_qemu_virt = ["dep:x86_64-qemu-virt", "fp-simd", "dev_log"]
 platform_riscv64_qemu_virt = [
     "dep:riscv64-qemu-virt",
     "fp-simd",
@@ -82,46 +78,52 @@ sched_cfs = ["ktask/sched_cfs"]
 sched_eevdf = ["ktask/sched_eevdf"]
 
 # File system
-fs = [
-    "dep:kfs",
-]
-fs_ext4 = ["kfs/ext4", "kdriver/virtio-blk", "kruntime/fs"]
-fs_fat = ["kfs/fat", "kdriver/virtio-blk", "kruntime/fs"]
-fs_9p = ["kfs/fs9p", "kdriver/virtio_9p", "kruntime/fs9p"]
-fs_times = ["kfs/times"]
+#
+# These features only enable the filesystem stack itself. The actual block
+# device driver (virtio-blk, ramdisk, ...) must be selected separately via the
+# `driver_*` features below, so that non-virtio platforms can use the same
+# filesystem code with their own block backends.
+fs = ["dep:kfs"]
+fs_ext4 = ["fs", "kfs/ext4", "kruntime/fs"]
+fs_fat = ["fs", "kfs/fat", "kruntime/fs"]
+fs_9p = ["fs", "kfs/fs9p", "kruntime/fs9p"]
+fs_times = ["fs", "kfs/times"]
 
 # Networking
-net = ["kdriver/virtio-net", "dep:knet", "kruntime/net"]
+#
+# Subsystem-only. The NIC / vsock transport driver is selected separately via
+# the `driver_*` features below.
+net = ["dep:knet", "kruntime/net"]
 vsock = [
-    "kdriver/virtio-socket",
+    "net",
     "kruntime/vsock",
     "knet/vsock",
     "ksyscall/vsock",
     "kservices/vsock",
 ]
 
-# Display
-display = [
-    "kdriver/virtio-gpu",
-    "dep:fbdevice",
-    "kruntime/display",
-]
+# Display (subsystem only; pick a driver via `driver_*`).
+display = ["dep:fbdevice", "kruntime/display"]
 
-# Input
-input = [
-    "kdriver/virtio-input",
-    "dep:inputdev",
-    "kruntime/input",
-    "kservices/input",
-]
+# Input (subsystem only; pick a driver via `driver_*`).
+input = ["dep:inputdev", "kruntime/input", "kservices/input"]
 
 # Real Time Clock (RTC) Driver.
 rtc = ["khal/rtc", "kruntime/rtc"]
 
 # Device drivers
-bus_mmio = ["kdriver/bus-mmio"]
-bus_pci = ["kdriver/bus-pci"]
-driver-ramdisk = ["kdriver/ramdisk", "kfs?/use-ramdisk"]
+#
+# Each `driver_*` feature pulls in one concrete hardware driver and (when it
+# only makes sense together with the corresponding subsystem) implies that
+# subsystem. They use underscores so they map directly from `KFEAT_DRIVER_*`
+# Kconfig symbols (see `scripts/make/kfeat_features.sh`).
+driver_virtio_blk = ["kdriver/virtio-blk"]
+driver_virtio_net = ["kdriver/virtio-net"]
+driver_virtio_gpu = ["kdriver/virtio-gpu"]
+driver_virtio_input = ["kdriver/virtio-input"]
+driver_virtio_socket = ["kdriver/virtio-socket"]
+driver_virtio_9p = ["kdriver/virtio_9p"]
+driver_ramdisk = ["kdriver/ramdisk"]
 
 # Backtrace
 dwarf = ["backtrace/dwarf"]
@@ -158,11 +160,26 @@ kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 kdriver.workspace = true
-aarch64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
-aarch64-crosvm-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
-x86_64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
-riscv64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
-loongarch64-qemu-virt = { workspace = true, optional = true, features = ["fp-simd", "rtc"] }
+aarch64-qemu-virt = { workspace = true, optional = true, features = [
+    "fp-simd",
+    "rtc",
+] }
+aarch64-crosvm-virt = { workspace = true, optional = true, features = [
+    "fp-simd",
+    "rtc",
+] }
+x86_64-qemu-virt = { workspace = true, optional = true, features = [
+    "fp-simd",
+    "rtc",
+] }
+riscv64-qemu-virt = { workspace = true, optional = true, features = [
+    "fp-simd",
+    "rtc",
+] }
+loongarch64-qemu-virt = { workspace = true, optional = true, features = [
+    "fp-simd",
+    "rtc",
+] }
 kcore = { workspace = true }
 kfs = { workspace = true, optional = true }
 khal.workspace = true

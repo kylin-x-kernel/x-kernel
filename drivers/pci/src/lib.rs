@@ -17,6 +17,7 @@ use core::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
+use khal::firmware::devices as fw;
 pub use virtio_drivers::transport::pci::bus::{
     BarInfo, Cam, CapabilityInfo, Command, ConfigurationAccess, DeviceFunction, DeviceFunctionInfo,
     HeaderType, MemoryBarType, MmioCam, PciError, PciRoot, Status,
@@ -30,7 +31,7 @@ static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PciConfigSource {
     Static,
-    DeviceTree,
+    Firmware,
     RuntimeOverride,
 }
 
@@ -44,8 +45,8 @@ pub enum PciInitError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacyInterruptRoute {
     pub irq: usize,
-    pub trigger: of::InterruptTrigger,
-    pub controller: of::InterruptControllerKind,
+    pub trigger: fw::InterruptTrigger,
+    pub controller: fw::InterruptControllerKind,
 }
 
 impl PciInitError {
@@ -75,18 +76,18 @@ pub fn pci_config_space() -> (u64, u8, PciConfigSource) {
         return (base, bus_end as u8, PciConfigSource::RuntimeOverride);
     }
 
-    if let Some(host) = of::generic_pci_host_info()
+    if let Some(host) = fw::pci_host()
         && host.bus_start == 0
     {
         log::info!(
-            "PCI host from device tree: cam={:?} ecam={:#x} size={:#x} bus_range={:#x}..={:#x}",
+            "PCI host from firmware: cam={:?} ecam={:#x} size={:#x} bus_range={:#x}..={:#x}",
             host.cam,
             host.ecam_base,
             host.ecam_size,
             host.bus_start,
             host.bus_end
         );
-        return (host.ecam_base, host.bus_end, PciConfigSource::DeviceTree);
+        return (host.ecam_base, host.bus_end, PciConfigSource::Firmware);
     }
 
     log::info!(
@@ -138,24 +139,24 @@ pub struct PciBus {
 impl PciBus {
     pub fn new(cam: Cam) -> Result<Self, PciInitError> {
         let (config_base, bus_end, source) = pci_config_space();
-        if source == PciConfigSource::DeviceTree
-            && let Some(host) = of::generic_pci_host_info()
+        if source == PciConfigSource::Firmware
+            && let Some(host) = fw::pci_host()
         {
             let expected = match cam {
-                Cam::MmioCam => of::PciHostCam::Cam,
-                Cam::Ecam => of::PciHostCam::Ecam,
+                Cam::MmioCam => fw::PciHostCam::Cam,
+                Cam::Ecam => fw::PciHostCam::Ecam,
             };
             if host.cam != expected {
                 log::warn!(
-                    "PCI DT host advertises {:?} but build selected {:?}; falling back to static \
-                     config",
+                    "PCI firmware host advertises {:?} but build selected {:?}; falling back to \
+                     static config",
                     host.cam,
                     cam
                 );
                 return Self::new_static(cam);
             }
             log::info!(
-                "PCI bus using DT host: cam={:?} ecam={:#x} bus_end={:#x}",
+                "PCI bus using firmware host: cam={:?} ecam={:#x} bus_end={:#x}",
                 cam,
                 config_base,
                 bus_end
@@ -210,14 +211,14 @@ impl PciBus {
 }
 
 pub fn pci_bar_allocation_range() -> Option<(u64, u64, PciConfigSource)> {
-    if let Some(range) = of::generic_pci_non_prefetchable_mem_range() {
+    if let Some(range) = fw::pci_bar_range() {
         log::info!(
-            "PCI BAR allocator from device tree: cpu_base={:#x} size={:#x} prefetchable={}",
+            "PCI BAR allocator from firmware: cpu_base={:#x} size={:#x} prefetchable={}",
             range.cpu_base,
             range.size,
             range.prefetchable
         );
-        return Some((range.cpu_base, range.size, PciConfigSource::DeviceTree));
+        return Some((range.cpu_base, range.size, PciConfigSource::Firmware));
     }
 
     let range = kbuild_config::PCI_RANGES
@@ -248,9 +249,9 @@ pub fn legacy_interrupt_route(
         );
         return None;
     }
-    let irq = of::generic_pci_legacy_interrupt(bdf.bus, bdf.device, bdf.function, pin)?;
+    let irq = fw::pci_legacy_irq(bdf.bus, bdf.device, bdf.function, pin)?;
     log::info!(
-        "PCI legacy IRQ from device tree: bdf={:?} pin=INT{} irq={} trigger={:?} controller={:?}",
+        "PCI legacy IRQ from firmware: bdf={:?} pin=INT{} irq={} trigger={:?} controller={:?}",
         bdf,
         pin,
         irq.irq,

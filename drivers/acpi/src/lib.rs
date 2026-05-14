@@ -82,6 +82,15 @@ pub struct ApicInfo {
     pub io_apic_address: Option<usize>,
 }
 
+/// One memory window advertised by a PCI host bridge `_CRS` resource template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciHostMemWindow {
+    pub base: u64,
+    pub size: u64,
+    pub prefetchable: bool,
+    pub is_64bit: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LocalApicEntry {
     pub processor_uid: u8,
@@ -217,6 +226,160 @@ pub fn find_io_apic_from_init() -> Option<IoApicEntry> {
     })
 }
 
+/// Best-effort: find the primary PCI host bridge's first non-prefetchable
+/// memory window from the DSDT `_CRS` resource template.
+///
+/// This is **not** a full AML interpreter. It locates the PCI host bridge by
+/// scanning the DSDT body for the EISA-encoded `PNP0A08` (PCI Express) or
+/// `PNP0A03` (legacy PCI) hardware ID, then searches forward (within a
+/// bounded window) for the `_CRS` name and walks the byte stream looking
+/// for QWord/DWord `Address Space Descriptor` Large Items (tags `0x8A` /
+/// `0x87`). It returns the first memory descriptor whose flags do not
+/// indicate prefetchable. This is robust against typical
+/// QEMU / firmware-generated DSDTs but should not be relied on for arbitrary
+/// platforms — callers must treat its result as advisory.
+pub fn find_pci_host_mem_window_from_init() -> Option<PciHostMemWindow> {
+    let rsdp = rsdp_addr()?;
+    let dsdt_addr = find_dsdt_address(rsdp)?;
+    let header = validate_sdt_header(dsdt_addr, Some(*b"DSDT"))?;
+    let body = sdt_bytes(dsdt_addr, header.length);
+    let body = body.get(mem::size_of::<AcpiSdtHeader>()..)?;
+    let window = scan_dsdt_for_pci_mem_window(body);
+    if let Some(w) = window {
+        kernel_boot::bootln!(
+            "ACPI: PCI host mem window from _CRS: base={:#x} size={:#x} prefetchable={} \
+             is_64bit={}",
+            w.base,
+            w.size,
+            w.prefetchable,
+            w.is_64bit
+        );
+    } else {
+        kernel_boot::bootln!("ACPI: no PCI host memory window found in DSDT");
+    }
+    window
+}
+
+fn find_dsdt_address(rsdp: usize) -> Option<usize> {
+    let (fadt_addr, header) = find_table_from_rsdp(rsdp, *b"FACP")?;
+    let body = sdt_bytes(fadt_addr, header.length);
+    // FADT layout: DSDT @ offset 40 (u32), X_DSDT @ offset 140 (u64, ACPI 2.0+).
+    if header.length >= 148 {
+        let xdsdt = u64::from_le_bytes(body.get(140..148)?.try_into().ok()?);
+        if xdsdt != 0 {
+            return Some(xdsdt as usize);
+        }
+    }
+    if header.length >= 44 {
+        let dsdt = u32::from_le_bytes(body.get(40..44)?.try_into().ok()?);
+        if dsdt != 0 {
+            return Some(dsdt as usize);
+        }
+    }
+    None
+}
+
+fn scan_dsdt_for_pci_mem_window(body: &[u8]) -> Option<PciHostMemWindow> {
+    // EISA-encoded PNP0A08 / PNP0A03.
+    const PNP0A08: [u8; 4] = [0x41, 0xD0, 0x0A, 0x08];
+    const PNP0A03: [u8; 4] = [0x41, 0xD0, 0x0A, 0x03];
+    const CRS_NAME: [u8; 4] = *b"_CRS";
+
+    // The PCI host device's `_CRS` is normally within a few KB of its `_HID`
+    // declaration. Bound the search to keep this O(N) with small constants.
+    const CRS_SEARCH_WINDOW: usize = 16 * 1024;
+    const RES_SCAN_WINDOW: usize = 8 * 1024;
+
+    let hid_pos = find_subsequence(body, &PNP0A08).or_else(|| find_subsequence(body, &PNP0A03))?;
+    let crs_search_end = hid_pos.saturating_add(CRS_SEARCH_WINDOW).min(body.len());
+    let crs_pos =
+        find_subsequence(body.get(hid_pos..crs_search_end)?, &CRS_NAME).map(|p| p + hid_pos)?;
+
+    let scan_start = crs_pos + CRS_NAME.len();
+    let scan_end = scan_start.saturating_add(RES_SCAN_WINDOW).min(body.len());
+    let bytes = body.get(scan_start..scan_end)?;
+
+    parse_resource_template_for_mem_window(bytes)
+}
+
+fn parse_resource_template_for_mem_window(bytes: &[u8]) -> Option<PciHostMemWindow> {
+    // Resource Type byte (offset 0 of payload):
+    //   0 = Memory Range, 1 = IO Range, 2 = Bus Number Range
+    // Type Specific Flags byte (offset 2 of payload, memory variant):
+    //   bit 0   : Read/Write
+    //   bits 2-1: Memory attributes (00=NC, 01=Cacheable,
+    //             10=Cacheable+Combine, 11=Cacheable+Prefetchable)
+    const RES_TYPE_MEM: u8 = 0;
+    const PREFETCHABLE_MASK: u8 = 0b0000_0110;
+    const PREFETCHABLE_VAL: u8 = 0b0000_0110;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let tag = bytes[i];
+        match tag {
+            // DWord Address Space Descriptor: tag (1) + length (2) + body.
+            0x87 => {
+                let body_start = i + 3;
+                let len = u16::from_le_bytes([*bytes.get(i + 1)?, *bytes.get(i + 2)?]) as usize;
+                let body_end = body_start + len;
+                if body_end > bytes.len() {
+                    return None;
+                }
+                let p = &bytes[body_start..body_end];
+                if p[0] == RES_TYPE_MEM {
+                    let prefetchable = (p[2] & PREFETCHABLE_MASK) == PREFETCHABLE_VAL;
+                    let min = u32::from_le_bytes(p[7..11].try_into().ok()?);
+                    let len = u32::from_le_bytes(p[19..23].try_into().ok()?);
+                    if !prefetchable && len > 0 && min > 0 {
+                        return Some(PciHostMemWindow {
+                            base: min as u64,
+                            size: len as u64,
+                            prefetchable: false,
+                            is_64bit: false,
+                        });
+                    }
+                }
+                i = body_end;
+            }
+            // QWord Address Space Descriptor: tag (1) + length (2) + body.
+            0x8A => {
+                let body_start = i + 3;
+                let len = u16::from_le_bytes([*bytes.get(i + 1)?, *bytes.get(i + 2)?]) as usize;
+                let body_end = body_start + len;
+                if body_end > bytes.len() {
+                    return None;
+                }
+                let p = &bytes[body_start..body_end];
+                if p[0] == RES_TYPE_MEM {
+                    let prefetchable = (p[2] & PREFETCHABLE_MASK) == PREFETCHABLE_VAL;
+                    let min = u64::from_le_bytes(p[11..19].try_into().ok()?);
+                    let len = u64::from_le_bytes(p[35..43].try_into().ok()?);
+                    if !prefetchable && len > 0 && min > 0 {
+                        return Some(PciHostMemWindow {
+                            base: min,
+                            size: len,
+                            prefetchable: false,
+                            is_64bit: true,
+                        });
+                    }
+                }
+                i = body_end;
+            }
+            // End Tag (Small Item, tag = 0x79).
+            0x79 => return None,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 pub fn find_table(signature: [u8; 4]) -> Option<(usize, AcpiTableHeader)> {
     find_table_from_rsdp(rsdp_addr()?, signature)
 }
@@ -300,13 +463,14 @@ fn find_table_xsdt(xsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
         )
     };
     kernel_boot::bootln!("ACPI: XSDT at {:#x} entries={}", xsdt_addr, entries_len);
+    let sig = core::str::from_utf8(&signature).unwrap_or("????");
     for entry in entries.iter().copied() {
         if has_signature(entry as usize, signature) {
-            kernel_boot::bootln!("ACPI: found MCFG at {:#x}", entry);
+            kernel_boot::bootln!("ACPI: found {} at {:#x}", sig, entry);
             return Some(entry as usize);
         }
     }
-    kernel_boot::bootln!("ACPI: MCFG not present in XSDT");
+    kernel_boot::bootln!("ACPI: {} not present in XSDT", sig);
     None
 }
 
@@ -321,13 +485,14 @@ fn find_table_rsdt(rsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
         )
     };
     kernel_boot::bootln!("ACPI: RSDT at {:#x} entries={}", rsdt_addr, entries_len);
+    let sig = core::str::from_utf8(&signature).unwrap_or("????");
     for entry in entries.iter().copied() {
         if has_signature(entry as usize, signature) {
-            kernel_boot::bootln!("ACPI: found MCFG at {:#x}", entry);
+            kernel_boot::bootln!("ACPI: found {} at {:#x}", sig, entry);
             return Some(entry as usize);
         }
     }
-    kernel_boot::bootln!("ACPI: MCFG not present in RSDT");
+    kernel_boot::bootln!("ACPI: {} not present in RSDT", sig);
     None
 }
 

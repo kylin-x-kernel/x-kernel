@@ -8,6 +8,7 @@ use memaddr::MemoryAddr;
 
 use crate::mem::{self, MemRange, ReservedKind, ReservedRegion, ReservedSource};
 
+pub mod devices;
 mod init;
 mod memory_source;
 mod state;

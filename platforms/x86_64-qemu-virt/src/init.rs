@@ -9,8 +9,7 @@ use khal::mem::pa;
 use kplat::boot::{BootHandler, BootInfo};
 
 fn io_apic_paddr_from_firmware_or_fallback() -> khal::mem::PhysAddr {
-    ::acpi::find_apic_from_init()
-        .and_then(|info| info.io_apic_address)
+    khal::firmware::devices::io_apic_paddr()
         .map(|addr| pa!(addr))
         .unwrap_or_else(|| {
             warn!("ACPI MADT IOAPIC not found, fallback to static IOAPIC base");
@@ -52,8 +51,6 @@ impl BootHandler for BootHandlerImpl {
             timer_driver::x86_lapic_tsc::t2ns(timer_driver::x86_lapic_tsc::now_ticks()),
         );
         kernel_boot::bootln!("rtc init");
-        crate::acpi::init();
-        kernel_boot::bootln!("acpi init");
     }
 
     fn final_init(_boot_info: &BootInfo) {

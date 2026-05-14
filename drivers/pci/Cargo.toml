@@ -16,4 +16,4 @@ virtio-drivers = { workspace = true }
 kbuild_config = { workspace = true }
 log.workspace = true
 memspace.workspace = true
-of = { workspace = true }
+khal = { workspace = true }

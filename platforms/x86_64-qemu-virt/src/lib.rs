@@ -11,7 +11,6 @@ extern crate log;
 #[macro_use]
 extern crate kplat;
 extern crate irq_driver as _;
-mod acpi;
 extern crate kernel_boot;
 mod init;
 #[cfg(feature = "smp")]

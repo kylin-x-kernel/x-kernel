@@ -97,7 +97,7 @@ bash scripts/start.sh
 | `BLK` | `y` | Enable virtio-blk storage |
 | `NET` | `y` | Enable virtio-net networking |
 | `GRAPHIC` | `n` | Enable virtio-gpu display |
-| `BUS` | `pci` | Device bus: `pci` or `mmio` |
+| `VIRTIO_BUS` | `pci` | Device bus: `pci` or `mmio` |
 | `MEM` | `1g` | Memory size |
 | `ACCEL` | auto | Hardware acceleration: `y` or `n` |
 | `DISK_IMG` | `$(PWD)/disk.img` | Virtual disk image path |

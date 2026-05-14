@@ -24,13 +24,18 @@
 //!     - `myfs`: Allow users to define their custom filesystems to override the default.
 //!     - `net`: Enable networking support.
 //!     - `display`: Enable graphics support.
-//! - Device drivers
-//!     - `bus-mmio`: Use device tree to probe all MMIO devices.
-//!     - `bus-pci`: Use PCI bus to probe all PCI devices.
-//!     - `driver-ramdisk`: Use the RAM disk to emulate the block device.
+//! - Device drivers (selected independently from the upperlayer stacks; a
+//!   filesystem feature no longer implies a specific block driver, so
+//!   non-virtio platforms can plug in their own drivers).
+//!     - `driver_virtio_blk`: virtio-blk block device driver.
+//!     - `driver_virtio_net`: virtio-net NIC driver (implies `net`).
+//!     - `driver_virtio_gpu`: virtio-gpu display driver (implies `display`).
+//!     - `driver_virtio_input`: virtio-input device driver (implies `input`).
+//!     - `driver_virtio_socket`: virtio-vsock transport driver (implies `vsock`).
+//!     - `driver_virtio_9p`: virtio-9p transport driver.
+//!     - `driver_ramdisk`: Use the RAM disk to emulate the block device.
 //!     - `driver-ixgbe`: Enable the Intel 82599 10Gbit NIC driver.
 //!     - `driver-bcm2835-sdhci`: Enable the BCM2835 SDHCI driver (Raspberry Pi SD card).
-
 #![no_std]
 
 #[cfg(feature = "platform_aarch64_crosvm_virt")]

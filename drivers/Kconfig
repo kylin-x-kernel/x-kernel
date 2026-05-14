@@ -91,18 +91,18 @@ endmenu # IRQ Configuration
 menu "Device Drivers Features"
 
 choice
-    prompt "System Bus Type"
-    default KFEAT_BUS_PCI
+    prompt "Virtio Bus Type"
+    default KFEAT_VIRTIO_BUS_PCI
 
-config KFEAT_BUS_PCI
-    bool "PCI Bus Support"
+config KFEAT_VIRTIO_BUS_PCI
+    bool "PCI Virtio_Bus Support"
     help
-      Enable PCI bus support.
+      Enable PCI virtio bus support.
 
-config KFEAT_BUS_MMIO
-    bool "MMIO Bus Support"
+config KFEAT_VIRTIO_BUS_MMIO
+    bool "MMIO Virtio_Bus Support"
     help
-      Enable MMIO bus support.
+      Enable MMIO virtio bus support.
 
 endchoice
 
@@ -123,6 +123,68 @@ config KFEAT_INPUT
     default y
     help
       Enable input driver support (virtio-input, inputdev, etc).
+
 endmenu   # Device Drivers Features
 
 endmenu # Drivers Basic Configuration
+
+menu "Device Drivers"
+
+comment "Block device drivers"
+
+config KFEAT_DRIVER_VIRTIO_BLK
+    bool "virtio-blk block device"
+    depends on KFEAT_FS
+    default y
+    help
+      Enable the virtio-blk block device driver. Required by virtio-based
+      virtual platforms (QEMU/CrosVM) when a disk-backed filesystem is in use.
+
+config KFEAT_DRIVER_RAMDISK
+    bool "RAM disk block device"
+    depends on KFEAT_FS
+    help
+      Use an in-memory RAM disk to back the filesystem. Useful on platforms
+      that do not (yet) provide a real block device driver.
+
+comment "Network drivers"
+
+config KFEAT_DRIVER_VIRTIO_NET
+    bool "virtio-net NIC"
+    depends on KFEAT_NET
+    default y
+    help
+      Enable the virtio-net NIC driver. Required by virtio-based virtual
+      platforms (QEMU/CrosVM) when networking is in use.
+
+config KFEAT_DRIVER_VIRTIO_SOCKET
+    bool "virtio-vsock transport"
+    depends on KFEAT_VSOCK
+    default y
+    help
+      Enable the virtio-vsock transport driver used by AF_VSOCK on virtio
+      platforms.
+
+comment "Filesystem transport drivers"
+
+config KFEAT_DRIVER_VIRTIO_9P
+    bool "virtio-9p transport"
+    depends on KFEAT_FS_9P
+    default y
+    help
+      Enable the virtio-9p transport used by the 9P filesystem client (e.g.
+      QEMU hostshare).
+
+comment "Display / input drivers"
+
+config KFEAT_DRIVER_VIRTIO_GPU
+    bool "virtio-gpu display"
+    help
+      Enable the virtio-gpu display driver.
+
+config KFEAT_DRIVER_VIRTIO_INPUT
+    bool "virtio-input input device"
+    help
+      Enable the virtio-input input device driver.
+
+endmenu # Device Drivers

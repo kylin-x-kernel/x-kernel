@@ -16,7 +16,7 @@
 #     - `GRAPHIC`: Enable display devices and graphic output (virtio-gpu)
 #     - `UEFI`: Boot x86_64 via OVMF and the generated `.uefi.img` instead of the default LinuxBoot/direct-boot image
 #     - `VIRTIO_9P`: Enable 9P shared filesystem devices (virtio-9p)
-#     - `BUS`: Device bus type: mmio, pci
+#     - `VIRTIO_BUS`: Device bus type: mmio, pci
 #     - `MEM`: Memory size (default is 128M)
 #     - `DISK_IMG`: Path to the virtual disk image
 #     - `ACCEL`: Enable hardware acceleration (KVM on linux)
