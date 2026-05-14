@@ -19,7 +19,7 @@ use memspace::{
     backend::{Backend, DynBackendOps, alloc_frame, dealloc_frame, pages_in},
 };
 
-struct FrameRefCnt(u8);
+struct FrameRefCnt(u32);
 
 impl FrameRefCnt {
     fn drop_frame(&mut self, pa: PhysAddr, pgsize: PageSize) {
@@ -37,7 +37,7 @@ struct FrameTableRefCount {
 }
 
 impl FrameTableRefCount {
-    const INITIAL_CNT: u8 = 1;
+    const INITIAL_CNT: u32 = 1;
 
     const fn new() -> Self {
         Self {
@@ -241,11 +241,11 @@ impl DynBackendOps for CowBackend {
                         .ok_or(KError::BadAddress)?;
                     let mut frame = frame.lock();
                     assert!(frame.0 > 0, "referencing unreferenced frame");
-                    frame.0 += 1;
-                    if frame.0 == u8::MAX {
+                    let new_cnt = frame.0.checked_add(1).ok_or_else(|| {
                         warn!("frame reference count overflow");
-                        return Err(KError::BadAddress);
-                    }
+                        KError::BadAddress
+                    })?;
+                    frame.0 = new_cnt;
                     old_pgtbl
                         .protect(vaddr, cow_flags)
                         .map_err(memspace::backend::map_paging_err)?;

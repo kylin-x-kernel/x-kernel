@@ -251,7 +251,10 @@ impl UnixTransportOps for StreamTransport {
                 chan.poll.wake();
             }
 
-            if count == size || non_blocking {
+            // `count` is only this iteration; `size` is the initial `src.remaining()`.
+            // Under load the ring may take several OUT polls to accept the full message
+            // (compare pipe `write`, which uses cumulative `total_written == size`).
+            if total == size || non_blocking {
                 Ok(total)
             } else {
                 Err(KError::WouldBlock)
