@@ -3,22 +3,24 @@
 // See LICENSES for license details.
 
 //! TCP socket implementation.
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
     task::Context,
 };
 
+use hashbrown::HashMap;
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
+use lazy_static::lazy_static;
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp as smol,
     time::Duration,
-    wire::{IpEndpoint, IpListenEndpoint},
+    wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
 
 use super::{LISTEN_TABLE, SOCKET_SET};
@@ -42,6 +44,8 @@ pub(crate) fn new_tcp_socket() -> smol::Socket<'static> {
 pub struct TcpSocket {
     state: StateLock,
     dispatch_irq: SocketHandle,
+    bound_endpoint: Mutex<IpListenEndpoint>,
+    bound_registered: AtomicBool,
 
     general: GeneralOptions,
     rx_closed: AtomicBool,
@@ -58,6 +62,8 @@ impl TcpSocket {
         Self {
             state: StateLock::new(State::Idle),
             dispatch_irq,
+            bound_endpoint: Mutex::new(empty_endpoint()),
+            bound_registered: AtomicBool::new(false),
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
@@ -71,27 +77,24 @@ impl TcpSocket {
         let result = Self {
             state: StateLock::new(State::Connected),
             dispatch_irq,
+            bound_endpoint: Mutex::new(empty_endpoint()),
+            bound_registered: AtomicBool::new(false),
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
         };
-        result.with_smol_socket(|socket| {
-            result
-                .general
-                .set_device_mask(Self::device_mask_for_connected_socket(socket));
-        });
-        result
-    }
-
-    fn device_mask_for_connected_socket(socket: &smol::Socket) -> u32 {
+        let (remote_endpoint, bound_endpoint) = result
+            .with_smol_socket(|socket| (socket.remote_endpoint(), socket_bound_endpoint(socket)));
+        *result.bound_endpoint.lock() = bound_endpoint;
         let service = SERVICE.lock();
-        if let Some(remote_endpoint) = socket.remote_endpoint() {
-            service.device_mask_for_addr(&remote_endpoint.addr)
-        } else {
-            service.device_mask_for(&socket.get_bound_endpoint())
-        }
+        let device_mask = remote_endpoint.map_or_else(
+            || service.device_mask_for(&bound_endpoint),
+            |remote_endpoint| service.device_mask_for_addr(&remote_endpoint.addr),
+        );
+        result.general.set_device_mask(device_mask);
+        result
     }
 }
 
@@ -117,7 +120,7 @@ impl TcpSocket {
     }
 
     fn bound_endpoint(&self) -> KResult<IpListenEndpoint> {
-        let endpoint = self.with_smol_socket(|socket| socket.get_bound_endpoint());
+        let endpoint = *self.bound_endpoint.lock();
         if endpoint.port == 0 {
             k_bail!(InvalidInput, "not bound");
         }
@@ -255,27 +258,25 @@ impl SocketOps for TcpSocket {
                 if local_addr.port() == 0 {
                     local_addr.set_port(get_ephemeral_port(local_addr.ip().into())?);
                 }
-                if !self.general.reuse_address() {
-                    SOCKET_SET.bind_check(local_addr.ip().into(), local_addr.port())?;
-                }
 
-                self.with_smol_socket(|socket| {
-                    if socket.get_bound_endpoint().port != 0 {
-                        return Err(KError::InvalidInput);
-                    }
-                    let endpoint = IpListenEndpoint {
-                        addr: if local_addr.ip().is_unspecified() {
-                            None
-                        } else {
-                            Some(local_addr.ip().into())
-                        },
-                        port: local_addr.port(),
-                    };
-                    socket.set_bound_endpoint(endpoint);
-                    self.general
-                        .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
-                    Ok(())
-                })?;
+                let endpoint = IpListenEndpoint {
+                    addr: if local_addr.ip().is_unspecified() {
+                        None
+                    } else {
+                        Some(local_addr.ip().into())
+                    },
+                    port: local_addr.port(),
+                };
+                if !self.general.reuse_address() && !LISTEN_TABLE.can_listen(endpoint) {
+                    return Err(KError::AddrInUse);
+                }
+                if self.bound_endpoint.lock().port != 0 {
+                    return Err(KError::InvalidInput);
+                }
+                self.register_bound_endpoint(endpoint)?;
+                *self.bound_endpoint.lock() = endpoint;
+                self.general
+                    .set_device_mask(SERVICE.lock().device_mask_for(&endpoint));
                 Ok(())
             })
     }
@@ -296,8 +297,7 @@ impl SocketOps for TcpSocket {
                 // TODO: check remote addr unreachable
                 // let (bound_endpoint, remote_endpoint) = self.get_endpoint_pair(remote_addr)?;
                 let remote_endpoint = IpEndpoint::from(remote_addr);
-                let mut bound_endpoint =
-                    self.with_smol_socket(|socket| socket.get_bound_endpoint());
+                let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
                     bound_endpoint.addr =
                         Some(SERVICE.lock().get_source_address(&remote_endpoint.addr));
@@ -308,27 +308,40 @@ impl SocketOps for TcpSocket {
                         .expect("source address must be resolved before ephemeral bind");
                     bound_endpoint.port = get_ephemeral_port(local_addr)?;
                 }
-                self.with_smol_socket(|socket| {
-                    socket.set_bound_endpoint(bound_endpoint);
-                    self.general.set_device_mask(
-                        SERVICE.lock().device_mask_for_addr(&remote_endpoint.addr),
-                    );
-                    socket
-                        .connect(
-                            crate::SERVICE.lock().iface.context(),
-                            remote_endpoint,
-                            bound_endpoint,
-                        )
-                        .map_err(|e| match e {
-                            smol::ConnectError::InvalidState => {
-                                k_err_type!(AlreadyConnected)
-                            }
-                            smol::ConnectError::Unaddressable => {
-                                k_err_type!(ConnectionRefused, "unaddressable")
-                            }
-                        })?;
-                    Ok(())
-                })
+                let should_register = !self.bound_registered.load(Ordering::Acquire);
+                if should_register {
+                    register_tcp_bound(bound_endpoint)?;
+                }
+
+                let result = {
+                    let mut service = crate::SERVICE.lock();
+                    let context = service.iface.context();
+                    self.with_smol_socket(|socket| {
+                        socket
+                            .connect(context, remote_endpoint, bound_endpoint)
+                            .map_err(|e| match e {
+                                smol::ConnectError::InvalidState => k_err_type!(AlreadyConnected),
+                                smol::ConnectError::Unaddressable => {
+                                    k_err_type!(ConnectionRefused, "unaddressable")
+                                }
+                            })?;
+                        Ok::<(), KError>(())
+                    })
+                };
+                if let Err(err) = result {
+                    if should_register {
+                        unregister_tcp_bound(bound_endpoint);
+                    }
+                    return Err(err);
+                }
+
+                *self.bound_endpoint.lock() = bound_endpoint;
+                if should_register {
+                    self.bound_registered.store(true, Ordering::Release);
+                }
+                self.general
+                    .set_device_mask(SERVICE.lock().device_mask_for_addr(&remote_endpoint.addr));
+                Ok(())
             })?;
 
         // Hack: let the server listen
@@ -348,11 +361,32 @@ impl SocketOps for TcpSocket {
         })
     }
 
-    fn listen(&self) -> KResult {
+    fn listen(&self, backlog: usize) -> KResult {
         if let Ok(guard) = self.state.lock(State::Idle) {
             guard.transit(State::Listening, || {
-                let bound_endpoint = self.with_smol_socket(|socket| socket.get_bound_endpoint());
-                LISTEN_TABLE.listen(bound_endpoint)?;
+                let mut bound_endpoint = *self.bound_endpoint.lock();
+                if bound_endpoint.port == 0 {
+                    let local_addr = bound_endpoint
+                        .addr
+                        .unwrap_or(IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED));
+                    bound_endpoint.port = get_ephemeral_port(local_addr)?;
+                }
+                let should_register = !self.bound_registered.load(Ordering::Acquire);
+                if should_register {
+                    register_tcp_bound(bound_endpoint)?;
+                }
+                if let Err(err) = LISTEN_TABLE.listen(bound_endpoint, backlog) {
+                    if should_register {
+                        unregister_tcp_bound(bound_endpoint);
+                    }
+                    return Err(err);
+                }
+                *self.bound_endpoint.lock() = bound_endpoint;
+                if should_register {
+                    self.bound_registered.store(true, Ordering::Release);
+                }
+                self.general
+                    .set_device_mask(SERVICE.lock().device_mask_for(&bound_endpoint));
                 Ok(())
             })?;
         } else {
@@ -434,15 +468,15 @@ impl SocketOps for TcpSocket {
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {
-        self.with_smol_socket(|socket| {
-            let endpoint = socket.get_bound_endpoint();
-            Ok(SocketAddrEx::Ip(SocketAddr::new(
-                endpoint
-                    .addr
-                    .map_or_else(|| Ipv4Addr::UNSPECIFIED.into(), Into::into),
-                endpoint.port,
-            )))
-        })
+        let endpoint = self
+            .with_smol_socket(|socket| socket.local_endpoint().map(endpoint_from_ip_endpoint))
+            .unwrap_or_else(|| *self.bound_endpoint.lock());
+        Ok(SocketAddrEx::Ip(SocketAddr::new(
+            endpoint
+                .addr
+                .map_or_else(|| Ipv4Addr::UNSPECIFIED.into(), Into::into),
+            endpoint.port,
+        )))
     }
 
     fn peer_addr(&self) -> KResult<SocketAddrEx> {
@@ -469,6 +503,8 @@ impl SocketOps for TcpSocket {
             }
             if how == Shutdown::Both {
                 self.state.set(State::Closed);
+                self.unregister_bound_endpoint();
+                *self.bound_endpoint.lock() = empty_endpoint();
             }
             poll_interfaces();
         }
@@ -476,7 +512,10 @@ impl SocketOps for TcpSocket {
         // listener
         if let Ok(guard) = self.state.lock(State::Listening) {
             guard.transit(State::Closed, || {
-                LISTEN_TABLE.unlisten(self.bound_endpoint()?);
+                let bound_endpoint = self.bound_endpoint()?;
+                LISTEN_TABLE.unlisten(bound_endpoint);
+                self.unregister_bound_endpoint();
+                *self.bound_endpoint.lock() = empty_endpoint();
                 poll_interfaces();
                 Ok(())
             })?;
@@ -521,10 +560,103 @@ impl Drop for TcpSocket {
         if let Err(err) = self.shutdown(Shutdown::Both) {
             warn!("TCP socket {}: shutdown failed: {}", self.dispatch_irq, err);
         }
+        self.unregister_bound_endpoint();
         SOCKET_SET.remove(self.dispatch_irq);
         // This is crucial for the close messages to be sent.
         poll_interfaces();
     }
+}
+
+const fn empty_endpoint() -> IpListenEndpoint {
+    IpListenEndpoint {
+        addr: None,
+        port: 0,
+    }
+}
+
+fn endpoint_from_ip_endpoint(endpoint: IpEndpoint) -> IpListenEndpoint {
+    IpListenEndpoint {
+        addr: Some(endpoint.addr),
+        port: endpoint.port,
+    }
+}
+
+fn socket_bound_endpoint(socket: &smol::Socket<'_>) -> IpListenEndpoint {
+    socket
+        .local_endpoint()
+        .map(endpoint_from_ip_endpoint)
+        .unwrap_or_else(|| socket.listen_endpoint())
+}
+
+impl TcpSocket {
+    fn register_bound_endpoint(&self, endpoint: IpListenEndpoint) -> KResult {
+        if !self.bound_registered.load(Ordering::Acquire) {
+            register_tcp_bound(endpoint)?;
+            self.bound_registered.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn unregister_bound_endpoint(&self) {
+        if self.bound_registered.swap(false, Ordering::AcqRel) {
+            unregister_tcp_bound(*self.bound_endpoint.lock());
+        }
+    }
+}
+
+lazy_static! {
+    static ref TCP_BOUND_ENDPOINTS: Mutex<HashMap<u16, Vec<Option<IpAddress>>>> =
+        Mutex::new(HashMap::new());
+}
+
+fn register_tcp_bound(endpoint: IpListenEndpoint) -> KResult {
+    if endpoint.port == 0 {
+        return Ok(());
+    }
+
+    let mut bound_endpoints = TCP_BOUND_ENDPOINTS.lock();
+    let bound_addrs = bound_endpoints.entry(endpoint.port).or_default();
+    if bound_addrs
+        .iter()
+        .any(|&addr| listen_addrs_conflict(addr, endpoint.addr))
+    {
+        return Err(KError::AddrInUse);
+    }
+    bound_addrs.push(endpoint.addr);
+    Ok(())
+}
+
+fn unregister_tcp_bound(endpoint: IpListenEndpoint) {
+    if endpoint.port == 0 {
+        return;
+    }
+
+    let mut bound_endpoints = TCP_BOUND_ENDPOINTS.lock();
+    let Some(bound_addrs) = bound_endpoints.get_mut(&endpoint.port) else {
+        return;
+    };
+    if let Some(index) = bound_addrs.iter().position(|&addr| addr == endpoint.addr) {
+        bound_addrs.swap_remove(index);
+    }
+    if bound_addrs.is_empty() {
+        bound_endpoints.remove(&endpoint.port);
+    }
+}
+
+fn tcp_port_available(endpoint: IpListenEndpoint) -> bool {
+    LISTEN_TABLE.can_listen(endpoint)
+        && !TCP_BOUND_ENDPOINTS
+            .lock()
+            .get(&endpoint.port)
+            .is_some_and(|bound_addrs| {
+                bound_addrs
+                    .iter()
+                    .any(|&addr| listen_addrs_conflict(addr, endpoint.addr))
+            })
+}
+
+fn listen_addrs_conflict(a: Option<IpAddress>, b: Option<IpAddress>) -> bool {
+    a.is_none() || b.is_none() || a == b
 }
 
 fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
@@ -546,9 +678,7 @@ fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
             addr: (!local_addr.is_unspecified()).then_some(local_addr),
             port,
         };
-        if LISTEN_TABLE.can_listen(listen_endpoint)
-            && SOCKET_SET.bind_check(local_addr, port).is_ok()
-        {
+        if tcp_port_available(listen_endpoint) {
             return Ok(port);
         }
         tries += 1;

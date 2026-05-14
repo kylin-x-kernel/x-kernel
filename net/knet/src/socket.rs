@@ -185,7 +185,7 @@ pub trait SocketOps: Configurable {
     fn connect(&self, remote_addr: SocketAddrEx) -> KResult;
 
     /// Starts listening on the bound address and port.
-    fn listen(&self) -> KResult {
+    fn listen(&self, _backlog: usize) -> KResult {
         Err(KError::OperationNotSupported)
     }
     /// Accepts a connection on a listening socket, returning a new socket.
@@ -216,8 +216,8 @@ impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
         (**self).connect(remote_addr)
     }
 
-    fn listen(&self) -> KResult {
-        (**self).listen()
+    fn listen(&self, backlog: usize) -> KResult {
+        (**self).listen(backlog)
     }
 
     fn accept(&self) -> KResult<Socket> {

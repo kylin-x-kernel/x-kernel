@@ -83,10 +83,9 @@ impl Configurable for UdpSocket {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         if let GetSocketOption::Error(error) = opt {
             // Drive pending RX work before reading SO_ERROR. UDP asynchronous
-            // errors are discovered from incoming ICMP packets during
-            // RxToken::preprocess(), while x-kernel currently advances the
-            // network stack from explicit poll sites rather than a background
-            // softirq.
+            // errors are discovered from incoming ICMP packets while polling
+            // devices, and x-kernel currently advances the network stack from
+            // explicit poll sites rather than a background softirq.
             poll_interfaces();
             **error = self.err_state.consume_socket_error();
             return Ok(OptionHandled::Yes);
@@ -152,7 +151,7 @@ impl SocketOps for UdpSocket {
 
         if !self.general.reuse_address() {
             // Check if the address is already in use
-            SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port)?;
+            SOCKET_SET.udp_bind_check(local_endpoint.addr, local_endpoint.port)?;
         }
 
         self.with_smol_socket(|socket| {
@@ -184,6 +183,8 @@ impl SocketOps for UdpSocket {
         let remote_addr = IpEndpoint::from(remote_addr);
         let src = SERVICE.lock().get_source_address(&remote_addr.addr);
         *guard = Some((remote_addr, src));
+        self.general
+            .set_device_mask(SERVICE.lock().device_mask_for_addr(&remote_addr.addr));
         self.err_state.set_peer_addr(Some((remote_addr, src)));
         debug!(
             "UDP socket {}: connected to {}",

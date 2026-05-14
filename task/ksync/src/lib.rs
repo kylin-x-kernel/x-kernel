@@ -74,7 +74,6 @@
 //! - `watchdog`: Enable watchdog support for deadlock detection
 
 #![cfg_attr(not(test), no_std)]
-#![feature(doc_cfg)]
 
 pub use kspin as spin;
 

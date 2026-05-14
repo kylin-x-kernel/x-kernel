@@ -24,7 +24,12 @@ pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
 
     /// Polls the device and pushes received IP packets into `buffer`.
-    fn poll_rx(&mut self, buffer: &mut PacketBuffer<()>, timestamp: Instant) -> bool;
+    fn poll_rx(
+        &mut self,
+        buffer: &mut PacketBuffer<()>,
+        timestamp: Instant,
+        packet_snoop: &mut dyn FnMut(&[u8]),
+    ) -> bool;
     /// Sends an IP packet to the next hop.
     ///
     /// Returns `true` if this operation resulted in the readiness of receive

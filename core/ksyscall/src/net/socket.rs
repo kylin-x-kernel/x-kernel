@@ -144,10 +144,15 @@ pub fn sys_listen(fd: i32, backlog: i32) -> KResult<isize> {
     if backlog < 0 && backlog != -1 {
         return Err(KError::InvalidInput);
     }
+    let backlog = if backlog == -1 {
+        usize::MAX
+    } else {
+        backlog as usize
+    };
 
     kthread::current_resources()
         .get_file_like_as::<Socket>(fd)?
-        .listen()?;
+        .listen(backlog)?;
 
     Ok(0)
 }

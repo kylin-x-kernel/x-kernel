@@ -52,7 +52,7 @@ impl<'a> SocketSetWrapper<'a> {
         f(socket)
     }
 
-    pub fn bind_check(&self, addr: IpAddress, port: u16) -> KResult {
+    pub fn udp_bind_check(&self, addr: IpAddress, port: u16) -> KResult {
         if port == 0 {
             return Ok(());
         }
@@ -61,12 +61,6 @@ impl<'a> SocketSetWrapper<'a> {
         let mut sockets = self.inner.lock();
         for (_, socket) in sockets.iter_mut() {
             match socket {
-                Socket::Tcp(s) => {
-                    let local_addr = s.get_bound_endpoint();
-                    if local_addr.addr == Some(addr) && local_addr.port == port {
-                        return Err(KError::AddrInUse);
-                    }
-                }
                 Socket::Udp(s) => {
                     if s.endpoint().addr == Some(addr) && s.endpoint().port == port {
                         return Err(KError::AddrInUse);

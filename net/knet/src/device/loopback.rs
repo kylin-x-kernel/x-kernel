@@ -42,8 +42,14 @@ impl NetDevice for LoopbackDevice {
         "lo"
     }
 
-    fn poll_rx(&mut self, buffer: &mut PacketBuffer<()>, _timestamp: Instant) -> bool {
+    fn poll_rx(
+        &mut self,
+        buffer: &mut PacketBuffer<()>,
+        _timestamp: Instant,
+        packet_snoop: &mut dyn FnMut(&[u8]),
+    ) -> bool {
         self.queue.dequeue().ok().is_some_and(|(_, rx_buf)| {
+            packet_snoop(rx_buf);
             buffer
                 .enqueue(rx_buf.len(), ())
                 .unwrap()

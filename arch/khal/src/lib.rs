@@ -28,7 +28,6 @@
 //! - User space support is always enabled.
 
 #![no_std]
-#![feature(doc_cfg)]
 #![allow(rustdoc::broken_intra_doc_links)]
 
 extern crate alloc;

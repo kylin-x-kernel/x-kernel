@@ -154,9 +154,15 @@ impl Router {
         }
     }
 
-    pub fn poll(&mut self, timestamp: Instant) {
+    pub fn poll(&mut self, timestamp: Instant, sockets: &mut SocketSet<'_>) {
         for dev in &mut self.devices {
-            while !self.rx_buffer.is_full() && dev.poll_rx(&mut self.rx_buffer, timestamp) {}
+            let mut packet_snoop = |packet: &[u8]| {
+                snoop_udp_error_packet(packet);
+                snoop_tcp_packet(packet, sockets);
+            };
+            while !self.rx_buffer.is_full()
+                && dev.poll_rx(&mut self.rx_buffer, timestamp, &mut packet_snoop)
+            {}
         }
     }
 
@@ -287,11 +293,6 @@ impl<'a> smoltcp::phy::RxToken for RxToken<'a> {
         F: FnOnce(&[u8]) -> R,
     {
         f(self.0)
-    }
-
-    fn preprocess(&self, sockets: &mut SocketSet) {
-        snoop_udp_error_packet(self.0);
-        snoop_tcp_packet(self.0, sockets);
     }
 }
 

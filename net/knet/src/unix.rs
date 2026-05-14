@@ -194,7 +194,7 @@ impl SocketOps for UnixDomainSocket {
         Ok(())
     }
 
-    fn listen(&self) -> KResult {
+    fn listen(&self, _backlog: usize) -> KResult {
         Ok(())
     }
 

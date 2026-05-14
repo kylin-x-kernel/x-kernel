@@ -95,7 +95,7 @@ impl SocketOps for VsockSocket {
         self.transport.connect(remote_addr)
     }
 
-    fn listen(&self) -> KResult {
+    fn listen(&self, _backlog: usize) -> KResult {
         self.transport.listen()
     }
 

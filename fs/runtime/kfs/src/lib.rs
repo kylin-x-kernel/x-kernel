@@ -5,7 +5,6 @@
 //! Kernel filesystem initialization and high-level APIs.
 #![cfg_attr(all(not(test), not(doc)), no_std)]
 #![allow(dead_code, unused_imports, rustdoc::broken_intra_doc_links)]
-#![feature(doc_cfg)]
 #![allow(clippy::new_ret_no_self)]
 
 extern crate alloc;

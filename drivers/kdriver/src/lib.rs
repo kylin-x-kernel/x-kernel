@@ -11,7 +11,6 @@
 //! Supports static and dynamic device models via the `dyn` feature.
 
 #![no_std]
-#![feature(doc_cfg)]
 #![feature(associated_type_defaults)]
 
 #[macro_use]

@@ -24,6 +24,7 @@ struct ListenTableEntry {
     syn_queue: VecDeque<PendingConn>,
     accept_queue: VecDeque<PendingConn>,
     accept_poll: PollSet,
+    backlog: usize,
     touched: bool,
     closed: bool,
 }
@@ -36,11 +37,13 @@ struct PendingConn {
 
 impl ListenTableEntry {
     /// Create a new listen table entry for the given endpoint.
-    fn new() -> Self {
+    fn new(backlog: usize) -> Self {
+        let backlog = backlog.clamp(1, LISTEN_QUEUE_SIZE);
         Self {
-            syn_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
-            accept_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
+            syn_queue: VecDeque::with_capacity(backlog),
+            accept_queue: VecDeque::with_capacity(backlog),
             accept_poll: PollSet::new(),
+            backlog,
             touched: false,
             closed: false,
         }
@@ -66,7 +69,7 @@ impl ListenTable {
         !Self::listen_conflicts(&entries, endpoint)
     }
 
-    pub fn listen(&self, listen_endpoint: IpListenEndpoint) -> KResult {
+    pub fn listen(&self, listen_endpoint: IpListenEndpoint, backlog: usize) -> KResult {
         let port = listen_endpoint.port;
         assert_ne!(port, 0);
 
@@ -78,7 +81,7 @@ impl ListenTable {
 
         entries.insert(
             listen_endpoint,
-            Arc::new(Mutex::new(ListenTableEntry::new())),
+            Arc::new(Mutex::new(ListenTableEntry::new(backlog))),
         );
         Ok(())
     }
@@ -203,7 +206,7 @@ impl ListenTable {
             return;
         }
         // TODO(mivik): accept address check
-        if entry.syn_queue.len() + entry.accept_queue.len() >= LISTEN_QUEUE_SIZE {
+        if entry.syn_queue.len() + entry.accept_queue.len() >= entry.backlog {
             warn!("listen backlog overflow!");
             return;
         }

@@ -111,6 +111,7 @@ impl EthernetDevice {
         frame: &[u8],
         buffer: &mut PacketBuffer<()>,
         timestamp: Instant,
+        packet_snoop: &mut dyn FnMut(&[u8]),
     ) -> bool {
         let frame = EthernetFrame::new_unchecked(frame);
         let Ok(repr) = EthernetRepr::parse(&frame) else {
@@ -127,6 +128,8 @@ impl EthernetDevice {
 
         match repr.ethertype {
             EthernetProtocol::Ipv4 => {
+                // Ethernet frames carry the IP packet in the payload; loopback stores IP packets directly.
+                packet_snoop(frame.payload());
                 buffer
                     .enqueue(frame.payload().len(), ())
                     .unwrap()
@@ -267,7 +270,12 @@ impl NetDeviceOps for EthernetDevice {
         &self.name
     }
 
-    fn poll_rx(&mut self, buffer: &mut PacketBuffer<()>, timestamp: Instant) -> bool {
+    fn poll_rx(
+        &mut self,
+        buffer: &mut PacketBuffer<()>,
+        timestamp: Instant,
+        packet_snoop: &mut dyn FnMut(&[u8]),
+    ) -> bool {
         loop {
             let rx_buf: NetBufHandle = match self.inner.recv() {
                 Ok(buf) => buf,
@@ -280,7 +288,7 @@ impl NetDeviceOps for EthernetDevice {
             };
             trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
 
-            let result = self.handle_rx_frame(rx_buf.data(), buffer, timestamp);
+            let result = self.handle_rx_frame(rx_buf.data(), buffer, timestamp, packet_snoop);
             self.inner.recycle_rx(rx_buf).unwrap();
             if result {
                 return true;

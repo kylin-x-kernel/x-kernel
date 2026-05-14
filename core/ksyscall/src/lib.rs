@@ -5,8 +5,6 @@
 //! Syscall implementation crate.
 
 #![no_std]
-#![feature(likely_unlikely)]
-#![feature(bstr)]
 #![allow(missing_docs)]
 
 #[macro_use]

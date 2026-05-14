@@ -48,7 +48,7 @@ impl Service {
     pub fn poll(&mut self, sockets: &mut SocketSet) -> bool {
         let timestamp = now();
 
-        self.router.poll(timestamp);
+        self.router.poll(timestamp, sockets);
         self.iface.poll(timestamp, &mut self.router, sockets);
         LISTEN_TABLE.wake_touched_acceptors(sockets);
         self.router.dispatch(timestamp)
