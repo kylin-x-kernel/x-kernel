@@ -4,15 +4,17 @@
 
 //! Helper functions to initialize the CPU states on systems bootstrapping.
 
+use kcpu_id_map::LogicalCpuId;
+
 /// Initializes the per-CPU data structures.
 ///
 /// It calls the initialization function of the [`percpu`] crate. It (or other
 /// alternative initialization) should be called before [`init_trap`].
 ///
 /// [`percpu`]: https://docs.rs/percpu/latest/percpu/index.html
-pub fn init_percpu(cpu_id: usize) {
+pub fn init_percpu(cpu_id: LogicalCpuId) {
     percpu::init();
-    percpu::init_percpu_reg(cpu_id);
+    percpu::init_percpu_reg(cpu_id.as_usize());
 }
 
 /// Initializes trap handling on the current CPU.

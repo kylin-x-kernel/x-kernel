@@ -4,15 +4,19 @@
 
 //! Power control implementation for x86_64-qemu-virt.
 
+#[cfg(feature = "smp")]
+use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kplat::sys::SysCtrl;
 use x86_64::instructions::port::PortWriteOnly;
 struct PowerImpl;
 #[impl_dev_interface]
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
-    fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
+    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
         use khal::mem::pa;
-        crate::mp::start_secondary_cpu(cpu_id, pa!(stack_top_paddr))
+
+        let raw_cpu_id = raw_cpu_id(logical_cpu_id);
+        crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr))
     }
 
     fn shutdown() -> ! {

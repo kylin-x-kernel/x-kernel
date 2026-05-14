@@ -2,12 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kplat::sys::SysCtrl;
 struct PowerImpl;
 #[impl_dev_interface]
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
-    fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
+    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
         use khal::mem::{v2p, va};
         if sbi_rt::probe_extension(sbi_rt::Hsm).is_unavailable() {
             warn!("HSM SBI extension is not supported for current SEE.");
@@ -16,7 +17,8 @@ impl SysCtrl for PowerImpl {
         let entry = v2p(va!(
             kernel_boot::arch::_start_secondary as *const () as usize
         ));
-        sbi_rt::hart_start(cpu_id, entry.as_usize(), stack_top_paddr);
+        let raw_cpu_id = raw_cpu_id(logical_cpu_id);
+        sbi_rt::hart_start(raw_cpu_id.as_usize(), entry.as_usize(), stack_top_paddr);
     }
 
     fn shutdown() -> ! {

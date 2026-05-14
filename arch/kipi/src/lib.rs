@@ -18,6 +18,7 @@
 extern crate log;
 extern crate alloc;
 
+use kcpu_id_map::LogicalCpuId;
 use khal::{
     irq::{IPI_IRQ, TargetCpu as IpiTarget},
     percpu::this_cpu_id,
@@ -74,25 +75,26 @@ pub fn init() {
 /// # Errors
 ///
 /// Returns `KipiError::InvalidCpuId` if `dest_cpu` exceeds system CPU count.
-pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) -> Result<()> {
+pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Result<()> {
     let cpu_num = kbuild_config::CPU_NUM;
+    let dest_cpu_index = dest_cpu.as_usize();
 
     // Error handling: check CPU ID validity
-    if dest_cpu >= cpu_num {
-        error!("Invalid CPU ID: {} (max: {})", dest_cpu, cpu_num - 1);
+    if dest_cpu_index >= cpu_num {
+        error!("Invalid CPU ID: {} (max: {})", dest_cpu_index, cpu_num - 1);
         return Err(KipiError::InvalidCpuId);
     }
 
-    debug!("Send IPI event to CPU {dest_cpu}");
+    debug!("Send IPI event to CPU {}", dest_cpu_index);
 
     if dest_cpu == this_cpu_id() {
         // Execute callback on current CPU immediately
         callback.into().call();
     } else {
-        unsafe { IPI_EVENT_QUEUE.remote_ref_raw(dest_cpu) }
+        unsafe { IPI_EVENT_QUEUE.remote_ref_raw(dest_cpu_index) }
             .lock()
             .push(this_cpu_id(), callback.into());
-        khal::irq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu));
+        khal::irq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu_index));
     }
 
     Ok(())
@@ -110,7 +112,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
 
     // Push the callback to all other CPUs' IPI event queues
     for cpu_id in 0..cpu_num {
-        if cpu_id != current_cpu_id {
+        if cpu_id != current_cpu_id.as_usize() {
             unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id) }
                 .lock()
                 .push(current_cpu_id, callback.clone().into_unicast());
@@ -121,7 +123,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     khal::irq::notify_cpu(
         IPI_IRQ,
         IpiTarget::AllButSelf {
-            me: current_cpu_id,
+            me: current_cpu_id.as_usize(),
             total: cpu_num,
         },
     );
@@ -138,7 +140,7 @@ pub fn ipi_handler() {
         .lock()
         .pop_one()
     {
-        debug!("Received IPI event from CPU {src_cpu_id}");
+        debug!("Received IPI event from CPU {}", src_cpu_id.as_usize());
 
         // use logging instead of silent failure
         callback.call();

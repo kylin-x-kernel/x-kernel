@@ -5,6 +5,7 @@
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
 use crate::irq::TargetCpu;
+use kcpu_id_map::LogicalCpuId;
 use kplat::{
     boot::BootHandler,
     impl_dev_interface,
@@ -29,7 +30,7 @@ impl BootHandler for DummyInit {
     fn final_init(_boot_info: &kplat::boot::BootInfo) {}
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_cpu_id: usize) {}
+    fn final_init_ap(_logical_cpu_id: LogicalCpuId) {}
 }
 
 #[impl_dev_interface]
@@ -86,7 +87,7 @@ impl crate::time::MonotonicTimerIf for DummyTime {
 #[impl_dev_interface]
 impl SysCtrl for DummyPower {
     #[cfg(feature = "smp")]
-    fn boot_ap(_cpu_id: usize, _stack_top_paddr: usize) {}
+    fn boot_ap(_logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) {}
 
     fn shutdown() -> ! {
         unimplemented!()

@@ -13,6 +13,7 @@ use kbuild_config::{BOOT_STACK_SIZE, CPU_NUM};
 use riscv::register::sstatus::{self, FS};
 
 use super::mmu;
+use crate::arch::RawCpuId;
 
 /// Boot stack for the primary CPU.
 #[unsafe(link_section = ".bss.stack")]
@@ -102,8 +103,14 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
     )
 }
 
-pub unsafe extern "C" fn __secondary_switched(cpu_id: usize) -> ! {
-    call_kernel_entry!(SECOND_KERNEL_ENTRY, cpu_id);
+pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
+    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+        panic!(
+            "missing logical cpu id mapping for raw cpu id {:#x}",
+            raw_cpu_id.as_usize()
+        )
+    });
+    call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id);
     loop {
         core::hint::spin_loop();
     }
@@ -111,7 +118,7 @@ pub unsafe extern "C" fn __secondary_switched(cpu_id: usize) -> ! {
 
 /// Post-MMU entry point for the boot CPU.
 pub unsafe extern "C" fn __primary_switched(
-    cpu_id: usize,
+    raw_cpu_id: RawCpuId,
     dtb_paddr: usize,
     kimage_voffset: usize,
 ) -> ! {
@@ -127,6 +134,13 @@ pub unsafe extern "C" fn __primary_switched(
     }
 
     kaddr_layout::set_kimage_voffset(kimage_voffset);
+    crate::arch::init_boot_cpu_id_map(dtb_paddr);
+    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+        panic!(
+            "missing logical cpu id mapping for raw cpu id {:#x}",
+            raw_cpu_id.as_usize()
+        )
+    });
     // Keep the linear-map console handoff in Rust after BSS is cleared and the
     // runtime kimage offset is established. Do not add boot-console logging in
     // the init_mmu() -> __primary_switched() window unless this activation is
@@ -147,7 +161,7 @@ pub unsafe extern "C" fn __primary_switched(
                 0x1000,
                 PAGE_OFFSET + kbuild_config::BOOT_CONSOLE_ADDR,
             )
-            .with_cpu_id(cpu_id)
+            .with_cpu_id(logical_cpu_id)
             .with_cpu_count(CPU_NUM);
     }
 

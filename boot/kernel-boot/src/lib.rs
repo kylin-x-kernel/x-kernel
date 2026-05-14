@@ -9,11 +9,13 @@
 
 pub use linkme::{distributed_slice as def_boot_init, distributed_slice as register_boot_init};
 
+use crate::arch::LogicalCpuId;
+
 #[def_boot_init]
 pub static PRIMARY_KERNEL_ENTRY: [fn(usize) -> !];
 
 #[def_boot_init]
-pub static SECOND_KERNEL_ENTRY: [fn(usize) -> !];
+pub static SECOND_KERNEL_ENTRY: [fn(LogicalCpuId) -> !];
 
 macro_rules! call_kernel_entry {
     ($entry:ident, $($args:tt)*) => {{

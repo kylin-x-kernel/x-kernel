@@ -4,7 +4,7 @@
 
 mod el;
 mod entry;
-pub use entry::_start_secondary;
-
 mod mmu;
 pub(crate) mod serial;
+
+pub use entry::{_start_secondary, set_secondary_boot_stack_top};

@@ -120,7 +120,7 @@ fn efi_main() -> Status {
                 BootProtocol::Uefi,
                 protocol_info_addr,
                 loaded_kernel.load_paddr as usize,
-                0,
+                0.into(),
                 kbuild_config::CPU_NUM,
             )
             .with_hardware_description_root(HardwareDescriptionRoot::Acpi)

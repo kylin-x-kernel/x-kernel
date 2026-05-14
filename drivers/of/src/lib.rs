@@ -71,10 +71,7 @@ pub struct NamedMemoryRegion {
     pub name: &'static str,
 }
 
-fn property_u32_cells<const N: usize>(
-    node: FdtNode<'static, 'static>,
-    name: &str,
-) -> Option<[u32; N]> {
+fn property_u32_cells<const N: usize>(node: FdtNode<'_, '_>, name: &str) -> Option<[u32; N]> {
     let value = node.property(name)?.value;
     if value.len() < N * 4 {
         return None;
@@ -89,6 +86,33 @@ fn property_u32_cells<const N: usize>(
 
 pub fn property_u32(node: FdtNode<'static, 'static>, name: &str) -> Option<u32> {
     node.property_u32(name)
+}
+
+pub fn is_cpu_node(node: FdtNode<'_, '_>) -> bool {
+    node.property_str("device_type") == Some("cpu")
+}
+
+pub fn is_enabled_cpu_node(node: FdtNode<'_, '_>) -> bool {
+    is_cpu_node(node) && node.property_str("status") != Some("disabled")
+}
+
+pub fn cpu_node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
+    if !is_cpu_node(node) {
+        return None;
+    }
+
+    let address_cells = node.parent_property_u32("#address-cells").unwrap_or(1) as usize;
+    match address_cells {
+        1 => property_u32_cells::<1>(node, "reg").and_then(|cells| parse_cells_u64(&cells)),
+        2 => property_u32_cells::<2>(node, "reg").and_then(|cells| parse_cells_u64(&cells)),
+        _ => None,
+    }
+}
+
+pub fn enabled_cpu_nodes<'dt>(
+    fdt: &'dt LinuxFdt<'dt>,
+) -> impl Iterator<Item = FdtNode<'dt, 'dt>> + 'dt {
+    fdt.all_nodes().filter(|node| is_enabled_cpu_node(*node))
 }
 
 fn parse_cells_u64(cells: &[u32]) -> Option<u64> {

@@ -14,6 +14,7 @@ use core::{
 };
 
 use futures_util::task::AtomicWaker;
+use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
 use ksched::BaseScheduler;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
@@ -188,7 +189,7 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
 /// [`RunQueue`] represents a run queue for global system or a specific CPU.
 pub(crate) struct RunQueue {
     /// The ID of the CPU this run queue is associated with.
-    cpu_id: usize,
+    cpu_id: LogicalCpuId,
     /// The core scheduler of this run queue.
     /// Since irq and preempt are preserved by the kernel guard hold by `KRunQueueRef`,
     /// we just use a simple raw spin lock here.
@@ -241,7 +242,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         debug!(
             "task add: {} on run_queue {}",
             task.id_name(),
-            self.inner.cpu_id
+            self.inner.cpu_id.as_usize()
         );
         assert!(task.is_ready());
         #[cfg(feature = "watchdog")]
@@ -270,7 +271,10 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
-            debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
+            debug!(
+                "task unblock: {task_id_name} on run_queue {}",
+                cpu_id.as_usize()
+            );
 
             // Fire the task wakeup tracepoint.
             fire_task_wakeup(task_id);
@@ -441,7 +445,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 impl RunQueue {
     /// Create a new run queue for the specified CPU.
     /// The run queue is initialized with a per-CPU gc task in its scheduler.
-    fn new(cpu_id: usize) -> Self {
+    fn new(cpu_id: LogicalCpuId) -> Self {
         let gc_task = TaskInner::new(
             || block_on(poll_fn(poll_gc)),
             "gc".into(),
@@ -449,7 +453,7 @@ impl RunQueue {
         )
         .into_arc();
         // gc task should be pinned to the current CPU.
-        gc_task.set_cpumask(KCpuMask::one_shot(cpu_id));
+        gc_task.set_cpumask(KCpuMask::one_shot(cpu_id.as_usize()));
 
         let mut scheduler = Scheduler::new();
         scheduler.add_task(gc_task);
@@ -496,7 +500,7 @@ impl RunQueue {
             }
             // TODO: priority
             #[cfg(feature = "smp")]
-            task.set_cpu_id(self.cpu_id as _);
+            task.set_cpu_id(self.cpu_id);
             self.scheduler.lock().put_prev_task(task, preempt);
             true
         } else {
@@ -670,7 +674,7 @@ pub(crate) fn init() {
     const IDLE_TASK_STACK_SIZE: usize = 16384;
     let idle_task = TaskInner::new(|| crate::run_idle(), "idle".into(), IDLE_TASK_STACK_SIZE);
     // idle task should be pinned to the current CPU.
-    idle_task.set_cpumask(KCpuMask::one_shot(cpu_id));
+    idle_task.set_cpumask(KCpuMask::one_shot(cpu_id.as_usize()));
     IDLE_TASK.with_current(|i| {
         i.init_once(idle_task.into_arc());
     });
@@ -684,7 +688,7 @@ pub(crate) fn init() {
         rq.init_once(RunQueue::new(cpu_id));
     });
     unsafe {
-        RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());
+        RUN_QUEUES[cpu_id.as_usize()].write(RUN_QUEUE.current_ref_mut_raw());
     }
 }
 
@@ -703,6 +707,6 @@ pub(crate) fn init_secondary() {
         rq.init_once(RunQueue::new(cpu_id));
     });
     unsafe {
-        RUN_QUEUES[cpu_id].write(RUN_QUEUE.current_ref_mut_raw());
+        RUN_QUEUES[cpu_id.as_usize()].write(RUN_QUEUE.current_ref_mut_raw());
     }
 }

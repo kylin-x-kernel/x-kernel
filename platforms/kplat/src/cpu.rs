@@ -4,6 +4,8 @@
 
 //! CPU-local platform helpers.
 
+use kcpu_id_map::LogicalCpuId;
+
 #[percpu::def_percpu]
 static KPCB_ID: usize = 0;
 
@@ -12,8 +14,8 @@ static KPCB_BSP: bool = false;
 
 /// Returns the current CPU ID.
 #[inline]
-pub fn id() -> usize {
-    KPCB_ID.read_current()
+pub fn id() -> LogicalCpuId {
+    LogicalCpuId::new(KPCB_ID.read_current())
 }
 
 /// Returns whether this CPU is the bootstrap processor (BSP).
@@ -23,21 +25,21 @@ pub fn is_bsp() -> bool {
 }
 
 /// Initializes per-CPU state for the boot CPU.
-pub fn boot_cpu_init(id: usize) {
+pub fn boot_cpu_init(id: LogicalCpuId) {
     percpu::init();
-    percpu::init_percpu_reg(id);
+    percpu::init_percpu_reg(id.as_usize());
     unsafe {
-        KPCB_ID.write_current_raw(id);
+        KPCB_ID.write_current_raw(id.as_usize());
         KPCB_BSP.write_current_raw(true);
     }
 }
 
 #[cfg(feature = "smp")]
 /// Initializes per-CPU state for an application processor (SMP only).
-pub fn ap_cpu_init(id: usize) {
-    percpu::init_percpu_reg(id);
+pub fn ap_cpu_init(id: LogicalCpuId) {
+    percpu::init_percpu_reg(id.as_usize());
     unsafe {
-        KPCB_ID.write_current_raw(id);
+        KPCB_ID.write_current_raw(id.as_usize());
         KPCB_BSP.write_current_raw(false);
     }
 }

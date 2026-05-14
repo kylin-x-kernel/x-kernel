@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 log = "0.4"
 ktypes = { workspace = true }
+kcpu_id_map = { workspace = true }
 khal = { workspace = true }
 kbuild_config = { workspace = true }
 boot_info = { workspace = true }

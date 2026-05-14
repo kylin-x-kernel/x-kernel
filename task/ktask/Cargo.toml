@@ -29,6 +29,7 @@ test = ["percpu/sp-naive"]
 [dependencies]
 kerrno.workspace = true
 khal.workspace = true
+kcpu_id_map.workspace = true
 backtrace = { workspace = true, optional = true }
 kpoll = { workspace = true }
 ksched = { workspace = true }

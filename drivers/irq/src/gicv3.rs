@@ -5,6 +5,7 @@
 //! GICv3 backend.
 
 use arm_gic_driver::v3::*;
+use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use khal::irq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
@@ -73,8 +74,10 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                 .cpu_interface()
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::current());
         }
-        TargetCpu::Specific(cpu_id) => {
-            let affinity = Affinity::from_mpidr(cpu_id as u64);
+        TargetCpu::Specific(logical_cpu_id) => {
+            let affinity = Affinity::from_mpidr(
+                raw_cpu_id(LogicalCpuId::new(logical_cpu_id)).as_usize() as u64,
+            );
             let target = SGITarget::list([affinity]);
             GIC.lock()
                 .cpu_interface()

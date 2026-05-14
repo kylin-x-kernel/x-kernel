@@ -8,6 +8,8 @@
 
 use core::{fmt, mem, ptr};
 
+use kcpu_id_map::LogicalCpuId;
+
 /// Magic number for BootInfo structure validation.
 ///
 /// ASCII: "BOOTINFO" = 0x424f4f54494e464f
@@ -56,7 +58,7 @@ pub struct BootInfo {
     pub boot_console_addr: usize,
     pub boot_console_vaddr: usize,
     pub boot_console_size: usize,
-    pub cpu_id: usize,
+    pub cpu_id: LogicalCpuId,
     pub cpu_count: usize,
     pub framebuffer: Option<FrameBufferInfo>,
 }
@@ -90,7 +92,7 @@ impl BootInfo {
             boot_console_addr: 0,
             boot_console_vaddr: 0,
             boot_console_size: 0,
-            cpu_id: 0,
+            cpu_id: LogicalCpuId::new(0),
             cpu_count: 0,
             framebuffer: None,
         }
@@ -251,7 +253,7 @@ impl BootInfo {
     }
 
     #[inline]
-    pub const fn with_cpu_id(mut self, id: usize) -> Self {
+    pub const fn with_cpu_id(mut self, id: LogicalCpuId) -> Self {
         self.cpu_id = id;
         self
     }

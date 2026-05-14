@@ -36,7 +36,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_cpu_id: usize) {
+    fn final_init_ap(_cpu_id: kcpu_id_map::LogicalCpuId) {
         irq_driver::gic::init_current_cpu();
         timer_driver::arm_generic::init_percpu();
     }

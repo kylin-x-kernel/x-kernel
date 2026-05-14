@@ -211,7 +211,7 @@ pub fn handle_idle_return(previous_ticks: u64) -> bool {
         info!(
             "[PM-DBG] cpu{} repaired timer regression: before={}, current={}, after={}, \
              repair_ticks={}, repair_ns={}, raw_ticks={}, offset={}=>{}",
-            cpu_id,
+            cpu_id.as_usize(),
             previous_ticks,
             current_ticks,
             fixed_ticks,
@@ -230,7 +230,7 @@ pub fn handle_idle_return(previous_ticks: u64) -> bool {
 #[cfg(feature = "crosvm")]
 pub fn handle_ipi_fixup() {
     let cpu_id = khal::percpu::this_cpu_id();
-    let bit = 1usize << cpu_id;
+    let bit = 1usize << cpu_id.as_usize();
     let pending = IPI_FIXUP_PENDING.fetch_and(!bit, Ordering::AcqRel);
     if pending & bit == 0 {
         return;
@@ -241,7 +241,9 @@ pub fn handle_ipi_fixup() {
     rearm_local_timer_irq();
     info!(
         "[PM-DBG] cpu{} applied remote timer fixup via IPI: logical_ticks={}, offset={}",
-        cpu_id, fixed_ticks, offset
+        cpu_id.as_usize(),
+        fixed_ticks,
+        offset
     );
 }
 
@@ -420,7 +422,7 @@ fn request_remote_timer_fixup() {
     } else {
         (1usize << kbuild_config::CPU_NUM) - 1
     };
-    let remote_mask = all_cpus_mask & !(1usize << current_cpu);
+    let remote_mask = all_cpus_mask & !(1usize << current_cpu.as_usize());
     if remote_mask == 0 {
         return;
     }
@@ -429,7 +431,7 @@ fn request_remote_timer_fixup() {
     khal::irq::notify_cpu(
         kbuild_config::IPI_IRQ,
         khal::irq::TargetCpu::AllButSelf {
-            me: current_cpu,
+            me: current_cpu.into(),
             total: kbuild_config::CPU_NUM,
         },
     );

@@ -60,7 +60,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_cpu_id: usize) {
+    fn final_init_ap(_logical_cpu_id: kcpu_id_map::LogicalCpuId) {
         x86_apic::init_secondary();
         timer_driver::x86_lapic_tsc::init_secondary();
     }

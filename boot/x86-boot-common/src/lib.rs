@@ -8,6 +8,7 @@ use core::ptr;
 
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::PAGE_OFFSET;
+use kcpu_id_map::LogicalCpuId;
 use kernel_elf_loader::KernelElf;
 
 pub const ALIGN_2M: u64 = 0x20_0000;
@@ -48,7 +49,7 @@ pub fn build_boot_info(
     protocol: BootProtocol,
     protocol_info_addr: usize,
     kernel_load_paddr: usize,
-    cpu_id: usize,
+    cpu_id: LogicalCpuId,
     cpu_count: usize,
 ) -> BootInfo {
     BootInfo::new(protocol)

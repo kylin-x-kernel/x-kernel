@@ -4,6 +4,7 @@
 
 //! Platform boot hooks for early and final initialization.
 use kbuild_config::PSCI_METHOD;
+use kcpu_id_map::LogicalCpuId;
 use kplat::boot::{BootHandler, BootInfo};
 use log::*;
 
@@ -39,14 +40,14 @@ impl BootHandler for BootHandlerImpl {
 
     /// Finish platform init after core subsystems are online.
     fn final_init(boot_info: &BootInfo) {
-        info!("cpu_id {}", boot_info.cpu_id);
+        info!("cpu_id {}", boot_info.cpu_id.as_usize());
         irq_driver::gic::init_current_cpu();
         timer_driver::arm_generic::init_percpu();
     }
 
     #[cfg(feature = "smp")]
     /// Finalize per-CPU setup on secondary cores.
-    fn final_init_ap(_cpu_id: usize) {
+    fn final_init_ap(_logical_cpu_id: LogicalCpuId) {
         irq_driver::gic::init_current_cpu();
         timer_driver::arm_generic::init_percpu();
     }

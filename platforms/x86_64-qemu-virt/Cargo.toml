@@ -22,6 +22,7 @@ bitflags = "2.6"
 percpu = { workspace = true }
 kcpu = { workspace = true }
 karch = { workspace = true }
+kcpu_id_map = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-ioport"] }

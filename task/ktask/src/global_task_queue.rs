@@ -7,6 +7,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
 
 use crate::WeakKtaskRef;
@@ -38,12 +39,12 @@ impl GlobalTaskRegistry {
     }
 
     #[inline]
-    fn try_insert(&self, cpu_id: usize, weak: WeakKtaskRef) {
+    fn try_insert(&self, cpu_id: LogicalCpuId, weak: WeakKtaskRef) {
         // Allocate once; if we fail to insert, free it immediately.
         let boxed = Box::new(weak);
         let ptr = Box::into_raw(boxed) as usize;
 
-        for slot in &self.slots[cpu_id] {
+        for slot in &self.slots[cpu_id.as_usize()] {
             if slot
                 .compare_exchange(0, ptr, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
@@ -52,15 +53,15 @@ impl GlobalTaskRegistry {
             }
         }
 
-        warn!("global task queue on cpu {} is full!", cpu_id);
+        warn!("global task queue on cpu {} is full!", cpu_id.as_usize());
 
         // registry full, drop record
         unsafe { drop(Box::from_raw(ptr as *mut WeakKtaskRef)) };
     }
 
     #[inline]
-    fn sweep_invalid(&self, cpu_id: usize) {
-        for slot in &self.slots[cpu_id] {
+    fn sweep_invalid(&self, cpu_id: LogicalCpuId) {
+        for slot in &self.slots[cpu_id.as_usize()] {
             let ptr = slot.load(Ordering::Acquire);
             if ptr == 0 {
                 continue;
@@ -80,8 +81,8 @@ impl GlobalTaskRegistry {
     }
 
     #[inline]
-    fn for_each(&self, cpu_id: usize, mut f: impl FnMut(&WeakKtaskRef)) {
-        for slot in &self.slots[cpu_id] {
+    fn for_each(&self, cpu_id: LogicalCpuId, mut f: impl FnMut(&WeakKtaskRef)) {
+        for slot in &self.slots[cpu_id.as_usize()] {
             let ptr = slot.load(Ordering::Acquire);
             if ptr == 0 {
                 continue;
@@ -103,12 +104,12 @@ pub(crate) fn record_task_for_watchdog(task: &crate::KtaskRef) {
 
 /// Sweep invalid weak refs from the current CPU's watchdog registry.
 #[inline]
-pub(crate) fn sweep_watchdog_tasks(cpu_id: usize) {
+pub(crate) fn sweep_watchdog_tasks(cpu_id: LogicalCpuId) {
     GLOBAL_TASK_REGISTRY.sweep_invalid(cpu_id);
 }
 
 /// Iterate the given CPU's watchdog registry.
 #[inline]
-pub(crate) fn for_each_watchdog_task(cpu_id: usize, f: impl FnMut(&WeakKtaskRef)) {
+pub(crate) fn for_each_watchdog_task(cpu_id: LogicalCpuId, f: impl FnMut(&WeakKtaskRef)) {
     GLOBAL_TASK_REGISTRY.for_each(cpu_id, f);
 }

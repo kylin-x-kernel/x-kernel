@@ -16,6 +16,7 @@ arm-el2 = ["karch/arm-el2"]
 
 [dependencies]
 backtrace = { workspace = true }
+kcpu_id_map = { workspace = true }
 karch = { workspace = true }
 linkme = { workspace = true }
 log = "0.4"

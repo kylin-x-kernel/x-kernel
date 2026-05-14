@@ -16,6 +16,7 @@ rtc = ["rtc_driver/pl031"]
 [dependencies]
 log = "0.4"
 kcpu = { workspace = true }
+kcpu_id_map = { workspace = true }
 kplat = { workspace = true }
 kernel_boot = { workspace = true }
 linkme = { workspace = true }

@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#[cfg(feature = "smp")]
+use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use khal::mem::PhysAddr;
 use kplat::sys::SysCtrl;
 
@@ -11,8 +13,9 @@ struct PowerImpl;
 #[impl_dev_interface]
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
-    fn boot_ap(cpu_id: usize, stack_top_paddr: usize) {
-        crate::mp::start_secondary_cpu(cpu_id, pa!(stack_top_paddr));
+    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
+        let raw_cpu_id = raw_cpu_id(logical_cpu_id);
+        crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr));
     }
 
     fn shutdown() -> ! {

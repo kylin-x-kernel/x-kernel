@@ -13,6 +13,7 @@ use core::{
 };
 
 use futures_util::{FutureExt, select_biased};
+use kcpu_id_map::LogicalCpuId;
 use kerrno::KError;
 use khal::time::{TimeValue, monotonic_time};
 
@@ -25,7 +26,7 @@ pub(crate) struct TimerKey {
 #[derive(Debug)]
 pub struct TimerHandle {
     key: TimerKey,
-    cpu_id: usize,
+    cpu_id: LogicalCpuId,
 }
 
 struct TimerRuntime {
@@ -127,7 +128,7 @@ pub fn register_timer(deadline: TimeValue, waker: Waker) -> Option<TimerHandle> 
 /// Cancels a previously registered timer. Safe to call from any CPU.
 pub fn cancel_timer(handle: &TimerHandle) {
     let _g = kspin::NoPreemptIrqSave::new();
-    unsafe { TIMER_RUNTIME.remote_ref_mut_raw(handle.cpu_id) }.cancel(&handle.key);
+    unsafe { TIMER_RUNTIME.remote_ref_mut_raw(handle.cpu_id.as_usize()) }.cancel(&handle.key);
 }
 
 /// Future returned by `sleep` and `sleep_until`.

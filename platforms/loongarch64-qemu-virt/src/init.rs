@@ -23,7 +23,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_cpu_id: usize) {
+    fn final_init_ap(_logical_cpu_id: kcpu_id_map::LogicalCpuId) {
         crate::time::init_percpu();
     }
 }

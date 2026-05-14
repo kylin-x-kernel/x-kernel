@@ -4,6 +4,8 @@
 
 use alloc::collections::VecDeque;
 
+use kcpu_id_map::LogicalCpuId;
+
 use crate::event::{Callback, IpiEvent};
 
 /// A per-CPU queue of IPI events.
@@ -30,7 +32,7 @@ impl IpiEventQueue {
     }
 
     /// Enqueues a new event into this queue.
-    pub fn push(&mut self, src_cpu_id: usize, callback: Callback) {
+    pub fn push(&mut self, src_cpu_id: LogicalCpuId, callback: Callback) {
         self.events.push_back(IpiEvent {
             src_cpu_id,
             callback,
@@ -41,7 +43,7 @@ impl IpiEventQueue {
     ///
     /// Returns `None` if the queue is empty.
     #[must_use]
-    pub fn pop_one(&mut self) -> Option<(usize, Callback)> {
+    pub fn pop_one(&mut self) -> Option<(LogicalCpuId, Callback)> {
         if let Some(e) = self.events.pop_front() {
             Some((e.src_cpu_id, e.callback))
         } else {
@@ -59,6 +61,7 @@ impl Default for IpiEventQueue {
 #[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_queue {
+    use kcpu_id_map::LogicalCpuId;
     use unittest::def_test;
 
     use super::IpiEventQueue;
@@ -73,21 +76,21 @@ pub mod tests_queue {
     #[def_test]
     fn test_queue_fifo() {
         let mut queue = IpiEventQueue::new();
-        queue.push(1, Callback::new(|| {}));
-        queue.push(2, Callback::new(|| {}));
+        queue.push(LogicalCpuId::new(1), Callback::new(|| {}));
+        queue.push(LogicalCpuId::new(2), Callback::new(|| {}));
         let (src1, _) = queue.pop_one().unwrap();
         let (src2, _) = queue.pop_one().unwrap();
-        assert_eq!(src1, 1);
-        assert_eq!(src2, 2);
+        assert_eq!(src1, LogicalCpuId::new(1));
+        assert_eq!(src2, LogicalCpuId::new(2));
     }
 
     #[def_test]
     fn test_queue_reuse() {
         let mut queue = IpiEventQueue::new();
-        queue.push(3, Callback::new(|| {}));
+        queue.push(LogicalCpuId::new(3), Callback::new(|| {}));
         let _ = queue.pop_one();
-        queue.push(4, Callback::new(|| {}));
+        queue.push(LogicalCpuId::new(4), Callback::new(|| {}));
         let (src, _) = queue.pop_one().unwrap();
-        assert_eq!(src, 4);
+        assert_eq!(src, LogicalCpuId::new(4));
     }
 }

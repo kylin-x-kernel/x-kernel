@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use khal::irq::TargetCpu;
 
 pub const IO_APIC_DOMAIN: khal::irq::IrqDomainId = khal::irq::IO_APIC_DOMAIN;
@@ -17,7 +18,11 @@ fn enable(irq: usize, enabled: bool) {
 fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     match target {
         TargetCpu::Self_ => x86_apic::send_ipi_self(interrupt_id),
-        TargetCpu::Specific(cpu_id) => x86_apic::send_ipi(interrupt_id, cpu_id),
+        TargetCpu::Specific(logical_cpu_id) => {
+            let logical_cpu_id = LogicalCpuId::new(logical_cpu_id);
+            let raw_cpu_id = raw_cpu_id(logical_cpu_id);
+            x86_apic::send_ipi_raw(interrupt_id, raw_cpu_id);
+        }
         TargetCpu::AllButSelf { me: _, total: _ } => x86_apic::send_ipi_all_but_self(interrupt_id),
     }
 }

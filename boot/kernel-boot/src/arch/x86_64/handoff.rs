@@ -15,6 +15,7 @@ use boot_info::{
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 
 use super::protocols::{MULTIBOOT_BOOTLOADER_MAGIC, SEV_CBIT_MASK};
+use crate::arch::RawCpuId;
 
 static mut X86_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::Unknown);
 
@@ -79,7 +80,7 @@ unsafe fn init_ap_boot_state() {
 }
 
 /// Read the initial APIC ID from CPUID leaf 1 (bits [31:24] of EBX).
-/// Used as the logical CPU ID, matching the convention of both x86 platforms.
+/// This is the raw x86 CPU ID used by the APIC topology.
 fn get_cpu_id() -> usize {
     let ebx_val: u32;
     unsafe {
@@ -104,7 +105,8 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         let kimage_voffset = handoff_arg;
         kaddr_layout::set_kimage_voffset(kimage_voffset);
         unsafe { init_ap_boot_state() };
-        let cpu_id = get_cpu_id();
+        let logical_cpu_id = crate::arch::logical_cpu_id(RawCpuId::new(get_cpu_id()))
+            .unwrap_or_else(|| panic!("missing logical cpu id mapping for boot cpu"));
         let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
         unsafe {
             X86_BOOT_INFO = BootInfo::new(BootProtocol::Multiboot2)
@@ -114,7 +116,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
                 .with_kernel_load_paddr(kernel_load_paddr)
                 .with_phys_virt_offset(PAGE_OFFSET)
                 .with_boot_console_ioport(kbuild_config::BOOT_CONSOLE_ADDR as u16)
-                .with_cpu_id(cpu_id)
+                .with_cpu_id(logical_cpu_id)
                 .with_cpu_count(kbuild_config::CPU_NUM);
         }
         let boot_info_ptr = core::ptr::addr_of!(X86_BOOT_INFO) as usize;
@@ -123,6 +125,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         let boot_info = unsafe { &*(mbi as *const BootInfo) };
         assert!(boot_info.is_valid(), "invalid boot info");
         kaddr_layout::set_kimage_voffset(KIMAGE_VADDR - boot_info.kernel_load_paddr);
+        crate::arch::init_boot_cpu_id_map(boot_info.rsdp_addr);
         unsafe { init_ap_boot_state() };
         call_kernel_entry!(PRIMARY_KERNEL_ENTRY, mbi)
     }
@@ -134,7 +137,14 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
 #[unsafe(no_mangle)]
 pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
-        call_kernel_entry!(SECOND_KERNEL_ENTRY, get_cpu_id())
+        let raw_cpu_id = RawCpuId::new(get_cpu_id());
+        let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+            panic!(
+                "missing logical cpu id mapping for raw cpu id {}",
+                raw_cpu_id.as_usize()
+            )
+        });
+        call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id)
     }
     loop {
         unsafe { core::arch::asm!("hlt", options(nostack, nomem)) }

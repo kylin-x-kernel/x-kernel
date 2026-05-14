@@ -20,6 +20,7 @@ use core::{
 };
 
 use futures_util::task::AtomicWaker;
+use kcpu_id_map::LogicalCpuId;
 use khal::context::TaskContext;
 #[cfg(feature = "tls")]
 use khal::tls::TlsArea;
@@ -255,8 +256,8 @@ impl TaskInner {
     ///
     /// Note: the task may not be running on the CPU, it just exists in the run queue.
     #[inline]
-    pub fn cpu_id(&self) -> u32 {
-        self.cpu_id.load(Ordering::Acquire)
+    pub fn cpu_id(&self) -> LogicalCpuId {
+        LogicalCpuId::new(self.cpu_id.load(Ordering::Acquire) as usize)
     }
 
     /// Gets the cpu affinity mask of the task.
@@ -552,8 +553,9 @@ impl TaskInner {
     /// Set the CPU ID where the task is running or will run.
     #[cfg(feature = "smp")]
     #[inline]
-    pub(crate) fn set_cpu_id(&self, cpu_id: u32) {
-        self.cpu_id.store(cpu_id, Ordering::Release);
+    pub(crate) fn set_cpu_id(&self, cpu_id: LogicalCpuId) {
+        self.cpu_id
+            .store(cpu_id.as_usize() as u32, Ordering::Release);
     }
 
     /// Returns whether the task is running on a CPU.

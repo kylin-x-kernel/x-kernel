@@ -9,6 +9,7 @@ use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::{BOOT_CONSOLE_ADDR, BOOT_STACK_SIZE, CPU_NUM};
 
 use super::{BOOT_DMW_BASE, BOOT_DMW_UNCACHED_BASE};
+use crate::arch::RawCpuId;
 
 const DIRECT_BOOT_LOAD_OFFSET: usize = 0x0020_0000;
 
@@ -142,8 +143,14 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
     )
 }
 
-pub unsafe extern "C" fn __secondary_switched(cpu_id: usize) -> ! {
-    call_kernel_entry!(SECOND_KERNEL_ENTRY, cpu_id);
+pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
+    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+        panic!(
+            "missing logical cpu id mapping for raw cpu id {:#x}",
+            raw_cpu_id.as_usize()
+        )
+    });
+    call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id);
     loop {
         core::hint::spin_loop();
     }
@@ -167,7 +174,7 @@ fn cmdline_len(cmdline_paddr: usize) -> usize {
 }
 
 pub unsafe extern "C" fn __primary_switched(
-    cpu_id: usize,
+    raw_cpu_id: RawCpuId,
     cmdline_paddr: usize,
     systemtable_paddr: usize,
     kimage_voffset: usize,
@@ -189,6 +196,14 @@ pub unsafe extern "C" fn __primary_switched(
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
     let cmdline_len = cmdline_len(cmdline_paddr);
     let (dtb_paddr, rsdp_paddr) = unsafe { super::mmu::boot_firmware_tables() };
+    crate::arch::init_boot_cpu_id_map(dtb_paddr);
+    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+        panic!(
+            "missing logical cpu id mapping for raw cpu id {:#x}",
+            raw_cpu_id.as_usize()
+        )
+    });
+    let cpu_id = logical_cpu_id.as_usize();
     let uefi_memmap_paddr = unsafe { super::mmu::boot_uefi_memmap_paddr() };
     let uefi_memmap_vaddr = if uefi_memmap_paddr == 0 {
         0
@@ -225,7 +240,7 @@ pub unsafe extern "C" fn __primary_switched(
                 0x1000,
                 kaddr_layout::p2v(BOOT_CONSOLE_ADDR),
             )
-            .with_cpu_id(cpu_id)
+            .with_cpu_id(logical_cpu_id)
             .with_cpu_count(CPU_NUM);
     }
 

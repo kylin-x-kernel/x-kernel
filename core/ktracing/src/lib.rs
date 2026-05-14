@@ -203,7 +203,7 @@ impl KernelTraceOps for Kops {
     }
 
     fn cpu_id() -> u32 {
-        khal::percpu::this_cpu_id() as u32
+        khal::percpu::this_cpu_id().as_usize() as u32
     }
 
     fn current_pid() -> u32 {

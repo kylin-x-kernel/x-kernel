@@ -23,9 +23,10 @@ use core::arch::naked_asm;
 
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
-use kbuild_config::BOOT_STACK_SIZE;
+use kbuild_config::{BOOT_STACK_SIZE, CPU_NUM};
 
 use super::{el, mmu, serial};
+use crate::arch::{LogicalCpuId, RawCpuId};
 
 // Linux ARM64 Boot Protocol image flags.
 const FLAG_LE: usize = 0b0;
@@ -42,6 +43,24 @@ pub(super) static mut SAVED_BOOT_ARGS: [u64; 4] = [0; 4];
 
 /// Unified boot info passed from the AArch64 boot entry into the kernel.
 static mut AARCH64_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::DeviceTree);
+
+#[unsafe(link_section = ".data")]
+static mut SECONDARY_BOOT_STACK_TOPS: [usize; CPU_NUM] = [0; CPU_NUM];
+
+pub fn set_secondary_boot_stack_top(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
+    let logical_cpu_index = logical_cpu_id.as_usize();
+    assert!(
+        logical_cpu_index < CPU_NUM,
+        "secondary cpu id out of range: {logical_cpu_index}"
+    );
+
+    unsafe {
+        // SAFETY: The logical CPU id has been range-checked above, and the
+        // boot CPU records each secondary stack top before releasing that CPU
+        // from firmware.
+        SECONDARY_BOOT_STACK_TOPS[logical_cpu_index] = stack_top_paddr;
+    }
+}
 
 /// Linux ARM64 Boot Protocol header followed by a branch to `primary_entry`.
 #[unsafe(naked)]
@@ -75,13 +94,13 @@ pub unsafe extern "C" fn _start() -> ! {
 #[unsafe(link_section = ".idmap.text")]
 pub unsafe extern "C" fn primary_entry() -> ! {
     naked_asm!(
-        // Capture CPU ID from MPIDR_EL1[23:0] (Aff2|Aff1|Aff0) and DTB
-        // pointer before any call clobbers them.  This simplified affinity
-        // masking follows the same convention used by other x-kernel platforms
-        // (e.g. aarch64-qemu-virt) and is sufficient for typical SMP
-        // configurations where Aff3 is zero.
+        // Capture the current CPU MPIDR affinity value and the DTB pointer
+        // before any call clobbers them. The logical runtime CPU id is derived
+        // later from the DT CPU order rather than assuming MPIDR == cpu_id.
         "mrs     x19, mpidr_el1",
-        "and     x19, x19, #0xffffff",   // CPU affinity Aff2|Aff1|Aff0
+        "and     x21, x19, #0xffffff",   // Aff2|Aff1|Aff0
+        "ubfx    x19, x19, #32, #8",     // Aff3
+        "orr     x19, x21, x19, lsl #32",
         "mov     x20, x0",               // save DTB physical address
 
         // Save firmware boot arguments (x0-x3) to SAVED_BOOT_ARGS via adrp.
@@ -114,7 +133,7 @@ pub unsafe extern "C" fn primary_entry() -> ! {
         "sub     x8, x9, x8",                  // x8 = KIMAGE_VADDR - PA(_start) = kimage_voffset
         "add     sp, sp, x8",
 
-        // Restore cpu_id, DTB, and pass kimage_voffset for __primary_switched.
+        // Restore raw CPU id, DTB, and pass kimage_voffset for __primary_switched.
         "mov     x0, x19",
         "mov     x1, x20",
         "mov     x2, x8",                      // x2 = kimage_voffset
@@ -162,19 +181,39 @@ pub unsafe extern "C" fn preserve_boot_args() {
 
 /// Secondary CPU boot entry.
 ///
-/// Called with `x0` = top of a pre-allocated stack.
+/// Called from firmware on a secondary CPU.
 ///
 /// # Safety
 ///
-/// Must only be called from secondary CPUs, with `x0` = top of a pre-allocated stack.
+/// Must only be called from secondary CPUs.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
 pub unsafe extern "C" fn _start_secondary() -> ! {
     naked_asm!(
         "mrs     x19, mpidr_el1",
-        "and     x19, x19, #0xffffff",   // CPU affinity Aff2|Aff1|Aff0 (see primary_entry)
-        "mov     sp, x0",                // stack passed in x0 (physical address)
+        "and     x20, x19, #0xffffff",   // Aff2|Aff1|Aff0
+        "ubfx    x19, x19, #32, #8",     // Aff3
+        "orr     x19, x20, x19, lsl #32",
+        // Look up the logical CPU id by scanning the raw-id map prepared by
+        // the boot CPU. The scan index is the logical CPU id.
+        "adrp    x22, {raw_cpu_ids_by_logical}",
+        "add     x22, x22, :lo12:{raw_cpu_ids_by_logical}",
+        "mov     x23, #0",
+        "0:",
+        "cmp     x23, {cpu_num}",
+        "b.hs    2f",
+        "ldr     x24, [x22, x23, lsl #3]",
+        "cmp     x24, x19",
+        "b.eq    1f",
+        "add     x23, x23, #1",
+        "b       0b",
+        "1:",
+        "adrp    x22, {secondary_boot_stack_tops}",
+        "add     x22, x22, :lo12:{secondary_boot_stack_tops}",
+        "ldr     x24, [x22, x23, lsl #3]",
+        "cbz     x24, 2f",
+        "mov     sp, x24",
         "bl      {switch_to_el1}",
         "bl      {enable_fp}",
         "bl      {init_mmu}",
@@ -188,20 +227,26 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         "ldr     x9, ={kimage_vaddr}",
         "sub     x8, x9, x8",           // x8 = kimage_voffset
         "add     sp, sp, x8",
-        "mov     x0, x19",               // cpu_id
+        "mov     x0, x23",               // logical cpu id
         "ldr     x8, ={entry_secondary}",
         "br      x8",
+        "2:",
+        "wfe",
+        "b       2b",
+        raw_cpu_ids_by_logical = sym crate::arch::CPU_ID_MAP,
+        secondary_boot_stack_tops = sym SECONDARY_BOOT_STACK_TOPS,
         switch_to_el1    = sym el::switch_to_el1,
         enable_fp        = sym enable_fp,
         init_mmu         = sym mmu::init_mmu,
+        cpu_num          = const CPU_NUM,
         kernel_start     = sym _start,
         kimage_vaddr     = const KIMAGE_VADDR,
         entry_secondary  = sym __secondary_switched,
     )
 }
 
-pub unsafe extern "C" fn __secondary_switched(cpu_id: usize) {
-    call_kernel_entry!(SECOND_KERNEL_ENTRY, cpu_id)
+pub unsafe extern "C" fn __secondary_switched(logical_cpu_id: LogicalCpuId) {
+    call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id)
 }
 
 /// Post-MMU entry point – runs at the kernel's high virtual address.
@@ -218,7 +263,7 @@ pub unsafe extern "C" fn __secondary_switched(cpu_id: usize) {
 /// Must only be called once, from [`primary_entry`], after the MMU has been
 /// enabled and the stack pointer adjusted to a virtual address.
 pub unsafe extern "C" fn __primary_switched(
-    cpu_id: usize,
+    cpu_mpidr: usize,
     dtb_paddr: usize,
     kimage_voffset: usize,
 ) {
@@ -239,6 +284,11 @@ pub unsafe extern "C" fn __primary_switched(
     // subsequent v2p()/p2v() calls on kernel-image symbols depend on this.
     kaddr_layout::set_kimage_voffset(kimage_voffset);
 
+    crate::arch::init_boot_cpu_id_map(dtb_paddr);
+
+    let logical_cpu_id = crate::arch::logical_cpu_id(RawCpuId::new(cpu_mpidr))
+        .unwrap_or_else(|| panic!("missing logical cpu id mapping for raw cpu id {cpu_mpidr:#x}"));
+
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
     unsafe {
         AARCH64_BOOT_INFO = BootInfo::new(BootProtocol::DeviceTree)
@@ -253,12 +303,13 @@ pub unsafe extern "C" fn __primary_switched(
                 0x1000,
                 serial::BOOT_UART_BOOT_VADDR,
             )
-            .with_cpu_id(cpu_id)
+            .with_cpu_id(logical_cpu_id)
             .with_cpu_count(kbuild_config::CPU_NUM);
     }
     crate::bootln!(
-        "entered primary switched cpu={} dtb={:#x} kimage_voffset={:#x}",
-        cpu_id,
+        "entered primary switched cpu={} mpidr={:#x} dtb={:#x} kimage_voffset={:#x}",
+        logical_cpu_id.as_usize(),
+        cpu_mpidr,
         dtb_paddr,
         kimage_voffset
     );

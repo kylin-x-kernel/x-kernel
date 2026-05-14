@@ -38,6 +38,7 @@ ksyscall = { path = "core/ksyscall" }
 # Internal: architecture and platform support
 karch = { path = "arch/karch" }
 kcpu = { path = "arch/kcpu" }
+kcpu_id_map = { path = "arch/kcpu_id_map" }
 khal = { path = "arch/khal" }
 kipi = { path = "arch/kipi" }
 kplat = { path = "platforms/kplat" }

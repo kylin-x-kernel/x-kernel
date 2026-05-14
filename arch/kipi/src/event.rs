@@ -4,6 +4,8 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
+use kcpu_id_map::LogicalCpuId;
+
 /// A callback function that executes once on the target CPU.
 ///
 /// # Safety
@@ -63,7 +65,7 @@ impl<T: Fn() + Send + Sync + 'static> From<T> for MulticastCallback {
 /// An IPI event sent from a source CPU to the target CPU.
 pub struct IpiEvent {
     /// The source CPU ID that sent this IPI event.
-    pub src_cpu_id: usize,
+    pub src_cpu_id: LogicalCpuId,
     /// The callback function to execute when this IPI event is dispatched.
     pub callback: Callback,
 }

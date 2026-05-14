@@ -24,6 +24,7 @@ kcpu = { workspace = true }
 karch = { workspace = true }
 kaddr_layout = { workspace = true }
 khal = { workspace = true }
+kcpu_id_map = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }

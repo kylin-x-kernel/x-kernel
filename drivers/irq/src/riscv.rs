@@ -4,6 +4,7 @@
 
 use core::{num::NonZeroU32, ptr::NonNull};
 
+use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use khal::irq::TargetCpu;
 use kplat::cpu::id as this_cpu_id;
 use kspin::SpinNoIrq;
@@ -59,8 +60,15 @@ pub fn init_primary() {
 }
 
 fn this_context() -> usize {
-    let hart_id = this_cpu_id();
+    let hart_id = raw_cpu_id(this_cpu_id()).as_usize();
     hart_id * 2 + 1
+}
+
+fn send_ipi_to_raw_hart(raw_hart_id: usize) {
+    let res = sbi_rt::send_ipi(HartMask::from_mask_base(1, raw_hart_id));
+    if res.is_err() {
+        warn!("notify_cpu failed: {res:?}");
+    }
 }
 
 pub fn init_current_cpu_context() {
@@ -165,27 +173,20 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
     fn notify_cpu(_interrupt_id: usize, target: TargetCpu) {
         match target {
             TargetCpu::Self_ => {
-                let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << this_cpu_id(), 0));
-                if res.is_err() {
-                    warn!("notify_cpu failed: {res:?}");
-                }
+                send_ipi_to_raw_hart(raw_cpu_id(this_cpu_id()).as_usize());
             }
-            TargetCpu::Specific(cpu_id) => {
-                let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << cpu_id, 0));
-                if res.is_err() {
-                    warn!("notify_cpu failed: {res:?}");
-                }
+            TargetCpu::Specific(logical_cpu_id) => {
+                send_ipi_to_raw_hart(raw_cpu_id(LogicalCpuId::new(logical_cpu_id)).as_usize());
             }
             TargetCpu::AllButSelf {
-                me: cpu_id,
+                me: local_logical_cpu_id,
                 total: cpu_num,
             } => {
-                for i in 0..cpu_num {
-                    if i != cpu_id {
-                        let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << i, 0));
-                        if res.is_err() {
-                            warn!("notify_cpu_all_others failed: {res:?}");
-                        }
+                for logical_cpu_id in 0..cpu_num {
+                    if logical_cpu_id != local_logical_cpu_id {
+                        send_ipi_to_raw_hart(
+                            raw_cpu_id(LogicalCpuId::new(logical_cpu_id)).as_usize(),
+                        );
                     }
                 }
             }

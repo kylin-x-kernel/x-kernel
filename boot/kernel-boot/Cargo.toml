@@ -17,6 +17,7 @@ fp-simd = []
 kbuild_config = { workspace = true }
 boot_info = { workspace = true }
 kaddr_layout = { workspace = true }
+kcpu_id_map = { workspace = true }
 linkme = { workspace = true }
 
 # Architecture-specific dependencies

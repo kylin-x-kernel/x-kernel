@@ -5,6 +5,8 @@
 //! PSCI interface helpers for power management and CPU control.
 #![allow(dead_code)]
 use core::sync::atomic::{AtomicBool, Ordering};
+
+use kcpu_id_map::RawCpuId;
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;
 const PSCI_0_2_64BIT: u32 = 0x40000000;
 const PSCI_0_2_FN_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + 1;
@@ -102,12 +104,20 @@ pub fn shutdown() -> ! {
         karch::stop_cpu();
     }
 }
-/// Power on a target CPU with the given entry point and argument.
-pub fn cpu_on(target_cpu: usize, entry_point: usize, arg: usize) {
-    info!("Starting CPU {target_cpu:x} ON ...");
-    let res = psci_call(PSCI_0_2_FN64_CPU_ON, target_cpu, entry_point, arg);
+/// Power on a target CPU identified by its raw MPIDR affinity value.
+pub fn cpu_on(target_raw_cpu_id: RawCpuId, entry_point: usize, arg: usize) {
+    info!("Starting CPU {:x} ON ...", target_raw_cpu_id.as_usize());
+    let res = psci_call(
+        PSCI_0_2_FN64_CPU_ON,
+        target_raw_cpu_id.as_usize(),
+        entry_point,
+        arg,
+    );
     if let Err(e) = res {
-        error!("failed to boot CPU {target_cpu:x} ({e:?})");
+        error!(
+            "failed to boot CPU {:x} ({e:?})",
+            target_raw_cpu_id.as_usize()
+        );
     }
 }
 /// Power off the current CPU via PSCI.

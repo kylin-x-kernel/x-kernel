@@ -1,0 +1,19 @@
+[package]
+name = "kcpu_id_map"
+description = "Early-boot logical/raw CPU ID mapping helpers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+kbuild_config = { workspace = true }
+kaddr_layout.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+acpi = { workspace = true }
+
+[target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64"))'.dependencies]
+of = { workspace = true }

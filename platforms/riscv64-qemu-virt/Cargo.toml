@@ -22,6 +22,7 @@ console_driver = { workspace = true, features = ["ns16550-mmio"] }
 kernel_boot = { workspace = true }
 percpu = { workspace = true }
 kcpu = { workspace = true }
+kcpu_id_map = { workspace = true }
 karch = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }

@@ -79,7 +79,7 @@ impl klogger::LoggerAdapter for LogIfImpl {
     fn cpu_id() -> Option<usize> {
         #[cfg(feature = "smp")]
         {
-            is_init_ok().then_some(khal::percpu::this_cpu_id())
+            is_init_ok().then(|| khal::percpu::this_cpu_id().as_usize())
         }
 
         #[cfg(not(feature = "smp"))]
@@ -172,7 +172,10 @@ pub fn rust_main(arg: usize) -> ! {
     let boot_info = khal::boot_info(arg);
     let cpu_id = boot_info.cpu_id;
 
-    kernel_boot::bootln!("kruntime primary start cpu={} boot_info={arg:#x}", cpu_id);
+    kernel_boot::bootln!(
+        "kruntime primary start cpu={} boot_info={arg:#x}",
+        cpu_id.as_usize()
+    );
     khal::firmware::init(boot_info);
     khal::percpu::init_primary(cpu_id);
     kcpu::init_trap();
@@ -219,7 +222,10 @@ pub fn rust_main(arg: usize) -> ! {
     klogger::init_klogger();
     klogger::set_log_level(configured_log_level()); // no effect if set `log-level-*` features
     info!("Logging is enabled.");
-    info!("Primary CPU {cpu_id} started, boot_info = {arg:#x}.");
+    info!(
+        "Primary CPU {} started, boot_info = {arg:#x}.",
+        cpu_id.as_usize()
+    );
     {
         use core::ops::Range;
 
@@ -291,7 +297,7 @@ pub fn rust_main(arg: usize) -> ! {
     finish_allocator_init();
     log_memory_regions();
 
-    info!("Primary CPU {cpu_id} init OK.");
+    info!("Primary CPU {} init OK.", cpu_id.as_usize());
     INITED_CPUS.fetch_add(1, Ordering::Release);
 
     while !is_init_ok() {
@@ -477,7 +483,7 @@ fn init_interrupt() {
     khal::irq::register(kbuild_config::PMU_IRQ, || {
         debug!(
             "PMU interrupt received on cpu {}",
-            khal::percpu::this_cpu_id()
+            khal::percpu::this_cpu_id().as_usize()
         );
         khal::pmu::dispatch_irq_overflows();
     });

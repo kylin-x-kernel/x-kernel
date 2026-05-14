@@ -154,10 +154,10 @@ pub fn find_mcfg_from_init() -> Option<McfgAllocation> {
 
 pub fn find_madt() -> Option<(MadtInfo, MadtEntryIter)> {
     let (table_addr, header) = find_table(*b"APIC")?;
-    if header.length < (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32 {
-        kernel_boot::bootln!("ACPI: MADT too short at {:#x}", table_addr);
-        return None;
-    }
+    assert!(
+        header.length >= (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32,
+        "ACPI MADT is too short"
+    );
     let madt_addr = table_addr + mem::size_of::<AcpiSdtHeader>();
     let madt = ptr_from_addr::<MadtHeader>(madt_addr);
     let info = MadtInfo {
@@ -176,15 +176,16 @@ pub fn find_madt() -> Option<(MadtInfo, MadtEntryIter)> {
 }
 
 pub fn find_madt_from_init() -> Option<(MadtInfo, MadtEntryIter)> {
-    find_madt_from_rsdp(rsdp_addr()?)
+    let rsdp_addr = rsdp_addr().unwrap_or_else(|| panic!("ACPI RSDP is not initialized"));
+    find_madt_from_rsdp(rsdp_addr)
 }
 
 pub fn find_madt_from_rsdp(rsdp_addr: usize) -> Option<(MadtInfo, MadtEntryIter)> {
     let (table_addr, header) = find_table_from_rsdp(rsdp_addr, *b"APIC")?;
-    if header.length < (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32 {
-        kernel_boot::bootln!("ACPI: MADT too short at {:#x}", table_addr);
-        return None;
-    }
+    assert!(
+        header.length >= (mem::size_of::<AcpiSdtHeader>() + mem::size_of::<MadtHeader>()) as u32,
+        "ACPI MADT is too short"
+    );
     let madt_addr = table_addr + mem::size_of::<AcpiSdtHeader>();
     let madt = ptr_from_addr::<MadtHeader>(madt_addr);
     let info = MadtInfo {
@@ -244,20 +245,7 @@ pub fn find_pci_host_mem_window_from_init() -> Option<PciHostMemWindow> {
     let header = validate_sdt_header(dsdt_addr, Some(*b"DSDT"))?;
     let body = sdt_bytes(dsdt_addr, header.length);
     let body = body.get(mem::size_of::<AcpiSdtHeader>()..)?;
-    let window = scan_dsdt_for_pci_mem_window(body);
-    if let Some(w) = window {
-        kernel_boot::bootln!(
-            "ACPI: PCI host mem window from _CRS: base={:#x} size={:#x} prefetchable={} \
-             is_64bit={}",
-            w.base,
-            w.size,
-            w.prefetchable,
-            w.is_64bit
-        );
-    } else {
-        kernel_boot::bootln!("ACPI: no PCI host memory window found in DSDT");
-    }
-    window
+    scan_dsdt_for_pci_mem_window(body)
 }
 
 fn find_dsdt_address(rsdp: usize) -> Option<usize> {
@@ -381,7 +369,8 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 pub fn find_table(signature: [u8; 4]) -> Option<(usize, AcpiTableHeader)> {
-    find_table_from_rsdp(rsdp_addr()?, signature)
+    let rsdp_addr = rsdp_addr().unwrap_or_else(|| panic!("ACPI RSDP is not initialized"));
+    find_table_from_rsdp(rsdp_addr, signature)
 }
 
 pub fn find_table_from_rsdp(
@@ -394,8 +383,12 @@ pub fn find_table_from_rsdp(
     } else if rsdp.rsdt_addr != 0 {
         find_table_rsdt(rsdp.rsdt_addr as usize, signature)
     } else {
-        None
-    }?;
+        panic!("ACPI RSDP does not reference XSDT or RSDT")
+    }
+    .unwrap_or_else(|| {
+        let signature = core::str::from_utf8(&signature).unwrap_or("????");
+        panic!("required ACPI table {signature} is missing")
+    });
     Some((table_addr, read_sdt_header(table_addr).into()))
 }
 
@@ -404,12 +397,6 @@ pub fn find_mcfg(rsdp_addr: usize) -> Option<McfgAllocation> {
     let rsdp_revision = rsdp.revision;
     let rsdt_addr = rsdp.rsdt_addr;
     let xsdt_addr = rsdp.xsdt_addr;
-    kernel_boot::bootln!(
-        "ACPI: RSDP revision={} rsdt={:#x} xsdt={:#x}",
-        rsdp_revision,
-        rsdt_addr,
-        xsdt_addr
-    );
 
     let sdt = if rsdp_revision >= 2 && xsdt_addr != 0 {
         find_table_xsdt(xsdt_addr as usize, *b"MCFG")
@@ -424,28 +411,23 @@ pub fn find_mcfg(rsdp_addr: usize) -> Option<McfgAllocation> {
 
 fn validate_rsdp(rsdp_addr: usize) -> Option<&'static Rsdp> {
     if rsdp_addr == 0 {
-        kernel_boot::bootln!("ACPI: missing RSDP address");
-        return None;
+        panic!("ACPI RSDP address is zero");
     }
 
     let rsdp = ptr_from_addr::<Rsdp>(rsdp_addr);
     if rsdp.signature != *b"RSD PTR " {
-        kernel_boot::bootln!("ACPI: bad RSDP signature at {:#x}", rsdp_addr);
-        return None;
+        panic!("ACPI RSDP signature is invalid");
     }
     if !checksum_ok(bytes_from_addr(rsdp_addr, 20)) {
-        kernel_boot::bootln!("ACPI: bad RSDP v1 checksum at {:#x}", rsdp_addr);
-        return None;
+        panic!("ACPI RSDP checksum is invalid");
     }
 
     if rsdp.revision >= 2 {
         if rsdp.length < mem::size_of::<Rsdp>() as u32 {
-            kernel_boot::bootln!("ACPI: short RSDP v2 length at {:#x}", rsdp_addr);
-            return None;
+            panic!("ACPI RSDP length is too short");
         }
         if !checksum_ok(bytes_from_addr(rsdp_addr, rsdp.length as usize)) {
-            kernel_boot::bootln!("ACPI: bad RSDP v2 checksum at {:#x}", rsdp_addr);
-            return None;
+            panic!("ACPI RSDP extended checksum is invalid");
         }
     }
 
@@ -462,16 +444,13 @@ fn find_table_xsdt(xsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
             entries_len,
         )
     };
-    kernel_boot::bootln!("ACPI: XSDT at {:#x} entries={}", xsdt_addr, entries_len);
-    let sig = core::str::from_utf8(&signature).unwrap_or("????");
     for entry in entries.iter().copied() {
         if has_signature(entry as usize, signature) {
-            kernel_boot::bootln!("ACPI: found {} at {:#x}", sig, entry);
             return Some(entry as usize);
         }
     }
-    kernel_boot::bootln!("ACPI: {} not present in XSDT", sig);
-    None
+    let signature = core::str::from_utf8(&signature).unwrap_or("????");
+    panic!("required ACPI table {signature} is missing from XSDT")
 }
 
 fn find_table_rsdt(rsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
@@ -484,16 +463,13 @@ fn find_table_rsdt(rsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
             entries_len,
         )
     };
-    kernel_boot::bootln!("ACPI: RSDT at {:#x} entries={}", rsdt_addr, entries_len);
-    let sig = core::str::from_utf8(&signature).unwrap_or("????");
     for entry in entries.iter().copied() {
         if has_signature(entry as usize, signature) {
-            kernel_boot::bootln!("ACPI: found {} at {:#x}", sig, entry);
             return Some(entry as usize);
         }
     }
-    kernel_boot::bootln!("ACPI: {} not present in RSDT", sig);
-    None
+    let signature = core::str::from_utf8(&signature).unwrap_or("????");
+    panic!("required ACPI table {signature} is missing from RSDT")
 }
 
 fn has_signature(table_addr: usize, signature: [u8; 4]) -> bool {
@@ -511,21 +487,14 @@ impl Iterator for MadtEntryIter {
         while self.current + mem::size_of::<MadtEntryHeader>() <= self.end {
             let header = ptr_from_addr::<MadtEntryHeader>(self.current);
             if header.length < mem::size_of::<MadtEntryHeader>() as u8 {
-                kernel_boot::bootln!("ACPI: invalid MADT entry length {}", header.length);
-                return None;
+                panic!("ACPI MADT entry is too short");
             }
 
             let entry_len = header.length as usize;
             let entry_addr = self.current;
             let entry_end = match entry_addr.checked_add(entry_len) {
                 Some(end) if end <= self.end => end,
-                _ => {
-                    kernel_boot::bootln!(
-                        "ACPI: MADT entry at {:#x} exceeds table bounds",
-                        entry_addr
-                    );
-                    return None;
-                }
+                _ => panic!("ACPI MADT entry exceeds table bounds"),
             };
 
             self.current = entry_end;
@@ -559,7 +528,6 @@ fn parse_mcfg(mcfg_addr: usize) -> Option<McfgAllocation> {
     let header = validate_sdt_header(mcfg_addr, Some(*b"MCFG"))?;
     let entries_base = mem::size_of::<AcpiSdtHeader>() + 8;
     if header.length < entries_base as u32 {
-        kernel_boot::bootln!("ACPI: MCFG too short at {:#x}", mcfg_addr);
         return None;
     }
 
@@ -576,20 +544,9 @@ fn parse_mcfg(mcfg_addr: usize) -> Option<McfgAllocation> {
             start_bus: entry.start_bus,
             end_bus: entry.end_bus,
         };
-        kernel_boot::bootln!(
-            "ACPI: MCFG entry base={:#x} seg={} buses={:#x}..={:#x}",
-            alloc.base_address,
-            alloc.pci_segment,
-            alloc.start_bus,
-            alloc.end_bus
-        );
         if alloc.pci_segment == 0 && selected.is_none() {
             selected = Some(alloc);
         }
-    }
-
-    if selected.is_none() {
-        kernel_boot::bootln!("ACPI: no usable MCFG segment 0 entry found");
     }
     selected
 }
@@ -604,18 +561,16 @@ fn validate_sdt_header(
 ) -> Option<AcpiSdtHeader> {
     let header = read_sdt_header(table_addr);
     if header.length < mem::size_of::<AcpiSdtHeader>() as u32 {
-        kernel_boot::bootln!("ACPI: short SDT length at {:#x}", table_addr);
-        return None;
+        panic!("ACPI SDT header is too short");
     }
     if let Some(expected) = expected_signature
         && header.signature != expected
     {
-        kernel_boot::bootln!("ACPI: bad SDT signature at {:#x}", table_addr);
-        return None;
+        let expected = core::str::from_utf8(&expected).unwrap_or("????");
+        panic!("ACPI SDT signature does not match expected {expected}");
     }
     if !checksum_ok(sdt_bytes(table_addr, header.length)) {
-        kernel_boot::bootln!("ACPI: bad SDT checksum at {:#x}", table_addr);
-        return None;
+        panic!("ACPI SDT checksum is invalid");
     }
     Some(header)
 }

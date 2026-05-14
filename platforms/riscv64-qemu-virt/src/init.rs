@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kcpu_id_map::LogicalCpuId;
 use kplat::boot::{BootHandler, BootInfo};
 
 struct BootHandlerImpl;
@@ -33,7 +34,7 @@ impl BootHandler for BootHandlerImpl {
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_cpu_id: usize) {
+    fn final_init_ap(_logical_cpu_id: LogicalCpuId) {
         irq_driver::riscv::init_percpu();
         timer_driver::riscv_sbi::init_percpu();
     }

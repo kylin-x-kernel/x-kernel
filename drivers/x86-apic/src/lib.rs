@@ -12,6 +12,7 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
+use kcpu_id_map::RawCpuId;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, pa};
@@ -173,8 +174,8 @@ pub fn send_ipi_self(interrupt_id: usize) {
     }
 }
 
-pub fn send_ipi(interrupt_id: usize, cpu_id: usize) {
-    let apic_id = raw_apic_id(cpu_id as u8);
+pub fn send_ipi_raw(interrupt_id: usize, target_raw_apic_id: RawCpuId) {
+    let apic_id = raw_apic_id(target_raw_apic_id.as_usize() as u8);
     unsafe {
         local_apic().send_ipi(interrupt_id as _, apic_id as _);
     };

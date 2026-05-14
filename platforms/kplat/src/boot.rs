@@ -5,6 +5,7 @@
 //! Platform boot-stage interface definitions.
 
 pub use boot_info::BootInfo;
+use kcpu_id_map::LogicalCpuId;
 use kplat_macros::device_interface;
 
 #[device_interface]
@@ -23,5 +24,5 @@ pub trait BootHandler {
 
     #[cfg(feature = "smp")]
     /// Final initialization on an application processor (SMP only).
-    fn final_init_ap(id: usize);
+    fn final_init_ap(logical_cpu_id: LogicalCpuId);
 }

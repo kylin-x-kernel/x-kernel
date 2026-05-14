@@ -11,6 +11,8 @@ use alloc::{
 use core::sync::atomic::AtomicUsize;
 
 #[cfg(feature = "watchdog")]
+use kcpu_id_map::LogicalCpuId;
+#[cfg(feature = "watchdog")]
 use khal::context::TrapFrame;
 use kspin::NoPreemptIrqSave;
 
@@ -194,7 +196,7 @@ pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
         // After setting the affinity, we need to check if current cpu matches
         // the affinity. If not, we need to migrate the task to the correct CPU.
         #[cfg(feature = "smp")]
-        if !cpumask.get(khal::percpu::this_cpu_id()) {
+        if !cpumask.get(khal::percpu::this_cpu_id().as_usize()) {
             const MIGRATION_TASK_STACK_SIZE: usize = 4096;
             // Spawn a new migration task for migrating.
             let migration_task = TaskInner::new(
@@ -207,7 +209,10 @@ pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
             // Migrate the current task to the correct CPU using the migration task.
             current_run_queue::<NoPreemptIrqSave>().migrate_current(migration_task);
 
-            assert!(cpumask.get(khal::percpu::this_cpu_id()), "Migration failed");
+            assert!(
+                cpumask.get(khal::percpu::this_cpu_id().as_usize()),
+                "Migration failed"
+            );
         }
         true
     }
@@ -273,7 +278,7 @@ fn dump_println(force: bool, args: core::fmt::Arguments<'_>) {
 }
 
 #[cfg(all(feature = "watchdog", target_arch = "aarch64"))]
-pub fn dump_cpu_task_backtrace(cpu_id: usize, force: bool) {
+pub fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool) {
     crate::global_task_queue::for_each_watchdog_task(cpu_id, |weaktask| {
         if let Some(task) = weaktask.upgrade()
             && !task.inner().is_running()
@@ -286,31 +291,35 @@ pub fn dump_cpu_task_backtrace(cpu_id: usize, force: bool) {
             );
             dump_println(
                 force,
-                format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id, task.inner()),
+                format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id.as_usize(), task.inner()),
             );
         }
     });
 }
 
 #[cfg(all(feature = "watchdog", not(target_arch = "aarch64")))]
-pub fn dump_cpu_task_backtrace(_cpu_id: usize, _force: bool) {
+pub fn dump_cpu_task_backtrace(_cpu_id: LogicalCpuId, _force: bool) {
     panic!("dump_cpu_task_backtrace: unimplemented arch");
 }
 
 #[cfg(all(feature = "watchdog", target_arch = "aarch64"))]
 #[inline(always)]
-pub fn dump_cur_task_backtrace(cpu_id: usize, tf: &TrapFrame, force: bool) {
+pub fn dump_cur_task_backtrace(cpu_id: LogicalCpuId, tf: &TrapFrame, force: bool) {
     let bt =
         backtrace::Backtrace::capture_trap(tf.x[29] as usize, tf.x[30] as usize, tf.x[30] as usize);
     dump_println(
         force,
-        format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id, current().inner()),
+        format_args!(
+            "cpu_id: {}, {:?}\n{bt}",
+            cpu_id.as_usize(),
+            current().inner()
+        ),
     );
 }
 
 #[cfg(all(feature = "watchdog", not(target_arch = "aarch64")))]
 #[inline(always)]
-pub fn dump_cur_task_backtrace(_cpu_id: usize, _tf: &TrapFrame, _force: bool) {
+pub fn dump_cur_task_backtrace(_cpu_id: LogicalCpuId, _tf: &TrapFrame, _force: bool) {
     panic!("dump_cur_task_backtrace: unimplemented arch");
 }
 

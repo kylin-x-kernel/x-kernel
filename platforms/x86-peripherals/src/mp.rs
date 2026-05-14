@@ -6,6 +6,7 @@
 
 use core::time::Duration;
 
+use kcpu_id_map::RawCpuId;
 use khal::{
     mem::{PAGE_SIZE_4K, PhysAddr, p2v, pa, v2p},
     time::spin_wait,
@@ -65,12 +66,12 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
         .copy_from_slice(&(ap_entry32_paddr as u64).to_le_bytes());
 }
 
-/// Starts a secondary CPU with the given APIC ID and stack.
-pub fn start_secondary_cpu(apic_id: usize, stack_top: PhysAddr) {
+/// Starts a secondary CPU with the given raw APIC ID and stack.
+pub fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) {
     unsafe { setup_startup_page(stack_top) };
 
     let start_page_idx = (ap_trampoline_page_paddr() / PAGE_SIZE_4K) as u8;
-    let apic_id = apic::raw_apic_id(apic_id as u8);
+    let apic_id = apic::raw_apic_id(raw_apic_id.as_usize() as u8);
     let lapic = apic::local_apic();
 
     unsafe { lapic.send_init_ipi(apic_id) };

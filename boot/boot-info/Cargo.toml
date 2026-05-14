@@ -10,3 +10,6 @@ repository.workspace = true
 documentation.workspace = true
 keywords = ["boot", "bootloader", "protocol"]
 categories = ["no-std", "os"]
+
+[dependencies]
+kcpu_id_map = { workspace = true }
