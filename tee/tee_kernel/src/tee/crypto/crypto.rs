@@ -603,10 +603,36 @@ pub(crate) fn crypto_cipher_update(
     output: &mut [u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
+    let algo = cs_guard.algo;
     if let CrypCtx::CipherCtx(cipher) = &mut cs_guard.ctx {
-        cipher
-            .update(input, output)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        // mbedtls ECB 底层单次只处理一个分组；mbedtls-smx 的 `Cipher::update` 不会自动拆块。
+        // 在此按分组循环，使上层可一次传入任意整数倍分组长度的数据。
+        if matches!(
+            algo,
+            TEE_ALG_AES_ECB_NOPAD
+                | TEE_ALG_DES_ECB_NOPAD
+                | TEE_ALG_DES3_ECB_NOPAD
+                | TEE_ALG_SM4_ECB_NOPAD
+        ) {
+            let bs = cipher.block_size();
+            if !input.len().is_multiple_of(bs) {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
+            if output.len() < input.len() {
+                return Err(TEE_ERROR_SHORT_BUFFER);
+            }
+            let mut written = 0usize;
+            for (inch, outch) in input.chunks(bs).zip(output.chunks_mut(bs)) {
+                written += cipher
+                    .update(inch, outch)
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            }
+            Ok(written)
+        } else {
+            cipher
+                .update(input, output)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }

@@ -2358,14 +2358,25 @@ fn tee_svc_cryp_obj_populate_type(
 
         let mut attr_ref = obj.attr[0].get_attr_by_id(attr.attributeID as c_ulong)?;
         if attr.attributeID & TEE_ATTR_FLAG_VALUE != 0 {
-            // change attrs.content.value to &[]
-            let value: &[u8] = unsafe {
-                core::slice::from_raw_parts(
-                    (&attr.content.value as *const tee_raw_sys::Value) as *const u8,
-                    core::mem::size_of::<tee_raw_sys::Value>(),
-                )
-            };
-            attr_ref.update_from_user(value)?;
+            // `attrs` 已在 copy_in_attrs 中拷入内核；此处不能再走按「用户 VA」读的
+            // update_from_user/copy_from_user（unittest 与真实路径下内核指针会读失败）。
+            // GP Value 属性：单域标量（如 TEE_ATTR_ECC_CURVE）使用 value.a。
+            match &mut attr_ref {
+                CryptoAttrRef::U32(v) => {
+                    // SAFETY: 当前分支由 TEE_ATTR_FLAG_VALUE 保证联合体读取 value 成员有效。
+                    **v = unsafe { attr.content.value.a };
+                }
+                _ => {
+                    // SAFETY: 当前分支由 TEE_ATTR_FLAG_VALUE 保证联合体读取 value 成员有效。
+                    let value: &[u8] = unsafe {
+                        core::slice::from_raw_parts(
+                            (&attr.content.value as *const tee_raw_sys::Value) as *const u8,
+                            core::mem::size_of::<tee_raw_sys::Value>(),
+                        )
+                    };
+                    attr_ref.update_from_user(value)?;
+                }
+            }
         } else {
             // change attrs.content.ref to &[]
             let buffer: &[u8] = unsafe {
@@ -2795,7 +2806,12 @@ fn long2byte(value: u64, ch: &mut [u8]) -> u32 {
 }
 
 #[cfg(unittest)]
-fn tee_init_ref_attribute(attr: &mut utee_attribute, attributeID: u32, buffer: &[u8], length: u32) {
+pub(crate) fn tee_init_ref_attribute(
+    attr: &mut utee_attribute,
+    attributeID: u32,
+    buffer: &[u8],
+    length: u32,
+) {
     if (attributeID & TEE_ATTR_FLAG_VALUE) != 0 {
         panic!("attributeID is value attribute");
     }
