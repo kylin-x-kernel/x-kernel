@@ -7,6 +7,7 @@
 #![cfg(unittest)]
 
 use alloc::format;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kspin::SpinNoIrq;
 use unittest::{assert, assert_eq, def_test};
@@ -21,6 +22,14 @@ fn new_thread_manager() -> alloc::sync::Arc<ThreadSignalManager> {
     let actions = alloc::sync::Arc::new(SpinNoIrq::new(SignalActions::default()));
     let proc = alloc::sync::Arc::new(ProcessSignalManager::new(actions, 0));
     ThreadSignalManager::new(1, proc)
+}
+
+static DEQUEUED_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LAST_DEQUEUED_SIGNAL: AtomicUsize = AtomicUsize::new(0);
+
+fn record_dequeued_signal(sig: &SignalInfo) {
+    LAST_DEQUEUED_SIGNAL.store(sig.signo() as usize, Ordering::Relaxed);
+    DEQUEUED_SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 #[def_test]
@@ -180,11 +189,48 @@ fn test_signo_default_action_full() {
         (Signo::SIGIO, Terminate),
         (Signo::SIGPWR, Terminate),
         (Signo::SIGSYS, CoreDump),
-        (Signo::SIGRTMIN, Ignore),
+        (Signo::SIGRTMIN, Terminate),
     ];
     for &(sig, action) in expected {
         assert_eq!(sig.default_action(), action);
     }
+}
+
+#[def_test]
+fn test_signal_dequeue_observer_per_signo() {
+    crate::register_signal_observer(Signo::SIGUSR1, record_dequeued_signal);
+    crate::register_signal_observer(Signo::SIGUSR2, record_dequeued_signal);
+    DEQUEUED_SIGNAL_COUNT.store(0, Ordering::Relaxed);
+    LAST_DEQUEUED_SIGNAL.store(0, Ordering::Relaxed);
+
+    let thread = new_thread_manager();
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR1);
+    mask.add(Signo::SIGUSR2);
+    mask.add(Signo::SIGINT);
+
+    // SIGUSR1 — registered, observer fires.
+    assert!(thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
+    let signal = thread.dequeue_signal(&mask).unwrap();
+    assert_eq!(signal.signo(), Signo::SIGUSR1);
+    assert_eq!(DEQUEUED_SIGNAL_COUNT.load(Ordering::Relaxed), 1);
+
+    // SIGUSR2 via process — registered, observer fires.
+    assert_eq!(
+        thread
+            .process()
+            .send_signal(SignalInfo::new_kernel(Signo::SIGUSR2)),
+        Some(1)
+    );
+    let signal = thread.dequeue_signal(&mask).unwrap();
+    assert_eq!(signal.signo(), Signo::SIGUSR2);
+    assert_eq!(DEQUEUED_SIGNAL_COUNT.load(Ordering::Relaxed), 2);
+
+    // SIGINT — NOT registered, observer must NOT fire.
+    assert!(thread.send_signal(SignalInfo::new_kernel(Signo::SIGINT)));
+    let signal = thread.dequeue_signal(&mask).unwrap();
+    assert_eq!(signal.signo(), Signo::SIGINT);
+    assert_eq!(DEQUEUED_SIGNAL_COUNT.load(Ordering::Relaxed), 2);
 }
 
 #[def_test]

@@ -17,7 +17,8 @@ use osvm::VirtMutPtr;
 use super::ProcessSignalManager;
 use crate::{
     DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
-    SignalInfo, SignalOSAction, SignalSet, SignalStack, Signo, arch::UContext,
+    SignalInfo, SignalOSAction, SignalSet, SignalStack, Signo, api::notify_signal_dequeued,
+    arch::UContext,
 };
 
 struct SignalFrame {
@@ -60,10 +61,14 @@ impl ThreadSignalManager {
     /// Dequeues a signal from the thread's pending signals.
     #[must_use]
     pub fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
-        self.pending
-            .lock()
-            .dequeue_signal(mask)
-            .or_else(|| self.proc.dequeue_signal(mask))
+        let signal = self.pending.lock().dequeue_signal(mask);
+        if let Some(sig) = signal {
+            notify_signal_dequeued(&sig);
+            return Some(sig);
+        }
+
+        self.possibly_has_signal.store(false, Ordering::Release);
+        self.proc.dequeue_signal(mask)
     }
 
     /// Returns the owning process signal manager.
@@ -160,13 +165,7 @@ impl ThreadSignalManager {
         drop(blocked);
 
         loop {
-            let sig = match self.pending.lock().dequeue_signal(&mask) {
-                Some(sig) => Some(sig),
-                None => {
-                    self.possibly_has_signal.store(false, Ordering::Release);
-                    self.proc.dequeue_signal(&mask)
-                }
-            }?;
+            let sig = self.dequeue_signal(&mask)?;
             let action = self.proc.actions.lock()[sig.signo()].clone();
 
             if let Some(os_action) = self.dispatch_irq_signal(uctx, restore_blocked, &sig, &action)

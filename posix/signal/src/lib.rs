@@ -7,12 +7,16 @@
 //! - Signal mask manipulation (`rt_sigprocmask`, `rt_sigaction`, `rt_sigpending`)
 //! - Signal delivery (`kill`, `tkill`, `tgkill`, realtime queueing)
 //! - Interval timers (`getitimer`, `setitimer`)
+//! - Signal file descriptors (`signalfd4`)
 //! - Signal wait/return flow (`rt_sigreturn`, `rt_sigtimedwait`, `rt_sigsuspend`)
 //! - Alternate signal stack (`sigaltstack`)
 
 #![no_std]
 
+extern crate alloc;
+
 mod itimer;
+mod signalfd;
 
 #[macro_use]
 extern crate klogger;
@@ -38,6 +42,7 @@ use linux_raw_sys::general::{
 use posix_types::{
     TimeValueLike, UserConstPtr, UserPtr, k_sigaction, k_sigaltstack, k_siginfo, k_sigset,
 };
+pub use signalfd::sys_signalfd4;
 
 /// Validates that the signal set size matches the expected size.
 pub fn check_sigset_size(size: usize) -> KResult<()> {

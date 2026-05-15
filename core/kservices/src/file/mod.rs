@@ -9,7 +9,6 @@ mod fs;
 mod net;
 mod pidfd;
 mod pipe;
-pub mod signalfd;
 pub mod timerfd;
 
 use alloc::sync::Arc;

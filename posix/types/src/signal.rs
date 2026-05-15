@@ -6,7 +6,9 @@
 
 use core::{ffi::c_ulong, mem};
 
-use linux_raw_sys::general::{__kernel_sighandler_t, __sigrestore_t, kernel_sigset_t, siginfo_t};
+use linux_raw_sys::general::{
+    __kernel_sighandler_t, __sigrestore_t, kernel_sigset_t, sigevent, siginfo_t, sigval_t,
+};
 
 use crate::{UserRead, UserWrite};
 
@@ -55,6 +57,20 @@ pub struct k_siginfo(pub siginfo_t);
 
 unsafe impl UserRead for k_siginfo {}
 unsafe impl UserWrite for k_siginfo {}
+
+/// A raw `sigval_t` carrier used at the syscall boundary.
+#[allow(non_camel_case_types)]
+pub type k_sigval = sigval_t;
+
+unsafe impl UserRead for k_sigval {}
+unsafe impl UserWrite for k_sigval {}
+
+/// A raw `sigevent` carrier used at the syscall boundary.
+#[allow(non_camel_case_types)]
+pub type k_sigevent = sigevent;
+
+unsafe impl UserRead for k_sigevent {}
+unsafe impl UserWrite for k_sigevent {}
 
 /// A raw `sigaltstack` carrier used at the syscall boundary.
 #[derive(Clone, Copy)]

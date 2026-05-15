@@ -10,9 +10,8 @@
 
 mod event;
 mod pidfd;
-mod signalfd;
 mod timerfd;
 
 pub use posix_fs::*;
 
-pub use self::{event::*, pidfd::*, signalfd::*, timerfd::*};
+pub use self::{event::*, pidfd::*, timerfd::*};

@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
 kerrno = { workspace = true }
 khal = { workspace = true }
 kio = { workspace = true }

@@ -6,8 +6,8 @@
 use core::{fmt, mem};
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
-use linux_raw_sys::general::{SI_KERNEL, SS_DISABLE, kernel_sigset_t, siginfo_t};
-use posix_types::{k_sigaltstack, k_siginfo, k_sigset};
+use linux_raw_sys::general::{SI_KERNEL, SI_TIMER, SS_DISABLE, kernel_sigset_t, siginfo_t};
+use posix_types::{k_sigaltstack, k_siginfo, k_sigset, k_sigval};
 use strum::{EnumIter, FromRepr, IntoEnumIterator};
 
 use crate::DefaultSignalAction;
@@ -125,6 +125,7 @@ impl Signo {
             Signo::SIGIO => DefaultSignalAction::Terminate,
             Signo::SIGPWR => DefaultSignalAction::Terminate,
             Signo::SIGSYS => DefaultSignalAction::CoreDump,
+            _ if self.is_realtime() => DefaultSignalAction::Terminate,
             _ => DefaultSignalAction::Ignore,
         }
     }
@@ -227,7 +228,8 @@ pub struct SignalInfo(pub siginfo_t);
 impl SignalInfo {
     /// Construct a kernel-originated signal.
     pub fn new_kernel(signo: Signo) -> Self {
-        // FIXME: Zeroable
+        // SAFETY: siginfo_t is a C struct where all-zeroes is a valid
+        // representation.  Fields are immediately overwritten below.
         let mut result: Self = unsafe { mem::zeroed() };
         result.set_signo(signo);
         result.set_code(SI_KERNEL as _);
@@ -236,7 +238,8 @@ impl SignalInfo {
 
     /// Construct a user-originated signal with a code and pid.
     pub fn new_user(signo: Signo, code: i32, pid: u32) -> Self {
-        // FIXME: Zeroable
+        // SAFETY: siginfo_t is a C struct where all-zeroes is a valid
+        // representation.  Fields are immediately overwritten below.
         let mut result: Self = unsafe { mem::zeroed() };
         result.set_signo(signo);
         result.set_code(code);
@@ -250,8 +253,21 @@ impl SignalInfo {
         result
     }
 
+    /// Construct a timer-originated signal.
+    pub fn new_timer(signo: Signo, timer_id: i32, overrun: i32, value: k_sigval) -> Self {
+        // SAFETY: siginfo_t is a C struct where all-zeroes is a valid
+        // representation.  Fields are immediately overwritten below.
+        let mut result: Self = unsafe { mem::zeroed() };
+        result.set_signo(signo);
+        result.set_code(SI_TIMER as _);
+        result.set_timer_fields(timer_id, overrun, value);
+        result
+    }
+
     /// Returns the signal number.
     pub fn signo(&self) -> Signo {
+        // SAFETY: bindgen preserves the union layout; reading si_signo through
+        // the anonymous union is a direct field access matching the C ABI.
         unsafe { Signo::from_repr(self.0.__bindgen_anon_1.__bindgen_anon_1.si_signo as _).unwrap() }
     }
 
@@ -262,6 +278,8 @@ impl SignalInfo {
 
     /// Returns the signal code.
     pub fn code(&self) -> i32 {
+        // SAFETY: bindgen preserves the union layout; si_code occupies the
+        // same offset in every union arm.
         unsafe { self.0.__bindgen_anon_1.__bindgen_anon_1.si_code }
     }
 
@@ -275,6 +293,93 @@ impl SignalInfo {
         // SAFETY: The union layout matches Linux's siginfo_t definition. bindgen keeps this layout,
         // so it is safe to read the errno field through the anonymous union.
         unsafe { self.0.__bindgen_anon_1.__bindgen_anon_1.si_errno }
+    }
+
+    /// Returns the timer ID carried by a `SI_TIMER` signal.
+    pub fn timer_id(&self) -> Option<i32> {
+        (self.code() == SI_TIMER as _).then_some(unsafe {
+            // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union
+            // arm was populated by `set_timer_fields`.
+            self.0
+                .__bindgen_anon_1
+                .__bindgen_anon_1
+                ._sifields
+                ._timer
+                ._tid
+        })
+    }
+
+    /// Returns the overrun count carried by a `SI_TIMER` signal.
+    pub fn timer_overrun(&self) -> Option<i32> {
+        (self.code() == SI_TIMER as _).then_some(unsafe {
+            // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union
+            // arm was populated by `set_timer_fields`.
+            self.0
+                .__bindgen_anon_1
+                .__bindgen_anon_1
+                ._sifields
+                ._timer
+                ._overrun
+        })
+    }
+
+    /// Returns the `sigval` payload carried by this signal, if present.
+    ///
+    /// Only `SI_TIMER` and user-originated signals (`code < 0`, e.g. `SI_QUEUE`)
+    /// carry a sigval.  Kernel-originated signals (`SI_KERNEL`, positive codes)
+    /// do not.
+    pub fn sigval(&self) -> Option<k_sigval> {
+        match self.code() {
+            code if code == SI_TIMER as _ => Some(unsafe {
+                // SAFETY: SI_TIMER signals populate the `_timer._sigval` union
+                // arm during construction (see `set_timer_fields`).
+                self.0
+                    .__bindgen_anon_1
+                    .__bindgen_anon_1
+                    ._sifields
+                    ._timer
+                    ._sigval
+            }),
+            code if code < 0 => Some(unsafe {
+                // SAFETY: Negative si_code indicates a user-originated signal
+                // (SI_QUEUE, SI_MESGQ, SI_ASYNCIO) whose `_rt._sigval` field
+                // was populated by the sender.
+                self.0
+                    .__bindgen_anon_1
+                    .__bindgen_anon_1
+                    ._sifields
+                    ._rt
+                    ._sigval
+            }),
+            _ => None,
+        }
+    }
+
+    fn set_timer_fields(&mut self, timer_id: i32, overrun: i32, value: k_sigval) {
+        self.0
+            .__bindgen_anon_1
+            .__bindgen_anon_1
+            ._sifields
+            ._timer
+            ._tid = timer_id;
+        self.0
+            .__bindgen_anon_1
+            .__bindgen_anon_1
+            ._sifields
+            ._timer
+            ._overrun = overrun;
+        self.0
+            .__bindgen_anon_1
+            .__bindgen_anon_1
+            ._sifields
+            ._timer
+            ._sigval = value;
+        self.0
+            .__bindgen_anon_1
+            .__bindgen_anon_1
+            ._sifields
+            ._timer
+            ._sys_private = 0;
     }
 }
 

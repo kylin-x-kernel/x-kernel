@@ -17,7 +17,8 @@ use kspin::SpinNoIrq;
 
 use crate::{
     DefaultSignalAction, MAX_SIGNALS, PendingSignals, SignalAction, SignalActionFlags,
-    SignalDisposition, SignalInfo, SignalSet, Signo, api::ThreadSignalManager,
+    SignalDisposition, SignalInfo, SignalSet, Signo,
+    api::{ThreadSignalManager, notify_signal_dequeued},
 };
 
 /// Container for signal actions across all supported signals.
@@ -92,12 +93,17 @@ impl ProcessSignalManager {
     /// # Returns
     /// The next available signal info, if any
     pub(crate) fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
-        let mut pending_guard = self.pending.lock();
-        let signal = pending_guard.dequeue_signal(mask);
+        let signal = {
+            let mut pending_guard = self.pending.lock();
+            let signal = pending_guard.dequeue_signal(mask);
+            if pending_guard.set.is_empty() {
+                self.has_pending.store(false, Ordering::Release);
+            }
+            signal
+        };
 
-        // Update fast path indicator
-        if pending_guard.set.is_empty() {
-            self.has_pending.store(false, Ordering::Release);
+        if let Some(sig) = &signal {
+            notify_signal_dequeued(sig);
         }
 
         signal

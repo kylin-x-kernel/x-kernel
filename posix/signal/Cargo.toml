@@ -10,13 +10,19 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+bitflags.workspace = true
 kerrno.workspace = true
 khal.workspace = true
+kio.workspace = true
 klogger.workspace = true
+kpoll.workspace = true
 kprocess.workspace = true
 kservices.workspace = true
 ksignal.workspace = true
+ksync.workspace = true
 ktask.workspace = true
 kthread.workspace = true
 linux-raw-sys.workspace = true
 posix-types.workspace = true
+unittest.workspace = true
+zerocopy = { version = "0.8.26", features = ["derive"] }

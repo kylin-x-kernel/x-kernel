@@ -2,6 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Linux `signalfd` support.
+//!
+//! This module owns both the `signalfd4` syscall ABI and the `signalfd`
+//! file-like object that exposes pending signals through fd reads.
+
 use alloc::{borrow::Cow, sync::Arc};
 use core::{
     mem,
@@ -9,74 +14,101 @@ use core::{
     task::Context,
 };
 
+use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
+use kservices::file::{FileLike, IoDst, IoSrc};
 use ksignal::{SignalInfo, SignalSet};
 use ksync::RwLock;
 use ktask::future::{block_on, poll_io};
+use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
+use posix_types::{UserConstPtr, k_sigset};
 use zerocopy::{Immutable, IntoBytes};
 
-use crate::file::{FileLike, IoDst, IoSrc};
+use crate::check_sigset_size;
 
-/// The size of signalfd_siginfo structure (128 bytes as per Linux
-/// specification)
 const SIGNALFD_SIGINFO_SIZE: usize = 128;
+const SFD_CLOEXEC: u32 = O_CLOEXEC;
+const SFD_NONBLOCK: u32 = O_NONBLOCK;
 
-/// signalfd_siginfo structure layout
-/// This matches the Linux signalfd_siginfo structure (128 bytes)
+bitflags! {
+    /// Flags for the `signalfd4` syscall.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct SignalfdFlags: u32 {
+        /// Creates a file descriptor that is closed on `exec`.
+        const CLOEXEC = SFD_CLOEXEC;
+        /// Creates a non-blocking signalfd.
+        const NONBLOCK = SFD_NONBLOCK;
+    }
+}
+
+/// The Linux `signalfd_siginfo` payload layout.
 #[repr(C)]
 #[derive(Immutable, IntoBytes)]
 struct SignalfdSiginfo {
-    ssi_signo: u32,    // Signal number
-    ssi_errno: i32,    // Error number (unused)
-    ssi_code: i32,     // Signal code
-    ssi_pid: u32,      // PID of sender
-    ssi_uid: u32,      // Real UID of sender
-    ssi_fd: i32,       // File descriptor (SIGIO)
-    ssi_tid: u32,      // Kernel timer ID (POSIX timers)
-    ssi_band: u32,     // Band event (SIGIO)
-    ssi_overrun: u32,  // POSIX timer overrun count
-    ssi_trapno: u32,   // Trap number that caused signal
-    ssi_status: i32,   // Exit status or signal (SIGCHLD)
-    ssi_int: i32,      // Integer sent by sigqueue(2)
-    ssi_ptr: u64,      // Pointer sent by sigqueue(2)
-    ssi_utime: u64,    // User CPU time consumed (SIGCHLD)
-    ssi_stime: u64,    // System CPU time consumed (SIGCHLD)
-    ssi_addr: u64,     // Address that generated signal
-    ssi_addr_lsb: u16, // Least significant bit of address
-    _pad: [u8; 46],    // Padding to make it 128 bytes
+    ssi_signo: u32,
+    ssi_errno: i32,
+    ssi_code: i32,
+    ssi_pid: u32,
+    ssi_uid: u32,
+    ssi_fd: i32,
+    ssi_tid: u32,
+    ssi_band: u32,
+    ssi_overrun: u32,
+    ssi_trapno: u32,
+    ssi_status: i32,
+    ssi_int: i32,
+    ssi_ptr: u64,
+    ssi_utime: u64,
+    ssi_stime: u64,
+    ssi_addr: u64,
+    ssi_addr_lsb: u16,
+    _pad: [u8; 46],
 }
 
 const _: [(); SIGNALFD_SIGINFO_SIZE] = [(); mem::size_of::<SignalfdSiginfo>()];
 
 impl SignalfdSiginfo {
-    /// Convert from SignalInfo to signalfd_siginfo
     fn from_signal_info(sig_info: &SignalInfo) -> Self {
         let errno = sig_info.errno();
+        let (ssi_tid, ssi_overrun) = match (sig_info.timer_id(), sig_info.timer_overrun()) {
+            (Some(timer_id), Some(overrun)) => (timer_id as u32, overrun.max(0) as u32),
+            _ => (0, 0),
+        };
+        let (ssi_int, ssi_ptr) = sig_info
+            .sigval()
+            .map(|value| {
+                // SAFETY: sigval_t is a public C union whose sival_int and
+                // sival_ptr members occupy the same storage; reading either is
+                // valid regardless of which variant was written.
+                unsafe { (value.sival_int, value.sival_ptr as u64) }
+            })
+            .unwrap_or((0, 0));
 
-        SignalfdSiginfo {
+        Self {
             ssi_signo: sig_info.signo() as u32,
             ssi_errno: errno,
             ssi_code: sig_info.code(),
             ssi_pid: 0,
             ssi_uid: 0,
             ssi_fd: -1,
-            ssi_tid: 0,
+            ssi_tid,
             ssi_band: 0,
-            ssi_overrun: 0,
+            ssi_overrun,
             ssi_trapno: 0,
             ssi_status: 0,
-            ssi_int: 0,
-            ssi_ptr: 0,
+            ssi_int,
+            ssi_ptr,
             ssi_utime: 0,
             ssi_stime: 0,
             ssi_addr: 0,
             ssi_addr_lsb: 0,
-            _pad: [0u8; 46],
+            _pad: [0; 46],
         }
     }
 }
 
+/// A file-like adapter that exposes pending signals through `read`.
 pub struct Signalfd {
     mask: RwLock<SignalSet>,
     non_blocking: AtomicBool,
@@ -101,7 +133,6 @@ impl Signalfd {
         *self.mask.read()
     }
 
-    /// Check if there are any pending signals matching the mask
     fn has_pending_signals(&self) -> bool {
         let mask = self.mask();
         let signal = &kthread::current_thread().signal;
@@ -109,7 +140,6 @@ impl Signalfd {
         !(pending & mask).is_empty()
     }
 
-    /// Dequeue a signal matching the mask
     fn dequeue_signal(&self) -> Option<SignalInfo> {
         let mask = self.mask();
         let signal = &kthread::current_thread().signal;
@@ -125,14 +155,9 @@ impl FileLike for Signalfd {
 
         block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
             if let Some(sig_info) = self.dequeue_signal() {
-                // Convert SignalInfo to SignalfdSiginfo
                 let sfd_info = SignalfdSiginfo::from_signal_info(&sig_info);
+                dst.write(sfd_info.as_bytes())?;
 
-                // Write the structure to the destination buffer
-                let bytes = sfd_info.as_bytes();
-                dst.write(bytes)?;
-
-                // Wake up other waiters if there are more signals pending
                 if self.has_pending_signals() {
                     self.poll_rx.wake();
                 }
@@ -145,7 +170,6 @@ impl FileLike for Signalfd {
     }
 
     fn write(&self, _src: &mut IoSrc) -> KResult<usize> {
-        // signalfd is read-only
         Err(KError::BadFileDescriptor)
     }
 
@@ -177,20 +201,52 @@ impl Pollable for Signalfd {
     }
 }
 
+/// Creates or updates a `signalfd` file descriptor.
+pub fn sys_signalfd4(
+    fd: i32,
+    mask: UserConstPtr<k_sigset>,
+    sigsetsize: usize,
+    flags: u32,
+) -> KResult<isize> {
+    check_sigset_size(sigsetsize)?;
+
+    let flags = SignalfdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
+
+    if fd != -1 && flags.contains(SignalfdFlags::CLOEXEC) {
+        return Err(KError::InvalidInput);
+    }
+
+    let mask: SignalSet = mask.read_vm()?.into();
+
+    if fd != -1 {
+        let signalfd = kthread::current_resources().get_file_like_as::<Signalfd>(fd)?;
+        signalfd.update_mask(mask);
+        signalfd.set_nonblocking(flags.contains(SignalfdFlags::NONBLOCK))?;
+        return Ok(fd as _);
+    }
+
+    let signalfd = Signalfd::new(mask);
+    signalfd.set_nonblocking(flags.contains(SignalfdFlags::NONBLOCK))?;
+
+    kthread::current_resources()
+        .add_file_like(signalfd as _, flags.contains(SignalfdFlags::CLOEXEC))
+        .map(|fd| fd as _)
+}
+
 #[cfg(unittest)]
-mod signalfd_tests {
-    use unittest::def_test;
+mod tests {
+    use kio::Cursor;
+    use ksignal::Signo;
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
 
-    /// Test signalfd path
     #[def_test]
     fn test_signalfd_path() {
         let signalfd = Signalfd::new(SignalSet::default());
         assert_eq!(signalfd.path(), "anon_inode:[signalfd]");
     }
 
-    /// Test SIGNALFD_SIGINFO_SIZE constant
     #[def_test]
     fn test_signalfd_siginfo_size() {
         assert_eq!(SIGNALFD_SIGINFO_SIZE, 128);
@@ -199,34 +255,23 @@ mod signalfd_tests {
 
     #[def_test]
     fn test_signalfd_nonblocking() {
-        let sfd = Signalfd::new(SignalSet::default());
-        assert!(!sfd.nonblocking());
-
-        sfd.set_nonblocking(true).unwrap();
-        assert!(sfd.nonblocking());
-
-        sfd.set_nonblocking(false).unwrap();
-        assert!(!sfd.nonblocking());
-    }
-
-    #[def_test]
-    fn test_signalfd_update_mask() {
-        let sfd = Signalfd::new(SignalSet::default());
-        let new_mask = SignalSet::default();
-        sfd.update_mask(new_mask);
+        let signalfd = Signalfd::new(SignalSet::default());
+        assert!(!signalfd.nonblocking());
+        signalfd.set_nonblocking(true).unwrap();
+        assert!(signalfd.nonblocking());
+        signalfd.set_nonblocking(false).unwrap();
+        assert!(!signalfd.nonblocking());
     }
 
     #[def_test]
     fn test_signalfd_write_returns_error() {
-        let sfd = Signalfd::new(SignalSet::default());
-        let data = b"test";
-        let mut src = kio::Cursor::new(data.as_slice());
-        assert!(sfd.write(&mut src).is_err());
+        let signalfd = Signalfd::new(SignalSet::default());
+        let mut src = Cursor::new(b"test".as_slice());
+        assert!(signalfd.write(&mut src).is_err());
     }
 
     #[def_test]
     fn test_signalfd_siginfo_from_signal_info() {
-        use ksignal::Signo;
         let sig = SignalInfo::new_kernel(Signo::SIGUSR1);
         let info = SignalfdSiginfo::from_signal_info(&sig);
         assert_eq!(info.ssi_signo, Signo::SIGUSR1 as u32);

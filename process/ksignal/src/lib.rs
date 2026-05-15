@@ -12,6 +12,7 @@ extern crate alloc;
 mod tests;
 
 pub mod api;
+pub use api::{register_signal_observer, unregister_signal_observer};
 pub mod arch;
 
 mod action;
