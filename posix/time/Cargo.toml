@@ -13,6 +13,6 @@ documentation.workspace = true
 kerrno = { workspace = true }
 khal = { workspace = true }
 klogger = { workspace = true }
+kthread = { workspace = true }
 linux-raw-sys = { workspace = true }
-posix-process = { workspace = true }
 posix-types = { workspace = true }

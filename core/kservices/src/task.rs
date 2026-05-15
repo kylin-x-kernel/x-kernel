@@ -14,8 +14,8 @@ use kprocess::Pid;
 use ksignal::{SignalInfo, Signo};
 use ktask::{TaskInner, current};
 use kthread::{
-    TimerState, current_futex_key, get_process_state, get_task, send_signal_to_process,
-    send_signal_to_thread, set_timer_state,
+    CpuTimeState, current_futex_key, get_process_state, get_task, poll_cpu_timers,
+    send_signal_to_process, send_signal_to_thread,
 };
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use osvm::{VirtMutPtr, VirtPtr};
@@ -44,7 +44,7 @@ pub fn new_user_task(
             while !thr.is_exiting() {
                 let reason = uctx.run();
 
-                set_timer_state(&curr, TimerState::Kernel);
+                thr.set_cpu_state(CpuTimeState::Kernel);
 
                 match reason {
                     ReturnReason::Syscall => dispatch_syscall(&mut uctx),
@@ -93,7 +93,8 @@ pub fn new_user_task(
                     while check_signals(&thr, &mut uctx, None) {}
                 }
 
-                set_timer_state(&curr, TimerState::User);
+                thr.set_cpu_state(CpuTimeState::User);
+                poll_cpu_timers();
                 curr.clear_interrupt();
             }
         },

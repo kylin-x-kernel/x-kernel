@@ -16,6 +16,7 @@ use alloc::sync::Arc;
 #[macro_use]
 extern crate klogger;
 
+mod cpu_time;
 mod lifecycle_state;
 mod posix_state;
 mod process_state;
@@ -24,8 +25,9 @@ mod runtime_state;
 mod signal;
 mod stat;
 mod thread;
-mod timer;
+mod timer_delivery;
 
+pub use cpu_time::{CpuTimeState, CpuTimeStatistics};
 pub use kfutex::{FutexEntry, FutexGuard, FutexKey, FutexTable, WaitQueue};
 pub use kresources::ProcessResources;
 pub use krlimit::{FILE_LIMIT, Rlimit, Rlimits};
@@ -37,10 +39,7 @@ pub use registry::{
     get_task, processes, tasks,
 };
 pub use runtime_state::ProcessRuntimeState;
-pub use signal::{
-    poll_timer, send_signal_to_process, send_signal_to_process_group, send_signal_to_thread,
-    set_timer_state,
-};
+pub use signal::{send_signal_to_process, send_signal_to_process_group, send_signal_to_thread};
 pub use stat::TaskStat;
 #[cfg(feature = "tee")]
 pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
@@ -48,7 +47,7 @@ pub use thread::{
     AsThread, CurrentThread, Thread, current_fs_context, current_process_fs_context,
     current_process_state, current_task_name, current_thread, with_current_thread,
 };
-pub use timer::{TimeManager, TimerState, spawn_alarm_task};
+pub use timer_delivery::{dispatch_timer_delivery, poll_cpu_timers, spawn_alarm_task};
 
 /// Returns the current process-owned resources.
 pub fn current_resources() -> Arc<ProcessResources> {

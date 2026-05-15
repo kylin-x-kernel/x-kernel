@@ -5,30 +5,21 @@
 //! POSIX CPU time syscalls and helpers.
 
 use kerrno::KResult;
-use khal::time::{TimeValue, monotonic_time_nanos, ns2t};
+use khal::time::{monotonic_time_nanos, ns2t};
 use posix_types::{Tms, UserPtr};
-
-/// Returns the current thread's accumulated user and system CPU time.
-pub fn current_thread_cpu_times() -> (TimeValue, TimeValue) {
-    kthread::current_thread().time.lock().output()
-}
-
-/// Returns the current thread's accumulated CPU time.
-pub fn current_thread_cpu_time() -> TimeValue {
-    let (utime, stime) = current_thread_cpu_times();
-    utime + stime
-}
 
 /// Returns timing information including user and system CPU time.
 pub fn sys_times(tms: UserPtr<Tms>) -> KResult<isize> {
-    let (utime, stime) = current_thread_cpu_times();
+    let proc_state = kthread::current_process_state();
+    let (utime, stime) = proc_state.process_cpu_times();
+    let (child_utime_ns, child_stime_ns) = proc_state.child_time_ns();
     let utime = utime.as_micros() as usize;
     let stime = stime.as_micros() as usize;
     tms.write_vm(Tms {
         tms_utime: utime,
         tms_stime: stime,
-        tms_cutime: utime,
-        tms_cstime: stime,
+        tms_cutime: ns2t(child_utime_ns as u64) as usize,
+        tms_cstime: ns2t(child_stime_ns as u64) as usize,
     })?;
     Ok(ns2t(monotonic_time_nanos()) as _)
 }

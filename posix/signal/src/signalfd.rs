@@ -18,7 +18,7 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kservices::file::{FileLike, IoDst, IoSrc};
-use ksignal::{SignalInfo, SignalSet};
+use ksignal::{SignalInfo, SignalSet, Signo};
 use ksync::RwLock;
 use ktask::future::{block_on, poll_io};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
@@ -216,7 +216,11 @@ pub fn sys_signalfd4(
         return Err(KError::InvalidInput);
     }
 
-    let mask: SignalSet = mask.read_vm()?.into();
+    let mut mask: SignalSet = mask.read_vm()?.into();
+    // SIGKILL and SIGSTOP cannot be caught, so they are silently removed
+    // from the signalfd mask — matching Linux do_signalfd4 behavior.
+    mask.remove(Signo::SIGKILL);
+    mask.remove(Signo::SIGSTOP);
 
     if fd != -1 {
         let signalfd = kthread::current_resources().get_file_like_as::<Signalfd>(fd)?;

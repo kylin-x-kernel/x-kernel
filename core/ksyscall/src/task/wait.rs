@@ -105,7 +105,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
                     for tid in child.threads() {
                         if let Ok(task) = get_task(tid) {
                             let thr = task.as_thread();
-                            let (u, s) = thr.time.lock().output();
+                            let (u, s) = thr.sample_cpu_time();
                             utime_ns +=
                                 u.as_secs() as usize * 1_000_000_000 + u.subsec_nanos() as usize;
                             stime_ns +=

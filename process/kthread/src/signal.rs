@@ -6,42 +6,8 @@ use kerrno::{KError, KResult};
 use kprocess::Pid;
 use ksignal::SignalInfo;
 use ktask::TaskInner;
-use ktimer::TimerState;
 
 use crate::{AsThread, Thread, get_process_group, get_process_state, get_task};
-
-/// Polls the timer for a task.
-pub fn poll_timer(task: &TaskInner) {
-    let Some(thread) = task.try_as_thread() else {
-        return;
-    };
-    // Timer accounting now uses a real mutex because syscall paths such as
-    // getrusage read other threads' time managers. Waiting here preserves
-    // timer delivery instead of silently dropping this polling round.
-    let mut time = thread.time.lock();
-    let signals = time.poll();
-    drop(time);
-    for signo in signals.into_iter().flatten() {
-        send_signal_thread_inner(task, thread, SignalInfo::new_kernel(signo));
-    }
-}
-
-/// Sets the timer state for a task.
-pub fn set_timer_state(task: &TaskInner, state: TimerState) {
-    let Some(thread) = task.try_as_thread() else {
-        return;
-    };
-    // The transition between user and kernel timing states must be applied
-    // even when another CPU is reading the same time manager for resource
-    // accounting, so this path waits instead of skipping the state update.
-    let mut time = thread.time.lock();
-    let signals = time.poll();
-    time.set_state(state);
-    drop(time);
-    for signo in signals.into_iter().flatten() {
-        send_signal_thread_inner(task, thread, SignalInfo::new_kernel(signo));
-    }
-}
 
 fn send_signal_thread_inner(task: &TaskInner, thread: &Thread, sig: SignalInfo) {
     if thread.signal.send_signal(sig) {

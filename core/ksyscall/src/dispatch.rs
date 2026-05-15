@@ -669,7 +669,18 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
         | Sysno::open_tree
         | Sysno::memfd_secret => sys_dummy_fd(sysno),
 
-        Sysno::timer_create | Sysno::timer_gettime | Sysno::timer_settime => Ok(0),
+        Sysno::timer_create => {
+            sys_timer_create(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2().into())
+        }
+        Sysno::timer_gettime => sys_timer_gettime(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::timer_settime => sys_timer_settime(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2().into(),
+            uctx.arg3().into(),
+        ),
+        Sysno::timer_delete => sys_timer_delete(uctx.arg0() as _),
+        Sysno::timer_getoverrun => sys_timer_getoverrun(uctx.arg0() as _),
 
         // sync_file_range: return success (no-op, same as fsync for directories)
         Sysno::sync_file_range => Ok(0),

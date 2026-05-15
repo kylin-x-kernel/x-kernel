@@ -21,8 +21,9 @@ kservices.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
+ktimer.workspace = true
 kthread.workspace = true
 linux-raw-sys.workspace = true
 posix-types.workspace = true
 unittest.workspace = true
-zerocopy = { version = "0.8.26", features = ["derive"] }
+zerocopy.workspace = true

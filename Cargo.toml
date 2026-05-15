@@ -164,6 +164,7 @@ xcov = { path = "util/xcov" }
 bitflags = "2.10"
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
+zerocopy = { version = "0.8", features = ["derive"] }
 chrono = { version = "0.4", default-features = false }
 crate_interface = "0.1.4"
 enum_dispatch = "0.3"

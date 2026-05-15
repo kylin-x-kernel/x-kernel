@@ -86,6 +86,7 @@ pub fn sys_execve(
     proc_state.credentials.write().apply_exec();
 
     *proc_state.signal.actions.lock() = Default::default();
+    proc_state.timer_manager().lock().clear_posix_timers();
 
     // Clear set_child_tid after exec since the original address is no longer valid
     kthread::current_thread().set_clear_child_tid(0);

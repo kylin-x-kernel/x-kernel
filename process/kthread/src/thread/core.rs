@@ -5,15 +5,15 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
+use khal::time::TimeValue;
 use kprocess::Pid;
 use ksignal::api::ThreadSignalManager;
 use ksync::Mutex;
 use ktask::KtaskRef;
-use ktimer::TimeManager;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeSessionCtxTrait;
 
-use crate::ProcessState;
+use crate::{CpuTimeState, CpuTimeStatistics, ProcessState};
 
 /// The current user thread handle.
 pub struct CurrentThread(pub(super) KtaskRef);
@@ -32,8 +32,8 @@ pub struct Thread {
     /// The thread-level signal manager.
     pub signal: Arc<ThreadSignalManager>,
 
-    /// The time manager.
-    pub time: Mutex<TimeManager>,
+    /// Per-thread CPU time statistics.
+    pub time: Mutex<CpuTimeStatistics>,
 
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
@@ -57,7 +57,7 @@ impl Thread {
             proc_state,
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
-            time: Mutex::new(TimeManager::new()),
+            time: Mutex::new(CpuTimeStatistics::new()),
             oom_score_adj: AtomicI32::new(200),
             exit: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
@@ -136,5 +136,26 @@ impl Thread {
     /// Returns the process ID of this thread's process.
     pub fn pid(&self) -> Pid {
         self.process_state().proc.pid()
+    }
+
+    /// Returns the sampled user and system CPU time in nanoseconds.
+    pub fn sample_cpu_time_ns(&self) -> (usize, usize) {
+        self.time.lock().sample_nanos()
+    }
+
+    /// Returns the sampled user and system CPU time.
+    pub fn sample_cpu_time(&self) -> (TimeValue, TimeValue) {
+        self.time.lock().sample()
+    }
+
+    /// Returns the total sampled CPU time (user + system).
+    pub fn cpu_time(&self) -> TimeValue {
+        let (utime, stime) = self.sample_cpu_time();
+        utime + stime
+    }
+
+    /// Updates the current CPU-accounting state.
+    pub fn set_cpu_state(&self, state: CpuTimeState) {
+        self.time.lock().set_state(state);
     }
 }

@@ -8,7 +8,9 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kfs::FsContext;
+use kprocess::Pid;
 use ksync::Mutex;
+use ktimer::ProcessTimerManager;
 use memspace::AddrSpace;
 
 /// Process runtime state shared by all threads in a process.
@@ -16,11 +18,13 @@ pub struct ProcessRuntimeState {
     address_space: Arc<Mutex<AddrSpace>>,
     fs_context: Arc<Mutex<FsContext>>,
     heap_top: AtomicUsize,
+    timer_manager: Arc<Mutex<ProcessTimerManager>>,
 }
 
 impl ProcessRuntimeState {
     /// Creates a new [`ProcessRuntimeState`].
     pub fn new(
+        owner_pid: Pid,
         address_space: Arc<Mutex<AddrSpace>>,
         fs_context: Arc<Mutex<FsContext>>,
         user_heap_base: usize,
@@ -29,6 +33,7 @@ impl ProcessRuntimeState {
             address_space,
             fs_context,
             heap_top: AtomicUsize::new(user_heap_base),
+            timer_manager: Arc::new(Mutex::new(ProcessTimerManager::new(owner_pid))),
         }
     }
 
@@ -50,5 +55,10 @@ impl ProcessRuntimeState {
     /// Sets the top address of the user heap.
     pub fn set_heap_top(&self, top: usize) {
         self.heap_top.store(top, Ordering::Release)
+    }
+
+    /// Returns the process-owned timer manager.
+    pub fn timer_manager(&self) -> &Arc<Mutex<ProcessTimerManager>> {
+        &self.timer_manager
     }
 }

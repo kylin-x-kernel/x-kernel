@@ -12,12 +12,13 @@ documentation.workspace = true
 [dependencies]
 event-listener = { workspace = true, default-features = false }
 kbuild_config.workspace = true
+kerrno.workspace = true
 khal.workspace = true
+kprocess.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 ktypes.workspace = true
-lazy_static = { workspace = true }
+linux-raw-sys = { workspace = true, default-features = false, features = ["general", "no_std"] }
 posix-types.workspace = true
 unittest.workspace = true
-

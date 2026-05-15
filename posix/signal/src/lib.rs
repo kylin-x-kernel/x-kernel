@@ -7,6 +7,7 @@
 //! - Signal mask manipulation (`rt_sigprocmask`, `rt_sigaction`, `rt_sigpending`)
 //! - Signal delivery (`kill`, `tkill`, `tgkill`, realtime queueing)
 //! - Interval timers (`getitimer`, `setitimer`)
+//! - POSIX timers (`timer_create`, `timer_settime`, `timer_gettime`, `timer_delete`)
 //! - Signal file descriptors (`signalfd4`)
 //! - Signal wait/return flow (`rt_sigreturn`, `rt_sigtimedwait`, `rt_sigsuspend`)
 //! - Alternate signal stack (`sigaltstack`)
@@ -16,6 +17,7 @@
 extern crate alloc;
 
 mod itimer;
+mod posix_timer;
 mod signalfd;
 
 #[macro_use]
@@ -38,6 +40,9 @@ use kthread::{
 };
 use linux_raw_sys::general::{
     MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, timespec,
+};
+pub use posix_timer::{
+    sys_timer_create, sys_timer_delete, sys_timer_getoverrun, sys_timer_gettime, sys_timer_settime,
 };
 use posix_types::{
     TimeValueLike, UserConstPtr, UserPtr, k_sigaction, k_sigaltstack, k_siginfo, k_sigset,

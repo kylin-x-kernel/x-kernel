@@ -20,7 +20,7 @@ mod rusage;
 mod thread;
 mod umask;
 
-pub use cpu_time::{current_thread_cpu_time, current_thread_cpu_times, sys_times};
+pub use cpu_time::sys_times;
 pub use ids::{sys_getpid, sys_getppid};
 pub use job_control::{sys_getpgid, sys_getsid, sys_setpgid, sys_setsid};
 pub use limits::{sys_getrlimit, sys_prlimit64, sys_setrlimit};

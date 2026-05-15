@@ -11,7 +11,13 @@ use posix_types::{ITimerType, TimeValueLike, UserConstPtr, UserPtr};
 /// Returns the current value of an interval timer.
 pub fn sys_getitimer(which: i32, value: UserPtr<itimerval>) -> KResult<isize> {
     let timer_type = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
-    let (it_interval, it_value) = kthread::current_thread().time.lock().get_itimer(timer_type);
+    let proc_state = kthread::current_thread().process_state().clone();
+    let (process_utime_ns, process_stime_ns) = proc_state.process_cpu_time_ns();
+    let (it_interval, it_value) = proc_state.timer_manager().lock().get_itimer(
+        timer_type,
+        process_utime_ns,
+        process_stime_ns,
+    );
 
     value.write_vm(itimerval {
         it_interval: timeval::from_time_value(it_interval),
@@ -44,11 +50,15 @@ pub fn sys_setitimer(
          {remained_ns:?}"
     );
 
-    let old =
-        kthread::current_thread()
-            .time
-            .lock()
-            .set_itimer(timer_type, interval_ns, remained_ns);
+    let proc_state = kthread::current_thread().process_state().clone();
+    let (process_utime_ns, process_stime_ns) = proc_state.process_cpu_time_ns();
+    let old = proc_state.timer_manager().lock().set_itimer(
+        timer_type,
+        interval_ns,
+        remained_ns,
+        process_utime_ns,
+        process_stime_ns,
+    );
 
     if let Some(old_value) = old_value.check_non_null() {
         old_value.write_vm(itimerval {
