@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use core::marker::PhantomPinned;
 
 use kdriver::BlockDevice as KBlockDevice;
-use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
+use ksync::{Mutex, MutexGuard};
 use kvfs::{
     DirEntry, Filesystem, FilesystemOps, Reference, ST_RELATIME, StatFs, VfsResult,
     path::MAX_NAME_LEN,

@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 use core::cell::OnceCell;
 
 use kdriver::BlockDevice as KBlockDevice;
-use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
+use ksync::{Mutex, MutexGuard};
 use kvfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, ST_RELATIME, StatFs,
     VfsError, VfsResult, path::MAX_NAME_LEN,

@@ -12,7 +12,7 @@ use alloc::{format, string::String};
 pub use fs::*;
 pub use inode::*;
 use kdriver::Virtio9pDevice;
-use kspin::SpinNoPreempt as Mutex;
+use ksync::Mutex;
 
 /// Virtio transport adapter bridging `kdriver::Virtio9pDevice` to `fs9p::Transport`.
 ///

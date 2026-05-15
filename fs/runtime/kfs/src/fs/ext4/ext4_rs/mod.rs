@@ -14,7 +14,7 @@ use ext4_rs::{BLOCK_SIZE, BlockDevice};
 pub use fs::*;
 pub use inode::*;
 use kdriver::{BlockDevice as KBlockDevice, prelude::BlockDriverOps};
-use kspin::SpinNoPreempt as Mutex;
+use ksync::Mutex;
 
 const FS_BLOCK_SIZE: usize = BLOCK_SIZE;
 

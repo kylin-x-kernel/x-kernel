@@ -9,7 +9,7 @@ use core::cell::OnceCell;
 
 use fs9p::Session;
 use kdriver::Virtio9pDevice;
-use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
+use ksync::{Mutex, MutexGuard};
 use kvfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
 };
