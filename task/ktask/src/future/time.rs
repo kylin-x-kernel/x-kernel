@@ -16,6 +16,7 @@ use futures_util::{FutureExt, select_biased};
 use kcpu_id_map::LogicalCpuId;
 use kerrno::KError;
 use khal::time::{TimeValue, monotonic_time};
+use kspin::SpinNoIrq;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TimerKey {
@@ -83,9 +84,9 @@ impl TimerRuntime {
         self.wheel.remove(key);
     }
 
-    fn wake(&mut self) {
+    fn take_expired_wakers(&mut self) -> BTreeMap<TimerKey, Waker> {
         if self.wheel.is_empty() {
-            return;
+            return BTreeMap::new();
         }
 
         let now = monotonic_time();
@@ -95,57 +96,65 @@ impl TimerRuntime {
             key: u64::MAX,
         });
 
-        let expired = core::mem::replace(&mut self.wheel, pending);
-        for (_, w) in expired {
-            w.wake();
-        }
+        core::mem::replace(&mut self.wheel, pending)
     }
 }
 
 percpu_static! {
-    TIMER_RUNTIME: TimerRuntime = TimerRuntime::new(),
+    TIMER_RUNTIME: SpinNoIrq<TimerRuntime> = SpinNoIrq::new(TimerRuntime::new()),
+}
+
+fn timer_runtime(cpu_id: LogicalCpuId) -> &'static SpinNoIrq<TimerRuntime> {
+    // SAFETY:
+    // 1. `cpu_id` is either returned by `this_cpu_id()` or stored from a
+    //    previously returned value, so it identifies an initialized CPU.
+    // 2. `TIMER_RUNTIME` is a `SpinNoIrq<TimerRuntime>`, and all mutable
+    //    accesses to the timer wheel go through the lock.
+    unsafe { TIMER_RUNTIME.remote_ref_raw(cpu_id.as_usize()) }
 }
 
 #[allow(dead_code)]
 pub(crate) fn check_timer_events() {
-    unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.wake();
-}
-
-fn with_current<R>(f: impl FnOnce(&mut TimerRuntime) -> R) -> R {
-    let _g = kspin::NoPreemptIrqSave::new();
-    f(unsafe { TIMER_RUNTIME.current_ref_mut_raw() })
+    let cpu_id = khal::percpu::this_cpu_id();
+    let wakers = timer_runtime(cpu_id).lock().take_expired_wakers();
+    for (_, waker) in wakers {
+        waker.wake();
+    }
 }
 
 /// Registers a timer that fires `waker` when `deadline` is reached.
 /// Returns `None` if `deadline` has already passed.
 pub fn register_timer(deadline: TimeValue, waker: Waker) -> Option<TimerHandle> {
-    let _g = kspin::NoPreemptIrqSave::new();
     let cpu_id = khal::percpu::this_cpu_id();
-    let key = unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.add_with_waker(deadline, waker)?;
+    let key = timer_runtime(cpu_id)
+        .lock()
+        .add_with_waker(deadline, waker)?;
     Some(TimerHandle { key, cpu_id })
 }
 
 /// Cancels a previously registered timer. Safe to call from any CPU.
 pub fn cancel_timer(handle: &TimerHandle) {
-    let _g = kspin::NoPreemptIrqSave::new();
-    unsafe { TIMER_RUNTIME.remote_ref_mut_raw(handle.cpu_id.as_usize()) }.cancel(&handle.key);
+    timer_runtime(handle.cpu_id).lock().cancel(&handle.key);
 }
 
 /// Future returned by `sleep` and `sleep_until`.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct TimerFuture(TimerKey);
+pub struct TimerFuture {
+    key: TimerKey,
+    cpu_id: LogicalCpuId,
+}
 
 impl Future for TimerFuture {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        with_current(|r| r.poll(&self.0, cx))
+        timer_runtime(self.cpu_id).lock().poll(&self.key, cx)
     }
 }
 
 impl Drop for TimerFuture {
     fn drop(&mut self) {
-        with_current(|r| r.cancel(&self.0));
+        timer_runtime(self.cpu_id).lock().cancel(&self.key);
     }
 }
 
@@ -156,9 +165,10 @@ pub async fn sleep(duration: Duration) {
 
 /// Waits until `deadline` is reached.
 pub async fn sleep_until(deadline: TimeValue) {
-    let key = with_current(|r| r.add(deadline));
+    let cpu_id = khal::percpu::this_cpu_id();
+    let key = timer_runtime(cpu_id).lock().add(deadline);
     if let Some(key) = key {
-        TimerFuture(key).await;
+        TimerFuture { key, cpu_id }.await;
     }
 }
 
