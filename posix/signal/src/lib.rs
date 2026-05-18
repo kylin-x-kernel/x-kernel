@@ -29,7 +29,7 @@ pub use itimer::{sys_getitimer, sys_setitimer};
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kprocess::Pid;
-use kservices::signal::{block_next_signal, check_signals};
+use kservices::task::check_signals;
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
 use ktask::{
     current,
@@ -249,7 +249,6 @@ pub fn sys_rt_tgsigqueueinfo(
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigreturn.2.html>.
 pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
-    block_next_signal();
     kthread::current_thread().signal.restore(uctx);
     Ok(uctx.retval() as isize)
 }

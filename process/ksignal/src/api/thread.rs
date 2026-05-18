@@ -11,6 +11,7 @@ use core::{
 };
 
 use kcpu::userspace::UserContext;
+use kerrno::KResult;
 use kspin::SpinNoIrq;
 use osvm::VirtMutPtr;
 
@@ -254,6 +255,22 @@ impl ThreadSignalManager {
     /// Returns `true` if the signal is currently blocked.
     pub fn signal_blocked(&self, signo: Signo) -> bool {
         self.blocked.lock().has(signo)
+    }
+
+    /// Temporarily replaces the blocked signal set for the duration of `f`,
+    /// then restores the original set.  Used by ppoll/pselect6/epoll_pwait to
+    /// atomically swap the signal mask while waiting.
+    pub fn with_temp_blocked<R>(
+        &self,
+        blocked: Option<SignalSet>,
+        f: impl FnOnce() -> KResult<R>,
+    ) -> KResult<R> {
+        let old_blocked = blocked.map(|set| self.set_blocked(set));
+        let result = f();
+        if let Some(old) = old_blocked {
+            self.set_blocked(old);
+        }
+        result
     }
 
     /// Gets the signal stack.

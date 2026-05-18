@@ -158,4 +158,14 @@ impl Thread {
     pub fn set_cpu_state(&self, state: CpuTimeState) {
         self.time.lock().set_state(state);
     }
+
+    /// Temporarily replaces the blocked signal set for the duration of `f`,
+    /// then restores the original set.  See [`ThreadSignalManager::with_temp_blocked`].
+    pub fn with_temp_blocked<R>(
+        &self,
+        blocked: Option<ksignal::SignalSet>,
+        f: impl FnOnce() -> kerrno::KResult<R>,
+    ) -> kerrno::KResult<R> {
+        self.signal.with_temp_blocked(blocked, f)
+    }
 }

@@ -15,7 +15,6 @@ extern crate alloc;
 
 pub mod file;
 pub mod mm;
-pub mod signal;
 pub mod socket;
 pub mod task;
 pub mod terminal;

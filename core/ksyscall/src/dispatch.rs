@@ -20,6 +20,7 @@
 
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
+use kthread::UserThreadRuntimeAction;
 use linux_sysno::Sysno;
 use posix_credentials::*;
 use posix_io_mpx::*;
@@ -32,11 +33,11 @@ use posix_time::*;
 use crate::{fs::*, io_mpx::*, net::*, sync::*, sys::*, task::*};
 
 /// Dispatches a syscall from the given user context.
-pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
+pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
         warn!("Invalid syscall number: {}", uctx.sysno());
         uctx.set_retval(-LinuxError::ENOSYS.into_raw() as _);
-        return;
+        return UserThreadRuntimeAction::Continue;
     };
 
     trace!("Syscall {sysno:?}");
@@ -707,4 +708,17 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) {
     debug!("Syscall {sysno} return {result:?}");
 
     uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).into_raw() as _) as _);
+
+    // rt_sigreturn restores the saved context from before the signal handler ran.
+    // If we allow the normal post-syscall signal check to run, it may immediately
+    // re-deliver the same signal whose handler just returned, causing an infinite
+    // loop.  Returning from a signal handler is not a "normal" syscall return — the
+    // restored context already represents where the thread was before the signal
+    // arrived, so no additional signal processing is needed.  Skipping this check
+    // matches Linux kernel behavior (see arch/*/kernel/signal.c: restore_sigcontext).
+    if sysno == Sysno::rt_sigreturn && result.is_ok() {
+        UserThreadRuntimeAction::SkipSignalCheckOnce
+    } else {
+        UserThreadRuntimeAction::Continue
+    }
 }

@@ -11,24 +11,22 @@ use kbuild_config::KERNEL_STACK_SIZE;
 use kerrno::{KError, KResult};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kprocess::Pid;
-use ksignal::{SignalInfo, Signo};
+use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
 use kthread::{
-    CpuTimeState, current_futex_key, get_process_state, get_task, poll_cpu_timers,
-    send_signal_to_process, send_signal_to_thread,
+    CpuTimeState, Thread, UserThreadRuntimeAction, current_futex_key, get_process_state, get_task,
+    poll_cpu_timers, send_signal_to_process, send_signal_to_thread,
 };
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_ipc::SHM_MANAGER;
-
-use crate::signal::{check_signals, unblock_next_signal};
 
 /// Create a new user task that runs in user space and handles traps.
 pub fn new_user_task(
     name: &str,
     mut uctx: UserContext,
     set_child_tid: usize,
-    mut dispatch_syscall: impl FnMut(&mut UserContext) + Send + 'static,
+    mut dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
 ) -> TaskInner {
     TaskInner::new(
         move || {
@@ -43,11 +41,14 @@ pub fn new_user_task(
             let thr = kthread::current_thread();
             while !thr.is_exiting() {
                 let reason = uctx.run();
+                let mut runtime_action = UserThreadRuntimeAction::Continue;
 
                 thr.set_cpu_state(CpuTimeState::Kernel);
 
                 match reason {
-                    ReturnReason::Syscall => dispatch_syscall(&mut uctx),
+                    ReturnReason::Syscall => {
+                        runtime_action = dispatch_syscall(&mut uctx);
+                    }
                     ReturnReason::PageFault(addr, flags) => {
                         if !thr
                             .proc_state
@@ -89,7 +90,13 @@ pub fn new_user_task(
                     }
                 }
 
-                if !unblock_next_signal() {
+                // Normally we check for pending signals after every trap return.  The
+                // exception is rt_sigreturn: it restores the pre-signal context, so
+                // running check_signals here would see the same pending signal that the
+                // handler just finished processing and immediately re-enter the handler,
+                // looping forever.  Skipping this check once is safe because the restored
+                // context already has the correct signal state.
+                if runtime_action != UserThreadRuntimeAction::SkipSignalCheckOnce {
                     while check_signals(&thr, &mut uctx, None) {}
                 }
 
@@ -249,4 +256,33 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
     }
 
     Ok(())
+}
+
+/// Check for pending signals and execute default handlers if needed.
+pub fn check_signals(
+    thr: &Thread,
+    uctx: &mut UserContext,
+    restore_blocked: Option<SignalSet>,
+) -> bool {
+    let Some((sig, os_action)) = thr.signal.check_signals(uctx, restore_blocked) else {
+        return false;
+    };
+
+    let signo = sig.signo();
+    match os_action {
+        SignalOSAction::Terminate => {
+            do_exit(signo as i32, true);
+        }
+        SignalOSAction::CoreDump => {
+            // TODO: implement core dump
+            do_exit(128 + signo as i32, true);
+        }
+        SignalOSAction::Stop => {
+            // TODO: implement stop
+            do_exit(1, true);
+        }
+        SignalOSAction::Continue => {}
+        SignalOSAction::Handler => {}
+    }
+    true
 }

@@ -14,7 +14,6 @@ use alloc::vec::Vec;
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kpoll::IoEvents;
-use kservices::signal::with_replacen_blocked;
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
@@ -60,7 +59,7 @@ fn do_poll(
     }
     let fds = FdPollSet(fds);
 
-    with_replacen_blocked(sigmask, || {
+    kthread::current_thread().with_temp_blocked(sigmask, || {
         match block_on(future::timeout(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {

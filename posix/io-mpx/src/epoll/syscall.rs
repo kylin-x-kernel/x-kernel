@@ -10,7 +10,6 @@ use core::time::Duration;
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kpoll::IoEvents;
-use kservices::signal::with_replacen_blocked;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
@@ -107,17 +106,18 @@ fn do_epoll_wait(
         .map(UserConstPtr::read_vm)
         .transpose()?;
 
-    let ready = with_replacen_blocked(sigmask.map(Into::into), || {
-        match block_on(future::timeout(
-            timeout,
-            poll_io(epoll.as_ref(), IoEvents::IN, false, || {
-                epoll.poll_events(&mut output)
-            }),
-        )) {
+    let ready =
+        kthread::current_thread().with_temp_blocked(sigmask.map(Into::into), || match block_on(
+            future::timeout(
+                timeout,
+                poll_io(epoll.as_ref(), IoEvents::IN, false, || {
+                    epoll.poll_events(&mut output)
+                }),
+            ),
+        ) {
             Ok(r) => r,
             Err(_) => Ok(0),
-        }
-    })?;
+        })?;
 
     events.write_vm_slice(&output[..ready])?;
     Ok(ready as isize)

@@ -16,7 +16,6 @@ kerrno.workspace = true
 kfd.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
-kservices.workspace = true
 kspin.workspace = true
 ktask.workspace = true
 kthread.workspace = true

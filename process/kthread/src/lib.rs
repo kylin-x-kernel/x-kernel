@@ -49,6 +49,16 @@ pub use thread::{
 };
 pub use timer_delivery::{dispatch_timer_delivery, poll_cpu_timers, spawn_alarm_task};
 
+/// Runtime action requested by a syscall after handling a user trap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UserThreadRuntimeAction {
+    /// Continue with the normal post-syscall signal check.
+    #[default]
+    Continue,
+    /// Skip the post-syscall signal check once (used by rt_sigreturn).
+    SkipSignalCheckOnce,
+}
+
 /// Returns the current process-owned resources.
 pub fn current_resources() -> Arc<ProcessResources> {
     current_process_state().resources.clone()

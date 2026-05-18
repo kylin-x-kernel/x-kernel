@@ -14,7 +14,6 @@ use core::time::Duration;
 
 use kerrno::{KError, KResult};
 use kpoll::IoEvents;
-use kservices::signal::with_replacen_blocked;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::*;
 use posix_signal::check_sigset_size;
@@ -103,7 +102,7 @@ fn do_select(
     let mut res_out = FdSet::zeroed();
     let mut res_ex = FdSet::zeroed();
 
-    let result = with_replacen_blocked(sigmask.map(Into::into), || {
+    let result = kthread::current_thread().with_temp_blocked(sigmask.map(Into::into), || {
         match block_on(future::timeout(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {
