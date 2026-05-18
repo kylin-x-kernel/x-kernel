@@ -94,7 +94,7 @@ struct TeeTaTimeOffs {
     positive: bool,
 }
 
-// Global time offset storage - using spin::Mutex for thread safety
+// Global time offset storage
 use ksync::Mutex;
 static TEE_TIME_OFFS: Mutex<Option<vec::Vec<TeeTaTimeOffs>>> = Mutex::new(None);
 

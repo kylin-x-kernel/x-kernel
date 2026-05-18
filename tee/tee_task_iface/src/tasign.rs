@@ -10,8 +10,9 @@ use core::convert::AsRef;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
 use kfs::{CachedFile, kernel_fs_context};
+use ksync::Mutex;
+use ktypes::Lazy;
 use log::{error, info};
-use spin::{Lazy, Mutex};
 use tee_raw_sys::ta_head;
 
 use crate::ta_ctx::TeeTaCtx;
