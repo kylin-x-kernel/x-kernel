@@ -115,6 +115,7 @@ pub(crate) struct PosixTimer {
     clock: PosixTimerClock,
     spec: ITimer,
     notify: PosixTimerNotify,
+    signal_seq: u32,
     pending_signal: bool,
     queued_overrun: u32,
     last_overrun: u32,
@@ -125,6 +126,7 @@ impl PosixTimer {
         clock: PosixTimerClock,
         notify: PosixTimerCreateNotify,
         timer_id: i32,
+        signal_seq: u32,
     ) -> Self {
         let notify = match notify {
             PosixTimerCreateNotify::None => PosixTimerNotify::None,
@@ -146,6 +148,7 @@ impl PosixTimer {
             clock,
             spec: ITimer::default(),
             notify,
+            signal_seq,
             pending_signal: false,
             queued_overrun: 0,
             last_overrun: 0,
@@ -206,6 +209,14 @@ impl PosixTimer {
             .set_alarm(runtime_deadline_ns, runtime_deadline_ns.map(|_| owner_pid));
     }
 
+    pub(crate) fn set_signal_seq(&mut self, signal_seq: u32) {
+        self.signal_seq = signal_seq;
+    }
+
+    pub(crate) fn signal_seq(&self) -> u32 {
+        self.signal_seq
+    }
+
     pub(crate) fn on_signal_dequeued(&mut self) {
         if !self.pending_signal {
             return;
@@ -253,6 +264,7 @@ impl PosixTimer {
             signo,
             timer_id,
             overrun: overrun.min(i32::MAX as u32) as i32,
+            signal_seq: self.signal_seq,
             value: value.into_raw(),
         };
         Some(match target_tid {

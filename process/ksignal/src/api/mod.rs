@@ -8,6 +8,8 @@ mod process;
 mod thread;
 
 pub(crate) use dequeue_observer::notify_signal_dequeued;
-pub use dequeue_observer::{register_signal_observer, unregister_signal_observer};
+pub use dequeue_observer::{
+    SignalDequeueAction, register_signal_observer, unregister_signal_observer,
+};
 pub use process::*;
 pub use thread::*;

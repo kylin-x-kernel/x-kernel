@@ -18,6 +18,7 @@ pub enum TimerSignal {
         signo: Signo,
         timer_id: i32,
         overrun: i32,
+        signal_seq: u32,
         value: k_sigval,
     },
 }

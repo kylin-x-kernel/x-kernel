@@ -8,7 +8,16 @@ use kspin::SpinNoIrq;
 
 use crate::{MAX_SIGNALS, SignalInfo, Signo};
 
-type ObserverFn = fn(&SignalInfo);
+/// The observer's decision for a dequeued signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalDequeueAction {
+    /// Delivers the signal to normal signal handling.
+    Deliver,
+    /// Drops the signal after dequeue.
+    Drop,
+}
+
+type ObserverFn = fn(&SignalInfo) -> SignalDequeueAction;
 
 const NONE: Option<ObserverFn> = None;
 
@@ -33,13 +42,11 @@ pub fn unregister_signal_observer(signo: Signo) {
 }
 
 /// Notifies the registered observer for `sig`, if any.
-pub(crate) fn notify_signal_dequeued(sig: &SignalInfo) {
+pub(crate) fn notify_signal_dequeued(sig: &SignalInfo) -> SignalDequeueAction {
     let idx = sig.signo() as usize;
     if !(1..=MAX_SIGNALS).contains(&idx) {
-        return;
+        return SignalDequeueAction::Deliver;
     }
     let observer = OBSERVERS.lock()[idx - 1];
-    if let Some(observer) = observer {
-        observer(sig);
-    }
+    observer.map_or(SignalDequeueAction::Deliver, |observer_fn| observer_fn(sig))
 }

@@ -5,13 +5,13 @@
 //! Thread/process timer runtime surface.
 //!
 //! This module owns the bridge between process-owned timer state and signal
-//! delivery. Timer expiration polling, dequeue callbacks, and alarm-task
-//! registration all converge here.
+//! delivery. Timer expiration polling, dequeue validation callbacks, and
+//! alarm-task registration all converge here.
 
 use alloc::vec::Vec;
 
 use kprocess::Pid;
-use ksignal::{SignalInfo, Signo};
+use ksignal::{SignalDequeueAction, SignalInfo, Signo};
 use ktimer::{TimerDelivery, TimerSignal};
 use ktypes::Once;
 
@@ -59,15 +59,23 @@ pub fn poll_cpu_timers() {
 }
 
 /// Updates timer bookkeeping after a pending timer signal is dequeued.
-fn on_signal_dequeued(sig: &SignalInfo) {
+fn on_signal_dequeued(sig: &SignalInfo) -> SignalDequeueAction {
     let Some(timer_id) = sig.timer_id() else {
-        return;
+        return SignalDequeueAction::Deliver;
     };
-    crate::current_thread()
+    let Some(signal_seq) = sig.timer_signal_seq() else {
+        return SignalDequeueAction::Drop;
+    };
+    let should_deliver = crate::current_thread()
         .process_state()
         .timer_manager()
         .lock()
-        .on_timer_signal_dequeued(timer_id);
+        .on_timer_signal_dequeued(timer_id, signal_seq);
+    if should_deliver {
+        SignalDequeueAction::Deliver
+    } else {
+        SignalDequeueAction::Drop
+    }
 }
 
 fn build_timer_signal_info(signal: TimerSignal) -> SignalInfo {
@@ -77,8 +85,9 @@ fn build_timer_signal_info(signal: TimerSignal) -> SignalInfo {
             signo,
             timer_id,
             overrun,
+            signal_seq,
             value,
-        } => SignalInfo::new_timer(signo, timer_id, overrun, value),
+        } => SignalInfo::new_timer(signo, timer_id, overrun, value, signal_seq),
     }
 }
 

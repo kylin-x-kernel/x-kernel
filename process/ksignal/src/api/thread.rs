@@ -17,7 +17,8 @@ use osvm::VirtMutPtr;
 use super::ProcessSignalManager;
 use crate::{
     DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
-    SignalInfo, SignalOSAction, SignalSet, SignalStack, Signo, api::notify_signal_dequeued,
+    SignalInfo, SignalOSAction, SignalSet, SignalStack, Signo,
+    api::{SignalDequeueAction, notify_signal_dequeued},
     arch::UContext,
 };
 
@@ -61,10 +62,15 @@ impl ThreadSignalManager {
     /// Dequeues a signal from the thread's pending signals.
     #[must_use]
     pub fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
-        let signal = self.pending.lock().dequeue_signal(mask);
-        if let Some(sig) = signal {
-            notify_signal_dequeued(&sig);
-            return Some(sig);
+        loop {
+            let signal = self.pending.lock().dequeue_signal(mask);
+            if let Some(sig) = signal {
+                if notify_signal_dequeued(&sig) == SignalDequeueAction::Deliver {
+                    return Some(sig);
+                }
+                continue;
+            }
+            break;
         }
 
         self.possibly_has_signal.store(false, Ordering::Release);

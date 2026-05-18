@@ -13,8 +13,8 @@ use kspin::SpinNoIrq;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
-    DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
-    SignalInfo, SignalSet, SignalStack, Signo,
+    DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDequeueAction,
+    SignalDisposition, SignalInfo, SignalSet, SignalStack, Signo,
     api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
 };
 
@@ -27,9 +27,16 @@ fn new_thread_manager() -> alloc::sync::Arc<ThreadSignalManager> {
 static DEQUEUED_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LAST_DEQUEUED_SIGNAL: AtomicUsize = AtomicUsize::new(0);
 
-fn record_dequeued_signal(sig: &SignalInfo) {
+fn record_dequeued_signal(sig: &SignalInfo) -> SignalDequeueAction {
     LAST_DEQUEUED_SIGNAL.store(sig.signo() as usize, Ordering::Relaxed);
     DEQUEUED_SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    SignalDequeueAction::Deliver
+}
+
+fn drop_dequeued_signal(sig: &SignalInfo) -> SignalDequeueAction {
+    LAST_DEQUEUED_SIGNAL.store(sig.signo() as usize, Ordering::Relaxed);
+    DEQUEUED_SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    SignalDequeueAction::Drop
 }
 
 #[def_test]
@@ -198,6 +205,8 @@ fn test_signo_default_action_full() {
 
 #[def_test]
 fn test_signal_dequeue_observer_per_signo() {
+    crate::unregister_signal_observer(Signo::SIGUSR1);
+    crate::unregister_signal_observer(Signo::SIGUSR2);
     crate::register_signal_observer(Signo::SIGUSR1, record_dequeued_signal);
     crate::register_signal_observer(Signo::SIGUSR2, record_dequeued_signal);
     DEQUEUED_SIGNAL_COUNT.store(0, Ordering::Relaxed);
@@ -231,6 +240,35 @@ fn test_signal_dequeue_observer_per_signo() {
     let signal = thread.dequeue_signal(&mask).unwrap();
     assert_eq!(signal.signo(), Signo::SIGINT);
     assert_eq!(DEQUEUED_SIGNAL_COUNT.load(Ordering::Relaxed), 2);
+
+    crate::unregister_signal_observer(Signo::SIGUSR1);
+    crate::unregister_signal_observer(Signo::SIGUSR2);
+}
+
+#[def_test]
+fn test_signal_dequeue_observer_can_drop_signal() {
+    crate::unregister_signal_observer(Signo::SIGUSR1);
+    crate::register_signal_observer(Signo::SIGUSR1, drop_dequeued_signal);
+    DEQUEUED_SIGNAL_COUNT.store(0, Ordering::Relaxed);
+    LAST_DEQUEUED_SIGNAL.store(0, Ordering::Relaxed);
+
+    let thread = new_thread_manager();
+    let mut mask = SignalSet::default();
+    mask.add(Signo::SIGUSR1);
+    mask.add(Signo::SIGUSR2);
+
+    assert!(thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR2)));
+    assert!(thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
+
+    let signal = thread.dequeue_signal(&mask).unwrap();
+    assert_eq!(signal.signo(), Signo::SIGUSR2);
+    assert_eq!(DEQUEUED_SIGNAL_COUNT.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        LAST_DEQUEUED_SIGNAL.load(Ordering::Relaxed),
+        Signo::SIGUSR1 as usize
+    );
+
+    crate::unregister_signal_observer(Signo::SIGUSR1);
 }
 
 #[def_test]

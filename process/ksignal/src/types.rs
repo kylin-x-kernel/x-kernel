@@ -254,13 +254,19 @@ impl SignalInfo {
     }
 
     /// Construct a timer-originated signal.
-    pub fn new_timer(signo: Signo, timer_id: i32, overrun: i32, value: k_sigval) -> Self {
+    pub fn new_timer(
+        signo: Signo,
+        timer_id: i32,
+        overrun: i32,
+        value: k_sigval,
+        signal_seq: u32,
+    ) -> Self {
         // SAFETY: siginfo_t is a C struct where all-zeroes is a valid
         // representation.  Fields are immediately overwritten below.
         let mut result: Self = unsafe { mem::zeroed() };
         result.set_signo(signo);
         result.set_code(SI_TIMER as _);
-        result.set_timer_fields(timer_id, overrun, value);
+        result.set_timer_fields(timer_id, overrun, value, signal_seq);
         result
     }
 
@@ -323,6 +329,20 @@ impl SignalInfo {
         })
     }
 
+    /// Returns the timer sequence carried by a `SI_TIMER` signal.
+    pub fn timer_signal_seq(&self) -> Option<u32> {
+        (self.code() == SI_TIMER as _).then_some(unsafe {
+            // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union
+            // arm was populated by `set_timer_fields`.
+            self.0
+                .__bindgen_anon_1
+                .__bindgen_anon_1
+                ._sifields
+                ._timer
+                ._sys_private as u32
+        })
+    }
+
     /// Returns the `sigval` payload carried by this signal, if present.
     ///
     /// Only `SI_TIMER` and user-originated signals (`code < 0`, e.g. `SI_QUEUE`)
@@ -355,7 +375,7 @@ impl SignalInfo {
         }
     }
 
-    fn set_timer_fields(&mut self, timer_id: i32, overrun: i32, value: k_sigval) {
+    fn set_timer_fields(&mut self, timer_id: i32, overrun: i32, value: k_sigval, signal_seq: u32) {
         self.0
             .__bindgen_anon_1
             .__bindgen_anon_1
@@ -379,7 +399,7 @@ impl SignalInfo {
             .__bindgen_anon_1
             ._sifields
             ._timer
-            ._sys_private = 0;
+            ._sys_private = signal_seq as _;
     }
 }
 

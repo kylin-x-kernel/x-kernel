@@ -26,6 +26,7 @@ pub struct ProcessTimerManager {
     owner_pid: Pid,
     itimers: [ITimer; ITIMER_SIGNAL_CAPACITY],
     next_posix_timer_id: i32,
+    next_posix_signal_seq: u32,
     posix_timers: BTreeMap<i32, PosixTimer>,
 }
 
@@ -36,6 +37,7 @@ impl ProcessTimerManager {
             owner_pid,
             itimers: Default::default(),
             next_posix_timer_id: 1,
+            next_posix_signal_seq: 1,
             posix_timers: BTreeMap::new(),
         }
     }
@@ -154,8 +156,11 @@ impl ProcessTimerManager {
             return Err(KError::InvalidInput);
         };
         let timer_id = self.allocate_posix_timer_id()?;
-        self.posix_timers
-            .insert(timer_id, PosixTimer::new(clock, notify, timer_id));
+        let signal_seq = self.allocate_posix_signal_seq();
+        self.posix_timers.insert(
+            timer_id,
+            PosixTimer::new(clock, notify, timer_id, signal_seq),
+        );
         Ok(timer_id)
     }
 
@@ -180,11 +185,13 @@ impl ProcessTimerManager {
         process_utime_ns: usize,
         process_stime_ns: usize,
     ) -> KResult<((TimeValue, TimeValue), Option<TimerDelivery>)> {
+        let signal_seq = self.allocate_posix_signal_seq();
         let timer = self
             .posix_timers
             .get_mut(&timer_id)
             .ok_or(KError::InvalidInput)?;
         let owner_pid = self.owner_pid;
+        timer.set_signal_seq(signal_seq);
         let old = timer.settime(
             absolute,
             interval_ns,
@@ -219,10 +226,15 @@ impl ProcessTimerManager {
         self.posix_timers.clear();
     }
 
-    pub fn on_timer_signal_dequeued(&mut self, timer_id: i32) {
+    pub fn on_timer_signal_dequeued(&mut self, timer_id: i32, signal_seq: u32) -> bool {
         if let Some(timer) = self.posix_timers.get_mut(&timer_id) {
+            if timer.signal_seq() != signal_seq {
+                return false;
+            }
             timer.on_signal_dequeued();
+            return true;
         }
+        false
     }
 
     fn timer_clock_now_ns(
@@ -255,6 +267,12 @@ impl ProcessTimerManager {
         }
     }
 
+    fn allocate_posix_signal_seq(&mut self) -> u32 {
+        let signal_seq = self.next_posix_signal_seq;
+        self.next_posix_signal_seq = self.next_posix_signal_seq.checked_add(1).unwrap_or(1);
+        signal_seq
+    }
+
     fn arm_itimer_real(timer: &mut ITimer, owner_pid: Pid) {
         timer.set_alarm(timer.deadline_ns(), Some(owner_pid));
     }
@@ -262,10 +280,16 @@ impl ProcessTimerManager {
 
 #[cfg(unittest)]
 mod tests {
+    use ksignal::Signo;
+    use linux_raw_sys::general::CLOCK_PROCESS_CPUTIME_ID;
     use posix_types::ITimerType;
     use unittest::def_test;
 
     use super::ProcessTimerManager;
+    use crate::{
+        TimerDelivery, TimerSignal,
+        posix_timer::{PosixTimerCreateNotify, PosixTimerSigValue},
+    };
 
     #[def_test]
     fn test_process_timer_manager_set_itimer_returns_previous_values() {
@@ -282,5 +306,39 @@ mod tests {
         let (interval, remained) = manager.get_itimer(ITimerType::Virtual, 0, 0);
         assert_eq!(interval.subsec_nanos(), 33);
         assert_eq!(remained.subsec_nanos(), 44);
+    }
+
+    #[def_test]
+    fn test_posix_timer_signal_seq_invalidates_stale_signal() {
+        let mut manager = ProcessTimerManager::new(1);
+        let timer_id = manager
+            .create_posix_timer(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        let (_, delivery) = manager
+            .set_posix_timer(timer_id, false, 0, 1, 0, 0)
+            .unwrap();
+        assert!(delivery.is_none());
+
+        let delivery = manager
+            .poll_cpu_timers(1, 0)
+            .into_iter()
+            .next()
+            .expect("timer delivery");
+        let stale_signal_seq = match delivery {
+            TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) => signal_seq,
+            _ => panic!("expected a POSIX timer signal"),
+        };
+
+        let _ = manager
+            .set_posix_timer(timer_id, false, 0, 10, 1, 0)
+            .unwrap();
+        assert!(!manager.on_timer_signal_dequeued(timer_id, stale_signal_seq));
     }
 }
