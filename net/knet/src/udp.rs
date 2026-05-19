@@ -181,7 +181,7 @@ impl SocketOps for UdpSocket {
         }
 
         let remote_addr = IpEndpoint::from(remote_addr);
-        let src = SERVICE.lock().get_source_address(&remote_addr.addr);
+        let src = SERVICE.lock().get_source_address(&remote_addr.addr)?;
         *guard = Some((remote_addr, src));
         self.general
             .set_device_mask(SERVICE.lock().device_mask_for_addr(&remote_addr.addr));
@@ -197,7 +197,7 @@ impl SocketOps for UdpSocket {
         let (remote_addr, source_addr) = match options.to {
             Some(addr) => {
                 let addr = IpEndpoint::from(addr.into_ip()?);
-                let src = SERVICE.lock().get_source_address(&addr.addr);
+                let src = SERVICE.lock().get_source_address(&addr.addr)?;
                 (addr, src)
             }
             None => self.remote_endpoint()?,

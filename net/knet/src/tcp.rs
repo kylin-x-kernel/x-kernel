@@ -300,7 +300,7 @@ impl SocketOps for TcpSocket {
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
                     bound_endpoint.addr =
-                        Some(SERVICE.lock().get_source_address(&remote_endpoint.addr));
+                        Some(SERVICE.lock().get_source_address(&remote_endpoint.addr)?);
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint

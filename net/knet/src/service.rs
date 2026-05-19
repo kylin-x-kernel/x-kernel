@@ -9,6 +9,7 @@ use core::{
     task::{Context, Waker},
 };
 
+use kerrno::{KError, KResult, LinuxError};
 use khal::time::{NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos};
 use kpoll::PollSet;
 use ktask::future::sleep;
@@ -54,11 +55,12 @@ impl Service {
         self.router.dispatch(timestamp)
     }
 
-    pub fn get_source_address(&self, dst_addr: &IpAddress) -> IpAddress {
-        let Some(rule) = self.router.table.lookup(dst_addr) else {
-            panic!("no route to destination: {dst_addr}");
-        };
-        rule.src
+    pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
+        self.router
+            .table
+            .lookup(dst_addr)
+            .map(|rule| rule.src)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))
     }
 
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
