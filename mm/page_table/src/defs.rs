@@ -94,6 +94,30 @@ pub trait PagingMetaData: Sync + Send {
     }
 
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
+
+    /// Flush TLB on all CPUs (local + remote via IPI shootdown).
+    ///
+    /// Default: local-only, backward compatible with single-CPU builds.
+    #[inline]
+    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) {
+        Self::flush_tlb(vaddr);
+    }
+}
+
+/// Interface for broadcasting TLB flush to remote CPUs.
+///
+/// Implemented by the IPI subsystem (e.g. `kipi::tlb`) at link time via
+/// `crate_interface::impl_interface`.  This indirection breaks the
+/// circular dependency between `page_table` and the IPI crate.
+#[cfg(feature = "smp")]
+#[crate_interface::def_interface]
+pub trait TlbFlushIf {
+    /// Flush TLB entries on all remote CPUs.
+    ///
+    /// If `vaddr` is `None`, flush the entire TLB; otherwise flush only the
+    /// entry mapping `vaddr`.  The local CPU flush is the caller's
+    /// responsibility — this method only handles remote CPUs.
+    fn flush_all(vaddr: Option<VirtAddr>);
 }
 
 /// Hooks for allocating and mapping page table frames.

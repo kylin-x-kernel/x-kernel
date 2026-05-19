@@ -14,7 +14,7 @@ use core::{
 };
 
 use futures_util::task::AtomicWaker;
-use kcpu_id_map::LogicalCpuId;
+use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
 use ksched::BaseScheduler;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
@@ -453,7 +453,7 @@ impl RunQueue {
         )
         .into_arc();
         // gc task should be pinned to the current CPU.
-        gc_task.set_cpumask(KCpuMask::one_shot(cpu_id.as_usize()));
+        gc_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
 
         let mut scheduler = Scheduler::new();
         scheduler.add_task(gc_task);
@@ -552,7 +552,10 @@ impl RunQueue {
         // Claim the task as running, we do this before switching to it
         // such that any running task will have this set.
         #[cfg(feature = "smp")]
-        next_task.set_on_cpu(true);
+        {
+            next_task.set_on_cpu(true);
+            next_task.set_on_cpu_mask_bit(this_cpu_id());
+        }
 
         #[cfg(feature = "task_ext")]
         {
@@ -674,7 +677,7 @@ pub(crate) fn init() {
     const IDLE_TASK_STACK_SIZE: usize = 16384;
     let idle_task = TaskInner::new(|| crate::run_idle(), "idle".into(), IDLE_TASK_STACK_SIZE);
     // idle task should be pinned to the current CPU.
-    idle_task.set_cpumask(KCpuMask::one_shot(cpu_id.as_usize()));
+    idle_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
     IDLE_TASK.with_current(|i| {
         i.init_once(idle_task.into_arc());
     });

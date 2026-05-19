@@ -79,24 +79,25 @@ unsafe fn init_ap_boot_state() {
     }
 }
 
-/// Read the initial APIC ID from CPUID leaf 1 (bits [31:24] of EBX).
-/// This is the raw x86 CPU ID used by the APIC topology.
-fn get_cpu_id() -> usize {
-    let ebx_val: u32;
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "mov {:e}, ebx",
-            "pop rbx",
-            out(reg) ebx_val,
-            inout("eax") 1u32 => _,
-            out("ecx") _,
-            out("edx") _,
-            options(nostack, preserves_flags),
-        );
+/// Read the x2APIC ID from CPUID leaf 0x0B (Extended Topology).
+/// Falls back to the initial APIC ID from leaf 1 if leaf 0x0B is not supported.
+fn get_cpu_id() -> RawCpuId {
+    let cpuid = raw_cpuid::CpuId::new();
+    if let Some(level) = cpuid
+        .get_extended_topology_info()
+        .and_then(|mut t| t.next())
+    {
+        let id = level.x2apic_id();
+        if id != 0 {
+            return RawCpuId::new(id as usize);
+        }
     }
-    ((ebx_val >> 24) & 0xff) as usize
+    RawCpuId::new(
+        cpuid
+            .get_feature_info()
+            .map(|f| f.initial_local_apic_id() as usize)
+            .unwrap_or(0),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -105,7 +106,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         let kimage_voffset = handoff_arg;
         kaddr_layout::set_kimage_voffset(kimage_voffset);
         unsafe { init_ap_boot_state() };
-        let logical_cpu_id = crate::arch::logical_cpu_id(RawCpuId::new(get_cpu_id()))
+        let logical_cpu_id = crate::arch::logical_cpu_id(get_cpu_id())
             .unwrap_or_else(|| panic!("missing logical cpu id mapping for boot cpu"));
         let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
         unsafe {
@@ -137,7 +138,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
 #[unsafe(no_mangle)]
 pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
-        let raw_cpu_id = RawCpuId::new(get_cpu_id());
+        let raw_cpu_id = get_cpu_id();
         let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
             panic!(
                 "missing logical cpu id mapping for raw cpu id {}",

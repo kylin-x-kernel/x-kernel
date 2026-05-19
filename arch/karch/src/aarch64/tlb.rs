@@ -32,13 +32,13 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
         // flush the entire TLB
         #[cfg(not(feature = "arm-el2"))]
         unsafe {
-            // TLB Invalidate by VMID, All at stage 1, EL1
-            asm!("dsb sy; isb; tlbi vmalle1; dsb sy; isb")
+            // TLB Invalidate by VMID, All at stage 1, EL1, Inner Shareable
+            asm!("dsb ishst; tlbi vmalle1is; dsb ish; isb")
         }
         #[cfg(feature = "arm-el2")]
         unsafe {
-            // TLB Invalidate All, EL2
-            asm!("tlbi alle2; dsb sy; isb")
+            // TLB Invalidate All, EL2, Inner Shareable
+            asm!("tlbi alle2is; dsb ish; isb")
         }
     }
 }

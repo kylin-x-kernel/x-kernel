@@ -14,6 +14,7 @@ default = []
 
 # Multicore
 smp = [
+    "ipi",
     "khal/smp",
     "kruntime/smp",
     "ktask?/smp",
@@ -21,6 +22,7 @@ smp = [
     "aarch64-qemu-virt?/smp",
     "aarch64-crosvm-virt?/smp",
     "riscv64-qemu-virt?/smp",
+    "x86_64-qemu-virt?/smp",
 ]
 
 # Floating point/SIMD
@@ -42,7 +44,12 @@ platform_aarch64_qemu_virt = [
     "smp",
     "dev_log",
 ]
-platform_x86_64_qemu_virt = ["dep:x86_64-qemu-virt", "fp-simd", "dev_log"]
+platform_x86_64_qemu_virt = [
+    "dep:x86_64-qemu-virt",
+    "fp-simd",
+    "smp",
+    "dev_log",
+]
 platform_riscv64_qemu_virt = [
     "dep:riscv64-qemu-virt",
     "fp-simd",

@@ -34,7 +34,6 @@ backtrace = { workspace = true, optional = true }
 kpoll = { workspace = true }
 ksched = { workspace = true }
 cfg-if.workspace = true
-cpumask = { version = "0.1" }
 crate_interface = { workspace = true }
 event-listener = { workspace = true }
 extern-trait = { version = "0.2", optional = true }
@@ -49,3 +48,4 @@ memaddr = { workspace = true }
 percpu = { workspace = true }
 kbuild_config = { workspace = true }
 karch = { workspace = true }
+unittest = { workspace = true }

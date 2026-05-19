@@ -24,7 +24,8 @@ pub mod loongarch64;
 pub(crate) use kcpu_id_map::CPU_ID_MAP;
 pub(crate) use kcpu_id_map::init_boot_cpu_id_map;
 pub use kcpu_id_map::{
-    LogicalCpuId, RawCpuId, for_each_present_logical_cpu, logical_cpu_id, raw_cpu_id,
+    KCpuMask, KCpuMaskExt, LogicalCpuId, LogicalCpuIdIter, RawCpuId, for_each_present_logical_cpu,
+    logical_cpu_id, raw_cpu_id,
 };
 
 #[cfg(target_arch = "loongarch64")]

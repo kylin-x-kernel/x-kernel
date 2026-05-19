@@ -18,7 +18,7 @@
 extern crate log;
 extern crate alloc;
 
-use kcpu_id_map::LogicalCpuId;
+use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
 use khal::{
     irq::{IPI_IRQ, TargetCpu as IpiTarget},
     percpu::this_cpu_id,
@@ -28,6 +28,7 @@ use lazyinit::LazyInit;
 
 mod event;
 mod queue;
+pub mod tlb;
 
 pub use event::{Callback, MulticastCallback};
 use queue::IpiEventQueue;
@@ -104,27 +105,26 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
 pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     debug!("Send IPI event to all other CPUs");
     let current_cpu_id = this_cpu_id();
-    let cpu_num = kbuild_config::CPU_NUM;
     let callback = callback.into();
 
     // Execute callback on current CPU immediately
     callback.clone().call();
 
     // Push the callback to all other CPUs' IPI event queues
-    for cpu_id in 0..cpu_num {
-        if cpu_id != current_cpu_id.as_usize() {
-            unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id) }
+    for_each_present_logical_cpu(|cpu_id| {
+        if cpu_id != current_cpu_id {
+            unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id.as_usize()) }
                 .lock()
                 .push(current_cpu_id, callback.clone().into_unicast());
         }
-    }
+    });
 
     // Send IPI to all other CPUs to trigger their callbacks
     khal::irq::notify_cpu(
         IPI_IRQ,
         IpiTarget::AllButSelf {
             me: current_cpu_id.as_usize(),
-            total: cpu_num,
+            total: kbuild_config::CPU_NUM,
         },
     );
 
@@ -136,6 +136,9 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
 /// This function is called in interrupt context. If a callback panics or fails,
 /// the error is logged but other pending callbacks will still be processed.
 pub fn ipi_handler() {
+    // Process TLB shootdown requests before handling generic callbacks.
+    tlb::handle_shootdown();
+
     while let Some((src_cpu_id, callback)) = unsafe { IPI_EVENT_QUEUE.current_ref_mut_raw() }
         .lock()
         .pop_one()

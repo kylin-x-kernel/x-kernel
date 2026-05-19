@@ -327,3 +327,51 @@ impl CpuIdMap {
         None
     }
 }
+
+/// The kernel CPU mask type, parameterized by the configured maximum CPU count.
+pub type KCpuMask = cpumask::CpuMask<{ CPU_NUM }>;
+
+/// Extension trait adding [`LogicalCpuId`]-typed operations to [`KCpuMask`].
+pub trait KCpuMaskExt {
+    /// Sets the bit corresponding to `cpu_id`.
+    fn set_logical(&mut self, cpu_id: LogicalCpuId, value: bool) -> bool;
+    /// Gets the bit corresponding to `cpu_id`.
+    fn get_logical(&self, cpu_id: LogicalCpuId) -> bool;
+    /// Constructs a mask with a single bit set for `cpu_id`.
+    fn one_shot_logical(cpu_id: LogicalCpuId) -> KCpuMask;
+    /// Returns an iterator yielding [`LogicalCpuId`] values for all set bits.
+    fn iter_logical(&self) -> LogicalCpuIdIter<'_>;
+}
+
+impl KCpuMaskExt for KCpuMask {
+    fn set_logical(&mut self, cpu_id: LogicalCpuId, value: bool) -> bool {
+        self.set(cpu_id.as_usize(), value)
+    }
+
+    fn get_logical(&self, cpu_id: LogicalCpuId) -> bool {
+        self.get(cpu_id.as_usize())
+    }
+
+    fn one_shot_logical(cpu_id: LogicalCpuId) -> KCpuMask {
+        KCpuMask::one_shot(cpu_id.as_usize())
+    }
+
+    fn iter_logical(&self) -> LogicalCpuIdIter<'_> {
+        LogicalCpuIdIter {
+            inner: self.into_iter(),
+        }
+    }
+}
+
+/// Iterator over set bits in a [`KCpuMask`], yielding [`LogicalCpuId`] values.
+pub struct LogicalCpuIdIter<'a> {
+    inner: cpumask::Iter<'a, { CPU_NUM }>,
+}
+
+impl<'a> Iterator for LogicalCpuIdIter<'a> {
+    type Item = LogicalCpuId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(LogicalCpuId::new)
+    }
+}

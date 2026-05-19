@@ -12,7 +12,7 @@ description = "Runtime library of X-kernel"
 [features]
 default = []
 
-smp = ["khal/smp", "ktask/smp"]
+smp = ["khal/smp", "ktask/smp", "memspace/smp", "ipi"]
 ipi = ["dep:kipi"]
 
 display = ["dep:kdriver", "dep:fbdevice"]
@@ -60,3 +60,4 @@ karch = { workspace = true }
 kernel_boot = { workspace = true }
 linkme = { workspace = true }
 macros.workspace = true
+unittest.workspace = true

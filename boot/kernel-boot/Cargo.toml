@@ -29,6 +29,7 @@ memaddr = { workspace = true }
 of = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
+raw-cpuid = "11"
 x86 = "0.52"
 x86_64 = { workspace = true }
 karch = { workspace = true }

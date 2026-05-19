@@ -11,7 +11,7 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::PhysAddr;
 use memspace::iomap_device;
-use riscv::register::sie;
+use riscv::register::{sie, sip};
 use riscv_plic::Plic;
 use sbi_rt::HartMask;
 
@@ -152,6 +152,7 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
+                unsafe { sip::clear_ssoft() };
                 Some(irq)
             },
             @S_EXT => {

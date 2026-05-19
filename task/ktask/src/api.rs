@@ -33,7 +33,7 @@ pub type KtaskRef = Arc<KTask>;
 pub type WeakKtaskRef = Weak<KTask>;
 
 /// The wrapper type for [`cpumask::CpuMask`] with SMP configuration.
-pub type KCpuMask = cpumask::CpuMask<{ kbuild_config::CPU_NUM }>;
+pub use kcpu_id_map::KCpuMask;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
 

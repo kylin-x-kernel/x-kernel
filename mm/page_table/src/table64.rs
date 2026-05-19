@@ -372,11 +372,11 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             ToFlush::None => {}
             ToFlush::Addresses(addrs) => {
                 for vaddr in addrs.iter() {
-                    M::flush_tlb(Some(*vaddr));
+                    M::flush_tlb_all_cpus(Some(*vaddr));
                 }
             }
             ToFlush::Full => {
-                M::flush_tlb(None);
+                M::flush_tlb_all_cpus(None);
             }
         }
         self.flush = ToFlush::None;

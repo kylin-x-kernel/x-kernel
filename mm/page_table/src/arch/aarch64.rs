@@ -196,6 +196,15 @@ impl PagingMetaData for A64PagingMetaData {
     fn flush_tlb(vaddr: Option<VirtAddr>) {
         karch::flush_tlb(vaddr);
     }
+
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+        // AArch64 Inner Shareable TLBI instructions (vaae1is / vmalle1is)
+        // broadcast to all PEs in the same Inner Shareable domain, so no
+        // software IPI shootdown is needed.
+        karch::flush_tlb(vaddr);
+    }
 }
 
 pub type A64PageTable<H> = PageTable64<A64PagingMetaData, A64PageEntry, H>;

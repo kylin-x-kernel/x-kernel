@@ -185,6 +185,13 @@ impl PagingMetaData for X64PagingMetaData {
     fn flush_tlb(vaddr: Option<VirtAddr>) {
         karch::flush_tlb(vaddr);
     }
+
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+        karch::flush_tlb(vaddr);
+        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_all(vaddr));
+    }
 }
 
 pub type X64PageTable<H> = PageTable64<X64PagingMetaData, X64PageEntry, H>;

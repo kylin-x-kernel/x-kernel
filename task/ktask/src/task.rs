@@ -20,7 +20,7 @@ use core::{
 };
 
 use futures_util::task::AtomicWaker;
-use kcpu_id_map::LogicalCpuId;
+use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::context::TaskContext;
 #[cfg(feature = "tls")]
 use khal::tls::TlsArea;
@@ -107,6 +107,11 @@ pub struct TaskInner {
     /// Used to indicate whether the task is running on a CPU.
     #[cfg(feature = "smp")]
     on_cpu: AtomicBool,
+
+    /// Bitmask of CPUs this task has been scheduled on since the last TLB
+    /// shootdown. Used to limit the scope of cross-CPU TLB invalidation.
+    #[cfg(feature = "smp")]
+    on_cpu_mask: SpinNoIrq<KCpuMask>,
 
     #[cfg(feature = "preempt")]
     need_resched: AtomicBool,
@@ -409,6 +414,8 @@ impl TaskInner {
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
+            #[cfg(feature = "smp")]
+            on_cpu_mask: SpinNoIrq::new(KCpuMask::new()),
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
@@ -576,6 +583,29 @@ impl TaskInner {
     pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
         self.on_cpu.store(on_cpu, Ordering::Release)
     }
+
+    /// Returns a snapshot of the CPUs this task has been scheduled on.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub fn on_cpu_mask(&self) -> KCpuMask {
+        *self.on_cpu_mask.lock()
+    }
+
+    /// Marks the given CPU as part of this task's residency mask.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub fn set_on_cpu_mask_bit(&self, cpu_id: LogicalCpuId) {
+        self.on_cpu_mask.lock().set_logical(cpu_id, true);
+    }
+
+    /// Clears the residency mask and sets only the given CPU.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub fn reset_on_cpu_mask(&self, cpu_id: LogicalCpuId) {
+        let mut mask = KCpuMask::new();
+        mask.set_logical(cpu_id, true);
+        *self.on_cpu_mask.lock() = mask;
+    }
 }
 
 impl fmt::Debug for TaskInner {
@@ -701,4 +731,61 @@ extern "C" fn task_entry() -> ! {
         entry()
     }
     crate::exit(0);
+}
+
+#[cfg(all(feature = "smp", unittest))]
+mod tests_on_cpu_mask {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    fn new_test_task() -> TaskInner {
+        TaskInner::new_common(TaskId::new(), "test".into())
+    }
+
+    #[def_test]
+    fn test_on_cpu_mask_initially_empty() {
+        let task = new_test_task();
+        assert!(task.on_cpu_mask().is_empty());
+    }
+
+    #[def_test]
+    fn test_set_on_cpu_mask_bit() {
+        if kbuild_config::CPU_NUM >= 2 {
+            let task = new_test_task();
+            task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
+            assert!(task.on_cpu_mask().get(0));
+            assert!(!task.on_cpu_mask().get(1));
+        }
+    }
+
+    #[def_test]
+    fn test_reset_on_cpu_mask() {
+        if kbuild_config::CPU_NUM >= 3 {
+            let task = new_test_task();
+            task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
+            task.set_on_cpu_mask_bit(LogicalCpuId::new(1));
+            task.reset_on_cpu_mask(LogicalCpuId::new(2));
+            let mask = task.on_cpu_mask();
+            assert!(!mask.get(0));
+            assert!(!mask.get(1));
+            assert!(mask.get(2));
+        }
+    }
+
+    #[def_test]
+    fn test_on_cpu_mask_multiple_bits() {
+        if kbuild_config::CPU_NUM >= 4 {
+            let task = new_test_task();
+            task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
+            task.set_on_cpu_mask_bit(LogicalCpuId::new(2));
+            task.set_on_cpu_mask_bit(LogicalCpuId::new(3));
+            let mask = task.on_cpu_mask();
+            assert_eq!(mask.len(), 3);
+            assert!(mask.get(0));
+            assert!(!mask.get(1));
+            assert!(mask.get(2));
+            assert!(mask.get(3));
+        }
+    }
 }

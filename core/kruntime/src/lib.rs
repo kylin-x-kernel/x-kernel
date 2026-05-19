@@ -287,6 +287,9 @@ pub fn rust_main(arg: usize) -> ! {
     #[cfg(feature = "ipi")]
     kipi::init();
 
+    #[cfg(feature = "smp")]
+    kipi::tlb::mark_all_cpus_started();
+
     info!("Initialize interrupt handlers...");
     init_interrupt();
 
