@@ -129,6 +129,7 @@ impl ConfigEngine {
         self.enforce_choice_mutual_exclusion();
         self.filter_by_if_conditions();
         self.reevaluate_defaults();
+        self.clear_stale_menuconfig_conditional_defaults();
         self.prune_inactive_symbols();
         Ok(())
     }
@@ -374,6 +375,10 @@ impl ConfigEngine {
         reevaluate_defaults_inner(&self.entries, &mut self.symbols);
     }
 
+    fn clear_stale_menuconfig_conditional_defaults(&mut self) {
+        clear_stale_menuconfig_conditional_defaults_inner(&self.entries, &mut self.symbols);
+    }
+
     pub fn write_config(&self, output: impl AsRef<Path>) -> Result<()> {
         ConfigWriter::write(output, &self.symbols)
     }
@@ -554,6 +559,74 @@ fn reevaluate_defaults_inner(entries: &[Entry], symbol_table: &mut SymbolTable) 
             Entry::Menu(menu) => reevaluate_defaults_inner(&menu.entries, symbol_table),
             Entry::If(if_entry) => reevaluate_defaults_inner(&if_entry.entries, symbol_table),
             _ => {}
+        }
+    }
+}
+
+fn clear_stale_menuconfig_conditional_defaults_inner(
+    entries: &[Entry],
+    symbol_table: &mut SymbolTable,
+) {
+    for entry in entries {
+        match entry {
+            Entry::Config(config) => clear_stale_conditional_default(
+                &config.name,
+                &config.symbol_type,
+                &config.properties,
+                config.is_derived(),
+                symbol_table,
+            ),
+            Entry::MenuConfig(menuconfig) => clear_stale_conditional_default(
+                &menuconfig.name,
+                &menuconfig.symbol_type,
+                &menuconfig.properties,
+                menuconfig.is_derived(),
+                symbol_table,
+            ),
+            Entry::Menu(menu) => {
+                clear_stale_menuconfig_conditional_defaults_inner(&menu.entries, symbol_table)
+            }
+            Entry::If(if_entry) => {
+                clear_stale_menuconfig_conditional_defaults_inner(&if_entry.entries, symbol_table)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn clear_stale_conditional_default(
+    name: &str,
+    symbol_type: &crate::kconfig::ast::SymbolType,
+    properties: &crate::kconfig::ast::Property,
+    is_derived: bool,
+    symbol_table: &mut SymbolTable,
+) {
+    let has_conditional = properties
+        .defaults
+        .iter()
+        .any(|default| default.condition.is_some());
+    if !has_conditional {
+        return;
+    }
+
+    let from_config = symbol_table
+        .get_symbol(name)
+        .map(|symbol| symbol.from_config)
+        .unwrap_or(false);
+    if from_config && !is_derived {
+        return;
+    }
+
+    if properties.evaluate_default(symbol_table).is_some() {
+        return;
+    }
+
+    match symbol_type {
+        crate::kconfig::ast::SymbolType::Bool | crate::kconfig::ast::SymbolType::Tristate => {
+            symbol_table.set_value(name, "n".to_string());
+        }
+        _ => {
+            symbol_table.clear_value(name);
         }
     }
 }

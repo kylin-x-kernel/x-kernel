@@ -159,3 +159,76 @@ FEATURE_C=y
         "FEATURE_C should be cleared when dependency chain is broken"
     );
 }
+
+#[test]
+fn test_missing_conditional_default_bool_is_reset_on_menuconfig_load() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let kconfig_content = r#"
+choice
+    prompt "Target Architecture"
+    default ARCH_AARCH64
+
+config ARCH_AARCH64
+    bool "AArch64"
+
+config ARCH_X86_64
+    bool "x86_64"
+
+endchoice
+
+if ARCH_AARCH64
+
+choice
+    prompt "AArch64 Platform"
+    default PLATFORM_AARCH64_QEMU_VIRT
+
+config PLATFORM_AARCH64_QEMU_VIRT
+    bool "QEMU ARM64 Virtual Machine"
+
+endchoice
+
+endif
+
+if ARCH_X86_64
+
+choice
+    prompt "x86_64 Platform"
+    default PLATFORM_X86_64_QEMU_VIRT
+
+config PLATFORM_X86_64_QEMU_VIRT
+    bool "QEMU x86_64 Virtual Machine"
+
+endchoice
+
+endif
+
+config KFEAT_CHAR
+    bool "Character support"
+
+config KFEAT_DRIVER_CONSOLE_PL011
+    bool "PL011 runtime console handoff"
+    depends on KFEAT_CHAR
+    default y if PLATFORM_AARCH64_QEMU_VIRT
+"#;
+    let kconfig_path = temp_dir.path().join("Kconfig");
+    fs::write(&kconfig_path, kconfig_content).unwrap();
+
+    let config_content = r#"
+# ARCH_AARCH64 is not set
+ARCH_X86_64=y
+KFEAT_CHAR=y
+# PLATFORM_AARCH64_QEMU_VIRT is not set
+PLATFORM_X86_64_QEMU_VIRT=y
+"#;
+    let config_path = temp_dir.path().join(".config");
+    fs::write(&config_path, config_content).unwrap();
+
+    let symbol_table = simulate_menuconfig_load(&kconfig_path, temp_dir.path(), &config_path);
+
+    assert_eq!(
+        symbol_table.get_value("KFEAT_DRIVER_CONSOLE_PL011"),
+        Some("n".to_string()),
+        "A missing conditional-default bool should not keep a stale default from the initial parse"
+    );
+}
