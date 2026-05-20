@@ -13,9 +13,8 @@ use kfs::{CachedFile, kernel_fs_context};
 use ksync::Mutex;
 use ktypes::Lazy;
 use log::{error, info};
-use tee_raw_sys::ta_head;
 
-use crate::ta_ctx::TeeTaCtx;
+use crate::ta_ctx::{self, TeeTaCtx};
 
 const TA_HEAD_FIFO_CAP: usize = 32;
 #[cfg(feature = "ta_verify_with_root")]
@@ -92,28 +91,11 @@ pub fn verify_ta_elf_signature_if_applicable(
             let ca_pem = None;
         }
     }
-    tasign::verify_elf_signature(image.as_slice(), ca_pem)
-        .map_err(|_| KError::InvalidExecutable)
-        .inspect_err(|err| {
-            error!("verify ta elf signature failed: {:?}", err);
-        })?;
-
-    let elf = xmas_elf::ElfFile::new(image.as_slice()).map_err(|_| KError::InvalidExecutable)?;
-    let section = elf.find_section_by_name(".ta_head");
-    let Some(section) = section else {
-        return Ok(None);
-    };
-    let offset = usize::try_from(section.offset()).map_err(|_| KError::InvalidData)?;
-    let size = usize::try_from(section.size()).map_err(|_| KError::InvalidData)?;
-    let end = offset.checked_add(size).ok_or(KError::InvalidData)?;
-    if end > image.len() {
-        return Err(KError::InvalidData);
-    }
-    if size != core::mem::size_of::<ta_head>() {
-        return Err(KError::InvalidData);
-    }
-
-    Ok(Some(image[offset..end].to_vec()))
+    tasign::verify_elf_signature(image.as_slice(), ca_pem).map_err(|e| {
+        error!("verify ta elf signature failed: {e}");
+        KError::InvalidExecutable
+    })?;
+    ta_ctx::read_ta_head_from_image(image.as_slice())
 }
 
 /// Clears the bounded FIFO cache of `.ta_head` bytes (pair with ELF loader cache flush).
@@ -159,38 +141,4 @@ pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
     let out = ta_head.clone();
     guard.insert(key, ta_head);
     Ok(out)
-}
-
-pub fn bytes_to_ta_head(data: &[u8]) -> KResult<ta_head> {
-    if data.len() != core::mem::size_of::<ta_head>() {
-        return Err(KError::InvalidData);
-    }
-    let ta_head = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<ta_head>()) };
-    Ok(ta_head)
-}
-
-#[unittest::mod_test]
-pub mod tests_tasign {
-    use unittest::assert_eq;
-
-    use super::*;
-
-    // Test function for basic ta_ctx operations
-    #[unittest::def_test]
-    fn test_bytes_to_ta_head() {
-        let ta_head = ta_head {
-            uuid: Default::default(),
-            stack_size: 1024,
-            flags: 1,
-            depr_entry: u64::MAX,
-        };
-        let data = unsafe {
-            core::slice::from_raw_parts(
-                (&ta_head as *const ta_head).cast::<u8>(),
-                core::mem::size_of::<ta_head>(),
-            )
-        };
-        let ta_head_from_bytes = bytes_to_ta_head(&data).unwrap();
-        assert_eq!(ta_head_from_bytes, ta_head);
-    }
 }

@@ -74,12 +74,17 @@ pub fn sys_execve(
 
     #[cfg(feature = "tee")]
     {
-        proc_state.tee_ta_ctx.write().init_ta_ctx(
-            absolute_path.as_str(),
-            tee_task_iface::tasign::get_ta_head_cached(absolute_path.as_str())?
-                .unwrap_or_default()
-                .as_slice(),
-        );
+        #[cfg(feature = "tee_ta_sign")]
+        let ta_head_bytes =
+            tee_task_iface::tasign::get_ta_head_cached(absolute_path.as_str())?.unwrap_or_default();
+        #[cfg(not(feature = "tee_ta_sign"))]
+        let ta_head_bytes =
+            tee_task_iface::ta_ctx::read_ta_head_if_applicable(absolute_path.as_str())?
+                .unwrap_or_default();
+        proc_state
+            .tee_ta_ctx
+            .write()
+            .init_ta_ctx(absolute_path.as_str(), ta_head_bytes.as_slice());
     }
 
     proc_state.set_heap_top(USER_HEAP_BASE);

@@ -175,7 +175,8 @@ impl ElfCacheEntry {
                 {
                     tee_task_iface::tasign::verify_ta_elf_on_load_and_cache_ta_head(
                         e.borrow_cache(),
-                    )?;
+                    )
+                    .map_err(|_err| KError::PermissionDenied)?;
                 }
                 Ok(Ok(e))
             }
