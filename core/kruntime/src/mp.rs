@@ -243,13 +243,26 @@ mod tests_tlb_shootdown {
             );
 
             // Dropping pt_mut calls finish() → flush_tlb_all_cpus → flush_all.
+            // On architectures without hardware broadcast (x86_64, riscv64), this sends IPIs.
             // If the remote CPU doesn't respond, this hangs.
             drop(pt_mut);
 
             // If we reach here, finish() → flush_tlb_all_cpus completed.
-            let mask = task.on_cpu_mask();
-            assert!(mask.get(my_cpu.as_usize()));
-            assert!(!mask.get(remote_cpu.as_usize()));
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let mask = task.on_cpu_mask();
+                assert!(mask.get(my_cpu.as_usize()));
+                assert!(!mask.get(remote_cpu.as_usize()));
+            }
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                // AArch64 implements flush_tlb_all_cpus using IS (Inner Shareable) hardware
+                // broadcast instructions. It does not invoke software IPIs, so the mask
+                // remains unmodified ({my_cpu, remote_cpu}). We reset it manually to keep
+                // state clean — the task is still running on my_cpu.
+                task.reset_on_cpu_mask(my_cpu);
+            }
         }
     }
 
@@ -351,6 +364,10 @@ mod tests_tlb_shootdown {
             }
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
+
+            // Clean up the mask correctly for platforms (like aarch64) that don't reset
+            // via software IPI — reset to the CPU the task is currently running on.
+            task.reset_on_cpu_mask(my_cpu);
         }
     }
 }
