@@ -4,6 +4,8 @@
 
 //! AArch64 platform peripheral drivers and helpers.
 #![no_std]
+#![cfg(target_arch = "aarch64")]
+
 #[macro_use]
 extern crate log;
 pub mod memory;

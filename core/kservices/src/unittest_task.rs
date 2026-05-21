@@ -84,10 +84,7 @@ impl InstalledTestThread {
             karch::write_user_page_table(page_table_root.into());
             karch::flush_tlb(None);
 
-            let previous_task_ext =
-                core::mem::replace((*task_ptr).task_ext_mut(), Some(KTaskExt::from_impl(thr)));
-
-            previous_task_ext
+            (*task_ptr).task_ext_mut().replace(KTaskExt::from_impl(thr))
         };
 
         unsafe {

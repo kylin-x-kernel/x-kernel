@@ -12,7 +12,6 @@ use alloc::{
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
 use kfs::{CachedFile, kernel_fs_context};
-use log::{info, warn};
 use tee_raw_sys::ta_head;
 use uuid as uuid_crate;
 
@@ -135,6 +134,7 @@ impl TeeTaCtx {
         ctx
     }
 
+    #[cfg(feature = "tee_ta_sign")]
     pub fn init_ta_ctx(&mut self, path: &str, ta_head: &[u8]) {
         if Self::is_ta(path) {
             self.set_uuid(path);
@@ -142,10 +142,10 @@ impl TeeTaCtx {
                 match bytes_to_ta_head(ta_head) {
                     Ok(head) => {
                         self.ta_head = head;
-                        info!("ta_head: {:X?}", self.ta_head);
+                        log::info!("ta_head: {:X?}", self.ta_head);
                     }
                     Err(err) => {
-                        warn!("parse ta_head failed: {:?}", err);
+                        log::warn!("parse ta_head failed: {:?}", err);
                     }
                 }
             }
@@ -175,7 +175,7 @@ pub mod tests_ta_ctx {
                 core::mem::size_of::<ta_head>(),
             )
         };
-        let ta_head_from_bytes = bytes_to_ta_head(&data).unwrap();
+        let ta_head_from_bytes = bytes_to_ta_head(data).unwrap();
         assert_eq!(ta_head_from_bytes, ta_head);
     }
 

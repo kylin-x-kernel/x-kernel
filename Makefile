@@ -38,7 +38,8 @@ LTO ?=
 TARGET_DIR ?= $(PWD)/target
 export TARGET_DIR
 XCONF_TARGET_DIR ?= $(TARGET_DIR)/tools/xconf
-XCONF = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(XCONF_TARGET_DIR) --manifest-path xtask/xconfig/Cargo.toml --bin xconf --
+HOST_TARGET := $(shell rustc -vV | sed -n 's|host: ||p')
+XCONF = env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(XCONF_TARGET_DIR) --manifest-path xtask/xconfig/Cargo.toml --bin xconf --
 EXTRA_CONFIG ?=
 UIMAGE ?= n
 export UNITTEST ?= n
@@ -55,7 +56,7 @@ endif
 
 .DEFAULT_GOAL := all
 
-BUILD_TARGETS := all build run justrun debug clippy disasm rootfs
+BUILD_TARGETS := all build run justrun debug clippy disasm rootfs teefs
 KCONFIG_TARGETS := menuconfig defconfig saveconfig savedefconfig oldconfig olddefconfig
 CLEAN_TARGETS := clean clean_c distclean
 UTILITY_TARGETS := clippy check_deps check_header doc doc_check_missing fmt unittest unittest_no_fail_fast
@@ -106,6 +107,9 @@ GDB ?= gdb
 OUT_DIR ?= $(PWD)
 LD_SCRIPT ?= $(abspath $(TARGET_DIR)/$(TARGET)/$(MODE)/linker_$(PLAT_NAME).lds)
 KBUILD_CONFIG_DIR := $(TARGET_DIR)/kbuild/$(PLAT_NAME)
+
+# gen-cargo CLI flags
+GEN_CARGO_FLAGS := --ld-script="$(LD_SCRIPT)" $(if $(filter y,$(UNITTEST)),--unittest) $(if $(filter y,$(DWARF)),--dwarf)
 
 # Generate Rust const definitions from .config
 CONFIG_RS := $(KBUILD_CONFIG_DIR)/config.rs
@@ -203,11 +207,13 @@ $(CONFIG_RS): .config
 	@$(XCONF) gen-const -o $(KBUILD_CONFIG_DIR)
 	@echo "✅ Generated config.rs"
 
+_gen_cargo:
+	@$(XCONF) gen-cargo $(GEN_CARGO_FLAGS)
 
 # Generate const definitions before build
 gen-const: $(CONFIG_RS)
 
-build: $(CONFIG_RS) $(OUT_DIR) $(FINAL_IMG)
+build: $(CONFIG_RS) _gen_cargo $(OUT_DIR) $(FINAL_IMG)
 
 disasm:
 	$(OBJDUMP) $(OUT_ELF) | less
@@ -237,7 +243,7 @@ check_header:
 header:
 	python3 scripts/check_header.py --fix
 
-clippy: check_deps check_header $(CONFIG_RS)
+clippy: check_deps check_header $(CONFIG_RS) _gen_cargo
 ifeq ($(origin ARCH), command line)
 	$(call cargo_clippy,--target $(TARGET))
 else
@@ -269,7 +275,7 @@ endif
 clean: clean_c
 	rm -rf $(APP)/*.bin $(APP)/*.elf
 	cargo clean --target-dir $(TARGET_DIR)
-	@rm -rf $(TARGET_DIR)/kbuild .cargo/config.toml
+	@rm -rf $(TARGET_DIR)/kbuild
 
 distclean: clean
 	@rm -f .config .config.old auto.conf autoconf.h
@@ -283,4 +289,5 @@ clean_c::
 .PHONY: all defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const \
 	build disasm run justrun debug \
 	clippy doc doc_check_missing fmt fmt_c unittest unittest_no_fail_fast \
+	_gen_cargo \
 	disk_img clean distclean clean_c

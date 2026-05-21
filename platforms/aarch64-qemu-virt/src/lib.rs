@@ -5,6 +5,9 @@
 //! Platform support for aarch64-qemu-virt.
 
 #![no_std]
+#![cfg(target_arch = "aarch64")]
+#![cfg(k_plat_name = "aarch64-qemu-virt")]
+
 #[macro_use]
 extern crate kplat;
 // Force-link kernel_boot so that _start and boot code are included in the final binary.

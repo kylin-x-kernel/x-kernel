@@ -596,7 +596,7 @@ pub mod tests_irq {
         }
 
         assert!(unregister(virq).is_some());
-        assert!(IRQ_STATE.lock().descs.get(&virq).is_none());
+        assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
     }
 
     #[def_test]

@@ -16,7 +16,7 @@ tee = [
     "kthread/tee",
     "kservices/tee",
 ]
-tee_ta_sign = ["tee_task_iface/tee_ta_sign"]
+tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 
 [dependencies]
 kaddr_layout.workspace = true

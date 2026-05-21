@@ -2071,7 +2071,7 @@ mod tests_htree_basic {
         let meta = TeeFsHtreeMeta::default();
         let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-        let res = calc_node_hash_with_type(TEE_ALG_SHA256, &mut node, Some(&meta), &mut digest);
+        let res = calc_node_hash_with_type(TEE_ALG_SHA256, &node, Some(&meta), &mut digest);
         assert!(res.is_ok());
 
         // the same asn sha256([0u8, 42]);
@@ -2270,14 +2270,14 @@ mod tests_htree_basic {
         );
 
         // 3. Verify tree hashes
-        let verify_result = verify_tree(&mut ht);
+        let verify_result = verify_tree(&ht);
         assert!(
             verify_result.is_ok(),
             "Verify tree failed: {:?}",
             verify_result.unwrap_err()
         );
 
-        let _print_result = print_tree_hash(&mut ht);
+        let _print_result = print_tree_hash(&ht);
         assert!(
             verify_result.is_ok(),
             "Verify tree failed: {:?}",
@@ -2915,8 +2915,10 @@ mod tests_authenc_funcs {
 
         // 3. 测试加密流程
         // 创建节点镜像用于加密
-        let mut node_image = TeeFsHtreeNodeImage::default();
-        node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
+        let mut node_image = TeeFsHtreeNodeImage {
+            iv: [0x05; TEE_FS_HTREE_IV_SIZE],
+            ..Default::default()
+        };
 
         // 初始化加密上下文
         let encrypt_cipher = authenc_init::<Encryption>(
@@ -3023,8 +3025,10 @@ mod tests_authenc_funcs {
         ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
         ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
 
-        let mut node_image = TeeFsHtreeNodeImage::default();
-        node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
+        let mut node_image = TeeFsHtreeNodeImage {
+            iv: [0x05; TEE_FS_HTREE_IV_SIZE],
+            ..Default::default()
+        };
 
         let enc = authenc_init::<Encryption>(
             TEE_OperationMode::TEE_MODE_ENCRYPT,
@@ -3059,8 +3063,10 @@ mod tests_authenc_funcs {
         ht.data.head.iv = [0x03; TEE_FS_HTREE_IV_SIZE];
         ht.root.node.hash = [0x04; TEE_FS_HTREE_HASH_SIZE];
 
-        let mut node_image = TeeFsHtreeNodeImage::default();
-        node_image.iv = [0x05; TEE_FS_HTREE_IV_SIZE];
+        let mut node_image = TeeFsHtreeNodeImage {
+            iv: [0x05; TEE_FS_HTREE_IV_SIZE],
+            ..Default::default()
+        };
 
         let enc = authenc_init::<Encryption>(
             TEE_OperationMode::TEE_MODE_ENCRYPT,
@@ -3120,7 +3126,7 @@ pub mod tests_fs_htree {
         .unwrap();
 
         assert_eq!(ht_create.data.uuid, uuid);
-        assert!(ht_create.data.dirty == false);
+        assert!(!ht_create.data.dirty);
 
         // 再打开文件 (create = false)
         let ht_open = tee_fs_htree_open(

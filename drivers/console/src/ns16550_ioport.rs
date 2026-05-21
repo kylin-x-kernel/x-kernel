@@ -61,3 +61,10 @@ pub fn read_data(bytes: &mut [u8]) -> usize {
 }
 
 pub fn ack_interrupt() {}
+
+pub(super) fn init_backend(config: crate::ConsoleConfig) {
+    match config.transport {
+        crate::ConsoleTransport::Mmio { .. } => panic!("ns16550-ioport does not support mmio transport"),
+        crate::ConsoleTransport::IoPort { io_port } => init(io_port),
+    }
+}

@@ -159,6 +159,25 @@ pub enum Commands {
         #[arg(short, long, default_value = ".")]
         srctree: PathBuf,
     },
+
+    /// Generate .cargo/.xconfig.toml from .config and build options
+    GenCargo {
+        /// Path to .config file
+        #[arg(short, long, default_value = ".config")]
+        config: PathBuf,
+
+        /// Enable unit-test mode
+        #[arg(long)]
+        unittest: bool,
+
+        /// Path to linker script
+        #[arg(long)]
+        ld_script: Option<String>,
+
+        /// Enable DWARF debug info
+        #[arg(long)]
+        dwarf: bool,
+    },
 }
 
 pub fn parse_command(kconfig: PathBuf, srctree: PathBuf) -> Result<()> {
@@ -254,5 +273,13 @@ pub fn run_cli() -> Result<()> {
             kconfig,
             srctree,
         } => crate::cli::gen_const::gen_const_command(config, output_dir, kconfig, srctree),
+        Commands::GenCargo {
+            config,
+            unittest,
+            ld_script,
+            dwarf,
+        } => {
+            crate::cli::gen_cargo::gen_cargo_command(config, unittest, ld_script, dwarf)
+        }
     }
 }

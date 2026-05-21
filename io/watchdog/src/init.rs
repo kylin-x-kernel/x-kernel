@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 //! Watchdog initialization and NMI handler setup.
+use kcpu_id_map::for_each_present_logical_cpu;
 use khal::{context::TrapFrame, percpu::this_cpu_id};
 use ktask::{KCpuMask, TaskInner};
 use log::debug;
@@ -45,9 +46,9 @@ fn init_common() {
         if rv::is_triggered() {
             rv::mark_arrived();
             unsafe {
-                TRAP_FRAMES[this_cpu_id()] = khal::context::active_exception_context();
+                TRAP_FRAMES[this_cpu_id().as_usize()] = khal::context::active_exception_context();
             }
-            let this_cpu = this_cpu_id();
+            let this_cpu = this_cpu_id().as_usize();
             let is_cause = rv::cause_cpu() == Some(this_cpu);
             if is_cause {
                 // Strong rendezvous: MUST wait until all CPUs are in NMI.
@@ -61,12 +62,12 @@ fn init_common() {
                 );
 
                 // Cause CPU dumps all tasks for all CPUs.
-                for cpu in 0..kbuild_config::CPU_NUM {
-                    if let Some(tf) = unsafe { TRAP_FRAMES[cpu] } {
-                        ktask::dump_cur_task_backtrace(cpu, tf, true);
+                for_each_present_logical_cpu(|cpu_id| {
+                    if let Some(tf) = unsafe { TRAP_FRAMES[cpu_id.as_usize()] } {
+                        ktask::dump_cur_task_backtrace(cpu_id, tf, true);
                     }
-                    ktask::dump_cpu_task_backtrace(cpu, true);
-                }
+                    ktask::dump_cpu_task_backtrace(cpu_id, true);
+                });
 
                 // Notify others that dump is done.
                 rv::mark_dump_done();
@@ -82,7 +83,7 @@ fn init_common() {
         }
     });
 
-    debug!("watchdog init success on cpu {}", this_cpu_id());
+    debug!("watchdog init success on cpu {}", this_cpu_id().as_usize());
 }
 
 /// Initialize soft lockup detection.
@@ -115,7 +116,7 @@ pub fn init_softlockup_detection() {
     );
 
     // Bind watchdog task to the local CPU.
-    watchdog_task.set_cpumask(KCpuMask::one_shot(this_cpu_id()));
+    watchdog_task.set_cpumask(KCpuMask::one_shot(this_cpu_id().as_usize()));
     ktask::spawn_task(watchdog_task);
 }
 

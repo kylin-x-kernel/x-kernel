@@ -57,7 +57,7 @@ pub fn is_dump_done() -> bool {
 #[inline]
 /// Trigger a rendezvous if none is active.
 pub fn try_trigger() {
-    let cpu = this_cpu_id();
+    let cpu = this_cpu_id().as_usize();
     if PHASE
         .compare_exchange(
             Phase::Idle as usize,
@@ -85,7 +85,7 @@ pub fn cause_cpu() -> Option<usize> {
 #[inline]
 /// Mark the current CPU as arrived.
 pub fn mark_arrived() {
-    let id = this_cpu_id();
+    let id = this_cpu_id().as_usize();
     if id >= usize::BITS as usize {
         // Cannot represent this CPU in the bitmap without overflowing the shift.
         return;

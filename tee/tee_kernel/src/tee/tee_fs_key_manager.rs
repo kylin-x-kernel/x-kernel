@@ -273,7 +273,7 @@ pub mod tests_tee_fs_key_manager {
         assert!(result.is_ok());
         assert_eq!(
             "D721A0F194231822F398706DD1FFF2B7",
-            hex::encode_upper(&cipher)
+            hex::encode_upper(cipher)
         );
 
         let mut decrypted = [0u8; 16];
@@ -304,7 +304,7 @@ pub mod tests_tee_fs_key_manager {
         assert!(result.is_ok());
         assert_eq!(
             "4329A6241E39AD7A9A404A814A7EDD32",
-            hex::encode_upper(&cipher)
+            hex::encode_upper(cipher)
         );
 
         let result = crypto_cipher_ecb_nopad(

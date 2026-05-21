@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["sh", "tee_app1", "tee_app2"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["KylinSoft Co., Ltd. <https://www.kylinos.cn/>"]
+homepage = "https://gitee.com/openkylin/x-kernel"
+repository = "https://gitee.com/openkylin/x-kernel"
+documentation = "https://gitee.com/openkylin/x-kernel"
+keywords = [
+    "kylin-x-kernel",
+    "kernel",
+    "tee",
+    "trusted execution environment",
+    "user-space app",
+]
+categories = ["os", "no-std", "user-space app"]
+
+[workspace.dependencies]
+lazy_static = { version = "1.5", features = ["spin_no_std"] }
+rsext4 = { path = "../fs/filesystems/rsext4", default-features = false }

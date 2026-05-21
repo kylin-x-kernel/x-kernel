@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 //! Raspberry Pi (AArch64) platform support.
+
 #![no_std]
+#![cfg(target_arch = "aarch64")]
+
 #[macro_use]
 extern crate kplat;
 mod boot;

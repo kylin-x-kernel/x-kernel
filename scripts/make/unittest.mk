@@ -1,5 +1,5 @@
-EXTRACT_COV = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run -p extract_cov --
-CONVERT_COV = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run -p convert_cov --
+EXTRACT_COV = cargo extract-cov
+CONVERT_COV = cargo convert-cov
 out_target := $(TARGET_DIR)/$(TARGET)/$(MODE)
 cov_profraw := $(out_target)/default.profraw
 cov_prodata := $(out_target)/default.profdata
@@ -10,12 +10,7 @@ cov_xml := $(out_target)/coverage.xml
 cov_ignore_regex := '/target/|/api/kapi/src/syscall/|/api/linux_sysno/src/|/boot/kernel-boot/'
 
 ifeq ($(UNITTEST), y)
-  RUSTFLAGS += --cfg unittest --check-cfg cfg(unittest) \
-                -C instrument-coverage \
-                -Z no-profiler-runtime
   APP_FEAT += unittest
-else
-  RUSTFLAGS += --check-cfg cfg(unittest)
 endif
 
 ifeq ($(ARCH), riscv64)

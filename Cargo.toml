@@ -3,16 +3,16 @@ resolver = "2"
 members = [
     # kernel entry
     "entry",
-    # build config system
-    "xtask/*",
     # boot and loader
     "boot/*",
-    # tee userspace apps
-    "tee_apps/*",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace
     "boot/x86_64-linuxboot",
+    # build config tools (std crates, not part of the no_std kernel workspace)
+    "xtask/*",
+    # TEE user-space apps (built separately with std toolchain)
+    "tee_apps/*",
 ]
 
 [workspace.package]

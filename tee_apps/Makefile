@@ -25,7 +25,7 @@ $(foreach name,$(TEE_APP_NAMES),--copy $(TARGET_DIR)/$(TARGET)/release/$(name):/
 TARGET_UPPER := $(shell echo $(TARGET) | tr a-z- A-Z_)
 LINKER_ENV := CARGO_TARGET_$(TARGET_UPPER)_LINKER
 CARGO_ENV := RUSTFLAGS= CC=$(LINKER) $(LINKER_ENV)=$(LINKER)
-CARGO_BUILD := cargo build --release --target $(TARGET)
+CARGO_BUILD := cargo build --release --target $(TARGET) --target-dir $(TARGET_DIR)
 
 .PHONY: tee_apps
 tee_apps:
@@ -48,5 +48,5 @@ tee_apps:
 		fi; \
 	done; \
 	echo "==> Creating $(DISK_IMG)"; \
-	cd $(ROOT_DIR) && env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run -p crate_rootfs --release -- \
+	cd $(ROOT_DIR) && env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run --release --manifest-path xtask/crate_rootfs/Cargo.toml -- \
 		--image $(DISK_IMG) --size-bytes $(ROOTFS_SIZE) $(COPY_ARGS)

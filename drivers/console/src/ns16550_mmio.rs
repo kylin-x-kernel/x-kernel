@@ -78,3 +78,14 @@ pub fn read_data(bytes: &mut [u8]) -> usize {
 }
 
 pub fn ack_interrupt() {}
+
+pub(super) fn init_backend(config: crate::ConsoleConfig) {
+    match config.transport {
+        crate::ConsoleTransport::Mmio { paddr, size } => {
+            let uart_base = memspace::iomap_device(paddr, size, "console-ns16550")
+                .unwrap_or_else(|err| panic!("failed to iomap console: {err:?}"));
+            init(uart_base);
+        }
+        crate::ConsoleTransport::IoPort { .. } => panic!("ns16550-mmio does not support ioport transport"),
+    }
+}

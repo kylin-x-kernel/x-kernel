@@ -851,7 +851,8 @@ TEE_INIT_APPS="/tee/storage_test" RUSTFLAGS= CC=${muslLinker} \\
   --target-dir "\${TARGET_DIR}/tee-apps"
 
 echo "==> Creating rootfs..."
-env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run -p crate_rootfs --release \\
+env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run --release \\
+  --manifest-path xtask/crate_rootfs/Cargo.toml \\
   --target-dir "\${TARGET_DIR}/crate-rootfs" -- \\
   --image disk.img --size-bytes 64M \\
   --copy "\${TARGET_DIR}/tee-apps/${muslTarget}/release/sh":/bin/sh \\

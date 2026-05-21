@@ -8,36 +8,27 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use khal::{irq::IrqDesc, mem::PhysAddr};
 use lazyinit::LazyInit;
-#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
-use memspace::iomap_device;
 
-#[cfg(feature = "ns16550-ioport")]
-mod ns16550_ioport;
-#[cfg(feature = "ns16550-mmio")]
-mod ns16550_mmio;
-#[cfg(feature = "pl011")]
-mod pl011;
-
-#[cfg(all(
-    feature = "pl011",
-    any(feature = "ns16550-mmio", feature = "ns16550-ioport")
-))]
-compile_error!("console-driver expects exactly one backend feature");
-#[cfg(all(feature = "ns16550-mmio", feature = "ns16550-ioport"))]
-compile_error!("console-driver expects exactly one backend feature");
-#[cfg(not(any(
-    feature = "pl011",
-    feature = "ns16550-mmio",
-    feature = "ns16550-ioport"
-)))]
-compile_error!("console-driver requires one backend feature");
-
-#[cfg(feature = "ns16550-ioport")]
-use self::ns16550_ioport as backend;
-#[cfg(feature = "ns16550-mmio")]
-use self::ns16550_mmio as backend;
-#[cfg(feature = "pl011")]
-use self::pl011 as backend;
+cfg_select! {
+    feature = "pl011" => {
+        mod pl011;
+        use self::pl011 as backend;
+        use self::pl011::init_backend;
+    }
+    feature = "ns16550-mmio" => {
+        mod ns16550_mmio;
+        use self::ns16550_mmio as backend;
+        use self::ns16550_mmio::init_backend;
+    },
+    feature = "ns16550-ioport" => {
+        mod ns16550_ioport;
+        use self::ns16550_ioport as backend;
+        use self::ns16550_ioport::init_backend;
+    }
+    _ => {
+        compile_error!("console-driver requires one backend feature");
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleTransport {
@@ -153,16 +144,19 @@ pub fn config_from_device_tree() -> Option<ConsoleConfig> {
     }
 }
 
-#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
-pub fn init_from_device_tree() -> Option<ConsoleConfig> {
-    let config = config_from_device_tree()?;
-    init(config);
-    Some(config)
-}
-
-#[cfg(feature = "ns16550-ioport")]
-pub fn init_from_device_tree() -> Option<ConsoleConfig> {
-    None
+cfg_select! {
+    any(feature = "pl011", feature = "ns16550-mmio") => {
+        pub fn init_from_device_tree() -> Option<ConsoleConfig> {
+            let config = config_from_device_tree()?;
+            init(config);
+            Some(config)
+        }
+    }
+    feature = "ns16550-ioport" => {
+        pub fn init_from_device_tree() -> Option<ConsoleConfig> {
+            None
+        }
+    }
 }
 
 #[cfg(not(feature = "ns16550-ioport"))]
@@ -186,38 +180,6 @@ fn device_tree_irq_desc(info: of::InterruptInfo) -> IrqDesc {
     };
 
     desc.with_source(khal::irq::IrqSource::DeviceTree)
-}
-
-#[cfg(feature = "pl011")]
-fn init_backend(config: ConsoleConfig) {
-    match config.transport {
-        ConsoleTransport::Mmio { paddr, size } => {
-            let uart_base = iomap_device(paddr, size, "console-pl011")
-                .unwrap_or_else(|err| panic!("failed to iomap console: {err:?}"));
-            backend::init(uart_base);
-        }
-        ConsoleTransport::IoPort { .. } => panic!("pl011 does not support ioport transport"),
-    }
-}
-
-#[cfg(feature = "ns16550-mmio")]
-fn init_backend(config: ConsoleConfig) {
-    match config.transport {
-        ConsoleTransport::Mmio { paddr, size } => {
-            let uart_base = iomap_device(paddr, size, "console-ns16550")
-                .unwrap_or_else(|err| panic!("failed to iomap console: {err:?}"));
-            backend::init(uart_base);
-        }
-        ConsoleTransport::IoPort { .. } => panic!("ns16550-mmio does not support ioport transport"),
-    }
-}
-
-#[cfg(feature = "ns16550-ioport")]
-fn init_backend(config: ConsoleConfig) {
-    match config.transport {
-        ConsoleTransport::Mmio { .. } => panic!("ns16550-ioport does not support mmio transport"),
-        ConsoleTransport::IoPort { io_port } => backend::init(io_port),
-    }
 }
 
 fn remember_config(config: ConsoleConfig) {

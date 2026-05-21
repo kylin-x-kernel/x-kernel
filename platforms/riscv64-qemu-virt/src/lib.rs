@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![cfg(target_arch = "riscv64")]
 #![no_std]
+#![cfg(target_arch = "riscv64")]
+
 #[macro_use]
 extern crate log;
 #[macro_use]

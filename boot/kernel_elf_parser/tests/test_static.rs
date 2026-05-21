@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::ELFParser;
+use kernel_elf_parser::{ELFHeadersBuilder, ELFParser};
 
 #[test]
 fn test_elf_parser() {
@@ -18,23 +18,33 @@ fn test_elf_parser() {
         let padding = vec![0u8; 16 - aligned_elf_bytes.len() % 16];
         aligned_elf_bytes.extend(padding);
     }
-    let elf =
-        xmas_elf::ElfFile::new(aligned_elf_bytes.as_slice()).expect("Failed to read elf file");
+
+    let builder =
+        ELFHeadersBuilder::new(aligned_elf_bytes.as_slice()).expect("Failed to parse ELF header");
+    let range = builder.ph_range();
+    let headers = builder
+        .build(&aligned_elf_bytes[range.start as usize..range.end as usize])
+        .expect("Failed to parse program headers");
 
     let interp_base = 0x1000;
-    let elf_parser = kernel_elf_parser::ELFParser::new(&elf, interp_base).unwrap();
+    let elf_parser = kernel_elf_parser::ELFParser::new(&headers, interp_base).unwrap();
     let base_addr = elf_parser.base();
     assert_eq!(base_addr, 0);
 
-    let segments = elf_parser.ph_load().collect::<Vec<_>>();
+    let segments: Vec<_> = elf_parser
+        .headers()
+        .ph
+        .iter()
+        .filter(|ph| ph.get_type() == Ok(xmas_elf::program::Type::Load))
+        .collect();
     assert_eq!(segments.len(), 4);
     let mut last_start = 0;
     for segment in segments.iter() {
         // start vaddr should be sorted
-        assert!(segment.vaddr > last_start);
-        last_start = segment.vaddr;
+        assert!(segment.virtual_addr > last_start);
+        last_start = segment.virtual_addr;
     }
-    assert_eq!(segments[0].vaddr, 0x400000);
+    assert_eq!(segments[0].virtual_addr, 0x400000);
 
     test_ustack(&elf_parser);
 }

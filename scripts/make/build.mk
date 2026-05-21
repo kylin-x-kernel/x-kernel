@@ -7,13 +7,11 @@ rust_elf := $(TARGET_DIR)/$(TARGET)/$(MODE)/$(rust_package)
 
 ifneq ($(filter $(MAKECMDGOALS),doc doc_check_missing),)
   # run `make doc`
-  $(if $(V), $(info RUSTFLAGS: "$(RUSTFLAGS)") $(info RUSTDOCFLAGS: "$(RUSTDOCFLAGS)"))
-  export RUSTFLAGS
+  $(if $(V), $(info RUSTDOCFLAGS: "$(RUSTDOCFLAGS)"))
   export RUSTDOCFLAGS
 else ifneq ($(filter $(MAKECMDGOALS),unittest unittest_no_fail_fast),)
   # run `make unittest`
-  $(if $(V), $(info RUSTFLAGS: "$(RUSTFLAGS)"))
-  export RUSTFLAGS
+  :
 else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run justrun debug),)
   # run `make build` and other above goals
   ifneq ($(V),)
@@ -23,12 +21,6 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
     $(info x-kernel features: "$(KFEAT)")
     $(info app features: "$(APP_FEAT)")
   endif
-    RUSTFLAGS += $(RUSTFLAGS_LINK_ARGS)
-  ifeq ($(DWARF), y)
-    RUSTFLAGS += -C force-frame-pointers -C debuginfo=2 -C strip=none
-  endif
-  $(if $(V), $(info RUSTFLAGS: "$(RUSTFLAGS)"))
-  export RUSTFLAGS
   ifeq ($(LTO), y)
     export CARGO_PROFILE_RELEASE_LTO=true
     export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
@@ -41,8 +33,7 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
   endif
 endif
 
-export RUSTFLAGS
-_cargo_build:
+_cargo_build: _gen_cargo
 	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME)\n"
 	$(call cargo_build,$(APP),$(KFEAT) $(APP_FEAT))
 

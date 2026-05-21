@@ -438,13 +438,13 @@ pub(crate) fn crypto_mac_init(cs: Arc<Mutex<TeeCrypState>>, key: &[u8]) -> TeeRe
             }
         }
         TEE_ALG_AES_CMAC | TEE_ALG_DES3_CMAC | TEE_ALG_SM4_CMAC => {
-            let (cipher_id, cipher_mode) = match algo {
-                TEE_ALG_AES_CMAC => (CipherId::Aes, CipherMode::ECB),
-                TEE_ALG_DES3_CMAC => (CipherId::Des3, CipherMode::ECB),
-                TEE_ALG_SM4_CMAC => (CipherId::SM4, CipherMode::ECB),
-                _ => (CipherId::None, CipherMode::None),
+            let cipher_id = match algo {
+                TEE_ALG_AES_CMAC => CipherId::Aes,
+                TEE_ALG_DES3_CMAC => CipherId::Des3,
+                TEE_ALG_SM4_CMAC => CipherId::SM4,
+                _ => CipherId::None,
             };
-            let mut cipher = Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as _)
+            let mut cipher = Cipher::setup_for_cmac(cipher_id, (key.len() * 8) as _)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
             cipher
                 .cmac_starts(key)

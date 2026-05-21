@@ -483,7 +483,7 @@ fn percpu_eevdf_fairness_equal_weight() {
     use crate::per_cpu::{PerCpuScheduler, SchedulerKind};
 
     let mut s = PerCpuScheduler::<Task>::new(SchedulerKind::Eevdf);
-    let tasks: Vec<_> = (0..3u64).map(|i| Task::new(i)).collect();
+    let tasks: Vec<_> = (0..3u64).map(Task::new).collect();
     for t in &tasks {
         s.add_task(t.clone());
     }
@@ -499,7 +499,7 @@ fn percpu_eevdf_fairness_equal_weight() {
     }
 
     let expected = TICKS / 3;
-    for (_, &got) in counts.iter().enumerate() {
+    for &got in counts.iter() {
         let err = (got as f64 - expected as f64).abs() / expected as f64;
         assert!(err < 0.05);
     }
@@ -578,7 +578,7 @@ fn eevdf_equal_weight_share_cpu_evenly() {
     let counts = eevdf_simulate(&tasks, TOTAL);
 
     let expected = TOTAL / N as u64;
-    for (_, &got) in counts.iter().enumerate() {
+    for &got in counts.iter() {
         let err = (got as f64 - expected as f64).abs() / expected as f64;
         assert!(err < 0.05);
     }
@@ -596,7 +596,7 @@ fn eevdf_weighted_tasks_get_proportional_cpu() {
         .collect();
     let counts = eevdf_simulate(&tasks, TOTAL);
 
-    for (_, (&got, &w)) in counts.iter().zip(weights.iter()).enumerate() {
+    for (&got, &w) in counts.iter().zip(weights.iter()) {
         let expected = TOTAL as f64 * w as f64 / total_weight as f64;
         let err = (got as f64 - expected).abs() / expected;
         assert!(err < 0.10);

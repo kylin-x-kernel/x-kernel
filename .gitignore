@@ -8,7 +8,6 @@
 *.img
 /kernel-rv
 /kernel-la
-/.cargo
 /.crates*
 /mnt
 *.swp
@@ -33,3 +32,7 @@ auto.conf
 autoconf.h
 target/kbuild/
 /shared
+
+.cargo/*
+!.cargo/config.toml
+.vscode

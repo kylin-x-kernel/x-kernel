@@ -3,7 +3,9 @@
 // See LICENSES for license details.
 
 //! x86 platform peripheral drivers and helpers.
-#![cfg(target_arch = "x86_64")]
+
 #![no_std]
+#![cfg(target_arch = "x86_64")]
+
 pub mod bootmem;
 pub mod mp;

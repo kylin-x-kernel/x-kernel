@@ -19,3 +19,4 @@ log.workspace = true
 percpu.workspace = true
 backtrace.workspace = true
 kbuild_config = { workspace = true }
+kcpu_id_map = { workspace = true }

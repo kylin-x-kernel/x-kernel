@@ -19,8 +19,9 @@ smp = [
     "kruntime/smp",
     "ktask?/smp",
     "kspin/smp",
-    "aarch64-qemu-virt?/smp",
     "aarch64-crosvm-virt?/smp",
+    "aarch64-qemu-virt?/smp",
+    "loongarch64-qemu-virt?/smp",
     "riscv64-qemu-virt?/smp",
     "x86_64-qemu-virt?/smp",
 ]

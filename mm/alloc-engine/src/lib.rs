@@ -29,6 +29,71 @@ mod buddy;
 #[cfg(feature = "buddy")]
 pub use buddy::BuddyByteAllocator;
 
+#[cfg(all(test, any(feature = "buddy-page", feature = "buddy", feature = "slab")))]
+mod test_impls {
+    use core::{alloc::Layout, ptr::NonNull};
+
+    use buddy_slab_allocator::{
+        SlabPoolTrait, SlabTrait,
+        eii::{slab_pool_impl, virt_to_phys_impl},
+    };
+
+    #[virt_to_phys_impl]
+    fn dummy_virt_to_phys(vaddr: usize) -> usize {
+        vaddr
+    }
+
+    struct DummySlabPool;
+    impl SlabTrait for DummySlabPool {
+        fn cpu_id(&self) -> usize {
+            0
+        }
+
+        fn page_size(&self) -> usize {
+            4096
+        }
+
+        fn alloc(
+            &self,
+            _layout: Layout,
+        ) -> buddy_slab_allocator::AllocResult<buddy_slab_allocator::SlabAllocResult> {
+            Err(buddy_slab_allocator::AllocError::NoMemory)
+        }
+
+        fn add_slab(
+            &self,
+            _size_class: buddy_slab_allocator::SizeClass,
+            _base: usize,
+            _bytes: usize,
+        ) {
+        }
+
+        fn dealloc_local(
+            &self,
+            _ptr: NonNull<u8>,
+            _layout: Layout,
+        ) -> buddy_slab_allocator::SlabDeallocResult {
+            buddy_slab_allocator::SlabDeallocResult::Done
+        }
+    }
+    static DUMMY_POOL: DummySlabPool = DummySlabPool;
+
+    impl SlabPoolTrait for DummySlabPool {
+        fn current_slab(&self) -> &dyn SlabTrait {
+            &DUMMY_POOL
+        }
+
+        fn owner_slab(&self, _cpu_idx: usize) -> &dyn SlabTrait {
+            &DUMMY_POOL
+        }
+    }
+
+    #[slab_pool_impl]
+    fn dummy_slab_pool() -> &'static dyn SlabPoolTrait {
+        &DUMMY_POOL
+    }
+}
+
 #[cfg(feature = "slab")]
 mod slab;
 #[cfg(feature = "slab")]

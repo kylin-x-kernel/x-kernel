@@ -4,6 +4,7 @@
 
 pub mod commands;
 pub mod defconfig;
+pub mod gen_cargo;
 pub mod gen_const;
 pub mod menuconfig;
 pub mod oldconfig;
@@ -13,6 +14,7 @@ pub mod savedefconfig;
 
 pub use commands::*;
 pub use defconfig::*;
+pub use gen_cargo::*;
 pub use gen_const::*;
 pub use menuconfig::*;
 pub use oldconfig::*;

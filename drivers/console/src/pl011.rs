@@ -85,3 +85,14 @@ pub fn ack_interrupt() {
         }
     });
 }
+
+pub(super) fn init_backend(config: crate::ConsoleConfig) {
+    match config.transport {
+        crate::ConsoleTransport::Mmio { paddr, size } => {
+            let uart_base = memspace::iomap_device(paddr, size, "console-pl011")
+                .unwrap_or_else(|err| panic!("failed to iomap console: {err:?}"));
+            init(uart_base);
+        }
+        crate::ConsoleTransport::IoPort { .. } => panic!("pl011 does not support ioport transport"),
+    }
+}
