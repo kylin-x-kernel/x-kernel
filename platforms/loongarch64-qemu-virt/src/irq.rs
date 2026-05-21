@@ -69,7 +69,7 @@ impl khal::irq::IntrManagerIf for IntrManagerImpl {
         }
     }
 
-    fn dispatch_irq(irq: usize) -> Option<usize> {
+    fn dispatch_irq(irq: usize) -> Option<khal::irq::DispatchedIrq> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
             let Some(ex_irq) = eiointc::claim_irq() else {
@@ -88,8 +88,10 @@ impl khal::irq::IntrManagerIf for IntrManagerImpl {
                 eiointc::complete_irq(irq);
             }
         }
-        Some(irq.as_usize())
+        Some(khal::irq::DispatchedIrq::new(irq.as_usize(), 0))
     }
+
+    fn complete_irq(_completion_cookie: usize) {}
 
     fn notify_cpu(_interrupt_id: usize, _target: TargetCpu) {
         todo!()

@@ -206,10 +206,17 @@ pub fn enable(irq: usize, enabled: bool) {
     }
 }
 
-pub fn dispatch_irq_irq(_unused: usize, pmu_irq: usize) -> Option<usize> {
+pub fn dispatch_irq_by_gic_version(_unused: usize, pmu_irq: usize) -> Option<(usize, usize)> {
     match active_version() {
         GicVersion::V2 => gicv2::dispatch_irq(pmu_irq),
         GicVersion::V3 => gicv3::dispatch_irq(),
+    }
+}
+
+pub fn complete_irq(completion_cookie: usize) {
+    match active_version() {
+        GicVersion::V2 => gicv2::complete_irq(completion_cookie),
+        GicVersion::V3 => gicv3::complete_irq(completion_cookie),
     }
 }
 
@@ -247,10 +254,18 @@ impl khal::irq::IntrManagerIf for GicIrqIfImpl {
         crate::gic::enable(irq, enabled);
     }
 
-    fn dispatch_irq(irq: usize) -> Option<usize> {
+    fn dispatch_irq(irq: usize) -> Option<khal::irq::DispatchedIrq> {
         let pmu_irq = kbuild_config::PMU_IRQ;
-        crate::gic::dispatch_irq_irq(irq, pmu_irq)
-            .map(|hwirq| khal::irq::resolve_hwirq(GIC_ROOT_DOMAIN, hwirq))
+        crate::gic::dispatch_irq_by_gic_version(irq, pmu_irq).map(|(hwirq, completion_cookie)| {
+            khal::irq::DispatchedIrq::new(
+                khal::irq::resolve_hwirq(GIC_ROOT_DOMAIN, hwirq),
+                completion_cookie,
+            )
+        })
+    }
+
+    fn complete_irq(completion_cookie: usize) {
+        crate::gic::complete_irq(completion_cookie);
     }
 
     fn notify_cpu(interrupt_id: usize, target: khal::irq::TargetCpu) {

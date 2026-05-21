@@ -24,6 +24,10 @@ pub const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
 pub const S_SOFT: usize = INTC_IRQ_BASE + 1;
 pub const S_TIMER: usize = INTC_IRQ_BASE + 5;
 pub const S_EXT: usize = INTC_IRQ_BASE + 9;
+
+/// Cookie sentinel: no PLIC completion needed (timer / IPI).
+/// PLIC interrupt numbers start at 1, so 0 is safe as a sentinel.
+const PLIC_COMPLETE_SKIP: usize = 0;
 static PLIC: LazyInit<SpinNoIrq<Plic>> = LazyInit::new();
 
 pub const fn plic_irq_desc(hwirq: usize) -> khal::irq::IrqDesc {
@@ -143,17 +147,17 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
         );
     }
 
-    fn dispatch_irq(irq: usize) -> Option<usize> {
+    fn dispatch_irq(irq: usize) -> Option<khal::irq::DispatchedIrq> {
         with_cause!(
             irq,
             @S_TIMER => {
                 trace!("IRQ: timer");
-                Some(irq)
+                Some(khal::irq::DispatchedIrq::new(irq, PLIC_COMPLETE_SKIP))
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
                 unsafe { sip::clear_ssoft() };
-                Some(irq)
+                Some(khal::irq::DispatchedIrq::new(irq, PLIC_COMPLETE_SKIP))
             },
             @S_EXT => {
                 let mut plic = plic().lock();
@@ -162,13 +166,30 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
                     return None;
                 };
                 trace!("IRQ: external {irq}");
-                plic.complete(this_context(), irq);
-                Some(khal::irq::resolve_hwirq(PLIC_DOMAIN, irq.get() as usize))
+                let hwirq = irq.get() as usize;
+                Some(khal::irq::DispatchedIrq::new(
+                    khal::irq::resolve_hwirq(PLIC_DOMAIN, hwirq),
+                    hwirq,
+                ))
             },
             @EX_IRQ => {
                 unreachable!("Device-side IRQs should be dispatch_irqd by triggering the External Interrupt.");
             }
         )
+    }
+
+    fn complete_irq(completion_cookie: usize) {
+        if completion_cookie == PLIC_COMPLETE_SKIP {
+            return;
+        }
+        // completion_cookie is a PLIC claim value (hwirq >= 1).
+        // A zero or otherwise invalid cookie here indicates a
+        // programming error in dispatch_irq.
+        let Some(irq) = NonZeroU32::new(completion_cookie as _) else {
+            warn!("PLIC complete_irq: bogus cookie {completion_cookie}");
+            return;
+        };
+        plic().lock().complete(this_context(), irq);
     }
 
     fn notify_cpu(_interrupt_id: usize, target: TargetCpu) {

@@ -5,6 +5,7 @@
 //! IRQ manager and OS-visible handler dispatch state.
 
 use alloc::collections::BTreeMap;
+use core::marker::PhantomData;
 
 use crate_interface::{call_interface, def_interface};
 #[cfg(feature = "ipi")]
@@ -57,11 +58,59 @@ pub fn current_apic_id() -> u8 {
     unsafe { __current_apic_id_impl() }
 }
 
+/// An IRQ claimed by the platform and not yet completed.
+///
+/// Completion must happen on the CPU that claimed the interrupt.
+#[derive(Debug)]
+pub struct DispatchedIrq {
+    irq: Virq,
+    completion_cookie: usize,
+    completed: bool,
+    _not_send: PhantomData<*mut ()>,
+}
+
+impl DispatchedIrq {
+    /// Creates a dispatched IRQ with an opaque completion cookie.
+    pub const fn new(irq: Virq, completion_cookie: usize) -> Self {
+        Self {
+            irq,
+            completion_cookie,
+            completed: false,
+            _not_send: PhantomData,
+        }
+    }
+
+    pub const fn irq(&self) -> Virq {
+        self.irq
+    }
+
+    pub fn complete(mut self) {
+        self.complete_inner();
+    }
+
+    fn complete_inner(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        platform_complete_irq(self.completion_cookie);
+    }
+}
+
+impl Drop for DispatchedIrq {
+    fn drop(&mut self) {
+        self.complete_inner();
+    }
+}
+
 #[def_interface]
 pub trait IntrManagerIf {
     fn configure(desc: IrqDesc);
     fn enable(id: usize, on: bool);
-    fn dispatch_irq(id: usize) -> Option<usize>;
+    /// Claims a pending interrupt and returns a guard that completes it on drop.
+    fn dispatch_irq(id: usize) -> Option<DispatchedIrq>;
+    /// Completes a claimed interrupt with its opaque completion cookie.
+    fn complete_irq(completion_cookie: usize);
     fn notify_cpu(id: usize, target: TargetCpu);
     fn set_prio(id: usize, prio: u8);
 }
@@ -104,8 +153,13 @@ fn disable_platform_irq(desc: IrqDesc) {
 }
 
 #[inline]
-fn platform_dispatch_irq(id: usize) -> Option<usize> {
+fn platform_dispatch_irq(id: usize) -> Option<DispatchedIrq> {
     call_interface!(IntrManagerIf::dispatch_irq, id)
+}
+
+#[inline]
+fn platform_complete_irq(completion_cookie: usize) {
+    call_interface!(IntrManagerIf::complete_irq, completion_cookie)
 }
 
 #[inline]
@@ -473,8 +527,9 @@ pub fn unsubscribe_wakeup(desc: impl IntoIrqDesc) -> bool {
 pub fn irq_handler(vector: usize) -> bool {
     let guard = kspin::NoPreempt::new();
 
-    if let Some(irq) = platform_dispatch_irq(vector) {
-        dispatch_subscribers(irq);
+    if let Some(dispatched_irq) = platform_dispatch_irq(vector) {
+        dispatch_subscribers(dispatched_irq.irq());
+        dispatched_irq.complete();
     }
 
     let _ = guard; // rescheduling may occur when preemption is re-enabled.

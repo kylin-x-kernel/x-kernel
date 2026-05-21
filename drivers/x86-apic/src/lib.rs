@@ -29,6 +29,18 @@ pub const APIC_ERROR_VECTOR: u8 = 0xf2;
 pub const MSIX_VECTOR_BASE: u8 = 0x40;
 pub const IO_APIC_VECTOR_BASE: usize = 0x20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoApicTriggerMode {
+    Edge,
+    Level,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoApicPolarity {
+    High,
+    Low,
+}
+
 static mut LOCAL_APIC: MaybeUninit<LocalApic> = MaybeUninit::uninit();
 static mut IS_X2APIC: bool = false;
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
@@ -77,6 +89,61 @@ pub fn set_irq_enabled(irq: usize, enabled: bool) {
                 }
             }
         }
+    }
+}
+
+pub fn configure_irq(irq: usize, trigger: IoApicTriggerMode, polarity: IoApicPolarity) {
+    if irq >= MSIX_VECTOR_BASE as usize {
+        return;
+    }
+
+    let vector = IO_APIC_VECTOR_BASE + irq;
+    if vector < APIC_TIMER_VECTOR as usize {
+        // SAFETY: `IO_APIC` is initialized before IRQ descriptors are configured.
+        unsafe {
+            let mut io_apic = IO_APIC.lock();
+            if irq <= io_apic.max_table_entry() as usize {
+                let mut entry = io_apic.table_entry(irq as u8);
+                let mut flags = entry.flags();
+                if trigger == IoApicTriggerMode::Level {
+                    flags.insert(IrqFlags::LEVEL_TRIGGERED);
+                } else {
+                    flags.remove(IrqFlags::LEVEL_TRIGGERED);
+                }
+                if polarity == IoApicPolarity::Low {
+                    flags.insert(IrqFlags::LOW_ACTIVE);
+                } else {
+                    flags.remove(IrqFlags::LOW_ACTIVE);
+                }
+                entry.set_flags(flags);
+                io_apic.set_table_entry(irq as u8, entry);
+            }
+        }
+    }
+}
+
+pub fn irq_trigger_mode(irq: usize) -> Option<IoApicTriggerMode> {
+    if irq >= MSIX_VECTOR_BASE as usize {
+        return None;
+    }
+
+    let vector = IO_APIC_VECTOR_BASE + irq;
+    if vector >= APIC_TIMER_VECTOR as usize {
+        return None;
+    }
+
+    // SAFETY: `IO_APIC` is initialized before IO-APIC interrupts can be dispatched.
+    unsafe {
+        let mut io_apic = IO_APIC.lock();
+        if irq > io_apic.max_table_entry() as usize {
+            return None;
+        }
+        let flags = io_apic.table_entry(irq as u8).flags();
+        Some(if flags.contains(IrqFlags::LEVEL_TRIGGERED) {
+            IoApicTriggerMode::Level
+        } else {
+            IoApicTriggerMode::Edge
+        })
     }
 }
 

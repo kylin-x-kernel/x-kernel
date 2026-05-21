@@ -187,7 +187,11 @@ fn legacy_irq_for_bdf(config: &::pci::PciConfigAccess, bdf: DeviceFunction) -> u
     if irq_line == 0xFF || irq_line == 0 {
         irq_line
     } else {
-        khal::irq::map(khal::irq::io_apic_irq_desc(irq_line))
+        khal::irq::map(
+            khal::irq::IrqDesc::new(irq_line, khal::irq::IrqTrigger::LevelLow)
+                .with_controller(khal::irq::IrqControllerKind::IoApic)
+                .with_domain(khal::irq::IO_APIC_DOMAIN),
+        )
     }
 }
 

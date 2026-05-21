@@ -100,9 +100,11 @@ impl crate::irq::IntrManagerIf for DummyIrq {
 
     fn enable(_irq: usize, _enabled: bool) {}
 
-    fn dispatch_irq(_irq: usize) -> Option<usize> {
+    fn dispatch_irq(_irq: usize) -> Option<crate::irq::DispatchedIrq> {
         None
     }
+
+    fn complete_irq(_completion_cookie: usize) {}
 
     fn notify_cpu(_irq: usize, _target: TargetCpu) {}
 

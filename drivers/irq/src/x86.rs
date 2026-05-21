@@ -3,12 +3,26 @@
 // See LICENSES for license details.
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
-use khal::irq::TargetCpu;
+use khal::irq::{IrqPolarity, IrqTrigger, TargetCpu};
 
 pub const IO_APIC_DOMAIN: khal::irq::IrqDomainId = khal::irq::IO_APIC_DOMAIN;
 
 pub const fn legacy_irq_desc(hwirq: usize) -> khal::irq::IrqDesc {
     khal::irq::io_apic_irq_desc(hwirq)
+}
+
+fn configure(desc: khal::irq::IrqDesc) {
+    let trigger = match desc.trigger {
+        IrqTrigger::EdgeRising | IrqTrigger::EdgeFalling => x86_apic::IoApicTriggerMode::Edge,
+        IrqTrigger::LevelHigh | IrqTrigger::LevelLow => x86_apic::IoApicTriggerMode::Level,
+        IrqTrigger::Unknown(_) => return,
+    };
+    let polarity = match desc.polarity {
+        IrqPolarity::High => x86_apic::IoApicPolarity::High,
+        IrqPolarity::Low => x86_apic::IoApicPolarity::Low,
+        IrqPolarity::Unknown => x86_apic::IoApicPolarity::High,
+    };
+    x86_apic::configure_irq(desc.hwirq, trigger, polarity);
 }
 
 fn enable(irq: usize, enabled: bool) {
@@ -27,39 +41,51 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     }
 }
 
-fn dispatch_irq(vector: usize) -> Option<usize> {
-    let irq = if vector >= x86_apic::APIC_TIMER_VECTOR as usize {
+fn dispatch_irq(vector: usize) -> Option<khal::irq::DispatchedIrq> {
+    if vector >= x86_apic::APIC_TIMER_VECTOR as usize {
         trace!("LAPIC IRQ {}", vector);
         x86_apic::end_of_interrupt();
-        return Some(vector);
-    } else if vector >= x86_apic::MSIX_VECTOR_BASE as usize {
-        let irq = vector;
-        trace!("MSI-X IRQ {}", irq);
+        return Some(khal::irq::DispatchedIrq::new(vector, 0));
+    }
+    if vector >= x86_apic::MSIX_VECTOR_BASE as usize {
+        trace!("MSI-X IRQ {}", vector);
         x86_apic::end_of_interrupt();
-        return Some(irq);
-    } else if vector >= x86_apic::IO_APIC_VECTOR_BASE {
-        vector - x86_apic::IO_APIC_VECTOR_BASE
-    } else {
-        return None;
-    };
-
-    trace!("IRQ {}", irq);
-    x86_apic::end_of_interrupt();
-    Some(khal::irq::resolve_hwirq(IO_APIC_DOMAIN, irq))
+        return Some(khal::irq::DispatchedIrq::new(vector, 0));
+    }
+    if vector >= x86_apic::IO_APIC_VECTOR_BASE {
+        let hwirq = vector - x86_apic::IO_APIC_VECTOR_BASE;
+        let irq = khal::irq::resolve_hwirq(IO_APIC_DOMAIN, hwirq);
+        if x86_apic::irq_trigger_mode(hwirq) == Some(x86_apic::IoApicTriggerMode::Level) {
+            trace!("IRQ {} (level)", hwirq);
+            return Some(khal::irq::DispatchedIrq::new(irq, 1));
+        }
+        trace!("IRQ {} (edge)", hwirq);
+        x86_apic::end_of_interrupt();
+        return Some(khal::irq::DispatchedIrq::new(irq, 0));
+    }
+    None
 }
 
 struct X86ApicIrqIfImpl;
 
 #[kplat::impl_dev_interface]
 impl khal::irq::IntrManagerIf for X86ApicIrqIfImpl {
-    fn configure(_desc: khal::irq::IrqDesc) {}
+    fn configure(desc: khal::irq::IrqDesc) {
+        configure(desc);
+    }
 
     fn enable(irq: usize, enabled: bool) {
         enable(irq, enabled);
     }
 
-    fn dispatch_irq(vector: usize) -> Option<usize> {
+    fn dispatch_irq(vector: usize) -> Option<khal::irq::DispatchedIrq> {
         dispatch_irq(vector)
+    }
+
+    fn complete_irq(completion_cookie: usize) {
+        if completion_cookie != 0 {
+            x86_apic::end_of_interrupt();
+        }
     }
 
     fn notify_cpu(interrupt_id: usize, target: khal::irq::TargetCpu) {

@@ -31,7 +31,7 @@ pub fn init_current_cpu() {
     debug!("Initialize GICv3 CPU Interface...");
     let mut cpu = GIC.lock().cpu_interface();
     let _ = cpu.init_current_cpu();
-    cpu.set_eoi_mode(false);
+    cpu.set_eoi_mode(true);
 }
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
@@ -54,17 +54,24 @@ pub fn set_prio(irq: usize, priority: u8) {
     gic.set_priority(intid, priority);
 }
 
-pub fn dispatch_irq() -> Option<usize> {
+pub fn dispatch_irq() -> Option<(usize, usize)> {
     let ack = TRAP_OP.ack1();
     if ack.is_special() {
         return None;
     }
     let irq = ack.to_u32() as usize;
     TRAP_OP.eoi1(ack);
-    if TRAP_OP.eoi_mode() {
-        TRAP_OP.dir(ack);
-    }
-    Some(irq)
+    // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
+    unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+    Some((irq, irq))
+}
+
+pub fn complete_irq(completion_cookie: usize) {
+    // SAFETY: completion_cookie is the INTID returned by ack1() in
+    // dispatch_irq on the same CPU; it is always a valid GICv3
+    // interrupt identifier (special values already filtered out).
+    let intid = unsafe { IntId::raw(completion_cookie as u32) };
+    TRAP_OP.dir(intid);
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {

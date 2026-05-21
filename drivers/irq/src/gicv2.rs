@@ -58,7 +58,7 @@ pub fn init_current_cpu() {
     debug!("Initialize GICv2 CPU Interface...");
     let mut cpu = GIC.lock().cpu_interface();
     cpu.init_current_cpu();
-    cpu.set_eoi_mode_ns(false);
+    cpu.set_eoi_mode_ns(true);
 }
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
@@ -106,30 +106,47 @@ fn close_irq_and_restore_masking() {
     set_prio_mask(0xff);
 }
 
-pub fn dispatch_irq(_pmu_irq: usize) -> Option<usize> {
+pub fn dispatch_irq(_pmu_irq: usize) -> Option<(usize, usize)> {
     let ack = TRAP_OP.ack();
     if ack.is_special() {
         return None;
     }
+
     let irq = match ack {
         Ack::Other(intid) => intid,
         Ack::SGI { intid, cpu_id: _ } => intid,
     }
     .to_u32() as usize;
     trace!("IRQ: {ack:?}");
+
+    // GIC non-secure mode requires an early EOI to lower the running priority,
+    // while the actual deactivation is deferred to `complete_irq`.
+    TRAP_OP.eoi(ack);
+    // SAFETY: `isb` only orders the acknowledged interrupt before the handler.
+    unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
+
     #[cfg(feature = "nmi-pmu")]
     if irq != _pmu_irq {
         open_high_priority_irq_mode();
     }
-    TRAP_OP.eoi(ack);
-    if TRAP_OP.eoi_mode_ns() {
-        TRAP_OP.dir(ack);
-    }
+    Some((irq, u32::from(ack) as usize))
+}
+
+pub fn complete_irq(completion_cookie: usize) {
+    let ack = Ack::from(completion_cookie as u32);
+    TRAP_OP.dir(ack);
+
     #[cfg(feature = "nmi-pmu")]
-    if irq != _pmu_irq {
-        close_irq_and_restore_masking();
+    {
+        let hwirq = match ack {
+            Ack::Other(intid) => intid,
+            Ack::SGI { intid, cpu_id: _ } => intid,
+        }
+        .to_u32() as usize;
+        if hwirq != kbuild_config::PMU_IRQ {
+            close_irq_and_restore_masking();
+        }
     }
-    Some(irq)
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
