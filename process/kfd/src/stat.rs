@@ -29,6 +29,29 @@ pub struct Kstat {
     pub ctime: Duration,
 }
 
+impl From<kvfs::Metadata> for Kstat {
+    fn from(metadata: kvfs::Metadata) -> Self {
+        let ty = metadata.node_type as u8;
+        let perm = metadata.mode.bits() as u32;
+        let mode = ((ty as u32) << 12) | perm;
+        Self {
+            dev: metadata.device,
+            ino: metadata.inode,
+            mode,
+            nlink: metadata.nlink as _,
+            uid: metadata.uid,
+            gid: metadata.gid,
+            size: metadata.size,
+            blksize: metadata.block_size as _,
+            blocks: metadata.blocks,
+            rdev: metadata.rdev,
+            atime: metadata.atime,
+            mtime: metadata.mtime,
+            ctime: metadata.ctime,
+        }
+    }
+}
+
 impl Default for Kstat {
     fn default() -> Self {
         Self {

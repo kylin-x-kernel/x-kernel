@@ -16,8 +16,8 @@ use core::{
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
+use kfd::{FileLike, IoDst, IoSrc};
 use kpoll::{IoEvents, PollSet, Pollable};
-use kservices::file::{FileLike, IoDst, IoSrc};
 use ksignal::{SignalInfo, SignalSet, Signo};
 use ksync::RwLock;
 use ktask::future::{block_on, poll_io};

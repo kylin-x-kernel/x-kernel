@@ -11,8 +11,7 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
-use kfs::FsContext;
-use kservices::file::Directory;
+use kfs::{Directory, FsContext};
 use kvfs::{NodePermission, NodeType};
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;

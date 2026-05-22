@@ -7,7 +7,7 @@
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
-use kservices::file::File;
+use kfs::File;
 use kthread::current_process_state;
 use kvfs::{Location, NodePermission};
 use linux_raw_sys::general::{
@@ -161,6 +161,6 @@ pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
 
     let proc_state = current_process_state();
     let file = proc_state.resources.get_file_like_as::<File>(fd)?;
-    buf.write_vm(statfs(file.inner().location())?)?;
+    buf.write_vm(statfs(file.location())?)?;
     Ok(0)
 }

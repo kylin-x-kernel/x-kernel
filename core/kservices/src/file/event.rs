@@ -11,10 +11,9 @@ use core::{
 };
 
 use kerrno::KError;
+use kfd::{FileLike, IoDst, IoSrc};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::future::{block_on, poll_io};
-
-use crate::file::{FileLike, IoDst, IoSrc};
 
 /// Kernel object implementing eventfd semantics.
 ///

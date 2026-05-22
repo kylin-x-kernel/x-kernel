@@ -10,6 +10,7 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
+use kfd::{FileLike, IoDst, IoSrc, Kstat};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, Signo};
 use ksync::Mutex;
@@ -25,9 +26,6 @@ use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
 };
-
-use super::{FileLike, Kstat};
-use crate::file::{IoDst, IoSrc};
 
 const RING_BUFFER_INIT_SIZE: usize = 65536; // 64 KiB
 

@@ -9,11 +9,26 @@ use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
 use kfd::{FileLike, Kstat};
-pub use kservices::file::with_fs;
-use kservices::file::{Directory, File};
+use kfs::{Directory, File, FsContext};
 use kthread::{current_process_state, current_thread, get_process_state};
-use kvfs::{Location, Metadata};
-use linux_raw_sys::general::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, O_NOFOLLOW, O_PATH};
+use kvfs::Location;
+use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_NOFOLLOW, O_PATH};
+
+/// Executes a function with the file system context for the given directory file descriptor.
+///
+/// If `dirfd` is `AT_FDCWD`, uses the current directory context.
+/// Otherwise, resolves the directory from the given file descriptor and uses it as the base.
+pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
+    let fs_context = kthread::current_fs_context();
+    let mut fs = fs_context.lock();
+    if dirfd == AT_FDCWD {
+        f(&mut fs)
+    } else {
+        let dir = kthread::current_resources().get_file_like_as::<Directory>(dirfd)?;
+        let dir = dir.inner().clone();
+        f(&mut fs.with_current_dir(dir)?)
+    }
+}
 
 /// The coarse shape of a path string before any runtime resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +161,7 @@ impl ResolveAtResult {
 
     pub fn stat(&self) -> KResult<Kstat> {
         match self {
-            Self::File(file) => file.metadata().map(|it| metadata_to_kstat(&it)),
+            Self::File(file) => file.metadata().map(Kstat::from),
             Self::Other(file_like) => file_like.stat(),
         }
     }
@@ -192,9 +207,7 @@ impl ResolvedPath {
 fn resolve_result_from_file_like(file_like: Arc<dyn FileLike>) -> KResult<ResolveAtResult> {
     let f = file_like.clone();
     if let Some(file) = f.downcast_ref::<File>() {
-        Ok(ResolveAtResult::File(
-            file.inner().backend()?.location().clone(),
-        ))
+        Ok(ResolveAtResult::File(file.backend()?.location().clone()))
     } else if let Some(dir) = f.downcast_ref::<Directory>() {
         Ok(ResolveAtResult::File(dir.inner().clone()))
     } else {
@@ -205,7 +218,7 @@ fn resolve_result_from_file_like(file_like: Arc<dyn FileLike>) -> KResult<Resolv
 fn file_like_location(file_like: Arc<dyn FileLike>) -> KResult<Location> {
     let f = file_like.clone();
     if let Some(file) = f.downcast_ref::<File>() {
-        Ok(file.inner().backend()?.location().clone())
+        Ok(file.backend()?.location().clone())
     } else if let Some(dir) = f.downcast_ref::<Directory>() {
         Ok(dir.inner().clone())
     } else {
@@ -308,27 +321,6 @@ fn procfd_entry(pid: u32, fd: c_int) -> KResult<Arc<dyn FileLike>> {
         .get(fd as usize)
         .map(|entry| entry.inner().clone())
         .ok_or(KError::BadFileDescriptor)
-}
-
-pub fn metadata_to_kstat(metadata: &Metadata) -> Kstat {
-    let ty = metadata.node_type as u8;
-    let perm = metadata.mode.bits() as u32;
-    let mode = ((ty as u32) << 12) | perm;
-    Kstat {
-        dev: metadata.device,
-        ino: metadata.inode,
-        mode,
-        nlink: metadata.nlink as _,
-        uid: metadata.uid,
-        gid: metadata.gid,
-        size: metadata.size,
-        blksize: metadata.block_size as _,
-        blocks: metadata.blocks,
-        rdev: metadata.rdev,
-        atime: metadata.atime,
-        mtime: metadata.mtime,
-        ctime: metadata.ctime,
-    }
 }
 
 #[cfg(unittest)]

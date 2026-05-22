@@ -28,6 +28,8 @@ alloc-engine = { workspace = true }
 kdriver = { workspace = true, features = ["block"] }
 memaddr = { workspace = true }
 kerrno = { workspace = true }
+kfd = { workspace = true }
+ktask = { workspace = true }
 kvfs = { workspace = true }
 khal = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }

@@ -8,9 +8,8 @@ use alloc::sync::Arc;
 
 use kcore::vfs::{Device, DeviceMmap};
 use kerrno::{KError, KResult};
-use kfs::{CachedFile, FileBackend};
+use kfs::{CachedFile, File, FileBackend};
 use khal::paging::{MappingFlags, PageSize};
-use kservices::file::File;
 use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
@@ -184,7 +183,6 @@ pub fn sys_mmap(
     let backend = match map_type {
         MmapFlags::SHARED | MmapFlags::SHARED_VALIDATE => {
             if let Some(file) = file {
-                let file = file.inner();
                 let backend = file.backend()?.clone();
                 match file.backend()?.clone() {
                     FileBackend::Cached(cache) => {
@@ -243,7 +241,7 @@ pub fn sys_mmap(
         MmapFlags::PRIVATE => {
             if let Some(file) = file {
                 // Private mapping from a file
-                let backend = file.inner().backend()?.clone();
+                let backend = file.backend()?.clone();
                 new_cow(start, page_size, backend, offset as u64, None)
             } else {
                 new_alloc(start, page_size)

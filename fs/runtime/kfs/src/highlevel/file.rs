@@ -4,20 +4,32 @@
 
 //! File abstraction and caching layer.
 use alloc::{
+    borrow::Cow,
     boxed::Box,
+    string::ToString,
     sync::{Arc, Weak},
     vec::Vec,
 };
 #[cfg(feature = "times")]
-use core::sync::atomic::{AtomicU8, Ordering};
-use core::{num::NonZeroUsize, ops::Range, task::Context};
+use core::sync::atomic::AtomicU8;
+use core::{
+    ffi::c_int,
+    hint::likely,
+    num::NonZeroUsize,
+    ops::Range,
+    sync::atomic::{AtomicBool, Ordering},
+    task::Context,
+};
 
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use kalloc::{UsageKind, global_allocator};
+use kerrno::{KError, KResult};
+use kfd::{FdTable, FileLike, IoDst, IoSrc, Kstat};
 use khal::mem::{PhysAddr, VirtAddr, v2p};
 use kio::{SeekFrom, prelude::*};
 use kpoll::{IoEvents, Pollable};
 use ksync::{Mutex, RwLock};
+use ktask::future::{block_on, poll_io};
 use kvfs::{
     FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
@@ -87,6 +99,7 @@ pub struct OpenOptions {
     node_type: NodeType,
     // system-specific
     mode: u32,
+    open_flags: u32,
 }
 
 impl OpenOptions {
@@ -108,6 +121,7 @@ impl OpenOptions {
             node_type: NodeType::RegularFile,
             // system-specific
             mode: 0o666,
+            open_flags: 0,
         }
     }
 
@@ -191,6 +205,12 @@ impl OpenOptions {
         self
     }
 
+    /// Sets the raw open flags (e.g., O_RDONLY, O_WRONLY) for the file.
+    pub fn open_flags(&mut self, open_flags: u32) -> &mut Self {
+        self.open_flags = open_flags;
+        self
+    }
+
     fn _open(&self, loc: Location) -> VfsResult<OpenResult> {
         let flags = self.to_flags()?;
 
@@ -222,7 +242,7 @@ impl OpenOptions {
             } else {
                 FileBackend::new_direct(loc)
             };
-            OpenResult::File(File::new(backend, flags))
+            OpenResult::File(File::with_open_flags(backend, flags, self.open_flags))
         })
     }
 
@@ -919,12 +939,18 @@ pub struct File {
     inner: FileBackend,
     flags: FileFlags,
     position: Option<Mutex<u64>>,
+    open_flags: u32,
+    nonblock: AtomicBool,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
 }
 
 impl File {
     pub fn new(inner: FileBackend, flags: FileFlags) -> Self {
+        Self::with_open_flags(inner, flags, 0)
+    }
+
+    pub fn with_open_flags(inner: FileBackend, flags: FileFlags, open_flags: u32) -> Self {
         let position = if inner.location().flags().contains(NodeFlags::STREAM) {
             None
         } else {
@@ -938,6 +964,8 @@ impl File {
             inner,
             flags,
             position,
+            open_flags,
+            nonblock: AtomicBool::new(false),
             #[cfg(feature = "times")]
             access_flags: AtomicU8::new(0),
         }
@@ -973,6 +1001,15 @@ impl File {
 
     pub fn flags(&self) -> FileFlags {
         self.flags
+    }
+
+    /// Checks the node-level blocking attribute (e.g. regular files are always
+    /// blocking). This is independent of the user-facing `O_NONBLOCK` flag
+    /// checked by `nonblocking()`. When true, read/write bypass poll_io and
+    /// execute directly — matching Linux behavior where `O_NONBLOCK` has no
+    /// effect on regular files.
+    fn is_blocking(&self) -> bool {
+        self.inner.location().flags().contains(NodeFlags::BLOCKING)
     }
 
     pub fn backend(&self) -> VfsResult<&FileBackend> {
@@ -1093,6 +1130,66 @@ impl Pollable for File {
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         self.inner.location().register(context, events)
+    }
+}
+
+use super::path_for;
+
+impl FileLike for File {
+    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
+        if likely(self.is_blocking()) {
+            self.read(dst)
+        } else {
+            block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
+                self.read(&mut *dst)
+            }))
+        }
+    }
+
+    fn write(&self, src: &mut IoSrc) -> KResult<usize> {
+        if likely(self.is_blocking()) {
+            self.write(src)
+        } else {
+            block_on(poll_io(self, IoEvents::OUT, self.nonblocking(), || {
+                self.write(&mut *src)
+            }))
+        }
+    }
+
+    fn stat(&self) -> KResult<Kstat> {
+        Ok(Kstat::from(self.location().metadata()?))
+    }
+
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+        self.backend()?.location().ioctl(cmd, arg)
+    }
+
+    fn set_nonblocking(&self, flag: bool) -> KResult {
+        self.nonblock.store(flag, Ordering::Release);
+        Ok(())
+    }
+
+    fn nonblocking(&self) -> bool {
+        self.nonblock.load(Ordering::Acquire)
+    }
+
+    fn open_flags(&self) -> u32 {
+        self.open_flags
+    }
+
+    fn path(&self) -> Cow<'_, str> {
+        path_for(self.location())
+    }
+
+    fn from_fd(fd_table: &RwLock<FdTable>, fd: c_int) -> KResult<Arc<Self>>
+    where
+        Self: Sized + 'static,
+    {
+        fd_table
+            .read()
+            .get_file_like(fd)?
+            .downcast_arc()
+            .map_err(|_| KError::InvalidInput)
     }
 }
 

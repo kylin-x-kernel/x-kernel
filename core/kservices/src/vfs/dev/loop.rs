@@ -9,7 +9,7 @@ use core::{
 
 use kcore::vfs::{DeviceMmap, DeviceOps};
 use kerrno::{KError, KResult, LinuxError};
-use kfs::FileBackend;
+use kfs::{File, FileBackend};
 use ksync::Mutex;
 use kvfs::{DeviceId, NodeFlags, VfsResult};
 use linux_raw_sys::{
@@ -90,7 +90,7 @@ impl DeviceOps for LoopDevice {
                     return Err(KError::BadFileDescriptor);
                 }
                 let f = kthread::current_resources().get_file_like(fd)?;
-                let Some(file) = f.downcast_ref::<crate::file::File>() else {
+                let Some(file) = f.downcast_ref::<File>() else {
                     return Err(KError::InvalidInput);
                 };
                 let mut guard = self.file.lock();
@@ -98,7 +98,7 @@ impl DeviceOps for LoopDevice {
                     return Err(KError::ResourceBusy);
                 }
 
-                *guard = Some(file.inner().backend()?.clone());
+                *guard = Some(file.backend()?.clone());
             }
             LOOP_CLR_FD => {
                 let mut guard = self.file.lock();

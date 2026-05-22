@@ -19,10 +19,10 @@ use core::{
 
 use kerrno::{KError, KResult, LinuxError};
 use kfd::FileLike;
-use kfs::{FileFlags, OpenOptions};
+use kfs::{Directory, File, FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
-use kservices::file::{Directory, File, Pipe};
+use kservices::file::Pipe;
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -129,7 +129,7 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<is
     let any_file = kthread::current_resources().get_file_like(fd)?;
 
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
-        let off = f.inner().seek(pos)?;
+        let off = Seek::seek(&mut &*f, pos)?;
         return Ok(off as _);
     }
 
@@ -174,7 +174,7 @@ pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     debug!("sys_ftruncate <= {fd} {length}");
     // Truncate file descriptor to specified length
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
-    f.inner().access(FileFlags::WRITE)?.set_len(length as _)?;
+    f.access(FileFlags::WRITE)?.set_len(length as _)?;
     Ok(0)
 }
 
@@ -212,8 +212,7 @@ pub fn sys_fallocate(
     let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
 
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
-    let inner = f.inner();
-    let file = inner.access(FileFlags::WRITE)?;
+    let file = f.access(FileFlags::WRITE)?;
 
     let start = offset as u64;
     let len_u = len as u64;
@@ -326,7 +325,7 @@ pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     // Synchronize file to disk - syncs both data and metadata
     let any_file = kthread::current_resources().get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
-        f.inner().sync(false)?;
+        f.sync(false)?;
         return Ok(0);
     } else if let Ok(d) = any_file.downcast_arc::<Directory>() {
         d.inner().sync(false)?;
@@ -341,7 +340,7 @@ pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     // Synchronize file data to disk - only syncs data, not metadata
     let any_file = kthread::current_resources().get_file_like(fd)?;
     if let Ok(f) = any_file.clone().downcast_arc::<File>() {
-        f.inner().sync(true)?;
+        f.sync(true)?;
         return Ok(0);
     } else if let Ok(d) = any_file.downcast_arc::<Directory>() {
         d.inner().sync(true)?;
@@ -384,9 +383,7 @@ pub fn sys_pread64(
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
-    let read = f
-        .inner()
-        .read_at(VmBytesMut::new(buf.as_ptr().cast_mut(), len), offset as _)?;
+    let read = f.read_at(VmBytesMut::new(buf.as_ptr().cast_mut(), len), offset as _)?;
     Ok(read as _)
 }
 
@@ -402,9 +399,7 @@ pub fn sys_pwrite64(
         return Ok(0);
     }
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
-    let write = f
-        .inner()
-        .write_at(VmBytes::new(buf.as_ptr(), len), offset as _)?;
+    let write = f.write_at(VmBytes::new(buf.as_ptr(), len), offset as _)?;
     Ok(write as _)
 }
 
@@ -442,9 +437,7 @@ pub fn sys_preadv2(
     // Vectored read at specific offset with optional flags
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    f.inner()
-        .read_at(iov.into_io(), offset as _)
-        .map(|n| n as _)
+    f.read_at(iov.into_io(), offset as _).map(|n| n as _)
 }
 
 /// Vectored write at a given offset with flags.
@@ -459,9 +452,7 @@ pub fn sys_pwritev2(
     // Vectored write at specific offset with optional flags.
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    f.inner()
-        .write_at(iov.into_io(), offset as _)
-        .map(|n| n as _)
+    f.write_at(iov.into_io(), offset as _).map(|n| n as _)
 }
 
 /// Helper for sendfile and copy_file_range operations
@@ -488,7 +479,7 @@ impl SendFile {
             SendFile::Offset(file, offset) => {
                 // Read from fixed offset and update offset pointer
                 let off = offset.read_vm()?;
-                let bytes_read = file.inner().read_at(&mut buf, off)?;
+                let bytes_read = file.read_at(&mut buf, off)?;
                 offset.write_vm(off + bytes_read as u64)?;
                 Ok(bytes_read)
             }
@@ -502,7 +493,7 @@ impl SendFile {
             SendFile::Offset(file, offset) => {
                 // Write at fixed offset and update offset pointer
                 let off = offset.read_vm()?;
-                let bytes_written = file.inner().write_at(buf, off)?;
+                let bytes_written = file.write_at(buf, off)?;
                 offset.write_vm(off + bytes_written as u64)?;
                 Ok(bytes_written)
             }
@@ -672,7 +663,7 @@ pub fn sys_splice(
         }
         // Path-only files (opened without O_RDWR/O_WRONLY) cannot be spliced
         if let Ok(file) = resources.get_file_like_as::<File>(fd_in)
-            && file.inner().is_path()
+            && file.is_path()
         {
             return Err(KError::InvalidInput);
         }
@@ -697,7 +688,7 @@ pub fn sys_splice(
         }
         // APPEND mode files cannot be spliced (offset cannot be changed)
         if let Ok(file) = resources.get_file_like_as::<File>(fd_out)
-            && file.inner().access(FileFlags::APPEND).is_ok()
+            && file.access(FileFlags::APPEND).is_ok()
         {
             return Err(KError::InvalidInput);
         }

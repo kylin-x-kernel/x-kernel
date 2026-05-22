@@ -9,11 +9,9 @@ use core::ffi::{c_char, c_int};
 
 use kcore::vfs::Device;
 use kerrno::{KError, KResult};
-use kfs::{FileBackend, OpenOptions, OpenResult};
-use kservices::{
-    file::{Directory, File, FileLike},
-    vfs::dev::tty,
-};
+use kfd::FileLike;
+use kfs::{Directory, FileBackend, OpenOptions, OpenResult};
+use kservices::vfs::dev::tty;
 use kthread::current_process_state;
 use kvfs::{DirEntry, FileNode, Location, NodeType, Reference};
 use linux_raw_sys::general::*;
@@ -29,7 +27,7 @@ fn current_effective_ids() -> (u32, u32) {
 fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32)) -> OpenOptions {
     let flags = flags as u32;
     let mut options = OpenOptions::new();
-    options.mode(mode).user(uid, gid);
+    options.mode(mode).user(uid, gid).open_flags(flags);
 
     match flags & 0b11 {
         O_RDONLY => options.read(true),
@@ -81,7 +79,11 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
                         Reference::new(Some(pts.entry().clone()), pty_number.to_string()),
                     );
                     let loc = Location::new(file.location().mountpoint().clone(), entry);
-                    file = kfs::File::new(FileBackend::Direct(loc), file.flags());
+                    file = kfs::File::with_open_flags(
+                        FileBackend::Direct(loc),
+                        file.flags(),
+                        file.open_flags(),
+                    );
                 } else if inner.is::<tty::CurrentTty>() {
                     let term = kthread::current_thread()
                         .process_state()
@@ -100,10 +102,14 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
                     let loc = kthread::current_process_fs_context()
                         .lock()
                         .resolve(&path)?;
-                    file = kfs::File::new(FileBackend::Direct(loc), file.flags());
+                    file = kfs::File::with_open_flags(
+                        FileBackend::Direct(loc),
+                        file.flags(),
+                        file.open_flags(),
+                    );
                 }
             }
-            Arc::new(File::new(file, flags))
+            Arc::new(file)
         }
         OpenResult::Dir(dir) => Arc::new(Directory::new(dir)),
     };

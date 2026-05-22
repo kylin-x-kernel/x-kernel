@@ -9,7 +9,6 @@ use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
 use kfs::OpenOptions;
-use kservices::file::File;
 use kthread::{current_process_fs_context, current_process_state};
 use linux_raw_sys::general::{MFD_CLOEXEC, O_RDWR};
 use posix_types::UserConstPtr;
@@ -27,13 +26,14 @@ pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isiz
                 .read(true)
                 .write(true)
                 .create(true)
+                .open_flags(O_RDWR)
                 .open(&fs, &name)?
                 .into_file()?;
             let cloexec = flags & MFD_CLOEXEC != 0;
             let proc_state = current_process_state();
             return proc_state
                 .resources
-                .add_file_like(Arc::new(File::new(file, O_RDWR)), cloexec)
+                .add_file_like(Arc::new(file), cloexec)
                 .map(|fd| fd as _);
         }
     }

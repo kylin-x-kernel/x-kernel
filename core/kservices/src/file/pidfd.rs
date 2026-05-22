@@ -9,10 +9,9 @@ use alloc::{
 use core::task::Context;
 
 use kerrno::{KError, KResult};
+use kfd::FileLike;
 use kpoll::{IoEvents, PollSet, Pollable};
 use kthread::ProcessState;
-
-use crate::file::FileLike;
 
 /// Process file descriptor for monitoring process state changes.
 ///

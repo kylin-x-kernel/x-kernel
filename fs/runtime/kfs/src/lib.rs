@@ -4,6 +4,7 @@
 
 //! Kernel filesystem initialization and high-level APIs.
 #![cfg_attr(all(not(test), not(doc)), no_std)]
+#![feature(likely_unlikely)]
 #![allow(dead_code, unused_imports, rustdoc::broken_intra_doc_links)]
 #![allow(clippy::new_ret_no_self)]
 

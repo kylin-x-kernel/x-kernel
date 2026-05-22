@@ -12,6 +12,7 @@ documentation.workspace = true
 [dependencies]
 bitflags.workspace = true
 kerrno.workspace = true
+kfd.workspace = true
 khal.workspace = true
 kio.workspace = true
 klogger.workspace = true

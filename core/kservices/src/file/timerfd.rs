@@ -16,13 +16,12 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
+use kfd::{FileLike, IoDst, IoSrc};
 use khal::time::{self, monotonic_time, wall_time};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ktask::future::{TimerHandle, block_on, cancel_timer, poll_io, register_timer};
 use linux_raw_sys::general::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
-
-use crate::file::{FileLike, IoDst, IoSrc};
 
 fn clock_now(clock_id: u32) -> Duration {
     match clock_id {
