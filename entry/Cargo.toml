@@ -29,6 +29,9 @@ kthread.workspace = true
 ksyscall.workspace = true
 kservices.workspace = true
 kcore.workspace = true
+kbuild_config.workspace = true
+indoc = "2"
+backtrace.workspace = true
 unittest = { workspace = true, optional = true }
 
 [package.metadata.vendor-filter]

@@ -189,30 +189,6 @@ pub fn rust_main(arg: usize) -> ! {
     khal::early_driver_init();
 
     kprintln!("{}", LOGO);
-    let build_machine = option_env!("KBUILD_BUILD_MACHINE").unwrap_or("unknown");
-    let build_time = option_env!("KBUILD_BUILD_TIME").unwrap_or("unknown");
-    kprintln!(
-        indoc::indoc! {"
-            arch = {}
-            platform = {}
-            target = {}
-            build_mode = {}
-            build_machine = {}
-            build_time = {}
-            log_level = {}
-            backtrace = {}
-            smp = {}
-        "},
-        kbuild_config::ARCH,
-        kbuild_config::PLATFORM,
-        option_env!("K_TARGET").unwrap_or(""),
-        option_env!("K_MODE").unwrap_or(""),
-        build_machine,
-        build_time,
-        configured_log_level(),
-        backtrace::is_enabled(),
-        kbuild_config::CPU_NUM,
-    );
     #[cfg(feature = "rtc")]
     kprintln!(
         "Boot at {}\n",

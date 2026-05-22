@@ -53,7 +53,6 @@ timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 chrono.workspace = true
 crate_interface.workspace = true
-indoc = "2"
 heapless = "0.9"
 percpu.workspace = true
 kbuild_config = { workspace = true }

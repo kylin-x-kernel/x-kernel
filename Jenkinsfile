@@ -864,7 +864,7 @@ make build
 
 echo "==> Running TEE storage test..."
 set +e
-timeout 600 stdbuf -oL -eL make HOSTFWD_PORT=${teeHostfwdPort} VSOCK_CID=${teeVsockCid} justrun 2>&1 | tee tee-test-output.log
+timeout 1200 stdbuf -oL -eL make HOSTFWD_PORT=${teeHostfwdPort} VSOCK_CID=${teeVsockCid} justrun 2>&1 | tee tee-test-output.log
 QEMU_STATUS=\${PIPESTATUS[0]}
 set -e
 

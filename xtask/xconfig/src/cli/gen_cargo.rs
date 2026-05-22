@@ -2,7 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use std::{collections::HashMap, fs::File, io::Write, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -48,6 +51,17 @@ pub fn gen_cargo_command(
     };
     generate_rust_analyzer_and_cargo_config(&config_map, &opts)?;
     Ok(())
+}
+
+/// Write `content` to `path` only if it differs from the current file content.
+fn write_if_changed(path: &std::path::Path, content: &str) -> std::io::Result<bool> {
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        if existing == content {
+            return Ok(false);
+        }
+    }
+    std::fs::write(path, content)?;
+    Ok(true)
 }
 
 /// Update `.vscode/settings.json` with rust-analyzer configuration derived
@@ -167,11 +181,12 @@ fn generate_rust_analyzer_config(config: &HashMap<String, String>) -> Result<()>
     }
     let output = serde_json::to_string_pretty(&Value::Object(settings))
         .map_err(|e| KconfigError::Config(e.to_string()))?;
-    let mut file = File::create(&settings_path).map_err(KconfigError::Io)?;
-    file.write_all(output.as_bytes())
-        .map_err(KconfigError::Io)?;
-    file.write_all(b"\n").map_err(KconfigError::Io)?;
-    println!("✅ Updated .vscode/settings.json");
+    let output_with_newline = format!("{}\n", output);
+    let changed =
+        write_if_changed(&settings_path, &output_with_newline).map_err(KconfigError::Io)?;
+    if changed {
+        println!("✅ Updated .vscode/settings.json");
+    }
 
     let ra_toml_path = std::path::Path::new("rust-analyzer.toml");
     if ra_toml_path.exists() {
@@ -263,7 +278,7 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
         target_rustflags.push("no-profiler-runtime".into());
     }
 
-    let mut envs = HashMap::new();
+    let mut envs = BTreeMap::new();
     envs.insert("K_PLAT_NAME".to_string(), plat_name.into());
     envs.insert(
         "RUST_TARGET_PATH".to_string(),
@@ -274,8 +289,8 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
     struct CargoConfig {
         build: BuildTarget,
         #[serde(rename = "target")]
-        targets: HashMap<String, BuildTarget>,
-        env: HashMap<String, String>,
+        targets: BTreeMap<String, BuildTarget>,
+        env: BTreeMap<String, String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(rename = "features")]
         feature_values: Vec<String>,
@@ -286,7 +301,7 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
         rustflags: Vec<String>,
     }
 
-    let mut targets = HashMap::new();
+    let mut targets = BTreeMap::new();
     targets.insert(
         target.to_string(),
         BuildTarget {
@@ -310,9 +325,11 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
          {}\n",
         generated_toml
     );
-    std::fs::write(dot_cargo_dir.join(".xconfig.toml"), cargo_config_toml)
-        .map_err(|e| KconfigError::Io(e))?;
-    println!("✅ Generated .cargo/.xconfig.toml");
+    let xconfig_path = dot_cargo_dir.join(".xconfig.toml");
+    let changed = write_if_changed(&xconfig_path, &cargo_config_toml).map_err(KconfigError::Io)?;
+    if changed {
+        println!("✅ Generated .cargo/.xconfig.toml");
+    }
 
     Ok(())
 }

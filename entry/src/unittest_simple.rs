@@ -50,7 +50,7 @@ fn test_explicit_result() -> TestResult {
 // More complex test examples
 // ============================================================================
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod math_tests {
     use unittest::def_test;
     /// Test Vec operations

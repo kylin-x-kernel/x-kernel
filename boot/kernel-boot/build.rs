@@ -58,6 +58,11 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
     let out_path = Path::new(&out_dir).join("../../..").join(fname);
     // Tell cargo to re-run this script if the output linker script is missing.
     println!("cargo:rerun-if-changed={}", out_path.display());
+    if let Ok(existing) = std::fs::read_to_string(&out_path)
+        && existing == ld_content
+    {
+        return Ok(());
+    }
     std::fs::write(out_path, ld_content)?;
     Ok(())
 }
