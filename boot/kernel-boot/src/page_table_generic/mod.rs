@@ -22,7 +22,7 @@ pub struct PTEInfo<P: PTEGeneric> {
 pub trait TableGeneric: Sync + Send + Clone + Copy + 'static {
     type PTE: PTEGeneric;
 
-    const PAGE_SIZE: usize = 0x1000;
+    const PAGE_SIZE: usize = PAGE_SIZE_4K;
     const LEVEL: usize = 4;
     const VALID_BITS: usize = 12 + Self::LEVEL * 9;
     // 大页最高支持的级别

@@ -2,15 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Time interrupt accounting.
-//!
-//! [`TimeValueLike`] has been moved to the `posix-types` crate.
+//! Interrupt statistics shared by kernel services and procfs.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 static IRQ_CNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Increment the interrupt count.
+/// Increment the interrupt count (called from timer callback).
 pub fn inc_irq_cnt() {
     IRQ_CNT.fetch_add(1, Ordering::Relaxed);
 }

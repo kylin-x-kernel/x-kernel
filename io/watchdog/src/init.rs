@@ -2,31 +2,34 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Watchdog initialization and NMI handler setup.
-use kcpu_id_map::for_each_present_logical_cpu;
-use khal::{context::TrapFrame, percpu::this_cpu_id};
+//! Watchdog initialization and optional NMI handler setup.
+
+use khal::percpu::this_cpu_id;
 use ktask::{KCpuMask, TaskInner};
 use log::debug;
-
-use crate::rendezvous as rv;
-
-/// Stores the active trap frame for each CPU when a watchdog failure is detected.
-static mut TRAP_FRAMES: [Option<&TrapFrame>; kbuild_config::CPU_NUM] =
-    [None; kbuild_config::CPU_NUM];
 
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
 /// It sets up:
 /// - soft lockup detection (timer + watchdog task)
-/// - hard lockup detection (PMU/NMI based)
 fn init_common() {
     init_softlockup_detection();
 
-    // Register hard lockup detection task.
-    crate::register_hardlockup_detection_task();
-
     // Register mutex deadlock check
     crate::register_watchdog_task(&crate::watchdog_task::MUTEX_DEADLOCK_CHECK);
+
+    #[cfg(feature = "nmi")]
+    init_nmi_watchdog();
+
+    debug!("watchdog init success on cpu {}", this_cpu_id().as_usize());
+}
+
+#[cfg(feature = "nmi")]
+fn init_nmi_watchdog() {
+    use crate::rendezvous as rv;
+
+    // Register hard lockup detection task.
+    crate::register_hardlockup_detection_task();
 
     // Initialize and enable NMI source for hard lockup detection.
     khal::nmi::init(khal::time::freq() * 10 * 16);
@@ -39,15 +42,17 @@ fn init_common() {
         // triggers a global rendezvous.
         let fail_name = crate::watchdog_task::check_watchdog_tasks();
         if fail_name.is_some() {
-            rv::try_trigger();
+            if ktask::snapshot::nmi_begin() {
+                rv::try_trigger();
+            } else {
+                khal::kprint_atomic!("[watchdog] snapshot already running, skip NMI dump\n");
+            }
         }
 
         // Once any CPU triggered, ALL CPUs must rendezvous here.
         if rv::is_triggered() {
             rv::mark_arrived();
-            unsafe {
-                TRAP_FRAMES[this_cpu_id().as_usize()] = khal::context::active_exception_context();
-            }
+            ktask::snapshot::nmi_collect_local();
             let this_cpu = this_cpu_id().as_usize();
             let is_cause = rv::cause_cpu() == Some(this_cpu);
             if is_cause {
@@ -62,15 +67,11 @@ fn init_common() {
                 );
 
                 // Cause CPU dumps all tasks for all CPUs.
-                for_each_present_logical_cpu(|cpu_id| {
-                    if let Some(tf) = unsafe { TRAP_FRAMES[cpu_id.as_usize()] } {
-                        ktask::dump_cur_task_backtrace(cpu_id, tf, true);
-                    }
-                    ktask::dump_cpu_task_backtrace(cpu_id, true);
-                });
+                ktask::snapshot::nmi_dump_all(rv::all_arrived_mask(), true);
 
                 // Notify others that dump is done.
                 rv::mark_dump_done();
+                ktask::snapshot::nmi_finish();
 
                 // Hard stop on the cause CPU.
                 panic!("Watchdog task check failed (global dump)");
@@ -82,8 +83,6 @@ fn init_common() {
             }
         }
     });
-
-    debug!("watchdog init success on cpu {}", this_cpu_id().as_usize());
 }
 
 /// Initialize soft lockup detection.
@@ -98,10 +97,7 @@ pub fn init_softlockup_detection() {
         crate::timer_tick();
 
         if crate::check_softlockup(now_ns) {
-            if let Some(tf) = khal::context::active_exception_context() {
-                ktask::dump_cur_task_backtrace(this_cpu_id(), tf, false);
-            }
-            ktask::dump_cpu_task_backtrace(this_cpu_id(), false);
+            ktask::snapshot::dump_cpu_tasks(this_cpu_id());
         }
     });
 

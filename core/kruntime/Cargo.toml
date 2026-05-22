@@ -26,6 +26,7 @@ rtc = []
 # driver-dyn = ["kdriver/dyn"]
 crosvm = ["vsock", "kfs/crosvm", "ktask/crosvm", "timer_driver/crosvm"]
 watchdog = ["dep:watchdog"]
+watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
 
 [dependencies]

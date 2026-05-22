@@ -10,14 +10,12 @@ use firmware_handoff::efi::{
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::BOOT_CONSOLE_ADDR;
 use loongArch64::register::tlbrentry;
-use memaddr::{PhysAddr, pa};
+use memaddr::{PAGE_SIZE_2M, PAGE_SIZE_4K, PhysAddr, pa};
 use page_table::{PageTableEntry as _, PagingFlags, loongarch64::La64PageEntry as LA64PTE};
 
 use super::{BOOT_DMW_BASE, BOOT_DMW_UNCACHED_BASE};
 
 const PT_ENTRIES: usize = 512;
-const PAGE_SIZE: usize = 0x1000;
-const MIB_2: usize = 0x20_0000;
 const LA64_GLOBAL_BIT: u64 = 1 << 6;
 const MAX_BOOT_L1_TABLES: usize = 4;
 const MAX_BOOT_L2_TABLES: usize = 8;
@@ -138,7 +136,7 @@ unsafe fn alloc_l1_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
     }
     let pa = pa!(
         boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L1_POOL) as usize).as_usize()
-            + idx * PAGE_SIZE
+            + idx * PAGE_SIZE_4K
     );
     (ptr, pa)
 }
@@ -161,7 +159,7 @@ unsafe fn alloc_l2_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
     }
     let pa = pa!(
         boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L2_POOL) as usize).as_usize()
-            + idx * PAGE_SIZE
+            + idx * PAGE_SIZE_4K
     );
     (ptr, pa)
 }
@@ -184,7 +182,7 @@ unsafe fn alloc_l3_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
     }
     let pa = pa!(
         boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L3_POOL) as usize).as_usize()
-            + idx * PAGE_SIZE
+            + idx * PAGE_SIZE_4K
     );
     (ptr, pa)
 }
@@ -200,7 +198,7 @@ unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[LA64PTE; PT_ENTRIE
     } else {
         let pa = unsafe { BOOT_PT_ROOT[root_idx] }.paddr().as_usize();
         let pool_base = boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L1_POOL) as usize).as_usize();
-        let idx = (pa - pool_base) / PAGE_SIZE;
+        let idx = (pa - pool_base) / PAGE_SIZE_4K;
         unsafe {
             core::ptr::addr_of_mut!(BOOT_PT_L1_POOL)
                 .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
@@ -222,7 +220,7 @@ unsafe fn next_l2_table(
     } else {
         let pa = entry.paddr().as_usize();
         let pool_base = boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L2_POOL) as usize).as_usize();
-        let idx = (pa - pool_base) / PAGE_SIZE;
+        let idx = (pa - pool_base) / PAGE_SIZE_4K;
         unsafe {
             core::ptr::addr_of_mut!(BOOT_PT_L2_POOL)
                 .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
@@ -244,7 +242,7 @@ unsafe fn next_l3_table(
     } else {
         let pa = entry.paddr().as_usize();
         let pool_base = boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L3_POOL) as usize).as_usize();
-        let idx = (pa - pool_base) / PAGE_SIZE;
+        let idx = (pa - pool_base) / PAGE_SIZE_4K;
         unsafe {
             core::ptr::addr_of_mut!(BOOT_PT_L3_POOL)
                 .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
@@ -298,21 +296,21 @@ unsafe fn map_range(va: usize, pa: usize, size: usize, flags: PagingFlags) {
     let mut cur_pa = pa;
     let end = va + size;
 
-    while cur_va < end && ((cur_va | cur_pa) & (MIB_2 - 1)) != 0 {
+    while cur_va < end && ((cur_va | cur_pa) & (PAGE_SIZE_2M - 1)) != 0 {
         unsafe { map_4k_page(cur_va, cur_pa, flags) };
-        cur_va += PAGE_SIZE;
-        cur_pa += PAGE_SIZE;
+        cur_va += PAGE_SIZE_4K;
+        cur_pa += PAGE_SIZE_4K;
     }
 
     while cur_va < end {
-        if cur_va + MIB_2 <= end {
+        if cur_va + PAGE_SIZE_2M <= end {
             unsafe { map_2m_page(cur_va, cur_pa, flags) };
-            cur_va += MIB_2;
-            cur_pa += MIB_2;
+            cur_va += PAGE_SIZE_2M;
+            cur_pa += PAGE_SIZE_2M;
         } else {
             unsafe { map_4k_page(cur_va, cur_pa, flags) };
-            cur_va += PAGE_SIZE;
-            cur_pa += PAGE_SIZE;
+            cur_va += PAGE_SIZE_4K;
+            cur_pa += PAGE_SIZE_4K;
         }
     }
 }
@@ -402,8 +400,8 @@ unsafe fn map_dtb_linear(dtb_paddr: usize) {
         return;
     }
     let dtb_size = unsafe { of::dtb_total_size_from_ptr(boot_phys_ptr(dtb_paddr)) }
-        .unwrap_or(MIB_2)
-        .max(PAGE_SIZE);
+        .unwrap_or(PAGE_SIZE_2M)
+        .max(PAGE_SIZE_4K);
     unsafe { map_linear_region(dtb_paddr, dtb_size, PagingFlags::READ | PagingFlags::WRITE) };
 }
 
@@ -485,7 +483,7 @@ unsafe fn map_mmio_linear_ranges() {
             map_range(
                 PAGE_OFFSET + BOOT_CONSOLE_ADDR,
                 BOOT_CONSOLE_ADDR,
-                PAGE_SIZE,
+                PAGE_SIZE_4K,
                 PagingFlags::READ | PagingFlags::WRITE | PagingFlags::DEVICE,
             );
         }

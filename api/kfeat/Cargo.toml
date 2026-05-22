@@ -31,7 +31,7 @@ fp-simd = ["khal/fp-simd"]
 
 
 # Interrupts
-ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi"]
+ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi", "ktask?/ipi"]
 
 crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 dma-trace = ["kdriver/dma-trace"]
@@ -136,6 +136,15 @@ driver_ramdisk = ["kdriver/ramdisk"]
 # Backtrace
 dwarf = ["backtrace/dwarf"]
 
+# Diagnostics
+snapshot = ["ktask/snapshot"]
+sysrq = ["dep:procfs", "procfs/sysrq"]
+watchdog = ["kruntime/watchdog", "ksync/watchdog"]
+watchdog_hardlockup = [
+    "kruntime/watchdog_hardlockup",
+    "aarch64-qemu-virt?/nmi",
+]
+
 # TEE
 tee = [
     "dep:tee_kernel",
@@ -148,9 +157,6 @@ tee_ta_sign = ["kcore/tee_ta_sign", "ksyscall/tee_ta_sign", "tee_task_iface/tee_
 csv_huk_key = ["tee_kernel/csv_huk_key"]
 virtcca_huk_key = ["tee_kernel/virtcca_huk_key"]
 ta_verify_with_root = ["tee_ta_sign", "tee_task_iface/ta_verify_with_root"]
-
-# Watchdog
-watchdog = ["kruntime/watchdog"]
 
 # Pmu
 pmu = ["kruntime/pmu"]
@@ -200,6 +206,7 @@ ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 ksyscall = { workspace = true }
 kspin = { workspace = true, optional = true }
+procfs = { workspace = true, optional = true }
 tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
 ktracing = { workspace = true, optional = true }

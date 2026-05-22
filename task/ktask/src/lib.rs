@@ -29,8 +29,10 @@ extern crate alloc;
 #[macro_use]
 mod run_queue;
 mod api;
-#[cfg(feature = "watchdog")]
+#[cfg(feature = "snapshot")]
 mod global_task_queue;
+#[cfg(feature = "snapshot")]
+pub mod snapshot;
 mod task;
 mod timers;
 mod tracing_hooks;

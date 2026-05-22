@@ -12,6 +12,13 @@ pub use self::units::{
     VirtAddrRange,
 };
 
+/// 1 KiB.
+pub const KB: usize = 1024;
+/// 1 MiB.
+pub const MB: usize = 1024 * KB;
+/// 1 GiB.
+pub const GB: usize = 1024 * MB;
+
 /// 4 KiB page size.
 pub const PAGE_SIZE_4K: usize = 0x1000;
 /// 2 MiB page size.

@@ -1,0 +1,165 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Convenience helpers for building in-kernel virtual filesystems.
+
+#![no_std]
+
+extern crate alloc;
+
+mod dir;
+mod file;
+mod fs;
+mod seq_file;
+
+use alloc::sync::Arc;
+
+pub use dir::*;
+pub use file::*;
+pub use fs::*;
+use kvfs::{DirNodeOps, FileNodeOps, WeakDirEntry};
+pub use seq_file::*;
+
+/// A callback that builds a `Arc<dyn DirNodeOps>` for a given
+/// `WeakDirEntry`.
+pub type DirMaker = Arc<dyn Fn(WeakDirEntry) -> Arc<dyn DirNodeOps> + Send + Sync>;
+
+/// An enum containing either a directory ([`DirMaker`]) or a file (`Arc<dyn
+/// FileNodeOps>`).
+#[derive(Clone)]
+pub enum NodeOpsMux {
+    /// A directory node.
+    Dir(DirMaker),
+    /// A file node.
+    File(Arc<dyn FileNodeOps>),
+}
+
+impl From<DirMaker> for NodeOpsMux {
+    fn from(maker: DirMaker) -> Self {
+        Self::Dir(maker)
+    }
+}
+
+impl<T: FileNodeOps> From<Arc<T>> for NodeOpsMux {
+    fn from(ops: Arc<T>) -> Self {
+        Self::File(ops)
+    }
+}
+
+/// Unit tests.
+#[cfg(unittest)]
+pub mod tests_vfs {
+    use alloc::{boxed::Box, sync::Arc};
+
+    use kvfs::{DirNodeOps, VfsError, WeakDirEntry};
+    use unittest::{TestResult, def_test};
+
+    use super::{DirMapping, NodeOpsMux, SimpleDirOps, dummy_stat_fs};
+
+    struct NonCacheableDir;
+
+    impl SimpleDirOps for NonCacheableDir {
+        fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = alloc::borrow::Cow<'a, str>> + 'a> {
+            Box::new(core::iter::empty())
+        }
+
+        fn lookup_child(&self, _name: &str) -> kvfs::VfsResult<NodeOpsMux> {
+            Err(VfsError::NotFound)
+        }
+
+        fn supports_dentry_cache(&self) -> bool {
+            false
+        }
+    }
+
+    fn dummy_dir_maker() -> super::DirMaker {
+        Arc::new(|_this: WeakDirEntry| -> Arc<dyn DirNodeOps> {
+            unimplemented!("dummy maker used only for tests")
+        })
+    }
+
+    #[def_test]
+    fn test_dummy_stat_fs_values() {
+        let stat = dummy_stat_fs(0x1234);
+        assert_eq!(stat.fs_type, 0x1234);
+        assert_eq!(stat.block_size, 512);
+        assert_eq!(stat.blocks, 100);
+        assert_eq!(stat.name_length, kvfs::path::MAX_NAME_LEN as u32);
+    }
+
+    #[def_test]
+    fn test_dirmapping_lookup() -> TestResult {
+        let mut map = DirMapping::new();
+        let maker = dummy_dir_maker();
+        map.add("child", NodeOpsMux::from(maker));
+        let entry = map.lookup_child("child").unwrap();
+        match entry {
+            NodeOpsMux::Dir(_) => {}
+            _ => return TestResult::Failed,
+        }
+        TestResult::Ok
+    }
+
+    #[def_test]
+    fn test_chained_dir_ops_lookup() {
+        let mut left = DirMapping::new();
+        let mut right = DirMapping::new();
+        let maker = dummy_dir_maker();
+        left.add("left", NodeOpsMux::from(maker.clone()));
+        right.add("right", NodeOpsMux::from(maker));
+        let chained = left.chain(right);
+        assert!(chained.lookup_child("left").is_ok());
+        assert!(chained.lookup_child("right").is_ok());
+        assert!(matches!(
+            chained.lookup_child("missing"),
+            Err(VfsError::NotFound)
+        ));
+    }
+
+    #[def_test]
+    fn test_dirmapping_overwrite_existing_child() {
+        let mut map = DirMapping::new();
+        map.add("node", NodeOpsMux::from(dummy_dir_maker()));
+        map.add("node", NodeOpsMux::from(dummy_dir_maker()));
+        assert!(matches!(map.lookup_child("node"), Ok(NodeOpsMux::Dir(_))));
+    }
+
+    #[def_test]
+    fn test_chained_dir_ops_supports_dentry_cache_when_both_do() {
+        let left = DirMapping::new();
+        let right = DirMapping::new();
+        assert!(left.chain(right).supports_dentry_cache());
+        assert!(
+            !DirMapping::new()
+                .chain(NonCacheableDir)
+                .supports_dentry_cache()
+        );
+    }
+
+    #[def_test]
+    fn test_chained_dir_ops_prefers_left_non_notfound_error() {
+        struct ErrorDir;
+
+        impl SimpleDirOps for ErrorDir {
+            fn child_names<'a>(
+                &'a self,
+            ) -> Box<dyn Iterator<Item = alloc::borrow::Cow<'a, str>> + 'a> {
+                Box::new(core::iter::empty())
+            }
+
+            fn lookup_child(&self, _name: &str) -> kvfs::VfsResult<NodeOpsMux> {
+                Err(VfsError::PermissionDenied)
+            }
+        }
+
+        let mut right = DirMapping::new();
+        right.add("node", NodeOpsMux::from(dummy_dir_maker()));
+
+        let chained = ErrorDir.chain(right);
+        assert!(matches!(
+            chained.lookup_child("node"),
+            Err(VfsError::PermissionDenied)
+        ));
+    }
+}

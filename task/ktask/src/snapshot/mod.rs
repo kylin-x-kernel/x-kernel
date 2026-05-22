@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+mod dump;
+
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+use kcpu_id_map::LogicalCpuId;
+use khal::{context::TrapFrame, percpu::this_cpu_id};
+
+struct TrapFrames([UnsafeCell<Option<TrapFrame>>; kbuild_config::CPU_NUM]);
+
+// Safety: `TrapFrames` provides interior mutability for per-CPU snapshot slots.
+// During collection each CPU only writes its own slot, while `dump_all` reads a
+// slot only after the writer has published the corresponding `COLLECTED` bit
+// with `Release` and the reader has observed it with `Acquire`.
+//
+// `begin`/`SnapshotGuard` serializes snapshot sessions, so two normal snapshot
+// dumpers do not clear/read these slots at the same time.
+unsafe impl Sync for TrapFrames {}
+
+impl TrapFrames {
+    const fn new() -> Self {
+        Self([const { UnsafeCell::new(None) }; kbuild_config::CPU_NUM])
+    }
+
+    fn clear(&self) {
+        for slot in &self.0 {
+            unsafe { *slot.get() = None };
+        }
+    }
+
+    fn write_current(&self, cpu_id: LogicalCpuId, tf: Option<TrapFrame>) {
+        unsafe { *self.0[cpu_id.as_usize()].get() = tf };
+    }
+
+    fn read(&self, cpu_id: LogicalCpuId) -> Option<TrapFrame> {
+        unsafe { *self.0[cpu_id.as_usize()].get() }
+    }
+}
+
+static SNAPSHOT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static COLLECTED: AtomicUsize = AtomicUsize::new(0);
+static TRAP_FRAMES: TrapFrames = TrapFrames::new();
+static SNAPSHOT_SEQ: AtomicUsize = AtomicUsize::new(1);
+
+#[cfg(feature = "ipi")]
+const SNAPSHOT_WAIT_TIMEOUT_NS: usize = 200_000_000;
+
+struct SnapshotGuard;
+
+impl Drop for SnapshotGuard {
+    fn drop(&mut self) {
+        finish();
+    }
+}
+
+const _: () = assert!(
+    kbuild_config::CPU_NUM <= usize::BITS as usize,
+    "snapshot CPU mask cannot represent all configured CPUs"
+);
+
+#[inline]
+const fn full_mask() -> usize {
+    if kbuild_config::CPU_NUM >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        (1usize << kbuild_config::CPU_NUM) - 1
+    }
+}
+
+fn cpu_bit(cpu: usize) -> Option<usize> {
+    if cpu >= kbuild_config::CPU_NUM {
+        None
+    } else {
+        Some(1usize << cpu)
+    }
+}
+
+fn begin() -> bool {
+    if SNAPSHOT_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+
+    TRAP_FRAMES.clear();
+    COLLECTED.store(0, Ordering::Release);
+    true
+}
+
+fn finish() {
+    COLLECTED.store(0, Ordering::Release);
+    TRAP_FRAMES.clear();
+    SNAPSHOT_ACTIVE.store(false, Ordering::Release);
+}
+
+fn begin_guard() -> Option<SnapshotGuard> {
+    begin().then_some(SnapshotGuard)
+}
+
+fn collect_local() {
+    let cpu_id = this_cpu_id();
+    let cpu_index = cpu_id.as_usize();
+    let Some(bit) = cpu_bit(cpu_index) else {
+        return;
+    };
+
+    TRAP_FRAMES.write_current(cpu_id, khal::context::active_exception_context().copied());
+    COLLECTED.fetch_or(bit, Ordering::Release);
+}
+
+fn wait_mask(timeout_ns: usize) -> usize {
+    let expect = full_mask();
+    let start = khal::time::monotonic_time_nanos();
+    let timeout_ns = timeout_ns as u64;
+
+    loop {
+        let mask = COLLECTED.load(Ordering::Acquire);
+        if mask & expect == expect {
+            return mask;
+        }
+        if khal::time::monotonic_time_nanos().wrapping_sub(start) >= timeout_ns {
+            return mask;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn dump_all(mask: usize, symbolize: bool) {
+    let expect = full_mask();
+
+    for cpu in 0..kbuild_config::CPU_NUM {
+        let bit = cpu_bit(cpu);
+
+        if bit.is_none_or(|bit| expect & bit != 0 && mask & bit == 0) {
+            khal::kprint_atomic!("[snapshot] cpu={cpu} NOT RESPONDING\n");
+            continue;
+        }
+
+        let cpu_id = LogicalCpuId::new(cpu);
+        match TRAP_FRAMES.read(cpu_id) {
+            Some(tf) => dump::dump_cur_task_backtrace(cpu_id, &tf, true, symbolize),
+            None => khal::kprint_atomic!("[snapshot] cpu={cpu} no active trap frame\n"),
+        }
+        dump::dump_cpu_task_backtrace(cpu_id, true, symbolize);
+    }
+}
+
+fn trigger_impl(reason: &str, collect_mask: impl FnOnce(usize) -> Option<usize>) {
+    let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let symbolize = backtrace::is_enabled();
+    khal::kprint_atomic!("\n[snapshot {seq}] trigger={reason}\n");
+
+    let Some(_guard) = begin_guard() else {
+        khal::kprint_atomic!("[snapshot {seq}] snapshot already running\n");
+        return;
+    };
+
+    if let Some(mask) = collect_mask(seq) {
+        dump_all(mask, symbolize);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Trigger a global task snapshot (e.g. from sysrq).
+///
+/// Broadcasts an IPI to collect trap frames from all CPUs, then dumps
+/// backtraces for every task. When the `ipi` feature is disabled, only the
+/// local CPU is collected.
+pub fn trigger(reason: &str) {
+    #[cfg(feature = "ipi")]
+    {
+        trigger_impl(reason, |seq| {
+            match kipi::run_on_each_cpu_via_ipi(nmi_collect_local) {
+                Ok(()) => Some(wait_mask(SNAPSHOT_WAIT_TIMEOUT_NS)),
+                Err(err) => {
+                    khal::kprint_atomic!("[snapshot {seq}] failed to broadcast snapshot: {err}\n");
+                    None
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "ipi"))]
+    {
+        trigger_impl(reason, |_seq| {
+            collect_local();
+            Some(COLLECTED.load(Ordering::Acquire))
+        });
+    }
+}
+
+/// Dump backtraces for all tasks on the given CPU (softlockup path).
+///
+/// Uses the current trap frame for the running task (if in interrupt context),
+/// then dumps all non-running tasks.
+pub fn dump_cpu_tasks(cpu_id: LogicalCpuId) {
+    if let Some(tf) = khal::context::active_exception_context() {
+        dump::dump_cur_task_backtrace(cpu_id, tf, false, true);
+    }
+    dump::dump_cpu_task_backtrace(cpu_id, false, true);
+}
+
+/// Begin an NMI-driven snapshot session.
+///
+/// Returns `true` if the snapshot was successfully initiated. When `true` is
+/// returned the caller is the *cause CPU* and must eventually call
+/// [`nmi_finish`] after calling [`nmi_dump_all`].
+pub fn nmi_begin() -> bool {
+    begin()
+}
+
+/// Collect the local CPU's trap frame from NMI context.
+pub fn nmi_collect_local() {
+    collect_local();
+}
+
+/// Dump all CPU task backtraces from NMI context.
+///
+/// `mask` is the bitmap of CPUs that have collected their trap frames.
+pub fn nmi_dump_all(mask: usize, symbolize: bool) {
+    dump_all(mask, symbolize);
+}
+
+/// Finish an NMI-driven snapshot session.
+pub fn nmi_finish() {
+    finish();
+}

@@ -140,6 +140,11 @@ impl SimpleFsNode {
             metadata: Mutex::new(metadata),
         }
     }
+
+    /// Updates the special-file device ID stored in this node's metadata.
+    pub fn set_device_id(&self, device_id: DeviceId) {
+        self.metadata.lock().rdev = device_id;
+    }
 }
 
 impl Drop for SimpleFsNode {

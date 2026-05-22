@@ -27,9 +27,8 @@ use buddy_slab_allocator::{
 };
 use kaddr_layout::v2p;
 use kspin::SpinNoIrq;
+use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
-
-const PAGE_SIZE: usize = 0x1000;
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
 
 #[virt_to_phys_impl]
@@ -44,7 +43,7 @@ impl SlabTrait for KernelSlabPool {
     }
 
     fn page_size(&self) -> usize {
-        PAGE_SIZE
+        PAGE_SIZE_4K
     }
 
     fn alloc(
@@ -172,7 +171,7 @@ pub struct GlobalAllocator {
     heap_ready: AtomicBool,
     /// Whether the page allocator has at least one usable memory region.
     page_ready: AtomicBool,
-    palloc: SpinNoIrq<BuddyPageAllocator<PAGE_SIZE>>,
+    palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,
     usages: SpinNoIrq<Usages>,
 }
 
@@ -259,11 +258,11 @@ impl GlobalAllocator {
             let exp_size = old_size
                 .max(layout.size())
                 .next_power_of_two()
-                .max(PAGE_SIZE);
+                .max(PAGE_SIZE_4K);
 
             let mut req_size = exp_size;
             let min_size = if heap_ready {
-                PAGE_SIZE.max(layout.size())
+                PAGE_SIZE_4K.max(layout.size())
             } else {
                 MIN_HEAP_SIZE.max(layout.size())
             };
@@ -271,17 +270,20 @@ impl GlobalAllocator {
                 if !heap_ready {
                     req_size = (req_size + MIN_HEAP_SIZE - 1) & !(MIN_HEAP_SIZE - 1);
                 }
-                let heap_addr =
-                    match self.alloc_pages(req_size / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap) {
-                        Ok(addr) => addr,
-                        Err(err) => {
-                            req_size /= 2;
-                            if req_size < min_size {
-                                return Err(err);
-                            }
-                            continue;
+                let heap_addr = match self.alloc_pages(
+                    req_size / PAGE_SIZE_4K,
+                    PAGE_SIZE_4K,
+                    UsageKind::RustHeap,
+                ) {
+                    Ok(addr) => addr,
+                    Err(err) => {
+                        req_size /= 2;
+                        if req_size < min_size {
+                            return Err(err);
                         }
-                    };
+                        continue;
+                    }
+                };
                 debug!(
                     "expand heap memory: [{:#x}, {:#x})",
                     heap_addr,
@@ -330,7 +332,7 @@ impl GlobalAllocator {
         );
         let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
+            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE_4K);
         }
         Ok(addr)
     }
@@ -351,7 +353,7 @@ impl GlobalAllocator {
             .lock()
             .allocate_pages_lowmem(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
+            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE_4K);
         }
         Ok(addr)
     }
@@ -375,7 +377,7 @@ impl GlobalAllocator {
             .lock()
             .allocate_pages_at(va, num_pages, align_pow2)?;
         if kind != UsageKind::RustHeap {
-            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE);
+            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE_4K);
         }
         Ok(addr)
     }
@@ -388,13 +390,13 @@ impl GlobalAllocator {
     ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
+        self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE_4K);
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
     /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE);
+        self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE_4K);
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
@@ -412,8 +414,11 @@ impl GlobalAllocator {
         if self.heap_ready.load(Ordering::Acquire) {
             return Ok(());
         }
-        let heap_addr =
-            self.alloc_pages(MIN_HEAP_SIZE / PAGE_SIZE, PAGE_SIZE, UsageKind::RustHeap)?;
+        let heap_addr = self.alloc_pages(
+            MIN_HEAP_SIZE / PAGE_SIZE_4K,
+            PAGE_SIZE_4K,
+            UsageKind::RustHeap,
+        )?;
         self.balloc.lock().init_region(heap_addr, MIN_HEAP_SIZE);
         self.heap_ready.store(true, Ordering::Release);
         Ok(())

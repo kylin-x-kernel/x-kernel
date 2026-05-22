@@ -40,6 +40,7 @@ ktypes.workspace = true
 kerrno.workspace = true
 kbuild_config.workspace = true
 kvfs.workspace = true
+kvfs-simple.workspace = true
 kfs.workspace = true
 khal.workspace = true
 kcred.workspace = true

@@ -33,6 +33,7 @@ raw-cpuid = "11"
 x86 = "0.52"
 x86_64 = { workspace = true }
 karch = { workspace = true }
+memaddr = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = "0.14"

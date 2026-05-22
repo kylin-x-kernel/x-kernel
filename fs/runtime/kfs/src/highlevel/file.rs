@@ -307,7 +307,7 @@ impl Default for OpenOptions {
     }
 }
 
-const PAGE_SIZE: usize = 4096;
+use memaddr::PAGE_SIZE_4K;
 
 #[derive(Debug)]
 pub struct PageCache {
@@ -318,7 +318,7 @@ pub struct PageCache {
 impl PageCache {
     fn new() -> VfsResult<Self> {
         let addr = global_allocator()
-            .alloc_pages(1, PAGE_SIZE, UsageKind::PageCache)
+            .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageCache)
             .inspect_err(|err| {
                 warn!("Failed to allocate page cache: {:?}", err);
             })
@@ -341,7 +341,7 @@ impl PageCache {
     }
 
     pub fn data(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), PAGE_SIZE) }
+        unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), PAGE_SIZE_4K) }
     }
 }
 
@@ -486,8 +486,8 @@ impl CachedFile {
             (listener.listener)(pn, page);
         }
         if page.dirty {
-            let page_start = pn as u64 * PAGE_SIZE as u64;
-            let len = (file.len()?.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
+            let page_start = pn as u64 * PAGE_SIZE_4K as u64;
+            let len = (file.len()?.saturating_sub(page_start)).min(PAGE_SIZE_4K as u64) as usize;
             if len > 0 {
                 file.write_at(&page.data()[..len], page_start)?;
             }
@@ -525,7 +525,7 @@ impl CachedFile {
             // This is required for mmap semantics: bytes past EOF in the last
             // mapped page must read as zero.
             page.data().fill(0);
-            file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
+            file.read_at(page.data(), pn as u64 * PAGE_SIZE_4K as u64)?;
         }
         cache.put(pn, page);
         Ok((cache.get_mut(&pn).unwrap(), evicted))
@@ -553,11 +553,11 @@ impl CachedFile {
     ) -> VfsResult<T> {
         let file = self.inner.entry().as_file()?;
         let mut initial = page_initial(file)?;
-        let start_page = (range.start / PAGE_SIZE as u64) as u32;
-        let end_page = range.end.div_ceil(PAGE_SIZE as u64) as u32;
-        let mut page_offset = (range.start % PAGE_SIZE as u64) as usize;
+        let start_page = (range.start / PAGE_SIZE_4K as u64) as u32;
+        let end_page = range.end.div_ceil(PAGE_SIZE_4K as u64) as u32;
+        let mut page_offset = (range.start % PAGE_SIZE_4K as u64) as usize;
         for pn in start_page..end_page {
-            let page_start = pn as u64 * PAGE_SIZE as u64;
+            let page_start = pn as u64 * PAGE_SIZE_4K as u64;
 
             let mut guard = self.shared.page_cache.lock();
             let page = self.page_or_insert(file, &mut guard, pn)?.0;
@@ -565,7 +565,7 @@ impl CachedFile {
             initial = page_each(
                 initial,
                 page,
-                page_offset..(range.end - page_start).min(PAGE_SIZE as u64) as usize,
+                page_offset..(range.end - page_start).min(PAGE_SIZE_4K as u64) as usize,
             )?;
             page_offset = 0;
         }
@@ -629,7 +629,7 @@ impl CachedFile {
         let old_len = file.len()?;
         file.set_len(len)?;
 
-        let page_size_u64 = PAGE_SIZE as u64;
+        let page_size_u64 = PAGE_SIZE_4K as u64;
         let old_last_page = if old_len == 0 {
             None
         } else {
@@ -700,7 +700,7 @@ impl CachedFile {
             return Ok(());
         }
         let file = self.inner.entry().as_file()?;
-        let start_pn = (offset / PAGE_SIZE as u64) as u32;
+        let start_pn = (offset / PAGE_SIZE_4K as u64) as u32;
         let mut guard = self.shared.page_cache.lock();
 
         let keys = guard

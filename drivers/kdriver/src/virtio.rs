@@ -199,7 +199,7 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
     }
 }
 
-const PAGE_SIZE: usize = 0x1000; // 4KB page size
+use memaddr::PAGE_SIZE_4K;
 pub struct VirtIoHalImpl;
 
 unsafe impl VirtIoHal for VirtIoHalImpl {
@@ -210,8 +210,8 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     ) -> (PhysAddr, NonNull<u8>) {
         use core::alloc::Layout;
         // For AMD SEV, use kdma which handles SHARED flag (clears C-Bit)
-        let size = pages * PAGE_SIZE;
-        let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
+        let size = pages * PAGE_SIZE_4K;
+        let layout = Layout::from_size_align(size, PAGE_SIZE_4K).unwrap();
         match unsafe { kdma::allocate_dma_memory(layout) } {
             Ok(dma_info) => {
                 // Clear the allocated memory
@@ -238,8 +238,8 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         _access_platform: bool,
     ) -> i32 {
         use core::alloc::Layout;
-        let size = pages * PAGE_SIZE;
-        let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
+        let size = pages * PAGE_SIZE_4K;
+        let layout = Layout::from_size_align(size, PAGE_SIZE_4K).unwrap();
         let dma_info = kdma::DMAInfo {
             cpu_addr: vaddr,
             bus_addr: kdma::DmaBusAddress::new(paddr),

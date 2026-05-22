@@ -37,6 +37,7 @@ pub(crate) mod fs;
 // New refactored components
 mod fs_operations;
 mod path_resolver;
+mod virtual_filesystems;
 mod working_context;
 
 mod highlevel;
@@ -44,6 +45,7 @@ mod highlevel;
 pub use fs_operations::FsOperations;
 pub use highlevel::*;
 pub use path_resolver::PathResolver;
+pub use virtual_filesystems::{VirtualFsMounts, mount_virtual_filesystems};
 pub use working_context::WorkingContext;
 
 /// Initialize the filesystem subsystem and mount the root filesystem.

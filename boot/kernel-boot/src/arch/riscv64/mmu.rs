@@ -6,11 +6,9 @@
 
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::{BOOT_CONSOLE_ADDR, BOOT_CONSOLE_TYPE};
-use memaddr::PhysAddr;
+use memaddr::{PAGE_SIZE_2M, PAGE_SIZE_4K, PhysAddr};
 
 const PT_ENTRIES: usize = 512;
-const PAGE_SIZE: usize = 0x1000;
-const MIB_2: usize = 0x20_0000;
 const MAX_BOOT_RAM_REGIONS: usize = 16;
 const MAX_BOOT_L1_TABLES: usize = 32;
 
@@ -121,7 +119,7 @@ unsafe fn alloc_l1_table() -> (*mut PageAligned<[u64; PT_ENTRIES]>, usize) {
             .cast::<PageAligned<[u64; PT_ENTRIES]>>()
             .add(idx)
     };
-    let pa = phys_addr_of!(BOOT_PT_L1_POOL) + idx * PAGE_SIZE;
+    let pa = phys_addr_of!(BOOT_PT_L1_POOL) + idx * PAGE_SIZE_4K;
     unsafe {
         *ptr = PageAligned::new([0; PT_ENTRIES]);
     }
@@ -139,7 +137,7 @@ unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[u64; PT_ENTRIES]> 
     } else {
         let pa = pte_paddr(unsafe { BOOT_PT_L2[root_idx] });
         let pool_base = phys_addr_of!(BOOT_PT_L1_POOL);
-        let idx = (pa - pool_base) / PAGE_SIZE;
+        let idx = (pa - pool_base) / PAGE_SIZE_4K;
         unsafe {
             core::ptr::addr_of_mut!(BOOT_PT_L1_POOL)
                 .cast::<PageAligned<[u64; PT_ENTRIES]>>()
@@ -171,16 +169,16 @@ unsafe fn map_range_2m(va: usize, pa: usize, size: usize, flags: u64) {
         return;
     }
 
-    let va_base = va & !(MIB_2 - 1);
-    let pa_base = pa & !(MIB_2 - 1);
-    let end = (va + size + MIB_2 - 1) & !(MIB_2 - 1);
+    let va_base = va & !(PAGE_SIZE_2M - 1);
+    let pa_base = pa & !(PAGE_SIZE_2M - 1);
+    let end = (va + size + PAGE_SIZE_2M - 1) & !(PAGE_SIZE_2M - 1);
 
     let mut cur_va = va_base;
     let mut cur_pa = pa_base;
     while cur_va < end {
         unsafe { map_2m_page(cur_va, cur_pa, flags) };
-        cur_va += MIB_2;
-        cur_pa += MIB_2;
+        cur_va += PAGE_SIZE_2M;
+        cur_pa += PAGE_SIZE_2M;
     }
 }
 
@@ -191,7 +189,7 @@ unsafe fn map_mmio_linear_ranges() {
             map_range_2m(
                 PAGE_OFFSET + BOOT_CONSOLE_ADDR,
                 BOOT_CONSOLE_ADDR,
-                PAGE_SIZE,
+                PAGE_SIZE_4K,
                 PTE_RW,
             )
         };
@@ -239,7 +237,7 @@ unsafe fn map_dtb_linear(dtb_paddr: usize) {
     if dtb_paddr == 0 {
         return;
     }
-    unsafe { map_range_2m(PAGE_OFFSET + dtb_paddr, dtb_paddr, MIB_2, PTE_RW) };
+    unsafe { map_range_2m(PAGE_OFFSET + dtb_paddr, dtb_paddr, PAGE_SIZE_2M, PTE_RW) };
 }
 
 #[unsafe(link_section = ".text.boot")]

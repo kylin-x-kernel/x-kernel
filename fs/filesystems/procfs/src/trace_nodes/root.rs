@@ -11,11 +11,10 @@ use alloc::{
     sync::Arc,
 };
 
-use kcore::vfs::{
-    DirMaker, NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile, SimpleFileOperation,
-    SimpleFs,
-};
 use kvfs::VfsError;
+use kvfs_simple::{
+    NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile, SimpleFileOperation, SimpleFs,
+};
 
 struct TracingDir {
     fs: Arc<SimpleFs>,
@@ -157,7 +156,9 @@ impl SimpleDirOps for TracingEventDir {
     }
 }
 
-/// [`DirMaker`] for the `tracing` directory under procfs (`/proc/tracing`).
-pub fn tracing_dir_maker(fs: Arc<SimpleFs>) -> DirMaker {
-    SimpleDir::new_maker(fs.clone(), Arc::new(TracingDir { fs }))
+pub(crate) fn add_root_entries(root: &mut kvfs_simple::DirMapping, fs: Arc<SimpleFs>) {
+    root.add(
+        "tracing",
+        SimpleDir::new_maker(fs.clone(), Arc::new(TracingDir { fs })),
+    );
 }

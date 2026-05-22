@@ -14,29 +14,28 @@ use alloc::{
 use core::{ffi::CStr, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
-#[cfg(feature = "tee")]
-use kcore::vfs::DirMapping;
-use kcore::vfs::{
-    NodeOpsMux, RwFile, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile,
-    SimpleFileOperation, SimpleFs,
-};
 use khal::paging::MappingFlags;
 use kprocess::Process;
 use ktask::{KtaskRef, WeakKtaskRef, current};
 use kthread::{AsThread, TaskStat, get_process_state, get_task, processes};
 use kvfs::{NodeType, VfsError, VfsResult};
+#[cfg(feature = "tee")]
+use kvfs_simple::DirMapping;
+use kvfs_simple::{
+    NodeOpsMux, RwFile, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile,
+    SimpleFileOperation, SimpleFs,
+};
 use memaddr::VirtAddr;
 use memspace::backend::Backend;
 use memspace_file::{CowBackend, FileBackend};
 
 #[cfg(feature = "tee")]
-use crate::tee::{has_ta_info, make_ta_info_dir};
-use crate::{hooks::ProcFsHooks, mounts::ProcMountIter};
+use super::tee::{has_ta_info, make_ta_info_dir};
+use crate::task_nodes::mounts::ProcMountIter;
 
 struct ProcessTaskDir {
     fs: Arc<SimpleFs>,
     process: Weak<Process>,
-    hooks: ProcFsHooks,
 }
 
 impl SimpleDirOps for ProcessTaskDir {
@@ -60,7 +59,7 @@ impl SimpleDirOps for ProcessTaskDir {
             return Err(VfsError::NotFound);
         }
 
-        Ok(make_thread_dir(self.fs.clone(), &task, self.hooks))
+        Ok(make_thread_dir(self.fs.clone(), &task))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -293,7 +292,6 @@ impl SeqIterator for MapsIter {
 struct ThreadFdDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
-    hooks: ProcFsHooks,
 }
 
 impl SimpleDirOps for ThreadFdDir {
@@ -301,8 +299,13 @@ impl SimpleDirOps for ThreadFdDir {
         let Some(task) = self.task.upgrade() else {
             return Box::new(iter::empty());
         };
-        let ids = (self.hooks.fd_ids)(&task)
-            .into_iter()
+        let ids = task
+            .as_thread()
+            .proc_state
+            .resources
+            .fd_table()
+            .read()
+            .ids()
             .map(|id| Cow::Owned(id.to_string()))
             .collect::<Vec<_>>();
         Box::new(ids.into_iter())
@@ -312,7 +315,17 @@ impl SimpleDirOps for ThreadFdDir {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-        let path = (self.hooks.fd_path)(&task, fd)?;
+        let path = task
+            .as_thread()
+            .proc_state
+            .resources
+            .fd_table()
+            .read()
+            .get(fd as _)
+            .ok_or(VfsError::NotFound)?
+            .inner()
+            .path()
+            .into_owned();
         Ok(SimpleFile::new(fs, NodeType::Symlink, move || Ok(path.clone())).into())
     }
 
@@ -324,14 +337,12 @@ impl SimpleDirOps for ThreadFdDir {
 struct ThreadDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
-    hooks: ProcFsHooks,
 }
 
-fn make_thread_dir(fs: Arc<SimpleFs>, task: &KtaskRef, hooks: ProcFsHooks) -> NodeOpsMux {
+fn make_thread_dir(fs: Arc<SimpleFs>, task: &KtaskRef) -> NodeOpsMux {
     let thread_dir = ThreadDir {
         fs: fs.clone(),
         task: Arc::downgrade(task),
-        hooks,
     };
 
     #[cfg(feature = "tee")]
@@ -456,7 +467,6 @@ impl SimpleDirOps for ThreadDir {
                 Arc::new(ProcessTaskDir {
                     fs,
                     process: Arc::downgrade(&task.as_thread().proc_state.proc),
-                    hooks: self.hooks,
                 }),
             )
             .into(),
@@ -513,7 +523,6 @@ impl SimpleDirOps for ThreadDir {
                 Arc::new(ThreadFdDir {
                     fs,
                     task: Arc::downgrade(&task),
-                    hooks: self.hooks,
                 }),
             )
             .into(),
@@ -526,14 +535,13 @@ impl SimpleDirOps for ThreadDir {
     }
 }
 
-pub struct ProcFsHandler {
+pub(crate) struct ProcFsHandler {
     fs: Arc<SimpleFs>,
-    hooks: ProcFsHooks,
 }
 
 impl ProcFsHandler {
-    pub fn new(fs: Arc<SimpleFs>, hooks: ProcFsHooks) -> Self {
-        Self { fs, hooks }
+    pub(crate) fn new(fs: Arc<SimpleFs>) -> Self {
+        Self { fs }
     }
 }
 
@@ -560,7 +568,7 @@ impl SimpleDirOps for ProcFsHandler {
                 .find_map(|tid| get_task(tid).ok())
                 .ok_or(VfsError::NotFound)?
         };
-        Ok(make_thread_dir(self.fs.clone(), &task, self.hooks))
+        Ok(make_thread_dir(self.fs.clone(), &task))
     }
 
     fn supports_dentry_cache(&self) -> bool {

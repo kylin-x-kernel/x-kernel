@@ -36,4 +36,38 @@ config KFEAT_TASK_EXT
     help
       Allow attaching user-defined extension data to each task.
 
+menu "Task Diagnostics"
+
+config KFEAT_SNAPSHOT
+    bool "Task snapshot support"
+    help
+      Enable reusable task/CPU snapshot collection and backtrace dumping
+      support in `ktask::snapshot`.
+
+config KFEAT_SYSRQ
+    bool "SysRq task snapshot trigger"
+    depends on KFEAT_SNAPSHOT
+    help
+      Expose `/proc/sysrq-trigger` and route supported SysRq commands to the
+      shared snapshot service.
+
+config KFEAT_WATCHDOG
+    bool "Watchdog diagnostics"
+    depends on KFEAT_SNAPSHOT
+    help
+      Enable watchdog-driven diagnostic checks such as soft lockup detection
+      and lock-wait heuristics.
+
+config KFEAT_WATCHDOG_HARDLOCKUP
+    bool "Watchdog hard lockup detection"
+    depends on KFEAT_WATCHDOG
+    depends on PLATFORM_AARCH64_QEMU_VIRT
+    select KFEAT_PMU
+    help
+      Enable the hard lockup watchdog backend. On AArch64 QEMU virt this is
+      currently implemented through the PMU-driven NMI path and global snapshot
+      rendezvous.
+
+endmenu
+
 endmenu

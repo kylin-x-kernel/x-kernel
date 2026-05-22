@@ -6,10 +6,10 @@
 
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 
-use kcore::vfs::{NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs};
 use ktask::{KtaskRef, WeakKtaskRef};
 use kthread::AsThread;
 use kvfs::{VfsError, VfsResult};
+use kvfs_simple::{NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs};
 use tee_task_iface::tee_procfs::{
     has_ta_info as tee_has_ta_info, render_ta_ctx_uuid as tee_render_ta_ctx_uuid,
     render_ta_head as tee_render_ta_head,

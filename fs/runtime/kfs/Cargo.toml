@@ -26,6 +26,7 @@ crosvm = []
 kalloc = { workspace = true }
 alloc-engine = { workspace = true }
 kdriver = { workspace = true, features = ["block"] }
+memaddr = { workspace = true }
 kerrno = { workspace = true }
 kvfs = { workspace = true }
 khal = { workspace = true }

@@ -64,12 +64,12 @@ pub unsafe trait TaskExt {
 }
 
 // How many held locks we track per task (debug only).
-#[cfg(feature = "watchdog")]
+#[cfg(feature = "snapshot")]
 const HELD_LOCK_SLOTS: usize = 4;
-#[cfg(feature = "watchdog")]
+#[cfg(feature = "snapshot")]
 type HeldLocks = [AtomicUsize; HELD_LOCK_SLOTS];
 
-#[cfg(feature = "watchdog")]
+#[cfg(feature = "snapshot")]
 struct PerTaskRecording {
     /// 0 = not waiting, otherwise lock address.
     waiting_lock: AtomicUsize,
@@ -78,7 +78,7 @@ struct PerTaskRecording {
     held_locks: HeldLocks,
 }
 
-#[cfg(feature = "watchdog")]
+#[cfg(feature = "snapshot")]
 impl PerTaskRecording {
     fn new() -> Self {
         Self {
@@ -134,7 +134,7 @@ pub struct TaskInner {
     tls: TlsArea,
 
     /// Per-task watchdog recording (lock-free/NMI-safe).
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     record_lock: PerTaskRecording,
 }
 
@@ -306,7 +306,7 @@ impl TaskInner {
         self.interrupt_waker.wake();
     }
 
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn set_waiting_lock(&self, lock: usize, now: usize) {
         // Publish `since` first, then `lock` with Release so readers that see
@@ -315,7 +315,7 @@ impl TaskInner {
         self.record_lock.waiting_lock.store(lock, Ordering::Release);
     }
 
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn clear_waiting_lock(&self) {
         // Clear `lock` first (Release) so readers won't observe a stale lock
@@ -325,7 +325,7 @@ impl TaskInner {
     }
 
     /// A lock-free snapshot of the lock-wait state, safe for NMI/watchdog paths.
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn waiting_snapshot(&self) -> Option<(usize, usize)> {
         let lock = self.record_lock.waiting_lock.load(Ordering::Acquire);
@@ -344,21 +344,21 @@ impl TaskInner {
     }
 
     /// Getter: current waiting lock address (0 means none).
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn waiting_lock(&self) -> usize {
         self.record_lock.waiting_lock.load(Ordering::Acquire)
     }
 
     /// Getter: tick when waiting started (0 means none).
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn waiting_since(&self) -> usize {
         self.record_lock.waiting_since.load(Ordering::Relaxed)
     }
 
     /// Record that this task now holds `addr`.
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     pub fn push_held_lock(&self, addr: usize) {
         // Find a free slot.
         for slot in &self.record_lock.held_locks {
@@ -373,7 +373,7 @@ impl TaskInner {
     }
 
     /// Record that this task released `addr`.
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     pub fn pop_held_lock(&self, addr: usize) {
         for slot in &self.record_lock.held_locks {
             if slot.load(Ordering::Acquire) == addr {
@@ -384,7 +384,7 @@ impl TaskInner {
     }
 
     /// Lock-free snapshot of held locks (0 entries are filtered out).
-    #[cfg(feature = "watchdog")]
+    #[cfg(feature = "snapshot")]
     pub fn held_locks_snapshot(&self) -> [usize; HELD_LOCK_SLOTS] {
         let mut out = [0usize; HELD_LOCK_SLOTS];
         for (i, slot) in self.record_lock.held_locks.iter().enumerate() {
@@ -430,7 +430,7 @@ impl TaskInner {
             task_ext: None,
             #[cfg(feature = "tls")]
             tls: TlsArea::alloc(),
-            #[cfg(feature = "watchdog")]
+            #[cfg(feature = "snapshot")]
             record_lock: PerTaskRecording::new(),
         }
     }
@@ -615,7 +615,7 @@ impl fmt::Debug for TaskInner {
             .field("name", &self.name)
             .field("state", &self.state());
 
-        #[cfg(feature = "watchdog")]
+        #[cfg(feature = "snapshot")]
         {
             let waiting = self.waiting_lock();
             let held = self.held_locks_snapshot();

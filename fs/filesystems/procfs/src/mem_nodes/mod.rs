@@ -2,9 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Basic virtual filesystem support.
+//! Memory related procfs nodes.
 
-mod dev;
-
-pub use dev::*;
-pub use kvfs_simple::*;
+pub(crate) mod root;

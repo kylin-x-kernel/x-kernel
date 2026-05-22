@@ -6,55 +6,34 @@
 
 extern crate alloc;
 
-mod hooks;
-mod mounts;
+mod basic_nodes;
+mod irq_nodes;
+mod mem_nodes;
 mod root;
-mod task;
-#[cfg(feature = "tee")]
-mod tee;
-mod tracing;
+#[cfg(feature = "sysrq")]
+mod sysrq_nodes;
+mod task_nodes;
+mod trace_nodes;
 
-pub use hooks::ProcFsHooks;
-use kcore::vfs::SimpleFs;
 use kvfs::{Filesystem, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME};
+use kvfs_simple::SimpleFs;
 
 const PROC_MOUNT_FLAGS: u32 = ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME;
 
 /// Create a new procfs filesystem for process information.
-pub fn new_procfs(hooks: ProcFsHooks) -> Filesystem {
-    SimpleFs::new_with_flags("proc".into(), 0x9fa0, PROC_MOUNT_FLAGS, move |fs| {
-        root::builder(fs, hooks)
-    })
+pub fn new_procfs() -> Filesystem {
+    SimpleFs::new_with_flags("proc".into(), 0x9fa0, PROC_MOUNT_FLAGS, root::builder)
 }
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{string::String, vec::Vec};
-
-    use kvfs::VfsError;
     use unittest::{assert_eq, def_test};
 
     use super::*;
 
-    fn test_irq_count() -> usize {
-        7
-    }
-
-    fn test_fd_ids(_: &ktask::KtaskRef) -> Vec<u32> {
-        Vec::new()
-    }
-
-    fn test_fd_path(_: &ktask::KtaskRef, _: u32) -> kvfs::VfsResult<String> {
-        Err(VfsError::NotFound)
-    }
-
     #[def_test]
     fn test_new_procfs_has_expected_name_and_flags() {
-        let fs = new_procfs(ProcFsHooks {
-            irq_count: test_irq_count,
-            fd_ids: test_fd_ids,
-            fd_path: test_fd_path,
-        });
+        let fs = new_procfs();
 
         assert_eq!(fs.name(), "proc");
         let stat = fs.stat().unwrap();

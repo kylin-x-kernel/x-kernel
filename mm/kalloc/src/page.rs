@@ -4,9 +4,9 @@
 
 //! Global page allocation helpers.
 use kerrno::KResult;
-use memaddr::{PhysAddr, VirtAddr};
+use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
-use crate::{PAGE_SIZE, UsageKind, global_allocator};
+use crate::{UsageKind, global_allocator};
 
 /// A RAII wrapper for contiguous 4K-sized pages.
 ///
@@ -50,7 +50,7 @@ impl GlobalPage {
 
     /// Get the total size (in bytes) of these pages.
     pub fn size(&self) -> usize {
-        self.num_pages * PAGE_SIZE
+        self.num_pages * PAGE_SIZE_4K
     }
 
     /// Convert the start virtual address to a raw pointer.
@@ -90,7 +90,7 @@ impl GlobalPage {
     /// Internal function to allocate pages.
     fn alloc_pages(num_pages: usize) -> KResult<Self> {
         let va = global_allocator()
-            .alloc_pages(num_pages, PAGE_SIZE, UsageKind::Global)
+            .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::Global)
             .map_err(|e| match e {
                 alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
                 _ => kerrno::KError::InvalidInput,

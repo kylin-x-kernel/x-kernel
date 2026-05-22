@@ -12,7 +12,9 @@ description = "x-kernel base task management module"
 [features]
 default = []
 
-watchdog = ["dep:backtrace"]
+snapshot = ["dep:backtrace"]
+ipi = ["dep:kipi"]
+watchdog = ["snapshot"]
 task_ext = ["dep:extern-trait"]
 tls = ["khal/tls"]
 preempt = ["percpu/preempt", "kspin/preempt"]
@@ -31,6 +33,7 @@ kerrno.workspace = true
 khal.workspace = true
 kcpu_id_map.workspace = true
 backtrace = { workspace = true, optional = true }
+kipi = { workspace = true, optional = true }
 kpoll = { workspace = true }
 ksched = { workspace = true }
 cfg-if.workspace = true

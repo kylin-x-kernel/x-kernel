@@ -102,6 +102,9 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
 }
 
 /// Executes a callback on all other CPUs via IPI.
+///
+/// The current CPU runs the callback immediately; all other CPUs receive it
+/// through their IPI event queues.
 pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     debug!("Send IPI event to all other CPUs");
     let current_cpu_id = this_cpu_id();
@@ -111,13 +114,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     callback.clone().call();
 
     // Push the callback to all other CPUs' IPI event queues
-    for_each_present_logical_cpu(|cpu_id| {
-        if cpu_id != current_cpu_id {
-            unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id.as_usize()) }
-                .lock()
-                .push(current_cpu_id, callback.clone().into_unicast());
-        }
-    });
+    broadcast_to_others(current_cpu_id, &callback);
 
     // Send IPI to all other CPUs to trigger their callbacks
     khal::irq::notify_cpu(
@@ -129,6 +126,44 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Executes a callback on every CPU from the IPI handler context.
+///
+/// Unlike [`run_on_each_cpu`], the current CPU also receives the callback
+/// through its local IPI queue instead of running it immediately.
+pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
+    debug!("Send IPI event to every CPU, including self");
+    let current_cpu_id = this_cpu_id();
+    let callback = callback.into();
+
+    // Push to current CPU's queue so it runs from IPI context too
+    unsafe { IPI_EVENT_QUEUE.current_ref_mut_raw() }
+        .lock()
+        .push(current_cpu_id, callback.clone().into_unicast());
+
+    broadcast_to_others(current_cpu_id, &callback);
+
+    khal::irq::notify_cpu(IPI_IRQ, IpiTarget::Self_);
+    khal::irq::notify_cpu(
+        IPI_IRQ,
+        IpiTarget::AllButSelf {
+            me: current_cpu_id.as_usize(),
+            total: kbuild_config::CPU_NUM,
+        },
+    );
+
+    Ok(())
+}
+
+fn broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &MulticastCallback) {
+    for_each_present_logical_cpu(|cpu_id| {
+        if cpu_id != current_cpu_id {
+            unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id.as_usize()) }
+                .lock()
+                .push(current_cpu_id, callback.clone().into_unicast());
+        }
+    });
 }
 
 /// The handler for IPI events. Retrieves events from the queue and executes callbacks.

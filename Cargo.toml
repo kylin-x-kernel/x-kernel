@@ -94,6 +94,7 @@ posix-types = { path = "posix/types" }
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
 kvfs = { path = "fs/foundation/kvfs" }
+kvfs-simple = { path = "fs/foundation/kvfs-simple" }
 kaddr_layout = { path = "mm/kaddr_layout" }
 kalloc = { path = "mm/kalloc" }
 kfs = { path = "fs/runtime/kfs" }

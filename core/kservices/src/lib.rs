@@ -17,7 +17,6 @@ pub mod file;
 pub mod mm;
 pub mod task;
 pub mod terminal;
-pub mod time;
 pub mod vfs;
 
 #[cfg(feature = "tee")]
@@ -32,11 +31,12 @@ pub use unittest_task::{register_unittest_runtime, run_with_test_user_thread};
 pub fn init() {
     info!("Initialize VFS...");
     vfs::dev::capture_firmware_dtb_snapshot();
-    vfs::mount_all().expect("Failed to mount vfs");
+    kfs::mount_virtual_filesystems(vfs::virtual_filesystems()).expect("Failed to mount vfs");
+    vfs::finish_virtual_filesystems().expect("Failed to finish vfs initialization");
 
     info!("Initialize /proc/interrupts...");
     ktask::register_timer_callback(|_| {
-        time::inc_irq_cnt();
+        kcore::irq_stats::inc_irq_cnt();
     });
 
     info!("Initialize alarm...");

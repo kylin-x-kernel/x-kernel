@@ -157,6 +157,7 @@ pub const APP_SUBCMD_ATTESTATION: &[u8; 12] = b"attestation\0";
 pub const APP_SUBCMD_SEALING: &[u8; 8] = b"sealing\0";
 pub const CSV_GUEST_DEV_PATH: &[u8; 15] = b"/dev/csv-guest\0";
 pub const DEV_MEM: &[u8; 9] = b"/dev/mem\0";
+/// CSV specification page size (u32 for FFI compatibility).
 pub const PAGE_SIZE: u32 = 4096;
 pub const HYGON_SM2_UID_SIZE: u32 = 256;
 pub const HYGON_ECC_UID_SIZE: u32 = 256;

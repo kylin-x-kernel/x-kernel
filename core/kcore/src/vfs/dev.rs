@@ -14,9 +14,8 @@ use kvfs::{
     DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps,
     NodePermission, NodeType, VfsError, VfsResult,
 };
+use kvfs_simple::{SimpleFs, SimpleFsNode};
 use memaddr::PhysAddrRange;
-
-use super::{SimpleFs, SimpleFsNode};
 
 /// Mmap behavior for devices.
 pub enum DeviceMmap {
@@ -75,7 +74,7 @@ impl Device {
         ops: Arc<dyn DeviceOps>,
     ) -> Arc<Self> {
         let node = SimpleFsNode::new(fs, node_type, NodePermission::default());
-        node.metadata.lock().rdev = device_id;
+        node.set_device_id(device_id);
         Arc::new(Self { node, ops })
     }
 
@@ -86,7 +85,7 @@ impl Device {
 
     /// Updates the device ID.
     pub fn set_device_id(&self, device_id: DeviceId) {
-        self.node.metadata.lock().rdev = device_id;
+        self.node.set_device_id(device_id);
     }
 
     /// Returns the memory mapping behavior of the device.

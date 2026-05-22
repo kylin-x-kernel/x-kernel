@@ -9,7 +9,8 @@ keywords = ["watchdog", "nmi", "embedded", "no_std"]
 categories = ["no-std", "embedded", "hardware-support"]
 
 [features]
-default = ["khal/nmi"]
+default = []
+nmi = ["khal/nmi"]
 
 [dependencies]
 khal.workspace = true
@@ -17,6 +18,4 @@ ktask = { workspace = true, features = ["watchdog"] }
 cfg-if.workspace = true
 log.workspace = true
 percpu.workspace = true
-backtrace.workspace = true
 kbuild_config = { workspace = true }
-kcpu_id_map = { workspace = true }

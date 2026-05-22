@@ -9,9 +9,9 @@ use alloc::{
     vec::Vec,
 };
 
-use kcore::vfs::SeqIterator;
 use kthread::current_process_state;
 use kvfs::{Mountpoint, ST_NOATIME, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RDONLY, ST_RELATIME};
+use kvfs_simple::{DirMapping, SeqFileNode, SeqIterator, SimpleFs};
 
 #[derive(Clone)]
 pub(crate) struct ProcMountEntry {
@@ -217,6 +217,13 @@ impl SeqIterator for ProcMountIter {
     fn show(&self, item: &Self::Item, buf: &mut String) -> core::fmt::Result {
         (self.formatter)(item, buf)
     }
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    root.add(
+        "mounts",
+        SeqFileNode::new_regular(fs, ProcMountIter::mounts()),
+    );
 }
 
 #[cfg(unittest)]

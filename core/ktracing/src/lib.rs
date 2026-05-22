@@ -20,7 +20,7 @@ use ktracepoint::{
     TracingEventsManager, global_init_events,
 };
 use ktypes::Once;
-use memaddr::VirtAddr;
+use memaddr::{PAGE_SIZE_4K, VirtAddr};
 
 static TRACE_RAW_PIPE: SpinNoIrq<TracePipeRaw> = SpinNoIrq::new(TracePipeRaw::new(4096));
 
@@ -220,10 +220,9 @@ impl KernelTraceOps for Kops {
     }
 
     fn write_kernel_text(_addr: *mut core::ffi::c_void, _data: &[u8]) {
-        const PAGE_SIZE: usize = 4096;
         let addr = _addr as usize;
-        let start = addr & !(PAGE_SIZE - 1);
-        let end = (addr + _data.len() + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let start = addr & !(PAGE_SIZE_4K - 1);
+        let end = (addr + _data.len() + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
         let span = end.saturating_sub(start);
         if span == 0 {
             return;

@@ -13,6 +13,7 @@ backtrace.workspace = true
 kaddr_layout.workspace = true
 kerrno.workspace = true
 kvfs.workspace = true
+kvfs-simple.workspace = true
 kfs.workspace = true
 khal.workspace = true
 klogger.workspace = true
@@ -33,7 +34,6 @@ linkme.workspace = true
 memaddr.workspace = true
 ouroboros = { version = "0.18.5", default-features = false }
 percpu = { workspace = true }
-slab.workspace = true
 ksignal.workspace = true
 kthread.workspace = true
 osvm.workspace = true

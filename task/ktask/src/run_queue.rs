@@ -245,7 +245,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
             self.inner.cpu_id.as_usize()
         );
         assert!(task.is_ready());
-        #[cfg(feature = "watchdog")]
+        #[cfg(feature = "snapshot")]
         {
             let _g = kspin::NoPreempt::new();
             crate::global_task_queue::record_task_for_watchdog(&task);
@@ -619,7 +619,7 @@ fn poll_gc(cx: &mut Context<'_>) -> Poll<()> {
             }
         }
 
-        #[cfg(feature = "watchdog")]
+        #[cfg(feature = "snapshot")]
         {
             let _g = kspin::NoPreempt::new();
             crate::global_task_queue::sweep_watchdog_tasks(this_cpu_id());
