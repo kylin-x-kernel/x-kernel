@@ -24,7 +24,7 @@ use posix_types::{UserConstPtr, UserPtr, net::socket_addr::sockaddr_nl};
 
 /// Trait to extend [`SocketAddr`] and its variants with methods for reading
 /// from and writing to user space.
-pub trait SocketAddrExt: Sized {
+pub(crate) trait SocketAddrExt: Sized {
     /// This method attempts to interpret the data pointed to by `addr` with the
     /// given `addrlen` as a valid socket address of the implementing type.
     fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self>;
@@ -32,9 +32,6 @@ pub trait SocketAddrExt: Sized {
     /// This method serializes the current socket address instance into the
     /// [`sockaddr`] structure pointed to by `addr` in user space.
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()>;
-
-    /// Gets the address family of the socket address.
-    fn family(&self) -> u16;
 }
 
 /// Read the address family from a user-space sockaddr
@@ -75,13 +72,6 @@ impl SocketAddrExt for SocketAddr {
             SocketAddr::V6(v6) => v6.write_to_user(addr, addrlen),
         }
     }
-
-    fn family(&self) -> u16 {
-        match self {
-            SocketAddr::V4(v4) => v4.family(),
-            SocketAddr::V6(v6) => v6.family(),
-        }
-    }
 }
 
 /// SocketAddrExt implementation for IPv4 socket addresses
@@ -113,10 +103,6 @@ impl SocketAddrExt for SocketAddrV4 {
             __pad: [0_u8; 8],
         };
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&sockin_addr) })
-    }
-
-    fn family(&self) -> u16 {
-        AF_INET as u16
     }
 }
 
@@ -154,10 +140,6 @@ impl SocketAddrExt for SocketAddrV6 {
             sin6_scope_id: self.scope_id(),
         };
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&sockin_addr) })
-    }
-
-    fn family(&self) -> u16 {
-        AF_INET6 as u16
     }
 }
 
@@ -208,10 +190,6 @@ impl SocketAddrExt for UnixAddr {
 
         fill_addr(addr, addrlen, &buf)
     }
-
-    fn family(&self) -> u16 {
-        AF_UNIX as u16
-    }
 }
 
 impl SocketAddrExt for NetlinkAddr {
@@ -237,10 +215,6 @@ impl SocketAddrExt for NetlinkAddr {
             nl_groups: self.groups,
         };
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&addr_nl) })
-    }
-
-    fn family(&self) -> u16 {
-        AF_NETLINK as u16
     }
 }
 
@@ -274,10 +248,6 @@ impl SocketAddrExt for VsockAddr {
         };
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&sockvm_addr) })
     }
-
-    fn family(&self) -> u16 {
-        AF_VSOCK as u16
-    }
 }
 
 /// SocketAddrExt implementation for extended socket addresses (all types)
@@ -302,16 +272,6 @@ impl SocketAddrExt for SocketAddrEx {
             SocketAddrEx::Netlink(netlink_addr) => netlink_addr.write_to_user(addr, addrlen),
             #[cfg(feature = "vsock")]
             SocketAddrEx::Vsock(vsock_addr) => vsock_addr.write_to_user(addr, addrlen),
-        }
-    }
-
-    fn family(&self) -> u16 {
-        match self {
-            SocketAddrEx::Ip(ip_addr) => ip_addr.family(),
-            SocketAddrEx::Unix(unix_addr) => unix_addr.family(),
-            SocketAddrEx::Netlink(netlink_addr) => netlink_addr.family(),
-            #[cfg(feature = "vsock")]
-            SocketAddrEx::Vsock(vsock_addr) => vsock_addr.family(),
         }
     }
 }

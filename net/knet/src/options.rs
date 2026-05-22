@@ -32,7 +32,7 @@ macro_rules! define_options {
     };
 }
 
-/// Corresponds to `struct ucred` in Linux.
+/// Credentials delivered over Unix-domain sockets.
 #[repr(C)]
 #[derive(Default, Debug, Clone)]
 pub struct UnixCredentials {
@@ -51,7 +51,7 @@ impl UnixCredentials {
 }
 
 define_options! {
-    // ---- Socket level options (SO_*) ----
+    // ---- Socket-wide options ----
     ReuseAddress(bool),
     Error(i32),
     DontRoute(bool),
@@ -64,12 +64,12 @@ define_options! {
     PassCredentials(bool),
     PeerCredentials(UnixCredentials),
 
-    // --- TCP level options (TCP_*) ----
+    // ---- TCP options ----
     NoDelay(bool),
     MaxSegment(usize),
     TcpInfo(()),
 
-    // ---- IP level options (IP_*) ----
+    // ---- IP options ----
     Ttl(u8),
     RecvErr(bool),
 

@@ -13,10 +13,11 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use kerrno::{KError, KResult, LinuxError};
+use kfd::FileLike;
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
-    Shutdown, SocketAddrEx, SocketOps,
+    Shutdown, Socket, SocketAddrEx, SocketOps,
     netlink::NetlinkSocket,
     raw::{IpProtocol, IpVersion, RawSocket},
     tcp::TcpSocket,
@@ -33,10 +34,7 @@ use linux_raw_sys::{
 };
 use posix_types::{UserConstPtr, UserPtr};
 
-use crate::{
-    file::{FileLike, Socket},
-    socket::SocketAddrExt,
-};
+use crate::addr::SocketAddrExt;
 
 /// Create a new socket of the specified domain, type, and protocol
 pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
@@ -98,7 +96,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
     };
-    let socket = Socket(socket);
+    let socket = socket;
 
     if raw_ty & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
@@ -172,7 +170,7 @@ pub fn sys_accept4(
     let cloexec = flags & O_CLOEXEC != 0;
 
     let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
-    let socket = Socket(socket.accept()?);
+    let socket = socket.accept()?;
     if flags & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
     }
@@ -231,8 +229,8 @@ pub fn sys_socketpair(
             return Err(KError::from(LinuxError::ESOCKTNOSUPPORT));
         }
     };
-    let sock1 = Socket(knet::Socket::Unix(Box::new(sock1)));
-    let sock2 = Socket(knet::Socket::Unix(Box::new(sock2)));
+    let sock1 = knet::Socket::Unix(Box::new(sock1));
+    let sock2 = knet::Socket::Unix(Box::new(sock2));
 
     if raw_ty & O_NONBLOCK != 0 {
         sock1.set_nonblocking(true)?;

@@ -217,7 +217,7 @@ impl Configurable for TcpSocket {
                 **size = TCP_RX_BUF_LEN;
             }
             O::TcpInfo(_) => {
-                // TODO(mivik): implement TCP_INFO
+                // TODO(mivik): implement TCP diagnostics
             }
             _ => return Ok(OptionHandled::No),
         }

@@ -10,11 +10,11 @@
 //! - Socket address queries
 
 use kerrno::KResult;
-use knet::SocketOps;
+use knet::{Socket, SocketOps};
 use linux_raw_sys::net::{sockaddr, socklen_t};
 use posix_types::UserPtr;
 
-use crate::{file::Socket, socket::SocketAddrExt};
+use crate::addr::SocketAddrExt;
 
 /// Get the local address bound to a socket
 pub fn sys_getsockname(

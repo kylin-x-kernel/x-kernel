@@ -13,7 +13,7 @@ use core::{mem::size_of, net::SocketAddr, ptr};
 use bytemuck::{NoUninit, bytes_of};
 use kerrno::{KError, KResult, LinuxError};
 use kfd::FileLike;
-use knet::UdpRecvError;
+use knet::{SocketErrorInfo, SocketErrorOrigin};
 use linux_raw_sys::net::{
     AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
     sockaddr_in,
@@ -40,6 +40,20 @@ const _: [u8; 16] = [0; size_of::<SockExtendedErr>()];
 // leaves no padding bytes; the size assertion above keeps this ABI expectation
 // checked at compile time.
 unsafe impl NoUninit for SockExtendedErr {}
+
+const SO_EE_ORIGIN_LOCAL: u8 = 1;
+const SO_EE_ORIGIN_ICMP: u8 = 2;
+const SO_EE_ORIGIN_ICMP6: u8 = 3;
+const SO_EE_ORIGIN_TXSTATUS: u8 = 4;
+
+fn sock_extended_err_origin(origin: SocketErrorOrigin) -> u8 {
+    match origin {
+        SocketErrorOrigin::Local => SO_EE_ORIGIN_LOCAL,
+        SocketErrorOrigin::Icmp => SO_EE_ORIGIN_ICMP,
+        SocketErrorOrigin::Icmp6 => SO_EE_ORIGIN_ICMP6,
+        SocketErrorOrigin::TxStatus => SO_EE_ORIGIN_TXSTATUS,
+    }
+}
 
 fn write_sock_extended_err(data: &mut [u8], err: &SockExtendedErr) -> KResult<()> {
     if data.len() < size_of::<SockExtendedErr>() {
@@ -71,7 +85,7 @@ fn write_sockaddr_in(data: &mut [u8], addr: Option<SocketAddr>) -> KResult<()> {
     };
 
     // SAFETY: `sockaddr_in` is fully initialized above and `data` has been
-    // checked to fit it at runtime. The cmsg payload is a byte slice, so its
+    // checked to fit it at runtime. The ancillary payload is a byte slice, so its
     // address is not guaranteed to satisfy `sockaddr_in` alignment.
     unsafe {
         ptr::write_unaligned(data.as_mut_ptr().cast::<sockaddr_in>(), sa);
@@ -98,13 +112,16 @@ fn write_ip_recverr(
     Ok(body_len)
 }
 
-pub fn push_ip_recverr_cmsg(builder: &mut CMsgBuilder<'_>, err: UdpRecvError) -> KResult<bool> {
+pub(crate) fn push_ip_recverr_cmsg(
+    builder: &mut CMsgBuilder<'_>,
+    err: SocketErrorInfo,
+) -> KResult<bool> {
     builder.push(IPPROTO_IP as u32, IP_RECVERR, |data| {
         let header = SockExtendedErr {
             ee_errno: err.errno.into_raw() as u32,
-            ee_origin: err.origin,
-            ee_type: err.ty,
-            ee_code: err.code,
+            ee_origin: sock_extended_err_origin(err.origin),
+            ee_type: err.error_type,
+            ee_code: err.error_code,
             ee_pad: 0,
             ee_info: err.info,
             ee_data: err.data,
@@ -115,13 +132,13 @@ pub fn push_ip_recverr_cmsg(builder: &mut CMsgBuilder<'_>, err: UdpRecvError) ->
 }
 
 /// Control message types for socket operations (ancillary data)
-pub enum CMsg {
+pub(crate) enum CMsg {
     /// SCM_RIGHTS: file descriptor passing between processes
     Rights { fds: Vec<Arc<dyn FileLike>> },
 }
 impl CMsg {
     /// Parse a control message header and extract its data
-    pub fn parse(
+    pub(crate) fn parse(
         resources: &kthread::ProcessResources,
         hdr_ptr: UserConstPtr<cmsghdr>,
         hdr: cmsghdr,
@@ -156,14 +173,14 @@ impl CMsg {
 }
 
 /// Builder for constructing control message buffers for socket I/O
-pub struct CMsgBuilder<'a> {
+pub(crate) struct CMsgBuilder<'a> {
     hdr: UserPtr<cmsghdr>,
     len: &'a mut usize,
     capacity: usize,
 }
 impl<'a> CMsgBuilder<'a> {
     /// Create a new control message builder with a given buffer and capacity
-    pub fn new(msg: UserPtr<cmsghdr>, len: &'a mut usize) -> Self {
+    pub(crate) fn new(msg: UserPtr<cmsghdr>, len: &'a mut usize) -> Self {
         let capacity = *len;
         *len = 0;
         Self {
@@ -174,7 +191,7 @@ impl<'a> CMsgBuilder<'a> {
     }
 
     /// Add a control message with the specified level and type to the buffer
-    pub fn push(
+    pub(crate) fn push(
         &mut self,
         level: u32,
         ty: u32,
@@ -204,5 +221,32 @@ impl<'a> CMsgBuilder<'a> {
         self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + cmsg_len);
         *self.len += cmsg_len;
         Ok(true)
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn test_sock_extended_err_origin_matches_linux_abi() {
+        assert_eq!(
+            sock_extended_err_origin(SocketErrorOrigin::Local),
+            SO_EE_ORIGIN_LOCAL
+        );
+        assert_eq!(
+            sock_extended_err_origin(SocketErrorOrigin::Icmp),
+            SO_EE_ORIGIN_ICMP
+        );
+        assert_eq!(
+            sock_extended_err_origin(SocketErrorOrigin::Icmp6),
+            SO_EE_ORIGIN_ICMP6
+        );
+        assert_eq!(
+            sock_extended_err_origin(SocketErrorOrigin::TxStatus),
+            SO_EE_ORIGIN_TXSTATUS
+        );
     }
 }

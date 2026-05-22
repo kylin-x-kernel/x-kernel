@@ -6,7 +6,6 @@
 
 pub mod event;
 mod fs;
-mod net;
 mod pidfd;
 mod pipe;
 pub mod timerfd;
@@ -21,7 +20,6 @@ use linux_raw_sys::general::{O_RDONLY, O_WRONLY};
 
 pub use self::{
     fs::{Directory, File, ResolveAtResult, metadata_to_kstat, resolve_at, with_fs},
-    net::Socket,
     pidfd::PidFd,
     pipe::Pipe,
 };

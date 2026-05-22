@@ -8,7 +8,6 @@ use core::{
     any::Any,
     fmt::{self, Debug},
     net::SocketAddr,
-    task::Context,
 };
 
 use bitflags::bitflags;
@@ -17,7 +16,6 @@ use enum_dispatch::enum_dispatch;
 use kdriver::prelude::VsockAddr;
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
-use kpoll::{IoEvents, Pollable};
 
 #[cfg(feature = "vsock")]
 use crate::vsock::VsockSocket;
@@ -100,26 +98,27 @@ bitflags! {
         /// buffer.
         const TRUNCATE = 0x02;
         /// Receive a pending asynchronous error instead of data.
-        const ERRQUEUE = 0x04;
+        const ERROR_QUEUE = 0x04;
     }
 }
 
-pub type CMsgData = Box<dyn Any + Send + Sync>;
+pub type AncillaryData = Box<dyn Any + Send + Sync>;
 
-pub const SO_EE_ORIGIN_NONE: u8 = 0;
-pub const SO_EE_ORIGIN_LOCAL: u8 = 1;
-pub const SO_EE_ORIGIN_ICMP: u8 = 2;
-pub const SO_EE_ORIGIN_ICMP6: u8 = 3;
-pub const SO_EE_ORIGIN_TXSTATUS: u8 = 4;
-pub const SO_EE_ORIGIN_TIMESTAMPING: u8 = SO_EE_ORIGIN_TXSTATUS;
+#[derive(Debug, Clone, Copy)]
+pub enum SocketErrorOrigin {
+    Local,
+    Icmp,
+    Icmp6,
+    TxStatus,
+}
 
-/// A UDP error queued by `IP_RECVERR`.
+/// A protocol error stored in a socket error queue.
 #[derive(Debug, Clone)]
-pub struct UdpRecvError {
+pub struct SocketErrorInfo {
     pub errno: LinuxError,
-    pub origin: u8,
-    pub ty: u8,
-    pub code: u8,
+    pub origin: SocketErrorOrigin,
+    pub error_type: u8,
+    pub error_code: u8,
     pub info: u32,
     pub data: u32,
     pub offender: Option<SocketAddr>,
@@ -127,8 +126,8 @@ pub struct UdpRecvError {
 
 /// Ancillary data produced by the networking stack itself.
 #[derive(Debug, Clone)]
-pub enum KernelCmsg {
-    IpRecvError(UdpRecvError),
+pub enum KernelAncillaryData {
+    IpError(SocketErrorInfo),
 }
 
 /// Options for sending data to a socket.
@@ -138,7 +137,7 @@ pub enum KernelCmsg {
 pub struct SendOptions {
     pub to: Option<SocketAddrEx>,
     pub flags: SendFlags,
-    pub cmsg: Vec<CMsgData>,
+    pub ancillary: Vec<AncillaryData>,
 }
 
 /// Options for receiving data from a socket.
@@ -148,7 +147,7 @@ pub struct SendOptions {
 pub struct RecvOptions<'a> {
     pub from: Option<&'a mut SocketAddrEx>,
     pub flags: RecvFlags,
-    pub cmsg: Option<&'a mut Vec<CMsgData>>,
+    pub ancillary: Option<&'a mut Vec<AncillaryData>>,
 }
 impl Debug for RecvOptions<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -256,30 +255,4 @@ pub enum Socket {
     Netlink(Box<NetlinkSocket>),
     #[cfg(feature = "vsock")]
     Vsock(Box<VsockSocket>),
-}
-
-impl Pollable for Socket {
-    fn poll(&self) -> IoEvents {
-        match self {
-            Socket::Tcp(tcp) => tcp.poll(),
-            Socket::Udp(udp) => udp.poll(),
-            Socket::Raw(raw) => raw.poll(),
-            Socket::Unix(unix) => unix.poll(),
-            Socket::Netlink(netlink) => netlink.poll(),
-            #[cfg(feature = "vsock")]
-            Socket::Vsock(vsock) => vsock.poll(),
-        }
-    }
-
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        match self {
-            Socket::Tcp(tcp) => tcp.register(context, events),
-            Socket::Udp(udp) => udp.register(context, events),
-            Socket::Raw(raw) => raw.register(context, events),
-            Socket::Unix(unix) => unix.register(context, events),
-            Socket::Netlink(netlink) => netlink.register(context, events),
-            #[cfg(feature = "vsock")]
-            Socket::Vsock(vsock) => vsock.register(context, events),
-        }
-    }
 }

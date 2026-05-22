@@ -54,7 +54,7 @@ impl GeneralOptions {
         self.nonblock.load(Ordering::Relaxed)
     }
 
-    /// Returns whether `SO_REUSEADDR` is enabled.
+    /// Returns whether address reuse is enabled.
     pub fn reuse_address(&self) -> bool {
         self.reuse_address.load(Ordering::Relaxed)
     }

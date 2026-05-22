@@ -11,8 +11,8 @@
 //! - `fs`: File system operations
 //! - `io_mpx`: I/O multiplexing (select, poll, epoll)
 //! - `mm`: Memory management
-//! - `net`: Network operations
 //! - `posix-credentials`: POSIX credential operations
+//! - `posix-net`: Network operations
 //! - `posix-signal`: Signal handling
 //! - `sync`: Synchronization primitives
 //! - `sys`: System information and control
@@ -26,11 +26,12 @@ use posix_credentials::*;
 use posix_io_mpx::*;
 use posix_ipc::*;
 use posix_mm::*;
+use posix_net::*;
 use posix_process::*;
 use posix_signal::*;
 use posix_time::*;
 
-use crate::{fs::*, io_mpx::*, net::*, sync::*, sys::*, task::*};
+use crate::{fs::*, io_mpx::*, sync::*, sys::*, task::*};
 
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {

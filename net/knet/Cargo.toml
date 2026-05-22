@@ -24,6 +24,8 @@ kfs = { workspace = true }
 kvfs = { workspace = true }
 kio = { workspace = true }
 kpoll = { workspace = true }
+kfd = { workspace = true }
+linux-raw-sys = { workspace = true, features = ["general"] }
 bitflags = "2.9.1"
 cfg-if = { workspace = true }
 enum_dispatch = { workspace = true }

@@ -9,7 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-vsock = ["knet/vsock", "kservices/vsock"]
+vsock = ["posix-net/vsock", "kservices/vsock"]
 tee = [
     "dep:tee_kernel",
     "dep:tee_task_iface",
@@ -25,14 +25,10 @@ kservices = { workspace = true }
 kbuild_config = { workspace = true }
 kerrno.workspace = true
 khal.workspace = true
-kio.workspace = true
 klogger.workspace = true
-knet.workspace = true
 kpoll.workspace = true
 ktask.workspace = true
 bitflags.workspace = true
-cfg-if.workspace = true
-bytemuck = { workspace = true, features = ["derive"] }
 kspin.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 kprocess.workspace = true
@@ -49,6 +45,7 @@ posix-fs.workspace = true
 posix-io-mpx.workspace = true
 posix-ipc.workspace = true
 posix-mm.workspace = true
+posix-net.workspace = true
 posix-process.workspace = true
 posix-sched.workspace = true
 posix-signal.workspace = true

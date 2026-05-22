@@ -22,13 +22,10 @@ use kfd::FileLike;
 use kfs::{FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
-use kservices::{
-    file::{Directory, File, Pipe},
-    mm::{VmBytes, VmBytesMut},
-};
+use kservices::file::{Directory, File, Pipe};
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
-use osvm::VirtPtr;
+use osvm::{VirtPtr, VmBytes, VmBytesMut};
 use posix_types::{IoVec, IoVectorBuf, UserConstPtr, UserPtr};
 
 struct DummyFd;

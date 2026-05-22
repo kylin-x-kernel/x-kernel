@@ -15,7 +15,6 @@ extern crate alloc;
 mod dispatch;
 mod fs;
 mod io_mpx;
-mod net;
 mod sync;
 mod sys;
 mod task;
@@ -26,6 +25,6 @@ pub use sys::sys_getrandom;
 pub mod kernel {
     pub use kservices::vfs;
 }
-pub use kservices::{socket, terminal};
+pub use kservices::terminal;
 #[cfg(feature = "tee")]
 pub use tee_kernel::tee;

@@ -14,7 +14,7 @@ use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 
 use crate::{
-    CMsgData, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
+    AncillaryData, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps, lookup_bind_entry},
@@ -22,7 +22,7 @@ use crate::{
 
 struct Datagram {
     data: Vec<u8>,
-    cmsg: Vec<CMsgData>,
+    ancillary: Vec<AncillaryData>,
     sender: UnixAddr,
 }
 
@@ -189,7 +189,7 @@ impl UnixTransportOps for DgramTransport {
         let len = message.len();
         let packet = Datagram {
             data: message,
-            cmsg: options.cmsg,
+            ancillary: options.ancillary,
             sender: self.local_addr.read().clone(),
         };
 
@@ -221,7 +221,11 @@ impl UnixTransportOps for DgramTransport {
                 return Err(KError::NotConnected);
             };
 
-            let Datagram { data, cmsg, sender } = match rx.try_recv() {
+            let Datagram {
+                data,
+                ancillary,
+                sender,
+            } = match rx.try_recv() {
                 Ok(packet) => packet,
                 Err(TryRecvError::Empty) => {
                     return Err(KError::WouldBlock);
@@ -238,8 +242,8 @@ impl UnixTransportOps for DgramTransport {
             if let Some(from) = options.from.as_mut() {
                 **from = SocketAddrEx::Unix(sender);
             }
-            if let Some(dst) = options.cmsg.as_mut() {
-                dst.extend(cmsg);
+            if let Some(dst) = options.ancillary.as_mut() {
+                dst.extend(ancillary);
             }
 
             Ok(if options.flags.contains(RecvFlags::TRUNCATE) {

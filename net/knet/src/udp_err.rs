@@ -22,7 +22,7 @@ use smoltcp::{
     },
 };
 
-use crate::{SO_EE_ORIGIN_ICMP, UdpRecvError};
+use crate::{SocketErrorInfo, SocketErrorOrigin};
 
 static UDP_REGISTRY: LazyInit<RwLock<Vec<Arc<UdpErrorState>>>> = LazyInit::new();
 
@@ -34,7 +34,7 @@ pub(crate) fn init_udp_error_registry() {
 pub(crate) struct QueuedUdpError {
     pub(crate) payload: Vec<u8>,
     pub(crate) addr: SocketAddr,
-    pub(crate) cmsg: UdpRecvError,
+    pub(crate) ancillary: SocketErrorInfo,
 }
 
 #[derive(Clone, Copy)]
@@ -125,7 +125,7 @@ impl UdpErrorState {
     fn refresh_socket_error(&self, queue: &VecDeque<QueuedUdpError>) {
         let errno = queue
             .front()
-            .map(|error| error.cmsg.errno.into_raw())
+            .map(|error| error.ancillary.errno.into_raw())
             .unwrap_or(0);
         self.socket_error.store(errno, Ordering::Release);
     }
@@ -269,11 +269,11 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8]) {
     let error = QueuedUdpError {
         payload: original_udp.payload().to_vec(),
         addr: SocketAddr::V4(remote),
-        cmsg: UdpRecvError {
+        ancillary: SocketErrorInfo {
             errno,
-            origin: SO_EE_ORIGIN_ICMP,
-            ty: ip_packet.payload()[0],
-            code: ip_packet.payload()[1],
+            origin: SocketErrorOrigin::Icmp,
+            error_type: ip_packet.payload()[0],
+            error_code: ip_packet.payload()[1],
             info,
             data: 0,
             offender: Some(offender),
@@ -293,7 +293,7 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::SO_EE_ORIGIN_ICMP;
+    use crate::SocketErrorOrigin;
 
     fn endpoint(addr: Ipv4Addr, port: u16) -> IpEndpoint {
         SocketAddrV4::new(addr, port).into()
@@ -314,11 +314,11 @@ mod tests {
         QueuedUdpError {
             payload: vec![payload_byte],
             addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1234)),
-            cmsg: UdpRecvError {
+            ancillary: SocketErrorInfo {
                 errno,
-                origin: SO_EE_ORIGIN_ICMP,
-                ty: 3,
-                code: 3,
+                origin: SocketErrorOrigin::Icmp,
+                error_type: 3,
+                error_code: 3,
                 info: 0,
                 data: 0,
                 offender: Some(SocketAddr::V4(SocketAddrV4::new(

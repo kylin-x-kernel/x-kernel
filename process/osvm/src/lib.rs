@@ -70,7 +70,10 @@ pub fn write_vm_bytes(p: *mut u8, src: &[u8]) -> MemResult {
 }
 
 mod ptrs;
+mod vm_io;
+
 pub use ptrs::{VirtMutPtr, VirtPtr};
+pub use vm_io::{VmBytes, VmBytesMut};
 
 #[cfg(feature = "alloc")]
 mod heap;

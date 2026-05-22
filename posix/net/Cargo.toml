@@ -1,0 +1,29 @@
+[package]
+name = "posix-net"
+description = "POSIX network syscall implementations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+vsock = ["knet/vsock"]
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+kerrno.workspace = true
+kfd.workspace = true
+khal.workspace = true
+kio.workspace = true
+klogger.workspace = true
+knet.workspace = true
+kthread.workspace = true
+linux-raw-sys.workspace = true
+osvm.workspace = true
+posix-types.workspace = true
+unittest.workspace = true

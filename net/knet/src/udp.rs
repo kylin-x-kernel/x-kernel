@@ -22,8 +22,8 @@ use smoltcp::{
 };
 
 use crate::{
-    KernelCmsg, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx,
-    SocketOps,
+    KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown,
+    SocketAddrEx, SocketOps,
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
@@ -82,7 +82,7 @@ impl UdpSocket {
 impl Configurable for UdpSocket {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         if let GetSocketOption::Error(error) = opt {
-            // Drive pending RX work before reading SO_ERROR. UDP asynchronous
+            // Drive pending RX work before reading the socket error. UDP asynchronous
             // errors are discovered from incoming ICMP packets while polling
             // devices, and x-kernel currently advances the network stack from
             // explicit poll sites rather than a background softirq.
@@ -245,7 +245,7 @@ impl SocketOps for UdpSocket {
     }
 
     fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
-        if options.flags.contains(RecvFlags::ERRQUEUE) {
+        if options.flags.contains(RecvFlags::ERROR_QUEUE) {
             return self.general.recv_poller(self, || {
                 poll_interfaces();
                 let error = if options.flags.contains(RecvFlags::PEEK) {
@@ -259,14 +259,14 @@ impl SocketOps for UdpSocket {
                 let QueuedUdpError {
                     payload,
                     addr,
-                    cmsg: recv_error,
+                    ancillary: recv_error,
                 } = error;
 
                 if let Some(from) = options.from.as_deref_mut() {
                     *from = SocketAddrEx::Ip(addr);
                 }
-                if let Some(cmsg) = options.cmsg.as_deref_mut() {
-                    cmsg.push(Box::new(KernelCmsg::IpRecvError(recv_error)));
+                if let Some(ancillary) = options.ancillary.as_deref_mut() {
+                    ancillary.push(Box::new(KernelAncillaryData::IpError(recv_error)));
                 }
 
                 let read = dst.write(&payload)?;

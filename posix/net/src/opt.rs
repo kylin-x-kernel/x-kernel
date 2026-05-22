@@ -12,8 +12,10 @@
 use core::mem::MaybeUninit;
 
 use kerrno::{KError, KResult, LinuxError};
-use knet::options::{Configurable, GetSocketOption, SetSocketOption};
-use kservices::file::Socket;
+use knet::{
+    Socket,
+    options::{Configurable, GetSocketOption, SetSocketOption},
+};
 use linux_raw_sys::net::socklen_t;
 use osvm::{VirtPtr, read_vm_mem, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr};

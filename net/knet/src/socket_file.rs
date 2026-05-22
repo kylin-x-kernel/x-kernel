@@ -2,62 +2,40 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Socket file wrapper for the VFS layer.
+//! File-like interface for network sockets.
 
 use alloc::{borrow::Cow, format, sync::Arc};
-use core::{ffi::c_int, ops::Deref, task::Context};
+use core::{ffi::c_int, task::Context};
 
 use kerrno::{KError, KResult};
-use kfd::FdTable;
-use knet::{
-    SocketOps,
-    options::{Configurable, GetSocketOption, SetSocketOption},
-};
+use kfd::{FdTable, FileLike, IoDst, IoSrc, Kstat};
 use kpoll::{IoEvents, Pollable};
 use ksync::RwLock;
 use linux_raw_sys::general::{O_RDWR, S_IFSOCK};
 
-use super::{FileLike, Kstat};
-use crate::file::{IoDst, IoSrc};
-
-/// Socket wrapper providing file-like interface for network sockets.
-///
-/// This struct wraps the underlying kernel network socket and implements
-/// the `FileLike` trait to provide standard file operations like read, write, and stat.
-pub struct Socket(pub knet::Socket);
-
-impl Deref for Socket {
-    /// Provides transparent access to the underlying network socket.
-    type Target = knet::Socket;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+use crate::{
+    RecvOptions, SendOptions, Socket, SocketOps,
+    options::{Configurable, GetSocketOption, SetSocketOption},
+};
 
 impl FileLike for Socket {
-    /// Receives data from the socket.
     fn read(&self, dst: &mut IoDst) -> KResult<usize> {
-        self.recv(dst, knet::RecvOptions::default())
+        self.recv(dst, RecvOptions::default())
     }
 
-    /// Sends data to the socket.
     fn write(&self, src: &mut IoSrc) -> KResult<usize> {
-        self.send(src, knet::SendOptions::default())
+        self.send(src, SendOptions::default())
     }
 
-    /// Returns socket statistics.
-    /// Note: Full socket stat implementation is not yet complete.
     fn stat(&self) -> KResult<Kstat> {
         // TODO(mivik): implement stat for sockets
         Ok(Kstat {
-            mode: S_IFSOCK | 0o777u32, // rwxrwxrwx
+            mode: S_IFSOCK | 0o777u32,
             blksize: 4096,
             ..Default::default()
         })
     }
 
-    /// Checks if the socket is in non-blocking mode.
     fn nonblocking(&self) -> bool {
         let mut result = false;
         self.get_option(GetSocketOption::NonBlocking(&mut result))
@@ -65,13 +43,10 @@ impl FileLike for Socket {
         result
     }
 
-    /// Sets or clears the non-blocking mode for this socket.
     fn set_nonblocking(&self, nonblocking: bool) -> KResult<()> {
-        self.0
-            .set_option(SetSocketOption::NonBlocking(&nonblocking))
+        self.set_option(SetSocketOption::NonBlocking(&nonblocking))
     }
 
-    /// Returns a string representation of the socket address.
     fn path(&self) -> Cow<'_, str> {
         format!("socket:[{}]", self as *const _ as usize).into()
     }
@@ -80,7 +55,6 @@ impl FileLike for Socket {
         O_RDWR
     }
 
-    /// Converts a file descriptor to a socket reference.
     fn from_fd(fd_table: &RwLock<FdTable>, fd: c_int) -> KResult<Arc<Self>>
     where
         Self: Sized + 'static,
@@ -92,23 +66,37 @@ impl FileLike for Socket {
             .map_err(|_| KError::NotASocket)
     }
 }
+
 impl Pollable for Socket {
-    /// Polls for available I/O events on this socket.
     fn poll(&self) -> IoEvents {
-        self.0.poll()
+        match self {
+            Socket::Tcp(tcp) => tcp.poll(),
+            Socket::Udp(udp) => udp.poll(),
+            Socket::Raw(raw) => raw.poll(),
+            Socket::Unix(unix) => unix.poll(),
+            Socket::Netlink(netlink) => netlink.poll(),
+            #[cfg(feature = "vsock")]
+            Socket::Vsock(vsock) => vsock.poll(),
+        }
     }
 
-    /// Registers the socket for polling with the given context and events.
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        self.0.register(context, events);
+        match self {
+            Socket::Tcp(tcp) => tcp.register(context, events),
+            Socket::Udp(udp) => udp.register(context, events),
+            Socket::Raw(raw) => raw.register(context, events),
+            Socket::Unix(unix) => unix.register(context, events),
+            Socket::Netlink(netlink) => netlink.register(context, events),
+            #[cfg(feature = "vsock")]
+            Socket::Vsock(vsock) => vsock.register(context, events),
+        }
     }
 }
 
 #[cfg(unittest)]
 mod socket_tests {
+    use linux_raw_sys::general::S_IFSOCK;
     use unittest::def_test;
-
-    use super::*;
 
     /// Test S_IFSOCK constant
     #[def_test]
