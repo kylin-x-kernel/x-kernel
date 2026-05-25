@@ -37,9 +37,9 @@ use super::{
     TeeResult,
     config::CFG_COMPAT_GP10_DES,
     crypto::crypto::{
-        CryptoHashCtx, CryptoMacCtx, crypto_hash_final, crypto_hash_init, crypto_hash_update,
-        crypto_mac_final, crypto_mac_init, crypto_mac_update, ecc_keypair, ecc_public_key,
-        rsa_keypair,
+        CryptoHashCtx, CryptoMacCtx, crypto_hash_alloc_ctx, crypto_hash_final, crypto_hash_init,
+        crypto_hash_update, crypto_mac_alloc_ctx, crypto_mac_final, crypto_mac_init,
+        crypto_mac_update, ecc_keypair, ecc_public_key, rsa_keypair,
     },
     crypto::{sm3_hash::SM3HashCtx, sm3_hmac::SM3HmacCtx},
     libmbedtls::bignum::{
@@ -710,6 +710,13 @@ pub fn tee_cryp_state_alloc(
         }
     }
 
+    // OP-TEE: crypto_mac_alloc_ctx / crypto_hash_alloc_ctx at state alloc time.
+    cs.ctx = match tee_alg_get_class(algo) {
+        TEE_OPERATION_MAC => crypto_mac_alloc_ctx(algo)?,
+        TEE_OPERATION_DIGEST => crypto_hash_alloc_ctx(algo)?,
+        _ => CrypCtx::Others,
+    };
+
     with_tee_session_ctx_mut(|ctx| {
         let vacant = ctx.cryp_state.vacant_entry();
         let id = vacant.key();
@@ -770,15 +777,46 @@ pub fn tee_cryp_state_copy(dst_id: u32, src_id: u32) -> TeeResult {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    let copied_ctx = match &src_guard.ctx {
-        CrypCtx::CipherCtx(cipher) => CrypCtx::CipherCtx(cipher.clone()),
-        CrypCtx::CmacCtx(cipher) => CrypCtx::CmacCtx(cipher.clone()),
-        CrypCtx::HashCtx(md) => CrypCtx::HashCtx(md.clone()),
-        CrypCtx::HmacCtx(hmac) => CrypCtx::HmacCtx(hmac.clone()),
+    match tee_alg_get_class(src_guard.algo) {
+        TEE_OPERATION_CIPHER => {
+            let CrypCtx::CipherCtx(src_cipher) = &src_guard.ctx else {
+                return Err(TEE_ERROR_BAD_STATE);
+            };
+            match &mut dst_guard.ctx {
+                CrypCtx::CipherCtx(dst_cipher) => *dst_cipher = src_cipher.clone(),
+                _ => dst_guard.ctx = CrypCtx::CipherCtx(src_cipher.clone()),
+            }
+        }
+        TEE_OPERATION_DIGEST => {
+            let CrypCtx::HashCtx(src_md) = &src_guard.ctx else {
+                return Err(TEE_ERROR_BAD_STATE);
+            };
+            let CrypCtx::HashCtx(dst_md) = &mut dst_guard.ctx else {
+                return Err(TEE_ERROR_BAD_STATE);
+            };
+            // OP-TEE: crypto_hash_copy_state() → mbedtls_md_clone / copy hash_state
+            *dst_md = src_md.clone();
+        }
+        TEE_OPERATION_MAC => match &src_guard.ctx {
+            CrypCtx::HmacCtx(src_hmac) => {
+                let CrypCtx::HmacCtx(dst_hmac) = &mut dst_guard.ctx else {
+                    return Err(TEE_ERROR_BAD_STATE);
+                };
+                *dst_hmac = src_hmac.clone();
+            }
+            CrypCtx::CmacCtx(src_cipher) => {
+                let CrypCtx::CmacCtx(dst_cipher) = &mut dst_guard.ctx else {
+                    return Err(TEE_ERROR_BAD_STATE);
+                };
+                // OP-TEE mbed_cmac_copy_state: mbedtls_cipher_clone in place.
+                dst_cipher
+                    .copy_state_from(src_cipher)
+                    .map_err(|_| TEE_ERROR_BAD_STATE)?;
+            }
+            _ => return Err(TEE_ERROR_BAD_STATE),
+        },
         _ => return Err(TEE_ERROR_BAD_STATE),
-    };
-
-    dst_guard.ctx = copied_ctx;
+    }
     dst_guard.state = src_guard.state;
     dst_guard.ctx_finalize = src_guard.ctx_finalize;
 
@@ -1738,7 +1776,7 @@ pub fn syscall_asymm_verify(
 #[unittest::mod_test]
 pub mod tests_cryp {
     use mbedtls::{bignum::Mpi, pk::Pk};
-    use unittest::{assert, assert_eq, assert_ne};
+    use unittest::{TestResult, assert, assert_eq, assert_ne};
 
     use super::*;
     use crate::{
@@ -2137,6 +2175,57 @@ pub mod tests_cryp {
         assert_eq!(dst_hash, src_hash);
     }
 
+    /// OP-TEE `regression_4001`: `TEE_DigestExtract` calls `hash_final` into the
+    /// operation buffer, then `TEE_CopyOperation` must still succeed.
+    #[unittest::def_test(custom)]
+    fn test_cryp_hash_copy_after_digest_extract_style_final() {
+        const HASH_DATA_MD5_IN1: [u8; 11] = [
+            0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d,
+        ];
+        const HASH_DATA_MD5_OUT1: [u8; 16] = [
+            0x61, 0x12, 0x71, 0x83, 0x70, 0x8d, 0x3a, 0xc7, 0xf1, 0x9b, 0x66, 0x06, 0xfc, 0xae,
+            0x7d, 0xf6,
+        ];
+
+        let mut src_state: u32 = 0;
+        let mut dst_state: u32 = 0;
+
+        assert!(
+            tee_cryp_state_alloc(
+                TEE_ALG_MD5,
+                TEE_OperationMode::TEE_MODE_DIGEST,
+                None,
+                None,
+                &mut src_state,
+            )
+            .is_ok()
+        );
+        assert!(
+            tee_cryp_state_alloc(
+                TEE_ALG_MD5,
+                TEE_OperationMode::TEE_MODE_DIGEST,
+                None,
+                None,
+                &mut dst_state,
+            )
+            .is_ok()
+        );
+        assert!(tee_cryp_hash_init(src_state).is_ok());
+        assert!(tee_cryp_hash_update(src_state, &HASH_DATA_MD5_IN1).is_ok());
+
+        let mut digest_buf = [0u8; 16];
+        let len = tee_cryp_hash_final(src_state, &[], &mut digest_buf).unwrap();
+        assert_eq!(len, 16);
+        assert_eq!(digest_buf, HASH_DATA_MD5_OUT1);
+
+        assert!(tee_cryp_state_copy(dst_state, src_state).is_ok());
+
+        let mut dst_digest = [0u8; 16];
+        let dst_len = tee_cryp_hash_final(dst_state, &[], &mut dst_digest).unwrap();
+        assert_eq!(dst_len, 16);
+        assert_eq!(dst_digest, HASH_DATA_MD5_OUT1);
+    }
+
     #[unittest::def_test(custom)]
     fn test_cryp_state_copy_hmac_sm3() {
         let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2356,6 +2445,150 @@ pub mod tests_cryp {
                 0x40, 0x10
             ]
         );
+    }
+
+    /// Populate a transient AES object and allocate `TEE_ALG_AES_CMAC` state (optee crypt TA).
+    fn alloc_aes_cmac_mac_state(key: &[u8], state: &mut u32) -> TestResult {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        assert!(syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref()).is_ok());
+        let obj_id = obj_id.read();
+
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type).unwrap();
+        let mut obj = obj_arc.lock();
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(key);
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
+
+        assert!(
+            tee_cryp_state_alloc(
+                TEE_ALG_AES_CMAC,
+                TEE_OperationMode::TEE_MODE_MAC,
+                Some(obj_id as _),
+                None,
+                state,
+            )
+            .is_ok()
+        );
+        TestResult::Ok
+    }
+
+    /// `xtee_test` regression_4002 MAC case 46: `TEE_ALG_AES_CMAC` + `B_MAC_CMAC_VECT2_*`.
+    ///
+    /// Mirrors CA/TA sequence (op1/op2/op3):
+    /// MAC_INIT(op1) → COPY(op3←op1) → MAC_UPDATE(op1, 9B) → COPY(op2←op1) →
+    /// MAC_FINAL(op2, tail 7B) → MAC_INIT(op1) → MAC_FINAL(op1, full) →
+    /// MAC_FINAL(op3, full)  // TEE_MACCompareFinal compute path
+    #[unittest::def_test(custom)]
+    fn test_regression_4002_mac_aes_cmac_vect2() {
+        const DATA: [u8; 16] = [
+            0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93,
+            0x17, 0x2a,
+        ];
+        const KEY: [u8; 16] = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
+        const EXPECTED: [u8; 16] = [
+            0x07, 0x0a, 0x16, 0xb4, 0x6b, 0x4d, 0x41, 0x44, 0xf7, 0x9b, 0xdd, 0x9d, 0xd0, 0x4a,
+            0x28, 0x7c,
+        ];
+        const IN_INCR: usize = 9;
+
+        let mut op1: u32 = 0;
+        let mut op2: u32 = 0;
+        let mut op3: u32 = 0;
+        let r = alloc_aes_cmac_mac_state(&KEY, &mut op1);
+        if r.is_failed() {
+            return r;
+        }
+        let r = alloc_aes_cmac_mac_state(&KEY, &mut op2);
+        if r.is_failed() {
+            return r;
+        }
+        let r = alloc_aes_cmac_mac_state(&KEY, &mut op3);
+        if r.is_failed() {
+            return r;
+        }
+
+        // MAC_INIT(op1)
+        assert!(tee_cryp_hash_init(op1).is_ok());
+
+        // COPY(op3 ← op1) right after MAC_INIT (before MAC_UPDATE)
+        assert!(tee_cryp_state_copy(op3, op1).is_ok());
+
+        // MAC_UPDATE(op1): single 9-byte chunk (multiple_incr == false)
+        assert!(tee_cryp_hash_update(op1, &DATA[..IN_INCR]).is_ok());
+
+        // COPY(op2 ← op1) after partial update
+        assert!(tee_cryp_state_copy(op2, op1).is_ok());
+
+        // MAC_FINAL_COMPUTE(op2, tail): remaining 7 bytes
+        let mut out_tail = [0u8; 16];
+        let tail = &DATA[IN_INCR..];
+        assert_eq!(tail.len(), 7);
+        let len_tail = tee_cryp_hash_final(op2, tail, &mut out_tail).unwrap();
+        assert_eq!(len_tail, 16);
+        assert_eq!(out_tail, EXPECTED, "tail final (op2)");
+
+        // MAC_INIT(op1) again — clears partial progress on op1
+        assert!(tee_cryp_hash_init(op1).is_ok());
+
+        // MAC_FINAL_COMPUTE(op1, full input)
+        let mut out_full = [0u8; 16];
+        let len_full = tee_cryp_hash_final(op1, &DATA, &mut out_full).unwrap();
+        assert_eq!(len_full, 16);
+        assert_eq!(out_full, EXPECTED, "full final after re-init (op1)");
+
+        // MAC_FINAL_COMPARE path: MACComputeFinal(op3, full) without re-init on op3
+        let mut out_op3 = [0u8; 16];
+        let len_op3 = tee_cryp_hash_final(op3, &DATA, &mut out_op3).unwrap();
+        assert_eq!(len_op3, 16);
+        assert_eq!(out_op3, EXPECTED, "compare path (op3 snapshot)");
+        assert_eq!(out_op3, out_full, "op3 snapshot vs op1 re-init full");
+    }
+
+    /// Minimal repro: op3 only gets post-MAC_INIT copy, then one-shot full final.
+    #[unittest::def_test(custom)]
+    fn test_regression_4002_mac_aes_cmac_vect2_op3_snapshot_only() {
+        const DATA: [u8; 16] = [
+            0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93,
+            0x17, 0x2a,
+        ];
+        const KEY: [u8; 16] = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
+        const EXPECTED: [u8; 16] = [
+            0x07, 0x0a, 0x16, 0xb4, 0x6b, 0x4d, 0x41, 0x44, 0xf7, 0x9b, 0xdd, 0x9d, 0xd0, 0x4a,
+            0x28, 0x7c,
+        ];
+
+        let mut op1: u32 = 0;
+        let mut op3: u32 = 0;
+        let r = alloc_aes_cmac_mac_state(&KEY, &mut op1);
+        if r.is_failed() {
+            return r;
+        }
+        let r = alloc_aes_cmac_mac_state(&KEY, &mut op3);
+        if r.is_failed() {
+            return r;
+        }
+
+        assert!(tee_cryp_hash_init(op1).is_ok());
+        assert!(tee_cryp_state_copy(op3, op1).is_ok());
+
+        let mut out_op1 = [0u8; 16];
+        assert!(tee_cryp_hash_init(op1).is_ok());
+        let len1 = tee_cryp_hash_final(op1, &DATA, &mut out_op1).unwrap();
+        assert_eq!(len1, 16);
+        assert_eq!(out_op1, EXPECTED);
+
+        let mut out_op3 = [0u8; 16];
+        let len3 = tee_cryp_hash_final(op3, &DATA, &mut out_op3).unwrap();
+        assert_eq!(len3, 16);
+        assert_eq!(out_op3, EXPECTED);
+        assert_eq!(out_op3, out_op1);
     }
 
     #[unittest::def_test(custom)]

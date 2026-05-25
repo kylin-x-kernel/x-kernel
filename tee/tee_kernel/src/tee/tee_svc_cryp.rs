@@ -1162,7 +1162,7 @@ pub const fn prop(
     }
 }
 
-pub static TEE_CRYP_OBJ_PROPS: [tee_cryp_obj_type_props; 14] = [
+pub static TEE_CRYP_OBJ_PROPS: [tee_cryp_obj_type_props; 19] = [
     // AES
     prop(
         TEE_TYPE_AES,
@@ -1206,6 +1206,51 @@ pub static TEE_CRYP_OBJ_PROPS: [tee_cryp_obj_type_props; 14] = [
         64,
         512,
         512 / 8,
+        &TEE_CRYP_OBJ_SECRET_VALUE_ATTRS,
+    ),
+    // HMAC-SHA1
+    prop(
+        TEE_TYPE_HMAC_SHA1,
+        8,
+        80,
+        512,
+        512 / 8,
+        &TEE_CRYP_OBJ_SECRET_VALUE_ATTRS,
+    ),
+    // HMAC-SHA224
+    prop(
+        TEE_TYPE_HMAC_SHA224,
+        8,
+        112,
+        512,
+        512 / 8,
+        &TEE_CRYP_OBJ_SECRET_VALUE_ATTRS,
+    ),
+    // HMAC-SHA256
+    prop(
+        TEE_TYPE_HMAC_SHA256,
+        8,
+        192,
+        1024,
+        1024 / 8,
+        &TEE_CRYP_OBJ_SECRET_VALUE_ATTRS,
+    ),
+    // HMAC-SHA384
+    prop(
+        TEE_TYPE_HMAC_SHA384,
+        8,
+        256,
+        1024,
+        1024 / 8,
+        &TEE_CRYP_OBJ_SECRET_VALUE_ATTRS,
+    ),
+    // HMAC-SHA512
+    prop(
+        TEE_TYPE_HMAC_SHA512,
+        8,
+        256,
+        1024,
+        1024 / 8,
         &TEE_CRYP_OBJ_SECRET_VALUE_ATTRS,
     ),
     // HMAC-SM3

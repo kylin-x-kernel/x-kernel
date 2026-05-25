@@ -293,27 +293,34 @@ pub(crate) fn crypto_hash_copy_state(ctx: &mut dyn CryptoHashCtx, src_ctx: &dyn 
     ctx.copy_state(src_ctx);
 }
 
+fn hash_md_type_from_algo(algo: u32) -> TeeResult<MdType> {
+    match algo {
+        TEE_ALG_MD5 => Ok(MdType::Md5),
+        TEE_ALG_SHA1 => Ok(MdType::Sha1),
+        TEE_ALG_SHA224 => Ok(MdType::Sha224),
+        TEE_ALG_SHA256 => Ok(MdType::Sha256),
+        TEE_ALG_SHA384 => Ok(MdType::Sha384),
+        TEE_ALG_SHA512 => Ok(MdType::Sha512),
+        TEE_ALG_SM3 => Ok(MdType::SM3),
+        _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
+    }
+}
+
+/// OP-TEE `crypto_hash_alloc_ctx`: allocate hash context at state alloc time.
+pub(crate) fn crypto_hash_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
+    let md_type = hash_md_type_from_algo(algo)?;
+    Md::new(md_type)
+        .map(CrypCtx::HashCtx)
+        .map_err(|_| TEE_ERROR_NOT_SUPPORTED)
+}
+
 pub(crate) fn crypto_hash_init(cs: Arc<Mutex<TeeCrypState>>) -> TeeResult {
     let mut cs_guard = cs.lock();
-    let algo = cs_guard.algo;
-    let mut md_type: MdType = MdType::None;
-    match algo {
-        TEE_ALG_MD5 => md_type = MdType::Md5,
-        TEE_ALG_SHA1 => md_type = MdType::Sha1,
-        TEE_ALG_SHA224 => md_type = MdType::Sha224,
-        TEE_ALG_SHA256 => md_type = MdType::Sha256,
-        TEE_ALG_SHA384 => md_type = MdType::Sha384,
-        TEE_ALG_SHA512 => md_type = MdType::Sha512,
-        TEE_ALG_SM3 => md_type = MdType::SM3,
-        _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
-    }
-    if let Ok(md) = Md::new(md_type) {
-        cs_guard.ctx = CrypCtx::HashCtx(md);
-        cs_guard.state = CrypState::Initialized;
-        Ok(())
-    } else {
-        Err(TEE_ERROR_BAD_PARAMETERS)
-    }
+    let md_type = hash_md_type_from_algo(cs_guard.algo)?;
+    let md = Md::new(md_type).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    cs_guard.ctx = CrypCtx::HashCtx(md);
+    cs_guard.state = CrypState::Initialized;
+    Ok(())
 }
 
 pub(crate) fn crypto_hash_update(cs: Arc<Mutex<TeeCrypState>>, data: &[u8]) -> TeeResult {
@@ -331,7 +338,11 @@ pub(crate) fn crypto_hash_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -
     let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Others);
 
     if let CrypCtx::HashCtx(md) = ctx {
-        md.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        // OP-TEE: keep a clone so TEE_DigestExtract / TEE_CopyOperation can re-finalize.
+        let state = md.clone();
+        let len = md.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        cs_guard.ctx = CrypCtx::HashCtx(state);
+        Ok(len)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -413,9 +424,27 @@ pub(crate) trait CryptoMacCtx {
     fn copy_state(&mut self, ctx: &dyn CryptoMacCtx);
 }
 
-pub(crate) fn crypto_mac_init(cs: Arc<Mutex<TeeCrypState>>, key: &[u8]) -> TeeResult {
-    let mut cs_guard = cs.lock();
-    let algo = cs_guard.algo;
+fn cmac_cipher_id_from_algo(algo: u32) -> TeeResult<CipherId> {
+    match algo {
+        TEE_ALG_AES_CMAC => Ok(CipherId::Aes),
+        TEE_ALG_DES3_CMAC => Ok(CipherId::Des3),
+        TEE_ALG_SM4_CMAC => Ok(CipherId::SM4),
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
+
+/// Default key length for `cipher_setup` at alloc (OP-TEE `crypto_cmac_alloc_ctx`).
+fn cmac_default_key_bit_len(algo: u32) -> TeeResult<u32> {
+    match algo {
+        TEE_ALG_AES_CMAC => Ok(128),
+        TEE_ALG_DES3_CMAC => Ok(192),
+        TEE_ALG_SM4_CMAC => Ok(128),
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
+
+/// OP-TEE `crypto_mac_alloc_ctx`: allocate MAC operation context without the secret key.
+pub(crate) fn crypto_mac_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
     match algo {
         TEE_ALG_HMAC_MD5 | TEE_ALG_HMAC_SHA1 | TEE_ALG_HMAC_SHA224 | TEE_ALG_HMAC_SHA256
         | TEE_ALG_HMAC_SHA384 | TEE_ALG_HMAC_SHA512 | TEE_ALG_HMAC_SM3 => {
@@ -427,34 +456,38 @@ pub(crate) fn crypto_mac_init(cs: Arc<Mutex<TeeCrypState>>, key: &[u8]) -> TeeRe
                 TEE_ALG_HMAC_SHA384 => MdType::Sha384,
                 TEE_ALG_HMAC_SHA512 => MdType::Sha512,
                 TEE_ALG_HMAC_SM3 => MdType::SM3,
-                _ => MdType::None,
+                _ => return Err(TEE_ERROR_NOT_SUPPORTED),
             };
-            if let Ok(hmac) = Hmac::new(md_type, key) {
-                cs_guard.ctx = CrypCtx::HmacCtx(hmac);
-                cs_guard.state = CrypState::Initialized;
-                Ok(())
-            } else {
-                Err(TEE_ERROR_NOT_IMPLEMENTED)
-            }
+            Hmac::setup(md_type)
+                .map(CrypCtx::HmacCtx)
+                .map_err(|_| TEE_ERROR_NOT_SUPPORTED)
         }
         TEE_ALG_AES_CMAC | TEE_ALG_DES3_CMAC | TEE_ALG_SM4_CMAC => {
-            let cipher_id = match algo {
-                TEE_ALG_AES_CMAC => CipherId::Aes,
-                TEE_ALG_DES3_CMAC => CipherId::Des3,
-                TEE_ALG_SM4_CMAC => CipherId::SM4,
-                _ => CipherId::None,
-            };
-            let mut cipher = Cipher::setup_for_cmac(cipher_id, (key.len() * 8) as _)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            cipher
-                .cmac_starts(key)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            cs_guard.ctx = CrypCtx::CmacCtx(cipher);
-            cs_guard.state = CrypState::Initialized;
-            Ok(())
+            let cipher_id = cmac_cipher_id_from_algo(algo)?;
+            let key_bit_len = cmac_default_key_bit_len(algo)?;
+            Cipher::setup_for_cmac(cipher_id, key_bit_len)
+                .map(CrypCtx::CmacCtx)
+                .map_err(|_| TEE_ERROR_NOT_SUPPORTED)
         }
-        _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
+}
+
+pub(crate) fn crypto_mac_init(cs: Arc<Mutex<TeeCrypState>>, key: &[u8]) -> TeeResult {
+    let mut cs_guard = cs.lock();
+    let algo = cs_guard.algo;
+    match &mut cs_guard.ctx {
+        CrypCtx::HmacCtx(hmac) => hmac.starts(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
+        CrypCtx::CmacCtx(cipher) => {
+            let cipher_id = cmac_cipher_id_from_algo(algo)?;
+            cipher
+                .cmac_init(cipher_id, key)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        }
+        _ => return Err(TEE_ERROR_BAD_STATE),
+    }
+    cs_guard.state = CrypState::Initialized;
+    Ok(())
 }
 
 // Crypto MAC update
@@ -477,12 +510,19 @@ pub(crate) fn crypto_mac_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) ->
     let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Others);
 
     match ctx {
-        CrypCtx::HmacCtx(hmac) => hmac.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        CrypCtx::HmacCtx(hmac) => {
+            let state = hmac.clone();
+            let len = hmac.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(state);
+            Ok(len)
+        }
         CrypCtx::CmacCtx(mut cipher) => {
+            let block_size = cipher.block_size();
             cipher
                 .cmac_finish(hash)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            Ok(cipher.block_size())
+            cs_guard.ctx = CrypCtx::CmacCtx(cipher);
+            Ok(block_size)
         }
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
