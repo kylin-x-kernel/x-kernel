@@ -11,6 +11,9 @@ use rsext4::error::{BlockDevError, RSEXT4Error};
 pub fn into_vfs_err(err: BlockDevError) -> VfsError {
     let linux_error = match err {
         BlockDevError::InvalidInput => LinuxError::EINVAL,
+        BlockDevError::NotDirectory => LinuxError::ENOTDIR,
+        BlockDevError::IsDirectory => LinuxError::EISDIR,
+        BlockDevError::DirectoryNotEmpty => LinuxError::ENOTEMPTY,
         BlockDevError::ReadError | BlockDevError::WriteError | BlockDevError::IoError => {
             LinuxError::EIO
         }

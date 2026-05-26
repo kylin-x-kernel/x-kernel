@@ -15,9 +15,355 @@ use alloc::{
 use log::{debug, error, info, warn};
 
 use crate::{
-    blockdev::*, config::*, dir::*, disknode::*, endian::DiskFormat, entries::*, error::*, ext4::*,
-    extents_tree::*, loopfile::*,
+    blockdev::*,
+    config::*,
+    dir::*,
+    disknode::*,
+    endian::DiskFormat,
+    entries::*,
+    error::*,
+    ext4::*,
+    extents_tree::*,
+    hashtree::{self, Ext4InodeHashTreeExt},
+    loopfile::*,
 };
+
+const ZERO_INODE_BYTES: [u8; 4] = 0u32.to_le_bytes();
+
+/// A directory entry located by a single parent-directory scan.
+pub(crate) struct ParentDirEntry {
+    pub ino: u32,
+    pub phys_block: u64,
+    pub file_type: u8,
+}
+
+/// Searches a single directory data block for a named entry.
+fn find_dentry_in_dir_block(data: &[u8], name_bytes: &[u8]) -> Option<(u32, u8)> {
+    let block_bytes = BLOCK_SIZE;
+    let mut offset: usize = 0;
+    while offset + 8 <= block_bytes {
+        let inode = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
+        let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
+        if rec_len < 8 {
+            break;
+        }
+        let name_len = data[offset + 6] as usize;
+        let entry_end = offset + rec_len as usize;
+        if entry_end > block_bytes {
+            break;
+        }
+        if name_len > 0 && offset + 8 + name_len <= entry_end {
+            let name = &data[offset + 8..offset + 8 + name_len];
+            if inode != 0 && name == name_bytes {
+                return Some((inode, data[offset + 7]));
+            }
+        }
+        if entry_end >= block_bytes {
+            break;
+        }
+        offset = entry_end;
+    }
+    None
+}
+
+/// Removes a dentry from a single directory block.
+fn remove_dentry_in_dir_block(data: &mut [u8], name_bytes: &[u8]) -> bool {
+    let block_bytes = BLOCK_SIZE;
+    let mut offset: usize = 0;
+    let mut prev_off: Option<usize> = None;
+    let mut prev_rec_len: u16 = 0;
+    while offset + 8 <= block_bytes {
+        let inode = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
+        let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
+        if rec_len < 8 {
+            break;
+        }
+        let name_len = data[offset + 6] as usize;
+        let entry_end = offset + rec_len as usize;
+        if entry_end > block_bytes {
+            break;
+        }
+
+        if name_len > 0 && offset + 8 + name_len <= entry_end {
+            let name = &data[offset + 8..offset + 8 + name_len];
+            if inode != 0 && name == name_bytes {
+                if let Some(poff) = prev_off {
+                    // Ext4 reuses deleted dirent space through the previous rec_len.
+                    let new_len = prev_rec_len.saturating_add(rec_len);
+                    let bytes = new_len.to_le_bytes();
+                    data[poff + 4] = bytes[0];
+                    data[poff + 5] = bytes[1];
+
+                    data[offset..offset + 4].copy_from_slice(&ZERO_INODE_BYTES);
+                } else {
+                    data[offset..offset + 4].copy_from_slice(&ZERO_INODE_BYTES);
+                }
+                return true;
+            }
+        }
+        if entry_end >= block_bytes {
+            break;
+        }
+        prev_off = Some(offset);
+        prev_rec_len = rec_len;
+        offset = entry_end;
+    }
+    false
+}
+
+/// Replaces the inode number and file type of a named directory entry.
+fn replace_dentry_in_dir_block(
+    data: &mut [u8],
+    name_bytes: &[u8],
+    new_ino: u32,
+    file_type: u8,
+) -> bool {
+    let block_bytes = BLOCK_SIZE;
+    let mut offset: usize = 0;
+    while offset + 8 <= block_bytes {
+        let existing_ino = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
+        let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
+        if rec_len < 8 {
+            break;
+        }
+        let name_len = data[offset + 6] as usize;
+        let entry_end = offset + rec_len as usize;
+        if entry_end > block_bytes {
+            break;
+        }
+
+        if name_len > 0 && offset + 8 + name_len <= entry_end {
+            let name = &data[offset + 8..offset + 8 + name_len];
+            if existing_ino != 0 && name == name_bytes {
+                data[offset..offset + 4].copy_from_slice(&new_ino.to_le_bytes());
+                data[offset + 7] = file_type;
+                return true;
+            }
+        }
+        if entry_end >= block_bytes {
+            break;
+        }
+        offset = entry_end;
+    }
+    false
+}
+
+fn try_remove_dentry_in_block<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    phys: u64,
+    name_bytes: &[u8],
+) -> BlockDevResult<bool> {
+    let mut removed = false;
+    fs.datablock_cache.modify(block_dev, phys, |data| {
+        removed = remove_dentry_in_dir_block(data, name_bytes);
+    })?;
+    Ok(removed)
+}
+
+fn try_replace_dentry_in_block<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    phys: u64,
+    name_bytes: &[u8],
+    new_ino: u32,
+    file_type: u8,
+) -> BlockDevResult<bool> {
+    let mut replaced = false;
+    fs.datablock_cache.modify(block_dev, phys, |data| {
+        replaced = replace_dentry_in_dir_block(data, name_bytes, new_ino, file_type);
+    })?;
+    Ok(replaced)
+}
+
+fn dir_data_blocks<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    dir_inode: &mut Ext4Inode,
+) -> BlockDevResult<Vec<u64>> {
+    let total_blocks = dir_inode.size().div_ceil(BLOCK_SIZE as u64);
+    if total_blocks == 0 {
+        return Ok(Vec::new());
+    }
+    if total_blocks > u32::MAX as u64 {
+        return Err(BlockDevError::Unsupported);
+    }
+
+    if dir_inode.have_extend_header_and_use_extend() {
+        let blocks = resolve_inode_block_allextend(fs, block_dev, dir_inode)?;
+        remember_dir_blocks(fs, &blocks);
+        let mut collected = Vec::new();
+        for lbn in 0..total_blocks as u32 {
+            let Some(&phys) = blocks.get(&lbn) else {
+                if lbn == 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
+                continue;
+            };
+            collected.push(phys);
+        }
+        return Ok(collected);
+    }
+
+    if total_blocks > 12 {
+        return Err(BlockDevError::Unsupported);
+    }
+
+    let mut collected = Vec::new();
+    for lbn in 0..total_blocks as usize {
+        let phys = dir_inode.i_block[lbn] as u64;
+        if phys == 0 {
+            if lbn == 0 {
+                return Err(BlockDevError::Corrupted);
+            }
+            continue;
+        }
+        remember_dir_block(fs, phys);
+        collected.push(phys);
+    }
+    Ok(collected)
+}
+
+/// Finds a child name in `parent_inode` with one directory scan.
+pub(crate) fn find_named_entry_in_parent<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    _parent_ino: u32,
+    parent_inode: &Ext4Inode,
+    name_bytes: &[u8],
+) -> BlockDevResult<Option<ParentDirEntry>> {
+    if !parent_inode.is_dir() {
+        return Ok(None);
+    }
+
+    // Try htree-indexed lookup first.
+    if parent_inode.is_htree_indexed()
+        && let Ok(result) =
+            hashtree::lookup_directory_entry(fs, block_dev, parent_inode, name_bytes)
+    {
+        return Ok(Some(ParentDirEntry {
+            ino: result.entry.inode,
+            phys_block: result.block_num as u64,
+            file_type: result.entry.file_type,
+        }));
+    }
+
+    // Fall back to linear scan across all data blocks.
+    let mut parent_inode_copy = *parent_inode;
+    for phys in dir_data_blocks(fs, block_dev, &mut parent_inode_copy)? {
+        let cached = fs.datablock_cache.get_or_load(block_dev, phys)?;
+        let data = &cached.data[..BLOCK_SIZE];
+        if let Some((inode, file_type)) = find_dentry_in_dir_block(data, name_bytes) {
+            return Ok(Some(ParentDirEntry {
+                ino: inode,
+                phys_block: phys,
+                file_type,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Removes a dentry on a block returned by [`find_named_entry_in_parent`].
+pub(crate) fn remove_named_entry_at<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    phys: u64,
+    name_bytes: &[u8],
+) -> BlockDevResult<bool> {
+    try_remove_dentry_in_block(fs, block_dev, phys, name_bytes)
+}
+
+fn replace_named_entry_at<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    phys: u64,
+    name_bytes: &[u8],
+    new_ino: u32,
+    file_type: u8,
+) -> BlockDevResult<bool> {
+    try_replace_dentry_in_block(fs, block_dev, phys, name_bytes, new_ino, file_type)
+}
+
+fn is_dot_or_dotdot(name: &str) -> bool {
+    matches!(name, "." | "..")
+}
+
+fn is_dir_empty<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    inode: &mut Ext4Inode,
+) -> BlockDevResult<bool> {
+    for phys in dir_data_blocks(fs, block_dev, inode)? {
+        let cached = fs.datablock_cache.get_or_load(block_dev, phys)?;
+        let data = &cached.data[..BLOCK_SIZE];
+        for (entry, _) in DirEntryIterator::new(data) {
+            if !entry.is_dot() && !entry.is_dotdot() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn free_dir_inode<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    ino: u32,
+    inode: &mut Ext4Inode,
+) -> BlockDevResult<()> {
+    // The inode slot is freed below, so no separate link-count writeback is needed.
+    inode.i_links_count = 0;
+    free_inode_storage(block_dev, fs, inode)?;
+    fs.free_inode(block_dev, ino)?;
+    let (group_idx, _) = fs.inode_allocator.global_to_group(ino);
+    if let Some(desc) = fs.get_group_desc_mut(group_idx) {
+        let used_dirs = desc.used_dirs_count().saturating_sub(1);
+        desc.bg_used_dirs_count_lo = (used_dirs & 0xFFFF) as u16;
+        desc.bg_used_dirs_count_hi = (used_dirs >> 16) as u16;
+    }
+    Ok(())
+}
+
+fn free_replaced_inode<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    ino: u32,
+    inode: &mut Ext4Inode,
+) -> BlockDevResult<()> {
+    if inode.is_dir() {
+        if !is_dir_empty(fs, block_dev, inode)? {
+            return Err(BlockDevError::DirectoryNotEmpty);
+        }
+        return free_dir_inode(fs, block_dev, ino, inode);
+    }
+
+    inode.i_links_count = inode.i_links_count.saturating_sub(1);
+    fs.modify_inode(block_dev, ino, |on_disk| {
+        on_disk.i_links_count = inode.i_links_count;
+    })?;
+    if inode.i_links_count == 0 {
+        free_inode_storage(block_dev, fs, inode)?;
+        fs.free_inode(block_dev, ino)?;
+    }
+    Ok(())
+}
 
 /// 重命名文件或目录
 ///
@@ -40,38 +386,13 @@ pub fn rename<B: BlockDevice>(
     let old_norm = split_paren_child_and_tranlatevalid(old_path);
     let new_norm = split_paren_child_and_tranlatevalid(new_path);
 
-    // 新文件是否存在：存在则先删除
-    if let Some((_ino, inod)) = get_inode_with_num(fs, device, &new_norm).ok().flatten() {
-        if inod.is_dir() {
-            delete_dir(fs, device, new_path);
-        } else {
-            delete_file(fs, device, new_path);
-        }
-    }
-    // 删除了还存在？错误!
-    if get_inode_with_num(fs, device, &new_norm)
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return Err(BlockDevError::WriteError);
-    }
-
     mv(fs, device, &old_norm, &new_norm)?;
 
     // 校验
-    if get_inode_with_num(fs, device, &old_norm)
-        .ok()
-        .flatten()
-        .is_some()
-    {
+    if get_inode_with_num(fs, device, &old_norm)?.is_some() {
         return Err(BlockDevError::WriteError);
     }
-    if get_inode_with_num(fs, device, &new_norm)
-        .ok()
-        .flatten()
-        .is_none()
-    {
+    if get_inode_with_num(fs, device, &new_norm)?.is_none() {
         return Err(BlockDevError::WriteError);
     }
 
@@ -819,7 +1140,7 @@ pub fn mv<B: BlockDevice>(
     };
 
     // 找到 old entry（inode + file_type），找不到就返回
-    let (_old_pino, mut old_parent_inode) = match get_inode_with_num(fs, block_dev, &old_parent)
+    let (old_pino, old_parent_inode) = match get_inode_with_num(fs, block_dev, &old_parent)
         .ok()
         .flatten()
     {
@@ -830,78 +1151,28 @@ pub fn mv<B: BlockDevice>(
         }
     };
 
-    let mut src_ino: Option<u32> = None;
-    let mut src_ft: Option<u8> = None;
-    if let Ok(blocks) = resolve_inode_block_allextend(fs, block_dev, &mut old_parent_inode) {
-        remember_dir_blocks(fs, &blocks);
-        for phys in blocks {
-            let cached = match fs.datablock_cache.get_or_load(block_dev, phys.1) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let data = &cached.data[..BLOCK_SIZE];
-            let iter = DirEntryIterator::new(data);
-            for (entry, _) in iter {
-                if entry.inode == 0 {
-                    continue;
-                }
-                if entry.name == old_name.as_bytes() {
-                    src_ino = Some(entry.inode);
-                    src_ft = Some(entry.file_type);
-                    break;
-                }
-            }
-            if src_ino.is_some() {
-                break;
-            }
-        }
-    }
-    if src_ino.is_none() {
-        // Non-extent directory: scan blocks using resolve_inode_block
-        let total_size = old_parent_inode.size() as usize;
-        let total_blocks = if total_size == 0 {
-            0
-        } else {
-            total_size.div_ceil(BLOCK_SIZE)
-        };
-        for lbn in 0..total_blocks {
-            let phys = match resolve_inode_block(block_dev, &mut old_parent_inode, lbn as u32) {
-                Ok(Some(b)) => b,
-                _ => continue,
-            };
-            remember_dir_block(fs, phys as u64);
-            let cached = match fs.datablock_cache.get_or_load(block_dev, phys as u64) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let data = &cached.data[..BLOCK_SIZE];
-            let iter = DirEntryIterator::new(data);
-            for (entry, _) in iter {
-                if entry.inode == 0 {
-                    continue;
-                }
-                if entry.name == old_name.as_bytes() {
-                    src_ino = Some(entry.inode);
-                    src_ft = Some(entry.file_type);
-                    break;
-                }
-            }
-            if src_ino.is_some() {
-                break;
-            }
-        }
-    }
-    let src_ino = match src_ino {
-        Some(v) => v,
-        None => {
+    let old_entry = match find_named_entry_in_parent(
+        fs,
+        block_dev,
+        old_pino,
+        &old_parent_inode,
+        old_name.as_bytes(),
+    ) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             error!(
                 "mv source entry not found in old parent: old_path={old_path} \
                  old_parent={old_parent} old_name={old_name}"
             );
             return Err(BlockDevError::InvalidInput);
         }
+        Err(e) => {
+            error!("mv lookup failed: {e:?} old_path={old_path}");
+            return Err(BlockDevError::InvalidInput);
+        }
     };
-    let src_ft = src_ft.unwrap_or(Ext4DirEntry2::EXT4_FT_UNKNOWN);
+    let src_ino = old_entry.ino;
+    let src_ft = old_entry.file_type;
 
     // new_parent 必须存在且是目录
     let (new_pino, new_parent_inode) = match get_inode_with_num(fs, block_dev, &new_parent)
@@ -919,45 +1190,98 @@ pub fn mv<B: BlockDevice>(
         return Err(BlockDevError::InvalidInput);
     }
 
-    // new_path 已存在则返回
-    if get_inode_with_num(fs, block_dev, &new_norm)
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        error!("mv destination already exists: new_path={new_path} new_norm={new_norm}");
-        return Err(BlockDevError::InvalidInput);
-    }
-
     // old_path 不允许为根目录
     if old_norm == "/" {
         error!("mv refuses to move root: old_path={old_path}");
         return Err(BlockDevError::InvalidInput);
     }
 
-    // 插入新 entry 到 new_parent
-    let mut new_parent_inode_copy = new_parent_inode;
-    if insert_dir_entry(
+    let dst_entry = find_named_entry_in_parent(
         fs,
         block_dev,
         new_pino,
-        &mut new_parent_inode_copy,
-        src_ino,
-        &new_name,
-        src_ft,
-    )
-    .is_err()
+        &new_parent_inode,
+        new_name.as_bytes(),
+    )?;
+    if let Some(dst_entry) = &dst_entry
+        && dst_entry.ino == src_ino
     {
-        error!(
-            "mv insert_dir_entry failed: old_path={old_path} new_path={new_path} \
-             new_parent={new_parent} new_name={new_name} src_ino={src_ino}"
-        );
-        return Err(BlockDevError::WriteError);
+        return Ok(());
     }
 
-    // 删除旧 entry
-    if !remove_inodeentry_from_parentdir(fs, block_dev, &old_parent, &old_name) {
-        let _ = remove_inodeentry_from_parentdir(fs, block_dev, &new_parent, &new_name);
+    let src_inode = fs.get_inode_by_num(block_dev, src_ino)?;
+    let src_is_dir = src_inode.is_dir();
+    let mut replaced_inode = if let Some(dst_entry) = &dst_entry {
+        Some((
+            dst_entry.ino,
+            dst_entry.file_type,
+            fs.get_inode_by_num(block_dev, dst_entry.ino)?,
+        ))
+    } else {
+        None
+    };
+    if let Some((_, _, inode)) = &mut replaced_inode {
+        if src_is_dir && !inode.is_dir() {
+            return Err(BlockDevError::NotDirectory);
+        }
+        if !src_is_dir && inode.is_dir() {
+            return Err(BlockDevError::IsDirectory);
+        }
+        if inode.is_dir() && !is_dir_empty(fs, block_dev, inode)? {
+            return Err(BlockDevError::DirectoryNotEmpty);
+        }
+    }
+
+    let inserted_new_entry = if let Some(dst_entry) = &dst_entry {
+        let replaced = replace_named_entry_at(
+            fs,
+            block_dev,
+            dst_entry.phys_block,
+            new_name.as_bytes(),
+            src_ino,
+            src_ft,
+        )?;
+        if !replaced {
+            error!("mv replace destination entry failed: new_path={new_path}");
+            return Err(BlockDevError::WriteError);
+        }
+        false
+    } else {
+        let mut new_parent_inode_copy = new_parent_inode;
+        insert_dir_entry(
+            fs,
+            block_dev,
+            new_pino,
+            &mut new_parent_inode_copy,
+            src_ino,
+            &new_name,
+            src_ft,
+        )
+        .map_err(|_| {
+            error!(
+                "mv insert_dir_entry failed: old_path={old_path} new_path={new_path} \
+                 new_parent={new_parent} new_name={new_name} src_ino={src_ino}"
+            );
+            BlockDevError::WriteError
+        })?;
+        true
+    };
+
+    if !remove_inodeentry_from_parentdir(fs, block_dev, &old_parent, &old_name)? {
+        if inserted_new_entry {
+            let _ = remove_inodeentry_from_parentdir(fs, block_dev, &new_parent, &new_name);
+        } else if let (Some(dst_entry), Some((old_dst_ino, old_dst_file_type, _))) =
+            (&dst_entry, &replaced_inode)
+        {
+            let _ = replace_named_entry_at(
+                fs,
+                block_dev,
+                dst_entry.phys_block,
+                new_name.as_bytes(),
+                *old_dst_ino,
+                *old_dst_file_type,
+            );
+        }
         error!(
             "mv remove old entry failed: old_parent={old_parent} old_name={old_name} (rollback \
              new_parent={new_parent} new_name={new_name})"
@@ -965,14 +1289,20 @@ pub fn mv<B: BlockDevice>(
         return Err(BlockDevError::WriteError);
     }
 
+    let replaced_dir = replaced_inode
+        .as_ref()
+        .is_some_and(|(_, _, inode)| inode.is_dir());
+    if let Some((old_dst_ino, _, old_dst_inode)) = &mut replaced_inode {
+        free_replaced_inode(fs, block_dev, *old_dst_ino, old_dst_inode)?;
+    }
+    if replaced_dir {
+        fs.modify_inode(block_dev, new_pino, |td| {
+            td.i_links_count = td.i_links_count.saturating_sub(1);
+        })?;
+    }
+
     // 目录跨父目录移动：更新 link 以及 '..'
-    let mut moved_inode = match fs.get_inode_by_num(block_dev, src_ino) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("mv get_inode_by_num failed ino={src_ino} err={e:?} ({e})");
-            return Err(e);
-        }
-    };
+    let mut moved_inode = src_inode;
     if moved_inode.is_dir() {
         // 父目录不同才需要改
         let old_pino = match get_inode_with_num(fs, block_dev, &old_parent)
@@ -1030,117 +1360,13 @@ pub fn mv<B: BlockDevice>(
     Ok(())
 }
 
-/// UnLink
+/// Unlinks a non-directory entry.
 pub fn unlink<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
     link_path: &str,
-) {
-    // 首先逐级扫描entry找到对应linkentry。
-    let norm_path = split_paren_child_and_tranlatevalid(link_path);
-    let (parent_path, child_name) = if let Some(pos) = norm_path.rfind('/') {
-        let parent = if pos == 0 {
-            "/".to_string()
-        } else {
-            norm_path[..pos].to_string()
-        };
-        let child = norm_path[pos + 1..].to_string();
-        (parent, child)
-    } else {
-        ("/".to_string(), norm_path)
-    };
-
-    let (_pino, mut parent_inode) = match get_inode_with_num(fs, block_dev, &parent_path)
-        .ok()
-        .flatten()
-    {
-        Some(v) => v,
-        None => {
-            warn!("Parent directory not found, unlink failed: {parent_path}");
-            return;
-        }
-    };
-
-    let mut target_ino: Option<u32> = None;
-    let blocks = match resolve_inode_block_allextend(fs, block_dev, &mut parent_inode) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("Parse parent dir blocks failed, unlink failed: {e:?} parent={parent_path}");
-            return;
-        }
-    };
-    remember_dir_blocks(fs, &blocks);
-
-    for &phys in blocks.values() {
-        let cached = match fs.datablock_cache.get_or_load(block_dev, phys) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let data = &cached.data[..BLOCK_SIZE];
-        let iter = DirEntryIterator::new(data);
-        for (entry, _) in iter {
-            if entry.inode == 0 {
-                continue;
-            }
-            if entry.name == child_name.as_bytes() {
-                target_ino = Some(entry.inode);
-                break;
-            }
-        }
-        if target_ino.is_some() {
-            break;
-        }
-    }
-
-    let target_ino = match target_ino {
-        Some(v) => v,
-        None => {
-            warn!("Link entry not found, unlink failed: {link_path}");
-            return;
-        }
-    };
-
-    let mut target_inode = match fs.get_inode_by_num(block_dev, target_ino) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("get inode {target_ino} failed, unlink failed: {e:?}");
-            return;
-        }
-    };
-
-    // 首先对指向inode 的link -1。
-    let new_links = target_inode.i_links_count.saturating_sub(1);
-    target_inode.i_links_count = new_links;
-    if fs
-        .modify_inode(block_dev, target_ino, |td| {
-            td.i_links_count = new_links;
-        })
-        .is_err()
-    {
-        warn!("modify inode {target_ino} links_count failed in unlink");
-        return;
-    }
-
-    // 如果此时link数为0就调用deletefile删除对应文件.   这里不复用deletefile，因为需要额外的定位
-    if new_links == 0 {
-        if let Err(e) = free_inode_storage(block_dev, fs, &mut target_inode) {
-            warn!("free inode storage failed for inode {target_ino}: {e:?}");
-            return;
-        }
-        if let Err(e) = fs.free_inode(block_dev, target_ino) {
-            warn!("free_inode failed for inode {target_ino}: {e:?}");
-            return;
-        }
-        let _ = fs.modify_inode(block_dev, target_ino, |td| {
-            td.i_dtime = u32::MAX;
-        });
-    }
-
-    // 最后调用removeentryfromparent移除entry
-    let removed = remove_inodeentry_from_parentdir(fs, block_dev, &parent_path, &child_name);
-    if !removed {
-        warn!("Dir entry '{child_name}' not found under parent {parent_path} in unlink");
-    }
+) -> BlockDevResult<()> {
+    delete_file(fs, block_dev, link_path)
 }
 
 /// Link
@@ -1210,32 +1436,17 @@ pub fn link<B: BlockDevice>(
     };
 
     let mut copied_ft: Option<u8> = None;
-    if let Some((_lpino, mut lp_inode)) = get_inode_with_num(fs, block_dev, &linked_parent_path)
-        .ok()
-        .flatten()
-        && let Ok(blocks) = resolve_inode_block_allextend(fs, block_dev, &mut lp_inode)
+    if let Ok(Some((linked_parent_ino, linked_parent_inode))) =
+        get_inode_with_num(fs, block_dev, &linked_parent_path)
+        && let Ok(Some(entry)) = find_named_entry_in_parent(
+            fs,
+            block_dev,
+            linked_parent_ino,
+            &linked_parent_inode,
+            linked_child_name.as_bytes(),
+        )
     {
-        remember_dir_blocks(fs, &blocks);
-        for &phys in blocks.values() {
-            let cached = match fs.datablock_cache.get_or_load(block_dev, phys) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let data = &cached.data[..BLOCK_SIZE];
-            let iter = DirEntryIterator::new(data);
-            for (entry, _) in iter {
-                if entry.inode == 0 {
-                    continue;
-                }
-                if entry.name == linked_child_name.as_bytes() {
-                    copied_ft = Some(entry.file_type);
-                    break;
-                }
-            }
-            if copied_ft.is_some() {
-                break;
-            }
-        }
+        copied_ft = Some(entry.file_type);
     }
 
     let file_type = copied_ft.unwrap_or_else(|| {
@@ -1279,107 +1490,99 @@ pub fn remove_inodeentry_from_parentdir<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
     parent_path: &str,
     child_name: &str,
-) -> bool {
-    let parent_info = match get_inode_with_num(fs, block_dev, parent_path)
+) -> BlockDevResult<bool> {
+    let (parent_ino_num, parent_inode) = match get_inode_with_num(fs, block_dev, parent_path)
         .ok()
         .flatten()
     {
         Some(v) => v,
         None => {
             warn!("Parent directory not found for path {parent_path}, remove entry failed");
-            return false;
+            return Ok(false);
         }
     };
-    let (_parent_ino_num, mut parent_inode) = parent_info;
 
-    let total_size = parent_inode.size() as usize;
-    let block_bytes = BLOCK_SIZE;
-    let total_blocks = if total_size == 0 {
-        0
-    } else {
-        total_size.div_ceil(block_bytes)
+    let entry = match find_named_entry_in_parent(
+        fs,
+        block_dev,
+        parent_ino_num,
+        &parent_inode,
+        child_name.as_bytes(),
+    )? {
+        Some(v) => v,
+        None => {
+            warn!("Dir entry '{child_name}' not found under parent {parent_path}");
+            return Ok(false);
+        }
     };
 
-    let mut removed = false;
-    let name_bytes = child_name.as_bytes();
+    remove_named_entry_at(fs, block_dev, entry.phys_block, child_name.as_bytes())
+}
 
-    for lbn in 0..total_blocks {
-        if removed {
-            break;
-        }
-        let phys = match resolve_inode_block(block_dev, &mut parent_inode, lbn as u32) {
-            Ok(Some(b)) => b,
-            _ => continue,
-        };
-        remember_dir_block(fs, phys as u64);
-        let _ = fs.datablock_cache.modify(block_dev, phys as u64, |data| {
-            if removed {
-                return;
-            }
-            let mut offset: usize = 0;
-            let mut prev_off: Option<usize> = None;
-            let mut prev_rec_len: u16 = 0;
-            while offset + 8 <= block_bytes {
-                let inode = u32::from_le_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]);
-                let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
-                if rec_len < 8 {
-                    break;
-                }
-                let name_len = data[offset + 6] as usize;
-                let entry_end = offset + rec_len as usize;
-                if entry_end > block_bytes {
-                    break;
-                }
-
-                // Only compare name bytes within the current entry's rec_len.
-                if name_len > 0 && offset + 8 + name_len <= entry_end {
-                    let name = &data[offset + 8..offset + 8 + name_len];
-                    if inode != 0 && name == name_bytes {
-                        if let Some(poff) = prev_off {
-                            // Merge current entry's space into previous entry.
-                            let new_len = prev_rec_len.saturating_add(rec_len);
-                            let bytes = new_len.to_le_bytes();
-                            data[poff + 4] = bytes[0];
-                            data[poff + 5] = bytes[1];
-
-                            // Clear current entry inode so it will be treated as free.
-                            let zero = 0u32.to_le_bytes();
-                            data[offset] = zero[0];
-                            data[offset + 1] = zero[1];
-                            data[offset + 2] = zero[2];
-                            data[offset + 3] = zero[3];
-                        } else {
-                            // No previous entry in this block: mark this entry free.
-                            let zero = 0u32.to_le_bytes();
-                            data[offset] = zero[0];
-                            data[offset + 1] = zero[1];
-                            data[offset + 2] = zero[2];
-                            data[offset + 3] = zero[3];
-                        }
-                        removed = true;
-                        break;
-                    }
-                }
-                if entry_end >= block_bytes {
-                    break;
-                }
-                prev_off = Some(offset);
-                prev_rec_len = rec_len;
-                offset = entry_end;
-            }
-        });
+pub fn rmdir<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    path: &str,
+) -> BlockDevResult<()> {
+    let norm_path = split_paren_child_and_tranlatevalid(path);
+    if norm_path == "/" {
+        return Err(BlockDevError::DeviceBusy);
     }
 
-    removed
+    let (parent_path, child_name) = if let Some(pos) = norm_path.rfind('/') {
+        let parent = if pos == 0 {
+            "/".to_string()
+        } else {
+            norm_path[..pos].to_string()
+        };
+        let child = norm_path[pos + 1..].to_string();
+        if is_dot_or_dotdot(&child) {
+            return Err(BlockDevError::InvalidInput);
+        }
+        (parent, child)
+    } else {
+        if is_dot_or_dotdot(&norm_path) {
+            return Err(BlockDevError::InvalidInput);
+        }
+        ("/".to_string(), norm_path)
+    };
+
+    let (parent_ino, parent_inode) =
+        get_inode_with_num(fs, block_dev, &parent_path)?.ok_or(BlockDevError::InvalidInput)?;
+    let entry = find_named_entry_in_parent(
+        fs,
+        block_dev,
+        parent_ino,
+        &parent_inode,
+        child_name.as_bytes(),
+    )?
+    .ok_or(BlockDevError::InvalidInput)?;
+
+    let mut target_inode = fs.get_inode_by_num(block_dev, entry.ino)?;
+    if !target_inode.is_dir() {
+        return Err(BlockDevError::NotDirectory);
+    }
+    if !is_dir_empty(fs, block_dev, &mut target_inode)? {
+        return Err(BlockDevError::DirectoryNotEmpty);
+    }
+
+    let removed = remove_named_entry_at(fs, block_dev, entry.phys_block, child_name.as_bytes())?;
+    if !removed {
+        return Err(BlockDevError::WriteError);
+    }
+
+    fs.modify_inode(block_dev, parent_ino, |inode| {
+        inode.i_links_count = inode.i_links_count.saturating_sub(1);
+    })?;
+    free_dir_inode(fs, block_dev, entry.ino, &mut target_inode)
 }
 
 /// 删除目录
-pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2Dev<B>, path: &str) {
+pub fn delete_dir<B: BlockDevice>(
+    fs: &mut Ext4FileSystem,
+    block_dev: &mut Jbd2Dev<B>,
+    path: &str,
+) -> BlockDevResult<()> {
     #[derive(Clone)]
     struct DirFrame {
         path: alloc::string::String,
@@ -1391,20 +1594,10 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
     }
 
     let norm_path = split_paren_child_and_tranlatevalid(path);
-    let (root_ino_num, root_inode) = match get_file_inode(fs, block_dev, &norm_path) {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            warn!("Dir not exist, delete failed!");
-            return;
-        }
-        Err(e) => {
-            warn!("Dir lookup error, delete failed: {e:?}");
-            return;
-        }
-    };
+    let (root_ino_num, root_inode) =
+        get_file_inode(fs, block_dev, &norm_path)?.ok_or(BlockDevError::InvalidInput)?;
     if !root_inode.is_dir() {
-        error!("path:{path} is not a dir!");
-        return;
+        return Err(BlockDevError::InvalidInput);
     }
 
     let (parent_path, child_name) = if norm_path == "/" {
@@ -1441,7 +1634,7 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
                 Ok(v) => v,
                 Err(e) => {
                     warn!("Parse dir blocks failed: {:?} path={}", e, frame.path);
-                    return;
+                    return Err(e);
                 }
             };
             remember_dir_blocks(fs, &dir_blocks);
@@ -1464,7 +1657,7 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
                                 "load dir block {} failed: {:?} path={}",
                                 phys, e, frame.path
                             );
-                            return;
+                            return Err(e);
                         }
                     };
                     let data = &cached.data[..block_bytes];
@@ -1506,7 +1699,7 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
 
                     // 是普通文件或者是链接，调用deletefile删除对应文件。
                     if !child_inode.is_dir() {
-                        delete_file(fs, block_dev, &child_path);
+                        delete_file(fs, block_dev, &child_path)?;
                         continue;
                     }
 
@@ -1546,7 +1739,7 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
                     "get inode {} failed in cleanup: {:?} path={}",
                     frame.ino_num, e, frame.path
                 );
-                return;
+                return Err(e);
             }
         };
 
@@ -1568,13 +1761,13 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
             // 删除entry时一样。
             debug!("delete entry path={removed_path}");
 
-            let removed = remove_inodeentry_from_parentdir(fs, block_dev, pp, name);
+            let removed = remove_inodeentry_from_parentdir(fs, block_dev, pp, name)?;
             if !removed {
                 warn!(
                     "Dir entry '{}' not found under parent {} (path={})",
                     name, pp, frame.path
                 );
-                return;
+                return Err(BlockDevError::WriteError);
             }
 
             if let Some((pino, _)) = get_inode_with_num(fs, block_dev, pp).ok().flatten() {
@@ -1590,14 +1783,14 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
                 "free inode storage failed for dir inode {}: {:?} path={}",
                 frame.ino_num, e, frame.path
             );
-            return;
+            return Err(e);
         }
         if let Err(e) = fs.free_inode(block_dev, frame.ino_num) {
             warn!(
                 "free_inode failed for inode {}: {:?} path={}",
                 frame.ino_num, e, frame.path
             );
-            return;
+            return Err(e);
         }
 
         // 最后更新块组的dir计数-1。
@@ -1609,6 +1802,7 @@ pub fn delete_dir<B: BlockDevice>(fs: &mut Ext4FileSystem, block_dev: &mut Jbd2D
             desc.bg_used_dirs_count_hi = (new_count >> 16) as u16;
         }
     }
+    Ok(())
 }
 
 /// 删除文件/删除链接文件
@@ -1616,59 +1810,10 @@ pub fn delete_file<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     block_dev: &mut Jbd2Dev<B>,
     path: &str,
-) {
-    // find inode
+) -> BlockDevResult<()> {
     let norm_path = split_paren_child_and_tranlatevalid(path);
-    let target = match get_file_inode(fs, block_dev, &norm_path) {
-        Ok(Some((ino_num, inode))) => (ino_num, inode),
-        Ok(None) => {
-            warn!("File not exist, delete failed!");
-            return;
-        }
-        Err(e) => {
-            warn!("File lookup error, delete failed: {e:?}");
-            return;
-        }
-    };
-    let (ino_num, mut target_inode) = target;
 
-    if target_inode.is_dir() {
-        error!("file:{path} is a dir!");
-        return;
-    }
-
-    // link-1
-    target_inode.i_links_count = target_inode.i_links_count.saturating_sub(1);
-    // update target inode link
-    if fs
-        .modify_inode(block_dev, ino_num, |td| {
-            td.i_links_count = target_inode.i_links_count;
-        })
-        .is_err()
-    {
-        error!("inode num:{ino_num} path:{path} modify faild!")
-    }
-    if target_inode.i_links_count == 0 {
-        debug!("Will free inode:{ino_num} path:{path}");
-        // 设置dtime(删除时的时间戳) 太小会触发PR_1_LOW_DTIME问题，inode存在并且正常使用时应该为0.
-
-        if let Err(e) = free_inode_storage(block_dev, fs, &mut target_inode) {
-            warn!("free inode storage failed for inode {ino_num}: {e:?}");
-            return;
-        }
-        // 释放inode
-        if let Err(e) = fs.free_inode(block_dev, ino_num) {
-            warn!("free_inode failed for inode {ino_num}: {e:?}");
-            return;
-        }
-    } else {
-        error!(
-            "Inode num:{} links:{} >0 ,only remove entry!",
-            ino_num, target_inode.i_links_count
-        );
-    }
-
-    // 计算父目录路径和子名
+    // Resolve parent path and child name for directory-entry lookup.
     let (parent_path, child_name) = if let Some(pos) = norm_path.rfind('/') {
         let parent = if pos == 0 {
             "/".to_string()
@@ -1676,19 +1821,55 @@ pub fn delete_file<B: BlockDevice>(
             norm_path[..pos].to_string()
         };
         let child = norm_path[pos + 1..].to_string();
+        if is_dot_or_dotdot(&child) {
+            return Err(BlockDevError::InvalidInput);
+        }
         (parent, child)
     } else {
+        if is_dot_or_dotdot(&norm_path) {
+            return Err(BlockDevError::InvalidInput);
+        }
         ("/".to_string(), norm_path)
     };
 
-    // 查找父目录 inode
-    let removed = remove_inodeentry_from_parentdir(fs, block_dev, &parent_path, &child_name);
+    let (parent_ino, parent_inode) =
+        get_inode_with_num(fs, block_dev, &parent_path)?.ok_or(BlockDevError::InvalidInput)?;
+    let entry = find_named_entry_in_parent(
+        fs,
+        block_dev,
+        parent_ino,
+        &parent_inode,
+        child_name.as_bytes(),
+    )?
+    .ok_or(BlockDevError::InvalidInput)?;
+
+    let ino_num = entry.ino;
+    let mut target_inode = fs.get_inode_by_num(block_dev, ino_num)?;
+    if target_inode.is_dir() {
+        return Err(BlockDevError::IsDirectory);
+    }
+
+    let removed = remove_named_entry_at(fs, block_dev, entry.phys_block, child_name.as_bytes())?;
     if !removed {
-        warn!(
-            "Dir entry '{child_name}' not found under parent {parent_path}, but inode/data \
-             already freed"
+        return Err(BlockDevError::WriteError);
+    }
+
+    target_inode.i_links_count = target_inode.i_links_count.saturating_sub(1);
+    fs.modify_inode(block_dev, ino_num, |td| {
+        td.i_links_count = target_inode.i_links_count;
+    })?;
+
+    if target_inode.i_links_count == 0 {
+        debug!("Will free inode:{ino_num} path:{path}");
+        free_inode_storage(block_dev, fs, &mut target_inode)?;
+        fs.free_inode(block_dev, ino_num)?;
+    } else {
+        error!(
+            "Inode num:{} links:{} >0 ,only remove entry!",
+            ino_num, target_inode.i_links_count
         );
     }
+    Ok(())
 }
 
 /// 根据数据块列表为普通文件 inode 构建块映射：

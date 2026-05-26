@@ -13,6 +13,12 @@
 pub enum BlockDevError {
     /// 非法输入
     InvalidInput,
+    /// Expected a directory but the target is not a directory
+    NotDirectory,
+    /// Expected a non-directory but the target is a directory
+    IsDirectory,
+    /// Directory not empty
+    DirectoryNotEmpty,
     /// 读取错误
     ReadError,
     /// 写入错误
@@ -57,6 +63,9 @@ impl core::fmt::Display for BlockDevError {
             BlockDevError::InvalidInput => {
                 write!(f, "invalid input")
             }
+            BlockDevError::NotDirectory => write!(f, "not a directory"),
+            BlockDevError::IsDirectory => write!(f, "is a directory"),
+            BlockDevError::DirectoryNotEmpty => write!(f, "directory not empty"),
             BlockDevError::ReadError => write!(f, "failed to read from block device"),
             BlockDevError::WriteError => write!(f, "failed to write to block device"),
             BlockDevError::BlockOutOfRange {

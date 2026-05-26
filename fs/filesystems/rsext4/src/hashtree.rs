@@ -43,14 +43,23 @@ impl core::fmt::Display for HashTreeError {
     }
 }
 
-/// Hash tree search result
+/// Hash tree directory entry returned from lookup.
+#[derive(Debug)]
+pub struct HashTreeDirEntry {
+    /// Inode number.
+    pub inode: u32,
+    /// Directory entry file type.
+    pub file_type: u8,
+}
+
+/// Hash tree search result.
 #[derive(Debug)]
 pub struct HashTreeSearchResult {
-    /// Found directory entry
-    pub entry: Ext4DirEntryInfo<'static>,
-    /// Block number where entry is located
+    /// Found directory entry.
+    pub entry: HashTreeDirEntry,
+    /// Block number where entry is located.
     pub block_num: u32,
-    /// Offset within the block
+    /// Offset within the block.
     pub offset: usize,
 }
 
@@ -278,8 +287,9 @@ impl HashTreeManager {
         for (entry, offset) in iter {
             if entry.name == target_name {
                 return Ok(HashTreeSearchResult {
-                    entry: unsafe {
-                        core::mem::transmute::<Ext4DirEntryInfo<'_>, Ext4DirEntryInfo<'_>>(entry)
+                    entry: HashTreeDirEntry {
+                        inode: entry.inode,
+                        file_type: entry.file_type,
                     },
                     block_num,
                     offset: offset as usize,
@@ -361,10 +371,9 @@ impl HashTreeManager {
                 let block_data = &cached_block.data[..block_bytes];
                 if let Some(entry) = classic_dir::find_entry(block_data, target_name) {
                     return Ok(HashTreeSearchResult {
-                        entry: unsafe {
-                            core::mem::transmute::<Ext4DirEntryInfo<'_>, Ext4DirEntryInfo<'_>>(
-                                entry,
-                            )
+                        entry: HashTreeDirEntry {
+                            inode: entry.inode,
+                            file_type: entry.file_type,
                         },
                         block_num: phys as u32,
                         offset: 0,
