@@ -2,21 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Helper functions to initialize the CPU states on systems bootstrapping.
-
-use kcpu_id_map::LogicalCpuId;
-
-/// Initializes the per-CPU data structures.
-///
-/// It calls the initialization function of the [`percpu`] crate. It (or other
-/// alternative initialization) should be called before [`init_trap`].
-///
-/// [`percpu`]: https://docs.rs/percpu/latest/percpu/index.html
-pub fn init_percpu(cpu_id: LogicalCpuId) {
-    percpu::init();
-    percpu::init_percpu_reg(cpu_id.as_usize());
-}
-
 /// Initializes trap handling on the current CPU.
 ///
 /// In detail, it initializes the GDT, IDT on x86_64 platforms and relevant
@@ -25,7 +10,7 @@ pub fn init_percpu(cpu_id: LogicalCpuId) {
 /// # Notes
 /// Before calling this function, the initialization function of the [`percpu`]
 /// crate should have been invoked to ensure that the per-CPU data structures
-/// are set up correctly (i.e., by calling [`init_percpu`]).
+/// are set up correctly (i.e., by calling [`khal::percpu::init_primary`]).
 ///
 /// [`percpu`]: https://docs.rs/percpu/latest/percpu/index.html
 pub fn init_trap() {

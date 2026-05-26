@@ -168,7 +168,7 @@ bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
 zerocopy = { version = "0.8", features = ["derive"] }
 chrono = { version = "0.4", default-features = false }
-crate_interface = "0.1.4"
+crate_interface = { version = "0.3", features = ["weak_default"] }
 enum_dispatch = "0.3"
 event-listener = { version = "5.4.0", default-features = false }
 extern-trait = "0.2"
@@ -194,12 +194,11 @@ mbedtls-build-helper = "0.1"
 mbedtls-platform-support-smx = { version = "0.1", package = "mbedtls-platform-support-smx", default-features = false }
 mbedtls-sys-auto = { version = "2.28", package = "mbedtls-sys-auto-smx", default-features = false, features = [
 ] }
-percpu = "0.2"
+percpu = "0.4"
 rust-dice = { version = "0.1", default-features = false }
 slab = { version = "0.4.9", default-features = false }
 slab_allocator = { version = "0.4", package = "ax_slab_allocator" }
 smoltcp = { version = "=0.13.0", default-features = false }
-spin = "0.10"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 x86_64 = { version = "0.15.2", features = ["instructions"] }

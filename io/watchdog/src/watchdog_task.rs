@@ -17,10 +17,6 @@ pub trait WatchdogTask {
     /// Check whether the task is healthy.
     /// Return `true` if healthy, `false` to trigger recovery actions.
     fn check(&self) -> bool;
-
-    // Called when `check()` returns false.
-    // Default: do nothing.
-    // fn on_failure(&self);
 }
 
 /// Register a watchdog task for the current CPU.
@@ -33,6 +29,7 @@ pub fn register_watchdog_task(task: &'static dyn WatchdogTask) {
 }
 
 /// Check watchdog tasks and return the first failed task ID if any.
+#[cfg(feature = "nmi")]
 pub(crate) fn check_watchdog_tasks() -> Option<&'static str> {
     unsafe {
         let queue = WATCHDOG_TASK_QUEUE.current_ref_mut_raw();

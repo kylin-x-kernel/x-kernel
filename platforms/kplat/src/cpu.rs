@@ -26,7 +26,7 @@ pub fn is_bsp() -> bool {
 
 /// Initializes per-CPU state for the boot CPU.
 pub fn boot_cpu_init(id: LogicalCpuId) {
-    percpu::init();
+    percpu::init_in_place().expect("failed to initialize per-CPU data areas");
     percpu::init_percpu_reg(id.as_usize());
     unsafe {
         KPCB_ID.write_current_raw(id.as_usize());
