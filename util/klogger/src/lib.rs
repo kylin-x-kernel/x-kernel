@@ -114,25 +114,59 @@ impl Log for KernelLogger {
 
         let line = record.line().unwrap_or(0);
         let path = record.target();
+        let compact = path == "unittest";
         let color = get_level_color(record.level());
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "std")] {
-                let _ = print_fmt(color_fmt!(
-                    AnsiColor::White,
-                    "[{time} {path}:{line}] {args}\n",
-                    time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
-                    path = path,
-                    line = line,
-                    args = color_fmt!(color, "{}", record.args()),
-                ));
+                let _ = if compact {
+                    print_fmt(color_fmt!(
+                        AnsiColor::White,
+                        "[{time}] {args}\n",
+                        time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
+                        args = color_fmt!(color, "{}", record.args()),
+                    ))
+                } else {
+                    print_fmt(color_fmt!(
+                        AnsiColor::White,
+                        "[{time} {path}:{line}] {args}\n",
+                        time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
+                        path = path,
+                        line = line,
+                        args = color_fmt!(color, "{}", record.args()),
+                    ))
+                };
             } else {
                 let cpu_id = call_interface!(LoggerAdapter::cpu_id);
                 let tid = call_interface!(LoggerAdapter::task_id);
                 let now = call_interface!(LoggerAdapter::now);
 
-                let _ = match (cpu_id, tid) {
-                   (Some(c), Some(t)) => print_fmt(color_fmt!(
+                let _ = match (compact, cpu_id, tid) {
+                    (true, Some(c), Some(t)) => print_fmt(color_fmt!(
+                        AnsiColor::White,
+                        "[{:>3}.{:06} {c}:{t}] {args}\n",
+                        now.as_secs(),
+                        now.subsec_micros(),
+                        c = c,
+                        t = t,
+                        args = color_fmt!(color, "{}", record.args()),
+                    )),
+                    (true, Some(c), None) => print_fmt(color_fmt!(
+                        AnsiColor::White,
+                        "[{:>3}.{:06} {c}] {args}\n",
+                        now.as_secs(),
+                        now.subsec_micros(),
+                        c = c,
+                        args = color_fmt!(color, "{}", record.args()),
+                    )),
+                    (true, _, _) => print_fmt(color_fmt!(
+                        AnsiColor::White,
+                        "[{:>3}.{:06}] {args}\n",
+                        now.as_secs(),
+                        now.subsec_micros(),
+                        args = color_fmt!(color, "{}", record.args()),
+                    )),
+                    (false, Some(c), Some(t)) => print_fmt(color_fmt!(
                         AnsiColor::White,
                         "[{:>3}.{:06} {c}:{t} {path}:{line}] {args}\n",
                         now.as_secs(),
@@ -143,7 +177,7 @@ impl Log for KernelLogger {
                         line = line,
                         args = color_fmt!(color, "{}", record.args()),
                     )),
-                    (Some(c), None) => print_fmt(color_fmt!(
+                    (false, Some(c), None) => print_fmt(color_fmt!(
                         AnsiColor::White,
                         "[{:>3}.{:06} {c} {path}:{line}] {args}\n",
                         now.as_secs(),
@@ -153,7 +187,7 @@ impl Log for KernelLogger {
                         line = line,
                         args = color_fmt!(color, "{}", record.args()),
                     )),
-                    _ => print_fmt(color_fmt!(
+                    (false, _, _) => print_fmt(color_fmt!(
                         AnsiColor::White,
                         "[{:>3}.{:06} {path}:{line}] {args}\n",
                         now.as_secs(),

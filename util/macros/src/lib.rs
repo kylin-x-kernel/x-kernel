@@ -147,6 +147,7 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `#[def_test(should_panic)]` - Test expects panic (not fully supported in no_std)
 /// - `#[def_test(custom)]` - Test runs through unittest's custom executor
 /// - `#[def_test(user)]` - Test runs through unittest's user-stack executor
+/// - `#[def_test(serial)]` - Test must run sequentially (not parallel-safe)
 #[proc_macro_attribute]
 pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
@@ -158,6 +159,7 @@ pub fn def_test(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> TokenStream {
     let mut ignore = false;
     let mut should_panic = false;
+    let mut serial = false;
     let mut use_custom_executor = false;
     let mut use_user_executor = false;
 
@@ -165,6 +167,7 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
         match arg.to_string().as_str() {
             "ignore" => ignore = true,
             "should_panic" => should_panic = true,
+            "serial" => serial = true,
             "custom" => use_custom_executor = true,
             "user" => use_user_executor = true,
             other => {
@@ -223,6 +226,7 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
 
     let ignore_val = ignore;
     let should_panic_val = should_panic;
+    let serial_val = serial;
     let execution_mode = if use_user_executor {
         quote!(unittest::TestExecutionMode::User)
     } else if use_custom_executor {
@@ -246,6 +250,7 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
             #fn_name,
             #should_panic_val,
             #ignore_val,
+            #serial_val,
             #execution_mode,
         );
     };

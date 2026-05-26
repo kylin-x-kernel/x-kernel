@@ -10,7 +10,10 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::Ordering;
 
-use crate::test_framework::{TEST_FAILED_FLAG, TestDescriptor, TestRunner, TestStats};
+use crate::test_framework::{
+    TEST_FAILED_FLAG, TestDescriptor, TestRunner, TestStats, print_unittest_error,
+    print_unittest_message,
+};
 
 // External symbols defined in the linker script
 #[allow(improper_ctypes)]
@@ -111,9 +114,9 @@ pub fn test_run_filtered(crate_filter: Option<&str>) -> TestStats {
     let tests = get_tests();
 
     if tests.is_empty() {
-        warn!("================================");
-        warn!("No tests found!");
-        warn!("================================");
+        print_unittest_message(format_args!("================================"));
+        print_unittest_message(format_args!("No tests found!"));
+        print_unittest_message(format_args!("================================"));
         return TestStats::new();
     }
 
@@ -121,16 +124,24 @@ pub fn test_run_filtered(crate_filter: Option<&str>) -> TestStats {
     let selected_tests = select_tests_by_crate(tests, &crate_filters);
 
     if selected_tests.is_empty() {
-        warn!("================================");
+        let log_no_tests = |msg: &str| {
+            if crate_filters.is_empty() {
+                print_unittest_message(format_args!("{}", msg));
+            } else {
+                print_unittest_error(format_args!("{}", msg));
+            }
+        };
+
+        log_no_tests("================================");
         if crate_filters.is_empty() {
-            warn!("No tests found!");
+            log_no_tests("No tests found!");
         } else {
-            warn!(
+            print_unittest_error(format_args!(
                 "No tests found for crate filter: {}",
                 crate_filters.join(",")
-            );
+            ));
         }
-        warn!("================================");
+        log_no_tests("================================");
         return TestStats::new();
     }
 
@@ -156,4 +167,35 @@ pub fn test_run_ok_filtered(crate_filter: Option<&str>) -> bool {
         return false;
     }
     stats.failed == 0
+}
+
+/// Collect and group tests without running them.
+///
+/// Returns tests grouped by module path, filtered by the optional crate filter.
+/// This is intended for external runners (e.g. entry.rs) that want to control
+/// test execution themselves (e.g. parallel scheduling).
+pub fn collect_tests(
+    crate_filter: Option<&str>,
+) -> BTreeMap<&'static str, Vec<&'static TestDescriptor>> {
+    TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
+
+    let tests = get_tests();
+    if tests.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let crate_filters = normalize_crate_filter(crate_filter);
+
+    let mut grouped: BTreeMap<&'static str, Vec<&'static TestDescriptor>> = BTreeMap::new();
+    for test in tests {
+        if crate_filters.is_empty()
+            || crate_filters
+                .iter()
+                .any(|cn| module_matches_crate(test.module, cn))
+        {
+            grouped.entry(test.module).or_default().push(test);
+        }
+    }
+
+    grouped
 }

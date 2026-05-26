@@ -61,7 +61,7 @@ fn attr(kind: u16, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_build_initial_state_contains_links_and_routes() {
     let state = build_initial_state(
         IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
@@ -101,7 +101,7 @@ fn test_build_initial_state_contains_links_and_routes() {
     }));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_parse_link_update_name_and_mtu() {
     let mut payload = Vec::new();
     push_u8(&mut payload, 17);
@@ -119,7 +119,7 @@ fn test_parse_link_update_name_and_mtu() {
     assert_eq!(request.mtu, Some(1400));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_update_link_state_rename_and_down() {
     init_test_state();
     let request = LinkUpdateRequest {
@@ -138,7 +138,7 @@ fn test_update_link_state_rename_and_down() {
     assert_eq!(link.flags & IFF_UP, 0);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_add_replace_and_delete_address() {
     init_test_state();
     let req = AddrRequest {
@@ -178,7 +178,7 @@ fn test_add_replace_and_delete_address() {
     );
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_add_and_delete_route() {
     init_test_state();
     let req = RouteRequest {
@@ -211,7 +211,7 @@ fn test_add_and_delete_route() {
     );
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_add_and_replace_neighbour() {
     init_test_state();
     let req = NeighRequest {
@@ -244,7 +244,7 @@ fn test_add_and_replace_neighbour() {
     );
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_dump_routes_returns_done_message() {
     init_test_state();
     let header = nl_header(RTM_GETROUTE, NLM_F_REQUEST, 7);
@@ -262,7 +262,7 @@ fn test_dump_routes_returns_done_message() {
     assert_eq!(seq, 7);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_ack_response_for_newaddr() {
     init_test_state();
     let mut payload = Vec::new();
@@ -286,7 +286,7 @@ fn test_ack_response_for_newaddr() {
     assert_eq!(read_i32_ne(&packets[0].data, NLMSG_HDR_LEN), Some(0));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_publish_kobject_uevent_to_group_subscriber() {
     let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
     socket
@@ -303,7 +303,7 @@ fn test_publish_kobject_uevent_to_group_subscriber() {
     assert_eq!(packet.data.last(), Some(&0));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_publish_kobject_uevent_drops_when_rx_queue_limit_exceeded() {
     let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
     socket
@@ -322,7 +322,7 @@ fn test_publish_kobject_uevent_drops_when_rx_queue_limit_exceeded() {
     assert!(queue.pop_front().is_none());
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
     let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
     socket
@@ -353,7 +353,7 @@ fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
     assert!(second_seq > first_seq);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_recv_preserves_packet_when_dst_buffer_too_small() {
     let socket = NetlinkSocket::new(NETLINK_ROUTE);
     socket.inner.rx_queue.lock().push_back(NetlinkPacket {

@@ -121,7 +121,7 @@ mod tests_tlb_shootdown {
 
     /// Test B: Proves TaskCpuResidencyIf correctly reads on_cpu_mask and
     /// reset_on_cpu_mask correctly resets it.
-    #[def_test]
+    #[def_test(serial)]
     fn test_task_cpu_residency_interface() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 4 {
@@ -158,7 +158,7 @@ mod tests_tlb_shootdown {
 
     /// Test C: Proves flush_all sends targeted IPI to CPUs in on_cpu_mask,
     /// waits for remote completion, and resets the mask.
-    #[def_test]
+    #[def_test(serial)]
     fn test_flush_all_targeted_shootdown() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
@@ -180,7 +180,7 @@ mod tests_tlb_shootdown {
     }
 
     /// Test D: Proves context switch updates on_cpu_mask.
-    #[def_test]
+    #[def_test(serial)]
     fn test_context_switch_updates_on_cpu_mask() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
@@ -219,7 +219,7 @@ mod tests_tlb_shootdown {
     /// Creates a real page table, maps a page (setting ToFlush::Addresses),
     /// then drops the PageTableMut which calls finish() → flush_tlb_all_cpus
     /// → flush_all → targeted IPI → completion → mask reset.
-    #[def_test]
+    #[def_test(serial)]
     fn test_finish_triggers_cross_cpu_flush() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
@@ -272,7 +272,7 @@ mod tests_tlb_shootdown {
     /// has the remote CPU read it (populating its TLB with V→P1), then remaps
     /// V to P2 with a shootdown. Verifies the remote CPU now reads P2's
     /// content, proving the stale V→P1 TLB entry was invalidated.
-    #[def_test]
+    #[def_test(serial)]
     fn test_shootdown_clears_stale_tlb() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {

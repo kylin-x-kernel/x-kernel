@@ -104,12 +104,12 @@ pub mod tests_active_exception_context {
     use super::*;
     use crate::ExceptionContext;
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_active_exception_context_none() {
         assert!(active_exception_context().is_none());
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_guard_sets_and_restores() {
         let ctx = ExceptionContext::default();
         {
@@ -119,7 +119,7 @@ pub mod tests_active_exception_context {
         assert!(active_exception_context().is_none());
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_with_active_exception_context() {
         let ctx = ExceptionContext::default();
         let _guard = ExceptionContextGuard::new(&ctx);

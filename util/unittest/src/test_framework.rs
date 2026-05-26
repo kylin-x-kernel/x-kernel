@@ -11,11 +11,49 @@
 
 use alloc::{collections::BTreeMap, format, vec::Vec};
 use core::{
-    fmt::Write,
+    fmt::{Arguments, Write},
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use super::TestResult;
+
+const UNITTEST_LOG_TARGET: &str = "unittest";
+
+fn log_unittest(level: log::Level, args: Arguments<'_>) {
+    log!(target: UNITTEST_LOG_TARGET, level, "{}", args);
+}
+
+fn force_log_unittest(level: log::Level, args: Arguments<'_>) {
+    let record = log::Record::builder()
+        .args(args)
+        .level(level)
+        .target(UNITTEST_LOG_TARGET)
+        .module_path_static(Some(UNITTEST_LOG_TARGET))
+        .build();
+    log::logger().log(&record);
+}
+
+pub fn print_unittest_message(args: Arguments<'_>) {
+    log_unittest(log::Level::Warn, args);
+}
+
+pub fn print_unittest_error(args: Arguments<'_>) {
+    log_unittest(log::Level::Error, args);
+}
+
+pub fn print_unittest_status(passed: bool) {
+    if passed {
+        force_log_unittest(
+            log::Level::Error,
+            format_args!("=== UNITTEST_STATUS: ALL_TESTS_PASSED ==="),
+        );
+    } else {
+        force_log_unittest(
+            log::Level::Error,
+            format_args!("=== UNITTEST_STATUS: TESTS_FAILED ==="),
+        );
+    }
+}
 
 impl TestResult {
     pub fn is_ok(&self) -> bool {
@@ -127,6 +165,7 @@ pub struct TestDescriptor {
     pub test_fn: fn() -> TestResult,
     pub should_panic: bool,
     pub ignore: bool,
+    pub serial: bool,
     pub execution_mode: TestExecutionMode,
 }
 
@@ -137,6 +176,7 @@ impl TestDescriptor {
         test_fn: fn() -> TestResult,
         should_panic: bool,
         ignore: bool,
+        serial: bool,
         execution_mode: TestExecutionMode,
     ) -> Self {
         Self {
@@ -145,6 +185,7 @@ impl TestDescriptor {
             test_fn,
             should_panic,
             ignore,
+            serial,
             execution_mode,
         }
     }
@@ -164,9 +205,12 @@ impl Testable for TestDescriptor {
             TestExecutionMode::Standard => (self.test_fn)(),
             TestExecutionMode::Custom => custom_test_executor().map_or_else(
                 || {
-                    error!(
-                        "custom test executor is not registered for {}:{}",
-                        self.module, self.name
+                    log_unittest(
+                        log::Level::Error,
+                        format_args!(
+                            "test {}::{} failed: custom test executor is not registered",
+                            self.module, self.name
+                        ),
                     );
                     TestResult::Failed
                 },
@@ -174,9 +218,12 @@ impl Testable for TestDescriptor {
             ),
             TestExecutionMode::User => user_test_executor().map_or_else(
                 || {
-                    error!(
-                        "user test executor is not registered for {}:{}",
-                        self.module, self.name
+                    log_unittest(
+                        log::Level::Error,
+                        format_args!(
+                            "test {}::{} failed: user test executor is not registered",
+                            self.module, self.name
+                        ),
                     );
                     TestResult::Failed
                 },
@@ -276,16 +323,37 @@ impl TestRunner {
         self.output.clear();
         match result {
             TestResult::Ok => {
-                write!(self.output, "    Test {} ... OK", test.name()).ok();
+                write!(
+                    self.output,
+                    "  test {}::{} ... ok",
+                    test.module(),
+                    test.name()
+                )
+                .ok();
             }
             TestResult::Failed => {
-                write!(self.output, "    Test {} ... FAILED", test.name()).ok();
+                write!(
+                    self.output,
+                    "  test {}::{} failed: test function returned TestResult::Failed",
+                    test.module(),
+                    test.name()
+                )
+                .ok();
             }
             TestResult::Ignored => {
-                write!(self.output, "    Test {} ... IGNORED", test.name()).ok();
+                write!(
+                    self.output,
+                    "  test {}::{} ... ignored",
+                    test.module(),
+                    test.name()
+                )
+                .ok();
             }
         }
-        self.print_message(self.output.as_str());
+        match result {
+            TestResult::Failed => self.print_error(self.output.as_str()),
+            _ => self.print_message(self.output.as_str()),
+        }
 
         // Update statistics
         self.stats.add_result(result);
@@ -363,16 +431,25 @@ impl TestRunner {
         self.output.clear();
         match result {
             TestResult::Ok => {
-                write!(self.output, "      => OK").ok();
+                write!(self.output, "      {} ... ok", test.name()).ok();
             }
             TestResult::Failed => {
-                write!(self.output, "      => FAILED").ok();
+                write!(
+                    self.output,
+                    "      {}::{} failed: test function returned TestResult::Failed",
+                    test.module(),
+                    test.name()
+                )
+                .ok();
             }
             TestResult::Ignored => {
-                write!(self.output, "      => IGNORED").ok();
+                write!(self.output, "      {} ... ignored", test.name()).ok();
             }
         }
-        self.print_message(self.output.as_str());
+        match result {
+            TestResult::Failed => self.print_error(self.output.as_str()),
+            _ => self.print_message(self.output.as_str()),
+        }
 
         // Update statistics
         self.stats.add_result(result);
@@ -388,21 +465,25 @@ impl TestRunner {
             self.stats.passed, self.stats.failed, self.stats.ignored, self.stats.total
         )
         .ok();
-        self.print_message(self.output.as_str());
-
         if self.stats.failed > 0 {
-            self.print_error("  >>> This tests FAILED!");
+            self.print_summary(log::Level::Error, self.output.as_str());
+            self.print_summary(log::Level::Error, "  >>> Unit tests FAILED");
         } else {
-            self.print_message("  >>> This tests PASSED!");
+            self.print_summary(log::Level::Warn, self.output.as_str());
+            self.print_summary(log::Level::Warn, "  >>> Unit tests PASSED");
         }
     }
 
     fn print_message(&self, msg: &str) {
-        warn!("{}", msg);
+        log_unittest(log::Level::Warn, format_args!("{}", msg));
     }
 
     fn print_error(&self, msg: &str) {
-        error!("{}", msg);
+        log_unittest(log::Level::Error, format_args!("{}", msg));
+    }
+
+    fn print_summary(&self, level: log::Level, msg: &str) {
+        force_log_unittest(level, format_args!("{}", msg));
     }
 
     pub fn get_stats(&self) -> TestStats {
@@ -428,9 +509,12 @@ pub fn __log_assert_eq_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
     right_expr: &str,
     right_val: &U,
 ) {
-    error!(
-        "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?})",
-        file, line, left_expr, left_val, right_expr, right_val
+    log_unittest(
+        log::Level::Error,
+        format_args!(
+            "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?})",
+            file, line, left_expr, left_val, right_expr, right_val
+        ),
     );
 }
 
@@ -443,15 +527,21 @@ pub fn __log_assert_ne_failure<T: core::fmt::Debug, U: core::fmt::Debug>(
     right_expr: &str,
     right_val: &U,
 ) {
-    error!(
-        "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?})",
-        file, line, left_expr, left_val, right_expr, right_val
+    log_unittest(
+        log::Level::Error,
+        format_args!(
+            "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?})",
+            file, line, left_expr, left_val, right_expr, right_val
+        ),
     );
 }
 
 #[doc(hidden)]
 pub fn __log_assert_failure(file: &str, line: u32, cond_expr: &str) {
-    error!("assert! failed at {}:{}: {}", file, line, cond_expr);
+    log_unittest(
+        log::Level::Error,
+        format_args!("assert! failed at {}:{}: {}", file, line, cond_expr),
+    );
 }
 
 // Basic assertion macros
@@ -551,6 +641,7 @@ macro_rules! tests {
                     $test_name,
                     false, // should_panic
                     false, // ignore
+                    false, // serial
                     $crate::TestExecutionMode::Standard,
                 ),
             )*
@@ -569,6 +660,7 @@ macro_rules! tests_name {
                     $test_name,
                     false, // should_panic
                     false, // ignore
+                    false, // serial
                     $crate::TestExecutionMode::Standard,
                 ),
             )*
@@ -668,6 +760,7 @@ mod tests_test_framework {
             ok_test,
             false,
             false,
+            false,
             TestExecutionMode::Standard,
         );
 
@@ -686,6 +779,7 @@ mod tests_test_framework {
             "ok",
             "alpha",
             ok_test,
+            false,
             false,
             false,
             TestExecutionMode::Standard,
@@ -721,6 +815,7 @@ mod tests_test_framework {
             fail_test,
             false,
             true,
+            false,
             TestExecutionMode::Standard,
         );
 
@@ -740,6 +835,7 @@ mod tests_test_framework {
             "custom",
             "framework",
             fail_test,
+            false,
             false,
             false,
             TestExecutionMode::Custom,
@@ -764,6 +860,7 @@ mod tests_test_framework {
             ok_test,
             false,
             false,
+            false,
             TestExecutionMode::Standard,
         )];
 
@@ -783,6 +880,7 @@ mod tests_test_framework {
             "assert_ok",
             "framework",
             assert_ok_test,
+            false,
             false,
             false,
             TestExecutionMode::Standard,
@@ -845,6 +943,7 @@ mod tests_test_framework {
             ok_test,
             true,
             false,
+            false,
             TestExecutionMode::Standard,
         );
         let ignored = TestDescriptor::new(
@@ -853,6 +952,7 @@ mod tests_test_framework {
             ignored_test,
             false,
             true,
+            false,
             TestExecutionMode::Standard,
         );
 
@@ -873,6 +973,7 @@ mod tests_test_framework {
                 "ok",
                 "framework",
                 ok_test,
+                false,
                 false,
                 false,
                 TestExecutionMode::Standard,
@@ -907,6 +1008,7 @@ mod tests_test_framework {
             "custom_restore",
             "framework",
             fail_test,
+            false,
             false,
             false,
             TestExecutionMode::Custom,

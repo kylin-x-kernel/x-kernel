@@ -11,7 +11,7 @@
 mod layout_tests {
     use core::mem::{align_of, offset_of, size_of};
 
-    use unittest::def_test;
+    use unittest::{assert_eq, def_test};
 
     use crate::types::*;
 
