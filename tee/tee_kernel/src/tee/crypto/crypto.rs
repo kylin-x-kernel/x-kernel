@@ -10,13 +10,16 @@ use mbedtls::{
     bignum::Mpi,
     cipher::raw::{Cipher, CipherId, CipherMode, CipherPadding, CipherType, Operation},
     ecp::EcPoint,
+    error::{Error as MbedError, HiError, LoError},
     hash::{Hmac, Md, Type as MdType},
     pk::{
         EcGroup, EcGroupId, Pk, RsaPadding, RsaPrivateComponents, RsaPublicComponents,
         Type as PkType,
     },
 };
-use mbedtls_sys_auto::mpi_write_binary;
+use mbedtls_sys_auto::{
+    ERR_SM2_ALLOC_FAILED, ERR_SM2_BAD_INPUT_DATA, ERR_SM2_BAD_SIGNATURE, mpi_write_binary,
+};
 use tee_raw_sys::*;
 
 use crate::tee::{
@@ -1166,6 +1169,86 @@ pub(crate) fn crypto_acipher_ecc_sign(
     }
 }
 
+/// Map high-level mbedtls verify errors to GP TEE codes.
+fn map_verify_hi(hi: HiError) -> Option<u32> {
+    match hi {
+        HiError::EcpVerifyFailed
+        | HiError::RsaVerifyFailed
+        | HiError::PkSigLenMismatch
+        | HiError::EcpSigLenMismatch => Some(TEE_ERROR_SIGNATURE_INVALID),
+        HiError::PkBadInputData
+        | HiError::EcpBadInputData
+        | HiError::PkInvalidPubkey
+        | HiError::PkInvalidAlg
+        | HiError::PkTypeMismatch
+        | HiError::PkKeyInvalidFormat
+        | HiError::EcpInvalidKey => Some(TEE_ERROR_BAD_PARAMETERS),
+        HiError::PkAllocFailed | HiError::EcpAllocFailed | HiError::MdAllocFailed => {
+            Some(TEE_ERROR_OUT_OF_MEMORY)
+        }
+        HiError::Unknown(_) => None,
+        _ => None,
+    }
+}
+
+/// Map low-level mbedtls verify errors to GP TEE codes.
+fn map_verify_lo(lo: LoError) -> Option<u32> {
+    match lo {
+        LoError::Asn1InvalidData
+        | LoError::Asn1LengthMismatch
+        | LoError::Asn1InvalidLength
+        | LoError::Asn1UnexpectedTag
+        | LoError::Asn1OutOfData => Some(TEE_ERROR_SIGNATURE_INVALID),
+        LoError::MpiAllocFailed | LoError::Asn1AllocFailed => Some(TEE_ERROR_OUT_OF_MEMORY),
+        LoError::Unknown(_) => None,
+        _ => None,
+    }
+}
+
+/// Map a raw mbedtls error code for verify paths (SM2 codes not in `HiError`, etc.).
+fn map_verify_mbedtls_code(code: i32) -> Option<u32> {
+    // `mbedtls_sm2_verify_internal` returns ERR_SM2_BAD_SIGNATURE with -1..-3 offsets.
+    if (ERR_SM2_BAD_SIGNATURE - 3..=ERR_SM2_BAD_SIGNATURE).contains(&code) {
+        return Some(TEE_ERROR_SIGNATURE_INVALID);
+    }
+
+    match code {
+        ERR_SM2_BAD_INPUT_DATA => Some(TEE_ERROR_BAD_PARAMETERS),
+        ERR_SM2_ALLOC_FAILED => Some(TEE_ERROR_OUT_OF_MEMORY),
+        _ => map_verify_hi(HiError::from(code)).or_else(|| map_verify_lo(LoError::from(code))),
+    }
+}
+
+/// Map high-level unknown codes (`HiError::Unknown` stores the positive high bits).
+fn map_verify_hi_unknown(hi_code: i32) -> Option<u32> {
+    map_verify_mbedtls_code(-hi_code)
+}
+
+/// Maps mbedtls asymmetric verify failures to GP TEE error codes.
+///
+/// Follows OP-TEE `convert_ltc_verify_status()` in `lib/libtomcrypt/acipher_helpers.h`.
+/// SM2 uses `ERR_SM2_BAD_SIGNATURE` instead of `ERR_ECP_VERIFY_FAILED`.
+fn mbedtls_verify_error_to_tee(err: MbedError) -> u32 {
+    map_verify_mbedtls_code(err.to_int())
+        .or_else(|| {
+            err.high_level().and_then(|hi| {
+                map_verify_hi(hi).or_else(|| match hi {
+                    HiError::Unknown(hi_code) => map_verify_hi_unknown(hi_code),
+                    _ => None,
+                })
+            })
+        })
+        .or_else(|| {
+            err.low_level().and_then(|lo| {
+                map_verify_lo(lo).or_else(|| match lo {
+                    LoError::Unknown(lo_code) => map_verify_mbedtls_code(-lo_code),
+                    _ => None,
+                })
+            })
+        })
+        .unwrap_or(TEE_ERROR_GENERIC)
+}
+
 /// 使用ECDSA时，传入的数据是hash值
 /// 使用SM2时，传入的数据是原始数据
 pub(crate) fn crypto_acipher_ecc_verify(
@@ -1177,6 +1260,10 @@ pub(crate) fn crypto_acipher_ecc_verify(
     let algo = cs_guard.algo;
     drop(cs_guard);
 
+    if hash.is_empty() || signature.is_empty() {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
     let md_type = match algo {
         TEE_ALG_ECDSA_SHA1 => MdType::Sha1,
         TEE_ALG_ECDSA_SHA224 => MdType::Sha224,
@@ -1184,21 +1271,19 @@ pub(crate) fn crypto_acipher_ecc_verify(
         TEE_ALG_ECDSA_SHA384 => MdType::Sha384,
         TEE_ALG_ECDSA_SHA512 => MdType::Sha512,
         TEE_ALG_SM2_DSA_SM3 => MdType::SM3,
-        _ => MdType::None,
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
     };
 
     let mut cs_guard = cs.lock();
 
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
-        match algo {
-            TEE_ALG_SM2_DSA_SM3 => pk
-                .sm2_verify(md_type, hash, signature)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
-            _ => pk
-                .verify(md_type, hash, signature)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
-        }
-    } else {
-        Err(TEE_ERROR_BAD_PARAMETERS)
-    }
+    let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx else {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    };
+
+    let result = match algo {
+        TEE_ALG_SM2_DSA_SM3 => pk.sm2_verify(md_type, hash, signature),
+        _ => pk.verify(md_type, hash, signature),
+    };
+
+    result.map_err(mbedtls_verify_error_to_tee)
 }
