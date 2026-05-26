@@ -2,20 +2,23 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! DICE模块，用于处理 DICE handover数据
-use alloc::{vec, vec::Vec};
+//! DICE module for handling DICE handover data.
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::any::Any;
 
 use dice_driver::{DICE_IOCTL_GET_HANDOVER, DICE_IOCTL_GET_RAW_HANDOVER};
-use kcore::vfs::DeviceOps;
 use kerrno::{KError, KResult};
 use ksync::Mutex;
 use ktypes::Lazy;
+use kvfs::DeviceFileOps;
+use kvfs_simple::{DirMapping, SimpleFs};
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
 use rand_chacha::{
     ChaCha8Rng,
     rand_core::{RngCore, SeedableRng},
 };
+
+use crate::DeviceFile;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DiceNodeInfo;
@@ -56,7 +59,7 @@ impl DiceNodeInfo {
     }
 }
 
-impl DeviceOps for DiceNodeInfo {
+impl DeviceFileOps for DiceNodeInfo {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> KResult<usize> {
         let data = dice_driver::read_raw_handover_data()?;
         let offset = usize::try_from(offset).map_err(|_| KError::InvalidInput)?;
@@ -70,7 +73,7 @@ impl DeviceOps for DiceNodeInfo {
     }
 
     fn write_at(&self, _buf: &[u8], _offset: u64) -> KResult<usize> {
-        unreachable!()
+        Err(KError::InvalidInput)
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
@@ -96,7 +99,7 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     let proc_exe_path = format!("/proc/{}/exe", pid);
     let proc_state = current_process_state();
     let fs = proc_state.fs_context().lock();
-    let data = fs.read(proc_exe_path).unwrap();
+    let data = fs.read(&proc_exe_path).map_err(|_| KError::NotFound)?;
 
     let mut sm3_result = vec![0u8; 32];
     let mut ctx = Md::new(Type::SM3).map_err(|_| KError::InvalidInput)?;
@@ -118,4 +121,16 @@ pub extern "C" fn get_rand(output: usize, len: usize) -> u32 {
     let mut rand = GLOBAL_RAND.lock();
     rand.fill_bytes(&mut buf);
     write_vm_mem(output as *mut u8, &buf).map_or(1, |_| 0)
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    root.add(
+        "dice",
+        DeviceFile::new(
+            fs.clone(),
+            kvfs::NodeType::CharacterDevice,
+            kvfs::DeviceId::new(30, 0),
+            Arc::new(DiceNodeInfo::new()),
+        ),
+    );
 }

@@ -1,0 +1,57 @@
+[package]
+name = "devfs"
+description = "Device filesystem (devfs) implementation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+input = ["dep:inputdev"]
+memtrack = ["kalloc/tracking", "dep:gimli"]
+dev-log = []
+dice = ["dep:dice_driver", "dep:ktypes", "dep:rand_chacha", "dep:mbedtls"]
+
+[dependencies]
+kalloc.workspace = true
+kcore.workspace = true
+kerrno.workspace = true
+kfs.workspace = true
+kdriver.workspace = true
+khal.workspace = true
+inherit-methods-macro = "0.1.0"
+klogger.workspace = true
+knet.workspace = true
+kpoll.workspace = true
+kspin.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+kthread.workspace = true
+ktty.workspace = true
+kvfs.workspace = true
+kvfs-simple.workspace = true
+linux-raw-sys = { workspace = true, features = ["ioctl"] }
+memaddr.workspace = true
+osvm.workspace = true
+posix-types.workspace = true
+rand = { version = "0.9.1", default-features = false, features = [
+    "alloc",
+    "small_rng",
+] }
+chrono = { version = "0.4.41", default-features = false }
+fbdevice.workspace = true
+bitmaps = { version = "3.2.1", default-features = false }
+zerocopy = { version = "0.8.26", features = ["derive"] }
+lazyinit.workspace = true
+flatten_objects = "0.2.4"
+backtrace.workspace = true
+gimli = { version = "*", default-features = false, optional = true }
+dice_driver = { workspace = true, optional = true }
+inputdev = { workspace = true, optional = true }
+ktypes = { workspace = true, optional = true }
+rand_chacha = { version = "0.3", default-features = false, optional = true }
+mbedtls = { workspace = true, optional = true }
+unittest.workspace = true

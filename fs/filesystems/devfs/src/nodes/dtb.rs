@@ -2,12 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, sync::Arc, vec};
 use core::any::Any;
 
-use kcore::vfs::DeviceOps;
-use kvfs::{NodeFlags, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
+use kvfs_simple::{DirMapping, SimpleFs};
 use lazyinit::LazyInit;
+
+use crate::DeviceFile;
+
 static DTB_SNAPSHOT: LazyInit<Box<[u8]>> = LazyInit::new();
 
 pub(crate) fn capture_snapshot() {
@@ -36,7 +39,7 @@ pub(crate) fn snapshot_available() -> bool {
 
 pub(crate) struct DtbSnapshot;
 
-impl DeviceOps for DtbSnapshot {
+impl DeviceFileOps for DtbSnapshot {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let Some(snapshot) = DTB_SNAPSHOT.get() else {
             return Ok(0);
@@ -60,5 +63,19 @@ impl DeviceOps for DtbSnapshot {
 
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
+    }
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    if snapshot_available() {
+        root.add(
+            "firmware-dtb",
+            DeviceFile::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(30, 2),
+                Arc::new(DtbSnapshot),
+            ),
+        );
     }
 }

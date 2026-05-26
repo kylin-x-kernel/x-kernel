@@ -1,0 +1,29 @@
+[package]
+name = "ktty"
+description = "TTY subsystem and terminal line discipline"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kerrno.workspace = true
+khal.workspace = true
+klogger.workspace = true
+kpoll.workspace = true
+kprocess.workspace = true
+ksignal.workspace = true
+kspin.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+kthread.workspace = true
+kvfs.workspace = true
+linux-raw-sys = { workspace = true, features = ["ioctl"] }
+osvm.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
+lazy_static = { workspace = true }
+unittest.workspace = true

@@ -7,12 +7,12 @@
 use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
-use kservices::vfs::MemoryFs;
 use kthread::current_process_state;
 use kvfs::{
     MountFlags, ST_NOATIME, ST_NODEV, ST_NODIRATIME, ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW,
     ST_RDONLY, ST_RELATIME,
 };
+use memfs::MemoryFs;
 use posix_types::UserConstPtr;
 
 /// Map `mount(2)` MS_* flags to filesystem-level ST_* flags (for `StatFs.mount_flags`).
@@ -153,7 +153,7 @@ pub fn sys_mount(
     }
 
     let mount_flags = per_mount_flags(flags);
-    let fs = MemoryFs::new_with_flags(mount_flags_from_sys_mount(flags));
+    let fs = MemoryFs::new_with_name_and_flags("tmpfs", mount_flags_from_sys_mount(flags));
     let target = current_process_state()
         .fs_context()
         .lock()

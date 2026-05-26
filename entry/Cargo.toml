@@ -28,6 +28,7 @@ kprocess.workspace = true
 kthread.workspace = true
 ksyscall.workspace = true
 kservices.workspace = true
+ktty.workspace = true
 kcore.workspace = true
 kbuild_config.workspace = true
 indoc = "2"

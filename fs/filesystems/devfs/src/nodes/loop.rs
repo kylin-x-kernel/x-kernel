@@ -2,21 +2,24 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::{format, sync::Arc};
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
-use kcore::vfs::{DeviceMmap, DeviceOps};
 use kerrno::{KError, KResult, LinuxError};
 use kfs::{File, FileBackend};
 use ksync::Mutex;
-use kvfs::{DeviceId, NodeFlags, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, DeviceMmap, NodeFlags, NodeType, VfsResult};
+use kvfs_simple::{DirMapping, SimpleFs};
 use linux_raw_sys::{
     ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKRAGET, BLKRASET, BLKROGET, BLKROSET},
     loop_device::{LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info},
 };
 use osvm::{VirtMutPtr, VirtPtr};
+
+use crate::DeviceFile;
 
 /// /dev/loopX devices
 /// Loop device for attaching regular files as block devices
@@ -66,7 +69,7 @@ impl LoopDevice {
     }
 }
 
-impl DeviceOps for LoopDevice {
+impl DeviceFileOps for LoopDevice {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let file = self.file.lock().clone();
         file.ok_or(KError::OperationNotPermitted)?
@@ -156,7 +159,7 @@ impl DeviceOps for LoopDevice {
 
     fn mmap(&self) -> DeviceMmap {
         if let Some(FileBackend::Cached(cache)) = self.file.lock().as_ref() {
-            DeviceMmap::Cache(cache.clone())
+            DeviceMmap::Cache(Arc::new(cache.clone()))
         } else {
             DeviceMmap::None
         }
@@ -164,5 +167,20 @@ impl DeviceOps for LoopDevice {
 
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
+    }
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    for i in 0..16 {
+        let dev_id = DeviceId::new(7, i);
+        root.add(
+            format!("loop{i}"),
+            DeviceFile::new(
+                fs.clone(),
+                NodeType::BlockDevice,
+                dev_id,
+                Arc::new(LoopDevice::new(i, dev_id)),
+            ),
+        );
     }
 }

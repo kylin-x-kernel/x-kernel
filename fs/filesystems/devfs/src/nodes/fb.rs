@@ -2,16 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::sync::Arc;
 use core::{any::Any, slice};
 
-use kcore::vfs::{DeviceMmap, DeviceOps};
 #[allow(unused_imports)]
 use kdriver::prelude::DisplayDriverOps;
 use kerrno::KError;
 use khal::mem::v2p;
-use kvfs::{NodeFlags, VfsError, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, DeviceMmap, NodeFlags, NodeType, VfsError, VfsResult};
+use kvfs_simple::{DirMapping, SimpleFs};
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
+
+use crate::DeviceFile;
 
 // Types from https://github.com/Tangzh33/asterinas
 
@@ -114,7 +117,7 @@ impl FrameBuffer {
         unsafe { slice::from_raw_parts_mut(self.base.as_mut_ptr(), self.size) }
     }
 }
-impl DeviceOps for FrameBuffer {
+impl DeviceFileOps for FrameBuffer {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let slice = self.as_mut_slice();
         let len = buf
@@ -236,5 +239,19 @@ impl DeviceOps for FrameBuffer {
 
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
+    }
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    if fbdevice::fb_available() {
+        root.add(
+            "fb0",
+            DeviceFile::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(29, 0),
+                Arc::new(FrameBuffer::new()),
+            ),
+        );
     }
 }

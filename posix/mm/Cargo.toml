@@ -11,7 +11,8 @@ documentation.workspace = true
 
 [dependencies]
 kaddr_layout = { workspace = true }
-kcore = { workspace = true }
+devfs = { workspace = true }
+kvfs = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
 khal = { workspace = true }

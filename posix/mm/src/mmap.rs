@@ -6,11 +6,12 @@
 
 use alloc::sync::Arc;
 
-use kcore::vfs::{Device, DeviceMmap};
+use devfs::DeviceFile;
 use kerrno::{KError, KResult};
 use kfs::{CachedFile, File, FileBackend};
 use khal::paging::{MappingFlags, PageSize};
 use kthread::current_process_state;
+use kvfs::DeviceMmap;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::backend::{Backend, SharedPages};
@@ -196,7 +197,7 @@ pub fn sys_mmap(
                         )
                     }
                     FileBackend::Direct(loc) => {
-                        if let Ok(device) = loc.entry().downcast::<Device>() {
+                        if let Ok(device) = loc.entry().downcast::<DeviceFile>() {
                             match device.mmap() {
                                 DeviceMmap::None => {
                                     return Err(KError::NoSuchDevice);
@@ -214,13 +215,18 @@ pub fn sys_mmap(
                                         start.as_usize() as isize - range.start.as_usize() as isize,
                                     )
                                 }
-                                DeviceMmap::Cache(cache) => new_file(
-                                    start,
-                                    cache,
-                                    file.flags(),
-                                    offset,
-                                    proc_state.address_space(),
-                                ),
+                                DeviceMmap::Cache(cache) => {
+                                    let cache = cache
+                                        .downcast::<kfs::CachedFile>()
+                                        .expect("DeviceMmap::Cache should contain CachedFile");
+                                    new_file(
+                                        start,
+                                        (*cache).clone(),
+                                        file.flags(),
+                                        offset,
+                                        proc_state.address_space(),
+                                    )
+                                }
                             }
                         } else {
                             // Preserve MAP_SHARED semantics for direct-opened regular files.

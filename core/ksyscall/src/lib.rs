@@ -20,11 +20,7 @@ mod sys;
 mod task;
 
 pub use dispatch::dispatch_irq_syscall;
-pub use kservices::file;
+pub use kservices::{file, terminal};
 pub use sys::sys_getrandom;
-pub mod kernel {
-    pub use kservices::vfs;
-}
-pub use kservices::terminal;
 #[cfg(feature = "tee")]
 pub use tee_kernel::tee;

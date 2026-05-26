@@ -95,10 +95,12 @@ posix-types = { path = "posix/types" }
 alloc-engine = { path = "mm/alloc-engine" }
 kvfs = { path = "fs/foundation/kvfs" }
 kvfs-simple = { path = "fs/foundation/kvfs-simple" }
+memfs = { path = "fs/filesystems/memfs" }
 kaddr_layout = { path = "mm/kaddr_layout" }
 kalloc = { path = "mm/kalloc" }
 kfs = { path = "fs/runtime/kfs" }
 procfs = { path = "fs/filesystems/procfs" }
+devfs = { path = "fs/filesystems/devfs" }
 memaddr = { path = "mm/memaddr" }
 memset = { path = "mm/memset" }
 memspace = { path = "mm/memspace" }
@@ -112,6 +114,7 @@ inputdev = { path = "io/inputdev" }
 kdma = { path = "io/kdma" }
 kio = { path = "io/kio" }
 knet = { path = "net/knet" }
+ktty = { path = "io/ktty" }
 watchdog = { path = "io/watchdog" }
 
 # Internal: drivers

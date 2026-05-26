@@ -5,12 +5,11 @@
 use alloc::sync::{Arc, Weak};
 use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
 
-use kcore::vfs::{DeviceOps, SimpleFs};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, Pollable};
 use kprocess::Process;
 use ksync::Mutex;
-use kvfs::NodeFlags;
+use kvfs::{DeviceFileOps, NodeFlags};
 use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::terminal::{
@@ -20,23 +19,11 @@ use crate::terminal::{
 };
 
 mod ntty;
-mod ptm;
-mod pts;
 mod pty;
 
 pub use ntty::{N_TTY, NTtyDriver};
-pub use ptm::Ptmx;
-pub use pts::PtsDir;
-pub use pty::PtyDriver;
+pub use pty::{PtyDriver, create_pty_pair};
 
-/// Create a new pseudo-terminal master-slave pair
-pub fn create_pty_master(fs: Arc<SimpleFs>) -> KResult<Arc<PtyDriver>> {
-    let (master, slave) = pty::create_pty_pair();
-    pts::add_slave(fs, slave)?;
-    Ok(master)
-}
-
-/// Tty device
 /// TTY device combining terminal and line discipline
 pub struct Tty<R, W> {
     this: Weak<Self>,
@@ -73,7 +60,7 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
             self.clone()
         }));
 
-        self.terminal.job_control.set_foreground(&pg).unwrap();
+        self.terminal.job_control.set_foreground(&pg)?;
         Ok(())
     }
 
@@ -81,9 +68,14 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
     pub fn pty_number(&self) -> u32 {
         self.terminal.pty_number.load(Ordering::Acquire)
     }
+
+    /// Set the pseudo-terminal slave number.
+    pub fn set_pty_number(&self, n: u32) {
+        self.terminal.pty_number.store(n, Ordering::Release);
+    }
 }
 
-impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
+impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
     fn read_at(&self, buf: &mut [u8], _offset: u64) -> KResult<usize> {
         if self.is_ptm || self.terminal.job_control.current_in_foreground() {
             self.ldisc.lock().read(buf)
@@ -107,7 +99,6 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
                 (arg as *mut Termios2).write_vm(*self.terminal.termios.lock().as_ref())?;
             }
             TCSETS | TCSETSF | TCSETSW => {
-                // TODO: drain output?
                 *self.terminal.termios.lock() =
                     Arc::new(Termios2::new((arg as *const Termios).read_vm()?));
                 if cmd == TCSETSF {
@@ -115,7 +106,6 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
                 }
             }
             TCSETS2 | TCSETSF2 | TCSETSW2 => {
-                // TODO: drain output?
                 *self.terminal.termios.lock() = Arc::new((arg as *const Termios2).read_vm()?);
                 if cmd == TCSETSF2 {
                     self.ldisc.lock().drain_input();
@@ -145,23 +135,21 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
                 (arg as *mut u32).write_vm(self.pty_number())?;
             }
             TIOCSCTTY => {
-                self.this
-                    .upgrade()
-                    .unwrap()
-                    .bind_to(&kthread::current_thread().proc_state.proc)?;
+                let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
+                tty.bind_to(&kthread::current_thread().proc_state.proc)?;
             }
             TIOCNOTTY => {
+                let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
                 if kthread::current_thread()
                     .proc_state
                     .proc
                     .group()
                     .session()
-                    .unset_terminal(&(self.this.upgrade().unwrap() as _))
+                    .unset_terminal(&(tty as _))
                 {
                     // TODO: If the process was session leader, send SIGHUP and
                     // SIGCONT to the foreground process group and all processes
-                    // in the current session lose their
-                    // controlling terminal.
+                    // in the current session lose their controlling terminal.
                 } else {
                     warn!("Failed to unset terminal");
                 }
@@ -175,7 +163,6 @@ impl<R: TtyRead, W: TtyWrite> DeviceOps for Tty<R, W> {
         Some(self)
     }
 
-    /// Casts the device operations to a dynamic type.
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -206,9 +193,9 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
 
 /// /dev/tty device - refers to the calling process's controlling terminal
 pub struct CurrentTty;
-impl DeviceOps for CurrentTty {
+impl DeviceFileOps for CurrentTty {
     fn read_at(&self, _buf: &mut [u8], _offset: u64) -> KResult<usize> {
-        unreachable!()
+        Err(KError::InvalidInput)
     }
 
     fn write_at(&self, _buf: &[u8], _offset: u64) -> KResult<usize> {
@@ -216,7 +203,7 @@ impl DeviceOps for CurrentTty {
     }
 
     fn ioctl(&self, _cmd: u32, _arg: usize) -> KResult<usize> {
-        unreachable!()
+        Err(KError::NotATty)
     }
 
     fn as_any(&self) -> &dyn Any {

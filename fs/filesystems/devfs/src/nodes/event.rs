@@ -6,7 +6,6 @@ use alloc::{format, sync::Arc, vec};
 use core::{any::Any, task::Context, time::Duration};
 
 use bitmaps::Bitmap;
-use kcore::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 #[allow(unused_imports)]
 use kdriver::prelude::{
     DriverError, DriverOps, Event, EventType, InputDevice, InputDeviceId, InputDriverOps,
@@ -15,13 +14,16 @@ use kerrno::{KError, KResult};
 use khal::time::wall_time;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
-use kvfs::{DeviceId, NodeFlags, NodeType, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
+use kvfs_simple::{DirMapping, SimpleDir, SimpleFs};
 use linux_raw_sys::{
     general::{__kernel_old_time_t, __kernel_suseconds_t},
     ioctl::{EVIOCGID, EVIOCGRAB, EVIOCGVERSION},
 };
 use posix_types::{InputId, UserPtr};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
+
+use crate::DeviceFile;
 
 const KEY_CNT: usize = EventType::Key.bits_count();
 
@@ -74,18 +76,6 @@ impl EventDev {
             }
         }
 
-        // let mut out = [0u8; 2000];
-        // if device.get_event_bits(EventType::Absolute, &mut out).unwrap() {
-        //     let mut bits = Vec::new();
-        //     for i in 0..EventType::Absolute.bits_count() {
-        //         if (out[i / 8] >> (i % 8)) & 1 != 0 {
-        //             bits.push(i);
-        //         }
-        //     }
-        //     warn!("{bits:?}");
-        // } else {
-        //     warn!("failure");
-        // }
         Self {
             inner: Mutex::new(Inner {
                 device,
@@ -155,7 +145,7 @@ pub extern "C" fn ongkey() {
     core::hint::black_box(());
 }
 
-impl DeviceOps for EventDev {
+impl DeviceFileOps for EventDev {
     fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -331,7 +321,7 @@ pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
     for (i, mut device) in input_devices.into_iter().enumerate() {
         assert!(device.get_event_bits(EventType::Key, &mut keys).unwrap());
 
-        let dev = Device::new(
+        let dev = DeviceFile::new(
             fs.clone(),
             NodeType::CharacterDevice,
             DeviceId::new(13, (i + 1) as _),
@@ -348,4 +338,11 @@ pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
         }
     }
     inputs
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    root.add(
+        "input",
+        SimpleDir::new_maker(fs.clone(), Arc::new(input_devices(fs.clone()))),
+    );
 }

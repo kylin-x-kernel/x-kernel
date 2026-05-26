@@ -114,7 +114,7 @@ vsock = [
 display = ["dep:fbdevice", "kruntime/display"]
 
 # Input (subsystem only; pick a driver via `driver_*`).
-input = ["dep:inputdev", "kruntime/input", "kservices/input"]
+input = ["dep:inputdev", "kruntime/input", "devfs/input"]
 
 # Real Time Clock (RTC) Driver.
 rtc = ["khal/rtc", "kruntime/rtc"]
@@ -195,6 +195,7 @@ loongarch64-qemu-virt = { workspace = true, optional = true, features = [
     "rtc",
 ] }
 kcore = { workspace = true }
+devfs = { workspace = true }
 kfs = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }

@@ -59,7 +59,7 @@ impl TtyWrite for PtyWriter {
     }
 }
 
-pub(crate) fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
+pub fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
     let master_to_slave = Arc::new(HeapRb::new(PTY_BUF_SIZE));
     let slave_to_master = Arc::new(HeapRb::new(PTY_BUF_SIZE));
     let poll_rx_slave = Arc::new(PollSet::new());

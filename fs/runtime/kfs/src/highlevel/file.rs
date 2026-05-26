@@ -440,7 +440,7 @@ impl FileUserData {
 
 impl CachedFile {
     pub fn get_or_create(location: Location) -> Self {
-        let in_memory = location.filesystem().name() == "tmpfs";
+        let in_memory = matches!(location.filesystem().name(), "tmpfs" | "memfs",);
 
         let mut guard = location.user_data();
         let shared = if let Some(shared) = guard.get::<FileUserData>().and_then(|it| it.get()) {

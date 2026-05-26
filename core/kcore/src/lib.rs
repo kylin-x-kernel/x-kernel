@@ -18,4 +18,3 @@ extern crate klogger;
 pub mod irq_stats;
 mod lrucache;
 pub mod mm;
-pub mod vfs;

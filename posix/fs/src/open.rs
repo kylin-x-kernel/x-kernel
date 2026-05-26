@@ -7,12 +7,12 @@
 use alloc::{format, string::ToString, sync::Arc};
 use core::ffi::{c_char, c_int};
 
-use kcore::vfs::Device;
+use devfs::DeviceFile;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
 use kfs::{Directory, FileBackend, OpenOptions, OpenResult};
-use kservices::vfs::dev::tty;
 use kthread::current_process_state;
+use ktty::tty;
 use kvfs::{DirEntry, FileNode, Location, NodeType, Reference};
 use linux_raw_sys::general::*;
 use posix_types::UserConstPtr;
@@ -65,9 +65,9 @@ fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32))
 fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
     let f: Arc<dyn FileLike> = match result {
         OpenResult::File(mut file) => {
-            if let Ok(device) = file.location().entry().downcast::<Device>() {
+            if let Ok(device) = file.location().entry().downcast::<DeviceFile>() {
                 let inner = device.inner().as_any();
-                if let Some(ptmx) = inner.downcast_ref::<tty::Ptmx>() {
+                if let Some(ptmx) = inner.downcast_ref::<devfs::Ptmx>() {
                     let (master, pty_number) = ptmx.create_pty()?;
                     let pts = current_process_state()
                         .fs_context()

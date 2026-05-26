@@ -2,13 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::sync::Arc;
 use core::{any::Any, ffi::c_int};
 
 use chrono::{Datelike, Timelike};
-use kcore::vfs::DeviceOps;
-use kvfs::{DeviceId, NodeFlags, VfsError, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, NodeFlags, VfsError, VfsResult};
+use kvfs_simple::{DirMapping, SimpleFs};
 use linux_raw_sys::ioctl::RTC_RD_TIME;
 use osvm::VirtMutPtr;
+
+use crate::DeviceFile;
 
 /// The device ID for /dev/rtc0
 pub const RTC0_DEVICE_ID: DeviceId = DeviceId::new(250, 0);
@@ -31,7 +34,7 @@ struct rtc_time {
 /// Real-time clock device
 pub struct Rtc;
 
-impl DeviceOps for Rtc {
+impl DeviceFileOps for Rtc {
     fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         Ok(0)
     }
@@ -69,4 +72,16 @@ impl DeviceOps for Rtc {
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
     }
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    root.add(
+        "rtc0",
+        DeviceFile::new(
+            fs.clone(),
+            kvfs::NodeType::CharacterDevice,
+            RTC0_DEVICE_ID,
+            Arc::new(Rtc),
+        ),
+    );
 }

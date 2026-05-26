@@ -14,7 +14,9 @@ categories.workspace = true
 [dependencies]
 bitflags.workspace = true
 kfd.workspace = true
-kcore.workspace = true
+devfs.workspace = true
+memfs.workspace = true
+ktty.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
 khal.workspace = true

@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 //! VFS node types and directory entry wrappers.
+mod device;
 mod dir;
 mod file;
 
@@ -21,6 +22,7 @@ use core::{
 };
 
 use bitflags::bitflags;
+pub use device::*;
 pub use dir::*;
 pub use file::*;
 use inherit_methods_macro::inherit_methods;

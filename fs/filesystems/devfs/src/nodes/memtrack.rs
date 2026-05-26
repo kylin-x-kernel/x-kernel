@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     alloc::Layout,
     any::Any,
@@ -11,9 +11,12 @@ use core::{
 };
 
 use backtrace::Backtrace;
-use kcore::{mm::clear_elf_cache, vfs::DeviceOps};
+use kcore::mm::clear_elf_cache;
 use kthread::{cleanup_task_tables, tasks};
-use kvfs::{NodeFlags, VfsResult};
+use kvfs::{DeviceFileOps, NodeFlags, VfsResult};
+use kvfs_simple::{DirMapping, SimpleFs};
+
+use crate::DeviceFile;
 
 static STAMPED_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -138,7 +141,7 @@ fn run_memory_analysis() {
 /// Memory tracking device for allocation profiling (/dev/memtrack)
 pub(crate) struct MemTrack;
 
-impl DeviceOps for MemTrack {
+impl DeviceFileOps for MemTrack {
     fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         Ok(buf.len())
     }
@@ -169,4 +172,16 @@ impl DeviceOps for MemTrack {
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
     }
+}
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    root.add(
+        "memtrack",
+        DeviceFile::new(
+            fs.clone(),
+            kvfs::NodeType::CharacterDevice,
+            kvfs::DeviceId::new(114, 514),
+            Arc::new(MemTrack),
+        ),
+    );
 }

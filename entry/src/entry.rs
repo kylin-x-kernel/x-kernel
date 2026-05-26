@@ -13,10 +13,11 @@ use kcred::Credentials;
 use kfs::{kernel_fs_context, new_process_fs_context};
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
-use kservices::{task::new_user_task, vfs::dev::tty::N_TTY};
+use kservices::task::new_user_task;
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
 use kthread::{ProcessState, ProcessStateConfig, Thread, add_task_to_table};
+use ktty::tty::N_TTY;
 
 /// Create and run the init process with the given argv/envp.
 pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
