@@ -109,6 +109,10 @@ impl CowBackend {
         pgtbl
             .map(va, frame, self.size, flags)
             .map_err(memspace::backend::map_paging_err)?;
+
+        if flags.contains(MappingFlags::EXECUTE) {
+            karch::flush_icache_range(p2v(frame), self.size.into());
+        }
         Ok(())
     }
 
@@ -144,6 +148,10 @@ impl CowBackend {
                     .remap(va, new_frame, flags)
                     .map_err(memspace::backend::map_paging_err)?;
                 frame.drop_frame(pa, self.size);
+
+                if flags.contains(MappingFlags::EXECUTE) {
+                    karch::flush_icache_range(p2v(new_frame), self.size.into());
+                }
             }
         }
 

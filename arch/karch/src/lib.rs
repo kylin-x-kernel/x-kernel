@@ -10,6 +10,19 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 
+/// crate_interface for cross-PE pipeline synchronisation. Implemented by `kipi`.
+#[crate_interface::def_interface]
+pub trait IcacheFlushIf {
+    fn flush_others();
+}
+
+/// Sends IPIs to all other PEs requesting they flush their instruction pipeline.
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn flush_icache_others() {
+    crate_interface::call_interface!(crate::IcacheFlushIf::flush_others());
+}
+
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         mod x86_64;

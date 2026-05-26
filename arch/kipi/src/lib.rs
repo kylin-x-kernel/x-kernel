@@ -27,6 +27,7 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
 mod event;
+mod icache;
 mod queue;
 pub mod tlb;
 

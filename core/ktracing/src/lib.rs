@@ -219,10 +219,10 @@ impl KernelTraceOps for Kops {
         TRACE_CMDLINE_CACHE.lock().insert(pid, comm);
     }
 
-    fn write_kernel_text(_addr: *mut core::ffi::c_void, _data: &[u8]) {
-        let addr = _addr as usize;
+    fn write_kernel_text(ptr: *mut core::ffi::c_void, data: &[u8]) {
+        let addr = ptr as usize;
         let start = addr & !(PAGE_SIZE_4K - 1);
-        let end = (addr + _data.len() + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
+        let end = (addr + data.len() + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
         let span = end.saturating_sub(start);
         if span == 0 {
             return;
@@ -250,7 +250,7 @@ impl KernelTraceOps for Kops {
         }
 
         unsafe {
-            core::ptr::copy_nonoverlapping(_data.as_ptr(), _addr.cast::<u8>(), _data.len());
+            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len());
         }
 
         {
@@ -258,7 +258,6 @@ impl KernelTraceOps for Kops {
             let _ = layout.protect(start_va, span, old_flags);
         }
 
-        #[cfg(target_arch = "aarch64")]
-        karch::flush_icache_all();
+        karch::flush_icache_range(VirtAddr::from(addr), data.len());
     }
 }

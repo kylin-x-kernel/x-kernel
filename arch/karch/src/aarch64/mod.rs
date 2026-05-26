@@ -13,7 +13,10 @@ mod tlb;
 mod tls;
 mod trap;
 
-pub use cache::{flush_dcache_line, flush_icache_all};
+pub use cache::{
+    flush_dcache_line, flush_icache_all, flush_icache_all_local, flush_icache_range,
+    flush_icache_remote,
+};
 pub use cpu::{await_interrupts, stop_cpu};
 pub use fp::enable_fp;
 #[allow(deprecated)]

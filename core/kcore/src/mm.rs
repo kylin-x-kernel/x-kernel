@@ -130,8 +130,6 @@ fn map_elf<'a>(
             false,
             backend,
         )?;
-
-        // TDOO: flush the I-cache
     }
 
     Ok(elf_parser)

@@ -8,6 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+karch = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
 khal = { workspace = true }
