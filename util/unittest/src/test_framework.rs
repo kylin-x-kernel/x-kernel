@@ -380,39 +380,65 @@ impl TestRunner {
         }
     }
 
-    /// Run tests grouped by module
-    /// Tests from the same module are run together
+    /// Run tests grouped by module.
+    /// Passing tests run silently; only failures are logged before the final summary.
     pub fn run_tests_grouped(
         &mut self,
-        name: &str,
+        _name: &str,
         grouped: &BTreeMap<&'static str, Vec<&TestDescriptor>>,
     ) {
         self.stats = TestStats::new();
-
-        self.print_message("================================");
-        self.print_message(format!("Starting unit tests [{}]...", name).as_str());
-        self.print_message(format!("  {} module(s) found", grouped.len()).as_str());
-        self.print_message("================================");
+        let mut saw_failure = false;
 
         for (module, tests) in grouped {
-            // Print module header
+            let mut module_failures = Vec::new();
+            for test in tests {
+                let result = test.run();
+                self.stats.add_result(result);
+                if !result.is_ok() {
+                    module_failures.push((test, result));
+                }
+            }
+
+            if module_failures.is_empty() {
+                continue;
+            }
+
+            saw_failure = true;
             self.print_message("");
             self.print_message(format!("  [{}] ({} tests)", module, tests.len()).as_str());
             self.print_message("  --------------------------------");
-
-            // Run all tests in this module
-            for test in tests {
-                self.run_test_simple(test);
+            for (test, result) in module_failures {
+                self.print_failed_test(test, result);
             }
         }
 
-        self.print_message("");
-        // Print final statistics
+        if saw_failure {
+            self.print_message("");
+        }
         self.print_final_stats();
 
-        // Set global flag if any test failed
         if self.stats.failed > 0 {
             TEST_FAILED_FLAG.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn print_failed_test(&mut self, test: &TestDescriptor, result: TestResult) {
+        self.output.clear();
+        write!(self.output, "    {}", test.name()).ok();
+        self.print_message(self.output.as_str());
+
+        self.output.clear();
+        match result {
+            TestResult::Failed => {
+                write!(self.output, "      => FAILED").ok();
+                self.print_error(self.output.as_str());
+            }
+            TestResult::Ignored => {
+                write!(self.output, "      => IGNORED").ok();
+                self.print_message(self.output.as_str());
+            }
+            TestResult::Ok => {}
         }
     }
 

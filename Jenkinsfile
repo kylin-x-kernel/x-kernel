@@ -26,6 +26,7 @@ pipeline {
         TEST_HARNESS_BRANCH = 'master'
         AUX_RUST_TOOLCHAIN = 'nightly-2026-03-08'
         CARGO_TERM_COLOR = 'always'
+        CARGO_TERM_QUIET = 'true'
         CARGO_REGISTRIES_CRATES_IO_PROTOCOL = 'sparse'
         RUSTUP_PERMIT_COPY_RENAME = '1'
         PYTHONUNBUFFERED = '1'
@@ -39,12 +40,21 @@ pipeline {
                     env.ROOT_WS = env.WORKSPACE
                     currentBuild.description = "PR#${env.giteePullRequestIid ?: 'manual'}"
                     prepareSource()
+                    // 先创建 6 个并行检查占位（较早创建 → Gitee 列表靠下）；顺序 4 项在后续 start/finish
+                    giteeStartParallelCheckRuns()
+                    giteeStartCheckRun('Prepare Source')
                     ciResults['Prepare Source'] = [status: 'passed']
                 }
             }
             post {
+                success {
+                    script { ciResults['Prepare Source'] = [status: 'passed'] }
+                }
                 failure {
                     script { ciResults['Prepare Source'] = [status: 'failed', detail: '源码准备失败（可能是分支分叉需要 rebase）'] }
+                }
+                always {
+                    script { ciFinishGiteeStage('Prepare Source', ciResults, '源码准备失败（可能是分支分叉需要 rebase）') }
                 }
             }
         }
@@ -52,13 +62,20 @@ pipeline {
         stage('Check Environment') {
             steps {
                 script {
+                    giteeStartCheckRun('Check Environment')
                     checkBuildEnvironment()
                     ciResults['Check Environment'] = [status: 'passed']
                 }
             }
             post {
+                success {
+                    script { ciResults['Check Environment'] = [status: 'passed'] }
+                }
                 failure {
                     script { ciResults['Check Environment'] = [status: 'failed', detail: 'Rust 工具链组件或 target 安装失败'] }
+                }
+                always {
+                    script { ciFinishGiteeStage('Check Environment', ciResults, 'Rust 工具链组件或 target 安装失败') }
                 }
             }
         }
@@ -66,13 +83,20 @@ pipeline {
         stage('Rustfmt') {
             steps {
                 script {
+                    giteeStartCheckRun('Rustfmt')
                     runRustfmt()
                     ciResults['Rustfmt'] = [status: 'passed']
                 }
             }
             post {
+                success {
+                    script { ciResults['Rustfmt'] = [status: 'passed'] }
+                }
                 failure {
                     script { ciResults['Rustfmt'] = [status: 'failed', detail: 'cargo fmt --check 发现格式问题'] }
+                }
+                always {
+                    script { ciFinishGiteeStage('Rustfmt', ciResults, 'cargo fmt --check 发现格式问题') }
                 }
             }
         }
@@ -80,13 +104,20 @@ pipeline {
         stage('Prefetch Dependencies') {
             steps {
                 script {
+                    giteeStartCheckRun('Prefetch Dependencies')
                     prefetchCargoDeps()
                     ciResults['Prefetch Dependencies'] = [status: 'passed']
                 }
             }
             post {
+                success {
+                    script { ciResults['Prefetch Dependencies'] = [status: 'passed'] }
+                }
                 failure {
                     script { ciResults['Prefetch Dependencies'] = [status: 'failed', detail: 'cargo fetch 失败'] }
+                }
+                always {
+                    script { ciFinishGiteeStage('Prefetch Dependencies', ciResults, 'cargo fetch 失败') }
                 }
             }
         }
@@ -96,74 +127,100 @@ pipeline {
                 stage('Clippy+Build: aarch64-crosvm-virt') {
                     steps {
                         script {
+                            giteeEnsureCheckRunStarted('Clippy+Build: aarch64-crosvm-virt')
                             runClippyAndBuild('aarch64-crosvm-virt')
                             ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'passed']
                         }
                     }
-                    post { failure { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } } }
+                    post {
+                        success { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'passed'] } }
+                        failure { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } }
+                        always { script { ciFinishGiteeStage('Clippy+Build: aarch64-crosvm-virt', ciResults, 'clippy 或 build 失败') } }
+                    }
                 }
                 stage('Clippy+Runtime: riscv64-qemu-virt') {
                     steps {
                         script {
+                            giteeEnsureCheckRunStarted('Clippy+Runtime: riscv64-qemu-virt')
                             runClippyAndRuntime('riscv64')
                             ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'passed']
                         }
                     }
-                    post { failure { script { ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'failed', detail: collectUnitTestSnippet('riscv64')] } } }
+                    post {
+                        success { script { ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'passed'] } }
+                        failure { script { ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'failed', detail: '阶段失败，详见下方日志。'] } }
+                        always { script { ciFinishGiteeStage('Clippy+Runtime: riscv64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
+                    }
                 }
                 stage('Clippy+Runtime: x86_64-qemu-virt') {
                     steps {
                         script {
+                            giteeEnsureCheckRunStarted('Clippy+Runtime: x86_64-qemu-virt')
                             runClippyAndRuntime('x86_64')
                             ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'passed']
                         }
                     }
                     post {
+                        success { script { ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'passed'] } }
                         failure {
-                            script { ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'failed', detail: collectUnitTestSnippet('x86_64')] }
+                            script { ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'failed', detail: '阶段失败，详见下方日志。'] }
                         }
+                        always { script { ciFinishGiteeStage('Clippy+Runtime: x86_64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
                     }
                 }
                 stage('Clippy+Runtime: aarch64-qemu-virt') {
                     steps {
                         script {
+                            giteeEnsureCheckRunStarted('Clippy+Runtime: aarch64-qemu-virt')
                             runClippyAndRuntime('aarch64')
                             ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'passed']
                         }
                     }
                     post {
+                        success { script { ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'passed'] } }
                         failure {
-                            script { ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'failed', detail: collectUnitTestSnippet('aarch64')] }
+                            script { ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'failed', detail: '阶段失败，详见下方日志。'] }
                         }
+                        always { script { ciFinishGiteeStage('Clippy+Runtime: aarch64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
                     }
                 }
                 stage('TEE: x86_64') {
                     steps {
                         script {
+                            giteeEnsureCheckRunStarted('TEE: x86_64')
                             teeResults['x86_64'] = runTeeStorageTest('x86_64')
                             ciResults['TEE: x86_64'] = [status: 'passed']
                         }
                     }
-                    post { failure { script {
-                        if (!teeResults.containsKey('x86_64')) {
-                            teeResults['x86_64'] = [arch: 'x86_64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
-                        }
-                        ciResults['TEE: x86_64'] = [status: 'failed', detail: teeResults['x86_64']?.errorSnippet ?: 'TEE 测试失败']
-                    } } }
+                    post {
+                        failure { script {
+                            if (!teeResults.containsKey('x86_64')) {
+                                teeResults['x86_64'] = [arch: 'x86_64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
+                            }
+                            ciResults['TEE: x86_64'] = [status: 'failed', detail: teeResults['x86_64']?.errorSnippet ?: 'TEE 测试失败']
+                        } }
+                        success { script { ciResults['TEE: x86_64'] = [status: 'passed'] } }
+                        always { script { ciFinishGiteeStage('TEE: x86_64', ciResults, 'TEE 测试失败') } }
+                    }
                 }
                 stage('TEE: aarch64') {
                     steps {
                         script {
+                            giteeEnsureCheckRunStarted('TEE: aarch64')
                             teeResults['aarch64'] = runTeeStorageTest('aarch64')
                             ciResults['TEE: aarch64'] = [status: 'passed']
                         }
                     }
-                    post { failure { script {
-                        if (!teeResults.containsKey('aarch64')) {
-                            teeResults['aarch64'] = [arch: 'aarch64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
-                        }
-                        ciResults['TEE: aarch64'] = [status: 'failed', detail: teeResults['aarch64']?.errorSnippet ?: 'TEE 测试失败']
-                    } } }
+                    post {
+                        failure { script {
+                            if (!teeResults.containsKey('aarch64')) {
+                                teeResults['aarch64'] = [arch: 'aarch64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
+                            }
+                            ciResults['TEE: aarch64'] = [status: 'failed', detail: teeResults['aarch64']?.errorSnippet ?: 'TEE 测试失败']
+                        } }
+                        success { script { ciResults['TEE: aarch64'] = [status: 'passed'] } }
+                        always { script { ciFinishGiteeStage('TEE: aarch64', ciResults, 'TEE 测试失败') } }
+                    }
                 }
             }
         }
@@ -172,17 +229,24 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: [
-                '**/artifacts/**/*', '**/logs/**/*', '**/unittest-output.log',
-                '**/tee-test-output.log',
-                '**/coverage-html/**/*', '**/coverage.info', '**/coverage.xml', '**/coverage.txt'
-            ].join(','), allowEmptyArchive: true
             script {
                 restoreReplayGiteeEnv()
+                fixWorkspaceOwnership(env.WORKSPACE)
+                def failedStageLogs = archiveFailedStageLogs(ciResults)
+                archiveArtifacts artifacts: [
+                    'stage-logs/**/*.log',
+                    '**/artifacts/**/*', '**/logs/**/*', '**/unittest-output.log',
+                    '**/tee-test-output.log',
+                    '**/coverage-html/**/*', '**/coverage.info', '**/coverage.xml', '**/coverage.txt'
+                ].join(','), allowEmptyArchive: true
                 deleteOldCiComments()
                 def coverageSummary = collectCoverageSummary()
-                def comment = buildCombinedComment(ciResults, coverageSummary)
-                notifyGiteePullRequest(comment)
+                def built = buildCombinedComment(ciResults, coverageSummary, failedStageLogs)
+                notifyGiteePullRequest(built.comment)
+                giteeFinalizeAllCheckRuns(ciResults, failedStageLogs)
+                giteeRefreshFailedCheckOutputs(ciResults, failedStageLogs)
+                // Gitee 检查列表按更新时间排序：构建末尾按顺序刷新 4 个顺序 stage，使其排在 6 个并行之上
+                giteeReorderSequentialCheckRuns(ciResults, failedStageLogs)
                 if (currentBuild.currentResult == 'SUCCESS') {
                     giteeTestPass()
                 } else {
@@ -196,6 +260,7 @@ pipeline {
 }
 
 def prefetchCargoDeps() {
+    initStageLog('Prefetch Dependencies')
     ws("${env.ROOT_WS}/prefetch") {
         def stageWorkspace = pwd()
         try {
@@ -203,6 +268,7 @@ def prefetchCargoDeps() {
             restoreSource()
             sh '''#!/bin/bash
 set -euo pipefail
+''' + stageLogTeeLine('Prefetch Dependencies') + '''
 echo "==> Prefetching cargo dependencies for all platforms..."
 
 declare -A ARCH_TARGET=(
@@ -229,6 +295,7 @@ echo "==> Dependency prefetch complete"
 }
 
 def checkBuildEnvironment() {
+    initStageLog('Check Environment')
     ws("${env.ROOT_WS}/env-check") {
         def stageWorkspace = pwd()
         try {
@@ -236,7 +303,7 @@ def checkBuildEnvironment() {
             restoreSource()
             sh '''#!/bin/bash
 set -euo pipefail
-
+''' + stageLogTeeLine('Check Environment') + '''
 echo "==> Checking Rust build environment..."
 NIGHTLY_TOOLCHAIN="${AUX_RUST_TOOLCHAIN}"
 
@@ -326,15 +393,17 @@ rustup +"${NIGHTLY_TOOLCHAIN}" target list --installed
 }
 
 def runRustfmt() {
+    initStageLog('Rustfmt')
     ws("${env.ROOT_WS}/rustfmt") {
         def stageWorkspace = pwd()
         try {
             deleteDir()
             restoreSource()
-            sh '''#!/bin/bash
+            sh """#!/bin/bash
 set -euo pipefail
+${stageLogTeeLine('Rustfmt')}
 cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
-'''
+"""
         } finally {
             fixWorkspaceOwnership(stageWorkspace)
         }
@@ -342,6 +411,8 @@ cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
 }
 
 def runClippyAndBuild(String platform) {
+    def stageName = "Clippy+Build: ${platform}"
+    initStageLog(stageName)
     ws("${env.ROOT_WS}/clippy-build-${platform}") {
         def stageWorkspace = pwd()
         def buildTargetDir = "/xkernel-target/build-${platform}"
@@ -352,6 +423,7 @@ def runClippyAndBuild(String platform) {
             withEnv(["TARGET_DIR=${buildTargetDir}"]) {
             sh """#!/bin/bash
 set -euo pipefail
+${stageLogTeeLine(stageName)}
 cp platforms/${platform}/defconfig .config
 make clippy
 stdbuf -oL -eL make build
@@ -365,6 +437,9 @@ stdbuf -oL -eL make build
 
 def runClippyAndRuntime(String arch) {
     def platform = "${arch}-qemu-virt"
+    def stageName = "Clippy+Runtime: ${platform}"
+    def stageLog = stageLogFile(stageName)
+    initStageLog(stageName)
     def runtimeTargetDir = targetDirForArch(arch)
     ws("${env.ROOT_WS}/${arch}") {
         def stageWorkspace = pwd()
@@ -372,9 +447,10 @@ def runClippyAndRuntime(String arch) {
             deleteDir()
             restoreSource()
 
-            withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
+            withEnv(["TARGET_DIR=${runtimeTargetDir}", "STAGE_LOG=${stageLog}"]) {
                 sh """#!/bin/bash
 set -euo pipefail
+${stageLogTeeLine(stageName)}
 cp platforms/${platform}/defconfig .config
 make clippy
 """
@@ -384,6 +460,7 @@ make clippy
 
                 sh """#!/bin/bash
 set -euo pipefail
+${stageLogTeeLine(stageName)}
 cp platforms/${platform}/defconfig .config
 stdbuf -oL -eL make build
 """
@@ -415,10 +492,11 @@ stdbuf -oL -eL make build
                              "STARRY_SKIP_BUILD=1",
                              "ROOTFS_CACHE_DIR=/xkernel-target/rootfs-cache",
                              "GUEST_CASES_TARGET_DIR=${runtimeTargetDir}/guest-cases-${arch}"]) {
-                        sh '''#!/bin/bash
+                        sh """#!/bin/bash
 set -euo pipefail
+${stageLogTeeLine(stageName)}
 stdbuf -oL -eL make ci-test run
-'''
+"""
                     }
                 }
             }
@@ -429,8 +507,13 @@ stdbuf -oL -eL make ci-test run
 }
 
 def runUnitTests(String arch) {
+    def ansiFilter = stageLogAnsiFilterPipe()
+    def stageTee = env.STAGE_LOG?.trim()
+        ? "exec > >(${ansiFilter} | tee -a '${env.STAGE_LOG}') 2>&1"
+        : ''
     sh """#!/bin/bash
 set -euo pipefail
+${stageTee}
 
 ROOTFS_VERSION=20260302
 ROOTFS_CACHE="/xkernel-target/rootfs-cache"
@@ -449,8 +532,10 @@ if [ "${arch}" = "aarch64" ]; then
     TIMEOUT=481
 fi
 
+sed -i -e 's/WARN/__TEMP__/g' -e 's/ERROR/WARN/g' -e 's/__TEMP__/ERROR/g' .config
+
 set +e
-timeout \${TIMEOUT} stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n run | tee unittest-output.log
+timeout \${TIMEOUT} stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n run | ${ansiFilter} | tee unittest-output.log
 status=\${PIPESTATUS[0]}
 set -e
 
@@ -536,9 +621,10 @@ def restoreReplayGiteeEnv() {
         def originalEnv = cause.getOriginal()
             .getEnvironment(hudson.model.TaskListener.NULL)
         ['giteePullRequestIid', 'giteePullRequestId',
-         'giteePullRequestTargetProjectId', 'giteeSourceBranch',
+         'giteePullRequestTargetProjectId', 'giteePullRequestLastCommit',
+         'giteeAfterCommitSha', 'giteeSourceBranch',
          'giteeTargetBranch', 'giteeTargetNamespace', 'giteeTargetRepoName',
-         'giteeSourceNamespace', 'giteeSourceRepoName'].each { key ->
+         'giteeSourceNamespace', 'giteeSourceRepoName', 'GIT_COMMIT'].each { key ->
             def val = originalEnv?.get(key)?.trim()
             if (val) env."${key}" = val
         }
@@ -551,14 +637,17 @@ def restoreReplayGiteeEnv() {
 }
 
 def prepareSource() {
+    initStageLog('Prepare Source')
     ws("${env.ROOT_WS}/source-cache") {
         def sourceWorkspace = pwd()
         try {
             deleteDir()
             checkoutProject()
             markSafeDirectory()
+            env.GIT_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+            echo "Checked out HEAD: ${env.GIT_COMMIT}"
             if (env.giteePullRequestIid?.trim()) {
-                checkNotDiverged()
+                checkNotDiverged('Prepare Source')
             }
         } finally {
             fixWorkspaceOwnership(sourceWorkspace)
@@ -566,10 +655,12 @@ def prepareSource() {
     }
 }
 
-def checkNotDiverged() {
+def checkNotDiverged(String stageName = '') {
     def targetBranch = env.giteeTargetBranch ?: env.DEFAULT_BRANCH
+    def teeLine = stageName ? stageLogTeeLine(stageName) : ''
     def result = sh(script: """#!/bin/bash
 set -euo pipefail
+${teeLine}
 git fetch origin ${targetBranch} --quiet
 BASE=\$(git merge-base HEAD origin/${targetBranch})
 TARGET=\$(git rev-parse origin/${targetBranch})
@@ -719,6 +810,149 @@ def allocateFreeCid() {
 def giteeTestPass() { giteePrApi('POST', 'test', 'pass', '--data-urlencode \'force=true\'') }
 def giteeTestReset() { giteePrApi('PATCH', 'testers', 'reset', '') }
 
+def resolveHeadSha() {
+    if (env.GIT_COMMIT?.trim()) return env.GIT_COMMIT.trim()
+    if (env.giteePullRequestLastCommit?.trim()) return env.giteePullRequestLastCommit.trim()
+    if (env.giteeAfterCommitSha?.trim()) return env.giteeAfterCommitSha.trim()
+    if (env.sha?.trim()) return env.sha.trim()
+    def sourceCache = "${env.ROOT_WS}/source-cache"
+    if (env.ROOT_WS?.trim() && fileExists("${sourceCache}/.git")) {
+        return sh(script: "git -C '${sourceCache}' rev-parse HEAD", returnStdout: true).trim()
+    }
+    return null
+}
+
+def resolveGiteeCheckRunsScript() {
+    def candidates = [
+        "${env.ROOT_WS}/source-cache/scripts/ci/gitee_check_runs.py",
+        'scripts/ci/gitee_check_runs.py',
+    ]
+    for (path in candidates) {
+        if (fileExists(path)) {
+            return path
+        }
+    }
+    return null
+}
+
+def giteeCheckIdsFile() {
+    def ws = env.ROOT_WS?.trim() ?: env.WORKSPACE
+    return "${ws}/gitee-check-ids.json"
+}
+
+/** 并行阶段顺序（PR 评论表格 + gitee_check_runs.py manifest） */
+def ciParallelStageOrder() {
+    return [
+        'Clippy+Build: aarch64-crosvm-virt',
+        'Clippy+Runtime: x86_64-qemu-virt',
+        'Clippy+Runtime: aarch64-qemu-virt',
+        'Clippy+Runtime: riscv64-qemu-virt',
+        'TEE: x86_64',
+        'TEE: aarch64',
+    ]
+}
+
+/** 串行阶段顺序（PR 评论表格 + gitee_check_runs.py manifest） */
+def ciSequentialStageOrder() {
+    return [
+        'Prepare Source',
+        'Check Environment',
+        'Rustfmt',
+        'Prefetch Dependencies',
+    ]
+}
+
+/**
+ * 调用 scripts/ci/gitee_check_runs.py 处理门禁检查。
+ * action: start | finish | start_parallel | ensure_start |
+ *         post_finalize | refresh_failed | reorder_sequential
+ * manifest 含 sequential_stages / parallel_stages（ciSequentialStageOrder / ciParallelStageOrder）
+ */
+def giteeCheck(String action, String stageName = null, Map ciResults = null, Map failedStageLogs = null) {
+    if (!env.giteePullRequestIid?.trim()) {
+        return
+    }
+
+    def scriptPath = resolveGiteeCheckRunsScript()
+    if (!scriptPath) {
+        echo "WARN: scripts/ci/gitee_check_runs.py not found; skip gitee ${action}"
+        return
+    }
+
+    def headSha = resolveHeadSha()
+    if (!headSha) {
+        echo "WARN: gitee ${action}${stageName ? " ${stageName}" : ''}: head SHA not available"
+        return
+    }
+
+    def namespace = env.giteeTargetNamespace ?: 'openkylin'
+    def repo = env.giteeTargetRepoName ?: 'x-kernel'
+    def prDbArg = env.giteePullRequestId?.trim() ? "--pr-db-id ${env.giteePullRequestId.trim()}" : "--pr ${env.giteePullRequestIid}"
+
+    def manifest = [
+        action: action,
+        stage_name: stageName,
+        owner: namespace,
+        repo: repo,
+        head_sha: headSha,
+        pr_db_id: env.giteePullRequestId?.trim(),
+        pr_iid: env.giteePullRequestIid?.trim(),
+        details_url: env.BUILD_URL ?: '',
+        ids_file: giteeCheckIdsFile(),
+        root_ws: env.ROOT_WS?.trim() ?: env.WORKSPACE,
+        sequential_stages: ciSequentialStageOrder(),
+        parallel_stages: ciParallelStageOrder(),
+        ci_results: ciResults ?: [:],
+        failed_stage_logs: failedStageLogs ?: [:],
+    ]
+
+    writeJSON file: 'gitee-ci-manifest.json', json: manifest
+    fixWorkspaceOwnership(env.WORKSPACE)
+
+    try {
+        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
+            sh(script: """#!/bin/bash
+set -euo pipefail
+python3 '${scriptPath}' \\
+  --owner '${namespace}' \\
+  --repo '${repo}' \\
+  --jenkins-manifest gitee-ci-manifest.json \\
+  ${prDbArg} \\
+  --details-url '${env.BUILD_URL ?: ''}' || {
+  echo "WARNING: Gitee check ${action}${stageName ? " (${stageName})" : ''} failed"
+}
+""")
+        }
+    } catch (e) {
+        echo "Gitee check ${action}: ${e.message}"
+    }
+}
+
+def giteeStartCheckRun(String stageName) { giteeCheck('start', stageName) }
+def giteeFinishCheckRun(String stageName, Map ciResults, Map failedStageLogs = [:]) {
+    giteeCheck('finish', stageName, ciResults, failedStageLogs)
+}
+
+/** 保证 ciResults 有状态后再 finish，避免 Gitee 检查一直停在「进行中」。 */
+def ciFinishGiteeStage(String stageName, Map results, String failedDetail) {
+    if (!results[stageName]?.status) {
+        results[stageName] = [status: 'failed', detail: failedDetail ?: "${stageName} 缺少 CI 结果"]
+        echo "WARN: ${stageName} missing ciResults status before Gitee finish"
+    }
+    giteeFinishCheckRun(stageName, results, [:])
+}
+def giteeStartParallelCheckRuns() { giteeCheck('start_parallel') }
+def giteeEnsureCheckRunStarted(String stageName) { giteeCheck('ensure_start', stageName) }
+def giteeFinalizeAllCheckRuns(Map ciResults, Map failedStageLogs = [:]) {
+    giteeCheck('post_finalize', null, ciResults, failedStageLogs)
+}
+def giteeRefreshFailedCheckOutputs(Map ciResults, Map failedStageLogs = [:]) {
+    giteeCheck('refresh_failed', null, ciResults, failedStageLogs)
+}
+def giteeReorderSequentialCheckRuns(Map ciResults, Map failedStageLogs = [:]) {
+    giteeCheck('reorder_sequential', null, ciResults, failedStageLogs)
+}
+
 def giteePrApi(String method, String endpoint, String label, String extraArgs) {
     if (!env.giteePullRequestIid?.trim()) return
     try {
@@ -778,41 +1012,9 @@ def targetTripleFor(String archOrPlatform) {
     error("Unsupported arch/platform: ${archOrPlatform}")
 }
 
-def collectUnitTestSnippet(String arch) {
-    try {
-        def logFile = "${env.ROOT_WS}/${arch}/unittest-output.log"
-        if (!fileExists(logFile)) {
-            return '未找到 unittest-output.log，阶段可能在日志创建前失败，请查看 Jenkins Stages 详情。'
-        }
-        def log = readFile(logFile)
-        def lines = log.split('\n')
-        def keywords = [
-            'panicked at',
-            'TESTS_FAILED',
-            'error[E',
-            'error:',
-            'could not compile',
-            'make: ***',
-            'Unit test command exited with status'
-        ]
-        for (keyword in keywords) {
-            for (int i = 0; i < lines.size(); i++) {
-                if (lines[i].contains(keyword)) {
-                    def from = Math.max(0, i - 3)
-                    def to = Math.min(lines.size() - 1, i + 8)
-                    return lines[from..to].join('\n').trim()
-                }
-            }
-        }
-        return lines.size() > 0
-            ? lines[Math.max(0, lines.size() - 20)..<lines.size()].join('\n').trim()
-            : '运行验证阶段失败，但未捕获到关键错误关键词，请查看 Jenkins Stages 详情。'
-    } catch (e) {
-        return "提取错误摘要失败：${e.message}"
-    }
-}
-
 def runTeeStorageTest(String arch) {
+    def stageName = "TEE: ${arch}"
+    initStageLog(stageName)
     def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '']
     def muslTarget = "${arch}-unknown-linux-musl"
     def muslLinker = "${arch}-linux-musl-gcc"
@@ -830,6 +1032,7 @@ def runTeeStorageTest(String arch) {
             withEnv(["TARGET_DIR=${teeTargetDir}"]) {
             sh """#!/bin/bash
 set -euo pipefail
+${stageLogTeeLine(stageName)}
 
 LIBUTEE_DIR="/xkernel-target/libutee-${arch}"
 mkdir -p "\${LIBUTEE_DIR}"
@@ -953,22 +1156,110 @@ def collectCoverageSummary() {
     return header + '\n' + rows.join('\n')
 }
 
-def buildCombinedComment(Map ciResults, String coverageSummary) {
-    def ciComment = buildCiComment(ciResults, coverageSummary)
-    return "<!-- x-kernel-ci -->\n${ciComment}"
+def ciStageOrder() {
+    return ciSequentialStageOrder() + ciParallelStageOrder()
+}
+
+def sanitizeStageFileName(String stageName) {
+    return stageName.replaceAll(/[^A-Za-z0-9._-]+/, '_').take(80)
+}
+
+def stageLogAnsiFilterPipe() {
+    return "sed -u -e 's/\\x1[Bb]\\[[0-9;]*[a-zA-Z]//g' -e 's/\\x9[Bb]\\[[0-9;]*[a-zA-Z]//g' -e 's/\\[[0-9;]*[mK]//g'"
+}
+
+def sanitizeStageLogForDisplay(String text) {
+    if (!text?.trim()) {
+        return ''
+    }
+    def cleaned = text
+        .replaceAll(/\u001B\[[0-9;?]*[ -\/]*[@-~]/, '')
+        .replaceAll(/\u009B[0-9;?]*[ -\/]*[@-~]/, '')
+        .replaceAll(/\[(?:\d{1,3};?)*[mK]/, '')
+        .replaceAll(/\r/, '')
+        .replaceAll(/\n{4,}/, '\n\n\n')
+    return cleaned.trim()
+}
+
+def stageLogFile(String stageName) {
+    return "${env.ROOT_WS}/stage-logs/${sanitizeStageFileName(stageName)}.log"
+}
+
+def initStageLog(String stageName) {
+    if (!env.ROOT_WS?.trim()) {
+        return
+    }
+    def logFile = stageLogFile(stageName)
+    sh """#!/bin/bash
+set -euo pipefail
+mkdir -p '${env.ROOT_WS}/stage-logs'
+: > '${logFile}'
+"""
+}
+
+def stageLogTeeLine(String stageName) {
+    def logFile = stageLogFile(stageName)
+    def filter = stageLogAnsiFilterPipe()
+    return "exec > >(${filter} | tee -a '${logFile}') 2>&1"
+}
+
+def readStageLogFile(String path) {
+    if (!path?.trim() || !fileExists(path)) {
+        return ''
+    }
+    try {
+        return readFile(path).trim()
+    } catch (e) {
+        echo "read stage log ${path} failed: ${e.message}"
+        return ''
+    }
+}
+
+def resolveFailedStageLog(String stageName, Map ciResults) {
+    def stageLog = readStageLogFile(stageLogFile(stageName))
+    if (stageLog) {
+        return sanitizeStageLogForDisplay(stageLog)
+    }
+    return sanitizeStageLogForDisplay(ciResults[stageName]?.detail?.trim() ?: '')
+}
+
+def archiveFailedStageLogs(Map ciResults) {
+    try {
+        def failedLogs = [:]
+        def failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
+        if (failedStages.isEmpty()) {
+            return failedLogs
+        }
+
+        sh "mkdir -p '${env.ROOT_WS}/stage-logs' stage-logs || true"
+        fixWorkspaceOwnership(env.WORKSPACE)
+
+        failedStages.each { stageName ->
+            def logContent = resolveFailedStageLog(stageName, ciResults)
+            if (!logContent) {
+                echo "No log captured for failed stage: ${stageName}"
+                return
+            }
+            failedLogs[stageName] = logContent
+        }
+        return failedLogs
+    } catch (e) {
+        echo "archiveFailedStageLogs failed: ${e.message}"
+        return [:]
+    }
+}
+
+def buildCombinedComment(Map ciResults, String coverageSummary, Map failedStageLogs = [:]) {
+    def result = buildCiComment(ciResults, coverageSummary)
+    return [
+        comment: "<!-- x-kernel-ci -->\n${result.body}",
+        allPassed: result.allPassed,
+    ]
 }
 
 def buildCiComment(Map results, String coverageSummary = '') {
     def stagesUrl = "${env.BUILD_URL}stages/"
-    def stageOrder = [
-        'Prepare Source',
-        'Check Environment',
-        'Rustfmt',
-        'Prefetch Dependencies',
-        'Clippy+Build: aarch64-crosvm-virt',
-        'Clippy+Runtime: x86_64-qemu-virt', 'Clippy+Runtime: aarch64-qemu-virt','Clippy+Runtime: riscv64-qemu-virt',
-        'TEE: x86_64', 'TEE: aarch64'
-    ]
+    def stageOrder = ciStageOrder()
     def normalizedResults = [:]
     stageOrder.each { name ->
         normalizedResults[name] = results[name] ?: [
@@ -1018,7 +1309,7 @@ ${rows}
     def details = coverageBlock + (errorBlocks ? "${errorBlocks}\n" : '')
     def body = table + details
     if (!allPassed) {
-        return table + "\n\n<details>\n<summary>查看构建详情</summary>\n\n" + details + "\n</details>"
+        body = table + "\n\n<details>\n<summary>查看构建详情</summary>\n\n" + details + "\n</details>"
     }
-    return body
+    return [body: body, allPassed: allPassed]
 }
