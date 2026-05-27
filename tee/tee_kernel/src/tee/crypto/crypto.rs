@@ -626,12 +626,12 @@ pub(crate) fn crypto_cipher_init(
     if let Ok(mut cipher) = Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as _) {
         cipher
             .set_key(cipher_op, key)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS);
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         if let Some(iv) = iv {
-            cipher.set_iv(iv).map_err(|_| TEE_ERROR_BAD_PARAMETERS);
+            cipher.set_iv(iv).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         }
         cipher.set_padding(cipher_padding);
-        cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS);
+        cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         cs_guard.state = CrypState::Initialized;
         cs_guard.ctx = CrypCtx::CipherCtx(cipher);
         Ok(())

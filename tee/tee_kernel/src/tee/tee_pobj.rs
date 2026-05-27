@@ -347,6 +347,10 @@ pub fn tee_pobj_rename(obj: &mut tee_pobj, obj_id: &[u8], obj_id_len: u32) -> Te
     let _guard = POBJS_MUTEX.lock();
 
     if obj.refcnt != 1 {
+        warn!(
+            "tee_pobj_rename: refcnt {} != 1, obj_id_len: {}",
+            obj.refcnt, obj.obj_id_len
+        );
         return Err(TEE_ERROR_BAD_STATE);
     }
 

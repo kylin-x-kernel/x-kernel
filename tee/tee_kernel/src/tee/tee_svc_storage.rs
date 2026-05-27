@@ -110,8 +110,9 @@ fn tee_svc_close_enum(enum_id: c_ulong) -> TeeResult {
 
     if let Some(fops) = fops {
         let mut obj_guard = obj.lock();
-        // let mut d = obj_guard.dir.as_mut().ok_or(TEE_ERROR_BAD_STATE)?.lock();
-        (fops.closedir)(obj_guard.dir.as_mut().ok_or(TEE_ERROR_BAD_STATE)?)?;
+        if let Some(dir) = obj_guard.dir.as_mut() {
+            (fops.closedir)(dir)?;
+        }
     }
 
     // obj auto released when the scope ends
@@ -827,6 +828,11 @@ pub fn syscall_storage_obj_del(obj_id: c_ulong) -> TeeResult {
             if pobj_guard.obj_id.is_empty() {
                 return Err(TEE_ERROR_BAD_STATE);
             }
+            tee_debug!(
+                "syscall_storage_obj_del: po refcnt: {}, obj_id_len: {}",
+                pobj_guard.refcnt,
+                pobj_guard.obj_id_len
+            );
         }
 
         let fops = {
@@ -919,25 +925,56 @@ pub fn syscall_storage_obj_rename(
     .inspect_err(|e| {
         error!("syscall_storage_obj_rename: tee_pobj_get error: {:#X?}", e);
     })?;
+    tee_debug!(
+        "syscall_storage_obj_rename: dest reserved po refcnt: {}, obj_id_len: {}",
+        po.read().refcnt,
+        po.read().obj_id_len
+    );
 
-    // move
-    let res = {
+    // move (`?` must stay inside a closure: in a plain block it returns from this
+    // syscall and would skip tee_pobj_release(po) below)
+    let res = (|| -> TeeResult<()> {
         let mut o_guard = o.lock();
         let mut pobj = o_guard.pobj.as_ref().unwrap().write();
-        (fops.rename)(&mut pobj, &po.read(), false /* no overwrite */).inspect_err(|e| {
+        tee_debug!(
+            "syscall_storage_obj_rename: source po refcnt: {}, obj_id_len: {}",
+            pobj.refcnt,
+            pobj.obj_id_len
+        );
+
+        let fs_res = (fops.rename)(&mut pobj, &po.read(), false /* no overwrite */);
+        if let Err(e) = fs_res {
             error!("syscall_storage_obj_rename: fops.rename error: {:#X?}", e);
-        })?;
+        } else {
+            tee_debug!("syscall_storage_obj_rename: fops.rename -> TEE_SUCCESS");
+        }
+        fs_res?;
 
         let po_guard = po.read();
         let obj_id = po_guard.obj_id.as_ref();
         let obj_id_len = po_guard.obj_id_len;
-        tee_pobj_rename(&mut pobj, obj_id, obj_id_len)
-    };
+        let pobj_res = tee_pobj_rename(&mut pobj, obj_id, obj_id_len);
+        if let Err(e) = pobj_res {
+            error!(
+                "syscall_storage_obj_rename: tee_pobj_rename error: {:#X?} (fops.rename already \
+                 committed)",
+                e
+            );
+        } else {
+            tee_debug!("syscall_storage_obj_rename: tee_pobj_rename -> TEE_SUCCESS");
+        }
+        pobj_res
+    })();
 
     // Always release the new po, regardless of success or failure
     // This matches the C implementation which calls tee_pobj_release(po) in the exit label
     let _ = tee_pobj_release(po);
 
+    if let Err(e) = res {
+        error!("syscall_storage_obj_rename: syscall return {:#X?}", e);
+    } else {
+        tee_debug!("syscall_storage_obj_rename: syscall return TEE_SUCCESS");
+    }
     res
 }
 
@@ -1265,8 +1302,8 @@ pub fn syscall_storage_reset_enum(obj_enum: c_ulong) -> TeeResult {
 
     if let Some(fops) = fops {
         let mut obj_guard = obj.lock();
-        {
-            (fops.closedir)(obj_guard.dir.as_mut().ok_or(TEE_ERROR_BAD_STATE)?)?;
+        if let Some(dir) = obj_guard.dir.as_mut() {
+            (fops.closedir)(dir)?;
         }
         obj_guard.fops = None;
         obj_guard.dir = None;
@@ -1301,12 +1338,11 @@ pub fn syscall_storage_start_enum(obj_enum: c_ulong, storage_id: c_ulong) -> Tee
         obj_guard.dir = None;
     }
 
-    obj_guard.fops = Some(fops);
-
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
     let uuid = Uuid::parse_str(&uuid)?;
 
     let dir = (fops.opendir)(uuid.as_raw_ref())?;
+    obj_guard.fops = Some(fops);
     obj_guard.dir = Some(dir);
     Ok(())
 }
