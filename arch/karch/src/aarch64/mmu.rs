@@ -68,6 +68,10 @@ pub fn read_user_page_table() -> HwPageTableRoot {
 /// When the `arm-el2` feature is enabled, writes `TTBR0_EL2`; otherwise
 /// writes `TTBR1_EL1`.
 ///
+/// An ISB is issued after the write to synchronise the context change, so
+/// that subsequent instructions (including TLBI) operate under the new
+/// translation regime.
+///
 /// Note that the TLB is **NOT** flushed after this operation.
 ///
 /// # Safety
@@ -85,10 +89,19 @@ pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
         use aarch64_cpu::registers::TTBR0_EL2;
         TTBR0_EL2.set(root.as_usize() as _);
     }
+
+    // ISB synchronises the TTBR write so that subsequent instructions
+    // (including TLBI) see the new translation regime.  Without this,
+    // a following TLBI may apply to the old TTBR.
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
 }
 
 /// Writes the register to update the current page table root for user space
 /// (`TTBR0_EL1`).
+///
+/// An ISB is issued after the write to synchronise the context change, so
+/// that subsequent instructions (including TLBI) operate under the new
+/// translation regime.
 ///
 /// Note that the TLB is **NOT** flushed after this operation.
 ///
@@ -98,4 +111,7 @@ pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
 #[inline]
 pub unsafe fn write_user_page_table(root: HwPageTableRoot) {
     TTBR0_EL1.set(root.as_usize() as _);
+    // ISB synchronises the TTBR write so that subsequent instructions
+    // (including TLBI) see the new translation regime.
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
 }
