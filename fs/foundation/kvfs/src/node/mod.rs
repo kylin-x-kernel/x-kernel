@@ -803,4 +803,24 @@ mod tests_node {
         assert!(dir.as_dir().is_ok());
         assert!(matches!(dir.as_file(), Err(VfsError::IsADirectory)));
     }
+
+    #[def_test]
+    fn test_reference_key_uniqueness() {
+        let ref1 = Reference::new(None, String::from("file1.txt"));
+        let ref2 = Reference::new(None, String::from("file2.txt"));
+        let ref3 = Reference::new(None, String::from("file1.txt"));
+
+        assert_ne!(ref1.key(), ref2.key());
+        assert_eq!(ref1.key(), ref3.key());
+    }
+
+    #[def_test]
+    fn test_direntry_weak_relationship() {
+        let fs = Arc::new(MockFilesystem);
+        let (entry, _) = make_file_entry(fs, 99, None, "weak_test");
+
+        let weak = entry.downgrade();
+        assert!(weak.upgrade().is_some());
+        assert!(weak.upgrade().unwrap().ptr_eq(&entry));
+    }
 }

@@ -144,6 +144,10 @@ pub trait DynBackendOps: Send + Sync {
         new_pgtbl: &mut PageTableMut,
         new_aspace: &Arc<Mutex<AddrSpace>>,
     ) -> KResult<Backend>;
+    /// Create a relocated copy of this backend at a new start virtual address.
+    fn relocated(&self, new_start: VirtAddr, aspace: &Arc<Mutex<AddrSpace>>) -> KResult<Backend>;
+    /// Returns `true` if this is an anonymous (non-file-backed) mapping.
+    fn is_anonymous(&self) -> bool;
 }
 
 #[derive(Clone)]
@@ -179,6 +183,34 @@ impl Backend {
         match self {
             Self::Dynamic(dynamic) => dynamic.downcast_ref::<T>(),
             _ => None,
+        }
+    }
+
+    /// Create a relocated copy of this backend at a new start address.
+    ///
+    /// Used by mremap to move a mapping to a different virtual address while
+    /// preserving the backend's physical pages and semantics.
+    ///
+    /// Returns `OperationNotSupported` for linear backends (their VA-to-PA
+    /// offset is fixed and cannot be relocated).
+    pub fn relocated(
+        &self,
+        new_start: VirtAddr,
+        aspace: &Arc<Mutex<AddrSpace>>,
+    ) -> KResult<Backend> {
+        match self {
+            Self::Linear(_) => Err(KError::OperationNotSupported),
+            Self::Shared(inner) => Ok(inner.relocated(new_start)),
+            Self::Dynamic(inner) => inner.0.relocated(new_start, aspace),
+        }
+    }
+
+    /// Returns `true` if this is an anonymous (non-file-backed) mapping.
+    pub fn is_anonymous(&self) -> bool {
+        match self {
+            Self::Linear(_) => false,
+            Self::Shared(_) => true,
+            Self::Dynamic(inner) => inner.0.is_anonymous(),
         }
     }
 }

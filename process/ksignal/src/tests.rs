@@ -203,7 +203,7 @@ fn test_signo_default_action_full() {
     }
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_signal_dequeue_observer_per_signo() {
     crate::unregister_signal_observer(Signo::SIGUSR1);
     crate::unregister_signal_observer(Signo::SIGUSR2);
@@ -245,7 +245,7 @@ fn test_signal_dequeue_observer_per_signo() {
     crate::unregister_signal_observer(Signo::SIGUSR2);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_signal_dequeue_observer_can_drop_signal() {
     crate::unregister_signal_observer(Signo::SIGUSR1);
     crate::register_signal_observer(Signo::SIGUSR1, drop_dequeued_signal);

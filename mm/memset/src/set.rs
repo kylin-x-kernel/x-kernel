@@ -200,6 +200,42 @@ impl<B: MemorySetBackend> MemorySet<B> {
         Ok(())
     }
 
+    /// Extend an existing area by the given additional size.
+    ///
+    /// The area must be keyed by `start` (i.e., `start` equals the area's
+    /// start address). The extension range `[area.end, area.end + additional)`
+    /// must not overlap with any other area.
+    pub fn extend_area(
+        &mut self,
+        start: B::Addr,
+        additional: usize,
+        page_table: &mut B::PageTable,
+    ) -> MemorySetResult {
+        let area = self.areas.get(&start).ok_or(MemorySetError::InvalidParam)?;
+        let current_end = area.end();
+        let flags = area.flags();
+        let backend = area.backend().clone();
+        let _ = area; // release borrow for subsequent self.areas access
+
+        let new_end = current_end
+            .checked_add(additional)
+            .ok_or(MemorySetError::InvalidParam)?;
+
+        if let Some((..)) = self.areas.range(current_end..new_end).next() {
+            return Err(MemorySetError::AlreadyExists);
+        }
+
+        if !backend.map(current_end, additional, flags, page_table) {
+            return Err(MemorySetError::BadState);
+        }
+
+        self.areas
+            .get_mut(&start)
+            .expect("key was just validated")
+            .set_end(new_end);
+        Ok(())
+    }
+
     /// Remove all memory areas and the underlying mappings.
     pub fn clear(&mut self, page_table: &mut B::PageTable) -> MemorySetResult {
         for (_, area) in self.areas.iter() {

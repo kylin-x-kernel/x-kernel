@@ -25,7 +25,7 @@ use lazyinit::LazyInit;
 use memaddr::{MemoryAddr, PhysAddr, va};
 
 pub use self::{
-    aspace::AddrSpace,
+    aspace::{AddrPolicy, AddrSpace},
     iomap::{
         DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device,
         register_device_region, register_fixed_device_region,

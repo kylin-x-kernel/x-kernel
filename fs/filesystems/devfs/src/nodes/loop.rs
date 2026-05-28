@@ -11,7 +11,7 @@ use core::{
 use kerrno::{KError, KResult, LinuxError};
 use kfs::{File, FileBackend};
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, DeviceId, DeviceMmap, NodeFlags, NodeType, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsResult};
 use kvfs_simple::{DirMapping, SimpleFs};
 use linux_raw_sys::{
     ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKRAGET, BLKRASET, BLKROGET, BLKROSET},
@@ -70,6 +70,13 @@ impl LoopDevice {
 }
 
 impl DeviceFileOps for LoopDevice {
+    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        match self.file.lock().as_ref() {
+            Some(FileBackend::Cached(_)) => mapper.map_file_backed(),
+            _ => Err(kvfs::VfsError::NoSuchDevice),
+        }
+    }
+
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let file = self.file.lock().clone();
         file.ok_or(KError::OperationNotPermitted)?
@@ -155,14 +162,6 @@ impl DeviceFileOps for LoopDevice {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-
-    fn mmap(&self) -> DeviceMmap {
-        if let Some(FileBackend::Cached(cache)) = self.file.lock().as_ref() {
-            DeviceMmap::Cache(Arc::new(cache.clone()))
-        } else {
-            DeviceMmap::None
-        }
     }
 
     fn flags(&self) -> NodeFlags {

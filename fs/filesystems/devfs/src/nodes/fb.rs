@@ -9,7 +9,7 @@ use core::{any::Any, slice};
 use kdriver::prelude::DisplayDriverOps;
 use kerrno::KError;
 use khal::mem::v2p;
-use kvfs::{DeviceFileOps, DeviceId, DeviceMmap, NodeFlags, NodeType, VfsError, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsError, VfsResult};
 use kvfs_simple::{DirMapping, SimpleFs};
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
@@ -233,8 +233,8 @@ impl DeviceFileOps for FrameBuffer {
         self
     }
 
-    fn mmap(&self) -> DeviceMmap {
-        DeviceMmap::Physical(PhysAddrRange::from_start_size(v2p(self.base), self.size))
+    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        mapper.map_physical(PhysAddrRange::from_start_size(v2p(self.base), self.size))
     }
 
     fn flags(&self) -> NodeFlags {

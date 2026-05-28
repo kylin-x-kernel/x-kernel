@@ -419,3 +419,80 @@ mod test {
         assert_eq!(None, Path::new("a/..").file_name());
     }
 }
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn test_path_component_parsing() {
+        let path = Path::new("/path/to/file.txt");
+        let components: Vec<_> = path.components().collect();
+
+        assert_eq!(components.len(), 4);
+        assert!(matches!(components[0], Component::RootDir));
+
+        if let Component::Normal(name) = &components[1] {
+            assert_eq!(*name, "path");
+        }
+
+        if let Component::Normal(name) = &components[2] {
+            assert_eq!(*name, "to");
+        }
+
+        if let Component::Normal(name) = &components[3] {
+            assert_eq!(*name, "file.txt");
+        }
+    }
+
+    #[def_test]
+    fn test_path_normalization() {
+        let path = PathBuf::from("/path/to/file");
+        assert_eq!(path.as_str(), "/path/to/file");
+
+        let root = PathBuf::from("/");
+        assert_eq!(root.as_str(), "/");
+
+        let empty = PathBuf::new();
+        assert_eq!(empty.as_str(), "");
+    }
+
+    #[def_test]
+    fn test_path_normalization_complex() {
+        let path = Path::new("/foo/bar/../baz/./qux/../file.txt");
+        let normalized = path.normalize().unwrap();
+        assert_eq!(normalized.as_str(), "/foo/baz/file.txt");
+
+        let path = Path::new("/../../../test");
+        assert!(path.normalize().is_none());
+
+        let path = Path::new("././././test");
+        let normalized = path.normalize().unwrap();
+        assert_eq!(normalized.as_str(), "/test");
+    }
+
+    #[def_test]
+    fn test_path_components_bidirectional() {
+        let test_paths = [
+            "/foo/bar/baz",
+            "../relative/path",
+            "./current/dir",
+            "foo/bar/../baz",
+            "/",
+            ".",
+            "..",
+        ];
+
+        for path_str in test_paths {
+            let path = Path::new(path_str);
+            let forward: Vec<_> = path.components().collect();
+            let mut backward: Vec<_> = path.components().rev().collect();
+            backward.reverse();
+            assert_eq!(forward, backward, "Failed for path: {path_str}");
+        }
+    }
+}

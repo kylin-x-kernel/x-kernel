@@ -6,10 +6,20 @@
 use alloc::sync::Arc;
 use core::{fmt, ops::DerefMut};
 
+/// Address resolution policy for mmap operations.
+pub enum AddrPolicy {
+    /// Find any suitable free area.
+    Any,
+    /// Use exact address, unmap existing ranges.
+    Fixed,
+    /// Use exact address, fail if overlaps existing mapping.
+    FixedNoReplace,
+}
+
 use kerrno::{KError, KResult, k_bail};
 use khal::{
     mem::p2v,
-    paging::{MappingFlags, PageTable},
+    paging::{MappingFlags, PageSize, PageTable},
     trap::PageFaultFlags,
 };
 use ksync::Mutex;
@@ -117,6 +127,39 @@ impl AddrSpace {
     /// Find the memory area that contains the given virtual address.
     pub fn find_area(&self, vaddr: VirtAddr) -> Option<&MemoryArea<Backend>> {
         self.areas.find(vaddr)
+    }
+
+    /// Resolve the mapping address for an mmap operation.
+    ///
+    /// For `Fixed`, validates the address and unmaps existing ranges.
+    /// For `FixedNoReplace`, returns `EEXIST` if the range overlaps an existing
+    /// mapping. For `Any`, finds a suitable free area.
+    pub fn mmap_resolve_addr(
+        &mut self,
+        hint: VirtAddr,
+        length: usize,
+        page_size: usize,
+        policy: AddrPolicy,
+    ) -> KResult<VirtAddr> {
+        match policy {
+            AddrPolicy::Any => {
+                let limit = VirtAddrRange::new(self.base(), self.end());
+                self.find_free_area(hint, length, limit, page_size)
+                    .or(self.find_free_area(self.base(), length, limit, page_size))
+                    .ok_or(KError::NoMemory)
+            }
+            AddrPolicy::Fixed => {
+                self.unmap(hint, length)?;
+                Ok(hint)
+            }
+            AddrPolicy::FixedNoReplace => {
+                let range = VirtAddrRange::from_start_size(hint, length);
+                if self.areas.overlaps(range) {
+                    k_bail!(AlreadyExists, "mapping overlaps existing area");
+                }
+                Ok(hint)
+            }
+        }
     }
 
     /// Add a new linear mapping.
@@ -275,6 +318,55 @@ impl AddrSpace {
         self.areas
             .protect(start, size, |_| Some(flags), &mut self.pgtbl)?;
 
+        Ok(())
+    }
+
+    /// Extend an existing memory area in place.
+    ///
+    /// Returns an error if the extension would exceed address space bounds
+    /// or overlap with another mapping.
+    pub fn extend_area(&mut self, start: VirtAddr, additional: usize) -> KResult {
+        // Validate the extension range [area.end, area.end + additional),
+        // not [start, start + additional).
+        let current_end = self
+            .areas
+            .find(start)
+            .map(|a| a.end())
+            .ok_or(KError::NoMemory)?;
+        if additional > 0 {
+            self.validate_region(current_end, additional)?;
+        }
+        self.areas.extend_area(start, additional, &mut self.pgtbl)?;
+        Ok(())
+    }
+
+    /// Move page table entries from src to dst within the same address space.
+    ///
+    /// For each mapped page in `[src, src+size)`, queries the PTE, maps it at
+    /// the corresponding dst address, and unmaps from src. Unmapped (lazy)
+    /// pages are skipped and will be demand-paged at the new location.
+    pub fn move_pages(
+        &mut self,
+        src: VirtAddr,
+        dst: VirtAddr,
+        size: usize,
+        page_size: PageSize,
+    ) -> KResult {
+        let range = VirtAddrRange::from_start_size(src, size);
+        let mut modify = self.pgtbl.modify();
+        for vaddr in crate::backend::pages_in(range, page_size)? {
+            let dst_vaddr = dst + (vaddr - src);
+            if let Ok((paddr, flags, _)) = modify.query(vaddr) {
+                modify
+                    .map(dst_vaddr, paddr, page_size, flags)
+                    .map_err(|_| KError::NoMemory)?;
+                // Safe: we just confirmed the mapping exists via query(), and we
+                // hold exclusive access to the page table through the modify guard.
+                modify
+                    .unmap(vaddr)
+                    .expect("unmap must succeed after successful query");
+            }
+        }
         Ok(())
     }
 

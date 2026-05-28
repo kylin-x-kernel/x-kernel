@@ -237,6 +237,23 @@ impl DynBackendOps for FileBackend {
         inner.register_listener(new_aspace);
         Ok(Backend::new_dynamic(Arc::new(FileBackend(inner))))
     }
+
+    fn relocated(&self, new_start: VirtAddr, aspace: &Arc<Mutex<AddrSpace>>) -> KResult<Backend> {
+        let inner = Arc::new(FileBackendInner {
+            start: new_start,
+            cache: self.0.cache.clone(),
+            flags: self.0.flags,
+            offset_page: self.0.offset_page,
+            handle: AtomicUsize::new(0),
+            futex_handle: self.0.futex_handle.clone(),
+        });
+        inner.register_listener(aspace);
+        Ok(Backend::new_dynamic(Arc::new(FileBackend(inner))))
+    }
+
+    fn is_anonymous(&self) -> bool {
+        false
+    }
 }
 
 pub fn new_file(

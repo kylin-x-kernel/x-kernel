@@ -8,7 +8,7 @@ use core::ops::Deref;
 
 use kpoll::Pollable;
 
-use super::NodeOps;
+use super::{NodeOps, device::MmapMapper};
 use crate::{VfsError, VfsResult};
 
 /// File node operations.
@@ -34,6 +34,12 @@ pub trait FileNodeOps: NodeOps + Pollable {
     /// Manipulates the underlying device parameters of special files.
     fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
         Err(VfsError::NotATty)
+    }
+
+    /// Handle mmap for this node via the provided mapper.
+    /// Default returns `ENODEV` (mmap not supported).
+    fn mmap(&self, _mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        Err(VfsError::NoSuchDevice)
     }
 }
 
@@ -73,5 +79,10 @@ impl FileNode {
             .into_any()
             .downcast()
             .map_err(|_| VfsError::InvalidInput)
+    }
+
+    /// Handle mmap for this file node.
+    pub fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        self.0.mmap(mapper)
     }
 }

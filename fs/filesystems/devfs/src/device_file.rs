@@ -11,7 +11,7 @@ use core::any::Any;
 use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceFileOps, DeviceId, DeviceMmap, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate,
+    DeviceFileOps, DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, MmapMapper,
     NodeFlags, NodeOps, NodePermission, NodeType, VfsError, VfsResult,
 };
 use kvfs_simple::{SimpleFs, SimpleFsNode};
@@ -46,11 +46,6 @@ impl DeviceFile {
     /// Updates the device ID.
     pub fn set_device_id(&self, device_id: DeviceId) {
         self.node.set_device_id(device_id);
-    }
-
-    /// Returns the memory mapping behavior of the device.
-    pub fn mmap(&self) -> DeviceMmap {
-        self.ops.mmap()
     }
 }
 
@@ -108,6 +103,10 @@ impl FileNodeOps for DeviceFile {
 
     fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
         self.ops.ioctl(cmd, arg)
+    }
+
+    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        self.ops.mmap(mapper)
     }
 }
 

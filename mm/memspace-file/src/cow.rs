@@ -268,6 +268,20 @@ impl DynBackendOps for CowBackend {
 
         Ok(Backend::new_dynamic(Arc::new(self.clone())))
     }
+
+    fn relocated(&self, new_start: VirtAddr, _aspace: &Arc<Mutex<AddrSpace>>) -> KResult<Backend> {
+        // CowBackend uses a global FRAME_TABLE for frame lifetime management
+        // and does not need per-aspace eviction listeners unlike FileBackend.
+        Ok(Backend::new_dynamic(Arc::new(CowBackend {
+            start: new_start,
+            size: self.size,
+            file: self.file.clone(),
+        })))
+    }
+
+    fn is_anonymous(&self) -> bool {
+        self.file.is_none()
+    }
 }
 
 pub fn new_cow(

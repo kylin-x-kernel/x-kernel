@@ -2,9 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Device file operations trait and memory mapping types.
+//! Device file operations trait and memory mapping callback.
 
-use alloc::sync::Arc;
 use core::any::Any;
 
 use kpoll::Pollable;
@@ -12,20 +11,17 @@ use memaddr::PhysAddrRange;
 
 use crate::{NodeFlags, VfsError, VfsResult};
 
-/// Memory mapping behavior for device files.
-pub enum DeviceMmap {
-    /// The device is not mappable.
-    None,
-    /// Maps to a physical address range.
-    Physical(PhysAddrRange),
-    /// The device is read-only and will be mapped as CoW.
-    ReadOnly,
-    /// Maps to a cached file backend.
-    ///
-    /// The payload is type-erased so that this crate does not depend on the
-    /// page-cache implementation. Producers wrap a `CachedFile` in
-    /// `Arc::new(..)` and consumers downcast it back.
-    Cache(Arc<dyn Any + Send + Sync>),
+/// Callback trait for establishing memory mappings.
+///
+/// Passed to `FileLike::mmap` / `DeviceFileOps::mmap` so that devices and files
+/// can request mapping establishment without depending on the memory subsystem.
+/// Implemented by the mmap syscall layer (posix-mm).
+pub trait MmapMapper {
+    /// Map a physical address range (device memory, framebuffer, etc.)
+    fn map_physical(&mut self, range: PhysAddrRange) -> VfsResult<()>;
+
+    /// Request a file-backed mapping (regular file or cached file).
+    fn map_file_backed(&mut self) -> VfsResult<()>;
 }
 
 /// Trait for device file backend operations.
@@ -50,9 +46,10 @@ pub trait DeviceFileOps: Send + Sync {
         None
     }
 
-    /// Returns the memory mapping behavior of the device.
-    fn mmap(&self) -> DeviceMmap {
-        DeviceMmap::None
+    /// Handle mmap for this device via the provided mapper.
+    /// Default returns `ENODEV` (mmap not supported).
+    fn mmap(&self, _mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        Err(VfsError::NoSuchDevice)
     }
 
     /// Returns the flags for the device node.

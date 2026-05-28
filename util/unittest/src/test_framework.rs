@@ -852,7 +852,7 @@ mod tests_test_framework {
         assert_eq!(ignored.run(), TestResult::Ignored);
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_custom_executor_paths() {
         let old = CUSTOM_TEST_EXECUTOR.swap(0, Ordering::AcqRel);
         CUSTOM_CALLS.store(0, AtomicOrdering::Relaxed);
@@ -1024,7 +1024,7 @@ mod tests_test_framework {
         TEST_FAILED_FLAG.store(false, Ordering::Relaxed);
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_custom_executor_can_be_restored_after_use() {
         let old = CUSTOM_TEST_EXECUTOR.swap(0, Ordering::AcqRel);
         CUSTOM_CALLS.store(0, AtomicOrdering::Relaxed);

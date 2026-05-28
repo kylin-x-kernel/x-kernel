@@ -12,6 +12,7 @@ use kerrno::{KError, KResult};
 use kio::prelude::*;
 use kpoll::Pollable;
 use ksync::RwLock;
+use kvfs::MmapMapper;
 
 use crate::{FdTable, Kstat};
 
@@ -60,6 +61,12 @@ pub trait FileLike: Pollable + DowncastSync {
 
     fn set_nonblocking(&self, _nonblocking: bool) -> KResult {
         Ok(())
+    }
+
+    /// Handle mmap for this file via the provided mapper.
+    /// Default returns `ENODEV` (mmap not supported).
+    fn mmap(&self, _mapper: &mut dyn MmapMapper) -> KResult<()> {
+        Err(KError::NoSuchDevice)
     }
 
     /// Returns a typed descriptor entry from a specific descriptor table.

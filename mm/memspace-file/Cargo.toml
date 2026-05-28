@@ -11,6 +11,7 @@ repository.workspace = true
 karch = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
+kvfs = { workspace = true }
 khal = { workspace = true }
 kspin = { workspace = true }
 ksync = { workspace = true }

@@ -10,8 +10,10 @@ extern crate log;
 
 mod cow;
 mod file;
+pub mod mmap;
 
 pub use self::{
     cow::{CowBackend, new_alloc, new_cow},
     file::{FileBackend, new_file},
+    mmap::FileMapper,
 };

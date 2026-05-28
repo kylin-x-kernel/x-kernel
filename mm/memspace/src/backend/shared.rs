@@ -7,7 +7,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::ops::Deref;
 
 use kerrno::KResult;
-use khal::paging::{MappingFlags, PageSize, PageTableMut};
+use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
 
@@ -75,6 +75,14 @@ impl SharedBackend {
         &self.pages
     }
 
+    /// Create a relocated shared backend at a new start address with the same pages.
+    pub fn relocated(&self, new_start: VirtAddr) -> Backend {
+        Backend::Shared(Self {
+            start: new_start,
+            pages: self.pages.clone(),
+        })
+    }
+
     fn pages_starting_from(&self, start: VirtAddr) -> &[PhysAddr] {
         debug_assert!(start.is_aligned(self.pages.size));
         let start_index = divide_page(start - self.start, self.pages.size);
@@ -102,7 +110,10 @@ impl BackendOps for SharedBackend {
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
         debug!("Shared::unmap: {:?}", range);
         for vaddr in pages_in(range, self.pages.size)? {
-            pgtbl.unmap(vaddr).map_err(map_paging_err)?;
+            match pgtbl.unmap(vaddr) {
+                Ok(_) | Err(PagingError::NotMapped) => {}
+                Err(err) => return Err(map_paging_err(err)),
+            }
         }
         Ok(())
     }
@@ -123,5 +134,11 @@ impl Backend {
     /// Create a shared mapping backend.
     pub fn new_shared(start: VirtAddr, pages: Arc<SharedPages>) -> Self {
         Self::Shared(SharedBackend { start, pages })
+    }
+
+    /// Create an anonymous shared mapping backend, allocating fresh physical pages.
+    pub fn new_anonymous_shared(start: VirtAddr, size: usize, pgsize: PageSize) -> KResult<Self> {
+        let pages = Arc::new(SharedPages::new(size, pgsize)?);
+        Ok(Self::Shared(SharedBackend { start, pages }))
     }
 }

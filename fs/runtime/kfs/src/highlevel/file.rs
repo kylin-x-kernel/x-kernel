@@ -31,7 +31,8 @@ use kpoll::{IoEvents, Pollable};
 use ksync::{Mutex, RwLock};
 use ktask::future::{block_on, poll_io};
 use kvfs::{
-    FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
+    FileNode, Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsResult,
+    path::Path,
 };
 use lru::LruCache;
 
@@ -1190,6 +1191,17 @@ impl FileLike for File {
             .get_file_like(fd)?
             .downcast_arc()
             .map_err(|_| KError::InvalidInput)
+    }
+
+    fn mmap(&self, mapper: &mut dyn MmapMapper) -> KResult<()> {
+        match &self.inner {
+            FileBackend::Cached(_) => mapper.map_file_backed()?,
+            FileBackend::Direct(loc) => match loc.node_type() {
+                NodeType::CharacterDevice | NodeType::BlockDevice => loc.mmap(mapper)?,
+                _ => mapper.map_file_backed()?,
+            },
+        }
+        Ok(())
     }
 }
 
