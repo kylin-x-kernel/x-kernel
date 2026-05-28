@@ -186,7 +186,7 @@ impl Vm {
     ///
     /// `prog` must be a flat sequence of 8-byte instruction slots.
     pub fn run_with_initial_regs(&mut self, prog: &[u8], initial: InitialRegs) -> Result<u64> {
-        if prog.len() % SLOT_SIZE != 0 {
+        if !prog.len().is_multiple_of(SLOT_SIZE) {
             return Err(Error::UnalignedProgram);
         }
         let num_slots = prog.len() / SLOT_SIZE;
