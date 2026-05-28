@@ -3,6 +3,8 @@
 // See LICENSES for license details.
 
 //! Synchronization primitives for one-time evaluation.
+//!
+//! See [`Once`] for the main type.
 
 use core::{
     cell::UnsafeCell,
@@ -18,6 +20,19 @@ use core::{
 /// `Once`).
 ///
 /// Because [`Once::new`] is `const`, this primitive may be used to safely initialize statics.
+///
+/// This type is `no_std`-compatible and uses spin-wait for coordination during
+/// initialization. After initialization, access is a single atomic load.
+///
+/// # Poisoning
+///
+/// If the initialization closure panics, the `Once` is permanently poisoned. All subsequent
+/// calls to [`call_once`](Self::call_once), [`try_call_once`](Self::try_call_once),
+/// [`wait`](Self::wait), or [`poll`](Self::poll) will panic.
+///
+/// For fallible initialization, use [`try_call_once`](Self::try_call_once) instead — if the
+/// closure returns `Err`, the cell is reset to `Uninitialized` and can be retried, rather
+/// than being permanently poisoned.
 ///
 /// # Examples
 ///
@@ -70,8 +85,9 @@ mod status {
     #[repr(transparent)]
     pub struct AtomicStatus(AtomicU8);
 
-    // Four possible states for the Once cell, encoded in the atomic u8 storage.
-    // These represent the lifecycle: uninitialized -> executing -> done/failed
+    /// Four possible states for the `Once` cell, encoded as `u8` discriminants in
+    /// the atomic state word. Represents the lifecycle:
+    /// `Uninitialized` → `Initializing` → `Ready` / `Failed`
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub enum Status {
@@ -147,8 +163,8 @@ impl<T> Once<T> {
     /// will be executed if this is the first time `call_once` has been called,
     /// and otherwise the routine will *not* be invoked.
     ///
-    /// This method will block the calling thread if another initialization
-    /// routine is currently running.
+    /// This method will spin-wait if another thread is currently performing
+    /// initialization.
     ///
     /// When this function returns, it is guaranteed that some initialization
     /// has run and completed (it may not be the closure specified). The
@@ -185,10 +201,10 @@ impl<T> Once<T> {
     }
 
     /// This method is similar to `call_once`, but allows the given closure to
-    /// fail, and lets the `Once` in a uninitialized state if it does.
+    /// fail, and leaves the `Once` in an uninitialized state if it does.
     ///
-    /// This method will block the calling thread if another initialization
-    /// routine is currently running.
+    /// This method will spin-wait if another thread is currently performing
+    /// initialization.
     ///
     /// When this function returns without error, it is guaranteed that some
     /// initialization has run and completed (it may not be the closure
@@ -304,6 +320,10 @@ impl<T> Once<T> {
 
     /// Blocks until the [`Once`] contains a value.
     ///
+    /// This method **spin-waits** using `core::hint::spin_loop` while another thread
+    /// is initializing. There is no timeout or blocking primitive involved. Use this
+    /// only when initialization is expected to complete quickly (e.g., kernel early boot).
+    ///
     /// Note that in releases prior to `0.7`, this function had the behaviour of [`Once::poll`].
     ///
     /// # Panics
@@ -321,8 +341,11 @@ impl<T> Once<T> {
         }
     }
 
-    /// Like [`Once::get`], but will spin if the [`Once`] is in the process of being
-    /// initialized. If initialization has not even begun, `None` will be returned.
+    /// Like [`Once::get`], but will **spin-wait** if the [`Once`] is in the process
+    /// of being initialized. If initialization has not even begun, `None` will be
+    /// returned.
+    ///
+    /// This method uses `core::hint::spin_loop` to wait. There is no timeout.
     ///
     /// Note that in releases prior to `0.7`, this function was named `wait`.
     ///
@@ -354,19 +377,27 @@ impl<T> Once<T> {
 }
 
 impl<T> Once<T> {
-    /// Initialization constant of [`Once`].
+    /// A const-initialized [`Once`] in the `Uninitialized` state.
+    ///
+    /// Equivalent to [`Once::new()`], but as an associated constant.
     #[allow(clippy::declare_interior_mutable_const)]
     pub const INIT: Self = Self {
         state: AtomicStatus::new(Status::Uninitialized),
         storage: UnsafeCell::new(MaybeUninit::uninit()),
     };
 
-    /// Creates a new [`Once`].
+    /// Creates a new [`Once`] in the `Uninitialized` state.
+    ///
+    /// The returned cell does not contain a value and must be initialized via
+    /// [`call_once`](Self::call_once) or [`try_call_once`](Self::try_call_once).
     pub const fn new() -> Self {
         Self::INIT
     }
 
-    /// Creates a new initialized [`Once`].
+    /// Creates a new [`Once`] in the `Ready` state with the given value.
+    ///
+    /// The cell behaves as if initialization has already completed. Subsequent
+    /// calls to [`get`](Self::get) will return `Some(&data)`.
     pub const fn initialized(data: T) -> Self {
         Self {
             state: AtomicStatus::new(Status::Ready),
@@ -409,6 +440,10 @@ impl<T> Once<T> {
     }
 
     /// Returns a reference to the inner value if the [`Once`] has been initialized.
+    ///
+    /// This is a non-blocking, non-panicking check using a single `Acquire` load.
+    /// Returns `None` if initialization has not completed, is in progress, or has
+    /// failed (poisoned).
     pub fn get(&self) -> Option<&T> {
         // Check if initialization is complete
         let current_state = self.state.load(Ordering::Acquire);
@@ -468,10 +503,11 @@ impl<T> Once<T> {
         unsafe { self.get_value_mut_unchecked() }
     }
 
-    /// Returns a the inner value if the [`Once`] has been initialized.
+    /// Returns the inner value if the [`Once`] has been initialized.
     ///
     /// Because this method requires ownership of the [`Once`], no synchronization overhead
-    /// is required to access the inner value. In effect, it is zero-cost.
+    /// is required to access the inner value. In effect, it is zero-cost. Returns `None`
+    /// if the cell is not in the `Ready` state.
     pub fn try_into_inner(mut self) -> Option<T> {
         if *self.state.get_mut() == Status::Ready {
             Some(unsafe { self.extract_value_unchecked() })
@@ -480,7 +516,8 @@ impl<T> Once<T> {
         }
     }
 
-    /// Returns a the inner value if the [`Once`] has been initialized.
+    /// Returns the inner value if the [`Once`] has been initialized.
+    ///
     /// # Safety
     ///
     /// This is *extremely* unsafe if the `Once` has not already been initialized because a reference to uninitialized

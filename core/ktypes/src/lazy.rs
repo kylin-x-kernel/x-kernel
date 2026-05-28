@@ -6,6 +6,8 @@
 //!
 //! Implementation adapted from the `SyncLazy` type of the standard library. See:
 //! <https://doc.rust-lang.org/std/lazy/struct.SyncLazy.html>
+//!
+//! See [`Lazy`] for the main type.
 
 use core::{cell::Cell, fmt, ops::Deref};
 
@@ -13,11 +15,26 @@ use crate::once::Once;
 
 /// A value which is initialized on the first access.
 ///
-/// This type is a thread-safe `Lazy`, and can be used in statics.
+/// This type is a thread-safe `Lazy`, and can be used in statics. It is
+/// `no_std`-compatible and uses spin-wait for coordination during initialization.
+///
+/// # Thread Safety
+///
+/// `Lazy<T, F>` implements `Sync` when `Once<T>: Sync`, which requires `T: Send + Sync`.
+/// The factory function `F` does not need to be `Sync` — it is consumed via
+/// `Cell::take()` under the `Once` synchronization, so only one thread ever reads it.
+///
+/// # Poisoning
+///
+/// If the initialization closure panics, the `Lazy` is permanently poisoned.
+/// All subsequent accesses via [`Deref`] will panic. This matches the behavior
+/// of `std::sync::SyncLazy`.
 ///
 /// # Examples
 ///
 /// ```
+/// use std::collections::HashMap;
+///
 /// use ktypes::Lazy;
 ///
 /// static HASHMAP: Lazy<HashMap<i32, String>> = Lazy::new(|| {
@@ -75,8 +92,9 @@ unsafe impl<T, F: Send> Sync for Lazy<T, F> where Once<T>: Sync {}
 // auto-derived `Send` impl is OK.
 
 impl<T, F> Lazy<T, F> {
-    /// Creates a new lazy value with the given initializing
-    /// function.
+    /// Creates a new lazy value with the given initializing function.
+    ///
+    /// This is a `const` constructor and can be used to initialize statics.
     pub const fn new(f: F) -> Self {
         Self {
             value_storage: Once::new(),
@@ -102,7 +120,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```
-    /// use spin::Lazy;
+    /// use ktypes::Lazy;
     ///
     /// let lazy = Lazy::new(|| 92);
     ///
