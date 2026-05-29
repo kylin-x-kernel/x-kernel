@@ -85,8 +85,8 @@ use crate::{
     tee::{
         self, TEE_ALG_DES3_CMAC, TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5,
         TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5, TEE_ALG_SHA3_224, TEE_ALG_SHA3_256, TEE_ALG_SHA3_384,
-        TEE_ALG_SHA3_512, TEE_ALG_SHAKE128, TEE_ALG_SHAKE256, TEE_ERROR_NODE_DISABLED,
-        TEE_TYPE_CONCAT_KDF_Z, TEE_TYPE_HKDF_IKM, TEE_TYPE_PBKDF2_PASSWORD,
+        TEE_ALG_SHA3_512, TEE_ALG_SHAKE128, TEE_ALG_SHAKE256, TEE_TYPE_CONCAT_KDF_Z,
+        TEE_TYPE_HKDF_IKM, TEE_TYPE_PBKDF2_PASSWORD,
         crypto::{
             self,
             crypto::{
@@ -96,7 +96,8 @@ use crate::{
                 crypto_acipher_rsassa_verify, crypto_acipher_sm2_pke_decrypt,
                 crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final, crypto_authenc_enc_final,
                 crypto_authenc_init, crypto_authenc_update_aad, crypto_cipher_final,
-                crypto_cipher_init, crypto_cipher_update, crypto_ecc_init, crypto_rsa_init,
+                crypto_cipher_init, crypto_cipher_max_output_len, crypto_cipher_update,
+                crypto_ecc_init, crypto_rsa_init,
             },
         },
         libmbedtls::bignum::BigNum,
@@ -185,8 +186,32 @@ pub(crate) struct TeeCrypState {
     pub id: u32,
 }
 
+/// Cipher operation context; ECB NOPAD partial input is buffered here (OP-TEE semantics).
+pub(crate) struct TeeCipherCtx {
+    pub cipher: Cipher,
+    pub pending: [u8; Self::PENDING_MAX],
+    pub pending_len: usize,
+    /// Stateful AES-XTS (mbedtls `cipher_update` does not continue tweak across calls).
+    pub xts: Option<crate::tee::crypto::aes_xts::TeeCipherXtsCtx>,
+}
+
+impl TeeCipherCtx {
+    pub(crate) const PENDING_MAX: usize = 32;
+}
+
+impl Clone for TeeCipherCtx {
+    fn clone(&self) -> Self {
+        Self {
+            cipher: self.cipher.clone(),
+            pending: self.pending,
+            pending_len: self.pending_len,
+            xts: self.xts.clone(),
+        }
+    }
+}
+
 pub(crate) enum CrypCtx {
-    CipherCtx(Cipher),
+    CipherCtx(Box<TeeCipherCtx>),
     HashCtx(Md),
     AsyCtx(Pk),
     HmacCtx(Hmac),
@@ -673,7 +698,7 @@ pub fn tee_cryp_state_alloc(
             if (tee_alg_get_chain_mode(algo) == TEE_CHAIN_MODE_XTS && (!o1_ok || !o2_ok))
                 || (tee_alg_get_chain_mode(algo) != TEE_CHAIN_MODE_XTS && (!o1_ok || o2_ok))
             {
-                return Err(TEE_ERROR_NODE_DISABLED);
+                return Err(TEE_ERROR_BAD_PARAMETERS);
             }
         }
         TEE_OPERATION_AE => {
@@ -688,7 +713,7 @@ pub fn tee_cryp_state_alloc(
         }
         TEE_OPERATION_DIGEST => {
             if o1_ok || o2_ok {
-                return Err(TEE_ERROR_NODE_DISABLED);
+                return Err(TEE_ERROR_BAD_PARAMETERS);
             }
         }
         TEE_OPERATION_ASYMMETRIC_CIPHER | TEE_OPERATION_ASYMMETRIC_SIGNATURE => {
@@ -1073,21 +1098,19 @@ pub fn tee_cryp_cipher_init(
 
     // 如果key2存在，则获取key2密钥
     if let Some(k) = key2 {
-        // 获取key2_obj
-        if let Ok(obj_key2) = tee_obj_get(k as _) {
-            let obj_key2_guard = obj_key2.lock();
-            if obj_key2_guard.attr.is_empty() {
-                return Err(TEE_ERROR_BAD_STATE);
-            }
-
-            // 从tee_obj中读取密钥
-            if let TeeCryptObj::obj_secret(k) = &obj_key2_guard.attr[0] {
-                key.extend_from_slice(k.key());
-            } else {
-                return Err(TEE_ERROR_BAD_STATE);
-            }
+        let obj_key2 = tee_obj_get(k as _)?;
+        let obj_key2_guard = obj_key2.lock();
+        if obj_key2_guard.attr.is_empty() {
+            return Err(TEE_ERROR_BAD_STATE);
         }
-    };
+
+        // 从tee_obj中读取密钥
+        if let TeeCryptObj::obj_secret(k) = &obj_key2_guard.attr[0] {
+            key.extend_from_slice(k.key());
+        } else {
+            return Err(TEE_ERROR_BAD_STATE);
+        }
+    }
 
     drop(cs_guard);
     crypto_cipher_init(cs.clone(), key.as_slice(), iv, padding_mode)
@@ -1112,15 +1135,8 @@ pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     }
 }
 
-/// 注意:
-/// 对于ECB模式而言，每次只能传入一个块数据，即input.len() == block_size
-/// 需要多次调用tee_cryp_cipher_update()函数
-/// 对于其他加密模式，可以一次性传入所有加密数据，也可以多次传入
-/// 多次调用时，输出区域不要重叠
-///
-/// 在使用除ECB外的其他模式时，请确保output长度至少比input大一个block_size
-/// 多余的一个block_size输出是为潜在的填充值所设定
-/// SM4的block_size为16字节
+/// 不足一块的输入会缓存在 `TeeCipherCtx::pending`（OP-TEE 语义）；
+/// `output` 须能容纳本次可能写出的密文字节数（可能为 0）。
 pub fn tee_cryp_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
@@ -1133,11 +1149,13 @@ pub fn tee_cryp_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeRe
         return Err(TEE_ERROR_BAD_STATE);
     }
 
-    if output.len() < input.len() {
+    drop(cs_guard);
+
+    let max_out = crypto_cipher_max_output_len(cs.clone(), input.len())?;
+    if output.len() < max_out {
         return Err(TEE_ERROR_SHORT_BUFFER);
     }
 
-    drop(cs_guard);
     crypto_cipher_update(cs.clone(), input, output)
 }
 
@@ -1171,7 +1189,18 @@ pub fn syscall_cipher_update(
     let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
     let mut dst = bb_memdup_user(dst_slice)?;
 
-    dst_len = tee_cryp_cipher_update(arg0 as _, &src, &mut dst)?;
+    let id = arg0 as u32;
+    {
+        let cs = tee_cryp_state_get(id)?;
+        let mut guard = cs.lock();
+        if let CrypCtx::CipherCtx(op) = &mut guard.ctx
+            && let Some(xts) = &mut op.xts
+        {
+            xts.record_user_base_if_unset(dst_ptr as usize);
+        }
+    }
+
+    dst_len = tee_cryp_cipher_update(id, &src, &mut dst)?;
 
     // Copy dst to user
     unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
@@ -1194,13 +1223,36 @@ pub fn tee_cryp_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
 
     drop(cs_guard);
 
+    {
+        let cs = tee_cryp_state_get(id)?;
+        let mut guard = cs.lock();
+        if let CrypCtx::CipherCtx(op) = &mut guard.ctx
+            && let Some(xts) = &mut op.xts
+        {
+            xts.in_final_syscall = true;
+        }
+    }
+
+    // 本次 syscall 的 output 仅覆盖当前 memref，始终从 output[0] 写入。
+    // TA 全局偏移 `xts.emitted_bytes` 只用于计算 patch 的虚拟地址，不能用作 output 下标。
     let mut len = 0;
     if !input.is_empty() {
         len = tee_cryp_cipher_update(id, input, output)?;
     }
 
-    len += crypto_cipher_final(cs.clone(), &mut output[len..])?;
-    Ok(len)
+    let tail = crypto_cipher_final(cs.clone(), &mut output[len..])?;
+
+    {
+        let cs = tee_cryp_state_get(id)?;
+        let mut guard = cs.lock();
+        if let CrypCtx::CipherCtx(op) = &mut guard.ctx
+            && let Some(xts) = &mut op.xts
+        {
+            xts.in_final_syscall = false;
+        }
+    }
+
+    Ok(len + tail)
 }
 
 pub fn syscall_cipher_final(
@@ -1232,11 +1284,64 @@ pub fn syscall_cipher_final(
     let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
     let mut dst = bb_memdup_user(dst_slice)?;
 
-    dst_len = tee_cryp_cipher_final(arg0 as _, &src, &mut dst)?;
+    let id = arg0 as u32;
+    {
+        let cs = tee_cryp_state_get(id)?;
+        let mut guard = cs.lock();
+        if let CrypCtx::CipherCtx(op) = &mut guard.ctx
+            && let Some(xts) = &mut op.xts
+        {
+            xts.record_user_base_if_unset(dst_ptr as usize);
+        }
+    }
+
+    dst_len = tee_cryp_cipher_final(id, &src, &mut dst)?;
+
+    xts_merge_patch_into_dst(id, dst_ptr as usize, &mut dst)?;
 
     // Copy dst to user
     unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
     unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
+
+    xts_apply_patch_to_user(id, dst_ptr as usize, dst_len)?;
+
+    Ok(())
+}
+
+/// If the patched block lies in this syscall's memref, update the kernel copy before `copy_to_user`.
+fn xts_merge_patch_into_dst(id: u32, dst_ptr: usize, dst: &mut [u8]) -> TeeResult {
+    let cs = tee_cryp_state_get(id)?;
+    let mut guard = cs.lock();
+    let CrypCtx::CipherCtx(op) = &mut guard.ctx else {
+        return Ok(());
+    };
+    if let Some(xts) = &op.xts {
+        xts.merge_patch_into_slice(dst_ptr, dst);
+    }
+    Ok(())
+}
+
+/// Patch the previous full XTS block in TA memory when it is outside this syscall's memref.
+fn xts_apply_patch_to_user(id: u32, dst_ptr: usize, dst_len: usize) -> TeeResult {
+    let cs = tee_cryp_state_get(id)?;
+    let mut guard = cs.lock();
+    let CrypCtx::CipherCtx(op) = &mut guard.ctx else {
+        return Ok(());
+    };
+    let Some(xts) = &mut op.xts else {
+        return Ok(());
+    };
+    let Some(patch) = xts.patch_block.take() else {
+        return Ok(());
+    };
+    let Some(patch_va) = xts.patch_user_off else {
+        return Ok(());
+    };
+    if patch_va >= dst_ptr && patch_va + patch.len() <= dst_ptr + dst_len {
+        return Ok(());
+    }
+    let patch_slice = unsafe { core::slice::from_raw_parts_mut(patch_va as *mut u8, patch.len()) };
+    unsafe { copy_to_user(patch_slice, &patch, patch.len() * size_of::<u8>())? };
     Ok(())
 }
 
@@ -3032,6 +3137,463 @@ pub mod tests_cryp {
 
         let result = tee_cryp_authenc_update_aad(state, b"aad");
         assert_eq!(result.err(), Some(TEE_ERROR_BAD_STATE));
+    }
+
+    fn des3_ecb_encrypt_test_setup(key: &[u8]) -> TeeResult<u32> {
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_DES3 as _, 192, obj_id.as_user_ref())?;
+        let obj_id = obj_id.read();
+
+        let obj_arc = tee_obj_get(obj_id as tee_obj_id_type)?;
+        let mut obj = obj_arc.lock();
+        let mut secret = tee_cryp_obj_secret_wrapper::new(24);
+        secret.set_secret_data(key)?;
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj);
+
+        let mut state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_DES3_ECB_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id),
+            None,
+            &mut state,
+        )?;
+        tee_cryp_cipher_init(state, None, CipherPaddingMode::None)?;
+        Ok(state)
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_des3_ecb_2key_cipher_init() {
+        let key = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff,
+        ];
+        let res = des3_ecb_encrypt_test_setup(&key);
+        assert!(res.is_ok());
+    }
+
+    /// mbedtls `test_vec_ecb` vector for DES-EDE-ECB encrypt.
+    #[unittest::def_test(custom)]
+    fn test_des3_ecb_2key_encrypt() {
+        let key = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff,
+        ];
+        let plain = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let expect = [0x92, 0x95, 0xb5, 0x9b, 0xb3, 0x84, 0x73, 0x6e];
+
+        let state = des3_ecb_encrypt_test_setup(&key).unwrap();
+        let mut out = [0u8; 8];
+        let len = tee_cryp_cipher_update(state, &plain, &mut out).unwrap();
+        assert_eq!(len, 8);
+        assert_eq!(&out, &expect);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_des3_ecb_3key_cipher_init() {
+        let key = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+        ];
+        let res = des3_ecb_encrypt_test_setup(&key);
+        assert!(res.is_ok());
+    }
+
+    fn aes_xts_test_setup_keys(key1: &[u8], key2: &[u8]) -> (tee_obj_id_type, tee_obj_id_type) {
+        let mut obj1_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut obj2_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj1_id.as_user_ref()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj2_id.as_user_ref()).unwrap();
+        let obj1_id = obj1_id.read() as tee_obj_id_type;
+        let obj2_id = obj2_id.read() as tee_obj_id_type;
+
+        for (id, material) in [(obj1_id, key1), (obj2_id, key2)] {
+            let obj_arc = tee_obj_get(id).unwrap();
+            let mut obj = obj_arc.lock();
+            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+            secret.set_secret_data(material).unwrap();
+            let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::obj_secret(secret));
+        }
+        (obj1_id, obj2_id)
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_aes_xts_incremental_update_matches_one_shot() {
+        // IEEE P1619 vector (mbedtls aes_test_xts index 1): 32-byte unit.
+        let key1 = [0x11u8; 16];
+        let key2 = [0x22u8; 16];
+        let iv = [
+            0x33, 0x33, 0x33, 0x33, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        let plain = [0x44u8; 32];
+        let expect = [
+            0xc4, 0x54, 0x18, 0x5e, 0x6a, 0x16, 0x93, 0x6e, 0x39, 0x33, 0x40, 0x38, 0xac, 0xef,
+            0x83, 0x8b, 0xfb, 0x18, 0x6f, 0xff, 0x74, 0x80, 0xad, 0xc4, 0x28, 0x93, 0x82, 0xec,
+            0xd6, 0xd3, 0x94, 0xf0,
+        ];
+
+        let (obj1_id, obj2_id) = aes_xts_test_setup_keys(&key1, &key2);
+
+        let mut state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_XTS,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj1_id as _),
+            Some(obj2_id as _),
+            &mut state,
+        )
+        .unwrap();
+        tee_cryp_cipher_init(state, Some(&iv), CipherPaddingMode::None).unwrap();
+
+        let mut out = [0u8; 32];
+        let mut off = 0usize;
+        // Simulate regression_4003 in_incr=8: first diff at 16 if tweak is not continued.
+        for chunk in plain.chunks(8) {
+            let n = tee_cryp_cipher_update(state, chunk, &mut out[off..]).unwrap();
+            off += n;
+        }
+        aes_xts_test_set_user_base(state, 0);
+        let n = tee_cryp_cipher_final(state, &[], &mut out[off..]).unwrap();
+        aes_xts_test_apply_patch(state, &mut out);
+        off += n;
+        assert_eq!(off, 32);
+        assert_eq!(&out, &expect);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_aes_xts_512_byte_incremental_update() {
+        use crate::tee::crypto::aes_xts::{aes_xts_crypt, aes_xts_init};
+
+        let key1 = [0x42u8; 16];
+        let key2 = [0x24u8; 16];
+        let iv = [0x07u8; 16];
+        let plain = [0x5au8; 512];
+        let mut expect = [0u8; 512];
+
+        let mut combined = Vec::with_capacity(32);
+        combined.extend_from_slice(&key1);
+        combined.extend_from_slice(&key2);
+        let mut xts = aes_xts_init(&combined, Some(&iv), false).unwrap();
+        aes_xts_crypt(&mut xts, &plain, &mut expect).unwrap();
+
+        let (obj1_id, obj2_id) = aes_xts_test_setup_keys(&key1, &key2);
+
+        let mut state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_XTS,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj1_id as _),
+            Some(obj2_id as _),
+            &mut state,
+        )
+        .unwrap();
+        tee_cryp_cipher_init(state, Some(&iv), CipherPaddingMode::None).unwrap();
+
+        let mut out = [0u8; 512];
+        let mut off = 0usize;
+        for chunk in plain.chunks(8) {
+            off += tee_cryp_cipher_update(state, chunk, &mut out[off..]).unwrap();
+        }
+        aes_xts_test_set_user_base(state, 0);
+        off += tee_cryp_cipher_final(state, &[], &mut out[off..]).unwrap();
+        aes_xts_test_apply_patch(state, &mut out);
+        assert_eq!(off, 512);
+        assert_eq!(&out, &expect);
+    }
+
+    fn aes_xts_reference_crypt(
+        key1: &[u8; 16],
+        key2: &[u8; 16],
+        iv: &[u8; 16],
+        plain: &[u8],
+        decrypt: bool,
+    ) -> alloc::vec::Vec<u8> {
+        use crate::tee::crypto::aes_xts::{aes_xts_crypt, aes_xts_init};
+
+        let mut combined = alloc::vec::Vec::with_capacity(32);
+        combined.extend_from_slice(key1);
+        combined.extend_from_slice(key2);
+        let mut xts = aes_xts_init(&combined, Some(iv), decrypt).unwrap();
+        let mut out = alloc::vec![0u8; plain.len()];
+        aes_xts_crypt(&mut xts, plain, &mut out).unwrap();
+        out
+    }
+
+    /// Buffered update + final, matching libutee split for non-block-aligned lengths.
+    fn aes_xts_reference_crypt_buffered(
+        key1: &[u8; 16],
+        key2: &[u8; 16],
+        iv: &[u8; 16],
+        input: &[u8],
+        decrypt: bool,
+    ) -> alloc::vec::Vec<u8> {
+        use crate::tee::crypto::aes_xts::{
+            AesXtsStream, aes_xts_final_buffered, aes_xts_init, aes_xts_update_buffered,
+        };
+
+        let mut combined = alloc::vec::Vec::with_capacity(32);
+        combined.extend_from_slice(key1);
+        combined.extend_from_slice(key2);
+        let mut xts = aes_xts_init(&combined, Some(iv), decrypt).unwrap();
+        let mut out = alloc::vec![0u8; input.len()];
+        let mut pending = [0u8; 32];
+        let mut pending_len = 0usize;
+        let rem = input.len() % 16;
+        let w = if rem == 0 {
+            let stream = AesXtsStream {
+                prior_bytes: 0,
+                is_final: true,
+            };
+            aes_xts_update_buffered(
+                &mut xts,
+                &mut pending,
+                &mut pending_len,
+                input,
+                &mut out,
+                &stream,
+            )
+            .unwrap()
+        } else {
+            let stream_up = AesXtsStream {
+                prior_bytes: 0,
+                is_final: false,
+            };
+            aes_xts_update_buffered(
+                &mut xts,
+                &mut pending,
+                &mut pending_len,
+                &input[..input.len() - rem],
+                &mut out,
+                &stream_up,
+            )
+            .unwrap()
+        };
+        let stream_fin = AesXtsStream {
+            prior_bytes: input.len() - rem,
+            is_final: true,
+        };
+        let (n, patch) = aes_xts_final_buffered(
+            &mut xts,
+            &mut pending,
+            &mut pending_len,
+            &input[input.len() - rem..],
+            &mut out[w..],
+            &stream_fin,
+        )
+        .unwrap();
+        if let Some(pb) = patch {
+            if w >= 16 {
+                out[w - 16..w].copy_from_slice(&pb);
+            }
+        }
+        core::assert_eq!(w + n, input.len());
+        out
+    }
+
+    fn aes_xts_test_set_user_base(state: u32, base: usize) {
+        let cs = tee_cryp_state_get(state).unwrap();
+        let mut guard = cs.lock();
+        if let CrypCtx::CipherCtx(op) = &mut guard.ctx
+            && let Some(xts) = &mut op.xts
+        {
+            xts.user_base = Some(base);
+        }
+    }
+
+    fn aes_xts_test_apply_patch(state: u32, out: &mut [u8]) {
+        let cs = tee_cryp_state_get(state).unwrap();
+        let mut guard = cs.lock();
+        let CrypCtx::CipherCtx(op) = &mut guard.ctx else {
+            return;
+        };
+        if let Some(xts) = &mut op.xts {
+            xts.apply_patch_to_buffer(out);
+        }
+    }
+
+    fn aes_xts_tee_encrypt_incremental(
+        key1: &[u8; 16],
+        key2: &[u8; 16],
+        iv: &[u8; 16],
+        plain: &[u8],
+        chunk: usize,
+    ) -> alloc::vec::Vec<u8> {
+        let (obj1_id, obj2_id) = aes_xts_test_setup_keys(key1, key2);
+        let mut state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_XTS,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj1_id as _),
+            Some(obj2_id as _),
+            &mut state,
+        )
+        .unwrap();
+        tee_cryp_cipher_init(state, Some(iv), CipherPaddingMode::None).unwrap();
+        aes_xts_test_set_user_base(state, 0);
+
+        let mut out = alloc::vec![0u8; plain.len()];
+        let first = chunk.min(plain.len());
+        let mut off = tee_cryp_cipher_update(state, &plain[..first], &mut out[..]).unwrap();
+        off += tee_cryp_cipher_final(state, &plain[first..], &mut out[off..]).unwrap();
+        aes_xts_test_apply_patch(state, &mut out);
+        core::assert_eq!(off, plain.len());
+        out
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_aes_xts_host_split_block_aligned_decrypt() {
+        let key1 = [0x11u8; 16];
+        let key2 = [0x22u8; 16];
+        let iv = [0x33u8; 16];
+
+        let plain32 = alloc::vec![0x77u8; 32];
+        let ct32 = aes_xts_reference_crypt(&key1, &key2, &iv, &plain32, false);
+        let dec32 = aes_xts_reference_crypt_host_split(&key1, &key2, &iv, &ct32, true, 6);
+        core::assert_eq!(dec32, plain32, "host split 32-byte decrypt");
+
+        let plain512 = alloc::vec![0x66u8; 512];
+        let ct512 = aes_xts_reference_crypt(&key1, &key2, &iv, &plain512, false);
+        let dec512 = aes_xts_reference_crypt_host_split(&key1, &key2, &iv, &ct512, true, 8);
+        core::assert_eq!(dec512, plain512, "host split 512-byte decrypt");
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_aes_xts_short_lengths_stealing() {
+        let key1 = [0x11u8; 16];
+        let key2 = [0x22u8; 16];
+        let iv = [0x33u8; 16];
+
+        for len in 17..=20 {
+            let plain = alloc::vec![0x44u8; len];
+            let expect = aes_xts_reference_crypt(&key1, &key2, &iv, &plain, false);
+            let expect_buf = aes_xts_reference_crypt_buffered(&key1, &key2, &iv, &plain, false);
+            core::assert_eq!(expect, expect_buf, "reference crypt vs buffered len={len}");
+
+            let one_shot = aes_xts_tee_encrypt_incremental(&key1, &key2, &iv, &plain, len);
+            core::assert_eq!(one_shot, expect, "one-shot encrypt len={len}");
+
+            let incr6 = aes_xts_tee_encrypt_incremental(&key1, &key2, &iv, &plain, 6);
+            core::assert_eq!(incr6, expect, "incr6 encrypt len={len}");
+
+            let ct = aes_xts_reference_crypt(&key1, &key2, &iv, &plain, false);
+            let dec = aes_xts_reference_crypt(&key1, &key2, &iv, &ct, true);
+            core::assert_eq!(dec, plain, "reference roundtrip len={len}");
+
+            let ct_tee = aes_xts_tee_encrypt_incremental(&key1, &key2, &iv, &plain, 6);
+            let dec_tee = aes_xts_tee_decrypt_incremental(&key1, &key2, &iv, &ct_tee, 6);
+            core::assert_eq!(dec_tee, plain, "tee roundtrip len={len}");
+        }
+
+        let plain32 = alloc::vec![0x55u8; 32];
+        let ct32 = aes_xts_tee_encrypt_incremental(&key1, &key2, &iv, &plain32, 8);
+        let dec32 = aes_xts_tee_decrypt_incremental(&key1, &key2, &iv, &ct32, 8);
+        core::assert_eq!(dec32, plain32, "32-byte decrypt roundtrip");
+
+        let plain512 = alloc::vec![0x66u8; 512];
+        let ct512 = aes_xts_tee_encrypt_incremental(&key1, &key2, &iv, &plain512, 8);
+        let dec512 = aes_xts_tee_decrypt_incremental(&key1, &key2, &iv, &ct512, 8);
+        core::assert_eq!(dec512, plain512, "512-byte decrypt roundtrip");
+
+        let plain32b = alloc::vec![0x77u8; 32];
+        let ct32b = aes_xts_tee_encrypt_incremental(&key1, &key2, &iv, &plain32b, 6);
+        let dec32b = aes_xts_tee_decrypt_incremental(&key1, &key2, &iv, &ct32b, 6);
+        core::assert_eq!(dec32b, plain32b, "32-byte decrypt in_incr=6 roundtrip");
+    }
+
+    /// Host regression_4003: `cipher_update(in_incr)` then `cipher_do_final(rest)`.
+    fn aes_xts_reference_crypt_host_split(
+        key1: &[u8; 16],
+        key2: &[u8; 16],
+        iv: &[u8; 16],
+        input: &[u8],
+        decrypt: bool,
+        in_incr: usize,
+    ) -> alloc::vec::Vec<u8> {
+        use crate::tee::crypto::aes_xts::{
+            AesXtsStream, aes_xts_final_buffered, aes_xts_init, aes_xts_update_buffered,
+        };
+
+        let mut combined = alloc::vec::Vec::with_capacity(32);
+        combined.extend_from_slice(key1);
+        combined.extend_from_slice(key2);
+        let mut xts = aes_xts_init(&combined, Some(iv), decrypt).unwrap();
+        let mut out = alloc::vec![0u8; input.len()];
+        let mut pending = [0u8; 32];
+        let mut pending_len = 0usize;
+
+        let first = in_incr.min(input.len());
+        let stream_up = AesXtsStream {
+            prior_bytes: 0,
+            is_final: false,
+        };
+        let w = aes_xts_update_buffered(
+            &mut xts,
+            &mut pending,
+            &mut pending_len,
+            &input[..first],
+            &mut out,
+            &stream_up,
+        )
+        .unwrap();
+
+        let stream_fin = AesXtsStream {
+            prior_bytes: first,
+            is_final: true,
+        };
+        let (n, patch) = aes_xts_final_buffered(
+            &mut xts,
+            &mut pending,
+            &mut pending_len,
+            &input[first..],
+            &mut out[w..],
+            &stream_fin,
+        )
+        .unwrap();
+        if let Some(pb) = patch {
+            if w >= 16 {
+                out[w - 16..w].copy_from_slice(&pb);
+            }
+        }
+        core::assert_eq!(w + n, input.len());
+        out
+    }
+
+    fn aes_xts_tee_decrypt_incremental(
+        key1: &[u8; 16],
+        key2: &[u8; 16],
+        iv: &[u8; 16],
+        ct: &[u8],
+        chunk: usize,
+    ) -> alloc::vec::Vec<u8> {
+        let (obj1_id, obj2_id) = aes_xts_test_setup_keys(key1, key2);
+        let mut state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_XTS,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(obj1_id as _),
+            Some(obj2_id as _),
+            &mut state,
+        )
+        .unwrap();
+        tee_cryp_cipher_init(state, Some(iv), CipherPaddingMode::None).unwrap();
+        aes_xts_test_set_user_base(state, 0);
+
+        let mut out = alloc::vec![0u8; ct.len()];
+        let first = chunk.min(ct.len());
+        let mut off = tee_cryp_cipher_update(state, &ct[..first], &mut out[..]).unwrap();
+        off += tee_cryp_cipher_final(state, &ct[first..], &mut out[off..]).unwrap();
+        aes_xts_test_apply_patch(state, &mut out);
+        core::assert_eq!(off, ct.len());
+        out
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_des3_ecb_rejects_invalid_key_length() {
+        let key = [0u8; 8];
+        let res = des3_ecb_encrypt_test_setup(&key);
+        assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
 
     #[unittest::def_test(custom)]

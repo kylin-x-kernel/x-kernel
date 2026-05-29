@@ -8,7 +8,7 @@ use core::{default::Default, fmt, fmt::Debug};
 use ksync::Mutex;
 use mbedtls::{
     bignum::Mpi,
-    cipher::raw::{Cipher, CipherId, CipherMode, CipherPadding, CipherType, Operation},
+    cipher::raw::{Cipher, CipherId, CipherMode, CipherPadding, Operation},
     ecp::EcPoint,
     error::{Error as MbedError, HiError, LoError},
     hash::{Hmac, Md, Type as MdType},
@@ -25,9 +25,15 @@ use tee_raw_sys::*;
 use crate::tee::{
     TEE_ALG_DES3_CMAC, TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5, TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5,
     TeeResult,
-    crypto::crypto_impl::{
-        EccAlgoKeyPair, EccComKeyPair, EccKeypair, Sm2DsaKeyPair, Sm2KepKeyPair, Sm2PkeKeyPair,
-        crypto_ecc_keypair_ops, crypto_ecc_keypair_ops_generate,
+    crypto::{
+        aes_xts::{
+            TeeCipherXtsCtx, aes_xts_final_buffered, aes_xts_init, aes_xts_update_buffered,
+            cipher_uses_aes_xts_kernel,
+        },
+        crypto_impl::{
+            EccAlgoKeyPair, EccComKeyPair, EccKeypair, Sm2DsaKeyPair, Sm2KepKeyPair, Sm2PkeKeyPair,
+            crypto_ecc_keypair_ops, crypto_ecc_keypair_ops_generate,
+        },
     },
     libmbedtls::{
         bignum::{BigNum, crypto_bignum_allocate},
@@ -37,7 +43,7 @@ use crate::tee::{
     tee_api_defines_extensions::TEE_ALG_SM4_XTS,
     tee_obj::{tee_obj_get, tee_obj_id_type},
     tee_svc_cryp::{CryptoAttrRef, TeeCryptObj, tee_cryp_obj_secret_wrapper, tee_crypto_ops},
-    tee_svc_cryp2::{CipherPaddingMode, CrypCtx, CrypState, TeeCrypState},
+    tee_svc_cryp2::{CipherPaddingMode, CrypCtx, CrypState, TeeCipherCtx, TeeCrypState},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -543,6 +549,31 @@ pub(crate) fn crypto_mac_copy_state(ctx: &mut dyn CryptoMacCtx, src_ctx: &dyn Cr
     ctx.copy_state(src_ctx)
 }
 
+const DES3_KEY_LEN_2KEY: usize = 16;
+const DES3_KEY_LEN_3KEY: usize = 24;
+
+/// OP-TEE `mbedtls_des3_set2key_*` / `set3key_*`: 2-key 用 DES-EDE（`cipher_info` base id 为 DES），
+/// 3-key 用 DES-EDE3（base id 为 3DES）。`cipher_info_from_values(3DES, 128, …)` 选不到 2-key。
+fn cipher_setup_for_key(
+    cipher_id: CipherId,
+    cipher_mode: CipherMode,
+    key: &[u8],
+) -> Result<Cipher, u32> {
+    if cipher_id == CipherId::Des3 {
+        match key.len() {
+            DES3_KEY_LEN_2KEY => {
+                Cipher::setup(CipherId::Des, cipher_mode, 128).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+            }
+            DES3_KEY_LEN_3KEY => Cipher::setup(CipherId::Des3, cipher_mode, 192)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            _ => Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    } else {
+        Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as u32)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    }
+}
+
 pub(crate) fn crypto_cipher_init(
     cs: Arc<Mutex<TeeCrypState>>,
     key: &[u8],
@@ -595,6 +626,9 @@ pub(crate) fn crypto_cipher_init(
         TEE_ALG_DES3_ECB_NOPAD => {
             cipher_id = CipherId::Des3;
             cipher_mode = CipherMode::ECB;
+            if key.len() != DES3_KEY_LEN_2KEY && key.len() != DES3_KEY_LEN_3KEY {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
         }
         TEE_ALG_DES_CBC_NOPAD => {
             cipher_id = CipherId::Des;
@@ -603,6 +637,9 @@ pub(crate) fn crypto_cipher_init(
         TEE_ALG_DES3_CBC_NOPAD => {
             cipher_id = CipherId::Des3;
             cipher_mode = CipherMode::CBC;
+            if key.len() != DES3_KEY_LEN_2KEY && key.len() != DES3_KEY_LEN_3KEY {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
         }
         TEE_ALG_SM4_ECB_NOPAD => {
             cipher_id = CipherId::SM4;
@@ -623,21 +660,127 @@ pub(crate) fn crypto_cipher_init(
         _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
     }
 
-    if let Ok(mut cipher) = Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as _) {
-        cipher
-            .set_key(cipher_op, key)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        if let Some(iv) = iv {
-            cipher.set_iv(iv).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        }
-        cipher.set_padding(cipher_padding);
-        cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        cs_guard.state = CrypState::Initialized;
-        cs_guard.ctx = CrypCtx::CipherCtx(cipher);
-        Ok(())
-    } else {
-        Err(TEE_ERROR_BAD_PARAMETERS)
+    let mut cipher = cipher_setup_for_key(cipher_id, cipher_mode, key)?;
+    cipher
+        .set_key(cipher_op, key)
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    if let Some(iv) = iv {
+        cipher.set_iv(iv).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
     }
+    // Padding mode may be unsupported for some algorithms; OP-TEE ignores the return value.
+    let _ = cipher.set_padding(cipher_padding);
+    cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+
+    let xts = if cipher_uses_aes_xts_kernel(algo) {
+        let decrypt = matches!(mode, TEE_OperationMode::TEE_MODE_DECRYPT);
+        Some(TeeCipherXtsCtx::new(aes_xts_init(key, iv, decrypt)?))
+    } else {
+        None
+    };
+
+    cs_guard.state = CrypState::Initialized;
+    cs_guard.ctx = CrypCtx::CipherCtx(Box::new(TeeCipherCtx {
+        cipher,
+        pending: [0; TeeCipherCtx::PENDING_MAX],
+        pending_len: 0,
+        xts,
+    }));
+    Ok(())
+}
+
+fn cipher_uses_ecb_pending(algo: u32) -> bool {
+    matches!(
+        algo,
+        TEE_ALG_AES_ECB_NOPAD
+            | TEE_ALG_DES_ECB_NOPAD
+            | TEE_ALG_DES3_ECB_NOPAD
+            | TEE_ALG_SM4_ECB_NOPAD
+    )
+}
+
+pub(crate) fn crypto_cipher_max_output_len(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input_len: usize,
+) -> TeeResult<usize> {
+    let cs_guard = cs.lock();
+    let CrypCtx::CipherCtx(op) = &cs_guard.ctx else {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    };
+    let block_size = op.cipher.block_size();
+    let block_buffered = cipher_uses_ecb_pending(cs_guard.algo) || op.xts.is_some();
+    let max_out = if block_buffered {
+        (op.pending_len + input_len) / block_size * block_size
+    } else {
+        input_len + block_size
+    };
+    Ok(max_out)
+}
+
+fn cipher_ecb_buffered_update(
+    cipher: &mut Cipher,
+    pending: &mut [u8; TeeCipherCtx::PENDING_MAX],
+    pending_len: &mut usize,
+    block_size: usize,
+    input: &[u8],
+    output: &mut [u8],
+) -> TeeResult<usize> {
+    if block_size == 0 || block_size > TeeCipherCtx::PENDING_MAX {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let mut written = 0usize;
+    let mut in_pos = 0usize;
+
+    loop {
+        if *pending_len > 0 {
+            if in_pos >= input.len() {
+                break;
+            }
+            let need = block_size - *pending_len;
+            let take = core::cmp::min(need, input.len() - in_pos);
+            pending[*pending_len..*pending_len + take]
+                .copy_from_slice(&input[in_pos..in_pos + take]);
+            *pending_len += take;
+            in_pos += take;
+
+            if *pending_len == block_size {
+                if output.len() < written + block_size {
+                    return Err(TEE_ERROR_SHORT_BUFFER);
+                }
+                written += cipher
+                    .update(
+                        &pending[..block_size],
+                        &mut output[written..written + block_size],
+                    )
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                *pending_len = 0;
+            }
+            continue;
+        }
+
+        if in_pos + block_size <= input.len() {
+            if output.len() < written + block_size {
+                return Err(TEE_ERROR_SHORT_BUFFER);
+            }
+            written += cipher
+                .update(
+                    &input[in_pos..in_pos + block_size],
+                    &mut output[written..written + block_size],
+                )
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            in_pos += block_size;
+        } else {
+            break;
+        }
+    }
+
+    let remainder = input.len() - in_pos;
+    if remainder > 0 {
+        pending[..remainder].copy_from_slice(&input[in_pos..]);
+        *pending_len = remainder;
+    }
+
+    Ok(written)
 }
 
 pub(crate) fn crypto_cipher_update(
@@ -647,32 +790,31 @@ pub(crate) fn crypto_cipher_update(
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    if let CrypCtx::CipherCtx(cipher) = &mut cs_guard.ctx {
-        // mbedtls ECB 底层单次只处理一个分组；mbedtls-smx 的 `Cipher::update` 不会自动拆块。
-        // 在此按分组循环，使上层可一次传入任意整数倍分组长度的数据。
-        if matches!(
-            algo,
-            TEE_ALG_AES_ECB_NOPAD
-                | TEE_ALG_DES_ECB_NOPAD
-                | TEE_ALG_DES3_ECB_NOPAD
-                | TEE_ALG_SM4_ECB_NOPAD
-        ) {
-            let bs = cipher.block_size();
-            if !input.len().is_multiple_of(bs) {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-            if output.len() < input.len() {
-                return Err(TEE_ERROR_SHORT_BUFFER);
-            }
-            let mut written = 0usize;
-            for (inch, outch) in input.chunks(bs).zip(output.chunks_mut(bs)) {
-                written += cipher
-                    .update(inch, outch)
-                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            }
-            Ok(written)
+    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
+        if let Some(xts) = &mut op.xts {
+            let stream = xts.stream();
+            let n = aes_xts_update_buffered(
+                &mut xts.state,
+                &mut op.pending,
+                &mut op.pending_len,
+                input,
+                output,
+                &stream,
+            )?;
+            xts.after_update(input.len(), n);
+            Ok(n)
+        } else if cipher_uses_ecb_pending(algo) {
+            let block_size = op.cipher.block_size();
+            cipher_ecb_buffered_update(
+                &mut op.cipher,
+                &mut op.pending,
+                &mut op.pending_len,
+                block_size,
+                input,
+                output,
+            )
         } else {
-            cipher
+            op.cipher
                 .update(input, output)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
         }
@@ -686,15 +828,36 @@ pub(crate) fn crypto_cipher_final(
     output: &mut [u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    if let CrypCtx::CipherCtx(cipher) = &mut cs_guard.ctx {
-        cipher.finish(output).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    let algo = cs_guard.algo;
+    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
+        if let Some(xts) = &mut op.xts {
+            let stream = xts.final_stream();
+            let (n, patch) = aes_xts_final_buffered(
+                &mut xts.state,
+                &mut op.pending,
+                &mut op.pending_len,
+                &[],
+                output,
+                &stream,
+            )?;
+            if let Some(pb) = patch {
+                xts.record_patch_from_final(pb, output);
+            }
+            xts.emitted_bytes += n;
+            Ok(n)
+        } else {
+            if cipher_uses_ecb_pending(algo) && op.pending_len != 0 {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
+            op.cipher
+                .finish(output)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
-/// mbedtls不支持CCM模式的流式加密
-/// 暂不支持CCM模式
 pub(crate) fn crypto_authenc_init(
     cs: Arc<Mutex<TeeCrypState>>,
     key: &[u8],
@@ -740,9 +903,9 @@ pub(crate) fn crypto_authenc_init(
     if let Ok(mut cipher) = Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as _) {
         cipher
             .set_key(cipher_op, key)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS);
-        cipher.set_iv(nonce).map_err(|_| TEE_ERROR_BAD_PARAMETERS);
-        cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS);
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        cipher.set_iv(nonce).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         if cipher_mode == CipherMode::CCM {
             let payload_len = payload_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
             let aad_len = aad_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
@@ -752,7 +915,12 @@ pub(crate) fn crypto_authenc_init(
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         }
         cs_guard.state = CrypState::Initialized;
-        cs_guard.ctx = CrypCtx::CipherCtx(cipher);
+        cs_guard.ctx = CrypCtx::CipherCtx(Box::new(TeeCipherCtx {
+            cipher,
+            pending: [0; TeeCipherCtx::PENDING_MAX],
+            pending_len: 0,
+            xts: None,
+        }));
         Ok(())
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
@@ -762,12 +930,16 @@ pub(crate) fn crypto_authenc_init(
 pub(crate) fn crypto_authenc_update_aad(cs: Arc<Mutex<TeeCrypState>>, aad: &[u8]) -> TeeResult {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    if let CrypCtx::CipherCtx(cipher) = &mut cs_guard.ctx {
+    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
         match algo {
-            TEE_ALG_AES_CCM | TEE_ALG_SM4_CCM => cipher
+            TEE_ALG_AES_CCM | TEE_ALG_SM4_CCM => op
+                .cipher
                 .update_ad_ccm(aad)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
-            _ => cipher.update_ad(aad).map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+            _ => op
+                .cipher
+                .update_ad(aad)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
         }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
@@ -782,13 +954,14 @@ pub(crate) fn crypto_authenc_enc_final(
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
     let mut res: usize = 0;
-    if let CrypCtx::CipherCtx(cipher) = &mut cs_guard.ctx {
+    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
         if let Some(input) = input {
-            res = cipher
+            res = op
+                .cipher
                 .update(input, output)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         }
-        cipher
+        op.cipher
             .write_tag(tag)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         Ok(res)
@@ -805,13 +978,14 @@ pub(crate) fn crypto_authenc_dec_final(
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
     let mut res: usize = 0;
-    if let CrypCtx::CipherCtx(cipher) = &mut cs_guard.ctx {
+    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
         if let Some(input) = input {
-            res = cipher
+            res = op
+                .cipher
                 .update(input, output)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         }
-        cipher
+        op.cipher
             .check_tag(tag)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         Ok(res)
