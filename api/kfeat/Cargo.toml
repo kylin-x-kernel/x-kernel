@@ -137,6 +137,7 @@ driver_ramdisk = ["kdriver/ramdisk"]
 dwarf = ["backtrace/dwarf"]
 
 # Diagnostics
+memtrack = ["kservices/memtrack"]
 snapshot = ["ktask/snapshot"]
 sysrq = ["dep:procfs", "procfs/sysrq"]
 watchdog = ["kruntime/watchdog", "ksync/watchdog"]

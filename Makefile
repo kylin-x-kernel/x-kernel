@@ -49,9 +49,9 @@ export UNITTEST_CRATE ?=
 A := $(PWD)/entry
 APP ?= $(A)
 
-export MEMTRACK := n
+export MEMTRACK ?= n
 ifeq ($(MEMTRACK), y)
-	APP_FEATURES += kapi/memtrack
+	FEATURES += memtrack
 endif
 
 .DEFAULT_GOAL := all
