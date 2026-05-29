@@ -13,6 +13,7 @@
 #![no_std]
 
 mod affinity;
+mod cpu;
 mod policy;
 mod priority;
 mod sleep;
@@ -22,6 +23,7 @@ mod yielding;
 extern crate klogger;
 
 pub use affinity::{sys_sched_getaffinity, sys_sched_setaffinity};
+pub use cpu::sys_getcpu;
 pub use policy::{sys_sched_getparam, sys_sched_getscheduler, sys_sched_setscheduler};
 pub use priority::{sys_getpriority, sys_setpriority};
 pub use sleep::{sys_clock_nanosleep, sys_nanosleep};

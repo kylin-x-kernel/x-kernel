@@ -401,6 +401,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             sys_sched_setscheduler(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into())
         }
         Sysno::sched_getparam => sys_sched_getparam(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::getcpu => sys_getcpu(uctx.arg0().into(), uctx.arg1().into(), uctx.arg2()),
         Sysno::getpriority => sys_getpriority(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::setpriority => sys_setpriority(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
 
