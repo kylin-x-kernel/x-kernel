@@ -74,10 +74,18 @@ impl Pollable for UnixTransport {
     }
 }
 
-#[derive(Default)]
 pub struct BindEntry {
-    stream: Mutex<Option<stream::Bind>>,
-    dgram: Mutex<Option<dgram::Bind>>,
+    pub(crate) stream: Arc<Mutex<Option<stream::Bind>>>,
+    pub(crate) dgram: Arc<Mutex<Option<dgram::Bind>>>,
+}
+
+impl Default for BindEntry {
+    fn default() -> Self {
+        Self {
+            stream: Arc::new(Mutex::new(None)),
+            dgram: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 lazy_static! {

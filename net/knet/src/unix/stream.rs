@@ -92,6 +92,10 @@ struct ConnRequest {
 pub struct StreamTransport {
     channel: Mutex<Option<Channel>>,
     accept_rx: Mutex<Option<(async_channel::Receiver<ConnRequest>, Arc<PollSet>)>>,
+    /// Handle to the BindEntry's stream slot. Set when this transport is a
+    /// listener (bind() was called). On drop, the slot is cleared so the
+    /// Bind — and its pending ConnRequests — are released promptly.
+    bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     poll_state: PollSet,
     options: GeneralOptions,
     pid: u32,
@@ -107,6 +111,7 @@ impl StreamTransport {
         StreamTransport {
             channel: Mutex::new(channel),
             accept_rx: Mutex::new(None),
+            bind_slot: Mutex::new(None),
             poll_state: PollSet::new(),
             options: GeneralOptions::default(),
             pid,
@@ -165,8 +170,10 @@ impl Configurable for StreamTransport {
 }
 #[async_trait]
 impl UnixTransportOps for StreamTransport {
-    fn bind(&self, slot: &super::BindEntry, _local_addr: &UnixAddr) -> KResult<()> {
-        let mut slot = slot.stream.lock();
+    fn bind(&self, entry: &super::BindEntry, _local_addr: &UnixAddr) -> KResult<()> {
+        // Clone the Arc handle so we can store it for cleanup on drop.
+        let bind_slot_handle = entry.stream.clone();
+        let mut slot = entry.stream.lock();
         if slot.is_some() {
             return Err(KError::AddrInUse);
         }
@@ -181,7 +188,9 @@ impl UnixTransportOps for StreamTransport {
             accept_poll: poll.clone(),
             pid: self.pid,
         });
+        drop(slot);
         *guard = Some((rx, poll));
+        *self.bind_slot.lock() = Some(bind_slot_handle);
         self.poll_state.wake();
         Ok(())
     }
@@ -251,9 +260,6 @@ impl UnixTransportOps for StreamTransport {
                 chan.poll.wake();
             }
 
-            // `count` is only this iteration; `size` is the initial `src.remaining()`.
-            // Under load the ring may take several OUT polls to accept the full message
-            // (compare pipe `write`, which uses cumulative `total_written == size`).
             if total == size || non_blocking {
                 Ok(total)
             } else {
@@ -343,6 +349,12 @@ impl Pollable for StreamTransport {
 
 impl Drop for StreamTransport {
     fn drop(&mut self) {
+        // If this transport was a listener, release the Bind from the
+        // BindEntry so pending ConnRequests (and their ring buffers) are
+        // freed immediately instead of lingering until the inode is unlinked.
+        if let Some(slot) = self.bind_slot.lock().take() {
+            *slot.lock() = None;
+        }
         if let Some(chan) = self.channel.lock().as_ref() {
             chan.poll.wake();
         }
