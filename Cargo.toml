@@ -29,7 +29,6 @@ categories = ["os", "no-std"]
 
 [workspace.dependencies]
 # Internal: API and core services
-kcore = { path = "core/kcore" }
 kfeat = { path = "api/kfeat" }
 kservices = { path = "core/kservices" }
 ksignal = { path = "process/ksignal" }
@@ -54,11 +53,12 @@ x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 # Internal: core runtime and services
 kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
-ktypes = { path = "core/ktypes" }
+klazy = { path = "util/klazy" }
 
 # Internal: tracing and debugging
 ktracing = { path = "core/ktracing" }
 kbpf = { path = "core/kbpf" }
+kuaccess = { path = "core/kuaccess" }
 
 # Internal: task scheduling and synchronization
 kpoll = { path = "task/kpoll" }
@@ -70,6 +70,7 @@ ksched = { path = "task/ksched" }
 # Internal: process management
 kfutex = { path = "process/kfutex" }
 kfd = { path = "process/kfd" }
+kexec = { path = "process/kexec" }
 krlimit = { path = "process/krlimit" }
 kresources = { path = "process/kresources" }
 kthread = { path = "process/kthread" }
@@ -197,6 +198,7 @@ mbedtls-build-helper = "0.1"
 mbedtls-platform-support-smx = { version = "0.1", package = "mbedtls-platform-support-smx", default-features = false }
 mbedtls-sys-auto = { version = "2.28", package = "mbedtls-sys-auto-smx", default-features = false, features = [
 ] }
+ouroboros = { version = "0.18.5", default-features = false }
 percpu = "0.4"
 rust-dice = { version = "0.1", default-features = false }
 slab = { version = "0.4.9", default-features = false }
@@ -212,3 +214,4 @@ buddy-slab-allocator = "0.4"
 downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
 flatten_objects = "0.2.4"
 weak-map = "0.1.1"
+xmas-elf = { version = "0.9", default-features = false }

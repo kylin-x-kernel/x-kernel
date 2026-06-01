@@ -1,8 +1,8 @@
-# ktypes — 设计文档
+# klazy — 设计文档
 
 ## 定位
 
-`ktypes` 提供兼容 `no_std` 的一次性初始化和延迟求值同步原语。这些原语是
+`klazy` 提供兼容 `no_std` 的一次性初始化和延迟求值同步原语。这些原语是
 x-kernel 中内核服务静态延迟初始化的基础构件（如 tracing、内存管理、TEE
 服务、密码学模块）。
 
@@ -19,7 +19,7 @@ OS 线程或条件变量。
 涉及的源文件：
 
 ```
-core/ktypes/
+core/klazy/
 ├── src/
 │   ├── lib.rs
 │   ├── once.rs
@@ -128,7 +128,7 @@ Lazy<T, F>  ──使用──>  Once<T>
 
 ### 为什么不用 `spin::Once`
 
-上游 `spin` crate 提供类似功能。我们将设计引入 `ktypes` 是为了：
+上游 `spin` crate 提供类似功能。我们将设计引入 `klazy` 是为了：
 
 - 控制 API 范围（添加 `try_call_once`、`initialized()` 等）。
 - 不受 `spin` 发布节奏影响，确保稳定性。

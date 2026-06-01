@@ -23,3 +23,6 @@ pub use pending::*;
 
 mod types;
 pub use types::*;
+
+mod trampoline;
+pub use trampoline::map_signal_trampoline;

@@ -1,8 +1,8 @@
-# ktypes — 安全与可靠性分析
+# klazy — 安全与可靠性分析
 
 ## 概述
 
-`ktypes` 是 x-kernel 中广泛使用的底层同步原语，负责内核服务的一次性初始化。
+`klazy` 是 x-kernel 中广泛使用的底层同步原语，负责内核服务的一次性初始化。
 其中包含 `unsafe` 代码，涉及内部可变性和原子状态转换。不正确的使用或不变量
 破损将导致未定义行为。
 
@@ -26,7 +26,7 @@
 └──────────────────────────────────┘
 ```
 
-- **safe API 调用者**信任 `ktypes` 正确维护其不变量。
+- **safe API 调用者**信任 `klazy` 正确维护其不变量。
 - **unsafe API 调用者**（`get_unchecked`、`get_mut_unchecked`、
   `into_inner_unchecked`、`as_mut_ptr`）需自行证明初始化已完成。
 
@@ -149,7 +149,7 @@ core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
 
 ## 故障管理
 
-`ktypes` 通过以下机制处理故障：
+`klazy` 通过以下机制处理故障：
 
 - **错误传播**：`try_call_once` 返回 `Result<&T, E>`，调用者可处理错误。
 - **中毒检测**：所有 `Failed` 状态的访问立即 panic，防止使用不一致状态。
@@ -179,7 +179,7 @@ core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
 
 ## 审计清单
 
-修改 `ktypes` 时需验证：
+修改 `klazy` 时需验证：
 
 - [ ] 每个 `unsafe` 块均有 `SAFETY:` 注释说明不变量。
 - [ ] 新增的 `u8 → Status` 转换不绕过 `AtomicStatus`。

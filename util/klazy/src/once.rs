@@ -37,9 +37,9 @@ use core::{
 /// # Examples
 ///
 /// ```
-/// use ktypes;
+/// use klazy;
 ///
-/// static START: ktypes::Once = ktypes::Once::new();
+/// static START: klazy::Once = klazy::Once::new();
 ///
 /// START.call_once(|| {
 ///     // run initialization here
@@ -180,9 +180,9 @@ impl<T> Once<T> {
     /// # Examples
     ///
     /// ```
-    /// use ktypes;
+    /// use klazy;
     ///
-    /// static INIT: ktypes::Once<usize> = ktypes::Once::new();
+    /// static INIT: klazy::Once<usize> = klazy::Once::new();
     ///
     /// fn get_cached_val() -> usize {
     ///     *INIT.call_once(expensive_computation)
@@ -220,9 +220,9 @@ impl<T> Once<T> {
     /// # Examples
     ///
     /// ```
-    /// use ktypes;
+    /// use klazy;
     ///
-    /// static INIT: ktypes::Once<usize> = ktypes::Once::new();
+    /// static INIT: klazy::Once<usize> = klazy::Once::new();
     ///
     /// fn get_cached_val() -> Result<usize, String> {
     ///     INIT.try_call_once(expensive_fallible_computation)

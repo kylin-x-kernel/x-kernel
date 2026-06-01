@@ -2,8 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use klazy::Lazy;
 use ksync::Mutex;
-use ktypes::Lazy;
 use mbedtls::{pk::Pk, rng::RngCallback};
 use mbedtls_sys_auto::types::{
     raw_types::{c_int, c_uchar, c_void},

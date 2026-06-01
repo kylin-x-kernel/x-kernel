@@ -11,7 +11,7 @@ use core::{
 };
 
 use backtrace::Backtrace;
-use kcore::mm::clear_elf_cache;
+use kexec::clear_elf_cache;
 use kthread::{cleanup_task_tables, tasks};
 use kvfs::{DeviceFileOps, NodeFlags, VfsResult};
 use kvfs_simple::{DirMapping, SimpleFs};
@@ -49,10 +49,10 @@ impl MemoryCategory {
                 continue;
             };
             match name.as_ref() {
-                "kcore::mm::ElfLoader::load" => {
+                "kexec::loader::ElfLoader::load" => {
                     return Some("elf cache");
                 }
-                "kcore::task::ProcessState::new" => {
+                "kthread::process_state::ProcessState::new" => {
                     return Some("process state");
                 }
                 "kprocess::process::Process::new" => {

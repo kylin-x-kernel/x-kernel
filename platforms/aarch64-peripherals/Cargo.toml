@@ -17,7 +17,7 @@ nmi-sdei = []
 
 [dependencies]
 memaddr = { workspace = true }
-ktypes = { workspace = true }
+klazy = { workspace = true }
 kcpu_id_map = { workspace = true }
 log = "0.4"
 lazyinit = "0.2"

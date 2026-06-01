@@ -10,7 +10,7 @@ use heapless::Vec;
 use khal::mem::{
     MemRange, PhysAddr, ReservedKind, ReservedRegion, ReservedSource, VirtAddr, sub_ranges,
 };
-use ktypes::Once;
+use klazy::Once;
 use memaddr::MemoryAddr;
 use of::{dtb_total_size_from_ptr, read_memory_regions, read_reserved_memory_regions};
 

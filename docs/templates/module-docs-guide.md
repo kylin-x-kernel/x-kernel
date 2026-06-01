@@ -8,7 +8,7 @@
 每个 crate 在自身目录下维护 `docs/`：
 
 ```
-core/ktypes/
+util/klazy/
 ├── src/
 │   ├── lib.rs          # rustdoc — 函数说明、接口语义、unsafe contract
 │   ├── once.rs

@@ -2,67 +2,23 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! User address space management.
+//! ELF loading for user programs.
 
 use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
-use core::{ffi::CStr, hint::unlikely, iter, mem::MaybeUninit};
+use core::{ffi::CStr, iter};
 
-use extern_trait::extern_trait;
-use kaddr_layout::{USER_SPACE_BASE, USER_SPACE_SIZE};
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
 use kfs::{CachedFile, FileBackend};
-use khal::{
-    asm::user_copy,
-    mem::v2p,
-    paging::{MappingFlags, PageSize},
-    trap::{PAGE_FAULT, register_trap_handler},
-};
-use kspin::IrqSave;
+use khal::paging::{MappingFlags, PageSize};
 use ksync::Mutex;
-use ktask::{current, current_may_uninit};
-use kthread::AsThread;
 use kvfs::Location;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::AddrSpace;
 use memspace_file::{new_alloc, new_cow};
-use osvm::{MemError, MemResult, VirtMemIo};
 use ouroboros::self_referencing;
 
-use crate::lrucache::LruCache;
-
-/// Creates a new empty user address space.
-pub fn new_user_aspace_empty() -> KResult<AddrSpace> {
-    AddrSpace::new_empty(
-        VirtAddr::from_usize(kaddr_layout::USER_SPACE_BASE),
-        kaddr_layout::USER_SPACE_SIZE,
-    )
-}
-
-/// If the target architecture requires it, the kernel portion of the address
-/// space will be copied to the user address space.
-pub fn copy_from_kernel(_aspace: &mut AddrSpace) -> KResult {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))]
-    {
-        // ARMv8 (aarch64) and LoongArch64 use separate page tables for user space
-        // (aarch64: TTBR0_EL1, LoongArch64: PGDL), so there is no need to copy the
-        // kernel portion to the user page table.
-        _aspace.copy_mappings_from(&memspace::kernel_layout().lock())?;
-    }
-    Ok(())
-}
-
-/// Map the signal trampoline to the user address space.
-pub fn map_trampoline(aspace: &mut AddrSpace) -> KResult {
-    let signal_trampoline_paddr = v2p(ksignal::arch::signal_trampoline_address().into());
-    aspace.map_linear(
-        kaddr_layout::SIGNAL_TRAMPOLINE.into(),
-        signal_trampoline_paddr,
-        PAGE_SIZE_4K,
-        MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER,
-    )?;
-    Ok(())
-}
+use super::lru_cache::LruCache;
 
 fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     let mut mapping_flags = MappingFlags::USER;
@@ -78,14 +34,6 @@ fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     mapping_flags
 }
 
-/// Map the elf file to the user address space.
-///
-/// # Arguments
-/// - `uspace`: The address space of the user app.
-/// - `elf`: The elf file.
-///
-/// # Returns
-/// - The entry point of the user app.
 fn map_elf<'a>(
     uspace: &mut AddrSpace,
     base: usize,
@@ -114,8 +62,8 @@ fn map_elf<'a>(
             (ph.mem_size as usize + seg_pad + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
         let seg_start = VirtAddr::from_usize(vaddr);
 
-        // Note that `offset` might not be aligned to 4K here, and it's
-        // backend's responsibility to properly dispatch_irq it.
+        // Note that `offset` might not be aligned to 4K here, and it is the
+        // backend's responsibility to handle it.
         let backend = new_cow(
             seg_start,
             PageSize::Size4K,
@@ -168,15 +116,15 @@ impl ElfCacheEntry {
             }
             .map_err(map_elf_error)
         }) {
-            Ok(e) => {
+            Ok(entry) => {
                 #[cfg(feature = "tee_ta_sign")]
                 {
                     tee_task_iface::tasign::verify_ta_elf_on_load_and_cache_ta_head(
-                        e.borrow_cache(),
+                        entry.borrow_cache(),
                     )
                     .map_err(|_err| KError::PermissionDenied)?;
                 }
-                Ok(Ok(e))
+                Ok(Ok(entry))
             }
             Err((_, heads)) => Ok(Err(heads.data)),
         }
@@ -195,10 +143,13 @@ impl ElfLoader {
     fn load(&mut self, uspace: &mut AddrSpace, path: &str) -> KResult<LoadResult> {
         let loc = kthread::current_fs_context().lock().resolve(path)?;
 
-        if !self.0.access(|e| e.borrow_cache().location().ptr_eq(&loc)) {
+        if !self
+            .0
+            .access(|entry| entry.borrow_cache().location().ptr_eq(&loc))
+        {
             match ElfCacheEntry::load(loc)? {
-                Ok(e) => {
-                    self.0.put(e);
+                Ok(entry) => {
+                    self.0.put(entry);
                 }
                 Err(data) => {
                     return Ok(Err(data));
@@ -207,7 +158,7 @@ impl ElfLoader {
         }
 
         uspace.clear();
-        map_trampoline(uspace)?;
+        ksignal::map_signal_trampoline(uspace)?;
 
         let entry = self.0.peek_mru().unwrap();
         let ldso = if let Some(header) = entry
@@ -233,9 +184,12 @@ impl ElfLoader {
 
         let (elf, ldso) = if let Some(ldso) = ldso {
             let loc = kthread::current_fs_context().lock().resolve(ldso)?;
-            if !self.0.access(|e| e.borrow_cache().location().ptr_eq(&loc)) {
-                let e = ElfCacheEntry::load(loc)?.map_err(|_| KError::InvalidInput)?;
-                self.0.put(e);
+            if !self
+                .0
+                .access(|entry| entry.borrow_cache().location().ptr_eq(&loc))
+            {
+                let entry = ElfCacheEntry::load(loc)?.map_err(|_| KError::InvalidInput)?;
+                self.0.put(entry);
             }
 
             let mut iter = self.0.items();
@@ -267,7 +221,7 @@ static ELF_LOADER: Mutex<ElfLoader> = Mutex::new(ElfLoader::new());
 
 /// Clear the ELF cache.
 ///
-/// Useful for removing noises during memory leak detect.
+/// Useful for removing noise during memory leak detection.
 pub fn clear_elf_cache() {
     ELF_LOADER.lock().0.flush();
     #[cfg(feature = "tee_ta_sign")]
@@ -277,12 +231,14 @@ pub fn clear_elf_cache() {
 /// Load the user app to the user address space.
 ///
 /// # Arguments
+///
 /// - `uspace`: The address space of the user app.
 /// - `args`: The arguments of the user app. The first argument is the path of
 ///   the user app.
 /// - `envs`: The environment variables of the user app.
 ///
 /// # Returns
+///
 /// - The entry point of the user app.
 /// - The stack pointer of the user app.
 pub fn load_user_app(
@@ -295,7 +251,7 @@ pub fn load_user_app(
         .or_else(|| args.first().map(String::as_str))
         .ok_or(KError::InvalidInput)?;
 
-    // FIXME: impl `/proc/self/exe` to let busybox retry running
+    // FIXME: Implement `/proc/self/exe` to let busybox retry running scripts.
     if path.ends_with(".sh") {
         let new_args: Vec<String> = iter::once("/bin/sh".to_owned())
             .chain(args.iter().cloned())
@@ -308,7 +264,10 @@ pub fn load_user_app(
         Err(data) => {
             if data.starts_with(b"#!") {
                 let head = &data[2..data.len().min(256)];
-                let pos = head.iter().position(|c| *c == b'\n').unwrap_or(head.len());
+                let pos = head
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .unwrap_or(head.len());
                 let line = core::str::from_utf8(&head[..pos]).map_err(|_| KError::InvalidInput)?;
 
                 let new_args: Vec<String> = line
@@ -360,124 +319,13 @@ pub fn load_user_app(
     Ok((entry, user_sp))
 }
 
-/// Enables scoped access into user memory, allowing page faults to occur inside
-/// kernel.
-pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
-    let curr = current();
-    let Some(thr) = curr.try_as_thread() else {
-        panic!("access_user_memory called outside of thread context");
-    };
-
-    thr.set_accessing_user_memory(true);
-    let result = f();
-    thr.set_accessing_user_memory(false);
-    result
-}
-
-#[register_trap_handler(PAGE_FAULT)]
-fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
-    let Some(curr) = current_may_uninit() else {
-        return false;
-    };
-    let Some(thread) = curr.try_as_thread() else {
-        return false;
-    };
-
-    if unlikely(!thread.is_accessing_user_memory()) {
-        return false;
-    }
-
-    thread
-        .process_state()
-        .address_space()
-        .lock()
-        .dispatch_irq_page_fault(vaddr, access_flags)
-}
-
-#[allow(dead_code)]
-struct Vm(IrqSave);
-
-/// Briefly checks if the given memory region is valid user memory.
-pub fn check_access(start: usize, len: usize) -> MemResult {
-    const USER_SPACE_END: usize = USER_SPACE_BASE + USER_SPACE_SIZE;
-    let ok = (USER_SPACE_BASE..USER_SPACE_END).contains(&start) && (USER_SPACE_END - start) >= len;
-    if unlikely(!ok) {
-        Err(MemError::NoAccess)
-    } else {
-        Ok(())
-    }
-}
-
-#[extern_trait]
-unsafe impl VirtMemIo for Vm {
-    fn new() -> Self {
-        Self(IrqSave::new())
-    }
-
-    fn read_mem(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> MemResult {
-        check_access(start, buf.len())?;
-        let failed_at = access_user_memory(|| unsafe {
-            user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
-        });
-        if unlikely(failed_at != 0) {
-            Err(MemError::NoAccess)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn write_mem(&mut self, start: usize, buf: &[u8]) -> MemResult {
-        check_access(start, buf.len())?;
-        let failed_at = access_user_memory(|| unsafe {
-            user_copy(start as _, buf.as_ptr() as *const _, buf.len())
-        });
-        if unlikely(failed_at != 0) {
-            Err(MemError::NoAccess)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-/// Unit tests.
 #[cfg(unittest)]
-pub mod tests_mm {
+mod tests {
     use khal::paging::MappingFlags;
-    use osvm::MemError;
     use unittest::def_test;
     use xmas_elf::program::{FLAG_R, FLAG_W, FLAG_X, Flags};
 
-    use super::{USER_SPACE_BASE, USER_SPACE_SIZE, check_access, mapping_flags};
-
-    #[def_test]
-    fn test_check_access_valid() {
-        assert!(check_access(USER_SPACE_BASE, 1).is_ok());
-    }
-
-    #[def_test]
-    fn test_check_access_invalid_low() {
-        let res = check_access(USER_SPACE_BASE - 1, 1);
-        assert!(matches!(res, Err(MemError::NoAccess)));
-    }
-
-    #[def_test]
-    fn test_check_access_invalid_len() {
-        let res = check_access(USER_SPACE_BASE, USER_SPACE_SIZE + 1);
-        assert!(matches!(res, Err(MemError::NoAccess)));
-    }
-
-    #[def_test]
-    fn test_check_access_zero_len_and_upper_boundary() {
-        assert!(check_access(USER_SPACE_BASE, 0).is_ok());
-        assert!(check_access(USER_SPACE_BASE + USER_SPACE_SIZE - 1, 1).is_ok());
-        assert!(check_access(USER_SPACE_BASE + USER_SPACE_SIZE, 0).is_err());
-    }
-
-    #[def_test]
-    fn test_check_access_end_overflow_rejected() {
-        let res = check_access(USER_SPACE_BASE + USER_SPACE_SIZE - 1, 2);
-        assert!(matches!(res, Err(MemError::NoAccess)));
-    }
+    use super::mapping_flags;
 
     #[def_test]
     fn test_mapping_flags_sets_user_and_requested_permissions() {
@@ -492,12 +340,6 @@ pub mod tests_mm {
         assert!(write_exec.contains(MappingFlags::USER | MappingFlags::WRITE));
         assert!(write_exec.contains(MappingFlags::EXECUTE));
         assert!(!write_exec.contains(MappingFlags::READ));
-    }
-
-    #[def_test]
-    fn test_check_access_rejects_far_above_user_space() {
-        let res = check_access(USER_SPACE_BASE + USER_SPACE_SIZE + 0x1000, 1);
-        assert!(matches!(res, Err(MemError::NoAccess)));
     }
 
     #[def_test]

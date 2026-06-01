@@ -8,8 +8,8 @@ use alloc::{
     sync::Arc,
 };
 
-use kcore::mm::{copy_from_kernel, load_user_app, new_user_aspace_empty};
 use kcred::Credentials;
+use kexec::load_user_app;
 use kfs::{kernel_fs_context, new_process_fs_context};
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
@@ -21,12 +21,8 @@ use ktty::tty::N_TTY;
 
 /// Create and run the init process with the given argv/envp.
 pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
-    let mut uspace = new_user_aspace_empty()
-        .and_then(|mut it| {
-            copy_from_kernel(&mut it)?;
-            Ok(it)
-        })
-        .expect("Failed to create user address space");
+    let mut uspace =
+        memspace::AddrSpace::new_user_empty().expect("Failed to create user address space");
 
     let loc = kernel_fs_context()
         .lock()

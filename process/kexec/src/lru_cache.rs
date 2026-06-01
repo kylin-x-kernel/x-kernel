@@ -9,10 +9,10 @@ use core::mem::replace;
 
 /// A simple LRU Cache implementation based on a fixed-size array.
 ///
-/// It maintains a fixed-capacity storage and uses a doubly-linked list
-/// indices to track the usage order (from MRU to LRU).
+/// It maintains a fixed-capacity storage and uses doubly-linked list indices
+/// to track the usage order from MRU to LRU.
 #[derive(Debug, Clone)]
-pub struct LruCache<V, const CAP: usize> {
+pub(super) struct LruCache<V, const CAP: usize> {
     storage: Vec<CacheNode<V>>,
     mru_idx: u16,
     lru_idx: u16,
@@ -34,7 +34,7 @@ impl<V, const CAP: usize> Default for LruCache<V, CAP> {
 
 impl<V, const CAP: usize> LruCache<V, CAP> {
     /// Creates a new empty LRU cache.
-    pub const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             storage: Vec::new(),
             mru_idx: 0,
@@ -44,9 +44,10 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
 
     /// Inserts a value into the cache.
     ///
-    /// The inserted value becomes the most-recently-used (MRU) item.
-    /// If the cache is full, the least-recently-used (LRU) item is removed and returned.
-    pub fn put(&mut self, val: V) -> Option<V> {
+    /// The inserted value becomes the most-recently-used item.
+    /// If the cache is full, the least-recently-used item is removed and
+    /// returned.
+    pub(super) fn put(&mut self, val: V) -> Option<V> {
         let node = CacheNode {
             payload: val,
             prev: 0,
@@ -68,9 +69,10 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
 
     /// Accesses an item in the cache that matches the predicate.
     ///
-    /// If an item is found, it is promoted to the most-recently-used (MRU) position,
-    /// and the function returns `true`. Otherwise, it returns `false`.
-    pub fn access<F>(&mut self, mut pred: F) -> bool
+    /// If an item is found, it is promoted to the most-recently-used position,
+    /// and the function returns `true`.
+    /// Otherwise, it returns `false`.
+    pub(super) fn access<F>(&mut self, mut pred: F) -> bool
     where
         F: FnMut(&V) -> bool,
     {
@@ -83,15 +85,15 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
         false
     }
 
-    /// Returns a reference to the most-recently-used (MRU) item.
+    /// Returns a reference to the most-recently-used item.
     ///
     /// This does not change the cache state.
-    pub fn peek_mru(&self) -> Option<&V> {
+    pub(super) fn peek_mru(&self) -> Option<&V> {
         self.storage.get(self.mru_idx as usize).map(|n| &n.payload)
     }
 
     /// Returns an iterator over the cache items, ordered from MRU to LRU.
-    pub fn items(&self) -> LruIter<'_, V, CAP> {
+    pub(super) fn items(&self) -> LruIter<'_, V, CAP> {
         LruIter::<V, CAP> {
             cache: self,
             pos: self.mru_idx,
@@ -99,7 +101,7 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
     }
 
     /// Clears all items from the cache.
-    pub fn flush(&mut self) {
+    pub(super) fn flush(&mut self) {
         self.storage.clear();
     }
 
@@ -146,7 +148,7 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
 }
 
 /// Iterator over the `LruCache` items, from MRU to LRU.
-pub struct LruIter<'a, V, const CAP: usize> {
+pub(super) struct LruIter<'a, V, const CAP: usize> {
     cache: &'a LruCache<V, CAP>,
     pos: u16,
 }
@@ -175,9 +177,8 @@ impl<'a, V, const CAP: usize> Iterator for LruIter<'a, V, CAP> {
     }
 }
 
-/// Unit tests.
 #[cfg(unittest)]
-pub mod tests_lrucache {
+mod tests {
     use unittest::def_test;
 
     use super::LruCache;

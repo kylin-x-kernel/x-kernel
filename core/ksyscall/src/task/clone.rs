@@ -14,7 +14,6 @@
 use alloc::sync::Arc;
 
 use bitflags::bitflags;
-use kcore::mm::copy_from_kernel;
 use kerrno::{KError, KResult};
 use kfd::{FdTable, FileLike};
 use khal::uspace::UserContext;
@@ -250,9 +249,7 @@ impl CloneRequest {
                 old_proc_data.address_space().clone()
             } else {
                 let mut aspace = old_proc_data.address_space().lock();
-                let aspace = aspace.try_clone()?;
-                copy_from_kernel(&mut aspace.lock())?;
-                aspace
+                aspace.try_clone()?
             };
             new_task
                 .ctx_mut()

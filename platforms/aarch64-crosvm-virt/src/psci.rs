@@ -3,8 +3,8 @@
 // See LICENSES for license details.
 
 //! PSCI wrappers and KVM guard-granule helpers.
+use klazy::Once;
 use kplat::{dma::PlatformDmaIf, mmio::PlatformMmioIf};
-use ktypes::Once;
 pub static GUARD_GRANULE: Once<usize> = Once::new();
 const ARM_SMCCC_VENDOR_HYP_KVM_MEM_UNSHARE_FUNC_ID: u32 =
     ((1) << 31) | ((1) << 30) | (((6) & 0x3F) << 24) | ((4) & 0xFFFF);

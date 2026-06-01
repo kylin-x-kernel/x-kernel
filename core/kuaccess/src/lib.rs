@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Kernel-side user memory access glue for `osvm`.
+
+#![no_std]
+#![feature(likely_unlikely)]
+#![warn(missing_docs)]
+
+use core::{hint::unlikely, mem::MaybeUninit};
+
+use extern_trait::extern_trait;
+use kaddr_layout::{USER_SPACE_BASE, USER_SPACE_SIZE};
+use khal::{
+    asm::user_copy,
+    paging::MappingFlags,
+    trap::{PAGE_FAULT, register_trap_handler},
+};
+use kspin::IrqSave;
+use ktask::{current, current_may_uninit};
+use kthread::AsThread;
+use memaddr::VirtAddr;
+use osvm::{MemError, MemResult, VirtMemIo};
+
+/// Enables scoped access into user memory, allowing page faults to occur inside
+/// kernel.
+pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
+    let curr = current();
+    let Some(thread) = curr.try_as_thread() else {
+        panic!("access_user_memory called outside of thread context");
+    };
+
+    thread.set_accessing_user_memory(true);
+    let result = f();
+    thread.set_accessing_user_memory(false);
+    result
+}
+
+#[register_trap_handler(PAGE_FAULT)]
+fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
+    let Some(curr) = current_may_uninit() else {
+        return false;
+    };
+    let Some(thread) = curr.try_as_thread() else {
+        return false;
+    };
+
+    if unlikely(!thread.is_accessing_user_memory()) {
+        return false;
+    }
+
+    thread
+        .process_state()
+        .address_space()
+        .lock()
+        .dispatch_irq_page_fault(vaddr, access_flags)
+}
+
+// `Vm` mirrors the osvm `VirtMemIo` entry point and is kept for future
+// direct VM access paths that instantiate the trait-backed adapter.
+#[expect(dead_code)]
+struct Vm(IrqSave);
+
+/// Briefly checks if the given memory region is valid user memory.
+pub fn check_access(start: usize, len: usize) -> MemResult {
+    const USER_SPACE_END: usize = USER_SPACE_BASE + USER_SPACE_SIZE;
+    let is_accessible =
+        (USER_SPACE_BASE..USER_SPACE_END).contains(&start) && (USER_SPACE_END - start) >= len;
+    if unlikely(!is_accessible) {
+        Err(MemError::NoAccess)
+    } else {
+        Ok(())
+    }
+}
+
+#[extern_trait]
+unsafe impl VirtMemIo for Vm {
+    fn new() -> Self {
+        Self(IrqSave::new())
+    }
+
+    fn read_mem(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> MemResult {
+        check_access(start, buf.len())?;
+        let failed_at = access_user_memory(|| unsafe {
+            user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
+        });
+        if unlikely(failed_at != 0) {
+            Err(MemError::NoAccess)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn write_mem(&mut self, start: usize, buf: &[u8]) -> MemResult {
+        check_access(start, buf.len())?;
+        let failed_at = access_user_memory(|| unsafe {
+            user_copy(start as _, buf.as_ptr() as *const _, buf.len())
+        });
+        if unlikely(failed_at != 0) {
+            Err(MemError::NoAccess)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use osvm::MemError;
+    use unittest::def_test;
+
+    use super::{USER_SPACE_BASE, USER_SPACE_SIZE, check_access};
+
+    #[def_test]
+    fn test_check_access_valid() {
+        assert!(check_access(USER_SPACE_BASE, 1).is_ok());
+    }
+
+    #[def_test]
+    fn test_check_access_invalid_low() {
+        let res = check_access(USER_SPACE_BASE - 1, 1);
+        assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+
+    #[def_test]
+    fn test_check_access_invalid_len() {
+        let res = check_access(USER_SPACE_BASE, USER_SPACE_SIZE + 1);
+        assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+
+    #[def_test]
+    fn test_check_access_zero_len_and_upper_boundary() {
+        assert!(check_access(USER_SPACE_BASE, 0).is_ok());
+        assert!(check_access(USER_SPACE_BASE + USER_SPACE_SIZE - 1, 1).is_ok());
+        assert!(check_access(USER_SPACE_BASE + USER_SPACE_SIZE, 0).is_err());
+    }
+
+    #[def_test]
+    fn test_check_access_end_overflow_rejected() {
+        let res = check_access(USER_SPACE_BASE + USER_SPACE_SIZE - 1, 2);
+        assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+
+    #[def_test]
+    fn test_check_access_rejects_far_above_user_space() {
+        let res = check_access(USER_SPACE_BASE + USER_SPACE_SIZE + 0x1000, 1);
+        assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+}

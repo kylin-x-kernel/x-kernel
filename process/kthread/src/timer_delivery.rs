@@ -10,10 +10,10 @@
 
 use alloc::vec::Vec;
 
+use klazy::Once;
 use kprocess::Pid;
 use ksignal::{SignalDequeueAction, SignalInfo, Signo};
 use ktimer::{TimerDelivery, TimerSignal};
-use ktypes::Once;
 
 use crate::{
     get_process_state,

@@ -82,6 +82,16 @@ impl AddrSpace {
         })
     }
 
+    /// Creates a new empty user address space with the standard user-space range.
+    pub fn new_user_empty() -> KResult<Self> {
+        let mut aspace = Self::new_empty(
+            VirtAddr::from_usize(kaddr_layout::USER_SPACE_BASE),
+            kaddr_layout::USER_SPACE_SIZE,
+        )?;
+        aspace.copy_kernel_mappings()?;
+        Ok(aspace)
+    }
+
     /// Copies page table mappings from another address space.
     ///
     /// It copies the page table entries only rather than the memory regions,
@@ -89,11 +99,24 @@ impl AddrSpace {
     /// user space.
     ///
     /// Returns an error if the two address spaces overlap.
-    #[cfg(feature = "copy")]
     pub fn copy_mappings_from(&mut self, other: &AddrSpace) -> KResult {
         self.pgtbl
             .modify()
             .copy_from(&other.pgtbl, other.base(), other.size());
+        Ok(())
+    }
+
+    /// If the target architecture requires it, copies the kernel portion
+    /// of the address space to this address space.
+    ///
+    /// On aarch64 and loongarch64, user space uses separate page tables
+    /// (TTBR0_EL1 / PGDL), so no copy is needed. On other architectures
+    /// the kernel mappings are shared by copying page table entries.
+    fn copy_kernel_mappings(&mut self) -> KResult {
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))]
+        {
+            self.copy_mappings_from(&crate::kernel_layout().lock())?;
+        }
         Ok(())
     }
 
@@ -466,6 +489,7 @@ impl AddrSpace {
         let new_aspace_clone = new_aspace.clone();
 
         let mut guard = new_aspace.lock();
+        guard.copy_kernel_mappings()?;
 
         let mut self_modify = self.pgtbl.modify();
         for area in self.areas.iter() {

@@ -6,7 +6,7 @@ use alloc::borrow::Cow;
 use core::{fmt, slice};
 
 use addr2line::Context;
-use ktypes::Once;
+use klazy::Once;
 // Only import in non-test builds
 #[cfg(not(test))]
 use log::{error, info, warn};

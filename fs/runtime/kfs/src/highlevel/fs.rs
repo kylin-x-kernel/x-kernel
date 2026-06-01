@@ -11,8 +11,8 @@ use alloc::{
     vec::Vec,
 };
 
+use klazy::Once;
 use ksync::Mutex;
-use ktypes::Once;
 use kvfs::{
     Location, Metadata, NodePermission, NodeType, VfsError, VfsResult,
     path::{Path, PathBuf},

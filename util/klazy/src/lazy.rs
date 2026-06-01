@@ -35,7 +35,7 @@ use crate::once::Once;
 /// ```
 /// use std::collections::HashMap;
 ///
-/// use ktypes::Lazy;
+/// use klazy::Lazy;
 ///
 /// static HASHMAP: Lazy<HashMap<i32, String>> = Lazy::new(|| {
 ///     println!("initializing");
@@ -120,7 +120,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```
-    /// use ktypes::Lazy;
+    /// use klazy::Lazy;
     ///
     /// let lazy = Lazy::new(|| 92);
     ///

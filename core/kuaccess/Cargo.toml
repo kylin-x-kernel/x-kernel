@@ -1,0 +1,21 @@
+[package]
+name = "kuaccess"
+description = "Kernel user-memory access glue for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+extern-trait = "0.3"
+kaddr_layout.workspace = true
+khal.workspace = true
+kspin.workspace = true
+kthread.workspace = true
+ktask.workspace = true
+linkme.workspace = true
+memaddr.workspace = true
+osvm.workspace = true
+unittest.workspace = true

@@ -10,8 +10,8 @@ use core::{
 };
 
 use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
+use klazy::Once;
 use ksync::{Mutex, RwLock};
-use ktypes::Once;
 use tee_raw_sys::*;
 
 use super::{

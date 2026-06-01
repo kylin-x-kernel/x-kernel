@@ -1,0 +1,32 @@
+[package]
+name = "kexec"
+description = "User program loading and exec image setup for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+tee = ["dep:tee_task_iface", "kthread/tee"]
+tee_ta_sign = ["tee_task_iface/tee_ta_sign"]
+
+[dependencies]
+kaddr_layout.workspace = true
+kerrno.workspace = true
+kfs.workspace = true
+khal.workspace = true
+kernel-elf-parser = { workspace = true }
+klogger.workspace = true
+ksignal.workspace = true
+ksync.workspace = true
+kthread.workspace = true
+kvfs.workspace = true
+memaddr.workspace = true
+memspace.workspace = true
+memspace_file.workspace = true
+ouroboros.workspace = true
+tee_task_iface = { workspace = true, optional = true }
+unittest.workspace = true
+xmas-elf.workspace = true

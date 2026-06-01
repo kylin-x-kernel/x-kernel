@@ -13,13 +13,13 @@ use alloc::{
 use core::mem;
 
 use khal::paging::MappingFlags;
+use klazy::Once;
 use kspin::{SpinNoIrq, SpinRaw};
 use ktask::current;
 use ktracepoint::{
     KernelTraceOps, TraceCmdLineCache, TraceEntryParser, TracePipeOps, TracePipeRaw,
     TracingEventsManager, global_init_events,
 };
-use ktypes::Once;
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 
 static TRACE_RAW_PIPE: SpinNoIrq<TracePipeRaw> = SpinNoIrq::new(TracePipeRaw::new(4096));

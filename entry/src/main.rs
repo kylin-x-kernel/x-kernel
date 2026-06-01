@@ -12,6 +12,7 @@ extern crate klogger;
 extern crate alloc;
 extern crate kfeat;
 extern crate kruntime;
+extern crate kuaccess;
 
 #[cfg(feature = "unittest")]
 mod unittest_simple;

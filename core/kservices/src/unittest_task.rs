@@ -46,9 +46,10 @@ impl InstalledTestThread {
         let tid = current_task.id().as_u64() as Pid;
         let pid = alloc_test_process_id();
 
-        let mut aspace = kcore::mm::new_user_aspace_empty()?;
-        kcore::mm::copy_from_kernel(&mut aspace)?;
-        kcore::mm::map_trampoline(&mut aspace)?;
+        // `new_user_empty` installs the standard user range and any required
+        // kernel mappings for the target architecture.
+        let mut aspace = memspace::AddrSpace::new_user_empty()?;
+        ksignal::map_signal_trampoline(&mut aspace)?;
         let aspace = Arc::new(Mutex::new(aspace));
 
         let proc = kprocess::Process::new_init(pid);

@@ -13,11 +13,11 @@ documentation.workspace = true
 input = ["dep:inputdev"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
-dice = ["dep:dice_driver", "dep:ktypes", "dep:rand_chacha", "dep:mbedtls"]
+dice = ["dep:dice_driver", "dep:klazy", "dep:rand_chacha", "dep:mbedtls"]
 
 [dependencies]
 kalloc.workspace = true
-kcore.workspace = true
+kexec.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
 kdriver.workspace = true
@@ -51,7 +51,7 @@ backtrace.workspace = true
 gimli = { version = "*", default-features = false, optional = true }
 dice_driver = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
-ktypes = { workspace = true, optional = true }
+klazy = { workspace = true, optional = true }
 rand_chacha = { version = "0.3", default-features = false, optional = true }
 mbedtls = { workspace = true, optional = true }
 unittest.workspace = true

@@ -27,7 +27,7 @@ mod unittest_task;
 #[cfg(unittest)]
 pub use unittest_task::{register_unittest_runtime, run_with_test_user_thread};
 
-/// Initializes VFS, /proc/interrupts accounting, and alarm task.
+/// Initializes VFS and alarm task.
 pub fn init() {
     info!("Initialize VFS...");
     devfs::capture_firmware_dtb_snapshot();
@@ -56,11 +56,6 @@ pub fn init() {
         }
         warn!("/dev/log not available: {err}");
     }
-
-    info!("Initialize /proc/interrupts...");
-    ktask::register_timer_callback(|_| {
-        kcore::irq_stats::inc_irq_cnt();
-    });
 
     info!("Initialize alarm...");
     kthread::spawn_alarm_task();

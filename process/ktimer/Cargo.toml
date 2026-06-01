@@ -18,7 +18,7 @@ kprocess.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
-ktypes.workspace = true
+klazy.workspace = true
 linux-raw-sys = { workspace = true, default-features = false, features = ["general", "no_std"] }
 posix-types.workspace = true
 unittest.workspace = true

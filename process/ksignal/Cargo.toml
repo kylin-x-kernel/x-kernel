@@ -9,8 +9,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kaddr_layout.workspace = true
 kcpu.workspace = true
 kerrno.workspace = true
+khal.workspace = true
 bitflags = { workspace = true }
 cfg-if = { workspace = true }
 derive_more = { version = "2.0", default-features = false, features = ["full"] }
@@ -21,6 +23,8 @@ linux-raw-sys = { workspace = true, default-features = false, features = [
     "no_std",
 ] }
 log = { workspace = true }
+memaddr.workspace = true
+memspace.workspace = true
 osvm = {workspace = true}
 posix-types.workspace = true
 strum = { workspace = true }

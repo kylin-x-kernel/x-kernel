@@ -2,11 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The core functionality of a monolithic kernel, including loading user
-//! programs and managing processes.
+//! User program loading and exec image setup.
 
 #![no_std]
-#![feature(likely_unlikely)]
 #![warn(missing_docs)]
 #![allow(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
 
@@ -15,6 +13,7 @@ extern crate alloc;
 #[macro_use]
 extern crate klogger;
 
-pub mod irq_stats;
-mod lrucache;
-pub mod mm;
+mod loader;
+mod lru_cache;
+
+pub use self::loader::{clear_elf_cache, load_user_app};

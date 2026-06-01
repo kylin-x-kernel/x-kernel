@@ -25,7 +25,7 @@ console_driver = { workspace = true, features = ["ns16550-mmio"] }
 irq_driver = { workspace = true }
 khal = { workspace = true }
 kbuild_config = { workspace = true }
-ktypes = { workspace = true }
+klazy = { workspace = true }
 kerrno = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }

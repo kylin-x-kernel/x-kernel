@@ -150,11 +150,11 @@ watchdog_hardlockup = [
 tee = [
     "dep:tee_kernel",
     "dep:tee_task_iface",
-    "kcore/tee",
+    "kexec/tee",
     "ksyscall/tee",
     "kservices/tee",
 ]
-tee_ta_sign = ["kcore/tee_ta_sign", "ksyscall/tee_ta_sign", "tee_task_iface/tee_ta_sign"]
+tee_ta_sign = ["kexec/tee_ta_sign", "ksyscall/tee_ta_sign", "tee_task_iface/tee_ta_sign"]
 csv_huk_key = ["tee_kernel/csv_huk_key"]
 virtcca_huk_key = ["tee_kernel/virtcca_huk_key"]
 ta_verify_with_root = ["tee_ta_sign", "tee_task_iface/ta_verify_with_root"]
@@ -195,7 +195,7 @@ loongarch64-qemu-virt = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",
 ] }
-kcore = { workspace = true }
+kexec = { workspace = true }
 devfs = { workspace = true }
 kfs = { workspace = true, optional = true }
 khal.workspace = true

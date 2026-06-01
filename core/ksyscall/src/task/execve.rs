@@ -13,8 +13,8 @@ use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::ffi::c_char;
 
 use kaddr_layout::USER_HEAP_BASE;
-use kcore::mm::load_user_app;
 use kerrno::{KError, KResult};
+use kexec::load_user_app;
 use khal::uspace::UserContext;
 use kservices::mm::vm_load_string;
 use ktask::current;

@@ -39,7 +39,7 @@ osvm.workspace = true
 linux_sysno.workspace = true
 tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
-kcore.workspace = true
+kexec.workspace = true
 posix-credentials.workspace = true
 posix-fs.workspace = true
 posix-io-mpx.workspace = true

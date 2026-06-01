@@ -8,7 +8,6 @@ homepage.workspace = true
 
 [features]
 default = []
-copy = ["page_table/copy-from"]
 smp = ["page_table/smp"]
 
 [dependencies]
@@ -22,7 +21,7 @@ lazyinit = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
 memset = { workspace = true }
-page_table = { workspace = true }
+page_table = { workspace = true, features = ["copy-from"]}
 unittest.workspace = true
 kbuild_config = { workspace = true }
 karch = { workspace = true }

@@ -19,7 +19,7 @@ karch = { workspace = true }
 khal = { workspace = true }
 static-keys = { workspace = true }
 kspin = { workspace = true }
-ktypes = { workspace = true }
+klazy = { workspace = true }
 lock_api = { workspace = true }
 memspace = { workspace = true }
 memaddr = { workspace = true }

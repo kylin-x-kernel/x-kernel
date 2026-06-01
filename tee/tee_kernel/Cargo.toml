@@ -25,7 +25,7 @@ unittest_support.workspace = true
 rust-dice = { workspace = true, optional = true }
 mbedtls = { workspace = true }
 mbedtls-sys-auto = { workspace = true }
-ktypes.workspace = true
+klazy.workspace = true
 kcpu = { workspace = true, optional = true }
 dice_driver = { workspace = true, optional = true }
 kerrno.workspace = true

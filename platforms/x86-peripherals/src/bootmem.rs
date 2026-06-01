@@ -6,7 +6,7 @@ use core::{mem, ptr};
 
 use boot_info::{BootInfo, BootProtocol, LinuxBootParams, X86LinuxE820EntryType};
 use khal::mem::ReservedKind;
-use ktypes::Once;
+use klazy::Once;
 use multiboot2::{BootInformation, BootInformationHeader, MemoryAreaType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -16,7 +16,7 @@ default = []
 # TA ELF `.ta_signature` verification at load time; see `src/tasign.rs` and crate `lib.rs` docs.
 tee_ta_sign = [
     "dep:ksync",
-    "dep:ktypes",
+    "dep:klazy",
     "dep:tasign",
     "dep:tasign_kernel_shim",
 ]
@@ -31,10 +31,10 @@ uuid = { version = "0.8", default-features = false }
 unittest.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
-xmas-elf = { version = "0.9", default-features = false }
+xmas-elf = { workspace = true, default-features = false }
 log.workspace = true
 ksync = { workspace = true, optional = true }
-ktypes = { workspace = true, optional = true }
+klazy = { workspace = true, optional = true }
 tasign = { workspace = true, optional = true, features = ["kernel-verify"] }
 tasign_kernel_shim = { workspace = true, optional = true }
 tee_raw_sys.workspace = true

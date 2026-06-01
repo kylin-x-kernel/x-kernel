@@ -59,7 +59,7 @@ kthread.workspace = true
 ksignal.workspace = true
 osvm.workspace = true
 tee_kernel = { workspace = true, optional = true }
-kcore.workspace = true
+memspace.workspace = true
 posix-ipc.workspace = true
 procfs.workspace = true
 devfs.workspace = true

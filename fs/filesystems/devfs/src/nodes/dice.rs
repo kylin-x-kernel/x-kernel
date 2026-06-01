@@ -8,8 +8,8 @@ use core::any::Any;
 
 use dice_driver::{DICE_IOCTL_GET_HANDOVER, DICE_IOCTL_GET_RAW_HANDOVER};
 use kerrno::{KError, KResult};
+use klazy::Lazy;
 use ksync::Mutex;
-use ktypes::Lazy;
 use kvfs::DeviceFileOps;
 use kvfs_simple::{DirMapping, SimpleFs};
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};

@@ -38,7 +38,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::{fmt, ops::Range};
 
-use ktypes::Once;
+use klazy::Once;
 
 // Modules
 pub mod arch;
