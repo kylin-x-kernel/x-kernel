@@ -681,6 +681,25 @@ def giteeManifestFile(String action, String stageName = null) {
     return "${ws}/gitee-manifests/${slug}-${unique}.json"
 }
 
+def prepareGiteeManifestDirectory() {
+    def ws = env.ROOT_WS?.trim() ?: env.WORKSPACE
+    withEnv(["_GITEE_MANIFEST_DIR=${ws}/gitee-manifests"]) {
+        sh label: 'Prepare Gitee manifest directory', script: '''#!/bin/bash
+set -euo pipefail
+manifest_dir="${_GITEE_MANIFEST_DIR}"
+mkdir -p "${manifest_dir}"
+
+parent_dir="$(dirname "${manifest_dir}")"
+if [[ -e "${parent_dir}" ]]; then
+    owner="$(stat -c '%u:%g' "${parent_dir}")"
+    chown "${owner}" "${manifest_dir}" || true
+fi
+
+chmod 0777 "${manifest_dir}" || true
+'''
+    }
+}
+
 /** 并行阶段顺序（PR 评论表格 + gitee_check_runs.py manifest） */
 def ciParallelStageOrder() {
     return ciStageNames(ciParallelStages())
@@ -736,12 +755,8 @@ def giteeCheck(String action, String stageName = null, Map ciResults = null, Map
     ]
 
     def manifestFile = giteeManifestFile(action, stageName)
-    sh label: 'Prepare Gitee manifest directory', script: """#!/bin/bash
-set -euo pipefail
-mkdir -p '${env.ROOT_WS ?: env.WORKSPACE}/gitee-manifests'
-"""
+    prepareGiteeManifestDirectory()
     writeJSON file: manifestFile, json: manifest
-    fixWorkspaceOwnership(env.ROOT_WS ?: env.WORKSPACE)
 
     try {
         withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
