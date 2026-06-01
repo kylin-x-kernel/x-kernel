@@ -9,7 +9,10 @@ use core::ffi::{c_char, c_int};
 use kerrno::{KError, KResult};
 use kfs::File;
 use kthread::current_process_state;
-use kvfs::{Location, NodePermission};
+use kvfs::{
+    Location, MountFlags, NodePermission, ST_NOATIME, ST_NODEV, ST_NODIRATIME, ST_NOEXEC,
+    ST_NOSUID, ST_NOSYMFOLLOW, ST_RDONLY, ST_RELATIME, ST_VALID,
+};
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
 };
@@ -120,6 +123,43 @@ pub fn sys_faccessat2(
     Ok(0)
 }
 
+fn superblock_statfs_flags(st_flags: u32) -> u32 {
+    let mut flags = 0;
+    if st_flags & ST_RDONLY != 0 {
+        flags |= ST_RDONLY;
+    }
+    flags
+}
+
+fn statfs_flags(mnt_flags: MountFlags, st_flags: u32) -> u32 {
+    let mut flags = ST_VALID | superblock_statfs_flags(st_flags);
+    if mnt_flags.contains(MountFlags::RDONLY) {
+        flags |= ST_RDONLY;
+    }
+    if mnt_flags.contains(MountFlags::NOSUID) {
+        flags |= ST_NOSUID;
+    }
+    if mnt_flags.contains(MountFlags::NODEV) {
+        flags |= ST_NODEV;
+    }
+    if mnt_flags.contains(MountFlags::NOEXEC) {
+        flags |= ST_NOEXEC;
+    }
+    if mnt_flags.contains(MountFlags::NOATIME) {
+        flags |= ST_NOATIME;
+    }
+    if mnt_flags.contains(MountFlags::NODIRATIME) {
+        flags |= ST_NODIRATIME;
+    }
+    if mnt_flags.contains(MountFlags::RELATIME) {
+        flags |= ST_RELATIME;
+    }
+    if mnt_flags.contains(MountFlags::NOSYMFOLLOW) {
+        flags |= ST_NOSYMFOLLOW;
+    }
+    flags
+}
+
 fn statfs(loc: &Location) -> KResult<statfs> {
     let stat = loc.filesystem().stat()?;
     let mut result: statfs = unsafe { core::mem::zeroed() };
@@ -135,7 +175,7 @@ fn statfs(loc: &Location) -> KResult<statfs> {
     };
     result.f_namelen = stat.name_length as _;
     result.f_frsize = stat.fragment_size as _;
-    result.f_flags = stat.mount_flags as _;
+    result.f_flags = statfs_flags(loc.mountpoint().flags(), stat.mount_flags) as _;
     Ok(result)
 }
 
@@ -163,4 +203,52 @@ pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     let file = proc_state.resources.get_file_like_as::<File>(fd)?;
     buf.write_vm(statfs(file.location())?)?;
     Ok(0)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use kvfs::{
+        MountFlags, ST_NOATIME, ST_NODEV, ST_NODIRATIME, ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW,
+        ST_RDONLY, ST_RELATIME, ST_VALID,
+    };
+    use unittest::{assert, assert_eq, def_test};
+
+    #[def_test]
+    fn test_statfs_flags_include_per_mount_flags() {
+        let flags = MountFlags::RDONLY
+            | MountFlags::NOSUID
+            | MountFlags::NODEV
+            | MountFlags::NOEXEC
+            | MountFlags::NOATIME
+            | MountFlags::NODIRATIME
+            | MountFlags::RELATIME
+            | MountFlags::NOSYMFOLLOW;
+        let result = super::statfs_flags(flags, 0);
+
+        assert!(result & ST_RDONLY != 0);
+        assert!(result & ST_NOSUID != 0);
+        assert!(result & ST_NODEV != 0);
+        assert!(result & ST_NOEXEC != 0);
+        assert!(result & ST_NOATIME != 0);
+        assert!(result & ST_NODIRATIME != 0);
+        assert!(result & ST_RELATIME != 0);
+        assert!(result & ST_NOSYMFOLLOW != 0);
+        assert!(result & ST_VALID != 0);
+    }
+
+    #[def_test]
+    fn test_statfs_flags_preserve_supported_superblock_flags() {
+        assert_eq!(
+            super::statfs_flags(MountFlags::NODEV, ST_RDONLY),
+            ST_VALID | ST_RDONLY | ST_NODEV
+        );
+    }
+
+    #[def_test]
+    fn test_superblock_statfs_flags_filter_mount_only_flags() {
+        assert_eq!(
+            super::superblock_statfs_flags(ST_RDONLY | ST_NODEV | ST_NOEXEC | ST_RELATIME),
+            ST_RDONLY
+        );
+    }
 }

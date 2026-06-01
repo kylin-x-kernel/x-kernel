@@ -99,7 +99,7 @@ impl<D> DeviceContainer<D> {
     /// container). Returns `None` if there are not enough devices.
     #[allow(dead_code)]
     pub fn take_nth(&mut self, n: usize) -> Option<D> {
-        if self.len() >= n {
+        if n < self.len() {
             Some(self.0.remove(n))
         } else {
             None

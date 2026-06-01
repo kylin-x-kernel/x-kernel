@@ -192,8 +192,6 @@ impl Location {
 
     pub fn filesystem(&self) -> &dyn FilesystemOps;
 
-    pub fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
-
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> VfsResult<u64>;
 
@@ -302,6 +300,12 @@ impl Location {
         Ok(())
     }
 
+    /// Updates metadata after checking mount writability.
+    pub fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        self.entry.update_metadata(update)
+    }
+
     /// Returns metadata with the mountpoint device ID applied.
     pub fn metadata(&self) -> VfsResult<Metadata> {
         let mut metadata = self.entry.metadata()?;
@@ -345,15 +349,19 @@ impl Location {
         Self::new(mountpoint, entry)
     }
 
+    fn lookup_child_in_mount(&self, name: &str) -> VfsResult<Self> {
+        Ok(Self::new(
+            self.mountpoint.clone(),
+            self.entry.as_dir()?.lookup(name)?,
+        ))
+    }
+
     /// Look up a child entry without following a symlink.
     pub fn lookup_no_follow(&self, name: &str) -> VfsResult<Self> {
         Ok(match name {
             DOT => self.clone(),
             DOTDOT => self.parent().unwrap_or_else(|| self.clone()),
-            _ => {
-                let loc = Self::new(self.mountpoint.clone(), self.entry.as_dir()?.lookup(name)?);
-                loc.resolve_final_mount()
-            }
+            _ => self.lookup_child_in_mount(name)?.resolve_final_mount(),
         })
     }
 
@@ -373,24 +381,38 @@ impl Location {
 
     /// Create a hard link to an existing node.
     pub fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
-        self.check_writable_mount()?;
         if !Arc::ptr_eq(&self.mountpoint, &node.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
+        self.check_writable_mount()?;
         self.entry
             .as_dir()?
             .link(name, &node.entry)
             .map(|entry| self.with_entry(entry))
     }
 
+    fn check_not_mountpoint(&self) -> VfsResult<()> {
+        if self.is_mountpoint() {
+            return Err(VfsError::ResourceBusy);
+        }
+        Ok(())
+    }
+
     /// Rename an entry within the same mountpoint.
     pub fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
-        self.check_writable_mount()?;
         if !Arc::ptr_eq(&self.mountpoint, &dst_dir.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
+        self.check_writable_mount()?;
+        dst_dir.check_writable_mount()?;
+
+        // DirNode::rename revalidates by name; keep these lookups until it can take resolved entries.
+        let src_loc = self.lookup_child_in_mount(src_name)?;
+        src_loc.check_not_mountpoint()?;
+        if let Ok(dst_loc) = dst_dir.lookup_child_in_mount(dst_name) {
+            dst_loc.check_not_mountpoint()?;
+        }
         if !self.ptr_eq(dst_dir)
-            && let Ok(src_loc) = self.lookup_no_follow(src_name)
             && src_loc.entry.node_type() == NodeType::Directory
             && src_loc.entry.is_ancestor_of(&dst_dir.entry)?
         {
@@ -404,14 +426,24 @@ impl Location {
     /// Remove a file or directory entry.
     pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
         self.check_writable_mount()?;
+        // DirNode::unlink revalidates by name; keep this lookup until it can take a resolved entry.
+        let loc = self.lookup_child_in_mount(name)?;
+        match (loc.is_dir(), is_dir) {
+            (true, false) => return Err(VfsError::IsADirectory),
+            (false, true) => return Err(VfsError::NotADirectory),
+            _ => {}
+        }
+        loc.check_not_mountpoint()?;
         self.entry.as_dir()?.unlink(name, is_dir)
     }
 
     /// Open a file entry with options.
     pub fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<Location> {
-        self.entry
-            .as_dir()?
-            .open_file(name, options)
+        let dir = self.entry.as_dir()?;
+        if options.create || options.create_new {
+            self.check_writable_mount()?;
+        }
+        dir.open_file(name, options)
             .map(|entry| self.with_entry(entry).resolve_final_mount())
     }
 

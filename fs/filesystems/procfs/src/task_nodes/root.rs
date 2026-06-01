@@ -67,10 +67,19 @@ impl SimpleDirOps for ProcessTaskDir {
     }
 }
 
-#[rustfmt::skip]
 fn task_status(task: &KtaskRef) -> String {
+    format_task_status(
+        &task.name(),
+        task.as_thread().proc_state.proc.pid(),
+        task.id().as_u64(),
+    )
+}
+
+#[rustfmt::skip]
+fn format_task_status(name: &str, tgid: u32, pid: u64) -> String {
     format!(
-        "Tgid:\t{}\n\
+        "Name:\t{}\n\
+        Tgid:\t{}\n\
         Pid:\t{}\n\
         Uid:\t0 0 0 0\n\
         Gid:\t0 0 0 0\n\
@@ -78,8 +87,9 @@ fn task_status(task: &KtaskRef) -> String {
         Cpus_allowed_list:\t0\n\
         Mems_allowed:\t1\n\
         Mems_allowed_list:\t0\n",
-        task.as_thread().proc_state.proc.pid(),
-        task.id().as_u64()
+        name,
+        tgid,
+        pid
     )
 }
 
@@ -583,8 +593,8 @@ mod tests {
 
     use super::{
         MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, format_oom_score_adj,
-        maps_permissions, namespace_inode, namespace_link_target, parse_oom_score_adj_input,
-        render_maps_line, special_mapping_name,
+        format_task_status, maps_permissions, namespace_inode, namespace_link_target,
+        parse_oom_score_adj_input, render_maps_line, special_mapping_name,
     };
 
     #[def_test]
@@ -602,6 +612,15 @@ mod tests {
     #[def_test]
     fn test_namespace_link_target_formats_inode_reference() {
         assert_eq!(namespace_link_target("mnt"), "mnt:[4026531841]");
+    }
+
+    #[def_test]
+    fn test_task_status_includes_process_name() {
+        let status = format_task_status("test-bin", 12, 34);
+
+        assert!(status.contains("Name:\ttest-bin\n"));
+        assert!(status.contains("Tgid:\t12\n"));
+        assert!(status.contains("Pid:\t34\n"));
     }
 
     #[def_test]

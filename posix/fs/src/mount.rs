@@ -8,65 +8,21 @@ use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
 use kthread::current_process_state;
-use kvfs::{
-    MountFlags, ST_NOATIME, ST_NODEV, ST_NODIRATIME, ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW,
-    ST_RDONLY, ST_RELATIME,
-};
+use kvfs::{MountFlags, ST_RDONLY};
 use memfs::MemoryFs;
 use posix_types::UserConstPtr;
 
-/// Map `mount(2)` MS_* flags to filesystem-level ST_* flags (for `StatFs.mount_flags`).
-///
-/// These are the superblock-level flags reported by `statfs(2)`.
-/// They are distinct from the per-mountpoint flags produced by [`per_mount_flags`].
-///
-/// Keep in sync with [`per_mount_flags`] — every MS_* flag handled here
-/// must also be handled there, and vice versa.
-fn mount_flags_from_sys_mount(flags: i32) -> u32 {
-    // `flags` is a non-negative bitmask from mount(2); safe to reinterpret.
+fn superblock_flags_from_sys_mount(flags: i32) -> u32 {
     let f = flags as u32;
-    let mut mount_flags = 0;
-
-    // Default to relatime unless NOATIME is set.
-    if f & linux_raw_sys::general::MS_NOATIME == 0 {
-        mount_flags |= ST_RELATIME;
-    }
+    let mut sb_flags = 0;
 
     if f & linux_raw_sys::general::MS_RDONLY != 0 {
-        mount_flags |= ST_RDONLY;
+        sb_flags |= ST_RDONLY;
     }
-    if f & linux_raw_sys::general::MS_NOSUID != 0 {
-        mount_flags |= ST_NOSUID;
-    }
-    if f & linux_raw_sys::general::MS_NODEV != 0 {
-        mount_flags |= ST_NODEV;
-    }
-    if f & linux_raw_sys::general::MS_NOEXEC != 0 {
-        mount_flags |= ST_NOEXEC;
-    }
-    if f & linux_raw_sys::general::MS_NOATIME != 0 {
-        mount_flags |= ST_NOATIME;
-    }
-    if f & linux_raw_sys::general::MS_NODIRATIME != 0 {
-        mount_flags |= ST_NODIRATIME;
-    }
-    if f & linux_raw_sys::general::MS_NOSYMFOLLOW != 0 {
-        mount_flags |= ST_NOSYMFOLLOW;
-    }
-    // STRICTATIME takes priority — clear both RELATIME and NOATIME.
-    // Must stay in sync with per_mount_flags.
-    if f & linux_raw_sys::general::MS_STRICTATIME != 0 {
-        mount_flags &= !(ST_RELATIME | ST_NOATIME);
-    }
-    mount_flags
+    sb_flags
 }
 
 /// Map `mount(2)` MS_* flags to per-mount [`MountFlags`].
-///
-/// This returns mount-point attributes, distinct from the superblock-level
-/// flags produced by [`mount_flags_from_sys_mount`].
-///
-/// Keep in sync with [`mount_flags_from_sys_mount`].
 fn per_mount_flags(flags: i32) -> MountFlags {
     // `flags` is a non-negative bitmask from mount(2); safe to reinterpret.
     let f = flags as u32;
@@ -153,7 +109,7 @@ pub fn sys_mount(
     }
 
     let mount_flags = per_mount_flags(flags);
-    let fs = MemoryFs::new_with_name_and_flags("tmpfs", mount_flags_from_sys_mount(flags));
+    let fs = MemoryFs::new_with_name_and_flags("tmpfs", superblock_flags_from_sys_mount(flags));
     let target = current_process_state()
         .fs_context()
         .lock()
@@ -188,4 +144,42 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
         .resolve(target)?;
     target.unmount()?;
     Ok(0)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use kvfs::{MountFlags, ST_RDONLY};
+    use unittest::{assert, assert_eq, def_test};
+
+    #[def_test]
+    fn test_superblock_flags_from_mount_only_options_are_filtered() {
+        let flags = (linux_raw_sys::general::MS_NODEV
+            | linux_raw_sys::general::MS_NOEXEC
+            | linux_raw_sys::general::MS_NOSUID
+            | linux_raw_sys::general::MS_NOATIME
+            | linux_raw_sys::general::MS_NODIRATIME
+            | linux_raw_sys::general::MS_NOSYMFOLLOW) as i32;
+
+        assert_eq!(super::superblock_flags_from_sys_mount(flags), 0);
+    }
+
+    #[def_test]
+    fn test_superblock_flags_preserve_readonly() {
+        assert_eq!(
+            super::superblock_flags_from_sys_mount(linux_raw_sys::general::MS_RDONLY as i32),
+            ST_RDONLY
+        );
+    }
+
+    #[def_test]
+    fn test_per_mount_flags_preserve_mount_options() {
+        let flags = (linux_raw_sys::general::MS_RDONLY
+            | linux_raw_sys::general::MS_NODEV
+            | linux_raw_sys::general::MS_NOEXEC) as i32;
+        let result = super::per_mount_flags(flags);
+
+        assert!(result.contains(MountFlags::RDONLY));
+        assert!(result.contains(MountFlags::NODEV));
+        assert!(result.contains(MountFlags::NOEXEC));
+    }
 }

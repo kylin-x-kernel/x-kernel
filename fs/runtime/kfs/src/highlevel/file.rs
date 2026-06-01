@@ -212,16 +212,24 @@ impl OpenOptions {
         self
     }
 
+    fn mutates_existing_file(&self) -> bool {
+        self.write || self.append || self.truncate
+    }
+
     fn _open(&self, loc: Location) -> VfsResult<OpenResult> {
         let flags = self.to_flags()?;
 
+        let is_dir = loc.is_dir();
+        if is_dir && flags.contains(FileFlags::WRITE) {
+            return Err(VfsError::IsADirectory);
+        }
         if self.directory {
-            if flags.contains(FileFlags::WRITE) {
-                return Err(VfsError::IsADirectory);
-            }
             loc.check_is_dir()?;
         }
-        Ok(if loc.is_dir() {
+        if self.mutates_existing_file() {
+            loc.check_writable_mount()?;
+        }
+        Ok(if is_dir {
             OpenResult::Dir(loc)
         } else {
             // TODO(mivik): is this correct?
@@ -972,6 +980,7 @@ impl FileBackend {
     }
 
     pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
+        self.location().check_writable_mount()?;
         match self {
             Self::Cached(cached) => cached.write_at(src, offset),
             Self::Direct(loc) => {
@@ -1004,6 +1013,7 @@ impl FileBackend {
     }
 
     pub fn append(&self, mut src: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
+        self.location().check_writable_mount()?;
         match self {
             Self::Cached(cached) => cached.append(src),
             Self::Direct(loc) => {
@@ -1053,6 +1063,7 @@ impl FileBackend {
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
+        self.location().check_writable_mount()?;
         match self {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => loc.entry().as_file()?.set_len(len),
@@ -1060,6 +1071,7 @@ impl FileBackend {
     }
 
     pub fn collapse_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        self.location().check_writable_mount()?;
         if let Self::Cached(cached) = self {
             cached.flush_and_evict_from(offset)?;
         }
@@ -1067,6 +1079,7 @@ impl FileBackend {
     }
 
     pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
+        self.location().check_writable_mount()?;
         if let Self::Cached(cached) = self {
             cached.flush_and_evict_from(offset)?;
         }
@@ -1083,6 +1096,8 @@ pub struct File {
     nonblock: AtomicBool,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
+    #[cfg(feature = "times")]
+    is_effectively_readonly: bool,
 }
 
 impl File {
@@ -1100,6 +1115,8 @@ impl File {
                 0
             }))
         };
+        #[cfg(feature = "times")]
+        let is_effectively_readonly = inner.location().is_effectively_readonly();
         Self {
             inner,
             flags,
@@ -1108,6 +1125,8 @@ impl File {
             nonblock: AtomicBool::new(false),
             #[cfg(feature = "times")]
             access_flags: AtomicU8::new(0),
+            #[cfg(feature = "times")]
+            is_effectively_readonly,
         }
     }
 
@@ -1349,6 +1368,9 @@ impl Drop for File {
     fn drop(&mut self) {
         let flags = self.access_flags.load(Ordering::Acquire);
         if flags != 0 {
+            if self.is_effectively_readonly {
+                return;
+            }
             let mut update = kvfs::MetadataUpdate::default();
             if flags & 1 != 0 {
                 update.atime = Some(khal::time::wall_time());

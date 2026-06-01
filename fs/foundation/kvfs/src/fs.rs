@@ -17,6 +17,8 @@ pub const ST_NOSUID: u32 = 0x2;
 pub const ST_NODEV: u32 = 0x4;
 /// Disallow program execution.
 pub const ST_NOEXEC: u32 = 0x8;
+/// `f_flags` support is implemented.
+pub const ST_VALID: u32 = 0x20;
 /// Do not update file access times.
 pub const ST_NOATIME: u32 = 0x400;
 /// Do not update directory access times.
