@@ -7,13 +7,12 @@
 //! All functions in this module are `pub(crate)` — external callers should use
 //! the high-level interfaces from the parent `snapshot` module.
 
-use alloc::format;
 use core::fmt;
 
 use kcpu_id_map::LogicalCpuId;
 use khal::context::TrapFrame;
 
-use crate::{KtaskRef, TaskInner};
+use crate::TaskInner;
 
 #[inline(always)]
 pub(crate) fn dump_println(force: bool, args: fmt::Arguments<'_>) {
@@ -24,7 +23,8 @@ pub(crate) fn dump_println(force: bool, args: fmt::Arguments<'_>) {
     }
 }
 
-pub(crate) fn current_task_for_cpu(cpu_id: LogicalCpuId) -> Option<KtaskRef> {
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn current_task_for_cpu(cpu_id: LogicalCpuId) -> Option<crate::KtaskRef> {
     let mut running = None;
     crate::global_task_queue::for_each_watchdog_task(cpu_id, |weaktask| {
         if running.is_some() {
@@ -120,7 +120,7 @@ pub(crate) fn dump_cur_task_backtrace(
                 cpu_id.as_usize(),
                 running_task
                     .as_ref()
-                    .map(|task| format!("{:?}", task.inner()))
+                    .map(|task| alloc::format!("{:?}", task.inner()))
                     .unwrap_or_else(|| alloc::string::String::from("<running task unavailable>"))
             ),
         );

@@ -9,12 +9,11 @@
 //! - Process information queries
 //! - Hostname management
 
-use core::ffi::c_char;
-
 use kbuild_config::ARCH;
 use kerrno::KResult;
 use kthread::{current_process_fs_context, processes};
 use linux_raw_sys::{
+    ctypes::c_char,
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
     system::{new_utsname, sysinfo},
 };

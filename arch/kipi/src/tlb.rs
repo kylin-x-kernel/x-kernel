@@ -11,7 +11,7 @@
 //! and spin-waits until every target CPU has performed the local flush and
 //! acknowledged completion.
 //!
-//! Implements the [`TlbFlushIf`](page_table::TlbFlushIf) interface defined
+//! Implements the [`page_table::TlbFlushIf`] interface defined
 //! in the `page_table` crate, breaking the circular dependency between
 //! `page_table` and `kipi`.
 

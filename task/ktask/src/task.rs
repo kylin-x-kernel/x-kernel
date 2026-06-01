@@ -20,7 +20,9 @@ use core::{
 };
 
 use futures_util::task::AtomicWaker;
-use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+#[cfg(feature = "smp")]
+use kcpu_id_map::KCpuMaskExt;
+use kcpu_id_map::LogicalCpuId;
 use khal::context::TaskContext;
 #[cfg(feature = "tls")]
 use khal::tls::TlsArea;
@@ -690,7 +692,7 @@ impl CurrentTask {
 
     pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
-        #[cfg(feature = "tls")]
+        #[cfg(all(feature = "tls", target_os = "none"))]
         unsafe {
             khal::asm::write_thread_pointer(init_task.tls.tls_ptr() as usize)
         };

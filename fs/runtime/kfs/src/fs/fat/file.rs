@@ -39,11 +39,18 @@ impl FatFileNode {
     }
 }
 
+fn file_size(file: &mut ff::File) -> u64 {
+    let pos = file.seek(SeekFrom::Current(0)).unwrap_or(0);
+    let size = file.seek(SeekFrom::End(0)).unwrap_or(0);
+    file.seek(SeekFrom::Start(pos)).ok();
+    size
+}
+
 fn grow_file(fs: &FatFilesystemInner, file: &mut ff::File<'static>, len: u64) -> VfsResult<()> {
     // rust-fatfs does not support growing files directly. We need to
     // pad with zeros manually.
     let mut pos = file.seek(SeekFrom::End(0)).map_err(into_vfs_err)?;
-    let block_size = fs.inner.bytes_per_sector() as usize;
+    let block_size = fs.inner.cluster_size() as usize;
     let block = vec![0; block_size];
 
     while pos < len {
@@ -65,7 +72,7 @@ impl NodeOps for FatFileNode {
 
     fn metadata(&self) -> VfsResult<Metadata> {
         let fs = self.fs.lock();
-        let file = self.inner.borrow(&fs);
+        let file = self.inner.borrow_mut(&fs);
         Ok(file_metadata(&fs, file, NodeType::RegularFile))
     }
 
@@ -84,8 +91,8 @@ impl NodeOps for FatFileNode {
 
     fn len(&self) -> VfsResult<u64> {
         let fs = self.fs.lock();
-        let file = self.inner.borrow(&fs);
-        Ok(file.size().unwrap_or(0) as u64)
+        let file = self.inner.borrow_mut(&fs);
+        Ok(file_size(file))
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {
@@ -123,7 +130,7 @@ impl FileNodeOps for FatFileNode {
     fn write_at(&self, mut buf: &[u8], offset: u64) -> VfsResult<usize> {
         let fs = self.fs.lock();
         let file = self.inner.borrow_mut(&fs);
-        if offset > file.size().unwrap_or(0) as u64 {
+        if offset > file_size(file) {
             grow_file(&fs, file, offset)?;
         }
         file.seek(SeekFrom::Start(offset)).map_err(into_vfs_err)?;
@@ -144,13 +151,13 @@ impl FileNodeOps for FatFileNode {
         let file = self.inner.borrow_mut(&fs);
         file.seek(SeekFrom::End(0)).map_err(into_vfs_err)?;
         let written = file.write(buf).map_err(into_vfs_err)?;
-        Ok((written, file.size().unwrap_or(0) as u64))
+        Ok((written, file_size(file)))
     }
 
     fn set_len(&self, len: u64) -> VfsResult<()> {
         let fs = self.fs.lock();
         let file = self.inner.borrow_mut(&fs);
-        if len <= file.size().unwrap_or(0) as u64 {
+        if len <= file_size(file) {
             file.seek(SeekFrom::Start(len)).map_err(into_vfs_err)?;
             file.truncate().map_err(into_vfs_err)
         } else {

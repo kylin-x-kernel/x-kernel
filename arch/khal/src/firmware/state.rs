@@ -23,10 +23,12 @@ pub fn dtb_capture_region() -> Option<(usize, usize, usize)> {
     DTB_CAPTURE.get().copied()
 }
 
+#[cfg(target_os = "none")]
 pub(super) fn init_cmdline(buf: [u8; CMDLINE_BUF_SIZE], len: usize) {
     CMDLINE.init_once((buf, len));
 }
 
+#[cfg(target_os = "none")]
 pub(super) fn init_dtb_capture(paddr: usize, vaddr: usize, size: usize) {
     if paddr != 0 && vaddr != 0 && size != 0 {
         DTB_CAPTURE.init_once((paddr, vaddr, size));

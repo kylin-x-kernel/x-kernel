@@ -81,9 +81,16 @@ pub fn unix_to_dos(datetime: Duration) -> fatfs::DateTime {
     )
 }
 
-pub fn file_metadata(fs: &FatFilesystemInner, file: &ff::File, node_type: NodeType) -> Metadata {
-    let size = file.size().unwrap_or(0) as u64;
-    let block_size = fs.inner.bytes_per_sector();
+pub fn file_metadata(
+    fs: &FatFilesystemInner,
+    file: &mut ff::File,
+    node_type: NodeType,
+) -> Metadata {
+    use fatfs::Seek;
+    let pos = file.seek(fatfs::SeekFrom::Current(0)).unwrap_or(0);
+    let size = file.seek(fatfs::SeekFrom::End(0)).unwrap_or(0);
+    file.seek(fatfs::SeekFrom::Start(pos)).ok();
+    let block_size = fs.inner.cluster_size() as u64;
     Metadata {
         // TODO: inode
         inode: 1,
@@ -98,14 +105,11 @@ pub fn file_metadata(fs: &FatFilesystemInner, file: &ff::File, node_type: NodeTy
         // TODO: The correct block count should be obtained from
         // `file.extents()`. However it would be costly. This implementation
         // would be enough for now.
-        blocks: size / block_size as u64,
+        blocks: size / block_size,
         rdev: DeviceId::default(),
-        atime: dos_to_unix(fatfs::DateTime::new(
-            file.accessed(),
-            fatfs::Time::new(0, 0, 0, 0),
-        )),
-        mtime: dos_to_unix(file.modified()),
-        ctime: dos_to_unix(file.created()),
+        atime: Duration::default(),
+        mtime: Duration::default(),
+        ctime: Duration::default(),
     }
 }
 

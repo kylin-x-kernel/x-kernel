@@ -9,11 +9,13 @@ use memaddr::MemoryAddr;
 use crate::mem::{self, MemRange, ReservedKind, ReservedRegion, ReservedSource};
 
 pub mod devices;
+#[cfg(target_os = "none")]
 mod init;
 mod memory_source;
 mod state;
 
 const CMDLINE_BUF_SIZE: usize = 2048;
+#[cfg(target_os = "none")]
 const DTB_CAPTURE_SIZE: usize = 0x20_0000;
 const MAX_MEMORY_RAM_REGIONS: usize = 128;
 const MAX_MEMORY_RESERVED_REGIONS: usize = 128;
@@ -21,9 +23,13 @@ const FIRMWARE_RESERVED_NAME: &str = "firmware reserved";
 
 pub use state::{cmdline, dtb_capture_region};
 
+#[cfg(target_os = "none")]
 pub fn init(boot_info: &boot_info::BootInfo) {
     init::init(boot_info);
 }
+
+#[cfg(not(target_os = "none"))]
+pub fn init(_boot_info: &boot_info::BootInfo) {}
 
 pub fn init_memory_description(boot_info: &boot_info::BootInfo) {
     memory_source::init_memory_description(boot_info);

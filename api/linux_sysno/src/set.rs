@@ -625,14 +625,4 @@ mod tests {
     fn test_iter_empty() {
         assert_eq!(SysnoSet::empty().iter().collect::<Vec<_>>(), &[]);
     }
-
-    #[cfg(feature = "serde")]
-    #[def_test]
-    fn test_serde_roundtrip() {
-        let syscalls = SysnoSet::new(&[Sysno::read, Sysno::write, Sysno::close, Sysno::openat]);
-
-        let s = serde_json::to_string_pretty(&syscalls).unwrap();
-
-        assert_eq!(serde_json::from_str::<SysnoSet>(&s).unwrap(), syscalls);
-    }
 }

@@ -6,11 +6,8 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
-use kernel_boot::{
-    SECOND_KERNEL_ENTRY,
-    arch::{LogicalCpuId, for_each_present_logical_cpu},
-    register_boot_init,
-};
+use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
+use kernel_boot::{SECOND_KERNEL_ENTRY, register_boot_init};
 use khal::mem::{VirtAddr, v2p};
 
 #[unsafe(link_section = ".bss.stack")]
@@ -93,13 +90,13 @@ struct TaskCpuResidencyImpl;
 
 #[crate_interface::impl_interface]
 impl kipi::tlb::TaskCpuResidencyIf for TaskCpuResidencyImpl {
-    fn current_on_cpu_mask() -> kernel_boot::arch::KCpuMask {
+    fn current_on_cpu_mask() -> kcpu_id_map::KCpuMask {
         ktask::current_may_uninit()
             .map(|t| t.on_cpu_mask())
             .unwrap_or_default()
     }
 
-    fn reset_on_cpu_mask(cpu: kernel_boot::arch::LogicalCpuId) {
+    fn reset_on_cpu_mask(cpu: kcpu_id_map::LogicalCpuId) {
         if let Some(t) = ktask::current_may_uninit() {
             t.reset_on_cpu_mask(cpu);
         }
@@ -113,7 +110,7 @@ impl kipi::tlb::TaskCpuResidencyIf for TaskCpuResidencyImpl {
 mod tests_tlb_shootdown {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use kernel_boot::arch::LogicalCpuId;
+    use kcpu_id_map::LogicalCpuId;
     use khal::percpu::this_cpu_id;
     use ktask::KCpuMask;
     use memaddr::{PhysAddr, VirtAddr};

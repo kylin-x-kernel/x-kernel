@@ -9,11 +9,11 @@ use core::arch::naked_asm;
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::{BOOT_STACK_SIZE, CPU_NUM};
+use kcpu_id_map::RawCpuId;
 #[cfg(feature = "fp-simd")]
 use riscv::register::sstatus::{self, FS};
 
 use super::mmu;
-use crate::arch::RawCpuId;
 
 /// Boot stack for the primary CPU.
 #[unsafe(link_section = ".bss.stack")]
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 }
 
 pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
-    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+    let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
             raw_cpu_id.as_usize()
@@ -134,8 +134,8 @@ pub unsafe extern "C" fn __primary_switched(
     }
 
     kaddr_layout::set_kimage_voffset(kimage_voffset);
-    crate::arch::init_boot_cpu_id_map(dtb_paddr);
-    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+    kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
+    let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
             raw_cpu_id.as_usize()

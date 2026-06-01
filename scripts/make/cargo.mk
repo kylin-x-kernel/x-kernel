@@ -16,7 +16,7 @@ build_args := \
   $(build_args-$(MODE)) \
   $(verbose)
 
-RUSTDOCFLAGS := -Z unstable-options --enable-index-page -D rustdoc::broken_intra_doc_links
+RUSTDOCFLAGS := -Z unstable-options --enable-index-page -D rustdoc::broken_intra_doc_links --check-cfg cfg(unittest)
 
 ifeq ($(MAKECMDGOALS), doc_check_missing)
   RUSTDOCFLAGS += -D missing-docs
@@ -35,14 +35,6 @@ endef
 package_roots := api arch boot core drivers fs io mm net process tee util
 crate_dirs := $(sort $(foreach root,$(package_roots),$(dir $(wildcard $(CURDIR)/$(root)/*/Cargo.toml))))
 all_packages := $(notdir $(patsubst %/,%,$(crate_dirs)))
-
-define cargo_doc
-  $(call run_cmd,cargo doc,--no-deps --all-features --workspace $(verbose))
-  @# run twice to fix broken hyperlinks
-  $(foreach p,$(all_packages), \
-    $(call run_cmd,cargo rustdoc,--all-features -p $(p) $(verbose))
-  )
-endef
 
 define unit_test
   $(call run_cmd,cargo test,-p kfs $(1) $(verbose) -- --nocapture)

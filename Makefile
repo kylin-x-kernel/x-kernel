@@ -250,12 +250,6 @@ else
 	$(call cargo_clippy)
 endif
 
-doc:
-	$(call cargo_doc)
-
-doc_check_missing:
-	$(call cargo_doc)
-
 fmt:
 	cargo +nightly-2026-03-08 fmt --all
 

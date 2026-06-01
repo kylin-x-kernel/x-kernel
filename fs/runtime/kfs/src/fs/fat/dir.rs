@@ -66,13 +66,9 @@ impl NodeOps for FatDirNode {
 
     fn metadata(&self) -> VfsResult<Metadata> {
         let fs = self.fs.lock();
-        let dir = self.inner.borrow(&fs);
-        if let Some(file) = dir.as_file() {
-            return Ok(file_metadata(&fs, file, NodeType::Directory));
-        }
+        let _dir = self.inner.borrow(&fs);
 
-        // root directory
-        let block_size = fs.inner.bytes_per_sector() as u64;
+        let block_size = fs.inner.cluster_size() as u64;
         Ok(Metadata {
             inode: self.inode(),
             device: 0,
@@ -149,7 +145,11 @@ impl DirNodeOps for FatDirNode {
         let mut fs = self.fs.lock();
         let dir = self.inner.borrow(&fs);
         dir.iter()
-            .find_map(|entry| entry.ok().filter(|it| it.eq_name(name)))
+            .find_map(|entry| {
+                entry
+                    .ok()
+                    .filter(|it| it.file_name().eq_ignore_ascii_case(name))
+            })
             .map(|entry| self.create_entry(entry, name.to_ascii_lowercase(), fs.alloc_inode()))
             .ok_or(VfsError::NotFound)
     }

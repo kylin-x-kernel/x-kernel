@@ -2,16 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Wrappers of some devices in the [`virtio-drivers`][1] crate, that implement
-//! traits in the [`driver_base`][2] series crates.
+//! Wrappers of some devices in the [`virtio-drivers`] crate, that implement
+//! traits in the [`driver_base`] series crates.
 //!
-//! Like the [`virtio-drivers`][1] crate, you must implement the [`VirtIoHal`]
-//! trait (alias of [`virtio-drivers::Hal`][3]), to allocate DMA regions and
+//! Like the [`virtio-drivers`] crate, you must implement the [`VirtIoHal`]
+//! trait (alias of `virtio_drivers::Hal`), to allocate DMA regions and
 //! translate between physical addresses (as seen by devices) and virtual
 //! addresses (as seen by your program).
 //!
-//! [1]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
-//! [2]: https://docs.rs/virtio-drivers/latest/virtio_drivers/trait.Hal.html
+//! [`virtio-drivers`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
+//! [`driver_base`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/trait.Hal.html
 
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]

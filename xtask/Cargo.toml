@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["xconfig", "convert_cov", "crate_rootfs", "extract_cov"]
+members = ["xconfig", "convert_cov", "crate_rootfs", "extract_cov", "gendoc"]
 
 [workspace.package]
 version = "0.1.0"

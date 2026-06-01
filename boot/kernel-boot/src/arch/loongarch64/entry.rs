@@ -7,9 +7,9 @@ use core::arch::naked_asm;
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::{BOOT_CONSOLE_ADDR, BOOT_STACK_SIZE, CPU_NUM};
+use kcpu_id_map::RawCpuId;
 
 use super::{BOOT_DMW_BASE, BOOT_DMW_UNCACHED_BASE};
-use crate::arch::RawCpuId;
 
 const DIRECT_BOOT_LOAD_OFFSET: usize = 0x0020_0000;
 
@@ -144,7 +144,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 }
 
 pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
-    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+    let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
             raw_cpu_id.as_usize()
@@ -196,8 +196,8 @@ pub unsafe extern "C" fn __primary_switched(
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
     let cmdline_len = cmdline_len(cmdline_paddr);
     let (dtb_paddr, rsdp_paddr) = unsafe { super::mmu::boot_firmware_tables() };
-    crate::arch::init_boot_cpu_id_map(dtb_paddr);
-    let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+    kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
+    let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
             raw_cpu_id.as_usize()

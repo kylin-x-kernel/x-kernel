@@ -4,7 +4,7 @@
 
 //! MMU/page table operations for AArch64.
 
-use aarch64_cpu::registers::{Readable, TTBR0_EL1, TTBR1_EL1, Writeable};
+use aarch64_cpu::registers::{Readable, TTBR0_EL1, Writeable};
 use memaddr::PhysAddr;
 
 /// Hardware-ready page-table root value.
@@ -42,6 +42,7 @@ pub fn read_kernel_page_table() -> HwPageTableRoot {
 
     #[cfg(not(feature = "arm-el2"))]
     {
+        use aarch64_cpu::registers::TTBR1_EL1;
         pt_root_reg = TTBR1_EL1.get() as usize;
     }
 
@@ -81,6 +82,7 @@ pub fn read_user_page_table() -> HwPageTableRoot {
 pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
     #[cfg(not(feature = "arm-el2"))]
     {
+        use aarch64_cpu::registers::TTBR1_EL1;
         TTBR1_EL1.set(root.as_usize() as _);
     }
 

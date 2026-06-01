@@ -24,9 +24,9 @@ use core::arch::naked_asm;
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::{BOOT_STACK_SIZE, CPU_NUM};
+use kcpu_id_map::{LogicalCpuId, RawCpuId};
 
 use super::{el, mmu, serial};
-use crate::arch::{LogicalCpuId, RawCpuId};
 
 // Linux ARM64 Boot Protocol image flags.
 const FLAG_LE: usize = 0b0;
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         "2:",
         "wfe",
         "b       2b",
-        raw_cpu_ids_by_logical = sym crate::arch::CPU_ID_MAP,
+        raw_cpu_ids_by_logical = sym kcpu_id_map::CPU_ID_MAP,
         secondary_boot_stack_tops = sym SECONDARY_BOOT_STACK_TOPS,
         switch_to_el1    = sym el::switch_to_el1,
         enable_fp        = sym enable_fp,
@@ -284,9 +284,9 @@ pub unsafe extern "C" fn __primary_switched(
     // subsequent v2p()/p2v() calls on kernel-image symbols depend on this.
     kaddr_layout::set_kimage_voffset(kimage_voffset);
 
-    crate::arch::init_boot_cpu_id_map(dtb_paddr);
+    kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
 
-    let logical_cpu_id = crate::arch::logical_cpu_id(RawCpuId::new(cpu_mpidr))
+    let logical_cpu_id = kcpu_id_map::logical_cpu_id(RawCpuId::new(cpu_mpidr))
         .unwrap_or_else(|| panic!("missing logical cpu id mapping for raw cpu id {cpu_mpidr:#x}"));
 
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;

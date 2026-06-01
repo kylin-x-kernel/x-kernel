@@ -13,9 +13,9 @@ use boot_info::{
     BOOT_INFO_MAGIC, BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot,
 };
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
+use kcpu_id_map::RawCpuId;
 
 use super::protocols::{MULTIBOOT_BOOTLOADER_MAGIC, SEV_CBIT_MASK};
-use crate::arch::RawCpuId;
 
 static mut X86_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::Unknown);
 
@@ -106,7 +106,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         let kimage_voffset = handoff_arg;
         kaddr_layout::set_kimage_voffset(kimage_voffset);
         unsafe { init_ap_boot_state() };
-        let logical_cpu_id = crate::arch::logical_cpu_id(get_cpu_id())
+        let logical_cpu_id = kcpu_id_map::logical_cpu_id(get_cpu_id())
             .unwrap_or_else(|| panic!("missing logical cpu id mapping for boot cpu"));
         let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
         unsafe {
@@ -126,7 +126,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         let boot_info = unsafe { &*(mbi as *const BootInfo) };
         assert!(boot_info.is_valid(), "invalid boot info");
         kaddr_layout::set_kimage_voffset(KIMAGE_VADDR - boot_info.kernel_load_paddr);
-        crate::arch::init_boot_cpu_id_map(boot_info.rsdp_addr);
+        kcpu_id_map::init_boot_cpu_id_map(boot_info.rsdp_addr);
         unsafe { init_ap_boot_state() };
         call_kernel_entry!(PRIMARY_KERNEL_ENTRY, mbi)
     }
@@ -139,7 +139,7 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
 pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
         let raw_cpu_id = get_cpu_id();
-        let logical_cpu_id = crate::arch::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+        let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
             panic!(
                 "missing logical cpu id mapping for raw cpu id {}",
                 raw_cpu_id.as_usize()

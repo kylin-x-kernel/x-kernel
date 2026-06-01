@@ -163,7 +163,7 @@ fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {
 /// The main entry point of the runtime.
 ///
 /// It is called from the bootstrapping code in the specific platform crate (see
-/// [`kplat::main`]).
+/// `kplat::main`).
 ///
 /// `arg` is the unified bootloader handoff payload (`BootInfo*`) for the
 /// primary CPU. Secondary cores call [`rust_main_secondary`].

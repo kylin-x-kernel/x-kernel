@@ -119,7 +119,7 @@ impl AuxEntry {
         }
     }
 
-    /// Get [self::AuxvType] of the auxv entry
+    /// Get [`AuxType`] of the auxv entry
     pub fn get_type(&self) -> AuxType {
         self.auxv_type
     }

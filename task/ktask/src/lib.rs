@@ -9,10 +9,10 @@
 //! # Cargo Features
 //!
 //! - `preempt`: Enable preemptive scheduling.
-//! - `sched-fifo`: Use the [FIFO cooperative scheduler][1]. It also enables the
-//! - `sched-rr`: Use the [Round-robin preemptive scheduler][2]. It also enables
+//! - `sched-fifo`: Use the FIFO cooperative scheduler. It also enables the
+//! - `sched-rr`: Use the Round-robin preemptive scheduler. It also enables
 //!   `preempt` features if it is enabled.
-//! - `sched-cfs`: Use the [Completely Fair Scheduler][3]. It also enables the
+//! - `sched-cfs`: Use the Completely Fair Scheduler. It also enables the
 //!   `preempt` features if it is enabled.
 
 #![cfg_attr(not(test), no_std)]

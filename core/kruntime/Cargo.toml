@@ -61,3 +61,4 @@ kernel_boot = { workspace = true }
 linkme = { workspace = true }
 macros.workspace = true
 unittest.workspace = true
+kcpu_id_map = { workspace = true }

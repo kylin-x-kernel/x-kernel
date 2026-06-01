@@ -15,6 +15,9 @@ use fatfs::SeekFrom;
 pub use fs::FatFilesystem;
 use fs::FatFilesystemInner;
 
+#[cfg(unittest)]
+mod fat_test;
+
 use crate::disk::SeekableDisk;
 
 impl fatfs::IoBase for SeekableDisk {

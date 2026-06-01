@@ -7,7 +7,7 @@
 //! The crate exposes three allocator classes:
 //!
 //! - [`ByteAllocator`]: Byte-granularity memory allocator. (e.g.,
-//!   [`BuddyByteAllocator`], [`SlabByteAllocator`])
+//!   `BuddyByteAllocator`, `SlabByteAllocator`)
 //! - [`PageAllocator`]: Page-granularity memory allocator. (e.g.,
 //!   [`BuddyPageAllocator`])
 //! - [`IdAllocator`]: Used to allocate unique IDs.

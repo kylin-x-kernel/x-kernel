@@ -3,7 +3,6 @@
 // See LICENSES for license details.
 
 #![no_std]
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerSource {
     PlatformStatic,
