@@ -34,15 +34,6 @@ impl<'a> SocketSetWrapper<'a> {
         dispatch_irq
     }
 
-    pub fn with_socket<T: AnySocket<'a>, R, F>(&self, dispatch_irq: SocketHandle, f: F) -> R
-    where
-        F: FnOnce(&T) -> R,
-    {
-        let set = self.inner.lock();
-        let socket = set.get(dispatch_irq);
-        f(socket)
-    }
-
     pub fn with_socket_mut<T: AnySocket<'a>, R, F>(&self, dispatch_irq: SocketHandle, f: F) -> R
     where
         F: FnOnce(&mut T) -> R,

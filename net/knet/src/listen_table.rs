@@ -29,10 +29,19 @@ struct ListenTableEntry {
     closed: bool,
 }
 
+/// The result of accepting a TCP connection from the listen table.
+///
+/// Contains the socket handle and the local/remote endpoints
+/// needed to construct an accepted [`TcpSocket`].
+#[derive(Clone, Copy)]
+pub(crate) struct AcceptedTcp {
+    pub(crate) handle: SocketHandle,
+    pub(crate) local_endpoint: IpEndpoint,
+    pub(crate) remote_endpoint: IpEndpoint,
+}
+
 struct PendingConn {
-    src: IpEndpoint,
-    dst: IpEndpoint,
-    dispatch_irq: SocketHandle,
+    accepted: AcceptedTcp,
 }
 
 impl ListenTableEntry {
@@ -107,19 +116,23 @@ impl ListenTable {
         }
     }
 
-    pub fn can_accept(&self, endpoint: IpListenEndpoint) -> KResult<bool> {
+    pub fn can_accept(&self, endpoint: IpListenEndpoint, sockets: &SocketSet<'_>) -> KResult<bool> {
         let Some(entry) = self.get_entry(&endpoint) else {
             warn!("accept before listen");
             return Err(KError::InvalidInput);
         };
 
         let entry = entry.lock();
-        Ok(!entry.accept_queue.is_empty())
+        Ok(entry
+            .accept_queue
+            .iter()
+            .any(|conn| is_acceptable_in_socket_set(conn.accepted.handle, sockets)))
     }
 
     pub fn register_accept_waker(
         &self,
         endpoint: IpListenEndpoint,
+        sockets: &SocketSet<'_>,
         waker: &core::task::Waker,
     ) -> KResult<()> {
         let Some(entry) = self.get_entry(&endpoint) else {
@@ -129,28 +142,42 @@ impl ListenTable {
 
         let entry = entry.lock();
         entry.accept_poll.register(waker);
-        if !entry.accept_queue.is_empty() {
+        if entry
+            .accept_queue
+            .iter()
+            .any(|conn| is_acceptable_in_socket_set(conn.accepted.handle, sockets))
+        {
             entry.accept_poll.wake();
         }
         Ok(())
     }
 
-    pub fn accept(&self, endpoint: IpListenEndpoint) -> KResult<SocketHandle> {
+    pub fn accept(
+        &self,
+        endpoint: IpListenEndpoint,
+        sockets: &mut SocketSet<'_>,
+    ) -> KResult<AcceptedTcp> {
         let Some(entry) = self.get_entry(&endpoint) else {
             warn!("accept before listen");
             return Err(KError::InvalidInput);
         };
 
         let mut entry = entry.lock();
+        let mut has_aborted_conn = refresh_entry_for_accept(&mut entry, sockets);
 
         loop {
-            let conn = entry.accept_queue.pop_front().ok_or(KError::WouldBlock)?;
-            if !is_closed(conn.dispatch_irq) {
-                return Ok(conn.dispatch_irq);
+            let conn = match entry.accept_queue.pop_front() {
+                Some(conn) => conn,
+                None if has_aborted_conn => return Err(KError::ConnectionAborted),
+                None => return Err(KError::WouldBlock),
+            };
+            if is_acceptable_in_socket_set(conn.accepted.handle, sockets) {
+                return Ok(conn.accepted);
             }
 
-            warn!("accept failed: connection reset");
-            SOCKET_SET.remove(conn.dispatch_irq);
+            warn!("accept failed: connection aborted");
+            sockets.remove(conn.accepted.handle);
+            has_aborted_conn = true;
         }
     }
 
@@ -201,7 +228,7 @@ impl ListenTable {
             .syn_queue
             .iter()
             .chain(entry.accept_queue.iter())
-            .any(|conn| conn.src == src && conn.dst == dst)
+            .any(|conn| conn.accepted.remote_endpoint == src && conn.accepted.local_endpoint == dst)
         {
             return;
         }
@@ -224,9 +251,11 @@ impl ListenTable {
         }
         let dispatch_irq = sockets.add(socket);
         entry.syn_queue.push_back(PendingConn {
-            src,
-            dst,
-            dispatch_irq,
+            accepted: AcceptedTcp {
+                handle: dispatch_irq,
+                local_endpoint: dst,
+                remote_endpoint: src,
+            },
         });
     }
 
@@ -279,21 +308,15 @@ impl ListenTable {
 
 impl ListenTableEntry {
     fn drain_handles(&mut self) -> Vec<SocketHandle> {
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(self.syn_queue.len() + self.accept_queue.len());
         while let Some(conn) = self.syn_queue.pop_front() {
-            handles.push(conn.dispatch_irq);
+            handles.push(conn.accepted.handle);
         }
         while let Some(conn) = self.accept_queue.pop_front() {
-            handles.push(conn.dispatch_irq);
+            handles.push(conn.accepted.handle);
         }
         handles
     }
-}
-
-fn is_closed(dispatch_irq: SocketHandle) -> bool {
-    SOCKET_SET.with_socket::<tcp::Socket, _, _>(dispatch_irq, |socket| {
-        matches!(socket.state(), State::Closed)
-    })
 }
 
 fn refresh_entry_in_socket_set(entry: &mut ListenTableEntry, sockets: &mut SocketSet<'_>) -> bool {
@@ -302,32 +325,61 @@ fn refresh_entry_in_socket_set(entry: &mut ListenTableEntry, sockets: &mut Socke
     promote_ready_in_socket_set(&mut entry.syn_queue, &mut entry.accept_queue, sockets)
 }
 
-fn prune_closed_in_socket_set(syn_queue: &mut VecDeque<PendingConn>, sockets: &mut SocketSet<'_>) {
-    let mut closed = Vec::new();
+fn refresh_entry_for_accept(entry: &mut ListenTableEntry, sockets: &mut SocketSet<'_>) -> bool {
+    prune_closed_in_socket_set(&mut entry.syn_queue, sockets);
+    let pruned_accept_queue = prune_closed_in_socket_set(&mut entry.accept_queue, sockets);
+    promote_ready_in_socket_set(&mut entry.syn_queue, &mut entry.accept_queue, sockets);
+    pruned_accept_queue
+}
+
+fn prune_closed_in_socket_set(
+    syn_queue: &mut VecDeque<PendingConn>,
+    sockets: &mut SocketSet<'_>,
+) -> bool {
+    let mut closed = Vec::with_capacity(syn_queue.len() / 4);
     syn_queue.retain(|conn| {
-        let keep = !is_closed_in_socket_set(conn.dispatch_irq, sockets);
+        let keep = !is_discardable_in_socket_set(conn.accepted.handle, sockets);
         if !keep {
-            closed.push(conn.dispatch_irq);
+            closed.push(conn.accepted.handle);
         }
         keep
     });
-    for dispatch_irq in closed {
-        sockets.remove(dispatch_irq);
+    let pruned = !closed.is_empty();
+    for handle in closed {
+        sockets.remove(handle);
+    }
+    pruned
+}
+
+fn is_discardable_in_socket_set(handle: SocketHandle, sockets: &SocketSet<'_>) -> bool {
+    let socket = sockets.get::<tcp::Socket>(handle);
+    match socket.state() {
+        State::LastAck | State::TimeWait => true,
+        State::Closed | State::FinWait1 | State::FinWait2 | State::Closing => {
+            socket.recv_queue() == 0
+        }
+        State::Listen
+        | State::SynSent
+        | State::SynReceived
+        | State::Established
+        | State::CloseWait => false,
     }
 }
 
-fn is_closed_in_socket_set(dispatch_irq: SocketHandle, sockets: &SocketSet<'_>) -> bool {
-    matches!(
-        sockets.get::<tcp::Socket>(dispatch_irq).state(),
-        State::Closed
-    )
+fn is_acceptable_in_socket_set(handle: SocketHandle, sockets: &SocketSet<'_>) -> bool {
+    is_acceptable_socket(sockets.get::<tcp::Socket>(handle))
 }
 
-fn is_connected_in_socket_set(dispatch_irq: SocketHandle, sockets: &SocketSet<'_>) -> bool {
-    matches!(
-        sockets.get::<tcp::Socket>(dispatch_irq).state(),
-        State::Established | State::CloseWait
-    )
+fn is_acceptable_socket(socket: &tcp::Socket<'_>) -> bool {
+    match socket.state() {
+        State::Established | State::CloseWait => true,
+        State::Closed | State::FinWait1 | State::FinWait2 | State::Closing => {
+            socket.recv_queue() > 0
+        }
+        State::LastAck | State::TimeWait | State::Listen | State::SynSent | State::SynReceived => {
+            false
+        }
+    }
 }
 
 fn promote_ready_in_socket_set(
@@ -341,7 +393,7 @@ fn promote_ready_in_socket_set(
         let Some(conn) = syn_queue.pop_front() else {
             break;
         };
-        if is_connected_in_socket_set(conn.dispatch_irq, sockets) {
+        if is_acceptable_in_socket_set(conn.accepted.handle, sockets) {
             accept_queue.push_back(conn);
             moved = true;
         } else {

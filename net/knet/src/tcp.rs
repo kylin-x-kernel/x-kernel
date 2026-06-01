@@ -45,6 +45,7 @@ pub struct TcpSocket {
     state: StateLock,
     dispatch_irq: SocketHandle,
     bound_endpoint: Mutex<IpListenEndpoint>,
+    accepted_remote_endpoint: Option<IpEndpoint>,
     bound_registered: AtomicBool,
 
     general: GeneralOptions,
@@ -63,6 +64,7 @@ impl TcpSocket {
             state: StateLock::new(State::Idle),
             dispatch_irq,
             bound_endpoint: Mutex::new(empty_endpoint()),
+            accepted_remote_endpoint: None,
             bound_registered: AtomicBool::new(false),
 
             general: GeneralOptions::new(),
@@ -72,12 +74,18 @@ impl TcpSocket {
         }
     }
 
-    /// Creates a new TCP socket that is already connected.
-    fn new_connected(dispatch_irq: SocketHandle) -> Self {
+    /// Creates a new TCP socket that is already connected,
+    /// using the given local and remote endpoints.
+    fn new_connected(
+        dispatch_irq: SocketHandle,
+        local_endpoint: IpEndpoint,
+        remote_endpoint: IpEndpoint,
+    ) -> Self {
         let result = Self {
             state: StateLock::new(State::Connected),
             dispatch_irq,
             bound_endpoint: Mutex::new(empty_endpoint()),
+            accepted_remote_endpoint: Some(remote_endpoint),
             bound_registered: AtomicBool::new(false),
 
             general: GeneralOptions::new(),
@@ -85,15 +93,11 @@ impl TcpSocket {
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
         };
-        let (remote_endpoint, bound_endpoint) = result
-            .with_smol_socket(|socket| (socket.remote_endpoint(), socket_bound_endpoint(socket)));
+        let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
-        let service = SERVICE.lock();
-        let device_mask = remote_endpoint.map_or_else(
-            || service.device_mask_for(&bound_endpoint),
-            |remote_endpoint| service.device_mask_for_addr(&remote_endpoint.addr),
-        );
-        result.general.set_device_mask(device_mask);
+        result
+            .general
+            .set_device_mask(SERVICE.lock().device_mask_for_addr(&remote_endpoint.addr));
         result
     }
 }
@@ -184,7 +188,10 @@ impl TcpSocket {
         let readable = self
             .bound_endpoint()
             .ok()
-            .and_then(|endpoint| LISTEN_TABLE.can_accept(endpoint).ok())
+            .and_then(|endpoint| {
+                let sockets = SOCKET_SET.inner.lock();
+                LISTEN_TABLE.can_accept(endpoint, &sockets).ok()
+            })
             .unwrap_or(false);
         events.set(IoEvents::IN, readable);
         events
@@ -403,9 +410,17 @@ impl SocketOps for TcpSocket {
         let bound_endpoint = self.bound_endpoint()?;
         self.general.recv_poller(self, || {
             poll_interfaces();
-            LISTEN_TABLE
-                .accept(bound_endpoint)
-                .map(|dispatch_irq| Socket::Tcp(Box::new(TcpSocket::new_connected(dispatch_irq))))
+            let accepted = {
+                let mut sockets = SOCKET_SET.inner.lock();
+                LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
+            };
+            Ok({
+                Socket::Tcp(Box::new(TcpSocket::new_connected(
+                    accepted.handle,
+                    accepted.local_endpoint,
+                    accepted.remote_endpoint,
+                )))
+            })
         })
     }
 
@@ -482,7 +497,11 @@ impl SocketOps for TcpSocket {
     fn peer_addr(&self) -> KResult<SocketAddrEx> {
         self.with_smol_socket(|socket| {
             Ok(SocketAddrEx::Ip(
-                socket.remote_endpoint().ok_or(KError::NotConnected)?.into(),
+                socket
+                    .remote_endpoint()
+                    .or(self.accepted_remote_endpoint)
+                    .ok_or(KError::NotConnected)?
+                    .into(),
             ))
         })
     }
@@ -547,7 +566,8 @@ impl Pollable for TcpSocket {
             && events.contains(IoEvents::IN)
             && let Ok(endpoint) = self.bound_endpoint()
         {
-            let _ = LISTEN_TABLE.register_accept_waker(endpoint, context.waker());
+            let sockets = SOCKET_SET.inner.lock();
+            let _ = LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context.waker());
         }
         if events.contains(IoEvents::RDHUP) {
             self.poll_rx_closed.register(context.waker());
@@ -579,13 +599,6 @@ fn endpoint_from_ip_endpoint(endpoint: IpEndpoint) -> IpListenEndpoint {
         addr: Some(endpoint.addr),
         port: endpoint.port,
     }
-}
-
-fn socket_bound_endpoint(socket: &smol::Socket<'_>) -> IpListenEndpoint {
-    socket
-        .local_endpoint()
-        .map(endpoint_from_ip_endpoint)
-        .unwrap_or_else(|| socket.listen_endpoint())
 }
 
 impl TcpSocket {

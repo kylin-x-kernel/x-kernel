@@ -151,6 +151,8 @@ pub enum KErrorKind {
     /// An error returned when an operation could not be completed because a
     /// call to `write()` returned [`Ok(0)`](Ok).
     WriteZero,
+    /// The connection was aborted.
+    ConnectionAborted,
 }
 
 impl KErrorKind {
@@ -166,6 +168,7 @@ impl KErrorKind {
             BadFileDescriptor => "Bad file descriptor",
             BadState => "Bad internal state",
             BrokenPipe => "Broken pipe",
+            ConnectionAborted => "Connection aborted",
             ConnectionRefused => "Connection refused",
             ConnectionReset => "Connection reset",
             CrossesDevices => "Cross-device link or rename",
@@ -240,6 +243,7 @@ impl From<KErrorKind> for LinuxError {
             BadAddress | BadState => LinuxError::EFAULT,
             BadFileDescriptor => LinuxError::EBADF,
             BrokenPipe => LinuxError::EPIPE,
+            ConnectionAborted => LinuxError::ECONNABORTED,
             ConnectionRefused => LinuxError::ECONNREFUSED,
             ConnectionReset => LinuxError::ECONNRESET,
             CrossesDevices => LinuxError::EXDEV,
@@ -290,6 +294,7 @@ impl TryFrom<LinuxError> for KErrorKind {
             LinuxError::EFAULT => BadAddress,
             LinuxError::EBADF => BadFileDescriptor,
             LinuxError::EPIPE => BrokenPipe,
+            LinuxError::ECONNABORTED => ConnectionAborted,
             LinuxError::ECONNREFUSED => ConnectionRefused,
             LinuxError::ECONNRESET => ConnectionReset,
             LinuxError::EXDEV => CrossesDevices,
@@ -499,7 +504,8 @@ kerror_consts!(
     UnexpectedEof,
     Unsupported,
     WouldBlock,
-    WriteZero
+    WriteZero,
+    ConnectionAborted
 );
 
 /// A specialized [`Result`] type with [`KError`] as the error type.
@@ -620,13 +626,16 @@ mod tests {
     #[test]
     fn test_try_from() {
         let max_code = KErrorKind::COUNT as i32;
-        assert_eq!(max_code, 43);
-        assert_eq!(max_code, KError::WriteZero.code());
+        assert_eq!(max_code, 44);
+        assert_eq!(max_code, KError::ConnectionAborted.code());
 
         assert_eq!(KError::AddrInUse.code(), 1);
         assert_eq!(Ok(KError::AddrInUse), KError::try_from_i32(1));
         assert_eq!(Ok(KError::AlreadyConnected), KError::try_from_i32(2));
-        assert_eq!(Ok(KError::WriteZero), KError::try_from_i32(max_code));
+        assert_eq!(
+            Ok(KError::ConnectionAborted),
+            KError::try_from_i32(max_code)
+        );
         assert_eq!(Err(max_code + 1), KError::try_from_i32(max_code + 1));
         assert_eq!(Err(0), KError::try_from_i32(0));
         assert_eq!(Err(i32::MAX), KError::try_from_i32(i32::MAX));
@@ -664,6 +673,7 @@ mod tests_unittest {
         (KErrorKind::BadFileDescriptor, LinuxError::EBADF),
         (KErrorKind::BadState, LinuxError::EFAULT),
         (KErrorKind::BrokenPipe, LinuxError::EPIPE),
+        (KErrorKind::ConnectionAborted, LinuxError::ECONNABORTED),
         (KErrorKind::ConnectionRefused, LinuxError::ECONNREFUSED),
         (KErrorKind::ConnectionReset, LinuxError::ECONNRESET),
         (KErrorKind::CrossesDevices, LinuxError::EXDEV),
