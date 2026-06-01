@@ -193,6 +193,8 @@ pub(crate) struct TeeCipherCtx {
     pub pending_len: usize,
     /// Stateful AES-XTS (mbedtls `cipher_update` does not continue tweak across calls).
     pub xts: Option<crate::tee::crypto::aes_xts::TeeCipherXtsCtx>,
+    /// Buffered AAD for GCM/CCM (`mbedtls_cipher_update_ad` is single-shot).
+    pub authenc_aad: Option<crate::tee::crypto::authenc_aad::TeeAuthencAadCtx>,
 }
 
 impl TeeCipherCtx {
@@ -206,6 +208,7 @@ impl Clone for TeeCipherCtx {
             pending: self.pending,
             pending_len: self.pending_len,
             xts: self.xts.clone(),
+            authenc_aad: self.authenc_aad.clone(),
         }
     }
 }
@@ -3110,6 +3113,104 @@ pub mod tests_cryp {
                 0x70, 0xAA
             ]
         );
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_sm4_gcm_split_aad_matches_one_shot() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = obj_id.read();
+        syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
+
+        let obj = tee_obj_get(obj_id as tee_obj_id_type).unwrap();
+        let mut obj_guard = obj.lock();
+        let key = [
+            0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC,
+            0xE4, 0x67,
+        ];
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(&key).unwrap();
+        let _ = core::mem::replace(&mut obj_guard.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj_guard);
+
+        tee_cryp_state_alloc(
+            TEE_ALG_SM4_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        let data: [u8; 64] = [
+            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
+            0xBB, 0xBB, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xDD, 0xDD, 0xDD, 0xDD,
+            0xDD, 0xDD, 0xDD, 0xDD, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        ];
+        let nonce = [
+            0xA3, 0x33, 0x06, 0x38, 0xA8, 0x09, 0xBA, 0x35, 0x8D, 0x6C, 0x09, 0x8E,
+        ];
+        let ad = [
+            0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD,
+            0xBE, 0xEF, 0xAB, 0xAD, 0xDA, 0xD2,
+        ];
+
+        tee_cryp_authenc_init(state, &nonce, None, None, None).unwrap();
+        tee_cryp_authenc_update_aad(state, &ad[..10]).unwrap();
+        tee_cryp_authenc_update_aad(state, &ad[10..]).unwrap();
+
+        let mut out = [0u8; 80];
+        let mut tag = [0u8; 16];
+        let n = tee_cryp_authenc_update_payload(state, &data, &mut out).unwrap();
+        tee_cryp_authenc_enc_final(state, None, &mut out[n..], &mut tag).unwrap();
+
+        assert_eq!(n, 64);
+        assert_eq!(
+            &out[..64],
+            [
+                0x0C, 0x29, 0xFC, 0x49, 0x07, 0x11, 0x9F, 0x99, 0xC4, 0x92, 0xE2, 0xFA, 0x7B, 0x63,
+                0x3F, 0x4E, 0x16, 0x5B, 0xE5, 0x35, 0x85, 0xAB, 0xED, 0x71, 0x8B, 0xA3, 0x9C, 0xAB,
+                0x80, 0xA0, 0x63, 0x92, 0x73, 0x1E, 0x5C, 0xE6, 0xE3, 0x58, 0x1D, 0xCA, 0xF1, 0x19,
+                0x03, 0x7D, 0x99, 0x8A, 0x0F, 0x52, 0x2D, 0x68, 0x0A, 0x9D, 0xCB, 0x40, 0x5A, 0xAD,
+                0xF8, 0x00, 0xC0, 0xC7, 0x98, 0xBA, 0xE3, 0x8A
+            ]
+        );
+        assert_eq!(
+            tag,
+            [
+                0x19, 0x7F, 0x6C, 0xC5, 0x52, 0x3D, 0xA3, 0x6A, 0x3B, 0x2C, 0x42, 0x92, 0x44, 0xC4,
+                0x70, 0xAA
+            ]
+        );
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_authenc_aad_rejected_after_payload() {
+        let mut state: u32 = 0;
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = obj_id.read();
+        syscall_obj_generate_key(obj_id as c_ulong, 128, core::ptr::null(), 0).unwrap();
+
+        tee_cryp_state_alloc(
+            TEE_ALG_SM4_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        let nonce = [0u8; 12];
+        let data = [0u8; 16];
+        let mut out = [0u8; 32];
+        tee_cryp_authenc_init(state, &nonce, None, None, None).unwrap();
+        tee_cryp_authenc_update_payload(state, &data, &mut out).unwrap();
+        let res = tee_cryp_authenc_update_aad(state, b"late");
+        assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
 
     #[unittest::def_test(custom)]

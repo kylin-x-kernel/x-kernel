@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 pub mod aes_xts;
+pub mod authenc_aad;
 #[allow(clippy::module_inception)]
 pub mod crypto;
 pub mod crypto_impl;
