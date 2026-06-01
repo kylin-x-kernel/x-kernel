@@ -1,5 +1,9 @@
 # X-Kernel
 
+[中文版](README_CN.md)
+
+X-Kernel is a multi-architecture monolithic kernel written in Rust. It provides a modular subsystem design covering memory management, process scheduling, file systems, networking, device drivers, and TEE (Trusted Execution Environment) support. The kernel targets multiple hardware architectures (AArch64, x86_64, RISC-V 64, LoongArch64) and runs on both virtual and physical platforms.
+
 This project is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS), an experimental monolithic OS based on [ArceOS](https://github.com/arceos-org/arceos), developed by Tsinghua University.
 
 ## Supported Architectures
@@ -11,8 +15,8 @@ This project is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS), a
 
 ## Supported Platforms
 - [x] QEMU
-- [x] [海光CSV环境](https://docs.opencloudos.org/OCS/Virtualization_and_Containers_Guide/CCP_Hygon_UserGuide/)
-- [x] Linux kylin-x Pkvm 虚拟机环境
+- [x] [Hygon CSV Environment](https://docs.opencloudos.org/OCS/Virtualization_and_Containers_Guide/CCP_Hygon_UserGuide/)
+- [x] Linux kylin-x Pkvm Virtual Machine
 
 ## Features
 - [x] Tee support
@@ -27,7 +31,7 @@ rustup target add aarch64-unknown-none-softfloat
 sudo apt install qemu-system
 ```
 
-# Musl toolchain
+### Musl toolchain
 | Architecture | GCC Version | Musl Version | Origin Link |
 |--------------|-------------|--------------|-------------|
 | x86_64     | 11.2.1      | git-b76f37f (2021-09-23) | [musl.cc](https://musl.cc/x86_64-linux-musl-cross.tgz) |
@@ -116,4 +120,3 @@ For the x86_64 UEFI flow, the host needs OVMF firmware files (for example `/usr/
 
 ## License
 This project is now released under the Apache License 2.0. See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for details.
-1
