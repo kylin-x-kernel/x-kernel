@@ -11,7 +11,7 @@
 //! - 块设备管理和缓存（blockdev, loopfile）
 //! - 块组管理和位图操作（blockgroup_description, bitmap, bitmap_cache）
 //! - 文件和目录操作（file, dir, entries）
-//! - 数据结构管理（superblock, inodetable_cache, datablock_cache）
+//! - 数据结构管理（superblock, inodetable_cache, directory/metadata datablock_cache）
 //! - 辅助工具和配置（tool, config, endian）
 //! - 日志系统（jbd2）
 

@@ -190,7 +190,7 @@ impl DynBackendOps for FileBackend {
                         flags - MappingFlags::WRITE
                     };
                     self.0.cache.with_page_or_insert(pn, |page, evicted| {
-                        if let Some((pn, _)) = evicted {
+                        for pn in evicted {
                             to_be_evicted.push(pn);
                         }
                         pgtbl

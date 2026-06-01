@@ -79,6 +79,10 @@ impl JBD2DEVSYSTEM {
             return Ok(false);
         }
 
+        // Ordered-data boundary: file data blocks are written directly outside
+        // the journal, so make them durable before metadata reaches the journal.
+        block_dev.flush().expect("Ordered data flush failed!");
+
         let mut desc_buffer = vec![0; BLOCK_SIZE];
 
         // 写header->内存缓存

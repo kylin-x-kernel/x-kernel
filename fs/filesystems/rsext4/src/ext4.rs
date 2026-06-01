@@ -41,7 +41,7 @@ use crate::{
 /// * `inode_allocator` - Inode分配器，管理inode的分配和释放
 /// * `bitmap_cache` - 位图缓存，按需加载，使用LRU淘汰策略
 /// * `inodetable_cache` - Inode表缓存
-/// * `datablock_cache` - 数据块缓存
+/// * `datablock_cache` - 目录和元数据块缓存；普通文件内容由上层 page cache 缓存
 /// * `root_inode` - 根目录inode号
 /// * `group_count` - 块组数量
 /// * `mounted` - 是否已挂载标志
@@ -59,7 +59,7 @@ pub struct Ext4FileSystem {
     pub bitmap_cache: BitmapCache,
     /// InodeTable缓存
     pub inodetable_cache: InodeCache,
-    /// DataBlock缓存
+    /// 目录和元数据块缓存
     pub datablock_cache: DataBlockCache,
     /// 根目录inode号
     pub root_inode: u32,

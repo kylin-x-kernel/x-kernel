@@ -365,6 +365,37 @@ fn free_replaced_inode<B: BlockDevice>(
     Ok(())
 }
 
+fn zero_data_block() -> Vec<u8> {
+    alloc::vec![0u8; BLOCK_SIZE]
+}
+
+fn checked_block_num(block_num: u64) -> BlockDevResult<u32> {
+    u32::try_from(block_num).map_err(|_| BlockDevError::BlockOutOfRange {
+        block_id: u32::MAX,
+        max_blocks: u32::MAX as u64,
+    })
+}
+
+pub fn read_data_block_direct<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    block_num: u64,
+) -> BlockDevResult<Vec<u8>> {
+    let mut data = zero_data_block();
+    device.read_blocks(&mut data, checked_block_num(block_num)?, 1)?;
+    Ok(data)
+}
+
+pub fn write_data_block_direct<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    block_num: u64,
+    data: &[u8],
+) -> BlockDevResult<()> {
+    if data.len() != BLOCK_SIZE {
+        return Err(BlockDevError::InvalidInput);
+    }
+    device.write_blocks(data, checked_block_num(block_num)?, 1, false)
+}
+
 /// 重命名文件或目录
 ///
 /// # 参数
@@ -458,9 +489,10 @@ pub fn truncate_with_ino<B: BlockDevice>(
             if tail_off != 0 {
                 let lbn = (truncate_size / block_bytes) as u32;
                 if let Some(phys) = resolve_inode_block(device, &mut inode, lbn)? {
-                    fs.datablock_cache.modify(device, phys as u64, |data| {
-                        data[tail_off as usize..].fill(0);
-                    })?;
+                    let mut data = read_data_block_direct(device, phys as u64)?;
+                    data[tail_off as usize..].fill(0);
+                    write_data_block_direct(device, phys as u64, &data)?;
+                    fs.datablock_cache.invalidate(phys as u64);
                 }
             }
 
@@ -491,9 +523,10 @@ pub fn truncate_with_ino<B: BlockDevice>(
                 let seg_len = (seg_end - pos) as usize;
 
                 if let Some(phys) = resolve_inode_block(device, &mut inode, lbn)? {
-                    fs.datablock_cache.modify(device, phys as u64, |data| {
-                        data[in_block_off..in_block_off + seg_len].fill(0);
-                    })?;
+                    let mut data = read_data_block_direct(device, phys as u64)?;
+                    data[in_block_off..in_block_off + seg_len].fill(0);
+                    write_data_block_direct(device, phys as u64, &data)?;
+                    fs.datablock_cache.invalidate(phys as u64);
                 }
 
                 pos = seg_end;
@@ -525,11 +558,12 @@ pub fn truncate_with_ino<B: BlockDevice>(
     if new_blocks > old_blocks {
         for lbn in old_blocks as u32..new_blocks as u32 {
             let phys = fs.alloc_block(device)?;
-            fs.datablock_cache.modify_new(phys, |data| {
-                for b in data.iter_mut() {
-                    *b = 0;
-                }
-            });
+            let data = zero_data_block();
+            if let Err(e) = write_data_block_direct(device, phys, &data) {
+                let _ = fs.free_block(device, phys);
+                return Err(e);
+            }
+            fs.datablock_cache.invalidate(phys);
             inode.i_block[lbn as usize] = phys as u32;
         }
     }
@@ -911,13 +945,17 @@ pub fn create_symbol_link<B: BlockDevice>(
 
             let blk = fs.alloc_block(device)?;
             let write_len = core::cmp::min(remaining, BLOCK_SIZE);
-            fs.datablock_cache.modify_new(blk, |data| {
-                for b in data.iter_mut() {
-                    *b = 0;
+            let mut data = zero_data_block();
+            let end = src_off + write_len;
+            data[..write_len].copy_from_slice(&target_bytes[src_off..end]);
+            if let Err(e) = write_data_block_direct(device, blk, &data) {
+                let _ = fs.free_block(device, blk);
+                for old_blk in data_blocks {
+                    let _ = fs.free_block(device, old_blk);
                 }
-                let end = src_off + write_len;
-                data[..write_len].copy_from_slice(&target_bytes[src_off..end]);
-            });
+                return Err(e);
+            }
+            fs.datablock_cache.invalidate(blk);
 
             data_blocks.push(blk);
             remaining -= write_len;
@@ -976,9 +1014,8 @@ fn read_symlink_target<B: BlockDevice>(
     if inode.have_extend_header_and_use_extend() {
         let blocks = resolve_inode_block_allextend(fs, device, inode)?;
         for &phys in blocks.values() {
-            let cached = fs.datablock_cache.get_or_load(device, phys)?;
-            let data = &cached.data[..block_bytes];
-            buf.extend_from_slice(data);
+            let data = read_data_block_direct(device, phys)?;
+            buf.extend_from_slice(&data[..block_bytes]);
             if buf.len() >= size {
                 break;
             }
@@ -989,9 +1026,8 @@ fn read_symlink_target<B: BlockDevice>(
                 Some(b) => b,
                 None => break,
             };
-            let cached = fs.datablock_cache.get_or_load(device, phys as u64)?;
-            let data = &cached.data[..block_bytes];
-            buf.extend_from_slice(data);
+            let data = read_data_block_direct(device, phys as u64)?;
+            buf.extend_from_slice(&data[..block_bytes]);
         }
     }
 
@@ -1064,9 +1100,8 @@ fn read_file_follow<B: BlockDevice>(
     if inode.have_extend_header_and_use_extend() {
         let blocks = resolve_inode_block_allextend(fs, device, &mut inode)?;
         for &phys in blocks.values() {
-            let cached = fs.datablock_cache.get_or_load(device, phys)?;
-            let data = &cached.data[..block_bytes];
-            buf.extend_from_slice(data);
+            let data = read_data_block_direct(device, phys)?;
+            buf.extend_from_slice(&data[..block_bytes]);
             if buf.len() >= size {
                 break;
             }
@@ -1078,9 +1113,8 @@ fn read_file_follow<B: BlockDevice>(
                 None => break,
             };
 
-            let cached = fs.datablock_cache.get_or_load(device, phys as u64)?;
-            let data = &cached.data[..block_bytes];
-            buf.extend_from_slice(data);
+            let data = read_data_block_direct(device, phys as u64)?;
+            buf.extend_from_slice(&data[..block_bytes]);
         }
     }
 
@@ -2034,13 +2068,18 @@ pub fn mkfile_with_ino<B: BlockDevice>(
             let write_len = core::cmp::min(remaining, BLOCK_SIZE);
 
             // 将数据写入新分配的数据块，其余部分填零
-            fs.datablock_cache.modify_new(blk, |data| {
-                for b in data.iter_mut() {
-                    *b = 0;
+            let mut data = zero_data_block();
+            let end = src_off + write_len;
+            data[..write_len].copy_from_slice(&buf[src_off..end]);
+            if let Err(e) = write_data_block_direct(device, blk, &data) {
+                error!("mkfile write data block failed path={path} err={e:?} ({e})");
+                let _ = fs.free_block(device, blk);
+                for old_blk in data_blocks {
+                    let _ = fs.free_block(device, old_blk);
                 }
-                let end = src_off + write_len;
-                data[..write_len].copy_from_slice(&buf[src_off..end]);
-            });
+                return None;
+            }
+            fs.datablock_cache.invalidate(blk);
 
             data_blocks.push(blk);
             total_written += write_len;
@@ -2227,11 +2266,12 @@ pub fn write_file_with_ino<B: BlockDevice>(
                 None => {
                     // Hole: allocate a new block and insert an extent for this single LBN.
                     let new_phys = fs.alloc_block(device)?;
-                    fs.datablock_cache.modify_new(new_phys, |blk| {
-                        for b in blk.iter_mut() {
-                            *b = 0;
-                        }
-                    });
+                    let zero = zero_data_block();
+                    if let Err(e) = write_data_block_direct(device, new_phys, &zero) {
+                        let _ = fs.free_block(device, new_phys);
+                        return Err(e);
+                    }
+                    fs.datablock_cache.invalidate(new_phys);
                     {
                         let mut tree = ExtentTree::new(&mut inode);
                         let ext = Ext4Extent::new(lbn as u32, new_phys, 1);
@@ -2254,23 +2294,28 @@ pub fn write_file_with_ino<B: BlockDevice>(
             }
         };
 
-        fs.datablock_cache.modify(device, phys as u64, |blk| {
-            let block_start = lbn * block_bytes;
-            let block_end = block_start + block_bytes;
+        let block_start = lbn * block_bytes;
+        let block_end = block_start + block_bytes;
 
-            let write_start = core::cmp::max(offset, block_start);
-            let write_end = core::cmp::min(end, block_end);
-            if write_start >= write_end {
-                return;
-            }
+        let write_start = core::cmp::max(offset, block_start);
+        let write_end = core::cmp::min(end, block_end);
+        if write_start >= write_end {
+            continue;
+        }
 
-            let src_off = write_start - offset;
-            let dst_off = (write_start - block_start) as usize;
-            let len = write_end - write_start;
+        let src_off = write_start - offset;
+        let dst_off = (write_start - block_start) as usize;
+        let len = write_end - write_start;
 
-            blk[dst_off..dst_off + len as usize]
-                .copy_from_slice(&data[src_off as usize..(src_off + len) as usize]);
-        })?;
+        let mut blk = if dst_off == 0 && len as usize == BLOCK_SIZE {
+            zero_data_block()
+        } else {
+            read_data_block_direct(device, phys as u64)?
+        };
+        blk[dst_off..dst_off + len as usize]
+            .copy_from_slice(&data[src_off as usize..(src_off + len) as usize]);
+        write_data_block_direct(device, phys as u64, &blk)?;
+        fs.datablock_cache.invalidate(phys as u64);
     }
 
     if end > old_size {

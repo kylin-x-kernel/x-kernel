@@ -273,11 +273,8 @@ impl FileNodeOps for Inode {
             if let Some(phys) = rsext4::loopfile::resolve_inode_block(dev, &mut inode, lbn as u32)
                 .map_err(into_vfs_err)?
             {
-                let cached = fs
-                    .datablock_cache
-                    .get_or_load(dev, phys as u64)
-                    .map_err(into_vfs_err)?;
-                let data = &cached.data[..block_bytes as usize];
+                let data =
+                    rsext4::file::read_data_block_direct(dev, phys as u64).map_err(into_vfs_err)?;
                 buf[written..written + copy_len as usize]
                     .copy_from_slice(&data[copy_start as usize..(copy_start + copy_len) as usize]);
             } else {
@@ -381,13 +378,17 @@ impl FileNodeOps for Inode {
                 while remaining > 0 {
                     let blk = fs.alloc_block(dev).map_err(into_vfs_err)?;
                     let write_len = core::cmp::min(remaining, BLOCK_SIZE);
-                    fs.datablock_cache.modify_new(blk, |data| {
-                        for b in data.iter_mut() {
-                            *b = 0;
+                    let mut data = alloc::vec![0u8; BLOCK_SIZE];
+                    let end = src_off + write_len;
+                    data[..write_len].copy_from_slice(&target_bytes[src_off..end]);
+                    if let Err(e) = rsext4::file::write_data_block_direct(dev, blk, &data) {
+                        let _ = fs.free_block(dev, blk);
+                        for old_blk in data_blocks {
+                            let _ = fs.free_block(dev, old_blk);
                         }
-                        let end = src_off + write_len;
-                        data[..write_len].copy_from_slice(&target_bytes[src_off..end]);
-                    });
+                        return Err(into_vfs_err(e));
+                    }
+                    fs.datablock_cache.invalidate(blk);
                     data_blocks.push(blk);
                     remaining -= write_len;
                     src_off += write_len;

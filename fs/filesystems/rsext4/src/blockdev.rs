@@ -369,8 +369,12 @@ impl<B: BlockDevice> Jbd2Dev<B> {
         Ok(())
     }
 
-    pub fn cantflush(&mut self) -> BlockDevResult<()> {
+    pub fn flush(&mut self) -> BlockDevResult<()> {
         self.inner.flush()
+    }
+
+    pub fn cantflush(&mut self) -> BlockDevResult<()> {
+        self.flush()
     }
 
     pub fn total_blocks(&self) -> u64 {

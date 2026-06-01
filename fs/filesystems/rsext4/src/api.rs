@@ -248,8 +248,7 @@ pub fn read_at<B: BlockDevice>(
         }
 
         if let Some(phys) = resolve_inode_block(dev, &mut file.inode, lbn as u32)? {
-            let cached = fs.datablock_cache.get_or_load(dev, phys as u64)?;
-            let data = &cached.data[..block_bytes as usize];
+            let data = read_data_block_direct(dev, phys as u64)?;
             out.extend_from_slice(&data[copy_start as usize..(copy_start + copy_len) as usize]);
         } else {
             // Hole: return zeros for the requested logical range.
