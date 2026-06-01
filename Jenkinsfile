@@ -127,6 +127,7 @@ pipeline {
                 stage('Clippy+Build: aarch64-crosvm-virt') {
                     steps {
                         script {
+                            ciParallelStageBegin('Clippy+Build: aarch64-crosvm-virt', ciResults)
                             giteeEnsureCheckRunStarted('Clippy+Build: aarch64-crosvm-virt')
                             runClippyAndBuild('aarch64-crosvm-virt')
                             ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'passed']
@@ -134,13 +135,15 @@ pipeline {
                     }
                     post {
                         success { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'passed'] } }
-                        failure { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'failed', detail: 'clippy 或 build 失败'] } }
-                        always { script { ciFinishGiteeStage('Clippy+Build: aarch64-crosvm-virt', ciResults, 'clippy 或 build 失败') } }
+                        failure { script { ciMarkParallelFailure('Clippy+Build: aarch64-crosvm-virt', ciResults, 'clippy 或 build 失败') } }
+                        aborted { script { ciResults['Clippy+Build: aarch64-crosvm-virt'] = [status: 'skipped', detail: '因其他并行阶段失败而中止（fail-fast）'] } }
+                        always { script { ciFinishParallelStage('Clippy+Build: aarch64-crosvm-virt', ciResults) } }
                     }
                 }
                 stage('Clippy+Runtime: riscv64-qemu-virt') {
                     steps {
                         script {
+                            ciParallelStageBegin('Clippy+Runtime: riscv64-qemu-virt', ciResults)
                             giteeEnsureCheckRunStarted('Clippy+Runtime: riscv64-qemu-virt')
                             runClippyAndRuntime('riscv64')
                             ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'passed']
@@ -148,13 +151,15 @@ pipeline {
                     }
                     post {
                         success { script { ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'passed'] } }
-                        failure { script { ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'failed', detail: '阶段失败，详见下方日志。'] } }
-                        always { script { ciFinishGiteeStage('Clippy+Runtime: riscv64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
+                        failure { script { ciMarkParallelFailure('Clippy+Runtime: riscv64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
+                        aborted { script { ciResults['Clippy+Runtime: riscv64-qemu-virt'] = [status: 'skipped', detail: '因其他并行阶段失败而中止（fail-fast）'] } }
+                        always { script { ciFinishParallelStage('Clippy+Runtime: riscv64-qemu-virt', ciResults) } }
                     }
                 }
                 stage('Clippy+Runtime: x86_64-qemu-virt') {
                     steps {
                         script {
+                            ciParallelStageBegin('Clippy+Runtime: x86_64-qemu-virt', ciResults)
                             giteeEnsureCheckRunStarted('Clippy+Runtime: x86_64-qemu-virt')
                             runClippyAndRuntime('x86_64')
                             ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'passed']
@@ -162,15 +167,15 @@ pipeline {
                     }
                     post {
                         success { script { ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'passed'] } }
-                        failure {
-                            script { ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'failed', detail: '阶段失败，详见下方日志。'] }
-                        }
-                        always { script { ciFinishGiteeStage('Clippy+Runtime: x86_64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
+                        failure { script { ciMarkParallelFailure('Clippy+Runtime: x86_64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
+                        aborted { script { ciResults['Clippy+Runtime: x86_64-qemu-virt'] = [status: 'skipped', detail: '因其他并行阶段失败而中止（fail-fast）'] } }
+                        always { script { ciFinishParallelStage('Clippy+Runtime: x86_64-qemu-virt', ciResults) } }
                     }
                 }
                 stage('Clippy+Runtime: aarch64-qemu-virt') {
                     steps {
                         script {
+                            ciParallelStageBegin('Clippy+Runtime: aarch64-qemu-virt', ciResults)
                             giteeEnsureCheckRunStarted('Clippy+Runtime: aarch64-qemu-virt')
                             runClippyAndRuntime('aarch64')
                             ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'passed']
@@ -178,15 +183,15 @@ pipeline {
                     }
                     post {
                         success { script { ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'passed'] } }
-                        failure {
-                            script { ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'failed', detail: '阶段失败，详见下方日志。'] }
-                        }
-                        always { script { ciFinishGiteeStage('Clippy+Runtime: aarch64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
+                        failure { script { ciMarkParallelFailure('Clippy+Runtime: aarch64-qemu-virt', ciResults, '阶段失败，详见下方日志。') } }
+                        aborted { script { ciResults['Clippy+Runtime: aarch64-qemu-virt'] = [status: 'skipped', detail: '因其他并行阶段失败而中止（fail-fast）'] } }
+                        always { script { ciFinishParallelStage('Clippy+Runtime: aarch64-qemu-virt', ciResults) } }
                     }
                 }
                 stage('TEE: x86_64') {
                     steps {
                         script {
+                            ciParallelStageBegin('TEE: x86_64', ciResults)
                             giteeEnsureCheckRunStarted('TEE: x86_64')
                             teeResults['x86_64'] = runTeeStorageTest('x86_64')
                             ciResults['TEE: x86_64'] = [status: 'passed']
@@ -197,15 +202,17 @@ pipeline {
                             if (!teeResults.containsKey('x86_64')) {
                                 teeResults['x86_64'] = [arch: 'x86_64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
                             }
-                            ciResults['TEE: x86_64'] = [status: 'failed', detail: teeResults['x86_64']?.errorSnippet ?: 'TEE 测试失败']
+                            ciMarkParallelFailure('TEE: x86_64', ciResults, teeResults['x86_64']?.errorSnippet ?: 'TEE 测试失败')
                         } }
+                        aborted { script { ciResults['TEE: x86_64'] = [status: 'skipped', detail: '因其他并行阶段失败而中止（fail-fast）'] } }
                         success { script { ciResults['TEE: x86_64'] = [status: 'passed'] } }
-                        always { script { ciFinishGiteeStage('TEE: x86_64', ciResults, 'TEE 测试失败') } }
+                        always { script { ciFinishParallelStage('TEE: x86_64', ciResults) } }
                     }
                 }
                 stage('TEE: aarch64') {
                     steps {
                         script {
+                            ciParallelStageBegin('TEE: aarch64', ciResults)
                             giteeEnsureCheckRunStarted('TEE: aarch64')
                             teeResults['aarch64'] = runTeeStorageTest('aarch64')
                             ciResults['TEE: aarch64'] = [status: 'passed']
@@ -216,10 +223,11 @@ pipeline {
                             if (!teeResults.containsKey('aarch64')) {
                                 teeResults['aarch64'] = [arch: 'aarch64', passed: 0, failed: 0, status: 'failed', errorSnippet: '构建或启动阶段失败，请查看 Jenkins 日志']
                             }
-                            ciResults['TEE: aarch64'] = [status: 'failed', detail: teeResults['aarch64']?.errorSnippet ?: 'TEE 测试失败']
+                            ciMarkParallelFailure('TEE: aarch64', ciResults, teeResults['aarch64']?.errorSnippet ?: 'TEE 测试失败')
                         } }
+                        aborted { script { ciResults['TEE: aarch64'] = [status: 'skipped', detail: '因其他并行阶段失败而中止（fail-fast）'] } }
                         success { script { ciResults['TEE: aarch64'] = [status: 'passed'] } }
-                        always { script { ciFinishGiteeStage('TEE: aarch64', ciResults, 'TEE 测试失败') } }
+                        always { script { ciFinishParallelStage('TEE: aarch64', ciResults) } }
                     }
                 }
             }
@@ -228,6 +236,11 @@ pipeline {
     }
 
     post {
+        aborted {
+            script {
+                markCiStagesAborted(ciResults)
+            }
+        }
         always {
             script {
                 restoreReplayGiteeEnv()
@@ -239,8 +252,8 @@ pipeline {
                     '**/tee-test-output.log',
                     '**/coverage-html/**/*', '**/coverage.info', '**/coverage.xml', '**/coverage.txt'
                 ].join(','), allowEmptyArchive: true
-                deleteOldCiComments()
                 def coverageSummary = collectCoverageSummary()
+                deleteOldCiComments()
                 def built = buildCombinedComment(ciResults, coverageSummary, failedStageLogs)
                 notifyGiteePullRequest(built.comment)
                 giteeFinalizeAllCheckRuns(ciResults, failedStageLogs)
@@ -941,6 +954,35 @@ def ciFinishGiteeStage(String stageName, Map results, String failedDetail) {
     }
     giteeFinishCheckRun(stageName, results, [:])
 }
+
+def ciParallelStageBegin(String stageName, Map results) {
+    results[stageName] = [status: 'running']
+}
+
+/** 并行 stage 收尾：success/failure/aborted 已写入的状态不覆盖；其余标 skipped。 */
+def ciFinishParallelStage(String stageName, Map results, String skippedDetail = null) {
+    def st = results[stageName]?.status
+    def skipMsg = skippedDetail ?: '因其他并行阶段失败而中止（fail-fast）'
+    if (st != 'passed' && st != 'failed') {
+        results[stageName] = [status: 'skipped', detail: skipMsg]
+    }
+    giteeFinishCheckRun(stageName, results, [:])
+}
+
+/** 构建被手动中止时，未完成的并行/串行阶段在 ciResults 中标记为 skipped（供 post_finalize 收尾）。 */
+def markCiStagesAborted(Map results) {
+    ciStageOrder().each { name ->
+        def st = results[name]?.status
+        if (st != 'passed' && st != 'failed') {
+            results[name] = [status: 'skipped', detail: '构建已中止（手动停止或 fail-fast）']
+        }
+    }
+}
+
+/** 本 stage 的 failure { } 触发，表示该并行分支自身失败（非 fail-fast 误触发时用 aborted { } 覆盖）。 */
+def ciMarkParallelFailure(String stageName, Map results, String failedDetail) {
+    results[stageName] = [status: 'failed', detail: failedDetail]
+}
 def giteeStartParallelCheckRuns() { giteeCheck('start_parallel') }
 def giteeEnsureCheckRunStarted(String stageName) { giteeCheck('ensure_start', stageName) }
 def giteeFinalizeAllCheckRuns(Map ciResults, Map failedStageLogs = [:]) {
@@ -1275,7 +1317,7 @@ def buildCiComment(Map results, String coverageSummary = '') {
 
     def rows = stageOrder.collect { name ->
         def r = normalizedResults[name]
-        def icon = r.status == 'passed' ? '✅' : (r.status == 'not_run' ? '⏭' : '❌')
+        def icon = r.status == 'passed' ? '✅' : ((r.status == 'skipped' || r.status == 'not_run') ? '⏭' : '❌')
         "| ${name} | ${icon} |"
     }.join('\n')
 
@@ -1299,7 +1341,7 @@ ${rows}
     }
 
     def errorBlocks = stageOrder.findAll { name ->
-        normalizedResults[name].status != 'passed' && normalizedResults[name].detail?.trim()
+        normalizedResults[name].status == 'failed' && normalizedResults[name].detail?.trim()
     }.collect { name ->
         def detail = normalizedResults[name].detail.take(1000)
         "\n### ❌ ${name}\n\n<details>\n<summary>查看错误详情</summary>\n\n" +

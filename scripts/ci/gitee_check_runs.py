@@ -148,13 +148,29 @@ def create_check_run(token, owner, repo, *, name, head_sha, pr_id=None,
     return data, code
 
 
-def get_check_run(token, owner, repo, check_run_id):
+def fetch_check_run(token, owner, repo, check_run_id, *, quiet=False):
     """获取检查任务详情 (GET /repos/{owner}/{repo}/check-runs/{id})"""
     data, code = _request("GET", f"/repos/{owner}/{repo}/check-runs/{check_run_id}",
                           {"access_token": token})
-    if data:
+    if data and not quiet:
         _print_check_run(data)
     return data, code
+
+
+def get_check_run(token, owner, repo, check_run_id):
+    return fetch_check_run(token, owner, repo, check_run_id)
+
+
+def is_check_run_in_progress(token, owner, repo, check_run_id):
+    data, code = fetch_check_run(token, owner, repo, check_run_id, quiet=True)
+    return bool(data and 200 <= code < 300 and data.get("status") == "in_progress")
+
+
+def ci_stage_status(ci_results, stage_name):
+    ci_result = ci_results.get(stage_name)
+    if isinstance(ci_result, dict):
+        return ci_result.get("status") or "not_run"
+    return "not_run"
 
 
 def update_check_run(token, owner, repo, check_run_id, *, name=None,
@@ -698,6 +714,8 @@ def build_stage_check_run_output(stage_name, ci_result, failed_stage_logs, detai
             f"## ❌ {stage_name} 失败\n\n{detail}\n\n"
             f"[阶段日志]({log_url}) | [Jenkins Stages]({stages_url})"
         )
+    elif status == "skipped":
+        summary = f"## ⏭ {stage_name} 已跳过\n\n{detail}\n\n[查看 Jenkins Stages]({stages_url})"
     else:
         summary = f"## ⏭ {stage_name} 未执行\n\n{detail}\n\n[查看 Jenkins Stages]({stages_url})"
 
@@ -850,20 +868,37 @@ def handle_jenkins_manifest(token, owner, repo, manifest, *, pr_db_id_fallback=N
         _, _, all_stages = manifest_topology(manifest)
         _, id_map = _load_ids_map(ids_file)
         last_code = 200
+        skip_detail = "阶段未执行或构建已中止（fail-fast / 手动停止）"
         for name in all_stages:
-            if name not in id_map:
+            check_id = id_map.get(name)
+            if check_id is None:
                 continue
-            st = (ci_results.get(name) or {}).get("status", "not_run")
-            if st != "not_run":
-                continue
-            override = {
-                "status": "skipped",
-                "detail": "阶段未执行（可能被 fail-fast 取消）",
-            }
-            _, code = finish_stage_from_manifest(
-                token, owner, repo, manifest, name,
-                pr_db_id=pr_id, override_ci_result=override,
+            st = ci_stage_status(ci_results, name)
+            in_progress = is_check_run_in_progress(
+                token, owner, repo, int(check_id),
             )
+            if st == "failed":
+                if in_progress:
+                    _, code = finish_stage_from_manifest(
+                        token, owner, repo, manifest, name, pr_db_id=pr_id,
+                    )
+                    if code and code >= 300:
+                        last_code = code
+                continue
+            if st == "passed":
+                if not in_progress:
+                    continue
+                _, code = finish_stage_from_manifest(
+                    token, owner, repo, manifest, name, pr_db_id=pr_id,
+                )
+            elif in_progress or st in ("not_run", "running", "skipped"):
+                override = {"status": "skipped", "detail": skip_detail}
+                _, code = finish_stage_from_manifest(
+                    token, owner, repo, manifest, name,
+                    pr_db_id=pr_id, override_ci_result=override,
+                )
+            else:
+                continue
             if code and code >= 300:
                 last_code = code
         return None, last_code
