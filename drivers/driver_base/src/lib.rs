@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Device driver interfaces used by [1]. It provides common traits and
+//! Device driver interfaces used by x-kernel. It provides common traits and
 //! types for implementing a device driver.
 //!
 //! You have to use this crate with the following crates for corresponding
@@ -12,7 +12,6 @@
 //! - [`kdriver_display`][3]: Common traits and types for graphics display drivers.
 //! - [`net`][4]: Common traits and types for network (NIC) drivers.
 //!
-//! [1]:
 //! [2]: ../kdriver_block/index.html
 //! [3]: ../kdriver_display/index.html
 //! [4]: ../net/index.html
@@ -36,8 +35,10 @@ pub enum DeviceKind {
     Input,
     /// Vsock device (e.g., virtio-vsock).
     Vsock,
-    /// 9P filesystem device (e.g., virtio-9p).
-    Virtio9p,
+    /// 9P filesystem transport device.
+    Fs9p,
+    /// Bus controller / bridge (e.g., PCI host bridge).
+    Bus,
 }
 
 impl DeviceKind {
@@ -52,7 +53,8 @@ impl DeviceKind {
             Display => "display",
             Input => "input",
             Vsock => "vsock",
-            Virtio9p => "virtio-9p",
+            Fs9p => "fs9p",
+            Bus => "bus",
         }
     }
 }
@@ -110,8 +112,14 @@ impl core::fmt::Display for DriverError {
 /// A specialized `Result` type for device operations.
 pub type DriverResult<T = ()> = core::result::Result<T, DriverError>;
 
-/// Common operations that require all device drivers to implement.
-pub trait DriverOps: Send + Sync {
+/// Common metadata that every device implementation must expose.
+///
+/// This trait describes the *identity* of a device instance — its name, its
+/// category, and (optionally) its IRQ. Concrete device-class operations
+/// (block read/write, net send/recv, ...) live in the per-category
+/// sub-traits in their respective crates (`block::BlockDevice`,
+/// `net::NetDevice`, etc.) and require this trait as a super-trait.
+pub trait Device: Send + Sync {
     /// The name of the device.
     fn name(&self) -> &str;
 

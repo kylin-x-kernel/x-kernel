@@ -6,7 +6,8 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-kdriver = { workspace = true, features = ["input"] }
+kclass = { workspace = true, features = ["input"] }
+kdevice = { workspace = true }
 ksync.workspace = true
 lazyinit.workspace = true
 log.workspace = true

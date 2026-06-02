@@ -5,8 +5,6 @@
 use alloc::sync::Arc;
 use core::{any::Any, slice};
 
-#[allow(unused_imports)]
-use kdriver::prelude::DisplayDriverOps;
 use kerrno::KError;
 use khal::mem::v2p;
 use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsError, VfsResult};

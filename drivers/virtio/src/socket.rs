@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! VirtIO vsock driver adapter.
-use driver_base::{DeviceKind, DriverOps, DriverResult};
+use driver_base::{Device, DeviceKind, DriverResult};
 use virtio_drivers::{
     Hal,
     device::socket::{
@@ -11,7 +11,7 @@ use virtio_drivers::{
     },
     transport::Transport,
 };
-use vsock::{VsockConnId, VsockDriverEventType, VsockDriverOps};
+use vsock::{VsockConnId, VsockDevice, VsockDriverEventType};
 
 use crate::as_driver_error;
 
@@ -38,7 +38,7 @@ impl ConnectionArgs {
 /// The VirtIO socket device driver.
 ///
 /// Wraps [`VsockConnectionManager`] from `virtio-drivers` and implements the
-/// [`VsockDriverOps`] trait, providing connection-oriented socket communication
+/// [`VsockDevice`] trait, providing connection-oriented socket communication
 /// between the guest and host via the VirtIO vsock transport.
 ///
 /// # Type Parameters
@@ -113,7 +113,7 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> DriverOps for VirtIoSocketDev<H, T> {
+impl<H: Hal, T: Transport> Device for VirtIoSocketDev<H, T> {
     fn name(&self) -> &str {
         "virtio-socket"
     }
@@ -123,7 +123,7 @@ impl<H: Hal, T: Transport> DriverOps for VirtIoSocketDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> VsockDriverOps for VirtIoSocketDev<H, T> {
+impl<H: Hal, T: Transport> VsockDevice for VirtIoSocketDev<H, T> {
     fn guest_cid(&self) -> u64 {
         self.inner.guest_cid()
     }

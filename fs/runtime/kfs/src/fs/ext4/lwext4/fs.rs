@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 use core::cell::OnceCell;
 
-use kdriver::BlockDevice as KBlockDevice;
+use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, ST_RELATIME, StatFs,
@@ -26,7 +26,7 @@ pub struct Ext4Filesystem {
 }
 
 impl Ext4Filesystem {
-    pub fn new(dev: KBlockDevice) -> VfsResult<Filesystem> {
+    pub fn new(dev: ClassDevice<KBlockDevice>) -> VfsResult<Filesystem> {
         let ext4 =
             lwext4_rust::Ext4Filesystem::new(Ext4Disk(dev), EXT4_CONFIG).map_err(into_vfs_err)?;
 

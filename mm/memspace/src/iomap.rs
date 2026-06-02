@@ -35,7 +35,23 @@ pub struct DeviceRegion {
 /// Iterator over registered device MMIO regions.
 pub type DeviceRegionIter = alloc::vec::IntoIter<DeviceRegion>;
 
-static DEVICE_REGISTRY: SpinNoIrq<Vec<DeviceRegion>> = SpinNoIrq::new(Vec::new());
+/// Lifetime policy of a registered MMIO region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionRefs {
+    /// Statically owned region (fixed/boot mapping). Never auto-unmapped.
+    Pinned,
+    /// Runtime `iomap_device` mapping with an active reference count.
+    Counted(usize),
+}
+
+/// Internal registry entry pairing a region with its lifetime policy.
+#[derive(Debug, Clone, Copy)]
+struct RegionEntry {
+    region: DeviceRegion,
+    refs: RegionRefs,
+}
+
+static DEVICE_REGISTRY: SpinNoIrq<Vec<RegionEntry>> = SpinNoIrq::new(Vec::new());
 
 // Boot/runtime layout ownership lives in kaddr_layout. memspace only consumes
 // the dedicated I/O VA window and allocates device mappings from that range.
@@ -74,13 +90,21 @@ pub fn register_fixed_device_region(
 
 /// Return an iterator over runtime-registered device MMIO regions.
 pub fn device_regions() -> DeviceRegionIter {
-    DEVICE_REGISTRY.lock().clone().into_iter()
+    DEVICE_REGISTRY
+        .lock()
+        .iter()
+        .map(|entry| entry.region)
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 /// Map a device MMIO region and register it for diagnostics.
 ///
 /// Drivers are expected to call this during initialization, cache the returned
 /// virtual base, and reuse that base from fast paths such as IRQ handlers.
+///
+/// Each successful call takes one reference on the underlying mapping. Callers
+/// that want lifetime-managed teardown should pair this with [`iounmap`].
 pub fn iomap_device(
     paddr: PhysAddr,
     size: usize,
@@ -97,7 +121,7 @@ pub fn iomap_device(
         .align_up_4k();
     let span = end.sub_addr(start);
 
-    if let Some(vaddr) = find_mapping_locked(&DEVICE_REGISTRY.lock(), start, span) {
+    if let Some(vaddr) = acquire_mapping_locked(&mut DEVICE_REGISTRY.lock(), start, span) {
         return Ok(vaddr + paddr.align_offset_4k());
     }
 
@@ -106,7 +130,7 @@ pub fn iomap_device(
     let mut kernel_aspace = kernel_layout().lock();
     let mut regions = DEVICE_REGISTRY.lock();
 
-    if let Some(vaddr) = find_mapping_locked(&regions, start, span) {
+    if let Some(vaddr) = acquire_mapping_locked(&mut regions, start, span) {
         return Ok(vaddr + paddr.align_offset_4k());
     }
 
@@ -132,12 +156,53 @@ pub fn iomap_device(
         name,
         vaddr: Some(mapped_start),
     };
-    if regions.contains(&region) {
-        return Ok(mapped_start + paddr.align_offset_4k());
-    }
     regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
-    regions.push(region);
+    regions.push(RegionEntry {
+        region,
+        refs: RegionRefs::Counted(1),
+    });
     Ok(mapped_start + paddr.align_offset_4k())
+}
+
+/// Release a reference previously taken by [`iomap_device`].
+///
+/// When the last reference to a runtime mapping is dropped, the virtual mapping
+/// is torn down. Pinned (statically registered) regions and addresses that do
+/// not belong to any runtime mapping are ignored.
+pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
+    let mut regions = DEVICE_REGISTRY.lock();
+    let Some(index) = regions.iter().position(|entry| {
+        let Some(base) = entry.region.vaddr else {
+            return false;
+        };
+        let Some(region_end) = base.checked_add(entry.region.size) else {
+            return false;
+        };
+        matches!(entry.refs, RegionRefs::Counted(_)) && base <= vaddr && vaddr < region_end
+    }) else {
+        return Ok(());
+    };
+
+    let RegionRefs::Counted(count) = regions[index].refs else {
+        return Ok(());
+    };
+    if count > 1 {
+        regions[index].refs = RegionRefs::Counted(count - 1);
+        return Ok(());
+    }
+
+    let entry = regions.swap_remove(index);
+    let Some(base) = entry.region.vaddr else {
+        return Ok(());
+    };
+    drop(regions);
+
+    kernel_layout()
+        .lock()
+        .unmap(base, entry.region.size)
+        .map_err(|_| IoMapError::MappingFailed)?;
+    karch::flush_tlb(None);
+    Ok(())
 }
 
 fn register_region(region: DeviceRegion) -> Result<(), IoMapError> {
@@ -146,24 +211,37 @@ fn register_region(region: DeviceRegion) -> Result<(), IoMapError> {
     }
 
     let mut regions = DEVICE_REGISTRY.lock();
-    if regions.contains(&region) {
+    if regions.iter().any(|entry| entry.region == region) {
         return Ok(());
     }
 
     regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
-    regions.push(region);
+    regions.push(RegionEntry {
+        region,
+        refs: RegionRefs::Pinned,
+    });
     Ok(())
 }
 
-fn find_mapping_locked(regions: &[DeviceRegion], paddr: PhysAddr, size: usize) -> Option<VirtAddr> {
+/// Find a registered mapping that covers `[paddr, paddr + size)` and, when it is
+/// a runtime reference-counted mapping, take an additional reference.
+fn acquire_mapping_locked(
+    regions: &mut [RegionEntry],
+    paddr: PhysAddr,
+    size: usize,
+) -> Option<VirtAddr> {
     let req_end = paddr.checked_add(size)?;
-    regions.iter().find_map(|region| {
-        let mapped_start = region.vaddr?;
-        let region_end = region.paddr.checked_add(region.size)?;
-        if region.paddr <= paddr && region_end >= req_end {
-            Some(mapped_start + paddr.sub_addr(region.paddr))
-        } else {
-            None
-        }
-    })
+    let index = regions.iter().position(|entry| {
+        let Some(region_end) = entry.region.paddr.checked_add(entry.region.size) else {
+            return false;
+        };
+        entry.region.vaddr.is_some() && entry.region.paddr <= paddr && region_end >= req_end
+    })?;
+
+    let entry = &mut regions[index];
+    let mapped_start = entry.region.vaddr?;
+    if let RegionRefs::Counted(count) = entry.refs {
+        entry.refs = RegionRefs::Counted(count + 1);
+    }
+    Some(mapped_start + paddr.sub_addr(entry.region.paddr))
 }

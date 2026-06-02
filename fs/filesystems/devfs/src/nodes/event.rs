@@ -2,14 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, sync::Arc, vec};
+use alloc::{format, string::ToString, sync::Arc, vec};
 use core::{any::Any, task::Context, time::Duration};
 
 use bitmaps::Bitmap;
+use kclass::ClassDevice;
 #[allow(unused_imports)]
-use kdriver::prelude::{
-    DriverError, DriverOps, Event, EventType, InputDevice, InputDeviceId, InputDriverOps,
-};
+use kclass::prelude::{DriverError, Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
+use kdevice::subscribe_device_removed;
 use kerrno::{KError, KResult};
 use khal::time::wall_time;
 use kpoll::{IoEvents, Pollable};
@@ -28,14 +28,18 @@ use crate::DeviceFile;
 const KEY_CNT: usize = EventType::Key.bits_count();
 
 struct Inner {
-    device: InputDevice,
+    device: Option<ClassDevice<InputDeviceImpl>>,
     read_ahead: Option<(Duration, Event)>,
     key_state: Bitmap<KEY_CNT>,
 }
 impl Inner {
     fn has_event(&mut self) -> bool {
+        let Some(device) = self.device.as_mut() else {
+            self.read_ahead = None;
+            return false;
+        };
         if self.read_ahead.is_none() {
-            match self.device.read_event() {
+            match device.read_event() {
                 Ok(event) => {
                     if event.event_type == EventType::Key as u16 {
                         if event.value == 0 {
@@ -62,7 +66,7 @@ pub struct EventDev {
 }
 
 impl EventDev {
-    pub fn new(mut device: InputDevice) -> Self {
+    pub fn new(mut device: ClassDevice<InputDeviceImpl>) -> Self {
         let mut ev_bits = Bitmap::new();
         for i in 0..EventType::COUNT {
             let Some(ty) = EventType::from_repr(i) else {
@@ -78,12 +82,35 @@ impl EventDev {
 
         Self {
             inner: Mutex::new(Inner {
-                device,
+                device: Some(device),
                 read_ahead: None,
                 key_state: Bitmap::new(),
             }),
             ev_bits,
         }
+    }
+
+    fn subscribe_removed(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        subscribe_device_removed(Arc::new(move |id| {
+            let Some(device) = weak.upgrade() else {
+                return;
+            };
+            if device.detach_removed(id) {
+                info!("evdev: detached removed input device {:?}", id);
+            }
+        }));
+    }
+
+    fn detach_removed(&self, id: kdevice::DeviceId) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.device.as_ref().is_none_or(|device| device.id() != id) {
+            return false;
+        }
+        inner.device = None;
+        inner.read_ahead = None;
+        inner.key_state = Bitmap::new();
+        true
     }
 
     fn get_event_bits(&self, arg: usize, size: usize, ty: u8) -> KResult<usize> {
@@ -95,7 +122,9 @@ impl EventDev {
         } else {
             let ty = EventType::from_repr(ty).ok_or(KError::InvalidInput)?;
             let mut bits = vec![0u8; size];
-            match self.inner.lock().device.get_event_bits(ty, &mut bits) {
+            let mut inner = self.inner.lock();
+            let device = inner.device.as_mut().ok_or(KError::NoSuchDevice)?;
+            match device.get_event_bits(ty, &mut bits) {
                 Ok(true) => {}
                 Ok(false) => {
                     debug!("No events for {ty:?}");
@@ -204,7 +233,9 @@ impl DeviceFileOps for EventDev {
                 Ok(0)
             }
             EVIOCGID => {
-                let device_id = self.inner.lock().device.device_id();
+                let inner = self.inner.lock();
+                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
+                let device_id = device.device_id();
                 UserPtr::<InputId>::from(arg).write_vm(InputId {
                     bus_type: device_id.bus_type,
                     vendor: device_id.vendor,
@@ -239,19 +270,23 @@ impl DeviceFileOps for EventDev {
                         match nr {
                             // EVIOCGNAME
                             0x06 => {
-                                return return_str(arg, size, self.inner.lock().device.name());
+                                let inner = self.inner.lock();
+                                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
+                                return return_str(arg, size, device.name());
                             }
                             // EVIOCGPHYS
                             0x07 => {
-                                return return_str(
-                                    arg,
-                                    size,
-                                    self.inner.lock().device.physical_location(),
-                                );
+                                let inner = self.inner.lock();
+                                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
+                                let value = device.physical_location().to_string();
+                                return return_str(arg, size, &value);
                             }
                             // EVIOCGUNIQ
                             0x08 => {
-                                return return_str(arg, size, self.inner.lock().device.unique_id());
+                                let inner = self.inner.lock();
+                                let device = inner.device.as_ref().ok_or(KError::NoSuchDevice)?;
+                                let value = device.unique_id().to_string();
+                                return return_str(arg, size, &value);
                             }
                             // EVIOCGPROP
                             0x09 => {
@@ -316,16 +351,19 @@ impl Pollable for EventDev {
 pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut inputs = DirMapping::new();
     let mut input_id = 0;
-    let input_devices = inputdev::input_take_all();
+    let input_devices = inputdev::input_drain_devices();
     let mut keys = [0; 0x300usize.div_ceil(8)];
     for (i, mut device) in input_devices.into_iter().enumerate() {
         assert!(device.get_event_bits(EventType::Key, &mut keys).unwrap());
+
+        let event_dev = Arc::new(EventDev::new(device));
+        event_dev.subscribe_removed();
 
         let dev = DeviceFile::new(
             fs.clone(),
             NodeType::CharacterDevice,
             DeviceId::new(13, (i + 1) as _),
-            Arc::new(EventDev::new(device)),
+            event_dev,
         );
 
         const BTN_MOUSE: usize = 0x110;

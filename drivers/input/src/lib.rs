@@ -7,7 +7,7 @@
 #![no_std]
 
 #[doc(no_inline)]
-pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use strum::FromRepr;
 
 /// Input event categories defined by the Linux input subsystem.
@@ -137,7 +137,7 @@ impl AbsInfo {
 }
 
 /// Operations that require an input device driver to implement.
-pub trait InputDriverOps: DriverOps {
+pub trait InputDevice: Device {
     /// Returns the device ID of the input device.
     fn device_id(&self) -> InputDeviceId;
 

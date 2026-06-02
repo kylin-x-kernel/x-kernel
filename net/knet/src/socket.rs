@@ -13,7 +13,7 @@ use core::{
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
 #[cfg(feature = "vsock")]
-use kdriver::prelude::VsockAddr;
+use kclass::prelude::VsockAddr;
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 

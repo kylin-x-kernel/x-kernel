@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-input = ["dep:inputdev"]
+input = ["dep:inputdev", "kclass/input"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
 dice = ["dep:dice_driver", "dep:klazy", "dep:rand_chacha", "dep:mbedtls"]
@@ -20,7 +20,6 @@ kalloc.workspace = true
 kexec.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
-kdriver.workspace = true
 khal.workspace = true
 inherit-methods-macro = "0.1.0"
 klogger.workspace = true
@@ -54,4 +53,6 @@ inputdev = { workspace = true, optional = true }
 klazy = { workspace = true, optional = true }
 rand_chacha = { version = "0.3", default-features = false, optional = true }
 mbedtls = { workspace = true, optional = true }
+kclass.workspace = true
+kdevice.workspace = true
 unittest.workspace = true

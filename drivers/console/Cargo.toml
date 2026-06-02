@@ -16,6 +16,10 @@ ns16550-mmio = ["dep:uart_16550"]
 ns16550-ioport = ["dep:uart_16550"]
 
 [dependencies]
+driver_base = { workspace = true }
+device_res = { workspace = true }
+kclass = { workspace = true, features = ["char"] }
+kdevice = { workspace = true }
 khal = { workspace = true }
 kplat = { workspace = true }
 kspin = { workspace = true }

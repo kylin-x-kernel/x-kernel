@@ -3,8 +3,8 @@
 // See LICENSES for license details.
 
 //! VirtIO block driver adapter.
-use block::BlockDriverOps;
-use driver_base::{DeviceKind, DriverOps, DriverResult};
+use block::BlockDevice;
+use driver_base::{Device, DeviceKind, DriverResult};
 use virtio_drivers::{
     Hal,
     device::blk::{SECTOR_SIZE, VirtIOBlk as InnerDev},
@@ -16,7 +16,7 @@ use crate::as_driver_error;
 /// The VirtIO block device driver.
 ///
 /// Wraps [`VirtIOBlk`] from `virtio-drivers` and implements the
-/// [`BlockDriverOps`] trait, providing sector-level read/write access to a
+/// [`BlockDevice`] trait, providing sector-level read/write access to a
 /// virtual block device.
 ///
 /// # Type Parameters
@@ -76,7 +76,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> DriverOps for VirtIoBlkDev<H, T> {
+impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
     fn name(&self) -> &str {
         "virtio-blk"
     }
@@ -86,7 +86,7 @@ impl<H: Hal, T: Transport> DriverOps for VirtIoBlkDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> BlockDriverOps for VirtIoBlkDev<H, T> {
+impl<H: Hal, T: Transport> BlockDevice for VirtIoBlkDev<H, T> {
     #[inline]
     fn num_blocks(&self) -> u64 {
         self.device.capacity()

@@ -12,7 +12,7 @@ use alloc::boxed::Box;
 use core::task::Context;
 
 use enum_dispatch::enum_dispatch;
-pub use kdriver::prelude::{VsockAddr, VsockConnId};
+pub use kclass::prelude::{VsockAddr, VsockConnId};
 use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, Pollable};

@@ -16,7 +16,10 @@ ext4-rsext4 = ["dep:rsext4"]
 ext4-ext4_rs = ["dep:ext4_rs"]
 ext4 = ["ext4-rsext4"]
 
-fs9p = ["dep:fs9p", "kdriver/virtio_9p"]
+# 9P subsystem only. The 9P transport driver (e.g. virtio-9p) must be selected
+# separately at the top level via `kfeat/driver_virtio_9p`, so non-virtio
+# transports can plug in without dragging virtio in here.
+fs9p = ["dep:fs9p", "kclass/virtio-9p"]
 
 times = []
 std = []
@@ -25,8 +28,9 @@ crosvm = []
 [dependencies]
 kalloc = { workspace = true }
 alloc-engine = { workspace = true }
-kdriver = { workspace = true, features = ["block"] }
 memaddr = { workspace = true }
+kclass = { workspace = true, features = ["block"] }
+kdevice = { workspace = true }
 kerrno = { workspace = true }
 kfd = { workspace = true }
 ktask = { workspace = true }
@@ -57,4 +61,3 @@ optional = true
 features = ["alloc", "lfn", "log_level_trace", "unicode"]
 
 [dev-dependencies]
-kdriver = { workspace = true, features = ["block", "ramdisk"] }

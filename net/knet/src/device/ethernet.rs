@@ -7,9 +7,7 @@ use alloc::{string::String, vec};
 use core::task::Waker;
 
 use hashbrown::HashMap;
-use kdriver::prelude::{
-    DriverError, DriverOps, NetBufHandle, NetDevice as DriverNetDevice, NetDriverOps,
-};
+use kclass::{ClassDevice, prelude::*};
 use ktask::future::register_irq_waker;
 use smoltcp::{
     storage::{PacketBuffer, PacketMetadata},
@@ -37,7 +35,7 @@ struct ArpNeighbor {
 pub struct EthernetDevice {
     #[allow(dead_code)]
     name: String,
-    inner: DriverNetDevice,
+    inner: ClassDevice<NetDeviceImpl>,
     neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
     ip: Ipv4Cidr,
 
@@ -47,7 +45,7 @@ impl EthernetDevice {
     const NEIGHBOR_TTL: Duration = Duration::from_secs(60);
 
     /// Create a new Ethernet device wrapper.
-    pub fn new(name: String, inner: DriverNetDevice, ip: Ipv4Cidr) -> Self {
+    pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
         let pending_tx = PacketBuffer::new(
             vec![PacketMetadata::EMPTY; ETHERNET_MAX_PENDING_PACKETS],
             vec![
@@ -71,7 +69,7 @@ impl EthernetDevice {
     }
 
     fn send_to<F>(
-        inner: &mut dyn NetDriverOps,
+        inner: &mut dyn NetDevice,
         dst: EthernetAddress,
         size: usize,
         f: F,
@@ -158,13 +156,15 @@ impl EthernetDevice {
             target_protocol_addr: target_ipv4,
         };
 
-        Self::send_to(
-            &mut self.inner,
-            EthernetAddress::BROADCAST,
-            arp_repr.buffer_len(),
-            |buf| arp_repr.emit(&mut ArpPacket::new_unchecked(buf)),
-            EthernetProtocol::Arp,
-        );
+        self.inner.with_mut(|inner| {
+            Self::send_to(
+                inner.as_mut(),
+                EthernetAddress::BROADCAST,
+                arp_repr.buffer_len(),
+                |buf| arp_repr.emit(&mut ArpPacket::new_unchecked(buf)),
+                EthernetProtocol::Arp,
+            );
+        });
 
         self.neighbors.insert(target_ip, None);
     }
@@ -224,13 +224,15 @@ impl EthernetDevice {
                     target_protocol_addr: source_protocol_addr,
                 };
 
-                Self::send_to(
-                    &mut self.inner,
-                    source_hardware_addr,
-                    response.buffer_len(),
-                    |buf| response.emit(&mut ArpPacket::new_unchecked(buf)),
-                    EthernetProtocol::Arp,
-                );
+                self.inner.with_mut(|inner| {
+                    Self::send_to(
+                        inner.as_mut(),
+                        source_hardware_addr,
+                        response.buffer_len(),
+                        |buf| response.emit(&mut ArpPacket::new_unchecked(buf)),
+                        EthernetProtocol::Arp,
+                    );
+                });
             }
 
             if self
@@ -251,13 +253,15 @@ impl EthernetDevice {
                         break;
                     }
 
-                    Self::send_to(
-                        &mut self.inner,
-                        neighbor.hardware_address,
-                        buf.len(),
-                        |b| b.copy_from_slice(buf),
-                        EthernetProtocol::Ipv4,
-                    );
+                    self.inner.with_mut(|inner| {
+                        Self::send_to(
+                            inner.as_mut(),
+                            neighbor.hardware_address,
+                            buf.len(),
+                            |b| b.copy_from_slice(buf),
+                            EthernetProtocol::Ipv4,
+                        );
+                    });
                     let _ = self.pending_tx.dequeue();
                 }
             }
@@ -268,6 +272,10 @@ impl EthernetDevice {
 impl NetDeviceOps for EthernetDevice {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn device_id(&self) -> Option<kdevice::DeviceId> {
+        Some(self.inner.id())
     }
 
     fn poll_rx(
@@ -303,25 +311,29 @@ impl NetDeviceOps for EthernetDevice {
         timestamp: Instant,
     ) -> bool {
         if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
-            Self::send_to(
-                &mut self.inner,
-                EthernetAddress::BROADCAST,
-                ip_packet.len(),
-                |buf| buf.copy_from_slice(ip_packet),
-                EthernetProtocol::Ipv4,
-            );
+            self.inner.with_mut(|inner| {
+                Self::send_to(
+                    inner.as_mut(),
+                    EthernetAddress::BROADCAST,
+                    ip_packet.len(),
+                    |buf| buf.copy_from_slice(ip_packet),
+                    EthernetProtocol::Ipv4,
+                );
+            });
             return false;
         }
 
         let need_request = match self.neighbors.get(&next_hop) {
             Some(Some(neighbor)) if neighbor.expires_at > timestamp => {
-                Self::send_to(
-                    &mut self.inner,
-                    neighbor.hardware_address,
-                    ip_packet.len(),
-                    |buf| buf.copy_from_slice(ip_packet),
-                    EthernetProtocol::Ipv4,
-                );
+                self.inner.with_mut(|inner| {
+                    Self::send_to(
+                        inner.as_mut(),
+                        neighbor.hardware_address,
+                        ip_packet.len(),
+                        |buf| buf.copy_from_slice(ip_packet),
+                        EthernetProtocol::Ipv4,
+                    );
+                });
                 return false;
             }
             Some(Some(_)) => true,

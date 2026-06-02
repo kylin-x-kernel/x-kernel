@@ -23,6 +23,11 @@ use crate::netlink::{AddrState, LinkState, NeighState};
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
 
+    /// Device-model ID for driver-backed devices.
+    fn device_id(&self) -> Option<kdevice::DeviceId> {
+        None
+    }
+
     /// Polls the device and pushes received IP packets into `buffer`.
     fn poll_rx(
         &mut self,

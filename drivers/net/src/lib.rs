@@ -17,7 +17,7 @@ extern crate alloc;
 // pub mod ixgbe;
 
 #[doc(no_inline)]
-pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 mod net_buf;
 pub use self::net_buf::{NetBuf, NetBufBox, NetBufHandle, NetBufPool};
@@ -27,7 +27,7 @@ pub use self::net_buf::{NetBuf, NetBufBox, NetBufHandle, NetBufPool};
 pub struct MacAddress(pub [u8; 6]);
 
 /// Operations that require a network device (NIC) driver to implement.
-pub trait NetDriverOps: DriverOps {
+pub trait NetDevice: Device {
     /// The hardware address of the NIC.
     fn mac(&self) -> MacAddress;
 
@@ -46,7 +46,7 @@ pub trait NetDriverOps: DriverOps {
     /// Gives back the `rx_buf` to the receive queue for later receiving.
     ///
     /// `rx_buf` should be the same as the one returned by
-    /// [`NetDriverOps::recv`].
+    /// [`NetDevice::recv`].
     fn recycle_rx(&mut self, rx_buf: NetBufHandle) -> DriverResult;
 
     /// Poll the transmit queue and gives back the buffers for previous transmissions.
@@ -59,7 +59,7 @@ pub trait NetDriverOps: DriverOps {
     /// Receives a packet from the network and stores it in the [`NetBuf`].
     ///
     /// Before receiving, the driver should have already populated some buffers
-    /// in the receive queue by [`NetDriverOps::recycle_rx`].
+    /// in the receive queue by [`NetDevice::recycle_rx`].
     ///
     /// If currently no incoming packets, returns an error with type
     /// [`DriverError::WouldBlock`].

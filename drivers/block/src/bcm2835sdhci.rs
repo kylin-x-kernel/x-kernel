@@ -8,9 +8,9 @@ use bcm2835_sdhci::{
     Bcm2835SDhci::{BLOCK_SIZE, EmmcCtl},
     SDHCIError,
 };
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
-use crate::BlockDriverOps;
+use crate::BlockDevice;
 
 /// Raspberry Pi 4 SD card driver based on BCM2835 SDHCI controller.
 pub struct SDHCIDriver(EmmcCtl);
@@ -46,7 +46,7 @@ fn convert_sdhci_error(err: SDHCIError) -> DriverError {
     }
 }
 
-impl DriverOps for SDHCIDriver {
+impl Device for SDHCIDriver {
     fn device_kind(&self) -> DeviceKind {
         DeviceKind::Block
     }
@@ -56,7 +56,7 @@ impl DriverOps for SDHCIDriver {
     }
 }
 
-impl BlockDriverOps for SDHCIDriver {
+impl BlockDevice for SDHCIDriver {
     fn read_block(&mut self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
         if buffer.len() < BLOCK_SIZE {
             return Err(DriverError::InvalidInput);

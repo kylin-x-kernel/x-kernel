@@ -17,6 +17,7 @@ tee = ["kthread/tee", "dep:tee_task_iface"]
 kvfs.workspace = true
 kaddr_layout.workspace = true
 kalloc.workspace = true
+kdevice.workspace = true
 khal.workspace = true
 kvfs-simple.workspace = true
 kprocess.workspace = true

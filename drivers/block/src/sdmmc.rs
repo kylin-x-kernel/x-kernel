@@ -6,10 +6,10 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use simple_sdmmc::SdMmc;
 
-use crate::BlockDriverOps;
+use crate::BlockDevice;
 
 /// A SD/MMC driver.
 pub struct SdMmcDriver(SdMmc);
@@ -26,7 +26,7 @@ impl SdMmcDriver {
     }
 }
 
-impl DriverOps for SdMmcDriver {
+impl Device for SdMmcDriver {
     fn device_kind(&self) -> DeviceKind {
         DeviceKind::Block
     }
@@ -36,7 +36,7 @@ impl DriverOps for SdMmcDriver {
     }
 }
 
-impl BlockDriverOps for SdMmcDriver {
+impl BlockDevice for SdMmcDriver {
     fn num_blocks(&self) -> u64 {
         self.0.num_blocks()
     }

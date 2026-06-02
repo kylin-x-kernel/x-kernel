@@ -18,10 +18,11 @@ gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]
 socket = ["alloc", "dep:vsock"]
-virtio_9p = ["alloc"]
+virtio-9p = ["alloc"]
 
 [dependencies]
 driver_base = { workspace = true }
+device_res = { workspace = true }
 block = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
@@ -32,7 +33,6 @@ kspin = { workspace = true }
 virtio-drivers = { workspace = true }
 unittest = { workspace = true }
 pci = { workspace = true }
-of = { workspace = true }
 zerocopy = "0.8"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

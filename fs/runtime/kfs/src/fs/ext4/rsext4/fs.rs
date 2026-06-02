@@ -6,7 +6,7 @@
 use alloc::sync::Arc;
 use core::cell::OnceCell;
 
-use kdriver::BlockDevice as KBlockDevice;
+use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, ST_RELATIME, StatFs,
@@ -56,7 +56,7 @@ impl Ext4Filesystem {
     }
 
     /// Create a new ext4 filesystem instance backed by a block device.
-    pub fn new(dev: KBlockDevice) -> VfsResult<Filesystem> {
+    pub fn new(dev: ClassDevice<KBlockDevice>) -> VfsResult<Filesystem> {
         let mut dev = Jbd2Dev::initial_jbd2dev(0, Ext4Disk(dev), true);
         let fs = rsext4::mount(&mut dev).map_err(into_vfs_err)?;
 

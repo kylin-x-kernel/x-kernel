@@ -124,6 +124,12 @@ config KFEAT_INPUT
     help
       Enable input driver support (virtio-input, inputdev, etc).
 
+config KFEAT_CHAR
+    bool "Character Driver Support"
+    default y
+    help
+      Enable runtime character device support. This covers devices that are
+      exposed after early boot handoff or through the unified driver pipeline.
 endmenu   # Device Drivers Features
 
 endmenu # Drivers Basic Configuration
@@ -164,6 +170,34 @@ config KFEAT_DRIVER_VIRTIO_SOCKET
     help
       Enable the virtio-vsock transport driver used by AF_VSOCK on virtio
       platforms.
+
+comment "Character drivers"
+
+config KFEAT_DRIVER_CONSOLE_PL011
+    bool "PL011 runtime console handoff"
+    depends on KFEAT_CHAR && PLATFORM_AARCH64_QEMU_VIRT
+    default y if PLATFORM_AARCH64_QEMU_VIRT
+    help
+      Reuse the early-boot PL011 console as a runtime character device managed
+      by kdriver.
+
+config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
+    bool "NS16550 MMIO runtime console handoff"
+    depends on KFEAT_CHAR && (PLATFORM_AARCH64_CROSVM_VIRT || PLATFORM_RISCV64_QEMU_VIRT || PLATFORM_LOONGARCH64_QEMU_VIRT)
+    default y if PLATFORM_AARCH64_CROSVM_VIRT
+    default y if PLATFORM_RISCV64_QEMU_VIRT
+    default y if PLATFORM_LOONGARCH64_QEMU_VIRT
+    help
+      Reuse the early-boot NS16550 MMIO console as a runtime character device
+      managed by kdriver.
+
+config KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
+    bool "NS16550 I/O-port runtime console handoff"
+    depends on KFEAT_CHAR && PLATFORM_X86_64_QEMU_VIRT
+    default y if PLATFORM_X86_64_QEMU_VIRT
+    help
+      Reuse the early-boot NS16550 I/O-port console as a runtime character
+      device managed by kdriver.
 
 comment "Filesystem transport drivers"
 

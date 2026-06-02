@@ -135,4 +135,8 @@ impl Service {
             }
         });
     }
+
+    pub fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> bool {
+        self.router.remove_device_by_model_id(id)
+    }
 }

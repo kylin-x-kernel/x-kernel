@@ -10,7 +10,7 @@ mod util;
 pub use fs::*;
 pub use inode::*;
 #[allow(unused_imports)]
-use kdriver::{BlockDevice as KBlockDevice, prelude::BlockDriverOps};
+use kclass::{BlockDevice as _, BlockDeviceImpl as KBlockDevice, ClassDevice};
 use rsext4::{
     BlockDevice,
     error::{BlockDevError, BlockDevResult},
@@ -19,7 +19,7 @@ use rsext4::{
 const FS_BLOCK_SIZE: usize = rsext4::BLOCK_SIZE;
 
 /// Block device wrapper implementing the ext4 driver traits.
-pub(crate) struct Ext4Disk(KBlockDevice);
+pub(crate) struct Ext4Disk(ClassDevice<KBlockDevice>);
 
 impl BlockDevice for Ext4Disk {
     fn write(&mut self, buffer: &[u8], block_id: u32, count: u32) -> BlockDevResult<()> {

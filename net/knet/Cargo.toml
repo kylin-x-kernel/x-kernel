@@ -10,10 +10,12 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-vsock = ["kdriver/vsock"]
+vsock = ["kdriver/vsock", "kclass/vsock"]
 
 [dependencies]
 unittest = { workspace = true }
+kclass = { workspace = true, features = ["net"] }
+kdevice = { workspace = true }
 kdriver = { workspace = true, features = ["net"] }
 khal = { workspace = true }
 ksync = { workspace = true }

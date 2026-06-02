@@ -116,22 +116,34 @@ display = ["dep:fbdevice", "kruntime/display"]
 # Input (subsystem only; pick a driver via `driver_*`).
 input = ["dep:inputdev", "kruntime/input", "devfs/input"]
 
+# Character device class infrastructure.
+char = ["kruntime/char"]
+
 # Real Time Clock (RTC) Driver.
 rtc = ["khal/rtc", "kruntime/rtc"]
 
 # Device drivers
 #
-# Each `driver_*` feature pulls in one concrete hardware driver and (when it
-# only makes sense together with the corresponding subsystem) implies that
-# subsystem. They use underscores so they map directly from `KFEAT_DRIVER_*`
-# Kconfig symbols (see `scripts/make/kfeat_features.sh`).
+# Each `driver_*` feature pulls in one concrete hardware driver. It does NOT
+# automatically enable the corresponding subsystem -- both must be selected
+# independently (via Kconfig or by hand). They use underscores so they map
+# directly from `KFEAT_DRIVER_*` Kconfig symbols (see
+# `scripts/make/kfeat_features.sh`).
 driver_virtio_blk = ["kdriver/virtio-blk"]
 driver_virtio_net = ["kdriver/virtio-net"]
 driver_virtio_gpu = ["kdriver/virtio-gpu"]
 driver_virtio_input = ["kdriver/virtio-input"]
 driver_virtio_socket = ["kdriver/virtio-socket"]
-driver_virtio_9p = ["kdriver/virtio_9p"]
+driver_virtio_9p = ["kdriver/virtio-9p"]
 driver_ramdisk = ["kdriver/ramdisk"]
+driver_ixgbe = ["kdriver/ixgbe"]
+driver_fxmac = ["kdriver/fxmac"]
+driver_ahci = ["kdriver/ahci"]
+driver_bcm2835_sdhci = ["kdriver/bcm2835-sdhci"]
+driver_sdmmc = ["kdriver/sdmmc"]
+driver_console_pl011 = ["kdriver/console-pl011"]
+driver_console_ns16550_mmio = ["kdriver/console-ns16550-mmio"]
+driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
 
 # Backtrace
 dwarf = ["backtrace/dwarf"]

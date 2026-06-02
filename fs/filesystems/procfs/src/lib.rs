@@ -7,6 +7,7 @@
 extern crate alloc;
 
 mod basic_nodes;
+mod device_nodes;
 mod irq_nodes;
 mod mem_nodes;
 mod root;

@@ -196,6 +196,9 @@ pub fn rust_main(arg: usize) -> ! {
     register_boot_console_runtime_region(boot_info);
     memspace::init_memory_management();
     kernel_boot::bootln!("memory space map ready");
+    // Install the OS-agnostic resource provider before any driver (including
+    // early device interrupts like the console input line) acquires a resource.
+    kdriver::install_resource_provider();
     khal::early_driver_init();
 
     kprintln!("{}", LOGO);
@@ -243,28 +246,25 @@ pub fn rust_main(arg: usize) -> ! {
 
     ktask::init_scheduler();
 
-    #[cfg(any(feature = "fs", feature = "fs9p", feature = "net", feature = "display"))]
-    {
-        #[allow(unused_variables)]
-        let all_devices = kdriver::init_drivers();
+    kdriver::init_drivers();
+    #[cfg(feature = "char")]
+    ktty::tty::try_handoff_console();
 
-        #[cfg(feature = "fs")]
-        kfs::init_filesystems(all_devices.block);
+    #[cfg(feature = "display")]
+    fbdevice::fb_init();
+    #[cfg(feature = "input")]
+    inputdev::init_input();
 
-        #[cfg(feature = "fs9p")]
-        kfs::mount_9pfilesystems(all_devices.virtio_9p, "/mnt/hostshare");
+    #[cfg(feature = "fs")]
+    kfs::init_filesystems();
 
-        #[cfg(feature = "net")]
-        knet::init_network(all_devices.net);
-        #[cfg(feature = "vsock")]
-        knet::init_vsock(all_devices.vsock);
+    #[cfg(feature = "fs9p")]
+    kfs::mount_9pfilesystems("/mnt/hostshare");
 
-        #[cfg(feature = "display")]
-        fbdevice::fb_init(all_devices.display);
-
-        #[cfg(feature = "input")]
-        inputdev::init_input(all_devices.input);
-    }
+    #[cfg(feature = "net")]
+    knet::init_network();
+    #[cfg(feature = "vsock")]
+    knet::init_vsock();
 
     #[cfg(feature = "smp")]
     {

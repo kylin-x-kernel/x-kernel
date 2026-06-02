@@ -7,7 +7,8 @@
    │
    │ safe API: VirtIoBlkDev, VirtIoGpuDev, VirtIoInputDev,
    │          VirtIoNetDev, VirtIoSocketDev, VirtIo9pDev
-   │          probe_mmio_device(), probe_pci_device()
+   │          probe_pci_device()
+   │ unsafe API: probe_mmio_device()
    │
    v
 ┌──────────────────────────────────────────────────────────────┐
@@ -30,7 +31,7 @@
 
 ## unsafe 代码清单
 
-### 1. `probe_mmio_device`（`lib.rs:101`）
+### 1. `probe_mmio_device`（`lib.rs:102`）
 
 ```rust
 let transport = unsafe { MmioTransport::new(header, reg_size) }.ok()?;
@@ -44,7 +45,7 @@ let transport = unsafe { MmioTransport::new(header, reg_size) }.ok()?;
 **调用者**：
 - 平台初始化代码 — 由固件/设备树保证地址有效
 
-### 2. `VirtIoGpuDev::fb()`（`gpu.rs:58`）
+### 2. `VirtIoGpuDev::fb()`（`gpu.rs:91`）
 
 ```rust
 unsafe {
@@ -60,9 +61,9 @@ unsafe {
 返回的 `FrameBuffer` 生命周期绑定到 `&self`，不会超过设备存活期。
 
 **调用者**：
-- `DisplayDriverOps::fb()` 的实现 — 由 `try_new()` 保证地址有效
+- `DisplayDevice::fb()` 的实现 — 由 `try_new()` 保证地址有效
 
-### 3. `VirtIoNetDev::try_new()` 中的 `receive_begin`（`net.rs:150`）
+### 3. `VirtIoNetDev::try_new()` 中的 `receive_begin`（`net.rs:216`）
 
 ```rust
 let token = unsafe {
@@ -79,7 +80,7 @@ let token = unsafe {
 **调用者**：
 - `VirtIoNetDev::try_new()` — 缓冲区存入 `rx_buffers` 数组
 
-### 4. `VirtIoNetDev::recycle_rx()` 中的 `from_handle` 和 `receive_begin`（`net.rs:226-233`）
+### 4. `VirtIoNetDev::recycle_rx()` 中的 `from_handle` 和 `receive_begin`（`net.rs:286-307`）
 
 ```rust
 let mut rx_buf = unsafe { NetBuf::from_handle(rx_buf) };
@@ -99,7 +100,7 @@ let new_token = unsafe {
 **调用者**：
 - 上层网络栈 — 保证 handle 的唯一性
 
-### 5. `VirtIoNetDev::recycle_tx()` 中的 `transmit_complete`（`net.rs:256-260`）
+### 5. `VirtIoNetDev::recycle_tx()` 中的 `transmit_complete`（`net.rs:321-328`）
 
 ```rust
 unsafe {
@@ -115,7 +116,7 @@ unsafe {
 **调用者**：
 - `VirtIoNetDev::recycle_tx()` — token 和缓冲区来自同一数组索引
 
-### 6. `VirtIoNetDev::send()` 中的 `from_handle` 和 `transmit_begin`（`net.rs:270-277`）
+### 6. `VirtIoNetDev::send()` 中的 `from_handle` 和 `transmit_begin`（`net.rs:337-353`）
 
 ```rust
 let tx_buf = unsafe { NetBuf::from_handle(tx_buf) };
@@ -135,7 +136,7 @@ let token = unsafe {
 **调用者**：
 - 上层网络栈 — 保证 handle 的唯一性
 
-### 7. `VirtIoNetDev::recv()` 中的 `receive_complete`（`net.rs:293-297`）
+### 7. `VirtIoNetDev::recv()` 中的 `receive_complete`（`net.rs:365-372`）
 
 ```rust
 let (hdr_len, pkt_len) = unsafe {
@@ -247,7 +248,6 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
    当前所有架构使用 legacy IRQ，可能导致中断共享问题。
 2. **无超时机制**：9p 设备的 `request()` 同步等待响应，无超时保护，
    恶意或故障设备可能导致调用者永久阻塞。
-   无其他设备共享同一 IRQ 时调用 `khal::irq::unregister`。
 3. **input 设备硬编码路径**：`physical_location()` 返回固定字符串 `"virtio0/input0"`，
    不反映实际设备拓扑。
 

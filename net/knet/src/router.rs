@@ -71,6 +71,15 @@ impl RouteTable {
     pub fn clear(&mut self) {
         self.rules.clear();
     }
+
+    pub fn remove_device(&mut self, dev: usize) {
+        self.rules.retain(|rule| rule.dev != dev);
+        for rule in &mut self.rules {
+            if rule.dev > dev {
+                rule.dev -= 1;
+            }
+        }
+    }
 }
 
 pub struct Router {
@@ -104,6 +113,19 @@ impl Router {
     pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
         self.devices.len() - 1
+    }
+
+    pub fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> bool {
+        let Some(pos) = self
+            .devices
+            .iter()
+            .position(|device| device.device_id() == Some(id))
+        else {
+            return false;
+        };
+        self.devices.remove(pos);
+        self.table.remove_device(pos);
+        true
     }
 
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {

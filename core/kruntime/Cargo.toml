@@ -15,12 +15,20 @@ default = []
 smp = ["khal/smp", "ktask/smp", "memspace/smp", "ipi"]
 ipi = ["dep:kipi"]
 
-display = ["dep:kdriver", "dep:fbdevice"]
-input = ["dep:kdriver", "dep:inputdev"]
-fs = ["dep:kdriver", "dep:kfs"]
-fs9p = ["dep:kdriver", "dep:kfs", "kdriver/virtio_9p", "kfs/fs9p"]
-net = ["dep:kdriver", "dep:knet"]
-vsock = ["net", "dep:kdriver"]
+char = ["kdriver/char", "dep:ktty"]
+display = ["kdriver/display", "dep:fbdevice"]
+input = ["kdriver/input", "dep:inputdev"]
+fs = ["kdriver/block", "dep:kfs"]
+# 9P runtime glue only. The transport driver is selected at the top level via
+# `kfeat/driver_virtio_9p` (or any future 9P transport driver feature).
+fs9p = [
+	"kdriver/block",
+	"kdriver/virtio-9p",
+	"dep:kfs",
+	"kfs/fs9p",
+]
+net = ["kdriver/net", "dep:knet"]
+vsock = ["net", "kdriver/vsock"]
 
 rtc = []
 # driver-dyn = ["kdriver/dyn"]
@@ -31,12 +39,13 @@ pmu = ["khal/pmu"]
 
 [dependencies]
 kalloc.workspace = true
+ktty = { workspace = true, optional = true }
 backtrace.workspace = true
 boot_info.workspace = true
 kerrno.workspace = true
 fbdevice = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
-kdriver = { workspace = true, optional = true }
+kdriver.workspace = true
 kdma.workspace = true
 memaddr.workspace = true
 kfs = { workspace = true, optional = true }

@@ -8,7 +8,7 @@ use alloc::{boxed::Box, sync::Arc};
 use core::cell::OnceCell;
 
 use fs9p::Session;
-use kdriver::Virtio9pDevice;
+use kclass::{ClassDevice, Virtio9pDeviceImpl};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
@@ -24,7 +24,7 @@ pub struct Fs9pFilesystem {
 
 impl Fs9pFilesystem {
     /// Create a new 9P filesystem instance from a virtio-9p device.
-    pub fn new(dev: Virtio9pDevice) -> VfsResult<Filesystem> {
+    pub fn new(dev: ClassDevice<Virtio9pDeviceImpl>) -> VfsResult<Filesystem> {
         let mount_tag = dev.mount_tag().into();
         let transport = Box::new(VirtioTransport(Mutex::new(dev)));
         let mut session = Session::new(transport, mount_tag);

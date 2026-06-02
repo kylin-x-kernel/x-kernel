@@ -2,10 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kdma::{DmaBusAddress, DMAInfo, allocate_dma_memory, deallocate_dma_memory};
-use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
-use khal::mem::{p2v, v2p};
 use core::{alloc::Layout, ptr::NonNull};
+
+use kdma::{DMAInfo, DmaBusAddress, allocate_dma_memory, deallocate_dma_memory};
+use khal::mem::{p2v, v2p};
+use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 
 /// HAL implementation for the ixgbe driver.
 pub struct IxgbeHalImpl;

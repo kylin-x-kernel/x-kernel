@@ -11,15 +11,15 @@ use alloc::{format, string::String};
 
 pub use fs::*;
 pub use inode::*;
-use kdriver::Virtio9pDevice;
+use kclass::{ClassDevice, Virtio9pDeviceImpl};
 use ksync::Mutex;
 
-/// Virtio transport adapter bridging `kdriver::Virtio9pDevice` to `fs9p::Transport`.
+/// Virtio transport adapter bridging `kclass::Virtio9pDeviceImpl` to `fs9p::Transport`.
 ///
 /// The fs9p `Transport` trait requires `&self` (shared reference), whereas
-/// `Virtio9pDevice::request` requires `&mut self`, so we wrap the device in
+/// `Virtio9pDeviceImpl::request` requires `&mut self`, so we wrap the device in
 /// a mutex to provide interior mutability.
-struct VirtioTransport(Mutex<Virtio9pDevice>);
+struct VirtioTransport(Mutex<ClassDevice<Virtio9pDeviceImpl>>);
 
 impl fs9p::Transport for VirtioTransport {
     fn request(&self, req: &[u8], resp: &mut [u8]) -> Result<usize, String> {

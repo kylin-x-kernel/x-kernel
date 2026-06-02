@@ -9,7 +9,8 @@ use core::{
     time::Duration,
 };
 
-use kdriver::prelude::*;
+use kclass::{ClassDevice, prelude::*};
+use kdevice::DeviceId;
 use kerrno::{KError, KResult, k_bail};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
@@ -17,13 +18,13 @@ use ktask::future::{block_on, interruptible};
 use crate::{alloc::string::ToString, vsock::connection_manager::VSOCK_CONN_MANAGER};
 
 // A single global vsock device instance.
-static VSOCK_DEV: Mutex<Option<VsockDevice>> = Mutex::new(None);
+static VSOCK_DEV: Mutex<Option<ClassDevice<VsockDeviceImpl>>> = Mutex::new(None);
 static VSOCK_EVENT_QUEUE: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
 
 const VSOCK_RX_SCRATCH_SIZE: usize = 0x1000; // 4KiB scratch buffer for vsock receive
 
 /// Registers a vsock device. Only one vsock device can be registered.
-pub fn register_vsock_dev(dev: VsockDevice) -> KResult {
+pub fn register_vsock_dev(dev: ClassDevice<VsockDeviceImpl>) -> KResult {
     let mut guard = VSOCK_DEV.lock();
     if guard.is_some() {
         k_bail!(AlreadyExists, "vsock device already registered");
@@ -31,6 +32,17 @@ pub fn register_vsock_dev(dev: VsockDevice) -> KResult {
     *guard = Some(dev);
     drop(guard);
     Ok(())
+}
+
+pub fn unregister_vsock_dev(id: DeviceId) -> bool {
+    let mut guard = VSOCK_DEV.lock();
+    if guard.as_ref().is_none_or(|dev| dev.id() != id) {
+        return false;
+    }
+    *guard = None;
+    VSOCK_EVENT_QUEUE.lock().clear();
+    *POLL_USERS.lock() = 0;
+    true
 }
 
 static POLL_USERS: Mutex<usize> = Mutex::new(0);
@@ -144,7 +156,7 @@ fn poll_vsock_devices() -> KResult<bool> {
     // Use core::mem::take to atomically move all events out and empty the global queue
     let pending_events = core::mem::take(&mut *VSOCK_EVENT_QUEUE.lock());
     for event in pending_events {
-        handle_vsock_event(event, dev, &mut buf);
+        dev.with_mut(|driver| handle_vsock_event(event, driver.as_mut(), &mut buf));
     }
 
     loop {
@@ -152,7 +164,7 @@ fn poll_vsock_devices() -> KResult<bool> {
             Ok(None) => break, // no more events
             Ok(Some(event)) => {
                 event_count += 1;
-                handle_vsock_event(event, dev, &mut buf);
+                dev.with_mut(|driver| handle_vsock_event(event, driver.as_mut(), &mut buf));
             }
             Err(e) => {
                 info!("Failed to poll vsock event: {e:?}");
@@ -163,7 +175,7 @@ fn poll_vsock_devices() -> KResult<bool> {
     Ok(event_count > 0)
 }
 
-fn handle_vsock_event(event: VsockDriverEventType, dev: &mut VsockDevice, buf: &mut [u8]) {
+fn handle_vsock_event(event: VsockDriverEventType, dev: &mut dyn VsockDevice, buf: &mut [u8]) {
     let mut manager = VSOCK_CONN_MANAGER.lock();
     debug!("Handling vsock event: {event:?}");
 

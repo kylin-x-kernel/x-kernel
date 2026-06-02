@@ -4,11 +4,11 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use simple_ahci::AhciDriver as CoreAhciDriver;
 pub use simple_ahci::Hal as AhciHal;
 
-use crate::BlockDriverOps;
+use crate::BlockDevice;
 
 /// AHCI driver implementation based on `simple_ahci` crate.
 pub struct AhciDriver<H: AhciHal>(CoreAhciDriver<H>);
@@ -28,7 +28,7 @@ impl<H: AhciHal> AhciDriver<H> {
     }
 }
 
-impl<H: AhciHal> DriverOps for AhciDriver<H> {
+impl<H: AhciHal> Device for AhciDriver<H> {
     fn name(&self) -> &str {
         "ahci"
     }
@@ -38,7 +38,7 @@ impl<H: AhciHal> DriverOps for AhciDriver<H> {
     }
 }
 
-impl<H: AhciHal> BlockDriverOps for AhciDriver<H> {
+impl<H: AhciHal> BlockDevice for AhciDriver<H> {
     fn block_size(&self) -> usize {
         self.0.block_size()
     }

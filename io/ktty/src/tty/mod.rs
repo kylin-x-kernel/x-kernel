@@ -21,7 +21,7 @@ use crate::terminal::{
 mod ntty;
 mod pty;
 
-pub use ntty::{N_TTY, NTtyDriver};
+pub use ntty::{N_TTY, NTtyDriver, try_handoff_console};
 pub use pty::{PtyDriver, create_pty_pair};
 
 /// TTY device combining terminal and line discipline

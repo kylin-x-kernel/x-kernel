@@ -6,7 +6,7 @@
 use alloc::sync::Arc;
 use core::marker::PhantomPinned;
 
-use kdriver::BlockDevice as KBlockDevice;
+use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
     DirEntry, Filesystem, FilesystemOps, Reference, ST_RELATIME, StatFs, VfsResult,
@@ -44,7 +44,7 @@ pub struct FatFilesystem {
 
 impl FatFilesystem {
     /// Create a new FAT filesystem instance backed by a block device.
-    pub fn new(dev: KBlockDevice) -> Filesystem {
+    pub fn new(dev: ClassDevice<KBlockDevice>) -> Filesystem {
         let mut inner = FatFilesystemInner {
             inner: ff::FileSystem::new(SeekableDisk::new(dev), fatfs::FsOptions::new())
                 .expect("failed to initialize FAT filesystem"),

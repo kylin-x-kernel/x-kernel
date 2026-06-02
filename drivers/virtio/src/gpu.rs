@@ -3,14 +3,14 @@
 // See LICENSES for license details.
 
 //! VirtIO GPU driver adapter.
-use display::{DisplayDriverOps, DisplayInfo, FrameBuffer};
-use driver_base::{DeviceKind, DriverOps, DriverResult};
+use display::{DisplayDevice, DisplayInfo, FrameBuffer};
+use driver_base::{Device, DeviceKind, DriverResult};
 use virtio_drivers::{Hal, device::gpu::VirtIOGpu as InnerDev, transport::Transport};
 
 /// The VirtIO GPU device driver.
 ///
 /// Wraps [`VirtIOGpu`] from `virtio-drivers` and implements the
-/// [`DisplayDriverOps`] trait, providing framebuffer access and display
+/// [`DisplayDevice`] trait, providing framebuffer access and display
 /// flush operations.
 ///
 /// # Type Parameters
@@ -64,7 +64,7 @@ impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> DriverOps for VirtIoGpuDev<H, T> {
+impl<H: Hal, T: Transport> Device for VirtIoGpuDev<H, T> {
     fn name(&self) -> &str {
         "virtio-gpu"
     }
@@ -74,7 +74,7 @@ impl<H: Hal, T: Transport> DriverOps for VirtIoGpuDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> DisplayDriverOps for VirtIoGpuDev<H, T> {
+impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     fn info(&self) -> DisplayInfo {
         self.info
     }

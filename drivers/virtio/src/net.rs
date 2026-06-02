@@ -6,8 +6,9 @@
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
-use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDriverOps};
+use device_res::{Irq, IrqResource, IrqReturn, IrqTriggerMode};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice};
 use kspin::SpinNoIrq;
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
@@ -51,12 +52,16 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetIrqAck for VirtIoNetIrqHand
 
 static NET_IRQ_HANDLES: SpinNoIrq<Vec<Arc<dyn VirtIoNetIrqAck>>> = SpinNoIrq::new(Vec::new());
 static REGISTERED_NET_IRQS: SpinNoIrq<BTreeSet<usize>> = SpinNoIrq::new(BTreeSet::new());
+/// Keeps the network interrupt registrations alive for the lifetime of the
+/// kernel; dropping an [`Irq`] guard would release the handler.
+static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
 
-fn handle_virtio_net_irq() {
+fn handle_virtio_net_irq() -> IrqReturn {
     let handles = NET_IRQ_HANDLES.lock();
     handles.iter().for_each(|irq_handle| {
         let _ = irq_handle.ack_interrupt();
     });
+    IrqReturn::Handled
 }
 
 fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: usize>(
@@ -72,10 +77,19 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
             irq,
         }));
 
-    if REGISTERED_NET_IRQS.lock().insert(irq) && !khal::irq::register(irq, handle_virtio_net_irq) {
-        NET_IRQ_HANDLES.lock().pop();
-        REGISTERED_NET_IRQS.lock().remove(&irq);
-        return Err(DriverError::ResourceBusy);
+    if REGISTERED_NET_IRQS.lock().insert(irq) {
+        let resource = IrqResource {
+            number: irq,
+            trigger: IrqTriggerMode::Unspecified,
+        };
+        match Irq::request(resource, Arc::new(handle_virtio_net_irq)) {
+            Ok(guard) => NET_IRQ_GUARDS.lock().push(guard),
+            Err(_) => {
+                NET_IRQ_HANDLES.lock().pop();
+                REGISTERED_NET_IRQS.lock().remove(&irq);
+                return Err(DriverError::ResourceBusy);
+            }
+        }
     }
 
     Ok(handle_id)
@@ -96,7 +110,7 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
 /// The VirtIO network device driver.
 ///
 /// Wraps [`VirtIONetRaw`] from `virtio-drivers` and implements the
-/// [`NetDriverOps`] trait, providing packet-level send/receive with buffer
+/// [`NetDevice`] trait, providing packet-level send/receive with buffer
 /// pool management and interrupt-driven IRQ acknowledgment.
 ///
 /// `QS` is the VirtIO queue size.
@@ -229,7 +243,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     }
 }
 
-impl<H: Hal, T: Transport, const QS: usize> DriverOps for VirtIoNetDev<H, T, QS> {
+impl<H: Hal, T: Transport, const QS: usize> Device for VirtIoNetDev<H, T, QS> {
     fn name(&self) -> &str {
         "virtio-net"
     }
@@ -243,7 +257,7 @@ impl<H: Hal, T: Transport, const QS: usize> DriverOps for VirtIoNetDev<H, T, QS>
     }
 }
 
-impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, QS> {
+impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS> {
     #[inline]
     fn mac(&self) -> MacAddress {
         MacAddress(self.inner.lock().mac_address())

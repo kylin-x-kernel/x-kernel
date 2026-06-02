@@ -15,20 +15,24 @@ extern crate log;
 
 #[cfg(feature = "fs9p")]
 use alloc::borrow::ToOwned;
-use alloc::sync::Arc;
 
 mod test_path_resolver;
 mod test_working_context;
 
+use alloc::{sync::Arc, vec::Vec};
+
+use kclass::block_devices;
 #[cfg(feature = "fs9p")]
-use kdriver::Virtio9pDevice;
-use kdriver::{BlockDevice, DeviceContainer, prelude::*};
+use kclass::{Virtio9pDevice as _, virtio_9p_devices};
+use kdevice::{DeviceId as KDeviceId, subscribe_device_removed};
 use ksync::Mutex;
 #[cfg(feature = "fs9p")]
 use kvfs::{
     NodePermission,
     path::{Path, PathBuf},
 };
+
+static FS_BACKING_DEVICES: Mutex<Vec<KDeviceId>> = Mutex::new(Vec::new());
 
 #[cfg(feature = "fat")]
 mod disk;
@@ -50,26 +54,32 @@ pub use virtual_filesystems::{VirtualFsMounts, mount_virtual_filesystems};
 pub use working_context::WorkingContext;
 
 /// Initialize the filesystem subsystem and mount the root filesystem.
-pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
+pub fn init_filesystems() {
     info!("Initialize filesystem subsystem...");
 
-    let dev = {
+    let mut block_devs = block_devices();
+    let handle = {
         #[cfg(feature = "crosvm")]
         {
-            // must have two block devices: secure and non-secure
-            // we only use the second blk
-            block_devs
-                .take_nth(1)
-                .expect("Less than two block devices found!")
+            assert!(block_devs.len() >= 2, "Less than two block devices found!");
+            block_devs.remove(1)
         }
         #[cfg(not(feature = "crosvm"))]
         {
-            block_devs.take_one().expect("No block device found!")
+            block_devs.pop().expect("No block device found!")
         }
     };
-    info!("  use block device 0: {:?}", dev.name());
 
-    let fs = fs::new_default(dev).expect("Failed to initialize filesystem");
+    let backing_id = handle.id();
+    subscribe_fs_backing_unregister(backing_id, "block");
+    info!(
+        "  use block device 0: {:?} (driver={}, {:?})",
+        handle.name(),
+        handle.driver_name(),
+        handle.location(),
+    );
+
+    let fs = fs::new_default(handle).expect("Failed to initialize filesystem");
     info!("  filesystem type: {:?}", fs.name());
 
     let mp = kvfs::Mountpoint::new_root(&fs);
@@ -79,15 +89,16 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
 }
 
 #[cfg(feature = "fs9p")]
-pub fn mount_9pfilesystems(mut virtio_9p_devs: DeviceContainer<Virtio9pDevice>, mount_path: &str) {
-    let dev_9p = virtio_9p_devs
-        .take_one()
-        .expect("No virtio-9p device found!");
+pub fn mount_9pfilesystems(mount_path: &str) {
+    let mut virtio_9p_devs = virtio_9p_devices();
+    let handle = virtio_9p_devs.pop().expect("No virtio-9p device found!");
+    let backing_id = handle.id();
+    subscribe_fs_backing_unregister(backing_id, "virtio-9p");
     info!("Mount 9P filesystem...");
-    info!("  use virtio-9p device: {:?}", dev_9p.name());
-    info!("  mount tag: {:?}", dev_9p.mount_tag());
+    info!("  use virtio-9p device: {:?}", handle.name());
+    info!("  mount tag: {:?}", handle.mount_tag());
 
-    let fs = fs::new_9p_filesystem(dev_9p).expect("Failed to initialize filesystem");
+    let fs = fs::new_9p_filesystem(handle).expect("Failed to initialize filesystem");
     info!("  filesystem type: {:?}", fs.name());
     let mut fs_ctx = kernel_fs_context().lock();
     ensure_mount_path(&mut fs_ctx, mount_path).expect("Failed to prepare 9P mount path");
@@ -96,6 +107,24 @@ pub fn mount_9pfilesystems(mut virtio_9p_devs: DeviceContainer<Virtio9pDevice>, 
         .and_then(|loc| loc.mount(&fs).map(|_| ()))
         .expect("Failed to mount 9P filesystem");
     info!("  mounted at: {:?}", mount_path);
+}
+
+fn subscribe_fs_backing_unregister(id: KDeviceId, label: &'static str) {
+    FS_BACKING_DEVICES.lock().push(id);
+    subscribe_device_removed(Arc::new(move |removed_id| {
+        if removed_id != id {
+            return;
+        }
+        let mut devices = FS_BACKING_DEVICES.lock();
+        if let Some(pos) = devices.iter().position(|device_id| *device_id == id) {
+            devices.swap_remove(pos);
+            warn!(
+                "filesystem: mounted {} backing device {:?} was removed; mounted filesystem is \
+                 now stale",
+                label, id
+            );
+        }
+    }));
 }
 
 #[cfg(feature = "fs9p")]

@@ -22,10 +22,10 @@ pub mod ramdisk_static;
 // pub mod sdmmc;
 
 #[doc(no_inline)]
-pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 /// Operations that require a block storage device driver to implement.
-pub trait BlockDriverOps: DriverOps {
+pub trait BlockDevice: Device {
     /// The number of blocks in this storage device.
     ///
     /// The total size of the device is `num_blocks() * block_size()`.

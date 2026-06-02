@@ -44,9 +44,12 @@ mod wrapper;
 mod test_options;
 mod test_state;
 
-use alloc::{borrow::ToOwned, boxed::Box};
+use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
 
-use kdriver::{DeviceContainer, prelude::*};
+#[cfg(feature = "vsock")]
+use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
+use kclass::{NetDevice, net_devices};
+use kdevice::subscribe_device_removed;
 use ksync::Mutex;
 use lazyinit::LazyInit;
 use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
@@ -67,8 +70,10 @@ static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
 static SERVICE: LazyInit<Mutex<Service>> = LazyInit::new();
 
 /// Initializes the network subsystem by NIC devices.
-pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
+pub fn init_network() {
     info!("Initialize network subsystem...");
+
+    let mut net_devs = net_devices();
 
     let mut router = Router::new();
     let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
@@ -82,16 +87,17 @@ pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
     ));
 
     let mut eth0_mac = None;
-    let eth0_ip = if let Some(dev) = net_devs.take_one() {
-        info!("  use NIC 0: {:?}", dev.name());
+    let eth0_ip = if let Some(handle) = net_devs.pop() {
+        let device_id = handle.id();
+        info!("  use NIC 0: {:?}", handle.name());
 
-        let eth0_address = EthernetAddress(dev.mac().0);
-        eth0_mac = Some(dev.mac().0);
+        let eth0_address = EthernetAddress(handle.mac().0);
+        eth0_mac = Some(handle.mac().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0_dev = router.add_device(Box::new(EthernetDevice::new(
             "eth0".to_owned(),
-            dev,
+            handle,
             eth0_ip,
         )));
 
@@ -105,6 +111,7 @@ pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
         info!("eth0:");
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
+        subscribe_network_unregister(device_id);
 
         Some(eth0_ip)
     } else {
@@ -140,18 +147,49 @@ pub fn init_network(mut net_devs: DeviceContainer<NetDevice>) {
     udp_err::init_udp_error_registry();
 }
 
+fn subscribe_network_unregister(id: kdevice::DeviceId) {
+    subscribe_device_removed(Arc::new(move |removed_id| {
+        if removed_id != id || !SERVICE.is_inited() {
+            return;
+        }
+        if SERVICE.lock().remove_device_by_model_id(id) {
+            warn!("network: detached removed device {:?}", id);
+        }
+    }));
+}
+
 /// Init vsock subsystem by vsock devices.
 #[cfg(feature = "vsock")]
-pub fn init_vsock(mut vsock_devs: DeviceContainer<VsockDevice>) {
-    use crate::device::register_vsock_dev;
+pub fn init_vsock() {
     info!("Initialize vsock subsystem...");
-    if let Some(dev) = vsock_devs.take_one() {
-        info!("  use vsock 0: {:?}", dev.name());
-        if let Err(e) = register_vsock_dev(dev) {
-            warn!("Failed to initialize vsock device: {:?}", e);
-        }
+    let mut vsock_devs = vsock_devices();
+    if let Some(handle) = vsock_devs.pop() {
+        register_vsock_handle(handle);
     } else {
         warn!("  No vsock device found!");
+    }
+    subscribe_vsock_available(Arc::new(register_vsock_handle));
+}
+
+#[cfg(feature = "vsock")]
+fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
+    use crate::device::{register_vsock_dev, unregister_vsock_dev};
+
+    let id = handle.id();
+    info!(
+        "  use vsock 0: {:?} (driver={}, {:?})",
+        handle.name(),
+        handle.driver_name(),
+        handle.location(),
+    );
+    if let Err(e) = register_vsock_dev(handle) {
+        warn!("Failed to initialize vsock device: {:?}", e);
+    } else {
+        subscribe_device_removed(Arc::new(move |removed_id| {
+            if removed_id == id && unregister_vsock_dev(id) {
+                warn!("vsock: detached removed device {:?}", id);
+            }
+        }));
     }
 }
 

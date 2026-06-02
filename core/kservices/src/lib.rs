@@ -17,7 +17,7 @@ use kvfs::{ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME};
 pub mod file;
 pub mod mm;
 pub mod task;
-pub use ktty::terminal;
+pub use ktty::{terminal, tty::try_handoff_console};
 #[cfg(feature = "tee")]
 pub use tee_kernel::tee;
 

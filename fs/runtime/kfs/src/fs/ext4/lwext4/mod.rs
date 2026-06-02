@@ -9,10 +9,10 @@ mod util;
 pub use fs::*;
 pub use inode::*;
 #[allow(unused_imports)]
-use kdriver::{BlockDevice as KBlockDevice, prelude::BlockDriverOps};
+use kclass::{BlockDevice as _, BlockDeviceImpl as KBlockDevice, ClassDevice};
 use lwext4_rust::{BlockDevice, Ext4Error, Ext4Result, ffi::EIO};
 
-pub(crate) struct Ext4Disk(KBlockDevice);
+pub(crate) struct Ext4Disk(ClassDevice<KBlockDevice>);
 
 impl BlockDevice for Ext4Disk {
     fn read_blocks(&mut self, block_id: u64, buf: &mut [u8]) -> Ext4Result<usize> {

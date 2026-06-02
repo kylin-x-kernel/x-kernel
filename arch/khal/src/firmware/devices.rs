@@ -36,7 +36,7 @@ static IO_APIC_CACHE: LazyInit<Option<usize>> = LazyInit::new();
 /// Which firmware table the device description was read from.
 ///
 /// Kept as a flat enum here (rather than borrowing `kdriver`'s
-/// `FirmwareOrigin`) so this layer stays free of driver-framework deps.
+/// `DiscoveryOrigin`) so this layer stays free of driver-framework deps.
 /// Callers that need to record the origin can map this 1:1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirmwareSource {
@@ -119,7 +119,7 @@ pub fn pci_host() -> Option<PciHostInfo> {
 ///
 /// Mirrors the discovery priority used by [`pci_host`]: Device Tree first,
 /// then ACPI MCFG. Useful for callers that need to record provenance (e.g.
-/// the device-database `FirmwareOrigin`) without re-doing the table walk.
+/// the device-database `DiscoveryOrigin`) without re-doing the table walk.
 pub fn pci_host_source() -> Option<FirmwareSource> {
     if of::generic_pci_host_info().is_some() {
         return Some(FirmwareSource::DeviceTree);

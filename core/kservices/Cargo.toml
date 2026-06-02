@@ -19,11 +19,7 @@ dice = [
 	"tee_kernel/dice_huk_key",
 	"devfs/dice",
 ]
-tee = [
-	"dep:tee_kernel",
-	"kthread/tee",
-	"procfs/tee",
-]
+tee = ["dep:tee_kernel", "kthread/tee", "procfs/tee"]
 
 [dependencies]
 kalloc.workspace = true

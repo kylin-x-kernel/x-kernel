@@ -11,7 +11,7 @@
 //! addresses (as seen by your program).
 //!
 //! [`virtio-drivers`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
-//! [`driver_base`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/trait.Hal.html
+//! [`driver_base`]: driver_base
 
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]
@@ -41,10 +41,10 @@ mod net;
 #[cfg(feature = "net")]
 pub use self::net::VirtIoNetDev;
 
-#[cfg(feature = "virtio_9p")]
+#[cfg(feature = "virtio-9p")]
 mod virtio_9p;
-#[cfg(feature = "virtio_9p")]
-pub use self::virtio_9p::VirtIo9pDev;
+#[cfg(feature = "virtio-9p")]
+pub use self::virtio_9p::{VirtIo9pDev, Virtio9pDevice};
 
 #[cfg(unittest)]
 pub mod mock_virtio;
@@ -243,16 +243,17 @@ fn legacy_irq_for_bdf(config: &::pci::PciConfigAccess, bdf: DeviceFunction) -> u
     if let Some(route) = ::pci::legacy_interrupt_route(config, bdf) {
         #[cfg(target_arch = "aarch64")]
         {
+            use khal::firmware::devices::InterruptTrigger;
             let desc = match route.trigger {
-                of::InterruptTrigger::EdgeRising => khal::irq::gic_edge_irq_desc(route.irq),
-                of::InterruptTrigger::LevelHigh
-                | of::InterruptTrigger::LevelLow
-                | of::InterruptTrigger::EdgeFalling
-                | of::InterruptTrigger::Unknown(_) => khal::irq::gic_level_irq_desc(route.irq),
+                InterruptTrigger::EdgeRising => khal::irq::gic_edge_irq_desc(route.irq),
+                InterruptTrigger::LevelHigh
+                | InterruptTrigger::LevelLow
+                | InterruptTrigger::EdgeFalling
+                | InterruptTrigger::Unknown(_) => khal::irq::gic_level_irq_desc(route.irq),
             };
             let virq = khal::irq::map(desc);
             log::info!(
-                "virtio PCI IRQ via device tree: bdf={:?} hwirq={} virq={} trigger={:?}",
+                "virtio PCI IRQ via firmware: bdf={:?} hwirq={} virq={} trigger={:?}",
                 bdf,
                 route.irq,
                 virq,
@@ -305,7 +306,7 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
         GPU => Some(DeviceKind::Display),
         Input => Some(DeviceKind::Input),
         Socket => Some(DeviceKind::Vsock),
-        _9P => Some(DeviceKind::Virtio9p),
+        _9P => Some(DeviceKind::Fs9p),
         _ => None,
     }
 }

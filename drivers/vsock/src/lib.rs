@@ -8,7 +8,7 @@
 #![cfg_attr(doc, feature(doc_cfg))]
 
 #[doc(no_inline)]
-pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 /// Vsock address.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,7 +56,7 @@ pub enum VsockDriverEventType {
 }
 
 /// Operations that require a vsock device driver to implement.
-pub trait VsockDriverOps: DriverOps {
+pub trait VsockDevice: Device {
     /// Returns the guest CID.
     fn guest_cid(&self) -> u64;
 

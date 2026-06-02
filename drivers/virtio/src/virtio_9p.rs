@@ -3,14 +3,29 @@
 // See LICENSES for license details.
 
 //! VirtIO 9p driver adapter.
-use driver_base::{DeviceKind, DriverOps, DriverResult};
+use alloc::string::{String, ToString};
+
+use driver_base::{Device, DeviceKind, DriverResult};
 use virtio_drivers::{Hal, device::virtio_9p::VirtIO9p as InnerDev, transport::Transport};
 
 use crate::as_driver_error;
 
+/// 9P-over-VirtIO device operations.
+///
+/// Defines the abstract interface used by the 9P filesystem layer so that the
+/// concrete `VirtIo9pDev<H, T>` does not have to leak through subsystem APIs.
+pub trait Virtio9pDevice: Device {
+    /// Returns the mount tag reported by the device.
+    fn mount_tag(&self) -> String;
+
+    /// Sends a raw 9p request and waits for the response.
+    fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize>;
+}
+
 /// The VirtIO 9p device driver.
 ///
-/// Wraps [`VirtIO9p`] from `virtio-drivers`, providing a simple request/response
+/// Wraps [`VirtIO9p`] from `virtio-drivers` and implements the
+/// [`Virtio9pDevice`] trait, providing a simple request/response
 /// interface for 9p filesystem protocol communication between guest and host.
 ///
 /// # Type Parameters
@@ -21,6 +36,7 @@ use crate::as_driver_error;
 /// # Example
 ///
 /// ```ignore
+/// use virtio::Virtio9pDevice;
 /// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
 /// let mut dev = VirtIo9pDev::<HalImpl, _>::try_new(transport)?;
 /// let tag = dev.mount_tag();
@@ -54,6 +70,12 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     pub fn mount_tag(&self) -> &str {
         self.inner.mount_tag()
     }
+}
+
+impl<H: Hal, T: Transport> Virtio9pDevice for VirtIo9pDev<H, T> {
+    fn mount_tag(&self) -> String {
+        self.inner.mount_tag().to_string()
+    }
 
     /// Sends a raw 9p request and waits for the response.
     ///
@@ -70,7 +92,7 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     ///
     /// Returns [`DriverError`] if the request fails (device error, buffer too
     /// small, etc.).
-    pub fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
+    fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
         self.inner
             .request(req, resp)
             .map(|written| written as usize)
@@ -78,13 +100,13 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> DriverOps for VirtIo9pDev<H, T> {
+impl<H: Hal, T: Transport> Device for VirtIo9pDev<H, T> {
     fn name(&self) -> &str {
         "virtio-9p"
     }
 
     fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Virtio9p
+        DeviceKind::Fs9p
     }
 }
 
@@ -117,7 +139,7 @@ mod tests {
 
         let dev = VirtIo9pDev::<MockHal, MockTransport>::try_new(transport).unwrap();
         assert_eq!(dev.name(), "virtio-9p");
-        assert_eq!(dev.device_kind(), DeviceKind::Virtio9p);
+        assert_eq!(dev.device_kind(), DeviceKind::Fs9p);
         assert_eq!(dev.mount_tag(), "hostshare");
     }
 

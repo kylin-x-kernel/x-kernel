@@ -27,7 +27,7 @@ use memaddr::{MemoryAddr, PhysAddr, va};
 pub use self::{
     aspace::{AddrPolicy, AddrSpace},
     iomap::{
-        DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device,
+        DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device, iounmap,
         register_device_region, register_fixed_device_region,
     },
 };

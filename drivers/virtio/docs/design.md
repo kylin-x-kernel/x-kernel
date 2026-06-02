@@ -40,7 +40,7 @@ Feature flags 控制编译哪些设备适配器：
 | `input`   | input     | `alloc`, `input` crate |
 | `net`     | net       | `alloc`, `net` crate |
 | `socket`  | socket    | `alloc`, `vsock` crate |
-| `virtio_9p` | virtio_9p | `alloc` |
+| `virtio-9p` | virtio_9p | `alloc` |
 
 ## 架构
 
@@ -51,7 +51,7 @@ Feature flags 控制编译哪些设备适配器：
 └───────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────—┘
         │          │          │          │          │          │
       Block      Display    Input       Net       Vsock      9p API
-      DriverOps  DriverOps  DriverOps   DriverOps DriverOps
+      Device     Device     Device      Device    Device     Device
         │          │          │          │          │          │
 ┌───────┴──────────┴──────────┴──────────┴──────────┴──────────┴───────┐
 │                          virtio (本模块)                              │
@@ -74,12 +74,12 @@ Feature flags 控制编译哪些设备适配器：
 | 组件 | 职责 |
 |------|------|
 | `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、公共类型 re-export |
-| `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDriverOps` 的 `VirtIoBlkDev` |
-| `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDriverOps` 的 `VirtIoGpuDev` |
-| `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDriverOps` 的 `VirtIoInputDev` |
-| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDriverOps` 的 `VirtIoNetDev`，管理收发缓冲区和 IRQ |
-| `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDriverOps` 的 `VirtIoSocketDev` |
-| `virtio_9p.rs` | 将 `VirtIO9p` 封装为 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
+| `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDevice` 的 `VirtIoBlkDev` |
+| `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
+| `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
+| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区和 IRQ |
+| `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDevice` 的 `VirtIoSocketDev` |
+| `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
 | `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
 
 ## 状态机
@@ -333,8 +333,8 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 **IRQ 处理流程**：
 
 1. `register_virtio_net_irq(irq, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
-2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `khal::irq::register(irq, handle_virtio_net_irq)`
-3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断
+2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request(resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
+3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回 `IrqReturn::Handled`
 
 ### Vsock 连接管理
 
@@ -391,9 +391,10 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
   调用者负责串行化，模块内部无锁。
 - **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
   访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
-  `NET_IRQ_HANDLES` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
+  `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
 - **IRQ 注册**：`register_virtio_net_irq()` 在 `NET_IRQ_HANDLES` 中注册回调句柄，
-  同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。
+  同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`Irq::request()` 返回的
+  guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。
 
 ## 设计决策
 
@@ -411,12 +412,15 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 ### 为什么 net 的 IRQ 处理使用全局静态变量
 
-中断处理函数 `handle_virtio_net_irq` 必须是函数指针（`fn()`），无法捕获上下文。
-因此使用全局 `NET_IRQ_HANDLES` 存储所有网络设备的 IRQ 回调句柄，
-中断到来时遍历所有句柄执行 `ack_interrupt()`。
+中断处理函数 `handle_virtio_net_irq` 通过 `Arc<dyn Fn() -> IrqReturn>` 注册，
+但仍需访问所有网络设备实例。使用全局 `NET_IRQ_HANDLES` 存储所有网络设备的
+IRQ 回调句柄，中断到来时遍历所有句柄执行 `ack_interrupt()`。
+`NET_IRQ_GUARDS` 持有 `Irq` guard，确保设备 Drop 时自动注销中断。
 
 ## Drop / 资源释放
 
-当前各设备适配器未实现自定义 `Drop`。设备资源（DMA 缓冲区、VirtIO 队列）的
-释放依赖 `virtio-drivers` 内部类型的 `Drop` 实现。当设备结构体离开作用域时，
-`InnerDev` 的 `Drop` 会自动通知设备重置并释放 DMA 内存。
+`VirtIoNetDev` 实现了自定义 `Drop`：在设备销毁时调用 `unregister_virtio_net_irq()`
+注销 IRQ 回调，释放 `NET_IRQ_GUARDS` 中对应的 guard。其他设备适配器未实现自定义
+`Drop`，设备资源（DMA 缓冲区、VirtIO 队列）的释放依赖 `virtio-drivers` 内部类型的
+`Drop` 实现。当设备结构体离开作用域时，`InnerDev` 的 `Drop` 会自动通知设备重置
+并释放 DMA 内存。

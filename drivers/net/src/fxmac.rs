@@ -6,12 +6,12 @@
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 use core::ptr::NonNull;
 
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 pub use fxmac_rs::KernelFunc;
 use fxmac_rs::{self, FXmac, FXmacGetMacAddress, FXmacLwipPortTx, FXmacRecvHandler, xmac_init};
 use log::*;
 
-use crate::{MacAddress, NetBufHandle, NetDriverOps};
+use crate::{MacAddress, NetBufHandle, NetDevice};
 
 const QS: usize = 64;
 
@@ -45,7 +45,7 @@ impl FXmacNic {
     }
 }
 
-impl DriverOps for FXmacNic {
+impl Device for FXmacNic {
     fn name(&self) -> &str {
         "cdns,phytium-gem-1.0"
     }
@@ -55,7 +55,7 @@ impl DriverOps for FXmacNic {
     }
 }
 
-impl NetDriverOps for FXmacNic {
+impl NetDevice for FXmacNic {
     fn mac(&self) -> MacAddress {
         MacAddress(self.hwaddr)
     }

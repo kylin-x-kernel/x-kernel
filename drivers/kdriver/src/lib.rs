@@ -4,55 +4,52 @@
 
 //! [x-kernel] device drivers.
 //!
-//! All detected devices are composed into [`AllDevices`] and returned by [`init_drivers`].
+//! The primary entry point is [`init_drivers`], which runs discovery and
+//! probes drivers against long-lived device objects. Drivers publish runtime
+//! devices into typed `kclass` registries.
 //!
-//! Device categories: [`NetDevice`], [`BlockDevice`], [`DisplayDevice`].
+//! Device categories live in the typed `kclass` layer.
+//!
+//! Initialization has three deliberately separate paths:
+//!
+//! - Platform `early_driver_init` brings up timer, IRQ, and boot console pieces
+//!   that must work before the generic driver model can enumerate descriptors.
+//! - The descriptor-first path enumerates buses, matches registered drivers,
+//!   probes unpublished `DeviceObject`s, then publishes active runtime devices.
+//! - The adoption path is reserved for early devices that are already running
+//!   but still need a runtime device-model object, such as the boot console.
 //!
 //! Supports static and dynamic device models via the `dyn` feature.
 
 #![no_std]
 #![feature(associated_type_defaults)]
 
+extern crate alloc;
+
 #[macro_use]
 extern crate log;
 
-#[macro_use]
-mod macros;
-
 mod bus;
-mod drivers;
-mod dummy;
-mod structs;
+pub mod driver_registry;
+mod enumeration;
+mod manager;
+mod resource;
 
-#[cfg(feature = "virtio")]
-mod virtio;
-
-// #[cfg(feature = "ixgbe")]
-// mod ixgbe;
-
-pub mod prelude;
-
-#[cfg(feature = "bus-pci")]
 pub use pci::set_pci_config_space;
 
-#[allow(unused_imports)]
-use self::prelude::*;
-#[cfg(feature = "block")]
-pub use self::structs::BlockDevice;
-#[cfg(feature = "display")]
-pub use self::structs::DisplayDevice;
-#[cfg(feature = "net")]
-pub use self::structs::NetDevice;
-#[cfg(feature = "virtio_9p")]
-pub use self::structs::Virtio9pDevice;
-pub use self::structs::{DeviceContainer, DeviceEnum};
+pub use self::{
+    bus::manager::{BusManager, default_bus_manager},
+    driver_registry::{BusOwnershipSummary, DriverOwnershipSummary, OwnershipSummary},
+    manager::{DeviceManager, device_manager, discover_unified},
+    resource::{devm_alloc_coherent, devm_iomap, devm_request_irq, install_resource_provider},
+};
 
-#[cfg(any(feature = "bus-pci", feature = "virtio"))]
+#[cfg(feature = "virtio")]
 fn iomap_mmio(
     paddr: usize,
     size: usize,
     name: &'static str,
-) -> DriverResult<core::ptr::NonNull<u8>> {
+) -> driver_base::DriverResult<core::ptr::NonNull<u8>> {
     let vaddr = memspace::iomap_device(paddr.into(), size, name).map_err(|err| {
         warn!(
             "failed to iomap {name} at [PA:{:#x}, PA:{:#x}): {:?}",
@@ -61,126 +58,172 @@ fn iomap_mmio(
             err
         );
         match err {
-            memspace::IoMapError::NoMemory => DriverError::NoMemory,
-            memspace::IoMapError::InvalidRange => DriverError::InvalidInput,
-            _ => DriverError::Io,
+            memspace::IoMapError::NoMemory => driver_base::DriverError::NoMemory,
+            memspace::IoMapError::InvalidRange => driver_base::DriverError::InvalidInput,
+            memspace::IoMapError::MappingFailed => driver_base::DriverError::Io,
         }
     })?;
-    core::ptr::NonNull::new(vaddr.as_mut_ptr()).ok_or(DriverError::BadState)
+    core::ptr::NonNull::new(vaddr.as_mut_ptr()).ok_or(driver_base::DriverError::BadState)
 }
 
-/// A structure that contains all device drivers, organized by their category.
-#[derive(Default)]
-pub struct AllDevices {
-    /// All network device drivers.
-    #[cfg(feature = "net")]
-    pub net: DeviceContainer<NetDevice>,
-    /// All block device drivers.
-    #[cfg(feature = "block")]
-    pub block: DeviceContainer<BlockDevice>,
-    /// All graphics device drivers.
-    #[cfg(feature = "display")]
-    pub display: DeviceContainer<DisplayDevice>,
-    /// All input device drivers.
-    #[cfg(feature = "input")]
-    pub input: DeviceContainer<InputDevice>,
-    /// All vsock device drivers.
-    #[cfg(feature = "vsock")]
-    pub vsock: DeviceContainer<VsockDevice>,
-    #[cfg(feature = "virtio_9p")]
-    /// All virtio-9p device drivers.
-    pub virtio_9p: DeviceContainer<Virtio9pDevice>,
+#[cfg(any(
+    feature = "ahci",
+    feature = "sdmmc",
+    feature = "ixgbe",
+    feature = "fxmac"
+))]
+fn first_mmio_resource(
+    device: &kdevice::DeviceObject,
+) -> driver_base::DriverResult<kdevice::MmioRegion> {
+    device
+        .first_mmio()
+        .ok_or(driver_base::DriverError::InvalidInput)
 }
 
-impl AllDevices {
-    /// Returns the device model used.
-    pub const fn device_model() -> &'static str {
-        "static"
-    }
-
-    /// Probes all supported devices.
-    fn probe(&mut self) {
-        for_each_drivers!(type Driver, {
-            if let Some(dev) = Driver::probe_global() {
-                info!(
-                    "registered a new {:?} device: {:?}",
-                    dev.device_kind(),
-                    dev.name(),
-                );
-                self.add_device(dev);
-            }
-        });
-        self.probe_bus_devices();
-    }
-
-    /// Adds device to corresponding container.
-    #[allow(dead_code)]
-    fn add_device(&mut self, dev: DeviceEnum) {
-        match dev {
-            #[cfg(feature = "net")]
-            DeviceEnum::Net(dev) => self.net.push(dev),
-            #[cfg(feature = "block")]
-            DeviceEnum::Block(dev) => self.block.push(dev),
-            #[cfg(feature = "display")]
-            DeviceEnum::Display(dev) => self.display.push(dev),
-            #[cfg(feature = "input")]
-            DeviceEnum::Input(dev) => self.input.push(dev),
-            #[cfg(feature = "vsock")]
-            DeviceEnum::Vsock(dev) => self.vsock.push(dev),
-            #[cfg(feature = "virtio_9p")]
-            DeviceEnum::Virtio9p(dev) => self.virtio_9p.push(dev),
-        }
-    }
+#[cfg(any(feature = "ahci", feature = "sdmmc", feature = "ixgbe"))]
+fn iomap_first_mmio(
+    device: &kdevice::DeviceObject,
+    name: &'static str,
+) -> driver_base::DriverResult<(core::ptr::NonNull<u8>, usize)> {
+    let mmio = first_mmio_resource(device)?;
+    let ptr = resource::devm_iomap(device, mmio, name)?;
+    Ok((ptr, mmio.size))
 }
 
-/// Initializes all device drivers.
-pub fn init_drivers() -> AllDevices {
+/// Initialize device drivers and populate typed `kclass` device classes.
+pub fn init_drivers() {
     info!("Initialize device drivers...");
-    info!("  device model: {}", AllDevices::device_model());
 
-    let mut all_devs = AllDevices::default();
-    all_devs.probe();
+    // Initialize global object/metadata stores before any device is activated.
+    kdevice::init_device_registry();
 
-    #[cfg(feature = "net")]
-    {
-        debug!("number of NICs: {}", all_devs.net.len());
-        for (i, dev) in all_devs.net.iter().enumerate() {
-            assert_eq!(dev.device_kind(), DeviceKind::Net);
-            debug!("  NIC {}: {:?}", i, dev.name());
-        }
+    let _registry = discover_unified();
+
+    log_class_summary();
+    log_device_core_summary();
+    log_device_ownership_summary();
+}
+
+/// Snapshot the current long-lived device topology from the driver core.
+pub fn current_device_ownership() -> kdevice::DeviceTopology {
+    kdevice::device_topology()
+}
+
+/// Summarize the current long-lived ownership graph through the `kdriver` facade.
+pub fn current_device_ownership_summary() -> OwnershipSummary {
+    let ownership = current_device_ownership();
+    OwnershipSummary {
+        bus_count: ownership.bus_cores().count(),
+        driver_count: ownership.driver_cores().count(),
+        device_count: ownership.device_cores().count(),
     }
-    #[cfg(feature = "block")]
-    {
-        debug!("number of block devices: {}", all_devs.block.len());
-        for (i, dev) in all_devs.block.iter().enumerate() {
-            assert_eq!(dev.device_kind(), DeviceKind::Block);
-            debug!("  block device {}: {:?}", i, dev.name());
-        }
-    }
-    #[cfg(feature = "display")]
-    {
-        debug!("number of graphics devices: {}", all_devs.display.len());
-        for (i, dev) in all_devs.display.iter().enumerate() {
-            assert_eq!(dev.device_kind(), DeviceKind::Display);
-            debug!("  graphics device {}: {:?}", i, dev.name());
-        }
-    }
-    #[cfg(feature = "input")]
-    {
-        debug!("number of input devices: {}", all_devs.input.len());
-        for (i, dev) in all_devs.input.iter().enumerate() {
-            assert_eq!(dev.device_kind(), DeviceKind::Input);
-            debug!("  input device {}: {:?}", i, dev.name());
-        }
-    }
-    #[cfg(feature = "vsock")]
-    {
-        debug!("number of vsock devices: {}", all_devs.vsock.len());
-        for (i, dev) in all_devs.vsock.iter().enumerate() {
-            assert_eq!(dev.device_kind(), DeviceKind::Vsock);
-            debug!("  vsock device {}: {:?}", i, dev.name());
+}
+
+/// Summarize current device ownership per bus through the `kdriver` facade.
+pub fn current_bus_ownership_summaries() -> alloc::vec::Vec<BusOwnershipSummary> {
+    let ownership = current_device_ownership();
+    ownership
+        .buses()
+        .map(|bus| BusOwnershipSummary {
+            id: bus.info.id,
+            name: bus.info.name,
+            device_count: ownership.devices_on_bus(bus.info.id).count(),
+        })
+        .collect()
+}
+
+/// Summarize current device ownership per driver through the `kdriver` facade.
+pub fn current_driver_ownership_summaries() -> alloc::vec::Vec<DriverOwnershipSummary> {
+    let ownership = current_device_ownership();
+    ownership
+        .drivers()
+        .map(|driver| DriverOwnershipSummary {
+            id: driver.info.id,
+            name: driver.info.name,
+            device_kind: driver.info.device_kind,
+            device_count: ownership.devices_for_driver(driver.info.id).count(),
+        })
+        .collect()
+}
+
+/// Enumerate current device cores attached to one bus through the `kdriver` facade.
+pub fn current_devices_on_bus(bus: kdevice::BusId) -> alloc::vec::Vec<kdevice::DeviceCore> {
+    let ownership = current_device_ownership();
+    ownership
+        .devices_on_bus(bus)
+        .map(|device| kdevice::DeviceCore::new(device.record.id))
+        .collect()
+}
+
+/// Enumerate current device cores associated with one driver through the `kdriver` facade.
+pub fn current_devices_for_driver(
+    driver: kdevice::DriverId,
+) -> alloc::vec::Vec<kdevice::DeviceCore> {
+    let ownership = current_device_ownership();
+    ownership
+        .devices_for_driver(driver)
+        .map(|device| kdevice::DeviceCore::new(device.record.id))
+        .collect()
+}
+
+fn log_class_summary() {
+    let records = kdevice::device_records_snapshot();
+    let active = records
+        .iter()
+        .filter(|r| r.state == kdevice::DeviceState::Active)
+        .count();
+    debug!("total devices: {} ({} active)", records.len(), active);
+}
+
+fn log_device_core_summary() {
+    let records = kdevice::device_records_snapshot();
+    let mut discovered = 0usize;
+    let mut matched = 0usize;
+    let mut bound = 0usize;
+    let mut active = 0usize;
+    let mut removing = 0usize;
+    let mut removed = 0usize;
+
+    for record in &records {
+        match record.state {
+            kdevice::DeviceState::Discovered => discovered += 1,
+            kdevice::DeviceState::Matched => matched += 1,
+            kdevice::DeviceState::Bound => bound += 1,
+            kdevice::DeviceState::Active => active += 1,
+            kdevice::DeviceState::Removing => removing += 1,
+            kdevice::DeviceState::Removed => removed += 1,
         }
     }
 
-    all_devs
+    info!(
+        "device core: total={}, discovered={}, matched={}, bound={}, active={}, removing={}, \
+         removed={}",
+        records.len(),
+        discovered,
+        matched,
+        bound,
+        active,
+        removing,
+        removed
+    );
+
+    for record in &records {
+        debug!(
+            "  device id={:?} state={} kind={} driver={} location={:?} identity={:?}",
+            record.id,
+            record.state.as_str(),
+            record.device_kind.map_or("<unknown>", |kind| kind.as_str()),
+            record.driver_name.unwrap_or("<unbound>"),
+            record.location,
+            record.identity,
+        );
+    }
+}
+
+fn log_device_ownership_summary() {
+    let summary = current_device_ownership_summary();
+    info!(
+        "device ownership: buses={}, drivers={}, devices={}",
+        summary.bus_count, summary.driver_count, summary.device_count,
+    );
 }

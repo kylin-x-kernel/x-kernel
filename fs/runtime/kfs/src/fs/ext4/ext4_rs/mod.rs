@@ -13,19 +13,19 @@ use core::cmp::min;
 use ext4_rs::{BLOCK_SIZE, BlockDevice};
 pub use fs::*;
 pub use inode::*;
-use kdriver::{BlockDevice as KBlockDevice, prelude::BlockDriverOps};
+use kclass::{BlockDevice as _, BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::Mutex;
 
 const FS_BLOCK_SIZE: usize = BLOCK_SIZE;
 
 /// Block device wrapper implementing ext4_rs block device APIs.
 pub(crate) struct Ext4Disk {
-    inner: Mutex<KBlockDevice>,
+    inner: Mutex<ClassDevice<KBlockDevice>>,
     block_size: usize,
 }
 
 impl Ext4Disk {
-    pub(crate) fn new(dev: KBlockDevice) -> Self {
+    pub(crate) fn new(dev: ClassDevice<KBlockDevice>) -> Self {
         let block_size = dev.block_size();
         Self {
             inner: Mutex::new(dev),

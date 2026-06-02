@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+console_driver.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true

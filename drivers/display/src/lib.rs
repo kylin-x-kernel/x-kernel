@@ -7,7 +7,7 @@
 #![no_std]
 
 #[doc(no_inline)]
-pub use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 /// The information of the graphics device.
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +48,7 @@ impl<'a> FrameBuffer<'a> {
 }
 
 /// Operations that require a graphics device driver to implement.
-pub trait DisplayDriverOps: DriverOps {
+pub trait DisplayDevice: Device {
     /// Get the display information.
     fn info(&self) -> DisplayInfo;
 

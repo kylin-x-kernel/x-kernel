@@ -122,8 +122,12 @@ watchdog = { path = "io/watchdog" }
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
 arm-gic = { path = "drivers/arm-gic" }
 block = { path = "drivers/block" }
+char_driver = { path = "drivers/char" }
 display = { path = "drivers/display" }
 driver_base = { path = "drivers/driver_base" }
+device_res = { path = "drivers/device-res", package = "device-res" }
+kclass = { path = "drivers/kclass" }
+kdevice = { path = "drivers/kdevice" }
 console_driver = { path = "drivers/console", package = "console-driver" }
 input = { path = "drivers/input" }
 kdriver = { path = "drivers/kdriver" }

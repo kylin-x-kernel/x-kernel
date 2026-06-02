@@ -13,9 +13,9 @@ use core::{
     ptr::NonNull,
 };
 
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
-use crate::BlockDriverOps;
+use crate::BlockDevice;
 
 const BLOCK_SIZE: usize = 512;
 
@@ -87,7 +87,7 @@ impl From<&[u8]> for RamDisk {
     }
 }
 
-impl DriverOps for RamDisk {
+impl Device for RamDisk {
     fn device_kind(&self) -> DeviceKind {
         DeviceKind::Block
     }
@@ -97,7 +97,7 @@ impl DriverOps for RamDisk {
     }
 }
 
-impl BlockDriverOps for RamDisk {
+impl BlockDevice for RamDisk {
     #[inline]
     fn num_blocks(&self) -> u64 {
         // Calculates the number of blocks in the RAM disk

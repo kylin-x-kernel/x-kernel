@@ -6,12 +6,12 @@
 use alloc::{collections::VecDeque, sync::Arc};
 use core::{convert::From, mem::ManuallyDrop, ptr::NonNull};
 
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 pub use ixgbe_driver::{INTEL_82599, INTEL_VEND, IxgbeHal, PhysAddr};
 use ixgbe_driver::{IxgbeDevice, IxgbeError, IxgbeNetBuf, MemPool, NicDevice};
 use log::*;
 
-use crate::{MacAddress, NetBufHandle, NetDriverOps};
+use crate::{MacAddress, NetBufHandle, NetDevice};
 
 const RECV_BATCH_SIZE: usize = 64;
 const RX_BUFFER_SIZE: usize = 1024;
@@ -50,7 +50,7 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> IxgbeNic<H, QS, QN> {
     }
 }
 
-impl<H: IxgbeHal, const QS: usize, const QN: u16> DriverOps for IxgbeNic<H, QS, QN> {
+impl<H: IxgbeHal, const QS: usize, const QN: u16> Device for IxgbeNic<H, QS, QN> {
     fn name(&self) -> &str {
         self.inner.get_driver_name()
     }
@@ -60,7 +60,7 @@ impl<H: IxgbeHal, const QS: usize, const QN: u16> DriverOps for IxgbeNic<H, QS, 
     }
 }
 
-impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDriverOps for IxgbeNic<H, QS, QN> {
+impl<H: IxgbeHal, const QS: usize, const QN: u16> NetDevice for IxgbeNic<H, QS, QN> {
     fn mac(&self) -> MacAddress {
         MacAddress(self.inner.get_mac_addr())
     }

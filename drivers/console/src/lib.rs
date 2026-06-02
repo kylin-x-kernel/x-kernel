@@ -4,9 +4,16 @@
 
 #![no_std]
 
+extern crate alloc;
+
+pub mod runtime;
+
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use device_res::{Irq, IrqResource, IrqReturn, IrqTriggerMode};
 use khal::{irq::IrqDesc, mem::PhysAddr};
+use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
 cfg_select! {
@@ -81,6 +88,9 @@ struct ConsoleState {
 
 static CONSOLE: LazyInit<ConsoleState> = LazyInit::new();
 static INPUT_IRQ_REGISTERED: AtomicBool = AtomicBool::new(false);
+/// Keeps the console input interrupt registration alive for the lifetime of the
+/// kernel; dropping the [`Irq`] guard would release the handler.
+static INPUT_IRQ: SpinNoIrq<Option<Irq>> = SpinNoIrq::new(None);
 
 fn selected_config() -> Option<ConsoleConfig> {
     CONSOLE.get().map(|state| state.config)
@@ -208,12 +218,16 @@ pub fn getchar() -> Option<u8> {
     backend::getchar()
 }
 
-fn handle_input_irq() {
+fn handle_input_irq() -> IrqReturn {
     backend::ack_interrupt();
+    IrqReturn::Handled
 }
 
 pub fn register_input_irq_handler() {
     let Some(desc) = selected_irq_desc() else {
+        return;
+    };
+    let Some(virq) = desc.logical_irq() else {
         return;
     };
     if INPUT_IRQ_REGISTERED.load(Ordering::Acquire) {
@@ -225,8 +239,18 @@ pub fn register_input_irq_handler() {
     {
         return;
     }
-    if !khal::irq::register(desc, handle_input_irq) {
-        INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
-        panic!("failed to register console input IRQ handler: {desc:?}");
+    // The descriptor was already resolved into `khal` via `map`, so the host
+    // provider can register by logical IRQ number; trigger/polarity metadata is
+    // applied from the stored descriptor.
+    let resource = IrqResource {
+        number: virq,
+        trigger: IrqTriggerMode::Unspecified,
+    };
+    match Irq::request(resource, Arc::new(handle_input_irq)) {
+        Ok(guard) => *INPUT_IRQ.lock() = Some(guard),
+        Err(err) => {
+            INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
+            panic!("failed to register console input IRQ handler: {desc:?} ({err:?})");
+        }
     }
 }

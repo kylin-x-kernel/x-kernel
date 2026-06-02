@@ -5,8 +5,8 @@
 //! VirtIO input driver adapter.
 use alloc::string::String;
 
-use driver_base::{DeviceKind, DriverError, DriverOps, DriverResult};
-use input::{Event, EventType, InputDeviceId, InputDriverOps};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use input::{Event, EventType, InputDevice, InputDeviceId};
 use virtio_drivers::{
     Hal,
     device::input::{InputConfigSelect, VirtIOInput as InnerDev},
@@ -18,7 +18,7 @@ use crate::as_driver_error;
 /// The VirtIO Input device driver.
 ///
 /// Wraps [`VirtIOInput`] from `virtio-drivers` and implements the
-/// [`InputDriverOps`] trait, providing event reading and capability query
+/// [`InputDevice`] trait, providing event reading and capability query
 /// for virtual input devices (keyboard, mouse, etc.).
 ///
 /// # Type Parameters
@@ -78,7 +78,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> DriverOps for VirtIoInputDev<H, T> {
+impl<H: Hal, T: Transport> Device for VirtIoInputDev<H, T> {
     fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -88,7 +88,7 @@ impl<H: Hal, T: Transport> DriverOps for VirtIoInputDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> InputDriverOps for VirtIoInputDev<H, T> {
+impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
     fn device_id(&self) -> InputDeviceId {
         self.device_id
     }

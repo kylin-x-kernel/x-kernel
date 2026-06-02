@@ -1,0 +1,34 @@
+[package]
+name = "kclass"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Typed runtime device class layer for x-kernel"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+driver_base.workspace = true
+kdevice.workspace = true
+kspin.workspace = true
+lazyinit.workspace = true
+log.workspace = true
+block = { workspace = true, optional = true }
+char_driver = { workspace = true, optional = true }
+display = { workspace = true, optional = true }
+input = { workspace = true, optional = true }
+net = { workspace = true, optional = true }
+virtio = { workspace = true, optional = true }
+vsock = { workspace = true, optional = true }
+
+[features]
+default = []
+block = ["dep:block"]
+char = ["dep:char_driver"]
+display = ["dep:display"]
+input = ["dep:input"]
+net = ["dep:net"]
+vsock = ["dep:vsock"]
+virtio-9p = ["dep:virtio"]
