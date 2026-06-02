@@ -155,6 +155,9 @@ impl Connection {
 
     #[inline]
     pub fn advance_rx_read(&mut self, count: usize) {
+        // SAFETY: Callers compute `count` from bytes copied out of `rx_slices`
+        // while holding the connection lock, so the advance stays within the
+        // currently occupied receive buffer.
         unsafe {
             self.rx_consumer.advance_read_index(count);
         }

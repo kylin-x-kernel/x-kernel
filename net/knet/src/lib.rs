@@ -31,7 +31,7 @@ pub mod raw;
 mod router;
 mod service;
 mod socket;
-pub mod socket_file;
+mod socket_file;
 pub(crate) mod state;
 pub mod tcp;
 pub mod udp;

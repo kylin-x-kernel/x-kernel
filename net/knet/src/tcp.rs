@@ -54,6 +54,9 @@ pub struct TcpSocket {
     poll_rx_closed: Arc<PollSet>,
 }
 
+// SAFETY: Shared mutable TCP state is protected by `StateLock`, `Mutex`,
+// `RwLock`, and atomics. Access to the smoltcp socket is serialized through
+// `SOCKET_SET`, and immutable endpoint fields are fixed after construction.
 unsafe impl Sync for TcpSocket {}
 
 impl TcpSocket {
@@ -425,7 +428,6 @@ impl SocketOps for TcpSocket {
     }
 
     fn send(&self, mut src: impl Read, _options: SendOptions) -> KResult<usize> {
-        // SAFETY: `self.dispatch_irq` should be initialized in a connected socket.
         self.general.send_poller(self, || {
             poll_interfaces();
             self.with_smol_socket(|socket| {

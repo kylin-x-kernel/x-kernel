@@ -129,7 +129,7 @@ impl From<NeighRequest> for NeighState {
     }
 }
 
-pub fn init_route_state(state: RtnetlinkState) {
+pub(crate) fn init_route_state(state: RtnetlinkState) {
     ROUTE_STATE.init_once(RwLock::new(state));
 }
 
@@ -679,7 +679,7 @@ where
     Ok(())
 }
 
-pub fn build_initial_state(
+pub(crate) fn build_initial_state(
     lo_ip: IpCidr,
     eth0_ip: Option<IpCidr>,
     eth0_mac: Option<[u8; 6]>,

@@ -248,10 +248,19 @@ impl UnixTransportOps for StreamTransport {
 
             let count = {
                 let (left, right) = chan.tx.vacant_slices_mut();
+                // SAFETY: The slices returned by `vacant_slices_mut` describe
+                // writable ring-buffer capacity. `Read::read` initializes only
+                // bytes it reports as written, and those bytes are published by
+                // `advance_write_index` below while the channel lock is held.
                 let mut count = src.read(unsafe { left.assume_init_mut() })?;
                 if count >= left.len() {
+                    // SAFETY: Same invariant as for `left`; this slice is the
+                    // second contiguous writable region of the same producer.
                     count += src.read(unsafe { right.assume_init_mut() })?;
                 }
+                // SAFETY: `count` is the sum of bytes written into the vacant
+                // slices above, so it never exceeds the producer capacity that
+                // was exposed for this locked operation.
                 unsafe { chan.tx.advance_write_index(count) };
                 count
             };
@@ -281,6 +290,9 @@ impl UnixTransportOps for StreamTransport {
                 if count >= left.len() {
                     count += dst.write(right)?;
                 }
+                // SAFETY: `count` is the sum of bytes copied out of the
+                // occupied slices returned by `as_slices`, so advancing by this
+                // amount stays within the consumer's readable region.
                 unsafe { chan.rx.advance_read_index(count) };
                 count
             };

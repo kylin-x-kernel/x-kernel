@@ -30,7 +30,7 @@ mod socket;
 mod tests;
 mod wire;
 
-pub use route::{build_initial_state, init_route_state};
+pub(crate) use route::{build_initial_state, init_route_state};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) const RT_TABLE_MAIN: u8 = wire::route::TABLE_MAIN;
 pub(crate) const RTN_UNICAST: u8 = wire::route::TYPE_UNICAST;
@@ -76,56 +76,57 @@ pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
 
 #[derive(Clone, Debug)]
-pub struct LinkState {
-    pub index: i32,
-    pub name: String,
-    pub flags: u32,
-    pub mtu: u32,
-    pub operstate: u8,
-    pub link_type: u16,
-    pub mac: [u8; 6],
-    pub broadcast: [u8; 6],
+pub(crate) struct LinkState {
+    pub(crate) index: i32,
+    pub(crate) name: String,
+    pub(crate) flags: u32,
+    pub(crate) mtu: u32,
+    pub(crate) operstate: u8,
+    pub(crate) link_type: u16,
+    pub(crate) mac: [u8; 6],
+    pub(crate) broadcast: [u8; 6],
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct AddrState {
-    pub index: u32,
-    pub family: u8,
-    pub prefix_len: u8,
-    pub scope: u8,
-    pub address: IpAddress,
+pub(crate) struct AddrState {
+    pub(crate) index: u32,
+    pub(crate) family: u8,
+    pub(crate) prefix_len: u8,
+    pub(crate) scope: u8,
+    pub(crate) address: IpAddress,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct RouteState {
-    pub family: u8,
-    pub dst_len: u8,
-    pub table: u8,
-    pub protocol: u8,
-    pub scope: u8,
-    pub route_type: u8,
-    pub oif: u32,
-    pub dst: Option<IpAddress>,
-    pub gateway: Option<IpAddress>,
-    pub prefsrc: Option<IpAddress>,
+pub(crate) struct RouteState {
+    pub(crate) family: u8,
+    pub(crate) dst_len: u8,
+    pub(crate) table: u8,
+    pub(crate) protocol: u8,
+    pub(crate) scope: u8,
+    pub(crate) route_type: u8,
+    pub(crate) oif: u32,
+    pub(crate) dst: Option<IpAddress>,
+    pub(crate) gateway: Option<IpAddress>,
+    pub(crate) prefsrc: Option<IpAddress>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct NeighState {
-    pub family: u8,
-    pub ifindex: u32,
-    pub state: u16,
-    pub flags: u8,
-    pub dst: IpAddress,
-    pub lladdr: Option<[u8; 6]>,
+#[expect(dead_code)]
+pub(crate) struct NeighState {
+    pub(crate) family: u8,
+    pub(crate) ifindex: u32,
+    pub(crate) state: u16,
+    pub(crate) flags: u8,
+    pub(crate) dst: IpAddress,
+    pub(crate) lladdr: Option<[u8; 6]>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct RtnetlinkState {
-    pub links: Vec<LinkState>,
-    pub addrs: Vec<AddrState>,
-    pub routes: Vec<RouteState>,
-    pub neighs: Vec<NeighState>,
+pub(crate) struct RtnetlinkState {
+    pub(crate) links: Vec<LinkState>,
+    pub(crate) addrs: Vec<AddrState>,
+    pub(crate) routes: Vec<RouteState>,
+    pub(crate) neighs: Vec<NeighState>,
 }
 
 pub(super) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
