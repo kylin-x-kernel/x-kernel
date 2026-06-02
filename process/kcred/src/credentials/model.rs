@@ -318,7 +318,7 @@ impl Credentials {
 
     /// Sets real, effective, and saved user IDs. Filesystem UID tracks the
     /// final EUID for set-ID transitions, matching Linux `setresuid`.
-    pub fn set_resuid_unchecked(
+    pub(crate) fn set_resuid_unchecked(
         &mut self,
         ruid: Option<Uid>,
         euid: Option<Uid>,
@@ -338,7 +338,7 @@ impl Credentials {
 
     /// Sets real, effective, and saved group IDs. Filesystem GID tracks the
     /// final EGID for set-ID transitions, matching Linux `setresgid`.
-    pub fn set_resgid_unchecked(
+    pub(crate) fn set_resgid_unchecked(
         &mut self,
         rgid: Option<Gid>,
         egid: Option<Gid>,
