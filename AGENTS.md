@@ -1,5 +1,16 @@
 # X-Kernel Agent Notes
 
+## Shared AI Skills
+
+Tool-neutral shared skills live under `docs/ai/skills/`.
+Any AI agent used in this repository should prefer those shared skills
+over tool-specific copies when both exist.
+
+Current shared skills:
+
+- `docs/ai/skills/build-workflow/SKILL.md`:
+  project configuration, build, run, clippy, and fmt workflow.
+
 ## Project Overview
 
 X-Kernel is a multi-architecture Rust OS/kernel project.
