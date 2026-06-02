@@ -95,7 +95,7 @@ pub fn init_scheduler() {
 }
 
 /// Initializes the task scheduler with cpu_num (for the primary CPU).
-pub fn init_scheduler_with_cpu_num(cpu_num: usize) {
+fn init_scheduler_with_cpu_num(cpu_num: usize) {
     info!("Initialize scheduling...");
     CPU_NUM.store(cpu_num, core::sync::atomic::Ordering::Relaxed);
 
