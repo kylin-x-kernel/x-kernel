@@ -102,6 +102,36 @@ core/kruntime
 | `unix` | 提供 Unix domain stream 与 datagram transport |
 | `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
 
+## 调用约束 / 执行上下文
+
+`knet` 运行在内核上下文中，
+但并非所有路径都适用于任意执行环境。
+调用者需要满足以下约束：
+
+- **依赖初始化顺序**：在创建 socket、访问路由状态、
+  或推进协议栈之前，必须先完成 `init_network`，
+  以初始化 `SERVICE`、`SOCKET_SET`、`LISTEN_TABLE`
+  和 netlink 初始状态。
+- **普通协议推进不应在硬中断上下文执行**：
+  `poll_interfaces`、socket send/recv/connect/accept、
+  netlink mutation 等路径会获取 `Mutex` / `RwLock`
+  并推进较重的数据路径，应在普通任务上下文中运行。
+- **IRQ 路径只做通知**：
+  设备中断回调应只负责唤醒等待者或登记事件，
+  不应直接执行完整的协议推进或阻塞式 socket 语义。
+- **允许阻塞的路径依赖 poll/waker 语义**：
+  阻塞式 socket 操作依赖 `PollSet`、waker
+  和 timeout 注册机制，调用者必须保证相应调度/等待环境可用。
+- **不要求固定当前进程线程才能访问全局状态**：
+  `SERVICE`、`SOCKET_SET` 和 `ROUTE_STATE`
+  的共享访问主要依赖全局锁和原子状态，
+  但 syscall 语义相关路径仍由 `posix/net`
+  负责提供进程文件描述符与凭据语境。
+- **可重入性受全局锁约束**：
+  允许多执行路径并发进入 crate，
+  但同一时刻对 `Service`、`SocketSet`
+  或 listener backlog 的关键访问会被串行化。
+
 ## 状态机
 
 ### TCP socket 状态

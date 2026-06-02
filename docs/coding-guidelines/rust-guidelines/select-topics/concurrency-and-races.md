@@ -48,6 +48,92 @@ self.device.write(&guard.pending_data)?;
 See also:
 PR [#925](https://github.com/asterinas/asterinas/pull/925).
 
+### Choose the lock type from the execution context (`lock-by-context`) {#lock-by-context}
+
+Pick the weakest lock
+that matches the real concurrency boundary.
+Do not default to IRQ-disabling spinlocks.
+
+- Use `ksync::Mutex` or other sleepable primitives
+  in ordinary task context
+  when the path may block, wait, sleep,
+  or call into poll/wake machinery.
+- Use `SpinNoPreempt`
+  for short non-blocking critical sections
+  in task context
+  when IRQ handlers do not touch the same state.
+- Use `SpinNoIrq`
+  only when local IRQ handlers
+  or other interrupt-context code
+  can race on the same state,
+  or when the API must be callable from IRQ context.
+- Use `SpinRaw`
+  only when the caller already guarantees
+  that IRQs and preemption are disabled,
+  and document that precondition explicitly.
+
+If there is no interrupt-context contender,
+do not use `SpinNoIrq`.
+The wider critical-section semantics
+make later blocking bugs much easier to introduce.
+
+```rust
+// Good — sleepable mutex in task context
+fn update_connection(&self) {
+    let mut conn = self.conn.lock(); // ksync::Mutex<_>
+    conn.apply_update();
+    conn.wait_queue.notify_all(true);
+}
+
+// Good — short non-blocking task-context spinlock
+fn push_local_stat(&self, delta: usize) {
+    let mut stats = self.stats.lock(); // SpinNoPreempt<_>
+    stats.rx_packets += 1;
+    stats.rx_bytes += delta;
+}
+
+// Bad — no IRQ competitor, but IRQ-disabling lock used anyway
+fn update_state(&self) {
+    let mut state = self.state.lock(); // SpinNoIrq<_>
+    state.advance();
+}
+```
+
+### Never acquire sleepable locks while holding a spinlock (`no-sleepable-lock-under-spinlock`) {#no-sleepable-lock-under-spinlock}
+
+Once a spinlock is held,
+the remaining path must stay non-blocking.
+Do not enter `ksync::Mutex`,
+`RwLock`, `Semaphore`, `WaitQueue`,
+`block_on`, `sleep`, or similar paths
+until the spinlock is dropped.
+
+This includes framework-provided wrapper locks.
+If a driver or runtime callback is entered
+under a spinlock,
+limit that lock scope
+to the actual register or queue access,
+then drop it before touching sleepable subsystem state.
+
+```rust
+// Good — extract device event under the spinlock, then drop it
+let event = self.device.with_mut(|dev| dev.poll_event())?;
+match event {
+    Some(event) => {
+        let mut conn = self.conn.lock(); // sleepable lock after spinlock scope
+        conn.handle(event);
+    }
+    None => {}
+}
+
+// Bad — sleepable mutex reached while still under framework spinlock
+self.device.with_mut(|dev| {
+    let mut conn = self.conn.lock();
+    conn.handle(dev.poll_event()?);
+    Ok::<_, Error>(())
+})?;
+```
+
 ### Do not use atomics casually (`careful-atomics`) {#careful-atomics}
 
 When multiple atomic fields

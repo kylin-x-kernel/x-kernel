@@ -130,7 +130,7 @@ VirtAddr::from(unsafe {
 
 | 章节 | 说明 |
 |------|------|
-| 基线 | 以本仓库 `docs/templates/module-docs-guide.md` 及 `AGENTS.md` 为准 |
+| 基线 | 以本仓库 `docs/ai/skills/module-docs/SKILL.md` 及 `AGENTS.md` 为准 |
 | 冗余设计 | 无 |
 | 过载控制 | 无（见 `ktask` / `kalloc`） |
 | 人因差错 | 无直接用户交互 |

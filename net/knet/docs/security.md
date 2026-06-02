@@ -32,6 +32,36 @@ driver layer / smoltcp / ringbuf
 - `knet` 信任 smoltcp checked parser 拒绝格式错误的 IP、TCP、UDP、ARP 和 Ethernet 数据。
 - unsafe 边界由 crate 内部封装，外部调用者没有直接调用 unsafe API 的入口。
 
+## 外部边界 / 攻击面
+
+`knet` 是面向外部输入最丰富的 crate 之一，
+攻击面不仅来自 Rust `unsafe`，
+还来自网络包、控制面消息、设备缓冲区和上层 syscall glue。
+
+经检查，本模块直接或间接接触以下边界：
+
+- **网络输入**：Ethernet、ARP、IPv4、TCP、UDP、raw IP 包；
+- **设备输入**：driver 提供的 `NetBufHandle`、IRQ 唤醒、RX/TX 缓冲区生命周期；
+- **控制面输入**：netlink header、attribute、route mutation、neighbor 更新；
+- **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件；
+- **上层 syscall 语义输入**：由 `posix/net` 传入的 socket 地址族、
+  socket option、阻塞语义和权限决策结果。
+
+本模块不直接解引用用户指针，
+而是信任 `posix/net` 先完成用户内存访问、长度校验和权限检查。
+本模块也不直接执行 DMA 编程，
+但会消费由 driver 层提供的网络缓冲区，
+因此仍需把 driver buffer 生命周期视为关键边界。
+
+因此威胁分析重点应覆盖：
+
+- 外部网络包是否能触发越界、panic、状态不一致或资源耗尽；
+- 控制面 mutation 是否会让 `ROUTE_STATE`
+  与 data-plane 同步失配；
+- driver buffer、socket handle、ring buffer
+  是否可能因生命周期管理错误破坏内存安全；
+- IRQ 路径与普通协议推进路径是否可能发生竞态或延迟放大。
+
 ## unsafe 代码清单
 
 ### 1. `TcpSocket` 的 `Sync` 实现

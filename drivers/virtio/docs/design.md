@@ -82,6 +82,32 @@ Feature flags 控制编译哪些设备适配器：
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
 | `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
 
+## 调用约束 / 执行上下文
+
+`virtio` 位于平台传输层与上层子系统之间，
+调用者需要满足以下执行约束：
+
+- **依赖平台已完成设备枚举与映射**：
+  `probe_mmio_device` 要求 MMIO 寄存器区已经映射且地址有效；
+  `probe_pci_device` 要求 PCI 配置空间、BAR 和 IRQ 路由可访问。
+- **初始化路径依赖早期启动环境**：
+  设备探测、feature 协商、virtqueue 分配和 IRQ 注册
+  通常发生在启动期或驱动注册期，
+  需要底层内存分配、DMA 支持和中断设施已经可用。
+- **普通设备操作不应在错误的中断语境中执行**：
+  块设备同步 I/O、9p 请求、GPU flush、
+  网络缓冲区回收等路径可能持有锁或等待设备完成，
+  不应假设适用于任意不可睡眠上下文。
+- **网络设备的 IRQ 与正常路径并发访问
+  依赖 `SpinNoIrq`**：
+  调用者不应绕过现有封装直接并发访问 `InnerDev`。
+- **设备对象的共享安全依赖 trait 约束和内部封装**：
+  非 net 设备主要通过 `&mut self` 独占访问；
+  net 设备依赖内部锁和 token-buffer 对应关系维持正确性。
+- **上层必须尊重 handle 生命周期**：
+  例如 net 设备返回的 TX/RX handle
+  必须按约定回收，不能重复消费或跨设备混用。
+
 ## 状态机
 
 ### 设备生命周期

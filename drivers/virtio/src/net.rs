@@ -372,6 +372,9 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
                     .receive_complete(token, rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
             };
+            if hdr_len + pkt_len > rx_buf.capacity() {
+                return Err(DriverError::InvalidInput);
+            }
             rx_buf.set_hdr_len(hdr_len);
             rx_buf.set_payload_len(pkt_len);
 

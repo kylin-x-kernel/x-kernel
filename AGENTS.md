@@ -10,6 +10,11 @@ Current shared skills:
 
 - `docs/ai/skills/build-workflow/SKILL.md`:
   project configuration, build, run, clippy, and fmt workflow.
+- `docs/ai/skills/module-docs/SKILL.md`:
+  module documentation generation workflow for `design.md`,
+  `security.md`, and required rustdoc coverage.
+- `docs/ai/skills/code-guidelines/SKILL.md`:
+  coding and code-review conventions for Rust kernel code.
 
 ## Project Overview
 
@@ -70,7 +75,7 @@ The current checked-in toolchain is described by `rust-toolchain.toml`.
 
 ## Coding Guidelines
 
-Read `.claude/skills/asterinas-coding-guidelines/SKILL.md` before writing or
+Read `docs/ai/skills/code-guidelines/SKILL.md` before writing or
 reviewing Rust kernel code.
 
 Key local rules:
@@ -83,3 +88,33 @@ Key local rules:
 - Use `?` for ordinary error propagation.
 - Avoid casual atomics and linear scans on hot paths.
 - Use workspace dependencies and existing local helper APIs where available.
+
+## Change Completeness
+
+When making a module change, do not stop at code edits alone.
+Agents should treat a change as complete only after checking the
+surrounding review, documentation, and validation obligations.
+
+Default workflow:
+
+1. Implement the code change.
+2. Review the patch against
+   `docs/ai/skills/code-guidelines/SKILL.md`.
+3. Check whether the change requires documentation updates:
+   - crate-local `docs/design.md`
+   - crate-local `docs/security.md`
+   - rustdoc on touched public APIs
+   - shared skills or top-level docs if workflow or policy changed
+4. Update the required documentation before final validation.
+5. Run the relevant build, lint, and test commands from
+   `docs/ai/skills/build-workflow/SKILL.md`.
+
+Documentation sync is usually required when a change affects:
+
+- public API behavior or contracts;
+- module architecture, file layout, or major type roles;
+- execution-context assumptions;
+- state machines, lifecycle, or cleanup behavior;
+- `unsafe` boundaries or invariants;
+- external inputs, trust boundaries, threat model, or failure handling;
+- project workflow, commands, or agent-facing guidance.

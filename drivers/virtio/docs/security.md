@@ -29,6 +29,39 @@
 - **unsafe API 调用者**：`probe_mmio_device` 的调用者需确保传入有效的 MMIO 地址；
   `probe_pci_device` 的调用者需确保 PCI 配置空间可访问。
 
+## 外部边界 / 攻击面
+
+`virtio` 是典型的硬件/虚拟硬件边界模块。
+它直接连接 VMM 暴露的 VirtIO 设备、
+平台传输层和上层驱动框架，
+因此攻击面不能只看 Rust `unsafe`。
+
+经检查，本模块直接接触以下边界：
+
+- **MMIO / PCI 配置空间**：
+  设备 header、BAR、capability、IRQ 路由；
+- **DMA / 共享内存缓冲区**：
+  virtqueue 描述符、网络收发 buffer、块设备 I/O buffer、
+  GPU framebuffer、9p 请求响应缓冲区；
+- **设备返回的数据与状态**：
+  VirtIO 队列完成状态、pkt 长度、mount tag、输入事件、vsock 事件；
+- **VMM / 虚拟设备行为**：
+  恶意或错误实现的设备可能返回畸形长度、错误 token、
+  不符合协议的响应或不触发预期中断。
+
+本模块通常不直接处理用户指针，
+但会承接来自上层子系统的 buffer、request 和 handle，
+因此上层和设备之间的边界必须同时纳入威胁分析。
+
+因此威胁分析重点应覆盖：
+
+- 设备寄存器地址或传输对象是否有效；
+- DMA / virtqueue / token 与缓冲区是否始终一一对应；
+- 设备返回的长度、状态和响应内容
+  是否可能突破本模块边界假设；
+- IRQ 路径、回收路径和正常 I/O 路径
+  是否可能破坏并发或生命周期不变量。
+
 ## unsafe 代码清单
 
 ### 1. `probe_mmio_device`（`lib.rs:102`）
@@ -206,7 +239,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | T-06 | IRQ 注册失败后仍使用设备 | 中 | `register_virtio_net_irq` 返回 `ResourceBusy` | `try_new()` 传播错误，设备不会被创建 |
 | T-07 | 网络设备 `free_tx_bufs` 耗尽导致发送失败 | 低 | 所有 tx 缓冲区都在飞行中 | `alloc_tx_buf` 返回 `DriverError::NoMemory`，上层应等待 `recycle_tx` 后重试 |
 | T-08 | `probe_mmio_device` 传入空指针 | 高 | `reg_base` 为 null | `NonNull::new(...).unwrap()` 会 panic；调用者应确保地址非空 |
-| T-09 | 恶意 VMM 通过 VirtIO 设备返回超长 `pkt_len` | 高 | `receive_complete` 返回的 `pkt_len` 超过缓冲区容量 | `NetBuf::set_payload_len` 内部应检查边界；需确认 `virtio-drivers` 是否已做校验 |
+| T-09 | 恶意 VMM 通过 VirtIO 设备返回超长 `pkt_len` | 高 | `receive_complete` 返回的 `pkt_len` 超过缓冲区容量 | `recv()` 在写回 `NetBuf` 元数据前显式检查 `hdr_len + pkt_len <= capacity`，超长长度直接返回 `DriverError::InvalidInput`；`NetBuf::set_payload_len` 的 `debug_assert` 作为开发期补充检查 |
 | T-10 | 恶意 VMM 返回伪造的 9p 响应 | 中 | `request()` 返回的数据不符合 9p 协议 | 上层 9p 文件系统应校验响应格式；本模块不解析内容 |
 | T-11 | 恶意 VMM 返回超长 `mount_tag` | 中 | `VirtIO9p::mount_tag()` 返回超长字符串 | `virtio-drivers` 内部从配置空间读取，长度由设备配置空间字段限制 |
 

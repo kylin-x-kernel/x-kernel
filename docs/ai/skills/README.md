@@ -25,3 +25,9 @@ Current skills:
 
 - `build-workflow/`:
   baseline project configuration, build, run, clippy, and formatting flow.
+- `module-docs/`:
+  module documentation generation flow for per-crate design,
+  security, and rustdoc content.
+- `code-guidelines/`:
+  executable coding and code-review conventions for Rust kernel code,
+  backed by `docs/coding-guidelines/`.

@@ -30,9 +30,30 @@
 - **unsafe API 调用者**（`get_unchecked`、`get_mut_unchecked`、
   `into_inner_unchecked`、`as_mut_ptr`）需自行证明初始化已完成。
 
+## 外部边界 / 攻击面
+
+`klazy` 本身不是 I/O、设备或用户态边界模块，
+其主要攻击面来自调用者传入的初始化闭包和 unsafe API 的误用。
+
+经检查，本模块：
+
+- **不直接访问用户内存**；
+- **不直接操作 MMIO / PIO 寄存器**；
+- **不直接管理 DMA 缓冲区或设备所有权内存**；
+- **不依赖 FFI、内联汇编或架构专有裸接口**；
+- **不直接解析 bootloader、firmware、device tree 或 ACPI 输入**；
+- **不直接处理文件系统、网络或 IPC 外部输入**。
+
+因此本模块的威胁分析重点在于：
+
+- 调用者是否满足初始化时序和 unsafe 前提；
+- 初始化闭包 panic 或长时间执行带来的可用性问题；
+- 并发调用者在自旋等待期间的 CPU 消耗；
+- 调用者是否通过 unsafe API 绕过状态检查。
+
 ## unsafe 代码清单
 
-### 1. `AtomicStatus::new_unchecked`（`once.rs:89`）
+### 1. `AtomicStatus::new_unchecked`（`util/klazy/src/once.rs:105`）
 
 ```rust
 unsafe fn new_unchecked(inner: u8) -> Self {
@@ -46,7 +67,7 @@ unsafe fn new_unchecked(inner: u8) -> Self {
 两者获取的 `u8` 均源自原子操作，而原子中存储的值最初都是合法的
 `Status` 变体。`AtomicStatus` 封装阻止了任意 `u8` 值被写入。
 
-### 2. `Once::get_value_unchecked`（`once.rs:388`）
+### 2. `Once::get_value_unchecked`（`util/klazy/src/once.rs:419`）
 
 ```rust
 unsafe fn get_value_unchecked(&self) -> &T {
@@ -62,7 +83,7 @@ unsafe fn get_value_unchecked(&self) -> &T {
 - `try_call_once_slow` — 在 `Release` store `Ready` 之后调用。
 - `get_unchecked()` — 调用者负责（debug 构建中有 `debug_assert`）。
 
-### 3. `Once::try_call_once_slow` value write（`once.rs:287`）
+### 3. `Once::try_call_once_slow` value write（`util/klazy/src/once.rs:306`）
 
 ```rust
 let storage_ptr = (*self.storage.get()).as_mut_ptr();
@@ -72,7 +93,7 @@ storage_ptr.write(initialized_value);
 **不变量**：调用者持有独占 write 权限（CAS 成功转为 `Initializing`），
 此时无并发 reader 能观察到 `Ready` 状态。
 
-### 4. `Once::as_mut_ptr`（`once.rs:382`）
+### 4. `Once::as_mut_ptr`（`util/klazy/src/once.rs:413`）
 
 ```rust
 pub fn as_mut_ptr(&self) -> *mut T
@@ -81,7 +102,65 @@ pub fn as_mut_ptr(&self) -> *mut T
 **不变量**：初始化前 read 此指针是 UB。write 可用于 FFI 互操作，
 调用者承担全部责任。
 
-### 5. `Once::Drop`（`once.rs:517`）
+### 5. `Once::get_mut_unchecked`（`util/klazy/src/once.rs:496`）
+
+```rust
+pub unsafe fn get_mut_unchecked(&mut self) -> &mut T
+```
+
+**不变量**：调用前值必须已经初始化完成。
+
+**为何安全**：该 API 要求独占 `&mut self`，
+因此不会与其他 reader / writer 并发访问同一 storage。
+但独占借用本身不代表值已经初始化，
+这一点仍由调用者负责证明。
+
+### 6. `Once::into_inner_unchecked`（`util/klazy/src/once.rs:527`）
+
+```rust
+pub unsafe fn into_inner_unchecked(self) -> T
+```
+
+**不变量**：消费 `self` 时，内部值必须已经初始化完成。
+
+**为何安全**：`self` 被按值消费后，不会再有其他并发访问路径；
+唯一剩余前提是 `MaybeUninit<T>` 中确实已经写入了有效 `T`。
+
+### 7. `unsafe impl Sync/Send for Once<T>`（`util/klazy/src/once.rs:76`）
+
+```rust
+unsafe impl<T: Send + Sync> Sync for Once<T> {}
+unsafe impl<T: Send> Send for Once<T> {}
+```
+
+**不变量**：
+
+- `Once<T>` 共享访问时，未初始化 storage 的写入必须与已初始化值的读取正确同步。
+- 只有赢得 CAS 的执行路径能写入内部 `MaybeUninit<T>`。
+- 所有从 `&Once<T>` 派生的共享读取都必须在 `Status::Ready` 的 `Acquire`/`Release`
+  配对之后发生。
+
+**为何安全**：`Once<T>` 的并发语义由内部原子状态机和内存序约束保护。
+`T: Send + Sync` 保证已初始化值可被跨线程共享；
+`T: Send` 保证 `Once<T>` 可在线程之间移动而不破坏内部值的所有权语义。
+
+### 8. `unsafe impl Sync for Lazy<T, F>`（`util/klazy/src/lazy.rs:91`）
+
+```rust
+unsafe impl<T, F: Send> Sync for Lazy<T, F> where Once<T>: Sync {}
+```
+
+**不变量**：
+
+- `factory: Cell<Option<F>>` 虽然不是 `Sync`，但只能在 `force()` 的一次性初始化路径中被消费一次。
+- 不得从 `&Lazy<T, F>` 派生出可并发访问的 `&F`。
+- `Lazy` 的共享访问安全性完全依赖底层 `Once<T>` 的同步和 `Cell::take()` 只发生一次。
+
+**为何安全**：`force()` 通过 `Once::call_once()` 保证只有一个执行路径能拿到并消费
+`factory`；其余路径只会在初始化完成后读取 `&T`。因此 `F` 只需 `Send`，
+不需要 `Sync`。
+
+### 9. `Once::Drop`（`util/klazy/src/once.rs:559`）
 
 ```rust
 core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
@@ -182,6 +261,7 @@ core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
 修改 `klazy` 时需验证：
 
 - [ ] 每个 `unsafe` 块均有 `SAFETY:` 注释说明不变量。
+- [ ] 每条重要 unsafe 路径都能回溯到具体函数和文件位置。
 - [ ] 新增的 `u8 → Status` 转换不绕过 `AtomicStatus`。
 - [ ] `try_call_once_slow` 中的状态转换符合 `design.md` 中的状态机图。
 - [ ] 新增原子操作的内存序不低于 `design.md` 中表格的要求。
