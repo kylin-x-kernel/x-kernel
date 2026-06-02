@@ -57,17 +57,17 @@ impl FdTable {
     }
 
     /// Returns a mutable descriptor entry at the given index.
-    pub fn get_mut(&mut self, fd: usize) -> Option<&mut FileDescriptor> {
+    pub(crate) fn get_mut(&mut self, fd: usize) -> Option<&mut FileDescriptor> {
         self.entries.get_mut(fd)
     }
 
     /// Inserts a descriptor entry at the first available slot.
-    pub fn add(&mut self, descriptor: FileDescriptor) -> Result<usize, FileDescriptor> {
+    pub(crate) fn add(&mut self, descriptor: FileDescriptor) -> Result<usize, FileDescriptor> {
         self.entries.add(descriptor)
     }
 
     /// Inserts a descriptor entry at a fixed slot.
-    pub fn add_at(
+    pub(crate) fn add_at(
         &mut self,
         fd: usize,
         descriptor: FileDescriptor,
@@ -76,12 +76,12 @@ impl FdTable {
     }
 
     /// Removes the descriptor entry at the given index.
-    pub fn remove(&mut self, fd: usize) -> Option<FileDescriptor> {
+    pub(crate) fn remove(&mut self, fd: usize) -> Option<FileDescriptor> {
         self.entries.remove(fd)
     }
 
     /// Clones the table contents from another descriptor table.
-    pub fn clone_from(&mut self, other: &Self) {
+    pub(crate) fn clone_from(&mut self, other: &Self) {
         self.entries.clone_from(&other.entries);
     }
 

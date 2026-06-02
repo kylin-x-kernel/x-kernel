@@ -17,7 +17,7 @@ pub struct FileDescriptor {
 
 impl FileDescriptor {
     /// Creates a new descriptor entry.
-    pub fn new(inner: Arc<dyn FileLike>, cloexec: bool) -> Self {
+    pub(crate) fn new(inner: Arc<dyn FileLike>, cloexec: bool) -> Self {
         Self { inner, cloexec }
     }
 
@@ -27,12 +27,12 @@ impl FileDescriptor {
     }
 
     /// Returns whether this descriptor is marked close-on-exec.
-    pub fn cloexec(&self) -> bool {
+    pub(crate) fn cloexec(&self) -> bool {
         self.cloexec
     }
 
     /// Updates the close-on-exec bit for this descriptor.
-    pub fn set_cloexec(&mut self, cloexec: bool) {
+    pub(crate) fn set_cloexec(&mut self, cloexec: bool) {
         self.cloexec = cloexec;
     }
 }

@@ -14,18 +14,31 @@ use linux_raw_sys::general::{
 /// Kernel stat structure containing file metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct Kstat {
+    /// Device identifier containing this inode.
     pub dev: u64,
+    /// Inode number.
     pub ino: u64,
+    /// Link count.
     pub nlink: u32,
+    /// File type and permission bits.
     pub mode: u32,
+    /// Owner user ID.
     pub uid: u32,
+    /// Owner group ID.
     pub gid: u32,
+    /// File size in bytes.
     pub size: u64,
+    /// Preferred block size for I/O.
     pub blksize: u32,
+    /// Number of allocated blocks.
     pub blocks: u64,
+    /// Device ID represented by this inode, for special files.
     pub rdev: DeviceId,
+    /// Last access time.
     pub atime: Duration,
+    /// Last modification time.
     pub mtime: Duration,
+    /// Last metadata change time.
     pub ctime: Duration,
 }
 
