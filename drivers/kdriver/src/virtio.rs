@@ -142,7 +142,10 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                 return None;
             }
         };
-        if let Some((ty, transport)) = virtio::probe_mmio_device(base_vaddr.as_ptr(), mmio_size)
+        // SAFETY: `base_vaddr` was obtained from `iomap_mmio` which maps a valid
+        // physical MMIO region, and `mmio_size` matches the region size.
+        if let Some((ty, transport)) =
+            unsafe { virtio::probe_mmio_device(base_vaddr.as_ptr(), mmio_size) }
             && ty == D::DEVICE_TYPE
         {
             match D::try_new(transport, None) {

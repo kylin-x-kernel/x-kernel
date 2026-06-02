@@ -36,16 +36,42 @@ impl ConnectionArgs {
 }
 
 /// The VirtIO socket device driver.
+///
+/// Wraps [`VsockConnectionManager`] from `virtio-drivers` and implements the
+/// [`VsockDriverOps`] trait, providing connection-oriented socket communication
+/// between the guest and host via the VirtIO vsock transport.
+///
+/// # Type Parameters
+///
+/// - `H` - VirtIO HAL implementation for DMA allocation.
+/// - `T` - Transport layer (MMIO or PCI).
+///
+/// # Example
+///
+/// ```ignore
+/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let mut vsock = VirtIoSocketDev::<HalImpl, _>::try_new(transport)?;
+/// vsock.listen(1234);
+/// let event = vsock.poll_event()?;
+/// ```
 pub struct VirtIoSocketDev<H: Hal, T: Transport> {
     inner: InnerDev<H, T>,
 }
 
+// SAFETY: VirtIoSocketDev accesses the device exclusively through &mut self.
+// The inner VsockConnectionManager is not auto Send/Sync due to PhantomData,
+// but it is safe to transfer across threads and share immutable references.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoSocketDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoSocketDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError`] if the VirtIO socket device fails to initialize
+    /// (e.g. feature negotiation failure, queue allocation failure).
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let virtio_socket = Self::open_socket(transport)?;
         Ok(Self {

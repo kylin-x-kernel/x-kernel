@@ -9,16 +9,41 @@ use virtio_drivers::{Hal, device::virtio_9p::VirtIO9p as InnerDev, transport::Tr
 use crate::as_driver_error;
 
 /// The VirtIO 9p device driver.
+///
+/// Wraps [`VirtIO9p`] from `virtio-drivers`, providing a simple request/response
+/// interface for 9p filesystem protocol communication between guest and host.
+///
+/// # Type Parameters
+///
+/// - `H` - VirtIO HAL implementation for DMA allocation.
+/// - `T` - Transport layer (MMIO or PCI).
+///
+/// # Example
+///
+/// ```ignore
+/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let mut dev = VirtIo9pDev::<HalImpl, _>::try_new(transport)?;
+/// let tag = dev.mount_tag();
+/// let mut resp = [0u8; 256];
+/// let n = dev.request(&req_buf, &mut resp)?;
+/// ```
 pub struct VirtIo9pDev<H: Hal, T: Transport> {
     inner: InnerDev<H, T>,
 }
 
+// SAFETY: VirtIo9pDev accesses the device exclusively through &mut self.
+// The inner VirtIO9p is not auto Send/Sync due to PhantomData, but it is
+// safe to transfer across threads and share immutable references.
 unsafe impl<H: Hal, T: Transport> Send for VirtIo9pDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIo9pDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError`] if the VirtIO 9p device fails to initialize.
     pub fn try_new(transport: T) -> DriverResult<Self> {
         Ok(Self {
             inner: InnerDev::new(transport).map_err(as_driver_error)?,
@@ -31,6 +56,20 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     }
 
     /// Sends a raw 9p request and waits for the response.
+    ///
+    /// # Arguments
+    ///
+    /// - `req` - The raw 9p request bytes to send.
+    /// - `resp` - Buffer to receive the response bytes.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes written into `resp`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError`] if the request fails (device error, buffer too
+    /// small, etc.).
     pub fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
         self.inner
             .request(req, resp)

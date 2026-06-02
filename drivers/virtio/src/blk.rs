@@ -14,17 +14,43 @@ use virtio_drivers::{
 use crate::as_driver_error;
 
 /// The VirtIO block device driver.
+///
+/// Wraps [`VirtIOBlk`] from `virtio-drivers` and implements the
+/// [`BlockDriverOps`] trait, providing sector-level read/write access to a
+/// virtual block device.
+///
+/// # Type Parameters
+///
+/// - `H` - VirtIO HAL implementation for DMA allocation.
+/// - `T` - Transport layer (MMIO or PCI).
+///
+/// # Example
+///
+/// ```ignore
+/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let mut blk = VirtIoBlkDev::<HalImpl, _>::try_new(transport)?;
+/// let mut buf = [0u8; 512];
+/// blk.read_block(0, &mut buf)?;
+/// ```
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     device: InnerDev<H, T>,
     sector_size: usize,
 }
 
+// SAFETY: VirtIoBlkDev accesses the device exclusively through &mut self.
+// The inner VirtIOBlk is not auto Send/Sync due to PhantomData, but it is
+// safe to transfer across threads and share immutable references.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError`] if the device fails to initialize (e.g. feature
+    /// negotiation failure, queue allocation failure, DMA error).
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let device = Self::init_device(transport)?;
         Ok(Self {

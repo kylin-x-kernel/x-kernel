@@ -51,25 +51,43 @@ pub mod mock_virtio;
 #[cfg(feature = "socket")]
 mod socket;
 use driver_base::{DeviceKind, DriverError};
-use virtio_drivers::transport::DeviceType as VirtIoDevType;
+use virtio_drivers::transport::{
+    DeviceType as VirtIoDevType,
+    pci::bus::{ConfigurationAccess, DeviceFunction, DeviceFunctionInfo, PciRoot},
+};
 pub use virtio_drivers::{
     BufferDirection, Hal as VirtIoHal, PhysAddr,
-    transport::{
-        Transport,
-        mmio::MmioTransport,
-        pci::{PciTransport, bus as virtio_pci_bus},
-    },
+    transport::{Transport, mmio::MmioTransport, pci::PciTransport},
 };
 
 #[cfg(feature = "socket")]
 pub use self::socket::VirtIoSocketDev;
-use self::virtio_pci_bus::{ConfigurationAccess, DeviceFunction, DeviceFunctionInfo, PciRoot};
 
 /// Try to probe a VirtIO MMIO device from the given memory region.
 ///
 /// If the device is recognized, returns the device type and a transport object
 /// for later operations. Otherwise, returns [`None`].
-pub fn probe_mmio_device(
+///
+/// # Arguments
+///
+/// - `reg_base` - Pointer to the MMIO register base of the device.
+/// - `reg_size` - Size of the MMIO register region in bytes.
+///
+/// # Returns
+///
+/// `Some((DeviceKind, MmioTransport))` if the device is a recognized VirtIO
+/// device, or `None` if the region does not contain a valid VirtIO header.
+///
+/// # Safety
+///
+/// The caller must ensure `reg_base` points to a valid VirtIO MMIO register
+/// region of at least `reg_size` bytes, and that the memory remains valid
+/// for the lifetime of the returned `MmioTransport`.
+///
+/// # Panics
+///
+/// Panics if `reg_base` is null.
+pub unsafe fn probe_mmio_device(
     reg_base: *mut u8,
     reg_size: usize,
 ) -> Option<(DeviceKind, MmioTransport<'static>)> {
@@ -78,6 +96,9 @@ pub fn probe_mmio_device(
     use virtio_drivers::transport::mmio::VirtIOHeader;
 
     let header = NonNull::new(reg_base as *mut VirtIOHeader).unwrap();
+    // SAFETY: The caller guarantees `reg_base` points to a valid MMIO region
+    // of at least `reg_size` bytes. `MmioTransport::new` only reads the
+    // header and validates the magic number and version.
     let transport = unsafe { MmioTransport::new(header, reg_size) }.ok()?;
     let dev_kind = as_device_kind(transport.device_type())?;
     Some((dev_kind, transport))
@@ -85,8 +106,30 @@ pub fn probe_mmio_device(
 
 /// Try to probe a VirtIO PCI device from the given PCI address.
 ///
-/// If the device is recognized, returns the device type and a transport object
-/// for later operations. Otherwise, returns [`None`].
+/// If the device is recognized, returns the device type, a transport object,
+/// and the IRQ number for later operations. Otherwise, returns [`None`].
+///
+/// # Arguments
+///
+/// - `root` - Mutable reference to the PCI root bridge.
+/// - `bdf` - Bus-Device-Function address of the PCI device.
+/// - `dev_info` - Pre-read device function info (vendor/device ID, class, etc.).
+/// - `config` - Mutable reference to PCI config space access helper.
+///
+/// # Returns
+///
+/// `Some((DeviceKind, PciTransport, irq))` on success, or `None` if the device
+/// is not a recognized VirtIO device or transport creation fails.
+///
+/// # Errors
+///
+/// Returns `None` (not `Err`) if any step fails; the caller should try the next
+/// device or fall back.
+///
+/// # Type Parameters
+///
+/// - `H` - VirtIO HAL implementation for DMA allocation.
+/// - `C` - PCI configuration access implementation.
 pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
     bdf: DeviceFunction,

@@ -15,7 +15,9 @@ use alloc::alloc::{Layout, alloc, dealloc};
 
 pub struct MockHal;
 
-// MockHal implementation for unit testing
+// SAFETY: MockHal is only used in unit tests. It uses the global allocator
+// for DMA, which is safe in std/test environments. Physical and virtual
+// addresses are identical in this mock (identity mapping).
 unsafe impl Hal for MockHal {
     fn dma_alloc(
         pages: usize,
@@ -23,11 +25,15 @@ unsafe impl Hal for MockHal {
         _access_platform: bool,
     ) -> (PhysAddr, NonNull<u8>) {
         let layout = Layout::from_size_align(pages * 4096, 4096).unwrap();
+        // SAFETY: Layout is guaranteed valid (power-of-2 alignment, non-zero size).
+        // The returned pointer is checked for null before use.
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
             panic!("MockHal: dma_alloc failed");
         }
-        unsafe { ptr.write_bytes(0, pages * 4096) }; // Zero memory
+        // SAFETY: ptr is non-null and points to `pages * 4096` bytes of
+        // allocated memory, so write_bytes is within bounds.
+        unsafe { ptr.write_bytes(0, pages * 4096) };
         (ptr as PhysAddr, NonNull::new(ptr).unwrap())
     }
 
@@ -38,11 +44,15 @@ unsafe impl Hal for MockHal {
         _access_platform: bool,
     ) -> i32 {
         let layout = Layout::from_size_align(pages * 4096, 4096).unwrap();
+        // SAFETY: paddr was returned by dma_alloc and points to memory
+        // allocated with the same layout.
         unsafe { dealloc(paddr as *mut u8, layout) };
         0
     }
 
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, _size: usize) -> NonNull<u8> {
+        // SAFETY: In the mock environment, physical and virtual addresses
+        // are identical (identity mapping). The caller ensures paddr is valid.
         NonNull::new(paddr as *mut u8).unwrap()
     }
 
@@ -51,6 +61,8 @@ unsafe impl Hal for MockHal {
         _direction: BufferDirection,
         _access_platform: bool,
     ) -> PhysAddr {
+        // SAFETY: In the mock, sharing is a no-op; the physical address
+        // equals the virtual address.
         buffer.as_ptr() as *mut u8 as PhysAddr
     }
 
@@ -153,6 +165,8 @@ impl Transport for MockTransport {
         }
 
         let mut value = core::mem::MaybeUninit::<T>::uninit();
+        // SAFETY: Bounds check above ensures `offset + size <= config.len()`.
+        // `T: FromBytes` guarantees any bit pattern is valid.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 config.as_ptr().add(offset),

@@ -16,16 +16,42 @@ use virtio_drivers::{
 use crate::as_driver_error;
 
 /// The VirtIO Input device driver.
+///
+/// Wraps [`VirtIOInput`] from `virtio-drivers` and implements the
+/// [`InputDriverOps`] trait, providing event reading and capability query
+/// for virtual input devices (keyboard, mouse, etc.).
+///
+/// # Type Parameters
+///
+/// - `H` - VirtIO HAL implementation for DMA allocation.
+/// - `T` - Transport layer (MMIO or PCI).
+///
+/// # Example
+///
+/// ```ignore
+/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let mut input = VirtIoInputDev::<HalImpl, _>::try_new(transport)?;
+/// let event = input.read_event()?;
+/// ```
 pub struct VirtIoInputDev<H: Hal, T: Transport> {
     inner: InnerDev<H, T>,
     device_id: InputDeviceId,
     name: String,
 }
 
+// SAFETY: VirtIoInputDev accesses the device exclusively through &mut self.
+// The inner VirtIOInput is not auto Send/Sync due to PhantomData, but it is
+// safe to transfer across threads and share immutable references.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoInputDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoInputDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
+    /// Creates a new driver instance, reads the device name and IDs, and
+    /// initializes the VirtIO input device.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError`] if device initialization or ID query fails.
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let mut device = InnerDev::new(transport).map_err(as_driver_error)?;
         let name = device.name().unwrap_or_else(|_| String::from("<unknown>"));
