@@ -205,7 +205,8 @@ impl Process {
     /// Child processes are inherited by the init process or by the nearest
     /// subreaper process.
     ///
-    /// This method panics if the [`Process`] is the init process.
+    /// If the [`Process`] is the init process, this method returns without
+    /// changing its state.
     pub fn exit(self: &Arc<Self>) {
         // TODO: child subreaper
         let reaper = INIT_PROC.get().unwrap();
@@ -292,8 +293,8 @@ impl Process {
 
     /// Creates a init [`Process`].
     ///
-    /// This function can be called multiple times, but
-    /// [`ProcessBuilder::build`] on the the result must be called only once.
+    /// The first process created without a parent becomes the global init
+    /// process returned by [`init_proc`].
     pub fn new_init(pid: Pid) -> Arc<Process> {
         Self::new(pid, None)
     }

@@ -3,10 +3,7 @@
 // See LICENSES for license details.
 
 //! Session management for process groups.
-use alloc::{
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::sync::{Arc, Weak};
 use core::{any::Any, fmt};
 
 use kspin::SpinNoIrq;
@@ -36,11 +33,6 @@ impl Session {
     /// The [`Session`] ID.
     pub fn sid(&self) -> Pid {
         self.sid
-    }
-
-    /// The [`ProcessGroup`]s that belong to this [`Session`].
-    pub fn process_groups(&self) -> Vec<Arc<ProcessGroup>> {
-        self.process_groups.lock().values().collect()
     }
 
     /// Sets the terminal for this session.
