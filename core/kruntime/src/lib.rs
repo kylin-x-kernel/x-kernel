@@ -2,15 +2,24 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Runtime orchestration for x-kernel: primary/secondary CPU bring-up, subsystem
+//! init ordering, and handoff to the application [`main`] symbol (provided by the
+//! `entry` crate).
+//!
+//! For architecture, boot flow, and security analysis, see `docs/design.md` and
+//! `docs/security.md` in the crate source directory.
+//!
 //! # Cargo Features
 //!
-//! - `paging`: Enable page table manipulation support.
-//! - `smp`: Enable SMP (symmetric multiprocessing) support.
-//! - `fs`: Enable filesystem support.
-//! - `net`: Enable networking support.
-//! - `display`: Enable graphics support.
+//! - `smp`: SMP bring-up (`rust_main_secondary`, `mp`)
+//! - `ipi`: Inter-processor interrupts (`kipi`)
+//! - `fs` / `fs9p` / `net` / `vsock` / `display` / `input`: driver and subsystem init
+//! - `rtc`: Wall-clock banner at boot
+//! - `watchdog` / `watchdog_hardlockup`: Watchdog on primary/secondary CPUs
+//! - `pmu`: PMU overflow IRQ handler
+//! - `crosvm`: Crosvm-oriented feature bundle
 //!
-//! All the features are optional and disabled by default.
+//! All features are optional and disabled by default.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -59,6 +68,7 @@ const LOGO: &str = r#"
  %%%%%%                %%%%%%+=
 "#;
 
+// SAFETY: The `main` symbol is guaranteed to be valid by the linker.
 unsafe extern "C" {
     /// Application's entry point.
     fn main();
@@ -205,6 +215,7 @@ pub fn rust_main(arg: usize) -> ! {
     {
         use core::ops::Range;
 
+        // SAFETY: The `_stext` and `_etext` symbols are guaranteed to be valid by the linker.
         unsafe extern "C" {
             safe static _stext: [u8; 0];
             safe static _etext: [u8; 0];
@@ -283,6 +294,7 @@ pub fn rust_main(arg: usize) -> ! {
         core::hint::spin_loop();
     }
 
+    // SAFETY: The `main` symbol is guaranteed to be valid by the linker.
     unsafe { main() };
 
     ktask::exit(0);
@@ -428,7 +440,7 @@ fn init_interrupt() {
     static NEXT_DEADLINE: u64 = 0;
 
     fn update_timer(now_ns: u64) {
-        // Safety: we have disabled preemption in IRQ handler.
+        // SAFETY: we have disabled preemption in IRQ handler.
         let current_deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
 
         // Use the later of the existing deadline or "now + interval" as
@@ -440,6 +452,7 @@ fn init_interrupt() {
         };
 
         let next_deadline = deadline + PERIODIC_INTERVAL_NANOS;
+        // SAFETY: Preemption is disabled in IRQ handler context, making per-CPU `NEXT_DEADLINE` access safe.
         unsafe { NEXT_DEADLINE.write_current_raw(next_deadline) };
         khal::time::arm_timer(deadline);
     }
