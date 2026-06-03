@@ -456,7 +456,7 @@ pub fn lookup_directory_entry<B: BlockDevice>(
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec::Vec;
+    use alloc::vec;
 
     use super::*;
     use crate::error::BlockDevError;
@@ -468,8 +468,7 @@ mod tests {
 
     impl MockBlockDevice {
         fn new(size: usize) -> Self {
-            let mut data = Vec::new();
-            data.resize(size, 0);
+            let data = vec![0; size];
             Self {
                 data,
                 is_open: false,
@@ -666,8 +665,7 @@ mod tests {
         let manager = create_hash_tree_manager(&fs);
 
         // Create test data: two DX entries
-        let mut test_data = Vec::new();
-        test_data.resize(16, 0);
+        let mut test_data = vec![0; 16];
         // First entry: hash=0x12345678, block=1
         test_data[0..4].copy_from_slice(&0x12345678u32.to_le_bytes());
         test_data[4..8].copy_from_slice(&1u32.to_le_bytes());
