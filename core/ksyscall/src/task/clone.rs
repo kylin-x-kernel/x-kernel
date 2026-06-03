@@ -18,13 +18,14 @@ use kerrno::{KError, KResult};
 use kfd::{FdTable, FileLike};
 use khal::uspace::UserContext;
 use kprocess::Pid;
-use kservices::{file::PidFd, task::new_user_task};
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};
 use kthread::{ProcessState, ProcessStateConfig, Thread, add_task_to_table};
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
+use posix_fs::file::PidFd;
+use posix_process::new_user_task;
 
 bitflags! {
     /// Options for use with [`sys_clone`] and [`sys_clone3`].

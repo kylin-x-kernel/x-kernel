@@ -8,10 +8,14 @@
 #![feature(likely_unlikely)]
 #![warn(missing_docs)]
 
-use core::{hint::unlikely, mem::MaybeUninit};
+extern crate alloc;
+
+use alloc::string::String;
+use core::{ffi::c_char, hint::unlikely, mem::MaybeUninit};
 
 use extern_trait::extern_trait;
 use kaddr_layout::{USER_SPACE_BASE, USER_SPACE_SIZE};
+use kerrno::{KError, KResult};
 use khal::{
     asm::user_copy,
     paging::MappingFlags,
@@ -72,6 +76,20 @@ pub fn check_access(start: usize, len: usize) -> MemResult {
     } else {
         Ok(())
     }
+}
+
+/// Load a null-terminated string from user virtual memory.
+pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
+    #[allow(clippy::unnecessary_cast)]
+    let bytes = osvm::load_vec_until_null(ptr as *const u8)?;
+    String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
+}
+
+/// Load a string with a fixed byte length from user virtual memory.
+pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String> {
+    #[allow(clippy::unnecessary_cast)]
+    let bytes = osvm::load_vec(ptr as *const u8, len)?;
+    String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
 }
 
 #[extern_trait]

@@ -12,9 +12,9 @@
 use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
-use kservices::mm::vm_load_string;
 use ktask::current;
 use kthread::get_process_state;
+use kuaccess::vm_load_string;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 use osvm::write_vm_mem;
 use posix_types::UserPtr;

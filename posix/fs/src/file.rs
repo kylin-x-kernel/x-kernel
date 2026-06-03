@@ -2,11 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Concrete file-like implementations (pipe, pidfd, eventfd, timerfd, signalfd).
+//! POSIX file-like kernel objects used by filesystem-related syscalls.
 
 pub mod event;
 mod pidfd;
-mod pipe;
+mod pipe_impl;
 pub mod timerfd;
 
 use alloc::sync::Arc;
@@ -16,11 +16,12 @@ use kfd::FdTable;
 use kfs::{FsContext, OpenOptions};
 use linux_raw_sys::general::{O_RDONLY, O_WRONLY};
 
-pub use self::{pidfd::PidFd, pipe::Pipe};
+pub use self::{pidfd::PidFd, pipe_impl::Pipe};
 
-/// Adds stdin/stdout/stderr entries using the provided filesystem view.
+/// Add stdin, stdout, and stderr backed by `/dev/console`.
 pub fn add_stdio(fd_table: &mut FdTable, fs_context: &FsContext) -> KResult<()> {
     assert_eq!(fd_table.count(), 0);
+
     let open = |options: &mut OpenOptions, flags| {
         KResult::Ok(Arc::new(
             options

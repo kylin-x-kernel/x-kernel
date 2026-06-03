@@ -121,7 +121,7 @@ Inherited group
 ### 进程退出和回收
 
 1. `exit_thread` 从线程集合移除 TID，并在未 group-exit 时记录退出码。
-2. 最后一个线程退出后，`core/kservices` 调用 `Process::exit`。
+2. 最后一个线程退出后，`posix-process` runtime glue 调用 `Process::exit`。
 3. `Process::exit` 设置 zombie 标志，将所有子进程 reparent 到 init。
 4. wait 路径观察 zombie 子进程后调用 `free`。
 5. `free` 从父进程 children 表删除当前 PID。

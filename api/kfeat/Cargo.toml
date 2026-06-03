@@ -35,8 +35,8 @@ ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi", "ktask?/ipi"]
 
 crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 dma-trace = ["kdriver/dma-trace"]
-dev_log = ["kservices/dev-log"]
-dice = ["kservices/dice"]
+dev_log = ["devfs/dev-log"]
+dice = ["dep:kalloc", "dep:tee_kernel", "kalloc/dice", "tee_kernel/dice_huk_key", "devfs/dice"]
 
 # Platform wiring
 platform_aarch64_qemu_virt = [
@@ -107,7 +107,6 @@ vsock = [
     "kruntime/vsock",
     "knet/vsock",
     "ksyscall/vsock",
-    "kservices/vsock",
 ]
 
 # Display (subsystem only; pick a driver via `driver_*`).
@@ -149,7 +148,7 @@ driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
 dwarf = ["backtrace/dwarf"]
 
 # Diagnostics
-memtrack = ["kservices/memtrack"]
+memtrack = ["dep:kalloc", "kalloc/tracking", "devfs/memtrack"]
 snapshot = ["ktask/snapshot"]
 sysrq = ["dep:procfs", "procfs/sysrq"]
 watchdog = ["kruntime/watchdog", "ksync/watchdog"]
@@ -164,7 +163,6 @@ tee = [
     "dep:tee_task_iface",
     "kexec/tee",
     "ksyscall/tee",
-    "kservices/tee",
 ]
 tee_ta_sign = ["kexec/tee_ta_sign", "ksyscall/tee_ta_sign", "tee_task_iface/tee_ta_sign"]
 csv_huk_key = ["tee_kernel/csv_huk_key"]
@@ -215,7 +213,6 @@ inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
-kservices = { workspace = true }
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 ksyscall = { workspace = true }

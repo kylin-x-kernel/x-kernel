@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 extern-trait = "0.3"
+kerrno.workspace = true
 kaddr_layout.workspace = true
 khal.workspace = true
 kspin.workspace = true

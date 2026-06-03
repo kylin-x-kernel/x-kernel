@@ -29,7 +29,6 @@ pub use itimer::{sys_getitimer, sys_setitimer};
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kprocess::Pid;
-use kservices::task::check_signals;
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
 use ktask::{
     current,
@@ -41,6 +40,7 @@ use kthread::{
 use linux_raw_sys::general::{
     MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, timespec,
 };
+use posix_process::check_signals;
 pub use posix_timer::{
     sys_timer_create, sys_timer_delete, sys_timer_getoverrun, sys_timer_gettime, sys_timer_settime,
 };

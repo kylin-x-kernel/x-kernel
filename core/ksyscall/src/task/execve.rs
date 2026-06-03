@@ -16,8 +16,8 @@ use kaddr_layout::USER_HEAP_BASE;
 use kerrno::{KError, KResult};
 use kexec::load_user_app;
 use khal::uspace::UserContext;
-use kservices::mm::vm_load_string;
 use ktask::current;
+use kuaccess::vm_load_string;
 use osvm::load_vec_until_null;
 
 pub fn sys_execve(

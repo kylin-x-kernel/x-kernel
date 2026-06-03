@@ -20,7 +20,8 @@ mod sys;
 mod task;
 
 pub use dispatch::dispatch_irq_syscall;
-pub use kservices::{file, terminal};
+pub use ktty::terminal;
+pub use posix_fs::file;
 pub use sys::sys_getrandom;
 #[cfg(feature = "tee")]
 pub use tee_kernel::tee;

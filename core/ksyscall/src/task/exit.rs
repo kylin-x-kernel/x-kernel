@@ -10,7 +10,7 @@
 //! - Process cleanup and resource release
 
 use kerrno::KResult;
-use kservices::task::do_exit;
+use posix_process::do_exit;
 
 pub fn sys_exit(exit_code: i32) -> KResult<isize> {
     do_exit(exit_code << 8, false);

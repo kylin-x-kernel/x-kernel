@@ -13,6 +13,7 @@ extern crate klogger;
 
 mod dir;
 mod fd_ops;
+pub mod file;
 mod io;
 mod ioctl;
 mod metadata;

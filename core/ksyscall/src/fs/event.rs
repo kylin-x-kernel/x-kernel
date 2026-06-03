@@ -11,8 +11,8 @@
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
-use kservices::file::event::EventFd;
 use linux_raw_sys::general::{EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
+use posix_fs::file::event::EventFd;
 
 bitflags! {
     /// Flags for the `eventfd2` syscall.

@@ -9,11 +9,21 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[features]
+tee = ["kthread/tee"]
+
 [dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+kbuild_config.workspace = true
 kerrno.workspace = true
 khal.workspace = true
+klogger.workspace = true
 kprocess.workspace = true
+ksignal.workspace = true
 ktask.workspace = true
 kthread.workspace = true
 linux-raw-sys.workspace = true
+linux_sysno.workspace = true
+osvm.workspace = true
+posix-ipc.workspace = true
 posix-types.workspace = true

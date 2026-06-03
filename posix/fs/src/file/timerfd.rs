@@ -3,13 +3,10 @@
 // See LICENSES for license details.
 
 //! `timerfd` implementation.
-//!
-//! Armed timers register into the global `TimerRuntime` via
-//! [`ktask::future::register_timer`]; on expiry the waker accumulates
-//! expirations and re-registers periodic timers
 
 use alloc::{borrow::Cow, sync::Arc, task::Wake};
 use core::{
+    mem::size_of,
     sync::atomic::{AtomicBool, Ordering},
     task::{Context, Waker},
     time::Duration,
@@ -30,7 +27,6 @@ fn clock_now(clock_id: u32) -> Duration {
     }
 }
 
-/// Convert a clock-domain deadline to the timer runtime domain (monotonic time).
 fn to_timer_deadline(clock_id: u32, deadline: Duration) -> Duration {
     match clock_id {
         CLOCK_MONOTONIC | CLOCK_BOOTTIME => deadline,
@@ -45,14 +41,11 @@ struct TimerFdInner {
 }
 
 impl TimerFdInner {
-    /// Advance the timer state to `now`, accumulating expirations.
-    /// Returns `true` if expirations > 0 after the update.
     fn tick(&mut self, now: Duration) -> bool {
         let deadline = match self.deadline {
-            Some(d) => d,
+            Some(deadline) => deadline,
             None => return self.expirations > 0,
         };
-
         if now < deadline {
             return self.expirations > 0;
         }
@@ -67,7 +60,6 @@ impl TimerFdInner {
             let advance_nanos = self.interval.as_nanos() * periods;
             self.deadline = Some(deadline + Duration::from_nanos(advance_nanos as u64));
         }
-
         true
     }
 }
@@ -84,28 +76,28 @@ impl Wake for TimerFdWaker {
     }
 }
 
-/// Kernel object implementing Linux timerfd semantics.
+/// File-like timer object for `timerfd_*` syscalls.
 pub struct TimerFd {
     clock_id: u32,
     inner: SpinNoIrq<TimerFdInner>,
-    non_blocking: AtomicBool,
-    timer_handle: SpinNoIrq<Option<TimerHandle>>,
     poll_rx: PollSet,
+    timer_handle: SpinNoIrq<Option<TimerHandle>>,
+    non_blocking: AtomicBool,
 }
 
 impl TimerFd {
-    /// Create a new disarmed timer fd.
+    /// Create a new timerfd for the given clock.
     pub fn new(clock_id: u32) -> Arc<Self> {
         Arc::new(Self {
             clock_id,
             inner: SpinNoIrq::new(TimerFdInner {
-                expirations: 0,
-                interval: Duration::ZERO,
                 deadline: None,
+                interval: Duration::ZERO,
+                expirations: 0,
             }),
-            non_blocking: AtomicBool::new(false),
-            timer_handle: SpinNoIrq::new(None),
             poll_rx: PollSet::new(),
+            timer_handle: SpinNoIrq::new(None),
+            non_blocking: AtomicBool::new(false),
         })
     }
 
@@ -127,8 +119,8 @@ impl TimerFd {
             };
 
             let handle = register_timer(to_timer_deadline(self.clock_id, dl), self.make_waker());
-            if let Some(h) = handle {
-                *self.timer_handle.lock() = Some(h);
+            if let Some(handle) = handle {
+                *self.timer_handle.lock() = Some(handle);
                 return;
             }
 
@@ -152,13 +144,10 @@ impl TimerFd {
         if has_exp && was_zero {
             self.poll_rx.wake();
         }
-
         self.arm_or_fire();
     }
 
-    /// Arm or disarm the timer.
-    ///
-    /// Returns `(old_interval, old_remaining)`.
+    /// Program the timer and return the previous `(interval, remaining)` pair.
     pub fn settime(
         self: &Arc<Self>,
         absolute: bool,
@@ -169,7 +158,6 @@ impl TimerFd {
 
         let now = clock_now(self.clock_id);
         let mut inner = self.inner.lock();
-
         let old_interval = inner.interval;
         let old_remaining = inner
             .deadline
@@ -184,7 +172,6 @@ impl TimerFd {
         }
 
         let deadline = if absolute { value } else { now + value };
-
         inner.deadline = Some(deadline);
         inner.interval = interval;
         inner.expirations = 0;
@@ -195,15 +182,12 @@ impl TimerFd {
         if fired {
             self.poll_rx.wake();
         }
-
         self.arm_or_fire();
 
         (old_interval, old_remaining)
     }
 
-    /// Query the current timer setting.
-    ///
-    /// Returns `(interval, remaining)`.
+    /// Query the current timer setting as `(interval, remaining)`.
     pub fn gettime(&self) -> (Duration, Duration) {
         let inner = self.inner.lock();
         let remaining = inner
@@ -263,9 +247,9 @@ impl FileLike for TimerFd {
 
 impl Pollable for TimerFd {
     fn poll(&self) -> IoEvents {
+        let mut events = IoEvents::empty();
         let mut inner = self.inner.lock();
         inner.tick(clock_now(self.clock_id));
-        let mut events = IoEvents::empty();
         events.set(IoEvents::IN, inner.expirations > 0);
         events
     }
@@ -322,7 +306,6 @@ mod timerfd_tests {
         assert!(old_interval.is_zero());
         assert!(old_remaining.is_zero());
 
-        // Disarm.
         let (old_interval, _) = tfd.settime(false, Duration::ZERO, Duration::ZERO);
         assert!(old_interval.is_zero());
 
@@ -377,7 +360,6 @@ mod timerfd_tests {
             interval: Duration::from_millis(100),
             deadline: Some(Duration::from_secs(10)),
         };
-        // 350ms overdue -> 4 expirations (at +0, +100, +200, +300ms).
         assert!(inner.tick(Duration::from_millis(10_350)));
         assert_eq!(inner.expirations, 4);
         assert_eq!(inner.deadline, Some(Duration::from_millis(10_400)));
@@ -397,7 +379,6 @@ mod timerfd_tests {
     #[def_test]
     fn test_timerfd_settime_rearm_returns_old() {
         let tfd = TimerFd::new(CLOCK_MONOTONIC);
-        // Arm with 10s interval 1s.
         tfd.settime(false, Duration::from_secs(10), Duration::from_secs(1));
 
         let (old_interval, old_remaining) =

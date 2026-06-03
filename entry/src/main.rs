@@ -14,6 +14,7 @@ extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
 
+mod runtime;
 #[cfg(feature = "unittest")]
 mod unittest_simple;
 
@@ -87,7 +88,7 @@ fn main() {
     print_boot_info();
 
     use kfs::kernel_fs_context;
-    kservices::init();
+    runtime::init_runtime();
 
     let args = CMDLINE
         .iter()
@@ -123,8 +124,8 @@ fn main() {
 
     print_boot_info();
 
-    kservices::init();
-    kservices::register_unittest_runtime();
+    runtime::init_runtime();
+    runtime::register_unittest_runtime();
 
     {
         let cx = kfs::kernel_fs_context().lock();

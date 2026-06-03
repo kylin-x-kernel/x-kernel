@@ -22,7 +22,7 @@ kernel-boot / 平台引导
 └─────────────────────────────────────────────┘
    │
    ▼
-entry::main (应用：kservices、用户态 init)
+entry::main (应用：entry runtime glue、用户态 init)
 ```
 
 - **引导层**保证 `BootInfo` 在 `rust_main` 可读且与物理内存描述一致。

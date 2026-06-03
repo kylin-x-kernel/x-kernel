@@ -30,7 +30,6 @@ categories = ["os", "no-std"]
 [workspace.dependencies]
 # Internal: API and core services
 kfeat = { path = "api/kfeat" }
-kservices = { path = "core/kservices" }
 ksignal = { path = "process/ksignal" }
 ksyscall = { path = "core/ksyscall" }
 

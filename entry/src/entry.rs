@@ -13,11 +13,12 @@ use kexec::load_user_app;
 use kfs::{kernel_fs_context, new_process_fs_context};
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
-use kservices::task::new_user_task;
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
 use kthread::{ProcessState, ProcessStateConfig, Thread, add_task_to_table};
 use ktty::tty::N_TTY;
+use posix_fs::file::add_stdio;
+use posix_process::new_user_task;
 
 /// Create and run the init process with the given argv/envp.
 pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
@@ -61,7 +62,7 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
     );
     {
         let fs_context = proc_state.fs_context().lock();
-        kservices::file::add_stdio(&mut proc_state.resources.fd_table().write(), &fs_context)
+        add_stdio(&mut proc_state.resources.fd_table().write(), &fs_context)
             .expect("Failed to add stdio");
     }
     let thr = Thread::new(pid, proc_state);

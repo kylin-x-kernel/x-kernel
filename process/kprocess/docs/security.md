@@ -3,7 +3,7 @@
 ## 信任模型
 
 ```text
-kthread / kservices / posix/process / ksyscall / ktty
+kthread / posix/process / ksyscall / ktty
    │
    │ safe API: Process, ProcessGroup, Session, init_proc, Pid
    v

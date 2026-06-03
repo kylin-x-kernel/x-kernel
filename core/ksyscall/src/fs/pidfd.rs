@@ -12,8 +12,8 @@
 use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
-use kservices::file::PidFd;
 use kthread::{get_process_state, send_signal_to_process};
+use posix_fs::file::PidFd;
 use posix_signal::make_queue_signal_info;
 use posix_types::{UserConstPtr, k_siginfo};
 

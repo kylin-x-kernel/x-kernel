@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! User task entry, exit, and robust futex cleanup helpers.
+//! User-thread runtime helpers used by process-related syscalls.
 
 use core::{ffi::c_long, sync::atomic::Ordering};
 
@@ -15,10 +15,6 @@ use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kprocess::Pid;
 use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
-use kthread::{
-    CpuTimeState, Thread, UserThreadRuntimeAction, current_futex_key, get_process_state, get_task,
-    poll_cpu_timers, send_signal_to_process, send_signal_to_thread,
-};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 #[cfg(target_arch = "x86_64")]
 use linux_sysno::Sysno;
@@ -30,7 +26,9 @@ pub fn new_user_task(
     name: &str,
     mut uctx: UserContext,
     set_child_tid: usize,
-    mut dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
+    mut dispatch_syscall: impl FnMut(&mut UserContext) -> kthread::UserThreadRuntimeAction
+    + Send
+    + 'static,
 ) -> TaskInner {
     TaskInner::new(
         move || {
@@ -45,9 +43,9 @@ pub fn new_user_task(
             let thr = kthread::current_thread();
             while !thr.is_exiting() {
                 let reason = uctx.run();
-                let mut runtime_action = UserThreadRuntimeAction::Continue;
+                let mut runtime_action = kthread::UserThreadRuntimeAction::Continue;
 
-                thr.set_cpu_state(CpuTimeState::Kernel);
+                thr.set_cpu_state(kthread::CpuTimeState::Kernel);
 
                 match reason {
                     ReturnReason::Syscall => {
@@ -71,10 +69,13 @@ pub fn new_user_task(
                     ReturnReason::Interrupt => {}
                     #[allow(unused_labels)]
                     ReturnReason::Exception(exc_info) => 'exc: {
-                        // TODO: detailed handling
                         let signo = match exc_info.kind() {
                             ExceptionKind::Misaligned => {
                                 #[cfg(target_arch = "loongarch64")]
+                                // SAFETY: This path only runs for a LoongArch misaligned-access
+                                // exception reported by `uctx.run()`. The user context still
+                                // contains the faulting instruction state, which is exactly the
+                                // precondition required by `emulate_unaligned`.
                                 if unsafe { uctx.emulate_unaligned() }.is_ok() {
                                     break 'exc;
                                 }
@@ -87,20 +88,20 @@ pub fn new_user_task(
                         raise_signal_fatal(SignalInfo::new_kernel(signo))
                             .expect("Failed to send SIGTRAP");
                     }
-                    r => {
-                        warn!("Unexpected return reason: {r:?}");
+                    reason => {
+                        warn!("Unexpected return reason: {reason:?}");
                         raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV))
                             .expect("Failed to send SIGSEGV");
                     }
                 }
 
-                // Normally we check for pending signals after every trap return.  The
-                // exception is rt_sigreturn: it restores the pre-signal context, so
-                // running check_signals here would see the same pending signal that the
+                // Normally we check for pending signals after every trap return. The
+                // exception is `rt_sigreturn`: it restores the pre-signal context, so
+                // running `check_signals` here would see the same pending signal that the
                 // handler just finished processing and immediately re-enter the handler,
-                // looping forever.  Skipping this check once is safe because the restored
+                // looping forever. Skipping this check once is safe because the restored
                 // context already has the correct signal state.
-                if runtime_action != UserThreadRuntimeAction::SkipSignalCheckOnce {
+                if runtime_action != kthread::UserThreadRuntimeAction::SkipSignalCheckOnce {
                     let mut handled_signal = false;
                     while check_signals(&thr, &mut uctx, None) {
                         handled_signal = true;
@@ -110,8 +111,8 @@ pub fn new_user_task(
                     }
                 }
 
-                thr.set_cpu_state(CpuTimeState::User);
-                poll_cpu_timers();
+                thr.set_cpu_state(kthread::CpuTimeState::User);
+                kthread::poll_cpu_timers();
                 curr.clear_interrupt();
             }
         },
@@ -120,49 +121,41 @@ pub fn new_user_task(
     )
 }
 
-/// Robust futex list node for robust mutexes
+/// Robust futex list node for robust mutexes.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, AnyBitPattern)]
-pub struct RobustList {
-    /// Next list node.
-    pub next: *mut RobustList,
+struct RobustList {
+    next: *mut RobustList,
 }
 
-/// Head of a robust futex list with pending operation state
+/// Head of a robust futex list with pending operation state.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, AnyBitPattern)]
-pub struct RobustListHead {
-    /// List head.
-    pub list: RobustList,
-    /// Offset from list entry to futex word.
-    pub futex_offset: c_long,
-    /// Pending list operation entry.
-    pub list_op_pending: *mut RobustList,
+struct RobustListHead {
+    list: RobustList,
+    futex_offset: c_long,
+    list_op_pending: *mut RobustList,
 }
 
-/// Mark a futex as owned by a dead task and wake waiting threads.
 fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> {
     let address = (entry as u64)
         .checked_add_signed(offset)
         .ok_or(KError::InvalidInput)?;
     let address: usize = address.try_into().map_err(|_| KError::InvalidInput)?;
-    let key = current_futex_key(address);
+    let key = kthread::current_futex_key(address);
 
     let futex_table = kthread::current_thread().proc_state.futex_table_for(&key);
-
     let Some(futex) = futex_table.get(&key) else {
         return Ok(());
     };
+
     futex.owner_dead.store(true, Ordering::SeqCst);
     futex.wq.wake(1, u32::MAX);
     Ok(())
 }
 
 /// Process robust futex list on thread exit and wake waiting threads.
-///
-/// Silently returns on any sign of list-walking problem, matching Linux behavior.
-/// Reference: <https://elixir.bootlin.com/linux/v6.13.6/source/kernel/futex/core.c#L1154>
-pub fn exit_robust_list(head: *const RobustListHead) {
+fn exit_robust_list(head: *const RobustListHead) {
     let mut limit = ROBUST_LIST_LIMIT;
 
     let end_ptr = unsafe { &raw const (*head).list };
@@ -174,10 +167,9 @@ pub fn exit_robust_list(head: *const RobustListHead) {
     let pending = head.list_op_pending;
 
     while !core::ptr::eq(entry, end_ptr) {
-        let Some(next_entry) = entry.read_vm().map(|e| e.next).ok() else {
+        let Some(next_entry) = entry.read_vm().map(|node| node.next).ok() else {
             return;
         };
-        // A pending lock might already be on the list, so don't process it twice.
         if entry != pending && dispatch_irq_futex_death(entry, offset).is_err() {
             return;
         }
@@ -190,7 +182,6 @@ pub fn exit_robust_list(head: *const RobustListHead) {
         ktask::yield_now();
     }
 
-    // Handle the pending entry separately after the list traversal.
     if !pending.is_null() {
         let _ = dispatch_irq_futex_death(pending, offset);
     }
@@ -205,14 +196,14 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
     if clear_child_tid.write_vm(0).is_ok() {
-        let key = current_futex_key(clear_child_tid as usize);
+        let key = kthread::current_futex_key(clear_child_tid as usize);
         let table = thr.proc_state.futex_table_for(&key);
-        let guard = table.get(&key);
-        if let Some(futex) = guard {
+        if let Some(futex) = table.get(&key) {
             futex.wq.wake(1, u32::MAX);
         }
         ktask::yield_now();
     }
+
     let head = thr.robust_list_head() as *const RobustListHead;
     if !head.is_null() {
         exit_robust_list(head);
@@ -220,17 +211,17 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
     let process = &thr.proc_state.proc;
     if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {
-        // Close all file descriptors before marking the process as exited.
-        // This ensures pipe write ends and other resources are properly released,
-        // so parent processes blocking on pipe reads will receive EOF.
         thr.proc_state.resources.close_all_fds();
 
         process.exit();
         if let Some(parent) = process.parent() {
             if let Some(signo) = thr.proc_state.exit_signal() {
-                let _ = send_signal_to_process(parent.pid(), Some(SignalInfo::new_kernel(signo)));
+                let _ = kthread::send_signal_to_process(
+                    parent.pid(),
+                    Some(SignalInfo::new_kernel(signo)),
+                );
             }
-            if let Ok(data) = get_process_state(parent.pid()) {
+            if let Ok(data) = kthread::get_process_state(parent.pid()) {
                 data.child_exit_event().wake();
             }
         }
@@ -240,28 +231,29 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         #[cfg(feature = "tee")]
         thr.proc_state.clear_tee_runtime_private();
     }
+
     if group_exit && !process.is_group_exited() {
         process.group_exit();
         let sig = SignalInfo::new_kernel(Signo::SIGKILL);
         for tid in process.threads() {
-            let _ = send_signal_to_thread(None, tid, Some(sig.clone()));
+            let _ = kthread::send_signal_to_thread(None, tid, Some(sig.clone()));
         }
     }
+
     thr.set_exit();
 }
 
-/// Sends a fatal signal to the current process.
+/// Send a fatal signal to the current process.
 pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
     let proc_state = &kthread::current_thread().proc_state;
 
     let signo = sig.signo();
     info!("Send fatal signal {signo:?} to the current process");
     if let Some(tid) = proc_state.signal.send_signal(sig)
-        && let Ok(task) = get_task(tid)
+        && let Ok(task) = kthread::get_task(tid)
     {
         task.interrupt();
     } else {
-        // No task wants to dispatch_irq the signal, abort the task
         do_exit(signo as i32, true);
     }
 
@@ -270,7 +262,7 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
 
 /// Check for pending signals and execute default handlers if needed.
 pub fn check_signals(
-    thr: &Thread,
+    thr: &kthread::Thread,
     uctx: &mut UserContext,
     restore_blocked: Option<SignalSet>,
 ) -> bool {
@@ -280,19 +272,10 @@ pub fn check_signals(
 
     let signo = sig.signo();
     match os_action {
-        SignalOSAction::Terminate => {
-            do_exit(signo as i32, true);
-        }
-        SignalOSAction::CoreDump => {
-            // TODO: implement core dump
-            do_exit(128 + signo as i32, true);
-        }
-        SignalOSAction::Stop => {
-            // TODO: implement stop
-            do_exit(1, true);
-        }
-        SignalOSAction::Continue => {}
-        SignalOSAction::Handler => {}
+        SignalOSAction::Terminate => do_exit(signo as i32, true),
+        SignalOSAction::CoreDump => do_exit(128 + signo as i32, true),
+        SignalOSAction::Stop => do_exit(1, true),
+        SignalOSAction::Continue | SignalOSAction::Handler => {}
     }
     true
 }

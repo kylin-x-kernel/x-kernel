@@ -11,11 +11,11 @@
 
 use kerrno::{KError, KResult};
 use kfd::FileLike;
-use kservices::file::timerfd::TimerFd;
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME,
     itimerspec, timespec,
 };
+use posix_fs::file::timerfd::TimerFd;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
 /// Creates a timerfd file descriptor.

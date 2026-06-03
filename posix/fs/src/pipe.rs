@@ -14,9 +14,10 @@ use core::ffi::c_int;
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
-use kservices::file::Pipe;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use posix_types::UserPtr;
+
+use crate::file::Pipe;
 
 bitflags! {
     /// Flags for the `pipe2` syscall.

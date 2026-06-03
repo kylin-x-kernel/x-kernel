@@ -13,9 +13,10 @@ use core::ffi::c_int;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kservices::file::Pipe;
 use linux_raw_sys::general::*;
 use posix_types::UserPtr;
+
+use crate::file::Pipe;
 
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {

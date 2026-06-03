@@ -9,19 +9,18 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-vsock = ["posix-net/vsock", "kservices/vsock"]
+vsock = ["posix-net/vsock"]
 tee = [
     "dep:tee_kernel",
     "dep:tee_task_iface",
     "kthread/tee",
-    "kservices/tee",
+    "posix-process/tee",
 ]
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 
 [dependencies]
 kaddr_layout.workspace = true
 kfd.workspace = true
-kservices = { workspace = true }
 kbuild_config = { workspace = true }
 kerrno.workspace = true
 khal.workspace = true
@@ -40,6 +39,8 @@ linux_sysno.workspace = true
 tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
 kexec.workspace = true
+kuaccess.workspace = true
+ktty.workspace = true
 posix-credentials.workspace = true
 posix-fs.workspace = true
 posix-io-mpx.workspace = true
