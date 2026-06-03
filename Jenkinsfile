@@ -120,7 +120,7 @@ def ciParallelStages() {
     runtimeTestArchitectures().each { arch ->
         stages << [
             name: "Runtime Test: ${arch}-qemu-virt",
-            failure: 'clippy、单元测试、覆盖率或 runtime 测试失败',
+            failure: 'clippy、单元测试、覆盖率、文档生成或 runtime 测试失败',
             type: 'runtime',
             arch: arch,
         ]
@@ -159,6 +159,7 @@ def archiveArtifactPatterns() {
         '**/coverage.info',
         '**/coverage.xml',
         '**/coverage.txt',
+        '**/doc-artifacts/**/*',
     ]
 }
 
@@ -357,6 +358,11 @@ cp platforms/${platform}/defconfig .config
 stdbuf -oL -eL make build
 """
 
+            if (arch == 'aarch64') {
+                runGendoc(stageName, runtimeTargetDir, arch)
+                copyDocArtifactsToWorkspace(runtimeTargetDir, arch)
+            }
+
             dir('test-harness') {
                 git branch: "${env.TEST_HARNESS_BRANCH}",
                     url: "${env.TEST_HARNESS_REPO}"
@@ -418,6 +424,30 @@ for f in coverage-html coverage.info coverage.xml coverage.txt; do
         cp -r "\${src}" coverage-artifacts/
     fi
 done
+"""
+}
+
+def runGendoc(String stageName, String targetDir, String arch) {
+    sh label: 'Generate Rust docs', script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+# rustdoc runs on the host target with --cfg doc (see .cargo/config.toml).
+# Do not pass --target: bare-metal triples have no std, but kio uses std under cfg(doc).
+cargo run --manifest-path xtask/gendoc/Cargo.toml -- --target-dir '${targetDir}'
+"""
+}
+
+def copyDocArtifactsToWorkspace(String targetDir, String arch) {
+    sh label: 'Collect doc artifacts', script: """#!/bin/bash
+set -euo pipefail
+doc_src="${targetDir}/doc"
+if [ ! -d "\${doc_src}" ]; then
+    echo "No doc directory found at \${doc_src}"
+    exit 1
+fi
+mkdir -p doc-artifacts
+cp -r "\${doc_src}" doc-artifacts/
+echo "Rust docs collected at doc-artifacts/doc/index.html"
 """
 }
 
@@ -1086,13 +1116,18 @@ ${rows}
  [查看详细日志 (Jenkins Stages)](${stagesUrl})
 - Job: `${env.JOB_NAME}`  Build: `#${env.BUILD_NUMBER}`"""
 
+    def baseUrl = "${env.BUILD_URL}artifact"
     def coverageBlock = ''
     if (coverageSummary?.trim()) {
-        def baseUrl = "${env.BUILD_URL}artifact"
         def links = ['x86_64', 'aarch64'].collect { arch ->
             "[${arch} HTML 报告](${baseUrl}/${arch}/coverage-artifacts/coverage-html/index.html)"
         }.join(' | ')
         coverageBlock = "\n### 📊 代码覆盖率\n\n${coverageSummary}\n\n${links}\n"
+    }
+
+    def docBlock = ''
+    if (allPassed) {
+        docBlock = "\n### 📚 Rust 文档\n\n[aarch64 API 文档](${baseUrl}/aarch64/doc-artifacts/doc/index.html)\n"
     }
 
     def errorBlocks = stageOrder.findAll { name ->
@@ -1104,7 +1139,7 @@ ${rows}
             '```' + "\n${detail}\n" + '```' + "\n</details>"
     }.join('\n')
 
-    def details = coverageBlock + (errorBlocks ? "${errorBlocks}\n" : '')
+    def details = coverageBlock + docBlock + (errorBlocks ? "${errorBlocks}\n" : '')
     def body = table + details
     if (!allPassed) {
         body = table + "\n\n<details>\n<summary>查看构建详情</summary>\n\n" + details + "\n</details>"

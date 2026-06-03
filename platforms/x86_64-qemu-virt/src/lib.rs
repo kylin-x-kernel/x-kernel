@@ -6,6 +6,7 @@
 
 #![no_std]
 #![cfg(target_arch = "x86_64")]
+#![cfg(k_plat_name = "x86_64-qemu-virt")]
 
 #[macro_use]
 extern crate log;

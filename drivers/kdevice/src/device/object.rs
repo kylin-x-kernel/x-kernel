@@ -314,7 +314,7 @@ impl DeviceObject {
     /// Try to acquire an in-use reference to a live device.
     ///
     /// Returns a [`DeviceUse`] guard only while the device is `Active`. While
-    /// any guard is alive the remove path ([`DeviceObject::begin_removing`])
+    /// any guard is alive the remove path (`DeviceObject::begin_removing`)
     /// refuses to tear the device down, so callers can safely operate on it
     /// for the lifetime of the guard.
     pub fn try_acquire(self: &Arc<Self>) -> Option<DeviceUse> {
@@ -337,7 +337,7 @@ impl DeviceObject {
     /// Register a cleanup callback bound to this device's lifetime ("devres").
     ///
     /// Callbacks run in LIFO order when the device's probe fails or when the
-    /// device is removed (see [`DeviceObject::run_cleanups`]). Drivers use this
+    /// device is removed (see `DeviceObject::run_cleanups`). Drivers use this
     /// to attach resource teardown to the device so neither a failed probe nor
     /// a later removal leaks the resource. Registration order matches
     /// acquisition order, so the most-recently acquired resource is released

@@ -15,7 +15,7 @@ use crate::as_driver_error;
 
 /// The VirtIO block device driver.
 ///
-/// Wraps [`VirtIOBlk`] from `virtio-drivers` and implements the
+/// Wraps `VirtIOBlk` from `virtio-drivers` and implements the
 /// [`BlockDevice`] trait, providing sector-level read/write access to a
 /// virtual block device.
 ///
@@ -49,7 +49,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError`] if the device fails to initialize (e.g. feature
+    /// Returns `DriverError` if the device fails to initialize (e.g. feature
     /// negotiation failure, queue allocation failure, DMA error).
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let device = Self::init_device(transport)?;

@@ -109,7 +109,7 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
 
 /// The VirtIO network device driver.
 ///
-/// Wraps [`VirtIONetRaw`] from `virtio-drivers` and implements the
+/// Wraps `VirtIONetRaw` from `virtio-drivers` and implements the
 /// [`NetDevice`] trait, providing packet-level send/receive with buffer
 /// pool management and interrupt-driven IRQ acknowledgment.
 ///
@@ -173,7 +173,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError`] if:
+    /// Returns `DriverError` if:
     /// - Device initialization fails (feature negotiation, queue setup).
     /// - Buffer pool allocation fails (`NoMemory`).
     /// - IRQ registration fails (`ResourceBusy`).

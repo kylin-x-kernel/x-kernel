@@ -35,13 +35,21 @@ fn main() {
 
     if target_config_path.exists() {
         // Copy the generated config
-        let config_content =
+        let mut config_content =
             fs::read_to_string(&target_config_path).expect("Failed to read generated config.rs");
+        // x86-only Kconfig symbols are absent on other platforms but may still be
+        // referenced when host-side tools (e.g. `cargo doc`) compile x86_64 code.
+        if !config_content.contains("SEV_CBIT_POS") {
+            config_content.push_str("\npub const SEV_CBIT_POS: u32 = 0;\n");
+        }
         fs::write(&config_rs_path, config_content).expect("Failed to write config.rs to OUT_DIR");
     } else {
         // Generate empty config if not available
-        fs::write(&config_rs_path, "// No config.rs generated yet\n")
-            .expect("Failed to write empty config.rs");
+        fs::write(
+            &config_rs_path,
+            "// No config.rs generated yet\npub const SEV_CBIT_POS: u32 = 0;\n",
+        )
+        .expect("Failed to write empty config.rs");
     }
 
     // Set environment variable for inclusion

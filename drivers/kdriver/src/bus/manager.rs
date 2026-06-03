@@ -11,7 +11,7 @@ use kdevice::BusId;
 use super::backend::BusBackend;
 use crate::enumeration::EnumerationContext;
 
-/// Manages multiple [`BusBackend`]s that coexist at runtime.
+/// Manages multiple `BusBackend`s that coexist at runtime.
 pub struct BusManager {
     backends: Vec<(BusId, Box<dyn BusBackend>)>,
 }
@@ -78,7 +78,7 @@ impl BusManager {
 
     /// Tear down every registered bus instance.
     ///
-    /// Each backend's [`BusBackend::remove`] hook is invoked best-effort; the
+    /// Each backend's `BusBackend::remove` hook is invoked best-effort; the
     /// manager keeps going on failure so partial teardown does not strand the
     /// remaining buses.
     pub fn remove_all(&mut self) {

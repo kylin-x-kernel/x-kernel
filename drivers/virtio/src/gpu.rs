@@ -9,7 +9,7 @@ use virtio_drivers::{Hal, device::gpu::VirtIOGpu as InnerDev, transport::Transpo
 
 /// The VirtIO GPU device driver.
 ///
-/// Wraps [`VirtIOGpu`] from `virtio-drivers` and implements the
+/// Wraps `VirtIOGpu` from `virtio-drivers` and implements the
 /// [`DisplayDevice`] trait, providing framebuffer access and display
 /// flush operations.
 ///
@@ -43,7 +43,7 @@ impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError`] if device initialization, framebuffer setup, or
+    /// Returns `DriverError` if device initialization, framebuffer setup, or
     /// resolution query fails.
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let mut device = InnerDev::new(transport).map_err(crate::as_driver_error)?;

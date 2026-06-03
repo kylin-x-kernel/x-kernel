@@ -37,7 +37,7 @@ impl ConnectionArgs {
 
 /// The VirtIO socket device driver.
 ///
-/// Wraps [`VsockConnectionManager`] from `virtio-drivers` and implements the
+/// Wraps `VsockConnectionManager` from `virtio-drivers` and implements the
 /// [`VsockDevice`] trait, providing connection-oriented socket communication
 /// between the guest and host via the VirtIO vsock transport.
 ///
@@ -70,7 +70,7 @@ impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError`] if the VirtIO socket device fails to initialize
+    /// Returns `DriverError` if the VirtIO socket device fails to initialize
     /// (e.g. feature negotiation failure, queue allocation failure).
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let virtio_socket = Self::open_socket(transport)?;

@@ -17,7 +17,7 @@ use crate::as_driver_error;
 
 /// The VirtIO Input device driver.
 ///
-/// Wraps [`VirtIOInput`] from `virtio-drivers` and implements the
+/// Wraps `VirtIOInput` from `virtio-drivers` and implements the
 /// [`InputDevice`] trait, providing event reading and capability query
 /// for virtual input devices (keyboard, mouse, etc.).
 ///
@@ -51,7 +51,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError`] if device initialization or ID query fails.
+    /// Returns `DriverError` if device initialization or ID query fails.
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let mut device = InnerDev::new(transport).map_err(as_driver_error)?;
         let name = device.name().unwrap_or_else(|_| String::from("<unknown>"));

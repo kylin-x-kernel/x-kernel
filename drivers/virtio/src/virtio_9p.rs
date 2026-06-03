@@ -24,7 +24,7 @@ pub trait Virtio9pDevice: Device {
 
 /// The VirtIO 9p device driver.
 ///
-/// Wraps [`VirtIO9p`] from `virtio-drivers` and implements the
+/// Wraps `VirtIO9p` from `virtio-drivers` and implements the
 /// [`Virtio9pDevice`] trait, providing a simple request/response
 /// interface for 9p filesystem protocol communication between guest and host.
 ///
@@ -59,7 +59,7 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError`] if the VirtIO 9p device fails to initialize.
+    /// Returns `DriverError` if the VirtIO 9p device fails to initialize.
     pub fn try_new(transport: T) -> DriverResult<Self> {
         Ok(Self {
             inner: InnerDev::new(transport).map_err(as_driver_error)?,
@@ -90,7 +90,7 @@ impl<H: Hal, T: Transport> Virtio9pDevice for VirtIo9pDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError`] if the request fails (device error, buffer too
+    /// Returns `DriverError` if the request fails (device error, buffer too
     /// small, etc.).
     fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
         self.inner
