@@ -21,6 +21,17 @@ impl Deref for CurrentThread {
 }
 
 /// Returns the current user thread.
+///
+/// # Panics
+///
+/// The returned handle panics when dereferenced if the current task is not a user thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let thread = kthread::current_thread();
+/// let pid = thread.pid();
+/// ```
 pub fn current_thread() -> CurrentThread {
     CurrentThread(current().clone())
 }
@@ -47,11 +58,32 @@ pub fn current_fs_context() -> Arc<Mutex<FsContext>> {
 /// Use this helper only for process-only paths such as syscalls or POSIX
 /// logic that require a current user thread. Kernel-task callers should use
 /// `current_fs_context` instead.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let fs_context = kthread::current_process_fs_context();
+/// let _guard = fs_context.lock();
+/// ```
 pub fn current_process_fs_context() -> Arc<Mutex<FsContext>> {
     current_process_state().fs_context().clone()
 }
 
 /// Executes a closure with the current user thread.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pid = kthread::with_current_thread(|thread| thread.pid());
+/// ```
 pub fn with_current_thread<R>(f: impl FnOnce(&Thread) -> R) -> R {
     let thread = current_thread();
     f(&thread)
@@ -60,6 +92,17 @@ pub fn with_current_thread<R>(f: impl FnOnce(&Thread) -> R) -> R {
 /// Returns the current process state.
 ///
 /// This helper requires the current task to be a user thread.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let proc_state = kthread::current_process_state();
+/// let pid = proc_state.proc.pid();
+/// ```
 pub fn current_process_state() -> Arc<ProcessState> {
     with_current_thread(|thread| thread.process_state().clone())
 }

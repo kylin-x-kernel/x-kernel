@@ -60,11 +60,32 @@ pub enum UserThreadRuntimeAction {
 }
 
 /// Returns the current process-owned resources.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let resources = kthread::current_resources();
+/// let fd_table = resources.fd_table();
+/// ```
 pub fn current_resources() -> Arc<ProcessResources> {
     current_process_state().resources.clone()
 }
 
 /// Builds a futex key in the context of the current process address space.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let key = kthread::current_futex_key(user_addr);
+/// ```
 pub fn current_futex_key(address: usize) -> FutexKey {
     let proc_state = current_process_state();
     let aspace = proc_state.address_space().lock();

@@ -15,6 +15,17 @@ pub trait AsThread {
     fn try_as_thread(&self) -> Option<&Thread>;
 
     /// Returns the thread from the task, panicking if it is a kernel task.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this task has no user-thread extension.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let thread = ktask::current().as_thread();
+    /// let pid = thread.pid();
+    /// ```
     fn as_thread(&self) -> &Thread {
         self.try_as_thread().expect("kernel task")
     }
