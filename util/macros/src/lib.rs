@@ -3,10 +3,14 @@
 // See LICENSES for license details.
 
 //! Procedural macros for kernel utility helpers.
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{Error, Ident, Item, ItemFn, ItemMod, Token, parse_macro_input, punctuated::Punctuated};
+use syn::{
+    DeriveInput, Error, Ident, Item, ItemFn, ItemImpl, ItemMod, LitInt, Token, parse_macro_input,
+    punctuated::Punctuated,
+};
 
 /// Register a constructor function to be called before `main`.
 ///
@@ -256,4 +260,129 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
     };
 
     output.into()
+}
+
+// ======== UserRead / UserWrite derive macros ========
+
+/// Resolve the crate path for `posix_types::__private` trait aliases.
+///
+/// Returns `crate` when invoked inside `posix-types` itself,
+/// and the external crate name otherwise.
+fn posix_types_private_path() -> proc_macro2::TokenStream {
+    use proc_macro_crate::{FoundCrate, crate_name};
+    match crate_name("posix-types").expect("posix-types is present in `Cargo.toml`") {
+        FoundCrate::Itself => quote!(crate),
+        FoundCrate::Name(name) => {
+            let ident = Ident::new(&name, Span::call_site());
+            quote!(#ident)
+        }
+    }
+}
+
+/// Derive macro that generates `unsafe impl UserRead for T {}`.
+///
+/// The caller asserts that any bit pattern read from user memory is a valid `T`.
+#[proc_macro_derive(UserRead)]
+pub fn derive_user_read(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let path = posix_types_private_path();
+    quote! {
+        unsafe impl #impl_generics #path::__private::UserReadTrait for #name #ty_generics #where_clause {}
+    }
+    .into()
+}
+
+/// Derive macro that generates `unsafe impl UserWrite for T {}`.
+///
+/// The caller asserts that writing `T` to user memory as raw bytes is always safe.
+#[proc_macro_derive(UserWrite)]
+pub fn derive_user_write(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let path = posix_types_private_path();
+    quote! {
+        unsafe impl #impl_generics #path::__private::UserWriteTrait for #name #ty_generics #where_clause {}
+    }
+    .into()
+}
+
+// ======== DRM ioctl attribute macro ========
+
+/// Arguments parsed from `#[drm_ioctl(iowr, 0x00)]` or `#[drm_ioctl(cmd = 0x1234)]`.
+enum DrmIoctlArgs {
+    Formula { dir: Ident, nr: LitInt },
+    Raw { cmd: LitInt },
+}
+
+impl syn::parse::Parse for DrmIoctlArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let lookahead = input.lookahead1();
+        if lookahead.peek(Ident) {
+            let ident: Ident = input.parse()?;
+            if ident == "cmd" {
+                let _: Token![=] = input.parse()?;
+                let cmd: LitInt = input.parse()?;
+                Ok(DrmIoctlArgs::Raw { cmd })
+            } else {
+                let _: Token![,] = input.parse()?;
+                let nr: LitInt = input.parse()?;
+                Ok(DrmIoctlArgs::Formula { dir: ident, nr })
+            }
+        } else {
+            Err(lookahead.error())
+        }
+    }
+}
+
+/// Attribute macro that injects `const CMD` into a `DrmIoctl` impl block.
+///
+/// # Usage
+///
+/// ```ignore
+/// #[drm_ioctl(iowr, 0x00)]
+/// impl DrmIoctl for DrmVersion {
+///     fn handle(dev: &dyn DeviceFileOps, arg: UserPtr<Self>) -> VfsResult<usize> {
+///         Ok(0)
+///     }
+/// }
+/// ```
+///
+/// The macro parses the impl block, injects `const CMD: u32 = iowr::<DrmVersion>(DRM_TYPE, 0x00);`
+/// at the top, and keeps everything else intact.
+#[proc_macro_attribute]
+pub fn drm_ioctl(args: TokenStream, input: TokenStream) -> TokenStream {
+    let mut impl_block = parse_macro_input!(input as ItemImpl);
+    let args = parse_macro_input!(args as DrmIoctlArgs);
+
+    // Extract the struct name from `impl DrmIoctl for T`.
+    // self_ty is the type after `for`, e.g. `DrmVersion`.
+    let struct_name = if let syn::Type::Path(type_path) = &*impl_block.self_ty {
+        &type_path.path.segments.last().unwrap().ident
+    } else {
+        return Error::new_spanned(&impl_block.self_ty, "expected a path type")
+            .to_compile_error()
+            .into();
+    };
+
+    // Build the CMD expression.
+    let cmd_expr = match args {
+        DrmIoctlArgs::Formula { dir, nr } => {
+            quote! { #dir::<#struct_name>(DRM_TYPE, #nr) }
+        }
+        DrmIoctlArgs::Raw { cmd } => {
+            quote! { #cmd }
+        }
+    };
+
+    // Inject `const CMD` at the beginning of the impl block.
+    let const_cmd: syn::ImplItem = syn::parse_quote! {
+        const CMD: u32 = #cmd_expr;
+    };
+    impl_block.items.insert(0, const_cmd);
+
+    let expanded = quote! { #impl_block };
+    TokenStream::from(expanded)
 }

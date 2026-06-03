@@ -16,7 +16,7 @@ use crate::{UserRead, UserWrite};
 
 /// Data structure used to pass permission information to IPC operations.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, UserWrite)]
 pub struct IpcPerm {
     /// Key supplied to msgget(2)
     pub key: __kernel_key_t,
@@ -40,12 +40,10 @@ pub struct IpcPerm {
     pub unused1: c_long,
 }
 
-unsafe impl UserWrite for IpcPerm {}
-
 /// A System V message queue descriptor.
 #[allow(non_camel_case_types)]
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, UserWrite, UserRead)]
 pub struct msqid_ds {
     pub msg_perm: IpcPerm,
     pub msg_stime: __kernel_time_t,
@@ -58,13 +56,10 @@ pub struct msqid_ds {
     pub msg_lrpid: __kernel_pid_t,
 }
 
-unsafe impl UserRead for msqid_ds {}
-unsafe impl UserWrite for msqid_ds {}
-
 /// A System V shared-memory descriptor.
 #[allow(non_camel_case_types)]
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, UserWrite, UserRead)]
 pub struct shmid_ds {
     pub shm_perm: IpcPerm,
     pub shm_segsz: __kernel_size_t,
@@ -76,9 +71,6 @@ pub struct shmid_ds {
     pub shm_nattch: c_ushort,
     pub abi_pad: [u8; 6],
 }
-
-unsafe impl UserRead for shmid_ds {}
-unsafe impl UserWrite for shmid_ds {}
 
 /// A System V message payload header.
 #[allow(non_camel_case_types)]

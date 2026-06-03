@@ -6,7 +6,7 @@
 
 use linux_raw_sys::system::{new_utsname, sysinfo};
 
-use crate::UserWrite;
+use crate::ptr::UserWrite;
 
 unsafe impl UserWrite for new_utsname {}
 unsafe impl UserWrite for sysinfo {}

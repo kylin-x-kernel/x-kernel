@@ -6,7 +6,7 @@
 
 use linux_raw_sys::net::{cmsghdr, mmsghdr, msghdr, ucred};
 
-use crate::UserRead;
+use crate::ptr::UserRead;
 
 unsafe impl UserRead for cmsghdr {}
 unsafe impl UserRead for mmsghdr {}

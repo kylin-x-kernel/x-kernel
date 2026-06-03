@@ -6,7 +6,7 @@
 
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 
-use crate::{UserRead, UserWrite};
+use crate::ptr::{UserRead, UserWrite};
 
 unsafe impl UserRead for __user_cap_header_struct {}
 

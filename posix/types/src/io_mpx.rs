@@ -12,13 +12,10 @@ use crate::{UserConstPtr, UserPtr, UserRead, UserWrite, k_sigset};
 
 /// An `fd_set`-compatible bitset used by `select`-style syscalls.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, UserRead, UserWrite)]
 pub struct FdSet {
     fds_bits: [usize; Self::FD_SETSIZE / usize::BITS as usize],
 }
-
-unsafe impl UserRead for FdSet {}
-unsafe impl UserWrite for FdSet {}
 
 impl FdSet {
     pub const FD_SETSIZE: usize = __FD_SETSIZE as usize;
@@ -86,13 +83,11 @@ impl fmt::Debug for FdSet {
 
 /// The raw `pselect6` signal-mask argument wrapper.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, UserRead)]
 pub struct SignalSetWithSize {
     set: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 }
-
-unsafe impl UserRead for SignalSetWithSize {}
 
 impl SignalSetWithSize {
     pub fn set(self) -> UserConstPtr<k_sigset> {

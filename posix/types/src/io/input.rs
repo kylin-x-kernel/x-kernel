@@ -4,7 +4,7 @@
 
 //! ABI-facing input device structures.
 
-use crate::UserWrite;
+use crate::ptr::UserWrite;
 
 /// The Linux `struct input_id` carrier used by evdev ioctls such as `EVIOCGID`.
 #[repr(C)]

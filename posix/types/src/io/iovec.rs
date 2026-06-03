@@ -13,7 +13,7 @@ use kerrno::{KError, KResult};
 use crate::{UserConstPtr, UserRead};
 
 /// An I/O vector descriptor used by `readv`/`writev`-style syscalls.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, UserRead)]
 #[repr(C)]
 pub struct IoVec {
     pub iov_base: *mut u8,
@@ -31,8 +31,6 @@ impl IoVec {
         iovs.load_vm_vec(iovcnt).map_err(Into::into)
     }
 }
-
-unsafe impl UserRead for IoVec {}
 
 #[cfg(unittest)]
 mod tests {

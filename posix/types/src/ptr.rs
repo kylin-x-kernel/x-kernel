@@ -12,6 +12,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::{
     ffi::c_char,
+    fmt::Debug,
     mem::{MaybeUninit, size_of, size_of_val},
     ptr, slice,
 };
@@ -179,6 +180,22 @@ impl<T> VirtPtr for UserPtr<T> {
 }
 
 impl<T> VirtMutPtr for UserPtr<T> {}
+
+impl<T> Debug for UserPtr<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("UserPtr").field(&self.0).finish()
+    }
+}
+
+// SAFETY: `UserPtr` is just a bare pointer, and its memory layout is equivalent to *mut T,
+// Any bit pattern is legal for naked pointers, so it meets AnyBitPattern.
+unsafe impl<T: 'static> bytemuck::Zeroable for UserPtr<T> {}
+unsafe impl<T: 'static> bytemuck::AnyBitPattern for UserPtr<T> {}
+
+// SAFETY: Reading/writing a `UserPtr` copies the raw pointer value (usize-sized)
+// without dereferencing it. Any bit pattern is valid for a pointer wrapper.
+unsafe impl<T> UserRead for UserPtr<T> {}
+unsafe impl<T> UserWrite for UserPtr<T> {}
 
 /// A read-only pointer to user-space memory.
 ///

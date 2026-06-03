@@ -13,7 +13,7 @@ use linux_raw_sys::general::{
     itimerspec, itimerval, timespec, timeval,
 };
 
-use crate::{UserRead, UserWrite};
+use crate::ptr::{UserRead, UserWrite};
 
 /// Convert between kernel `TimeValue` and Linux time structures.
 pub trait TimeValueLike {

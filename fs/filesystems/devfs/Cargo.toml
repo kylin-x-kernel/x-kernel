@@ -42,6 +42,7 @@ rand = { version = "0.9.1", default-features = false, features = [
 ] }
 chrono = { version = "0.4.41", default-features = false }
 fbdevice.workspace = true
+drmdevice.workspace = true
 bitmaps = { version = "3.2.1", default-features = false }
 zerocopy = { version = "0.8.26", features = ["derive"] }
 lazyinit.workspace = true

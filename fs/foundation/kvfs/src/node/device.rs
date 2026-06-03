@@ -22,6 +22,15 @@ pub trait MmapMapper {
 
     /// Request a file-backed mapping (regular file or cached file).
     fn map_file_backed(&mut self) -> VfsResult<()>;
+
+    /// Returns the mmap offset supplied by userspace.
+    ///
+    /// Devices that multiplex multiple buffers behind a single fd (e.g. DRM
+    /// dumb buffers) use this offset as a lookup key rather than a byte offset
+    /// into a single contiguous region.
+    fn offset(&self) -> usize {
+        0
+    }
 }
 
 /// Trait for device file backend operations.

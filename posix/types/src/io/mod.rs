@@ -6,7 +6,7 @@
 
 use linux_raw_sys::general::{epoll_event, pollfd};
 
-use crate::{UserRead, UserWrite};
+use crate::ptr::{UserRead, UserWrite};
 
 mod input;
 mod iovec;

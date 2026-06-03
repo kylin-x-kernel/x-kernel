@@ -54,6 +54,10 @@ impl FileMapper {
 }
 
 impl MmapMapper for FileMapper {
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
     fn map_physical(&mut self, mut range: PhysAddrRange) -> kvfs::VfsResult<()> {
         range.start += self.offset;
         if range.is_empty() {

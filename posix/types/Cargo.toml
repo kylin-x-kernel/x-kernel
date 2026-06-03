@@ -18,3 +18,4 @@ linux-raw-sys = { workspace = true }
 osvm = { workspace = true }
 strum = { workspace = true }
 unittest = { workspace = true}
+macros = { workspace = true }

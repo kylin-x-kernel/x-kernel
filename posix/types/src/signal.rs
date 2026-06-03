@@ -13,7 +13,7 @@ use linux_raw_sys::general::{
 use crate::{UserRead, UserWrite};
 
 /// A raw `sigset_t` carrier used at the syscall boundary.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, UserRead, UserWrite)]
 #[repr(transparent)]
 #[allow(non_camel_case_types)]
 pub struct k_sigset(pub u64);
@@ -32,11 +32,8 @@ impl From<kernel_sigset_t> for k_sigset {
     }
 }
 
-unsafe impl UserRead for k_sigset {}
-unsafe impl UserWrite for k_sigset {}
-
 /// A raw `sigaction` carrier used at the syscall boundary.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, UserRead, UserWrite)]
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct k_sigaction {
@@ -46,17 +43,11 @@ pub struct k_sigaction {
     pub mask: k_sigset,
 }
 
-unsafe impl UserRead for k_sigaction {}
-unsafe impl UserWrite for k_sigaction {}
-
 /// A raw `siginfo_t` carrier used at the syscall boundary.
-#[derive(Clone)]
+#[derive(Clone, UserRead, UserWrite)]
 #[repr(transparent)]
 #[allow(non_camel_case_types)]
 pub struct k_siginfo(pub siginfo_t);
-
-unsafe impl UserRead for k_siginfo {}
-unsafe impl UserWrite for k_siginfo {}
 
 /// A raw `sigval_t` carrier used at the syscall boundary.
 #[allow(non_camel_case_types)]
@@ -73,7 +64,7 @@ unsafe impl UserRead for k_sigevent {}
 unsafe impl UserWrite for k_sigevent {}
 
 /// A raw `sigaltstack` carrier used at the syscall boundary.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, UserRead, UserWrite)]
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct k_sigaltstack {
@@ -82,6 +73,3 @@ pub struct k_sigaltstack {
     pub abi_pad: u32,
     pub size: usize,
 }
-
-unsafe impl UserRead for k_sigaltstack {}
-unsafe impl UserWrite for k_sigaltstack {}

@@ -6,7 +6,7 @@
 
 use linux_raw_sys::general::{rlimit64, rusage};
 
-use crate::{UserRead, UserWrite};
+use crate::ptr::{UserRead, UserWrite};
 
 unsafe impl UserRead for rlimit64 {}
 

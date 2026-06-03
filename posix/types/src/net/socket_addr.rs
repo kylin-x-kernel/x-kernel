@@ -13,7 +13,7 @@ unsafe impl UserRead for sockaddr_in6 {}
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, UserRead)]
 pub struct sockaddr_nl {
     pub nl_family: __kernel_sa_family_t,
     pub nl_pad: u16,
@@ -21,13 +21,11 @@ pub struct sockaddr_nl {
     pub nl_groups: u32,
 }
 
-unsafe impl UserRead for sockaddr_nl {}
-
 // This type should be provided by `linux_raw_sys` but it's missing.
 // See <https://github.com/sunfishcode/linux-raw-sys/issues/169>.
 #[allow(non_camel_case_types)]
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, UserRead)]
 pub struct sockaddr_vm {
     pub svm_family: __kernel_sa_family_t,
     pub svm_reserved1: u16,
@@ -35,5 +33,3 @@ pub struct sockaddr_vm {
     pub svm_cid: u32,
     pub svm_zero: [u8; 4],
 }
-
-unsafe impl UserRead for sockaddr_vm {}

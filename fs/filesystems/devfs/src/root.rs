@@ -16,6 +16,7 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     nodes::cpu_dma_latency::add_root_entries(&mut root, fs.clone());
     nodes::rtc::add_root_entries(&mut root, fs.clone());
     nodes::fb::add_root_entries(&mut root, fs.clone());
+    nodes::dri::add_root_entries(&mut root, fs.clone());
     nodes::tty_nodes::add_root_entries(&mut root, fs.clone());
     nodes::r#loop::add_root_entries(&mut root, fs.clone());
     nodes::shm::add_root_entries(&mut root, fs.clone());

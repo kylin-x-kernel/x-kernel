@@ -4,7 +4,7 @@
 
 //! ABI-facing `times(2)` structures.
 
-use crate::UserWrite;
+use crate::ptr::UserWrite;
 
 #[repr(C)]
 pub struct Tms {

@@ -6,7 +6,7 @@
 
 use linux_raw_sys::general::{flock64, stat, statfs, statx};
 
-use crate::{UserRead, UserWrite};
+use crate::ptr::{UserRead, UserWrite};
 
 unsafe impl UserRead for flock64 {}
 

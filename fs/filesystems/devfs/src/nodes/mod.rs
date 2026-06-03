@@ -5,6 +5,7 @@
 //! devfs device node definitions.
 
 pub(crate) mod cpu_dma_latency;
+pub(crate) mod dri;
 pub(crate) mod dtb;
 pub(crate) mod fb;
 pub(crate) mod r#loop;
