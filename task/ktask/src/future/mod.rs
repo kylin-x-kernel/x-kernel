@@ -45,7 +45,7 @@ impl Wake for KWaker {
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(task) = self.task.upgrade() {
             *self.woke.lock() = true;
-            select_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, false);
+            select_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, true);
         }
     }
 }

@@ -186,6 +186,30 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     }
 }
 
+#[cfg(feature = "preempt")]
+fn request_resched(cpu_id: LogicalCpuId) {
+    if cpu_id == this_cpu_id() {
+        crate::current().set_preempt_pending(true);
+        return;
+    }
+
+    #[cfg(all(feature = "smp", feature = "ipi"))]
+    request_remote_resched(cpu_id);
+}
+
+#[cfg(all(feature = "preempt", feature = "smp", feature = "ipi"))]
+fn request_remote_resched(cpu_id: LogicalCpuId) {
+    if let Err(err) = kipi::run_on_cpu(cpu_id, || {
+        crate::current().set_preempt_pending(true);
+    }) {
+        warn!(
+            "failed to request reschedule on CPU {}: {}",
+            cpu_id.as_usize(),
+            err
+        );
+    }
+}
+
 /// [`RunQueue`] represents a run queue for global system or a specific CPU.
 pub(crate) struct RunQueue {
     /// The ID of the CPU this run queue is associated with.
@@ -279,11 +303,9 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
             // Fire the task wakeup tracepoint.
             fire_task_wakeup(task_id);
 
-            // Note: when the task is unblocked on another CPU's run queue,
-            // we just ingiore the `resched` flag.
-            if resched && cpu_id == this_cpu_id() {
-                #[cfg(feature = "preempt")]
-                crate::current().set_preempt_pending(true);
+            #[cfg(feature = "preempt")]
+            if resched {
+                request_resched(cpu_id);
             }
         }
     }
