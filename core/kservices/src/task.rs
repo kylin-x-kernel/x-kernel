@@ -8,6 +8,8 @@ use core::{ffi::c_long, sync::atomic::Ordering};
 
 use bytemuck::AnyBitPattern;
 use kbuild_config::KERNEL_STACK_SIZE;
+#[cfg(target_arch = "x86_64")]
+use kerrno::LinuxError;
 use kerrno::{KError, KResult};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kprocess::Pid;
@@ -18,6 +20,8 @@ use kthread::{
     poll_cpu_timers, send_signal_to_process, send_signal_to_thread,
 };
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
+#[cfg(target_arch = "x86_64")]
+use linux_sysno::Sysno;
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_ipc::SHM_MANAGER;
 
@@ -97,7 +101,13 @@ pub fn new_user_task(
                 // looping forever.  Skipping this check once is safe because the restored
                 // context already has the correct signal state.
                 if runtime_action != UserThreadRuntimeAction::SkipSignalCheckOnce {
-                    while check_signals(&thr, &mut uctx, None) {}
+                    let mut handled_signal = false;
+                    while check_signals(&thr, &mut uctx, None) {
+                        handled_signal = true;
+                    }
+                    if !handled_signal {
+                        restart_syscall_without_signal(&mut uctx);
+                    }
                 }
 
                 thr.set_cpu_state(CpuTimeState::User);
@@ -286,3 +296,23 @@ pub fn check_signals(
     }
     true
 }
+
+#[cfg(target_arch = "x86_64")]
+fn restart_syscall_without_signal(uctx: &mut UserContext) {
+    let Some(err) = uctx.syscall_restart_error() else {
+        return;
+    };
+
+    match err {
+        LinuxError::ERESTARTSYS | LinuxError::ERESTARTNOINTR | LinuxError::ERESTARTNOHAND => {
+            uctx.rollback_syscall();
+        }
+        LinuxError::ERESTART_RESTARTBLOCK => {
+            uctx.restart_with_syscall(Sysno::restart_syscall as usize);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn restart_syscall_without_signal(_uctx: &mut UserContext) {}

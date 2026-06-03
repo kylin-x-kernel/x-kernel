@@ -127,7 +127,9 @@ init_scheduler_secondary()
 ### 5) 阻塞/唤醒与 WaitQueue/Future
 
 - `future::block_on` 在 `Poll::Pending` 下走 `blocked_resched()`，把当前任务置为 `Blocked`。
-- waker 触发时通过 `select_run_queue(...).unblock_task(...)` 将任务恢复为 `Ready` 并回到某个 run queue。
+- waker 触发时通过 `select_wake_run_queue(...).unblock_task(..., true)` 将任务恢复为 `Ready`。
+- SMP 下若当前 CPU 满足目标任务 affinity，唤醒优先入当前 CPU run queue；否则回退到普通 `select_run_queue` 轮询选队。
+- `unblock_task(..., true)` 对本 CPU 设置 `need_resched`；对远端 CPU 在 `ipi + preempt` 可用时请求远端设置 `need_resched`。
 - `WaitQueue` 基于 `event_listener` 封装等待与通知，支持超时与条件等待。
 
 ### 6) 退出回收（GC task）
@@ -145,8 +147,10 @@ init_scheduler_secondary()
 
 - 每 CPU 一个 `RUN_QUEUE`、`IDLE_TASK`、`EXITED_TASKS`、`WAIT_FOR_EXIT`。
 - `select_run_queue` 依据任务 `cpumask` 在允许 CPU 集内做轮询选队。
+- `select_wake_run_queue` 用于 wait/future 唤醒路径，优先选择当前 CPU 以缩短 wake-to-run 延迟。
 - 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。
 - 对 `Blocked` 任务重新入队时，SMP 下会等待 `task.on_cpu()` 清零，避免与远端 CPU 的切换过程并发冲突。
+- 远端 run queue 唤醒不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
 
 ## 调度点模型（何时可能发生切换）
 
@@ -156,6 +160,8 @@ init_scheduler_secondary()
 | `blocked_resched()` | 是 |
 | `exit_current()` | 是 |
 | tick 触发 `task_tick` | 否（通常先设置 pending） |
+| 本 CPU waker 唤醒任务 | 否（设置 pending，安全点抢占） |
+| 远端 waker 唤醒任务 | 否（可通过 IPI 请求远端 pending） |
 | `enable_preempt` 且 `need_resched` | 可能（触发 `preempt_resched`） |
 
 因此 `ktask` 不是“每个时钟中断必切换”模型，而是“tick 驱动 + 安全点执行”的工程化抢占模型。
@@ -185,6 +191,10 @@ init_scheduler_secondary()
 ### 为何 tick 不直接切换
 
 中断上下文与临界区中直接切换会放大并发复杂度。延迟到 `enable_preempt` 安全点执行可减少重入风险并保持响应性。
+
+### 为何唤醒路径优先选择当前 CPU
+
+wait/future 唤醒通常发生在释放资源或发送事件的线程上下文中。若目标任务 affinity 允许当前 CPU，将其放入当前 run queue 可减少跨核唤醒延迟，并让 `need_resched` 在本 CPU 的抢占安全点生效；当 affinity 不允许时仍回退到普通选队逻辑。
 
 ### 为何引入 `KernelGuardIf` 接口
 

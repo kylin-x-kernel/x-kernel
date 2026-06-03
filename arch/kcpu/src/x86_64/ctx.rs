@@ -18,7 +18,7 @@ use memaddr::VirtAddr;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExceptionContext {
     /// General-purpose register rax.
     pub rax: u64,
@@ -50,6 +50,9 @@ pub struct ExceptionContext {
     pub r14: u64,
     /// General-purpose register r15.
     pub r15: u64,
+
+    /// Original syscall number, or all bits set when the trap did not come from syscall entry.
+    pub orig_rax: u64,
 
     /// Trap vector number (pushed by `trap.S`).
     pub vector: u64,
@@ -151,12 +154,17 @@ impl ExceptionContext {
 
     /// Gets the syscall number.
     pub const fn sysno(&self) -> usize {
-        self.rax as usize
+        if self.is_from_syscall() {
+            self.orig_rax as usize
+        } else {
+            self.rax as usize
+        }
     }
 
     /// Sets the syscall number.
     pub const fn set_sysno(&mut self, rax: usize) {
         self.rax = rax as _;
+        self.orig_rax = rax as _;
     }
 
     /// Gets the return value register.
@@ -169,9 +177,65 @@ impl ExceptionContext {
         self.rax = rax as _;
     }
 
+    /// Returns whether this context came from a syscall entry.
+    pub const fn is_from_syscall(&self) -> bool {
+        self.orig_rax != u64::MAX
+    }
+
+    /// Gets the syscall number saved at syscall entry.
+    pub const fn orig_sysno(&self) -> usize {
+        self.orig_rax as _
+    }
+
+    /// Restores registers so the interrupted syscall will be executed again.
+    pub fn rollback_syscall(&mut self) {
+        if self.is_from_syscall() {
+            self.rax = self.orig_rax;
+            self.rip = self.rip.saturating_sub(2);
+        }
+    }
+
+    /// Re-enters user space at the syscall instruction with a replacement syscall number.
+    pub fn restart_with_syscall(&mut self, sysno: usize) {
+        if self.is_from_syscall() {
+            self.rax = sysno as _;
+            self.rip = self.rip.saturating_sub(2);
+        }
+    }
+
     /// Unwind the stack and get the backtrace.
     pub fn backtrace(&self) -> backtrace::Backtrace {
         backtrace::Backtrace::capture_trap(self.rbp as _, self.rip as _, 0)
+    }
+}
+
+impl Default for ExceptionContext {
+    fn default() -> Self {
+        Self {
+            rax: 0,
+            rcx: 0,
+            rdx: 0,
+            rbx: 0,
+            rbp: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            orig_rax: u64::MAX,
+            vector: 0,
+            error_code: 0,
+            rip: 0,
+            cs: 0,
+            rflags: 0,
+            rsp: 0,
+            ss: 0,
+        }
     }
 }
 

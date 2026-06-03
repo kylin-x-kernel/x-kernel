@@ -89,8 +89,9 @@ ksched algorithms / karch context switch / allocator
 1. **任务状态机单向约束**：`Running/Ready/Blocked/Exited` 转换由 run queue 统一入口执行；`transition_state` 防止重复唤醒重入。
 2. **延迟抢占模型**：tick 仅设置 `need_resched`，真实切换在 `enable_preempt` 安全点触发，避免临界区中途切换。
 3. **SMP blocked 唤醒保护**：Blocked 任务重新入队前（`smp`）等待 `task.on_cpu()==false`，防止与远端 CPU `switch_to` 并发。
-4. **退出回收隔离**：退出任务先进入 `EXITED_TASKS`，由每 CPU `gc_task` 延迟回收，避免切换路径直接 drop。
-5. **idle 任务特判**：idle 不入普通调度实体路径，不参与 `task_tick`，避免算法元数据污染。
+4. **唤醒抢占请求分离**：waker 只把任务转为 `Ready` 并设置本地或远端 `need_resched` 请求，真实切换仍发生在抢占安全点。
+5. **退出回收隔离**：退出任务先进入 `EXITED_TASKS`，由每 CPU `gc_task` 延迟回收，避免切换路径直接 drop。
+6. **idle 任务特判**：idle 不入普通调度实体路径，不参与 `task_tick`，避免算法元数据污染。
 
 ## 威胁分析
 
@@ -104,6 +105,7 @@ ksched algorithms / karch context switch / allocator
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
 | T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护 |
 | T-08 | tick 回调执行耗时过长拖慢调度 | 中 | callback 滥用 | API 文档约束“回调应短小”；系统仍可抢占恢复 |
+| T-09 | 远端唤醒后未及时调度 | 中 | 任务入远端 run queue 但远端 CPU 未到抢占安全点 | `ipi + preempt` 下请求远端 `need_resched`；无 IPI 时仍依赖 tick/安全点 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -113,7 +115,7 @@ ksched algorithms / karch context switch / allocator
 | F-02 | `cpumask` 为空 | 调用方设置非法 affinity | 任务无可运行 CPU | API 失败或 panic | 2 | `set_current_affinity` 判空返回 false |
 | F-03 | 长时间持有 NoPreempt 临界区 | 代码路径过重 | 抢占延迟增大 | 延迟抖动/实时性下降 | 3 | 缩短临界区，避免重计算 |
 | F-04 | gc task 回收滞后 | 外部长期持有 `Arc` | `EXITED_TASKS` 堆积 | 内存增长 | 2 | `Arc::try_unwrap` 重试，join 语义释放 |
-| F-05 | 唤醒路径始终 `resched=false` | 调用策略保守 | 被唤醒任务调度延迟 | 吞吐/延迟波动 | 3 | 依赖 tick 与主动 yield；可按场景优化 |
+| F-05 | 远端 resched 请求丢失 | IPI 不可用或远端未及时到达安全点 | 被唤醒任务调度延迟 | 吞吐/延迟波动 | 3 | `ipi + preempt` 下发送远端 pending 请求；无 IPI 配置依赖 tick |
 | F-06 | 算法 `task_tick` 行为异常 | 调度器实现 bug | 抢占策略失真 | 饥饿/抖动 | 2 | `ksched` 单测覆盖 + trace hook 诊断 |
 
 ## 故障管理
@@ -136,7 +138,7 @@ ksched algorithms / karch context switch / allocator
 
 1. 当前无全局主动负载均衡线程；跨核主要依赖 affinity 与入队选核。
 2. `select_run_queue` 采用简单轮询，不基于实时队列负载。
-3. 某些唤醒路径固定 `resched=false`，低延迟场景可能需要进一步策略化。
+3. 远端唤醒的抢占请求依赖 `ipi + preempt` feature；未启用时仍依赖 tick 或其它安全点推进。
 4. `unsafe` 边界仍较多，需持续收敛到更小封装点并补齐 `SAFETY` 说明。
 
 ## 审计清单

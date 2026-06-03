@@ -14,10 +14,11 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    future::poll_fn,
+    future::Future,
     ops::Deref,
-    sync::atomic::AtomicBool,
-    task::{Poll, Waker},
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -36,13 +37,92 @@ use memspace_file::FileBackend;
 /// Wait queue used by futex.
 #[derive(Default)]
 pub struct WaitQueue {
-    queue: SpinNoIrq<VecDeque<(Waker, u32)>>,
+    queue: SpinNoIrq<VecDeque<Waiter>>,
+}
+
+struct Waiter {
+    waker: Waker,
+    bitset: u32,
+    is_active: Arc<AtomicBool>,
+}
+
+struct WaitFuture<'a, C> {
+    wait_queue: &'a WaitQueue,
+    bitset: u32,
+    condition: Option<C>,
+    waiter: Option<Arc<AtomicBool>>,
+}
+
+impl<C> Unpin for WaitFuture<'_, C> {}
+
+impl<C: FnOnce() -> bool> Future for WaitFuture<'_, C> {
+    type Output = KResult<bool>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+
+        if let Some(token) = this.waiter.clone() {
+            let mut queue = this.wait_queue.queue.lock();
+            if let Some(waiter) = queue
+                .iter_mut()
+                .find(|waiter| Arc::ptr_eq(&waiter.is_active, &token))
+            {
+                if !waiter.is_active.load(Ordering::Acquire) {
+                    queue.retain(|waiter| !Arc::ptr_eq(&waiter.is_active, &token));
+                    this.waiter = None;
+                    return Poll::Ready(Ok(true));
+                }
+                waiter.waker = cx.waker().clone();
+                return Poll::Pending;
+            }
+
+            if token.load(Ordering::Acquire) {
+                return Poll::Pending;
+            }
+
+            this.waiter = None;
+            return Poll::Ready(Ok(true));
+        }
+
+        let Some(condition) = this.condition.take() else {
+            return Poll::Ready(Ok(true));
+        };
+
+        let mut queue = this.wait_queue.queue.lock();
+        if !condition() {
+            return Poll::Ready(Ok(false));
+        }
+
+        let token = Arc::new(AtomicBool::new(true));
+        queue.push_back(Waiter {
+            waker: cx.waker().clone(),
+            bitset: this.bitset,
+            is_active: token.clone(),
+        });
+        this.waiter = Some(token);
+        Poll::Pending
+    }
+}
+
+impl<C> Drop for WaitFuture<'_, C> {
+    fn drop(&mut self) {
+        if let Some(token) = self.waiter.take() {
+            token.store(false, Ordering::Release);
+            self.wait_queue.remove_waiter(&token);
+        }
+    }
 }
 
 impl WaitQueue {
     /// Creates a new `WaitQueue`.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn remove_waiter(&self, token: &Arc<AtomicBool>) {
+        self.queue
+            .lock()
+            .retain(|waiter| !Arc::ptr_eq(&waiter.is_active, token));
     }
 
     /// Waits if the given condition is met.
@@ -55,22 +135,14 @@ impl WaitQueue {
         timeout: Option<Duration>,
         condition: impl FnOnce() -> bool,
     ) -> KResult<bool> {
-        let mut condition = Some(condition);
         block_on(interruptible(future::timeout(
             timeout,
-            poll_fn(|cx| {
-                if let Some(cond) = condition.take() {
-                    let mut queue = self.queue.lock();
-                    if !cond() {
-                        Poll::Ready(Ok(false))
-                    } else {
-                        queue.push_back((cx.waker().clone(), bitset));
-                        Poll::Pending
-                    }
-                } else {
-                    Poll::Ready(Ok(true))
-                }
-            }),
+            WaitFuture {
+                wait_queue: self,
+                bitset,
+                condition: Some(condition),
+                waiter: None,
+            },
         )))??
     }
 
@@ -78,11 +150,14 @@ impl WaitQueue {
     /// bitmask.
     pub fn wake(&self, count: usize, mask: u32) -> usize {
         let mut woke = 0;
-        self.queue.lock().retain(|(waker, bitset)| {
-            if woke >= count || (bitset & mask) == 0 {
+        self.queue.lock().retain(|waiter| {
+            if !waiter.is_active.load(Ordering::Acquire) {
+                false
+            } else if woke >= count || (waiter.bitset & mask) == 0 {
                 true
             } else {
-                waker.wake_by_ref();
+                waiter.is_active.store(false, Ordering::Release);
+                waiter.waker.wake_by_ref();
                 woke += 1;
                 false
             }
@@ -92,15 +167,32 @@ impl WaitQueue {
 
     /// Checks if the wait queue is empty.
     pub fn is_empty(&self) -> bool {
-        self.queue.lock().is_empty()
+        let mut queue = self.queue.lock();
+        queue.retain(|waiter| waiter.is_active.load(Ordering::Acquire));
+        queue.is_empty()
     }
 
     /// Requeue at most `count` tasks to the target wait queue.
     pub fn requeue(&self, mut count: usize, target: &WaitQueue) -> usize {
-        let tasks: Vec<_> = {
+        let tasks = {
             let mut wq = self.queue.lock();
-            count = count.min(wq.len());
-            wq.drain(..count).collect()
+            let mut tasks = Vec::new();
+            let mut remaining = VecDeque::new();
+
+            while let Some(waiter) = wq.pop_front() {
+                if !waiter.is_active.load(Ordering::Acquire) {
+                    continue;
+                }
+                if tasks.len() < count {
+                    tasks.push(waiter);
+                } else {
+                    remaining.push_back(waiter);
+                }
+            }
+
+            count = tasks.len();
+            *wq = remaining;
+            tasks
         };
         if !tasks.is_empty() {
             let mut wq = target.queue.lock();

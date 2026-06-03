@@ -186,6 +186,35 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     }
 }
 
+/// Selects a run queue for a task that is becoming runnable from a wakeup.
+#[inline]
+pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
+    let irq_state = G::acquire();
+    #[cfg(not(feature = "smp"))]
+    {
+        let _ = task;
+        KRunQueueRef {
+            inner: unsafe { RUN_QUEUE.current_ref_mut_raw() },
+            state: irq_state,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+    #[cfg(feature = "smp")]
+    {
+        let current_cpu = this_cpu_id();
+        let inner = if task.cpumask().get(current_cpu.as_usize()) {
+            unsafe { RUN_QUEUE.current_ref_mut_raw() }
+        } else {
+            get_run_queue(select_run_queue_index(task.cpumask()))
+        };
+        KRunQueueRef {
+            inner,
+            state: irq_state,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
 #[cfg(feature = "preempt")]
 fn request_resched(cpu_id: LogicalCpuId) {
     if cpu_id == this_cpu_id() {

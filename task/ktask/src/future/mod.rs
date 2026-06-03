@@ -15,7 +15,7 @@ use core::{
 use kerrno::KError;
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::{KtaskRef, WeakKtaskRef, current, current_run_queue, select_run_queue};
+use crate::{KtaskRef, WeakKtaskRef, current, current_run_queue, select_wake_run_queue};
 
 mod poll;
 pub use poll::*;
@@ -45,7 +45,7 @@ impl Wake for KWaker {
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(task) = self.task.upgrade() {
             *self.woke.lock() = true;
-            select_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, true);
+            select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, true);
         }
     }
 }

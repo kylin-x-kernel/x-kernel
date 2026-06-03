@@ -86,11 +86,21 @@ pub fn sys_futex(
                 u32::MAX
             };
 
-            if !futex
+            let wait_result = futex
                 .wq
-                .wait_if(bitset, timeout, || uaddr.read_vm() == Ok(value))?
-            {
-                return Err(KError::WouldBlock);
+                .wait_if(bitset, timeout, || uaddr.read_vm() == Ok(value));
+            match wait_result {
+                Ok(false) => {
+                    return Err(KError::WouldBlock);
+                }
+                Ok(true) => {}
+                Err(err) => {
+                    #[cfg(target_arch = "x86_64")]
+                    if timeout.is_none() && LinuxError::from(err) == LinuxError::EINTR {
+                        return Err(KError::from(LinuxError::ERESTARTSYS));
+                    }
+                    return Err(err);
+                }
             }
 
             if futex.owner_dead.swap(false, Ordering::SeqCst) {

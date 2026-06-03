@@ -12,6 +12,8 @@ use core::{
 
 use kcpu::userspace::UserContext;
 use kerrno::KResult;
+#[cfg(target_arch = "x86_64")]
+use kerrno::LinuxError;
 use kspin::SpinNoIrq;
 use osvm::VirtMutPtr;
 
@@ -103,6 +105,7 @@ impl ThreadSignalManager {
             },
             SignalDisposition::Ignore => None,
             SignalDisposition::Handler(handler) => {
+                prepare_syscall_restart_for_signal(uctx, action.flags);
                 let layout = Layout::new::<SignalFrame>();
                 let stack = self.stack.lock();
                 let sp = if stack.disabled() || !action.flags.contains(SignalActionFlags::ONSTACK) {
@@ -291,3 +294,28 @@ impl ThreadSignalManager {
         self.pending.lock().set | self.proc.pending()
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+fn prepare_syscall_restart_for_signal(uctx: &mut UserContext, flags: SignalActionFlags) {
+    let Some(err) = uctx.syscall_restart_error() else {
+        return;
+    };
+
+    match err {
+        LinuxError::ERESTARTSYS if flags.contains(SignalActionFlags::RESTART) => {
+            uctx.rollback_syscall();
+        }
+        LinuxError::ERESTARTNOINTR => {
+            uctx.rollback_syscall();
+        }
+        LinuxError::ERESTARTSYS
+        | LinuxError::ERESTARTNOHAND
+        | LinuxError::ERESTART_RESTARTBLOCK => {
+            uctx.set_retval(-(LinuxError::EINTR.into_raw() as isize) as usize);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn prepare_syscall_restart_for_signal(_uctx: &mut UserContext, _flags: SignalActionFlags) {}

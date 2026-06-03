@@ -90,16 +90,18 @@ trap_handler_table:
 
 .Ltrap_user:
     swapgs                              # swap in kernel gs
+    push    -1                          # orig_rax: not a syscall
     jmp     .Lexit_user
 
 .Ltrap_kernel:
+    push    -1                          # orig_rax: not a syscall
     PUSH_GENERAL_REGS
 
     mov     rdi, rsp
     call    x86_trap_handler
 
     POP_GENERAL_REGS
-    add     rsp, 16                     # pop vector, error_code
+    add     rsp, 24                     # pop orig_rax, vector, error_code
     iretq
 
 .global syscall_entry
@@ -116,6 +118,7 @@ syscall_entry:
 
     push    0                           # push error_code
     push    {SYSCALL_VECTOR}            # push vector
+    push    rax                         # push orig_rax
 
 .Lexit_user:
     PUSH_GENERAL_REGS
@@ -138,7 +141,7 @@ enter_user:
     swapgs                              # swap in user gs
 
     POP_GENERAL_REGS
-    add rsp, 16                         # pop vector, error_code
+    add rsp, 24                         # pop orig_rax, vector, error_code
 
     # Determine whether to use sysret or iret.
     # If returning to user space with a clean context,

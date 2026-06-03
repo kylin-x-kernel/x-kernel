@@ -53,9 +53,22 @@ pub mod tests_arch {
         let mut ctx = ExceptionContext::default();
         ctx.set_sysno(7);
         assert_eq!(ctx.sysno(), 7);
+        assert_eq!(ctx.orig_sysno(), 7);
         assert_eq!(ctx.retval(), 7);
         ctx.set_retval(9);
-        assert_eq!(ctx.sysno(), 9);
+        assert_eq!(ctx.sysno(), 7);
+        assert_eq!(ctx.orig_sysno(), 7);
         assert_eq!(ctx.retval(), 9);
+    }
+
+    #[def_test]
+    fn test_exception_context_rollback_syscall() {
+        let mut ctx = ExceptionContext::default();
+        ctx.set_sysno(202);
+        ctx.set_ip(0x1002);
+        ctx.set_retval((-512isize) as usize);
+        ctx.rollback_syscall();
+        assert_eq!(ctx.retval(), 202);
+        assert_eq!(ctx.ip(), 0x1000);
     }
 }

@@ -9,6 +9,7 @@
 
 //! Structures and functions for user space.
 
+use kerrno::LinuxError;
 use memaddr::VirtAddr;
 use x86_64::{
     registers::{
@@ -50,6 +51,7 @@ impl UserContext {
                 rflags: RFlags::INTERRUPT_FLAG.bits(), // IOPL = 0, IF = 1
                 rsp: ustack_top.as_usize() as _,
                 ss: gdt::UDATA.0 as _,
+                orig_rax: u64::MAX,
                 ..Default::default()
             },
             fs_base: 0,
@@ -116,6 +118,23 @@ impl UserContext {
 
         karch::enable_local_irq();
         ret
+    }
+
+    /// Returns the saved Linux restart error when this context stopped after a syscall.
+    pub fn syscall_restart_error(&self) -> Option<LinuxError> {
+        if !self.is_from_syscall() {
+            return None;
+        }
+
+        let retval = self.retval() as isize;
+        [
+            LinuxError::ERESTARTSYS,
+            LinuxError::ERESTARTNOINTR,
+            LinuxError::ERESTARTNOHAND,
+            LinuxError::ERESTART_RESTARTBLOCK,
+        ]
+        .into_iter()
+        .find(|err| retval == -(err.into_raw() as isize))
     }
 }
 
