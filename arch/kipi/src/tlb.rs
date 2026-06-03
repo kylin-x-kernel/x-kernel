@@ -11,6 +11,11 @@
 //! and spin-waits until every target CPU has performed the local flush and
 //! acknowledged completion.
 //!
+//! The residency mask is only reset on a **full** TLB flush (`flush_all(None)`),
+//! where every CPU has invalidated all entries.  For single-VA flushes the mask
+//! is preserved so that CPUs are not prematurely removed while still holding
+//! valid TLB entries for other virtual addresses.
+//!
 //! Implements the [`page_table::TlbFlushIf`] interface defined
 //! in the `page_table` crate, breaking the circular dependency between
 //! `page_table` and `kipi`.
@@ -49,7 +54,7 @@ pub trait TaskCpuResidencyIf {
     /// Returns the set of CPUs the current task has been scheduled on.
     fn current_on_cpu_mask() -> KCpuMask;
     /// Resets the current task's residency mask to only the given CPU.
-    fn reset_on_cpu_mask(cpu: LogicalCpuId);
+    fn reset_on_cpu_mask();
 }
 
 /// Mark that all secondary CPUs have entered the runtime.
@@ -71,10 +76,6 @@ impl TlbFlushIf for TlbFlushImpl {
 
         let my_cpu = this_cpu_id();
 
-        // Query the current task's CPU residency to determine shootdown scope.
-        let target_mask =
-            crate_interface::call_interface!(TaskCpuResidencyIf::current_on_cpu_mask());
-
         // Publish the target address.
         match vaddr {
             Some(va) => {
@@ -86,7 +87,9 @@ impl TlbFlushIf for TlbFlushImpl {
             }
         }
 
-        // Collect target CPUs (all in mask except self).
+        // Collect target CPUs from the residency mask.
+        let target_mask =
+            crate_interface::call_interface!(TaskCpuResidencyIf::current_on_cpu_mask());
         let targets: [Option<LogicalCpuId>; kbuild_config::CPU_NUM] = {
             let mut buf = [None; kbuild_config::CPU_NUM];
             let mut idx = 0;
@@ -99,35 +102,35 @@ impl TlbFlushIf for TlbFlushImpl {
             buf
         };
 
-        let has_targets = targets[0].is_some();
-        if !has_targets {
-            return;
-        }
+        if targets[0].is_some() {
+            // Reset completion and set pending for target CPUs.
+            for target in targets.iter().flatten() {
+                let i = target.as_usize();
+                COMPLETED[i].store(false, Ordering::Relaxed);
+                PENDING[i].store(true, Ordering::Release);
+            }
 
-        // Reset completion and set pending for target CPUs.
-        for target in targets.iter().flatten() {
-            let i = target.as_usize();
-            COMPLETED[i].store(false, Ordering::Relaxed);
-            PENDING[i].store(true, Ordering::Release);
-        }
+            core::sync::atomic::fence(Ordering::SeqCst);
 
-        // Ensure the shared state is visible before the IPI lands.
-        core::sync::atomic::fence(Ordering::SeqCst);
+            for target in targets.iter().flatten() {
+                khal::irq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
+            }
 
-        // Send targeted IPIs.
-        for target in targets.iter().flatten() {
-            khal::irq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
-        }
-
-        // Spin-wait until every target CPU has completed its flush.
-        for target in targets.iter().flatten() {
-            while !COMPLETED[target.as_usize()].load(Ordering::Acquire) {
-                core::hint::spin_loop();
+            for target in targets.iter().flatten() {
+                while !COMPLETED[target.as_usize()].load(Ordering::Acquire) {
+                    core::hint::spin_loop();
+                }
             }
         }
 
-        // After shootdown, reset residency to current CPU only.
-        crate_interface::call_interface!(TaskCpuResidencyIf::reset_on_cpu_mask(my_cpu));
+        // Only reset the mask on a full TLB flush: after flush_all(None),
+        // every CPU has invalidated *all* TLB entries for this address space,
+        // so each thread only needs to track its current CPU.  For a single-VA
+        // flush, the mask must be preserved — CPUs that were flushed for this
+        // VA still hold valid entries for other VAs.
+        if vaddr.is_none() {
+            crate_interface::call_interface!(TaskCpuResidencyIf::reset_on_cpu_mask());
+        }
     }
 }
 

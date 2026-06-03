@@ -58,6 +58,7 @@ memspace = { workspace = true }
 knet = { workspace = true, optional = true }
 kplat = { workspace = true }
 ktask = { workspace = true }
+kthread = { workspace = true }
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 chrono.workspace = true

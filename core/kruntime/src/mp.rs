@@ -9,6 +9,7 @@ use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
 use kernel_boot::{SECOND_KERNEL_ENTRY, register_boot_init};
 use khal::mem::{VirtAddr, v2p};
+use kthread::AsThread;
 
 #[unsafe(link_section = ".bss.stack")]
 static mut SECONDARY_BOOT_STACK: [[u8; TASK_STACK_SIZE]; CPU_NUM - 1] =
@@ -91,15 +92,46 @@ struct TaskCpuResidencyImpl;
 #[crate_interface::impl_interface]
 impl kipi::tlb::TaskCpuResidencyIf for TaskCpuResidencyImpl {
     fn current_on_cpu_mask() -> kcpu_id_map::KCpuMask {
-        ktask::current_may_uninit()
-            .map(|t| t.on_cpu_mask())
-            .unwrap_or_default()
+        let Some(current) = ktask::current_may_uninit() else {
+            return kcpu_id_map::KCpuMask::new();
+        };
+        // Kernel tasks (e.g. during boot) don't have a Thread; fall back to
+        // the current task's mask only.
+        let Some(thread) = current.try_as_thread() else {
+            return current.on_cpu_mask();
+        };
+        // Collect on_cpu_mask from all threads sharing the same address space.
+        // Per-task masks alone may not cover all CPUs running sibling threads,
+        // which would cause TLB shootdowns to miss those CPUs.
+        let mut mask = current.on_cpu_mask();
+        for tid in thread.proc_state.proc.threads() {
+            if let Ok(task) = kthread::get_task(tid) {
+                mask |= task.on_cpu_mask();
+            }
+        }
+        mask
     }
 
-    fn reset_on_cpu_mask(cpu: kcpu_id_map::LogicalCpuId) {
-        if let Some(t) = ktask::current_may_uninit() {
-            t.reset_on_cpu_mask(cpu);
+    fn reset_on_cpu_mask() {
+        let Some(current) = ktask::current_may_uninit() else {
+            return;
+        };
+        // Kernel tasks don't have a Thread; fall back to the current task.
+        let Some(thread) = current.try_as_thread() else {
+            current.reset_on_cpu_mask(khal::percpu::this_cpu_id());
+            return;
+        };
+        // Reset every thread's mask to its own current CPU — the shootdown has
+        // just invalidated stale TLB entries on all targeted CPUs, so each
+        // thread only needs to track the CPU it is currently on.
+        for tid in thread.proc_state.proc.threads() {
+            if let Ok(task) = kthread::get_task(tid) {
+                task.reset_on_cpu_mask(task.cpu_id());
+            }
         }
+        // Ensure the current task's mask always reflects this CPU, even if
+        // task.cpu_id() hasn't been updated by the scheduler yet.
+        current.reset_on_cpu_mask(khal::percpu::this_cpu_id());
     }
 }
 
@@ -137,19 +169,19 @@ mod tests_tlb_shootdown {
             let raw = crate_interface::call_interface!(
                 kipi::tlb::TaskCpuResidencyIf::current_on_cpu_mask()
             );
-            // reset_on_cpu_mask(this_cpu_id()) keeps the current CPU bit, so raw
+            // raw mask includes this_cpu_id() in addition to the bits we set.
             // includes this_cpu_id() in addition to the bits we set.
             assert!(raw.get(0));
             assert!(raw.get(2));
             assert!(raw.get(this_cpu_id().as_usize()));
 
-            crate_interface::call_interface!(kipi::tlb::TaskCpuResidencyIf::reset_on_cpu_mask(
-                LogicalCpuId::new(1)
-            ));
+            crate_interface::call_interface!(kipi::tlb::TaskCpuResidencyIf::reset_on_cpu_mask());
             let mask = task.on_cpu_mask();
-            assert!(!mask.get(0));
-            assert!(!mask.get(2));
-            assert!(mask.get(1));
+            // reset_on_cpu_mask resets each thread's mask to the CPU it is
+            // currently running on.
+            assert!(mask.get(this_cpu_id().as_usize()));
+            assert!(!mask.get(0) || this_cpu_id().as_usize() == 0);
+            assert!(!mask.get(2) || this_cpu_id().as_usize() == 2);
         }
     }
 
@@ -215,7 +247,9 @@ mod tests_tlb_shootdown {
     ///
     /// Creates a real page table, maps a page (setting ToFlush::Addresses),
     /// then drops the PageTableMut which calls finish() → flush_tlb_all_cpus
-    /// → flush_all → targeted IPI → completion → mask reset.
+    /// → flush_remote → targeted IPI → completion.
+    /// Single-VA flushes do **not** reset the residency mask (only full flushes
+    /// do), so the remote CPU bit remains set.
     #[def_test(serial)]
     fn test_finish_triggers_cross_cpu_flush() {
         let cpu_num = kbuild_config::CPU_NUM;
@@ -239,27 +273,24 @@ mod tests_tlb_shootdown {
                 khal::paging::MappingFlags::READ,
             );
 
-            // Dropping pt_mut calls finish() → flush_tlb_all_cpus → flush_all.
+            // Dropping pt_mut calls finish() → flush_tlb_all_cpus → flush_remote.
             // On architectures without hardware broadcast (x86_64, riscv64), this sends IPIs.
             // If the remote CPU doesn't respond, this hangs.
             drop(pt_mut);
 
             // If we reach here, finish() → flush_tlb_all_cpus completed.
-            #[cfg(not(target_arch = "aarch64"))]
+            // Single-VA flush preserves the mask — only full flushes reset it.
+            // The remote CPU was flushed for this specific VA, but the mask bit
+            // stays so future shootdowns for other VAs will still target it.
             {
                 let mask = task.on_cpu_mask();
                 assert!(mask.get(my_cpu.as_usize()));
-                assert!(!mask.get(remote_cpu.as_usize()));
+                // Remote CPU bit is still present (mask not reset on single-VA).
+                assert!(mask.get(remote_cpu.as_usize()));
             }
 
-            #[cfg(target_arch = "aarch64")]
-            {
-                // AArch64 implements flush_tlb_all_cpus using IS (Inner Shareable) hardware
-                // broadcast instructions. It does not invoke software IPIs, so the mask
-                // remains unmodified ({my_cpu, remote_cpu}). We reset it manually to keep
-                // state clean — the task is still running on my_cpu.
-                task.reset_on_cpu_mask(my_cpu);
-            }
+            // Clean up: manually reset mask.
+            task.reset_on_cpu_mask(my_cpu);
         }
     }
 
