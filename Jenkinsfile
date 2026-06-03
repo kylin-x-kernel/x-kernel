@@ -300,6 +300,7 @@ def checkBuildEnvironment() {
 set -euo pipefail
 ${stageLogTeeLine(setupStageName())}
 scripts/ci/check_build_environment.sh
+ln -sf /usr/local/bin/riscv64-linux-musl-gcc /usr/local/bin/riscv64gc-linux-musl-gcc
 """
     }
 }
