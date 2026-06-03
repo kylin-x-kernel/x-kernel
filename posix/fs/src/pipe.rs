@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use bitflags::bitflags;
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use kfd::FileLike;
 use kservices::file::Pipe;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
@@ -21,7 +21,7 @@ use posix_types::UserPtr;
 bitflags! {
     /// Flags for the `pipe2` syscall.
     #[derive(Debug, Clone, Copy, Default)]
-    pub struct PipeFlags: u32 {
+    struct PipeFlags: u32 {
         /// Create a pipe with close-on-exec flag.
         const CLOEXEC = O_CLOEXEC;
         /// Create a non-blocking pipe.
@@ -31,13 +31,7 @@ bitflags! {
 
 /// Creates a pipe and returns the read/write file descriptors.
 pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
-    let flags = {
-        let new_flags = PipeFlags::from_bits_truncate(flags);
-        if new_flags.bits() != flags {
-            warn!("sys_pipe2 <= unrecognized flags: {flags}");
-        }
-        new_flags
-    };
+    let flags = PipeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
 
     let cloexec = flags.contains(PipeFlags::CLOEXEC);
     let (read_end, write_end) = Pipe::new();
@@ -49,7 +43,11 @@ pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
     let read_fd = resources.add_file_like(Arc::new(read_end), cloexec)?;
     let write_fd = resources
         .add_file_like(Arc::new(write_end), cloexec)
-        .inspect_err(|_| resources.close_file_like(read_fd).unwrap())?;
+        .inspect_err(|_| {
+            if let Err(err) = resources.close_file_like(read_fd) {
+                warn!("sys_pipe2 cleanup failed for read fd {read_fd}: {err:?}");
+            }
+        })?;
 
     fds.write_vm([read_fd, write_fd])?;
 

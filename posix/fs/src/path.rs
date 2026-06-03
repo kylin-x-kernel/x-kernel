@@ -18,7 +18,7 @@ use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_NOF
 ///
 /// If `dirfd` is `AT_FDCWD`, uses the current directory context.
 /// Otherwise, resolves the directory from the given file descriptor and uses it as the base.
-pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
+pub(crate) fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
     let fs_context = kthread::current_fs_context();
     let mut fs = fs_context.lock();
     if dirfd == AT_FDCWD {
@@ -32,7 +32,7 @@ pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) ->
 
 /// The coarse shape of a path string before any runtime resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathKind {
+pub(crate) enum PathKind {
     /// The path string is empty.
     Empty,
     /// The path string is relative.
@@ -43,7 +43,7 @@ pub enum PathKind {
 
 impl PathKind {
     /// Classify a raw path string by its leading form.
-    pub fn classify(path: &str) -> Self {
+    pub(crate) fn classify(path: &str) -> Self {
         if path.is_empty() {
             Self::Empty
         } else if path.starts_with('/') {
@@ -56,7 +56,7 @@ impl PathKind {
 
 /// Whether a path is a procfd path, and if so, its parsed components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParsedProcFdPath {
+pub(crate) enum ParsedProcFdPath {
     /// Not a `/proc/.../fd/...` path.
     NotProcFd,
     /// A procfd path with invalid syntax.
@@ -67,7 +67,7 @@ pub enum ParsedProcFdPath {
 
 /// High-level classification of a raw path string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClassifiedPath {
+pub(crate) enum ClassifiedPath {
     /// A normal path string, classified only by leading form.
     Plain(PathKind),
     /// A successfully parsed `/proc/<pid>/fd/<fd>` path.
@@ -78,13 +78,13 @@ pub enum ClassifiedPath {
 
 /// Parsed components of a `/proc/<pid>/fd/<fd>` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcFdPath {
-    pub pid: u32,
-    pub fd: c_int,
+pub(crate) struct ProcFdPath {
+    pub(crate) pid: u32,
+    pub(crate) fd: c_int,
 }
 
 /// Classifies a raw path string without touching runtime state.
-pub fn classify_path(path: &str, current_pid: u32) -> ClassifiedPath {
+pub(crate) fn classify_path(path: &str, current_pid: u32) -> ClassifiedPath {
     match classify_procfd_path(path, current_pid) {
         ParsedProcFdPath::NotProcFd => ClassifiedPath::Plain(PathKind::classify(path)),
         ParsedProcFdPath::Invalid => ClassifiedPath::InvalidProcFd,
@@ -95,7 +95,7 @@ pub fn classify_path(path: &str, current_pid: u32) -> ClassifiedPath {
 /// Classifies a path as a procfd reference, returning parsed pid and fd.
 ///
 /// Supports `/proc/self/fd/<fd>` and `/proc/<pid>/fd/<fd>` forms.
-pub fn classify_procfd_path(path: &str, current_pid: u32) -> ParsedProcFdPath {
+pub(crate) fn classify_procfd_path(path: &str, current_pid: u32) -> ParsedProcFdPath {
     let Some(rest) = path.strip_prefix("/proc/") else {
         return ParsedProcFdPath::NotProcFd;
     };
@@ -128,15 +128,14 @@ pub fn classify_procfd_path(path: &str, current_pid: u32) -> ParsedProcFdPath {
 
 /// Result of resolving a path at a given directory.
 #[derive(Clone)]
-pub enum ResolveAtResult {
+pub(crate) enum ResolveAtResult {
     File(Location),
     Other(Arc<dyn FileLike>),
 }
 
 #[derive(Clone)]
-pub struct ResolvedPath {
+pub(crate) struct ResolvedPath {
     target: ResolveAtResult,
-    display_path: String,
     kind: ResolvedPathKind,
 }
 
@@ -146,20 +145,20 @@ enum ResolvedPathKind {
     ProcFd,
 }
 
-pub enum PathSource {
+pub(crate) enum PathSource {
     Path(String),
     Resolved(ResolvedPath),
 }
 
 impl ResolveAtResult {
-    pub fn into_file(self) -> Option<Location> {
+    pub(crate) fn into_file(self) -> Option<Location> {
         match self {
             Self::File(file) => Some(file),
             Self::Other(_) => None,
         }
     }
 
-    pub fn stat(&self) -> KResult<Kstat> {
+    pub(crate) fn stat(&self) -> KResult<Kstat> {
         match self {
             Self::File(file) => file.metadata().map(Kstat::from),
             Self::Other(file_like) => file_like.stat(),
@@ -168,38 +167,32 @@ impl ResolveAtResult {
 }
 
 impl ResolvedPath {
-    fn from_file_like(display_path: String, file_like: Arc<dyn FileLike>) -> KResult<Self> {
+    fn from_file_like(file_like: Arc<dyn FileLike>) -> KResult<Self> {
         Ok(Self {
             target: resolve_result_from_file_like(file_like)?,
-            display_path,
             kind: ResolvedPathKind::FilesystemObject,
         })
     }
 
-    fn from_procfd_file_like(display_path: String, file_like: Arc<dyn FileLike>) -> KResult<Self> {
+    fn from_procfd_file_like(file_like: Arc<dyn FileLike>) -> KResult<Self> {
         Ok(Self {
             target: ResolveAtResult::File(file_like_location(file_like)?),
-            display_path,
             kind: ResolvedPathKind::ProcFd,
         })
     }
 
-    pub fn display_path(&self) -> &str {
-        &self.display_path
-    }
-
-    pub fn location(&self) -> Option<Location> {
+    pub(crate) fn location(&self) -> Option<Location> {
         match &self.target {
             ResolveAtResult::File(location) => Some(location.clone()),
             ResolveAtResult::Other(_) => None,
         }
     }
 
-    pub fn is_procfd(&self) -> bool {
+    pub(crate) fn is_procfd(&self) -> bool {
         matches!(self.kind, ResolvedPathKind::ProcFd)
     }
 
-    pub fn into_result(self) -> ResolveAtResult {
+    pub(crate) fn into_result(self) -> ResolveAtResult {
         self.target
     }
 }
@@ -232,7 +225,7 @@ fn resolve_empty_path(dirfd: c_int, flags: u32) -> KResult<PathSource> {
     }
     let proc_state = current_process_state();
     let file_like = proc_state.resources.get_file_like(dirfd)?;
-    ResolvedPath::from_file_like(file_like.path().into_owned(), file_like).map(PathSource::Resolved)
+    ResolvedPath::from_file_like(file_like).map(PathSource::Resolved)
 }
 
 fn is_live_procfd_path(path: &str) -> bool {
@@ -251,7 +244,7 @@ fn resolve_live_procfd(path: &str) -> KResult<Option<ResolvedPath>> {
     };
 
     let file_like = procfd_entry(procfd.pid, procfd.fd)?;
-    ResolvedPath::from_procfd_file_like(path.to_owned(), file_like).map(Some)
+    ResolvedPath::from_procfd_file_like(file_like).map(Some)
 }
 
 fn resolve_nonempty_path_source(path: &str, flags: u32) -> KResult<PathSource> {
@@ -263,14 +256,18 @@ fn resolve_nonempty_path_source(path: &str, flags: u32) -> KResult<PathSource> {
     Ok(PathSource::Path(path.to_owned()))
 }
 
-pub fn resolve_path_source(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<PathSource> {
+pub(crate) fn resolve_path_source(
+    dirfd: c_int,
+    path: Option<&str>,
+    flags: u32,
+) -> KResult<PathSource> {
     match path {
         Some(path) if !path.is_empty() => resolve_nonempty_path_source(path, flags),
         _ => resolve_empty_path(dirfd, flags),
     }
 }
 
-pub fn resolve_open_path_source(
+pub(crate) fn resolve_open_path_source(
     dirfd: c_int,
     path: Option<&str>,
     open_flags: u32,
@@ -303,7 +300,7 @@ fn resolve_filesystem_path(dirfd: c_int, path: &str, flags: u32) -> KResult<Loca
     })
 }
 
-pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
+pub(crate) fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
     match resolve_path_source(dirfd, path, flags)? {
         PathSource::Resolved(path) => Ok(path.into_result()),
         PathSource::Path(path) => {

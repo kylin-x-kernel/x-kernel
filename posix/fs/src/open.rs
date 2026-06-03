@@ -97,7 +97,7 @@ fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
                     } else if let Some(pts) = term.downcast_ref::<tty::PtyDriver>() {
                         format!("/dev/pts/{}", pts.pty_number())
                     } else {
-                        panic!("unknown terminal type")
+                        return Err(KError::OperationNotSupported);
                     };
                     let loc = kthread::current_process_fs_context()
                         .lock()

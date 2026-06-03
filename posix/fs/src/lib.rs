@@ -25,6 +25,6 @@ mod stat;
 mod sync;
 
 pub use self::{
-    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, path::*, pipe::*,
-    stat::*, sync::*,
+    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, pipe::*, stat::*,
+    sync::*,
 };

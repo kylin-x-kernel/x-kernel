@@ -395,6 +395,9 @@ pub fn sys_pwrite64(
     offset: __kernel_off_t,
 ) -> KResult<isize> {
     // Write to file at specific offset without changing file position
+    if offset < 0 {
+        return Err(KError::InvalidInput);
+    }
     if len == 0 {
         return Ok(0);
     }
@@ -411,6 +414,9 @@ pub fn sys_preadv(
     offset: __kernel_off_t,
 ) -> KResult<isize> {
     // Vectored read at specific offset - delegates to preadv2 with flags=0
+    if offset < 0 {
+        return Err(KError::InvalidInput);
+    }
     sys_preadv2(fd, iov, iovcnt, offset, 0)
 }
 
@@ -422,6 +428,9 @@ pub fn sys_pwritev(
     offset: __kernel_off_t,
 ) -> KResult<isize> {
     // Vectored write at specific offset - delegates to pwritev2 with flags=0
+    if offset < 0 {
+        return Err(KError::InvalidInput);
+    }
     sys_pwritev2(fd, iov, iovcnt, offset, 0)
 }
 
@@ -431,13 +440,23 @@ pub fn sys_preadv2(
     iov: UserConstPtr<IoVec>,
     iovcnt: usize,
     offset: __kernel_off_t,
-    _flags: u32,
+    flags: u32,
 ) -> KResult<isize> {
-    debug!("sys_preadv2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
+    debug!("sys_preadv2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {flags}");
     // Vectored read at specific offset with optional flags
+    if offset < -1 {
+        return Err(KError::InvalidInput);
+    }
+    if flags != 0 {
+        return Err(KError::Unsupported);
+    }
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    f.read_at(iov.into_io(), offset as _).map(|n| n as _)
+    if offset == -1 {
+        f.read(iov.into_io()).map(|n| n as _)
+    } else {
+        f.read_at(iov.into_io(), offset as _).map(|n| n as _)
+    }
 }
 
 /// Vectored write at a given offset with flags.
@@ -446,13 +465,23 @@ pub fn sys_pwritev2(
     iov: UserConstPtr<IoVec>,
     iovcnt: usize,
     offset: __kernel_off_t,
-    _flags: u32,
+    flags: u32,
 ) -> KResult<isize> {
-    debug!("sys_pwritev2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
+    debug!("sys_pwritev2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {flags}");
     // Vectored write at specific offset with optional flags.
+    if offset < -1 {
+        return Err(KError::InvalidInput);
+    }
+    if flags != 0 {
+        return Err(KError::Unsupported);
+    }
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    f.write_at(iov.into_io(), offset as _).map(|n| n as _)
+    if offset == -1 {
+        f.write(iov.into_io()).map(|n| n as _)
+    } else {
+        f.write_at(iov.into_io(), offset as _).map(|n| n as _)
+    }
 }
 
 /// Helper for sendfile and copy_file_range operations
@@ -480,7 +509,10 @@ impl SendFile {
                 // Read from fixed offset and update offset pointer
                 let off = offset.read_vm()?;
                 let bytes_read = file.read_at(&mut buf, off)?;
-                offset.write_vm(off + bytes_read as u64)?;
+                let new_off = off
+                    .checked_add(bytes_read as u64)
+                    .ok_or(KError::InvalidInput)?;
+                offset.write_vm(new_off)?;
                 Ok(bytes_read)
             }
         }
@@ -494,7 +526,10 @@ impl SendFile {
                 // Write at fixed offset and update offset pointer
                 let off = offset.read_vm()?;
                 let bytes_written = file.write_at(buf, off)?;
-                offset.write_vm(off + bytes_written as u64)?;
+                let new_off = off
+                    .checked_add(bytes_written as u64)
+                    .ok_or(KError::InvalidInput)?;
+                offset.write_vm(new_off)?;
                 Ok(bytes_written)
             }
         }
@@ -579,7 +614,7 @@ pub fn sys_copy_file_range(
     fd_out: c_int,
     off_out: UserPtr<u64>,
     len: usize,
-    _flags: u32,
+    flags: u32,
 ) -> KResult<isize> {
     debug!(
         "sys_copy_file_range <= fd_in: {}, off_in: {}, fd_out: {}, off_out: {}, len: {}, flags: {}",
@@ -588,10 +623,12 @@ pub fn sys_copy_file_range(
         fd_out,
         !off_out.is_null(),
         len,
-        _flags
+        flags
     );
 
-    // TODO: check flags
+    if flags != 0 {
+        return Err(KError::InvalidInput);
+    }
     // TODO: check both regular files
     // TODO: check same file and overlap
 
