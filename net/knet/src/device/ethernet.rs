@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Ethernet device adapter for the smoltcp stack.
-use alloc::{string::String, vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::task::Waker;
 
 use hashbrown::HashMap;
@@ -42,7 +42,7 @@ pub struct EthernetDevice {
     pending_tx: PacketBuffer<'static, IpAddress>,
 }
 impl EthernetDevice {
-    const NEIGHBOR_TTL: Duration = Duration::from_secs(60);
+    const NEIGHBOR_TTL: Duration = Duration::from_secs(300);
 
     /// Create a new Ethernet device wrapper.
     pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
@@ -172,7 +172,7 @@ impl EthernetDevice {
     fn handle_arp_packet(&mut self, payload: &[u8], now: Instant) {
         let Ok(repr) = ArpPacket::new_checked(payload).and_then(|packet| ArpRepr::parse(&packet))
         else {
-            warn!("Dropping malformed ARP packet");
+            debug!("Dropping malformed ARP packet");
             return;
         };
 
@@ -235,35 +235,51 @@ impl EthernetDevice {
                 });
             }
 
-            if self
-                .pending_tx
-                .peek()
-                .is_ok_and(|it| it.0 == &IpAddress::Ipv4(source_protocol_addr))
-            {
-                while let Ok((&next_hop, buf)) = self.pending_tx.peek() {
-                    // TODO: optimize logic such that one long-pending ARP
-                    // request does not block all other packets
+            enum PendingAction {
+                Send(EthernetAddress),
+                Keep,
+                Refresh,
+            }
 
-                    let Some(Some(neighbor)) = self.neighbors.get(&next_hop) else {
-                        break;
-                    };
-                    if neighbor.expires_at <= now {
-                        // Neighbor is expired, we need to request ARP again
-                        self.send_arp_request(next_hop);
-                        break;
+            let mut kept_packets = Vec::with_capacity(ETHERNET_MAX_PENDING_PACKETS);
+            for _ in 0..ETHERNET_MAX_PENDING_PACKETS {
+                let Ok((&next_hop, buf)) = self.pending_tx.peek() else {
+                    break;
+                };
+
+                let payload = buf.to_vec();
+                let action = match self.neighbors.get(&next_hop) {
+                    Some(Some(neighbor)) if neighbor.expires_at > now => {
+                        PendingAction::Send(neighbor.hardware_address)
                     }
+                    Some(Some(_)) => PendingAction::Refresh,
+                    _ => PendingAction::Keep,
+                };
 
-                    self.inner.with_mut(|inner| {
-                        Self::send_to(
-                            inner.as_mut(),
-                            neighbor.hardware_address,
-                            buf.len(),
-                            |b| b.copy_from_slice(buf),
-                            EthernetProtocol::Ipv4,
-                        );
-                    });
-                    let _ = self.pending_tx.dequeue();
+                let _ = self.pending_tx.dequeue();
+                match action {
+                    PendingAction::Send(hardware_address) => Self::send_to(
+                        &mut self.inner,
+                        hardware_address,
+                        payload.len(),
+                        |b| b.copy_from_slice(&payload),
+                        EthernetProtocol::Ipv4,
+                    ),
+                    PendingAction::Keep => kept_packets.push((next_hop, payload)),
+                    PendingAction::Refresh => {
+                        self.neighbors.remove(&next_hop);
+                        self.send_arp_request(next_hop);
+                        kept_packets.push((next_hop, payload));
+                    }
                 }
+            }
+
+            for (next_hop, payload) in kept_packets {
+                let Ok(buf) = self.pending_tx.enqueue(payload.len(), next_hop) else {
+                    warn!("Pending packets buffer is full, dropping packet");
+                    continue;
+                };
+                buf.copy_from_slice(&payload);
             }
         }
     }

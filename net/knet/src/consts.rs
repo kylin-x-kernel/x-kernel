@@ -27,4 +27,4 @@ pub const RAW_TX_BUF_LEN: usize = 64 * 1024;
 pub const LISTEN_QUEUE_SIZE: usize = 512;
 
 pub const SOCKET_BUFFER_SIZE: usize = 64;
-pub const ETHERNET_MAX_PENDING_PACKETS: usize = 32;
+pub const ETHERNET_MAX_PENDING_PACKETS: usize = 128;
