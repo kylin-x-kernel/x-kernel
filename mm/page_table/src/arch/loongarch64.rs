@@ -147,9 +147,16 @@ impl PagingMetaData for LA64MetaData {
 
     #[cfg(feature = "smp")]
     #[inline]
+    fn flush_tlb_process(vaddr: Option<VirtAddr>) {
+        karch::flush_tlb(vaddr);
+        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_process(vaddr));
+    }
+
+    #[cfg(feature = "smp")]
+    #[inline]
     fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
         karch::flush_tlb(vaddr);
-        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_all(vaddr));
+        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_all_cpus(vaddr));
     }
 }
 

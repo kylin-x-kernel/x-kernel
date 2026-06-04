@@ -73,18 +73,43 @@ impl AddrSpace {
         self.range.contains(start) && (self.range.end - start) >= size
     }
 
-    /// Creates a new empty address space.
-    pub fn new_empty(base: VirtAddr, size: usize) -> KResult<Self> {
+    /// Creates a new empty user address space.
+    ///
+    /// The returned address space uses a user page table; TLB shootdowns for
+    /// page table modifications are scoped to the current task's CPU residency
+    /// mask.
+    pub fn new_empty_user(base: VirtAddr, size: usize) -> KResult<Self> {
+        Self::new_empty_inner(base, size, false)
+    }
+
+    /// Creates a new empty kernel address space.
+    ///
+    /// The returned address space uses a kernel page table; TLB shootdowns for
+    /// page table modifications are broadcast to **all** online CPUs.
+    pub fn new_empty_kernel(base: VirtAddr, size: usize) -> KResult<Self> {
+        Self::new_empty_inner(base, size, true)
+    }
+
+    /// Internal helper: creates a new empty address space.
+    ///
+    /// Set `is_kernel` to `true` for the global kernel address space so that
+    /// page table modifications flush TLB entries on **all** online CPUs.
+    fn new_empty_inner(base: VirtAddr, size: usize, is_kernel: bool) -> KResult<Self> {
+        let pgtbl = if is_kernel {
+            PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
+        } else {
+            PageTable::try_new().map_err(|_| KError::NoMemory)?
+        };
         Ok(Self {
             range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
-            pgtbl: PageTable::try_new().map_err(|_| KError::NoMemory)?,
+            pgtbl,
         })
     }
 
     /// Creates a new empty user address space with the standard user-space range.
     pub fn new_user_empty() -> KResult<Self> {
-        let mut aspace = Self::new_empty(
+        let mut aspace = Self::new_empty_user(
             VirtAddr::from_usize(kaddr_layout::USER_SPACE_BASE),
             kaddr_layout::USER_SPACE_SIZE,
         )?;
@@ -485,7 +510,7 @@ impl AddrSpace {
     /// size, then iterates over all memory areas in the original address
     /// space to copy or share their mappings into the new one.
     pub fn try_clone(&mut self) -> KResult<Arc<Mutex<Self>>> {
-        let new_aspace = Arc::new(Mutex::new(Self::new_empty(self.base(), self.size())?));
+        let new_aspace = Arc::new(Mutex::new(Self::new_empty_user(self.base(), self.size())?));
         let new_aspace_clone = new_aspace.clone();
 
         let mut guard = new_aspace.lock();

@@ -5,16 +5,28 @@
 //! TLB shootdown via IPI.
 //!
 //! When one CPU modifies page tables, other CPUs may hold stale TLB entries.
-//! This module provides a zero-allocation shootdown mechanism: the initiator
-//! stores the target virtual address in shared statics, sends IPIs to the
-//! CPUs that the current task has been scheduled on (tracked by `on_cpu_mask`),
+//! This module provides two IPI-based shootdown paths:
+//!
+//! 1. **Per-process flush** (`flush_process`): the initiator sends IPIs only to
+//!    the CPUs that the current task has been scheduled on (tracked by
+//!    `on_cpu_mask`).  Used for user page table modifications whose visibility
+//!    is scoped to a single address space.
+//!
+//! 2. **All-CPU flush** (`flush_all_cpus`): the initiator broadcasts IPIs to
+//!    **all** online CPUs via `for_each_present_logical_cpu()`.  Used for kernel
+//!    page table modifications that are shared globally and must be visible on
+//!    every CPU.
+//!
+//! Both paths share a zero-allocation shootdown mechanism: the initiator stores
+//! the target virtual address in shared statics, sends IPIs to the target CPUs,
 //! and spin-waits until every target CPU has performed the local flush and
 //! acknowledged completion.
 //!
-//! The residency mask is only reset on a **full** TLB flush (`flush_all(None)`),
-//! where every CPU has invalidated all entries.  For single-VA flushes the mask
-//! is preserved so that CPUs are not prematurely removed while still holding
-//! valid TLB entries for other virtual addresses.
+//! The residency mask is only reset on a **full** TLB flush
+//! (`flush_process(None)` or `flush_all_cpus(None)`), where every target CPU
+//! has invalidated all entries.  For single-VA flushes the mask is preserved
+//! so that CPUs are not prematurely removed while still holding valid TLB
+//! entries for other virtual addresses.
 //!
 //! Implements the [`page_table::TlbFlushIf`] interface defined
 //! in the `page_table` crate, breaking the circular dependency between
@@ -22,7 +34,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, for_each_present_logical_cpu};
 use khal::{
     irq::{IPI_IRQ, TargetCpu},
     percpu::this_cpu_id,
@@ -69,68 +81,86 @@ struct TlbFlushImpl;
 
 #[crate_interface::impl_interface]
 impl TlbFlushIf for TlbFlushImpl {
-    fn flush_all(vaddr: Option<VirtAddr>) {
+    fn flush_process(vaddr: Option<VirtAddr>) {
         if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
             return;
         }
+        flush_remote(
+            vaddr,
+            crate_interface::call_interface!(TaskCpuResidencyIf::current_on_cpu_mask()),
+        );
+    }
 
-        let my_cpu = this_cpu_id();
+    fn flush_all_cpus(vaddr: Option<VirtAddr>) {
+        if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
+            return;
+        }
+        // Build a mask of all online CPUs — the kernel page table is
+        // shared globally, so every CPU may hold stale entries.
+        let mut all_mask = KCpuMask::new();
+        for_each_present_logical_cpu(|cpu| {
+            all_mask.set(cpu.as_usize(), true);
+        });
+        flush_remote(vaddr, all_mask);
+    }
+}
 
-        // Publish the target address.
-        match vaddr {
-            Some(va) => {
-                SHOOTDOWN_FLUSH_ALL.store(false, Ordering::Relaxed);
-                SHOOTDOWN_VADDR.store(va.as_usize(), Ordering::Relaxed);
-            }
-            None => {
-                SHOOTDOWN_FLUSH_ALL.store(true, Ordering::Relaxed);
+/// Shared shootdown logic: publish `vaddr`, send IPIs to every CPU set in
+/// `target_mask` (except self), spin-wait for completion, and reset
+/// residency masks on full flushes.
+fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
+    let my_cpu = this_cpu_id();
+
+    // Publish the target address.
+    match vaddr {
+        Some(va) => {
+            SHOOTDOWN_FLUSH_ALL.store(false, Ordering::Relaxed);
+            SHOOTDOWN_VADDR.store(va.as_usize(), Ordering::Relaxed);
+        }
+        None => {
+            SHOOTDOWN_FLUSH_ALL.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let targets: [Option<LogicalCpuId>; kbuild_config::CPU_NUM] = {
+        let mut buf = [None; kbuild_config::CPU_NUM];
+        let mut idx = 0;
+        for cpu in target_mask.iter_logical() {
+            if cpu != my_cpu {
+                buf[idx] = Some(cpu);
+                idx += 1;
             }
         }
+        buf
+    };
 
-        // Collect target CPUs from the residency mask.
-        let target_mask =
-            crate_interface::call_interface!(TaskCpuResidencyIf::current_on_cpu_mask());
-        let targets: [Option<LogicalCpuId>; kbuild_config::CPU_NUM] = {
-            let mut buf = [None; kbuild_config::CPU_NUM];
-            let mut idx = 0;
-            for cpu in target_mask.iter_logical() {
-                if cpu != my_cpu {
-                    buf[idx] = Some(cpu);
-                    idx += 1;
-                }
-            }
-            buf
-        };
-
-        if targets[0].is_some() {
-            // Reset completion and set pending for target CPUs.
-            for target in targets.iter().flatten() {
-                let i = target.as_usize();
-                COMPLETED[i].store(false, Ordering::Relaxed);
-                PENDING[i].store(true, Ordering::Release);
-            }
-
-            core::sync::atomic::fence(Ordering::SeqCst);
-
-            for target in targets.iter().flatten() {
-                khal::irq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
-            }
-
-            for target in targets.iter().flatten() {
-                while !COMPLETED[target.as_usize()].load(Ordering::Acquire) {
-                    core::hint::spin_loop();
-                }
-            }
+    if targets[0].is_some() {
+        for target in targets.iter().flatten() {
+            let i = target.as_usize();
+            COMPLETED[i].store(false, Ordering::Relaxed);
+            PENDING[i].store(true, Ordering::Release);
         }
 
-        // Only reset the mask on a full TLB flush: after flush_all(None),
-        // every CPU has invalidated *all* TLB entries for this address space,
-        // so each thread only needs to track its current CPU.  For a single-VA
-        // flush, the mask must be preserved — CPUs that were flushed for this
-        // VA still hold valid entries for other VAs.
-        if vaddr.is_none() {
-            crate_interface::call_interface!(TaskCpuResidencyIf::reset_on_cpu_mask());
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        for target in targets.iter().flatten() {
+            khal::irq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
         }
+
+        for target in targets.iter().flatten() {
+            while !COMPLETED[target.as_usize()].load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    // Only reset the mask on a full TLB flush: after flush_all(None),
+    // every CPU has invalidated *all* TLB entries for this address space,
+    // so each thread only needs to track its current CPU.  For a single-VA
+    // flush, the mask must be preserved — CPUs that were flushed for this
+    // VA still hold valid entries for other VAs.
+    if vaddr.is_none() {
+        crate_interface::call_interface!(TaskCpuResidencyIf::reset_on_cpu_mask());
     }
 }
 
@@ -160,7 +190,7 @@ pub fn handle_shootdown() {
 /// `crate_interface` dispatch (which requires the defining crate's path).
 #[cfg(unittest)]
 pub fn trigger_flush_all(vaddr: Option<VirtAddr>) {
-    <TlbFlushImpl as TlbFlushIf>::flush_all(vaddr);
+    <TlbFlushImpl as TlbFlushIf>::flush_all_cpus(vaddr);
 }
 
 #[cfg(unittest)]

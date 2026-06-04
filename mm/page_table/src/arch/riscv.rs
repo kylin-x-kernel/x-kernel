@@ -124,8 +124,13 @@ pub trait SvVirtAddr: memaddr::MemoryAddr + Send + Sync {
     fn flush_tlb(vaddr: Option<Self>);
 
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<Self>) {
+    fn flush_tlb_process(vaddr: Option<Self>) {
         Self::flush_tlb(vaddr);
+    }
+
+    #[inline]
+    fn flush_tlb_all_cpus(vaddr: Option<Self>) {
+        Self::flush_tlb_process(vaddr);
     }
 }
 
@@ -137,9 +142,16 @@ impl SvVirtAddr for VirtAddr {
 
     #[cfg(feature = "smp")]
     #[inline]
+    fn flush_tlb_process(vaddr: Option<Self>) {
+        karch::flush_tlb(vaddr);
+        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_process(vaddr));
+    }
+
+    #[cfg(feature = "smp")]
+    #[inline]
     fn flush_tlb_all_cpus(vaddr: Option<Self>) {
         karch::flush_tlb(vaddr);
-        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_all(vaddr));
+        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_all_cpus(vaddr));
     }
 }
 
@@ -164,6 +176,11 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv39MetaData<VA> {
     }
 
     #[inline]
+    fn flush_tlb_process(vaddr: Option<VA>) {
+        <VA as SvVirtAddr>::flush_tlb_process(vaddr);
+    }
+
+    #[inline]
     fn flush_tlb_all_cpus(vaddr: Option<VA>) {
         <VA as SvVirtAddr>::flush_tlb_all_cpus(vaddr);
     }
@@ -179,6 +196,11 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv48MetaData<VA> {
     #[inline]
     fn flush_tlb(vaddr: Option<VA>) {
         <VA as SvVirtAddr>::flush_tlb(vaddr);
+    }
+
+    #[inline]
+    fn flush_tlb_process(vaddr: Option<VA>) {
+        <VA as SvVirtAddr>::flush_tlb_process(vaddr);
     }
 
     #[inline]

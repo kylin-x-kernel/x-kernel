@@ -72,7 +72,8 @@ fn map_memory_region(vmspace: &mut AddrSpace, region: MemoryRegion) -> LinuxResu
 
 /// Creates a new address space for kernel itself.
 pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
-    let mut vmspace = AddrSpace::new_empty(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
+    let mut vmspace =
+        AddrSpace::new_empty_kernel(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
     for region in memory_regions() {
         map_memory_region(&mut vmspace, region)?;
     }

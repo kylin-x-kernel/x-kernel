@@ -95,12 +95,25 @@ pub trait PagingMetaData: Sync + Send {
 
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
 
-    /// Flush TLB on all CPUs (local + remote via IPI shootdown).
+    /// Flush TLB on CPUs where the **current task** has been scheduled
+    /// (per-process CPU residency mask).  Correct for user page tables.
     ///
     /// Default: local-only, backward compatible with single-CPU builds.
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) {
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) {
         Self::flush_tlb(vaddr);
+    }
+
+    /// Flush TLB on **all** online CPUs, regardless of task residency.
+    /// Required for kernel page table modifications whose mappings are
+    /// shared across every process.
+    ///
+    /// Default: same as [`flush_tlb_process`](Self::flush_tlb_process).
+    /// Architectures without hardware broadcast (x86_64, riscv64,
+    /// loongarch64) override this to broadcast to all online CPUs via IPI.
+    #[inline]
+    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) {
+        Self::flush_tlb_process(vaddr);
     }
 }
 
@@ -112,12 +125,27 @@ pub trait PagingMetaData: Sync + Send {
 #[cfg(feature = "smp")]
 #[crate_interface::def_interface]
 pub trait TlbFlushIf {
-    /// Flush TLB entries on all remote CPUs.
+    /// Flush TLB entries on remote CPUs where the **current task** has been
+    /// scheduled (per-process CPU residency mask).
+    ///
+    /// This is the right choice for per-process user page tables, where only
+    /// CPUs that have run threads of the current process can hold stale
+    /// entries for this address space.
     ///
     /// If `vaddr` is `None`, flush the entire TLB; otherwise flush only the
     /// entry mapping `vaddr`.  The local CPU flush is the caller's
     /// responsibility — this method only handles remote CPUs.
-    fn flush_all(vaddr: Option<VirtAddr>);
+    fn flush_process(vaddr: Option<VirtAddr>);
+
+    /// Flush TLB entries on **all** online CPUs, regardless of task
+    /// residency.  This is required for modifications to the global kernel
+    /// page table, which is shared across every process — every online CPU
+    /// may hold stale kernel TLB entries.
+    ///
+    /// If `vaddr` is `None`, flush the entire TLB; otherwise flush only the
+    /// entry mapping `vaddr`.  The local CPU flush is the caller's
+    /// responsibility — this method only handles remote CPUs.
+    fn flush_all_cpus(vaddr: Option<VirtAddr>);
 }
 
 /// Hooks for allocating and mapping page table frames.

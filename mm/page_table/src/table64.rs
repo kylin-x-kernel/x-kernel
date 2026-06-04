@@ -35,17 +35,36 @@ pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>
     root_paddr: PhysAddr,
     #[cfg(feature = "copy-from")]
     borrowed_entries: bitmaps::Bitmap<ENTRY_COUNT>,
+    /// `true` for kernel page tables (shared globally).
+    /// When set, [`PageTableMut::finish`] broadcasts TLB invalidations
+    /// to **all** online CPUs instead of only the current task's
+    /// residency mask.
+    is_kernel: bool,
     _phantom: PhantomData<(M, PTE, H)>,
 }
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PTE, H> {
-    /// Create a new page table root.
+    /// Create a new user page table root.
     pub fn try_new() -> PtResult<Self> {
+        Self::try_new_inner(false)
+    }
+
+    /// Create a new kernel page table root.
+    ///
+    /// Kernel page tables are shared across all processes, so TLB
+    /// invalidations target **all** online CPUs rather than only the
+    /// current task's residency mask.
+    pub fn try_new_kernel() -> PtResult<Self> {
+        Self::try_new_inner(true)
+    }
+
+    fn try_new_inner(is_kernel: bool) -> PtResult<Self> {
         let root_paddr = Self::alloc_table()?;
         Ok(Self {
             root_paddr,
             #[cfg(feature = "copy-from")]
             borrowed_entries: bitmaps::Bitmap::new(),
+            is_kernel,
             _phantom: PhantomData,
         })
     }
@@ -368,15 +387,34 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
 
     pub fn finish(&mut self) {
         #[cfg(not(docsrs))]
-        match &self.flush {
-            ToFlush::None => {}
-            ToFlush::Addresses(addrs) => {
-                for vaddr in addrs.iter() {
-                    M::flush_tlb_all_cpus(Some(*vaddr));
+        if self.inner.is_kernel {
+            // Kernel page table: flush ALL online CPUs — the mapping is
+            // shared across every process, so every CPU may hold stale
+            // TLB entries.
+            match &self.flush {
+                ToFlush::None => {}
+                ToFlush::Addresses(addrs) => {
+                    for vaddr in addrs.iter() {
+                        M::flush_tlb_all_cpus(Some(*vaddr));
+                    }
+                }
+                ToFlush::Full => {
+                    M::flush_tlb_all_cpus(None);
                 }
             }
-            ToFlush::Full => {
-                M::flush_tlb_all_cpus(None);
+        } else {
+            // User page table: flush only CPUs where the current process
+            // has been scheduled (per-process residency mask).
+            match &self.flush {
+                ToFlush::None => {}
+                ToFlush::Addresses(addrs) => {
+                    for vaddr in addrs.iter() {
+                        M::flush_tlb_process(Some(*vaddr));
+                    }
+                }
+                ToFlush::Full => {
+                    M::flush_tlb_process(None);
+                }
             }
         }
         self.flush = ToFlush::None;

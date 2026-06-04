@@ -199,10 +199,20 @@ impl PagingMetaData for A64PagingMetaData {
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+    fn flush_tlb_process(vaddr: Option<VirtAddr>) {
         // AArch64 Inner Shareable TLBI instructions (vaae1is / vmalle1is)
         // broadcast to all PEs in the same Inner Shareable domain, so no
         // software IPI shootdown is needed.
+        karch::flush_tlb(vaddr);
+    }
+
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+        // Same as flush_tlb_process — hardware broadcast already covers
+        // all inner-shareable CPUs.  Provided for clarity: kernel page
+        // table flushes have the same implementation as user page table
+        // flushes on aarch64.
         karch::flush_tlb(vaddr);
     }
 }

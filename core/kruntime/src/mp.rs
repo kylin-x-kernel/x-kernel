@@ -185,7 +185,7 @@ mod tests_tlb_shootdown {
         }
     }
 
-    /// Test C: Proves flush_all sends targeted IPI to CPUs in on_cpu_mask,
+    /// Test C: Proves flush_all_cpus sends IPIs to all online CPUs,
     /// waits for remote completion, and resets the mask.
     #[def_test(serial)]
     fn test_flush_all_targeted_shootdown() {
@@ -320,6 +320,10 @@ mod tests_tlb_shootdown {
             const MAGIC_A: u64 = 0xDEAD_BEEF_CAFE_BABE;
             const MAGIC_B: u64 = 0xCAFE_BABE_DEAD_BEEF;
 
+            // SAFETY: v1 and v2 are valid kernel-virtual addresses backed by
+            // freshly allocated physical pages owned by this test.  Writing
+            // magic values through volatile pointers is safe because no other
+            // code holds references to these pages.
             unsafe {
                 core::ptr::write_volatile(v1 as *mut u64, MAGIC_A);
                 core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
@@ -395,6 +399,157 @@ mod tests_tlb_shootdown {
 
             // Clean up the mask correctly for platforms (like aarch64) that don't reset
             // via software IPI — reset to the CPU the task is currently running on.
+            task.reset_on_cpu_mask(my_cpu);
+        }
+    }
+
+    /// Test G: Proves that kernel page table TLB shootdown reaches ALL
+    /// online CPUs, regardless of the current task's CPU residency mask.
+    ///
+    /// Kernel page table modifications (is_kernel=true) go through
+    /// `flush_all_cpus()`, which builds a full CPU mask via
+    /// `for_each_present_logical_cpu()`.  Every online CPU — including
+    /// those not in the current task's `on_cpu_mask` — receives a
+    /// shootdown IPI.
+    ///
+    /// ### What this test verifies
+    ///
+    /// 1. **Correct shootdown**: after modifying the kernel page table, the
+    ///    remote CPU (which is deliberately absent from the current task's
+    ///    `on_cpu_mask`) still receives a TLB shootdown IPI and reads the
+    ///    new mapping (MAGIC_B instead of stale MAGIC_A).
+    ///
+    /// 2. **Mask reset**: after a full flush (`None` vaddr), the task's
+    ///    residency mask is correctly reset to only the current CPU.
+    #[def_test(serial)]
+    fn test_kernel_pt_miss_remote_without_mask() {
+        let cpu_num = kbuild_config::CPU_NUM;
+        if cpu_num >= 2 {
+            let my_cpu = this_cpu_id();
+            let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
+
+            // Ensure the current task's mask does NOT include the remote CPU.
+            // This is the natural state for a kernel task that has only ever
+            // run on its own CPU.
+            let task = ktask::current_may_uninit().unwrap();
+            task.reset_on_cpu_mask(my_cpu);
+
+            // Allocate two physical pages with different magic values.
+            let v1 = kalloc::global_allocator()
+                .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
+                .expect("alloc page 1");
+            let v2 = kalloc::global_allocator()
+                .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
+                .expect("alloc page 2");
+            let p1 = khal::mem::v2p(VirtAddr::from(v1));
+            let p2 = khal::mem::v2p(VirtAddr::from(v2));
+
+            const MAGIC_A: u64 = 0xDEAD_BEEF_CAFE_BABE;
+            const MAGIC_B: u64 = 0xCAFE_BABE_DEAD_BEEF;
+
+            // SAFETY: v1 and v2 are valid kernel-virtual addresses backed by
+            // freshly allocated physical pages owned by this test.  Writing
+            // magic values through volatile pointers is safe because no other
+            // code holds references to these pages.
+            unsafe {
+                core::ptr::write_volatile(v1 as *mut u64, MAGIC_A);
+                core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
+            }
+
+            let test_vaddr = VirtAddr::from(0xFFFF_8000_7F00_0000usize);
+
+            // Phase 1: Map V → P1 in the kernel page table; remote CPU reads V.
+            // This populates the remote CPU's TLB with V → P1.
+            {
+                let mut aspace = memspace::kernel_layout().lock();
+                let mut pt_mut = aspace.page_table_mut().modify();
+                pt_mut
+                    .map(
+                        test_vaddr,
+                        p1,
+                        khal::paging::PageSize::Size4K,
+                        khal::paging::MappingFlags::READ | khal::paging::MappingFlags::WRITE,
+                    )
+                    .expect("map V→P1");
+            }
+
+            static REMOTE_READ_G: AtomicUsize = AtomicUsize::new(0);
+
+            REMOTE_READ_G.store(0, Ordering::Relaxed);
+            kipi::run_on_cpu(remote_cpu, move || {
+                let val = unsafe { core::ptr::read_volatile(test_vaddr.as_usize() as *const u64) };
+                REMOTE_READ_G.store(val as usize, Ordering::Release);
+            })
+            .unwrap();
+            while REMOTE_READ_G.load(Ordering::Acquire) == 0 {
+                core::hint::spin_loop();
+            }
+            assert_eq!(
+                REMOTE_READ_G.load(Ordering::Acquire),
+                MAGIC_A as usize,
+                "Phase 1: remote CPU should read MAGIC_A from V→P1 mapping"
+            );
+
+            // Phase 2: Remap V → P2 in the kernel page table.
+            // `kernel_layout()` creates a kernel page table (is_kernel=true), so
+            // `PageTableMut::finish()` calls `flush_all_cpus()`, which builds a
+            // mask of ALL online CPUs via `for_each_present_logical_cpu()`.
+            // The remote CPU WILL receive a shootdown IPI.
+            {
+                let mut aspace = memspace::kernel_layout().lock();
+                let mut pt_mut = aspace.page_table_mut().modify();
+                let _ = pt_mut.unmap(test_vaddr).expect("unmap V");
+                pt_mut
+                    .map(
+                        test_vaddr,
+                        p2,
+                        khal::paging::PageSize::Size4K,
+                        khal::paging::MappingFlags::READ | khal::paging::MappingFlags::WRITE,
+                    )
+                    .expect("map V→P2");
+            }
+
+            // ---- Assertion: TLB shootdown must reach ALL online CPUs ----
+            //
+            // After modifying the global kernel page table, every online CPU
+            // must see the new mapping.  We assert the CORRECT behavior:
+            // the remote CPU should read MAGIC_B (P2's content).
+            //
+            // Kernel page table modifications (is_kernel=true) go through
+            // `flush_all_cpus()`, which builds a full CPU mask via
+            // `for_each_present_logical_cpu()`.  Every online CPU — including
+            // the remote CPU — receives a shootdown IPI, so this assertion
+            // PASSES on all architectures.
+            REMOTE_READ_G.store(0, Ordering::Relaxed);
+            kipi::run_on_cpu(remote_cpu, move || {
+                let val = unsafe { core::ptr::read_volatile(test_vaddr.as_usize() as *const u64) };
+                REMOTE_READ_G.store(val as usize, Ordering::Release);
+            })
+            .unwrap();
+            while REMOTE_READ_G.load(Ordering::Acquire) == 0 {
+                core::hint::spin_loop();
+            }
+            let remote_val = REMOTE_READ_G.load(Ordering::Acquire);
+
+            assert_eq!(
+                remote_val, MAGIC_B as usize,
+                "BUG (iomap TLB): remote CPU {remote_cpu:?} read {remote_val:#x}, expected \
+                 MAGIC_B ({MAGIC_B:#x}) from the V→P2 mapping.\nThe kernel page table was \
+                 modified and `flush_all_cpus()` should have targeted ALL online CPUs via \
+                 `for_each_present_logical_cpu()`, including the remote CPU.  If this assertion \
+                 fails, the remote CPU did not receive a TLB shootdown IPI or its TLB was not \
+                 properly invalidated.",
+            );
+
+            // Cleanup: unmap V, free pages.
+            {
+                let mut aspace = memspace::kernel_layout().lock();
+                let mut pt_mut = aspace.page_table_mut().modify();
+                let _ = pt_mut.unmap(test_vaddr);
+            }
+            kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
+            kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
+
             task.reset_on_cpu_mask(my_cpu);
         }
     }
