@@ -42,6 +42,9 @@ core/ksyscall/
 │   │   └── pipe.rs
 │   ├── io_mpx/
 │   ├── sync/
+│   │   ├── futex.rs
+│   │   ├── membarrier.rs
+│   │   └── mod.rs
 │   ├── sys.rs
 │   ├── task/
 │   │   ├── clone.rs
@@ -52,10 +55,13 @@ core/ksyscall/
 │   │   ├── job.rs
 │   │   ├── mod.rs
 │   │   ├── pidfd.rs
+│   │   ├── sched.rs
 │   │   ├── thread.rs
 │   │   └── wait.rs
 │   ├── time/
 │   │   ├── mod.rs
+│   │   ├── queries.rs
+│   │   ├── sleep.rs
 │   │   └── timerfd.rs
 │   └── vfs/
 │       └── mod.rs
@@ -74,10 +80,10 @@ ksyscall::dispatch_irq_syscall
     │ decode sysno + ABI arguments
     ├─ vfs adapter  ───────────> posix-fs / kfs / kvfs
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
-    ├─ time adapter ───────────> kfd_objects::TimerFd / posix-time
+    ├─ time adapter ───────────> khal time sources / kthread CPU-time state / kfd_objects::TimerFd
     ├─ task adapter ───────────> kthread / posix-process / kprocess
     ├─ io_mpx adapter ─────────> posix-io-mpx
-    ├─ sync adapter ───────────> posix-sync / kthread
+    ├─ sync adapter ───────────> kfutex / kthread
     └─ misc adapter ───────────> posix-mm / posix-net / posix-signal / ...
 ```
 
@@ -103,9 +109,21 @@ ksyscall::dispatch_irq_syscall
 - `time/timerfd.rs`
   - `timerfd_*`
   - owner 在 `kfd_objects::TimerFd`
+- `time/queries.rs`
+  - `clock_gettime` / `gettimeofday` / `clock_getres`
+  - owner 在 `khal` 时钟源与 `kthread` CPU-time 查询
+- `time/sleep.rs`
+  - `nanosleep` / `clock_nanosleep`
+  - owner 在 `ktask` sleep runtime 与 `khal` 时钟查询
 - `task/pidfd.rs`
   - `pidfd_*`
   - owner 在 `kthread::PidFd`
+- `task/sched.rs`
+  - `sched_yield` / `sched_*affinity` / `sched_*scheduler` / `getcpu` / `getpriority` / `setpriority`
+  - owner 在 `ktask` 调度接口、`kthread` 进程/线程状态和 `khal` CPU 查询
+- `sync/futex.rs`
+  - `futex` / `get_robust_list` / `set_robust_list`
+  - owner 在 `kfutex` 等待队列与 `kthread` 线程 robust-list 状态
 
 ## 非目标
 

@@ -8,8 +8,7 @@
 //! - Memory barriers (membarrier, etc.)
 //! - Atomic memory operations
 
+mod futex;
 mod membarrier;
 
-pub use posix_sync::{sys_futex, sys_get_robust_list, sys_set_robust_list};
-
-pub use self::membarrier::*;
+pub use self::{futex::*, membarrier::*};

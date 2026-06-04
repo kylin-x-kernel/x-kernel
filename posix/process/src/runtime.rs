@@ -144,7 +144,10 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> 
     let address: usize = address.try_into().map_err(|_| KError::InvalidInput)?;
     let key = kthread::current_futex_key(address);
 
-    let futex_table = kthread::current_thread().proc_state.futex_table_for(&key);
+    let futex_table = kthread::current_thread()
+        .proc_state
+        .futex_state()
+        .table_for(&key);
     let Some(futex) = futex_table.get(&key) else {
         return Ok(());
     };
@@ -197,7 +200,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
     if clear_child_tid.write_vm(0).is_ok() {
         let key = kthread::current_futex_key(clear_child_tid as usize);
-        let table = thr.proc_state.futex_table_for(&key);
+        let table = thr.proc_state.futex_state().table_for(&key);
         if let Some(futex) = table.get(&key) {
             futex.wq.wake(1, u32::MAX);
         }

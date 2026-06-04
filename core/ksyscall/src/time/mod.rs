@@ -4,6 +4,8 @@
 
 //! Time-related syscall adapters.
 
+mod queries;
+mod sleep;
 mod timerfd;
 
-pub use self::timerfd::*;
+pub use self::{queries::*, sleep::*, timerfd::*};

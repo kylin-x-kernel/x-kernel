@@ -2,20 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    string::String,
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "tee")]
 use core::any::Any;
 
-use hashbrown::HashMap;
 use kcred::Credentials;
 #[cfg(feature = "tee")]
 use kerrno::{KError, KResult};
 use kfs::FsContext;
-use kfutex::{FutexKey, FutexTable};
+use kfutex::ProcessFutexState;
 use khal::time::TimeValue;
 use kpoll::PollSet;
 use kprocess::Process;
@@ -25,7 +20,6 @@ use ksignal::{
     api::{ProcessSignalManager, SignalActions},
 };
 use ksync::{Mutex, RwLock, spin::SpinNoIrq};
-use lazy_static::lazy_static;
 #[cfg(feature = "tee")]
 use slab::Slab;
 #[cfg(feature = "tee")]
@@ -77,8 +71,8 @@ pub struct ProcessState {
     /// The process signal manager.
     pub signal: Arc<ProcessSignalManager>,
 
-    /// The private futex table.
-    futex_table: Arc<FutexTable>,
+    /// The process-owned futex state.
+    futex: Arc<ProcessFutexState>,
 
     /// POSIX credentials shared by all threads in this process.
     pub credentials: RwLock<Credentials>,
@@ -133,7 +127,7 @@ impl ProcessState {
                 config.signal_trampoline,
             )),
 
-            futex_table: Arc::new(FutexTable::new()),
+            futex: Arc::new(ProcessFutexState::new()),
             credentials: RwLock::new(credentials),
         })
     }
@@ -143,18 +137,9 @@ impl ProcessState {
         self.exit_signal() != Some(Signo::SIGCHLD)
     }
 
-    /// Returns the futex table for the given key.
-    pub fn futex_table_for(&self, key: &FutexKey) -> Arc<FutexTable> {
-        match key {
-            FutexKey::Private { .. } => self.futex_table.clone(),
-            FutexKey::Shared { region, .. } => {
-                let ptr = match region {
-                    Ok(pages) => Weak::as_ptr(pages) as usize,
-                    Err(key) => Weak::as_ptr(key) as usize,
-                };
-                SHARED_FUTEX_TABLES.lock().get_or_insert(ptr)
-            }
-        }
+    /// Returns the process-owned futex state.
+    pub fn futex_state(&self) -> &Arc<ProcessFutexState> {
+        &self.futex
     }
 
     /// Returns the POSIX-facing shared state.
@@ -325,71 +310,5 @@ impl ProcessState {
     #[cfg(feature = "tee")]
     pub fn clear_tee_runtime_private(&self) {
         *self.tee_runtime_private.write() = None;
-    }
-}
-
-pub(super) struct FutexTables {
-    pub(super) map: HashMap<usize, Arc<FutexTable>>,
-    pub(super) operations: usize,
-}
-
-impl FutexTables {
-    pub(super) fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            operations: 0,
-        }
-    }
-
-    pub(super) fn get_or_insert(&mut self, key: usize) -> Arc<FutexTable> {
-        self.operations += 1;
-        if self.operations == 100 {
-            self.operations = 0;
-            self.map
-                .retain(|_, table| Arc::strong_count(table) > 1 || !table.is_empty());
-        }
-        self.map
-            .entry(key)
-            .or_insert_with(|| Arc::new(FutexTable::new()))
-            .clone()
-    }
-}
-
-lazy_static! {
-    static ref SHARED_FUTEX_TABLES: Mutex<FutexTables> = Mutex::new(FutexTables::new());
-}
-
-#[cfg(unittest)]
-mod tests_process_state {
-    use alloc::sync::Arc;
-
-    use unittest::def_test;
-
-    use super::FutexTables;
-
-    #[def_test]
-    fn test_futextables_get_or_insert_reuses_existing_table() {
-        let mut tables = FutexTables::new();
-        let first = tables.get_or_insert(0x1234);
-        let second = tables.get_or_insert(0x1234);
-
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(tables.map.len(), 1);
-        assert_eq!(tables.operations, 2);
-    }
-
-    #[def_test]
-    fn test_futextables_cleanup_drops_stale_entries_on_threshold() {
-        let mut tables = FutexTables::new();
-        let stale = tables.get_or_insert(1);
-        drop(stale);
-
-        tables.operations = 99;
-        let fresh = tables.get_or_insert(2);
-
-        assert_eq!(tables.operations, 0);
-        assert!(!tables.map.contains_key(&1));
-        assert!(tables.map.contains_key(&2));
-        assert_eq!(Arc::strong_count(&fresh), 2);
     }
 }

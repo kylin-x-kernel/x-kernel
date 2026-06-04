@@ -2,15 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX time query syscall implementations.
-//!
-//! - Clock queries (`clock_gettime`, `clock_getres`)
-//! - Wall-clock queries (`gettimeofday`)
-
-#![no_std]
-
-#[macro_use]
-extern crate klogger;
+//! Time query syscall adapters.
 
 use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time, wall_time};

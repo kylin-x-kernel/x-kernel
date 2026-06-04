@@ -13,6 +13,8 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+
+use kfutex::FutexKey;
 #[macro_use]
 extern crate klogger;
 
@@ -29,7 +31,6 @@ mod thread;
 mod timer_delivery;
 
 pub use cpu_time::{CpuTimeState, CpuTimeStatistics};
-pub use kfutex::{FutexEntry, FutexGuard, FutexKey, FutexTable, WaitQueue};
 pub use kresources::ProcessResources;
 pub use krlimit::{FILE_LIMIT, Rlimit, Rlimits};
 pub use lifecycle_state::ProcessLifecycleState;

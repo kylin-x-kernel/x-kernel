@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX sleep syscalls.
+//! Sleep-related time syscall adapters.
 
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
@@ -16,11 +16,7 @@ fn sleep_impl(clock: impl Fn() -> TimeValue, dur: TimeValue) -> TimeValue {
     debug!("sleep_impl <= {dur:?}");
 
     let start = clock();
-
-    // TODO: currently ignoring concrete clock type.
-    // We detect EINTR manually if the slept time is not enough.
     let _ = block_on(interruptible(sleep(dur)));
-
     clock() - start
 }
 

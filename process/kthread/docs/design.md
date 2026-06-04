@@ -61,7 +61,7 @@ ProcessState
   ├─ lifecycle: ProcessLifecycleState
   ├─ runtime: ProcessRuntimeState
   ├─ signal: Arc<ProcessSignalManager>
-  ├─ futex_table: Arc<FutexTable>
+  ├─ futex: Arc<ProcessFutexState>
   └─ credentials / optional TEE state
 ```
 
@@ -84,7 +84,7 @@ ProcessState
 - 当前线程专用入口依赖 scheduler 已可用，并且当前 task 带有 `Box<Thread>` task extension。
 - `current_thread` 返回的 handle 在 deref 时要求当前 task 是用户线程；`current_process_state`、`current_process_fs_context`、`current_resources` 和 `current_futex_key` 直接要求用户线程上下文。
 - `current_fs_context` 可在内核任务路径使用，内核任务会回退到 kernel 默认文件系统上下文。
-- registry、signal、timer 和 futex table helper 面向 task/syscall 生命周期路径，调用点不应位于中断上下文。
+- registry、signal、timer 和 futex key helper 面向 task/syscall 生命周期路径，调用点不应位于中断上下文。
 - `ProcessState::new` 依赖 `kprocess::Process`、地址空间、文件系统上下文、信号动作表和 credential 已由调用者初始化。
 - `init_timer_runtime` 依赖 timer 和 signal 子系统已完成基础初始化，并通过 `Once` 保证重复调用只注册一次。
 - TEE 相关入口只在 `tee` feature 下可用，调用方需要保证具体 private runtime state 类型一致。
@@ -205,20 +205,16 @@ poll_cpu_timers()
 
 timer signal dequeue 时，observer 调用 `ProcessTimerManager::on_timer_signal_dequeued` 校验 timer id 与 signal sequence，决定投递或丢弃。
 
-### futex table 选择
+### futex key 构造
 
 ```text
 current_futex_key(address)
   → current ProcessState address_space
   → FutexKey::new(aspace, address)
-
-ProcessState::futex_table_for(key)
-  ├─ Private → process-local FutexTable
-  └─ Shared  → global SHARED_FUTEX_TABLES[region identity]
 ```
 
-shared futex table key 使用共享映射区域的 weak pointer identity。
-全局表每 100 次操作清理一次无强引用且为空的 table，限制 stale entry 长期保留。
+`kthread` 只负责从当前用户线程上下文构造 `FutexKey`。
+private/shared futex table 的实例管理、shared identity 路由和 stale table 清理由 `kfutex::ProcessFutexState` 维护。
 
 ## 并发模型
 
@@ -227,14 +223,13 @@ shared futex table key 使用共享映射区域的 weak pointer identity。
 - `ProcessState::credentials`、TEE TA state 和 TEE private state 使用 `RwLock`。
 - `ProcessRuntimeState::heap_top` 使用 Acquire/Release atomic，地址空间、文件系统上下文和 timer manager 使用 `Arc<Mutex<...>>`。
 - registry 表使用全局 `RwLock<WeakMap<...>>`，查询返回可升级强引用。
-- shared futex table 使用全局 `Mutex<FutexTables>`，仅在 table lookup 与周期清理时持锁。
 - signal helper 在目标查找后调用 signal manager，并在有新 pending signal 时 interrupt 对应 task。
 
 ## 设计决策
 
 ### 作为进程运行态 facade
 
-`kthread` 当前公开面较宽，包含 thread/process state、当前上下文 helper、registry、signal、timer、pidfd 以及 futex/resource/rlimit re-export。
+`kthread` 当前公开面较宽，包含 thread/process state、当前上下文 helper、registry、signal、timer、pidfd 以及 resource/rlimit re-export。
 这保持了 syscall、POSIX、procfs、TTY 和 TEE 调用点的稳定导入路径。
 代价是 crate 边界呈 facade 形态，后续新增 API 需要先验证外部调用者，内部 helper 优先保持私有或 `pub(crate)`。
 
@@ -267,5 +262,4 @@ weak entry 避免 task/process/session 之间形成全局强引用环。
 - `Thread` 没有自定义 `Drop`，随 task extension 中的 `Box<Thread>` 释放。
 - `ProcessState` 通过 `Arc` 引用计数管理，共享给同进程全部线程和外部查询者。
 - registry、process group 和 session 索引只持有 weak entry，不阻止对象释放。
-- shared futex table 的全局 map 周期性删除空且无外部强引用的 table。
 - TEE private runtime state 通过 `Arc<dyn Any + Send + Sync>` 保存，清理时直接置空 slot。

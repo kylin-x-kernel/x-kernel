@@ -2,17 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX/Linux synchronization syscall implementations.
-
-#![no_std]
-
-#[macro_use]
-extern crate klogger;
+//! Futex and robust-list syscall adapters.
 
 use core::{mem::size_of, sync::atomic::Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
-use kthread::{AsThread, FutexKey, current_futex_key, get_task};
+use kfutex::FutexKey;
+use kthread::{AsThread, current_futex_key};
 use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT,
     FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
@@ -39,8 +35,7 @@ fn current_key_for_futex_op(address: usize, futex_op: u32) -> FutexKey {
 
 /// Fast userspace mutex (futex) system call.
 ///
-/// Implements Linux futex semantics for efficient synchronization primitives.
-/// See <https://man7.org/linux/man-pages/man2/futex.2.html>.
+/// Linux semantics follow `futex(2)`.
 pub fn sys_futex(
     uaddr: UserPtr<u32>,
     futex_op: u32,
@@ -60,7 +55,7 @@ pub fn sys_futex(
 
     let thr = kthread::current_thread();
     let proc_state = &thr.proc_state;
-    let futex_table = proc_state.futex_table_for(&key);
+    let futex_table = proc_state.futex_state().table_for(&key);
 
     let command = futex_op & (FUTEX_CMD_MASK as u32);
     match command {
@@ -79,7 +74,6 @@ pub fn sys_futex(
             };
 
             let futex = futex_table.get_or_insert(&key);
-
             let bitset = if command == FUTEX_WAIT_BITSET {
                 value3
             } else {
@@ -132,7 +126,7 @@ pub fn sys_futex(
 
             let futex = futex_table.get(&key);
             let key2 = current_key_for_futex_op(uaddr2.as_ptr() as usize, futex_op);
-            let table2 = proc_state.futex_table_for(&key2);
+            let table2 = proc_state.futex_state().table_for(&key2);
             let futex2 = table2.get_or_insert(&key2);
 
             let mut count = 0;
@@ -148,23 +142,23 @@ pub fn sys_futex(
     }
 }
 
+/// Returns the robust-list head of the selected thread.
 pub fn sys_get_robust_list(
     tid: u32,
     head: UserPtr<*const robust_list_head>,
     size: UserPtr<usize>,
 ) -> KResult<isize> {
-    let task = get_task(tid)?;
+    let task = kthread::get_task(tid)?;
     head.write_vm(task.as_thread().robust_list_head() as _)?;
     size.write_vm(size_of::<robust_list_head>())?;
-
     Ok(0)
 }
 
+/// Sets the robust-list head for the current thread.
 pub fn sys_set_robust_list(head: UserConstPtr<robust_list_head>, size: usize) -> KResult<isize> {
     if size != size_of::<robust_list_head>() {
         return Err(KError::InvalidInput);
     }
     kthread::current_thread().set_robust_list_head(head.as_ptr() as usize);
-
     Ok(0)
 }

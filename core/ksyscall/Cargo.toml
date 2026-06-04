@@ -22,6 +22,7 @@ tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 kaddr_layout.workspace = true
 kfd.workspace = true
 kfd_objects.workspace = true
+kfutex.workspace = true
 kbuild_config = { workspace = true }
 kerrno.workspace = true
 khal.workspace = true
@@ -49,10 +50,7 @@ posix-ipc.workspace = true
 posix-mm.workspace = true
 posix-net.workspace = true
 posix-process.workspace = true
-posix-sched.workspace = true
 posix-signal.workspace = true
-posix-sync.workspace = true
-posix-time.workspace = true
 posix-types.workspace = true
 num_enum = { version = "0.7", default-features = false }
 
