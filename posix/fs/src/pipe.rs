@@ -17,7 +17,7 @@ use kfd::FileLike;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use posix_types::UserPtr;
 
-use crate::file::Pipe;
+use crate::file::PipeObject;
 
 bitflags! {
     /// Flags for the `pipe2` syscall.
@@ -35,7 +35,7 @@ pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
     let flags = PipeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
 
     let cloexec = flags.contains(PipeFlags::CLOEXEC);
-    let (read_end, write_end) = Pipe::new();
+    let (read_end, write_end) = PipeObject::create_endpoints();
     if flags.contains(PipeFlags::NONBLOCK) {
         read_end.set_nonblocking(true)?;
         write_end.set_nonblocking(true)?;

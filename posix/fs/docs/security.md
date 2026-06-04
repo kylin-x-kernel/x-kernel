@@ -24,7 +24,7 @@ user process
 │  ├─ validates ABI flags and scalar ranges where needed    │
 │  ├─ copies user strings/buffers through posix_types/osvm  │
 │  ├─ resolves fd/path against current process context      │
-│  ├─ delegates object semantics to kfd/kfs/kvfs/Pipe/devfs │
+│  ├─ delegates object semantics to kfd/kfs/kvfs/pipe objects/devfs │
 │  └─ maps failures to KError/KResult                       │
 └──────────────────────────────────────────────────────────┘
   │
@@ -78,7 +78,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
    fd 查找得到的对象在当前操作期间由引用计数保持存活。
 4. **类型相关操作先 downcast 校验**：
    `ftruncate`、`fstatfs`、定点 I/O 和目录 seek 等路径先确认对象是 `File`、
-   `Directory` 或 `Pipe`，类型不匹配返回错误。
+   `Directory` 或 pipe endpoint，类型不匹配返回错误。
 5. **范围和溢出必须显式处理**：
    `fallocate` 对负 offset/len 和 `offset + len` 溢出返回 `InvalidInput`；
    `lseek` 目录 offset 使用 `checked_add_signed`；

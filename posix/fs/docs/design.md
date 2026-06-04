@@ -8,7 +8,7 @@
 转换为内核内部的 fd 表、进程文件系统上下文、VFS 节点和设备对象操作。
 
 目标读者是维护 `core/ksyscall` 文件系统分发路径、`kfd` 进程 fd 表、
-`kfs`/`kvfs` VFS 层、`kservices::file::Pipe` 以及终端和设备文件兼容路径的开发者。
+`kfs`/`kvfs` VFS 层、`posix-fs` 的 pipe 文件对象以及终端和设备文件兼容路径的开发者。
 
 ## 背景
 
@@ -72,7 +72,7 @@ core/ksyscall
 │   ├─ kfd::FileLike                                       │
 │   ├─ kfs::{File, Directory, OpenOptions, FsContext}       │
 │   ├─ kvfs::{Location, MetadataUpdate, MountFlags}         │
-│   ├─ kservices::file::Pipe                               │
+│   ├─ PipeObject / PipeReadEnd / PipeWriteEnd             │
 │   └─ devfs/ktty special files                            │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -87,7 +87,7 @@ core/ksyscall
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，当前支持 tmpfs mount |
-| `pipe` | 创建 pipe 两端并原子写回用户 fd 数组 |
+| `pipe` | 创建 pipe 读写端点并原子写回用户 fd 数组 |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
 | `ioctl` | 处理 `FIONBIO` 并把其它命令转交 `FileLike::ioctl` |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
@@ -156,7 +156,7 @@ FileLike::read/write
     │
     ├─ kfs::File offset or read_at/write_at
     ├─ kfs::Directory offset for lseek/getdents64
-    ├─ kservices::file::Pipe
+    ├─ PipeObject / PipeReadEnd / PipeWriteEnd
     └─ device-specific FileLike implementation
 ```
 

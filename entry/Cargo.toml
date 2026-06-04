@@ -8,7 +8,7 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-unittest = ["dep:unittest"]
+unittest = ["dep:unittest", "dep:unittest_support", "tee_kernel/unittest_helpers"]
 dma-trace = ["kfeat/dma-trace"]
 
 [dependencies]
@@ -17,25 +17,16 @@ xcov.workspace = true
 kfeat.workspace = true
 kfs.workspace = true
 khal.workspace = true
-kcred.workspace = true
-karch.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
-ksignal.workspace = true
-ksync.workspace = true
 ktask.workspace = true
 cfg-if.workspace = true
 linkme.workspace = true
-kprocess.workspace = true
 kthread.workspace = true
 kuaccess.workspace = true
 ksyscall.workspace = true
-ktty.workspace = true
-kexec.workspace = true
-memspace.workspace = true
 kbuild_config.workspace = true
 kerrno.workspace = true
-posix-fs.workspace = true
 posix-process.workspace = true
 devfs.workspace = true
 memfs.workspace = true
@@ -43,7 +34,7 @@ procfs.workspace = true
 indoc = "2"
 backtrace.workspace = true
 unittest = { workspace = true, optional = true }
-unittest_support.workspace = true
+unittest_support = { workspace = true, optional = true }
 
 [target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
 tee_kernel.workspace = true

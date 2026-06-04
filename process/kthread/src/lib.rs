@@ -47,7 +47,9 @@ pub use thread::{
     AsThread, CurrentThread, Thread, current_fs_context, current_process_fs_context,
     current_process_state, current_task_name, current_thread, with_current_thread,
 };
-pub use timer_delivery::{dispatch_timer_delivery, poll_cpu_timers, spawn_alarm_task};
+pub use timer_delivery::{
+    dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers, spawn_alarm_task,
+};
 
 /// Runtime action requested by a syscall after handling a user trap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

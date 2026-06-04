@@ -10,7 +10,7 @@
 
 x-kernel 将**引导**（`kernel-boot`、平台 `platconfig`）与**运行时**（内存、调度、驱动、用户态 init）分离。引导层通过 `BootInfo` 和 `linkme` 切片把主核/从核入口注册为函数指针；`kruntime` 提供这些入口的实现（`rust_main` / `rust_main_secondary`），并在全部 CPU 就绪后调用链接进来的 `main()`。
 
-应用逻辑（`entry::runtime::init_runtime`、`run_initproc` 等）放在 `entry` crate，避免 `kruntime` 反向依赖高层服务。
+应用逻辑（例如 `entry::runtime::init_runtime`）放在 `entry` crate；初始用户进程组装则由 `posix-process::run_init_process` 承接，避免 `kruntime` 反向依赖高层服务。
 
 ## 范围
 

@@ -14,6 +14,7 @@ extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
 
+mod bootstrap;
 mod runtime;
 #[cfg(feature = "unittest")]
 mod unittest_simple;
@@ -32,9 +33,6 @@ fn unittest_crate_filter() -> Option<&'static str> {
         None => None,
     }
 }
-
-#[cfg(not(feature = "unittest"))]
-mod entry;
 
 #[cfg(not(feature = "unittest"))]
 pub const CMDLINE: &[&str] = &["/bin/sh", "-c", include_str!("init.sh")];
@@ -97,7 +95,7 @@ fn main() {
         .collect::<Vec<_>>();
     let envs = [];
 
-    let exit_code = entry::run_initproc(&args, &envs);
+    let exit_code = posix_process::run_init_process(&args, &envs, ksyscall::dispatch_irq_syscall);
     info!("Init process exited with code: {exit_code:?}");
 
     let cx = kernel_fs_context().lock();

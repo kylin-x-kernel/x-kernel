@@ -2,7 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Init process bootstrap helpers.
+//! Init-process bootstrap owned by the process layer.
+
 use alloc::{
     string::{String, ToString},
     sync::Arc,
@@ -15,13 +16,20 @@ use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
 use ksync::Mutex;
 use ktask::{KTaskExt, spawn_task};
-use kthread::{ProcessState, ProcessStateConfig, Thread, add_task_to_table};
+use kthread::{
+    ProcessState, ProcessStateConfig, Thread, UserThreadRuntimeAction, add_task_to_table,
+};
 use ktty::tty::N_TTY;
 use posix_fs::file::add_stdio;
-use posix_process::new_user_task;
 
-/// Create and run the init process with the given argv/envp.
-pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
+use crate::new_user_task;
+
+/// Create, start, and wait for the initial user process.
+pub fn run_init_process(
+    args: &[String],
+    envs: &[String],
+    dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
+) -> i32 {
     let mut uspace =
         memspace::AddrSpace::new_user_empty().expect("Failed to create user address space");
 
@@ -39,7 +47,7 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
 
-    let mut task = new_user_task(name, uctx, 0, ksyscall::dispatch_irq_syscall);
+    let mut task = new_user_task(name, uctx, 0, dispatch_syscall);
     task.ctx_mut()
         .set_page_table_root(uspace.page_table_root().into());
 
@@ -67,6 +75,9 @@ pub fn run_initproc(args: &[String], envs: &[String]) -> i32 {
     }
     let thr = Thread::new(pid, proc_state);
 
+    // SAFETY: The freshly created `Thread` is uniquely owned here and is installed
+    // exactly once as the task extension for the matching user task before the task
+    // is spawned or made visible to any other observer.
     *task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
 
     let task = spawn_task(task);

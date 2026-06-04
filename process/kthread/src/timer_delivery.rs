@@ -93,8 +93,8 @@ fn build_timer_signal_info(signal: TimerSignal) -> SignalInfo {
 
 static TIMER_RUNTIME_INIT: Once<()> = Once::new();
 
-/// Installs the timer-expiration bridge and spawns the alarm task once.
-pub fn spawn_alarm_task() {
+/// Installs the timer-expiration bridge and starts the timer runtime once.
+pub fn init_timer_runtime() {
     TIMER_RUNTIME_INIT.call_once(|| {
         ktimer::register_expired_task_handler(poll_timer);
         // Only register for signals that timers can produce:
@@ -110,4 +110,9 @@ pub fn spawn_alarm_task() {
         }
         ktimer::spawn_alarm_task();
     });
+}
+
+/// Starts the timer runtime by spawning the alarm task once.
+pub fn spawn_alarm_task() {
+    init_timer_runtime();
 }

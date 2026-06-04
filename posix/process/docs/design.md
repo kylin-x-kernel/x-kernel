@@ -2,9 +2,10 @@
 
 ## 定位
 
-`posix-process` 负责进程/线程相关 syscall glue，以及依附其上的用户线程 runtime 逻辑：
+`posix-process` 负责进程/线程相关 syscall glue，以及依附其上的用户线程 runtime 和初始用户进程组装逻辑：
 
 - clone / exit / signal-return 需要共享的用户态 trap 主循环；
+- 初始用户进程的地址空间、`ProcessState`、TTY 和 stdio 组装；
 - 线程退出时的 robust futex 清理、group-exit 和父进程通知；
 - 保持这些逻辑依赖 `kthread` 原语，但不把它们塞回 `kthread` 本体。
 
@@ -13,6 +14,7 @@
 本次相关范围包括：
 
 - `src/runtime.rs`
+- `src/init_process.rs`
 - `src/lib.rs`
 
 ## 架构
@@ -22,14 +24,15 @@ entry / ksyscall / posix-signal
               |
               v
         posix-process
-              |
-              v
-            kthread
+          |        |
+          v        v
+        kexec    kthread
 ```
 
 ## 调用约束 / 执行上下文
 
 - `new_user_task()` 仅用于创建会进入用户态执行的 task。
+- `run_init_process()` 依赖 rootfs、TTY 和默认 stdio 初始化路径可用。
 - `do_exit()`、`check_signals()` 依赖 current task 已安装线程扩展。
 - 这些接口会访问地址空间、信号状态、fd 表和共享内存管理器，可阻塞，不适用于中断上下文。
 

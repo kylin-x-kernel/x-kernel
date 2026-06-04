@@ -1,5 +1,45 @@
 # Modules and Crates
 
+### Define crate boundaries by data ownership and cohesion (`crate-boundaries`) {#crate-boundaries}
+
+Choose crate boundaries primarily by
+which data, state, invariants, lifecycle rules,
+and execution-context assumptions belong together.
+A good crate should own a coherent ownership domain
+whose rules are easier to understand,
+review,
+and evolve together inside one compilation unit.
+
+Do not create or keep a crate
+just because it is currently a convenient place
+to collect unrelated helpers,
+glue code,
+or migration leftovers.
+Avoid catch-all crates
+that mix unrelated resources
+with weak ownership relationships.
+
+When deciding between a `mod` and a separate crate:
+
+1. Keep the code as a `mod`
+   when it is an implementation detail of one owning crate
+   and is not a reusable ownership boundary
+   depended on by multiple peer crates.
+2. Promote it to its own crate
+   when the same owned data/state boundary,
+   state machine,
+   lifecycle rule set,
+   or invariant-bearing component
+   is depended on by multiple peer crates.
+   That usually signals a 1-to-N relationship
+   and a real ownership boundary worth isolating.
+
+In short:
+
+- use a crate for a cohesive ownership domain;
+- use a module for a private implementation partition inside that domain;
+- split out a crate when multiple peers need to depend on the same owned data boundary.
+
 ### Default to the narrowest visibility (`narrow-visibility`) {#narrow-visibility}
 
 Start private,

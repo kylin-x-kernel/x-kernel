@@ -5,6 +5,8 @@
 #![no_std]
 #![allow(missing_docs)]
 
+#[macro_use]
+extern crate klogger;
 extern crate alloc;
 
 use alloc::{sync::Arc, vec, vec::Vec};
@@ -15,15 +17,24 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use kcred::Credentials;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
-use ksync::Mutex;
-use ktask::current;
-use kthread::AsThread;
+use kprocess::Pid;
+use ksignal::api::SignalActions;
+use ksync::{
+    Mutex,
+    spin::{NoPreempt, SpinNoIrq},
+};
+use ktask::{KTaskExt, TaskExt, current};
+use kthread::{AsThread, ProcessState, ProcessStateConfig, Thread};
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use osvm::{read_vm_mem, write_vm_mem};
+use unittest::{TestDescriptor, TestResult};
 
 static NEXT_TEST_USER_ADDR: AtomicUsize = AtomicUsize::new(kaddr_layout::USER_HEAP_BASE);
+static NEXT_TEST_PROCESS_ID: AtomicUsize = AtomicUsize::new(0x7000_0000);
+static INIT_TEST_THREAD_HOOK: SpinNoIrq<Option<InitTestThreadHook>> = SpinNoIrq::new(None);
 
 #[macro_export]
 macro_rules! __unittest_support_user_vec {
@@ -36,6 +47,199 @@ macro_rules! __unittest_support_user_vec {
 }
 
 pub use crate::__unittest_support_user_vec as user_vec;
+
+/// Optional test-thread initialization hook used when installing the unittest runtime.
+pub type InitTestThreadHook = fn(&Thread);
+
+fn alloc_test_process_id() -> Pid {
+    NEXT_TEST_PROCESS_ID.fetch_add(1, Ordering::Relaxed) as Pid
+}
+
+fn current_task_ptr() -> *mut ktask::TaskInner {
+    let current_task = current();
+    current_task.inner() as *const _ as *mut ktask::TaskInner
+}
+
+fn registered_init_test_thread(thread: &Thread) {
+    if let Some(init_thread) = *INIT_TEST_THREAD_HOOK.lock() {
+        init_thread(thread);
+    }
+}
+
+struct InstalledTestThread {
+    previous_task_ext: Option<KTaskExt>,
+    previous_page_table_root: karch::HwPageTableRoot,
+}
+
+impl InstalledTestThread {
+    fn install(init_thread: InitTestThreadHook) -> KResult<Self> {
+        let current_task = current();
+        let tid = current_task.id().as_u64() as Pid;
+        let pid = alloc_test_process_id();
+
+        let mut aspace = memspace::AddrSpace::new_user_empty()?;
+        ksignal::map_signal_trampoline(&mut aspace)?;
+        let aspace = Arc::new(Mutex::new(aspace));
+
+        let proc = kprocess::Process::new_init(pid);
+        proc.add_thread(tid);
+
+        let proc_state = ProcessState::new(
+            proc,
+            "[unittest-user]".into(),
+            Arc::new(vec![]),
+            aspace,
+            kfs::new_process_fs_context(),
+            Arc::new(SpinNoIrq::new(SignalActions::default())),
+            None,
+            Credentials::root(),
+            ProcessStateConfig::default(),
+        );
+        let thr = Thread::new(tid, proc_state);
+        init_thread(&thr);
+
+        let page_table_root = thr.proc_state.address_space().lock().page_table_root();
+        let task_ptr = current_task_ptr();
+        let previous_page_table_root = karch::read_user_page_table();
+
+        // SAFETY: `task_ptr` is derived from `current()` and still names the current task
+        // for the duration of this installation. `NoPreempt` prevents switching away while
+        // we update the task context, so the current task and its context stay stable.
+        // Converting the immutable `ctx()` pointer to `*mut` is sound here because this
+        // code has exclusive access to the current task context during the no-preempt
+        // critical section.
+        let previous_task_ext = unsafe {
+            let _no_preempt = NoPreempt::new();
+
+            if let Some(ext) = (*task_ptr).task_ext() {
+                ext.on_leave();
+            }
+
+            let ctx_ptr: *mut khal::context::TaskContext = (*task_ptr).ctx() as *const _ as *mut _;
+            (*ctx_ptr).set_page_table_root(page_table_root.into());
+            karch::write_user_page_table(page_table_root.into());
+            karch::flush_tlb(None);
+
+            (*task_ptr).task_ext_mut().replace(KTaskExt::from_impl(thr))
+        };
+
+        // SAFETY: `task_ptr` still points to the current task immediately after the
+        // installation above, and `on_enter` only observes the freshly installed task ext.
+        unsafe {
+            if let Some(ext) = (*task_ptr).task_ext() {
+                ext.on_enter();
+            }
+        }
+
+        Ok(Self {
+            previous_task_ext,
+            previous_page_table_root,
+        })
+    }
+}
+
+impl Drop for InstalledTestThread {
+    fn drop(&mut self) {
+        let task_ptr = current_task_ptr();
+        // SAFETY: Drop runs on the same current task that installed the temporary user
+        // thread runtime. `NoPreempt` keeps the task context stable while we restore the
+        // previous page table root and task extension. The `ctx()` const-to-mut cast is
+        // sound because this critical section has exclusive access to the current task
+        // context.
+        unsafe {
+            {
+                let _no_preempt = NoPreempt::new();
+
+                if let Some(ext) = (*task_ptr).task_ext() {
+                    ext.on_leave();
+                }
+
+                let ctx_ptr: *mut khal::context::TaskContext =
+                    (*task_ptr).ctx() as *const _ as *mut _;
+                (*ctx_ptr).set_page_table_root(self.previous_page_table_root);
+                karch::write_user_page_table(self.previous_page_table_root);
+                karch::flush_tlb(None);
+
+                *(*task_ptr).task_ext_mut() = self.previous_task_ext.take();
+            }
+            if let Some(ext) = (*task_ptr).task_ext() {
+                ext.on_enter();
+            }
+        }
+    }
+}
+
+/// Run a unittest with a temporary userspace thread runtime installed.
+pub fn run_with_test_user_thread(
+    test: &TestDescriptor,
+    init_thread: InitTestThreadHook,
+) -> TestResult {
+    let _installed_thread = match InstalledTestThread::install(init_thread) {
+        Ok(guard) => guard,
+        Err(error) => {
+            error!(
+                "failed to install unittest user-thread runtime for {}:{}: {error:?}",
+                test.module, test.name
+            );
+            return TestResult::Failed;
+        }
+    };
+
+    (test.test_fn)()
+}
+
+const USER_TEST_STACK_SIZE: usize = 64 * 1024;
+
+/// Run a unittest on a temporary userspace stack inside a temporary userspace thread runtime.
+pub fn run_with_test_user_stack(
+    test: &TestDescriptor,
+    init_thread: InitTestThreadHook,
+) -> TestResult {
+    let _installed_thread = match InstalledTestThread::install(init_thread) {
+        Ok(guard) => guard,
+        Err(error) => {
+            error!(
+                "failed to install unittest user-thread runtime for {}:{}: {error:?}",
+                test.module, test.name
+            );
+            return TestResult::Failed;
+        }
+    };
+
+    let user_stack = match TestUserBuffer::new(USER_TEST_STACK_SIZE) {
+        Ok(stack) => stack,
+        Err(error) => {
+            error!(
+                "failed to allocate user test stack for {}:{}: {error:?}",
+                test.module, test.name
+            );
+            return TestResult::Failed;
+        }
+    };
+
+    let stack_top = user_stack.as_user_ptr::<u8>() as usize + user_stack.len();
+
+    let _no_preempt = NoPreempt::new();
+    // SAFETY: `TestUserBuffer` owns a valid user-mapped stack region of `USER_TEST_STACK_SIZE`
+    // bytes, and `stack_top` is the exclusive top-of-stack pointer for that region. Keeping
+    // preemption disabled avoids switching away while the test trampoline enters user mode.
+    unsafe { unittest::run_test_on_user_stack(test, stack_top) }
+}
+
+/// Register the shared unittest runtime using a crate-provided test-thread initialization hook.
+pub fn register_unittest_runtime(init_thread: InitTestThreadHook) {
+    *INIT_TEST_THREAD_HOOK.lock() = Some(init_thread);
+    unittest::register_custom_test_executor(run_registered_test_user_thread);
+    unittest::register_user_test_executor(run_registered_test_user_stack);
+}
+
+fn run_registered_test_user_thread(test: &TestDescriptor) -> TestResult {
+    run_with_test_user_thread(test, registered_init_test_thread)
+}
+
+fn run_registered_test_user_stack(test: &TestDescriptor) -> TestResult {
+    run_with_test_user_stack(test, registered_init_test_thread)
+}
 
 pub struct TestUserBuffer {
     aspace: Arc<Mutex<memspace::AddrSpace>>,

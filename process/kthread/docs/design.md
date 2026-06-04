@@ -84,7 +84,7 @@ ProcessState
 - `current_fs_context` 可在内核任务路径使用，内核任务会回退到 kernel 默认文件系统上下文。
 - registry、signal、timer 和 futex table helper 面向 task/syscall 生命周期路径，调用点不应位于中断上下文。
 - `ProcessState::new` 依赖 `kprocess::Process`、地址空间、文件系统上下文、信号动作表和 credential 已由调用者初始化。
-- `spawn_alarm_task` 依赖 timer 和 signal 子系统已完成基础初始化，并通过 `Once` 保证重复调用只注册一次。
+- `init_timer_runtime` 依赖 timer 和 signal 子系统已完成基础初始化，并通过 `Once` 保证重复调用只注册一次。
 - TEE 相关入口只在 `tee` feature 下可用，调用方需要保证具体 private runtime state 类型一致。
 
 ## 状态机
@@ -185,7 +185,7 @@ process group 信号遍历 `kprocess::ProcessGroup` 当前可升级成员，并�
 ### timer 投递
 
 ```text
-spawn_alarm_task()
+init_timer_runtime()
   → register_expired_task_handler(poll_timer)
   → register_signal_observer(SIGALRM/SIGVTALRM/SIGPROF/RT)
   → ktimer::spawn_alarm_task()

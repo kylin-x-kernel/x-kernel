@@ -109,7 +109,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 | F-04 | CPU time 统计偏差 | 线程状态切换漏调 `set_cpu_state` | rusage/procfs/time 展示不准 | 统计类 syscall 偏差 | 4 | 采样时先 update；状态切换由 trap/syscall 路径维护 |
 | F-05 | child CPU time 累计溢出 | 长期运行或异常重复累计 | 子进程统计截断 | rusage 展示错误 | 4 | 使用 `usize` nanosecond 计数；调用点应只在 reaped 时累计 |
 | F-06 | shared futex stale table 堆积 | 长期没有达到 cleanup 阈值或 table 非空 | 全局 map 增长 | 内存占用上升 | 3 | 每 100 次操作 retain；空且无外部强引用 table 被删除 |
-| F-07 | timer observer 未注册 | `spawn_alarm_task` 未调用 | timer signal 不投递 | alarm/POSIX timer 失效 | 2 | `kservices` 初始化阶段调用；`Once` 保证只注册一次 |
+| F-07 | timer observer 未注册 | `init_timer_runtime` 未调用 | timer signal 不投递 | alarm/POSIX timer 失效 | 2 | entry bootstrap 初始化阶段调用；`Once` 保证只注册一次 |
 | F-08 | timer dequeue 在非 timer signal 上误处理 | 普通信号进入 observer | 错误 drop signal | 信号语义异常 | 2 | 无 timer id 时返回 `Deliver` |
 | F-09 | TEE private state 泄漏或类型冲突 | 调用方未清理或重复初始化不同类型 | TEE 运行态错误 | TEE 会话失败 | 3 | `clear_tee_runtime_private` 清理 slot；类型不匹配返回 `BadState` |
 | F-10 | 中断上下文持锁调用 | 错误调用 registry 或 resource helper | IRQ 延迟增加 | 调度和响应延迟 | 2 | 审计清单要求新增调用点标明执行上下文 |
@@ -127,7 +127,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 - `send_signal_to_thread` 对 kernel task 目标返回 `OperationNotPermitted`。
 - `send_signal_to_thread` 在 `tgid` 不匹配时返回 `NoSuchProcess`。
 - `current_fs_context` 对 kernel task 提供 kernel 默认 context，避免共享路径 panic。
-- `spawn_alarm_task` 使用 `Once` 注册 timer runtime，避免重复注册 observer。
+- `init_timer_runtime` 使用 `Once` 注册 timer runtime，避免重复注册 observer。
 - TEE private state downcast 失败返回 `BadState`。
 
 ## 隐私分析

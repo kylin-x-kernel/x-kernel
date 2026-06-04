@@ -15,15 +15,22 @@ tee = ["kthread/tee"]
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
 kbuild_config.workspace = true
+kcred.workspace = true
 kerrno.workspace = true
+kexec.workspace = true
+kfs.workspace = true
 khal.workspace = true
 klogger.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
+ksync.workspace = true
 ktask.workspace = true
+ktty.workspace = true
 kthread.workspace = true
 linux-raw-sys.workspace = true
 linux_sysno.workspace = true
+memspace.workspace = true
 osvm.workspace = true
+posix-fs.workspace = true
 posix-ipc.workspace = true
 posix-types.workspace = true

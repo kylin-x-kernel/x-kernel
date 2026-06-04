@@ -27,7 +27,7 @@ use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
 use posix_types::{IoVec, IoVectorBuf, UserConstPtr, UserPtr};
 
-use crate::file::Pipe;
+use crate::file::current_pipe_endpoint;
 
 struct DummyFd;
 impl FileLike for DummyFd {
@@ -360,10 +360,7 @@ pub fn sys_fadvise64(
     debug!("sys_fadvise64 <= fd: {fd}, offset: {offset}, len: {len}, advice: {advice}");
     // Provide hints to kernel about how file will be accessed
     // Currently not fully implemented - pipes are not supported
-    if kthread::current_resources()
-        .get_file_like_as::<Pipe>(fd)
-        .is_ok()
-    {
+    if current_pipe_endpoint(fd).is_ok() {
         return Err(KError::BrokenPipe);
     }
     if advice > 5 {
@@ -692,8 +689,7 @@ pub fn sys_splice(
         SendFile::Offset(resources.get_file_like_as::<File>(fd_in)?, off_in.cast())
     } else {
         // Try to use as pipe first
-        if let Ok(src) = resources.get_file_like_as::<Pipe>(fd_in) {
-            // Pipe must be readable
+        if let Ok(src) = current_pipe_endpoint(fd_in) {
             if !src.is_read() {
                 return Err(KError::BadFileDescriptor);
             }
@@ -717,8 +713,7 @@ pub fn sys_splice(
         SendFile::Offset(resources.get_file_like_as::<File>(fd_out)?, off_out.cast())
     } else {
         // Try to use as pipe first
-        if let Ok(dst) = resources.get_file_like_as::<Pipe>(fd_out) {
-            // Pipe must be writable
+        if let Ok(dst) = current_pipe_endpoint(fd_out) {
             if !dst.is_write() {
                 return Err(KError::BadFileDescriptor);
             }

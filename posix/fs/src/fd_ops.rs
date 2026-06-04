@@ -16,7 +16,7 @@ use kerrno::{KError, KResult};
 use linux_raw_sys::general::*;
 use posix_types::UserPtr;
 
-use crate::file::Pipe;
+use crate::file::current_pipe_endpoint;
 
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {
@@ -144,11 +144,11 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(0)
         }
         F_GETPIPE_SZ => {
-            let pipe = kthread::current_resources().get_file_like_as::<Pipe>(fd)?;
+            let pipe = current_pipe_endpoint(fd)?;
             Ok(pipe.capacity() as _)
         }
         F_SETPIPE_SZ => {
-            let pipe = kthread::current_resources().get_file_like_as::<Pipe>(fd)?;
+            let pipe = current_pipe_endpoint(fd)?;
             pipe.resize(arg)?;
             Ok(pipe.capacity() as _)
         }

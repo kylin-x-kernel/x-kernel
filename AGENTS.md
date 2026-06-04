@@ -15,6 +15,9 @@ Current shared skills:
   `security.md`, and required rustdoc coverage.
 - `docs/ai/skills/code-guidelines/SKILL.md`:
   coding and code-review conventions for Rust kernel code.
+- `docs/ai/skills/test-harness/SKILL.md`:
+  external Starry Test Harness workflow for guest regression cases,
+  suite registration, execution, and syscall-focused test design constraints.
 
 ## Project Overview
 
@@ -40,6 +43,10 @@ ownership boundaries.
 - Keep address-space logic inside `mm/memspace`.
 - Keep kernel user-memory access glue in `core/kuaccess`.
 - Keep user program loading and exec image setup in `process/kexec`.
+- Define crates around cohesive ownership domains: data, state, invariants,
+  lifecycle, and execution-context assumptions that naturally belong together.
+  Keep code as a `mod` when it is only one crate's implementation detail; split
+  it into a crate when multiple peer crates depend on the same owned boundary.
 - Avoid reintroducing broad catch-all crates for responsibilities owned by
   `memspace`, `kuaccess`, or `kexec`.
 - Prefer shared driver, HAL, and memory-management layers over platform-local

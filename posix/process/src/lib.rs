@@ -12,11 +12,14 @@
 
 #![no_std]
 
+extern crate alloc;
+
 #[macro_use]
 extern crate klogger;
 
 mod cpu_time;
 mod ids;
+mod init_process;
 mod job_control;
 mod limits;
 mod runtime;
@@ -26,6 +29,7 @@ mod umask;
 
 pub use cpu_time::sys_times;
 pub use ids::{sys_getpid, sys_getppid};
+pub use init_process::run_init_process;
 pub use job_control::{sys_getpgid, sys_getsid, sys_setpgid, sys_setsid};
 pub use limits::{sys_getrlimit, sys_prlimit64, sys_setrlimit};
 pub use runtime::{check_signals, do_exit, new_user_task, raise_signal_fatal};

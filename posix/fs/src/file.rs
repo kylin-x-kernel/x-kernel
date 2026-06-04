@@ -16,7 +16,10 @@ use kfd::FdTable;
 use kfs::{FsContext, OpenOptions};
 use linux_raw_sys::general::{O_RDONLY, O_WRONLY};
 
-pub use self::{pidfd::PidFd, pipe_impl::Pipe};
+pub use self::{
+    pidfd::PidFd,
+    pipe_impl::{PipeEndpoint, PipeObject, PipeReadEnd, PipeWriteEnd, current_pipe_endpoint},
+};
 
 /// Add stdin, stdout, and stderr backed by `/dev/console`.
 pub fn add_stdio(fd_table: &mut FdTable, fs_context: &FsContext) -> KResult<()> {
