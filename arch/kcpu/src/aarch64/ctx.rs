@@ -164,11 +164,14 @@ pub struct FpState {
 impl FpState {
     /// Saves the current FP/SIMD states from CPU to this structure.
     pub fn save(&mut self) {
+        // SAFETY: `FpState` layout is `repr(C, align(16))` matching the V0-V31 + FPCR + FPSR
+        // save format expected by `fpstate_save`.
         unsafe { fpstate_save(self) }
     }
 
     /// Restores the FP/SIMD states from this structure to CPU.
     pub fn restore(&self) {
+        // SAFETY: `FpState` contains previously saved FP state with valid layout.
         unsafe { fpstate_restore(self) }
     }
 }
@@ -257,6 +260,8 @@ impl TaskContext {
         #[cfg(feature = "tls")]
         {
             self.tpidr_el0 = karch::read_thread_pointer() as _;
+            // SAFETY: Writing TPIDR_EL0 for TLS; per-CPU operation with interrupts off
+            // during `switch_to`.
             unsafe { karch::write_thread_pointer(next_ctx.tpidr_el0 as _) };
         }
         #[cfg(feature = "fp-simd")]
@@ -265,9 +270,13 @@ impl TaskContext {
             next_ctx.fp_state.restore();
         }
         if self.ttbr0_el1 != next_ctx.ttbr0_el1 {
+            // SAFETY: `ttbr0_el1` value comes from `HwPageTableRoot` set via
+            // `set_page_table_root()`, guaranteed valid by the page table subsystem.
             unsafe { karch::write_user_page_table(next_ctx.ttbr0_el1) };
             karch::flush_tlb(None); // currently flush the entire TLB
         }
+        // SAFETY: Naked function that saves/restores callee-saved registers (x19-x30, sp)
+        // and swaps stack pointers. Both stack pointers are valid.
         unsafe { context_switch(self, next_ctx) }
     }
 }

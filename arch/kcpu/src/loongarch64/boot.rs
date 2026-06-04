@@ -9,6 +9,8 @@
 /// In detail, it initializes the exception vector on LoongArch64 platforms.
 pub fn init_trap() {
     crate::userspace_common::init_exception_table();
+    // SAFETY: `exception_entry_base` is defined in `excp.S`.
+    // `karch::init_trap_state` sets the exception entry base CSR.
     unsafe {
         unsafe extern "C" {
             fn exception_entry_base();

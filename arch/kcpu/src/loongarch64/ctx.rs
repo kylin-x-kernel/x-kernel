@@ -102,12 +102,15 @@ impl FpuState {
     /// Save the current FPU states from CPU to this structure.
     #[inline]
     pub fn save(&mut self) {
+        // SAFETY: `FpuState` layout is `repr(C)` with `fp: [u64; 32]`, `fcc: [u8; 8]`,
+        // `fcsr: u32`, matching the register save format.
         unsafe { save_fp_registers(self) }
     }
 
     /// Restore FPU states from this structure to CPU.
     #[inline]
     pub fn restore(&self) {
+        // SAFETY: `FpuState` contains previously saved FP state with valid layout.
         unsafe { restore_fp_registers(self) }
     }
 }
@@ -305,10 +308,14 @@ impl TaskContext {
         #[cfg(feature = "tls")]
         {
             self.tp = karch::read_thread_pointer();
+            // SAFETY: Writing `tp` register for TLS; per-CPU operation with interrupts
+            // off during `switch_to`.
             unsafe { karch::write_thread_pointer(next_ctx.tp) };
         }
         {
             if self.pgdl != next_ctx.pgdl {
+                // SAFETY: `pgdl` value comes from `HwPageTableRoot` set via
+                // `set_page_table_root()`, guaranteed valid by the page table subsystem.
                 unsafe { karch::write_user_page_table(next_ctx.pgdl) };
                 karch::flush_tlb(None); // currently flush the entire TLB
             }
@@ -318,6 +325,8 @@ impl TaskContext {
             self.fpu.save();
             next_ctx.fpu.restore();
         }
+        // SAFETY: Naked function that saves/restores callee-saved registers
+        // (ra, s0-s8, fp, sp) and swaps stack pointers.
         unsafe { context_switch(self, next_ctx) }
     }
 }

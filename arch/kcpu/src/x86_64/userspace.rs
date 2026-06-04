@@ -86,13 +86,16 @@ impl UserContext {
         karch::disable_local_irq();
 
         let kernel_fs_base = karch::read_thread_pointer();
+        // SAFETY: Setting FS base to the user value; the kernel value is saved and restored after `enter_user` returns.
         unsafe { karch::write_thread_pointer(self.fs_base as _) };
         KernelGsBase::write(x86_64::VirtAddr::new_truncate(self.gs_base));
 
+        // SAFETY: `enter_user` is an assembly stub that switches to user mode and returns on trap. `UserContext` fields are set up by `new()` with valid user segment selectors and entry point.
         unsafe { enter_user(self) };
 
         self.gs_base = KernelGsBase::read().as_u64();
         self.fs_base = karch::read_thread_pointer() as _;
+        // SAFETY: Restoring the kernel FS base that was saved before entering user mode.
         unsafe { karch::write_thread_pointer(kernel_fs_base) };
 
         let cr2 = Cr2::read().unwrap().as_u64() as usize;
@@ -181,6 +184,7 @@ pub(super) fn init_syscall() {
             | RFlags::NESTED_TASK
             | RFlags::ALIGNMENT_CHECK,
     ); // TF | IF | DF | IOPL | AC | NT (0x47700)
+    // SAFETY: Enabling the SCE (System Call Extensions) bit in EFER. `syscall_entry` is defined in `excp.S` and resides in kernel code space. Segment selectors in `Star` are compile-time constants from `gdt.rs`.
     unsafe {
         Efer::update(|efer| *efer |= EferFlags::SYSTEM_CALL_EXTENSIONS);
     }

@@ -26,7 +26,10 @@ pub(super) const IRQ_VECTOR_END: u8 = 0xff;
 fn dispatch_irq_page_fault(tf: &mut ExceptionContext) {
     let access_flags = err_code_to_flags(tf.error_code)
         .unwrap_or_else(|e| panic!("Invalid #PF error code: {:#x}", e));
-    let vaddr = va!(unsafe { cr2() });
+    let vaddr = va!(unsafe {
+        // SAFETY: Reading CR2 is a privileged but side-effect-free register read.
+        cr2()
+    });
     if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }

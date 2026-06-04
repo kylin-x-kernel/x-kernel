@@ -32,7 +32,10 @@ static ACTIVE_EXCEPTION_CONTEXT_PTR: AtomicUsize = AtomicUsize::new(0);
 /// treat it as a short-lived snapshot: use it immediately and don't store it.
 #[inline]
 pub fn active_exception_context() -> Option<&'static ExceptionContext> {
-    // Safety: caller context must tolerate best-effort snapshot.
+    // SAFETY: `current_ref_raw()` returns a raw pointer to this CPU's per-CPU
+    // data area. The `load` is a best-effort atomic read; Relaxed ordering is
+    // sufficient because each CPU has its own copy and only the current CPU
+    // writes to it (within a trap handler, with IRQs off).
     let ptr = unsafe {
         ACTIVE_EXCEPTION_CONTEXT_PTR
             .current_ref_raw()
@@ -76,6 +79,11 @@ impl ExceptionContextGuard {
     pub fn new(tf: &ExceptionContext) -> Self {
         let ptr = tf as *const ExceptionContext as usize;
 
+        // SAFETY: `current_ref_raw()` points to this CPU's per-CPU data.
+        // The swap is safe because: (1) per-CPU data is uniquely owned by
+        // this CPU; (2) trap handlers run with IRQs off, so no concurrent
+        // access from the same CPU; (3) `ptr` is a valid address derived
+        // from a live `&ExceptionContext` reference.
         let prev = unsafe {
             ACTIVE_EXCEPTION_CONTEXT_PTR
                 .current_ref_raw()
@@ -89,6 +97,9 @@ impl ExceptionContextGuard {
 impl Drop for ExceptionContextGuard {
     #[inline]
     fn drop(&mut self) {
+        // SAFETY: Restoring the previous pointer is safe because `self.prev`
+        // was obtained from the same per-CPU atomic in `new()`. Drop runs
+        // at the end of the trap handler scope, still with IRQs off.
         unsafe {
             ACTIVE_EXCEPTION_CONTEXT_PTR
                 .current_ref_raw()

@@ -13,7 +13,7 @@ mod unaligned;
 
 pub mod instrs;
 pub use instrs as asm;
-pub mod boot;
+pub(crate) mod boot;
 pub use boot::init_trap;
 
 pub mod userspace;

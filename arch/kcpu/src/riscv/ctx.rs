@@ -111,18 +111,21 @@ impl FpState {
     /// Restores the floating-point registers from this FP state
     #[inline]
     pub fn restore(&self) {
+        // SAFETY: `FpState` layout is `repr(C)` with `fp: [u64; 32]` + `fcsr`, matching the register save format.
         unsafe { restore_fp_registers(self) }
     }
 
     /// Saves the current floating-point registers to this FP state
     #[inline]
     pub fn save(&mut self) {
+        // SAFETY: `FpState` has valid alignment and size for FP register save.
         unsafe { save_fp_registers(self) }
     }
 
     /// Clears all floating-point registers to zero
     #[inline]
     pub fn clear() {
+        // SAFETY: Naked function that writes zeros to FP registers; no memory interaction.
         unsafe { clear_fp_registers() }
     }
 
@@ -146,6 +149,7 @@ impl FpState {
             FS::Off => {}                         // do nothing
             FS::Dirty => unreachable!("FP state of the next task should not be dirty"),
         }
+        // SAFETY: Writing the FS field in sstatus CSR to track FP state; standard CSR write.
         unsafe { sstatus::set_fs(next_fp_state.fs) }; // set the FP state to the next task's FP state
     }
 }
@@ -385,9 +389,11 @@ impl TaskContext {
         #[cfg(feature = "tls")]
         {
             self.tp = karch::read_thread_pointer();
+            // SAFETY: Writing `tp` register for TLS; per-CPU operation with interrupts off during `switch_to`.
             unsafe { karch::write_thread_pointer(next_ctx.tp) };
         }
         if self.satp != next_ctx.satp {
+            // SAFETY: `satp` value comes from `HwPageTableRoot` set via `set_page_table_root()`, guaranteed valid by the page table subsystem.
             unsafe { karch::write_user_page_table(next_ctx.satp) };
             karch::flush_tlb(None); // currently flush the entire TLB
         }
@@ -396,6 +402,7 @@ impl TaskContext {
             self.fp_state.switch_to(&next_ctx.fp_state);
         }
 
+        // SAFETY: Naked function that saves/restores callee-saved registers (ra, s0-s11, sp) and swaps stack pointers.
         unsafe { context_switch(self, next_ctx) }
     }
 }

@@ -22,12 +22,14 @@ pub(super) fn init() {
             static ENTRIES: [VirtAddr; NUM_INT];
         }
         let mut table = InterruptDescriptorTable::new();
+        // SAFETY: `InterruptDescriptorTable` is documented by the `x86_64` crate as a transparent wrapper around 256 `Entry` items. `NUM_INT == 256` matches.
         let entries = unsafe {
             core::mem::transmute::<&mut InterruptDescriptorTable, &mut [Entry<()>; NUM_INT]>(
                 &mut table,
             )
         };
         for i in 0..NUM_INT {
+            // SAFETY: `ENTRIES[i]` are addresses from the assembly-defined `trap_handler_table`, each pointing to a valid trap entry stub.
             let opt = unsafe { entries[i].set_handler_addr(ENTRIES[i]) };
             if i == 0x3 || i == 0x80 {
                 // enable user space breakpoints and legacy int 0x80 syscall

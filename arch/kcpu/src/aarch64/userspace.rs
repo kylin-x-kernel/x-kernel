@@ -89,6 +89,9 @@ impl UserContext {
         }
 
         karch::disable_local_irq(); // updated module reference from asm -> instrs
+        // SAFETY: `enter_user` is an assembly stub that restores user registers from
+        // `UserContext` and executes `eret`. `UserContext` fields are set up by `new()`
+        // with valid EL0t SPSR and user entry point.
         let trap_kind = unsafe { enter_user(self) };
 
         let ret = match trap_kind {

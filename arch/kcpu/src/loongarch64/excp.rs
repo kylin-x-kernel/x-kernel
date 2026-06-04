@@ -65,6 +65,8 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
         }
         Trap::Exception(Exception::Breakpoint) => dispatch_irq_breakpoint(&mut tf.era),
         Trap::Exception(Exception::AddressNotAligned) => unsafe {
+            // SAFETY: Called within a trap handler for an AddressNotAligned exception.
+            // `tf` is a valid ExceptionContext with `era` pointing to the faulting instruction.
             tf.emulate_unaligned().unwrap();
         },
         Trap::Interrupt(_) => {

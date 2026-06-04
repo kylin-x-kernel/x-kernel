@@ -41,6 +41,8 @@ pub fn init_trap() {
     unsafe extern "C" {
         fn exception_vector_base();
     }
+    // SAFETY: `exception_vector_base` is defined in `excp.S` and aligned per ARM vector
+    // table requirements. Writing zero to TTBR0_EL1 disables low-address translation.
     unsafe {
         karch::write_trap_vector_base(exception_vector_base as *const () as usize);
         karch::write_user_page_table(memaddr::PhysAddr::from(0usize).into());

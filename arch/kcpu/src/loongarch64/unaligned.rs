@@ -43,6 +43,8 @@ impl fmt::Display for UnalignedError {
 impl core::error::Error for UnalignedError {}
 
 fn unaligned_read(addr: u64, value: &mut u64, n: u64, symbol: bool) -> Result<(), UnalignedError> {
+    // SAFETY: `addr` is the faulting virtual address from BADV. `_unaligned_read`
+    // in assembly performs a safe byte-by-byte read with exception table entries.
     if unsafe { _unaligned_read(addr, value, n, symbol) } == -1 {
         return Err(UnalignedError { addr, n: Some(n) });
     }
@@ -50,12 +52,18 @@ fn unaligned_read(addr: u64, value: &mut u64, n: u64, symbol: bool) -> Result<()
 }
 
 fn unaligned_write(addr: u64, value: u64, n: u64) -> Result<(), UnalignedError> {
+    // SAFETY: `addr` is the faulting virtual address from BADV. `_unaligned_write`
+    // in assembly performs a safe byte-by-byte write with exception table entries.
     if unsafe { _unaligned_write(addr, value, n) } == -1 {
         return Err(UnalignedError { addr, n: Some(n) });
     }
     Ok(())
 }
 
+// SAFETY (for all asm_write_fpr_N and asm_read_fpr_N functions): These use
+// `movgr2fr.d` / `movfr2gr.d` which only move data between general-purpose and
+// FP registers — no memory access. Each function is hardcoded to a specific
+// register number matching its match arm in `write_fpr`/`read_fpr`.
 #[inline]
 fn asm_write_fpr_0(val: u64) {
     unsafe { asm!("movgr2fr.d $f0,  {val} ", val = in(reg) val) }
@@ -441,7 +449,7 @@ fn asm_read_fpr_31() -> u64 {
 }
 
 /// Writes a value to the specified floating-point register.
-pub fn write_fpr(fd: usize, val: u64) {
+fn write_fpr(fd: usize, val: u64) {
     match fd {
         0 => asm_write_fpr_0(val),
         1 => asm_write_fpr_1(val),
@@ -482,7 +490,7 @@ pub fn write_fpr(fd: usize, val: u64) {
 }
 
 /// Reads the value of the specified floating-point register.
-pub fn read_fpr(fd: usize) -> u64 {
+fn read_fpr(fd: usize) -> u64 {
     let value: u64;
     match fd {
         0 => value = asm_read_fpr_0(),
@@ -567,9 +575,13 @@ impl TrapFrame {
         let mut value: u64 = 0;
 
         let badv = badv::read().vaddr() as u64;
+        // SAFETY: `self.era` points to the faulting instruction in the code segment,
+        // readable in the current trap context.
         let badi = unsafe { core::ptr::read(self.era as *const u32) };
         let rd = (badi & 0x1f) as usize;
 
+        // SAFETY: `GeneralRegisters` is `repr(C)` with 32 consecutive `usize` fields,
+        // layout-compatible with `[usize; 32]`.
         let regs = unsafe {
             core::mem::transmute::<&mut GeneralRegisters, &mut [usize; 32]>(&mut self.regs)
         };

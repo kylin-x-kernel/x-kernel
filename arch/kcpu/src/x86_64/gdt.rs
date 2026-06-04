@@ -33,13 +33,16 @@ pub const UCODE64: SegmentSelector = SegmentSelector::new(4, PrivilegeLevel::Rin
 /// Initializes the per-CPU TSS and GDT structures and loads them into the
 /// current CPU.
 pub(super) fn init() {
+    // SAFETY: Called during per-CPU initialization (boot or secondary CPU bringup), single-threaded for this CPU.
     let gdt = unsafe { GDT.current_ref_mut_raw() };
     assert_eq!(gdt.append(Descriptor::kernel_code_segment()), KCODE64);
     assert_eq!(gdt.append(Descriptor::kernel_data_segment()), KDATA);
     assert_eq!(gdt.append(Descriptor::user_data_segment()), UDATA);
     assert_eq!(gdt.append(Descriptor::user_code_segment()), UCODE64);
+    // SAFETY: TSS is initialized; reading a shared reference for passing to GDT descriptor.
     let tss = gdt.append(Descriptor::tss_segment(unsafe { TSS.current_ref_raw() }));
     gdt.load();
+    // SAFETY: Segment selectors are compile-time constants verified by `assert_eq!` above. Loading them after `gdt.load()` is valid because the GDT now contains the referenced descriptors.
     unsafe {
         DS::set_reg(KDATA);
         ES::set_reg(KDATA);

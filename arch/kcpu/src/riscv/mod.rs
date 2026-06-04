@@ -12,7 +12,7 @@ mod excp;
 
 pub mod instrs;
 pub use instrs as asm;
-pub mod boot;
+pub(crate) mod boot;
 
 pub mod userspace;
 

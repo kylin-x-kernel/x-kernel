@@ -295,17 +295,20 @@ impl ExtendedState {
     /// Saves the current extended states from CPU to this structure.
     #[inline]
     pub fn save(&mut self) {
+        // SAFETY: `fxsave_area` is a valid 512-byte `FxStateBlock` with 16-byte alignment, matching FXSAVE64 requirements.
         unsafe { core::arch::x86_64::_fxsave64(&mut self.fxsave_area as *mut _ as *mut u8) }
     }
 
     /// Restores the extended states from this structure to CPU.
     #[inline]
     pub fn restore(&self) {
+        // SAFETY: `fxsave_area` contains previously saved FXSAVE state with valid layout.
         unsafe { core::arch::x86_64::_fxrstor64(&self.fxsave_area as *const _ as *const u8) }
     }
 
     /// Returns the extended state with initialized values.
     pub const fn default() -> Self {
+        // SAFETY: `FxStateBlock` contains only integer/array fields (`u16`, `u32`, `u64`). All-zero is a valid representation for every field.
         let mut area: FxStateBlock = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
         area.fpu_ctrl = 0x037f;
         area.fpu_status = 0;
@@ -362,6 +365,9 @@ pub struct TaskContext {
 impl TaskContext {
     #[inline]
     unsafe fn prepare_initial_frame(entry: usize, kstack_top: VirtAddr) -> u64 {
+        // SAFETY: `kstack_top` points to the top of a valid kernel stack with sufficient space.
+        // `sub(1)` for u64 then `sub(1)` for ContextSwitchFrame leaves room for the frame.
+        // 16-byte alignment is maintained for x86_64 calling convention.
         let top_u64 = kstack_top.as_mut_ptr() as *mut u64;
         let frame_ptr = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>().sub(1) };
         unsafe {
@@ -394,6 +400,7 @@ impl TaskContext {
     /// Initializes the context for a new task, with the given entry point and
     /// kernel stack.
     pub fn init(&mut self, entry: usize, kstack_top: VirtAddr, tls_area: VirtAddr) {
+        // SAFETY: `kstack_top` is a valid kernel stack top provided by the caller.
         unsafe {
             // x86_64 calling convention: the stack must be 16-byte aligned before
             // calling a function. That means when entering a new task (`ret` in `context_switch`
@@ -418,6 +425,7 @@ impl TaskContext {
     /// restores the next task's context from `next_ctx` to CPU.
     pub fn switch_to(&mut self, next_ctx: &Self) {
         #[cfg(feature = "tls")]
+        // SAFETY: Reading/writing FS base (TLS pointer) is a per-CPU operation. Interrupts are off during `switch_to`.
         unsafe {
             self.fs_base = karch::read_thread_pointer();
             karch::write_thread_pointer(next_ctx.fs_base);
@@ -427,12 +435,17 @@ impl TaskContext {
             self.ext_state.save();
             next_ctx.ext_state.restore();
         }
+        // SAFETY: `cr3` values come from `HwPageTableRoot` set via
+        // `set_page_table_root()`, guaranteed valid by the page table subsystem.
+        // Skipping the write when CR3 matches avoids an unnecessary TLB flush
+        // (e.g., threads within the same process share the same page table).
         unsafe {
             if next_ctx.cr3 != self.cr3 {
                 karch::write_user_page_table(next_ctx.cr3);
                 // writing to CR3 has flushed the TLB
             }
         }
+        // SAFETY: `context_switch` is a naked function that saves/restores callee-saved registers and swaps stack pointers. Both `self.rsp` and `next_ctx.rsp` are valid stack pointers.
         unsafe { context_switch(&mut self.rsp, &next_ctx.rsp) }
     }
 }

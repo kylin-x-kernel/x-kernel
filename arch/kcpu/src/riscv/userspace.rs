@@ -61,6 +61,7 @@ impl UserContext {
         }
 
         karch::disable_local_irq();
+        // SAFETY: `enter_user` is an assembly stub that restores user registers and executes `sret`. `UserContext` fields are set up by `new()` with valid SSTATUS (SPIE+SUM) and user entry point.
         unsafe { enter_user(self) };
 
         let scause = scause::read();

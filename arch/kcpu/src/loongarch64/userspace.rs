@@ -49,6 +49,9 @@ impl UserContext {
         }
 
         karch::disable_local_irq();
+        // SAFETY: `enter_user` is an assembly stub that restores user registers and
+        // executes `ertn`. `UserContext` fields are set up by `new()` with valid PRMD
+        // (PLV=UMODE, PIE) and user entry point.
         unsafe { enter_user(self) };
 
         let estat = estat::read();

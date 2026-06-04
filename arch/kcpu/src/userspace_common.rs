@@ -51,6 +51,10 @@ unsafe extern "C" {
 
 impl ExceptionContext {
     pub(crate) fn fixup_exception(&mut self) -> bool {
+        // SAFETY: `_ex_table_start` and `_ex_table_end` are linker-defined
+        // symbols bounding the `__ex_table` section. They form a valid slice
+        // of `ExceptionTableEntry` items. The table has been sorted by
+        // `init_exception_table()` at boot.
         let entries = unsafe {
             core::slice::from_raw_parts(
                 _ex_table_start.as_ptr(),
@@ -70,7 +74,10 @@ impl ExceptionContext {
 }
 
 pub(crate) fn init_exception_table() {
-    // Sort exception table
+    // SAFETY: `_ex_table_start` / `_ex_table_end` are valid linker symbols.
+    // This is called once during boot (single-threaded), so mutable access
+    // is exclusive. `cast_mut()` is safe because we own the section data
+    // at init time.
     let ex_table = unsafe {
         core::slice::from_raw_parts_mut(
             _ex_table_start.as_ptr().cast_mut(),
