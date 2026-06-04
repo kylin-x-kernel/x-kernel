@@ -150,7 +150,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
         F_SETPIPE_SZ => {
             let pipe = kthread::current_resources().get_file_like_as::<Pipe>(fd)?;
             pipe.resize(arg)?;
-            Ok(0)
+            Ok(pipe.capacity() as _)
         }
         _ => {
             warn!("unsupported fcntl parameters: cmd: {cmd}");

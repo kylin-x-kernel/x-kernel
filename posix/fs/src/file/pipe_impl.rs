@@ -27,7 +27,8 @@ use ringbuf::{
     traits::{Consumer, Observer, Producer},
 };
 
-const RING_BUFFER_INIT_SIZE: usize = 65536;
+const RING_BUFFER_INIT_SIZE: usize = 65536; // 64 KiB
+const PIPE_MAX_SIZE: usize = 1024 * 1024; // 1 MiB, matching Linux pipe-max-size default.
 
 struct Shared {
     buffer: Mutex<HeapRb<u8>>,
@@ -88,20 +89,40 @@ impl Pipe {
     }
 
     pub fn resize(&self, new_size: usize) -> KResult<()> {
-        let new_size = new_size.div_ceil(PAGE_SIZE_4K).max(1) * PAGE_SIZE_4K;
+        let pages = new_size
+            .checked_add(PAGE_SIZE_4K - 1)
+            .ok_or(KError::InvalidInput)?
+            / PAGE_SIZE_4K;
+        let pages = pages
+            .max(1)
+            .checked_next_power_of_two()
+            .ok_or(KError::InvalidInput)?;
+        let new_size = pages
+            .checked_mul(PAGE_SIZE_4K)
+            .ok_or(KError::InvalidInput)?;
+        if new_size > PIPE_MAX_SIZE {
+            return Err(KError::OperationNotPermitted);
+        }
 
         let mut buffer = self.shared.buffer.lock();
-        if new_size == buffer.capacity().get() {
+        let old_size = buffer.capacity().get();
+        if new_size == old_size {
             return Ok(());
         }
         if new_size < buffer.occupied_len() {
             return Err(KError::ResourceBusy);
         }
 
-        let old_buffer = mem::replace(&mut *buffer, HeapRb::new(new_size));
+        let new_buffer = HeapRb::try_new(new_size).map_err(|_| KError::NoMemory)?;
+        let old_buffer = mem::replace(&mut *buffer, new_buffer);
         let (left, right) = old_buffer.as_slices();
         buffer.push_slice(left);
         buffer.push_slice(right);
+
+        if new_size > old_size {
+            self.shared.poll_tx.wake();
+        }
+
         Ok(())
     }
 }
@@ -364,6 +385,47 @@ mod pipe_tests {
         let (read_end, _write_end) = Pipe::new();
         read_end.resize(5000).unwrap();
         assert_eq!(read_end.capacity(), 8192);
+    }
+
+    #[def_test]
+    fn test_pipe_resize_rounds_up_to_power_of_two_pages() {
+        let (read_end, _write_end) = Pipe::new();
+        read_end.resize(12 * 1024).unwrap();
+        assert_eq!(read_end.capacity(), 16 * 1024);
+
+        read_end.resize(20 * 1024).unwrap();
+        assert_eq!(read_end.capacity(), 32 * 1024);
+    }
+
+    #[def_test]
+    fn test_pipe_resize_minimum() {
+        let (read_end, _write_end) = Pipe::new();
+        read_end.resize(0).unwrap();
+        assert_eq!(read_end.capacity(), PAGE_SIZE_4K);
+    }
+
+    #[def_test]
+    fn test_pipe_resize_to_maximum() {
+        let (read_end, _write_end) = Pipe::new();
+        read_end.resize(PIPE_MAX_SIZE).unwrap();
+        assert_eq!(read_end.capacity(), PIPE_MAX_SIZE);
+    }
+
+    #[def_test]
+    fn test_pipe_resize_rejects_excessive_size() {
+        let (read_end, _write_end) = Pipe::new();
+        assert_eq!(
+            read_end.resize(PIPE_MAX_SIZE + 1),
+            Err(KError::OperationNotPermitted)
+        );
+        assert_eq!(read_end.capacity(), RING_BUFFER_INIT_SIZE);
+    }
+
+    #[def_test]
+    fn test_pipe_resize_rejects_overflow_size() {
+        let (read_end, _write_end) = Pipe::new();
+        assert_eq!(read_end.resize(usize::MAX), Err(KError::InvalidInput));
+        assert_eq!(read_end.capacity(), RING_BUFFER_INIT_SIZE);
     }
 
     #[def_test]
