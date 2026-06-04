@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! `pipe` object implementation.
+
 use alloc::{borrow::Cow, format, sync::Arc};
 use core::{
     mem,
@@ -15,7 +17,6 @@ use kpoll::{IoEvents, PollSet, Pollable};
 use ksignal::{SignalInfo, Signo};
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io};
-use kthread::send_signal_to_process;
 use linux_raw_sys::{
     general::{O_RDONLY, O_WRONLY, S_IFIFO},
     ioctl::FIONREAD,
@@ -31,6 +32,7 @@ const RING_BUFFER_INIT_SIZE: usize = 65536; // 64 KiB
 const PIPE_MAX_SIZE: usize = 1024 * 1024; // 1 MiB, matching Linux pipe-max-size default.
 const PIPE_BUF: usize = 4096;
 
+/// Shared pipe state exposed through read and write endpoints in the fd table.
 pub struct PipeObject {
     state: Mutex<PipeState>,
     poll_rx: PollSet,
@@ -282,42 +284,51 @@ impl Pollable for PipeObject {
 }
 
 impl PipeReadEnd {
+    /// Returns `true` because this endpoint is the read side.
     pub fn is_read(&self) -> bool {
         true
     }
 
+    /// Returns the current pipe buffer capacity in bytes.
     pub fn capacity(&self) -> usize {
         self.pipe.capacity()
     }
 
+    /// Resize the shared pipe buffer.
     pub fn resize(&self, new_size: usize) -> KResult<()> {
         self.pipe.resize(new_size)
     }
 }
 
 impl PipeWriteEnd {
+    /// Returns `true` because this endpoint is the write side.
     pub fn is_write(&self) -> bool {
         true
     }
 
+    /// Returns the current pipe buffer capacity in bytes.
     pub fn capacity(&self) -> usize {
         self.pipe.capacity()
     }
 
+    /// Resize the shared pipe buffer.
     pub fn resize(&self, new_size: usize) -> KResult<()> {
         self.pipe.resize(new_size)
     }
 }
 
 impl PipeEndpoint {
+    /// Returns whether this endpoint is readable.
     pub fn is_read(&self) -> bool {
         matches!(self, Self::Read(_))
     }
 
+    /// Returns whether this endpoint is writable.
     pub fn is_write(&self) -> bool {
         matches!(self, Self::Write(_))
     }
 
+    /// Returns the current pipe buffer capacity in bytes.
     pub fn capacity(&self) -> usize {
         match self {
             Self::Read(pipe) => pipe.capacity(),
@@ -325,6 +336,7 @@ impl PipeEndpoint {
         }
     }
 
+    /// Resize the shared pipe buffer behind either endpoint.
     pub fn resize(&self, new_size: usize) -> KResult<()> {
         match self {
             Self::Read(pipe) => pipe.resize(new_size),
@@ -333,6 +345,7 @@ impl PipeEndpoint {
     }
 }
 
+/// Resolve the current process file descriptor to a concrete pipe endpoint.
 pub fn current_pipe_endpoint(fd: i32) -> KResult<PipeEndpoint> {
     let resources = kthread::current_resources();
     if let Ok(pipe) = resources.get_file_like_as::<PipeReadEnd>(fd) {
@@ -345,7 +358,7 @@ pub fn current_pipe_endpoint(fd: i32) -> KResult<PipeEndpoint> {
 }
 
 fn raise_pipe() {
-    send_signal_to_process(
+    kthread::send_signal_to_process(
         kthread::current_thread().pid(),
         Some(SignalInfo::new_kernel(Signo::SIGPIPE)),
     )

@@ -14,4 +14,5 @@
 extern crate alloc;
 
 pub mod eventfd;
+pub mod pipe;
 pub mod timerfd;

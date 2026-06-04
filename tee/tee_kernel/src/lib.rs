@@ -14,5 +14,5 @@ pub mod file;
 pub mod mm;
 pub mod tee;
 pub use tee_raw_sys::TEE_SUCCESS;
-#[cfg(all(unittest, feature = "unittest_helpers"))]
+#[cfg(unittest)]
 pub use unittest_support::{TestUserArray, TestUserBuffer, TestUserValue, user_vec};

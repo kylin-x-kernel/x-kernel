@@ -21,11 +21,9 @@ mod mount;
 mod namei;
 mod open;
 mod path;
-mod pipe;
 mod stat;
 mod sync;
 
 pub use self::{
-    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, pipe::*, stat::*,
-    sync::*,
+    dir::*, fd_ops::*, io::*, ioctl::*, metadata::*, mount::*, namei::*, open::*, stat::*, sync::*,
 };

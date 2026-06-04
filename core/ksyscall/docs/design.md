@@ -73,7 +73,7 @@ user trap / arch syscall entry
 ksyscall::dispatch_irq_syscall
     │ decode sysno + ABI arguments
     ├─ vfs adapter  ───────────> posix-fs / kfs / kvfs
-    ├─ ipc adapter  ───────────> posix-fs::pipe / kfd_objects::EventFd
+    ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
     ├─ time adapter ───────────> kfd_objects::TimerFd / posix-time
     ├─ task adapter ───────────> kthread / posix-process / kprocess
     ├─ io_mpx adapter ─────────> posix-io-mpx
@@ -96,7 +96,7 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `posix-fs` / `kfs` / `kvfs`
 - `ipc/pipe.rs`
   - `pipe2`
-  - owner 在 `posix-fs::PipeObject`
+  - owner 在 `kfd_objects::PipeObject`
 - `ipc/eventfd.rs`
   - `eventfd2`
   - owner 在 `kfd_objects::EventFd`

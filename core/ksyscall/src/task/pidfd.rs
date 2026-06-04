@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
-use kthread::{PidFd, get_process_state, send_signal_to_process};
+use kthread::PidFd;
 use posix_signal::make_queue_signal_info;
 use posix_types::{UserConstPtr, k_siginfo};
 
@@ -19,7 +19,7 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let task = get_process_state(pid)?;
+    let task = kthread::get_process_state(pid)?;
     let fd = PidFd::new(&task);
 
     kthread::current_resources()
@@ -60,6 +60,6 @@ pub fn sys_pidfd_send_signal(
     let pid = pidfd.process_state()?.proc.pid();
 
     let sig = make_queue_signal_info(pid, signo, sig)?;
-    send_signal_to_process(pid, sig)?;
+    kthread::send_signal_to_process(pid, sig)?;
     Ok(0)
 }

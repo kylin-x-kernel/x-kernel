@@ -21,7 +21,7 @@ use kprocess::Pid;
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};
-use kthread::{PidFd, ProcessState, ProcessStateConfig, Thread, add_task_to_table};
+use kthread::{PidFd, ProcessState, ProcessStateConfig, Thread};
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
 use posix_process::new_user_task;
@@ -309,7 +309,7 @@ impl CloneRequest {
         *new_task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
 
         let task = spawn_task(new_task);
-        add_task_to_table(&task);
+        kthread::add_task_to_table(&task);
 
         Ok(tid as _)
     }

@@ -4,16 +4,16 @@
 
 `posix-fs` 是 x-kernel 的 POSIX/Linux 文件系统 syscall 兼容 crate。
 它把 `openat(2)`、`read(2)`、`write(2)`、`stat(2)`、`mkdir(2)`、
-`link(2)`、`mount(2)`、`pipe(2)`、`fcntl(2)`、`ioctl(2)` 等用户态入口
+`link(2)`、`mount(2)`、`fcntl(2)`、`ioctl(2)` 等用户态入口
 转换为内核内部的 fd 表、进程文件系统上下文、VFS 节点和设备对象操作。
 
 目标读者是维护 `core/ksyscall` 文件系统分发路径、`kfd` 进程 fd 表、
-`kfs`/`kvfs` VFS 层、`posix-fs` 拥有的 pipe 对象以及终端和设备文件兼容路径的开发者。
+`kfs`/`kvfs` VFS 层，以及终端和设备文件兼容路径的开发者。
 
 ## 背景
 
 POSIX 文件系统 syscall 同时接触用户指针、路径字符串、进程当前工作目录、
-文件描述符、VFS 节点、设备节点和 `posix-fs` 自己拥有的匿名 fd 对象。
+文件描述符、VFS 节点、设备节点以及与 fd-backed object 的互操作路径。
 `posix-fs` 把这些 Linux ABI 细节收敛到一个 crate 中，
 使 syscall 分发表只负责导出入口，
 而底层 VFS 和 fd 表继续保持面向内核对象的抽象。
@@ -43,7 +43,6 @@ posix/fs/
 │   ├── namei.rs        # link/unlink/symlink/readlink/rename
 │   ├── metadata.rs     # chown/chmod/utime/utimensat
 │   ├── mount.rs        # mount/umount2
-│   ├── pipe.rs         # pipe2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
 │   ├── ioctl.rs        # ioctl dispatch and FIONBIO handling
 │   └── sync.rs         # sync/syncfs
@@ -75,8 +74,8 @@ core/ksyscall
 │   ├─ kfd::FileLike                                       │
 │   ├─ kfs::{File, Directory, OpenOptions, FsContext}       │
 │   ├─ kvfs::{Location, MetadataUpdate, MountFlags}         │
-│   ├─ PipeObject / PipeReadEnd / PipeWriteEnd             │
-│   └─ devfs/ktty special files                            │
+│   ├─ devfs/ktty special files                            │
+│   └─ kfd_objects::PipeEndpoint interop for splice/fcntl  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -90,7 +89,6 @@ core/ksyscall
 | `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
 | `metadata` | 修改所有者、权限和时间戳 |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，当前支持 tmpfs mount |
-| `pipe` | 创建 pipe 读写端点并原子写回用户 fd 数组 |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
 | `ioctl` | 处理 `FIONBIO` 并把其它命令转交 `FileLike::ioctl` |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
@@ -103,11 +101,11 @@ core/ksyscall
 - 当前线程可通过 `kthread::current_thread()` 获取；
 - 当前进程有可访问的 `ProcessState`、fd resources 和 `FsContext`；
 - 用户指针可通过 `posix_types` / `osvm` 访问当前地址空间；
-- 调用路径允许阻塞、分配和进入 VFS、管道或设备对象；
+- 调用路径允许阻塞、分配和进入 VFS、fd-backed object 或设备对象；
 - 调度器、进程资源锁、VFS 和内存映射已经初始化。
 
 该 crate 不适合作为中断上下文或早期启动阶段 API 使用。
-路径解析、fd 表访问、VFS I/O、目录遍历、pipe 创建和 fd-to-fd 复制都可能分配、
+路径解析、fd 表访问、VFS I/O、目录遍历和 fd-to-fd 复制都可能分配、
 加锁、等待底层对象或返回 `WouldBlock`。
 
 ## 状态机
@@ -129,9 +127,6 @@ Closed fd
 
 `posix-fs` 不直接保存 fd 表，
 而是通过 `kthread::current_resources()` 操作当前进程资源。
-`pipe2` 在第二个 fd 添加失败时会关闭已经加入的读端，
-避免用户态观察到半创建的 pipe。
-
 ### 路径解析
 
 ```text
@@ -159,7 +154,7 @@ FileLike::read/write
     │
     ├─ kfs::File offset or read_at/write_at
     ├─ kfs::Directory offset for lseek/getdents64
-    ├─ PipeObject / PipeReadEnd / PipeWriteEnd
+    ├─ kfd_objects::PipeReadEnd / PipeWriteEnd
     └─ device-specific FileLike implementation
 ```
 
@@ -237,17 +232,18 @@ FileLike::read/write
 ### syscall 兼容层与 VFS 分离
 
 `posix-fs` 只处理 Linux ABI、当前进程上下文和错误传播，
-把实际文件语义交给 `kfs`、`kvfs`、`kfd`、本 crate 拥有的匿名 fd 对象和设备对象。
+把实际文件语义交给 `kfs`、`kvfs`、`kfd`、`kfd_objects` 和设备对象。
 这样可以避免在 syscall 层复制文件系统实现，
 代价是 syscall 兼容行为必须清楚记录哪些由本 crate 保证、哪些由底层对象保证。
 
 ### fd-backed object 与文件系统状态分离
 
 通过 fd 向用户态暴露对象，并不自动意味着该对象属于文件系统 owner。
-`timerfd` 已迁移到 `kfd_objects`，因为它的核心状态是 timer runtime、
-expiration counter 和 arm/disarm 语义，而不是路径、inode、mount 或文件偏移。
-`posix-fs` 继续保留的匿名 fd 对象，应当仍然和文件系统相关 syscall 或
-当前 crate 自己维护的不变量强关联。
+`timerfd`、`eventfd` 和 `pipe` 已迁移到 `kfd_objects`，因为它们的核心状态分别是
+timer runtime、event counter、pipe buffer 与 endpoint 生命周期，
+而不是路径、inode、mount 或文件偏移。
+`posix-fs` 对这类对象保留的职责，仅限于像 `splice`、`fcntl(F_*PIPE_SZ)` 这样的
+VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 
 ### procfd 作为路径解析特例
 
@@ -292,7 +288,6 @@ expiration counter 和 arm/disarm 语义，而不是路径、inode、mount 或�
 
 - `close`/`close_range` 从当前进程 fd 表移除 `Arc<dyn FileLike>`；
 - fd 复制和打开路径通过 `Arc` 共享文件、目录、pipe 或设备对象；
-- `pipe2` 在写端加入失败时主动关闭已加入的读端；
 - 临时 `Vec`、路径 `String`、`CString` 和中间 I/O 缓冲区在函数返回时释放；
 - mount/unmount 的生命周期由 `kvfs::Location` 和 mountpoint 管理。
 

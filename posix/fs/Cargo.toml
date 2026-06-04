@@ -14,6 +14,7 @@ categories.workspace = true
 [dependencies]
 bitflags.workspace = true
 kfd.workspace = true
+kfd_objects.workspace = true
 devfs.workspace = true
 memfs.workspace = true
 ktty.workspace = true
@@ -23,15 +24,10 @@ khal.workspace = true
 kio.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
-ksignal.workspace = true
-ksync.workspace = true
-ktask.workspace = true
 kthread.workspace = true
 kvfs.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 linux_sysno.workspace = true
-memaddr.workspace = true
 osvm.workspace = true
 posix-types.workspace = true
-ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 unittest.workspace = true

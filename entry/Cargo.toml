@@ -8,7 +8,7 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-unittest = ["dep:unittest", "dep:unittest_support", "tee_kernel/unittest_helpers"]
+unittest = ["dep:unittest", "dep:unittest_support"]
 dma-trace = ["kfeat/dma-trace"]
 
 [dependencies]

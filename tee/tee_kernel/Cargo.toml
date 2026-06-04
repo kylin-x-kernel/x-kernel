@@ -13,7 +13,6 @@ documentation.workspace = true
 default = ["linux_sysno/tee", "kalloc/tee", "tee_ss_smx"]
 tee_cfg_memtag = []
 tee_ss_smx = []
-unittest_helpers = ["dep:unittest_support"]
 csv_huk_key = ["dep:kcpu"]
 # dice_huk_key and virtcca_huk_key are mutually exclusive (compile_error in tee/arch/aarch64/mod.rs).
 dice_huk_key = ["dep:dice_driver", "dep:rust-dice"]
@@ -22,7 +21,7 @@ virtcca_huk_key = []
 [dependencies]
 kalloc.workspace = true
 unittest.workspace = true
-unittest_support = { workspace = true, optional = true }
+unittest_support.workspace = true
 rust-dice = { workspace = true, optional = true }
 mbedtls = { workspace = true }
 mbedtls-sys-auto = { workspace = true }

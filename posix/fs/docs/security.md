@@ -27,7 +27,7 @@ user process
 │  ├─ validates ABI flags and scalar ranges where needed    │
 │  ├─ copies user strings/buffers through posix_types/osvm  │
 │  ├─ resolves fd/path against current process context      │
-│  ├─ delegates object semantics to kfd/kfs/kvfs/posix-fs-owned fd objects/devfs │
+│  ├─ delegates object semantics to kfd/kfs/kvfs/kfd_objects/devfs │
 │  └─ maps failures to KError/KResult                       │
 └──────────────────────────────────────────────────────────┘
   │
@@ -38,7 +38,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 - 用户态参数不可信，包括空指针、无效地址、过长路径、恶意 flags、负 offset 和 fd 复用。
 - `posix-fs` 信任 `posix_types` / `osvm` 对用户地址执行边界检查和错误传播。
 - `posix-fs` 信任 `kfd` 在 fd 查找、复制、关闭和 descriptor flags 上保持并发安全。
-- `posix-fs` 信任 `kfs` / `kvfs` / 本 crate 拥有的 fd 对象 / 设备对象执行真实读写、权限、目录和挂载语义。
+- `posix-fs` 信任 `kfs` / `kvfs` / `kfd_objects` / 设备对象执行真实读写、权限、目录和挂载语义。
 - 进程当前上下文、fd 表、`FsContext` 和用户地址空间必须来自当前 syscall 执行线程。
 
 ## 外部边界 / 攻击面
@@ -49,7 +49,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | 用户读写缓冲区 | `read`、`write`、`readlinkat`、`getdents64`、`statfs` | 坏地址、短缓冲区、跨页访问失败、内核信息写回格式错误 |
 | 用户 iovec | `readv`、`writev`、`preadv2`、`pwritev2` | iovec 数量过大、范围溢出、读写方向错误 |
 | fd 编号 | 几乎所有 fd syscall | 已关闭 fd、类型不匹配、fd 复用、`CLOEXEC`/非阻塞标志混淆 |
-| 当前进程状态 | `chdir`、`openat`、`close_range`、`pipe2` | 进程资源锁、fs context 更新、umask 和当前目录语义 |
+| 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs context 更新、umask 和当前目录语义 |
 | procfd 路径 | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化 |
 | VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、mount flags、文件系统实现差异 |
 | fd-to-fd 复制 | `sendfile`、`copy_file_range`、`splice` | 源目标类型错误、offset 指针 TOCTOU、同文件重叠、阻塞语义 |
@@ -98,10 +98,9 @@ kfd resources / kfs / kvfs / device and pipe implementations
 2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 通过 `FileLike::set_nonblocking` 作用于对象。
 3. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
 4. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 procfd 解析。
-5. `pipe2` 必须要么同时向用户返回两个 fd，要么清理已创建的一端。
-6. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
-7. 创建文件和目录时应应用当前进程 `umask`。
-8. `chroot` 目标必须是目录。
+5. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
+6. 创建文件和目录时应应用当前进程 `umask`。
+7. `chroot` 目标必须是目录。
 
 ## 线程安全
 
@@ -126,14 +125,13 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 使用 zeroed 初始化后逐项赋值 |
 | T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或权限模型 | `classify_procfd_path` 拒绝无效 pid/fd；fd 表读取经 `get_process_state` 和 resources；后续权限仍依赖底层对象 |
 | T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 procfd 路径被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | `resolve_open_path_source` 将 `O_NOFOLLOW` 转为 `AT_SYMLINK_NOFOLLOW`，并对 live procfd 返回 loop 错误 |
-| T-06 | `pipe2` 创建失败留下半初始化 fd | fd 表 | 中 | 读端加入成功、写端加入失败 | 写端加入失败时关闭读端 |
-| T-07 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
-| T-08 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；新增完整语义前不应宣称等价 Linux |
-| T-09 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 bind、remount、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput` |
-| T-10 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；未来实现前审计所有锁相关返回路径 |
-| T-11 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | `current_effective_ids()` 固定 `(0, 0)` | 文档列为限制；接入 `kcred` 后应使用当前 fsuid/fsgid |
-| T-12 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；未来需接入 `kcred::AccessCredentials` |
-| T-13 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
+| T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
+| T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；新增完整语义前不应宣称等价 Linux |
+| T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 bind、remount、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput` |
+| T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；未来实现前审计所有锁相关返回路径 |
+| T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | `current_effective_ids()` 固定 `(0, 0)` | 文档列为限制；接入 `kcred` 后应使用当前 fsuid/fsgid |
+| T-11 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；未来需接入 `kcred::AccessCredentials` |
+| T-12 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
 
 影响等级定义：
 
@@ -148,15 +146,14 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | F-01 | 路径读取失败 | 用户指针无效或字符串不可访问 | syscall 返回地址错误相关 `KError` | 当前操作失败 | 3 | `load_string` 失败直接传播 |
 | F-02 | fd 类型不匹配 | 对目录执行文件写、对非 pipe 执行 pipe 操作 | 返回 `BadFileDescriptor`、`InvalidInput` 或底层错误 | 应用收到 Linux errno 等价错误 | 3 | 使用 `get_file_like_as` / downcast 校验 |
 | F-03 | 用户输出缓冲区太小 | `getdents64` 一条记录也放不下，`getcwd` size 不足 | 返回 `InvalidInput` 或 `OutOfRange` | 调用方可扩大缓冲区重试 | 4 | 写入前计算长度 |
-| F-04 | pipe 写端 fd 添加失败 | fd 表满或分配失败 | 读端被关闭，pipe 创建失败 | 无半创建 fd 泄漏 | 3 | `inspect_err` 清理读端 |
-| F-05 | `open` 设备特殊处理失败 | `/dev/ptmx`、当前终端或 `/dev/pts` 解析失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；未知终端类型返回 `OperationNotSupported` |
-| F-06 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
-| F-07 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `do_send` 保留部分写入语义 |
-| F-08 | `mount` 请求不支持的文件系统 | `fs_type != "tmpfs"` | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | 显式检查 fs_type |
-| F-09 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
-| F-10 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
-| F-11 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；后续应按 cmd 补充错误语义 |
-| F-12 | `close_range(UNSHARE)` 资源复制失败 | 下层 unshare 实现异常或未来改为可失败 | 当前 API 没有错误承载 | fd 表隔离语义不完整 | 2 | 审计 `unshare_fd_table` 语义，未来可失败时更新 syscall 返回 |
+| F-04 | `open` 设备特殊处理失败 | `/dev/ptmx`、当前终端或 `/dev/pts` 解析失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；未知终端类型返回 `OperationNotSupported` |
+| F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
+| F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `do_send` 保留部分写入语义 |
+| F-07 | `mount` 请求不支持的文件系统 | `fs_type != "tmpfs"` | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | 显式检查 fs_type |
+| F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
+| F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
+| F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；后续应按 cmd 补充错误语义 |
+| F-11 | `close_range(UNSHARE)` 资源复制失败 | 下层 unshare 实现异常或未来改为可失败 | 当前 API 没有错误承载 | fd 表隔离语义不完整 | 2 | 审计 `unshare_fd_table` 语义，未来可失败时更新 syscall 返回 |
 
 严重度定义：
 
