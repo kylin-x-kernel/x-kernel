@@ -135,22 +135,20 @@ mod tests {
 
     use super::*;
 
-    fn reset_model() {
-        kdevice::reset_device_registry_for_tests();
-        kdevice::register_bus_type(alloc::sync::Arc::new(kdevice::BusTypeObject::new(
-            alloc::sync::Arc::new(kdevice::PlatformBusTypeMatcher::new()),
-        )));
-        kdevice::register_bus_instance(kdevice::BusTypeId::PLATFORM, "test-bus");
+    fn reset_model() -> alloc::sync::Arc<kdevice::BusInstance> {
+        let (_bus_type, bus) =
+            kdevice::reset_and_setup_platform_bus_for_tests("enumeration-test-bus");
+        bus
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_register_device_creates_descriptor_without_runtime_record() {
-        reset_model();
+        let bus = reset_model();
 
         let mut context = EnumerationContext::new();
         let id = context
             .register_device(
-                BusId::new(0),
+                bus.id(),
                 DeviceLocation::PlatformStatic { id: 1 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -168,14 +166,14 @@ mod tests {
         assert_eq!(kdevice::device_records_snapshot().len(), 0);
     }
 
-    #[def_test]
+    #[def_test(serial)]
     fn test_probe_pending_requeues_unmatched_descriptor() {
-        reset_model();
+        let bus = reset_model();
 
         let mut context = EnumerationContext::new();
         context
             .register_device(
-                BusId::new(0),
+                bus.id(),
                 DeviceLocation::PlatformStatic { id: 2 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {

@@ -240,6 +240,13 @@ pub struct Io {
 
 impl Io {
     /// Map an MMIO region, returning a handle that unmaps on drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NoProvider`](ResError::NoProvider) if no provider has been
+    /// installed. May also return errors propagated from the provider
+    /// (e.g. [`MappingFailed`](ResError::MappingFailed),
+    /// [`InvalidResource`](ResError::InvalidResource)).
     pub fn map(region: MmioRegion, name: &'static str) -> ResResult<Self> {
         let mapping = provider()?.map_mmio(region, name)?;
         Ok(Self {
@@ -248,6 +255,11 @@ impl Io {
     }
 
     /// The virtual base address of the mapping.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle has no active mapping. This cannot happen through
+    /// the current public API since the mapping is only taken during drop.
     pub fn as_ptr(&self) -> NonNull<u8> {
         self.mapping
             .as_ref()
@@ -256,6 +268,11 @@ impl Io {
     }
 
     /// The physical region backing this mapping.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle has no active mapping. This cannot happen through
+    /// the current public API since the mapping is only taken during drop.
     pub fn region(&self) -> MmioRegion {
         self.mapping
             .as_ref()
@@ -265,6 +282,10 @@ impl Io {
 
     /// Returns a checked pointer `offset` bytes into the region, asserting that
     /// `[offset, offset + size)` stays within bounds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `offset + size` overflows `usize` or exceeds `region.size`.
     #[inline]
     fn access_ptr(&self, offset: usize, size: usize) -> *mut u8 {
         let region = self.region();
@@ -286,6 +307,12 @@ impl Io {
 /// weakly-ordered targets (e.g. AArch64) they emit the appropriate barrier.
 /// Offsets are bounds-checked against the mapped region and must be naturally
 /// aligned for the access width.
+///
+/// # Panics
+///
+/// All accessors panic if `offset + width` overflows `usize` or exceeds the
+/// mapped region size. Multi-byte accessors panic on misaligned offsets in
+/// debug builds.
 impl Io {
     /// Read a `u8` register at `offset`.
     #[inline]
@@ -391,6 +418,13 @@ pub struct Irq {
 
 impl Irq {
     /// Register `handler` for the interrupt described by `resource`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NoProvider`](ResError::NoProvider) if no provider has been
+    /// installed. May also return errors propagated from the provider
+    /// (e.g. [`Busy`](ResError::Busy),
+    /// [`InvalidResource`](ResError::InvalidResource)).
     pub fn request(resource: IrqResource, handler: Arc<dyn IrqHandler>) -> ResResult<Self> {
         provider()?.request_irq(resource, handler)?;
         Ok(Self {
@@ -432,6 +466,13 @@ pub struct DmaCoherent {
 
 impl DmaCoherent {
     /// Allocate a coherent DMA buffer, returning a handle that frees on drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NoProvider`](ResError::NoProvider) if no provider has been
+    /// installed. May also return errors propagated from the provider
+    /// (e.g. [`NoMemory`](ResError::NoMemory),
+    /// [`Unsupported`](ResError::Unsupported)).
     pub fn alloc(spec: DmaSpec) -> ResResult<Self> {
         let allocation = provider()?.alloc_coherent(spec)?;
         Ok(Self {
@@ -440,6 +481,11 @@ impl DmaCoherent {
     }
 
     /// The CPU-visible virtual address of the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle has no active allocation. This cannot happen through
+    /// the current public API since the allocation is only taken during drop.
     pub fn cpu_ptr(&self) -> NonNull<u8> {
         self.allocation
             .as_ref()
@@ -448,6 +494,11 @@ impl DmaCoherent {
     }
 
     /// The device-visible bus address of the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle has no active allocation. This cannot happen through
+    /// the current public API since the allocation is only taken during drop.
     pub fn bus_addr(&self) -> u64 {
         self.allocation
             .as_ref()
@@ -456,6 +507,11 @@ impl DmaCoherent {
     }
 
     /// The buffer length in bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle has no active allocation. This cannot happen through
+    /// the current public API since the allocation is only taken during drop.
     pub fn len(&self) -> usize {
         self.allocation
             .as_ref()
@@ -499,9 +555,14 @@ pub trait DeviceResource {
 /// Map an MMIO region and tie its lifetime to `device`.
 ///
 /// The mapping is released when the device's probe fails or it is removed.
-/// Returns an [`Io`] handle borrowing the device's lifetime is not possible, so
-/// this returns the virtual base pointer; use [`Io`] directly when manual
-/// control is required.
+/// Since returning an [`Io`] handle that borrows the device's lifetime is not
+/// possible (the handle would outlive the function scope), this returns the
+/// virtual base pointer directly. Use [`Io::map`] when manual lifetime control
+/// is required.
+///
+/// # Errors
+///
+/// See [`Io::map`].
 pub fn devm_iomap(
     device: &dyn DeviceResource,
     region: MmioRegion,
@@ -516,6 +577,10 @@ pub fn devm_iomap(
 /// Register an interrupt handler and tie its lifetime to `device`.
 ///
 /// The handler is released when the device's probe fails or it is removed.
+///
+/// # Errors
+///
+/// See [`Irq::request`].
 pub fn devm_request_irq(
     device: &dyn DeviceResource,
     irq: IrqResource,
@@ -530,6 +595,10 @@ pub fn devm_request_irq(
 ///
 /// The buffer is freed when the device's probe fails or it is removed. Returns
 /// the CPU virtual address and device bus address of the buffer.
+///
+/// # Errors
+///
+/// See [`DmaCoherent::alloc`].
 pub fn devm_alloc_coherent(
     device: &dyn DeviceResource,
     spec: DmaSpec,
