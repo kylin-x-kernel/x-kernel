@@ -2,6 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! LoongArch64 page table entry and paging metadata.
+//!
+//! Implements [`PageTableEntry`] for LoongArch64 4-level paging using the
+//! [`LaFlags`] attribute format. Also provides [`LA64MetaData`] with the
+//! `PWCL`/`PWCH` register values for hardware page table walker configuration.
+//!
+//! # Type aliases
+//!
+//! - [`LA64PageTable`] — `PageTable64<LA64MetaData, La64PageEntry, H>`
+//! - [`LA64PageTableMut`] — `PageTableMut<LA64MetaData, La64PageEntry, H>`
+
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{
@@ -11,7 +22,7 @@ use crate::{
 
 bitflags::bitflags! {
     #[derive(Debug)]
-    pub struct LaFlags: u64 {
+    pub(crate) struct LaFlags: u64 {
         const V = 1 << 0;
         const D = 1 << 1;
         const PLVL = 1 << 2;
@@ -85,6 +96,11 @@ impl From<PagingFlags> for LaFlags {
     }
 }
 
+/// LoongArch64 page table entry (PTE).
+///
+/// A `#[repr(transparent)]` wrapper around `u64` that encodes physical
+/// addresses and [`LaFlags`] attributes. Physical addresses are masked
+/// to cover bits 12–47 (48-bit physical address space).
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct La64PageEntry(u64);
@@ -127,6 +143,10 @@ impl PageTableEntry for La64PageEntry {
 
 crate::impl_pte_debug!(La64PageEntry);
 
+/// LoongArch64 paging metadata: 4-level paging, 48-bit PA, 48-bit VA.
+///
+/// Provides `PWCH_VALUE` and `PWCL_VALUE` constants for configuring the
+/// hardware page table walker registers (`PWCH` / `PWCL`).
 pub struct LA64MetaData;
 
 impl LA64MetaData {
@@ -160,5 +180,7 @@ impl PagingMetaData for LA64MetaData {
     }
 }
 
+/// LoongArch64 page table type alias.
 pub type LA64PageTable<H> = PageTable64<LA64MetaData, La64PageEntry, H>;
+/// LoongArch64 mutable page table type alias.
 pub type LA64PageTableMut<'a, H> = PageTableMut<'a, LA64MetaData, La64PageEntry, H>;

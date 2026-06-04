@@ -3,6 +3,19 @@
 // See LICENSES for license details.
 
 //! Generic 64-bit multi-level page table implementation.
+//!
+//! This module provides [`PageTable64`] (read-only query) and [`PageTableMut`]
+//! (mutable operations with deferred TLB flushes). Both are parameterized over
+//! architecture-specific metadata (`M: PagingMetaData`), page table entry type
+//! (`PTE: PageTableEntry`), and frame allocation handler (`H: PagingHandler`).
+//!
+//! # TLB flush batching
+//!
+//! `PageTableMut` batches TLB flushes for performance. Each mutating operation
+//! (`map`, `unmap`, `remap`, `protect`) records the affected virtual address.
+//! When the batch is finalized (via [`PageTableMut::finish`] or `Drop`), the
+//! addresses are flushed either individually (≤ 16 entries) or with a full TLB
+//! shootdown (> 16 entries).
 use core::{marker::PhantomData, ops::Deref};
 
 use arrayvec::ArrayVec;
@@ -31,6 +44,29 @@ const fn p1_idx(vaddr: usize) -> usize {
 }
 
 /// A 64-bit page table with configurable metadata and handlers.
+///
+/// `PageTable64` owns the root page table frame and all recursively allocated
+/// sub-table frames. On [`Drop`], the entire frame tree is deallocated.
+///
+/// This type provides read-only operations (query). For mutable operations
+/// (map, unmap, remap, protect), obtain a [`PageTableMut`] via [`modify`].
+///
+/// # Type parameters
+///
+/// - `M` — paging metadata (levels, address bits, TLB flush).
+/// - `PTE` — architecture-specific page table entry type.
+/// - `H` — frame allocator and phys-to-virt translation.
+///
+/// # Example
+///
+/// ```ignore
+/// let pt: X64PageTable<H> = PageTable64::try_new()?;
+/// if let Ok((paddr, flags, size)) = pt.query(vaddr) {
+///     println!("vaddr -> paddr {paddr:?}, size {size:?}, flags {flags:?}");
+/// }
+/// ```
+///
+/// [`modify`]: PageTable64::modify
 pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
     root_paddr: PhysAddr,
     #[cfg(feature = "copy-from")]
@@ -45,6 +81,10 @@ pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PTE, H> {
     /// Create a new user page table root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PtError::NoMemory`] if frame allocation fails.
     pub fn try_new() -> PtResult<Self> {
         Self::try_new_inner(false)
     }
@@ -69,13 +109,35 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         })
     }
 
-    /// Return the root page table physical address.
+    /// Returns the physical address of the root page table frame.
+    ///
+    /// This is the address that should be loaded into the page table base
+    /// register (e.g., CR3 on x86_64, TTBR0 on AArch64).
     pub const fn root_paddr(&self) -> PhysAddr {
         self.root_paddr
     }
 
-    /// Query a virtual address translation.
+    /// Queries the physical translation and flags for a virtual address.
+    ///
+    /// Walks the page table from the root to the leaf entry for `vaddr`.
+    /// If the walk encounters a huge page at an intermediate level, the
+    /// physical address is computed by aligning down and adding the page offset.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok((paddr, flags, page_size))` — the physical address, permission
+    ///   flags, and page size of the mapping.
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::NotMapped`] — no present entry found for `vaddr`.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page
+    ///   that blocks further walking (should not occur with correct PTE flags).
+    /// - [`PtError::InvalidAddress`] — `vaddr` is not a valid canonical address.
     pub fn query(&self, vaddr: M::VirtAddr) -> PtResult<(PhysAddr, PagingFlags, PageSize)> {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PtError::InvalidAddress);
+        }
         let (entry, size) = self.get_entry(vaddr)?;
         if !entry.is_present() {
             return Err(PtError::NotMapped);
@@ -84,7 +146,11 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         Ok((entry.paddr().add(off), entry.flags(), size))
     }
 
-    /// Create a mutable mapping view that tracks TLB flushes.
+    /// Creates a mutable mapping view that tracks TLB flushes.
+    ///
+    /// The returned [`PageTableMut`] borrows `&mut self`, ensuring exclusive
+    /// access. All mutating operations on the page table must go through this
+    /// type. TLB flushes are deferred until [`PageTableMut::finish`] or `Drop`.
     pub fn modify(&mut self) -> PageTableMut<'_, M, PTE, H> {
         PageTableMut::new(self)
     }
@@ -94,6 +160,9 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     fn alloc_table() -> PtResult<PhysAddr> {
         if let Some(paddr) = H::alloc_frame() {
             let ptr = H::p2v(paddr).as_mut_ptr();
+            // SAFETY: `H::alloc_frame()` returns a 4K-aligned physical frame.
+            // `H::p2v()` returns a valid virtual address that uniquely maps the
+            // frame with read-write access. The frame size is `PAGE_SIZE_4K`.
             unsafe { core::ptr::write_bytes(ptr, 0, PAGE_SIZE_4K) };
             Ok(paddr)
         } else {
@@ -103,6 +172,11 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
 
     fn table_of<'a>(&self, paddr: PhysAddr) -> &'a [PTE] {
         let ptr = H::p2v(paddr).as_ptr() as _;
+        // SAFETY: `paddr` points to a valid 4K-aligned page table frame allocated
+        // by `alloc_table()`. `H::p2v()` provides a valid virtual mapping of the
+        // frame. The frame contains exactly `ENTRY_COUNT` (512) PTEs, which fits
+        // within `PAGE_SIZE_4K` (512 × 8 = 4096 bytes). PTE types are `Copy`,
+        // so no drop glue is involved.
         unsafe { core::slice::from_raw_parts(ptr, ENTRY_COUNT) }
     }
 
@@ -158,6 +232,28 @@ enum ToFlush<M: PagingMetaData> {
 }
 
 /// Mutable page table access with deferred TLB flushes.
+///
+/// `PageTableMut` borrows `&mut PageTable64` and provides map/unmap/remap/protect
+/// operations. Each mutating operation records the affected virtual address for
+/// deferred TLB flushing. The flushes are executed when [`finish`](Self::finish)
+/// is called or when `PageTableMut` is dropped.
+///
+/// # TLB flush batching
+///
+/// Up to 16 addresses are flushed individually; beyond
+/// that, a full TLB shootdown is performed. This avoids the overhead of
+/// per-operation TLB invalidation during batch mappings.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut pt: X64PageTable<H> = PageTable64::try_new()?;
+/// {
+///     let mut m = pt.modify();
+///     m.map(vaddr, paddr, PageSize::Size4K, PagingFlags::READ | PagingFlags::WRITE)?;
+///     m.map(vaddr2, paddr2, PageSize::Size4K, PagingFlags::READ)?;
+/// } // Drop flushes TLB automatically
+/// ```
 pub struct PageTableMut<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
     inner: &'a mut PageTable64<M, PTE, H>,
     flush: ToFlush<M>,
@@ -199,6 +295,9 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
 
     fn table_of_mut(&mut self, paddr: PhysAddr) -> &'a mut [PTE] {
         let ptr = H::p2v(paddr).as_mut_ptr() as _;
+        // SAFETY: Same as `table_of`, but `PageTableMut` holds `&mut PageTable64`,
+        // so no other references to the frame exist. The frame layout and PTE
+        // constraints are identical to `table_of`.
         unsafe { core::slice::from_raw_parts_mut(ptr, ENTRY_COUNT) }
     }
 
@@ -234,36 +333,95 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         crate::walk_page_table_create!(self, vaddr, page_size)
     }
 
+    /// Maps a virtual address to a physical address with the given page size and flags.
+    ///
+    /// Allocates intermediate page table frames as needed (via `H::alloc_frame`).
+    /// The target entry must be unused; mapping over an existing entry returns
+    /// [`PtError::AlreadyMapped`].
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::AlreadyMapped`] — `vaddr` is already mapped.
+    /// - [`PtError::NoMemory`] — frame allocation for an intermediate table failed.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page.
+    /// - [`PtError::InvalidAddress`] — `vaddr` or `paddr` is outside the valid address range.
     pub fn map(
         &mut self,
         vaddr: M::VirtAddr,
-        target: PhysAddr,
+        paddr: PhysAddr,
         page_size: PageSize,
         flags: PagingFlags,
     ) -> PtResult {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PtError::InvalidAddress);
+        }
+        if !M::paddr_is_valid(paddr.as_usize()) {
+            return Err(PtError::InvalidAddress);
+        }
         let entry = self.get_entry_mut_or_create(vaddr, page_size)?;
         if !entry.is_unused() {
             return Err(PtError::AlreadyMapped);
         }
-        *entry = PageTableEntry::new_page(target.align_down(page_size), flags, page_size.is_huge());
+        *entry = PageTableEntry::new_page(paddr.align_down(page_size), flags, page_size.is_huge());
         self.flush(vaddr);
         Ok(())
     }
 
+    /// Remaps an existing mapping to a new physical address with new flags.
+    ///
+    /// The virtual address must already be mapped. The page size is preserved
+    /// from the existing mapping.
+    ///
+    /// # Returns
+    ///
+    /// The [`PageSize`] of the remapped entry.
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::NotMapped`] — `vaddr` is not mapped.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page
+    ///   that blocks walking to the leaf.
+    /// - [`PtError::InvalidAddress`] — `vaddr` or `paddr` is outside the valid address range.
     pub fn remap(
         &mut self,
         vaddr: M::VirtAddr,
         paddr: PhysAddr,
         flags: PagingFlags,
     ) -> PtResult<PageSize> {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PtError::InvalidAddress);
+        }
+        if !M::paddr_is_valid(paddr.as_usize()) {
+            return Err(PtError::InvalidAddress);
+        }
         let (entry, size) = self.get_entry_mut(vaddr)?;
+        if !entry.is_present() {
+            return Err(PtError::NotMapped);
+        }
         entry.set_paddr(paddr);
         entry.set_flags(flags, size.is_huge());
         self.flush(vaddr);
         Ok(size)
     }
 
+    /// Changes the permission flags of an existing mapping.
+    ///
+    /// The virtual address must already be mapped (present). The page size
+    /// and physical address are preserved.
+    ///
+    /// # Returns
+    ///
+    /// The [`PageSize`] of the protected entry.
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::NotMapped`] — `vaddr` is not mapped.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page.
+    /// - [`PtError::InvalidAddress`] — `vaddr` is not a valid canonical address.
     pub fn protect(&mut self, vaddr: M::VirtAddr, flags: PagingFlags) -> PtResult<PageSize> {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PtError::InvalidAddress);
+        }
         let (entry, size) = self.get_entry_mut(vaddr)?;
         if !entry.is_present() {
             return Err(PtError::NotMapped);
@@ -273,10 +431,23 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Ok(size)
     }
 
+    /// Unmaps a virtual address, clearing the leaf page table entry.
+    ///
+    /// # Returns
+    ///
+    /// The previous `(physical_address, flags, page_size)` of the unmapped entry.
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::NotMapped`] — `vaddr` is not mapped.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page.
+    /// - [`PtError::InvalidAddress`] — `vaddr` is not a valid canonical address.
     pub fn unmap(&mut self, vaddr: M::VirtAddr) -> PtResult<(PhysAddr, PagingFlags, PageSize)> {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PtError::InvalidAddress);
+        }
         let (entry, size) = self.get_entry_mut(vaddr)?;
         if !entry.is_present() {
-            entry.clear();
             return Err(PtError::NotMapped);
         }
         let paddr = entry.paddr();
@@ -286,6 +457,27 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Ok((paddr, flags, size))
     }
 
+    /// Maps a contiguous region of virtual addresses to physical addresses.
+    ///
+    /// Iterates through the region in page-sized steps, automatically selecting
+    /// the largest possible page size (1G → 2M → 4K) based on alignment and
+    /// remaining size. When `allow_huge` is `false`, only 4K pages are used.
+    ///
+    /// The physical address for each page is determined by `phys_getter`, which
+    /// receives the virtual address and returns the corresponding physical address.
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::NotAligned`] — `vaddr` or `size` is not 4K-aligned.
+    /// - [`PtError::AlreadyMapped`] — a page in the region is already mapped.
+    /// - [`PtError::NoMemory`] — frame allocation for an intermediate table failed.
+    /// - [`PtError::InvalidAddress`] — `vaddr` or a physical address from `phys_getter` is invalid.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page.
+    ///
+    /// # Note
+    ///
+    /// On partial failure, previously mapped pages within the region are **not**
+    /// rolled back. The caller is responsible for cleanup.
     pub fn map_region(
         &mut self,
         vaddr: M::VirtAddr,
@@ -298,6 +490,18 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         let mut rem_size = size;
         if !PageSize::Size4K.is_aligned(vaddr_val) || !PageSize::Size4K.is_aligned(rem_size) {
             return Err(PtError::NotAligned);
+        }
+        if !M::vaddr_is_valid(vaddr_val) {
+            return Err(PtError::InvalidAddress);
+        }
+        if vaddr_val
+            .checked_add(rem_size - PageSize::Size4K as usize)
+            .is_none()
+        {
+            return Err(PtError::InvalidAddress);
+        }
+        if !M::vaddr_is_valid(vaddr_val + rem_size - PageSize::Size4K as usize) {
+            return Err(PtError::InvalidAddress);
         }
         while rem_size > 0 {
             let v_addr = vaddr_val.into();
@@ -327,6 +531,15 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Ok(())
     }
 
+    /// Unmaps a contiguous region of virtual addresses.
+    ///
+    /// Iterates through the region, unmapping each page and advancing by the
+    /// returned page size.
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::NotMapped`] — a page in the region is not mapped.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry is a huge page.
     pub fn unmap_region(&mut self, vaddr: M::VirtAddr, size: usize) -> PtResult {
         let mut vaddr_val: usize = vaddr.into();
         let mut rem_size = size;
@@ -339,6 +552,15 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Ok(())
     }
 
+    /// Changes permission flags for a contiguous region of virtual addresses.
+    ///
+    /// Unmapped pages within the region are silently skipped (the iterator
+    /// advances by `PageSize::Size4K`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if `protect()` returns an error other than
+    /// [`PtError::NotMapped`].
     pub fn protect_region(
         &mut self,
         vaddr: M::VirtAddr,
@@ -360,6 +582,21 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         Ok(())
     }
 
+    /// Copies top-level page table entries from `other` into this page table.
+    ///
+    /// This is used for `fork()` support: the child's page table inherits the
+    /// parent's top-level entries (shared page table frames). Copied entries
+    /// are marked in `borrowed_entries` so that `Drop` does not deallocate
+    /// frames owned by the source page table.
+    ///
+    /// # Safety contract (caller responsibility)
+    ///
+    /// The source page table must outlive this page table. If the source is
+    /// dropped first, the borrowed entries will point to freed frames.
+    ///
+    /// # Availability
+    ///
+    /// Only available with `feature = "copy-from"`.
     #[cfg(feature = "copy-from")]
     pub fn copy_from(&mut self, other: &PageTable64<M, PTE, H>, start: M::VirtAddr, size: usize) {
         if size == 0 {
@@ -385,6 +622,12 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
     }
 
+    /// Flushes all pending TLB entries and resets the flush state.
+    ///
+    /// - If ≤ 16 addresses were recorded, each is flushed individually.
+    /// - If more than 16 addresses were recorded, a full TLB shootdown is performed.
+    ///
+    /// This method is also called automatically on `Drop`.
     pub fn finish(&mut self) {
         #[cfg(not(docsrs))]
         if self.inner.is_kernel {

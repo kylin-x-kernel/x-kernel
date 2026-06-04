@@ -2,6 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! RISC-V page table entry and paging metadata.
+//!
+//! Implements [`PageTableEntry`] for RISC-V Sv39 (3-level) and Sv48 (4-level)
+//! paging modes. Both modes share the same [`Rv64PageEntry`] PTE format;
+//! the mode is selected via [`Sv39MetaData`] or [`Sv48MetaData`].
+//!
+//! # Type aliases
+//!
+//! - [`Sv39PageTable`] / [`Sv39PageTableMut`] — 3-level, 39-bit VA
+//! - [`Sv48PageTable`] / [`Sv48PageTableMut`] — 4-level, 48-bit VA
+
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{
@@ -11,7 +22,7 @@ use crate::{
 
 bitflags::bitflags! {
     #[derive(Debug)]
-    pub struct RvFlags: usize {
+    pub(crate) struct RvFlags: usize {
         const V =   1 << 0;
         const R =   1 << 1;
         const W =   1 << 2;
@@ -67,6 +78,11 @@ impl From<PagingFlags> for RvFlags {
     }
 }
 
+/// RISC-V page table entry (PTE).
+///
+/// A `#[repr(transparent)]` wrapper around `u64` following the RISC-V
+/// Sv39/Sv48 PTE format. Physical addresses are stored in bits 10–53
+/// (shifted right by 2 from the actual address).
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct Rv64PageEntry(u64);
@@ -120,6 +136,11 @@ impl PageTableEntry for Rv64PageEntry {
 
 crate::impl_pte_debug!(Rv64PageEntry);
 
+/// Trait for RISC-V virtual address types that support TLB flushing.
+///
+/// This trait abstracts over the TLB flush mechanism, allowing `Sv39MetaData`
+/// and `Sv48MetaData` to delegate to the appropriate implementation.
+/// The default `VirtAddr` implementation calls `karch::flush_tlb`.
 pub trait SvVirtAddr: memaddr::MemoryAddr + Send + Sync {
     fn flush_tlb(vaddr: Option<Self>);
 
@@ -155,10 +176,12 @@ impl SvVirtAddr for VirtAddr {
     }
 }
 
+/// RISC-V Sv39 paging metadata: 3-level, 56-bit PA, 39-bit VA.
 pub struct Sv39MetaData<VA: SvVirtAddr> {
     _virt_addr: core::marker::PhantomData<VA>,
 }
 
+/// RISC-V Sv48 paging metadata: 4-level, 56-bit PA, 48-bit VA.
 pub struct Sv48MetaData<VA: SvVirtAddr> {
     _virt_addr: core::marker::PhantomData<VA>,
 }
@@ -209,8 +232,12 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv48MetaData<VA> {
     }
 }
 
+/// RISC-V Sv39 page table type alias.
 pub type Sv39PageTable<H> = PageTable64<Sv39MetaData<VirtAddr>, Rv64PageEntry, H>;
+/// RISC-V Sv39 mutable page table type alias.
 pub type Sv39PageTableMut<'a, H> = PageTableMut<'a, Sv39MetaData<VirtAddr>, Rv64PageEntry, H>;
 
+/// RISC-V Sv48 page table type alias.
 pub type Sv48PageTable<H> = PageTable64<Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;
+/// RISC-V Sv48 mutable page table type alias.
 pub type Sv48PageTableMut<'a, H> = PageTableMut<'a, Sv48MetaData<VirtAddr>, Rv64PageEntry, H>;

@@ -2,6 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! AArch64 page table entry and paging metadata.
+//!
+//! Implements [`PageTableEntry`] for AArch64 4-level paging using the
+//! [`Arm64Attr`] attribute format. AArch64 TLB flush uses Inner Shareable
+//! TLBI instructions, so no software IPI shootdown is needed for SMP.
+//!
+//! # Type aliases
+//!
+//! - [`A64PageTable`] — `PageTable64<A64PagingMetaData, A64PageEntry, H>`
+//! - [`A64PageTableMut`] — `PageTableMut<A64PagingMetaData, A64PageEntry, H>`
+
 use memaddr::{PhysAddr, VirtAddr};
 
 use crate::{
@@ -53,7 +64,7 @@ impl Arm64Attr {
         Self::from_bits_retain(bits)
     }
 
-    pub const fn mem_attr(&self) -> Option<Arm64MemAttr> {
+    pub(crate) const fn mem_attr(&self) -> Option<Arm64MemAttr> {
         let idx = (self.bits() & Self::ATTR_INDEX_MASK) >> 2;
         Some(match idx {
             0 => Arm64MemAttr::Device,
@@ -132,6 +143,11 @@ impl From<PagingFlags> for Arm64Attr {
     }
 }
 
+/// AArch64 page table entry (PTE).
+///
+/// A `#[repr(transparent)]` wrapper around `u64` that encodes physical
+/// addresses and [`Arm64Attr`] attributes. Physical addresses are masked
+/// to cover bits 12–47 (48-bit physical address space).
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct A64PageEntry(u64);
@@ -178,6 +194,10 @@ impl PageTableEntry for A64PageEntry {
 
 crate::impl_pte_debug!(A64PageEntry);
 
+/// AArch64 paging metadata: 4-level paging, 48-bit PA, 48-bit VA.
+///
+/// AArch64 uses Inner Shareable TLBI instructions for SMP TLB flush,
+/// so `flush_tlb_all_cpus` does not need software IPI shootdown.
 pub struct A64PagingMetaData;
 
 impl PagingMetaData for A64PagingMetaData {
@@ -217,5 +237,7 @@ impl PagingMetaData for A64PagingMetaData {
     }
 }
 
+/// AArch64 page table type alias.
 pub type A64PageTable<H> = PageTable64<A64PagingMetaData, A64PageEntry, H>;
+/// AArch64 mutable page table type alias.
 pub type A64PageTableMut<'a, H> = PageTableMut<'a, A64PagingMetaData, A64PageEntry, H>;

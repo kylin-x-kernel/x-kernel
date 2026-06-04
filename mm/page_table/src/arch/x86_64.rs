@@ -2,8 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! x86_64 page table entry and paging metadata.
+//!
+//! Implements [`PageTableEntry`] for x86_64 long-mode 4-level paging with
+//! optional AMD SEV C-bit encryption support. The C-bit position is read
+//! from `kbuild_config::SEV_CBIT_POS` at compile time.
+//!
+//! # Type aliases
+//!
+//! - [`X64PageTable`] — `PageTable64<X64PagingMetaData, X64PageEntry, H>`
+//! - [`X64PageTableMut`] — `PageTableMut<X64PagingMetaData, X64PageEntry, H>`
+
 use memaddr::{PhysAddr, VirtAddr};
-pub use x86_64::structures::paging::page_table::PageTableFlags as PTF;
+pub(crate) use x86_64::structures::paging::page_table::PageTableFlags as PTF;
 
 use crate::{
     defs::{PageTableEntry, PagingFlags, PagingMetaData},
@@ -107,6 +118,15 @@ impl From<PagingFlags> for PTF {
     }
 }
 
+/// x86_64 page table entry (PTE).
+///
+/// A `#[repr(transparent)]` wrapper around `u64` that encodes physical
+/// addresses, permission flags, and the AMD SEV C-bit. The C-bit position
+/// is determined by `kbuild_config::SEV_CBIT_POS`.
+///
+/// Physical addresses in the PTE are masked to cover bits 12–51
+/// (52-bit physical address space). The C-bit is embedded within this
+/// range when SEV is active.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct X64PageEntry(u64);
@@ -172,6 +192,7 @@ impl PageTableEntry for X64PageEntry {
 
 crate::impl_pte_debug!(X64PageEntry);
 
+/// x86_64 paging metadata: 4-level paging, 52-bit PA, 48-bit VA.
 pub struct X64PagingMetaData;
 
 impl PagingMetaData for X64PagingMetaData {
@@ -201,5 +222,7 @@ impl PagingMetaData for X64PagingMetaData {
     }
 }
 
+/// x86_64 page table type alias.
 pub type X64PageTable<H> = PageTable64<X64PagingMetaData, X64PageEntry, H>;
+/// x86_64 mutable page table type alias.
 pub type X64PageTableMut<'a, H> = PageTableMut<'a, X64PagingMetaData, X64PageEntry, H>;

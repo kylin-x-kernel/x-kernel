@@ -2,6 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Internal macros for page table traversal and PTE implementation.
+//!
+//! These macros are not part of the public API. They exist to share code
+//! between the immutable and mutable page table walk paths, and to reduce
+//! boilerplate in architecture-specific PTE implementations.
+
+/// Implements `fmt::Debug` for a PTE type, showing `paddr` and `flags`.
 #[macro_export]
 macro_rules! impl_pte_debug {
     ($struct_name:ident) => {
@@ -16,6 +23,10 @@ macro_rules! impl_pte_debug {
     };
 }
 
+/// Provides common `PageTableEntry` method implementations for PTE types
+/// that store a raw `u64` with a flags field and a physical address field.
+///
+/// Generates: `EMPTY`, `paddr()`, `flags()`, `set_paddr()`, `bits()`.
 #[macro_export]
 macro_rules! impl_pte_common_ops {
     ($flags_ty:ty, $paddr_mask:expr) => {
@@ -39,6 +50,20 @@ macro_rules! impl_pte_common_ops {
     };
 }
 
+/// Walks a multi-level page table from root to leaf, returning the leaf
+/// PTE reference and its `PageSize`.
+///
+/// Supports both immutable (`ref`) and mutable (`mut`) access patterns.
+/// For 3-level paging (e.g., Sv39), starts at P3; for 4-level paging,
+/// starts at P4. Detects huge pages at P3 (1G) and P2 (2M) levels.
+///
+/// # Arguments
+///
+/// - `$self` — the page table reference.
+/// - `$vaddr` — virtual address to look up.
+/// - `$table_fn` — method to obtain a table slice from a physical address.
+/// - `$next_fn` — method to obtain the next-level table from an entry.
+/// - `$is_mut` — `mut` or `ref`, selecting mutable or immutable access.
 #[macro_export]
 macro_rules! walk_page_table {
     ($self:expr, $vaddr:expr, $table_fn:ident, $next_fn:ident, $is_mut:ident) => {{
@@ -74,6 +99,18 @@ macro_rules! walk_page_table {
     (@is_huge $table:expr, $idx:expr) => { $table[$idx].is_huge() };
 }
 
+/// Walks a multi-level page table from root to leaf, allocating intermediate
+/// page table frames as needed.
+///
+/// Unlike `walk_page_table!`, this macro creates missing intermediate tables
+/// via `next_table_mut_or_create()`. It returns a mutable reference to the
+/// leaf PTE at the level corresponding to `$page_size`.
+///
+/// # Arguments
+///
+/// - `$self` — the mutable page table reference.
+/// - `$vaddr` — virtual address to map.
+/// - `$page_size` — target page size (determines the walk depth).
 #[macro_export]
 macro_rules! walk_page_table_create {
     ($self:expr, $vaddr:expr, $page_size:expr) => {{
