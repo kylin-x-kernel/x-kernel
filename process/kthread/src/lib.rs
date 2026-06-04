@@ -18,6 +18,7 @@ extern crate klogger;
 
 mod cpu_time;
 mod lifecycle_state;
+mod pidfd;
 mod posix_state;
 mod process_state;
 mod registry;
@@ -32,6 +33,7 @@ pub use kfutex::{FutexEntry, FutexGuard, FutexKey, FutexTable, WaitQueue};
 pub use kresources::ProcessResources;
 pub use krlimit::{FILE_LIMIT, Rlimit, Rlimits};
 pub use lifecycle_state::ProcessLifecycleState;
+pub use pidfd::PidFd;
 pub use posix_state::ProcessPosixState;
 pub use process_state::{ProcessState, ProcessStateConfig};
 pub use registry::{

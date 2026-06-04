@@ -26,6 +26,7 @@ process/kthread/
     ├── lib.rs
     ├── cpu_time.rs
     ├── lifecycle_state.rs
+    ├── pidfd.rs
     ├── posix_state.rs
     ├── process_state.rs
     ├── registry.rs
@@ -72,6 +73,7 @@ ProcessState
 | `ProcessRuntimeState` | 保存地址空间、文件系统上下文、heap top 和进程 timer manager |
 | `ProcessPosixState` | 保存 exe path、cmdline、exit signal 和 umask |
 | `ProcessLifecycleState` | 保存子进程退出事件、进程退出事件和已回收子进程 CPU time |
+| `PidFd` | 通过 fd table 暴露 `ProcessState` 生命周期和跨进程 capability 入口 |
 | `registry` | 保存 task、process、process group、session 的 weak lookup table |
 | `signal` | 提供 thread、process、process group 级信号发送入口 |
 | `timer_delivery` | 连接 `ktimer` 过期事件、signal 构造和 alarm task 注册 |
@@ -232,7 +234,7 @@ shared futex table key 使用共享映射区域的 weak pointer identity。
 
 ### 作为进程运行态 facade
 
-`kthread` 当前公开面较宽，包含 thread/process state、当前上下文 helper、registry、signal、timer 以及 futex/resource/rlimit re-export。
+`kthread` 当前公开面较宽，包含 thread/process state、当前上下文 helper、registry、signal、timer、pidfd 以及 futex/resource/rlimit re-export。
 这保持了 syscall、POSIX、procfs、TTY 和 TEE 调用点的稳定导入路径。
 代价是 crate 边界呈 facade 形态，后续新增 API 需要先验证外部调用者，内部 helper 优先保持私有或 `pub(crate)`。
 

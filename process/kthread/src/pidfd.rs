@@ -11,9 +11,10 @@ use core::task::Context;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
 use kpoll::{IoEvents, PollSet, Pollable};
-use kthread::ProcessState;
 
-/// Process file descriptor for monitoring process lifecycle changes.
+use crate::ProcessState;
+
+/// Process capability file descriptor for monitoring process lifecycle changes.
 pub struct PidFd {
     proc_state: Weak<ProcessState>,
     exit_event: Arc<PollSet>,

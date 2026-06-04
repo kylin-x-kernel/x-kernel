@@ -14,6 +14,7 @@ syscall / posix / procfs / kservices / ktty / tee
 │  shared ProcessState                     │
 │  weak task/process registry              │
 │  signal and timer delivery bridge        │
+│  pidfd process capability object         │
 │  futex table selection                   │
 │                                          │
 │  unsafe boundary: TaskExt downcast       │
@@ -35,6 +36,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 | syscall 参数 | 用户态系统调用 | PID、TID、fd、futex 地址、timer 参数经 POSIX/syscall 层转换后调用 helper | syscall 层负责用户指针校验、权限检查和 errno 映射 |
 | 用户内存地址 | futex、robust list、clear-child-tid | 以 `usize` 地址保存或构造 `FutexKey` | `kthread` 不解引用地址，用户内存访问由 `kuaccess`、`memspace` 或调用方完成 |
 | 文件系统和 fd 输入 | POSIX fs/net/ipc 路径 | 通过 `current_resources`、`current_process_fs_context` 获取资源表和路径上下文 | 资源对象和路径解析由 `kresources`、`kfs`、上层 POSIX 模块校验 |
+| process capability 输入 | pidfd syscall / clone PIDFD 路径 | `PidFd` 持有 `Weak<ProcessState>` 和 `exit_event` | syscall 层负责 PID 可见性、目标 fd 权限与 errno 映射 |
 | signal/timer 输入 | POSIX signal、itimer、POSIX timer | 以 `SignalInfo`、`TimerDelivery`、timer sequence 进入投递路径 | `ksignal` 和 `ktimer` 维护 signal/timer 语义，`kthread` 负责目标 lookup 和 task interrupt |
 | TEE runtime state | TEE 子系统 | type-erased `Arc<dyn Any + Send + Sync>` process private slot | 调用方保证同一进程内的具体类型一致 |
 | 中断和硬件输入 | timer alarm task 间接触发 | `ktimer` 回调 `poll_timer` 后进入 signal 投递 | `kthread` 入口按 task/runtime 路径设计，不直接读 MMIO、PIO、DMA 或设备内存 |
@@ -61,6 +63,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 5. **shared futex identity**：shared futex table key 来自共享映射区域 weak pointer identity，key 只用于哈希索引，不用于内存访问。
 6. **timer signal sequence**：POSIX timer signal dequeue 通过 timer id 和 signal sequence 校验陈旧 signal。
 7. **TEE 类型擦除**：TEE private runtime state 以 `Arc<dyn Any + Send + Sync>` 保存，取回时必须 downcast 到调用者期望类型。
+8. **PidFd 生命周期观察**：`PidFd` 只通过 `Weak<ProcessState>` 观察目标进程，upgrade 失败必须返回 `NoSuchProcess`。
 
 ## 线程安全
 
@@ -92,6 +95,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 | T-10 | 中断上下文误用锁路径放大延迟 | 中 | IRQ 路径调用 registry、timer manager 或 resource helper | 入口设计面向 task/syscall 生命周期；新增调用点需避免 IRQ 上下文 |
 | T-11 | 上层漏校验用户 futex 地址导致错误等待目标 | 中 | syscall 层直接把未校验地址传给 `current_futex_key` | `kthread` 只构造 key，地址合法性和访问权限由 futex syscall 路径负责 |
 | T-12 | fd 或路径输入绕过权限控制 | 中 | 上层通过 `current_resources` 取到资源后漏做权限检查 | `kthread` 只返回当前进程资源表，权限和对象类型校验由 POSIX/fs/net 层执行 |
+| T-13 | pidfd 在目标进程退出后继续暴露有效 capability | 中 | `PidFd` 错误持有强引用或 poll/upgrade 判断不一致 | `PidFd` 仅保存 weak 引用；`process_state()` upgrade 失败返回 `NoSuchProcess` |
 
 影响等级定义：
 
@@ -156,3 +160,4 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 - 新增 futex 逻辑保持 private table 与 shared table 的隔离。
 - 新增 TEE 状态逻辑说明 type-erased slot 的具体类型约束。
 - 新增锁调用点标明执行上下文，避免 IRQ 路径调用可能阻塞或放大延迟的 helper。
+- 新增 pidfd 相关逻辑说明 `Weak<ProcessState>` 生命周期和 exit event 观察语义。

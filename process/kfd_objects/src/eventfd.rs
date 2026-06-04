@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Eventfd-backed file implementation.
+//! `eventfd` object implementation.
 
 use alloc::{borrow::Cow, sync::Arc};
 use core::{
@@ -260,26 +260,27 @@ mod eventfd_tests {
     fn test_eventfd_write_then_read() {
         let eventfd = EventFd::new(0, false);
 
-        let value = 5_u64.to_ne_bytes();
-        let mut src = kio::Cursor::new(value.as_slice());
+        let data = 42u64.to_ne_bytes();
+        let mut src = kio::Cursor::new(data.as_slice());
+        let mut dst_buf = [0; size_of::<u64>()];
+        let mut dst = kio::Cursor::new(dst_buf.as_mut_slice());
+
         assert_eq!(eventfd.write(&mut src).unwrap(), size_of::<u64>());
         assert!(eventfd.poll().contains(IoEvents::IN));
 
-        let mut out = [0u8; 8];
-        let mut dst = kio::Cursor::new(out.as_mut_slice());
         assert_eq!(eventfd.read(&mut dst).unwrap(), size_of::<u64>());
-        assert_eq!(u64::from_ne_bytes(out), 5);
+        assert_eq!(u64::from_ne_bytes(dst_buf), 42);
         assert!(!eventfd.poll().contains(IoEvents::IN));
     }
 
     #[def_test]
     fn test_eventfd_semaphore_read_keeps_remaining_count() {
         let eventfd = EventFd::new(3, true);
+        let mut dst_buf = [0; size_of::<u64>()];
+        let mut dst = kio::Cursor::new(dst_buf.as_mut_slice());
 
-        let mut out = [0u8; 8];
-        let mut dst = kio::Cursor::new(out.as_mut_slice());
         assert_eq!(eventfd.read(&mut dst).unwrap(), size_of::<u64>());
-        assert_eq!(u64::from_ne_bytes(out), 3);
+        assert_eq!(u64::from_ne_bytes(dst_buf), 3);
 
         let events = eventfd.poll();
         assert!(events.contains(IoEvents::IN));
@@ -289,8 +290,9 @@ mod eventfd_tests {
     #[def_test]
     fn test_eventfd_invalid_write_value() {
         let eventfd = EventFd::new(0, false);
-        let value = u64::MAX.to_ne_bytes();
-        let mut src = kio::Cursor::new(value.as_slice());
+        let data = u64::MAX.to_ne_bytes();
+        let mut src = kio::Cursor::new(data.as_slice());
+
         assert_eq!(eventfd.write(&mut src), Err(KError::InvalidInput));
     }
 
@@ -298,12 +300,12 @@ mod eventfd_tests {
     fn test_eventfd_small_buffers_fail() {
         let eventfd = EventFd::new(1, false);
 
-        let mut small_out = [0u8; 4];
-        let mut dst = kio::Cursor::new(small_out.as_mut_slice());
+        let mut short_dst = [0; size_of::<u64>() - 1];
+        let mut dst = kio::Cursor::new(short_dst.as_mut_slice());
         assert_eq!(eventfd.read(&mut dst), Err(KError::InvalidInput));
 
-        let value = 1_u64.to_ne_bytes();
-        let mut src = kio::Cursor::new(value[..4].as_ref());
+        let short_src = [0; size_of::<u64>() - 1];
+        let mut src = kio::Cursor::new(short_src.as_slice());
         assert_eq!(eventfd.write(&mut src), Err(KError::InvalidInput));
     }
 }

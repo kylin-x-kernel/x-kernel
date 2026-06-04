@@ -5,14 +5,14 @@
 //! Event file descriptor syscalls.
 //!
 //! This module implements event notification operations including:
-//! - Event file creation (eventfd, eventfd2, etc.)
+//! - Event file creation (`eventfd2`)
 //! - Event flags and modes (semaphore, non-blocking, etc.)
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
+use kfd_objects::eventfd::EventFd;
 use linux_raw_sys::general::{EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
-use posix_fs::file::event::EventFd;
 
 bitflags! {
     /// Flags for the `eventfd2` syscall.

@@ -6,6 +6,9 @@
 主要风险来自用户指针和路径字符串、文件描述符复用、跨进程 procfd 解析、
 目录项 ABI 布局、元数据权限语义、mount flags 兼容和 fd-to-fd 数据复制。
 
+`timerfd`、`eventfd` 等不以文件系统状态为核心的 fd-backed kernel object
+已迁移到独立 owner crate `kfd_objects`，不再由本 crate 承担其状态机和安全审计责任。
+
 本 crate 含少量 Rust `unsafe` 代码，
 都用于构造 Linux ABI 结构，而不是绕过 VFS 或 fd 表权限。
 
@@ -24,7 +27,7 @@ user process
 │  ├─ validates ABI flags and scalar ranges where needed    │
 │  ├─ copies user strings/buffers through posix_types/osvm  │
 │  ├─ resolves fd/path against current process context      │
-│  ├─ delegates object semantics to kfd/kfs/kvfs/pipe objects/devfs │
+│  ├─ delegates object semantics to kfd/kfs/kvfs/posix-fs-owned fd objects/devfs │
 │  └─ maps failures to KError/KResult                       │
 └──────────────────────────────────────────────────────────┘
   │
@@ -35,7 +38,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 - 用户态参数不可信，包括空指针、无效地址、过长路径、恶意 flags、负 offset 和 fd 复用。
 - `posix-fs` 信任 `posix_types` / `osvm` 对用户地址执行边界检查和错误传播。
 - `posix-fs` 信任 `kfd` 在 fd 查找、复制、关闭和 descriptor flags 上保持并发安全。
-- `posix-fs` 信任 `kfs` / `kvfs` / 设备对象执行真实读写、权限、目录和挂载语义。
+- `posix-fs` 信任 `kfs` / `kvfs` / 本 crate 拥有的 fd 对象 / 设备对象执行真实读写、权限、目录和挂载语义。
 - 进程当前上下文、fd 表、`FsContext` 和用户地址空间必须来自当前 syscall 执行线程。
 
 ## 外部边界 / 攻击面

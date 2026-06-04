@@ -1,0 +1,21 @@
+[package]
+name = "kfd_objects"
+description = "FD-backed kernel object implementations for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kerrno.workspace = true
+kfd.workspace = true
+khal.workspace = true
+kio.workspace = true
+kpoll.workspace = true
+kspin.workspace = true
+ktask.workspace = true
+linux-raw-sys = { workspace = true, features = ["general"] }
+unittest.workspace = true

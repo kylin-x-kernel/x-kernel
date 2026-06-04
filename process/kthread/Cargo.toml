@@ -19,6 +19,7 @@ khal.workspace = true
 kcred.workspace = true
 kaddr_layout.workspace = true
 kerrno.workspace = true
+kfd.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
 kfutex.workspace = true

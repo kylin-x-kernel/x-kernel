@@ -5,30 +5,28 @@
 //! Timer file descriptor syscalls.
 //!
 //! This module implements timer notification operations including:
-//! - Timer file creation (timerfd_create)
-//! - Timer arming/disarming (timerfd_settime)
-//! - Timer query (timerfd_gettime)
+//! - Timer file creation (`timerfd_create`)
+//! - Timer arming/disarming (`timerfd_settime`)
+//! - Timer query (`timerfd_gettime`)
 
 use kerrno::{KError, KResult};
 use kfd::FileLike;
+use kfd_objects::timerfd::TimerFd;
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME,
     itimerspec, timespec,
 };
-use posix_fs::file::timerfd::TimerFd;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
 /// Creates a timerfd file descriptor.
 pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
     debug!("sys_timerfd_create <= clock_id: {clock_id}, flags: {flags:#x}");
 
-    // Validate clock_id.
     match clock_id as u32 {
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME => {}
         _ => return Err(KError::InvalidInput),
     }
 
-    // Validate flags (only TFD_CLOEXEC and TFD_NONBLOCK are valid).
     let unknown = flags & !(TFD_CLOEXEC | TFD_NONBLOCK);
     if unknown != 0 {
         return Err(KError::InvalidInput);
@@ -53,7 +51,6 @@ pub fn sys_timerfd_settime(
 ) -> KResult<isize> {
     debug!("sys_timerfd_settime <= fd: {fd}, flags: {flags:#x}");
 
-    // Only TFD_TIMER_ABSTIME is valid.
     let unknown = flags & !TFD_TIMER_ABSTIME;
     if unknown != 0 {
         return Err(KError::InvalidInput);

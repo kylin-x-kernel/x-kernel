@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! `timerfd` implementation.
+//! `timerfd` object implementation.
 
 use alloc::{borrow::Cow, sync::Arc, task::Wake};
 use core::{
@@ -113,12 +113,15 @@ impl TimerFd {
 
     fn arm_or_fire(self: &Arc<Self>) {
         loop {
-            let dl = match self.inner.lock().deadline {
-                Some(dl) => dl,
+            let deadline = match self.inner.lock().deadline {
+                Some(deadline) => deadline,
                 None => return,
             };
 
-            let handle = register_timer(to_timer_deadline(self.clock_id, dl), self.make_waker());
+            let handle = register_timer(
+                to_timer_deadline(self.clock_id, deadline),
+                self.make_waker(),
+            );
             if let Some(handle) = handle {
                 *self.timer_handle.lock() = Some(handle);
                 return;
@@ -126,10 +129,10 @@ impl TimerFd {
 
             let mut inner = self.inner.lock();
             let was_zero = inner.expirations == 0;
-            let has_exp = inner.tick(clock_now(self.clock_id));
+            let has_expiration = inner.tick(clock_now(self.clock_id));
             drop(inner);
 
-            if has_exp && was_zero {
+            if has_expiration && was_zero {
                 self.poll_rx.wake();
             }
         }
@@ -138,10 +141,10 @@ impl TimerFd {
     fn on_timer_expired(self: &Arc<Self>) {
         let mut inner = self.inner.lock();
         let was_zero = inner.expirations == 0;
-        let has_exp = inner.tick(clock_now(self.clock_id));
+        let has_expiration = inner.tick(clock_now(self.clock_id));
         drop(inner);
 
-        if has_exp && was_zero {
+        if has_expiration && was_zero {
             self.poll_rx.wake();
         }
         self.arm_or_fire();
@@ -161,7 +164,7 @@ impl TimerFd {
         let old_interval = inner.interval;
         let old_remaining = inner
             .deadline
-            .and_then(|d| d.checked_sub(now))
+            .and_then(|deadline| deadline.checked_sub(now))
             .unwrap_or(Duration::ZERO);
 
         if value.is_zero() {
@@ -192,7 +195,7 @@ impl TimerFd {
         let inner = self.inner.lock();
         let remaining = inner
             .deadline
-            .and_then(|d| d.checked_sub(clock_now(self.clock_id)))
+            .and_then(|deadline| deadline.checked_sub(clock_now(self.clock_id)))
             .unwrap_or(Duration::ZERO);
         (inner.interval, remaining)
     }

@@ -8,15 +8,18 @@
 转换为内核内部的 fd 表、进程文件系统上下文、VFS 节点和设备对象操作。
 
 目标读者是维护 `core/ksyscall` 文件系统分发路径、`kfd` 进程 fd 表、
-`kfs`/`kvfs` VFS 层、`posix-fs` 的 pipe 文件对象以及终端和设备文件兼容路径的开发者。
+`kfs`/`kvfs` VFS 层、`posix-fs` 拥有的 pipe 对象以及终端和设备文件兼容路径的开发者。
 
 ## 背景
 
 POSIX 文件系统 syscall 同时接触用户指针、路径字符串、进程当前工作目录、
-文件描述符、VFS 节点、设备节点和管道对象。
+文件描述符、VFS 节点、设备节点和 `posix-fs` 自己拥有的匿名 fd 对象。
 `posix-fs` 把这些 Linux ABI 细节收敛到一个 crate 中，
 使 syscall 分发表只负责导出入口，
 而底层 VFS 和 fd 表继续保持面向内核对象的抽象。
+
+`timerfd`、`eventfd` 这类不以 VFS 或文件系统状态为核心的 fd-backed kernel object
+不再由 `posix-fs` 拥有，而是迁移到独立的 owner crate `kfd_objects`。
 
 当前实现以兼容常用 Linux 用户态程序为目标，
 优先覆盖常用路径和明确拒绝尚不支持的模式。
@@ -234,9 +237,17 @@ FileLike::read/write
 ### syscall 兼容层与 VFS 分离
 
 `posix-fs` 只处理 Linux ABI、当前进程上下文和错误传播，
-把实际文件语义交给 `kfs`、`kvfs`、`kfd` 和设备对象。
+把实际文件语义交给 `kfs`、`kvfs`、`kfd`、本 crate 拥有的匿名 fd 对象和设备对象。
 这样可以避免在 syscall 层复制文件系统实现，
 代价是 syscall 兼容行为必须清楚记录哪些由本 crate 保证、哪些由底层对象保证。
+
+### fd-backed object 与文件系统状态分离
+
+通过 fd 向用户态暴露对象，并不自动意味着该对象属于文件系统 owner。
+`timerfd` 已迁移到 `kfd_objects`，因为它的核心状态是 timer runtime、
+expiration counter 和 arm/disarm 语义，而不是路径、inode、mount 或文件偏移。
+`posix-fs` 继续保留的匿名 fd 对象，应当仍然和文件系统相关 syscall 或
+当前 crate 自己维护的不变量强关联。
 
 ### procfd 作为路径解析特例
 

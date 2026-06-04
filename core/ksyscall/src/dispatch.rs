@@ -8,7 +8,8 @@
 //! to the appropriate handler functions based on the syscall number.
 //!
 //! The module is organized into submodules for different categories:
-//! - `fs`: File system operations
+//! - `vfs`: VFS/path-based operations
+//! - `ipc`: IPC descriptor operations
 //! - `io_mpx`: I/O multiplexing (select, poll, epoll)
 //! - `mm`: Memory management
 //! - `posix-credentials`: POSIX credential operations
@@ -16,7 +17,8 @@
 //! - `posix-signal`: Signal handling
 //! - `sync`: Synchronization primitives
 //! - `sys`: System information and control
-//! - `task`: Process and thread management
+//! - `task`: Process, thread, and pidfd management
+//! - `time`: Time descriptor operations
 
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
@@ -31,7 +33,7 @@ use posix_process::*;
 use posix_signal::*;
 use posix_time::*;
 
-use crate::{fs::*, io_mpx::*, sync::*, sys::*, task::*};
+use crate::{io_mpx::*, ipc::*, sync::*, sys::*, task::*, time::*, vfs::*};
 
 /// Dispatches a syscall from the given user context.
 pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {

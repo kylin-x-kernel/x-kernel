@@ -2,12 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX file-like kernel objects used by filesystem-related syscalls.
+//! POSIX file-like kernel objects owned by `posix-fs`.
+//!
+//! This module keeps filesystem-adjacent objects such as pipes.
+//! Fd-backed kernel objects whose primary state is not filesystem
+//! state, such as `timerfd` and `eventfd`, live in their own owner crate.
 
-pub mod event;
-mod pidfd;
 mod pipe_impl;
-pub mod timerfd;
 
 use alloc::sync::Arc;
 
@@ -16,9 +17,8 @@ use kfd::FdTable;
 use kfs::{FsContext, OpenOptions};
 use linux_raw_sys::general::{O_RDONLY, O_WRONLY};
 
-pub use self::{
-    pidfd::PidFd,
-    pipe_impl::{PipeEndpoint, PipeObject, PipeReadEnd, PipeWriteEnd, current_pipe_endpoint},
+pub use self::pipe_impl::{
+    PipeEndpoint, PipeObject, PipeReadEnd, PipeWriteEnd, current_pipe_endpoint,
 };
 
 /// Add stdin, stdout, and stderr backed by `/dev/console`.

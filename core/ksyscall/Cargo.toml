@@ -21,6 +21,7 @@ tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 [dependencies]
 kaddr_layout.workspace = true
 kfd.workspace = true
+kfd_objects.workspace = true
 kbuild_config = { workspace = true }
 kerrno.workspace = true
 khal.workspace = true

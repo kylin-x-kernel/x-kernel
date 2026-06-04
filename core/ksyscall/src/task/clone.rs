@@ -21,10 +21,9 @@ use kprocess::Pid;
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};
-use kthread::{ProcessState, ProcessStateConfig, Thread, add_task_to_table};
+use kthread::{PidFd, ProcessState, ProcessStateConfig, Thread, add_task_to_table};
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
-use posix_fs::file::PidFd;
 use posix_process::new_user_task;
 
 bitflags! {
