@@ -4,7 +4,7 @@
 
 `kthread` 提供 x-kernel 的进程侧线程运行时入口。
 它把 `ktask` 的内核任务对象扩展为用户线程，并在 `kprocess` 的进程身份关系之上挂接共享运行态。
-调用者通过本 crate 访问当前线程、当前进程状态、文件资源、futex key、task/process registry、signal 发送和 timer 投递。
+调用者通过本 crate 访问当前线程、当前进程状态、当前进程 credential 快照、文件资源、futex key、task/process registry、signal 发送和 timer 投递。
 
 `kthread` 不保存 POSIX 进程身份图本体，也不实现地址空间、文件表、credential、signal 和 futex 的核心数据结构。
 这些能力分别由 `kprocess`、`memspace`、`kresources`、`kcred`、`ksignal` 和 `kfutex` 维护。
@@ -25,6 +25,7 @@ process/kthread/
 └── src/
     ├── lib.rs
     ├── cpu_time.rs
+    ├── credentials.rs
     ├── lifecycle_state.rs
     ├── pidfd.rs
     ├── posix_state.rs
@@ -70,6 +71,7 @@ ProcessState
 | `Thread` | 保存单线程状态、线程信号、CPU time、robust list、clear-child-tid 和退出标志 |
 | `CurrentThread` | 包装当前 `KtaskRef`，通过 `Deref` 访问当前用户线程 |
 | `ProcessState` | 聚合进程共享运行态，连接 `kprocess::Process`、资源表、地址空间、信号和 timer |
+| `credentials` helper | 暴露当前进程 credential 读写和 access snapshot helper |
 | `ProcessRuntimeState` | 保存地址空间、文件系统上下文、heap top 和进程 timer manager |
 | `ProcessPosixState` | 保存 exe path、cmdline、exit signal 和 umask |
 | `ProcessLifecycleState` | 保存子进程退出事件、进程退出事件和已回收子进程 CPU time |
@@ -82,7 +84,7 @@ ProcessState
 ## 调用约束 / 执行上下文
 
 - 当前线程专用入口依赖 scheduler 已可用，并且当前 task 带有 `Box<Thread>` task extension。
-- `current_thread` 返回的 handle 在 deref 时要求当前 task 是用户线程；`current_process_state`、`current_process_fs_context`、`current_resources` 和 `current_futex_key` 直接要求用户线程上下文。
+- `current_thread` 返回的 handle 在 deref 时要求当前 task 是用户线程；`current_process_state`、`current_process_fs_context`、`current_resources`、credential helper 和 `current_futex_key` 直接要求用户线程上下文。
 - `current_fs_context` 可在内核任务路径使用，内核任务会回退到 kernel 默认文件系统上下文。
 - registry、signal、timer 和 futex key helper 面向 task/syscall 生命周期路径，调用点不应位于中断上下文。
 - `ProcessState::new` 依赖 `kprocess::Process`、地址空间、文件系统上下文、信号动作表和 credential 已由调用者初始化。
@@ -145,7 +147,23 @@ current_thread()
 ```
 
 `current_fs_context` 对用户线程返回进程文件系统上下文，对内核任务回退到 kernel 默认上下文。
-`current_process_state`、`current_process_fs_context`、`current_resources` 和 `current_futex_key` 属于用户线程专用入口。
+`current_process_state`、`current_process_fs_context`、`current_resources`、credential helper 和 `current_futex_key` 属于用户线程专用入口。
+
+### 当前进程 credential helper
+
+```text
+with_current_credentials(_)
+  → current ProcessState
+  → credentials.read()
+
+with_current_credentials_mut(_)
+  → current ProcessState
+  → credentials.write()
+```
+
+这层 helper 只负责在当前用户线程上下文下暴露 `ProcessState::credentials` 的读写入口。
+credential 模型和视图转换规则仍由 `kcred` 维护，
+调用侧如果需要具体 snapshot，应基于这里的基础入口自行组合。
 
 ### registry 查询
 

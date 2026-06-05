@@ -49,6 +49,7 @@ core/ksyscall/
 │   ├── task/
 │   │   ├── clone.rs
 │   │   ├── clone3.rs
+│   │   ├── credentials.rs
 │   │   ├── ctl.rs
 │   │   ├── execve.rs
 │   │   ├── exit.rs
@@ -81,7 +82,7 @@ ksyscall::dispatch_irq_syscall
     ├─ vfs adapter  ───────────> posix-fs / kfs / kvfs
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
     ├─ time adapter ───────────> khal time sources / kthread CPU-time state / kfd_objects::TimerFd
-    ├─ task adapter ───────────> kthread / posix-process / kprocess
+    ├─ task adapter ───────────> kthread / posix-process / kprocess / kcred
     ├─ io_mpx adapter ─────────> posix-io-mpx
     ├─ sync adapter ───────────> kfutex / kthread
     └─ misc adapter ───────────> posix-mm / posix-net / posix-signal / ...
@@ -118,6 +119,9 @@ ksyscall::dispatch_irq_syscall
 - `task/pidfd.rs`
   - `pidfd_*`
   - owner 在 `kthread::PidFd`
+- `task/credentials.rs`
+  - `get*id` / `set*id` / `getgroups` / `setgroups`
+  - owner 在 `kthread` 当前进程 credential helper 与 `kcred` credential 模型
 - `task/sched.rs`
   - `sched_yield` / `sched_*affinity` / `sched_*scheduler` / `getcpu` / `getpriority` / `setpriority`
   - owner 在 `ktask` 调度接口、`kthread` 进程/线程状态和 `khal` CPU 查询

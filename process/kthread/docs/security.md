@@ -5,7 +5,7 @@
 ```text
 syscall / posix / procfs / kservices / ktty / tee
        │
-       │ safe API: current thread, process state, registry, signal, timer
+       │ safe API: current thread, process state, credential helper, registry, signal, timer
        ▼
 ┌──────────────────────────────────────────┐
 │ kthread                                  │
@@ -27,7 +27,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 - 调用者负责在 syscall 边界完成用户指针、权限、PID 可见性和参数合法性检查。
 - `kthread` 负责维护 task extension 类型、当前用户线程访问、进程共享运行态和 registry lookup 不变量。
 - `kthread` 不直接读写用户内存，不接收设备 DMA，不解析网络包。
-- `current_process_state`、`current_process_fs_context`、`current_resources` 和 `current_futex_key` 只能在当前 task 是用户线程时调用。
+- `current_process_state`、`current_process_fs_context`、`current_resources`、credential helper 和 `current_futex_key` 只能在当前 task 是用户线程时调用。
 
 ## 外部边界 / 攻击面
 
@@ -36,6 +36,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 | syscall 参数 | 用户态系统调用 | PID、TID、fd、futex 地址、timer 参数经 POSIX/syscall 层转换后调用 helper | syscall 层负责用户指针校验、权限检查和 errno 映射 |
 | 用户内存地址 | futex、robust list、clear-child-tid | 以 `usize` 地址保存或构造 `FutexKey` | `kthread` 不解引用地址，用户内存访问由 `kuaccess`、`memspace` 或调用方完成 |
 | 文件系统和 fd 输入 | POSIX fs/net/ipc 路径 | 通过 `current_resources`、`current_process_fs_context` 获取资源表和路径上下文 | 资源对象和路径解析由 `kresources`、`kfs`、上层 POSIX 模块校验 |
+| 凭据查询与变更 | syscall、DAC 检查 | 通过 current-context helper 读取或更新 `ProcessState::credentials` | 具体 credential 规则由 `kcred` 维护 |
 | process capability 输入 | pidfd syscall / clone PIDFD 路径 | `PidFd` 持有 `Weak<ProcessState>` 和 `exit_event` | syscall 层负责 PID 可见性、目标 fd 权限与 errno 映射 |
 | signal/timer 输入 | POSIX signal、itimer、POSIX timer | 以 `SignalInfo`、`TimerDelivery`、timer sequence 进入投递路径 | `ksignal` 和 `ktimer` 维护 signal/timer 语义，`kthread` 负责目标 lookup 和 task interrupt |
 | TEE runtime state | TEE 子系统 | type-erased `Arc<dyn Any + Send + Sync>` process private slot | 调用方保证同一进程内的具体类型一致 |
@@ -62,6 +63,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 6. **timer signal sequence**：POSIX timer signal dequeue 通过 timer id 和 signal sequence 校验陈旧 signal。
 7. **TEE 类型擦除**：TEE private runtime state 以 `Arc<dyn Any + Send + Sync>` 保存，取回时必须 downcast 到调用者期望类型。
 8. **PidFd 生命周期观察**：`PidFd` 只通过 `Weak<ProcessState>` 观察目标进程，upgrade 失败必须返回 `NoSuchProcess`。
+9. **credential helper 上下文**：当前进程 credential helper 只在用户线程上下文访问 `ProcessState::credentials`，不跨进程借出锁保护的内部引用。
 
 ## 线程安全
 

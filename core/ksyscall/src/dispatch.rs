@@ -12,7 +12,6 @@
 //! - `ipc`: IPC descriptor operations
 //! - `io_mpx`: I/O multiplexing (select, poll, epoll)
 //! - `mm`: Memory management
-//! - `posix-credentials`: POSIX credential operations
 //! - `posix-net`: Network operations
 //! - `posix-signal`: Signal handling
 //! - `sync`: Synchronization primitives
@@ -24,7 +23,6 @@ use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use kthread::UserThreadRuntimeAction;
 use linux_sysno::Sysno;
-use posix_credentials::*;
 use posix_io_mpx::*;
 use posix_ipc::*;
 use posix_mm::*;

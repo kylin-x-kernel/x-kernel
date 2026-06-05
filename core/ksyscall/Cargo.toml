@@ -24,6 +24,7 @@ kfd.workspace = true
 kfd_objects.workspace = true
 kfutex.workspace = true
 kbuild_config = { workspace = true }
+kcred.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true
@@ -43,7 +44,6 @@ tee_task_iface = { workspace = true, optional = true }
 kexec.workspace = true
 kuaccess.workspace = true
 ktty.workspace = true
-posix-credentials.workspace = true
 posix-fs.workspace = true
 posix-io-mpx.workspace = true
 posix-ipc.workspace = true

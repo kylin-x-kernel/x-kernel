@@ -79,7 +79,6 @@ kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
 
 # Internal: POSIX ABI compatibility
-posix-credentials = { path = "posix/credentials" }
 posix-ipc = { path = "posix/ipc" }
 posix-fs = { path = "posix/fs" }
 posix-io-mpx = { path = "posix/io-mpx" }

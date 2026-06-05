@@ -13,6 +13,7 @@
 
 mod clone;
 mod clone3;
+mod credentials;
 mod ctl;
 mod execve;
 mod exit;
@@ -24,4 +25,6 @@ mod wait;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::thread::*;
-pub use self::{clone::*, clone3::*, ctl::*, execve::*, exit::*, pidfd::*, sched::*, wait::*};
+pub use self::{
+    clone::*, clone3::*, credentials::*, ctl::*, execve::*, exit::*, pidfd::*, sched::*, wait::*,
+};

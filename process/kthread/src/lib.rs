@@ -19,6 +19,7 @@ use kfutex::FutexKey;
 extern crate klogger;
 
 mod cpu_time;
+mod credentials;
 mod lifecycle_state;
 mod pidfd;
 mod posix_state;
@@ -31,6 +32,7 @@ mod thread;
 mod timer_delivery;
 
 pub use cpu_time::{CpuTimeState, CpuTimeStatistics};
+pub use credentials::{with_current_credentials, with_current_credentials_mut};
 pub use kresources::ProcessResources;
 pub use krlimit::{FILE_LIMIT, Rlimit, Rlimits};
 pub use lifecycle_state::ProcessLifecycleState;
