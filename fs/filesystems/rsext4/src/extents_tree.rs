@@ -1650,7 +1650,7 @@ mod tests {
         bitmap_cache::CacheKey,
         blockdev::{BlockDevice, Jbd2Dev},
         error::{BlockDevError, BlockDevResult},
-        ext4::{mkfs, mount},
+        ext4::{Ext4FileSystem, mkfs, mount},
     };
 
     struct MemBlockDev {
@@ -1733,6 +1733,7 @@ mod tests {
         let mut jbd = Jbd2Dev::initial_jbd2dev(0, dev, false);
         mkfs(&mut jbd).unwrap();
         let fs = mount(&mut jbd).unwrap();
+
         (jbd, fs)
     }
 

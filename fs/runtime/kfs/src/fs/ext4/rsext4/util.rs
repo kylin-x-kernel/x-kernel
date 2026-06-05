@@ -41,7 +41,7 @@ pub fn into_vfs_err_mount(err: RSEXT4Error) -> VfsError {
         RSEXT4Error::IoError => LinuxError::EIO,
         RSEXT4Error::InvalidMagic | RSEXT4Error::InvalidSuperblock => LinuxError::EINVAL,
         RSEXT4Error::FilesystemHasErrors => LinuxError::EIO,
-        RSEXT4Error::UnsupportedFeature => LinuxError::EOPNOTSUPP,
+        RSEXT4Error::UnsupportedFeature { .. } => LinuxError::EOPNOTSUPP,
         RSEXT4Error::AlreadyMounted => LinuxError::EBUSY,
     };
     VfsError::from(linux_error).canonicalize()

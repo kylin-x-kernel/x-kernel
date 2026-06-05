@@ -79,7 +79,13 @@ pub fn init_filesystems() {
         handle.location(),
     );
 
-    let fs = fs::new_default(handle).expect("Failed to initialize filesystem");
+    let fs = match fs::new_default(handle) {
+        Ok(fs) => fs,
+        Err(e) => {
+            error!("Failed to mount root filesystem: {e:?}");
+            panic!("VFS: Unable to mount root fs");
+        }
+    };
     info!("  filesystem type: {:?}", fs.name());
 
     let mp = kvfs::Mountpoint::new_root(&fs);

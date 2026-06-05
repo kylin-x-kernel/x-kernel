@@ -144,7 +144,7 @@ pub fn get_inode_with_num<B: BlockDevice>(
 
         let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
             inode_num as u32,
-            fs.superblock.s_inodes_per_group,
+            fs.layout.inodes_per_group,
             inode_table_start,
             BLOCK_SIZE,
         );
@@ -326,7 +326,7 @@ pub fn insert_dir_entry<B: BlockDevice>(
     };
     let (p_block_num, p_offset, _pg) = fs.inodetable_cache.calc_inode_location(
         parent_ino_num,
-        fs.superblock.s_inodes_per_group,
+        fs.layout.inodes_per_group,
         inode_table_start,
         BLOCK_SIZE,
     );
@@ -585,7 +585,7 @@ pub fn mkdir_with_ino<B: BlockDevice>(
         };
         let (p_block_num, p_offset, _pg) = fs.inodetable_cache.calc_inode_location(
             parent_ino_num,
-            fs.superblock.s_inodes_per_group,
+            fs.layout.inodes_per_group,
             p_inode_table_start,
             BLOCK_SIZE,
         );
@@ -869,7 +869,7 @@ pub fn create_lost_found_directory<B: BlockDevice>(
     };
     let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
         fs.root_inode,
-        fs.superblock.s_inodes_per_group,
+        fs.layout.inodes_per_group,
         inode_table_start,
         BLOCK_SIZE,
     );

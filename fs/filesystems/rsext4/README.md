@@ -117,16 +117,16 @@
  dev.journal_replay();
  ```
  
- 注意：`mkfs()` 内部会临时关闭 journal，避免在 journal superblock 尚未注入时触发 JBD2 逻辑；`mkfs()` 结束前会恢复原先的开关状态（见 `src/ext4_backend/ext4.rs`）。
- 
+ 注意：`mkfs()` 内部会临时关闭 journal，避免在 journal superblock 尚未注入时触发 JBD2 逻辑；`mkfs()` 结束前会恢复原先的开关状态。
+
  ## 3. 创建文件系统（mkfs）
- 
+
  ```rust
  use rsext4::mkfs;
- 
+
  mkfs(&mut dev)?;
  ```
- 
+
  ## 4. 挂载与卸载
  
  你可以直接用 `mount/umount`，也可以用 `fs_mount/fs_umount`（它们只是转发到 `ext4::mount/umount`）。
@@ -260,4 +260,3 @@
 
  ```
  
-

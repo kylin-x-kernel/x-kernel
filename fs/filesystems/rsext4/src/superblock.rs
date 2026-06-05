@@ -292,6 +292,9 @@ impl Ext4Superblock {
 
     /// 获取块组数量
     pub fn block_groups_count(&self) -> u32 {
+        if self.s_blocks_per_group == 0 {
+            return 0;
+        }
         let blocks = self.blocks_count();
         let blocks_per_group = self.s_blocks_per_group as u64;
         blocks.div_ceil(blocks_per_group) as u32
@@ -321,14 +324,11 @@ impl Ext4Superblock {
 
     /// 每个块组的组描述符大小（字节）
     pub fn get_desc_size(&self) -> u16 {
-        if self.s_desc_size == 0 {
-            if self.has_feature_compat(Ext4Superblock::EXT4_FEATURE_INCOMPAT_64BIT) {
-                return GROUP_DESC_SIZE;
-            } else {
-                return GROUP_DESC_SIZE_OLD;
-            }
+        if self.has_feature_incompat(Ext4Superblock::EXT4_FEATURE_INCOMPAT_64BIT) {
+            self.s_desc_size
+        } else {
+            GROUP_DESC_SIZE_OLD
         }
-        self.s_desc_size
     }
 
     /// 每个块组的 inode 表占用多少个块
@@ -358,9 +358,31 @@ impl Ext4Superblock {
         self.s_feature_ro_compat & feature != 0
     }
 
+    /// Returns a bitmask of unsupported incompatible features.
+    ///
+    /// Corresponds to the `EXT4_FEATURE_INCOMPAT_SUPP` check in Linux's `ext4_feature_set_ok()`.
+    pub fn unsupported_incompat_features(&self) -> u32 {
+        self.s_feature_incompat & !Self::SUPPORTED_INCOMPAT_FEATURES
+    }
+
+    /// Returns a bitmask of unsupported read-only compatible features.
+    ///
+    /// Mount should be rejected if unsupported ro-compat features are present.
+    pub fn unsupported_ro_compat_features(&self) -> u32 {
+        self.s_feature_ro_compat & !Self::SUPPORTED_RO_COMPAT_FEATURES
+    }
+
     /// 是否启用了 extent 特性
     pub fn has_extents(&self) -> bool {
         self.has_feature_incompat(Self::EXT4_FEATURE_INCOMPAT_EXTENTS)
+    }
+
+    /// Whether the flex_bg feature is enabled (EXT4_FEATURE_INCOMPAT_FLEX_BG bit set).
+    ///
+    /// Note: this only indicates the on-disk feature flag. Whether flex_bg is active at
+    /// runtime depends on `Ext4Features::from_superblock()` validating `s_log_groups_per_flex`.
+    pub fn has_flex_bg(&self) -> bool {
+        self.has_feature_incompat(Self::EXT4_FEATURE_INCOMPAT_FLEX_BG)
     }
 
     /// 是否启用了 journal 特性
@@ -437,6 +459,23 @@ impl Ext4Superblock {
     pub const EXT4_FEATURE_INCOMPAT_META_BG: u32 = 0x0010;
     pub const EXT4_FEATURE_INCOMPAT_MMP: u32 = 0x0100;
     pub const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
+    /// Incompat features that rsext4 implements and can safely mount.
+    /// This is NOT the Linux EXT4_FEATURE_INCOMPAT_SUPP list; it only
+    /// includes features whose on-disk semantics are exercised by the
+    /// existing read/write paths.
+    pub const SUPPORTED_INCOMPAT_FEATURES: u32 = Self::EXT4_FEATURE_INCOMPAT_FILETYPE
+        | Self::EXT4_FEATURE_INCOMPAT_64BIT
+        | Self::EXT4_FEATURE_INCOMPAT_EXTENTS
+        | Self::EXT4_FEATURE_INCOMPAT_FLEX_BG;
+    /// Ro-compat features that rsext4 implements or that are harmless
+    /// for read-write mounts.  Features that change metadata layout
+    /// (METADATA_CSUM, BIGALLOC, QUOTA, etc.) are intentionally excluded
+    /// until the corresponding code is added.
+    pub const SUPPORTED_RO_COMPAT_FEATURES: u32 = Self::EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER
+        | Self::EXT4_FEATURE_RO_COMPAT_LARGE_FILE
+        | Self::EXT4_FEATURE_RO_COMPAT_HUGE_FILE
+        | Self::EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE
+        | Self::EXT4_FEATURE_RO_COMPAT_DIR_NLINK;
 }
 
 // 只读兼容特性标志
@@ -924,5 +963,87 @@ mod tests {
         assert_eq!(sb2.blocks_count(), 0x1FFFFFFFF);
         assert_eq!(sb2.s_blocks_count_lo, 0xFFFFFFFF);
         assert_eq!(sb2.s_blocks_count_hi, 0x00000001);
+    }
+
+    #[test]
+    fn supported_incompat_features_are_allowed() {
+        let mut superblock = Ext4Superblock::default();
+        superblock.s_feature_incompat = Ext4Superblock::SUPPORTED_INCOMPAT_FEATURES;
+
+        assert_eq!(superblock.unsupported_incompat_features(), 0);
+    }
+
+    #[test]
+    fn flex_bg_is_supported() {
+        let mut superblock = Ext4Superblock::default();
+        superblock.s_feature_incompat = Ext4Superblock::SUPPORTED_INCOMPAT_FEATURES;
+
+        // FLEX_BG is in the supported set → no unsupported bits
+        assert_eq!(superblock.unsupported_incompat_features(), 0);
+        assert!(superblock.has_flex_bg());
+    }
+
+    #[test]
+    fn unknown_incompat_feature_is_still_rejected() {
+        let mut superblock = Ext4Superblock::default();
+        superblock.s_feature_incompat = Ext4Superblock::SUPPORTED_INCOMPAT_FEATURES
+            | Ext4Superblock::EXT4_FEATURE_INCOMPAT_COMPRESSION;
+
+        assert_eq!(
+            superblock.unsupported_incompat_features(),
+            Ext4Superblock::EXT4_FEATURE_INCOMPAT_COMPRESSION
+        );
+    }
+
+    #[test]
+    fn supported_ro_compat_features_are_allowed() {
+        let mut superblock = Ext4Superblock::default();
+        superblock.s_feature_ro_compat = Ext4Superblock::SUPPORTED_RO_COMPAT_FEATURES;
+
+        assert_eq!(superblock.unsupported_ro_compat_features(), 0);
+    }
+
+    #[test]
+    fn desc_size_ignores_field_without_64bit_feature() {
+        let mut superblock = Ext4Superblock::default();
+        superblock.s_feature_incompat &= !Ext4Superblock::EXT4_FEATURE_INCOMPAT_64BIT;
+        superblock.s_desc_size = 64;
+
+        assert_eq!(superblock.get_desc_size(), GROUP_DESC_SIZE_OLD);
+    }
+
+    #[test]
+    fn desc_size_uses_field_with_64bit_feature() {
+        let mut superblock = Ext4Superblock::default();
+        superblock.s_feature_incompat |= Ext4Superblock::EXT4_FEATURE_INCOMPAT_64BIT;
+        superblock.s_desc_size = 64;
+
+        assert_eq!(superblock.get_desc_size(), GROUP_DESC_SIZE);
+    }
+
+    #[test]
+    fn unsupported_ro_compat_features_are_detected() {
+        let mut superblock = Ext4Superblock::default();
+        superblock.s_feature_ro_compat = Ext4Superblock::SUPPORTED_RO_COMPAT_FEATURES
+            | Ext4Superblock::EXT4_FEATURE_RO_COMPAT_METADATA_CSUM;
+
+        assert_eq!(
+            superblock.unsupported_ro_compat_features(),
+            Ext4Superblock::EXT4_FEATURE_RO_COMPAT_METADATA_CSUM
+        );
+    }
+
+    #[test]
+    fn block_groups_count_returns_zero_when_blocks_per_group_is_zero() {
+        let sb = Ext4Superblock::default();
+        // s_blocks_per_group defaults to 0 — no division by zero
+        assert_eq!(sb.block_groups_count(), 0);
+    }
+
+    #[test]
+    fn layout_rejects_zero_blocks_per_group() {
+        use crate::layout::Ext4Layout;
+        let sb = Ext4Superblock::default();
+        assert!(Ext4Layout::try_from_superblock(&sb).is_err());
     }
 }

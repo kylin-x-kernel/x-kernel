@@ -539,22 +539,33 @@ mod tests {
     fn create_test_fs() -> Ext4FileSystem {
         use crate::{
             bitmap_cache::BitmapCache, bmalloc::*, datablock_cache::DataBlockCache,
-            inodetable_cache::InodeCache, superblock::Ext4Superblock,
+            inodetable_cache::InodeCache, layout::Ext4Layout, superblock::Ext4Superblock,
         };
         let mut superblock = Ext4Superblock::default();
+        superblock.s_rev_level = Ext4Superblock::EXT4_DYNAMIC_REV;
+        superblock.s_log_block_size = crate::config::LOG_BLOCK_SIZE;
+        superblock.s_log_cluster_size = crate::config::LOG_BLOCK_SIZE;
+        superblock.s_inode_size = crate::config::DEFAULT_INODE_SIZE;
+        superblock.s_first_ino = crate::config::RESERVED_INODES + 1;
+        superblock.s_blocks_per_group = 8192;
+        superblock.s_clusters_per_group = 8192;
+        superblock.s_inodes_per_group = 256;
+        superblock.s_blocks_count_lo = 8192;
+        superblock.s_desc_size = crate::config::GROUP_DESC_SIZE;
         superblock.s_hash_seed = [0x12345678, 0x87654321, 0xABCDEF00, 0x00FEDCBA];
         superblock.s_def_hash_version = 0x8; // Half SipHash
 
-        let inode_size = match superblock.s_inode_size {
-            0 => crate::config::DEFAULT_INODE_SIZE as usize,
-            n => n as usize,
-        };
+        let layout = Ext4Layout::try_from_superblock(&superblock).unwrap();
+        let inode_size = layout.inode_size as usize;
+        let block_allocator = BlockAllocator::new(&layout);
+        let inode_allocator = InodeAllocator::new(&layout);
 
         Ext4FileSystem {
             superblock,
+            layout,
             group_descs: Vec::new(),
-            block_allocator: BlockAllocator::new(&superblock),
-            inode_allocator: InodeAllocator::new(&superblock),
+            block_allocator,
+            inode_allocator,
             bitmap_cache: BitmapCache::new(100),
             inodetable_cache: InodeCache::new(100, inode_size),
             datablock_cache: DataBlockCache::new(100, 4096),

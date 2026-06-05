@@ -226,7 +226,7 @@ pub fn get_file_inode<B: BlockDevice>(
 
         let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
             inode_num_u32,
-            fs.superblock.s_inodes_per_group,
+            fs.layout.inodes_per_group,
             inode_table_start,
             BLOCK_SIZE,
         );

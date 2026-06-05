@@ -232,7 +232,7 @@ impl<B: BlockDevice> Jbd2Dev<B> {
         }
     }
 
-    /// 运行时打开/关闭日志功能（例如 mkfs 阶段强制关闭，真正挂载再打开）
+    /// 运行时打开/关闭日志功能
     pub fn set_journal_use(&mut self, use_journal: bool) {
         self.journal_use = use_journal;
     }
@@ -343,7 +343,7 @@ impl<B: BlockDevice> Jbd2Dev<B> {
         // 2) 元数据且启用日志：走 JBD2 事务
         //    此时之前的普通数据块已经完成写入
 
-        // 注意：在 mkfs/早期阶段可能还没设置 super_block，此时直接退化为普通写，避免阻塞格式化
+        // journal superblock 尚未注入时，暂时按非日志写处理
         if self.systeam.is_none() {
             // 日志标志已开但还没有 journal superblock，暂时按非日志写处理
             error!(

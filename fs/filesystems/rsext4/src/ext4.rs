@@ -24,9 +24,13 @@ use crate::{
     error::*,
     inodetable_cache::*,
     jbd2::{jbd2::*, jbdstruct::*},
+    layout::*,
     loopfile::*,
     superblock::*,
-    tool::*,
+    tool::{
+        cloc_group_layout, debug_super_and_desc, generate_uuid, generate_uuid_8,
+        need_redundant_backup,
+    },
 };
 
 /// Ext4 文件系统实例
@@ -49,6 +53,8 @@ use crate::{
 pub struct Ext4FileSystem {
     /// 超级块
     pub superblock: Ext4Superblock,
+    /// Derived layout and feature capability layer built from superblock at mount time.
+    pub layout: Ext4Layout,
     /// 块组描述符数组
     pub group_descs: Vec<Ext4GroupDesc>,
     /// 块分配器
@@ -69,6 +75,16 @@ pub struct Ext4FileSystem {
     pub mounted: bool,
     /// Journal 超级块 开始块号
     pub journal_sb_block_start: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct DescriptorRangeCheck {
+    group_idx: u32,
+    allowed_first_block: u64,
+    allowed_last_block: u64,
+    superblock_block: u64,
+    gdt_first_block: u64,
+    gdt_last_block: u64,
 }
 
 impl Ext4FileSystem {
@@ -117,7 +133,7 @@ impl Ext4FileSystem {
             }
         };
 
-        let bm = InodeBitmap::new(&bitmap.data, self.superblock.s_inodes_per_group);
+        let bm = InodeBitmap::new(&bitmap.data, self.layout.inodes_per_group);
         match bm.is_allocated(inode_in_group) {
             Some(allocated) => allocated,
             None => {
@@ -179,7 +195,7 @@ impl Ext4FileSystem {
         };
         let (block_num, offset, _group_idx) = self.inodetable_cache.calc_inode_location(
             self.root_inode,
-            self.superblock.s_inodes_per_group,
+            self.layout.inodes_per_group,
             inode_table_start,
             BLOCK_SIZE,
         );
@@ -221,26 +237,61 @@ impl Ext4FileSystem {
         }
         debug!("Superblock magic verified");
 
-        // 3. 检查文件系统状态
+        // 3. Feature validation: check incompat and ro-compat feature bits before
+        // deriving geometry so unsupported layout-changing features are reported
+        // as unsupported rather than as corrupted superblocks.
+        let unsupported_incompat_features = superblock.unsupported_incompat_features();
+        if unsupported_incompat_features != 0 {
+            error!("unsupported incompatible features: {unsupported_incompat_features:#x}");
+            return Err(RSEXT4Error::UnsupportedFeature {
+                bits: unsupported_incompat_features,
+            });
+        }
+
+        let unsupported_ro_compat_features = superblock.unsupported_ro_compat_features();
+        if unsupported_ro_compat_features != 0 {
+            error!("unsupported ro-compat features: {unsupported_ro_compat_features:#x}");
+            return Err(RSEXT4Error::UnsupportedFeature {
+                bits: unsupported_ro_compat_features,
+            });
+        }
+        Self::validate_block_addressability(&superblock)?;
+
+        // 4. Build derived layout from the superblock after feature validation.
+        let layout = Ext4Layout::try_from_superblock(&superblock)?;
+        debug!(
+            "Ext4 layout: block_size={} blocks_per_group={} groups={} has_flex_bg={}",
+            layout.block_size,
+            layout.blocks_per_group,
+            layout.group_count,
+            layout.has_flex_bg()
+        );
+
+        // 5. Check filesystem state
         if superblock.s_state == Ext4Superblock::EXT4_ERROR_FS {
             warn!("Filesystem is in error state");
             //  return Err(RSEXT4Error::FilesystemHasErrors);
         }
 
-        // 4. 计算块组数量
-        let group_count = superblock.block_groups_count();
+        // 6. Compute block group count
+        let group_count = layout.group_count;
+        if group_count == 0 {
+            error!("Block group count is zero");
+            return Err(RSEXT4Error::InvalidSuperblock);
+        }
         debug!("Block group count: {group_count}");
 
-        // 5. 读取所有块组描述符
-        let group_descs = Self::load_group_descriptors(block_dev, group_count)?;
+        // 8. Load all block group descriptors
+        let group_descs = Self::load_group_descriptors(block_dev, &layout)?;
+        Self::validate_group_descriptors(&superblock, &layout, &group_descs)?;
         debug!("Loaded {} group descriptors", group_descs.len());
 
-        // 6. 初始化分配器
-        let block_allocator = BlockAllocator::new(&superblock);
-        let inode_allocator = InodeAllocator::new(&superblock);
+        // 9. Initialize allocators
+        let block_allocator = BlockAllocator::new(&layout);
+        let inode_allocator = InodeAllocator::new(&layout);
         debug!("Allocators initialized");
 
-        // 7. 初始化位图缓存（最多缓存8个位图）
+        // 10. Initialize bitmap cache (lazy loading, LRU eviction)
         let bitmap_cache = BitmapCache::create_default();
         debug!("Bitmap cache initialized (lazy loading)");
 
@@ -248,10 +299,7 @@ impl Ext4FileSystem {
         // NOTE: inode size is a filesystem property (superblock.s_inode_size), not a fixed constant.
         // Using a wrong inode size will make inode table offsets incorrect and may read zeroed inodes
         // (e.g. /dev becomes mode=0, then VFS mount fails with ENOTDIR).
-        let inode_size = match superblock.s_inode_size {
-            0 => DEFAULT_INODE_SIZE as usize,
-            n => n as usize,
-        };
+        let inode_size = layout.inode_size as usize;
         let inode_cache = InodeCache::new(INODE_CACHE_MAX, inode_size);
         debug!("Inode cache initialized");
 
@@ -262,6 +310,7 @@ impl Ext4FileSystem {
         // 构造文件系统实例
         let mut fs = Self {
             superblock,
+            layout,
             group_descs,
             block_allocator,
             inode_allocator,
@@ -451,7 +500,7 @@ impl Ext4FileSystem {
     /// 加载所有块组描述符 顺序性
     fn load_group_descriptors<B: BlockDevice>(
         block_dev: &mut Jbd2Dev<B>,
-        group_count: u32,
+        layout: &Ext4Layout,
     ) -> Result<Vec<Ext4GroupDesc>, RSEXT4Error> {
         let mut group_descs = Vec::new();
         let gdt_base: u64 = BLOCK_SIZE as u64;
@@ -459,8 +508,8 @@ impl Ext4FileSystem {
         // 为了减少重复读块，这里缓存当前块号
         let mut current_block: Option<u64> = None;
 
-        let superblock = read_superblock(block_dev).map_err(|_| RSEXT4Error::IoError)?;
-        let desc_size = superblock.get_desc_size() as usize;
+        let group_count = layout.group_count;
+        let desc_size = layout.desc_size as usize;
 
         debug!("Loading group descriptors: {group_count} groups, desc_size = {desc_size} bytes");
         for group_id in 0..group_count {
@@ -499,6 +548,163 @@ impl Ext4FileSystem {
             group_descs.len()
         );
         Ok(group_descs)
+    }
+
+    fn validate_block_addressability(superblock: &Ext4Superblock) -> Result<(), RSEXT4Error> {
+        let max_addressable_blocks = u32::MAX as u64 + 1;
+        if superblock.blocks_count() > max_addressable_blocks {
+            error!(
+                "filesystem is too large for rsext4 block device API: blocks={} max={}",
+                superblock.blocks_count(),
+                max_addressable_blocks
+            );
+            return Err(RSEXT4Error::UnsupportedFeature {
+                bits: Ext4Superblock::EXT4_FEATURE_INCOMPAT_64BIT,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate descriptor-provided metadata locations at mount time.
+    ///
+    /// This mirrors Linux `ext4_check_descriptors()`: normal block groups must
+    /// keep their bitmaps and inode table inside the owning group, while
+    /// flex_bg filesystems may place them anywhere in the filesystem.  Both
+    /// modes still reject ranges that exceed the block device API or overlap
+    /// the primary superblock/GDT.
+    fn validate_group_descriptors(
+        superblock: &Ext4Superblock,
+        layout: &Ext4Layout,
+        group_descs: &[Ext4GroupDesc],
+    ) -> Result<(), RSEXT4Error> {
+        if group_descs.len() != layout.group_count as usize {
+            error!(
+                "group descriptor count mismatch: loaded={} expected={}",
+                group_descs.len(),
+                layout.group_count
+            );
+            return Err(RSEXT4Error::InvalidSuperblock);
+        }
+
+        let blocks_count = superblock.blocks_count();
+        if blocks_count == 0 {
+            error!("invalid block count: 0");
+            return Err(RSEXT4Error::InvalidSuperblock);
+        }
+
+        let fs_first_block = layout.first_data_block as u64;
+        let fs_last_block = blocks_count.saturating_sub(1);
+        let superblock_block = SUPERBLOCK_OFFSET / layout.block_size;
+        let gdt_first_block = superblock_block + 1;
+        let gdt_blocks = (layout.group_count as u64).div_ceil(layout.descs_per_block as u64);
+        let gdt_last_block = gdt_first_block + gdt_blocks.saturating_sub(1);
+        let descriptors_allow_flex_layout = layout.has_flex_bg();
+
+        debug!(
+            "Checking group descriptors: groups={} flex_bg={} fs_range={}..={} gdt_range={}..={}",
+            layout.group_count,
+            descriptors_allow_flex_layout,
+            fs_first_block,
+            fs_last_block,
+            gdt_first_block,
+            gdt_last_block
+        );
+
+        for (group_idx, desc) in group_descs.iter().enumerate() {
+            let group_idx = group_idx as u32;
+            let group_first_block =
+                layout.first_data_block as u64 + group_idx as u64 * layout.blocks_per_group as u64;
+            let group_last_block =
+                if group_idx + 1 == layout.group_count || descriptors_allow_flex_layout {
+                    fs_last_block
+                } else {
+                    group_first_block + layout.blocks_per_group as u64 - 1
+                };
+            let allowed_first_block = if descriptors_allow_flex_layout {
+                fs_first_block
+            } else {
+                group_first_block
+            };
+
+            let check = DescriptorRangeCheck {
+                group_idx,
+                allowed_first_block,
+                allowed_last_block: group_last_block,
+                superblock_block,
+                gdt_first_block,
+                gdt_last_block,
+            };
+
+            Self::validate_descriptor_range(check, "block bitmap", desc.block_bitmap(), 1)?;
+            Self::validate_descriptor_range(check, "inode bitmap", desc.inode_bitmap(), 1)?;
+            Self::validate_descriptor_range(
+                check,
+                "inode table",
+                desc.inode_table(),
+                layout.inode_table_blocks_per_group as u64,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_descriptor_range(
+        check: DescriptorRangeCheck,
+        name: &str,
+        start_block: u64,
+        block_count: u64,
+    ) -> Result<(), RSEXT4Error> {
+        let Some(last_block) = start_block.checked_add(block_count.saturating_sub(1)) else {
+            error!(
+                "{} for group {} overflows: start={}",
+                name, check.group_idx, start_block
+            );
+            return Err(RSEXT4Error::InvalidSuperblock);
+        };
+
+        if last_block > u32::MAX as u64 {
+            error!(
+                "{} for group {} is outside rsext4 block device address space: range={}..={}",
+                name, check.group_idx, start_block, last_block
+            );
+            return Err(RSEXT4Error::UnsupportedFeature {
+                bits: Ext4Superblock::EXT4_FEATURE_INCOMPAT_64BIT,
+            });
+        }
+        if start_block <= check.superblock_block && check.superblock_block <= last_block {
+            error!(
+                "{} for group {} overlaps superblock at block {}",
+                name, check.group_idx, check.superblock_block
+            );
+            return Err(RSEXT4Error::InvalidSuperblock);
+        }
+        if start_block <= check.gdt_last_block && last_block >= check.gdt_first_block {
+            error!(
+                "{} for group {} overlaps group descriptors: range={}..={} gdt={}..={}",
+                name,
+                check.group_idx,
+                start_block,
+                last_block,
+                check.gdt_first_block,
+                check.gdt_last_block
+            );
+            return Err(RSEXT4Error::InvalidSuperblock);
+        }
+        if start_block < check.allowed_first_block || last_block > check.allowed_last_block {
+            error!(
+                "{} for group {} outside allowed range: range={}..={} allowed={}..={}",
+                name,
+                check.group_idx,
+                start_block,
+                last_block,
+                check.allowed_first_block,
+                check.allowed_last_block
+            );
+            return Err(RSEXT4Error::InvalidSuperblock);
+        }
+
+        Ok(())
     }
 
     /// 卸载文件系统 不写超级块备份
@@ -544,7 +750,7 @@ impl Ext4FileSystem {
         block_dev: &mut Jbd2Dev<B>,
     ) -> BlockDevResult<()> {
         let total_desc_count = self.group_descs.len();
-        let desc_size = self.superblock.get_desc_size() as usize;
+        let desc_size = self.layout.desc_size as usize;
 
         // GDT 基地址统一为块号 1 的起始字节偏移
         let gdt_base: u64 = BLOCK_SIZE as u64;
@@ -658,7 +864,7 @@ impl Ext4FileSystem {
 
         let (block_num, offset, _g) = self.inodetable_cache.calc_inode_location(
             inode_num,
-            self.superblock.s_inodes_per_group,
+            self.layout.inodes_per_group,
             inode_table_start,
             BLOCK_SIZE,
         );
@@ -683,7 +889,7 @@ impl Ext4FileSystem {
 
         let (block_num, offset, _g) = self.inodetable_cache.calc_inode_location(
             inode_num,
-            self.superblock.s_inodes_per_group,
+            self.layout.inodes_per_group,
             inode_table_start,
             BLOCK_SIZE,
         );
@@ -1037,6 +1243,7 @@ pub struct FileSystemStats {
     /// 块组数
     pub block_groups: u32,
 }
+
 /// entries是否存在
 pub fn file_entry_exisr<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
@@ -1063,7 +1270,10 @@ pub fn mount<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<Ext4F
         }
         Err(e) => {
             error!("Mount failed: {e}");
-            Err(BlockDevError::Corrupted)
+            match e {
+                RSEXT4Error::UnsupportedFeature { .. } => Err(BlockDevError::Unsupported),
+                _ => Err(BlockDevError::Corrupted),
+            }
         }
     }
 }
@@ -1176,17 +1386,17 @@ pub fn compute_fs_layout(inode_size: u16, total_blocks: u64) -> FsLayoutInfo {
     let reserved_gdt_blocks: u32 = RESERVED_GDT_BLOCKS;
 
     // 组0布局：
-    // - 对于 4K：Primary superblock at 0, GDT at 1, Reserved GDT blocks at 2..(2+reserved_gdt_blocks-1)
-    // - 我们在预留 GDT 区域之后顺序放置 block_bitmap、inode_bitmap、inode_table
+    // - 对于 4K：Primary superblock at 0, GDT at 1..(1+gdt_blocks-1)
+    // - 我们在主 GDT 和预留 GDT 区域之后顺序放置 block_bitmap、inode_bitmap、inode_table
     let group0_start: u32 = first_data_block;
-    let reserved_gdt_start: u32 = group0_start + 2; // 块0=引导/超级块，块1=GDT，块2.. 预留GDT
-    let group0_block_bitmap: u32 = reserved_gdt_start + reserved_gdt_blocks; // 2 + reserved
+    let reserved_gdt_start: u32 = group0_start + 1 + gdt_blocks;
+    let group0_block_bitmap: u32 = reserved_gdt_start + reserved_gdt_blocks;
     let group0_inode_bitmap: u32 = group0_block_bitmap + 1;
     let group0_inode_table: u32 = group0_inode_bitmap + 1;
     let group0_metadata_blocks: u32 = (group0_inode_table + inode_table_blocks) - group0_start;
 
     // 预留块总数：约 5%（与 ext4 默认类似）
-    let reserved_blocks: u64 = total_blocks / 20; // 5%
+    let reserved_blocks: u64 = total_blocks / 20;
 
     FsLayoutInfo {
         block_size,
@@ -1211,8 +1421,8 @@ pub fn compute_fs_layout(inode_size: u16, total_blocks: u64) -> FsLayoutInfo {
 pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
     debug!("Start initializing Ext4 filesystem...");
     // mkfs 阶段先强制关闭日志，避免还未初始化 journal superblock 时触发 JBD2 逻辑
-    block_dev.set_journal_use(false);
     let old_jouranl_use = block_dev.is_use_journal();
+    block_dev.set_journal_use(false);
 
     // 1. 计算布局参数
     let total_blocks = block_dev.total_blocks();
@@ -1225,7 +1435,7 @@ pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
     debug!("  Blocks per group: {}", layout.blocks_per_group);
     debug!("  Inodes per group: {}", layout.inodes_per_group);
 
-    // 构建并根据fearure写入到所有group超级块
+    // 构建并根据feature写入到所有group超级块
     let superblock = build_superblock(total_blocks, &layout);
     write_superblock(block_dev, &superblock)?;
     debug!("Superblock written");
@@ -1233,7 +1443,6 @@ pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
     // 写冗余备份 自动判断是否写
     write_superblock_redundant_backup(block_dev, &superblock, total_groups, &layout)?;
 
-    // 注意顺序
     let mut descs: VecDeque<Ext4GroupDesc> = VecDeque::new();
     // 为superblock写入gdt（全部标记为UNINIT）
     for group_id in 0..total_groups {
@@ -1259,7 +1468,7 @@ pub fn mkfs<B: BlockDevice>(block_dev: &mut Jbd2Dev<B>) -> BlockDevResult<()> {
         fs.umount(block_dev)?;
     }
 
-    //  验证：读回超级块检查魔数
+    // 验证：读回超级块检查魔数
     let verify_sb = read_superblock(block_dev)?;
 
     // mkfs 结束前恢复日志开关（为后续真实挂载做准备）
@@ -1298,7 +1507,6 @@ fn build_superblock(total_blocks: u64, layout: &FsLayoutInfo) -> Ext4Superblock 
     };
 
     // 设置hash种子
-    // 需要生成UUID
     let uuid = generate_uuid();
     sb.s_hash_seed = uuid.0;
 
@@ -1400,11 +1608,10 @@ fn write_superblock_redundant_backup<B: BlockDevice>(
     groups_count: u32,
     fs_layout: &FsLayoutInfo,
 ) -> BlockDevResult<()> {
-    // 从1开始
-    // sparse_superbllock特性判断
-    let sprse_feature =
+    // 从1开始，按 sparse_super 判断是否写备份
+    let sparse_feature =
         sb.has_feature_ro_compat(Ext4Superblock::EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER);
-    if sprse_feature {
+    if sparse_feature {
         for gid in 1..groups_count {
             let group_layout = cloc_group_layout(
                 gid,
@@ -1416,7 +1623,6 @@ fn write_superblock_redundant_backup<B: BlockDevice>(
                 fs_layout.group0_inode_table,
                 fs_layout.gdt_blocks,
             );
-            // 需要超级块备份
             if need_redundant_backup(gid) {
                 let super_blocks = group_layout.group_start_block;
                 block_dev
@@ -1481,21 +1687,19 @@ fn write_gdt_redundant_backup<B: BlockDevice>(
     groups_count: u32,
     fs_layout: &FsLayoutInfo,
 ) -> BlockDevResult<()> {
-    // 参数合法性判断
     let desc_size = sb.get_desc_size();
     let desc_all_size = descs.len() * desc_size as usize;
-    let can_recive_size = fs_layout.gdt_blocks * fs_layout.descs_per_block * desc_size as u32;
-    if can_recive_size < desc_all_size as u32 {
+    let can_receive_size = fs_layout.gdt_blocks * fs_layout.descs_per_block * desc_size as u32;
+    if can_receive_size < desc_all_size as u32 {
         return Err(BlockDevError::BufferTooSmall {
-            provided: can_recive_size as usize,
+            provided: can_receive_size as usize,
             required: desc_all_size,
         });
     }
 
-    let sprse_feature =
+    let sparse_feature =
         sb.has_feature_ro_compat(Ext4Superblock::EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER);
-    if sprse_feature {
-        // 为每个块组执行
+    if sparse_feature {
         for gid in 1..groups_count {
             if need_redundant_backup(gid) {
                 let group_layout = cloc_group_layout(
@@ -1508,14 +1712,13 @@ fn write_gdt_redundant_backup<B: BlockDevice>(
                     fs_layout.group0_inode_table,
                     fs_layout.gdt_blocks,
                 );
-                let gdt_start = group_layout.group_start_block + 1; //跳过超级块
+                let gdt_start = group_layout.group_start_block + 1; // 跳过超级块
 
                 let mut desc_iter = descs.iter();
-                // 循环写入desc
                 for gdt_block_id in gdt_start..group_layout.group_blcok_bitmap_startblocks {
                     block_dev.read_block(gdt_block_id as u32)?;
                     let buffer = block_dev.buffer_mut();
-                    let mut current_offset = 0_usize; //descoffset循环记录
+                    let mut current_offset = 0_usize;
                     for _ in 0..fs_layout.descs_per_block {
                         if let Some(desc) = desc_iter.next() {
                             desc.to_disk_bytes(
@@ -1524,7 +1727,6 @@ fn write_gdt_redundant_backup<B: BlockDevice>(
                             current_offset += desc_size as usize;
                         }
                     }
-                    // 写回磁盘
                     block_dev.write_block(gdt_block_id as u32, true)?;
                 }
             }
@@ -1552,7 +1754,6 @@ fn write_group_desc<B: BlockDevice>(
     let in_block = (byte_offset % block_size_u64) as usize;
     let end = in_block + desc_size;
 
-    // 读取目标块，修改对应 slice，再写回
     block_dev.read_block(block_num as u32)?;
     let buffer = block_dev.buffer_mut();
     if end > buffer.len() {
@@ -1569,7 +1770,6 @@ fn initialize_group_0<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
     layout: &FsLayoutInfo,
 ) -> BlockDevResult<()> {
-    // 计算块组0的布局
     let block_bitmap_blk = layout.group0_block_bitmap;
     let inode_bitmap_blk = layout.group0_inode_bitmap;
     let inode_table_blk = layout.group0_inode_table;
@@ -1597,7 +1797,7 @@ fn initialize_group_0<B: BlockDevice>(
             buffer[byte_idx] |= 1 << bit_idx;
         }
 
-        // 2.5padding无效inode为1
+        // padding无效inode为1
         let bits_per_group = BLOCK_SIZE_U32 * 8;
         for i in layout.inodes_per_group..bits_per_group {
             let byte_idx: usize = (i / 8) as usize;
@@ -1607,7 +1807,6 @@ fn initialize_group_0<B: BlockDevice>(
     }
     block_dev.write_block(inode_bitmap_blk, true)?;
 
-    //  清零inode表
     {
         let buffer = block_dev.buffer_mut();
         buffer.fill(0);
@@ -1616,7 +1815,7 @@ fn initialize_group_0<B: BlockDevice>(
         block_dev.write_block(inode_table_blk + i, true)?;
     }
 
-    //  更新块组0的描述符（清除UNINIT标志）
+    // 更新块组0的描述符（清除UNINIT标志）
     let desc = Ext4GroupDesc {
         bg_flags: Ext4GroupDesc::EXT4_BG_INODE_ZEROED,
         bg_free_blocks_count_lo: layout
@@ -1641,9 +1840,7 @@ fn initialize_other_groups_bitmaps<B: BlockDevice>(
     layout: &FsLayoutInfo,
     sb: &Ext4Superblock,
 ) -> BlockDevResult<()> {
-    // 从块组1开始，逐组初始化
     for group_id in 1..layout.groups {
-        // 使用与 build_uninit_group_desc 相同的布局计算
         let gl = cloc_group_layout(
             group_id,
             sb,
@@ -1658,7 +1855,6 @@ fn initialize_other_groups_bitmaps<B: BlockDevice>(
         let block_bitmap_blk = gl.group_blcok_bitmap_startblocks as u32;
         let inode_bitmap_blk = gl.group_inode_bitmap_startblocks as u32;
 
-        //  初始化块位图：全0 → 所有块空闲
         {
             let buffer = block_dev.buffer_mut();
             buffer.fill(0);
@@ -1673,7 +1869,6 @@ fn initialize_other_groups_bitmaps<B: BlockDevice>(
         block_dev.write_block(block_bitmap_blk, true)?;
 
         {
-            //  初始化inode位图：全0 → 所有inode空闲
             let buffer = block_dev.buffer_mut();
             buffer.fill(0);
 

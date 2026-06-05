@@ -2,16 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! # 错误处理模块
+//! # Error handling module
 //!
-//! 定义了 rsext4 库中使用的所有错误类型，提供清晰的错误信息以便调试和处理
+//! Defines all error types used in the rsext4 library, providing clear error
+//! messages for debugging and handling.
 
-/// 块设备错误类型
+/// Block device error type
 ///
-/// 定义了所有可能的块设备操作错误
+/// All possible block device operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockDevError {
-    /// 非法输入
+    /// Invalid input
     InvalidInput,
     /// Expected a directory but the target is not a directory
     NotDirectory,
@@ -19,41 +20,41 @@ pub enum BlockDevError {
     IsDirectory,
     /// Directory not empty
     DirectoryNotEmpty,
-    /// 读取错误
+    /// Read error
     ReadError,
-    /// 写入错误
+    /// Write error
     WriteError,
-    /// 块号超出范围
+    /// Block number out of range
     BlockOutOfRange { block_id: u32, max_blocks: u64 },
-    /// 无效的块大小
+    /// Invalid block size
     InvalidBlockSize { size: usize, expected: usize },
-    /// 缓冲区太小
+    /// Buffer too small
     BufferTooSmall { provided: usize, required: usize },
-    /// 设备未打开
+    /// Device not open
     DeviceNotOpen,
-    /// 设备已关闭
+    /// Device already closed
     DeviceClosed,
-    /// I/O错误
+    /// I/O error
     IoError,
-    /// 对齐错误（数据未对齐到块边界）
+    /// Alignment error (data not aligned to block boundary)
     AlignmentError { offset: u64, alignment: u32 },
-    /// 设备忙
+    /// Device busy
     DeviceBusy,
-    /// 超时
+    /// Timeout
     Timeout,
-    /// 不支持的操作
+    /// Unsupported operation
     Unsupported,
-    /// 设备只读
+    /// Device is read-only
     ReadOnly,
-    /// 空间不足
+    /// No space left
     NoSpace,
-    /// 权限错误
+    /// Permission denied
     PermissionDenied,
-    /// 设备损坏或数据损坏
+    /// Device or data corrupted
     Corrupted,
-    /// 校验和错误
+    /// Checksum error
     ChecksumError,
-    /// 未知错误
+    /// Unknown error
     Unknown,
 }
 
@@ -104,44 +105,42 @@ impl core::fmt::Display for BlockDevError {
         }
     }
 }
-/// 块设备操作结果类型
-///
-/// 用于块设备操作的错误处理
+/// Block device operation result type
 pub type BlockDevResult<T> = Result<T, BlockDevError>;
 
-/// Ext4 文件系统错误
+/// Ext4 filesystem error
 ///
-/// 定义了所有可能的 ext4 文件系统操作错误
+/// All possible ext4 filesystem operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RSEXT4Error {
-    /// IO 错误
+    /// I/O error
     IoError,
-    /// 魔数无效
+    /// Invalid magic number
     InvalidMagic,
-    /// 超级块无效（如GDT超出预留空间）
+    /// Invalid superblock (e.g. GDT beyond reserved space)
     InvalidSuperblock,
-    /// 文件系统有错误
+    /// Filesystem has errors
     FilesystemHasErrors,
-    /// 不支持的特性
-    UnsupportedFeature,
-    /// 已经挂载
+    /// Unsupported feature bits (incompat or ro-compat)
+    UnsupportedFeature { bits: u32 },
+    /// Already mounted
     AlreadyMounted,
 }
 
 impl core::fmt::Display for RSEXT4Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            RSEXT4Error::IoError => write!(f, "IO错误"),
-            RSEXT4Error::InvalidMagic => write!(f, "魔数无效"),
-            RSEXT4Error::InvalidSuperblock => write!(f, "超级块无效"),
-            RSEXT4Error::FilesystemHasErrors => write!(f, "文件系统有错误"),
-            RSEXT4Error::UnsupportedFeature => write!(f, "不支持的特性"),
-            RSEXT4Error::AlreadyMounted => write!(f, "文件系统已挂载"),
+            RSEXT4Error::IoError => write!(f, "I/O error"),
+            RSEXT4Error::InvalidMagic => write!(f, "invalid magic number"),
+            RSEXT4Error::InvalidSuperblock => write!(f, "invalid superblock"),
+            RSEXT4Error::FilesystemHasErrors => write!(f, "filesystem has errors"),
+            RSEXT4Error::UnsupportedFeature { bits } => {
+                write!(f, "unsupported feature: {bits:#x}")
+            }
+            RSEXT4Error::AlreadyMounted => write!(f, "filesystem already mounted"),
         }
     }
 }
 
-/// Ext4 文件系统操作结果类型
-///
-/// 用于 ext4 文件系统操作的错误处理
+/// Ext4 filesystem operation result type
 pub type Ext4Result<T> = Result<T, RSEXT4Error>;

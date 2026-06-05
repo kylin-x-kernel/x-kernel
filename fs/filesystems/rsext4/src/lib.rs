@@ -58,6 +58,7 @@ pub mod file;
 pub mod hashtree;
 pub mod inodetable_cache;
 pub mod jbd2;
+pub mod layout;
 pub mod loopfile;
 pub mod superblock;
 pub mod tool;

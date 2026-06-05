@@ -79,6 +79,7 @@ pub fn need_redundant_backup(gid: u32) -> bool {
     }
     false
 }
+
 /// number是不是base的幂
 pub fn is_numbers_power(number: usize, base: usize) -> bool {
     let mut tmp_number = number;
@@ -115,7 +116,7 @@ pub fn cloc_group_layout(
             group_blcok_bitmap_startblocks: group0_block_bitmap as u64,
             group_inode_bitmap_startblocks: group0_inode_bitmap as u64,
             group_inode_table_startblocks: group0_inode_table as u64,
-            metadata_blocks_in_group: (group0_inode_table + inode_table_blocks),
+            metadata_blocks_in_group: group0_inode_table + inode_table_blocks,
         };
     }
 
