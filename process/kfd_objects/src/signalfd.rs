@@ -2,10 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux `signalfd` support.
-//!
-//! This module owns both the `signalfd4` syscall ABI and the `signalfd`
-//! file-like object that exposes pending signals through fd reads.
+//! Linux `signalfd` object support.
 
 use alloc::{borrow::Cow, sync::Arc};
 use core::{
@@ -18,14 +15,11 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd::{FileLike, IoDst, IoSrc};
 use kpoll::{IoEvents, PollSet, Pollable};
-use ksignal::{SignalInfo, SignalSet, Signo};
+use ksignal::{SignalInfo, SignalSet};
 use ksync::RwLock;
 use ktask::future::{block_on, poll_io};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
-use posix_types::{UserConstPtr, k_sigset};
 use zerocopy::{Immutable, IntoBytes};
-
-use crate::check_sigset_size;
 
 const SIGNALFD_SIGINFO_SIZE: usize = 128;
 const SFD_CLOEXEC: u32 = O_CLOEXEC;
@@ -199,42 +193,6 @@ impl Pollable for Signalfd {
             self.poll_rx.register(context.waker());
         }
     }
-}
-
-/// Creates or updates a `signalfd` file descriptor.
-pub fn sys_signalfd4(
-    fd: i32,
-    mask: UserConstPtr<k_sigset>,
-    sigsetsize: usize,
-    flags: u32,
-) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
-
-    let flags = SignalfdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
-
-    if fd != -1 && flags.contains(SignalfdFlags::CLOEXEC) {
-        return Err(KError::InvalidInput);
-    }
-
-    let mut mask: SignalSet = mask.read_vm()?.into();
-    // SIGKILL and SIGSTOP cannot be caught, so they are silently removed
-    // from the signalfd mask — matching Linux do_signalfd4 behavior.
-    mask.remove(Signo::SIGKILL);
-    mask.remove(Signo::SIGSTOP);
-
-    if fd != -1 {
-        let signalfd = kthread::current_resources().get_file_like_as::<Signalfd>(fd)?;
-        signalfd.update_mask(mask);
-        signalfd.set_nonblocking(flags.contains(SignalfdFlags::NONBLOCK))?;
-        return Ok(fd as _);
-    }
-
-    let signalfd = Signalfd::new(mask);
-    signalfd.set_nonblocking(flags.contains(SignalfdFlags::NONBLOCK))?;
-
-    kthread::current_resources()
-        .add_file_like(signalfd as _, flags.contains(SignalfdFlags::CLOEXEC))
-        .map(|fd| fd as _)
 }
 
 #[cfg(unittest)]

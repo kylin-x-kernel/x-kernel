@@ -30,6 +30,7 @@ khal.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
 ktask.workspace = true
+ktimer.workspace = true
 bitflags.workspace = true
 kspin.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
@@ -45,12 +46,10 @@ kexec.workspace = true
 kuaccess.workspace = true
 ktty.workspace = true
 posix-fs.workspace = true
-posix-io-mpx.workspace = true
 posix-ipc.workspace = true
 posix-mm.workspace = true
 posix-net.workspace = true
 posix-process.workspace = true
-posix-signal.workspace = true
 posix-types.workspace = true
 num_enum = { version = "0.7", default-features = false }
 

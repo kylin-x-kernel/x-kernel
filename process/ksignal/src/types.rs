@@ -6,7 +6,9 @@
 use core::{fmt, mem};
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
-use linux_raw_sys::general::{SI_KERNEL, SI_TIMER, SS_DISABLE, kernel_sigset_t, siginfo_t};
+use linux_raw_sys::general::{
+    SI_KERNEL, SI_TIMER, SS_DISABLE, SS_ONSTACK, kernel_sigset_t, siginfo_t,
+};
 use posix_types::{k_sigaltstack, k_siginfo, k_sigset, k_sigval};
 use strum::{EnumIter, FromRepr, IntoEnumIterator};
 
@@ -470,5 +472,21 @@ impl SignalStack {
     /// Checks if signal stack is disabled.
     pub fn disabled(&self) -> bool {
         self.flags == SS_DISABLE
+    }
+
+    /// Returns `true` when `sp` points into this alternate signal stack.
+    pub fn contains_sp(&self, sp: usize) -> bool {
+        !self.disabled() && sp > self.sp && sp - self.sp <= self.size
+    }
+
+    /// Returns the Linux-visible flags for this stack at `sp`.
+    pub fn flags_for_sp(&self, sp: usize) -> u32 {
+        if self.disabled() {
+            SS_DISABLE
+        } else if self.contains_sp(sp) {
+            SS_ONSTACK
+        } else {
+            0
+        }
     }
 }

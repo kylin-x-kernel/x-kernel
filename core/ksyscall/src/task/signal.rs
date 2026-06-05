@@ -2,60 +2,23 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX signal syscall implementations.
-//!
-//! - Signal mask manipulation (`rt_sigprocmask`, `rt_sigaction`, `rt_sigpending`)
-//! - Signal delivery (`kill`, `tkill`, `tgkill`, realtime queueing)
-//! - Interval timers (`getitimer`, `setitimer`)
-//! - POSIX timers (`timer_create`, `timer_settime`, `timer_gettime`, `timer_delete`)
-//! - Signal file descriptors (`signalfd4`)
-//! - Signal wait/return flow (`rt_sigreturn`, `rt_sigtimedwait`, `rt_sigsuspend`)
-//! - Alternate signal stack (`sigaltstack`)
-
-#![no_std]
-
-extern crate alloc;
-
-mod itimer;
-mod posix_timer;
-mod signalfd;
-
-#[macro_use]
-extern crate klogger;
+//! Generic signal-management syscalls.
 
 use core::{future::poll_fn, task::Poll};
 
-pub use itimer::{sys_getitimer, sys_setitimer};
 use kerrno::{KError, KResult, LinuxError};
+use kfd_objects::signalfd::{Signalfd, SignalfdFlags};
 use khal::uspace::UserContext;
 use kprocess::Pid;
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
-use ktask::{
-    current,
-    future::{self, block_on},
-};
-use kthread::{
-    processes, send_signal_to_process, send_signal_to_process_group, send_signal_to_thread,
-};
 use linux_raw_sys::general::{
-    MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, timespec,
+    MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SS_DISABLE, SS_ONSTACK,
+    timespec,
 };
 use posix_process::check_signals;
-pub use posix_timer::{
-    sys_timer_create, sys_timer_delete, sys_timer_getoverrun, sys_timer_gettime, sys_timer_settime,
-};
 use posix_types::{
     TimeValueLike, UserConstPtr, UserPtr, k_sigaction, k_sigaltstack, k_siginfo, k_sigset,
 };
-pub use signalfd::sys_signalfd4;
-
-/// Validates that the signal set size matches the expected size.
-pub fn check_sigset_size(size: usize) -> KResult<()> {
-    if size != size_of::<k_sigset>() && size != 0 {
-        return Err(KError::InvalidInput);
-    }
-    Ok(())
-}
 
 /// Converts a numeric signal number to [`Signo`].
 fn parse_signo(signo: u32) -> KResult<Signo> {
@@ -71,7 +34,7 @@ pub fn sys_rt_sigprocmask(
     oldset: UserPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
 
     let signal = &kthread::current_thread().signal;
     let old = signal.blocked();
@@ -105,7 +68,7 @@ pub fn sys_rt_sigaction(
     oldact: UserPtr<k_sigaction>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
 
     let signo = parse_signo(signo)?;
     if matches!(signo, Signo::SIGKILL | Signo::SIGSTOP) {
@@ -113,14 +76,18 @@ pub fn sys_rt_sigaction(
     }
 
     let current_thread = kthread::current_thread();
-    let mut actions = current_thread.process_state().signal.actions.lock();
+    let proc_state = current_thread.process_state();
+    let signal = &proc_state.signal;
+    let new_action = act
+        .check_non_null()
+        .map(UserConstPtr::read_vm)
+        .transpose()?
+        .map(Into::into);
+    debug!("sys_rt_sigaction <= signo: {signo:?}, act: {new_action:?}");
+    let old_action = signal.replace_signal_action(signo, new_action);
+
     if let Some(oldact) = oldact.check_non_null() {
-        oldact.write_vm(actions[signo].clone().into())?;
-    }
-    if let Some(act) = act.check_non_null() {
-        let act = act.read_vm()?.into();
-        debug!("sys_rt_sigaction <= signo: {signo:?}, act: {act:?}");
-        actions[signo] = act;
+        oldact.write_vm(old_action.into())?;
     }
     Ok(0)
 }
@@ -129,7 +96,7 @@ pub fn sys_rt_sigaction(
 ///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigpending.2.html>.
 pub fn sys_rt_sigpending(set: UserPtr<k_sigset>, sigsetsize: usize) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
     set.write_vm(kthread::current_thread().signal.pending().into())?;
     Ok(0)
 }
@@ -154,27 +121,46 @@ pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_USER as _)?;
 
     match pid {
-        1.. => send_signal_to_process(pid as _, sig)?,
+        1.. => kthread::send_signal_to_process(pid as _, sig)?,
         0 => {
             let pgid = kthread::current_thread()
                 .process_state()
                 .proc
                 .group()
                 .pgid();
-            send_signal_to_process_group(pgid, sig)?;
+            kthread::send_signal_to_process_group(pgid, sig)?;
         }
         -1 => {
             let current_pid = kthread::current_thread().pid();
-            if let Some(sig) = sig {
-                for proc_state in processes() {
-                    if proc_state.proc.is_init() || proc_state.proc.pid() == current_pid {
-                        continue;
+            let mut saw_target = false;
+            let mut first_error = None;
+
+            for proc_state in kthread::processes() {
+                if proc_state.proc.is_init() || proc_state.proc.pid() == current_pid {
+                    continue;
+                }
+                saw_target = true;
+                if let Err(err) =
+                    kthread::send_signal_to_process(proc_state.proc.pid(), sig.clone())
+                {
+                    debug!(
+                        "sys_kill(-1) failed for pid {}: {err:?}",
+                        proc_state.proc.pid()
+                    );
+                    if err != KError::OperationNotPermitted && first_error.is_none() {
+                        first_error = Some(err);
                     }
-                    let _ = send_signal_to_process(proc_state.proc.pid(), Some(sig.clone()));
                 }
             }
+
+            if !saw_target {
+                return Err(KError::NoSuchProcess);
+            }
+            if let Some(err) = first_error {
+                return Err(err);
+            }
         }
-        ..-1 => send_signal_to_process_group((-pid) as Pid, sig)?,
+        ..-1 => kthread::send_signal_to_process_group((-pid) as Pid, sig)?,
     }
     Ok(0)
 }
@@ -184,7 +170,7 @@ pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
 /// See <https://man7.org/linux/man-pages/man2/tkill.2.html>.
 pub fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
-    send_signal_to_thread(None, tid, sig)?;
+    kthread::send_signal_to_thread(None, tid, sig)?;
     Ok(0)
 }
 
@@ -193,7 +179,7 @@ pub fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
 /// See <https://man7.org/linux/man-pages/man2/tgkill.2.html>.
 pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
-    send_signal_to_thread(Some(tgid), tid, sig)?;
+    kthread::send_signal_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }
 
@@ -223,10 +209,10 @@ pub fn sys_rt_sigqueueinfo(
     sig: UserConstPtr<k_siginfo>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
-    send_signal_to_process(tgid, sig)?;
+    kthread::send_signal_to_process(tgid, sig)?;
     Ok(0)
 }
 
@@ -238,10 +224,10 @@ pub fn sys_rt_tgsigqueueinfo(
     sig: UserConstPtr<k_siginfo>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
-    send_signal_to_thread(Some(tgid), tid, sig)?;
+    kthread::send_signal_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }
 
@@ -263,7 +249,7 @@ pub fn sys_rt_sigtimedwait(
     timeout: UserConstPtr<timespec>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
 
     let set: SignalSet = set.read_vm()?.into();
     let timeout = if let Some(ts) = timeout.check_non_null() {
@@ -275,7 +261,7 @@ pub fn sys_rt_sigtimedwait(
 
     debug!("sys_rt_sigtimedwait => set = {set:?}, timeout = {timeout:?}");
 
-    let current = current();
+    let current = ktask::current();
     let current_thread = kthread::current_thread();
     let signal = &current_thread.signal;
 
@@ -295,7 +281,7 @@ pub fn sys_rt_sigtimedwait(
         }
     });
 
-    let Ok(sig) = block_on(future::timeout(timeout, wait_signal)) else {
+    let Ok(sig) = ktask::future::block_on(ktask::future::timeout(timeout, wait_signal)) else {
         signal.set_blocked(old_blocked);
         return Err(KError::WouldBlock);
     };
@@ -319,16 +305,16 @@ pub fn sys_rt_sigsuspend(
     set: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
 
-    let current = current();
+    let current = ktask::current();
     let current_thread = kthread::current_thread();
 
     let set: SignalSet = set.read_vm()?.into();
     let old_blocked = current_thread.signal.set_blocked(set);
 
     uctx.set_retval(-LinuxError::EINTR.into_raw() as usize);
-    block_on(poll_fn(|cx| {
+    ktask::future::block_on(poll_fn(|cx| {
         if check_signals(&current_thread, uctx, Some(old_blocked)) {
             return Poll::Ready(());
         }
@@ -343,21 +329,83 @@ pub fn sys_rt_sigsuspend(
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigaltstack.2.html>.
 pub fn sys_sigaltstack(
+    uctx: &UserContext,
     ss: UserConstPtr<k_sigaltstack>,
     old_ss: UserPtr<k_sigaltstack>,
 ) -> KResult<isize> {
-    let signal = &kthread::current_thread().signal;
+    let current_thread = kthread::current_thread();
+    let signal = &current_thread.signal;
+    let user_sp = uctx.sp();
 
     if let Some(old_ss) = old_ss.check_non_null() {
-        old_ss.write_vm(signal.stack().into())?;
+        old_ss.write_vm(signal.stack_for_sp(user_sp).into())?;
     }
 
     if let Some(ss) = ss.check_non_null() {
-        let ss: SignalStack = ss.read_vm()?.into();
-        if ss.size <= MINSIGSTKSZ as usize {
+        if signal.is_on_signal_stack(user_sp) {
+            return Err(KError::OperationNotPermitted);
+        }
+
+        let mut ss: SignalStack = ss.read_vm()?.into();
+        match ss.flags {
+            SS_DISABLE => {
+                ss = SignalStack {
+                    sp: 0,
+                    flags: SS_DISABLE,
+                    size: 0,
+                };
+            }
+            0 | SS_ONSTACK => {}
+            _ => return Err(KError::InvalidInput),
+        }
+
+        if ss.disabled() {
+            ss = SignalStack {
+                sp: 0,
+                flags: SS_DISABLE,
+                size: 0,
+            };
+        } else if ss.size < MINSIGSTKSZ as usize {
             return Err(KError::NoMemory);
         }
+
         signal.set_stack(ss);
     }
     Ok(0)
+}
+
+/// Creates or updates a `signalfd` file descriptor.
+pub fn sys_signalfd4(
+    fd: i32,
+    mask: UserConstPtr<k_sigset>,
+    sigsetsize: usize,
+    flags: u32,
+) -> KResult<isize> {
+    posix_types::check_sigset_size(sigsetsize)?;
+
+    let flags = SignalfdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
+
+    if fd != -1 && flags.contains(SignalfdFlags::CLOEXEC) {
+        return Err(KError::InvalidInput);
+    }
+
+    let mut mask: SignalSet = mask.read_vm()?.into();
+    // SIGKILL and SIGSTOP cannot be caught, so they are silently removed
+    // from the signalfd mask — matching Linux do_signalfd4 behavior.
+    mask.remove(Signo::SIGKILL);
+    mask.remove(Signo::SIGSTOP);
+
+    if fd != -1 {
+        let signalfd = kthread::current_resources().get_file_like_as::<Signalfd>(fd)?;
+        kfd::FileLike::set_nonblocking(signalfd.as_ref(), flags.contains(SignalfdFlags::NONBLOCK))?;
+        signalfd.update_mask(mask);
+        return Ok(fd as _);
+    }
+
+    let signalfd = Signalfd::new(mask);
+    kfd::FileLike::set_nonblocking(signalfd.as_ref(), flags.contains(SignalfdFlags::NONBLOCK))?;
+
+    kthread::current_resources()
+        .add_file_like(signalfd as _, flags.contains(SignalfdFlags::CLOEXEC))
+        .map(|fd| fd as _)
 }

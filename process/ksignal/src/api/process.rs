@@ -129,6 +129,30 @@ impl ProcessSignalManager {
             .contains(SignalActionFlags::RESTART)
     }
 
+    /// Returns the configured action for the given signal.
+    pub fn signal_action(&self, signo: Signo) -> SignalAction {
+        self.actions.lock()[signo].clone()
+    }
+
+    /// Replaces the configured action for the given signal and returns the old one.
+    pub fn replace_signal_action(
+        &self,
+        signo: Signo,
+        action: Option<SignalAction>,
+    ) -> SignalAction {
+        let mut actions = self.actions.lock();
+        let old = actions[signo].clone();
+        if let Some(action) = action {
+            actions[signo] = action;
+        }
+        old
+    }
+
+    /// Replaces the configured action for the given signal.
+    pub fn set_signal_action(&self, signo: Signo, action: SignalAction) {
+        self.actions.lock()[signo] = action;
+    }
+
     /// Sends a signal to the process.
     ///
     /// This method handles process-level signal delivery, checking if the signal

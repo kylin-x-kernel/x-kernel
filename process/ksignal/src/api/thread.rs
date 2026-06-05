@@ -85,6 +85,20 @@ impl ThreadSignalManager {
         &self.proc
     }
 
+    /// Returns the configured alternate stack with flags computed for `sp`.
+    pub fn stack_for_sp(&self, sp: usize) -> SignalStack {
+        let stack = self.stack.lock().clone();
+        SignalStack {
+            flags: stack.flags_for_sp(sp),
+            ..stack
+        }
+    }
+
+    /// Returns `true` when `sp` lies on the alternate signal stack.
+    pub fn is_on_signal_stack(&self, sp: usize) -> bool {
+        self.stack.lock().contains_sp(sp)
+    }
+
     /// Dispatch a signal, building a user stack frame if needed.
     pub fn dispatch_irq_signal(
         &self,

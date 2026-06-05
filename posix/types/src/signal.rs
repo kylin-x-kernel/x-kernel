@@ -6,6 +6,7 @@
 
 use core::{ffi::c_ulong, mem};
 
+use kerrno::{KError, KResult};
 use linux_raw_sys::general::{
     __kernel_sighandler_t, __sigrestore_t, kernel_sigset_t, sigevent, siginfo_t, sigval_t,
 };
@@ -17,6 +18,14 @@ use crate::{UserRead, UserWrite};
 #[repr(transparent)]
 #[allow(non_camel_case_types)]
 pub struct k_sigset(pub u64);
+
+/// Validates that an ABI `sigset_t` size matches the kernel expectation.
+pub fn check_sigset_size(size: usize) -> KResult<()> {
+    if size != size_of::<k_sigset>() && size != 0 {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
+}
 
 impl From<k_sigset> for kernel_sigset_t {
     fn from(value: k_sigset) -> Self {

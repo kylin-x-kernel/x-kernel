@@ -16,7 +16,6 @@ use kerrno::{KError, KResult};
 use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::*;
-use posix_signal::check_sigset_size;
 use posix_types::{FdSet, SignalSetWithSize, TimeValueLike, UserConstPtr, UserPtr};
 
 use super::FdPollSet;
@@ -49,7 +48,7 @@ fn do_select(
         None
     } else {
         let sigmask = sigmask.read_vm()?;
-        check_sigset_size(sigmask.sigsetsize())?;
+        posix_types::check_sigset_size(sigmask.sigsetsize())?;
         let set = sigmask.set();
         if set.is_null() {
             None

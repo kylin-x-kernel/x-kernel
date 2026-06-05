@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX `timer_create`-family syscalls.
+//! POSIX process timer syscalls.
 
 use kerrno::{KError, KResult};
 use kprocess::Pid;
@@ -60,7 +60,7 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
             let tid = tid as Pid;
             let current = kthread::current_thread();
             let proc_state = current.process_state();
-            if !proc_state.proc.threads().contains(&tid) {
+            if !proc_state.contains_thread(tid) {
                 return Err(KError::InvalidInput);
             }
             Ok(PosixTimerCreateNotify::Signal {

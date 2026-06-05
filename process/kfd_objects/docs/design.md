@@ -6,7 +6,7 @@
 它承接那些通过进程 fd table 暴露给用户态、实现 `FileLike` / `Pollable`，
 但本质上不属于路径/VFS 对象的数据和状态机。
 
-当前该 crate 先承接 `TimerFd`、`EventFd` 和 `PipeObject`。
+当前该 crate 先承接 `TimerFd`、`EventFd`、`PipeObject`、`Signalfd` 和 `Epoll`。
 目标读者是维护 `ksyscall` syscall adapter、`kfd`/`kresources` fd table，
 以及 `timerfd`、`eventfd`、`pipe`、`pidfd` 等匿名对象实现的开发者。
 
@@ -31,8 +31,10 @@ process/kfd_objects/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
+│   ├── epoll.rs
 │   ├── eventfd.rs
 │   ├── pipe.rs
+│   ├── signalfd.rs
 │   └── timerfd.rs
 └── docs/
     ├── design.md
@@ -43,10 +45,10 @@ process/kfd_objects/
 
 ```text
 core/ksyscall adapter
-    │ eventfd2 / timerfd_* / pipe2 ABI binding
+    │ eventfd2 / timerfd_* / pipe2 / epoll_* ABI binding
     v
-process/kfd_objects::{EventFd, PipeObject, TimerFd}
-    │ owns timer/event/pipe state and FileLike/Pollable behavior
+process/kfd_objects::{Epoll, EventFd, PipeObject, Signalfd, TimerFd}
+    │ owns epoll/timer/event/pipe/signalfd state and FileLike/Pollable behavior
     v
 kfd / kresources fd table
     │ stores Arc<dyn FileLike>
@@ -114,3 +116,34 @@ fd 路径暴露语义。
 - `pipe2` flags ABI 解析；
 - fd table 分配策略；
 - `fcntl(F_GETPIPE_SZ/F_SETPIPE_SZ)` 的 syscall ABI 路由。
+
+## `Signalfd` 角色
+
+`Signalfd` 拥有：
+
+- signal mask；
+- nonblocking 状态；
+- `read()` 消费 pending signal 的 fd 语义；
+- `poll(IN)` 与 pending signal 可见性的对应关系。
+
+它不处理：
+
+- `signalfd4` 的 syscall 参数校验；
+- signal syscall ABI 入口；
+- fd table 分配策略。
+
+## `Epoll` 角色
+
+`Epoll` 拥有：
+
+- interest table；
+- ready queue；
+- level / edge / oneshot 触发状态；
+- `poll(IN)` 与 ready queue 可见性的对应关系。
+
+它不处理：
+
+- `epoll_*` 的 syscall 参数校验；
+- timeout / sigmask 的 ABI 解析；
+- watched file 的 fd table 解析；
+- fd table 分配策略。

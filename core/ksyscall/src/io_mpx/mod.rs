@@ -10,6 +10,7 @@
 //!
 //! Allows monitoring multiple file descriptors for I/O events.
 
+mod epoll;
 mod poll;
 mod select;
 
@@ -19,7 +20,7 @@ use core::task::Context;
 use kfd::FileLike;
 use kpoll::{IoEvents, Pollable};
 
-pub use self::{poll::*, select::*};
+pub use self::{epoll::*, poll::*, select::*};
 
 struct FdPollSet(pub Vec<(Arc<dyn FileLike>, IoEvents)>);
 impl Pollable for FdPollSet {

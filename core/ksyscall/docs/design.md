@@ -61,11 +61,14 @@ core/ksyscall/
 │   │   ├── pidfd.rs
 │   │   ├── rusage.rs
 │   │   ├── sched.rs
+│   │   ├── signal.rs
 │   │   ├── thread.rs
 │   │   ├── umask.rs
 │   │   └── wait.rs
 │   ├── time/
 │   │   ├── mod.rs
+│   │   ├── itimer.rs
+│   │   ├── posix_timer.rs
 │   │   ├── queries.rs
 │   │   ├── sleep.rs
 │   │   └── timerfd.rs
@@ -88,9 +91,9 @@ ksyscall::dispatch_irq_syscall
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
     ├─ time adapter ───────────> khal time sources / kthread CPU-time state / kfd_objects::TimerFd
     ├─ task adapter ───────────> kthread / posix-process / kprocess / kcred
-    ├─ io_mpx adapter ─────────> posix-io-mpx
+    ├─ io_mpx adapter ─────────> kfd_objects::Epoll
     ├─ sync adapter ───────────> kfutex / kthread
-    └─ misc adapter ───────────> posix-mm / posix-net / posix-signal / ...
+    └─ misc adapter ───────────> posix-mm / posix-net / ...
 ```
 
 ## 设计原则
@@ -121,6 +124,15 @@ ksyscall::dispatch_irq_syscall
 - `time/sleep.rs`
   - `nanosleep` / `clock_nanosleep`
   - owner 在 `ktask` sleep runtime 与 `khal` 时钟查询
+- `time/itimer.rs`
+  - `getitimer` / `setitimer`
+  - owner 在 `ProcessTimerManager` 的 legacy interval timer 状态
+- `time/posix_timer.rs`
+  - `timer_create` / `timer_gettime` / `timer_settime` / `timer_delete` / `timer_getoverrun`
+  - owner 在 `ProcessTimerManager` 的 POSIX timer 状态与 `kthread` timer delivery runtime
+- `io_mpx/`
+  - `select` / `pselect6` / `poll` / `ppoll` / `epoll_*`
+  - owner 在 `kfd_objects::Epoll` 与通用 `FileLike` poll 接口
 - `task/pidfd.rs`
   - `pidfd_*`
   - owner 在 `kthread::PidFd`
@@ -136,6 +148,12 @@ ksyscall::dispatch_irq_syscall
 - `task/thread.rs`
   - `gettid` / `set_tid_address` / `arch_prctl`
   - owner 在 `kthread` 当前线程状态与架构线程上下文
+- `task/signal.rs`
+  - `rt_sigprocmask` / `rt_sigaction` / `rt_sigpending` / `kill` / `tkill` / `tgkill`
+    / `rt_sigqueueinfo` / `rt_tgsigqueueinfo` / `rt_sigreturn` / `rt_sigtimedwait`
+    / `rt_sigsuspend` / `sigaltstack` / `signalfd4`
+  - owner 在 `kthread` 当前线程 signal state、`ksignal` signal model
+    与 `kfd_objects::Signalfd`
 - `task/cpu_time.rs`
   - `times`
   - owner 在 `kthread` 进程 CPU-time 统计与 `khal` 时钟查询

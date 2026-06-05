@@ -17,7 +17,6 @@ use kpoll::IoEvents;
 use ksignal::SignalSet;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
-use posix_signal::check_sigset_size;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr, k_sigset};
 
 use super::FdPollSet;
@@ -121,7 +120,7 @@ pub fn sys_ppoll(
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
     let nfds = nfds.try_into().map_err(|_| KError::InvalidInput)?;
     let mut poll_fds = fds.load_vm_vec(nfds)?;
     let timeout = if timeout.is_null() {

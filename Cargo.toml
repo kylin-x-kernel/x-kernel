@@ -81,11 +81,9 @@ osvm = { path = "process/osvm" }
 # Internal: POSIX ABI compatibility
 posix-ipc = { path = "posix/ipc" }
 posix-fs = { path = "posix/fs" }
-posix-io-mpx = { path = "posix/io-mpx" }
 posix-mm = { path = "posix/mm" }
 posix-net = { path = "posix/net" }
 posix-process = { path = "posix/process" }
-posix-signal = { path = "posix/signal" }
 posix-types = { path = "posix/types" }
 
 # Internal: memory and filesystem

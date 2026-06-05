@@ -23,13 +23,13 @@
 ## 架构
 
 ```text
-entry / ksyscall / posix-signal
-              |
-              v
-        posix-process
-          |   \
-          v    v
-        kexec  kthread
+entry / ksyscall
+        |
+        v
+  posix-process
+    |   \
+    v    v
+  kexec  kthread
 ```
 
 ## 调用约束 / 执行上下文

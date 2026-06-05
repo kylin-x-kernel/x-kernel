@@ -9,18 +9,16 @@ use core::time::Duration;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
+use kfd_objects::epoll::{Epoll, EpollEvent, EpollFlags};
 use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
 };
-use posix_signal::check_sigset_size;
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr, k_sigset};
 
-use super::{Epoll, EpollEvent, EpollFlags};
-
 bitflags! {
-    /// Flags for the `epoll_create1` syscall.
+    // Flags for the `epoll_create1` syscall.
     #[derive(Debug, Clone, Copy, Default)]
     pub struct EpollCreateFlags: u32 {
         const CLOEXEC = EPOLL_CLOEXEC;
@@ -48,6 +46,7 @@ pub fn sys_epoll_ctl(
     event: UserConstPtr<epoll_event>,
 ) -> KResult<isize> {
     let epoll = kthread::current_resources().get_file_like_as::<Epoll>(epfd)?;
+    let file = kthread::current_resources().get_file_like(fd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
@@ -67,14 +66,14 @@ pub fn sys_epoll_ctl(
     match op {
         EPOLL_CTL_ADD => {
             let (event, flags) = parse_event()?;
-            epoll.add(fd, event, flags)?;
+            epoll.add(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_MOD => {
             let (event, flags) = parse_event()?;
-            epoll.modify(fd, event, flags)?;
+            epoll.modify(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_DEL => {
-            epoll.delete(fd)?;
+            epoll.delete(fd, file)?;
         }
         _ => return Err(KError::InvalidInput),
     }
@@ -89,7 +88,7 @@ fn do_epoll_wait(
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    check_sigset_size(sigsetsize)?;
+    posix_types::check_sigset_size(sigsetsize)?;
     debug!("sys_epoll_wait <= epfd: {epfd}, maxevents: {maxevents}, timeout: {timeout:?}");
 
     if maxevents <= 0 {

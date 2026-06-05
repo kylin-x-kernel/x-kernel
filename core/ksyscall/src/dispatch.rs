@@ -13,21 +13,18 @@
 //! - `io_mpx`: I/O multiplexing (select, poll, epoll)
 //! - `mm`: Memory management
 //! - `posix-net`: Network operations
-//! - `posix-signal`: Signal handling
 //! - `sync`: Synchronization primitives
 //! - `sys`: System information and control
-//! - `task`: Process, thread, and pidfd management
-//! - `time`: Time descriptor operations
+//! - `task`: Process, thread, signal, and pidfd management
+//! - `time`: Time and process-timer operations
 
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
 use kthread::UserThreadRuntimeAction;
 use linux_sysno::Sysno;
-use posix_io_mpx::*;
 use posix_ipc::*;
 use posix_mm::*;
 use posix_net::*;
-use posix_signal::*;
 
 use crate::{io_mpx::*, ipc::*, sync::*, sys::*, task::*, time::*, vfs::*};
 
@@ -497,7 +494,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg3().into(),
             uctx.arg4() as _,
         ),
-        Sysno::sigaltstack => sys_sigaltstack(uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::sigaltstack => sys_sigaltstack(uctx, uctx.arg0().into(), uctx.arg1().into()),
         Sysno::futex => sys_futex(
             uctx.arg0().into(),
             uctx.arg1() as _,

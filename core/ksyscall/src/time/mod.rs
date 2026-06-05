@@ -4,8 +4,10 @@
 
 //! Time-related syscall adapters.
 
+mod itimer;
+mod posix_timer;
 mod queries;
 mod sleep;
 mod timerfd;
 
-pub use self::{queries::*, sleep::*, timerfd::*};
+pub use self::{itimer::*, posix_timer::*, queries::*, sleep::*, timerfd::*};

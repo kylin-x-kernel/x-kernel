@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX interval timer syscalls.
+//! Process interval timer syscalls.
 
 use kerrno::{KError, KResult};
 use linux_raw_sys::general::{itimerval, timeval};

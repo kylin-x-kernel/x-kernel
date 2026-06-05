@@ -3,13 +3,14 @@
 ## 概述
 
 `kfd_objects` 负责 fd-backed kernel object 的内部状态和运行时回调。
-当前对象是 `TimerFd`、`EventFd` 和 `PipeObject`。
+当前对象是 `TimerFd`、`EventFd`、`PipeObject`、`Signalfd` 和 `Epoll`。
 主要风险来自：
 
 - timer callback 与 `read/poll/settime` 的并发交互；
 - fd close/drop 时的底层 timer handle 清理；
 - `read()` / `poll()` / `gettime()` 的状态一致性；
-- 非阻塞路径的可见性语义。
+- 非阻塞路径的可见性语义；
+- `epoll` interest table 与 ready queue 的一致性。
 
 本 crate 当前不包含手写 `unsafe` 代码。
 
@@ -22,7 +23,7 @@ userspace syscall args
 ksyscall adapter
    │ validates ABI flags and syscall-specific user input
    v
-kfd_objects::{EventFd, PipeObject, TimerFd}
+kfd_objects::{Epoll, EventFd, PipeObject, Signalfd, TimerFd}
    │ owns object state, callbacks, read/write/poll semantics
    v
 ktask timer runtime / generic fd readiness
@@ -42,6 +43,8 @@ ktask timer runtime / generic fd readiness
 - `EventFd::read/write/poll` 必须围绕同一计数器上限与 semaphore 语义保持一致。
 - `PipeObject::read/write/poll` 必须围绕同一 buffer、reader/writer 计数和
   `PIPE_BUF` 原子写入语义保持一致。
+- `Signalfd::read/poll` 必须围绕同一 pending signal 可见性与 mask 语义保持一致。
+- `Epoll` 的 interest table、ready queue 与 trigger mode 必须围绕同一就绪语义保持一致。
 
 ## 并发模型
 
@@ -68,6 +71,26 @@ timer runtime 回调与 `read/poll/settime` 可能并发发生。
 因此 reader/writer 计数、EOF/HUP/ERR 语义、以及 resize 过程中 buffer 迁移，
 都必须通过同一个 `PipeState` 锁维护。
 
+`Signalfd` 使用：
+
+- `RwLock<SignalSet>` 保护当前 mask；
+- `AtomicBool` 保存 nonblocking 标志；
+- `PollSet` 维护可读唤醒。
+
+它不拥有 signal 队列本身；队列 owner 仍在当前线程的 signal state。
+因此 `read()` / `poll()` 必须始终通过当前线程 signal manager 观察 pending signal。
+
+`Epoll` 使用：
+
+- `SpinNoPreempt<HashMap<...>>` 保护 interest table；
+- `SpinNoPreempt<VecDeque<...>>` 保护 ready queue；
+- `AtomicBool` 跟踪 interest 是否已经入队；
+- `PollSet` 维护 `epoll_wait` 侧唤醒。
+
+watched file 的 fd table 解析现在由 syscall adapter 完成。
+因此 backend 只需围绕 interest 键值稳定性、ready queue 去重和
+watched file 失效后的清理维护同一个状态机。
+
 ## 主要风险
 
 | 编号 | 风险 | 影响 | 缓解 |
@@ -81,6 +104,11 @@ timer runtime 回调与 `read/poll/settime` 可能并发发生。
 | T-07 | pipe reader/writer 计数失配导致 EOF/HUP/ERR 错误 | 中 | `drop`、`poll`、`read/write` 统一经 `PipeState` 锁维护计数 |
 | T-08 | pipe resize 丢数据或发布未初始化字节 | 高 | resize 时先检查 occupied_len，再复制已读写切片并保持容量上限检查 |
 | T-09 | pipe 写端在无 reader 时未正确抛出 `SIGPIPE` / `BrokenPipe` | 中 | 在写路径同一锁内检查 `readers == 0`，并统一走 signal + error 分支 |
+| T-10 | `signalfd` mask 更新与 `read/poll` 观察不一致 | 中 | mask 经 `RwLock` 更新，并在更新后唤醒 poller 重新观察 |
+| T-11 | `signalfd` 将不可捕获信号暴露给用户态 fd 语义 | 低 | syscall adapter 统一移除 `SIGKILL` / `SIGSTOP` |
+| T-12 | `epoll` ready queue 去重失效导致重复唤醒或事件风暴 | 中 | `in_ready_queue` 位与 ready queue 统一维护 |
+| T-13 | `epoll` oneshot / edge-triggered 状态机错误 | 高 | `TriggerMode` 集中建模并在消费路径统一更新 |
+| T-14 | watched file 失效后 interest 清理不完整 | 中 | ready 消费路径在 `Weak` 升级失败后立即回收 interest |
 
 ## 审计清单
 
@@ -90,3 +118,5 @@ timer runtime 回调与 `read/poll/settime` 可能并发发生。
 - [ ] `read/poll` 是否对外保持一致的 readiness 语义。
 - [ ] `EventFd` 计数上限、poll 可写性和 semaphore 语义是否同步更新。
 - [ ] `PipeObject` 的 EOF/HUP/ERR、`PIPE_BUF` 原子写入和 resize 上限语义是否同步更新。
+- [ ] `Signalfd` 的 mask 更新、pending signal 观察和 `poll(IN)` 语义是否保持一致。
+- [ ] `Epoll` 的 interest table、ready queue、oneshot/edge 触发语义是否保持一致。

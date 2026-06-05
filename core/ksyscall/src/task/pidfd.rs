@@ -8,8 +8,9 @@ use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
 use kthread::PidFd;
-use posix_signal::make_queue_signal_info;
 use posix_types::{UserConstPtr, k_siginfo};
+
+use super::make_queue_signal_info;
 
 /// Create a process file descriptor for the specified process.
 pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {

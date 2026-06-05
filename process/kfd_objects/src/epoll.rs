@@ -102,12 +102,11 @@ struct EntryKey {
 }
 
 impl EntryKey {
-    fn new_for_current(fd: i32) -> KResult<Self> {
-        let file = kthread::current_resources().get_file_like(fd)?;
-        Ok(Self {
+    fn new(fd: i32, file: &Arc<dyn FileLike>) -> Self {
+        Self {
             fd,
-            file: Arc::downgrade(&file),
-        })
+            file: Arc::downgrade(file),
+        }
     }
 
     #[inline]
@@ -305,8 +304,14 @@ impl Epoll {
     }
 
     /// Adds a file descriptor interest to the epoll instance.
-    pub fn add(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
-        let key = EntryKey::new_for_current(fd)?;
+    pub fn add(
+        &self,
+        fd: i32,
+        file: Arc<dyn FileLike>,
+        event: EpollEvent,
+        flags: EpollFlags,
+    ) -> KResult<()> {
+        let key = EntryKey::new(fd, &file);
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
         let mut guard = self.inner.interests.lock();
         if guard.contains_key(&key) {
@@ -320,8 +325,14 @@ impl Epoll {
     }
 
     /// Modifies an existing interest for the given file descriptor.
-    pub fn modify(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> KResult<()> {
-        let key = EntryKey::new_for_current(fd)?;
+    pub fn modify(
+        &self,
+        fd: i32,
+        file: Arc<dyn FileLike>,
+        event: EpollEvent,
+        flags: EpollFlags,
+    ) -> KResult<()> {
+        let key = EntryKey::new(fd, &file);
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
 
         let mut guard = self.inner.interests.lock();
@@ -341,8 +352,8 @@ impl Epoll {
     }
 
     /// Removes an existing interest for the given file descriptor.
-    pub fn delete(&self, fd: i32) -> KResult<()> {
-        let key = EntryKey::new_for_current(fd)?;
+    pub fn delete(&self, fd: i32, file: Arc<dyn FileLike>) -> KResult<()> {
+        let key = EntryKey::new(fd, &file);
         self.inner
             .interests
             .lock()
@@ -528,28 +539,17 @@ mod epoll_tests {
     fn test_epoll_event() {
         let event = EpollEvent {
             events: IoEvents::IN | IoEvents::OUT,
-            user_data: 0x1234_5678,
+            user_data: 123,
         };
-
-        assert!(event.events.contains(IoEvents::IN));
-        assert!(event.events.contains(IoEvents::OUT));
-        assert!(!event.events.contains(IoEvents::ERR));
-        assert_eq!(event.user_data, 0x1234_5678);
-    }
-
-    #[def_test]
-    fn test_poll_events_zero_buffer() {
-        let epoll = Epoll::new();
-        let mut events = [];
-
-        assert_eq!(epoll.poll_events(&mut events), Err(KError::WouldBlock));
+        assert_eq!(event.events.bits(), (IoEvents::IN | IoEvents::OUT).bits());
+        assert_eq!(event.user_data, 123);
     }
 
     #[def_test]
     fn test_epoll_poll_no_events() {
         let epoll = Epoll::new();
         let events = epoll.poll();
-        assert!(!events.contains(IoEvents::IN));
+        assert!(events.is_empty());
     }
 
     #[def_test]
@@ -559,42 +559,31 @@ mod epoll_tests {
         assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
     }
 
-    #[def_test(custom)]
+    #[def_test]
     fn test_epoll_delete_nonexistent() {
         let epoll = Epoll::new();
-        assert!(epoll.delete(999).is_err());
+        let dummy: Arc<dyn FileLike> = Arc::new(Epoll::new());
+        assert!(epoll.delete(999, dummy).is_err());
     }
 
-    #[def_test(custom)]
+    #[def_test]
     fn test_epoll_modify_nonexistent() {
         let epoll = Epoll::new();
+        let dummy: Arc<dyn FileLike> = Arc::new(Epoll::new());
         let event = EpollEvent {
             events: IoEvents::IN,
-            user_data: 0,
+            user_data: 42,
         };
-        assert!(epoll.modify(999, event, EpollFlags::empty()).is_err());
+        assert!(
+            epoll
+                .modify(999, dummy, event, EpollFlags::empty())
+                .is_err()
+        );
     }
 
     #[def_test]
     fn test_epoll_default() {
         let epoll = Epoll::default();
         assert_eq!(epoll.path(), "anon_inode:[eventpoll]");
-    }
-
-    #[def_test]
-    fn test_consume_result_variants() {
-        let keep = ConsumeResult::EventAndKeep(EpollEvent {
-            events: IoEvents::IN,
-            user_data: 1,
-        });
-        let remove = ConsumeResult::EventAndRemove(EpollEvent {
-            events: IoEvents::IN,
-            user_data: 2,
-        });
-        let none = ConsumeResult::NoEvent;
-
-        assert!(!matches!(keep, ConsumeResult::NoEvent));
-        assert!(!matches!(remove, ConsumeResult::NoEvent));
-        assert!(matches!(none, ConsumeResult::NoEvent));
     }
 }

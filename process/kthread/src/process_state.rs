@@ -255,6 +255,11 @@ impl ProcessState {
         utime + stime
     }
 
+    /// Returns whether `tid` belongs to this process.
+    pub fn contains_thread(&self, tid: kprocess::Pid) -> bool {
+        self.proc.threads().contains(&tid)
+    }
+
     /// Adds reaped-child CPU time to the accumulated counters.
     pub fn accumulate_child_time(&self, utime_ns: usize, stime_ns: usize) {
         self.lifecycle.accumulate_child_time(utime_ns, stime_ns);
