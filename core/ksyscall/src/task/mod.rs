@@ -13,18 +13,22 @@
 
 mod clone;
 mod clone3;
+mod cpu_time;
 mod credentials;
 mod ctl;
 mod execve;
 mod exit;
+mod ids;
 mod job;
+mod limits;
 mod pidfd;
+mod rusage;
 mod sched;
 mod thread;
+mod umask;
 mod wait;
 
-#[cfg(target_arch = "x86_64")]
-pub use self::thread::*;
 pub use self::{
-    clone::*, clone3::*, credentials::*, ctl::*, execve::*, exit::*, pidfd::*, sched::*, wait::*,
+    clone::*, clone3::*, cpu_time::*, credentials::*, ctl::*, execve::*, exit::*, ids::*, job::*,
+    limits::*, pidfd::*, rusage::*, sched::*, thread::*, umask::*, wait::*,
 };

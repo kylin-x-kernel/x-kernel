@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX CPU time syscalls and helpers.
+//! Process CPU-time accounting syscalls.
 
 use kerrno::KResult;
 use khal::time::{monotonic_time_nanos, ns2t};

@@ -8,7 +8,7 @@
 
 ## 外部边界 / 攻击面
 
-- clone/exit/signalfd/signal-return 相关 syscall 路径。
+- clone/exit/signal-return 相关 runtime 路径。
 - init 进程启动时的可执行文件解析、TTY 绑定和 stdio 安装路径。
 - 线程退出时读取的 robust futex list。
 - 共享内存回收和父子进程退出通知。
@@ -31,6 +31,7 @@
 
 - 本 crate 不自建额外共享状态，依赖 `kthread`/`ProcessState` 内部同步。
 - group-exit 广播和父进程唤醒都基于当前可见线程/进程集合执行。
+- 纯 syscall adapter 已迁到 `ksyscall/task`，不再扩大本 crate 的 ABI 暴露面。
 
 ## 威胁分析
 

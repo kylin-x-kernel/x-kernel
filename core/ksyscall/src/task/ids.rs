@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX process ID syscalls.
+//! Process identity syscalls.
 
 use kerrno::{KError, KResult};
 

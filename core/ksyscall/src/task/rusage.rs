@@ -2,12 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX `getrusage` syscall implementation.
+//! Process and thread resource-usage syscalls.
 
 use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use kprocess::Process;
-use kthread::{AsThread, ProcessState, Thread, get_task};
+use kthread::{AsThread, ProcessState, Thread};
 use linux_raw_sys::general::{__kernel_old_timeval, rusage};
 use posix_types::{TimeValueLike, UserPtr};
 
@@ -45,7 +45,7 @@ fn self_rusage(proc: &Process) -> Rusage {
     proc.threads()
         .into_iter()
         .fold(Rusage::default(), |acc, tid| {
-            if let Ok(task) = get_task(tid) {
+            if let Ok(task) = kthread::get_task(tid) {
                 acc.collate(Rusage::from_thread(task.as_thread()))
             } else {
                 acc
@@ -73,7 +73,7 @@ fn children_rusage(proc_state: &ProcessState) -> Rusage {
         .into_iter()
         .fold(Rusage::default(), |acc, child_proc| {
             child_proc.threads().into_iter().fold(acc, |acc, tid| {
-                if let Ok(task) = get_task(tid) {
+                if let Ok(task) = kthread::get_task(tid) {
                     acc.collate(Rusage::from_thread(task.as_thread()))
                 } else {
                     acc
@@ -84,7 +84,8 @@ fn children_rusage(proc_state: &ProcessState) -> Rusage {
     reaped.collate(live)
 }
 
-/// Returns resource usage information for the current process, its children, or the current thread.
+/// Returns resource usage information for the current process, its children, or the current
+/// thread.
 pub fn sys_getrusage(who: i32, usage: UserPtr<rusage>) -> KResult<isize> {
     const RUSAGE_SELF: i32 = linux_raw_sys::general::RUSAGE_SELF as i32;
     const RUSAGE_CHILDREN: i32 = linux_raw_sys::general::RUSAGE_CHILDREN;

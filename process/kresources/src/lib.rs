@@ -11,10 +11,11 @@ extern crate alloc;
 use alloc::sync::Arc;
 use core::ffi::c_int;
 
+use kerrno::{KError, KResult};
 use kfd::{FdTable, FileLike};
-use krlimit::Rlimits;
+use krlimit::{Rlimit, Rlimits};
 use ksync::RwLock;
-use linux_raw_sys::general::RLIMIT_NOFILE;
+use linux_raw_sys::general::{RLIM_NLIMITS, RLIMIT_NOFILE};
 
 /// Process-owned resource state.
 ///
@@ -39,6 +40,46 @@ impl ProcessResources {
     /// Returns the current RLIMIT_NOFILE soft cap.
     pub fn max_nofile(&self) -> u64 {
         self.rlimits.read()[RLIMIT_NOFILE].current
+    }
+
+    /// Returns the current limit for a specific resource.
+    pub fn rlimit(&self, resource: u32) -> KResult<Rlimit> {
+        if resource >= RLIM_NLIMITS {
+            return Err(KError::InvalidInput);
+        }
+
+        Ok(self.rlimits.read()[resource])
+    }
+
+    /// Returns the current soft/hard pair for a specific resource.
+    pub fn rlimit_values(&self, resource: u32) -> KResult<(u64, u64)> {
+        let limit = self.rlimit(resource)?;
+        Ok((limit.current, limit.max))
+    }
+
+    /// Updates the limit for a specific resource.
+    pub fn set_rlimit(&self, resource: u32, new_limit: Rlimit) -> KResult {
+        if resource >= RLIM_NLIMITS {
+            return Err(KError::InvalidInput);
+        }
+        if new_limit.current > new_limit.max {
+            return Err(KError::InvalidInput);
+        }
+
+        let limit = &mut self.rlimits.write()[resource];
+        if new_limit.max > limit.max {
+            // Raising the hard limit requires CAP_SYS_RESOURCE.
+            // Return EPERM until proper credential checks are in place.
+            return Err(KError::OperationNotPermitted);
+        }
+
+        *limit = new_limit;
+        Ok(())
+    }
+
+    /// Updates the soft/hard pair for a specific resource.
+    pub fn set_rlimit_values(&self, resource: u32, current: u64, max: u64) -> KResult {
+        self.set_rlimit(resource, Rlimit::new(current, max))
     }
 
     /// Returns the current file descriptor table handle.
@@ -141,6 +182,7 @@ impl ProcessResources {
 
 #[cfg(unittest)]
 mod tests {
+    use krlimit::Rlimit;
     use unittest::def_test;
 
     use super::ProcessResources;
@@ -154,5 +196,68 @@ mod tests {
             0x80000
         );
         assert_eq!(resources.fd_table().read().count(), 0);
+    }
+
+    #[def_test]
+    fn test_rlimit_accessors_update_selected_limit() {
+        let resources = ProcessResources::new(0x80000);
+
+        assert_eq!(
+            resources
+                .rlimit(linux_raw_sys::general::RLIMIT_NOFILE)
+                .unwrap(),
+            Rlimit::new(1024, 1024)
+        );
+        assert_eq!(
+            resources
+                .rlimit_values(linux_raw_sys::general::RLIMIT_NOFILE)
+                .unwrap(),
+            (1024, 1024)
+        );
+
+        resources
+            .set_rlimit(
+                linux_raw_sys::general::RLIMIT_NOFILE,
+                Rlimit::new(512, 1024),
+            )
+            .unwrap();
+
+        assert_eq!(
+            resources
+                .rlimit(linux_raw_sys::general::RLIMIT_NOFILE)
+                .unwrap(),
+            Rlimit::new(512, 1024)
+        );
+        assert_eq!(
+            resources
+                .rlimit_values(linux_raw_sys::general::RLIMIT_NOFILE)
+                .unwrap(),
+            (512, 1024)
+        );
+    }
+
+    #[def_test]
+    fn test_set_rlimit_rejects_invalid_or_privileged_updates() {
+        let resources = ProcessResources::new(0x80000);
+
+        assert_eq!(
+            resources
+                .set_rlimit(
+                    linux_raw_sys::general::RLIMIT_NOFILE,
+                    Rlimit::new(2048, 1024)
+                )
+                .unwrap_err(),
+            kerrno::KError::InvalidInput
+        );
+
+        assert_eq!(
+            resources
+                .set_rlimit(
+                    linux_raw_sys::general::RLIMIT_NOFILE,
+                    Rlimit::new(1024, 2048)
+                )
+                .unwrap_err(),
+            kerrno::KError::OperationNotPermitted
+        );
     }
 }

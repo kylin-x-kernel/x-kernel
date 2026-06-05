@@ -2,8 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Architecture-specific thread control syscalls.
+//! Thread identity and architecture-specific control syscalls.
 
+#[cfg(not(target_arch = "x86_64"))]
+use kerrno::KResult;
 #[cfg(target_arch = "x86_64")]
 use kerrno::{KError, KResult};
 
@@ -65,4 +67,16 @@ pub fn sys_arch_prctl(
         ArchPrctlCode::GetCpuid => Ok(0),
         ArchPrctlCode::SetCpuid => Err(kerrno::KError::NoSuchDevice),
     }
+}
+
+/// Returns the thread ID of the current thread.
+pub fn sys_gettid() -> KResult<isize> {
+    Ok(ktask::current().id().as_u64() as _)
+}
+
+/// Sets the `clear_child_tid` pointer for the current thread.
+pub fn sys_set_tid_address(clear_child_tid: usize) -> KResult<isize> {
+    let current = ktask::current();
+    kthread::current_thread().set_clear_child_tid(clear_child_tid);
+    Ok(current.id().as_u64() as isize)
 }

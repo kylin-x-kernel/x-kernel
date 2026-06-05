@@ -49,15 +49,20 @@ core/ksyscall/
 │   ├── task/
 │   │   ├── clone.rs
 │   │   ├── clone3.rs
+│   │   ├── cpu_time.rs
 │   │   ├── credentials.rs
 │   │   ├── ctl.rs
 │   │   ├── execve.rs
 │   │   ├── exit.rs
+│   │   ├── ids.rs
 │   │   ├── job.rs
+│   │   ├── limits.rs
 │   │   ├── mod.rs
 │   │   ├── pidfd.rs
+│   │   ├── rusage.rs
 │   │   ├── sched.rs
 │   │   ├── thread.rs
+│   │   ├── umask.rs
 │   │   └── wait.rs
 │   ├── time/
 │   │   ├── mod.rs
@@ -122,6 +127,27 @@ ksyscall::dispatch_irq_syscall
 - `task/credentials.rs`
   - `get*id` / `set*id` / `getgroups` / `setgroups`
   - owner 在 `kthread` 当前进程 credential helper 与 `kcred` credential 模型
+- `task/ids.rs`
+  - `getpid` / `getppid`
+  - owner 在 `kthread` 当前线程与父子进程关系
+- `task/job.rs`
+  - `getsid` / `setsid` / `getpgid` / `setpgid`
+  - owner 在 `kthread` 进程组与 session 状态
+- `task/thread.rs`
+  - `gettid` / `set_tid_address` / `arch_prctl`
+  - owner 在 `kthread` 当前线程状态与架构线程上下文
+- `task/cpu_time.rs`
+  - `times`
+  - owner 在 `kthread` 进程 CPU-time 统计与 `khal` 时钟查询
+- `task/rusage.rs`
+  - `getrusage`
+  - owner 在 `kthread` 进程/线程 CPU-time 采样状态
+- `task/limits.rs`
+  - `getrlimit` / `setrlimit` / `prlimit64`
+  - owner 在 `ProcessState.resources` 的 rlimit 状态
+- `task/umask.rs`
+  - `umask`
+  - owner 在 `ProcessState` 的文件创建掩码状态
 - `task/sched.rs`
   - `sched_yield` / `sched_*affinity` / `sched_*scheduler` / `getcpu` / `getpriority` / `setpriority`
   - owner 在 `ktask` 调度接口、`kthread` 进程/线程状态和 `khal` CPU 查询

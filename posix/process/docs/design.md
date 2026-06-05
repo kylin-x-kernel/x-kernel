@@ -2,12 +2,15 @@
 
 ## 定位
 
-`posix-process` 负责进程/线程相关 syscall glue，以及依附其上的用户线程 runtime 和初始用户进程组装逻辑：
+`posix-process` 负责进程/线程生命周期相关的上层 owner 逻辑：
 
 - clone / exit / signal-return 需要共享的用户态 trap 主循环；
 - 初始用户进程的地址空间、`ProcessState`、TTY 和 stdio 组装；
 - 线程退出时的 robust futex 清理、group-exit 和父进程通知；
 - 保持这些逻辑依赖 `kthread` 原语，但不把它们塞回 `kthread` 本体。
+
+纯 syscall adapter（`getpid`、`getrusage`、`umask`、job control、rlimit 等）
+已经迁回 `ksyscall/task`，不再由本 crate 承接。
 
 ## 范围
 
@@ -24,9 +27,9 @@ entry / ksyscall / posix-signal
               |
               v
         posix-process
-          |        |
-          v        v
-        kexec    kthread
+          |   \
+          v    v
+        kexec  kthread
 ```
 
 ## 调用约束 / 执行上下文
@@ -62,5 +65,6 @@ entry / ksyscall / posix-signal
 
 ## 设计决策
 
-- 该 glue 放在 `posix-process`，因为它属于进程/线程 syscall 语义层，不应该污染 `kthread` 的基础职责。
-- `posix-process` 可以自然承接这类面向进程生命周期的上层逻辑，并避免 `kthread <-> posix-ipc` 环依赖。
+- 该逻辑放在 `posix-process`，因为它围绕进程/线程生命周期状态机，不应该污染 `kthread` 的基础职责。
+- `posix-process` 可以自然承接这类面向进程生命周期的上层 owner 逻辑，并避免 `kthread <-> posix-ipc` 环依赖。
+- 纯 adapter 迁回 `ksyscall/task` 后，本 crate 只保留真正依赖进程生命周期状态机的 owner 逻辑。

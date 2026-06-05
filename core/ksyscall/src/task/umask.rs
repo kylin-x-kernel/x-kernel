@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! POSIX file-mode creation mask syscalls.
+//! Process file-mode creation mask syscalls.
 
 use kerrno::KResult;
 

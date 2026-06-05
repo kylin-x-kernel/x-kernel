@@ -27,7 +27,6 @@ use posix_io_mpx::*;
 use posix_ipc::*;
 use posix_mm::*;
 use posix_net::*;
-use posix_process::*;
 use posix_signal::*;
 
 use crate::{io_mpx::*, ipc::*, sync::*, sys::*, task::*, time::*, vfs::*};

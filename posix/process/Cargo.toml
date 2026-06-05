@@ -33,4 +33,3 @@ memspace.workspace = true
 osvm.workspace = true
 posix-fs.workspace = true
 posix-ipc.workspace = true
-posix-types.workspace = true
