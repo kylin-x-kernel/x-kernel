@@ -23,6 +23,10 @@ static VSOCK_EVENT_QUEUE: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(Vec
 
 const VSOCK_RX_SCRATCH_SIZE: usize = 0x1000; // 4KiB scratch buffer for vsock receive
 
+fn get_vsock_dev() -> KResult<ClassDevice<VsockDeviceImpl>> {
+    VSOCK_DEV.lock().as_ref().cloned().ok_or(KError::NotFound)
+}
+
 /// Registers a vsock device. Only one vsock device can be registered.
 pub fn register_vsock_dev(dev: ClassDevice<VsockDeviceImpl>) -> KResult {
     let mut guard = VSOCK_DEV.lock();
@@ -132,10 +136,11 @@ async fn poll_vsock_adaptive() -> KResult<()> {
 
     if has_events {
         POLL_BACKOFF.on_activity();
-    } else {
-        POLL_BACKOFF.on_idle_tick();
+        ktask::yield_now();
+        return Ok(());
     }
 
+    POLL_BACKOFF.on_idle_tick();
     let interval = POLL_BACKOFF.next_interval();
 
     let (idle_count, interval_us) = POLL_BACKOFF.snapshot();
@@ -147,10 +152,7 @@ async fn poll_vsock_adaptive() -> KResult<()> {
 }
 
 fn poll_vsock_devices() -> KResult<bool> {
-    let dev = {
-        let guard = VSOCK_DEV.lock();
-        guard.as_ref().cloned().ok_or(KError::NotFound)?
-    };
+    let dev = get_vsock_dev()?;
     let mut event_count = 0;
     let mut buf = alloc::vec![0; VSOCK_RX_SCRATCH_SIZE];
 
@@ -256,8 +258,7 @@ fn requeue_vsock_event(event: VsockDriverEventType) {
 }
 
 pub fn vsock_listen(addr: VsockAddr) -> KResult<()> {
-    let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(KError::NotFound)?;
+    let mut dev = get_vsock_dev()?;
     dev.listen(addr.port);
     Ok(())
 }
@@ -273,8 +274,7 @@ fn map_dev_err(e: DriverError) -> KError {
 }
 
 pub fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
-    let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(KError::NotFound)?;
+    let mut dev = get_vsock_dev()?;
     dev.connect(conn_id).map_err(map_dev_err)
 }
 
@@ -282,8 +282,7 @@ pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
     let max_retries = 10; // Tests have shown that no more than two retries will be notified
     for _ in 0..max_retries {
         let result = {
-            let mut guard = VSOCK_DEV.lock();
-            let dev = guard.as_mut().ok_or(KError::NotFound)?;
+            let mut dev = get_vsock_dev()?;
             dev.send(conn_id, buf)
         };
         match result {
@@ -302,13 +301,11 @@ pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
 }
 
 pub fn vsock_disconnect(conn_id: VsockConnId) -> KResult<()> {
-    let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(KError::NotFound)?;
+    let mut dev = get_vsock_dev()?;
     dev.disconnect(conn_id).map_err(map_dev_err)
 }
 
 pub fn vsock_guest_cid() -> KResult<u64> {
-    let mut guard = VSOCK_DEV.lock();
-    let dev = guard.as_mut().ok_or(KError::NotFound)?;
+    let dev = get_vsock_dev()?;
     Ok(dev.guest_cid())
 }
