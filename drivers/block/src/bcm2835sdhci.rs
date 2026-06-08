@@ -9,11 +9,20 @@ use bcm2835_sdhci::{
     SDHCIError,
 };
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use kspin::SpinNoIrq;
 
 use crate::BlockDevice;
 
 /// Raspberry Pi 4 SD card driver based on BCM2835 SDHCI controller.
-pub struct SDHCIDriver(EmmcCtl);
+///
+/// The `SpinNoIrq` lock serializes hardware access so the device can be
+/// shared behind a `&self` interface. `num_blocks` and `block_size` cache
+/// the device geometry so queries do not need to take the lock.
+pub struct SDHCIDriver {
+    inner: SpinNoIrq<EmmcCtl>,
+    num_blocks: u64,
+    block_size: usize,
+}
 
 impl SDHCIDriver {
     /// Creates and initializes the SDHCI driver instance.
@@ -23,7 +32,13 @@ impl SDHCIDriver {
         let mut controller = EmmcCtl::new();
         if controller.init() == 0 {
             log::info!("SDHCI driver: initialization successful.");
-            Ok(SDHCIDriver(controller))
+            let num_blocks = controller.get_block_num();
+            let block_size = controller.get_block_size();
+            Ok(SDHCIDriver {
+                inner: SpinNoIrq::new(controller),
+                num_blocks,
+                block_size,
+            })
         } else {
             log::warn!("SDHCI driver: initialization failed.");
             Err(DriverError::Io)
@@ -57,7 +72,7 @@ impl Device for SDHCIDriver {
 }
 
 impl BlockDevice for SDHCIDriver {
-    fn read_block(&mut self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
         if buffer.len() < BLOCK_SIZE {
             return Err(DriverError::InvalidInput);
         }
@@ -68,12 +83,13 @@ impl BlockDevice for SDHCIDriver {
             return Err(DriverError::InvalidInput);
         }
 
-        self.0
+        self.inner
+            .lock()
             .read_block(block_id as u32, 1, aligned_buffer)
             .map_err(convert_sdhci_error)
     }
 
-    fn write_block(&mut self, block_id: u64, buffer: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buffer: &[u8]) -> DriverResult {
         if buffer.len() < BLOCK_SIZE {
             return Err(DriverError::Io);
         }
@@ -84,21 +100,22 @@ impl BlockDevice for SDHCIDriver {
             return Err(DriverError::InvalidInput);
         }
 
-        self.0
+        self.inner
+            .lock()
             .write_block(block_id as u32, 1, aligned_buffer)
             .map_err(convert_sdhci_error)
     }
 
-    fn flush(&mut self) -> DriverResult {
+    fn flush(&self) -> DriverResult {
         Ok(())
     }
 
     fn num_blocks(&self) -> u64 {
-        self.0.get_block_num()
+        self.num_blocks
     }
 
     fn block_size(&self) -> usize {
-        self.0.get_block_size()
+        self.block_size
     }
 }
 

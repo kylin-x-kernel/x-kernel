@@ -32,11 +32,11 @@ impl Device for RuntimeConsole {
 }
 
 impl CharDevice for RuntimeConsole {
-    fn read(&mut self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
         Ok(console_driver::read_data(buf))
     }
 
-    fn write(&mut self, buf: &[u8]) -> DriverResult<usize> {
+    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
         console_driver::write_data(buf);
         Ok(buf.len())
     }

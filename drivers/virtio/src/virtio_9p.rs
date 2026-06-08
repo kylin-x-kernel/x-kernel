@@ -6,6 +6,7 @@
 use alloc::string::{String, ToString};
 
 use driver_base::{Device, DeviceKind, DriverResult};
+use kspin::SpinNoIrq;
 use virtio_drivers::{Hal, device::virtio_9p::VirtIO9p as InnerDev, transport::Transport};
 
 use crate::as_driver_error;
@@ -19,7 +20,7 @@ pub trait Virtio9pDevice: Device {
     fn mount_tag(&self) -> String;
 
     /// Sends a raw 9p request and waits for the response.
-    fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize>;
+    fn request(&self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize>;
 }
 
 /// The VirtIO 9p device driver.
@@ -44,12 +45,13 @@ pub trait Virtio9pDevice: Device {
 /// let n = dev.request(&req_buf, &mut resp)?;
 /// ```
 pub struct VirtIo9pDev<H: Hal, T: Transport> {
-    inner: InnerDev<H, T>,
+    inner: SpinNoIrq<InnerDev<H, T>>,
+    mount_tag: String,
 }
 
-// SAFETY: VirtIo9pDev accesses the device exclusively through &mut self.
-// The inner VirtIO9p is not auto Send/Sync due to PhantomData, but it is
-// safe to transfer across threads and share immutable references.
+// SAFETY: VirtIo9pDev serializes access to the inner VirtIO9p through its own
+// `SpinNoIrq` lock. The inner type is not auto Send/Sync due to PhantomData,
+// but it is safe to transfer across threads and share behind that lock.
 unsafe impl<H: Hal, T: Transport> Send for VirtIo9pDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIo9pDev<H, T> {}
 
@@ -61,20 +63,23 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     ///
     /// Returns `DriverError` if the VirtIO 9p device fails to initialize.
     pub fn try_new(transport: T) -> DriverResult<Self> {
+        let inner = InnerDev::new(transport).map_err(as_driver_error)?;
+        let mount_tag = inner.mount_tag().to_string();
         Ok(Self {
-            inner: InnerDev::new(transport).map_err(as_driver_error)?,
+            inner: SpinNoIrq::new(inner),
+            mount_tag,
         })
     }
 
     /// Returns the mount tag reported by the device.
-    pub fn mount_tag(&self) -> &str {
-        self.inner.mount_tag()
+    pub fn mount_tag(&self) -> String {
+        self.mount_tag.clone()
     }
 }
 
 impl<H: Hal, T: Transport> Virtio9pDevice for VirtIo9pDev<H, T> {
     fn mount_tag(&self) -> String {
-        self.inner.mount_tag().to_string()
+        self.mount_tag.clone()
     }
 
     /// Sends a raw 9p request and waits for the response.
@@ -92,8 +97,9 @@ impl<H: Hal, T: Transport> Virtio9pDevice for VirtIo9pDev<H, T> {
     ///
     /// Returns `DriverError` if the request fails (device error, buffer too
     /// small, etc.).
-    fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
+    fn request(&self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
         self.inner
+            .lock()
             .request(req, resp)
             .map(|written| written as usize)
             .map_err(as_driver_error)

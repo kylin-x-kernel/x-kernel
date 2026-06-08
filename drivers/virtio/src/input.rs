@@ -7,6 +7,7 @@ use alloc::string::String;
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use input::{Event, EventType, InputDevice, InputDeviceId};
+use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
     device::input::{InputConfigSelect, VirtIOInput as InnerDev},
@@ -34,14 +35,15 @@ use crate::as_driver_error;
 /// let event = input.read_event()?;
 /// ```
 pub struct VirtIoInputDev<H: Hal, T: Transport> {
-    inner: InnerDev<H, T>,
+    inner: SpinNoIrq<InnerDev<H, T>>,
     device_id: InputDeviceId,
     name: String,
 }
 
-// SAFETY: VirtIoInputDev accesses the device exclusively through &mut self.
-// The inner VirtIOInput is not auto Send/Sync due to PhantomData, but it is
-// safe to transfer across threads and share immutable references.
+// SAFETY: VirtIoInputDev serializes access to the inner VirtIOInput through its
+// own `SpinNoIrq` lock. The inner type is not auto Send/Sync due to
+// PhantomData, but it is safe to transfer across threads and share behind that
+// lock.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoInputDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoInputDev<H, T> {}
 
@@ -58,7 +60,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
         let ids = device.ids().map_err(as_driver_error)?;
 
         Ok(Self {
-            inner: device,
+            inner: SpinNoIrq::new(device),
             device_id: InputDeviceId {
                 bus_type: ids.bustype,
                 vendor: ids.vendor,
@@ -69,9 +71,10 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
         })
     }
 
-    fn load_event_bits(&mut self, event_type: EventType, out: &mut [u8]) -> DriverResult<bool> {
+    fn load_event_bits(&self, event_type: EventType, out: &mut [u8]) -> DriverResult<bool> {
         let written = self
             .inner
+            .lock()
             .query_config_select(InputConfigSelect::EvBits, event_type as u8, out)
             .map_err(as_driver_error)?;
         Ok(written != 0)
@@ -101,12 +104,12 @@ impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
         "virtio"
     }
 
-    fn get_event_bits(&mut self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
+    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
         self.load_event_bits(ty, out)
     }
 
-    fn read_event(&mut self) -> DriverResult<Event> {
-        let Some(event) = self.inner.pop_pending_event() else {
+    fn read_event(&self) -> DriverResult<Event> {
+        let Some(event) = self.inner.lock().pop_pending_event() else {
             return Err(DriverError::WouldBlock);
         };
         Ok(Event {

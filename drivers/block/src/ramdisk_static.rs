@@ -4,17 +4,32 @@
 
 //! A RAM disk driver implemented with a static slice as storage.
 
-use core::ops::{Deref, DerefMut};
-
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use kspin::SpinNoPreempt;
 
 use crate::BlockDevice;
 
 const BLOCK_SIZE: usize = 512;
 
 /// RAM disk structure backed by a static mutable slice.
-#[derive(Default)]
-pub struct RamDisk(&'static mut [u8]);
+///
+/// The `SpinNoPreempt` lock serializes all block reads and writes so the
+/// device can be shared behind a `&self` interface. `SpinNoPreempt` is
+/// sufficient because this is a pure-software driver with no IRQ interaction.
+/// `len` caches the buffer length so size queries do not need to take the lock.
+pub struct RamDisk {
+    data: SpinNoPreempt<&'static mut [u8]>,
+    len: usize,
+}
+
+impl Default for RamDisk {
+    fn default() -> Self {
+        RamDisk {
+            data: SpinNoPreempt::new(&mut []),
+            len: 0,
+        }
+    }
+}
 
 impl RamDisk {
     /// Constructs a new RAM disk from the provided static buffer.
@@ -33,21 +48,11 @@ impl RamDisk {
             0,
             "Buffer size is not a multiple of block size."
         );
-        RamDisk(buffer)
-    }
-}
-
-impl Deref for RamDisk {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl DerefMut for RamDisk {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
+        let len = buffer.len();
+        RamDisk {
+            data: SpinNoPreempt::new(buffer),
+            len,
+        }
     }
 }
 
@@ -65,7 +70,7 @@ impl BlockDevice for RamDisk {
     /// Returns the number of blocks the RAM disk can hold.
     #[inline]
     fn num_blocks(&self) -> u64 {
-        (self.len() / BLOCK_SIZE) as u64
+        (self.len / BLOCK_SIZE) as u64
     }
 
     /// Returns the block size of the RAM disk.
@@ -75,37 +80,39 @@ impl BlockDevice for RamDisk {
     }
 
     /// Reads a single block from the RAM disk into the provided buffer.
-    fn read_block(&mut self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
         if buffer.len() % BLOCK_SIZE != 0 {
             return Err(DriverError::InvalidInput);
         }
 
         let offset = block_id as usize * BLOCK_SIZE;
-        if offset + buffer.len() > self.len() {
+        if offset + buffer.len() > self.len {
             return Err(DriverError::Io);
         }
 
-        buffer.copy_from_slice(&self[offset..offset + buffer.len()]);
+        let data = self.data.lock();
+        buffer.copy_from_slice(&data[offset..offset + buffer.len()]);
         Ok(())
     }
 
     /// Writes a single block to the RAM disk from the provided buffer.
-    fn write_block(&mut self, block_id: u64, buffer: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buffer: &[u8]) -> DriverResult {
         if buffer.len() % BLOCK_SIZE != 0 {
             return Err(DriverError::InvalidInput);
         }
 
         let offset = block_id as usize * BLOCK_SIZE;
-        if offset + buffer.len() > self.len() {
+        if offset + buffer.len() > self.len {
             return Err(DriverError::Io);
         }
 
-        self[offset..offset + buffer.len()].copy_from_slice(buffer);
+        let mut data = self.data.lock();
+        data[offset..offset + buffer.len()].copy_from_slice(buffer);
         Ok(())
     }
 
     /// No operation needed for flushing RAM disk.
-    fn flush(&mut self) -> DriverResult {
+    fn flush(&self) -> DriverResult {
         Ok(())
     }
 }
@@ -138,7 +145,7 @@ pub mod tests_ramdisk_static {
     #[def_test]
     fn test_ramdisk_static_basic_operations() {
         let buffer = create_aligned_buffer(2048); // 4 blocks
-        let mut disk = RamDisk::new(buffer);
+        let disk = RamDisk::new(buffer);
 
         // Test driver properties
         assert_eq!(disk.device_kind(), DeviceKind::Block);
@@ -182,7 +189,7 @@ pub mod tests_ramdisk_static {
     #[def_test]
     fn test_ramdisk_static_boundary_and_errors() {
         let buffer = create_aligned_buffer(1024); // 2 blocks
-        let mut disk = RamDisk::new(buffer);
+        let disk = RamDisk::new(buffer);
 
         // Test reading/writing beyond boundaries
         let mut test_buf = vec![0; 512];

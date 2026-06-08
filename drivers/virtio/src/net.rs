@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use device_res::{Irq, IrqResource, IrqReturn, IrqTriggerMode};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
 use crate::as_driver_error;
@@ -138,18 +138,30 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
 /// let rx_buf = net.recv()?;
 /// ```
 pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
-    rx_buffers: [Option<NetBufBox>; QS],
-    tx_buffers: [Option<NetBufBox>; QS],
-    free_tx_bufs: Vec<NetBufBox>,
+    bufs: SpinNoPreempt<NetBufState<QS>>,
+    // Kept alive so that `NetBufBox`es in `bufs` remain valid.
+    #[allow(dead_code)]
     buf_pool: Arc<NetBufPool>,
     inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+    mac: MacAddress,
     irq: Option<usize>,
     irq_handle_id: Option<usize>,
 }
 
-// SAFETY: VirtIoNetDev's shared state (InnerDev) is protected by SpinNoIrq.
-// The buffer arrays are accessed through &mut self exclusively. It is safe
-// to transfer across threads and share immutable references.
+/// Buffer bookkeeping for in-flight and free network buffers.
+///
+/// This state is only touched from task context, so it is guarded by a
+/// `SpinNoPreempt` lock. The IRQ handler only acks the device via `inner`
+/// and never touches these buffers, so the two locks never deadlock.
+struct NetBufState<const QS: usize> {
+    rx_buffers: [Option<NetBufBox>; QS],
+    tx_buffers: [Option<NetBufBox>; QS],
+    free_tx_bufs: Vec<NetBufBox>,
+}
+
+// SAFETY: VirtIoNetDev's device state (InnerDev) is protected by SpinNoIrq and
+// its buffer bookkeeping by SpinNoPreempt. Both locks provide the mutual
+// exclusion required to transfer across threads and share immutable references.
 unsafe impl<H: Hal, T: Transport, const QS: usize> Send for VirtIoNetDev<H, T, QS> {}
 unsafe impl<H: Hal, T: Transport, const QS: usize> Sync for VirtIoNetDev<H, T, QS> {}
 
@@ -188,30 +200,20 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
         let inner = Arc::new(SpinNoIrq::new(
             InnerDev::new(transport).map_err(as_driver_error)?,
         ));
-        let rx_buffers = [NONE_BUF; QS];
+        let mut rx_buffers = [NONE_BUF; QS];
         let tx_buffers = [NONE_BUF; QS];
         let buf_pool = NetBufPool::new(2 * QS, NET_BUF_LEN)?;
-        let free_tx_bufs = Vec::with_capacity(QS);
-
-        let mut dev = Self {
-            rx_buffers,
-            inner,
-            tx_buffers,
-            free_tx_bufs,
-            buf_pool,
-            irq,
-            irq_handle_id: None,
-        };
+        let mut free_tx_bufs = Vec::with_capacity(QS);
 
         // 1. Fill all rx buffers.
-        for (i, rx_buf_place) in dev.rx_buffers.iter_mut().enumerate() {
-            let mut rx_buf = dev.buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
+        for (i, rx_buf_place) in rx_buffers.iter_mut().enumerate() {
+            let mut rx_buf = buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
             // SAFETY: `receive_begin` requires exclusive access to the buffer
             // for the duration it is in the VirtIO queue. The buffer is owned
             // by `rx_buf` and stored in `rx_buffers[i]` immediately after,
             // ensuring it lives as long as the device holds the token.
             let token = unsafe {
-                dev.inner
+                inner
                     .lock()
                     .receive_begin(rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
@@ -222,24 +224,37 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
 
         // 2. Allocate all tx buffers.
         for _ in 0..QS {
-            let mut tx_buf = dev.buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
+            let mut tx_buf = buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
             // Fill header
-            let hdr_len = dev
-                .inner
+            let hdr_len = inner
                 .lock()
                 .fill_buffer_header(tx_buf.buffer_mut())
                 .or(Err(DriverError::InvalidInput))?;
             tx_buf.set_hdr_len(hdr_len);
-            dev.free_tx_bufs.push(tx_buf);
+            free_tx_bufs.push(tx_buf);
         }
 
-        if let Some(irq) = dev.irq {
-            let handle_id = register_virtio_net_irq(irq, &dev.inner)?;
-            dev.irq_handle_id = Some(handle_id);
+        let mut irq_handle_id = None;
+        if let Some(irq) = irq {
+            irq_handle_id = Some(register_virtio_net_irq(irq, &inner)?);
         }
 
-        // 3. Return the driver instance.
-        Ok(dev)
+        // 3. Cache immutable device properties.
+        let mac = MacAddress(inner.lock().mac_address());
+
+        // 4. Return the driver instance.
+        Ok(Self {
+            bufs: SpinNoPreempt::new(NetBufState {
+                rx_buffers,
+                tx_buffers,
+                free_tx_bufs,
+            }),
+            buf_pool,
+            inner,
+            mac,
+            irq,
+            irq_handle_id,
+        })
     }
 }
 
@@ -260,12 +275,13 @@ impl<H: Hal, T: Transport, const QS: usize> Device for VirtIoNetDev<H, T, QS> {
 impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS> {
     #[inline]
     fn mac(&self) -> MacAddress {
-        MacAddress(self.inner.lock().mac_address())
+        self.mac
     }
 
     #[inline]
     fn can_tx(&self) -> bool {
-        !self.free_tx_bufs.is_empty() && self.inner.lock().can_send()
+        let has_free = !self.bufs.lock().free_tx_bufs.is_empty();
+        has_free && self.inner.lock().can_send()
     }
 
     #[inline]
@@ -283,10 +299,11 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         QS
     }
 
-    fn recycle_rx(&mut self, rx_buf: NetBufHandle) -> DriverResult {
+    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult {
         // SAFETY: `from_handle` converts a handle back to an owned `NetBuf`.
         // The caller guarantees the handle is valid and not used elsewhere.
         let mut rx_buf = unsafe { NetBuf::from_handle(rx_buf) };
+        let mut bufs = self.bufs.lock();
         // SAFETY: `receive_begin` requires exclusive access to the buffer.
         // We own `rx_buf` and will store it in `rx_buffers[new_token]`
         // immediately after, ensuring it lives as long as the device holds
@@ -299,14 +316,14 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         };
         // `rx_buffers[new_token]` is expected to be `None` since it was taken
         // away at `Self::recv()` and has not been added back.
-        if self.rx_buffers[new_token as usize].is_some() {
+        if bufs.rx_buffers[new_token as usize].is_some() {
             return Err(DriverError::BadState);
         }
-        self.rx_buffers[new_token as usize] = Some(rx_buf);
+        bufs.rx_buffers[new_token as usize] = Some(rx_buf);
         Ok(())
     }
 
-    fn recycle_tx(&mut self) -> DriverResult {
+    fn recycle_tx(&self) -> DriverResult {
         loop {
             let token = {
                 let mut inner = self.inner.lock();
@@ -315,7 +332,11 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             let Some(token) = token else {
                 break;
             };
-            let tx_buf = self.tx_buffers[token as usize]
+            // Take the `bufs` lock only for the duration of a single token's
+            // bookkeeping so concurrent network I/O on this device is not
+            // blocked for the whole drain loop.
+            let mut bufs = self.bufs.lock();
+            let tx_buf = bufs.tx_buffers[token as usize]
                 .take()
                 .ok_or(DriverError::BadState)?;
             // SAFETY: `transmit_complete` requires that the buffer frame
@@ -329,15 +350,16 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
                     .map_err(as_driver_error)?;
             }
             // Recycle the buffer.
-            self.free_tx_bufs.push(tx_buf);
+            bufs.free_tx_bufs.push(tx_buf);
         }
         Ok(())
     }
 
-    fn send(&mut self, tx_buf: NetBufHandle) -> DriverResult {
+    fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
         // SAFETY: `from_handle` converts a handle back to an owned `NetBuf`.
         // The caller guarantees the handle is valid and not used elsewhere.
         let tx_buf = unsafe { NetBuf::from_handle(tx_buf) };
+        let mut bufs = self.bufs.lock();
         // SAFETY: `transmit_begin` requires exclusive access to the buffer
         // frame for the duration it is in the VirtIO queue. We store the
         // buffer in `tx_buffers[token]` immediately after, ensuring it
@@ -348,18 +370,19 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
                 .transmit_begin(tx_buf.frame())
                 .map_err(as_driver_error)?
         };
-        self.tx_buffers[token as usize] = Some(tx_buf);
+        bufs.tx_buffers[token as usize] = Some(tx_buf);
         Ok(())
     }
 
-    fn recv(&mut self) -> DriverResult<NetBufHandle> {
+    fn recv(&self) -> DriverResult<NetBufHandle> {
         self.inner.lock().ack_interrupt();
+        let mut bufs = self.bufs.lock();
         let token = {
             let inner = self.inner.lock();
             inner.poll_receive()
         };
         if let Some(token) = token {
-            let mut rx_buf = self.rx_buffers[token as usize]
+            let mut rx_buf = bufs.rx_buffers[token as usize]
                 .take()
                 .ok_or(DriverError::BadState)?;
             // SAFETY: `receive_complete` requires that the buffer matches the
@@ -384,9 +407,14 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         }
     }
 
-    fn alloc_tx_buf(&mut self, size: usize) -> DriverResult<NetBufHandle> {
+    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
         // 0. Allocate a buffer from the queue.
-        let mut net_buf = self.free_tx_bufs.pop().ok_or(DriverError::NoMemory)?;
+        let mut net_buf = self
+            .bufs
+            .lock()
+            .free_tx_bufs
+            .pop()
+            .ok_or(DriverError::NoMemory)?;
         let pkt_len = size;
 
         // 1. Check if the buffer is large enough.

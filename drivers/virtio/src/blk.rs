@@ -5,6 +5,7 @@
 //! VirtIO block driver adapter.
 use block::BlockDevice;
 use driver_base::{Device, DeviceKind, DriverResult};
+use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
     device::blk::{SECTOR_SIZE, VirtIOBlk as InnerDev},
@@ -33,13 +34,22 @@ use crate::as_driver_error;
 /// blk.read_block(0, &mut buf)?;
 /// ```
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
-    device: InnerDev<H, T>,
+    device: SpinNoIrq<InnerDev<H, T>>,
     sector_size: usize,
+    num_blocks: u64,
 }
 
-// SAFETY: VirtIoBlkDev accesses the device exclusively through &mut self.
-// The inner VirtIOBlk is not auto Send/Sync due to PhantomData, but it is
-// safe to transfer across threads and share immutable references.
+// SAFETY: VirtIoBlkDev serializes all access to the inner VirtIOBlk through
+// its own `SpinNoIrq` lock. The inner VirtIOBlk is not auto Send/Sync due
+// to PhantomData, but it is safe to transfer across threads and share behind
+// that lock. The lock must mask interrupts for the duration of each device
+// access, because the synchronous request path busy-polls the used ring while
+// holding the lock. On targets without per-device MSI-X (e.g. x86, where
+// virtio falls back to a shared level-triggered INTx line that the block
+// driver never acks), leaving local interrupts enabled during the poll lets
+// the shared line re-assert continuously and livelock the CPU in an interrupt
+// storm. Masking IRQs here keeps the busy-poll safe, matching the IRQ-safe
+// lock the virtio-net adapter uses for the same reason.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
@@ -53,9 +63,11 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// negotiation failure, queue allocation failure, DMA error).
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let device = Self::init_device(transport)?;
+        let num_blocks = device.capacity();
         Ok(Self {
-            device,
+            device: SpinNoIrq::new(device),
             sector_size: SECTOR_SIZE,
+            num_blocks,
         })
     }
 
@@ -63,14 +75,16 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         InnerDev::new(transport).map_err(as_driver_error)
     }
 
-    fn read_sector(&mut self, sector: u64, out_buf: &mut [u8]) -> DriverResult {
+    fn read_sector(&self, sector: u64, out_buf: &mut [u8]) -> DriverResult {
         self.device
+            .lock()
             .read_blocks(sector as usize, out_buf)
             .map_err(as_driver_error)
     }
 
-    fn write_sector(&mut self, sector: u64, in_buf: &[u8]) -> DriverResult {
+    fn write_sector(&self, sector: u64, in_buf: &[u8]) -> DriverResult {
         self.device
+            .lock()
             .write_blocks(sector as usize, in_buf)
             .map_err(as_driver_error)
     }
@@ -89,7 +103,7 @@ impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
 impl<H: Hal, T: Transport> BlockDevice for VirtIoBlkDev<H, T> {
     #[inline]
     fn num_blocks(&self) -> u64 {
-        self.device.capacity()
+        self.num_blocks
     }
 
     #[inline]
@@ -97,16 +111,16 @@ impl<H: Hal, T: Transport> BlockDevice for VirtIoBlkDev<H, T> {
         self.sector_size
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         self.read_sector(block_id, buf)
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
         self.write_sector(block_id, buf)
     }
 
-    fn flush(&mut self) -> DriverResult {
-        self.device.flush().map_err(as_driver_error)
+    fn flush(&self) -> DriverResult {
+        self.device.lock().flush().map_err(as_driver_error)
     }
 }
 

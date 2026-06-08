@@ -96,8 +96,7 @@ impl ConsoleSubsystem {
     /// `ClassDevice<T>` wraps an `Arc<Inner<T>>`, so cloning is cheap and
     /// the caller can drop the subsystem lock before doing IO. This keeps
     /// the subsystem critical section short and avoids holding it across
-    /// per-device IO, which itself takes the inner spinlock via
-    /// `with_mut(...)`.
+    /// per-device IO, which itself takes the driver's interior spinlock.
     fn active_handle(&self) -> Option<ClassDevice<CharDeviceImpl>> {
         let id = self.active?;
         self.devices
@@ -175,12 +174,12 @@ pub fn read_active_console(buf: &mut [u8]) -> Option<DriverResult<usize>> {
     // the lock before doing IO. The character device's own lock is taken
     // inside `read(...)`; nesting subsystem -> per-device lock here is what
     // we want to avoid.
-    let mut handle = console_subsystem().lock().active_handle()?;
+    let handle = console_subsystem().lock().active_handle()?;
     Some(handle.read(buf))
 }
 
 /// Write to the active runtime console, if one exists.
 pub fn write_active_console(buf: &[u8]) -> Option<DriverResult<usize>> {
-    let mut handle = console_subsystem().lock().active_handle()?;
+    let handle = console_subsystem().lock().active_handle()?;
     Some(handle.write(buf))
 }

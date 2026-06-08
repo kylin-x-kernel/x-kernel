@@ -12,7 +12,6 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kdevice::{BusId, DeviceCore, DeviceId, DeviceLocation, DeviceObject, DeviceState, DriverId};
-use kspin::SpinNoIrq;
 
 /// A typed runtime capability with a live parent device object.
 pub struct ClassDevice<T> {
@@ -21,7 +20,7 @@ pub struct ClassDevice<T> {
 
 struct ClassDeviceInner<T> {
     parent: Arc<DeviceObject>,
-    runtime: SpinNoIrq<T>,
+    runtime: T,
     name: String,
     device_kind: DeviceKind,
     irq: Option<usize>,
@@ -94,7 +93,7 @@ impl<T> ClassDevice<T> {
         Ok(Self {
             inner: Arc::new(ClassDeviceInner {
                 parent,
-                runtime: SpinNoIrq::new(inner),
+                runtime: inner,
                 name,
                 device_kind,
                 irq,
@@ -159,16 +158,12 @@ impl<T> ClassDevice<T> {
         DeviceCore::new(self.id())
     }
 
-    /// Borrow the runtime capability under the class-device lock.
+    /// Borrow the runtime capability.
+    ///
+    /// The runtime object is shared immutably; any mutation is the driver's
+    /// responsibility via interior locking.
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        let runtime = self.inner.runtime.lock();
-        f(&runtime)
-    }
-
-    /// Mutably borrow the runtime capability under the class-device lock.
-    pub fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        let mut runtime = self.inner.runtime.lock();
-        f(&mut runtime)
+        f(&self.inner.runtime)
     }
 
     /// Whether the parent device is active and not removed.

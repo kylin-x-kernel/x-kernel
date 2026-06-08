@@ -273,24 +273,50 @@ impl VsockTransportOps for VsockStreamTransport {
 
     fn shutdown(&self, how: Shutdown) -> KResult<()> {
         let conn = self.get_connection()?;
-        let mut conn = conn.lock();
 
-        if how.has_read() {
-            conn.set_rx_closed(true);
-        }
-
-        if how.has_write() {
-            conn.set_tx_closed(true);
-        }
+        // Apply the shutdown flags and read the state while holding only the
+        // connection lock, then release it before taking the device or manager
+        // locks to keep the global order `VSOCK_DEV -> VSOCK_CONN_MANAGER ->
+        // conn`.
+        //
+        // NOTE: `state` is a snapshot taken under the conn lock. By the time we
+        // use it below, the actual state may have changed (e.g. the driver event
+        // path may have transitioned the connection to Disconnected). This is
+        // acceptable because:
+        //   - The critical mutations (rx_closed / tx_closed) already happened
+        //     inside the lock above.
+        //   - vsock_disconnect / unlisten are idempotent notification calls;
+        //     issuing an extra disconnect on an already-disconnected connection
+        //     is harmless.
+        let state = {
+            let mut conn = conn.lock();
+            if how.has_read() {
+                conn.set_rx_closed(true);
+            }
+            if how.has_write() {
+                conn.set_tx_closed(true);
+            }
+            conn.state()
+        };
 
         if let Some(conn_id) = *self.conn_id.lock() {
-            if conn.state() == ConnectionState::Connected {
+            if state == ConnectionState::Connected {
                 crate::device::vsock_disconnect(conn_id)?;
-            } else if conn.state() == ConnectionState::Listening {
+            } else if state == ConnectionState::Listening {
                 VSOCK_CONN_MANAGER.lock().unlisten(conn_id.local_port);
             }
         }
-        conn.set_state(ConnectionState::Closed);
+        conn.lock().set_state(ConnectionState::Closed);
+
+        // Wake all waiters so that any task blocked in poll/register is
+        // notified of the closure.  Without this, a task that registered a
+        // waker just before we set Closed could be stuck forever if the
+        // double-poll in the caller missed the transition.
+        {
+            let mut conn = conn.lock();
+            conn.wake_rx();
+            conn.wake_connect();
+        }
         Ok(())
     }
 
@@ -315,10 +341,20 @@ impl Pollable for VsockStreamTransport {
             return IoEvents::empty();
         };
 
-        let conn = conn.lock();
+        // Snapshot the connection under its own lock, then drop it before taking
+        // the manager lock to preserve the order `VSOCK_CONN_MANAGER -> conn`.
+        let (state, rx_used, rx_closed, tx_closed) = {
+            let conn = conn.lock();
+            (
+                conn.state(),
+                conn.rx_buffer_used(),
+                conn.rx_closed(),
+                conn.tx_closed(),
+            )
+        };
         let mut events = IoEvents::empty();
 
-        match conn.state() {
+        match state {
             ConnectionState::Listening => {
                 // if there is a pending connection, set IN
                 if let Some(conn_id) = *self.conn_id.lock() {
@@ -329,42 +365,41 @@ impl Pollable for VsockStreamTransport {
                 }
             }
             ConnectionState::Connected | ConnectionState::Closed => {
-                events.set(IoEvents::IN, conn.rx_buffer_used() > 0 || conn.rx_closed());
-                events.set(IoEvents::OUT, !conn.tx_closed());
+                events.set(IoEvents::IN, rx_used > 0 || rx_closed);
+                events.set(IoEvents::OUT, !tx_closed);
             }
             ConnectionState::Connecting => {
-                // if connected, set OUT
-                events.set(IoEvents::OUT, conn.state() == ConnectionState::Connected);
+                // a connecting socket is not writable yet
+                events.set(IoEvents::OUT, false);
             }
             _ => {}
         }
-        events.set(IoEvents::RDHUP, conn.rx_closed());
+        events.set(IoEvents::RDHUP, rx_closed);
         events
     }
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        if let Ok(conn) = self.get_connection() {
-            let mut conn = conn.lock();
-            match conn.state() {
-                ConnectionState::Listening if events.contains(IoEvents::IN) => {
-                    conn.register_accept_poll(context);
-                }
-                ConnectionState::Connected => {
-                    if events.contains(IoEvents::IN) {
-                        conn.register_rx_poll(context);
-                    }
-                    if events.contains(IoEvents::OUT) {
-                        warn!(
-                            "VsockStreamTransport: OUT event on connected socket is not supported"
-                        );
-                    }
-                }
-                ConnectionState::Connecting if events.contains(IoEvents::OUT) => {
-                    conn.register_connect_poll(context);
-                }
-                _ => {}
+        let Ok(conn) = self.get_connection() else {
+            return;
+        };
+
+        // Register all potentially relevant wakers unconditionally, without
+        // branching on the connection state.  This avoids a TOCTOU race where
+        // the state changes between the snapshot and the register call, which
+        // could cause the wrong waker (or no waker at all) to be registered
+        // and leave the caller stuck forever.  Unused wakers simply never fire.
+        if events.contains(IoEvents::IN) {
+            conn.lock().register_rx_poll(context);
+            // Also register on the listen queue for accept() support.
+            if let Some(conn_id) = *self.conn_id.lock()
+                && let Some(queue) = VSOCK_CONN_MANAGER
+                    .lock()
+                    .get_listen_queue(conn_id.local_port)
+            {
+                queue.lock().register_poll(context);
             }
         }
+        conn.lock().register_connect_poll(context);
     }
 }
 

@@ -7,12 +7,20 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use kspin::SpinNoIrq;
 use simple_sdmmc::SdMmc;
 
 use crate::BlockDevice;
 
 /// A SD/MMC driver.
-pub struct SdMmcDriver(SdMmc);
+///
+/// The `SpinNoIrq` lock serializes hardware access so the device can be
+/// shared behind a `&self` interface. `num_blocks` caches the disk capacity
+/// so size queries do not need to take the lock.
+pub struct SdMmcDriver {
+    inner: SpinNoIrq<SdMmc>,
+    num_blocks: u64,
+}
 
 impl SdMmcDriver {
     /// Creates a new [`SdMmcDriver`] from the given base address.
@@ -21,8 +29,17 @@ impl SdMmcDriver {
     ///
     /// The caller must ensure that `base` is a valid pointer to the SD/MMC controller's
     /// register block and that no other code is concurrently accessing the same hardware.
+    /// # Safety
+    ///
+    /// The caller must ensure that `base` is a valid pointer to the SD/MMC controller's
+    /// register block and that no other code is concurrently accessing the same hardware.
     pub unsafe fn new(base: usize) -> Self {
-        Self(SdMmc::new(base))
+        let sdmmc = SdMmc::new(base);
+        let num_blocks = sdmmc.num_blocks();
+        Self {
+            inner: SpinNoIrq::new(sdmmc),
+            num_blocks,
+        }
     }
 }
 
@@ -38,42 +55,44 @@ impl Device for SdMmcDriver {
 
 impl BlockDevice for SdMmcDriver {
     fn num_blocks(&self) -> u64 {
-        self.0.num_blocks()
+        self.num_blocks
     }
 
     fn block_size(&self) -> usize {
         SdMmc::BLOCK_SIZE
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         let (blocks, remainder) = buf.as_chunks_mut::<{ SdMmc::BLOCK_SIZE }>();
 
         if !remainder.is_empty() {
             return Err(DriverError::InvalidInput);
         }
 
+        let mut dev = self.inner.lock();
         for (i, block) in blocks.iter_mut().enumerate() {
-            self.0.read_block(block_id as u32 + i as u32, block);
+            dev.read_block(block_id as u32 + i as u32, block);
         }
 
         Ok(())
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
         let (blocks, remainder) = buf.as_chunks::<{ SdMmc::BLOCK_SIZE }>();
 
         if !remainder.is_empty() {
             return Err(DriverError::InvalidInput);
         }
 
+        let mut dev = self.inner.lock();
         for (i, block) in blocks.iter().enumerate() {
-            self.0.write_block(block_id as u32 + i as u32, block);
+            dev.write_block(block_id as u32 + i as u32, block);
         }
 
         Ok(())
     }
 
-    fn flush(&mut self) -> DriverResult {
+    fn flush(&self) -> DriverResult {
         Ok(())
     }
 }

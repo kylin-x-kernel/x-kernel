@@ -47,14 +47,14 @@ pub trait NetDevice: Device {
     ///
     /// `rx_buf` should be the same as the one returned by
     /// [`NetDevice::recv`].
-    fn recycle_rx(&mut self, rx_buf: NetBufHandle) -> DriverResult;
+    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult;
 
     /// Poll the transmit queue and gives back the buffers for previous transmissions.
     /// returns [`DriverResult`].
-    fn recycle_tx(&mut self) -> DriverResult;
+    fn recycle_tx(&self) -> DriverResult;
 
     /// Transmits a packet in the buffer to the network, without blocking.
-    fn send(&mut self, tx_buf: NetBufHandle) -> DriverResult;
+    fn send(&self, tx_buf: NetBufHandle) -> DriverResult;
 
     /// Receives a packet from the network and stores it in the [`NetBuf`].
     ///
@@ -63,8 +63,8 @@ pub trait NetDevice: Device {
     ///
     /// If currently no incoming packets, returns an error with type
     /// [`DriverError::WouldBlock`].
-    fn recv(&mut self) -> DriverResult<NetBufHandle>;
+    fn recv(&self) -> DriverResult<NetBufHandle>;
 
     /// Allocate a memory buffer of a specified size for network transmission.
-    fn alloc_tx_buf(&mut self, size: usize) -> DriverResult<NetBufHandle>;
+    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle>;
 }

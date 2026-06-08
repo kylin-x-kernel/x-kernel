@@ -9,6 +9,7 @@ use core::ptr::NonNull;
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 pub use fxmac_rs::KernelFunc;
 use fxmac_rs::{self, FXmac, FXmacGetMacAddress, FXmacLwipPortTx, FXmacRecvHandler, xmac_init};
+use kspin::SpinNoIrq;
 use log::*;
 
 use crate::{MacAddress, NetBufHandle, NetDevice};
@@ -16,10 +17,14 @@ use crate::{MacAddress, NetBufHandle, NetDevice};
 const QS: usize = 64;
 
 /// FXMAC NIC driver instance.
+///
+/// The hardware device and the RX staging queue are each guarded by a
+/// `SpinNoIrq` lock so the driver can be shared behind a `&self`
+/// interface. The lock order is always RX queue first, then the device.
 pub struct FXmacNic {
-    inner: &'static mut FXmac,
+    inner: SpinNoIrq<&'static mut FXmac>,
     hwaddr: [u8; 6],
-    rx_buffer_queue: VecDeque<NetBufHandle>,
+    rx_buffer_queue: SpinNoIrq<VecDeque<NetBufHandle>>,
 }
 
 unsafe impl Sync for FXmacNic {}
@@ -37,9 +42,9 @@ impl FXmacNic {
 
         let inner = xmac_init(&hwaddr);
         let dev = Self {
-            inner,
+            inner: SpinNoIrq::new(inner),
             hwaddr,
-            rx_buffer_queue,
+            rx_buffer_queue: SpinNoIrq::new(rx_buffer_queue),
         };
         Ok(dev)
     }
@@ -69,31 +74,32 @@ impl NetDevice for FXmacNic {
     }
 
     fn can_rx(&self) -> bool {
-        !self.rx_buffer_queue.is_empty()
+        !self.rx_buffer_queue.lock().is_empty()
     }
 
     fn can_tx(&self) -> bool {
         true
     }
 
-    fn recycle_rx(&mut self, rx_buf: NetBufHandle) -> DriverResult {
+    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult {
         unsafe {
             drop(Box::from_raw(rx_buf.owner_ptr::<Vec<u8>>()));
         }
         Ok(())
     }
 
-    fn recycle_tx(&mut self) -> DriverResult {
+    fn recycle_tx(&self) -> DriverResult {
         // drop tx_buf
         Ok(())
     }
 
-    fn recv(&mut self) -> DriverResult<NetBufHandle> {
-        if !self.rx_buffer_queue.is_empty() {
+    fn recv(&self) -> DriverResult<NetBufHandle> {
+        let mut rx_buffer_queue = self.rx_buffer_queue.lock();
+        if !rx_buffer_queue.is_empty() {
             // RX buffer have received packets.
-            Ok(self.rx_buffer_queue.pop_front().unwrap())
+            Ok(rx_buffer_queue.pop_front().unwrap())
         } else {
-            match FXmacRecvHandler(self.inner) {
+            match FXmacRecvHandler(&mut **self.inner.lock()) {
                 None => Err(DriverError::WouldBlock),
                 Some(packets) => {
                     for payload in packets {
@@ -107,18 +113,18 @@ impl NetDevice for FXmacNic {
                             buf_len,
                         );
 
-                        self.rx_buffer_queue.push_back(rx_buf);
+                        rx_buffer_queue.push_back(rx_buf);
                     }
 
-                    Ok(self.rx_buffer_queue.pop_front().unwrap())
+                    Ok(rx_buffer_queue.pop_front().unwrap())
                 }
             }
         }
     }
 
-    fn send(&mut self, tx_buf: NetBufHandle) -> DriverResult {
+    fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
         let tx_vec = vec![tx_buf.data().to_vec()];
-        let ret = FXmacLwipPortTx(self.inner, tx_vec);
+        let ret = FXmacLwipPortTx(&mut **self.inner.lock(), tx_vec);
         unsafe {
             drop(Box::from_raw(tx_buf.owner_ptr::<Vec<u8>>()));
         }
@@ -129,7 +135,7 @@ impl NetDevice for FXmacNic {
         }
     }
 
-    fn alloc_tx_buf(&mut self, size: usize) -> DriverResult<NetBufHandle> {
+    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
         let mut tx_buf = Box::new(alloc::vec![0; size]);
         let tx_buf_ptr = tx_buf.as_mut_ptr();
 

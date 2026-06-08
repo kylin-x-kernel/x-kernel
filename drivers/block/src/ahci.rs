@@ -5,13 +5,22 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use kspin::SpinNoIrq;
 use simple_ahci::AhciDriver as CoreAhciDriver;
 pub use simple_ahci::Hal as AhciHal;
 
 use crate::BlockDevice;
 
 /// AHCI driver implementation based on `simple_ahci` crate.
-pub struct AhciDriver<H: AhciHal>(CoreAhciDriver<H>);
+///
+/// The `SpinNoIrq` lock serializes hardware access so the device can be
+/// shared behind a `&self` interface. `num_blocks` and `block_size` cache
+/// the device geometry so queries do not need to take the lock.
+pub struct AhciDriver<H: AhciHal> {
+    inner: SpinNoIrq<CoreAhciDriver<H>>,
+    num_blocks: u64,
+    block_size: usize,
+}
 
 impl<H: AhciHal> AhciDriver<H> {
     /// Attempts to create a new AHCI driver using the specified MMIO base address.
@@ -24,7 +33,15 @@ impl<H: AhciHal> AhciDriver<H> {
     /// - No other part of the code is accessing the AHCI controller simultaneously.
     /// - The AHCI hardware is functioning at the provided address.
     pub unsafe fn new(base_addr: usize) -> Option<Self> {
-        CoreAhciDriver::<H>::try_new(base_addr).map(AhciDriver)
+        CoreAhciDriver::<H>::try_new(base_addr).map(|driver| {
+            let block_size = driver.block_size();
+            let num_blocks = driver.capacity();
+            AhciDriver {
+                inner: SpinNoIrq::new(driver),
+                num_blocks,
+                block_size,
+            }
+        })
     }
 }
 
@@ -40,42 +57,44 @@ impl<H: AhciHal> Device for AhciDriver<H> {
 
 impl<H: AhciHal> BlockDevice for AhciDriver<H> {
     fn block_size(&self) -> usize {
-        self.0.block_size()
+        self.block_size
     }
 
     fn num_blocks(&self) -> u64 {
-        self.0.capacity()
+        self.num_blocks
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        if buf.len() % self.block_size() != 0 {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        if buf.len() % self.block_size != 0 {
             return Err(DriverError::InvalidInput);
         }
         if buf.as_ptr() as usize % 4 != 0 {
             return Err(DriverError::InvalidInput);
         }
-        if self.0.read(block_id, buf) {
+        let mut dev = self.inner.lock();
+        if dev.read(block_id, buf) {
             Ok(())
         } else {
             Err(DriverError::Io)
         }
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
-        if buf.len() % self.block_size() != 0 {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        if buf.len() % self.block_size != 0 {
             return Err(DriverError::InvalidInput);
         }
         if buf.as_ptr() as usize % 4 != 0 {
             return Err(DriverError::InvalidInput);
         }
-        if self.0.write(block_id, buf) {
+        let mut dev = self.inner.lock();
+        if dev.write(block_id, buf) {
             Ok(())
         } else {
             Err(DriverError::Io)
         }
     }
 
-    fn flush(&mut self) -> DriverResult {
+    fn flush(&self) -> DriverResult {
         Ok(())
     }
 }

@@ -35,19 +35,19 @@ pub trait CharDevice: Device {
     /// indicates end-of-stream when the device has a finite source; for
     /// open-ended sources, drivers should return [`DriverError::WouldBlock`]
     /// instead so the caller can decide whether to retry or sleep.
-    fn read(&mut self, buf: &mut [u8]) -> DriverResult<usize>;
+    fn read(&self, buf: &mut [u8]) -> DriverResult<usize>;
 
     /// Write up to `buf.len()` bytes from `buf` to the device.
     ///
     /// Returns the number of bytes actually accepted. Drivers that cannot
     /// make progress without blocking should return
     /// [`DriverError::WouldBlock`] rather than spinning internally.
-    fn write(&mut self, buf: &[u8]) -> DriverResult<usize>;
+    fn write(&self, buf: &[u8]) -> DriverResult<usize>;
 
     /// Flush any buffered output to the underlying hardware.
     ///
     /// Default implementation is a no-op for stateless devices.
-    fn flush(&mut self) -> DriverResult {
+    fn flush(&self) -> DriverResult {
         Ok(())
     }
 }

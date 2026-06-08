@@ -152,10 +152,10 @@ pub trait InputDevice: Device {
     ///
     /// Returns true if the event type is supported and the bitmap is written to
     /// `out`.
-    fn get_event_bits(&mut self, ty: EventType, out: &mut [u8]) -> DriverResult<bool>;
+    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool>;
 
     /// Reads an input event from the device.
     ///
     /// If no events are available, `Err(DriverError::WouldBlock)` is returned.
-    fn read_event(&mut self) -> DriverResult<Event>;
+    fn read_event(&self) -> DriverResult<Event>;
 }

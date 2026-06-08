@@ -274,31 +274,31 @@ impl BlockDevice for ClassDevice<BlockDeviceImpl> {
         self.with(|device| device.block_size())
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        self.with_mut(|device| device.read_block(block_id, buf))
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        self.with(|device| device.read_block(block_id, buf))
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
-        self.with_mut(|device| device.write_block(block_id, buf))
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        self.with(|device| device.write_block(block_id, buf))
     }
 
-    fn flush(&mut self) -> DriverResult {
-        self.with_mut(|device| device.flush())
+    fn flush(&self) -> DriverResult {
+        self.with(|device| device.flush())
     }
 }
 
 #[cfg(feature = "char")]
 impl CharDevice for ClassDevice<CharDeviceImpl> {
-    fn read(&mut self, buf: &mut [u8]) -> DriverResult<usize> {
-        self.with_mut(|device| device.read(buf))
+    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+        self.with(|device| device.read(buf))
     }
 
-    fn write(&mut self, buf: &[u8]) -> DriverResult<usize> {
-        self.with_mut(|device| device.write(buf))
+    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
+        self.with(|device| device.write(buf))
     }
 
-    fn flush(&mut self) -> DriverResult {
-        self.with_mut(|device| device.flush())
+    fn flush(&self) -> DriverResult {
+        self.with(|device| device.flush())
     }
 }
 
@@ -318,8 +318,8 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         // underlying display device cannot be removed and the mapping is
         // guaranteed to remain valid for `fb_size` bytes starting at
         // `fb_base_vaddr`. The framebuffer is only mutated through
-        // `flush()` (which takes `&mut self`), so no other code mutates
-        // this region concurrently.
+        // `flush()`, and the driver serializes that access with its own
+        // interior lock, so no other code mutates this region concurrently.
         unsafe {
             display::FrameBuffer::from_raw_parts_mut(info.fb_base_vaddr as *mut u8, info.fb_size)
         }
@@ -329,8 +329,8 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         self.with(|device| device.need_flush())
     }
 
-    fn flush(&mut self) -> DriverResult {
-        self.with_mut(|device| device.flush())
+    fn flush(&self) -> DriverResult {
+        self.with(|device| device.flush())
     }
 }
 
@@ -348,12 +348,12 @@ impl InputDevice for ClassDevice<InputDeviceImpl> {
         self.input_unique_id()
     }
 
-    fn get_event_bits(&mut self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
-        self.with_mut(|device| device.get_event_bits(ty, out))
+    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
+        self.with(|device| device.get_event_bits(ty, out))
     }
 
-    fn read_event(&mut self) -> DriverResult<Event> {
-        self.with_mut(|device| device.read_event())
+    fn read_event(&self) -> DriverResult<Event> {
+        self.with(|device| device.read_event())
     }
 }
 
@@ -379,24 +379,24 @@ impl NetDevice for ClassDevice<NetDeviceImpl> {
         self.with(|device| device.tx_queue_len())
     }
 
-    fn recycle_rx(&mut self, rx_buf: NetBufHandle) -> DriverResult {
-        self.with_mut(|device| device.recycle_rx(rx_buf))
+    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult {
+        self.with(|device| device.recycle_rx(rx_buf))
     }
 
-    fn recycle_tx(&mut self) -> DriverResult {
-        self.with_mut(|device| device.recycle_tx())
+    fn recycle_tx(&self) -> DriverResult {
+        self.with(|device| device.recycle_tx())
     }
 
-    fn send(&mut self, tx_buf: NetBufHandle) -> DriverResult {
-        self.with_mut(|device| device.send(tx_buf))
+    fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
+        self.with(|device| device.send(tx_buf))
     }
 
-    fn recv(&mut self) -> DriverResult<NetBufHandle> {
-        self.with_mut(|device| device.recv())
+    fn recv(&self) -> DriverResult<NetBufHandle> {
+        self.with(|device| device.recv())
     }
 
-    fn alloc_tx_buf(&mut self, size: usize) -> DriverResult<NetBufHandle> {
-        self.with_mut(|device| device.alloc_tx_buf(size))
+    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
+        self.with(|device| device.alloc_tx_buf(size))
     }
 }
 
@@ -406,36 +406,36 @@ impl VsockDevice for ClassDevice<VsockDeviceImpl> {
         self.with(|device| device.guest_cid())
     }
 
-    fn listen(&mut self, src_port: u32) {
-        self.with_mut(|device| device.listen(src_port));
+    fn listen(&self, src_port: u32) {
+        self.with(|device| device.listen(src_port));
     }
 
-    fn connect(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        self.with_mut(|device| device.connect(cid))
+    fn connect(&self, cid: VsockConnId) -> DriverResult<()> {
+        self.with(|device| device.connect(cid))
     }
 
-    fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
-        self.with_mut(|device| device.send(cid, buf))
+    fn send(&self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
+        self.with(|device| device.send(cid, buf))
     }
 
-    fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
-        self.with_mut(|device| device.recv(cid, buf))
+    fn recv(&self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
+        self.with(|device| device.recv(cid, buf))
     }
 
-    fn recv_avail(&mut self, cid: VsockConnId) -> DriverResult<usize> {
-        self.with_mut(|device| device.recv_avail(cid))
+    fn recv_avail(&self, cid: VsockConnId) -> DriverResult<usize> {
+        self.with(|device| device.recv_avail(cid))
     }
 
-    fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        self.with_mut(|device| device.disconnect(cid))
+    fn disconnect(&self, cid: VsockConnId) -> DriverResult<()> {
+        self.with(|device| device.disconnect(cid))
     }
 
-    fn abort(&mut self, cid: VsockConnId) -> DriverResult<()> {
-        self.with_mut(|device| device.abort(cid))
+    fn abort(&self, cid: VsockConnId) -> DriverResult<()> {
+        self.with(|device| device.abort(cid))
     }
 
-    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEventType>> {
-        self.with_mut(|device| device.poll_event())
+    fn poll_event(&self) -> DriverResult<Option<VsockDriverEventType>> {
+        self.with(|device| device.poll_event())
     }
 }
 
@@ -452,8 +452,8 @@ impl Virtio9pDevice for ClassDevice<Virtio9pDeviceImpl> {
         self.mount_tag()
     }
 
-    fn request(&mut self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
-        self.with_mut(|device| device.request(req, resp))
+    fn request(&self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
+        self.with(|device| device.request(req, resp))
     }
 }
 

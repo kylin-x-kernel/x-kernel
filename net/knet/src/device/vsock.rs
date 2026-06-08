@@ -160,15 +160,15 @@ fn poll_vsock_devices() -> KResult<bool> {
     // Use core::mem::take to atomically move all events out and empty the global queue
     let pending_events = core::mem::take(&mut *VSOCK_EVENT_QUEUE.lock());
     for event in pending_events {
-        handle_vsock_event(&dev, event, &mut buf);
+        handle_vsock_event(event, &dev, &mut buf);
     }
 
     loop {
-        match dev.with_mut(|driver| driver.poll_event()) {
+        match dev.poll_event() {
             Ok(None) => break, // no more events
             Ok(Some(event)) => {
                 event_count += 1;
-                handle_vsock_event(&dev, event, &mut buf);
+                handle_vsock_event(event, &dev, &mut buf);
             }
             Err(e) => {
                 info!("Failed to poll vsock event: {e:?}");
@@ -179,43 +179,41 @@ fn poll_vsock_devices() -> KResult<bool> {
     Ok(event_count > 0)
 }
 
-fn handle_vsock_event(
-    dev: &ClassDevice<VsockDeviceImpl>,
-    event: VsockDriverEventType,
-    buf: &mut [u8],
-) {
+fn handle_vsock_event(event: VsockDriverEventType, dev: &dyn VsockDevice, buf: &mut [u8]) {
     debug!("Handling vsock event: {event:?}");
 
     match event {
         VsockDriverEventType::ConnectionRequest(conn_id) => {
-            let mut manager = VSOCK_CONN_MANAGER.lock();
-            if let Err(e) = manager.on_connection_request(conn_id) {
+            if let Err(e) = VSOCK_CONN_MANAGER.lock().on_connection_request(conn_id) {
                 info!("Connection request failed: {conn_id:?}, error={e:?}");
             }
         }
 
         VsockDriverEventType::Received(conn_id, len) => {
-            let conn = {
-                let manager = VSOCK_CONN_MANAGER.lock();
-                manager.get_connection(conn_id)
-            };
-            let free_space = if let Some(conn) = conn {
-                conn.lock().rx_buffer_free()
-            } else {
+            // Look up the connection, then release the manager lock before
+            // touching the connection or the device. This keeps the global
+            // order `VSOCK_CONN_MANAGER -> conn` and never holds the manager
+            // lock across the `conn` lock or device IO.
+            let Some(conn) = VSOCK_CONN_MANAGER.lock().get_connection(conn_id) else {
                 info!("Received data for unknown connection: {conn_id:?}");
                 return;
             };
 
+            let free_space = conn.lock().rx_buffer_free();
             if free_space == 0 {
-                requeue_vsock_event(VsockDriverEventType::Received(conn_id, len));
+                VSOCK_EVENT_QUEUE
+                    .lock()
+                    .push_back(VsockDriverEventType::Received(conn_id, len));
                 return;
             }
 
             let max_read = core::cmp::min(free_space, buf.len());
-            match dev.with_mut(|driver| driver.recv(conn_id, &mut buf[..max_read])) {
+            match dev.recv(conn_id, &mut buf[..max_read]) {
                 Ok(read_len) => {
-                    let mut manager = VSOCK_CONN_MANAGER.lock();
-                    if let Err(e) = manager.on_data_received(conn_id, &buf[..read_len]) {
+                    if let Err(e) = VSOCK_CONN_MANAGER
+                        .lock()
+                        .on_data_received(conn_id, &buf[..read_len])
+                    {
                         info!(
                             "Failed to dispatch_irq received data: conn_id={conn_id:?}, \
                              error={e:?}",
@@ -229,22 +227,19 @@ fn handle_vsock_event(
         }
 
         VsockDriverEventType::Disconnected(conn_id) => {
-            let mut manager = VSOCK_CONN_MANAGER.lock();
-            if let Err(e) = manager.on_disconnected(conn_id) {
+            if let Err(e) = VSOCK_CONN_MANAGER.lock().on_disconnected(conn_id) {
                 info!("Failed to dispatch_irq disconnection: {conn_id:?}, error={e:?}",);
             }
         }
 
         VsockDriverEventType::Connected(conn_id) => {
-            let mut manager = VSOCK_CONN_MANAGER.lock();
-            if let Err(e) = manager.on_connected(conn_id) {
+            if let Err(e) = VSOCK_CONN_MANAGER.lock().on_connected(conn_id) {
                 info!("Failed to dispatch_irq connection established: {conn_id:?}, error={e:?}",);
             }
         }
 
         VsockDriverEventType::CreditUpdate(conn_id) => {
-            let mut manager = VSOCK_CONN_MANAGER.lock();
-            if let Err(e) = manager.on_credit_update(conn_id) {
+            if let Err(e) = VSOCK_CONN_MANAGER.lock().on_credit_update(conn_id) {
                 info!("Failed to handle credit update: {conn_id:?}, error={e:?}",);
             }
         }
@@ -253,12 +248,8 @@ fn handle_vsock_event(
     }
 }
 
-fn requeue_vsock_event(event: VsockDriverEventType) {
-    VSOCK_EVENT_QUEUE.lock().push_back(event);
-}
-
 pub fn vsock_listen(addr: VsockAddr) -> KResult<()> {
-    let mut dev = get_vsock_dev()?;
+    let dev = get_vsock_dev()?;
     dev.listen(addr.port);
     Ok(())
 }
@@ -274,7 +265,7 @@ fn map_dev_err(e: DriverError) -> KError {
 }
 
 pub fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
-    let mut dev = get_vsock_dev()?;
+    let dev = get_vsock_dev()?;
     dev.connect(conn_id).map_err(map_dev_err)
 }
 
@@ -282,7 +273,7 @@ pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
     let max_retries = 10; // Tests have shown that no more than two retries will be notified
     for _ in 0..max_retries {
         let result = {
-            let mut dev = get_vsock_dev()?;
+            let dev = get_vsock_dev()?;
             dev.send(conn_id, buf)
         };
         match result {
@@ -301,7 +292,7 @@ pub fn vsock_send(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
 }
 
 pub fn vsock_disconnect(conn_id: VsockConnId) -> KResult<()> {
-    let mut dev = get_vsock_dev()?;
+    let dev = get_vsock_dev()?;
     dev.disconnect(conn_id).map_err(map_dev_err)
 }
 

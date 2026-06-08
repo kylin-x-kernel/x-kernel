@@ -37,14 +37,14 @@ pub trait BlockDevice: Device {
     ///
     /// The size of the buffer may exceed the block size, in which case multiple
     /// contiguous blocks will be read.
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult;
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult;
 
     /// Writes blocked data to the given block.
     ///
     /// The size of the buffer may exceed the block size, in which case multiple
     /// contiguous blocks will be written.
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult;
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult;
 
     /// Flushes the device to write all pending data to the storage.
-    fn flush(&mut self) -> DriverResult;
+    fn flush(&self) -> DriverResult;
 }

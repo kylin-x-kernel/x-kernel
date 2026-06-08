@@ -61,26 +61,26 @@ pub trait VsockDevice: Device {
     fn guest_cid(&self) -> u64;
 
     /// Listen on a specific port.
-    fn listen(&mut self, src_port: u32);
+    fn listen(&self, src_port: u32);
 
     /// Connect to a peer socket.
-    fn connect(&mut self, cid: VsockConnId) -> DriverResult<()>;
+    fn connect(&self, cid: VsockConnId) -> DriverResult<()>;
 
     /// Send data to the connected peer socket.
-    fn send(&mut self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize>;
+    fn send(&self, cid: VsockConnId, buf: &[u8]) -> DriverResult<usize>;
 
     /// Receive data from the connected peer socket.
-    fn recv(&mut self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize>;
+    fn recv(&self, cid: VsockConnId, buf: &mut [u8]) -> DriverResult<usize>;
 
     /// Returns the number of bytes in the receive buffer available to be read by recv.
-    fn recv_avail(&mut self, cid: VsockConnId) -> DriverResult<usize>;
+    fn recv_avail(&self, cid: VsockConnId) -> DriverResult<usize>;
 
     /// Disconnect from the connected peer socket.
-    fn disconnect(&mut self, cid: VsockConnId) -> DriverResult<()>;
+    fn disconnect(&self, cid: VsockConnId) -> DriverResult<()>;
 
     /// Forcibly closes the connection without waiting for the peer.
-    fn abort(&mut self, cid: VsockConnId) -> DriverResult<()>;
+    fn abort(&self, cid: VsockConnId) -> DriverResult<()>;
 
     /// Poll for a device event.
-    fn poll_event(&mut self) -> DriverResult<Option<VsockDriverEventType>>;
+    fn poll_event(&self) -> DriverResult<Option<VsockDriverEventType>>;
 }

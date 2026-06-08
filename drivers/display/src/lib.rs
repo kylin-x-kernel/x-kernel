@@ -59,7 +59,7 @@ pub trait DisplayDevice: Device {
     fn need_flush(&self) -> bool;
 
     /// Flush framebuffer to the screen.
-    fn flush(&mut self) -> DriverResult;
+    fn flush(&self) -> DriverResult;
 }
 
 mod tests;

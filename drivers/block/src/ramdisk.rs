@@ -14,13 +14,18 @@ use core::{
 };
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use kspin::SpinNoPreempt;
 
 use crate::BlockDevice;
 
 const BLOCK_SIZE: usize = 512;
 
 /// A RAM disk structure backed by heap memory.
-pub struct RamDisk(NonNull<[u8]>);
+///
+/// The `SpinNoPreempt` lock serializes all block reads and writes so the
+/// device can be shared behind a `&self` interface. `SpinNoPreempt` is
+/// sufficient because this is a pure-software driver with no IRQ interaction.
+pub struct RamDisk(NonNull<[u8]>, SpinNoPreempt<()>);
 
 unsafe impl Send for RamDisk {}
 unsafe impl Sync for RamDisk {}
@@ -28,7 +33,7 @@ unsafe impl Sync for RamDisk {}
 impl Default for RamDisk {
     fn default() -> Self {
         // Initially creates an empty dangling pointer for the RamDisk
-        Self(NonNull::<[u8; 0]>::dangling())
+        Self(NonNull::<[u8; 0]>::dangling(), SpinNoPreempt::new(()))
     }
 }
 
@@ -43,7 +48,10 @@ impl RamDisk {
         // Allocate the memory and create a NonNull pointer to the RAM disk buffer.
         let ptr = unsafe { NonNull::new_unchecked(alloc_zeroed(layout)) };
 
-        Self(NonNull::slice_from_raw_parts(ptr, size))
+        Self(
+            NonNull::slice_from_raw_parts(ptr, size),
+            SpinNoPreempt::new(()),
+        )
     }
 }
 
@@ -109,7 +117,7 @@ impl BlockDevice for RamDisk {
         BLOCK_SIZE
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         if buf.len() % BLOCK_SIZE != 0 {
             return Err(DriverError::InvalidInput);
         }
@@ -117,11 +125,12 @@ impl BlockDevice for RamDisk {
         if offset + buf.len() > self.len() {
             return Err(DriverError::Io);
         }
+        let _guard = self.1.lock();
         buf.copy_from_slice(&self[offset..offset + buf.len()]);
         Ok(())
     }
 
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
         if buf.len() % BLOCK_SIZE != 0 {
             return Err(DriverError::InvalidInput);
         }
@@ -129,11 +138,16 @@ impl BlockDevice for RamDisk {
         if offset + buf.len() > self.len() {
             return Err(DriverError::Io);
         }
-        self[offset..offset + buf.len()].copy_from_slice(buf);
+        let _guard = self.1.lock();
+        // SAFETY: the lock serializes all mutable access; the pointer is valid
+        // for `self.0.len()` bytes (allocated in `new`), and the bounds were
+        // checked above.
+        let data = unsafe { self.0.as_ptr().as_mut().unwrap_unchecked() };
+        data[offset..offset + buf.len()].copy_from_slice(buf);
         Ok(())
     }
 
-    fn flush(&mut self) -> DriverResult {
+    fn flush(&self) -> DriverResult {
         Ok(())
     }
 }
@@ -154,7 +168,7 @@ mod tests_ramdisk {
     #[def_test]
     fn test_ramdisk_basic_operations() {
         // Test creation with different sizes
-        let mut disk = RamDisk::new(1024);
+        let disk = RamDisk::new(1024);
         assert_eq!(disk.device_kind(), DeviceKind::Block);
         assert_eq!(disk.name(), "ramdisk");
         assert_eq!(disk.block_size(), 512);
@@ -187,7 +201,7 @@ mod tests_ramdisk {
 
     #[def_test]
     fn test_ramdisk_boundary_conditions() {
-        let mut disk = RamDisk::new(1536); // 3 blocks
+        let disk = RamDisk::new(1536); // 3 blocks
 
         // Test reading beyond disk boundary
         let mut buf = vec![0; 512];

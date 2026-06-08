@@ -66,7 +66,7 @@ pub struct EventDev {
 }
 
 impl EventDev {
-    pub fn new(mut device: ClassDevice<InputDeviceImpl>) -> Self {
+    pub fn new(device: ClassDevice<InputDeviceImpl>) -> Self {
         let mut ev_bits = Bitmap::new();
         for i in 0..EventType::COUNT {
             let Some(ty) = EventType::from_repr(i) else {
@@ -353,7 +353,7 @@ pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut input_id = 0;
     let input_devices = inputdev::input_drain_devices();
     let mut keys = [0; 0x300usize.div_ceil(8)];
-    for (i, mut device) in input_devices.into_iter().enumerate() {
+    for (i, device) in input_devices.into_iter().enumerate() {
         assert!(device.get_event_bits(EventType::Key, &mut keys).unwrap());
 
         let event_dev = Arc::new(EventDev::new(device));

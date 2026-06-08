@@ -69,7 +69,7 @@ impl EthernetDevice {
     }
 
     fn send_to<F>(
-        inner: &mut dyn NetDevice,
+        inner: &dyn NetDevice,
         dst: EthernetAddress,
         size: usize,
         f: F,
@@ -156,15 +156,13 @@ impl EthernetDevice {
             target_protocol_addr: target_ipv4,
         };
 
-        self.inner.with_mut(|inner| {
-            Self::send_to(
-                inner.as_mut(),
-                EthernetAddress::BROADCAST,
-                arp_repr.buffer_len(),
-                |buf| arp_repr.emit(&mut ArpPacket::new_unchecked(buf)),
-                EthernetProtocol::Arp,
-            );
-        });
+        Self::send_to(
+            &self.inner,
+            EthernetAddress::BROADCAST,
+            arp_repr.buffer_len(),
+            |buf| arp_repr.emit(&mut ArpPacket::new_unchecked(buf)),
+            EthernetProtocol::Arp,
+        );
 
         self.neighbors.insert(target_ip, None);
     }
@@ -224,15 +222,13 @@ impl EthernetDevice {
                     target_protocol_addr: source_protocol_addr,
                 };
 
-                self.inner.with_mut(|inner| {
-                    Self::send_to(
-                        inner.as_mut(),
-                        source_hardware_addr,
-                        response.buffer_len(),
-                        |buf| response.emit(&mut ArpPacket::new_unchecked(buf)),
-                        EthernetProtocol::Arp,
-                    );
-                });
+                Self::send_to(
+                    &self.inner,
+                    source_hardware_addr,
+                    response.buffer_len(),
+                    |buf| response.emit(&mut ArpPacket::new_unchecked(buf)),
+                    EthernetProtocol::Arp,
+                );
             }
 
             enum PendingAction {
@@ -259,7 +255,7 @@ impl EthernetDevice {
                 let _ = self.pending_tx.dequeue();
                 match action {
                     PendingAction::Send(hardware_address) => Self::send_to(
-                        &mut self.inner,
+                        &self.inner,
                         hardware_address,
                         payload.len(),
                         |b| b.copy_from_slice(&payload),
@@ -327,29 +323,25 @@ impl NetDeviceOps for EthernetDevice {
         timestamp: Instant,
     ) -> bool {
         if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
-            self.inner.with_mut(|inner| {
-                Self::send_to(
-                    inner.as_mut(),
-                    EthernetAddress::BROADCAST,
-                    ip_packet.len(),
-                    |buf| buf.copy_from_slice(ip_packet),
-                    EthernetProtocol::Ipv4,
-                );
-            });
+            Self::send_to(
+                &self.inner,
+                EthernetAddress::BROADCAST,
+                ip_packet.len(),
+                |buf| buf.copy_from_slice(ip_packet),
+                EthernetProtocol::Ipv4,
+            );
             return false;
         }
 
         let need_request = match self.neighbors.get(&next_hop) {
             Some(Some(neighbor)) if neighbor.expires_at > timestamp => {
-                self.inner.with_mut(|inner| {
-                    Self::send_to(
-                        inner.as_mut(),
-                        neighbor.hardware_address,
-                        ip_packet.len(),
-                        |buf| buf.copy_from_slice(ip_packet),
-                        EthernetProtocol::Ipv4,
-                    );
-                });
+                Self::send_to(
+                    &self.inner,
+                    neighbor.hardware_address,
+                    ip_packet.len(),
+                    |buf| buf.copy_from_slice(ip_packet),
+                    EthernetProtocol::Ipv4,
+                );
                 return false;
             }
             Some(Some(_)) => true,

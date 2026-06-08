@@ -5,6 +5,7 @@
 //! VirtIO GPU driver adapter.
 use display::{DisplayDevice, DisplayInfo, FrameBuffer};
 use driver_base::{Device, DeviceKind, DriverResult};
+use kspin::SpinNoIrq;
 use virtio_drivers::{Hal, device::gpu::VirtIOGpu as InnerDev, transport::Transport};
 
 /// The VirtIO GPU device driver.
@@ -28,12 +29,12 @@ use virtio_drivers::{Hal, device::gpu::VirtIOGpu as InnerDev, transport::Transpo
 /// ```
 pub struct VirtIoGpuDev<H: Hal, T: Transport> {
     info: DisplayInfo,
-    inner: InnerDev<H, T>,
+    inner: SpinNoIrq<InnerDev<H, T>>,
 }
 
-// SAFETY: VirtIoGpuDev accesses the device exclusively through &mut self.
-// The inner VirtIOGpu is not auto Send/Sync due to PhantomData, but it is
-// safe to transfer across threads and share immutable references.
+// SAFETY: VirtIoGpuDev serializes access to the inner VirtIOGpu through its own
+// `SpinNoIrq` lock. The inner type is not auto Send/Sync due to PhantomData,
+// but it is safe to transfer across threads and share behind that lock.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoGpuDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 
@@ -59,7 +60,7 @@ impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
                 fb_base_vaddr,
                 fb_size,
             },
-            inner: device,
+            inner: SpinNoIrq::new(device),
         })
     }
 }
@@ -96,7 +97,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         true
     }
 
-    fn flush(&mut self) -> DriverResult {
-        self.inner.flush().map_err(crate::as_driver_error)
+    fn flush(&self) -> DriverResult {
+        self.inner.lock().flush().map_err(crate::as_driver_error)
     }
 }
