@@ -7,10 +7,44 @@
 use alloc::vec;
 
 use kerrno::{KError, KResult};
-use khal::paging::MappingFlags;
+use khal::paging::{MappingFlags, PageSize, PagingError};
 use kthread::current_process_state;
-use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use posix_types::UserPtr;
+
+struct ResidencyQuery {
+    is_resident: bool,
+    step_bytes: usize,
+}
+
+impl ResidencyQuery {
+    fn from_page_table_query(
+        query_result: Result<(PhysAddr, MappingFlags, PageSize), PagingError>,
+    ) -> Self {
+        match query_result {
+            Ok((_, _, size)) => Self {
+                is_resident: true,
+                step_bytes: size as usize,
+            },
+            Err(_) => Self {
+                is_resident: false,
+                step_bytes: PAGE_SIZE_4K,
+            },
+        }
+    }
+
+    fn step_pages(&self) -> usize {
+        self.step_bytes / PAGE_SIZE_4K
+    }
+}
+
+fn ensure_user_accessible_area(aspace: &memspace::AddrSpace, addr: VirtAddr) -> KResult<()> {
+    let area = aspace.find_area(addr).ok_or(KError::NoMemory)?;
+    if !area.flags().contains(MappingFlags::USER) {
+        return Err(KError::NoMemory);
+    }
+    Ok(())
+}
 
 /// Check whether pages are resident in memory.
 ///
@@ -75,36 +109,16 @@ pub fn sys_mincore(addr: usize, length: usize, vec: UserPtr<u8>) -> KResult<isiz
     while i < page_count {
         let addr = start_addr + i * PAGE_SIZE_4K;
 
-        // ENOMEM: Check if this page is within a valid VMA
-        let area = aspace.find_area(addr).ok_or(KError::NoMemory)?;
+        ensure_user_accessible_area(&aspace, addr)?;
+        let residency = ResidencyQuery::from_page_table_query(aspace.page_table().query(addr));
+        let step_pages = residency.step_pages();
 
-        // Verify we have at least USER access permission
-        if !area.flags().contains(MappingFlags::USER) {
-            return Err(KError::NoMemory);
-        }
-
-        // Query page table with batch awareness
-        let (is_resident, size) = match aspace.page_table().query(addr) {
-            Ok((_, _, size)) => {
-                // Physical page exists and is resident
-                // page_size tells us how many contiguous pages have the same status
-                (true, size as _)
-            }
-            Err(_) => {
-                // Page is mapped but not populated (lazy allocation)
-                // We need to determine how many contiguous pages are also not populated
-                // For safety, we check the next page or use PAGE_SIZE_4K as minimum step
-                (false, PAGE_SIZE_4K)
-            }
-        };
-        let n = size / PAGE_SIZE_4K;
-
-        if is_resident {
-            let end = (i + n).min(page_count);
+        if residency.is_resident {
+            let end = (i + step_pages).min(page_count);
             result[i..end].fill(1);
         }
 
-        i += n;
+        i += step_pages;
     }
 
     // EFAULT: Write result to user space

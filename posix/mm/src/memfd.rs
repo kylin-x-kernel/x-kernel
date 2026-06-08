@@ -15,8 +15,27 @@ use posix_types::UserConstPtr;
 
 // TODO: correct memfd implementation
 
+bitflags::bitflags! {
+    #[derive(Clone, Copy)]
+    struct MemfdFlags: u32 {
+        const CLOEXEC = MFD_CLOEXEC;
+    }
+}
+
+impl MemfdFlags {
+    fn from_raw(bits: u32) -> KResult<Self> {
+        Self::from_bits(bits).ok_or(KError::InvalidInput)
+    }
+
+    fn is_cloexec(self) -> bool {
+        self.contains(Self::CLOEXEC)
+    }
+}
+
 /// Creates an anonymous in-memory file descriptor.
 pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
+    let flags = MemfdFlags::from_raw(flags)?;
+
     // This is cursed
     for id in 0..0xffff {
         let name = format!("/tmp/memfd-{id:04x}");
@@ -29,11 +48,10 @@ pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isiz
                 .open_flags(O_RDWR)
                 .open(&fs, &name)?
                 .into_file()?;
-            let cloexec = flags & MFD_CLOEXEC != 0;
             let proc_state = current_process_state();
             return proc_state
                 .resources
-                .add_file_like(Arc::new(file), cloexec)
+                .add_file_like(Arc::new(file), flags.is_cloexec())
                 .map(|fd| fd as _);
         }
     }
