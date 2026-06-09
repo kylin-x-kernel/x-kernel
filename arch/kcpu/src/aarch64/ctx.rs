@@ -273,7 +273,7 @@ impl TaskContext {
             // SAFETY: `ttbr0_el1` value comes from `HwPageTableRoot` set via
             // `set_page_table_root()`, guaranteed valid by the page table subsystem.
             unsafe { karch::write_user_page_table(next_ctx.ttbr0_el1) };
-            karch::flush_tlb(None); // currently flush the entire TLB
+            // User ASIDs tag TLB entries; switching TTBR0 does not require a full flush.
         }
         // SAFETY: Naked function that saves/restores callee-saved registers (x19-x30, sp)
         // and swaps stack pointers. Both stack pointers are valid.

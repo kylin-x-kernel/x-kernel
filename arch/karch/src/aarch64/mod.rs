@@ -4,6 +4,7 @@
 
 //! AArch64 low-level architecture operations.
 
+mod asid;
 mod cache;
 mod cpu;
 mod fp;
@@ -13,6 +14,10 @@ mod tlb;
 mod tls;
 mod trap;
 
+pub use asid::{
+    alloc_user_asid, encode_user_page_table_root, free_user_asid, user_asid_from_ttbr,
+    user_page_table_root_paddr,
+};
 pub use cache::{
     flush_dcache_line, flush_icache_all, flush_icache_all_local, flush_icache_range,
     flush_icache_remote,
@@ -28,6 +33,6 @@ pub use mmu::{
     HwPageTableRoot, read_kernel_page_table, read_user_page_table, write_kernel_page_table,
     write_user_page_table,
 };
-pub use tlb::flush_tlb;
+pub use tlb::{flush_tlb, flush_tlb_asid, flush_tlb_va_asid};
 pub use tls::{read_thread_pointer, write_thread_pointer};
 pub use trap::write_trap_vector_base;

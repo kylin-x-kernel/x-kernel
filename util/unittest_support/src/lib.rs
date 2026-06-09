@@ -98,7 +98,7 @@ impl InstalledTestThread {
         let thr = Thread::new(tid, proc_state);
         init_thread(&thr);
 
-        let page_table_root = thr.proc_state.address_space().lock().page_table_root();
+        let page_table_root = thr.proc_state.address_space().lock().page_table_hw_root();
         let task_ptr = current_task_ptr();
         let previous_page_table_root = karch::read_user_page_table();
 
@@ -116,9 +116,8 @@ impl InstalledTestThread {
             }
 
             let ctx_ptr: *mut khal::context::TaskContext = (*task_ptr).ctx() as *const _ as *mut _;
-            (*ctx_ptr).set_page_table_root(page_table_root.into());
-            karch::write_user_page_table(page_table_root.into());
-            karch::flush_tlb(None);
+            (*ctx_ptr).set_page_table_root(page_table_root);
+            karch::write_user_page_table(page_table_root);
 
             (*task_ptr).task_ext_mut().replace(KTaskExt::from_impl(thr))
         };
@@ -158,7 +157,6 @@ impl Drop for InstalledTestThread {
                     (*task_ptr).ctx() as *const _ as *mut _;
                 (*ctx_ptr).set_page_table_root(self.previous_page_table_root);
                 karch::write_user_page_table(self.previous_page_table_root);
-                karch::flush_tlb(None);
 
                 *(*task_ptr).task_ext_mut() = self.previous_task_ext.take();
             }

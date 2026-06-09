@@ -226,6 +226,14 @@ impl PagingMetaData for A64PagingMetaData {
         karch::flush_tlb(vaddr);
     }
 
+    #[inline]
+    fn flush_tlb_process_asid(vaddr: Option<VirtAddr>, asid: u16) {
+        match vaddr {
+            Some(va) => karch::flush_tlb_va_asid(va, asid),
+            None => karch::flush_tlb_asid(asid),
+        }
+    }
+
     #[cfg(feature = "smp")]
     #[inline]
     fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {

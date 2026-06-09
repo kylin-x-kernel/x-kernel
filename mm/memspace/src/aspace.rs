@@ -35,6 +35,9 @@ pub struct AddrSpace {
     range: VirtAddrRange,
     areas: MemorySet<Backend>,
     pgtbl: PageTable,
+    /// User ASID packed into TTBR0_EL1 on AArch64.
+    #[cfg(target_arch = "aarch64")]
+    asid: u16,
 }
 
 impl AddrSpace {
@@ -68,6 +71,18 @@ impl AddrSpace {
         self.pgtbl.root_paddr()
     }
 
+    /// Returns the hardware page-table root value for user context switches.
+    pub fn page_table_hw_root(&self) -> karch::HwPageTableRoot {
+        #[cfg(target_arch = "aarch64")]
+        {
+            karch::encode_user_page_table_root(self.page_table_root(), self.asid)
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.page_table_root().into()
+        }
+    }
+
     /// Checks if the address space contains the given address range.
     pub fn contains_range(&self, start: VirtAddr, size: usize) -> bool {
         self.range.contains(start) && (self.range.end - start) >= size
@@ -95,6 +110,25 @@ impl AddrSpace {
     /// Set `is_kernel` to `true` for the global kernel address space so that
     /// page table modifications flush TLB entries on **all** online CPUs.
     fn new_empty_inner(base: VirtAddr, size: usize, is_kernel: bool) -> KResult<Self> {
+        #[cfg(target_arch = "aarch64")]
+        let asid = if is_kernel {
+            0
+        } else {
+            karch::alloc_user_asid()
+        };
+        #[cfg(target_arch = "aarch64")]
+        let pgtbl = {
+            let mut pgtbl = if is_kernel {
+                PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
+            } else {
+                PageTable::try_new().map_err(|_| KError::NoMemory)?
+            };
+            if asid != 0 {
+                pgtbl.set_user_asid(asid);
+            }
+            pgtbl
+        };
+        #[cfg(not(target_arch = "aarch64"))]
         let pgtbl = if is_kernel {
             PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
         } else {
@@ -104,6 +138,8 @@ impl AddrSpace {
             range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
             pgtbl,
+            #[cfg(target_arch = "aarch64")]
+            asid,
         })
     }
 
@@ -556,6 +592,10 @@ impl fmt::Debug for AddrSpace {
 
 impl Drop for AddrSpace {
     fn drop(&mut self) {
+        #[cfg(target_arch = "aarch64")]
+        if self.asid != 0 {
+            karch::free_user_asid(self.asid);
+        }
         self.clear();
     }
 }

@@ -49,7 +49,7 @@ pub fn run_init_process(
 
     let mut task = new_user_task(name, uctx, 0, dispatch_syscall);
     task.ctx_mut()
-        .set_page_table_root(uspace.page_table_root().into());
+        .set_page_table_root(uspace.page_table_hw_root());
 
     let pid = task.id().as_u64() as Pid;
     let proc = Process::new_init(pid);

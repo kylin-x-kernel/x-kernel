@@ -76,6 +76,9 @@ pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>
     /// to **all** online CPUs instead of only the current task's
     /// residency mask.
     is_kernel: bool,
+    /// User ASID for ASID-scoped TLB shootdown (AArch64 TTBR0). Zero for
+    /// kernel page tables and before the owner address space assigns one.
+    user_asid: u16,
     _phantom: PhantomData<(M, PTE, H)>,
 }
 
@@ -105,8 +108,15 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
             #[cfg(feature = "copy-from")]
             borrowed_entries: bitmaps::Bitmap::new(),
             is_kernel,
+            user_asid: 0,
             _phantom: PhantomData,
         })
+    }
+
+    /// Sets the user ASID used for TLB shootdown when this page table is
+    /// modified. Must match the ASID packed into TTBR0 on context switch.
+    pub const fn set_user_asid(&mut self, asid: u16) {
+        self.user_asid = asid;
     }
 
     /// Returns the physical address of the root page table frame.
@@ -646,17 +656,18 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
                 }
             }
         } else {
-            // User page table: flush only CPUs where the current process
-            // has been scheduled (per-process residency mask).
+            // User page table: invalidate stale entries for this address
+            // space's ASID (AArch64) or residency mask (other arches).
+            let asid = self.inner.user_asid;
             match &self.flush {
                 ToFlush::None => {}
                 ToFlush::Addresses(addrs) => {
                     for vaddr in addrs.iter() {
-                        M::flush_tlb_process(Some(*vaddr));
+                        M::flush_tlb_process_asid(Some(*vaddr), asid);
                     }
                 }
                 ToFlush::Full => {
-                    M::flush_tlb_process(None);
+                    M::flush_tlb_process_asid(None, asid);
                 }
             }
         }

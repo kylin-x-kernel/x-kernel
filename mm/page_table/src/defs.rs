@@ -191,6 +191,15 @@ pub trait PagingMetaData: Sync + Send {
         Self::flush_tlb(vaddr);
     }
 
+    /// Like [`flush_tlb_process`](Self::flush_tlb_process), but scoped to
+    /// `asid` when the architecture supports ASID-tagged TLB entries.
+    ///
+    /// Default: ignores `asid` and delegates to `flush_tlb_process`.
+    #[inline]
+    fn flush_tlb_process_asid(vaddr: Option<Self::VirtAddr>, _asid: u16) {
+        Self::flush_tlb_process(vaddr);
+    }
+
     /// Flush TLB on **all** online CPUs, regardless of task residency.
     /// Required for kernel page table modifications whose mappings are
     /// shared across every process.
