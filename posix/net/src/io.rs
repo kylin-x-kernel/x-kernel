@@ -202,17 +202,41 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<is
 /// Receive data from a socket with optional remote address and ancillary data collection
 struct RecvOutput<'a> {
     addr: UserPtr<sockaddr>,
-    addrlen: UserPtr<socklen_t>,
+    addrlen: RecvAddrLen<'a>,
     out_flags: Option<&'a mut RecvFlags>,
     cmsg_builder: Option<CMsgBuilder<'a>>,
     msg_flags: Option<&'a mut u32>,
+}
+
+enum RecvAddrLen<'a> {
+    User(UserPtr<socklen_t>),
+    Value(&'a mut socklen_t),
+}
+
+impl RecvAddrLen<'_> {
+    fn read(&self) -> KResult<socklen_t> {
+        match self {
+            RecvAddrLen::User(ptr) => ptr.read_vm().map_err(Into::into),
+            RecvAddrLen::Value(value) => Ok(**value),
+        }
+    }
+
+    fn write(&mut self, value: socklen_t) -> KResult<()> {
+        match self {
+            RecvAddrLen::User(ptr) => ptr.write_vm(value).map_err(Into::into),
+            RecvAddrLen::Value(dst) => {
+                **dst = value;
+                Ok(())
+            }
+        }
+    }
 }
 
 impl<'a> RecvOutput<'a> {
     fn new(addr: UserPtr<sockaddr>, addrlen: UserPtr<socklen_t>) -> Self {
         Self {
             addr,
-            addrlen,
+            addrlen: RecvAddrLen::User(addrlen),
             out_flags: None,
             cmsg_builder: None,
             msg_flags: None,
@@ -224,7 +248,7 @@ fn recv_impl(
     fd: i32,
     mut dst: impl Write + IoBufMut,
     flags: u32,
-    output: RecvOutput<'_>,
+    mut output: RecvOutput<'_>,
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
@@ -261,9 +285,9 @@ fn recv_impl(
     }
 
     if let Some(remote_addr) = remote_addr {
-        let mut addrlen_value = output.addrlen.read_vm()?;
+        let mut addrlen_value = output.addrlen.read()?;
         remote_addr.write_to_user(output.addr, &mut addrlen_value)?;
-        output.addrlen.write_vm(addrlen_value)?;
+        output.addrlen.write(addrlen_value)?;
     }
 
     let mut cmsg_truncated = false;
@@ -325,6 +349,7 @@ pub fn sys_recvfrom(
 pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> {
     let mut msg_value = msg.read_vm()?;
     msg_value.msg_flags = 0;
+    let mut msg_namelen = msg_value.msg_namelen as socklen_t;
     let result = recv_impl(
         fd,
         IoVectorBuf::from_iovecs(IoVec::load_from_user(
@@ -334,6 +359,8 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> 
         .into_io(),
         flags,
         RecvOutput {
+            addr: UserPtr::from(msg_value.msg_name as usize),
+            addrlen: RecvAddrLen::Value(&mut msg_namelen),
             cmsg_builder: (!msg_value.msg_control.is_null()).then(|| {
                 CMsgBuilder::new(
                     UserPtr::from(msg_value.msg_control as *mut cmsghdr),
@@ -341,12 +368,10 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> 
                 )
             }),
             msg_flags: Some(&mut msg_value.msg_flags),
-            ..RecvOutput::new(
-                UserPtr::from(msg_value.msg_name as usize),
-                UserPtr::from(&mut msg_value.msg_namelen as *mut _ as *mut socklen_t),
-            )
+            out_flags: None,
         },
     );
+    msg_value.msg_namelen = msg_namelen as _;
     write_vm_mem(msg.as_ptr().cast_mut(), core::slice::from_ref(&msg_value))?;
     result
 }
