@@ -656,11 +656,24 @@ fn error_packets(request: &[u8], errno: LinuxError) -> Vec<NetlinkPacket> {
     }]
 }
 
-pub(super) fn route_state() -> RtnetlinkState {
+pub(crate) fn route_state() -> RtnetlinkState {
     if ROUTE_STATE.is_inited() {
         (*ROUTE_STATE.read()).clone()
     } else {
         Default::default()
+    }
+}
+
+pub(crate) fn link_state_for_ifindex(ifindex: i32) -> Option<LinkState> {
+    if ROUTE_STATE.is_inited() {
+        ROUTE_STATE
+            .read()
+            .links
+            .iter()
+            .find(|link| link.index == ifindex)
+            .cloned()
+    } else {
+        None
     }
 }
 

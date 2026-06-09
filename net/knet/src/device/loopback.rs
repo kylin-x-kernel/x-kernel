@@ -44,6 +44,7 @@ impl NetDevice for LoopbackDevice {
 
     fn poll_rx(
         &mut self,
+        _ifindex: i32,
         buffer: &mut PacketBuffer<()>,
         _timestamp: Instant,
         packet_snoop: &mut dyn FnMut(&[u8]),
@@ -60,6 +61,7 @@ impl NetDevice for LoopbackDevice {
 
     fn send_ip_packet(
         &mut self,
+        _ifindex: i32,
         next_hop: IpAddress,
         ip_packet: &[u8],
         _timestamp: Instant,

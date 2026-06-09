@@ -24,9 +24,13 @@ const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
 const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 
+const PACKET_ADD_MEMBERSHIP: u32 = 1;
+const PACKET_DROP_MEMBERSHIP: u32 = 2;
+const PACKET_STATISTICS: u32 = 6;
+
 mod conv {
     use kerrno::{KError, KResult};
-    use knet::options::UnixCredentials;
+    use knet::options::{PacketMembership, PacketStatistics, UnixCredentials};
     use linux_raw_sys::{general::timeval, net::ucred};
     use posix_types::TimeValueLike;
 
@@ -85,6 +89,64 @@ mod conv {
             })
         }
     }
+
+    #[allow(non_camel_case_types)]
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct tpacket_stats {
+        pub tp_packets: u32,
+        pub tp_drops: u32,
+    }
+
+    pub struct PacketStats;
+
+    impl PacketStats {
+        pub fn sys_to_rust(val: tpacket_stats) -> KResult<PacketStatistics> {
+            Ok(PacketStatistics {
+                packets: val.tp_packets,
+                drops: val.tp_drops,
+            })
+        }
+
+        pub fn rust_to_sys(val: PacketStatistics) -> KResult<tpacket_stats> {
+            Ok(tpacket_stats {
+                tp_packets: val.packets,
+                tp_drops: val.drops,
+            })
+        }
+    }
+
+    #[allow(non_camel_case_types)]
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct packet_mreq {
+        pub mr_ifindex: i32,
+        pub mr_type: u16,
+        pub mr_alen: u16,
+        pub mr_address: [u8; 8],
+    }
+
+    pub struct PacketMembershipConv;
+
+    impl PacketMembershipConv {
+        pub fn sys_to_rust(val: packet_mreq) -> KResult<PacketMembership> {
+            Ok(PacketMembership {
+                ifindex: val.mr_ifindex,
+                membership_type: val.mr_type,
+                addr_len: val.mr_alen,
+                addr: val.mr_address,
+            })
+        }
+
+        pub fn rust_to_sys(val: PacketMembership) -> KResult<packet_mreq> {
+            Ok(packet_mreq {
+                mr_ifindex: val.ifindex,
+                mr_type: val.membership_type,
+                mr_alen: val.addr_len,
+                mr_address: val.addr,
+            })
+        }
+    }
 }
 
 macro_rules! call_dispatch {
@@ -111,6 +173,10 @@ macro_rules! call_dispatch {
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,
+
+            (SOL_PACKET, PACKET_STATISTICS) => PacketStatistics as PacketStats,
+            (SOL_PACKET, PACKET_ADD_MEMBERSHIP) => PacketAddMembership as PacketMembershipConv,
+            (SOL_PACKET, PACKET_DROP_MEMBERSHIP) => PacketDropMembership as PacketMembershipConv,
         }
     }};
     ($dispatch:ident, $in:expr, $($pat:pat => $which:ident $(as $conv:ty)?),* $(,)?) => {

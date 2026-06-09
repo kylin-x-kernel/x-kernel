@@ -5,6 +5,7 @@
 //! Routing table and route selection.
 use alloc::{boxed::Box, vec, vec::Vec};
 
+use kerrno::{KError, KResult, LinuxError};
 use smoltcp::{
     iface::SocketSet,
     phy::{DeviceCapabilities, Medium},
@@ -177,15 +178,29 @@ impl Router {
     }
 
     pub fn poll(&mut self, timestamp: Instant, sockets: &mut SocketSet<'_>) {
-        for dev in &mut self.devices {
+        for (dev_index, dev) in self.devices.iter_mut().enumerate() {
+            let ifindex = dev_index as i32 + 1;
             let mut packet_snoop = |packet: &[u8]| {
                 snoop_udp_error_packet(packet);
                 snoop_tcp_packet(packet, sockets);
             };
             while !self.rx_buffer.is_full()
-                && dev.poll_rx(&mut self.rx_buffer, timestamp, &mut packet_snoop)
-            {}
+                && dev.poll_rx(ifindex, &mut self.rx_buffer, timestamp, &mut packet_snoop)
+            {
+            }
         }
+    }
+
+    pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+        if ifindex <= 0 {
+            return Err(KError::InvalidInput);
+        }
+        let dev_index = (ifindex - 1) as usize;
+        let dev = self
+            .devices
+            .get_mut(dev_index)
+            .ok_or(KError::from(LinuxError::ENODEV))?;
+        dev.send_link_frame(ifindex, frame)
     }
 
     pub fn dispatch(&mut self, timestamp: Instant) -> bool {
@@ -198,8 +213,9 @@ impl Router {
                     let dst_addr = IpAddress::Ipv4(ip_packet.dst_addr());
                     if ip_packet.dst_addr().is_broadcast() {
                         let buf = ip_packet.into_inner();
-                        for dev in &mut self.devices {
-                            poll_next |= dev.send_ip_packet(dst_addr, buf, timestamp);
+                        for (dev_index, dev) in self.devices.iter_mut().enumerate() {
+                            poll_next |=
+                                dev.send_ip_packet(dev_index as i32 + 1, dst_addr, buf, timestamp);
                         }
                     } else {
                         let Some(rule) = self.table.lookup(&dst_addr) else {
@@ -210,8 +226,12 @@ impl Router {
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
                         let dev = &mut self.devices[rule.dev];
-                        poll_next |=
-                            dev.send_ip_packet(next_hop, ip_packet.into_inner(), timestamp);
+                        poll_next |= dev.send_ip_packet(
+                            rule.dev as i32 + 1,
+                            next_hop,
+                            ip_packet.into_inner(),
+                            timestamp,
+                        );
                     }
                 }
                 IpVersion::Ipv6 => {
@@ -220,8 +240,9 @@ impl Router {
                     let dst_addr = IpAddress::Ipv6(ip_packet.dst_addr());
                     if ip_packet.dst_addr().is_multicast() {
                         let buf = ip_packet.into_inner();
-                        for dev in &mut self.devices {
-                            poll_next |= dev.send_ip_packet(dst_addr, buf, timestamp);
+                        for (dev_index, dev) in self.devices.iter_mut().enumerate() {
+                            poll_next |=
+                                dev.send_ip_packet(dev_index as i32 + 1, dst_addr, buf, timestamp);
                         }
                     } else {
                         let Some(rule) = self.table.lookup(&dst_addr) else {
@@ -232,8 +253,12 @@ impl Router {
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
                         let dev = &mut self.devices[rule.dev];
-                        poll_next |=
-                            dev.send_ip_packet(next_hop, ip_packet.into_inner(), timestamp);
+                        poll_next |= dev.send_ip_packet(
+                            rule.dev as i32 + 1,
+                            next_hop,
+                            ip_packet.into_inner(),
+                            timestamp,
+                        );
                     }
                 }
             }

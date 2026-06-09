@@ -19,6 +19,7 @@ use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
     Shutdown, Socket, SocketAddrEx, SocketOps,
     netlink::NetlinkSocket,
+    packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
     tcp::TcpSocket,
     udp::UdpSocket,
@@ -27,9 +28,9 @@ use knet::{
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{
-        AF_INET, AF_INET6, AF_NETLINK, AF_UNIX, AF_VSOCK, IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP,
-        SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM, sockaddr,
-        socklen_t,
+        AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_ICMP, IPPROTO_TCP,
+        IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET,
+        SOCK_STREAM, sockaddr, socklen_t,
     },
 };
 use posix_types::{UserConstPtr, UserPtr};
@@ -81,12 +82,31 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             }
             knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32)))
         }
+        (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
+            if !kthread::current_thread()
+                .proc_state
+                .credentials
+                .read()
+                .is_privileged()
+            {
+                return Err(KError::from(LinuxError::EPERM));
+            }
+            if proto > u16::MAX as u32 {
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            let kind = if ty == SOCK_RAW {
+                PacketSocketKind::Raw
+            } else {
+                PacketSocketKind::Datagram
+            };
+            knet::Socket::Packet(Box::new(PacketSocket::new(kind, proto as u16)?))
+        }
         #[cfg(feature = "vsock")]
         (AF_VSOCK, SOCK_STREAM) => {
             // Virtio socket (hypervisor communication)
             knet::Socket::Vsock(Box::new(VsockSocket::new(VsockStreamTransport::new())))
         }
-        (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) | (AF_NETLINK, _) => {
+        (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) | (AF_NETLINK, _) | (AF_PACKET, _) => {
             // Socket type not supported for this domain
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
             return Err(KError::from(LinuxError::ESOCKTNOSUPPORT));
@@ -96,8 +116,6 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
     };
-    let socket = socket;
-
     if raw_ty & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
     }

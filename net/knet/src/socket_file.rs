@@ -75,6 +75,7 @@ impl Pollable for Socket {
             Socket::Raw(raw) => raw.poll(),
             Socket::Unix(unix) => unix.poll(),
             Socket::Netlink(netlink) => netlink.poll(),
+            Socket::Packet(packet) => packet.poll(),
             #[cfg(feature = "vsock")]
             Socket::Vsock(vsock) => vsock.poll(),
         }
@@ -87,6 +88,7 @@ impl Pollable for Socket {
             Socket::Raw(raw) => raw.register(context, events),
             Socket::Unix(unix) => unix.register(context, events),
             Socket::Netlink(netlink) => netlink.register(context, events),
+            Socket::Packet(packet) => packet.register(context, events),
             #[cfg(feature = "vsock")]
             Socket::Vsock(vsock) => vsock.register(context, events),
         }

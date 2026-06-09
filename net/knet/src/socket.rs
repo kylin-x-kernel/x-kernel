@@ -22,6 +22,7 @@ use crate::vsock::VsockSocket;
 use crate::{
     netlink::{NetlinkAddr, NetlinkSocket},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
+    packet::{PacketAddr, PacketSocket},
     raw::RawSocket,
     tcp::TcpSocket,
     udp::UdpSocket,
@@ -33,6 +34,7 @@ pub enum SocketAddrEx {
     Ip(SocketAddr),
     Unix(UnixAddr),
     Netlink(NetlinkAddr),
+    Packet(PacketAddr),
     #[cfg(feature = "vsock")]
     Vsock(VsockAddr),
 }
@@ -43,6 +45,7 @@ impl SocketAddrEx {
             SocketAddrEx::Ip(addr) => Ok(addr),
             SocketAddrEx::Unix(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Netlink(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Packet(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             #[cfg(feature = "vsock")]
             SocketAddrEx::Vsock(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
         }
@@ -53,6 +56,7 @@ impl SocketAddrEx {
             SocketAddrEx::Unix(addr) => Ok(addr),
             SocketAddrEx::Ip(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Netlink(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Packet(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             #[cfg(feature = "vsock")]
             SocketAddrEx::Vsock(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
         }
@@ -65,12 +69,20 @@ impl SocketAddrEx {
         }
     }
 
+    pub fn into_packet(self) -> KResult<PacketAddr> {
+        match self {
+            SocketAddrEx::Packet(addr) => Ok(addr),
+            _ => Err(KError::from(LinuxError::EAFNOSUPPORT)),
+        }
+    }
+
     #[cfg(feature = "vsock")]
     pub fn into_vsock(self) -> KResult<VsockAddr> {
         match self {
             SocketAddrEx::Ip(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Unix(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Netlink(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
+            SocketAddrEx::Packet(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
             SocketAddrEx::Vsock(addr) => Ok(addr),
         }
     }
@@ -148,12 +160,14 @@ pub struct RecvOptions<'a> {
     pub from: Option<&'a mut SocketAddrEx>,
     pub flags: RecvFlags,
     pub ancillary: Option<&'a mut Vec<AncillaryData>>,
+    pub out_flags: Option<&'a mut RecvFlags>,
 }
 impl Debug for RecvOptions<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RecvOptions")
             .field("from", &self.from)
             .field("flags", &self.flags)
+            .field("out_flags", &self.out_flags.as_ref().map(|_| ()))
             .finish()
     }
 }
@@ -253,6 +267,7 @@ pub enum Socket {
     Raw(Box<RawSocket>),
     Unix(Box<UnixDomainSocket>),
     Netlink(Box<NetlinkSocket>),
+    Packet(Box<PacketSocket>),
     #[cfg(feature = "vsock")]
     Vsock(Box<VsockSocket>),
 }

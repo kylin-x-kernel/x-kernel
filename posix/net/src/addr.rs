@@ -15,12 +15,12 @@ use core::{
 use kerrno::{KError, KResult, LinuxError};
 #[cfg(feature = "vsock")]
 use knet::vsock::VsockAddr;
-use knet::{SocketAddrEx, netlink::NetlinkAddr, unix::UnixAddr};
+use knet::{SocketAddrEx, netlink::NetlinkAddr, packet::PacketAddr, unix::UnixAddr};
 use linux_raw_sys::net::*;
 use osvm::VirtPtr;
 #[cfg(feature = "vsock")]
 use posix_types::net::socket_addr::sockaddr_vm;
-use posix_types::{UserConstPtr, UserPtr, net::socket_addr::sockaddr_nl};
+use posix_types::{UserConstPtr, UserPtr, UserRead, net::socket_addr::sockaddr_nl};
 
 /// Trait to extend [`SocketAddr`] and its variants with methods for reading
 /// from and writing to user space.
@@ -218,6 +218,54 @@ impl SocketAddrExt for NetlinkAddr {
     }
 }
 
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct sockaddr_ll {
+    pub sll_family: __kernel_sa_family_t,
+    pub sll_protocol: u16,
+    pub sll_ifindex: i32,
+    pub sll_hatype: u16,
+    pub sll_pkttype: u8,
+    pub sll_halen: u8,
+    pub sll_addr: [u8; 8],
+}
+
+unsafe impl UserRead for sockaddr_ll {}
+
+impl SocketAddrExt for PacketAddr {
+    fn read_from_user(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<Self> {
+        if addrlen < size_of::<sockaddr_ll>() as socklen_t {
+            return Err(KError::InvalidInput);
+        }
+        let addr_ll = addr.cast::<sockaddr_ll>().read_vm()?;
+        if addr_ll.sll_family as u32 != AF_PACKET {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        }
+        Ok(PacketAddr {
+            protocol: addr_ll.sll_protocol,
+            ifindex: addr_ll.sll_ifindex,
+            hatype: addr_ll.sll_hatype,
+            pkttype: addr_ll.sll_pkttype,
+            addr_len: addr_ll.sll_halen,
+            addr: addr_ll.sll_addr,
+        })
+    }
+
+    fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
+        let addr_ll = sockaddr_ll {
+            sll_family: AF_PACKET as _,
+            sll_protocol: self.protocol,
+            sll_ifindex: self.ifindex,
+            sll_hatype: self.hatype,
+            sll_pkttype: self.pkttype,
+            sll_halen: self.addr_len,
+            sll_addr: self.addr,
+        };
+        fill_addr(addr, addrlen, unsafe { cast_to_slice(&addr_ll) })
+    }
+}
+
 /// SocketAddrExt implementation for Vsock addresses
 #[cfg(feature = "vsock")]
 impl SocketAddrExt for VsockAddr {
@@ -258,6 +306,7 @@ impl SocketAddrExt for SocketAddrEx {
             AF_INET | AF_INET6 => SocketAddr::read_from_user(addr, addrlen).map(Self::Ip),
             AF_UNIX => UnixAddr::read_from_user(addr, addrlen).map(Self::Unix),
             AF_NETLINK => NetlinkAddr::read_from_user(addr, addrlen).map(Self::Netlink),
+            AF_PACKET => PacketAddr::read_from_user(addr, addrlen).map(Self::Packet),
             #[cfg(feature = "vsock")]
             AF_VSOCK => VsockAddr::read_from_user(addr, addrlen).map(Self::Vsock),
             _ => Err(KError::from(LinuxError::EAFNOSUPPORT)),
@@ -270,6 +319,7 @@ impl SocketAddrExt for SocketAddrEx {
             SocketAddrEx::Ip(ip_addr) => ip_addr.write_to_user(addr, addrlen),
             SocketAddrEx::Unix(unix_addr) => unix_addr.write_to_user(addr, addrlen),
             SocketAddrEx::Netlink(netlink_addr) => netlink_addr.write_to_user(addr, addrlen),
+            SocketAddrEx::Packet(packet_addr) => packet_addr.write_to_user(addr, addrlen),
             #[cfg(feature = "vsock")]
             SocketAddrEx::Vsock(vsock_addr) => vsock_addr.write_to_user(addr, addrlen),
         }

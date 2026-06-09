@@ -40,6 +40,7 @@ pub struct UnixCredentials {
     pub uid: u32,
     pub gid: u32,
 }
+
 impl UnixCredentials {
     pub fn new(pid: u32) -> Self {
         UnixCredentials {
@@ -48,6 +49,20 @@ impl UnixCredentials {
             gid: 0,
         }
     }
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct PacketStatistics {
+    pub packets: u32,
+    pub drops: u32,
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct PacketMembership {
+    pub ifindex: i32,
+    pub membership_type: u16,
+    pub addr_len: u16,
+    pub addr: [u8; 8],
 }
 
 define_options! {
@@ -72,6 +87,11 @@ define_options! {
     // ---- IP options ----
     Ttl(u8),
     RecvErr(bool),
+
+    // ---- Packet socket options (PACKET_*) ----
+    PacketStatistics(PacketStatistics),
+    PacketAddMembership(PacketMembership),
+    PacketDropMembership(PacketMembership),
 
     // ---- Extra options ----
     NonBlocking(bool),

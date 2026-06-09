@@ -5,6 +5,7 @@
 //! Network device abstractions.
 use core::task::Waker;
 
+use kerrno::KResult;
 use smoltcp::{storage::PacketBuffer, time::Instant, wire::IpAddress};
 
 mod ethernet;
@@ -31,6 +32,7 @@ pub trait NetDevice: Send + Sync {
     /// Polls the device and pushes received IP packets into `buffer`.
     fn poll_rx(
         &mut self,
+        ifindex: i32,
         buffer: &mut PacketBuffer<()>,
         timestamp: Instant,
         packet_snoop: &mut dyn FnMut(&[u8]),
@@ -40,8 +42,23 @@ pub trait NetDevice: Send + Sync {
     /// Returns `true` if this operation resulted in the readiness of receive
     /// operation. This is true for loopback devices and can be used to speed
     /// up packet processing.
-    fn send_ip_packet(&mut self, next_hop: IpAddress, ip_packet: &[u8], timestamp: Instant)
-    -> bool;
+    fn send_ip_packet(
+        &mut self,
+        ifindex: i32,
+        next_hop: IpAddress,
+        ip_packet: &[u8],
+        timestamp: Instant,
+    ) -> bool;
+
+    /// Sends a link-layer frame through the device.
+    ///
+    /// `ifindex` identifies the egress network interface and `frame` contains
+    /// the complete link-layer frame to transmit. Devices that do not support
+    /// raw link-layer transmission keep the default implementation, which
+    /// returns [`kerrno::KError::OperationNotSupported`].
+    fn send_link_frame(&mut self, _ifindex: i32, _frame: &[u8]) -> KResult<usize> {
+        Err(kerrno::KError::OperationNotSupported)
+    }
 
     /// Register a waker for receive readiness.
     fn register_rx_waker(&self, waker: &Waker);

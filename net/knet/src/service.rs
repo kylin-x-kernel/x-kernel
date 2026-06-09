@@ -139,4 +139,8 @@ impl Service {
     pub fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> bool {
         self.router.remove_device_by_model_id(id)
     }
+
+    pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+        self.router.send_link_frame(ifindex, frame)
+    }
 }

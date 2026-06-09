@@ -8,6 +8,7 @@ use core::task::Waker;
 
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
+use kerrno::{KError, KResult, LinuxError};
 use ktask::future::register_irq_waker;
 use smoltcp::{
     storage::{PacketBuffer, PacketMetadata},
@@ -22,6 +23,7 @@ use crate::{
     consts::{ETHERNET_MAX_PENDING_PACKETS, STANDARD_MTU},
     device::NetDevice as NetDeviceOps,
     netlink::{AddrState, LinkState, NeighState},
+    packet,
 };
 
 const EMPTY_MAC: EthernetAddress = EthernetAddress([0; 6]);
@@ -68,18 +70,19 @@ impl EthernetDevice {
         EthernetAddress(self.inner.mac().0)
     }
 
-    fn send_to<F>(
+    fn send_frame<F>(
         inner: &dyn NetDevice,
         dst: EthernetAddress,
         size: usize,
         f: F,
         proto: EthernetProtocol,
-    ) where
+    ) -> Option<([u8; 6], Vec<u8>)>
+    where
         F: FnOnce(&mut [u8]),
     {
         if let Err(err) = inner.recycle_tx() {
             warn!("recycle_tx failed: {:?}", err);
-            return;
+            return None;
         }
 
         let repr = EthernetRepr {
@@ -92,30 +95,60 @@ impl EthernetDevice {
             Ok(buf) => buf,
             Err(err) => {
                 warn!("alloc_tx_buf failed: {:?}", err);
-                return;
+                return None;
             }
         };
         let mut frame = EthernetFrame::new_unchecked(tx_buf.data_mut());
         repr.emit(&mut frame);
         f(frame.payload_mut());
+        let frame_data = packet::has_packet_handlers().then(|| tx_buf.data().to_vec());
         trace!("SEND {} bytes: {:02X?}", tx_buf.len(), tx_buf.data());
         if let Err(err) = inner.send(tx_buf) {
             warn!("send failed: {:?}", err);
+            None
+        } else {
+            frame_data.map(|frame_data| (repr.src_addr.0, frame_data))
+        }
+    }
+
+    fn send_to<F>(
+        &mut self,
+        ifindex: i32,
+        dst: EthernetAddress,
+        size: usize,
+        f: F,
+        proto: EthernetProtocol,
+    ) where
+        F: FnOnce(&mut [u8]),
+    {
+        let sent = Self::send_frame(&self.inner, dst, size, f, proto);
+        if let Some((src_addr, frame_data)) = sent {
+            packet::publish_outgoing_frame(ifindex, &frame_data, src_addr);
         }
     }
 
     fn handle_rx_frame(
         &mut self,
-        frame: &[u8],
+        ifindex: i32,
+        frame_data: &[u8],
         buffer: &mut PacketBuffer<()>,
         timestamp: Instant,
         packet_snoop: &mut dyn FnMut(&[u8]),
     ) -> bool {
-        let frame = EthernetFrame::new_unchecked(frame);
+        let frame = EthernetFrame::new_unchecked(frame_data);
         let Ok(repr) = EthernetRepr::parse(&frame) else {
             warn!("Dropping malformed Ethernet frame");
             return false;
         };
+
+        packet::publish_parsed_link_frame(
+            ifindex,
+            frame_data,
+            repr.dst_addr,
+            repr.src_addr,
+            repr.ethertype,
+            self.mac_addr().0,
+        );
 
         if !repr.dst_addr.is_broadcast()
             && repr.dst_addr != EMPTY_MAC
@@ -134,14 +167,14 @@ impl EthernetDevice {
                     .copy_from_slice(frame.payload());
                 return true;
             }
-            EthernetProtocol::Arp => self.handle_arp_packet(frame.payload(), timestamp),
+            EthernetProtocol::Arp => self.handle_arp_packet(ifindex, frame.payload(), timestamp),
             _ => {}
         }
 
         false
     }
 
-    fn send_arp_request(&mut self, target_ip: IpAddress) {
+    fn send_arp_request(&mut self, ifindex: i32, target_ip: IpAddress) {
         let IpAddress::Ipv4(target_ipv4) = target_ip else {
             warn!("IPv6 address ARP is not supported: {}", target_ip);
             return;
@@ -156,8 +189,8 @@ impl EthernetDevice {
             target_protocol_addr: target_ipv4,
         };
 
-        Self::send_to(
-            &self.inner,
+        self.send_to(
+            ifindex,
             EthernetAddress::BROADCAST,
             arp_repr.buffer_len(),
             |buf| arp_repr.emit(&mut ArpPacket::new_unchecked(buf)),
@@ -167,7 +200,7 @@ impl EthernetDevice {
         self.neighbors.insert(target_ip, None);
     }
 
-    fn handle_arp_packet(&mut self, payload: &[u8], now: Instant) {
+    fn handle_arp_packet(&mut self, ifindex: i32, payload: &[u8], now: Instant) {
         let Ok(repr) = ArpPacket::new_checked(payload).and_then(|packet| ArpRepr::parse(&packet))
         else {
             debug!("Dropping malformed ARP packet");
@@ -222,8 +255,8 @@ impl EthernetDevice {
                     target_protocol_addr: source_protocol_addr,
                 };
 
-                Self::send_to(
-                    &self.inner,
+                self.send_to(
+                    ifindex,
                     source_hardware_addr,
                     response.buffer_len(),
                     |buf| response.emit(&mut ArpPacket::new_unchecked(buf)),
@@ -254,17 +287,17 @@ impl EthernetDevice {
 
                 let _ = self.pending_tx.dequeue();
                 match action {
-                    PendingAction::Send(hardware_address) => Self::send_to(
-                        &self.inner,
+                    PendingAction::Send(hardware_address) => self.send_to(
+                        ifindex,
                         hardware_address,
                         payload.len(),
-                        |b| b.copy_from_slice(&payload),
+                        |buf| buf.copy_from_slice(&payload),
                         EthernetProtocol::Ipv4,
                     ),
                     PendingAction::Keep => kept_packets.push((next_hop, payload)),
                     PendingAction::Refresh => {
                         self.neighbors.remove(&next_hop);
-                        self.send_arp_request(next_hop);
+                        self.send_arp_request(ifindex, next_hop);
                         kept_packets.push((next_hop, payload));
                     }
                 }
@@ -292,6 +325,7 @@ impl NetDeviceOps for EthernetDevice {
 
     fn poll_rx(
         &mut self,
+        ifindex: i32,
         buffer: &mut PacketBuffer<()>,
         timestamp: Instant,
         packet_snoop: &mut dyn FnMut(&[u8]),
@@ -308,7 +342,8 @@ impl NetDeviceOps for EthernetDevice {
             };
             trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
 
-            let result = self.handle_rx_frame(rx_buf.data(), buffer, timestamp, packet_snoop);
+            let result =
+                self.handle_rx_frame(ifindex, rx_buf.data(), buffer, timestamp, packet_snoop);
             self.inner.recycle_rx(rx_buf).unwrap();
             if result {
                 return true;
@@ -318,13 +353,14 @@ impl NetDeviceOps for EthernetDevice {
 
     fn send_ip_packet(
         &mut self,
+        ifindex: i32,
         next_hop: IpAddress,
         ip_packet: &[u8],
         timestamp: Instant,
     ) -> bool {
         if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
-            Self::send_to(
-                &self.inner,
+            self.send_to(
+                ifindex,
                 EthernetAddress::BROADCAST,
                 ip_packet.len(),
                 |buf| buf.copy_from_slice(ip_packet),
@@ -335,8 +371,8 @@ impl NetDeviceOps for EthernetDevice {
 
         let need_request = match self.neighbors.get(&next_hop) {
             Some(Some(neighbor)) if neighbor.expires_at > timestamp => {
-                Self::send_to(
-                    &self.inner,
+                self.send_to(
+                    ifindex,
                     neighbor.hardware_address,
                     ip_packet.len(),
                     |buf| buf.copy_from_slice(ip_packet),
@@ -351,7 +387,7 @@ impl NetDeviceOps for EthernetDevice {
         };
         // Only send ARP request if we haven't already requested it
         if need_request {
-            self.send_arp_request(next_hop);
+            self.send_arp_request(ifindex, next_hop);
         }
         if self.pending_tx.is_full() {
             warn!("Pending packets buffer is full, dropping packet");
@@ -363,6 +399,16 @@ impl NetDeviceOps for EthernetDevice {
         };
         dst_buffer.copy_from_slice(ip_packet);
         false
+    }
+
+    fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+        let local_addr = self.mac_addr().0;
+        self.inner.recycle_tx().map_err(map_dev_err)?;
+        let mut tx_buf = self.inner.alloc_tx_buf(frame.len()).map_err(map_dev_err)?;
+        tx_buf.data_mut().copy_from_slice(frame);
+        self.inner.send(tx_buf).map_err(map_dev_err)?;
+        packet::publish_outgoing_frame(ifindex, frame, local_addr);
+        Ok(frame.len())
     }
 
     fn register_rx_waker(&self, waker: &Waker) {
@@ -400,5 +446,16 @@ impl NetDeviceOps for EthernetDevice {
                 );
             }
         }
+    }
+}
+
+fn map_dev_err(err: DriverError) -> KError {
+    match err {
+        DriverError::AlreadyExists => KError::AlreadyExists,
+        DriverError::WouldBlock => KError::WouldBlock,
+        DriverError::InvalidInput => KError::InvalidInput,
+        DriverError::NoMemory => LinuxError::ENOBUFS.into(),
+        DriverError::Io => KError::Io,
+        _ => KError::BadState,
     }
 }

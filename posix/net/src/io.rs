@@ -200,14 +200,31 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<is
 }
 
 /// Receive data from a socket with optional remote address and ancillary data collection
+struct RecvOutput<'a> {
+    addr: UserPtr<sockaddr>,
+    addrlen: UserPtr<socklen_t>,
+    out_flags: Option<&'a mut RecvFlags>,
+    cmsg_builder: Option<CMsgBuilder<'a>>,
+    msg_flags: Option<&'a mut u32>,
+}
+
+impl<'a> RecvOutput<'a> {
+    fn new(addr: UserPtr<sockaddr>, addrlen: UserPtr<socklen_t>) -> Self {
+        Self {
+            addr,
+            addrlen,
+            out_flags: None,
+            cmsg_builder: None,
+            msg_flags: None,
+        }
+    }
+}
+
 fn recv_impl(
     fd: i32,
     mut dst: impl Write + IoBufMut,
     flags: u32,
-    addr: UserPtr<sockaddr>,
-    addrlen: UserPtr<socklen_t>,
-    cmsg_builder: Option<CMsgBuilder>,
-    msg_flags: Option<&mut u32>,
+    output: RecvOutput<'_>,
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
@@ -226,26 +243,31 @@ fn recv_impl(
     }
 
     let mut ancillary = Vec::new();
+    let mut reported_flags = RecvFlags::empty();
 
     let mut remote_addr =
-        (!addr.is_null()).then(|| SocketAddrEx::Ip((Ipv4Addr::UNSPECIFIED, 0).into()));
+        (!output.addr.is_null()).then(|| SocketAddrEx::Ip((Ipv4Addr::UNSPECIFIED, 0).into()));
     let recv = socket.recv(
         &mut dst,
         RecvOptions {
             from: remote_addr.as_mut(),
             flags: recv_flags,
             ancillary: Some(&mut ancillary),
+            out_flags: Some(&mut reported_flags),
         },
     )?;
+    if let Some(out_flags) = output.out_flags {
+        *out_flags = reported_flags;
+    }
 
     if let Some(remote_addr) = remote_addr {
-        let mut addrlen_value = addrlen.read_vm()?;
-        remote_addr.write_to_user(addr, &mut addrlen_value)?;
-        addrlen.write_vm(addrlen_value)?;
+        let mut addrlen_value = output.addrlen.read_vm()?;
+        remote_addr.write_to_user(output.addr, &mut addrlen_value)?;
+        output.addrlen.write_vm(addrlen_value)?;
     }
 
     let mut cmsg_truncated = false;
-    if let Some(mut builder) = cmsg_builder {
+    if let Some(mut builder) = output.cmsg_builder {
         for ancillary in ancillary {
             let Some(ancillary) = into_socket_ancillary(ancillary) else {
                 warn!("received unexpected ancillary");
@@ -268,7 +290,8 @@ fn recv_impl(
         }
     }
 
-    if let Some(msg_flags) = msg_flags {
+    if let Some(msg_flags) = output.msg_flags {
+        *msg_flags |= recv_truncate_to_msg_flag(reported_flags);
         if flags & MSG_ERRQUEUE != 0 {
             *msg_flags |= MSG_ERRQUEUE;
         }
@@ -294,10 +317,7 @@ pub fn sys_recvfrom(
         fd,
         VmBytesMut::new(buf, len),
         flags,
-        addr,
-        addrlen,
-        None,
-        None,
+        RecvOutput::new(addr, addrlen),
     )
 }
 
@@ -313,18 +333,30 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> 
         )?)?
         .into_io(),
         flags,
-        UserPtr::from(msg_value.msg_name as usize),
-        UserPtr::from(&mut msg_value.msg_namelen as *mut _ as *mut socklen_t),
-        (!msg_value.msg_control.is_null()).then(|| {
-            CMsgBuilder::new(
-                UserPtr::from(msg_value.msg_control as *mut cmsghdr),
-                &mut msg_value.msg_controllen,
+        RecvOutput {
+            cmsg_builder: (!msg_value.msg_control.is_null()).then(|| {
+                CMsgBuilder::new(
+                    UserPtr::from(msg_value.msg_control as *mut cmsghdr),
+                    &mut msg_value.msg_controllen,
+                )
+            }),
+            msg_flags: Some(&mut msg_value.msg_flags),
+            ..RecvOutput::new(
+                UserPtr::from(msg_value.msg_name as usize),
+                UserPtr::from(&mut msg_value.msg_namelen as *mut _ as *mut socklen_t),
             )
-        }),
-        Some(&mut msg_value.msg_flags),
+        },
     );
     write_vm_mem(msg.as_ptr().cast_mut(), core::slice::from_ref(&msg_value))?;
     result
+}
+
+fn recv_truncate_to_msg_flag(flags: RecvFlags) -> u32 {
+    if flags.contains(RecvFlags::TRUNCATE) {
+        MSG_TRUNC
+    } else {
+        0
+    }
 }
 
 /// Send multiple datagrams in one syscall.
@@ -420,15 +452,19 @@ pub fn sys_recvmmsg(
             )?)?
             .into_io(),
             flags,
-            UserPtr::from(msg.msg_hdr.msg_name as usize),
-            UserPtr::from(&mut msg.msg_hdr.msg_namelen as *mut _ as *mut socklen_t),
-            (!msg.msg_hdr.msg_control.is_null()).then(|| {
-                CMsgBuilder::new(
-                    UserPtr::from(msg.msg_hdr.msg_control as *mut cmsghdr),
-                    &mut msg.msg_hdr.msg_controllen,
+            RecvOutput {
+                cmsg_builder: (!msg.msg_hdr.msg_control.is_null()).then(|| {
+                    CMsgBuilder::new(
+                        UserPtr::from(msg.msg_hdr.msg_control as *mut cmsghdr),
+                        &mut msg.msg_hdr.msg_controllen,
+                    )
+                }),
+                msg_flags: Some(&mut msg.msg_hdr.msg_flags),
+                ..RecvOutput::new(
+                    UserPtr::from(msg.msg_hdr.msg_name as usize),
+                    UserPtr::from(&mut msg.msg_hdr.msg_namelen as *mut _ as *mut socklen_t),
                 )
-            }),
-            Some(&mut msg.msg_hdr.msg_flags),
+            },
         ) {
             Ok(n) => {
                 msg.msg_len = n as u32;
