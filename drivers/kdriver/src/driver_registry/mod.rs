@@ -16,6 +16,8 @@ pub(crate) mod firmware_specs;
 pub(crate) mod net;
 pub(crate) mod virtio;
 
+/// Re-export matcher result and priority types from `kdevice` for
+/// convenience when implementing [`DeviceMatcher`](kdevice::DeviceMatcher).
 pub use kdevice::{MatchResult, priority};
 
 /// Convenience type alias for a shared driver implementation.

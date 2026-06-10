@@ -35,8 +35,18 @@ mod enumeration;
 mod manager;
 mod resource;
 
+/// Re-export the PCI configuration space accessor from the `pci` crate.
 pub use pci::set_pci_config_space;
 
+/// Public API surface for the device driver orchestration crate.
+///
+/// These re-exports constitute the stable interface for:
+/// - bus management ([`BusManager`], [`default_bus_manager`])
+/// - device lifecycle ([`DeviceManager`], [`device_manager`], [`discover_unified`])
+/// - resource management ([`devm_iomap`], [`devm_request_irq`], [`devm_alloc_coherent`],
+///   [`install_resource_provider`])
+/// - ownership introspection ([`OwnershipSummary`], [`BusOwnershipSummary`],
+///   [`DriverOwnershipSummary`])
 pub use self::{
     bus::manager::{BusManager, default_bus_manager},
     driver_registry::{BusOwnershipSummary, DriverOwnershipSummary, OwnershipSummary},
@@ -91,6 +101,17 @@ fn iomap_first_mmio(
 }
 
 /// Initialize device drivers and populate typed `kclass` device classes.
+///
+/// This is the primary entry point for the driver subsystem. It:
+///
+/// 1. Initializes the global device registry ([`kdevice::init_device_registry`]).
+/// 2. Runs unified bus discovery and driver matching/probing via
+///    [`discover_unified`].
+/// 3. Logs device class, device-core state, and ownership summaries at
+///    `info` / `debug` level.
+///
+/// Must be called after platform `early_driver_init` has brought up timer,
+/// IRQ, and boot-console infrastructure.
 pub fn init_drivers() {
     info!("Initialize device drivers...");
 
@@ -105,11 +126,20 @@ pub fn init_drivers() {
 }
 
 /// Snapshot the current long-lived device topology from the driver core.
+///
+/// Returns a [`kdevice::DeviceTopology`] that can be iterated to inspect
+/// buses, drivers, and devices currently registered in the device model.
+/// The snapshot is a point-in-time view and does not track subsequent
+/// hot-plug or remove events.
 pub fn current_device_ownership() -> kdevice::DeviceTopology {
     kdevice::device_topology()
 }
 
 /// Summarize the current long-lived ownership graph through the `kdriver` facade.
+///
+/// Returns an [`OwnershipSummary`] with counts of buses, drivers, and devices
+/// currently registered. Use this for diagnostics and monitoring rather than
+/// iterating the full topology.
 pub fn current_device_ownership_summary() -> OwnershipSummary {
     let ownership = current_device_ownership();
     OwnershipSummary {
@@ -120,6 +150,9 @@ pub fn current_device_ownership_summary() -> OwnershipSummary {
 }
 
 /// Summarize current device ownership per bus through the `kdriver` facade.
+///
+/// Returns a `Vec<`[`BusOwnershipSummary`]`>` with one entry per registered bus,
+/// each carrying the bus id, name, and count of devices attached to it.
 pub fn current_bus_ownership_summaries() -> alloc::vec::Vec<BusOwnershipSummary> {
     let ownership = current_device_ownership();
     ownership
@@ -133,6 +166,10 @@ pub fn current_bus_ownership_summaries() -> alloc::vec::Vec<BusOwnershipSummary>
 }
 
 /// Summarize current device ownership per driver through the `kdriver` facade.
+///
+/// Returns a `Vec<`[`DriverOwnershipSummary`]`>` with one entry per registered
+/// driver, each carrying the driver id, name, device kind, and count of bound
+/// devices.
 pub fn current_driver_ownership_summaries() -> alloc::vec::Vec<DriverOwnershipSummary> {
     let ownership = current_device_ownership();
     ownership
@@ -147,6 +184,9 @@ pub fn current_driver_ownership_summaries() -> alloc::vec::Vec<DriverOwnershipSu
 }
 
 /// Enumerate current device cores attached to one bus through the `kdriver` facade.
+///
+/// Returns all [`kdevice::DeviceCore`] handles for devices on the given bus.
+/// Each handle is a lightweight identifier usable with other `kdevice` APIs.
 pub fn current_devices_on_bus(bus: kdevice::BusId) -> alloc::vec::Vec<kdevice::DeviceCore> {
     let ownership = current_device_ownership();
     ownership
@@ -155,7 +195,12 @@ pub fn current_devices_on_bus(bus: kdevice::BusId) -> alloc::vec::Vec<kdevice::D
         .collect()
 }
 
-/// Enumerate current device cores associated with one driver through the `kdriver` facade.
+/// Enumerate current device cores associated with one driver through the
+/// `kdriver` facade.
+///
+/// Returns all [`kdevice::DeviceCore`] handles for devices bound to the given
+/// driver. Useful for diagnostics, device enumeration, and debugging which
+/// hardware instances a driver is managing.
 pub fn current_devices_for_driver(
     driver: kdevice::DriverId,
 ) -> alloc::vec::Vec<kdevice::DeviceCore> {

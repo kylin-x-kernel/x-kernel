@@ -145,8 +145,16 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         use core::alloc::Layout;
         let size = pages * PAGE_SIZE_4K;
         let layout = Layout::from_size_align(size, PAGE_SIZE_4K).unwrap();
+        // SAFETY: `layout` is a valid non-zero layout constructed from
+        // `pages * PAGE_SIZE_4K` with `PAGE_SIZE_4K` alignment. The
+        // returned buffer is owned exclusively by the VirtIO transport
+        // until `dma_dealloc` is called.
         match unsafe { kdma::allocate_dma_memory(layout) } {
             Ok(dma_info) => {
+                // SAFETY: `dma_info.cpu_addr` was just returned by
+                // `allocate_dma_memory` and points to `size` bytes of
+                // valid, exclusively-owned DMA memory. Zeroing prevents
+                // the device from reading stale kernel data.
                 unsafe {
                     core::ptr::write_bytes(dma_info.cpu_addr.as_ptr(), 0, size);
                 }
@@ -175,12 +183,20 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             cpu_addr: vaddr,
             bus_addr: kdma::DmaBusAddress::new(paddr),
         };
+        // SAFETY: `dma_info` and `layout` describe a coherent buffer
+        // previously returned by `dma_alloc` with the same `pages`.
+        // The caller (VirtIO transport) guarantees the buffer is no
+        // longer in use by the device.
         unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
         0
     }
 
     #[inline]
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
+        // SAFETY: The caller (VirtIO transport) has confirmed the device
+        // exists at `paddr` before calling this function. `iomap_mmio`
+        // delegates to `memspace::iomap_device` which validates the
+        // physical address range.
         iomap_mmio(paddr as usize, size, "virtio-mmio-hal")
             .expect("failed to iomap virtio MMIO region")
     }
@@ -192,6 +208,10 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) -> PhysAddr {
+        // SAFETY: `buffer` is a valid DMA buffer allocated by the VirtIO
+        // transport layer (via `dma_alloc` or an upper-layer provider).
+        // `kdma::map_dma_buffer` performs the necessary cache maintenance
+        // and IOMMU mapping to make the buffer visible to the device.
         unsafe { kdma::map_dma_buffer(buffer, dma_direction(direction)) }
             .expect("failed to map shared DMA buffer via kdma")
             .bus_addr
@@ -206,6 +226,11 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) {
+        // SAFETY: `paddr` and `buffer` are the same values returned by
+        // a previous `share` call on this buffer. `kdma::unmap_dma_buffer`
+        // reverses the cache maintenance and IOMMU mapping performed by
+        // `map_dma_buffer`. The caller (VirtIO transport) guarantees the
+        // device is no longer accessing the buffer.
         unsafe {
             kdma::unmap_dma_buffer(
                 kdma::DmaBusAddress::new(paddr),
