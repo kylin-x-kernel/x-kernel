@@ -28,29 +28,32 @@ pub fn get_size_for_buffer() -> u64 {
 
 /// Returns the number of `LlvmProfileData` entries in the range.
 pub fn get_num_data(begin: *const LlvmProfileData, end: *const LlvmProfileData) -> u64 {
-    let begin_i = begin as isize;
-    let end_i = end as isize;
-    ((end_i + size_of::<LlvmProfileData>() as isize - 1) - begin_i) as u64
-        / size_of::<LlvmProfileData>() as u64
+    div_ceil_u64(
+        ptr_range_len(begin.cast::<u8>(), end.cast::<u8>()),
+        size_of::<LlvmProfileData>() as u64,
+    )
 }
 
 /// Returns the data section size in bytes.
 pub fn get_data_size(begin: *const LlvmProfileData, end: *const LlvmProfileData) -> u64 {
-    get_num_data(begin, end) * size_of::<LlvmProfileData>() as u64
+    get_num_data(begin, end)
+        .checked_mul(size_of::<LlvmProfileData>() as u64)
+        .expect("profile data size overflow")
 }
 
 /// Returns the number of counter entries in the range.
 pub fn get_num_counters(begin: *const u8, end: *const u8) -> u64 {
-    let entry_sz = crate::port::counter_entry_size(profiling::get_version());
-    let begin_i = begin as isize;
-    let end_i = end as isize;
-    ((end_i + entry_sz as isize - 1) - begin_i) as u64 / entry_sz as u64
+    let entry_sz = crate::port::counter_entry_size(profiling::get_version()) as u64;
+    assert!(entry_sz != 0, "counter entry size must be non-zero");
+    div_ceil_u64(ptr_range_len(begin, end), entry_sz)
 }
 
 /// Returns the counter section size in bytes.
 pub fn get_counters_size(begin: *const u8, end: *const u8) -> u64 {
-    let entry_sz = crate::port::counter_entry_size(profiling::get_version());
-    get_num_counters(begin, end) * entry_sz as u64
+    let entry_sz = crate::port::counter_entry_size(profiling::get_version()) as u64;
+    get_num_counters(begin, end)
+        .checked_mul(entry_sz)
+        .expect("profile counter size overflow")
 }
 
 /// Returns the bitmap section size in bytes.
@@ -94,7 +97,7 @@ pub fn get_padding_sizes_for_counters(
     let page_size = crate::port::get_page_size() as u64;
     Ok(PaddingSizes {
         before_counters: crate::port::calculate_bytes_needed_to_page_align(
-            size_of::<LlvmProfileHeader>() as u64 + data_size,
+            checked_add_size(size_of::<LlvmProfileHeader>() as u64, data_size),
             page_size,
         ),
         after_counters: crate::port::calculate_bytes_needed_to_page_align(counters_size, page_size),
@@ -153,16 +156,39 @@ fn get_size_for_buffer_internal(
 
     let binary_ids_size = platform::get_binary_ids_size();
 
-    size_of::<LlvmProfileHeader>() as u64
-        + binary_ids_size
-        + data_size
-        + padding.before_counters
-        + counters_size
-        + padding.after_counters
-        + num_bitmap_bytes
-        + padding.after_bitmap
-        + names_size
-        + padding.after_names
+    [
+        size_of::<LlvmProfileHeader>() as u64,
+        binary_ids_size,
+        data_size,
+        padding.before_counters,
+        counters_size,
+        padding.after_counters,
+        num_bitmap_bytes,
+        padding.after_bitmap,
+        names_size,
+        padding.after_names,
+    ]
+    .into_iter()
+    .try_fold(0u64, |total, size| total.checked_add(size))
+    .expect("profile buffer size overflow")
+}
+
+fn ptr_range_len(begin: *const u8, end: *const u8) -> u64 {
+    (end as usize)
+        .checked_sub(begin as usize)
+        .expect("profile section end precedes begin") as u64
+}
+
+fn div_ceil_u64(value: u64, divisor: u64) -> u64 {
+    debug_assert!(divisor != 0, "division by zero in profile size calculation");
+    value
+        .checked_add(divisor - 1)
+        .expect("profile section size overflow")
+        / divisor
+}
+
+fn checked_add_size(lhs: u64, rhs: u64) -> u64 {
+    lhs.checked_add(rhs).expect("profile buffer size overflow")
 }
 
 fn get_num_padding_bytes(size_bytes: u64) -> u64 {

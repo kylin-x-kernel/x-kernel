@@ -230,7 +230,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
                 .lock()
                 .fill_buffer_header(tx_buf.buffer_mut())
                 .or(Err(DriverError::InvalidInput))?;
-            tx_buf.set_hdr_len(hdr_len);
+            tx_buf.set_hdr_len(hdr_len)?;
             free_tx_bufs.push(tx_buf);
         }
 
@@ -395,11 +395,8 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
                     .receive_complete(token, rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
             };
-            if hdr_len + pkt_len > rx_buf.capacity() {
-                return Err(DriverError::InvalidInput);
-            }
-            rx_buf.set_hdr_len(hdr_len);
-            rx_buf.set_payload_len(pkt_len);
+            rx_buf.set_hdr_len(hdr_len)?;
+            rx_buf.set_payload_len(pkt_len)?;
 
             Ok(rx_buf.into_handle())
         } else {
@@ -417,14 +414,8 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             .ok_or(DriverError::NoMemory)?;
         let pkt_len = size;
 
-        // 1. Check if the buffer is large enough.
-        let hdr_len = net_buf.hdr_len();
-        if hdr_len + pkt_len > net_buf.capacity() {
-            return Err(DriverError::InvalidInput);
-        }
-        net_buf.set_payload_len(pkt_len);
+        net_buf.set_payload_len(pkt_len)?;
 
-        // 2. Return the buffer.
         Ok(net_buf.into_handle())
     }
 }

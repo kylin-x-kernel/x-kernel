@@ -160,7 +160,10 @@ pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
                 return Err(err);
             }
         }
-        ..-1 => kthread::send_signal_to_process_group((-pid) as Pid, sig)?,
+        ..-1 => {
+            let pgid = pid.checked_neg().ok_or(KError::InvalidInput)? as Pid;
+            kthread::send_signal_to_process_group(pgid, sig)?;
+        }
     }
     Ok(0)
 }

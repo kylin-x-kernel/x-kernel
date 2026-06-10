@@ -27,7 +27,11 @@ pub struct LinearBackend {
 
 impl LinearBackend {
     fn pa(&self, va: VirtAddr) -> PhysAddr {
-        PhysAddr::from((va.as_usize() as isize - self.offset) as usize)
+        let pa = (va.as_usize() as isize)
+            .checked_sub(self.offset)
+            .expect("linear address translation overflow");
+        assert!(pa >= 0, "linear address translation produced negative PA");
+        PhysAddr::from(pa as usize)
     }
 }
 

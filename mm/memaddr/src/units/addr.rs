@@ -399,7 +399,7 @@ macro_rules! def_usize_addr {
             type Output = Self;
             #[inline]
             fn add(self, rhs: usize) -> Self {
-                let sum = self.0 + rhs;
+                let sum = self.0.checked_add(rhs).expect("overflow in address addition");
                 Self(sum)
             }
         }
@@ -407,7 +407,7 @@ macro_rules! def_usize_addr {
         impl core::ops::AddAssign<usize> for $name {
             #[inline]
             fn add_assign(&mut self, rhs: usize) {
-                self.0 += rhs;
+                self.0 = self.0.checked_add(rhs).expect("overflow in address addition");
             }
         }
 
@@ -415,7 +415,7 @@ macro_rules! def_usize_addr {
             type Output = Self;
             #[inline]
             fn sub(self, rhs: usize) -> Self {
-                let diff = self.0 - rhs;
+                let diff = self.0.checked_sub(rhs).expect("overflow in address subtraction");
                 Self(diff)
             }
         }
@@ -423,7 +423,7 @@ macro_rules! def_usize_addr {
         impl core::ops::SubAssign<usize> for $name {
             #[inline]
             fn sub_assign(&mut self, rhs: usize) {
-                self.0 -= rhs;
+                self.0 = self.0.checked_sub(rhs).expect("overflow in address subtraction");
             }
         }
 

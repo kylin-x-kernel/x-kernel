@@ -296,7 +296,11 @@ pub fn load_user_app(
         new_alloc(ustack_start, PageSize::Size4K),
     )?;
 
-    let stack_data = app_stack_region(args, envs, &auxv, ustack_top.into());
+    let stack_data = app_stack_region(args, envs, &auxv, ustack_top.into())
+        .map_err(|_| KError::ArgumentListTooLong)?;
+    if stack_data.len() > ustack_size {
+        return Err(KError::ArgumentListTooLong);
+    }
     let user_sp = ustack_top - stack_data.len();
     let user_sp_aligned = user_sp.align_down_4k();
     uspace.populate_area(

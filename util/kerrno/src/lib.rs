@@ -422,7 +422,7 @@ impl KError {
             return Ok(KError(value));
         }
         if value < 0 {
-            let linux = LinuxError::new(-value);
+            let linux = LinuxError::new(value.checked_neg().ok_or(value)?);
             if linux.name().is_some() {
                 return Ok(KError(value));
             }

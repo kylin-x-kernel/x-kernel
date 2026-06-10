@@ -30,20 +30,33 @@ pub type PageIter4K<A> = PageIter<PAGE_SIZE_4K, A>;
 pub type PageIter2M<A> = PageIter<PAGE_SIZE_2M, A>;
 pub type PageIter1G<A> = PageIter<PAGE_SIZE_1G, A>;
 
+const fn assert_valid_align(align: usize) {
+    assert!(
+        align != 0 && (align & (align - 1)) == 0,
+        "alignment must be a non-zero power of two"
+    );
+}
+
 /// Align down to the nearest multiple of `align`.
 pub const fn floor_align(addr: usize, align: usize) -> usize {
+    assert_valid_align(align);
     let mask = align - 1;
     addr & !mask
 }
 
 /// Align up to the nearest multiple of `align`.
 pub const fn ceil_align(addr: usize, align: usize) -> usize {
+    assert_valid_align(align);
     let mask = align - 1;
-    (addr + mask) & !mask
+    match addr.checked_add(mask) {
+        Some(addr) => addr & !mask,
+        None => panic!("aligned address overflow"),
+    }
 }
 
 /// Return the remainder for `addr` relative to `align`.
 pub const fn align_rem(addr: usize, align: usize) -> usize {
+    assert_valid_align(align);
     addr & (align - 1)
 }
 

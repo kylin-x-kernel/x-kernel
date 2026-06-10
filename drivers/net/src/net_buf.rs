@@ -131,7 +131,7 @@ impl NetBuf {
 
     /// Returns the full frame (header + payload) as a contiguous slice.
     pub const fn frame(&self) -> &[u8] {
-        unsafe { self.get_slice(0, self.hdr_len + self.payload_len) }
+        unsafe { self.get_slice(0, self.frame_len()) }
     }
 
     /// Returns the entire buffer.
@@ -145,15 +145,17 @@ impl NetBuf {
     }
 
     /// Set the length of the header part.
-    pub fn set_hdr_len(&mut self, hdr_len: usize) {
-        debug_assert!(hdr_len + self.payload_len <= self.buf_len);
+    pub fn set_hdr_len(&mut self, hdr_len: usize) -> DriverResult {
+        check_frame_len(hdr_len, self.payload_len, self.buf_len)?;
         self.hdr_len = hdr_len;
+        Ok(())
     }
 
     /// Set the length of the payload part.
-    pub fn set_payload_len(&mut self, payload_len: usize) {
-        debug_assert!(self.hdr_len + payload_len <= self.buf_len);
+    pub fn set_payload_len(&mut self, payload_len: usize) -> DriverResult {
+        check_frame_len(self.hdr_len, payload_len, self.buf_len)?;
         self.payload_len = payload_len;
+        Ok(())
     }
 
     /// Converts the buffer into a [`NetBufHandle`].
@@ -176,6 +178,25 @@ impl NetBuf {
     pub unsafe fn from_handle(handle: NetBufHandle) -> Box<Self> {
         unsafe { Box::from_raw(handle.owner_ptr::<Self>()) }
     }
+
+    const fn frame_len(&self) -> usize {
+        let frame_len = self
+            .hdr_len
+            .checked_add(self.payload_len)
+            .expect("network frame length overflow");
+        debug_assert!(frame_len <= self.buf_len, "invalid network frame length");
+        frame_len
+    }
+}
+
+fn check_frame_len(hdr_len: usize, payload_len: usize, buf_len: usize) -> DriverResult {
+    let frame_len = hdr_len
+        .checked_add(payload_len)
+        .ok_or(DriverError::InvalidInput)?;
+    if frame_len > buf_len {
+        return Err(DriverError::InvalidInput);
+    }
+    Ok(())
 }
 
 impl Drop for NetBuf {
@@ -347,7 +368,7 @@ pub mod tests_netbuf {
                 // Test buffer content manipulation
                 for buf in allocated_buffers.iter_mut().take(3) {
                     // Test payload manipulation - set a small payload first
-                    buf.set_payload_len(100);
+                    buf.set_payload_len(100).unwrap();
                     let payload = buf.payload_mut();
                     if !payload.is_empty() {
                         // Fill with test pattern
@@ -362,7 +383,7 @@ pub mod tests_netbuf {
                     // Test payload length adjustment
                     let original_payload_len = buf.payload_len();
                     if original_payload_len > 10 {
-                        buf.set_payload_len(original_payload_len - 5);
+                        buf.set_payload_len(original_payload_len - 5).unwrap();
                         assert_eq!(buf.payload_len(), original_payload_len - 5);
                     }
                 }

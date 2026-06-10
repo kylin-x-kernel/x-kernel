@@ -41,8 +41,11 @@ impl<'a> KernelElf<'a> {
             if file_end as usize > image.len() {
                 return Err("segment file range out of bounds");
             }
+            let seg_end = vaddr
+                .checked_add(memsz)
+                .ok_or("segment memory range overflow")?;
             min_vaddr = min_vaddr.min(vaddr & !0xfff);
-            max_vaddr = max_vaddr.max(align_up(vaddr + memsz, 0x1000));
+            max_vaddr = max_vaddr.max(align_up(seg_end, 0x1000)?);
         }
         if min_vaddr == u64::MAX || max_vaddr <= min_vaddr {
             return Err("missing PT_LOAD segments");
@@ -219,8 +222,14 @@ fn load_segment_layout(ph: &Elf64Phdr) -> Result<(u64, u64), &'static str> {
     Ok((vaddr, memsz))
 }
 
-fn align_up(value: u64, align: u64) -> u64 {
-    (value + align - 1) & !(align - 1)
+fn align_up(value: u64, align: u64) -> Result<u64, &'static str> {
+    if align == 0 || !align.is_power_of_two() {
+        return Err("invalid alignment");
+    }
+    value
+        .checked_add(align - 1)
+        .map(|value| value & !(align - 1))
+        .ok_or("aligned address overflow")
 }
 
 #[repr(C)]

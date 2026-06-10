@@ -48,40 +48,47 @@ use crate::auxv::{AuxEntry, AuxType};
 ///
 /// # Return
 ///
-/// * [`Vec<u8>`] - Initial stack frame of the application
+/// * [`Result<Vec<u8>, &'static str>`] - Initial stack frame of the application
 ///
 /// # Notes
 ///
 /// The detailed format is described in <https://articles.manugarg.com/aboutelfauxiliaryvectors.html>
-pub fn app_stack_region(args: &[String], envs: &[String], auxv: &[AuxEntry], sp: usize) -> Vec<u8> {
+pub fn app_stack_region(
+    args: &[String],
+    envs: &[String],
+    auxv: &[AuxEntry],
+    sp: usize,
+) -> Result<Vec<u8>, &'static str> {
     let mut data = VecDeque::new();
-    let mut push = |src: &[u8]| -> usize {
+    let mut push = |src: &[u8]| -> Result<usize, &'static str> {
         data.extend(src.iter().cloned());
         data.rotate_right(src.len());
-        sp - data.len()
+        sp.checked_sub(data.len()).ok_or("user stack overflow")
     };
 
     // define a random string with 16 bytes
-    let random_str_pos = push("0123456789abcdef".as_bytes());
+    let random_str_pos = push("0123456789abcdef".as_bytes())?;
     // Push arguments and environment variables
-    let envs_slice: Vec<_> = envs
+    let envs_slice: Result<Vec<_>, _> = envs
         .iter()
         .map(|env| {
-            push(b"\0");
+            push(b"\0")?;
             push(env.as_bytes())
         })
         .collect();
-    let argv_slice: Vec<_> = args
+    let envs_slice = envs_slice?;
+    let argv_slice: Result<Vec<_>, _> = args
         .iter()
         .map(|arg| {
-            push(b"\0");
+            push(b"\0")?;
             push(arg.as_bytes())
         })
         .collect();
+    let argv_slice = argv_slice?;
     let padding_null = "\0".repeat(8);
-    let sp = push(padding_null.as_bytes());
+    let sp = push(padding_null.as_bytes())?;
 
-    push(&b"\0".repeat(sp % 16));
+    push(&b"\0".repeat(sp % 16))?;
 
     // Align stack to 16 bytes by padding if needed.
     // We will push following 8-byte items into stack:
@@ -94,7 +101,7 @@ pub fn app_stack_region(args: &[String], envs: &[String], auxv: &[AuxEntry], sp:
     // If odd, the stack top will not be aligned to 16 bytes unless we add 8-byte
     // padding
     if (envs.len() + args.len() + 3) & 1 != 0 {
-        push(padding_null.as_bytes());
+        push(padding_null.as_bytes())?;
     }
 
     // Push auxiliary vectors
@@ -111,21 +118,21 @@ pub fn app_stack_region(args: &[String], envs: &[String], auxv: &[AuxEntry], sp:
             break;
         }
     }
-    push(auxv.as_bytes());
+    push(auxv.as_bytes())?;
     if !has_random {
-        push(AuxEntry::new(AuxType::RANDOM, random_str_pos).as_bytes());
+        push(AuxEntry::new(AuxType::RANDOM, random_str_pos).as_bytes())?;
     }
     if !has_execfn {
-        push(AuxEntry::new(AuxType::EXECFN, argv_slice[0]).as_bytes());
+        push(AuxEntry::new(AuxType::EXECFN, argv_slice[0]).as_bytes())?;
     }
 
     // Push the argv and envp pointers
-    push(padding_null.as_bytes());
-    push(envs_slice.as_bytes());
-    push(padding_null.as_bytes());
-    push(argv_slice.as_bytes());
+    push(padding_null.as_bytes())?;
+    push(envs_slice.as_bytes())?;
+    push(padding_null.as_bytes())?;
+    push(argv_slice.as_bytes())?;
     // Push argc
-    let sp = push(args.len().as_bytes());
+    let sp = push(args.len().as_bytes())?;
 
     assert!(sp % 16 == 0);
 
@@ -133,5 +140,5 @@ pub fn app_stack_region(args: &[String], envs: &[String], auxv: &[AuxEntry], sp:
     let (first, second) = data.as_slices();
     result.extend_from_slice(first);
     result.extend_from_slice(second);
-    result
+    Ok(result)
 }

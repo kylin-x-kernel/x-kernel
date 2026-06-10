@@ -61,64 +61,42 @@ impl Message {
 }
 
 pub(crate) fn read_u8(buf: &[u8], offset: &mut usize) -> Result<u8, String> {
-    if *offset + 1 > buf.len() {
-        return Err(String::from("short buffer"));
-    }
-    let value = buf[*offset];
-    *offset += 1;
-    Ok(value)
+    Ok(read_exact(buf, offset, 1)?[0])
 }
 
 pub(crate) fn read_u16(buf: &[u8], offset: &mut usize) -> Result<u16, String> {
-    if *offset + 2 > buf.len() {
-        return Err(String::from("short buffer"));
-    }
-    let value = u16::from_le_bytes([buf[*offset], buf[*offset + 1]]);
-    *offset += 2;
-    Ok(value)
+    let bytes = read_exact(buf, offset, 2)?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 pub(crate) fn read_u32(buf: &[u8], offset: &mut usize) -> Result<u32, String> {
-    if *offset + 4 > buf.len() {
-        return Err(String::from("short buffer"));
-    }
-    let value = u32::from_le_bytes([
-        buf[*offset],
-        buf[*offset + 1],
-        buf[*offset + 2],
-        buf[*offset + 3],
-    ]);
-    *offset += 4;
-    Ok(value)
+    let bytes = read_exact(buf, offset, 4)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 pub(crate) fn read_u64(buf: &[u8], offset: &mut usize) -> Result<u64, String> {
-    if *offset + 8 > buf.len() {
-        return Err(String::from("short buffer"));
-    }
-    let value = u64::from_le_bytes([
-        buf[*offset],
-        buf[*offset + 1],
-        buf[*offset + 2],
-        buf[*offset + 3],
-        buf[*offset + 4],
-        buf[*offset + 5],
-        buf[*offset + 6],
-        buf[*offset + 7],
-    ]);
-    *offset += 8;
-    Ok(value)
+    let bytes = read_exact(buf, offset, 8)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
 }
 
 pub(crate) fn read_str(buf: &[u8], offset: &mut usize) -> Result<String, String> {
     let len = read_u16(buf, offset)? as usize;
-    if *offset + len > buf.len() {
-        return Err(String::from("short buffer"));
-    }
-    let value = core::str::from_utf8(&buf[*offset..*offset + len])
+    let value = core::str::from_utf8(read_exact(buf, offset, len)?)
         .map_err(|_| String::from("invalid utf8"))?;
-    *offset += len;
     Ok(value.to_string())
+}
+
+fn read_exact<'a>(buf: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8], String> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| String::from("short buffer"))?;
+    let bytes = buf
+        .get(*offset..end)
+        .ok_or_else(|| String::from("short buffer"))?;
+    *offset = end;
+    Ok(bytes)
 }
 
 pub(crate) fn read_qid(buf: &[u8], offset: &mut usize) -> Result<Qid, String> {

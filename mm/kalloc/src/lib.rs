@@ -31,6 +31,12 @@ use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
 
+fn pages_to_bytes(num_pages: usize) -> usize {
+    num_pages
+        .checked_mul(PAGE_SIZE_4K)
+        .expect("page count byte size overflow")
+}
+
 #[virt_to_phys_impl]
 fn kernel_virt_to_phys(vaddr: usize) -> usize {
     v2p(vaddr)
@@ -135,7 +141,9 @@ impl Usages {
     }
 
     fn dealloc(&mut self, kind: UsageKind, size: usize) {
-        self.0[kind as usize] -= size;
+        self.0[kind as usize] = self.0[kind as usize]
+            .checked_sub(size)
+            .expect("kalloc usage underflow");
     }
 
     /// Return usage in bytes for the given kind.
@@ -332,7 +340,7 @@ impl GlobalAllocator {
         );
         let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE_4K);
+            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
     }
@@ -353,7 +361,7 @@ impl GlobalAllocator {
             .lock()
             .allocate_pages_lowmem(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE_4K);
+            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
     }
@@ -377,7 +385,7 @@ impl GlobalAllocator {
             .lock()
             .allocate_pages_at(va, num_pages, align_pow2)?;
         if kind != UsageKind::RustHeap {
-            self.usages.lock().alloc(kind, num_pages * PAGE_SIZE_4K);
+            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
     }
@@ -390,13 +398,13 @@ impl GlobalAllocator {
     ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE_4K);
+        self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
     /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, num_pages * PAGE_SIZE_4K);
+        self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 

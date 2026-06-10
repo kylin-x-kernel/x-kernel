@@ -124,7 +124,8 @@ pub struct MadtEntryIter {
 
 impl McfgAllocation {
     pub fn ecam_region(self) -> Option<MemRange> {
-        let start = self.base_address as usize + ((self.start_bus as usize) << 20);
+        let base = usize::try_from(self.base_address).ok()?;
+        let start = base.checked_add((self.start_bus as usize) << 20)?;
         let size = ((self.end_bus as usize).checked_sub(self.start_bus as usize)? + 1) << 20;
         Some((start, size))
     }
@@ -314,6 +315,9 @@ fn parse_resource_template_for_mem_window(bytes: &[u8]) -> Option<PciHostMemWind
                     return None;
                 }
                 let p = &bytes[body_start..body_end];
+                if p.len() < 23 {
+                    return None;
+                }
                 if p[0] == RES_TYPE_MEM {
                     let prefetchable = (p[2] & PREFETCHABLE_MASK) == PREFETCHABLE_VAL;
                     let min = u32::from_le_bytes(p[7..11].try_into().ok()?);
@@ -338,6 +342,9 @@ fn parse_resource_template_for_mem_window(bytes: &[u8]) -> Option<PciHostMemWind
                     return None;
                 }
                 let p = &bytes[body_start..body_end];
+                if p.len() < 43 {
+                    return None;
+                }
                 if p[0] == RES_TYPE_MEM {
                     let prefetchable = (p[2] & PREFETCHABLE_MASK) == PREFETCHABLE_VAL;
                     let min = u64::from_le_bytes(p[11..19].try_into().ok()?);
