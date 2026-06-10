@@ -266,16 +266,30 @@ impl ShmManager {
     }
 
     pub fn clear_proc_shm(&mut self, pid: Pid) {
-        if let Some(shmids) = self.get_shmids_by_pid(pid) {
-            for shmid in shmids {
-                if let Some(shm_inner) = self.get_inner_by_shmid(shmid) {
-                    let mut shm_inner = shm_inner.lock();
-                    shm_inner.detach_process(pid);
-                    if shm_inner.rmid && shm_inner.attach_count() == 0 {
-                        self.remove_shmid(shmid);
-                    }
-                }
+        // SHM_MANAGER is held throughout (&mut self).  Lock order is
+        // SHM_MANAGER → ShmInner, matching sys_shmget and avoiding
+        // the AB/BA deadlock with sys_shmat/sys_shmdt.
+        //
+        // Collect ShmInner refs first so the per-segment work below
+        // doesn't re-borrow self.shmid_inner while iterating.
+        let shmids: Vec<i32> = self.get_shmids_by_pid(pid).into_iter().flatten().collect();
+        let inners: Vec<(i32, Arc<Mutex<ShmInner>>)> = shmids
+            .iter()
+            .filter_map(|&shmid| self.get_inner_by_shmid(shmid).map(|inner| (shmid, inner)))
+            .collect();
+        let mut to_remove: Vec<i32> = Vec::new();
+        for (shmid, inner) in &inners {
+            let mut shm_inner = inner.lock();
+            shm_inner.detach_process(pid);
+            // rmid+attach_count checked atomically: SHM_MANAGER is held
+            // (via &mut self) so no other thread can call remove_shmid
+            // or set rmid via IPC_RMID concurrently.
+            if shm_inner.rmid && shm_inner.attach_count() == 0 {
+                to_remove.push(*shmid);
             }
+        }
+        for shmid in to_remove {
+            self.remove_shmid(shmid);
         }
         self.remove_pid(pid);
     }
@@ -378,8 +392,6 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     let end_addr = VirtAddr::from(start_addr.as_usize() + length);
     let va_range = VirtAddrRange::new(start_addr, end_addr);
 
-    let mut shm_manager = SHM_MANAGER.lock();
-    shm_manager.insert_shmid_vaddr(pid, shm_inner.shmid, start_addr);
     info!(
         "Process {} alloc shm virt addr start: {:#x}, size: {}, mapping_flags: {:#x?}",
         pid,
@@ -388,6 +400,9 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
         mapping_flags
     );
 
+    // Map pages + update ShmInner under shm_inner lock only.
+    // sys_shmget locks SHM_MANAGER → ShmInner; locking ShmInner →
+    // SHM_MANAGER here would be the reverse order (AB/BA deadlock).
     if let Some(phys_pages) = shm_inner.phys_pages.clone() {
         let backend = Backend::new_shared(start_addr, phys_pages);
         aspace.map(start_addr, length, mapping_flags, false, backend)?;
@@ -400,6 +415,12 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     }
 
     shm_inner.attach_process(pid, va_range);
+    let shmid_val = shm_inner.shmid;
+    drop(shm_inner);
+
+    SHM_MANAGER
+        .lock()
+        .insert_shmid_vaddr(pid, shmid_val, start_addr);
     Ok(start_addr.as_usize() as isize)
 }
 
@@ -442,22 +463,32 @@ pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
             .ok_or(KError::InvalidInput)?
     };
 
-    let shm_inner = {
+    let shm_inner_arc = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
             .get_inner_by_shmid(shmid)
             .ok_or(KError::InvalidInput)?
     };
-    let mut shm_inner = shm_inner.lock();
+    let mut shm_inner = shm_inner_arc.lock();
     let va_range = shm_inner.get_addr_range(pid).ok_or(KError::InvalidInput)?;
 
     let mut aspace = proc_state.address_space().lock();
     aspace.unmap(va_range.start, va_range.size())?;
+    drop(aspace);
+
+    // Detach under shm_inner, then release to avoid holding it
+    // across SHM_MANAGER (sys_shmget locks SHM_MANAGER → ShmInner).
+    shm_inner.detach_process(pid);
+    drop(shm_inner);
 
     let mut shm_manager = SHM_MANAGER.lock();
     shm_manager.remove_shmaddr(pid, shmaddr);
-    shm_inner.detach_process(pid);
 
+    // Re-validate rmid+attach_count atomically under both locks,
+    // in the correct order (SHM_MANAGER → ShmInner).  No TOCTOU:
+    // whatever another thread did between drop(shm_inner) and here
+    // is reflected in the re-check.
+    let shm_inner = shm_inner_arc.lock();
     if shm_inner.rmid && shm_inner.attach_count() == 0 {
         shm_manager.remove_shmid(shmid);
     }
@@ -556,5 +587,37 @@ pub mod tests_shm {
 
         assert!(manager.get_inner_by_shmid(22).is_none());
         assert!(manager.get_shmid_by_key(11).is_none());
+    }
+
+    #[def_test]
+    fn test_clear_proc_shm_rmid_false_preserves_segment() {
+        let mut manager = ShmManager::new();
+        let shm_inner = Arc::new(Mutex::new(ShmInner::new(
+            11,
+            33,
+            4096,
+            MappingFlags::READ,
+            7,
+        )));
+        let range = VirtAddrRange::try_from(0x3000usize..0x4000usize).unwrap();
+        shm_inner.lock().attach_process(7, range);
+        // NOTE: rmid stays false.
+        manager.insert_key_shmid(11, 33);
+        manager.insert_shmid_inner(33, shm_inner.clone());
+        manager.insert_shmid_vaddr(7, 33, range.start);
+
+        manager.clear_proc_shm(7);
+
+        // Segment preserved (rmid=false).
+        assert!(manager.get_inner_by_shmid(33).is_some());
+        // pid mapping cleared.
+        assert!(manager.get_shmids_by_pid(7).is_none());
+    }
+
+    #[def_test]
+    fn test_clear_proc_shm_no_mappings_does_not_panic() {
+        let mut manager = ShmManager::new();
+        manager.clear_proc_shm(999);
+        // Graceful no-op.
     }
 }

@@ -99,6 +99,14 @@ pub fn sys_execve(
     // Close CLOEXEC file descriptors
     proc_state.resources.close_cloexec_files();
 
+    // execve replaces the entire address space.  The old mappings are
+    // now destroyed (including any System-V shared memory attachments).
+    // Clear the stale ShmManager entries so the process can re-attach
+    // the same segments later.
+    posix_ipc::SHM_MANAGER
+        .lock()
+        .clear_proc_shm(proc_state.proc.pid());
+
     uctx.set_ip(entry_point.as_usize());
     uctx.set_sp(user_stack_base.as_usize());
     Ok(0)
