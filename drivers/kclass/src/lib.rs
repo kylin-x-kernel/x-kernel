@@ -26,6 +26,7 @@ use lazyinit::LazyInit;
 
 mod generic;
 
+/// Re-export generic class-device primitives that are part of the public API.
 pub use self::generic::{ClassAvailabilityCallback, ClassDevice};
 use self::generic::{ClassDeviceMetadata, ClassRegistry};
 
@@ -203,33 +204,50 @@ macro_rules! class_registries {
     };
 }
 
+/// Concrete runtime type for network devices.
+///
+/// Drivers construct this via `Box::new(their_net_device)` and publish it
+/// through [`publish_net`].
 #[cfg(feature = "net")]
 pub type NetDeviceImpl = Box<dyn NetDevice + Send + Sync>;
+/// Concrete runtime type for block devices.
 #[cfg(feature = "block")]
 pub type BlockDeviceImpl = Box<dyn BlockDevice + Send + Sync>;
+/// Concrete runtime type for character devices.
 #[cfg(feature = "char")]
 pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;
+/// Concrete runtime type for display devices.
 #[cfg(feature = "display")]
 pub type DisplayDeviceImpl = Box<dyn DisplayDevice + Send + Sync>;
+/// Concrete runtime type for input devices.
 #[cfg(feature = "input")]
 pub type InputDeviceImpl = Box<dyn InputDevice + Send + Sync>;
+/// Concrete runtime type for VSOCK devices.
 #[cfg(feature = "vsock")]
 pub type VsockDeviceImpl = Box<dyn VsockDevice + Send + Sync>;
+/// Concrete runtime type for VirtIO 9P devices.
 #[cfg(feature = "virtio-9p")]
 pub type Virtio9pDeviceImpl = Box<dyn Virtio9pDevice + Send + Sync>;
 
+/// Re-export block device trait and associated types.
 #[cfg(feature = "block")]
 pub use block::BlockDevice;
+/// Re-export character device trait.
 #[cfg(feature = "char")]
 pub use char_driver::CharDevice;
+/// Re-export display device trait and framebuffer metadata.
 #[cfg(feature = "display")]
 pub use display::{DisplayDevice, DisplayInfo};
+/// Re-export input device trait, event types, and identity types.
 #[cfg(feature = "input")]
 pub use input::{Event, EventType, InputDevice, InputDeviceId};
+/// Re-export network device trait and buffer handle.
 #[cfg(feature = "net")]
 pub use net::{NetBufHandle, NetDevice};
+/// Re-export VirtIO 9P device trait.
 #[cfg(feature = "virtio-9p")]
 pub use virtio::Virtio9pDevice;
+/// Re-export VSOCK device trait and address/connection types.
 #[cfg(feature = "vsock")]
 pub use vsock::{VsockAddr, VsockConnId, VsockDevice, VsockDriverEventType};
 
