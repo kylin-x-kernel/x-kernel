@@ -32,6 +32,11 @@ static TRACE_MANAGER: Once<TracingEventsManager<TraceRawLock, Kops>> = Once::new
 /// Lock adapter used by `ktracepoint` internals.
 pub struct TraceRawLock(SpinRaw<()>);
 
+// SAFETY: `TraceRawLock` implements the `lock_api::RawMutex` protocol by
+// leaking the RAII guard on successful lock acquisition and pairing it with
+// `SpinLock::force_unlock` in `unlock`. The tracepoint lock is raw by design:
+// callers must use it through `lock_api`, which guarantees `unlock` is called
+// only after a successful `lock` or `try_lock`.
 unsafe impl lock_api::RawMutex for TraceRawLock {
     type GuardMarker = lock_api::GuardSend;
 
@@ -53,6 +58,9 @@ unsafe impl lock_api::RawMutex for TraceRawLock {
     }
 
     unsafe fn unlock(&self) {
+        // SAFETY: required by the `RawMutex::unlock` contract. `lock` and
+        // successful `try_lock` above intentionally forget the guard, so this
+        // path still owns the raw spin lock and may release its atomic flag.
         unsafe { self.0.force_unlock() }
     }
 
@@ -249,9 +257,11 @@ impl KernelTraceOps for Kops {
             }
         }
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len());
-        }
+        // SAFETY: the destination range is the kernel text range selected by
+        // the static-key patching caller. The page range has been temporarily
+        // made writable above, and the source/destination ranges do not
+        // overlap.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len()) };
 
         {
             let mut layout = memspace::kernel_layout().lock();

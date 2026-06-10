@@ -21,6 +21,9 @@ impl BaseGuard for TestGuardIrq {
     type State = u32;
 
     fn acquire() -> Self::State {
+        // SAFETY: unit tests run this guard counter in controlled single-test
+        // paths; the mutable static is only a lightweight state-restoration
+        // probe for the fake guard.
         unsafe {
             IRQ_CNT += 1;
             IRQ_CNT
@@ -28,6 +31,8 @@ impl BaseGuard for TestGuardIrq {
     }
 
     fn release(_: Self::State) {
+        // SAFETY: paired with `acquire` in the same fake guard. Tests assert
+        // that every acquired state is restored before the test exits.
         unsafe {
             IRQ_CNT -= 1;
         }
@@ -67,8 +72,12 @@ fn try_lock_works() {
 fn guard_state_restored() {
     let m = TestSpinIrq::new(());
     let _a = m.lock();
+    // SAFETY: the test reads the fake guard counter after the lock operation
+    // has completed on this execution path.
     assert_eq!(unsafe { IRQ_CNT }, 1);
     drop(_a);
+    // SAFETY: after dropping the only guard, the fake guard counter should be
+    // restored to zero.
     assert_eq!(unsafe { IRQ_CNT }, 0);
 }
 
@@ -77,13 +86,17 @@ fn guard_state_restored() {
 fn failed_try_lock_restores_state() {
     let m = TestSpinIrq::new(());
     let _a = m.lock();
+    // SAFETY: the current test path holds the only fake guard instance.
     assert_eq!(unsafe { IRQ_CNT }, 1);
 
     let b = m.try_lock();
     assert!(b.is_none());
+    // SAFETY: the failed `try_lock` must have restored its temporary guard
+    // state, so only the original guard contributes to the counter.
     assert_eq!(unsafe { IRQ_CNT }, 1);
 
     drop(_a);
+    // SAFETY: after dropping the original guard, no fake guard state remains.
     assert_eq!(unsafe { IRQ_CNT }, 0);
 }
 
@@ -142,6 +155,8 @@ fn force_unlock_works() {
     let lock = TestMutex::new(());
     core::mem::forget(lock.lock());
 
+    // SAFETY: this test intentionally leaks the guard, so the current
+    // execution path still owns the lock and may exercise `force_unlock`.
     unsafe {
         lock.force_unlock();
     }

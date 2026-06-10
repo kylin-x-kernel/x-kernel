@@ -62,8 +62,13 @@ pub struct SpinLockGuard<'a, G: BaseGuard, T: ?Sized + 'a> {
     flag_ref: &'a AtomicBool,
 }
 
-// Same unsafe impls as `std::sync::Mutex`
+// SAFETY: `SpinLock` only exposes shared access to `T` through guards that
+// acquire the lock before creating references from the internal `UnsafeCell`.
+// Sharing `&SpinLock` across threads is sound when the protected value can be
+// sent to the guard holder thread.
 unsafe impl<G: BaseGuard, T: ?Sized + Send> Sync for SpinLock<G, T> {}
+// SAFETY: ownership transfer of the lock transfers ownership of the protected
+// storage. Access remains mediated by the same guard protocol after the move.
 unsafe impl<G: BaseGuard, T: ?Sized + Send> Send for SpinLock<G, T> {}
 
 impl<G: BaseGuard, T> SpinLock<G, T> {
@@ -116,6 +121,8 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
         SpinLockGuard {
             _token: &PhantomData,
             guard_state,
+            // SAFETY: the guard has acquired the spinlock and will release it
+            // on drop, so this guard is the unique mutable accessor until then.
             ptr: unsafe { &mut *self.storage.get() },
             #[cfg(feature = "smp")]
             flag_ref: &self.flag,
@@ -160,6 +167,8 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
             Some(SpinLockGuard {
                 _token: &PhantomData,
                 guard_state,
+                // SAFETY: successful acquisition gives this guard exclusive
+                // access to the protected storage until the guard is dropped.
                 ptr: unsafe { &mut *self.storage.get() },
                 #[cfg(feature = "smp")]
                 flag_ref: &self.flag,
@@ -188,6 +197,8 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
     /// no actual locking is needed.
     #[inline(always)]
     pub fn get_mut(&mut self) -> &mut T {
+        // SAFETY: `&mut self` proves no other references to the lock exist, so
+        // no guard can concurrently access the `UnsafeCell` contents.
         unsafe { &mut *self.storage.get() }
     }
 }
@@ -216,6 +227,8 @@ impl<G: BaseGuard, T: ?Sized> Deref for SpinLockGuard<'_, G, T> {
 
     #[inline(always)]
     fn deref(&self) -> &T {
+        // SAFETY: `ptr` was created only after the lock was acquired. Shared
+        // references derived from a guard cannot outlive the guard.
         unsafe { &*self.ptr }
     }
 }
@@ -223,6 +236,8 @@ impl<G: BaseGuard, T: ?Sized> Deref for SpinLockGuard<'_, G, T> {
 impl<G: BaseGuard, T: ?Sized> DerefMut for SpinLockGuard<'_, G, T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: `&mut self` proves this guard is borrowed exclusively, and
+        // the guard owns the lock until drop.
         unsafe { &mut *self.ptr }
     }
 }
