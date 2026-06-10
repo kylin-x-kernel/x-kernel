@@ -5,6 +5,8 @@ members = [
     "entry",
     # boot and loader
     "boot/*",
+    # filesystems under active standalone development
+    "fs/filesystems/kext4",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace
@@ -102,6 +104,7 @@ memspace = { path = "mm/memspace" }
 memspace_file = { path = "mm/memspace-file", package = "memspace-file" }
 page_table = { path = "mm/page_table" }
 rsext4 = { path = "fs/filesystems/rsext4", default-features = false }
+kext4 = { path = "fs/filesystems/kext4", default-features = false }
 
 # Internal: IO and network subsystem
 fbdevice = { path = "io/fbdevice" }

@@ -1,0 +1,16 @@
+[package]
+name = "kext4"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Checked ext4 storage core for X-Kernel"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories = ["filesystem", "no-std"]
+
+[features]
+default = []
+
+[dependencies]
+block = { workspace = true }
