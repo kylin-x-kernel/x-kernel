@@ -30,7 +30,10 @@ use crate::tee::{
             TeeCipherXtsCtx, aes_xts_final_buffered, aes_xts_init, aes_xts_update_buffered,
             cipher_uses_aes_xts_kernel,
         },
-        authenc_aad::{TeeAuthencAadCtx, cipher_uses_authenc_aad_buffer},
+        authenc::{
+            TeeAuthencCtx, cipher_gcm_set_nonce, cipher_uses_authenc_aad_buffer,
+            cipher_uses_ccm_payload_buffer, cipher_uses_gcm_payload_buffer,
+        },
         crypto_impl::{
             EccAlgoKeyPair, EccComKeyPair, EccKeypair, Sm2DsaKeyPair, Sm2KepKeyPair, Sm2PkeKeyPair,
             crypto_ecc_keypair_ops, crypto_ecc_keypair_ops_generate,
@@ -685,16 +688,64 @@ pub(crate) fn crypto_cipher_init(
         pending: [0; TeeCipherCtx::PENDING_MAX],
         pending_len: 0,
         xts,
-        authenc_aad: None,
+        authenc: None,
     }));
     Ok(())
 }
 
 fn tee_cipher_ctx_flush_authenc_aad(op: &mut TeeCipherCtx) -> TeeResult {
-    let Some(aad) = &mut op.authenc_aad else {
+    let Some(authenc) = &mut op.authenc else {
         return Ok(());
     };
-    aad.enter_payload_phase(&mut op.cipher)
+    authenc.enter_payload_phase(&mut op.cipher)
+}
+
+fn tee_cipher_ctx_replay_key(
+    cs: &TeeCrypState,
+    op: &TeeCipherCtx,
+) -> TeeResult<Option<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)>> {
+    let Some(authenc) = &op.authenc else {
+        return Ok(None);
+    };
+    let key = cryp_state_symmetric_key(cs)?;
+    let aad = authenc.aad_bytes().to_vec();
+    Ok(Some((key, aad)))
+}
+
+/// Copy cipher operation state for `TEE_CopyOperation` / `tee_cryp_state_copy`.
+///
+/// CCM/GCM payload uses replay buffers; cloning `Cipher` shares broken mbedtls multipart state.
+/// Only `authenc` buffers are cloned; dst gets a fresh standby `Cipher`.
+pub(crate) fn crypto_cipher_ctx_copy_from(
+    cs: &TeeCrypState,
+    src: &TeeCipherCtx,
+) -> TeeResult<TeeCipherCtx> {
+    let cipher = if let Some(authenc) = &src.authenc {
+        let key = cryp_state_symmetric_key(cs)?;
+        authenc.fresh_standby_cipher(cs.algo, &key)?
+    } else {
+        src.cipher.clone()
+    };
+    Ok(TeeCipherCtx {
+        cipher,
+        pending: src.pending,
+        pending_len: src.pending_len,
+        xts: src.xts.clone(),
+        authenc: src.authenc.clone(),
+    })
+}
+
+fn cryp_state_symmetric_key(cs: &TeeCrypState) -> TeeResult<alloc::vec::Vec<u8>> {
+    let key1 = cs.key1.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    let obj = tee_obj_get(key1 as tee_obj_id_type)?;
+    let guard = obj.lock();
+    if guard.attr.is_empty() {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+    let TeeCryptObj::obj_secret(secret) = &guard.attr[0] else {
+        return Err(TEE_ERROR_BAD_STATE);
+    };
+    Ok(secret.key().to_vec())
 }
 
 fn cipher_uses_ecb_pending(algo: u32) -> bool {
@@ -719,6 +770,12 @@ pub(crate) fn crypto_cipher_max_output_len(
     let block_buffered = cipher_uses_ecb_pending(cs_guard.algo) || op.xts.is_some();
     let max_out = if block_buffered {
         (op.pending_len + input_len) / block_size * block_size
+    } else if op.authenc.is_some() {
+        // CCM/GCM replay returns only the new chunk (`input_len` bytes).
+        input_len
+    } else if cipher_uses_authenc_aad_buffer(cs_guard.algo) {
+        // GCM: match mbedtls `Cipher::update` slack (`in_len + block_size`).
+        input_len.saturating_add(block_size)
     } else {
         input_len + block_size
     };
@@ -799,9 +856,17 @@ pub(crate) fn crypto_cipher_update(
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
+    let replay_key = match &cs_guard.ctx {
+        CrypCtx::CipherCtx(op) => tee_cipher_ctx_replay_key(&cs_guard, op)?,
+        _ => None,
+    };
     if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
         if cipher_uses_authenc_aad_buffer(algo) {
             tee_cipher_ctx_flush_authenc_aad(op)?;
+        }
+        if let Some((key, _aad)) = replay_key {
+            let authenc = op.authenc.as_mut().unwrap();
+            return authenc.update_payload(algo, &key, input, output);
         }
         if let Some(xts) = &mut op.xts {
             let stream = xts.stream();
@@ -916,8 +981,12 @@ pub(crate) fn crypto_authenc_init(
         cipher
             .set_key(cipher_op, key)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        cipher.set_iv(nonce).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        if cipher_uses_gcm_payload_buffer(algo) {
+            cipher_gcm_set_nonce(&mut cipher, nonce)?;
+        } else {
+            cipher.set_iv(nonce).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        }
         if cipher_mode == CipherMode::CCM {
             let payload_len = payload_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
             let aad_len = aad_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
@@ -926,8 +995,20 @@ pub(crate) fn crypto_authenc_init(
                 .starts_ccm(payload_len, aad_len, tag_len)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         }
-        let authenc_aad = if cipher_uses_authenc_aad_buffer(algo) {
-            Some(TeeAuthencAadCtx::new(algo, aad_len))
+        let authenc = if cipher_uses_ccm_payload_buffer(algo) {
+            let payload_len = payload_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+            let aad_len = aad_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+            let tag_len = tag_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+            Some(TeeAuthencCtx::new_ccm(
+                algo,
+                nonce,
+                payload_len,
+                aad_len,
+                tag_len,
+                mode,
+            ))
+        } else if cipher_uses_gcm_payload_buffer(algo) {
+            Some(TeeAuthencCtx::new_gcm(algo, nonce, mode))
         } else {
             None
         };
@@ -937,7 +1018,7 @@ pub(crate) fn crypto_authenc_init(
             pending: [0; TeeCipherCtx::PENDING_MAX],
             pending_len: 0,
             xts: None,
-            authenc_aad,
+            authenc,
         }));
         Ok(())
     } else {
@@ -948,10 +1029,10 @@ pub(crate) fn crypto_authenc_init(
 pub(crate) fn crypto_authenc_update_aad(cs: Arc<Mutex<TeeCrypState>>, aad: &[u8]) -> TeeResult {
     let mut cs_guard = cs.lock();
     if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
-        let Some(aad_ctx) = &mut op.authenc_aad else {
+        let Some(authenc) = &mut op.authenc else {
             return Err(TEE_ERROR_BAD_PARAMETERS);
         };
-        aad_ctx.append_aad(aad)
+        authenc.append_aad(aad)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -964,9 +1045,18 @@ pub(crate) fn crypto_authenc_enc_final(
     tag: &mut [u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let mut res: usize = 0;
+    let algo = cs_guard.algo;
+    let replay_key = match &cs_guard.ctx {
+        CrypCtx::CipherCtx(op) => tee_cipher_ctx_replay_key(&cs_guard, op)?,
+        _ => None,
+    };
     if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
         tee_cipher_ctx_flush_authenc_aad(op)?;
+        if let Some((key, _aad)) = replay_key {
+            let authenc = op.authenc.as_mut().unwrap();
+            return authenc.enc_final(algo, &key, input, output, tag);
+        }
+        let mut res: usize = 0;
         if let Some(input) = input {
             res = op
                 .cipher
@@ -989,9 +1079,18 @@ pub(crate) fn crypto_authenc_dec_final(
     tag: &[u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let mut res: usize = 0;
+    let algo = cs_guard.algo;
+    let replay_key = match &cs_guard.ctx {
+        CrypCtx::CipherCtx(op) => tee_cipher_ctx_replay_key(&cs_guard, op)?,
+        _ => None,
+    };
     if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
         tee_cipher_ctx_flush_authenc_aad(op)?;
+        if let Some((key, _aad)) = replay_key {
+            let authenc = op.authenc.as_mut().unwrap();
+            return authenc.dec_final(algo, &key, input, output, tag);
+        }
+        let mut res: usize = 0;
         if let Some(input) = input {
             res = op
                 .cipher
@@ -1000,7 +1099,7 @@ pub(crate) fn crypto_authenc_dec_final(
         }
         op.cipher
             .check_tag(tag)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            .map_err(|_| TEE_ERROR_MAC_INVALID)?;
         Ok(res)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)

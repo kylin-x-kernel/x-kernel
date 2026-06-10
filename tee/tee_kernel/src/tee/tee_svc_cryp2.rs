@@ -95,9 +95,9 @@ use crate::{
                 crypto_acipher_rsanopad_encrypt, crypto_acipher_rsassa_sign,
                 crypto_acipher_rsassa_verify, crypto_acipher_sm2_pke_decrypt,
                 crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final, crypto_authenc_enc_final,
-                crypto_authenc_init, crypto_authenc_update_aad, crypto_cipher_final,
-                crypto_cipher_init, crypto_cipher_max_output_len, crypto_cipher_update,
-                crypto_ecc_init, crypto_rsa_init,
+                crypto_authenc_init, crypto_authenc_update_aad, crypto_cipher_ctx_copy_from,
+                crypto_cipher_final, crypto_cipher_init, crypto_cipher_max_output_len,
+                crypto_cipher_update, crypto_ecc_init, crypto_rsa_init,
             },
         },
         libmbedtls::bignum::BigNum,
@@ -193,8 +193,8 @@ pub(crate) struct TeeCipherCtx {
     pub pending_len: usize,
     /// Stateful AES-XTS (mbedtls `cipher_update` does not continue tweak across calls).
     pub xts: Option<crate::tee::crypto::aes_xts::TeeCipherXtsCtx>,
-    /// Buffered AAD for GCM/CCM (`mbedtls_cipher_update_ad` is single-shot).
-    pub authenc_aad: Option<crate::tee::crypto::authenc_aad::TeeAuthencAadCtx>,
+    /// Buffered AAD and payload for CCM/GCM (mbedtls multipart AEAD is unreliable).
+    pub authenc: Option<crate::tee::crypto::authenc::TeeAuthencCtx>,
 }
 
 impl TeeCipherCtx {
@@ -208,7 +208,7 @@ impl Clone for TeeCipherCtx {
             pending: self.pending,
             pending_len: self.pending_len,
             xts: self.xts.clone(),
-            authenc_aad: self.authenc_aad.clone(),
+            authenc: self.authenc.clone(),
         }
     }
 }
@@ -806,13 +806,14 @@ pub fn tee_cryp_state_copy(dst_id: u32, src_id: u32) -> TeeResult {
     }
 
     match tee_alg_get_class(src_guard.algo) {
-        TEE_OPERATION_CIPHER => {
+        TEE_OPERATION_CIPHER | TEE_OPERATION_AE => {
             let CrypCtx::CipherCtx(src_cipher) = &src_guard.ctx else {
                 return Err(TEE_ERROR_BAD_STATE);
             };
+            let copied = crypto_cipher_ctx_copy_from(&src_guard, src_cipher)?;
             match &mut dst_guard.ctx {
-                CrypCtx::CipherCtx(dst_cipher) => *dst_cipher = src_cipher.clone(),
-                _ => dst_guard.ctx = CrypCtx::CipherCtx(src_cipher.clone()),
+                CrypCtx::CipherCtx(dst_cipher) => **dst_cipher = copied,
+                _ => dst_guard.ctx = CrypCtx::CipherCtx(Box::new(copied)),
             }
         }
         TEE_OPERATION_DIGEST => {
@@ -2494,6 +2495,103 @@ pub mod tests_cryp {
         assert_eq!(&out2_dst[..16], &out2_src[..16]);
     }
 
+    /// regression_4005 case 0: partial AE update, then `TEE_CopyOperation` / `ENC_FINAL` on both ops.
+    #[unittest::def_test(custom)]
+    fn test_cryp_state_copy_aes_ccm_after_partial_ae() {
+        let mut src_state: u32 = 0;
+        let mut dst_state: u32 = 0;
+        let mut src_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut dst_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, src_obj_id.as_user_ref()).unwrap();
+        let src_obj_id = src_obj_id.read();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dst_obj_id.as_user_ref()).unwrap();
+        let dst_obj_id = dst_obj_id.read();
+
+        let key = [
+            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d,
+            0x4e, 0x4f,
+        ];
+        let nonce = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16];
+        let aad = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+        let plain = [0x20, 0x21, 0x22, 0x23];
+        let cipher_expect = [0x71, 0x62, 0x01, 0x5b];
+        let tag_expect = [0x4d, 0xac, 0x25, 0x5d];
+
+        for obj_id in [src_obj_id, dst_obj_id] {
+            let obj = tee_obj_get(obj_id as tee_obj_id_type).unwrap();
+            let mut guard = obj.lock();
+            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+            secret.set_secret_data(&key).unwrap();
+            let _ = core::mem::replace(&mut guard.attr[0], TeeCryptObj::obj_secret(secret));
+        }
+
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_CCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(src_obj_id as _),
+            None,
+            &mut src_state,
+        )
+        .unwrap();
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_CCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(dst_obj_id as _),
+            None,
+            &mut dst_state,
+        )
+        .unwrap();
+
+        tee_cryp_authenc_init(
+            src_state,
+            &nonce,
+            Some(aad.len()),
+            Some(tag_expect.len()),
+            Some(plain.len()),
+        )
+        .unwrap();
+        tee_cryp_authenc_update_aad(src_state, &aad[..4]).unwrap();
+        tee_cryp_authenc_update_aad(src_state, &aad[4..]).unwrap();
+
+        let mut out_src = [0u8; 32];
+        let n = tee_cryp_authenc_update_payload(src_state, &plain[..2], &mut out_src).unwrap();
+        assert_eq!(n, 2);
+
+        tee_cryp_state_copy(dst_state, src_state).unwrap();
+
+        let mut out_src_tail = [0u8; 32];
+        let mut out_dst_tail = [0u8; 32];
+        let mut tag_src = [0u8; 4];
+        let mut tag_dst = [0u8; 4];
+
+        let tail_len = tee_cryp_authenc_enc_final(
+            src_state,
+            Some(&plain[2..]),
+            &mut out_src_tail,
+            &mut tag_src,
+        )
+        .unwrap();
+        let tail_len2 = tee_cryp_authenc_enc_final(
+            dst_state,
+            Some(&plain[2..]),
+            &mut out_dst_tail,
+            &mut tag_dst,
+        )
+        .unwrap();
+
+        assert_eq!(tail_len, tail_len2);
+        assert_eq!(&out_src[..2], &cipher_expect[..2]);
+        assert_eq!(&out_src_tail[..tail_len], &cipher_expect[2..]);
+        assert_eq!(&out_dst_tail[..tail_len2], &cipher_expect[2..]);
+        assert_eq!(tag_src, tag_expect);
+        assert_eq!(tag_dst, tag_expect);
+
+        // regression_4005 case 0: dual FREE_OPERATION — must not corrupt heap via CCM clone.
+        tee_cryp_state_free(src_state).unwrap();
+        tee_cryp_state_free(dst_state).unwrap();
+    }
+
     #[unittest::def_test(custom)]
     fn test_cryp_cmac_aes() {
         let mut state: u32 = 0;
@@ -3185,6 +3283,234 @@ pub mod tests_cryp {
                 0x70, 0xAA
             ]
         );
+    }
+
+    /// OP-TEE xtest regression_4005 AE case 6/7: AES-GCM vect1 (empty AAD/payload).
+    #[unittest::def_test(custom)]
+    fn test_cryp_aes_gcm_vect1_empty_payload() {
+        let key = [0u8; 16];
+        let nonce = [0u8; 12];
+        let tag_expect = [
+            0x58, 0xe2, 0xfc, 0xce, 0xfa, 0x7e, 0x30, 0x61, 0x36, 0x7f, 0x1d, 0x57, 0xa4, 0xe7,
+            0x45, 0x5a,
+        ];
+
+        let mut enc_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, enc_obj_id.as_user_ref()).unwrap();
+        let enc_obj_id = enc_obj_id.read();
+        let obj = tee_obj_get(enc_obj_id as tee_obj_id_type).unwrap();
+        let mut obj_guard = obj.lock();
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(&key).unwrap();
+        let _ = core::mem::replace(&mut obj_guard.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(obj_guard);
+
+        let mut enc_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(enc_obj_id as _),
+            None,
+            &mut enc_state,
+        )
+        .unwrap();
+        tee_cryp_authenc_init(enc_state, &nonce, None, None, None).unwrap();
+
+        let mut out = [0u8; 16];
+        let mut tag = [0u8; 16];
+        let n = tee_cryp_authenc_enc_final(enc_state, None, &mut out, &mut tag).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(tag, tag_expect);
+
+        let mut dec_obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut dec_obj2_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dec_obj_id.as_user_ref()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, dec_obj2_id.as_user_ref()).unwrap();
+        let dec_obj_id = dec_obj_id.read();
+        let dec_obj2_id = dec_obj2_id.read();
+        for obj_id in [dec_obj_id, dec_obj2_id] {
+            let obj = tee_obj_get(obj_id as tee_obj_id_type).unwrap();
+            let mut obj_guard = obj.lock();
+            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+            secret.set_secret_data(&key).unwrap();
+            let _ = core::mem::replace(&mut obj_guard.attr[0], TeeCryptObj::obj_secret(secret));
+        }
+
+        let mut dec_state: u32 = 0;
+        let mut dec_state2: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_GCM,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(dec_obj_id as _),
+            None,
+            &mut dec_state,
+        )
+        .unwrap();
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_GCM,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(dec_obj2_id as _),
+            None,
+            &mut dec_state2,
+        )
+        .unwrap();
+        tee_cryp_authenc_init(dec_state, &nonce, None, None, None).unwrap();
+        tee_cryp_state_copy(dec_state2, dec_state).unwrap();
+
+        let mut plain = [0u8; 16];
+        let n = tee_cryp_authenc_dec_final(dec_state, None, &mut plain, &tag_expect).unwrap();
+        assert_eq!(n, 0);
+
+        let mut plain2 = [0u8; 16];
+        let n2 = tee_cryp_authenc_dec_final(dec_state2, None, &mut plain2, &tag_expect).unwrap();
+        assert_eq!(n2, 0);
+    }
+
+    /// OP-TEE xtest regression_4005 AE case 8: AES-GCM vect2, 9+7 payload split + copy.
+    #[unittest::def_test(custom)]
+    fn test_cryp_aes_gcm_vect2_split_encrypt_copy() {
+        let key = [0u8; 16];
+        let nonce = [0u8; 12];
+        let plain = [0u8; 16];
+        let cipher_expect = [
+            0x03, 0x88, 0xda, 0xce, 0x60, 0xb6, 0xa3, 0x92, 0xf3, 0x28, 0xc2, 0xb9, 0x71, 0xb2,
+            0xfe, 0x78,
+        ];
+        let tag_expect = [
+            0xab, 0x6e, 0x47, 0xd4, 0x2c, 0xec, 0x13, 0xbd, 0xf5, 0x3a, 0x67, 0xb2, 0x12, 0x57,
+            0xbd, 0xdf,
+        ];
+
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        let mut obj2_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref()).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj2_id.as_user_ref()).unwrap();
+        let obj_id = obj_id.read();
+        let obj2_id = obj2_id.read();
+        for id in [obj_id, obj2_id] {
+            let obj = tee_obj_get(id as tee_obj_id_type).unwrap();
+            let mut guard = obj.lock();
+            let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+            secret.set_secret_data(&key).unwrap();
+            let _ = core::mem::replace(&mut guard.attr[0], TeeCryptObj::obj_secret(secret));
+        }
+
+        let mut src_state: u32 = 0;
+        let mut dst_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut src_state,
+        )
+        .unwrap();
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj2_id as _),
+            None,
+            &mut dst_state,
+        )
+        .unwrap();
+        tee_cryp_authenc_init(src_state, &nonce, None, None, None).unwrap();
+
+        let mut out = [0u8; 32];
+        let n = tee_cryp_authenc_update_payload(src_state, &plain[..9], &mut out).unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(&out[..9], &cipher_expect[..9]);
+
+        tee_cryp_state_copy(dst_state, src_state).unwrap();
+
+        let mut tag_src = [0u8; 16];
+        let mut tag_dst = [0u8; 16];
+        let tail_src =
+            tee_cryp_authenc_enc_final(src_state, Some(&plain[9..]), &mut out[9..], &mut tag_src)
+                .unwrap();
+        let tail_dst =
+            tee_cryp_authenc_enc_final(dst_state, Some(&plain[9..]), &mut out[9..], &mut tag_dst)
+                .unwrap();
+
+        assert_eq!(tail_src, 7);
+        assert_eq!(tail_dst, 7);
+        assert_eq!(&out[..16], cipher_expect);
+        assert_eq!(tag_src, tag_expect);
+        assert_eq!(tag_dst, tag_expect);
+    }
+
+    /// OP-TEE xtest regression_4005 AE case 14: AES-GCM vect6, 60-byte nonce.
+    #[unittest::def_test(custom)]
+    fn test_cryp_aes_gcm_vect6_long_nonce_encrypt() {
+        let key = [
+            0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30,
+            0x83, 0x08,
+        ];
+        let nonce = [
+            0x93, 0x13, 0x22, 0x5d, 0xf8, 0x84, 0x06, 0xe5, 0x55, 0x90, 0x9c, 0x5a, 0xff, 0x52,
+            0x69, 0xaa, 0x6a, 0x7a, 0x95, 0x38, 0x53, 0x4f, 0x7d, 0xa1, 0xe4, 0xc3, 0x03, 0xd2,
+            0xa3, 0x18, 0xa7, 0x28, 0xc3, 0xc0, 0xc9, 0x51, 0x56, 0x80, 0x95, 0x39, 0xfc, 0xf0,
+            0xe2, 0x42, 0x9a, 0x6b, 0x52, 0x54, 0x16, 0xae, 0xdb, 0xf5, 0xa0, 0xde, 0x6a, 0x57,
+            0xa6, 0x37, 0xb3, 0x9b,
+        ];
+        let aad = [
+            0xfe, 0xed, 0xfa, 0xce, 0xde, 0xad, 0xbe, 0xef, 0xfe, 0xed, 0xfa, 0xce, 0xde, 0xad,
+            0xbe, 0xef, 0xab, 0xad, 0xda, 0xd2,
+        ];
+        let plain = [
+            0xd9, 0x31, 0x32, 0x25, 0xf8, 0x84, 0x06, 0xe5, 0xa5, 0x59, 0x09, 0xc5, 0xaf, 0xf5,
+            0x26, 0x9a, 0x86, 0xa7, 0xa9, 0x53, 0x15, 0x34, 0xf7, 0xda, 0x2e, 0x4c, 0x30, 0x3d,
+            0x8a, 0x31, 0x8a, 0x72, 0x1c, 0x3c, 0x0c, 0x95, 0x95, 0x68, 0x09, 0x53, 0x2f, 0xcf,
+            0x0e, 0x24, 0x49, 0xa6, 0xb5, 0x25, 0xb1, 0x6a, 0xed, 0xf5, 0xaa, 0x0d, 0xe6, 0x57,
+            0xba, 0x63, 0x7b, 0x39,
+        ];
+        let cipher_expect = [
+            0x8c, 0xe2, 0x49, 0x98, 0x62, 0x56, 0x15, 0xb6, 0x03, 0xa0, 0x33, 0xac, 0xa1, 0x3f,
+            0xb8, 0x94, 0xbe, 0x91, 0x12, 0xa5, 0xc3, 0xa2, 0x11, 0xa8, 0xba, 0x26, 0x2a, 0x3c,
+            0xca, 0x7e, 0x2c, 0xa7, 0x01, 0xe4, 0xa9, 0xa4, 0xfb, 0xa4, 0x3c, 0x90, 0xcc, 0xdc,
+            0xb2, 0x81, 0xd4, 0x8c, 0x7c, 0x6f, 0xd6, 0x28, 0x75, 0xd2, 0xac, 0xa4, 0x17, 0x03,
+            0x4c, 0x34, 0xae, 0xe5,
+        ];
+        let tag_expect = [
+            0x61, 0x9c, 0xc5, 0xae, 0xff, 0xfe, 0x0b, 0xfa, 0x46, 0x2a, 0xf4, 0x3c, 0x16, 0x99,
+            0xd0, 0x50,
+        ];
+
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_AES as _, 128, obj_id.as_user_ref()).unwrap();
+        let obj_id = obj_id.read();
+        let obj = tee_obj_get(obj_id as tee_obj_id_type).unwrap();
+        let mut guard = obj.lock();
+        let mut secret = tee_cryp_obj_secret_wrapper::new(32);
+        secret.set_secret_data(&key).unwrap();
+        let _ = core::mem::replace(&mut guard.attr[0], TeeCryptObj::obj_secret(secret));
+        drop(guard);
+
+        let mut state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_AES_GCM,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(obj_id as _),
+            None,
+            &mut state,
+        )
+        .unwrap();
+        tee_cryp_authenc_init(state, &nonce, None, None, None).unwrap();
+
+        tee_cryp_authenc_update_aad(state, &aad[..5]).unwrap();
+        tee_cryp_authenc_update_aad(state, &aad[5..]).unwrap();
+
+        let mut out = [0u8; 64];
+        let mut n = 0usize;
+        for chunk in plain.chunks(9) {
+            n += tee_cryp_authenc_update_payload(state, chunk, &mut out[n..]).unwrap();
+        }
+        assert_eq!(n, plain.len());
+
+        let mut tag = [0u8; 16];
+        let tail = tee_cryp_authenc_enc_final(state, None, &mut out[n..], &mut tag).unwrap();
+        assert_eq!(tail, 0);
+        assert_eq!(&out[..plain.len()], cipher_expect);
+        assert_eq!(tag, tag_expect);
     }
 
     #[unittest::def_test(custom)]
