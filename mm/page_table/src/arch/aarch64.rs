@@ -127,7 +127,9 @@ impl From<PagingFlags> for Arm64Attr {
             a |= Self::UXN | Self::PXN;
         }
         if f.contains(PagingFlags::USER) {
-            a |= Self::AP_EL0;
+            // User mappings must be non-global so TLB entries are tagged with
+            // the ASID in TTBR0_EL1 and do not leak across context switches.
+            a |= Self::AP_EL0 | Self::NG;
         }
         if f.contains(PagingFlags::SHARED) {
             a |= Self::NS;
