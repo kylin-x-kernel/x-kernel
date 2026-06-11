@@ -92,9 +92,25 @@ impl GeneralOptions {
         pollable: &P,
         f: F,
     ) -> KResult<T> {
+        self.send_poller_with_nonblocking(pollable, false, f)
+    }
+
+    /// Poll for send readiness and run the operation with a per-call
+    /// nonblocking override.
+    pub fn send_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(
+        &self,
+        pollable: &P,
+        nonblocking: bool,
+        f: F,
+    ) -> KResult<T> {
         block_on(timeout(
             self.send_timeout(),
-            poll_io(pollable, IoEvents::OUT, self.nonblocking(), f),
+            poll_io(
+                pollable,
+                IoEvents::OUT,
+                self.nonblocking() || nonblocking,
+                f,
+            ),
         ))?
     }
 

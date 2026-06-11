@@ -202,52 +202,18 @@ impl SocketOps for RawSocket {
         let local = self.local_address_for(remote)?;
         let payload_len = src.remaining();
 
-        self.general.send_poller(self, || {
-            poll_interfaces();
-            self.with_smol_socket(|socket| {
-                if !socket.can_send() {
-                    return Err(KError::WouldBlock);
-                }
-                let next_header = socket.ip_protocol().expect("raw socket protocol");
-                let hop_limit = (*self.ttl.read()).unwrap_or(64);
-
-                let header_len = match self.ip_version {
-                    IpVersion::Ipv4 => Ipv4Repr {
-                        src_addr: match local {
-                            IpAddress::Ipv4(addr) => addr,
-                            _ => unreachable!(),
-                        },
-                        dst_addr: match remote {
-                            IpAddress::Ipv4(addr) => addr,
-                            _ => unreachable!(),
-                        },
-                        next_header,
-                        payload_len,
-                        hop_limit,
+        self.general
+            .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                poll_interfaces();
+                self.with_smol_socket(|socket| {
+                    if !socket.can_send() {
+                        return Err(KError::WouldBlock);
                     }
-                    .buffer_len(),
-                    IpVersion::Ipv6 => Ipv6Repr {
-                        src_addr: match local {
-                            IpAddress::Ipv6(addr) => addr,
-                            _ => unreachable!(),
-                        },
-                        dst_addr: match remote {
-                            IpAddress::Ipv6(addr) => addr,
-                            _ => unreachable!(),
-                        },
-                        next_header,
-                        payload_len,
-                        hop_limit,
-                    }
-                    .buffer_len(),
-                };
+                    let next_header = socket.ip_protocol().expect("raw socket protocol");
+                    let hop_limit = (*self.ttl.read()).unwrap_or(64);
 
-                let buf = socket
-                    .send(header_len + payload_len)
-                    .map_err(|_| KError::WouldBlock)?;
-                match self.ip_version {
-                    IpVersion::Ipv4 => {
-                        let header = Ipv4Repr {
+                    let header_len = match self.ip_version {
+                        IpVersion::Ipv4 => Ipv4Repr {
                             src_addr: match local {
                                 IpAddress::Ipv4(addr) => addr,
                                 _ => unreachable!(),
@@ -259,14 +225,9 @@ impl SocketOps for RawSocket {
                             next_header,
                             payload_len,
                             hop_limit,
-                        };
-                        header.emit(
-                            &mut Ipv4Packet::new_unchecked(&mut *buf),
-                            &smoltcp::phy::ChecksumCapabilities::ignored(),
-                        );
-                    }
-                    IpVersion::Ipv6 => {
-                        let header = Ipv6Repr {
+                        }
+                        .buffer_len(),
+                        IpVersion::Ipv6 => Ipv6Repr {
                             src_addr: match local {
                                 IpAddress::Ipv6(addr) => addr,
                                 _ => unreachable!(),
@@ -278,15 +239,55 @@ impl SocketOps for RawSocket {
                             next_header,
                             payload_len,
                             hop_limit,
-                        };
-                        header.emit(&mut Ipv6Packet::new_unchecked(&mut *buf));
-                    }
-                }
+                        }
+                        .buffer_len(),
+                    };
 
-                let written = src.read(&mut buf[header_len..])?;
-                Ok(written)
+                    let buf = socket
+                        .send(header_len + payload_len)
+                        .map_err(|_| KError::WouldBlock)?;
+                    match self.ip_version {
+                        IpVersion::Ipv4 => {
+                            let header = Ipv4Repr {
+                                src_addr: match local {
+                                    IpAddress::Ipv4(addr) => addr,
+                                    _ => unreachable!(),
+                                },
+                                dst_addr: match remote {
+                                    IpAddress::Ipv4(addr) => addr,
+                                    _ => unreachable!(),
+                                },
+                                next_header,
+                                payload_len,
+                                hop_limit,
+                            };
+                            header.emit(
+                                &mut Ipv4Packet::new_unchecked(&mut *buf),
+                                &smoltcp::phy::ChecksumCapabilities::ignored(),
+                            );
+                        }
+                        IpVersion::Ipv6 => {
+                            let header = Ipv6Repr {
+                                src_addr: match local {
+                                    IpAddress::Ipv6(addr) => addr,
+                                    _ => unreachable!(),
+                                },
+                                dst_addr: match remote {
+                                    IpAddress::Ipv6(addr) => addr,
+                                    _ => unreachable!(),
+                                },
+                                next_header,
+                                payload_len,
+                                hop_limit,
+                            };
+                            header.emit(&mut Ipv6Packet::new_unchecked(&mut *buf));
+                        }
+                    }
+
+                    let written = src.read(&mut buf[header_len..])?;
+                    Ok(written)
+                })
             })
-        })
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {

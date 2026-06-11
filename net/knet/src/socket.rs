@@ -94,6 +94,14 @@ bitflags! {
     /// See [`SocketOps::send`].
     #[derive(Default, Debug, Clone, Copy)]
     pub struct SendFlags: u32 {
+        /// Do not block for this send operation.
+        const DONT_WAIT = 0x01;
+    }
+}
+
+impl SendFlags {
+    pub(crate) fn nonblocking(self) -> bool {
+        self.contains(Self::DONT_WAIT)
     }
 }
 
@@ -207,6 +215,10 @@ pub trait SocketOps: Configurable {
     }
 
     /// Send data to the socket, optionally to a specific address.
+    ///
+    /// Stream sockets should consume the full input in blocking mode when
+    /// progress remains possible, and may return a partial count after a
+    /// successful write when the operation would block or fail.
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
     /// Receive data from the socket.
     fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize>;

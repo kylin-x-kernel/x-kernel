@@ -242,16 +242,18 @@ impl PacketSocket {
         Err(KError::OperationNotSupported)
     }
 
-    fn send_raw(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        self.inner.general.send_poller(self, || {
-            if !SERVICE.is_inited() {
-                return Err(KError::NotFound);
-            }
-            SERVICE.lock().send_link_frame(ifindex, frame)
-        })
+    fn send_raw(&self, ifindex: i32, frame: &[u8], nonblocking: bool) -> KResult<usize> {
+        self.inner
+            .general
+            .send_poller_with_nonblocking(self, nonblocking, || {
+                if !SERVICE.is_inited() {
+                    return Err(KError::NotFound);
+                }
+                SERVICE.lock().send_link_frame(ifindex, frame)
+            })
     }
 
-    fn send_datagram(&self, addr: PacketAddr, payload: &[u8]) -> KResult<usize> {
+    fn send_datagram(&self, addr: PacketAddr, payload: &[u8], nonblocking: bool) -> KResult<usize> {
         let protocol = if addr.protocol == 0 {
             self.inner.protocol
         } else {
@@ -260,7 +262,8 @@ impl PacketSocket {
         let link = validate_link_for_send(addr.ifindex, payload.len(), PacketSocketKind::Datagram)?;
         let frame = build_datagram_frame(addr, link.mac, protocol, payload)?;
 
-        self.send_raw(addr.ifindex, &frame).map(|_| payload.len())
+        self.send_raw(addr.ifindex, &frame, nonblocking)
+            .map(|_| payload.len())
     }
 
     fn statistics(&self) -> PacketStatistics {
@@ -343,9 +346,11 @@ impl SocketOps for PacketSocket {
         match self.inner.kind {
             PacketSocketKind::Raw => {
                 validate_link_for_send(addr.ifindex, data.len(), PacketSocketKind::Raw)?;
-                self.send_raw(addr.ifindex, &data)
+                self.send_raw(addr.ifindex, &data, options.flags.nonblocking())
             }
-            PacketSocketKind::Datagram => self.send_datagram(addr, &data),
+            PacketSocketKind::Datagram => {
+                self.send_datagram(addr, &data, options.flags.nonblocking())
+            }
         }
     }
 

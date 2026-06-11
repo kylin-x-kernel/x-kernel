@@ -236,45 +236,46 @@ impl UnixTransportOps for StreamTransport {
         }
         let size = src.remaining();
         let mut total = 0;
-        let non_blocking = self.options.nonblocking();
-        self.options.send_poller(self, || {
-            let mut guard = self.channel.lock();
-            let Some(chan) = guard.as_mut() else {
-                return Err(KError::NotConnected);
-            };
-            if !chan.tx.read_is_held() {
-                return Err(KError::BrokenPipe);
-            }
-
-            let count = {
-                let (left, right) = chan.tx.vacant_slices_mut();
-                // SAFETY: The slices returned by `vacant_slices_mut` describe
-                // writable ring-buffer capacity. `Read::read` initializes only
-                // bytes it reports as written, and those bytes are published by
-                // `advance_write_index` below while the channel lock is held.
-                let mut count = src.read(unsafe { left.assume_init_mut() })?;
-                if count >= left.len() {
-                    // SAFETY: Same invariant as for `left`; this slice is the
-                    // second contiguous writable region of the same producer.
-                    count += src.read(unsafe { right.assume_init_mut() })?;
+        let non_blocking = self.options.nonblocking() || options.flags.nonblocking();
+        self.options
+            .send_poller_with_nonblocking(self, non_blocking, || {
+                let mut guard = self.channel.lock();
+                let Some(chan) = guard.as_mut() else {
+                    return Err(KError::NotConnected);
+                };
+                if !chan.tx.read_is_held() {
+                    return Err(KError::BrokenPipe);
                 }
-                // SAFETY: `count` is the sum of bytes written into the vacant
-                // slices above, so it never exceeds the producer capacity that
-                // was exposed for this locked operation.
-                unsafe { chan.tx.advance_write_index(count) };
-                count
-            };
-            total += count;
-            if count > 0 {
-                chan.poll.wake();
-            }
 
-            if total == size || non_blocking {
-                Ok(total)
-            } else {
-                Err(KError::WouldBlock)
-            }
-        })
+                let count = {
+                    let (left, right) = chan.tx.vacant_slices_mut();
+                    // SAFETY: The slices returned by `vacant_slices_mut` describe
+                    // writable ring-buffer capacity. `Read::read` initializes only
+                    // bytes it reports as written, and those bytes are published by
+                    // `advance_write_index` below while the channel lock is held.
+                    let mut count = src.read(unsafe { left.assume_init_mut() })?;
+                    if count >= left.len() {
+                        // SAFETY: Same invariant as for `left`; this slice is the
+                        // second contiguous writable region of the same producer.
+                        count += src.read(unsafe { right.assume_init_mut() })?;
+                    }
+                    // SAFETY: `count` is the sum of bytes written into the vacant
+                    // slices above, so it never exceeds the producer capacity that
+                    // was exposed for this locked operation.
+                    unsafe { chan.tx.advance_write_index(count) };
+                    count
+                };
+                total += count;
+                if count > 0 {
+                    chan.poll.wake();
+                }
+
+                if total == size || non_blocking {
+                    Ok(total)
+                } else {
+                    Err(KError::WouldBlock)
+                }
+            })
     }
 
     fn recv(&self, mut dst: impl Write, _options: RecvOptions) -> KResult<usize> {

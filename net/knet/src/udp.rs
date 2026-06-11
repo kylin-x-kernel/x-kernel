@@ -212,36 +212,37 @@ impl SocketOps for UdpSocket {
                 0,
             )))?;
         }
-        self.general.send_poller(self, || {
-            poll_interfaces();
-            self.with_smol_socket(|socket| {
-                if !socket.is_open() {
-                    // not connected
-                    Err(k_err_type!(NotConnected))
-                } else if !socket.can_send() {
-                    Err(KError::WouldBlock)
-                } else {
-                    let buf = socket
-                        .send(
-                            src.remaining(),
-                            UdpMetadata {
-                                endpoint: remote_addr,
-                                local_address: Some(source_addr),
-                                meta: PacketMeta::default(),
-                            },
-                        )
-                        .map_err(|e| match e {
-                            smol::SendError::BufferFull => KError::WouldBlock,
-                            smol::SendError::Unaddressable => {
-                                k_err_type!(ConnectionRefused, "unaddressable")
-                            }
-                        })?;
-                    let read = src.read(buf)?;
-                    assert_eq!(read, buf.len());
-                    Ok(read)
-                }
+        self.general
+            .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                poll_interfaces();
+                self.with_smol_socket(|socket| {
+                    if !socket.is_open() {
+                        // not connected
+                        Err(k_err_type!(NotConnected))
+                    } else if !socket.can_send() {
+                        Err(KError::WouldBlock)
+                    } else {
+                        let buf = socket
+                            .send(
+                                src.remaining(),
+                                UdpMetadata {
+                                    endpoint: remote_addr,
+                                    local_address: Some(source_addr),
+                                    meta: PacketMeta::default(),
+                                },
+                            )
+                            .map_err(|e| match e {
+                                smol::SendError::BufferFull => KError::WouldBlock,
+                                smol::SendError::Unaddressable => {
+                                    k_err_type!(ConnectionRefused, "unaddressable")
+                                }
+                            })?;
+                        let read = src.read(buf)?;
+                        assert_eq!(read, buf.len());
+                        Ok(read)
+                    }
+                })
             })
-        })
     }
 
     fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {

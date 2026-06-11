@@ -24,8 +24,8 @@ use knet::{
 use linux_raw_sys::{
     general::timespec,
     net::{
-        MSG_CTRUNC, MSG_ERRQUEUE, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr,
-        msghdr, sockaddr, socklen_t,
+        MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET,
+        cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
     },
 };
 use osvm::{VirtPtr, VmBytes, VmBytesMut, write_vm_mem};
@@ -38,6 +38,14 @@ use crate::{
 
 // Linux ABI for sendmmsg/recvmmsg limits vlen to UIO_MAXIOV (1024).
 const MMSG_MAX_VLEN: u32 = 1024;
+
+fn parse_send_flags(flags: u32) -> SendFlags {
+    let mut send_flags = SendFlags::empty();
+    if flags & MSG_DONTWAIT != 0 {
+        send_flags |= SendFlags::DONT_WAIT;
+    }
+    send_flags
+}
 
 fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Duration>> {
     if timeout.is_null() {
@@ -156,7 +164,7 @@ fn send_impl(
         &mut src,
         SendOptions {
             to: addr,
-            flags: SendFlags::default(),
+            flags: parse_send_flags(flags),
             ancillary,
         },
     )?;

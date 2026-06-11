@@ -427,29 +427,44 @@ impl SocketOps for TcpSocket {
         })
     }
 
-    fn send(&self, mut src: impl Read, _options: SendOptions) -> KResult<usize> {
-        self.general.send_poller(self, || {
-            poll_interfaces();
-            self.with_smol_socket(|socket| {
-                if self.tx_closed.load(Ordering::Acquire) {
-                    Err(KError::BrokenPipe)
-                } else if !socket.may_send() {
-                    Err(Self::send_state_error(socket.state()))
-                } else if !socket.can_send() {
-                    Err(KError::WouldBlock)
-                } else {
-                    // connected, and the tx buffer is not full
-                    let len = socket
-                        .send(|buffer| {
-                            let result = src.read(buffer);
-                            let len = result.unwrap_or(0);
-                            (len, result)
-                        })
-                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))??;
-                    Ok(len)
-                }
-            })
-        })
+    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+        let mut total_sent = 0;
+        let nonblocking = options.flags.nonblocking();
+
+        while src.remaining() > 0 {
+            let result = self
+                .general
+                .send_poller_with_nonblocking(self, nonblocking, || {
+                    poll_interfaces();
+                    self.with_smol_socket(|socket| {
+                        if self.tx_closed.load(Ordering::Acquire) {
+                            Err(KError::BrokenPipe)
+                        } else if !socket.may_send() {
+                            Err(Self::send_state_error(socket.state()))
+                        } else if !socket.can_send() {
+                            Err(KError::WouldBlock)
+                        } else {
+                            let len = socket
+                                .send(|buffer| {
+                                    let result = src.read(buffer);
+                                    let len = result.as_ref().map_or(0, |len| *len);
+                                    (len, result)
+                                })
+                                .map_err(|_| k_err_type!(NotConnected, "not connected?"))??;
+                            Ok(len)
+                        }
+                    })
+                });
+
+            match result {
+                Ok(0) => break,
+                Ok(len) => total_sent += len,
+                Err(_) if total_sent > 0 => return Ok(total_sent),
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(total_sent)
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {
