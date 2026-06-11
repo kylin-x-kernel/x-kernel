@@ -700,6 +700,9 @@ identity 分离，再让目录 lookup/create/root 全部走同一 `iget` 路径�
 
 - `CachedFile` 仍是打开文件的高层 wrapper；
 - `FileMapping` 作为 inode attachment 保存 LRU page cache 和 mmap eviction listener；
+- inode attachment 强持有 `FileMapping`，最后一个 fd close 不销毁 page cache；
+- `FileMapping::sync` 只写回脏页，不清空 LRU 页面；
+- `FsOperations::write` 在 helper 返回前显式 sync，作为完整 superblock writeback 前的过渡闭环；
 - buffered I/O 与 `memspace-file` 通过同一个 mapping 共享页面；
 - page index 类型改为 `u64`，避免大文件页号在 mmap/cache 边界截断。
 

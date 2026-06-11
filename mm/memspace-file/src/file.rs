@@ -7,10 +7,9 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
-use kfs::{CachedFile, FileFlags, PageIndex};
+use kfs::{CachedFile, EvictRegistration, FileFlags, PageIndex};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
@@ -24,28 +23,16 @@ pub struct FileBackendInner {
     cache: CachedFile,
     flags: FileFlags,
     offset_page: PageIndex,
-    handle: AtomicUsize,
+    registration: Mutex<Option<EvictRegistration>>,
     futex_handle: Arc<()>,
-}
-
-impl Drop for FileBackendInner {
-    fn drop(&mut self) {
-        let handle = self.handle.load(Ordering::Acquire);
-        if handle != 0 {
-            unsafe {
-                self.cache.remove_evict_listener(handle);
-            }
-        }
-    }
 }
 
 impl FileBackendInner {
     pub fn register_listener(self: &Arc<Self>, aspace: &Arc<Mutex<AddrSpace>>) {
-        if self.handle.load(Ordering::Acquire) != 0 {
-            panic!("Listener already registered");
-        }
+        let mut registration = self.registration.lock();
+        assert!(registration.is_none(), "listener already registered");
         let aspace = Arc::downgrade(aspace);
-        let handle = self.cache.add_evict_listener({
+        let guard = self.cache.add_evict_listener({
             let this = Arc::downgrade(self);
             move |pn, _page| {
                 let Some(this) = this.upgrade() else {
@@ -60,7 +47,7 @@ impl FileBackendInner {
                 this.on_evict(pn, &mut aspace);
             }
         });
-        self.handle.store(handle, Ordering::Release);
+        *registration = Some(guard);
     }
 
     fn on_evict(self: &Arc<Self>, pn: PageIndex, aspace: &mut AddrSpace) {
@@ -242,7 +229,7 @@ impl DynBackendOps for FileBackend {
             cache: self.0.cache.clone(),
             flags: self.0.flags,
             offset_page: self.0.offset_page,
-            handle: AtomicUsize::new(0),
+            registration: Mutex::new(None),
             futex_handle: self.0.futex_handle.clone(),
         });
         inner.register_listener(new_aspace);
@@ -255,7 +242,7 @@ impl DynBackendOps for FileBackend {
             cache: self.0.cache.clone(),
             flags: self.0.flags,
             offset_page: self.0.offset_page,
-            handle: AtomicUsize::new(0),
+            registration: Mutex::new(None),
             futex_handle: self.0.futex_handle.clone(),
         });
         inner.register_listener(aspace);
@@ -280,7 +267,7 @@ pub fn new_file(
         cache,
         flags,
         offset_page,
-        handle: AtomicUsize::new(0),
+        registration: Mutex::new(None),
         futex_handle: Arc::new(()),
     });
     inner.register_listener(aspace);

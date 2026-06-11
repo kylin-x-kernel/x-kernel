@@ -123,6 +123,7 @@ impl FsOperations {
         };
         let file = File::create(&ctx, path.as_ref())?;
         (&file).write_all(buf.as_ref())?;
+        file.sync(false)?;
         Ok(())
     }
 

@@ -11,6 +11,7 @@ use alloc::{
 };
 use core::{
     num::NonZeroUsize,
+    ptr::NonNull,
     sync::atomic::{AtomicU8, Ordering},
 };
 
@@ -157,7 +158,7 @@ impl FileMapping {
         }
     }
 
-    pub fn add_evict_listener<F>(&self, listener: F) -> usize
+    pub fn add_evict_listener<F>(self: &Arc<Self>, listener: F) -> EvictRegistration
     where
         F: Fn(PageIndex, &PageCache) + Send + Sync + 'static,
     {
@@ -165,22 +166,21 @@ impl FileMapping {
             listener: Box::new(listener),
             link: LinkedListAtomicLink::new(),
         });
-        let dispatch_irq = pointer.as_ref() as *const EvictListener as usize;
+        let listener_ptr = NonNull::from(pointer.as_ref());
         self.evict_listeners.lock().push_back(pointer);
-        dispatch_irq
+        EvictRegistration {
+            mapping: Arc::downgrade(self),
+            listener_ptr,
+        }
     }
 
-    /// Removes an evict listener by dispatch_irq.
-    ///
-    /// # Safety
-    ///
-    /// The `dispatch_irq` must come from a previous call to
-    /// [`Self::add_evict_listener`] on the same [`FileMapping`] and must not
-    /// have been removed already. Passing an invalid dispatch_irq is undefined
-    /// behavior.
-    pub unsafe fn remove_evict_listener(&self, dispatch_irq: usize) {
+    fn remove_evict_listener(&self, listener_ptr: NonNull<EvictListener>) {
         let mut guard = self.evict_listeners.lock();
-        let mut cursor = unsafe { guard.cursor_mut_from_ptr(dispatch_irq as *const EvictListener) };
+        // SAFETY: `listener_ptr` is created only from an `EvictListener`
+        // allocated by `add_evict_listener` and is kept private inside
+        // `EvictRegistration`. Dropping the registration consumes it exactly
+        // once.
+        let mut cursor = unsafe { guard.cursor_mut_from_ptr(listener_ptr.as_ptr()) };
         cursor.remove();
     }
 
@@ -189,10 +189,12 @@ impl FileMapping {
             .ok_or(VfsError::InvalidInput)
     }
 
-    fn evict_cache(&self, file: &FileNode, pn: PageIndex, page: &mut PageCache) -> VfsResult<()> {
-        for listener in self.evict_listeners.lock().iter() {
-            (listener.listener)(pn, page);
-        }
+    fn writeback_page(
+        &self,
+        file: &FileNode,
+        pn: PageIndex,
+        page: &mut PageCache,
+    ) -> VfsResult<()> {
         if page.dirty {
             let page_start = Self::page_start(pn)?;
             let len = (file.len()?.saturating_sub(page_start)).min(PAGE_SIZE_4K as u64) as usize;
@@ -202,6 +204,13 @@ impl FileMapping {
             page.dirty = false;
         }
         Ok(())
+    }
+
+    fn evict_cache(&self, file: &FileNode, pn: PageIndex, page: &mut PageCache) -> VfsResult<()> {
+        for listener in self.evict_listeners.lock().iter() {
+            (listener.listener)(pn, page);
+        }
+        self.writeback_page(file, pn, page)
     }
 
     fn evict_slot(&self, file: &FileNode, pn: PageIndex, slot: &CachedPageSlot) -> VfsResult<()> {
@@ -469,25 +478,58 @@ impl FileMapping {
         if in_memory {
             return Ok(());
         }
-        let mut guard = self.page_cache.lock();
-        while let Some((pn, slot)) = guard.pop_lru() {
-            self.evict_slot(file, pn, &slot)?;
+        let keys = self
+            .page_cache
+            .lock()
+            .iter()
+            .map(|(pn, _)| *pn)
+            .collect::<Vec<_>>();
+        for pn in keys {
+            let Some(slot) = self.page_cache.lock().get(&pn).cloned() else {
+                continue;
+            };
+            if !slot.is_ready() {
+                slot.wait_ready();
+            }
+            if slot.is_ready() {
+                slot.with_ready_page(|page| self.writeback_page(file, pn, page))?;
+            }
         }
         file.sync(data_only)?;
         Ok(())
     }
 }
 
-pub(super) enum FileMappingData {
-    Weak(Weak<FileMapping>),
-    Strong(Arc<FileMapping>),
+/// RAII registration for a file-mapping eviction listener.
+pub struct EvictRegistration {
+    mapping: Weak<FileMapping>,
+    listener_ptr: NonNull<EvictListener>,
+}
+
+// SAFETY: `EvictRegistration` never dereferences `listener_ptr` directly. The
+// pointer is only used while holding the owning `FileMapping` listener-list
+// lock, and the listener allocation remains owned by that list until the guard
+// is dropped.
+unsafe impl Send for EvictRegistration {}
+
+impl Drop for EvictRegistration {
+    fn drop(&mut self) {
+        if let Some(mapping) = self.mapping.upgrade() {
+            mapping.remove_evict_listener(self.listener_ptr);
+        }
+    }
+}
+
+pub(super) struct FileMappingData {
+    mapping: Arc<FileMapping>,
 }
 
 impl FileMappingData {
-    pub fn get(&self) -> Option<Arc<FileMapping>> {
-        match self {
-            FileMappingData::Weak(weak) => weak.upgrade(),
-            FileMappingData::Strong(strong) => Some(strong.clone()),
-        }
+    pub fn new(mapping: Arc<FileMapping>) -> Self {
+        Self { mapping }
+    }
+
+    pub fn mapping(&self) -> Arc<FileMapping> {
+        self.mapping.clone()
     }
 }

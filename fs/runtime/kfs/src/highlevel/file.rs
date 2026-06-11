@@ -24,7 +24,7 @@ use memaddr::PAGE_SIZE_4K;
 
 use super::{
     FsContext,
-    mapping::{FileMapping, FileMappingData, PageCache, PageIndex},
+    mapping::{EvictRegistration, FileMapping, FileMappingData, PageCache, PageIndex},
 };
 
 bitflags::bitflags! {
@@ -354,19 +354,15 @@ impl CachedFile {
         let in_memory = matches!(location.filesystem().name(), "tmpfs" | "memfs",);
 
         let mut guard = location.inode_data();
-        let mapping = if let Some(mapping) = guard.get::<FileMappingData>().and_then(|it| it.get())
-        {
-            mapping
+        let mapping = if let Some(mapping) = guard.get::<FileMappingData>() {
+            mapping.mapping()
         } else {
-            let (mapping, user_data) = if in_memory {
-                let mapping = Arc::new(FileMapping::new_unbounded());
-                (mapping.clone(), FileMappingData::Strong(mapping))
+            let mapping = if in_memory {
+                Arc::new(FileMapping::new_unbounded())
             } else {
-                let mapping = Arc::new(FileMapping::new());
-                let user_data = FileMappingData::Weak(Arc::downgrade(&mapping));
-                (mapping, user_data)
+                Arc::new(FileMapping::new())
             };
-            guard.insert(user_data);
+            guard.insert(FileMappingData::new(mapping.clone()));
             mapping
         };
         drop(guard);
@@ -387,24 +383,11 @@ impl CachedFile {
         self.in_memory
     }
 
-    pub fn add_evict_listener<F>(&self, listener: F) -> usize
+    pub fn add_evict_listener<F>(&self, listener: F) -> EvictRegistration
     where
         F: Fn(PageIndex, &PageCache) + Send + Sync + 'static,
     {
         self.mapping.add_evict_listener(listener)
-    }
-
-    /// Removes an evict listener by dispatch_irq.
-    ///
-    /// # Safety
-    ///
-    /// The `dispatch_irq` must come from a previous call to [`add_evict_listener`]
-    /// on the same [`CachedFile`] and must not have been removed already.
-    /// Passing an invalid dispatch_irq is undefined behavior.
-    pub unsafe fn remove_evict_listener(&self, dispatch_irq: usize) {
-        unsafe {
-            self.mapping.remove_evict_listener(dispatch_irq);
-        }
     }
 
     fn page_start(pn: PageIndex) -> VfsResult<u64> {
