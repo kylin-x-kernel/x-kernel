@@ -16,7 +16,8 @@ use kpoll::{IoEvents, Pollable};
 
 use super::{DirNode, FileNode, Node, NodeFlags, NodeOps, TypeMap};
 use crate::{
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
+    DirNodeInodeOperations, FileNodeFileOperations, FilesystemOps, Metadata, MetadataUpdate, Mutex,
+    MutexGuard, NodeType, VfsError, VfsResult,
 };
 
 /// VFS inode identity shared by one or more directory entries.
@@ -114,12 +115,22 @@ impl VfsInode {
         }
     }
 
+    /// Returns a Linux-style file-operations adapter for file-like inodes.
+    pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
+        self.as_file().map(FileNodeFileOperations::new)
+    }
+
     /// Returns a directory node reference if this inode wraps a directory node.
     pub fn as_dir(&self) -> VfsResult<&DirNode> {
         match &self.node {
             Node::Dir(dir) => Ok(dir),
             _ => Err(VfsError::NotADirectory),
         }
+    }
+
+    /// Returns a Linux-style inode-operations adapter for directory inodes.
+    pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
+        self.as_dir().map(DirNodeInodeOperations::new)
     }
 
     /// Attempt to downcast the inode to a concrete node type.
@@ -245,6 +256,19 @@ impl InodeCache {
         self.get_or_insert_with(inode_number, || {
             VfsInode::new_file(create_node_fn(), node_type)
         })
+    }
+
+    /// Return or create a directory VFS inode for a stable filesystem inode.
+    ///
+    /// This is the directory counterpart of [`Self::get_or_insert_file`].
+    /// Filesystems should use it after their directory node no longer stores
+    /// dentry/path context inside the inode object.
+    pub fn get_or_insert_dir(
+        &self,
+        inode_number: u64,
+        create_node_fn: impl FnOnce() -> DirNode,
+    ) -> Arc<VfsInode> {
+        self.get_or_insert_with(inode_number, || VfsInode::new_dir(create_node_fn()))
     }
 
     /// Remove dead cache entries and return the number removed.

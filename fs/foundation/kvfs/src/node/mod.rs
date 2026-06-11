@@ -32,7 +32,8 @@ use kpoll::{IoEvents, Pollable};
 use smallvec::SmallVec;
 
 use crate::{
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsResult, path::PathBuf,
+    DirNodeInodeOperations, FileNodeFileOperations, FilesystemOps, Metadata, MetadataUpdate, Mutex,
+    MutexGuard, NodeType, VfsResult, path::PathBuf,
 };
 
 bitflags! {
@@ -314,6 +315,16 @@ impl DirEntry {
     /// Return the inode identity referenced by this directory entry.
     pub fn vfs_inode(&self) -> &Arc<VfsInode> {
         &self.0.inode
+    }
+
+    /// Returns a Linux-style inode-operations adapter for directory entries.
+    pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
+        self.0.inode.inode_operations()
+    }
+
+    /// Returns a Linux-style file-operations adapter for file entries.
+    pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
+        self.0.inode.file_operations()
     }
 
     /// Returns the cache key for this entry.

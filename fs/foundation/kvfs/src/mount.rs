@@ -21,8 +21,8 @@ use kpoll::{IoEvents, Pollable};
 
 use crate::{
     DirEntry, DirEntrySink, Filesystem, FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard,
-    NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, ST_RDONLY, TypeMap, VfsError,
-    VfsInode, VfsResult,
+    NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, ST_RDONLY, SuperBlock, TypeMap,
+    VfsError, VfsInode, VfsResult,
     path::{DOT, DOTDOT, PathBuf},
 };
 
@@ -55,6 +55,8 @@ bitflags::bitflags! {
 /// A mounted filesystem instance and its relationships.
 #[derive(Debug)]
 pub struct Mountpoint {
+    /// Superblock backing this mounted filesystem instance.
+    super_block: Arc<SuperBlock>,
     /// Root dir entry in the mountpoint.
     root: DirEntry,
     /// Location in the parent mountpoint.
@@ -89,6 +91,7 @@ impl Mountpoint {
 
         let root = fs.root_dir();
         Arc::new(Self {
+            super_block: fs.super_block().clone(),
             root,
             location: location_in_parent,
             child_mounts: Mutex::default(),
@@ -111,6 +114,11 @@ impl Mountpoint {
     /// Return a `Location` representing the mountpoint root.
     pub fn root_location(self: &Arc<Self>) -> Location {
         Location::new(self.clone(), self.root.clone())
+    }
+
+    /// Returns the superblock backing this mountpoint.
+    pub fn super_block(&self) -> &Arc<SuperBlock> {
+        &self.super_block
     }
 
     /// Returns the location in the parent mountpoint.
@@ -233,6 +241,11 @@ impl Location {
     /// Returns the mountpoint containing this location.
     pub fn mountpoint(&self) -> &Arc<Mountpoint> {
         &self.mountpoint
+    }
+
+    /// Returns the superblock containing this location.
+    pub fn super_block(&self) -> &Arc<SuperBlock> {
+        self.mountpoint.super_block()
     }
 
     /// Returns the underlying directory entry.

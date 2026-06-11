@@ -684,6 +684,18 @@ VFS 批量页接口可以先合并连续页，使用同步多块 I/O 获得第�
 `WeakDirEntry` 保存父子路径上下文。后续需要先把目录操作中的路径上下文与 inode
 identity 分离，再让目录 lookup/create/root 全部走同一 `iget` 路径。
 
+PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
+
+- `kvfs::SuperBlock` 成为显式 VFS superblock 对象，`Filesystem` 不再直接只包
+  `FilesystemOps`；
+- `Mountpoint` 和 `Location` 可以直接访问所属 superblock，为后续
+  superblock/inode writeback、reclaim 和 mount 域管理提供入口；
+- `kvfs::ops` 增加 Linux 风格的 `SuperBlockOperations`、`InodeOperations`、
+  `FileOperations` 和 `AddressSpaceOperations` trait；
+- 现有 `DirNodeOps`/`FileNodeOps` 通过 adapter 暂时接入新 ops family；
+- `InodeCache` 增加目录 inode API，等目录节点移除 dentry/path 上下文后用于 root
+  和普通目录唯一化。
+
 ### VFS-2：inode 级 FileMapping
 
 改动：

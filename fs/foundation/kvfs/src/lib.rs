@@ -11,6 +11,7 @@ extern crate alloc;
 mod fs;
 mod mount;
 mod node;
+mod ops;
 pub mod path;
 mod permission;
 mod types;
@@ -18,6 +19,7 @@ mod types;
 pub use fs::*;
 pub use mount::*;
 pub use node::*;
+pub use ops::*;
 pub use permission::*;
 pub use types::*;
 
