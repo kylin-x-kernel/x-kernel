@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-tee = ["kthread/tee"]
+tee = ["kthread/tee", "dep:tee_kernel"]
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
@@ -33,3 +33,4 @@ memspace.workspace = true
 osvm.workspace = true
 posix-fs.workspace = true
 posix-ipc.workspace = true
+tee_kernel = { workspace = true, optional = true }

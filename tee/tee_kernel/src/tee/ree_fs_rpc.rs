@@ -13,6 +13,7 @@ use super::{
         FS_MODE_644, FS_OFLAG_DEFAULT, FS_OFLAG_RW, FS_OFLAG_RW_TRUNC, FileVariant, TeeFileLike,
     },
     fs_dirfile::TeeFsDirfileFileh,
+    fs_htree::tee_fs_htree_close,
     tee_fs::TEE_FS_NAME_MAX,
     tee_svc_storage::tee_svc_storage_create_filename_dfh,
 };
@@ -81,8 +82,10 @@ pub fn tee_fs_rpc_create_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileV
 /// # Returns
 /// * `TeeResult<()>` - the result of the operation
 pub fn tee_fs_rpc_close(_fd: &FileVariant) -> TeeResult {
-    // fd.close();
-    Ok(())
+    // FileVariant is Copy; closing a copied handle is enough to remove the fd
+    // entry from the global fd table, mirroring OP-TEE's rpc close semantics.
+    let mut fd = *_fd;
+    fd.close()
 }
 
 /// Remove a file from a dfh

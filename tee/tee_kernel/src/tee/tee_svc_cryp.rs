@@ -1387,7 +1387,8 @@ pub fn tee_obj_set_type(
     obj.info.maxObjectSize = max_key_size as u32;
     if obj.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT != 0 {
         let pobj = obj.pobj.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
-        pobj.write().obj_info_usage = TEE_USAGE_DEFAULT;
+        pobj.obj_info_usage
+            .store(TEE_USAGE_DEFAULT, core::sync::atomic::Ordering::Relaxed);
     } else {
         obj.info.objectUsage = TEE_USAGE_DEFAULT;
     }
@@ -2069,9 +2070,14 @@ pub fn syscall_cryp_obj_get_info(obj_id: c_ulong, info: *mut utee_object_info) -
     if o.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT != 0 {
         let pobj = o.pobj.as_ref().ok_or(TEE_ERROR_BAD_STATE)?;
 
-        with_pobj_usage_lock(pobj.read().flags, || {
-            o_info.obj_usage = pobj.read().obj_info_usage;
-        });
+        with_pobj_usage_lock(
+            pobj.flags.load(core::sync::atomic::Ordering::Relaxed),
+            || {
+                o_info.obj_usage = pobj
+                    .obj_info_usage
+                    .load(core::sync::atomic::Ordering::Relaxed);
+            },
+        );
     } else {
         o_info.obj_usage = o.info.objectUsage;
     }
@@ -2098,24 +2104,22 @@ pub fn syscall_cryp_obj_restrict_usage(obj_id: c_ulong, usage: c_ulong) -> TeeRe
     if o.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT != 0 {
         // get pobj arc and flags in the closure, avoid multiple borrows in the closure
         let pobj_arc = o.pobj.as_ref().ok_or(TEE_ERROR_BAD_STATE)?.clone();
-        let pobj_flags = {
-            let pobj_guard = pobj_arc.read();
-            pobj_guard.flags
-        };
+        let pobj_flags = pobj_arc.flags.load(core::sync::atomic::Ordering::Relaxed);
 
         let mut new_usage: u32 = 0;
         let write_res = with_pobj_usage_lock(pobj_flags, || -> TeeResult {
-            // get pobj arc in the closure, avoid multiple borrows in the closure
-            let pobj_guard = pobj_arc.read();
-            new_usage = pobj_guard.obj_info_usage & usage as u32;
-            drop(pobj_guard);
+            new_usage = pobj_arc
+                .obj_info_usage
+                .load(core::sync::atomic::Ordering::Relaxed)
+                & usage as u32;
 
             // call write_usage（need &mut o，now can borrow safely，because pobj's lock is released）
             tee_svc_storage_write_usage(&mut o, new_usage)?;
 
             // get write lock to update obj_info_usage
-            let mut pobj_guard = pobj_arc.write();
-            pobj_guard.obj_info_usage = new_usage;
+            pobj_arc
+                .obj_info_usage
+                .store(new_usage, core::sync::atomic::Ordering::Relaxed);
             Ok(())
         });
 
@@ -2173,9 +2177,12 @@ pub fn syscall_cryp_obj_get_attr(
     );
     if attr_id & TEE_ATTR_FLAG_PUBLIC as c_ulong == 0 {
         if o.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT != 0 {
-            let pobj = o.pobj.as_ref().ok_or(TEE_ERROR_BAD_STATE)?.read();
-            with_pobj_usage_lock(pobj.flags, || {
-                obj_usage = pobj.obj_info_usage;
+            let pobj = o.pobj.as_ref().ok_or(TEE_ERROR_BAD_STATE)?;
+            let pobj_flags = pobj.flags.load(core::sync::atomic::Ordering::Relaxed);
+            with_pobj_usage_lock(pobj_flags, || {
+                obj_usage = pobj
+                    .obj_info_usage
+                    .load(core::sync::atomic::Ordering::Relaxed);
             });
         } else {
             obj_usage = o.info.objectUsage;
@@ -2555,9 +2562,12 @@ pub fn syscall_cryp_obj_copy(dst: c_ulong, src: c_ulong) -> TeeResult {
     dst_o.info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
     dst_o.info.objectSize = src_o.info.objectSize;
     if src_o.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT != 0 {
-        let pobj = src_o.pobj.as_ref().ok_or(TEE_ERROR_BAD_STATE)?.read();
-        with_pobj_usage_lock(pobj.flags, || {
-            dst_o.info.objectUsage = pobj.obj_info_usage;
+        let pobj = src_o.pobj.as_ref().ok_or(TEE_ERROR_BAD_STATE)?;
+        let pobj_flags = pobj.flags.load(core::sync::atomic::Ordering::Relaxed);
+        with_pobj_usage_lock(pobj_flags, || {
+            dst_o.info.objectUsage = pobj
+                .obj_info_usage
+                .load(core::sync::atomic::Ordering::Relaxed);
         });
     } else {
         dst_o.info.objectUsage = src_o.info.objectUsage;

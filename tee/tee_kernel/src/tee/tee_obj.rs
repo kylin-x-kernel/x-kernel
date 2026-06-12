@@ -13,8 +13,7 @@ use bincode::de;
 use flatten_objects::FlattenObjects;
 use kerrno::{KError, KResult};
 use ksync::{Mutex, RwLock};
-use ktask::current;
-use kthread::{AsThread, TeeSessionCtxTrait};
+use kthread::TeeSessionCtxTrait;
 use slab::Slab;
 use tee_raw_sys::{libc_compat::size_t, *};
 
@@ -44,7 +43,7 @@ pub struct tee_obj {
     // void *attr;
     pub attr: Vec<TeeCryptObj>,
     pub ds_pos: size_t,
-    pub pobj: Option<Arc<RwLock<tee_pobj>>>,
+    pub pobj: Option<Arc<tee_pobj>>,
     /// file handle for the pobject
     pub fh: Option<Box<tee_file_handle>>,
 }
@@ -106,8 +105,7 @@ pub fn tee_obj_add(mut obj: tee_obj) -> TeeResult<tee_obj_id_type> {
         // 创建 Arc 并插入
         #[allow(clippy::arc_with_non_send_sync)]
         let arc_obj = Arc::new(Mutex::new(obj));
-        let inserted_id = vacant.insert(arc_obj);
-        tee_debug!("tee_obj_add: id: {}", id);
+        vacant.insert(arc_obj);
 
         Ok(id as tee_obj_id_type)
     })
@@ -156,7 +154,7 @@ pub fn tee_obj_close(obj_id: u32) -> TeeResult {
         // borrow checker will ensure the pobj is not used after the scope ends
         let (fops, pobj_clone) = {
             let pobj = obj_guard.pobj.as_ref().ok_or(TEE_ERROR_BAD_STATE)?;
-            let fops = pobj.read().fops.ok_or(TEE_ERROR_BAD_STATE)?;
+            let fops = pobj.fops.ok_or(TEE_ERROR_BAD_STATE)?;
             let pobj_clone = Arc::clone(pobj);
             (fops, pobj_clone)
         };
@@ -166,6 +164,25 @@ pub fn tee_obj_close(obj_id: u32) -> TeeResult {
         tee_pobj_release(pobj_clone)?;
     }
 
+    Ok(())
+}
+
+/// Close all open objects in the current session context.
+///
+/// Mirrors OP-TEE `tee_obj_close_all()` in `release_utc_state`.
+pub fn tee_obj_close_all() -> TeeResult {
+    let ids: Vec<u32> = with_tee_session_ctx(|ctx| {
+        Ok(ctx
+            .objects
+            .iter()
+            .map(|(k, _)| obj_inner_to_outer(k as tee_obj_id_type) as u32)
+            .collect())
+    })?;
+    for id in ids {
+        if let Err(e) = tee_obj_close(id) {
+            error!("tee_obj_close_all: tee_obj_close({id}): {e:#010X?}");
+        }
+    }
     Ok(())
 }
 

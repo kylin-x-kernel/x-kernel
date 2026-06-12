@@ -4,13 +4,11 @@
 
 use alloc::{
     boxed::Box,
-    collections::VecDeque,
     string::{String, ToString},
-    sync::Arc,
     vec,
     vec::Vec,
 };
-use core::{any::Any, ffi::c_uint, fmt::Debug, ptr};
+use core::{any::Any, ffi::c_uint, fmt::Debug};
 
 use ksync::{Mutex, RwLock};
 use tee_raw_sys::{TEE_STORAGE_PRIVATE, *};
@@ -25,7 +23,7 @@ use super::{
     },
     fs_htree::{
         TEE_FS_HTREE_HASH_SIZE, TeeFsHtree, TeeFsHtreeImage, TeeFsHtreeNodeImage, TeeFsHtreeType,
-        tee_fs_htree_get_meta, tee_fs_htree_meta_set_dirty, tee_fs_htree_open,
+        tee_fs_htree_close, tee_fs_htree_get_meta, tee_fs_htree_meta_set_dirty, tee_fs_htree_open,
         tee_fs_htree_read_block, tee_fs_htree_sync_to_storage, tee_fs_htree_truncate,
         tee_fs_htree_write_block,
     },
@@ -43,6 +41,21 @@ use crate::tee::utils::slice_fmt;
 
 pub type tee_file_handle = TeeFsFd;
 
+/// Global REE FS state: combines the mutex and the directory handle cache.
+///
+/// This matches OP-TEE C semantics where `ree_fs_mutex` protects the global
+/// `ree_fs_dirh`. By using `Mutex<ReeFsDirh>`, the lock and the data it
+/// protects are bound together, eliminating the need for raw pointers and
+/// preventing use-after-free across processes/threads.
+static REE_FS_STATE: Mutex<ReeFsDirh> = Mutex::new(ReeFsDirh::new());
+
+/// Extra global mutex to match optee_os C semantics more closely.
+///
+/// In OP-TEE, `ree_fs_mutex` serializes the whole ree_fs_* operation
+/// (including out-of-place write + htree sync + directory bookkeeping).
+/// Rust already uses `REE_FS_STATE` for dirh caching, but the additional mutex
+/// makes the serialization explicit and prevents subtle reordering across
+/// different code paths.
 static REE_FS_MUTEX: Mutex<()> = Mutex::new(());
 
 pub const BLOCK_SHIFT: usize = 12;
@@ -92,22 +105,14 @@ impl TeeFsFdAux {
 #[repr(C)]
 #[derive(Default)]
 pub struct TeeFsDir {
-    pub dirh: *mut TeeFsDirfileDirh,
+    /// Whether this dir iterator holds a reference on the global dirh.
+    /// Replaces the raw `*mut TeeFsDirfileDirh` pointer that was unsafe
+    /// across process/thread boundaries.
+    pub has_dirh_ref: bool,
     pub idx: i32,
     pub d: tee_fs_dirent,
     pub uuid: TEE_UUID,
 }
-
-// impl Default for TeeFsDir {
-//     fn default() -> Self {
-//         TeeFsDir {
-//             dirh: ptr::null_mut(),
-//             idx: 0,
-//             d: tee_fs_dirent::default(),
-//             uuid: TEE_UUID::default(),
-//         }
-//     }
-// }
 
 fn pos_to_block_num(position: usize) -> usize {
     position >> BLOCK_SHIFT
@@ -416,7 +421,9 @@ pub fn ree_fs_open_primitive(
         Err(e) => {
             error!("ree_fs_open_primitive: open htree error: {:X?}", e);
             tee_fs_rpc_close(&fdp.fd)?;
-            tee_fs_rpc_remove_dfh(dfh)?;
+            if create {
+                tee_fs_rpc_remove_dfh(dfh)?;
+            }
             // drop(fdp);  no need
             return Err(e);
         }
@@ -662,9 +669,11 @@ pub fn ree_fs_write_primitive(
 }
 
 pub fn ree_fs_close_primitive(_fdp: &mut TeeFsFd) {
-    // tee_fs_htree_close(&mut fdp.ht);
-    // tee_fs_rpc_close(&fdp.fd);
-    // free(fdp);
+    // Align with OP-TEE C ree_fs_close_primitive():
+    // close htree context then close underlying file descriptor.
+    let ht = core::mem::take(&mut _fdp.ht);
+    let _ = tee_fs_htree_close(ht);
+    let _ = tee_fs_rpc_close(&_fdp.fd);
 }
 
 pub fn ree_dirf_commit_writes(
@@ -760,11 +769,11 @@ impl TeeFsDirfileOperations for ReeDirfOps {
 pub struct TeeFileOperations {
     pub name: &'static str,
 
-    pub open: fn(po: &mut tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>>,
+    pub open: fn(po: &tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>>,
 
     #[allow(clippy::type_complexity)]
     pub create: fn(
-        po: &mut tee_pobj,
+        po: &tee_pobj,
         overwrite: bool,
         head: &[u8],
         attr: &[u8],
@@ -786,7 +795,7 @@ pub struct TeeFileOperations {
     pub write:
         fn(fh: &mut TeeFsFd, pos: usize, buf_core: &[u8], buf_user: &[u8], len: usize) -> TeeResult,
 
-    pub rename: fn(old: &mut tee_pobj, new: &tee_pobj, overwrite: bool) -> TeeResult,
+    pub rename: fn(old: &tee_pobj, new: &tee_pobj, overwrite: bool) -> TeeResult,
 
     pub remove: fn(po: &tee_pobj) -> TeeResult,
 
@@ -801,45 +810,42 @@ pub struct TeeFileOperations {
     pub echo: fn() -> String,
 }
 
-pub fn ree_fs_open(po: &mut tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>> {
+pub fn ree_fs_open(po: &tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>> {
     tee_debug!("ree_fs_open: po: {:?}", po);
-    // lock, for thread (process) safety
-    let _guard = REE_FS_MUTEX.lock();
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
+    state.get_dirh()?;
 
-    let dirh_ptr = get_dirh()?;
-    tee_debug!("ree_fs_open: dirh_ptr: {:?}", dirh_ptr);
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
+    let ret = {
+        let dirh = state.dirh_mut();
+        let objid = po.obj_id.lock();
+        let dfh_result = tee_fs_dirfile_find(dirh, &po.uuid, &objid.obj_id);
+        dfh_result.and_then(|mut dfh| {
+            let mut hash_buf = dfh.hash;
+            let mut fdp =
+                ree_fs_open_primitive(Some(&po.uuid), false, Some(&mut hash_buf), Some(&dfh))
+                    .map_err(|err| {
+                        if err == TEE_ERROR_ITEM_NOT_FOUND {
+                            TEE_ERROR_CORRUPT_OBJECT
+                        } else {
+                            err
+                        }
+                    })?;
+            dfh.hash.copy_from_slice(&hash_buf);
+
+            if let Some(size_ref) = size {
+                let meta = tee_fs_htree_get_meta(&mut fdp.ht);
+                *size_ref = meta.length as usize;
+            }
+
+            Ok(fdp)
+        })
     };
 
-    let fd = (|| -> TeeResult<Box<TeeFsFd>> {
-        // let dfh_opt = tee_fs_dirfile_find(dirh, &po.uuid, po.obj_id)?;
-        let mut dfh = tee_fs_dirfile_find(dirh, &po.uuid, &po.obj_id)?;
-
-        let mut hash_buf = dfh.hash;
-        let mut fdp = ree_fs_open_primitive(Some(&po.uuid), false, Some(&mut hash_buf), Some(&dfh))
-            .map_err(|err| {
-                if err == TEE_ERROR_ITEM_NOT_FOUND {
-                    TEE_ERROR_CORRUPT_OBJECT
-                } else {
-                    err
-                }
-            })?;
-        dfh.hash.copy_from_slice(&hash_buf);
-
-        if let Some(size_ref) = size {
-            let meta = tee_fs_htree_get_meta(&mut fdp.ht);
-            *size_ref = meta.length as usize;
-        }
-
-        Ok(fdp)
-    })()
-    .inspect_err(|err| {
-        put_dirh(dirh, true);
-    })?;
-
-    Ok(fd)
+    if ret.is_err() {
+        state.put_dirh_primitive(true).ok();
+    }
+    ret
 }
 
 /// 为安全文件（fdp 对应的文件）在目录文件（dirh）中设置一个名字 po.obj_id，并同步目录、清理旧文件。
@@ -864,7 +870,8 @@ fn set_name(
     );
     let mut have_old_dfh = false;
 
-    let old_dfh = tee_fs_dirfile_find(dirh, &po.uuid, &po.obj_id);
+    let objid = po.obj_id.lock();
+    let old_dfh = tee_fs_dirfile_find(dirh, &po.uuid, &objid.obj_id);
 
     tee_debug!("set_name: old_dfh: {:X?}", old_dfh);
 
@@ -888,7 +895,7 @@ fn set_name(
     // tee_fs_dirfile_rename() will allocate a new index.
     fdp.dfh.idx = old_dfh.idx;
     old_dfh.idx = -1;
-    tee_fs_dirfile_rename(dirh, &po.uuid, &mut fdp.dfh, &po.obj_id)?;
+    tee_fs_dirfile_rename(dirh, &po.uuid, &mut fdp.dfh, &objid.obj_id)?;
     commit_dirh_writes(dirh)?;
 
     if have_old_dfh {
@@ -900,7 +907,7 @@ fn set_name(
 }
 
 fn ree_fs_create(
-    po: &mut tee_pobj,
+    po: &tee_pobj,
     overwrite: bool,
     head: &[u8],
     attr: &[u8],
@@ -911,73 +918,109 @@ fn ree_fs_create(
     // One of data_core and data_user must be NULL
     debug_assert!(data_core.is_empty() || data_user.is_empty());
 
-    let _guard = REE_FS_MUTEX.lock();
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
 
     let mut dfh = TeeFsDirfileFileh::default();
     let mut fdp: Option<Box<TeeFsFd>> = None;
-    let dirh_ptr = get_dirh()?;
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
-    };
+    state.get_dirh()?;
 
-    (|| -> TeeResult<Box<TeeFsFd>> {
-        tee_fs_dirfile_get_tmp(dirh, &mut dfh)?;
+    let ret = ree_fs_create_inner(
+        &mut state,
+        &ReeFsCreateParams {
+            po,
+            overwrite,
+            head,
+            attr,
+            data_core,
+            data_user,
+            data_size,
+        },
+        &mut dfh,
+        &mut fdp,
+    );
 
-        let mut hash_buf = dfh.hash;
-        let opened_fdp =
-            ree_fs_open_primitive(Some(&po.uuid), true, Some(&mut hash_buf), Some(&dfh))?;
-        dfh.hash.copy_from_slice(&hash_buf);
-
-        // 标记 fdp 已成功打开，对应 C 版本中的 *fh != NULL
-        fdp = Some(opened_fdp);
-        let fdp_val = fdp.as_mut().ok_or(TEE_ERROR_GENERIC)?;
-
-        let mut pos = 0;
-
-        if !head.is_empty() {
-            ree_fs_write_primitive(fdp_val, pos, head, &[], head.len())?;
-            pos += head.len();
-        }
-
-        if !attr.is_empty() {
-            ree_fs_write_primitive(fdp_val, pos, attr, &[], attr.len())?;
-            pos += attr.len();
-        }
-
-        if (!data_core.is_empty() || !data_user.is_empty()) && data_size > 0 {
-            ree_fs_write_primitive(fdp_val, pos, data_core, data_user, data_size)?;
-        }
-
-        tee_debug!("ree_fs_create: sync to storage");
-        tee_fs_htree_sync_to_storage(&mut fdp_val.ht, Some(&mut fdp_val.dfh.hash))?;
-
-        tee_debug!("ree_fs_create: set name");
-        set_name(dirh, fdp_val, po, overwrite).inspect_err(|e| {
-            error!("ree_fs_create: set name failed: {:X?}", e);
-        })?;
-
-        // 成功时取出 fdp，使用 take() 避免移动后无法在 map_err 中使用
-        fdp.take().ok_or(TEE_ERROR_GENERIC)
-    })()
-    .inspect_err(|_err| {
-        // 错误处理：对应 C 版本中的 if (*fh) 检查
-        put_dirh(dirh, true);
+    if ret.is_err() {
+        state.put_dirh_primitive(true).ok();
         if let Some(ref mut fdp_val) = fdp {
             ree_fs_close_primitive(fdp_val);
             tee_fs_rpc_remove_dfh(Some(&dfh)).ok();
         }
-    })
+    }
+    ret
+}
+
+struct ReeFsCreateParams<'a> {
+    po: &'a tee_pobj,
+    overwrite: bool,
+    head: &'a [u8],
+    attr: &'a [u8],
+    data_core: &'a [u8],
+    data_user: &'a [u8],
+    data_size: usize,
+}
+
+/// Inner helper for `ree_fs_create` to avoid borrow conflicts with `state`.
+fn ree_fs_create_inner(
+    state: &mut ReeFsDirh,
+    params: &ReeFsCreateParams<'_>,
+    dfh: &mut TeeFsDirfileFileh,
+    fdp: &mut Option<Box<TeeFsFd>>,
+) -> TeeResult<Box<TeeFsFd>> {
+    tee_fs_dirfile_get_tmp(state.dirh_mut(), dfh)?;
+
+    let mut hash_buf = dfh.hash;
+    let opened_fdp =
+        ree_fs_open_primitive(Some(&params.po.uuid), true, Some(&mut hash_buf), Some(dfh))?;
+    dfh.hash.copy_from_slice(&hash_buf);
+
+    *fdp = Some(opened_fdp);
+    let fdp_val = fdp.as_mut().ok_or(TEE_ERROR_GENERIC)?;
+
+    let mut pos = 0;
+
+    if !params.head.is_empty() {
+        ree_fs_write_primitive(fdp_val, pos, params.head, &[], params.head.len())?;
+        pos += params.head.len();
+    }
+
+    if !params.attr.is_empty() {
+        ree_fs_write_primitive(fdp_val, pos, params.attr, &[], params.attr.len())?;
+        pos += params.attr.len();
+    }
+
+    if (!params.data_core.is_empty() || !params.data_user.is_empty()) && params.data_size > 0 {
+        ree_fs_write_primitive(
+            fdp_val,
+            pos,
+            params.data_core,
+            params.data_user,
+            params.data_size,
+        )?;
+    }
+
+    tee_debug!("ree_fs_create: sync to storage");
+    tee_fs_htree_sync_to_storage(&mut fdp_val.ht, Some(&mut fdp_val.dfh.hash))?;
+
+    tee_debug!("ree_fs_create: set name");
+    set_name(state.dirh_mut(), fdp_val, params.po, params.overwrite).inspect_err(|e| {
+        error!("ree_fs_create: set name failed: {:X?}", e);
+    })?;
+
+    fdp.take().ok_or(TEE_ERROR_GENERIC)
 }
 
 pub fn ree_fs_close(fh: &mut Option<Box<TeeFsFd>>) {
     if let Some(mut fdp) = fh.take() {
-        // 获取互斥锁，guard 在作用域结束时自动释放
-        let _guard = REE_FS_MUTEX.lock();
-        let _ = put_dirh_primitive(false);
+        let _global_lock = REE_FS_MUTEX.lock();
+        {
+            let mut state = REE_FS_STATE.lock();
+            state.put_dirh_primitive(false).ok();
+        }
+        // Avoid dropping file handles while REE_FS_STATE is held.
+        // Drop path may touch global fd/VFS locks and can deadlock with
+        // other paths that take those locks before waiting on REE_FS_STATE.
         ree_fs_close_primitive(&mut fdp);
-        // fh 已经在 take() 时设置为 None，无需手动设置
-        // TODO: fdp (Box<TeeFsFd>) 此时未受_guard 保护，是否需要额外处理（drop fdp）？
     }
 }
 
@@ -988,7 +1031,7 @@ pub fn ree_fs_read(
     buf_user: &mut [u8],
     len: &mut usize,
 ) -> TeeResult {
-    let _guard = REE_FS_MUTEX.lock();
+    let _global_lock = REE_FS_MUTEX.lock();
     ree_fs_read_primitive(fh, pos, buf_core, buf_user, len)
 }
 
@@ -1002,13 +1045,9 @@ pub fn ree_fs_write(
     debug_assert!(!buf_core.is_empty() || !buf_user.is_empty());
     tee_debug!("ree_fs_write: fh: {:?}, pos: {:?}, len: {:?}", fh, pos, len);
 
-    let _guard = REE_FS_MUTEX.lock();
-    let dirh_ptr = get_dirh()?;
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
-    };
-    tee_debug!("ree_fs_write: dirh: {:?}", dirh_ptr);
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
+    state.get_dirh()?;
 
     let ret = (|| -> TeeResult {
         ree_fs_write_primitive(fh, pos, buf_core, buf_user, len).inspect_err(|e| {
@@ -1017,50 +1056,44 @@ pub fn ree_fs_write(
         tee_fs_htree_sync_to_storage(&mut fh.ht, Some(&mut fh.dfh.hash)).inspect_err(|e| {
             error!("ree_fs_write: sync to storage failed: {:#010X}", e);
         })?;
-        tee_fs_dirfile_update_hash(dirh, &fh.dfh).inspect_err(|e| {
+        tee_fs_dirfile_update_hash(state.dirh_mut(), &fh.dfh).inspect_err(|e| {
             error!("ree_fs_write: update hash failed: {:#010X}", e);
         })?;
-        commit_dirh_writes(dirh).inspect_err(|e| {
+        commit_dirh_writes(state.dirh_mut()).inspect_err(|e| {
             error!("ree_fs_write: commit writes failed: {:#010X}", e);
         })?;
 
         Ok(())
     })();
 
-    put_dirh(dirh, ret.is_err());
+    state.put_dirh_primitive(ret.is_err()).ok();
     ret
 }
 
 pub fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
-    let _guard = REE_FS_MUTEX.lock();
-    let dirh_ptr = get_dirh()?;
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
-    };
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
+    state.get_dirh()?;
 
     let ret = (|| -> TeeResult {
         ree_fs_ftruncate_internal(fh, len)?;
 
         tee_fs_htree_sync_to_storage(&mut fh.ht, Some(&mut fh.dfh.hash))?;
 
-        tee_fs_dirfile_update_hash(dirh, &fh.dfh)?;
-        commit_dirh_writes(dirh)?;
+        tee_fs_dirfile_update_hash(state.dirh_mut(), &fh.dfh)?;
+        commit_dirh_writes(state.dirh_mut())?;
 
         Ok(())
     })();
 
-    put_dirh(dirh, ret.is_err());
+    state.put_dirh_primitive(ret.is_err()).ok();
     ret
 }
 
-pub fn ree_fs_rename(old: &mut tee_pobj, new: &tee_pobj, overwrite: bool) -> TeeResult {
-    let _guard = REE_FS_MUTEX.lock();
-    let dirh_ptr = get_dirh()?;
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
-    };
+pub fn ree_fs_rename(old: &tee_pobj, new: &tee_pobj, overwrite: bool) -> TeeResult {
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
+    state.get_dirh()?;
 
     let remove_dfh = TeeFsDirfileFileh {
         idx: -1,
@@ -1069,21 +1102,27 @@ pub fn ree_fs_rename(old: &mut tee_pobj, new: &tee_pobj, overwrite: bool) -> Tee
     };
 
     let ret = (|| -> TeeResult {
-        let new_dfh = tee_fs_dirfile_find(dirh, &new.uuid, &new.obj_id);
+        let new_objid = new.obj_id.lock();
+        let new_dfh = tee_fs_dirfile_find(state.dirh_mut(), &new.uuid, &new_objid.obj_id);
 
         if new_dfh.is_ok() && !overwrite {
             return Err(TEE_ERROR_ACCESS_CONFLICT);
         }
 
-        let mut dfh = tee_fs_dirfile_find(dirh, &old.uuid, &old.obj_id)?;
+        drop(new_objid);
+        let old_objid = old.obj_id.lock();
+        let mut dfh = tee_fs_dirfile_find(state.dirh_mut(), &old.uuid, &old_objid.obj_id)?;
 
-        tee_fs_dirfile_rename(dirh, &new.uuid, &mut dfh, &new.obj_id)?;
+        drop(old_objid);
+
+        let new_objid = new.obj_id.lock();
+        tee_fs_dirfile_rename(state.dirh_mut(), &new.uuid, &mut dfh, &new_objid.obj_id)?;
 
         if remove_dfh.idx != -1 {
-            tee_fs_dirfile_remove(dirh, &remove_dfh)?;
+            tee_fs_dirfile_remove(state.dirh_mut(), &remove_dfh)?;
         }
 
-        commit_dirh_writes(dirh)?;
+        commit_dirh_writes(state.dirh_mut())?;
 
         if remove_dfh.idx != -1 {
             tee_fs_rpc_remove_dfh(Some(&remove_dfh))?;
@@ -1092,33 +1131,31 @@ pub fn ree_fs_rename(old: &mut tee_pobj, new: &tee_pobj, overwrite: bool) -> Tee
         Ok(())
     })();
 
-    put_dirh(dirh, ret.is_err());
+    state.put_dirh_primitive(ret.is_err()).ok();
     ret
 }
 
 pub fn ree_fs_remove(po: &tee_pobj) -> TeeResult {
     tee_debug!("ree_fs_remove: po: {:?}", po);
 
-    let _guard = REE_FS_MUTEX.lock();
-    let dirh_ptr = get_dirh()?;
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
-    };
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
+    state.get_dirh()?;
 
     let ret = (|| -> TeeResult {
-        let dfh = tee_fs_dirfile_find(dirh, &po.uuid, &po.obj_id)?;
+        let objid = po.obj_id.lock();
+        let dfh = tee_fs_dirfile_find(state.dirh_mut(), &po.uuid, &objid.obj_id)?;
 
-        tee_fs_dirfile_remove(dirh, &dfh)?;
+        tee_fs_dirfile_remove(state.dirh_mut(), &dfh)?;
 
-        commit_dirh_writes(dirh)?;
+        commit_dirh_writes(state.dirh_mut())?;
 
         tee_fs_rpc_remove_dfh(Some(&dfh))?;
 
         Ok(())
     })();
 
-    put_dirh(dirh, ret.is_err());
+    state.put_dirh_primitive(ret.is_err()).ok();
     ret
 }
 
@@ -1184,18 +1221,15 @@ fn commit_dirh_writes(dirh: &mut TeeFsDirfileDirh) -> TeeResult {
     tee_fs_dirfile_commit_writes(dirh, None)
 }
 
-/// Process-local directory handle cache.
+/// Global directory handle cache, matching OP-TEE C semantics.
 ///
-/// The cache lives in the owning [`ProcessState`] instead of a global TEE map,
-/// so its lifetime matches the process lifetime and stale handles cannot leak
-/// across processes.
+/// In OP-TEE C, `ree_fs_dirh` is a global static pointer shared by all CPUs,
+/// protected by `ree_fs_mutex`. Here we use `Mutex<ReeFsDirh>` (i.e.
+/// `REE_FS_STATE`) so the lock and the data are bound together.
 ///
-/// Different from OP-TEE:
-/// - OP-TEE keeps `ree_fs_dirh` as a TEE-global object shared by multiple TAs.
-/// - X-Kernel keeps one cache per process.
-///
-/// This keeps the handle/cache lifecycle aligned with process exit and avoids a
-/// manual reset path.
+/// All callers obtain a `MutexGuard<ReeFsDirh>` and access the inner
+/// `TeeFsDirfileDirh` through safe `&mut` references — no raw pointers escape
+/// the lock scope.
 pub struct ReeFsDirh {
     /// Directory handle cache
     handle: Option<Box<TeeFsDirfileDirh>>,
@@ -1217,24 +1251,40 @@ impl ReeFsDirh {
         }
     }
 
-    /// Get directory handle, if not exist, open it
-    pub fn get_dirh(&mut self) -> TeeResult<*mut TeeFsDirfileDirh> {
+    /// Acquire a directory handle reference: open the handle if needed and
+    /// increment the reference count.
+    ///
+    /// After calling this, use [`dirh_mut()`] to obtain a `&mut TeeFsDirfileDirh`.
+    /// This two-step design avoids holding a mutable borrow on `self` across
+    /// the entire operation, which would prevent calling `put_dirh_primitive`
+    /// in error paths.
+    pub fn get_dirh(&mut self) -> TeeResult<()> {
         if self.handle.is_none() {
             let dirh = open_dirh()?;
             self.handle = Some(dirh);
         }
         self.refcount += 1;
 
-        let h = self.handle.as_mut().unwrap().as_mut() as *mut TeeFsDirfileDirh;
         tee_debug!(
-            "get_dirh: h with refcount: {:?} and h: {:?}",
+            "get_dirh: refcount: {:?}, h: {:p}",
             self.refcount,
-            h
+            self.handle.as_ref().unwrap().as_ref() as *const _
         );
-        Ok(h)
+        Ok(())
     }
 
-    /// Release directory handle reference
+    /// Get a mutable reference to the cached directory handle.
+    ///
+    /// # Panics
+    /// Panics if `get_dirh()` has not been called successfully first.
+    pub fn dirh_mut(&mut self) -> &mut TeeFsDirfileDirh {
+        self.handle.as_mut().expect("dirh not opened").as_mut()
+    }
+
+    /// Release directory handle reference.
+    ///
+    /// If `close` is true or the reference count drops to zero, the cached
+    /// handle is closed and freed.
     pub fn put_dirh_primitive(&mut self, close: bool) -> TeeResult {
         if self.refcount == 0 {
             warn!("put_dirh_primitive: refcount already 0 (double free or logic error)");
@@ -1243,14 +1293,13 @@ impl ReeFsDirh {
 
         self.refcount -= 1;
 
-        // Only these two cases need to be released:
+        // Close the handle when:
         // 1) Normal reference count reaches zero
-        // 2) close == true (force release)
-        if self.refcount == 0 || close {
-            if let Some(mut dirh) = self.handle.take() {
-                close_dirh(&mut dirh)?;
-            }
-            self.refcount = 0;
+        // 2) close == true (force release, e.g. on error)
+        if (self.refcount == 0 || close)
+            && let Some(mut dirh) = self.handle.take()
+        {
+            close_dirh(&mut dirh)?;
         }
 
         Ok(())
@@ -1259,7 +1308,6 @@ impl ReeFsDirh {
 
 impl Drop for ReeFsDirh {
     fn drop(&mut self) {
-        // 进程退出时自动清理
         if let Some(mut dirh) = self.handle.take() {
             tee_debug!("ReeFsDirh::drop: cleaning up cached dirh");
             let _ = close_dirh(&mut dirh);
@@ -1267,95 +1315,53 @@ impl Drop for ReeFsDirh {
     }
 }
 
-type DirHandleManager = Arc<Mutex<ReeFsDirh>>;
-
-fn current_dir_handle_manager() -> TeeResult<DirHandleManager> {
-    kthread::current_process_state()
-        .get_or_init_tee_runtime_private(|| Mutex::new(ReeFsDirh::new()))
-        .map_err(|_| TEE_ERROR_GENERIC)
-}
-
-/// 获取目录句柄
-pub fn get_dirh() -> TeeResult<*mut TeeFsDirfileDirh> {
-    current_dir_handle_manager()?.lock().get_dirh()
-}
-
-/// 释放目录句柄引用
-pub fn put_dirh_primitive(close: bool) -> TeeResult {
-    current_dir_handle_manager()?
-        .lock()
-        .put_dirh_primitive(close)
-}
-
-/// 释放目录句柄
-pub fn put_dirh(_dirh: &TeeFsDirfileDirh, close: bool) {
-    let _ = put_dirh_primitive(close);
-}
-
 pub fn ree_fs_opendir_rpc(uuid: &TEE_UUID) -> TeeResult<Box<TeeFsDir>> {
     let mut d = Box::new(TeeFsDir::default());
-
-    // d->uuid = uuid; (如果 uuid 是 NULL，则使用默认值)
     d.uuid = *uuid;
 
-    let _guard = REE_FS_MUTEX.lock();
-
-    // res = get_dirh(&d->dirh);
-    let dirh_ptr = get_dirh()?;
-    d.dirh = dirh_ptr;
-
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
-    };
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
+    state.get_dirh()?;
+    d.has_dirh_ref = true;
 
     // See that there's at least one file
-    // d->idx = -1;
     d.idx = -1;
     d.d.oid_len = d.d.oid.len() as u32;
-    // 在 Rust 中，oidlen 是返回值，不需要预先设置
 
-    // res = tee_fs_dirfile_get_next(d->dirh, d->uuid, &d->idx, d->d.oid, &d->d.oidlen);
+    let dirh = state.dirh_mut();
     let res = tee_fs_dirfile_get_next(dirh, &d.uuid, &mut d.idx, &mut d.d.oid);
 
     d.idx = -1;
 
-    // 处理结果
     match res {
         Ok(oid_len) => {
             d.d.oid_len = oid_len as u32;
-            // 成功：*dir = d;
             Ok(d)
         }
         Err(e) => {
-            // 失败：put_dirh(d->dirh, false); free(d);
-            put_dirh(dirh, false);
+            d.has_dirh_ref = false;
+            state.put_dirh_primitive(false).ok();
             Err(e)
         }
     }
 }
 
 pub fn ree_fs_closedir_rpc(d: &mut TeeFsDir) -> TeeResult {
-    let _guard = REE_FS_MUTEX.lock();
-    let dirh_ptr = d.dirh;
-    if !dirh_ptr.is_null() {
-        let dirh = unsafe {
-            assert!(!dirh_ptr.is_null());
-            &mut *dirh_ptr
-        };
-        put_dirh(dirh, false);
+    if d.has_dirh_ref {
+        let _global_lock = REE_FS_MUTEX.lock();
+        let mut state = REE_FS_STATE.lock();
+        state.put_dirh_primitive(false).ok();
+        d.has_dirh_ref = false;
     }
 
     Ok(())
 }
 
 pub fn ree_fs_readdir_rpc(d: &mut TeeFsDir, ent: &mut tee_fs_dirent) -> TeeResult {
-    let _guard = REE_FS_MUTEX.lock();
-    let dirh_ptr = d.dirh;
-    let dirh = unsafe {
-        assert!(!dirh_ptr.is_null());
-        &mut *dirh_ptr
-    };
+    let _global_lock = REE_FS_MUTEX.lock();
+    let mut state = REE_FS_STATE.lock();
+    // The dirh must have been acquired by opendir; access it through the lock.
+    let dirh = state.dirh_mut();
 
     ent.oid_len = ent.oid.len() as u32;
     let res = tee_fs_dirfile_get_next(dirh, &d.uuid, &mut d.idx, &mut d.d.oid);

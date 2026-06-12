@@ -16,7 +16,10 @@ use tee_raw_sys::*;
 use tee_task_iface::TeeTaCtx;
 
 use crate::tee::{
-    TeeResult, tee_obj::tee_obj, tee_svc_cryp2::TeeCrypState, tee_svc_storage::tee_storage_enum,
+    TeeResult,
+    tee_obj::{tee_obj, tee_obj_close_all},
+    tee_svc_cryp2::{TeeCrypState, tee_cryp_state_close_all},
+    tee_svc_storage::{tee_storage_enum, tee_svc_storage_close_all_enum},
     user_ta::user_ta_ctx,
 };
 
@@ -134,6 +137,27 @@ where
 
         f(concrete)
     })
+}
+
+/// Release session-scoped TEE resources before TA thread/process exit.
+///
+/// Closes all open objects, storage enumerators, and crypto states in the current
+/// thread's session context. Only runs when that context already exists.
+///
+/// # Caller context
+///
+/// Must not be called while `tee_session_ctx` is already locked on the current thread
+/// (non-reentrant `Mutex`). Intended for thread exit after syscall/trap handling returns.
+pub fn tee_session_release_state() -> TeeResult {
+    let has_ctx = kthread::with_current_thread(|thread| thread.tee_session_ctx.lock().is_some());
+    if !has_ctx {
+        return Ok(());
+    }
+
+    tee_obj_close_all()?;
+    tee_svc_storage_close_all_enum()?;
+    tee_cryp_state_close_all()?;
+    Ok(())
 }
 
 #[cfg(unittest)]

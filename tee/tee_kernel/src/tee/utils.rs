@@ -64,7 +64,7 @@ pub fn roundup_u<
 }
 
 pub fn slice_fmt(data: &[u8]) -> String {
-    let min_len: usize = 2048;
+    let min_len: usize = 128;
     let len = data.len();
     let show_len = len.min(min_len);
 

@@ -367,7 +367,7 @@ pub fn tee_fs_dirfile_remove(dirh: &mut TeeFsDirfileDirh, dfh: &TeeFsDirfileFile
     let mut dent: DirFileEntry = DirFileEntry::default();
     read_dent(dirh, dfh.idx as usize, &mut dent)?;
 
-    if dent.oid_len == 0 {
+    if is_free(&dent) {
         return Ok(());
     }
 

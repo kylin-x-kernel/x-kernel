@@ -893,6 +893,20 @@ pub fn tee_cryp_state_free(id: u32) -> TeeResult {
     Ok(())
 }
 
+/// Close all crypto operation states in the current session context.
+///
+/// Mirrors OP-TEE `tee_svc_cryp_free_states()` in `release_utc_state`.
+pub fn tee_cryp_state_close_all() -> TeeResult {
+    let ids: Vec<u32> =
+        with_tee_session_ctx(|ctx| Ok(ctx.cryp_state.iter().map(|(k, _)| k as u32).collect()))?;
+    for id in ids {
+        if let Err(e) = tee_cryp_state_free(id) {
+            error!("tee_cryp_state_close_all: tee_cryp_state_free({id}): {e:#010X?}");
+        }
+    }
+    Ok(())
+}
+
 pub fn syscall_cryp_state_free(arg0: usize) -> TeeResult {
     tee_cryp_state_free(arg0 as _)
 }

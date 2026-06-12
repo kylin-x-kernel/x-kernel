@@ -96,6 +96,7 @@ pub type TeeResult<T = ()> = Result<T, u32>;
 pub use tee_api_defines_extensions::*;
 #[cfg(unittest)]
 pub use tee_session::set_tee_session_ctx;
+pub use tee_session::tee_session_release_state;
 
 /// Dispatch TEE-specific syscalls from the userspace context
 pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {

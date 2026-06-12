@@ -11,6 +11,7 @@ use kio::{Seek, SeekFrom};
 use ksync::RwLock;
 use kthread;
 use kvfs::{NodePermission, VfsError};
+use lazy_static::lazy_static;
 use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
@@ -25,10 +26,9 @@ pub const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR | O_SYNC;
 pub const FS_OFLAG_RW: u32 = O_RDWR | O_SYNC;
 pub const FS_OFLAG_RW_TRUNC: u32 = O_RDWR | O_TRUNC | O_SYNC;
 
-type TeeFdTable = Arc<RwLock<Slab<Arc<File>>>>;
-
-fn current_tee_fd_table() -> TeeFdTable {
-    kthread::current_process_state().tee_fd_table().clone()
+lazy_static! {
+    /// Global open-object table for TEE file descriptors.
+    static ref TEE_FD_TABLE: RwLock<Slab<Arc<File>>> = RwLock::new(Slab::new());
 }
 
 /// Convert open flags to [`OpenOptions`].
@@ -158,7 +158,7 @@ fn add_to_fd(result: OpenResult, _flags: u32) -> KResult<isize> {
         }
     };
 
-    let fd = current_tee_fd_table().write().insert(Arc::new(f));
+    let fd = TEE_FD_TABLE.write().insert(Arc::new(f));
     Ok(fd as isize)
 }
 
@@ -166,7 +166,7 @@ fn with_file<F, R>(file: &FileVariant, f: F) -> TeeResult<R>
 where
     F: FnOnce(&Arc<File>) -> TeeResult<R>,
 {
-    let file_arc = current_tee_fd_table()
+    let file_arc = TEE_FD_TABLE
         .read()
         .get(file.fd as usize)
         .ok_or_else(|| {
@@ -365,7 +365,7 @@ impl TeeFileLike for FileVariant {
         if self.fd < 0 {
             return Ok(()); // already closed
         }
-        current_tee_fd_table()
+        TEE_FD_TABLE
             .write()
             .try_remove(self.fd as usize)
             .ok_or_else(|| {

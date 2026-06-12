@@ -212,6 +212,14 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         exit_robust_list(head);
     }
 
+    // Per-thread TEE session cleanup when this thread holds a session context.
+    // tee_session_release_state() is a no-op when none exists. Safe here because
+    // do_exit runs after syscall/trap return; tee_session_ctx must not be held.
+    #[cfg(feature = "tee")]
+    if let Err(e) = tee_kernel::tee::tee_session_release_state() {
+        error!("tee_session_release_state on thread exit: {e:#010X?}");
+    }
+
     let process = &thr.proc_state.proc;
     if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {
         thr.proc_state.resources.close_all_fds();
