@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux-style VFS operation families.
+//! VFS operation families.
 //!
-//! These traits name the ownership boundaries that Linux keeps separate:
-//! superblock-wide operations, inode namespace operations, open-file
-//! operations, and address-space/page-cache operations. Existing `kvfs`
-//! traits are still used as the compatibility surface while filesystems are
-//! migrated toward these narrower families.
+//! These traits name the ownership boundaries for superblock-wide operations,
+//! inode namespace operations, open-file operations, and address-space/page-cache
+//! operations. Existing `kvfs` traits are still used as the compatibility
+//! surface while filesystems are migrated toward these narrower families.
 
 use crate::{
     DirEntry, DirEntrySink, DirNode, FileNode, Metadata, MetadataUpdate, NodePermission, NodeType,
@@ -18,8 +17,8 @@ use crate::{
 /// Superblock-wide filesystem operations.
 ///
 /// A superblock owns one mounted filesystem instance and the state shared by
-/// all inodes in that instance. This is the Linux `struct super_operations`
-/// boundary; it must not contain per-open-file state.
+/// all inodes in that instance. This boundary must not contain per-open-file
+/// state.
 pub trait SuperBlockOperations: Send + Sync + 'static {
     /// Returns the filesystem type name.
     fn name(&self) -> &str;
@@ -34,13 +33,18 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
     fn sync_fs(&self) -> VfsResult<()> {
         Ok(())
     }
+
+    /// Returns the maximum regular-file byte offset supported by this superblock.
+    fn max_file_size(&self) -> u64 {
+        crate::MAX_LFS_FILESIZE
+    }
 }
 
 /// Inode metadata and namespace operations.
 ///
-/// This groups operations that Linux keeps in `inode_operations`, plus the
-/// current directory iteration hook that still needs to move out of the
-/// compatibility `DirNodeOps` trait.
+/// This groups inode-scoped namespace operations, plus the current directory
+/// iteration hook that still needs to move out of the compatibility
+/// `DirNodeOps` trait.
 pub trait InodeOperations: Send + Sync {
     /// Returns metadata for this inode.
     fn metadata(&self) -> VfsResult<Metadata>;
@@ -98,8 +102,8 @@ pub trait InodeOperations: Send + Sync {
 
 /// Open-file operations.
 ///
-/// This is the future home for Linux `file_operations`-style behavior. The
-/// current compatibility path still routes most calls through `FileNodeOps`.
+/// This is the future home for open-file behavior. The current compatibility
+/// path still routes most calls through `FileNodeOps`.
 pub trait FileOperations: Send + Sync {
     /// Reads file data at `offset`.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize>;
@@ -144,9 +148,9 @@ impl FileOperations for FileNodeFileOperations<'_> {
 
 /// Page-cache and backing-store operations for an inode address space.
 ///
-/// This is the target boundary for Linux `address_space_operations`. Buffered
-/// I/O and mmap should converge here instead of reaching through byte-level
-/// `read_at`/`write_at` methods.
+/// This is the target boundary for page-cache and backing-store operations.
+/// Buffered I/O and mmap should converge here instead of reaching through
+/// byte-level `read_at`/`write_at` methods.
 pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Reads one page from backing storage into `page`.
     fn read_page(&self, page_index: u64, page: &mut [u8]) -> VfsResult<usize>;

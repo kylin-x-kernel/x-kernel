@@ -153,6 +153,8 @@ pub enum KErrorKind {
     WriteZero,
     /// The connection was aborted.
     ConnectionAborted,
+    /// File is too large for the filesystem or VFS limit.
+    FileTooLarge,
 }
 
 impl KErrorKind {
@@ -204,6 +206,7 @@ impl KErrorKind {
             Unsupported => "Operation not supported",
             WouldBlock => "Operation would block",
             WriteZero => "Write zero",
+            FileTooLarge => "File too large",
         }
     }
 
@@ -248,6 +251,7 @@ impl From<KErrorKind> for LinuxError {
             ConnectionReset => LinuxError::ECONNRESET,
             CrossesDevices => LinuxError::EXDEV,
             DirectoryNotEmpty => LinuxError::ENOTEMPTY,
+            FileTooLarge => LinuxError::EFBIG,
             FilesystemLoop => LinuxError::ELOOP,
             IllegalBytes => LinuxError::EILSEQ,
             InProgress => LinuxError::EINPROGRESS,
@@ -299,6 +303,7 @@ impl TryFrom<LinuxError> for KErrorKind {
             LinuxError::ECONNRESET => ConnectionReset,
             LinuxError::EXDEV => CrossesDevices,
             LinuxError::ENOTEMPTY => DirectoryNotEmpty,
+            LinuxError::EFBIG => FileTooLarge,
             LinuxError::ELOOP => FilesystemLoop,
             LinuxError::EILSEQ => IllegalBytes,
             LinuxError::EINPROGRESS => InProgress,
@@ -505,7 +510,8 @@ kerror_consts!(
     Unsupported,
     WouldBlock,
     WriteZero,
-    ConnectionAborted
+    ConnectionAborted,
+    FileTooLarge
 );
 
 /// A specialized [`Result`] type with [`KError`] as the error type.
@@ -678,6 +684,7 @@ mod tests_unittest {
         (KErrorKind::ConnectionReset, LinuxError::ECONNRESET),
         (KErrorKind::CrossesDevices, LinuxError::EXDEV),
         (KErrorKind::DirectoryNotEmpty, LinuxError::ENOTEMPTY),
+        (KErrorKind::FileTooLarge, LinuxError::EFBIG),
         (KErrorKind::FilesystemLoop, LinuxError::ELOOP),
         (KErrorKind::IllegalBytes, LinuxError::EILSEQ),
         (KErrorKind::InProgress, LinuxError::EINPROGRESS),

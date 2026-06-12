@@ -9,6 +9,9 @@ use inherit_methods_macro::inherit_methods;
 
 use crate::{DirEntry, Mutex, SuperBlockOperations, TypeMap, VfsResult};
 
+/// Large-file page-cache limit for 64-bit VFS offsets.
+pub const MAX_LFS_FILESIZE: u64 = i64::MAX as u64;
+
 /// Mount read-only.
 pub const ST_RDONLY: u32 = 0x1;
 /// Ignore set-user-ID and set-group-ID bits.
@@ -73,6 +76,11 @@ pub trait FilesystemOps: Send + Sync + 'static {
     fn flush(&self) -> VfsResult<()> {
         Ok(())
     }
+
+    /// Returns the maximum regular-file byte offset supported by this filesystem.
+    fn max_file_size(&self) -> u64 {
+        MAX_LFS_FILESIZE
+    }
 }
 
 impl<T: FilesystemOps> SuperBlockOperations for T {
@@ -91,15 +99,20 @@ impl<T: FilesystemOps> SuperBlockOperations for T {
     fn sync_fs(&self) -> VfsResult<()> {
         self.flush()
     }
+
+    fn max_file_size(&self) -> u64 {
+        FilesystemOps::max_file_size(self)
+    }
 }
 
 /// VFS superblock object.
 ///
 /// A superblock owns one filesystem instance and superblock-scoped
-/// attachments. In Linux terms this is the `struct super_block` object; dentries
-/// and inodes point into it, while open files do not own it.
+/// attachments. Dentries and inodes point into it, while open files do not own
+/// it.
 pub struct SuperBlock {
     ops: Arc<dyn FilesystemOps>,
+    max_file_size: u64,
     data: Mutex<TypeMap>,
 }
 
@@ -117,8 +130,10 @@ impl SuperBlock {
 impl SuperBlock {
     /// Creates a superblock from legacy filesystem operations.
     pub fn new(ops: Arc<dyn FilesystemOps>) -> Arc<Self> {
+        let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
         Arc::new(Self {
             ops,
+            max_file_size,
             data: Mutex::default(),
         })
     }
@@ -126,6 +141,11 @@ impl SuperBlock {
     /// Returns the legacy operations object while filesystems are migrating.
     pub fn legacy_ops(&self) -> &Arc<dyn FilesystemOps> {
         &self.ops
+    }
+
+    /// Returns this superblock's maximum regular-file size.
+    pub fn max_file_size(&self) -> u64 {
+        self.max_file_size
     }
 
     /// Access superblock-scoped attachment storage.

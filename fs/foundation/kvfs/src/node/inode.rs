@@ -115,7 +115,7 @@ impl VfsInode {
         }
     }
 
-    /// Returns a Linux-style file-operations adapter for file-like inodes.
+    /// Returns a file-operations adapter for file-like inodes.
     pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
         self.as_file().map(FileNodeFileOperations::new)
     }
@@ -128,7 +128,7 @@ impl VfsInode {
         }
     }
 
-    /// Returns a Linux-style inode-operations adapter for directory inodes.
+    /// Returns an inode-operations adapter for directory inodes.
     pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
         self.as_dir().map(DirNodeInodeOperations::new)
     }

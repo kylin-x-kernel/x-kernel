@@ -19,8 +19,8 @@ use ksync::RwLock;
 use ktask::future::{block_on, poll_io};
 pub use kvfs::VfsFileFlags as FileFlags;
 use kvfs::{
-    Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsFile, VfsResult,
-    path::Path,
+    Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsFile, VfsIoRange,
+    VfsResult, check_file_size, generic_read_range, generic_write_range, path::Path,
 };
 use memaddr::PAGE_SIZE_4K;
 
@@ -393,11 +393,6 @@ impl CachedFile {
         self.mapping.add_evict_listener(listener)
     }
 
-    fn page_start(pn: PageIndex) -> VfsResult<u64> {
-        pn.checked_mul(PAGE_SIZE_4K as u64)
-            .ok_or(VfsError::InvalidInput)
-    }
-
     pub fn with_page<R>(&self, pn: PageIndex, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
         self.mapping.with_page(pn, f)
     }
@@ -412,20 +407,24 @@ impl CachedFile {
             .with_page_or_insert(file, self.in_memory, pn, f)
     }
 
-    pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+    pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         let len = self.inner.len()?;
-        let end = (offset + dst.remaining_mut() as u64).min(len);
-        if end <= offset {
+        let Some(range) = generic_read_range(&self.inner, offset, dst.remaining_mut(), len)? else {
             return Ok(0);
-        }
-        let start_page = offset / PAGE_SIZE_4K as u64;
+        };
+        self.read_range(dst, range)
+    }
+
+    fn read_range(&self, mut dst: impl Write + IoBufMut, range: VfsIoRange) -> VfsResult<usize> {
+        let end = range.end();
+        let start_page = range.offset() / PAGE_SIZE_4K as u64;
         let end_page = end.div_ceil(PAGE_SIZE_4K as u64);
-        let mut page_offset = (offset % PAGE_SIZE_4K as u64) as usize;
+        let mut page_offset = (range.offset() % PAGE_SIZE_4K as u64) as usize;
         let mut read = 0;
         let mut chunk = [0u8; PAGE_SIZE_4K];
         let file = self.inner.entry().as_file()?;
         for pn in start_page..end_page {
-            let page_start = Self::page_start(pn)?;
+            let page_start = pn * PAGE_SIZE_4K as u64;
             let range = page_offset..(end - page_start).min(PAGE_SIZE_4K as u64) as usize;
             let chunk_len = range.end - range.start;
             self.mapping
@@ -440,19 +439,30 @@ impl CachedFile {
         Ok(read)
     }
 
-    fn write_at_locked(&self, mut buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        let end = offset + buf.remaining() as u64;
+    fn write_at_locked(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+        let Some(range) = generic_write_range(&self.inner, offset, buf.remaining())? else {
+            return Ok(0);
+        };
+        self.write_range_locked(buf, range)
+    }
+
+    fn write_range_locked(
+        &self,
+        mut buf: impl Read + IoBuf,
+        range: VfsIoRange,
+    ) -> VfsResult<usize> {
+        let end = range.end();
         let file = self.inner.entry().as_file()?;
         if end > file.len()? {
             file.set_len(end)?;
         }
-        let start_page = offset / PAGE_SIZE_4K as u64;
+        let start_page = range.offset() / PAGE_SIZE_4K as u64;
         let end_page = end.div_ceil(PAGE_SIZE_4K as u64);
-        let mut page_offset = (offset % PAGE_SIZE_4K as u64) as usize;
+        let mut page_offset = (range.offset() % PAGE_SIZE_4K as u64) as usize;
         let mut written = 0;
         let mut chunk = [0u8; PAGE_SIZE_4K];
         for pn in start_page..end_page {
-            let page_start = Self::page_start(pn)?;
+            let page_start = pn * PAGE_SIZE_4K as u64;
             let range = page_offset..(end - page_start).min(PAGE_SIZE_4K as u64) as usize;
             let chunk_len = range.end - range.start;
             buf.read(&mut chunk[..chunk_len])?;
@@ -484,6 +494,7 @@ impl CachedFile {
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
+        check_file_size(&self.inner, len)?;
         let file = self.inner.entry().as_file()?;
         let old_len = file.len()?;
         file.set_len(len)?;
@@ -537,16 +548,28 @@ impl FileBackend {
         CachedFile::get_or_create(location).map(Self::Cached)
     }
 
-    pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
+    pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+        let location = self.location();
+        let Some(range) =
+            generic_read_range(location, offset, dst.remaining_mut(), location.len()?)?
+        else {
+            return Ok(0);
+        };
+        self.read_range(dst, range)
+    }
+
+    fn read_range(&self, mut dst: impl Write + IoBufMut, range: VfsIoRange) -> VfsResult<usize> {
         match self {
-            Self::Cached(cached) => cached.read_at(dst, offset),
+            Self::Cached(cached) => cached.read_range(dst, range),
             Self::Direct(loc) => {
                 let mut total = 0usize;
                 let file = loc.entry().as_file()?;
+                let mut remaining = range.len();
+                let mut offset = range.offset();
                 let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
 
-                while !dst.is_full() {
-                    let want = chunk.len().min(dst.remaining_mut());
+                while remaining > 0 && !dst.is_full() {
+                    let want = chunk.len().min(dst.remaining_mut()).min(remaining);
                     if want == 0 {
                         break;
                     }
@@ -567,6 +590,7 @@ impl FileBackend {
                     }
 
                     total += read;
+                    remaining -= read;
 
                     if read < want {
                         break;
@@ -578,17 +602,30 @@ impl FileBackend {
         }
     }
 
-    pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
+    pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+        let Some(range) = generic_write_range(self.location(), offset, src.remaining())? else {
+            return Ok(0);
+        };
+        self.write_range(src, range)
+    }
+
+    fn write_range(&self, mut src: impl Read + IoBuf, range: VfsIoRange) -> VfsResult<usize> {
         self.location().check_writable_mount()?;
         match self {
-            Self::Cached(cached) => cached.write_at(src, offset),
+            Self::Cached(cached) => {
+                let _guard = cached.append_lock.read();
+                cached.write_range_locked(src, range)
+            }
             Self::Direct(loc) => {
                 let mut total = 0usize;
                 let file = loc.entry().as_file()?;
+                let mut remaining = range.len();
+                let mut offset = range.offset();
                 let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
 
-                while !src.is_empty() {
-                    let read = src.read(&mut chunk)?;
+                while remaining > 0 && !src.is_empty() {
+                    let want = chunk.len().min(remaining);
+                    let read = src.read(&mut chunk[..want])?;
                     if read == 0 {
                         break;
                     }
@@ -604,6 +641,7 @@ impl FileBackend {
                     }
 
                     total += read;
+                    remaining -= read;
                 }
 
                 Ok(total)
@@ -618,10 +656,15 @@ impl FileBackend {
             Self::Direct(loc) => {
                 let mut total = 0usize;
                 let mut end = loc.len()?;
+                let Some(range) = generic_write_range(loc, end, src.remaining())? else {
+                    return Ok((0, end));
+                };
+                let mut remaining = range.len();
                 let mut chunk = [0u8; 4096];
 
-                while !src.is_empty() {
-                    let read = src.read(&mut chunk)?;
+                while remaining > 0 && !src.is_empty() {
+                    let want = chunk.len().min(remaining);
+                    let read = src.read(&mut chunk[..want])?;
                     if read == 0 {
                         break;
                     }
@@ -640,6 +683,7 @@ impl FileBackend {
                     }
 
                     total += read;
+                    remaining -= read;
                 }
 
                 Ok((total, end))
@@ -663,6 +707,7 @@ impl FileBackend {
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
         self.location().check_writable_mount()?;
+        check_file_size(self.location(), len)?;
         match self {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => loc.entry().as_file()?.set_len(len),
@@ -679,6 +724,12 @@ impl FileBackend {
 
     pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
         self.location().check_writable_mount()?;
+        let new_len = self
+            .location()
+            .len()?
+            .checked_add(len)
+            .ok_or(VfsError::FileTooLarge)?;
+        check_file_size(self.location(), new_len)?;
         if let Self::Cached(cached) = self {
             cached.flush_and_evict_from(offset)?;
         }
@@ -751,8 +802,7 @@ impl File {
     /// Checks the node-level blocking attribute (e.g. regular files are always
     /// blocking). This is independent of the user-facing `O_NONBLOCK` flag
     /// checked by `nonblocking()`. When true, read/write bypass poll_io and
-    /// execute directly — matching Linux behavior where `O_NONBLOCK` has no
-    /// effect on regular files.
+    /// execute directly.
     fn is_blocking(&self) -> bool {
         self.vfs_file.is_blocking()
     }
@@ -768,12 +818,24 @@ impl File {
 
     /// Reads a number of bytes starting from a given offset.
     pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        self.access(FileFlags::READ)?.read_at(dst, offset)
+        let backend = self.access(FileFlags::READ)?;
+        let len = backend.location().len()?;
+        let Some(range) = self
+            .vfs_file
+            .generic_read_range(offset, dst.remaining_mut(), len)?
+        else {
+            return Ok(0);
+        };
+        backend.read_range(dst, range)
     }
 
     /// Writes a number of bytes starting from a given offset.
     pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        self.access(FileFlags::WRITE)?.write_at(src, offset)
+        let backend = self.access(FileFlags::WRITE)?;
+        let Some(range) = self.vfs_file.generic_write_range(offset, src.remaining())? else {
+            return Ok(0);
+        };
+        backend.write_range(src, range)
     }
 
     /// Attempts to sync OS-internal file content and metadata to disk.

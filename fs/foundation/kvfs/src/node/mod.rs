@@ -330,12 +330,12 @@ impl DirEntry {
         self.0.inode.get_or_insert_address_space(ops)
     }
 
-    /// Returns a Linux-style inode-operations adapter for directory entries.
+    /// Returns an inode-operations adapter for directory entries.
     pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
         self.0.inode.inode_operations()
     }
 
-    /// Returns a Linux-style file-operations adapter for file entries.
+    /// Returns a file-operations adapter for file entries.
     pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
         self.0.inode.file_operations()
     }

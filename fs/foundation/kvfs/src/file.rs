@@ -4,10 +4,9 @@
 
 //! Open-file objects.
 //!
-//! Linux keeps per-open state in `struct file`, separate from inode identity
-//! and directory-entry name bindings. `VfsFile` is the VFS-owned core of that
-//! object: it owns the opened location, access mode, file offset, raw open
-//! flags, and file-private attachment storage.
+//! `VfsFile` owns per-open state separately from inode identity and
+//! directory-entry name bindings: opened location, access mode, file offset, raw
+//! open flags, and file-private attachment storage.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,6 +27,100 @@ bitflags::bitflags! {
         /// Path-only file descriptor.
         const PATH = 16;
     }
+}
+
+/// A byte range validated by VFS generic read/write checks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VfsIoRange {
+    offset: u64,
+    len: usize,
+}
+
+impl VfsIoRange {
+    /// Returns the starting byte offset.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Returns the number of bytes that may be accessed.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the exclusive byte end offset.
+    pub fn end(&self) -> u64 {
+        self.offset + self.len as u64
+    }
+}
+
+/// Applies generic VFS read range checks.
+///
+/// Reads beyond `super_block::s_maxbytes` or EOF complete as a zero-length
+/// access. Reads that cross either boundary are truncated before the page-cache
+/// loop starts.
+pub fn generic_read_range(
+    location: &Location,
+    offset: u64,
+    count: usize,
+    file_len: u64,
+) -> VfsResult<Option<VfsIoRange>> {
+    let max_file_size = location.super_block().max_file_size();
+    if count == 0 || offset >= max_file_size || offset >= file_len {
+        return Ok(None);
+    }
+
+    let count = u64::try_from(count).map_err(|_| VfsError::InvalidInput)?;
+    let count = count
+        .min(max_file_size - offset)
+        .min(file_len.saturating_sub(offset));
+    if count == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(VfsIoRange {
+        offset,
+        len: usize::try_from(count).map_err(|_| VfsError::InvalidInput)?,
+    }))
+}
+
+/// Applies generic VFS write range checks.
+///
+/// Writes starting at or beyond `super_block::s_maxbytes` fail with `EFBIG`.
+/// Writes that start before the limit but cross it are truncated into a short
+/// write before the page-cache loop starts.
+pub fn generic_write_range(
+    location: &Location,
+    offset: u64,
+    count: usize,
+) -> VfsResult<Option<VfsIoRange>> {
+    if count == 0 {
+        return Ok(None);
+    }
+
+    let max_file_size = location.super_block().max_file_size();
+    if offset >= max_file_size {
+        return Err(VfsError::FileTooLarge);
+    }
+
+    let count = u64::try_from(count)
+        .map_err(|_| VfsError::InvalidInput)?
+        .min(max_file_size - offset);
+    if count == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(VfsIoRange {
+        offset,
+        len: usize::try_from(count).map_err(|_| VfsError::InvalidInput)?,
+    }))
+}
+
+/// Checks a new inode size against this location's superblock maximum.
+pub fn check_file_size(location: &Location, len: u64) -> VfsResult<()> {
+    if len > location.super_block().max_file_size() {
+        return Err(VfsError::FileTooLarge);
+    }
+    Ok(())
 }
 
 /// VFS-owned open-file state.
@@ -92,11 +185,30 @@ impl VfsFile {
         }
     }
 
+    /// Applies generic VFS read range checks for this open file.
+    pub fn generic_read_range(
+        &self,
+        offset: u64,
+        count: usize,
+        file_len: u64,
+    ) -> VfsResult<Option<VfsIoRange>> {
+        generic_read_range(&self.location, offset, count, file_len)
+    }
+
+    /// Applies generic VFS write range checks for this open file.
+    pub fn generic_write_range(&self, offset: u64, count: usize) -> VfsResult<Option<VfsIoRange>> {
+        generic_write_range(&self.location, offset, count)
+    }
+
+    /// Checks a new inode size against this file's superblock maximum.
+    pub fn check_file_size(&self, len: u64) -> VfsResult<()> {
+        check_file_size(&self.location, len)
+    }
+
     /// Returns whether the underlying node is always blocking.
     ///
-    /// This is distinct from the open-file `O_NONBLOCK` state. Linux ignores
-    /// `O_NONBLOCK` for regular files because the inode operation itself is
-    /// always blocking.
+    /// This is distinct from the open-file `O_NONBLOCK` state. Regular-file
+    /// operations are blocking at the inode operation boundary.
     pub fn is_blocking(&self) -> bool {
         self.location.flags().contains(NodeFlags::BLOCKING)
     }

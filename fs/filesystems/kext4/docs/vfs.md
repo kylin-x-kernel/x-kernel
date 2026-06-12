@@ -159,8 +159,18 @@ DentryOperations                         == Linux dentry_operations, later
 | `VfsInode`/inode | inode identity、metadata、i_op/i_fop、i_mapping 指针 | 路径字符串、fd flags、用户 ABI |
 | `VfsFile`/file | 一次 open 的状态：flags、position、private data | page cache 生命周期、目录树所有权 |
 | `AddressSpace` | page cache、writeback、invalidate、mmap coherence | ext4 extent 算法、journal 事务细节 |
-| `SuperBlock` | 一个 mounted filesystem instance 的全局状态 | syscall ABI、fd table、进程 cwd/root |
+| `SuperBlock` | 一个 mounted filesystem instance 的全局状态、`s_maxbytes` | syscall ABI、fd table、进程 cwd/root |
 | ext4 | ext4 super/inode/file/address_space ops 和 ext4 算法 | VFS 对象定义、路径解析、fd ABI |
+
+`s_maxbytes` 是 VFS 的范围边界，不能留给 page-cache 循环中途用
+`page_index * PAGE_SIZE` 溢出来发现。对齐 Linux 时，读写必须先经过 generic
+range checks：
+
+- read：`offset >= s_maxbytes` 返回 0，跨 `s_maxbytes` 或 EOF 的请求先截断；
+- write：`offset >= s_maxbytes` 返回 `EFBIG`，跨 `s_maxbytes` 的请求先截断为
+  short write；
+- page-cache/address-space 循环只处理已经验证过的范围，不负责全局最大文件大小
+  判断。
 
 ### Mermaid 总览图
 
