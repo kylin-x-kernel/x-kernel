@@ -11,8 +11,12 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+ebpf = ["dep:bpffs"]
+
 [dependencies]
 bitflags.workspace = true
+bpffs = { workspace = true, optional = true }
 kfd.workspace = true
 kfd_objects.workspace = true
 devfs.workspace = true

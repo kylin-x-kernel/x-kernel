@@ -9,6 +9,7 @@ homepage.workspace = true
 
 [features]
 default = []        # TODO: init ramdisk
+ebpf = ["dep:bpffs"]
 fat = ["dep:fatfs", "dep:block"]
 
 ext4-lwext4 = ["dep:lwext4_rust"]
@@ -26,6 +27,7 @@ std = []
 crosvm = []
 
 [dependencies]
+bpffs = { workspace = true, optional = true }
 kalloc = { workspace = true }
 alloc-engine = { workspace = true }
 memaddr = { workspace = true }

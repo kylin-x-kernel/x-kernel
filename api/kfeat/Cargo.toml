@@ -176,7 +176,7 @@ pmu = ["kruntime/pmu"]
 tracepoint = ["ktracing/tracepoint"]
 
 # eBPF
-ebpf = ["dep:kbpf"]
+ebpf = ["dep:kbpf", "dep:kfs", "ksyscall/ebpf", "kfs/ebpf"]
 
 [dependencies]
 alloc-engine = { workspace = true, optional = true }

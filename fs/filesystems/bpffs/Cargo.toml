@@ -1,0 +1,18 @@
+[package]
+name = "bpffs"
+description = "BPF virtual filesystem support for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+hashbrown.workspace = true
+kerrno.workspace = true
+kfd.workspace = true
+kpoll.workspace = true
+ksync.workspace = true
+kvfs.workspace = true
+kvfs-simple.workspace = true

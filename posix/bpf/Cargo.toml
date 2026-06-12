@@ -1,0 +1,24 @@
+[package]
+name = "posix-bpf"
+description = "POSIX bpf(2) syscall implementation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+ebpf = []
+
+[dependencies]
+bpffs.workspace = true
+kerrno.workspace = true
+klogger.workspace = true
+kvfs.workspace = true
+kuaccess.workspace = true
+kthread.workspace = true
+posix-types.workspace = true

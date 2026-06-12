@@ -17,6 +17,7 @@ tee = [
     "posix-process/tee",
 ]
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
+ebpf = ["dep:posix-bpf", "posix-bpf/ebpf", "posix-fs/ebpf"]
 
 [dependencies]
 kaddr_layout.workspace = true
@@ -46,6 +47,7 @@ kexec.workspace = true
 kuaccess.workspace = true
 ktty.workspace = true
 posix-fs.workspace = true
+posix-bpf = { workspace = true, optional = true }
 posix-ipc.workspace = true
 posix-mm.workspace = true
 posix-net.workspace = true

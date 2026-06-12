@@ -104,12 +104,15 @@ pub fn sys_mount(
     let fs_type = fs_type.load_string()?;
     debug!("sys_mount <= source: {source:?}, target: {target:?}, fs_type: {fs_type:?}");
 
-    if fs_type != "tmpfs" {
-        return Err(KError::NoSuchDevice);
-    }
-
     let mount_flags = per_mount_flags(flags);
-    let fs = MemoryFs::new_with_name_and_flags("tmpfs", superblock_flags_from_sys_mount(flags));
+    let fs = match fs_type.as_str() {
+        "tmpfs" => {
+            MemoryFs::new_with_name_and_flags("tmpfs", superblock_flags_from_sys_mount(flags))
+        }
+        #[cfg(feature = "ebpf")]
+        "bpf" => bpffs::new_bpffs(),
+        _ => return Err(KError::NoSuchDevice),
+    };
     let target = current_process_state()
         .fs_context()
         .lock()

@@ -71,6 +71,13 @@ pub fn mount_virtual_filesystems(mounts: VirtualFsMounts) -> LinuxResult<()> {
     mount_at(&fs, "/tmp", mounts.tmpfs)?;
     mount_at(&fs, "/proc", mounts.procfs)?;
     mount_at(&fs, "/sys", mounts.sysfs)?;
+    #[cfg(feature = "ebpf")]
+    {
+        if fs.resolve("/sys/fs").is_err() {
+            fs.create_dir("/sys/fs", DIR_PERMISSION)?;
+        }
+        mount_at(&fs, "/sys/fs/bpf", bpffs::new_bpffs())?;
+    }
     create_sys_compat_links(&fs)?;
     Ok(())
 }
