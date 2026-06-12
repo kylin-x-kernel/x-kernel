@@ -707,6 +707,17 @@ PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
 - `DirEntry` 和 `Location` 暴露 address-space 入口，后续 buffered I/O、mmap、
   writeback 和 reclaim 可以从 dentry/path 上下文外移到 inode address-space。
 
+第三批把已有 page cache 进一步挂到 address-space 域：
+
+- `AddressSpace` 反向只弱引用 inode，避免 inode attachment 与 address-space 形成
+  `Arc` 引用环；
+- KFS `FileMapping` 提供 `AddressSpaceOperations` adapter，`writepages` 复用现有
+  dirty page sync，`invalidate_from` 复用 flush-and-evict；
+- `CachedFile` 从 `Location.address_space()` 获取/创建 inode page cache，不再直接
+  把 `FileMappingData` 挂在 `VfsInode::inode_data` 顶层；
+- 直接使用 `CachedFile::get_or_create` 的 mmap、exec loader 和 TEE TA loader 改为
+  显式传播 VFS 错误。
+
 ### VFS-2：inode 级 FileMapping
 
 改动：

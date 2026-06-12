@@ -20,7 +20,7 @@ use kalloc::{UsageKind, global_allocator};
 use khal::mem::{PhysAddr, VirtAddr, v2p};
 use ksync::Mutex;
 use ktask::WaitQueue;
-use kvfs::{FileNode, VfsError, VfsResult};
+use kvfs::{AddressSpaceOperations, FileNode, VfsError, VfsResult};
 use lru::LruCache;
 use memaddr::PAGE_SIZE_4K;
 
@@ -497,6 +497,56 @@ impl FileMapping {
         }
         file.sync(data_only)?;
         Ok(())
+    }
+}
+
+pub(super) struct FileMappingAddressSpaceOperations {
+    mapping: Arc<FileMapping>,
+    file: FileNode,
+    in_memory: bool,
+}
+
+impl FileMappingAddressSpaceOperations {
+    pub fn new(mapping: Arc<FileMapping>, file: FileNode, in_memory: bool) -> Self {
+        Self {
+            mapping,
+            file,
+            in_memory,
+        }
+    }
+}
+
+impl AddressSpaceOperations for FileMappingAddressSpaceOperations {
+    fn read_page(&self, page_index: u64, page: &mut [u8]) -> VfsResult<usize> {
+        let len = page.len().min(PAGE_SIZE_4K);
+        let page = &mut page[..len];
+        page.fill(0);
+        if self.in_memory {
+            return Ok(0);
+        }
+        self.file
+            .read_at(page, FileMapping::page_start(page_index)?)
+    }
+
+    fn write_page(&self, page_index: u64, page: &[u8]) -> VfsResult<usize> {
+        if self.in_memory {
+            return Ok(0);
+        }
+        let page = &page[..page.len().min(PAGE_SIZE_4K)];
+        self.file
+            .write_at(page, FileMapping::page_start(page_index)?)
+    }
+
+    fn writepages(&self, data_only: bool) -> VfsResult<()> {
+        self.mapping.sync(&self.file, self.in_memory, data_only)
+    }
+
+    fn invalidate_from(&self, page_index: u64) -> VfsResult<()> {
+        self.mapping.flush_and_evict_from(
+            &self.file,
+            self.in_memory,
+            FileMapping::page_start(page_index)?,
+        )
     }
 }
 

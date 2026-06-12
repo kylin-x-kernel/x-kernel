@@ -44,6 +44,7 @@ pub trait FileNodeOps: NodeOps + Pollable {
 }
 
 /// Wrapper around a file node implementation.
+#[derive(Clone)]
 #[repr(transparent)]
 pub struct FileNode(Arc<dyn FileNodeOps>);
 

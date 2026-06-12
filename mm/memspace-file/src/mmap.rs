@@ -72,7 +72,7 @@ impl MmapMapper for FileMapper {
 
     fn map_file_backed(&mut self) -> kvfs::VfsResult<()> {
         let backend = if self.shared {
-            let cache = CachedFile::get_or_create(self.file.location().clone());
+            let cache = CachedFile::get_or_create(self.file.location().clone())?;
             new_file(
                 self.start,
                 cache,

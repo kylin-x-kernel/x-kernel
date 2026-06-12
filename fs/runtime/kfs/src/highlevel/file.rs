@@ -26,7 +26,10 @@ use memaddr::PAGE_SIZE_4K;
 
 use super::{
     FsContext,
-    mapping::{EvictRegistration, FileMapping, FileMappingData, PageCache, PageIndex},
+    mapping::{
+        EvictRegistration, FileMapping, FileMappingAddressSpaceOperations, FileMappingData,
+        PageCache, PageIndex,
+    },
 };
 
 /// Results returned by [`OpenOptions::open`].
@@ -223,13 +226,13 @@ impl OpenOptions {
                 || self.direct
                 || loc.flags().contains(NodeFlags::NON_CACHEABLE);
             let backend = if !direct || loc.flags().contains(NodeFlags::ALWAYS_CACHE) {
-                FileBackend::new_cached(loc)
+                FileBackend::new_cached(loc)?
             } else {
                 FileBackend::new_direct(loc)
             };
             if self.truncate {
                 if metadata.node_type == NodeType::RegularFile {
-                    CachedFile::get_or_create(backend.location().clone()).set_len(0)?;
+                    CachedFile::get_or_create(backend.location().clone())?.set_len(0)?;
                 } else {
                     backend.set_len(0)?;
                 }
@@ -340,29 +343,39 @@ impl Clone for CachedFile {
 }
 
 impl CachedFile {
-    pub fn get_or_create(location: Location) -> Self {
+    pub fn get_or_create(location: Location) -> VfsResult<Self> {
         let in_memory = matches!(location.filesystem().name(), "tmpfs" | "memfs",);
+        let file = location.entry().as_file()?.clone();
 
-        let mut guard = location.inode_data();
-        let mapping = if let Some(mapping) = guard.get::<FileMappingData>() {
-            mapping.mapping()
-        } else {
+        let address_space = location.vfs_inode().get_or_insert_address_space_with(|| {
             let mapping = if in_memory {
                 Arc::new(FileMapping::new_unbounded())
             } else {
                 Arc::new(FileMapping::new())
             };
-            guard.insert(FileMappingData::new(mapping.clone()));
-            mapping
-        };
-        drop(guard);
+            let ops = Arc::new(FileMappingAddressSpaceOperations::new(
+                mapping.clone(),
+                file,
+                in_memory,
+            ));
+            let address_space = kvfs::AddressSpace::new(Arc::downgrade(location.vfs_inode()), ops);
+            address_space
+                .data()
+                .insert(FileMappingData::new(mapping.clone()));
+            address_space
+        });
 
-        Self {
+        let Some(mapping) = address_space.data().get::<FileMappingData>() else {
+            return Err(VfsError::InvalidInput);
+        };
+        let mapping = mapping.mapping();
+
+        Ok(Self {
             inner: location,
             mapping,
             in_memory,
             append_lock: RwLock::new(()),
-        }
+        })
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
@@ -520,8 +533,8 @@ impl FileBackend {
         Self::Direct(location)
     }
 
-    pub(crate) fn new_cached(location: Location) -> Self {
-        Self::Cached(CachedFile::get_or_create(location))
+    pub(crate) fn new_cached(location: Location) -> VfsResult<Self> {
+        CachedFile::get_or_create(location).map(Self::Cached)
     }
 
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {

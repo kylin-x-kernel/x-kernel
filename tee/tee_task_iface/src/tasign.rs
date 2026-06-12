@@ -131,7 +131,7 @@ pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
         }
     }
 
-    let cache = CachedFile::get_or_create(loc);
+    let cache = CachedFile::get_or_create(loc)?;
     let ta_head = verify_ta_elf_signature_if_applicable(key.as_str(), &cache)?;
 
     let mut guard = TA_HEAD_CACHE.lock();

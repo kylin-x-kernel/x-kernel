@@ -157,9 +157,15 @@ impl VfsInode {
         self: &Arc<Self>,
         ops: Arc<dyn AddressSpaceOperations>,
     ) -> Arc<AddressSpace> {
-        self.attachments
-            .lock()
-            .get_or_insert_with(|| AddressSpace::new(self.clone(), ops))
+        self.get_or_insert_address_space_with(|| AddressSpace::new(Arc::downgrade(self), ops))
+    }
+
+    /// Return or create this inode's address-space object with a custom builder.
+    pub fn get_or_insert_address_space_with(
+        &self,
+        create: impl FnOnce() -> AddressSpace,
+    ) -> Arc<AddressSpace> {
+        self.attachments.lock().get_or_insert_with(create)
     }
 
     /// Read the symlink target as a string.

@@ -11,18 +11,18 @@
 
 use alloc::sync::Arc;
 
-use crate::{AddressSpaceOperations, Mutex, MutexGuard, TypeMap, VfsInode, VfsResult};
+use crate::{AddressSpaceOperations, Mutex, MutexGuard, TypeMap, VfsResult, WeakVfsInode};
 
 /// VFS address space for one inode.
 pub struct AddressSpace {
-    inode: Arc<VfsInode>,
+    inode: WeakVfsInode,
     ops: Arc<dyn AddressSpaceOperations>,
     data: Mutex<TypeMap>,
 }
 
 impl AddressSpace {
     /// Creates an address space for `inode`.
-    pub fn new(inode: Arc<VfsInode>, ops: Arc<dyn AddressSpaceOperations>) -> Self {
+    pub fn new(inode: WeakVfsInode, ops: Arc<dyn AddressSpaceOperations>) -> Self {
         Self {
             inode,
             ops,
@@ -31,8 +31,8 @@ impl AddressSpace {
     }
 
     /// Returns the inode owning this address space.
-    pub fn inode(&self) -> &Arc<VfsInode> {
-        &self.inode
+    pub fn inode(&self) -> Option<alloc::sync::Arc<crate::VfsInode>> {
+        self.inode.upgrade()
     }
 
     /// Returns the backing address-space operations.
@@ -69,7 +69,7 @@ impl AddressSpace {
 impl core::fmt::Debug for AddressSpace {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AddressSpace")
-            .field("inode", &self.inode.inode())
+            .field("inode", &self.inode().map(|inode| inode.inode()))
             .finish()
     }
 }

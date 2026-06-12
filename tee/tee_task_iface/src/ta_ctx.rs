@@ -70,7 +70,7 @@ pub fn read_ta_head_if_applicable(path: &str) -> KResult<Option<Vec<u8>>> {
         return Ok(None);
     }
     let loc = kernel_fs_context().lock().resolve(path)?;
-    let cache = CachedFile::get_or_create(loc);
+    let cache = CachedFile::get_or_create(loc)?;
     let len = cache.location().len().map_err(|_| KError::InvalidData)?;
     let len = usize::try_from(len).map_err(|_| KError::InvalidData)?;
     let mut image = alloc::vec![0u8; len];
