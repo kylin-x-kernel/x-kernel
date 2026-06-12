@@ -5,7 +5,7 @@
 use alloc::{format, string::String, sync::Arc};
 use core::fmt::Write;
 
-use kbuild_config::{ARCH, CPU_NUM};
+use kbuild_config::ARCH;
 use kcpu_id_map::for_each_present_logical_cpu;
 use kvfs_simple::{DirMapping, SimpleDir, SimpleFile, SimpleFs};
 
@@ -36,8 +36,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         "cpuinfo",
         SimpleFile::new_regular(fs.clone(), || {
             let mut info = String::new();
-            let cpu_count = CPU_NUM;
-            for_each_present_logical_cpu(|cpu_id| {
+            for_each_present_logical_cpu(|present_index, cpu_id, cpu_count| {
                 writeln!(
                     info,
                     "processor\t: {}\ncpu cores\t: {}\narchitecture\t: {}",
@@ -46,7 +45,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                     ARCH,
                 )
                 .unwrap();
-                if cpu_id.as_usize() + 1 < cpu_count {
+                if present_index + 1 < cpu_count {
                     info.push('\n');
                 }
             });

@@ -98,7 +98,7 @@ impl TlbFlushIf for TlbFlushImpl {
         // Build a mask of all online CPUs — the kernel page table is
         // shared globally, so every CPU may hold stale entries.
         let mut all_mask = KCpuMask::new();
-        for_each_present_logical_cpu(|cpu| {
+        for_each_present_logical_cpu(|_, cpu, _| {
             all_mask.set(cpu.as_usize(), true);
         });
         flush_remote(vaddr, all_mask);

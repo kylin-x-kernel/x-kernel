@@ -158,7 +158,7 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
 }
 
 fn broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &MulticastCallback) {
-    for_each_present_logical_cpu(|cpu_id| {
+    for_each_present_logical_cpu(|_, cpu_id, _| {
         if cpu_id != current_cpu_id {
             unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id.as_usize()) }
                 .lock()

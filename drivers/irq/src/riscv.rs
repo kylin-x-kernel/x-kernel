@@ -64,7 +64,15 @@ pub fn init_primary() {
 }
 
 fn this_context() -> usize {
-    let hart_id = raw_cpu_id(this_cpu_id()).as_usize();
+    let logical_cpu_id = this_cpu_id();
+    let hart_id = raw_cpu_id(logical_cpu_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "missing raw CPU id mapping for current logical CPU {}",
+                logical_cpu_id.as_usize()
+            )
+        })
+        .as_usize();
     hart_id * 2 + 1
 }
 
@@ -195,10 +203,21 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
     fn notify_cpu(_interrupt_id: usize, target: TargetCpu) {
         match target {
             TargetCpu::Self_ => {
-                send_ipi_to_raw_hart(raw_cpu_id(this_cpu_id()).as_usize());
+                let logical_cpu_id = this_cpu_id();
+                let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
+                    panic!(
+                        "missing raw CPU id mapping for current logical CPU {}",
+                        logical_cpu_id.as_usize()
+                    )
+                });
+                send_ipi_to_raw_hart(raw_cpu_id.as_usize());
             }
             TargetCpu::Specific(logical_cpu_id) => {
-                send_ipi_to_raw_hart(raw_cpu_id(LogicalCpuId::new(logical_cpu_id)).as_usize());
+                let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
+                    warn!("RISC-V notify_cpu: missing raw CPU id for logical CPU {logical_cpu_id}");
+                    return;
+                };
+                send_ipi_to_raw_hart(raw_cpu_id.as_usize());
             }
             TargetCpu::AllButSelf {
                 me: local_logical_cpu_id,
@@ -206,9 +225,14 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
             } => {
                 for logical_cpu_id in 0..cpu_num {
                     if logical_cpu_id != local_logical_cpu_id {
-                        send_ipi_to_raw_hart(
-                            raw_cpu_id(LogicalCpuId::new(logical_cpu_id)).as_usize(),
-                        );
+                        let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
+                            warn!(
+                                "RISC-V notify_cpu: missing raw CPU id for logical CPU \
+                                 {logical_cpu_id}"
+                            );
+                            continue;
+                        };
+                        send_ipi_to_raw_hart(raw_cpu_id.as_usize());
                     }
                 }
             }

@@ -23,8 +23,8 @@ use core::arch::naked_asm;
 
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
-use kbuild_config::{BOOT_STACK_SIZE, CPU_NUM};
-use kcpu_id_map::{LogicalCpuId, RawCpuId};
+use kbuild_config::BOOT_STACK_SIZE;
+use kcpu_id_map::RawCpuId;
 
 use super::{el, mmu, serial};
 
@@ -43,24 +43,6 @@ pub(super) static mut SAVED_BOOT_ARGS: [u64; 4] = [0; 4];
 
 /// Unified boot info passed from the AArch64 boot entry into the kernel.
 static mut AARCH64_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::DeviceTree);
-
-#[unsafe(link_section = ".data")]
-static mut SECONDARY_BOOT_STACK_TOPS: [usize; CPU_NUM] = [0; CPU_NUM];
-
-pub fn set_secondary_boot_stack_top(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
-    let logical_cpu_index = logical_cpu_id.as_usize();
-    assert!(
-        logical_cpu_index < CPU_NUM,
-        "secondary cpu id out of range: {logical_cpu_index}"
-    );
-
-    unsafe {
-        // SAFETY: The logical CPU id has been range-checked above, and the
-        // boot CPU records each secondary stack top before releasing that CPU
-        // from firmware.
-        SECONDARY_BOOT_STACK_TOPS[logical_cpu_index] = stack_top_paddr;
-    }
-}
 
 /// Linux ARM64 Boot Protocol header followed by a branch to `primary_entry`.
 #[unsafe(naked)]
@@ -191,29 +173,12 @@ pub unsafe extern "C" fn preserve_boot_args() {
 #[unsafe(link_section = ".idmap.text")]
 pub unsafe extern "C" fn _start_secondary() -> ! {
     naked_asm!(
+        "cbz     x0, 2f",
+        "mov     sp, x0",
         "mrs     x19, mpidr_el1",
         "and     x20, x19, #0xffffff",   // Aff2|Aff1|Aff0
         "ubfx    x19, x19, #32, #8",     // Aff3
         "orr     x19, x20, x19, lsl #32",
-        // Look up the logical CPU id by scanning the raw-id map prepared by
-        // the boot CPU. The scan index is the logical CPU id.
-        "adrp    x22, {raw_cpu_ids_by_logical}",
-        "add     x22, x22, :lo12:{raw_cpu_ids_by_logical}",
-        "mov     x23, #0",
-        "0:",
-        "cmp     x23, {cpu_num}",
-        "b.hs    2f",
-        "ldr     x24, [x22, x23, lsl #3]",
-        "cmp     x24, x19",
-        "b.eq    1f",
-        "add     x23, x23, #1",
-        "b       0b",
-        "1:",
-        "adrp    x22, {secondary_boot_stack_tops}",
-        "add     x22, x22, :lo12:{secondary_boot_stack_tops}",
-        "ldr     x24, [x22, x23, lsl #3]",
-        "cbz     x24, 2f",
-        "mov     sp, x24",
         "bl      {switch_to_el1}",
         "bl      {enable_fp}",
         "bl      {init_mmu}",
@@ -227,25 +192,28 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         "ldr     x9, ={kimage_vaddr}",
         "sub     x8, x9, x8",           // x8 = kimage_voffset
         "add     sp, sp, x8",
-        "mov     x0, x23",               // logical cpu id
+        "mov     x0, x19",               // raw cpu id
         "ldr     x8, ={entry_secondary}",
         "br      x8",
         "2:",
         "wfe",
         "b       2b",
-        raw_cpu_ids_by_logical = sym kcpu_id_map::CPU_ID_MAP,
-        secondary_boot_stack_tops = sym SECONDARY_BOOT_STACK_TOPS,
         switch_to_el1    = sym el::switch_to_el1,
         enable_fp        = sym enable_fp,
         init_mmu         = sym mmu::init_mmu,
-        cpu_num          = const CPU_NUM,
         kernel_start     = sym _start,
         kimage_vaddr     = const KIMAGE_VADDR,
         entry_secondary  = sym __secondary_switched,
     )
 }
 
-pub unsafe extern "C" fn __secondary_switched(logical_cpu_id: LogicalCpuId) {
+pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) {
+    let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
+        panic!(
+            "missing logical cpu id mapping for raw cpu id {:#x}",
+            raw_cpu_id.as_usize()
+        )
+    });
     call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id)
 }
 

@@ -11,13 +11,18 @@ struct PowerImpl;
 #[impl_dev_interface]
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
-    fn boot_ap(logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) {
+    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
         use khal::mem::{v2p, va};
         let entry_paddr = v2p(va!(
             kernel_boot::arch::_start_secondary as *const () as usize
         ));
-        let raw_cpu_id = raw_cpu_id(logical_cpu_id);
-        aarch64_peripherals::psci::cpu_on(raw_cpu_id, entry_paddr.as_usize(), 0);
+        let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
+            panic!(
+                "missing raw CPU id mapping for logical CPU {}",
+                logical_cpu_id.as_usize()
+            )
+        });
+        aarch64_peripherals::psci::cpu_on(raw_cpu_id, entry_paddr.as_usize(), stack_top_paddr);
     }
 
     fn shutdown() -> ! {

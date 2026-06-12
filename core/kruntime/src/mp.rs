@@ -21,7 +21,7 @@ static ENTERED_CPUS: AtomicUsize = AtomicUsize::new(1);
 #[allow(clippy::absurd_extreme_comparisons)]
 pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) {
     let mut secondary_logical_cpu_id = 0;
-    for_each_present_logical_cpu(|logical_cpu_id| {
+    for_each_present_logical_cpu(|_, logical_cpu_id, _| {
         if logical_cpu_id == primary_cpu_id || secondary_logical_cpu_id >= CPU_NUM - 1 {
             return;
         }
@@ -31,8 +31,6 @@ pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) {
                 .as_ptr_range()
                 .end as usize
         }));
-
-        kernel_boot::arch::set_secondary_boot_stack_top(logical_cpu_id, stack_top.as_usize());
 
         debug!("starting CPU {}...", logical_cpu_id.as_usize());
         khal::power::boot_ap(logical_cpu_id, stack_top.as_usize());

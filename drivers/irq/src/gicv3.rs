@@ -82,9 +82,11 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::current());
         }
         TargetCpu::Specific(logical_cpu_id) => {
-            let affinity = Affinity::from_mpidr(
-                raw_cpu_id(LogicalCpuId::new(logical_cpu_id)).as_usize() as u64,
-            );
+            let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
+                warn!("GICv3 notify_cpu: missing raw CPU id for logical CPU {logical_cpu_id}");
+                return;
+            };
+            let affinity = Affinity::from_mpidr(raw_cpu_id.as_usize() as u64);
             let target = SGITarget::list([affinity]);
             GIC.lock()
                 .cpu_interface()

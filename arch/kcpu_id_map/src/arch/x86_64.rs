@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::{CpuIdMap, RawCpuId, cpu_id_map_mut_ptr, cpu_map_initialized};
+use crate::cpu_id::{RawCpuId, cpu_map_initialized, load_cpu_id_map_from_madt};
 
 #[inline]
 pub const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
@@ -10,9 +10,7 @@ pub const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
 }
 
 fn load_raw_cpu_ids_from_madt(entries: acpi::MadtEntryIter) {
-    unsafe {
-        CpuIdMap::from_madt(cpu_id_map_mut_ptr(), entries, normalize_raw_id);
-    }
+    load_cpu_id_map_from_madt(entries, normalize_raw_id);
 }
 
 pub(crate) fn ensure_runtime_cpu_id_map() {

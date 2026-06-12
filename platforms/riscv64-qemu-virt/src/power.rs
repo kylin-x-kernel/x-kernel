@@ -17,7 +17,12 @@ impl SysCtrl for PowerImpl {
         let entry = v2p(va!(
             kernel_boot::arch::_start_secondary as *const () as usize
         ));
-        let raw_cpu_id = raw_cpu_id(logical_cpu_id);
+        let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
+            panic!(
+                "missing raw CPU id mapping for logical CPU {}",
+                logical_cpu_id.as_usize()
+            )
+        });
         sbi_rt::hart_start(raw_cpu_id.as_usize(), entry.as_usize(), stack_top_paddr);
     }
 

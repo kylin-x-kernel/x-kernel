@@ -15,7 +15,12 @@ impl SysCtrl for PowerImpl {
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
         use khal::mem::pa;
 
-        let raw_cpu_id = raw_cpu_id(logical_cpu_id);
+        let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
+            panic!(
+                "missing raw CPU id mapping for logical CPU {}",
+                logical_cpu_id.as_usize()
+            )
+        });
         crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr))
     }
 

@@ -23,9 +23,3 @@ pub mod loongarch64;
 
 #[cfg(target_arch = "loongarch64")]
 pub use self::loongarch64::*;
-
-// Provide a no-op fallback so callers can unconditionally call
-// `kernel_boot::arch::set_secondary_boot_stack_top()` without `cfg`.
-#[cfg(not(target_arch = "aarch64"))]
-/// No-op on architectures that do not use a boot-time secondary stack table.
-pub fn set_secondary_boot_stack_top(_cpu_id: kcpu_id_map::LogicalCpuId, _stack_top_paddr: usize) {}

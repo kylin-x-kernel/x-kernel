@@ -37,15 +37,6 @@ pub mod arch {
     pub fn _start_secondary() -> ! {
         unreachable!("arch::_start_secondary should never be called on the host target");
     }
-
-    pub fn set_secondary_boot_stack_top(
-        _cpu_id: kcpu_id_map::LogicalCpuId,
-        _stack_top_paddr: usize,
-    ) {
-        unreachable!(
-            "arch::set_secondary_boot_stack_top should never be called on the host target"
-        );
-    }
 }
 
 pub use boot_info as bootinfo;
