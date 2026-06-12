@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::{format, string::String, sync::Arc};
+use core::fmt::Write;
 
+use kbuild_config::{ARCH, CPU_NUM};
+use kcpu_id_map::for_each_present_logical_cpu;
 use kvfs_simple::{DirMapping, SimpleDir, SimpleFile, SimpleFs};
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
@@ -27,6 +30,27 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             {
                 Ok(String::from("0\n"))
             }
+        }),
+    );
+    root.add(
+        "cpuinfo",
+        SimpleFile::new_regular(fs.clone(), || {
+            let mut info = String::new();
+            let cpu_count = CPU_NUM;
+            for_each_present_logical_cpu(|cpu_id| {
+                writeln!(
+                    info,
+                    "processor\t: {}\ncpu cores\t: {}\narchitecture\t: {}",
+                    cpu_id.as_usize(),
+                    cpu_count,
+                    ARCH,
+                )
+                .unwrap();
+                if cpu_id.as_usize() + 1 < cpu_count {
+                    info.push('\n');
+                }
+            });
+            Ok(info)
         }),
     );
     root.add("sys", {

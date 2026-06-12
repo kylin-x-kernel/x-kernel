@@ -14,9 +14,11 @@ sysrq = ["ktask/snapshot"]
 tee = ["kthread/tee", "dep:tee_task_iface"]
 
 [dependencies]
+kbuild_config.workspace = true
 kvfs.workspace = true
 kaddr_layout.workspace = true
 kalloc.workspace = true
+kcpu_id_map.workspace = true
 kdevice.workspace = true
 khal.workspace = true
 kvfs-simple.workspace = true
