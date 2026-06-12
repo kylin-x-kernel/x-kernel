@@ -3,11 +3,11 @@
 // See LICENSES for license details.
 
 //! File abstraction and caching layer.
-use alloc::{borrow::Cow, string::ToString, sync::Arc, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use core::{
     ffi::c_int,
     hint::likely,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, Ordering},
     task::Context,
 };
 
@@ -15,10 +15,12 @@ use kerrno::{KError, KResult};
 use kfd::{FdTable, FileLike, IoDst, IoSrc, Kstat};
 use kio::{SeekFrom, prelude::*};
 use kpoll::{IoEvents, Pollable};
-use ksync::{Mutex, RwLock};
+use ksync::RwLock;
 use ktask::future::{block_on, poll_io};
+pub use kvfs::VfsFileFlags as FileFlags;
 use kvfs::{
-    Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
+    Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsFile, VfsResult,
+    path::Path,
 };
 use memaddr::PAGE_SIZE_4K;
 
@@ -26,18 +28,6 @@ use super::{
     FsContext,
     mapping::{EvictRegistration, FileMapping, FileMappingData, PageCache, PageIndex},
 };
-
-bitflags::bitflags! {
-    /// Access mode flags for an opened file.
-    #[derive(Debug, Clone, Copy)]
-    pub struct FileFlags: u8 {
-        const READ = 1;
-        const WRITE = 2;
-        const EXECUTE = 4;
-        const APPEND = 8;
-        const PATH = 16;
-    }
-}
 
 /// Results returned by [`OpenOptions::open`].
 pub enum OpenResult {
@@ -686,10 +676,7 @@ impl FileBackend {
 /// Provides `std::fs::File`-like interface.
 pub struct File {
     inner: FileBackend,
-    flags: FileFlags,
-    position: Option<Mutex<u64>>,
-    open_flags: u32,
-    nonblock: AtomicBool,
+    vfs_file: Box<VfsFile>,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
     #[cfg(feature = "times")]
@@ -702,23 +689,16 @@ impl File {
     }
 
     pub fn with_open_flags(inner: FileBackend, flags: FileFlags, open_flags: u32) -> Self {
-        let position = if inner.location().flags().contains(NodeFlags::STREAM) {
-            None
-        } else {
-            Some(Mutex::new(if flags.contains(FileFlags::APPEND) {
-                inner.location().len().unwrap_or_default()
-            } else {
-                0
-            }))
-        };
+        let vfs_file = Box::new(VfsFile::with_open_flags(
+            inner.location().clone(),
+            flags,
+            open_flags,
+        ));
         #[cfg(feature = "times")]
-        let is_effectively_readonly = inner.location().is_effectively_readonly();
+        let is_effectively_readonly = vfs_file.location().is_effectively_readonly();
         Self {
             inner,
-            flags,
-            position,
-            open_flags,
-            nonblock: AtomicBool::new(false),
+            vfs_file,
             #[cfg(feature = "times")]
             access_flags: AtomicU8::new(0),
             #[cfg(feature = "times")]
@@ -743,19 +723,16 @@ impl File {
     }
 
     pub fn access(&self, flags: FileFlags) -> VfsResult<&FileBackend> {
-        if self.flags.contains(flags) && !self.is_path() {
-            Ok(&self.inner)
-        } else {
-            Err(VfsError::BadFileDescriptor)
-        }
+        self.vfs_file.access(flags)?;
+        Ok(&self.inner)
     }
 
     pub fn is_path(&self) -> bool {
-        self.flags.contains(FileFlags::PATH)
+        self.vfs_file.is_path()
     }
 
     pub fn flags(&self) -> FileFlags {
-        self.flags
+        self.vfs_file.flags()
     }
 
     /// Checks the node-level blocking attribute (e.g. regular files are always
@@ -764,7 +741,7 @@ impl File {
     /// execute directly — matching Linux behavior where `O_NONBLOCK` has no
     /// effect on regular files.
     fn is_blocking(&self) -> bool {
-        self.inner.location().flags().contains(NodeFlags::BLOCKING)
+        self.vfs_file.is_blocking()
     }
 
     pub fn backend(&self) -> VfsResult<&FileBackend> {
@@ -773,7 +750,7 @@ impl File {
     }
 
     pub fn location(&self) -> &Location {
-        self.inner.location()
+        self.vfs_file.location()
     }
 
     /// Reads a number of bytes starting from a given offset.
@@ -800,8 +777,7 @@ impl File {
         {
             self.access_flags.fetch_or(1, Ordering::AcqRel);
         }
-        if let Some(pos) = self.position.as_ref() {
-            let mut pos = pos.lock();
+        if let Some(mut pos) = self.vfs_file.position_lock() {
             self.read_at(dst, *pos).inspect(|n| {
                 *pos += *n as u64;
             })
@@ -815,8 +791,7 @@ impl File {
         {
             self.access_flags.fetch_or(3, Ordering::AcqRel);
         }
-        if let Some(pos) = self.position.as_ref() {
-            let mut pos = pos.lock();
+        if let Some(mut pos) = self.vfs_file.position_lock() {
             if let Ok(f) = self.access(FileFlags::APPEND) {
                 f.append(src).map(|(written, new_size)| {
                     *pos = new_size;
@@ -858,8 +833,7 @@ impl Seek for &File {
     fn seek(&mut self, pos: SeekFrom) -> kio::Result<u64> {
         self.access(FileFlags::empty())?;
 
-        if let Some(guard) = self.position.as_ref() {
-            let mut guard = guard.lock();
+        if let Some(mut guard) = self.vfs_file.position_lock() {
             let new_pos = match pos {
                 SeekFrom::Start(pos) => pos,
                 SeekFrom::End(off) => {
@@ -920,16 +894,16 @@ impl FileLike for File {
     }
 
     fn set_nonblocking(&self, flag: bool) -> KResult {
-        self.nonblock.store(flag, Ordering::Release);
+        self.vfs_file.set_nonblocking(flag);
         Ok(())
     }
 
     fn nonblocking(&self) -> bool {
-        self.nonblock.load(Ordering::Acquire)
+        self.vfs_file.nonblocking()
     }
 
     fn open_flags(&self) -> u32 {
-        self.open_flags
+        self.vfs_file.open_flags()
     }
 
     fn path(&self) -> Cow<'_, str> {

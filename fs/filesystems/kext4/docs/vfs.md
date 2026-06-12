@@ -696,6 +696,17 @@ PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
 - `InodeCache` 增加目录 inode API，等目录节点移除 dentry/path 上下文后用于 root
   和普通目录唯一化。
 
+第二批继续把运行时状态往 VFS 边界回收：
+
+- `kvfs::VfsFile` 承接 Linux `struct file` 级状态：opened location、access mode、
+  file position、raw open flags、`O_NONBLOCK` 和 file-private attachments；
+- `kfs::File` 组合 `VfsFile`，不再自己拥有 flags/position/nonblock/open_flags，
+  只保留 buffered/direct backend、POSIX fd glue 和时间戳回写；
+- `kvfs::AddressSpace` 成为显式 inode address-space 对象，通过 inode attachment
+  挂到 `VfsInode`，为后续把 `FileMapping` 迁出 KFS runtime 铺路；
+- `DirEntry` 和 `Location` 暴露 address-space 入口，后续 buffered I/O、mmap、
+  writeback 和 reclaim 可以从 dentry/path 上下文外移到 inode address-space。
+
 ### VFS-2：inode 级 FileMapping
 
 改动：

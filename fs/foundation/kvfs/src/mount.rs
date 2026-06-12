@@ -20,9 +20,9 @@ use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 
 use crate::{
-    DirEntry, DirEntrySink, Filesystem, FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard,
-    NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, ST_RDONLY, SuperBlock, TypeMap,
-    VfsError, VfsInode, VfsResult,
+    AddressSpace, AddressSpaceOperations, DirEntry, DirEntrySink, Filesystem, FilesystemOps,
+    Metadata, MetadataUpdate, Mutex, MutexGuard, NodeFlags, NodePermission, NodeType, OpenOptions,
+    ReferenceKey, ST_RDONLY, SuperBlock, TypeMap, VfsError, VfsInode, VfsResult,
     path::{DOT, DOTDOT, PathBuf},
 };
 
@@ -226,6 +226,8 @@ impl Location {
     pub fn inode_data(&self) -> MutexGuard<'_, TypeMap>;
 
     pub fn vfs_inode(&self) -> &Arc<VfsInode>;
+
+    pub fn address_space(&self) -> Option<Arc<AddressSpace>>;
 }
 
 impl Location {
@@ -251,6 +253,14 @@ impl Location {
     /// Returns the underlying directory entry.
     pub fn entry(&self) -> &DirEntry {
         &self.entry
+    }
+
+    /// Return or create this location's inode address-space object.
+    pub fn get_or_insert_address_space(
+        &self,
+        ops: Arc<dyn AddressSpaceOperations>,
+    ) -> Arc<AddressSpace> {
+        self.entry.get_or_insert_address_space(ops)
     }
 
     /// Returns the name of this location within its parent directory.

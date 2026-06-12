@@ -16,8 +16,8 @@ use kpoll::{IoEvents, Pollable};
 
 use super::{DirNode, FileNode, Node, NodeFlags, NodeOps, TypeMap};
 use crate::{
-    DirNodeInodeOperations, FileNodeFileOperations, FilesystemOps, Metadata, MetadataUpdate, Mutex,
-    MutexGuard, NodeType, VfsError, VfsResult,
+    AddressSpace, AddressSpaceOperations, DirNodeInodeOperations, FileNodeFileOperations,
+    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
 };
 
 /// VFS inode identity shared by one or more directory entries.
@@ -145,6 +145,21 @@ impl VfsInode {
     /// Access inode-scoped attachment storage.
     pub fn inode_data(&self) -> MutexGuard<'_, TypeMap> {
         self.attachments.lock()
+    }
+
+    /// Returns this inode's address-space object, if one has been attached.
+    pub fn address_space(&self) -> Option<Arc<AddressSpace>> {
+        self.attachments.lock().get::<AddressSpace>()
+    }
+
+    /// Return or create this inode's address-space object.
+    pub fn get_or_insert_address_space(
+        self: &Arc<Self>,
+        ops: Arc<dyn AddressSpaceOperations>,
+    ) -> Arc<AddressSpace> {
+        self.attachments
+            .lock()
+            .get_or_insert_with(|| AddressSpace::new(self.clone(), ops))
     }
 
     /// Read the symlink target as a string.
