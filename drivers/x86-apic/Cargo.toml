@@ -16,6 +16,8 @@ kspin = { workspace = true }
 kcpu_id_map = { workspace = true }
 memspace = { workspace = true }
 memaddr = { workspace = true }
+khal = { workspace = true }
+crate_interface = { workspace = true }
 log = "0.4"
 lazyinit = "0.2"
 

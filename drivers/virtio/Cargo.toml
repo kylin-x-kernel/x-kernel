@@ -33,10 +33,11 @@ kspin = { workspace = true }
 virtio-drivers = { workspace = true }
 unittest = { workspace = true }
 pci = { workspace = true }
-zerocopy = "0.8"
+zerocopy = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 khal = { workspace = true }
+safe-mmio = { workspace = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 khal = { workspace = true }

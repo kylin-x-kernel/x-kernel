@@ -8,10 +8,7 @@
 #[macro_use]
 extern crate log;
 
-use core::{
-    mem::MaybeUninit,
-    sync::atomic::{AtomicU8, Ordering},
-};
+use core::mem::MaybeUninit;
 
 use kcpu_id_map::RawCpuId;
 use kspin::SpinNoIrq;
@@ -45,32 +42,68 @@ pub enum IoApicPolarity {
 static mut LOCAL_APIC: MaybeUninit<LocalApic> = MaybeUninit::uninit();
 static mut IS_X2APIC: bool = false;
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
-static MSIX_VECTOR_COUNTER: AtomicU8 = AtomicU8::new(MSIX_VECTOR_BASE);
+static MSIX_VECTOR_ALLOCATOR: SpinNoIrq<MsixVectorAllocator> =
+    SpinNoIrq::new(MsixVectorAllocator::new());
 
-#[unsafe(export_name = "__kplat_alloc_msix_vector")]
-pub fn alloc_msix_vector() -> Option<u8> {
-    loop {
-        let current = MSIX_VECTOR_COUNTER.load(Ordering::Relaxed);
-        if current >= APIC_TIMER_VECTOR {
-            return None;
+const MSIX_VECTOR_COUNT: usize = (APIC_TIMER_VECTOR as usize) - (MSIX_VECTOR_BASE as usize);
+const MSIX_VECTOR_WORD_BITS: usize = u64::BITS as usize;
+const MSIX_VECTOR_WORDS: usize = MSIX_VECTOR_COUNT.div_ceil(MSIX_VECTOR_WORD_BITS);
+
+struct MsixVectorAllocator {
+    allocated: [u64; MSIX_VECTOR_WORDS],
+}
+
+impl MsixVectorAllocator {
+    const fn new() -> Self {
+        Self {
+            allocated: [0; MSIX_VECTOR_WORDS],
         }
-        match MSIX_VECTOR_COUNTER.compare_exchange(
-            current,
-            current + 1,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return Some(current),
-            Err(_) => continue,
+    }
+
+    fn alloc(&mut self) -> Option<u8> {
+        for index in 0..MSIX_VECTOR_COUNT {
+            let word = index / MSIX_VECTOR_WORD_BITS;
+            let bit = 1u64 << (index % MSIX_VECTOR_WORD_BITS);
+            if self.allocated[word] & bit == 0 {
+                self.allocated[word] |= bit;
+                return Some(MSIX_VECTOR_BASE + index as u8);
+            }
         }
+
+        None
+    }
+
+    fn free(&mut self, vector: u8) -> bool {
+        if !(MSIX_VECTOR_BASE..APIC_TIMER_VECTOR).contains(&vector) {
+            return false;
+        }
+
+        let index = usize::from(vector - MSIX_VECTOR_BASE);
+        let word = index / MSIX_VECTOR_WORD_BITS;
+        let bit = 1u64 << (index % MSIX_VECTOR_WORD_BITS);
+        let was_allocated = self.allocated[word] & bit != 0;
+        self.allocated[word] &= !bit;
+        was_allocated
     }
 }
 
-#[unsafe(export_name = "__kplat_current_apic_id")]
-pub fn current_apic_id() -> u8 {
-    raw_cpuid::CpuId::new()
-        .get_feature_info()
-        .map_or(0, |f| f.initial_local_apic_id())
+struct X86ApicIfImpl;
+
+#[crate_interface::impl_interface]
+impl khal::irq::X86ApicIf for X86ApicIfImpl {
+    fn alloc_msix_vector() -> Option<u8> {
+        MSIX_VECTOR_ALLOCATOR.lock().alloc()
+    }
+
+    fn free_msix_vector(vector: u8) -> bool {
+        MSIX_VECTOR_ALLOCATOR.lock().free(vector)
+    }
+
+    fn current_apic_id() -> u8 {
+        raw_cpuid::CpuId::new()
+            .get_feature_info()
+            .map_or(0, |f| f.initial_local_apic_id())
+    }
 }
 
 pub fn set_irq_enabled(irq: usize, enabled: bool) {

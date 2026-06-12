@@ -275,6 +275,7 @@ pub fn legacy_interrupt_route(
 ///
 /// Create one from the same MMIO base pointer and [`Cam`] type used for
 /// [`PciRoot`]. Both types reference the same underlying memory region.
+#[derive(Clone, Copy)]
 pub struct PciConfigAccess {
     mmio_base: *mut u32,
     cam: Cam,

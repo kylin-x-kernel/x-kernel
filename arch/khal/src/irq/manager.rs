@@ -33,15 +33,12 @@ pub enum TargetCpu {
     AllButSelf { me: usize, total: usize },
 }
 
-// Platform-provided MSI-X helpers (x86_64 only).
-// The implementations live in the selected x86 platform crate and are linked
-// in via the exported symbol names below.
 #[cfg(target_arch = "x86_64")]
-unsafe extern "Rust" {
-    #[link_name = "__kplat_alloc_msix_vector"]
-    fn __alloc_msix_vector_impl() -> Option<u8>;
-    #[link_name = "__kplat_current_apic_id"]
-    fn __current_apic_id_impl() -> u8;
+#[def_interface]
+pub trait X86ApicIf {
+    fn alloc_msix_vector() -> Option<u8>;
+    fn free_msix_vector(vector: u8) -> bool;
+    fn current_apic_id() -> u8;
 }
 
 /// Allocates the next available MSI-X CPU vector.
@@ -49,13 +46,22 @@ unsafe extern "Rust" {
 /// Returns `None` when all vectors are exhausted.
 #[cfg(target_arch = "x86_64")]
 pub fn alloc_msix_vector() -> Option<u8> {
-    unsafe { __alloc_msix_vector_impl() }
+    call_interface!(X86ApicIf::alloc_msix_vector())
+}
+
+/// Releases a previously allocated MSI-X CPU vector.
+///
+/// Returns `false` if the vector is outside the MSI-X range or was not
+/// currently allocated.
+#[cfg(target_arch = "x86_64")]
+pub fn free_msix_vector(vector: u8) -> bool {
+    call_interface!(X86ApicIf::free_msix_vector(vector))
 }
 
 /// Returns the APIC ID of the current logical CPU.
 #[cfg(target_arch = "x86_64")]
 pub fn current_apic_id() -> u8 {
-    unsafe { __current_apic_id_impl() }
+    call_interface!(X86ApicIf::current_apic_id())
 }
 
 /// An IRQ claimed by the platform and not yet completed.

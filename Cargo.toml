@@ -205,6 +205,7 @@ mbedtls-sys-auto = { version = "2.28", package = "mbedtls-sys-auto-smx", default
 ouroboros = { version = "0.18.5", default-features = false }
 percpu = "0.4"
 rust-dice = { version = "0.1", default-features = false }
+safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
 slab_allocator = { version = "0.4", package = "ax_slab_allocator" }
 smoltcp = { version = "=0.13.0", default-features = false }
@@ -218,4 +219,5 @@ buddy-slab-allocator = "0.4"
 downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
 flatten_objects = "0.2.4"
 weak-map = "0.1.1"
+tock-registers = "0.10.1"
 xmas-elf = { version = "0.9", default-features = false }
