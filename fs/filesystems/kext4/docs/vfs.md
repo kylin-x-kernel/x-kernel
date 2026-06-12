@@ -162,6 +162,333 @@ DentryOperations                         == Linux dentry_operations, later
 | `SuperBlock` | 一个 mounted filesystem instance 的全局状态 | syscall ABI、fd table、进程 cwd/root |
 | ext4 | ext4 super/inode/file/address_space ops 和 ext4 算法 | VFS 对象定义、路径解析、fd ABI |
 
+### Mermaid 总览图
+
+这些图使用 GitHub Markdown 支持的 Mermaid 代码块。若在本地编辑器里看到的是
+源码而不是图，说明当前 Markdown 预览器没有启用 Mermaid；在 GitHub PR 页面或
+启用 Mermaid 的 Markdown 预览器里会渲染成图。
+
+第一张图是最终分层。箭头表示依赖和调用方向，只允许从上层请求下层能力，不能让
+下层反向依赖上层实现。
+
+```mermaid
+flowchart TD
+    subgraph ABI["POSIX syscall ABI"]
+        A1["openat/read/write/fsync/rename/statx"]
+        A2["fd table, open flags, user buffers"]
+        A3["errno and Linux ABI conversion"]
+    end
+
+    subgraph RUNTIME["Runtime glue"]
+        R1["boot mount and rootfs"]
+        R2["global writeback worker"]
+        R3["global reclaim worker"]
+        R4["runtime fd object glue"]
+    end
+
+    subgraph VFS["VFS core"]
+        V1["namei: path walk and lookup orchestration"]
+        V2["mount tree: Mountpoint"]
+        V3["path result: Location"]
+        V4["dentry cache: DirEntry"]
+        V5["inode cache: VfsInode"]
+        V6["open file: VfsFile"]
+        V7["address space: AddressSpace"]
+        V8["ops families"]
+        V9["generic writeback and reclaim interfaces"]
+    end
+
+    subgraph LIBFS["libfs helpers"]
+        L1["simple directory helper"]
+        L2["simple file helper"]
+        L3["seq file helper"]
+    end
+
+    subgraph EXT4["Filesystem implementation"]
+        E1["super.rs: mount/fill_super/statfs/sync_fs"]
+        E2["inode.rs: iget/read_inode/write_inode"]
+        E3["namei.rs: lookup/create/link/unlink/rename"]
+        E4["file.rs: open/read/write/fsync/ioctl/mmap hook"]
+        E5["address_space.rs: read_folio/writepages/invalidate"]
+        E6["extents.rs: extent tree and delayed allocation"]
+        E7["mballoc.rs: block allocator"]
+        E8["jbd2: journal and ordered data"]
+        E9["block_io.rs: block device requests"]
+    end
+
+    subgraph BLOCK["Block layer"]
+        B1["block device"]
+        B2["flush, barrier, error reporting"]
+    end
+
+    A1 --> A2 --> R4
+    A3 --> R4
+    R4 --> V1
+    R1 --> V2
+    R2 --> V9
+    R3 --> V9
+    V1 --> V2 --> V3
+    V3 --> V4 --> V5
+    V5 --> V7
+    V6 --> V3
+    V6 --> V8
+    V7 --> V8
+    V8 --> E1
+    V8 --> E2
+    V8 --> E3
+    V8 --> E4
+    V8 --> E5
+    LIBFS -. helper only .-> VFS
+    E5 --> E6 --> E7 --> E9
+    E5 --> E8 --> E9
+    E9 --> B1 --> B2
+```
+
+第二张图是 Linux VFS 对象关系。目标是让 X-Kernel 的对象关系和这个图一致：
+dentry 是名字，inode 是身份，file 是一次 open，address_space 是 inode 的 page
+cache/writeback 域，super_block 是文件系统实例。
+
+```mermaid
+flowchart LR
+    subgraph PATH["Path and mount"]
+        P1["Location - Linux struct path"]
+        P2["Mountpoint - Linux vfsmount"]
+        P3["DirEntry - Linux dentry"]
+    end
+
+    subgraph CORE["VFS identity objects"]
+        S1["SuperBlock - Linux super_block"]
+        I1["VfsInode - Linux inode"]
+        F1["VfsFile - Linux file"]
+        AS1["AddressSpace - inode i_mapping"]
+    end
+
+    subgraph OPS["Operation tables"]
+        SO["SuperBlockOperations"]
+        IO["InodeOperations"]
+        FO["FileOperations"]
+        AO["AddressSpaceOperations"]
+        DO["DentryOperations - Linux dentry_operations later"]
+    end
+
+    subgraph STATE["State ownership"]
+        DNAME["name + parent + dentry cache"]
+        IMETA["inode number + metadata + inode private data"]
+        FSTATE["open flags + file position + private_data"]
+        PCACHE["cached pages + dirty/writeback/error + mmap reverse map"]
+        SBSTATE["mount instance + inode cache + freeze/writeback domains"]
+    end
+
+    P1 --> P2
+    P1 --> P3
+    P2 --> S1
+    P3 --> I1
+    F1 --> P1
+    F1 --> FO
+    I1 --> IO
+    I1 --> FO
+    I1 --> AS1
+    AS1 --> AO
+    S1 --> SO
+    P3 -. future .-> DO
+
+    P3 --> DNAME
+    I1 --> IMETA
+    F1 --> FSTATE
+    AS1 --> PCACHE
+    S1 --> SBSTATE
+
+    AS1 -. weak inode reference .-> I1
+    I1 -. owns mapping attachment .-> AS1
+```
+
+第三张图是目标 crate/目录边界。它用于判断代码应该放在哪里。
+
+```mermaid
+flowchart TD
+    subgraph POSIX["posix/fs"]
+        POPEN["openat/statx/read/write/fsync/mmap syscalls"]
+        PFD["fd table integration"]
+        PUSER["copy user buffers and translate errno"]
+    end
+
+    subgraph KFS["fs/runtime/kfs"]
+        KBOOT["rootfs and boot-time mount"]
+        KFD["runtime FileLike glue"]
+        KWB["writeback worker"]
+        KRC["reclaim worker"]
+    end
+
+    subgraph VFSCORE["fs/foundation/kvfs or future fs/vfs"]
+        VSB["super_block.rs"]
+        VMNT["mount.rs"]
+        VNAMEI["namei.rs"]
+        VDENT["dentry.rs"]
+        VINODE["inode.rs"]
+        VFILE["file.rs"]
+        VAS["address_space.rs"]
+        VOPS["ops.rs"]
+        VWB["writeback.rs"]
+    end
+
+    subgraph LIBFS2["fs/foundation/kvfs-simple or future libfs"]
+        LSIMPLE["simplefs helpers"]
+        LSEQ["seq_file"]
+        LRW["rw generated files"]
+    end
+
+    subgraph EXT4DIR["fs/filesystems/ext4"]
+        XSUPER["super.rs"]
+        XINODE["inode.rs"]
+        XNAMEI["namei.rs"]
+        XFILE["file.rs"]
+        XAS["address_space.rs"]
+        XEXT["extents.rs"]
+        XALLOC["mballoc.rs"]
+        XJBD["jbd2/"]
+        XBIO["block_io.rs"]
+    end
+
+    POPEN --> PFD --> KFD
+    PUSER --> KFD
+    KFD --> VNAMEI
+    KBOOT --> VMNT
+    KWB --> VWB
+    KRC --> VWB
+
+    VNAMEI --> VMNT
+    VNAMEI --> VDENT
+    VDENT --> VINODE
+    VINODE --> VAS
+    VFILE --> VOPS
+    VINODE --> VOPS
+    VAS --> VOPS
+    VSB --> VOPS
+
+    LIBFS2 -. helper implementation .-> VFSCORE
+
+    VOPS --> XSUPER
+    VOPS --> XINODE
+    VOPS --> XNAMEI
+    VOPS --> XFILE
+    VOPS --> XAS
+    XAS --> XEXT
+    XEXT --> XALLOC
+    XAS --> XJBD
+    XJBD --> XBIO
+
+    EXT4DIR -. forbidden posix ABI .-> POSIX
+    EXT4DIR -. forbidden kfs fd wrapper .-> KFS
+    VFSCORE -. forbidden runtime glue .-> KFS
+    VFSCORE -. forbidden concrete fs .-> EXT4DIR
+```
+
+第四张图是 ext4 接入 VFS 的 ops 映射。ext4 只能实现 ops，不能重新定义 VFS 对象。
+
+```mermaid
+flowchart LR
+    subgraph LINUX["Linux ext4 reference"]
+        LSOPS["ext4_sops"]
+        LFINODE["ext4_file_inode_operations"]
+        LDINODE["ext4_dir_inode_operations"]
+        LFOPS["ext4_file_operations"]
+        LAOPS["ext4_aops / ext4_da_aops"]
+    end
+
+    subgraph XVFS["X-Kernel VFS trait families"]
+        SO2["SuperBlockOperations"]
+        IO2["InodeOperations"]
+        FO2["FileOperations"]
+        AO2["AddressSpaceOperations"]
+    end
+
+    subgraph XEXT4["KExt4 implementation"]
+        KSO["KExt4SuperOps"]
+        KFIO["KExt4FileInodeOps"]
+        KDIO["KExt4DirInodeOps"]
+        KFO["KExt4FileOps"]
+        KAO["KExt4AddressSpaceOps"]
+    end
+
+    subgraph EXT4ALG["Ext4 algorithms, not VFS"]
+        IG["iget/read_inode/write_inode"]
+        NM["htree/name lookup and dir updates"]
+        EX["extent tree / delayed allocation / unwritten extent"]
+        MB["mballoc"]
+        JBD["journal / ordered data / fsync"]
+        BIO["block I/O"]
+    end
+
+    LSOPS --> SO2 --> KSO --> IG
+    LFINODE --> IO2 --> KFIO --> IG
+    LDINODE --> IO2 --> KDIO --> NM
+    LFOPS --> FO2 --> KFO --> JBD
+    LAOPS --> AO2 --> KAO --> EX
+    EX --> MB --> BIO
+    EX --> JBD --> BIO
+```
+
+第五张图是一次典型读写路径。重点是 `posix/fs` 不碰 page cache，`kfs` 不拥有 VFS
+身份对象，ext4 不反向调用 syscall ABI。
+
+```mermaid
+sequenceDiagram
+    participant U as User syscall
+    participant P as posix/fs ABI
+    participant K as fs/runtime/kfs glue
+    participant N as VFS namei
+    participant D as DirEntry dentry
+    participant I as VfsInode inode
+    participant F as VfsFile file
+    participant AS as AddressSpace page cache
+    participant X as ext4 ops
+    participant B as block device
+
+    U->>P: openat(path, flags, mode)
+    P->>K: convert ABI to VFS open request
+    K->>N: path walk from cwd/root
+    N->>D: lookup/create dentry
+    D->>I: resolve inode identity through inode cache
+    N->>F: create open file state
+    F-->>P: fd object
+
+    U->>P: read/write(fd, user buffer)
+    P->>K: validate fd and user buffer
+    K->>F: read/write on opened file
+    F->>AS: buffered I/O through inode address space
+    AS->>X: AddressSpaceOperations read/write/writepages
+    X->>X: extent mapping and journal rules
+    X->>B: block read/write/flush
+    B-->>X: I/O completion or error
+    X-->>AS: page uptodate/dirty/error result
+    AS-->>F: bytes completed
+    F-->>P: result
+    P-->>U: errno or byte count
+```
+
+第六张图是迁移路线。每个阶段都要减少一类混乱，而不是在旧边界上继续堆功能。
+
+```mermaid
+flowchart TD
+    M0["Current mixed state: kvfs + kfs + posix-fs"]
+    M1["Boundary first: SuperBlock, VfsInode, DirEntry, VfsFile, AddressSpace"]
+    M2["Directory inode identity: dentry is only name binding"]
+    M3["Ops family migration: super, inode, file, address_space, dentry"]
+    M4["Address-space page cache: mapping behind AddressSpace"]
+    M5["Page state machine: uptodate, dirty, writeback, error, invalidate"]
+    M6["Namei and mount cleanup: path walk, namespace, rename locking"]
+    M7["Ext4 VFS integration: ext4 implements Linux-like ops"]
+    M8["Global writeback and reclaim: not per-fd lifetime"]
+    M9["Advanced coherence: mmap, direct I/O, truncate, freeze, unmount"]
+
+    M0 --> M1 --> M2 --> M3 --> M4 --> M5 --> M6 --> M7 --> M8 --> M9
+
+    M0 -. no more VFS state in kfs .-> M1
+    M3 -. ext4 must not define VFS traits .-> M7
+    M4 -. last fd close keeps page cache .-> M8
+    M6 -. dentry, inode, path are separate .-> M7
+```
+
 ### 目标目录与依赖
 
 当前 `kvfs`、`kfs`、`posix-fs` 同时承担 VFS、runtime、syscall ABI 和 helper 职责，
@@ -1000,28 +1327,6 @@ dirty/writeback/error/invalidate 状态机、批量 I/O 和 `AddressSpaceOps` �
 - PageCache 和 JBD2 completion 接入。
 
 VFS-8 可以在首个可用 KExt4 之后完成，但接口设计不能阻止它。
-
-## PR 与人员边界
-
-建议 VFS 改造由一名明确负责人主导公共文件，避免与 KExt4 两人同时修改：
-
-| 范围 | 默认负责人 | 参与者 |
-|---|---|---|
-| `fs/foundation/kvfs` inode/address-space API | VFS 负责人 | KExt4 B review |
-| `fs/runtime/kfs` PageCache/writeback | KExt4 B 或 VFS 负责人 | mmap 负责人 review |
-| `mm/memspace-file` mmap coherence | 内存管理负责人 | KExt4 B review |
-| KExt4 `AddressSpaceOps` | KExt4 B | KExt4 A review ordered-data |
-| block async I/O | 驱动/I/O 负责人 | KExt4 A review |
-
-如果仍由 KExt4 两人承担全部工作：
-
-- B 独占 kvfs/KFS/mmap 公共改造；
-- A 在此期间只依赖已合并 API 开发 disk/buffer/allocator/journal；
-- A 不在功能分支修改 kvfs/KFS；
-- 公共 API 先合并，KExt4 接入后续单独 PR；
-- 同一时间只有一个分支修改 `kvfs`、`kfs` 或 `memspace-file`。
-
-每个 VFS PR 只完成一个阶段，不与 ext4 功能实现混合。
 
 ## 兼容迁移
 
