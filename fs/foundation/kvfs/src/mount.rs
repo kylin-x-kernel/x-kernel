@@ -22,7 +22,7 @@ use kpoll::{IoEvents, Pollable};
 use crate::{
     DirEntry, DirEntrySink, Filesystem, FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard,
     NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, ST_RDONLY, TypeMap, VfsError,
-    VfsResult,
+    VfsInode, VfsResult,
     path::{DOT, DOTDOT, PathBuf},
 };
 
@@ -211,7 +211,13 @@ impl Location {
 
     pub fn flags(&self) -> NodeFlags;
 
+    pub fn dentry_data(&self) -> MutexGuard<'_, TypeMap>;
+
     pub fn user_data(&self) -> MutexGuard<'_, TypeMap>;
+
+    pub fn inode_data(&self) -> MutexGuard<'_, TypeMap>;
+
+    pub fn vfs_inode(&self) -> &Arc<VfsInode>;
 }
 
 impl Location {
@@ -332,6 +338,11 @@ impl Location {
     /// Returns `true` if this location references the same entry.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.mountpoint, &other.mountpoint) && self.entry.ptr_eq(&other.entry)
+    }
+
+    /// Returns `true` if both locations point at the same VFS inode identity.
+    pub fn is_same_inode(&self, other: &Self) -> bool {
+        self.entry.is_same_inode(&other.entry)
     }
 
     /// Returns `true` if this location is a mountpoint directory.

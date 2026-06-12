@@ -6,6 +6,7 @@
 mod device;
 mod dir;
 mod file;
+mod inode;
 
 use alloc::{
     borrow::ToOwned,
@@ -26,12 +27,12 @@ pub use device::*;
 pub use dir::*;
 pub use file::*;
 use inherit_methods_macro::inherit_methods;
+pub use inode::*;
 use kpoll::{IoEvents, Pollable};
 use smallvec::SmallVec;
 
 use crate::{
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
-    path::PathBuf,
+    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsResult, path::PathBuf,
 };
 
 bitflags! {
@@ -206,17 +207,15 @@ impl TypeMap {
 }
 
 struct Inner {
-    node: Node,
-    node_type: NodeType,
+    inode: Arc<VfsInode>,
     reference: Reference,
-    user_data: Mutex<TypeMap>,
+    dentry_data: Mutex<TypeMap>,
 }
 
 impl fmt::Debug for Inner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Inner")
-            .field("node", &self.node)
-            .field("node_type", &self.node_type)
+            .field("inode", &self.inode)
             .field("reference", &self.reference)
             .finish()
     }
@@ -246,7 +245,7 @@ impl From<Node> for Arc<dyn NodeOps> {
     }
 }
 
-#[inherit_methods(from = "self.0.node")]
+#[inherit_methods(from = "self.0.inode")]
 impl DirEntry {
     pub fn inode(&self) -> u64;
 
@@ -265,45 +264,56 @@ impl DirEntry {
 impl DirEntry {
     /// Construct a file entry with the given node and reference.
     pub fn new_file(node: FileNode, node_type: NodeType, reference: Reference) -> Self {
-        Self(Arc::new(Inner {
-            node: Node::File(node),
-            node_type,
-            reference,
-            user_data: Mutex::default(),
-        }))
+        Self::new_file_from_inode(VfsInode::new_file(node, node_type), reference)
     }
 
     /// Construct a directory entry with a node builder.
     pub fn new_dir(node_fn: impl FnOnce(WeakDirEntry) -> DirNode, reference: Reference) -> Self {
         Self(Arc::new_cyclic(|this| Inner {
-            node: Node::Dir(node_fn(WeakDirEntry(this.clone()))),
-            node_type: NodeType::Directory,
+            inode: VfsInode::new_dir(node_fn(WeakDirEntry(this.clone()))),
             reference,
-            user_data: Mutex::default(),
+            dentry_data: Mutex::default(),
+        }))
+    }
+
+    /// Construct a file entry that points at an existing inode identity.
+    pub fn new_file_from_inode(inode: Arc<VfsInode>, reference: Reference) -> Self {
+        debug_assert!(inode.is_file());
+        Self(Arc::new(Inner {
+            inode,
+            reference,
+            dentry_data: Mutex::default(),
+        }))
+    }
+
+    /// Construct a directory entry that points at an existing inode identity.
+    pub fn new_dir_from_inode(inode: Arc<VfsInode>, reference: Reference) -> Self {
+        debug_assert!(inode.is_dir());
+        Self(Arc::new(Inner {
+            inode,
+            reference,
+            dentry_data: Mutex::default(),
         }))
     }
 
     /// Returns metadata for this entry, filling in its node type.
     pub fn metadata(&self) -> VfsResult<Metadata> {
-        self.0.node.metadata().map(|mut metadata| {
-            metadata.node_type = self.0.node_type;
-            metadata
-        })
+        self.0.inode.metadata()
     }
 
     /// Attempt to downcast the entry to a concrete node type.
     pub fn downcast<T: NodeOps>(&self) -> VfsResult<Arc<T>> {
-        self.0
-            .node
-            .clone_ops_arc()
-            .into_any()
-            .downcast()
-            .map_err(|_| VfsError::InvalidInput)
+        self.0.inode.downcast()
     }
 
     /// Downgrade to a weak reference.
     pub fn downgrade(&self) -> WeakDirEntry {
         WeakDirEntry(Arc::downgrade(&self.0))
+    }
+
+    /// Return the inode identity referenced by this directory entry.
+    pub fn vfs_inode(&self) -> &Arc<VfsInode> {
+        &self.0.inode
     }
 
     /// Returns the cache key for this entry.
@@ -313,7 +323,7 @@ impl DirEntry {
 
     /// Returns the node type of this entry.
     pub fn node_type(&self) -> NodeType {
-        self.0.node_type
+        self.0.inode.node_type()
     }
 
     /// Returns the parent directory entry, if any.
@@ -370,33 +380,32 @@ impl DirEntry {
 
     /// Returns `true` if this entry is a file.
     pub fn is_file(&self) -> bool {
-        matches!(self.0.node, Node::File(_))
+        self.0.inode.is_file()
     }
 
     /// Returns `true` if this entry is a directory.
     pub fn is_dir(&self) -> bool {
-        matches!(self.0.node, Node::Dir(_))
+        self.0.inode.is_dir()
     }
 
     /// Returns a file node reference if this entry is a file.
     pub fn as_file(&self) -> VfsResult<&FileNode> {
-        match &self.0.node {
-            Node::File(file) => Ok(file),
-            _ => Err(VfsError::IsADirectory),
-        }
+        self.0.inode.as_file()
     }
 
     /// Returns a directory node reference if this entry is a directory.
     pub fn as_dir(&self) -> VfsResult<&DirNode> {
-        match &self.0.node {
-            Node::Dir(dir) => Ok(dir),
-            _ => Err(VfsError::NotADirectory),
-        }
+        self.0.inode.as_dir()
     }
 
     /// Returns `true` if two entries point to the same node.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Returns `true` if two entries point to the same inode identity.
+    pub fn is_same_inode(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0.inode, &other.0.inode)
     }
 
     /// Returns the raw pointer value for this entry.
@@ -406,42 +415,40 @@ impl DirEntry {
 
     /// Read the symlink target as a string.
     pub fn read_link(&self) -> VfsResult<String> {
-        if self.node_type() != NodeType::Symlink {
-            return Err(VfsError::InvalidData);
-        }
-        let file = self.as_file()?;
-        let mut buf = vec![0; file.len()? as usize];
-        file.read_at(&mut buf, 0)?;
-        String::from_utf8(buf).map_err(|_| VfsError::InvalidData)
+        self.0.inode.read_link()
     }
 
     /// Issue an ioctl to the underlying file node.
     pub fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
-        match &self.0.node {
-            Node::File(file) => file.ioctl(cmd, arg),
-            Node::Dir(_) => Err(VfsError::NotATty),
-        }
+        self.0.inode.ioctl(cmd, arg)
     }
 
-    /// Access per-node user data storage.
+    /// Access per-dentry attachment storage.
+    pub fn dentry_data(&self) -> MutexGuard<'_, TypeMap> {
+        self.0.dentry_data.lock()
+    }
+
+    /// Access per-dentry attachment storage.
+    ///
+    /// This is kept for compatibility with older call sites. New shared state
+    /// that belongs to the underlying file object should use [`Self::inode_data`].
     pub fn user_data(&self) -> MutexGuard<'_, TypeMap> {
-        self.0.user_data.lock()
+        self.dentry_data()
+    }
+
+    /// Access inode-scoped attachment storage.
+    pub fn inode_data(&self) -> MutexGuard<'_, TypeMap> {
+        self.0.inode.inode_data()
     }
 }
 
 impl Pollable for DirEntry {
     fn poll(&self) -> IoEvents {
-        match &self.0.node {
-            Node::File(file) => file.poll(),
-            Node::Dir(_dir) => IoEvents::IN | IoEvents::OUT,
-        }
+        self.0.inode.poll()
     }
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        match &self.0.node {
-            Node::File(file) => file.register(context, events),
-            Node::Dir(_) => {}
-        }
+        self.0.inode.register(context, events)
     }
 }
 
@@ -458,8 +465,8 @@ mod tests_node {
     use unittest::def_test;
 
     use super::{
-        DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, NodeOps, Reference,
-        TypeMap,
+        DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, InodeCache, NodeOps,
+        Reference, TypeMap, VfsInode,
     };
     use crate::{
         FilesystemOps, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, VfsError,
@@ -701,6 +708,15 @@ mod tests_node {
         (entry, ops)
     }
 
+    fn make_file_inode(
+        fs: Arc<MockFilesystem>,
+        inode: u64,
+    ) -> (Arc<VfsInode>, Arc<MockFileNodeOps>) {
+        let ops = Arc::new(MockFileNodeOps::new(fs, inode, b"payload"));
+        let inode = VfsInode::new_file(FileNode::new(ops.clone()), NodeType::RegularFile);
+        (inode, ops)
+    }
+
     #[def_test]
     fn test_reference_root_and_key() {
         let root = Reference::root();
@@ -755,6 +771,58 @@ mod tests_node {
         assert_eq!(*entry.user_data().get::<u32>().unwrap(), 42);
 
         assert_eq!(ops.update_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[def_test]
+    fn test_shared_inode_identity_and_attachments() {
+        let fs = Arc::new(MockFilesystem);
+        let (inode, _) = make_file_inode(fs, 30);
+        let first = DirEntry::new_file_from_inode(
+            inode.clone(),
+            Reference::new(None, String::from("first")),
+        );
+        let second =
+            DirEntry::new_file_from_inode(inode, Reference::new(None, String::from("second")));
+
+        assert!(!first.ptr_eq(&second));
+        assert!(first.is_same_inode(&second));
+
+        first.inode_data().insert(42_u32);
+        assert_eq!(*second.inode_data().get::<u32>().unwrap(), 42);
+
+        first.user_data().insert(String::from("first dentry"));
+        assert!(second.user_data().get::<String>().is_none());
+    }
+
+    #[def_test]
+    fn test_legacy_constructors_create_distinct_inode_identities() {
+        let fs = Arc::new(MockFilesystem);
+        let (first, _) = make_file_entry(fs.clone(), 40, None, "first");
+        let (second, _) = make_file_entry(fs, 40, None, "second");
+
+        assert!(!first.ptr_eq(&second));
+        assert!(!first.is_same_inode(&second));
+    }
+
+    #[def_test]
+    fn test_inode_cache_reuses_live_inode_identity() {
+        let cache = InodeCache::new();
+        let fs = Arc::new(MockFilesystem);
+        let first = cache.get_or_insert_file(50, NodeType::RegularFile, || {
+            let ops = Arc::new(MockFileNodeOps::new(fs.clone(), 50, b"first"));
+            FileNode::new(ops)
+        });
+        let second = cache.get_or_insert_file(50, NodeType::RegularFile, || {
+            panic!("live inode should be reused")
+        });
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.inode(), 50);
+        assert!(cache.lookup(50).is_some());
+
+        drop(first);
+        drop(second);
+        assert!(cache.lookup(50).is_none());
     }
 
     #[def_test]

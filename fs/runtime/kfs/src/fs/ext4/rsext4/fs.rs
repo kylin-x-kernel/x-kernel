@@ -3,14 +3,14 @@
 // See LICENSES for license details.
 
 //! Ext4 filesystem adapter (rsext4 backend).
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc};
 use core::cell::OnceCell;
 
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, ST_RELATIME, StatFs,
-    VfsError, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, FileNode, Filesystem, FilesystemOps, InodeCache, Location, NodeType,
+    Reference, ST_RELATIME, StatFs, VfsError, VfsInode, VfsResult, path::MAX_NAME_LEN,
 };
 use rsext4::Jbd2Dev;
 
@@ -35,6 +35,7 @@ impl Ext4State {
 /// Ext4 filesystem implementation.
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4State>,
+    inode_cache: InodeCache,
     root_dir: OnceCell<DirEntry>,
 }
 
@@ -62,6 +63,7 @@ impl Ext4Filesystem {
 
         let fs = Arc::new(Self {
             inner: Mutex::new(Ext4State { fs, dev }),
+            inode_cache: InodeCache::new(),
             root_dir: OnceCell::new(),
         });
         let _ = fs.root_dir.set(DirEntry::new_dir(
@@ -81,6 +83,18 @@ impl Ext4Filesystem {
     /// Lock the inner ext4 filesystem state.
     pub(crate) fn lock(&self) -> MutexGuard<'_, Ext4State> {
         self.inner.lock()
+    }
+
+    pub(crate) fn get_file_vfs_inode(
+        fs: &Arc<Self>,
+        ino: u32,
+        node_type: NodeType,
+        path: Option<String>,
+    ) -> Arc<VfsInode> {
+        fs.inode_cache
+            .get_or_insert_file(ino as u64, node_type, || {
+                FileNode::new(Inode::new(fs.clone(), ino, None, path))
+            })
     }
 
     pub(crate) fn writeback_to_disk(&self) -> VfsResult<()> {

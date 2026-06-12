@@ -9,9 +9,9 @@ use core::{any::Any, cmp::min, task::Context, time::Duration};
 use ext4_rs::BLOCK_SIZE;
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps,
-    Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError,
-    VfsResult, WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, FilesystemOps, Metadata,
+    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
+    WeakDirEntry,
 };
 
 use super::{
@@ -54,11 +54,8 @@ impl Inode {
                 reference,
             )
         } else {
-            DirEntry::new_file(
-                FileNode::new(Inode::new(self.fs.clone(), ino, None, None)),
-                node_type,
-                reference,
-            )
+            let inode = Ext4Filesystem::get_file_vfs_inode(&self.fs, ino, node_type);
+            DirEntry::new_file_from_inode(inode, reference)
         }
     }
 

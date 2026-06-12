@@ -8,8 +8,8 @@ use core::cell::OnceCell;
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Location, Reference, ST_RELATIME, StatFs,
-    VfsError, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, FileNode, Filesystem, FilesystemOps, InodeCache, Location, NodeType,
+    Reference, ST_RELATIME, StatFs, VfsError, VfsInode, VfsResult, path::MAX_NAME_LEN,
 };
 use lwext4_rust::{FsConfig, ffi::EXT4_ROOT_INO};
 
@@ -22,6 +22,7 @@ const EXT4_CONFIG: FsConfig = FsConfig { bcache_size: 256 };
 
 pub struct Ext4Filesystem {
     inner: Mutex<LwExt4Filesystem>,
+    inode_cache: InodeCache,
     root_dir: OnceCell<DirEntry>,
 }
 
@@ -32,6 +33,7 @@ impl Ext4Filesystem {
 
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),
+            inode_cache: InodeCache::new(),
             root_dir: OnceCell::new(),
         });
         let _ = fs.root_dir.set(DirEntry::new_dir(
@@ -43,6 +45,17 @@ impl Ext4Filesystem {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, LwExt4Filesystem> {
         self.inner.lock()
+    }
+
+    pub(crate) fn get_file_vfs_inode(
+        fs: &Arc<Self>,
+        ino: u32,
+        node_type: NodeType,
+    ) -> Arc<VfsInode> {
+        fs.inode_cache
+            .get_or_insert_file(ino as u64, node_type, || {
+                FileNode::new(Inode::new(fs.clone(), ino, None))
+            })
     }
 
     pub(crate) fn range_shift(

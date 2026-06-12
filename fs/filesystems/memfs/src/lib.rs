@@ -16,8 +16,8 @@ use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use kvfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
-    FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType,
-    Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
+    FilesystemOps, InodeCache, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
+    NodeType, Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
 };
 use kvfs_simple::dummy_stat_fs_with_flags;
 use slab::Slab;
@@ -64,6 +64,7 @@ pub struct MemoryFs {
     name: &'static str,
     mount_flags: u32,
     inodes: Mutex<Slab<Arc<Inode>>>,
+    inode_cache: InodeCache,
     root: Mutex<Option<DirEntry>>,
 }
 
@@ -87,6 +88,7 @@ impl MemoryFs {
             name,
             mount_flags,
             inodes: Mutex::new(Slab::new()),
+            inode_cache: InodeCache::new(),
             root: Mutex::default(),
         });
         let root_ino = Inode::new(
@@ -260,11 +262,14 @@ impl MemoryNode {
                 reference,
             )
         } else {
-            DirEntry::new_file(
-                FileNode::new(MemoryNode::new(fs, inode, None)),
-                node_type,
-                reference,
-            )
+            let inode_number = inode.ino;
+            let vfs_inode = self
+                .fs
+                .inode_cache
+                .get_or_insert_file(inode_number, node_type, || {
+                    FileNode::new(MemoryNode::new(fs, inode, None))
+                });
+            DirEntry::new_file_from_inode(vfs_inode, reference)
         })
     }
 }

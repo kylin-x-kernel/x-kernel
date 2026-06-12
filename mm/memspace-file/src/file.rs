@@ -10,7 +10,7 @@ use alloc::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
-use kfs::{CachedFile, FileFlags};
+use kfs::{CachedFile, FileFlags, PageIndex};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
@@ -23,7 +23,7 @@ pub struct FileBackendInner {
     start: VirtAddr,
     cache: CachedFile,
     flags: FileFlags,
-    offset_page: u32,
+    offset_page: PageIndex,
     handle: AtomicUsize,
     futex_handle: Arc<()>,
 }
@@ -63,11 +63,17 @@ impl FileBackendInner {
         self.handle.store(handle, Ordering::Release);
     }
 
-    fn on_evict(self: &Arc<Self>, pn: u32, aspace: &mut AddrSpace) {
+    fn on_evict(self: &Arc<Self>, pn: PageIndex, aspace: &mut AddrSpace) {
         let Some(pn) = pn.checked_sub(self.offset_page) else {
             return;
         };
-        let vaddr = self.start + pn as usize * PageSize::Size4K as usize;
+        if pn > usize::MAX as PageIndex {
+            return;
+        }
+        let Some(offset) = (pn as usize).checked_mul(PageSize::Size4K as usize) else {
+            return;
+        };
+        let vaddr = self.start + offset;
         if !aspace.find_area(vaddr).is_some_and(|it| {
             it.backend()
                 .downcast_dynamic_ref::<FileBackend>()
@@ -91,7 +97,7 @@ impl FileBackend {
     pub fn offset_for(&self, addr: VirtAddr) -> u64 {
         let base = self.0.start.as_usize();
         let rel = addr.as_usize().saturating_sub(base) as u64;
-        self.0.offset_page as u64 * PAGE_SIZE_4K as u64 + rel
+        self.0.offset_page * PAGE_SIZE_4K as u64 + rel
     }
 
     pub fn cache(&self) -> &CachedFile {
@@ -162,9 +168,14 @@ impl DynBackendOps for FileBackend {
     ) -> KResult<(usize, Option<Box<dyn FnOnce(&mut AddrSpace)>>)> {
         let mut pages = 0;
         let mut to_be_evicted = Vec::new();
-        let start_page = ((range.start - self.0.start) / PAGE_SIZE_4K) as u32 + self.0.offset_page;
+        let range_start_page = ((range.start - self.0.start) / PAGE_SIZE_4K) as PageIndex;
+        let start_page = range_start_page
+            .checked_add(self.0.offset_page)
+            .ok_or(KError::InvalidInput)?;
         for (i, addr) in pages_in(range, PageSize::Size4K)?.enumerate() {
-            let pn = start_page + i as u32;
+            let pn = start_page
+                .checked_add(i as PageIndex)
+                .ok_or(KError::InvalidInput)?;
             match pgtbl.query(addr) {
                 Ok((paddr, page_flags, _)) => {
                     if access_flags.contains(MappingFlags::WRITE)
@@ -263,7 +274,7 @@ pub fn new_file(
     offset: usize,
     aspace: &Arc<Mutex<AddrSpace>>,
 ) -> Backend {
-    let offset_page = (offset / PAGE_SIZE_4K) as u32;
+    let offset_page = (offset / PAGE_SIZE_4K) as PageIndex;
     let inner = Arc::new(FileBackendInner {
         start,
         cache,

@@ -6,6 +6,7 @@
 mod directory;
 mod file;
 mod fs;
+mod mapping;
 
 use alloc::{borrow::Cow, string::ToString};
 
@@ -17,6 +18,7 @@ pub use fs::{
     new_process_fs_context,
 };
 use kvfs::Location;
+pub use mapping::{PageCache, PageIndex};
 
 pub(crate) fn path_for(loc: &Location) -> Cow<'static, str> {
     loc.absolute_path()

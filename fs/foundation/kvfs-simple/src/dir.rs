@@ -15,8 +15,8 @@ use core::any::Any;
 
 use inherit_methods_macro::inherit_methods;
 use kvfs::{
-    DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FilesystemOps, Metadata, MetadataUpdate,
-    NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
+    DirEntry, DirEntrySink, DirNode, DirNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeOps,
+    NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
     path::{DOT, DOTDOT},
 };
 
@@ -184,7 +184,11 @@ impl<O: SimpleDirOps> DirNodeOps for SimpleDir<O> {
             }
             NodeOpsMux::File(ops) => {
                 let node_type = ops.metadata()?.node_type;
-                DirEntry::new_file(FileNode::new(ops.clone()), node_type, reference)
+                let inode = self
+                    .node
+                    .filesystem_ref()
+                    .get_file_vfs_inode(ops.clone(), node_type);
+                DirEntry::new_file_from_inode(inode, reference)
             }
         })
     }

@@ -7,9 +7,9 @@ use core::{any::Any, task::Context};
 
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps,
-    Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError,
-    VfsResult, WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, FilesystemOps, Metadata,
+    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
+    WeakDirEntry,
 };
 use lwext4_rust::{FileAttr, InodeType};
 
@@ -40,11 +40,9 @@ impl Inode {
                 reference,
             )
         } else {
-            DirEntry::new_file(
-                FileNode::new(Inode::new(self.fs.clone(), entry.ino(), None)),
-                into_vfs_type(entry.inode_type()),
-                reference,
-            )
+            let node_type = into_vfs_type(entry.inode_type());
+            let inode = Ext4Filesystem::get_file_vfs_inode(&self.fs, entry.ino(), node_type);
+            DirEntry::new_file_from_inode(inode, reference)
         }
     }
 
@@ -244,11 +242,8 @@ impl DirNodeOps for Inode {
                 reference,
             )
         } else {
-            DirEntry::new_file(
-                FileNode::new(Inode::new(self.fs.clone(), ino, None)),
-                node_type,
-                reference,
-            )
+            let inode = Ext4Filesystem::get_file_vfs_inode(&self.fs, ino, node_type);
+            DirEntry::new_file_from_inode(inode, reference)
         })
     }
 

@@ -13,11 +13,11 @@ extent、allocator 和 journal。当前 kvfs/KFS 的对象身份、页缓存接�
 改造必须服务所有磁盘文件系统，不能在 KExt4 中建立一条只有 ext4 能使用的
 私有 VFS 旁路。
 
-## 当前问题
+## 改造前问题
 
 ### dentry 与 inode 身份混合
 
-当前 `DirEntry` 同时保存：
+改造前 `DirEntry` 同时保存：
 
 - 路径关系；
 - `FileNode` 或 `DirNode`；
@@ -26,11 +26,12 @@ extent、allocator 和 journal。当前 kvfs/KFS 的对象身份、页缓存接�
 
 PageCache 通过 `Location::user_data()` 挂在 `DirEntry` 上。硬链接可能产生多个
 `DirEntry`，甚至多个文件系统 inode wrapper，因此同一磁盘 inode 可能拥有多份
-缓存和锁。
+缓存和锁。第一批 VFS 重构已经把普通文件的缓存迁到 inode attachment，目录 inode
+唯一化仍在后续阶段完成。
 
 ### PageCache 属于 `CachedFile`
 
-当前关系近似：
+改造前关系近似：
 
 ```text
 CachedFile
@@ -40,8 +41,9 @@ CachedFile
        -> cached pages
 ```
 
-它缺少明确的 inode/address-space 所有权，也没有全局 reclaim、dirty accounting
-和后台 writeback。
+第一批 VFS-2 重构后，`CachedFileShared` 被拆为 inode 级 `FileMapping`，并由
+`CachedFile`、buffered I/O 和 mmap backend 共享。它仍缺少全局 reclaim、dirty
+accounting 和后台 writeback。
 
 ### 文件系统接口仍是字节 I/O
 
@@ -154,26 +156,26 @@ allocator + metadata buffer + journal + block I/O
 
 ```rust
 pub struct VfsInode {
-    key: InodeKey,
-    ops: Arc<dyn NodeOps>,
+    node: Node,
+    node_type: NodeType,
     attachments: Mutex<TypeMap>,
 }
 
-pub struct InodeKey {
-    filesystem_id: u64,
-    inode_number: u64,
+pub struct InodeCache {
+    inodes: Mutex<HashMap<u64, Weak<VfsInode>>>,
 }
 
 pub struct DirEntry {
     inode: Arc<VfsInode>,
     reference: Reference,
-    node_type: NodeType,
     dentry_data: Mutex<TypeMap>,
 }
 ```
 
 `DirEntry` 只表示一个名字到 inode 的绑定。多个硬链接拥有不同 dentry，但共享
-同一个 `Arc<VfsInode>`。
+同一个 `Arc<VfsInode>`。`InodeCache` 由文件系统实例持有，因此 cache key 中的
+`u64` inode number 在一个 filesystem instance 内唯一；跨 filesystem instance
+不共享 cache。
 
 ### inode 唯一性
 
@@ -670,6 +672,18 @@ VFS 批量页接口可以先合并连续页，使用同步多块 I/O 获得第�
 
 这一阶段不改变现有 `read_at/write_at` 行为。
 
+当前第一批重构先落地 VFS 通用对象和非目录 inode 路径：
+
+- `kvfs::VfsInode` 承载 inode 级 identity 和 attachment；
+- `DirEntry` 只保留路径/名字相关状态，并通过 `Arc<VfsInode>` 访问底层节点；
+- `kvfs::InodeCache` 提供每个文件系统实例的 live inode weak cache；
+- `memfs`、`kvfs-simple` 和现有 ext4 backend 的非目录 lookup/create 使用 inode cache；
+- KFS page cache 从 dentry attachment 迁到 inode attachment。
+
+目录 inode 的完整唯一化暂不在第一批完成，因为现有目录节点仍依赖
+`WeakDirEntry` 保存父子路径上下文。后续需要先把目录操作中的路径上下文与 inode
+identity 分离，再让目录 lookup/create/root 全部走同一 `iget` 路径。
+
 ### VFS-2：inode 级 FileMapping
 
 改动：
@@ -681,6 +695,15 @@ VFS 批量页接口可以先合并连续页，使用同步多块 I/O 获得第�
 - 保留旧字节 I/O 回调。
 
 这是 KExt4 开始接入 PageCache 前的最低前置条件。
+
+当前第一批只完成 `FileMapping` 的所有权和索引类型前置改造：
+
+- `CachedFile` 仍是打开文件的高层 wrapper；
+- `FileMapping` 作为 inode attachment 保存 LRU page cache 和 mmap eviction listener；
+- buffered I/O 与 `memspace-file` 通过同一个 mapping 共享页面；
+- page index 类型改为 `u64`，避免大文件页号在 mmap/cache 边界截断。
+
+dirty/writeback/error/invalidate 状态机、批量 I/O 和 `AddressSpaceOps` 仍归入后续阶段。
 
 ### VFS-3：Page 状态与失败语义
 

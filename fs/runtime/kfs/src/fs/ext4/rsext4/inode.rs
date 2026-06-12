@@ -13,9 +13,9 @@ use core::{any::Any, task::Context};
 
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps,
-    Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError,
-    VfsResult, WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, FilesystemOps, Metadata,
+    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
+    WeakDirEntry,
 };
 use rsext4::{BLOCK_SIZE, Jbd2Dev};
 
@@ -66,11 +66,9 @@ impl Inode {
                 reference,
             )
         } else {
-            DirEntry::new_file(
-                FileNode::new(Inode::new(self.fs.clone(), ino, None, path)),
-                inode_to_vfs_type(inode.is_dir(), inode.is_file(), inode.is_symlink()),
-                reference,
-            )
+            let node_type = inode_to_vfs_type(inode.is_dir(), inode.is_file(), inode.is_symlink());
+            let inode = Ext4Filesystem::get_file_vfs_inode(&self.fs, ino, node_type, path);
+            DirEntry::new_file_from_inode(inode, reference)
         }
     }
 
@@ -526,11 +524,8 @@ impl DirNodeOps for Inode {
                 reference,
             )
         } else {
-            DirEntry::new_file(
-                FileNode::new(Inode::new(self.fs.clone(), ino, None, Some(path))),
-                node_type,
-                reference,
-            )
+            let inode = Ext4Filesystem::get_file_vfs_inode(&self.fs, ino, node_type, Some(path));
+            DirEntry::new_file_from_inode(inode, reference)
         })
     }
 

@@ -9,8 +9,9 @@ use core::{any::Any, time::Duration};
 
 use ksync::Mutex;
 use kvfs::{
-    DeviceId, DirEntry, DirNode, Filesystem, FilesystemOps, Metadata, MetadataUpdate, NodeOps,
-    NodePermission, NodeType, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DeviceId, DirEntry, DirNode, FileNode, FileNodeOps, Filesystem, FilesystemOps, InodeCache,
+    Metadata, MetadataUpdate, NodeOps, NodePermission, NodeType, Reference, StatFs, VfsInode,
+    VfsResult, path::MAX_NAME_LEN,
 };
 use slab::Slab;
 
@@ -45,6 +46,7 @@ pub struct SimpleFs {
     fs_type: u32,
     mount_flags: u32,
     inodes: Mutex<Slab<()>>,
+    inode_cache: InodeCache,
     root: Mutex<Option<DirEntry>>,
 }
 
@@ -70,6 +72,7 @@ impl SimpleFs {
             fs_type,
             mount_flags,
             inodes: Mutex::new(Slab::new()),
+            inode_cache: InodeCache::new(),
             root: Mutex::new(None),
         });
         let root = root(fs.clone());
@@ -90,6 +93,15 @@ impl SimpleFs {
 
     fn release_inode(&self, ino: u64) {
         self.inodes.lock().remove(ino as usize - 1);
+    }
+
+    pub(crate) fn get_file_vfs_inode(
+        &self,
+        ops: Arc<dyn FileNodeOps>,
+        node_type: NodeType,
+    ) -> Arc<VfsInode> {
+        self.inode_cache
+            .get_or_insert_file(ops.inode(), node_type, || FileNode::new(ops))
     }
 }
 
@@ -144,6 +156,10 @@ impl SimpleFsNode {
     /// Updates the special-file device ID stored in this node's metadata.
     pub fn set_device_id(&self, device_id: DeviceId) {
         self.metadata.lock().rdev = device_id;
+    }
+
+    pub(crate) fn filesystem_ref(&self) -> &Arc<SimpleFs> {
+        &self.fs
     }
 }
 

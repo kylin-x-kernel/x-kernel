@@ -3,40 +3,29 @@
 // See LICENSES for license details.
 
 //! File abstraction and caching layer.
-use alloc::{
-    borrow::Cow,
-    boxed::Box,
-    string::ToString,
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::{borrow::Cow, string::ToString, sync::Arc, vec::Vec};
 use core::{
     ffi::c_int,
     hint::likely,
-    num::NonZeroUsize,
     sync::atomic::{AtomicBool, AtomicU8, Ordering},
     task::Context,
 };
 
-use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
-use kalloc::{UsageKind, global_allocator};
 use kerrno::{KError, KResult};
 use kfd::{FdTable, FileLike, IoDst, IoSrc, Kstat};
-use khal::mem::{PhysAddr, VirtAddr, v2p};
 use kio::{SeekFrom, prelude::*};
 use kpoll::{IoEvents, Pollable};
 use ksync::{Mutex, RwLock};
-use ktask::{
-    WaitQueue,
-    future::{block_on, poll_io},
-};
+use ktask::future::{block_on, poll_io};
 use kvfs::{
-    FileNode, Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsResult,
-    path::Path,
+    Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
-use lru::LruCache;
+use memaddr::PAGE_SIZE_4K;
 
-use super::FsContext;
+use super::{
+    FsContext,
+    mapping::{FileMapping, FileMappingData, PageCache, PageIndex},
+};
 
 bitflags::bitflags! {
     /// Access mode flags for an opened file.
@@ -340,136 +329,9 @@ impl Default for OpenOptions {
     }
 }
 
-use memaddr::PAGE_SIZE_4K;
-const PAGE_STATE_LOADING: u8 = 0;
-const PAGE_STATE_READY: u8 = 1;
-const PAGE_STATE_FAILED: u8 = 2;
-
-#[derive(Debug)]
-pub struct PageCache {
-    addr: VirtAddr,
-    dirty: bool,
-}
-
-impl PageCache {
-    fn new() -> VfsResult<Self> {
-        let addr = global_allocator()
-            .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageCache)
-            .inspect_err(|err| {
-                warn!("Failed to allocate page cache: {:?}", err);
-            })
-            .map_err(|e| match e {
-                alloc_engine::AllocError::NoMemory => VfsError::NoMemory,
-                _ => VfsError::InvalidInput,
-            })?;
-        Ok(Self {
-            addr: addr.into(),
-            dirty: false,
-        })
-    }
-
-    pub fn paddr(&self) -> PhysAddr {
-        v2p(self.addr)
-    }
-
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
-    pub fn data(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), PAGE_SIZE_4K) }
-    }
-}
-
-impl Drop for PageCache {
-    fn drop(&mut self) {
-        if self.dirty {
-            warn!("dirty page dropped without flushing");
-        }
-        global_allocator().dealloc_pages(self.addr.as_usize(), 1, UsageKind::PageCache);
-    }
-}
-
-struct CachedPageSlot {
-    state: AtomicU8,
-    waiters: WaitQueue,
-    page: Mutex<Option<PageCache>>,
-}
-
-impl CachedPageSlot {
-    fn new_loading() -> Self {
-        Self {
-            state: AtomicU8::new(PAGE_STATE_LOADING),
-            waiters: WaitQueue::new(),
-            page: Mutex::new(None),
-        }
-    }
-
-    fn is_ready(&self) -> bool {
-        self.state.load(Ordering::Acquire) == PAGE_STATE_READY
-    }
-
-    fn wait_ready(&self) {
-        self.waiters
-            .wait_until(|| self.state.load(Ordering::Acquire) != PAGE_STATE_LOADING);
-    }
-
-    fn publish(&self, page: PageCache) {
-        *self.page.lock() = Some(page);
-        self.state.store(PAGE_STATE_READY, Ordering::Release);
-        self.waiters.notify_all(false);
-    }
-
-    fn fail(&self) {
-        *self.page.lock() = None;
-        self.state.store(PAGE_STATE_FAILED, Ordering::Release);
-        self.waiters.notify_all(false);
-    }
-
-    fn with_ready_page<R>(&self, f: impl FnOnce(&mut PageCache) -> R) -> R {
-        let mut guard = self.page.lock();
-        f(guard.as_mut().expect("ready page slot must be populated"))
-    }
-
-    fn with_page<R>(&self, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
-        let mut guard = self.page.lock();
-        f(guard.as_mut())
-    }
-}
-
-type EvictListenerFn = dyn Fn(u32, &PageCache) + Send + Sync;
-
-struct EvictListener {
-    listener: Box<EvictListenerFn>,
-    link: LinkedListAtomicLink,
-}
-
-intrusive_adapter!(EvictListenerAdapter = Box<EvictListener>: EvictListener { link: LinkedListAtomicLink });
-
-struct CachedFileShared {
-    page_cache: Mutex<LruCache<u32, Arc<CachedPageSlot>>>,
-    evict_listeners: Mutex<LinkedList<EvictListenerAdapter>>,
-}
-
-impl CachedFileShared {
-    pub fn new() -> Self {
-        Self {
-            page_cache: Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap())),
-            evict_listeners: Mutex::new(LinkedList::default()),
-        }
-    }
-
-    pub fn new_unbounded() -> Self {
-        Self {
-            page_cache: Mutex::new(LruCache::unbounded()),
-            evict_listeners: Mutex::new(LinkedList::default()),
-        }
-    }
-}
-
 pub struct CachedFile {
     inner: Location,
-    shared: Arc<CachedFileShared>,
+    mapping: Arc<FileMapping>,
     in_memory: bool,
     /// Only one thread can append to the file at a time, while multiple writers
     /// are permitted.
@@ -480,23 +342,9 @@ impl Clone for CachedFile {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            shared: self.shared.clone(),
+            mapping: self.mapping.clone(),
             in_memory: self.in_memory,
             append_lock: RwLock::new(()),
-        }
-    }
-}
-
-enum FileUserData {
-    Weak(Weak<CachedFileShared>),
-    Strong(Arc<CachedFileShared>),
-}
-
-impl FileUserData {
-    pub fn get(&self) -> Option<Arc<CachedFileShared>> {
-        match self {
-            FileUserData::Weak(weak) => weak.upgrade(),
-            FileUserData::Strong(strong) => Some(strong.clone()),
         }
     }
 }
@@ -505,33 +353,34 @@ impl CachedFile {
     pub fn get_or_create(location: Location) -> Self {
         let in_memory = matches!(location.filesystem().name(), "tmpfs" | "memfs",);
 
-        let mut guard = location.user_data();
-        let shared = if let Some(shared) = guard.get::<FileUserData>().and_then(|it| it.get()) {
-            shared
+        let mut guard = location.inode_data();
+        let mapping = if let Some(mapping) = guard.get::<FileMappingData>().and_then(|it| it.get())
+        {
+            mapping
         } else {
-            let (shared, user_data) = if in_memory {
-                let shared = Arc::new(CachedFileShared::new_unbounded());
-                (shared.clone(), FileUserData::Strong(shared))
+            let (mapping, user_data) = if in_memory {
+                let mapping = Arc::new(FileMapping::new_unbounded());
+                (mapping.clone(), FileMappingData::Strong(mapping))
             } else {
-                let shared = Arc::new(CachedFileShared::new());
-                let user_data = FileUserData::Weak(Arc::downgrade(&shared));
-                (shared, user_data)
+                let mapping = Arc::new(FileMapping::new());
+                let user_data = FileMappingData::Weak(Arc::downgrade(&mapping));
+                (mapping, user_data)
             };
             guard.insert(user_data);
-            shared
+            mapping
         };
         drop(guard);
 
         Self {
             inner: location,
-            shared,
+            mapping,
             in_memory,
             append_lock: RwLock::new(()),
         }
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
+        Arc::ptr_eq(&self.mapping, &other.mapping)
     }
 
     pub fn in_memory(&self) -> bool {
@@ -540,15 +389,9 @@ impl CachedFile {
 
     pub fn add_evict_listener<F>(&self, listener: F) -> usize
     where
-        F: Fn(u32, &PageCache) + Send + Sync + 'static,
+        F: Fn(PageIndex, &PageCache) + Send + Sync + 'static,
     {
-        let pointer = Box::new(EvictListener {
-            listener: Box::new(listener),
-            link: LinkedListAtomicLink::new(),
-        });
-        let dispatch_irq = pointer.as_ref() as *const EvictListener as usize;
-        self.shared.evict_listeners.lock().push_back(pointer);
-        dispatch_irq
+        self.mapping.add_evict_listener(listener)
     }
 
     /// Removes an evict listener by dispatch_irq.
@@ -559,151 +402,28 @@ impl CachedFile {
     /// on the same [`CachedFile`] and must not have been removed already.
     /// Passing an invalid dispatch_irq is undefined behavior.
     pub unsafe fn remove_evict_listener(&self, dispatch_irq: usize) {
-        let mut guard = self.shared.evict_listeners.lock();
-        let mut cursor = unsafe { guard.cursor_mut_from_ptr(dispatch_irq as *const EvictListener) };
-        cursor.remove();
-    }
-
-    fn evict_cache(&self, file: &FileNode, pn: u32, page: &mut PageCache) -> VfsResult<()> {
-        for listener in self.shared.evict_listeners.lock().iter() {
-            (listener.listener)(pn, page);
-        }
-        if page.dirty {
-            let page_start = pn as u64 * PAGE_SIZE_4K as u64;
-            let len = (file.len()?.saturating_sub(page_start)).min(PAGE_SIZE_4K as u64) as usize;
-            if len > 0 {
-                file.write_at(&page.data()[..len], page_start)?;
-            }
-            page.dirty = false;
-        }
-        Ok(())
-    }
-
-    fn evict_slot(&self, file: &FileNode, pn: u32, slot: &CachedPageSlot) -> VfsResult<()> {
-        slot.with_ready_page(|page| self.evict_cache(file, pn, page))
-    }
-
-    fn pop_ready_slot(
-        guard: &mut LruCache<u32, Arc<CachedPageSlot>>,
-    ) -> Option<(u32, Arc<CachedPageSlot>)> {
-        let pn = guard
-            .iter()
-            .find_map(|(pn, slot)| slot.is_ready().then_some(*pn))?;
-        guard.pop(&pn).map(|slot| (pn, slot))
-    }
-
-    fn load_page(&self, file: &FileNode, pn: u32) -> VfsResult<PageCache> {
-        let mut page = PageCache::new()?;
-        // Always zero-fill first so short reads leave a defined zero tail.
-        // This is required for mmap semantics: bytes past EOF in the last
-        // mapped page must read as zero.
-        page.data().fill(0);
-        if !self.in_memory {
-            file.read_at(page.data(), pn as u64 * PAGE_SIZE_4K as u64)?;
-        }
-        Ok(page)
-    }
-
-    fn rollback_loading_slot(
-        &self,
-        pn: u32,
-        slot: &Arc<CachedPageSlot>,
-        evicted: Option<(u32, Arc<CachedPageSlot>)>,
-    ) {
-        let mut guard = self.shared.page_cache.lock();
-        if guard
-            .get(&pn)
-            .is_some_and(|current| Arc::ptr_eq(current, slot))
-        {
-            guard.pop(&pn);
-        }
-        if let Some((evicted_pn, evicted_slot)) = evicted
-            && guard.get(&evicted_pn).is_none()
-            && guard.len() < guard.cap().get()
-        {
-            guard.put(evicted_pn, evicted_slot);
-        }
-        drop(guard);
-        slot.fail();
-    }
-
-    fn ensure_page_ready(&self, pn: u32) -> VfsResult<(Arc<CachedPageSlot>, Vec<u32>)> {
-        let file = self.inner.entry().as_file()?;
-        loop {
-            let mut created = false;
-            let mut evicted = None;
-            let slot = {
-                let mut guard = self.shared.page_cache.lock();
-                if let Some(slot) = guard.get(&pn) {
-                    slot.clone()
-                } else {
-                    let slot = Arc::new(CachedPageSlot::new_loading());
-                    if guard.len() >= guard.cap().get() {
-                        evicted = Self::pop_ready_slot(&mut guard);
-                        if evicted.is_none() {
-                            let wait_slot = guard.iter().next().map(|(_, slot)| slot.clone());
-                            drop(guard);
-                            if let Some(wait_slot) = wait_slot {
-                                wait_slot.wait_ready();
-                            }
-                            continue;
-                        }
-                    }
-                    guard.put(pn, slot.clone());
-                    created = true;
-                    slot
-                }
-            };
-
-            if !created {
-                slot.wait_ready();
-                if slot.is_ready() {
-                    return Ok((slot, Vec::new()));
-                }
-                continue;
-            }
-
-            if let Some((evicted_pn, evicted_slot)) = evicted.as_ref()
-                && let Err(err) = self.evict_slot(file, *evicted_pn, evicted_slot)
-            {
-                self.rollback_loading_slot(pn, &slot, evicted);
-                return Err(err);
-            }
-
-            match self.load_page(file, pn) {
-                Ok(page) => {
-                    slot.publish(page);
-                    let evicted_pns = evicted.into_iter().map(|(pn, _)| pn).collect();
-                    return Ok((slot, evicted_pns));
-                }
-                Err(err) => {
-                    self.rollback_loading_slot(pn, &slot, evicted);
-                    return Err(err);
-                }
-            }
+        unsafe {
+            self.mapping.remove_evict_listener(dispatch_irq);
         }
     }
 
-    pub fn with_page<R>(&self, pn: u32, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
-        let slot = self.shared.page_cache.lock().get(&pn).cloned();
-        if let Some(slot) = slot {
-            if !slot.is_ready() {
-                slot.wait_ready();
-            }
-            if slot.is_ready() {
-                return slot.with_page(f);
-            }
-        }
-        f(None)
+    fn page_start(pn: PageIndex) -> VfsResult<u64> {
+        pn.checked_mul(PAGE_SIZE_4K as u64)
+            .ok_or(VfsError::InvalidInput)
+    }
+
+    pub fn with_page<R>(&self, pn: PageIndex, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
+        self.mapping.with_page(pn, f)
     }
 
     pub fn with_page_or_insert<R>(
         &self,
-        pn: u32,
-        f: impl FnOnce(&mut PageCache, Vec<u32>) -> VfsResult<R>,
+        pn: PageIndex,
+        f: impl FnOnce(&mut PageCache, Vec<PageIndex>) -> VfsResult<R>,
     ) -> VfsResult<R> {
-        let (slot, evicted) = self.ensure_page_ready(pn)?;
-        slot.with_ready_page(|page| f(page, evicted))
+        let file = self.inner.entry().as_file()?;
+        self.mapping
+            .with_page_or_insert(file, self.in_memory, pn, f)
     }
 
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
@@ -712,19 +432,21 @@ impl CachedFile {
         if end <= offset {
             return Ok(0);
         }
-        let start_page = (offset / PAGE_SIZE_4K as u64) as u32;
-        let end_page = end.div_ceil(PAGE_SIZE_4K as u64) as u32;
+        let start_page = offset / PAGE_SIZE_4K as u64;
+        let end_page = end.div_ceil(PAGE_SIZE_4K as u64);
         let mut page_offset = (offset % PAGE_SIZE_4K as u64) as usize;
         let mut read = 0;
         let mut chunk = [0u8; PAGE_SIZE_4K];
+        let file = self.inner.entry().as_file()?;
         for pn in start_page..end_page {
-            let page_start = pn as u64 * PAGE_SIZE_4K as u64;
+            let page_start = Self::page_start(pn)?;
             let range = page_offset..(end - page_start).min(PAGE_SIZE_4K as u64) as usize;
             let chunk_len = range.end - range.start;
-            let (slot, _) = self.ensure_page_ready(pn)?;
-            slot.with_ready_page(|page| {
-                chunk[..chunk_len].copy_from_slice(&page.data()[range.clone()]);
-            });
+            self.mapping
+                .with_page_or_insert(file, self.in_memory, pn, |page, _| {
+                    chunk[..chunk_len].copy_from_slice(&page.data()[range.clone()]);
+                    Ok(())
+                })?;
             dst.write(&chunk[..chunk_len])?;
             read += chunk_len;
             page_offset = 0;
@@ -738,23 +460,24 @@ impl CachedFile {
         if end > file.len()? {
             file.set_len(end)?;
         }
-        let start_page = (offset / PAGE_SIZE_4K as u64) as u32;
-        let end_page = end.div_ceil(PAGE_SIZE_4K as u64) as u32;
+        let start_page = offset / PAGE_SIZE_4K as u64;
+        let end_page = end.div_ceil(PAGE_SIZE_4K as u64);
         let mut page_offset = (offset % PAGE_SIZE_4K as u64) as usize;
         let mut written = 0;
         let mut chunk = [0u8; PAGE_SIZE_4K];
         for pn in start_page..end_page {
-            let page_start = pn as u64 * PAGE_SIZE_4K as u64;
+            let page_start = Self::page_start(pn)?;
             let range = page_offset..(end - page_start).min(PAGE_SIZE_4K as u64) as usize;
             let chunk_len = range.end - range.start;
             buf.read(&mut chunk[..chunk_len])?;
-            let (slot, _) = self.ensure_page_ready(pn)?;
-            slot.with_ready_page(|page| {
-                page.data()[range.clone()].copy_from_slice(&chunk[..chunk_len]);
-                if !self.in_memory {
-                    page.dirty = true;
-                }
-            });
+            self.mapping
+                .with_page_or_insert(file, self.in_memory, pn, |page, _| {
+                    page.data()[range.clone()].copy_from_slice(&chunk[..chunk_len]);
+                    if !self.in_memory {
+                        page.mark_dirty();
+                    }
+                    Ok(())
+                })?;
             written += chunk_len;
             page_offset = 0;
         }
@@ -778,128 +501,18 @@ impl CachedFile {
         let file = self.inner.entry().as_file()?;
         let old_len = file.len()?;
         file.set_len(len)?;
-
-        let page_size_u64 = PAGE_SIZE_4K as u64;
-        let old_last_page = if old_len == 0 {
-            None
-        } else {
-            Some(((old_len - 1) / page_size_u64) as u32)
-        };
-        let new_last_page = if len == 0 {
-            None
-        } else {
-            Some(((len - 1) / page_size_u64) as u32)
-        };
-
-        if old_len < len {
-            // Growing file size should expose zeros in the new range.
-            if let Some(old_pn) = old_last_page
-                && let Some(slot) = self.shared.page_cache.lock().get(&old_pn).cloned()
-                && slot.is_ready()
-            {
-                let page_start = old_pn as u64 * page_size_u64;
-                let old_page_offset = (old_len - page_start) as usize;
-                let new_page_offset = (len - page_start).min(page_size_u64) as usize;
-                slot.with_ready_page(|page| {
-                    if old_page_offset < new_page_offset {
-                        page.data()[old_page_offset..new_page_offset].fill(0);
-                    }
-                });
-            }
-        } else if old_len > len {
-            // Truncating: clear tail of the new last page (if partial), then
-            // drop all cached pages beyond EOF.
-            let mut guard = self.shared.page_cache.lock();
-
-            if let Some(new_pn) = new_last_page {
-                let tail_off = (len % page_size_u64) as usize;
-                if tail_off != 0
-                    && let Some(slot) = guard.get(&new_pn).cloned()
-                {
-                    drop(guard);
-                    if slot.is_ready() {
-                        slot.with_ready_page(|page| {
-                            page.data()[tail_off..].fill(0);
-                            // Keep the page dirty so the valid prefix [0, tail_off)
-                            // can still be written back if it was modified earlier.
-                            if !self.in_memory {
-                                page.dirty = true;
-                            }
-                        });
-                    }
-                    guard = self.shared.page_cache.lock();
-                }
-            }
-
-            let keys = guard
-                .iter()
-                .map(|(k, _)| *k)
-                .filter(|pn| match new_last_page {
-                    Some(last) => *pn > last,
-                    None => true,
-                })
-                .collect::<Vec<_>>();
-
-            for pn in keys {
-                if let Some(slot) = guard.pop(&pn)
-                    && !self.in_memory
-                {
-                    if !slot.is_ready() {
-                        drop(guard);
-                        slot.wait_ready();
-                        guard = self.shared.page_cache.lock();
-                    }
-                    if !slot.is_ready() {
-                        continue;
-                    }
-                    // Don't write back pages since they're beyond new EOF.
-                    slot.with_ready_page(|page| {
-                        page.dirty = false;
-                    });
-                    self.evict_slot(file, pn, &slot)?;
-                }
-            }
-        }
-        Ok(())
+        self.mapping.set_len(file, self.in_memory, old_len, len)
     }
 
     fn flush_and_evict_from(&self, offset: u64) -> VfsResult<()> {
-        if self.in_memory {
-            return Ok(());
-        }
         let file = self.inner.entry().as_file()?;
-        let start_pn = (offset / PAGE_SIZE_4K as u64) as u32;
-        let mut guard = self.shared.page_cache.lock();
-
-        let keys = guard
-            .iter()
-            .map(|(k, _)| *k)
-            .filter(|pn| *pn >= start_pn)
-            .collect::<Vec<_>>();
-
-        for pn in keys {
-            if let Some(slot) = guard.pop(&pn)
-                && let Err(e) = self.evict_slot(file, pn, &slot)
-            {
-                guard.push(pn, slot);
-                return Err(e);
-            }
-        }
-        file.sync(false)?;
-        Ok(())
+        self.mapping
+            .flush_and_evict_from(file, self.in_memory, offset)
     }
 
     pub fn sync(&self, data_only: bool) -> VfsResult<()> {
-        if self.in_memory {
-            return Ok(());
-        }
         let file = self.inner.entry().as_file()?;
-        let mut guard = self.shared.page_cache.lock();
-        while let Some((pn, slot)) = guard.pop_lru() {
-            self.evict_slot(file, pn, &slot)?;
-        }
-        file.sync(data_only)?;
-        Ok(())
+        self.mapping.sync(file, self.in_memory, data_only)
     }
 
     pub fn location(&self) -> &Location {
@@ -909,7 +522,7 @@ impl CachedFile {
 
 impl Drop for CachedFile {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.shared) > 1 {
+        if Arc::strong_count(&self.mapping) > 1 {
             // If there are other references to this cached file, we don't
             // need to drop it.
             return;
