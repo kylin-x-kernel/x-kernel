@@ -105,48 +105,245 @@ unsafe 调用，eviction 回调使用 `try_lock`，失败后可能暂时保留�
 - 无法统一限制 dirty pages；
 - mmap 和 buffered I/O 的工作集被硬编码容量破坏。
 
-## 目标架构
+## 总设计图
+
+最终目标不是“把 ext4 能跑通”，而是把 X-Kernel 的 VFS 层重构成和
+`~/code/linux` 中 Linux VFS 相同的算法层次和对象边界，再用 Rust 的所有权、
+trait、生命周期、`Result`、`Drop`/RAII、`Send`/`Sync` 等语言能力表达这些边界。
+Rust 只能帮助我们把生命周期和并发不变量写清楚，不能改变 Linux VFS 的层次结构。
+
+### 目标心智模型
+
+Linux 的核心心智模型是：
 
 ```text
-Path / DirEntry
-      |
-      v
-VfsInode identity ------------------------------------+
-  - inode number                                      |
-  - NodeOps                                           |
-  - inode-scoped attachments                          |
-  - Arc<FileMapping> ---------------------------------+
-                                                       
-KFS FileMapping / AddressSpace
-  - page index -> CachedPage
-  - dirty/writeback/error state
-  - mapping lifetime and invalidation
-  - mmap reverse mappings
-      |
-      v
-kvfs AddressSpaceOps
-  - read_pages
-  - write_pages
-  - invalidate/truncate coordination
-  - sync range
-      |
-      v
-KExt4 inode / extent / delayed allocation
-      |
-      v
-allocator + metadata buffer + journal + block I/O
+name/path      open file state       page cache/writeback
+   |                 |                         |
+   v                 v                         v
+dentry + mount ---> file -----------------> address_space
+   |                 |                         |
+   v                 v                         v
+ inode identity ----+--------------------> inode->i_mapping
+   |
+   v
+super_block
+   |
+   v
+filesystem implementation, e.g. ext4
 ```
+
+对应到 X-Kernel 的目标对象：
+
+```text
+Location { Mountpoint, DirEntry }        == Linux struct path { vfsmount, dentry }
+Mountpoint                               == Linux vfsmount
+SuperBlock                               == Linux super_block
+DirEntry                                 == Linux dentry
+VfsInode                                 == Linux inode
+VfsFile                                  == Linux file
+AddressSpace                             == Linux address_space / inode->i_mapping
+
+SuperBlockOperations                     == Linux super_operations
+InodeOperations                          == Linux inode_operations
+FileOperations                           == Linux file_operations
+AddressSpaceOperations                   == Linux address_space_operations
+DentryOperations                         == Linux dentry_operations, later
+```
+
+对象边界必须稳定遵守：
+
+| 层次 | 只负责 | 不能负责 |
+|---|---|---|
+| `Location`/path | mount + dentry 的解析结果 | inode 生命周期、page cache、ext4 规则 |
+| `DirEntry`/dentry | 名字绑定、父子关系、dentry cache | 文件内容、open file position、block mapping |
+| `VfsInode`/inode | inode identity、metadata、i_op/i_fop、i_mapping 指针 | 路径字符串、fd flags、用户 ABI |
+| `VfsFile`/file | 一次 open 的状态：flags、position、private data | page cache 生命周期、目录树所有权 |
+| `AddressSpace` | page cache、writeback、invalidate、mmap coherence | ext4 extent 算法、journal 事务细节 |
+| `SuperBlock` | 一个 mounted filesystem instance 的全局状态 | syscall ABI、fd table、进程 cwd/root |
+| ext4 | ext4 super/inode/file/address_space ops 和 ext4 算法 | VFS 对象定义、路径解析、fd ABI |
+
+### 目标目录与依赖
+
+当前 `kvfs`、`kfs`、`posix-fs` 同时承担 VFS、runtime、syscall ABI 和 helper 职责，
+这是混乱的根源。目标目录按 Linux 边界拆开：
+
+```text
+fs/
+  foundation/
+    kvfs/                  # 目标可重命名为 fs/vfs；只放 VFS 核心对象和 trait
+      super_block.rs       # SuperBlock, SuperBlockOperations
+      inode.rs             # VfsInode, inode cache, InodeOperations binding
+      dentry.rs            # DirEntry, dentry cache, DentryOperations
+      file.rs              # VfsFile, FileOperations binding
+      mount.rs             # Mountpoint, Location/path
+      namei.rs             # path walk, lookup/open/create/rename orchestration
+      address_space.rs     # AddressSpace, page cache entry points
+      writeback.rs         # generic writeback/reclaim interfaces
+    kvfs-simple/           # 目标为 libfs；simplefs/helper，不拥有核心 VFS 状态
+
+  runtime/
+    kfs/                   # 启动挂载、rootfs、全局 writeback/reclaim glue
+      boot_mount.rs
+      rootfs.rs
+      writeback_worker.rs
+      reclaim.rs
+
+  filesystems/
+    ext4/                  # 只实现 ext4，不反向定义 VFS
+      super.rs             # mount/fill_super/statfs/sync_fs
+      inode.rs             # iget/read_inode/write_inode/setattr/getattr
+      namei.rs             # lookup/create/link/unlink/rename/mkdir/rmdir
+      file.rs              # open/read_iter/write_iter/fsync/ioctl/mmap hook
+      address_space.rs     # read_folio/writepages/bmap/invalidate
+      extents.rs
+      mballoc.rs
+      jbd2/
+      block_io.rs
+
+posix/
+  fs/                      # syscall ABI: fd flags, user pointers, errno/openat/statx
+```
+
+依赖方向只能自上而下调用，不能反向：
+
+```text
+posix/fs
+   -> fs/runtime/kfs
+      -> fs/foundation/kvfs
+         -> fs/filesystems/ext4 through VFS trait objects
+            -> ext4 internals: extent / allocator / journal / block I/O
+               -> block device
+
+fs/filesystems/ext4 must not depend on posix/fs or kfs high-level fd wrappers.
+fs/foundation/kvfs must not depend on kfs runtime or any concrete filesystem.
+fs/runtime/kfs must not define core VFS identity objects.
+```
+
+`kvfs-simple`/libfs 只能提供 helper，例如 simple directory、simple file、seq file。
+它不能拥有 superblock/inode/dentry/file/address_space 的核心状态，否则会再次产生
+第二套 VFS。
+
+### Linux 对齐的调用链
+
+从底层到上层，目标调用链应当按下面顺序收敛：
+
+```text
+block device
+  -> ext4 block_io
+  -> ext4 journal / metadata buffer / extent mapping
+  -> ext4 address_space_operations
+  -> VFS AddressSpace page cache / writeback / mmap coherence
+  -> VFS inode_operations + file_operations
+  -> VFS dentry/namei/mount path walk
+  -> VFS file object
+  -> kfs runtime fd object glue
+  -> posix/fs syscall ABI
+```
+
+从上层到下层，一次 `openat/read/write/fsync/rename` 的心智模型是：
+
+```text
+syscall ABI
+  -> convert flags / user buffers / cwd-root into VFS request
+  -> namei walks Location { Mountpoint, DirEntry }
+  -> dentry lookup resolves or creates VfsInode
+  -> open creates VfsFile
+  -> read/write calls FileOperations or AddressSpaceOperations
+  -> ext4 implements the operation using inode/extent/journal/block layers
+```
+
+`posix-fs` 只能做 ABI 转换，不能决定 dentry cache、inode cache、page cache、
+writeback 或 ext4 extent 语义。`kfs` 只能做 runtime glue，不能成为第二个 VFS。
+
+### ext4 的目标接入方式
+
+`~/code/linux/fs/ext4` 的结构说明 ext4 并不拥有 VFS 对象；它向 VFS 注册 ops：
+
+```text
+ext4_sops                       -> super_operations
+ext4_file_inode_operations      -> inode_operations for regular files
+ext4_dir_inode_operations       -> inode_operations for directories
+ext4_file_operations            -> file_operations
+ext4_aops / ext4_da_aops        -> address_space_operations
+```
+
+X-Kernel 的 KExt4 也必须按同样层次实现：
+
+```text
+KExt4SuperOps                   -> SuperBlockOperations
+KExt4FileInodeOps               -> InodeOperations
+KExt4DirInodeOps                -> InodeOperations
+KExt4FileOps                    -> FileOperations
+KExt4AddressSpaceOps            -> AddressSpaceOperations
+```
+
+ext4 内部算法归 ext4 自己：
+
+- inode 读写、extent tree、delayed allocation、unwritten extent；
+- block allocator、mballoc；
+- metadata buffer；
+- journal/JBD2；
+- ordered-data、fsync、orphan/truncate 规则；
+- ext4 特有 mount option 和 feature bit。
+
+这些算法不能上移到 `kvfs`/VFS；VFS 只提供调用时机、对象生命周期、锁顺序、
+page-cache/writeback 协议和错误传播模型。
+
+### Rust 表达方式
+
+Rust 版本不改变 Linux 分层，只改变分层的表达：
+
+| Linux C 写法 | Rust 目标写法 |
+|---|---|
+| refcount + manual put | `Arc`/`Weak`，避免所有权环 |
+| ops table function pointers | trait object，例如 `Arc<dyn FileOperations>` |
+| `void *private_data` | 类型化 `TypeMap` 或明确 newtype |
+| manual unregister/free | RAII guard，`Drop` 自动注销 |
+| integer error code | `VfsResult<T>`，边界处统一 errno |
+| lock discipline by convention | 小对象封装 + 私有字段 + 明确锁顺序文档 |
+| raw pointer lifetime | 借用、生命周期、`NonNull` 只封装在安全 API 内 |
+| global mutable state | runtime-owned registry/worker，VFS 只暴露 trait |
+
+Rust 代码要利用类型系统把“不属于这一层的状态”放不进去。例如：
+
+- `VfsFile` 可以有 file position，但不能有 page cache 所有权；
+- `AddressSpace` 可以有 page cache 和 writeback 状态，但不能持有强 `Arc<VfsInode>`
+  形成环；
+- `DirEntry` 可以有名字和 parent，但不能保存 ext4 extent 状态；
+- ext4 ops 可以保存 ext4 inode private data，但不能重新定义 VFS inode。
+
+### 当前到目标的迁移原则
+
+迁移顺序必须从大边界到小边界、从底层到上层：
+
+1. 先定 crate/目录职责：VFS core、runtime glue、libfs helper、filesystem、POSIX ABI。
+2. 再定 Linux 对象：superblock、mount/path、dentry、inode、file、address_space。
+3. 再迁移生命周期：inode cache、dentry cache、address_space/page cache、open file state。
+4. 再迁移 ops family：super/inode/file/address_space/dentry ops。
+5. 再迁移 ext4：先 super/inode/namei/file/address_space 接 VFS，再实现 extent/journal 细节。
+6. 最后补全全局 writeback、reclaim、freeze/unmount、direct I/O 和 mmap coherence。
+
+禁止的方向：
+
+- 在 `kfs` 里继续堆 VFS 对象；
+- 在 `posix-fs` 里实现 namei、inode cache、page cache 或 ext4 语义；
+- 在 ext4 中反向定义 VFS trait；
+- 为了 KExt4 临时新增一条绕过 VFS 的私有 page-cache 或 path resolver；
+- 让目录 inode、dentry、路径上下文继续混在同一个对象里。
 
 核心所有权：
 
 | 对象 | 所有者 |
 |---|---|
-| 路径、父子关系、名字 | `DirEntry` |
-| inode 身份、inode 级附件 | `VfsInode` |
-| 普通文件数据页 | KFS `FileMapping` |
-| 文件页读取/写回语义 | 文件系统 `AddressSpaceOps` |
-| ext4 metadata buffer | KExt4 metadata cache |
-| journal transaction | KExt4 JBD2 |
+| 路径解析结果 | `Location { Mountpoint, DirEntry }` |
+| mount tree | `Mountpoint` / future mount namespace |
+| 名字绑定、父子关系 | `DirEntry` |
+| inode identity、inode private data | `VfsInode` |
+| 一次 open 的 fd 状态 | `VfsFile` |
+| 普通文件数据页、writeback、mmap coherence | `AddressSpace` |
+| VFS 启动挂载、rootfs、全局 worker | `fs/runtime/kfs` |
+| syscall ABI、fd table、用户内存边界 | `posix/fs` |
+| ext4 metadata buffer、extent、journal | KExt4 |
 
 ## 改造一：拆分 dentry 与 inode
 
