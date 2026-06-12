@@ -662,6 +662,7 @@ pub fn tee_cryp_state_alloc(
     key2: Option<u32>,
     state: &mut u32,
 ) -> TeeResult {
+    let algo = translate_compat_algo(algo);
     let mut cs = TeeCrypState::default();
     let mut cs_id: u32 = 0;
     let mut res: TeeResult = Ok(());
@@ -1639,6 +1640,19 @@ pub fn tee_cryp_asymm_operate(
     output: &mut [u8],
     label: Option<&[u8]>,
 ) -> TeeResult<usize> {
+    let mut required = 0usize;
+    tee_cryp_asymm_operate_with_required(id, input, output, label, None, &mut required)
+}
+
+pub fn tee_cryp_asymm_operate_with_required(
+    id: u32,
+    input: &[u8],
+    output: &mut [u8],
+    label: Option<&[u8]>,
+    mgf_algo: Option<u32>,
+    required: &mut usize,
+) -> TeeResult<usize> {
+    *required = 0;
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1664,10 +1678,10 @@ pub fn tee_cryp_asymm_operate(
     match algo {
         TEE_ALG_RSA_NOPAD => match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT => {
-                crypto_acipher_rsanopad_encrypt(cs.clone(), input, output)
+                crypto_acipher_rsanopad_encrypt(cs.clone(), input, output, required)
             }
             TEE_OperationMode::TEE_MODE_DECRYPT => {
-                crypto_acipher_rsanopad_decrypt(cs.clone(), input, output)
+                crypto_acipher_rsanopad_decrypt(cs.clone(), input, output, required)
             }
             _ => Err(TEE_ERROR_GENERIC),
         },
@@ -1688,10 +1702,10 @@ pub fn tee_cryp_asymm_operate(
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384
         | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT => {
-                crypto_acipher_rsaes_encrypt(cs.clone(), input, output, label)
+                crypto_acipher_rsaes_encrypt(cs.clone(), input, output, label, mgf_algo, required)
             }
             TEE_OperationMode::TEE_MODE_DECRYPT => {
-                crypto_acipher_rsaes_decrypt(cs.clone(), input, output, label)
+                crypto_acipher_rsaes_decrypt(cs.clone(), input, output, label, mgf_algo, required)
             }
             _ => Err(TEE_ERROR_GENERIC),
         },
@@ -1707,13 +1721,13 @@ pub fn tee_cryp_asymm_operate(
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => {
-            crypto_acipher_rsassa_sign(cs.clone(), input, output)
+            crypto_acipher_rsassa_sign(cs.clone(), input, output, required)
         }
         TEE_ALG_DSA_SHA1 | TEE_ALG_DSA_SHA224 | TEE_ALG_DSA_SHA256 => Err(TEE_ERROR_NOT_SUPPORTED), /* mbedtls no support for DSA */
         TEE_ALG_ED25519 => Err(TEE_ERROR_NOT_SUPPORTED), // mbedtls no support for EdDSA
         TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
         | TEE_ALG_ECDSA_SHA512 | TEE_ALG_SM2_DSA_SM3 => {
-            crypto_acipher_ecc_sign(cs.clone(), input, output)
+            crypto_acipher_ecc_sign(cs.clone(), input, output, required)
         }
         _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
@@ -1748,26 +1762,42 @@ pub fn syscall_asymm_operate(
     };
 
     let mut label_buf: Option<Box<[u8]>> = None;
+    let mut mgf_algo: Option<u32> = None;
     if let Some(ref attrs) = params_attrs {
         for attr in attrs.iter() {
-            if attr.attributeID != TEE_ATTR_RSA_OAEP_LABEL {
-                continue;
+            match attr.attributeID {
+                TEE_ATTR_RSA_OAEP_LABEL => {
+                    if attr.attributeID & TEE_ATTR_FLAG_VALUE != 0 {
+                        return Err(TEE_ERROR_BAD_PARAMETERS);
+                    }
+                    let (buf, len) = unsafe {
+                        (
+                            attr.content.memref.buffer as *const u8,
+                            attr.content.memref.size,
+                        )
+                    };
+                    if len != 0 && buf.is_null() {
+                        return Err(TEE_ERROR_BAD_PARAMETERS);
+                    }
+                    let usr_label = unsafe { core::slice::from_raw_parts(buf, len) };
+                    label_buf = Some(bb_memdup_user(usr_label)?);
+                }
+                TEE_ATTR_RSA_OAEP_MGF_HASH => {
+                    let (buf, len) = unsafe {
+                        (
+                            attr.content.memref.buffer as *const u8,
+                            attr.content.memref.size,
+                        )
+                    };
+                    if len != core::mem::size_of::<u32>() || buf.is_null() {
+                        return Err(TEE_ERROR_BAD_PARAMETERS);
+                    }
+                    let mut val = 0u32;
+                    unsafe { copy_from_user_struct(&mut val, &*(buf as *const u32))? };
+                    mgf_algo = Some(val);
+                }
+                _ => {}
             }
-            if attr.attributeID & TEE_ATTR_FLAG_VALUE != 0 {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-            let (buf, len) = unsafe {
-                (
-                    attr.content.memref.buffer as *const u8,
-                    attr.content.memref.size,
-                )
-            };
-            if len != 0 && buf.is_null() {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-            let usr_label = unsafe { core::slice::from_raw_parts(buf, len) };
-            label_buf = Some(bb_memdup_user(usr_label)?);
-            break;
         }
     }
 
@@ -1787,19 +1817,50 @@ pub fn syscall_asymm_operate(
         bb_memdup_user(src_slice)?
     };
 
-    if dst_ptr.is_null() || dst_len == 0 {
+    if dst_ptr.is_null() && dst_len != 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
-    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
-    let mut dst = bb_memdup_user(dst_slice)?;
+    if dst_len != 0 && dst_ptr.is_null() {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
 
+    let mut dst_buf: Box<[u8]>;
+    let dst_user_slice = if dst_len == 0 {
+        dst_buf = Box::new([]);
+        None
+    } else {
+        let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, dst_len) };
+        dst_buf = bb_memdup_user(dst_slice)?;
+        Some(dst_slice)
+    };
+
+    let mut required = 0usize;
     let label_ref = label_buf.as_deref();
-    dst_len = tee_cryp_asymm_operate(arg0 as _, &src, &mut dst, label_ref)?;
-
-    // Copy to user
-    unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
-    unsafe { copy_to_user(dst_slice, &dst, dst_len * size_of::<u8>())? };
-    Ok(())
+    match tee_cryp_asymm_operate_with_required(
+        arg0 as _,
+        &src,
+        &mut dst_buf,
+        label_ref,
+        mgf_algo,
+        &mut required,
+    ) {
+        Ok(actual) => {
+            dst_len = actual;
+            unsafe { copy_to_user_struct(&mut *dst_len_ptr, &dst_len)? };
+            if let Some(dst_slice) = dst_user_slice {
+                unsafe { copy_to_user(dst_slice, &dst_buf, dst_len * size_of::<u8>())? };
+            }
+            Ok(())
+        }
+        Err(TEE_ERROR_SHORT_BUFFER) => {
+            if required == 0 {
+                return Err(TEE_ERROR_SHORT_BUFFER);
+            }
+            unsafe { copy_to_user_struct(&mut *dst_len_ptr, &required)? };
+            Err(TEE_ERROR_SHORT_BUFFER)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResult {
@@ -1890,10 +1951,13 @@ pub mod tests_cryp {
     use super::*;
     use crate::{
         TestUserValue,
-        tee::tee_svc_cryp::{
-            syscall_cryp_obj_alloc, syscall_cryp_obj_close, syscall_cryp_obj_copy,
-            syscall_cryp_obj_populate, syscall_obj_generate_key, tee_init_ref_attribute,
-            tee_obj_set_type,
+        tee::{
+            libmbedtls::bignum::BigNum,
+            tee_svc_cryp::{
+                syscall_cryp_obj_alloc, syscall_cryp_obj_close, syscall_cryp_obj_copy,
+                syscall_cryp_obj_populate, syscall_obj_generate_key, tee_init_ref_attribute,
+                tee_obj_set_type,
+            },
         },
     };
 
@@ -2041,6 +2105,51 @@ pub mod tests_cryp {
     }
 
     #[unittest::def_test(custom)]
+    fn test_cryp_legacy_ecdsa_p256_sign_verify_with_keypair() {
+        let mut usr_params = crate::user_vec![utee_attribute::default(); 1];
+        usr_params[0].attribute_id = TEE_ATTR_ECC_CURVE;
+        usr_params[0].a = TEE_ECC_CURVE_NIST_P256 as u64;
+        usr_params[0].b = 0;
+
+        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_KEYPAIR as _, 256, obj_id.as_user_ref()).unwrap();
+        let obj_id = obj_id.read();
+        syscall_obj_generate_key(obj_id as c_ulong, 256, usr_params.as_ptr(), 1).unwrap();
+
+        let mut obj_id2 = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_KEYPAIR as _, 256, obj_id2.as_user_ref()).unwrap();
+        let obj_id2 = obj_id2.read();
+        syscall_cryp_obj_copy(obj_id2 as _, obj_id as _).unwrap();
+
+        let mut st_sign: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_ECDSA_P256,
+            TEE_OperationMode::TEE_MODE_SIGN,
+            Some(obj_id),
+            None,
+            &mut st_sign,
+        )
+        .unwrap();
+        let cs = tee_cryp_state_get(st_sign).unwrap();
+        assert_eq!(cs.lock().algo, TEE_ALG_ECDSA_SHA256);
+
+        let mut st_verify: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_ECDSA_P256,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(obj_id2),
+            None,
+            &mut st_verify,
+        )
+        .unwrap();
+
+        let digest = [0x42u8; 32];
+        let mut sig = [0u8; 256];
+        let sig_len = tee_cryp_asymm_operate(st_sign, &digest, &mut sig, None).unwrap();
+        tee_cryp_asymm_verify(st_verify, &digest, &sig[..sig_len]).unwrap();
+    }
+
+    #[unittest::def_test(custom)]
     fn test_syscall_cryp_generate_key_ecc_p256_keypair() {
         // ECDSA P-256：必须在 generate_key 时通过 TEE_ATTR_ECC_CURVE 指定曲线
         let mut usr_params = crate::user_vec![utee_attribute::default(); 1];
@@ -2071,12 +2180,12 @@ pub mod tests_cryp {
             _ => panic!("ecc_keypair not found"),
         };
         assert_eq!(ecc_keypair.curve, TEE_ECC_CURVE_NIST_P256);
-        let d_len = ecc_keypair.d.byte_length().unwrap();
-        let x_len = ecc_keypair.x.byte_length().unwrap();
-        let y_len = ecc_keypair.y.byte_length().unwrap();
-        assert!(d_len == 31 || d_len == 32);
-        assert!(x_len == 31 || x_len == 32);
-        assert!(y_len == 31 || y_len == 32);
+        assert!(ecc_keypair.d.bit_length().unwrap() <= 256);
+        assert!(ecc_keypair.x.bit_length().unwrap() <= 256);
+        assert!(ecc_keypair.y.bit_length().unwrap() <= 256);
+        assert!(ecc_keypair.d.bit_length().unwrap() > 0);
+        assert!(ecc_keypair.x.bit_length().unwrap() > 0);
+        assert!(ecc_keypair.y.bit_length().unwrap() > 0);
     }
 
     #[unittest::def_test(custom)]
@@ -4282,14 +4391,28 @@ pub mod tests_cryp {
         assert!(res.is_ok());
 
         let data = b"SIGNATURE TEST SIGNATURE TEST SI";
-        let mut signature1 = [0u8; 141];
 
-        let res = tee_cryp_asymm_operate(state, data, &mut signature1, None);
-        assert!(res.is_ok());
-        let len = res.unwrap();
+        let mut hash_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut hash_state,
+        )
+        .unwrap();
+        tee_cryp_hash_init(hash_state).unwrap();
+        tee_cryp_hash_update(hash_state, data).unwrap();
+        let mut digest = [0u8; 32];
+        let digest_len = tee_cryp_hash_final(hash_state, &[], &mut digest).unwrap();
+        let _ = tee_cryp_state_free(hash_state);
 
-        let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len]);
-        assert!(res.is_ok());
+        let mut signature1 = [0u8; 64];
+        let len =
+            tee_cryp_asymm_operate(state, &digest[..digest_len], &mut signature1, None).unwrap();
+        assert_eq!(len, 64);
+
+        tee_cryp_asymm_verify(state_pub, &digest[..digest_len], &signature1[..len]).unwrap();
     }
 
     #[unittest::def_test(custom)]
@@ -4311,53 +4434,83 @@ pub mod tests_cryp {
         assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
         assert_eq!(obj.attr.len(), 1);
         assert!(matches!(obj.attr[0], TeeCryptObj::ecc_public_key(_)));
-
-        let pubkey: [u8; 64] = [
-            0xa5, 0x2f, 0x69, 0x51, 0xd8, 0x49, 0x4d, 0x4a, 0xec, 0xf8, 0x23, 0xdf, 0xee, 0x1c,
-            0x34, 0x36, 0x7a, 0x39, 0xe7, 0x09, 0xa3, 0xdb, 0x7e, 0x32, 0x9d, 0x73, 0x8a, 0xe9,
-            0xfe, 0x40, 0xee, 0x72, 0x52, 0x83, 0x5b, 0x95, 0xb4, 0xcb, 0xeb, 0x3b, 0x5e, 0x40,
-            0xea, 0x23, 0x91, 0xd6, 0x09, 0x00, 0xdb, 0xf1, 0x7d, 0xc7, 0xd3, 0xc8, 0xe9, 0xa4,
-            0xfe, 0x81, 0xca, 0x73, 0x70, 0xdc, 0x80, 0xc6,
-        ];
-        let sig: [u8; 70] = [
-            0x30, 0x44, 0x02, 0x20, 0x25, 0xe1, 0xce, 0x81, 0xc9, 0xbf, 0x92, 0x6b, 0xf3, 0xd0,
-            0x25, 0xb5, 0xc8, 0x39, 0x97, 0x9b, 0x84, 0xd1, 0x79, 0x62, 0x86, 0x99, 0x30, 0x8e,
-            0x6e, 0x2d, 0x9d, 0x3c, 0xd8, 0x24, 0xe9, 0xd6, 0x02, 0x20, 0x34, 0xa6, 0x35, 0x27,
-            0x8a, 0x03, 0xff, 0x98, 0x24, 0xcc, 0x5f, 0x4f, 0x34, 0x29, 0x8d, 0xec, 0x2d, 0x8d,
-            0xb0, 0xfa, 0xb4, 0x2b, 0x00, 0x82, 0xc4, 0x67, 0xa9, 0x56, 0xeb, 0x3a, 0xcb, 0xca,
-        ];
-        let res = ecc_public_key::new(TEE_TYPE_SM2_DSA_PUBLIC_KEY, 512);
-        assert!(res.is_ok());
-        let mut ecc_key = res.unwrap();
-
-        let res = Mpi::from_binary(&pubkey[..32]);
-        assert!(res.is_ok());
-        let x = res.unwrap();
-
-        let res = Mpi::from_binary(&pubkey[32..]);
-        assert!(res.is_ok());
-        let y = res.unwrap();
-
-        ecc_key.x = BigNum::from_mpi(x);
-        ecc_key.y = BigNum::from_mpi(y);
-
-        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::ecc_public_key(ecc_key));
         drop(obj);
 
+        let ptx: [u8; 46] = [
+            0xB2, 0xE1, 0x4C, 0x5C, 0x79, 0xC6, 0xDF, 0x5B, 0x85, 0xF4, 0xFE, 0x7E, 0xD8, 0xDB,
+            0x7A, 0x26, 0x2B, 0x9D, 0xA7, 0xE0, 0x7C, 0xCB, 0x0E, 0xA9, 0xF4, 0x74, 0x7B, 0x8C,
+            0xCD, 0xA8, 0xA4, 0xF3, 0x6D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x20, 0x64, 0x69,
+            0x67, 0x65, 0x73, 0x74,
+        ];
+        const SIG: [u8; 64] = [
+            0xF5, 0xA0, 0x3B, 0x06, 0x48, 0xD2, 0xC4, 0x63, 0x0E, 0xEA, 0xC5, 0x13, 0xE1, 0xBB,
+            0x81, 0xA1, 0x59, 0x44, 0xDA, 0x38, 0x27, 0xD5, 0xB7, 0x41, 0x43, 0xAC, 0x7E, 0xAC,
+            0xEE, 0xE7, 0x20, 0xB3, 0xB1, 0xB6, 0xAA, 0x29, 0xDF, 0x21, 0x2F, 0xD8, 0x76, 0x31,
+            0x82, 0xBC, 0x0D, 0x42, 0x1C, 0xA1, 0xBB, 0x90, 0x38, 0xFD, 0x1F, 0x7F, 0x42, 0xD4,
+            0x84, 0x0B, 0x69, 0xC4, 0x85, 0xBB, 0xC1, 0xAA,
+        ];
+        const PUB_X: [u8; 32] = [
+            0x09, 0xF9, 0xDF, 0x31, 0x1E, 0x54, 0x21, 0xA1, 0x50, 0xDD, 0x7D, 0x16, 0x1E, 0x4B,
+            0xC5, 0xC6, 0x72, 0x17, 0x9F, 0xAD, 0x18, 0x33, 0xFC, 0x07, 0x6B, 0xB0, 0x8F, 0xF3,
+            0x56, 0xF3, 0x50, 0x20,
+        ];
+        const PUB_Y: [u8; 32] = [
+            0xCC, 0xEA, 0x49, 0x0C, 0xE2, 0x67, 0x75, 0xA5, 0x2D, 0xC6, 0xEA, 0x71, 0x8C, 0xC1,
+            0xAA, 0x60, 0x0A, 0xED, 0x05, 0xFB, 0xF3, 0x5E, 0x08, 0x4A, 0x66, 0x32, 0xF6, 0x07,
+            0x2D, 0xA9, 0xAD, 0x13,
+        ];
+
+        let mut hash_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut hash_state,
+        )
+        .unwrap();
+        tee_cryp_hash_init(hash_state).unwrap();
+        tee_cryp_hash_update(hash_state, &ptx).unwrap();
+        let mut digest = [0u8; 32];
+        let digest_len = tee_cryp_hash_final(hash_state, &[], &mut digest).unwrap();
+        let _ = tee_cryp_state_free(hash_state);
+
+        let mut usr_x = crate::user_vec![0u8; 32];
+        let mut usr_y = crate::user_vec![0u8; 32];
+        usr_x.copy_from_slice(&PUB_X);
+        usr_y.copy_from_slice(&PUB_Y);
+
+        let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
+        tee_init_ref_attribute(
+            &mut usr_attrs[0],
+            TEE_ATTR_ECC_PUBLIC_VALUE_X,
+            &usr_x[..],
+            32,
+        );
+        tee_init_ref_attribute(
+            &mut usr_attrs[1],
+            TEE_ATTR_ECC_PUBLIC_VALUE_Y,
+            &usr_y[..],
+            32,
+        );
+        syscall_cryp_obj_populate(
+            obj_id as c_ulong,
+            usr_attrs.as_mut_ptr(),
+            usr_attrs.len() as c_ulong,
+        )
+        .unwrap();
+
         let mut state: u32 = 0;
-        let res = tee_cryp_state_alloc(
+        tee_cryp_state_alloc(
             TEE_ALG_SM2_DSA_SM3,
             TEE_OperationMode::TEE_MODE_VERIFY,
             Some(obj_id as _),
             None,
             &mut state,
-        );
-        assert!(res.is_ok());
+        )
+        .unwrap();
 
-        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
-
-        let res = tee_cryp_asymm_verify(state, data, &sig);
-        assert!(res.is_ok());
+        tee_cryp_asymm_verify(state, &digest[..digest_len], &SIG).unwrap();
     }
 
     /// 与 `test_cryp_sm2_verify_with_pub_key` 相同数据与验签结论，公钥通过 `tee_init_ref_attribute` +
@@ -4365,30 +4518,53 @@ pub mod tests_cryp {
     #[unittest::def_test(custom)]
     fn test_cryp_sm2_verify_with_pub_key_via_init_ref_attr() {
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        let res =
-            syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref());
-        assert!(res.is_ok());
+        syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_PUBLIC_KEY as _, 256, obj_id.as_user_ref())
+            .unwrap();
         let obj_id = obj_id.read();
 
-        let pubkey: [u8; 64] = [
-            0xa5, 0x2f, 0x69, 0x51, 0xd8, 0x49, 0x4d, 0x4a, 0xec, 0xf8, 0x23, 0xdf, 0xee, 0x1c,
-            0x34, 0x36, 0x7a, 0x39, 0xe7, 0x09, 0xa3, 0xdb, 0x7e, 0x32, 0x9d, 0x73, 0x8a, 0xe9,
-            0xfe, 0x40, 0xee, 0x72, 0x52, 0x83, 0x5b, 0x95, 0xb4, 0xcb, 0xeb, 0x3b, 0x5e, 0x40,
-            0xea, 0x23, 0x91, 0xd6, 0x09, 0x00, 0xdb, 0xf1, 0x7d, 0xc7, 0xd3, 0xc8, 0xe9, 0xa4,
-            0xfe, 0x81, 0xca, 0x73, 0x70, 0xdc, 0x80, 0xc6,
+        let ptx: [u8; 46] = [
+            0xB2, 0xE1, 0x4C, 0x5C, 0x79, 0xC6, 0xDF, 0x5B, 0x85, 0xF4, 0xFE, 0x7E, 0xD8, 0xDB,
+            0x7A, 0x26, 0x2B, 0x9D, 0xA7, 0xE0, 0x7C, 0xCB, 0x0E, 0xA9, 0xF4, 0x74, 0x7B, 0x8C,
+            0xCD, 0xA8, 0xA4, 0xF3, 0x6D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x20, 0x64, 0x69,
+            0x67, 0x65, 0x73, 0x74,
         ];
-        let sig: [u8; 70] = [
-            0x30, 0x44, 0x02, 0x20, 0x25, 0xe1, 0xce, 0x81, 0xc9, 0xbf, 0x92, 0x6b, 0xf3, 0xd0,
-            0x25, 0xb5, 0xc8, 0x39, 0x97, 0x9b, 0x84, 0xd1, 0x79, 0x62, 0x86, 0x99, 0x30, 0x8e,
-            0x6e, 0x2d, 0x9d, 0x3c, 0xd8, 0x24, 0xe9, 0xd6, 0x02, 0x20, 0x34, 0xa6, 0x35, 0x27,
-            0x8a, 0x03, 0xff, 0x98, 0x24, 0xcc, 0x5f, 0x4f, 0x34, 0x29, 0x8d, 0xec, 0x2d, 0x8d,
-            0xb0, 0xfa, 0xb4, 0x2b, 0x00, 0x82, 0xc4, 0x67, 0xa9, 0x56, 0xeb, 0x3a, 0xcb, 0xca,
+        const SIG: [u8; 64] = [
+            0xF5, 0xA0, 0x3B, 0x06, 0x48, 0xD2, 0xC4, 0x63, 0x0E, 0xEA, 0xC5, 0x13, 0xE1, 0xBB,
+            0x81, 0xA1, 0x59, 0x44, 0xDA, 0x38, 0x27, 0xD5, 0xB7, 0x41, 0x43, 0xAC, 0x7E, 0xAC,
+            0xEE, 0xE7, 0x20, 0xB3, 0xB1, 0xB6, 0xAA, 0x29, 0xDF, 0x21, 0x2F, 0xD8, 0x76, 0x31,
+            0x82, 0xBC, 0x0D, 0x42, 0x1C, 0xA1, 0xBB, 0x90, 0x38, 0xFD, 0x1F, 0x7F, 0x42, 0xD4,
+            0x84, 0x0B, 0x69, 0xC4, 0x85, 0xBB, 0xC1, 0xAA,
         ];
+        const PUB_X: [u8; 32] = [
+            0x09, 0xF9, 0xDF, 0x31, 0x1E, 0x54, 0x21, 0xA1, 0x50, 0xDD, 0x7D, 0x16, 0x1E, 0x4B,
+            0xC5, 0xC6, 0x72, 0x17, 0x9F, 0xAD, 0x18, 0x33, 0xFC, 0x07, 0x6B, 0xB0, 0x8F, 0xF3,
+            0x56, 0xF3, 0x50, 0x20,
+        ];
+        const PUB_Y: [u8; 32] = [
+            0xCC, 0xEA, 0x49, 0x0C, 0xE2, 0x67, 0x75, 0xA5, 0x2D, 0xC6, 0xEA, 0x71, 0x8C, 0xC1,
+            0xAA, 0x60, 0x0A, 0xED, 0x05, 0xFB, 0xF3, 0x5E, 0x08, 0x4A, 0x66, 0x32, 0xF6, 0x07,
+            0x2D, 0xA9, 0xAD, 0x13,
+        ];
+
+        let mut hash_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_SM3,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut hash_state,
+        )
+        .unwrap();
+        tee_cryp_hash_init(hash_state).unwrap();
+        tee_cryp_hash_update(hash_state, &ptx).unwrap();
+        let mut digest = [0u8; 32];
+        let digest_len = tee_cryp_hash_final(hash_state, &[], &mut digest).unwrap();
+        let _ = tee_cryp_state_free(hash_state);
 
         let mut usr_x = crate::user_vec![0u8; 32];
         let mut usr_y = crate::user_vec![0u8; 32];
-        usr_x.copy_from_slice(&pubkey[..32]);
-        usr_y.copy_from_slice(&pubkey[32..]);
+        usr_x.copy_from_slice(&PUB_X);
+        usr_y.copy_from_slice(&PUB_Y);
 
         let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
         tee_init_ref_attribute(
@@ -4404,26 +4580,24 @@ pub mod tests_cryp {
             32,
         );
 
-        let res = syscall_cryp_obj_populate(
+        syscall_cryp_obj_populate(
             obj_id as c_ulong,
             usr_attrs.as_mut_ptr(),
             usr_attrs.len() as c_ulong,
-        );
-        assert!(res.is_ok(), "populate: {:x?}", res);
+        )
+        .unwrap();
 
         let mut state: u32 = 0;
-        let res = tee_cryp_state_alloc(
+        tee_cryp_state_alloc(
             TEE_ALG_SM2_DSA_SM3,
             TEE_OperationMode::TEE_MODE_VERIFY,
             Some(obj_id as _),
             None,
             &mut state,
-        );
-        assert!(res.is_ok());
+        )
+        .unwrap();
 
-        let data = b"SIGNATURE TEST SIGNATURE TEST SI";
-        let res = tee_cryp_asymm_verify(state, data, &sig);
-        assert!(res.is_ok());
+        tee_cryp_asymm_verify(state, &digest[..digest_len], &SIG).unwrap();
     }
 
     #[unittest::def_test(custom)]
@@ -4702,6 +4876,325 @@ pub mod tests_cryp {
         assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
     }
 
+    /// OP-TEE `regression_4000_data.h` → `ac_rsaes_oaep_vect1` (also regression_4006 case 46/47).
+    mod ac_rsaes_oaep_vect1 {
+        pub const MODULUS: [u8; 128] = [
+            0xa8, 0xb3, 0xb2, 0x84, 0xaf, 0x8e, 0xb5, 0x0b, 0x38, 0x70, 0x34, 0xa8, 0x60, 0xf1,
+            0x46, 0xc4, 0x91, 0x9f, 0x31, 0x87, 0x63, 0xcd, 0x6c, 0x55, 0x98, 0xc8, 0xae, 0x48,
+            0x11, 0xa1, 0xe0, 0xab, 0xc4, 0xc7, 0xe0, 0xb0, 0x82, 0xd6, 0x93, 0xa5, 0xe7, 0xfc,
+            0xed, 0x67, 0x5c, 0xf4, 0x66, 0x85, 0x12, 0x77, 0x2c, 0x0c, 0xbc, 0x64, 0xa7, 0x42,
+            0xc6, 0xc6, 0x30, 0xf5, 0x33, 0xc8, 0xcc, 0x72, 0xf6, 0x2a, 0xe8, 0x33, 0xc4, 0x0b,
+            0xf2, 0x58, 0x42, 0xe9, 0x84, 0xbb, 0x78, 0xbd, 0xbf, 0x97, 0xc0, 0x10, 0x7d, 0x55,
+            0xbd, 0xb6, 0x62, 0xf5, 0xc4, 0xe0, 0xfa, 0xb9, 0x84, 0x5c, 0xb5, 0x14, 0x8e, 0xf7,
+            0x39, 0x2d, 0xd3, 0xaa, 0xff, 0x93, 0xae, 0x1e, 0x6b, 0x66, 0x7b, 0xb3, 0xd4, 0x24,
+            0x76, 0x16, 0xd4, 0xf5, 0xba, 0x10, 0xd4, 0xcf, 0xd2, 0x26, 0xde, 0x88, 0xd3, 0x9f,
+            0x16, 0xfb,
+        ];
+        pub const PUB_EXP: [u8; 3] = [0x01, 0x00, 0x01];
+        pub const PRIV_EXP: [u8; 128] = [
+            0x53, 0x33, 0x9c, 0xfd, 0xb7, 0x9f, 0xc8, 0x46, 0x6a, 0x65, 0x5c, 0x73, 0x16, 0xac,
+            0xa8, 0x5c, 0x55, 0xfd, 0x8f, 0x6d, 0xd8, 0x98, 0xfd, 0xaf, 0x11, 0x95, 0x17, 0xef,
+            0x4f, 0x52, 0xe8, 0xfd, 0x8e, 0x25, 0x8d, 0xf9, 0x3f, 0xee, 0x18, 0x0f, 0xa0, 0xe4,
+            0xab, 0x29, 0x69, 0x3c, 0xd8, 0x3b, 0x15, 0x2a, 0x55, 0x3d, 0x4a, 0xc4, 0xd1, 0x81,
+            0x2b, 0x8b, 0x9f, 0xa5, 0xaf, 0x0e, 0x7f, 0x55, 0xfe, 0x73, 0x04, 0xdf, 0x41, 0x57,
+            0x09, 0x26, 0xf3, 0x31, 0x1f, 0x15, 0xc4, 0xd6, 0x5a, 0x73, 0x2c, 0x48, 0x31, 0x16,
+            0xee, 0x3d, 0x3d, 0x2d, 0x0a, 0xf3, 0x54, 0x9a, 0xd9, 0xbf, 0x7c, 0xbf, 0xb7, 0x8a,
+            0xd8, 0x84, 0xf8, 0x4d, 0x5b, 0xeb, 0x04, 0x72, 0x4d, 0xc7, 0x36, 0x9b, 0x31, 0xde,
+            0xf3, 0x7d, 0x0c, 0xf5, 0x39, 0xe9, 0xcf, 0xcd, 0xd3, 0xde, 0x65, 0x37, 0x29, 0xea,
+            0xd5, 0xd1,
+        ];
+        pub const PRIME1: [u8; 64] = [
+            0xd3, 0x27, 0x37, 0xe7, 0x26, 0x7f, 0xfe, 0x13, 0x41, 0xb2, 0xd5, 0xc0, 0xd1, 0x50,
+            0xa8, 0x1b, 0x58, 0x6f, 0xb3, 0x13, 0x2b, 0xed, 0x2f, 0x8d, 0x52, 0x62, 0x86, 0x4a,
+            0x9c, 0xb9, 0xf3, 0x0a, 0xf3, 0x8b, 0xe4, 0x48, 0x59, 0x8d, 0x41, 0x3a, 0x17, 0x2e,
+            0xfb, 0x80, 0x2c, 0x21, 0xac, 0xf1, 0xc1, 0x1c, 0x52, 0x0c, 0x2f, 0x26, 0xa4, 0x71,
+            0xdc, 0xad, 0x21, 0x2e, 0xac, 0x7c, 0xa3, 0x9d,
+        ];
+        pub const PRIME2: [u8; 64] = [
+            0xcc, 0x88, 0x53, 0xd1, 0xd5, 0x4d, 0xa6, 0x30, 0xfa, 0xc0, 0x04, 0xf4, 0x71, 0xf2,
+            0x81, 0xc7, 0xb8, 0x98, 0x2d, 0x82, 0x24, 0xa4, 0x90, 0xed, 0xbe, 0xb3, 0x3d, 0x3e,
+            0x3d, 0x5c, 0xc9, 0x3c, 0x47, 0x65, 0x70, 0x3d, 0x1d, 0xd7, 0x91, 0x64, 0x2f, 0x1f,
+            0x11, 0x6a, 0x0d, 0xd8, 0x52, 0xbe, 0x24, 0x19, 0xb2, 0xaf, 0x72, 0xbf, 0xe9, 0xa0,
+            0x30, 0xe8, 0x60, 0xb0, 0x28, 0x8b, 0x5d, 0x77,
+        ];
+        pub const EXP1: [u8; 64] = [
+            0x0e, 0x12, 0xbf, 0x17, 0x18, 0xe9, 0xce, 0xf5, 0x59, 0x9b, 0xa1, 0xc3, 0x88, 0x2f,
+            0xe8, 0x04, 0x6a, 0x90, 0x87, 0x4e, 0xef, 0xce, 0x8f, 0x2c, 0xcc, 0x20, 0xe4, 0xf2,
+            0x74, 0x1f, 0xb0, 0xa3, 0x3a, 0x38, 0x48, 0xae, 0xc9, 0xc9, 0x30, 0x5f, 0xbe, 0xcb,
+            0xd2, 0xd7, 0x68, 0x19, 0x96, 0x7d, 0x46, 0x71, 0xac, 0xc6, 0x43, 0x1e, 0x40, 0x37,
+            0x96, 0x8d, 0xb3, 0x78, 0x78, 0xe6, 0x95, 0xc1,
+        ];
+        pub const EXP2: [u8; 64] = [
+            0x95, 0x29, 0x7b, 0x0f, 0x95, 0xa2, 0xfa, 0x67, 0xd0, 0x07, 0x07, 0xd6, 0x09, 0xdf,
+            0xd4, 0xfc, 0x05, 0xc8, 0x9d, 0xaf, 0xc2, 0xef, 0x6d, 0x6e, 0xa5, 0x5b, 0xec, 0x77,
+            0x1e, 0xa3, 0x33, 0x73, 0x4d, 0x92, 0x51, 0xe7, 0x90, 0x82, 0xec, 0xda, 0x86, 0x6e,
+            0xfe, 0xf1, 0x3c, 0x45, 0x9e, 0x1a, 0x63, 0x13, 0x86, 0xb7, 0xe3, 0x54, 0xc8, 0x99,
+            0xf5, 0xf1, 0x12, 0xca, 0x85, 0xd7, 0x15, 0x83,
+        ];
+        pub const COEFF: [u8; 64] = [
+            0x4f, 0x45, 0x6c, 0x50, 0x24, 0x93, 0xbd, 0xc0, 0xed, 0x2a, 0xb7, 0x56, 0xa3, 0xa6,
+            0xed, 0x4d, 0x67, 0x35, 0x2a, 0x69, 0x7d, 0x42, 0x16, 0xe9, 0x32, 0x12, 0xb1, 0x27,
+            0xa6, 0x3d, 0x54, 0x11, 0xce, 0x6f, 0xa9, 0x8d, 0x5d, 0xbe, 0xfd, 0x73, 0x26, 0x3e,
+            0x37, 0x28, 0x14, 0x27, 0x43, 0x81, 0x81, 0x66, 0xed, 0x7d, 0xd6, 0x36, 0x87, 0xdd,
+            0x2a, 0x8c, 0xa1, 0xd2, 0xf4, 0xfb, 0xd8, 0xe1,
+        ];
+        pub const PTX: [u8; 28] = [
+            0x66, 0x28, 0x19, 0x4e, 0x12, 0x07, 0x3d, 0xb0, 0x3b, 0xa9, 0x4c, 0xda, 0x9e, 0xf9,
+            0x53, 0x23, 0x97, 0xd5, 0x0d, 0xba, 0x79, 0xb9, 0x87, 0x00, 0x4a, 0xfe, 0xfe, 0x34,
+        ];
+        pub const CIPHER: [u8; 128] = [
+            0x35, 0x4f, 0xe6, 0x7b, 0x4a, 0x12, 0x6d, 0x5d, 0x35, 0xfe, 0x36, 0xc7, 0x77, 0x79,
+            0x1a, 0x3f, 0x7b, 0xa1, 0x3d, 0xef, 0x48, 0x4e, 0x2d, 0x39, 0x08, 0xaf, 0xf7, 0x22,
+            0xfa, 0xd4, 0x68, 0xfb, 0x21, 0x69, 0x6d, 0xe9, 0x5d, 0x0b, 0xe9, 0x11, 0xc2, 0xd3,
+            0x17, 0x4f, 0x8a, 0xfc, 0xc2, 0x01, 0x03, 0x5f, 0x7b, 0x6d, 0x8e, 0x69, 0x40, 0x2d,
+            0xe5, 0x45, 0x16, 0x18, 0xc2, 0x1a, 0x53, 0x5f, 0xa9, 0xd7, 0xbf, 0xc5, 0xb8, 0xdd,
+            0x9f, 0xc2, 0x43, 0xf8, 0xcf, 0x92, 0x7d, 0xb3, 0x13, 0x22, 0xd6, 0xe8, 0x81, 0xea,
+            0xa9, 0x1a, 0x99, 0x61, 0x70, 0xe6, 0x57, 0xa0, 0x5a, 0x26, 0x64, 0x26, 0xd9, 0x8c,
+            0x88, 0x00, 0x3f, 0x84, 0x77, 0xc1, 0x22, 0x70, 0x94, 0xa0, 0xd9, 0xfa, 0x1e, 0x8c,
+            0x40, 0x24, 0x30, 0x9c, 0xe1, 0xec, 0xcc, 0xb5, 0x21, 0x00, 0x35, 0xd4, 0x7a, 0xc7,
+            0x2e, 0x8a,
+        ];
+    }
+
+    /// Populate `ac_rsaes_oaep_vect1` into a transient RSA keypair object.
+    /// `with_crt == false` matches regression_4006 case 46 (n/e/d only); `true` adds CRT factors.
+    fn install_ac_rsaes_oaep_vect1_keypair(with_crt: bool) -> u32 {
+        use ac_rsaes_oaep_vect1::*;
+
+        let mut kp_obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 1024, kp_obj.as_user_ref()).unwrap();
+        let kp_id = kp_obj.read();
+
+        let mut usr_n = crate::user_vec![0u8; 128];
+        let mut usr_e = crate::user_vec![0u8; 3];
+        let mut usr_d = crate::user_vec![0u8; 128];
+        usr_n.copy_from_slice(&MODULUS);
+        usr_e.copy_from_slice(&PUB_EXP);
+        usr_d.copy_from_slice(&PRIV_EXP);
+
+        if with_crt {
+            let mut usr_p = crate::user_vec![0u8; 64];
+            let mut usr_q = crate::user_vec![0u8; 64];
+            let mut usr_dp = crate::user_vec![0u8; 64];
+            let mut usr_dq = crate::user_vec![0u8; 64];
+            let mut usr_qp = crate::user_vec![0u8; 64];
+            usr_p.copy_from_slice(&PRIME1);
+            usr_q.copy_from_slice(&PRIME2);
+            usr_dp.copy_from_slice(&EXP1);
+            usr_dq.copy_from_slice(&EXP2);
+            usr_qp.copy_from_slice(&COEFF);
+
+            let mut usr_attrs = crate::user_vec![utee_attribute::default(); 8];
+            tee_init_ref_attribute(&mut usr_attrs[0], TEE_ATTR_RSA_MODULUS, &usr_n[..], 128);
+            tee_init_ref_attribute(
+                &mut usr_attrs[1],
+                TEE_ATTR_RSA_PUBLIC_EXPONENT,
+                &usr_e[..],
+                3,
+            );
+            tee_init_ref_attribute(
+                &mut usr_attrs[2],
+                TEE_ATTR_RSA_PRIVATE_EXPONENT,
+                &usr_d[..],
+                128,
+            );
+            tee_init_ref_attribute(&mut usr_attrs[3], TEE_ATTR_RSA_PRIME1, &usr_p[..], 64);
+            tee_init_ref_attribute(&mut usr_attrs[4], TEE_ATTR_RSA_PRIME2, &usr_q[..], 64);
+            tee_init_ref_attribute(&mut usr_attrs[5], TEE_ATTR_RSA_EXPONENT1, &usr_dp[..], 64);
+            tee_init_ref_attribute(&mut usr_attrs[6], TEE_ATTR_RSA_EXPONENT2, &usr_dq[..], 64);
+            tee_init_ref_attribute(&mut usr_attrs[7], TEE_ATTR_RSA_COEFFICIENT, &usr_qp[..], 64);
+            syscall_cryp_obj_populate(kp_id as c_ulong, usr_attrs.as_mut_ptr(), 8).unwrap();
+        } else {
+            let mut usr_attrs = crate::user_vec![utee_attribute::default(); 3];
+            tee_init_ref_attribute(&mut usr_attrs[0], TEE_ATTR_RSA_MODULUS, &usr_n[..], 128);
+            tee_init_ref_attribute(
+                &mut usr_attrs[1],
+                TEE_ATTR_RSA_PUBLIC_EXPONENT,
+                &usr_e[..],
+                3,
+            );
+            tee_init_ref_attribute(
+                &mut usr_attrs[2],
+                TEE_ATTR_RSA_PRIVATE_EXPONENT,
+                &usr_d[..],
+                128,
+            );
+            syscall_cryp_obj_populate(kp_id as c_ulong, usr_attrs.as_mut_ptr(), 3).unwrap();
+        }
+
+        kp_id
+    }
+
+    fn alloc_ac_rsaes_oaep_vect1_decrypt_op(kp_id: u32) -> u32 {
+        let mut st_dec: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(kp_id),
+            None,
+            &mut st_dec,
+        )
+        .unwrap();
+        st_dec
+    }
+
+    /// regression_4006 **case 46 host path**: n/e/d key (no CRT), preset ciphertext,
+    /// `TEE_ATTR_RSA_OAEP_MGF_HASH` = SHA1 via `syscall_asymm_operate`.
+    ///
+    /// Phase 1 isolates `tee_cryp_asymm_operate_with_required`; phase 2 matches TA/libutee.
+    /// Run: build x-kernel with `UNITTEST=y`, then filter `case46_host_decrypt_path`.
+    #[unittest::def_test(custom)]
+    fn test_regression_4006_case46_host_decrypt_path() {
+        use ac_rsaes_oaep_vect1::{CIPHER, PTX};
+
+        let kp_id = install_ac_rsaes_oaep_vect1_keypair(false);
+        let st_dec = alloc_ac_rsaes_oaep_vect1_decrypt_op(kp_id);
+
+        // Phase 1: kernel crypto API (no syscall attribute marshalling).
+        let mut out = [0u8; 128];
+        let mut required = 0usize;
+        let res = tee_cryp_asymm_operate_with_required(
+            st_dec,
+            &CIPHER,
+            &mut out,
+            None,
+            Some(TEE_ALG_SHA1),
+            &mut required,
+        );
+        if let Err(e) = res {
+            panic!(
+                "phase1 tee_cryp_asymm_operate_with_required failed: {:#x}",
+                e
+            );
+        }
+        assert_eq!(required, PTX.len());
+        assert_eq!(&out[..required], PTX);
+
+        // Phase 2: same as host regression_4006 → TA → TEE_AsymmetricDecrypt → syscall.
+        // MGF hash and out_len must live in mapped user VA (syscall uses copy_from_user).
+        let mut usr_mgf = crate::user_vec![0u8; core::mem::size_of::<u32>()];
+        usr_mgf.copy_from_slice(&TEE_ALG_SHA1.to_ne_bytes());
+        let mut usr_attrs = crate::user_vec![utee_attribute::default(); 1];
+        tee_init_ref_attribute(
+            &mut usr_attrs[0],
+            TEE_ATTR_RSA_OAEP_MGF_HASH,
+            &usr_mgf[..],
+            core::mem::size_of::<u32>() as u32,
+        );
+
+        let mut usr_cipher = crate::user_vec![0u8; CIPHER.len()];
+        usr_cipher.copy_from_slice(&CIPHER);
+        let mut usr_out = crate::user_vec![0u8; 512];
+        let mut usr_out_len = TestUserValue::<usize>::from_value(usr_out.len()).unwrap();
+
+        let res = syscall_asymm_operate(
+            st_dec as usize,
+            usr_attrs.as_ptr() as usize,
+            1,
+            usr_cipher.as_ptr() as usize,
+            usr_cipher.len(),
+            usr_out.as_mut_ptr() as usize,
+            usr_out_len.as_user_ptr() as usize,
+        );
+        if let Err(e) = res {
+            panic!("phase2 syscall_asymm_operate failed: {:#x}", e);
+        }
+        let out_len = usr_out_len.read();
+        assert_eq!(out_len, PTX.len());
+        assert_eq!(&usr_out[..out_len], PTX);
+    }
+
+    /// regression_4006 **case 46 TA/libutee key path**: empty op key object at
+    /// `tee_cryp_state_alloc`, then `syscall_cryp_obj_copy` (same as
+    /// `TEE_AllocateOperation` + `TEE_SetOperationKey`), preset ciphertext, MGF via
+    /// `syscall_asymm_operate`.
+    ///
+    /// Phase 1/2 of `test_regression_4006_case46_host_decrypt_path` bind the populated
+    /// keypair at state alloc; this test closes the remaining gap to host regression.
+    #[unittest::def_test(custom)]
+    fn test_regression_4006_case46_set_operation_key_decrypt_path() {
+        use ac_rsaes_oaep_vect1::{CIPHER, PTX};
+
+        let src_priv_id = install_ac_rsaes_oaep_vect1_keypair(false);
+
+        // libutee TEE_AllocateOperation: empty key1 + cryp state alloc before SetOperationKey.
+        let mut op_key_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 1024, op_key_id.as_user_ref()).unwrap();
+        let op_key_id = op_key_id.read();
+
+        let mut st_dec: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(op_key_id),
+            None,
+            &mut st_dec,
+        )
+        .unwrap();
+
+        // libutee TEE_SetOperationKey → TEE_CopyObjectAttributes1 → _utee_cryp_obj_copy.
+        syscall_cryp_obj_copy(op_key_id as _, src_priv_id as _).unwrap();
+
+        let mut usr_mgf = crate::user_vec![0u8; core::mem::size_of::<u32>()];
+        usr_mgf.copy_from_slice(&TEE_ALG_SHA1.to_ne_bytes());
+        let mut usr_attrs = crate::user_vec![utee_attribute::default(); 1];
+        tee_init_ref_attribute(
+            &mut usr_attrs[0],
+            TEE_ATTR_RSA_OAEP_MGF_HASH,
+            &usr_mgf[..],
+            core::mem::size_of::<u32>() as u32,
+        );
+
+        let mut usr_cipher = crate::user_vec![0u8; CIPHER.len()];
+        usr_cipher.copy_from_slice(&CIPHER);
+        let mut usr_out = crate::user_vec![0u8; 512];
+        let mut usr_out_len = TestUserValue::<usize>::from_value(usr_out.len()).unwrap();
+
+        let res = syscall_asymm_operate(
+            st_dec as usize,
+            usr_attrs.as_ptr() as usize,
+            1,
+            usr_cipher.as_ptr() as usize,
+            usr_cipher.len(),
+            usr_out.as_mut_ptr() as usize,
+            usr_out_len.as_user_ptr() as usize,
+        );
+        if let Err(e) = res {
+            panic!(
+                "set_operation_key path syscall_asymm_operate failed: {:#x}",
+                e
+            );
+        }
+        let out_len = usr_out_len.read();
+        assert_eq!(out_len, PTX.len());
+        assert_eq!(&usr_out[..out_len], PTX);
+    }
+
+    /// CRT key + direct `tee_cryp_asymm_operate` (no MGF attribute); baseline for vect1.
+    #[unittest::def_test(custom)]
+    fn test_regression_4006_rsa_oaep_vect1_decrypt_crt_baseline() {
+        use ac_rsaes_oaep_vect1::{CIPHER, PTX};
+
+        let kp_id = install_ac_rsaes_oaep_vect1_keypair(true);
+        let st_dec = alloc_ac_rsaes_oaep_vect1_decrypt_op(kp_id);
+
+        let mut out = [0u8; 128];
+        let len = tee_cryp_asymm_operate(st_dec, &CIPHER, &mut out, None).unwrap();
+        assert_eq!(len, PTX.len());
+        assert_eq!(&out[..len], PTX);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_rsa_oaep_mgf_hash_mismatch_not_supported() {
+        use crate::tee::crypto::rsa::rsaes_oaep_check_mgf;
+
+        assert_eq!(
+            rsaes_oaep_check_mgf(TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256, TEE_ALG_SHA1).err(),
+            Some(TEE_ERROR_NOT_SUPPORTED)
+        );
+        assert!(rsaes_oaep_check_mgf(TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256, TEE_ALG_SHA256).is_ok());
+    }
+
     #[unittest::def_test(custom)]
     fn test_cryp_rsa_pkcs1_v15_encrypt_decrypt_random_key() {
         let kp_obj = TestUserValue::<c_uint>::from_value(0);
@@ -4766,6 +5259,157 @@ pub mod tests_cryp {
         let out_len = res.unwrap();
         assert_eq!(out_len, plain.len());
         assert_eq!(&out[..out_len], plain.as_slice());
+    }
+
+    /// OP-TEE allows RSA ENCRYPT/VERIFY with a keypair object (public half is used).
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_pkcs1_v15_encrypt_with_keypair_object() {
+        let (kp_id, _pub_id) = install_rsa_test_der_key_objects();
+        let mut kp2_obj = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_RSA_KEYPAIR as _, 2048, kp2_obj.as_user_ref()).unwrap();
+        let kp2_id = kp2_obj.read();
+        syscall_cryp_obj_copy(kp2_id as _, kp_id as _).unwrap();
+
+        let plain = b"encrypt via keypair handle";
+
+        let mut st_enc: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_V1_5,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(kp_id),
+            None,
+            &mut st_enc,
+        )
+        .unwrap();
+
+        let mut st_dec: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_V1_5,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(kp2_id),
+            None,
+            &mut st_dec,
+        )
+        .unwrap();
+
+        let mut cipher = [0u8; 256];
+        let cipher_len = tee_cryp_asymm_operate(st_enc, plain, &mut cipher, None).unwrap();
+
+        let mut out = [0u8; 256];
+        let out_len =
+            tee_cryp_asymm_operate(st_dec, &cipher[..cipher_len], &mut out, None).unwrap();
+        assert_eq!(&out[..out_len], plain);
+    }
+
+    /// Regression vectors often supply only (n, e, d); CRT primes are optional in OP-TEE.
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_pkcs1_v15_decrypt_without_crt_primes() {
+        let (kp_id, pub_id) = install_rsa_test_der_key_objects();
+        {
+            let obj = tee_obj_get(kp_id as tee_obj_id_type).unwrap();
+            let mut guard = obj.lock();
+            let TeeCryptObj::rsa_keypair(kp) = &mut guard.attr[0] else {
+                panic!("expected rsa keypair");
+            };
+            kp.p = BigNum::default();
+            kp.q = BigNum::default();
+            kp.dp = BigNum::default();
+            kp.dq = BigNum::default();
+            kp.qp = BigNum::default();
+        }
+
+        let plain = b"decrypt without crt";
+        let mut st_enc: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_V1_5,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(pub_id),
+            None,
+            &mut st_enc,
+        )
+        .unwrap();
+
+        let mut st_dec: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSAES_PKCS1_V1_5,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(kp_id),
+            None,
+            &mut st_dec,
+        )
+        .unwrap();
+
+        let mut cipher = [0u8; 256];
+        let cipher_len = tee_cryp_asymm_operate(st_enc, plain, &mut cipher, None).unwrap();
+
+        let mut out = [0u8; 256];
+        let out_len =
+            tee_cryp_asymm_operate(st_dec, &cipher[..cipher_len], &mut out, None).unwrap();
+        assert_eq!(&out[..out_len], plain);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_nopad_roundtrip_returns_plaintext_len() {
+        let (kp_id, pub_id) = install_rsa_test_der_key_objects();
+        let plain = b"rsa nopad plain txt";
+
+        let mut st_enc: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSA_NOPAD,
+            TEE_OperationMode::TEE_MODE_ENCRYPT,
+            Some(pub_id),
+            None,
+            &mut st_enc,
+        )
+        .unwrap();
+
+        let mut st_dec: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSA_NOPAD,
+            TEE_OperationMode::TEE_MODE_DECRYPT,
+            Some(kp_id),
+            None,
+            &mut st_dec,
+        )
+        .unwrap();
+
+        let mut cipher = [0u8; 256];
+        let cipher_len = tee_cryp_asymm_operate(st_enc, plain, &mut cipher, None).unwrap();
+        assert!(cipher_len <= cipher.len());
+        assert!(cipher_len > 0);
+
+        let mut out = [0u8; 256];
+        let out_len =
+            tee_cryp_asymm_operate(st_dec, &cipher[..cipher_len], &mut out, None).unwrap();
+        assert_eq!(out_len, plain.len());
+        assert_eq!(&out[..out_len], plain);
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_rsa_sign_short_buffer_probe() {
+        let (kp_id, _pub_id) = install_rsa_test_der_key_objects();
+        let mut st_sign: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_RSASSA_PKCS1_V1_5_SHA256,
+            TEE_OperationMode::TEE_MODE_SIGN,
+            Some(kp_id),
+            None,
+            &mut st_sign,
+        )
+        .unwrap();
+
+        let digest = [0u8; 32];
+        let mut required = 0usize;
+        let res = tee_cryp_asymm_operate_with_required(
+            st_sign,
+            &digest,
+            &mut [],
+            None,
+            None,
+            &mut required,
+        );
+        assert_eq!(res.err(), Some(TEE_ERROR_SHORT_BUFFER));
+        assert_eq!(required, 256);
     }
 
     #[unittest::def_test(custom)]
@@ -4960,5 +5604,235 @@ pub mod tests_cryp {
         let mut out = [0u8; 256];
         let res = tee_cryp_asymm_operate(st, data, &mut out, None);
         assert_eq!(res.err(), Some(TEE_ERROR_GENERIC));
+    }
+
+    /// regression_4006 case 280：ECDSA P192 VERIFY（NIST 186-2 test vector 1）。
+    /// 对齐 host/libutee：`SHA1(ptx)` → `AllocateOperation`（空 key1）→ `SetOperationKey`（copy 公钥）→ verify。
+    #[unittest::def_test(custom)]
+    fn test_regression_4006_ecdsa_p192_verify_case280() {
+        const PTX: [u8; 128] = [
+            0x66, 0xe9, 0x8a, 0x16, 0x58, 0x54, 0xcd, 0x07, 0x98, 0x9b, 0x1e, 0xe0, 0xec, 0x3f,
+            0x8d, 0xbe, 0x0e, 0xe3, 0xc2, 0xfb, 0x00, 0x51, 0xef, 0x53, 0xa0, 0xbe, 0x03, 0x45,
+            0x7c, 0x4f, 0x21, 0xbc, 0xe7, 0xdc, 0x50, 0xef, 0x4d, 0xf3, 0x74, 0x86, 0xc3, 0x20,
+            0x7d, 0xfe, 0xe2, 0x6b, 0xde, 0x4e, 0xd6, 0x23, 0x40, 0xcb, 0xb2, 0xda, 0x78, 0x49,
+            0x06, 0xb1, 0xb7, 0x83, 0xb4, 0xd6, 0x01, 0xbd, 0xff, 0x4a, 0xe1, 0xa7, 0xe5, 0xe8,
+            0x5a, 0x85, 0xaf, 0xa3, 0x20, 0x8d, 0xc6, 0x0f, 0x09, 0x90, 0xc8, 0x23, 0xbe, 0xdd,
+            0xdb, 0x3d, 0xb6, 0x63, 0x42, 0x66, 0x65, 0x15, 0x2e, 0xd7, 0xb0, 0x93, 0xd6, 0xbd,
+            0xa5, 0x06, 0xc9, 0x3a, 0x69, 0x4b, 0x83, 0xac, 0x71, 0x55, 0x3f, 0x31, 0xf5, 0xcc,
+            0x0d, 0x6b, 0xa2, 0xfa, 0x24, 0x80, 0x90, 0xe8, 0x79, 0x65, 0x73, 0xc4, 0x91, 0x5d,
+            0x15, 0x86,
+        ];
+        const SIG: [u8; 48] = [
+            0xaf, 0x1f, 0x74, 0x9e, 0x3d, 0xf6, 0x22, 0x0f, 0xf0, 0x4e, 0xfd, 0x17, 0x86, 0x18,
+            0xa9, 0x77, 0xe0, 0x83, 0x8b, 0x1b, 0x9d, 0xc1, 0x26, 0xe3, 0x89, 0x90, 0xa0, 0x4c,
+            0x6c, 0xc0, 0xff, 0x26, 0x26, 0x4e, 0xcf, 0x8f, 0x78, 0x31, 0x38, 0x1a, 0x9d, 0xbc,
+            0x6e, 0x53, 0xcc, 0x8c, 0xc8, 0x60,
+        ];
+        const PUB_X: [u8; 24] = [
+            0x14, 0xf6, 0x97, 0x38, 0x59, 0x96, 0x89, 0xf5, 0x70, 0x6a, 0xb7, 0x13, 0x43, 0xbe,
+            0xcc, 0x88, 0x6e, 0xf1, 0x56, 0x9a, 0x2d, 0x11, 0x37, 0xfe,
+        ];
+        const PUB_Y: [u8; 24] = [
+            0x0c, 0xf5, 0xa4, 0x33, 0x90, 0x9e, 0x33, 0x21, 0x7f, 0xb4, 0xdf, 0x6b, 0x95, 0x93,
+            0xf7, 0x1d, 0x43, 0xfb, 0x1c, 0x2a, 0x56, 0x53, 0xb7, 0x63,
+        ];
+
+        // 1) SHA1(ptx) — 与 regression_4006 VERIFY/SIGN 前置 digest 一致
+        let mut hash_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_SHA1,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut hash_state,
+        )
+        .unwrap();
+        tee_cryp_hash_init(hash_state).unwrap();
+        tee_cryp_hash_update(hash_state, &PTX).unwrap();
+        let mut digest = [0u8; 20];
+        let digest_len = tee_cryp_hash_final(hash_state, &[], &mut digest).unwrap();
+        assert_eq!(digest_len, 20);
+        let _ = tee_cryp_state_free(hash_state);
+
+        // 2) populate 源公钥（regression_4006 create_ecc_keys 的 pub_h）
+        let mut src_pub_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_ECDSA_PUBLIC_KEY as _,
+            192,
+            src_pub_id.as_user_ref(),
+        )
+        .unwrap();
+        let src_pub_id = src_pub_id.read();
+
+        let mut usr_x = crate::user_vec![0u8; 24];
+        let mut usr_y = crate::user_vec![0u8; 24];
+        usr_x.copy_from_slice(&PUB_X);
+        usr_y.copy_from_slice(&PUB_Y);
+
+        let mut usr_attrs = crate::user_vec![utee_attribute::default(); 3];
+        usr_attrs[0].attribute_id = TEE_ATTR_ECC_CURVE | TEE_ATTR_FLAG_VALUE;
+        usr_attrs[0].a = TEE_ECC_CURVE_NIST_P192 as u64;
+        usr_attrs[0].b = 0;
+        tee_init_ref_attribute(
+            &mut usr_attrs[1],
+            TEE_ATTR_ECC_PUBLIC_VALUE_X,
+            &usr_x[..],
+            24,
+        );
+        tee_init_ref_attribute(
+            &mut usr_attrs[2],
+            TEE_ATTR_ECC_PUBLIC_VALUE_Y,
+            &usr_y[..],
+            24,
+        );
+        syscall_cryp_obj_populate(
+            src_pub_id as c_ulong,
+            usr_attrs.as_mut_ptr(),
+            usr_attrs.len() as c_ulong,
+        )
+        .unwrap();
+
+        // 3) libutee：AllocateOperation 时为 operation 分配空 key1，再 syscall alloc cryp state
+        let mut op_key_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 192, op_key_id.as_user_ref())
+            .unwrap();
+        let op_key_id = op_key_id.read();
+
+        let mut verify_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_ECDSA_P192,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(op_key_id),
+            None,
+            &mut verify_state,
+        )
+        .unwrap();
+        let cs = tee_cryp_state_get(verify_state).unwrap();
+        assert_eq!(cs.lock().algo, TEE_ALG_ECDSA_SHA1);
+
+        // 4) TEE_SetOperationKey：把 pub_h 属性 copy 到 operation 的 key1
+        syscall_cryp_obj_copy(op_key_id as _, src_pub_id as _).unwrap();
+
+        // 5) 验签 — host 日志停在此前的 SET_OPERATION_KEY / VERIFY 之间
+        tee_cryp_asymm_verify(verify_state, &digest[..digest_len], &SIG).unwrap();
+    }
+
+    /// regression_4006 case 400：ECDSA P521 VERIFY（NIST 186-2 test vector 61）。
+    /// P521 为 521 bit，分量/签名固定宽度为 ceil(521/8)=66 字节（总长 132）。
+    #[unittest::def_test(custom)]
+    fn test_regression_4006_ecdsa_p521_verify_case400() {
+        const PTX: [u8; 128] = [
+            0xcc, 0x92, 0xca, 0x36, 0xa7, 0x67, 0x60, 0x75, 0x2b, 0x5a, 0x45, 0xca, 0x5d, 0x72,
+            0x35, 0x94, 0x71, 0x22, 0xa6, 0x00, 0x2f, 0x1d, 0x4e, 0x7d, 0x9c, 0x6b, 0xe5, 0x70,
+            0xd7, 0xbd, 0x2c, 0x29, 0x41, 0xfe, 0x2e, 0x16, 0xe0, 0x2a, 0xc6, 0x37, 0x06, 0x63,
+            0x61, 0xd2, 0x2d, 0x42, 0x05, 0x68, 0x26, 0x6b, 0x93, 0xe7, 0x73, 0x64, 0x49, 0x21,
+            0xf1, 0xa7, 0x8a, 0x7d, 0xba, 0xf5, 0xe2, 0xed, 0x49, 0xee, 0x45, 0x20, 0xdf, 0xdf,
+            0x97, 0xf8, 0x26, 0xdb, 0x72, 0x3e, 0x14, 0x0d, 0x23, 0x95, 0x13, 0x4c, 0xf5, 0xac,
+            0x5f, 0xf0, 0xb3, 0xb8, 0xaf, 0xe4, 0x68, 0x22, 0x17, 0xfd, 0x69, 0x7c, 0x2d, 0x8a,
+            0x95, 0xba, 0x6b, 0x2d, 0xdc, 0x9f, 0xd4, 0xe9, 0xfe, 0x75, 0xda, 0x7b, 0x95, 0x01,
+            0x80, 0xee, 0x56, 0xb6, 0xbc, 0x6a, 0x94, 0x29, 0x1f, 0x4d, 0x05, 0xc5, 0xb7, 0x7c,
+            0xc9, 0xc0,
+        ];
+        const SIG: [u8; 132] = [
+            0x00, 0xd3, 0x14, 0xdd, 0xe7, 0x4c, 0xce, 0x60, 0x24, 0x51, 0x89, 0x80, 0xad, 0x85,
+            0xcc, 0x7d, 0x5a, 0x29, 0x4e, 0x14, 0x8f, 0xa2, 0x6f, 0x06, 0x48, 0x48, 0x6a, 0x6d,
+            0x28, 0x82, 0xca, 0x7a, 0x92, 0xa1, 0xc9, 0x34, 0xc4, 0xb0, 0x1e, 0xe1, 0xf6, 0xcc,
+            0x1d, 0xcc, 0x59, 0x20, 0xd4, 0x97, 0x19, 0xa1, 0x82, 0x3c, 0xfa, 0x32, 0xa6, 0x9c,
+            0xda, 0x71, 0x0b, 0x0e, 0x95, 0x62, 0x3b, 0xbb, 0x04, 0x51, 0x01, 0x4b, 0x0b, 0x93,
+            0xbd, 0xa1, 0x37, 0xa5, 0x29, 0x39, 0x00, 0xeb, 0x6c, 0xb6, 0xb1, 0x51, 0xe3, 0x30,
+            0x1b, 0x8e, 0x29, 0x44, 0xea, 0xee, 0x5c, 0xe0, 0xf8, 0xdf, 0x87, 0xc9, 0x84, 0x1b,
+            0x61, 0x37, 0x2a, 0x2d, 0x70, 0xe7, 0x75, 0xc6, 0x75, 0x8d, 0x29, 0xa7, 0xd2, 0x4f,
+            0x62, 0xc6, 0x9d, 0xc8, 0x84, 0xb5, 0x4c, 0xe6, 0x7a, 0x8e, 0xdb, 0x51, 0xa0, 0x72,
+            0xe4, 0x79, 0x7a, 0x9b, 0x03, 0x6d,
+        ];
+        const PUB_X: [u8; 66] = [
+            0x00, 0xf1, 0xdc, 0x7c, 0xcb, 0x09, 0xd6, 0x1e, 0x6a, 0xf3, 0x79, 0xb8, 0x9a, 0xca,
+            0x90, 0x5b, 0x49, 0x77, 0x9f, 0xbe, 0x43, 0xa9, 0x4c, 0x8e, 0xf3, 0x84, 0xcc, 0xbf,
+            0x66, 0x0f, 0x48, 0x05, 0xc9, 0x65, 0xa3, 0xa2, 0x4e, 0xd5, 0xa9, 0x62, 0xc2, 0x48,
+            0x09, 0x41, 0x5c, 0xde, 0xcf, 0xdf, 0xe5, 0x0f, 0xd1, 0x8f, 0x12, 0x66, 0x07, 0x31,
+            0x54, 0xb6, 0x2f, 0x35, 0x5f, 0xe4, 0xc9, 0x8a, 0xf6, 0xe5,
+        ];
+        const PUB_Y: [u8; 66] = [
+            0x01, 0x74, 0x0e, 0xb9, 0x5b, 0x8e, 0x31, 0xa0, 0x43, 0x4c, 0x98, 0x8f, 0x2e, 0xdd,
+            0x55, 0x0b, 0x8d, 0xc6, 0xc4, 0x5c, 0x6f, 0x50, 0x43, 0x09, 0x25, 0x53, 0x70, 0xcc,
+            0xe5, 0x7e, 0x82, 0x1f, 0xcb, 0x4f, 0x60, 0xba, 0xd1, 0x7a, 0x8f, 0xb9, 0xa3, 0xf4,
+            0xdc, 0x67, 0xed, 0x48, 0x60, 0xae, 0x6d, 0xd3, 0xed, 0x4b, 0x1f, 0x51, 0xb9, 0x84,
+            0x51, 0xb7, 0xe7, 0x09, 0x5c, 0xc8, 0x7d, 0x4d, 0x62, 0x79,
+        ];
+
+        // regression_4006 对 ECDSA 统一用 SHA1 做 ptx 摘要
+        let mut hash_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_SHA1,
+            TEE_OperationMode::TEE_MODE_DIGEST,
+            None,
+            None,
+            &mut hash_state,
+        )
+        .unwrap();
+        tee_cryp_hash_init(hash_state).unwrap();
+        tee_cryp_hash_update(hash_state, &PTX).unwrap();
+        let mut digest = [0u8; 20];
+        let digest_len = tee_cryp_hash_final(hash_state, &[], &mut digest).unwrap();
+        assert_eq!(digest_len, 20);
+        let _ = tee_cryp_state_free(hash_state);
+
+        let mut src_pub_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_ECDSA_PUBLIC_KEY as _,
+            521,
+            src_pub_id.as_user_ref(),
+        )
+        .unwrap();
+        let src_pub_id = src_pub_id.read();
+
+        let mut usr_x = crate::user_vec![0u8; 66];
+        let mut usr_y = crate::user_vec![0u8; 66];
+        usr_x.copy_from_slice(&PUB_X);
+        usr_y.copy_from_slice(&PUB_Y);
+
+        let mut usr_attrs = crate::user_vec![utee_attribute::default(); 3];
+        usr_attrs[0].attribute_id = TEE_ATTR_ECC_CURVE | TEE_ATTR_FLAG_VALUE;
+        usr_attrs[0].a = TEE_ECC_CURVE_NIST_P521 as u64;
+        usr_attrs[0].b = 0;
+        tee_init_ref_attribute(
+            &mut usr_attrs[1],
+            TEE_ATTR_ECC_PUBLIC_VALUE_X,
+            &usr_x[..],
+            66,
+        );
+        tee_init_ref_attribute(
+            &mut usr_attrs[2],
+            TEE_ATTR_ECC_PUBLIC_VALUE_Y,
+            &usr_y[..],
+            66,
+        );
+        syscall_cryp_obj_populate(
+            src_pub_id as c_ulong,
+            usr_attrs.as_mut_ptr(),
+            usr_attrs.len() as c_ulong,
+        )
+        .unwrap();
+
+        let mut op_key_id = TestUserValue::<c_uint>::from_value(0).unwrap();
+        syscall_cryp_obj_alloc(TEE_TYPE_ECDSA_PUBLIC_KEY as _, 521, op_key_id.as_user_ref())
+            .unwrap();
+        let op_key_id = op_key_id.read();
+
+        let mut verify_state: u32 = 0;
+        tee_cryp_state_alloc(
+            TEE_ALG_ECDSA_P521,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(op_key_id),
+            None,
+            &mut verify_state,
+        )
+        .unwrap();
+        let cs = tee_cryp_state_get(verify_state).unwrap();
+        assert_eq!(cs.lock().algo, TEE_ALG_ECDSA_SHA512);
+
+        syscall_cryp_obj_copy(op_key_id as _, src_pub_id as _).unwrap();
+
+        tee_cryp_asymm_verify(verify_state, &digest[..digest_len], &SIG).unwrap();
     }
 }

@@ -75,3 +75,18 @@ pub(crate) fn tee_alg_get_main_alg(algo: u32) -> u32 {
 pub(crate) fn tee_alg_get_chain_mode(algo: u32) -> u32 {
     ((algo) >> 8) & 0xF
 }
+
+/// Bits [23:20] of a composite algorithm — internal hash identifier (OP-TEE).
+pub(crate) fn tee_alg_get_internal_hash(algo: u32) -> u32 {
+    (algo >> 20) & 0x7
+}
+
+/// Map internal hash bits to a standalone digest algorithm id (OP-TEE `TEE_INTERNAL_HASH_TO_ALGO`).
+pub(crate) fn tee_internal_hash_to_algo(algo: u32) -> u32 {
+    let main_hash = tee_alg_get_internal_hash(algo);
+    if main_hash == 7 {
+        TEE_ALG_SM3
+    } else {
+        (TEE_OPERATION_DIGEST << 28) | main_hash
+    }
+}
