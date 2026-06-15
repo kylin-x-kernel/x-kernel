@@ -106,7 +106,7 @@ watched file 失效后的清理维护同一个状态机。
 | T-09 | pipe 写端在无 reader 时未正确抛出 `SIGPIPE` / `BrokenPipe` | 中 | 在写路径同一锁内检查 `readers == 0`，并统一走 signal + error 分支 |
 | T-10 | `signalfd` mask 更新与 `read/poll` 观察不一致 | 中 | mask 经 `RwLock` 更新，并在更新后唤醒 poller 重新观察 |
 | T-11 | `signalfd` 将不可捕获信号暴露给用户态 fd 语义 | 低 | syscall adapter 统一移除 `SIGKILL` / `SIGSTOP` |
-| T-12 | `epoll` ready queue 去重失效导致重复唤醒或事件风暴 | 中 | `in_ready_queue` 位与 ready queue 统一维护 |
+| T-12 | `epoll` ready queue 去重失效导致重复唤醒、事件风暴或 `MOD` 后丢失事件 | 中 | `in_ready_queue` 位与 ready queue 统一维护；`MOD` 替换已入队 interest 时同步替换 ready queue 中的 `Weak` |
 | T-13 | `epoll` oneshot / edge-triggered 状态机错误 | 高 | `TriggerMode` 集中建模并在消费路径统一更新 |
 | T-14 | watched file 失效后 interest 清理不完整 | 中 | ready 消费路径在 `Weak` 升级失败后立即回收 interest |
 
