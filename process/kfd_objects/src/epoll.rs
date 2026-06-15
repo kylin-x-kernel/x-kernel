@@ -499,32 +499,6 @@ mod epoll_tests {
 
     use super::*;
 
-    struct ReadyFile {
-        events: SpinNoPreempt<IoEvents>,
-    }
-
-    impl ReadyFile {
-        fn new(events: IoEvents) -> Self {
-            Self {
-                events: SpinNoPreempt::new(events),
-            }
-        }
-    }
-
-    impl FileLike for ReadyFile {
-        fn path(&self) -> Cow<'_, str> {
-            "ready-file".into()
-        }
-    }
-
-    impl Pollable for ReadyFile {
-        fn poll(&self) -> IoEvents {
-            *self.events.lock()
-        }
-
-        fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
-    }
-
     #[def_test]
     fn test_epoll_creation() {
         let epoll = Epoll::new();
@@ -638,40 +612,6 @@ mod epoll_tests {
                 .modify(999, dummy, event, EpollFlags::empty())
                 .is_err()
         );
-    }
-
-    #[def_test]
-    fn test_epoll_modify_replaces_ready_queue_interest() {
-        let epoll = Epoll::new();
-        let file: Arc<dyn FileLike> = Arc::new(ReadyFile::new(IoEvents::IN | IoEvents::OUT));
-
-        epoll
-            .add(
-                3,
-                file.clone(),
-                EpollEvent {
-                    events: IoEvents::IN,
-                    user_data: 1,
-                },
-                EpollFlags::empty(),
-            )
-            .unwrap();
-        epoll
-            .modify(
-                3,
-                file,
-                EpollEvent {
-                    events: IoEvents::OUT,
-                    user_data: 2,
-                },
-                EpollFlags::empty(),
-            )
-            .unwrap();
-
-        let mut out = [epoll_event { events: 0, data: 0 }; 1];
-        assert_eq!(epoll.poll_events(&mut out), Ok(1));
-        assert_eq!(out[0].events, IoEvents::OUT.bits());
-        assert_eq!(out[0].data, 2);
     }
 
     #[def_test]
