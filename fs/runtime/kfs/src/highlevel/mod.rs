@@ -3,14 +3,12 @@
 // See LICENSES for license details.
 
 //! High-level filesystem APIs (std-like wrappers).
-mod directory;
 mod file;
 mod fs;
 mod mapping;
 
 use alloc::{borrow::Cow, string::ToString};
 
-pub use directory::*;
 pub use file::*;
 // Re-export the wrapper FsContext for backward compatibility
 pub use fs::{

@@ -20,7 +20,7 @@ use core::{
 use kerrno::{KError, KResult, LinuxError};
 use kfd::FileLike;
 use kfd_objects::pipe::current_pipe_endpoint;
-use kfs::{Directory, File, FileFlags, OpenOptions};
+use kfs::{File, FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use kpoll::{IoEvents, Pollable};
 use linux_raw_sys::general::__kernel_off_t;
@@ -128,26 +128,9 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<is
     };
     let any_file = kthread::current_resources().get_file_like(fd)?;
 
-    if let Ok(f) = any_file.clone().downcast_arc::<File>() {
+    if let Ok(f) = any_file.downcast_arc::<File>() {
         let off = Seek::seek(&mut &*f, pos)?;
         return Ok(off as _);
-    }
-
-    if let Ok(d) = any_file.downcast_arc::<Directory>() {
-        let mut off = d.offset.lock();
-        let new_pos = match pos {
-            SeekFrom::Start(pos) => pos,
-            SeekFrom::End(delta) => d
-                .inner()
-                .len()?
-                .checked_add_signed(delta)
-                .ok_or(KError::InvalidInput)?,
-            SeekFrom::Current(delta) => {
-                off.checked_add_signed(delta).ok_or(KError::InvalidInput)?
-            }
-        };
-        *off = new_pos;
-        return Ok(new_pos as _);
     }
 
     Err(KError::from(LinuxError::ESPIPE))
@@ -163,8 +146,7 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
     }
     let file = OpenOptions::new()
         .write(true)
-        .open(&kthread::current_process_fs_context().lock(), path)?
-        .into_file()?;
+        .open(&kthread::current_process_fs_context().lock(), path)?;
     file.access(FileFlags::WRITE)?.set_len(length as _)?;
     Ok(0)
 }
@@ -324,11 +306,8 @@ pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
     // Synchronize file to disk - syncs both data and metadata
     let any_file = kthread::current_resources().get_file_like(fd)?;
-    if let Ok(f) = any_file.clone().downcast_arc::<File>() {
+    if let Ok(f) = any_file.downcast_arc::<File>() {
         f.sync(false)?;
-        return Ok(0);
-    } else if let Ok(d) = any_file.downcast_arc::<Directory>() {
-        d.inner().sync(false)?;
         return Ok(0);
     }
     Err(KError::from(LinuxError::EINVAL))
@@ -339,11 +318,8 @@ pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
     // Synchronize file data to disk - only syncs data, not metadata
     let any_file = kthread::current_resources().get_file_like(fd)?;
-    if let Ok(f) = any_file.clone().downcast_arc::<File>() {
+    if let Ok(f) = any_file.downcast_arc::<File>() {
         f.sync(true)?;
-        return Ok(0);
-    } else if let Ok(d) = any_file.downcast_arc::<Directory>() {
-        d.inner().sync(true)?;
         return Ok(0);
     }
     Err(KError::from(LinuxError::EINVAL))

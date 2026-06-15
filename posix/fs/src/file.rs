@@ -21,10 +21,7 @@ pub fn add_stdio(fd_table: &mut FdTable, fs_context: &FsContext) -> KResult<()> 
 
     let open = |options: &mut OpenOptions, flags| {
         KResult::Ok(Arc::new(
-            options
-                .open_flags(flags)
-                .open(fs_context, "/dev/console")?
-                .into_file()?,
+            options.open_flags(flags).open(fs_context, "/dev/console")?,
         ))
     };
 

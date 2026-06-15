@@ -478,16 +478,13 @@ impl FileMapping {
         if in_memory {
             return Ok(());
         }
-        let keys = self
+        let slots = self
             .page_cache
             .lock()
             .iter()
-            .map(|(pn, _)| *pn)
+            .map(|(pn, slot)| (*pn, slot.clone()))
             .collect::<Vec<_>>();
-        for pn in keys {
-            let Some(slot) = self.page_cache.lock().get(&pn).cloned() else {
-                continue;
-            };
+        for (pn, slot) in slots {
             if !slot.is_ready() {
                 slot.wait_ready();
             }

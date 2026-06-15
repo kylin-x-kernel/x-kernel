@@ -46,8 +46,7 @@ pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isiz
                 .write(true)
                 .create(true)
                 .open_flags(O_RDWR)
-                .open(&fs, &name)?
-                .into_file()?;
+                .open(&fs, &name)?;
             let proc_state = current_process_state();
             return proc_state
                 .resources

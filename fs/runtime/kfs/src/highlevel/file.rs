@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! File abstraction and caching layer.
-use alloc::{borrow::Cow, boxed::Box, string::ToString, sync::Arc, vec::Vec};
+use alloc::{borrow::Cow, string::ToString, sync::Arc, vec::Vec};
 use core::{
     ffi::c_int,
     hint::likely,
@@ -19,8 +19,8 @@ use ksync::RwLock;
 use ktask::future::{block_on, poll_io};
 pub use kvfs::VfsFileFlags as FileFlags;
 use kvfs::{
-    Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsFile, VfsIoRange,
-    VfsResult, check_file_size, generic_read_range, generic_write_range, path::Path,
+    DirEntrySink, Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsFile,
+    VfsIoRange, VfsResult, check_file_size, generic_read_range, generic_write_range, path::Path,
 };
 use memaddr::PAGE_SIZE_4K;
 
@@ -31,38 +31,6 @@ use super::{
         PageCache, PageIndex,
     },
 };
-
-/// Results returned by [`OpenOptions::open`].
-pub enum OpenResult {
-    File(File),
-    Dir(Location),
-}
-
-impl OpenResult {
-    /// Convert into a file result, erroring if it is a directory.
-    pub fn into_file(self) -> VfsResult<File> {
-        match self {
-            Self::File(file) => Ok(file),
-            Self::Dir(_) => Err(VfsError::IsADirectory),
-        }
-    }
-
-    /// Convert into a directory result, erroring if it is a file.
-    pub fn into_dir(self) -> VfsResult<Location> {
-        match self {
-            Self::Dir(dir) => Ok(dir),
-            Self::File(_) => Err(VfsError::NotADirectory),
-        }
-    }
-
-    /// Convert into a location regardless of variant.
-    pub fn into_location(self) -> Location {
-        match self {
-            Self::File(file) => file.location().clone(),
-            Self::Dir(dir) => dir,
-        }
-    }
-}
 
 /// Options and flags which can be used to configure how a file is opened.
 #[derive(Debug, Clone)]
@@ -198,7 +166,7 @@ impl OpenOptions {
         self.write || self.append || self.truncate
     }
 
-    fn _open(&self, loc: Location) -> VfsResult<OpenResult> {
+    fn _open(&self, loc: Location) -> VfsResult<File> {
         let flags = self.to_flags()?;
 
         let is_dir = loc.is_dir();
@@ -211,8 +179,8 @@ impl OpenOptions {
         if self.mutates_existing_file() {
             loc.check_writable_mount()?;
         }
-        Ok(if is_dir {
-            OpenResult::Dir(loc)
+        let backend = if is_dir {
+            FileBackend::new_directory(loc)
         } else {
             // TODO(mivik): is this correct?
             let metadata = loc.metadata()?;
@@ -237,18 +205,19 @@ impl OpenOptions {
                     backend.set_len(0)?;
                 }
             }
-            OpenResult::File(File::with_open_flags(backend, flags, self.open_flags))
-        })
+            backend
+        };
+        Ok(File::with_open_flags(backend, flags, self.open_flags))
     }
 
-    pub fn open_loc(&self, loc: Location) -> VfsResult<OpenResult> {
+    pub fn open_loc(&self, loc: Location) -> VfsResult<File> {
         if !self.is_valid() {
             return Err(VfsError::InvalidInput);
         }
         self._open(loc)
     }
 
-    pub fn open(&self, context: &FsContext, path: impl AsRef<Path>) -> VfsResult<OpenResult> {
+    pub fn open(&self, context: &FsContext, path: impl AsRef<Path>) -> VfsResult<File> {
         if !self.is_valid() {
             return Err(VfsError::InvalidInput);
         }
@@ -535,6 +504,7 @@ impl Drop for CachedFile {
 pub enum FileBackend {
     Cached(CachedFile),
     Direct(Location),
+    Directory(Location),
 }
 
 impl FileBackend {
@@ -548,7 +518,14 @@ impl FileBackend {
         CachedFile::get_or_create(location).map(Self::Cached)
     }
 
+    pub(crate) fn new_directory(location: Location) -> Self {
+        Self::Directory(location)
+    }
+
     pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+        if matches!(self, Self::Directory(_)) {
+            return Err(VfsError::IsADirectory);
+        }
         let location = self.location();
         let Some(range) =
             generic_read_range(location, offset, dst.remaining_mut(), location.len()?)?
@@ -561,6 +538,7 @@ impl FileBackend {
     fn read_range(&self, mut dst: impl Write + IoBufMut, range: VfsIoRange) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => cached.read_range(dst, range),
+            Self::Directory(_) => Err(VfsError::IsADirectory),
             Self::Direct(loc) => {
                 let mut total = 0usize;
                 let file = loc.entry().as_file()?;
@@ -603,6 +581,9 @@ impl FileBackend {
     }
 
     pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+        if matches!(self, Self::Directory(_)) {
+            return Err(VfsError::IsADirectory);
+        }
         let Some(range) = generic_write_range(self.location(), offset, src.remaining())? else {
             return Ok(0);
         };
@@ -616,6 +597,7 @@ impl FileBackend {
                 let _guard = cached.append_lock.read();
                 cached.write_range_locked(src, range)
             }
+            Self::Directory(_) => Err(VfsError::IsADirectory),
             Self::Direct(loc) => {
                 let mut total = 0usize;
                 let file = loc.entry().as_file()?;
@@ -653,6 +635,7 @@ impl FileBackend {
         self.location().check_writable_mount()?;
         match self {
             Self::Cached(cached) => cached.append(src),
+            Self::Directory(_) => Err(VfsError::IsADirectory),
             Self::Direct(loc) => {
                 let mut total = 0usize;
                 let mut end = loc.len()?;
@@ -695,6 +678,7 @@ impl FileBackend {
         match self {
             Self::Cached(cached) => cached.location(),
             Self::Direct(loc) => loc,
+            Self::Directory(loc) => loc,
         }
     }
 
@@ -702,6 +686,7 @@ impl FileBackend {
         match self {
             Self::Cached(cached) => cached.sync(data_only),
             Self::Direct(loc) => loc.entry().as_file()?.sync(data_only),
+            Self::Directory(loc) => loc.sync(data_only),
         }
     }
 
@@ -711,11 +696,15 @@ impl FileBackend {
         match self {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => loc.entry().as_file()?.set_len(len),
+            Self::Directory(_) => Err(VfsError::IsADirectory),
         }
     }
 
     pub fn collapse_range(&self, offset: u64, len: u64) -> VfsResult<()> {
         self.location().check_writable_mount()?;
+        if matches!(self, Self::Directory(_)) {
+            return Err(VfsError::IsADirectory);
+        }
         if let Self::Cached(cached) = self {
             cached.flush_and_evict_from(offset)?;
         }
@@ -724,6 +713,9 @@ impl FileBackend {
 
     pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
         self.location().check_writable_mount()?;
+        if matches!(self, Self::Directory(_)) {
+            return Err(VfsError::IsADirectory);
+        }
         let new_len = self
             .location()
             .len()?
@@ -740,11 +732,26 @@ impl FileBackend {
 /// Provides `std::fs::File`-like interface.
 pub struct File {
     inner: FileBackend,
-    vfs_file: Box<VfsFile>,
+    vfs_file: VfsFile,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
     #[cfg(feature = "times")]
     is_effectively_readonly: bool,
+}
+
+struct PositionUpdatingDirSink<'a> {
+    position: &'a mut u64,
+    sink: &'a mut dyn DirEntrySink,
+}
+
+impl DirEntrySink for PositionUpdatingDirSink<'_> {
+    fn accept(&mut self, name: &str, ino: u64, node_type: NodeType, offset: u64) -> bool {
+        let accepted = self.sink.accept(name, ino, node_type, offset);
+        if accepted {
+            *self.position = offset;
+        }
+        accepted
+    }
 }
 
 impl File {
@@ -753,11 +760,7 @@ impl File {
     }
 
     pub fn with_open_flags(inner: FileBackend, flags: FileFlags, open_flags: u32) -> Self {
-        let vfs_file = Box::new(VfsFile::with_open_flags(
-            inner.location().clone(),
-            flags,
-            open_flags,
-        ));
+        let vfs_file = VfsFile::with_open_flags(inner.location().clone(), flags, open_flags);
         #[cfg(feature = "times")]
         let is_effectively_readonly = vfs_file.location().is_effectively_readonly();
         Self {
@@ -771,10 +774,7 @@ impl File {
     }
 
     pub fn open(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
-        OpenOptions::new()
-            .read(true)
-            .open(context, path.as_ref())
-            .and_then(OpenResult::into_file)
+        OpenOptions::new().read(true).open(context, path.as_ref())
     }
 
     pub fn create(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
@@ -783,7 +783,6 @@ impl File {
             .create(true)
             .truncate(true)
             .open(context, path.as_ref())
-            .and_then(OpenResult::into_file)
     }
 
     pub fn access(&self, flags: FileFlags) -> VfsResult<&FileBackend> {
@@ -816,8 +815,19 @@ impl File {
         self.vfs_file.location()
     }
 
+    pub fn is_dir(&self) -> bool {
+        matches!(self.inner, FileBackend::Directory(_))
+    }
+
+    pub fn check_is_dir(&self) -> VfsResult<()> {
+        self.location().check_is_dir()
+    }
+
     /// Reads a number of bytes starting from a given offset.
     pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+        if self.is_dir() {
+            return Err(VfsError::IsADirectory);
+        }
         let backend = self.access(FileFlags::READ)?;
         let len = backend.location().len()?;
         let Some(range) = self
@@ -845,6 +855,18 @@ impl File {
     pub fn sync(&self, data_only: bool) -> VfsResult<()> {
         self.access(FileFlags::empty())?;
         self.inner.sync(data_only)
+    }
+
+    pub fn read_dir(&self, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+        self.access(FileFlags::READ)?;
+        self.location().check_is_dir()?;
+        let mut pos = self.vfs_file.position_lock_or_espipe()?;
+        let start = *pos;
+        let mut sink = PositionUpdatingDirSink {
+            position: &mut pos,
+            sink,
+        };
+        self.location().read_dir(start, &mut sink)
     }
 
     pub fn read(&self, dst: impl Write + IoBufMut) -> kio::Result<usize> {
@@ -908,22 +930,19 @@ impl Seek for &File {
     fn seek(&mut self, pos: SeekFrom) -> kio::Result<u64> {
         self.access(FileFlags::empty())?;
 
-        if let Some(mut guard) = self.vfs_file.position_lock() {
-            let new_pos = match pos {
-                SeekFrom::Start(pos) => pos,
-                SeekFrom::End(off) => {
-                    let size = self.access(FileFlags::empty())?.location().len()?;
-                    size.checked_add_signed(off).ok_or(VfsError::InvalidInput)?
-                }
-                SeekFrom::Current(off) => guard
-                    .checked_add_signed(off)
-                    .ok_or(VfsError::InvalidInput)?,
-            };
-            *guard = new_pos;
-            Ok(new_pos)
-        } else {
-            Ok(0)
-        }
+        let mut guard = self.vfs_file.position_lock_or_espipe()?;
+        let new_pos = match pos {
+            SeekFrom::Start(pos) => pos,
+            SeekFrom::End(off) => {
+                let size = self.access(FileFlags::empty())?.location().len()?;
+                size.checked_add_signed(off).ok_or(VfsError::InvalidInput)?
+            }
+            SeekFrom::Current(off) => guard
+                .checked_add_signed(off)
+                .ok_or(VfsError::InvalidInput)?,
+        };
+        *guard = new_pos;
+        Ok(new_pos)
     }
 }
 
@@ -999,6 +1018,7 @@ impl FileLike for File {
     fn mmap(&self, mapper: &mut dyn MmapMapper) -> KResult<()> {
         match &self.inner {
             FileBackend::Cached(_) => mapper.map_file_backed()?,
+            FileBackend::Directory(_) => return Err(KError::NoSuchDevice),
             FileBackend::Direct(loc) => match loc.node_type() {
                 NodeType::CharacterDevice | NodeType::BlockDevice => loc.mmap(mapper)?,
                 _ => mapper.map_file_backed()?,

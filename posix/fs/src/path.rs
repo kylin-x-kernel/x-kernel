@@ -9,7 +9,7 @@ use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
 use kfd::{FileLike, Kstat};
-use kfs::{Directory, File, FsContext};
+use kfs::{File, FsContext};
 use kthread::{current_process_state, current_thread, get_process_state};
 use kvfs::Location;
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_NOFOLLOW, O_PATH};
@@ -24,8 +24,9 @@ pub(crate) fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult
     if dirfd == AT_FDCWD {
         f(&mut fs)
     } else {
-        let dir = kthread::current_resources().get_file_like_as::<Directory>(dirfd)?;
-        let dir = dir.inner().clone();
+        let dir = kthread::current_resources().get_file_like_as::<File>(dirfd)?;
+        dir.check_is_dir()?;
+        let dir = dir.location().clone();
         f(&mut fs.with_current_dir(dir)?)
     }
 }
@@ -129,7 +130,7 @@ pub(crate) fn classify_procfd_path(path: &str, current_pid: u32) -> ParsedProcFd
 /// Result of resolving a path at a given directory.
 #[derive(Clone)]
 pub(crate) enum ResolveAtResult {
-    File(Location),
+    Location(Location),
     Other(Arc<dyn FileLike>),
 }
 
@@ -151,16 +152,16 @@ pub(crate) enum PathSource {
 }
 
 impl ResolveAtResult {
-    pub(crate) fn into_file(self) -> Option<Location> {
+    pub(crate) fn into_location(self) -> KResult<Location> {
         match self {
-            Self::File(file) => Some(file),
-            Self::Other(_) => None,
+            Self::Location(location) => Ok(location),
+            Self::Other(_) => Err(KError::BadFileDescriptor),
         }
     }
 
     pub(crate) fn stat(&self) -> KResult<Kstat> {
         match self {
-            Self::File(file) => file.metadata().map(Kstat::from),
+            Self::Location(location) => location.metadata().map(Kstat::from),
             Self::Other(file_like) => file_like.stat(),
         }
     }
@@ -176,14 +177,14 @@ impl ResolvedPath {
 
     fn from_procfd_file_like(file_like: Arc<dyn FileLike>) -> KResult<Self> {
         Ok(Self {
-            target: ResolveAtResult::File(file_like_location(file_like)?),
+            target: ResolveAtResult::Location(file_like_location(file_like)?),
             kind: ResolvedPathKind::ProcFd,
         })
     }
 
     pub(crate) fn location(&self) -> Option<Location> {
         match &self.target {
-            ResolveAtResult::File(location) => Some(location.clone()),
+            ResolveAtResult::Location(location) => Some(location.clone()),
             ResolveAtResult::Other(_) => None,
         }
     }
@@ -200,9 +201,9 @@ impl ResolvedPath {
 fn resolve_result_from_file_like(file_like: Arc<dyn FileLike>) -> KResult<ResolveAtResult> {
     let f = file_like.clone();
     if let Some(file) = f.downcast_ref::<File>() {
-        Ok(ResolveAtResult::File(file.backend()?.location().clone()))
-    } else if let Some(dir) = f.downcast_ref::<Directory>() {
-        Ok(ResolveAtResult::File(dir.inner().clone()))
+        Ok(ResolveAtResult::Location(
+            file.backend()?.location().clone(),
+        ))
     } else {
         Ok(ResolveAtResult::Other(file_like))
     }
@@ -212,8 +213,6 @@ fn file_like_location(file_like: Arc<dyn FileLike>) -> KResult<Location> {
     let f = file_like.clone();
     if let Some(file) = f.downcast_ref::<File>() {
         Ok(file.backend()?.location().clone())
-    } else if let Some(dir) = f.downcast_ref::<Directory>() {
-        Ok(dir.inner().clone())
     } else {
         Err(KError::OperationNotSupported)
     }
@@ -304,7 +303,7 @@ pub(crate) fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResul
     match resolve_path_source(dirfd, path, flags)? {
         PathSource::Resolved(path) => Ok(path.into_result()),
         PathSource::Path(path) => {
-            resolve_filesystem_path(dirfd, &path, flags).map(ResolveAtResult::File)
+            resolve_filesystem_path(dirfd, &path, flags).map(ResolveAtResult::Location)
         }
     }
 }

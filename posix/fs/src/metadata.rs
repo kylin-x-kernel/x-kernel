@@ -9,7 +9,7 @@ use core::{
     time::Duration,
 };
 
-use kerrno::{KError, KResult};
+use kerrno::KResult;
 use khal::time::wall_time;
 use kvfs::{MetadataUpdate, NodePermission};
 use linux_raw_sys::general::*;
@@ -45,9 +45,7 @@ pub fn sys_fchownat(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?
-        .into_file()
-        .ok_or(KError::BadFileDescriptor)?;
+    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_location()?;
     let meta = loc.metadata()?;
 
     let mut mode = meta.mode;
@@ -88,8 +86,7 @@ pub fn sys_fchmodat(
         .map(UserConstPtr::load_string)
         .transpose()?;
     resolve_at(dirfd, path.as_deref(), flags)?
-        .into_file()
-        .ok_or(KError::BadFileDescriptor)?
+        .into_location()?
         .update_metadata(MetadataUpdate {
             mode: Some(NodePermission::from_bits_truncate(mode as u16)),
             ..Default::default()
@@ -109,8 +106,7 @@ fn update_times(
         .map(UserConstPtr::load_string)
         .transpose()?;
     resolve_at(dirfd, path.as_deref(), flags)?
-        .into_file()
-        .ok_or(KError::BadFileDescriptor)?
+        .into_location()?
         .update_metadata(MetadataUpdate {
             atime,
             mtime,

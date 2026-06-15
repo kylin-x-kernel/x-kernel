@@ -5,7 +5,7 @@
 //! Filesystem sync syscalls.
 
 use kerrno::{KError, KResult};
-use kfs::{Directory, File};
+use kfs::File;
 
 pub fn sys_sync() -> KResult<isize> {
     let root = kthread::current_process_state()
@@ -22,11 +22,6 @@ pub fn sys_syncfs(fd: i32) -> KResult<isize> {
 
     if let Some(file) = file_like.downcast_ref::<File>() {
         file.location().filesystem().flush()?;
-        return Ok(0);
-    }
-
-    if let Some(dir) = file_like.downcast_ref::<Directory>() {
-        dir.inner().filesystem().flush()?;
         return Ok(0);
     }
 

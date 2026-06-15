@@ -182,7 +182,7 @@ FileLike::read/write
 2. 非空路径先识别 live procfd。
 3. procfd 路径解析为目标进程 fd 表中的 `FileLike`。
 4. 普通路径根据 `AT_SYMLINK_NOFOLLOW` 选择 `resolve` 或 `resolve_no_follow`。
-5. 返回 `ResolveAtResult::File(Location)` 或非 VFS 对象 `ResolveAtResult::Other`。
+5. 返回 `ResolveAtResult::Location(Location)` 或非 VFS 对象 `ResolveAtResult::Other`。
 
 ### `getdents64`
 

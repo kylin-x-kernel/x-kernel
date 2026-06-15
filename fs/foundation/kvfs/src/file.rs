@@ -10,6 +10,8 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use kerrno::LinuxError;
+
 use crate::{Location, Mutex, MutexGuard, NodeFlags, TypeMap, VfsError, VfsResult};
 
 bitflags::bitflags! {
@@ -45,6 +47,11 @@ impl VfsIoRange {
     /// Returns the number of bytes that may be accessed.
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Returns whether this range contains no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Returns the exclusive byte end offset.
@@ -141,15 +148,7 @@ impl VfsFile {
 
     /// Creates a VFS file with raw user-visible open flags.
     pub fn with_open_flags(location: Location, flags: VfsFileFlags, open_flags: u32) -> Self {
-        let position = if location.flags().contains(NodeFlags::STREAM) {
-            None
-        } else {
-            Some(Mutex::new(if flags.contains(VfsFileFlags::APPEND) {
-                location.len().unwrap_or_default()
-            } else {
-                0
-            }))
-        };
+        let position = (!location.flags().contains(NodeFlags::STREAM)).then(|| Mutex::new(0));
 
         Self {
             location,
@@ -218,6 +217,12 @@ impl VfsFile {
         self.position.as_ref().map(Mutex::lock)
     }
 
+    /// Locks the current file offset for operations that require seekability.
+    pub fn position_lock_or_espipe(&self) -> VfsResult<MutexGuard<'_, u64>> {
+        self.position_lock()
+            .ok_or_else(|| VfsError::from(LinuxError::ESPIPE))
+    }
+
     /// Returns the current file offset, if this file tracks one.
     pub fn position(&self) -> Option<u64> {
         self.position.as_ref().map(|position| *position.lock())
@@ -225,12 +230,8 @@ impl VfsFile {
 
     /// Sets the current file offset if this file tracks one.
     pub fn set_position(&self, position: u64) -> VfsResult<()> {
-        if let Some(mut current) = self.position_lock() {
-            *current = position;
-            Ok(())
-        } else {
-            Err(VfsError::InvalidInput)
-        }
+        *self.position_lock_or_espipe()? = position;
+        Ok(())
     }
 
     /// Sets the open-file nonblocking flag.

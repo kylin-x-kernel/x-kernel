@@ -6,7 +6,7 @@ use alloc::{format, sync::Arc, vec::Vec};
 use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
-use kfs::{File, FileBackend, FileFlags, OpenOptions, OpenResult};
+use kfs::{File, FileFlags, OpenOptions};
 use kio::{Seek, SeekFrom};
 use ksync::RwLock;
 use kthread;
@@ -149,16 +149,13 @@ impl Default for FileVariant {
     }
 }
 
-fn add_to_fd(result: OpenResult, _flags: u32) -> KResult<isize> {
-    let f = match result {
-        OpenResult::File(file) => file,
-        _ => {
-            info!("add_to_fd = error");
-            return Err(KError::InvalidInput);
-        }
-    };
+fn add_to_fd(file: File, _flags: u32) -> KResult<isize> {
+    if file.is_dir() {
+        info!("add_to_fd = error");
+        return Err(KError::InvalidInput);
+    }
 
-    let fd = TEE_FD_TABLE.write().insert(Arc::new(f));
+    let fd = TEE_FD_TABLE.write().insert(Arc::new(file));
     Ok(fd as isize)
 }
 
