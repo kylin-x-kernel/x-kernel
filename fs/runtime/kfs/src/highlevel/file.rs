@@ -523,112 +523,125 @@ impl FileBackend {
     }
 
     pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        if matches!(self, Self::Directory(_)) {
-            return Err(VfsError::IsADirectory);
-        }
-        let location = self.location();
-        let Some(range) =
-            generic_read_range(location, offset, dst.remaining_mut(), location.len()?)?
-        else {
-            return Ok(0);
-        };
-        self.read_range(dst, range)
-    }
-
-    fn read_range(&self, mut dst: impl Write + IoBufMut, range: VfsIoRange) -> VfsResult<usize> {
         match self {
-            Self::Cached(cached) => cached.read_range(dst, range),
+            Self::Cached(cached) => cached.read_at(dst, offset),
             Self::Directory(_) => Err(VfsError::IsADirectory),
+            Self::Direct(loc) if loc.flags().contains(NodeFlags::STREAM) => {
+                Self::read_direct_at(loc, dst, offset, None, false)
+            }
             Self::Direct(loc) => {
-                let mut total = 0usize;
-                let file = loc.entry().as_file()?;
-                let mut remaining = range.len();
-                let mut offset = range.offset();
-                let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
-
-                while remaining > 0 && !dst.is_full() {
-                    let want = chunk.len().min(dst.remaining_mut()).min(remaining);
-                    if want == 0 {
-                        break;
-                    }
-
-                    let read = file.read_at(&mut chunk[..want], offset)?;
-                    if read == 0 {
-                        break;
-                    }
-                    offset += read as u64;
-
-                    let mut consumed = 0usize;
-                    while consumed < read {
-                        let written = dst.write(&chunk[consumed..read])?;
-                        if written == 0 {
-                            return Err(VfsError::WriteZero);
-                        }
-                        consumed += written;
-                    }
-
-                    total += read;
-                    remaining -= read;
-
-                    if read < want {
-                        break;
-                    }
-                }
-
-                Ok(total)
+                let Some(range) = generic_read_range(loc, offset, dst.remaining_mut(), loc.len()?)?
+                else {
+                    return Ok(0);
+                };
+                Self::read_direct_at(loc, dst, range.offset(), Some(range.len()), true)
             }
         }
+    }
+
+    fn read_direct_at(
+        loc: &Location,
+        mut dst: impl Write + IoBufMut,
+        mut offset: u64,
+        mut remaining: Option<usize>,
+        advance_offset: bool,
+    ) -> VfsResult<usize> {
+        let mut total = 0usize;
+        let file = loc.entry().as_file()?;
+        let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
+
+        while remaining != Some(0) && !dst.is_full() {
+            let want = remaining
+                .map_or(chunk.len(), |remaining| chunk.len().min(remaining))
+                .min(dst.remaining_mut());
+            if want == 0 {
+                break;
+            }
+
+            let read = file.read_at(&mut chunk[..want], offset)?;
+            if read == 0 {
+                break;
+            }
+            if advance_offset {
+                offset += read as u64;
+            }
+
+            let mut consumed = 0usize;
+            while consumed < read {
+                let written = dst.write(&chunk[consumed..read])?;
+                if written == 0 {
+                    return Err(VfsError::WriteZero);
+                }
+                consumed += written;
+            }
+
+            total += read;
+            if let Some(left) = remaining.as_mut() {
+                *left -= read;
+            }
+
+            if read < want {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        if matches!(self, Self::Directory(_)) {
-            return Err(VfsError::IsADirectory);
-        }
-        let Some(range) = generic_write_range(self.location(), offset, src.remaining())? else {
-            return Ok(0);
-        };
-        self.write_range(src, range)
-    }
-
-    fn write_range(&self, mut src: impl Read + IoBuf, range: VfsIoRange) -> VfsResult<usize> {
         self.location().check_writable_mount()?;
         match self {
-            Self::Cached(cached) => {
-                let _guard = cached.append_lock.read();
-                cached.write_range_locked(src, range)
-            }
+            Self::Cached(cached) => cached.write_at(src, offset),
             Self::Directory(_) => Err(VfsError::IsADirectory),
+            Self::Direct(loc) if loc.flags().contains(NodeFlags::STREAM) => {
+                Self::write_direct_at(loc, src, offset, None, false)
+            }
             Self::Direct(loc) => {
-                let mut total = 0usize;
-                let file = loc.entry().as_file()?;
-                let mut remaining = range.len();
-                let mut offset = range.offset();
-                let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
-
-                while remaining > 0 && !src.is_empty() {
-                    let want = chunk.len().min(remaining);
-                    let read = src.read(&mut chunk[..want])?;
-                    if read == 0 {
-                        break;
-                    }
-
-                    let mut written_in_chunk = 0usize;
-                    while written_in_chunk < read {
-                        let written = file.write_at(&chunk[written_in_chunk..read], offset)?;
-                        if written == 0 {
-                            return Err(VfsError::WriteZero);
-                        }
-                        written_in_chunk += written;
-                        offset += written as u64;
-                    }
-
-                    total += read;
-                    remaining -= read;
-                }
-
-                Ok(total)
+                let Some(range) = generic_write_range(loc, offset, src.remaining())? else {
+                    return Ok(0);
+                };
+                Self::write_direct_at(loc, src, range.offset(), Some(range.len()), true)
             }
         }
+    }
+
+    fn write_direct_at(
+        loc: &Location,
+        mut src: impl Read + IoBuf,
+        mut offset: u64,
+        mut remaining: Option<usize>,
+        advance_offset: bool,
+    ) -> VfsResult<usize> {
+        let mut total = 0usize;
+        let file = loc.entry().as_file()?;
+        let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
+
+        while remaining != Some(0) && !src.is_empty() {
+            let want = remaining.map_or(chunk.len(), |remaining| chunk.len().min(remaining));
+            let read = src.read(&mut chunk[..want])?;
+            if read == 0 {
+                break;
+            }
+
+            let mut written_in_chunk = 0usize;
+            while written_in_chunk < read {
+                let written = file.write_at(&chunk[written_in_chunk..read], offset)?;
+                if written == 0 {
+                    return Err(VfsError::WriteZero);
+                }
+                written_in_chunk += written;
+                if advance_offset {
+                    offset += written as u64;
+                }
+            }
+
+            total += read;
+            if let Some(left) = remaining.as_mut() {
+                *left -= read;
+            }
+        }
+
+        Ok(total)
     }
 
     pub fn append(&self, mut src: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
@@ -825,27 +838,12 @@ impl File {
 
     /// Reads a number of bytes starting from a given offset.
     pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        if self.is_dir() {
-            return Err(VfsError::IsADirectory);
-        }
-        let backend = self.access(FileFlags::READ)?;
-        let len = backend.location().len()?;
-        let Some(range) = self
-            .vfs_file
-            .generic_read_range(offset, dst.remaining_mut(), len)?
-        else {
-            return Ok(0);
-        };
-        backend.read_range(dst, range)
+        self.access(FileFlags::READ)?.read_at(dst, offset)
     }
 
     /// Writes a number of bytes starting from a given offset.
     pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        let backend = self.access(FileFlags::WRITE)?;
-        let Some(range) = self.vfs_file.generic_write_range(offset, src.remaining())? else {
-            return Ok(0);
-        };
-        backend.write_range(src, range)
+        self.access(FileFlags::WRITE)?.write_at(src, offset)
     }
 
     /// Attempts to sync OS-internal file content and metadata to disk.
