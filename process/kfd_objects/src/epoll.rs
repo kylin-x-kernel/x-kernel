@@ -276,6 +276,32 @@ impl Epoll {
         file.register(&mut context, interest.event.events);
     }
 
+    fn replace_ready_interest(
+        &self,
+        old_interest: &Arc<EpollInterest>,
+        new_interest: &Arc<EpollInterest>,
+    ) {
+        let old_weak = Arc::downgrade(old_interest);
+        let new_weak = Arc::downgrade(new_interest);
+        let mut queue = self.inner.ready_queue.lock();
+        let mut replaced = false;
+
+        for queued_interest in queue.iter_mut() {
+            if Weak::ptr_eq(queued_interest, &old_weak) {
+                *queued_interest = new_weak.clone();
+                replaced = true;
+                break;
+            }
+        }
+
+        if !replaced {
+            queue.push_back(new_weak);
+        }
+        new_interest.in_ready_queue.store(true, Ordering::Release);
+        drop(queue);
+        self.inner.poll_ready.wake();
+    }
+
     fn check_and_register_waker(&self, interest: &Arc<EpollInterest>) {
         let Some(file) = interest.key.get_file() else {
             return;
@@ -336,18 +362,21 @@ impl Epoll {
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
 
         let mut guard = self.inner.interests.lock();
-        let old = guard.get_mut(&key).ok_or(KError::NotFound)?;
-        if old.is_in_queue() {
-            interest.in_ready_queue.store(true, Ordering::Release);
-        }
-        *old = Arc::clone(&interest);
+        let old = guard.get(&key).cloned().ok_or(KError::NotFound)?;
+        guard.insert(key.clone(), Arc::clone(&interest));
         drop(guard);
+
+        if old.is_in_queue() {
+            self.replace_ready_interest(&old, &interest);
+            self.register_waker_only(&interest);
+        } else {
+            self.check_and_register_waker(&interest);
+        }
 
         trace!(
             "Epoll: modify fd={}, events={:?}",
             fd, interest.event.events
         );
-        self.check_and_register_waker(&interest);
         Ok(())
     }
 
@@ -461,10 +490,40 @@ impl Pollable for Epoll {
 
 #[cfg(unittest)]
 mod epoll_tests {
-    use kpoll::IoEvents;
+    use alloc::borrow::Cow;
+    use core::task::Context;
+
+    use kpoll::{IoEvents, Pollable};
+    use kspin::SpinNoPreempt;
     use unittest::def_test;
 
     use super::*;
+
+    struct ReadyFile {
+        events: SpinNoPreempt<IoEvents>,
+    }
+
+    impl ReadyFile {
+        fn new(events: IoEvents) -> Self {
+            Self {
+                events: SpinNoPreempt::new(events),
+            }
+        }
+    }
+
+    impl FileLike for ReadyFile {
+        fn path(&self) -> Cow<'_, str> {
+            "ready-file".into()
+        }
+    }
+
+    impl Pollable for ReadyFile {
+        fn poll(&self) -> IoEvents {
+            *self.events.lock()
+        }
+
+        fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
+    }
 
     #[def_test]
     fn test_epoll_creation() {
@@ -579,6 +638,40 @@ mod epoll_tests {
                 .modify(999, dummy, event, EpollFlags::empty())
                 .is_err()
         );
+    }
+
+    #[def_test]
+    fn test_epoll_modify_replaces_ready_queue_interest() {
+        let epoll = Epoll::new();
+        let file: Arc<dyn FileLike> = Arc::new(ReadyFile::new(IoEvents::IN | IoEvents::OUT));
+
+        epoll
+            .add(
+                3,
+                file.clone(),
+                EpollEvent {
+                    events: IoEvents::IN,
+                    user_data: 1,
+                },
+                EpollFlags::empty(),
+            )
+            .unwrap();
+        epoll
+            .modify(
+                3,
+                file,
+                EpollEvent {
+                    events: IoEvents::OUT,
+                    user_data: 2,
+                },
+                EpollFlags::empty(),
+            )
+            .unwrap();
+
+        let mut out = [epoll_event { events: 0, data: 0 }; 1];
+        assert_eq!(epoll.poll_events(&mut out), Ok(1));
+        assert_eq!(out[0].events, IoEvents::OUT.bits());
+        assert_eq!(out[0].data, 2);
     }
 
     #[def_test]
