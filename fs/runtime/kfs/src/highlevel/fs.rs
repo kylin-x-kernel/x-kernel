@@ -14,7 +14,7 @@ use alloc::{
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
-    Location, Metadata, NodePermission, NodeType, VfsError, VfsResult,
+    Location, Metadata, Mountpoint, NodePermission, NodeType, VfsError, VfsResult,
     path::{Path, PathBuf},
 };
 
@@ -43,6 +43,20 @@ pub fn kernel_fs_context() -> &'static Arc<Mutex<FsContext>> {
 /// Creates a new process-owned filesystem context from the kernel defaults.
 pub fn new_process_fs_context() -> Arc<Mutex<FsContext>> {
     Arc::new(Mutex::new(kernel_fs_context().lock().clone()))
+}
+
+fn sync_mount_tree(mountpoint: &Arc<Mountpoint>) -> VfsResult<()> {
+    mountpoint.super_block().sync_fs()?;
+    for child in mountpoint.child_mounts() {
+        sync_mount_tree(&child)?;
+    }
+    Ok(())
+}
+
+/// Synchronizes all filesystems visible from the kernel root mount tree.
+pub fn sync_filesystems() -> VfsResult<()> {
+    let root_mount = kernel_fs_context().lock().root_dir().mountpoint().clone();
+    sync_mount_tree(&root_mount)
 }
 
 /// Directory entry returned by `ReadDir`.

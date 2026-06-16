@@ -153,7 +153,7 @@ impl VfsInode {
     }
 
     /// Return or create this inode's address-space object.
-    pub fn get_or_insert_address_space(
+    pub(crate) fn get_or_insert_address_space(
         self: &Arc<Self>,
         ops: Arc<dyn AddressSpaceOperations>,
     ) -> Arc<AddressSpace> {
@@ -161,7 +161,7 @@ impl VfsInode {
     }
 
     /// Return or create this inode's address-space object with a custom builder.
-    pub fn get_or_insert_address_space_with(
+    pub(crate) fn get_or_insert_address_space_with(
         &self,
         create: impl FnOnce() -> AddressSpace,
     ) -> Arc<AddressSpace> {

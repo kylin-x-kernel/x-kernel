@@ -3,11 +3,11 @@
 // See LICENSES for license details.
 
 //! Filesystem traits and wrappers.
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use inherit_methods_macro::inherit_methods;
 
-use crate::{DirEntry, Mutex, SuperBlockOperations, TypeMap, VfsResult};
+use crate::{AddressSpace, DirEntry, Mutex, SuperBlockOperations, TypeMap, VfsResult};
 
 /// Large-file page-cache limit for 64-bit VFS offsets.
 pub const MAX_LFS_FILESIZE: u64 = i64::MAX as u64;
@@ -113,6 +113,7 @@ impl<T: FilesystemOps> SuperBlockOperations for T {
 pub struct SuperBlock {
     ops: Arc<dyn FilesystemOps>,
     max_file_size: u64,
+    address_spaces: Mutex<Vec<Arc<AddressSpace>>>,
     data: Mutex<TypeMap>,
 }
 
@@ -123,8 +124,6 @@ impl SuperBlock {
     pub fn root_dir(&self) -> DirEntry;
 
     pub fn stat(&self) -> VfsResult<StatFs>;
-
-    pub fn flush(&self) -> VfsResult<()>;
 }
 
 impl SuperBlock {
@@ -134,6 +133,7 @@ impl SuperBlock {
         Arc::new(Self {
             ops,
             max_file_size,
+            address_spaces: Mutex::default(),
             data: Mutex::default(),
         })
     }
@@ -146,6 +146,40 @@ impl SuperBlock {
     /// Returns this superblock's maximum regular-file size.
     pub fn max_file_size(&self) -> u64 {
         self.max_file_size
+    }
+
+    /// Registers an inode address space owned by this superblock.
+    pub fn register_address_space(&self, address_space: &Arc<AddressSpace>) {
+        let mut address_spaces = self.address_spaces.lock();
+        if !address_spaces
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, address_space))
+        {
+            address_spaces.push(address_space.clone());
+        }
+    }
+
+    fn live_address_spaces(&self) -> Vec<Arc<AddressSpace>> {
+        self.address_spaces.lock().clone()
+    }
+
+    /// Writes back dirty page-cache state owned by this superblock.
+    pub fn writeback_address_spaces(&self, data_only: bool) -> VfsResult<()> {
+        for address_space in self.live_address_spaces() {
+            address_space.writepages(data_only)?;
+        }
+        Ok(())
+    }
+
+    /// Synchronizes VFS page-cache state and then filesystem-owned state.
+    pub fn sync_fs(&self) -> VfsResult<()> {
+        self.writeback_address_spaces(false)?;
+        self.ops.flush()
+    }
+
+    /// Flushes this superblock.
+    pub fn flush(&self) -> VfsResult<()> {
+        self.sync_fs()
     }
 
     /// Access superblock-scoped attachment storage.

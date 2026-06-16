@@ -84,5 +84,9 @@ pub fn run_init_process(
     add_task_to_table(&task);
 
     // TODO: wait for all processes to finish
-    task.join()
+    let exit_code = task.join();
+    if let Err(err) = kfs::sync_filesystems() {
+        warn!("sync filesystems after init exit failed: {err:?}");
+    }
+    exit_code
 }

@@ -316,7 +316,7 @@ impl CachedFile {
         let in_memory = matches!(location.filesystem().name(), "tmpfs" | "memfs",);
         let file = location.entry().as_file()?.clone();
 
-        let address_space = location.vfs_inode().get_or_insert_address_space_with(|| {
+        let address_space = location.get_or_insert_address_space_with(|| {
             let mapping = if in_memory {
                 Arc::new(FileMapping::new_unbounded())
             } else {

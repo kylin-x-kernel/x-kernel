@@ -32,8 +32,8 @@ use kpoll::{IoEvents, Pollable};
 use smallvec::SmallVec;
 
 use crate::{
-    AddressSpace, AddressSpaceOperations, DirNodeInodeOperations, FileNodeFileOperations,
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsResult, path::PathBuf,
+    AddressSpace, DirNodeInodeOperations, FileNodeFileOperations, FilesystemOps, Metadata,
+    MetadataUpdate, Mutex, MutexGuard, NodeType, VfsResult, path::PathBuf,
 };
 
 bitflags! {
@@ -320,14 +320,6 @@ impl DirEntry {
     /// Returns this inode's address-space object, if one has been attached.
     pub fn address_space(&self) -> Option<Arc<AddressSpace>> {
         self.0.inode.address_space()
-    }
-
-    /// Return or create this inode's address-space object.
-    pub fn get_or_insert_address_space(
-        &self,
-        ops: Arc<dyn AddressSpaceOperations>,
-    ) -> Arc<AddressSpace> {
-        self.0.inode.get_or_insert_address_space(ops)
     }
 
     /// Returns an inode-operations adapter for directory entries.

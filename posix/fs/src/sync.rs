@@ -5,15 +5,10 @@
 //! Filesystem sync syscalls.
 
 use kerrno::{KError, KResult};
-use kfs::File;
+use kfs::{File, sync_filesystems};
 
 pub fn sys_sync() -> KResult<isize> {
-    let root = kthread::current_process_state()
-        .fs_context()
-        .lock()
-        .root_dir()
-        .clone();
-    root.filesystem().flush()?;
+    sync_filesystems()?;
     Ok(0)
 }
 
@@ -21,7 +16,7 @@ pub fn sys_syncfs(fd: i32) -> KResult<isize> {
     let file_like = kthread::current_resources().get_file_like(fd)?;
 
     if let Some(file) = file_like.downcast_ref::<File>() {
-        file.location().filesystem().flush()?;
+        file.location().super_block().sync_fs()?;
         return Ok(0);
     }
 

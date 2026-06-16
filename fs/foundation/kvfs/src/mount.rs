@@ -260,7 +260,22 @@ impl Location {
         &self,
         ops: Arc<dyn AddressSpaceOperations>,
     ) -> Arc<AddressSpace> {
-        self.entry.get_or_insert_address_space(ops)
+        let address_space = self.entry.vfs_inode().get_or_insert_address_space(ops);
+        self.super_block().register_address_space(&address_space);
+        address_space
+    }
+
+    /// Return or create this location's inode address-space object.
+    pub fn get_or_insert_address_space_with(
+        &self,
+        create: impl FnOnce() -> AddressSpace,
+    ) -> Arc<AddressSpace> {
+        let address_space = self
+            .entry
+            .vfs_inode()
+            .get_or_insert_address_space_with(create);
+        self.super_block().register_address_space(&address_space);
+        address_space
     }
 
     /// Returns the name of this location within its parent directory.

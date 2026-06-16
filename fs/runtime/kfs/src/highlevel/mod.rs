@@ -13,7 +13,7 @@ pub use file::*;
 // Re-export the wrapper FsContext for backward compatibility
 pub use fs::{
     FsContext, KERNEL_FS_CONTEXT, ROOT_FS_CONTEXT, ReadDir, ReadDirEntry, kernel_fs_context,
-    new_process_fs_context,
+    new_process_fs_context, sync_filesystems,
 };
 use kvfs::Location;
 pub use mapping::{EvictRegistration, PageCache, PageIndex};
