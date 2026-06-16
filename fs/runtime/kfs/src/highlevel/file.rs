@@ -313,8 +313,8 @@ impl Clone for CachedFile {
 
 impl CachedFile {
     pub fn get_or_create(location: Location) -> VfsResult<Self> {
-        let in_memory = matches!(location.filesystem().name(), "tmpfs" | "memfs",);
-        let file = location.entry().as_file()?.clone();
+        let in_memory = matches!(location.super_block().name(), "tmpfs" | "memfs",);
+        location.entry().as_file()?;
 
         let address_space = location.get_or_insert_address_space_with(|| {
             let mapping = if in_memory {
@@ -324,7 +324,7 @@ impl CachedFile {
             };
             let ops = Arc::new(FileMappingAddressSpaceOperations::new(
                 mapping.clone(),
-                file,
+                location.clone(),
                 in_memory,
             ));
             let address_space = kvfs::AddressSpace::new(Arc::downgrade(location.vfs_inode()), ops);
@@ -355,6 +355,7 @@ impl CachedFile {
         self.in_memory
     }
 
+    /// Registers an eviction listener while the returned guard is held.
     pub fn add_evict_listener<F>(&self, listener: F) -> EvictRegistration
     where
         F: Fn(PageIndex, &PageCache) + Send + Sync + 'static,

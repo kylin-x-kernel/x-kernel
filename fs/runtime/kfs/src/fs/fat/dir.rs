@@ -4,11 +4,11 @@
 
 //! FAT directory node implementation.
 use alloc::{string::String, sync::Arc};
-use core::{any::Any, mem, ops::Deref, time::Duration};
+use core::{any::Any, mem, time::Duration};
 
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FilesystemOps, Metadata, MetadataUpdate,
-    NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, Metadata, MetadataUpdate, NodeFlags,
+    NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
 };
 
 use super::{
@@ -90,10 +90,6 @@ impl NodeOps for FatDirNode {
     fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
         // TODO: update metadata on directory
         Ok(())
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        self.fs.deref()
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

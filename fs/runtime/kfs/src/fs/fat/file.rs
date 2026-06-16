@@ -4,13 +4,13 @@
 
 //! FAT file node implementation.
 use alloc::{sync::Arc, vec};
-use core::{any::Any, mem, ops::Deref, task::Context};
+use core::{any::Any, mem, task::Context};
 
 use fatfs::{Read, Seek, SeekFrom, Write};
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodeType,
-    VfsError, VfsResult,
+    FileNode, FileNodeOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodeType, VfsError,
+    VfsResult,
 };
 
 use super::{
@@ -83,10 +83,6 @@ impl NodeOps for FatFileNode {
         let file = self.inner.borrow_mut(&fs);
         update_file_metadata(file, update);
         Ok(())
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        self.fs.deref()
     }
 
     fn len(&self) -> VfsResult<u64> {

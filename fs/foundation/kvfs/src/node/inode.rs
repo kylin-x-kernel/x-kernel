@@ -16,8 +16,8 @@ use kpoll::{IoEvents, Pollable};
 
 use super::{DirNode, FileNode, Node, NodeFlags, NodeOps, TypeMap};
 use crate::{
-    AddressSpace, AddressSpaceOperations, DirNodeInodeOperations, FileNodeFileOperations,
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
+    AddressSpace, AddressSpaceOperations, DirNodeInodeOperations, FileNodeFileOperations, Metadata,
+    MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
 };
 
 /// VFS inode identity shared by one or more directory entries.
@@ -69,11 +69,6 @@ impl VfsInode {
     /// Updates the metadata of the node.
     pub fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         self.node.update_metadata(update)
-    }
-
-    /// Gets the filesystem owning this node.
-    pub fn filesystem(&self) -> &dyn FilesystemOps {
-        self.node.filesystem()
     }
 
     /// Gets the size of the node.

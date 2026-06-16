@@ -6,8 +6,9 @@
 //!
 //! These traits name the ownership boundaries for superblock-wide operations,
 //! inode namespace operations, open-file operations, and address-space/page-cache
-//! operations. Existing `kvfs` traits are still used as the compatibility
-//! surface while filesystems are migrated toward these narrower families.
+//! operations. `SuperBlockOperations` is the owned superblock boundary; the
+//! other families still provide adapters while filesystems migrate away from
+//! legacy node traits.
 
 use crate::{
     DirEntry, DirEntrySink, DirNode, FileNode, Metadata, MetadataUpdate, NodePermission, NodeType,
@@ -151,6 +152,9 @@ impl FileOperations for FileNodeFileOperations<'_> {
 /// This is the target boundary for page-cache and backing-store operations.
 /// Buffered I/O and mmap should converge here instead of reaching through
 /// byte-level `read_at`/`write_at` methods.
+///
+/// Implementations should be tied to the owning inode/superblock state, not to
+/// one open file instance.
 pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Reads one page from backing storage into `page`.
     fn read_page(&self, page_index: u64, page: &mut [u8]) -> VfsResult<usize>;

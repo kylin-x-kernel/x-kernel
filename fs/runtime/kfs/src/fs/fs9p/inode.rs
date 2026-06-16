@@ -14,9 +14,9 @@ use core::{any::Any, task::Context};
 use fs9p::FileAttr;
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps,
-    Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError,
-    VfsResult, WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Metadata,
+    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
+    WeakDirEntry,
 };
 
 use super::{
@@ -211,10 +211,6 @@ impl NodeOps for Inode {
         let mut session = self.fs.lock();
         let attr = session.getattr(&path).map_err(into_vfs_err)?;
         Ok(attr.size)
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        &*self.fs
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

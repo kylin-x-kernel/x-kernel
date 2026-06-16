@@ -191,11 +191,10 @@ fn format_mount_options(mnt_flags: MountFlags, is_ro: bool) -> String {
 
 fn make_mount_entry(mount: &Arc<Mountpoint>, parent_id: u64, mount_id: u64) -> ProcMountEntry {
     let mount_point = mountpoint_path(mount);
-    let fs_type = mount.root_location().filesystem().name().to_string();
+    let fs_type = mount.super_block().name().to_string();
     let mnt_flags = mount.flags();
     let st_flags = mount
-        .root_location()
-        .filesystem()
+        .super_block()
         .stat()
         .ok()
         .map_or(0, |stat| stat.mount_flags);

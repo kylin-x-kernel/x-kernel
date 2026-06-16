@@ -9,9 +9,8 @@ use core::{any::Any, cmp::min, task::Context, time::Duration};
 use ext4_rs::BLOCK_SIZE;
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, FilesystemOps, Metadata,
-    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
-    WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, Metadata, MetadataUpdate,
+    NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
 };
 
 use super::{
@@ -134,10 +133,6 @@ impl NodeOps for Inode {
         let fs = self.fs.lock();
         let inode_ref = fs.get_inode_ref(self.ino);
         Ok(inode_ref.inode.size())
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        &*self.fs
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

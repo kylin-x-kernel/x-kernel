@@ -7,9 +7,8 @@ use core::{any::Any, task::Context};
 
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, FilesystemOps, Metadata,
-    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
-    WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, Metadata, MetadataUpdate,
+    NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
 };
 use lwext4_rust::{FileAttr, InodeType};
 
@@ -117,10 +116,6 @@ impl NodeOps for Inode {
             .lock()
             .with_inode_ref(self.ino, |inode| Ok(inode.size()))
             .map_err(into_vfs_err)
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        &*self.fs
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

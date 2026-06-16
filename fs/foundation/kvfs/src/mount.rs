@@ -20,8 +20,8 @@ use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 
 use crate::{
-    AddressSpace, AddressSpaceOperations, DirEntry, DirEntrySink, Filesystem, FilesystemOps,
-    Metadata, MetadataUpdate, Mutex, MutexGuard, NodeFlags, NodePermission, NodeType, OpenOptions,
+    AddressSpace, AddressSpaceOperations, DirEntry, DirEntrySink, Filesystem, Metadata,
+    MetadataUpdate, Mutex, MutexGuard, NodeFlags, NodePermission, NodeType, OpenOptions,
     ReferenceKey, ST_RDONLY, SuperBlock, TypeMap, VfsError, VfsInode, VfsResult,
     path::{DOT, DOTDOT, PathBuf},
 };
@@ -198,8 +198,6 @@ pub struct Location {
 impl Location {
     pub fn inode(&self) -> u64;
 
-    pub fn filesystem(&self) -> &dyn FilesystemOps;
-
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> VfsResult<u64>;
 
@@ -331,7 +329,7 @@ impl Location {
     pub fn is_effectively_readonly(&self) -> bool {
         self.is_mount_readonly()
             || self
-                .filesystem()
+                .super_block()
                 .stat()
                 .is_ok_and(|stat| stat.mount_flags & ST_RDONLY != 0)
     }
@@ -640,27 +638,27 @@ mod tests {
 
     use super::*;
     use crate::{
-        DirEntry, DirEntrySink, DirNode, DirNodeOps, Filesystem, FilesystemOps, Metadata,
-        MetadataUpdate, NodeOps, NodePermission, NodeType, Reference, StatFs, VfsError, VfsResult,
+        DirEntry, DirEntrySink, DirNode, DirNodeOps, Filesystem, Metadata, MetadataUpdate, NodeOps,
+        NodePermission, NodeType, Reference, StatFs, SuperBlockOperations, VfsError, VfsResult,
     };
 
     struct MockFilesystem {
         mount_flags: u32,
     }
 
-    impl FilesystemOps for MockFilesystem {
+    impl SuperBlockOperations for MockFilesystem {
         fn name(&self) -> &str {
             "mockfs"
         }
 
-        fn root_dir(&self) -> DirEntry {
+        fn root_dentry(&self) -> DirEntry {
             DirEntry::new_dir(
                 |_| DirNode::new(Arc::new(MockDirNodeOps::new(self.mount_flags, 1))),
                 Reference::root(),
             )
         }
 
-        fn stat(&self) -> VfsResult<StatFs> {
+        fn statfs(&self) -> VfsResult<StatFs> {
             statfs(self.mount_flags)
         }
     }
@@ -704,30 +702,12 @@ mod tests {
             Ok(())
         }
 
-        fn filesystem(&self) -> &dyn FilesystemOps {
-            self
-        }
-
         fn sync(&self, _data_only: bool) -> VfsResult<()> {
             Ok(())
         }
 
         fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
             self
-        }
-    }
-
-    impl FilesystemOps for MockDirNodeOps {
-        fn name(&self) -> &str {
-            "mockfs"
-        }
-
-        fn root_dir(&self) -> DirEntry {
-            panic!("root_dir is not used through directory nodes")
-        }
-
-        fn stat(&self) -> VfsResult<StatFs> {
-            statfs(self.mount_flags)
         }
     }
 

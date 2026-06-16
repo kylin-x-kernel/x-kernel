@@ -20,7 +20,7 @@ use kalloc::{UsageKind, global_allocator};
 use khal::mem::{PhysAddr, VirtAddr, v2p};
 use ksync::Mutex;
 use ktask::WaitQueue;
-use kvfs::{AddressSpaceOperations, FileNode, VfsError, VfsResult};
+use kvfs::{AddressSpaceOperations, FileNode, Location, VfsError, VfsResult};
 use lru::LruCache;
 use memaddr::PAGE_SIZE_4K;
 
@@ -499,15 +499,15 @@ impl FileMapping {
 
 pub(super) struct FileMappingAddressSpaceOperations {
     mapping: Arc<FileMapping>,
-    file: FileNode,
+    location: Location,
     in_memory: bool,
 }
 
 impl FileMappingAddressSpaceOperations {
-    pub fn new(mapping: Arc<FileMapping>, file: FileNode, in_memory: bool) -> Self {
+    pub fn new(mapping: Arc<FileMapping>, location: Location, in_memory: bool) -> Self {
         Self {
             mapping,
-            file,
+            location,
             in_memory,
         }
     }
@@ -521,7 +521,9 @@ impl AddressSpaceOperations for FileMappingAddressSpaceOperations {
         if self.in_memory {
             return Ok(0);
         }
-        self.file
+        self.location
+            .entry()
+            .as_file()?
             .read_at(page, FileMapping::page_start(page_index)?)
     }
 
@@ -530,17 +532,21 @@ impl AddressSpaceOperations for FileMappingAddressSpaceOperations {
             return Ok(0);
         }
         let page = &page[..page.len().min(PAGE_SIZE_4K)];
-        self.file
+        self.location
+            .entry()
+            .as_file()?
             .write_at(page, FileMapping::page_start(page_index)?)
     }
 
     fn writepages(&self, data_only: bool) -> VfsResult<()> {
-        self.mapping.sync(&self.file, self.in_memory, data_only)
+        let file = self.location.entry().as_file()?;
+        self.mapping.sync(file, self.in_memory, data_only)
     }
 
     fn invalidate_from(&self, page_index: u64) -> VfsResult<()> {
+        let file = self.location.entry().as_file()?;
         self.mapping.flush_and_evict_from(
-            &self.file,
+            file,
             self.in_memory,
             FileMapping::page_start(page_index)?,
         )
@@ -548,6 +554,7 @@ impl AddressSpaceOperations for FileMappingAddressSpaceOperations {
 }
 
 /// RAII registration for a file-mapping eviction listener.
+#[must_use = "dropping EvictRegistration unregisters the eviction listener"]
 pub struct EvictRegistration {
     mapping: Weak<FileMapping>,
     listener_ptr: NonNull<EvictListener>,

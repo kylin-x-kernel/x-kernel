@@ -10,8 +10,8 @@ use core::{any::Any, cmp::Ordering, task::Context};
 use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
-    NodeType, VfsError, VfsResult,
+    FileNodeOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, VfsError,
+    VfsResult,
 };
 
 use super::fs::{SimpleFs, SimpleFsNode};
@@ -104,8 +104,6 @@ impl NodeOps for SimpleFile {
     fn metadata(&self) -> VfsResult<Metadata>;
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
-
-    fn filesystem(&self) -> &dyn FilesystemOps;
 
     fn sync(&self, data_only: bool) -> VfsResult<()>;
 

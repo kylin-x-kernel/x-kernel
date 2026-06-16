@@ -11,7 +11,8 @@ use fs9p::Session;
 use kclass::{ClassDevice, Virtio9pDeviceImpl};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, Filesystem, Reference, StatFs, SuperBlockOperations, VfsResult,
+    path::MAX_NAME_LEN,
 };
 
 use super::{VirtioTransport, inode::Inode};
@@ -54,16 +55,16 @@ impl Fs9pFilesystem {
 unsafe impl Send for Fs9pFilesystem {}
 unsafe impl Sync for Fs9pFilesystem {}
 
-impl FilesystemOps for Fs9pFilesystem {
+impl SuperBlockOperations for Fs9pFilesystem {
     fn name(&self) -> &str {
         "9p"
     }
 
-    fn root_dir(&self) -> DirEntry {
+    fn root_dentry(&self) -> DirEntry {
         self.root_dir.get().unwrap().clone()
     }
 
-    fn stat(&self) -> VfsResult<StatFs> {
+    fn statfs(&self) -> VfsResult<StatFs> {
         // 9P does not expose filesystem-wide statistics in a standard way.
         // Return a minimal StatFs with zeroed fields.
         Ok(StatFs {
@@ -80,7 +81,7 @@ impl FilesystemOps for Fs9pFilesystem {
         })
     }
 
-    fn flush(&self) -> VfsResult<()> {
+    fn sync_fs(&self) -> VfsResult<()> {
         // 9P writes are synchronous through virtio — no explicit flush needed.
         Ok(())
     }

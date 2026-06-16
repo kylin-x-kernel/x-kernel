@@ -103,8 +103,8 @@ fn main() {
         .unmount_all()
         .expect("Failed to unmount all filesystems");
     cx.root_dir()
-        .filesystem()
-        .flush()
+        .super_block()
+        .sync_fs()
         .expect("Failed to flush rootfs");
     drop(cx);
 
@@ -323,7 +323,7 @@ fn main() {
             );
         }
 
-        if let Err(e) = cx.root_dir().filesystem().flush() {
+        if let Err(e) = cx.root_dir().super_block().sync_fs() {
             error!("Failed to flush filesystem: {:?}", e);
         }
     } else {

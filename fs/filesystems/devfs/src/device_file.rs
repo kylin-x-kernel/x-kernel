@@ -11,8 +11,8 @@ use core::any::Any;
 use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceFileOps, DeviceId, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, MmapMapper,
-    NodeFlags, NodeOps, NodePermission, NodeType, VfsError, VfsResult,
+    DeviceFileOps, DeviceId, FileNodeOps, Metadata, MetadataUpdate, MmapMapper, NodeFlags, NodeOps,
+    NodePermission, NodeType, VfsError, VfsResult,
 };
 use kvfs_simple::{SimpleFs, SimpleFsNode};
 
@@ -56,8 +56,6 @@ impl NodeOps for DeviceFile {
     fn metadata(&self) -> VfsResult<Metadata>;
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
-
-    fn filesystem(&self) -> &dyn FilesystemOps;
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {
         Err(VfsError::InvalidInput)

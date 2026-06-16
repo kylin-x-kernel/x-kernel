@@ -13,9 +13,8 @@ use core::{any::Any, task::Context};
 
 use kpoll::{IoEvents, Pollable};
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, FilesystemOps, Metadata,
-    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
-    WeakDirEntry,
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, Metadata, MetadataUpdate,
+    NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
 };
 use rsext4::{BLOCK_SIZE, Jbd2Dev};
 
@@ -191,10 +190,6 @@ impl NodeOps for Inode {
         fs.get_inode_by_num(dev, self.ino)
             .map(|inode| inode.size())
             .map_err(into_vfs_err)
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        &*self.fs
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

@@ -87,7 +87,7 @@ unsafe 调用，eviction 回调使用 `try_lock`，失败后可能暂时保留�
 
 ### sync 语义过粗
 
-当前 `NodeOps::sync(data_only)` 和 `FilesystemOps::flush()` 无法表达：
+当前 `NodeOps::sync(data_only)` 和 `SuperBlockOperations::sync_fs()` 还无法表达：
 
 - 同步范围；
 - data/meta 区分；
@@ -1220,8 +1220,8 @@ identity 分离，再让目录 lookup/create/root 全部走同一 `iget` 路径�
 
 PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
 
-- `kvfs::SuperBlock` 成为显式 VFS superblock 对象，`Filesystem` 不再直接只包
-  `FilesystemOps`；
+- `kvfs::SuperBlock` 成为显式 VFS superblock 对象，`Filesystem` 包装
+  `SuperBlockOperations`；
 - `Mountpoint` 和 `Location` 可以直接访问所属 superblock，为后续
   superblock/inode writeback、reclaim 和 mount 域管理提供入口；
 - `kvfs::ops` 增加 Linux 风格的 `SuperBlockOperations`、`InodeOperations`、

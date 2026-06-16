@@ -31,7 +31,7 @@ pub const ST_RELATIME: u32 = 0x1000;
 /// Do not follow symlinks.
 pub const ST_NOSYMFOLLOW: u32 = 0x2000;
 
-/// Filesystem statistics returned by [`FilesystemOps::stat`].
+/// Filesystem statistics returned by [`SuperBlockOperations::statfs`].
 pub struct StatFs {
     /// Filesystem type identifier.
     pub fs_type: u32,
@@ -57,78 +57,38 @@ pub struct StatFs {
     pub mount_flags: u32,
 }
 
-/// Trait for legacy filesystem operations.
-///
-/// New VFS code should treat these methods as superblock operations and reach
-/// them through [`SuperBlock`]. The trait is kept so existing filesystems can
-/// migrate without a single tree-wide flag day.
-pub trait FilesystemOps: Send + Sync + 'static {
-    /// Gets the name of the filesystem
-    fn name(&self) -> &str;
-
-    /// Gets the root directory entry of the filesystem
-    fn root_dir(&self) -> DirEntry;
-
-    /// Returns statistics about the filesystem
-    fn stat(&self) -> VfsResult<StatFs>;
-
-    /// Flushes the filesystem, ensuring all data is written to disk
-    fn flush(&self) -> VfsResult<()> {
-        Ok(())
-    }
-
-    /// Returns the maximum regular-file byte offset supported by this filesystem.
-    fn max_file_size(&self) -> u64 {
-        MAX_LFS_FILESIZE
-    }
-}
-
-impl<T: FilesystemOps> SuperBlockOperations for T {
-    fn name(&self) -> &str {
-        FilesystemOps::name(self)
-    }
-
-    fn root_dentry(&self) -> DirEntry {
-        self.root_dir()
-    }
-
-    fn statfs(&self) -> VfsResult<StatFs> {
-        self.stat()
-    }
-
-    fn sync_fs(&self) -> VfsResult<()> {
-        self.flush()
-    }
-
-    fn max_file_size(&self) -> u64 {
-        FilesystemOps::max_file_size(self)
-    }
-}
-
 /// VFS superblock object.
 ///
 /// A superblock owns one filesystem instance and superblock-scoped
 /// attachments. Dentries and inodes point into it, while open files do not own
 /// it.
 pub struct SuperBlock {
-    ops: Arc<dyn FilesystemOps>,
+    ops: Arc<dyn SuperBlockOperations>,
     max_file_size: u64,
     address_spaces: Mutex<Vec<Arc<AddressSpace>>>,
     data: Mutex<TypeMap>,
 }
 
-#[inherit_methods(from = "self.ops")]
 impl SuperBlock {
-    pub fn name(&self) -> &str;
+    /// Returns the filesystem type name.
+    pub fn name(&self) -> &str {
+        self.ops.name()
+    }
 
-    pub fn root_dir(&self) -> DirEntry;
+    /// Returns the root dentry for this superblock.
+    pub fn root_dir(&self) -> DirEntry {
+        self.ops.root_dentry()
+    }
 
-    pub fn stat(&self) -> VfsResult<StatFs>;
+    /// Returns filesystem statistics for this superblock.
+    pub fn stat(&self) -> VfsResult<StatFs> {
+        self.ops.statfs()
+    }
 }
 
 impl SuperBlock {
-    /// Creates a superblock from legacy filesystem operations.
-    pub fn new(ops: Arc<dyn FilesystemOps>) -> Arc<Self> {
+    /// Creates a superblock from superblock operations.
+    pub fn new(ops: Arc<dyn SuperBlockOperations>) -> Arc<Self> {
         let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
         Arc::new(Self {
             ops,
@@ -138,8 +98,8 @@ impl SuperBlock {
         })
     }
 
-    /// Returns the legacy operations object while filesystems are migrating.
-    pub fn legacy_ops(&self) -> &Arc<dyn FilesystemOps> {
+    /// Returns the superblock operation family.
+    pub fn operations(&self) -> &Arc<dyn SuperBlockOperations> {
         &self.ops
     }
 
@@ -174,12 +134,7 @@ impl SuperBlock {
     /// Synchronizes VFS page-cache state and then filesystem-owned state.
     pub fn sync_fs(&self) -> VfsResult<()> {
         self.writeback_address_spaces(false)?;
-        self.ops.flush()
-    }
-
-    /// Flushes this superblock.
-    pub fn flush(&self) -> VfsResult<()> {
-        self.sync_fs()
+        self.ops.sync_fs()
     }
 
     /// Access superblock-scoped attachment storage.
@@ -213,7 +168,7 @@ impl Filesystem {
 
 impl Filesystem {
     /// Create a new filesystem wrapper from an implementation object.
-    pub fn new(ops: Arc<dyn FilesystemOps>) -> Self {
+    pub fn new(ops: Arc<dyn SuperBlockOperations>) -> Self {
         Self {
             super_block: SuperBlock::new(ops),
         }
