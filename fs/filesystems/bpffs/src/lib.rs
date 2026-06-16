@@ -21,9 +21,9 @@ use kfd::FileLike;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use kvfs::{
-    DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem, FilesystemOps,
-    Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError,
-    VfsResult, WeakDirEntry,
+    DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem, Metadata,
+    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
+    WeakDirEntry,
 };
 use kvfs_simple::{SimpleFs, SimpleFsNode};
 
@@ -177,10 +177,6 @@ impl NodeOps for BpfNode {
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         self.inode.node.update_metadata(update)
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        self.inode.node.filesystem()
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

@@ -9,8 +9,8 @@ use core::cell::OnceCell;
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    DirEntry, DirNode, FileNode, Filesystem, FilesystemOps, InodeCache, Location, NodeType,
-    Reference, ST_RELATIME, StatFs, VfsError, VfsInode, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, FileNode, Filesystem, InodeCache, Location, NodeType, Reference,
+    ST_RELATIME, StatFs, SuperBlockOperations, VfsError, VfsInode, VfsResult, path::MAX_NAME_LEN,
 };
 use rsext4::Jbd2Dev;
 
@@ -137,16 +137,16 @@ unsafe impl Send for Ext4Filesystem {}
 
 unsafe impl Sync for Ext4Filesystem {}
 
-impl FilesystemOps for Ext4Filesystem {
+impl SuperBlockOperations for Ext4Filesystem {
     fn name(&self) -> &str {
         "ext4"
     }
 
-    fn root_dir(&self) -> DirEntry {
+    fn root_dentry(&self) -> DirEntry {
         self.root_dir.get().unwrap().clone()
     }
 
-    fn stat(&self) -> VfsResult<StatFs> {
+    fn statfs(&self) -> VfsResult<StatFs> {
         let fs = self.lock();
         let superblock = &fs.fs.superblock;
         let block_size = superblock.block_size();
@@ -168,7 +168,7 @@ impl FilesystemOps for Ext4Filesystem {
         })
     }
 
-    fn flush(&self) -> VfsResult<()> {
+    fn sync_fs(&self) -> VfsResult<()> {
         self.sync_to_disk()
     }
 }

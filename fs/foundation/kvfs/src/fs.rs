@@ -3,11 +3,14 @@
 // See LICENSES for license details.
 
 //! Filesystem traits and wrappers.
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use inherit_methods_macro::inherit_methods;
 
-use crate::{DirEntry, VfsResult};
+use crate::{AddressSpace, DirEntry, Mutex, SuperBlockOperations, TypeMap, VfsResult};
+
+/// Large-file page-cache limit for 64-bit VFS offsets.
+pub const MAX_LFS_FILESIZE: u64 = i64::MAX as u64;
 
 /// Mount read-only.
 pub const ST_RDONLY: u32 = 0x1;
@@ -28,7 +31,7 @@ pub const ST_RELATIME: u32 = 0x1000;
 /// Do not follow symlinks.
 pub const ST_NOSYMFOLLOW: u32 = 0x2000;
 
-/// Filesystem statistics returned by [`FilesystemOps::stat`].
+/// Filesystem statistics returned by [`SuperBlockOperations::statfs`].
 pub struct StatFs {
     /// Filesystem type identifier.
     pub fs_type: u32,
@@ -54,30 +57,107 @@ pub struct StatFs {
     pub mount_flags: u32,
 }
 
-/// Trait for filesystem operations.
-pub trait FilesystemOps: Send + Sync {
-    /// Gets the name of the filesystem
-    fn name(&self) -> &str;
+/// VFS superblock object.
+///
+/// A superblock owns one filesystem instance and superblock-scoped
+/// attachments. Dentries and inodes point into it, while open files do not own
+/// it.
+pub struct SuperBlock {
+    ops: Arc<dyn SuperBlockOperations>,
+    max_file_size: u64,
+    address_spaces: Mutex<Vec<Arc<AddressSpace>>>,
+    data: Mutex<TypeMap>,
+}
 
-    /// Gets the root directory entry of the filesystem
-    fn root_dir(&self) -> DirEntry;
+impl SuperBlock {
+    /// Returns the filesystem type name.
+    pub fn name(&self) -> &str {
+        self.ops.name()
+    }
 
-    /// Returns statistics about the filesystem
-    fn stat(&self) -> VfsResult<StatFs>;
+    /// Returns the root dentry for this superblock.
+    pub fn root_dir(&self) -> DirEntry {
+        self.ops.root_dentry()
+    }
 
-    /// Flushes the filesystem, ensuring all data is written to disk
-    fn flush(&self) -> VfsResult<()> {
+    /// Returns filesystem statistics for this superblock.
+    pub fn stat(&self) -> VfsResult<StatFs> {
+        self.ops.statfs()
+    }
+}
+
+impl SuperBlock {
+    /// Creates a superblock from superblock operations.
+    pub fn new(ops: Arc<dyn SuperBlockOperations>) -> Arc<Self> {
+        let max_file_size = ops.max_file_size().min(MAX_LFS_FILESIZE);
+        Arc::new(Self {
+            ops,
+            max_file_size,
+            address_spaces: Mutex::default(),
+            data: Mutex::default(),
+        })
+    }
+
+    /// Returns the superblock operation family.
+    pub fn operations(&self) -> &Arc<dyn SuperBlockOperations> {
+        &self.ops
+    }
+
+    /// Returns this superblock's maximum regular-file size.
+    pub fn max_file_size(&self) -> u64 {
+        self.max_file_size
+    }
+
+    /// Registers an inode address space owned by this superblock.
+    pub fn register_address_space(&self, address_space: &Arc<AddressSpace>) {
+        let mut address_spaces = self.address_spaces.lock();
+        if !address_spaces
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, address_space))
+        {
+            address_spaces.push(address_space.clone());
+        }
+    }
+
+    fn live_address_spaces(&self) -> Vec<Arc<AddressSpace>> {
+        self.address_spaces.lock().clone()
+    }
+
+    /// Writes back dirty page-cache state owned by this superblock.
+    pub fn writeback_address_spaces(&self, data_only: bool) -> VfsResult<()> {
+        for address_space in self.live_address_spaces() {
+            address_space.writepages(data_only)?;
+        }
         Ok(())
+    }
+
+    /// Synchronizes VFS page-cache state and then filesystem-owned state.
+    pub fn sync_fs(&self) -> VfsResult<()> {
+        self.writeback_address_spaces(false)?;
+        self.ops.sync_fs()
+    }
+
+    /// Access superblock-scoped attachment storage.
+    pub fn data(&self) -> crate::MutexGuard<'_, TypeMap> {
+        self.data.lock()
+    }
+}
+
+impl core::fmt::Debug for SuperBlock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SuperBlock")
+            .field("name", &self.name())
+            .finish()
     }
 }
 
 /// A reference-counted filesystem wrapper.
 #[derive(Clone)]
 pub struct Filesystem {
-    ops: Arc<dyn FilesystemOps>,
+    super_block: Arc<SuperBlock>,
 }
 
-#[inherit_methods(from = "self.ops")]
+#[inherit_methods(from = "self.super_block")]
 impl Filesystem {
     pub fn name(&self) -> &str;
 
@@ -88,7 +168,19 @@ impl Filesystem {
 
 impl Filesystem {
     /// Create a new filesystem wrapper from an implementation object.
-    pub fn new(ops: Arc<dyn FilesystemOps>) -> Self {
-        Self { ops }
+    pub fn new(ops: Arc<dyn SuperBlockOperations>) -> Self {
+        Self {
+            super_block: SuperBlock::new(ops),
+        }
+    }
+
+    /// Create a filesystem wrapper from an existing superblock.
+    pub fn from_super_block(super_block: Arc<SuperBlock>) -> Self {
+        Self { super_block }
+    }
+
+    /// Returns the VFS superblock for this filesystem.
+    pub fn super_block(&self) -> &Arc<SuperBlock> {
+        &self.super_block
     }
 }

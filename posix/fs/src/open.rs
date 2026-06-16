@@ -10,7 +10,7 @@ use core::ffi::{c_char, c_int};
 use devfs::DeviceFile;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
-use kfs::{Directory, FileBackend, OpenOptions, OpenResult};
+use kfs::{File, FileBackend, OpenOptions};
 use kthread::current_process_state;
 use ktty::tty;
 use kvfs::{DirEntry, FileNode, Location, NodeType, Reference};
@@ -62,57 +62,44 @@ fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32))
     options
 }
 
-fn add_to_fd(result: OpenResult, flags: u32) -> KResult<i32> {
-    let f: Arc<dyn FileLike> = match result {
-        OpenResult::File(mut file) => {
-            if let Ok(device) = file.location().entry().downcast::<DeviceFile>() {
-                let inner = device.inner().as_any();
-                if let Some(ptmx) = inner.downcast_ref::<devfs::Ptmx>() {
-                    let (master, pty_number) = ptmx.create_pty()?;
-                    let pts = current_process_state()
-                        .fs_context()
-                        .lock()
-                        .resolve("/dev/pts")?;
-                    let entry = DirEntry::new_file(
-                        FileNode::new(master),
-                        NodeType::CharacterDevice,
-                        Reference::new(Some(pts.entry().clone()), pty_number.to_string()),
-                    );
-                    let loc = Location::new(file.location().mountpoint().clone(), entry);
-                    file = kfs::File::with_open_flags(
-                        FileBackend::Direct(loc),
-                        file.flags(),
-                        file.open_flags(),
-                    );
-                } else if inner.is::<tty::CurrentTty>() {
-                    let term = kthread::current_thread()
-                        .process_state()
-                        .proc
-                        .group()
-                        .session()
-                        .terminal()
-                        .ok_or(KError::NotFound)?;
-                    let path = if term.is::<tty::NTtyDriver>() {
-                        "/dev/console".to_string()
-                    } else if let Some(pts) = term.downcast_ref::<tty::PtyDriver>() {
-                        format!("/dev/pts/{}", pts.pty_number())
-                    } else {
-                        return Err(KError::OperationNotSupported);
-                    };
-                    let loc = kthread::current_process_fs_context()
-                        .lock()
-                        .resolve(&path)?;
-                    file = kfs::File::with_open_flags(
-                        FileBackend::Direct(loc),
-                        file.flags(),
-                        file.open_flags(),
-                    );
-                }
-            }
-            Arc::new(file)
+fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
+    if let Ok(device) = file.location().entry().downcast::<DeviceFile>() {
+        let inner = device.inner().as_any();
+        if let Some(ptmx) = inner.downcast_ref::<devfs::Ptmx>() {
+            let (master, pty_number) = ptmx.create_pty()?;
+            let pts = current_process_state()
+                .fs_context()
+                .lock()
+                .resolve("/dev/pts")?;
+            let entry = DirEntry::new_file(
+                FileNode::new(master),
+                NodeType::CharacterDevice,
+                Reference::new(Some(pts.entry().clone()), pty_number.to_string()),
+            );
+            let loc = Location::new(file.location().mountpoint().clone(), entry);
+            file = File::with_open_flags(FileBackend::Direct(loc), file.flags(), file.open_flags());
+        } else if inner.is::<tty::CurrentTty>() {
+            let term = kthread::current_thread()
+                .process_state()
+                .proc
+                .group()
+                .session()
+                .terminal()
+                .ok_or(KError::NotFound)?;
+            let path = if term.is::<tty::NTtyDriver>() {
+                "/dev/console".to_string()
+            } else if let Some(pts) = term.downcast_ref::<tty::PtyDriver>() {
+                format!("/dev/pts/{}", pts.pty_number())
+            } else {
+                return Err(KError::OperationNotSupported);
+            };
+            let loc = kthread::current_process_fs_context()
+                .lock()
+                .resolve(&path)?;
+            file = File::with_open_flags(FileBackend::Direct(loc), file.flags(), file.open_flags());
         }
-        OpenResult::Dir(dir) => Arc::new(Directory::new(dir)),
-    };
+    }
+    let f: Arc<dyn FileLike> = Arc::new(file);
     if flags & O_NONBLOCK != 0 {
         f.set_nonblocking(true)?;
     }

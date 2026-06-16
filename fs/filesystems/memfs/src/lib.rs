@@ -16,8 +16,8 @@ use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use kvfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
-    FilesystemOps, InodeCache, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
-    NodeType, Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
+    InodeCache, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference,
+    StatFs, SuperBlockOperations, VfsError, VfsResult, WeakDirEntry,
 };
 use kvfs_simple::dummy_stat_fs_with_flags;
 use slab::Slab;
@@ -109,16 +109,16 @@ impl MemoryFs {
     }
 }
 
-impl FilesystemOps for MemoryFs {
+impl SuperBlockOperations for MemoryFs {
     fn name(&self) -> &str {
         self.name
     }
 
-    fn root_dir(&self) -> DirEntry {
+    fn root_dentry(&self) -> DirEntry {
         self.root.lock().clone().unwrap()
     }
 
-    fn stat(&self) -> VfsResult<StatFs> {
+    fn statfs(&self) -> VfsResult<StatFs> {
         Ok(dummy_stat_fs_with_flags(0x01021994, self.mount_flags))
     }
 }
@@ -308,10 +308,6 @@ impl NodeOps for MemoryNode {
             metadata.mtime = mtime;
         }
         Ok(())
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        self.fs.as_ref()
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

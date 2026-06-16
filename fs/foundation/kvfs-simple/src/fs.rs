@@ -9,9 +9,9 @@ use core::{any::Any, time::Duration};
 
 use ksync::Mutex;
 use kvfs::{
-    DeviceId, DirEntry, DirNode, FileNode, FileNodeOps, Filesystem, FilesystemOps, InodeCache,
-    Metadata, MetadataUpdate, NodeOps, NodePermission, NodeType, Reference, StatFs, VfsInode,
-    VfsResult, path::MAX_NAME_LEN,
+    DeviceId, DirEntry, DirNode, FileNode, FileNodeOps, Filesystem, InodeCache, Metadata,
+    MetadataUpdate, NodeOps, NodePermission, NodeType, Reference, StatFs, SuperBlockOperations,
+    VfsInode, VfsResult, path::MAX_NAME_LEN,
 };
 use slab::Slab;
 
@@ -105,16 +105,16 @@ impl SimpleFs {
     }
 }
 
-impl FilesystemOps for SimpleFs {
+impl SuperBlockOperations for SimpleFs {
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn root_dir(&self) -> DirEntry {
+    fn root_dentry(&self) -> DirEntry {
         self.root.lock().clone().unwrap()
     }
 
-    fn stat(&self) -> VfsResult<StatFs> {
+    fn statfs(&self) -> VfsResult<StatFs> {
         Ok(dummy_stat_fs_with_flags(self.fs_type, self.mount_flags))
     }
 }
@@ -200,10 +200,6 @@ impl NodeOps for SimpleFsNode {
             metadata.mtime = mtime;
         }
         Ok(())
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        self.fs.as_ref()
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {

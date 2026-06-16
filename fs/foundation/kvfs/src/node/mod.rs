@@ -32,7 +32,8 @@ use kpoll::{IoEvents, Pollable};
 use smallvec::SmallVec;
 
 use crate::{
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsResult, path::PathBuf,
+    AddressSpace, DirNodeInodeOperations, FileNodeFileOperations, Metadata, MetadataUpdate, Mutex,
+    MutexGuard, NodeType, VfsResult, path::PathBuf,
 };
 
 bitflags! {
@@ -77,9 +78,6 @@ pub trait NodeOps: Send + Sync + 'static {
 
     /// Updates the metadata of the node.
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
-
-    /// Gets the filesystem owning this node.
-    fn filesystem(&self) -> &dyn FilesystemOps;
 
     /// Gets the size of the node.
     fn len(&self) -> VfsResult<u64> {
@@ -249,8 +247,6 @@ impl From<Node> for Arc<dyn NodeOps> {
 impl DirEntry {
     pub fn inode(&self) -> u64;
 
-    pub fn filesystem(&self) -> &dyn FilesystemOps;
-
     pub fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
 
     #[allow(clippy::len_without_is_empty)]
@@ -314,6 +310,21 @@ impl DirEntry {
     /// Return the inode identity referenced by this directory entry.
     pub fn vfs_inode(&self) -> &Arc<VfsInode> {
         &self.0.inode
+    }
+
+    /// Returns this inode's address-space object, if one has been attached.
+    pub fn address_space(&self) -> Option<Arc<AddressSpace>> {
+        self.0.inode.address_space()
+    }
+
+    /// Returns an inode-operations adapter for directory entries.
+    pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
+        self.0.inode.inode_operations()
+    }
+
+    /// Returns a file-operations adapter for file entries.
+    pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
+        self.0.inode.file_operations()
     }
 
     /// Returns the cache key for this entry.
@@ -469,22 +480,22 @@ mod tests_node {
         Reference, TypeMap, VfsInode,
     };
     use crate::{
-        FilesystemOps, Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, VfsError,
+        Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, SuperBlockOperations, VfsError,
         VfsResult,
     };
 
     struct MockFilesystem;
 
-    impl FilesystemOps for MockFilesystem {
+    impl SuperBlockOperations for MockFilesystem {
         fn name(&self) -> &str {
             "mockfs"
         }
 
-        fn root_dir(&self) -> DirEntry {
+        fn root_dentry(&self) -> DirEntry {
             panic!("root_dir is not used in these tests")
         }
 
-        fn stat(&self) -> VfsResult<StatFs> {
+        fn statfs(&self) -> VfsResult<StatFs> {
             Ok(StatFs {
                 fs_type: 0,
                 block_size: 0,
@@ -548,10 +559,6 @@ mod tests_node {
             *self.owner.lock() = update.owner;
             self.update_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
-        }
-
-        fn filesystem(&self) -> &dyn FilesystemOps {
-            self.fs.as_ref()
         }
 
         fn sync(&self, _data_only: bool) -> VfsResult<()> {
@@ -647,10 +654,6 @@ mod tests_node {
 
         fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
             Ok(())
-        }
-
-        fn filesystem(&self) -> &dyn FilesystemOps {
-            self.fs.as_ref()
         }
 
         fn sync(&self, _data_only: bool) -> VfsResult<()> {
@@ -755,7 +758,6 @@ mod tests_node {
         assert!(entry.is_file());
         assert!(!entry.is_dir());
         assert_eq!(entry.name(), "leaf");
-        assert_eq!(entry.filesystem().name(), "mockfs");
         assert_eq!(entry.node_type(), NodeType::RegularFile);
         assert!(matches!(entry.as_dir(), Err(VfsError::NotADirectory)));
         assert_eq!(entry.as_file().unwrap().inode(), 2);

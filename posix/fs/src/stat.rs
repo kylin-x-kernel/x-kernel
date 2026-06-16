@@ -161,7 +161,7 @@ fn statfs_flags(mnt_flags: MountFlags, st_flags: u32) -> u32 {
 }
 
 fn statfs(loc: &Location) -> KResult<statfs> {
-    let stat = loc.filesystem().stat()?;
+    let stat = loc.super_block().stat()?;
     // SAFETY: `statfs` is a plain Linux ABI data structure. Zeroing it
     // initializes padding and fields that this compatibility layer does not
     // currently set explicitly before copying the value to user memory.

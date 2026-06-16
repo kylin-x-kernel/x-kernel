@@ -11,7 +11,7 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
-use kfs::{Directory, FsContext};
+use kfs::{File, FsContext};
 use kvfs::{NodePermission, NodeType};
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
@@ -137,19 +137,16 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     );
 
     let mut buffer = DirBuffer::new(len);
-    let dir = kthread::current_resources().get_file_like_as::<Directory>(fd)?;
-    let mut dir_offset = dir.offset.lock();
+    let dir = kthread::current_resources().get_file_like_as::<File>(fd)?;
     let mut has_remaining = false;
 
-    dir.inner()
-        .read_dir(*dir_offset, &mut |name: &str, ino, node_type, offset| {
-            has_remaining = true;
-            if !buffer.write_entry(ino, offset as _, node_type, name.as_bytes()) {
-                return false;
-            }
-            *dir_offset = offset;
-            true
-        })?;
+    dir.read_dir(&mut |name: &str, ino, node_type, offset| {
+        has_remaining = true;
+        if !buffer.write_entry(ino, offset as _, node_type, name.as_bytes()) {
+            return false;
+        }
+        true
+    })?;
 
     if has_remaining && buffer.offset == 0 {
         return Err(KError::InvalidInput);

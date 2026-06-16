@@ -15,8 +15,8 @@ use core::any::Any;
 
 use inherit_methods_macro::inherit_methods;
 use kvfs::{
-    DirEntry, DirEntrySink, DirNode, DirNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeOps,
-    NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
+    DirEntry, DirEntrySink, DirNode, DirNodeOps, Metadata, MetadataUpdate, NodeOps, NodePermission,
+    NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
     path::{DOT, DOTDOT},
 };
 
@@ -134,8 +134,6 @@ impl<O: SimpleDirOps> NodeOps for SimpleDir<O> {
     fn metadata(&self) -> VfsResult<Metadata>;
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
-
-    fn filesystem(&self) -> &dyn FilesystemOps;
 
     fn sync(&self, data_only: bool) -> VfsResult<()>;
 

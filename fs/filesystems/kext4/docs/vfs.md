@@ -87,7 +87,7 @@ unsafe 调用，eviction 回调使用 `try_lock`，失败后可能暂时保留�
 
 ### sync 语义过粗
 
-当前 `NodeOps::sync(data_only)` 和 `FilesystemOps::flush()` 无法表达：
+当前 `NodeOps::sync(data_only)` 和 `SuperBlockOperations::sync_fs()` 还无法表达：
 
 - 同步范围；
 - data/meta 区分；
@@ -105,48 +105,582 @@ unsafe 调用，eviction 回调使用 `try_lock`，失败后可能暂时保留�
 - 无法统一限制 dirty pages；
 - mmap 和 buffered I/O 的工作集被硬编码容量破坏。
 
-## 目标架构
+## 总设计图
+
+最终目标不是“把 ext4 能跑通”，而是把 X-Kernel 的 VFS 层重构成和
+`~/code/linux` 中 Linux VFS 相同的算法层次和对象边界，再用 Rust 的所有权、
+trait、生命周期、`Result`、`Drop`/RAII、`Send`/`Sync` 等语言能力表达这些边界。
+Rust 只能帮助我们把生命周期和并发不变量写清楚，不能改变 Linux VFS 的层次结构。
+
+### 目标心智模型
+
+Linux 的核心心智模型是：
 
 ```text
-Path / DirEntry
-      |
-      v
-VfsInode identity ------------------------------------+
-  - inode number                                      |
-  - NodeOps                                           |
-  - inode-scoped attachments                          |
-  - Arc<FileMapping> ---------------------------------+
-                                                       
-KFS FileMapping / AddressSpace
-  - page index -> CachedPage
-  - dirty/writeback/error state
-  - mapping lifetime and invalidation
-  - mmap reverse mappings
-      |
-      v
-kvfs AddressSpaceOps
-  - read_pages
-  - write_pages
-  - invalidate/truncate coordination
-  - sync range
-      |
-      v
-KExt4 inode / extent / delayed allocation
-      |
-      v
-allocator + metadata buffer + journal + block I/O
+name/path      open file state       page cache/writeback
+   |                 |                         |
+   v                 v                         v
+dentry + mount ---> file -----------------> address_space
+   |                 |                         |
+   v                 v                         v
+ inode identity ----+--------------------> inode->i_mapping
+   |
+   v
+super_block
+   |
+   v
+filesystem implementation, e.g. ext4
 ```
+
+对应到 X-Kernel 的目标对象：
+
+```text
+Location { Mountpoint, DirEntry }        == Linux struct path { vfsmount, dentry }
+Mountpoint                               == Linux vfsmount
+SuperBlock                               == Linux super_block
+DirEntry                                 == Linux dentry
+VfsInode                                 == Linux inode
+VfsFile                                  == Linux file
+AddressSpace                             == Linux address_space / inode->i_mapping
+
+SuperBlockOperations                     == Linux super_operations
+InodeOperations                          == Linux inode_operations
+FileOperations                           == Linux file_operations
+AddressSpaceOperations                   == Linux address_space_operations
+DentryOperations                         == Linux dentry_operations, later
+```
+
+对象边界必须稳定遵守：
+
+| 层次 | 只负责 | 不能负责 |
+|---|---|---|
+| `Location`/path | mount + dentry 的解析结果 | inode 生命周期、page cache、ext4 规则 |
+| `DirEntry`/dentry | 名字绑定、父子关系、dentry cache | 文件内容、open file position、block mapping |
+| `VfsInode`/inode | inode identity、metadata、i_op/i_fop、i_mapping 指针 | 路径字符串、fd flags、用户 ABI |
+| `VfsFile`/file | 一次 open 的状态：flags、position、private data | page cache 生命周期、目录树所有权 |
+| `AddressSpace` | page cache、writeback、invalidate、mmap coherence | ext4 extent 算法、journal 事务细节 |
+| `SuperBlock` | 一个 mounted filesystem instance 的全局状态、`s_maxbytes` | syscall ABI、fd table、进程 cwd/root |
+| ext4 | ext4 super/inode/file/address_space ops 和 ext4 算法 | VFS 对象定义、路径解析、fd ABI |
+
+`s_maxbytes` 是 VFS 的范围边界，不能留给 page-cache 循环中途用
+`page_index * PAGE_SIZE` 溢出来发现。对齐 Linux 时，读写必须先经过 generic
+range checks：
+
+- read：`offset >= s_maxbytes` 返回 0，跨 `s_maxbytes` 或 EOF 的请求先截断；
+- write：`offset >= s_maxbytes` 返回 `EFBIG`，跨 `s_maxbytes` 的请求先截断为
+  short write；
+- page-cache/address-space 循环只处理已经验证过的范围，不负责全局最大文件大小
+  判断。
+
+### Mermaid 总览图
+
+这些图使用 GitHub Markdown 支持的 Mermaid 代码块。若在本地编辑器里看到的是
+源码而不是图，说明当前 Markdown 预览器没有启用 Mermaid；在 GitHub PR 页面或
+启用 Mermaid 的 Markdown 预览器里会渲染成图。
+
+第一张图是最终分层。箭头表示依赖和调用方向，只允许从上层请求下层能力，不能让
+下层反向依赖上层实现。
+
+```mermaid
+flowchart TD
+    subgraph ABI["POSIX syscall ABI"]
+        A1["openat/read/write/fsync/rename/statx"]
+        A2["fd table, open flags, user buffers"]
+        A3["errno and Linux ABI conversion"]
+    end
+
+    subgraph RUNTIME["Runtime glue"]
+        R1["boot mount and rootfs"]
+        R2["global writeback worker"]
+        R3["global reclaim worker"]
+        R4["runtime fd object glue"]
+    end
+
+    subgraph VFS["VFS core"]
+        V1["namei: path walk and lookup orchestration"]
+        V2["mount tree: Mountpoint"]
+        V3["path result: Location"]
+        V4["dentry cache: DirEntry"]
+        V5["inode cache: VfsInode"]
+        V6["open file: VfsFile"]
+        V7["address space: AddressSpace"]
+        V8["ops families"]
+        V9["generic writeback and reclaim interfaces"]
+    end
+
+    subgraph LIBFS["libfs helpers"]
+        L1["simple directory helper"]
+        L2["simple file helper"]
+        L3["seq file helper"]
+    end
+
+    subgraph EXT4["Filesystem implementation"]
+        E1["super.rs: mount/fill_super/statfs/sync_fs"]
+        E2["inode.rs: iget/read_inode/write_inode"]
+        E3["namei.rs: lookup/create/link/unlink/rename"]
+        E4["file.rs: open/read/write/fsync/ioctl/mmap hook"]
+        E5["address_space.rs: read_folio/writepages/invalidate"]
+        E6["extents.rs: extent tree and delayed allocation"]
+        E7["mballoc.rs: block allocator"]
+        E8["jbd2: journal and ordered data"]
+        E9["block_io.rs: block device requests"]
+    end
+
+    subgraph BLOCK["Block layer"]
+        B1["block device"]
+        B2["flush, barrier, error reporting"]
+    end
+
+    A1 --> A2 --> R4
+    A3 --> R4
+    R4 --> V1
+    R1 --> V2
+    R2 --> V9
+    R3 --> V9
+    V1 --> V2 --> V3
+    V3 --> V4 --> V5
+    V5 --> V7
+    V6 --> V3
+    V6 --> V8
+    V7 --> V8
+    V8 --> E1
+    V8 --> E2
+    V8 --> E3
+    V8 --> E4
+    V8 --> E5
+    LIBFS -. helper only .-> VFS
+    E5 --> E6 --> E7 --> E9
+    E5 --> E8 --> E9
+    E9 --> B1 --> B2
+```
+
+第二张图是 Linux VFS 对象关系。目标是让 X-Kernel 的对象关系和这个图一致：
+dentry 是名字，inode 是身份，file 是一次 open，address_space 是 inode 的 page
+cache/writeback 域，super_block 是文件系统实例。
+
+```mermaid
+flowchart LR
+    subgraph PATH["Path and mount"]
+        P1["Location - Linux struct path"]
+        P2["Mountpoint - Linux vfsmount"]
+        P3["DirEntry - Linux dentry"]
+    end
+
+    subgraph CORE["VFS identity objects"]
+        S1["SuperBlock - Linux super_block"]
+        I1["VfsInode - Linux inode"]
+        F1["VfsFile - Linux file"]
+        AS1["AddressSpace - inode i_mapping"]
+    end
+
+    subgraph OPS["Operation tables"]
+        SO["SuperBlockOperations"]
+        IO["InodeOperations"]
+        FO["FileOperations"]
+        AO["AddressSpaceOperations"]
+        DO["DentryOperations - Linux dentry_operations later"]
+    end
+
+    subgraph STATE["State ownership"]
+        DNAME["name + parent + dentry cache"]
+        IMETA["inode number + metadata + inode private data"]
+        FSTATE["open flags + file position + private_data"]
+        PCACHE["cached pages + dirty/writeback/error + mmap reverse map"]
+        SBSTATE["mount instance + inode cache + freeze/writeback domains"]
+    end
+
+    P1 --> P2
+    P1 --> P3
+    P2 --> S1
+    P3 --> I1
+    F1 --> P1
+    F1 --> FO
+    I1 --> IO
+    I1 --> FO
+    I1 --> AS1
+    AS1 --> AO
+    S1 --> SO
+    P3 -. future .-> DO
+
+    P3 --> DNAME
+    I1 --> IMETA
+    F1 --> FSTATE
+    AS1 --> PCACHE
+    S1 --> SBSTATE
+
+    AS1 -. weak inode reference .-> I1
+    I1 -. owns mapping attachment .-> AS1
+```
+
+第三张图是目标 crate/目录边界。它用于判断代码应该放在哪里。
+
+```mermaid
+flowchart TD
+    subgraph POSIX["posix/fs"]
+        POPEN["openat/statx/read/write/fsync/mmap syscalls"]
+        PFD["fd table integration"]
+        PUSER["copy user buffers and translate errno"]
+    end
+
+    subgraph KFS["fs/runtime/kfs"]
+        KBOOT["rootfs and boot-time mount"]
+        KFD["runtime FileLike glue"]
+        KWB["writeback worker"]
+        KRC["reclaim worker"]
+    end
+
+    subgraph VFSCORE["fs/foundation/kvfs or future fs/vfs"]
+        VSB["super_block.rs"]
+        VMNT["mount.rs"]
+        VNAMEI["namei.rs"]
+        VDENT["dentry.rs"]
+        VINODE["inode.rs"]
+        VFILE["file.rs"]
+        VAS["address_space.rs"]
+        VOPS["ops.rs"]
+        VWB["writeback.rs"]
+    end
+
+    subgraph LIBFS2["fs/foundation/kvfs-simple or future libfs"]
+        LSIMPLE["simplefs helpers"]
+        LSEQ["seq_file"]
+        LRW["rw generated files"]
+    end
+
+    subgraph EXT4DIR["fs/filesystems/ext4"]
+        XSUPER["super.rs"]
+        XINODE["inode.rs"]
+        XNAMEI["namei.rs"]
+        XFILE["file.rs"]
+        XAS["address_space.rs"]
+        XEXT["extents.rs"]
+        XALLOC["mballoc.rs"]
+        XJBD["jbd2/"]
+        XBIO["block_io.rs"]
+    end
+
+    POPEN --> PFD --> KFD
+    PUSER --> KFD
+    KFD --> VNAMEI
+    KBOOT --> VMNT
+    KWB --> VWB
+    KRC --> VWB
+
+    VNAMEI --> VMNT
+    VNAMEI --> VDENT
+    VDENT --> VINODE
+    VINODE --> VAS
+    VFILE --> VOPS
+    VINODE --> VOPS
+    VAS --> VOPS
+    VSB --> VOPS
+
+    LIBFS2 -. helper implementation .-> VFSCORE
+
+    VOPS --> XSUPER
+    VOPS --> XINODE
+    VOPS --> XNAMEI
+    VOPS --> XFILE
+    VOPS --> XAS
+    XAS --> XEXT
+    XEXT --> XALLOC
+    XAS --> XJBD
+    XJBD --> XBIO
+
+    EXT4DIR -. forbidden posix ABI .-> POSIX
+    EXT4DIR -. forbidden kfs fd wrapper .-> KFS
+    VFSCORE -. forbidden runtime glue .-> KFS
+    VFSCORE -. forbidden concrete fs .-> EXT4DIR
+```
+
+第四张图是 ext4 接入 VFS 的 ops 映射。ext4 只能实现 ops，不能重新定义 VFS 对象。
+
+```mermaid
+flowchart LR
+    subgraph LINUX["Linux ext4 reference"]
+        LSOPS["ext4_sops"]
+        LFINODE["ext4_file_inode_operations"]
+        LDINODE["ext4_dir_inode_operations"]
+        LFOPS["ext4_file_operations"]
+        LAOPS["ext4_aops / ext4_da_aops"]
+    end
+
+    subgraph XVFS["X-Kernel VFS trait families"]
+        SO2["SuperBlockOperations"]
+        IO2["InodeOperations"]
+        FO2["FileOperations"]
+        AO2["AddressSpaceOperations"]
+    end
+
+    subgraph XEXT4["KExt4 implementation"]
+        KSO["KExt4SuperOps"]
+        KFIO["KExt4FileInodeOps"]
+        KDIO["KExt4DirInodeOps"]
+        KFO["KExt4FileOps"]
+        KAO["KExt4AddressSpaceOps"]
+    end
+
+    subgraph EXT4ALG["Ext4 algorithms, not VFS"]
+        IG["iget/read_inode/write_inode"]
+        NM["htree/name lookup and dir updates"]
+        EX["extent tree / delayed allocation / unwritten extent"]
+        MB["mballoc"]
+        JBD["journal / ordered data / fsync"]
+        BIO["block I/O"]
+    end
+
+    LSOPS --> SO2 --> KSO --> IG
+    LFINODE --> IO2 --> KFIO --> IG
+    LDINODE --> IO2 --> KDIO --> NM
+    LFOPS --> FO2 --> KFO --> JBD
+    LAOPS --> AO2 --> KAO --> EX
+    EX --> MB --> BIO
+    EX --> JBD --> BIO
+```
+
+第五张图是一次典型读写路径。重点是 `posix/fs` 不碰 page cache，`kfs` 不拥有 VFS
+身份对象，ext4 不反向调用 syscall ABI。
+
+```mermaid
+sequenceDiagram
+    participant U as User syscall
+    participant P as posix/fs ABI
+    participant K as fs/runtime/kfs glue
+    participant N as VFS namei
+    participant D as DirEntry dentry
+    participant I as VfsInode inode
+    participant F as VfsFile file
+    participant AS as AddressSpace page cache
+    participant X as ext4 ops
+    participant B as block device
+
+    U->>P: openat(path, flags, mode)
+    P->>K: convert ABI to VFS open request
+    K->>N: path walk from cwd/root
+    N->>D: lookup/create dentry
+    D->>I: resolve inode identity through inode cache
+    N->>F: create open file state
+    F-->>P: fd object
+
+    U->>P: read/write(fd, user buffer)
+    P->>K: validate fd and user buffer
+    K->>F: read/write on opened file
+    F->>AS: buffered I/O through inode address space
+    AS->>X: AddressSpaceOperations read/write/writepages
+    X->>X: extent mapping and journal rules
+    X->>B: block read/write/flush
+    B-->>X: I/O completion or error
+    X-->>AS: page uptodate/dirty/error result
+    AS-->>F: bytes completed
+    F-->>P: result
+    P-->>U: errno or byte count
+```
+
+第六张图是迁移路线。每个阶段都要减少一类混乱，而不是在旧边界上继续堆功能。
+
+```mermaid
+flowchart TD
+    M0["Current mixed state: kvfs + kfs + posix-fs"]
+    M1["Boundary first: SuperBlock, VfsInode, DirEntry, VfsFile, AddressSpace"]
+    M2["Directory inode identity: dentry is only name binding"]
+    M3["Ops family migration: super, inode, file, address_space, dentry"]
+    M4["Address-space page cache: mapping behind AddressSpace"]
+    M5["Page state machine: uptodate, dirty, writeback, error, invalidate"]
+    M6["Namei and mount cleanup: path walk, namespace, rename locking"]
+    M7["Ext4 VFS integration: ext4 implements Linux-like ops"]
+    M8["Global writeback and reclaim: not per-fd lifetime"]
+    M9["Advanced coherence: mmap, direct I/O, truncate, freeze, unmount"]
+
+    M0 --> M1 --> M2 --> M3 --> M4 --> M5 --> M6 --> M7 --> M8 --> M9
+
+    M0 -. no more VFS state in kfs .-> M1
+    M3 -. ext4 must not define VFS traits .-> M7
+    M4 -. last fd close keeps page cache .-> M8
+    M6 -. dentry, inode, path are separate .-> M7
+```
+
+### 目标目录与依赖
+
+当前 `kvfs`、`kfs`、`posix-fs` 同时承担 VFS、runtime、syscall ABI 和 helper 职责，
+这是混乱的根源。目标目录按 Linux 边界拆开：
+
+```text
+fs/
+  foundation/
+    kvfs/                  # 目标可重命名为 fs/vfs；只放 VFS 核心对象和 trait
+      super_block.rs       # SuperBlock, SuperBlockOperations
+      inode.rs             # VfsInode, inode cache, InodeOperations binding
+      dentry.rs            # DirEntry, dentry cache, DentryOperations
+      file.rs              # VfsFile, FileOperations binding
+      mount.rs             # Mountpoint, Location/path
+      namei.rs             # path walk, lookup/open/create/rename orchestration
+      address_space.rs     # AddressSpace, page cache entry points
+      writeback.rs         # generic writeback/reclaim interfaces
+    kvfs-simple/           # 目标为 libfs；simplefs/helper，不拥有核心 VFS 状态
+
+  runtime/
+    kfs/                   # 启动挂载、rootfs、全局 writeback/reclaim glue
+      boot_mount.rs
+      rootfs.rs
+      writeback_worker.rs
+      reclaim.rs
+
+  filesystems/
+    ext4/                  # 只实现 ext4，不反向定义 VFS
+      super.rs             # mount/fill_super/statfs/sync_fs
+      inode.rs             # iget/read_inode/write_inode/setattr/getattr
+      namei.rs             # lookup/create/link/unlink/rename/mkdir/rmdir
+      file.rs              # open/read_iter/write_iter/fsync/ioctl/mmap hook
+      address_space.rs     # read_folio/writepages/bmap/invalidate
+      extents.rs
+      mballoc.rs
+      jbd2/
+      block_io.rs
+
+posix/
+  fs/                      # syscall ABI: fd flags, user pointers, errno/openat/statx
+```
+
+依赖方向只能自上而下调用，不能反向：
+
+```text
+posix/fs
+   -> fs/runtime/kfs
+      -> fs/foundation/kvfs
+         -> fs/filesystems/ext4 through VFS trait objects
+            -> ext4 internals: extent / allocator / journal / block I/O
+               -> block device
+
+fs/filesystems/ext4 must not depend on posix/fs or kfs high-level fd wrappers.
+fs/foundation/kvfs must not depend on kfs runtime or any concrete filesystem.
+fs/runtime/kfs must not define core VFS identity objects.
+```
+
+`kvfs-simple`/libfs 只能提供 helper，例如 simple directory、simple file、seq file。
+它不能拥有 superblock/inode/dentry/file/address_space 的核心状态，否则会再次产生
+第二套 VFS。
+
+### Linux 对齐的调用链
+
+从底层到上层，目标调用链应当按下面顺序收敛：
+
+```text
+block device
+  -> ext4 block_io
+  -> ext4 journal / metadata buffer / extent mapping
+  -> ext4 address_space_operations
+  -> VFS AddressSpace page cache / writeback / mmap coherence
+  -> VFS inode_operations + file_operations
+  -> VFS dentry/namei/mount path walk
+  -> VFS file object
+  -> kfs runtime fd object glue
+  -> posix/fs syscall ABI
+```
+
+从上层到下层，一次 `openat/read/write/fsync/rename` 的心智模型是：
+
+```text
+syscall ABI
+  -> convert flags / user buffers / cwd-root into VFS request
+  -> namei walks Location { Mountpoint, DirEntry }
+  -> dentry lookup resolves or creates VfsInode
+  -> open creates VfsFile
+  -> read/write calls FileOperations or AddressSpaceOperations
+  -> ext4 implements the operation using inode/extent/journal/block layers
+```
+
+`posix-fs` 只能做 ABI 转换，不能决定 dentry cache、inode cache、page cache、
+writeback 或 ext4 extent 语义。`kfs` 只能做 runtime glue，不能成为第二个 VFS。
+
+### ext4 的目标接入方式
+
+`~/code/linux/fs/ext4` 的结构说明 ext4 并不拥有 VFS 对象；它向 VFS 注册 ops：
+
+```text
+ext4_sops                       -> super_operations
+ext4_file_inode_operations      -> inode_operations for regular files
+ext4_dir_inode_operations       -> inode_operations for directories
+ext4_file_operations            -> file_operations
+ext4_aops / ext4_da_aops        -> address_space_operations
+```
+
+X-Kernel 的 KExt4 也必须按同样层次实现：
+
+```text
+KExt4SuperOps                   -> SuperBlockOperations
+KExt4FileInodeOps               -> InodeOperations
+KExt4DirInodeOps                -> InodeOperations
+KExt4FileOps                    -> FileOperations
+KExt4AddressSpaceOps            -> AddressSpaceOperations
+```
+
+ext4 内部算法归 ext4 自己：
+
+- inode 读写、extent tree、delayed allocation、unwritten extent；
+- block allocator、mballoc；
+- metadata buffer；
+- journal/JBD2；
+- ordered-data、fsync、orphan/truncate 规则；
+- ext4 特有 mount option 和 feature bit。
+
+这些算法不能上移到 `kvfs`/VFS；VFS 只提供调用时机、对象生命周期、锁顺序、
+page-cache/writeback 协议和错误传播模型。
+
+### Rust 表达方式
+
+Rust 版本不改变 Linux 分层，只改变分层的表达：
+
+| Linux C 写法 | Rust 目标写法 |
+|---|---|
+| refcount + manual put | `Arc`/`Weak`，避免所有权环 |
+| ops table function pointers | trait object，例如 `Arc<dyn FileOperations>` |
+| `void *private_data` | 类型化 `TypeMap` 或明确 newtype |
+| manual unregister/free | RAII guard，`Drop` 自动注销 |
+| integer error code | `VfsResult<T>`，边界处统一 errno |
+| lock discipline by convention | 小对象封装 + 私有字段 + 明确锁顺序文档 |
+| raw pointer lifetime | 借用、生命周期、`NonNull` 只封装在安全 API 内 |
+| global mutable state | runtime-owned registry/worker，VFS 只暴露 trait |
+
+Rust 代码要利用类型系统把“不属于这一层的状态”放不进去。例如：
+
+- `VfsFile` 可以有 file position，但不能有 page cache 所有权；
+- `AddressSpace` 可以有 page cache 和 writeback 状态，但不能持有强 `Arc<VfsInode>`
+  形成环；
+- `DirEntry` 可以有名字和 parent，但不能保存 ext4 extent 状态；
+- ext4 ops 可以保存 ext4 inode private data，但不能重新定义 VFS inode。
+
+### 当前到目标的迁移原则
+
+迁移顺序必须从大边界到小边界、从底层到上层：
+
+1. 先定 crate/目录职责：VFS core、runtime glue、libfs helper、filesystem、POSIX ABI。
+2. 再定 Linux 对象：superblock、mount/path、dentry、inode、file、address_space。
+3. 再迁移生命周期：inode cache、dentry cache、address_space/page cache、open file state。
+4. 再迁移 ops family：super/inode/file/address_space/dentry ops。
+5. 再迁移 ext4：先 super/inode/namei/file/address_space 接 VFS，再实现 extent/journal 细节。
+6. 最后补全全局 writeback、reclaim、freeze/unmount、direct I/O 和 mmap coherence。
+
+禁止的方向：
+
+- 在 `kfs` 里继续堆 VFS 对象；
+- 在 `posix-fs` 里实现 namei、inode cache、page cache 或 ext4 语义；
+- 在 ext4 中反向定义 VFS trait；
+- 为了 KExt4 临时新增一条绕过 VFS 的私有 page-cache 或 path resolver；
+- 让目录 inode、dentry、路径上下文继续混在同一个对象里。
 
 核心所有权：
 
 | 对象 | 所有者 |
 |---|---|
-| 路径、父子关系、名字 | `DirEntry` |
-| inode 身份、inode 级附件 | `VfsInode` |
-| 普通文件数据页 | KFS `FileMapping` |
-| 文件页读取/写回语义 | 文件系统 `AddressSpaceOps` |
-| ext4 metadata buffer | KExt4 metadata cache |
-| journal transaction | KExt4 JBD2 |
+| 路径解析结果 | `Location { Mountpoint, DirEntry }` |
+| mount tree | `Mountpoint` / future mount namespace |
+| 名字绑定、父子关系 | `DirEntry` |
+| inode identity、inode private data | `VfsInode` |
+| 一次 open 的 fd 状态 | `VfsFile` |
+| 普通文件数据页、writeback、mmap coherence | `AddressSpace` |
+| VFS 启动挂载、rootfs、全局 worker | `fs/runtime/kfs` |
+| syscall ABI、fd table、用户内存边界 | `posix/fs` |
+| ext4 metadata buffer、extent、journal | KExt4 |
 
 ## 改造一：拆分 dentry 与 inode
 
@@ -684,6 +1218,40 @@ VFS 批量页接口可以先合并连续页，使用同步多块 I/O 获得第�
 `WeakDirEntry` 保存父子路径上下文。后续需要先把目录操作中的路径上下文与 inode
 identity 分离，再让目录 lookup/create/root 全部走同一 `iget` 路径。
 
+PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
+
+- `kvfs::SuperBlock` 成为显式 VFS superblock 对象，`Filesystem` 包装
+  `SuperBlockOperations`；
+- `Mountpoint` 和 `Location` 可以直接访问所属 superblock，为后续
+  superblock/inode writeback、reclaim 和 mount 域管理提供入口；
+- `kvfs::ops` 增加 Linux 风格的 `SuperBlockOperations`、`InodeOperations`、
+  `FileOperations` 和 `AddressSpaceOperations` trait；
+- 现有 `DirNodeOps`/`FileNodeOps` 通过 adapter 暂时接入新 ops family；
+- `InodeCache` 增加目录 inode API，等目录节点移除 dentry/path 上下文后用于 root
+  和普通目录唯一化。
+
+第二批继续把运行时状态往 VFS 边界回收：
+
+- `kvfs::VfsFile` 承接 Linux `struct file` 级状态：opened location、access mode、
+  file position、raw open flags、`O_NONBLOCK` 和 file-private attachments；
+- `kfs::File` 组合 `VfsFile`，不再自己拥有 flags/position/nonblock/open_flags，
+  只保留 buffered/direct backend、POSIX fd glue 和时间戳回写；
+- `kvfs::AddressSpace` 成为显式 inode address-space 对象，通过 inode attachment
+  挂到 `VfsInode`，为后续把 `FileMapping` 迁出 KFS runtime 铺路；
+- `DirEntry` 和 `Location` 暴露 address-space 入口，后续 buffered I/O、mmap、
+  writeback 和 reclaim 可以从 dentry/path 上下文外移到 inode address-space。
+
+第三批把已有 page cache 进一步挂到 address-space 域：
+
+- `AddressSpace` 反向只弱引用 inode，避免 inode attachment 与 address-space 形成
+  `Arc` 引用环；
+- KFS `FileMapping` 提供 `AddressSpaceOperations` adapter，`writepages` 复用现有
+  dirty page sync，`invalidate_from` 复用 flush-and-evict；
+- `CachedFile` 从 `Location.address_space()` 获取/创建 inode page cache，不再直接
+  把 `FileMappingData` 挂在 `VfsInode::inode_data` 顶层；
+- 直接使用 `CachedFile::get_or_create` 的 mmap、exec loader 和 TEE TA loader 改为
+  显式传播 VFS 错误。
+
 ### VFS-2：inode 级 FileMapping
 
 改动：
@@ -700,6 +1268,9 @@ identity 分离，再让目录 lookup/create/root 全部走同一 `iget` 路径�
 
 - `CachedFile` 仍是打开文件的高层 wrapper；
 - `FileMapping` 作为 inode attachment 保存 LRU page cache 和 mmap eviction listener；
+- inode attachment 强持有 `FileMapping`，最后一个 fd close 不销毁 page cache；
+- `FileMapping::sync` 只写回脏页，不清空 LRU 页面；
+- `FsOperations::write` 在 helper 返回前显式 sync，作为完整 superblock writeback 前的过渡闭环；
 - buffered I/O 与 `memspace-file` 通过同一个 mapping 共享页面；
 - page index 类型改为 `u64`，避免大文件页号在 mmap/cache 边界截断。
 
@@ -766,28 +1337,6 @@ dirty/writeback/error/invalidate 状态机、批量 I/O 和 `AddressSpaceOps` �
 - PageCache 和 JBD2 completion 接入。
 
 VFS-8 可以在首个可用 KExt4 之后完成，但接口设计不能阻止它。
-
-## PR 与人员边界
-
-建议 VFS 改造由一名明确负责人主导公共文件，避免与 KExt4 两人同时修改：
-
-| 范围 | 默认负责人 | 参与者 |
-|---|---|---|
-| `fs/foundation/kvfs` inode/address-space API | VFS 负责人 | KExt4 B review |
-| `fs/runtime/kfs` PageCache/writeback | KExt4 B 或 VFS 负责人 | mmap 负责人 review |
-| `mm/memspace-file` mmap coherence | 内存管理负责人 | KExt4 B review |
-| KExt4 `AddressSpaceOps` | KExt4 B | KExt4 A review ordered-data |
-| block async I/O | 驱动/I/O 负责人 | KExt4 A review |
-
-如果仍由 KExt4 两人承担全部工作：
-
-- B 独占 kvfs/KFS/mmap 公共改造；
-- A 在此期间只依赖已合并 API 开发 disk/buffer/allocator/journal；
-- A 不在功能分支修改 kvfs/KFS；
-- 公共 API 先合并，KExt4 接入后续单独 PR；
-- 同一时间只有一个分支修改 `kvfs`、`kfs` 或 `memspace-file`。
-
-每个 VFS PR 只完成一个阶段，不与 ext4 功能实现混合。
 
 ## 兼容迁移
 

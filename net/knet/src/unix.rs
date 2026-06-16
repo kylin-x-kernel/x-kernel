@@ -132,12 +132,12 @@ fn lookup_or_create_bind_entry<R>(
             f(bindings.entry(name.clone()).or_default())
         }
         UnixAddr::Path(path) => {
-            let loc = OpenOptions::new()
+            let file = OpenOptions::new()
                 .write(true)
                 .create(true)
                 .node_type(NodeType::Socket)
-                .open(&kthread::current_fs_context().lock(), path.as_ref())?
-                .into_location();
+                .open(&kthread::current_fs_context().lock(), path.as_ref())?;
+            let loc = file.location().clone();
             if loc.metadata()?.node_type != NodeType::Socket {
                 return Err(KError::NotASocket);
             }

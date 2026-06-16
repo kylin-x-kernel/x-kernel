@@ -9,7 +9,7 @@ use core::marker::PhantomPinned;
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
 use kvfs::{
-    DirEntry, Filesystem, FilesystemOps, Reference, ST_RELATIME, StatFs, VfsResult,
+    DirEntry, Filesystem, Reference, ST_RELATIME, StatFs, SuperBlockOperations, VfsResult,
     path::MAX_NAME_LEN,
 };
 use slab::Slab;
@@ -79,16 +79,16 @@ impl FatFilesystem {
     }
 }
 
-impl FilesystemOps for FatFilesystem {
+impl SuperBlockOperations for FatFilesystem {
     fn name(&self) -> &str {
         "vfat"
     }
 
-    fn root_dir(&self) -> DirEntry {
+    fn root_dentry(&self) -> DirEntry {
         self.root_dir.lock().clone().unwrap()
     }
 
-    fn stat(&self) -> VfsResult<StatFs> {
+    fn statfs(&self) -> VfsResult<StatFs> {
         let fs = self.inner.lock();
         let stats = fs.inner.stats().map_err(into_vfs_err)?;
         Ok(StatFs {

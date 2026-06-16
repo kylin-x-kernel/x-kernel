@@ -8,16 +8,22 @@
 
 extern crate alloc;
 
+mod address_space;
+mod file;
 mod fs;
 mod mount;
 mod node;
+mod ops;
 pub mod path;
 mod permission;
 mod types;
 
+pub use address_space::*;
+pub use file::*;
 pub use fs::*;
 pub use mount::*;
 pub use node::*;
+pub use ops::*;
 pub use permission::*;
 pub use types::*;
 

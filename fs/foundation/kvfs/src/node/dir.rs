@@ -424,22 +424,22 @@ mod tests_dir {
 
     use super::{DirEntrySink, DirNode, DirNodeOps, OpenOptions};
     use crate::{
-        DirEntry, FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeOps,
-        NodePermission, NodeType, Reference, StatFs, VfsError, VfsResult, path::MAX_NAME_LEN,
+        DirEntry, FileNode, FileNodeOps, Metadata, MetadataUpdate, NodeOps, NodePermission,
+        NodeType, Reference, StatFs, SuperBlockOperations, VfsError, VfsResult, path::MAX_NAME_LEN,
     };
 
     struct MockFilesystem;
 
-    impl FilesystemOps for MockFilesystem {
+    impl SuperBlockOperations for MockFilesystem {
         fn name(&self) -> &str {
             "mockfs"
         }
 
-        fn root_dir(&self) -> DirEntry {
+        fn root_dentry(&self) -> DirEntry {
             panic!("root_dir is not used in these tests")
         }
 
-        fn stat(&self) -> VfsResult<StatFs> {
+        fn statfs(&self) -> VfsResult<StatFs> {
             Ok(StatFs {
                 fs_type: 0,
                 block_size: 0,
@@ -500,10 +500,6 @@ mod tests_dir {
         fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
             *self.owner.lock() = update.owner;
             Ok(())
-        }
-
-        fn filesystem(&self) -> &dyn FilesystemOps {
-            self.fs.as_ref()
         }
 
         fn sync(&self, _data_only: bool) -> VfsResult<()> {
@@ -599,10 +595,6 @@ mod tests_dir {
 
         fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
             Ok(())
-        }
-
-        fn filesystem(&self) -> &dyn FilesystemOps {
-            self.fs.as_ref()
         }
 
         fn sync(&self, _data_only: bool) -> VfsResult<()> {

@@ -11,8 +11,8 @@ use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use kvfs::{
-    FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission,
-    NodeType, VfsError, VfsResult,
+    FileNodeOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, VfsError,
+    VfsResult,
 };
 
 use super::{SimpleFs, SimpleFsNode};
@@ -184,8 +184,6 @@ impl<I: SeqIterator> NodeOps for SeqFileNode<I> {
     fn metadata(&self) -> VfsResult<Metadata>;
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
-
-    fn filesystem(&self) -> &dyn FilesystemOps;
 
     fn sync(&self, data_only: bool) -> VfsResult<()>;
 

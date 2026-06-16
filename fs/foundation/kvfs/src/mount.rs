@@ -20,9 +20,9 @@ use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 
 use crate::{
-    DirEntry, DirEntrySink, Filesystem, FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard,
-    NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, ST_RDONLY, TypeMap, VfsError,
-    VfsInode, VfsResult,
+    AddressSpace, AddressSpaceOperations, DirEntry, DirEntrySink, Filesystem, Metadata,
+    MetadataUpdate, Mutex, MutexGuard, NodeFlags, NodePermission, NodeType, OpenOptions,
+    ReferenceKey, ST_RDONLY, SuperBlock, TypeMap, VfsError, VfsInode, VfsResult,
     path::{DOT, DOTDOT, PathBuf},
 };
 
@@ -55,6 +55,8 @@ bitflags::bitflags! {
 /// A mounted filesystem instance and its relationships.
 #[derive(Debug)]
 pub struct Mountpoint {
+    /// Superblock backing this mounted filesystem instance.
+    super_block: Arc<SuperBlock>,
     /// Root dir entry in the mountpoint.
     root: DirEntry,
     /// Location in the parent mountpoint.
@@ -89,6 +91,7 @@ impl Mountpoint {
 
         let root = fs.root_dir();
         Arc::new(Self {
+            super_block: fs.super_block().clone(),
             root,
             location: location_in_parent,
             child_mounts: Mutex::default(),
@@ -111,6 +114,11 @@ impl Mountpoint {
     /// Return a `Location` representing the mountpoint root.
     pub fn root_location(self: &Arc<Self>) -> Location {
         Location::new(self.clone(), self.root.clone())
+    }
+
+    /// Returns the superblock backing this mountpoint.
+    pub fn super_block(&self) -> &Arc<SuperBlock> {
+        &self.super_block
     }
 
     /// Returns the location in the parent mountpoint.
@@ -190,8 +198,6 @@ pub struct Location {
 impl Location {
     pub fn inode(&self) -> u64;
 
-    pub fn filesystem(&self) -> &dyn FilesystemOps;
-
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> VfsResult<u64>;
 
@@ -218,6 +224,8 @@ impl Location {
     pub fn inode_data(&self) -> MutexGuard<'_, TypeMap>;
 
     pub fn vfs_inode(&self) -> &Arc<VfsInode>;
+
+    pub fn address_space(&self) -> Option<Arc<AddressSpace>>;
 }
 
 impl Location {
@@ -235,9 +243,37 @@ impl Location {
         &self.mountpoint
     }
 
+    /// Returns the superblock containing this location.
+    pub fn super_block(&self) -> &Arc<SuperBlock> {
+        self.mountpoint.super_block()
+    }
+
     /// Returns the underlying directory entry.
     pub fn entry(&self) -> &DirEntry {
         &self.entry
+    }
+
+    /// Return or create this location's inode address-space object.
+    pub fn get_or_insert_address_space(
+        &self,
+        ops: Arc<dyn AddressSpaceOperations>,
+    ) -> Arc<AddressSpace> {
+        let address_space = self.entry.vfs_inode().get_or_insert_address_space(ops);
+        self.super_block().register_address_space(&address_space);
+        address_space
+    }
+
+    /// Return or create this location's inode address-space object.
+    pub fn get_or_insert_address_space_with(
+        &self,
+        create: impl FnOnce() -> AddressSpace,
+    ) -> Arc<AddressSpace> {
+        let address_space = self
+            .entry
+            .vfs_inode()
+            .get_or_insert_address_space_with(create);
+        self.super_block().register_address_space(&address_space);
+        address_space
     }
 
     /// Returns the name of this location within its parent directory.
@@ -293,7 +329,7 @@ impl Location {
     pub fn is_effectively_readonly(&self) -> bool {
         self.is_mount_readonly()
             || self
-                .filesystem()
+                .super_block()
                 .stat()
                 .is_ok_and(|stat| stat.mount_flags & ST_RDONLY != 0)
     }
@@ -602,27 +638,27 @@ mod tests {
 
     use super::*;
     use crate::{
-        DirEntry, DirEntrySink, DirNode, DirNodeOps, Filesystem, FilesystemOps, Metadata,
-        MetadataUpdate, NodeOps, NodePermission, NodeType, Reference, StatFs, VfsError, VfsResult,
+        DirEntry, DirEntrySink, DirNode, DirNodeOps, Filesystem, Metadata, MetadataUpdate, NodeOps,
+        NodePermission, NodeType, Reference, StatFs, SuperBlockOperations, VfsError, VfsResult,
     };
 
     struct MockFilesystem {
         mount_flags: u32,
     }
 
-    impl FilesystemOps for MockFilesystem {
+    impl SuperBlockOperations for MockFilesystem {
         fn name(&self) -> &str {
             "mockfs"
         }
 
-        fn root_dir(&self) -> DirEntry {
+        fn root_dentry(&self) -> DirEntry {
             DirEntry::new_dir(
                 |_| DirNode::new(Arc::new(MockDirNodeOps::new(self.mount_flags, 1))),
                 Reference::root(),
             )
         }
 
-        fn stat(&self) -> VfsResult<StatFs> {
+        fn statfs(&self) -> VfsResult<StatFs> {
             statfs(self.mount_flags)
         }
     }
@@ -666,30 +702,12 @@ mod tests {
             Ok(())
         }
 
-        fn filesystem(&self) -> &dyn FilesystemOps {
-            self
-        }
-
         fn sync(&self, _data_only: bool) -> VfsResult<()> {
             Ok(())
         }
 
         fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
             self
-        }
-    }
-
-    impl FilesystemOps for MockDirNodeOps {
-        fn name(&self) -> &str {
-            "mockfs"
-        }
-
-        fn root_dir(&self) -> DirEntry {
-            panic!("root_dir is not used through directory nodes")
-        }
-
-        fn stat(&self) -> VfsResult<StatFs> {
-            statfs(self.mount_flags)
         }
     }
 

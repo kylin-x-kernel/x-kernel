@@ -16,7 +16,8 @@ use kpoll::{IoEvents, Pollable};
 
 use super::{DirNode, FileNode, Node, NodeFlags, NodeOps, TypeMap};
 use crate::{
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
+    AddressSpace, AddressSpaceOperations, DirNodeInodeOperations, FileNodeFileOperations, Metadata,
+    MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
 };
 
 /// VFS inode identity shared by one or more directory entries.
@@ -70,11 +71,6 @@ impl VfsInode {
         self.node.update_metadata(update)
     }
 
-    /// Gets the filesystem owning this node.
-    pub fn filesystem(&self) -> &dyn FilesystemOps {
-        self.node.filesystem()
-    }
-
     /// Gets the size of the node.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> VfsResult<u64> {
@@ -114,12 +110,22 @@ impl VfsInode {
         }
     }
 
+    /// Returns a file-operations adapter for file-like inodes.
+    pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
+        self.as_file().map(FileNodeFileOperations::new)
+    }
+
     /// Returns a directory node reference if this inode wraps a directory node.
     pub fn as_dir(&self) -> VfsResult<&DirNode> {
         match &self.node {
             Node::Dir(dir) => Ok(dir),
             _ => Err(VfsError::NotADirectory),
         }
+    }
+
+    /// Returns an inode-operations adapter for directory inodes.
+    pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
+        self.as_dir().map(DirNodeInodeOperations::new)
     }
 
     /// Attempt to downcast the inode to a concrete node type.
@@ -134,6 +140,27 @@ impl VfsInode {
     /// Access inode-scoped attachment storage.
     pub fn inode_data(&self) -> MutexGuard<'_, TypeMap> {
         self.attachments.lock()
+    }
+
+    /// Returns this inode's address-space object, if one has been attached.
+    pub fn address_space(&self) -> Option<Arc<AddressSpace>> {
+        self.attachments.lock().get::<AddressSpace>()
+    }
+
+    /// Return or create this inode's address-space object.
+    pub(crate) fn get_or_insert_address_space(
+        self: &Arc<Self>,
+        ops: Arc<dyn AddressSpaceOperations>,
+    ) -> Arc<AddressSpace> {
+        self.get_or_insert_address_space_with(|| AddressSpace::new(Arc::downgrade(self), ops))
+    }
+
+    /// Return or create this inode's address-space object with a custom builder.
+    pub(crate) fn get_or_insert_address_space_with(
+        &self,
+        create: impl FnOnce() -> AddressSpace,
+    ) -> Arc<AddressSpace> {
+        self.attachments.lock().get_or_insert_with(create)
     }
 
     /// Read the symlink target as a string.
@@ -245,6 +272,19 @@ impl InodeCache {
         self.get_or_insert_with(inode_number, || {
             VfsInode::new_file(create_node_fn(), node_type)
         })
+    }
+
+    /// Return or create a directory VFS inode for a stable filesystem inode.
+    ///
+    /// This is the directory counterpart of [`Self::get_or_insert_file`].
+    /// Filesystems should use it after their directory node no longer stores
+    /// dentry/path context inside the inode object.
+    pub fn get_or_insert_dir(
+        &self,
+        inode_number: u64,
+        create_node_fn: impl FnOnce() -> DirNode,
+    ) -> Arc<VfsInode> {
+        self.get_or_insert_with(inode_number, || VfsInode::new_dir(create_node_fn()))
     }
 
     /// Remove dead cache entries and return the number removed.

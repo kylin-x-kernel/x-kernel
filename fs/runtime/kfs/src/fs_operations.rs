@@ -117,12 +117,22 @@ impl FsOperations {
 
     /// Writes a slice as the entire contents of a file
     pub fn write(&self, path: impl AsRef<Path>, buf: impl AsRef<[u8]>) -> VfsResult<()> {
-        // Create a temporary FsContext wrapper for File::create
         let ctx = crate::FsContext {
             inner: self.clone(),
         };
         let file = File::create(&ctx, path.as_ref())?;
         (&file).write_all(buf.as_ref())?;
+        Ok(())
+    }
+
+    /// Writes a slice as the entire contents of a file and synchronizes it.
+    pub fn write_sync(&self, path: impl AsRef<Path>, buf: impl AsRef<[u8]>) -> VfsResult<()> {
+        let ctx = crate::FsContext {
+            inner: self.clone(),
+        };
+        let file = File::create(&ctx, path.as_ref())?;
+        (&file).write_all(buf.as_ref())?;
+        file.sync(false)?;
         Ok(())
     }
 
@@ -208,7 +218,7 @@ impl FsOperations {
                 "symlink: set_symlink failed target={} link_name={} fs={} err={:?}",
                 target.as_ref(),
                 name,
-                dir.filesystem().name(),
+                dir.super_block().name(),
                 err
             );
             return Err(err);

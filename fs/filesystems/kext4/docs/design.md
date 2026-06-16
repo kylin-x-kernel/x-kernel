@@ -104,7 +104,7 @@ journal、checkpoint 和恢复流程。metadata buffer 不能冒充文件 PageCa
 
 独占负责：
 
-- `vfs/`：`FilesystemOps`、`NodeOps`、`FileNodeOps`、`DirNodeOps` 适配；
+- `vfs/`：`SuperBlockOperations`、`NodeOps`、`FileNodeOps`、`DirNodeOps` 适配；
 - `inode/`：内存 inode、inode cache、生命周期和 inode 级同步；
 - `extent/`：逻辑块映射、extent tree、delayed allocation 映射；
 - `dir/`：目录项、HTree、lookup/readdir/create/unlink/rename/link；

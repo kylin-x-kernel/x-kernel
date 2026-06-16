@@ -7,7 +7,7 @@ use alloc::{borrow::Cow, string::ToString, sync::Arc, vec::Vec};
 use core::{
     ffi::c_int,
     hint::likely,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, Ordering},
     task::Context,
 };
 
@@ -15,61 +15,22 @@ use kerrno::{KError, KResult};
 use kfd::{FdTable, FileLike, IoDst, IoSrc, Kstat};
 use kio::{SeekFrom, prelude::*};
 use kpoll::{IoEvents, Pollable};
-use ksync::{Mutex, RwLock};
+use ksync::RwLock;
 use ktask::future::{block_on, poll_io};
+pub use kvfs::VfsFileFlags as FileFlags;
 use kvfs::{
-    Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
+    DirEntrySink, Location, MmapMapper, NodeFlags, NodePermission, NodeType, VfsError, VfsFile,
+    VfsIoRange, VfsResult, check_file_size, generic_read_range, generic_write_range, path::Path,
 };
 use memaddr::PAGE_SIZE_4K;
 
 use super::{
     FsContext,
-    mapping::{FileMapping, FileMappingData, PageCache, PageIndex},
+    mapping::{
+        EvictRegistration, FileMapping, FileMappingAddressSpaceOperations, FileMappingData,
+        PageCache, PageIndex,
+    },
 };
-
-bitflags::bitflags! {
-    /// Access mode flags for an opened file.
-    #[derive(Debug, Clone, Copy)]
-    pub struct FileFlags: u8 {
-        const READ = 1;
-        const WRITE = 2;
-        const EXECUTE = 4;
-        const APPEND = 8;
-        const PATH = 16;
-    }
-}
-
-/// Results returned by [`OpenOptions::open`].
-pub enum OpenResult {
-    File(File),
-    Dir(Location),
-}
-
-impl OpenResult {
-    /// Convert into a file result, erroring if it is a directory.
-    pub fn into_file(self) -> VfsResult<File> {
-        match self {
-            Self::File(file) => Ok(file),
-            Self::Dir(_) => Err(VfsError::IsADirectory),
-        }
-    }
-
-    /// Convert into a directory result, erroring if it is a file.
-    pub fn into_dir(self) -> VfsResult<Location> {
-        match self {
-            Self::Dir(dir) => Ok(dir),
-            Self::File(_) => Err(VfsError::NotADirectory),
-        }
-    }
-
-    /// Convert into a location regardless of variant.
-    pub fn into_location(self) -> Location {
-        match self {
-            Self::File(file) => file.location().clone(),
-            Self::Dir(dir) => dir,
-        }
-    }
-}
 
 /// Options and flags which can be used to configure how a file is opened.
 #[derive(Debug, Clone)]
@@ -205,7 +166,7 @@ impl OpenOptions {
         self.write || self.append || self.truncate
     }
 
-    fn _open(&self, loc: Location) -> VfsResult<OpenResult> {
+    fn _open(&self, loc: Location) -> VfsResult<File> {
         let flags = self.to_flags()?;
 
         let is_dir = loc.is_dir();
@@ -218,8 +179,8 @@ impl OpenOptions {
         if self.mutates_existing_file() {
             loc.check_writable_mount()?;
         }
-        Ok(if is_dir {
-            OpenResult::Dir(loc)
+        let backend = if is_dir {
+            FileBackend::new_directory(loc)
         } else {
             // TODO(mivik): is this correct?
             let metadata = loc.metadata()?;
@@ -233,29 +194,30 @@ impl OpenOptions {
                 || self.direct
                 || loc.flags().contains(NodeFlags::NON_CACHEABLE);
             let backend = if !direct || loc.flags().contains(NodeFlags::ALWAYS_CACHE) {
-                FileBackend::new_cached(loc)
+                FileBackend::new_cached(loc)?
             } else {
                 FileBackend::new_direct(loc)
             };
             if self.truncate {
                 if metadata.node_type == NodeType::RegularFile {
-                    CachedFile::get_or_create(backend.location().clone()).set_len(0)?;
+                    CachedFile::get_or_create(backend.location().clone())?.set_len(0)?;
                 } else {
                     backend.set_len(0)?;
                 }
             }
-            OpenResult::File(File::with_open_flags(backend, flags, self.open_flags))
-        })
+            backend
+        };
+        Ok(File::with_open_flags(backend, flags, self.open_flags))
     }
 
-    pub fn open_loc(&self, loc: Location) -> VfsResult<OpenResult> {
+    pub fn open_loc(&self, loc: Location) -> VfsResult<File> {
         if !self.is_valid() {
             return Err(VfsError::InvalidInput);
         }
         self._open(loc)
     }
 
-    pub fn open(&self, context: &FsContext, path: impl AsRef<Path>) -> VfsResult<OpenResult> {
+    pub fn open(&self, context: &FsContext, path: impl AsRef<Path>) -> VfsResult<File> {
         if !self.is_valid() {
             return Err(VfsError::InvalidInput);
         }
@@ -350,33 +312,39 @@ impl Clone for CachedFile {
 }
 
 impl CachedFile {
-    pub fn get_or_create(location: Location) -> Self {
-        let in_memory = matches!(location.filesystem().name(), "tmpfs" | "memfs",);
+    pub fn get_or_create(location: Location) -> VfsResult<Self> {
+        let in_memory = matches!(location.super_block().name(), "tmpfs" | "memfs",);
+        location.entry().as_file()?;
 
-        let mut guard = location.inode_data();
-        let mapping = if let Some(mapping) = guard.get::<FileMappingData>().and_then(|it| it.get())
-        {
-            mapping
-        } else {
-            let (mapping, user_data) = if in_memory {
-                let mapping = Arc::new(FileMapping::new_unbounded());
-                (mapping.clone(), FileMappingData::Strong(mapping))
+        let address_space = location.get_or_insert_address_space_with(|| {
+            let mapping = if in_memory {
+                Arc::new(FileMapping::new_unbounded())
             } else {
-                let mapping = Arc::new(FileMapping::new());
-                let user_data = FileMappingData::Weak(Arc::downgrade(&mapping));
-                (mapping, user_data)
+                Arc::new(FileMapping::new())
             };
-            guard.insert(user_data);
-            mapping
-        };
-        drop(guard);
+            let ops = Arc::new(FileMappingAddressSpaceOperations::new(
+                mapping.clone(),
+                location.clone(),
+                in_memory,
+            ));
+            let address_space = kvfs::AddressSpace::new(Arc::downgrade(location.vfs_inode()), ops);
+            address_space
+                .data()
+                .insert(FileMappingData::new(mapping.clone()));
+            address_space
+        });
 
-        Self {
+        let Some(mapping) = address_space.data().get::<FileMappingData>() else {
+            return Err(VfsError::InvalidInput);
+        };
+        let mapping = mapping.mapping();
+
+        Ok(Self {
             inner: location,
             mapping,
             in_memory,
             append_lock: RwLock::new(()),
-        }
+        })
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
@@ -387,29 +355,12 @@ impl CachedFile {
         self.in_memory
     }
 
-    pub fn add_evict_listener<F>(&self, listener: F) -> usize
+    /// Registers an eviction listener while the returned guard is held.
+    pub fn add_evict_listener<F>(&self, listener: F) -> EvictRegistration
     where
         F: Fn(PageIndex, &PageCache) + Send + Sync + 'static,
     {
         self.mapping.add_evict_listener(listener)
-    }
-
-    /// Removes an evict listener by dispatch_irq.
-    ///
-    /// # Safety
-    ///
-    /// The `dispatch_irq` must come from a previous call to [`add_evict_listener`]
-    /// on the same [`CachedFile`] and must not have been removed already.
-    /// Passing an invalid dispatch_irq is undefined behavior.
-    pub unsafe fn remove_evict_listener(&self, dispatch_irq: usize) {
-        unsafe {
-            self.mapping.remove_evict_listener(dispatch_irq);
-        }
-    }
-
-    fn page_start(pn: PageIndex) -> VfsResult<u64> {
-        pn.checked_mul(PAGE_SIZE_4K as u64)
-            .ok_or(VfsError::InvalidInput)
     }
 
     pub fn with_page<R>(&self, pn: PageIndex, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
@@ -426,20 +377,24 @@ impl CachedFile {
             .with_page_or_insert(file, self.in_memory, pn, f)
     }
 
-    pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+    pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         let len = self.inner.len()?;
-        let end = (offset + dst.remaining_mut() as u64).min(len);
-        if end <= offset {
+        let Some(range) = generic_read_range(&self.inner, offset, dst.remaining_mut(), len)? else {
             return Ok(0);
-        }
-        let start_page = offset / PAGE_SIZE_4K as u64;
+        };
+        self.read_range(dst, range)
+    }
+
+    fn read_range(&self, mut dst: impl Write + IoBufMut, range: VfsIoRange) -> VfsResult<usize> {
+        let end = range.end();
+        let start_page = range.offset() / PAGE_SIZE_4K as u64;
         let end_page = end.div_ceil(PAGE_SIZE_4K as u64);
-        let mut page_offset = (offset % PAGE_SIZE_4K as u64) as usize;
+        let mut page_offset = (range.offset() % PAGE_SIZE_4K as u64) as usize;
         let mut read = 0;
         let mut chunk = [0u8; PAGE_SIZE_4K];
         let file = self.inner.entry().as_file()?;
         for pn in start_page..end_page {
-            let page_start = Self::page_start(pn)?;
+            let page_start = pn * PAGE_SIZE_4K as u64;
             let range = page_offset..(end - page_start).min(PAGE_SIZE_4K as u64) as usize;
             let chunk_len = range.end - range.start;
             self.mapping
@@ -454,19 +409,30 @@ impl CachedFile {
         Ok(read)
     }
 
-    fn write_at_locked(&self, mut buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        let end = offset + buf.remaining() as u64;
+    fn write_at_locked(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+        let Some(range) = generic_write_range(&self.inner, offset, buf.remaining())? else {
+            return Ok(0);
+        };
+        self.write_range_locked(buf, range)
+    }
+
+    fn write_range_locked(
+        &self,
+        mut buf: impl Read + IoBuf,
+        range: VfsIoRange,
+    ) -> VfsResult<usize> {
+        let end = range.end();
         let file = self.inner.entry().as_file()?;
         if end > file.len()? {
             file.set_len(end)?;
         }
-        let start_page = offset / PAGE_SIZE_4K as u64;
+        let start_page = range.offset() / PAGE_SIZE_4K as u64;
         let end_page = end.div_ceil(PAGE_SIZE_4K as u64);
-        let mut page_offset = (offset % PAGE_SIZE_4K as u64) as usize;
+        let mut page_offset = (range.offset() % PAGE_SIZE_4K as u64) as usize;
         let mut written = 0;
         let mut chunk = [0u8; PAGE_SIZE_4K];
         for pn in start_page..end_page {
-            let page_start = Self::page_start(pn)?;
+            let page_start = pn * PAGE_SIZE_4K as u64;
             let range = page_offset..(end - page_start).min(PAGE_SIZE_4K as u64) as usize;
             let chunk_len = range.end - range.start;
             buf.read(&mut chunk[..chunk_len])?;
@@ -498,6 +464,7 @@ impl CachedFile {
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
+        check_file_size(&self.inner, len)?;
         let file = self.inner.entry().as_file()?;
         let old_len = file.len()?;
         file.set_len(len)?;
@@ -538,6 +505,7 @@ impl Drop for CachedFile {
 pub enum FileBackend {
     Cached(CachedFile),
     Direct(Location),
+    Directory(Location),
 }
 
 impl FileBackend {
@@ -547,95 +515,153 @@ impl FileBackend {
         Self::Direct(location)
     }
 
-    pub(crate) fn new_cached(location: Location) -> Self {
-        Self::Cached(CachedFile::get_or_create(location))
+    pub(crate) fn new_cached(location: Location) -> VfsResult<Self> {
+        CachedFile::get_or_create(location).map(Self::Cached)
     }
 
-    pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
+    pub(crate) fn new_directory(location: Location) -> Self {
+        Self::Directory(location)
+    }
+
+    pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => cached.read_at(dst, offset),
+            Self::Directory(_) => Err(VfsError::IsADirectory),
+            Self::Direct(loc) if loc.flags().contains(NodeFlags::STREAM) => {
+                Self::read_direct_at(loc, dst, offset, None, false)
+            }
             Self::Direct(loc) => {
-                let mut total = 0usize;
-                let file = loc.entry().as_file()?;
-                let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
-
-                while !dst.is_full() {
-                    let want = chunk.len().min(dst.remaining_mut());
-                    if want == 0 {
-                        break;
-                    }
-
-                    let read = file.read_at(&mut chunk[..want], offset)?;
-                    if read == 0 {
-                        break;
-                    }
-                    offset += read as u64;
-
-                    let mut consumed = 0usize;
-                    while consumed < read {
-                        let written = dst.write(&chunk[consumed..read])?;
-                        if written == 0 {
-                            return Err(VfsError::WriteZero);
-                        }
-                        consumed += written;
-                    }
-
-                    total += read;
-
-                    if read < want {
-                        break;
-                    }
-                }
-
-                Ok(total)
+                let Some(range) = generic_read_range(loc, offset, dst.remaining_mut(), loc.len()?)?
+                else {
+                    return Ok(0);
+                };
+                Self::read_direct_at(loc, dst, range.offset(), Some(range.len()), true)
             }
         }
     }
 
-    pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
+    fn read_direct_at(
+        loc: &Location,
+        mut dst: impl Write + IoBufMut,
+        mut offset: u64,
+        mut remaining: Option<usize>,
+        advance_offset: bool,
+    ) -> VfsResult<usize> {
+        let mut total = 0usize;
+        let file = loc.entry().as_file()?;
+        let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
+
+        while remaining != Some(0) && !dst.is_full() {
+            let want = remaining
+                .map_or(chunk.len(), |remaining| chunk.len().min(remaining))
+                .min(dst.remaining_mut());
+            if want == 0 {
+                break;
+            }
+
+            let read = file.read_at(&mut chunk[..want], offset)?;
+            if read == 0 {
+                break;
+            }
+            if advance_offset {
+                offset += read as u64;
+            }
+
+            let mut consumed = 0usize;
+            while consumed < read {
+                let written = dst.write(&chunk[consumed..read])?;
+                if written == 0 {
+                    return Err(VfsError::WriteZero);
+                }
+                consumed += written;
+            }
+
+            total += read;
+            if let Some(left) = remaining.as_mut() {
+                *left -= read;
+            }
+
+            if read < want {
+                break;
+            }
+        }
+
+        Ok(total)
+    }
+
+    pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
         self.location().check_writable_mount()?;
         match self {
             Self::Cached(cached) => cached.write_at(src, offset),
+            Self::Directory(_) => Err(VfsError::IsADirectory),
+            Self::Direct(loc) if loc.flags().contains(NodeFlags::STREAM) => {
+                Self::write_direct_at(loc, src, offset, None, false)
+            }
             Self::Direct(loc) => {
-                let mut total = 0usize;
-                let file = loc.entry().as_file()?;
-                let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
-
-                while !src.is_empty() {
-                    let read = src.read(&mut chunk)?;
-                    if read == 0 {
-                        break;
-                    }
-
-                    let mut written_in_chunk = 0usize;
-                    while written_in_chunk < read {
-                        let written = file.write_at(&chunk[written_in_chunk..read], offset)?;
-                        if written == 0 {
-                            return Err(VfsError::WriteZero);
-                        }
-                        written_in_chunk += written;
-                        offset += written as u64;
-                    }
-
-                    total += read;
-                }
-
-                Ok(total)
+                let Some(range) = generic_write_range(loc, offset, src.remaining())? else {
+                    return Ok(0);
+                };
+                Self::write_direct_at(loc, src, range.offset(), Some(range.len()), true)
             }
         }
+    }
+
+    fn write_direct_at(
+        loc: &Location,
+        mut src: impl Read + IoBuf,
+        mut offset: u64,
+        mut remaining: Option<usize>,
+        advance_offset: bool,
+    ) -> VfsResult<usize> {
+        let mut total = 0usize;
+        let file = loc.entry().as_file()?;
+        let mut chunk = [0u8; Self::DIRECT_IO_CHUNK_SIZE];
+
+        while remaining != Some(0) && !src.is_empty() {
+            let want = remaining.map_or(chunk.len(), |remaining| chunk.len().min(remaining));
+            let read = src.read(&mut chunk[..want])?;
+            if read == 0 {
+                break;
+            }
+
+            let mut written_in_chunk = 0usize;
+            while written_in_chunk < read {
+                let written = file.write_at(&chunk[written_in_chunk..read], offset)?;
+                if written == 0 {
+                    return Err(VfsError::WriteZero);
+                }
+                written_in_chunk += written;
+                if advance_offset {
+                    offset += written as u64;
+                }
+            }
+
+            total += read;
+            if let Some(left) = remaining.as_mut() {
+                *left -= read;
+            }
+        }
+
+        Ok(total)
     }
 
     pub fn append(&self, mut src: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
         self.location().check_writable_mount()?;
         match self {
             Self::Cached(cached) => cached.append(src),
+            Self::Directory(_) => Err(VfsError::IsADirectory),
             Self::Direct(loc) => {
                 let mut total = 0usize;
                 let mut end = loc.len()?;
+                let Some(range) = generic_write_range(loc, end, src.remaining())? else {
+                    return Ok((0, end));
+                };
+                let mut remaining = range.len();
                 let mut chunk = [0u8; 4096];
 
-                while !src.is_empty() {
-                    let read = src.read(&mut chunk)?;
+                while remaining > 0 && !src.is_empty() {
+                    let want = chunk.len().min(remaining);
+                    let read = src.read(&mut chunk[..want])?;
                     if read == 0 {
                         break;
                     }
@@ -654,6 +680,7 @@ impl FileBackend {
                     }
 
                     total += read;
+                    remaining -= read;
                 }
 
                 Ok((total, end))
@@ -665,6 +692,7 @@ impl FileBackend {
         match self {
             Self::Cached(cached) => cached.location(),
             Self::Direct(loc) => loc,
+            Self::Directory(loc) => loc,
         }
     }
 
@@ -672,19 +700,25 @@ impl FileBackend {
         match self {
             Self::Cached(cached) => cached.sync(data_only),
             Self::Direct(loc) => loc.entry().as_file()?.sync(data_only),
+            Self::Directory(loc) => loc.sync(data_only),
         }
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
         self.location().check_writable_mount()?;
+        check_file_size(self.location(), len)?;
         match self {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => loc.entry().as_file()?.set_len(len),
+            Self::Directory(_) => Err(VfsError::IsADirectory),
         }
     }
 
     pub fn collapse_range(&self, offset: u64, len: u64) -> VfsResult<()> {
         self.location().check_writable_mount()?;
+        if matches!(self, Self::Directory(_)) {
+            return Err(VfsError::IsADirectory);
+        }
         if let Self::Cached(cached) = self {
             cached.flush_and_evict_from(offset)?;
         }
@@ -693,6 +727,15 @@ impl FileBackend {
 
     pub fn insert_range(&self, offset: u64, len: u64) -> VfsResult<()> {
         self.location().check_writable_mount()?;
+        if matches!(self, Self::Directory(_)) {
+            return Err(VfsError::IsADirectory);
+        }
+        let new_len = self
+            .location()
+            .len()?
+            .checked_add(len)
+            .ok_or(VfsError::FileTooLarge)?;
+        check_file_size(self.location(), new_len)?;
         if let Self::Cached(cached) = self {
             cached.flush_and_evict_from(offset)?;
         }
@@ -703,14 +746,26 @@ impl FileBackend {
 /// Provides `std::fs::File`-like interface.
 pub struct File {
     inner: FileBackend,
-    flags: FileFlags,
-    position: Option<Mutex<u64>>,
-    open_flags: u32,
-    nonblock: AtomicBool,
+    vfs_file: VfsFile,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
     #[cfg(feature = "times")]
     is_effectively_readonly: bool,
+}
+
+struct PositionUpdatingDirSink<'a> {
+    position: &'a mut u64,
+    sink: &'a mut dyn DirEntrySink,
+}
+
+impl DirEntrySink for PositionUpdatingDirSink<'_> {
+    fn accept(&mut self, name: &str, ino: u64, node_type: NodeType, offset: u64) -> bool {
+        let accepted = self.sink.accept(name, ino, node_type, offset);
+        if accepted {
+            *self.position = offset;
+        }
+        accepted
+    }
 }
 
 impl File {
@@ -719,23 +774,12 @@ impl File {
     }
 
     pub fn with_open_flags(inner: FileBackend, flags: FileFlags, open_flags: u32) -> Self {
-        let position = if inner.location().flags().contains(NodeFlags::STREAM) {
-            None
-        } else {
-            Some(Mutex::new(if flags.contains(FileFlags::APPEND) {
-                inner.location().len().unwrap_or_default()
-            } else {
-                0
-            }))
-        };
+        let vfs_file = VfsFile::with_open_flags(inner.location().clone(), flags, open_flags);
         #[cfg(feature = "times")]
-        let is_effectively_readonly = inner.location().is_effectively_readonly();
+        let is_effectively_readonly = vfs_file.location().is_effectively_readonly();
         Self {
             inner,
-            flags,
-            position,
-            open_flags,
-            nonblock: AtomicBool::new(false),
+            vfs_file,
             #[cfg(feature = "times")]
             access_flags: AtomicU8::new(0),
             #[cfg(feature = "times")]
@@ -744,10 +788,7 @@ impl File {
     }
 
     pub fn open(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
-        OpenOptions::new()
-            .read(true)
-            .open(context, path.as_ref())
-            .and_then(OpenResult::into_file)
+        OpenOptions::new().read(true).open(context, path.as_ref())
     }
 
     pub fn create(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
@@ -756,32 +797,27 @@ impl File {
             .create(true)
             .truncate(true)
             .open(context, path.as_ref())
-            .and_then(OpenResult::into_file)
     }
 
     pub fn access(&self, flags: FileFlags) -> VfsResult<&FileBackend> {
-        if self.flags.contains(flags) && !self.is_path() {
-            Ok(&self.inner)
-        } else {
-            Err(VfsError::BadFileDescriptor)
-        }
+        self.vfs_file.access(flags)?;
+        Ok(&self.inner)
     }
 
     pub fn is_path(&self) -> bool {
-        self.flags.contains(FileFlags::PATH)
+        self.vfs_file.is_path()
     }
 
     pub fn flags(&self) -> FileFlags {
-        self.flags
+        self.vfs_file.flags()
     }
 
     /// Checks the node-level blocking attribute (e.g. regular files are always
     /// blocking). This is independent of the user-facing `O_NONBLOCK` flag
     /// checked by `nonblocking()`. When true, read/write bypass poll_io and
-    /// execute directly — matching Linux behavior where `O_NONBLOCK` has no
-    /// effect on regular files.
+    /// execute directly.
     fn is_blocking(&self) -> bool {
-        self.inner.location().flags().contains(NodeFlags::BLOCKING)
+        self.vfs_file.is_blocking()
     }
 
     pub fn backend(&self) -> VfsResult<&FileBackend> {
@@ -790,7 +826,15 @@ impl File {
     }
 
     pub fn location(&self) -> &Location {
-        self.inner.location()
+        self.vfs_file.location()
+    }
+
+    pub fn is_dir(&self) -> bool {
+        matches!(self.inner, FileBackend::Directory(_))
+    }
+
+    pub fn check_is_dir(&self) -> VfsResult<()> {
+        self.location().check_is_dir()
     }
 
     /// Reads a number of bytes starting from a given offset.
@@ -812,13 +856,24 @@ impl File {
         self.inner.sync(data_only)
     }
 
+    pub fn read_dir(&self, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+        self.access(FileFlags::READ)?;
+        self.location().check_is_dir()?;
+        let mut pos = self.vfs_file.position_lock_or_espipe()?;
+        let start = *pos;
+        let mut sink = PositionUpdatingDirSink {
+            position: &mut pos,
+            sink,
+        };
+        self.location().read_dir(start, &mut sink)
+    }
+
     pub fn read(&self, dst: impl Write + IoBufMut) -> kio::Result<usize> {
         #[cfg(feature = "times")]
         {
             self.access_flags.fetch_or(1, Ordering::AcqRel);
         }
-        if let Some(pos) = self.position.as_ref() {
-            let mut pos = pos.lock();
+        if let Some(mut pos) = self.vfs_file.position_lock() {
             self.read_at(dst, *pos).inspect(|n| {
                 *pos += *n as u64;
             })
@@ -832,8 +887,7 @@ impl File {
         {
             self.access_flags.fetch_or(3, Ordering::AcqRel);
         }
-        if let Some(pos) = self.position.as_ref() {
-            let mut pos = pos.lock();
+        if let Some(mut pos) = self.vfs_file.position_lock() {
             if let Ok(f) = self.access(FileFlags::APPEND) {
                 f.append(src).map(|(written, new_size)| {
                     *pos = new_size;
@@ -875,23 +929,19 @@ impl Seek for &File {
     fn seek(&mut self, pos: SeekFrom) -> kio::Result<u64> {
         self.access(FileFlags::empty())?;
 
-        if let Some(guard) = self.position.as_ref() {
-            let mut guard = guard.lock();
-            let new_pos = match pos {
-                SeekFrom::Start(pos) => pos,
-                SeekFrom::End(off) => {
-                    let size = self.access(FileFlags::empty())?.location().len()?;
-                    size.checked_add_signed(off).ok_or(VfsError::InvalidInput)?
-                }
-                SeekFrom::Current(off) => guard
-                    .checked_add_signed(off)
-                    .ok_or(VfsError::InvalidInput)?,
-            };
-            *guard = new_pos;
-            Ok(new_pos)
-        } else {
-            Ok(0)
-        }
+        let mut guard = self.vfs_file.position_lock_or_espipe()?;
+        let new_pos = match pos {
+            SeekFrom::Start(pos) => pos,
+            SeekFrom::End(off) => {
+                let size = self.access(FileFlags::empty())?.location().len()?;
+                size.checked_add_signed(off).ok_or(VfsError::InvalidInput)?
+            }
+            SeekFrom::Current(off) => guard
+                .checked_add_signed(off)
+                .ok_or(VfsError::InvalidInput)?,
+        };
+        *guard = new_pos;
+        Ok(new_pos)
     }
 }
 
@@ -937,16 +987,16 @@ impl FileLike for File {
     }
 
     fn set_nonblocking(&self, flag: bool) -> KResult {
-        self.nonblock.store(flag, Ordering::Release);
+        self.vfs_file.set_nonblocking(flag);
         Ok(())
     }
 
     fn nonblocking(&self) -> bool {
-        self.nonblock.load(Ordering::Acquire)
+        self.vfs_file.nonblocking()
     }
 
     fn open_flags(&self) -> u32 {
-        self.open_flags
+        self.vfs_file.open_flags()
     }
 
     fn path(&self) -> Cow<'_, str> {
@@ -967,6 +1017,7 @@ impl FileLike for File {
     fn mmap(&self, mapper: &mut dyn MmapMapper) -> KResult<()> {
         match &self.inner {
             FileBackend::Cached(_) => mapper.map_file_backed()?,
+            FileBackend::Directory(_) => return Err(KError::NoSuchDevice),
             FileBackend::Direct(loc) => match loc.node_type() {
                 NodeType::CharacterDevice | NodeType::BlockDevice => loc.mmap(mapper)?,
                 _ => mapper.map_file_backed()?,

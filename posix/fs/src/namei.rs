@@ -35,9 +35,7 @@ pub fn sys_linkat(
         warn!("Unsupported flags: {flags}");
     }
 
-    let old = resolve_at(old_dirfd, old_path.as_deref(), flags)?
-        .into_file()
-        .ok_or(KError::BadFileDescriptor)?;
+    let old = resolve_at(old_dirfd, old_path.as_deref(), flags)?.into_location()?;
     if old.is_dir() {
         return Err(KError::OperationNotPermitted);
     }
