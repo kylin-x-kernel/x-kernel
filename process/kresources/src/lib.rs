@@ -163,8 +163,11 @@ impl ProcessResources {
 
     /// Closes all file descriptors when the table is not shared.
     pub fn close_all_fds(&self) {
-        let fd_table = self.fd_table();
-        FdTable::close_all_if_unshared(&fd_table);
+        // Must NOT call self.fd_table() — that clones the inner Arc and
+        // bumps strong_count, tricking close_all_if_unshared into returning
+        // early without closing any descriptors.
+        let guard = self.fd_table.read();
+        FdTable::close_all_if_unshared(&guard);
     }
 
     /// Replaces the current fd table with an unshared clone.
