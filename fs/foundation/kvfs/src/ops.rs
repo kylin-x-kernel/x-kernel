@@ -165,6 +165,11 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Writes all dirty pages known to this address space.
     fn writepages(&self, data_only: bool) -> VfsResult<()>;
 
+    /// Evicts cached pages before the owning inode is destroyed.
+    fn evict(&self) -> VfsResult<()> {
+        self.writepages(false)
+    }
+
     /// Invalidates cached pages starting at `page_index`.
     fn invalidate_from(&self, page_index: u64) -> VfsResult<()>;
 }

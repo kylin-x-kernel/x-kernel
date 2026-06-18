@@ -55,6 +55,11 @@ impl AddressSpace {
         self.ops.writepages(data_only)
     }
 
+    /// Prepares this address space for inode teardown.
+    pub fn evict(&self) -> VfsResult<()> {
+        self.ops.evict()
+    }
+
     /// Invalidates cached pages starting at `page_index`.
     pub fn invalidate_from(&self, page_index: u64) -> VfsResult<()> {
         self.ops.invalidate_from(page_index)

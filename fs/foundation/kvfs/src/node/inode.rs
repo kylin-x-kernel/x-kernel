@@ -181,6 +181,13 @@ impl VfsInode {
             Node::Dir(_) => Err(VfsError::NotATty),
         }
     }
+
+    fn evict_address_space(&self) -> VfsResult<()> {
+        if let Some(address_space) = self.address_space() {
+            address_space.evict()?;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for VfsInode {
@@ -189,6 +196,17 @@ impl fmt::Debug for VfsInode {
             .field("node", &self.node)
             .field("node_type", &self.node_type)
             .finish()
+    }
+}
+
+impl Drop for VfsInode {
+    fn drop(&mut self) {
+        if let Err(err) = self.evict_address_space() {
+            log::warn!(
+                "failed to write back inode {} address space during evict: {err:?}",
+                self.inode()
+            );
+        }
     }
 }
 

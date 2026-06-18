@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 //! Filesystem traits and wrappers.
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 use inherit_methods_macro::inherit_methods;
 
@@ -65,7 +68,7 @@ pub struct StatFs {
 pub struct SuperBlock {
     ops: Arc<dyn SuperBlockOperations>,
     max_file_size: u64,
-    address_spaces: Mutex<Vec<Arc<AddressSpace>>>,
+    address_spaces: Mutex<Vec<Weak<AddressSpace>>>,
     data: Mutex<TypeMap>,
 }
 
@@ -111,16 +114,32 @@ impl SuperBlock {
     /// Registers an inode address space owned by this superblock.
     pub fn register_address_space(&self, address_space: &Arc<AddressSpace>) {
         let mut address_spaces = self.address_spaces.lock();
-        if !address_spaces
-            .iter()
-            .any(|existing| Arc::ptr_eq(existing, address_space))
-        {
-            address_spaces.push(address_space.clone());
+        let mut exists = false;
+        address_spaces.retain(|existing| {
+            let Some(existing) = existing.upgrade() else {
+                return false;
+            };
+            if Arc::ptr_eq(&existing, address_space) {
+                exists = true;
+            }
+            true
+        });
+        if !exists {
+            address_spaces.push(Arc::downgrade(address_space));
         }
     }
 
     fn live_address_spaces(&self) -> Vec<Arc<AddressSpace>> {
-        self.address_spaces.lock().clone()
+        let mut address_spaces = self.address_spaces.lock();
+        let mut live = Vec::new();
+        address_spaces.retain(|address_space| {
+            let Some(address_space) = address_space.upgrade() else {
+                return false;
+            };
+            live.push(address_space);
+            true
+        });
+        live
     }
 
     /// Writes back dirty page-cache state owned by this superblock.
