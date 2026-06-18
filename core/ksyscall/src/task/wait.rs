@@ -135,5 +135,6 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
                 Poll::Pending
             }
         }
-    })))?
+    })))
+    .map_err(|_interrupted| KError::from(LinuxError::ERESTARTSYS))?
 }

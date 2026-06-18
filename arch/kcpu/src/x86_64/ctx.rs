@@ -187,6 +187,11 @@ impl ExceptionContext {
         self.orig_rax as _
     }
 
+    /// No-op on x86_64: the syscall instruction preserves argument registers
+    /// (rdi, rsi, rdx, r10, r8, r9) and only clobbers rax/rcx/r11.
+    /// SA_RESTART restores rax from orig_rax in rollback_syscall.
+    pub fn save_syscall_args(&mut self) {}
+
     /// Restores registers so the interrupted syscall will be executed again.
     pub fn rollback_syscall(&mut self) {
         if self.is_from_syscall() {

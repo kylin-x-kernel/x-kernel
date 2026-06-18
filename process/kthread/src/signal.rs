@@ -10,8 +10,16 @@ use ktask::TaskInner;
 use crate::{AsThread, Thread, get_process_group, get_process_state, get_task};
 
 fn send_signal_thread_inner(task: &TaskInner, thread: &Thread, sig: SignalInfo) {
+    let signo = sig.signo();
     if thread.signal.send_signal(sig) {
-        task.interrupt();
+        // Don't interrupt the target task for signals whose default
+        // disposition is "ignore" (most notably SIGCHLD).  Such signals
+        // should still be queued so that an explicit sigaction handler
+        // or signalfd can observe them, but they must not kick a task
+        // out of a blocking syscall (e.g. waitpid).
+        if !thread.signal.process().signal_ignored(signo) {
+            task.interrupt();
+        }
     }
 }
 
@@ -40,6 +48,7 @@ pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> 
         debug!("Send signal {signo:?} to process {pid}");
         if let Some(tid) = proc_state.signal.send_signal(sig)
             && let Ok(task) = get_task(tid)
+            && !proc_state.signal.signal_ignored(signo)
         {
             task.interrupt();
         }

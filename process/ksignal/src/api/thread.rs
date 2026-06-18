@@ -11,9 +11,7 @@ use core::{
 };
 
 use kcpu::userspace::UserContext;
-use kerrno::KResult;
-#[cfg(target_arch = "x86_64")]
-use kerrno::LinuxError;
+use kerrno::{KResult, LinuxError};
 use kspin::SpinNoIrq;
 use osvm::VirtMutPtr;
 
@@ -309,7 +307,15 @@ impl ThreadSignalManager {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+/// If the just-returned syscall error is a Linux restart code, handle it
+/// and return `true` (meaning the syscall was transparently restarted and
+/// the caller should *not* set up a signal handler frame).  Returns `false`
+/// when no restart took place — the caller proceeds with handler dispatch
+/// as usual.
+/// If the just-returned syscall error is a Linux restart code, prepare
+/// the context accordingly.  The handler always runs; SA_RESTART only
+/// controls whether the syscall is transparently retried *after* the
+/// handler returns (via sigreturn).
 fn prepare_syscall_restart_for_signal(uctx: &mut UserContext, flags: SignalActionFlags) {
     let Some(err) = uctx.syscall_restart_error() else {
         return;
@@ -330,6 +336,3 @@ fn prepare_syscall_restart_for_signal(uctx: &mut UserContext, flags: SignalActio
         _ => {}
     }
 }
-
-#[cfg(not(target_arch = "x86_64"))]
-fn prepare_syscall_restart_for_signal(_uctx: &mut UserContext, _flags: SignalActionFlags) {}

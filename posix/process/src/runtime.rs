@@ -8,15 +8,12 @@ use core::{ffi::c_long, sync::atomic::Ordering};
 
 use bytemuck::AnyBitPattern;
 use kbuild_config::KERNEL_STACK_SIZE;
-#[cfg(target_arch = "x86_64")]
-use kerrno::LinuxError;
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kprocess::Pid;
 use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
-#[cfg(target_arch = "x86_64")]
 use linux_sysno::Sysno;
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_ipc::SHM_MANAGER;
@@ -49,6 +46,7 @@ pub fn new_user_task(
 
                 match reason {
                     ReturnReason::Syscall => {
+                        uctx.save_syscall_args();
                         runtime_action = dispatch_syscall(&mut uctx);
                     }
                     ReturnReason::PageFault(addr, flags) => {
@@ -291,7 +289,6 @@ pub fn check_signals(
     true
 }
 
-#[cfg(target_arch = "x86_64")]
 fn restart_syscall_without_signal(uctx: &mut UserContext) {
     let Some(err) = uctx.syscall_restart_error() else {
         return;
@@ -307,6 +304,3 @@ fn restart_syscall_without_signal(uctx: &mut UserContext) {
         _ => {}
     }
 }
-
-#[cfg(not(target_arch = "x86_64"))]
-fn restart_syscall_without_signal(_uctx: &mut UserContext) {}

@@ -46,6 +46,7 @@ impl UserContext {
             },
             sepc: entry,
             sstatus,
+            saved_syscall_arg0: 0,
         })
     }
 

@@ -164,6 +164,8 @@ pub struct ExceptionContext {
     pub sepc: usize,
     /// Supervisor Status Register.
     pub sstatus: sstatus::Sstatus,
+    /// Snapshot of a0 saved before syscall dispatch for SA_RESTART.
+    pub saved_syscall_arg0: usize,
 }
 
 impl Default for ExceptionContext {
@@ -172,6 +174,7 @@ impl Default for ExceptionContext {
             regs: GeneralRegisters::default(),
             sepc: 0,
             sstatus: sstatus::Sstatus::from_bits(0),
+            saved_syscall_arg0: 0,
         }
     }
 }
@@ -290,6 +293,40 @@ impl ExceptionContext {
     /// Sets the TLS area.
     pub const fn set_tls(&mut self, tls_area: usize) {
         self.regs.tp = tls_area;
+    }
+
+    /// Snapshot a0 before syscall dispatch so that [`rollback_syscall`] can
+    /// restore it after the return value overwrites it.
+    pub fn save_syscall_args(&mut self) {
+        self.saved_syscall_arg0 = self.regs.a0;
+    }
+
+    /// Rewind PC and restore a0 so the syscall is re-executed with the
+    /// original arguments.
+    pub fn rollback_syscall(&mut self) {
+        self.sepc = self.sepc.wrapping_sub(4); // `ecall` is 4 bytes
+        self.regs.a0 = self.saved_syscall_arg0;
+    }
+
+    /// Replace syscall number and rewind PC (used by ERESTART_RESTARTBLOCK).
+    pub fn restart_with_syscall(&mut self, sysno: usize) {
+        self.rollback_syscall();
+        self.set_sysno(sysno);
+    }
+
+    /// If the last syscall set a Linux restart error as its return value,
+    /// returns that error; otherwise `None`.
+    pub fn syscall_restart_error(&self) -> Option<kerrno::LinuxError> {
+        use kerrno::LinuxError;
+        let retval = self.retval() as isize;
+        [
+            LinuxError::ERESTARTSYS,
+            LinuxError::ERESTARTNOINTR,
+            LinuxError::ERESTARTNOHAND,
+            LinuxError::ERESTART_RESTARTBLOCK,
+        ]
+        .into_iter()
+        .find(|err| retval == -(err.into_raw() as isize))
     }
 
     /// Unwind the stack and get the backtrace.

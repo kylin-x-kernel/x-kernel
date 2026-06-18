@@ -219,11 +219,10 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
 fn request_resched(cpu_id: LogicalCpuId) {
     if cpu_id == this_cpu_id() {
         crate::current().set_preempt_pending(true);
-        return;
+    } else {
+        #[cfg(all(feature = "smp", feature = "ipi"))]
+        request_remote_resched(cpu_id);
     }
-
-    #[cfg(all(feature = "smp", feature = "ipi"))]
-    request_remote_resched(cpu_id);
 }
 
 #[cfg(all(feature = "preempt", feature = "smp", feature = "ipi"))]

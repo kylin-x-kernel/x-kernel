@@ -10,6 +10,7 @@
 //! Structures and functions for user space.
 
 use aarch64_cpu::registers::{ESR_EL1, FAR_EL1, Readable};
+use kerrno::LinuxError;
 use memaddr::VirtAddr;
 use tock_registers::LocalRegisterCopy;
 
@@ -29,6 +30,10 @@ pub struct UserContext {
     pub sp: u64,
     /// Software Thread ID Register (TPIDR_EL0).
     pub tpidr: u64,
+    /// Snapshot of x0 saved before dispatching a syscall, so that
+    /// SA_RESTART can restore argument 0 after the return value
+    /// overwrites it.
+    saved_syscall_arg0: u64,
 }
 
 impl UserContext {
@@ -54,6 +59,7 @@ impl UserContext {
             },
             sp: ustack_top.as_usize() as _,
             tpidr: 0,
+            saved_syscall_arg0: 0,
         }
     }
 
@@ -138,6 +144,46 @@ impl UserContext {
 
         karch::enable_local_irq();
         ret
+    }
+}
+
+impl UserContext {
+    /// Snapshot x0 before entering the syscall dispatch so that it can
+    /// be restored later by [`rollback_syscall`].
+    pub fn save_syscall_args(&mut self) {
+        self.saved_syscall_arg0 = self.tf.x[0];
+    }
+
+    /// Rewind the program counter so that the SVC instruction that entered
+    /// the kernel is re-executed when we return to userspace.  Used by the
+    /// SA_RESTART machinery to transparently restart an interrupted syscall.
+    pub fn rollback_syscall(&mut self) {
+        // On AArch64, ELR holds the address of the instruction *after* SVC.
+        self.tf.elr = self.tf.elr.wrapping_sub(4);
+        // Restore the original syscall argument; x0 was overwritten with
+        // the return value (e.g. ERESTARTSYS).
+        self.tf.x[0] = self.saved_syscall_arg0;
+    }
+
+    /// Replace the syscall number and rewind PC so that the new syscall
+    /// is executed instead of the original one (used by ERESTART_RESTARTBLOCK).
+    pub fn restart_with_syscall(&mut self, sysno: usize) {
+        self.rollback_syscall();
+        self.set_sysno(sysno);
+    }
+
+    /// If the last syscall set a Linux restart error as its return value,
+    /// returns that error; otherwise `None`.
+    pub fn syscall_restart_error(&self) -> Option<LinuxError> {
+        let retval = self.retval() as isize;
+        [
+            LinuxError::ERESTARTSYS,
+            LinuxError::ERESTARTNOINTR,
+            LinuxError::ERESTARTNOHAND,
+            LinuxError::ERESTART_RESTARTBLOCK,
+        ]
+        .into_iter()
+        .find(|err| retval == -(err.into_raw() as isize))
     }
 }
 
