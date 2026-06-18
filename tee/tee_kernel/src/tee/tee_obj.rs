@@ -19,7 +19,7 @@ use tee_raw_sys::{libc_compat::size_t, *};
 
 use super::{
     TeeResult,
-    libmbedtls::bignum::BigNum,
+    crypto::bignum::BigNum,
     tee_pobj::{tee_pobj, tee_pobj_release},
     tee_ree_fs::tee_file_handle,
     tee_session::{with_tee_session_ctx, with_tee_session_ctx_mut},

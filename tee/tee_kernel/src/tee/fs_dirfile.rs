@@ -9,7 +9,7 @@ use alloc::{
     vec::Vec,
 };
 
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
 use tee_raw_sys::{
     TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM_NOT_FOUND, TEE_ERROR_SHORT_BUFFER,
     TEE_OBJECT_ID_MAX_LEN, TEE_UUID,
@@ -43,7 +43,7 @@ pub struct TeeFsDirfileFileh {
 
 /// entry of dirfile dirfile_entry
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct DirFileEntry {
     uuid: TEE_UUID,
     oid: [u8; TEE_OBJECT_ID_MAX_LEN as _],
@@ -196,12 +196,7 @@ pub fn read_dent(dirh: &mut TeeFsDirfileDirh, idx: usize, dent: &mut DirFileEntr
     let offset = entry_size * idx;
     let mut len = entry_size;
 
-    // 读取目录项数据
-    // convert DirFileEntry to mutable byte slice
-    // safety: DirFileEntry is #[repr(C)], memory layout is determined, size is fixed, can be safely converted
-    let dent_bytes = unsafe {
-        core::slice::from_raw_parts_mut(dent as *mut DirFileEntry as *mut u8, entry_size)
-    };
+    let dent_bytes = bytes_of_mut(dent);
     dirh.fops
         .read(&mut dirh.fh, offset, dent_bytes, &mut len)
         .inspect_err(|e| {
@@ -220,11 +215,7 @@ pub fn read_dent(dirh: &mut TeeFsDirfileDirh, idx: usize, dent: &mut DirFileEntr
 pub fn write_dent(dirh: &mut TeeFsDirfileDirh, n: usize, dent: &DirFileEntry) -> TeeResult {
     let entry_size = core::mem::size_of::<DirFileEntry>();
 
-    // convert DirFileEntry to byte slice
-    // safety: DirFileEntry is #[repr(C)], memory layout is determined, size is fixed, can be safely converted
-    let dent_bytes = unsafe {
-        core::slice::from_raw_parts(dent as *const DirFileEntry as *const u8, entry_size)
-    };
+    let dent_bytes = bytes_of(dent);
     dirh.fops.write(&mut dirh.fh, entry_size * n, dent_bytes)?;
 
     if n >= dirh.ndents {
@@ -250,7 +241,7 @@ pub fn tee_fs_dirfile_open(
     let mut n: usize = 0;
 
     let res: TeeResult<()> = loop {
-        let mut dent: DirFileEntry = unsafe { core::mem::zeroed() };
+        let mut dent = DirFileEntry::default();
 
         match read_dent(&mut dirh, n, &mut dent) {
             Err(TEE_ERROR_ITEM_NOT_FOUND) => {
@@ -270,7 +261,7 @@ pub fn tee_fs_dirfile_open(
         // if (test_file(dirh, dent.file_number))
         if test_file(&mut dirh, dent.file_number as usize) {
             tee_debug!("clearing duplicate file number {}", dent.file_number);
-            let mut zero_dent: DirFileEntry = unsafe { core::mem::zeroed() };
+            let zero_dent = DirFileEntry::default();
             if let Err(e) = write_dent(&mut dirh, n, &zero_dent) {
                 break Err(e);
             }
@@ -305,7 +296,7 @@ pub fn tee_fs_dirfile_find(
     oid: &[u8],
 ) -> TeeResult<TeeFsDirfileFileh> {
     let oidlen = oid.len();
-    let mut dent: DirFileEntry = unsafe { core::mem::zeroed() };
+    let mut dent = DirFileEntry::default();
     let mut n: usize = 0;
 
     // Note: Do NOT use `for n in 0..` here! In Rust, that creates a new
@@ -380,7 +371,7 @@ pub fn tee_fs_dirfile_remove(dirh: &mut TeeFsDirfileDirh, dfh: &TeeFsDirfileFile
     core::assert!(dfh.file_number == file_number);
     core::assert!(test_file(dirh, file_number as usize));
 
-    dent = unsafe { core::mem::zeroed() };
+    dent = DirFileEntry::default();
     write_dent(dirh, dfh.idx as usize, &dent)?;
     tee_debug!(
         "tee_fs_dirfile_remove: after write_dent, dirh.fh.ht.data.dirty: {}, dfh.idx: {}",
@@ -396,7 +387,7 @@ pub fn tee_fs_dirfile_update_hash(
     dirh: &mut TeeFsDirfileDirh,
     dfh: &TeeFsDirfileFileh,
 ) -> TeeResult {
-    let mut dent: DirFileEntry = unsafe { core::mem::zeroed() };
+    let mut dent = DirFileEntry::default();
 
     read_dent(dirh, dfh.idx as usize, &mut dent)?;
     tee_debug!(
@@ -463,7 +454,7 @@ pub fn tee_fs_dirfile_get_next(
         i = 0;
     }
 
-    let mut dent: DirFileEntry = unsafe { core::mem::zeroed() };
+    let mut dent = DirFileEntry::default();
 
     loop {
         read_dent(dirh, i as usize, &mut dent)?;

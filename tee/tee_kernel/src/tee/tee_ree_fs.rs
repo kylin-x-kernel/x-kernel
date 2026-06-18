@@ -34,7 +34,6 @@ use super::{
     tee_api_defines_extensions::{TEE_STORAGE_PRIVATE_REE, TEE_STORAGE_PRIVATE_RPMB},
     tee_fs::tee_fs_dirent,
     tee_pobj::tee_pobj,
-    user_access::{copy_from_user, copy_to_user},
     utils::roundup_u,
 };
 use crate::tee::utils::slice_fmt;
@@ -106,7 +105,7 @@ impl TeeFsFdAux {
 #[derive(Default)]
 pub struct TeeFsDir {
     /// Whether this dir iterator holds a reference on the global dirh.
-    /// Replaces the raw `*mut TeeFsDirfileDirh` pointer that was unsafe
+    /// Replaces the former raw `*mut TeeFsDirfileDirh` pointer
     /// across process/thread boundaries.
     pub has_dirh_ref: bool,
     pub idx: i32,
@@ -495,7 +494,7 @@ fn out_of_place_write(
             let buf_offset = buf_user.len() - remain_bytes;
             let src_slice = &buf_user[buf_offset..buf_offset + size_to_write];
             let dst_slice = &mut block[offset..offset + size_to_write];
-            copy_from_user(dst_slice, src_slice, size_to_write)?;
+            dst_slice.copy_from_slice(src_slice);
         } else {
             // 如果buf为空，填充0
             block[offset..offset + size_to_write].fill(0);
@@ -598,7 +597,7 @@ pub fn ree_fs_read_primitive(
         } else if !buf_user.is_empty() {
             let block_slice = &block[offset..offset + size_to_read];
             let buf_slice = &mut buf_user[buf_offset..buf_offset + size_to_read];
-            copy_to_user(buf_slice, block_slice, size_to_read)?;
+            buf_slice.copy_from_slice(block_slice);
         }
 
         remain_bytes -= size_to_read;

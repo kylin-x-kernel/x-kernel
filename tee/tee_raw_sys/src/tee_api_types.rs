@@ -17,7 +17,17 @@ use crate::libc_compat::size_t;
 pub type TEE_Result = u32;
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug, PartialEq)]
+#[derive(
+    Copy,
+    Clone,
+    Default,
+    Debug,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    posix_types::UserRead,
+    posix_types::UserWrite,
+)]
 pub struct TEE_UUID {
     pub timeLow: u32,
     pub timeMid: u16,
@@ -25,7 +35,7 @@ pub struct TEE_UUID {
     pub clockSeqAndNode: [u8; 8],
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, posix_types::UserWrite)]
 #[repr(C)]
 pub struct TEE_Identity {
     pub login: u32,
@@ -155,23 +165,15 @@ pub struct TEE_Attribute {
 
 impl Debug for TEE_Attribute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unsafe {
-            if self.attributeID & TEE_ATTR_FLAG_VALUE != 0 {
-                write!(
-                    f,
-                    "TEE_Attribute{{attributeID: {:#010X?}, content: value: a={:#010X?}, \
-                     b={:#010X?}}}",
-                    self.attributeID, self.content.value.a, self.content.value.b
-                )
-            } else {
-                write!(
-                    f,
-                    "TEE_Attribute{{attributeID: {:#010X?}, content: memref: {:#010X?}, \
-                     {:#010X?}}}",
-                    self.attributeID, self.content.memref.buffer, self.content.memref.size
-                )
-            }
-        }
+        let content_kind = if self.attributeID & TEE_ATTR_FLAG_VALUE != 0 {
+            "value"
+        } else {
+            "memref"
+        };
+        f.debug_struct("TEE_Attribute")
+            .field("attributeID", &format_args!("{:#010X}", self.attributeID))
+            .field("content_kind", &content_kind)
+            .finish_non_exhaustive()
     }
 }
 
@@ -223,7 +225,7 @@ pub struct TEE_OperationInfoMultiple {
 
 // Time & Date API
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, posix_types::UserRead, posix_types::UserWrite)]
 #[repr(C)]
 pub struct TeeTime {
     pub seconds: u32,
@@ -294,7 +296,7 @@ pub const TEE_MEMREF_3_USED: u32 = 0x00000008;
 pub const TEE_SE_READER_NAME_MAX: u32 = 20;
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug, PartialEq)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ta_head {
     pub uuid: TEE_UUID,
     pub stack_size: u32,

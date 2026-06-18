@@ -13,7 +13,7 @@ documentation.workspace = true
 input = ["dep:inputdev", "kclass/input"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
-dice = ["dep:dice_driver", "dep:klazy", "dep:rand_chacha", "dep:mbedtls"]
+dice = ["dep:dice_driver", "dep:klazy", "dep:rand_chacha", "dep:tee_crypto"]
 
 [dependencies]
 kalloc.workspace = true
@@ -53,7 +53,7 @@ dice_driver = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 klazy = { workspace = true, optional = true }
 rand_chacha = { version = "0.3", default-features = false, optional = true }
-mbedtls = { workspace = true, optional = true }
+tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 kclass.workspace = true
 kdevice.workspace = true
 unittest.workspace = true

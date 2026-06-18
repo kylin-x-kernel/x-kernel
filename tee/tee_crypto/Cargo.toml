@@ -1,0 +1,98 @@
+[package]
+name = "tee_crypto"
+version = "0.1.0"
+description = "TEE Crypto Crate."
+edition = "2024"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+std = ["alloc"]
+alloc = []
+
+[dependencies]
+# Hash
+sha1 = { version = "0.11", default-features = false, features = ["oid"] }
+sha2 = { version = "0.11", default-features = false, features = ["oid"] }
+sm3 = { version = "0.5", default-features = false }
+md5 = { package = "md-5", version = "0.11", default-features = false }
+digest = { version = "0.11", default-features = false }
+
+# Block cipher
+aes = { version = "0.9", default-features = false }
+sm4 = { version = "0.6", default-features = false }
+des = { version = "0.9", default-features = false }
+cipher = { version = "0.5", default-features = false }
+
+# AEAD
+aead = { version = "0.6", default-features = false, features = ["alloc"] }
+ccm = { version = "0.6.0-rc.3", default-features = false, features = ["alloc"] }
+
+# GCM mode (GHASH + CTR)
+ctr = { version = "0.10", default-features = false }
+ghash = { version = "0.6", default-features = false }
+subtle = { version = "2.6", default-features = false }
+
+# MAC
+hmac = { version = "0.13", default-features = false }
+cmac = { version = "0.8", default-features = false }
+
+# Asymmetric — RSA
+rsa = { version = "0.10.0-rc.18", default-features = false, features = ["hazmat", "encoding"] }
+signature = { version = "3.0.0", default-features = false }
+pkcs1 = { version = "0.8.0-rc.1", default-features = false }
+pkcs8 = { version = "0.11", default-features = false, features = ["alloc"] }
+
+# Asymmetric — ECC
+elliptic-curve = { version = "0.14.0-rc.32", default-features = false, features = ["sec1", "pkcs8"] }
+p192 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa"] }
+p224 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa"] }
+p256 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa", "ecdh"] }
+p384 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa", "ecdh"] }
+p521 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa"] }
+ecdsa = { version = "0.17.0-rc.18", default-features = false, features = ["digest", "hazmat", "der", "algorithm"] }
+sm2 = { version = "0.14.0-rc.9", default-features = false, features = ["pke", "dsa", "alloc", "der", "pkcs8"] }
+
+# BigNum
+crypto-bigint = { version = "0.7", default-features = false, features = ["alloc"] }
+crypto-primes = { version = "0.7", default-features = false }
+
+# RNG
+rand_core = { version = "0.10", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
+
+# Utility
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+criterion = "0.8"
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[[bench]]
+name = "hash_throughput"
+path = "benchs/hash_throughput.rs"
+harness = false
+
+[[bench]]
+name = "cipher_throughput"
+path = "benchs/cipher_throughput.rs"
+harness = false
+
+[[bench]]
+name = "aead_throughput"
+path = "benchs/aead_throughput.rs"
+harness = false
+
+[[bench]]
+name = "mac_kdf_throughput"
+path = "benchs/mac_kdf_throughput.rs"
+harness = false
+
+[[bench]]
+name = "xts_throughput"
+path = "benchs/xts_throughput.rs"
+harness = false

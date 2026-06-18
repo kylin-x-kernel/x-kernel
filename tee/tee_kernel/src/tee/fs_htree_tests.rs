@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, vec, vec::Vec};
-use core::{any::Any, fmt, fmt::Debug, mem::size_of, slice};
+use core::{any::Any, fmt, fmt::Debug, mem::size_of};
 
 use ksync::Mutex;
 use static_assertions::const_assert;
@@ -231,8 +231,7 @@ fn write_block(ht: &mut TeeFsHtree, bn: usize, salt: u8) -> TeeResult {
         b[n] = val_from_bn_n_salt(bn, n, salt);
     }
 
-    let bytes: &[u8] =
-        unsafe { slice::from_raw_parts(b.as_ptr() as *const u8, core::mem::size_of_val(&b)) };
+    let bytes: &[u8] = bytemuck::cast_slice(&b);
 
     debug_assert!(bytes.len() == TEST_BLOCK_SIZE);
     // let storage = ht.storage.as_ref();
@@ -243,8 +242,7 @@ fn read_block(ht: &mut TeeFsHtree, bn: usize, salt: u8) -> TeeResult {
     let mut b = [0u32; TEST_BLOCK_SIZE / size_of::<u32>()];
     let mut n = 0;
 
-    let mut bytes: &mut [u8] =
-        unsafe { slice::from_raw_parts_mut(b.as_ptr() as *mut u8, core::mem::size_of_val(&b)) };
+    let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut b);
 
     // let storage = ht.storage.as_ref();
     tee_fs_htree_read_block(ht, bn, bytes)?;

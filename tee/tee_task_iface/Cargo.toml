@@ -25,6 +25,7 @@ tee_ta_sign = [
 ta_verify_with_root = ["tee_ta_sign"]
 
 [dependencies]
+bytemuck = { workspace = true }
 cfg-if = { workspace = true }
 hashbrown = { workspace = true }
 uuid = { version = "0.8", default-features = false }

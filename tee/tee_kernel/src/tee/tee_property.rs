@@ -5,23 +5,24 @@
 #![allow(dead_code)]
 
 use alloc::{boxed::Box, ffi::CString, vec};
-use core::{
-    ffi::{c_uint, c_ulong, c_void},
-    ptr::addr_of,
-    slice,
-};
+use core::ffi::{c_uint, c_ulong, c_void};
 
+use osvm::MemError;
+use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{
     TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM_NOT_FOUND, TEE_ERROR_SHORT_BUFFER, TEE_Identity,
     TEE_PROPSET_CURRENT_CLIENT, TEE_PROPSET_CURRENT_TA, TEE_PROPSET_TEE_IMPLEMENTATION,
     TEE_PropSetHandle, TEE_UUID,
 };
 
-use crate::tee::{
-    TeeResult,
-    tee_session::with_tee_session_ctx,
-    user_access::{copy_from_user, copy_to_user},
-};
+use crate::tee::{TeeResult, tee_session::with_tee_session_ctx};
+
+fn map_user_mem_error(err: MemError) -> u32 {
+    match err {
+        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
+        _ => tee_raw_sys::TEE_ERROR_GENERIC,
+    }
+}
 
 /// Trait representing a TA property.
 trait TEEProps {
@@ -99,11 +100,9 @@ impl TEEProps for ClientIdentity {
         }
         *blen = prop_size;
         let clnt_id = with_tee_session_ctx(|ctx| Ok(ctx.clnt_id))?;
-        copy_to_user(
-            unsafe { slice::from_raw_parts_mut(buf as _, *blen as usize) },
-            unsafe { slice::from_raw_parts(addr_of!(clnt_id) as _, size_of::<TEE_Identity>()) },
-            *blen as usize,
-        )
+        UserPtr::<TEE_Identity>::from(buf.cast::<TEE_Identity>())
+            .write_vm(clnt_id)
+            .map_err(map_user_mem_error)
     }
 }
 
@@ -124,11 +123,9 @@ impl TEEProps for ClientEndian {
             return Err(TEE_ERROR_SHORT_BUFFER);
         }
         *blen = prop_size;
-        copy_to_user(
-            unsafe { slice::from_raw_parts_mut(buf as _, *blen as usize) },
-            unsafe { slice::from_raw_parts(addr_of!(endian) as _, size_of::<u32>()) },
-            *blen as usize,
-        )
+        UserPtr::<u32>::from(buf.cast::<u32>())
+            .write_vm(endian)
+            .map_err(map_user_mem_error)
     }
 }
 
@@ -152,11 +149,9 @@ impl TEEProps for TAAppID {
         }
         *blen = prop_size;
         let uuid = with_tee_session_ctx(|ctx| Ok(ctx.clnt_id))?.uuid;
-        copy_to_user(
-            unsafe { slice::from_raw_parts_mut(buf as _, *blen as usize) },
-            unsafe { slice::from_raw_parts(addr_of!(uuid) as _, size_of::<TEE_UUID>()) },
-            *blen as usize,
-        )
+        UserPtr::<TEE_UUID>::from(buf.cast::<TEE_UUID>())
+            .write_vm(uuid)
+            .map_err(map_user_mem_error)
     }
 }
 
@@ -196,29 +191,18 @@ pub fn sys_tee_scn_get_property(
     // Get the property type
     if !prop_type.is_null() {
         let raw_type = prop.prop_type().as_raw();
-        copy_to_user(
-            unsafe { slice::from_raw_parts_mut(prop_type as _, size_of::<u32>()) },
-            &raw_type.to_ne_bytes(),
-            size_of::<u32>(),
-        )?;
+        UserPtr::<c_uint>::from(prop_type)
+            .write_vm(raw_type)
+            .map_err(map_user_mem_error)?;
     }
 
     // Get the property
     if !buf.is_null() && !blen.is_null() {
-        let mut klen_buf = [0u8; 4];
-        copy_from_user(
-            &mut klen_buf,
-            unsafe { slice::from_raw_parts(blen as _, size_of::<u32>()) },
-            size_of::<u32>(),
-        )?;
-        let mut klen = u32::from_ne_bytes(klen_buf);
+        let user_blen = UserPtr::<c_uint>::from(blen);
+        let mut klen = user_blen.read_vm().map_err(map_user_mem_error)?;
 
         prop.get(buf, &mut klen)?;
-        copy_to_user(
-            unsafe { slice::from_raw_parts_mut(blen as _, size_of::<u32>()) },
-            &klen.to_ne_bytes(),
-            size_of::<u32>(),
-        )?;
+        user_blen.write_vm(klen).map_err(map_user_mem_error)?;
     }
 
     // Get the property name
@@ -227,36 +211,21 @@ pub fn sys_tee_scn_get_property(
         let prop_name_bytes = prop_name.to_bytes_with_nul();
         let prop_name_len = prop_name_bytes.len() as u32;
 
-        let mut klen_buf = [0u8; 4];
-        copy_from_user(
-            &mut klen_buf,
-            unsafe { slice::from_raw_parts(name_len as _, size_of::<u32>()) },
-            size_of::<u32>(),
-        )?;
-        let mut klen = u32::from_ne_bytes(klen_buf);
+        let user_name_len = UserPtr::<c_uint>::from(name_len);
+        let mut klen = user_name_len.read_vm().map_err(map_user_mem_error)?;
 
         if klen < prop_name_len {
             klen = prop_name_len;
-            copy_to_user(
-                unsafe { slice::from_raw_parts_mut(name_len as _, size_of::<u32>()) },
-                &klen.to_ne_bytes(),
-                size_of::<u32>(),
-            )?;
+            user_name_len.write_vm(klen).map_err(map_user_mem_error)?;
             return Err(TEE_ERROR_SHORT_BUFFER);
         }
 
-        copy_to_user(
-            unsafe { slice::from_raw_parts_mut(name as _, klen as usize) },
-            prop_name_bytes,
-            prop_name_len as usize,
-        )?;
+        UserPtr::<u8>::from(name.cast::<u8>())
+            .write_vm_slice(prop_name_bytes)
+            .map_err(map_user_mem_error)?;
 
         klen = prop_name_len;
-        copy_to_user(
-            unsafe { slice::from_raw_parts_mut(name_len as _, size_of::<u32>()) },
-            &klen.to_ne_bytes(),
-            size_of::<u32>(),
-        )?;
+        user_name_len.write_vm(klen).map_err(map_user_mem_error)?;
     }
 
     Ok(())
@@ -273,23 +242,18 @@ pub fn sys_tee_scn_get_property_name_to_index(
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    let mut kname_buf = vec![0u8; name_len as usize];
-    copy_from_user(
-        &mut kname_buf,
-        unsafe { slice::from_raw_parts(name as *const u8, name_len as usize) },
-        name_len as usize,
-    )?;
+    let kname_buf = UserConstPtr::<u8>::from(name.cast_const().cast::<u8>())
+        .load_vm_vec(name_len as usize)
+        .map_err(map_user_mem_error)?;
     let kname = match core::str::from_utf8(&kname_buf[..(name_len as usize - 1)]) {
         Ok(kname) => kname,
         Err(_) => return Err(TEE_ERROR_BAD_PARAMETERS),
     };
 
     let prop_index = get_prop_index(kname)?;
-    copy_to_user(
-        unsafe { slice::from_raw_parts_mut(index as _, size_of::<u32>()) },
-        &prop_index.to_ne_bytes(),
-        size_of::<u32>(),
-    )?;
+    UserPtr::<c_uint>::from(index)
+        .write_vm(prop_index)
+        .map_err(map_user_mem_error)?;
 
     Ok(())
 }

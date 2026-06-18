@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::{ffi::c_uint, mem::size_of, ptr};
 
 use klogger::info;
-use mbedtls::hash::{Hmac, Md, Type as MdType};
+use tee_crypto::mac::Mac;
 use tee_raw_sys::{
     TEE_ALG_HMAC_SHA256, TEE_ALG_SM3, TEE_ERROR_BAD_PARAMETERS, TEE_MODE_MAC, TEE_OperationMode,
     TEE_TYPE_HMAC_SHA256, TEE_TYPE_HMAC_SM3,
@@ -65,10 +65,11 @@ pub fn huk_subkey_derive(
         data_to_hash.extend_from_slice(data);
     }
 
-    let mut hmac = Hmac::new(MdType::SM3, &huk.data).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    hmac.update(&data_to_hash)
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    hmac.finish(subkey).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let mut hmac =
+        tee_crypto::mac::HmacSm3::new(&huk.data).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    hmac.update(&data_to_hash);
+    let result = hmac.finalize();
+    subkey.copy_from_slice(&result[..subkey.len()]);
 
     Ok(())
 }

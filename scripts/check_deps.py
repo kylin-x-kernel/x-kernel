@@ -21,8 +21,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,6 +100,13 @@ class ParsedToml:
     lines: list[str]
     deps: list[Dependency] = field(default_factory=list)
     features_text: str = ""  # Raw text of the [features] section for reference scanning
+
+
+@dataclass
+class ResolvedDependency:
+    package_name: str
+    rust_name: str
+    sections: set[str]
 
 
 def parse_cargo_toml(path: Path) -> ParsedToml:
@@ -239,6 +248,134 @@ def parse_cargo_toml(path: Path) -> ParsedToml:
     return result
 
 
+def resolved_dependencies_from_metadata(
+    metadata: dict,
+) -> dict[Path, list[ResolvedDependency]]:
+    """Extract resolved dependency names from Cargo metadata JSON."""
+    package_by_id = {pkg["id"]: pkg for pkg in metadata.get("packages", [])}
+    resolved_by_manifest: dict[Path, list[ResolvedDependency]] = {}
+
+    for node in metadata.get("resolve", {}).get("nodes", []):
+        pkg = package_by_id.get(node["id"])
+        if pkg is None:
+            continue
+
+        manifest_path = Path(pkg["manifest_path"])
+        resolved_deps: list[ResolvedDependency] = []
+
+        for dep in node.get("deps", []):
+            dep_pkg = package_by_id.get(dep["pkg"])
+            if dep_pkg is None:
+                continue
+
+            sections: set[str] = set()
+            for dep_kind in dep.get("dep_kinds", []):
+                kind = dep_kind.get("kind")
+                if kind == "dev":
+                    sections.add("dev-dependencies")
+                elif kind in (None, "normal", "build"):
+                    sections.add("dependencies")
+
+            # `dep["name"]` is the manifest alias (hyphen-bearing). The actual
+            # rust identifier visible to source code is the dependency's lib
+            # target name (which may be set via `[lib] name = ...` in the
+            # upstream crate — e.g. package `rust-libutee` exposes lib `rust_utee`).
+            # Fall back to the dep alias converted to a rust ident if no lib
+            # target exists (proc-macro / build-only).
+            lib_target_name = next(
+                (
+                    t["name"]
+                    for t in dep_pkg.get("targets", [])
+                    if "lib" in t.get("kind", []) or "rlib" in t.get("kind", [])
+                ),
+                None,
+            )
+            rust_name = lib_target_name or crate_name_to_rust_ident(dep["name"])
+
+            resolved_deps.append(ResolvedDependency(
+                package_name=dep_pkg["name"],
+                rust_name=rust_name,
+                sections=sections,
+            ))
+
+        resolved_by_manifest[manifest_path] = resolved_deps
+
+    return resolved_by_manifest
+
+
+def run_cargo_metadata(args: list[str], cwd: Path, warn: bool = True) -> dict | None:
+    try:
+        proc = subprocess.run(
+            ["cargo", "metadata", "--format-version=1", *args],
+            cwd=cwd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if warn:
+            print(f"Warning: failed to run cargo metadata {' '.join(args)}: {exc}", file=sys.stderr)
+        return None
+
+    return json.loads(proc.stdout)
+
+
+def load_resolved_dependencies(root: Path) -> dict[Path, list[ResolvedDependency]]:
+    """Load Cargo's resolved dependency names for workspace package manifests.
+
+    Cargo package names are not always the Rust crate names visible from code.
+    For example, the `md-5` package exposes the `md5` library target. The
+    resolve graph records the exact name Cargo makes available to each package,
+    including explicit dependency renames.
+    """
+    metadata = run_cargo_metadata(["--locked"], root)
+    if metadata is None:
+        return {}
+
+    return resolved_dependencies_from_metadata(metadata)
+
+
+def load_manifest_resolved_dependencies(
+    manifest_path: Path,
+    warn: bool = False,
+) -> list[ResolvedDependency]:
+    """Load resolved dependency names for a crate outside the root workspace."""
+    metadata = run_cargo_metadata(
+        ["--offline", "--manifest-path", str(manifest_path)],
+        manifest_path.parent,
+        warn=warn,
+    )
+    if metadata is None:
+        return []
+
+    return resolved_dependencies_from_metadata(metadata).get(manifest_path.resolve(), [])
+
+
+def resolve_rust_name(
+    dep: Dependency,
+    resolved_deps: list[ResolvedDependency],
+) -> str:
+    """Return the Rust crate name visible to source code for a dependency."""
+    candidates = [
+        resolved
+        for resolved in resolved_deps
+        if resolved.package_name == dep.package_name and dep.section in resolved.sections
+    ]
+    if len(candidates) == 1:
+        return candidates[0].rust_name
+
+    candidates = [
+        resolved
+        for resolved in resolved_deps
+        if resolved.package_name == dep.package_name
+    ]
+    if len(candidates) == 1:
+        return candidates[0].rust_name
+
+    return crate_name_to_rust_ident(dep.name)
+
+
 def _finalize_table_dep(
     result: ParsedToml,
     table_dep: tuple,
@@ -279,27 +416,26 @@ def _finalize_table_dep(
 _PATTERNS: dict[str, re.Pattern] = {}
 
 
-def get_usage_pattern(crate_name: str) -> re.Pattern:
+def get_usage_pattern(rust_name: str) -> re.Pattern:
     """Build a regex to detect usage of a crate in Rust source."""
-    if crate_name in _PATTERNS:
-        return _PATTERNS[crate_name]
+    if rust_name in _PATTERNS:
+        return _PATTERNS[rust_name]
 
-    ident = crate_name_to_rust_ident(crate_name)
     # Match various usage patterns:
-    #   use <ident>:: / pub use <ident>:: / pub(crate) use <ident>::
-    #   extern crate <ident>
-    #   <ident>::  (qualified path)
-    #   <ident>!   (macro invocation)
-    #   #[<ident>  (attribute)
+    #   use <rust_name>:: / pub use <rust_name>:: / pub(crate) use <rust_name>::
+    #   extern crate <rust_name>
+    #   <rust_name>::  (qualified path)
+    #   <rust_name>!   (macro invocation)
+    #   #[<rust_name>  (attribute)
     pattern = re.compile(
-        r"(?:^(?:pub\s+)?(?:\([^)]*\)\s+)?use\s+.*\b" + re.escape(ident) + r"\b)"
-        r"|(?:^extern\s+crate\s+" + re.escape(ident) + r"\b)"
-        r"|(?:\b" + re.escape(ident) + r"\s*::)"
-        r"|(?:\b" + re.escape(ident) + r"\s*!)"
-        r"|(?:#\[.*\b" + re.escape(ident) + r"\b)",
+        r"(?:^(?:pub\s+)?(?:\([^)]*\)\s+)?use\s+.*\b" + re.escape(rust_name) + r"\b)"
+        r"|(?:^extern\s+crate\s+" + re.escape(rust_name) + r"\b)"
+        r"|(?:\b" + re.escape(rust_name) + r"\s*::)"
+        r"|(?:\b" + re.escape(rust_name) + r"\s*!)"
+        r"|(?:#\[.*\b" + re.escape(rust_name) + r"\b)",
         re.MULTILINE,
     )
-    _PATTERNS[crate_name] = pattern
+    _PATTERNS[rust_name] = pattern
     return pattern
 
 
@@ -323,7 +459,7 @@ def collect_rust_sources(crate_dir: Path, section: str) -> list[Path]:
 
             if section == "dev-dependencies":
                 top = parts[0] if parts else ""
-                if top in ("tests", "examples", "benches"):
+                if top in ("tests", "examples", "benches", "benchs"):
                     rust_files.append(file_path)
                 elif top == "src":
                     # Dev-deps may be used in #[cfg(test)] blocks
@@ -334,22 +470,34 @@ def collect_rust_sources(crate_dir: Path, section: str) -> list[Path]:
     return rust_files
 
 
-def is_dep_used(dep: Dependency, rust_files: list[Path], features_text: str = "") -> bool:
+def is_dep_used(
+    dep: Dependency,
+    rust_name: str,
+    rust_files: list[Path],
+    features_text: str = "",
+) -> bool:
     """Check if a dependency is used in any of the given Rust source files or [features]."""
-    ident = crate_name_to_rust_ident(dep.package_name)
-
     # Check [features] section for "dep_name/..." or "dep:dep_name" references
     if features_text:
         # Match patterns like: "kcpu/fp-simd" or "dep:kcpu" in feature lists
-        # Use word boundary approach: ident followed by / or preceded by dep:
-        esc = re.escape(ident)
-        feat_re = r"(?<!\w)" + esc + r"/"   # kcpu/
-        feat_re += r"|dep:" + esc + r"(?!\w)"  # dep:kcpu
-        if re.search(feat_re, features_text):
-            return True
+        # Feature references use Cargo dependency keys, while source uses the
+        # resolved Rust crate name.
+        feature_names = {
+            dep.name,
+            dep.package_name,
+            crate_name_to_rust_ident(dep.name),
+            crate_name_to_rust_ident(dep.package_name),
+            rust_name,
+        }
+        for feature_name in feature_names:
+            esc = re.escape(feature_name)
+            feat_re = r"(?<![\w-])" + esc + r"/"
+            feat_re += r"|dep:" + esc + r"(?![\w-])"
+            if re.search(feat_re, features_text):
+                return True
 
     # Check Rust source files
-    pattern = get_usage_pattern(dep.package_name)
+    pattern = get_usage_pattern(rust_name)
 
     for f in rust_files:
         try:
@@ -462,6 +610,8 @@ def main() -> None:
     else:
         all_crates = find_all_crates(root)
 
+    resolved_by_manifest = load_resolved_dependencies(root)
+
     total_unused = 0
     total_deps = 0
     crates_with_unused: list[str] = []
@@ -474,10 +624,18 @@ def main() -> None:
         if not parsed.deps:
             continue
 
+        resolved_deps = resolved_by_manifest.get(cargo_path.resolve())
+        if resolved_deps is None:
+            resolved_deps = load_manifest_resolved_dependencies(
+                cargo_path.resolve(),
+                warn=args.verbose,
+            )
+            resolved_by_manifest[cargo_path.resolve()] = resolved_deps
         unused_in_crate: list[Dependency] = []
 
         for dep in parsed.deps:
             total_deps += 1
+            rust_name = resolve_rust_name(dep, resolved_deps)
 
             # Skip optional deps (feature-gated, only used when feature is enabled)
             if dep.optional:
@@ -499,13 +657,12 @@ def main() -> None:
 
             rust_files = collect_rust_sources(crate_dir, dep.section)
 
-            if is_dep_used(dep, rust_files, parsed.features_text):
+            if is_dep_used(dep, rust_name, rust_files, parsed.features_text):
                 if args.verbose:
-                    print(f"  {rel_path}: [{dep.section}] {dep.name} — used")
+                    print(f"  {rel_path}: [{dep.section}] {dep.name} (-> {rust_name}) — used")
             else:
-                rust_ident = crate_name_to_rust_ident(dep.package_name)
                 unused_in_crate.append(dep)
-                print(f"  {rel_path}: [{dep.section}] {dep.name} (-> {rust_ident}) — UNUSED")
+                print(f"  {rel_path}: [{dep.section}] {dep.name} (-> {rust_name}) — UNUSED")
 
         if unused_in_crate:
             total_unused += len(unused_in_crate)

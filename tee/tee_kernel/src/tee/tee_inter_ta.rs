@@ -3,11 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::string::ToString;
-use core::{
-    ffi::{c_uint, c_ulong},
-    ptr::addr_of,
-};
+use core::ffi::{c_uint, c_ulong};
 
+use osvm::MemError;
+use posix_types::UserConstPtr;
 use tee_raw_sys::{TEE_UUID, utee_params};
 
 use crate::tee::{
@@ -15,9 +14,15 @@ use crate::tee::{
     tee_ta_manager::{
         tee_ta_close_session, tee_ta_get_session, tee_ta_init_session, tee_ta_invoke_command,
     },
-    user_access::copy_from_user,
     uuid::Uuid,
 };
+
+fn map_user_mem_error(err: MemError) -> u32 {
+    match err {
+        MemError::InvalidAddr | MemError::NoAccess => tee_raw_sys::TEE_ERROR_BAD_PARAMETERS,
+        _ => tee_raw_sys::TEE_ERROR_GENERIC,
+    }
+}
 
 /// Open a session to another TEE application
 pub fn sys_tee_scn_open_ta_session(
@@ -27,18 +32,9 @@ pub fn sys_tee_scn_open_ta_session(
     _ta_sees: *mut c_uint,
     _ret_orig: *mut c_uint,
 ) -> TeeResult {
-    let uuid = TEE_UUID {
-        timeLow: 0,
-        timeMid: 0,
-        timeHiAndVersion: 0,
-        clockSeqAndNode: [0; 8],
-    };
-    let uuid_size = core::mem::size_of::<TEE_UUID>();
-    copy_from_user(
-        unsafe { core::slice::from_raw_parts_mut(addr_of!(uuid) as _, uuid_size) },
-        unsafe { core::slice::from_raw_parts(dest as _, uuid_size) },
-        uuid_size,
-    )?;
+    let uuid = UserConstPtr::<TEE_UUID>::from(dest)
+        .read_vm()
+        .map_err(map_user_mem_error)?;
 
     tee_ta_init_session(Uuid::from(uuid).to_string())?;
 

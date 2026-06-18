@@ -3,22 +3,15 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, vec, vec::Vec};
-use core::mem::size_of;
 
 use cfg_if::cfg_if;
 use ksync::Mutex;
 use lazy_static::lazy_static;
-use mbedtls::{
-    cipher,
-    cipher::raw::{Cipher, CipherId, CipherMode, Operation},
-    hash,
-    hash::Type,
-};
 use static_assertions::const_assert;
+use tee_crypto::{block_cipher::BlockCipher, mac::Mac};
 use tee_raw_sys::{
     TEE_ALG_AES_ECB_NOPAD, TEE_ALG_HMAC_SHA256, TEE_ALG_HMAC_SM3, TEE_ALG_SM4_ECB_NOPAD,
-    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_GENERIC, TEE_ERROR_NOT_IMPLEMENTED, TEE_OperationMode,
-    TEE_UUID,
+    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_NOT_IMPLEMENTED, TEE_OperationMode, TEE_UUID,
 };
 
 use super::{
@@ -91,51 +84,51 @@ pub fn crypto_cipher_ecb_nopad(
     output: &mut [u8],
 ) -> TeeResult {
     debug_assert!(key.len() >= 16);
+    debug_assert_eq!(input.len(), output.len());
 
-    let (cipher_id, key_bytes) = match algo {
-        TEE_ALG_AES_ECB_NOPAD => (CipherId::Aes, key.len()),
-        TEE_ALG_SM4_ECB_NOPAD => (CipherId::SM4, 16),
+    match algo {
+        TEE_ALG_AES_ECB_NOPAD => {
+            for (in_block, out_block) in input.chunks(16).zip(output.chunks_mut(16)) {
+                if in_block.len() != 16 {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+                out_block.copy_from_slice(in_block);
+                match mode {
+                    TEE_OperationMode::TEE_MODE_ENCRYPT => {
+                        tee_crypto::block_cipher::Aes128Ecb::encrypt(&key[..16], out_block)
+                            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+                    }
+                    TEE_OperationMode::TEE_MODE_DECRYPT => {
+                        tee_crypto::block_cipher::Aes128Ecb::decrypt(&key[..16], out_block)
+                            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+                    }
+                    _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+                }
+            }
+        }
+        TEE_ALG_SM4_ECB_NOPAD => {
+            for (in_block, out_block) in input.chunks(16).zip(output.chunks_mut(16)) {
+                if in_block.len() != 16 {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+                out_block.copy_from_slice(in_block);
+                match mode {
+                    TEE_OperationMode::TEE_MODE_ENCRYPT => {
+                        tee_crypto::block_cipher::Sm4Ecb::encrypt(&key[..16], out_block)
+                            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+                    }
+                    TEE_OperationMode::TEE_MODE_DECRYPT => {
+                        tee_crypto::block_cipher::Sm4Ecb::decrypt(&key[..16], out_block)
+                            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+                    }
+                    _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+                }
+            }
+        }
         _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
     };
 
-    // 根据模式确定操作类型
-    let operation = match mode {
-        TEE_OperationMode::TEE_MODE_ENCRYPT => Operation::Encrypt,
-        TEE_OperationMode::TEE_MODE_DECRYPT => Operation::Decrypt,
-        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
-    };
-
-    // 使用 raw 接口创建 Cipher 实例
-    let mut cipher_ctx = Cipher::setup(cipher_id, CipherMode::ECB, (key_bytes * 8) as u32)
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
-    // 设置密钥
-    cipher_ctx
-        .set_key(operation, &key[..key_bytes])
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
-    // 根据模式执行加密或解密
-    let _len = match mode {
-        TEE_OperationMode::TEE_MODE_ENCRYPT => cipher_ctx.encrypt(input, output),
-        TEE_OperationMode::TEE_MODE_DECRYPT => cipher_ctx.decrypt(input, output),
-        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
-    }
-    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
     Ok(())
-}
-
-/// Convert TeeAlg to mbedtls::hash::Type
-/// This is a helper function instead of TryFrom implementation due to Rust's orphan rule
-fn tee_alg_to_hmac_type(value: TeeAlg) -> TeeResult<Type> {
-    match value {
-        TEE_ALG_HMAC_MD5 => Ok(Type::Md5),
-        TEE_ALG_HMAC_SHA1 => Ok(Type::Sha1),
-        TEE_ALG_HMAC_SHA256 => Ok(Type::Sha256),
-        TEE_ALG_HMAC_SHA512 => Ok(Type::Sha512),
-        TEE_ALG_HMAC_SM3 => Ok(Type::SM3),
-        _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
-    }
 }
 
 pub fn do_hmac(out_key: &mut [u8], in_key: &[u8], message: &[u8]) -> TeeResult {
@@ -144,14 +137,23 @@ pub fn do_hmac(out_key: &mut [u8], in_key: &[u8], message: &[u8]) -> TeeResult {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    let hmac_type = tee_alg_to_hmac_type(TEE_FS_KM_HMAC_ALG)?;
+    let result = match TEE_FS_KM_HMAC_ALG {
+        TEE_ALG_HMAC_SM3 => {
+            let mut mac =
+                tee_crypto::mac::HmacSm3::new(in_key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            mac.update(message);
+            mac.finalize()
+        }
+        TEE_ALG_HMAC_SHA256 => {
+            let mut mac =
+                tee_crypto::mac::HmacSha256::new(in_key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            mac.update(message);
+            mac.finalize()
+        }
+        _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
+    };
 
-    let mut mac = hash::Hmac::new(hmac_type, in_key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
-    mac.update(message).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
-    mac.finish(out_key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
+    out_key.copy_from_slice(&result[..out_key.len()]);
     Ok(())
 }
 
@@ -188,7 +190,6 @@ pub fn tee_fs_fek_crypt(
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    // Extract in_key slice before unsafe block
     let in_key_slice = in_key.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
 
     let ssk = TEE_FS_SSK.lock();
@@ -202,13 +203,7 @@ pub fn tee_fs_fek_crypt(
     let ssk_key_slice = &ssk.key[..];
 
     if let Some(uuid) = uuid {
-        let uuid_bytes = unsafe {
-            core::slice::from_raw_parts(
-                (uuid as *const TEE_UUID) as *const u8,
-                size_of::<TEE_UUID>(),
-            )
-        };
-        do_hmac(&mut tsk, ssk_key_slice, uuid_bytes)?;
+        do_hmac(&mut tsk, ssk_key_slice, bytemuck::bytes_of(uuid))?;
     } else {
         let dummy = [0u8, 1];
         do_hmac(&mut tsk, ssk_key_slice, &dummy)?;

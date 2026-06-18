@@ -154,6 +154,7 @@ x86-peripherals = { path = "platforms/x86-peripherals" }
 x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 
 # Internal: tee
+tee_crypto = { path = "tee/tee_crypto" }
 tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }
@@ -195,13 +196,6 @@ linux_sysno = { path = "api/linux_sysno", default-features = false }
 linkme = "0.3.33"
 lock_api = { version = "0.4", default-features = false }
 log = "0.4"
-mbedtls = { version = "0.13", package = "mbedtls-smx", default-features = false, features = [
-    "no_std_deps",
-] }
-mbedtls-build-helper = "0.1"
-mbedtls-platform-support-smx = { version = "0.1", package = "mbedtls-platform-support-smx", default-features = false }
-mbedtls-sys-auto = { version = "2.28", package = "mbedtls-sys-auto-smx", default-features = false, features = [
-] }
 ouroboros = { version = "0.18.5", default-features = false }
 percpu = "0.4"
 rust-dice = { version = "0.1", default-features = false }
@@ -209,6 +203,7 @@ safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
 slab_allocator = { version = "0.4", package = "ax_slab_allocator" }
 smoltcp = { version = "=0.13.0", default-features = false }
+smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 x86_64 = { version = "0.15.2", features = ["instructions"] }

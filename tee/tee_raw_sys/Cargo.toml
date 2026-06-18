@@ -21,3 +21,5 @@ license-compatible = true
 reason = "Rust FFI bindings for GlobalPlatform TEE standard API. Type definitions and constants are derived from industry specifications and cannot be substantially modified without breaking TEE ecosystem compatibility. OP-TEE components licensed under BSD-2-Clause."
 
 [dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+posix-types.workspace = true

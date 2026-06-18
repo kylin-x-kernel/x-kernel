@@ -490,11 +490,7 @@ impl Pollable for Epoll {
 
 #[cfg(unittest)]
 mod epoll_tests {
-    use alloc::borrow::Cow;
-    use core::task::Context;
-
     use kpoll::{IoEvents, Pollable};
-    use kspin::SpinNoPreempt;
     use unittest::def_test;
 
     use super::*;

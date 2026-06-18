@@ -3,11 +3,11 @@
 // See LICENSES for license details.
 
 use dice_driver::read_raw_handover_data;
-use mbedtls::hash::{Hkdf, Md, Type as MdType};
 use rust_dice::dice_parse_handover;
+use tee_crypto::{hkdf, mac::HmacSm3};
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE};
 
-use crate::tee::{TeeResult, utils::slice_fmt};
+use crate::tee::TeeResult;
 
 pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     if huk_key.is_empty() {
@@ -31,7 +31,9 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     debug!("cdi_seal length: {}", cdi_seal.len());
 
     let salt = b"DICE CDI Seal";
-    Hkdf::hkdf(MdType::SM3, salt, cdi_seal, &[], huk_key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let okm = hkdf::hkdf::<HmacSm3>(salt, cdi_seal, &[], huk_key.len())
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    huk_key.copy_from_slice(&okm);
     // warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
     Ok(())
 }

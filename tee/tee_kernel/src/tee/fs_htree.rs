@@ -3,23 +3,22 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
-use core::{fmt, fmt::Debug, ptr::NonNull};
+use core::{fmt, fmt::Debug};
 
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
 use cfg_if::cfg_if;
-use mbedtls::{
-    cipher::{Authenticated, Cipher, CipherData, Decryption, Encryption, Fresh, Operation, raw},
-    error::HiError::PemAllocFailed,
-    hash::{Md, Type},
-};
 use memoffset::offset_of;
 use subtle::ConstantTimeEq;
+use tee_crypto::{
+    aead::{Aead, Aes128GcmAead, Sm4GcmAead},
+    hash::{Digest, Sha256, Sm3},
+};
 use tee_raw_sys::{
-    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_AES_GCM, TEE_ALG_HMAC_SHA256, TEE_ALG_HMAC_SM3, TEE_ALG_MD5,
-    TEE_ALG_SHA256, TEE_ALG_SHA512, TEE_ALG_SM3, TEE_ALG_SM4_ECB_NOPAD, TEE_ALG_SM4_GCM,
-    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE, TEE_ERROR_CORRUPT_OBJECT, TEE_ERROR_GENERIC,
-    TEE_ERROR_MAC_INVALID, TEE_ERROR_NOT_IMPLEMENTED, TEE_ERROR_NOT_SUPPORTED, TEE_ERROR_SECURITY,
-    TEE_ERROR_SHORT_BUFFER, TEE_OperationMode, TEE_UUID,
+    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_AES_GCM, TEE_ALG_HMAC_SHA256, TEE_ALG_HMAC_SM3, TEE_ALG_SHA256,
+    TEE_ALG_SM3, TEE_ALG_SM4_ECB_NOPAD, TEE_ALG_SM4_GCM, TEE_ERROR_BAD_PARAMETERS,
+    TEE_ERROR_BAD_STATE, TEE_ERROR_CORRUPT_OBJECT, TEE_ERROR_GENERIC, TEE_ERROR_MAC_INVALID,
+    TEE_ERROR_NOT_IMPLEMENTED, TEE_ERROR_NOT_SUPPORTED, TEE_ERROR_SECURITY, TEE_ERROR_SHORT_BUFFER,
+    TEE_OperationMode, TEE_UUID,
 };
 
 use super::utee_defines::{
@@ -79,8 +78,6 @@ pub const fn htree_node_committed_child(n: usize) -> u32 {
     1 << (1 + n)
 }
 
-// unsafe impl Zeroable for TeeFsHtreeNodeImage {}
-// unsafe impl Pod for TeeFsHtreeNodeImage {}
 #[repr(C)]
 #[derive(Copy, Debug, Clone, Default, Pod, Zeroable)]
 pub struct TeeFsHtreeMeta {
@@ -88,11 +85,11 @@ pub struct TeeFsHtreeMeta {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, Pod, Zeroable)]
 pub struct TeeFsHtreeImeta {
     pub meta: TeeFsHtreeMeta,
     pub max_node_id: u32,
-    // pub _padding: [u8; 4],
+    pub _padding: [u8; 4],
 }
 
 pub const TEE_FS_HTREE_IMETA_SIZE: usize = core::mem::size_of::<TeeFsHtreeImeta>();
@@ -121,7 +118,7 @@ impl Debug for TeeFsHtreeImage {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default)] // Derive Clone for easy copying if needed
+#[derive(Copy, Clone, Default, Pod, Zeroable)]
 pub struct TeeFsHtreeNodeImage {
     pub hash: [u8; TEE_FS_HTREE_HASH_SIZE],
     pub iv: [u8; TEE_FS_HTREE_IV_SIZE],
@@ -132,28 +129,12 @@ pub struct TeeFsHtreeNodeImage {
 static_assertions::const_assert!(core::mem::size_of::<TeeFsHtreeNodeImage>() == 66);
 
 impl TeeFsHtreeNodeImage {
-    /// Returns the on-disk byte representation of this node image.
-    ///
-    /// # Safety invariants
-    /// - `Self` is `#[repr(C)]` with a stable layout
-    /// - All bytes are fully initialized
-    /// - This type represents an on-disk / wire image
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                core::mem::size_of::<Self>(),
-            )
-        }
+        bytes_of(self)
     }
 
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self as *mut Self as *mut u8,
-                core::mem::size_of::<Self>(),
-            )
-        }
+        bytes_of_mut(self)
     }
 }
 
@@ -197,11 +178,7 @@ pub struct HtreeNode {
     pub dirty: bool,
     pub block_updated: bool,
     pub node: TeeFsHtreeNodeImage,
-    // parent 使用 NonNull，因为：
-    // 1. root 节点的 parent 为 None
-    // 2. 子节点的 parent 指向父节点（非拥有关系）
-    // 3. 父节点的生命周期由 tee_fs_htree 保证
-    pub parent: Option<NonNull<HtreeNode>>,
+    pub parent_id: Option<usize>,
     // left/right 使用 Box，因为：
     // 1. 子节点由父节点拥有
     // 2. 释放时通过 Box 自动管理
@@ -220,12 +197,12 @@ impl HtreeNode {
     }
 
     pub fn set_left(current_node: &mut HtreeNode, mut child: HtreeNode) {
-        child.parent = NonNull::new(current_node as *mut _);
+        child.parent_id = Some(current_node.id);
         current_node.left = Some(Box::new(child));
     }
 
     pub fn set_right(current_node: &mut HtreeNode, mut child: HtreeNode) {
-        child.parent = NonNull::new(current_node as *mut _);
+        child.parent_id = Some(current_node.id);
         current_node.right = Some(Box::new(child));
     }
 
@@ -255,13 +232,6 @@ impl HtreeNode {
 }
 
 pub type Subtree = Option<Box<HtreeNode>>;
-
-// HtreeNode 使用 NonNull 作为 parent 指针，不是自动 Send 的
-// 但我们可以安全地实现 Send，因为：
-// 1. 整个 TeeFsHtree 被 Mutex 保护，所有访问都通过 Mutex 进行
-// 2. parent 指针的生命周期由 TeeFsHtree 保证，不会出现悬垂指针
-// 3. 树结构在同一线程中访问，不会出现并发修改
-unsafe impl Send for HtreeNode {}
 
 pub trait SubtreeExt {
     fn get_mut(&mut self) -> Option<&mut HtreeNode>;
@@ -306,45 +276,53 @@ impl Debug for TeeFsHtree {
     }
 }
 
-fn tee_alg_to_hash_type(value: TeeAlg) -> Result<Type, u32> {
-    match value {
-        TEE_ALG_MD5 => Ok(Type::Md5),
-        TEE_ALG_SHA256 => Ok(Type::Sha256),
-        TEE_ALG_SHA512 => Ok(Type::Sha512),
-        TEE_ALG_SM3 => Ok(Type::SM3),
+/// Hash context wrapping tee_crypto hash types.
+pub enum HashContext {
+    Sm3(Sm3),
+    Sha256(Sha256),
+}
+
+fn tee_alg_to_hash_ctx(alg: TeeAlg) -> TeeResult<HashContext> {
+    match alg {
+        TEE_ALG_SHA256 => Ok(HashContext::Sha256(Sha256::new())),
+        TEE_ALG_SM3 => Ok(HashContext::Sm3(Sm3::new())),
         _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
     }
 }
 
-fn crypto_hash_alloc_ctx(alg: TeeAlg) -> TeeResult<Md> {
-    let t = tee_alg_to_hash_type(alg)?;
-    let md = Md::new(t).map_err(|_| TEE_ERROR_BAD_STATE)?;
-
-    Ok(md)
+fn crypto_hash_alloc_ctx(alg: TeeAlg) -> TeeResult<HashContext> {
+    tee_alg_to_hash_ctx(alg)
 }
 
-fn crypto_hash_init(_md: &mut Md) -> TeeResult {
-    // initialized in Md.new
+fn crypto_hash_init(_md: &mut HashContext) -> TeeResult {
+    // Hash context is initialized at creation time in tee_crypto
     Ok(())
 }
 
-fn crypto_hash_update(md: &mut Md, data: &[u8]) -> TeeResult {
+fn crypto_hash_update(md: &mut HashContext, data: &[u8]) -> TeeResult {
     tee_debug!(
         "crypto_hash_update: data length: {:?}, data: {:X?}",
         data.len(),
         hex::encode(data)
     );
-    md.update(data).map_err(|_| TEE_ERROR_BAD_STATE)?;
+    match md {
+        HashContext::Sm3(h) => h.update(data),
+        HashContext::Sha256(h) => h.update(data),
+    }
     Ok(())
 }
 
-fn crypto_hash_final(md: Md, digest: &mut [u8]) -> TeeResult {
+fn crypto_hash_final(md: HashContext, digest: &mut [u8]) -> TeeResult {
     tee_debug!(
         "crypto_hash_final: digest length: {:?}, digest: {:X?}",
         digest.len(),
         hex::encode(&digest)
     );
-    md.finish(digest).map_err(|_| TEE_ERROR_BAD_STATE)?;
+    let result = match md {
+        HashContext::Sm3(h) => h.finalize(),
+        HashContext::Sha256(h) => h.finalize(),
+    };
+    digest.copy_from_slice(&result.as_bytes()[..digest.len()]);
     Ok(())
 }
 
@@ -396,13 +374,7 @@ pub fn rpc_read_head(
     vers: u8,
     head: &mut TeeFsHtreeImage,
 ) -> TeeResult {
-    let data_ptr: &mut [u8] = unsafe {
-        core::slice::from_raw_parts_mut(
-            head as *mut TeeFsHtreeImage as *mut u8,
-            size_of::<TeeFsHtreeImage>(),
-        )
-    };
-    rpc_read(storage, TeeFsHtreeType::Head, 0, vers, data_ptr)?;
+    rpc_read(storage, TeeFsHtreeType::Head, 0, vers, bytes_of_mut(head))?;
     Ok(())
 }
 
@@ -480,13 +452,7 @@ pub fn rpc_write_head(
     head: &TeeFsHtreeImage,
 ) -> TeeResult {
     tee_debug!("rpc_write_head: vers: {}, counter: {}", vers, head.counter);
-    let data_ptr: &[u8] = unsafe {
-        core::slice::from_raw_parts(
-            head as *const TeeFsHtreeImage as *const u8,
-            size_of::<TeeFsHtreeImage>(),
-        )
-    };
-    rpc_write(storage, TeeFsHtreeType::Head, 0, vers, data_ptr)?;
+    rpc_write(storage, TeeFsHtreeType::Head, 0, vers, bytes_of(head))?;
     Ok(())
 }
 
@@ -535,7 +501,7 @@ pub fn calc_node(
 ) -> TeeResult {
     let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-    if node.parent.is_some() {
+    if node.parent_id.is_some() {
         calc_node_hash_with_type(TEE_FS_HTREE_HASH_ALG, node, None, &mut digest)?;
     } else {
         calc_node_hash_with_type(
@@ -561,7 +527,7 @@ pub fn calc_node(
 /// # Returns
 /// * `TeeResult` - the result of the operation
 pub fn calc_node_hash_with_ctx(
-    mut md: Md,
+    mut md: HashContext,
     node: &HtreeNode,
     meta: Option<&TeeFsHtreeMeta>,
     digest: &mut [u8; TEE_FS_HTREE_HASH_SIZE],
@@ -781,7 +747,7 @@ pub fn verify_node(
 ) -> TeeResult {
     let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-    if node.parent.is_some() {
+    if node.parent_id.is_some() {
         calc_node_hash_with_type(TEE_FS_HTREE_HASH_ALG, node, None, &mut digest)?;
     } else {
         calc_node_hash_with_type(
@@ -821,7 +787,7 @@ pub fn print_node_hash(
 ) -> TeeResult {
     let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
-    if node.parent.is_some() {
+    if node.parent_id.is_some() {
         calc_node_hash_with_type(TEE_FS_HTREE_HASH_ALG, node, None, &mut digest)?;
     } else {
         calc_node_hash_with_type(
@@ -844,23 +810,19 @@ pub fn print_node_hash(
 /// * `fd` - the file descriptor
 /// # Returns
 /// * `TeeResult` - the result of the operation
-fn htree_sync_node_to_storage(
+fn write_current_node_to_storage(
     node: &mut HtreeNode,
-    ht_data: &TeeFsHtreeData,
     storage: &dyn TeeFsHtreeStorageOps,
-    // fd: Option<&mut FileVariant>,
+    vers: u8,
+    meta: Option<&TeeFsHtreeMeta>,
 ) -> TeeResult {
     tee_debug!(
         "htree_sync_node_to_storage: node.id: {:?}, node.dirty: {:?}, node.block_updated: {:?}",
-        // fd,
         node.id,
         node.dirty,
         node.block_updated
     );
 
-    #[allow(unused_assignments)]
-    let mut vers: u8 = 0;
-    let mut meta: Option<&TeeFsHtreeMeta> = None;
     // The node can be dirty while the block isn't updated due to
     // updated children, but if block is updated the node has to be
     // dirty.
@@ -868,35 +830,6 @@ fn htree_sync_node_to_storage(
 
     if !node.dirty {
         return Ok(());
-    }
-    // if fd.is_none() {
-    //     return Err(TEE_ERROR_BAD_PARAMETERS);
-    // }
-
-    if let Some(parent_ptr) = node.parent {
-        // parent 是 NonNull<HtreeNode>，可以直接解引用访问父节点
-        // 安全性：parent 指针的生命周期由 tee_fs_htree 保证，在节点存在期间始终有效
-        let parent_node = unsafe { &mut *parent_ptr.as_ptr() };
-
-        // 计算 flags 并设置
-        let f = htree_node_committed_child(node.id & 1);
-
-        parent_node.dirty = true;
-        parent_node.node.flags ^= f as u16;
-        vers = ((parent_node.node.flags & f as u16) != 0) as u8;
-    } else {
-        // Counter isn't updated yet, it's increased just before
-        // writing the header.
-        // C version: vers = !(targ->ht->head.counter & 1);
-        // When counter is even, vers = 1; when counter is odd, vers = 0
-        vers = ((ht_data.head.counter & 1) == 0) as u8;
-        meta = Some(&ht_data.imeta.meta);
-        tee_debug!(
-            "htree_sync_node_to_storage (root): counter: {}, root_node_vers: {}, flags: 0x{:04X}",
-            ht_data.head.counter,
-            vers,
-            node.node.flags
-        );
     }
     let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
@@ -911,32 +844,100 @@ fn htree_sync_node_to_storage(
     Ok(())
 }
 
+fn sync_descendants_to_storage(
+    node: &mut HtreeNode,
+    storage: &dyn TeeFsHtreeStorageOps,
+) -> TeeResult {
+    if let Some(left) = node.left.get_mut() {
+        sync_descendants_to_storage(left, storage)?;
+        if left.dirty {
+            let f = htree_node_committed_child(left.id & 1);
+            node.dirty = true;
+            node.node.flags ^= f as u16;
+            let vers = ((node.node.flags & f as u16) != 0) as u8;
+            write_current_node_to_storage(left, storage, vers, None)?;
+        }
+    }
+
+    if let Some(right) = node.right.get_mut() {
+        sync_descendants_to_storage(right, storage)?;
+        if right.dirty {
+            let f = htree_node_committed_child(right.id & 1);
+            node.dirty = true;
+            node.node.flags ^= f as u16;
+            let vers = ((node.node.flags & f as u16) != 0) as u8;
+            write_current_node_to_storage(right, storage, vers, None)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_tree_to_storage(ht: &mut TeeFsHtree) -> TeeResult {
+    let storage = ht.storage.as_ref();
+    sync_descendants_to_storage(&mut ht.root, storage)?;
+
+    let vers = ((ht.data.head.counter & 1) == 0) as u8;
+    tee_debug!(
+        "sync_tree_to_storage: counter: {}, root_node_vers: {}, root_flags: 0x{:04X}",
+        ht.data.head.counter,
+        vers,
+        ht.root.node.flags
+    );
+    write_current_node_to_storage(&mut ht.root, storage, vers, Some(&ht.data.imeta.meta))
+}
+
+/// AEAD cipher context replacing mbedtls Cipher type-state.
+/// Stores parameters for one-shot encrypt/decrypt at finalize time.
+pub struct AeadContext {
+    alg: TeeAlg,
+    key: [u8; TEE_FS_HTREE_FEK_SIZE],
+    nonce: [u8; TEE_FS_HTREE_IV_SIZE],
+    aad: Vec<u8>,
+}
+
+/// Marker for encryption direction (kept for API compatibility, no longer used as generic bound).
+#[allow(dead_code)]
+pub struct Encryption;
+
+/// Marker for decryption direction (kept for API compatibility, no longer used as generic bound).
+#[allow(dead_code)]
+pub struct Decryption;
+
 /// create cipher for encrypt or decrypt
 ///
 /// # Arguments
 /// * `alg` - the algorithm of the cipher
 /// * `key_bytes` - the length of the key
 /// # Returns
-/// * `TeeResult<Cipher<M, Authenticated, Fresh>>` - the cipher for encrypt or decrypt
-fn create_cipher<M: Operation>(
-    alg: TeeAlg,
-    key_bytes: usize,
-) -> TeeResult<Cipher<M, Authenticated, Fresh>> {
-    let key_bits = key_bytes * 8;
+/// * `TeeResult<AeadContext>` - the cipher for encrypt or decrypt
+fn create_cipher(alg: TeeAlg, key_bytes: usize) -> TeeResult<AeadContext> {
     match alg {
-        TEE_ALG_AES_GCM => Cipher::<M, Authenticated, Fresh>::new(
-            raw::CipherId::Aes,
-            raw::CipherMode::GCM,
-            key_bits as u32,
-        )
-        .map_err(|_| TEE_ERROR_NOT_SUPPORTED),
-        TEE_ALG_SM4_GCM => Cipher::<M, Authenticated, Fresh>::new(
-            raw::CipherId::SM4,
-            raw::CipherMode::GCM,
-            key_bits as u32,
-        )
-        .map_err(|_| TEE_ERROR_NOT_SUPPORTED),
+        TEE_ALG_AES_GCM | TEE_ALG_SM4_GCM => {
+            if key_bytes != TEE_FS_HTREE_FEK_SIZE {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
+            Ok(AeadContext {
+                alg,
+                key: [0u8; TEE_FS_HTREE_FEK_SIZE],
+                nonce: [0u8; TEE_FS_HTREE_IV_SIZE],
+                aad: Vec::new(),
+            })
+        }
         _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
+
+impl AeadContext {
+    fn set_key_iv(mut self, key: &[u8], iv: &[u8]) -> TeeResult<Self> {
+        self.key.copy_from_slice(&key[..TEE_FS_HTREE_FEK_SIZE]);
+        self.nonce.copy_from_slice(&iv[..TEE_FS_HTREE_IV_SIZE]);
+        Ok(self)
+    }
+
+    fn set_ad(mut self, aad: &[u8]) -> TeeResult<Self> {
+        self.aad = aad.to_vec();
+        Ok(self)
     }
 }
 
@@ -950,14 +951,14 @@ fn create_cipher<M: Operation>(
 /// * `ni_is_some` - if the node is some
 /// * `root_hash` - the hash of the root
 /// # Returns
-/// * `Cipher<M, Authenticated, CipherData>` - the cipher for encrypt or decrypt
-fn authenc_init_core<M: Operation>(
+/// * `AeadContext` - the cipher for encrypt or decrypt
+fn authenc_init_core(
     fek: &[u8; TEE_FS_HTREE_FEK_SIZE],
     head: &TeeFsHtreeImage,
     iv: &[u8; TEE_FS_HTREE_IV_SIZE],
     ni_is_some: bool,
     root_hash: Option<&[u8; TEE_FS_HTREE_HASH_SIZE]>,
-) -> TeeResult<Cipher<M, Authenticated, CipherData>> {
+) -> TeeResult<AeadContext> {
     const ALG: TeeAlg = TEE_FS_HTREE_AUTH_ENC_ALG;
     let mut aad_len = TEE_FS_HTREE_FEK_SIZE + TEE_FS_HTREE_IV_SIZE;
 
@@ -965,8 +966,8 @@ fn authenc_init_core<M: Operation>(
         aad_len += TEE_FS_HTREE_HASH_SIZE + core::mem::size_of_val(&head.counter);
     }
 
-    let cipher = create_cipher::<M>(ALG, TEE_FS_HTREE_FEK_SIZE)?;
-    let cipher_k = cipher.set_key_iv(fek, iv).map_err(|_| TEE_ERROR_GENERIC)?;
+    let cipher = create_cipher(ALG, TEE_FS_HTREE_FEK_SIZE)?;
+    let cipher_k = cipher.set_key_iv(fek, iv)?;
 
     let mut ad: Vec<u8> = Vec::with_capacity(aad_len);
     if !ni_is_some {
@@ -980,9 +981,7 @@ fn authenc_init_core<M: Operation>(
     ad.extend_from_slice(bytemuck::bytes_of(&head.enc_fek));
     ad.extend_from_slice(iv);
 
-    let cipher_d = cipher_k.set_ad(ad.as_slice());
-
-    cipher_d.map_err(|_| TEE_ERROR_GENERIC)
+    cipher_k.set_ad(ad.as_slice())
 }
 
 /// init cipher for encrypt or decrypt
@@ -994,14 +993,14 @@ fn authenc_init_core<M: Operation>(
 /// * `_payload_len` - the length of the payload
 /// * `root_hash` - the hash of the root
 /// # Returns
-/// * `Cipher<M, Authenticated, CipherData>` - the cipher for encrypt or decrypt
-pub fn authenc_init<M: Operation>(
+/// * `AeadContext` - the cipher for encrypt or decrypt
+pub fn authenc_init(
     mode: TEE_OperationMode,
     ht: &mut TeeFsHtree,
     ni: Option<&mut TeeFsHtreeNodeImage>,
     _payload_len: usize,
     root_hash: Option<&[u8; TEE_FS_HTREE_HASH_SIZE]>,
-) -> TeeResult<Cipher<M, Authenticated, CipherData>> {
+) -> TeeResult<AeadContext> {
     // When ni is Some (block encryption/decryption), root_hash should not be used
     // When ni is None, root_hash should be provided or use ht.root.node.hash
     let hash = if ni.is_some() {
@@ -1035,13 +1034,13 @@ pub fn authenc_init<M: Operation>(
 /// * `ni_iv` - the iv from the node, if None use head.iv
 /// * `root_hash` - the hash of the root
 /// # Returns
-/// * `Cipher<Decryption, Authenticated, CipherData>` - the cipher for decrypt
+/// * `AeadContext` - the cipher for decrypt
 fn authenc_init_decrypt(
     fek: &[u8; TEE_FS_HTREE_FEK_SIZE],
     head: &TeeFsHtreeImage,
     ni_iv: Option<&[u8; TEE_FS_HTREE_IV_SIZE]>,
     root_hash: Option<&[u8; TEE_FS_HTREE_HASH_SIZE]>,
-) -> TeeResult<Cipher<Decryption, Authenticated, CipherData>> {
+) -> TeeResult<AeadContext> {
     let (iv, ni_is_some) = if let Some(ni_iv) = ni_iv {
         (ni_iv, true)
     } else {
@@ -1067,13 +1066,13 @@ fn authenc_init_decrypt(
 /// * `ni_iv` - the iv from the node (will be filled with random data), if None use head.iv
 /// * `root_hash` - the hash of the root
 /// # Returns
-/// * `Cipher<Encryption, Authenticated, CipherData>` - the cipher for encrypt
+/// * `AeadContext` - the cipher for encrypt
 fn authenc_init_encrypt(
     fek: &[u8; TEE_FS_HTREE_FEK_SIZE],
     head: &TeeFsHtreeImage,
     ni_iv: Option<&mut [u8; TEE_FS_HTREE_IV_SIZE]>,
     root_hash: Option<&[u8; TEE_FS_HTREE_HASH_SIZE]>,
-) -> TeeResult<Cipher<Encryption, Authenticated, CipherData>> {
+) -> TeeResult<AeadContext> {
     let (iv, ni_is_some) = if let Some(ni_iv) = ni_iv {
         crypto_rng_read(ni_iv)?;
         (ni_iv as &[u8; TEE_FS_HTREE_IV_SIZE], true)
@@ -1098,14 +1097,14 @@ fn authenc_init_encrypt(
 /// final for decrypt, using separated parameters to avoid borrow conflicts
 ///
 /// # Arguments
-/// * `cipher` - the cipher for decrypt
+/// * `ctx` - the cipher context for decrypt
 /// * `tag` - the tag for decrypt
 /// * `crypt` - the crypt for decrypt
 /// * `plain` - the plain for decrypt
 /// # Returns
 /// * `TeeResult` - the result of the operation
 pub fn authenc_decrypt_final(
-    cipher: Cipher<Decryption, Authenticated, CipherData>,
+    ctx: AeadContext,
     tag: &[u8],
     crypt: &[u8],
     plain: &mut [u8],
@@ -1116,60 +1115,52 @@ pub fn authenc_decrypt_final(
         slice_fmt(crypt),
         slice_fmt(plain),
     );
-    let mut plain_with_add_block = vec![0u8; crypt.len() + cipher.block_size()];
 
-    let (len1, cipher_d) = cipher
-        .update(crypt, plain_with_add_block.as_mut_slice())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
+    // tee_crypto decrypt expects ciphertext || tag concatenated
+    let mut ct_with_tag = crypt.to_vec();
+    ct_with_tag.extend_from_slice(tag);
 
-    // plain[len1..] 是 finish 写入的位置
-    let (len2, cipher_t) = cipher_d
-        .finish(&mut plain_with_add_block.as_mut_slice()[len1..])
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-
-    cipher_t.check_tag(tag).map_err(|_| TEE_ERROR_MAC_INVALID)?;
-
-    if len1 + len2 != crypt.len() {
-        return Err(TEE_ERROR_GENERIC);
+    let result = match ctx.alg {
+        TEE_ALG_AES_GCM => Aes128GcmAead::decrypt(&ctx.key, &ctx.nonce, &ctx.aad, &ct_with_tag),
+        TEE_ALG_SM4_GCM => Sm4GcmAead::decrypt(&ctx.key, &ctx.nonce, &ctx.aad, &ct_with_tag),
+        _ => return Err(TEE_ERROR_NOT_SUPPORTED),
     }
+    .map_err(|_| TEE_ERROR_MAC_INVALID)?;
 
-    plain.copy_from_slice(&plain_with_add_block.as_slice()[..crypt.len()]);
+    plain.copy_from_slice(&result);
     Ok(())
 }
 
 /// final for encrypt, using separated parameters to avoid borrow conflicts
 ///
 /// # Arguments
-/// * `cipher` - the cipher for encrypt
+/// * `ctx` - the cipher context for encrypt
 /// * `tag` - the tag for encrypt
 /// * `plain` - the plain for encrypt
 /// * `crypt` - the crypt for encrypt
 /// # Returns
 /// * `TeeResult` - the result of the operation
 pub fn authenc_encrypt_final(
-    cipher: Cipher<Encryption, Authenticated, CipherData>,
+    ctx: AeadContext,
     tag: &mut [u8],
     plain: &[u8],
     crypt: &mut [u8],
 ) -> TeeResult {
-    let mut crypt_with_add_block = vec![0u8; plain.len() + cipher.block_size()];
+    // tee_crypto encrypt returns ciphertext || tag
+    let result = match ctx.alg {
+        TEE_ALG_AES_GCM => Aes128GcmAead::encrypt(&ctx.key, &ctx.nonce, &ctx.aad, plain),
+        TEE_ALG_SM4_GCM => Sm4GcmAead::encrypt(&ctx.key, &ctx.nonce, &ctx.aad, plain),
+        _ => return Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+    .map_err(|_| TEE_ERROR_GENERIC)?;
 
-    let (len1, cipher_d) = cipher
-        .update(plain, crypt_with_add_block.as_mut_slice())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-
-    // crypt[len1..] 是 finish 写入的位置
-    let (len2, cipher_t) = cipher_d
-        .finish(&mut crypt_with_add_block.as_mut_slice()[len1..])
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-
-    cipher_t.write_tag(tag).map_err(|_| TEE_ERROR_GENERIC)?;
-
-    if len1 + len2 != plain.len() {
+    // result = ciphertext || tag (tag is 16 bytes)
+    let ct_len = plain.len();
+    if result.len() != ct_len + 16 {
         return Err(TEE_ERROR_GENERIC);
     }
-
-    crypt.copy_from_slice(&crypt_with_add_block.as_slice()[..plain.len()]);
+    crypt.copy_from_slice(&result[..ct_len]);
+    tag.copy_from_slice(&result[ct_len..]);
 
     tee_debug!(
         "authenc_encrypt_final: tag: {:?}, crypt: {:?}, plain: {:?}",
@@ -1197,16 +1188,12 @@ pub fn update_root(ht: &mut TeeFsHtree) -> TeeResult {
         None,
     )?;
 
-    let ptr = &mut ht.data.imeta as *mut _ as *mut u8;
-    unsafe {
-        let slice = core::slice::from_raw_parts_mut(ptr, size_of_val(&ht.data.imeta));
-        authenc_encrypt_final(
-            cipher,
-            &mut ht.data.head.tag,
-            slice,
-            &mut ht.data.head.imeta,
-        )?;
-    }
+    authenc_encrypt_final(
+        cipher,
+        &mut ht.data.head.tag,
+        bytes_of_mut(&mut ht.data.imeta),
+        &mut ht.data.head.imeta,
+    )?;
 
     Ok(())
 }
@@ -1598,11 +1585,12 @@ pub fn verify_root(ht: &mut TeeFsHtree) -> TeeResult {
         None,
     )?;
 
-    let ptr = &mut ht.data.imeta as *mut _ as *mut u8;
-    unsafe {
-        let slice = core::slice::from_raw_parts_mut(ptr, size_of_val(&ht.data.imeta));
-        authenc_decrypt_final(cipher, &ht.data.head.tag, &ht.data.head.imeta, slice)?;
-    }
+    authenc_decrypt_final(
+        cipher,
+        &ht.data.head.tag,
+        &ht.data.head.imeta,
+        bytes_of_mut(&mut ht.data.imeta),
+    )?;
 
     Ok(())
 }
@@ -1636,8 +1624,7 @@ pub fn tee_fs_htree_sync_to_storage(
     // let mut fd = open_file_like("filenamne", FS_OFLAG_DEFAULT, FS_MODE_644)
     //     .map_err(|_| TeeResultCode::ErrorGeneric)?;
 
-    htree_traverse_post_order_mut(ht, &mut htree_sync_node_to_storage)
-        .inspect_err(|e| error!("htree_traverse_post_order_mut error! {:X?}", e))?;
+    sync_tree_to_storage(ht).inspect_err(|e| error!("sync_tree_to_storage error! {:X?}", e))?;
 
     let counter_before = ht.data.head.counter;
     update_root(ht)?;
@@ -2024,23 +2011,18 @@ pub fn tee_fs_htree_truncate(ht: &mut TeeFsHtree, block_num: usize) -> TeeResult
         let node = find_closest_node(ht, current_max_node_id);
         assert!(node.id == current_max_node_id);
         assert!(node.get_child_by_index(0).is_none() && node.get_child_by_index(1).is_none());
-        assert!(node.parent.is_some());
+        assert!(node.parent_id.is_some());
 
-        // Get the parent node pointer and child node index, then release the node reference
-        let (parent_ptr, child_index) = if let Some(parent) = node.parent {
-            (parent, node.id & 1)
+        let (parent_id, child_index) = if let Some(parent_id) = node.parent_id {
+            (parent_id, node.id & 1)
         } else {
             unreachable!() // already ensured by assert that parent exists
         };
 
-        // node reference will be released automatically when scope ends, here explicitly mark it as not used
         let _ = node;
 
-        // Use unsafe to get the mutable reference of the parent node from NonNull
-        // Safety: parent pointer lifetime is guaranteed by tee_fs_htree, valid during node existence
-        let parent_node = unsafe { &mut *parent_ptr.as_ptr() };
+        let parent_node = find_node(ht, parent_id).ok_or(TEE_ERROR_GENERIC)?;
 
-        // Set the corresponding child tree of the parent node to None
         if child_index == 0 {
             parent_node.left = None;
         } else {
@@ -2196,18 +2178,10 @@ mod tests_htree_basic {
 
         {
             let left_ref = root.left.as_ref().unwrap();
-            let left_parent = left_ref.parent.as_ref().unwrap();
-            assert_eq!(
-                left_parent.as_ptr(),
-                &root as *const HtreeNode as *mut HtreeNode
-            ); // 指向同一个 root
+            assert_eq!(left_ref.parent_id, Some(root.id));
 
             let right_ref = root.right.as_ref().unwrap();
-            let right_parent = right_ref.parent.as_ref().unwrap();
-            assert_eq!(
-                right_parent.as_ptr(),
-                &root as *const HtreeNode as *mut HtreeNode
-            );
+            assert_eq!(right_ref.parent_id, Some(root.id));
         }
 
         {
@@ -2314,11 +2288,8 @@ mod tests_htree_basic {
     #[unittest::def_test]
     pub fn test_verify_node_with_parent_after_calc() {
         let ht = TeeFsHtree::default();
-        let parent = HtreeNode::new(1, TeeFsHtreeNodeImage::default());
         let mut child = HtreeNode::new(2, TeeFsHtreeNodeImage::default());
-
-        // 设置父子关系
-        child.parent = NonNull::new(&parent as *const HtreeNode as *mut HtreeNode);
+        child.parent_id = Some(1);
 
         // 先计算子节点哈希
         let storage = ht.storage.as_ref();
@@ -2755,12 +2726,11 @@ mod tests_get_node {
         let result = get_node(&mut ht, true, 5); // 路径 1 -> 2 -> 5
         assert!(result.is_ok());
 
-        // 先获取 node 的 id 和 parent，然后释放借用
-        let (node_id, parent_ptr) = {
+        let (node_id, parent_id) = {
             let node = result.unwrap();
             let id = node.id;
-            let parent = node.parent;
-            (id, parent)
+            let parent_id = node.parent_id;
+            (id, parent_id)
         };
         assert_eq!(node_id, 5);
 
@@ -2776,13 +2746,7 @@ mod tests_get_node {
         assert!(node2_from_tree.right.is_some());
         assert_eq!(node2_from_tree.right.as_ref().unwrap().id, 5);
 
-        // 验证 parent 指针
-        if let Some(parent_ptr) = parent_ptr {
-            let parent_ref = unsafe { &*parent_ptr.as_ptr() };
-            assert_eq!(parent_ref.id, 2);
-        } else {
-            panic!("Node 5 should have a parent");
-        }
+        assert_eq!(parent_id, Some(2));
     }
     // 测试场景 7: 创建一个需要补齐路径上的一个节点的场景 (右子节点)
     // 初始: 1-2-3。 目标: 6 (3的左子节点)
@@ -2797,11 +2761,11 @@ mod tests_get_node {
 
         let result = get_node(&mut ht, true, 6); // 路径 1 -> 3 -> 6
         assert!(result.is_ok());
-        let (node_id, parent_ptr) = {
+        let (node_id, parent_id) = {
             let node = result.unwrap();
             let id = node.id;
-            let parent = node.parent;
-            (id, parent)
+            let parent_id = node.parent_id;
+            (id, parent_id)
         };
         assert_eq!(node_id, 6);
 
@@ -2823,12 +2787,7 @@ mod tests_get_node {
         let node3_from_tree = ht.root.right.get_ref().unwrap();
         assert!(node3_from_tree.left.is_some());
         assert_eq!(node3_from_tree.left.as_ref().unwrap().id, 6);
-        if let Some(parent_ptr) = parent_ptr {
-            let parent_ref = unsafe { &*parent_ptr.as_ptr() };
-            assert_eq!(parent_ref.id, 3);
-        } else {
-            panic!("Node 6 should have a parent");
-        }
+        assert_eq!(parent_id, Some(3));
     }
     // 测试场景 8: 创建多个中间缺失节点 (所有在路径上，但非连续ID)
     // 初始: 只有 1。 目标: 4 (路径: 1 -> 2 -> 4)
@@ -2921,7 +2880,7 @@ mod tests_authenc_funcs {
         };
 
         // 初始化加密上下文
-        let encrypt_cipher = authenc_init::<Encryption>(
+        let encrypt_cipher = authenc_init(
             TEE_OperationMode::TEE_MODE_ENCRYPT,
             &mut ht,
             Some(&mut node_image),
@@ -2939,7 +2898,7 @@ mod tests_authenc_funcs {
 
         // 4. 测试解密流程
         // 初始化解密上下文
-        let decrypt_cipher = authenc_init::<Decryption>(
+        let decrypt_cipher = authenc_init(
             TEE_OperationMode::TEE_MODE_DECRYPT,
             &mut ht,
             Some(&mut node_image),
@@ -2988,7 +2947,7 @@ mod tests_authenc_funcs {
         let mut plain = [0u8; 32];
         plain[..msg.len()].copy_from_slice(msg);
 
-        let enc = authenc_init::<Encryption>(
+        let enc = authenc_init(
             TEE_OperationMode::TEE_MODE_ENCRYPT,
             &mut ht,
             None,
@@ -3002,7 +2961,7 @@ mod tests_authenc_funcs {
 
         assert_ne!(&plain[..msg.len()], &crypt[..msg.len()]);
 
-        let dec = authenc_init::<Decryption>(
+        let dec = authenc_init(
             TEE_OperationMode::TEE_MODE_DECRYPT,
             &mut ht,
             None,
@@ -3030,7 +2989,7 @@ mod tests_authenc_funcs {
             ..Default::default()
         };
 
-        let enc = authenc_init::<Encryption>(
+        let enc = authenc_init(
             TEE_OperationMode::TEE_MODE_ENCRYPT,
             &mut ht,
             Some(&mut node_image),
@@ -3042,7 +3001,7 @@ mod tests_authenc_funcs {
         let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
         authenc_encrypt_final(enc, &mut tag, &[], &mut crypt).unwrap();
 
-        let dec = authenc_init::<Decryption>(
+        let dec = authenc_init(
             TEE_OperationMode::TEE_MODE_DECRYPT,
             &mut ht,
             Some(&mut node_image),
@@ -3068,7 +3027,7 @@ mod tests_authenc_funcs {
             ..Default::default()
         };
 
-        let enc = authenc_init::<Encryption>(
+        let enc = authenc_init(
             TEE_OperationMode::TEE_MODE_ENCRYPT,
             &mut ht,
             Some(&mut node_image),
@@ -3080,7 +3039,7 @@ mod tests_authenc_funcs {
         let mut tag = [0u8; TEE_FS_HTREE_TAG_SIZE];
         authenc_encrypt_final(enc, &mut tag, b"test", &mut crypt).unwrap();
 
-        let dec = authenc_init::<Decryption>(
+        let dec = authenc_init(
             TEE_OperationMode::TEE_MODE_DECRYPT,
             &mut ht,
             Some(&mut node_image),

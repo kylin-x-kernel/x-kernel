@@ -5,6 +5,8 @@
 use alloc::vec;
 
 use khal::time::{TimeValue, wall_time};
+use osvm::MemError;
+use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{
     TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OVERFLOW, TEE_ERROR_TIME_NOT_SET, TEE_UUID, TeeTime,
 };
@@ -12,8 +14,14 @@ use tee_raw_sys::{
 use crate::tee::{
     TeeResult,
     tee_session::{with_tee_session_ctx, with_tee_session_ctx_mut},
-    user_access::{copy_from_user_struct, copy_to_user_struct},
 };
+
+fn map_user_mem_error(err: MemError) -> u32 {
+    match err {
+        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
+        _ => tee_raw_sys::TEE_ERROR_GENERIC,
+    }
+}
 
 pub fn tee_time_get_sys_time() -> khal::time::TimeValue {
     wall_time()
@@ -23,7 +31,7 @@ fn tee_time_get_ree_time() -> khal::time::TimeValue {
 }
 
 /// Get the current time from the specified time category
-pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
+pub fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult {
     // Get current session context
     let uuid = with_tee_session_ctx(|ctx| Ok(ctx.clnt_id.uuid))?;
 
@@ -54,10 +62,9 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
 
     // Handle time retrieval result
     match time_result {
-        Ok(time_value) => {
-            // Use copy_to_user_struct to copy time to user space
-            copy_to_user_struct(teetime, &time_value)
-        }
+        Ok(time_value) => UserPtr::<TeeTime>::from(teetime)
+            .write_vm(time_value)
+            .map_err(map_user_mem_error),
         Err(e) if e == TEE_ERROR_OVERFLOW => {
             // Copy data even on overflow
             let time_value = tee_time_get_sys_time();
@@ -65,7 +72,9 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
                 seconds: time_value.as_secs() as u32,
                 millis: time_value.subsec_millis(),
             };
-            copy_to_user_struct(teetime, &fallback_time)?;
+            UserPtr::<TeeTime>::from(teetime)
+                .write_vm(fallback_time)
+                .map_err(map_user_mem_error)?;
             Err(TEE_ERROR_OVERFLOW)
         }
         Err(e) => Err(e),
@@ -73,13 +82,10 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: &mut TeeTime) -> TeeResult {
 }
 
 /// Set the TA-specific time offset
-pub fn sys_tee_scn_set_ta_time(mytime: &TeeTime) -> TeeResult {
-    // Copy time data from user space to kernel space
-    let mut t: TeeTime = TeeTime {
-        seconds: 0,
-        millis: 0,
-    };
-    copy_from_user_struct(&mut t, mytime)?;
+pub fn sys_tee_scn_set_ta_time(mytime: *const TeeTime) -> TeeResult {
+    let t = UserConstPtr::<TeeTime>::from(mytime)
+        .read_vm()
+        .map_err(map_user_mem_error)?;
 
     // Get current session context and set TA time
     with_tee_session_ctx_mut(|ctx| tee_time_set_ta_time(&ctx.clnt_id.uuid, &t))?;

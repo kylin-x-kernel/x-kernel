@@ -2,23 +2,26 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, format, sync::Arc};
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
 use core::{default::Default, fmt, fmt::Debug};
 
 use ksync::Mutex;
-use mbedtls::{
-    bignum::Mpi,
-    cipher::raw::{Cipher, CipherId, CipherMode, CipherPadding, Operation},
-    ecp::EcPoint,
-    error::{Error as MbedError, HiError, LoError},
-    hash::{Hmac, Md, Type as MdType},
-    pk::{
-        EcGroup, EcGroupId, Pk, RsaPadding, RsaPrivateComponents, RsaPublicComponents,
-        Type as PkType,
+use tee_crypto::{
+    asymmetric::EccCurve,
+    hash::{Digest, DigestBytes, HashAlgorithm, Sha1, Sha224, Sha256, Sha384, Sha512, Sm3},
+    mac::{
+        Aes128Cmac, Aes192Cmac, Aes256Cmac, Des3Cmac, HmacMd5, HmacSha1, HmacSha224, HmacSha256,
+        HmacSha384, HmacSha512, HmacSm3, Mac, Sm4Cmac,
     },
-};
-use mbedtls_sys_auto::{
-    ERR_SM2_ALLOC_FAILED, ERR_SM2_BAD_INPUT_DATA, ERR_SM2_BAD_SIGNATURE, mpi_write_binary,
+    material::{
+        CiphertextAlgorithm, CiphertextBytes, SignatureAlgorithm, SignatureBytes, SignatureEncoding,
+    },
+    md5::Md5,
+    streaming_cipher::{Direction, PaddingMode, StreamingCipherAlgo, StreamingCipherCtx},
+    tee_ops::{
+        ecc::{self as ecc_ops, EccHashAlgo},
+        rsa::{self as rsa_ops, RsaEncPadding, RsaHashAlgo, RsaSignPadding},
+    },
 };
 use tee_raw_sys::*;
 
@@ -26,34 +29,219 @@ use crate::tee::{
     TEE_ALG_DES3_CMAC, TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5, TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5,
     TeeResult,
     crypto::{
-        aes_xts::{
-            TeeCipherXtsCtx, aes_xts_final_buffered, aes_xts_init, aes_xts_update_buffered,
-            cipher_uses_aes_xts_kernel,
-        },
-        authenc::{
-            TeeAuthencCtx, cipher_gcm_set_nonce, cipher_uses_authenc_aad_buffer,
-            cipher_uses_ccm_payload_buffer, cipher_uses_gcm_payload_buffer,
-        },
+        bignum::{BigNum, crypto_bignum_allocate},
         crypto_impl::{
             EccAlgoKeyPair, EccComKeyPair, EccKeypair, Sm2DsaKeyPair, Sm2KepKeyPair, Sm2PkeKeyPair,
-            crypto_ecc_keypair_ops, crypto_ecc_keypair_ops_generate,
+            crypto_ecc_keypair_ops_generate,
         },
-        ecc::{ecdsa_sign_raw, ecdsa_verify_raw, sm2_sign_digest_raw, sm2_verify_digest_raw},
-        rsa::{
-            check_pk_sign_output, check_rsa_cipher_output, map_pk_op_err, resolve_rsaes_mgf_algo,
-            rsa_nopad_decrypt, rsa_nopad_encrypt, rsaes_decrypt, rsaes_oaep_check_mgf,
-        },
-    },
-    libmbedtls::{
-        bignum::{BigNum, crypto_bignum_allocate, crypto_bignum_num_bits},
-        ecc::{EcdOps, Sm2DsaOps, Sm2KepOps, Sm2PkeOps},
     },
     rng_software::TeeSoftwareRng,
     tee_api_defines_extensions::TEE_ALG_SM4_XTS,
     tee_obj::{tee_obj_get, tee_obj_id_type},
     tee_svc_cryp::{CryptoAttrRef, TeeCryptObj, tee_cryp_obj_secret_wrapper, tee_crypto_ops},
-    tee_svc_cryp2::{CipherPaddingMode, CrypCtx, CrypState, TeeCipherCtx, TeeCrypState},
+    tee_svc_cryp2::{
+        CipherPaddingMode, CmacContext, CrypCtx, CrypState, HashContext, HmacContext, TeeCrypState,
+    },
 };
+
+/// Asymmetric context storing raw key components and algorithm metadata.
+/// Replaces mbedtls Pk for RSA/ECC operations.
+#[derive(Clone)]
+pub(crate) enum AsymmetricCtx {
+    /// RSA public key (n, e)
+    RsaPublic { n: Vec<u8>, e: Vec<u8> },
+    /// RSA private key (n, e, d, p, q)
+    RsaPrivate {
+        n: Vec<u8>,
+        e: Vec<u8>,
+        d: Vec<u8>,
+        p: Vec<u8>,
+        q: Vec<u8>,
+    },
+    /// ECC public key (x, y) on a specific curve
+    EccPublic {
+        curve: EccCurve,
+        x: Vec<u8>,
+        y: Vec<u8>,
+    },
+    /// ECC private key (secret scalar) on a specific curve
+    EccPrivate { curve: EccCurve, secret: Vec<u8> },
+}
+
+/// Helper: extract big-endian bytes from a BigNum (minimal width, no leading zeros).
+fn bn_to_bytes(bn: &BigNum) -> Vec<u8> {
+    bn.to_bytes().unwrap_or_default()
+}
+
+fn ecc_curve_field_byte_len(curve: EccCurve) -> usize {
+    match curve {
+        EccCurve::P192 => 24,
+        EccCurve::P224 => 28,
+        EccCurve::P256 => 32,
+        EccCurve::P384 => 48,
+        EccCurve::P521 => 66,
+        EccCurve::Sm2 => 32,
+    }
+}
+
+/// Big-endian field element bytes fixed to the curve's coordinate/scalar width.
+fn bn_to_ecc_field_bytes(bn: &BigNum, field_len: usize) -> Vec<u8> {
+    let bytes = bn_to_bytes(bn);
+    if bytes.len() >= field_len {
+        bytes[bytes.len() - field_len..].to_vec()
+    } else {
+        let mut out = alloc::vec![0u8; field_len];
+        out[field_len - bytes.len()..].copy_from_slice(&bytes);
+        out
+    }
+}
+
+fn bignum_is_present(bn: &BigNum) -> bool {
+    bn.bit_length() > 0
+}
+
+fn rsa_bn_to_secret_bytes(bn: &BigNum) -> Vec<u8> {
+    if bignum_is_present(bn) {
+        bn_to_bytes(bn)
+    } else {
+        Vec::new()
+    }
+}
+
+fn check_rsa_modulus_output(mod_size: usize, output_len: usize, required: &mut usize) -> TeeResult {
+    *required = mod_size;
+    if output_len < mod_size {
+        Err(TEE_ERROR_SHORT_BUFFER)
+    } else {
+        Ok(())
+    }
+}
+
+fn ecc_max_signature_len(curve: EccCurve, algo: u32) -> usize {
+    if algo == TEE_ALG_SM2_DSA_SM3 {
+        return 64;
+    }
+    match curve {
+        EccCurve::P192 => 48,
+        EccCurve::P224 => 56,
+        EccCurve::P256 => 72,
+        EccCurve::P384 => 104,
+        EccCurve::P521 => 139,
+        EccCurve::Sm2 => 64,
+    }
+}
+
+fn ecc_raw_signature_len(curve: EccCurve) -> usize {
+    match curve {
+        EccCurve::P192 => 48,
+        EccCurve::P224 => 56,
+        EccCurve::P256 => 64,
+        EccCurve::P384 => 96,
+        EccCurve::P521 => 132,
+        EccCurve::Sm2 => 64,
+    }
+}
+
+/// Helper: map TEE algorithm to RsaHashAlgo.
+fn algo_to_rsa_hash(algo: u32) -> RsaHashAlgo {
+    match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5 => RsaHashAlgo::Md5,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1 => RsaHashAlgo::Sha1,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224 => RsaHashAlgo::Sha224,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA256
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256 => RsaHashAlgo::Sha256,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA384
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384 => RsaHashAlgo::Sha384,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA512
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512
+        | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => RsaHashAlgo::Sha512,
+        _ => RsaHashAlgo::Sha256,
+    }
+}
+
+fn rsa_hash_to_hash_algorithm(hash_algo: RsaHashAlgo) -> HashAlgorithm {
+    match hash_algo {
+        RsaHashAlgo::Md5 => HashAlgorithm::Md5,
+        RsaHashAlgo::Sha1 => HashAlgorithm::Sha1,
+        RsaHashAlgo::Sha224 => HashAlgorithm::Sha224,
+        RsaHashAlgo::Sha256 => HashAlgorithm::Sha256,
+        RsaHashAlgo::Sha384 => HashAlgorithm::Sha384,
+        RsaHashAlgo::Sha512 => HashAlgorithm::Sha512,
+    }
+}
+
+fn ecc_hash_to_hash_algorithm(hash_algo: EccHashAlgo) -> HashAlgorithm {
+    match hash_algo {
+        EccHashAlgo::Sha1 => HashAlgorithm::Sha1,
+        EccHashAlgo::Sha224 => HashAlgorithm::Sha224,
+        EccHashAlgo::Sha256 => HashAlgorithm::Sha256,
+        EccHashAlgo::Sha384 => HashAlgorithm::Sha384,
+        EccHashAlgo::Sha512 => HashAlgorithm::Sha512,
+        EccHashAlgo::Sm3 => HashAlgorithm::Sm3,
+    }
+}
+
+fn rsa_digest_from_tee(hash_algo: RsaHashAlgo, digest: &[u8]) -> DigestBytes {
+    DigestBytes::new(digest.to_vec(), rsa_hash_to_hash_algorithm(hash_algo))
+}
+
+fn ecc_digest_from_tee(hash_algo: EccHashAlgo, digest: &[u8]) -> DigestBytes {
+    DigestBytes::new(digest.to_vec(), ecc_hash_to_hash_algorithm(hash_algo))
+}
+
+fn signature_from_tee(
+    signature: &[u8],
+    algorithm: SignatureAlgorithm,
+    encoding: SignatureEncoding,
+) -> SignatureBytes {
+    SignatureBytes::new(signature.to_vec(), algorithm, encoding)
+}
+
+fn ciphertext_from_tee(ciphertext: &[u8], algorithm: CiphertextAlgorithm) -> CiphertextBytes {
+    CiphertextBytes::new(ciphertext.to_vec(), algorithm)
+}
+
+/// Helper: map TEE algorithm to RsaSignPadding.
+fn algo_to_sign_padding(algo: u32) -> RsaSignPadding {
+    match algo {
+        TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
+        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => RsaSignPadding::Pss,
+        _ => RsaSignPadding::Pkcs1v15,
+    }
+}
+
+/// Helper: map TEE algorithm to RsaEncPadding.
+fn algo_to_enc_padding(algo: u32) -> RsaEncPadding {
+    match algo {
+        TEE_ALG_RSAES_PKCS1_V1_5 => RsaEncPadding::Pkcs1v15,
+        _ => RsaEncPadding::Oaep,
+    }
+}
+
+/// Helper: map TEE curve constant to EccCurve.
+fn tee_curve_to_ecc_curve(curve: u32) -> TeeResult<EccCurve> {
+    match curve {
+        TEE_ECC_CURVE_NIST_P192 => Ok(EccCurve::P192),
+        TEE_ECC_CURVE_NIST_P224 => Ok(EccCurve::P224),
+        TEE_ECC_CURVE_NIST_P256 => Ok(EccCurve::P256),
+        TEE_ECC_CURVE_NIST_P384 => Ok(EccCurve::P384),
+        TEE_ECC_CURVE_NIST_P521 => Ok(EccCurve::P521),
+        TEE_ECC_CURVE_SM2 => Ok(EccCurve::Sm2),
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ecc_public_key {
@@ -116,22 +304,13 @@ impl tee_crypto_ops for ecc_keypair {
     fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
         let mut curve = 0;
 
-        let _ops: Box<dyn crypto_ecc_keypair_ops> = match key_type {
-            TEE_TYPE_ECDSA_KEYPAIR | TEE_TYPE_ECDH_KEYPAIR => Box::new(EcdOps),
-            TEE_TYPE_SM2_DSA_KEYPAIR => {
+        match key_type {
+            TEE_TYPE_ECDSA_KEYPAIR | TEE_TYPE_ECDH_KEYPAIR => {}
+            TEE_TYPE_SM2_DSA_KEYPAIR | TEE_TYPE_SM2_PKE_KEYPAIR | TEE_TYPE_SM2_KEP_KEYPAIR => {
                 curve = TEE_ECC_CURVE_SM2;
-                Box::new(Sm2DsaOps)
-            }
-            TEE_TYPE_SM2_PKE_KEYPAIR => {
-                curve = TEE_ECC_CURVE_SM2;
-                Box::new(Sm2PkeOps)
-            }
-            TEE_TYPE_SM2_KEP_KEYPAIR => {
-                curve = TEE_ECC_CURVE_SM2;
-                Box::new(Sm2KepOps)
             }
             _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
-        };
+        }
 
         Ok(ecc_keypair {
             d: crypto_bignum_allocate(key_size_bits)?,
@@ -311,32 +490,36 @@ pub(crate) fn crypto_hash_copy_state(ctx: &mut dyn CryptoHashCtx, src_ctx: &dyn 
     ctx.copy_state(src_ctx);
 }
 
-fn hash_md_type_from_algo(algo: u32) -> TeeResult<MdType> {
+fn hash_algo_supported(algo: u32) -> TeeResult {
     match algo {
-        TEE_ALG_MD5 => Ok(MdType::Md5),
-        TEE_ALG_SHA1 => Ok(MdType::Sha1),
-        TEE_ALG_SHA224 => Ok(MdType::Sha224),
-        TEE_ALG_SHA256 => Ok(MdType::Sha256),
-        TEE_ALG_SHA384 => Ok(MdType::Sha384),
-        TEE_ALG_SHA512 => Ok(MdType::Sha512),
-        TEE_ALG_SM3 => Ok(MdType::SM3),
+        TEE_ALG_MD5 | TEE_ALG_SHA1 | TEE_ALG_SHA224 | TEE_ALG_SHA256 | TEE_ALG_SHA384
+        | TEE_ALG_SHA512 | TEE_ALG_SM3 => Ok(()),
         _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
     }
 }
 
-/// OP-TEE `crypto_hash_alloc_ctx`: allocate hash context at state alloc time.
+/// OP-TEE `crypto_hash_alloc_ctx`: allocate hash context placeholder at state alloc time.
+/// The actual hash context is created in `crypto_hash_init`.
 pub(crate) fn crypto_hash_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
-    let md_type = hash_md_type_from_algo(algo)?;
-    Md::new(md_type)
-        .map(CrypCtx::HashCtx)
-        .map_err(|_| TEE_ERROR_NOT_SUPPORTED)
+    hash_algo_supported(algo)?;
+    Ok(CrypCtx::Others)
 }
 
 pub(crate) fn crypto_hash_init(cs: Arc<Mutex<TeeCrypState>>) -> TeeResult {
     let mut cs_guard = cs.lock();
-    let md_type = hash_md_type_from_algo(cs_guard.algo)?;
-    let md = Md::new(md_type).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    cs_guard.ctx = CrypCtx::HashCtx(md);
+    let algo = cs_guard.algo;
+    hash_algo_supported(algo)?;
+    let hash_ctx = match algo {
+        TEE_ALG_MD5 => HashContext::Md5(Md5::new()),
+        TEE_ALG_SHA1 => HashContext::Sha1(Sha1::new()),
+        TEE_ALG_SHA224 => HashContext::Sha224(Sha224::new()),
+        TEE_ALG_SHA256 => HashContext::Sha256(Sha256::new()),
+        TEE_ALG_SHA384 => HashContext::Sha384(Sha384::new()),
+        TEE_ALG_SHA512 => HashContext::Sha512(Sha512::new()),
+        TEE_ALG_SM3 => HashContext::Sm3(Sm3::new()),
+        _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
+    };
+    cs_guard.ctx = CrypCtx::HashCtx(hash_ctx);
     cs_guard.state = CrypState::Initialized;
     Ok(())
 }
@@ -345,24 +528,95 @@ pub(crate) fn crypto_hash_update(cs: Arc<Mutex<TeeCrypState>>, data: &[u8]) -> T
     let mut cs_guard = cs.lock();
 
     match &mut cs_guard.ctx {
-        CrypCtx::HashCtx(md) => md.update(data).map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        CrypCtx::HashCtx(HashContext::Md5(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HashCtx(HashContext::Sha1(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HashCtx(HashContext::Sha224(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HashCtx(HashContext::Sha256(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HashCtx(HashContext::Sha384(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HashCtx(HashContext::Sha512(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HashCtx(HashContext::Sm3(h)) => {
+            h.update(data);
+            Ok(())
+        }
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 
 pub(crate) fn crypto_hash_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -> TeeResult<usize> {
-    let mut cs_guard = cs.lock();
+    let cs_guard = cs.lock();
 
-    let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Others);
-
-    if let CrypCtx::HashCtx(md) = ctx {
-        // OP-TEE: keep a clone so TEE_DigestExtract / TEE_CopyOperation can re-finalize.
-        let state = md.clone();
-        let len = md.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        cs_guard.ctx = CrypCtx::HashCtx(state);
-        Ok(len)
-    } else {
-        Err(TEE_ERROR_BAD_PARAMETERS)
+    // Clone the live hash state and finalize the clone so callers that need
+    // digest-extract semantics (OP-TEE `TEE_DigestExtract` → `TEE_CopyOperation`)
+    // can still copy/continue the operation after `final`.
+    match &cs_guard.ctx {
+        CrypCtx::HashCtx(HashContext::Md5(h)) => {
+            let digest = h.clone().finalize();
+            let digest = digest.as_bytes();
+            let len = digest.len().min(hash.len());
+            hash[..len].copy_from_slice(&digest[..len]);
+            Ok(len)
+        }
+        CrypCtx::HashCtx(HashContext::Sha1(h)) => {
+            let digest = h.clone().finalize();
+            let digest = digest.as_bytes();
+            let len = digest.len().min(hash.len());
+            hash[..len].copy_from_slice(&digest[..len]);
+            Ok(len)
+        }
+        CrypCtx::HashCtx(HashContext::Sha224(h)) => {
+            let digest = h.clone().finalize();
+            let digest = digest.as_bytes();
+            let len = digest.len().min(hash.len());
+            hash[..len].copy_from_slice(&digest[..len]);
+            Ok(len)
+        }
+        CrypCtx::HashCtx(HashContext::Sha256(h)) => {
+            let digest = h.clone().finalize();
+            let digest = digest.as_bytes();
+            let len = digest.len().min(hash.len());
+            hash[..len].copy_from_slice(&digest[..len]);
+            Ok(len)
+        }
+        CrypCtx::HashCtx(HashContext::Sha384(h)) => {
+            let digest = h.clone().finalize();
+            let digest = digest.as_bytes();
+            let len = digest.len().min(hash.len());
+            hash[..len].copy_from_slice(&digest[..len]);
+            Ok(len)
+        }
+        CrypCtx::HashCtx(HashContext::Sha512(h)) => {
+            let digest = h.clone().finalize();
+            let digest = digest.as_bytes();
+            let len = digest.len().min(hash.len());
+            hash[..len].copy_from_slice(&digest[..len]);
+            Ok(len)
+        }
+        CrypCtx::HashCtx(HashContext::Sm3(h)) => {
+            let digest = h.clone().finalize();
+            let digest = digest.as_bytes();
+            let len = digest.len().min(hash.len());
+            hash[..len].copy_from_slice(&digest[..len]);
+            Ok(len)
+        }
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 
@@ -442,51 +696,13 @@ pub(crate) trait CryptoMacCtx {
     fn copy_state(&mut self, ctx: &dyn CryptoMacCtx);
 }
 
-fn cmac_cipher_id_from_algo(algo: u32) -> TeeResult<CipherId> {
-    match algo {
-        TEE_ALG_AES_CMAC => Ok(CipherId::Aes),
-        TEE_ALG_DES3_CMAC => Ok(CipherId::Des3),
-        TEE_ALG_SM4_CMAC => Ok(CipherId::SM4),
-        _ => Err(TEE_ERROR_NOT_SUPPORTED),
-    }
-}
-
-/// Default key length for `cipher_setup` at alloc (OP-TEE `crypto_cmac_alloc_ctx`).
-fn cmac_default_key_bit_len(algo: u32) -> TeeResult<u32> {
-    match algo {
-        TEE_ALG_AES_CMAC => Ok(128),
-        TEE_ALG_DES3_CMAC => Ok(192),
-        TEE_ALG_SM4_CMAC => Ok(128),
-        _ => Err(TEE_ERROR_NOT_SUPPORTED),
-    }
-}
-
-/// OP-TEE `crypto_mac_alloc_ctx`: allocate MAC operation context without the secret key.
+/// OP-TEE `crypto_mac_alloc_ctx`: allocate MAC context placeholder at state alloc time.
+/// The actual MAC context is created in `crypto_mac_init`.
 pub(crate) fn crypto_mac_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
     match algo {
         TEE_ALG_HMAC_MD5 | TEE_ALG_HMAC_SHA1 | TEE_ALG_HMAC_SHA224 | TEE_ALG_HMAC_SHA256
-        | TEE_ALG_HMAC_SHA384 | TEE_ALG_HMAC_SHA512 | TEE_ALG_HMAC_SM3 => {
-            let md_type = match algo {
-                TEE_ALG_HMAC_MD5 => MdType::Md5,
-                TEE_ALG_HMAC_SHA1 => MdType::Sha1,
-                TEE_ALG_HMAC_SHA224 => MdType::Sha224,
-                TEE_ALG_HMAC_SHA256 => MdType::Sha256,
-                TEE_ALG_HMAC_SHA384 => MdType::Sha384,
-                TEE_ALG_HMAC_SHA512 => MdType::Sha512,
-                TEE_ALG_HMAC_SM3 => MdType::SM3,
-                _ => return Err(TEE_ERROR_NOT_SUPPORTED),
-            };
-            Hmac::setup(md_type)
-                .map(CrypCtx::HmacCtx)
-                .map_err(|_| TEE_ERROR_NOT_SUPPORTED)
-        }
-        TEE_ALG_AES_CMAC | TEE_ALG_DES3_CMAC | TEE_ALG_SM4_CMAC => {
-            let cipher_id = cmac_cipher_id_from_algo(algo)?;
-            let key_bit_len = cmac_default_key_bit_len(algo)?;
-            Cipher::setup_for_cmac(cipher_id, key_bit_len)
-                .map(CrypCtx::CmacCtx)
-                .map_err(|_| TEE_ERROR_NOT_SUPPORTED)
-        }
+        | TEE_ALG_HMAC_SHA384 | TEE_ALG_HMAC_SHA512 | TEE_ALG_HMAC_SM3 | TEE_ALG_AES_CMAC
+        | TEE_ALG_DES3_CMAC | TEE_ALG_SM4_CMAC => Ok(CrypCtx::Others),
         _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
 }
@@ -494,18 +710,84 @@ pub(crate) fn crypto_mac_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
 pub(crate) fn crypto_mac_init(cs: Arc<Mutex<TeeCrypState>>, key: &[u8]) -> TeeResult {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    match &mut cs_guard.ctx {
-        CrypCtx::HmacCtx(hmac) => hmac.starts(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
-        CrypCtx::CmacCtx(cipher) => {
-            let cipher_id = cmac_cipher_id_from_algo(algo)?;
-            cipher
-                .cmac_init(cipher_id, key)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    match algo {
+        TEE_ALG_HMAC_MD5 => {
+            let hmac = HmacMd5::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(HmacContext::HmacMd5(hmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
         }
-        _ => return Err(TEE_ERROR_BAD_STATE),
+        TEE_ALG_HMAC_SHA1 => {
+            let hmac = HmacSha1::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(HmacContext::HmacSha1(hmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_HMAC_SHA224 => {
+            let hmac = HmacSha224::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(HmacContext::HmacSha224(hmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_HMAC_SHA256 => {
+            let hmac = HmacSha256::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(HmacContext::HmacSha256(hmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_HMAC_SHA512 => {
+            let hmac = HmacSha512::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(HmacContext::HmacSha512(hmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_HMAC_SHA384 => {
+            let hmac = HmacSha384::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(HmacContext::HmacSha384(hmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_HMAC_SM3 => {
+            let hmac = HmacSm3::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::HmacCtx(HmacContext::HmacSm3(hmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_AES_CMAC => {
+            let cmac = match key.len() {
+                16 => Aes128Cmac::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
+                24 => {
+                    let c = Aes192Cmac::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                    cs_guard.ctx = CrypCtx::CmacCtx(CmacContext::Aes192(c));
+                    cs_guard.state = CrypState::Initialized;
+                    return Ok(());
+                }
+                32 => {
+                    let c = Aes256Cmac::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                    cs_guard.ctx = CrypCtx::CmacCtx(CmacContext::Aes256(c));
+                    cs_guard.state = CrypState::Initialized;
+                    return Ok(());
+                }
+                _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+            };
+            cs_guard.ctx = CrypCtx::CmacCtx(CmacContext::Aes128(cmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_DES3_CMAC => {
+            let cmac = Des3Cmac::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::CmacCtx(CmacContext::Des3(cmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        TEE_ALG_SM4_CMAC => {
+            let cmac = Sm4Cmac::new(key).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            cs_guard.ctx = CrypCtx::CmacCtx(CmacContext::Sm4(cmac));
+            cs_guard.state = CrypState::Initialized;
+            Ok(())
+        }
+        _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
     }
-    cs_guard.state = CrypState::Initialized;
-    Ok(())
 }
 
 // Crypto MAC update
@@ -513,34 +795,137 @@ pub(crate) fn crypto_mac_update(cs: Arc<Mutex<TeeCrypState>>, data: &[u8]) -> Te
     let mut guard = cs.lock();
 
     match &mut guard.ctx {
-        CrypCtx::HmacCtx(hmac) => hmac.update(data).map_err(|_| TEE_ERROR_BAD_PARAMETERS),
-        CrypCtx::CmacCtx(cipher) => cipher
-            .cmac_update(data)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
+        CrypCtx::HmacCtx(HmacContext::HmacMd5(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha1(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha224(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha256(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha384(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha512(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSm3(h)) => {
+            h.update(data);
+            Ok(())
+        }
+        CrypCtx::CmacCtx(CmacContext::Aes128(c)) => {
+            c.update(data);
+            Ok(())
+        }
+        CrypCtx::CmacCtx(CmacContext::Aes192(c)) => {
+            c.update(data);
+            Ok(())
+        }
+        CrypCtx::CmacCtx(CmacContext::Aes256(c)) => {
+            c.update(data);
+            Ok(())
+        }
+        CrypCtx::CmacCtx(CmacContext::Sm4(c)) => {
+            c.update(data);
+            Ok(())
+        }
+        CrypCtx::CmacCtx(CmacContext::Des3(c)) => {
+            c.update(data);
+            Ok(())
+        }
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 
 // Crypto MAC finalization
 pub(crate) fn crypto_mac_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -> TeeResult<usize> {
-    let mut cs_guard = cs.lock();
+    let cs_guard = cs.lock();
 
-    let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Others);
-
-    match ctx {
-        CrypCtx::HmacCtx(hmac) => {
-            let state = hmac.clone();
-            let len = hmac.finish(hash).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            cs_guard.ctx = CrypCtx::HmacCtx(state);
+    // Clone the live MAC state and finalize the clone so callers that need
+    // digest-extract semantics (OP-TEE `TEE_DigestExtract` → `TEE_CopyOperation`)
+    // can still copy/continue the operation after `final`.
+    match &cs_guard.ctx {
+        CrypCtx::HmacCtx(HmacContext::HmacMd5(h)) => {
+            let tag = h.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
             Ok(len)
         }
-        CrypCtx::CmacCtx(mut cipher) => {
-            let block_size = cipher.block_size();
-            cipher
-                .cmac_finish(hash)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            cs_guard.ctx = CrypCtx::CmacCtx(cipher);
-            Ok(block_size)
+        CrypCtx::HmacCtx(HmacContext::HmacSha1(h)) => {
+            let tag = h.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha224(h)) => {
+            let tag = h.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha256(h)) => {
+            let tag = h.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha384(h)) => {
+            let tag = h.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSha512(h)) => {
+            let tag = h.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::HmacCtx(HmacContext::HmacSm3(h)) => {
+            let tag = h.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::CmacCtx(CmacContext::Aes128(c)) => {
+            let tag = c.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::CmacCtx(CmacContext::Aes192(c)) => {
+            let tag = c.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::CmacCtx(CmacContext::Aes256(c)) => {
+            let tag = c.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::CmacCtx(CmacContext::Sm4(c)) => {
+            let tag = c.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
+        }
+        CrypCtx::CmacCtx(CmacContext::Des3(c)) => {
+            let tag = c.clone().finalize();
+            let len = tag.len().min(hash.len());
+            hash[..len].copy_from_slice(&tag[..len]);
+            Ok(len)
         }
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
@@ -558,31 +943,6 @@ pub(crate) fn crypto_mac_copy_state(ctx: &mut dyn CryptoMacCtx, src_ctx: &dyn Cr
     ctx.copy_state(src_ctx)
 }
 
-const DES3_KEY_LEN_2KEY: usize = 16;
-const DES3_KEY_LEN_3KEY: usize = 24;
-
-/// OP-TEE `mbedtls_des3_set2key_*` / `set3key_*`: 2-key 用 DES-EDE（`cipher_info` base id 为 DES），
-/// 3-key 用 DES-EDE3（base id 为 3DES）。`cipher_info_from_values(3DES, 128, …)` 选不到 2-key。
-fn cipher_setup_for_key(
-    cipher_id: CipherId,
-    cipher_mode: CipherMode,
-    key: &[u8],
-) -> Result<Cipher, u32> {
-    if cipher_id == CipherId::Des3 {
-        match key.len() {
-            DES3_KEY_LEN_2KEY => {
-                Cipher::setup(CipherId::Des, cipher_mode, 128).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
-            }
-            DES3_KEY_LEN_3KEY => Cipher::setup(CipherId::Des3, cipher_mode, 192)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS),
-            _ => Err(TEE_ERROR_BAD_PARAMETERS),
-        }
-    } else {
-        Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as u32)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
-    }
-}
-
 pub(crate) fn crypto_cipher_init(
     cs: Arc<Mutex<TeeCrypState>>,
     key: &[u8],
@@ -593,265 +953,91 @@ pub(crate) fn crypto_cipher_init(
     let algo = cs_guard.algo;
     let mode = cs_guard.mode;
 
-    let mut cipher_id = CipherId::None;
-    let mut cipher_mode = CipherMode::None;
-    let mut cipher_op = Operation::None;
-
-    let cipher_padding = match padding_mode {
-        CipherPaddingMode::None => CipherPadding::None,
-        CipherPaddingMode::Pkcs7 => CipherPadding::Pkcs7,
-        CipherPaddingMode::Zeros => CipherPadding::Zeros,
-        CipherPaddingMode::AnsiX923 => CipherPadding::AnsiX923,
-        CipherPaddingMode::IsoIec78164 => CipherPadding::IsoIec78164,
+    let direction = match mode {
+        TEE_OperationMode::TEE_MODE_ENCRYPT => Direction::Encrypt,
+        TEE_OperationMode::TEE_MODE_DECRYPT => Direction::Decrypt,
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
     };
 
-    match mode {
-        TEE_OperationMode::TEE_MODE_ENCRYPT => cipher_op = Operation::Encrypt,
-        TEE_OperationMode::TEE_MODE_DECRYPT => cipher_op = Operation::Decrypt,
-        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
-    }
+    let padding = match padding_mode {
+        CipherPaddingMode::None => PaddingMode::None,
+        CipherPaddingMode::Pkcs7 => PaddingMode::Pkcs7,
+        _ => PaddingMode::None,
+    };
 
-    match algo {
-        TEE_ALG_AES_ECB_NOPAD => {
-            cipher_id = CipherId::Aes;
-            cipher_mode = CipherMode::ECB;
+    // 2-key DES3 (K1+K2) expands to 3-key (K1+K2+K1); the underlying cipher
+    // implementation always wants 24 bytes. Reject anything that's not 16 or 24.
+    let des3_key_storage;
+    let key = if matches!(algo, TEE_ALG_DES3_ECB_NOPAD | TEE_ALG_DES3_CBC_NOPAD) {
+        match key.len() {
+            16 => {
+                let mut expanded = Vec::with_capacity(24);
+                expanded.extend_from_slice(&key[..8]);
+                expanded.extend_from_slice(&key[8..]);
+                expanded.extend_from_slice(&key[..8]);
+                des3_key_storage = expanded;
+                des3_key_storage.as_slice()
+            }
+            24 => key,
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
         }
-        TEE_ALG_AES_CBC_NOPAD => {
-            cipher_id = CipherId::Aes;
-            cipher_mode = CipherMode::CBC;
-        }
-        TEE_ALG_AES_CTR => {
-            cipher_id = CipherId::Aes;
-            cipher_mode = CipherMode::CTR;
-        }
+    } else {
+        key
+    };
+
+    let cipher_algo = match algo {
+        TEE_ALG_AES_ECB_NOPAD => StreamingCipherAlgo::Aes128Ecb,
+        TEE_ALG_AES_CBC_NOPAD => match key.len() {
+            16 => StreamingCipherAlgo::Aes128Cbc,
+            32 => StreamingCipherAlgo::Aes256Cbc,
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        },
+        TEE_ALG_AES_CTR => match key.len() {
+            16 => StreamingCipherAlgo::Aes128Ctr,
+            32 => StreamingCipherAlgo::Aes256Ctr,
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        },
         TEE_ALG_AES_XTS => {
-            cipher_id = CipherId::Aes;
-            cipher_mode = CipherMode::XTS;
+            let decrypt = matches!(direction, Direction::Decrypt);
+            let xts_state = crate::tee::crypto::aes_xts::aes_xts_init(key, iv, decrypt)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            let xts_ctx = crate::tee::crypto::aes_xts::TeeCipherXtsCtx::new(xts_state);
+            cs_guard.state = CrypState::Initialized;
+            cs_guard.ctx = CrypCtx::XtsCtx(xts_ctx);
+            return Ok(());
         }
-        TEE_ALG_DES_ECB_NOPAD => {
-            cipher_id = CipherId::Des;
-            cipher_mode = CipherMode::ECB;
-        }
-        TEE_ALG_DES3_ECB_NOPAD => {
-            cipher_id = CipherId::Des3;
-            cipher_mode = CipherMode::ECB;
-            if key.len() != DES3_KEY_LEN_2KEY && key.len() != DES3_KEY_LEN_3KEY {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-        }
-        TEE_ALG_DES_CBC_NOPAD => {
-            cipher_id = CipherId::Des;
-            cipher_mode = CipherMode::CBC;
-        }
-        TEE_ALG_DES3_CBC_NOPAD => {
-            cipher_id = CipherId::Des3;
-            cipher_mode = CipherMode::CBC;
-            if key.len() != DES3_KEY_LEN_2KEY && key.len() != DES3_KEY_LEN_3KEY {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-        }
-        TEE_ALG_SM4_ECB_NOPAD => {
-            cipher_id = CipherId::SM4;
-            cipher_mode = CipherMode::ECB;
-        }
-        TEE_ALG_SM4_CBC_NOPAD => {
-            cipher_id = CipherId::SM4;
-            cipher_mode = CipherMode::CBC;
-        }
-        TEE_ALG_SM4_CTR => {
-            cipher_id = CipherId::SM4;
-            cipher_mode = CipherMode::CTR;
-        }
+        TEE_ALG_DES_ECB_NOPAD => StreamingCipherAlgo::DesEcb,
+        TEE_ALG_DES3_ECB_NOPAD => StreamingCipherAlgo::Des3Ecb,
+        TEE_ALG_DES_CBC_NOPAD => StreamingCipherAlgo::DesCbc,
+        TEE_ALG_DES3_CBC_NOPAD => StreamingCipherAlgo::Des3Cbc,
+        TEE_ALG_SM4_ECB_NOPAD => StreamingCipherAlgo::Sm4Ecb,
+        TEE_ALG_SM4_CBC_NOPAD => StreamingCipherAlgo::Sm4Cbc,
+        TEE_ALG_SM4_CTR => StreamingCipherAlgo::Sm4Ctr,
         TEE_ALG_SM4_XTS => {
-            cipher_id = CipherId::SM4;
-            cipher_mode = CipherMode::XTS;
+            return Err(TEE_ERROR_NOT_IMPLEMENTED);
         }
         _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
-    }
-
-    let mut cipher = cipher_setup_for_key(cipher_id, cipher_mode, key)?;
-    cipher
-        .set_key(cipher_op, key)
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    if let Some(iv) = iv {
-        cipher.set_iv(iv).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    }
-    // Padding mode may be unsupported for some algorithms; OP-TEE ignores the return value.
-    let _ = cipher.set_padding(cipher_padding);
-    cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
-    let xts = if cipher_uses_aes_xts_kernel(algo) {
-        let decrypt = matches!(mode, TEE_OperationMode::TEE_MODE_DECRYPT);
-        Some(TeeCipherXtsCtx::new(aes_xts_init(key, iv, decrypt)?))
-    } else {
-        None
     };
 
+    let iv_bytes = iv.unwrap_or(&[]);
+    let ctx = StreamingCipherCtx::new(cipher_algo, key, iv_bytes, direction, padding)
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
     cs_guard.state = CrypState::Initialized;
-    cs_guard.ctx = CrypCtx::CipherCtx(Box::new(TeeCipherCtx {
-        cipher,
-        pending: [0; TeeCipherCtx::PENDING_MAX],
-        pending_len: 0,
-        xts,
-        authenc: None,
-    }));
+    cs_guard.ctx = CrypCtx::CipherCtx(ctx);
     Ok(())
 }
 
-fn tee_cipher_ctx_flush_authenc_aad(op: &mut TeeCipherCtx) -> TeeResult {
-    let Some(authenc) = &mut op.authenc else {
-        return Ok(());
-    };
-    authenc.enter_payload_phase(&mut op.cipher)
-}
-
-fn tee_cipher_ctx_replay_key(
-    cs: &TeeCrypState,
-    op: &TeeCipherCtx,
-) -> TeeResult<Option<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)>> {
-    let Some(authenc) = &op.authenc else {
-        return Ok(None);
-    };
-    let key = cryp_state_symmetric_key(cs)?;
-    let aad = authenc.aad_bytes().to_vec();
-    Ok(Some((key, aad)))
-}
-
-/// Copy cipher operation state for `TEE_CopyOperation` / `tee_cryp_state_copy`.
-///
-/// CCM/GCM payload uses replay buffers; cloning `Cipher` shares broken mbedtls multipart state.
-/// Only `authenc` buffers are cloned; dst gets a fresh standby `Cipher`.
-pub(crate) fn crypto_cipher_ctx_copy_from(
-    cs: &TeeCrypState,
-    src: &TeeCipherCtx,
-) -> TeeResult<TeeCipherCtx> {
-    let cipher = if let Some(authenc) = &src.authenc {
-        let key = cryp_state_symmetric_key(cs)?;
-        authenc.fresh_standby_cipher(cs.algo, &key)?
-    } else {
-        src.cipher.clone()
-    };
-    Ok(TeeCipherCtx {
-        cipher,
-        pending: src.pending,
-        pending_len: src.pending_len,
-        xts: src.xts.clone(),
-        authenc: src.authenc.clone(),
-    })
-}
-
-fn cryp_state_symmetric_key(cs: &TeeCrypState) -> TeeResult<alloc::vec::Vec<u8>> {
-    let key1 = cs.key1.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
-    let obj = tee_obj_get(key1 as tee_obj_id_type)?;
-    let guard = obj.lock();
-    if guard.attr.is_empty() {
-        return Err(TEE_ERROR_BAD_STATE);
-    }
-    let TeeCryptObj::obj_secret(secret) = &guard.attr[0] else {
-        return Err(TEE_ERROR_BAD_STATE);
-    };
-    Ok(secret.key().to_vec())
-}
-
-fn cipher_uses_ecb_pending(algo: u32) -> bool {
-    matches!(
-        algo,
-        TEE_ALG_AES_ECB_NOPAD
-            | TEE_ALG_DES_ECB_NOPAD
-            | TEE_ALG_DES3_ECB_NOPAD
-            | TEE_ALG_SM4_ECB_NOPAD
-    )
-}
-
+/// Compute the maximum output length for a cipher update operation.
 pub(crate) fn crypto_cipher_max_output_len(
     cs: Arc<Mutex<TeeCrypState>>,
     input_len: usize,
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
-    let CrypCtx::CipherCtx(op) = &cs_guard.ctx else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
-    };
-    let block_size = op.cipher.block_size();
-    let block_buffered = cipher_uses_ecb_pending(cs_guard.algo) || op.xts.is_some();
-    let max_out = if block_buffered {
-        (op.pending_len + input_len) / block_size * block_size
-    } else if op.authenc.is_some() {
-        // CCM/GCM replay returns only the new chunk (`input_len` bytes).
-        input_len
-    } else if cipher_uses_authenc_aad_buffer(cs_guard.algo) {
-        // GCM: match mbedtls `Cipher::update` slack (`in_len + block_size`).
-        input_len.saturating_add(block_size)
-    } else {
-        input_len + block_size
-    };
-    Ok(max_out)
-}
-
-fn cipher_ecb_buffered_update(
-    cipher: &mut Cipher,
-    pending: &mut [u8; TeeCipherCtx::PENDING_MAX],
-    pending_len: &mut usize,
-    block_size: usize,
-    input: &[u8],
-    output: &mut [u8],
-) -> TeeResult<usize> {
-    if block_size == 0 || block_size > TeeCipherCtx::PENDING_MAX {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+    match &cs_guard.ctx {
+        CrypCtx::CipherCtx(ctx) => Ok(ctx.max_update_output_len(input_len)),
+        CrypCtx::XtsCtx(xts) => Ok(xts.max_update_output_len(input_len)),
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
-
-    let mut written = 0usize;
-    let mut in_pos = 0usize;
-
-    loop {
-        if *pending_len > 0 {
-            if in_pos >= input.len() {
-                break;
-            }
-            let need = block_size - *pending_len;
-            let take = core::cmp::min(need, input.len() - in_pos);
-            pending[*pending_len..*pending_len + take]
-                .copy_from_slice(&input[in_pos..in_pos + take]);
-            *pending_len += take;
-            in_pos += take;
-
-            if *pending_len == block_size {
-                if output.len() < written + block_size {
-                    return Err(TEE_ERROR_SHORT_BUFFER);
-                }
-                written += cipher
-                    .update(
-                        &pending[..block_size],
-                        &mut output[written..written + block_size],
-                    )
-                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-                *pending_len = 0;
-            }
-            continue;
-        }
-
-        if in_pos + block_size <= input.len() {
-            if output.len() < written + block_size {
-                return Err(TEE_ERROR_SHORT_BUFFER);
-            }
-            written += cipher
-                .update(
-                    &input[in_pos..in_pos + block_size],
-                    &mut output[written..written + block_size],
-                )
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            in_pos += block_size;
-        } else {
-            break;
-        }
-    }
-
-    let remainder = input.len() - in_pos;
-    if remainder > 0 {
-        pending[..remainder].copy_from_slice(&input[in_pos..]);
-        *pending_len = remainder;
-    }
-
-    Ok(written)
 }
 
 pub(crate) fn crypto_cipher_update(
@@ -860,48 +1046,18 @@ pub(crate) fn crypto_cipher_update(
     output: &mut [u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let algo = cs_guard.algo;
-    let replay_key = match &cs_guard.ctx {
-        CrypCtx::CipherCtx(op) => tee_cipher_ctx_replay_key(&cs_guard, op)?,
-        _ => None,
-    };
-    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
-        if cipher_uses_authenc_aad_buffer(algo) {
-            tee_cipher_ctx_flush_authenc_aad(op)?;
+    match &mut cs_guard.ctx {
+        CrypCtx::CipherCtx(ctx) => {
+            let result = ctx.update(input).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            let len = result.len().min(output.len());
+            output[..len].copy_from_slice(&result[..len]);
+            Ok(len)
         }
-        if let Some((key, _aad)) = replay_key {
-            let authenc = op.authenc.as_mut().unwrap();
-            return authenc.update_payload(algo, &key, input, output);
+        CrypCtx::XtsCtx(xts) => {
+            let written = xts.cipher_update(input, output)?;
+            Ok(written)
         }
-        if let Some(xts) = &mut op.xts {
-            let stream = xts.stream();
-            let n = aes_xts_update_buffered(
-                &mut xts.state,
-                &mut op.pending,
-                &mut op.pending_len,
-                input,
-                output,
-                &stream,
-            )?;
-            xts.after_update(input.len(), n);
-            Ok(n)
-        } else if cipher_uses_ecb_pending(algo) {
-            let block_size = op.cipher.block_size();
-            cipher_ecb_buffered_update(
-                &mut op.cipher,
-                &mut op.pending,
-                &mut op.pending_len,
-                block_size,
-                input,
-                output,
-            )
-        } else {
-            op.cipher
-                .update(input, output)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
-        }
-    } else {
-        Err(TEE_ERROR_BAD_PARAMETERS)
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
 }
 
@@ -910,36 +1066,39 @@ pub(crate) fn crypto_cipher_final(
     output: &mut [u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let algo = cs_guard.algo;
-    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
-        if let Some(xts) = &mut op.xts {
-            let stream = xts.final_stream();
-            let (n, patch) = aes_xts_final_buffered(
-                &mut xts.state,
-                &mut op.pending,
-                &mut op.pending_len,
-                &[],
-                output,
-                &stream,
-            )?;
-            if let Some(pb) = patch {
-                xts.record_patch_from_final(pb, output);
-            }
-            xts.emitted_bytes += n;
-            Ok(n)
-        } else {
-            if cipher_uses_ecb_pending(algo) && op.pending_len != 0 {
-                return Err(TEE_ERROR_BAD_PARAMETERS);
-            }
-            op.cipher
-                .finish(output)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    match &mut cs_guard.ctx {
+        CrypCtx::CipherCtx(ctx) => {
+            let result = ctx.r#final().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            let len = result.len().min(output.len());
+            output[..len].copy_from_slice(&result[..len]);
+            Ok(len)
         }
+        CrypCtx::XtsCtx(xts) => {
+            let written = xts.cipher_final(&[], output)?;
+            Ok(written)
+        }
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
+    }
+}
+
+/// XTS-specific final entry: consumes any trailing `input` plus flushes pending bytes
+/// within a single `in_final_syscall=true` scope so ciphertext-stealing tweak handling
+/// matches the OP-TEE single-shot reference.
+pub(crate) fn crypto_xts_cipher_final(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+) -> TeeResult<usize> {
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::XtsCtx(xts) = &mut cs_guard.ctx {
+        xts.cipher_final(input, output)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
+/// mbedtls不支持CCM模式的流式加密
+/// 暂不支持CCM模式
 pub(crate) fn crypto_authenc_init(
     cs: Arc<Mutex<TeeCrypState>>,
     key: &[u8],
@@ -952,95 +1111,58 @@ pub(crate) fn crypto_authenc_init(
     let algo = cs_guard.algo;
     let mode = cs_guard.mode;
 
-    let mut cipher_id = CipherId::None;
-    let mut cipher_mode = CipherMode::None;
-    let mut cipher_op = Operation::None;
-
-    match mode {
-        TEE_OperationMode::TEE_MODE_ENCRYPT => cipher_op = Operation::Encrypt,
-        TEE_OperationMode::TEE_MODE_DECRYPT => cipher_op = Operation::Decrypt,
+    let direction = match mode {
+        TEE_OperationMode::TEE_MODE_ENCRYPT => Direction::Encrypt,
+        TEE_OperationMode::TEE_MODE_DECRYPT => Direction::Decrypt,
         _ => return Err(TEE_ERROR_BAD_PARAMETERS),
-    }
+    };
 
-    match algo {
-        TEE_ALG_AES_GCM => {
-            cipher_id = CipherId::Aes;
-            cipher_mode = CipherMode::GCM;
-        }
-        TEE_ALG_SM4_GCM => {
-            cipher_id = CipherId::SM4;
-            cipher_mode = CipherMode::GCM;
-        }
-        TEE_ALG_AES_CCM => {
-            cipher_id = CipherId::Aes;
-            cipher_mode = CipherMode::CCM;
-        }
+    let aead_algo = match algo {
+        TEE_ALG_AES_GCM => match key.len() {
+            16 => StreamingCipherAlgo::Aes128Gcm,
+            24 => StreamingCipherAlgo::Aes192Gcm,
+            32 => StreamingCipherAlgo::Aes256Gcm,
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        },
+        TEE_ALG_SM4_GCM => StreamingCipherAlgo::Sm4Gcm,
+        TEE_ALG_AES_CCM => match key.len() {
+            16 => StreamingCipherAlgo::Aes128Ccm,
+            32 => StreamingCipherAlgo::Aes256Ccm,
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        },
         TEE_ALG_SM4_CCM => {
-            cipher_id = CipherId::SM4;
-            cipher_mode = CipherMode::CCM;
+            return Err(TEE_ERROR_NOT_IMPLEMENTED);
         }
         _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
-    }
+    };
 
-    if let Ok(mut cipher) = Cipher::setup(cipher_id, cipher_mode, (key.len() * 8) as _) {
-        cipher
-            .set_key(cipher_op, key)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        if cipher_uses_gcm_payload_buffer(algo) {
-            cipher_gcm_set_nonce(&mut cipher, nonce)?;
-        } else {
-            cipher.set_iv(nonce).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-            cipher.reset().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let tl = tag_len.unwrap_or(16);
+    let ctx = StreamingCipherCtx::new_aead(aead_algo, key, nonce, direction, tl)
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    cs_guard.state = CrypState::Initialized;
+    cs_guard.ctx = CrypCtx::CipherCtx(ctx);
+    Ok(())
+}
+
+pub(crate) fn crypto_authenc_update_aad(cs: Arc<Mutex<TeeCrypState>>, aad: &[u8]) -> TeeResult {
+    let mut cs_guard = cs.lock();
+    if let CrypCtx::CipherCtx(ctx) = &mut cs_guard.ctx {
+        if ctx.payload_started() {
+            return Err(TEE_ERROR_BAD_PARAMETERS);
         }
-        if cipher_mode == CipherMode::CCM {
-            let payload_len = payload_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
-            let aad_len = aad_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
-            let tag_len = tag_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
-            cipher
-                .starts_ccm(payload_len, aad_len, tag_len)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        }
-        let authenc = if cipher_uses_ccm_payload_buffer(algo) {
-            let payload_len = payload_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
-            let aad_len = aad_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
-            let tag_len = tag_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
-            Some(TeeAuthencCtx::new_ccm(
-                algo,
-                nonce,
-                payload_len,
-                aad_len,
-                tag_len,
-                mode,
-            ))
-        } else if cipher_uses_gcm_payload_buffer(algo) {
-            Some(TeeAuthencCtx::new_gcm(algo, nonce, mode))
-        } else {
-            None
-        };
-        cs_guard.state = CrypState::Initialized;
-        cs_guard.ctx = CrypCtx::CipherCtx(Box::new(TeeCipherCtx {
-            cipher,
-            pending: [0; TeeCipherCtx::PENDING_MAX],
-            pending_len: 0,
-            xts: None,
-            authenc,
-        }));
+        ctx.update_aad(aad);
         Ok(())
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
-pub(crate) fn crypto_authenc_update_aad(cs: Arc<Mutex<TeeCrypState>>, aad: &[u8]) -> TeeResult {
-    let mut cs_guard = cs.lock();
-    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
-        let Some(authenc) = &mut op.authenc else {
-            return Err(TEE_ERROR_BAD_PARAMETERS);
-        };
-        authenc.append_aad(aad)
-    } else {
-        Err(TEE_ERROR_BAD_PARAMETERS)
-    }
+pub(crate) fn crypto_authenc_update_payload(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input: &[u8],
+    output: &mut [u8],
+) -> TeeResult<usize> {
+    crypto_cipher_update(cs, input, output)
 }
 
 pub(crate) fn crypto_authenc_enc_final(
@@ -1050,29 +1172,18 @@ pub(crate) fn crypto_authenc_enc_final(
     tag: &mut [u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let algo = cs_guard.algo;
-    let replay_key = match &cs_guard.ctx {
-        CrypCtx::CipherCtx(op) => tee_cipher_ctx_replay_key(&cs_guard, op)?,
-        _ => None,
-    };
-    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
-        tee_cipher_ctx_flush_authenc_aad(op)?;
-        if let Some((key, _aad)) = replay_key {
-            let authenc = op.authenc.as_mut().unwrap();
-            return authenc.enc_final(algo, &key, input, output, tag);
-        }
-        let mut res: usize = 0;
-        if let Some(input) = input {
-            res = op
-                .cipher
-                .update(input, output)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        }
-        op.cipher
-            .write_tag(tag)
+    let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
+    if let CrypCtx::CipherCtx(ctx) = ctx {
+        let (ct, tag_val) = ctx
+            .encrypt_final_with_input(input)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        Ok(res)
+        let ct_len = ct.len().min(output.len());
+        output[..ct_len].copy_from_slice(&ct[..ct_len]);
+        let tag_len = tag_val.len().min(tag.len());
+        tag[..tag_len].copy_from_slice(&tag_val[..tag_len]);
+        Ok(ct_len)
     } else {
+        cs_guard.ctx = ctx; // put back
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
@@ -1084,73 +1195,21 @@ pub(crate) fn crypto_authenc_dec_final(
     tag: &[u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
-    let algo = cs_guard.algo;
-    let replay_key = match &cs_guard.ctx {
-        CrypCtx::CipherCtx(op) => tee_cipher_ctx_replay_key(&cs_guard, op)?,
-        _ => None,
-    };
-    if let CrypCtx::CipherCtx(op) = &mut cs_guard.ctx {
-        tee_cipher_ctx_flush_authenc_aad(op)?;
-        if let Some((key, _aad)) = replay_key {
-            let authenc = op.authenc.as_mut().unwrap();
-            return authenc.dec_final(algo, &key, input, output, tag);
-        }
-        let mut res: usize = 0;
-        if let Some(input) = input {
-            res = op
-                .cipher
-                .update(input, output)
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        }
-        op.cipher
-            .check_tag(tag)
-            .map_err(|_| TEE_ERROR_MAC_INVALID)?;
-        Ok(res)
+    let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
+    if let CrypCtx::CipherCtx(ctx) = ctx {
+        let pt = ctx
+            .decrypt_final_with_input(input, tag)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let pt_len = pt.len().min(output.len());
+        output[..pt_len].copy_from_slice(&pt[..pt_len]);
+        Ok(pt_len)
     } else {
+        cs_guard.ctx = ctx; // put back
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
-fn bignum_is_present(bn: &BigNum) -> bool {
-    matches!(crypto_bignum_num_bits(bn), Ok(bits) if bits > 0)
-}
-
-fn pk_from_rsa_public(n: &Mpi, e: &Mpi) -> TeeResult<Pk> {
-    let rsa = RsaPublicComponents { n, e };
-    Pk::public_from_rsa_components(rsa).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
-}
-
-fn pk_from_rsa_keypair_private(rsa_key: &rsa_keypair) -> TeeResult<Pk> {
-    let rsa = if bignum_is_present(&rsa_key.p) && bignum_is_present(&rsa_key.q) {
-        RsaPrivateComponents::WithPrimes {
-            p: rsa_key.p.as_mpi(),
-            q: rsa_key.q.as_mpi(),
-            e: rsa_key.e.as_mpi(),
-        }
-    } else {
-        RsaPrivateComponents::WithPrivateExponent {
-            n: rsa_key.n.as_mpi(),
-            d: rsa_key.d.as_mpi(),
-            e: rsa_key.e.as_mpi(),
-        }
-    };
-    Pk::private_from_rsa_components(rsa).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
-}
-
-fn pk_from_ecc_public(x: &BigNum, y: &BigNum, curve: u32, pk_type: PkType) -> TeeResult<Pk> {
-    let public_point = EcPoint::from_components(x.clone().into_mpi(), y.clone().into_mpi())
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    let curve_id = get_curve_id(curve)?;
-    let ec_group = EcGroup::new(curve_id).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    Pk::public_from_ec_components_extend(ec_group, public_point, pk_type.into())
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
-}
-
-pub(crate) fn crypto_rsa_init(
-    cs: Arc<Mutex<TeeCrypState>>,
-    padding_mode: RsaPadding,
-    mode: TEE_OperationMode,
-) -> TeeResult {
+pub(crate) fn crypto_rsa_init(cs: Arc<Mutex<TeeCrypState>>, mode: TEE_OperationMode) -> TeeResult {
     let mut cs_guard = cs.lock();
     let key1 = cs_guard.key1;
 
@@ -1162,30 +1221,32 @@ pub(crate) fn crypto_rsa_init(
             return Err(TEE_ERROR_BAD_STATE);
         }
 
-        let mut pk = match mode {
+        match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_VERIFY => {
-                match &obj_key1_guard.attr[0] {
-                    TeeCryptObj::rsa_public_key(rsa_key) => {
-                        pk_from_rsa_public(rsa_key.n.as_mpi(), rsa_key.e.as_mpi())?
-                    }
-                    TeeCryptObj::rsa_keypair(rsa_key) => {
-                        pk_from_rsa_public(rsa_key.n.as_mpi(), rsa_key.e.as_mpi())?
-                    }
-                    _ => return Err(TEE_ERROR_BAD_STATE),
+                if let TeeCryptObj::rsa_public_key(rsa_key) = &obj_key1_guard.attr[0] {
+                    cs_guard.ctx = CrypCtx::AsyCtx(AsymmetricCtx::RsaPublic {
+                        n: bn_to_bytes(&rsa_key.n),
+                        e: bn_to_bytes(&rsa_key.e),
+                    });
+                } else {
+                    return Err(TEE_ERROR_BAD_STATE);
                 }
             }
             TEE_OperationMode::TEE_MODE_DECRYPT | TEE_OperationMode::TEE_MODE_SIGN => {
-                let TeeCryptObj::rsa_keypair(rsa_key) = &obj_key1_guard.attr[0] else {
+                if let TeeCryptObj::rsa_keypair(rsa_key) = &obj_key1_guard.attr[0] {
+                    cs_guard.ctx = CrypCtx::AsyCtx(AsymmetricCtx::RsaPrivate {
+                        n: bn_to_bytes(&rsa_key.n),
+                        e: bn_to_bytes(&rsa_key.e),
+                        d: rsa_bn_to_secret_bytes(&rsa_key.d),
+                        p: rsa_bn_to_secret_bytes(&rsa_key.p),
+                        q: rsa_bn_to_secret_bytes(&rsa_key.q),
+                    });
+                } else {
                     return Err(TEE_ERROR_BAD_STATE);
-                };
-                pk_from_rsa_keypair_private(rsa_key)?
+                }
             }
             _ => return Err(TEE_ERROR_BAD_PARAMETERS),
-        };
-        pk.set_options(mbedtls::pk::Options::Rsa {
-            padding: padding_mode,
-        });
-        cs_guard.ctx = CrypCtx::AsyCtx(pk);
+        }
     } else {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     };
@@ -1199,8 +1260,22 @@ pub(crate) fn crypto_acipher_rsanopad_encrypt(
     required: &mut usize,
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
-    if let CrypCtx::AsyCtx(pk) = &cs_guard.ctx {
-        rsa_nopad_encrypt(pk, input, output, required)
+    if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPublic { n, e }) = &cs_guard.ctx {
+        let mod_size = n.len();
+        if mod_size == 0 || input.len() > mod_size {
+            return Err(TEE_ERROR_BAD_PARAMETERS);
+        }
+        let pubkey =
+            rsa_ops::rsa_public_from_components(n, e).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let mut scratch = vec![0u8; mod_size];
+        let out_len = rsa_ops::rsa_nopad_encrypt(&pubkey, input, &mut scratch)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        *required = out_len;
+        if output.len() < out_len {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
+        output[..out_len].copy_from_slice(&scratch[..out_len]);
+        Ok(out_len)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -1212,29 +1287,29 @@ pub(crate) fn crypto_acipher_rsanopad_decrypt(
     output: &mut [u8],
     required: &mut usize,
 ) -> TeeResult<usize> {
-    let mut cs_guard = cs.lock();
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
-        rsa_nopad_decrypt(pk, input, output, required)
+    let cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPrivate { n, e, d, p, q }) = &cs_guard.ctx {
+        let mod_size = n.len();
+        if mod_size == 0 || input.len() > mod_size {
+            return Err(TEE_ERROR_BAD_PARAMETERS);
+        }
+        let keypair = rsa_ops::rsa_key_from_components(n, e, d, p, q)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let mut scratch = vec![0u8; mod_size];
+        let out_len = rsa_ops::rsa_nopad_decrypt(&keypair, input, &mut scratch)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        *required = out_len;
+        if output.len() < out_len {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
+        output[..out_len].copy_from_slice(&scratch[..out_len]);
+        Ok(out_len)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
-fn get_curve_id(curve: u32) -> TeeResult<EcGroupId> {
-    match curve {
-        TEE_CRYPTO_ELEMENT_NONE => Ok(EcGroupId::None),
-        TEE_ECC_CURVE_NIST_P192 => Ok(EcGroupId::SecP192R1),
-        TEE_ECC_CURVE_NIST_P224 => Ok(EcGroupId::SecP224R1),
-        TEE_ECC_CURVE_NIST_P256 => Ok(EcGroupId::SecP256R1),
-        TEE_ECC_CURVE_NIST_P384 => Ok(EcGroupId::SecP384R1),
-        TEE_ECC_CURVE_NIST_P521 => Ok(EcGroupId::SecP521R1),
-        TEE_ECC_CURVE_25519 => Ok(EcGroupId::Curve25519),
-        TEE_ECC_CURVE_SM2 => Ok(EcGroupId::SM2P256R1),
-        _ => Err(TEE_ERROR_NOT_SUPPORTED),
-    }
-}
-
-pub(crate) fn crypto_ecc_init(cs: Arc<Mutex<TeeCrypState>>, pk_type: PkType) -> TeeResult {
+pub(crate) fn crypto_ecc_init(cs: Arc<Mutex<TeeCrypState>>, is_sm2: bool) -> TeeResult {
     let mut cs_guard = cs.lock();
     let key1 = cs_guard.key1;
     let mode = cs_guard.mode;
@@ -1247,36 +1322,42 @@ pub(crate) fn crypto_ecc_init(cs: Arc<Mutex<TeeCrypState>>, pk_type: PkType) -> 
             return Err(TEE_ERROR_BAD_STATE);
         }
 
-        let pk = match mode {
+        match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_VERIFY => {
-                match &obj_key1_guard.attr[0] {
-                    TeeCryptObj::ecc_public_key(ecc_key) => {
-                        pk_from_ecc_public(&ecc_key.x, &ecc_key.y, ecc_key.curve, pk_type)?
-                    }
-                    TeeCryptObj::ecc_keypair(ecc_key) => {
-                        pk_from_ecc_public(&ecc_key.x, &ecc_key.y, ecc_key.curve, pk_type)?
-                    }
-                    _ => return Err(TEE_ERROR_BAD_STATE),
+                if let TeeCryptObj::ecc_public_key(ecc_key) = &obj_key1_guard.attr[0] {
+                    let curve = if is_sm2 {
+                        EccCurve::Sm2
+                    } else {
+                        tee_curve_to_ecc_curve(ecc_key.curve)?
+                    };
+                    let field_len = ecc_curve_field_byte_len(curve);
+                    cs_guard.ctx = CrypCtx::AsyCtx(AsymmetricCtx::EccPublic {
+                        curve,
+                        x: bn_to_ecc_field_bytes(&ecc_key.x, field_len),
+                        y: bn_to_ecc_field_bytes(&ecc_key.y, field_len),
+                    });
+                } else {
+                    return Err(TEE_ERROR_BAD_STATE);
                 }
             }
             TEE_OperationMode::TEE_MODE_DECRYPT | TEE_OperationMode::TEE_MODE_SIGN => {
-                let TeeCryptObj::ecc_keypair(ecc_key) = &obj_key1_guard.attr[0] else {
+                if let TeeCryptObj::ecc_keypair(ecc_key) = &obj_key1_guard.attr[0] {
+                    let curve = if is_sm2 {
+                        EccCurve::Sm2
+                    } else {
+                        tee_curve_to_ecc_curve(ecc_key.curve)?
+                    };
+                    let field_len = ecc_curve_field_byte_len(curve);
+                    cs_guard.ctx = CrypCtx::AsyCtx(AsymmetricCtx::EccPrivate {
+                        curve,
+                        secret: bn_to_ecc_field_bytes(&ecc_key.d, field_len),
+                    });
+                } else {
                     return Err(TEE_ERROR_BAD_STATE);
-                };
-                let curve_id = get_curve_id(ecc_key.curve)?;
-                let ec_group = EcGroup::new(curve_id).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-                Pk::private_from_ec_components_extend(
-                    ec_group,
-                    ecc_key.d.clone().into_mpi(),
-                    pk_type.into(),
-                )
-                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+                }
             }
             _ => return Err(TEE_ERROR_BAD_PARAMETERS),
-        };
-        cs_guard.ctx = CrypCtx::AsyCtx(pk);
-    } else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+        }
     }
     Ok(())
 }
@@ -1286,11 +1367,15 @@ pub(crate) fn crypto_acipher_sm2_pke_encrypt(
     input: &[u8],
     output: &mut [u8],
 ) -> TeeResult<usize> {
-    let mut cs_guard = cs.lock();
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+    let cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(AsymmetricCtx::EccPublic { x, y, .. }) = &cs_guard.ctx {
         let mut rng = TeeSoftwareRng::new();
-        pk.encrypt_extend(input, output, &mut rng, Some(MdType::SM3 as _))
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+        let ct = tee_crypto::sm2::sm2_pke_encrypt(x, y, input, &mut rng)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let ct = ct.as_bytes();
+        let len = ct.len().min(output.len());
+        output[..len].copy_from_slice(&ct[..len]);
+        Ok(len)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -1301,11 +1386,15 @@ pub(crate) fn crypto_acipher_sm2_pke_decrypt(
     input: &[u8],
     output: &mut [u8],
 ) -> TeeResult<usize> {
-    let mut cs_guard = cs.lock();
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
-        let mut rng = TeeSoftwareRng::new();
-        pk.decrypt_extend(input, output, &mut rng, Some(MdType::SM3 as _))
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    let cs_guard = cs.lock();
+    if let CrypCtx::AsyCtx(AsymmetricCtx::EccPrivate { secret, .. }) = &cs_guard.ctx {
+        let ciphertext = ciphertext_from_tee(input, CiphertextAlgorithm::Sm2Pke);
+        let pt = tee_crypto::sm2::sm2_pke_decrypt(secret, &ciphertext)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let pt = pt.expose_secret();
+        let len = pt.len().min(output.len());
+        output[..len].copy_from_slice(&pt[..len]);
+        Ok(len)
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -1315,38 +1404,29 @@ pub(crate) fn crypto_acipher_rsaes_encrypt(
     cs: Arc<Mutex<TeeCrypState>>,
     input: &[u8],
     output: &mut [u8],
-    label: &[u8],
-    mgf_algo: Option<u32>,
+    _label: &[u8],
     required: &mut usize,
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    let mgf_algo = resolve_rsaes_mgf_algo(algo, mgf_algo);
-    rsaes_oaep_check_mgf(algo, mgf_algo)?;
-    let CrypCtx::AsyCtx(pk) = &cs_guard.ctx else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
-    };
-    check_rsa_cipher_output(pk, output.len(), required)?;
-    drop(cs_guard);
 
-    let mut cs_guard = cs.lock();
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+    if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPublic { n, e }) = &cs_guard.ctx {
+        check_rsa_modulus_output(n.len(), output.len(), required)?;
         let mut rng = TeeSoftwareRng::new();
-
-        match algo {
-            TEE_ALG_RSAES_PKCS1_V1_5 => pk
-                .encrypt_extend(input, output, &mut rng, None)
-                .map_err(map_pk_op_err),
-            TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5
-            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA1
-            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA224
-            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256
-            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA384
-            | TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA512 => pk
-                .encrypt_with_label(input, output, &mut rng, label)
-                .map_err(map_pk_op_err),
-            _ => Err(TEE_ERROR_BAD_PARAMETERS),
-        }
+        let pubkey =
+            rsa_ops::rsa_public_from_components(n, e).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let hash_algo = algo_to_rsa_hash(algo);
+        let ct = match algo_to_enc_padding(algo) {
+            RsaEncPadding::Pkcs1v15 => rsa_ops::rsa_encrypt_pkcs1v15(&pubkey, input, &mut rng)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
+            RsaEncPadding::Oaep => {
+                rsa_ops::rsa_encrypt_oaep(&pubkey, hash_algo, _label, input, &mut rng)
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+            }
+        };
+        let ct = ct.as_bytes();
+        output[..ct.len()].copy_from_slice(ct);
+        Ok(ct.len())
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -1356,18 +1436,35 @@ pub(crate) fn crypto_acipher_rsaes_decrypt(
     cs: Arc<Mutex<TeeCrypState>>,
     input: &[u8],
     output: &mut [u8],
-    label: &[u8],
-    mgf_algo: Option<u32>,
+    _label: &[u8],
     required: &mut usize,
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    let mgf_algo = resolve_rsaes_mgf_algo(algo, mgf_algo);
-    drop(cs_guard);
 
-    let mut cs_guard = cs.lock();
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
-        rsaes_decrypt(pk, algo, mgf_algo, input, output, label, required)
+    if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPrivate { n, e, d, p, q }) = &cs_guard.ctx {
+        let keypair = rsa_ops::rsa_key_from_components(n, e, d, p, q)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let hash_algo = algo_to_rsa_hash(algo);
+        let pt = match algo_to_enc_padding(algo) {
+            RsaEncPadding::Pkcs1v15 => {
+                let ciphertext = ciphertext_from_tee(input, CiphertextAlgorithm::RsaPkcs1v15);
+                rsa_ops::rsa_decrypt_pkcs1v15(&keypair, &ciphertext)
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+            }
+            RsaEncPadding::Oaep => {
+                let ciphertext = ciphertext_from_tee(input, CiphertextAlgorithm::RsaOaep);
+                rsa_ops::rsa_decrypt_oaep(&keypair, hash_algo, _label, &ciphertext)
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
+            }
+        };
+        let pt = pt.expose_secret();
+        *required = pt.len();
+        if output.len() < pt.len() {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
+        output[..pt.len()].copy_from_slice(pt);
+        Ok(pt.len())
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -1378,31 +1475,41 @@ pub(crate) fn crypto_acipher_rsassa_sign(
     input: &[u8],
     output: &mut [u8],
     required: &mut usize,
+    pss_salt_len: Option<usize>,
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    let CrypCtx::AsyCtx(pk) = &cs_guard.ctx else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
-    };
-    check_pk_sign_output(pk, output.len(), required)?;
-    drop(cs_guard);
 
-    let md_type = match algo {
-        TEE_ALG_RSASSA_PKCS1_V1_5_MD5 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => MdType::Md5,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA1 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => MdType::Sha1,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA224 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => MdType::Sha224,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA256 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => MdType::Sha256,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA384 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => MdType::Sha384,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => MdType::Sha512,
-        _ => MdType::None,
-    };
-
-    let mut cs_guard = cs.lock();
-
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+    if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPrivate { n, e, d, p, q }) = &cs_guard.ctx {
+        check_rsa_modulus_output(n.len(), output.len(), required)?;
         let mut rng = TeeSoftwareRng::new();
-        pk.sign(md_type, input, output, &mut rng)
-            .map_err(map_pk_op_err)
+        let keypair = rsa_ops::rsa_key_from_components(n, e, d, p, q)
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let hash_algo = algo_to_rsa_hash(algo);
+        let digest = rsa_digest_from_tee(hash_algo, input);
+        let sig = match algo_to_sign_padding(algo) {
+            RsaSignPadding::Pkcs1v15 => rsa_ops::rsa_sign(
+                &keypair,
+                hash_algo,
+                RsaSignPadding::Pkcs1v15,
+                &digest,
+                &mut rng,
+                None,
+            )
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
+            RsaSignPadding::Pss => rsa_ops::rsa_sign(
+                &keypair,
+                hash_algo,
+                RsaSignPadding::Pss,
+                &digest,
+                &mut rng,
+                pss_salt_len,
+            )
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
+        };
+        let sig = sig.as_bytes();
+        output[..sig.len()].copy_from_slice(sig);
+        Ok(sig.len())
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
@@ -1415,30 +1522,52 @@ pub(crate) fn crypto_acipher_rsassa_verify(
 ) -> TeeResult {
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    drop(cs_guard);
 
-    let md_type = match algo {
-        TEE_ALG_RSASSA_PKCS1_V1_5_MD5 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => MdType::Md5,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA1 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => MdType::Sha1,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA224 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => MdType::Sha224,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA256 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => MdType::Sha256,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA384 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => MdType::Sha384,
-        TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => MdType::Sha512,
-        _ => MdType::None,
-    };
-
-    let mut cs_guard = cs.lock();
-
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
-        pk.verify(md_type, hash, signature)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+    if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPublic { n, e }) = &cs_guard.ctx {
+        let pubkey =
+            rsa_ops::rsa_public_from_components(n, e).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let hash_algo = algo_to_rsa_hash(algo);
+        let digest = rsa_digest_from_tee(hash_algo, hash);
+        match algo_to_sign_padding(algo) {
+            RsaSignPadding::Pkcs1v15 => {
+                let signature = signature_from_tee(
+                    signature,
+                    SignatureAlgorithm::RsaPkcs1v15,
+                    SignatureEncoding::Raw,
+                );
+                rsa_ops::rsa_verify(
+                    &pubkey,
+                    hash_algo,
+                    RsaSignPadding::Pkcs1v15,
+                    &digest,
+                    &signature,
+                )
+                .map_err(map_rsa_verify_err)
+            }
+            RsaSignPadding::Pss => {
+                let signature = signature_from_tee(
+                    signature,
+                    SignatureAlgorithm::RsaPss,
+                    SignatureEncoding::Raw,
+                );
+                rsa_ops::rsa_verify(&pubkey, hash_algo, RsaSignPadding::Pss, &digest, &signature)
+                    .map_err(map_rsa_verify_err)
+            }
+        }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
-/// 使用ECDSA时，传入的数据是hash值
-/// 使用SM2时，传入的数据是原始数据
+fn map_rsa_verify_err(err: tee_crypto::CryptoError) -> u32 {
+    match err {
+        tee_crypto::CryptoError::VerificationFailed | tee_crypto::CryptoError::InvalidInput => {
+            TEE_ERROR_SIGNATURE_INVALID
+        }
+        _ => TEE_ERROR_BAD_PARAMETERS,
+    }
+}
+
 pub(crate) fn crypto_acipher_ecc_sign(
     cs: Arc<Mutex<TeeCrypState>>,
     input: &[u8],
@@ -1447,108 +1576,52 @@ pub(crate) fn crypto_acipher_ecc_sign(
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    let CrypCtx::AsyCtx(pk) = &cs_guard.ctx else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
-    };
-    check_pk_sign_output(pk, output.len(), required)?;
-    drop(cs_guard);
 
-    let mut cs_guard = cs.lock();
-
-    if let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx {
+    if let CrypCtx::AsyCtx(AsymmetricCtx::EccPrivate { curve, secret }) = &cs_guard.ctx {
+        let max_len = ecc_max_signature_len(*curve, algo);
+        *required = max_len;
+        if output.len() < max_len {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
         let mut rng = TeeSoftwareRng::new();
         match algo {
             TEE_ALG_SM2_DSA_SM3 => {
-                sm2_sign_digest_raw(pk, input, output, required, &mut rng).map_err(map_pk_op_err)
+                let sig = tee_crypto::sm2::sm2_dsa_sign(secret, input, &mut rng)
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                let sig = sig.as_bytes();
+                *required = sig.len();
+                if output.len() < sig.len() {
+                    return Err(TEE_ERROR_SHORT_BUFFER);
+                }
+                output[..sig.len()].copy_from_slice(sig);
+                Ok(sig.len())
             }
-            _ => ecdsa_sign_raw(pk, input, output, required, &mut rng).map_err(map_pk_op_err),
+            _ => {
+                let hash_algo = match algo {
+                    TEE_ALG_ECDSA_SHA1 => EccHashAlgo::Sha1,
+                    TEE_ALG_ECDSA_SHA224 => EccHashAlgo::Sha224,
+                    TEE_ALG_ECDSA_SHA256 => EccHashAlgo::Sha256,
+                    TEE_ALG_ECDSA_SHA384 => EccHashAlgo::Sha384,
+                    TEE_ALG_ECDSA_SHA512 => EccHashAlgo::Sha512,
+                    _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+                };
+                let digest = ecc_digest_from_tee(hash_algo, input);
+                let sig = ecc_ops::ecc_sign(*curve, hash_algo, secret, &digest, &mut rng)
+                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                let sig = sig.as_bytes();
+                *required = sig.len();
+                if output.len() < sig.len() {
+                    return Err(TEE_ERROR_SHORT_BUFFER);
+                }
+                output[..sig.len()].copy_from_slice(sig);
+                Ok(sig.len())
+            }
         }
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
 
-/// Map high-level mbedtls verify errors to GP TEE codes.
-fn map_verify_hi(hi: HiError) -> Option<u32> {
-    match hi {
-        HiError::EcpVerifyFailed
-        | HiError::RsaVerifyFailed
-        | HiError::PkSigLenMismatch
-        | HiError::EcpSigLenMismatch => Some(TEE_ERROR_SIGNATURE_INVALID),
-        HiError::PkBadInputData
-        | HiError::EcpBadInputData
-        | HiError::PkInvalidPubkey
-        | HiError::PkInvalidAlg
-        | HiError::PkTypeMismatch
-        | HiError::PkKeyInvalidFormat
-        | HiError::EcpInvalidKey => Some(TEE_ERROR_BAD_PARAMETERS),
-        HiError::PkAllocFailed | HiError::EcpAllocFailed | HiError::MdAllocFailed => {
-            Some(TEE_ERROR_OUT_OF_MEMORY)
-        }
-        HiError::Unknown(_) => None,
-        _ => None,
-    }
-}
-
-/// Map low-level mbedtls verify errors to GP TEE codes.
-fn map_verify_lo(lo: LoError) -> Option<u32> {
-    match lo {
-        LoError::Asn1InvalidData
-        | LoError::Asn1LengthMismatch
-        | LoError::Asn1InvalidLength
-        | LoError::Asn1UnexpectedTag
-        | LoError::Asn1OutOfData => Some(TEE_ERROR_SIGNATURE_INVALID),
-        LoError::MpiAllocFailed | LoError::Asn1AllocFailed => Some(TEE_ERROR_OUT_OF_MEMORY),
-        LoError::Unknown(_) => None,
-        _ => None,
-    }
-}
-
-/// Map a raw mbedtls error code for verify paths (SM2 codes not in `HiError`, etc.).
-fn map_verify_mbedtls_code(code: i32) -> Option<u32> {
-    // `mbedtls_sm2_verify_internal` returns ERR_SM2_BAD_SIGNATURE with -1..-3 offsets.
-    if (ERR_SM2_BAD_SIGNATURE - 3..=ERR_SM2_BAD_SIGNATURE).contains(&code) {
-        return Some(TEE_ERROR_SIGNATURE_INVALID);
-    }
-
-    match code {
-        ERR_SM2_BAD_INPUT_DATA => Some(TEE_ERROR_BAD_PARAMETERS),
-        ERR_SM2_ALLOC_FAILED => Some(TEE_ERROR_OUT_OF_MEMORY),
-        _ => map_verify_hi(HiError::from(code)).or_else(|| map_verify_lo(LoError::from(code))),
-    }
-}
-
-/// Map high-level unknown codes (`HiError::Unknown` stores the positive high bits).
-fn map_verify_hi_unknown(hi_code: i32) -> Option<u32> {
-    map_verify_mbedtls_code(-hi_code)
-}
-
-/// Maps mbedtls asymmetric verify failures to GP TEE error codes.
-///
-/// Follows OP-TEE `convert_ltc_verify_status()` in `lib/libtomcrypt/acipher_helpers.h`.
-/// SM2 uses `ERR_SM2_BAD_SIGNATURE` instead of `ERR_ECP_VERIFY_FAILED`.
-fn mbedtls_verify_error_to_tee(err: MbedError) -> u32 {
-    map_verify_mbedtls_code(err.to_int())
-        .or_else(|| {
-            err.high_level().and_then(|hi| {
-                map_verify_hi(hi).or_else(|| match hi {
-                    HiError::Unknown(hi_code) => map_verify_hi_unknown(hi_code),
-                    _ => None,
-                })
-            })
-        })
-        .or_else(|| {
-            err.low_level().and_then(|lo| {
-                map_verify_lo(lo).or_else(|| match lo {
-                    LoError::Unknown(lo_code) => map_verify_mbedtls_code(-lo_code),
-                    _ => None,
-                })
-            })
-        })
-        .unwrap_or(TEE_ERROR_GENERIC)
-}
-
-/// ECDSA/SM2 DSA verify: `hash` is the digest (e.g. SM3(ZA||M) for SM2), signature is raw R||S.
 pub(crate) fn crypto_acipher_ecc_verify(
     cs: Arc<Mutex<TeeCrypState>>,
     hash: &[u8],
@@ -1556,22 +1629,44 @@ pub(crate) fn crypto_acipher_ecc_verify(
 ) -> TeeResult {
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
-    drop(cs_guard);
 
-    if hash.is_empty() || signature.is_empty() {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
+    if let CrypCtx::AsyCtx(AsymmetricCtx::EccPublic { curve, x, y }) = &cs_guard.ctx {
+        match algo {
+            TEE_ALG_SM2_DSA_SM3 => {
+                // SM2 signatures may arrive either as raw `r||s` (64B) or DER
+                // (`0x30 len ...`). OP-TEE-generated sigs are raw, but vectors
+                // copied from specs are usually DER — accept both.
+                let encoding = if signature.len() == 64 {
+                    SignatureEncoding::Raw
+                } else {
+                    SignatureEncoding::Der
+                };
+                let signature = signature_from_tee(signature, SignatureAlgorithm::Sm2Dsa, encoding);
+                tee_crypto::sm2::sm2_dsa_verify(x, y, hash, &signature).map_err(map_rsa_verify_err)
+            }
+            _ => {
+                let hash_algo = match algo {
+                    TEE_ALG_ECDSA_SHA1 => EccHashAlgo::Sha1,
+                    TEE_ALG_ECDSA_SHA224 => EccHashAlgo::Sha224,
+                    TEE_ALG_ECDSA_SHA256 => EccHashAlgo::Sha256,
+                    TEE_ALG_ECDSA_SHA384 => EccHashAlgo::Sha384,
+                    TEE_ALG_ECDSA_SHA512 => EccHashAlgo::Sha512,
+                    _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+                };
+                let digest = ecc_digest_from_tee(hash_algo, hash);
+                let raw_len = ecc_raw_signature_len(*curve);
+                let encoding = if signature.len() == raw_len {
+                    SignatureEncoding::Raw
+                } else {
+                    SignatureEncoding::Der
+                };
+                let signature =
+                    signature_from_tee(signature, SignatureAlgorithm::Ecdsa(*curve), encoding);
+                ecc_ops::ecc_verify(*curve, hash_algo, x, y, &digest, &signature)
+                    .map_err(map_rsa_verify_err)
+            }
+        }
+    } else {
+        Err(TEE_ERROR_BAD_PARAMETERS)
     }
-
-    let mut cs_guard = cs.lock();
-
-    let CrypCtx::AsyCtx(pk) = &mut cs_guard.ctx else {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
-    };
-
-    let result = match algo {
-        TEE_ALG_SM2_DSA_SM3 => sm2_verify_digest_raw(pk, hash, signature),
-        _ => ecdsa_verify_raw(pk, hash, signature),
-    };
-
-    result.map_err(mbedtls_verify_error_to_tee)
 }

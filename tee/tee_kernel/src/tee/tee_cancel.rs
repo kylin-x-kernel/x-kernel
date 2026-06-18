@@ -4,16 +4,24 @@
 
 // Cancellation syscalls implementation for TEE using session-level state
 
-use core::{ffi::c_uint, slice};
+use core::ffi::c_uint;
 
 use khal::time::wall_time;
+use osvm::MemError;
+use posix_types::UserPtr;
 use tee_raw_sys::TeeTime;
 
 use crate::tee::{
     TeeResult,
     tee_session::{TeeSessionCtx, with_tee_session_ctx, with_tee_session_ctx_mut},
-    user_access::copy_to_user,
 };
+
+fn map_user_mem_error(err: MemError) -> u32 {
+    match err {
+        MemError::InvalidAddr | MemError::NoAccess => tee_raw_sys::TEE_ERROR_BAD_PARAMETERS,
+        _ => tee_raw_sys::TEE_ERROR_GENERIC,
+    }
+}
 
 /// TEE_GetCancellationFlag
 /// Returns 1 if the session cancel flag is set and not masked, otherwise 0.
@@ -22,11 +30,9 @@ use crate::tee::{
 pub fn sys_tee_scn_get_cancellation_flag(cancel: *mut c_uint) -> TeeResult {
     let is_cancelled = with_tee_session_ctx(|ctx| Ok(tee_ta_session_is_cancelled(ctx, None)))?;
     let flag: u32 = if is_cancelled { 1 } else { 0 };
-    copy_to_user(
-        unsafe { slice::from_raw_parts_mut(cancel as _, size_of::<u32>()) },
-        &flag.to_ne_bytes(),
-        size_of::<u32>(),
-    )?;
+    UserPtr::<c_uint>::from(cancel)
+        .write_vm(flag)
+        .map_err(map_user_mem_error)?;
     Ok(())
 }
 
@@ -43,11 +49,9 @@ pub fn sys_tee_scn_unmask_cancellation(old_mask: *mut c_uint) -> TeeResult {
         Ok(prev)
     })?;
     let prev_mask: u32 = if prev { 1 } else { 0 };
-    copy_to_user(
-        unsafe { slice::from_raw_parts_mut(old_mask as _, size_of::<u32>()) },
-        &prev_mask.to_ne_bytes(),
-        size_of::<u32>(),
-    )?;
+    UserPtr::<c_uint>::from(old_mask)
+        .write_vm(prev_mask)
+        .map_err(map_user_mem_error)?;
     Ok(())
 }
 
@@ -62,11 +66,9 @@ pub fn sys_tee_scn_mask_cancellation(old_mask: *mut c_uint) -> TeeResult {
         Ok(prev)
     })?;
     let prev_mask: u32 = if prev { 1 } else { 0 };
-    copy_to_user(
-        unsafe { slice::from_raw_parts_mut(old_mask as _, size_of::<u32>()) },
-        &prev_mask.to_ne_bytes(),
-        size_of::<u32>(),
-    )?;
+    UserPtr::<c_uint>::from(old_mask)
+        .write_vm(prev_mask)
+        .map_err(map_user_mem_error)?;
     Ok(())
 }
 

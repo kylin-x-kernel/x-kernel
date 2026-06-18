@@ -100,6 +100,7 @@ def rustfmtStageName() { return 'Check: Rustfmt' }
 
 def runtimeTestArchitectures() { return ['x86_64', 'aarch64', 'riscv64'] }
 def teeTestArchitectures() { return ['x86_64', 'aarch64'] }
+def teeTestBinaries() { return ['storage_test', 'cryp_test'] }
 
 def ciSequentialStages() {
     return [
@@ -128,7 +129,7 @@ def ciParallelStages() {
 
     teeTestArchitectures().each { arch ->
         stages << [
-            name: "TEE Storage: ${arch}",
+            name: "TEE Tests: ${arch}",
             failure: 'TEE 测试失败',
             type: 'tee',
             arch: arch,
@@ -893,18 +894,20 @@ def targetTripleFor(String archOrPlatform) {
 }
 
 def runTeeStorageTest(String arch) {
-    def stageName = "TEE Storage: ${arch}"
+    def stageName = "TEE Tests: ${arch}"
     initStageLog(stageName)
-    def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '']
+    def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '', missingApps: []]
     def teeTargetDir = "/xkernel-target/tee-${arch}"
     def teeHostfwdPort = teePortFor(arch)
     def teeVsockCid = teeVsockCidFor(arch)
+    def testBins = teeTestBinaries()
 
     withCleanSourceWorkspace("tee-test-${arch}") { stageWorkspace ->
         withEnv(["TARGET_DIR=${teeTargetDir}",
                  "HOSTFWD_PORT=${teeHostfwdPort}",
-                 "VSOCK_CID=${teeVsockCid}"]) {
-            sh label: "Run TEE storage test ${arch}", script: """#!/bin/bash
+                 "VSOCK_CID=${teeVsockCid}",
+                 "TEE_TEST_BINS=${testBins.join(' ')}"]) {
+            sh label: "Run TEE tests ${arch}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 scripts/ci/run_tee_storage_test.sh '${arch}'
@@ -914,6 +917,9 @@ scripts/ci/run_tee_storage_test.sh '${arch}'
         def logText = readFile("${stageWorkspace}/tee-test-output.log")
         result.passed = logText.split('<<< test success', -1).length - 1
         result.failed = logText.split('<<< test failed', -1).length - 1
+        result.missingApps = testBins.findAll { app ->
+            !logText.contains("tee_init: /tee/${app} exited with exit status: 0")
+        }
 
         if (logText.contains('TEE_RESULT: TIMEOUT')) {
             result.status = 'timeout'
@@ -927,6 +933,9 @@ scripts/ci/run_tee_storage_test.sh '${arch}'
         } else if (result.failed > 0) {
             result.status = 'failed'
             result.errorSnippet = extractSnippet(logText, '<<< test failed', 5)
+        } else if (!result.missingApps.isEmpty()) {
+            result.status = 'incomplete'
+            result.errorSnippet = "以下 TEE 测试未成功退出: ${result.missingApps.join(', ')}"
         } else if (result.passed > 0) {
             result.status = 'passed'
         } else {
@@ -935,7 +944,7 @@ scripts/ci/run_tee_storage_test.sh '${arch}'
         }
 
         if (result.status != 'passed') {
-            error("TEE Storage Test ${arch}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
+            error("TEE Tests ${arch}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
         }
     }
 

@@ -87,13 +87,7 @@ pub fn bytes_to_ta_head(data: &[u8]) -> KResult<ta_head> {
     if data.len() != core::mem::size_of::<ta_head>() {
         return Err(KError::InvalidData);
     }
-    // SAFETY:
-    // 1. `ta_head` is `#[repr(C)]` with plain fields (`TEE_UUID`, integers); `read_unaligned`
-    //    is valid and no stricter alignment than the slice is required.
-    // 2. The length check above ensures `data` spans exactly `size_of::<ta_head>()` bytes.
-    // 3. `ta_head` has no niche or enum invariants; any bit pattern from the ELF section is valid.
-    let ta_head = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<ta_head>()) };
-    Ok(ta_head)
+    Ok(bytemuck::pod_read_unaligned(data))
 }
 
 impl TeeTaCtx {
@@ -169,12 +163,7 @@ pub mod tests_ta_ctx {
             flags: 1,
             depr_entry: u64::MAX,
         };
-        let data = unsafe {
-            core::slice::from_raw_parts(
-                (&ta_head as *const ta_head).cast::<u8>(),
-                core::mem::size_of::<ta_head>(),
-            )
-        };
+        let data = bytemuck::bytes_of(&ta_head);
         let ta_head_from_bytes = bytes_to_ta_head(data).unwrap();
         assert_eq!(ta_head_from_bytes, ta_head);
     }

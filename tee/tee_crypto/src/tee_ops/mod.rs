@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-pub mod bignum;
+//! TEE operation-level cryptographic APIs.
+
 pub mod ecc;
 pub mod rsa;

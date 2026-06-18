@@ -93,7 +93,7 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     use alloc::format;
 
     use kthread::current_process_state;
-    use mbedtls::hash::{Md, Type};
+    use tee_crypto::hash::{Digest, Sm3};
 
     let pid = kthread::current_thread().pid();
     let proc_exe_path = format!("/proc/{}/exe", pid);
@@ -102,9 +102,10 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     let data = fs.read(&proc_exe_path).map_err(|_| KError::NotFound)?;
 
     let mut sm3_result = vec![0u8; 32];
-    let mut ctx = Md::new(Type::SM3).map_err(|_| KError::InvalidInput)?;
-    ctx.update(&data).map_err(|_| KError::InvalidInput)?;
-    let _len = ctx.finish(&mut sm3_result);
+    let mut hasher = Sm3::new();
+    hasher.update(&data);
+    let hash = hasher.finalize();
+    sm3_result.copy_from_slice(&hash);
 
     info!("resm3_resultsult: {:x?}", sm3_result);
     Ok(sm3_result)

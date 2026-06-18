@@ -60,7 +60,7 @@ mod crypto;
 mod fs_dirfile;
 mod fs_htree;
 mod huk_subkey;
-mod libmbedtls;
+
 mod libutee;
 mod memtag;
 mod otp_stubs;
@@ -107,12 +107,6 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         Sysno::tee_scn_panic => sys_tee_scn_panic(uctx.arg0() as _),
         Sysno::tee_scn_get_property => {
             let prop_type: usize = 0;
-            // unsafe {
-            //     asm!(
-            //         "mov {0}, x6",
-            //         out(reg) prop_type,
-            //     );
-            // }
             sys_tee_scn_get_property(
                 uctx.arg0() as _,
                 uctx.arg1() as _,
@@ -148,16 +142,8 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         Sysno::tee_scn_unmask_cancellation => sys_tee_scn_unmask_cancellation(uctx.arg0() as _),
         Sysno::tee_scn_mask_cancellation => sys_tee_scn_mask_cancellation(uctx.arg0() as _),
         Sysno::tee_scn_wait => sys_tee_scn_wait(uctx.arg0() as _),
-        Sysno::tee_scn_get_time => {
-            let teetime_ptr = uctx.arg1() as *mut TeeTime;
-            let teetime_ref = unsafe { &mut *teetime_ptr };
-            sys_tee_scn_get_time(uctx.arg0() as _, teetime_ref)
-        }
-        Sysno::tee_scn_set_ta_time => {
-            let teetime_ptr = uctx.arg1() as *const TeeTime;
-            let teetime_ref = unsafe { &*teetime_ptr };
-            sys_tee_scn_set_ta_time(teetime_ref)
-        }
+        Sysno::tee_scn_get_time => sys_tee_scn_get_time(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::tee_scn_set_ta_time => sys_tee_scn_set_ta_time(uctx.arg1() as _),
 
         Sysno::tee_scn_cryp_state_alloc => syscall_cryp_state_alloc(
             uctx.arg0(),

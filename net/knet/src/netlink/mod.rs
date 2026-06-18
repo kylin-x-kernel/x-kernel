@@ -30,8 +30,6 @@ mod socket;
 mod tests;
 mod wire;
 
-#[cfg(unittest)]
-pub(crate) use route::route_state;
 pub(crate) use route::{build_initial_state, init_route_state, link_state_for_ifindex};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) const RT_TABLE_MAIN: u8 = wire::route::TABLE_MAIN;

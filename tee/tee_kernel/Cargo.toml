@@ -23,9 +23,8 @@ kalloc.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
 rust-dice = { workspace = true, optional = true }
-mbedtls = { workspace = true }
-mbedtls-sys-auto = { workspace = true }
 klazy.workspace = true
+tee_crypto = { workspace = true, features = ["alloc"] }
 kcpu = { workspace = true, optional = true }
 dice_driver = { workspace = true, optional = true }
 kerrno.workspace = true
@@ -42,6 +41,7 @@ cfg-if.workspace = true
 lazy_static = { workspace = true }
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 osvm.workspace = true
+posix-types.workspace = true
 kthread = { workspace = true, features = ["tee"] }
 linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
@@ -56,8 +56,8 @@ subtle = { version = "2", default-features = false }
 static_assertions = "1.1.0"
 memoffset = { version = "0.9", default-features = false }
 flatten_objects = "0.2.4"
-rand_chacha = { version = "0.3", default-features = false }
 slab = { workspace = true }
+smccc.workspace = true
 rand = { version = "0.9.1", default-features = false, features = [
     "alloc",
     "small_rng",

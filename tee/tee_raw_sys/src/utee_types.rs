@@ -41,7 +41,7 @@ pub struct utee_params {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, posix_types::UserRead)]
 pub struct utee_attribute {
     pub a: u64,
     pub b: u64,
@@ -67,7 +67,7 @@ impl Debug for utee_attribute {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, posix_types::UserWrite)]
 pub struct utee_object_info {
     pub obj_type: u32,
     pub obj_size: u32,

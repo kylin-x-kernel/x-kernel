@@ -4,10 +4,7 @@
 
 use alloc::{format, string::String};
 
-use rand_chacha::{
-    ChaCha20Rng,
-    rand_core::{RngCore, SeedableRng},
-};
+use tee_crypto::rng::{DeterministicRng, Rng};
 
 #[inline]
 pub const fn bit32(nr: u32) -> u32 {
@@ -76,7 +73,7 @@ pub fn slice_fmt(data: &[u8]) -> String {
 
 pub fn random_bytes(data: &mut [u8]) {
     let seed = khal::time::now_ticks();
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut rng = DeterministicRng::seed_from_u64(seed);
     rng.fill_bytes(data);
 }
 

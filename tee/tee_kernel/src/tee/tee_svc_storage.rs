@@ -9,9 +9,11 @@ use core::{
     ptr,
 };
 
-use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
+use bytemuck::{Pod, Zeroable, bytes_of_mut};
 use klazy::Once;
 use ksync::{Mutex, RwLock};
+use osvm::MemError;
+use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::*;
 
 use super::{
@@ -30,28 +32,48 @@ use super::{
         syscall_cryp_obj_close, syscall_cryp_obj_get_info, tee_obj_attr_copy_from,
         tee_obj_attr_from_binary, tee_obj_attr_to_binary, tee_obj_set_type,
     },
-    user_access::{
-        bb_memdup_user_private, copy_to_user, copy_to_user_private, copy_to_user_struct,
-        copy_to_user_u64,
-    },
     uuid::Uuid,
 };
 use crate::tee::TeeResult;
 
-/// Copy object id from TA user memory. `object_id_len == 0` is valid (OP-TEE); do not use
-/// `slice::from_raw_parts(null, 0)` or `read_vm_mem` on a null pointer.
+fn map_user_mem_error(err: MemError) -> u32 {
+    match err {
+        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
+        _ => TEE_ERROR_GENERIC,
+    }
+}
+
+fn read_user_bytes_optional(addr: *const c_void, len: usize) -> TeeResult<Box<[u8]>> {
+    if len == 0 {
+        return Ok(Box::new([]));
+    }
+    if addr.is_null() {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    Ok(UserConstPtr::<u8>::from(addr.cast::<u8>())
+        .load_vm_vec(len)
+        .map_err(map_user_mem_error)?
+        .into_boxed_slice())
+}
+
+fn write_user_bytes(addr: *mut c_void, data: &[u8]) -> TeeResult {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if addr.is_null() {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    UserPtr::<u8>::from(addr.cast::<u8>())
+        .write_vm_slice(data)
+        .map_err(map_user_mem_error)
+}
+
+/// Copy object id from TA user memory. `object_id_len == 0` is valid (OP-TEE).
 fn bb_memdup_object_id_from_user(
     object_id: *const c_void,
     object_id_len: usize,
 ) -> TeeResult<Box<[u8]>> {
-    if object_id_len == 0 {
-        return Ok(Box::new([]));
-    }
-    if object_id.is_null() {
-        return Err(TEE_ERROR_BAD_PARAMETERS);
-    }
-    let slice = unsafe { core::slice::from_raw_parts(object_id as *const u8, object_id_len) };
-    bb_memdup_user_private(slice)
+    read_user_bytes_optional(object_id, object_id_len)
 }
 
 pub const TEE_UUID_HEX_LEN: usize = size_of::<TEE_UUID>();
@@ -180,13 +202,13 @@ pub fn tee_svc_storage_create_dirname(buf: &mut [u8], uuid: &TEE_UUID) -> TeeRes
 
     let uuid_hex_start_idx = 1; // 从 buf 的第二个字节开始写入 UUID
 
-    // convert TEE_UUID to byte slice
-    // safety: TEE_UUID is #[repr(C)], memory layout is determined, size is fixed (16 bytes), can be safely converted
-    let uuid_bytes = unsafe {
-        core::slice::from_raw_parts(uuid as *const TEE_UUID as *const u8, size_of::<TEE_UUID>())
-    };
+    let mut uuid_bytes = [0u8; TEE_UUID_HEX_LEN];
+    uuid_bytes[..4].copy_from_slice(&uuid.timeLow.to_ne_bytes());
+    uuid_bytes[4..6].copy_from_slice(&uuid.timeMid.to_ne_bytes());
+    uuid_bytes[6..8].copy_from_slice(&uuid.timeHiAndVersion.to_ne_bytes());
+    uuid_bytes[8..].copy_from_slice(&uuid.clockSeqAndNode);
 
-    tee_b2hs(uuid_bytes, &mut buf[uuid_hex_start_idx..]).map_err(|_| TEE_ERROR_GENERIC)?;
+    tee_b2hs(&uuid_bytes, &mut buf[uuid_hex_start_idx..]).map_err(|_| TEE_ERROR_GENERIC)?;
 
     Ok(())
 }
@@ -416,8 +438,9 @@ pub fn syscall_storage_obj_open(
             // Ok(())
         })?;
 
-        // copy obj_id to user space
-        copy_to_user_struct(unsafe { &mut *obj }, &tee_obj_id)?;
+        UserPtr::<c_uint>::from(obj)
+            .write_vm(tee_obj_id)
+            .map_err(map_user_mem_error)?;
 
         Ok(())
     })();
@@ -765,7 +788,7 @@ pub fn syscall_storage_obj_create(
     )?;
     tee_debug!("syscall_storage_obj_create: tee_pobj_get po: {:?}", po);
 
-    let data_slice = unsafe { core::slice::from_raw_parts(data as *const u8, len) };
+    let data_buf = read_user_bytes_optional(data.cast_const(), len)?;
 
     // === call inner function ===
     let mut inner_ctx = CreateInnerCtx {
@@ -774,7 +797,7 @@ pub fn syscall_storage_obj_create(
     };
 
     let result =
-        syscall_storage_obj_create_inner(&mut inner_ctx, flags, attr, data_slice, obj.is_null());
+        syscall_storage_obj_create_inner(&mut inner_ctx, flags, attr, &data_buf, obj.is_null());
 
     // === 根据结果处理 ===
     match result {
@@ -786,7 +809,9 @@ pub fn syscall_storage_obj_create(
         CreateInnerResult::CreatedNew(o_id) => {
             // 第二分支成功，继续处理
             if !obj.is_null()
-                && let Err(e) = unsafe { copy_to_user_struct(&mut *obj, &o_id) }
+                && let Err(e) = UserPtr::<c_uint>::from(obj)
+                    .write_vm(o_id)
+                    .map_err(map_user_mem_error)
             {
                 // oclose 路径：C 逻辑中 oclose 不进行错误码转换
                 let _ = tee_obj_close(o_id);
@@ -1057,14 +1082,14 @@ pub fn syscall_storage_obj_read(
 
     let mut bytes = len;
     let mut o_guard = o.lock();
-    let data_slice = unsafe { core::slice::from_raw_parts_mut(data as *mut u8, len) };
+    let mut data_buf = vec![0u8; len].into_boxed_slice();
     tee_debug!(
         "syscall_storage_obj_read: bytes: {:X?} dataPosition: 0x{:X?}",
         bytes,
         o_guard.info.dataPosition
     );
     let fh = o_guard.fh.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
-    (fops.read)(fh, pos_tmp, &mut [], data_slice, &mut bytes).inspect_err(|e| {
+    (fops.read)(fh, pos_tmp, &mut [], &mut data_buf, &mut bytes).inspect_err(|e| {
         if *e == TEE_ERROR_CORRUPT_OBJECT {
             error!("Object corrupt");
             remove_corrupt_obj(&mut o_guard);
@@ -1073,7 +1098,10 @@ pub fn syscall_storage_obj_read(
     o_guard.info.dataPosition += bytes;
 
     let u_count = bytes as u64;
-    copy_to_user_struct(unsafe { &mut *count }, &u_count);
+    UserPtr::<u64>::from(count)
+        .write_vm(u_count)
+        .map_err(map_user_mem_error)?;
+    write_user_bytes(data, &data_buf[..bytes])?;
 
     Ok(())
 }
@@ -1130,9 +1158,9 @@ pub fn syscall_storage_obj_write(obj: c_ulong, data: *mut c_void, len: usize) ->
         "syscall_storage_obj_write: dataPosition: {:X?}",
         o_guard.info.dataPosition
     );
-    let data_slice = unsafe { core::slice::from_raw_parts(data as *const u8, len) };
+    let data_buf = read_user_bytes_optional(data.cast_const(), len)?;
     let fh = o_guard.fh.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
-    (fops.write)(fh, pos_tmp, &[], data_slice, len).inspect_err(|e| {
+    (fops.write)(fh, pos_tmp, &[], &data_buf, len).inspect_err(|e| {
         error!("syscall_storage_obj_write: write failed: {:X?}", e);
     })?;
     o_guard.info.dataPosition += len;
@@ -1153,15 +1181,10 @@ pub fn tee_svc_storage_write_usage(o: &mut tee_obj, usage: u32) -> TeeResult {
             .ok_or(TEE_ERROR_BAD_STATE)?
     };
 
-    let usage_slice = unsafe {
-        core::slice::from_raw_parts(
-            &usage as *const u32 as *const u8,
-            core::mem::size_of::<u32>(),
-        )
-    };
+    let usage_bytes = usage.to_ne_bytes();
 
     let fh = o.fh.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
-    (fops.write)(fh, pos, usage_slice, &[], usage_slice.len()).inspect_err(|e| {
+    (fops.write)(fh, pos, &usage_bytes, &[], usage_bytes.len()).inspect_err(|e| {
         error!("tee_svc_storage_write_usage: write failed: {:X?}", e);
     })
 }
@@ -1305,7 +1328,9 @@ pub fn syscall_storage_alloc_enum(obj_enum: *mut c_uint) -> TeeResult {
         fops: None,
     };
     let id = tee_svc_storage_add_enum(obj)? as u32;
-    copy_to_user_struct(unsafe { &mut *obj_enum }, &id)?;
+    UserPtr::<c_uint>::from(obj_enum)
+        .write_vm(id)
+        .map_err(map_user_mem_error)?;
     Ok(())
 }
 
@@ -1412,7 +1437,7 @@ pub fn syscall_storage_next_enum(
         let mut dir = obj_guard.dir.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
         let mut d = tee_fs_dirent::default();
         (fops.readdir)(dir, &mut d)
-            .inspect_err(|e| error!("syscall_storage_next_enum: readdir error: {:#010X?}", e))?;
+            .inspect_err(|e| debug!("syscall_storage_next_enum: readdir: {:#010X?}", e))?;
         drop(obj_guard); // 释放 e 的锁，避免在 tee_pobj_get 中持有多个锁
 
         o = Some(Box::new(tee_obj::default()));
@@ -1456,8 +1481,9 @@ pub fn syscall_storage_next_enum(
             Ok(())
         })?;
 
-        let info_ref = unsafe { &mut *info };
-        copy_to_user_struct(info_ref, &bbuf)?;
+        UserPtr::<utee_object_info>::from(info)
+            .write_vm(bbuf)
+            .map_err(map_user_mem_error)?;
 
         let (obj_id_len, obj_id_vec, l) = {
             let objid = pobj.obj_id.lock();
@@ -1467,12 +1493,11 @@ pub fn syscall_storage_next_enum(
             (obj_id_len, obj_id_vec, l)
         };
 
-        let obj_id_slice =
-            unsafe { core::slice::from_raw_parts_mut(obj_id as *mut u8, obj_id_len) };
-        copy_to_user(obj_id_slice, &obj_id_vec, obj_id_len)?;
+        write_user_bytes(obj_id, &obj_id_vec[..obj_id_len])?;
 
-        let len_ref = unsafe { &mut *len };
-        copy_to_user_u64(len_ref, &l)?;
+        UserPtr::<u64>::from(len)
+            .write_vm(l)
+            .map_err(map_user_mem_error)?;
 
         Ok(())
     })();
@@ -1698,11 +1723,11 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             storage_id,
-            object_id_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id_user.as_user_ptr() as *mut c_void,
             object_id.len(),
             flags as c_ulong,
             attr as c_ulong,
-            data_create_user.as_user_ptr::<u8>() as *mut c_void,
+            data_create_user.as_user_ptr() as *mut c_void,
             data_create.len(),
             obj.as_user_ref(),
         );
@@ -1714,7 +1739,7 @@ pub mod tests_tee_svc_storage {
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
-            data_read.as_user_ptr::<u8>() as *mut c_void,
+            data_read.as_user_ptr() as *mut c_void,
             data_create.len(),
             count.as_user_ref(),
         );
@@ -1727,7 +1752,7 @@ pub mod tests_tee_svc_storage {
         let data_write_user = user_buffer_from_bytes(data_write);
         let result = syscall_storage_obj_write(
             obj_id,
-            data_write_user.as_user_ptr::<u8>() as *mut c_void,
+            data_write_user.as_user_ptr() as *mut c_void,
             data_write.len(),
         );
         assert!(result.is_ok());
@@ -1743,7 +1768,7 @@ pub mod tests_tee_svc_storage {
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
-            data_read.as_user_ptr::<u8>() as *mut c_void,
+            data_read.as_user_ptr() as *mut c_void,
             data_write.len(),
             count.as_user_ref(),
         );
@@ -1761,7 +1786,7 @@ pub mod tests_tee_svc_storage {
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
-            data_read.as_user_ptr::<u8>() as *mut c_void,
+            data_read.as_user_ptr() as *mut c_void,
             data_create.len(),
             count.as_user_ref(),
         );
@@ -1774,7 +1799,7 @@ pub mod tests_tee_svc_storage {
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
         let _result = syscall_storage_obj_read(
             obj_id,
-            data_read.as_user_ptr::<u8>() as *mut c_void,
+            data_read.as_user_ptr() as *mut c_void,
             1,
             count.as_user_ref(),
         );
@@ -1808,7 +1833,7 @@ pub mod tests_tee_svc_storage {
         let object_id_new_user = user_buffer_from_bytes(object_id_new.as_bytes());
         let result = syscall_storage_obj_rename(
             obj_id,
-            object_id_new_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id_new_user.as_user_ptr() as *mut c_void,
             object_id_new.len(),
         );
         assert!(result.is_ok());
@@ -1829,7 +1854,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr::<u8>() as *mut c_void,
+            object_id.as_user_ptr() as *mut c_void,
             "invalid_create".len(),
             1u64 << 63,
             TEE_HANDLE_NULL as c_ulong,
@@ -1841,7 +1866,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr::<u8>() as *mut c_void,
+            object_id.as_user_ptr() as *mut c_void,
             "invalid_create".len(),
             TEE_DATA_FLAG_ACCESS_READ as c_ulong,
             TEE_HANDLE_NULL as c_ulong,
@@ -1870,11 +1895,11 @@ pub mod tests_tee_svc_storage {
         let mut created_obj = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_storage_obj_create(
             storage_id,
-            object_id_create_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id_create_user.as_user_ptr() as *mut c_void,
             object_id.len(),
             create_flags as c_ulong,
             TEE_HANDLE_NULL as c_ulong,
-            data_create_user.as_user_ptr::<u8>() as *mut c_void,
+            data_create_user.as_user_ptr() as *mut c_void,
             data_create.len(),
             created_obj.as_user_ref(),
         );
@@ -1888,7 +1913,7 @@ pub mod tests_tee_svc_storage {
         let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_storage_obj_open(
             storage_id,
-            object_id_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id_user.as_user_ptr() as *mut c_void,
             object_id.len(),
             open_flags as c_ulong,
             obj.as_user_ref(),
@@ -1907,7 +1932,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_open(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr::<u8>() as *mut c_void,
+            object_id.as_user_ptr() as *mut c_void,
             "missing_object".len(),
             1u64 << 62,
             obj.as_user_ref(),
@@ -1916,7 +1941,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_open(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr::<u8>() as *mut c_void,
+            object_id.as_user_ptr() as *mut c_void,
             "missing_object".len(),
             TEE_DATA_FLAG_ACCESS_READ as c_ulong,
             obj.as_user_ref(),
@@ -1936,14 +1961,14 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             storage_id,
-            object_id_user.as_user_ptr::<u8>() as *mut c_void,
+            object_id_user.as_user_ptr() as *mut c_void,
             object_id.len(),
             (TEE_DATA_FLAG_ACCESS_READ
                 | TEE_DATA_FLAG_ACCESS_WRITE
                 | TEE_DATA_FLAG_ACCESS_WRITE_META
                 | TEE_DATA_FLAG_OVERWRITE) as c_ulong,
             TEE_HANDLE_NULL as c_ulong,
-            data_create_user.as_user_ptr::<u8>() as *mut c_void,
+            data_create_user.as_user_ptr() as *mut c_void,
             data_create.len(),
             obj.as_user_ref(),
         );

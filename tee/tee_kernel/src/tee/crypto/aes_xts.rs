@@ -4,21 +4,39 @@
 
 //! Stateful AES-XTS (OP-TEE / LibTomCrypt semantics).
 //!
-//! mbedtls `cipher_update` for XTS recomputes the tweak from `ctx->iv` on every call, so
-//! multi-part updates must advance tweak state in the kernel. This module uses two AES-ECB
-//! contexts (data and tweak keys) without modifying rust-mbedtls.
+//! Multi-part updates must advance tweak state in the kernel so split TA calls
+//! behave as one continuous XTS message.
 
-use mbedtls::cipher::raw::{Cipher, CipherId, CipherMode, Operation};
+use tee_crypto::block_cipher::BlockCipher;
 use tee_raw_sys::TEE_ERROR_BAD_PARAMETERS;
 
 use crate::tee::TeeResult;
 
 const XTS_BLOCK_SIZE: usize = 16;
 
+#[derive(Clone)]
+enum AesEcbKey {
+    Aes128([u8; 16]),
+    Aes256([u8; 32]),
+}
+
+impl AesEcbKey {
+    fn new(key: &[u8]) -> Result<Self, u32> {
+        match key.len() {
+            16 => Ok(Self::Aes128(
+                key.try_into().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
+            )),
+            32 => Ok(Self::Aes256(
+                key.try_into().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
+            )),
+            _ => Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    }
+}
+
 /// Running AES-XTS state carried across `cipher_update` / `cipher_final` syscalls.
 pub(crate) struct AesXtsState {
-    crypt_ecb: Cipher,
-    tweak_ecb: Cipher,
+    crypt_key: AesEcbKey,
     pub(crate) running_tweak: [u8; XTS_BLOCK_SIZE],
     decrypt: bool,
     /// Tweak applied to the most recently completed full block (before `gf128mul_x`).
@@ -27,7 +45,7 @@ pub(crate) struct AesXtsState {
     last_block: [u8; XTS_BLOCK_SIZE],
     /// Input to the last full block (`plaintext` on encrypt, `ciphertext` on decrypt).
     last_cipher_block: [u8; XTS_BLOCK_SIZE],
-    /// Tweak for decrypt ciphertext stealing (`prev_tweak` in mbedtls).
+    /// Tweak for decrypt ciphertext stealing (`prev_tweak` in the reference XTS flow).
     decrypt_steal_tweak: [u8; XTS_BLOCK_SIZE],
     has_last_block: bool,
     /// Input bytes already decrypted/encrypted before the current block.
@@ -43,7 +61,7 @@ pub(crate) struct AesXtsStream {
     pub is_final: bool,
 }
 
-/// AES-XTS operation state carried in [`crate::tee::tee_svc_cryp2::TeeCipherCtx`].
+/// AES-XTS operation state carried in [`crate::tee::tee_svc_cryp2::CrypCtx::XtsCtx`].
 ///
 /// Groups the kernel cipher state and syscall bookkeeping for incremental TA updates.
 pub(crate) struct TeeCipherXtsCtx {
@@ -60,6 +78,10 @@ pub(crate) struct TeeCipherXtsCtx {
     pub bytes_ingested: usize,
     /// Set while processing `cipher_final` (including its leading tail `update`).
     pub in_final_syscall: bool,
+    /// Tail buffer for sub-block input across split syscalls.
+    pub pending: [u8; XTS_BLOCK_SIZE],
+    /// Valid bytes in `pending`.
+    pub pending_len: usize,
 }
 
 impl TeeCipherXtsCtx {
@@ -72,7 +94,49 @@ impl TeeCipherXtsCtx {
             patch_user_off: None,
             bytes_ingested: 0,
             in_final_syscall: false,
+            pending: [0u8; XTS_BLOCK_SIZE],
+            pending_len: 0,
         }
+    }
+
+    /// Maximum bytes a `cipher_update` may emit for `input_len` more input bytes.
+    pub(crate) fn max_update_output_len(&self, input_len: usize) -> usize {
+        (self.pending_len + input_len) / XTS_BLOCK_SIZE * XTS_BLOCK_SIZE
+    }
+
+    /// Feed `input` through XTS, emitting completed full blocks into `output`.
+    pub(crate) fn cipher_update(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize, u32> {
+        let stream = self.stream();
+        let written = aes_xts_update_buffered(
+            &mut self.state,
+            &mut self.pending,
+            &mut self.pending_len,
+            input,
+            output,
+            &stream,
+        )?;
+        self.after_update(input.len(), written);
+        Ok(written)
+    }
+
+    /// Flush remaining buffered bytes (and optional `input` tail) with ciphertext stealing.
+    pub(crate) fn cipher_final(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize, u32> {
+        self.in_final_syscall = true;
+        let stream = self.final_stream();
+        let (written, patch) = aes_xts_final_buffered(
+            &mut self.state,
+            &mut self.pending,
+            &mut self.pending_len,
+            input,
+            output,
+            &stream,
+        )?;
+        self.bytes_ingested += input.len();
+        self.emitted_bytes += written;
+        if let Some(patch) = patch {
+            self.record_patch_from_final(patch, output);
+        }
+        Ok(written)
     }
 
     pub(crate) fn stream(&self) -> AesXtsStream {
@@ -102,16 +166,21 @@ impl TeeCipherXtsCtx {
         self.patch_user_off = None;
     }
 
-    /// Record a ciphertext-stealing patch for a block written in an earlier syscall.
+    /// Record a ciphertext-stealing patch for the last full block of the message.
+    ///
+    /// `emitted_bytes` includes the CTS tail, so we derive the patch offset from
+    /// `bytes_ingested` (the total message length): the last full block starts at
+    /// `(N-1)*16` where `N = bytes_ingested / 16`.
     pub(crate) fn record_patch_from_final(
         &mut self,
         patch: [u8; XTS_BLOCK_SIZE],
         output: &mut [u8],
     ) {
-        if self.emitted_bytes < XTS_BLOCK_SIZE {
+        let n_full = self.bytes_ingested / XTS_BLOCK_SIZE;
+        if n_full == 0 {
             return;
         }
-        let patch_off = self.emitted_bytes - XTS_BLOCK_SIZE;
+        let patch_off = (n_full - 1) * XTS_BLOCK_SIZE;
         if let Some(base) = self.user_base {
             self.patch_block = Some(patch);
             self.patch_user_off = Some(base + patch_off);
@@ -159,6 +228,8 @@ impl Clone for TeeCipherXtsCtx {
             patch_user_off: self.patch_user_off,
             bytes_ingested: self.bytes_ingested,
             in_final_syscall: self.in_final_syscall,
+            pending: self.pending,
+            pending_len: self.pending_len,
         }
     }
 }
@@ -166,8 +237,7 @@ impl Clone for TeeCipherXtsCtx {
 impl Clone for AesXtsState {
     fn clone(&self) -> Self {
         Self {
-            crypt_ecb: self.crypt_ecb.clone(),
-            tweak_ecb: self.tweak_ecb.clone(),
+            crypt_key: self.crypt_key.clone(),
             running_tweak: self.running_tweak,
             decrypt: self.decrypt,
             last_block_tweak: self.last_block_tweak,
@@ -192,16 +262,28 @@ fn split_xts_keys(key: &[u8]) -> Result<(&[u8], &[u8]), u32> {
     Ok((&key[..half], &key[half..]))
 }
 
-fn ecb_crypt_block(cipher: &mut Cipher, decrypt: bool, block: &[u8], out: &mut [u8]) -> TeeResult {
-    let n = if decrypt {
-        cipher.decrypt(block, out)
-    } else {
-        cipher.encrypt(block, out)
-    };
-    n.map(|_| ()).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+fn ecb_crypt_block(key: &AesEcbKey, decrypt: bool, block: &[u8], out: &mut [u8]) -> TeeResult {
+    if block.len() != XTS_BLOCK_SIZE || out.len() < XTS_BLOCK_SIZE {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    out[..XTS_BLOCK_SIZE].copy_from_slice(block);
+    match key {
+        AesEcbKey::Aes128(key) if decrypt => {
+            tee_crypto::block_cipher::Aes128Ecb::decrypt(key, &mut out[..XTS_BLOCK_SIZE])
+        }
+        AesEcbKey::Aes128(key) => {
+            tee_crypto::block_cipher::Aes128Ecb::encrypt(key, &mut out[..XTS_BLOCK_SIZE])
+        }
+        AesEcbKey::Aes256(key) if decrypt => {
+            tee_crypto::block_cipher::Aes256Ecb::decrypt(key, &mut out[..XTS_BLOCK_SIZE])
+        }
+        AesEcbKey::Aes256(key) => {
+            tee_crypto::block_cipher::Aes256Ecb::encrypt(key, &mut out[..XTS_BLOCK_SIZE])
+        }
+    }
+    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)
 }
 
-/// GF(2^128) multiply by x (mbedtls `mbedtls_gf128mul_x_ble`).
 fn message_total_len(stream: &AesXtsStream, current_input_len: usize) -> Option<usize> {
     if stream.is_final {
         Some(stream.prior_bytes + current_input_len)
@@ -210,7 +292,7 @@ fn message_total_len(stream: &AesXtsStream, current_input_len: usize) -> Option<
     }
 }
 
-/// mbedtls: `leftover && blocks == 0` on decrypt — advance tweak only before the last full
+/// Decrypt with a partial tail: advance tweak only before the last full
 /// block of the entire message when `length % 16 != 0`.
 fn decrypt_pre_advance_before_block(
     xts: &AesXtsState,
@@ -248,24 +330,8 @@ pub(crate) fn aes_xts_init(
     decrypt: bool,
 ) -> Result<AesXtsState, u32> {
     let (key1, key2) = split_xts_keys(key)?;
-    let key_bits = (key1.len() * 8) as u32;
-
-    let mut crypt_ecb = Cipher::setup(CipherId::Aes, CipherMode::ECB, key_bits)
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    let crypt_op = if decrypt {
-        Operation::Decrypt
-    } else {
-        Operation::Encrypt
-    };
-    crypt_ecb
-        .set_key(crypt_op, key1)
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-
-    let mut tweak_ecb = Cipher::setup(CipherId::Aes, CipherMode::ECB, key_bits)
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-    tweak_ecb
-        .set_key(Operation::Encrypt, key2)
-        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let crypt_key = AesEcbKey::new(key1)?;
+    let tweak_key = AesEcbKey::new(key2)?;
 
     let mut data_unit = [0u8; XTS_BLOCK_SIZE];
     if let Some(iv) = iv {
@@ -276,11 +342,10 @@ pub(crate) fn aes_xts_init(
     }
 
     let mut running_tweak = [0u8; XTS_BLOCK_SIZE];
-    ecb_crypt_block(&mut tweak_ecb, false, &data_unit, &mut running_tweak)?;
+    ecb_crypt_block(&tweak_key, false, &data_unit, &mut running_tweak)?;
 
     Ok(AesXtsState {
-        crypt_ecb,
-        tweak_ecb,
+        crypt_key,
         running_tweak,
         decrypt,
         last_block_tweak: running_tweak,
@@ -292,7 +357,7 @@ pub(crate) fn aes_xts_init(
     })
 }
 
-/// Ciphertext stealing tail (mbedtls `mbedtls_aes_crypt_xts` leftover path).
+/// Ciphertext stealing tail for partial final blocks.
 fn xts_ciphertext_stealing(
     xts: &mut AesXtsState,
     input_tail: &[u8],
@@ -326,7 +391,7 @@ fn xts_ciphertext_stealing(
     }
 
     let mut block_out = [0u8; XTS_BLOCK_SIZE];
-    ecb_crypt_block(&mut xts.crypt_ecb, xts.decrypt, &tmp, &mut block_out)?;
+    ecb_crypt_block(&xts.crypt_key, xts.decrypt, &tmp, &mut block_out)?;
 
     let mut patch = [0u8; XTS_BLOCK_SIZE];
     for i in 0..XTS_BLOCK_SIZE {
@@ -345,7 +410,7 @@ fn crypt_one_full_block(xts: &mut AesXtsState, input: &[u8], output: &mut [u8]) 
         tmp[i] = input[i] ^ xts.running_tweak[i];
     }
     xts.last_block_tweak = xts.running_tweak;
-    ecb_crypt_block(&mut xts.crypt_ecb, xts.decrypt, &tmp, output)?;
+    ecb_crypt_block(&xts.crypt_key, xts.decrypt, &tmp, output)?;
     for (out, tweak) in output
         .iter_mut()
         .zip(xts.running_tweak.iter())

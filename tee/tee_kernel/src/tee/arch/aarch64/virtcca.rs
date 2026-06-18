@@ -5,7 +5,7 @@
 //! VirtCCA / TSI SMC helpers (AArch64).
 
 use khal::mem::{VirtAddr, v2p};
-use mbedtls::hash::{Hkdf, Md, Type as MdType};
+use tee_crypto::{hkdf, mac::HmacSm3};
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_SHORT_BUFFER};
 
 use crate::tee::{
@@ -41,23 +41,14 @@ pub fn rsi_smc_call(
     arg2: usize,
     arg3: usize,
 ) -> (usize, usize, usize) {
-    let ret0;
-    let ret1;
-    let ret2;
-    unsafe {
-        core::arch::asm!(
-            "smc #0",
-            inlateout("x0") func as usize => ret0,
-            inlateout("x1") arg0 => ret1,
-            inlateout("x2") arg1 => ret2,
-            in("x3") arg2,
-            in("x4") arg3,
-            in("x5") 0usize,
-            in("x6") 0usize,
-            in("x7") 0usize,
-        )
-    }
-    (ret0, ret1, ret2)
+    let mut args = [0u64; 17];
+    args[0] = arg0 as u64;
+    args[1] = arg1 as u64;
+    args[2] = arg2 as u64;
+    args[3] = arg3 as u64;
+
+    let ret = smccc::smc64(func, args);
+    (ret[0] as usize, ret[1] as usize, ret[2] as usize)
 }
 
 /// Derive key via TSI HUK SMC; returns SMCCC status in `x0` (same as `arm_smccc_res.a0`).
@@ -90,8 +81,9 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     }
     // warn!("get_huk_key: image_key: {:?}", slice_fmt(&image_key));
     let info = b"KunPeng VirtCCA Sealing Key";
-    Hkdf::hkdf(MdType::SM3, info, &image_key, &[], huk_key)
+    let derived = hkdf::hkdf::<HmacSm3>(info, &image_key, &[], huk_key.len())
         .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    huk_key.copy_from_slice(&derived);
     // warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
     Ok(())
 }
