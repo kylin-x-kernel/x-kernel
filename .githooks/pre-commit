@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# x-kernel shared pre-commit hook.
+#
+# Runs the project formatter and clippy so that commits which would fail
+# CI on `make fmt` / `make clippy` are caught locally first. The formatter
+# auto-fixes and re-stages the staged Rust files; clippy only gates.
+#
+# Escape hatches (set for a single commit):
+#   SKIP_FMT=1     git commit ...   # skip `make fmt`
+#   SKIP_CLIPPY=1  git commit ...   # skip `make clippy`
+#   SKIP_ALL=1     git commit ...   # skip both
+#
+# This hook is enabled automatically by scripts/make/hooks.mk on any
+# `make ...` invocation; no manual setup is required after clone or pull.
+
+# Never let a misconfigured environment block a commit.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$REPO_ROOT" || exit 0
+
+if [ "${SKIP_ALL:-0}" = "1" ]; then
+	echo "⏭️  pre-commit: SKIP_ALL=1, skipping all checks." >&2
+	exit 0
+fi
+
+# Only relevant when Rust sources are staged.
+mapfile -t STAGED_RS < <(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+if [ "${#STAGED_RS[@]}" -eq 0 ]; then
+	exit 0
+fi
+
+# ---- fmt: auto-format, then re-stage the files that were staged ----
+if [ "${SKIP_FMT:-0}" != "1" ]; then
+	if ! make fmt; then
+		echo "❌ pre-commit: 'make fmt' failed (is the pinned nightly toolchain installed?)." >&2
+		echo "   bypass with: SKIP_FMT=1 git commit ..." >&2
+		exit 1
+	fi
+	# Re-stage the staged .rs files that fmt may have rewritten.
+	git add -- "${STAGED_RS[@]}" 2>/dev/null || true
+fi
+
+# ---- clippy: gate the commit ----
+if [ "${SKIP_CLIPPY:-0}" != "1" ]; then
+	if [ ! -f .config ]; then
+		echo "⚠️  pre-commit: no .config found; 'make clippy' needs one — skipping clippy this commit." >&2
+		echo "    CI still runs clippy: run 'cp platforms/<plat>/defconfig .config && make defconfig' before pushing." >&2
+	elif ! make clippy; then
+		echo "❌ pre-commit: 'make clippy' failed. Fix the issues above, then re-run 'git commit'." >&2
+		echo "   bypass with: SKIP_CLIPPY=1 git commit ..." >&2
+		exit 1
+	fi
+fi
+
+echo "✅ pre-commit: fmt + clippy checks passed." >&2
+exit 0

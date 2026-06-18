@@ -378,6 +378,25 @@ Format Rust code:
 cargo +nightly-2026-03-08 fmt --all
 ```
 
+Pre-commit hooks (shared, auto-enabled):
+
+A shared `pre-commit` hook is committed under `.githooks/` and runs
+`make fmt` (auto-formats and re-stages the staged Rust files) followed by
+`make clippy`, so commits that would fail CI on those two checks are
+blocked locally first.
+
+- It is enabled automatically on any `make ...` invocation — no manual
+  setup is needed after `git clone` or `git pull`. To (re)enable it
+  explicitly in a clone, run `make hooks`.
+- It only runs when at least one `*.rs` file is staged.
+- Skip a check for a single commit with environment variables:
+  - `SKIP_FMT=1 git commit ...` — skip `make fmt`;
+  - `SKIP_CLIPPY=1 git commit ...` — skip `make clippy`;
+  - `SKIP_ALL=1 git commit ...` — skip both.
+- `make clippy` requires a `.config`; if none is present the hook skips
+  clippy for that commit (CI still checks it, so prepare a `.config`
+  before pushing).
+
 Clean generated artifacts:
 
 ```bash

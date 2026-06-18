@@ -143,6 +143,8 @@ ROOTFS_IMG = x-kernel-$(ROOTFS_VARIANT)-$(ARCH).img
 
 endif # end of IS_BUILD
 
+include scripts/make/hooks.mk
+
 
 menuconfig:
 	@$(XCONF) menuconfig -k Kconfig -s .
