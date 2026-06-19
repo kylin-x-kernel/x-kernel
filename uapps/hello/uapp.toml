@@ -1,0 +1,26 @@
+[package]
+name = "hello"
+description = "Minimal Rust uapp example"
+enabled = true
+order = 10
+
+[prepare]
+env = [
+  "RUSTFLAGS=",
+  "CC=aarch64-linux-musl-gcc",
+  "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc",
+]
+commands = [
+  "cargo build --release --target aarch64-unknown-linux-musl",
+]
+
+[[install]]
+src = "target/aarch64-unknown-linux-musl/release/hello-uapp"
+dest = "/hello-uapp"
+mode = "0755"
+
+[[autostart]]
+name = "hello"
+command = "/hello-uapp"
+background = false
+exit = false

@@ -38,12 +38,17 @@ LTO ?=
 TARGET_DIR ?= $(PWD)/target
 export TARGET_DIR
 XCONF_TARGET_DIR ?= $(TARGET_DIR)/tools/xconf
+UAPP_TARGET_DIR ?= $(TARGET_DIR)/tools/uapp
 HOST_TARGET := $(shell rustc -vV | sed -n 's|host: ||p')
 XCONF = env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(XCONF_TARGET_DIR) --manifest-path xtask/xconfig/Cargo.toml --bin xconf --
+UAPP_TOOL = env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(UAPP_TARGET_DIR) --manifest-path xtask/uapp/Cargo.toml --
 EXTRA_CONFIG ?=
 UIMAGE ?= n
 export UNITTEST ?= n
 export UNITTEST_CRATE ?=
+UAPPS ?= all
+UAPP_DIR ?= $(PWD)/uapps
+UAPP_AUTOSTART_TARGET ?= /etc/profile.d/99-autostart.sh
 
 # App options
 A := $(PWD)/entry
@@ -56,7 +61,7 @@ endif
 
 .DEFAULT_GOAL := all
 
-BUILD_TARGETS := all build run justrun debug clippy disasm rootfs teefs
+BUILD_TARGETS := all build run justrun debug clippy disasm rootfs rootfs-uapps teefs uapps
 KCONFIG_TARGETS := menuconfig defconfig saveconfig savedefconfig oldconfig olddefconfig
 CLEAN_TARGETS := clean clean_c distclean
 UTILITY_TARGETS := clippy check_deps check_header doc doc_check_missing fmt unittest unittest_no_fail_fast
@@ -154,13 +159,25 @@ menuconfig:
 		echo "ℹ️  No changes saved"; \
 	fi
 
-rootfs:
-	@if [ ! -f $(ROOTFS_IMG) ]; then \
-		echo "Image not found, downloading..."; \
-		curl -f -L $(ROOTFS_URL)/$(ROOTFS_IMG).xz -O; \
-		xz -d $(ROOTFS_IMG).xz; \
+uapps:
+	@if [ ! -f "$(DISK_IMG)" ]; then \
+		echo "disk image not found: $(DISK_IMG)"; \
+		echo "Please run 'make rootfs' first."; \
+		exit 1; \
 	fi
-	@cp $(ROOTFS_IMG) $(DISK_IMG)
+	$(UAPP_TOOL) install \
+	  --uapps-dir "$(UAPP_DIR)" \
+	  --disk-img "$(DISK_IMG)" \
+	  --select "$(UAPPS)" \
+	  --autostart-target "$(UAPP_AUTOSTART_TARGET)" \
+	  --repo-root "$(PWD)" \
+	  --build-dir "$(TARGET_DIR)/uapps" \
+	  --arch "$(ARCH)" \
+	  --target "$(TARGET)" \
+	  --plat-name "$(PLAT_NAME)" \
+	  --cross-compile "$(CROSS_COMPILE)"
+
+rootfs-uapps: rootfs uapps
 
 teefs:
 	$(MAKE) -C tee_apps ARCH=$(ARCH)
@@ -284,6 +301,7 @@ clean_c::
 # but the actual dependency is on $(CONFIG_RS) which is file-based
 .PHONY: all defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const \
 	build disasm run justrun debug \
+	rootfs rootfs-uapps teefs uapps \
 	clippy doc doc_check_missing fmt fmt_c unittest unittest_no_fail_fast \
 	_gen_cargo \
 	disk_img clean distclean clean_c
