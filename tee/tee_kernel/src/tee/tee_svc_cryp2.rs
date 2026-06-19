@@ -1571,7 +1571,6 @@ pub fn syscall_asymm_verify(
 
 #[unittest::mod_test]
 pub mod tests_cryp {
-    use tee_crypto::hash::{Digest, Sm3};
     use unittest::{TestResult, assert, assert_eq, assert_ne};
 
     use super::*;
@@ -1583,51 +1582,6 @@ pub mod tests_cryp {
             tee_obj_set_type,
         },
     };
-
-    fn sm2_digest(public_key: &[u8; 64], message: &[u8]) -> [u8; 32] {
-        const DEFAULT_DISTID: &[u8] = b"1234567812345678";
-        const SM2_A: [u8; 32] = [
-            0xff, 0xff, 0xff, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xfc,
-        ];
-        const SM2_B: [u8; 32] = [
-            0x28, 0xe9, 0xfa, 0x9e, 0x9d, 0x9f, 0x5e, 0x34, 0x4d, 0x5a, 0x9e, 0x4b, 0xcf, 0x65,
-            0x09, 0xa7, 0xf3, 0x97, 0x89, 0xf5, 0x15, 0xab, 0x8f, 0x92, 0xdd, 0xbc, 0xbd, 0x41,
-            0x4d, 0x94, 0x0e, 0x93,
-        ];
-        const SM2_GX: [u8; 32] = [
-            0x32, 0xc4, 0xae, 0x2c, 0x1f, 0x19, 0x81, 0x19, 0x5f, 0x99, 0x04, 0x46, 0x6a, 0x39,
-            0xc9, 0x94, 0x8f, 0xe3, 0x0b, 0xbf, 0xf2, 0x66, 0x0b, 0xe1, 0x71, 0x5a, 0x45, 0x89,
-            0x33, 0x4c, 0x74, 0xc7,
-        ];
-        const SM2_GY: [u8; 32] = [
-            0xbc, 0x37, 0x36, 0xa2, 0xf4, 0xf6, 0x77, 0x9c, 0x59, 0xbd, 0xce, 0xe3, 0x6b, 0x69,
-            0x21, 0x53, 0xd0, 0xa9, 0x87, 0x7c, 0xc6, 0x2a, 0x47, 0x40, 0x02, 0xdf, 0x32, 0xe5,
-            0x21, 0x39, 0xf0, 0xa0,
-        ];
-
-        let entl = (DEFAULT_DISTID.len() as u16 * 8).to_be_bytes();
-        let mut za_hash = Sm3::new();
-        za_hash.update(&entl);
-        za_hash.update(DEFAULT_DISTID);
-        za_hash.update(&SM2_A);
-        za_hash.update(&SM2_B);
-        za_hash.update(&SM2_GX);
-        za_hash.update(&SM2_GY);
-        za_hash.update(&public_key[..32]);
-        za_hash.update(&public_key[32..]);
-        let za = za_hash.finalize();
-
-        let mut msg_hash = Sm3::new();
-        msg_hash.update(za.as_bytes());
-        msg_hash.update(message);
-        msg_hash
-            .finalize()
-            .as_bytes()
-            .try_into()
-            .expect("SM3 digest is 32 bytes")
-    }
 
     #[unittest::def_test(custom)]
     fn test_cryp_state() {
@@ -3929,7 +3883,12 @@ pub mod tests_cryp {
         );
         assert!(res.is_ok());
 
-        let data = sm2_digest(&pubkey, b"SIGNATURE TEST SIGNATURE TEST SI");
+        let data = tee_crypto::sm2::sm2_compute_sign_digest(
+            None,
+            b"SIGNATURE TEST SIGNATURE TEST SI",
+            &pubkey,
+        )
+        .expect("sm2 sign digest");
 
         let res = tee_cryp_asymm_verify(state, &data, &sig);
         assert!(res.is_ok());
@@ -3996,7 +3955,12 @@ pub mod tests_cryp {
         );
         assert!(res.is_ok());
 
-        let data = sm2_digest(&pubkey, b"SIGNATURE TEST SIGNATURE TEST SI");
+        let data = tee_crypto::sm2::sm2_compute_sign_digest(
+            None,
+            b"SIGNATURE TEST SIGNATURE TEST SI",
+            &pubkey,
+        )
+        .expect("sm2 sign digest");
         let res = tee_cryp_asymm_verify(state, &data, &sig);
         assert!(res.is_ok());
     }
