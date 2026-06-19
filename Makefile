@@ -159,6 +159,14 @@ menuconfig:
 		echo "ℹ️  No changes saved"; \
 	fi
 
+rootfs:
+	@if [ ! -f $(ROOTFS_IMG) ]; then \
+		echo "Image not found, downloading..."; \
+		curl -f -L $(ROOTFS_URL)/$(ROOTFS_IMG).xz -O; \
+		xz -d $(ROOTFS_IMG).xz; \
+	fi
+	@cp $(ROOTFS_IMG) $(DISK_IMG)
+
 uapps:
 	@if [ ! -f "$(DISK_IMG)" ]; then \
 		echo "disk image not found: $(DISK_IMG)"; \
