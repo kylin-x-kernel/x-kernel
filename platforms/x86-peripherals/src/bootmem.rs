@@ -90,6 +90,8 @@ where
     if multiboot_info_ptr == 0 {
         return;
     }
+    // SAFETY: the boot protocol provides `multiboot_info_ptr` as a valid pointer to
+    // the immutable Multiboot2 information block for the duration of early boot.
     let info = unsafe { BootInformation::load(multiboot_info_ptr as *const BootInformationHeader) }
         .expect("invalid multiboot2 boot information");
     if let Some(mmap) = info.memory_map_tag() {
@@ -175,6 +177,8 @@ where
         return;
     }
 
+    // SAFETY: the Multiboot1 handoff provides `multiboot_info_ptr` as an
+    // unaligned-but-readable pointer to the fixed-layout `UefiMbInfo` header.
     let info = unsafe { ptr::read_unaligned(multiboot_info_ptr as *const UefiMbInfo) };
     if (info.flags & (1 << 6)) == 0 || info.mmap_addr == 0 || info.mmap_length == 0 {
         return;
@@ -183,6 +187,8 @@ where
     let mut cursor = info.mmap_addr as usize;
     let end = cursor + info.mmap_length as usize;
     while cursor + mem::size_of::<UefiMbMmapEntry>() <= end {
+        // SAFETY: the firmware-provided memory-map bounds were checked above, and
+        // each iteration only reads one fixed-size entry within that byte range.
         let entry = unsafe { ptr::read_unaligned(cursor as *const UefiMbMmapEntry) };
         if entry.len != 0 {
             let kind = match entry.typ {

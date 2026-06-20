@@ -11,6 +11,7 @@ use x86::msr;
 /// It is used to implement TLS (Thread Local Storage).
 #[inline]
 pub fn read_thread_pointer() -> usize {
+    // SAFETY: reading `IA32_FS_BASE` is side-effect free and returns the current TLS base.
     unsafe { msr::rdmsr(msr::IA32_FS_BASE) as usize }
 }
 
@@ -23,5 +24,6 @@ pub fn read_thread_pointer() -> usize {
 /// This function is unsafe as it changes the CPU states.
 #[inline]
 pub unsafe fn write_thread_pointer(val: usize) {
+    // SAFETY: the caller guarantees `val` is a valid TLS base to publish in `FS_BASE`.
     unsafe { msr::wrmsr(msr::IA32_FS_BASE, val as u64) }
 }

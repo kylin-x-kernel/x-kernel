@@ -30,6 +30,8 @@ impl khal::console::ConsoleIf for DriverConsoleIfImpl {
 
 pub fn init(io_port: u16) {
     SERIAL.init_once({
+        // SAFETY: `io_port` is the configured NS16550 base I/O port and is
+        // only used here to construct the early console device instance.
         let mut uart = unsafe { SerialPort::new(io_port) };
         uart.init();
         SpinNoIrq::new(uart)

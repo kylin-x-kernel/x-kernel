@@ -53,6 +53,8 @@ pub struct VirtIo9pDev<H: Hal, T: Transport> {
 // `SpinNoIrq` lock. The inner type is not auto Send/Sync due to PhantomData,
 // but it is safe to transfer across threads and share behind that lock.
 unsafe impl<H: Hal, T: Transport> Send for VirtIo9pDev<H, T> {}
+// SAFETY: shared references to VirtIo9pDev still funnel all device interaction
+// through the `SpinNoIrq` lock, preserving synchronized access.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIo9pDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {

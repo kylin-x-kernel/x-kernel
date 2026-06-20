@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::borrow::Cow;
-use core::{fmt, slice};
+use core::{cell::UnsafeCell, fmt, slice};
 
 use addr2line::Context;
 use klazy::Once;
@@ -15,8 +15,32 @@ use paste::paste;
 
 pub type DwarfReader = gimli::EndianSlice<'static, gimli::RunTimeEndian>;
 
-static mut CONTEXT: Option<Context<DwarfReader>> = None;
+struct DwarfContextStorage(UnsafeCell<Option<Context<DwarfReader>>>);
 
+impl DwarfContextStorage {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(None))
+    }
+
+    fn get(&self) -> Option<&Context<DwarfReader>> {
+        // SAFETY: the context is written at most once during `init()`, after
+        // which it is read-only. Callers only borrow it immutably.
+        unsafe { (*self.0.get()).as_ref() }
+    }
+
+    fn init_once(&self, ctx: Context<DwarfReader>) {
+        // SAFETY: `INIT_ONCE` ensures this write runs at most once before the
+        // context is ever observed. Subsequent access is read-only.
+        unsafe { *self.0.get() = Some(ctx) };
+    }
+}
+
+// SAFETY: initialization happens once under `INIT_ONCE`; afterwards the stored
+// context is treated as immutable shared state through `get()`.
+unsafe impl Sync for DwarfContextStorage {}
+
+#[cfg_attr(test, allow(dead_code))]
+static CONTEXT: DwarfContextStorage = DwarfContextStorage::new();
 #[cfg_attr(test, allow(dead_code))]
 static INIT_ONCE: Once<()> = Once::new();
 
@@ -36,17 +60,20 @@ macro_rules! generate_sections {
 
         paste! {
             $(
-                let $name = DwarfReader::new(
-                    unsafe {
+                let $name = {
+                    // SAFETY: The linker provides matching `__start_*`/`__stop_*`
+                    // symbols for each DWARF section, so this slice spans the
+                    // exact bytes of the embedded section.
+                    let section = unsafe {
                         core::slice::from_raw_parts(
                             [<__start_ $name>].as_ptr(),
                             [<__stop_ $name>]
                                 .as_ptr()
                                 .offset_from_unsigned([<__start_ $name>].as_ptr()),
                         )
-                    },
-                    gimli::RunTimeEndian::default(),
-                );
+                    };
+                    DwarfReader::new(section, gimli::RunTimeEndian::default())
+                };
             )*
         }
     };
@@ -133,9 +160,7 @@ pub fn init() {
 
             match init_result {
                 Ok(ctx) => {
-                    unsafe {
-                        CONTEXT = Some(ctx);
-                    }
+                    CONTEXT.init_once(ctx);
                     if degraded {
                         warn!(
                             "Initialized addr2line context after ignoring optional DWARF sections."
@@ -181,8 +206,7 @@ impl Iterator for FrameIter<'_> {
     type Item = (crate::Frame, addr2line::Frame<'static, DwarfReader>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        #[allow(static_mut_refs)]
-        let ctx = unsafe { CONTEXT.as_ref()? };
+        let ctx = CONTEXT.get()?;
 
         loop {
             if let Some((raw, inner)) = &mut self.inner
@@ -240,8 +264,7 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
         return Ok(());
     }
 
-    #[allow(static_mut_refs)]
-    if unsafe { CONTEXT.is_none() } {
+    if CONTEXT.get().is_none() {
         // In test mode, symbolication is not available
         #[cfg(test)]
         {
@@ -264,8 +287,9 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
         }
     }
 
-    #[allow(static_mut_refs)]
-    let ctx = unsafe { CONTEXT.as_ref().unwrap() };
+    let ctx = CONTEXT
+        .get()
+        .expect("checked above that DWARF context is initialized");
 
     // Symbolicate each raw frame individually and always preserve a raw fallback.
     for (i, raw) in frames.iter().enumerate() {
@@ -298,8 +322,7 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
 
 #[cfg(test)]
 pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) -> fmt::Result {
-    #[allow(static_mut_refs)]
-    if unsafe { CONTEXT.is_none() } {
+    if CONTEXT.get().is_none() {
         writeln!(f, "Symbolication disabled in test mode.")?;
         writeln!(f, "Raw frames:")?;
         for (i, frame) in frames.iter().enumerate() {

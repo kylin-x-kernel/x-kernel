@@ -58,8 +58,9 @@ impl<'a> LinuxFdt<'a> {
     }
 
     /// # Safety
-    /// This function performs a read to verify the magic value. If the pointer
-    /// is invalid this can result in undefined behavior.
+    ///
+    /// `ptr` must point to a readable flattened devicetree blob whose header
+    /// and total-size range remain accessible for the returned lifetime.
     ///
     /// Note: this function does ***not*** require that the data be 4-byte
     /// aligned
@@ -77,6 +78,8 @@ impl<'a> LinuxFdt<'a> {
             .totalsize
             .get() as usize;
 
+        // SAFETY: `ptr` was validated above and `real_size` comes from the FDT
+        // header at that address, so this slice covers the same live FDT blob.
         unsafe { Self::new(core::slice::from_raw_parts(ptr, real_size)) }
     }
 

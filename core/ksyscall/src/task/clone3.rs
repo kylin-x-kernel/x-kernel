@@ -20,6 +20,22 @@ use super::clone::{CloneFlags, CloneRequest};
 /// Minimum size of clone_args (the original v0 layout: flags through tls, 8 fields × 8 bytes).
 const CLONE_ARGS_SIZE_VER0: usize = 64;
 
+const fn zeroed_clone_args() -> clone_args {
+    clone_args {
+        flags: 0,
+        pidfd: 0,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: 0,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup: 0,
+    }
+}
+
 pub fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KResult<isize> {
     if size < CLONE_ARGS_SIZE_VER0 {
         return Err(KError::InvalidInput);
@@ -27,18 +43,18 @@ pub fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KResult<is
 
     // Zero-init then copy min(size, sizeof) bytes from user space so that
     // fields beyond the caller's struct version default to zero.
-    let mut kargs_uninit = MaybeUninit::<clone_args>::zeroed();
+    let mut kargs = zeroed_clone_args();
     let read_size = core::cmp::min(size, mem::size_of::<clone_args>());
+    // SAFETY: `kargs` is a fully initialized plain `#[repr(C)]` struct of
+    // integer fields. Reinterpreting its storage as writable `MaybeUninit<u8>`
+    // bytes is sound for an in-place copy from user memory.
     let dst = unsafe {
         core::slice::from_raw_parts_mut(
-            kargs_uninit.as_mut_ptr() as *mut MaybeUninit<u8>,
+            (&mut kargs as *mut clone_args).cast::<MaybeUninit<u8>>(),
             read_size,
         )
     };
     osvm::read_vm_mem(cl_args as *const u8, dst)?;
-    // SAFETY: clone_args is #[repr(C)] with all-u64 fields; every bit pattern is valid,
-    // and any unread tail was zero-filled above.
-    let kargs = unsafe { kargs_uninit.assume_init() };
 
     debug!(
         "sys_clone3 <= flags: {:#x}, exit_signal: {}, stack: {:#x}, stack_size: {:#x}, ptid: \

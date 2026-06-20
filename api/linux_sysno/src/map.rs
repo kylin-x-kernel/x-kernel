@@ -9,6 +9,11 @@ use crate::{SysnoSet, set::SysnoSetIter};
 
 type DataArray<T> = [MaybeUninit<T>; Sysno::table_size()];
 
+#[inline]
+const fn uninit_data_array<T>() -> DataArray<T> {
+    [const { MaybeUninit::uninit() }; Sysno::table_size()]
+}
+
 /// A map of syscalls to a type `T`.
 ///
 /// This provides constant-time lookup of syscalls within a static array.
@@ -73,7 +78,7 @@ impl<T> SysnoMap<T> {
     pub const fn new() -> Self {
         Self {
             is_set: SysnoSet::empty(),
-            data: unsafe { MaybeUninit::uninit().assume_init() },
+            data: uninit_data_array(),
         }
     }
 
@@ -85,6 +90,8 @@ impl<T> SysnoMap<T> {
     /// Clears the map, removing all syscalls.
     pub fn clear(&mut self) {
         for sysno in &self.is_set {
+            // SAFETY: `is_set` only contains syscalls whose corresponding slot
+            // has been initialized with a `T`.
             unsafe { self.data[get_idx(sysno)].assume_init_drop() }
         }
         self.is_set.clear();
@@ -117,6 +124,8 @@ impl<T> SysnoMap<T> {
         } else {
             // Was already in the set.
             let old = core::mem::replace(uninit, MaybeUninit::new(value));
+            // SAFETY: the slot was already marked initialized in `is_set`, so
+            // replacing it yields a previously initialized `T`.
             Some(unsafe { old.assume_init() })
         }
     }
@@ -126,6 +135,8 @@ impl<T> SysnoMap<T> {
     pub fn remove(&mut self, sysno: Sysno) -> Option<T> {
         if self.is_set.remove(sysno) {
             let old = core::mem::replace(&mut self.data[get_idx(sysno)], MaybeUninit::uninit());
+            // SAFETY: removing from `is_set` only succeeds for initialized
+            // slots, so `old` contains a live `T`.
             Some(unsafe { old.assume_init() })
         } else {
             None
@@ -136,6 +147,8 @@ impl<T> SysnoMap<T> {
     /// `None` if the syscall is not in the map.
     pub fn get(&self, sysno: Sysno) -> Option<&T> {
         if self.is_set.contains(sysno) {
+            // SAFETY: membership in `is_set` proves the slot was initialized
+            // and has not been removed since this shared borrow began.
             Some(unsafe { self.data[get_idx(sysno)].assume_init_ref() })
         } else {
             None
@@ -146,6 +159,8 @@ impl<T> SysnoMap<T> {
     /// Returns `None` if the syscall is not in the map.
     pub fn get_mut(&mut self, sysno: Sysno) -> Option<&mut T> {
         if self.is_set.contains(sysno) {
+            // SAFETY: membership in `is_set` proves the slot was initialized,
+            // and `&mut self` guarantees exclusive access to that slot.
             Some(unsafe { self.data[get_idx(sysno)].assume_init_mut() })
         } else {
             None
@@ -190,7 +205,7 @@ impl<T: Copy> SysnoMap<T> {
     /// assert_eq!(DESCRIPTIONS[Sysno::close], "close a file descriptor");
     /// ```
     pub const fn from_slice(slice: &[(Sysno, T)]) -> Self {
-        let mut data: DataArray<T> = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut data = uninit_data_array();
 
         let mut is_set = SysnoSet::empty();
 
@@ -238,6 +253,8 @@ impl<'a, T> Iterator for SysnoMapIter<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(|sysno| {
+            // SAFETY: the iterator only yields syscalls present in the
+            // underlying `SysnoSet`, which correspond to initialized slots.
             let value = unsafe { self.data[get_idx(sysno)].assume_init_ref() };
             (sysno, value)
         })
@@ -253,6 +270,8 @@ impl<'a, T> Iterator for SysnoMapValues<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         self.0
             .next()
+            // SAFETY: the iterator only yields syscalls present in the
+            // underlying `SysnoSet`, which correspond to initialized slots.
             .map(|sysno| unsafe { self.1[get_idx(sysno)].assume_init_ref() })
     }
 }
@@ -308,7 +327,8 @@ impl<T> core::ops::IndexMut<Sysno> for SysnoMap<T> {
 #[cfg(unittest)]
 mod tests {
     extern crate alloc;
-    use alloc::{format, vec::Vec};
+    use alloc::{format, string::String, vec::Vec};
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use unittest::{assert, assert_eq, def_test};
 
@@ -383,6 +403,64 @@ mod tests {
     }
 
     #[def_test]
+    fn test_drop_counts_for_non_copy_values() {
+        static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        struct DropTracker;
+
+        impl Drop for DropTracker {
+            fn drop(&mut self) {
+                DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        DROP_COUNT.store(0, Ordering::Relaxed);
+
+        {
+            let mut map = SysnoMap::new();
+
+            assert!(map.insert(Sysno::openat, DropTracker).is_none());
+            assert_eq!(DROP_COUNT.load(Ordering::Relaxed), 0);
+
+            let replaced = map.insert(Sysno::openat, DropTracker);
+            assert!(replaced.is_some());
+            drop(replaced);
+            assert_eq!(DROP_COUNT.load(Ordering::Relaxed), 1);
+
+            let removed = map.remove(Sysno::openat);
+            assert!(removed.is_some());
+            drop(removed);
+            assert_eq!(DROP_COUNT.load(Ordering::Relaxed), 2);
+
+            assert!(map.insert(Sysno::read, DropTracker).is_none());
+            assert!(map.insert(Sysno::close, DropTracker).is_none());
+            map.clear();
+            assert_eq!(DROP_COUNT.load(Ordering::Relaxed), 4);
+
+            assert!(map.insert(Sysno::write, DropTracker).is_none());
+            assert_eq!(DROP_COUNT.load(Ordering::Relaxed), 4);
+        }
+
+        assert_eq!(DROP_COUNT.load(Ordering::Relaxed), 5);
+    }
+
+    #[def_test]
+    fn test_clear() {
+        let mut map = SysnoMap::from_iter([
+            (Sysno::read, String::from("read")),
+            (Sysno::openat, String::from("openat")),
+        ]);
+        assert_eq!(map.count(), 2);
+
+        map.clear();
+
+        assert!(map.is_empty());
+        assert_eq!(map.count(), 0);
+        assert_eq!(map.get(Sysno::read), None);
+        assert_eq!(map.get(Sysno::openat), None);
+    }
+
+    #[def_test]
     fn test_debug() {
         let map = SysnoMap::from_iter([(Sysno::read, 42), (Sysno::openat, 10)]);
         let result = format!("{:?}", map);
@@ -403,9 +481,30 @@ mod tests {
     }
 
     #[def_test]
+    fn test_from_slice_and_values() {
+        static CALLBACKS: SysnoMap<u16> =
+            SysnoMap::from_slice(&[(Sysno::openat, 7), (Sysno::close, 11), (Sysno::read, 13)]);
+
+        assert_eq!(CALLBACKS.get(Sysno::openat), Some(&7));
+        assert_eq!(CALLBACKS.get(Sysno::close), Some(&11));
+        assert_eq!(CALLBACKS.get(Sysno::read), Some(&13));
+        assert_eq!(CALLBACKS.values().copied().sum::<u16>(), 31);
+    }
+
+    #[def_test]
     fn test_into_iter() {
         let map = SysnoMap::from_iter([(Sysno::read, 42), (Sysno::openat, 10)]);
         assert_eq!((&map).into_iter().count(), 2);
+    }
+
+    #[def_test]
+    fn test_iter_reports_expected_entries() {
+        let map = SysnoMap::from_iter([(Sysno::read, 42), (Sysno::openat, 10)]);
+        let entries = map.iter().collect::<Vec<_>>();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&(Sysno::read, &42)));
+        assert!(entries.contains(&(Sysno::openat, &10)));
     }
 
     #[def_test]

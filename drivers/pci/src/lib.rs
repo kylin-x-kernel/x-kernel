@@ -164,8 +164,10 @@ impl PciBus {
         }
         let ecam_size = pci_ecam_size(bus_end, cam);
         let base_vaddr = iomap_mmio(config_base as usize, ecam_size, "pci-ecam")?;
+        // SAFETY: `base_vaddr` maps the entire ECAM window described by `cam`.
         let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
         let root = PciRoot::new(mmio_cam);
+        // SAFETY: `base_vaddr` maps the entire ECAM window described by `cam`.
         let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
         Ok(Self {
             root,
@@ -181,8 +183,10 @@ impl PciBus {
         let bus_end = kbuild_config::PCI_BUS_END as u8;
         let ecam_size = pci_ecam_size(bus_end, cam);
         let base_vaddr = iomap_mmio(config_base as usize, ecam_size, "pci-ecam")?;
+        // SAFETY: `base_vaddr` maps the entire static ECAM window described by `cam`.
         let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
         let root = PciRoot::new(mmio_cam);
+        // SAFETY: `base_vaddr` maps the entire static ECAM window described by `cam`.
         let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
         Ok(Self {
             root,
@@ -277,14 +281,9 @@ pub fn legacy_interrupt_route(
 /// [`PciRoot`]. Both types reference the same underlying memory region.
 #[derive(Clone, Copy)]
 pub struct PciConfigAccess {
-    mmio_base: *mut u32,
+    mmio_base: usize,
     cam: Cam,
 }
-
-// SAFETY: PciConfigAccess is used like PciRoot: the raw pointer points to a
-// static MMIO mapping that is valid for the lifetime of the program.
-unsafe impl Send for PciConfigAccess {}
-unsafe impl Sync for PciConfigAccess {}
 
 impl PciConfigAccess {
     /// Creates a new `PciConfigAccess` from a raw MMIO base and CAM type.
@@ -293,11 +292,14 @@ impl PciConfigAccess {
     ///
     /// `mmio_base` must meet the same requirements as for [`PciRoot::new`]:
     /// it must be a valid, 4-byte-aligned, appropriately-mapped MMIO pointer
-    /// valid for the lifetime of the program.
+    /// valid for the lifetime of the program. The mapped ECAM window must be
+    /// large enough for every later BDF/register access performed through this
+    /// wrapper, and no other abstraction may violate MMIO aliasing rules for
+    /// the same config window.
     pub unsafe fn new(mmio_base: *mut u8, cam: Cam) -> Self {
         assert!(mmio_base as usize & 0x3 == 0);
         Self {
-            mmio_base: mmio_base as *mut u32,
+            mmio_base: mmio_base as usize,
             cam,
         }
     }
@@ -322,7 +324,11 @@ impl PciConfigAccess {
         let address = self.cam_offset(device_function, register_offset);
         // SAFETY: The pointer arithmetic stays within the MMIO window because
         // cam_offset() produces offsets bounded by Cam::size().
-        unsafe { self.mmio_base.add((address >> 2) as usize).read_volatile() }
+        unsafe {
+            (self.mmio_base as *mut u32)
+                .add((address >> 2) as usize)
+                .read_volatile()
+        }
     }
 
     /// Writes a 32-bit word to PCI configuration space.
@@ -332,7 +338,7 @@ impl PciConfigAccess {
         let address = self.cam_offset(device_function, register_offset);
         // SAFETY: Same as read_word.
         unsafe {
-            self.mmio_base
+            (self.mmio_base as *mut u32)
                 .add((address >> 2) as usize)
                 .write_volatile(data);
         }

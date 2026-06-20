@@ -228,11 +228,40 @@ impl fmt::Debug for SignalSet {
 pub struct SignalInfo(pub siginfo_t);
 
 impl SignalInfo {
+    fn empty() -> Self {
+        // SAFETY: Linux `siginfo_t` uses an integer/union payload ABI where an
+        // all-zero bit pattern is a valid baseline state. Constructors below
+        // immediately set the active header fields and any payload they expose.
+        unsafe { mem::zeroed() }
+    }
+
+    fn header(&self) -> &linux_raw_sys::general::siginfo__bindgen_ty_1__bindgen_ty_1 {
+        // SAFETY: bindgen preserves the Linux `siginfo_t` ABI. The common
+        // header lives at the same offset regardless of the active union arm.
+        unsafe { &self.0.__bindgen_anon_1.__bindgen_anon_1 }
+    }
+
+    fn header_mut(&mut self) -> &mut linux_raw_sys::general::siginfo__bindgen_ty_1__bindgen_ty_1 {
+        // SAFETY: constructors and setters update the common header in place,
+        // which is valid for every `siginfo_t` union arm.
+        unsafe { &mut self.0.__bindgen_anon_1.__bindgen_anon_1 }
+    }
+
+    fn sifields(&self) -> &linux_raw_sys::general::__sifields {
+        // SAFETY: callers only read the union arm selected by `si_code` or by
+        // the constructor that populated the payload.
+        &self.header()._sifields
+    }
+
+    fn sifields_mut(&mut self) -> &mut linux_raw_sys::general::__sifields {
+        // SAFETY: constructors/setters write the payload arm that they select
+        // before any reader can observe the resulting `SignalInfo`.
+        &mut self.header_mut()._sifields
+    }
+
     /// Construct a kernel-originated signal.
     pub fn new_kernel(signo: Signo) -> Self {
-        // SAFETY: siginfo_t is a C struct where all-zeroes is a valid
-        // representation.  Fields are immediately overwritten below.
-        let mut result: Self = unsafe { mem::zeroed() };
+        let mut result = Self::empty();
         result.set_signo(signo);
         result.set_code(SI_KERNEL as _);
         result
@@ -240,18 +269,10 @@ impl SignalInfo {
 
     /// Construct a user-originated signal with a code and pid.
     pub fn new_user(signo: Signo, code: i32, pid: u32) -> Self {
-        // SAFETY: siginfo_t is a C struct where all-zeroes is a valid
-        // representation.  Fields are immediately overwritten below.
-        let mut result: Self = unsafe { mem::zeroed() };
+        let mut result = Self::empty();
         result.set_signo(signo);
         result.set_code(code);
-        result
-            .0
-            .__bindgen_anon_1
-            .__bindgen_anon_1
-            ._sifields
-            ._sigchld
-            ._pid = pid as _;
+        result.sifields_mut()._sigchld._pid = pid as _;
         result
     }
 
@@ -263,9 +284,7 @@ impl SignalInfo {
         value: k_sigval,
         signal_seq: u32,
     ) -> Self {
-        // SAFETY: siginfo_t is a C struct where all-zeroes is a valid
-        // representation.  Fields are immediately overwritten below.
-        let mut result: Self = unsafe { mem::zeroed() };
+        let mut result = Self::empty();
         result.set_signo(signo);
         result.set_code(SI_TIMER as _);
         result.set_timer_fields(timer_id, overrun, value, signal_seq);
@@ -274,75 +293,49 @@ impl SignalInfo {
 
     /// Returns the signal number.
     pub fn signo(&self) -> Signo {
-        // SAFETY: bindgen preserves the union layout; reading si_signo through
-        // the anonymous union is a direct field access matching the C ABI.
-        unsafe { Signo::from_repr(self.0.__bindgen_anon_1.__bindgen_anon_1.si_signo as _).unwrap() }
+        Signo::from_repr(self.header().si_signo as _).unwrap()
     }
 
     /// Updates the signal number.
     pub fn set_signo(&mut self, signo: Signo) {
-        self.0.__bindgen_anon_1.__bindgen_anon_1.si_signo = signo as _;
+        self.header_mut().si_signo = signo as _;
     }
 
     /// Returns the signal code.
     pub fn code(&self) -> i32 {
-        // SAFETY: bindgen preserves the union layout; si_code occupies the
-        // same offset in every union arm.
-        unsafe { self.0.__bindgen_anon_1.__bindgen_anon_1.si_code }
+        self.header().si_code
     }
 
     /// Updates the signal code.
     pub fn set_code(&mut self, code: i32) {
-        self.0.__bindgen_anon_1.__bindgen_anon_1.si_code = code;
+        self.header_mut().si_code = code;
     }
 
     /// Returns the stored errno value.
     pub fn errno(&self) -> i32 {
-        // SAFETY: The union layout matches Linux's siginfo_t definition. bindgen keeps this layout,
-        // so it is safe to read the errno field through the anonymous union.
-        unsafe { self.0.__bindgen_anon_1.__bindgen_anon_1.si_errno }
+        self.header().si_errno
     }
 
     /// Returns the timer ID carried by a `SI_TIMER` signal.
     pub fn timer_id(&self) -> Option<i32> {
-        (self.code() == SI_TIMER as _).then_some(unsafe {
-            // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union
-            // arm was populated by `set_timer_fields`.
-            self.0
-                .__bindgen_anon_1
-                .__bindgen_anon_1
-                ._sifields
-                ._timer
-                ._tid
-        })
+        // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union arm
+        // was populated by `set_timer_fields`.
+        (self.code() == SI_TIMER as _).then_some(unsafe { self.sifields()._timer._tid })
     }
 
     /// Returns the overrun count carried by a `SI_TIMER` signal.
     pub fn timer_overrun(&self) -> Option<i32> {
-        (self.code() == SI_TIMER as _).then_some(unsafe {
-            // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union
-            // arm was populated by `set_timer_fields`.
-            self.0
-                .__bindgen_anon_1
-                .__bindgen_anon_1
-                ._sifields
-                ._timer
-                ._overrun
-        })
+        // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union arm
+        // was populated by `set_timer_fields`.
+        (self.code() == SI_TIMER as _).then_some(unsafe { self.sifields()._timer._overrun })
     }
 
     /// Returns the timer sequence carried by a `SI_TIMER` signal.
     pub fn timer_signal_seq(&self) -> Option<u32> {
-        (self.code() == SI_TIMER as _).then_some(unsafe {
-            // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union
-            // arm was populated by `set_timer_fields`.
-            self.0
-                .__bindgen_anon_1
-                .__bindgen_anon_1
-                ._sifields
-                ._timer
-                ._sys_private as u32
-        })
+        // SAFETY: guarded by SI_TIMER check, meaning the `_timer` union arm
+        // was populated by `set_timer_fields`.
+        (self.code() == SI_TIMER as _)
+            .then_some(unsafe { self.sifields()._timer._sys_private as u32 })
     }
 
     /// Returns the `sigval` payload carried by this signal, if present.
@@ -352,60 +345,33 @@ impl SignalInfo {
     /// do not.
     pub fn sigval(&self) -> Option<k_sigval> {
         match self.code() {
-            code if code == SI_TIMER as _ => Some(unsafe {
-                // SAFETY: SI_TIMER signals populate the `_timer._sigval` union
-                // arm during construction (see `set_timer_fields`).
-                self.0
-                    .__bindgen_anon_1
-                    .__bindgen_anon_1
-                    ._sifields
-                    ._timer
-                    ._sigval
-            }),
-            code if code < 0 => Some(unsafe {
-                // SAFETY: Negative si_code indicates a user-originated signal
-                // (SI_QUEUE, SI_MESGQ, SI_ASYNCIO) whose `_rt._sigval` field
-                // was populated by the sender.
-                self.0
-                    .__bindgen_anon_1
-                    .__bindgen_anon_1
-                    ._sifields
-                    ._rt
-                    ._sigval
-            }),
+            // SAFETY: SI_TIMER signals populate the `_timer._sigval` union arm
+            // during construction (see `set_timer_fields`).
+            code if code == SI_TIMER as _ => Some(unsafe { self.sifields()._timer._sigval }),
+            // SAFETY: negative `si_code` indicates a user-originated signal
+            // (SI_QUEUE, SI_MESGQ, SI_ASYNCIO) whose `_rt._sigval` field was
+            // populated by the sender.
+            code if code < 0 => Some(unsafe { self.sifields()._rt._sigval }),
             _ => None,
         }
     }
 
     fn set_timer_fields(&mut self, timer_id: i32, overrun: i32, value: k_sigval, signal_seq: u32) {
-        self.0
-            .__bindgen_anon_1
-            .__bindgen_anon_1
-            ._sifields
-            ._timer
-            ._tid = timer_id;
-        self.0
-            .__bindgen_anon_1
-            .__bindgen_anon_1
-            ._sifields
-            ._timer
-            ._overrun = overrun;
-        self.0
-            .__bindgen_anon_1
-            .__bindgen_anon_1
-            ._sifields
-            ._timer
-            ._sigval = value;
-        self.0
-            .__bindgen_anon_1
-            .__bindgen_anon_1
-            ._sifields
-            ._timer
-            ._sys_private = signal_seq as _;
+        self.sifields_mut()._timer._tid = timer_id;
+        self.sifields_mut()._timer._overrun = overrun;
+        self.sifields_mut()._timer._sigval = value;
+        self.sifields_mut()._timer._sys_private = signal_seq as _;
     }
 }
 
+// SAFETY: `SignalInfo` is a by-value Linux `siginfo_t` payload. The kernel
+// treats the embedded pointer-like fields as opaque metadata bits instead of
+// dereferenceable Rust aliases, so moving the payload between threads does not
+// transfer ownership of thread-affine memory.
 unsafe impl Send for SignalInfo {}
+// SAFETY: shared references only expose read-only decoding helpers over the
+// stored ABI payload. Mutation still requires `&mut self`, so sharing
+// `SignalInfo` between threads does not permit unsynchronized mutation.
 unsafe impl Sync for SignalInfo {}
 
 impl fmt::Debug for SignalInfo {

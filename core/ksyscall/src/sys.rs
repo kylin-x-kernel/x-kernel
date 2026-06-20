@@ -22,10 +22,11 @@ use posix_types::UserPtr;
 
 const fn pad_str(info: &str) -> [c_char; 65] {
     let mut data: [c_char; 65] = [0; 65];
-    // this needs #![feature(const_copy_from_slice)]
-    // data[..info.len()].copy_from_slice(info.as_bytes());
-    unsafe {
-        core::ptr::copy_nonoverlapping(info.as_ptr().cast(), data.as_mut_ptr(), info.len());
+    let bytes = info.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        data[idx] = bytes[idx] as c_char;
+        idx += 1;
     }
     data
 }
@@ -48,8 +49,22 @@ pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
 
 /// Get general system information such as process count and memory unit
 pub fn sys_sysinfo(info: UserPtr<sysinfo>) -> KResult<isize> {
-    // FIXME: Zeroable
-    let mut kinfo: sysinfo = unsafe { core::mem::zeroed() };
+    let mut kinfo = sysinfo {
+        uptime: 0,
+        loads: [0; 3],
+        totalram: 0,
+        freeram: 0,
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs: 0,
+        pad: 0,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 0,
+        _f: linux_raw_sys::system::__IncompleteArrayField::new(),
+    };
     kinfo.procs = processes().len() as _;
     kinfo.mem_unit = 1;
     info.write_vm(kinfo)?;

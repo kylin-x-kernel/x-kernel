@@ -139,16 +139,33 @@ impl TimeValueLike for __kernel_sock_timeval {
     }
 }
 
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserRead for itimerspec {}
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserRead for itimerval {}
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserRead for timespec {}
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserRead for timeval {}
 #[cfg(target_arch = "x86_64")]
+// SAFETY: `utimbuf` is a POD syscall carrier with explicit integer fields.
 unsafe impl UserRead for utimbuf {}
 
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserWrite for itimerspec {}
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserWrite for itimerval {}
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserWrite for timespec {}
+// SAFETY: these time structs are POD syscall carriers whose fields are validated
+// by the conversion helpers when semantic checks are needed.
 unsafe impl UserWrite for timeval {}
 
 #[cfg(target_arch = "x86_64")]

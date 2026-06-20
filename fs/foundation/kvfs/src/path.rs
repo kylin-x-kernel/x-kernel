@@ -162,6 +162,8 @@ pub struct Path {
 
 impl Path {
     pub fn new<S: AsRef<str> + ?Sized>(s: &S) -> &Path {
+        // SAFETY: `Path` is `repr(transparent)` over `str`, so shared references
+        // to `str` and `Path` have identical layout and lifetime.
         unsafe { &*(s.as_ref() as *const str as *const Path) }
     }
 
@@ -263,6 +265,8 @@ impl From<&Path> for Arc<Path> {
     #[inline]
     fn from(v: &Path) -> Arc<Path> {
         let arc = Arc::<str>::from(&v.inner);
+        // SAFETY: `Path` is `repr(transparent)` over `str`, so converting the
+        // `Arc<str>` allocation back to `Arc<Path>` preserves layout and ownership.
         unsafe { Arc::from_raw(Arc::into_raw(arc) as *const Path) }
     }
 }

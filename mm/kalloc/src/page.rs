@@ -65,6 +65,8 @@ impl GlobalPage {
 
     /// Fills the allocated pages with a specific byte value.
     pub fn fill(&mut self, byte: u8) {
+        // SAFETY: `self` owns a contiguous allocation of `self.size()` bytes
+        // starting at `self.as_mut_ptr()`, so writing that full range is valid.
         unsafe { core::ptr::write_bytes(self.as_mut_ptr(), byte, self.size()) }
     }
 
@@ -79,11 +81,15 @@ impl GlobalPage {
     // not be interpreted as literal duplication.
     /// Returns a slice for reading data.
     pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: `self` owns a live allocation of `self.size()` bytes
+        // starting at `self.as_ptr()`, and this method returns a shared view.
         unsafe { core::slice::from_raw_parts(self.as_ptr(), self.size()) }
     }
 
     /// Returns a mutable slice for writing data.
     pub fn as_slice_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `&mut self` guarantees exclusive access to the live
+        // allocation of `self.size()` bytes starting at `self.as_mut_ptr()`.
         unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), self.size()) }
     }
 

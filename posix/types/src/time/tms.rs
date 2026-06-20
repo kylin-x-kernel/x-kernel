@@ -18,4 +18,5 @@ pub struct Tms {
     pub tms_cstime: usize,
 }
 
+// SAFETY: `Tms` is a POD syscall output carrier with explicit integer fields.
 unsafe impl UserWrite for Tms {}

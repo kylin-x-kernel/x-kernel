@@ -18,6 +18,8 @@ use crate::{buffer, platform, profiling, types::*};
 ///
 /// `profile_data` must point to a buffer of at least `profile_size` bytes.
 pub unsafe fn check_compatibility(profile_data: *const u8, profile_size: u64) -> i32 {
+    // SAFETY: the caller provides a readable profile buffer of `profile_size`
+    // bytes, and this routine bounds-checks every typed access within it.
     unsafe {
         if profile_size < size_of::<LlvmProfileHeader>() as u64 {
             return -1;
@@ -83,6 +85,8 @@ pub unsafe fn check_compatibility(profile_data: *const u8, profile_size: u64) ->
 ///
 /// `profile_data` must point to a compatible profile buffer of `profile_size` bytes.
 pub unsafe fn merge_from_buffer(profile_data: *const u8, profile_size: u64) -> i32 {
+    // SAFETY: the caller provides a readable compatible profile buffer, and the
+    // routine only mutates the in-memory profiling sections owned by this runtime.
     unsafe {
         if check_compatibility(profile_data, profile_size) != 0 {
             return -1;
@@ -134,6 +138,8 @@ pub unsafe fn merge_from_buffer(profile_data: *const u8, profile_size: u64) -> i
 /// Computes a signature for the current load module.
 /// Mirrors lprofGetLoadModuleSignature in InstrProfilingMerge.c.
 pub fn get_load_module_signature() -> u64 {
+    // SAFETY: the profiling section boundary helpers return process-lifetime
+    // storage owned by this runtime, and the computation is read-only.
     unsafe {
         let version = profiling::get_version();
         let num_counters =

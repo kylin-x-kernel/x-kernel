@@ -24,6 +24,8 @@ fn decode_test_result(code: u8) -> TestResult {
 }
 
 extern "C" fn test_entry(test: *const TestDescriptor) -> u8 {
+    // SAFETY: `test_entry` is only called from `call_on_stack`, which passes a
+    // valid pointer to a live `TestDescriptor`.
     let result = unsafe { ((*test).test_fn)() };
     encode_test_result(result)
 }
@@ -38,6 +40,8 @@ extern "C" fn test_entry(test: *const TestDescriptor) -> u8 {
 /// - The caller must ensure no concurrent use of the same stack memory.
 /// - `test` must remain valid for the whole duration of this call.
 pub unsafe fn run_test_on_user_stack(test: &TestDescriptor, stack_top: usize) -> TestResult {
+    // SAFETY: The caller upholds the temporary-stack contract, and `test`
+    // remains live for the duration of the stack-switched call.
     let code = unsafe { arch::call_on_stack(stack_top, test_entry, test as *const TestDescriptor) };
     decode_test_result(code)
 }

@@ -164,17 +164,7 @@ impl Transport for MockTransport {
             return Err(Error::ConfigSpaceTooSmall);
         }
 
-        let mut value = core::mem::MaybeUninit::<T>::uninit();
-        // SAFETY: Bounds check above ensures `offset + size <= config.len()`.
-        // `T: FromBytes` guarantees any bit pattern is valid.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                config.as_ptr().add(offset),
-                value.as_mut_ptr() as *mut u8,
-                size,
-            );
-            Ok(value.assume_init())
-        }
+        T::read_from_bytes(&config[offset..offset + size]).map_err(|_| Error::ConfigSpaceTooSmall)
     }
 
     fn write_config_space<T: IntoBytes + Immutable>(

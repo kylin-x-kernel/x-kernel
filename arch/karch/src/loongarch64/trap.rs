@@ -35,6 +35,8 @@ pub unsafe fn write_trap_vector_base(addr: usize) {
 /// This changes trap-entry state for the current CPU.
 #[inline]
 pub unsafe fn init_trap_state(addr: usize) {
+    // SAFETY: this clears the current CPU's scratch trap CSR and then programs
+    // the caller-provided trap vector base for that same CPU.
     unsafe {
         asm!("csrwr $r0, 0x30");
         write_trap_vector_base(addr);

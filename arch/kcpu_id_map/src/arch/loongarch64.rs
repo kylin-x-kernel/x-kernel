@@ -30,6 +30,8 @@ pub fn init_boot_cpu_id_map(dtb_paddr: usize) {
     }
 
     let dtb_vaddr = kaddr_layout::p2v(dtb_paddr) as *const u8;
+    // SAFETY: `dtb_paddr` comes from boot firmware; after `p2v` it points to
+    // the readable DTB blob used for CPU enumeration during early boot.
     let fdt = unsafe { of::LinuxFdt::from_ptr(dtb_vaddr) }
         .expect("LoongArch boot CPU mapping requires a valid device tree");
     load_raw_cpu_ids_from_fdt(&fdt);

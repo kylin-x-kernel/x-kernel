@@ -60,11 +60,15 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
         let operand = (vaddr.as_usize() >> 12) & VA_MASK;
 
         #[cfg(not(feature = "arm-el2"))]
+        // SAFETY: `operand` is the architected VA operand format for this TLBI
+        // instruction on the current CPU.
         unsafe {
             // TLB Invalidate by VA, All ASID, EL1, Inner Shareable
             asm!("tlbi vaae1is, {}; dsb sy; isb", in(reg) operand)
         }
         #[cfg(feature = "arm-el2")]
+        // SAFETY: `operand` is the architected VA operand format for this TLBI
+        // instruction on the current CPU.
         unsafe {
             // TLB Invalidate by VA, EL2, Inner Shareable
             asm!("tlbi vae2is, {}; dsb sy; isb", in(reg) operand)
@@ -72,11 +76,15 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     } else {
         // flush the entire TLB
         #[cfg(not(feature = "arm-el2"))]
+        // SAFETY: This is the architected whole-TLB invalidation sequence for
+        // the current CPU.
         unsafe {
             // TLB Invalidate by VMID, All at stage 1, EL1, Inner Shareable
             asm!("dsb ishst; tlbi vmalle1is; dsb ish; isb")
         }
         #[cfg(feature = "arm-el2")]
+        // SAFETY: This is the architected whole-TLB invalidation sequence for
+        // the current CPU while running at EL2.
         unsafe {
             // TLB Invalidate All, EL2, Inner Shareable
             asm!("tlbi alle2is; dsb ish; isb")

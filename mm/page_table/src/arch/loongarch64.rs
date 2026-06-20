@@ -107,6 +107,16 @@ pub struct La64PageEntry(u64);
 
 impl La64PageEntry {
     const PADDR_MASK: u64 = 0x0000_ffff_ffff_f000;
+
+    /// Constructs a PTE from a raw hardware encoding.
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the raw hardware encoding of this PTE.
+    pub const fn as_raw(&self) -> u64 {
+        self.0
+    }
 }
 
 impl PageTableEntry for La64PageEntry {

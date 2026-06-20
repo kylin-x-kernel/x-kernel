@@ -16,16 +16,20 @@ const BLOCK_SIZE: usize = 512;
 /// The `SpinNoPreempt` lock serializes all block reads and writes so the
 /// device can be shared behind a `&self` interface. `SpinNoPreempt` is
 /// sufficient because this is a pure-software driver with no IRQ interaction.
-/// `len` caches the buffer length so size queries do not need to take the lock.
+/// `base_addr`/`len` describe the backing allocation without storing a global
+/// `&'static mut [u8]`; the lock serializes temporary mutable slice
+/// reconstruction for each I/O operation.
 pub struct RamDisk {
-    data: SpinNoPreempt<&'static mut [u8]>,
+    lock: SpinNoPreempt<()>,
+    base_addr: usize,
     len: usize,
 }
 
 impl Default for RamDisk {
     fn default() -> Self {
         RamDisk {
-            data: SpinNoPreempt::new(&mut []),
+            lock: SpinNoPreempt::new(()),
+            base_addr: (&mut []).as_mut_ptr().addr(),
             len: 0,
         }
     }
@@ -50,9 +54,20 @@ impl RamDisk {
         );
         let len = buffer.len();
         RamDisk {
-            data: SpinNoPreempt::new(buffer),
+            lock: SpinNoPreempt::new(()),
+            base_addr: buffer.as_mut_ptr().addr(),
             len,
         }
+    }
+
+    fn with_data<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> R {
+        let _guard = self.lock.lock();
+        // SAFETY: `base_addr..base_addr+len` is the original static backing
+        // buffer provided at construction. The spinlock serializes all
+        // temporary mutable slice reconstruction, so no two mutable borrows of
+        // the same storage can coexist.
+        let data = unsafe { core::slice::from_raw_parts_mut(self.base_addr as *mut u8, self.len) };
+        f(data)
     }
 }
 
@@ -90,8 +105,9 @@ impl BlockDevice for RamDisk {
             return Err(DriverError::Io);
         }
 
-        let data = self.data.lock();
-        buffer.copy_from_slice(&data[offset..offset + buffer.len()]);
+        self.with_data(|data| {
+            buffer.copy_from_slice(&data[offset..offset + buffer.len()]);
+        });
         Ok(())
     }
 
@@ -106,8 +122,9 @@ impl BlockDevice for RamDisk {
             return Err(DriverError::Io);
         }
 
-        let mut data = self.data.lock();
-        data[offset..offset + buffer.len()].copy_from_slice(buffer);
+        self.with_data(|data| {
+            data[offset..offset + buffer.len()].copy_from_slice(buffer);
+        });
         Ok(())
     }
 
@@ -131,11 +148,16 @@ pub mod tests_ramdisk_static {
     // Helper function to create aligned static buffer for testing
     fn create_aligned_buffer(size: usize) -> &'static mut [u8] {
         let layout = Layout::from_size_align(size, 512).unwrap();
+        // SAFETY: `layout` is constructed from validated size/alignment values,
+        // and the returned pointer is only used after the null check below.
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
             panic!("Failed to allocate memory");
         }
 
+        // SAFETY: `ptr` points to `size` bytes allocated by `alloc(layout)`,
+        // so zeroing that range and reborrowing it as a mutable slice is valid
+        // for the leaked test buffer lifetime.
         unsafe {
             ptr.write_bytes(0, size);
             core::slice::from_raw_parts_mut(ptr, size)

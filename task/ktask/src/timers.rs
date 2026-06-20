@@ -19,6 +19,8 @@ where
     F: Fn(TimeValue) + Send + Sync + 'static,
 {
     let _g = NoPreemptIrqSave::new();
+    // SAFETY: the per-CPU callback vector is accessed on the current CPU while
+    // preemption and interrupts are masked by `NoPreemptIrqSave`.
     unsafe {
         TIMER_CALLBACKS
             .current_ref_mut_raw()
@@ -27,6 +29,8 @@ where
 }
 
 pub(crate) fn check_events() {
+    // SAFETY: iterates the current CPU's callback vector while running in the
+    // timer path that owns this per-CPU storage.
     for callback in unsafe { TIMER_CALLBACKS.current_ref_raw().iter() } {
         callback(wall_time());
     }

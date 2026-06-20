@@ -97,4 +97,6 @@ pub struct msginfo {
     pub pad: u16,
 }
 
+// SAFETY: `msginfo` is a POD IPC info carrier whose bytes can be written back
+// to user memory directly.
 unsafe impl UserWrite for msginfo {}

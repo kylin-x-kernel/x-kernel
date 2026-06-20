@@ -45,6 +45,23 @@ struct PipeState {
     writers: usize,
 }
 
+fn write_into_vacant_ringbuf(state: &mut PipeState, src: &mut IoSrc) -> KResult<usize> {
+    let (left, right) = state.buffer.vacant_slices_mut();
+
+    // SAFETY: `vacant_slices_mut` exposes writable spare capacity, and `IoSrc`
+    // only initializes the bytes it reports as written.
+    let mut count = unsafe { src.read(left.assume_init_mut()) }?;
+    if count >= left.len() {
+        // SAFETY: same as above for the second vacant slice.
+        count += unsafe { src.read(right.assume_init_mut()) }?;
+    }
+
+    // SAFETY: `count` is exactly the number of bytes just initialized in the
+    // vacant slices, so advancing by it only publishes initialized bytes.
+    unsafe { state.buffer.advance_write_index(count) };
+    Ok(count)
+}
+
 /// Read endpoint for a pipe object.
 pub struct PipeReadEnd {
     pipe: Arc<PipeObject>,
@@ -223,21 +240,7 @@ impl PipeObject {
                     if total_written == 0 && size <= PIPE_BUF && available < size {
                         return Err(KError::WouldBlock);
                     }
-
-                    let (left, right) = state.buffer.vacant_slices_mut();
-
-                    // SAFETY: `vacant_slices_mut` exposes writable spare capacity, and `IoSrc`
-                    // only initializes the bytes it reports as written.
-                    let mut count = src.read(unsafe { left.assume_init_mut() })?;
-                    if count >= left.len() {
-                        // SAFETY: same as above for the second vacant slice.
-                        count += src.read(unsafe { right.assume_init_mut() })?;
-                    }
-
-                    // SAFETY: `count` is exactly the number of bytes just initialized in the
-                    // vacant slices, so advancing by it only publishes initialized bytes.
-                    unsafe { state.buffer.advance_write_index(count) };
-                    Some(count)
+                    Some(write_into_vacant_ringbuf(&mut state, src)?)
                 }
             };
 

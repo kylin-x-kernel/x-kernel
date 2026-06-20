@@ -32,12 +32,24 @@ impl Rusage {
 
 impl From<Rusage> for rusage {
     fn from(value: Rusage) -> Self {
-        // SAFETY: `rusage` is a POD struct from `linux_raw_sys`. All-zeroes is a valid
-        // initial state for every field (integer counters become 0, timevals become 0).
-        let mut usage: rusage = unsafe { core::mem::zeroed() };
-        usage.ru_utime = __kernel_old_timeval::from_time_value(value.utime);
-        usage.ru_stime = __kernel_old_timeval::from_time_value(value.stime);
-        usage
+        Self {
+            ru_utime: __kernel_old_timeval::from_time_value(value.utime),
+            ru_stime: __kernel_old_timeval::from_time_value(value.stime),
+            ru_maxrss: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        }
     }
 }
 

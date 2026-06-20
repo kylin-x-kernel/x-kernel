@@ -30,8 +30,12 @@ impl SysCtrl for PowerImpl {
             khal::kprintln!("System will reboot, press any key to continue ...");
             while console_driver::getchar().is_none() {}
             khal::kprintln!("Rebooting ...");
+            // SAFETY: port `0x64` is the standard x86 keyboard-controller command
+            // port, and writing `0xfe` requests a CPU reset on this platform.
             unsafe { PortWriteOnly::new(0x64).write(0xfeu8) };
         } else {
+            // SAFETY: port `0x604` is the QEMU/ACPI power-management shutdown port
+            // for this platform, and writing `0x2000` requests power-off.
             unsafe { PortWriteOnly::new(0x604).write(0x2000u16) };
         }
         karch::stop_cpu();

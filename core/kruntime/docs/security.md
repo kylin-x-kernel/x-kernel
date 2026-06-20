@@ -17,7 +17,7 @@ kernel-boot / 平台引导
 │  │ extern "C" main                         │ │
 │  │ _stext / _etext (ZST 取址)              │ │
 │  │ init_cb: .init_array 函数指针调用        │ │
-│  │ SECONDARY_BOOT_STACK + boot_ap          │ │
+│  │ SecondaryBootStacks::stack_top + boot_ap│ │
 │  └─────────────────────────────────────────┘ │
 └─────────────────────────────────────────────┘
    │
@@ -60,15 +60,13 @@ unsafe extern "C" {
 
 **风险**：若段被污染，可能跳转到任意地址（高危）。
 
-### 4. `start_secondary_cpus` 中的栈指针（`mp.rs`）
+### 4. `SecondaryBootStacks::stack_top` 中的栈指针（`mp.rs`）
 
 ```rust
-VirtAddr::from(unsafe {
-    SECONDARY_BOOT_STACK[...].as_ptr_range().end as usize
-})
+SECONDARY_BOOT_STACKS.stack_top(...)
 ```
 
-**不变量**：`SECONDARY_BOOT_STACK` 在 `.bss.stack`，大小 `TASK_STACK_SIZE`；仅主核在 AP 启动前计算栈顶；每个 AP 使用独立槽位。
+**不变量**：`SecondaryBootStacks` 在 `.bss.stack`，大小 `TASK_STACK_SIZE`；仅主核在 AP 启动前通过 `stack_top()` 计算栈顶；每个 AP 使用独立槽位，包装类型不向外暴露内部数组引用。
 
 ### 5. `lang_items` panic handler
 
@@ -91,7 +89,7 @@ VirtAddr::from(unsafe {
 | T-01 | `.init_array` 槽位非函数指针， `init_cb` 跳转到垃圾地址 | 高 | 链接脚本错误、内存破坏、恶意对象 | 仅信任 `register_init` 生成的条目；链接器 KEEP `.init_array`；主核单线程阶段调用 |
 | T-02 | `BootInfo` 伪造或损坏导致错误内存映射 | 高 | 引导层 bug 或虚拟化攻击 | `khal::firmware::init` 校验；保留区标记；`memspace` 独立管理 |
 | T-03 | SMP 屏障失效，从核未 init 完即执行 `main` | 中 | `INITED_CPUS` 计数错误或 `CPU_NUM` 配置不匹配 | 原子计数 + `is_init_ok` 自旋；`CPU_NUM` 与 DT/平台一致 |
-| T-04 | 从核栈溢出或 AP 启动过早使用未初始化栈 | 高 | `boot_ap` 与栈注册竞态 | `ENTERED_CPUS` 按序握手；每 AP 独立 `SECONDARY_BOOT_STACK` 槽 |
+| T-04 | 从核栈溢出或 AP 启动过早使用未初始化栈 | 高 | `boot_ap` 与栈注册竞态 | `ENTERED_CPUS` 按序握手；每 AP 独立 `SecondaryBootStacks` 槽 |
 | T-05 | `main()` 返回后进入 `ktask::exit` 时调度器状态不一致 | 中 | `entry::main` 异常返回 | 约定 `main` 以关机/进程结束结束；文档说明 |
 | T-06 | Panic handler 中 backtrace 遍历无效栈 | 中 | 栈损坏、FP 范围配置错误 | `fp_range` 覆盖线性映射；panic 后关机 |
 | T-07 | `DmaPageTableIf::protect` 错误修改内核页表 | 高 | `kdma` 传入非法 vaddr/size | 实现委托 `memspace::protect`；由 mm 子系统校验 |

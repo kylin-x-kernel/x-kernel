@@ -67,8 +67,9 @@ where
     ///
     /// # Safety
     ///
-    /// The caller must ensure `start + size` does not overflow and that the
-    /// resulting end is valid for the address type.
+    /// The caller must ensure `start + size` does not overflow, that the
+    /// resulting end is valid for the address type, and that the computed end
+    /// still satisfies the `AddrRange` invariant `start <= end`.
     pub unsafe fn from_start_size_unchecked(start: A, size: usize) -> Self {
         let end = start.wrapping_add(size);
         Self { start, end }

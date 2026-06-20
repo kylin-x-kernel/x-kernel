@@ -24,14 +24,13 @@ use crate::ExceptionContext;
 #[percpu::def_percpu]
 static ACTIVE_EXCEPTION_CONTEXT_PTR: AtomicUsize = AtomicUsize::new(0);
 
-/// Returns the currently active trapframe, if any.
+/// Returns a copy of the currently active trapframe, if any.
 ///
-/// # Safety & lifetime
-/// The returned reference is valid only while the CPU is still in the trap
-/// context where the trapframe lives on the stack. Therefore, callers should
-/// treat it as a short-lived snapshot: use it immediately and don't store it.
+/// The active trapframe itself lives on the current CPU's trap stack. This
+/// API returns a by-value snapshot so callers cannot accidentally retain a
+/// borrowed reference after the trap handler unwinds.
 #[inline]
-pub fn active_exception_context() -> Option<&'static ExceptionContext> {
+pub fn active_exception_context() -> Option<ExceptionContext> {
     // SAFETY: `current_ref_raw()` returns a raw pointer to this CPU's per-CPU
     // data area. The `load` is a best-effort atomic read; Relaxed ordering is
     // sufficient because each CPU has its own copy and only the current CPU
@@ -45,17 +44,25 @@ pub fn active_exception_context() -> Option<&'static ExceptionContext> {
     if ptr == 0 {
         None
     } else {
-        // SAFETY:
-        // - pointer was installed from a valid &ExceptionContext
-        // - valid only while still in the trap context
-        Some(unsafe { &*(ptr as *const ExceptionContext) })
+        // SAFETY: `ptr` was installed from a live `&ExceptionContext` by
+        // `ExceptionContextGuard::new` on this CPU. We copy the trapframe by
+        // value immediately instead of returning a borrowed reference, so the
+        // result does not outlive the trap-stack storage it came from.
+        Some(unsafe { *(ptr as *const ExceptionContext) })
     }
 }
 
-/// Calls `f` with the currently active trapframe.
+/// Calls `f` with a reference to a snapshot of the currently active trapframe.
+///
+/// Unlike the trapframe pointer tracked by `ExceptionContextGuard`, the
+/// reference passed to `f` points to a temporary local snapshot created by
+/// `active_exception_context()`. Callers can inspect register contents inside
+/// the closure, but must not assume pointer identity with the live trap-stack
+/// frame.
 #[inline]
 pub fn with_active_exception_context<T>(f: impl FnOnce(Option<&ExceptionContext>) -> T) -> T {
-    f(active_exception_context().map(|tf| tf as &ExceptionContext))
+    let snapshot = active_exception_context();
+    f(snapshot.as_ref())
 }
 
 /// A guard that exposes `tf` as the active trapframe within a scope.
@@ -132,9 +139,15 @@ pub mod tests_active_exception_context {
 
     #[def_test(serial)]
     fn test_with_active_exception_context() {
-        let ctx = ExceptionContext::default();
+        let mut ctx = ExceptionContext::default();
+        ctx.set_retval(0x1234);
+        ctx.set_ip(0x5678);
+        ctx.set_arg1(0x9abc);
         let _guard = ExceptionContextGuard::new(&ctx);
-        let got = with_active_exception_context(|opt| opt.map(|p| p as *const _));
-        assert_eq!(got, Some(&ctx as *const _));
+        let got = with_active_exception_context(|opt| opt.copied());
+        let got = got.expect("active exception context snapshot missing");
+        assert_eq!(got.retval(), ctx.retval());
+        assert_eq!(got.ip(), ctx.ip());
+        assert_eq!(got.arg1(), ctx.arg1());
     }
 }

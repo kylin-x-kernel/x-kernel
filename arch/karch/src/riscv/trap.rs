@@ -17,5 +17,7 @@ pub unsafe fn write_trap_vector_base(addr: usize) {
     let mut reg = stvec::read();
     reg.set_address(addr);
     reg.set_trap_mode(stvec::TrapMode::Direct);
+    // SAFETY: the caller guarantees `addr` names a valid trap entry for the
+    // current hart, and this only updates that hart's `stvec` register.
     unsafe { stvec::write(reg) }
 }

@@ -217,6 +217,8 @@ where
 
     impl Drop for Guard<'_> {
         fn drop(&mut self) {
+            // SAFETY: the guard restores the original vector length if the read
+            // path exits early before the appended bytes are validated.
             unsafe {
                 self.buf.set_len(self.len);
             }
@@ -225,6 +227,8 @@ where
 
     let mut g = Guard {
         len: buf.len(),
+        // SAFETY: this helper temporarily treats the string as a byte vector
+        // and re-validates any appended suffix before committing the new length.
         buf: unsafe { buf.as_mut_vec() },
     };
     let ret = f(g.buf);
@@ -251,6 +255,8 @@ pub fn default_read_to_string<R: Read + ?Sized>(
     // method to fill it up. An arbitrary implementation could overwrite the
     // entire contents of the vector, not just append to it (which is what
     // we are expecting).
+    // SAFETY: `append_to_string` restores the original length on failure and
+    // validates the newly appended suffix as UTF-8 before committing it.
     unsafe { append_to_string(buf, |b| default_read_to_end(r, b, size_hint)) }
 }
 
@@ -392,6 +398,8 @@ pub trait BufRead: Read {
     /// them to the provided `String` buffer.
     #[cfg(feature = "alloc")]
     fn read_line(&mut self, buf: &mut String) -> Result<usize> {
+        // SAFETY: `append_to_string` validates the appended bytes before
+        // exposing them through the `String`.
         unsafe { super::append_to_string(buf, |b| self.read_until(b'\n', b)) }
     }
 

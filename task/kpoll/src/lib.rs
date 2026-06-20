@@ -70,6 +70,10 @@ pub trait Pollable {
 
 const POLL_SET_CAPACITY: usize = 64;
 
+const fn uninit_waker_array() -> [MaybeUninit<Waker>; POLL_SET_CAPACITY] {
+    [const { MaybeUninit::uninit() }; POLL_SET_CAPACITY]
+}
+
 #[cfg(feature = "stats")]
 #[derive(Debug, Default)]
 struct Stats {
@@ -88,7 +92,7 @@ struct Inner {
 impl Inner {
     const fn new() -> Self {
         Self {
-            entries: unsafe { MaybeUninit::uninit().assume_init() },
+            entries: uninit_waker_array(),
             cursor: 0,
 
             #[cfg(feature = "stats")]
@@ -115,6 +119,8 @@ impl Inner {
 
         let slot = self.cursor % POLL_SET_CAPACITY;
         if self.cursor >= POLL_SET_CAPACITY {
+            // SAFETY: once `cursor >= POLL_SET_CAPACITY`, every slot in the
+            // ring buffer has been initialized at least once before reuse.
             let old = unsafe { self.entries[slot].assume_init_read() };
             if !old.will_wake(waker) {
                 old.wake();
@@ -130,6 +136,8 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         for i in 0..self.len() {
+            // SAFETY: `len()` is capped by `cursor`, which only counts entries
+            // that were previously written with `Waker` values.
             unsafe { self.entries[i].assume_init_read() }.wake();
         }
     }

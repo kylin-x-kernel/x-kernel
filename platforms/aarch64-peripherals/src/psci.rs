@@ -51,6 +51,8 @@ impl From<i32> for PsciError {
 }
 fn arm_smccc_smc(func: u32, arg0: usize, arg1: usize, arg2: usize) -> usize {
     let mut ret;
+    // SAFETY: issues a PSCI SMC call using the standard SMCCC calling
+    // convention, touching only the documented argument/result registers.
     unsafe {
         core::arch::asm!(
             "smc #0",
@@ -64,6 +66,8 @@ fn arm_smccc_smc(func: u32, arg0: usize, arg1: usize, arg2: usize) -> usize {
 }
 fn psci_hvc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> usize {
     let ret;
+    // SAFETY: issues a PSCI HVC call using the standard SMCCC calling
+    // convention, touching only the documented argument/result registers.
     unsafe {
         core::arch::asm!(
             "hvc #0",

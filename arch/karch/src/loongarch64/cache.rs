@@ -15,6 +15,7 @@ use memaddr::VirtAddr;
 /// Local `ibar 0` — does not affect other cores.
 #[inline]
 pub fn flush_icache_all_local() {
+    // SAFETY: `ibar 0` only flushes the current core's instruction-cache view.
     unsafe { asm!("ibar 0") };
 }
 
@@ -24,6 +25,8 @@ pub fn flush_icache_all_local() {
 /// does not broadcast, so each core must execute it locally.
 #[inline]
 pub fn flush_icache_remote() {
+    // SAFETY: on the remote core, this executes the same local `ibar 0`
+    // instruction-cache barrier as `flush_icache_all_local`.
     unsafe { asm!("ibar 0") };
 }
 

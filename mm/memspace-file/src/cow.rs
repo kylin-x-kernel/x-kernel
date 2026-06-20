@@ -94,6 +94,8 @@ impl CowBackend {
         let frame = self.alloc_new_frame(true)?;
 
         if let Some((file, file_start, file_end)) = &self.file {
+            // SAFETY: `frame` is a freshly allocated mapped frame of `self.size`
+            // bytes, so it may be exposed as a mutable byte slice for file fill.
             let buf = unsafe { slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _) };
             let start = self.start.as_usize().saturating_sub(va.as_usize());
             assert!(start < self.size as _);
@@ -137,6 +139,8 @@ impl CowBackend {
             }
             _ => {
                 let new_frame = self.alloc_new_frame(false)?;
+                // SAFETY: `pa` and `new_frame` are distinct frame-sized mappings
+                // of `self.size` bytes, so copying the full page contents is valid.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         p2v(pa).as_ptr(),

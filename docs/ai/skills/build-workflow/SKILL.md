@@ -270,6 +270,11 @@ Clippy:
 make clippy
 ```
 
+Notes:
+
+- `make clippy` also enforces `clippy::undocumented_unsafe_blocks`;
+  `unsafe { ... }` blocks should carry a nearby `SAFETY:` explanation.
+
 Run:
 
 ```bash

@@ -21,6 +21,8 @@ use core::arch::asm;
 #[inline]
 pub fn hypercall(nr: u64, a0: u64, a1: u64) -> i64 {
     let ret: i64;
+    // SAFETY: this follows the hypervisor ABI for `vmmcall`, preserves `rbx`
+    // across the inline assembly block, and only clobbers the documented registers.
     unsafe {
         // Note: rbx is reserved by LLVM, so we need to save/restore it manually
         asm!(

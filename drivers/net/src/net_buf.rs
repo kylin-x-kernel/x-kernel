@@ -46,11 +46,14 @@ impl NetBufHandle {
 
     /// Return the payload as `&[u8]`.
     pub fn data(&self) -> &[u8] {
+        // SAFETY: `data_ptr` points at `data_len` bytes owned by the handle for
+        // the duration of this borrow.
         unsafe { core::slice::from_raw_parts(self.data_ptr.as_ptr() as *const u8, self.data_len) }
     }
 
     /// Return the payload as `&mut [u8]`.
     pub fn data_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `data_ptr` points at `data_len` bytes owned exclusively by this handle.
         unsafe { core::slice::from_raw_parts_mut(self.data_ptr.as_ptr(), self.data_len) }
     }
 }
@@ -82,21 +85,36 @@ pub struct NetBuf {
     hdr_len: usize,
     payload_len: usize,
     buf_len: usize,
-    base_ptr: NonNull<u8>,
     pool_offset: usize,
     pool: Arc<NetBufPool>,
 }
 
-unsafe impl Send for NetBuf {}
-unsafe impl Sync for NetBuf {}
-
 impl NetBuf {
-    const unsafe fn get_slice(&self, start: usize, len: usize) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.base_ptr.as_ptr().add(start), len) }
+    fn base_ptr(&self) -> *mut u8 {
+        self.pool.storage.as_ptr().wrapping_add(self.pool_offset) as *mut u8
     }
 
-    const unsafe fn get_slice_mut(&mut self, start: usize, len: usize) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.base_ptr.as_ptr().add(start), len) }
+    fn get_slice(&self, start: usize, len: usize) -> &[u8] {
+        let end = start
+            .checked_add(len)
+            .expect("network buffer slice end overflow");
+        debug_assert!(end <= self.buf_len, "network buffer slice out of bounds");
+        // SAFETY: `start..end` is checked against this buffer's backing
+        // allocation, so the raw slice stays within the owned storage.
+        unsafe { core::slice::from_raw_parts(self.base_ptr().add(start), len) }
+    }
+
+    fn get_slice_mut(&mut self, start: usize, len: usize) -> &mut [u8] {
+        let end = start
+            .checked_add(len)
+            .expect("network buffer slice end overflow");
+        debug_assert!(
+            end <= self.buf_len,
+            "network buffer mutable slice out of bounds"
+        );
+        // SAFETY: `start..end` is checked against this buffer's backing
+        // allocation, and `&mut self` guarantees exclusive access.
+        unsafe { core::slice::from_raw_parts_mut(self.base_ptr().add(start), len) }
     }
 
     /// Returns the capacity of the buffer.
@@ -115,33 +133,33 @@ impl NetBuf {
     }
 
     /// Returns the header part of the buffer.
-    pub const fn header(&self) -> &[u8] {
-        unsafe { self.get_slice(0, self.hdr_len) }
+    pub fn header(&self) -> &[u8] {
+        self.get_slice(0, self.hdr_len)
     }
 
     /// Returns the payload part of the buffer.
-    pub const fn payload(&self) -> &[u8] {
-        unsafe { self.get_slice(self.hdr_len, self.payload_len) }
+    pub fn payload(&self) -> &[u8] {
+        self.get_slice(self.hdr_len, self.payload_len)
     }
 
     /// Returns the mutable reference to the payload part.
-    pub const fn payload_mut(&mut self) -> &mut [u8] {
-        unsafe { self.get_slice_mut(self.hdr_len, self.payload_len) }
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        self.get_slice_mut(self.hdr_len, self.payload_len)
     }
 
     /// Returns the full frame (header + payload) as a contiguous slice.
-    pub const fn frame(&self) -> &[u8] {
-        unsafe { self.get_slice(0, self.frame_len()) }
+    pub fn frame(&self) -> &[u8] {
+        self.get_slice(0, self.frame_len())
     }
 
     /// Returns the entire buffer.
-    pub const fn buffer(&self) -> &[u8] {
-        unsafe { self.get_slice(0, self.buf_len) }
+    pub fn buffer(&self) -> &[u8] {
+        self.get_slice(0, self.buf_len)
     }
 
     /// Returns the mutable reference to the entire buffer.
-    pub const fn buffer_mut(&mut self) -> &mut [u8] {
-        unsafe { self.get_slice_mut(0, self.buf_len) }
+    pub fn buffer_mut(&mut self) -> &mut [u8] {
+        self.get_slice_mut(0, self.buf_len)
     }
 
     /// Set the length of the header part.
@@ -173,9 +191,13 @@ impl NetBuf {
     ///
     /// # Safety
     ///
-    /// This function is unsafe because it may cause some memory issues,
-    /// so we must ensure that it is called after calling `into_handle`.
+    /// `handle` must have been produced by [`NetBuf::into_handle`] from a live
+    /// `Box<NetBuf>` allocation, and it must be consumed here exactly once.
+    /// Reconstructing from an invalid, forged, or already-consumed handle is
+    /// undefined behavior.
     pub unsafe fn from_handle(handle: NetBufHandle) -> Box<Self> {
+        // SAFETY: `handle` originated from `into_handle`, so its owner pointer
+        // is a live `Box<NetBuf>` allocation to reconstruct exactly once.
         unsafe { Box::from_raw(handle.owner_ptr::<Self>()) }
     }
 
@@ -255,13 +277,10 @@ impl NetBufPool {
     /// Returns `None` if no buffer is available.
     pub fn alloc_buf(self: &Arc<Self>) -> Option<NetBuf> {
         let pool_offset = self.free_offsets.lock().pop()?;
-        let buf_ptr =
-            unsafe { NonNull::new(self.storage.as_ptr().add(pool_offset) as *mut u8).unwrap() };
         Some(NetBuf {
             hdr_len: 0,
             payload_len: 0,
             buf_len: self.buf_len,
-            base_ptr: buf_ptr,
             pool_offset,
             pool: Arc::clone(self),
         })

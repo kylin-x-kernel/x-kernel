@@ -2,18 +2,18 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::cell::UnsafeCell;
-
 use kbuild_config::CPU_NUM;
+use klazy::Once;
 
 const INVALID_RAW_CPU_ID: usize = usize::MAX;
 
 #[cfg_attr(target_arch = "aarch64", unsafe(link_section = ".data"))]
-static CPU_ID_MAP: CpuIdMapStorage = CpuIdMapStorage::new(INVALID_RAW_CPU_ID);
+static CPU_ID_MAP: Once<CpuIdMap> = Once::new();
+static UNINITIALIZED_CPU_ID_MAP: CpuIdMap = CpuIdMap::new(INVALID_RAW_CPU_ID);
 
 #[inline]
 pub(crate) fn cpu_map_initialized() -> bool {
-    CPU_ID_MAP.with(CpuIdMap::is_initialized)
+    current_cpu_id_map().is_initialized()
 }
 
 #[cfg(any(
@@ -25,7 +25,7 @@ pub(crate) fn load_cpu_id_map_from_fdt(
     fdt: &of::LinuxFdt<'_>,
     normalize_raw_id: fn(RawCpuId) -> RawCpuId,
 ) -> bool {
-    CPU_ID_MAP.with_mut(|map| map.load_from_fdt(fdt, normalize_raw_id))
+    load_cpu_id_map(|map| map.load_from_fdt(fdt, normalize_raw_id))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -33,19 +33,19 @@ pub(crate) fn load_cpu_id_map_from_madt(
     entries: acpi::MadtEntryIter,
     normalize_raw_id: fn(RawCpuId) -> RawCpuId,
 ) -> bool {
-    CPU_ID_MAP.with_mut(|map| map.load_from_madt(entries, normalize_raw_id))
+    load_cpu_id_map(|map| map.load_from_madt(entries, normalize_raw_id))
 }
 
 pub(crate) fn logical_to_raw(logical_cpu_id: LogicalCpuId) -> Option<RawCpuId> {
-    CPU_ID_MAP.with(|map| map.logical_to_raw(logical_cpu_id))
+    current_cpu_id_map().logical_to_raw(logical_cpu_id)
 }
 
 pub(crate) fn raw_to_logical(raw_cpu_id: RawCpuId) -> Option<LogicalCpuId> {
-    CPU_ID_MAP.with(|map| map.raw_to_logical(raw_cpu_id))
+    current_cpu_id_map().raw_to_logical(raw_cpu_id)
 }
 
 pub(crate) fn for_each_present_logical_cpu(mut f: impl FnMut(usize, LogicalCpuId, usize)) {
-    CPU_ID_MAP.with(|map| map.for_each_present_logical_cpu(&mut f));
+    current_cpu_id_map().for_each_present_logical_cpu(&mut f);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -108,43 +108,20 @@ impl From<RawCpuId> for usize {
     }
 }
 
-#[repr(transparent)]
-struct CpuIdMapStorage {
-    map: UnsafeCell<CpuIdMap>,
+fn current_cpu_id_map() -> &'static CpuIdMap {
+    CPU_ID_MAP.get().unwrap_or(&UNINITIALIZED_CPU_ID_MAP)
 }
 
-// SAFETY: CPU id map mutation is restricted to one initialization pass through
-// `with_mut`; after initialization the map is read-only.
-unsafe impl Sync for CpuIdMapStorage {}
+fn load_cpu_id_map(load: impl FnOnce(&mut CpuIdMap) -> bool) -> bool {
+    assert!(
+        CPU_ID_MAP.get().is_none(),
+        "CPU id map is already initialized"
+    );
 
-impl CpuIdMapStorage {
-    const fn new(invalid_raw_cpu_id: usize) -> Self {
-        Self {
-            map: UnsafeCell::new(CpuIdMap::new(invalid_raw_cpu_id)),
-        }
-    }
-
-    fn map(&self) -> &CpuIdMap {
-        // SAFETY: The map storage lives for the whole kernel lifetime. Shared
-        // access is read-only and does not alias mutable access after
-        // initialization.
-        unsafe { &*self.map.get() }
-    }
-
-    fn with<R>(&self, f: impl FnOnce(&CpuIdMap) -> R) -> R {
-        f(self.map())
-    }
-
-    fn with_mut<R>(&self, f: impl FnOnce(&mut CpuIdMap) -> R) -> R {
-        assert!(
-            !self.map().is_initialized(),
-            "CPU id map is already initialized"
-        );
-        // SAFETY: CPU map loading helpers are used during initialization before
-        // concurrent readers can observe or alias the map. The initialized
-        // check above prevents later reinitialization through this storage API.
-        unsafe { f(&mut *self.map.get()) }
-    }
+    let mut map = CpuIdMap::new(INVALID_RAW_CPU_ID);
+    let truncated = load(&mut map);
+    CPU_ID_MAP.call_once(|| map);
+    truncated
 }
 
 #[derive(Clone, Copy)]

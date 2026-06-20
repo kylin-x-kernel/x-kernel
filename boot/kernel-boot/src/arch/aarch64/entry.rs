@@ -45,6 +45,12 @@ pub(super) static mut SAVED_BOOT_ARGS: [u64; 4] = [0; 4];
 static mut AARCH64_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::DeviceTree);
 
 /// Linux ARM64 Boot Protocol header followed by a branch to `primary_entry`.
+///
+/// # Safety
+///
+/// This is the raw firmware entry point. The caller must enter with the Linux
+/// ARM64 boot protocol register state, a valid early execution context, and
+/// control must transfer here exactly once for the boot CPU.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".head.text")]
@@ -71,6 +77,13 @@ pub unsafe extern "C" fn _start() -> ! {
 /// used for data, except for `ldr x8, =sym` literal-pool loads which
 /// intentionally load the *linked* virtual address so that the `br x8`
 /// after MMU-enable jumps to the correct high-virtual-address symbol.
+///
+/// # Safety
+///
+/// This function is entered directly from the raw boot header before normal
+/// Rust invariants exist. The caller must provide the architecture-defined
+/// boot register state, and the code it calls must remain valid until the MMU
+/// handoff completes.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
@@ -143,6 +156,11 @@ pub unsafe extern "C" fn primary_entry() -> ! {
 /// Save x0-x3 (firmware boot arguments) to [`SAVED_BOOT_ARGS`].
 ///
 /// Uses PC-relative addressing so this can run before the MMU is on.
+///
+/// # Safety
+///
+/// The caller must invoke this only during early boot while `x0..x3` still
+/// contain the original firmware handoff arguments for the current CPU.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
@@ -207,6 +225,10 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
     )
 }
 
+/// # Safety
+///
+/// Must only be entered from [`_start_secondary`] after the secondary CPU has
+/// switched to the boot page tables and established a valid virtual stack.
 pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) {
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
@@ -242,6 +264,8 @@ pub unsafe extern "C" fn __primary_switched(
         fn _sbss();
         fn _ebss();
     }
+    // SAFETY: `_sbss.._ebss` is the linker-defined BSS range for the current
+    // image, and zeroing it here is the first mutable access after early entry.
     unsafe {
         let bss_start = _sbss as *const () as usize;
         let bss_end = _ebss as *const () as usize;
@@ -258,6 +282,8 @@ pub unsafe extern "C" fn __primary_switched(
         .unwrap_or_else(|| panic!("missing logical cpu id mapping for raw cpu id {cpu_mpidr:#x}"));
 
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
+    // SAFETY: primary boot CPU performs one-time initialization of the global
+    // boot-info structure before handing control to the generic runtime.
     unsafe {
         AARCH64_BOOT_INFO = BootInfo::new(BootProtocol::DeviceTree)
             .with_memory_description_root(MemoryDescriptionRoot::DeviceTree)

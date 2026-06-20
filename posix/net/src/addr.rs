@@ -44,6 +44,8 @@ fn read_family(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<u16>
 }
 /// Cast a reference to a byte slice
 unsafe fn cast_to_slice<T>(value: &T) -> &[u8] {
+    // SAFETY: `value` is a live reference, and reborrowing its contiguous
+    // storage as a same-sized byte slice preserves layout and lifetime.
     unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) }
 }
 /// Write socket address data to user-space buffer
@@ -102,6 +104,7 @@ impl SocketAddrExt for SocketAddrV4 {
             },
             __pad: [0_u8; 8],
         };
+        // SAFETY: `sockin_addr` is a stack-allocated POD socket-address struct.
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&sockin_addr) })
     }
 }
@@ -119,6 +122,8 @@ impl SocketAddrExt for SocketAddrV6 {
         }
 
         Ok(SocketAddrV6::new(
+            // SAFETY: bindgen exposes the IPv6 bytes through a union field with
+            // the same layout as the kernel `in6_addr` representation.
             Ipv6Addr::from(unsafe { addr_in6.sin6_addr.in6_u.u6_addr8 }),
             u16::from_be(addr_in6.sin6_port),
             u32::from_be(addr_in6.sin6_flowinfo),
@@ -139,6 +144,7 @@ impl SocketAddrExt for SocketAddrV6 {
             },
             sin6_scope_id: self.scope_id(),
         };
+        // SAFETY: `sockin_addr` is a stack-allocated POD socket-address struct.
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&sockin_addr) })
     }
 }
@@ -214,6 +220,7 @@ impl SocketAddrExt for NetlinkAddr {
             nl_pid: self.pid,
             nl_groups: self.groups,
         };
+        // SAFETY: `addr_nl` is a stack-allocated POD socket-address struct.
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&addr_nl) })
     }
 }
@@ -231,6 +238,7 @@ pub struct sockaddr_ll {
     pub sll_addr: [u8; 8],
 }
 
+// SAFETY: `sockaddr_ll` is a POD socket-address carrier copied by value.
 unsafe impl UserRead for sockaddr_ll {}
 
 impl SocketAddrExt for PacketAddr {
@@ -262,6 +270,7 @@ impl SocketAddrExt for PacketAddr {
             sll_halen: self.addr_len,
             sll_addr: self.addr,
         };
+        // SAFETY: `addr_ll` is a stack-allocated POD socket-address struct.
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&addr_ll) })
     }
 }
@@ -294,6 +303,7 @@ impl SocketAddrExt for VsockAddr {
             svm_cid: self.cid as _,
             svm_zero: [0_u8; 4],
         };
+        // SAFETY: `sockvm_addr` is a stack-allocated POD socket-address struct.
         fill_addr(addr, addrlen, unsafe { cast_to_slice(&sockvm_addr) })
     }
 }

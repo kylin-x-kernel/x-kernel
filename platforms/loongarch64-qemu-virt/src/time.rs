@@ -33,10 +33,17 @@ fn init_rtc() {
     fn extract_bits(value: u32, range: core::ops::Range<u32>) -> u32 {
         (value >> range.start) & ((1 << (range.end - range.start)) - 1)
     }
+    // SAFETY: `rtc_base_ptr` comes from a successful `iomap_device` of the
+    // LS7A RTC register window, and `SYS_RTCCTRL` is a 32-bit register offset
+    // within that mapped range.
     unsafe {
         (rtc_base_ptr.add(SYS_RTCCTRL) as *mut u32).write_volatile(TOY_ENABLE | OSC_ENABLE);
     }
+    // SAFETY: both offsets name 32-bit TOY read registers inside the same
+    // mapped LS7A RTC window described above.
     let toy_high = unsafe { (rtc_base_ptr.add(SYS_TOY_READ1) as *const u32).read_volatile() };
+    // SAFETY: `SYS_TOY_READ0` is another 32-bit register in the mapped RTC
+    // window, so the volatile read stays within the device MMIO region.
     let toy_low = unsafe { (rtc_base_ptr.add(SYS_TOY_READ0) as *const u32).read_volatile() };
     let date_time = Utc
         .with_ymd_and_hms(

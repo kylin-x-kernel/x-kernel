@@ -24,9 +24,13 @@ fn mmio_base() -> usize {
 }
 
 fn read_w(addr: usize) -> u32 {
+    // SAFETY: `mmio_base()` is initialized from `iomap_device`, and callers
+    // pass PCH PIC register offsets within the mapped 32-bit MMIO aperture.
     unsafe { ((mmio_base() + addr) as *mut u32).read_volatile() }
 }
 fn write_w(addr: usize, val: u32) {
+    // SAFETY: `mmio_base()` is initialized from `iomap_device`, and callers
+    // pass PCH PIC register offsets within the mapped 32-bit MMIO aperture.
     unsafe {
         ((mmio_base() + addr) as *mut u32).write_volatile(val);
     }
@@ -48,6 +52,9 @@ pub fn enable_irq(irq: usize) {
     let addr = PCH_PIC_MASK + offset;
     write_w(addr, read_w(addr) & !bit);
     let addr = PCH_INT_HTVEC + irq;
+    // SAFETY: `addr` selects a byte entry inside the already-mapped HTVEC
+    // table, and programming it with the IRQ number is the hardware-defined
+    // format for this register block.
     unsafe {
         ((mmio_base() + addr) as *mut u8).write_volatile(irq as _);
     }

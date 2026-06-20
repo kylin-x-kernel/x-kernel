@@ -21,12 +21,15 @@ use kerrno::{KError, KResult};
 use osvm::{VirtMutPtr, VirtPtr, load_vec_until_null, read_vm_bytes, write_vm_bytes};
 
 fn as_uninit_bytes<T>(value: &mut MaybeUninit<T>) -> &mut [MaybeUninit<u8>] {
+    // SAFETY: `MaybeUninit<T>` may always be viewed as an equally sized byte slice.
     unsafe {
         slice::from_raw_parts_mut(value.as_mut_ptr().cast::<MaybeUninit<u8>>(), size_of::<T>())
     }
 }
 
 fn spare_as_uninit_bytes<T>(spare: &mut [MaybeUninit<T>]) -> &mut [MaybeUninit<u8>] {
+    // SAFETY: a `[MaybeUninit<T>]` spare-capacity slice may always be viewed as
+    // an equally sized byte slice for copy-from-user initialization.
     unsafe {
         slice::from_raw_parts_mut(
             spare.as_mut_ptr().cast::<MaybeUninit<u8>>(),
@@ -55,22 +58,34 @@ pub unsafe trait UserWrite {}
 
 macro_rules! impl_user_read_for_scalars {
     ($($ty:ty),* $(,)?) => {
-        $(unsafe impl UserRead for $ty {})*
+        $(
+            // SAFETY: primitive scalars are valid syscall by-value carriers.
+            unsafe impl UserRead for $ty {}
+        )*
     };
 }
 
 impl_user_read_for_scalars!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+// SAFETY: `()` has no bytes and is trivially safe to copy from user memory.
+unsafe impl UserRead for () {}
 macro_rules! impl_user_write_for_scalars {
     ($($ty:ty),* $(,)?) => {
-        $(unsafe impl UserWrite for $ty {})*
+        $(
+            // SAFETY: primitive scalars always expose fully initialized bytes.
+            unsafe impl UserWrite for $ty {}
+        )*
     };
 }
 
 impl_user_write_for_scalars!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 
+// SAFETY: fixed-size arrays are valid when each element upholds the same contract.
 unsafe impl<T: UserRead, const N: usize> UserRead for [T; N] where [T; N]: Copy {}
+// SAFETY: fixed-size arrays are valid when each element upholds the same contract.
 unsafe impl<T: UserWrite, const N: usize> UserWrite for [T; N] {}
+// SAFETY: raw pointers are copied by value without dereferencing.
 unsafe impl<T> UserWrite for *const T {}
+// SAFETY: raw pointers are copied by value without dereferencing.
 unsafe impl<T> UserWrite for *mut T {}
 
 /// A mutable pointer to user-space memory.
@@ -166,6 +181,8 @@ impl<T> UserPtr<T> {
     where
         T: UserWrite,
     {
+        // SAFETY: a live slice may be reinterpreted as a same-sized byte slice
+        // for copy-to-user without changing layout.
         let bytes = unsafe { slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) };
         write_vm_bytes(self.0.cast::<u8>(), bytes)
     }
@@ -190,11 +207,15 @@ impl<T> Debug for UserPtr<T> {
 // SAFETY: `UserPtr` is just a bare pointer, and its memory layout is equivalent to *mut T,
 // Any bit pattern is legal for naked pointers, so it meets AnyBitPattern.
 unsafe impl<T: 'static> bytemuck::Zeroable for UserPtr<T> {}
+// SAFETY: `UserPtr<T>` is a transparent raw-pointer wrapper, so every pointer
+// bit pattern is valid for the type.
 unsafe impl<T: 'static> bytemuck::AnyBitPattern for UserPtr<T> {}
 
 // SAFETY: Reading/writing a `UserPtr` copies the raw pointer value (usize-sized)
 // without dereferencing it. Any bit pattern is valid for a pointer wrapper.
 unsafe impl<T> UserRead for UserPtr<T> {}
+// SAFETY: Reading/writing a `UserPtr` copies the raw pointer value (usize-sized)
+// without dereferencing it. Any bit pattern is valid for a pointer wrapper.
 unsafe impl<T> UserWrite for UserPtr<T> {}
 
 /// A read-only pointer to user-space memory.
@@ -270,6 +291,7 @@ impl<T> UserConstPtr<T> {
         T: UserRead,
     {
         let value = self.read_uninit()?;
+        // SAFETY: `T: UserRead` promises copied bytes form a valid initialized `T`.
         Ok(unsafe { value.assume_init() })
     }
 
@@ -283,6 +305,7 @@ impl<T> UserConstPtr<T> {
             self.0.cast::<u8>(),
             spare_as_uninit_bytes(&mut vec.spare_capacity_mut()[..len]),
         )?;
+        // SAFETY: `read_vm_bytes` initialized exactly `len` elements worth of bytes.
         unsafe { vec.set_len(len) };
         Ok(vec)
     }

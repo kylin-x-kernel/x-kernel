@@ -8,7 +8,11 @@ use linux_raw_sys::net::{__kernel_sa_family_t, sockaddr_in, sockaddr_in6};
 
 use crate::UserRead;
 
+// SAFETY: these socket-address structs are POD syscall carriers with no extra
+// validity invariants beyond their raw bytes.
 unsafe impl UserRead for sockaddr_in {}
+// SAFETY: these socket-address structs are POD syscall carriers with no extra
+// validity invariants beyond their raw bytes.
 unsafe impl UserRead for sockaddr_in6 {}
 
 #[allow(non_camel_case_types)]

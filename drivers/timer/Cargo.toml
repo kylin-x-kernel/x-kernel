@@ -17,16 +17,17 @@ crosvm = []
 khal = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
+klazy = { workspace = true }
 log = "0.4"
 percpu.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu = "10.0"
-int_ratio = "0.1"
 of = { workspace = true }
+int_ratio = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-int_ratio = "0.1"
+int_ratio = { workspace = true }
 raw-cpuid = "11.5"
 x2apic = "0.5"
 x86_apic = { workspace = true }

@@ -65,6 +65,8 @@ pub fn read_kernel_page_table() -> HwPageTableRoot {
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
 pub unsafe fn write_user_page_table(root: HwPageTableRoot) {
+    // SAFETY: the caller guarantees `root` names a valid Sv39 page-table root
+    // for the current hart, and this writes only the current hart's `satp`.
     unsafe { satp::set(satp::Mode::Sv39, 0, root.as_usize() >> 12) };
 }
 
@@ -81,5 +83,7 @@ pub unsafe fn write_user_page_table(root: HwPageTableRoot) {
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
 pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
+    // SAFETY: RISC-V uses the same `satp` root for kernel and user mappings, so
+    // this forwards the caller's validated page-table root to `write_user_page_table`.
     unsafe { write_user_page_table(root) };
 }

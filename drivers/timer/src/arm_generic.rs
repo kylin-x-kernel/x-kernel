@@ -144,6 +144,8 @@ pub fn init(config: TimerConfig) {
         "ARM generic timer frequency must fit in u32"
     );
     TIMER_FREQ_HZ.store(freq, Ordering::Relaxed);
+    // SAFETY: timer initialization runs before normal timer conversions start,
+    // and the ratio state becomes read-only after this one-time setup.
     unsafe {
         CNTPCT_TO_NANOS_RATIO = Ratio::new(1_000_000_000u32, freq as u32);
         NANOS_TO_CNTPCT_RATIO = CNTPCT_TO_NANOS_RATIO.inverse();
@@ -152,6 +154,8 @@ pub fn init(config: TimerConfig) {
 
 pub fn init_percpu() {
     #[cfg(feature = "crosvm")]
+    // SAFETY: this initializes only the current CPU's percpu logical-tick slot
+    // during local timer bring-up, before normal timer events use it.
     unsafe {
         LAST_LOGICAL_TICKS.write_current_raw(logical_ticks(
             raw_now_ticks(),
@@ -249,11 +253,17 @@ pub fn handle_ipi_fixup() {
 
 #[inline]
 pub fn t2ns(ticks: u64) -> u64 {
+    // SAFETY: the conversion ratio is initialized once in `init` and remains
+    // immutable afterwards, so concurrent readers only observe the published
+    // precomputed state.
     unsafe { CNTPCT_TO_NANOS_RATIO.mul_trunc(ticks) }
 }
 
 #[inline]
 pub fn ns2t(nanos: u64) -> u64 {
+    // SAFETY: the conversion ratio is initialized once in `init` and remains
+    // immutable afterwards, so concurrent readers only observe the published
+    // precomputed state.
     unsafe { NANOS_TO_CNTPCT_RATIO.mul_trunc(nanos) }
 }
 
@@ -381,6 +391,7 @@ fn track_logical_ticks(ticks: u64) -> u64 {
     // Safety: this only accesses the current CPU's percpu timer state.
     let last = unsafe { LAST_LOGICAL_TICKS.read_current_raw() };
     if ticks > last {
+        // SAFETY: this updates only the current CPU's percpu logical-tick slot.
         unsafe { LAST_LOGICAL_TICKS.write_current_raw(ticks) };
         ticks
     } else {

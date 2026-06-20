@@ -74,6 +74,8 @@ static mut BOOT_PT_L2_BOOT_UART: PageAligned<[A64PageEntry; PT_ENTRIES]> =
 macro_rules! phys_addr_of {
     ($sym:expr) => {{
         let pa: usize;
+        // SAFETY: this emits a pure address-materialization sequence for a
+        // linker-resolved symbol without dereferencing memory or touching the stack.
         unsafe {
             core::arch::asm!(
                 "adrp {out}, {sym}",
@@ -93,6 +95,8 @@ fn map_boot_idmap_block_if_absent(block_base: usize, flags: PagingFlags) {
         l1_idx < PT_ENTRIES,
         "physical address outside boot idmap window"
     );
+    // SAFETY: boot page tables are only mutated during early single-core bring-up,
+    // and `l1_idx` was bounds-checked against the statically sized table.
     unsafe {
         if BOOT_PT_L1_IDMAP[l1_idx].is_present() {
             return;
@@ -107,6 +111,8 @@ fn map_boot_linear_block_if_absent(block_base: usize, flags: PagingFlags) {
         l1_idx < PT_ENTRIES,
         "physical address outside boot linear map window"
     );
+    // SAFETY: boot page tables are only mutated during early single-core bring-up,
+    // and `l1_idx` was bounds-checked against the statically sized table.
     unsafe {
         if BOOT_PT_L1_LINEAR[l1_idx].is_present() {
             return;
@@ -152,6 +158,8 @@ unsafe fn create_boot_kimage_map(
     kernel_end_pa: usize,
     l2_kimage_pa: usize,
 ) {
+    // SAFETY: boot page tables are only mutated during early single-core bring-up,
+    // and the computed index selects the dedicated L1 entry for the kernel image.
     unsafe {
         let kimage_l1_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 30 & (PT_ENTRIES - 1);
         BOOT_PT_L1_KIMAGE[kimage_l1_idx] = A64PageEntry::new_table(PhysAddr::from(l2_kimage_pa));
@@ -163,6 +171,8 @@ unsafe fn create_boot_kimage_map(
     let mut pa = pa_base;
     let mut l2_idx = 0usize;
     while pa < pa_end {
+        // SAFETY: the loop walks within the statically allocated L2 boot table
+        // and fills one entry per 2 MiB chunk of the kernel image mapping.
         unsafe {
             BOOT_PT_L2_KIMAGE[l2_idx] = A64PageEntry::new_page(
                 PhysAddr::from(pa),
@@ -185,6 +195,9 @@ unsafe fn create_boot_uart_map(l2_boot_uart_pa: usize) {
     let boot_uart_block_pa = boot_console_paddr & !(MIB_2 - 1);
     let kimage_l1_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 30 & (PT_ENTRIES - 1);
 
+    // SAFETY: boot page tables are only mutated during early single-core bring-up,
+    // and the computed indices target either the dedicated UART L2 table or a
+    // non-overlapping slot in the kernel-image L2 table.
     unsafe {
         if boot_uart_l1_idx == kimage_l1_idx {
             assert!(
@@ -209,6 +222,12 @@ unsafe fn create_boot_uart_map(l2_boot_uart_pa: usize) {
 }
 
 #[unsafe(link_section = ".idmap.text")]
+/// # Safety
+///
+/// This function may only run during early single-CPU bring-up before the MMU
+/// handoff completes. The caller must ensure the linker symbols, saved DTB
+/// pointer, and boot page-table globals all refer to the current boot image
+/// and are not concurrently mutated.
 pub unsafe fn create_boot_page_tables() {
     let l1_idmap_pa = phys_addr_of!(BOOT_PT_L1_IDMAP);
     let l1_linear_pa = phys_addr_of!(BOOT_PT_L1_LINEAR);
@@ -223,6 +242,8 @@ pub unsafe fn create_boot_page_tables() {
     let kernel_start_pa = phys_addr_of!(_start);
     let kernel_end_pa = phys_addr_of!(_ekernel);
 
+    // SAFETY: boot page-table roots are single-writer globals during early
+    // bring-up, and the computed indices select valid top-level slots.
     unsafe {
         BOOT_PT_L0_TTBR0[0] = A64PageEntry::new_table(PhysAddr::from(l1_idmap_pa));
         BOOT_PT_L0_TTBR1[0] = A64PageEntry::new_table(PhysAddr::from(l1_linear_pa));
@@ -231,9 +252,13 @@ pub unsafe fn create_boot_page_tables() {
         BOOT_PT_L0_TTBR1[kimage_l0_idx] = A64PageEntry::new_table(PhysAddr::from(l1_kimage_pa));
     }
 
+    // SAFETY: early boot saved the raw DTB pointer in `SAVED_BOOT_ARGS[0]`.
     let dtb_paddr = unsafe { super::entry::SAVED_BOOT_ARGS[0] as usize };
+    // SAFETY: these helpers mutate only boot-time page tables before MMU handoff.
     unsafe { create_boot_minimal_maps(kernel_start_pa, dtb_paddr) };
+    // SAFETY: these helpers mutate only boot-time page tables before MMU handoff.
     unsafe { create_boot_kimage_map(kernel_start_pa, kernel_end_pa, l2_kimage_pa) };
+    // SAFETY: these helpers mutate only boot-time page tables before MMU handoff.
     unsafe { create_boot_uart_map(l2_boot_uart_pa) };
 
     barrier::dsb(barrier::SY);
@@ -244,6 +269,8 @@ pub fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
         return;
     }
 
+    // SAFETY: `dtb_paddr` comes from boot firmware and points to the immutable
+    // device-tree blob used for early RAM discovery.
     let Ok((regions, count)) = (unsafe {
         of::read_memory_regions_from_ptr::<MAX_BOOT_RAM_REGIONS>(dtb_paddr as *const u8)
     }) else {
@@ -269,6 +296,12 @@ pub fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
 }
 
 #[unsafe(link_section = ".idmap.text")]
+/// # Safety
+///
+/// The boot page tables rooted at `BOOT_PT_L0_TTBR0` and `BOOT_PT_L0_TTBR1`
+/// must already be fully initialized for the current boot image, and the
+/// caller must ensure enabling the MMU will keep the current execution path
+/// and required data mapped.
 pub unsafe fn init_mmu() {
     let ttbr0_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR0);
     let ttbr1_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR1);

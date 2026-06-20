@@ -16,4 +16,5 @@ pub struct InputId {
     pub version: u16,
 }
 
+// SAFETY: `InputId` is a POD ioctl result structure with no hidden validity invariants.
 unsafe impl UserWrite for InputId {}

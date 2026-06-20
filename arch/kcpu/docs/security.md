@@ -72,13 +72,14 @@ ACTIVE_EXCEPTION_CONTEXT_PTR
 ### 2. `active_exception_context()` 裸指针转换（`active_exception_context.rs:39-52`）
 
 ```rust
-Some(unsafe { &*(ptr as *const ExceptionContext) })
+Some(unsafe { *(ptr as *const ExceptionContext) })
 ```
 
 **不变量**：`ptr` 必须指向有效的 `ExceptionContext` 实例。
 
 **为何安全**：指针仅由 `ExceptionContextGuard::new` 安装，guard 的 `Drop`
-保证在 trap 退出时恢复。调用者文档声明返回引用仅在当前 trap 上下文中有效。
+保证在 trap 退出时恢复。该 API 立即按值复制 trapframe 并返回快照，
+避免向调用者暴露可能在 trap 返回后失效的借用引用。
 
 ### 3. `prepare_initial_frame`（`x86_64/ctx.rs:367-379`）
 
@@ -123,14 +124,22 @@ unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64)
 ### 6. `ExtendedState::default`（`x86_64/ctx.rs:310`）
 
 ```rust
-let mut area: FxStateBlock = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+FxStateBlock {
+    fpu_ctrl: 0x037f,
+    sse_mxcsr: 0x1f80,
+    st_space: [0; 16],
+    xmm_space: [0; 32],
+    _padding: [0; 12],
+    // ...
+}
 ```
 
 **不变量**：`FxStateBlock` 的所有字段均为 `u16`/`u32`/`u64` 数组，
 全零是有效表示。
 
-**为何安全**：`FxStateBlock` 是 plain old data 类型，无 `enum` 判别值
-或 `NonNull` 指针。零初始化后立即覆盖关键字段（`fpu_ctrl`、`sse_mxcsr`）。
+**为何安全**：`FxStateBlock` 现在通过显式字段初始化构造，避免了对
+“整块零初始化后再补写关键字段”的 `unsafe` 假设。其布局仍由
+`repr(C, align(16))` 和 `static_assertions` 保证满足 FXSAVE/FXRSTOR 要求。
 
 ### 7. `switch_to` 页表切换（各架构 ctx.rs）
 
@@ -190,7 +199,10 @@ let entries = unsafe {
 ```rust
 let badi = unsafe { core::ptr::read(self.era as *const u32) };
 let regs = unsafe {
-    core::mem::transmute::<&mut GeneralRegisters, &mut [usize; 32]>(&mut self.regs)
+    core::slice::from_raw_parts_mut(
+        core::ptr::from_mut(&mut self.regs).cast::<usize>(),
+        32,
+    )
 };
 ```
 

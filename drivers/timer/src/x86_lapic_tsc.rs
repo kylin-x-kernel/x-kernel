@@ -2,16 +2,22 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use int_ratio::Ratio;
+use klazy::Once;
 use log::info;
 use raw_cpuid::CpuId;
 
 use crate::TimerSource;
 
 const LAPIC_TICKS_PER_SEC: u64 = 1_000_000_000;
-static mut NANOS_TO_LAPIC_TICKS_RATIO: Ratio = Ratio::zero();
-static mut INIT_TICK: u64 = 0;
-static mut CPU_FREQ_MHZ: u64 = 0;
+static INIT_TICK: AtomicU64 = AtomicU64::new(0);
+static CPU_FREQ_MHZ: AtomicU64 = AtomicU64::new(0);
+static TSC_TICKS_TO_NANOS_RATIO: Once<Ratio> = Once::new();
+static NANOS_TO_TSC_TICKS_RATIO: Once<Ratio> = Once::new();
+static NANOS_TO_LAPIC_TICKS_RATIO: Once<Ratio> =
+    Once::initialized(Ratio::new(LAPIC_TICKS_PER_SEC as u32, 1_000_000_000u32));
 
 struct X86LapicTscMonotonicTimer;
 
@@ -62,59 +68,80 @@ pub fn early_init(config: TimerConfig) {
         config.nominal_frequency_hz >= 1_000_000,
         "x86 LAPIC/TSC timer frequency must be at least 1MHz"
     );
-    unsafe {
-        CPU_FREQ_MHZ = config.nominal_frequency_hz / 1_000_000;
-    }
+    let mut freq_mhz = config.nominal_frequency_hz / 1_000_000;
 
     if let Some(freq) = CpuId::new()
         .get_processor_frequency_info()
         .map(|info| info.processor_base_frequency())
         .filter(|freq| *freq > 0)
     {
-        unsafe { CPU_FREQ_MHZ = freq as u64 }
+        freq_mhz = freq as u64;
     }
-    info!("TSC frequency: {} MHz", unsafe { CPU_FREQ_MHZ });
-    unsafe {
-        INIT_TICK = core::arch::x86_64::_rdtsc();
-    }
+    assert!(
+        u32::try_from(freq_mhz).is_ok(),
+        "TSC frequency must fit in u32 MHz"
+    );
+    CPU_FREQ_MHZ.store(freq_mhz, Ordering::Relaxed);
+    let freq_mhz_u32 = freq_mhz as u32;
+    TSC_TICKS_TO_NANOS_RATIO.call_once(|| Ratio::new(1_000u32, freq_mhz_u32));
+    NANOS_TO_TSC_TICKS_RATIO.call_once(|| Ratio::new(freq_mhz_u32, 1_000u32));
+    info!(
+        "TSC frequency: {} MHz",
+        CPU_FREQ_MHZ.load(Ordering::Relaxed)
+    );
+    // SAFETY: `_rdtsc` is available on the x86_64 target and is used here during
+    // early timer initialization to capture the monotonic TSC baseline.
+    INIT_TICK.store(unsafe { core::arch::x86_64::_rdtsc() }, Ordering::Relaxed);
 }
 
 pub fn init_primary() {
+    // SAFETY: the bootstrap CPU has already initialized the local APIC, and the
+    // helper holds its lock while programming the LAPIC timer registers.
     unsafe {
         use x2apic::lapic::{TimerDivide, TimerMode};
-        let lapic = x86_apic::local_apic();
-        lapic.set_timer_mode(TimerMode::OneShot);
-        lapic.set_timer_divide(TimerDivide::Div1);
-        lapic.enable_timer();
-        NANOS_TO_LAPIC_TICKS_RATIO = Ratio::new(LAPIC_TICKS_PER_SEC as u32, 1_000_000_000u32);
+        x86_apic::with_local_apic(|lapic| {
+            lapic.set_timer_mode(TimerMode::OneShot);
+            lapic.set_timer_divide(TimerDivide::Div1);
+            lapic.enable_timer();
+        });
     }
 }
 
 pub fn init_secondary() {
+    // SAFETY: secondary CPUs call this only after LAPIC bring-up; the helper
+    // programs the current CPU's private LAPIC timer state to match the BSP's
+    // one-shot / divide-by-1 configuration.
     unsafe {
-        x86_apic::local_apic().enable_timer();
+        use x2apic::lapic::{TimerDivide, TimerMode};
+        x86_apic::with_local_apic(|lapic| {
+            lapic.set_timer_mode(TimerMode::OneShot);
+            lapic.set_timer_divide(TimerDivide::Div1);
+            lapic.enable_timer();
+        })
     }
 }
 
 #[inline]
 pub fn now_ticks() -> u64 {
-    unsafe { core::arch::x86_64::_rdtsc() - INIT_TICK }
+    // SAFETY: `_rdtsc` is available on the x86_64 target and provides the current
+    // monotonically increasing TSC value used by this timer source.
+    unsafe { core::arch::x86_64::_rdtsc() - INIT_TICK.load(Ordering::Relaxed) }
 }
 
 #[inline]
 pub fn t2ns(ticks: u64) -> u64 {
-    let freq_mhz = cpu_freq_mhz() as u128;
-    let nanos = (ticks as u128 * 1_000) / freq_mhz;
-    assert!(nanos <= u64::MAX as u128, "nanosecond timestamp overflow");
-    nanos as u64
+    TSC_TICKS_TO_NANOS_RATIO
+        .get()
+        .expect("x86 LAPIC/TSC timer conversion ratio is not initialized")
+        .mul_trunc(ticks)
 }
 
 #[inline]
 pub fn ns2t(nanos: u64) -> u64 {
-    let freq_mhz = cpu_freq_mhz() as u128;
-    let ticks = (nanos as u128 * freq_mhz) / 1_000;
-    assert!(ticks <= u64::MAX as u128, "timer tick count overflow");
-    ticks as u64
+    NANOS_TO_TSC_TICKS_RATIO
+        .get()
+        .expect("x86 LAPIC/TSC timer conversion ratio is not initialized")
+        .mul_trunc(nanos)
 }
 
 #[inline]
@@ -126,8 +153,7 @@ pub fn freq() -> u64 {
 
 #[inline]
 fn cpu_freq_mhz() -> u64 {
-    // SAFETY: CPU_FREQ_MHZ is initialized during early timer setup and only read after initialization.
-    let freq_mhz = unsafe { CPU_FREQ_MHZ };
+    let freq_mhz = CPU_FREQ_MHZ.load(Ordering::Relaxed);
     assert!(freq_mhz != 0, "x86 LAPIC/TSC timer is not initialized");
     freq_mhz
 }
@@ -138,15 +164,21 @@ pub fn interrupt_id() -> usize {
 }
 
 pub fn arm_timer(deadline_ns: u64) {
-    let lapic = x86_apic::local_apic();
     let now_ns = t2ns(now_ticks());
+    // SAFETY: the local APIC timer is initialized before deadline programming, and
+    // the helper holds the LAPIC lock while updating the timer registers.
     unsafe {
-        if now_ns < deadline_ns {
-            let apic_ticks = NANOS_TO_LAPIC_TICKS_RATIO.mul_trunc(deadline_ns - now_ns);
-            assert!(apic_ticks <= u32::MAX as u64);
-            lapic.set_timer_initial(apic_ticks.max(1) as u32);
-        } else {
-            lapic.set_timer_initial(1);
-        }
+        x86_apic::with_local_apic(|lapic| {
+            if now_ns < deadline_ns {
+                let apic_ticks = NANOS_TO_LAPIC_TICKS_RATIO
+                    .get()
+                    .expect("x86 LAPIC deadline ratio is not initialized")
+                    .mul_trunc(deadline_ns - now_ns);
+                assert!(apic_ticks <= u32::MAX as u64);
+                lapic.set_timer_initial(apic_ticks.max(1) as u32);
+            } else {
+                lapic.set_timer_initial(1);
+            }
+        });
     }
 }

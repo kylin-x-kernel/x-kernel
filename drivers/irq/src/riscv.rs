@@ -59,6 +59,9 @@ pub fn init_primary() {
         .unwrap_or((PhysAddr::from_usize(PLIC_PADDR), PLIC_MMIO_SIZE));
     let plic_base = iomap_device(paddr, size, PLIC_IOMAP_NAME)
         .unwrap_or_else(|err| panic!("failed to iomap PLIC: {err:?}"));
+    // SAFETY: `plic_base` comes from a successful `iomap_device` of the PLIC
+    // MMIO window, so the pointer is non-null and references the live register
+    // block for the duration of the driver.
     let plic = unsafe { Plic::new(NonNull::new(plic_base.as_usize() as *mut _).unwrap()) };
     PLIC.init_once(SpinNoIrq::new(plic));
 }
@@ -88,6 +91,8 @@ pub fn init_current_cpu_context() {
 }
 
 pub fn init_percpu() {
+    // SAFETY: these CSR writes only affect interrupt-enable bits on the
+    // current hart during local interrupt-controller initialization.
     unsafe {
         sie::set_ssoft();
         sie::set_stimer();
@@ -129,6 +134,8 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
         with_cause!(
             irq,
             @S_TIMER => {
+                // SAFETY: these CSR writes only toggle the current hart's
+                // supervisor-timer enable bit.
                 unsafe {
                     if enabled {
                         sie::set_stimer();
@@ -164,6 +171,8 @@ impl khal::irq::IntrManagerIf for RiscvIrqIfImpl {
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
+                // SAFETY: the current trap cause is a pending supervisor
+                // software interrupt, so clearing that CSR bit acknowledges it.
                 unsafe { sip::clear_ssoft() };
                 Some(khal::irq::DispatchedIrq::new(irq, PLIC_COMPLETE_SKIP))
             },

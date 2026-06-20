@@ -68,11 +68,19 @@ global_asm!(
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     serial_putc(b'P');
     loop {
+        // SAFETY: halting is the final fallback after boot-stub panic and does
+        // not violate any Rust memory invariants.
         unsafe { core::arch::asm!("hlt", options(nostack, nomem)) }
     }
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// This is the raw x86_64 boot-stub entry reached directly from assembly. The
+/// caller must provide a supported boot magic plus the matching handoff
+/// pointers, and the physical image containing this stub must stay valid until
+/// control is transferred to the loaded kernel image.
 unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, source_image_paddr: usize) -> ! {
     let (loaded, protocol, protocol_info_paddr, rsdp_paddr, cmdline) = if magic == MAGIC as usize {
         let (loaded, protocol, protocol_info_paddr, rsdp_paddr) =
@@ -98,6 +106,9 @@ unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, source_image_paddr: us
             panic!("kernel image spans multiple PDPT entries")
         }
     };
+    // SAFETY: the boot stub owns the temporary page-table pool and global boot
+    // info during this one-time handoff, and the loaded kernel entry, stack,
+    // and boot info pointer all remain mapped across the CR3 switch.
     unsafe {
         let boot_runtime_start = (&raw const __image_start as usize) & !0xfff;
         let boot_runtime_end = align_up(&raw const __image_end as u64, 0x1000) as usize;
@@ -131,11 +142,15 @@ fn load_multiboot_kernel(
     mbi: usize,
     source_image_paddr: usize,
 ) -> (LoadedKernel, BootProtocol, usize, usize) {
+    // SAFETY: `mbi` is the bootloader-provided Multiboot2 information pointer
+    // for this entry path and remains live while the stub parses it.
     let info = unsafe { BootInformation::load(mbi as *const BootInformationHeader) }
         .expect("invalid multiboot2 boot information");
     let module = info.module_tags().next().expect("missing kernel module");
     let module_start = module.start_address() as u64;
     let module_end = module.end_address() as u64;
+    // SAFETY: the bootloader-provided module address range is treated as an
+    // immutable byte slice for parsing and loading the kernel image.
     let module_bytes = unsafe {
         slice::from_raw_parts(
             module_start as *const u8,
@@ -177,6 +192,8 @@ fn load_linuxboot_kernel(
         .expect("missing linux payload length");
     let payload_start = source_image_paddr as u64 + payload_offset as u64;
     let payload_end = payload_start + payload_length as u64;
+    // SAFETY: the Linux boot params payload range describes the immutable ELF
+    // payload bytes embedded in the boot image for this handoff.
     let payload =
         unsafe { slice::from_raw_parts(payload_start as *const u8, payload_length as usize) };
 
@@ -207,6 +224,8 @@ fn serial_putc(byte: u8) {
     if boot_console_io_port().is_none() {
         return;
     }
+    // SAFETY: this performs the minimal polled UART port-I/O sequence against
+    // the configured early console ports only.
     unsafe {
         loop {
             let mut ready: u8;

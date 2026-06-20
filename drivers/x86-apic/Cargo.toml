@@ -18,6 +18,7 @@ memspace = { workspace = true }
 memaddr = { workspace = true }
 khal = { workspace = true }
 crate_interface = { workspace = true }
+percpu = { workspace = true }
 log = "0.4"
 lazyinit = "0.2"
 

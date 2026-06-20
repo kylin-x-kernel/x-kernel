@@ -263,6 +263,9 @@ mod allocator_api {
         }
     }
 
+    // SAFETY: `AllocatorRc` serializes allocator access through `RefCell` and
+    // forwards allocation/deallocation to the wrapped `ByteAllocator` with the
+    // same pointer/layout pairs it received from the `Allocator` API.
     unsafe impl<A: ByteAllocator> Allocator for AllocatorRc<A> {
         fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
             match layout.size() {

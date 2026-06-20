@@ -7,7 +7,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::mem::{self, MaybeUninit};
+use core::mem::MaybeUninit;
 
 use kerrno::{KError, KResult};
 use kio::prelude::*;
@@ -132,9 +132,13 @@ impl Read for IoVectorBufIo {
             if len == 0 {
                 break;
             }
-            read_vm_mem(iov.iov_base.wrapping_add(self.offset), unsafe {
-                mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buf[count..count + len])
-            })?;
+            let out = &mut buf[count..count + len];
+            // SAFETY: `MaybeUninit<u8>` has the same layout as `u8`, and `out`
+            // remains exclusively borrowed for the duration of the user-memory read.
+            let out = unsafe {
+                core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<MaybeUninit<u8>>(), len)
+            };
+            read_vm_mem(iov.iov_base.wrapping_add(self.offset), out)?;
             self.offset += len;
             self.inner.len = self.inner.len.saturating_sub(len);
             count += len;

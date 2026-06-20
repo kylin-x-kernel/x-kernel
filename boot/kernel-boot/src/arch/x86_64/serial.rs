@@ -40,6 +40,8 @@ fn init_once() {
     }
 
     let port = bootconsole_config::ioport_addr().expect("missing x86 boot console ioport");
+    // SAFETY: these programmed-I/O writes target the configured UART registers
+    // and are the standard early-console initialization sequence.
     unsafe {
         outb(port + UART_IER_OFFSET, UART_IER_DISABLE_ALL);
         outb(port + UART_LCR_OFFSET, UART_LCR_DLAB);
@@ -57,6 +59,8 @@ fn init_once() {
 fn write_raw_byte(byte: u8) {
     init_once();
     let port = bootconsole_config::ioport_addr().expect("missing x86 boot console ioport");
+    // SAFETY: these programmed-I/O operations poll the configured UART status
+    // register and write one byte to its data register.
     unsafe {
         while inb(port + UART_LSR_OFFSET) & UART_LSR_THR_EMPTY == 0 {}
         outb(port + UART_DATA_OFFSET, byte);
@@ -111,6 +115,7 @@ pub(crate) fn write_hex(num: usize) {
 #[inline]
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
+    // SAFETY: performs one x86 port-I/O read from the caller-specified UART register.
     unsafe {
         core::arch::asm!(
             "in al, dx",
@@ -124,6 +129,7 @@ unsafe fn inb(port: u16) -> u8 {
 
 #[inline]
 unsafe fn outb(port: u16, value: u8) {
+    // SAFETY: performs one x86 port-I/O write to the caller-specified UART register.
     unsafe {
         core::arch::asm!(
             "out dx, al",

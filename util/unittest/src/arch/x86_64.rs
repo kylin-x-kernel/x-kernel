@@ -5,12 +5,22 @@
 use super::StackTestEntry;
 use crate::TestDescriptor;
 
+/// Invoke `entry` on an alternate stack and pass it `test`.
+///
+/// # Safety
+///
+/// `stack_top` must point to the top of a valid writable temporary stack
+/// region reserved for this call, `entry` must follow the expected ABI, and
+/// `test` must remain valid for the duration of the stack-switched call.
 pub unsafe fn call_on_stack(
     stack_top: usize,
     entry: StackTestEntry,
     test: *const TestDescriptor,
 ) -> u8 {
     let ret: usize;
+    // SAFETY: the caller provides a valid alternate stack top and test entry;
+    // the assembly switches to that stack, preserves the original `rsp`, and
+    // returns control using the normal x86_64 C ABI.
     unsafe {
         core::arch::asm!(
             "mov r10, {stack_top}",

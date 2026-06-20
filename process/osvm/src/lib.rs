@@ -36,6 +36,12 @@ pub type MemResult<T = ()> = Result<T, MemError>;
 
 /// External trait that supplies platform-specific memory I/O.
 #[extern_trait(MemImpl)]
+/// # Safety
+///
+/// Implementers must ensure `read_mem` and `write_mem` only succeed when the
+/// supplied virtual range is accessible for the requested operation, and that
+/// successful reads fully initialize `out`. Implementations must not create
+/// typed references to user memory; they should perform checked byte copies.
 pub unsafe trait VirtMemIo: 'static {
     fn new() -> Self;
     fn read_mem(&mut self, addr: usize, out: &mut [MaybeUninit<u8>]) -> MemResult;
@@ -60,6 +66,8 @@ pub fn write_vm_mem<T>(p: *mut T, src: &[T]) -> MemResult {
     if !p.is_aligned() {
         return Err(MemError::InvalidAddr);
     }
+    // SAFETY: `src` is a live slice, so viewing its contiguous storage as bytes
+    // for the same length is layout-preserving.
     let bytes = unsafe { slice::from_raw_parts(src.as_ptr().cast::<u8>(), size_of_val(src)) };
     MemImpl::new().write_mem(p.addr(), bytes)
 }

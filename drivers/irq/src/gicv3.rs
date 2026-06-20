@@ -20,6 +20,8 @@ pub fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     info!("Initialize GICv3...");
     let gicd_base = VirtAddr::new(gicd_base.into());
     let gicr_base = VirtAddr::new(gicr_base.into());
+    // SAFETY: both distributor and redistributor bases come from platform
+    // discovery and point at the mapped GICv3 MMIO frames for this machine.
     let mut gic = unsafe { Gic::new(gicd_base, gicr_base) };
     gic.init();
     GIC.init_once(SpinNoIrq::new(gic));
@@ -36,6 +38,8 @@ pub fn init_current_cpu() {
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
     trace!("GICv3 set trigger: {interrupt_id} {edge}");
+    // SAFETY: callers pass a hardware IRQ number understood by this GIC
+    // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(interrupt_id as u32) };
     let cfg = if edge { Trigger::Edge } else { Trigger::Level };
     GIC.lock().set_cfg(intid, cfg);
@@ -43,12 +47,16 @@ pub fn set_trigger(interrupt_id: usize, edge: bool) {
 
 pub fn enable(irq: usize, enabled: bool) {
     trace!("GICv3 set enable: {irq} {enabled}");
+    // SAFETY: callers pass a hardware IRQ number understood by this GIC
+    // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
     let mut gic = GIC.lock();
     gic.set_irq_enable(intid, enabled);
 }
 
 pub fn set_prio(irq: usize, priority: u8) {
+    // SAFETY: callers pass a hardware IRQ number understood by this GIC
+    // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
     let gic = GIC.lock();
     gic.set_priority(intid, priority);

@@ -12,34 +12,56 @@ use core::{
 use kcpu_id_map::LogicalCpuId;
 use khal::{context::TrapFrame, percpu::this_cpu_id};
 
-struct TrapFrames([UnsafeCell<Option<TrapFrame>>; kbuild_config::CPU_NUM]);
+struct SnapshotSlot(UnsafeCell<Option<TrapFrame>>);
 
-// Safety: `TrapFrames` provides interior mutability for per-CPU snapshot slots.
-// During collection each CPU only writes its own slot, while `dump_all` reads a
-// slot only after the writer has published the corresponding `COLLECTED` bit
-// with `Release` and the reader has observed it with `Acquire`.
-//
-// `begin`/`SnapshotGuard` serializes snapshot sessions, so two normal snapshot
-// dumpers do not clear/read these slots at the same time.
-unsafe impl Sync for TrapFrames {}
+impl SnapshotSlot {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(None))
+    }
+
+    fn clear(&self) {
+        // SAFETY: snapshot session setup/teardown serializes bulk reset of all
+        // slots, so no reader consumes stale data concurrently with this clear.
+        unsafe { *self.0.get() = None };
+    }
+
+    fn write(&self, tf: Option<TrapFrame>) {
+        // SAFETY: each CPU writes only its own slot, and publication is
+        // ordered by the subsequent `COLLECTED.fetch_or(..., Release)`.
+        unsafe { *self.0.get() = tf };
+    }
+
+    fn read(&self) -> Option<TrapFrame> {
+        // SAFETY: readers only consume a slot after observing its `COLLECTED`
+        // bit with `Acquire`, which pairs with the writer's `Release`.
+        unsafe { *self.0.get() }
+    }
+}
+
+// SAFETY: `SnapshotSlot` is a per-CPU publication cell. Writers mutate only
+// the owning CPU's slot, while readers consume the stored trap frame only
+// after `COLLECTED` establishes Release/Acquire ordering for that slot.
+unsafe impl Sync for SnapshotSlot {}
+
+struct TrapFrames([SnapshotSlot; kbuild_config::CPU_NUM]);
 
 impl TrapFrames {
     const fn new() -> Self {
-        Self([const { UnsafeCell::new(None) }; kbuild_config::CPU_NUM])
+        Self([const { SnapshotSlot::new() }; kbuild_config::CPU_NUM])
     }
 
     fn clear(&self) {
         for slot in &self.0 {
-            unsafe { *slot.get() = None };
+            slot.clear();
         }
     }
 
     fn write_current(&self, cpu_id: LogicalCpuId, tf: Option<TrapFrame>) {
-        unsafe { *self.0[cpu_id.as_usize()].get() = tf };
+        self.0[cpu_id.as_usize()].write(tf);
     }
 
     fn read(&self, cpu_id: LogicalCpuId) -> Option<TrapFrame> {
-        unsafe { *self.0[cpu_id.as_usize()].get() }
+        self.0[cpu_id.as_usize()].read()
     }
 }
 
@@ -111,7 +133,7 @@ fn collect_local() {
         return;
     };
 
-    TRAP_FRAMES.write_current(cpu_id, khal::context::active_exception_context().copied());
+    TRAP_FRAMES.write_current(cpu_id, khal::context::active_exception_context());
     COLLECTED.fetch_or(bit, Ordering::Release);
 }
 
@@ -205,7 +227,7 @@ pub fn trigger(reason: &str) {
 /// then dumps all non-running tasks.
 pub fn dump_cpu_tasks(cpu_id: LogicalCpuId) {
     if let Some(tf) = khal::context::active_exception_context() {
-        dump::dump_cur_task_backtrace(cpu_id, tf, false, true);
+        dump::dump_cur_task_backtrace(cpu_id, &tf, false, true);
     }
     dump::dump_cpu_task_backtrace(cpu_id, false, true);
 }

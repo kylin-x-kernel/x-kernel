@@ -120,6 +120,8 @@ macro_rules! read_from_vec_impl {
         let mut read_buf: BorrowedBuf<'_> = $buf.spare_capacity_mut().into();
         let result = $reader.read_buf(read_buf.unfilled());
         let bytes_read = read_buf.len();
+        // SAFETY: `read_buf` writes exclusively into the vector's spare capacity,
+        // so extending the length by the reported initialized byte count is sound.
         unsafe {
             $buf.set_len($buf.len() + bytes_read);
         }

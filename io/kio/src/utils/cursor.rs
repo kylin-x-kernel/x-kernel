@@ -254,6 +254,8 @@ fn reserve_and_pad(pos_mut: &mut u64, vec: &mut Vec<u8>, buf_len: usize) -> Resu
 #[cfg(feature = "alloc")]
 unsafe fn vec_write_all_unchecked(pos: usize, vec: &mut Vec<u8>, buf: &[u8]) -> usize {
     debug_assert!(vec.capacity() >= pos + buf.len());
+    // SAFETY: the caller guarantees `buf.len()` bytes of spare capacity at
+    // `pos`, so the copy stays within the allocated vector buffer.
     unsafe { vec.as_mut_ptr().add(pos).copy_from(buf.as_ptr(), buf.len()) };
     pos + buf.len()
 }

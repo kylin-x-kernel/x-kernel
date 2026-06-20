@@ -38,6 +38,8 @@ pub trait VirtPtr: Copy {
         Self::Target: AnyBitPattern,
     {
         let u = self.read_uninit()?;
+        // SAFETY: `AnyBitPattern` guarantees every bit pattern is a valid value
+        // for `Self::Target`, so the initialized bytes can be assumed valid.
         Ok(unsafe { u.assume_init() })
     }
 }

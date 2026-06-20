@@ -17,6 +17,8 @@ impl ArchBacktrace for AArch64 {
 
     fn current_fp() -> usize {
         let fp: usize;
+        // SAFETY: Reading the current frame pointer from `x29` is a
+        // side-effect-free register move.
         unsafe { asm!("mov {}, x29", out(reg) fp, options(nomem, nostack)) };
         fp
     } // AArch64 requires 16-byte stack alignment

@@ -91,6 +91,39 @@ impl PerTaskRecording {
     }
 }
 
+struct TaskContextCell(UnsafeCell<TaskContext>);
+
+impl TaskContextCell {
+    fn new() -> Self {
+        Self(UnsafeCell::new(TaskContext::new()))
+    }
+
+    fn get_mut(&mut self) -> &mut TaskContext {
+        self.0.get_mut()
+    }
+
+    fn get(&self) -> &TaskContext {
+        // SAFETY: mutable access to the stored task context is restricted to
+        // `&mut self` construction paths and scheduler-controlled context
+        // switch paths. Ordinary callers only observe it through a shared
+        // reference.
+        unsafe { &*self.0.get() }
+    }
+
+    fn as_mut_ptr(&self) -> *mut TaskContext {
+        self.0.get()
+    }
+}
+
+// SAFETY: `TaskContextCell` only exposes shared references for inspection and
+// raw pointers for scheduler-controlled context switching. The scheduler is
+// responsible for ensuring exclusive mutable access when using `as_mut_ptr`.
+unsafe impl Send for TaskContextCell {}
+// SAFETY: sharing `TaskContextCell` is sound because interior mutation is not
+// exposed directly; callers need scheduler-controlled raw-pointer access to
+// mutate the stored `TaskContext`.
+unsafe impl Sync for TaskContextCell {}
+
 /// The inner task structure.
 pub struct TaskInner {
     id: TaskId,
@@ -127,7 +160,7 @@ pub struct TaskInner {
     wait_for_exit: AtomicWaker,
 
     kstack: Option<TaskStack>,
-    ctx: UnsafeCell<TaskContext>,
+    ctx: TaskContextCell,
 
     #[cfg(feature = "task_ext")]
     task_ext: Option<KTaskExt>,
@@ -165,7 +198,12 @@ impl From<u8> for TaskState {
     }
 }
 
+// SAFETY: `TaskInner` is only shared through synchronization primitives for
+// its interior mutable fields; raw context access is gated by scheduler/task
+// invariants in this module.
 unsafe impl Send for TaskInner {}
+// SAFETY: shared references do not permit unsynchronized mutation beyond the
+// interior-mutability primitives that already enforce the task invariants.
 unsafe impl Sync for TaskInner {}
 
 impl TaskInner {
@@ -240,23 +278,20 @@ impl TaskInner {
 
     /// Returns a mutable reference to the task context.
     #[inline]
-    pub const fn ctx_mut(&mut self) -> &mut TaskContext {
+    pub fn ctx_mut(&mut self) -> &mut TaskContext {
         self.ctx.get_mut()
     }
 
     /// Returns a shared reference to the task context.
     #[inline]
     pub fn ctx(&self) -> &TaskContext {
-        unsafe { &*self.ctx.get() }
+        self.ctx.get()
     }
 
     /// Returns the top address of the kernel stack.
     #[inline]
-    pub const fn kernel_stack_top(&self) -> Option<VirtAddr> {
-        match &self.kstack {
-            Some(s) => Some(s.top()),
-            None => None,
-        }
+    pub fn kernel_stack_top(&self) -> Option<VirtAddr> {
+        self.kstack.as_ref().map(|s| s.top())
     }
 
     /// Returns the CPU ID where the task is running or will run.
@@ -427,7 +462,7 @@ impl TaskInner {
             exit_code: AtomicI32::new(0),
             wait_for_exit: AtomicWaker::new(),
             kstack: None,
-            ctx: UnsafeCell::new(TaskContext::new()),
+            ctx: TaskContextCell::new(),
             #[cfg(feature = "task_ext")]
             task_ext: None,
             #[cfg(feature = "tls")]
@@ -555,8 +590,8 @@ impl TaskInner {
     }
 
     #[inline]
-    pub(crate) const unsafe fn ctx_mut_ptr(&self) -> *mut TaskContext {
-        self.ctx.get()
+    pub(crate) fn ctx_mut_ptr(&self) -> *mut TaskContext {
+        self.ctx.as_mut_ptr()
     }
 
     /// Set the CPU ID where the task is running or will run.
@@ -644,18 +679,24 @@ impl TaskStack {
     pub fn alloc(size: usize) -> Self {
         let layout = Layout::from_size_align(size, 16).unwrap();
         Self {
+            // SAFETY: `layout` is validated above and the returned allocation
+            // is owned exclusively by this `TaskStack`.
             ptr: NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap(),
             layout,
         }
     }
 
-    pub const fn top(&self) -> VirtAddr {
-        unsafe { core::mem::transmute(self.ptr.as_ptr().add(self.layout.size())) }
+    pub fn top(&self) -> VirtAddr {
+        // SAFETY: adding `layout.size()` to the base allocation pointer yields
+        // the one-past-the-end stack-top address represented as `VirtAddr`.
+        VirtAddr::from(self.ptr.as_ptr().wrapping_add(self.layout.size()) as usize)
     }
 }
 
 impl Drop for TaskStack {
     fn drop(&mut self) {
+        // SAFETY: `ptr` and `layout` are the exact allocation pair created in
+        // `TaskStack::alloc`, and `drop` runs exactly once for this stack.
         unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
     }
 }
@@ -669,6 +710,9 @@ impl CurrentTask {
     pub(crate) fn try_get() -> Option<Self> {
         let ptr: *const super::KTask = khal::percpu::current_task_ptr();
         if !ptr.is_null() {
+            // SAFETY: the percpu current-task pointer is installed from
+            // `Arc::into_raw` in `init_current`/`set_current` and stays valid
+            // while it is the current task pointer for this CPU.
             Some(Self(unsafe { ManuallyDrop::new(KtaskRef::from_raw(ptr)) }))
         } else {
             None
@@ -693,10 +737,14 @@ impl CurrentTask {
     pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
         #[cfg(all(feature = "tls", target_os = "none"))]
+        // SAFETY: the initial task's TLS block is fully constructed before the
+        // task becomes current, and this writes the current CPU's thread pointer.
         unsafe {
             khal::asm::write_thread_pointer(init_task.tls.tls_ptr() as usize)
         };
         let ptr = Arc::into_raw(init_task);
+        // SAFETY: `ptr` originates from `Arc::into_raw` and becomes the owning
+        // percpu current-task pointer for this CPU.
         unsafe {
             khal::percpu::set_current_task_ptr(ptr);
         }
@@ -706,6 +754,8 @@ impl CurrentTask {
         let Self(arc) = prev;
         ManuallyDrop::into_inner(arc); // `call Arc::drop()` to decrease prev task reference count.
         let ptr = Arc::into_raw(next);
+        // SAFETY: `ptr` originates from `Arc::into_raw` and replaces the
+        // owning percpu current-task pointer for this CPU.
         unsafe {
             khal::percpu::set_current_task_ptr(ptr);
         }
@@ -722,6 +772,9 @@ impl Deref for CurrentTask {
 
 extern "C" fn task_entry() -> ! {
     #[cfg(feature = "smp")]
+    // SAFETY: this runs as the first code on a scheduled task after the
+    // context switch, which is exactly when the previous-task on-CPU marker
+    // must be cleared for this CPU.
     unsafe {
         // Clear the prev task on CPU before running the task entry function.
         crate::run_queue::clear_prev_task_on_cpu();

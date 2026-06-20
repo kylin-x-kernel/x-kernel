@@ -4,7 +4,7 @@
 
 //! Ext4 inode wrapper and node implementations (ext4_rs backend).
 use alloc::{string::String, sync::Arc, vec};
-use core::{any::Any, cmp::min, task::Context, time::Duration};
+use core::{any::Any, cmp::min, slice, task::Context, time::Duration};
 
 use ext4_rs::BLOCK_SIZE;
 use kpoll::{IoEvents, Pollable};
@@ -70,10 +70,6 @@ impl Inode {
         Err(VfsError::NotFound)
     }
 }
-
-unsafe impl Send for Inode {}
-
-unsafe impl Sync for Inode {}
 
 impl NodeOps for Inode {
     fn inode(&self) -> u64 {
@@ -159,7 +155,10 @@ impl FileNodeOps for Inode {
                 if offset as usize >= size {
                     return Ok(0);
                 }
-                let data: &[u8; 60] = unsafe { core::mem::transmute(&inode.block) };
+                // SAFETY: ext4 stores inline fast-symlink payload bytes in the
+                // 15 u32 block-pointer slots. Reinterpreting that fixed 60-byte
+                // region as raw bytes preserves layout and size.
+                let data = unsafe { slice::from_raw_parts(inode.block.as_ptr().cast::<u8>(), 60) };
                 let start = offset as usize;
                 let end = min(size, start + buf.len());
                 let len = end.saturating_sub(start);

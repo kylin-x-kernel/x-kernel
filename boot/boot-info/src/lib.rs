@@ -135,6 +135,9 @@ impl BootInfo {
             return None;
         }
 
+        // SAFETY: `cmdline_addr..cmdline_addr + cmdline_len` comes from boot
+        // handoff metadata, and callers only request a borrowed view over that
+        // immutable byte range.
         unsafe {
             let slice =
                 core::slice::from_raw_parts(self.cmdline_addr as *const u8, self.cmdline_len);
@@ -371,12 +374,14 @@ impl LinuxBootParams {
 
     #[inline]
     pub fn acpi_rsdp_addr(self) -> u64 {
+        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
         unsafe { self.read_u64(X86_LINUX_BOOT_PARAMS_ACPI_RSDP_ADDR_OFFSET) }
     }
 
     #[inline]
     pub fn e820_entries(self) -> usize {
         usize::min(
+            // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
             unsafe { self.read_u8(X86_LINUX_BOOT_PARAMS_E820_ENTRIES_OFFSET) as usize },
             X86_LINUX_BOOT_E820_MAX_ENTRIES,
         )
@@ -391,17 +396,22 @@ impl LinuxBootParams {
             + X86_LINUX_BOOT_PARAMS_E820_TABLE_OFFSET
             + index * mem::size_of::<X86LinuxE820Entry>())
             as *const X86LinuxE820Entry;
+        // SAFETY: `index < e820_entries()` bounds the entry inside the boot
+        // params e820 table, and the Linux boot protocol permits unaligned
+        // field access from the zeropage blob.
         Some(unsafe { ptr::read_unaligned(entry_ptr) })
     }
 
     #[inline]
     pub fn cmdline_ptr(self) -> Option<usize> {
+        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
         let ptr = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_CMD_LINE_PTR_OFFSET) } as usize;
         (ptr != 0).then_some(ptr)
     }
 
     #[inline]
     pub fn cmdline_size(self) -> Option<usize> {
+        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
         let size = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_CMDLINE_SIZE_OFFSET) } as usize;
         (size != 0).then_some(size)
     }
@@ -412,6 +422,8 @@ impl LinuxBootParams {
             .cmdline_size()
             .unwrap_or(X86_LINUX_BOOT_LEGACY_CMDLINE_MAX);
         let scan_len = max_len.checked_add(1)?;
+        // SAFETY: `ptr..ptr + scan_len` is the bootloader-provided command-line
+        // buffer, and the extra byte allows scanning for the terminating NUL.
         let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, scan_len) };
         let nul_pos = bytes.iter().position(|&byte| byte == 0)?;
         core::str::from_utf8(&bytes[..nul_pos]).ok()
@@ -419,7 +431,9 @@ impl LinuxBootParams {
 
     #[inline]
     pub fn payload_offset(self) -> Option<u32> {
+        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
         let payload_offset = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_OFFSET_OFFSET) };
+        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
         let payload_length = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET) };
         if payload_offset == 0 || payload_length == 0 {
             None
@@ -430,7 +444,9 @@ impl LinuxBootParams {
 
     #[inline]
     pub fn payload_length(self) -> Option<u32> {
+        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
         let payload_offset = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_OFFSET_OFFSET) };
+        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
         let payload_length = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET) };
         if payload_offset == 0 || payload_length == 0 {
             None
@@ -441,16 +457,21 @@ impl LinuxBootParams {
 
     #[inline]
     unsafe fn read_u8(self, offset: usize) -> u8 {
+        // SAFETY: `LinuxBootParams` is a typed view over the boot protocol blob
+        // rooted at `self.addr`; callers only use fixed protocol-defined
+        // offsets, and x86 zeropage fields permit unaligned reads.
         unsafe { ptr::read_unaligned((self.addr + offset) as *const u8) }
     }
 
     #[inline]
     unsafe fn read_u64(self, offset: usize) -> u64 {
+        // SAFETY: see `read_u8`; the same zeropage invariant applies here.
         unsafe { ptr::read_unaligned((self.addr + offset) as *const u64) }
     }
 
     #[inline]
     unsafe fn read_u32(self, offset: usize) -> u32 {
+        // SAFETY: see `read_u8`; the same zeropage invariant applies here.
         unsafe { ptr::read_unaligned((self.addr + offset) as *const u32) }
     }
 }

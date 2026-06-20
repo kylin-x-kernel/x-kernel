@@ -9,12 +9,14 @@ use riscv::register::sstatus;
 /// Allows the current CPU to respond to interrupts.
 #[inline]
 pub fn enable_local_irq() {
+    // SAFETY: this only sets the current hart's supervisor interrupt-enable bit.
     unsafe { sstatus::set_sie() }
 }
 
 /// Makes the current CPU ignore interrupts.
 #[inline]
 pub fn disable_local_irq() {
+    // SAFETY: this only clears the current hart's supervisor interrupt-enable bit.
     unsafe { sstatus::clear_sie() }
 }
 
@@ -55,6 +57,8 @@ pub fn save_irq_and_disable() -> usize {
     const SIE_BIT: usize = 1 << 1;
     let flags: usize;
     // csrrc: atomically clear the SIE bit and return the old sstatus value
+    // SAFETY: this single CSR instruction only touches the current hart's
+    // `sstatus` SIE bit and returns the previous value atomically.
     unsafe { core::arch::asm!("csrrc {}, sstatus, {}", out(reg) flags, const SIE_BIT) };
     flags & SIE_BIT
 }
@@ -64,5 +68,7 @@ pub fn save_irq_and_disable() -> usize {
 #[inline]
 pub fn restore_irq(flags: usize) {
     // csrrs: set the bits from `flags` back into sstatus
+    // SAFETY: `flags` comes from `save_irq_and_disable`, so only the saved
+    // interrupt-enable bit is written back to the current hart's `sstatus`.
     unsafe { core::arch::asm!("csrrs x0, sstatus, {}", in(reg) flags) };
 }

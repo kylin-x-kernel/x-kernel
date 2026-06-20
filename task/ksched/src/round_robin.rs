@@ -101,6 +101,9 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
+        // SAFETY: scheduler tasks are only linked into `ready_queue` through
+        // this scheduler, so removing a known task preserves the intrusive-list
+        // membership invariant.
         unsafe { self.ready_queue.remove(task) }
     }
 

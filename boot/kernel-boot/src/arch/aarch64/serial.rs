@@ -221,6 +221,8 @@ impl Uart {
     #[unsafe(link_section = ".idmap.text")]
     pub fn put(&self, c: u8) -> Option<u8> {
         let ptr = self.base_address as *mut u8;
+        // SAFETY: `base_address` is the configured UART MMIO data register and
+        // early boot uses volatile stores for side-effecting device access.
         unsafe {
             ptr.write_volatile(c);
         }
@@ -230,6 +232,8 @@ impl Uart {
     #[unsafe(link_section = ".idmap.text")]
     pub fn put_idmap(&self, c: u8) -> Option<u8> {
         let ptr = self.base_address as *mut u8;
+        // SAFETY: `base_address` is the configured UART MMIO data register and
+        // early boot uses volatile stores for side-effecting device access.
         unsafe {
             ptr.write_volatile(c);
         }
@@ -284,6 +288,8 @@ macro_rules! boot_print_reg {
         boot_print_str($reg_name);
         boot_print_str(": ");
         let reg;
+        // SAFETY: `mrs` reads the named system register into a general-purpose
+        // register for diagnostics without mutating memory or control flow.
         unsafe { core::arch::asm!(concat!("mrs {}, ", $reg_name), out(reg) reg) };
         boot_print_usize(reg);
     };

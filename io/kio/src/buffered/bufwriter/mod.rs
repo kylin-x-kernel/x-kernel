@@ -230,6 +230,8 @@ impl<W: ?Sized + Write> BufWriter<W> {
         let old_len = self.buf.len();
         let buf_len = buf.len();
         let src = buf.as_ptr();
+        // SAFETY: the caller guaranteed sufficient spare capacity, and the
+        // destination range starts at the old logical end of the vector.
         unsafe {
             let dst = self.buf.as_mut_ptr().add(old_len);
             core::ptr::copy_nonoverlapping(src, dst, buf_len);

@@ -62,6 +62,7 @@ the core topic files above them are the primary path.
 When writing or editing Rust kernel code:
 
 1. Identify whether the change touches `unsafe`,
+   raw pointers, FFI, uninitialized storage,
    shared state, logging, public APIs, or hot paths.
 2. Load the matching topic files from this skill directory.
 3. Apply the mandatory rules from those topic files.
@@ -70,6 +71,7 @@ When writing or editing Rust kernel code:
    boundary validation,
    current-context assumptions,
    `unsafe` reasoning,
+   unsafe scope minimization,
    lock scope,
    error propagation,
    and logging quality.
@@ -82,13 +84,18 @@ When reviewing Rust kernel code:
 
 1. Check whether names reflect the real semantics and units.
 2. Check whether comments explain intent rather than paraphrasing code.
-3. Check every `unsafe` block, `unsafe fn`, and `unsafe impl`
+3. If the patch touches `unsafe`, load `unsafety.md`
+   and review against its scenario catalog,
+   `SAFETY:` comment standard, and review questions.
+4. Check every `unsafe` block, `unsafe fn`, and `unsafe impl`
    for explicit invariants and sufficient audit surface.
-4. Check whether lock scope, lock order, and wake/block behavior are safe.
-5. Check whether syscall boundaries and current-context assumptions are explicit.
-6. Check whether `?`, typed errors, and logging levels are used appropriately.
-7. Check whether modules, visibility, macros, and attributes stay disciplined.
-8. Check whether the code introduces avoidable hot-path scans,
+5. Check whether raw-pointer, FFI, and `MaybeUninit`
+   usage is modeled with the narrowest sound pattern available.
+6. Check whether lock scope, lock order, and wake/block behavior are safe.
+7. Check whether syscall boundaries and current-context assumptions are explicit.
+8. Check whether `?`, typed errors, and logging levels are used appropriately.
+9. Check whether modules, visibility, macros, and attributes stay disciplined.
+10. Check whether the code introduces avoidable hot-path scans,
    copies, allocations, or atomics.
 
 ## Review Checklist
@@ -99,6 +106,14 @@ Before considering a code change aligned with this skill, verify:
 - comments and rustdoc explain intent and contracts;
 - current-context semantics are explicit where the API depends on them;
 - every `unsafe` site has a concrete safety argument;
+- every `unsafe` block has a nearby `SAFETY:` comment that
+  names the real invariants rather than using placeholders;
+- `unsafe fn` bodies do not silently rely on implicit whole-body unsafety;
+- `unsafe` review uses the scenario catalog from `unsafety.md`
+  instead of ad hoc reasoning;
+- uninitialized storage uses `MaybeUninit<T>` or an equivalent explicit model;
+- raw-pointer and FFI code states validity, alignment,
+  lifetime, aliasing, and ABI assumptions where relevant;
 - shared-state code has sane lock scope and lock ordering;
 - boundary validation happens at subsystem edges;
 - modules, visibility, imports, and attributes stay narrowly scoped;

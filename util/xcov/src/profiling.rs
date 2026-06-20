@@ -32,8 +32,10 @@ pub fn get_version() -> u64 {
 ///
 /// `probe` must point to a valid u64.
 pub unsafe fn set_timestamp(probe: *mut u64) {
+    // SAFETY: the caller guarantees `probe` points to a valid writable `u64`.
     let val = unsafe { *probe };
     if val == 0 || val == u64::MAX {
+        // SAFETY: the caller guarantees `probe` points to a valid writable `u64`.
         unsafe { *probe = GLOBAL_TIMESTAMP.fetch_add(1, Ordering::Relaxed) as u64 };
     }
 }
@@ -44,6 +46,8 @@ pub unsafe fn set_timestamp(probe: *mut u64) {
 ///
 /// Must be called when no concurrent profiling is happening.
 pub unsafe fn reset_counters() {
+    // SAFETY: the caller guarantees there is no concurrent profiling activity,
+    // so the runtime sections may be reset in place.
     unsafe {
         if get_version() & VARIANT_MASK_TEMPORAL_PROF != 0 {
             GLOBAL_TIMESTAMP.store(1, Ordering::Relaxed);

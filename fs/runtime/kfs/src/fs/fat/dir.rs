@@ -4,7 +4,7 @@
 
 //! FAT directory node implementation.
 use alloc::{string::String, sync::Arc};
-use core::{any::Any, mem, time::Duration};
+use core::{any::Any, time::Duration};
 
 use kvfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, Metadata, MetadataUpdate, NodeFlags,
@@ -28,11 +28,18 @@ pub struct FatDirNode {
 
 impl FatDirNode {
     /// Construct a directory node from a FAT directory handle.
-    pub fn new(fs: Arc<FatFilesystem>, dir: ff::Dir, inode: u64, this: WeakDirEntry) -> DirNode {
+    pub fn new(
+        fs: Arc<FatFilesystem>,
+        owner: &super::fs::FatFilesystem,
+        dir: ff::Dir,
+        inode: u64,
+        this: WeakDirEntry,
+    ) -> DirNode {
         DirNode::new(Arc::new(Self {
             fs,
-            // SAFETY: FsRef guarantees correct lifetime
-            inner: FsRef::new(unsafe { mem::transmute::<ff::Dir, ff::Dir>(dir) }),
+            // SAFETY: The FAT handle is only accessed while holding the
+            // matching filesystem lock, which outlives this node wrapper.
+            inner: unsafe { FsRef::from_dir_handle(owner, dir) },
             inode,
             this,
         }))
@@ -42,22 +49,26 @@ impl FatDirNode {
         let reference = Reference::new(self.this.upgrade(), name.into());
         if entry.is_file() {
             DirEntry::new_file(
-                FatFileNode::new(self.fs.clone(), entry.to_file(), inode),
+                FatFileNode::new(self.fs.clone(), self.fs.as_ref(), entry.to_file(), inode),
                 NodeType::RegularFile,
                 reference,
             )
         } else {
             DirEntry::new_dir(
-                |this| FatDirNode::new(self.fs.clone(), entry.to_dir(), inode, this),
+                |this| {
+                    FatDirNode::new(
+                        self.fs.clone(),
+                        self.fs.as_ref(),
+                        entry.to_dir(),
+                        inode,
+                        this,
+                    )
+                },
                 reference,
             )
         }
     }
 }
-
-unsafe impl Send for FatDirNode {}
-
-unsafe impl Sync for FatDirNode {}
 
 impl NodeOps for FatDirNode {
     fn inode(&self) -> u64 {
@@ -124,7 +135,8 @@ impl DirNodeOps for FatDirNode {
             let inode = if let Some(entry) = dir_node.lookup_cache(&name) {
                 entry.inode()
             } else {
-                let entry = self.create_entry(entry, name.clone(), fs.alloc_inode());
+                let inode = fs.alloc_inode();
+                let entry = self.create_entry(entry, name.clone(), inode);
                 let inode = entry.inode();
                 dir_node.insert_cache(name.clone(), entry);
                 inode
@@ -146,7 +158,10 @@ impl DirNodeOps for FatDirNode {
                     .ok()
                     .filter(|it| it.file_name().eq_ignore_ascii_case(name))
             })
-            .map(|entry| self.create_entry(entry, name.to_ascii_lowercase(), fs.alloc_inode()))
+            .map(|entry| {
+                let inode = fs.alloc_inode();
+                self.create_entry(entry, name.to_ascii_lowercase(), inode)
+            })
             .ok_or(VfsError::NotFound)
     }
 
@@ -160,25 +175,23 @@ impl DirNodeOps for FatDirNode {
         let dir = self.inner.borrow(&fs);
         let reference = Reference::new(self.this.upgrade(), name.to_ascii_lowercase());
         match node_type {
-            NodeType::RegularFile => dir
-                .create_file(name)
-                .map(|file| {
-                    DirEntry::new_file(
-                        FatFileNode::new(self.fs.clone(), file, fs.alloc_inode()),
-                        NodeType::RegularFile,
-                        reference,
-                    )
-                })
-                .map_err(into_vfs_err),
-            NodeType::Directory => dir
-                .create_dir(name)
-                .map(|dir| {
-                    DirEntry::new_dir(
-                        |this| FatDirNode::new(self.fs.clone(), dir, fs.alloc_inode(), this),
-                        reference,
-                    )
-                })
-                .map_err(into_vfs_err),
+            NodeType::RegularFile => {
+                let file = dir.create_file(name).map_err(into_vfs_err)?;
+                let inode = fs.alloc_inode();
+                Ok(DirEntry::new_file(
+                    FatFileNode::new(self.fs.clone(), self.fs.as_ref(), file, inode),
+                    NodeType::RegularFile,
+                    reference,
+                ))
+            }
+            NodeType::Directory => {
+                let dir = dir.create_dir(name).map_err(into_vfs_err)?;
+                let inode = fs.alloc_inode();
+                Ok(DirEntry::new_dir(
+                    |this| FatDirNode::new(self.fs.clone(), self.fs.as_ref(), dir, inode, this),
+                    reference,
+                ))
+            }
             _ => Err(VfsError::InvalidInput),
         }
     }

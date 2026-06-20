@@ -93,9 +93,9 @@ pub struct TlsArea {
 
 impl Drop for TlsArea {
     fn drop(&mut self) {
-        unsafe {
-            alloc::alloc::dealloc(self.base.as_ptr(), self.layout);
-        }
+        // SAFETY: `base` was allocated from the global allocator with exactly
+        // `layout` in `TlsArea::alloc`, and `Drop` runs at most once.
+        unsafe { alloc::alloc::dealloc(self.base.as_ptr(), self.layout) }
     }
 }
 
@@ -104,31 +104,38 @@ impl TlsArea {
     ///
     /// One should set the hardware thread pointer register to this value.
     pub fn tls_ptr(&self) -> *mut u8 {
+        // SAFETY: `base` points to an allocation of `tls_area_size()` bytes,
+        // and `tp_offset()` is defined to lie within that allocation for the
+        // active architecture's TLS layout.
         unsafe { self.base.as_ptr().add(tp_offset()) }
     }
 
     /// Allocates the memory region for TLS, and initializes it.
     pub fn alloc() -> Self {
         let layout = Layout::from_size_align(tls_area_size(), TLS_ALIGN).unwrap();
+        // SAFETY: `layout` was validated above. Allocation failure is handled
+        // before any pointer arithmetic or initialization occurs.
         let area_base = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        let base =
+            NonNull::new(area_base).unwrap_or_else(|| alloc::alloc::handle_alloc_error(layout));
 
+        // SAFETY: `base` is a non-null allocation of `layout.size()` bytes.
+        // The source `.tdata` range comes from linker-defined symbols, and the
+        // destination static-TLS subrange lies within the TLS allocation.
         unsafe {
             let tls_load_base = _stdata as *mut u8;
             let tls_load_size = (_etdata as *mut u8).offset_from_unsigned(_stdata as *mut u8);
             // copy data from .tbdata section
             core::ptr::copy_nonoverlapping(
                 tls_load_base,
-                area_base.add(static_tls_offset()),
+                base.as_ptr().add(static_tls_offset()),
                 tls_load_size,
             );
             // initialize TCB
-            init_tcb(area_base);
+            init_tcb(base);
         }
 
-        Self {
-            base: NonNull::new(area_base).unwrap(),
-            layout,
-        }
+        Self { base, layout }
     }
 }
 
@@ -178,10 +185,13 @@ fn tls_area_size() -> usize {
     }
 }
 
-unsafe fn init_tcb(tls_area: *mut u8) {
+fn init_tcb(tls_area: NonNull<u8>) {
     if cfg!(target_arch = "x86_64") {
+        // SAFETY: `tls_area` is the base of the newly allocated TLS region,
+        // and on x86_64 the TCB self-pointer slot lives at `tp_offset()`
+        // within that allocation.
         unsafe {
-            let tp_addr = tls_area.add(tp_offset()).cast::<usize>();
+            let tp_addr = tls_area.as_ptr().add(tp_offset()).cast::<usize>();
             tp_addr.write(tp_addr as usize); // write self pointer
         }
     }

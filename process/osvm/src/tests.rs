@@ -23,11 +23,11 @@ fn test_read_write_vm_mem_local() {
     let ptr = &mut val as *mut u64;
 
     // Test Reading
-    let mut out = MaybeUninit::<u64>::uninit();
+    let read_res = (ptr as *const u64).read_vm();
     // read_vm_mem takes *const T
-    let res = read_vm_mem(ptr as *const u64, core::slice::from_mut(&mut out));
+    let res = read_res.as_ref().map(|_| ());
     assert!(res.is_ok());
-    let read_val = unsafe { out.assume_init() };
+    let read_val = read_res.unwrap();
     assert_eq!(read_val, 0x1234567890ABCDEF);
 
     // Test Writing

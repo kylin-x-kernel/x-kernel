@@ -87,17 +87,13 @@ impl From<SignalAction> for kernel_sigaction {
     fn from(value: SignalAction) -> Self {
         let value = k_sigaction::from(value);
 
-        // FIXME: Zeroable
-        let mut result: kernel_sigaction = unsafe { core::mem::zeroed() };
-        result.sa_handler_kernel = value.handler;
-        result.sa_flags = value.flags;
-        #[cfg(sa_restorer)]
-        {
-            result.sa_restorer = value.restorer;
+        Self {
+            sa_handler_kernel: value.handler,
+            sa_flags: value.flags,
+            #[cfg(sa_restorer)]
+            sa_restorer: value.restorer,
+            sa_mask: value.mask.into(),
         }
-        result.sa_mask = value.mask.into();
-
-        result
     }
 }
 

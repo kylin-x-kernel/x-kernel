@@ -4,7 +4,7 @@
 
 //! FAT file node implementation.
 use alloc::{sync::Arc, vec};
-use core::{any::Any, mem, task::Context};
+use core::{any::Any, task::Context};
 
 use fatfs::{Read, Seek, SeekFrom, Write};
 use kpoll::{IoEvents, Pollable};
@@ -15,10 +15,9 @@ use kvfs::{
 
 use super::{
     FsRef, ff,
-    fs::FatFilesystem,
+    fs::{FatFilesystem, FatFilesystemInner},
     util::{file_metadata, into_vfs_err, update_file_metadata},
 };
-use crate::fs::fat::fs::FatFilesystemInner;
 
 /// FAT file node.
 pub struct FatFileNode {
@@ -29,11 +28,17 @@ pub struct FatFileNode {
 
 impl FatFileNode {
     /// Construct a file node from a FAT file handle.
-    pub fn new(fs: Arc<FatFilesystem>, file: ff::File, inode: u64) -> FileNode {
+    pub fn new(
+        fs: Arc<FatFilesystem>,
+        owner: &FatFilesystem,
+        file: ff::File,
+        inode: u64,
+    ) -> FileNode {
         FileNode::new(Arc::new(Self {
             fs,
-            // SAFETY: FsRef guarantees correct lifetime
-            inner: FsRef::new(unsafe { mem::transmute::<ff::File, ff::File>(file) }),
+            // SAFETY: The FAT handle is only accessed while holding the
+            // matching filesystem lock, which outlives this node wrapper.
+            inner: unsafe { FsRef::from_file_handle(owner, file) },
             inode,
         }))
     }
@@ -61,39 +66,35 @@ fn grow_file(fs: &FatFilesystemInner, file: &mut ff::File<'static>, len: u64) ->
     Ok(())
 }
 
-unsafe impl Send for FatFileNode {}
-
-unsafe impl Sync for FatFileNode {}
-
 impl NodeOps for FatFileNode {
     fn inode(&self) -> u64 {
         self.inode
     }
 
     fn metadata(&self) -> VfsResult<Metadata> {
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         Ok(file_metadata(&fs, file, NodeType::RegularFile))
     }
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         // FatFS has no ownership & permission
 
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         update_file_metadata(file, update);
         Ok(())
     }
 
     fn len(&self) -> VfsResult<u64> {
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         Ok(file_size(file))
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         file.flush().map_err(into_vfs_err)
     }
 
@@ -108,8 +109,8 @@ impl NodeOps for FatFileNode {
 
 impl FileNodeOps for FatFileNode {
     fn read_at(&self, mut buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         file.seek(SeekFrom::Start(offset)).map_err(into_vfs_err)?;
 
         let mut read = 0;
@@ -124,8 +125,8 @@ impl FileNodeOps for FatFileNode {
     }
 
     fn write_at(&self, mut buf: &[u8], offset: u64) -> VfsResult<usize> {
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         if offset > file_size(file) {
             grow_file(&fs, file, offset)?;
         }
@@ -143,16 +144,16 @@ impl FileNodeOps for FatFileNode {
     }
 
     fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         file.seek(SeekFrom::End(0)).map_err(into_vfs_err)?;
         let written = file.write(buf).map_err(into_vfs_err)?;
         Ok((written, file_size(file)))
     }
 
     fn set_len(&self, len: u64) -> VfsResult<()> {
-        let fs = self.fs.lock();
-        let file = self.inner.borrow_mut(&fs);
+        let mut fs = self.fs.lock();
+        let file = self.inner.borrow_mut(&mut fs);
         if len <= file_size(file) {
             file.seek(SeekFrom::Start(len)).map_err(into_vfs_err)?;
             file.truncate().map_err(into_vfs_err)

@@ -34,6 +34,8 @@ struct VirtIoNetIrqHandle<H: Hal, T: Transport, const QS: usize> {
 // which provides mutual exclusion. The inner InnerDev is safe to share
 // across threads when protected by a lock.
 unsafe impl<H: Hal, T: Transport, const QS: usize> Send for VirtIoNetIrqHandle<H, T, QS> {}
+// SAFETY: VirtIoNetIrqHandle only accesses the device through SpinNoIrq,
+// which provides mutual exclusion for shared references as well.
 unsafe impl<H: Hal, T: Transport, const QS: usize> Sync for VirtIoNetIrqHandle<H, T, QS> {}
 
 impl<H: Hal, T: Transport, const QS: usize> VirtIoNetIrqAck for VirtIoNetIrqHandle<H, T, QS> {
@@ -163,6 +165,8 @@ struct NetBufState<const QS: usize> {
 // its buffer bookkeeping by SpinNoPreempt. Both locks provide the mutual
 // exclusion required to transfer across threads and share immutable references.
 unsafe impl<H: Hal, T: Transport, const QS: usize> Send for VirtIoNetDev<H, T, QS> {}
+// SAFETY: VirtIoNetDev's device state (InnerDev) is protected by SpinNoIrq and
+// its buffer bookkeeping by SpinNoPreempt, so shared references remain synchronized.
 unsafe impl<H: Hal, T: Transport, const QS: usize> Sync for VirtIoNetDev<H, T, QS> {}
 
 impl<H: Hal, T: Transport, const QS: usize> Drop for VirtIoNetDev<H, T, QS> {

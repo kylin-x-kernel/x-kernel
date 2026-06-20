@@ -42,10 +42,14 @@ impl Default for SlabByteAllocator {
 
 impl BaseAllocator for SlabByteAllocator {
     fn init_region(&mut self, start: usize, size: usize) {
+        // SAFETY: The caller provides a valid backing region at
+        // `[start, start + size)` for constructing the slab heap.
         self.heap = unsafe { Some(Heap::new(start, size)) };
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
+        // SAFETY: The caller provides a valid backing region at
+        // `[start, start + size)` to extend the slab heap.
         unsafe {
             self.inner_mut().add_memory(start, size);
         }
@@ -60,11 +64,15 @@ impl ByteAllocator for SlabByteAllocator {
     fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
         self.inner_mut()
             .allocate(layout)
+            // SAFETY: `Heap::allocate` only returns non-null allocation
+            // addresses on success.
             .map(|addr| unsafe { NonNull::new_unchecked(addr as *mut u8) })
             .map_err(|_| AllocError::NoMemory)
     }
 
     fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        // SAFETY: `ptr` and `layout` come from a previous successful
+        // allocation from this heap.
         unsafe { self.inner_mut().deallocate(ptr.as_ptr() as usize, layout) }
     }
 

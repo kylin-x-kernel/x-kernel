@@ -44,6 +44,7 @@ impl From<PhysAddr> for HwPageTableRoot {
 /// Returns the hardware-ready page table root value.
 #[inline]
 pub fn read_user_page_table() -> HwPageTableRoot {
+    // SAFETY: reading `cr3` is side-effect free and returns the current page-table root.
     HwPageTableRoot::new((unsafe { controlregs::cr3() } as usize).align_down_4k())
 }
 
@@ -71,6 +72,8 @@ pub fn read_kernel_page_table() -> HwPageTableRoot {
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
 pub unsafe fn write_user_page_table(root: HwPageTableRoot) {
+    // SAFETY: the caller guarantees `root` names a valid hardware page-table root
+    // for the current address-space switch.
     unsafe { controlregs::cr3_write(root.as_usize() as _) }
 }
 
@@ -87,5 +90,7 @@ pub unsafe fn write_user_page_table(root: HwPageTableRoot) {
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
 pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
+    // SAFETY: x86_64 uses the same `cr3` root for kernel and user mappings, so
+    // this forwards the caller's validated root unchanged.
     unsafe { write_user_page_table(root) }
 }

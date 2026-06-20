@@ -68,7 +68,8 @@ const LOGO: &str = r#"
  %%%%%%                %%%%%%+=
 "#;
 
-// SAFETY: The `main` symbol is guaranteed to be valid by the linker.
+// SAFETY: The linker script exports the final application entry symbol as a
+// valid `extern "C" fn()` named `main`.
 unsafe extern "C" {
     /// Application's entry point.
     fn main();
@@ -294,7 +295,9 @@ pub fn rust_main(arg: usize) -> ! {
         core::hint::spin_loop();
     }
 
-    // SAFETY: The `main` symbol is guaranteed to be valid by the linker.
+    // SAFETY: The linker exported `main` as the final application entry, and
+    // runtime initialization above has established the execution environment it
+    // expects before control is transferred.
     unsafe { main() };
 
     ktask::exit(0);
@@ -440,7 +443,9 @@ fn init_interrupt() {
     static NEXT_DEADLINE: u64 = 0;
 
     fn update_timer(now_ns: u64) {
-        // SAFETY: we have disabled preemption in IRQ handler.
+        // SAFETY: timer IRQ handlers run with preemption disabled on the
+        // current CPU, so raw per-CPU access cannot race migration to another
+        // CPU.
         let current_deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
 
         // Use the later of the existing deadline or "now + interval" as
@@ -452,7 +457,8 @@ fn init_interrupt() {
         };
 
         let next_deadline = deadline + PERIODIC_INTERVAL_NANOS;
-        // SAFETY: Preemption is disabled in IRQ handler context, making per-CPU `NEXT_DEADLINE` access safe.
+        // SAFETY: timer IRQ handlers run with preemption disabled on the
+        // current CPU, so writing the current CPU's raw per-CPU slot is safe.
         unsafe { NEXT_DEADLINE.write_current_raw(next_deadline) };
         khal::time::arm_timer(deadline);
     }

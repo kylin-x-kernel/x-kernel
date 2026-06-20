@@ -9,16 +9,14 @@
 //! - Set socket options (setsockopt, etc.)
 //! - Socket-level, IP-level, TCP-level, and other protocol options
 
-use core::mem::MaybeUninit;
-
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
     Socket,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
 use linux_raw_sys::net::socklen_t;
-use osvm::{VirtPtr, read_vm_mem, write_vm_mem};
-use posix_types::{UserConstPtr, UserPtr};
+use osvm::{VirtPtr, write_vm_mem};
+use posix_types::{UserConstPtr, UserPtr, UserRead};
 
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
@@ -32,7 +30,7 @@ mod conv {
     use kerrno::{KError, KResult};
     use knet::options::{PacketMembership, PacketStatistics, UnixCredentials};
     use linux_raw_sys::{general::timeval, net::ucred};
-    use posix_types::TimeValueLike;
+    use posix_types::{TimeValueLike, UserRead};
 
     pub struct Int<T>(T);
 
@@ -98,6 +96,9 @@ mod conv {
         pub tp_drops: u32,
     }
 
+    // SAFETY: `tpacket_stats` is a POD getsockopt result structure.
+    unsafe impl UserRead for tpacket_stats {}
+
     pub struct PacketStats;
 
     impl PacketStats {
@@ -125,6 +126,9 @@ mod conv {
         pub mr_alen: u16,
         pub mr_address: [u8; 8],
     }
+
+    // SAFETY: `packet_mreq` is a POD setsockopt/getsockopt carrier.
+    unsafe impl UserRead for packet_mreq {}
 
     pub struct PacketMembershipConv;
 
@@ -250,14 +254,11 @@ pub fn sys_setsockopt(
         fd, level, optname, optlen
     );
 
-    fn get<T: Copy>(val: UserConstPtr<u8>, len: socklen_t) -> KResult<T> {
+    fn get<T: UserRead>(val: UserConstPtr<u8>, len: socklen_t) -> KResult<T> {
         if len as usize != size_of::<T>() {
             return Err(KError::InvalidInput);
         }
-        let mut value = MaybeUninit::<T>::uninit();
-        read_vm_mem(val.cast::<T>().as_ptr(), core::slice::from_mut(&mut value))
-            .map_err(KError::from)?;
-        Ok(unsafe { value.assume_init() })
+        val.cast::<T>().read_vm().map_err(KError::from)
     }
 
     let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;

@@ -95,6 +95,8 @@ impl Default for RawMutex {
     }
 }
 
+// SAFETY: `RawMutex` provides the mutual-exclusion and wakeup guarantees
+// required by `lock_api::RawMutex` through its internal state machine.
 unsafe impl lock_api::RawMutex for RawMutex {
     type GuardMarker = lock_api::GuardSend;
 
@@ -201,6 +203,9 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     unsafe fn unlock(&self) {
+        // SAFETY: `lock_api` only calls `unlock` after this mutex instance was
+        // successfully locked by the current guard holder, so releasing the
+        // owner slot and waking one waiter upholds the raw mutex protocol.
         let owner_id = self.owner_id.swap(0, Ordering::Release);
         assert_eq!(
             owner_id,

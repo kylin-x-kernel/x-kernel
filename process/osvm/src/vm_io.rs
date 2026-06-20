@@ -4,7 +4,7 @@
 
 //! Streaming I/O adapters for user-space virtual memory.
 
-use core::mem::{self, MaybeUninit};
+use core::{mem::MaybeUninit, slice};
 
 use kio::prelude::*;
 
@@ -35,9 +35,14 @@ impl VmBytes {
 impl Read for VmBytes {
     fn read(&mut self, buf: &mut [u8]) -> kio::Result<usize> {
         let len = self.len.min(buf.len());
-        read_vm_mem(self.ptr, unsafe {
-            mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buf[..len])
-        })?;
+        let out = unsafe {
+            // SAFETY: `buf[..len]` is a live mutable byte slice. Rebuilding it
+            // as `MaybeUninit<u8>` preserves the same allocation, length, and
+            // alignment, while making the initialization state explicit for
+            // `read_vm_mem`.
+            slice::from_raw_parts_mut(buf[..len].as_mut_ptr().cast::<MaybeUninit<u8>>(), len)
+        };
+        read_vm_mem(self.ptr, out)?;
         self.ptr = self.ptr.wrapping_add(len);
         self.len -= len;
         Ok(len)

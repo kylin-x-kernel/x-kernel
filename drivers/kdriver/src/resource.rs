@@ -91,11 +91,14 @@ impl ResourceProvider for HostResourceProvider {
         let vaddr =
             memspace::iomap_device(region.base.into(), region.size, name).map_err(map_iomap_err)?;
         let ptr = NonNull::new(vaddr.as_mut_ptr()).ok_or(ResError::MappingFailed)?;
-        Ok(MmioMapping { vaddr: ptr, region })
+        Ok(MmioMapping {
+            vaddr: ptr.as_ptr() as usize,
+            region,
+        })
     }
 
     fn unmap_mmio(&self, mapping: MmioMapping) {
-        let vaddr = memaddr::VirtAddr::from(mapping.vaddr.as_ptr() as usize);
+        let vaddr = memaddr::VirtAddr::from(mapping.vaddr);
         let _ = memspace::iounmap(vaddr);
     }
 
@@ -143,7 +146,7 @@ impl ResourceProvider for HostResourceProvider {
         // allocation until it is freed via `free_coherent`.
         let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
         Ok(DmaAllocation {
-            cpu_addr: info.cpu_addr,
+            cpu_addr: info.cpu_addr.as_ptr() as usize,
             bus_addr: info.bus_addr.as_u64(),
             spec,
         })
@@ -154,7 +157,8 @@ impl ResourceProvider for HostResourceProvider {
             return;
         };
         let info = kdma::DMAInfo {
-            cpu_addr: alloc.cpu_addr,
+            cpu_addr: NonNull::new(alloc.cpu_addr as *mut u8)
+                .expect("coherent DMA allocation stored a null CPU address"),
             bus_addr: kdma::DmaBusAddress::new(alloc.bus_addr),
         };
         // SAFETY: `info` and `layout` describe a coherent buffer previously

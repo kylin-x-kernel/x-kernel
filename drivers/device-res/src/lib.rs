@@ -154,30 +154,21 @@ where
 #[derive(Debug, Clone, Copy)]
 pub struct MmioMapping {
     /// Virtual address the CPU uses to access the region.
-    pub vaddr: NonNull<u8>,
+    pub vaddr: usize,
     /// The physical region this mapping covers.
     pub region: MmioRegion,
 }
-
-// SAFETY: `MmioMapping` only carries an address value and a plain descriptor.
-// Ownership of the underlying device mapping is single-threaded per handle and
-// the address is valid for the lifetime of the mapping.
-unsafe impl Send for MmioMapping {}
 
 /// A coherent DMA allocation returned by [`ResourceProvider::alloc_coherent`].
 #[derive(Debug, Clone, Copy)]
 pub struct DmaAllocation {
     /// Virtual address the CPU uses to access the buffer.
-    pub cpu_addr: NonNull<u8>,
+    pub cpu_addr: usize,
     /// Bus address the device uses to access the buffer.
     pub bus_addr: u64,
     /// The originating allocation request.
     pub spec: DmaSpec,
 }
-
-// SAFETY: `DmaAllocation` carries plain address values describing a coherent
-// buffer that is owned exclusively by its [`DmaCoherent`] handle.
-unsafe impl Send for DmaAllocation {}
 
 /// Host-provided backend for OS-semantic resource operations.
 ///
@@ -261,10 +252,13 @@ impl Io {
     /// Panics if the handle has no active mapping. This cannot happen through
     /// the current public API since the mapping is only taken during drop.
     pub fn as_ptr(&self) -> NonNull<u8> {
-        self.mapping
-            .as_ref()
-            .expect("Io handle used after release")
-            .vaddr
+        NonNull::new(
+            self.mapping
+                .as_ref()
+                .expect("Io handle used after release")
+                .vaddr as *mut u8,
+        )
+        .expect("Io mapping stored a null virtual address")
     }
 
     /// The physical region backing this mapping.
@@ -487,10 +481,13 @@ impl DmaCoherent {
     /// Panics if the handle has no active allocation. This cannot happen through
     /// the current public API since the allocation is only taken during drop.
     pub fn cpu_ptr(&self) -> NonNull<u8> {
-        self.allocation
-            .as_ref()
-            .expect("DmaCoherent handle used after release")
-            .cpu_addr
+        NonNull::new(
+            self.allocation
+                .as_ref()
+                .expect("DmaCoherent handle used after release")
+                .cpu_addr as *mut u8,
+        )
+        .expect("DmaCoherent stored a null CPU address")
     }
 
     /// The device-visible bus address of the buffer.

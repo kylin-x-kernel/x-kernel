@@ -50,6 +50,8 @@ impl BouncePool {
             "DMA bounce buffer {:#x} is outside the configured bounce pool",
             cpu_addr
         );
+        // SAFETY: `cpu_addr` was validated to belong to this pool and `layout`
+        // comes from the matching allocation path.
         unsafe {
             self.allocator
                 .deallocate(NonNull::new_unchecked(cpu_addr as *mut u8), layout);

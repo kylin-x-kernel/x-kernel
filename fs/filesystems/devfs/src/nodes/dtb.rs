@@ -23,6 +23,8 @@ pub(crate) fn capture_snapshot() {
 
     let mut snapshot = vec![0u8; size];
     let src = vaddr as *const u8;
+    // SAFETY: firmware reports `vaddr..vaddr+size` as the captured DTB region,
+    // and `snapshot` owns a distinct writable buffer of exactly `size` bytes.
     unsafe {
         core::ptr::copy_nonoverlapping(src, snapshot.as_mut_ptr(), size);
     }

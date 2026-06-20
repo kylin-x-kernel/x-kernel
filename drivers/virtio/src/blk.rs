@@ -40,17 +40,17 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
 }
 
 // SAFETY: VirtIoBlkDev serializes all access to the inner VirtIOBlk through
-// its own `SpinNoIrq` lock. The inner VirtIOBlk is not auto Send/Sync due
-// to PhantomData, but it is safe to transfer across threads and share behind
-// that lock. The lock must mask interrupts for the duration of each device
-// access, because the synchronous request path busy-polls the used ring while
-// holding the lock. On targets without per-device MSI-X (e.g. x86, where
-// virtio falls back to a shared level-triggered INTx line that the block
-// driver never acks), leaving local interrupts enabled during the poll lets
-// the shared line re-assert continuously and livelock the CPU in an interrupt
-// storm. Masking IRQs here keeps the busy-poll safe, matching the IRQ-safe
-// lock the virtio-net adapter uses for the same reason.
+// its own `SpinNoIrq` lock. The inner VirtIOBlk is not auto Send due to
+// PhantomData, but it is safe to transfer across threads behind that lock.
+// The lock must mask interrupts for the duration of each device access,
+// because the synchronous request path busy-polls the used ring while holding
+// the lock. On targets without per-device MSI-X (e.g. x86, where virtio falls
+// back to a shared level-triggered INTx line that the block driver never
+// acks), leaving local interrupts enabled during the poll lets the shared line
+// re-assert continuously and livelock the CPU in an interrupt storm.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
+// SAFETY: shared access to the device is serialized by the IRQ-safe lock
+// described above, so immutable references may be shared across threads safely.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {

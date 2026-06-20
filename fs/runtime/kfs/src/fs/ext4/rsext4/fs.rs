@@ -4,7 +4,6 @@
 
 //! Ext4 filesystem adapter (rsext4 backend).
 use alloc::{string::String, sync::Arc};
-use core::cell::OnceCell;
 
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
@@ -25,10 +24,7 @@ pub(crate) struct Ext4State {
 
 impl Ext4State {
     pub(crate) fn split(&mut self) -> (&mut rsext4::Ext4FileSystem, &mut Jbd2Dev<Ext4Disk>) {
-        let fs = &mut self.fs as *mut _;
-        let dev = &mut self.dev as *mut _;
-        // SAFETY: fs 和 dev 是同一结构体的不同字段，不会别名重叠。
-        unsafe { (&mut *fs, &mut *dev) }
+        (&mut self.fs, &mut self.dev)
     }
 }
 
@@ -36,7 +32,7 @@ impl Ext4State {
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4State>,
     inode_cache: InodeCache,
-    root_dir: OnceCell<DirEntry>,
+    root_dir: Mutex<Option<DirEntry>>,
 }
 
 impl Ext4Filesystem {
@@ -64,9 +60,9 @@ impl Ext4Filesystem {
         let fs = Arc::new(Self {
             inner: Mutex::new(Ext4State { fs, dev }),
             inode_cache: InodeCache::new(),
-            root_dir: OnceCell::new(),
+            root_dir: Mutex::new(None),
         });
-        let _ = fs.root_dir.set(DirEntry::new_dir(
+        *fs.root_dir.lock() = Some(DirEntry::new_dir(
             |this| {
                 DirNode::new(Inode::new(
                     fs.clone(),
@@ -133,17 +129,13 @@ impl Ext4Filesystem {
     }
 }
 
-unsafe impl Send for Ext4Filesystem {}
-
-unsafe impl Sync for Ext4Filesystem {}
-
 impl SuperBlockOperations for Ext4Filesystem {
     fn name(&self) -> &str {
         "ext4"
     }
 
     fn root_dentry(&self) -> DirEntry {
-        self.root_dir.get().unwrap().clone()
+        self.root_dir.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

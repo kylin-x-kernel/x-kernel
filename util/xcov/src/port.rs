@@ -13,6 +13,8 @@ pub use portable_atomic::{AtomicU32, AtomicU64, AtomicUsize};
 
 /// Atomic compare-and-swap on a 64-bit value.
 pub fn bool_cmpxchg_u64(ptr: *mut u64, old_val: u64, new_val: u64) -> bool {
+    // SAFETY: callers pass a properly aligned `u64` slot used as an atomic word
+    // by the profiling runtime, so reinterpreting it as `AtomicU64` is sound.
     unsafe {
         let a = &*(ptr as *const AtomicU64);
         a.compare_exchange(
@@ -31,6 +33,7 @@ pub fn bool_cmpxchg_u64(ptr: *mut u64, old_val: u64, new_val: u64) -> bool {
 ///
 /// Caller must guarantee `[ptr, ptr + len)` is valid for writes.
 pub unsafe fn mem_zero(ptr: *mut u8, len: usize) {
+    // SAFETY: the caller guarantees the destination range is valid for writes.
     unsafe { ptr::write_bytes(ptr, 0, len) }
 }
 
@@ -40,6 +43,7 @@ pub unsafe fn mem_zero(ptr: *mut u8, len: usize) {
 ///
 /// Caller must guarantee `[ptr, ptr + len)` is valid for writes.
 pub unsafe fn mem_set(ptr: *mut u8, val: u8, len: usize) {
+    // SAFETY: the caller guarantees the destination range is valid for writes.
     unsafe { ptr::write_bytes(ptr, val, len) }
 }
 
@@ -49,6 +53,7 @@ pub unsafe fn mem_set(ptr: *mut u8, val: u8, len: usize) {
 ///
 /// Caller must guarantee `[a, a + len)` and `[b, b + len)` are valid for reads.
 pub unsafe fn mem_cmp(a: *const u8, b: *const u8, len: usize) -> i32 {
+    // SAFETY: the caller guarantees both input ranges are valid for `len` reads.
     unsafe {
         let mut offset = 0;
         while offset < len {
@@ -70,6 +75,7 @@ pub unsafe fn mem_cmp(a: *const u8, b: *const u8, len: usize) -> i32 {
 /// Caller must guarantee `[dst, dst + len)` is valid for writes
 /// and `[src, src + len)` is valid for reads, with no overlap.
 pub unsafe fn mem_copy(dst: *mut u8, src: *const u8, len: usize) {
+    // SAFETY: the caller guarantees both ranges are valid and non-overlapping.
     unsafe { ptr::copy_nonoverlapping(src, dst, len) }
 }
 
@@ -80,6 +86,8 @@ pub unsafe fn mem_copy(dst: *mut u8, src: *const u8, len: usize) {
 /// Caller must guarantee `align` is a valid alignment (power of two).
 #[cfg(feature = "alloc")]
 pub unsafe fn alloc_zeroed(size: usize, align: usize) -> *mut u8 {
+    // SAFETY: the caller guarantees `align` is valid; allocation is delegated
+    // to the global allocator using the matching `Layout`.
     unsafe {
         extern crate alloc;
         use alloc::alloc::{Layout, alloc_zeroed};
@@ -96,6 +104,8 @@ pub unsafe fn alloc_zeroed(size: usize, align: usize) -> *mut u8 {
 /// `size` and `align`.
 #[cfg(feature = "alloc")]
 pub unsafe fn dealloc(ptr: *mut u8, size: usize, align: usize) {
+    // SAFETY: the caller guarantees `ptr`, `size`, and `align` match a prior
+    // successful `alloc_zeroed` call.
     unsafe {
         extern crate alloc;
         use alloc::alloc::{Layout, dealloc};

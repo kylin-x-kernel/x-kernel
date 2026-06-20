@@ -93,6 +93,8 @@ pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String
 }
 
 #[extern_trait]
+// SAFETY: `Vm` validates the user range up front and performs raw copies only
+// inside the temporary user-access window established by `access_user_memory`.
 unsafe impl VirtMemIo for Vm {
     fn new() -> Self {
         Self(IrqSave::new())
@@ -100,8 +102,10 @@ unsafe impl VirtMemIo for Vm {
 
     fn read_mem(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> MemResult {
         check_access(start, buf.len())?;
-        let failed_at = access_user_memory(|| unsafe {
-            user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
+        let failed_at = access_user_memory(|| {
+            // SAFETY: `check_access` validated the user range, and `buf`
+            // provides writable storage for exactly `buf.len()` bytes.
+            unsafe { user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len()) }
         });
         if unlikely(failed_at != 0) {
             Err(MemError::NoAccess)
@@ -112,8 +116,10 @@ unsafe impl VirtMemIo for Vm {
 
     fn write_mem(&mut self, start: usize, buf: &[u8]) -> MemResult {
         check_access(start, buf.len())?;
-        let failed_at = access_user_memory(|| unsafe {
-            user_copy(start as _, buf.as_ptr() as *const _, buf.len())
+        let failed_at = access_user_memory(|| {
+            // SAFETY: `check_access` validated the user range, and `buf`
+            // supplies readable storage for exactly `buf.len()` bytes.
+            unsafe { user_copy(start as _, buf.as_ptr() as *const _, buf.len()) }
         });
         if unlikely(failed_at != 0) {
             Err(MemError::NoAccess)

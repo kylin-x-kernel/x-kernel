@@ -34,6 +34,8 @@ impl Frame {
         CurrentArch::validate_fp(fp)?;
 
         // Read frame from memory
+        // SAFETY: `validate_fp` checked the frame pointer for architecture-
+        // specific alignment and basic validity before this raw read.
         let frame = unsafe { Self::read_unchecked(fp) };
 
         // Validate the read frame
@@ -54,6 +56,8 @@ impl Frame {
     /// The caller must ensure that `fp` is valid and properly aligned.
     unsafe fn read_unchecked(fp: usize) -> Self {
         let offset = CurrentArch::FRAME_OFFSET;
+        // SAFETY: The caller guarantees `fp` points at a readable frame record
+        // with the architecture-specific offset already accounted for.
         unsafe { (fp as *const Frame).sub(offset).read() }
     }
 

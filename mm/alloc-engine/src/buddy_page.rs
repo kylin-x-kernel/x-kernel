@@ -46,7 +46,11 @@ fn map_alloc_error(err: BuddyAllocError) -> AllocError {
 
 impl<const PAGE_SIZE: usize> BaseAllocator for BuddyPageAllocator<PAGE_SIZE> {
     fn init_region(&mut self, start: usize, size: usize) {
+        // SAFETY: The caller provides a valid, writable memory region at
+        // `[start, start + size)` for allocator metadata and managed pages.
         let region = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
+        // SAFETY: `region` is a unique mutable slice covering the allocator's
+        // initial backing memory.
         unsafe {
             self.inner
                 .init(region)
@@ -55,7 +59,11 @@ impl<const PAGE_SIZE: usize> BaseAllocator for BuddyPageAllocator<PAGE_SIZE> {
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
+        // SAFETY: The caller provides a valid, writable memory region at
+        // `[start, start + size)` that can be added to the buddy allocator.
         let region = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
+        // SAFETY: `region` is a unique mutable slice describing the newly added
+        // backing memory.
         unsafe { self.inner.add_region(region).map_err(map_alloc_error) }
     }
 }

@@ -57,6 +57,8 @@ pub fn save_irq_and_disable() -> usize {
     const IE_MASK: usize = 1 << 2;
     let mut flags: usize = 0;
     // csrxchg atomically reads CRMD and clears the IE bit
+    // SAFETY: this CSR exchange only touches the current CPU's CRMD interrupt
+    // enable bit and returns the previous value atomically.
     unsafe { asm!("csrxchg {}, {}, 0x0", inout(reg) flags, in(reg) IE_MASK) };
     flags & IE_MASK
 }
@@ -68,5 +70,7 @@ pub fn restore_irq(flags: usize) {
     /// Interrupt Enable bit mask in CRMD.
     const IE_MASK: usize = 1 << 2;
     // csrxchg atomically restores the IE bit
+    // SAFETY: `flags` comes from `save_irq_and_disable`, so only the saved
+    // interrupt-enable bit is written back into the current CPU's CRMD.
     unsafe { asm!("csrxchg {}, {}, 0x0", in(reg) flags, in(reg) IE_MASK) };
 }

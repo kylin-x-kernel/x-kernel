@@ -54,11 +54,6 @@ pub struct TcpSocket {
     poll_rx_closed: Arc<PollSet>,
 }
 
-// SAFETY: Shared mutable TCP state is protected by `StateLock`, `Mutex`,
-// `RwLock`, and atomics. Access to the smoltcp socket is serialized through
-// `SOCKET_SET`, and immutable endpoint fields are fixed after construction.
-unsafe impl Sync for TcpSocket {}
-
 impl TcpSocket {
     /// Creates a new TCP socket.
     pub fn new() -> Self {

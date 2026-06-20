@@ -54,11 +54,12 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 ///
 /// # Safety
 ///
-/// This function is unsafe because it directly interacts with the global
-/// allocator, which can potentially cause memory leaks or other issues if not
-/// used correctly.
+/// The caller must free the returned allocation exactly once with
+/// [`deallocate_dma_memory`] using the same `layout`, and must only expose the
+/// returned bus address to devices that are allowed to DMA that buffer.
 #[track_caller]
 pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
+    // SAFETY: forwards the caller's DMA allocation preconditions to the global DMA allocator.
     unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
 }
 
@@ -73,10 +74,11 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
 ///
 /// # Safety
 ///
-/// This function is unsafe because it directly interacts with the global allocator,
-/// which can potentially cause memory leaks or other issues if not used correctly.
+/// `dma` must come from a prior successful [`allocate_dma_memory`] call, and
+/// `layout` must exactly match that allocation.
 #[track_caller]
 pub unsafe fn deallocate_dma_memory(dma: DMAInfo, layout: Layout) {
+    // SAFETY: forwards the caller's matching deallocation contract to the global DMA allocator.
     unsafe { ALLOCATOR.lock().deallocate_dma_memory(dma, layout) }
 }
 
@@ -97,12 +99,14 @@ pub enum DmaDirection {
 ///
 /// # Safety
 ///
-/// `buffer` must be valid and remain exclusively owned until it is later passed
-/// to [`unmap_dma_buffer`].
+/// `buffer` must remain live and exclusively owned until it is later passed to
+/// [`unmap_dma_buffer`]. The caller must not let the device keep using the
+/// returned bus address after unmapping.
 pub unsafe fn map_dma_buffer(
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) -> AllocResult<DMAInfo> {
+    // SAFETY: forwards the caller's exclusive-buffer contract to the DMA mapper.
     unsafe { ALLOCATOR.lock().map_dma_buffer(buffer, direction) }
 }
 
@@ -110,13 +114,15 @@ pub unsafe fn map_dma_buffer(
 ///
 /// # Safety
 ///
-/// `dma_addr` must be the bus address previously returned by
-/// [`map_dma_buffer`] for the same `buffer`.
+/// `dma_addr` must be the still-active bus address previously returned by
+/// [`map_dma_buffer`] for the same `buffer`, and unmapping must happen exactly
+/// once for that mapping.
 pub unsafe fn unmap_dma_buffer(
     dma_addr: DmaBusAddress,
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) {
+    // SAFETY: forwards the caller's matching mapping contract to the DMA mapper.
     unsafe {
         ALLOCATOR
             .lock()

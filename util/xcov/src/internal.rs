@@ -4,21 +4,19 @@
 
 //! Internal profiling state.
 
+use portable_atomic::AtomicU32;
+
 /// Tracks whether profile data has already been dumped.
-static mut PROFILE_DUMPED: u32 = 0;
+static PROFILE_DUMPED: AtomicU32 = AtomicU32::new(0);
 
 /// Returns non-zero if the profile data has already been dumped.
 pub fn is_profile_dumped() -> u32 {
-    // SAFETY: Matches the C runtime semantics (single-threaded access).
-    unsafe { PROFILE_DUMPED }
+    PROFILE_DUMPED.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Sets the profile dumped flag.
 pub fn set_profile_dumped(value: u32) {
-    // SAFETY: Matches the C runtime semantics (single-threaded access).
-    unsafe {
-        PROFILE_DUMPED = value;
-    }
+    PROFILE_DUMPED.store(value, core::sync::atomic::Ordering::Release);
 }
 
 #[cfg(test)]

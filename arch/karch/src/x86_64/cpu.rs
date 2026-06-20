@@ -21,6 +21,8 @@ pub fn stop_cpu() {
 #[inline]
 pub fn await_interrupts() {
     if cfg!(target_os = "none") {
+        // SAFETY: `hlt` is executed only in the bare-metal target path and is
+        // intended to block until the next external interrupt arrives.
         unsafe { asm!("hlt") }
     } else {
         core::hint::spin_loop()

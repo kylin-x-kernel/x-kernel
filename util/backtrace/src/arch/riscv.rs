@@ -17,6 +17,8 @@ impl ArchBacktrace for RiscV {
 
     fn current_fp() -> usize {
         let fp: usize;
+        // SAFETY: this reads the current RISC-V frame-pointer register `s0`
+        // into a general-purpose output without touching memory or the stack.
         unsafe { asm!("addi {}, s0, 0", out(reg) fp, options(nomem, nostack)) };
         fp
     } // RISC-V uses 8-byte alignment

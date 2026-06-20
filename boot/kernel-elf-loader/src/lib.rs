@@ -99,9 +99,12 @@ impl<'a> KernelElf<'a> {
             let count = sym_bytes.len() / mem::size_of::<Elf64Sym>();
             for i in 0..count {
                 let off = i * mem::size_of::<Elf64Sym>();
+                // SAFETY: `count` is derived from the symbol table slice length,
+                // so each window below contains one full readable `Elf64Sym`.
                 let sym = unsafe {
-                    ptr::read_unaligned(sym_bytes[off..off + mem::size_of::<Elf64Sym>()].as_ptr()
-                        as *const Elf64Sym)
+                    read_unaligned_from_bytes::<Elf64Sym>(
+                        &sym_bytes[off..off + mem::size_of::<Elf64Sym>()],
+                    )
                 };
                 let name_off = sym.st_name as usize;
                 if name_off >= strtab_bytes.len() {
@@ -232,6 +235,17 @@ fn align_up(value: u64, align: u64) -> Result<u64, &'static str> {
         .ok_or("aligned address overflow")
 }
 
+/// # Safety
+///
+/// `bytes` must be at least `size_of::<T>()` bytes long and contain a readable
+/// `T` object encoded at `bytes.as_ptr()`.
+unsafe fn read_unaligned_from_bytes<T: Copy>(bytes: &[u8]) -> T {
+    debug_assert!(bytes.len() >= mem::size_of::<T>());
+    // SAFETY: The caller guarantees `bytes` covers a full readable `T`, and
+    // `read_unaligned` copies the value out without assuming alignment.
+    unsafe { ptr::read_unaligned(bytes.as_ptr().cast::<T>()) }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Elf64Header {
@@ -256,7 +270,9 @@ impl Elf64Header {
         if image.len() < mem::size_of::<Elf64Header>() {
             return None;
         }
-        let hdr = unsafe { ptr::read_unaligned(image.as_ptr() as *const Elf64Header) };
+        // SAFETY: The length check above guarantees `image` begins with one
+        // full readable ELF header.
+        let hdr = unsafe { read_unaligned_from_bytes::<Elf64Header>(image) };
         if hdr.e_ident[..4] != [0x7f, b'E', b'L', b'F'] || hdr.e_ident[4] != 2 {
             return None;
         }
@@ -269,7 +285,9 @@ impl Elf64Header {
         if end > image.len() {
             return None;
         }
-        Some(unsafe { ptr::read_unaligned(image[off..end].as_ptr() as *const Elf64Phdr) })
+        // SAFETY: The bounds check above guarantees `image[off..end]`
+        // contains one full readable program header.
+        Some(unsafe { read_unaligned_from_bytes::<Elf64Phdr>(&image[off..end]) })
     }
 
     fn shdr(&self, image: &[u8], idx: u16) -> Option<Elf64Shdr> {
@@ -278,7 +296,9 @@ impl Elf64Header {
         if end > image.len() {
             return None;
         }
-        Some(unsafe { ptr::read_unaligned(image[off..end].as_ptr() as *const Elf64Shdr) })
+        // SAFETY: The bounds check above guarantees `image[off..end]`
+        // contains one full readable section header.
+        Some(unsafe { read_unaligned_from_bytes::<Elf64Shdr>(&image[off..end]) })
     }
 }
 

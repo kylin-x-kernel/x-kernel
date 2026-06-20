@@ -65,6 +65,8 @@ pub struct VirtIoSocketDev<H: Hal, T: Transport> {
 // is not auto Send/Sync due to PhantomData, but it is safe to transfer across
 // threads and share behind that lock.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoSocketDev<H, T> {}
+// SAFETY: VirtIoSocketDev serializes all shared access to the inner
+// VsockConnectionManager through its own `SpinNoIrq` lock.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoSocketDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoSocketDev<H, T> {

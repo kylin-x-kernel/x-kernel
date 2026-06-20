@@ -40,6 +40,9 @@ impl DiceDevice {
         }
 
         let mut buffer = vec![0u8; size];
+        // SAFETY: `region` comes from the firmware-described DICE reserved
+        // range, `size` was range-checked above, and `buffer` owns `size`
+        // writable bytes for the copy destination.
         unsafe {
             core::ptr::copy_nonoverlapping(addr.as_usize() as *const u8, buffer.as_mut_ptr(), size);
         }

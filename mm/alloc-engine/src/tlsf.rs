@@ -41,6 +41,8 @@ impl Default for TlsfByteAllocator {
 
 impl BaseAllocator for TlsfByteAllocator {
     fn init_region(&mut self, start: usize, size: usize) {
+        // SAFETY: The caller provides a valid, writable pool at
+        // `[start, start + size)` for the TLSF allocator.
         unsafe {
             let pool = core::slice::from_raw_parts_mut(start as *mut u8, size);
             self.inner
@@ -51,6 +53,8 @@ impl BaseAllocator for TlsfByteAllocator {
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
+        // SAFETY: The caller provides a valid, writable pool at
+        // `[start, start + size)` that can be added to the TLSF allocator.
         unsafe {
             let pool = core::slice::from_raw_parts_mut(start as *mut u8, size);
             self.inner
@@ -70,6 +74,8 @@ impl ByteAllocator for TlsfByteAllocator {
     }
 
     fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        // SAFETY: `ptr` comes from a previous successful allocation from this
+        // allocator and `layout.align()` matches the original alignment.
         unsafe { self.inner.deallocate(ptr, layout.align()) }
         self.used_bytes -= layout.size();
     }

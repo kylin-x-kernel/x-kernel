@@ -16,7 +16,15 @@ pub use input::*;
 pub use iovec::*;
 pub use vector_buf::*;
 
+// SAFETY: these event structs are POD syscall carriers whose bytes can be
+// copied to and from user memory without additional invariants.
 unsafe impl UserRead for epoll_event {}
+// SAFETY: these event structs are POD syscall carriers whose bytes can be
+// copied to and from user memory without additional invariants.
 unsafe impl UserWrite for epoll_event {}
+// SAFETY: these event structs are POD syscall carriers whose bytes can be
+// copied to and from user memory without additional invariants.
 unsafe impl UserRead for pollfd {}
+// SAFETY: these event structs are POD syscall carriers whose bytes can be
+// copied to and from user memory without additional invariants.
 unsafe impl UserWrite for pollfd {}

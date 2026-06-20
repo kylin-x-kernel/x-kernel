@@ -108,6 +108,8 @@ pub fn init_memory_management() {
     let kernel_layout = new_kernel_layout().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_layout);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
+    // SAFETY: `kernel_page_table_root()` returns the initialized kernel root
+    // page table that must become active before continuing boot.
     unsafe { karch::write_kernel_page_table(kernel_page_table_root().into()) };
     // flush all TLB
     karch::flush_tlb(None);
@@ -119,6 +121,7 @@ pub fn init_memory_management_secondary() {
         KERNEL_ASPACE.get().is_some(),
         "kernel address space must be initialized before secondary MMU activation"
     );
+    // SAFETY: secondary CPUs switch to the already initialized kernel root page table.
     unsafe { karch::write_kernel_page_table(kernel_page_table_root().into()) };
     // flush all TLB
     karch::flush_tlb(None);

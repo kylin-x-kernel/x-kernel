@@ -19,6 +19,8 @@ impl ArchBacktrace for X86_64 {
 
     fn current_fp() -> usize {
         let fp: usize;
+        // SAFETY: reading `rbp` into a general-purpose register does not touch
+        // memory and is the canonical way to obtain the current frame pointer.
         unsafe { asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack)) };
         fp
     } // x86_64 requires 16-byte stack alignment

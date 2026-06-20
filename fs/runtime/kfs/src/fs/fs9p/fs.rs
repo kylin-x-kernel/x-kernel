@@ -5,7 +5,6 @@
 //! 9P filesystem adapter — filesystem-level operations.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::cell::OnceCell;
 
 use fs9p::Session;
 use kclass::{ClassDevice, Virtio9pDeviceImpl};
@@ -20,7 +19,7 @@ use super::{VirtioTransport, inode::Inode};
 /// 9P filesystem implementation backed by a virtio-9p device.
 pub struct Fs9pFilesystem {
     inner: Mutex<Session>,
-    root_dir: OnceCell<DirEntry>,
+    root_dir: Mutex<Option<DirEntry>>,
 }
 
 impl Fs9pFilesystem {
@@ -35,10 +34,10 @@ impl Fs9pFilesystem {
 
         let fs = Arc::new(Self {
             inner: Mutex::new(session),
-            root_dir: OnceCell::new(),
+            root_dir: Mutex::new(None),
         });
 
-        let _ = fs.root_dir.set(DirEntry::new_dir(
+        *fs.root_dir.lock() = Some(DirEntry::new_dir(
             |this| DirNode::new(Inode::new_dir(fs.clone(), Some(this), Some("/".into()))),
             Reference::root(),
         ));
@@ -52,16 +51,13 @@ impl Fs9pFilesystem {
     }
 }
 
-unsafe impl Send for Fs9pFilesystem {}
-unsafe impl Sync for Fs9pFilesystem {}
-
 impl SuperBlockOperations for Fs9pFilesystem {
     fn name(&self) -> &str {
         "9p"
     }
 
     fn root_dentry(&self) -> DirEntry {
-        self.root_dir.get().unwrap().clone()
+        self.root_dir.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

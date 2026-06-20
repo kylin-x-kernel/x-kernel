@@ -33,6 +33,8 @@ fn collect_uefi_memory(
     ram_regions: &mut RamRegions,
     reserved_regions: &mut ReservedRegions,
 ) {
+    // SAFETY: `memmap_ptr` is the bootloader-provided EFI memory-map blob and
+    // is interpreted according to the Linux EFI handoff header format.
     let memmap = unsafe { BootMemmapRef::from_ptr(memmap_ptr.cast::<LinuxEfiBootMemmapHeader>()) }
         .expect("invalid Linux EFI boot memmap");
 

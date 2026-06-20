@@ -11,7 +11,9 @@
 
 use alloc::{collections::BTreeMap, format, vec::Vec};
 use core::{
+    cell::UnsafeCell,
     fmt::{Arguments, Write},
+    hint::spin_loop,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -105,10 +107,60 @@ pub static TEST_FAILED_FLAG: AtomicBool = AtomicBool::new(false);
 pub type CustomTestExecutor = fn(&TestDescriptor) -> TestResult;
 pub type UserTestExecutor = fn(&TestDescriptor) -> TestResult;
 
-static CUSTOM_TEST_EXECUTOR: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-static USER_TEST_EXECUTOR: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+struct TestExecutorSlot<T: Copy> {
+    locked: AtomicBool,
+    value: UnsafeCell<Option<T>>,
+}
+
+impl<T: Copy> TestExecutorSlot<T> {
+    const fn new() -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(None),
+        }
+    }
+
+    fn store(&self, executor: T, _ordering: Ordering) {
+        self.with_lock(|slot| *slot = Some(executor));
+    }
+
+    #[cfg(unittest)]
+    fn replace(&self, value: Option<T>, _ordering: Ordering) -> Option<T> {
+        self.with_lock(|slot| core::mem::replace(slot, value))
+    }
+
+    #[cfg(unittest)]
+    fn store_raw(&self, value: Option<T>, _ordering: Ordering) {
+        self.with_lock(|slot| *slot = value);
+    }
+
+    fn load(&self, _ordering: Ordering) -> Option<T> {
+        self.with_lock(|slot| *slot)
+    }
+
+    fn with_lock<R>(&self, f: impl FnOnce(&mut Option<T>) -> R) -> R {
+        while self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spin_loop();
+        }
+        // SAFETY: `locked` is this slot's private spinlock. Holding it gives
+        // exclusive access to the `UnsafeCell<Option<T>>` contents until the
+        // flag is cleared below.
+        let result = f(unsafe { &mut *self.value.get() });
+        self.locked.store(false, Ordering::Release);
+        result
+    }
+}
+
+// SAFETY: all access to `value` is serialized by `locked`, and `T: Copy`
+// prevents borrow-based aliasing from escaping the slot.
+unsafe impl<T: Copy> Sync for TestExecutorSlot<T> {}
+
+static CUSTOM_TEST_EXECUTOR: TestExecutorSlot<CustomTestExecutor> = TestExecutorSlot::new();
+static USER_TEST_EXECUTOR: TestExecutorSlot<UserTestExecutor> = TestExecutorSlot::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -119,29 +171,19 @@ pub enum TestExecutionMode {
 }
 
 pub fn register_custom_test_executor(executor: CustomTestExecutor) {
-    CUSTOM_TEST_EXECUTOR.store(executor as usize, Ordering::Release);
+    CUSTOM_TEST_EXECUTOR.store(executor, Ordering::Release);
 }
 
 pub fn register_user_test_executor(executor: UserTestExecutor) {
-    USER_TEST_EXECUTOR.store(executor as usize, Ordering::Release);
+    USER_TEST_EXECUTOR.store(executor, Ordering::Release);
 }
 
 fn custom_test_executor() -> Option<CustomTestExecutor> {
-    let executor = CUSTOM_TEST_EXECUTOR.load(Ordering::Acquire);
-    if executor == 0 {
-        None
-    } else {
-        Some(unsafe { core::mem::transmute::<usize, CustomTestExecutor>(executor) })
-    }
+    CUSTOM_TEST_EXECUTOR.load(Ordering::Acquire)
 }
 
 fn user_test_executor() -> Option<UserTestExecutor> {
-    let executor = USER_TEST_EXECUTOR.load(Ordering::Acquire);
-    if executor == 0 {
-        None
-    } else {
-        Some(unsafe { core::mem::transmute::<usize, UserTestExecutor>(executor) })
-    }
+    USER_TEST_EXECUTOR.load(Ordering::Acquire)
 }
 
 // Testable trait
@@ -854,7 +896,7 @@ mod tests_test_framework {
 
     #[def_test(serial)]
     fn test_custom_executor_paths() {
-        let old = CUSTOM_TEST_EXECUTOR.swap(0, Ordering::AcqRel);
+        let old = CUSTOM_TEST_EXECUTOR.replace(None, Ordering::AcqRel);
         CUSTOM_CALLS.store(0, AtomicOrdering::Relaxed);
 
         let desc = TestDescriptor::new(
@@ -873,7 +915,7 @@ mod tests_test_framework {
         assert_eq!(desc.run(), TestResult::Ok);
         assert_eq!(CUSTOM_CALLS.load(AtomicOrdering::Relaxed), 1);
 
-        CUSTOM_TEST_EXECUTOR.store(old, Ordering::Release);
+        CUSTOM_TEST_EXECUTOR.store_raw(old, Ordering::Release);
     }
 
     #[def_test]
@@ -1026,7 +1068,7 @@ mod tests_test_framework {
 
     #[def_test(serial)]
     fn test_custom_executor_can_be_restored_after_use() {
-        let old = CUSTOM_TEST_EXECUTOR.swap(0, Ordering::AcqRel);
+        let old = CUSTOM_TEST_EXECUTOR.replace(None, Ordering::AcqRel);
         CUSTOM_CALLS.store(0, AtomicOrdering::Relaxed);
 
         register_custom_test_executor(custom_ok_test);
@@ -1043,6 +1085,6 @@ mod tests_test_framework {
         assert_eq!(desc.run(), TestResult::Ok);
         assert_eq!(CUSTOM_CALLS.load(AtomicOrdering::Relaxed), 1);
 
-        CUSTOM_TEST_EXECUTOR.store(old, Ordering::Release);
+        CUSTOM_TEST_EXECUTOR.store_raw(old, Ordering::Release);
     }
 }

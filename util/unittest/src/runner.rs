@@ -28,6 +28,8 @@ unsafe extern "C" {
 /// This function relies on the linker script defining `__unittest_start` and `__unittest_end`
 /// symbols that bracket the `.unittest` section.
 fn get_tests() -> &'static [TestDescriptor] {
+    // SAFETY: The linker script defines `__unittest_start` and
+    // `__unittest_end` as the exact bounds of the `.unittest` descriptor array.
     unsafe {
         let start = &__unittest_start as *const TestDescriptor;
         let end = &__unittest_end as *const TestDescriptor;

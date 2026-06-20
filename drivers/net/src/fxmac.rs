@@ -22,13 +22,10 @@ const QS: usize = 64;
 /// `SpinNoIrq` lock so the driver can be shared behind a `&self`
 /// interface. The lock order is always RX queue first, then the device.
 pub struct FXmacNic {
-    inner: SpinNoIrq<&'static mut FXmac>,
+    inner: SpinNoIrq<usize>,
     hwaddr: [u8; 6],
     rx_buffer_queue: SpinNoIrq<VecDeque<NetBufHandle>>,
 }
-
-unsafe impl Sync for FXmacNic {}
-unsafe impl Send for FXmacNic {}
 
 impl FXmacNic {
     /// Initialize the FXMAC driver instance.
@@ -42,11 +39,19 @@ impl FXmacNic {
 
         let inner = xmac_init(&hwaddr);
         let dev = Self {
-            inner: SpinNoIrq::new(inner),
+            inner: SpinNoIrq::new(inner as *mut FXmac as usize),
             hwaddr,
             rx_buffer_queue: SpinNoIrq::new(rx_buffer_queue),
         };
         Ok(dev)
+    }
+
+    fn with_inner<R>(&self, f: impl FnOnce(&mut FXmac) -> R) -> R {
+        let ptr = *self.inner.lock() as *mut FXmac;
+        // SAFETY: `xmac_init` returns a stable device instance that lives for
+        // the lifetime of the driver. All mutable access is serialized by
+        // `self.inner`, so we only materialize one `&mut FXmac` at a time.
+        f(unsafe { &mut *ptr })
     }
 }
 
@@ -99,7 +104,7 @@ impl NetDevice for FXmacNic {
             // RX buffer have received packets.
             Ok(rx_buffer_queue.pop_front().unwrap())
         } else {
-            match FXmacRecvHandler(&mut **self.inner.lock()) {
+            match self.with_inner(FXmacRecvHandler) {
                 None => Err(DriverError::WouldBlock),
                 Some(packets) => {
                     for payload in packets {
@@ -124,7 +129,7 @@ impl NetDevice for FXmacNic {
 
     fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
         let tx_vec = vec![tx_buf.data().to_vec()];
-        let ret = FXmacLwipPortTx(&mut **self.inner.lock(), tx_vec);
+        let ret = self.with_inner(|inner| FXmacLwipPortTx(inner, tx_vec));
         unsafe {
             drop(Box::from_raw(tx_buf.owner_ptr::<Vec<u8>>()));
         }

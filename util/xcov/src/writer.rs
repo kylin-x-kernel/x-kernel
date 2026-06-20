@@ -20,6 +20,8 @@ pub unsafe extern "C" fn buffer_writer(
     io_vecs: *mut ProfDataIOVec,
     num_io_vecs: u32,
 ) -> u32 {
+    // SAFETY: `this` and `io_vecs` come from the profiling runtime, and the
+    // callback only advances the destination pointer within the caller-owned buffer.
     unsafe {
         let mut buffer_ptr = (*this).writer_ctx as *mut u8;
 
@@ -50,12 +52,17 @@ pub unsafe extern "C" fn buffer_writer(
 ///
 /// # Safety
 ///
-/// `writer` must point to a valid `ProfDataWriter`.
+/// `writer` must point to a valid mutable `ProfDataWriter`,
+/// `vp_data_reader` must be a valid value-profiling reader callback block when
+/// non-null, and all profile section accessors used by this routine must refer
+/// to live profiling sections for the current binary.
 pub unsafe fn write_data(
     writer: *mut ProfDataWriter,
     vp_data_reader: *mut VPDataReaderType,
     skip_name_data_write: i32,
 ) -> i32 {
+    // SAFETY: the caller provides a valid writer and section accessors; this
+    // wrapper forwards the current runtime-owned section boundaries unchanged.
     unsafe {
         write_data_impl(
             writer,
@@ -92,6 +99,8 @@ pub unsafe fn write_data_impl(
     names_end: *const u8,
     skip_name_data_write: i32,
 ) -> i32 {
+    // SAFETY: all section boundary pointers come from the profiling runtime and
+    // are treated as read-only ranges during serialization.
     unsafe {
         let num_data = buffer::get_num_data(data_begin, data_end);
         let data_size = buffer::get_data_size(data_begin, data_end);
@@ -248,6 +257,8 @@ unsafe fn write_one_value_prof_data(
     reader: &VPDataReaderType,
     data: *const LlvmProfileData,
 ) -> i32 {
+    // SAFETY: the writer and value-profile reader come from the runtime, and
+    // this routine serializes one function's profiling metadata in place.
     unsafe {
         let mut site_count_bufs: [[u8; MAX_SITE_COUNT_BUF]; IPVK_NUM_KINDS] =
             [[0u8; MAX_SITE_COUNT_BUF]; IPVK_NUM_KINDS];
@@ -367,6 +378,8 @@ unsafe fn write_one_value_prof_data(
 /// `out_buffer` must point to a buffer at least as large as
 /// `buffer::get_size_for_buffer()` bytes.
 pub unsafe fn write_buffer(out_buffer: *mut u8) -> i32 {
+    // SAFETY: the caller provides an output buffer large enough for the full
+    // serialized profile, and the temporary writer stays within that range.
     unsafe {
         let mut writer = ProfDataWriter {
             write_fn: buffer_writer,

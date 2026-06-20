@@ -4,7 +4,11 @@
 
 //! FAT filesystem adapter.
 use alloc::sync::Arc;
-use core::marker::PhantomPinned;
+use core::{
+    marker::PhantomPinned,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+};
 
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
 use ksync::{Mutex, MutexGuard};
@@ -42,6 +46,31 @@ pub struct FatFilesystem {
     root_dir: Mutex<Option<DirEntry>>,
 }
 
+pub(crate) struct FatFilesystemGuard<'a> {
+    owner: NonNull<FatFilesystem>,
+    guard: MutexGuard<'a, FatFilesystemInner>,
+}
+
+impl FatFilesystemGuard<'_> {
+    pub(crate) fn owner_ptr(&self) -> NonNull<FatFilesystem> {
+        self.owner
+    }
+}
+
+impl Deref for FatFilesystemGuard<'_> {
+    type Target = FatFilesystemInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for FatFilesystemGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
 impl FatFilesystem {
     /// Create a new FAT filesystem instance backed by a block device.
     pub fn new(dev: ClassDevice<KBlockDevice>) -> Filesystem {
@@ -59,12 +88,9 @@ impl FatFilesystem {
 
         let root_dir = DirEntry::new_dir(
             |this| {
-                FatDirNode::new(
-                    result.clone(),
-                    result.lock().inner.root_dir(),
-                    root_inode,
-                    this,
-                )
+                let fs = result.lock();
+                let root = fs.inner.root_dir();
+                FatDirNode::new(result.clone(), result.as_ref(), root, root_inode, this)
             },
             Reference::root(),
         );
@@ -74,8 +100,11 @@ impl FatFilesystem {
 }
 
 impl FatFilesystem {
-    pub(crate) fn lock(&self) -> MutexGuard<'_, FatFilesystemInner> {
-        self.inner.lock()
+    pub(crate) fn lock(&self) -> FatFilesystemGuard<'_> {
+        FatFilesystemGuard {
+            owner: NonNull::from(self),
+            guard: self.inner.lock(),
+        }
     }
 }
 

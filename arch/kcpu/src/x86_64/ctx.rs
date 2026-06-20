@@ -313,15 +313,23 @@ impl ExtendedState {
 
     /// Returns the extended state with initialized values.
     pub const fn default() -> Self {
-        // SAFETY: `FxStateBlock` contains only integer/array fields (`u16`, `u32`, `u64`). All-zero is a valid representation for every field.
-        let mut area: FxStateBlock = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-        area.fpu_ctrl = 0x037f;
-        area.fpu_status = 0;
-        // FXSAVE stores the abridged tag word. A clean `fninit` state saves as 0,
-        // not 0xffff like the legacy x87 environment format.
-        area.fpu_tag = 0;
-        area.sse_mxcsr = 0x1f80;
-        Self { fxsave_area: area }
+        Self {
+            fxsave_area: FxStateBlock {
+                fpu_ctrl: 0x037f,
+                fpu_status: 0,
+                // FXSAVE stores the abridged tag word. A clean `fninit` state saves as 0,
+                // not 0xffff like the legacy x87 environment format.
+                fpu_tag: 0,
+                fpu_opcode: 0,
+                fpu_ip: 0,
+                fpu_dp: 0,
+                sse_mxcsr: 0x1f80,
+                sse_mxcsr_mask: 0,
+                st_space: [0; 16],
+                xmm_space: [0; 32],
+                _padding: [0; 12],
+            },
+        }
     }
 }
 
@@ -374,7 +382,11 @@ impl TaskContext {
         // `sub(1)` for u64 then `sub(1)` for ContextSwitchFrame leaves room for the frame.
         // 16-byte alignment is maintained for x86_64 calling convention.
         let top_u64 = kstack_top.as_mut_ptr() as *mut u64;
+        // SAFETY: pointer arithmetic stays within the reserved initial-frame
+        // space at the top of the kernel stack.
         let frame_ptr = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>().sub(1) };
+        // SAFETY: `frame_ptr` points to writable stack memory reserved for the
+        // initial context-switch frame.
         unsafe {
             frame_ptr.write(ContextSwitchFrame {
                 rip: entry as _,

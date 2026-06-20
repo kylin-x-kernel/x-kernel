@@ -166,7 +166,7 @@ impl FileMapping {
             listener: Box::new(listener),
             link: LinkedListAtomicLink::new(),
         });
-        let listener_ptr = NonNull::from(pointer.as_ref());
+        let listener_ptr = NonNull::from(pointer.as_ref()).as_ptr() as usize;
         self.evict_listeners.lock().push_back(pointer);
         EvictRegistration {
             mapping: Arc::downgrade(self),
@@ -174,13 +174,13 @@ impl FileMapping {
         }
     }
 
-    fn remove_evict_listener(&self, listener_ptr: NonNull<EvictListener>) {
+    fn remove_evict_listener(&self, listener_ptr: usize) {
         let mut guard = self.evict_listeners.lock();
         // SAFETY: `listener_ptr` is created only from an `EvictListener`
         // allocated by `add_evict_listener` and is kept private inside
         // `EvictRegistration`. Dropping the registration consumes it exactly
         // once.
-        let mut cursor = unsafe { guard.cursor_mut_from_ptr(listener_ptr.as_ptr()) };
+        let mut cursor = unsafe { guard.cursor_mut_from_ptr(listener_ptr as *const EvictListener) };
         cursor.remove();
     }
 
@@ -556,14 +556,8 @@ impl AddressSpaceOperations for FileMappingAddressSpaceOperations {
 #[must_use = "dropping EvictRegistration unregisters the eviction listener"]
 pub struct EvictRegistration {
     mapping: Weak<FileMapping>,
-    listener_ptr: NonNull<EvictListener>,
+    listener_ptr: usize,
 }
-
-// SAFETY: `EvictRegistration` never dereferences `listener_ptr` directly. The
-// pointer is only used while holding the owning `FileMapping` listener-list
-// lock, and the listener allocation remains owned by that list until the guard
-// is dropped.
-unsafe impl Send for EvictRegistration {}
 
 impl Drop for EvictRegistration {
     fn drop(&mut self) {

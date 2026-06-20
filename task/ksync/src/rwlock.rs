@@ -40,6 +40,8 @@ impl Default for RawRwLock {
     }
 }
 
+// SAFETY: `RawRwLock` enforces the shared/exclusive access protocol required
+// by `lock_api::RawRwLock` through its internal state machine.
 unsafe impl lock_api::RawRwLock for RawRwLock {
     type GuardMarker = lock_api::GuardSend;
 
@@ -95,6 +97,9 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
     #[inline]
     unsafe fn unlock_shared(&self) {
+        // SAFETY: `lock_api` only calls `unlock_shared` for a previously
+        // acquired shared lock, so decrementing the reader count and waking a
+        // writer when the last reader leaves preserves the raw rwlock protocol.
         let state = self.state.fetch_sub(1, Ordering::Release);
 
         // Wake up a waiting writer if this was the last reader
@@ -131,6 +136,9 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
     #[inline]
     unsafe fn unlock_exclusive(&self) {
+        // SAFETY: `lock_api` only calls `unlock_exclusive` for the current
+        // exclusive owner, so clearing the write-lock bit and waking waiters
+        // preserves the raw rwlock state machine.
         self.state.store(0, Ordering::Release);
 
         // Wake up all waiting readers and one writer

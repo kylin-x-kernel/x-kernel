@@ -15,8 +15,14 @@ pub(crate) fn build_multiboot_info<'a>(
 ) -> Result<u64, Status> {
     let base = mbi_buf as *mut u8;
     let total_size = 4usize * 0x1000;
+    // SAFETY: `mbi_buf` is a bootloader-allocated low-memory scratch buffer,
+    // and this function only zeroes the fixed 16 KiB region reserved for the
+    // Multiboot information blob.
     unsafe { ptr::write_bytes(base, 0, total_size) };
 
+    let mut cursor_offset = mem::size_of::<MbInfo>();
+    // SAFETY: the first free byte in the reserved Multiboot buffer begins
+    // immediately after the fixed-size `MbInfo` header.
     let mut cursor = unsafe { base.add(mem::size_of::<MbInfo>()) };
 
     let mut mmap_length = 0u32;
@@ -34,10 +40,21 @@ pub(crate) fn build_multiboot_info<'a>(
             len,
             typ: mtype,
         };
+        let next_offset = cursor_offset
+            .checked_add(mem::size_of::<MbMmapEntry>())
+            .ok_or(Status::BUFFER_TOO_SMALL)?;
+        if next_offset > total_size {
+            return Err(Status::BUFFER_TOO_SMALL);
+        }
+
+        // SAFETY: `next_offset <= total_size` guarantees the destination range
+        // stays within the reserved Multiboot buffer, and unaligned writes are
+        // intentional because the packed Multiboot blob is serialized bytewise.
         unsafe {
             ptr::write_unaligned(cursor as *mut MbMmapEntry, entry);
             cursor = cursor.add(mem::size_of::<MbMmapEntry>());
         }
+        cursor_offset = next_offset;
         mmap_length += mem::size_of::<MbMmapEntry>() as u32;
 
         if is_available_memory(desc.ty) {
@@ -78,6 +95,8 @@ pub(crate) fn build_multiboot_info<'a>(
         vbe_interface_len: 0,
     };
 
+    // SAFETY: `base` points to the start of the reserved Multiboot buffer, and
+    // `MbInfo` occupies the header bytes that were zeroed above.
     unsafe {
         ptr::write_unaligned(base as *mut MbInfo, info);
     }

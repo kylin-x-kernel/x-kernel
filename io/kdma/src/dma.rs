@@ -68,6 +68,13 @@ impl DmaAllocator {
     ///
     /// DMA memory is allocated in page granularity so page-table attributes and
     /// platform share/unshare hooks remain balanced for every allocation.
+    ///
+    /// # Safety
+    ///
+    /// The caller must treat the returned [`DMAInfo`] as coherent DMA memory:
+    /// deallocate it exactly once with the same `layout`, do not forge or
+    /// offset the returned CPU address, and only hand the bus address to a
+    /// device that is allowed to DMA that range.
     #[track_caller]
     pub unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
         self.alloc_coherent_pages(layout)
@@ -89,6 +96,8 @@ impl DmaAllocator {
         self.update_flags(vaddr, num_pages, flags)?;
         self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
         let dma_info = DMAInfo {
+            // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
+            // and therefore cannot be null.
             cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
             bus_addr: v2b(vaddr),
         };
@@ -125,6 +134,11 @@ impl DmaAllocator {
     }
 
     /// Gives back the allocated region to the byte allocator.
+    ///
+    /// # Safety
+    ///
+    /// `dma` must come from a prior successful [`allocate_dma_memory`] call on
+    /// this allocator, and `layout` must exactly match that allocation.
     #[track_caller]
     pub unsafe fn deallocate_dma_memory(&mut self, dma: DMAInfo, layout: Layout) {
         let num_pages = layout_pages(&layout);
@@ -141,6 +155,13 @@ impl DmaAllocator {
         global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
     }
 
+    /// Maps an existing CPU buffer through the bounce pool for a temporary DMA transaction.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must remain live and exclusively owned by the caller until the
+    /// matching [`unmap_dma_buffer`] call. The caller must not let the device
+    /// access the returned bus address after unmapping.
     pub unsafe fn map_dma_buffer(
         &mut self,
         buffer: NonNull<[u8]>,
@@ -157,6 +178,8 @@ impl DmaAllocator {
         let (dma_info, layout) = self.alloc_bounce_buffer(len)?;
 
         if direction != DmaDirection::DeviceToDriver {
+            // SAFETY: the bounce buffer and source slice are distinct live
+            // regions of `len` bytes established by the caller and allocator.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     buffer.as_ptr() as *const u8,
@@ -187,6 +210,13 @@ impl DmaAllocator {
         Ok(dma_info)
     }
 
+    /// Unmaps a previously bounced DMA buffer and synchronizes data back.
+    ///
+    /// # Safety
+    ///
+    /// `dma_addr` must be the still-active mapping returned by
+    /// [`map_dma_buffer`] for the same `buffer`, and this function must be
+    /// called exactly once for that mapping.
     pub unsafe fn unmap_dma_buffer(
         &mut self,
         dma_addr: DmaBusAddress,
@@ -209,6 +239,8 @@ impl DmaAllocator {
 
         fence(Ordering::SeqCst);
         if direction != DmaDirection::DriverToDevice {
+            // SAFETY: the bounce buffer and destination slice are distinct live
+            // regions of `len` bytes tracked by the active mapping record.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     mapping.cpu_addr as *const u8,

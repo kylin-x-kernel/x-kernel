@@ -61,6 +61,8 @@ pub fn save_irq_and_disable() -> usize {
         /// Interrupt Enable Flag (IF).
         const IF_BIT: usize = 1 << 9;
         let flags: usize;
+        // SAFETY: captures the current flags and disables maskable interrupts
+        // on the local CPU in one serialized sequence.
         unsafe { asm!("pushf; pop {}; cli", out(reg) flags) };
         flags & IF_BIT
     }
@@ -75,8 +77,10 @@ pub fn restore_irq(flags: usize) {
     #[cfg(target_os = "none")]
     {
         if flags != 0 {
+            // SAFETY: restores the saved local interrupt-enabled state.
             unsafe { asm!("sti") };
         } else {
+            // SAFETY: restores the saved local interrupt-disabled state.
             unsafe { asm!("cli") };
         }
     }

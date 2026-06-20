@@ -109,7 +109,8 @@ impl MsixTable {
     ///
     /// `base` must point to mapped MSI-X table MMIO memory that contains at
     /// least `len` valid entries. The caller must ensure that this wrapper has
-    /// unique ownership of the table register accesses while it is alive.
+    /// unique ownership of the table register accesses while it is alive, and
+    /// that the mapped table remains live for the full lifetime of the wrapper.
     pub unsafe fn new(base: NonNull<MsixTableEntry>, len: usize) -> Self {
         Self { base, len }
     }

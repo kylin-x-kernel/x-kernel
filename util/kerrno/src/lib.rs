@@ -214,6 +214,60 @@ impl KErrorKind {
     pub const fn code(self) -> i32 {
         self as i32
     }
+
+    #[inline]
+    const fn from_code(value: i32) -> Option<Self> {
+        use KErrorKind::*;
+
+        Some(match value {
+            1 => AddrInUse,
+            2 => AlreadyConnected,
+            3 => AlreadyExists,
+            4 => ArgumentListTooLong,
+            5 => BadAddress,
+            6 => BadFileDescriptor,
+            7 => BadState,
+            8 => BrokenPipe,
+            9 => ConnectionRefused,
+            10 => ConnectionReset,
+            11 => CrossesDevices,
+            12 => DirectoryNotEmpty,
+            13 => FilesystemLoop,
+            14 => IllegalBytes,
+            15 => InProgress,
+            16 => Interrupted,
+            17 => InvalidData,
+            18 => InvalidExecutable,
+            19 => InvalidInput,
+            20 => Io,
+            21 => IsADirectory,
+            22 => NameTooLong,
+            23 => NoMemory,
+            24 => NoSuchDevice,
+            25 => NoSuchProcess,
+            26 => NotADirectory,
+            27 => NotASocket,
+            28 => NotATty,
+            29 => NotConnected,
+            30 => NotFound,
+            31 => OperationNotPermitted,
+            32 => OperationNotSupported,
+            33 => OutOfRange,
+            34 => PermissionDenied,
+            35 => ReadOnlyFilesystem,
+            36 => ResourceBusy,
+            37 => StorageFull,
+            38 => TimedOut,
+            39 => TooManyOpenFiles,
+            40 => UnexpectedEof,
+            41 => Unsupported,
+            42 => WouldBlock,
+            43 => WriteZero,
+            44 => ConnectionAborted,
+            45 => FileTooLarge,
+            _ => return None,
+        })
+    }
 }
 
 impl TryFrom<i32> for KErrorKind {
@@ -221,11 +275,7 @@ impl TryFrom<i32> for KErrorKind {
 
     #[inline]
     fn try_from(value: i32) -> Result<Self, Self::Error> {
-        if value > 0 && value <= KErrorKind::COUNT as i32 {
-            Ok(unsafe { core::mem::transmute::<i32, KErrorKind>(value) })
-        } else {
-            Err(value)
-        }
+        KErrorKind::from_code(value).ok_or(value)
     }
 }
 
@@ -362,7 +412,9 @@ impl KError {
         if self.0 < 0 {
             KErrorData::Linux(LinuxError::new(-self.0))
         } else {
-            KErrorData::Ky(unsafe { core::mem::transmute::<i32, KErrorKind>(self.0) })
+            let kind = KErrorKind::from_code(self.0)
+                .unwrap_or_else(|| panic!("invalid positive KError code: {}", self.0));
+            KErrorData::Ky(kind)
         }
     }
 
@@ -632,16 +684,17 @@ mod tests {
     #[test]
     fn test_try_from() {
         let max_code = KErrorKind::COUNT as i32;
-        assert_eq!(max_code, 44);
-        assert_eq!(max_code, KError::ConnectionAborted.code());
+        assert_eq!(max_code, 45);
+        assert_eq!(max_code, KError::FileTooLarge.code());
 
         assert_eq!(KError::AddrInUse.code(), 1);
         assert_eq!(Ok(KError::AddrInUse), KError::try_from_i32(1));
         assert_eq!(Ok(KError::AlreadyConnected), KError::try_from_i32(2));
         assert_eq!(
             Ok(KError::ConnectionAborted),
-            KError::try_from_i32(max_code)
+            KError::try_from_i32(KError::ConnectionAborted.code())
         );
+        assert_eq!(Ok(KError::FileTooLarge), KError::try_from_i32(max_code));
         assert_eq!(Err(max_code + 1), KError::try_from_i32(max_code + 1));
         assert_eq!(Err(0), KError::try_from_i32(0));
         assert_eq!(Err(i32::MAX), KError::try_from_i32(i32::MAX));

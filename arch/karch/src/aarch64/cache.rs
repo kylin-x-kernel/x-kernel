@@ -17,6 +17,8 @@ use memaddr::VirtAddr;
 /// Local icache flush and pipeline sync — does not affect other PEs.
 #[inline]
 pub fn flush_icache_all_local() {
+    // SAFETY: `ic iallu`, `dsb`, and `isb` are privileged cache-maintenance
+    // and barrier instructions executed on the current CPU only.
     unsafe { asm!("ic iallu; dsb sy; isb") };
 }
 
@@ -77,5 +79,7 @@ pub fn flush_icache_range(start: VirtAddr, size: usize) {
 /// is typical for AArch64 but may vary across CPU implementations.
 #[inline]
 pub fn flush_dcache_line(vaddr: VirtAddr) {
+    // SAFETY: `dc ivac` with the given virtual address is the architected
+    // cache-line invalidation primitive for the current CPU.
     unsafe { asm!("dc ivac, {0:x}; dsb sy; isb", in(reg) vaddr.as_usize()) };
 }

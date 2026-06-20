@@ -26,7 +26,7 @@ define cargo_build
   $(call run_cmd,cargo build --manifest-path $(1)/Cargo.toml,$(build_args) --features "$(strip $(2))")
 endef
 
-clippy_args := -A unsafe_op_in_unsafe_fn -D warnings
+clippy_args := -A unsafe_op_in_unsafe_fn -D clippy::undocumented_unsafe_blocks -D warnings
 
 define cargo_clippy
   $(call run_cmd,cargo clippy --manifest-path $(APP)/Cargo.toml,-p $(rust_package) --target $(TARGET) --target-dir $(TARGET_DIR) --features "$(strip $(KFEAT) $(APP_FEAT))" $(1) $(verbose) -- $(clippy_args))

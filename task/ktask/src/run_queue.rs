@@ -9,13 +9,14 @@ use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};
 use core::{
     future::poll_fn,
-    mem::MaybeUninit,
+    ptr::NonNull,
     task::{Context, Poll},
 };
 
 use futures_util::task::AtomicWaker;
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
+use klazy::Once;
 use ksched::BaseScheduler;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
@@ -50,19 +51,80 @@ percpu_static! {
     PREV_TASK: Weak<crate::KTask> = Weak::new(),
 }
 
-/// An array of references to run queues, one for each CPU, indexed by cpu_id.
-///
-/// This static variable holds references to the run queues for each CPU in the system.
-///
-/// # Safety
-///
-/// Access to this variable is marked as `unsafe` because it contains `MaybeUninit` references,
-/// which require careful handling to avoid undefined behavior. The array should be fully
-/// initialized before being accessed to ensure safe usage.
-static mut RUN_QUEUES: [MaybeUninit<&'static mut RunQueue>; kbuild_config::CPU_NUM] =
-    [ARRAY_REPEAT_VALUE; kbuild_config::CPU_NUM];
-#[allow(clippy::declare_interior_mutable_const)] // It's ok because it's used only for initialization `RUN_QUEUES`.
-const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut RunQueue> = MaybeUninit::uninit();
+struct RunQueueRegistry([Once<usize>; kbuild_config::CPU_NUM]);
+
+impl RunQueueRegistry {
+    const fn new() -> Self {
+        Self([const { Once::new() }; kbuild_config::CPU_NUM])
+    }
+
+    fn register_current(&self, cpu_id: LogicalCpuId, run_queue: NonNull<RunQueue>) {
+        self.0[cpu_id.as_usize()].call_once(|| run_queue.as_ptr().addr());
+    }
+
+    fn get(&self, index: usize) -> &'static mut RunQueue {
+        let run_queue = *self.0[index]
+            .get()
+            .expect("run queue must be registered before cross-CPU lookup");
+        // SAFETY:
+        // - each slot is initialized exactly once during per-CPU scheduler
+        //   bring-up before remote scheduling can reference it;
+        // - the stored address points at a per-CPU `RunQueue` whose lifetime
+        //   is the entire kernel run;
+        // - callers use the returned reference under the scheduler's existing
+        //   CPU ownership and IRQ/preemption exclusion rules.
+        unsafe { &mut *(run_queue as *mut RunQueue) }
+    }
+}
+
+static RUN_QUEUES: RunQueueRegistry = RunQueueRegistry::new();
+
+#[inline(always)]
+fn current_run_queue_ptr() -> NonNull<RunQueue> {
+    // SAFETY: the current CPU's `RUN_QUEUE` percpu slot is initialized during
+    // scheduler bring-up before normal scheduling paths run. This helper takes
+    // the address of the initialized inner `RunQueue`, not the outer
+    // `LazyInit<RunQueue>` wrapper.
+    unsafe { NonNull::from(RUN_QUEUE.current_ref_raw().get_unchecked()) }
+}
+
+#[inline(always)]
+fn current_run_queue_mut() -> &'static mut RunQueue {
+    // SAFETY: the current CPU's `RUN_QUEUE` percpu slot is initialized before
+    // scheduling code runs, and callers obtain mutable access only within the
+    // scheduler's current-CPU ownership rules.
+    unsafe { RUN_QUEUE.current_ref_mut_raw().get_mut_unchecked() }
+}
+
+#[inline(always)]
+fn current_exited_tasks_mut() -> &'static mut VecDeque<KtaskRef> {
+    // SAFETY: callers use this only while operating on the current CPU's
+    // scheduler state, where the percpu exited-task list has been initialized.
+    unsafe { EXITED_TASKS.current_ref_mut_raw() }
+}
+
+#[inline(always)]
+fn current_wait_for_exit() -> &'static AtomicWaker {
+    // SAFETY: the current CPU's percpu `WAIT_FOR_EXIT` waker is initialized
+    // during scheduler bring-up before GC or exit paths use it.
+    unsafe { WAIT_FOR_EXIT.current_ref_raw() }
+}
+
+#[inline(always)]
+fn current_idle_task() -> &'static KtaskRef {
+    // SAFETY: the current CPU's idle-task percpu slot is initialized during
+    // scheduler bring-up before reschedule paths can use it.
+    unsafe { IDLE_TASK.current_ref_raw().get_unchecked() }
+}
+
+#[cfg(feature = "smp")]
+#[inline(always)]
+fn current_prev_task_mut() -> &'static mut Weak<crate::KTask> {
+    // SAFETY: callers touch `PREV_TASK` only while scheduling on the current
+    // CPU with IRQs disabled, so the current CPU's percpu slot is initialized
+    // and accessed under the scheduler's ownership rules.
+    unsafe { PREV_TASK.current_ref_mut_raw() }
+}
 
 /// Returns a reference to the current run queue in [`CurrentRunQueueRef`].
 ///
@@ -80,7 +142,7 @@ const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut RunQueue> = MaybeUninit::unin
 pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G> {
     let irq_state = G::acquire();
     CurrentRunQueueRef {
-        inner: unsafe { RUN_QUEUE.current_ref_mut_raw() },
+        inner: current_run_queue_mut(),
         current_task: crate::current(),
         state: irq_state,
         _phantom: core::marker::PhantomData,
@@ -141,7 +203,7 @@ fn select_run_queue_index(cpumask: KCpuMask) -> usize {
 #[cfg(feature = "smp")]
 #[inline]
 fn get_run_queue(index: usize) -> &'static mut RunQueue {
-    unsafe { RUN_QUEUES[index].assume_init_mut() }
+    RUN_QUEUES.get(index)
 }
 
 /// Selects the appropriate run queue for the provided task.
@@ -169,7 +231,7 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
         let _ = task;
         // When SMP is disabled, all tasks are scheduled on the same global run queue.
         KRunQueueRef {
-            inner: unsafe { RUN_QUEUE.current_ref_mut_raw() },
+            inner: current_run_queue_mut(),
             state: irq_state,
             _phantom: core::marker::PhantomData,
         }
@@ -194,7 +256,7 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
     {
         let _ = task;
         KRunQueueRef {
-            inner: unsafe { RUN_QUEUE.current_ref_mut_raw() },
+            inner: current_run_queue_mut(),
             state: irq_state,
             _phantom: core::marker::PhantomData,
         }
@@ -203,7 +265,7 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
     {
         let current_cpu = this_cpu_id();
         let inner = if task.cpumask().get(current_cpu.as_usize()) {
-            unsafe { RUN_QUEUE.current_ref_mut_raw() }
+            current_run_queue_mut()
         } else {
             get_run_queue(select_run_queue_index(task.cpumask()))
         };
@@ -428,24 +490,24 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         assert!(curr.is_running(), "task is not running: {:?}", curr.state());
         assert!(!curr.is_idle());
         if curr.is_init() {
-            // Safety: it is called from `current_run_queue::<NoPreemptIrqSave>().exit_current(exit_code)`,
-            // which disabled IRQs and preemption.
-            unsafe {
-                EXITED_TASKS.current_ref_mut_raw().clear();
-            }
+            // SAFETY: `exit_current` runs under
+            // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
+            // preemption are disabled while touching the current CPU's percpu
+            // exited-task list.
+            current_exited_tasks_mut().clear();
             khal::power::shutdown();
         } else {
             // Notify the joiner task.
             curr.notify_exit(exit_code);
 
-            // Safety: it is called from `current_run_queue::<NoPreemptIrqSave>().exit_current(exit_code)`,
-            // which disabled IRQs and preemption.
-            unsafe {
-                // Push current task to the `EXITED_TASKS` list, which will be consumed by the GC task.
-                EXITED_TASKS.current_ref_mut_raw().push_back(curr.clone());
-                // Wake up the GC task to drop the exited tasks.
-                WAIT_FOR_EXIT.current_ref_mut_raw().wake();
-            }
+            // SAFETY: `exit_current` runs under
+            // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
+            // preemption are disabled while touching current-CPU percpu
+            // scheduler queues and wakers.
+            // Push current task to the `EXITED_TASKS` list, which will be consumed by the GC task.
+            current_exited_tasks_mut().push_back(curr.clone());
+            // Wake up the GC task to drop the exited tasks.
+            current_wait_for_exit().wake();
 
             // Schedule to next task.
             self.inner.resched();
@@ -565,10 +627,7 @@ impl RunQueue {
             .scheduler
             .lock()
             .pick_next_task()
-            .unwrap_or_else(|| unsafe {
-                // Safety: IRQs must be disabled at this time.
-                IDLE_TASK.current_ref_raw().get_unchecked().clone()
-            });
+            .unwrap_or_else(|| current_idle_task().clone());
         assert!(
             next.is_ready(),
             "next {} is not ready: {:?}",
@@ -619,6 +678,9 @@ impl RunQueue {
             }
         }
 
+        // SAFETY: scheduling owns both task contexts here, IRQs are disabled,
+        // and the percpu scheduler/task pointers being updated are local to
+        // the current CPU.
         unsafe {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
@@ -626,7 +688,7 @@ impl RunQueue {
             // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
             #[cfg(feature = "smp")]
             {
-                *PREV_TASK.current_ref_mut_raw() = Arc::downgrade(&prev_task);
+                *current_prev_task_mut() = Arc::downgrade(&prev_task);
             }
 
             // The strong reference count of `prev_task` will be decremented by 1,
@@ -679,7 +741,7 @@ fn poll_gc(cx: &mut Context<'_>) -> Poll<()> {
         // use `current_ref_raw` to get the `WAIT_FOR_EXIT`'s reference here to avoid
         // the use of `NoPreemptGuard`. Since gc task is pinned to the current
         // CPU, there is no affection if the gc task is preempted during the process.
-        unsafe { WAIT_FOR_EXIT.current_ref_raw() }.register(cx.waker());
+        current_wait_for_exit().register(cx.waker());
 
         // New tasks might be added during the above section, recheck it to
         // prevent us from sleeping indefinitely.
@@ -709,6 +771,9 @@ pub(crate) fn migrate_entry(migrated_task: KtaskRef) {
 /// Clear the `on_cpu` field of previous task running on this CPU.
 #[cfg(feature = "smp")]
 pub(crate) unsafe fn clear_prev_task_on_cpu() {
+    // SAFETY: this is called on the CPU that owns `PREV_TASK`, after the
+    // context switch completed and before another previous-task record is
+    // installed.
     unsafe {
         PREV_TASK
             .current_ref_raw()
@@ -735,14 +800,14 @@ pub(crate) fn init() {
     // Put the subsequent execution into the `main` task.
     let main_task = TaskInner::new_init("main".into()).into_arc();
     main_task.set_state(TaskState::Running);
+    // SAFETY: scheduler bring-up installs the first current task for this CPU
+    // before any concurrent task access can occur.
     unsafe { CurrentTask::init_current(main_task) }
 
     RUN_QUEUE.with_current(|rq| {
         rq.init_once(RunQueue::new(cpu_id));
     });
-    unsafe {
-        RUN_QUEUES[cpu_id.as_usize()].write(RUN_QUEUE.current_ref_mut_raw());
-    }
+    RUN_QUEUES.register_current(cpu_id, current_run_queue_ptr());
 }
 
 pub(crate) fn init_secondary() {
@@ -754,12 +819,12 @@ pub(crate) fn init_secondary() {
     IDLE_TASK.with_current(|i| {
         i.init_once(idle_task.clone());
     });
+    // SAFETY: scheduler bring-up installs the first current task for this CPU
+    // before any concurrent task access can occur.
     unsafe { CurrentTask::init_current(idle_task) }
 
     RUN_QUEUE.with_current(|rq| {
         rq.init_once(RunQueue::new(cpu_id));
     });
-    unsafe {
-        RUN_QUEUES[cpu_id.as_usize()].write(RUN_QUEUE.current_ref_mut_raw());
-    }
+    RUN_QUEUES.register_current(cpu_id, current_run_queue_ptr());
 }

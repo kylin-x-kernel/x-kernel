@@ -445,6 +445,8 @@ fn find_table_xsdt(xsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
     let header = validate_sdt_header(xsdt_addr, Some(*b"XSDT"))?;
     let entries_len =
         (header.length as usize - mem::size_of::<AcpiSdtHeader>()) / mem::size_of::<u64>();
+    // SAFETY: `validate_sdt_header` checked the table bounds, so the entry
+    // array starts right after the header and spans `entries_len` u64 entries.
     let entries = unsafe {
         slice::from_raw_parts(
             addr_to_ptr::<u64>(xsdt_addr + mem::size_of::<AcpiSdtHeader>()),
@@ -464,6 +466,8 @@ fn find_table_rsdt(rsdt_addr: usize, signature: [u8; 4]) -> Option<usize> {
     let header = validate_sdt_header(rsdt_addr, Some(*b"RSDT"))?;
     let entries_len =
         (header.length as usize - mem::size_of::<AcpiSdtHeader>()) / mem::size_of::<u32>();
+    // SAFETY: `validate_sdt_header` checked the table bounds, so the entry
+    // array starts right after the header and spans `entries_len` u32 entries.
     let entries = unsafe {
         slice::from_raw_parts(
             addr_to_ptr::<u32>(rsdt_addr + mem::size_of::<AcpiSdtHeader>()),
@@ -540,6 +544,8 @@ fn parse_mcfg(mcfg_addr: usize) -> Option<McfgAllocation> {
 
     let entries_start = mcfg_addr + entries_base;
     let entries_len = (header.length as usize - entries_base) / mem::size_of::<McfgEntryRaw>();
+    // SAFETY: `validate_sdt_header` checked that the MCFG payload is large
+    // enough, so the entries region is in-bounds for `entries_len` records.
     let entries =
         unsafe { slice::from_raw_parts(addr_to_ptr::<McfgEntryRaw>(entries_start), entries_len) };
 
@@ -583,14 +589,20 @@ fn validate_sdt_header(
 }
 
 fn sdt_bytes(addr: usize, length: u32) -> &'static [u8] {
+    // SAFETY: Callers pass validated ACPI table addresses and lengths obtained
+    // from firmware headers, so the resulting byte slice stays in-bounds.
     unsafe { slice::from_raw_parts(addr_to_ptr::<u8>(addr), length as usize) }
 }
 
 fn bytes_from_addr(addr: usize, length: usize) -> &'static [u8] {
+    // SAFETY: Callers pass validated firmware ranges, so the resulting byte
+    // slice stays in-bounds for `length` bytes.
     unsafe { slice::from_raw_parts(addr_to_ptr::<u8>(addr), length) }
 }
 
 fn ptr_from_addr<T>(addr: usize) -> &'static T {
+    // SAFETY: Callers pass validated firmware structure addresses mapped into
+    // the kernel address space, so dereferencing this typed pointer is sound.
     unsafe { &*addr_to_ptr::<T>(addr) }
 }
 

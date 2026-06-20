@@ -112,6 +112,8 @@ impl FrameBuffer {
 
     #[allow(clippy::mut_from_ref)]
     fn as_mut_slice(&self) -> &mut [u8] {
+        // SAFETY: `base..base+size` comes from the framebuffer driver's mapped
+        // backing store and remains valid for the device lifetime.
         unsafe { slice::from_raw_parts_mut(self.base.as_mut_ptr(), self.size) }
     }
 }

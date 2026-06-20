@@ -6,6 +6,8 @@
 //!
 //! 定义了 ext4 文件系统的块组描述符结构和相关操作。
 
+use core::ptr;
+
 use crate::endian::*;
 
 /// Ext4 块组描述符结构
@@ -153,8 +155,8 @@ impl<'a> BlockGroupDescTable<'a> {
         }
     }
 
-    /// 获取指定块组的描述符
-    pub fn get_desc(&self, group_idx: u32) -> Option<&Ext4GroupDesc> {
+    /// 获取指定块组的描述符值。
+    pub fn get_desc(&self, group_idx: u32) -> Option<Ext4GroupDesc> {
         if group_idx >= self.group_count {
             return None;
         }
@@ -164,9 +166,12 @@ impl<'a> BlockGroupDescTable<'a> {
             return None;
         }
 
-        // 安全地将字节切片转换为结构体引用
         let desc_ptr = self.data[offset..].as_ptr() as *const Ext4GroupDesc;
-        unsafe { Some(&*desc_ptr) }
+        // SAFETY: the bounds check above guarantees that the backing slice
+        // contains a complete serialized `Ext4GroupDesc` at `offset`. The
+        // descriptor table may be only byte-aligned, so reads must be
+        // unaligned and returned by value rather than as a reference.
+        Some(unsafe { ptr::read_unaligned(desc_ptr) })
     }
 
     /// 获取块组数量
@@ -242,7 +247,7 @@ pub struct BlockGroupDescIter<'a> {
 }
 
 impl<'a> Iterator for BlockGroupDescIter<'a> {
-    type Item = &'a Ext4GroupDesc;
+    type Item = Ext4GroupDesc;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current >= self.table.group_count {
@@ -273,8 +278,7 @@ impl<'a> BlockGroupDescTableMut<'a> {
         }
     }
 
-    /// 获取指定块组的可变描述符引用
-    pub fn get_desc_mut(&mut self, group_idx: u32) -> Option<&mut Ext4GroupDesc> {
+    fn desc_ptr_mut(&mut self, group_idx: u32) -> Option<*mut Ext4GroupDesc> {
         if group_idx >= self.group_count {
             return None;
         }
@@ -284,86 +288,79 @@ impl<'a> BlockGroupDescTableMut<'a> {
             return None;
         }
 
-        // 安全地将字节切片转换为可变结构体引用
-        let desc_ptr = self.data[offset..].as_mut_ptr() as *mut Ext4GroupDesc;
-        unsafe { Some(&mut *desc_ptr) }
+        Some(self.data[offset..].as_mut_ptr() as *mut Ext4GroupDesc)
+    }
+
+    fn update_desc(&mut self, group_idx: u32, update: impl FnOnce(&mut Ext4GroupDesc)) -> bool {
+        let Some(desc_ptr) = self.desc_ptr_mut(group_idx) else {
+            return false;
+        };
+        // SAFETY: bounds checks in `desc_ptr_mut` guarantee a complete
+        // descriptor at `desc_ptr`. The underlying table may be only
+        // byte-aligned, so we must edit a by-value copy and write it back with
+        // unaligned operations while `&mut self` guarantees exclusivity.
+        let mut desc = unsafe { ptr::read_unaligned(desc_ptr) };
+        update(&mut desc);
+        // SAFETY: same reasoning as above; we are writing the updated
+        // descriptor bytes back into the same in-bounds table slot.
+        unsafe { ptr::write_unaligned(desc_ptr, desc) };
+        true
     }
 
     /// 更新块组的空闲块数
     pub fn update_free_blocks(&mut self, group_idx: u32, count: u32) -> bool {
-        if let Some(desc) = self.get_desc_mut(group_idx) {
+        self.update_desc(group_idx, |desc| {
             desc.bg_free_blocks_count_lo = (count & 0xFFFF) as u16;
             desc.bg_free_blocks_count_hi = ((count >> 16) & 0xFFFF) as u16;
-            true
-        } else {
-            false
-        }
+        })
     }
 
     /// 更新块组的空闲inode数
     pub fn update_free_inodes(&mut self, group_idx: u32, count: u32) -> bool {
-        if let Some(desc) = self.get_desc_mut(group_idx) {
+        self.update_desc(group_idx, |desc| {
             desc.bg_free_inodes_count_lo = (count & 0xFFFF) as u16;
             desc.bg_free_inodes_count_hi = ((count >> 16) & 0xFFFF) as u16;
-            true
-        } else {
-            false
-        }
+        })
     }
 
     /// 更新块组的目录数
     pub fn update_used_dirs(&mut self, group_idx: u32, count: u32) -> bool {
-        if let Some(desc) = self.get_desc_mut(group_idx) {
+        self.update_desc(group_idx, |desc| {
             desc.bg_used_dirs_count_lo = (count & 0xFFFF) as u16;
             desc.bg_used_dirs_count_hi = ((count >> 16) & 0xFFFF) as u16;
-            true
-        } else {
-            false
-        }
+        })
     }
 
     /// 递增块组的目录数
     pub fn increment_used_dirs(&mut self, group_idx: u32) -> bool {
-        if let Some(desc) = self.get_desc_mut(group_idx) {
+        self.update_desc(group_idx, |desc| {
             let count = desc.used_dirs_count() + 1;
             desc.bg_used_dirs_count_lo = (count & 0xFFFF) as u16;
             desc.bg_used_dirs_count_hi = ((count >> 16) & 0xFFFF) as u16;
-            true
-        } else {
-            false
-        }
+        })
     }
 
     /// 递减块组的目录数
     pub fn decrement_used_dirs(&mut self, group_idx: u32) -> bool {
-        if let Some(desc) = self.get_desc_mut(group_idx) {
+        self.update_desc(group_idx, |desc| {
             let count = desc.used_dirs_count().saturating_sub(1);
             desc.bg_used_dirs_count_lo = (count & 0xFFFF) as u16;
             desc.bg_used_dirs_count_hi = ((count >> 16) & 0xFFFF) as u16;
-            true
-        } else {
-            false
-        }
+        })
     }
 
     /// 设置块组标志
     pub fn set_flags(&mut self, group_idx: u32, flags: u16) -> bool {
-        if let Some(desc) = self.get_desc_mut(group_idx) {
+        self.update_desc(group_idx, |desc| {
             desc.bg_flags |= flags;
-            true
-        } else {
-            false
-        }
+        })
     }
 
     /// 清除块组标志
     pub fn clear_flags(&mut self, group_idx: u32, flags: u16) -> bool {
-        if let Some(desc) = self.get_desc_mut(group_idx) {
+        self.update_desc(group_idx, |desc| {
             desc.bg_flags &= !flags;
-            true
-        } else {
-            false
-        }
+        })
     }
 }
 
@@ -380,7 +377,7 @@ pub struct BlockGroupStats {
 
 impl BlockGroupStats {
     /// 从块组描述符提取统计信息
-    pub fn from_desc(group_idx: u32, desc: &Ext4GroupDesc) -> Self {
+    pub fn from_desc(group_idx: u32, desc: Ext4GroupDesc) -> Self {
         Self {
             group_idx,
             free_blocks: desc.free_blocks_count(),

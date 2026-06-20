@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 //! SMP bring-up helpers for the runtime.
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
@@ -12,10 +15,41 @@ use khal::mem::{VirtAddr, v2p};
 use kthread::AsThread;
 
 #[unsafe(link_section = ".bss.stack")]
-static mut SECONDARY_BOOT_STACK: [[u8; TASK_STACK_SIZE]; CPU_NUM - 1] =
-    [[0; TASK_STACK_SIZE]; CPU_NUM - 1];
+static SECONDARY_BOOT_STACKS: SecondaryBootStacks = SecondaryBootStacks::new();
 
 static ENTERED_CPUS: AtomicUsize = AtomicUsize::new(1);
+
+struct SecondaryBootStacks {
+    stacks: UnsafeCell<[[u8; TASK_STACK_SIZE]; CPU_NUM - 1]>,
+}
+
+impl SecondaryBootStacks {
+    const fn new() -> Self {
+        Self {
+            stacks: UnsafeCell::new([[0; TASK_STACK_SIZE]; CPU_NUM - 1]),
+        }
+    }
+
+    fn stack_top(&self, secondary_cpu_index: usize) -> VirtAddr {
+        // SAFETY: `secondary_cpu_index` is allocated monotonically by the
+        // serialized AP bring-up loop and is bounded by `CPU_NUM - 1`. The
+        // boot-stack backing array lives for the entire kernel lifetime, so
+        // advancing to the selected slot and computing its one-past-end
+        // address stays within the same allocation.
+        let stack = unsafe {
+            self.stacks
+                .get()
+                .cast::<[u8; TASK_STACK_SIZE]>()
+                .add(secondary_cpu_index)
+        };
+        VirtAddr::from(stack.cast::<u8>().wrapping_add(TASK_STACK_SIZE) as usize)
+    }
+}
+
+// SAFETY: Access is restricted to `stack_top()`, which only derives raw stack
+// end addresses for uniquely assigned per-CPU slots during serialized AP
+// bring-up. No shared references to the inner arrays are exposed.
+unsafe impl Sync for SecondaryBootStacks {}
 
 /// Start all secondary CPUs and wait until they enter the runtime.
 #[allow(clippy::absurd_extreme_comparisons)]
@@ -26,11 +60,7 @@ pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) {
             return;
         }
 
-        let stack_top = v2p(VirtAddr::from(unsafe {
-            SECONDARY_BOOT_STACK[secondary_logical_cpu_id]
-                .as_ptr_range()
-                .end as usize
-        }));
+        let stack_top = v2p(SECONDARY_BOOT_STACKS.stack_top(secondary_logical_cpu_id));
 
         debug!("starting CPU {}...", logical_cpu_id.as_usize());
         khal::power::boot_ap(logical_cpu_id, stack_top.as_usize());

@@ -16,6 +16,8 @@ static CURRENT_TASK_PTR: usize = 0;
 #[inline]
 pub fn current_task_ptr<T>() -> *const T {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: on x86_64 the per-CPU task pointer is read with a single `gs`
+    // access, so the value cannot be torn by preemption.
     unsafe {
         // on x86, only one instruction is needed to read the per-CPU task pointer from `gs:[off]`.
         CURRENT_TASK_PTR.read_current_raw() as _
@@ -26,6 +28,8 @@ pub fn current_task_ptr<T>() -> *const T {
         target_arch = "riscv64",
         target_arch = "loongarch64"
     ))]
+    // SAFETY: interrupts are masked for the duration of the multi-instruction
+    // per-CPU read sequence, so the current CPU context cannot change midway.
     unsafe {
         // on RISC-V and LA64, reading `CURRENT_TASK_PTR` requires multiple instruction, so we disable local IRQs.
         let _guard = kspin::IrqSave::new();
@@ -45,6 +49,8 @@ pub fn current_task_ptr<T>() -> *const T {
 pub unsafe fn set_current_task_ptr<T>(ptr: *const T) {
     #[cfg(target_arch = "x86_64")]
     {
+        // SAFETY: the caller guarantees `ptr` targets a valid task structure,
+        // and x86 updates the per-CPU pointer atomically through `gs`.
         unsafe { CURRENT_TASK_PTR.write_current_raw(ptr as usize) }
     }
     #[cfg(any(
@@ -55,6 +61,8 @@ pub unsafe fn set_current_task_ptr<T>(ptr: *const T) {
     ))]
     {
         let _guard = kspin::IrqSave::new();
+        // SAFETY: the caller guarantees `ptr` targets a valid task structure,
+        // and interrupts are masked across the multi-instruction update.
         unsafe { CURRENT_TASK_PTR.write_current_raw(ptr as usize) }
     }
 }

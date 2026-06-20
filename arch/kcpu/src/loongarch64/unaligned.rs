@@ -18,6 +18,11 @@ use crate::{GeneralRegisters, TrapFrame};
 
 core::arch::global_asm!(include_asm_macros!(), include_str!("unaligned.S"));
 
+static_assertions::const_assert_eq!(
+    core::mem::size_of::<GeneralRegisters>(),
+    32 * core::mem::size_of::<usize>()
+);
+
 unsafe extern "C" {
     fn _unaligned_read(addr: u64, value: &mut u64, n: u64, symbol: bool) -> i32;
     fn _unaligned_write(addr: u64, value: u64, n: u64) -> i32;
@@ -580,10 +585,11 @@ impl TrapFrame {
         let badi = unsafe { core::ptr::read(self.era as *const u32) };
         let rd = (badi & 0x1f) as usize;
 
-        // SAFETY: `GeneralRegisters` is `repr(C)` with 32 consecutive `usize` fields,
-        // layout-compatible with `[usize; 32]`.
+        // SAFETY: `GeneralRegisters` is `repr(C)` and consists of exactly 32 consecutive
+        // `usize` fields, so its storage can be viewed as a mutable `[usize]` for indexed
+        // register access during emulation.
         let regs = unsafe {
-            core::mem::transmute::<&mut GeneralRegisters, &mut [usize; 32]>(&mut self.regs)
+            core::slice::from_raw_parts_mut(core::ptr::from_mut(&mut self.regs).cast::<usize>(), 32)
         };
 
         if (badi >> 22) == LDD_OP || (badi >> 24) == LDPTRD_OP || (badi >> 15) == LDXD_OP {

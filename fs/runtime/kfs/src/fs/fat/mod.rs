@@ -9,11 +9,11 @@ mod file;
 mod fs;
 mod util;
 
-use core::cell::UnsafeCell;
+use core::{cell::UnsafeCell, ptr::NonNull};
 
 use fatfs::SeekFrom;
 pub use fs::FatFilesystem;
-use fs::FatFilesystemInner;
+use fs::{FatFilesystem, FatFilesystemGuard};
 
 #[cfg(unittest)]
 mod fat_test;
@@ -56,27 +56,104 @@ impl fatfs::Seek for SeekableDisk {
 
 /// A reference to an object within a filesystem.
 pub(crate) struct FsRef<T> {
+    owner: NonNull<FatFilesystem>,
     inner: UnsafeCell<T>,
 }
 
 impl<T> FsRef<T> {
     /// Create a new filesystem reference wrapper.
-    pub fn new(inner: T) -> Self {
+    pub fn new(owner: &FatFilesystem, inner: T) -> Self {
         Self {
+            owner: NonNull::from(owner),
             inner: UnsafeCell::new(inner),
         }
     }
 
+    /// Extend a FAT handle's filesystem-tied lifetime to the surrounding node.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the handle is only accessed while holding the
+    /// owning [`FatFilesystemInner`] lock for the same filesystem instance.
+    pub unsafe fn from_filesystem_handle(owner: &FatFilesystem, inner: T) -> Self {
+        Self::new(owner, inner)
+    }
+
     /// Borrow an immutable reference tied to the filesystem lifetime.
-    pub fn borrow<'a>(&self, _fs: &'a FatFilesystemInner) -> &'a T {
-        // SAFETY: The filesystem outlives the reference
+    pub fn borrow<'a>(&self, fs: &'a FatFilesystemGuard<'a>) -> &'a T {
+        self.assert_owner(fs);
+        // SAFETY: `assert_owner` checked that `fs` is the filesystem instance
+        // that created this handle, and callers hold that filesystem mutex while
+        // borrowing. The underlying FAT object therefore stays alive and access
+        // remains serialized by the owner lock.
         unsafe { &*self.inner.get() }
     }
 
     /// Borrow a mutable reference tied to the filesystem lifetime.
     #[allow(clippy::mut_from_ref)]
-    pub fn borrow_mut<'a>(&self, _fs: &'a FatFilesystemInner) -> &'a mut T {
-        // SAFETY: The filesystem outlives the reference
+    pub fn borrow_mut<'a>(&self, fs: &'a mut FatFilesystemGuard<'a>) -> &'a mut T {
+        self.assert_owner(fs);
+        // SAFETY: `assert_owner` checked that `fs` is the filesystem instance
+        // that created this handle, and the owner mutex guard provides the
+        // exclusive access required to hand out `&mut T`.
         unsafe { &mut *self.inner.get() }
     }
+
+    fn assert_owner(&self, fs: &FatFilesystemGuard<'_>) {
+        assert_eq!(
+            self.owner,
+            fs.owner_ptr(),
+            "FAT handle borrowed under a different filesystem instance"
+        );
+    }
 }
+
+impl FsRef<ff::File<'static>> {
+    /// Capture a FAT file handle whose borrow is externally guarded by the
+    /// owning filesystem lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the returned handle is only accessed while
+    /// holding the matching [`FatFilesystemInner`] lock for the filesystem
+    /// that created `file`.
+    pub unsafe fn from_file_handle(owner: &FatFilesystem, file: ff::File<'_>) -> Self {
+        // SAFETY: the caller guarantees `file` stays tied to `owner` and is only
+        // accessed while holding that filesystem's mutex, so extending the
+        // handle lifetime to the node wrapper remains within the owner lock's
+        // audit surface.
+        Self::new(owner, unsafe {
+            core::mem::transmute::<ff::File<'_>, ff::File<'static>>(file)
+        })
+    }
+}
+
+impl FsRef<ff::Dir<'static>> {
+    /// Capture a FAT directory handle whose borrow is externally guarded by
+    /// the owning filesystem lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the returned handle is only accessed while
+    /// holding the matching [`FatFilesystemInner`] lock for the filesystem
+    /// that created `dir`.
+    pub unsafe fn from_dir_handle(owner: &FatFilesystem, dir: ff::Dir<'_>) -> Self {
+        // SAFETY: the caller guarantees `dir` stays tied to `owner` and is only
+        // accessed while holding that filesystem's mutex, so extending the
+        // handle lifetime to the node wrapper remains within the owner lock's
+        // audit surface.
+        Self::new(owner, unsafe {
+            core::mem::transmute::<ff::Dir<'_>, ff::Dir<'static>>(dir)
+        })
+    }
+}
+
+// SAFETY: `FsRef<T>` stores the exact owning `FatFilesystemInner` pointer for the
+// captured FAT handle. Every access path checks that the caller holds that same
+// filesystem instance and then relies on its mutex to serialize handle access.
+unsafe impl<T> Send for FsRef<T> {}
+
+// SAFETY: shared references do not expose `T` directly. Borrowing requires the
+// matching owner lock, and `assert_owner` rejects reborrowing under a different
+// filesystem instance.
+unsafe impl<T> Sync for FsRef<T> {}

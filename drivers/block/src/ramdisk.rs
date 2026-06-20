@@ -6,12 +6,7 @@
 
 extern crate alloc;
 
-use alloc::alloc::{alloc_zeroed, dealloc};
-use core::{
-    alloc::Layout,
-    ops::{Deref, DerefMut},
-    ptr::NonNull,
-};
+use alloc::{boxed::Box, vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoPreempt;
@@ -22,18 +17,21 @@ const BLOCK_SIZE: usize = 512;
 
 /// A RAM disk structure backed by heap memory.
 ///
-/// The `SpinNoPreempt` lock serializes all block reads and writes so the
-/// device can be shared behind a `&self` interface. `SpinNoPreempt` is
-/// sufficient because this is a pure-software driver with no IRQ interaction.
-pub struct RamDisk(NonNull<[u8]>, SpinNoPreempt<()>);
-
-unsafe impl Send for RamDisk {}
-unsafe impl Sync for RamDisk {}
+/// The `SpinNoPreempt` lock serializes block reads and writes to the backing
+/// storage so the device can be shared behind a `&self` interface. Capacity is
+/// fixed at construction time and cached separately, so metadata queries do not
+/// need to take the data lock.
+pub struct RamDisk {
+    storage: SpinNoPreempt<Box<[u8]>>,
+    len: usize,
+}
 
 impl Default for RamDisk {
     fn default() -> Self {
-        // Initially creates an empty dangling pointer for the RamDisk
-        Self(NonNull::<[u8; 0]>::dangling(), SpinNoPreempt::new(()))
+        Self {
+            storage: SpinNoPreempt::new(Box::<[u8]>::default()),
+            len: 0,
+        }
     }
 }
 
@@ -43,54 +41,20 @@ impl RamDisk {
     /// The size is rounded up to be aligned to the block size (512 bytes).
     pub fn new(size_hint: usize) -> Self {
         let size = align_up(size_hint);
-        let layout = unsafe { Layout::from_size_align_unchecked(size, BLOCK_SIZE) };
-
-        // Allocate the memory and create a NonNull pointer to the RAM disk buffer.
-        let ptr = unsafe { NonNull::new_unchecked(alloc_zeroed(layout)) };
-
-        Self(
-            NonNull::slice_from_raw_parts(ptr, size),
-            SpinNoPreempt::new(()),
-        )
-    }
-}
-
-impl Drop for RamDisk {
-    fn drop(&mut self) {
-        if self.0.is_empty() {
-            return;
+        Self {
+            storage: SpinNoPreempt::new(vec![0u8; size].into_boxed_slice()),
+            len: size,
         }
-
-        // Deallocate the memory when the RamDisk goes out of scope
-        unsafe {
-            dealloc(
-                self.0.cast::<u8>().as_ptr(),
-                Layout::from_size_align_unchecked(self.0.len(), BLOCK_SIZE),
-            );
-        }
-    }
-}
-
-impl Deref for RamDisk {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        // Dereferencing the RamDisk to get a slice of bytes
-        unsafe { self.0.as_ref() }
-    }
-}
-
-impl DerefMut for RamDisk {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // Dereferencing mutably for mutable operations
-        unsafe { self.0.as_mut() }
     }
 }
 
 impl From<&[u8]> for RamDisk {
     fn from(data: &[u8]) -> Self {
-        let mut ramdisk = RamDisk::new(data.len());
-        ramdisk[..data.len()].copy_from_slice(data);
+        let ramdisk = RamDisk::new(data.len());
+        {
+            let mut storage = ramdisk.storage.lock();
+            storage[..data.len()].copy_from_slice(data);
+        }
         ramdisk
     }
 }
@@ -108,8 +72,7 @@ impl Device for RamDisk {
 impl BlockDevice for RamDisk {
     #[inline]
     fn num_blocks(&self) -> u64 {
-        // Calculates the number of blocks in the RAM disk
-        (self.len() / BLOCK_SIZE) as u64
+        (self.len / BLOCK_SIZE) as u64
     }
 
     #[inline]
@@ -122,11 +85,11 @@ impl BlockDevice for RamDisk {
             return Err(DriverError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;
-        if offset + buf.len() > self.len() {
+        if offset + buf.len() > self.len {
             return Err(DriverError::Io);
         }
-        let _guard = self.1.lock();
-        buf.copy_from_slice(&self[offset..offset + buf.len()]);
+        let storage = self.storage.lock();
+        buf.copy_from_slice(&storage[offset..offset + buf.len()]);
         Ok(())
     }
 
@@ -135,15 +98,11 @@ impl BlockDevice for RamDisk {
             return Err(DriverError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;
-        if offset + buf.len() > self.len() {
+        if offset + buf.len() > self.len {
             return Err(DriverError::Io);
         }
-        let _guard = self.1.lock();
-        // SAFETY: the lock serializes all mutable access; the pointer is valid
-        // for `self.0.len()` bytes (allocated in `new`), and the bounds were
-        // checked above.
-        let data = unsafe { self.0.as_ptr().as_mut().unwrap_unchecked() };
-        data[offset..offset + buf.len()].copy_from_slice(buf);
+        let mut storage = self.storage.lock();
+        storage[offset..offset + buf.len()].copy_from_slice(buf);
         Ok(())
     }
 
@@ -197,6 +156,14 @@ mod tests_ramdisk {
 
         // Test flush operation
         assert!(disk.flush().is_ok());
+    }
+
+    #[def_test]
+    fn test_ramdisk_num_blocks_matches_capacity() {
+        let disk = RamDisk::from(&[0x5Au8; 700][..]);
+        assert_eq!(disk.num_blocks(), 2);
+        assert!(disk.write_block(1, &[0xA5; 512]).is_ok());
+        assert_eq!(disk.num_blocks(), 2);
     }
 
     #[def_test]

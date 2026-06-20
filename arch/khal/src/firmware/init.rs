@@ -16,6 +16,8 @@ pub(super) fn init(boot_info: &BootInfo) {
             boot_info.dtb_addr,
             boot_info.dtb_addr + DTB_CAPTURE_SIZE
         );
+        // SAFETY: `ptr` comes from validated boot info and points to the
+        // immutable device-tree blob selected for early firmware parsing.
         let _ = unsafe { of::init_device_tree_ptr(ptr) };
         if let Some(stdout_path) = of::chosen_stdout_path() {
             bootln!("firmware: chosen stdout-path={}", stdout_path);

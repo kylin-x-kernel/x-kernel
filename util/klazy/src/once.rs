@@ -73,7 +73,13 @@ impl<T: fmt::Debug> fmt::Debug for Once<T> {
 
 // Same unsafe impls as `std::sync::RwLock`, because this also allows for
 // concurrent reads.
+// SAFETY: After initialization, `Once<T>` only exposes shared references to
+// `T`, and initialization is serialized by the state machine, so sharing across
+// threads is sound when `T: Send + Sync`.
 unsafe impl<T: Send + Sync> Sync for Once<T> {}
+// SAFETY: Moving `Once<T>` between threads is sound because the only shared
+// mutable state is guarded by the atomic initialization protocol, and `T` may
+// be transferred across threads when `T: Send`.
 unsafe impl<T: Send> Send for Once<T> {}
 
 mod status {
@@ -97,13 +103,14 @@ mod status {
         Failed        = 0x03,
     }
     impl Status {
-        // Construct a status from an inner u8 integer.
-        //
-        // # Safety
-        //
-        // For this to be safe, the inner number must have a valid corresponding enum variant.
-        unsafe fn new_unchecked(inner: u8) -> Self {
-            unsafe { core::mem::transmute(inner) }
+        fn from_raw(raw: u8) -> Self {
+            match raw {
+                0x00 => Self::Uninitialized,
+                0x01 => Self::Initializing,
+                0x02 => Self::Ready,
+                0x03 => Self::Failed,
+                _ => unreachable!("invalid Once status: {raw:#x}"),
+            }
         }
     }
 
@@ -118,7 +125,7 @@ mod status {
         pub fn load(&self, ordering: Ordering) -> Status {
             // The invariant ensures the loaded u8 is a valid Status variant
             let raw_value = self.0.load(ordering);
-            unsafe { Status::new_unchecked(raw_value) }
+            Status::from_raw(raw_value)
         }
 
         #[inline(always)]
@@ -143,16 +150,14 @@ mod status {
 
             // Convert result values back to Status enum
             match result {
-                Ok(current) => Ok(unsafe { Status::new_unchecked(current) }),
-                Err(actual) => Err(unsafe { Status::new_unchecked(actual) }),
+                Ok(current) => Ok(Status::from_raw(current)),
+                Err(actual) => Err(Status::from_raw(actual)),
             }
         }
 
         #[inline(always)]
-        pub fn get_mut(&mut self) -> &mut Status {
-            // Direct mutable access is safe with exclusive reference
-            let ptr = self.0.get_mut() as *mut u8;
-            unsafe { &mut *(ptr.cast::<Status>()) }
+        pub fn get_mut(&mut self) -> Status {
+            Status::from_raw(*self.0.get_mut())
         }
     }
 }
@@ -272,10 +277,9 @@ impl<T> Once<T> {
                 }
                 Err(Status::Ready) => {
                     // Another thread completed initialization
-                    return Ok(unsafe {
-                        // SAFETY: Status is Ready, so value is initialized
-                        self.get_value_unchecked()
-                    });
+                    // SAFETY: `Status::Ready` is only published after the value
+                    // has been fully initialized in `storage`.
+                    return Ok(unsafe { self.get_value_unchecked() });
                 }
                 Err(Status::Uninitialized) => {
                     // CAS failed spuriously, retry
@@ -314,6 +318,8 @@ impl<T> Once<T> {
             self.state.store(Status::Ready, Ordering::Release);
 
             // Return the initialized value
+            // SAFETY: This thread just wrote the value to `storage` and then
+            // published `Status::Ready`, so the value is initialized here.
             return unsafe { Ok(self.get_value_unchecked()) };
         }
     }
@@ -366,6 +372,8 @@ impl<T> Once<T> {
                     core::hint::spin_loop();
                 }
                 Status::Ready => {
+                    // SAFETY: `Status::Ready` is only observable after the
+                    // initialized value has been published to `storage`.
                     return Some(unsafe { self.get_value_unchecked() });
                 }
                 Status::Failed => {
@@ -449,6 +457,8 @@ impl<T> Once<T> {
         let current_state = self.state.load(Ordering::Acquire);
 
         if current_state == Status::Ready {
+            // SAFETY: `Status::Ready` is only observable after the initialized
+            // value has been published to `storage`.
             Some(unsafe { self.get_value_unchecked() })
         } else {
             None
@@ -470,6 +480,8 @@ impl<T> Once<T> {
             "Attempted to access an uninitialized OnceCell. If this was run without debug checks, \
              this would be undefined behaviour. This is a serious bug and you must fix it.",
         );
+        // SAFETY: The caller promises the cell is initialized; the debug
+        // assertion checks that contract in debug builds.
         unsafe { self.get_value_unchecked() }
     }
 
@@ -478,7 +490,9 @@ impl<T> Once<T> {
     /// Because this method requires a mutable reference to the [`Once`], no synchronization
     /// overhead is required to access the inner value. In effect, it is zero-cost.
     pub fn get_mut(&mut self) -> Option<&mut T> {
-        if *self.state.get_mut() == Status::Ready {
+        if self.state.get_mut() == Status::Ready {
+            // SAFETY: `Status::Ready` guarantees initialization and `&mut self`
+            // guarantees exclusive access to the stored value.
             Some(unsafe { self.get_value_mut_unchecked() })
         } else {
             None
@@ -500,6 +514,8 @@ impl<T> Once<T> {
             "Attempted to access an uninitialized OnceCell. If this was run without debug checks, \
              this would be undefined behavior. This is a serious bug and you must fix it.",
         );
+        // SAFETY: The caller promises the cell is initialized; the debug
+        // assertion checks that contract in debug builds.
         unsafe { self.get_value_mut_unchecked() }
     }
 
@@ -509,7 +525,9 @@ impl<T> Once<T> {
     /// is required to access the inner value. In effect, it is zero-cost. Returns `None`
     /// if the cell is not in the `Ready` state.
     pub fn try_into_inner(mut self) -> Option<T> {
-        if *self.state.get_mut() == Status::Ready {
+        if self.state.get_mut() == Status::Ready {
+            // SAFETY: `Status::Ready` guarantees initialization and ownership
+            // of `self` lets us move the value out exactly once.
             Some(unsafe { self.extract_value_unchecked() })
         } else {
             None
@@ -531,6 +549,8 @@ impl<T> Once<T> {
             "Attempted to access an uninitialized OnceCell. If this was run without debug checks, \
              this would be undefined behavior. This is a serious bug and you must fix it.",
         );
+        // SAFETY: The caller promises the cell is initialized; the debug
+        // assertion checks that contract in debug builds.
         unsafe { self.extract_value_unchecked() }
     }
 
@@ -553,9 +573,10 @@ impl<T> From<T> for Once<T> {
 impl<T> Drop for Once<T> {
     fn drop(&mut self) {
         // Exclusive mutable access means no atomic operations needed
-        if *self.state.get_mut() == Status::Ready {
+        if self.state.get_mut() == Status::Ready {
+            // SAFETY: `Status::Ready` guarantees the slot contains a live `T`,
+            // and `&mut self` guarantees exclusive access during drop.
             unsafe {
-                // Value is initialized, so we must drop it
                 core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
             }
         }

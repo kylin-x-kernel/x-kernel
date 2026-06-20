@@ -5,6 +5,8 @@
 use alloc::{format, sync::Arc};
 use core::{
     any::Any,
+    mem::MaybeUninit,
+    slice,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
@@ -34,6 +36,23 @@ pub struct LoopDevice {
     pub ra: AtomicU32,
 }
 
+const fn empty_loop_info() -> loop_info {
+    loop_info {
+        lo_number: 0,
+        lo_device: 0,
+        lo_inode: 0,
+        lo_rdevice: 0,
+        lo_offset: 0,
+        lo_encrypt_type: 0,
+        lo_encrypt_key_size: 0,
+        lo_flags: 0,
+        lo_name: [0; 64],
+        lo_encrypt_key: [0; 32],
+        lo_init: [0; 2],
+        reserved: [0; 4],
+    }
+}
+
 impl LoopDevice {
     /// Create a new loop device
     pub(crate) fn new(number: u32, dev_id: DeviceId) -> Self {
@@ -51,10 +70,20 @@ impl LoopDevice {
         if self.file.lock().is_none() {
             return Err(KError::from(LinuxError::ENXIO));
         }
-        let mut res: loop_info = unsafe { core::mem::zeroed() };
-        res.lo_number = self.number as _;
-        res.lo_rdevice = self.dev_id.0 as _;
-        Ok(res)
+        Ok(loop_info {
+            lo_number: self.number as _,
+            lo_device: 0,
+            lo_inode: 0,
+            lo_rdevice: self.dev_id.0 as _,
+            lo_offset: 0,
+            lo_encrypt_type: 0,
+            lo_encrypt_key_size: 0,
+            lo_flags: 0,
+            lo_name: [0; 64],
+            lo_encrypt_key: [0; 32],
+            lo_init: [0; 2],
+            reserved: [0; 4],
+        })
     }
 
     /// Set information for the loop device.
@@ -121,8 +150,16 @@ impl DeviceFileOps for LoopDevice {
                 (arg as *mut loop_info).write_vm(self.get_info()?)?;
             }
             LOOP_SET_STATUS => {
-                // FIXME: AnyBitPattern
-                let info = unsafe { (arg as *const loop_info).read_uninit()?.assume_init() };
+                let mut info = empty_loop_info();
+                // SAFETY: `info` is a live POD `loop_info` value, so its full
+                // storage may be reborrowed as `MaybeUninit<u8>` for copy-from-user.
+                let info_bytes = unsafe {
+                    slice::from_raw_parts_mut(
+                        (&mut info as *mut loop_info).cast::<MaybeUninit<u8>>(),
+                        size_of::<loop_info>(),
+                    )
+                };
+                osvm::read_vm_bytes(arg as *const u8, info_bytes)?;
                 self.set_info(info)?;
             }
             // TODO: the following should apply to any block devices

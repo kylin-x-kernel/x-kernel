@@ -12,6 +12,8 @@ use core::arch::asm;
 #[inline]
 pub fn read_thread_pointer() -> usize {
     let tp;
+    // SAFETY: this reads the current CPU's `$tp` register into a general-purpose
+    // output without touching memory.
     unsafe { asm!("move {}, $tp", out(reg) tp) };
     tp
 }
@@ -25,5 +27,7 @@ pub fn read_thread_pointer() -> usize {
 /// This function is unsafe as it changes the CPU states.
 #[inline]
 pub unsafe fn write_thread_pointer(val: usize) {
+    // SAFETY: the caller guarantees `val` is a valid TLS/thread-pointer value
+    // to publish in the current CPU's `$tp` register.
     unsafe { asm!("move $tp, {}", in(reg) val) }
 }

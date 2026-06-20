@@ -47,6 +47,8 @@ pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
         GICC_PMR.init_once(usize::from(gicc_base) + PMR_OFFSET);
         set_gic_init_status(true);
     }
+    // SAFETY: both distributor and CPU interface bases come from platform
+    // discovery and point at the mapped GICv2 MMIO frames for this machine.
     let mut gic = unsafe { Gic::new(gicd_base, gicc_base, None) };
     gic.init();
     GIC.init_once(SpinNoIrq::new(gic));
@@ -63,6 +65,8 @@ pub fn init_current_cpu() {
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
     trace!("GICv2 set trigger: {interrupt_id} {edge}");
+    // SAFETY: callers pass a hardware IRQ number understood by this GIC
+    // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(interrupt_id as u32) };
     let cfg = if edge { Trigger::Edge } else { Trigger::Level };
     GIC.lock().set_cfg(intid, cfg);
@@ -70,6 +74,8 @@ pub fn set_trigger(interrupt_id: usize, edge: bool) {
 
 pub fn enable(irq: usize, enabled: bool) {
     trace!("GICv2 set enable: {irq} {enabled}");
+    // SAFETY: callers pass a hardware IRQ number understood by this GIC
+    // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
     let gic = GIC.lock();
     gic.set_irq_enable(intid, enabled);
@@ -77,6 +83,8 @@ pub fn enable(irq: usize, enabled: bool) {
 
 #[cfg(feature = "pmr")]
 pub fn set_prio(irq: usize, priority: u8) {
+    // SAFETY: callers pass a hardware IRQ number understood by this GIC
+    // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
     let gic = GIC.lock();
     gic.set_priority(intid, priority);
@@ -89,6 +97,8 @@ pub fn set_prio(_irq: usize, _priority: u8) {
 
 #[cfg(feature = "pmr")]
 fn set_prio_mask(priority: u8) {
+    // SAFETY: `GICC_PMR` is initialized from the mapped CPU-interface frame
+    // before PMR mode is enabled, and PMR is a single 32-bit MMIO register.
     unsafe {
         core::ptr::write_volatile((*GICC_PMR.get_unchecked()) as *mut u32, priority as u32);
     }
@@ -97,11 +107,15 @@ fn set_prio_mask(priority: u8) {
 #[cfg(feature = "pmr")]
 fn open_high_priority_irq_mode() {
     set_prio_mask(0x80);
+    // SAFETY: writing `daifclr, #2` only unmasks IRQ delivery on the current
+    // CPU and does not touch memory.
     unsafe { asm!("msr daifclr, #2") };
 }
 
 #[cfg(feature = "pmr")]
 fn close_irq_and_restore_masking() {
+    // SAFETY: writing `daifset, #2` only masks IRQ delivery on the current
+    // CPU and does not touch memory.
     unsafe { asm!("msr daifset, #2") };
     set_prio_mask(0xff);
 }

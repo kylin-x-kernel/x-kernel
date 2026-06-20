@@ -47,6 +47,7 @@ pub static __llvm_profile_raw_version: u64 = types::INSTR_PROF_RAW_VERSION;
 #[cfg(feature = "alloc")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn minicov_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
+    // SAFETY: forwards the caller's allocation contract to the portability layer.
     unsafe { port::alloc_zeroed(size, align) }
 }
 
@@ -59,6 +60,7 @@ pub unsafe extern "C" fn minicov_alloc_zeroed(size: usize, align: usize) -> *mut
 #[cfg(feature = "alloc")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn minicov_dealloc(ptr: *mut u8, size: usize, align: usize) {
+    // SAFETY: forwards the caller's deallocation contract to the portability layer.
     unsafe { port::dealloc(ptr, size, align) }
 }
 
@@ -233,6 +235,7 @@ pub unsafe extern "C" fn __llvm_profile_end_vtabnames() -> *const u8 {
 /// Must not be called concurrently with other profiling operations.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __llvm_profile_reset_counters() {
+    // SAFETY: forwards the runtime's synchronization precondition unchanged.
     unsafe { profiling::reset_counters() };
 }
 
@@ -244,6 +247,7 @@ pub unsafe extern "C" fn __llvm_profile_reset_counters() {
 /// Must not be called concurrently with other profiling operations.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __llvm_profile_merge_from_buffer(profile: *const u8, size: u64) -> i32 {
+    // SAFETY: forwards the caller-provided profile buffer contract unchanged.
     unsafe { merge::merge_from_buffer(profile, size) }
 }
 
@@ -254,6 +258,7 @@ pub unsafe extern "C" fn __llvm_profile_merge_from_buffer(profile: *const u8, si
 /// `profile` must point to a buffer of at least `size` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __llvm_profile_check_compatibility(profile: *const u8, size: u64) -> i32 {
+    // SAFETY: forwards the caller-provided profile buffer contract unchanged.
     unsafe { merge::check_compatibility(profile, size) }
 }
 
@@ -285,6 +290,7 @@ pub extern "C" fn __llvm_profile_get_size_for_buffer() -> u64 {
 /// `__llvm_profile_get_size_for_buffer()` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __llvm_profile_write_buffer(buffer: *mut u8) -> i32 {
+    // SAFETY: forwards the caller-provided output buffer contract unchanged.
     unsafe { writer::write_buffer(buffer) }
 }
 
@@ -299,6 +305,7 @@ pub unsafe extern "C" fn __llvm_profile_instrument_target(
     data: *mut c_void,
     counter_index: u32,
 ) {
+    // SAFETY: forwards the compiler-provided profiling record contract unchanged.
     unsafe { value::instrument_target(target_value, data, counter_index) };
 }
 
@@ -314,6 +321,7 @@ pub unsafe extern "C" fn __llvm_profile_instrument_target_value(
     counter_index: u32,
     count_value: u64,
 ) {
+    // SAFETY: forwards the compiler-provided profiling record contract unchanged.
     unsafe { value::instrument_target_value(target_value, data, counter_index, count_value) };
 }
 
@@ -328,6 +336,7 @@ pub unsafe extern "C" fn __llvm_profile_instrument_memop(
     data: *mut c_void,
     counter_index: u32,
 ) {
+    // SAFETY: forwards the compiler-provided profiling record contract unchanged.
     unsafe { value::instrument_memop(target_value, data, counter_index) };
 }
 
@@ -386,6 +395,7 @@ pub unsafe extern "C" fn lprofWriteData(
     vp_data_reader: *mut VPDataReaderType,
     skip_name_data_write: i32,
 ) -> i32 {
+    // SAFETY: forwards the caller-provided writer and callback contracts unchanged.
     unsafe { writer::write_data(writer, vp_data_reader, skip_name_data_write) }
 }
 
@@ -447,6 +457,7 @@ pub fn capture_coverage<Writer: CoverageWriter>(
         extern crate alloc;
         let mut buf = alloc::vec![0u8; size as usize];
 
+        // SAFETY: `buf` is allocated to exactly the required serialized profile size.
         let result = unsafe { writer::write_buffer(buf.as_mut_ptr()) };
         if result != 0 {
             return Err(CoverageWriteError);
@@ -468,6 +479,7 @@ pub fn capture_coverage<Writer: CoverageWriter>(
 /// This function is not thread-safe: concurrent calls or concurrent execution
 /// of instrumented code may produce inaccurate coverage data.
 pub fn merge_coverage(data: &[u8]) -> Result<(), IncompatibleCoverageData> {
+    // SAFETY: `data` exposes a stable slice for the duration of the merge call.
     let result = unsafe { merge::merge_from_buffer(data.as_ptr(), data.len() as u64) };
     if result != 0 {
         Err(IncompatibleCoverageData)
@@ -480,6 +492,7 @@ pub fn merge_coverage(data: &[u8]) -> Result<(), IncompatibleCoverageData> {
 ///
 /// Must not be called concurrently with other profiling operations.
 pub fn reset_coverage() {
+    // SAFETY: the safe wrapper inherits the documented non-concurrency requirement.
     unsafe { profiling::reset_counters() };
 }
 

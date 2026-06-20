@@ -110,6 +110,8 @@ pub mod pmu {
 }
 #[inline]
 pub fn boot_info(arg: usize) -> &'static boot_info::BootInfo {
+    // SAFETY: boot entry passes `arg` as the address of a live `BootInfo`
+    // structure that remains valid for the kernel lifetime.
     let boot_info = unsafe { &*(arg as *const boot_info::BootInfo) };
     assert!(boot_info.is_valid(), "invalid boot info");
     boot_info

@@ -196,6 +196,7 @@ linux_sysno = { path = "api/linux_sysno", default-features = false }
 linkme = "0.3.33"
 lock_api = { version = "0.4", default-features = false }
 log = "0.4"
+int_ratio = "0.1"
 ouroboros = { version = "0.18.5", default-features = false }
 percpu = "0.4"
 rust-dice = { version = "0.1", default-features = false }

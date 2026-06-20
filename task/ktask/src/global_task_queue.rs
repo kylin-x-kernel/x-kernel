@@ -56,6 +56,8 @@ impl GlobalTaskRegistry {
         warn!("global task queue on cpu {} is full!", cpu_id.as_usize());
 
         // registry full, drop record
+        // SAFETY: `ptr` was produced by `Box::into_raw` just above and was not
+        // published into any slot, so reconstructing and dropping the box is valid.
         unsafe { drop(Box::from_raw(ptr as *mut WeakKtaskRef)) };
     }
 
@@ -66,7 +68,8 @@ impl GlobalTaskRegistry {
             if ptr == 0 {
                 continue;
             }
-            // Safety: ptr is either 0 or a valid Box<WeakKtaskRef> installed by try_insert.
+            // SAFETY: `ptr` is either 0 or a valid `Box<WeakKtaskRef>` raw
+            // pointer installed by `try_insert` and not yet reclaimed.
             let weak = unsafe { &*(ptr as *const WeakKtaskRef) };
             if weak.upgrade().is_none() {
                 // Try to claim the slot and free.
@@ -74,6 +77,8 @@ impl GlobalTaskRegistry {
                     .compare_exchange(ptr, 0, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
                 {
+                    // SAFETY: the successful CAS transfers sole ownership of
+                    // the boxed weak ref back to this CPU for reclamation.
                     unsafe { drop(Box::from_raw(ptr as *mut WeakKtaskRef)) };
                 }
             }
@@ -87,7 +92,8 @@ impl GlobalTaskRegistry {
             if ptr == 0 {
                 continue;
             }
-            // Safety: ptr is either 0 or a valid Box<WeakKtaskRef>.
+            // SAFETY: `ptr` is either 0 or a valid `Box<WeakKtaskRef>` raw
+            // pointer published by `try_insert` and not reclaimed yet.
             let weak = unsafe { &*(ptr as *const WeakKtaskRef) };
             f(weak);
         }

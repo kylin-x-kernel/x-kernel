@@ -45,6 +45,8 @@ fn write_raw_byte(byte: u8) {
     };
     let lsr = (base + UART_LSR_OFFSET) as *const u8;
     let thr = (base + UART_THR_OFFSET) as *mut u8;
+    // SAFETY: `base` is the active NS16550 MMIO base chosen during boot, so
+    // `lsr` and `thr` address UART registers within that mapped device window.
     unsafe {
         while lsr.read_volatile() & UART_LSR_THR_EMPTY == 0 {}
         thr.write_volatile(byte);

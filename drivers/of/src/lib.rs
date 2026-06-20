@@ -227,6 +227,8 @@ pub fn fdt() -> Option<&'static LinuxFdt<'static>> {
 /// `ptr` must point to a valid, readable DTB blob for the duration of this
 /// call.
 pub unsafe fn dtb_total_size_from_ptr(ptr: *const u8) -> Result<usize, FirmwareInitError> {
+    // SAFETY: The caller guarantees `ptr` points to a valid, readable DTB blob
+    // for the duration of this call.
     let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
     Ok(fdt.total_size())
 }
@@ -242,6 +244,8 @@ pub fn dtb_total_size() -> Option<usize> {
 /// `ptr` must point to a valid DTB blob that remains accessible for the rest of
 /// the program lifetime.
 pub unsafe fn init_device_tree_ptr(ptr: *const u8) -> Result<(), FirmwareInitError> {
+    // SAFETY: The caller guarantees `ptr` points to a valid DTB blob that
+    // remains accessible for the rest of the program lifetime.
     let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
     FDT.init_once(fdt);
     Ok(())
@@ -561,6 +565,8 @@ fn collect_named_regions<const N: usize>(
 pub unsafe fn read_memory_regions_from_ptr<const N: usize>(
     ptr: *const u8,
 ) -> Result<([crate::MemoryRegion; N], usize), FirmwareInitError> {
+    // SAFETY: The caller guarantees `ptr` points to a valid, readable DTB blob
+    // for the duration of this call.
     let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
     Ok(collect_regions(fdt.memory_regions()))
 }
@@ -575,6 +581,8 @@ pub unsafe fn read_memory_regions_from_ptr<const N: usize>(
 pub unsafe fn read_reserved_memory_regions_from_ptr<const N: usize>(
     ptr: *const u8,
 ) -> Result<([crate::MemoryRegion; N], usize), FirmwareInitError> {
+    // SAFETY: The caller guarantees `ptr` points to a valid, readable DTB blob
+    // for the duration of this call.
     let fdt = unsafe { LinuxFdt::from_ptr(ptr) }.map_err(FirmwareInitError::BadDeviceTree)?;
     Ok(collect_reserved_regions(
         fdt.mem_reservations().chain(fdt.reserved_memory_regions()),

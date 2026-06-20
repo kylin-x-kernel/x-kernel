@@ -323,10 +323,6 @@ pub struct Card0 {
     retained_pages: Mutex<BTreeMap<u64, Arc<GlobalPage>>>,
 }
 
-// SAFETY: Card0 uses only Send+Sync interior types.
-unsafe impl Send for Card0 {}
-unsafe impl Sync for Card0 {}
-
 impl Card0 {
     /// Create a new DRM device instance.
     pub fn new() -> Arc<Self> {
@@ -1015,6 +1011,9 @@ impl Card0 {
         };
         let info = fbdevice::fb_info();
         let copy = (size as usize).min(info.fb_size);
+        // SAFETY: both framebuffer regions are valid for `copy` bytes and do
+        // not overlap: one is the DRM shadow buffer, the other is the mapped
+        // display framebuffer.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 pages.start_va().as_usize() as *const u8,

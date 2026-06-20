@@ -34,9 +34,13 @@ impl<'a> FrameBuffer<'a> {
     ///
     /// # Safety
     ///
-    /// Caller must insure that the given memory region is valid and accessible.
+    /// `ptr..ptr + len` must denote a live, writable framebuffer mapping for
+    /// the returned lifetime, and no other mutable reference may alias that
+    /// region while the returned [`FrameBuffer`] exists.
     pub unsafe fn from_raw_parts_mut(ptr: *mut u8, len: usize) -> Self {
         Self {
+            // SAFETY: The caller guarantees `[ptr, ptr + len)` is a valid,
+            // writable framebuffer region for the returned lifetime.
             _raw: unsafe { core::slice::from_raw_parts_mut(ptr, len) },
         }
     }

@@ -8,7 +8,8 @@
 #[used]
 static _SECTION_PLACE_HOLDER: [u8; 0] = [];
 
-// SAFETY: The `__init_array_start` and `__init_array_end` symbols are guaranteed to be valid by the linker.
+// SAFETY: The linker script exports `__init_array_start` and
+// `__init_array_end` as the bounds of the contiguous `.init_array` region.
 unsafe extern "C" {
     fn __init_array_start();
     fn __init_array_end();
@@ -19,15 +20,17 @@ unsafe extern "C" {
 /// # Notes
 /// Caller should ensure that the `.init_array` section will not be disturbed by other sections.
 pub(crate) fn init_cb() {
-    for init_ptr in (__init_array_start as *const () as usize
-        ..__init_array_end as *const () as usize)
-        .step_by(core::mem::size_of::<*const core::ffi::c_void>())
-    {
-        // SAFETY: The `init_ptr` is guaranteed to be valid by the caller.
-        unsafe {
-            core::mem::transmute::<*const core::ffi::c_void, fn()>(
-                *(init_ptr as *const *const core::ffi::c_void),
-            )();
-        }
+    let init_start = __init_array_start as *const () as *const extern "C" fn();
+    let init_end = __init_array_end as *const () as *const extern "C" fn();
+
+    // SAFETY: The linker provides a contiguous `.init_array` range containing
+    // only `extern "C" fn()` entries emitted by `#[register_init]`, so
+    // `[init_start, init_end)` can be viewed as a function-pointer slice.
+    let init_fns = unsafe {
+        core::slice::from_raw_parts(init_start, init_end.offset_from(init_start) as usize)
+    };
+
+    for init_fn in init_fns {
+        init_fn();
     }
 }

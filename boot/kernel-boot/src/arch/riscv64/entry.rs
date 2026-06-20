@@ -35,6 +35,13 @@ fn enable_fp_simd() {
 /// On entry:
 /// - `a0` = hart id
 /// - `a1` = device-tree physical address
+///
+/// # Safety
+///
+/// This is the raw machine-mode or supervisor-mode entry point for the boot
+/// CPU. The caller must provide the architecture-defined register state and a
+/// valid physical execution context for building page tables and enabling
+/// paging exactly once.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
@@ -74,6 +81,7 @@ unsafe extern "C" fn _start() -> ! {
 /// Secondary CPU early boot entry.
 ///
 /// # Safety
+///
 /// On entry:
 /// - `a0` = hart id
 /// - `a1` = top of a pre-allocated physical boot stack
@@ -103,6 +111,11 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
     )
 }
 
+/// # Safety
+///
+/// Must only be entered from [`_start_secondary`] after paging is enabled and
+/// the secondary CPU stack has been adjusted into the kernel virtual address
+/// space.
 pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
@@ -117,6 +130,12 @@ pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
 }
 
 /// Post-MMU entry point for the boot CPU.
+///
+/// # Safety
+///
+/// Must only be entered from [`_start`] after the boot page tables are active,
+/// `kimage_voffset` matches the current image mapping, and `dtb_paddr` still
+/// points to the immutable boot DTB.
 pub unsafe extern "C" fn __primary_switched(
     raw_cpu_id: RawCpuId,
     dtb_paddr: usize,
@@ -127,6 +146,8 @@ pub unsafe extern "C" fn __primary_switched(
         fn _ebss();
     }
 
+    // SAFETY: `_sbss.._ebss` is the linker-defined BSS range for the current
+    // boot image, and early boot is the only writer before Rust static init.
     unsafe {
         let bss_start = _sbss as *const () as usize;
         let bss_end = _ebss as *const () as usize;
@@ -148,6 +169,8 @@ pub unsafe extern "C" fn __primary_switched(
     super::serial::activate_linear_map();
 
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
+    // SAFETY: primary boot CPU performs one-time initialization of the global
+    // boot-info structure after BSS clear and before handing control to the kernel.
     unsafe {
         RISCV_BOOT_INFO = BootInfo::new(BootProtocol::OpenSBI)
             .with_memory_description_root(MemoryDescriptionRoot::DeviceTree)

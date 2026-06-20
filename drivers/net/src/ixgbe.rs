@@ -33,7 +33,13 @@ pub struct IxgbeNic<H: IxgbeHal, const QS: usize, const QN: u16> {
     name: String,
 }
 
+// SAFETY: the hardware device and RX staging queue are each protected by
+// `SpinNoIrq`, and the driver maintains a consistent lock order, so shared
+// references remain synchronized across threads.
 unsafe impl<H: IxgbeHal, const QS: usize, const QN: u16> Sync for IxgbeNic<H, QS, QN> {}
+// SAFETY: ownership may move across threads because all mutable interaction
+// with device state and staged buffers remains serialized by the same
+// `SpinNoIrq` locks.
 unsafe impl<H: IxgbeHal, const QS: usize, const QN: u16> Send for IxgbeNic<H, QS, QN> {}
 
 impl<H: IxgbeHal, const QS: usize, const QN: u16> IxgbeNic<H, QS, QN> {

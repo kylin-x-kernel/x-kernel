@@ -27,6 +27,11 @@ fn enable_fp_simd() {
     }
 }
 
+/// # Safety
+///
+/// This is the raw firmware entry point for the boot CPU. The caller must
+/// provide the architecture-defined boot register state and execute this entry
+/// exactly once for the primary CPU before normal Rust invariants exist.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
@@ -143,6 +148,11 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
     )
 }
 
+/// # Safety
+///
+/// Must only be entered from [`_start_secondary`] after the secondary CPU has
+/// enabled the boot mappings and adjusted its stack into the kernel virtual
+/// address space.
 pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
@@ -162,6 +172,8 @@ fn cmdline_len(cmdline_paddr: usize) -> usize {
     }
     let cmdline = kaddr_layout::p2v(cmdline_paddr) as *const u8;
     let mut len = 0usize;
+    // SAFETY: `cmdline_paddr` comes from firmware handoff; after `p2v` it
+    // points to a readable NUL-terminated command-line buffer during early boot.
     unsafe {
         while len < 4096 {
             if cmdline.add(len).read_volatile() == 0 {
@@ -173,6 +185,11 @@ fn cmdline_len(cmdline_paddr: usize) -> usize {
     len
 }
 
+/// # Safety
+///
+/// Must only be entered from [`_start`] after the boot mappings are active and
+/// `kimage_voffset` matches the current kernel image mapping. The firmware
+/// pointers passed in must still refer to the current boot handoff objects.
 pub unsafe extern "C" fn __primary_switched(
     raw_cpu_id: RawCpuId,
     cmdline_paddr: usize,
@@ -184,6 +201,8 @@ pub unsafe extern "C" fn __primary_switched(
         fn _ebss();
     }
 
+    // SAFETY: `_sbss.._ebss` is the linker-defined BSS range for this boot
+    // image, and early boot is its only writer before runtime init.
     unsafe {
         let bss_start = _sbss as *const () as usize;
         let bss_end = _ebss as *const () as usize;
@@ -195,6 +214,8 @@ pub unsafe extern "C" fn __primary_switched(
 
     let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
     let cmdline_len = cmdline_len(cmdline_paddr);
+    // SAFETY: boot MMU setup cached the DTB/RSDP firmware table addresses in
+    // boot globals that remain valid until kernel handoff.
     let (dtb_paddr, rsdp_paddr) = unsafe { super::mmu::boot_firmware_tables() };
     kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
@@ -204,6 +225,8 @@ pub unsafe extern "C" fn __primary_switched(
         )
     });
     let cpu_id = logical_cpu_id.as_usize();
+    // SAFETY: boot MMU setup cached the EFI memmap physical address in a boot
+    // global that remains valid until kernel handoff.
     let uefi_memmap_paddr = unsafe { super::mmu::boot_uefi_memmap_paddr() };
     let uefi_memmap_vaddr = if uefi_memmap_paddr == 0 {
         0
@@ -224,6 +247,8 @@ pub unsafe extern "C" fn __primary_switched(
     } else {
         HardwareDescriptionRoot::None
     };
+    // SAFETY: primary boot CPU performs one-time initialization of the global
+    // boot-info structure after BSS clear and before kernel entry.
     unsafe {
         LOONGARCH_BOOT_INFO = BootInfo::new(BootProtocol::Uefi)
             .with_memory_description_root(memory_root)

@@ -16,6 +16,9 @@ const ARM_SMCCC_VENDOR_HYP_KVM_MEM_SHARE_FUNC_ID: u32 =
 pub fn psci_hvc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> (usize, usize) {
     let ret0;
     let ret1;
+    // SAFETY: this issues the standard AArch64 HVC trap with SMCCC register
+    // conventions, using only caller-provided argument values and reading back
+    // the returned x0/x1 results.
     unsafe {
         core::arch::asm!(
             "hvc #0",

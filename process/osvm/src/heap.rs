@@ -10,7 +10,15 @@ use bytemuck::{AnyBitPattern, Pod, bytes_of, zeroed};
 
 use crate::{MemError, MemImpl, MemResult, VirtMemIo, read_vm_mem};
 
-/// Load a fixed-length vector from user memory without validating pointer.
+/// Load a fixed-length vector from user memory without imposing any ABI
+/// validity requirement on the copied element type.
+///
+/// # Safety
+///
+/// `p` must denote a user-memory region containing at least `count`
+/// initialized `T` values, and every copied byte pattern must be a valid
+/// initialized `T`. This function does not enforce `AnyBitPattern`; use
+/// [`load_vec`] when a safe typed wrapper is sufficient.
 pub unsafe fn load_vec_unsafe<T>(p: *const T, count: usize) -> MemResult<Vec<T>> {
     let mut v = Vec::with_capacity(count);
     read_vm_mem(p, &mut v.spare_capacity_mut()[..count])?;
@@ -22,7 +30,9 @@ pub unsafe fn load_vec_unsafe<T>(p: *const T, count: usize) -> MemResult<Vec<T>>
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 /// Load a fixed-length vector from user memory.
 pub fn load_vec<T: AnyBitPattern>(p: *const T, count: usize) -> MemResult<Vec<T>> {
-    // SAFETY: The caller must ensure that `p` is valid for reading `count` elements.
+    // SAFETY: `AnyBitPattern` guarantees that any copied byte pattern is a
+    // valid `T`, so the only remaining requirement is a readable `count`
+    // element user range, which `read_vm_mem` checks during the copy.
     unsafe { load_vec_unsafe(p, count) }
 }
 
@@ -53,9 +63,13 @@ pub fn load_vec_until_null<T: Pod>(p: *const T) -> MemResult<Vec<T>> {
         let dst = &mut res.spare_capacity_mut()[..n];
         io.read_mem(base, dst.as_bytes_mut())?;
 
+        // SAFETY: `read_mem` just initialized `dst`, so the borrowed spare-capacity
+        // slice can be viewed as initialized elements for the zero scan.
         let slc = unsafe { dst.assume_init_ref() };
         let idx = slc.iter().position(check_zero);
 
+        // SAFETY: the first `idx.unwrap_or(n)` elements of the reserved tail were
+        // initialized by `read_mem`, so extending the vector length by that count is sound.
         unsafe { res.set_len(res.len() + idx.unwrap_or(n)) };
         if res.len() >= LIMIT / elem_sz {
             return Err(MemError::NameTooLong);

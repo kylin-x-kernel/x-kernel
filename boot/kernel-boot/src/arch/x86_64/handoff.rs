@@ -36,10 +36,14 @@ unsafe fn init_ap_boot_state() {
     const PAGE_SIZE_4K: usize = 0x1000;
     const PTE_PER_PT: usize = 512;
 
+    // SAFETY: AP bootstrap state is initialized once during early boot before
+    // any concurrent access to these static handoff tables exists.
     let gdt_desc = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_gdt_desc) };
     let gdt_paddr = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_gdt) as usize) as u32;
     gdt_desc[2..6].copy_from_slice(&gdt_paddr.to_le_bytes());
 
+    // SAFETY: AP bootstrap state is initialized once during early boot before
+    // any concurrent access to these static handoff tables exists.
     let pml4 = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pml4) };
     let pdpt_low = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_pdpt_low) as usize) as u64;
     let pdpt_high = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_pdpt_high) as usize) as u64;
@@ -49,11 +53,17 @@ unsafe fn init_ap_boot_state() {
     pml4[256] = pdpt_high | 0x3;
     pml4[511] = pdpt_kimage | 0x3;
 
+    // SAFETY: AP bootstrap state is initialized once during early boot before
+    // any concurrent access to these static handoff tables exists.
     let pdpt_kimage = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pdpt_kimage) };
     let pd_kimage = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_pd_kimage) as usize) as u64;
     pdpt_kimage[0] = pd_kimage | 0x3;
 
+    // SAFETY: AP bootstrap state is initialized once during early boot before
+    // any concurrent access to these static handoff tables exists.
     let pd_kimage = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pd_kimage) };
+    // SAFETY: AP bootstrap state is initialized once during early boot before
+    // any concurrent access to these static handoff tables exists.
     let pt_kimage = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pt_kimage) };
     pd_kimage.fill(0);
     pt_kimage.fill(0);
@@ -101,14 +111,23 @@ fn get_cpu_id() -> RawCpuId {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// This is the raw x86_64 handoff entry from the temporary assembly stub. The
+/// caller must provide either a valid Multiboot magic and handoff payload or a
+/// valid [`BOOT_INFO_MAGIC`] payload, and the temporary boot mappings must keep
+/// the referenced data live until control is transferred onward.
 pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg: usize) {
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
         let kimage_voffset = handoff_arg;
         kaddr_layout::set_kimage_voffset(kimage_voffset);
+        // SAFETY: early boot performs the one-time AP bootstrap table setup here.
         unsafe { init_ap_boot_state() };
         let logical_cpu_id = kcpu_id_map::logical_cpu_id(get_cpu_id())
             .unwrap_or_else(|| panic!("missing logical cpu id mapping for boot cpu"));
         let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
+        // SAFETY: primary boot CPU performs one-time initialization of the global
+        // x86 boot-info structure before entering the generic kernel.
         unsafe {
             X86_BOOT_INFO = BootInfo::new(BootProtocol::Multiboot2)
                 .with_memory_description_root(MemoryDescriptionRoot::X86BootProtocol)
@@ -123,19 +142,29 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         let boot_info_ptr = core::ptr::addr_of!(X86_BOOT_INFO) as usize;
         call_kernel_entry!(PRIMARY_KERNEL_ENTRY, boot_info_ptr)
     } else if magic as u64 == BOOT_INFO_MAGIC {
+        // SAFETY: `mbi` is the bootloader-provided pointer to a live `BootInfo`
+        // structure passed in the boot protocol handoff.
         let boot_info = unsafe { &*(mbi as *const BootInfo) };
         assert!(boot_info.is_valid(), "invalid boot info");
         kaddr_layout::set_kimage_voffset(KIMAGE_VADDR - boot_info.kernel_load_paddr);
         kcpu_id_map::init_boot_cpu_id_map(boot_info.rsdp_addr);
+        // SAFETY: early boot performs the one-time AP bootstrap table setup here.
         unsafe { init_ap_boot_state() };
         call_kernel_entry!(PRIMARY_KERNEL_ENTRY, mbi)
     }
     loop {
+        // SAFETY: if boot handoff returns unexpectedly, halting the CPU avoids
+        // executing past the bootstrap path.
         unsafe { core::arch::asm!("hlt", options(nostack, nomem)) }
     }
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// This is the raw secondary-CPU x86_64 handoff entry. The caller must enter
+/// with the temporary AP bootstrap environment established and use the
+/// supported secondary magic for this path.
 pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
         let raw_cpu_id = get_cpu_id();
@@ -148,6 +177,8 @@ pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
         call_kernel_entry!(SECOND_KERNEL_ENTRY, logical_cpu_id)
     }
     loop {
+        // SAFETY: if the secondary-entry handoff returns unexpectedly, halting
+        // the CPU avoids executing past the bootstrap path.
         unsafe { core::arch::asm!("hlt", options(nostack, nomem)) }
     }
 }

@@ -65,6 +65,8 @@ fn for_each_multiboot_region(
     if multiboot_info_ptr == 0 {
         return;
     }
+    // SAFETY: `multiboot_info_ptr` is the bootloader-provided Multiboot2 info
+    // pointer and is only parsed as the immutable boot-information blob here.
     let info = unsafe { BootInformation::load(multiboot_info_ptr as *const BootInformationHeader) }
         .expect("invalid multiboot2 boot information");
     if let Some(mmap) = info.memory_map_tag() {
@@ -150,6 +152,8 @@ fn for_each_uefi_region(
         return;
     }
 
+    // SAFETY: `multiboot_info_ptr` points to the immutable multiboot handoff
+    // structure that contains the EFI memory-map metadata.
     let info = unsafe { ptr::read_unaligned(multiboot_info_ptr as *const UefiMbInfo) };
     if (info.flags & (1 << 6)) == 0 || info.mmap_addr == 0 || info.mmap_length == 0 {
         return;
@@ -158,6 +162,8 @@ fn for_each_uefi_region(
     let mut cursor = info.mmap_addr as usize;
     let end = cursor + info.mmap_length as usize;
     while cursor + core_mem::size_of::<UefiMbMmapEntry>() <= end {
+        // SAFETY: the loop bounds keep `cursor` within the EFI mmap byte range,
+        // and entries are read with `read_unaligned` because firmware layout is packed.
         let entry = unsafe { ptr::read_unaligned(cursor as *const UefiMbMmapEntry) };
         if entry.len != 0 {
             let kind = match entry.typ {

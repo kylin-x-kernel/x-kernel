@@ -36,6 +36,8 @@ pub struct VirtIoGpuDev<H: Hal, T: Transport> {
 // `SpinNoIrq` lock. The inner type is not auto Send/Sync due to PhantomData,
 // but it is safe to transfer across threads and share behind that lock.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoGpuDev<H, T> {}
+// SAFETY: shared references are synchronized by the same `SpinNoIrq` lock, so
+// immutable aliasing across threads does not permit unsynchronized device access.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {

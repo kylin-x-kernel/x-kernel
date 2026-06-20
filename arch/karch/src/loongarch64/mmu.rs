@@ -94,6 +94,8 @@ pub unsafe fn write_kernel_page_table(root: HwPageTableRoot) {
 /// - `PWCH` (CSR 0x1d): <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#page-walk-controller-for-higher-half-address-space>
 #[inline]
 pub unsafe fn write_pwc(pwcl: u32, pwch: u32) {
+    // SAFETY: the caller provides architecture-valid page-walk controller
+    // values, and this only updates the current CPU's PWCL/PWCH CSRs.
     unsafe {
         asm!(
             "csrwr {}, 0x1c",
@@ -127,6 +129,8 @@ pub unsafe fn init_mmu(
     tlbrehi::set_ps(page_size_shift);
     tlbrentry::set_tlbrentry(tlbrentry_addr);
 
+    // SAFETY: the caller provides validated roots and walk configuration for
+    // the current CPU; this is the one-time MMU programming sequence before enabling paging.
     unsafe {
         write_pwc(pwcl, pwch);
         write_kernel_page_table(root);

@@ -14,7 +14,11 @@ use aarch64_cpu::{asm::barrier, registers::*};
 ///
 /// # Safety
 ///
-/// This function is unsafe as it changes the CPU mode.
+/// This function may only run during early boot before normal kernel
+/// execution begins. The caller must ensure the CPU is currently running in
+/// EL2 or EL3 with the expected boot entry register state, that the current
+/// link register names a valid continuation point after the `eret`, and that
+/// switching to EL1 will not strand required stack or code mappings.
 #[unsafe(link_section = ".idmap.text")]
 pub unsafe fn switch_to_el1() {
     let current_sp = aarch64_cpu::registers::SP.get();

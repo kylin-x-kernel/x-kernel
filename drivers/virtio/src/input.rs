@@ -45,6 +45,8 @@ pub struct VirtIoInputDev<H: Hal, T: Transport> {
 // PhantomData, but it is safe to transfer across threads and share behind that
 // lock.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoInputDev<H, T> {}
+// SAFETY: shared references to VirtIoInputDev still funnel all device access
+// through the same `SpinNoIrq` lock, preserving synchronized access.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoInputDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {

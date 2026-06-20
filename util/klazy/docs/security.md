@@ -53,19 +53,24 @@
 
 ## unsafe 代码清单
 
-### 1. `AtomicStatus::new_unchecked`（`util/klazy/src/once.rs:105`）
+### 1. `Status::from_raw`（`util/klazy/src/once.rs:101`）
 
 ```rust
-unsafe fn new_unchecked(inner: u8) -> Self {
-    core::mem::transmute(inner)
+fn from_raw(raw: u8) -> Self {
+    match raw {
+        0x00 => Self::Uninitialized,
+        0x01 => Self::Initializing,
+        0x02 => Self::Ready,
+        0x03 => Self::Failed,
+        _ => unreachable!("invalid Once status: {raw:#x}"),
+    }
 }
 ```
 
 **不变量**：`u8` 值必须是有效的 `Status` 判别值（0x00–0x03）。
 
-**为何安全**：仅从 `AtomicStatus::load` 和 `compare_exchange` 调用，
-两者获取的 `u8` 均源自原子操作，而原子中存储的值最初都是合法的
-`Status` 变体。`AtomicStatus` 封装阻止了任意 `u8` 值被写入。
+**为何安全**：状态解码现在走显式匹配，不再依赖 `transmute`。非法值会
+立刻触发 `unreachable!`，而不是把未验证的判别值重解释成枚举。
 
 ### 2. `Once::get_value_unchecked`（`util/klazy/src/once.rs:419`）
 

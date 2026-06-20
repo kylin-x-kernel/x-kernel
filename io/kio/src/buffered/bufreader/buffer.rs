@@ -135,6 +135,9 @@ impl Buffer {
         #[cfg(borrowedbuf_init)]
         let old_init = self.initialized - self.filled;
         #[cfg(borrowedbuf_init)]
+        // SAFETY: `old_init` tracks the already-initialized prefix within the
+        // spare tail borrowed from `self.buf`, so re-marking that prefix as
+        // initialized is consistent with the backing buffer state.
         unsafe {
             buf.set_init(old_init);
         }

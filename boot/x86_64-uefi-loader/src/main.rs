@@ -103,6 +103,8 @@ fn efi_main() -> Status {
     info!("boot info buffer = {:#x}", boot_info_buf);
 
     info!("exiting boot services...");
+    // SAFETY: the loader is finished with UEFI boot services at this point and
+    // immediately consumes the returned final memory map for handoff metadata.
     let mmap = unsafe { uefi::boot::exit_boot_services(None) };
 
     let protocol_info_addr =
@@ -114,6 +116,9 @@ fn efi_main() -> Status {
             }
         };
 
+    // SAFETY: `boot_info_buf` is a freshly allocated bootloader-owned page, and
+    // writing one fully initialized `BootInfo` value initializes that page for
+    // the immediate kernel handoff.
     unsafe {
         ptr::write(
             boot_info_buf as *mut BootInfo,
@@ -131,6 +136,9 @@ fn efi_main() -> Status {
 
     info!("jumping to kernel stub...");
 
+    // SAFETY: `pml4` names the freshly built temporary boot page tables, and
+    // the loaded kernel entry, argument block, and boot stack were all prepared
+    // to remain mapped across the CR3 switch and immediate control transfer.
     unsafe {
         switch_page_table(pml4, cbit_mask);
         jump_to_kernel(

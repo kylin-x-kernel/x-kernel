@@ -302,6 +302,8 @@ impl CloneRequest {
         if self.flags.contains(CloneFlags::CHILD_CLEARTID) {
             thr.set_clear_child_tid(self.child_tid);
         }
+        // SAFETY: `thr` is the freshly constructed thread implementation for
+        // `new_task`, so converting it into the task extension is the intended one-time handoff.
         *new_task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
 
         let task = spawn_task(new_task);

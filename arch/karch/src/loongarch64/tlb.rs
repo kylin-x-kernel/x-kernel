@@ -14,6 +14,8 @@ use memaddr::VirtAddr;
 /// entry that maps the given virtual address.
 #[inline]
 pub fn flush_tlb(vaddr: Option<VirtAddr>) {
+    // SAFETY: these instructions operate only on the current CPU's TLB state;
+    // the optional virtual address is passed verbatim to the architected `invtlb`.
     unsafe {
         if let Some(vaddr) = vaddr {
             // <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#_dbar>

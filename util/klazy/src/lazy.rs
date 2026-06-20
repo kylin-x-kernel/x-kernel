@@ -88,6 +88,9 @@ impl<T: fmt::Debug, F> fmt::Debug for Lazy<T, F> {
 // we do create a `&mut Option<F>` in `force`, but this is
 // properly synchronized, so it only happens once
 // so it also does not contribute to this impl.
+// SAFETY: `Lazy` only shares access to the initialized `T`; access to the
+// stored initializer is internally synchronized so `&Lazy<T, F>` never creates
+// unsynchronized shared access to `F`.
 unsafe impl<T, F: Send> Sync for Lazy<T, F> where Once<T>: Sync {}
 // auto-derived `Send` impl is OK.
 

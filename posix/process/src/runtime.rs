@@ -159,6 +159,8 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> 
 fn exit_robust_list(head: *const RobustListHead) {
     let mut limit = ROBUST_LIST_LIMIT;
 
+    // SAFETY: `head` comes from the task's registered robust-list head, and we
+    // only take the address of its embedded sentinel field for list termination checks.
     let end_ptr = unsafe { &raw const (*head).list };
     let Some(head) = head.read_vm().ok() else {
         return;

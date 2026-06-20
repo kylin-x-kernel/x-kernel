@@ -375,8 +375,16 @@ impl AddrSpace {
     /// * `start` - The start virtual address to read.
     /// * `buf` - The buffer to store the data.
     pub fn read(&self, start: VirtAddr, buf: &mut [u8]) -> KResult {
-        self.process_area_data(start, buf.len(), |src, offset, read_size| unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr().add(offset), read_size);
+        self.process_area_data(start, buf.len(), |src, offset, read_size| {
+            // SAFETY: `process_area_data` bounds-checks the source region, and
+            // `offset..offset + read_size` lies within the destination slice.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr(),
+                    buf.as_mut_ptr().add(offset),
+                    read_size,
+                );
+            }
         })
     }
 
@@ -387,8 +395,16 @@ impl AddrSpace {
     /// * `start_vaddr` - The start virtual address to write.
     /// * `buf` - The buffer to write to the address space.
     pub fn write(&self, start: VirtAddr, buf: &[u8]) -> KResult {
-        self.process_area_data(start, buf.len(), |dst, offset, write_size| unsafe {
-            core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), dst.as_mut_ptr(), write_size);
+        self.process_area_data(start, buf.len(), |dst, offset, write_size| {
+            // SAFETY: `process_area_data` bounds-checks the destination region,
+            // and `offset..offset + write_size` lies within the source slice.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf.as_ptr().add(offset),
+                    dst.as_mut_ptr(),
+                    write_size,
+                );
+            }
         })
     }
 

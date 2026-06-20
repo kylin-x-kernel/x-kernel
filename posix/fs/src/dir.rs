@@ -108,16 +108,20 @@ impl DirBuffer {
         }
 
         // SAFETY: Bounds were checked above and the entry layout matches
-        // `linux_dirent64`.
+        // `linux_dirent64`. The byte buffer may not satisfy `linux_dirent64`
+        // alignment at arbitrary offsets, so the header write must be
+        // unaligned.
         unsafe {
             let entry_ptr = self.buf.as_mut_ptr().add(self.offset);
-            entry_ptr.cast::<linux_dirent64>().write(linux_dirent64 {
-                d_ino,
-                d_off,
-                d_reclen: len as _,
-                d_type: d_type as _,
-                d_name: Default::default(),
-            });
+            entry_ptr
+                .cast::<linux_dirent64>()
+                .write_unaligned(linux_dirent64 {
+                    d_ino,
+                    d_off,
+                    d_reclen: len as _,
+                    d_type: d_type as _,
+                    d_name: Default::default(),
+                });
 
             let name_ptr = entry_ptr.add(NAME_OFFSET);
             name_ptr.copy_from_nonoverlapping(name.as_ptr(), name.len());

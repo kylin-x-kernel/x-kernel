@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::{
     marker::PhantomData,
-    mem::{MaybeUninit, size_of, transmute},
+    mem::{MaybeUninit, size_of},
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -259,6 +259,8 @@ impl TestUserBuffer {
             .alloc_pages(num_pages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
             .map_err(|_| KError::NoMemory)?;
 
+        // SAFETY: `kernel_va` names a freshly allocated kernel mapping of
+        // `mapped_size` bytes that may be zero-initialized in place.
         unsafe {
             core::ptr::write_bytes(kernel_va as *mut u8, 0, mapped_size);
         }
@@ -303,10 +305,13 @@ impl TestUserBuffer {
             return Err(KError::InvalidInput);
         }
         let mut out = vec![0u8; len];
-        read_vm_mem(self.user_addr as *const u8, unsafe {
-            transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut out[..])
-        })
-        .map_err(KError::from)?;
+        // SAFETY: `MaybeUninit<u8>` has the same layout as `u8`. `out` owns a
+        // valid `len`-byte buffer, so reborrowing its backing storage as
+        // `MaybeUninit<u8>` is sound for filling it via `read_vm_mem`.
+        let out_uninit = unsafe {
+            core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<MaybeUninit<u8>>(), len)
+        };
+        read_vm_mem(self.user_addr as *const u8, out_uninit).map_err(KError::from)?;
         Ok(out)
     }
 
@@ -316,6 +321,8 @@ impl TestUserBuffer {
 
     pub fn read_u64(&self) -> KResult<u64> {
         let mut out = 0u64;
+        // SAFETY: `out` is a live `u64`, so its storage may be reborrowed as a
+        // single-element `MaybeUninit<u64>` slice for `read_vm_mem`.
         let out_slice = unsafe {
             core::slice::from_raw_parts_mut((&mut out as *mut u64).cast::<MaybeUninit<u64>>(), 1)
         };
@@ -338,11 +345,15 @@ impl TestUserBuffer {
 
     pub fn as_user_slice(&mut self, len: usize) -> &mut [u8] {
         assert!(len <= self.len);
+        // SAFETY: `user_addr..user_addr + len` lies within the mapped test buffer
+        // and `&mut self` guarantees exclusive access.
         unsafe { core::slice::from_raw_parts_mut(self.user_addr as *mut u8, len) }
     }
 
     pub fn as_user_ref<T>(&mut self) -> &mut T {
         assert!(size_of::<T>() <= self.len);
+        // SAFETY: the mapped test buffer is at least `size_of::<T>()` bytes and
+        // `&mut self` guarantees exclusive access to that region.
         unsafe { &mut *(self.user_addr as *mut T) }
     }
 }
@@ -388,6 +399,8 @@ impl<T> TestUserValue<T> {
     where
         T: Copy,
     {
+        // SAFETY: the mapped test buffer contains a previously initialized `T`
+        // value written through the same typed view.
         unsafe { self.as_user_ptr().read() }
     }
 }
@@ -423,10 +436,14 @@ impl<T, const N: usize> TestUserArray<T, N> {
     }
 
     pub fn as_user_slice(&mut self) -> &mut [T] {
+        // SAFETY: the mapped buffer is sized for `[T; N]` and `&mut self`
+        // guarantees exclusive access to that region.
         unsafe { core::slice::from_raw_parts_mut(self.as_user_ptr(), N) }
     }
 
     pub fn as_user_ref(&mut self) -> &mut [T; N] {
+        // SAFETY: the mapped buffer is sized for `[T; N]` and `&mut self`
+        // guarantees exclusive access to that region.
         unsafe { &mut *(self.as_user_ptr() as *mut [T; N]) }
     }
 
@@ -445,6 +462,8 @@ impl<T, const N: usize> TestUserArray<T, N> {
     where
         T: Copy,
     {
+        // SAFETY: the mapped buffer contains a previously initialized `[T; N]`
+        // value written through the same typed view.
         unsafe { (self.as_user_ptr() as *const [T; N]).read() }
     }
 }
@@ -453,6 +472,8 @@ impl<T, const N: usize> Deref for TestUserArray<T, N> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
+        // SAFETY: the mapped buffer is sized for `N` elements and remains valid
+        // for shared access for the lifetime of `self`.
         unsafe { core::slice::from_raw_parts(self.as_user_ptr(), N) }
     }
 }

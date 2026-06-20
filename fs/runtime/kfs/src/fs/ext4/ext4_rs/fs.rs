@@ -4,7 +4,6 @@
 
 //! Ext4 filesystem adapter (ext4_rs backend).
 use alloc::sync::Arc;
-use core::cell::OnceCell;
 
 use ext4_rs::Ext4;
 use kclass::{BlockDeviceImpl as KBlockDevice, ClassDevice};
@@ -22,7 +21,7 @@ const EXT4_ROOT_INODE: u32 = 2;
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4>,
     inode_cache: InodeCache,
-    root_dir: OnceCell<DirEntry>,
+    root_dir: Mutex<Option<DirEntry>>,
 }
 
 impl Ext4Filesystem {
@@ -32,9 +31,9 @@ impl Ext4Filesystem {
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),
             inode_cache: InodeCache::new(),
-            root_dir: OnceCell::new(),
+            root_dir: Mutex::new(None),
         });
-        let _ = fs.root_dir.set(DirEntry::new_dir(
+        *fs.root_dir.lock() = Some(DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), EXT4_ROOT_INODE, Some(this), None)),
             Reference::root(),
         ));
@@ -67,17 +66,13 @@ impl Ext4Filesystem {
     }
 }
 
-unsafe impl Send for Ext4Filesystem {}
-
-unsafe impl Sync for Ext4Filesystem {}
-
 impl SuperBlockOperations for Ext4Filesystem {
     fn name(&self) -> &str {
         "ext4"
     }
 
     fn root_dentry(&self) -> DirEntry {
-        self.root_dir.get().unwrap().clone()
+        self.root_dir.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {

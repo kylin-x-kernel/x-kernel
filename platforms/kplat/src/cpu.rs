@@ -28,6 +28,9 @@ pub fn is_bsp() -> bool {
 pub fn boot_cpu_init(id: LogicalCpuId) {
     percpu::init_in_place().expect("failed to initialize per-CPU data areas");
     percpu::init_percpu_reg(id.as_usize());
+    // SAFETY: `init_percpu_reg` has already installed the current CPU's percpu
+    // base, so these raw writes target this CPU's own initialized slots during
+    // single-threaded CPU bring-up.
     unsafe {
         KPCB_ID.write_current_raw(id.as_usize());
         KPCB_BSP.write_current_raw(true);
@@ -38,6 +41,9 @@ pub fn boot_cpu_init(id: LogicalCpuId) {
 /// Initializes per-CPU state for an application processor (SMP only).
 pub fn ap_cpu_init(id: LogicalCpuId) {
     percpu::init_percpu_reg(id.as_usize());
+    // SAFETY: `init_percpu_reg` has already installed the current CPU's percpu
+    // base, so these raw writes target this CPU's own initialized slots during
+    // that CPU's local bring-up path.
     unsafe {
         KPCB_ID.write_current_raw(id.as_usize());
         KPCB_BSP.write_current_raw(false);

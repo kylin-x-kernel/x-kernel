@@ -46,6 +46,8 @@ fn with_uart_mut<R>(f: impl FnOnce(&mut MmioSerialPort) -> R) -> R {
 
 pub fn init(uart_base: VirtAddr) {
     UART.init_once(SpinNoIrq::new({
+        // SAFETY: `uart_base` comes from a successful `iomap_device` of the
+        // configured NS16550 MMIO window, so it names the UART register block.
         let mut uart = unsafe { MmioSerialPort::new(uart_base.as_usize()) };
         uart.init();
         uart

@@ -460,6 +460,8 @@ impl GlobalAllocator {
     }
 }
 
+// SAFETY: `GlobalAllocator` routes all allocations through its internal locked
+// allocators and upholds the `GlobalAlloc` contract for returned pointers.
 unsafe impl GlobalAlloc for GlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let allocate_memory = || {

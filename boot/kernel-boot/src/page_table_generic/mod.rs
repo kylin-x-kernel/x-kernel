@@ -45,13 +45,17 @@ pub trait Access {
     ///
     /// # Safety
     ///
-    /// should be deallocated by [`dealloc`].
+    /// The returned physical address must name writable storage for `layout`
+    /// with the required alignment, and it must later be released exactly once
+    /// via [`dealloc`] using the same `layout`.
     unsafe fn alloc(&mut self, layout: Layout) -> Option<PhysAddr>;
     /// dealloc memory for a page table entry.
     ///
     /// # Safety
     ///
-    /// ptr must be allocated by [`alloc`].
+    /// `ptr` must have been returned by [`alloc`] on this same allocator
+    /// instance for the same `layout`, and it must not have been deallocated
+    /// already.
     unsafe fn dealloc(&mut self, ptr: PhysAddr, layout: Layout);
 
     fn phys_to_mut(&self, phys: PhysAddr) -> *mut u8;
@@ -74,4 +78,3 @@ pub enum PagingError {
 
 /// The specialized `Result` type for page table operations.
 pub type PagingResult<T = ()> = Result<T, PagingError>;
-

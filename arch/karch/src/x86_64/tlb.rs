@@ -14,8 +14,10 @@ use x86::tlb;
 #[inline]
 pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     if let Some(vaddr) = vaddr {
+        // SAFETY: invalidates the TLB entry corresponding to the supplied virtual address.
         unsafe { tlb::flush(vaddr.into()) }
     } else {
+        // SAFETY: requests a full local TLB invalidation.
         unsafe { tlb::flush_all() }
     }
 }

@@ -193,6 +193,8 @@ impl<'a> RawEfiContext<'a> {
     /// `ptr` must point to a readable EFI system table and its configuration
     /// table array for the full lifetime of the returned view.
     pub unsafe fn from_ptr(ptr: *const SystemTable) -> Result<Self, ParseError> {
+        // SAFETY: The caller guarantees `ptr` points to a readable EFI system
+        // table for the lifetime of the returned view.
         let system_table = unsafe { ptr.as_ref() }.ok_or(ParseError::NullPointer)?;
         if system_table.header.signature != SystemTable::SIGNATURE
             || usize::try_from(system_table.header.size).ok() < Some(size_of::<SystemTable>())
@@ -246,6 +248,8 @@ impl<'a> RawEfiContext<'a> {
             return Err(ParseError::InvalidConfigurationTable);
         }
 
+        // SAFETY: The caller guarantees `map` returns a readable configuration
+        // table array with `configuration_table_entries` elements.
         Ok(unsafe { slice::from_raw_parts(table_ptr, self.configuration_table_entries) })
     }
 
@@ -258,6 +262,8 @@ impl<'a> RawEfiContext<'a> {
         guid: Guid,
         map: impl FnOnce(usize) -> *const ConfigurationTable,
     ) -> Result<Option<usize>, ParseError> {
+        // SAFETY: The caller guarantees `map` yields a readable configuration
+        // table array, matching the contract of `configuration_tables`.
         Ok(unsafe { self.configuration_tables(map) }?
             .iter()
             .find(|entry| entry.vendor_guid == guid)
@@ -275,6 +281,8 @@ impl<'a> RawEfiContext<'a> {
         &self,
         map: impl FnOnce(usize) -> *const ConfigurationTable,
     ) -> Result<Option<usize>, ParseError> {
+        // SAFETY: The caller guarantees `map` returns a readable EFI
+        // configuration table array.
         unsafe { self.config_table(LINUX_EFI_BOOT_MEMMAP_GUID, map) }
     }
 
@@ -286,6 +294,8 @@ impl<'a> RawEfiContext<'a> {
         &self,
         map: impl FnOnce(usize) -> *const ConfigurationTable,
     ) -> Result<Option<usize>, ParseError> {
+        // SAFETY: The caller guarantees `map` returns a readable EFI
+        // configuration table array.
         unsafe { self.config_table(DEVICE_TREE_GUID, map) }
     }
 
@@ -297,9 +307,13 @@ impl<'a> RawEfiContext<'a> {
         &self,
         map: impl Fn(usize) -> *const ConfigurationTable + Copy,
     ) -> Result<Option<usize>, ParseError> {
+        // SAFETY: The caller guarantees `map` returns a readable EFI
+        // configuration table array.
         if let Some(rsdp) = unsafe { self.config_table(ACPI_20_TABLE_GUID, map) }? {
             return Ok(Some(rsdp));
         }
+        // SAFETY: The caller guarantees `map` returns a readable EFI
+        // configuration table array.
         unsafe { self.config_table(ACPI_TABLE_GUID, map) }
     }
 }
@@ -326,6 +340,8 @@ impl<'a> BootMemmapRef<'a> {
     /// `ptr` must point to a readable Linux EFI boot memmap header followed by
     /// `map_size` bytes of descriptor data.
     pub unsafe fn from_ptr(ptr: *const LinuxEfiBootMemmapHeader) -> Result<Self, ParseError> {
+        // SAFETY: The caller guarantees `ptr` points to a readable boot memmap
+        // header for the lifetime of the returned view.
         let header = unsafe { ptr.as_ref() }.ok_or(ParseError::NullPointer)?;
         if header.desc_size < size_of::<MemoryDescriptor>()
             || header.buff_size < header.map_size
@@ -334,10 +350,14 @@ impl<'a> BootMemmapRef<'a> {
             return Err(ParseError::InvalidBootMemmap);
         }
 
+        // SAFETY: `ptr` points to the boot memmap header, so advancing by the
+        // header size reaches the first descriptor byte in the same blob.
         let desc_ptr = unsafe { ptr.cast::<u8>().add(size_of::<LinuxEfiBootMemmapHeader>()) };
         let descriptors = if header.map_size == 0 {
             &[]
         } else {
+            // SAFETY: `desc_ptr` points to the descriptor payload immediately
+            // following the validated header, and `map_size` bounds that payload.
             unsafe { slice::from_raw_parts(desc_ptr, header.map_size) }
         };
 
@@ -368,7 +388,7 @@ pub struct BootMemmapIter<'a> {
 }
 
 impl<'a> Iterator for BootMemmapIter<'a> {
-    type Item = MemoryDescriptorView<'a>;
+    type Item = MemoryDescriptorView;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining.is_empty() {
@@ -377,20 +397,24 @@ impl<'a> Iterator for BootMemmapIter<'a> {
 
         let desc_bytes = self.remaining.get(..self.desc_size)?;
         self.remaining = self.remaining.get(self.desc_size..)?;
-        let descriptor = unsafe { &*desc_bytes.as_ptr().cast::<MemoryDescriptor>() };
+        // SAFETY: Each chunk is `desc_size >= size_of::<MemoryDescriptor>()`
+        // bytes long. `read_unaligned` copies the descriptor out without
+        // creating an aligned reference into the raw byte blob.
+        let descriptor =
+            unsafe { ptr::read_unaligned(desc_bytes.as_ptr().cast::<MemoryDescriptor>()) };
         Some(MemoryDescriptorView { descriptor })
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct MemoryDescriptorView<'a> {
-    descriptor: &'a MemoryDescriptor,
+pub struct MemoryDescriptorView {
+    descriptor: MemoryDescriptor,
 }
 
-impl<'a> MemoryDescriptorView<'a> {
+impl MemoryDescriptorView {
     #[must_use]
-    pub const fn descriptor(&self) -> &'a MemoryDescriptor {
-        self.descriptor
+    pub const fn descriptor(&self) -> &MemoryDescriptor {
+        &self.descriptor
     }
 
     #[must_use]
@@ -578,9 +602,7 @@ mod tests {
             page_count: 1,
             att: 0,
         };
-        let view = MemoryDescriptorView {
-            descriptor: &descriptor,
-        };
+        let view = MemoryDescriptorView { descriptor };
         assert!(!view.is_linear_mapping_candidate());
         assert_eq!(view.type_name(), "mmio");
     }

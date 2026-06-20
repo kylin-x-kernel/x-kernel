@@ -89,6 +89,8 @@ pub fn dtb_reserved_range(dtb_paddr: usize, p2v: fn(PhysAddr) -> VirtAddr) -> Op
     }
 
     let dtb_va = p2v(PhysAddr::from_usize(dtb_paddr));
+    // SAFETY: `dtb_va` is the kernel virtual mapping of the bootloader-provided
+    // DTB blob, so reading its total-size header is valid here.
     let dtb_size = unsafe { dtb_total_size_from_ptr(dtb_va.as_usize() as *const u8) }.ok()?;
     let dtb_base = dtb_paddr.align_down_4k();
     let dtb_end = dtb_paddr.checked_add(dtb_size)?.align_up_4k();

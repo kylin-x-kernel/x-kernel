@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::mem::MaybeUninit;
-
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct EarlyBootArgs {
@@ -22,7 +20,19 @@ pub struct EarlyBootArgs {
 
 impl EarlyBootArgs {
     pub const fn new() -> Self {
-        unsafe { MaybeUninit::zeroed().assume_init() }
+        Self {
+            args: [0; 4],
+            virt_entry: core::ptr::null_mut(),
+            kimage_addr_lma: core::ptr::null_mut(),
+            kimage_addr_vma: core::ptr::null_mut(),
+            stack_top_lma: core::ptr::null_mut(),
+            stack_top_vma: core::ptr::null_mut(),
+            kcode_end: core::ptr::null_mut(),
+            el: 0,
+            kliner_offset: 0,
+            page_size: 0,
+            debug: 0,
+        }
     }
 
     pub fn debug(&self) -> bool {

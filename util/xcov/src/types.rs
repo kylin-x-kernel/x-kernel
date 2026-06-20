@@ -189,6 +189,8 @@ pub const fn get_num_padding_bytes(size_bytes: u64) -> u8 {
 // SAFETY: These types contain raw pointers that are only read by the
 // profiling runtime. The runtime operates in single-threaded contexts.
 unsafe impl Sync for LlvmProfileData {}
+// SAFETY: `ValueProfNode` instances live in runtime-managed storage and are
+// synchronized externally by the profiling runtime's update protocol.
 unsafe impl Sync for ValueProfNode {}
 
 #[cfg(test)]

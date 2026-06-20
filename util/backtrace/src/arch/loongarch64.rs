@@ -17,6 +17,8 @@ impl ArchBacktrace for LoongArch64 {
 
     fn current_fp() -> usize {
         let fp: usize;
+        // SAFETY: this reads the current LoongArch64 frame-pointer register
+        // into a general-purpose output without touching memory or the stack.
         unsafe { asm!("move {}, $fp", out(reg) fp, options(nomem, nostack)) };
         fp
     }

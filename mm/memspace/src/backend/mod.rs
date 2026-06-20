@@ -39,6 +39,8 @@ pub fn alloc_frame(zeroed: bool, size: PageSize) -> KResult<PhysAddr> {
             .map_err(|_| KError::NoMemory)?,
     );
     if zeroed {
+        // SAFETY: `vaddr` names a freshly allocated virtual region of `pgsize`
+        // bytes, so zero-filling that range is valid.
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, pgsize) };
     }
     let paddr = v2p(vaddr);

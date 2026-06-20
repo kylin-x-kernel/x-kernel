@@ -4,7 +4,7 @@
 
 //! POSIX signal ABI types.
 
-use core::{ffi::c_ulong, mem};
+use core::ffi::c_ulong;
 
 use kerrno::{KError, KResult};
 use linux_raw_sys::general::{
@@ -29,15 +29,15 @@ pub fn check_sigset_size(size: usize) -> KResult<()> {
 
 impl From<k_sigset> for kernel_sigset_t {
     fn from(value: k_sigset) -> Self {
-        // SAFETY: `kernel_sigset_t` has the same layout as `[c_ulong; 1]`.
-        unsafe { mem::transmute::<u64, kernel_sigset_t>(value.0) }
+        Self {
+            sig: [value.0 as c_ulong],
+        }
     }
 }
 
 impl From<kernel_sigset_t> for k_sigset {
     fn from(value: kernel_sigset_t) -> Self {
-        // SAFETY: `kernel_sigset_t` has the same layout as `[c_ulong; 1]`.
-        Self(unsafe { mem::transmute::<kernel_sigset_t, u64>(value) })
+        Self(value.sig[0])
     }
 }
 
@@ -62,14 +62,18 @@ pub struct k_siginfo(pub siginfo_t);
 #[allow(non_camel_case_types)]
 pub type k_sigval = sigval_t;
 
+// SAFETY: `sigval_t` is an ABI POD type copied verbatim at the syscall boundary.
 unsafe impl UserRead for k_sigval {}
+// SAFETY: `sigval_t` is an ABI POD type copied verbatim at the syscall boundary.
 unsafe impl UserWrite for k_sigval {}
 
 /// A raw `sigevent` carrier used at the syscall boundary.
 #[allow(non_camel_case_types)]
 pub type k_sigevent = sigevent;
 
+// SAFETY: `sigevent` is an ABI POD type copied verbatim at the syscall boundary.
 unsafe impl UserRead for k_sigevent {}
+// SAFETY: `sigevent` is an ABI POD type copied verbatim at the syscall boundary.
 unsafe impl UserWrite for k_sigevent {}
 
 /// A raw `sigaltstack` carrier used at the syscall boundary.

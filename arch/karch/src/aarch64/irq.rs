@@ -54,6 +54,8 @@ pub fn irq_enabled() -> bool {
 #[inline]
 pub fn save_irq_and_disable() -> usize {
     let flags: usize;
+    // SAFETY: Reading `daif` and setting the IRQ mask bit are standard local
+    // CPU interrupt-control operations.
     unsafe {
         asm!("mrs {}, daif", out(reg) flags, options(nomem, nostack, preserves_flags));
         asm!("msr daifset, #2", options(nomem, nostack));
@@ -65,6 +67,8 @@ pub fn save_irq_and_disable() -> usize {
 /// [`save_irq_and_disable`].
 #[inline]
 pub fn restore_irq(flags: usize) {
+    // SAFETY: `flags` must come from a previous `save_irq_and_disable` call and
+    // therefore encodes a restorable DAIF state for the current CPU.
     unsafe {
         asm!("msr daif, {}", in(reg) flags, options(nomem, nostack));
     }
