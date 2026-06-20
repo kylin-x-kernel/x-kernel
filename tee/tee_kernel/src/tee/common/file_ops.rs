@@ -2,12 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
 use kfs::{File, FileFlags, OpenOptions};
-use kio::{Seek, SeekFrom};
 use ksync::RwLock;
 use kthread;
 use kvfs::{NodePermission, VfsError};
@@ -16,15 +15,11 @@ use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
 
-use crate::{
-    file::{resolve_at, with_fs},
-    tee::TeeResult,
-};
+use crate::{file::with_fs, tee::TeeResult};
 
-pub const FS_MODE_644: u32 = (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+pub const FS_MODE_644: u32 = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 pub const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR | O_SYNC;
 pub const FS_OFLAG_RW: u32 = O_RDWR | O_SYNC;
-pub const FS_OFLAG_RW_TRUNC: u32 = O_RDWR | O_TRUNC | O_SYNC;
 
 lazy_static! {
     /// Global open-object table for TEE file descriptors.
@@ -69,16 +64,6 @@ fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32))
 }
 
 pub trait TeeFileLike {
-    /// read data from file to buffer
-    ///
-    /// # Arguments
-    /// * `buf` - buffer to store read data
-    ///
-    /// # Returns
-    /// * `Ok(usize)` - number of bytes read
-    /// * `Err(TEE_ERROR_GENERIC)` - error
-    fn read(&mut self, buf: &mut [u8]) -> TeeResult<usize>;
-
     /// read data from file to buffer at offset
     ///
     /// # Arguments
@@ -90,16 +75,6 @@ pub trait TeeFileLike {
     /// * `Err(TEE_ERROR_GENERIC)` - error
     fn pread(&self, buf: &mut [u8], offset: usize) -> TeeResult<usize>;
 
-    /// write data to file
-    ///
-    /// # Arguments
-    /// * `buf` - data to write
-    ///
-    /// # Returns
-    /// * `Ok(usize)` - number of bytes written
-    /// * `Err(TEE_ERROR_GENERIC)` - error
-    fn write(&mut self, buf: &[u8]) -> TeeResult<usize>;
-
     /// write data to file at offset
     ///
     /// # Arguments
@@ -110,16 +85,6 @@ pub trait TeeFileLike {
     /// * `Ok(usize)` - number of bytes written
     /// * `Err(TEE_ERROR_GENERIC)` - error
     fn pwrite(&self, buf: &[u8], offset: usize) -> TeeResult<usize>;
-
-    /// move file read write pointer to offset
-    ///
-    /// # Arguments
-    /// * `pos` - `SeekFrom` enum, specify the starting position and offset of the search
-    ///
-    /// # Returns
-    /// * `Ok(u64)` - new pointer position (number of bytes from the beginning of the file)
-    /// * `Err(TEE_ERROR_GENERIC)` - error
-    fn seek(&mut self, pos: SeekFrom) -> TeeResult<u64>;
 
     /// truncate file to length
     ///
@@ -192,11 +157,6 @@ impl FileVariant {
         Ok(Self { fd })
     }
 
-    /// get raw file descriptor
-    pub fn as_raw_fd(&self) -> isize {
-        self.fd
-    }
-
     /// remove file
     ///
     /// # Arguments
@@ -218,35 +178,6 @@ impl FileVariant {
                 error!("FileVariant::remove_file failed: {:?}", e);
                 Err(TEE_ERROR_GENERIC)
             }
-        }
-    }
-
-    /// remove file
-    ///
-    /// # Arguments
-    /// * `path` - the path of the file to remove
-    /// # Returns
-    /// * `TeeResult` - the result of the operation
-    pub fn remove_dir(path: &str) -> TeeResult {
-        tee_debug!("FileVariant::remove dir with path: {}", path);
-        with_fs(AT_FDCWD, |fs| fs.remove_dir(path))
-            .inspect_err(|e| error!("remove dir failed: {:?}", e))
-            .map_err(|_| TEE_ERROR_GENERIC)?;
-
-        Ok(())
-    }
-
-    /// check if file exists
-    ///
-    /// # Arguments
-    /// * `path` - the path of the file to check
-    /// # Returns
-    /// * `bool` - true if file exists, false otherwise
-    pub fn exists(path: &str) -> bool {
-        let loc = resolve_at(AT_FDCWD, Some(path), AT_EMPTY_PATH);
-        match loc {
-            Ok(loc) => loc.stat().is_ok(),
-            Err(_) => false,
         }
     }
 
@@ -284,14 +215,6 @@ impl FileVariant {
 }
 
 impl TeeFileLike for FileVariant {
-    fn read(&mut self, buf: &mut [u8]) -> TeeResult<usize> {
-        with_file(self, |file| {
-            file.read(buf)
-                .inspect_err(|e| error!("read from file failed: {:?}", e))
-                .map_err(|_| TEE_ERROR_GENERIC)
-        })
-    }
-
     fn pread(&self, buf: &mut [u8], offset: usize) -> TeeResult<usize> {
         tee_debug!(
             "FileVariant::pread = fd: {}, offset: 0x{:X?}, buf_len: 0x{:X?}",
@@ -302,20 +225,6 @@ impl TeeFileLike for FileVariant {
         with_file(self, |file| {
             file.read_at(buf, offset as _)
                 .inspect_err(|e| error!("read_at from file failed: {:?}", e))
-                .map_err(|_| TEE_ERROR_GENERIC)
-        })
-    }
-
-    fn write(&mut self, buf: &[u8]) -> TeeResult<usize> {
-        tee_debug!(
-            "FileVariant::write = fd: {}, buf: {:x?}, len: {}",
-            self.fd,
-            buf,
-            buf.len()
-        );
-        with_file(self, |file| {
-            file.write(buf)
-                .inspect_err(|e| error!("write to file failed: {:?}", e))
                 .map_err(|_| TEE_ERROR_GENERIC)
         })
     }
@@ -334,15 +243,6 @@ impl TeeFileLike for FileVariant {
                 .map_err(|_| TEE_ERROR_GENERIC)?;
 
             Ok(len)
-        })
-    }
-
-    fn seek(&mut self, pos: SeekFrom) -> TeeResult<u64> {
-        with_file(self, |file| {
-            file.as_ref()
-                .seek(pos)
-                .inspect_err(|e| error!("seek to file failed: {:?}", e))
-                .map_err(|_| TEE_ERROR_GENERIC)
         })
     }
 
@@ -374,42 +274,44 @@ impl TeeFileLike for FileVariant {
     }
 }
 
-pub fn tee_get_file_size(path: &str) -> TeeResult<usize> {
-    let loc = resolve_at(AT_FDCWD, Some(path), 0)
-        .inspect_err(|e| error!("resolve_at failed: {:?}", e))
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-    Ok(loc.stat().map_err(|_| TEE_ERROR_GENERIC)?.size as usize)
-}
-
-pub fn file_ops_test() {
-    let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT), 0o644);
-    assert!(fd.is_ok());
-    let mut fd = fd.unwrap();
-
-    // // write 1024 bytes to file
-    let buf = [0xAA; 8];
-    let _n = fd.write(&buf).expect("Failed to write file");
-}
-
 #[unittest::mod_test]
 pub mod tests_file_ops {
-    use rand::{Rng, distr::Alphanumeric};
     use unittest::{assert, assert_eq};
 
     use super::*;
 
+    fn file_exists(path: &str) -> bool {
+        use crate::file::resolve_at;
+
+        let loc = resolve_at(AT_FDCWD, Some(path), AT_EMPTY_PATH);
+        matches!(loc, Ok(loc) if loc.stat().is_ok())
+    }
+
+    fn remove_dir(path: &str) -> TeeResult {
+        with_fs(AT_FDCWD, |fs| fs.remove_dir(path))
+            .inspect_err(|e| error!("remove dir failed: {:?}", e))
+            .map_err(|_| TEE_ERROR_GENERIC)
+    }
+
+    fn tee_get_file_size(path: &str) -> TeeResult<usize> {
+        use crate::file::resolve_at;
+
+        let loc = resolve_at(AT_FDCWD, Some(path), 0)
+            .inspect_err(|e| error!("resolve_at failed: {:?}", e))
+            .map_err(|_| TEE_ERROR_GENERIC)?;
+        Ok(loc.stat().map_err(|_| TEE_ERROR_GENERIC)?.size as usize)
+    }
+
     #[unittest::def_test(custom)]
     fn test_file_ops_read() {
-        let fd = FileVariant::open("/tmp/test.txt", (O_RDWR | O_CREAT), 0o644);
+        let fd = FileVariant::open("/tmp/test.txt", O_RDWR | O_CREAT, 0o644);
         assert!(fd.is_ok());
         let mut fd = fd.unwrap();
         let buf = [0xAA; 8];
-        let n = fd.write(&buf).expect("Failed to write file");
+        let n = fd.pwrite(&buf, 0).expect("Failed to pwrite file");
         assert_eq!(n, 8);
-        let pos = fd.seek(SeekFrom::Start(0)).expect("Failed to seek");
-        assert_eq!(pos, 0);
         let mut buf = [0; 8];
-        let n = fd.read(&mut buf).expect("Failed to read file");
+        let n = fd.pread(&mut buf, 0).expect("Failed to pread file");
         assert_eq!(n, 8);
         assert_eq!(buf, [0xAA; 8]);
         let mut buf = [0; 4];
@@ -430,17 +332,17 @@ pub mod tests_file_ops {
     #[unittest::def_test(custom)]
     fn test_file_ops_exists() {
         let path = "/tmp/test.txt.not_exists";
-        assert!(!FileVariant::exists(path));
+        assert!(!file_exists(path));
         {
-            let fd = FileVariant::open(path, (O_RDWR | O_CREAT), 0o644);
+            let fd = FileVariant::open(path, O_RDWR | O_CREAT, 0o644);
             assert!(fd.is_ok());
         }
-        assert!(FileVariant::exists(path));
+        assert!(file_exists(path));
         {
             let n = FileVariant::remove_file(path);
             assert!(n.is_ok());
         }
-        assert!(!FileVariant::exists(path));
+        assert!(!file_exists(path));
     }
 
     #[unittest::def_test(custom)]
@@ -448,11 +350,11 @@ pub mod tests_file_ops {
         let path = "/tmp/test_create_dir/";
         let n = FileVariant::create_dir(path);
         assert!(n.is_ok());
-        assert!(FileVariant::exists(path));
+        assert!(file_exists(path));
         let n = FileVariant::create_dir(path);
         assert!(n.is_ok());
-        let n = FileVariant::remove_dir(path);
+        let n = remove_dir(path);
         assert!(n.is_ok());
-        assert!(!FileVariant::exists(path));
+        assert!(!file_exists(path));
     }
 }

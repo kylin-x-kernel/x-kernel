@@ -2,25 +2,22 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    boxed::Box,
-    string::{String, ToString},
-    sync::Arc,
-};
+use alloc::{boxed::Box, sync::Arc};
 use core::{any::Any, default::Default};
 
-use ksync::{Mutex, RwLock};
-use kthread::{self, TeeSessionCtxTrait, Thread};
+use ksync::Mutex;
+#[cfg(unittest)]
+use kthread::Thread;
+use kthread::{self, TeeSessionCtxTrait};
 use slab::Slab;
 use tee_raw_sys::*;
 use tee_task_iface::TeeTaCtx;
 
 use crate::tee::{
     TeeResult,
-    tee_obj::{tee_obj, tee_obj_close_all},
+    tee_obj::{TeeObj, tee_obj_close_all},
     tee_svc_cryp2::{TeeCrypState, tee_cryp_state_close_all},
-    tee_svc_storage::{tee_storage_enum, tee_svc_storage_close_all_enum},
-    user_ta::user_ta_ctx,
+    tee_svc_storage::{TeeStorageEnum, tee_svc_storage_close_all_enum},
 };
 
 /// TEE Session Context
@@ -37,8 +34,8 @@ pub struct TeeSessionCtx {
     pub cancel: bool,
     pub cancel_mask: bool,
     pub cancel_time: TeeTime,
-    pub objects: Slab<Arc<Mutex<tee_obj>>>,
-    pub storage_enums: Slab<Arc<Mutex<tee_storage_enum>>>,
+    pub objects: Slab<Arc<Mutex<TeeObj>>>,
+    pub storage_enums: Slab<Arc<Mutex<TeeStorageEnum>>>,
     pub cryp_state: Slab<Arc<Mutex<TeeCrypState>>>,
 }
 
@@ -205,6 +202,8 @@ where
 // Only compiled when the tee_test feature is enabled
 #[unittest::mod_test]
 pub mod tests_tee_session {
+    use alloc::string::String;
+
     use unittest::assert_eq;
 
     use super::*;
@@ -222,7 +221,7 @@ pub mod tests_tee_session {
         assert_eq!(uuid_back, "00000000-0000-0000-0000-000000000000");
 
         with_tee_ta_ctx_mut(|ta_ctx| {
-            ta_ctx.uuid = "936da01f-9abd-4d9d-80c7-02af85c822a8".to_string();
+            ta_ctx.uuid = String::from("936da01f-9abd-4d9d-80c7-02af85c822a8");
             Ok(())
         })
         .unwrap();

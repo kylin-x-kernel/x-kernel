@@ -2,12 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    boxed::Box,
-    format,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{boxed::Box, format, string::ToString, vec::Vec};
 
 use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
 use tee_raw_sys::{
@@ -284,7 +279,8 @@ pub fn tee_fs_dirfile_open(
             Ok(dirh)
         }
         Err(e) => {
-            tee_fs_dirfile_close(&mut dirh);
+            // cleanup path: best-effort close after open failure
+            let _ = tee_fs_dirfile_close(&mut dirh);
             Err(e)
         }
     }

@@ -2,9 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(dead_code)]
-
-use alloc::{boxed::Box, ffi::CString, vec};
+use alloc::{boxed::Box, ffi::CString};
 use core::ffi::{c_uint, c_ulong, c_void};
 
 use osvm::MemError;
@@ -53,6 +51,7 @@ impl PropertySet {
     }
 }
 
+#[allow(dead_code)]
 enum PropType {
     Bool,        // bool
     U32,         // uint32_t
@@ -159,9 +158,14 @@ fn get_prop_struct(prop_set: PropertySet, index: c_ulong) -> TeeResult<Box<dyn T
     match prop_set {
         PropertySet::CurrentClient => match index {
             0 => Ok(Box::new(ClientIdentity)),
+            1 => Ok(Box::new(ClientEndian)),
             _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
         },
-        _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        PropertySet::CurrentTa => match index {
+            0 => Ok(Box::new(TAAppID)),
+            _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        },
+        PropertySet::TeeImplementation => Err(TEE_ERROR_ITEM_NOT_FOUND),
     }
 }
 

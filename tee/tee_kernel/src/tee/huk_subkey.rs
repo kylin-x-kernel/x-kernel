@@ -3,32 +3,19 @@
 // See LICENSES for license details.
 
 use alloc::vec::Vec;
-use core::{ffi::c_uint, mem::size_of, ptr};
 
-use klogger::info;
 use tee_crypto::mac::Mac;
-use tee_raw_sys::{
-    TEE_ALG_HMAC_SHA256, TEE_ALG_SM3, TEE_ERROR_BAD_PARAMETERS, TEE_MODE_MAC, TEE_OperationMode,
-    TEE_TYPE_HMAC_SHA256, TEE_TYPE_HMAC_SM3,
-};
+use tee_raw_sys::TEE_ERROR_BAD_PARAMETERS;
 
 use super::{
     otp_stubs::{TeeHwUniqueKey, tee_otp_get_hw_unique_key},
-    utee_defines::{HW_UNIQUE_KEY_LENGTH, TEE_SHA256_HASH_SIZE},
+    utee_defines::HW_UNIQUE_KEY_LENGTH,
 };
-use crate::tee::{
-    TeeResult,
-    tee_obj::tee_obj_get,
-    tee_svc_cryp::{
-        TeeCryptObj, syscall_cryp_obj_alloc, syscall_obj_generate_key, tee_cryp_obj_secret_wrapper,
-    },
-    tee_svc_cryp2::{
-        tee_cryp_hash_final, tee_cryp_hash_init, tee_cryp_hash_update, tee_cryp_state_alloc,
-    },
-};
+use crate::tee::TeeResult;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum HukSubkeyUsage {
     Rpmb     = 0,
     Ssk      = 1,
@@ -37,7 +24,7 @@ pub enum HukSubkeyUsage {
     TaEnc    = 4,
 }
 
-pub const HUK_SUBKEY_MAX_LEN: usize = TEE_SHA256_HASH_SIZE;
+pub const HUK_SUBKEY_MAX_LEN: usize = super::utee_defines::TEE_SHA256_HASH_SIZE;
 
 pub fn huk_subkey_derive(
     usage: HukSubkeyUsage,

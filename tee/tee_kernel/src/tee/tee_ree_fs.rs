@@ -2,15 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    boxed::Box,
-    string::{String, ToString},
-    vec,
-    vec::Vec,
-};
+#[cfg(unittest)]
+use alloc::string::String;
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{any::Any, ffi::c_uint, fmt::Debug};
 
-use ksync::{Mutex, RwLock};
+use ksync::Mutex;
 use tee_raw_sys::{TEE_STORAGE_PRIVATE, *};
 
 use super::{
@@ -32,25 +29,23 @@ use super::{
         tee_fs_rpc_truncate,
     },
     tee_api_defines_extensions::{TEE_STORAGE_PRIVATE_REE, TEE_STORAGE_PRIVATE_RPMB},
-    tee_fs::tee_fs_dirent,
-    tee_pobj::tee_pobj,
+    tee_fs::TeeFsDirent,
+    tee_pobj::TeePobj,
     utils::roundup_u,
 };
 use crate::tee::utils::slice_fmt;
 
-pub type tee_file_handle = TeeFsFd;
-
 /// Global REE FS state: combines the mutex and the directory handle cache.
 ///
-/// This matches OP-TEE C semantics where `ree_fs_mutex` protects the global
+/// This matches GP semantics where `ree_fs_mutex` protects the global
 /// `ree_fs_dirh`. By using `Mutex<ReeFsDirh>`, the lock and the data it
 /// protects are bound together, eliminating the need for raw pointers and
 /// preventing use-after-free across processes/threads.
 static REE_FS_STATE: Mutex<ReeFsDirh> = Mutex::new(ReeFsDirh::new());
 
-/// Extra global mutex to match optee_os C semantics more closely.
+/// Extra global mutex to match GP reference semantics more closely.
 ///
-/// In OP-TEE, `ree_fs_mutex` serializes the whole ree_fs_* operation
+/// In GP, `ree_fs_mutex` serializes the whole ree_fs_* operation
 /// (including out-of-place write + htree sync + directory bookkeeping).
 /// Rust already uses `REE_FS_STATE` for dirh caching, but the additional mutex
 /// makes the serialization explicit and prevents subtle reordering across
@@ -60,6 +55,9 @@ static REE_FS_MUTEX: Mutex<()> = Mutex::new(());
 pub const BLOCK_SHIFT: usize = 12;
 pub const BLOCK_SIZE: usize = 1 << BLOCK_SHIFT;
 
+/// REE filesystem file descriptor (htree + backing file).
+///
+/// GP: `struct tee_fs_fd` / `tee_file_handle`
 #[derive(Debug, Default)]
 pub struct TeeFsFd {
     pub ht: Box<TeeFsHtree>,
@@ -109,7 +107,7 @@ pub struct TeeFsDir {
     /// across process/thread boundaries.
     pub has_dirh_ref: bool,
     pub idx: i32,
-    pub d: tee_fs_dirent,
+    pub d: TeeFsDirent,
     pub uuid: TEE_UUID,
 }
 
@@ -210,7 +208,7 @@ pub fn get_offs_size(typ: TeeFsHtreeType, idx: usize, vers: u8) -> TeeResult<(us
 /// read data from file to buffer at offset using rpc
 /// the typical flow is:
 ///   1. call ree_fs_rpc_read_init to get offs and size to fill params
-///   2. send OPTEE_RPC_CMD_FS to ree
+///   2. send GP_RPC_CMD_FS to ree
 ///      in starryos, just usign file operations to read data
 ///
 /// # Arguments
@@ -329,10 +327,6 @@ pub trait TeeFsHtreeStorageOps: Debug + Any + Send + Sync {
         vers: u8,
         data: &[u8],
     ) -> TeeResult<usize>;
-
-    fn clone_box(&self) -> Box<dyn TeeFsHtreeStorageOps> {
-        unimplemented!()
-    }
 }
 
 impl TeeFsHtreeStorageOps for TeeFsFdAux {
@@ -668,7 +662,7 @@ pub fn ree_fs_write_primitive(
 }
 
 pub fn ree_fs_close_primitive(_fdp: &mut TeeFsFd) {
-    // Align with OP-TEE C ree_fs_close_primitive():
+    // Align with GP ree_fs_close_primitive():
     // close htree context then close underlying file descriptor.
     let ht = core::mem::take(&mut _fdp.ht);
     let _ = tee_fs_htree_close(ht);
@@ -763,16 +757,16 @@ impl TeeFsDirfileOperations for ReeDirfOps {
     }
 }
 
-/// tee_file_operations is the operations of the tee_pobj
+/// tee_file_operations is the operations of the TeePobj
 #[derive(Debug)]
 pub struct TeeFileOperations {
     pub name: &'static str,
 
-    pub open: fn(po: &tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>>,
+    pub open: fn(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>>,
 
     #[allow(clippy::type_complexity)]
     pub create: fn(
-        po: &tee_pobj,
+        po: &TeePobj,
         overwrite: bool,
         head: &[u8],
         attr: &[u8],
@@ -794,22 +788,22 @@ pub struct TeeFileOperations {
     pub write:
         fn(fh: &mut TeeFsFd, pos: usize, buf_core: &[u8], buf_user: &[u8], len: usize) -> TeeResult,
 
-    pub rename: fn(old: &tee_pobj, new: &tee_pobj, overwrite: bool) -> TeeResult,
+    pub rename: fn(old: &TeePobj, new: &TeePobj, overwrite: bool) -> TeeResult,
 
-    pub remove: fn(po: &tee_pobj) -> TeeResult,
+    pub remove: fn(po: &TeePobj) -> TeeResult,
 
     pub truncate: fn(fh: &mut TeeFsFd, size: usize) -> TeeResult,
 
     pub opendir: fn(uuid: &TEE_UUID) -> TeeResult<Box<TeeFsDir>>,
 
-    pub readdir: fn(d: &mut TeeFsDir, ent: &mut tee_fs_dirent) -> TeeResult,
+    pub readdir: fn(d: &mut TeeFsDir, ent: &mut TeeFsDirent) -> TeeResult,
 
     pub closedir: fn(d: &mut TeeFsDir) -> TeeResult,
     #[cfg(unittest)]
     pub echo: fn() -> String,
 }
 
-pub fn ree_fs_open(po: &tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>> {
+pub fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>> {
     tee_debug!("ree_fs_open: po: {:?}", po);
     let _global_lock = REE_FS_MUTEX.lock();
     let mut state = REE_FS_STATE.lock();
@@ -857,7 +851,7 @@ pub fn ree_fs_open(po: &tee_pobj, size: Option<&mut usize>) -> TeeResult<Box<Tee
 fn set_name(
     dirh: &mut TeeFsDirfileDirh,
     fdp: &mut TeeFsFd,
-    po: &tee_pobj,
+    po: &TeePobj,
     overwrite: bool,
 ) -> TeeResult {
     tee_debug!(
@@ -906,7 +900,7 @@ fn set_name(
 }
 
 fn ree_fs_create(
-    po: &tee_pobj,
+    po: &TeePobj,
     overwrite: bool,
     head: &[u8],
     attr: &[u8],
@@ -950,7 +944,7 @@ fn ree_fs_create(
 }
 
 struct ReeFsCreateParams<'a> {
-    po: &'a tee_pobj,
+    po: &'a TeePobj,
     overwrite: bool,
     head: &'a [u8],
     attr: &'a [u8],
@@ -1089,7 +1083,7 @@ pub fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
     ret
 }
 
-pub fn ree_fs_rename(old: &tee_pobj, new: &tee_pobj, overwrite: bool) -> TeeResult {
+pub fn ree_fs_rename(old: &TeePobj, new: &TeePobj, overwrite: bool) -> TeeResult {
     let _global_lock = REE_FS_MUTEX.lock();
     let mut state = REE_FS_STATE.lock();
     state.get_dirh()?;
@@ -1134,7 +1128,7 @@ pub fn ree_fs_rename(old: &tee_pobj, new: &tee_pobj, overwrite: bool) -> TeeResu
     ret
 }
 
-pub fn ree_fs_remove(po: &tee_pobj) -> TeeResult {
+pub fn ree_fs_remove(po: &TeePobj) -> TeeResult {
     tee_debug!("ree_fs_remove: po: {:?}", po);
 
     let _global_lock = REE_FS_MUTEX.lock();
@@ -1159,8 +1153,8 @@ pub fn ree_fs_remove(po: &tee_pobj) -> TeeResult {
 }
 
 #[cfg(unittest)]
-fn ree_fs_echo() -> String {
-    "TeeFileOperations->echo".to_string()
+fn ree_fs_echo() -> alloc::string::String {
+    alloc::string::String::from("TeeFileOperations->echo")
 }
 
 // global file_ops for REE FS, in starryos REE is  starryos self
@@ -1220,9 +1214,9 @@ fn commit_dirh_writes(dirh: &mut TeeFsDirfileDirh) -> TeeResult {
     tee_fs_dirfile_commit_writes(dirh, None)
 }
 
-/// Global directory handle cache, matching OP-TEE C semantics.
+/// Global directory handle cache, matching GP semantics.
 ///
-/// In OP-TEE C, `ree_fs_dirh` is a global static pointer shared by all CPUs,
+/// In GP, `ree_fs_dirh` is a global static pointer shared by all CPUs,
 /// protected by `ree_fs_mutex`. Here we use `Mutex<ReeFsDirh>` (i.e.
 /// `REE_FS_STATE`) so the lock and the data are bound together.
 ///
@@ -1356,7 +1350,7 @@ pub fn ree_fs_closedir_rpc(d: &mut TeeFsDir) -> TeeResult {
     Ok(())
 }
 
-pub fn ree_fs_readdir_rpc(d: &mut TeeFsDir, ent: &mut tee_fs_dirent) -> TeeResult {
+pub fn ree_fs_readdir_rpc(d: &mut TeeFsDir, ent: &mut TeeFsDirent) -> TeeResult {
     let _global_lock = REE_FS_MUTEX.lock();
     let mut state = REE_FS_STATE.lock();
     // The dirh must have been acquired by opendir; access it through the lock.

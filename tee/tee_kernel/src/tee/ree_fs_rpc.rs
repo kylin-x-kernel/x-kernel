@@ -9,11 +9,8 @@ use tee_raw_sys::{TEE_ERROR_BAD_FORMAT, TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM
 
 use super::{
     TeeResult,
-    common::file_ops::{
-        FS_MODE_644, FS_OFLAG_DEFAULT, FS_OFLAG_RW, FS_OFLAG_RW_TRUNC, FileVariant, TeeFileLike,
-    },
+    common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT, FS_OFLAG_RW, FileVariant, TeeFileLike},
     fs_dirfile::TeeFsDirfileFileh,
-    fs_htree::tee_fs_htree_close,
     tee_fs::TEE_FS_NAME_MAX,
     tee_svc_storage::tee_svc_storage_create_filename_dfh,
 };
@@ -83,7 +80,7 @@ pub fn tee_fs_rpc_create_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileV
 /// * `TeeResult<()>` - the result of the operation
 pub fn tee_fs_rpc_close(_fd: &FileVariant) -> TeeResult {
     // FileVariant is Copy; closing a copied handle is enough to remove the fd
-    // entry from the global fd table, mirroring OP-TEE's rpc close semantics.
+    // entry from the global fd table, mirroring GP's rpc close semantics.
     let mut fd = *_fd;
     fd.close()
 }

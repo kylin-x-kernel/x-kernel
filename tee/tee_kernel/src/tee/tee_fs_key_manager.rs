@@ -2,9 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::vec;
 
-use cfg_if::cfg_if;
 use ksync::Mutex;
 use lazy_static::lazy_static;
 use static_assertions::const_assert;
@@ -14,15 +13,14 @@ use tee_raw_sys::{
     TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_NOT_IMPLEMENTED, TEE_OperationMode, TEE_UUID,
 };
 
+#[cfg(not(feature = "tee_ss_smx"))]
+use super::utee_defines::TEE_SHA256_HASH_SIZE;
 use super::{
     TeeResult,
     huk_subkey::{HUK_SUBKEY_MAX_LEN, HukSubkeyUsage, huk_subkey_derive},
-    otp_stubs::{TeeHwUniqueKey, tee_otp_get_hw_unique_key},
-    utee_defines::{TEE_SHA256_HASH_SIZE, TEE_SM3_HASH_SIZE, TeeAlg},
-    utils::slice_fmt,
+    utee_defines::{TEE_SM3_HASH_SIZE, TeeAlg},
 };
 
-const TEE_FS_KM_CHIP_ID_LENGTH: usize = 32;
 pub const TEE_FS_KM_FEK_SIZE: usize = 16; /* bytes */
 
 cfg_if::cfg_if! {
@@ -44,11 +42,8 @@ pub struct TeeFsSsk {
     pub key: [u8; TEE_FS_KM_SSK_SIZE],
 }
 
-pub static STRING_FOR_SSK_GEN: &[u8] = b"ONLY_FOR_tee_fs_ssk";
-
 const_assert!(TEE_FS_KM_SSK_SIZE <= HUK_SUBKEY_MAX_LEN);
 
-// Helper function to initialize SSK
 fn init_ssk() -> TeeFsSsk {
     let mut ssk = TeeFsSsk {
         is_init: false,

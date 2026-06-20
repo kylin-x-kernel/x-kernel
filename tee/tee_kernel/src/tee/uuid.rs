@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(dead_code)]
-
 use core::fmt;
 
 use hex;
@@ -32,25 +30,6 @@ impl Uuid {
         ))
     }
 
-    /// Creates a `Uuid` using the supplied big-endian bytes.
-    pub fn from_bytes(bytes: [u8; 16]) -> Uuid {
-        let uuid = uuid_crate::Uuid::from_bytes(bytes);
-        let (time_low, time_mid, time_hi_and_version, clock_seq_and_node) = uuid.as_fields();
-        Self::new_raw(time_low, time_mid, time_hi_and_version, *clock_seq_and_node)
-    }
-
-    /// Creates a `Uuid` using a slice of supplied big-endian bytes.
-    pub fn from_slice(b: &[u8]) -> TeeResult<Uuid> {
-        let uuid = uuid_crate::Uuid::from_slice(b).map_err(|_| TEE_ERROR_BAD_FORMAT)?;
-        let (time_low, time_mid, time_hi_and_version, clock_seq_and_node) = uuid.as_fields();
-        Ok(Self::new_raw(
-            time_low,
-            time_mid,
-            time_hi_and_version,
-            *clock_seq_and_node,
-        ))
-    }
-
     /// Creates a raw TEE client uuid object with specified parameters.
     pub fn new_raw(
         time_low: u32,
@@ -65,11 +44,6 @@ impl Uuid {
             clockSeqAndNode: clock_seq_and_nod,
         };
         Self { raw: raw_uuid }
-    }
-
-    /// Converts a uuid to a const raw `TEE_UUID` pointer.
-    pub fn as_raw_ptr(&self) -> *const raw::TEE_UUID {
-        &self.raw
     }
 
     /// Converts a uuid to a raw `TEE_UUID` reference.

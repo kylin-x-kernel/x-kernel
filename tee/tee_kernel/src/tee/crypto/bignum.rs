@@ -18,24 +18,9 @@ use crate::tee::{TeeResult, config::CFG_CORE_BIGNUM_MAX_BITS};
 pub struct BigNum(pub TeeBigNum);
 
 impl BigNum {
-    /// Create a BigNum from a u32 value.
-    pub fn new(value: u32) -> TeeResult<Self> {
-        Ok(BigNum(TeeBigNum::from_u32(value)))
-    }
-
-    /// Number of bytes required to store this value.
-    pub fn byte_length(&self) -> usize {
-        self.0.byte_length()
-    }
-
     /// Number of bits required to store this value.
     pub fn bit_length(&self) -> usize {
         self.0.bit_length()
-    }
-
-    /// Get value as u32 if it fits.
-    pub fn as_u32(&self) -> TeeResult<u32> {
-        self.0.as_u32().map_err(|_| TEE_ERROR_GENERIC)
     }
 
     /// Serialize to big-endian bytes.
@@ -70,6 +55,21 @@ impl PartialEq for BigNum {
 
 impl Eq for BigNum {}
 
+#[cfg(unittest)]
+impl BigNum {
+    pub fn new(value: u32) -> TeeResult<Self> {
+        Ok(BigNum(TeeBigNum::from_u32(value)))
+    }
+
+    pub fn byte_length(&self) -> usize {
+        self.0.byte_length()
+    }
+
+    pub fn as_u32(&self) -> TeeResult<u32> {
+        self.0.as_u32().map_err(|_| TEE_ERROR_GENERIC)
+    }
+}
+
 /// Get number of bytes required to store the big number.
 pub fn crypto_bignum_num_bytes(a: &BigNum) -> TeeResult<usize> {
     Ok(a.0.byte_length())
@@ -78,11 +78,6 @@ pub fn crypto_bignum_num_bytes(a: &BigNum) -> TeeResult<usize> {
 /// Get number of bits required to store the big number.
 pub fn crypto_bignum_num_bits(a: &BigNum) -> TeeResult<usize> {
     Ok(a.0.bit_length())
-}
-
-/// Compare two big numbers.
-pub fn crypto_bignum_compare(a: &BigNum, b: &BigNum) -> Ordering {
-    a.0.compare(&b.0)
 }
 
 /// Convert big number to binary representation.
@@ -110,14 +105,4 @@ pub fn crypto_bignum_allocate(size_bits: usize) -> TeeResult<BigNum> {
         size_bits = CFG_CORE_BIGNUM_MAX_BITS;
     }
     Ok(BigNum(TeeBigNum::allocate(size_bits)))
-}
-
-/// Free a big number (drop).
-pub fn crypto_bignum_free(_bn: BigNum) {
-    // Drop happens automatically
-}
-
-/// Clear a big number (set to zero).
-pub fn crypto_bignum_clear(bn: &mut BigNum) {
-    bn.0.clear();
 }

@@ -4,6 +4,7 @@
 
 use alloc::{format, string::String};
 
+#[cfg(any(feature = "csv_huk_key", feature = "virtcca_huk_key"))]
 use tee_crypto::rng::{DeterministicRng, Rng};
 
 #[inline]
@@ -12,22 +13,13 @@ pub const fn bit32(nr: u32) -> u32 {
 }
 
 #[inline]
-pub const fn bit64(nr: u32) -> u64 {
-    1u64 << nr
-}
-
-#[inline]
 pub const fn bit(nr: u32) -> u32 {
     bit32(nr)
 }
 
 #[inline]
+#[cfg(unittest)]
 pub(crate) fn shift_u32(v: u32, shift: u32) -> u32 {
-    v << shift
-}
-
-#[inline]
-pub(crate) fn shift_u64(v: u64, shift: u32) -> u64 {
     v << shift
 }
 
@@ -71,6 +63,7 @@ pub fn slice_fmt(data: &[u8]) -> String {
         + if len > min_len { "..." } else { "" }
 }
 
+#[cfg(any(feature = "csv_huk_key", feature = "virtcca_huk_key"))]
 pub fn random_bytes(data: &mut [u8]) {
     let seed = khal::time::now_ticks();
     let mut rng = DeterministicRng::seed_from_u64(seed);

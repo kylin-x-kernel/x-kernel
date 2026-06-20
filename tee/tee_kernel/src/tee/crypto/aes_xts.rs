@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Stateful AES-XTS (OP-TEE / LibTomCrypt semantics).
+//! Stateful AES-XTS (GP / LibTomCrypt semantics).
 //!
 //! Multi-part updates must advance tweak state in the kernel so split TA calls
 //! behave as one continuous XTS message.
@@ -52,7 +52,7 @@ pub(crate) struct AesXtsState {
     msg_offset: usize,
 }
 
-/// Per-syscall context: OP-TEE splits `cipher_update` + `cipher_final`; tweak advance for
+/// Per-syscall context: GP splits `cipher_update` + `cipher_final`; tweak advance for
 /// ciphertext stealing must use the whole message length, not the current slice length.
 pub(crate) struct AesXtsStream {
     /// Input bytes fed in prior syscalls (not including the current `input` slice).
@@ -153,12 +153,6 @@ impl TeeCipherXtsCtx {
         }
     }
 
-    pub(crate) fn record_user_base_if_unset(&mut self, base: usize) {
-        if self.user_base.is_none() {
-            self.user_base = Some(base);
-        }
-    }
-
     pub(crate) fn after_update(&mut self, input_len: usize, output_len: usize) {
         self.bytes_ingested += input_len;
         self.emitted_bytes += output_len;
@@ -189,22 +183,8 @@ impl TeeCipherXtsCtx {
         }
     }
 
-    /// If the patched block lies in this syscall's memref, update the kernel copy in place.
-    pub(crate) fn merge_patch_into_slice(&self, dst_ptr: usize, dst: &mut [u8]) {
-        let Some(patch) = self.patch_block.as_ref() else {
-            return;
-        };
-        let Some(patch_va) = self.patch_user_off else {
-            return;
-        };
-        if patch_va < dst_ptr || patch_va + patch.len() > dst_ptr + dst.len() {
-            return;
-        }
-        let local_off = patch_va - dst_ptr;
-        dst[local_off..local_off + patch.len()].copy_from_slice(patch);
-    }
-
     /// Apply a deferred patch when the target block is outside the current memref (`patch_va` is a buffer offset).
+    #[cfg(unittest)]
     pub(crate) fn apply_patch_to_buffer(&mut self, out: &mut [u8]) {
         let Some(patch) = self.patch_block.take() else {
             return;
@@ -248,10 +228,6 @@ impl Clone for AesXtsState {
             msg_offset: self.msg_offset,
         }
     }
-}
-
-pub(crate) fn cipher_uses_aes_xts_kernel(algo: u32) -> bool {
-    algo == tee_raw_sys::TEE_ALG_AES_XTS
 }
 
 fn split_xts_keys(key: &[u8]) -> Result<(&[u8], &[u8]), u32> {
@@ -427,6 +403,7 @@ fn crypt_one_full_block(xts: &mut AesXtsState, input: &[u8], output: &mut [u8]) 
 }
 
 /// Encrypt/decrypt `input` into `output`, updating `running_tweak` (may include ciphertext stealing).
+#[cfg(unittest)]
 pub(crate) fn aes_xts_crypt(
     xts: &mut AesXtsState,
     input: &[u8],
@@ -471,7 +448,6 @@ pub(crate) fn aes_xts_crypt(
     };
     let (patch, n) =
         xts_ciphertext_stealing(xts, &pending[..pending_len], output, written, decrypt_t)?;
-    pending_len = 0;
     if written >= XTS_BLOCK_SIZE {
         output[written - XTS_BLOCK_SIZE..written].copy_from_slice(&patch);
     }

@@ -31,14 +31,14 @@ use crate::tee::{
     crypto::{
         bignum::{BigNum, crypto_bignum_allocate},
         crypto_impl::{
-            EccAlgoKeyPair, EccComKeyPair, EccKeypair, Sm2DsaKeyPair, Sm2KepKeyPair, Sm2PkeKeyPair,
-            crypto_ecc_keypair_ops_generate,
+            CryptoEccKeypairOpsGenerate, EccComKeyPair, EccKeypairOpsCtx, Sm2DsaKeyPair,
+            Sm2KepKeyPair, Sm2PkeKeyPair,
         },
     },
     rng_software::TeeSoftwareRng,
     tee_api_defines_extensions::TEE_ALG_SM4_XTS,
-    tee_obj::{tee_obj_get, tee_obj_id_type},
-    tee_svc_cryp::{CryptoAttrRef, TeeCryptObj, tee_cryp_obj_secret_wrapper, tee_crypto_ops},
+    tee_obj::{TeeObjIdType, tee_obj_get},
+    tee_svc_cryp::{CryptoAttrRef, TeeCryptObj, TeeCryptoOps},
     tee_svc_cryp2::{
         CipherPaddingMode, CmacContext, CrypCtx, CrypState, HashContext, HmacContext, TeeCrypState,
     },
@@ -106,6 +106,11 @@ fn rsa_bn_to_secret_bytes(bn: &BigNum) -> Vec<u8> {
     } else {
         Vec::new()
     }
+}
+
+#[inline]
+fn vec_as_bytes(v: &Vec<u8>) -> &[u8] {
+    v.as_slice()
 }
 
 fn check_rsa_modulus_output(mod_size: usize, output_len: usize, required: &mut usize) -> TeeResult {
@@ -244,14 +249,15 @@ fn tee_curve_to_ecc_curve(curve: u32) -> TeeResult<EccCurve> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ecc_public_key {
+/// GP: `struct ecc_public_key`
+pub struct EccPublicKey {
     pub x: BigNum,
     pub y: BigNum,
     curve: u32,
     // ops: Box<dyn crypto_ecc_public_ops>,
 }
 
-impl tee_crypto_ops for ecc_public_key {
+impl TeeCryptoOps for EccPublicKey {
     fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
         let mut curve = 0;
         match key_type {
@@ -263,14 +269,14 @@ impl tee_crypto_ops for ecc_public_key {
             _ => {}
         };
 
-        Ok(ecc_public_key {
+        Ok(EccPublicKey {
             x: crypto_bignum_allocate(key_size_bits)?,
             y: crypto_bignum_allocate(key_size_bits)?,
             curve,
         })
     }
 
-    fn get_attr_by_id(&mut self, attr_id: tee_obj_id_type) -> TeeResult<CryptoAttrRef<'_>> {
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
         match attr_id as u32 {
             TEE_ATTR_ECC_PUBLIC_VALUE_X => Ok(CryptoAttrRef::BigNum(&mut self.x)),
             TEE_ATTR_ECC_PUBLIC_VALUE_Y => Ok(CryptoAttrRef::BigNum(&mut self.y)),
@@ -280,7 +286,8 @@ impl tee_crypto_ops for ecc_public_key {
     }
 }
 #[derive(Default)]
-pub struct ecc_keypair {
+/// GP: `struct ecc_keypair`
+pub struct EccKeypair {
     pub d: BigNum,
     pub x: BigNum,
     pub y: BigNum,
@@ -289,9 +296,9 @@ pub struct ecc_keypair {
     // pub ops: Box<dyn crypto_ecc_keypair_ops>,
 }
 
-impl Debug for ecc_keypair {
+impl Debug for EccKeypair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ecc_keypair")
+        f.debug_struct("EccKeypair")
             .field("d", &self.d)
             .field("x", &self.x)
             .field("y", &self.y)
@@ -300,7 +307,7 @@ impl Debug for ecc_keypair {
     }
 }
 
-impl tee_crypto_ops for ecc_keypair {
+impl TeeCryptoOps for EccKeypair {
     fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
         let mut curve = 0;
 
@@ -312,7 +319,7 @@ impl tee_crypto_ops for ecc_keypair {
             _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
         }
 
-        Ok(ecc_keypair {
+        Ok(EccKeypair {
             d: crypto_bignum_allocate(key_size_bits)?,
             x: crypto_bignum_allocate(key_size_bits)?,
             y: crypto_bignum_allocate(key_size_bits)?,
@@ -321,7 +328,7 @@ impl tee_crypto_ops for ecc_keypair {
         })
     }
 
-    fn get_attr_by_id(&mut self, attr_id: tee_obj_id_type) -> TeeResult<CryptoAttrRef<'_>> {
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
         match attr_id as u32 {
             TEE_ATTR_ECC_PRIVATE_VALUE => Ok(CryptoAttrRef::BigNum(&mut self.d)),
             TEE_ATTR_ECC_PUBLIC_VALUE_X => Ok(CryptoAttrRef::BigNum(&mut self.x)),
@@ -332,15 +339,16 @@ impl tee_crypto_ops for ecc_keypair {
     }
 }
 
-impl PartialEq for ecc_keypair {
+impl PartialEq for EccKeypair {
     fn eq(&self, other: &Self) -> bool {
         self.d == other.d && self.x == other.x && self.y == other.y && self.curve == other.curve
     }
 }
 
-impl Eq for ecc_keypair {}
+impl Eq for EccKeypair {}
 
-pub struct rsa_keypair {
+/// GP: `struct rsa_keypair`
+pub struct RsaKeypair {
     pub e: BigNum, // Public exponent
     pub d: BigNum, // Private exponent
     pub n: BigNum, // Modulus
@@ -353,9 +361,9 @@ pub struct rsa_keypair {
     pub dq: BigNum, // d mod (q-1)
 }
 
-impl Debug for rsa_keypair {
+impl Debug for RsaKeypair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("rsa_keypair")
+        f.debug_struct("RsaKeypair")
             .field("e", &self.e)
             .field("d", &self.d)
             .field("n", &self.n)
@@ -368,9 +376,9 @@ impl Debug for rsa_keypair {
     }
 }
 
-impl tee_crypto_ops for rsa_keypair {
+impl TeeCryptoOps for RsaKeypair {
     fn new(_key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
-        Ok(rsa_keypair {
+        Ok(RsaKeypair {
             e: crypto_bignum_allocate(key_size_bits)?,
             d: crypto_bignum_allocate(key_size_bits)?,
             n: crypto_bignum_allocate(key_size_bits)?,
@@ -382,7 +390,7 @@ impl tee_crypto_ops for rsa_keypair {
         })
     }
 
-    fn get_attr_by_id(&mut self, attr_id: tee_obj_id_type) -> TeeResult<CryptoAttrRef<'_>> {
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
         match attr_id as u32 {
             TEE_ATTR_RSA_MODULUS => Ok(CryptoAttrRef::BigNum(&mut self.n)),
             TEE_ATTR_RSA_PUBLIC_EXPONENT => Ok(CryptoAttrRef::BigNum(&mut self.e)),
@@ -397,29 +405,30 @@ impl tee_crypto_ops for rsa_keypair {
     }
 }
 
-pub struct rsa_public_key {
+/// GP: `struct rsa_public_key`
+pub struct RsaPublicKey {
     pub e: BigNum, // Public exponent
     pub n: BigNum, // Modulus
 }
 
-impl Debug for rsa_public_key {
+impl Debug for RsaPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("rsa_public_key")
+        f.debug_struct("RsaPublicKey")
             .field("e", &self.e)
             .field("n", &self.n)
             .finish()
     }
 }
 
-impl tee_crypto_ops for rsa_public_key {
+impl TeeCryptoOps for RsaPublicKey {
     fn new(_key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
-        Ok(rsa_public_key {
+        Ok(RsaPublicKey {
             e: crypto_bignum_allocate(key_size_bits)?,
             n: crypto_bignum_allocate(key_size_bits)?,
         })
     }
 
-    fn get_attr_by_id(&mut self, attr_id: tee_obj_id_type) -> TeeResult<CryptoAttrRef<'_>> {
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
         match attr_id as u32 {
             TEE_ATTR_RSA_MODULUS => Ok(CryptoAttrRef::BigNum(&mut self.n)),
             TEE_ATTR_RSA_PUBLIC_EXPONENT => Ok(CryptoAttrRef::BigNum(&mut self.e)),
@@ -429,65 +438,20 @@ impl tee_crypto_ops for rsa_public_key {
 }
 
 pub fn crypto_acipher_gen_ecc_key(
-    key: &mut ecc_keypair,
+    key: &mut EccKeypair,
     key_size_bits: usize,
     object_type: u32,
 ) -> TeeResult {
-    let mut key: Box<dyn crypto_ecc_keypair_ops_generate> = match object_type {
+    let mut key: Box<dyn CryptoEccKeypairOpsGenerate> = match object_type {
         TEE_TYPE_ECDSA_KEYPAIR | TEE_TYPE_ECDH_KEYPAIR => {
-            Box::new(EccKeypair::<EccComKeyPair>::new(key))
+            Box::new(EccKeypairOpsCtx::<EccComKeyPair>::new(key))
         }
-        TEE_TYPE_SM2_PKE_KEYPAIR => Box::new(EccKeypair::<Sm2PkeKeyPair>::new(key)),
-        TEE_TYPE_SM2_DSA_KEYPAIR => Box::new(EccKeypair::<Sm2DsaKeyPair>::new(key)),
-        TEE_TYPE_SM2_KEP_KEYPAIR => Box::new(EccKeypair::<Sm2KepKeyPair>::new(key)),
+        TEE_TYPE_SM2_PKE_KEYPAIR => Box::new(EccKeypairOpsCtx::<Sm2PkeKeyPair>::new(key)),
+        TEE_TYPE_SM2_DSA_KEYPAIR => Box::new(EccKeypairOpsCtx::<Sm2DsaKeyPair>::new(key)),
+        TEE_TYPE_SM2_KEP_KEYPAIR => Box::new(EccKeypairOpsCtx::<Sm2KepKeyPair>::new(key)),
         _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
     };
     key.generate(key_size_bits)
-}
-
-// The crypto context used by the crypto_hash_*() functions
-pub(crate) struct CryptoHashContext {
-    pub ops: Option<&'static CryptoHashOps>,
-}
-
-// Constructor for CryptoHashCtx
-pub(crate) struct CryptoHashOps {
-    pub init: Option<fn(ctx: &mut CryptoHashContext) -> TeeResult>,
-    pub update: Option<fn(ctx: &mut CryptoHashContext, data: &[u8]) -> TeeResult>,
-    pub final_: Option<fn(ctx: &mut CryptoHashContext, digest: &mut [u8]) -> TeeResult>,
-    pub free_ctx: Option<fn(ctx: &mut CryptoHashContext)>,
-    pub copy_state: Option<fn(dst_ctx: &mut CryptoHashContext, src_ctx: &CryptoHashContext)>,
-}
-
-// defining hash operations for cryptographic hashing
-pub(crate) trait CryptoHashCtx {
-    // Initialize the hash context
-    fn init(&mut self) -> TeeResult;
-
-    // Update the hash context with data
-    fn update(&mut self, data: &[u8]) -> TeeResult;
-
-    // Finalize the hash computation and return the digest
-    fn r#final(&mut self, digest: &mut [u8]) -> TeeResult;
-
-    // Free the hash context resources
-    fn free_ctx(self);
-
-    // Copy the state from one context to another
-    fn copy_state(&mut self, ctx: &dyn CryptoHashCtx);
-}
-
-// Helper function to get ops from context
-fn hash_ops(ctx: &CryptoHashContext) -> &CryptoHashOps {
-    ctx.ops.as_ref().expect("CryptoHashCtx ops is None")
-}
-
-pub(crate) fn crypto_hash_free_ctx(ctx: impl CryptoHashCtx) {
-    ctx.free_ctx();
-}
-
-pub(crate) fn crypto_hash_copy_state(ctx: &mut dyn CryptoHashCtx, src_ctx: &dyn CryptoHashCtx) {
-    ctx.copy_state(src_ctx);
 }
 
 fn hash_algo_supported(algo: u32) -> TeeResult {
@@ -498,7 +462,7 @@ fn hash_algo_supported(algo: u32) -> TeeResult {
     }
 }
 
-/// OP-TEE `crypto_hash_alloc_ctx`: allocate hash context placeholder at state alloc time.
+/// GP `crypto_hash_alloc_ctx`: allocate hash context placeholder at state alloc time.
 /// The actual hash context is created in `crypto_hash_init`.
 pub(crate) fn crypto_hash_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
     hash_algo_supported(algo)?;
@@ -564,7 +528,7 @@ pub(crate) fn crypto_hash_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -
     let cs_guard = cs.lock();
 
     // Clone the live hash state and finalize the clone so callers that need
-    // digest-extract semantics (OP-TEE `TEE_DigestExtract` → `TEE_CopyOperation`)
+    // digest-extract semantics (GP `TEE_DigestExtract` → `TEE_CopyOperation`)
     // can still copy/continue the operation after `final`.
     match &cs_guard.ctx {
         CrypCtx::HashCtx(HashContext::Md5(h)) => {
@@ -620,84 +584,7 @@ pub(crate) fn crypto_hash_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -
     }
 }
 
-// Driver-based hash allocation (stub implementation)
-pub(crate) fn drvcrypt_hash_alloc_ctx(_algo: u32) -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-// Default hash algorithm allocation functions (stub implementations)
-pub(crate) fn crypto_md5_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha1_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha224_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha256_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha384_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha512_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha3_224_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha3_256_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha3_384_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sha3_512_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_shake128_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_shake256_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
-pub(crate) fn crypto_sm3_alloc_ctx() -> TeeResult<Box<dyn CryptoHashCtx>> {
-    Err(TEE_ERROR_NOT_IMPLEMENTED)
-}
-
 // defining mac operations for cryptographic hashing
-pub(crate) trait CryptoMacCtx {
-    // Initialize the hash context
-    fn init(&mut self, key: &[u8]) -> TeeResult;
-
-    // Update the hash context with data
-    fn update(&mut self, data: &[u8]) -> TeeResult;
-
-    // Finalize the hash computation and return the digest
-    fn r#final(&mut self, digest: &mut [u8]) -> TeeResult;
-
-    // Free the hash context resources
-    fn free_ctx(self);
-
-    // Copy the state from one context to another
-    fn copy_state(&mut self, ctx: &dyn CryptoMacCtx);
-}
-
-/// OP-TEE `crypto_mac_alloc_ctx`: allocate MAC context placeholder at state alloc time.
-/// The actual MAC context is created in `crypto_mac_init`.
 pub(crate) fn crypto_mac_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
     match algo {
         TEE_ALG_HMAC_MD5 | TEE_ALG_HMAC_SHA1 | TEE_ALG_HMAC_SHA224 | TEE_ALG_HMAC_SHA256
@@ -852,7 +739,7 @@ pub(crate) fn crypto_mac_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) ->
     let cs_guard = cs.lock();
 
     // Clone the live MAC state and finalize the clone so callers that need
-    // digest-extract semantics (OP-TEE `TEE_DigestExtract` → `TEE_CopyOperation`)
+    // digest-extract semantics (GP `TEE_DigestExtract` → `TEE_CopyOperation`)
     // can still copy/continue the operation after `final`.
     match &cs_guard.ctx {
         CrypCtx::HmacCtx(HmacContext::HmacMd5(h)) => {
@@ -929,18 +816,6 @@ pub(crate) fn crypto_mac_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) ->
         }
         _ => Err(TEE_ERROR_BAD_PARAMETERS),
     }
-}
-
-// Crypto MAC free
-pub(crate) fn crypto_mac_free(ctx: impl CryptoMacCtx) {
-    // Err(TEE_ERROR_NOT_IMPLEMENTED)
-    ctx.free_ctx();
-}
-
-//
-pub(crate) fn crypto_mac_copy_state(ctx: &mut dyn CryptoMacCtx, src_ctx: &dyn CryptoMacCtx) {
-    // Err(TEE_ERROR_NOT_IMPLEMENTED)
-    ctx.copy_state(src_ctx)
 }
 
 pub(crate) fn crypto_cipher_init(
@@ -1083,7 +958,7 @@ pub(crate) fn crypto_cipher_final(
 
 /// XTS-specific final entry: consumes any trailing `input` plus flushes pending bytes
 /// within a single `in_final_syscall=true` scope so ciphertext-stealing tweak handling
-/// matches the OP-TEE single-shot reference.
+/// matches the GP single-shot reference.
 pub(crate) fn crypto_xts_cipher_final(
     cs: Arc<Mutex<TeeCrypState>>,
     input: &[u8],
@@ -1103,9 +978,9 @@ pub(crate) fn crypto_authenc_init(
     cs: Arc<Mutex<TeeCrypState>>,
     key: &[u8],
     nonce: &[u8],
-    aad_len: Option<usize>,
+    _aad_len: Option<usize>,
     tag_len: Option<usize>,
-    payload_len: Option<usize>,
+    _payload_len: Option<usize>,
 ) -> TeeResult {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -1223,7 +1098,7 @@ pub(crate) fn crypto_rsa_init(cs: Arc<Mutex<TeeCrypState>>, mode: TEE_OperationM
 
         match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_VERIFY => {
-                if let TeeCryptObj::rsa_public_key(rsa_key) = &obj_key1_guard.attr[0] {
+                if let TeeCryptObj::RsaPublicKey(rsa_key) = &obj_key1_guard.attr[0] {
                     cs_guard.ctx = CrypCtx::AsyCtx(AsymmetricCtx::RsaPublic {
                         n: bn_to_bytes(&rsa_key.n),
                         e: bn_to_bytes(&rsa_key.e),
@@ -1233,7 +1108,7 @@ pub(crate) fn crypto_rsa_init(cs: Arc<Mutex<TeeCrypState>>, mode: TEE_OperationM
                 }
             }
             TEE_OperationMode::TEE_MODE_DECRYPT | TEE_OperationMode::TEE_MODE_SIGN => {
-                if let TeeCryptObj::rsa_keypair(rsa_key) = &obj_key1_guard.attr[0] {
+                if let TeeCryptObj::RsaKeypair(rsa_key) = &obj_key1_guard.attr[0] {
                     cs_guard.ctx = CrypCtx::AsyCtx(AsymmetricCtx::RsaPrivate {
                         n: bn_to_bytes(&rsa_key.n),
                         e: bn_to_bytes(&rsa_key.e),
@@ -1265,8 +1140,8 @@ pub(crate) fn crypto_acipher_rsanopad_encrypt(
         if mod_size == 0 || input.len() > mod_size {
             return Err(TEE_ERROR_BAD_PARAMETERS);
         }
-        let pubkey =
-            rsa_ops::rsa_public_from_components(n, e).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let pubkey = rsa_ops::rsa_public_from_components(vec_as_bytes(n), vec_as_bytes(e))
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let mut scratch = vec![0u8; mod_size];
         let out_len = rsa_ops::rsa_nopad_encrypt(&pubkey, input, &mut scratch)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
@@ -1293,8 +1168,14 @@ pub(crate) fn crypto_acipher_rsanopad_decrypt(
         if mod_size == 0 || input.len() > mod_size {
             return Err(TEE_ERROR_BAD_PARAMETERS);
         }
-        let keypair = rsa_ops::rsa_key_from_components(n, e, d, p, q)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let keypair = rsa_ops::rsa_key_from_components(
+            vec_as_bytes(n),
+            vec_as_bytes(e),
+            vec_as_bytes(d),
+            vec_as_bytes(p),
+            vec_as_bytes(q),
+        )
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let mut scratch = vec![0u8; mod_size];
         let out_len = rsa_ops::rsa_nopad_decrypt(&keypair, input, &mut scratch)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
@@ -1324,7 +1205,7 @@ pub(crate) fn crypto_ecc_init(cs: Arc<Mutex<TeeCrypState>>, is_sm2: bool) -> Tee
 
         match mode {
             TEE_OperationMode::TEE_MODE_ENCRYPT | TEE_OperationMode::TEE_MODE_VERIFY => {
-                if let TeeCryptObj::ecc_public_key(ecc_key) = &obj_key1_guard.attr[0] {
+                if let TeeCryptObj::EccPublicKey(ecc_key) = &obj_key1_guard.attr[0] {
                     let curve = if is_sm2 {
                         EccCurve::Sm2
                     } else {
@@ -1341,7 +1222,7 @@ pub(crate) fn crypto_ecc_init(cs: Arc<Mutex<TeeCrypState>>, is_sm2: bool) -> Tee
                 }
             }
             TEE_OperationMode::TEE_MODE_DECRYPT | TEE_OperationMode::TEE_MODE_SIGN => {
-                if let TeeCryptObj::ecc_keypair(ecc_key) = &obj_key1_guard.attr[0] {
+                if let TeeCryptObj::EccKeypair(ecc_key) = &obj_key1_guard.attr[0] {
                     let curve = if is_sm2 {
                         EccCurve::Sm2
                     } else {
@@ -1370,8 +1251,9 @@ pub(crate) fn crypto_acipher_sm2_pke_encrypt(
     let cs_guard = cs.lock();
     if let CrypCtx::AsyCtx(AsymmetricCtx::EccPublic { x, y, .. }) = &cs_guard.ctx {
         let mut rng = TeeSoftwareRng::new();
-        let ct = tee_crypto::sm2::sm2_pke_encrypt(x, y, input, &mut rng)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let ct =
+            tee_crypto::sm2::sm2_pke_encrypt(vec_as_bytes(x), vec_as_bytes(y), input, &mut rng)
+                .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let ct = ct.as_bytes();
         let len = ct.len().min(output.len());
         output[..len].copy_from_slice(&ct[..len]);
@@ -1389,7 +1271,7 @@ pub(crate) fn crypto_acipher_sm2_pke_decrypt(
     let cs_guard = cs.lock();
     if let CrypCtx::AsyCtx(AsymmetricCtx::EccPrivate { secret, .. }) = &cs_guard.ctx {
         let ciphertext = ciphertext_from_tee(input, CiphertextAlgorithm::Sm2Pke);
-        let pt = tee_crypto::sm2::sm2_pke_decrypt(secret, &ciphertext)
+        let pt = tee_crypto::sm2::sm2_pke_decrypt(vec_as_bytes(secret), &ciphertext)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let pt = pt.expose_secret();
         let len = pt.len().min(output.len());
@@ -1413,8 +1295,8 @@ pub(crate) fn crypto_acipher_rsaes_encrypt(
     if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPublic { n, e }) = &cs_guard.ctx {
         check_rsa_modulus_output(n.len(), output.len(), required)?;
         let mut rng = TeeSoftwareRng::new();
-        let pubkey =
-            rsa_ops::rsa_public_from_components(n, e).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let pubkey = rsa_ops::rsa_public_from_components(vec_as_bytes(n), vec_as_bytes(e))
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let hash_algo = algo_to_rsa_hash(algo);
         let ct = match algo_to_enc_padding(algo) {
             RsaEncPadding::Pkcs1v15 => rsa_ops::rsa_encrypt_pkcs1v15(&pubkey, input, &mut rng)
@@ -1443,8 +1325,14 @@ pub(crate) fn crypto_acipher_rsaes_decrypt(
     let algo = cs_guard.algo;
 
     if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPrivate { n, e, d, p, q }) = &cs_guard.ctx {
-        let keypair = rsa_ops::rsa_key_from_components(n, e, d, p, q)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let keypair = rsa_ops::rsa_key_from_components(
+            vec_as_bytes(n),
+            vec_as_bytes(e),
+            vec_as_bytes(d),
+            vec_as_bytes(p),
+            vec_as_bytes(q),
+        )
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let hash_algo = algo_to_rsa_hash(algo);
         let pt = match algo_to_enc_padding(algo) {
             RsaEncPadding::Pkcs1v15 => {
@@ -1483,8 +1371,14 @@ pub(crate) fn crypto_acipher_rsassa_sign(
     if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPrivate { n, e, d, p, q }) = &cs_guard.ctx {
         check_rsa_modulus_output(n.len(), output.len(), required)?;
         let mut rng = TeeSoftwareRng::new();
-        let keypair = rsa_ops::rsa_key_from_components(n, e, d, p, q)
-            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let keypair = rsa_ops::rsa_key_from_components(
+            vec_as_bytes(n),
+            vec_as_bytes(e),
+            vec_as_bytes(d),
+            vec_as_bytes(p),
+            vec_as_bytes(q),
+        )
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let hash_algo = algo_to_rsa_hash(algo);
         let digest = rsa_digest_from_tee(hash_algo, input);
         let sig = match algo_to_sign_padding(algo) {
@@ -1524,8 +1418,8 @@ pub(crate) fn crypto_acipher_rsassa_verify(
     let algo = cs_guard.algo;
 
     if let CrypCtx::AsyCtx(AsymmetricCtx::RsaPublic { n, e }) = &cs_guard.ctx {
-        let pubkey =
-            rsa_ops::rsa_public_from_components(n, e).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        let pubkey = rsa_ops::rsa_public_from_components(vec_as_bytes(n), vec_as_bytes(e))
+            .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
         let hash_algo = algo_to_rsa_hash(algo);
         let digest = rsa_digest_from_tee(hash_algo, hash);
         match algo_to_sign_padding(algo) {
@@ -1586,7 +1480,7 @@ pub(crate) fn crypto_acipher_ecc_sign(
         let mut rng = TeeSoftwareRng::new();
         match algo {
             TEE_ALG_SM2_DSA_SM3 => {
-                let sig = tee_crypto::sm2::sm2_dsa_sign(secret, input, &mut rng)
+                let sig = tee_crypto::sm2::sm2_dsa_sign(vec_as_bytes(secret), input, &mut rng)
                     .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
                 let sig = sig.as_bytes();
                 *required = sig.len();
@@ -1606,8 +1500,9 @@ pub(crate) fn crypto_acipher_ecc_sign(
                     _ => return Err(TEE_ERROR_BAD_PARAMETERS),
                 };
                 let digest = ecc_digest_from_tee(hash_algo, input);
-                let sig = ecc_ops::ecc_sign(*curve, hash_algo, secret, &digest, &mut rng)
-                    .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+                let sig =
+                    ecc_ops::ecc_sign(*curve, hash_algo, vec_as_bytes(secret), &digest, &mut rng)
+                        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
                 let sig = sig.as_bytes();
                 *required = sig.len();
                 if output.len() < sig.len() {
@@ -1634,7 +1529,7 @@ pub(crate) fn crypto_acipher_ecc_verify(
         match algo {
             TEE_ALG_SM2_DSA_SM3 => {
                 // SM2 signatures may arrive either as raw `r||s` (64B) or DER
-                // (`0x30 len ...`). OP-TEE-generated sigs are raw, but vectors
+                // (`0x30 len ...`). GP-generated sigs are raw, but vectors
                 // copied from specs are usually DER — accept both.
                 let encoding = if signature.len() == 64 {
                     SignatureEncoding::Raw
@@ -1642,7 +1537,8 @@ pub(crate) fn crypto_acipher_ecc_verify(
                     SignatureEncoding::Der
                 };
                 let signature = signature_from_tee(signature, SignatureAlgorithm::Sm2Dsa, encoding);
-                tee_crypto::sm2::sm2_dsa_verify(x, y, hash, &signature).map_err(map_rsa_verify_err)
+                tee_crypto::sm2::sm2_dsa_verify(vec_as_bytes(x), vec_as_bytes(y), hash, &signature)
+                    .map_err(map_rsa_verify_err)
             }
             _ => {
                 let hash_algo = match algo {
@@ -1662,8 +1558,15 @@ pub(crate) fn crypto_acipher_ecc_verify(
                 };
                 let signature =
                     signature_from_tee(signature, SignatureAlgorithm::Ecdsa(*curve), encoding);
-                ecc_ops::ecc_verify(*curve, hash_algo, x, y, &digest, &signature)
-                    .map_err(map_rsa_verify_err)
+                ecc_ops::ecc_verify(
+                    *curve,
+                    hash_algo,
+                    vec_as_bytes(x),
+                    vec_as_bytes(y),
+                    &digest,
+                    &signature,
+                )
+                .map_err(map_rsa_verify_err)
             }
         }
     } else {

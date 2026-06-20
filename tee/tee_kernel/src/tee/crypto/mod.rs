@@ -6,5 +6,3 @@ pub mod bignum;
 #[allow(clippy::module_inception)]
 pub mod crypto;
 pub mod crypto_impl;
-pub mod sm3_hash;
-pub mod sm3_hmac;

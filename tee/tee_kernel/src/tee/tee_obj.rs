@@ -2,67 +2,57 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    boxed::Box,
-    sync::Arc,
-    vec::{self, Vec},
-};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{default, ffi::c_ulong, fmt, fmt::Debug};
 
-use bincode::de;
-use flatten_objects::FlattenObjects;
-use kerrno::{KError, KResult};
-use ksync::{Mutex, RwLock};
-use kthread::TeeSessionCtxTrait;
-use slab::Slab;
+use ksync::Mutex;
 use tee_raw_sys::{libc_compat::size_t, *};
 
 use super::{
     TeeResult,
-    crypto::bignum::BigNum,
-    tee_pobj::{tee_pobj, tee_pobj_release},
-    tee_ree_fs::tee_file_handle,
+    tee_pobj::{TeePobj, tee_pobj_release},
+    tee_ree_fs::TeeFsFd,
     tee_session::{with_tee_session_ctx, with_tee_session_ctx_mut},
-    tee_svc_cryp::{TeeCryptObj, TeeCryptObjAttr},
+    tee_svc_cryp::TeeCryptObj,
 };
 
-pub type tee_obj_id_type = c_ulong; //usize;
-/// The maximum number of open files
-pub const AX_TEE_OBJ_LIMIT: usize = 1024;
+/// GP: `tee_obj_id_type`
+pub type TeeObjIdType = c_ulong; //usize;
 
 // scope_local::scope_local! {
 //     /// The open objects for TA.
-//     pub static TEE_OBJ_TABLE: Arc<RwLock<Slab<Arc<tee_obj>>>> = Arc::default();
+//     pub static TEE_OBJ_TABLE: Arc<RwLock<Slab<Arc<TeeObj>>>> = Arc::default();
 // }
 
 #[repr(C)]
-pub struct tee_obj {
+/// GP: `struct tee_obj`
+pub struct TeeObj {
     pub info: TEE_ObjectInfo,
     pub busy: bool,      // true if used by an operation
     pub have_attrs: u32, // bitfield identifying set properties
     // void *attr;
     pub attr: Vec<TeeCryptObj>,
     pub ds_pos: size_t,
-    pub pobj: Option<Arc<tee_pobj>>,
+    pub pobj: Option<Arc<TeePobj>>,
     /// file handle for the pobject
-    pub fh: Option<Box<tee_file_handle>>,
+    pub fh: Option<Box<TeeFsFd>>,
 }
 
-impl Debug for tee_obj {
+impl Debug for TeeObj {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let fd_dbg = self.fh.as_ref().map(|h| h.fd.fd).unwrap_or(-1);
         write!(
             f,
-            "tee_obj{{info: {:?}, busy: {:?}, have_attrs: {:010X?}, attr: {:?}, ds_pos: {:010X?}, \
+            "TeeObj{{info: {:?}, busy: {:?}, have_attrs: {:010X?}, attr: {:?}, ds_pos: {:010X?}, \
              pobj: {:?}, fh: {:?}}}",
             self.info, self.busy, self.have_attrs, self.attr, self.ds_pos, self.pobj, fd_dbg
         )
     }
 }
 
-impl default::Default for tee_obj {
+impl default::Default for TeeObj {
     fn default() -> Self {
-        tee_obj {
+        TeeObj {
             info: TEE_ObjectInfo {
                 objectId: 0,
                 objectType: 0,
@@ -83,22 +73,22 @@ impl default::Default for tee_obj {
     }
 }
 
-fn obj_inner_to_outer(obj: tee_obj_id_type) -> tee_obj_id_type {
-    (obj + 1) as tee_obj_id_type
+fn obj_inner_to_outer(obj: TeeObjIdType) -> TeeObjIdType {
+    (obj + 1) as TeeObjIdType
 }
 
-fn obj_outer_to_inner(obj: tee_obj_id_type) -> tee_obj_id_type {
+fn obj_outer_to_inner(obj: TeeObjIdType) -> TeeObjIdType {
     debug_assert!(obj > 0);
-    (obj - 1) as tee_obj_id_type
+    (obj - 1) as TeeObjIdType
 }
 
-pub fn tee_obj_add(mut obj: tee_obj) -> TeeResult<tee_obj_id_type> {
+pub fn tee_obj_add(mut obj: TeeObj) -> TeeResult<TeeObjIdType> {
     with_tee_session_ctx_mut(|ctx| {
         // 获取一个可用的 ID
         let vacant = ctx.objects.vacant_entry();
         let mut id = vacant.key();
 
-        id = obj_inner_to_outer(id as tee_obj_id_type) as usize;
+        id = obj_inner_to_outer(id as TeeObjIdType) as usize;
         // 设置 objectId
         obj.info.objectId = id as u32;
 
@@ -107,11 +97,11 @@ pub fn tee_obj_add(mut obj: tee_obj) -> TeeResult<tee_obj_id_type> {
         let arc_obj = Arc::new(Mutex::new(obj));
         vacant.insert(arc_obj);
 
-        Ok(id as tee_obj_id_type)
+        Ok(id as TeeObjIdType)
     })
 }
 
-pub fn tee_obj_get(obj_id: tee_obj_id_type) -> TeeResult<Arc<Mutex<tee_obj>>> {
+pub fn tee_obj_get(obj_id: TeeObjIdType) -> TeeResult<Arc<Mutex<TeeObj>>> {
     let obj_id = obj_outer_to_inner(obj_id);
     with_tee_session_ctx(|ctx| match ctx.objects.get(obj_id as _) {
         Some(obj) => Ok(Arc::clone(obj)),
@@ -119,14 +109,14 @@ pub fn tee_obj_get(obj_id: tee_obj_id_type) -> TeeResult<Arc<Mutex<tee_obj>>> {
     })
 }
 
-/// delete the tee_obj from the session objects table
+/// delete the TeeObj from the session objects table
 ///
 /// # Arguments
-/// * `obj_id` - the id of the tee_obj
-pub fn tee_obj_delete(obj_id: u32) -> TeeResult<Arc<Mutex<tee_obj>>> {
-    let obj_id = obj_outer_to_inner(obj_id as tee_obj_id_type);
+/// * `obj_id` - the id of the TeeObj
+pub fn tee_obj_delete(obj_id: u32) -> TeeResult<Arc<Mutex<TeeObj>>> {
+    let obj_id = obj_outer_to_inner(obj_id as TeeObjIdType);
     // remove from session objects
-    with_tee_session_ctx_mut(|ctx| -> TeeResult<Arc<Mutex<tee_obj>>> {
+    with_tee_session_ctx_mut(|ctx| -> TeeResult<Arc<Mutex<TeeObj>>> {
         let obj = ctx
             .objects
             .try_remove(obj_id as _)
@@ -135,15 +125,15 @@ pub fn tee_obj_delete(obj_id: u32) -> TeeResult<Arc<Mutex<tee_obj>>> {
     })
 }
 
-/// close the tee_obj
+/// close the TeeObj
 ///
-/// 1. delete the tee_obj from the session objects table
-/// 2. if the tee_obj is persistent, close the file handle and
-/// 3. release the tee_pobj
-/// 4. free the tee_obj memory
+/// 1. delete the TeeObj from the session objects table
+/// 2. if the TeeObj is persistent, close the file handle and
+/// 3. release the TeePobj
+/// 4. free the TeeObj memory
 ///
 /// # Arguments
-/// * `obj_id` - the id of the tee_obj
+/// * `obj_id` - the id of the TeeObj
 /// # Returns
 /// * `TeeResult` - the result of the operation
 pub fn tee_obj_close(obj_id: u32) -> TeeResult {
@@ -169,13 +159,13 @@ pub fn tee_obj_close(obj_id: u32) -> TeeResult {
 
 /// Close all open objects in the current session context.
 ///
-/// Mirrors OP-TEE `tee_obj_close_all()` in `release_utc_state`.
+/// Mirrors GP `tee_obj_close_all()` in `release_utc_state`.
 pub fn tee_obj_close_all() -> TeeResult {
     let ids: Vec<u32> = with_tee_session_ctx(|ctx| {
         Ok(ctx
             .objects
             .iter()
-            .map(|(k, _)| obj_inner_to_outer(k as tee_obj_id_type) as u32)
+            .map(|(k, _)| obj_inner_to_outer(k as TeeObjIdType) as u32)
             .collect())
     })?;
     for id in ids {
@@ -188,12 +178,12 @@ pub fn tee_obj_close_all() -> TeeResult {
 
 #[unittest::def_test(custom)]
 fn test_tee_obj_add_get() {
-    let mut obj = tee_obj {
+    let obj = TeeObj {
         busy: true,
         ..Default::default()
     };
-    let obj_id = tee_obj_add(obj).expect("Failed to add tee_obj");
-    info!("Added tee_obj with id {}", obj_id);
-    let retrieved_obj = tee_obj_get(obj_id).expect("Failed to get tee_obj");
+    let obj_id = tee_obj_add(obj).expect("Failed to add TeeObj");
+    info!("Added TeeObj with id {}", obj_id);
+    let retrieved_obj = tee_obj_get(obj_id).expect("Failed to get TeeObj");
     assert!(retrieved_obj.lock().busy);
 }

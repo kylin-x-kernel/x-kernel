@@ -31,7 +31,6 @@ kerrno.workspace = true
 kvfs.workspace = true
 kfs.workspace = true
 khal.workspace = true
-kio.workspace = true
 klogger.workspace = true
 knet.workspace = true
 ksync.workspace = true
@@ -55,13 +54,8 @@ kbuild_config.workspace = true
 subtle = { version = "2", default-features = false }
 static_assertions = "1.1.0"
 memoffset = { version = "0.9", default-features = false }
-flatten_objects = "0.2.4"
 slab = { workspace = true }
 smccc.workspace = true
-rand = { version = "0.9.1", default-features = false, features = [
-    "alloc",
-    "small_rng",
-] }
 
 # [dev-dependencies]
 # kapi = { path = "../../api/kapi" }

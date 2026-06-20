@@ -2,19 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(non_camel_case_types, non_snake_case)]
-#![allow(unused)]
-#![allow(missing_docs)]
-#![allow(non_upper_case_globals)]
+use core::ffi::c_uint;
 
-use core::{arch::asm, ffi::c_uint};
-
-use cfg_if::cfg_if;
 use khal::uspace::UserContext;
 use linux_sysno::Sysno;
-use tee_raw_sys::{TEE_ERROR_NOT_SUPPORTED, TeeTime};
+use tee_raw_sys::TEE_ERROR_NOT_SUPPORTED;
 
 use crate::tee::{
     tee_cancel::{
@@ -32,7 +24,7 @@ use crate::tee::{
         syscall_cryp_obj_reset, syscall_cryp_obj_restrict_usage, syscall_obj_generate_key,
     },
     tee_svc_cryp2::{
-        CipherPaddingMode, syscall_asymm_operate, syscall_asymm_verify, syscall_authenc_dec_final,
+        syscall_asymm_operate, syscall_asymm_verify, syscall_authenc_dec_final,
         syscall_authenc_enc_final, syscall_authenc_init, syscall_authenc_update_aad,
         syscall_authenc_update_payload, syscall_cipher_final, syscall_cipher_init,
         syscall_cipher_update, syscall_cryp_random_number_generate, syscall_cryp_state_alloc,
@@ -59,6 +51,8 @@ mod config;
 mod crypto;
 mod fs_dirfile;
 mod fs_htree;
+#[cfg(unittest)]
+mod fs_htree_tests;
 mod huk_subkey;
 
 mod libutee;
@@ -97,6 +91,32 @@ pub use tee_api_defines_extensions::*;
 #[cfg(unittest)]
 pub use tee_session::set_tee_session_ctx;
 pub use tee_session::tee_session_release_state;
+
+/// 7th syscall register argument (see NOTE TODO in `dispatch_irq_tee_syscall`).
+fn tee_syscall_arg6(uctx: &UserContext) -> usize {
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "aarch64")] {
+            uctx.x[6] as usize
+        } else if #[cfg(target_arch = "x86_64")] {
+            uctx.r12 as usize
+        } else {
+            0
+        }
+    }
+}
+
+/// 7th and 8th syscall register arguments for `tee_scn_storage_obj_create`.
+fn tee_syscall_storage_create_extras(uctx: &UserContext) -> (usize, *mut c_uint) {
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "aarch64")] {
+            (uctx.x[6] as usize, uctx.x[7] as *mut c_uint)
+        } else if #[cfg(target_arch = "x86_64")] {
+            (uctx.r12 as usize, uctx.r13 as *mut c_uint)
+        } else {
+            (0, core::ptr::null_mut())
+        }
+    }
+}
 
 /// Dispatch TEE-specific syscalls from the userspace context
 pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
@@ -241,16 +261,15 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
             uctx.arg4(),
         ),
 
+        // NOTE TODO: Syscalls with 7+ register arguments — `tee_scn_authenc_enc_final`,
+        // `tee_scn_authenc_dec_final`, `tee_scn_asymm_operate`, `tee_scn_asymm_verify`, and
+        // `tee_scn_storage_obj_create` — pass arg0–arg5 via `uctx.arg0()`..`arg5()` on all
+        // architectures; extra parameter(s) are read from arch-specific registers (see
+        // rust-libutee `syscalls/arch/`). Only aarch64 (x6/x7) and x86_64 (r12/r13) are
+        // wired up here. On riscv64/loongarch64 the extras default to 0 until kcpu and TA
+        // stubs agree on the ABI (7th → a6; 8th → user stack or a spare register).
         Sysno::tee_scn_authenc_enc_final => {
-            let mut tag_len: usize = 0;
-
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "aarch64")] {
-                    tag_len = uctx.x[6] as usize;
-                } else if #[cfg(target_arch = "x86_64")] {
-                    tag_len = uctx.r12 as usize;
-                }
-            }
+            let tag_len = tee_syscall_arg6(uctx);
             syscall_authenc_enc_final(
                 uctx.arg0(),
                 uctx.arg1(),
@@ -263,15 +282,7 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         }
 
         Sysno::tee_scn_authenc_dec_final => {
-            let mut tag_len: usize = 0;
-
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "aarch64")] {
-                    tag_len = uctx.x[6] as usize;
-                } else if #[cfg(target_arch = "x86_64")] {
-                    tag_len = uctx.r12 as usize;
-                }
-            }
+            let tag_len = tee_syscall_arg6(uctx);
             syscall_authenc_dec_final(
                 uctx.arg0(),
                 uctx.arg1(),
@@ -284,15 +295,7 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         }
 
         Sysno::tee_scn_asymm_operate => {
-            let mut dst_len: usize = 0;
-
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "aarch64")] {
-                    dst_len = uctx.x[6] as usize;
-                } else if #[cfg(target_arch = "x86_64")] {
-                    dst_len = uctx.r12 as usize;
-                }
-            }
+            let dst_len = tee_syscall_arg6(uctx);
             syscall_asymm_operate(
                 uctx.arg0(),
                 uctx.arg1(),
@@ -305,15 +308,7 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         }
 
         Sysno::tee_scn_asymm_verify => {
-            let mut sig_len: usize = 0;
-
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "aarch64")] {
-                    sig_len = uctx.x[6] as usize;
-                } else if #[cfg(target_arch = "x86_64")] {
-                    sig_len = uctx.r12 as usize;
-                }
-            }
+            let sig_len = tee_syscall_arg6(uctx);
             syscall_asymm_verify(
                 uctx.arg0(),
                 uctx.arg1(),
@@ -334,18 +329,7 @@ pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResu
         ),
 
         Sysno::tee_scn_storage_obj_create => {
-            let mut len: usize = 0;
-            let mut obj_ptr: *mut c_uint = core::ptr::null_mut();
-
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "aarch64")] {
-                    len = uctx.x[6] as usize;
-                    obj_ptr = uctx.x[7] as *mut c_uint;
-                } else if #[cfg(target_arch = "x86_64")] {
-                    len = uctx.r12 as usize;
-                    obj_ptr = uctx.r13 as *mut c_uint;
-                }
-            }
+            let (len, obj_ptr) = tee_syscall_storage_create_extras(uctx);
             syscall_storage_obj_create(
                 uctx.arg0() as _,
                 uctx.arg1() as _,

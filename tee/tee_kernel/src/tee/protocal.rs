@@ -2,12 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(dead_code)]
-
 use alloc::{string::String, vec::Vec};
 
 use bincode::{Decode, Encode};
 
+#[allow(dead_code)]
 #[derive(Encode, Decode)]
 pub enum TARequest {
     Register { uuid: String },

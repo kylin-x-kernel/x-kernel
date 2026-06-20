@@ -2,34 +2,33 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::{fmt, fmt::Debug};
 
 use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
-use cfg_if::cfg_if;
 use memoffset::offset_of;
 use subtle::ConstantTimeEq;
 use tee_crypto::{
     aead::{Aead, Aes128GcmAead, Sm4GcmAead},
     hash::{Digest, Sha256, Sm3},
 };
+#[cfg(not(feature = "tee_ss_smx"))]
+use tee_raw_sys::{TEE_ALG_AES_ECB_NOPAD, TEE_ALG_HMAC_SHA256};
 use tee_raw_sys::{
-    TEE_ALG_AES_ECB_NOPAD, TEE_ALG_AES_GCM, TEE_ALG_HMAC_SHA256, TEE_ALG_HMAC_SM3, TEE_ALG_SHA256,
-    TEE_ALG_SM3, TEE_ALG_SM4_ECB_NOPAD, TEE_ALG_SM4_GCM, TEE_ERROR_BAD_PARAMETERS,
-    TEE_ERROR_BAD_STATE, TEE_ERROR_CORRUPT_OBJECT, TEE_ERROR_GENERIC, TEE_ERROR_MAC_INVALID,
-    TEE_ERROR_NOT_IMPLEMENTED, TEE_ERROR_NOT_SUPPORTED, TEE_ERROR_SECURITY, TEE_ERROR_SHORT_BUFFER,
-    TEE_OperationMode, TEE_UUID,
+    TEE_ALG_AES_GCM, TEE_ALG_SHA256, TEE_ALG_SM3, TEE_ALG_SM4_GCM, TEE_ERROR_BAD_PARAMETERS,
+    TEE_ERROR_CORRUPT_OBJECT, TEE_ERROR_GENERIC, TEE_ERROR_MAC_INVALID, TEE_ERROR_NOT_IMPLEMENTED,
+    TEE_ERROR_NOT_SUPPORTED, TEE_ERROR_SECURITY, TEE_ERROR_SHORT_BUFFER, TEE_OperationMode,
+    TEE_UUID,
 };
 
-use super::utee_defines::{
-    TEE_AES_BLOCK_SIZE, TEE_SHA256_HASH_SIZE, TEE_SM3_HASH_SIZE, TEE_SM4_BLOCK_SIZE,
-};
+use super::utee_defines::TEE_SM3_HASH_SIZE;
+#[cfg(not(feature = "tee_ss_smx"))]
+use super::utee_defines::{TEE_AES_BLOCK_SIZE, TEE_SHA256_HASH_SIZE};
 use crate::tee::{
     TeeResult,
-    common::file_ops::FileVariant,
     rng_software::crypto_rng_read,
     tee_fs_key_manager::{TEE_FS_KM_FEK_SIZE, tee_fs_fek_crypt},
-    tee_ree_fs::{BLOCK_SIZE, TeeFsFdAux, TeeFsHtreeStorageOps},
+    tee_ree_fs::{TeeFsFdAux, TeeFsHtreeStorageOps},
     utee_defines::TeeAlg,
     utils::slice_fmt,
 };
@@ -38,27 +37,17 @@ pub const TEE_FS_HTREE_IV_SIZE: usize = 16;
 pub const TEE_FS_HTREE_FEK_SIZE: usize = 16;
 pub const TEE_FS_HTREE_TAG_SIZE: usize = 16;
 
-pub const TEE_FS_HTREE_CHIP_ID_SIZE: usize = 32;
-
 cfg_if::cfg_if! {
     if #[cfg(feature = "tee_ss_smx")] {
         pub const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SM3;
         pub const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SM3_HASH_SIZE;
-        pub const TEE_FS_HTREE_ENC_ALG: TeeAlg = TEE_ALG_SM4_ECB_NOPAD;
-        pub const TEE_FS_HTREE_ENC_SIZE: usize = TEE_SM4_BLOCK_SIZE;
         pub const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_SM4_GCM;
-        pub const TEE_FS_HTREE_HMAC_ALG: TeeAlg = TEE_ALG_HMAC_SM3;
     } else {
         pub const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SHA256;
         pub const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SHA256_HASH_SIZE;
-        pub const TEE_FS_HTREE_ENC_ALG: TeeAlg = TEE_ALG_AES_ECB_NOPAD;
-        pub const TEE_FS_HTREE_ENC_SIZE: usize = TEE_AES_BLOCK_SIZE;
         pub const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_AES_GCM;
-        pub const TEE_FS_HTREE_HMAC_ALG: TeeAlg = TEE_ALG_HMAC_SHA256;
     }
 }
-pub const TEE_FS_HTREE_TSK_SIZE: usize = TEE_FS_HTREE_HASH_SIZE;
-pub const TEE_FS_HTREE_SSK_SIZE: usize = TEE_FS_HTREE_HASH_SIZE;
 
 pub const HTREE_NODE_COMMITTED_BLOCK: u32 = 1 << 0; // 即 0x1
 
@@ -493,6 +482,7 @@ pub fn rpc_write_node(
 /// * `fd` - the file descriptor
 /// # Returns
 /// * `TeeResult` - the result of the operation
+#[cfg(unittest)]
 pub fn calc_node(
     node: &mut HtreeNode,
     ht_data: &TeeFsHtreeData,
@@ -613,42 +603,9 @@ pub fn calc_node_hash(
 /// traverse the tree post order
 ///
 /// # Arguments
-/// * `cb` - the callback function
-/// * `node` - the node
-/// * `tee_fs_htree` - the tree
-/// * `fd` - the file descriptor
-/// # Returns
-/// * `TeeResult` - the result of the operation
-pub fn traverse_post_order<F>(
-    mut cb: F,
-    node: &mut HtreeNode,
-    tee_fs_htree: &mut TeeFsHtree,
-    mut fd: Option<&mut FileVariant>,
-) -> TeeResult
-where
-    F: FnMut(&mut TeeFsHtree, &mut HtreeNode, Option<&mut FileVariant>) -> TeeResult,
-{
-    if let Some(left) = node.left.get_mut() {
-        traverse_post_order(&mut cb, left, tee_fs_htree, fd.as_deref_mut())?;
-    }
-
-    if let Some(right) = node.right.get_mut() {
-        traverse_post_order(&mut cb, right, tee_fs_htree, fd.as_deref_mut())?;
-    }
-
-    // 回调当前节点
-    let _res = cb(tee_fs_htree, node, fd);
-
-    Ok(())
-}
-
-/// traverse the tree post order
-///
-/// # Arguments
 /// * `node` - the node
 /// * `ht_data` - the data of the tree
 /// * `visitor` - the visitor function
-/// * `fd` - the file descriptor
 /// # Returns
 /// * `TeeResult` - the result of the operation
 pub fn post_order_traverse<F>(
@@ -686,6 +643,7 @@ where
 /// * `fd` - the file descriptor
 /// # Returns
 /// * `TeeResult` - the result of the operation
+#[cfg(unittest)]
 pub fn post_order_traverse_mut<F>(
     node: &mut HtreeNode,
     ht_data: &TeeFsHtreeData,
@@ -713,22 +671,6 @@ where
     // TODO 实际应用中你可能需要更健壮的错误处理。
     visitor(node, ht_data, storage)?; // 将 RefMut<HtreeNode> 传递给 visitor
 
-    Ok(())
-}
-
-/// free the node
-///
-/// # Arguments
-/// * `node` - the node
-/// * `ht_data` - the data of the tree
-/// * `fd` - the file descriptor
-/// # Returns
-/// * `TeeResult` - the result of the operation
-pub fn free_node(
-    _node: &HtreeNode,
-    _ht_data: &TeeFsHtreeData,
-    // _fd: Option<&mut FileVariant>,
-) -> TeeResult {
     Ok(())
 }
 
@@ -780,6 +722,7 @@ pub fn verify_node(
 /// * `fd` - the file descriptor
 /// # Returns
 /// * `TeeResult` - the result of the operation
+#[cfg(unittest)]
 pub fn print_node_hash(
     node: &HtreeNode,
     ht_data: &TeeFsHtreeData,
@@ -1222,6 +1165,7 @@ where
 /// * `visitor` - the visitor function
 /// # Returns
 /// * `TeeResult` - the result of the operation
+#[cfg(unittest)]
 fn htree_traverse_post_order_mut<F>(ht: &mut TeeFsHtree, visitor: &mut F) -> TeeResult
 where
     F: FnMut(&mut HtreeNode, &TeeFsHtreeData, &dyn TeeFsHtreeStorageOps) -> TeeResult,
@@ -1249,6 +1193,7 @@ pub fn verify_tree(ht: &TeeFsHtree) -> TeeResult {
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
+#[cfg(unittest)]
 pub fn calc_tree(ht: &mut TeeFsHtree) -> TeeResult {
     htree_traverse_post_order_mut(ht, &mut calc_node)?;
     Ok(())
@@ -1260,6 +1205,7 @@ pub fn calc_tree(ht: &mut TeeFsHtree) -> TeeResult {
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
+#[cfg(unittest)]
 pub fn print_tree_hash(ht: &TeeFsHtree) -> TeeResult {
     htree_traverse_post_order(ht, &mut print_node_hash)?;
 
@@ -1606,7 +1552,7 @@ pub fn verify_root(ht: &mut TeeFsHtree) -> TeeResult {
 pub fn tee_fs_htree_sync_to_storage(
     ht: &mut TeeFsHtree,
     // fd: &mut FileVariant,
-    mut hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
+    hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
 ) -> TeeResult {
     // if ht.is_none() {
     //     return Err(TeeResultCode::ErrorCorruptObject);
@@ -1684,7 +1630,7 @@ pub fn tee_fs_htree_open(
 
     let init_result = (|| {
         if create {
-            let mut dummy_head = TeeFsHtreeImage::default();
+            let dummy_head = TeeFsHtreeImage::default();
             tee_debug!("tee_fs_htree_open: create: true");
             crypto_rng_read(&mut ht.data.fek)?;
             tee_fs_fek_crypt(
@@ -2049,7 +1995,7 @@ mod tests_htree_basic {
 
     #[unittest::def_test]
     pub fn test_calc_node_hash() {
-        let mut node = HtreeNode::default();
+        let node = HtreeNode::default();
         let meta = TeeFsHtreeMeta::default();
         let mut digest = [0u8; TEE_FS_HTREE_HASH_SIZE];
 
@@ -2409,11 +2355,15 @@ mod tests_node_id_to_level {
         assert_eq!(node_id_to_level(1 << 30), 31);
     }
 
+    // Kept for std `#[should_panic]` semantics; not registered via `def_test` because
+    // kernel unittest cannot catch panics yet.
+    #[allow(dead_code)]
     #[should_panic]
     pub fn test_node_id_zero_should_panic() {
         node_id_to_level(0);
     }
 
+    #[allow(dead_code)]
     #[should_panic]
     pub fn test_node_id_max_should_panic() {
         node_id_to_level(usize::MAX);
@@ -2849,6 +2799,8 @@ mod tests_get_node {
 
 #[unittest::mod_test]
 mod tests_authenc_funcs {
+    use alloc::string::String;
+
     use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
@@ -3058,7 +3010,7 @@ pub mod tests_fs_htree {
     use unittest::{assert, assert_eq};
 
     use super::*;
-    use crate::tee::common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT};
+    use crate::tee::common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT, FileVariant};
 
     #[unittest::def_test(custom)]
     fn test_tee_fs_htree_open() {

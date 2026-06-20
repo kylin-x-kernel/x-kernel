@@ -2,22 +2,18 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#[cfg(unittest)]
 use hex::{decode_to_slice, encode_to_slice};
 
-#[allow(unused)]
+#[cfg(unittest)]
 pub const fn tee_b2hs_hsbuf_size(x: usize) -> usize {
     x.saturating_mul(2).saturating_add(1)
-}
-
-#[allow(unused)]
-pub const fn tee_hs2b_bbuf_size(x: usize) -> usize {
-    // saturating_add 避免 x = usize::MAX 时溢出
-    x.saturating_add(1) >> 1
 }
 
 /// 将二进制数据 `b` 编码为十六进制字符串（写入 `hs`）
 ///
 /// 返回写入的长度（不包含末尾 0）
+#[cfg(unittest)]
 pub fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
     let expected_len = b.len() * 2;
 
@@ -40,6 +36,7 @@ pub fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
 /// 将十六进制字符串 `hs` 解码为二进制（写入 `b`）
 ///
 /// 返回写入的字节数
+#[cfg(unittest)]
 pub fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, ()> {
     let hslen = hs.len();
     if !hslen.is_multiple_of(2) {

@@ -11,7 +11,6 @@ use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_SECURITY, TEE_ERROR_TIME_NOT_SET,
 
 use super::{
     TeeResult,
-    common::file_ops::FileVariant,
     fs_htree::{
         TEE_FS_HTREE_HASH_SIZE, TeeFsHtree, TeeFsHtreeImage, TeeFsHtreeNodeImage, TeeFsHtreeType,
         print_tree_hash, tee_fs_htree_close, tee_fs_htree_open, tee_fs_htree_read_block,
@@ -78,18 +77,18 @@ pub fn test_get_offs_size(typ: TeeFsHtreeType, idx: usize, vers: u8) -> TeeResul
 }
 
 #[derive(Clone)]
-pub struct test_htree_storage_inner {
+pub struct TestHtreeStorageInner {
     pub data: Vec<u8>,
     pub data_len: usize,
     pub data_alloced: usize,
     pub block: Vec<u8>,
 }
 
-impl Debug for test_htree_storage_inner {
+impl Debug for TestHtreeStorageInner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "test_htree_storage_inner: data.len(): {:X?}, data_len: {:X?}, data_alloced: {:X?}, \
+            "TestHtreeStorageInner: data.len(): {:X?}, data_len: {:X?}, data_alloced: {:X?}, \
              block.len(): {:X?}",
             self.data.len(),
             self.data_len,
@@ -100,19 +99,19 @@ impl Debug for test_htree_storage_inner {
 }
 
 #[derive(Debug)]
-pub struct test_htree_storage {
-    inner: Mutex<test_htree_storage_inner>,
+pub struct TestHtreeStorage {
+    inner: Mutex<TestHtreeStorageInner>,
 }
 
-impl Clone for test_htree_storage {
+impl Clone for TestHtreeStorage {
     fn clone(&self) -> Self {
-        test_htree_storage {
+        TestHtreeStorage {
             inner: Mutex::new(self.inner.lock().clone()),
         }
     }
 }
 
-impl TeeFsHtreeStorageOps for test_htree_storage {
+impl TeeFsHtreeStorageOps for TestHtreeStorage {
     fn block_size(&self) -> usize {
         TEST_BLOCK_SIZE
     }
@@ -211,10 +210,14 @@ impl TeeFsHtreeStorageOps for test_htree_storage {
         // TODO: is this necessary?
         Ok(data.len())
     }
+}
 
-    fn clone_box(&self) -> Box<dyn TeeFsHtreeStorageOps> {
-        Box::new(self.clone())
-    }
+fn clone_test_storage(storage: &dyn TeeFsHtreeStorageOps) -> Box<dyn TeeFsHtreeStorageOps> {
+    let any = storage as &dyn Any;
+    let mock = any
+        .downcast_ref::<TestHtreeStorage>()
+        .expect("test storage only");
+    Box::new(mock.clone())
 }
 
 fn val_from_bn_n_salt(bn: usize, n: usize, salt: u8) -> u32 {
@@ -225,7 +228,6 @@ fn val_from_bn_n_salt(bn: usize, n: usize, salt: u8) -> u32 {
 
 fn write_block(ht: &mut TeeFsHtree, bn: usize, salt: u8) -> TeeResult {
     let mut b = [0u32; TEST_BLOCK_SIZE / size_of::<u32>()];
-    let mut n = 0;
 
     for n in 0..b.len() {
         b[n] = val_from_bn_n_salt(bn, n, salt);
@@ -240,7 +242,6 @@ fn write_block(ht: &mut TeeFsHtree, bn: usize, salt: u8) -> TeeResult {
 
 fn read_block(ht: &mut TeeFsHtree, bn: usize, salt: u8) -> TeeResult {
     let mut b = [0u32; TEST_BLOCK_SIZE / size_of::<u32>()];
-    let mut n = 0;
 
     let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut b);
 
@@ -289,7 +290,7 @@ fn do_range_backwards(
 }
 
 fn htree_test_rewrite(
-    aux: &mut test_htree_storage,
+    aux: &mut TestHtreeStorage,
     num_blocks: usize,
     w_unsync_begin: usize,
     w_unsync_num: usize,
@@ -303,7 +304,7 @@ fn htree_test_rewrite(
     let alloced = aux_inner.data_alloced;
     aux_inner.data[..alloced].fill(0xce);
 
-    let storage = Box::new(test_htree_storage {
+    let storage = Box::new(TestHtreeStorage {
         inner: Mutex::new(aux_inner.clone()),
     });
 
@@ -348,8 +349,8 @@ fn htree_test_rewrite(
     do_range(read_block, &mut ht, 0, num_blocks, salt as u8)?;
 
     info!("------ Close and reopen the hash-tree ------");
-    let storage = ht.storage.clone_box();
-    tee_fs_htree_close(ht);
+    let storage = clone_test_storage(ht.storage.as_ref());
+    tee_fs_htree_close(ht)?;
     tee_debug!("storage: {:?}", storage.as_ref());
     let mut ht = tee_fs_htree_open(storage, false, Some(&mut hash), Some(&TEE_UUID::default()))
         .inspect_err(|e| {
@@ -415,8 +416,8 @@ fn htree_test_rewrite(
          undo the changes since last call to tee_fs_htree_sync_to_storage(). Reopen the hash-tree \
          and verify that recent changes indeed was discarded. ------"
     );
-    let storage = ht.storage.clone_box();
-    tee_fs_htree_close(ht);
+    let storage = clone_test_storage(ht.storage.as_ref());
+    tee_fs_htree_close(ht)?;
     let mut ht = tee_fs_htree_open(storage, false, Some(&mut hash), Some(&TEE_UUID::default()))?;
     do_range(read_block, &mut ht, 0, num_blocks, salt as u8)?;
 
@@ -424,18 +425,18 @@ fn htree_test_rewrite(
         "------ Close, reopen and verify that all blocks are read as expected again but this time \
          based on the counter value in struct tee_fs_htree_image. ------"
     );
-    let storage = ht.storage.clone_box();
-    tee_fs_htree_close(ht);
+    let storage = clone_test_storage(ht.storage.as_ref());
+    tee_fs_htree_close(ht)?;
     let mut ht = tee_fs_htree_open(storage, false, None, Some(&TEE_UUID::default()))?;
     do_range(read_block, &mut ht, 0, num_blocks, salt as u8)?;
 
     Ok(())
 }
 
-fn aux_alloc(num_blocks: usize) -> TeeResult<test_htree_storage> {
+fn aux_alloc(num_blocks: usize) -> TeeResult<TestHtreeStorage> {
     let (offs, sz) = test_get_offs_size(TeeFsHtreeType::Block, num_blocks, 1)?;
-    let aux = test_htree_storage {
-        inner: Mutex::new(test_htree_storage_inner {
+    let aux = TestHtreeStorage {
+        inner: Mutex::new(TestHtreeStorageInner {
             data: vec![0; offs + sz],
             data_len: 0,
             data_alloced: offs + sz,
@@ -449,15 +450,12 @@ fn test_corrupt_type(
     uuid: &TEE_UUID,
     hash: &mut [u8; TEE_FS_HTREE_HASH_SIZE],
     num_blocks: usize,
-    aux: &mut test_htree_storage,
+    aux: &mut TestHtreeStorage,
     typ: TeeFsHtreeType,
     idx: usize,
 ) -> TeeResult {
-    let mut offs: usize = 0;
-    let mut size: usize = 0;
-    let mut size0: usize = 0;
-
-    (offs, size0) = test_get_offs_size(typ, idx, 0)?;
+    let (mut offs, size0) = test_get_offs_size(typ, idx, 0)?;
+    let mut size = 0usize;
 
     tee_debug!(
         "test_corrupt_type: typ: {:?}, idx: {:?}, offs: {:X?}, size0: {:X?}",
@@ -470,9 +468,9 @@ fn test_corrupt_type(
     let mut n: usize = 0;
     let res = (|| -> TeeResult {
         loop {
-            let mut aux2 = aux.clone();
+            let aux2 = aux.clone();
             {
-                let aux_inner = aux.inner.lock();
+                let _aux_inner = aux.inner.lock();
                 let mut aux2_inner = aux2.inner.lock();
 
                 // aux2_inner.data[..aux_inner.data_len]
@@ -553,7 +551,7 @@ fn test_corrupt_type(
 }
 
 fn test_corrupt(num_blocks: usize) -> TeeResult {
-    let mut aux = aux_alloc(num_blocks)?;
+    let aux = aux_alloc(num_blocks)?;
     let mut hash = [0u8; TEE_FS_HTREE_HASH_SIZE];
     let uuid = TEE_UUID::default();
 
@@ -570,7 +568,7 @@ fn test_corrupt(num_blocks: usize) -> TeeResult {
     do_range(write_block, &mut ht, 0, num_blocks, 1)?;
     tee_fs_htree_sync_to_storage(&mut ht, Some(&mut hash))?;
 
-    let mut aux = ht.storage.clone_box();
+    let aux = clone_test_storage(ht.storage.as_ref());
     tee_fs_htree_close(ht)?;
 
     // Verify that the object can be read correctly
@@ -578,15 +576,15 @@ fn test_corrupt(num_blocks: usize) -> TeeResult {
     let mut ht = tee_fs_htree_open(aux, false, Some(&mut hash), Some(&uuid))?;
     tee_debug!("tee_fs_htree_open: ht: {:?}", &ht);
     do_range(read_block, &mut ht, 0, num_blocks, 1)?;
-    let aux = ht.storage.clone_box();
+    let aux = clone_test_storage(ht.storage.as_ref());
     tee_fs_htree_close(ht)?;
 
-    // Downcast Box<dyn TeeFsHtreeStorageOps> to Box<test_htree_storage>
-    // We know in test context, storage is always test_htree_storage
+    // Downcast Box<dyn TeeFsHtreeStorageOps> to Box<TestHtreeStorage>
+    // We know in test context, storage is always TestHtreeStorage
     // First convert to Box<dyn Any>, then downcast
     tee_debug!("--- test_corrupt with Head ---");
     let aux_any: Box<dyn core::any::Any> = aux;
-    let aux_box: Box<test_htree_storage> = aux_any.downcast().map_err(|_| TEE_ERROR_GENERIC)?;
+    let aux_box: Box<TestHtreeStorage> = aux_any.downcast().map_err(|_| TEE_ERROR_GENERIC)?;
     let mut aux = *aux_box;
     test_corrupt_type(
         &uuid,
