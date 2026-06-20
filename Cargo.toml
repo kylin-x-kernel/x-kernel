@@ -158,8 +158,7 @@ tee_crypto = { path = "tee/tee_crypto" }
 tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }
-tasign = { version = "0.1", default-features = false }
-tasign_kernel_shim = { version = "0.1", package = "tasign-kernel-shim" }
+tasign = { version = "0.2", default-features = false }
 
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }
@@ -199,7 +198,7 @@ log = "0.4"
 int_ratio = "0.1"
 ouroboros = { version = "0.18.5", default-features = false }
 percpu = "0.4"
-rust-dice = { version = "0.1", default-features = false }
+rust-dice = { version = "0.1", default-features = false, features = ["nostd"] }
 safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
 slab_allocator = { version = "0.4", package = "ax_slab_allocator" }

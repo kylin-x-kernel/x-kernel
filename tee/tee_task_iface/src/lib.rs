@@ -7,16 +7,14 @@
 //! # Cargo features
 //!
 //! - **`tee_ta_sign`** — Enables the `tasign` submodule (TA ELF signature verification),
-//!   pulls in `tasign` / `ksync` / `klazy`, and links `tasign-kernel-shim` for mbedTLS
-//!   libc shims on bare-metal. Without this feature, `tasign` is not compiled; `.ta_head` can
-//!   still be read via [`ta_ctx::read_ta_head_if_applicable`].
+//!   pulls in `tasign` (`kernel-verify` / `backend-rustcrypto`), `ksync`, and `klazy`.
+//!   Without this feature, `tasign` is not compiled; `.ta_head` can still be read via
+//!   [`ta_ctx::read_ta_head_if_applicable`].
 //! - **`ta_verify_with_root`** — Uses an embedded CA PEM to verify certificate chain during
 //!   TA signature verification (depends on `tee_ta_sign`).
 #![no_std]
 
 extern crate alloc;
-#[cfg(feature = "tee_ta_sign")]
-extern crate tasign_kernel_shim;
 
 use core::any::Any;
 

@@ -13,12 +13,12 @@ documentation.workspace = true
 
 [features]
 default = []
-# TA ELF `.ta_signature` verification at load time; see `src/tasign.rs` and crate `lib.rs` docs.
+# TA ELF `.ta_signature` verification at load time (tasign 0.2, RustCrypto backend).
+# See `src/tasign.rs` and crate `lib.rs` docs.
 tee_ta_sign = [
     "dep:ksync",
     "dep:klazy",
     "dep:tasign",
-    "dep:tasign_kernel_shim",
 ]
 # Enable certificate-chain verification by embedding the built-in CA PEM.
 # Effective only when `tee_ta_sign` is also enabled.
@@ -37,5 +37,4 @@ log.workspace = true
 ksync = { workspace = true, optional = true }
 klazy = { workspace = true, optional = true }
 tasign = { workspace = true, optional = true, features = ["kernel-verify"] }
-tasign_kernel_shim = { workspace = true, optional = true }
 tee_raw_sys.workspace = true

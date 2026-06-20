@@ -22,7 +22,7 @@ virtcca_huk_key = []
 kalloc.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
-rust-dice = { workspace = true, optional = true }
+rust-dice = { workspace = true, optional = true, features = ["nostd"] }
 klazy.workspace = true
 tee_crypto = { workspace = true, features = ["alloc"] }
 kcpu = { workspace = true, optional = true }
