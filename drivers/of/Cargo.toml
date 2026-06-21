@@ -11,3 +11,4 @@ repository.workspace = true
 [dependencies]
 lazyinit.workspace = true
 rs_fdtree = { workspace = true }
+unittest = { workspace = true }

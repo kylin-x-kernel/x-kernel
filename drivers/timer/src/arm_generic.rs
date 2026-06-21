@@ -12,6 +12,7 @@ use aarch64_cpu::registers::{
     Readable, Writeable,
 };
 use int_ratio::Ratio;
+use klazy::Once;
 #[cfg(feature = "crosvm")]
 use log::info;
 
@@ -28,8 +29,8 @@ static TICK_RESUME_OFFSET: AtomicU64 = AtomicU64::new(0);
 static LAST_LOGICAL_TICKS: u64 = 0;
 #[cfg(feature = "crosvm")]
 static IPI_FIXUP_PENDING: AtomicUsize = AtomicUsize::new(0);
-static mut CNTPCT_TO_NANOS_RATIO: Ratio = Ratio::zero();
-static mut NANOS_TO_CNTPCT_RATIO: Ratio = Ratio::zero();
+static CNTPCT_TO_NANOS_RATIO: Once<Ratio> = Once::new();
+static NANOS_TO_CNTPCT_RATIO: Once<Ratio> = Once::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
@@ -144,12 +145,8 @@ pub fn init(config: TimerConfig) {
         "ARM generic timer frequency must fit in u32"
     );
     TIMER_FREQ_HZ.store(freq, Ordering::Relaxed);
-    // SAFETY: timer initialization runs before normal timer conversions start,
-    // and the ratio state becomes read-only after this one-time setup.
-    unsafe {
-        CNTPCT_TO_NANOS_RATIO = Ratio::new(1_000_000_000u32, freq as u32);
-        NANOS_TO_CNTPCT_RATIO = CNTPCT_TO_NANOS_RATIO.inverse();
-    }
+    let ratio = CNTPCT_TO_NANOS_RATIO.call_once(|| Ratio::new(1_000_000_000u32, freq as u32));
+    NANOS_TO_CNTPCT_RATIO.call_once(|| ratio.inverse());
 }
 
 pub fn init_percpu() {
@@ -253,18 +250,18 @@ pub fn handle_ipi_fixup() {
 
 #[inline]
 pub fn t2ns(ticks: u64) -> u64 {
-    // SAFETY: the conversion ratio is initialized once in `init` and remains
-    // immutable afterwards, so concurrent readers only observe the published
-    // precomputed state.
-    unsafe { CNTPCT_TO_NANOS_RATIO.mul_trunc(ticks) }
+    CNTPCT_TO_NANOS_RATIO
+        .get()
+        .expect("ARM generic timer conversion ratio is not initialized")
+        .mul_trunc(ticks)
 }
 
 #[inline]
 pub fn ns2t(nanos: u64) -> u64 {
-    // SAFETY: the conversion ratio is initialized once in `init` and remains
-    // immutable afterwards, so concurrent readers only observe the published
-    // precomputed state.
-    unsafe { NANOS_TO_CNTPCT_RATIO.mul_trunc(nanos) }
+    NANOS_TO_CNTPCT_RATIO
+        .get()
+        .expect("ARM generic timer inverse conversion ratio is not initialized")
+        .mul_trunc(nanos)
 }
 
 #[inline]

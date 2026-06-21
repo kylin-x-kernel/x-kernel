@@ -589,3 +589,7 @@ impl<T: HasSchedulerId> BaseScheduler for PerCpuScheduler<T> {
         }
     }
 }
+
+#[cfg(unittest)]
+#[path = "test_per_cpu.rs"]
+mod tests;

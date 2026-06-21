@@ -18,3 +18,6 @@ ksync = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
 memspace = { workspace = true }
+memfs = { workspace = true }
+unittest = { workspace = true }
+

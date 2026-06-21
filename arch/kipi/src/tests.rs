@@ -56,7 +56,7 @@ fn test_run_on_cpu_rejects_non_present_cpu() {
     }
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_run_on_cpu_rejects_not_ready_present_cpu() {
     let current_cpu = khal::percpu::this_cpu_id();
     let mut remote_cpu = None;
@@ -74,7 +74,7 @@ fn test_run_on_cpu_rejects_not_ready_present_cpu() {
     }
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_run_on_each_cpu_does_not_execute_locally_when_remote_not_ready() {
     static HIT: AtomicUsize = AtomicUsize::new(0);
 
@@ -98,7 +98,7 @@ fn test_run_on_each_cpu_does_not_execute_locally_when_remote_not_ready() {
     }
 }
 
-#[def_test]
+#[def_test(serial)]
 fn test_run_on_each_cpu_via_ipi_failure_does_not_leave_local_event() {
     static HIT: AtomicUsize = AtomicUsize::new(0);
 

@@ -595,11 +595,72 @@ impl<'a> Drop for PanicGuard<'a> {
     }
 }
 
+#[cfg(unittest)]
+mod unittest_tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::Once;
+
+    #[def_test]
+    fn initialized_and_from_start_ready() {
+        let from_initialized = Once::initialized(7u32);
+        assert!(from_initialized.is_completed());
+        assert_eq!(from_initialized.get().copied(), Some(7));
+
+        let from_trait: Once<u32> = 9u32.into();
+        assert!(from_trait.is_completed());
+        assert_eq!(from_trait.get().copied(), Some(9));
+    }
+
+    #[def_test]
+    fn try_call_once_error_allows_retry() {
+        let once = Once::<u32>::new();
+
+        let result = once.try_call_once(|| Err::<u32, &'static str>("retry"));
+        assert_eq!(result, Err("retry"));
+        assert!(!once.is_completed());
+        assert!(once.get().is_none());
+        assert!(once.poll().is_none());
+
+        let value = once.call_once(|| 11);
+        assert_eq!(*value, 11);
+        assert!(once.is_completed());
+    }
+
+    #[def_test]
+    fn get_mut_and_as_mut_ptr_update_ready_value() {
+        let mut once = Once::initialized(5usize);
+        assert_eq!(
+            once.get_mut().map(|value| {
+                *value += 2;
+                *value
+            }),
+            Some(7)
+        );
+
+        unsafe {
+            *once.as_mut_ptr() = 13;
+        }
+
+        assert_eq!(once.get().copied(), Some(13));
+    }
+
+    #[def_test]
+    fn try_into_inner_matches_ready_state() {
+        assert_eq!(Once::<u32>::new().try_into_inner(), None);
+        assert_eq!(Once::initialized(23u32).try_into_inner(), Some(23));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         prelude::v1::*,
-        sync::{Arc, atomic::AtomicU32, mpsc::channel},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU32},
+            mpsc::channel,
+        },
         thread,
     };
 
@@ -627,7 +688,7 @@ mod tests {
     #[test]
     fn stampede_once() {
         static O: Once = Once::new();
-        static mut RUN: bool = false;
+        static RUN: AtomicBool = AtomicBool::new(false);
 
         let (tx, rx) = channel();
         let mut ts = Vec::new();
@@ -637,24 +698,20 @@ mod tests {
                 for _ in 0..4 {
                     thread::yield_now()
                 }
-                unsafe {
-                    O.call_once(|| {
-                        assert!(!RUN);
-                        RUN = true;
-                    });
-                    assert!(RUN);
-                }
+                O.call_once(|| {
+                    assert!(!RUN.load(Ordering::Acquire));
+                    RUN.store(true, Ordering::Release);
+                });
+                assert!(RUN.load(Ordering::Acquire));
                 tx.send(()).unwrap();
             }));
         }
 
-        unsafe {
-            O.call_once(|| {
-                assert!(!RUN);
-                RUN = true;
-            });
-            assert!(RUN);
-        }
+        O.call_once(|| {
+            assert!(!RUN.load(Ordering::Acquire));
+            RUN.store(true, Ordering::Release);
+        });
+        assert!(RUN.load(Ordering::Acquire));
 
         for _ in 0..10 {
             rx.recv().unwrap();
@@ -747,15 +804,13 @@ mod tests {
         assert_eq!(a, 1);
     }
 
-    static mut CALLED: bool = false;
+    static CALLED: AtomicBool = AtomicBool::new(false);
 
     struct DropTest {}
 
     impl Drop for DropTest {
         fn drop(&mut self) {
-            unsafe {
-                CALLED = true;
-            }
+            CALLED.store(true, Ordering::Release);
         }
     }
 
@@ -809,25 +864,21 @@ mod tests {
     // time.
     #[test]
     fn drop_occurs_and_skip_uninit_drop() {
-        unsafe {
-            CALLED = false;
-        }
+        CALLED.store(false, Ordering::Release);
 
         {
             let once = Once::<_>::new();
             once.call_once(|| DropTest {});
         }
 
-        assert!(unsafe { CALLED });
+        assert!(CALLED.load(Ordering::Acquire));
         // Now test that we skip drops for the uninitialized case.
-        unsafe {
-            CALLED = false;
-        }
+        CALLED.store(false, Ordering::Release);
 
         let once = Once::<DropTest>::new();
         drop(once);
 
-        assert!(unsafe { !CALLED });
+        assert!(!CALLED.load(Ordering::Acquire));
     }
 
     #[test]

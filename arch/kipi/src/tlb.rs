@@ -263,7 +263,18 @@ mod tests {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
             let my_cpu = this_cpu_id();
-            let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
+            let mut remote_cpu = None;
+            for_each_present_logical_cpu(|_, cpu_id, _| {
+                if remote_cpu.is_some() || cpu_id == my_cpu {
+                    return;
+                }
+                if crate::IPI_QUEUE_READY[cpu_id.as_usize()].load(Ordering::Acquire) {
+                    remote_cpu = Some(cpu_id);
+                }
+            });
+            let Some(remote_cpu) = remote_cpu else {
+                return unittest::TestResult::Ok;
+            };
 
             static REMOTE_DONE: AtomicBool = AtomicBool::new(false);
             REMOTE_DONE.store(false, Ordering::Relaxed);

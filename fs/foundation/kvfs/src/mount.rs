@@ -884,6 +884,178 @@ mod tests {
     }
 
     #[def_test]
+    fn test_mount_root_name_and_dotdot_stays_at_mount_root() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let child_mount = mount_dir.mount(&child_fs).unwrap();
+        let child_root = child_mount.root_location();
+        let child_path = child_root.absolute_path().unwrap();
+
+        assert_eq!(child_root.name(), "");
+        assert_eq!(child_path.as_str(), "/mnt");
+        assert!(child_root.entry().is_root_of_mount());
+        assert!(
+            child_root
+                .lookup_no_follow(".")
+                .unwrap()
+                .ptr_eq(&child_root)
+        );
+        assert_eq!(
+            child_root.lookup_no_follow("..").unwrap().absolute_path(),
+            Ok(PathBuf::from("/mnt"))
+        );
+    }
+
+    #[def_test]
+    fn test_nested_mount_root_dotdot_stays_at_nested_mount_root() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let grandchild_fs = mock_filesystem(0);
+
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let first_mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let child_mount = first_mount_dir.mount(&child_fs).unwrap();
+        let second_mount_dir = child_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let grandchild_mount = second_mount_dir.mount(&grandchild_fs).unwrap();
+        let grandchild_root = grandchild_mount.root_location();
+        let grandchild_path = grandchild_root.absolute_path().unwrap();
+
+        assert_eq!(grandchild_path.as_str(), "/mnt/mnt");
+        assert_eq!(grandchild_root.name(), "");
+        assert!(grandchild_root.entry().is_root_of_mount());
+        assert!(
+            grandchild_root
+                .lookup_no_follow("..")
+                .unwrap()
+                .absolute_path()
+                == Ok(PathBuf::from("/mnt/mnt"))
+        );
+    }
+
+    #[def_test]
+    fn test_mountpoint_child_tracking_updates_for_mount_and_unmount() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+
+        let root_mount = Mountpoint::new_root(&root_fs);
+        assert_eq!(root_mount.child_mounts().len(), 0);
+
+        let mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let child_mount = mount_dir.mount(&child_fs).unwrap();
+
+        let children = root_mount.child_mounts();
+        assert_eq!(children.len(), 1);
+        assert!(Arc::ptr_eq(&children[0], &child_mount));
+
+        child_mount.root_location().unmount().unwrap();
+        assert_eq!(root_mount.child_mounts().len(), 0);
+    }
+
+    #[def_test]
+    fn test_unmount_rejects_non_mount_root_location() {
+        let root_fs = mock_filesystem(0);
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+
+        assert_eq!(mount_dir.unmount(), Err(VfsError::InvalidInput));
+        assert_eq!(mount_dir.unmount_all(), Err(VfsError::InvalidInput));
+    }
+
+    #[def_test]
+    fn test_unmount_rejects_mount_with_nested_children() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let grandchild_fs = mock_filesystem(0);
+
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let first_mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let child_mount = first_mount_dir.mount(&child_fs).unwrap();
+        let second_mount_dir = child_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let grandchild_mount = second_mount_dir.mount(&grandchild_fs).unwrap();
+
+        assert_eq!(
+            child_mount.root_location().unmount(),
+            Err(VfsError::ResourceBusy)
+        );
+        assert_eq!(child_mount.child_mounts().len(), 1);
+        assert_eq!(root_mount.child_mounts().len(), 1);
+
+        grandchild_mount.root_location().unmount().unwrap();
+        child_mount.root_location().unmount().unwrap();
+        assert_eq!(root_mount.child_mounts().len(), 0);
+    }
+
+    #[def_test]
+    fn test_unmount_all_recursively_clears_nested_mounts() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let grandchild_fs = mock_filesystem(0);
+
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let first_mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let child_mount = first_mount_dir.mount(&child_fs).unwrap();
+        let second_mount_dir = child_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let grandchild_mount = second_mount_dir.mount(&grandchild_fs).unwrap();
+
+        child_mount.root_location().unmount_all().unwrap();
+
+        assert_eq!(root_mount.child_mounts().len(), 0);
+        assert_eq!(child_mount.child_mounts().len(), 0);
+        assert_eq!(
+            root_mount
+                .root_location()
+                .lookup_no_follow("mnt")
+                .unwrap()
+                .absolute_path(),
+            Ok(PathBuf::from("/mnt"))
+        );
+        assert_eq!(grandchild_mount.child_mounts().len(), 0);
+    }
+
+    #[def_test]
+    fn test_hidden_mount_cannot_be_unmounted_while_overmounted() {
+        let root_fs = mock_filesystem(0);
+        let fs_a = mock_filesystem(0);
+        let fs_b = mock_filesystem(0);
+
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let mount_a = mount_dir.mount(&fs_a).unwrap();
+        let mount_b = mount_dir.mount(&fs_b).unwrap();
+
+        assert_eq!(
+            mount_a.root_location().unmount(),
+            Err(VfsError::InvalidInput)
+        );
+
+        mount_b.root_location().unmount().unwrap();
+        mount_a.root_location().unmount().unwrap();
+        assert_eq!(root_mount.child_mounts().len(), 0);
+    }
+
+    #[def_test]
+    fn test_metadata_uses_mount_device_identity() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let mount_dir = root_mount.root_location().lookup_no_follow("mnt").unwrap();
+        let child_mount = mount_dir.mount(&child_fs).unwrap();
+        let child_root = child_mount.root_location();
+
+        let root_metadata = root_mount.root_location().metadata().unwrap();
+        let child_metadata = child_root.metadata().unwrap();
+
+        assert_eq!(root_metadata.inode, 1);
+        assert_eq!(child_metadata.inode, 1);
+        assert_eq!(root_metadata.device, root_mount.device());
+        assert_eq!(child_metadata.device, child_mount.device());
+        assert!(root_metadata.device != child_metadata.device);
+    }
+
+    #[def_test]
     fn test_readonly_mount_blocks_create() {
         let fs = mock_filesystem(0);
         let mount = Mountpoint::new_root_with_flags(&fs, MountFlags::RDONLY);

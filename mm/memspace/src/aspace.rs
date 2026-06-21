@@ -615,3 +615,160 @@ impl Drop for AddrSpace {
         self.clear();
     }
 }
+
+#[cfg(unittest)]
+mod tests {
+    use khal::paging::PageSize;
+    use memaddr::PAGE_SIZE_4K;
+    use unittest::def_test;
+
+    use super::*;
+    use crate::backend::Backend;
+
+    fn new_test_aspace() -> AddrSpace {
+        AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)
+            .expect("test address space should be constructible")
+    }
+
+    fn map_shared(
+        aspace: &mut AddrSpace,
+        start: usize,
+        size: usize,
+        flags: MappingFlags,
+    ) -> Backend {
+        let start = VirtAddr::from(start);
+        let backend = Backend::new_anonymous_shared(start, size, PageSize::Size4K)
+            .expect("shared backend allocation should succeed");
+        aspace
+            .map(start, size, flags, false, backend.clone())
+            .expect("mapping should succeed");
+        backend
+    }
+
+    #[def_test]
+    fn test_mmap_resolve_addr_honors_fixed_and_no_replace_policies() {
+        let mut aspace = new_test_aspace();
+        map_shared(
+            &mut aspace,
+            0x5000,
+            PAGE_SIZE_4K * 2,
+            MappingFlags::READ | MappingFlags::WRITE,
+        );
+
+        let any = aspace
+            .mmap_resolve_addr(
+                VirtAddr::from(0x5000usize),
+                PAGE_SIZE_4K,
+                PAGE_SIZE_4K,
+                AddrPolicy::Any,
+            )
+            .expect("allocator should find another free gap");
+        assert_ne!(any, VirtAddr::from(0x5000usize));
+        assert!(aspace.contains_range(any, PAGE_SIZE_4K));
+
+        let err = aspace
+            .mmap_resolve_addr(
+                VirtAddr::from(0x5000usize),
+                PAGE_SIZE_4K,
+                PAGE_SIZE_4K,
+                AddrPolicy::FixedNoReplace,
+            )
+            .expect_err("occupied fixed-no-replace mapping must fail");
+        assert!(matches!(err, KError::AlreadyExists));
+
+        let fixed = aspace
+            .mmap_resolve_addr(
+                VirtAddr::from(0x5000usize),
+                PAGE_SIZE_4K,
+                PAGE_SIZE_4K,
+                AddrPolicy::Fixed,
+            )
+            .expect("fixed mappings should unmap and reuse the requested address");
+        assert_eq!(fixed, VirtAddr::from(0x5000usize));
+        assert!(aspace.find_area(VirtAddr::from(0x5000usize)).is_none());
+        assert!(aspace.find_area(VirtAddr::from(0x6000usize)).is_some());
+    }
+
+    #[def_test]
+    fn test_map_protect_and_access_checks_follow_permissions() {
+        let mut aspace = new_test_aspace();
+        let start = VirtAddr::from(0x9000usize);
+
+        map_shared(
+            &mut aspace,
+            start.as_usize(),
+            PAGE_SIZE_4K * 2,
+            MappingFlags::READ | MappingFlags::WRITE,
+        );
+
+        assert!(aspace.can_access_range(start, PAGE_SIZE_4K * 2, MappingFlags::READ));
+        assert!(aspace.can_access_range(start, PAGE_SIZE_4K * 2, MappingFlags::WRITE));
+        assert!(!aspace.can_access_range(start, PAGE_SIZE_4K * 2, MappingFlags::EXECUTE));
+
+        aspace
+            .protect(start, PAGE_SIZE_4K * 2, MappingFlags::READ)
+            .expect("protection update should succeed");
+
+        assert!(aspace.can_access_range(start, PAGE_SIZE_4K * 2, MappingFlags::READ));
+        assert!(!aspace.can_access_range(start, PAGE_SIZE_4K * 2, MappingFlags::WRITE));
+    }
+
+    #[def_test]
+    fn test_extend_area_grows_existing_mapping_and_rejects_missing_start() {
+        let mut aspace = new_test_aspace();
+        let start = VirtAddr::from(0xd000usize);
+        map_shared(
+            &mut aspace,
+            start.as_usize(),
+            PAGE_SIZE_4K,
+            MappingFlags::READ,
+        );
+
+        aspace
+            .extend_area(start, PAGE_SIZE_4K)
+            .expect("adjacent free space should allow extension");
+
+        let area = aspace
+            .find_area(start)
+            .expect("extended area should remain discoverable");
+        assert_eq!(area.size(), PAGE_SIZE_4K * 2);
+
+        let err = aspace
+            .extend_area(VirtAddr::from(0x20000usize), PAGE_SIZE_4K)
+            .expect_err("extending a missing area must fail");
+        assert!(matches!(err, KError::NoMemory));
+    }
+
+    #[def_test]
+    fn test_move_pages_preserves_contents_and_clears_source_mapping() {
+        let mut aspace = new_test_aspace();
+        let src = VirtAddr::from(0x11000usize);
+        let dst = VirtAddr::from(0x15000usize);
+        map_shared(
+            &mut aspace,
+            src.as_usize(),
+            PAGE_SIZE_4K,
+            MappingFlags::READ | MappingFlags::WRITE,
+        );
+
+        let payload = [1_u8, 2, 3, 4, 5];
+        aspace
+            .write(src + 37, &payload)
+            .expect("mapped page should accept writes");
+
+        aspace
+            .move_pages(src, dst, PAGE_SIZE_4K, PageSize::Size4K)
+            .expect("moving pages within one address space should succeed");
+
+        let mut buf = [0_u8; 5];
+        aspace
+            .read(dst + 37, &mut buf)
+            .expect("moved mapping should stay readable");
+        assert_eq!(buf, payload);
+
+        let err = aspace
+            .read(src + 37, &mut buf)
+            .expect_err("source mapping should be removed after move");
+        assert!(matches!(err, KError::BadAddress));
+    }
+}

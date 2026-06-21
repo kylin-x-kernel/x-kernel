@@ -642,3 +642,7 @@ pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegi
             0,
         ))
 }
+
+#[cfg(unittest)]
+#[path = "test_of.rs"]
+mod unittest_tests;

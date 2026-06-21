@@ -17,6 +17,7 @@ dwarf = ["dep:addr2line", "dep:gimli", "dep:paste"]
 cfg-if = { workspace = true }
 log = { workspace = true }
 klazy.workspace= true
+unittest.workspace = true
 
 addr2line = { version = "0.25.1", default-features = false, optional = true, features = [
     "cpp_demangle",

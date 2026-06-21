@@ -184,3 +184,148 @@ mod tests {
         assert_eq!(result, -1);
     }
 }
+
+#[cfg(unittest)]
+mod unittest_tests {
+    use alloc::vec::Vec;
+    use core::{mem::size_of, slice};
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    unsafe fn build_compatible_profile_blob() -> Vec<u8> {
+        let num_data = buffer::get_num_data(platform::begin_data(), platform::end_data());
+        let num_counters =
+            buffer::get_num_counters(platform::begin_counters(), platform::end_counters());
+        let num_bitmap_bytes =
+            buffer::get_num_bitmap_bytes(platform::begin_bitmap(), platform::end_bitmap());
+        let names_size = buffer::get_name_size(platform::begin_names(), platform::end_names());
+        let entry_size = crate::port::counter_entry_size(profiling::get_version()) as usize;
+
+        let header = LlvmProfileHeader {
+            magic: profiling::get_magic(),
+            version: profiling::get_version(),
+            binary_ids_size: 0,
+            num_data,
+            padding_bytes_before_counters: 0,
+            num_counters,
+            padding_bytes_after_counters: 0,
+            num_bitmap_bytes,
+            padding_bytes_after_bitmap_bytes: 0,
+            names_size,
+            counters_delta: 0,
+            bitmap_delta: 0,
+            names_delta: 0,
+            num_vtables: 0,
+            vnames_size: 0,
+            value_kind_last: IPVK_LAST as u64,
+        };
+
+        let mut blob = Vec::with_capacity(
+            size_of::<LlvmProfileHeader>()
+                + num_data as usize * size_of::<LlvmProfileData>()
+                + num_counters as usize * entry_size
+                + num_bitmap_bytes as usize
+                + names_size as usize,
+        );
+        blob.extend_from_slice(unsafe {
+            slice::from_raw_parts(
+                (&header as *const LlvmProfileHeader).cast::<u8>(),
+                size_of::<LlvmProfileHeader>(),
+            )
+        });
+        blob.extend_from_slice(unsafe {
+            slice::from_raw_parts(
+                platform::begin_data().cast::<u8>(),
+                num_data as usize * size_of::<LlvmProfileData>(),
+            )
+        });
+        blob.extend_from_slice(unsafe {
+            slice::from_raw_parts(
+                platform::begin_counters(),
+                num_counters as usize * entry_size,
+            )
+        });
+        blob.extend_from_slice(unsafe {
+            slice::from_raw_parts(platform::begin_bitmap(), num_bitmap_bytes as usize)
+        });
+        blob.extend_from_slice(unsafe {
+            slice::from_raw_parts(platform::begin_names(), names_size as usize)
+        });
+        blob
+    }
+
+    #[def_test(serial)]
+    fn compatibility_accepts_runtime_snapshot() {
+        let blob = unsafe { build_compatible_profile_blob() };
+        let result = unsafe { check_compatibility(blob.as_ptr(), blob.len() as u64) };
+        assert_eq!(result, 0);
+    }
+
+    #[def_test(serial)]
+    fn compatibility_rejects_mismatched_function_metadata() {
+        let mut blob = unsafe { build_compatible_profile_blob() };
+        let data_offset = size_of::<LlvmProfileHeader>();
+        let data_ptr = unsafe { blob.as_mut_ptr().add(data_offset) }.cast::<LlvmProfileData>();
+        unsafe {
+            (*data_ptr).func_hash ^= 1;
+        }
+
+        let result = unsafe { check_compatibility(blob.as_ptr(), blob.len() as u64) };
+        assert_eq!(result, -1);
+    }
+
+    #[def_test(serial)]
+    fn merge_from_buffer_updates_counters_and_bitmap() {
+        let mut blob = unsafe { build_compatible_profile_blob() };
+        let header = unsafe { &*(blob.as_ptr().cast::<LlvmProfileHeader>()) };
+        let entry_size = crate::port::counter_entry_size(profiling::get_version()) as usize;
+        assert!(header.num_counters > 0);
+
+        let counters_offset = size_of::<LlvmProfileHeader>()
+            + header.num_data as usize * size_of::<LlvmProfileData>();
+        let bitmap_offset = counters_offset + header.num_counters as usize * entry_size;
+        let byte_coverage = profiling::get_version() & VARIANT_MASK_BYTE_COVERAGE != 0;
+
+        let counters_begin = platform::begin_counters() as *mut u8;
+        let bitmap_begin = platform::begin_bitmap() as *mut u8;
+
+        if byte_coverage {
+            let original = unsafe { *counters_begin };
+            blob[counters_offset] = 0;
+            unsafe {
+                *counters_begin = 0xFF;
+                let result = merge_from_buffer(blob.as_ptr(), blob.len() as u64);
+                assert_eq!(result, 0);
+                assert_eq!(*counters_begin, 0);
+                *counters_begin = original;
+            }
+        } else {
+            let original = unsafe { *(counters_begin.cast::<u64>()) };
+            let merged = 7u64;
+            blob[counters_offset..counters_offset + size_of::<u64>()]
+                .copy_from_slice(&merged.to_le_bytes());
+            unsafe {
+                let result = merge_from_buffer(blob.as_ptr(), blob.len() as u64);
+                assert_eq!(result, 0);
+                assert_eq!(
+                    *(counters_begin.cast::<u64>()),
+                    original.saturating_add(merged)
+                );
+                *(counters_begin.cast::<u64>()) = original;
+            }
+        }
+
+        if header.num_bitmap_bytes > 0 {
+            let original = unsafe { *bitmap_begin };
+            blob[bitmap_offset] = 0x5A;
+            unsafe {
+                let result = merge_from_buffer(blob.as_ptr(), blob.len() as u64);
+                assert_eq!(result, 0);
+                assert_eq!(*bitmap_begin, original | 0x5A);
+                *bitmap_begin = original;
+            }
+        }
+    }
+}

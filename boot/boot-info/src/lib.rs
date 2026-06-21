@@ -6,6 +6,9 @@
 
 #![no_std]
 
+#[cfg(unittest)]
+extern crate alloc;
+
 use core::{fmt, mem, ptr};
 
 use kcpu_id_map::LogicalCpuId;
@@ -608,3 +611,227 @@ const _: () = {
     assert!(core::mem::size_of::<BootProtocol>() == 1);
     assert!(core::mem::size_of::<X86LinuxE820Entry>() == 24);
 };
+
+#[cfg(unittest)]
+mod unittest_tests {
+    use alloc::{boxed::Box, format, vec, vec::Vec};
+
+    use unittest::def_test;
+
+    use super::*;
+
+    fn le_u32(value: u32) -> [u8; 4] {
+        value.to_le_bytes()
+    }
+
+    fn le_u64(value: u64) -> [u8; 8] {
+        value.to_le_bytes()
+    }
+
+    fn leak_bytes(bytes: Vec<u8>) -> usize {
+        Box::leak(bytes.into_boxed_slice()).as_ptr() as usize
+    }
+
+    fn build_linux_boot_blob(
+        rsdp: u64,
+        e820_entries: u8,
+        payload_offset: u32,
+        payload_length: u32,
+        cmdline_ptr: u32,
+        cmdline_size: u32,
+        e820: &[X86LinuxE820Entry],
+    ) -> usize {
+        let blob_len = X86_LINUX_BOOT_PARAMS_E820_TABLE_OFFSET
+            + X86_LINUX_BOOT_E820_MAX_ENTRIES * mem::size_of::<X86LinuxE820Entry>();
+        let mut blob = vec![0u8; blob_len];
+        blob[X86_LINUX_BOOT_PARAMS_ACPI_RSDP_ADDR_OFFSET
+            ..X86_LINUX_BOOT_PARAMS_ACPI_RSDP_ADDR_OFFSET + 8]
+            .copy_from_slice(&le_u64(rsdp));
+        blob[X86_LINUX_BOOT_PARAMS_E820_ENTRIES_OFFSET] = e820_entries;
+        blob[X86_LINUX_BOOT_PARAMS_CMD_LINE_PTR_OFFSET
+            ..X86_LINUX_BOOT_PARAMS_CMD_LINE_PTR_OFFSET + 4]
+            .copy_from_slice(&le_u32(cmdline_ptr));
+        blob[X86_LINUX_BOOT_PARAMS_CMDLINE_SIZE_OFFSET
+            ..X86_LINUX_BOOT_PARAMS_CMDLINE_SIZE_OFFSET + 4]
+            .copy_from_slice(&le_u32(cmdline_size));
+        blob[X86_LINUX_BOOT_PARAMS_PAYLOAD_OFFSET_OFFSET
+            ..X86_LINUX_BOOT_PARAMS_PAYLOAD_OFFSET_OFFSET + 4]
+            .copy_from_slice(&le_u32(payload_offset));
+        blob[X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET
+            ..X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET + 4]
+            .copy_from_slice(&le_u32(payload_length));
+        for (index, entry) in e820.iter().enumerate() {
+            let offset = X86_LINUX_BOOT_PARAMS_E820_TABLE_OFFSET
+                + index * mem::size_of::<X86LinuxE820Entry>();
+            blob[offset..offset + 8].copy_from_slice(&entry.addr.to_le_bytes());
+            blob[offset + 8..offset + 16].copy_from_slice(&entry.size.to_le_bytes());
+            blob[offset + 16..offset + 20].copy_from_slice(&entry.entry_type.to_le_bytes());
+            blob[offset + 20..offset + 24].copy_from_slice(&entry.attr.to_le_bytes());
+        }
+        leak_bytes(blob)
+    }
+
+    #[def_test]
+    fn boot_info_builder_and_validation_helpers() {
+        let cmdline = b"console=ttyS0 root=/dev/vda\0".to_vec();
+        let cmdline_len = cmdline.len() - 1;
+        let cmdline_addr = leak_bytes(cmdline);
+        let info = BootInfo::new(BootProtocol::LinuxBoot)
+            .with_memory_description_root(MemoryDescriptionRoot::X86BootProtocol)
+            .with_hardware_description_root(HardwareDescriptionRoot::Acpi)
+            .with_dtb(0x1000, 0x2000)
+            .with_uefi_memmap(0x3000, 0x4000)
+            .with_rsdp(0x5000)
+            .with_ramdisk(0x6000, 0x7000)
+            .with_boot_runtime(0x8000, 0x9000)
+            .with_cmdline(cmdline_addr, cmdline_len)
+            .with_boot_console_mmio(0xa000, 0x100, 0xb000)
+            .with_cpu_id(LogicalCpuId::new(3))
+            .with_cpu_count(8)
+            .with_protocol_info_addr(0xc000)
+            .with_kernel_load_paddr(0xd000)
+            .with_phys_virt_offset(0xffff_0000);
+
+        assert!(info.is_valid());
+        assert_eq!(info.protocol(), BootProtocol::LinuxBoot);
+        assert_eq!(
+            info.memory_description_root(),
+            MemoryDescriptionRoot::X86BootProtocol
+        );
+        assert_eq!(
+            info.hardware_description_root(),
+            HardwareDescriptionRoot::Acpi
+        );
+        assert_eq!(info.cmdline(), Some("console=ttyS0 root=/dev/vda"));
+        assert!(info.has_dtb());
+        assert_eq!(info.dtb_ptr(), Some(0x2000 as *const u8));
+        assert!(info.has_uefi_memmap());
+        assert_eq!(info.uefi_memmap_ptr(), Some(0x4000 as *const u8));
+        assert!(info.has_acpi());
+        assert_eq!(info.boot_console_transport, BootConsoleTransport::Mmio);
+        assert_eq!(info.boot_runtime_paddr(), 0x8000);
+        assert_eq!(info.boot_runtime_size(), 0x9000);
+        assert_eq!(info.cpu_id, LogicalCpuId::new(3));
+        assert_eq!(info.cpu_count, 8);
+
+        let mut invalid = info;
+        invalid.magic = 0;
+        assert!(!invalid.is_valid());
+        invalid = info;
+        invalid.version = 0;
+        assert!(!invalid.is_valid());
+    }
+
+    #[def_test]
+    fn boot_info_cmdline_and_console_edge_cases() {
+        let invalid_utf8 = vec![0xff, 0xfe];
+        let invalid_utf8_addr = leak_bytes(invalid_utf8);
+        let info = BootInfo::new(BootProtocol::Unknown)
+            .with_cmdline(invalid_utf8_addr, 2)
+            .with_boot_console_mmio(0, 0x100, 0x2000);
+        assert_eq!(info.cmdline(), None);
+        assert_eq!(info.boot_console_transport, BootConsoleTransport::None);
+        assert_eq!(info.dtb_ptr(), None);
+        assert_eq!(info.uefi_memmap_ptr(), None);
+
+        let ioport = BootInfo::new(BootProtocol::Bios).with_boot_console_ioport(0x3f8);
+        assert_eq!(ioport.boot_console_transport, BootConsoleTransport::IoPort);
+        assert_eq!(ioport.boot_console_addr, 0x3f8);
+        assert_eq!(ioport.boot_console_size, 1);
+
+        let none = BootInfo::new(BootProtocol::Bios).with_boot_console_ioport(0);
+        assert_eq!(none.boot_console_transport, BootConsoleTransport::None);
+        assert!(format!("{info:?}").contains("boot_console_transport"));
+    }
+
+    #[def_test]
+    fn linux_boot_params_parse_fields_and_entries() {
+        let e820 = [
+            X86LinuxE820Entry {
+                addr: 0x1000,
+                size: 0x2000,
+                entry_type: X86LinuxE820EntryType::Ram as u32,
+                attr: 1,
+            },
+            X86LinuxE820Entry {
+                addr: 0x4000,
+                size: 0x1000,
+                entry_type: X86LinuxE820EntryType::Reserved as u32,
+                attr: 2,
+            },
+        ];
+        let params = LinuxBootParams::new(build_linux_boot_blob(
+            0x8877_6655_4433_2211,
+            e820.len() as u8,
+            0x1200,
+            0x3400,
+            0x1234_5678,
+            32,
+            &e820,
+        ))
+        .unwrap();
+
+        assert!(params.addr() != 0);
+        assert_eq!(params.acpi_rsdp_addr(), 0x8877_6655_4433_2211);
+        assert_eq!(params.e820_entries(), 2);
+        assert_eq!(params.e820_entry(0).unwrap().addr, 0x1000);
+        assert!(params.e820_entry(0).unwrap().is_usable_ram());
+        assert_eq!(params.e820_entry(1).unwrap().entry_type, 2);
+        assert!(params.e820_entry(2).is_none());
+        assert_eq!(params.cmdline_ptr(), Some(0x1234_5678));
+        assert_eq!(params.cmdline_size(), Some(32));
+        assert_eq!(params.payload_offset(), Some(0x1200));
+        assert_eq!(params.payload_length(), Some(0x3400));
+        assert!(format!("{params:?}").contains("payload_offset"));
+    }
+
+    #[def_test]
+    fn linux_boot_params_handle_legacy_and_invalid_cases() {
+        assert!(LinuxBootParams::new(0).is_none());
+
+        let params = LinuxBootParams::new(build_linux_boot_blob(
+            0,
+            (X86_LINUX_BOOT_E820_MAX_ENTRIES as u16 + 5) as u8,
+            0,
+            0x3400,
+            0x2000_0000,
+            0,
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(params.e820_entries(), X86_LINUX_BOOT_E820_MAX_ENTRIES);
+        assert_eq!(params.cmdline_ptr(), Some(0x2000_0000));
+        assert_eq!(params.cmdline_size(), None);
+        assert_eq!(params.payload_offset(), None);
+        assert_eq!(params.payload_length(), None);
+    }
+
+    #[def_test]
+    fn enums_and_framebuffer_helpers_are_stable() {
+        assert_eq!(MemoryDescriptionRoot::Unknown.name(), "unknown");
+        assert_eq!(MemoryDescriptionRoot::DeviceTree.name(), "device tree");
+        assert_eq!(MemoryDescriptionRoot::UefiMemmap.name(), "uefi memmap");
+        assert_eq!(HardwareDescriptionRoot::DeviceTree.name(), "device tree");
+        assert_eq!(HardwareDescriptionRoot::Acpi.name(), "acpi");
+
+        let zero_ram = X86LinuxE820Entry {
+            addr: 0,
+            size: 0,
+            entry_type: X86LinuxE820EntryType::Ram as u32,
+            attr: 0,
+        };
+        assert!(!zero_ram.is_usable_ram());
+
+        let framebuffer = FrameBufferInfo {
+            addr: 0xdead_beef,
+            width: 800,
+            height: 600,
+            pitch: 3200,
+            bpp: 32,
+            format: PixelFormat::Rgb,
+            _reserved: 0,
+        };
+        assert_eq!(framebuffer.width, 800);
+        assert_eq!(framebuffer.format, PixelFormat::Rgb);
+    }
+}

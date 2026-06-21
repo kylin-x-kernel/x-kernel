@@ -215,3 +215,178 @@ impl FdTable {
         drop(removed);
     }
 }
+
+#[cfg(unittest)]
+mod unittest_tests {
+    use alloc::{borrow::Cow, sync::Arc, vec, vec::Vec};
+    use core::task::Context;
+
+    use kerrno::KError;
+    use kpoll::{IoEvents, Pollable};
+    use unittest::def_test;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct MockFile {
+        name: &'static str,
+        ready: IoEvents,
+    }
+
+    impl Pollable for MockFile {
+        fn poll(&self) -> IoEvents {
+            self.ready
+        }
+
+        fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
+    }
+
+    impl FileLike for MockFile {
+        fn path(&self) -> Cow<'_, str> {
+            Cow::Borrowed(self.name)
+        }
+    }
+
+    #[derive(Debug)]
+    struct OtherFile;
+
+    impl Pollable for OtherFile {
+        fn poll(&self) -> IoEvents {
+            IoEvents::empty()
+        }
+
+        fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
+    }
+
+    impl FileLike for OtherFile {
+        fn path(&self) -> Cow<'_, str> {
+            Cow::Borrowed("other")
+        }
+    }
+
+    fn mock_file(name: &'static str) -> Arc<dyn FileLike> {
+        Arc::new(MockFile {
+            name,
+            ready: IoEvents::IN,
+        })
+    }
+
+    #[def_test]
+    fn add_get_and_downcast_file_like() {
+        let mut table = FdTable::default();
+        let fd = table.add_file_like(4, mock_file("alpha"), false).unwrap();
+        assert_eq!(fd, 0);
+        assert_eq!(table.count(), 1);
+        assert_eq!(table.ids().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(table.get_file_like(fd).unwrap().path(), "alpha");
+        assert!(
+            table
+                .get_file_like_as::<MockFile>(fd)
+                .unwrap()
+                .poll()
+                .contains(IoEvents::IN)
+        );
+        assert!(matches!(
+            table.get_file_like_as::<OtherFile>(fd),
+            Err(KError::InvalidInput)
+        ));
+        assert!(matches!(
+            table.get_file_like(9),
+            Err(KError::BadFileDescriptor)
+        ));
+    }
+
+    #[def_test]
+    fn add_and_insert_enforce_limits_and_slots() {
+        let mut table = FdTable::default();
+        assert_eq!(
+            table.add_file_like(0, mock_file("overflow"), false),
+            Err(KError::TooManyOpenFiles)
+        );
+
+        let fd0 = match table.insert_file_like(mock_file("first"), false) {
+            Ok(fd) => fd,
+            Err(_) => panic!("insert_file_like should allocate the first slot"),
+        };
+        let fd5 = match table.add_at(5, FileDescriptor::new(mock_file("fixed"), true)) {
+            Ok(fd) => fd,
+            Err(_) => panic!("add_at should insert into an empty fixed slot"),
+        };
+        assert_eq!(fd0, 0);
+        assert_eq!(fd5, 5);
+        assert_eq!(table.ids().collect::<Vec<_>>(), vec![0, 5]);
+        assert!(
+            table
+                .add_at(5, FileDescriptor::new(mock_file("dup"), false))
+                .is_err()
+        );
+    }
+
+    #[def_test]
+    fn duplicate_and_cloexec_operations_update_descriptor_state() {
+        let mut table = FdTable::default();
+        let old_fd = table.add_file_like(8, mock_file("src"), false).unwrap();
+        let replaced_fd = table.add_file_like(8, mock_file("victim"), true).unwrap();
+        assert_eq!(replaced_fd, 1);
+
+        assert_eq!(table.cloexec(old_fd).unwrap(), false);
+        table.set_cloexec(old_fd, true).unwrap();
+        assert_eq!(table.cloexec(old_fd).unwrap(), true);
+
+        let new_fd = table.duplicate_to(old_fd, replaced_fd, false).unwrap();
+        assert_eq!(new_fd, replaced_fd);
+        assert_eq!(table.cloexec(new_fd).unwrap(), false);
+        assert_eq!(table.get_file_like(new_fd).unwrap().path(), "src");
+        assert_eq!(
+            table.duplicate_to(99, 4, false),
+            Err(KError::BadFileDescriptor)
+        );
+        assert_eq!(table.set_cloexec(99, true), Err(KError::BadFileDescriptor));
+        assert_eq!(table.cloexec(99), Err(KError::BadFileDescriptor));
+    }
+
+    #[def_test]
+    fn close_and_range_operations_only_touch_selected_entries() {
+        let mut table = FdTable::default();
+        for name in ["a", "b", "c", "d"] {
+            table.add_file_like(8, mock_file(name), false).unwrap();
+        }
+
+        table.set_cloexec_range(1, 8);
+        assert_eq!(table.cloexec(0).unwrap(), false);
+        assert_eq!(table.cloexec(1).unwrap(), true);
+        assert_eq!(table.cloexec(3).unwrap(), true);
+
+        table.close_range(1, 2);
+        assert_eq!(table.ids().collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!(table.close_file_like(2), Err(KError::BadFileDescriptor));
+        table.close_cloexec_files();
+        assert_eq!(table.ids().collect::<Vec<_>>(), vec![0]);
+        table.close_range(10, 12);
+        assert_eq!(table.count(), 1);
+    }
+
+    #[def_test]
+    fn clone_shared_and_close_all_if_unshared_follow_reference_count() {
+        let shared = FdTable::new_shared();
+        {
+            let mut guard = shared.write();
+            guard.add_file_like(4, mock_file("first"), false).unwrap();
+            guard.add_file_like(4, mock_file("second"), true).unwrap();
+        }
+
+        let cloned = FdTable::clone_shared_from(&shared);
+        assert_eq!(cloned.read().ids().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(cloned.read().get_file_like(1).unwrap().path(), "second");
+
+        let extra_ref = Arc::clone(&shared);
+        FdTable::close_all_if_unshared(&shared);
+        assert_eq!(shared.read().count(), 2);
+        drop(extra_ref);
+
+        FdTable::close_all_if_unshared(&shared);
+        assert_eq!(shared.read().count(), 0);
+        assert_eq!(cloned.read().count(), 2);
+        drop(cloned);
+    }
+}

@@ -606,3 +606,334 @@ pub fn devm_alloc_coherent(
     device.register_cleanup(Box::new(move || drop(dma)));
     Ok((cpu_ptr, bus_addr))
 }
+
+#[cfg(unittest)]
+mod unittest_tests {
+    use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+
+    use unittest::def_test;
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Event {
+        MapMmio(MmioRegion),
+        UnmapMmio(MmioRegion),
+        RequestIrq(IrqResource),
+        ReleaseIrq(IrqResource),
+        SetIrqEnabled(IrqResource, bool),
+        AllocCoherent(DmaSpec),
+        FreeCoherent(DmaSpec),
+    }
+
+    struct ProviderState {
+        events: Vec<Event>,
+        mmio_words: [u64; 4],
+        dma: [u8; 64],
+        map_error: Option<ResError>,
+        irq_error: Option<ResError>,
+        dma_error: Option<ResError>,
+    }
+
+    impl ProviderState {
+        const fn new() -> Self {
+            Self {
+                events: Vec::new(),
+                mmio_words: [0; 4],
+                dma: [0; 64],
+                map_error: None,
+                irq_error: None,
+                dma_error: None,
+            }
+        }
+
+        fn reset(&mut self) {
+            self.events.clear();
+            self.mmio_words.fill(0);
+            self.dma.fill(0);
+            self.map_error = None;
+            self.irq_error = None;
+            self.dma_error = None;
+        }
+    }
+
+    struct TestProvider {
+        state: SpinNoIrq<ProviderState>,
+    }
+
+    impl TestProvider {
+        const fn new() -> Self {
+            Self {
+                state: SpinNoIrq::new(ProviderState::new()),
+            }
+        }
+
+        fn reset(&self) {
+            self.state.lock().reset();
+        }
+
+        fn set_map_error(&self, error: ResError) {
+            self.state.lock().map_error = Some(error);
+        }
+
+        fn set_irq_error(&self, error: ResError) {
+            self.state.lock().irq_error = Some(error);
+        }
+
+        fn set_dma_error(&self, error: ResError) {
+            self.state.lock().dma_error = Some(error);
+        }
+
+        fn events(&self) -> Vec<Event> {
+            self.state.lock().events.clone()
+        }
+    }
+
+    impl ResourceProvider for TestProvider {
+        fn map_mmio(&self, region: MmioRegion, _name: &'static str) -> ResResult<MmioMapping> {
+            let mut state = self.state.lock();
+            state.events.push(Event::MapMmio(region));
+            if let Some(error) = state.map_error.take() {
+                return Err(error);
+            }
+            Ok(MmioMapping {
+                vaddr: state.mmio_words.as_mut_ptr() as usize,
+                region,
+            })
+        }
+
+        fn unmap_mmio(&self, mapping: MmioMapping) {
+            self.state
+                .lock()
+                .events
+                .push(Event::UnmapMmio(mapping.region));
+        }
+
+        fn request_irq(&self, irq: IrqResource, _handler: Arc<dyn IrqHandler>) -> ResResult<()> {
+            let mut state = self.state.lock();
+            state.events.push(Event::RequestIrq(irq));
+            if let Some(error) = state.irq_error.take() {
+                return Err(error);
+            }
+            Ok(())
+        }
+
+        fn release_irq(&self, irq: IrqResource) {
+            self.state.lock().events.push(Event::ReleaseIrq(irq));
+        }
+
+        fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
+            self.state
+                .lock()
+                .events
+                .push(Event::SetIrqEnabled(irq, enabled));
+        }
+
+        fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation> {
+            let mut state = self.state.lock();
+            state.events.push(Event::AllocCoherent(spec));
+            if let Some(error) = state.dma_error.take() {
+                return Err(error);
+            }
+            Ok(DmaAllocation {
+                cpu_addr: state.dma.as_mut_ptr() as usize,
+                bus_addr: 0xfeed_cafe,
+                spec,
+            })
+        }
+
+        fn free_coherent(&self, alloc: DmaAllocation) {
+            self.state
+                .lock()
+                .events
+                .push(Event::FreeCoherent(alloc.spec));
+        }
+    }
+
+    struct TestDevice {
+        resources: Vec<ResourceDesc>,
+        cleanups: SpinNoIrq<Vec<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl TestDevice {
+        fn new(resources: Vec<ResourceDesc>) -> Self {
+            Self {
+                resources,
+                cleanups: SpinNoIrq::new(Vec::new()),
+            }
+        }
+
+        fn run_cleanups(&self) {
+            let mut cleanups = self.cleanups.lock();
+            while let Some(clean) = cleanups.pop() {
+                clean();
+            }
+        }
+    }
+
+    impl DeviceResource for TestDevice {
+        fn resources(&self) -> &[ResourceDesc] {
+            &self.resources
+        }
+
+        fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>) {
+            self.cleanups.lock().push(cleanup);
+        }
+    }
+
+    static TEST_PROVIDER: TestProvider = TestProvider::new();
+    static TEST_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
+
+    fn install_test_provider() {
+        TEST_PROVIDER.reset();
+        set_provider(&TEST_PROVIDER);
+    }
+
+    #[def_test]
+    fn provider_required_and_installation_visible() {
+        let _serial = TEST_SERIAL.lock();
+        *PROVIDER.lock() = None;
+        assert_eq!(
+            Io::map(
+                MmioRegion {
+                    base: 0x1000,
+                    size: 4
+                },
+                "missing"
+            )
+            .unwrap_err(),
+            ResError::NoProvider
+        );
+
+        install_test_provider();
+        assert!(provider_installed());
+    }
+
+    #[def_test]
+    fn io_read_write_and_drop_follow_provider_lifecycle() {
+        let _serial = TEST_SERIAL.lock();
+        install_test_provider();
+
+        let region = MmioRegion {
+            base: 0x2000,
+            size: 16,
+        };
+        let io = Io::map(region, "regs").unwrap();
+        assert_eq!(io.region(), region);
+
+        io.write8(0, 0x12);
+        io.write16(2, 0x3456);
+        io.write32(4, 0x789a_bcde);
+        io.write64(8, 0x0123_4567_89ab_cdef);
+
+        assert_eq!(io.read8(0), 0x12);
+        assert_eq!(io.read16(2), 0x3456);
+        assert_eq!(io.read32(4), 0x789a_bcde);
+        assert_eq!(io.read64(8), 0x0123_4567_89ab_cdef);
+
+        drop(io);
+
+        assert_eq!(
+            TEST_PROVIDER.events(),
+            vec![Event::MapMmio(region), Event::UnmapMmio(region)]
+        );
+    }
+
+    #[def_test]
+    fn irq_and_dma_release_on_drop_and_devm_cleanup() {
+        let _serial = TEST_SERIAL.lock();
+        install_test_provider();
+
+        let irq = IrqResource {
+            number: 7,
+            trigger: IrqTriggerMode::LevelHigh,
+        };
+        let spec = DmaSpec { len: 24, align: 8 };
+
+        let guard = Irq::request(irq, Arc::new(|| IrqReturn::Handled)).unwrap();
+        assert_eq!(guard.number(), 7);
+        guard.set_enabled(false);
+        drop(guard);
+
+        let dma = DmaCoherent::alloc(spec).unwrap();
+        assert_eq!(dma.bus_addr(), 0xfeed_cafe);
+        assert_eq!(dma.len(), 24);
+        assert!(!dma.is_empty());
+        drop(dma);
+
+        let device = TestDevice::new(vec![ResourceDesc::Irq(irq), ResourceDesc::Dma(spec)]);
+        assert_eq!(device.resources().len(), 2);
+
+        devm_request_irq(&device, irq, Arc::new(|| IrqReturn::Handled)).unwrap();
+        let (cpu_ptr, bus_addr) = devm_alloc_coherent(&device, spec).unwrap();
+        assert_eq!(
+            cpu_ptr.as_ptr() as usize,
+            TEST_PROVIDER.state.lock().dma.as_ptr() as usize
+        );
+        assert_eq!(bus_addr, 0xfeed_cafe);
+
+        device.run_cleanups();
+
+        assert_eq!(
+            TEST_PROVIDER.events(),
+            vec![
+                Event::RequestIrq(irq),
+                Event::SetIrqEnabled(irq, false),
+                Event::ReleaseIrq(irq),
+                Event::AllocCoherent(spec),
+                Event::FreeCoherent(spec),
+                Event::RequestIrq(irq),
+                Event::AllocCoherent(spec),
+                Event::FreeCoherent(spec),
+                Event::ReleaseIrq(irq),
+            ]
+        );
+    }
+
+    #[def_test]
+    fn devm_iomap_and_provider_errors_propagate() {
+        let _serial = TEST_SERIAL.lock();
+        install_test_provider();
+
+        let device = TestDevice::new(Vec::new());
+        let region = MmioRegion {
+            base: 0x3000,
+            size: 8,
+        };
+        let ptr = devm_iomap(&device, region, "devm").unwrap();
+        assert_eq!(
+            ptr.as_ptr() as usize,
+            TEST_PROVIDER.state.lock().mmio_words.as_ptr() as usize
+        );
+        device.run_cleanups();
+
+        TEST_PROVIDER.reset();
+        TEST_PROVIDER.set_map_error(ResError::MappingFailed);
+        assert_eq!(
+            devm_iomap(&device, region, "failing").unwrap_err(),
+            ResError::MappingFailed
+        );
+
+        TEST_PROVIDER.reset();
+        TEST_PROVIDER.set_irq_error(ResError::Busy);
+        assert_eq!(
+            devm_request_irq(
+                &device,
+                IrqResource {
+                    number: 9,
+                    trigger: IrqTriggerMode::EdgeRising,
+                },
+                Arc::new(|| IrqReturn::NotHandled),
+            )
+            .unwrap_err(),
+            ResError::Busy
+        );
+
+        TEST_PROVIDER.reset();
+        TEST_PROVIDER.set_dma_error(ResError::NoMemory);
+        assert_eq!(
+            devm_alloc_coherent(&device, DmaSpec { len: 8, align: 8 }).unwrap_err(),
+            ResError::NoMemory
+        );
+    }
+}

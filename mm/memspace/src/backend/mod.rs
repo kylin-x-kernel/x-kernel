@@ -334,3 +334,201 @@ impl MemorySetBackend for Backend {
         modifier.protect_region(start, size, new_flags).is_ok()
     }
 }
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::{sync::Arc, vec, vec::Vec};
+    use core::any::Any;
+
+    use kerrno::KError;
+    use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
+    use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+    use unittest::def_test;
+
+    use super::{Backend, DynBackendOps, SharedPages, divide_page, map_paging_err, pages_in};
+    use crate::aspace::AddrSpace;
+
+    struct TestDynBackend {
+        is_anonymous: bool,
+        relocated_result: Result<Backend, KError>,
+        last_relocated: ksync::Mutex<Option<(VirtAddr, usize)>>,
+    }
+
+    impl TestDynBackend {
+        fn new(is_anonymous: bool, relocated_result: Result<Backend, KError>) -> Self {
+            Self {
+                is_anonymous,
+                relocated_result,
+                last_relocated: ksync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl DynBackendOps for TestDynBackend {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn page_size(&self) -> PageSize {
+            PageSize::Size4K
+        }
+
+        fn map(
+            &self,
+            _range: VirtAddrRange,
+            _flags: MappingFlags,
+            _pgtbl: &mut PageTableMut,
+        ) -> kerrno::KResult {
+            unreachable!("test backend does not map pages")
+        }
+
+        fn unmap(&self, _range: VirtAddrRange, _pgtbl: &mut PageTableMut) -> kerrno::KResult {
+            unreachable!("test backend does not unmap pages")
+        }
+
+        fn on_protect(
+            &self,
+            _range: VirtAddrRange,
+            _new_flags: MappingFlags,
+            _pgtbl: &mut PageTableMut,
+        ) -> kerrno::KResult {
+            unreachable!("test backend does not protect pages")
+        }
+
+        fn populate(
+            &self,
+            _range: VirtAddrRange,
+            _flags: MappingFlags,
+            _access_flags: MappingFlags,
+            _pgtbl: &mut PageTableMut,
+        ) -> super::PopulateResult {
+            unreachable!("test backend does not populate pages")
+        }
+
+        fn clone_map(
+            &self,
+            _range: VirtAddrRange,
+            _flags: MappingFlags,
+            _old_pgtbl: &mut PageTableMut,
+            _new_pgtbl: &mut PageTableMut,
+            _new_aspace: &Arc<ksync::Mutex<AddrSpace>>,
+        ) -> kerrno::KResult<Backend> {
+            unreachable!("test backend does not clone mappings")
+        }
+
+        fn relocated(
+            &self,
+            new_start: VirtAddr,
+            aspace: &Arc<ksync::Mutex<AddrSpace>>,
+        ) -> kerrno::KResult<Backend> {
+            *self.last_relocated.lock() = Some((new_start, Arc::as_ptr(aspace) as usize));
+            self.relocated_result.clone()
+        }
+
+        fn is_anonymous(&self) -> bool {
+            self.is_anonymous
+        }
+    }
+
+    fn new_test_aspace() -> Arc<ksync::Mutex<AddrSpace>> {
+        Arc::new(ksync::Mutex::new(
+            AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K)
+                .expect("test address space should be constructible"),
+        ))
+    }
+
+    #[def_test]
+    fn test_divide_page_supports_base_and_huge_pages() {
+        assert_eq!(divide_page(PAGE_SIZE_4K * 3, PageSize::Size4K), 3);
+        assert_eq!(
+            divide_page((PageSize::Size2M as usize) * 2, PageSize::Size2M),
+            2
+        );
+    }
+
+    #[def_test]
+    fn test_pages_in_yields_expected_page_sequence() {
+        let range = VirtAddrRange::from_start_size(VirtAddr::from(0x4000usize), PAGE_SIZE_4K * 3);
+        let pages = pages_in(range, PageSize::Size4K)
+            .expect("aligned range should produce page iterator")
+            .map(VirtAddr::as_usize)
+            .collect::<Vec<_>>();
+
+        assert_eq!(pages, vec![0x4000, 0x5000, 0x6000]);
+    }
+
+    #[def_test]
+    fn test_pages_in_rejects_unaligned_range() {
+        let range = VirtAddrRange::from_start_size(VirtAddr::from(0x4000usize), PAGE_SIZE_4K + 1);
+        assert!(matches!(
+            pages_in(range, PageSize::Size4K),
+            Err(KError::InvalidInput)
+        ));
+    }
+
+    #[def_test]
+    fn test_map_paging_err_preserves_no_memory_and_flattens_others() {
+        assert_eq!(map_paging_err(PagingError::NoMemory), KError::NoMemory);
+        assert_eq!(map_paging_err(PagingError::NotMapped), KError::InvalidInput);
+    }
+
+    #[def_test]
+    fn test_backend_relocated_rejects_linear_backend() {
+        let aspace = new_test_aspace();
+        let result = Backend::new_linear(0).relocated(VirtAddr::from(0x8000usize), &aspace);
+
+        assert!(matches!(result, Err(KError::OperationNotSupported)));
+    }
+
+    #[def_test]
+    fn test_backend_relocated_updates_shared_backend_start() {
+        let pages = Arc::new(SharedPages {
+            phys_pages: Vec::new(),
+            size: PageSize::Size4K,
+        });
+        let backend = Backend::new_shared(VirtAddr::from(0x2000usize), pages.clone());
+        let relocated = backend
+            .relocated(VirtAddr::from(0x9000usize), &new_test_aspace())
+            .expect("shared backend relocation should succeed");
+
+        assert!(relocated.is_anonymous());
+        match relocated {
+            Backend::Shared(inner) => {
+                assert!(Arc::ptr_eq(inner.pages(), &pages));
+            }
+            _ => panic!("expected relocated shared backend"),
+        }
+    }
+
+    #[def_test]
+    fn test_backend_dynamic_relocated_forwards_arguments_and_result() {
+        let aspace = new_test_aspace();
+        let inner = Arc::new(TestDynBackend::new(false, Ok(Backend::new_linear(17))));
+        let backend = Backend::new_dynamic(inner.clone());
+        let new_start = VirtAddr::from(0xb000usize);
+
+        let relocated = backend
+            .relocated(new_start, &aspace)
+            .expect("dynamic relocation should use backend result");
+
+        assert!(!backend.is_anonymous());
+        assert!(matches!(relocated, Backend::Linear(_)));
+        assert_eq!(
+            *inner.last_relocated.lock(),
+            Some((new_start, Arc::as_ptr(&aspace) as usize))
+        );
+    }
+
+    #[def_test]
+    fn test_backend_dynamic_relocated_propagates_errors_and_anonymous_flag() {
+        let aspace = new_test_aspace();
+        let inner = Arc::new(TestDynBackend::new(true, Err(KError::InvalidInput)));
+        let backend = Backend::new_dynamic(inner.clone());
+
+        assert!(backend.is_anonymous());
+        assert!(matches!(
+            backend.relocated(VirtAddr::from(0xc000usize), &aspace),
+            Err(KError::InvalidInput)
+        ));
+    }
+}

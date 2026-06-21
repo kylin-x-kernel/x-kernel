@@ -13,3 +13,4 @@ categories = ["no-std", "os"]
 
 [dependencies]
 kcpu_id_map = { workspace = true }
+unittest = { workspace = true }

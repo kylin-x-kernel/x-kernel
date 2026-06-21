@@ -710,3 +710,180 @@ fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
     }
     k_bail!(AddrInUse, "no available ports");
 }
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::vec;
+    use core::net::Ipv4Addr;
+
+    use smoltcp::wire::Ipv4Address;
+    use unittest::def_test;
+
+    use super::*;
+
+    const PORT_START: u16 = 0xc000;
+    const PORT_END: u16 = 0xffff;
+
+    struct BoundRegistryReset;
+
+    impl BoundRegistryReset {
+        fn new() -> Self {
+            clear_bound_registry();
+            Self
+        }
+    }
+
+    impl Drop for BoundRegistryReset {
+        fn drop(&mut self) {
+            clear_bound_registry();
+        }
+    }
+
+    fn clear_bound_registry() {
+        TCP_BOUND_ENDPOINTS.lock().clear();
+    }
+
+    fn next_ephemeral_port(port: u16) -> u16 {
+        if port == PORT_END {
+            PORT_START
+        } else {
+            port + 1
+        }
+    }
+
+    fn listen_endpoint(addr: Option<Ipv4Addr>, port: u16) -> IpListenEndpoint {
+        IpListenEndpoint {
+            addr: addr.map(|ip| IpAddress::Ipv4(Ipv4Address::from(ip))),
+            port,
+        }
+    }
+
+    #[def_test]
+    fn test_send_state_error_maps_connection_and_shutdown_states() {
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::Listen),
+            KError::NotConnected
+        );
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::SynSent),
+            KError::NotConnected
+        );
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::SynReceived),
+            KError::NotConnected
+        );
+
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::Closed),
+            KError::BrokenPipe
+        );
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::FinWait1),
+            KError::BrokenPipe
+        );
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::FinWait2),
+            KError::BrokenPipe
+        );
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::Closing),
+            KError::BrokenPipe
+        );
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::LastAck),
+            KError::BrokenPipe
+        );
+        assert_eq!(
+            TcpSocket::send_state_error(smol::State::TimeWait),
+            KError::BrokenPipe
+        );
+    }
+
+    #[def_test]
+    fn test_listen_addrs_conflict_handles_wildcards_and_exact_matches() {
+        let addr_a = Some(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)));
+        let addr_b = Some(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2)));
+
+        assert!(listen_addrs_conflict(None, addr_a));
+        assert!(listen_addrs_conflict(addr_a, None));
+        assert!(listen_addrs_conflict(addr_a, addr_a));
+        assert!(!listen_addrs_conflict(addr_a, addr_b));
+    }
+
+    #[def_test(serial)]
+    fn test_register_tcp_bound_rejects_conflicts_but_keeps_distinct_specific_addrs() {
+        let _reset = BoundRegistryReset::new();
+        let addr_a = listen_endpoint(Some(Ipv4Addr::new(192, 0, 2, 1)), 40000);
+        let addr_b = listen_endpoint(Some(Ipv4Addr::new(192, 0, 2, 2)), 40000);
+        let wildcard = listen_endpoint(None, 40000);
+
+        assert!(register_tcp_bound(addr_a).is_ok());
+        assert!(register_tcp_bound(addr_b).is_ok());
+        assert_eq!(register_tcp_bound(addr_a), Err(KError::AddrInUse));
+        assert_eq!(register_tcp_bound(wildcard), Err(KError::AddrInUse));
+
+        let bound_addrs = TCP_BOUND_ENDPOINTS.lock().get(&40000).cloned().unwrap();
+        assert_eq!(bound_addrs.len(), 2);
+        assert!(bound_addrs.contains(&addr_a.addr));
+        assert!(bound_addrs.contains(&addr_b.addr));
+    }
+
+    #[def_test(serial)]
+    fn test_unregister_tcp_bound_removes_only_matching_address_and_cleans_empty_port() {
+        let _reset = BoundRegistryReset::new();
+        let addr_a = listen_endpoint(Some(Ipv4Addr::new(192, 0, 2, 10)), 40001);
+        let addr_b = listen_endpoint(Some(Ipv4Addr::new(192, 0, 2, 11)), 40001);
+
+        register_tcp_bound(addr_a).unwrap();
+        register_tcp_bound(addr_b).unwrap();
+
+        unregister_tcp_bound(addr_a);
+        {
+            let bound_addrs = TCP_BOUND_ENDPOINTS.lock().get(&40001).cloned().unwrap();
+            assert_eq!(bound_addrs, vec![addr_b.addr]);
+        }
+
+        unregister_tcp_bound(addr_a);
+        {
+            let bound_addrs = TCP_BOUND_ENDPOINTS.lock().get(&40001).cloned().unwrap();
+            assert_eq!(bound_addrs, vec![addr_b.addr]);
+        }
+
+        unregister_tcp_bound(addr_b);
+        assert!(TCP_BOUND_ENDPOINTS.lock().get(&40001).is_none());
+    }
+
+    #[def_test(serial)]
+    fn test_tcp_port_available_respects_specific_and_wildcard_conflicts() {
+        let _reset = BoundRegistryReset::new();
+        let addr_a = listen_endpoint(Some(Ipv4Addr::new(198, 51, 100, 1)), 40002);
+        let addr_b = listen_endpoint(Some(Ipv4Addr::new(198, 51, 100, 2)), 40002);
+        let wildcard = listen_endpoint(None, 40002);
+
+        assert!(tcp_port_available(addr_a));
+
+        register_tcp_bound(addr_a).unwrap();
+        assert!(!tcp_port_available(addr_a));
+        assert!(tcp_port_available(addr_b));
+        assert!(!tcp_port_available(wildcard));
+    }
+
+    #[def_test(serial)]
+    fn test_get_ephemeral_port_skips_conflicting_candidate_and_stays_in_range() {
+        let _reset = BoundRegistryReset::new();
+        let local_addr = IpAddress::Ipv4(Ipv4Address::new(203, 0, 113, 10));
+
+        let first = get_ephemeral_port(local_addr).unwrap();
+        assert!((PORT_START..=PORT_END).contains(&first));
+
+        let blocked = listen_endpoint(
+            Some(Ipv4Addr::new(203, 0, 113, 10)),
+            next_ephemeral_port(first),
+        );
+        register_tcp_bound(blocked).unwrap();
+
+        let second = get_ephemeral_port(local_addr).unwrap();
+        assert!((PORT_START..=PORT_END).contains(&second));
+        assert_ne!(second, blocked.port);
+    }
+}

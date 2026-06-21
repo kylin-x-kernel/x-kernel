@@ -388,3 +388,232 @@ pub unsafe fn write_buffer(out_buffer: *mut u8) -> i32 {
         write_data(&mut writer, ptr::null_mut(), 0)
     }
 }
+
+#[cfg(unittest)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    unsafe extern "C" fn vec_writer(
+        this: *mut ProfDataWriter,
+        io_vecs: *mut ProfDataIOVec,
+        num_io_vecs: u32,
+    ) -> u32 {
+        let out = unsafe { &mut *((*this).writer_ctx as *mut Vec<u8>) };
+        for idx in 0..num_io_vecs as usize {
+            let iov = unsafe { &*io_vecs.add(idx) };
+            let total = iov.elm_size * iov.num_elm;
+            if iov.data.is_null() {
+                let old_len = out.len();
+                out.resize(old_len + total, 0);
+            } else {
+                let bytes = unsafe { core::slice::from_raw_parts(iov.data.cast::<u8>(), total) };
+                out.extend_from_slice(bytes);
+            }
+        }
+        0
+    }
+
+    unsafe extern "C" fn fail_writer(
+        _this: *mut ProfDataWriter,
+        _io_vecs: *mut ProfDataIOVec,
+        _num_io_vecs: u32,
+    ) -> u32 {
+        1
+    }
+
+    static FAKE_VALUES: [InstrProfValueData; 2] = [
+        InstrProfValueData {
+            value: 10,
+            count: 1,
+        },
+        InstrProfValueData {
+            value: 20,
+            count: 3,
+        },
+    ];
+    static FAKE_READ_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn fake_init_rt_record(
+        _data: *const LlvmProfileData,
+        site_count_array: *mut *mut u8,
+    ) -> u32 {
+        unsafe {
+            let site_counts = *site_count_array.add(IPVK_INDIRECT_CALL_TARGET as usize);
+            if !site_counts.is_null() {
+                *site_counts = 2;
+            }
+        }
+        FAKE_READ_INDEX.store(0, Ordering::Relaxed);
+        1
+    }
+
+    unsafe extern "C" fn fake_header_size(num_sites: u32) -> u32 {
+        let total = size_of::<ValueProfRecord>() as u32 + num_sites;
+        let padding = (7 & (8 - total % 8)) as u32;
+        total + padding
+    }
+
+    unsafe extern "C" fn fake_first_record(data: *mut ValueProfData) -> *mut ValueProfRecord {
+        unsafe { data.cast::<u8>().add(size_of::<ValueProfData>()) }.cast::<ValueProfRecord>()
+    }
+
+    unsafe extern "C" fn fake_num_value_data_for_site(_value_kind: u32, _site: u32) -> u32 {
+        2
+    }
+
+    unsafe extern "C" fn fake_value_prof_data_size() -> u32 {
+        size_of::<ValueProfData>() as u32
+            + unsafe { fake_header_size(1) }
+            + (FAKE_VALUES.len() * size_of::<InstrProfValueData>()) as u32
+    }
+
+    unsafe extern "C" fn fake_get_value_data(
+        _value_kind: u32,
+        _site: u32,
+        dst: *mut InstrProfValueData,
+        _start_node: *mut ValueProfNode,
+        n: u32,
+    ) -> *mut ValueProfNode {
+        let start = FAKE_READ_INDEX.fetch_add(n as usize, Ordering::Relaxed);
+        for idx in 0..n as usize {
+            unsafe {
+                *dst.add(idx) = FAKE_VALUES[start + idx];
+            }
+        }
+        ptr::null_mut()
+    }
+
+    #[def_test(serial)]
+    fn buffer_writer_zero_fills_null_iovecs() {
+        let mut out = [0xAAu8; 8];
+        let mut writer = ProfDataWriter {
+            write_fn: buffer_writer,
+            writer_ctx: out.as_mut_ptr().cast::<c_void>(),
+        };
+        let data = [1u8, 2, 3];
+        let mut iovs = [
+            ProfDataIOVec {
+                data: data.as_ptr().cast_mut().cast::<c_void>(),
+                elm_size: 1,
+                num_elm: data.len(),
+                use_zero_padding: 0,
+            },
+            ProfDataIOVec {
+                data: ptr::null_mut(),
+                elm_size: 1,
+                num_elm: 3,
+                use_zero_padding: 1,
+            },
+            ProfDataIOVec {
+                data: ptr::null_mut(),
+                elm_size: 1,
+                num_elm: 2,
+                use_zero_padding: 0,
+            },
+        ];
+
+        let result = unsafe { buffer_writer(&mut writer, iovs.as_mut_ptr(), iovs.len() as u32) };
+        assert_eq!(result, 0);
+        assert_eq!(out, [1, 2, 3, 0, 0, 0, 0xAA, 0xAA]);
+        assert_eq!(
+            writer.writer_ctx,
+            unsafe { out.as_mut_ptr().add(8) }.cast::<c_void>()
+        );
+    }
+
+    #[def_test(serial)]
+    fn write_data_impl_propagates_writer_failure() {
+        let data = [LlvmProfileData {
+            name_ref: 0,
+            func_hash: 0,
+            counter_ptr: ptr::null_mut(),
+            bitmap_ptr: ptr::null_mut(),
+            function_pointer: ptr::null_mut(),
+            values: ptr::null_mut(),
+            num_counters: 0,
+            num_value_sites: [0; IPVK_NUM_KINDS],
+            num_bitmap_bytes: 0,
+        }];
+        let names = [0u8; 4];
+        let mut writer = ProfDataWriter {
+            write_fn: fail_writer,
+            writer_ctx: ptr::null_mut(),
+        };
+
+        let result = unsafe {
+            write_data_impl(
+                &mut writer,
+                data.as_ptr(),
+                data.as_ptr().add(data.len()),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+                names.as_ptr(),
+                names.as_ptr().add(names.len()),
+                1,
+            )
+        };
+        assert_eq!(result, -1);
+    }
+
+    #[def_test(serial)]
+    fn write_one_value_prof_data_serializes_reader_output() {
+        let reader = VPDataReaderType {
+            init_rt_record: fake_init_rt_record,
+            get_value_prof_record_header_size: fake_header_size,
+            get_first_value_prof_record: fake_first_record,
+            get_num_value_data_for_site: fake_num_value_data_for_site,
+            get_value_prof_data_size: fake_value_prof_data_size,
+            get_value_data: fake_get_value_data,
+        };
+        let data = LlvmProfileData {
+            name_ref: 0,
+            func_hash: 0,
+            counter_ptr: ptr::null_mut(),
+            bitmap_ptr: ptr::null_mut(),
+            function_pointer: ptr::null_mut(),
+            values: ptr::null_mut(),
+            num_counters: 0,
+            num_value_sites: [1, 0, 0],
+            num_bitmap_bytes: 0,
+        };
+        let mut bytes = Vec::new();
+        let mut writer = ProfDataWriter {
+            write_fn: vec_writer,
+            writer_ctx: (&mut bytes as *mut Vec<u8>).cast::<c_void>(),
+        };
+
+        let result = unsafe { write_one_value_prof_data(&mut writer, &reader, &data) };
+        assert_eq!(result, 0);
+        assert_eq!(bytes.len(), 56);
+
+        let total_size = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let num_value_kinds = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let kind = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let num_sites = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let site_count = bytes[16];
+        let first_value = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let first_count = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let second_value = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let second_count = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
+
+        assert_eq!(total_size, 56);
+        assert_eq!(num_value_kinds, 1);
+        assert_eq!(kind, IPVK_INDIRECT_CALL_TARGET);
+        assert_eq!(num_sites, 1);
+        assert_eq!(site_count, 2);
+        assert_eq!(first_value, 10);
+        assert_eq!(first_count, 1);
+        assert_eq!(second_value, 20);
+        assert_eq!(second_count, 3);
+    }
+}

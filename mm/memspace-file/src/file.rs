@@ -273,3 +273,153 @@ pub fn new_file(
     inner.register_listener(aspace);
     Backend::new_dynamic(Arc::new(FileBackend(inner)))
 }
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use kerrno::KError;
+    use kfs::{CachedFile, FileFlags, PageIndex};
+    use khal::paging::{MappingFlags, PageSize};
+    use kvfs::{Mountpoint, OpenOptions};
+    use memaddr::{PAGE_SIZE_4K, VirtAddr};
+    use memfs::MemoryFs;
+    use memspace::{
+        AddrSpace,
+        backend::{Backend, DynBackendOps},
+    };
+    use unittest::def_test;
+
+    use super::{FileBackend, FileBackendInner, new_file};
+
+    fn new_test_aspace() -> Arc<ksync::Mutex<AddrSpace>> {
+        Arc::new(ksync::Mutex::new(
+            AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K)
+                .expect("test address space should be constructible"),
+        ))
+    }
+
+    fn new_test_cache(name: &str) -> CachedFile {
+        let fs = MemoryFs::new();
+        let root = Mountpoint::new_root(&fs).root_location();
+        let location = root
+            .open_file(
+                name,
+                &OpenOptions {
+                    create: true,
+                    ..OpenOptions::default()
+                },
+            )
+            .expect("test file should be creatable");
+        CachedFile::get_or_create(location).expect("cached file should be constructible")
+    }
+
+    fn new_test_backend(start: usize, flags: FileFlags, offset: usize) -> FileBackend {
+        FileBackend(Arc::new(FileBackendInner {
+            start: VirtAddr::from(start),
+            cache: new_test_cache("backend-file"),
+            flags,
+            offset_page: (offset / PAGE_SIZE_4K) as PageIndex,
+            registration: ksync::Mutex::new(None),
+            futex_handle: Arc::new(()),
+        }))
+    }
+
+    fn downcast_file_backend(backend: &Backend) -> &FileBackend {
+        backend
+            .downcast_dynamic_ref::<FileBackend>()
+            .expect("backend should be a FileBackend")
+    }
+
+    #[def_test]
+    fn test_offset_for_includes_file_offset_and_saturates_before_start() {
+        let backend = new_test_backend(0x4000, FileFlags::READ, PAGE_SIZE_4K * 2);
+
+        assert_eq!(backend.offset_for(VirtAddr::from(0x4000usize)), 0x2000);
+        assert_eq!(backend.offset_for(VirtAddr::from(0x4800usize)), 0x2800);
+        assert_eq!(backend.offset_for(VirtAddr::from(0x3000usize)), 0x2000);
+    }
+
+    #[def_test]
+    fn test_check_flags_enforces_requested_access_modes() {
+        let read_only = new_test_backend(0x4000, FileFlags::READ, 0);
+        assert!(read_only.check_flags(MappingFlags::empty()).is_ok());
+        assert!(read_only.check_flags(MappingFlags::READ).is_ok());
+        assert!(matches!(
+            read_only.check_flags(MappingFlags::WRITE),
+            Err(KError::PermissionDenied)
+        ));
+
+        let write_only = new_test_backend(0x4000, FileFlags::WRITE, 0);
+        assert!(write_only.check_flags(MappingFlags::WRITE).is_ok());
+        assert!(matches!(
+            write_only.check_flags(MappingFlags::READ),
+            Err(KError::PermissionDenied)
+        ));
+        assert!(matches!(
+            write_only.check_flags(MappingFlags::READ | MappingFlags::WRITE),
+            Err(KError::PermissionDenied)
+        ));
+    }
+
+    #[def_test]
+    fn test_new_file_rounds_offset_to_page_and_registers_listener() {
+        let aspace = new_test_aspace();
+        let backend = new_file(
+            VirtAddr::from(0x8000usize),
+            new_test_cache("new-file"),
+            FileFlags::READ | FileFlags::WRITE,
+            PAGE_SIZE_4K + 123,
+            &aspace,
+        );
+        let backend = downcast_file_backend(&backend);
+
+        assert_eq!(backend.0.offset_page, 1);
+        assert!(backend.0.registration.lock().is_some());
+        assert!(!backend.is_anonymous());
+        assert_eq!(backend.page_size(), PageSize::Size4K);
+    }
+
+    #[def_test]
+    fn test_relocated_preserves_shared_state_and_updates_start() {
+        let original = new_test_backend(0x4000, FileFlags::READ | FileFlags::WRITE, PAGE_SIZE_4K);
+        let original_futex = original.futex_handle();
+        let aspace = new_test_aspace();
+        let relocated = original
+            .relocated(VirtAddr::from(0x9000usize), &aspace)
+            .expect("relocation should succeed");
+        let relocated = downcast_file_backend(&relocated);
+
+        assert_eq!(relocated.0.start, VirtAddr::from(0x9000usize));
+        assert_eq!(relocated.0.offset_page, original.0.offset_page);
+        assert_eq!(relocated.0.flags.bits(), original.0.flags.bits());
+        assert!(relocated.cache().ptr_eq(original.cache()));
+        assert!(relocated.0.registration.lock().is_some());
+        assert!(Arc::ptr_eq(
+            &relocated
+                .futex_handle()
+                .upgrade()
+                .expect("relocated futex handle should stay alive"),
+            &original_futex
+                .upgrade()
+                .expect("original futex handle should stay alive"),
+        ));
+    }
+
+    #[def_test]
+    fn test_on_evict_ignores_indices_that_cannot_map_to_a_virtual_page() {
+        let backend = Arc::new(FileBackendInner {
+            start: VirtAddr::from(0x4000usize),
+            cache: new_test_cache("evict"),
+            flags: FileFlags::READ,
+            offset_page: 2,
+            registration: ksync::Mutex::new(None),
+            futex_handle: Arc::new(()),
+        });
+        let mut aspace = AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K)
+            .expect("test address space should be constructible");
+
+        backend.on_evict(1, &mut aspace);
+        backend.on_evict(PageIndex::MAX, &mut aspace);
+    }
+}

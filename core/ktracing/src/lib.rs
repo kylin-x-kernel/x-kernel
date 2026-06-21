@@ -271,3 +271,7 @@ impl KernelTraceOps for Kops {
         karch::flush_icache_range(VirtAddr::from(addr), data.len());
     }
 }
+
+#[cfg(unittest)]
+#[path = "test_ktracing.rs"]
+mod tests;

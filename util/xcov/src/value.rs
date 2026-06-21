@@ -335,6 +335,7 @@ unsafe extern "C" fn vp_init_rt_record(
                 if !nodes.is_null() {
                     record.nodes_kind[vk as usize] = nodes.add(site_offset) as *const ValueProfNode;
                 }
+                record.site_count_array[vk as usize] = *site_count_array.add(vk as usize);
 
                 for j in 0..n as usize {
                     let mut c: u32 = 0;
@@ -463,28 +464,226 @@ unsafe extern "C" fn vp_get_value_data(
     })
 }
 
-#[cfg(test)]
-pub mod tests {
-    pub use super::get_range_rep_value;
+#[cfg(unittest)]
+mod tests {
+    extern crate alloc;
 
-    #[test]
+    use alloc::vec::Vec;
+    use core::{ffi::c_void, mem::size_of};
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    fn new_profile_data(num_value_sites: [u16; IPVK_NUM_KINDS]) -> LlvmProfileData {
+        LlvmProfileData {
+            name_ref: 0,
+            func_hash: 0,
+            counter_ptr: ptr::null_mut(),
+            bitmap_ptr: ptr::null_mut(),
+            function_pointer: ptr::null_mut(),
+            values: ptr::null_mut(),
+            num_counters: 0,
+            num_value_sites,
+            num_bitmap_bytes: 0,
+        }
+    }
+
+    unsafe fn collect_site_entries(data: &LlvmProfileData, site_index: usize) -> Vec<(u64, u64)> {
+        let mut result = Vec::new();
+        let counters = data.values.cast::<*mut ValueProfNode>();
+        if counters.is_null() {
+            return result;
+        }
+        let mut node = unsafe { *counters.add(site_index) };
+        while !node.is_null() {
+            result.push((unsafe { (*node).value }, unsafe { (*node).count }));
+            node = unsafe { (*node).next };
+        }
+        result
+    }
+
+    unsafe fn free_profile_nodes(data: &mut LlvmProfileData) {
+        let values = data.values.cast::<*mut ValueProfNode>();
+        if values.is_null() {
+            return;
+        }
+
+        let mut num_sites = 0usize;
+        for vki in IPVK_FIRST..=IPVK_LAST {
+            num_sites += data.num_value_sites[(vki - IPVK_FIRST) as usize] as usize;
+        }
+
+        for site in 0..num_sites {
+            let mut node = unsafe { *values.add(site) };
+            while !node.is_null() {
+                let next = unsafe { (*node).next };
+                unsafe {
+                    port::dealloc(
+                        node.cast::<u8>(),
+                        size_of::<ValueProfNode>(),
+                        core::mem::align_of::<ValueProfNode>(),
+                    );
+                }
+                node = next;
+            }
+        }
+
+        unsafe {
+            port::dealloc(
+                values.cast::<u8>(),
+                num_sites * size_of::<*mut ValueProfNode>(),
+                core::mem::align_of::<*mut ValueProfNode>(),
+            );
+        }
+        data.values = ptr::null_mut();
+    }
+
+    #[def_test(serial)]
     fn range_rep_value_small() {
         assert_eq!(get_range_rep_value(0), 0);
         assert_eq!(get_range_rep_value(1), 1);
         assert_eq!(get_range_rep_value(8), 8);
     }
 
-    #[test]
+    #[def_test(serial)]
     fn range_rep_value_bucketed() {
         // Values from C InstrProfGetRangeRepValue comments/examples.
-        assert_eq!(get_range_rep_value(16), 16); // power of 2 → as-is
-        assert_eq!(get_range_rep_value(9), 9); // prev_pow2(9)+1 = 9
-        assert_eq!(get_range_rep_value(22), 17); // prev_pow2(22)+1 = 17
-        assert_eq!(get_range_rep_value(99), 65); // prev_pow2(99)+1 = 65
-        assert_eq!(get_range_rep_value(256), 256); // power of 2 → as-is
-        assert_eq!(get_range_rep_value(512), 512); // power of 2 → as-is
-        assert_eq!(get_range_rep_value(300), 257); // prev_pow2(300)+1 = 257
-        assert_eq!(get_range_rep_value(513), 513); // >= 513 → 513
+        assert_eq!(get_range_rep_value(16), 16);
+        assert_eq!(get_range_rep_value(9), 9);
+        assert_eq!(get_range_rep_value(22), 17);
+        assert_eq!(get_range_rep_value(99), 65);
+        assert_eq!(get_range_rep_value(256), 256);
+        assert_eq!(get_range_rep_value(512), 512);
+        assert_eq!(get_range_rep_value(300), 257);
+        assert_eq!(get_range_rep_value(513), 513);
         assert_eq!(get_range_rep_value(1000), 513);
+    }
+
+    #[def_test(serial)]
+    fn instrument_target_value_accumulates_and_links_sites() {
+        let old_max = VP_MAX_NUM_VALS_PER_SITE.load(core::sync::atomic::Ordering::Relaxed);
+        VP_MAX_NUM_VALS_PER_SITE.store(4, core::sync::atomic::Ordering::Relaxed);
+
+        let mut data = new_profile_data([1, 0, 0]);
+        unsafe {
+            instrument_target_value(
+                7,
+                (&mut data as *mut LlvmProfileData).cast::<c_void>(),
+                0,
+                1,
+            );
+            instrument_target_value(
+                7,
+                (&mut data as *mut LlvmProfileData).cast::<c_void>(),
+                0,
+                3,
+            );
+            instrument_target_value(
+                9,
+                (&mut data as *mut LlvmProfileData).cast::<c_void>(),
+                0,
+                2,
+            );
+
+            let entries = collect_site_entries(&data, 0);
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0], (7, 4));
+            assert_eq!(entries[1], (9, 2));
+
+            free_profile_nodes(&mut data);
+        }
+
+        VP_MAX_NUM_VALS_PER_SITE.store(old_max, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[def_test(serial)]
+    fn instrument_target_value_evicts_or_decays_min_count_entry() {
+        let old_max = VP_MAX_NUM_VALS_PER_SITE.load(core::sync::atomic::Ordering::Relaxed);
+        VP_MAX_NUM_VALS_PER_SITE.store(2, core::sync::atomic::Ordering::Relaxed);
+
+        let mut data = new_profile_data([1, 0, 0]);
+        unsafe {
+            let data_ptr = (&mut data as *mut LlvmProfileData).cast::<c_void>();
+            instrument_target_value(1, data_ptr, 0, 5);
+            instrument_target_value(2, data_ptr, 0, 2);
+            instrument_target_value(3, data_ptr, 0, 3);
+
+            let entries = collect_site_entries(&data, 0);
+            assert!(entries.contains(&(1, 5)));
+            assert!(entries.contains(&(3, 3)));
+            assert!(!entries.iter().any(|&(value, _)| value == 2));
+
+            instrument_target_value(4, data_ptr, 0, 1);
+            let entries = collect_site_entries(&data, 0);
+            assert!(entries.contains(&(1, 5)));
+            assert!(entries.contains(&(3, 2)));
+            assert!(!entries.iter().any(|&(value, _)| value == 4));
+
+            free_profile_nodes(&mut data);
+        }
+
+        VP_MAX_NUM_VALS_PER_SITE.store(old_max, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[def_test(serial)]
+    fn instrument_memop_buckets_large_values() {
+        let old_max = VP_MAX_NUM_VALS_PER_SITE.load(core::sync::atomic::Ordering::Relaxed);
+        VP_MAX_NUM_VALS_PER_SITE.store(4, core::sync::atomic::Ordering::Relaxed);
+
+        let mut data = new_profile_data([0, 1, 0]);
+        unsafe {
+            instrument_memop(300, (&mut data as *mut LlvmProfileData).cast::<c_void>(), 0);
+            let entries = collect_site_entries(&data, 0);
+            assert_eq!(entries, alloc::vec![(257, 1)]);
+            free_profile_nodes(&mut data);
+        }
+
+        VP_MAX_NUM_VALS_PER_SITE.store(old_max, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[def_test(serial)]
+    fn vp_data_reader_reports_site_counts_and_values() {
+        let old_max = VP_MAX_NUM_VALS_PER_SITE.load(core::sync::atomic::Ordering::Relaxed);
+        VP_MAX_NUM_VALS_PER_SITE.store(4, core::sync::atomic::Ordering::Relaxed);
+
+        let mut data = new_profile_data([1, 0, 0]);
+        unsafe {
+            let data_ptr = (&mut data as *mut LlvmProfileData).cast::<c_void>();
+            instrument_target_value(11, data_ptr, 0, 1);
+            instrument_target_value(22, data_ptr, 0, 5);
+
+            let mut indirect_counts = [0u8; 8];
+            let mut site_count_arrays = [ptr::null_mut(); IPVK_NUM_KINDS];
+            site_count_arrays[IPVK_INDIRECT_CALL_TARGET as usize] = indirect_counts.as_mut_ptr();
+
+            let reader = &*get_vpdo_data_reader();
+            let num_kinds = (reader.init_rt_record)(&data, site_count_arrays.as_mut_ptr());
+            assert_eq!(num_kinds, 1);
+            assert_eq!(
+                (reader.get_num_value_data_for_site)(IPVK_INDIRECT_CALL_TARGET, 0),
+                2
+            );
+            assert!(indirect_counts[0] >= 2);
+            assert_eq!((reader.get_value_prof_data_size)(), 56);
+
+            let mut out = [InstrProfValueData::default(); 2];
+            let next = (reader.get_value_data)(
+                IPVK_INDIRECT_CALL_TARGET,
+                0,
+                out.as_mut_ptr(),
+                ptr::null_mut(),
+                2,
+            );
+            assert!(next.is_null());
+            assert_eq!(out[0].value, 11);
+            assert_eq!(out[0].count, 1);
+            assert_eq!(out[1].value, 22);
+            assert_eq!(out[1].count, 5);
+
+            free_profile_nodes(&mut data);
+        }
+
+        VP_MAX_NUM_VALS_PER_SITE.store(old_max, core::sync::atomic::Ordering::Relaxed);
     }
 }
