@@ -101,9 +101,14 @@ pub(crate) enum CrypCtx {
 }
 
 /// Hash context backed by tee_crypto streaming hash types.
+///
+/// `Md5` and `Sha1` variants are kept for GlobalPlatform TEE API compatibility
+/// only; both are weak and not recommended for new security-sensitive use.
 #[derive(Clone)]
 pub(crate) enum HashContext {
+    /// Legacy — MD5; not recommended.
     Md5(tee_crypto::md5::Md5),
+    /// Legacy — SHA-1; not recommended.
     Sha1(tee_crypto::hash::Sha1),
     Sha224(tee_crypto::hash::Sha224),
     Sha256(tee_crypto::hash::Sha256),
@@ -113,9 +118,15 @@ pub(crate) enum HashContext {
 }
 
 /// HMAC context backed by tee_crypto streaming MAC types.
+///
+/// `HmacMd5` and `HmacSha1` variants are kept for GlobalPlatform TEE API
+/// compatibility only; both underlying hashes are weak and not recommended
+/// for new security-sensitive use.
 #[derive(Clone)]
 pub(crate) enum HmacContext {
+    /// Legacy — HMAC-MD5; not recommended.
     HmacMd5(tee_crypto::mac::HmacMd5),
+    /// Legacy — HMAC-SHA-1; not recommended.
     HmacSha1(tee_crypto::mac::HmacSha1),
     HmacSha224(tee_crypto::mac::HmacSha224),
     HmacSha256(tee_crypto::mac::HmacSha256),

@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Hash abstraction — SHA-1/224/256/384/512, SM3, MD5.
+//!
+//! MD5 and SHA-1 are retained for GlobalPlatform TEE API compatibility.
+//! Both are considered weak (MD5: broken collisions; SHA-1: deprecated,
+//! collision attacks known) and should not be chosen for new security-sensitive
+//! use; prefer SHA-256, SHA-384/512, or SM3.
 
 use alloc::vec::Vec;
 use core::{fmt, ops::Deref};
@@ -12,7 +17,9 @@ use digest::Digest as _;
 /// Supported hash algorithm selector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashAlgorithm {
+    /// MD5 — legacy TEE support only; cryptographically broken, not recommended.
     Md5,
+    /// SHA-1 — legacy TEE support only; deprecated and weak, not recommended.
     Sha1,
     Sha224,
     Sha256,
@@ -179,6 +186,8 @@ pub struct Sm3 {
 }
 
 /// SHA-1 hash.
+///
+/// Supported for legacy TEE interoperability only; not recommended for new use.
 #[derive(Clone)]
 pub struct Sha1 {
     inner: sha1::Sha1,

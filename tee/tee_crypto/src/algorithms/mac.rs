@@ -29,12 +29,18 @@ pub trait Mac {
 }
 
 /// HMAC-MD5.
+///
+/// Provided for `TEE_ALG_HMAC_MD5` compatibility. MD5 is cryptographically
+/// broken; do not use for new security-sensitive workloads.
 #[derive(Clone)]
 pub struct HmacMd5 {
     inner: hmac::Hmac<md5::Md5>,
 }
 
 /// HMAC-SHA-1.
+///
+/// Provided for `TEE_ALG_HMAC_SHA1` compatibility. SHA-1 is deprecated and
+/// weak; do not use for new security-sensitive workloads.
 #[derive(Clone)]
 pub struct HmacSha1 {
     inner: hmac::Hmac<sha1::Sha1>,

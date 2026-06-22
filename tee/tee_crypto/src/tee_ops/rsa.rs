@@ -24,9 +24,15 @@ use crate::{
 };
 
 /// RSA hash algorithm selector.
+///
+/// `Md5` and `Sha1` variants exist for GlobalPlatform TEE API compatibility
+/// (PKCS#1 v1.5, PSS, OAEP). Both are weak and must not be used for new
+/// security-sensitive RSA operations; prefer SHA-256 or stronger.
 #[derive(Clone, Debug, Copy)]
 pub enum RsaHashAlgo {
+    /// Legacy RSA hash — MD5; not recommended.
     Md5,
+    /// Legacy RSA hash — SHA-1; not recommended.
     Sha1,
     Sha224,
     Sha256,

@@ -3,12 +3,19 @@
 // See LICENSES for license details.
 
 //! MD5 hash wrapper backed by RustCrypto.
+//!
+//! MD5 is provided for GlobalPlatform TEE API compatibility (`TEE_ALG_MD5`,
+//! `TEE_ALG_HMAC_MD5`, RSA/ECDSA variants, etc.). It is cryptographically
+//! broken (practical collision attacks) and must not be used for new
+//! security-sensitive workloads; prefer SHA-256 or SM3 instead.
 
 use digest::Digest as _;
 
 use super::hash::{Digest, DigestBytes, HashAlgorithm};
 
 /// MD5 hash (RFC 1321).
+///
+/// Supported for legacy TEE interoperability only; not recommended for new use.
 #[derive(Clone)]
 pub struct Md5 {
     inner: md5::Md5,

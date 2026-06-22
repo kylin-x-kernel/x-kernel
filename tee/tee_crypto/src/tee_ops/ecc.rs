@@ -27,8 +27,12 @@ use crate::{
 };
 
 /// Hash algorithm for ECDSA.
+///
+/// The `Sha1` variant is retained for `TEE_ALG_ECDSA_SHA1` compatibility.
+/// SHA-1 is deprecated and weak; prefer SHA-256 or stronger for new use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EccHashAlgo {
+    /// Legacy ECDSA hash — SHA-1; not recommended.
     Sha1,
     Sha224,
     Sha256,

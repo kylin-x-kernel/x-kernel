@@ -454,6 +454,10 @@ pub fn crypto_acipher_gen_ecc_key(
     key.generate(key_size_bits)
 }
 
+/// Returns Ok for hash algorithms exposed through the GP TEE API.
+///
+/// MD5 and SHA-1 are included for legacy interoperability; they are weak and
+/// should not be selected for new security-sensitive workloads.
 fn hash_algo_supported(algo: u32) -> TeeResult {
     match algo {
         TEE_ALG_MD5 | TEE_ALG_SHA1 | TEE_ALG_SHA224 | TEE_ALG_SHA256 | TEE_ALG_SHA384
