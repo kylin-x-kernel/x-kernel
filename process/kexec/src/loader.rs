@@ -142,7 +142,10 @@ impl ElfLoader {
 
     fn load(&mut self, uspace: &mut AddrSpace, path: &str) -> KResult<LoadResult> {
         let loc = kthread::current_fs_context().lock().resolve(path)?;
+        self.load_location(uspace, loc)
+    }
 
+    fn load_location(&mut self, uspace: &mut AddrSpace, loc: Location) -> KResult<LoadResult> {
         if !self
             .0
             .access(|entry| entry.borrow_cache().location().ptr_eq(&loc))
@@ -247,6 +250,27 @@ pub fn load_user_app(
     args: &[String],
     envs: &[String],
 ) -> KResult<(VirtAddr, VirtAddr)> {
+    load_user_app_resolved(uspace, None, path, args, envs)
+}
+
+/// Load the user app from an already-resolved filesystem location.
+pub fn load_user_app_at(
+    uspace: &mut AddrSpace,
+    loc: Location,
+    path: &str,
+    args: &[String],
+    envs: &[String],
+) -> KResult<(VirtAddr, VirtAddr)> {
+    load_user_app_resolved(uspace, Some(loc), Some(path), args, envs)
+}
+
+fn load_user_app_resolved(
+    uspace: &mut AddrSpace,
+    loc: Option<Location>,
+    path: Option<&str>,
+    args: &[String],
+    envs: &[String],
+) -> KResult<(VirtAddr, VirtAddr)> {
     let path = path
         .or_else(|| args.first().map(String::as_str))
         .ok_or(KError::InvalidInput)?;
@@ -259,7 +283,15 @@ pub fn load_user_app(
         return load_user_app(uspace, None, &new_args, envs);
     }
 
-    let (entry, auxv) = match { ELF_LOADER.lock().load(uspace, path)? } {
+    let load_result = {
+        let mut loader = ELF_LOADER.lock();
+        match loc {
+            Some(loc) => loader.load_location(uspace, loc)?,
+            None => loader.load(uspace, path)?,
+        }
+    };
+
+    let (entry, auxv) = match load_result {
         Ok((entry, auxv)) => (entry, auxv),
         Err(data) => {
             if data.starts_with(b"#!") {

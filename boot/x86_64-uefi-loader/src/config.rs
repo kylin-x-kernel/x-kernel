@@ -14,6 +14,8 @@ use uefi::{
     proto::media::file::{File, FileAttribute, FileMode, FileType, RegularFile},
 };
 
+use crate::loader::sanitize_kernel_path;
+
 const AXBOOT_CONFIG_PATH: &str = "axboot.toml";
 
 pub(crate) struct AxBootConfig {
@@ -139,8 +141,17 @@ fn parse_config(content: &str, cfg: &mut AxBootConfig) -> Result<(), &'static st
         match key {
             "kernel_paths" => {
                 let paths = parse_string_list(value)?;
-                if !paths.is_empty() {
-                    cfg.kernel_paths = paths;
+                let mut valid_paths = Vec::new();
+                for path in paths {
+                    match sanitize_kernel_path(&path) {
+                        Ok(path) => valid_paths.push(path),
+                        Err(_) => warn!("ignoring invalid kernel path from config: {:?}", path),
+                    }
+                }
+                if !valid_paths.is_empty() {
+                    cfg.kernel_paths = valid_paths;
+                } else {
+                    warn!("kernel_paths contains no valid entries, keeping defaults");
                 }
             }
             _ => {}

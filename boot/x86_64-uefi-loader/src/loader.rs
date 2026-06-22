@@ -20,20 +20,27 @@ pub(crate) fn load_kernel(image: Handle, kernel_paths: &[String]) -> Result<Vec<
     let mut root = fs.open_volume().map_err(|e| e.status())?;
 
     for path in kernel_paths {
-        let path16 =
-            uefi::CString16::try_from(path.as_str()).map_err(|_| Status::INVALID_PARAMETER)?;
-        info!("trying kernel path: {}", path);
+        let sanitized_path = match sanitize_kernel_path(path) {
+            Ok(path) => path,
+            Err(err) => {
+                error!("rejecting invalid kernel path {:?}: {:?}", path, err);
+                continue;
+            }
+        };
+        let path16 = uefi::CString16::try_from(sanitized_path.as_str())
+            .map_err(|_| Status::INVALID_PARAMETER)?;
+        info!("trying kernel path: {}", sanitized_path);
         match root.open(&path16, FileMode::Read, FileAttribute::empty()) {
             Ok(handle) => {
                 let file = match handle.into_type().map_err(|e| e.status())? {
                     FileType::Regular(f) => f,
                     _ => return Err(Status::UNSUPPORTED),
                 };
-                info!("kernel opened: {}", path);
+                info!("kernel opened: {}", sanitized_path);
                 return read_file(file);
             }
             Err(err) => {
-                info!("open failed for {}: {:?}", path, err.status());
+                info!("open failed for {}: {:?}", sanitized_path, err.status());
                 continue;
             }
         }
@@ -41,6 +48,29 @@ pub(crate) fn load_kernel(image: Handle, kernel_paths: &[String]) -> Result<Vec<
 
     error!("kernel file not found in EFI root");
     Err(Status::NOT_FOUND)
+}
+
+pub(crate) fn sanitize_kernel_path(path: &str) -> Result<String, Status> {
+    if path.is_empty() || path.starts_with('/') || path.starts_with('\\') || path.contains(':') {
+        return Err(Status::INVALID_PARAMETER);
+    }
+
+    let mut normalized = String::new();
+    for component in path.split(['/', '\\']) {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(Status::INVALID_PARAMETER);
+        }
+        if !normalized.is_empty() {
+            normalized.push('\\');
+        }
+        normalized.push_str(component);
+    }
+
+    if normalized.is_empty() {
+        return Err(Status::INVALID_PARAMETER);
+    }
+
+    Ok(normalized)
 }
 
 fn read_file(mut file: RegularFile) -> Result<Vec<u8>, Status> {

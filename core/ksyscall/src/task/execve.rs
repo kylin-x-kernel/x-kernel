@@ -14,7 +14,7 @@ use core::ffi::c_char;
 
 use kaddr_layout::USER_HEAP_BASE;
 use kerrno::{KError, KResult};
-use kexec::load_user_app;
+use kexec::load_user_app_at;
 use khal::uspace::UserContext;
 use ktask::current;
 use kuaccess::vm_load_string;
@@ -60,14 +60,16 @@ pub fn sys_execve(
         return Err(KError::WouldBlock);
     }
 
-    let mut aspace = proc_state.address_space().lock();
-    let (entry_point, user_stack_base) =
-        load_user_app(&mut aspace, Some(path.as_str()), &args, &envs)?;
-    drop(aspace);
-
     let loc = proc_state.fs_context().lock().resolve(&path)?;
     let absolute_path = loc.absolute_path()?.to_string();
-    curr.set_name(loc.name());
+    let entry_name = loc.name().to_string();
+
+    let mut aspace = proc_state.address_space().lock();
+    let (entry_point, user_stack_base) =
+        load_user_app_at(&mut aspace, loc, absolute_path.as_str(), &args, &envs)?;
+    drop(aspace);
+
+    curr.set_name(entry_name.as_str());
 
     *proc_state.exe_path().write() = absolute_path.clone();
     *proc_state.cmdline().write() = Arc::new(args);
