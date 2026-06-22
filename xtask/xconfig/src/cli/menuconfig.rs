@@ -10,9 +10,15 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use crate::{config::ConfigEngine, error::Result, ui::MenuConfigApp};
+use crate::{
+    config::ConfigEngine, error::Result, ui::MenuConfigApp, validate::validate_input_path,
+};
 
 pub fn menuconfig_command(kconfig: PathBuf, srctree: PathBuf) -> Result<()> {
+    for path in [&kconfig, &srctree] {
+        validate_input_path(path)?;
+    }
+
     println!("Loading configuration...");
 
     let mut engine = ConfigEngine::from_kconfig(&kconfig, &srctree)?;

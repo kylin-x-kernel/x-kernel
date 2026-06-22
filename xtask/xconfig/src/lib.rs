@@ -8,5 +8,6 @@ pub mod error;
 pub mod kconfig;
 mod log;
 pub mod ui;
+pub mod validate;
 
 pub use error::{KconfigError, Result};

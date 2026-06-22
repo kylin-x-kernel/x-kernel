@@ -13,6 +13,32 @@ pub fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| std::env::var("XCONFIG_DEBUG").is_ok())
 }
 
+/// Validate a debug log path (CWE-22). Reject empty, NUL, control characters,
+/// and `..` components so a log path set via `XCONFIG_DEBUG_LOG` (or derived
+/// from `HOME`) cannot be made to truncate an arbitrary location via traversal.
+fn validate_debug_log_path(path: &str) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("debug log path must not be empty".to_string());
+    }
+    if path.contains('\0') {
+        return Err(format!("debug log path must not contain NUL bytes: {path}"));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(format!(
+            "debug log path must not contain control characters: {path}"
+        ));
+    }
+    if std::path::Path::new(path)
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "debug log path must not contain parent-directory (..) components: {path}"
+        ));
+    }
+    Ok(())
+}
+
 // Get debug log file handle (lazily opened)
 pub fn debug_log_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
     static DEBUG_FILE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
@@ -31,6 +57,11 @@ pub fn debug_log_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
                     format!("/tmp/xconfig_debug_{}.log", std::process::id())
                 }
             });
+
+            if let Err(err) = validate_debug_log_path(&log_path) {
+                eprintln!("Warning: ignoring invalid debug log path '{log_path}': {err}");
+                return None;
+            }
 
             let mut options = std::fs::OpenOptions::new();
             options.create(true).write(true).truncate(true);
@@ -63,4 +94,24 @@ macro_rules! debug_log {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_debug_log_path;
+
+    #[test]
+    fn accepts_normal_log_paths() {
+        assert!(validate_debug_log_path("/tmp/x.log").is_ok());
+        assert!(validate_debug_log_path("xconfig_debug.log").is_ok());
+    }
+
+    #[test]
+    fn rejects_traversal_and_control_chars() {
+        assert!(validate_debug_log_path("../evil").is_err());
+        assert!(validate_debug_log_path("/tmp/a/../b").is_err());
+        assert!(validate_debug_log_path("/tmp/a\nb").is_err());
+        assert!(validate_debug_log_path("/tmp/a\0b").is_err());
+        assert!(validate_debug_log_path("").is_err());
+    }
 }

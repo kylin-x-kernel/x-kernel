@@ -4,9 +4,13 @@
 
 use std::path::PathBuf;
 
-use crate::{config::ConfigEngine, error::Result};
+use crate::{config::ConfigEngine, error::Result, validate::validate_input_path};
 
 pub fn saveconfig_command(output: PathBuf, kconfig: PathBuf, srctree: PathBuf) -> Result<()> {
+    for path in [&output, &kconfig, &srctree] {
+        validate_input_path(path)?;
+    }
+
     println!("Saving configuration...");
     println!("Kconfig: {}", kconfig.display());
     println!("Output: {}", output.display());

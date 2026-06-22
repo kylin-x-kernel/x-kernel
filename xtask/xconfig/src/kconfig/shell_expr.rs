@@ -11,6 +11,16 @@ use crate::{
 pub fn evaluate_shell_expr(expr: &str, symbols: &SymbolTable) -> Result<String> {
     let trimmed = expr.trim();
 
+    // xconfig intentionally does not execute sub-shells. Fail closed on the
+    // Kconfig `$(shell ...)` / `$(shell, ...)` forms with a clear error instead
+    // of silently treating them as a variable reference, so the
+    // command-injection surface stays closed by construction (CWE-78/#28).
+    if trimmed.starts_with("$(shell ") || trimmed.starts_with("$(shell,") {
+        return Err(KconfigError::InvalidExpression(format!(
+            "shell execution is not supported in Kconfig expressions: {expr}"
+        )));
+    }
+
     // Handle $(if ...) expressions
     if trimmed.starts_with("$(if ") && trimmed.ends_with(')') {
         return evaluate_if_expr(trimmed, symbols);
@@ -220,5 +230,23 @@ mod tests {
         let expr = r#"$(if $(USE_QUOTES),"value with \"quotes\"",plain)"#;
         let result = evaluate_shell_expr(expr, &symbols).unwrap();
         assert_eq!(result, r#""value with \"quotes\"""#);
+    }
+
+    #[test]
+    fn test_shell_execution_is_rejected() {
+        // `$(shell ...)` must fail closed: xconfig never executes sub-shells.
+        let symbols = SymbolTable::new();
+        assert!(evaluate_shell_expr("$(shell whoami)", &symbols).is_err());
+        assert!(evaluate_shell_expr("$(shell,uname -r)", &symbols).is_err());
+    }
+
+    #[test]
+    fn test_non_shell_variable_still_works() {
+        // A variable literally named `shellfoo` must not be confused with
+        // `$(shell ...)`.
+        let mut symbols = SymbolTable::new();
+        symbols.add_symbol("shellfoo".to_string(), SymbolType::Bool);
+        symbols.set_value("shellfoo", "bar".to_string());
+        assert_eq!(evaluate_shell_expr("$(shellfoo)", &symbols).unwrap(), "bar");
     }
 }

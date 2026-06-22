@@ -102,12 +102,14 @@ pub fn run_debugfs(disk_img: &Path, command_file: &Path) -> Result<(), String> {
 
 pub fn verify_paths(disk_img: &Path, paths: &[String]) -> Result<(), String> {
     for path in paths {
+        validate_guest_path(path)?;
         debugfs_stat(disk_img, path)?;
     }
     Ok(())
 }
 
 pub fn verify_directory(disk_img: &Path, path: &str) -> Result<(), String> {
+    validate_guest_path(path)?;
     let output = debugfs_stat(disk_img, path)?;
     if !output.contains("Type: directory") {
         return Err(format!(
@@ -161,10 +163,46 @@ fn guest_basename(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// Validate a guest path inside the disk image (CWE-22 / CWE-78 hardening).
+///
+/// Guest paths are embedded into `debugfs` requests (`stat "<path>"`) and
+/// command scripts. Reject anything that could escape the intended location
+/// (`..`), break request parsing (control characters, NUL), or arrive without
+/// an absolute root. All values reaching [`debugfs_quote`] are expected to be
+/// pre-validated here.
+pub(crate) fn validate_guest_path(path: &str) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err(format!("guest path must not be empty: {path:?}"));
+    }
+    if !path.starts_with('/') {
+        return Err(format!("guest path must be absolute: {path:?}"));
+    }
+    if path.contains('\0') {
+        return Err(format!("guest path must not contain NUL bytes: {path:?}"));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(format!(
+            "guest path must not contain control characters: {path:?}"
+        ));
+    }
+    if path.split('/').any(|component| component == "..") {
+        return Err(format!(
+            "guest path must not contain parent-directory (..) components: {path:?}"
+        ));
+    }
+    Ok(())
+}
+
 fn debugfs_quote_path(path: &Path) -> String {
     debugfs_quote(&path.to_string_lossy())
 }
 
+/// Escape `value` for a `debugfs` double-quoted argument.
+///
+/// `debugfs` is invoked without a shell (`Command::new("debugfs").arg(...)`),
+/// so this only needs to defeat the `debugfs` request lexer: backslash and
+/// double-quote are the only characters that can alter quoting. Guest paths
+/// reaching here are pre-validated by [`validate_guest_path`].
 fn debugfs_quote(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
@@ -172,7 +210,7 @@ fn debugfs_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{guest_basename, guest_parent};
+    use super::{guest_basename, guest_parent, validate_guest_path};
 
     #[test]
     fn guest_parent_handles_root_children() {
@@ -187,5 +225,29 @@ mod tests {
     #[test]
     fn guest_basename_handles_nested_paths() {
         assert_eq!(guest_basename("/usr/local/bin/hello"), "hello");
+    }
+
+    #[test]
+    fn validate_guest_path_accepts_absolute_paths() {
+        assert!(validate_guest_path("/hello").is_ok());
+        assert!(validate_guest_path("/usr/bin/hello").is_ok());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_non_absolute() {
+        assert!(validate_guest_path("hello").is_err());
+        assert!(validate_guest_path("../hello").is_err());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_parent_traversal() {
+        assert!(validate_guest_path("/a/../b").is_err());
+        assert!(validate_guest_path("/../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_control_chars_and_nul() {
+        assert!(validate_guest_path("/a\nb").is_err());
+        assert!(validate_guest_path("/a\0b").is_err());
     }
 }

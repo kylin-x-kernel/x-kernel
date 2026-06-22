@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::{
     config::{ConfigEngine, ConfigWriter},
     error::Result,
+    validate::validate_input_path,
 };
 
 pub fn savedefconfig_command(
@@ -15,6 +16,10 @@ pub fn savedefconfig_command(
     kconfig: PathBuf,
     srctree: PathBuf,
 ) -> Result<()> {
+    for path in [&config, &output, &kconfig, &srctree] {
+        validate_input_path(path)?;
+    }
+
     println!("Saving minimal defconfig...");
     println!("Config: {}", config.display());
     println!("Output: {}", output.display());

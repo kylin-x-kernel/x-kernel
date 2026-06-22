@@ -102,6 +102,15 @@ fn render_entry(script: &mut String, entry: &AutostartEntry) {
     }
 }
 
+/// Quote `value` as a single POSIX shell argument.
+///
+/// Every byte of `value` is placed inside a single-quoted region, and the
+/// only character that can terminate such a region (a literal `'`) is emitted
+/// as the standard `'\''` sequence. This fully neutralizes shell
+/// metacharacters (`;`, `&`, `|`, `$()`, backticks) and control characters
+/// (newlines, NUL) so the rendered autostart script cannot break out of the
+/// quoted argument (CWE-78/#14/#56). The round-trip property is locked by the
+/// tests below.
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -125,5 +134,35 @@ mod tests {
     #[test]
     fn shell_quote_handles_single_quotes() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn shell_quote_defeats_injection_and_round_trips() {
+        // Each payload must be fully enclosed in single quotes and round-trip
+        // back to the original, proving no shell metacharacter or control
+        // character can break out of the quoted argument.
+        let payloads = [
+            "; rm -rf /",
+            "$(whoami)",
+            "`id`",
+            "foo & bar",
+            "a|b",
+            "a\nb",
+            "a\rb",
+            "a\tb",
+            "echo 'hi'",
+            "> /etc/passwd",
+            "name with spaces",
+        ];
+        for payload in payloads {
+            let quoted = shell_quote(payload);
+            assert!(
+                quoted.starts_with('\'') && quoted.ends_with('\''),
+                "shell_quote({payload:?}) = {quoted:?} is not single-quote delimited"
+            );
+            let inner = &quoted[1..quoted.len() - 1];
+            let restored: String = inner.replace("'\\''", "'");
+            assert_eq!(restored, payload, "round-trip failed for {payload:?}");
+        }
     }
 }

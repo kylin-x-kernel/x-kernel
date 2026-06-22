@@ -10,4 +10,5 @@ description = "Inject X-Kernel user-space applications into an existing disk ima
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
+tempfile = "3.10"
 toml = "1.1.2"

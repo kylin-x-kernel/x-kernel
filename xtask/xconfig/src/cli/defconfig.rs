@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::{
     config::{ConfigEngine, GeneratedArtifacts},
     error::Result,
+    validate::validate_input_path,
 };
 
 pub fn defconfig_to_output(
@@ -15,6 +16,10 @@ pub fn defconfig_to_output(
     kconfig: PathBuf,
     srctree: PathBuf,
 ) -> Result<GeneratedArtifacts> {
+    for path in [&defconfig, &output, &kconfig, &srctree] {
+        validate_input_path(path)?;
+    }
+
     let mut engine = ConfigEngine::from_kconfig(&kconfig, &srctree)?;
     engine.load_config(&defconfig)?;
     engine.prune_inactive_symbols();

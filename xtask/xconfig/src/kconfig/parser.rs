@@ -127,6 +127,19 @@ impl Parser {
             return Err(KconfigError::FileNotFound(source_path));
         }
 
+        // Containment (CWE-22): a `source` directive must not escape the
+        // source tree. An absolute `path_expr` or one containing `..` could
+        // otherwise pull in arbitrary files. Compare canonicalized paths so
+        // symlinks are resolved consistently.
+        let srctree_canon = fs::canonicalize(&self.srctree)?;
+        let source_canon = fs::canonicalize(&source_path)?;
+        if !source_canon.starts_with(&srctree_canon) {
+            return Err(KconfigError::Config(format!(
+                "source directive escapes srctree: {path_expr:?} resolves to {}",
+                source_canon.display()
+            )));
+        }
+
         // Check for circular dependency
         if self.inclusion_chain.contains(&source_path) {
             let chain = self

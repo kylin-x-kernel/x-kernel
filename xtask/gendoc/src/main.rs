@@ -8,7 +8,7 @@
 
 use std::{
     error::Error,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 
@@ -42,8 +42,35 @@ fn read_features(path: &PathBuf) -> Result<Vec<String>, Box<dyn Error>> {
     Ok(features)
 }
 
+/// Validate a host-side input path (CWE-22): reject empty, NUL, non-UTF-8,
+/// and `..` (parent-directory) components. Absolute paths and `.` are allowed.
+fn validate_input_path(path: &Path) -> Result<(), Box<dyn Error>> {
+    let Some(text) = path.to_str() else {
+        return Err(format!("path must be valid UTF-8: {}", path.display()).into());
+    };
+    if text.is_empty() {
+        return Err("path must not be empty".into());
+    }
+    if text.contains('\0') {
+        return Err(format!("path must not contain NUL bytes: {}", path.display()).into());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "path must not contain parent-directory (..) components: {}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
+
+    validate_input_path(&args.config)?;
 
     if !args.config.exists() {
         eprintln!(
@@ -71,6 +98,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     for extra in &args.extra {
+        // Extra args are forwarded to `cargo doc` as separate argv elements
+        // (no shell). Reject NUL early so a malformed argument cannot reach
+        // execv with surprising behavior.
+        if extra.contains('\0') {
+            return Err(format!("extra cargo argument contains NUL bytes: {extra:?}").into());
+        }
         cmd.arg(extra);
     }
 

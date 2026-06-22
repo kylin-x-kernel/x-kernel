@@ -47,3 +47,25 @@ fn test_nested_source() {
     // Verify we got content from multiple files
     assert!(ast.entries.len() > 3);
 }
+
+#[test]
+fn test_source_escaping_srctree_is_rejected() {
+    // A `source` directive that resolves outside srctree (via `..`) must be
+    // rejected (CWE-22 containment), even when the target file exists.
+    let srctree = tempfile::TempDir::new().unwrap();
+    let srctree_path = srctree.path();
+    let outside_name = format!(
+        "{}_escape.conf",
+        srctree_path.file_name().unwrap().to_str().unwrap()
+    );
+    let outside = srctree_path.parent().unwrap().join(&outside_name);
+    std::fs::write(&outside, "config ESCAPE\n    bool\n").unwrap();
+    let kconfig = srctree_path.join("Kconfig");
+    std::fs::write(&kconfig, format!("source \"../{outside_name}\"\n")).unwrap();
+
+    let mut parser = Parser::new(&kconfig, srctree_path).unwrap();
+    let result = parser.parse();
+
+    let _ = std::fs::remove_file(&outside);
+    assert!(result.is_err(), "source escaping srctree must be rejected");
+}

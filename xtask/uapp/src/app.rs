@@ -72,6 +72,10 @@ pub fn install(command: InstallCommand) -> Result<(), String> {
     prepare::run_prepare_commands(&uapps, &context)?;
 
     let install_files = install::collect_install_files(&uapps)?;
+    for file in &install_files {
+        debugfs::validate_guest_path(&file.guest_path)
+            .map_err(|err| format!("invalid install guest path: {err}"))?;
+    }
     let autostart_content = autostart::render(&uapps);
     let autostart_host_path = install::write_autostart_file(&autostart_content)?;
 
@@ -96,6 +100,10 @@ pub fn install(command: InstallCommand) -> Result<(), String> {
             autostart_host_path.display()
         );
     } else {
+        // `debugfs_script_path` is a CSPRNG-named tempfile (see
+        // `install::write_debugfs_script`) and is passed to `debugfs -f` as a
+        // separate argv element with no shell, so it is not a command-injection
+        // vector (CWE-78/#50).
         debugfs::run_debugfs(&command.disk_img, &debugfs_script_path)?;
         let mut verified_paths: Vec<String> = install_files
             .iter()
@@ -124,18 +132,7 @@ fn load_selected_uapps(uapps_dir: &Path, selection: &str) -> Result<Vec<Uapp>, S
 }
 
 fn validate_autostart_target(path: &str) -> Result<(), String> {
-    if path.trim().is_empty() {
-        return Err("autostart target must not be empty".to_string());
-    }
-    if !path.starts_with('/') {
-        return Err(format!(
-            "autostart target must be an absolute guest path: {path}"
-        ));
-    }
-    if path.contains('\0') {
-        return Err("autostart target must not contain NUL bytes".to_string());
-    }
-    Ok(())
+    debugfs::validate_guest_path(path).map_err(|err| format!("invalid autostart target: {err}"))
 }
 
 fn absolute_path(path: PathBuf) -> Result<PathBuf, String> {

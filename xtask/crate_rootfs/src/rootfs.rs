@@ -60,7 +60,7 @@ pub fn build_rootfs(args: Args) -> Result<(), String> {
 
     for item in &args.copies {
         let data = read_file_bytes(&item.src)?;
-        let dest = normalize_dest(&item.dest);
+        let dest = normalize_dest(&item.dest)?;
 
         let (inode_num, _inode) = mkfile_with_ino(&mut jbd, &mut fs, &dest, Some(&data), None)
             .ok_or_else(|| format!("failed to create file {dest} in ext4 image"))?;
@@ -141,10 +141,21 @@ fn read_file_bytes(path: &std::path::PathBuf) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-fn normalize_dest(dest: &str) -> String {
-    if dest.starts_with('/') {
+fn normalize_dest(dest: &str) -> Result<String, String> {
+    // `dest` is a guest path inside the freshly created ext4 image. Reject
+    // traversal/control characters even though the path is contained within
+    // the image (CWE-22, defense-in-depth alongside parse_copy_spec).
+    if dest.contains('\0') {
+        return Err(format!("copy dest must not contain NUL bytes: {dest}"));
+    }
+    if dest.split('/').any(|component| component == "..") {
+        return Err(format!(
+            "copy dest must not contain parent-directory (..) components: {dest}"
+        ));
+    }
+    Ok(if dest.starts_with('/') {
         dest.to_string()
     } else {
         format!("/{}", dest)
-    }
+    })
 }

@@ -4,9 +4,11 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
+
+use tempfile::NamedTempFile;
 
 use crate::{
     debugfs::{DebugfsScript, InstallFile},
@@ -26,15 +28,36 @@ pub fn collect_install_files(uapps: &[Uapp]) -> Result<Vec<InstallFile>, String>
 }
 
 pub fn write_autostart_file(content: &str) -> Result<PathBuf, String> {
-    let path = temp_path("xkernel-uapp-99-autostart", "sh");
-    fs::write(&path, content)
-        .map_err(|err| format!("failed to write autostart script {}: {err}", path.display()))?;
-    Ok(path)
+    let mut file = new_temp_file("xkernel-uapp-autostart-", ".sh")?;
+    file.write_all(content.as_bytes())
+        .map_err(|err| format!("failed to write autostart script: {err}"))?;
+    persist_temp_file(file)
 }
 
 pub fn write_debugfs_script(script: &DebugfsScript) -> Result<PathBuf, String> {
-    let path = temp_path("xkernel-uapp-debugfs", "commands");
+    let file = new_temp_file("xkernel-uapp-debugfs-", ".commands")?;
+    let path = file.path().to_path_buf();
     script.write_to(&path)?;
+    persist_temp_file(file)
+}
+
+/// Create a temp file with an unpredictable name and exclusive (`O_EXCL`)
+/// creation, so neither the name nor an attacker-placed symlink can be used
+/// to redirect the write at an arbitrary path.
+fn new_temp_file(prefix: &str, suffix: &str) -> Result<NamedTempFile, String> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(suffix)
+        .tempfile()
+        .map_err(|err| format!("failed to create temp file: {err}"))
+}
+
+/// Persist a `NamedTempFile` to its final path so it can be referenced by
+/// absolute path (e.g. handed to `debugfs -f`) and later removed explicitly.
+fn persist_temp_file(file: NamedTempFile) -> Result<PathBuf, String> {
+    let (_file, path) = file
+        .keep()
+        .map_err(|err| format!("failed to persist temp file: {err}"))?;
     Ok(path)
 }
 
@@ -166,11 +189,36 @@ fn parse_mode(mode: Option<&str>) -> Result<u32, String> {
     u32::from_str_radix(mode, 8).map_err(|err| format!("invalid mode {mode}: {err}"))
 }
 
-fn temp_path(prefix: &str, suffix: &str) -> PathBuf {
-    let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}.{suffix}"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::debugfs::DebugfsScript;
+
+    /// Temp files must get unpredictable, unique names rather than the old
+    /// `pid-nanos` scheme, so they cannot be pre-created by an attacker.
+    #[test]
+    fn temp_file_names_are_unique_and_retain_content() {
+        let a = write_autostart_file("echo a").unwrap();
+        let b = write_autostart_file("echo b").unwrap();
+        assert_ne!(a, b, "temp file names must be unique");
+
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "echo a");
+
+        let _ = fs::remove_file(&a);
+        let _ = fs::remove_file(&b);
+    }
+
+    #[test]
+    fn debugfs_temp_script_retains_commands() {
+        let mut script = DebugfsScript::new();
+        script.add_file(&InstallFile {
+            host_path: PathBuf::from("/tmp/x-kernel-uapp-test"),
+            guest_path: "/hello".to_string(),
+            mode: 0o644,
+        });
+        let path = write_debugfs_script(&script).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("write"));
+        let _ = fs::remove_file(&path);
+    }
 }
