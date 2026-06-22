@@ -414,8 +414,8 @@ pub fn rename<B: BlockDevice>(
     old_path: &str,
     new_path: &str,
 ) -> BlockDevResult<()> {
-    let old_norm = split_paren_child_and_tranlatevalid(old_path);
-    let new_norm = split_paren_child_and_tranlatevalid(new_path);
+    let old_norm = normalize_path(old_path)?;
+    let new_norm = normalize_path(new_path)?;
 
     mv(fs, device, &old_norm, &new_norm)?;
 
@@ -435,10 +435,10 @@ pub fn truncate<B: BlockDevice>(
     path: &str,
     truncate_size: u64,
 ) -> BlockDevResult<()> {
-    let norm_path = split_paren_child_and_tranlatevalid(path);
+    let norm_path = normalize_path(path)?;
 
     // 首先找到目标文件。
-    let (inode_num, _inode) = match get_inode_with_num(fs, device, &norm_path).ok().flatten() {
+    let (inode_num, _inode) = match get_inode_with_num(fs, device, &norm_path)? {
         Some(v) => v,
         None => return Err(BlockDevError::InvalidInput),
     };
@@ -870,8 +870,8 @@ pub fn create_symbol_link<B: BlockDevice>(
     dst_path: &str,
 ) -> BlockDevResult<()> {
     // 首先判断两个目标文件是否存在，被链接不存在报错，链接文件存在报错。
-    let src_norm = split_paren_child_and_tranlatevalid(src_path);
-    let dst_norm = split_paren_child_and_tranlatevalid(dst_path);
+    let src_norm = normalize_path(src_path)?;
+    let dst_norm = normalize_path(dst_path)?;
 
     if get_file_inode(fs, device, &src_norm)?.is_none() {
         return Err(BlockDevError::InvalidInput);
@@ -1036,9 +1036,9 @@ fn read_symlink_target<B: BlockDevice>(
     Ok(buf)
 }
 
-fn resolve_symlink_path(current_path: &str, target: &str) -> String {
+fn resolve_symlink_path(current_path: &str, target: &str) -> BlockDevResult<String> {
     if target.starts_with('/') {
-        return split_paren_child_and_tranlatevalid(target);
+        return normalize_path(target);
     }
     let parent = match current_path.rfind('/') {
         Some(0) | None => "/",
@@ -1053,7 +1053,7 @@ fn resolve_symlink_path(current_path: &str, target: &str) -> String {
         combined.push('/');
         combined.push_str(target);
     }
-    split_paren_child_and_tranlatevalid(&combined)
+    normalize_path(&combined)
 }
 
 fn read_file_follow<B: BlockDevice>(
@@ -1078,7 +1078,7 @@ fn read_file_follow<B: BlockDevice>(
             Ok(s) => s,
             Err(_) => return Err(BlockDevError::Corrupted),
         };
-        let resolved = resolve_symlink_path(path, target);
+        let resolved = resolve_symlink_path(path, target)?;
         return read_file_follow(device, fs, &resolved, depth + 1);
     }
 
@@ -1139,8 +1139,8 @@ pub fn mv<B: BlockDevice>(
     // 如果是文件或者链接
     // 将旧entry使用insertnewentry插入到新目录修改文件名称，更新长度信息，使用removeentry...删除旧entry
 
-    let old_norm = split_paren_child_and_tranlatevalid(old_path);
-    let new_norm = split_paren_child_and_tranlatevalid(new_path);
+    let old_norm = normalize_path(old_path)?;
+    let new_norm = normalize_path(new_path)?;
 
     let (old_parent, old_name) = match old_norm.rfind('/') {
         Some(pos) => {
@@ -1410,8 +1410,12 @@ pub fn link<B: BlockDevice>(
     link_path: &str,
     linked_path: &str,
 ) {
-    let link_norm = split_paren_child_and_tranlatevalid(link_path);
-    let linked_norm = split_paren_child_and_tranlatevalid(linked_path);
+    let Ok(link_norm) = normalize_path(link_path) else {
+        return;
+    };
+    let Ok(linked_norm) = normalize_path(linked_path) else {
+        return;
+    };
 
     // 1.检查 被链接文件本身是否存在，不存在返回。
     let (target_ino, target_inode) = match get_file_inode(fs, block_dev, &linked_norm) {
@@ -1558,7 +1562,7 @@ pub fn rmdir<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
     path: &str,
 ) -> BlockDevResult<()> {
-    let norm_path = split_paren_child_and_tranlatevalid(path);
+    let norm_path = normalize_path(path)?;
     if norm_path == "/" {
         return Err(BlockDevError::DeviceBusy);
     }
@@ -1627,7 +1631,7 @@ pub fn delete_dir<B: BlockDevice>(
         stage: u8, // 0=scan, 1=cleanup
     }
 
-    let norm_path = split_paren_child_and_tranlatevalid(path);
+    let norm_path = normalize_path(path)?;
     let (root_ino_num, root_inode) =
         get_file_inode(fs, block_dev, &norm_path)?.ok_or(BlockDevError::InvalidInput)?;
     if !root_inode.is_dir() {
@@ -1845,7 +1849,7 @@ pub fn delete_file<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
     path: &str,
 ) -> BlockDevResult<()> {
-    let norm_path = split_paren_child_and_tranlatevalid(path);
+    let norm_path = normalize_path(path)?;
 
     // Resolve parent path and child name for directory-entry lookup.
     let (parent_path, child_name) = if let Some(pos) = norm_path.rfind('/') {
@@ -1993,7 +1997,7 @@ pub fn mkfile_with_ino<B: BlockDevice>(
     file_type: Option<u8>,
 ) -> Option<(u32, Ext4Inode)> {
     // 规范化路径
-    let norm_path = split_paren_child_and_tranlatevalid(path);
+    let norm_path = normalize_path(path).ok()?;
 
     // 如果目标已存在，直接返回
     if let Ok(Some((_ino_num, inode))) = get_file_inode(fs, device, &norm_path) {
@@ -2017,7 +2021,11 @@ pub fn mkfile_with_ino<B: BlockDevice>(
         }
     };
     let child = valid_path.split_off(split_point)[1..].to_string();
-    let parent = valid_path;
+    let parent = if valid_path.is_empty() {
+        String::from("/")
+    } else {
+        valid_path
+    };
 
     // 确保父目录存在
     if mkdir(device, fs, &parent).is_none() {
@@ -2194,7 +2202,8 @@ pub fn read_file<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     path: &str,
 ) -> BlockDevResult<Option<Vec<u8>>> {
-    read_file_follow(device, fs, path, 0)
+    let norm_path = normalize_path(path)?;
+    read_file_follow(device, fs, &norm_path, 0)
 }
 
 pub fn write_file<B: BlockDevice>(
@@ -2209,7 +2218,7 @@ pub fn write_file<B: BlockDevice>(
     }
 
     // 获取 inode 及其 inode 号
-    let info = match get_inode_with_num(fs, device, path).ok().flatten() {
+    let info = match get_inode_with_num(fs, device, path)? {
         Some(v) => v,
         None => return Err(BlockDevError::WriteError),
     };

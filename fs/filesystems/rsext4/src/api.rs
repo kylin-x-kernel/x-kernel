@@ -102,7 +102,7 @@ pub fn open<B: BlockDevice>(
     path: &str,
     create: bool,
 ) -> BlockDevResult<OpenFile> {
-    let norm_path = split_paren_child_and_tranlatevalid(path);
+    let norm_path = normalize_path(path)?;
 
     if let Ok(Some(inode)) = get_file_inode(fs, dev, &norm_path) {
         let real_inode = inode.1;

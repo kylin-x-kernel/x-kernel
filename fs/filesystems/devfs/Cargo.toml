@@ -13,7 +13,7 @@ documentation.workspace = true
 input = ["dep:inputdev", "kclass/input"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
-dice = ["dep:dice_driver", "dep:klazy", "dep:rand_chacha", "dep:tee_crypto"]
+dice = ["dep:dice_driver", "dep:klazy", "dep:tee_crypto"]
 
 [dependencies]
 kalloc.workspace = true
@@ -36,10 +36,6 @@ linux-raw-sys = { workspace = true, features = ["ioctl"] }
 memaddr.workspace = true
 osvm.workspace = true
 posix-types.workspace = true
-rand = { version = "0.9.1", default-features = false, features = [
-    "alloc",
-    "small_rng",
-] }
 chrono = { version = "0.4.41", default-features = false }
 fbdevice.workspace = true
 drmdevice.workspace = true
@@ -52,7 +48,7 @@ gimli = { version = "*", default-features = false, optional = true }
 dice_driver = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 klazy = { workspace = true, optional = true }
-rand_chacha = { version = "0.3", default-features = false, optional = true }
+rand_chacha = { version = "0.3", default-features = false }
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 kclass.workspace = true
 kdevice.workspace = true

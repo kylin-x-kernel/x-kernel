@@ -5,17 +5,44 @@
 use klazy::Lazy;
 use ksync::Mutex;
 use tee_crypto::rng::{DeterministicRng, Infallible, Rng, TryCryptoRng, TryRng};
+use tee_raw_sys::TEE_ERROR_GENERIC;
 
 use crate::tee::TeeResult;
 
+const RNG_SEED_SIZE: usize = 32;
+
 static GLOBAL_TEE_SOFTWARE_RAND: Lazy<Mutex<DeterministicRng>> = Lazy::new(|| {
-    let seed = khal::time::now_ticks();
-    Mutex::new(DeterministicRng::seed_from_u64(seed))
+    let seed = kernel_random_seed().expect("TEE software RNG seed unavailable");
+    Mutex::new(DeterministicRng::seed_from_bytes(&seed))
 });
 
 fn tee_software_get_rand(output: &mut [u8]) {
     let mut rand = GLOBAL_TEE_SOFTWARE_RAND.lock();
     rand.fill_bytes(output);
+}
+
+fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
+    let mut seed = [0u8; RNG_SEED_SIZE];
+    let location = kfs::kernel_fs_context()
+        .lock()
+        .resolve("/dev/urandom")
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    let len = location
+        .entry()
+        .as_file()
+        .map_err(|_| TEE_ERROR_GENERIC)?
+        .read_at(&mut seed, 0)
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    if len != seed.len() {
+        return Err(TEE_ERROR_GENERIC);
+    }
+    Ok(seed)
+}
+
+fn software_rng_seed() -> [u8; RNG_SEED_SIZE] {
+    let mut seed = [0u8; RNG_SEED_SIZE];
+    tee_software_get_rand(&mut seed);
+    seed
 }
 
 /// read data from crypto RNG to buffer
@@ -37,9 +64,9 @@ pub struct TeeSoftwareRng {
 
 impl TeeSoftwareRng {
     pub fn new() -> Self {
-        let seed = khal::time::now_ticks();
+        let seed = software_rng_seed();
         Self {
-            rng: DeterministicRng::seed_from_u64(seed),
+            rng: DeterministicRng::seed_from_bytes(&seed),
         }
     }
 }
@@ -65,9 +92,8 @@ impl TryCryptoRng for TeeSoftwareRng {}
 
 /// RNG backed by the global `GLOBAL_TEE_SOFTWARE_RAND`.
 ///
-/// Unlike `TeeSoftwareRng` which creates a fresh ChaCha20 instance seeded only
-/// from `now_ticks()` (low entropy), this reuses the persistent global CSPRNG
-/// so state is continuous across calls.
+/// This reuses the persistent global CSPRNG so state is continuous across
+/// calls.
 pub struct GlobalSoftwareRng;
 
 impl TryRng for GlobalSoftwareRng {
@@ -122,5 +148,16 @@ pub mod tests_rng_software {
         let mut buf = [0u8; 10];
         Rng::fill_bytes(&mut rng, &mut buf);
         assert_ne!(buf, [0u8; 10]);
+    }
+
+    #[unittest::def_test]
+    fn test_tee_software_rng_instances_use_distinct_seeds() {
+        let mut rng1 = TeeSoftwareRng::new();
+        let mut rng2 = TeeSoftwareRng::new();
+        let mut buf1 = [0u8; 32];
+        let mut buf2 = [0u8; 32];
+        rng1.rng.fill_bytes(&mut buf1);
+        rng2.rng.fill_bytes(&mut buf2);
+        assert_ne!(buf1, buf2);
     }
 }

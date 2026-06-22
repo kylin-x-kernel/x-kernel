@@ -484,7 +484,7 @@ impl P9Session {
 
     fn walk_path(&mut self, path: &str) -> Result<(u32, bool), String> {
         let fid = self.alloc_fid();
-        let names = path_parts(path);
+        let names = path_parts(path)?;
         let qids = self.walk(self.root_fid, fid, &names)?;
         let is_dir = qids.last().map(|q| q.type_ & 0x80 != 0).unwrap_or(true);
         Ok((fid, is_dir))

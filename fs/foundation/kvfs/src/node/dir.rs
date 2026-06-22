@@ -15,7 +15,7 @@ use super::DirEntry;
 use crate::{
     MetadataUpdate, Mountpoint, Mutex, MutexGuard, NodeOps, NodePermission, NodeType, VfsError,
     VfsResult,
-    path::{DOT, DOTDOT, MAX_NAME_LEN, verify_entry_name},
+    path::{DOT, DOTDOT, verify_entry_name},
 };
 
 /// A trait for a sink that can receive directory entries.
@@ -48,7 +48,9 @@ pub trait DirNodeOps: NodeOps {
     /// result.
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize>;
 
-    /// Lookups a directory entry by name.
+    /// Lookups a directory entry by a single non-empty component name.
+    ///
+    /// The name must not be `.`, `..`, or contain path separators.
     fn lookup(&self, name: &str) -> VfsResult<DirEntry>;
 
     /// Returns whether directory entries can be cached.
@@ -207,11 +209,11 @@ impl DirNode {
         }
     }
 
-    /// Looks up a directory entry by name.
+    /// Looks up a directory entry by a single non-empty component name.
+    ///
+    /// The name must not be `.`, `..`, or contain path separators.
     pub fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
-        if name.len() > MAX_NAME_LEN {
-            return Err(VfsError::NameTooLong);
-        }
+        verify_entry_name(name)?;
         // Fast path
         if self.ops.supports_dentry_cache() {
             self.lookup_locked(name, &mut self.dentry_cache.lock())

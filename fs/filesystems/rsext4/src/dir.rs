@@ -38,32 +38,62 @@ pub(crate) fn remember_dir_blocks(fs: &mut Ext4FileSystem, blocks: &BTreeMap<u32
     }
 }
 
-/// 合法化路径：去掉重复的 '/'
-///
-/// # 参数
-///
-/// * `pat` - 输入路径
-///
-/// # 返回值
-///
-/// 返回处理后的路径
-pub fn split_paren_child_and_tranlatevalid(pat: &str) -> String {
-    // 去掉重复///类型和中间空路径
-    let mut last_c = '\0';
-    let mut result_s = String::new();
-    for ch in pat.chars() {
-        if ch == '/' && last_c == '/' {
-            continue;
-        }
-        result_s.push(ch);
-        last_c = ch;
-    }
-    // 去掉末尾多余的 '/'，但保留单独的根"/"
-    while result_s.len() > 1 && result_s.ends_with('/') {
-        result_s.pop();
+/// Normalize an rsext4 API path to an absolute path under the filesystem root.
+pub fn normalize_path(path: &str) -> BlockDevResult<String> {
+    if path.is_empty() || path.contains('\0') {
+        return Err(BlockDevError::InvalidInput);
     }
 
-    result_s
+    let mut components = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(BlockDevError::InvalidInput);
+                }
+            }
+            name => components.push(name),
+        }
+    }
+
+    if components.is_empty() {
+        return Ok(String::from("/"));
+    }
+
+    let mut normalized = String::new();
+    for component in components {
+        normalized.push('/');
+        normalized.push_str(component);
+    }
+    Ok(normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_path_rejects_root_escape() {
+        assert!(normalize_path("../host").is_err());
+        assert!(normalize_path("/../../host").is_err());
+    }
+
+    #[test]
+    fn normalize_path_normalizes_inside_root() {
+        assert_eq!(normalize_path("/a/./b/../c").unwrap(), "/a/c");
+        assert_eq!(normalize_path("a//b/").unwrap(), "/a/b");
+    }
+
+    #[test]
+    fn normalize_path_rejects_nul() {
+        assert!(normalize_path("/a\0b").is_err());
+    }
+
+    #[test]
+    fn normalize_path_rejects_empty() {
+        assert!(normalize_path("").is_err());
+    }
 }
 
 /// 路径解析，返回 (inode_num, inode)
@@ -72,14 +102,16 @@ pub fn get_inode_with_num<B: BlockDevice>(
     device: &mut Jbd2Dev<B>,
     path: &str,
 ) -> BlockDevResult<Option<(u32, Ext4Inode)>> {
+    let norm_path = normalize_path(path)?;
+
     // 根目录特殊处理
-    if path.is_empty() || path == "/" {
+    if norm_path == "/" {
         let inode = fs.get_root(device)?;
         return Ok(Some((fs.root_inode, inode)));
     }
 
     // 按 '/' 分割
-    let components = path.split('/').filter(|s| !s.is_empty());
+    let components = norm_path.split('/').filter(|s| !s.is_empty());
 
     // 从根开始
     let mut current_inode = fs.get_root(device)?;
@@ -88,18 +120,6 @@ pub fn get_inode_with_num<B: BlockDevice>(
     for name in components {
         if !current_inode.is_dir() {
             return Ok(None);
-        }
-
-        if name == "." {
-            continue;
-        }
-        if name == ".." {
-            // 这里只处理简单情况：根的父仍为根
-            if current_ino == fs.root_inode {
-                continue;
-            }
-            // 更完整的 ".." 解析可以在后续扩展
-            continue;
         }
 
         let target = name.as_bytes();
@@ -377,7 +397,7 @@ pub fn mkdir_with_ino<B: BlockDevice>(
     path: &str,
 ) -> Option<(u32, Ext4Inode)> {
     // 先对传入路径做规范化（去掉重复的 '/' 等）
-    let norm_path = split_paren_child_and_tranlatevalid(path);
+    let norm_path = normalize_path(path).ok()?;
 
     // 若目标已存在，直接返回
     if let Ok(Some(inode)) = get_file_inode(fs, device, &norm_path) {

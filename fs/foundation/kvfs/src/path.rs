@@ -18,7 +18,8 @@ pub const MAX_NAME_LEN: usize = 255;
 
 /// Validate a directory entry name.
 pub(crate) fn verify_entry_name(name: &str) -> VfsResult<()> {
-    if name == DOT || name == DOTDOT {
+    if name.is_empty() || name == DOT || name == DOTDOT || name.contains('/') || name.contains('\0')
+    {
         return Err(VfsError::InvalidInput);
     }
     if name.len() > MAX_NAME_LEN {
@@ -428,7 +429,7 @@ mod test {
 mod tests {
     use alloc::vec::Vec;
 
-    use unittest::{assert_eq, def_test};
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
 
@@ -498,5 +499,13 @@ mod tests {
             backward.reverse();
             assert_eq!(forward, backward, "Failed for path: {path_str}");
         }
+    }
+
+    #[def_test]
+    fn test_verify_entry_name_rejects_path_components() {
+        for name in ["", ".", "..", "a/b", "a\0b"] {
+            assert!(verify_entry_name(name).is_err());
+        }
+        assert!(verify_entry_name("file").is_ok());
     }
 }

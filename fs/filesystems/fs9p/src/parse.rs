@@ -8,28 +8,54 @@ use alloc::{string::String, vec::Vec};
 
 use crate::message::{read_qid, read_str, read_u8, read_u16, read_u32, read_u64};
 
+fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return Err(String::from("invalid path"));
+    }
+    Ok(())
+}
+
+fn normalized_path_parts(path: &str) -> Result<Vec<&str>, String> {
+    if path.is_empty() {
+        return Err(String::from("invalid path"));
+    }
+
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(String::from("invalid path"));
+                }
+            }
+            name => {
+                validate_name(name)?;
+                parts.push(name);
+            }
+        }
+    }
+    Ok(parts)
+}
+
 /// Split a path into parent directory and leaf name.
 pub(crate) fn split_parent_name(path: &str) -> Result<(&str, &str), String> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "/" {
         return Err(String::from("invalid path"));
     }
+    normalized_path_parts(trimmed)?;
     let mut parts = trimmed.rsplitn(2, '/');
     let name = parts.next().unwrap_or("");
+    validate_name(name)?;
     let parent = parts.next().unwrap_or("");
     let parent = if parent.is_empty() { "/" } else { parent };
-    if name.is_empty() {
-        Err(String::from("invalid path"))
-    } else {
-        Ok((parent, name))
-    }
+    Ok((parent, name))
 }
 
 /// Split a path into normalized components.
-pub(crate) fn path_parts(path: &str) -> Vec<&str> {
-    path.split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect()
+pub(crate) fn path_parts(path: &str) -> Result<Vec<&str>, String> {
+    normalized_path_parts(path)
 }
 
 /// Parse 9P2000 stat-based directory entries.
@@ -83,4 +109,29 @@ fn parse_stat_name(buf: &[u8]) -> Result<String, String> {
     let _length = read_u64(buf, &mut offset)?;
     let name = read_str(buf, &mut offset)?;
     Ok(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn path_parts_rejects_root_escape() {
+        assert!(path_parts("").is_err());
+        assert!(path_parts("../host").is_err());
+        assert!(path_parts("/../../host").is_err());
+    }
+
+    #[test]
+    fn path_parts_normalizes_inside_root() {
+        assert_eq!(path_parts("/a/./b/../c").unwrap(), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn split_parent_name_rejects_invalid_leaf() {
+        assert!(split_parent_name("/a/..").is_err());
+        assert!(split_parent_name("/a/").is_ok());
+    }
 }

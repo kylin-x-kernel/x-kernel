@@ -11,44 +11,84 @@ use khal::time::now_ticks;
 use ksync::Mutex;
 use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
 use kvfs_simple::{DirMapping, SimpleFs};
-use rand::{RngCore, SeedableRng, rngs::SmallRng};
+use rand_chacha::{
+    ChaCha20Rng,
+    rand_core::{RngCore, SeedableRng},
+};
 
 use crate::DeviceFile;
 
+struct RandomState {
+    rng: ChaCha20Rng,
+    write_counter: u64,
+}
+
+impl RandomState {
+    fn new() -> Self {
+        Self {
+            rng: ChaCha20Rng::from_seed(initial_seed()),
+            write_counter: 0,
+        }
+    }
+
+    fn fill_bytes(&mut self, buf: &mut [u8]) {
+        self.rng.fill_bytes(buf);
+    }
+
+    fn mix_entropy(&mut self, input: &[u8]) {
+        let mut seed = [0u8; 32];
+        self.rng.fill_bytes(&mut seed);
+
+        for (index, byte) in input.iter().enumerate() {
+            seed[index % seed.len()] ^= *byte;
+        }
+
+        self.write_counter = self.write_counter.wrapping_add(1);
+        let ticks = now_ticks().wrapping_add(self.write_counter.rotate_left(17));
+        for (index, byte) in ticks.to_le_bytes().iter().enumerate() {
+            seed[index] ^= *byte;
+        }
+
+        self.rng = ChaCha20Rng::from_seed(seed);
+    }
+}
+
+fn initial_seed() -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    let mut state = now_ticks() ^ 0x9e37_79b9_7f4a_7c15;
+
+    for chunk in seed.chunks_mut(8) {
+        state ^= state.rotate_left(7);
+        state = state.wrapping_mul(0xd134_2543_de82_ef95);
+        chunk.copy_from_slice(&state.to_le_bytes());
+    }
+
+    seed
+}
+
 /// /dev/random and /dev/urandom device - returns pseudo-random data.
 struct Random {
-    rng: Mutex<SmallRng>,
+    state: Mutex<RandomState>,
 }
 
 impl Random {
     /// Create a new random device seeded from timer entropy.
     pub fn new() -> Self {
-        let seed = now_ticks();
         Self {
-            rng: Mutex::new(SmallRng::seed_from_u64(seed)),
+            state: Mutex::new(RandomState::new()),
         }
     }
 }
 
 impl DeviceFileOps for Random {
     fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        self.rng.lock().fill_bytes(buf);
+        self.state.lock().fill_bytes(buf);
         Ok(buf.len())
     }
 
     fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {
         // Writing to /dev/random mixes additional entropy into the PRNG.
-        let mut rng = self.rng.lock();
-        let mut mix = rng.next_u64();
-        for chunk in buf.chunks(8) {
-            let mut arr = [0u8; 8];
-            arr[..chunk.len()].copy_from_slice(chunk);
-            mix ^= u64::from_ne_bytes(arr);
-            mix = mix.wrapping_mul(0x517cc1b727220a95);
-        }
-        drop(rng);
-        // Reseed with mixed entropy
-        *self.rng.lock() = SmallRng::seed_from_u64(mix);
+        self.state.lock().mix_entropy(buf);
         Ok(buf.len())
     }
 
@@ -113,5 +153,16 @@ mod tests {
         dev.read_at(&mut buf1, 0).unwrap();
         dev.read_at(&mut buf2, 0).unwrap();
         assert_ne!(buf1, buf2);
+    }
+
+    #[def_test]
+    fn test_random_write_changes_stream() {
+        let dev = Random::new();
+        let mut before = [0u8; 32];
+        let mut after = [0u8; 32];
+        dev.read_at(&mut before, 0).unwrap();
+        dev.write_at(b"entropy", 0).unwrap();
+        dev.read_at(&mut after, 0).unwrap();
+        assert_ne!(before, after);
     }
 }

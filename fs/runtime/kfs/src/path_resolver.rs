@@ -167,7 +167,9 @@ impl PathResolver {
                 }
                 Component::ParentDir => {
                     // `..` - go to parent
-                    current = current.parent().unwrap_or_else(|| base.clone());
+                    if let Some(parent) = current.parent() {
+                        current = parent;
+                    }
                 }
                 Component::RootDir => {
                     // `/` - go to root
