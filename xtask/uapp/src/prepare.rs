@@ -48,23 +48,35 @@ pub fn run_prepare_commands(uapps: &[Uapp], context: &PrepareContext) -> Result<
 
         for command in &uapp.manifest.prepare.commands {
             println!("uapp prepare [{}]: {}", uapp.name(), command);
-            run_shell_command(uapp, context, &uapp_build_dir, &uapp_out_dir, command)?;
+            run_prepare_command(uapp, context, &uapp_build_dir, &uapp_out_dir, command)?;
         }
     }
     Ok(())
 }
 
-fn run_shell_command(
+fn run_prepare_command(
     uapp: &Uapp,
     context: &PrepareContext,
     uapp_build_dir: &Path,
     uapp_out_dir: &Path,
     command: &str,
 ) -> Result<(), String> {
-    let mut process = Command::new("sh");
+    let argv = split_prepare_command(command).map_err(|err| {
+        format!(
+            "invalid prepare command for {}: {command}: {err}",
+            uapp.name()
+        )
+    })?;
+    let Some((program, args)) = argv.split_first() else {
+        return Err(format!(
+            "prepare command for {} must not be empty",
+            uapp.name()
+        ));
+    };
+
+    let mut process = Command::new(program);
     process
-        .arg("-c")
-        .arg(command)
+        .args(args)
         .current_dir(&uapp.dir)
         .env("REPO_ROOT", &context.repo_root)
         .env("UAPP_NAME", uapp.name())
@@ -94,4 +106,111 @@ fn run_shell_command(
         ));
     }
     Ok(())
+}
+
+fn split_prepare_command(command: &str) -> Result<Vec<String>, &'static str> {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Quote {
+        Single,
+        Double,
+    }
+
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escape = false;
+    let mut has_current_word = false;
+
+    for ch in command.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            has_current_word = true;
+            continue;
+        }
+
+        match quote {
+            Some(Quote::Single) => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                    has_current_word = true;
+                }
+            }
+            Some(Quote::Double) => {
+                if ch == '"' {
+                    quote = None;
+                } else if ch == '\\' {
+                    escape = true;
+                } else {
+                    current.push(ch);
+                    has_current_word = true;
+                }
+            }
+            None => {
+                if ch.is_whitespace() {
+                    if has_current_word {
+                        words.push(std::mem::take(&mut current));
+                        has_current_word = false;
+                    }
+                } else if ch == '\'' {
+                    quote = Some(Quote::Single);
+                    has_current_word = true;
+                } else if ch == '"' {
+                    quote = Some(Quote::Double);
+                    has_current_word = true;
+                } else if ch == '\\' {
+                    escape = true;
+                    has_current_word = true;
+                } else {
+                    current.push(ch);
+                    has_current_word = true;
+                }
+            }
+        }
+    }
+
+    if escape {
+        return Err("unterminated escape");
+    }
+    if quote.is_some() {
+        return Err("unterminated quote");
+    }
+    if has_current_word {
+        words.push(current);
+    }
+
+    Ok(words)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_prepare_command;
+
+    #[test]
+    fn split_prepare_command_preserves_shell_metacharacters_as_args() {
+        let argv = split_prepare_command("echo hello; rm -rf /tmp/test").unwrap();
+
+        assert_eq!(argv, ["echo", "hello;", "rm", "-rf", "/tmp/test"]);
+    }
+
+    #[test]
+    fn split_prepare_command_supports_quoted_arguments_without_shell_execution() {
+        let argv = split_prepare_command("printf '%s %s' foo bar").unwrap();
+
+        assert_eq!(argv, ["printf", "%s %s", "foo", "bar"]);
+    }
+
+    #[test]
+    fn split_prepare_command_rejects_unterminated_quotes() {
+        assert!(split_prepare_command("printf 'broken").is_err());
+    }
+
+    #[test]
+    fn split_prepare_command_keeps_empty_quoted_arguments() {
+        let argv = split_prepare_command("printf '' \"\" tail").unwrap();
+
+        assert_eq!(argv, ["printf", "", "", "tail"]);
+    }
 }

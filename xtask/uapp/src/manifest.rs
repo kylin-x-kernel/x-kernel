@@ -250,6 +250,9 @@ fn validate_manifest(dir: &Path, manifest_path: &Path, manifest: &Manifest) -> R
     for env in &manifest.prepare.env {
         validate_env_entry(env, manifest_path)?;
     }
+    for command in &manifest.prepare.commands {
+        validate_non_empty("prepare.commands", command, manifest_path)?;
+    }
 
     for entry in &manifest.autostart {
         validate_non_empty("autostart.name", &entry.name, manifest_path)?;

@@ -53,7 +53,8 @@ pub fn install(command: InstallCommand) -> Result<(), String> {
         let autostart_parent = debugfs::guest_parent(&command.autostart_target);
         debugfs::verify_directory(&command.disk_img, &autostart_parent).map_err(|err| {
             format!(
-                "autostart parent directory must already exist in disk image: {autostart_parent}: {err}"
+                "autostart parent directory must already exist in disk image: {autostart_parent}: \
+                 {err}"
             )
         })?;
     }
