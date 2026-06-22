@@ -51,6 +51,7 @@ features = [
   "medium-ip",
   "proto-ipv4",
   "proto-ipv6",
+  "auto-icmp-echo-reply",
   "socket-raw",
   "socket-icmp",
   "socket-udp",
