@@ -14,7 +14,7 @@ use klazy::Lazy;
 use ksync::Mutex;
 use log::{error, info};
 
-use crate::ta_ctx::{self, TeeTaCtx};
+use crate::ta_ctx::{self, looks_like_ta};
 
 const TA_HEAD_FIFO_CAP: usize = 32;
 #[cfg(feature = "ta_verify_with_root")]
@@ -60,15 +60,17 @@ impl TaHeadFifoCache {
 static TA_HEAD_CACHE: Lazy<Mutex<TaHeadFifoCache>> =
     Lazy::new(|| Mutex::new(TaHeadFifoCache::new()));
 
-/// When `exec_path` names a TA (`*.ta` with UUID basename), read the full image and verify `.ta_signature`.
+/// When `exec_path` ends with `{uuid}.ta`, read the full image and verify `.ta_signature`.
 ///
 /// Returns the raw `.ta_head` section bytes on success; callers persist that value in the global FIFO
-/// map (`verify_ta_elf_on_load_and_cache_ta_head` / `get_ta_head_cached`). Non-TA paths return `Ok(None)` without error.
+/// map (`verify_ta_elf_on_load_and_cache_ta_head` / `get_ta_head_cached`). Non-TA-shaped paths return
+/// `Ok(None)` without error. TEE context binding still requires a canonical `/tee/ta/` path via
+/// [`crate::TeeTaCtx::is_ta`].
 pub fn verify_ta_elf_signature_if_applicable(
     exec_path: &str,
     cache: &CachedFile,
 ) -> KResult<Option<Vec<u8>>> {
-    if !TeeTaCtx::is_ta(exec_path) {
+    if !looks_like_ta(exec_path) {
         return Ok(None);
     }
     let len = cache.location().len().map_err(|_| KError::InvalidData)?;

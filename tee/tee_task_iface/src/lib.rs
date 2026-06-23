@@ -23,7 +23,7 @@ pub mod ta_ctx;
 pub mod tasign;
 pub mod tee_procfs;
 
-pub use ta_ctx::{SessionIdentity, TeeTaCtx};
+pub use ta_ctx::{SessionIdentity, TeeTaCtx, looks_like_ta};
 
 /// Tee session context trait.
 ///

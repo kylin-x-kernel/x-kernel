@@ -15,7 +15,10 @@ use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
 
-use crate::{file::with_fs, tee::TeeResult};
+use crate::{
+    file::{validate_tee_path, with_fs},
+    tee::TeeResult,
+};
 
 pub const FS_MODE_644: u32 = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 pub const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR | O_SYNC;
@@ -147,10 +150,11 @@ impl FileVariant {
             flags,
             mode
         );
+        let path = validate_tee_path(path).map_err(|_| VfsError::InvalidInput)?;
         let mode = mode & !kthread::current_process_state().umask();
 
         let options = flags_to_options(flags as c_int, mode as __kernel_mode_t, (0, 0));
-        let fd = with_fs(AT_FDCWD, |fs| options.open(fs, path))
+        let fd = with_fs(AT_FDCWD, |fs| options.open(fs, &path))
             .and_then(|it| add_to_fd(it, flags as _))?;
 
         tee_debug!("FileVariant::open = fd: {}", fd);
@@ -168,7 +172,8 @@ impl FileVariant {
     ///   - `Err(TEE_ERROR_GENERIC)` - other errors
     pub fn remove_file(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove file with path: {}", path);
-        match with_fs(AT_FDCWD, |fs| fs.remove_file(path)) {
+        let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
+        match with_fs(AT_FDCWD, |fs| fs.remove_file(&path)) {
             Ok(()) => Ok(()),
             Err(VfsError::NotFound) => {
                 tee_debug!("FileVariant::remove_file: file {} not found", path);
@@ -195,9 +200,10 @@ impl FileVariant {
     /// doesn't exist, the function will return an error.
     /// If the directory already exists, the function returns success (idempotent behavior).
     pub fn create_dir(path: &str) -> TeeResult {
+        let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let mode = NodePermission::from_bits_truncate(0o755);
         with_fs(AT_FDCWD, |fs| {
-            match fs.create_dir(path, mode) {
+            match fs.create_dir(&path, mode) {
                 Ok(_) => Ok(()),
                 Err(VfsError::AlreadyExists) => {
                     // Directory already exists, return success (idempotent)
@@ -283,12 +289,14 @@ pub mod tests_file_ops {
     fn file_exists(path: &str) -> bool {
         use crate::file::resolve_at;
 
+        // resolve_at validates and normalizes paths before VFS resolution.
         let loc = resolve_at(AT_FDCWD, Some(path), AT_EMPTY_PATH);
         matches!(loc, Ok(loc) if loc.stat().is_ok())
     }
 
     fn remove_dir(path: &str) -> TeeResult {
-        with_fs(AT_FDCWD, |fs| fs.remove_dir(path))
+        let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
+        with_fs(AT_FDCWD, |fs| fs.remove_dir(&path))
             .inspect_err(|e| error!("remove dir failed: {:?}", e))
             .map_err(|_| TEE_ERROR_GENERIC)
     }
@@ -296,10 +304,38 @@ pub mod tests_file_ops {
     fn tee_get_file_size(path: &str) -> TeeResult<usize> {
         use crate::file::resolve_at;
 
+        // resolve_at validates and normalizes paths before VFS resolution.
         let loc = resolve_at(AT_FDCWD, Some(path), 0)
             .inspect_err(|e| error!("resolve_at failed: {:?}", e))
             .map_err(|_| TEE_ERROR_GENERIC)?;
         Ok(loc.stat().map_err(|_| TEE_ERROR_GENERIC)?.size as usize)
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_file_ops_resolve_helpers_reject_path_traversal() {
+        assert!(!file_exists("/tee/../etc/passwd"));
+        assert!(!file_exists("/etc/passwd"));
+        assert!(!file_exists("../etc/passwd"));
+        assert!(tee_get_file_size("/etc/passwd").is_err());
+        assert!(tee_get_file_size("../etc/passwd").is_err());
+        assert!(remove_dir("/etc/passwd").is_err());
+        assert!(remove_dir("../etc/passwd").is_err());
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_file_ops_open_rejects_path_traversal() {
+        assert!(matches!(
+            FileVariant::open("/tee/../etc/passwd", O_RDONLY, 0),
+            Err(VfsError::InvalidInput)
+        ));
+        assert!(matches!(
+            FileVariant::open("/etc/passwd", O_RDONLY, 0),
+            Err(VfsError::InvalidInput)
+        ));
+        assert!(matches!(
+            FileVariant::open("../etc/passwd", O_RDONLY, 0),
+            Err(VfsError::InvalidInput)
+        ));
     }
 
     #[unittest::def_test(custom)]

@@ -2,7 +2,44 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+//! Hygon CSV guest attestation and hardware-unique key (HUK) derivation.
+//!
+//! # FFI bindings
+//!
+//! [`super::hygon_csv_bindings`] is auto-generated from the Hygon CSV guest ABI
+//! (see `tee/README.md` for the generator repo). Do **not** hand-edit bindings;
+//! regenerate them when the vendor layout changes.
+//!
+//! Binding types such as [`super::hygon_csv_bindings::csv3_attestation_report_ext`]
+//! mirror C `#[repr(C, packed)]` layouts exactly. Fields named `reserved` (for
+//! example the 716-byte tail in `csv3_attestation_report_ext`) are ABI padding or
+//! future extension slots. They are not application payload and must not be written
+//! from external input or interpreted as trusted data.
+//!
+//! # Safety contract
+//!
+//! All attestation report access must stay in this module behind a wrapper that:
+//!
+//! - checks the hypercall/response buffer length before any field read;
+//! - uses `offset_of!` (or generated offsets) plus explicit field sizes instead of
+//!   whole-struct `copy_from_slice`, `transmute`, or direct serde; and
+//! - keeps `const_assert!` / `const_assert_eq!` layout checks when adding new report
+//!   formats.
+//!
+//! Other TEE code must call [`get_huk_key`] rather than importing binding structs.
+//!
+//! # Current report format
+//!
+//! The live path uses [`super::hygon_csv_bindings::csv_attestation_report_t`].
+//! [`get_sealing_key`] reads `sealing_key` only after verifying
+//! `report_data.len() >= CSV_SEALING_KEY_OFFSET + size_of::<CsvSealingKey>()`.
+//!
+//! CSV3 extended attestation (`csv3_attestation_report_ext`) is defined in bindings
+//! but not used yet. When enabled, follow the same wrapper pattern: parse from a
+//! bounded `&[u8]`, validate `len >= size_of::<Report>()`, then extract fields by
+//! offset; ignore `reserved` on read and never expose it as writable storage.
+
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::mem::size_of;
 
 use bytemuck::{Pod, Zeroable, bytes_of};
@@ -25,10 +62,7 @@ use tee_raw_sys::{
 use super::hygon_csv_bindings::{
     PAGE_SIZE, csv_attestation_report_t, csv_guest_user_data_attestation_t,
 };
-use crate::tee::{
-    TeeResult,
-    utils::{random_bytes, slice_fmt},
-};
+use crate::tee::{TeeResult, utils::random_bytes};
 
 /// Hypercall number for VM attestation (specific to Hygon platform)
 const KVM_HC_VM_ATTESTATION: u64 = 100;
@@ -123,7 +157,6 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     let derived = hkdf::hkdf::<HmacSm3>(salt.as_bytes(), &sealing_key, &[], huk_key.len())
         .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
     huk_key.copy_from_slice(&derived);
-    // warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
     Ok(())
 }
 #[cfg(feature = "csv_huk_key")]

@@ -18,6 +18,68 @@ use uuid as uuid_crate;
 /// Length of a TA basename `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.ta` (hyphenated UUID + `.ta`).
 const TA_UUID_DOT_TA_EXAMPLE: &str = "936da01f-9abd-4d9d-80c7-02af85c822a8.ta";
 
+/// Canonical install directory for signed TA ELF images.
+const TA_INSTALL_ROOT: &str = "/tee/ta/";
+
+/// Normalize an absolute path and reject traversal or non-canonical components.
+fn normalize_absolute_path(path: &str) -> Option<String> {
+    if path.is_empty() || path.as_bytes().contains(&0) || !path.starts_with('/') {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return None,
+            part => parts.push(part),
+        }
+    }
+
+    let mut normalized = String::from("/");
+    normalized.push_str(&parts.join("/"));
+    Some(normalized)
+}
+
+fn is_valid_ta_basename(name: &str) -> bool {
+    if name.len() != TA_UUID_DOT_TA_EXAMPLE.len() || !name.ends_with(".ta") {
+        return false;
+    }
+    let Some(stem) = name.strip_suffix(".ta") else {
+        return false;
+    };
+    uuid_crate::Uuid::parse_str(stem).is_ok()
+}
+
+/// Return the canonical `/tee/ta/{uuid}.ta` path when `path` names an installed TA.
+fn canonical_ta_install_path(path: &str) -> Option<String> {
+    let normalized = normalize_absolute_path(path)?;
+    if !normalized.starts_with(TA_INSTALL_ROOT) {
+        return None;
+    }
+    let basename = normalized.strip_prefix(TA_INSTALL_ROOT)?;
+    if basename.contains('/') || !is_valid_ta_basename(basename) {
+        return None;
+    }
+    Some(normalized)
+}
+
+/// True when `path` is an absolute `{uuid}.ta` basename with no `..` components.
+///
+/// Used to decide whether exec must run TA ELF signature verification. Paths
+/// containing `..` are rejected (same as [`TeeTaCtx::is_ta`]). TEE runtime
+/// context still requires a canonical `/tee/ta/` install path.
+pub fn looks_like_ta(path: &str) -> bool {
+    let Some(normalized) = normalize_absolute_path(path) else {
+        return false;
+    };
+    let basename = match normalized.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name,
+        _ => return false,
+    };
+    is_valid_ta_basename(basename)
+}
+
 /// Identity of a TA session, stored in `TeeTaCtx.open_sessions`.
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
@@ -66,10 +128,10 @@ pub fn read_ta_head_from_image(image: &[u8]) -> KResult<Option<Vec<u8>>> {
 
 /// When `path` names a TA, read the ELF via `CachedFile` and return raw `.ta_head` bytes (no signature check).
 pub fn read_ta_head_if_applicable(path: &str) -> KResult<Option<Vec<u8>>> {
-    if !TeeTaCtx::is_ta(path) {
+    let Some(normalized) = canonical_ta_install_path(path) else {
         return Ok(None);
-    }
-    let loc = kernel_fs_context().lock().resolve(path)?;
+    };
+    let loc = kernel_fs_context().lock().resolve(&normalized)?;
     let cache = CachedFile::get_or_create(loc)?;
     let len = cache.location().len().map_err(|_| KError::InvalidData)?;
     let len = usize::try_from(len).map_err(|_| KError::InvalidData)?;
@@ -92,11 +154,14 @@ pub fn bytes_to_ta_head(data: &[u8]) -> KResult<ta_head> {
 
 impl TeeTaCtx {
     pub fn set_uuid(&mut self, path: &str) {
-        // get the path basic string
-        let uuid = match path
+        let Some(normalized) = canonical_ta_install_path(path) else {
+            log::debug!("set_uuid: rejected non-canonical TA path: {path}");
+            return;
+        };
+        let uuid = match normalized
             .rsplit('/')
             .next()
-            .and_then(|name| name.rsplit_once('.').map(|(base, _)| base))
+            .and_then(|name| name.strip_suffix(".ta"))
         {
             Some(v) => v,
             None => return,
@@ -107,19 +172,17 @@ impl TeeTaCtx {
         }
     }
 
-    /// True when the path's final component is `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.ta`
-    /// (same character length as `936da01f-9abd-4d9d-80c7-02af85c822a8.ta`, hyphenated UUID) — not arbitrary `*.ta` names.
+    /// True when `path` canonicalizes to `/tee/ta/{uuid}.ta` with a hyphenated UUID basename.
+    ///
+    /// Used for TEE runtime context (UUID, `ta_head`, storage namespace). Exec-time
+    /// signature verification uses [`looks_like_ta`] instead.
     pub fn is_ta(path: &str) -> bool {
-        let Some(name) = path.rsplit('/').next() else {
-            return false;
-        };
-        if name.len() != TA_UUID_DOT_TA_EXAMPLE.len() || !name.ends_with(".ta") {
-            return false;
-        }
-        let Some(stem) = name.strip_suffix(".ta") else {
-            return false;
-        };
-        uuid_crate::Uuid::parse_str(stem).is_ok()
+        canonical_ta_install_path(path).is_some()
+    }
+
+    /// Alias for [`looks_like_ta`].
+    pub fn looks_like_ta(path: &str) -> bool {
+        super::looks_like_ta(path)
     }
 
     pub fn new(path: &str) -> Self {
@@ -193,5 +256,25 @@ pub mod tests_ta_ctx {
         assert!(!TeeTaCtx::is_ta(
             "/tee/ta/936da01f9abd4d9d80c702af85c822a8.ta"
         ));
+        assert!(!TeeTaCtx::is_ta(
+            "/tee/ta/../936da01f-9abd-4d9d-80c7-02af85c822a8.ta"
+        ));
+        assert!(!TeeTaCtx::is_ta(
+            "/tee/ta/subdir/936da01f-9abd-4d9d-80c7-02af85c822a8.ta"
+        ));
+        assert!(!TeeTaCtx::is_ta(
+            "/tmp/936da01f-9abd-4d9d-80c7-02af85c822a8.ta"
+        ));
+
+        assert!(looks_like_ta("/036da01f-9abd-4d9d-80c7-02af85c822a8.ta"));
+        assert!(looks_like_ta(
+            "/tee/ta/936da01f-9abd-4d9d-80c7-02af85c822a8.ta"
+        ));
+        assert!(!looks_like_ta(
+            "/tee/ta/../936da01f-9abd-4d9d-80c7-02af85c822a8.ta"
+        ));
+        assert!(!looks_like_ta("/tee/ta/foo.ta"));
+        assert!(!looks_like_ta("/bin/sh"));
+        assert!(!TeeTaCtx::is_ta("/036da01f-9abd-4d9d-80c7-02af85c822a8.ta"));
     }
 }

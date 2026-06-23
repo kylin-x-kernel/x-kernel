@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::{format, string::String};
 use core::fmt;
 
 use hex;
@@ -28,6 +29,11 @@ impl Uuid {
             time_hi_and_version,
             *clock_seq_and_node,
         ))
+    }
+
+    /// Returns the TA Unix socket path for this UUID under `/tmp`.
+    pub fn ta_unix_socket_path(&self) -> String {
+        format!("/tmp/{}.sock", self)
     }
 
     /// Creates a raw TEE client uuid object with specified parameters.
@@ -69,5 +75,39 @@ impl fmt::Display for Uuid {
 impl From<raw::TEE_UUID> for Uuid {
     fn from(raw: raw::TEE_UUID) -> Self {
         Uuid { raw }
+    }
+}
+
+/// Builds `/tmp/{uuid}.sock` after validating `uuid` as RFC4122.
+///
+/// Rejects path traversal and other non-UUID characters before the path is
+/// passed to the Unix socket layer.
+pub fn ta_unix_socket_path(uuid: &str) -> TeeResult<String> {
+    Ok(Uuid::parse_str(uuid)?.ta_unix_socket_path())
+}
+
+#[cfg(unittest)]
+mod tests {
+    use tee_raw_sys::TEE_ERROR_BAD_FORMAT;
+
+    use super::*;
+
+    #[test]
+    fn ta_unix_socket_path_valid_uuid() {
+        let path = ta_unix_socket_path("936da01f-9abd-4d9d-80c7-02af85c822a8").unwrap();
+        assert_eq!(path, "/tmp/936da01f-9abd-4d9d-80c7-02af85c822a8.sock");
+    }
+
+    #[test]
+    fn ta_unix_socket_path_rejects_path_traversal() {
+        assert_eq!(ta_unix_socket_path("../evil"), Err(TEE_ERROR_BAD_FORMAT));
+    }
+
+    #[test]
+    fn ta_unix_socket_path_rejects_slashes() {
+        assert_eq!(
+            ta_unix_socket_path("../../etc/passwd"),
+            Err(TEE_ERROR_BAD_FORMAT)
+        );
     }
 }

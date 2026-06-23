@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use bincode::config;
 use knet::{
@@ -17,12 +21,66 @@ use crate::tee::{
     TeeResult,
     protocal::{Parameters, TeeRequest, TeeResponse},
     tee_session::{with_tee_ta_ctx, with_tee_ta_ctx_mut},
+    uuid::{Uuid, ta_unix_socket_path},
 };
 
+const TEE_TA_MAX_FRAME_PAYLOAD_LEN: usize = 64 * 1024;
+
+fn validated_payload_len(len: usize) -> TeeResult<usize> {
+    if len > TEE_TA_MAX_FRAME_PAYLOAD_LEN {
+        Err(TEE_ERROR_GENERIC)
+    } else {
+        Ok(len)
+    }
+}
+
+fn recv_exact(socket: &UnixDomainSocket, buf: &mut [u8]) -> TeeResult<()> {
+    let mut offset = 0;
+    while offset < buf.len() {
+        let n = socket
+            .recv(&mut buf[offset..], RecvOptions::default())
+            .map_err(|_| TEE_ERROR_GENERIC)?;
+        if n == 0 {
+            return Err(TEE_ERROR_GENERIC);
+        }
+        offset += n;
+    }
+    Ok(())
+}
+
+fn recv_framed_payload(socket: &UnixDomainSocket) -> TeeResult<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    recv_exact(socket, &mut len_buf)?;
+    let len = validated_payload_len(u32::from_ne_bytes(len_buf) as usize)?;
+    let mut payload = vec![0u8; len];
+    recv_exact(socket, &mut payload)?;
+    Ok(payload)
+}
+
+fn send_framed_message(socket: &UnixDomainSocket, encoded: &[u8]) -> TeeResult<()> {
+    validated_payload_len(encoded.len())?;
+    let mut message = Vec::with_capacity(4 + encoded.len());
+    message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
+    message.extend_from_slice(encoded);
+    socket
+        .send(message.as_slice(), SendOptions::default())
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    Ok(())
+}
+
+fn recv_tee_response(socket: &UnixDomainSocket) -> TeeResult<TeeResponse> {
+    let payload = recv_framed_payload(socket)?;
+    let (resp, _) =
+        bincode::decode_from_slice(&payload, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+    Ok(resp)
+}
+
 pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
+    let parsed = Uuid::parse_str(&uuid)?;
+    let path = parsed.ta_unix_socket_path();
+    let uuid = parsed.to_string();
     // Connect to dest TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kthread::current_thread().pid()));
-    let path = format!("/tmp/{}.sock", uuid);
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
 
@@ -33,22 +91,9 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
         connection_method: 0,
     };
     let encoded = bincode::encode_to_vec(req, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
-    let mut message = Vec::with_capacity(4 + encoded.len());
-    message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
-    message.extend_from_slice(&encoded);
-    let src = message.as_slice();
-    socket
-        .send(src, SendOptions::default())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
+    send_framed_message(&socket, &encoded)?;
 
-    // Receive response from dest TA
-    let mut buf = [0u8; 1024];
-    let mut dst = buf.as_mut_slice();
-    socket
-        .recv(&mut dst, RecvOptions::default())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-    let (resp, _): (TeeResponse, _) =
-        bincode::decode_from_slice(dst, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+    let resp = recv_tee_response(&socket)?;
     match resp {
         TeeResponse::OpenSession { session_id, result } => match result {
             TEE_SUCCESS => with_tee_ta_ctx_mut(|ctx| {
@@ -67,7 +112,7 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
 pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     // Connect to dest TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kthread::current_thread().pid()));
-    let path = format!("/tmp/{}.sock", sess_id.uuid);
+    let path = ta_unix_socket_path(&sess_id.uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
 
@@ -76,13 +121,7 @@ pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
         session_id: sess_id.session_id,
     };
     let encoded = bincode::encode_to_vec(req, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
-    let mut message = Vec::with_capacity(4 + encoded.len());
-    message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
-    message.extend_from_slice(&encoded);
-    let src = message.as_slice();
-    socket
-        .send(src, SendOptions::default())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
+    send_framed_message(&socket, &encoded)?;
 
     Ok(())
 }
@@ -94,7 +133,7 @@ pub fn tee_ta_invoke_command(
 ) -> TeeResult {
     // Connect to dest TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kthread::current_thread().pid()));
-    let path = format!("/tmp/{}.sock", sess_id.uuid);
+    let path = ta_unix_socket_path(&sess_id.uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
 
@@ -105,22 +144,9 @@ pub fn tee_ta_invoke_command(
         params: Parameters::default(),
     };
     let encoded = bincode::encode_to_vec(req, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
-    let mut message = Vec::with_capacity(4 + encoded.len());
-    message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
-    message.extend_from_slice(&encoded);
-    let src = message.as_slice();
-    socket
-        .send(src, SendOptions::default())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
+    send_framed_message(&socket, &encoded)?;
 
-    // Receive response from dest TA
-    let mut buf = [0u8; 1024];
-    let mut dst = buf.as_mut_slice();
-    socket
-        .recv(&mut dst, RecvOptions::default())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
-    let (resp, _): (TeeResponse, _) =
-        bincode::decode_from_slice(dst, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+    let resp = recv_tee_response(&socket)?;
     match resp {
         TeeResponse::InvokeCommand { params: _, result } => match result {
             TEE_SUCCESS => Ok(()),
@@ -135,4 +161,25 @@ pub fn tee_ta_get_session(dispatch_irq: u32) -> TeeResult<SessionIdentity> {
         Some(sess_id) => Ok(sess_id.clone()),
         None => Err(TEE_ERROR_ITEM_NOT_FOUND),
     })
+}
+
+#[cfg(unittest)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validated_payload_len_accepts_within_limit() {
+        assert_eq!(
+            validated_payload_len(TEE_TA_MAX_FRAME_PAYLOAD_LEN).unwrap(),
+            TEE_TA_MAX_FRAME_PAYLOAD_LEN
+        );
+    }
+
+    #[test]
+    fn validated_payload_len_rejects_oversized_frames() {
+        assert_eq!(
+            validated_payload_len(TEE_TA_MAX_FRAME_PAYLOAD_LEN + 1),
+            Err(TEE_ERROR_GENERIC)
+        );
+    }
 }

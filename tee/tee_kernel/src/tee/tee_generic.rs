@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, vec::Vec};
+use alloc::vec::Vec;
 use core::ffi::c_char;
 
 use bincode::config;
@@ -15,7 +15,9 @@ use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_GENERIC};
 
 use crate::{
     mm::vm_load_string_with_len,
-    tee::{TeeResult, protocal::TeeRequest, tee_session::with_tee_ta_ctx},
+    tee::{
+        TeeResult, protocal::TeeRequest, tee_session::with_tee_ta_ctx, uuid::ta_unix_socket_path,
+    },
 };
 
 /// Return from a TEE syscall with a return code
@@ -43,7 +45,7 @@ pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
     // Connect to current TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kthread::current_thread().pid()));
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
-    let path = format!("/tmp/{}.sock", uuid);
+    let path = ta_unix_socket_path(&uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket.connect(remote_addr).map_err(|_| TEE_ERROR_GENERIC)?;
 

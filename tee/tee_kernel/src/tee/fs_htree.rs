@@ -3014,8 +3014,8 @@ pub mod tests_fs_htree {
 
     #[unittest::def_test(custom)]
     fn test_tee_fs_htree_open() {
-        let fd =
-            FileVariant::open("test_fs_htree_open.bin", FS_OFLAG_DEFAULT, FS_MODE_644).unwrap();
+        let fd = FileVariant::open("/tmp/test_fs_htree_open.bin", FS_OFLAG_DEFAULT, FS_MODE_644)
+            .unwrap();
 
         let uuid = TEE_UUID {
             timeLow: 1,
