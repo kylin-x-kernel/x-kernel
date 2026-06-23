@@ -225,6 +225,13 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         thr.proc_state.resources.close_all_fds();
 
         process.exit();
+
+        // Detach shared memory before waking the parent, so that
+        // waitpid() returns only after segments marked IPC_RMID
+        // have been destroyed.
+        SHM_MANAGER.lock().clear_proc_shm(process.pid());
+        #[cfg(feature = "tee")]
+        thr.proc_state.clear_tee_runtime_private();
         if let Some(parent) = process.parent() {
             if let Some(signo) = thr.proc_state.exit_signal() {
                 let _ = kthread::send_signal_to_process(
@@ -237,10 +244,6 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
             }
         }
         thr.proc_state.exit_event().wake();
-
-        SHM_MANAGER.lock().clear_proc_shm(process.pid());
-        #[cfg(feature = "tee")]
-        thr.proc_state.clear_tee_runtime_private();
     }
 
     if group_exit && !process.is_group_exited() {

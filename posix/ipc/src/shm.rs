@@ -51,7 +51,9 @@ fn new_shmid_ds(key: i32, size: usize, mode: __kernel_mode_t, pid: __kernel_pid_
 pub struct ShmInner {
     pub shmid: i32,
     pub page_num: usize,
-    va_range: BTreeMap<Pid, VirtAddrRange>,
+    /// Multiple attachments per PID are allowed (one VMA per shmat call).
+    /// Each PID maps to a list of VirtAddrRanges, one per attach.
+    va_range: BTreeMap<Pid, Vec<VirtAddrRange>>,
     pub phys_pages: Option<Arc<SharedPages>>,
     pub rmid: bool,
     pub mapping_flags: MappingFlags,
@@ -90,28 +92,59 @@ impl ShmInner {
         self.phys_pages = Some(phys_pages);
     }
 
+    /// Returns the total number of attachments across all PIDs.
     pub fn attach_count(&self) -> usize {
-        self.va_range.len()
+        self.va_range.values().map(|v| v.len()).sum()
     }
 
-    pub fn get_addr_range(&self, pid: Pid) -> Option<VirtAddrRange> {
-        self.va_range.get(&pid).cloned()
+    /// Finds the `VirtAddrRange` for a given PID whose start address matches `vaddr`.
+    /// `vaddr` is the address returned by a previous shmat call (the start of the
+    /// mapping).
+    pub fn get_addr_range_by_vaddr(&self, pid: Pid, vaddr: VirtAddr) -> Option<VirtAddrRange> {
+        self.va_range
+            .get(&pid)?
+            .iter()
+            .find(|range| range.start == vaddr)
+            .cloned()
+    }
+
+    /// Returns all `VirtAddrRange` entries for a given PID.
+    /// Used for batch detach in `clear_proc_shm`.
+    pub fn ranges_for_pid(&self, pid: Pid) -> Vec<VirtAddrRange> {
+        self.va_range.get(&pid).cloned().unwrap_or_default()
     }
 
     pub fn attach_process(&mut self, pid: Pid, va_range: VirtAddrRange) {
-        assert!(self.get_addr_range(pid).is_none());
-        self.va_range.insert(pid, va_range);
+        self.va_range.entry(pid).or_default().push(va_range);
         self.shmid_ds.shm_nattch += 1;
         self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
         self.shmid_ds.shm_atime = monotonic_time_nanos() as __kernel_time_t;
     }
 
-    pub fn detach_process(&mut self, pid: Pid) {
-        assert!(self.get_addr_range(pid).is_some());
-        self.va_range.remove(&pid);
-        self.shmid_ds.shm_nattch -= 1;
-        self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
-        self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+    /// Detaches all attachments for a given PID.
+    /// Called by `clear_proc_shm` during process exit.
+    pub fn detach_all_for_pid(&mut self, pid: Pid) {
+        if let Some(ranges) = self.va_range.remove(&pid) {
+            self.shmid_ds.shm_nattch -= ranges.len() as u16;
+            self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
+            self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+        }
+    }
+
+    /// Detaches a single attachment identified by (pid, vaddr).
+    /// `vaddr` is the start address returned by `shmat`.
+    pub fn detach_process_by_vaddr(&mut self, pid: Pid, vaddr: VirtAddr) {
+        if let Some(ranges) = self.va_range.get_mut(&pid)
+            && let Some(pos) = ranges.iter().position(|r| r.start == vaddr)
+        {
+            ranges.remove(pos);
+            if ranges.is_empty() {
+                self.va_range.remove(&pid);
+            }
+            self.shmid_ds.shm_nattch -= 1;
+            self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
+            self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+        }
     }
 }
 
@@ -186,7 +219,10 @@ where
 pub struct ShmManager {
     key_shmid: BiBTreeMap<i32, i32>,
     shmid_inner: BTreeMap<i32, Arc<Mutex<ShmInner>>>,
-    pid_shmid_vaddr: BTreeMap<Pid, BiBTreeMap<i32, VirtAddr>>,
+    /// Per-PID map from virtual address (start of shmat mapping) to shmid.
+    /// Each vaddr maps to exactly one shmid, but a shmid can have multiple
+    /// vaddrs (multiple attachments from the same process).
+    pid_shmid_vaddr: BTreeMap<Pid, BTreeMap<VirtAddr, i32>>,
 }
 
 impl ShmManager {
@@ -206,28 +242,21 @@ impl ShmManager {
         self.shmid_inner.get(&shmid).cloned()
     }
 
+    /// Looks up the shmid attached at a given virtual address by a given PID.
     pub fn get_shmid_by_vaddr(&self, pid: Pid, vaddr: VirtAddr) -> Option<i32> {
         self.pid_shmid_vaddr
             .get(&pid)
-            .and_then(|map| map.get_by_value(&vaddr))
+            .and_then(|map| map.get(&vaddr))
             .cloned()
     }
 
+    /// Returns all unique shmids that the given PID has attached.
     fn get_shmids_by_pid(&self, pid: Pid) -> Option<Vec<i32>> {
         let map = self.pid_shmid_vaddr.get(&pid)?;
-        let mut res = Vec::new();
-        for key in map.forward.keys() {
-            res.push(*key);
-        }
+        let mut res: Vec<i32> = map.values().cloned().collect();
+        res.sort();
+        res.dedup();
         Some(res)
-    }
-
-    #[allow(dead_code)]
-    fn find_vaddr_by_shmid(&self, pid: Pid, shmid: i32) -> Option<VirtAddr> {
-        self.pid_shmid_vaddr
-            .get(&pid)
-            .and_then(|map| map.get_by_key(&shmid))
-            .cloned()
     }
 
     pub fn insert_key_shmid(&mut self, key: i32, shmid: i32) {
@@ -242,14 +271,14 @@ impl ShmManager {
         self.pid_shmid_vaddr
             .entry(pid)
             .or_default()
-            .insert(shmid, vaddr);
+            .insert(vaddr, shmid);
     }
 
     pub fn remove_shmaddr(&mut self, pid: Pid, shmaddr: VirtAddr) {
         let mut empty: bool = false;
         if let Some(map) = self.pid_shmid_vaddr.get_mut(&pid) {
-            map.remove_by_value(&shmaddr);
-            empty = map.forward.is_empty();
+            map.remove(&shmaddr);
+            empty = map.is_empty();
         }
         if empty {
             self.pid_shmid_vaddr.remove(&pid);
@@ -280,7 +309,7 @@ impl ShmManager {
         let mut to_remove: Vec<i32> = Vec::new();
         for (shmid, inner) in &inners {
             let mut shm_inner = inner.lock();
-            shm_inner.detach_process(pid);
+            shm_inner.detach_all_for_pid(pid);
             // rmid+attach_count checked atomically: SHM_MANAGER is held
             // (via &mut self) so no other thread can call remove_shmid
             // or set rmid via IPC_RMID concurrently.
@@ -369,10 +398,23 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     let pid = proc_state.proc.pid();
     let mut aspace = proc_state.address_space().lock();
 
-    let start_aligned = memaddr::align_down_4k(addr);
+    // Validate addr: if non-zero, it must be page-aligned unless SHM_RND is set.
+    let start_aligned = if addr != 0 {
+        if shm_flg.contains(ShmAtFlags::SHM_RND) {
+            memaddr::align_down_4k(addr)
+        } else if !addr.is_multiple_of(PAGE_SIZE_4K) {
+            return Err(KError::InvalidInput);
+        } else {
+            addr
+        }
+    } else {
+        0
+    };
     let length = shm_inner.page_num * PAGE_SIZE_4K;
 
-    assert!(shm_inner.get_addr_range(pid).is_none());
+    // Find a free virtual address range for this attachment.
+    // Multiple attachments from the same PID to the same shmid are
+    // allowed (POSIX permits repeated shmat without intervening shmdt).
     let start_addr = aspace
         .find_free_area(
             VirtAddr::from(start_aligned),
@@ -391,14 +433,6 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
         .ok_or(KError::NoMemory)?;
     let end_addr = VirtAddr::from(start_addr.as_usize() + length);
     let va_range = VirtAddrRange::new(start_addr, end_addr);
-
-    info!(
-        "Process {} alloc shm virt addr start: {:#x}, size: {}, mapping_flags: {:#x?}",
-        pid,
-        start_addr.as_usize(),
-        length,
-        mapping_flags
-    );
 
     // Map pages + update ShmInner under shm_inner lock only.
     // sys_shmget locks SHM_MANAGER → ShmInner; locking ShmInner →
@@ -447,6 +481,12 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<shmid_ds>) -> KResult<isize
     }
 
     shm_inner.shmid_ds.shm_ctime = monotonic_time_nanos() as __kernel_time_t;
+
+    if shm_inner.rmid && shm_inner.attach_count() == 0 {
+        drop(shm_inner);
+        SHM_MANAGER.lock().remove_shmid(shmid);
+    }
+
     Ok(0)
 }
 
@@ -470,7 +510,9 @@ pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
             .ok_or(KError::InvalidInput)?
     };
     let mut shm_inner = shm_inner_arc.lock();
-    let va_range = shm_inner.get_addr_range(pid).ok_or(KError::InvalidInput)?;
+    let va_range = shm_inner
+        .get_addr_range_by_vaddr(pid, shmaddr)
+        .ok_or(KError::InvalidInput)?;
 
     let mut aspace = proc_state.address_space().lock();
     aspace.unmap(va_range.start, va_range.size())?;
@@ -478,7 +520,7 @@ pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
 
     // Detach under shm_inner, then release to avoid holding it
     // across SHM_MANAGER (sys_shmget locks SHM_MANAGER → ShmInner).
-    shm_inner.detach_process(pid);
+    shm_inner.detach_process_by_vaddr(pid, shmaddr);
     drop(shm_inner);
 
     let mut shm_manager = SHM_MANAGER.lock();
@@ -527,12 +569,13 @@ pub mod tests_shm {
     fn test_shminner_attach_detach_and_update() {
         let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
         let range = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
+        let vaddr = range.start;
         inner.attach_process(1, range);
         assert_eq!(inner.attach_count(), 1);
-        assert!(inner.get_addr_range(1).is_some());
+        assert!(inner.get_addr_range_by_vaddr(1, vaddr).is_some());
         assert!(inner.try_update(4096, MappingFlags::READ, 2).is_ok());
         assert!(inner.try_update(8192, MappingFlags::READ, 2).is_err());
-        inner.detach_process(1);
+        inner.detach_process_by_vaddr(1, vaddr);
         assert_eq!(inner.attach_count(), 0);
     }
 
@@ -619,5 +662,47 @@ pub mod tests_shm {
         let mut manager = ShmManager::new();
         manager.clear_proc_shm(999);
         // Graceful no-op.
+    }
+
+    #[def_test]
+    fn test_shminner_multiple_attaches_same_pid() {
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let range1 = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
+        let range2 = VirtAddrRange::try_from(0x2000usize..0x3000usize).unwrap();
+
+        // Same PID attaches twice — should succeed (no assertion failure).
+        inner.attach_process(1, range1);
+        inner.attach_process(1, range2);
+        assert_eq!(inner.attach_count(), 2);
+
+        // Look up by vaddr.
+        assert!(inner.get_addr_range_by_vaddr(1, range1.start).is_some());
+        assert!(inner.get_addr_range_by_vaddr(1, range2.start).is_some());
+
+        // Detach one.
+        inner.detach_process_by_vaddr(1, range1.start);
+        assert_eq!(inner.attach_count(), 1);
+        assert!(inner.get_addr_range_by_vaddr(1, range1.start).is_none());
+        assert!(inner.get_addr_range_by_vaddr(1, range2.start).is_some());
+
+        // Detach the other.
+        inner.detach_process_by_vaddr(1, range2.start);
+        assert_eq!(inner.attach_count(), 0);
+        assert!(inner.ranges_for_pid(1).is_empty());
+    }
+
+    #[def_test]
+    fn test_shminner_detach_all_for_pid() {
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let range1 = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
+        let range2 = VirtAddrRange::try_from(0x2000usize..0x3000usize).unwrap();
+
+        inner.attach_process(1, range1);
+        inner.attach_process(1, range2);
+        assert_eq!(inner.attach_count(), 2);
+
+        inner.detach_all_for_pid(1);
+        assert_eq!(inner.attach_count(), 0);
+        assert!(inner.ranges_for_pid(1).is_empty());
     }
 }
