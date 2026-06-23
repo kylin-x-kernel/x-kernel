@@ -529,19 +529,22 @@ def checkoutProject() {
             checkout scm
             return
         }
-        checkout([
-            $class: 'GitSCM',
-            branches: [[name: "*/${sourceBranch}"]],
-            userRemoteConfigs: [[url: sourceRepo]]
-        ])
+        gitCheckoutWithToken(sourceRepo, sourceBranch)
         return
     }
 
-    checkout([
-        $class: 'GitSCM',
-        branches: [[name: "*/${env.DEFAULT_BRANCH}"]],
-        userRemoteConfigs: [[url: env.PROJECT_REPO]]
-    ])
+    gitCheckoutWithToken(env.PROJECT_REPO, env.DEFAULT_BRANCH)
+}
+
+def gitCheckoutWithToken(String repoUrl, String branch) {
+    withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GIT_TOKEN')]) {
+        def authUrl = repoUrl.replace('https://', "https://oauth2:${GIT_TOKEN}@")
+        checkout([
+            $class: 'GitSCM',
+            branches: [[name: "*/${branch}"]],
+            userRemoteConfigs: [[url: authUrl]]
+        ])
+    }
 }
 
 def markSafeDirectory() {
