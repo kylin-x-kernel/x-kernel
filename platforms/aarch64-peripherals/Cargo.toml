@@ -29,6 +29,7 @@ khal = { workspace = true }
 irq_driver = { workspace = true }
 aarch64-pmuv3 = { workspace = true, optional = true }
 percpu = { workspace = true }
+kerrno = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

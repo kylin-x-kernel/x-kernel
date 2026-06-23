@@ -4,7 +4,7 @@
 
 use alloc::{format, string::String};
 
-#[cfg(any(feature = "csv_huk_key", feature = "virtcca_huk_key"))]
+#[cfg(feature = "csv_huk_key")]
 use tee_crypto::rng::{DeterministicRng, Rng};
 
 #[inline]
@@ -63,7 +63,7 @@ pub fn slice_fmt(data: &[u8]) -> String {
         + if len > min_len { "..." } else { "" }
 }
 
-#[cfg(any(feature = "csv_huk_key", feature = "virtcca_huk_key"))]
+#[cfg(feature = "csv_huk_key")]
 pub fn random_bytes(data: &mut [u8]) {
     let seed = khal::time::now_ticks();
     let mut rng = DeterministicRng::seed_from_u64(seed);

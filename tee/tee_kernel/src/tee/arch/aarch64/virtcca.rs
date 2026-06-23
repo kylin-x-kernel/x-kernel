@@ -8,10 +8,7 @@ use khal::mem::{VirtAddr, v2p};
 use tee_crypto::{hkdf, mac::HmacSm3};
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_SHORT_BUFFER};
 
-use crate::tee::{
-    TeeResult,
-    utils::{random_bytes, slice_fmt},
-};
+use crate::tee::TeeResult;
 
 const SMC_TSI_CALL_BASE: u32 = 0xC400_0000;
 const IMAGE_KEY_LEN: usize = 32;
@@ -24,7 +21,7 @@ const fn smc_tsi_fid(x: u32) -> u32 {
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
 pub enum ImageKeyAlg {
-    HMAC_SHA256 = 0,
+    HmacSha256 = 0,
 }
 
 /// HUK derive key (matches `SMC_TSI_FID(0x19B)`).
@@ -74,16 +71,14 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     let mut image_key = [0u8; IMAGE_KEY_LEN];
     user_param[..salt.len()].copy_from_slice(salt);
 
-    let ret = smc_image_key(ImageKeyAlg::HMAC_SHA256 as u32, &user_param, &mut image_key)?;
+    let ret = smc_image_key(ImageKeyAlg::HmacSha256 as u32, &user_param, &mut image_key)?;
     if ret != 0 {
         error!("smc_image_key failed with ret: {}", ret);
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
-    // warn!("get_huk_key: image_key: {:?}", slice_fmt(&image_key));
     let info = b"KunPeng VirtCCA Sealing Key";
     let derived = hkdf::hkdf::<HmacSm3>(info, &image_key, &[], huk_key.len())
         .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
     huk_key.copy_from_slice(&derived);
-    // warn!("get_huk_key: huk_key: {:?}", slice_fmt(huk_key));
     Ok(())
 }

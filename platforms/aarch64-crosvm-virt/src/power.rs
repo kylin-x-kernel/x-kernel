@@ -4,13 +4,14 @@
 
 //! Power and SMP boot controls for the platform.
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kerrno::KResult;
 use kplat::sys::SysCtrl;
 struct PowerImpl;
 #[impl_dev_interface]
 impl SysCtrl for PowerImpl {
     /// Power on an application processor (AP) with a provided stack.
     #[cfg(feature = "smp")]
-    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
+    fn boot_ap(logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) -> KResult {
         use khal::mem::{v2p, va};
         let entry_paddr = v2p(va!(
             kernel_boot::arch::_start_secondary as *const () as usize
@@ -21,7 +22,7 @@ impl SysCtrl for PowerImpl {
                 logical_cpu_id.as_usize()
             )
         });
-        aarch64_peripherals::psci::cpu_on(raw_cpu_id, entry_paddr.as_usize(), stack_top_paddr);
+        aarch64_peripherals::psci::cpu_on(raw_cpu_id, entry_paddr.as_usize(), 0).map_err(Into::into)
     }
 
     /// Request a system shutdown through PSCI.

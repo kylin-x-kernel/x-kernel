@@ -11,6 +11,7 @@ use core::{
 use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
 use kernel_boot::{SECOND_KERNEL_ENTRY, register_boot_init};
+use kerrno::KResult;
 use khal::mem::{VirtAddr, v2p};
 use kthread::AsThread;
 
@@ -53,23 +54,34 @@ unsafe impl Sync for SecondaryBootStacks {}
 
 /// Start all secondary CPUs and wait until they enter the runtime.
 #[allow(clippy::absurd_extreme_comparisons)]
-pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) {
+pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
     let mut secondary_logical_cpu_id = 0;
+    let mut start_result = Ok(());
     for_each_present_logical_cpu(|_, logical_cpu_id, _| {
+        if start_result.is_err() {
+            return;
+        }
         if logical_cpu_id == primary_cpu_id || secondary_logical_cpu_id >= CPU_NUM - 1 {
             return;
         }
 
         let stack_top = v2p(SECONDARY_BOOT_STACKS.stack_top(secondary_logical_cpu_id));
 
+        #[cfg(target_arch = "aarch64")]
+        kernel_boot::arch::set_secondary_boot_context(logical_cpu_id, stack_top.as_usize());
+
         debug!("starting CPU {}...", logical_cpu_id.as_usize());
-        khal::power::boot_ap(logical_cpu_id, stack_top.as_usize());
+        if let Err(err) = khal::power::boot_ap(logical_cpu_id, stack_top.as_usize()) {
+            start_result = Err(err);
+            return;
+        }
         secondary_logical_cpu_id += 1;
 
         while ENTERED_CPUS.load(Ordering::Acquire) <= secondary_logical_cpu_id {
             core::hint::spin_loop();
         }
     });
+    start_result
 }
 
 /// The main entry point of the runtime for secondary cores.

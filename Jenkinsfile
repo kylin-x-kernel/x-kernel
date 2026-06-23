@@ -116,12 +116,23 @@ def ciParallelStages() {
         failure: 'clippy 或 build 失败',
         type: 'build',
         platform: 'aarch64-crosvm-virt',
+    ], [
+        name: 'Build Check: aarch64-qemu-virt-virtcca',
+        failure: 'clippy 或 build 失败',
+        type: 'build',
+        platform: 'aarch64-qemu-virt-virtcca',
+        defconfig: 'platforms/aarch64-qemu-virt/virtcca_defconfig',
+    ], [
+        name: 'Doc Check: aarch64',
+        failure: 'Rust 文档生成失败',
+        type: 'doc',
+        arch: 'aarch64',
     ]]
 
     runtimeTestArchitectures().each { arch ->
         stages << [
             name: "Runtime Test: ${arch}-qemu-virt",
-            failure: 'clippy、单元测试、覆盖率、文档生成或 runtime 测试失败',
+            failure: 'clippy、单元测试、覆盖率或 runtime 测试失败',
             type: 'runtime',
             arch: arch,
         ]
@@ -259,7 +270,10 @@ def ciParallelBranches() {
 def runCiWorkload(Map spec) {
     switch (spec.type) {
         case 'build':
-            runClippyAndBuild(spec.platform)
+            runClippyAndBuild(spec.platform, spec.defconfig ?: defconfigForPlatform(spec.platform))
+            break
+        case 'doc':
+            runGendocStage(spec.arch)
             break
         case 'runtime':
             runClippyAndRuntime(spec.arch)
@@ -317,7 +331,7 @@ cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
     }
 }
 
-def runClippyAndBuild(String platform) {
+def runClippyAndBuild(String platform, String defconfigPath) {
     def stageName = "Build Check: ${platform}"
     initStageLog(stageName)
     def buildTargetDir = "/xkernel-target/build-${platform}"
@@ -326,7 +340,7 @@ def runClippyAndBuild(String platform) {
             sh label: "Clippy and build ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
-cp platforms/${platform}/defconfig .config
+cp ${defconfigPath} .config
 make clippy
 stdbuf -oL -eL make build
 """
@@ -360,14 +374,8 @@ cp platforms/${platform}/defconfig .config
 stdbuf -oL -eL make build
 """
 
-            if (arch == 'aarch64') {
-                runGendoc(stageName, runtimeTargetDir, arch)
-                copyDocArtifactsToWorkspace(runtimeTargetDir, arch)
-            }
-
             dir('test-harness') {
-                git branch: "${env.TEST_HARNESS_BRANCH}",
-                    url: "${env.TEST_HARNESS_REPO}"
+                gitCheckoutWithToken(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
                 markSafeDirectory()
 
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
@@ -382,6 +390,38 @@ stdbuf -oL -eL make ci-test run
 """
                 }
             }
+        }
+    }
+}
+
+def runGendocStage(String arch) {
+    def stageName = "Doc Check: ${arch}"
+    initStageLog(stageName)
+    def docTargetDir = targetDirForDoc(arch)
+    def hostTarget = sh(script: "rustc -vV | sed -n 's|host: ||p'", returnStdout: true).trim()
+    def targetTriple = targetTripleFor(arch)
+    def platform = "${arch}-qemu-virt"
+    def ldScript = "${docTargetDir}/${targetTriple}/release/linker_${platform}.lds"
+    def kbuildConfigDir = "${docTargetDir}/kbuild/${platform}"
+
+    withCleanSourceWorkspace("doc-${arch}") {
+        withEnv(["TARGET_DIR=${docTargetDir}"]) {
+            sh label: "Prepare config for gendoc ${arch}", script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+cp ${defconfigFor(arch)} .config
+make defconfig
+env CARGO_BUILD_TARGET='${hostTarget}' RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= \
+  cargo run --target-dir '${docTargetDir}/tools/xconf' \
+  --manifest-path xtask/xconfig/Cargo.toml --bin xconf -- \
+  gen-const --output-dir='${kbuildConfigDir}'
+env CARGO_BUILD_TARGET='${hostTarget}' RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= \
+  cargo run --target-dir '${docTargetDir}/tools/xconf' \
+  --manifest-path xtask/xconfig/Cargo.toml --bin xconf -- \
+  gen-cargo --ld-script='${ldScript}'
+"""
+            runGendoc(stageName, docTargetDir, arch)
+            copyDocArtifactsToWorkspace(docTargetDir, arch)
         }
     }
 }
@@ -629,6 +669,10 @@ def defconfigFor(String arch) {
     return "platforms/${arch}-qemu-virt/defconfig"
 }
 
+def defconfigForPlatform(String platform) {
+    return "platforms/${platform}/defconfig"
+}
+
 def archForPlatform(String platform) {
     if (platform.startsWith('aarch64')) return 'aarch64'
     if (platform.startsWith('x86_64')) return 'x86_64'
@@ -638,6 +682,10 @@ def archForPlatform(String platform) {
 
 def targetDirForArch(String arch) {
     return "/xkernel-target/runtime-${arch}"
+}
+
+def targetDirForDoc(String arch) {
+    return "/xkernel-target/doc-${arch}"
 }
 
 def teePortFor(String arch) {
@@ -1140,7 +1188,7 @@ ${rows}
 
     def docBlock = ''
     if (allPassed) {
-        docBlock = "\n### 📚 Rust 文档\n\n[aarch64 API 文档](${baseUrl}/aarch64/doc-artifacts/doc/index.html)\n"
+        docBlock = "\n### 📚 Rust 文档\n\n[aarch64 API 文档](${baseUrl}/doc-aarch64/doc-artifacts/doc/index.html)\n"
     }
 
     def errorBlocks = stageOrder.findAll { name ->

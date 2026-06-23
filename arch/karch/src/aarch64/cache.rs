@@ -14,6 +14,8 @@ use core::arch::asm;
 
 use memaddr::VirtAddr;
 
+const CACHE_LINE: usize = 64;
+
 /// Local icache flush and pipeline sync — does not affect other PEs.
 #[inline]
 pub fn flush_icache_all_local() {
@@ -51,7 +53,6 @@ pub fn flush_icache_all() {
 /// all PEs. An IPI is then sent so other PEs execute `isb`.
 #[inline]
 pub fn flush_icache_range(start: VirtAddr, size: usize) {
-    const CACHE_LINE: usize = 64;
     let addr = start.as_usize() & !(CACHE_LINE - 1);
     let end = (start.as_usize() + size + CACHE_LINE - 1) & !(CACHE_LINE - 1);
     for va in (addr..end).step_by(CACHE_LINE) {
@@ -72,14 +73,33 @@ pub fn flush_icache_range(start: VirtAddr, size: usize) {
     }
 }
 
-/// Flushes the data cache line at the given virtual address.
+/// Cleans the data cache line covering `vaddr` to the Point of Coherency.
 ///
-/// Uses the `DC IVAC` instruction (Data Cache Invalidate by Virtual Address to
-/// Point of Coherency). The cache line size is implementation-defined; 64 bytes
-/// is typical for AArch64 but may vary across CPU implementations.
+/// This is the correct primitive when the current CPU wrote shared boot or
+/// firmware-visible state through a cacheable mapping and another observer may
+/// read it before joining the normal coherent MMU-on world.
 #[inline]
-pub fn flush_dcache_line(vaddr: VirtAddr) {
-    // SAFETY: `dc ivac` with the given virtual address is the architected
-    // cache-line invalidation primitive for the current CPU.
-    unsafe { asm!("dc ivac, {0:x}; dsb sy; isb", in(reg) vaddr.as_usize()) };
+pub fn clean_dcache_line_to_poc(vaddr: VirtAddr) {
+    let line_vaddr = vaddr.as_usize() & !(CACHE_LINE - 1);
+    // SAFETY: `dc cvac` cleans the cache line containing `line_vaddr` to the
+    // Point of Coherency. The address is aligned to a cache-line boundary, and
+    // `dsb sy` waits for completion before the caller releases another
+    // observer, such as a secondary CPU running with the MMU off.
+    unsafe { asm!("dc cvac, {0:x}; dsb sy", in(reg) line_vaddr) };
+}
+
+/// Cleans every data cache line covering `[start, start + size)` to the Point
+/// of Coherency.
+#[inline]
+pub fn clean_dcache_range_to_poc(start: VirtAddr, size: usize) {
+    let addr = start.as_usize() & !(CACHE_LINE - 1);
+    let end = (start.as_usize() + size + CACHE_LINE - 1) & !(CACHE_LINE - 1);
+    for va in (addr..end).step_by(CACHE_LINE) {
+        // SAFETY: `dc cvac` is issued for each cache line covering the
+        // requested range so MMU-off or non-coherent readers observe the
+        // current CPU's writes from PoC.
+        unsafe { asm!("dc cvac, {0:x}", in(reg) va) };
+    }
+    // SAFETY: `dsb sy` waits until all preceding clean operations reach PoC.
+    unsafe { asm!("dsb sy") };
 }

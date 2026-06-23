@@ -87,7 +87,9 @@ impl crate::time::MonotonicTimerIf for DummyTime {
 #[impl_dev_interface]
 impl SysCtrl for DummyPower {
     #[cfg(feature = "smp")]
-    fn boot_ap(_logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) {}
+    fn boot_ap(_logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) -> kerrno::KResult {
+        Ok(())
+    }
 
     fn shutdown() -> ! {
         unimplemented!()

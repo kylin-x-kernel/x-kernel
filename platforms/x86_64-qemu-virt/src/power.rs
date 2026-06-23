@@ -6,13 +6,14 @@
 
 #[cfg(feature = "smp")]
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kerrno::KResult;
 use kplat::sys::SysCtrl;
 use x86_64::instructions::port::PortWriteOnly;
 struct PowerImpl;
 #[impl_dev_interface]
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
-    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
+    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
         use khal::mem::pa;
 
         let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
@@ -21,7 +22,8 @@ impl SysCtrl for PowerImpl {
                 logical_cpu_id.as_usize()
             )
         });
-        crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr))
+        crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr));
+        Ok(())
     }
 
     fn shutdown() -> ! {

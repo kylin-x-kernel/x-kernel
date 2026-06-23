@@ -24,6 +24,7 @@ percpu = { workspace = true }
 kcpu = { workspace = true }
 kcpu_id_map = { workspace = true }
 karch = { workspace = true }
+kerrno = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 rtc_driver = { workspace = true }

@@ -7,6 +7,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use kcpu_id_map::RawCpuId;
+use kerrno::{KError, KErrorKind};
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;
 const PSCI_0_2_64BIT: u32 = 0x40000000;
 const PSCI_0_2_FN_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + 1;
@@ -19,9 +20,9 @@ const PSCI_0_2_FN64_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 1;
 const PSCI_0_2_FN64_CPU_ON: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 3;
 const PSCI_0_2_FN64_MIGRATE: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 5;
 static PSCI_METHOD_HVC: AtomicBool = AtomicBool::new(false);
-#[derive(PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
-enum PsciError {
+pub enum PsciError {
     NotSupported    = -1,
     InvalidParams   = -2,
     Denied          = -3,
@@ -47,6 +48,21 @@ impl From<i32> for PsciError {
             -9 => InvalidAddress,
             _ => panic!("Unknown PSCI error code: {}", code),
         }
+    }
+}
+
+impl From<PsciError> for KError {
+    fn from(value: PsciError) -> Self {
+        let kind = match value {
+            PsciError::NotSupported => KErrorKind::OperationNotSupported,
+            PsciError::InvalidParams => KErrorKind::InvalidInput,
+            PsciError::Denied => KErrorKind::PermissionDenied,
+            PsciError::AlreadyOn | PsciError::OnPending => KErrorKind::ResourceBusy,
+            PsciError::InternalFailure => KErrorKind::Io,
+            PsciError::NotPresent | PsciError::Disabled => KErrorKind::NoSuchDevice,
+            PsciError::InvalidAddress => KErrorKind::BadAddress,
+        };
+        kind.into()
     }
 }
 fn arm_smccc_smc(func: u32, arg0: usize, arg1: usize, arg2: usize) -> usize {
@@ -109,7 +125,11 @@ pub fn shutdown() -> ! {
     }
 }
 /// Power on a target CPU identified by its raw MPIDR affinity value.
-pub fn cpu_on(target_raw_cpu_id: RawCpuId, entry_point: usize, arg: usize) {
+pub fn cpu_on(
+    target_raw_cpu_id: RawCpuId,
+    entry_point: usize,
+    arg: usize,
+) -> Result<(), PsciError> {
     info!("Starting CPU {:x} ON ...", target_raw_cpu_id.as_usize());
     let res = psci_call(
         PSCI_0_2_FN64_CPU_ON,
@@ -123,6 +143,7 @@ pub fn cpu_on(target_raw_cpu_id: RawCpuId, entry_point: usize, arg: usize) {
             target_raw_cpu_id.as_usize()
         );
     }
+    res
 }
 /// Power off the current CPU via PSCI.
 pub fn cpu_off() {

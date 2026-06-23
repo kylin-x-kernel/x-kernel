@@ -34,9 +34,13 @@ pub mod arch;
 // compiles all platform crates on the host.
 #[cfg(not(target_os = "none"))]
 pub mod arch {
+    use kcpu_id_map::LogicalCpuId;
+
     pub fn _start_secondary() -> ! {
         unreachable!("arch::_start_secondary should never be called on the host target");
     }
+
+    pub fn set_secondary_boot_context(_logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) {}
 }
 
 pub use boot_info as bootinfo;

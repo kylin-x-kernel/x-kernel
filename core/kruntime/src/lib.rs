@@ -269,7 +269,12 @@ pub fn rust_main(arg: usize) -> ! {
 
     #[cfg(feature = "smp")]
     {
-        self::mp::start_secondary_cpus(cpu_id);
+        self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
+            panic!(
+                "failed to start secondary CPUs after boot CPU {} init: {err:?}",
+                cpu_id.as_usize()
+            )
+        });
     }
 
     #[cfg(feature = "ipi")]

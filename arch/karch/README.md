@@ -5,7 +5,8 @@ Lightweight architecture-specific low-level operations for the x-kernel project.
 This crate provides a uniform API across all supported architectures (AArch64, x86_64, RISC-V, LoongArch64, ARM) for:
 
 - **TLB flush**: `flush_tlb(vaddr: Option<VirtAddr>)`
-- **Cache maintenance** (AArch64): `flush_icache_all()`, `flush_dcache_line(vaddr)`
+- **Cache maintenance** (AArch64): `flush_icache_all()`,
+  `clean_dcache_line_to_poc(vaddr)`, `clean_dcache_range_to_poc(start, size)`
 - **CPU control**: `stop_cpu()`, `await_interrupts()`
 - **Local interrupt management**:
   - `enable_local_irq()`, `disable_local_irq()`, `local_irq_enabled()`

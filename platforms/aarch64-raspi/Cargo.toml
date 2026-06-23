@@ -20,6 +20,8 @@ page_table = { workspace = true }
 kcpu = { workspace = true }
 karch = { workspace = true }
 khal = { workspace = true }
+kcpu_id_map = { workspace = true }
+kerrno = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
 

@@ -3,16 +3,17 @@
 // See LICENSES for license details.
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kerrno::{KError, KErrorKind, KResult};
 use kplat::sys::SysCtrl;
 struct PowerImpl;
 #[impl_dev_interface]
 impl SysCtrl for PowerImpl {
     #[cfg(feature = "smp")]
-    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
+    fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
         use khal::mem::{v2p, va};
         if sbi_rt::probe_extension(sbi_rt::Hsm).is_unavailable() {
             warn!("HSM SBI extension is not supported for current SEE.");
-            return;
+            return Err(KErrorKind::OperationNotSupported.into());
         }
         let entry = v2p(va!(
             kernel_boot::arch::_start_secondary as *const () as usize
@@ -23,7 +24,16 @@ impl SysCtrl for PowerImpl {
                 logical_cpu_id.as_usize()
             )
         });
-        sbi_rt::hart_start(raw_cpu_id.as_usize(), entry.as_usize(), stack_top_paddr);
+        sbi_rt::hart_start(raw_cpu_id.as_usize(), entry.as_usize(), stack_top_paddr).map_err(
+            |err| {
+                warn!(
+                    "failed to boot hart {} via SBI HSM: {err:?}",
+                    raw_cpu_id.as_usize()
+                );
+                KError::from(KErrorKind::Io)
+            },
+        )?;
+        Ok(())
     }
 
     fn shutdown() -> ! {

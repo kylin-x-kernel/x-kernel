@@ -19,8 +19,8 @@ pub use asid::{
     user_page_table_root_paddr,
 };
 pub use cache::{
-    flush_dcache_line, flush_icache_all, flush_icache_all_local, flush_icache_range,
-    flush_icache_remote,
+    clean_dcache_line_to_poc, clean_dcache_range_to_poc, flush_icache_all, flush_icache_all_local,
+    flush_icache_range, flush_icache_remote,
 };
 pub use cpu::{await_interrupts, stop_cpu};
 pub use fp::enable_fp;

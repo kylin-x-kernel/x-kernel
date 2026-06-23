@@ -24,7 +24,7 @@ use core::arch::naked_asm;
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
 use kbuild_config::BOOT_STACK_SIZE;
-use kcpu_id_map::RawCpuId;
+use kcpu_id_map::{LogicalCpuId, RawCpuId, raw_cpu_id};
 
 use super::{el, mmu, serial};
 
@@ -43,6 +43,53 @@ pub(super) static mut SAVED_BOOT_ARGS: [u64; 4] = [0; 4];
 
 /// Unified boot info passed from the AArch64 boot entry into the kernel.
 static mut AARCH64_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::DeviceTree);
+
+#[unsafe(link_section = ".data")]
+static mut SECONDARY_BOOT_CONTEXT: SecondaryBootContext = SecondaryBootContext::new();
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SecondaryBootContext {
+    target_raw_cpu_id: usize,
+    stack_top_paddr: usize,
+}
+
+impl SecondaryBootContext {
+    const INVALID_RAW_CPU_ID: usize = usize::MAX;
+
+    const fn new() -> Self {
+        Self {
+            target_raw_cpu_id: Self::INVALID_RAW_CPU_ID,
+            stack_top_paddr: 0,
+        }
+    }
+}
+
+/// Records the target raw CPU id and physical boot stack for the next
+/// secondary AArch64 CPU release.
+pub fn set_secondary_boot_context(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
+    let target_raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
+        panic!(
+            "missing raw CPU id mapping for logical CPU {}",
+            logical_cpu_id.as_usize()
+        )
+    });
+    let ctx = SecondaryBootContext {
+        target_raw_cpu_id: target_raw_cpu_id.as_usize(),
+        stack_top_paddr,
+    };
+
+    // SAFETY: Secondary CPU bring-up is serialized by `start_secondary_cpus`,
+    // so the boot CPU is the only writer. The secondary entry reads this
+    // context only after the boot CPU fully populates it and issues `CPU_ON`.
+    unsafe {
+        SECONDARY_BOOT_CONTEXT = ctx;
+    }
+    karch::clean_dcache_range_to_poc(
+        memaddr::VirtAddr::from(core::ptr::addr_of!(SECONDARY_BOOT_CONTEXT) as usize),
+        core::mem::size_of::<SecondaryBootContext>(),
+    );
+}
 
 /// Linux ARM64 Boot Protocol header followed by a branch to `primary_entry`.
 ///
@@ -191,12 +238,20 @@ pub unsafe extern "C" fn preserve_boot_args() {
 #[unsafe(link_section = ".idmap.text")]
 pub unsafe extern "C" fn _start_secondary() -> ! {
     naked_asm!(
-        "cbz     x0, 2f",
-        "mov     sp, x0",
         "mrs     x19, mpidr_el1",
         "and     x20, x19, #0xffffff",   // Aff2|Aff1|Aff0
         "ubfx    x19, x19, #32, #8",     // Aff3
         "orr     x19, x20, x19, lsl #32",
+        // The boot CPU prepares a single shared release context before each
+        // serialized PSCI `CPU_ON`. The released secondary CPU validates that
+        // the context targets its raw MPIDR and then takes the prepared stack.
+        "adrp    x22, {secondary_boot_context}",
+        "add     x22, x22, :lo12:{secondary_boot_context}",
+        "ldp     x23, x24, [x22]",
+        "cmp     x23, x19",
+        "b.ne    2f",
+        "cbz     x24, 2f",
+        "mov     sp, x24",
         "bl      {switch_to_el1}",
         "bl      {enable_fp}",
         "bl      {init_mmu}",
@@ -216,6 +271,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         "2:",
         "wfe",
         "b       2b",
+        secondary_boot_context = sym SECONDARY_BOOT_CONTEXT,
         switch_to_el1    = sym el::switch_to_el1,
         enable_fp        = sym enable_fp,
         init_mmu         = sym mmu::init_mmu,
