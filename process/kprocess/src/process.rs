@@ -215,14 +215,18 @@ impl Process {
             return;
         }
 
-        let mut children = self.children.lock(); // Acquire the lock first
+        // Lock order: reaper.children → self.children.
+        // init never exits (returns early above), so it never acquires its
+        // own children lock in the reverse order.  All other exit() callers
+        // follow the same "reaper first" rule, preventing AB-BA deadlocks.
+        // This also avoids any window where orphans are invisible to waitpid.
+        let mut reaper_children = reaper.children.lock();
+        let mut children = self.children.lock();
         self.is_zombie.store(true, Ordering::Release);
 
-        let mut reaper_children = reaper.children.lock();
-        let reaper = Arc::downgrade(reaper);
-
+        let reaper_weak = Arc::downgrade(reaper);
         for (pid, child) in core::mem::take(&mut *children) {
-            *child.parent.lock() = reaper.clone();
+            *child.parent.lock() = reaper_weak.clone();
             reaper_children.insert(pid, child);
         }
     }

@@ -128,12 +128,10 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
     };
 
     block_on(interruptible(poll_fn(|cx| {
+        proc_state.child_exit_event().register(cx.waker());
         match check_children().transpose() {
             Some(res) => Poll::Ready(res),
-            None => {
-                proc_state.child_exit_event().register(cx.waker());
-                Poll::Pending
-            }
+            None => Poll::Pending,
         }
     })))
     .map_err(|_interrupted| KError::from(LinuxError::ERESTARTSYS))?
