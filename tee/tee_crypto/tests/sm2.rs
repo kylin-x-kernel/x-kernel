@@ -188,3 +188,49 @@ fn test_sm2_kep_different_peers_differ() {
 
     assert_ne!(secret_ab, secret_ac);
 }
+
+#[test]
+fn test_sm2_message_sec1_sign_verify_roundtrip() {
+    let mut rng = common::seeded_rng(202);
+    let keypair = Sm2DsaKeypair::generate(&mut rng, 0).expect("keygen");
+    let comps = keypair.to_public_components().expect("components");
+    let (x, y) = match comps {
+        tee_crypto::asymmetric::PublicKeyComponents::Sm2(point) => {
+            (point.x().to_vec(), point.y().to_vec())
+        }
+        _ => panic!("expected SM2"),
+    };
+    let mut sec1 = vec![0x04];
+    sec1.extend_from_slice(&x);
+    sec1.extend_from_slice(&y);
+
+    let sk = keypair.as_inner().to_bytes();
+    let msg = b"TBSCertificate-bytes";
+    let sig = sm2_sign_message(&sk, msg, &mut rng).expect("sign");
+    sm2_verify_message_sec1(&sec1, msg, &sig).expect("verify");
+}
+
+#[test]
+fn test_sm2_digest_sec1_sign_verify_roundtrip() {
+    let mut rng = common::seeded_rng(203);
+    let keypair = Sm2DsaKeypair::generate(&mut rng, 0).expect("keygen");
+    let comps = keypair.to_public_components().expect("components");
+    let (x, y) = match comps {
+        tee_crypto::asymmetric::PublicKeyComponents::Sm2(point) => {
+            (point.x().to_vec(), point.y().to_vec())
+        }
+        _ => panic!("expected SM2"),
+    };
+    let mut sec1 = vec![0x04];
+    sec1.extend_from_slice(&x);
+    sec1.extend_from_slice(&y);
+
+    let sk = keypair.as_inner().to_bytes();
+    let msg = b"digest-mode-message";
+    let mut pk = [0u8; 64];
+    pk[..32].copy_from_slice(&x);
+    pk[32..].copy_from_slice(&y);
+    let digest = sm2_compute_sign_digest(None, msg, &pk).expect("digest");
+    let sig = sm2_sign_digest(&sk, &digest, &mut rng).expect("sign");
+    sm2_verify_digest_sec1(&sec1, &digest, &sig).expect("verify");
+}

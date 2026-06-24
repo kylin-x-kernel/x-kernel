@@ -30,6 +30,9 @@ use crate::{
 /// Default distinguishing identifier for SM2 DSA.
 const DEFAULT_DISTID: &str = "1234567812345678";
 
+/// Default distinguishing identifier for SM2 DSA (tasign / GmSSL compatible name).
+pub const DEFAULT_DISTINGUISHING_ID: &str = DEFAULT_DISTID;
+
 /// GM/T 0003 recommended curve parameters for ZA = SM3(ENTLA || ID || a || b || Gx || Gy || Px || Py).
 const SM2_EQUATION_A: [u8; 32] = [
     0xff, 0xff, 0xff, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -394,4 +397,88 @@ pub fn sm2_compute_sign_digest(
     hasher.update(z);
     hasher.update(message);
     Ok(hasher.finalize().into())
+}
+
+// ---------------------------------------------------------------------------
+// Byte-level SM2 DSA (X.509 message mode / CMS) — additive API for tasign
+// ---------------------------------------------------------------------------
+
+fn verifying_key_from_sec1(public_key_sec1: &[u8]) -> Result<sm2::dsa::VerifyingKey> {
+    sm2::dsa::VerifyingKey::from_sec1_bytes(DEFAULT_DISTINGUISHING_ID, public_key_sec1)
+        .map_err(|_| CryptoError::InvalidKey)
+}
+
+/// Returns `Ok(())` when `public_key_sec1` is valid SM2 SEC1 encoding (rejects other curves).
+pub fn sm2_validate_sec1_public_key(public_key_sec1: &[u8]) -> Result<()> {
+    verifying_key_from_sec1(public_key_sec1).map(|_| ())
+}
+
+fn signing_key_from_secret(secret_key: &[u8]) -> Result<sm2::dsa::SigningKey> {
+    let sk = sm2::SecretKey::from_slice(secret_key).map_err(|_| CryptoError::InvalidKey)?;
+    sm2::dsa::SigningKey::new(DEFAULT_DISTID, &sk).map_err(|_| CryptoError::InternalError)
+}
+
+fn parse_sm2_signature_der(signature: &[u8]) -> Result<sm2::dsa::Signature> {
+    sm2::dsa::Signature::from_der(signature).map_err(|_| CryptoError::InvalidInput)
+}
+
+/// Verify SM2 signature over a raw message (ZA‖M preprocessing), SEC1 uncompressed public key.
+pub fn sm2_verify_message_sec1(public_key_sec1: &[u8], msg: &[u8], signature: &[u8]) -> Result<()> {
+    use sm2::dsa::signature::Verifier;
+    let verifying_key = verifying_key_from_sec1(public_key_sec1)?;
+    let sig = parse_sm2_signature_der(signature)?;
+    verifying_key
+        .verify(msg, &sig)
+        .map_err(|_| CryptoError::VerificationFailed)
+}
+
+/// Sign SM2 message mode (ZA‖M); returns DER-encoded signature.
+pub fn sm2_sign_message(
+    secret_key: &[u8],
+    msg: &[u8],
+    rng: &mut dyn CryptoRng,
+) -> Result<alloc::vec::Vec<u8>> {
+    use sm2::dsa::signature::RandomizedSigner;
+    let signing_key = signing_key_from_secret(secret_key)?;
+    let mut adapter = RngAdapter::new(rng);
+    let sig = signing_key
+        .try_sign_with_rng(&mut adapter, msg)
+        .map_err(|_| CryptoError::InternalError)?;
+    Ok(sig.to_der().as_bytes().to_vec())
+}
+
+/// Sign SM2 digest mode (pre-hashed *e*); returns DER-encoded signature.
+pub fn sm2_sign_digest(
+    secret_key: &[u8],
+    digest: &[u8; 32],
+    rng: &mut dyn CryptoRng,
+) -> Result<alloc::vec::Vec<u8>> {
+    use sm2::dsa::signature::hazmat::RandomizedPrehashSigner;
+    let signing_key = signing_key_from_secret(secret_key)?;
+    let mut adapter = RngAdapter::new(rng);
+    let sig = signing_key
+        .sign_prehash_with_rng(&mut adapter, digest)
+        .map_err(|_| CryptoError::InternalError)?;
+    Ok(sig.to_der().as_bytes().to_vec())
+}
+
+/// Verify SM2 digest mode (pre-hashed *e*), SEC1 uncompressed public key.
+pub fn sm2_verify_digest_sec1(
+    public_key_sec1: &[u8],
+    digest: &[u8; 32],
+    signature: &[u8],
+) -> Result<()> {
+    use sm2::dsa::signature::hazmat::PrehashVerifier;
+    let verifying_key = verifying_key_from_sec1(public_key_sec1)?;
+    let sig = parse_sm2_signature_der(signature)?;
+    verifying_key
+        .verify_prehash(digest, &sig)
+        .map_err(|_| CryptoError::VerificationFailed)
+}
+
+/// Parse a 32-byte SM2 private scalar from PKCS#8 DER.
+pub fn sm2_secret_scalar_from_pkcs8_der(der: &[u8]) -> Result<[u8; 32]> {
+    use pkcs8::DecodePrivateKey;
+    let sk = sm2::SecretKey::from_pkcs8_der(der).map_err(|_| CryptoError::InvalidKey)?;
+    Ok(sk.to_bytes().into())
 }

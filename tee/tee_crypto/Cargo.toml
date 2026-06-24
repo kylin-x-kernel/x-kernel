@@ -1,6 +1,6 @@
 [package]
 name = "tee_crypto"
-version = "0.1.1"
+version = "0.1.2"
 description = "TEE Crypto Crate."
 edition = "2024"
 authors.workspace = true
@@ -13,6 +13,14 @@ documentation.workspace = true
 default = []
 std = ["alloc"]
 alloc = []
+pkix-internal-tests = ["pkix"]
+pkix = [
+    "alloc",
+    "dep:x509-cert",
+    "dep:der",
+    "dep:spki",
+]
+serde = []
 
 [dependencies]
 # Hash
@@ -37,9 +45,10 @@ ctr = { version = "0.10", default-features = false }
 ghash = { version = "0.6", default-features = false }
 subtle = { version = "2.6", default-features = false }
 
-# MAC
+# MAC / KDF
 hmac = { version = "0.13", default-features = false }
 cmac = { version = "0.8", default-features = false }
+pbkdf2 = { version = "0.13", default-features = false }
 
 # Asymmetric — RSA
 rsa = { version = "0.10.0-rc.18", default-features = false, features = ["hazmat", "encoding"] }
@@ -47,15 +56,15 @@ signature = { version = "3.0.0", default-features = false }
 pkcs1 = { version = "0.8.0-rc.1", default-features = false }
 pkcs8 = { version = "0.11", default-features = false, features = ["alloc"] }
 
-# Asymmetric — ECC
-elliptic-curve = { version = "0.14.0-rc.32", default-features = false, features = ["sec1", "pkcs8"] }
-p192 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa"] }
-p224 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa"] }
-p256 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa", "ecdh"] }
-p384 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa", "ecdh"] }
-p521 = { version = "0.14.0-rc.9", default-features = false, features = ["ecdsa"] }
-ecdsa = { version = "0.17.0-rc.18", default-features = false, features = ["digest", "hazmat", "der", "algorithm"] }
-sm2 = { version = "0.14.0-rc.9", default-features = false, features = ["pke", "dsa", "alloc", "der", "pkcs8"] }
+# Asymmetric — ECC (RustCrypto 0.14 line; bump together)
+elliptic-curve = { version = ">=0.14.0-rc.36, <0.14.0", default-features = false, features = ["sec1", "pkcs8"] }
+p192 = { version = "0.14.0-rc.13", default-features = false, features = ["ecdsa"] }
+p224 = { version = "0.14.0-rc.13", default-features = false, features = ["ecdsa"] }
+p256 = { version = "0.14.0-rc.13", default-features = false, features = ["ecdsa", "ecdh", "pkcs8"] }
+p384 = { version = "0.14.0-rc.13", default-features = false, features = ["ecdsa", "ecdh", "pkcs8"] }
+p521 = { version = "0.14.0-rc.13", default-features = false, features = ["ecdsa"] }
+ecdsa = { version = "0.17.0-rc.21", default-features = false, features = ["digest", "hazmat", "der", "algorithm"] }
+sm2 = { version = "0.14.0-rc.13", default-features = false, features = ["pke", "dsa", "alloc", "der", "pkcs8"] }
 
 # BigNum
 crypto-bigint = { version = "0.7", default-features = false, features = ["alloc"] }
@@ -68,9 +77,24 @@ rand_chacha = { version = "0.10", default-features = false }
 # Utility
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 
+# PKIX path validation (optional; implementation inlined in src/pkix_path/)
+x509-cert = { version = "0.3.0-rc.4", optional = true, default-features = false, features = ["pem"] }
+der = { version = "0.8", optional = true, default-features = false, features = ["alloc", "derive", "flagset", "oid"] }
+spki = { version = "0.8", optional = true, default-features = false, features = ["alloc"] }
+
 [dev-dependencies]
 criterion = "0.8"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[[test]]
+name = "pkix_stitch"
+path = "tests/pkix_stitch.rs"
+required-features = ["pkix"]
+
+[[test]]
+name = "pkix_anchor_nc"
+path = "tests/pkix_anchor_nc.rs"
+required-features = ["pkix"]
 
 [[bench]]
 name = "hash_throughput"

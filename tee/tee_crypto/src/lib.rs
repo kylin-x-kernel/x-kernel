@@ -10,6 +10,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg_attr(all(feature = "pkix", test), macro_use)]
 extern crate alloc;
 
 mod algorithms;
@@ -17,10 +18,17 @@ pub mod asymmetric;
 pub mod bignum;
 pub mod bytes;
 pub mod error;
+pub mod kdf;
 pub mod material;
 pub mod rng;
 pub mod streaming_cipher;
 pub mod tee_ops;
+
+#[cfg(feature = "pkix")]
+pub(crate) mod pkix_path;
+
+#[cfg(feature = "pkix")]
+pub mod pkix;
 
 pub use algorithms::{aead, block_cipher, cipher, ecc, hash, hkdf, mac, md5, rsa, sm2, xts};
 pub use error::{CryptoError, Result};

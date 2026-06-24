@@ -10,6 +10,7 @@ pub mod cipher;
 pub mod ecc;
 pub mod hash;
 pub mod hkdf;
+pub mod kdf;
 pub mod mac;
 pub mod md5;
 pub mod rsa;

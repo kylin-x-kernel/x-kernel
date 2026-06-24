@@ -7,6 +7,8 @@ members = [
     "boot/*",
     # filesystems under active standalone development
     "fs/filesystems/kext4",
+    # tee_crypto source tree (publish / local tests); kernel deps use crates.io via workspace.dependencies
+    "tee/tee_crypto",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace
@@ -154,7 +156,7 @@ x86-peripherals = { path = "platforms/x86-peripherals" }
 x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 
 # Internal: tee
-tee_crypto = { path = "tee/tee_crypto" }
+tee_crypto = { version = "0.1", default-features = false }
 tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }

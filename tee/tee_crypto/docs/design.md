@@ -177,3 +177,55 @@ accidentally depending on private implementation details.
 Shared test helpers live under `tests/common/`. Each integration test compiles
 as an independent crate, so helper functions should stay small and tolerate
 being used by only a subset of test targets.
+
+## x-kernel integration
+
+The kernel workspace lists `tee/tee_crypto` as a **workspace member** so
+developers can run `cargo test -p tee_crypto` and `cargo publish -p tee_crypto`
+from the repository root. Runtime dependencies (`tee_kernel`, `devfs`, …) still
+resolve **`tee_crypto` from crates.io** via `[workspace.dependencies]`:
+
+```toml
+tee_crypto = { version = "0.1", default-features = false }
+```
+
+There is no `path = "tee/tee_crypto"` in workspace dependencies, so member
+crates do not link the in-tree copy unless patched.
+
+### Standalone crate tests (default for `tee_crypto` changes)
+
+```bash
+# from repo root
+cargo test -p tee_crypto
+cargo test -p tee_crypto --features "pkix,pkix-internal-tests" --lib
+cargo test -p tee_crypto --features pkix --test pkix_anchor_nc
+cargo test -p tee_crypto --features pkix --test pkix_stitch
+
+# or from the crate directory
+cd tee/tee_crypto && cargo test ...
+```
+
+See `docs/pkix.md` for PKIX-specific commands.
+
+### Publish to crates.io
+
+```bash
+cargo publish -p tee_crypto --registry crates-io --dry-run
+```
+
+Run from the **workspace root** (`x-kernel/`), not only from `tee/tee_crypto/`.
+
+### Kernel build against local `tee/tee_crypto`
+
+To exercise in-tree changes through `make build`, `make clippy`, or `make run`,
+temporarily add to the **repository root** `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+tee_crypto = { path = "tee/tee_crypto" }
+```
+
+Remove the `[patch.crates-io]` block before merge unless the release intent is
+to ship unpublished `tee_crypto` APIs. After publishing a new crates.io
+release, bump the workspace `version = "0.1"` constraint only when the kernel
+must depend on that release (Cargo resolves the latest compatible `0.1.x`).

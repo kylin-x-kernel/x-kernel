@@ -635,3 +635,32 @@ fn ecdh_sm2(local_secret: &[u8], peer_x: &[u8], peer_y: &[u8]) -> Result<SharedS
         SharedSecretAlgorithm::Sm2Kep,
     ))
 }
+
+/// Parse a 32-byte P-256 ECDSA private scalar from PKCS#8 DER.
+pub fn p256_secret_scalar_from_pkcs8_der(der: &[u8]) -> Result<[u8; 32]> {
+    use elliptic_curve::pkcs8::DecodePrivateKey;
+    let sk = p256::ecdsa::SigningKey::from_pkcs8_der(der).map_err(|_| CryptoError::InvalidKey)?;
+    Ok(sk.to_bytes().into())
+}
+
+/// Extract P-256 public point coordinates from SPKI DER.
+pub fn p256_public_xy_from_spki_der(spki_der: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    use elliptic_curve::{pkcs8::DecodePublicKey, sec1::ToSec1Point};
+    let pk = p256::PublicKey::from_public_key_der(spki_der).map_err(|_| CryptoError::InvalidKey)?;
+    let point = pk.as_affine().to_sec1_point(false);
+    let x = point.x().ok_or(CryptoError::InvalidKey)?.to_vec();
+    let y = point.y().ok_or(CryptoError::InvalidKey)?.to_vec();
+    Ok((x, y))
+}
+
+/// Sign a pre-hashed P-256 ECDSA digest; returns DER-encoded signature (CMS detached).
+pub fn ecc_sign_p256_prehash_der(
+    secret_key: &[u8],
+    digest: &[u8; 32],
+    rng: &mut dyn CryptoRng,
+) -> Result<Vec<u8>> {
+    let sig = ecc_sign_p256(secret_key, digest, rng)?;
+    let raw = sig.as_bytes();
+    let sig = p256::ecdsa::Signature::from_slice(raw).map_err(|_| CryptoError::InvalidInput)?;
+    Ok(sig.to_der().as_bytes().to_vec())
+}

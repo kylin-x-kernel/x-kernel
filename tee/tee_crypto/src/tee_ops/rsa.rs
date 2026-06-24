@@ -162,6 +162,14 @@ pub fn rsa_public_key_from_pkcs1_der(der: &[u8]) -> Result<RsaPublic> {
         .map_err(|_| CryptoError::Backend(BackendError::RsaParseKey))
 }
 
+/// Parse an RSA public key from SubjectPublicKeyInfo / SPKI DER.
+pub fn rsa_public_key_from_spki_der(spki_der: &[u8]) -> Result<RsaPublic> {
+    use rsa::pkcs8::DecodePublicKey;
+    rsa::RsaPublicKey::from_public_key_der(spki_der)
+        .map(RsaPublic::from_public_key)
+        .map_err(|_| CryptoError::Backend(BackendError::RsaParseKey))
+}
+
 /// Parse an RSA private key from PKCS#8 DER bytes.
 pub fn rsa_private_key_from_pkcs8_der(der: &[u8]) -> Result<RsaKeypair> {
     use pkcs8::DecodePrivateKey;
@@ -254,6 +262,16 @@ pub fn rsa_get_n(key: &RsaKeypair) -> Vec<u8> {
 /// Get the public exponent bytes (big-endian).
 pub fn rsa_get_e(key: &RsaKeypair) -> Vec<u8> {
     key.as_inner().e().to_be_bytes().to_vec()
+}
+
+/// Return RSA modulus size in bits (private key).
+pub fn rsa_private_key_bits(key: &RsaKeypair) -> usize {
+    key.as_inner().n().bits() as usize
+}
+
+/// Return RSA modulus size in bits (public key).
+pub fn rsa_public_key_bits(key: &RsaPublic) -> usize {
+    key.as_inner().n().bits() as usize
 }
 
 /// Get the private exponent bytes (big-endian).
