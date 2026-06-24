@@ -458,16 +458,14 @@ mod tests_dir {
     }
 
     struct MockFileNodeOps {
-        fs: Arc<MockFilesystem>,
         inode: u64,
         data: crate::Mutex<Vec<u8>>,
         owner: crate::Mutex<Option<(u32, u32)>>,
     }
 
     impl MockFileNodeOps {
-        fn new(fs: Arc<MockFilesystem>, inode: u64) -> Self {
+        fn new(_fs: Arc<MockFilesystem>, inode: u64) -> Self {
             Self {
-                fs,
                 inode,
                 data: crate::Mutex::new(Vec::new()),
                 owner: crate::Mutex::new(None),

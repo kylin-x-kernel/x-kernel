@@ -201,7 +201,7 @@ mod unittest_tests {
         let num_bitmap_bytes =
             buffer::get_num_bitmap_bytes(platform::begin_bitmap(), platform::end_bitmap());
         let names_size = buffer::get_name_size(platform::begin_names(), platform::end_names());
-        let entry_size = crate::port::counter_entry_size(profiling::get_version()) as usize;
+        let entry_size = crate::port::counter_entry_size(profiling::get_version());
 
         let header = LlvmProfileHeader {
             magic: profiling::get_magic(),
@@ -229,27 +229,48 @@ mod unittest_tests {
                 + num_bitmap_bytes as usize
                 + names_size as usize,
         );
+        // SAFETY: `&header` references a fully-initialized local `LlvmProfileHeader`
+        // on the stack; the derived `*const u8` is aligned to `align_of::<u8>() == 1`
+        // and the byte length equals `size_of::<LlvmProfileHeader>()`, so the slice
+        // covers exactly the header's initialized bytes.
         blob.extend_from_slice(unsafe {
             slice::from_raw_parts(
                 (&header as *const LlvmProfileHeader).cast::<u8>(),
                 size_of::<LlvmProfileHeader>(),
             )
         });
+        // SAFETY: `begin_data()`/`end_data()` bound the linker-provided
+        // `__llvm_prf_data` section (process-lifetime, properly aligned for
+        // `LlvmProfileData`), and `num_data` is derived from that same range via
+        // `get_num_data`, so `num_data * size_of::<LlvmProfileData>()` bytes are
+        // valid and readable.
         blob.extend_from_slice(unsafe {
             slice::from_raw_parts(
                 platform::begin_data().cast::<u8>(),
                 num_data as usize * size_of::<LlvmProfileData>(),
             )
         });
+        // SAFETY: `begin_counters()` points at the `__llvm_prf_cnts` section
+        // (process-lifetime storage), and `num_counters * entry_size` is the exact
+        // byte length that `get_num_counters` computes over that same section, so
+        // the slice stays within initialized section memory.
         blob.extend_from_slice(unsafe {
             slice::from_raw_parts(
                 platform::begin_counters(),
                 num_counters as usize * entry_size,
             )
         });
+        // SAFETY: `begin_bitmap()` points at the `__llvm_prf_bits` section
+        // (process-lifetime storage), and `num_bitmap_bytes` is the byte length
+        // `get_num_bitmap_bytes` derives from `begin_bitmap()`/`end_bitmap()`, so
+        // the slice stays within the section.
         blob.extend_from_slice(unsafe {
             slice::from_raw_parts(platform::begin_bitmap(), num_bitmap_bytes as usize)
         });
+        // SAFETY: `begin_names()` points at the `__llvm_prf_names` section
+        // (process-lifetime storage), and `names_size` is the byte length
+        // `get_name_size` derives from `begin_names()`/`end_names()`, so the slice
+        // stays within the section.
         blob.extend_from_slice(unsafe {
             slice::from_raw_parts(platform::begin_names(), names_size as usize)
         });
@@ -258,29 +279,56 @@ mod unittest_tests {
 
     #[def_test(serial)]
     fn compatibility_accepts_runtime_snapshot() {
+        // SAFETY: `build_compatible_profile_blob()` only reads from the
+        // process-lifetime profiling sections and a stack `LlvmProfileHeader`;
+        // it performs no mutation of shared state.
         let blob = unsafe { build_compatible_profile_blob() };
+        // SAFETY: `blob` is a `Vec<u8>` owned for the call's duration, so
+        // `blob.as_ptr()` is valid and `blob.len()` is the exact readable byte
+        // count, satisfying `check_compatibility`'s buffer contract.
         let result = unsafe { check_compatibility(blob.as_ptr(), blob.len() as u64) };
         assert_eq!(result, 0);
     }
 
     #[def_test(serial)]
     fn compatibility_rejects_mismatched_function_metadata() {
+        // SAFETY: `build_compatible_profile_blob()` only reads from the
+        // process-lifetime profiling sections and a stack `LlvmProfileHeader`.
         let mut blob = unsafe { build_compatible_profile_blob() };
         let data_offset = size_of::<LlvmProfileHeader>();
+        // SAFETY: `blob` was built with capacity
+        // `size_of::<LlvmProfileHeader>() + num_data * size_of::<LlvmProfileData>() + ...`,
+        // and is fully initialized, so `data_offset == size_of::<LlvmProfileHeader>()`
+        // lies within the allocation; the blob's bytes are `u8`-aligned so `add`
+        // stays in-bounds.
         let data_ptr = unsafe { blob.as_mut_ptr().add(data_offset) }.cast::<LlvmProfileData>();
+        // SAFETY: `data_ptr` points at the first `LlvmProfileData` inside the blob,
+        // which is initialized from the `__llvm_prf_data` section; the section is
+        // 8-byte aligned (INSTR_PROF_DATA_ALIGNMENT) and the blob preserves that
+        // alignment because the header is exactly 128 bytes, so the dereference is
+        // aligned and reads initialized memory. `blob` is exclusively borrowed via
+        // `as_mut_ptr`, so there is no aliasing.
         unsafe {
             (*data_ptr).func_hash ^= 1;
         }
 
+        // SAFETY: `blob` is still owned and valid; `blob.as_ptr()`/`blob.len()`
+        // satisfy `check_compatibility`'s readable-buffer contract.
         let result = unsafe { check_compatibility(blob.as_ptr(), blob.len() as u64) };
         assert_eq!(result, -1);
     }
 
     #[def_test(serial)]
     fn merge_from_buffer_updates_counters_and_bitmap() {
+        // SAFETY: `build_compatible_profile_blob()` only reads from the
+        // process-lifetime profiling sections and a stack `LlvmProfileHeader`.
         let mut blob = unsafe { build_compatible_profile_blob() };
+        // SAFETY: `blob` starts with a fully initialized `LlvmProfileHeader`
+        // (128 bytes, 8-byte aligned) written by `build_compatible_profile_blob`,
+        // so the cast and shared reference are aligned and read initialized bytes;
+        // no mutable borrow of `blob` is outstanding.
         let header = unsafe { &*(blob.as_ptr().cast::<LlvmProfileHeader>()) };
-        let entry_size = crate::port::counter_entry_size(profiling::get_version()) as usize;
+        let entry_size = crate::port::counter_entry_size(profiling::get_version());
         assert!(header.num_counters > 0);
 
         let counters_offset = size_of::<LlvmProfileHeader>()
@@ -292,8 +340,16 @@ mod unittest_tests {
         let bitmap_begin = platform::begin_bitmap() as *mut u8;
 
         if byte_coverage {
+            // SAFETY: `counters_begin` is `begin_counters()`, the process-lifetime
+            // `__llvm_prf_cnts` section base; `header.num_counters > 0` guarantees
+            // at least one byte (byte-coverage mode uses 1-byte entries), so the
+            // read is in-bounds and the section is zero-initialized.
             let original = unsafe { *counters_begin };
             blob[counters_offset] = 0;
+            // SAFETY: `blob` is owned and valid for `blob.len()` bytes (satisfying
+            // `merge_from_buffer`'s contract); `counters_begin` is the writable
+            // process-lifetime counters section, and these tests are `#[serial]`
+            // so no other thread accesses the counters concurrently.
             unsafe {
                 *counters_begin = 0xFF;
                 let result = merge_from_buffer(blob.as_ptr(), blob.len() as u64);
@@ -302,10 +358,17 @@ mod unittest_tests {
                 *counters_begin = original;
             }
         } else {
+            // SAFETY: `counters_begin` is the `__llvm_prf_cnts` section base; the
+            // section is 8-byte aligned and `header.num_counters > 0` means at least
+            // one `u64`-sized entry exists, so the cast and read are aligned and the
+            // section is zero-initialized.
             let original = unsafe { *(counters_begin.cast::<u64>()) };
             let merged = 7u64;
             blob[counters_offset..counters_offset + size_of::<u64>()]
                 .copy_from_slice(&merged.to_le_bytes());
+            // SAFETY: `blob` is owned and valid for `blob.len()` bytes; the counters
+            // section is writable process-lifetime storage, and the test is `#[serial]`
+            // so access to `counters_begin` is exclusive.
             unsafe {
                 let result = merge_from_buffer(blob.as_ptr(), blob.len() as u64);
                 assert_eq!(result, 0);
@@ -318,8 +381,15 @@ mod unittest_tests {
         }
 
         if header.num_bitmap_bytes > 0 {
+            // SAFETY: `bitmap_begin` is `begin_bitmap()`, the process-lifetime
+            // `__llvm_prf_bits` section base; `header.num_bitmap_bytes > 0`
+            // guarantees at least one byte is present, so the read is in-bounds and
+            // the section is zero-initialized.
             let original = unsafe { *bitmap_begin };
             blob[bitmap_offset] = 0x5A;
+            // SAFETY: `blob` is owned and valid for `blob.len()` bytes; `bitmap_begin`
+            // is the writable process-lifetime bitmap section, and the test is
+            // `#[serial]` so access is exclusive.
             unsafe {
                 let result = merge_from_buffer(blob.as_ptr(), blob.len() as u64);
                 assert_eq!(result, 0);

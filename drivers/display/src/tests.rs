@@ -178,6 +178,9 @@ fn test_framebuffer_unsafe_operations_and_boundaries() {
     for &size in &test_sizes {
         if size == 0 {
             // Test zero-size buffer (edge case)
+            // SAFETY: `NonNull::dangling()` yields a non-null, aligned pointer
+            // that is never dereferenced; paired with length `0`, no bytes are
+            // read or written, so the raw-parts contract holds for empty access.
             unsafe {
                 let ptr = core::ptr::NonNull::dangling().as_ptr();
                 let _fb = FrameBuffer::from_raw_parts_mut(ptr, 0);
@@ -195,6 +198,10 @@ fn test_framebuffer_unsafe_operations_and_boundaries() {
             *byte = (i % 255 + 1) as u8; // Avoid zeros for better testing
         }
 
+        // SAFETY: `ptr` is borrowed from `buffer`, a live `Vec<u8>` of length
+        // `size`, so it is valid, aligned, and unaliased for `size` bytes for
+        // the duration of this block; `buffer` is not accessed again until
+        // after it drops.
         unsafe {
             let _fb = FrameBuffer::from_raw_parts_mut(ptr, size);
         }

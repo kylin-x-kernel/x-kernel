@@ -3299,10 +3299,10 @@ pub mod tests_cryp {
             &stream_fin,
         )
         .unwrap();
-        if let Some(pb) = patch {
-            if w >= 16 {
-                out[w - 16..w].copy_from_slice(&pb);
-            }
+        if let Some(pb) = patch
+            && w >= 16
+        {
+            out[w - 16..w].copy_from_slice(&pb);
         }
         core::assert_eq!(w + n, input.len());
         out
@@ -3462,10 +3462,10 @@ pub mod tests_cryp {
             &stream_fin,
         )
         .unwrap();
-        if let Some(pb) = patch {
-            if w >= 16 {
-                out[w - 16..w].copy_from_slice(&pb);
-            }
+        if let Some(pb) = patch
+            && w >= 16
+        {
+            out[w - 16..w].copy_from_slice(&pb);
         }
         core::assert_eq!(w + n, input.len());
         out

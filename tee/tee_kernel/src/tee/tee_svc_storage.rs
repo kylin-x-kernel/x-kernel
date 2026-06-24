@@ -1752,11 +1752,11 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             storage_id,
-            object_id_user.as_user_ptr() as *mut c_void,
+            object_id_user.as_user_ptr(),
             object_id.len(),
             flags as c_ulong,
             attr as c_ulong,
-            data_create_user.as_user_ptr() as *mut c_void,
+            data_create_user.as_user_ptr(),
             data_create.len(),
             obj.as_user_ref(),
         );
@@ -1768,7 +1768,7 @@ pub mod tests_tee_svc_storage {
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
-            data_read.as_user_ptr() as *mut c_void,
+            data_read.as_user_ptr(),
             data_create.len(),
             count.as_user_ref(),
         );
@@ -1779,11 +1779,8 @@ pub mod tests_tee_svc_storage {
 
         let data_write = b"TEST_DATA";
         let data_write_user = user_buffer_from_bytes(data_write);
-        let result = syscall_storage_obj_write(
-            obj_id,
-            data_write_user.as_user_ptr() as *mut c_void,
-            data_write.len(),
-        );
+        let result =
+            syscall_storage_obj_write(obj_id, data_write_user.as_user_ptr(), data_write.len());
         assert!(result.is_ok());
 
         let result = syscall_storage_obj_seek(
@@ -1797,7 +1794,7 @@ pub mod tests_tee_svc_storage {
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
-            data_read.as_user_ptr() as *mut c_void,
+            data_read.as_user_ptr(),
             data_write.len(),
             count.as_user_ref(),
         );
@@ -1815,7 +1812,7 @@ pub mod tests_tee_svc_storage {
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
         let result = syscall_storage_obj_read(
             obj_id,
-            data_read.as_user_ptr() as *mut c_void,
+            data_read.as_user_ptr(),
             data_create.len(),
             count.as_user_ref(),
         );
@@ -1826,12 +1823,8 @@ pub mod tests_tee_svc_storage {
 
         let data_read = TestUserBuffer::new(1).unwrap();
         let mut count = TestUserValue::<u64>::from_value(0).unwrap();
-        let _result = syscall_storage_obj_read(
-            obj_id,
-            data_read.as_user_ptr() as *mut c_void,
-            1,
-            count.as_user_ref(),
-        );
+        let _result =
+            syscall_storage_obj_read(obj_id, data_read.as_user_ptr(), 1, count.as_user_ref());
         assert_eq!(count.read(), 0);
 
         let result = syscall_storage_obj_seek(
@@ -1862,7 +1855,7 @@ pub mod tests_tee_svc_storage {
         let object_id_new_user = user_buffer_from_bytes(object_id_new.as_bytes());
         let result = syscall_storage_obj_rename(
             obj_id,
-            object_id_new_user.as_user_ptr() as *mut c_void,
+            object_id_new_user.as_user_ptr(),
             object_id_new.len(),
         );
         assert!(result.is_ok());
@@ -1883,7 +1876,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr() as *mut c_void,
+            object_id.as_user_ptr(),
             "invalid_create".len(),
             1u64 << 63,
             TEE_HANDLE_NULL as c_ulong,
@@ -1895,7 +1888,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr() as *mut c_void,
+            object_id.as_user_ptr(),
             "invalid_create".len(),
             TEE_DATA_FLAG_ACCESS_READ as c_ulong,
             TEE_HANDLE_NULL as c_ulong,
@@ -1924,11 +1917,11 @@ pub mod tests_tee_svc_storage {
         let mut created_obj = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_storage_obj_create(
             storage_id,
-            object_id_create_user.as_user_ptr() as *mut c_void,
+            object_id_create_user.as_user_ptr(),
             object_id.len(),
             create_flags as c_ulong,
             TEE_HANDLE_NULL as c_ulong,
-            data_create_user.as_user_ptr() as *mut c_void,
+            data_create_user.as_user_ptr(),
             data_create.len(),
             created_obj.as_user_ref(),
         );
@@ -1942,7 +1935,7 @@ pub mod tests_tee_svc_storage {
         let mut obj = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_storage_obj_open(
             storage_id,
-            object_id_user.as_user_ptr() as *mut c_void,
+            object_id_user.as_user_ptr(),
             object_id.len(),
             open_flags as c_ulong,
             obj.as_user_ref(),
@@ -1961,7 +1954,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_open(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr() as *mut c_void,
+            object_id.as_user_ptr(),
             "missing_object".len(),
             1u64 << 62,
             obj.as_user_ref(),
@@ -1970,7 +1963,7 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_open(
             TEE_STORAGE_PRIVATE as c_ulong,
-            object_id.as_user_ptr() as *mut c_void,
+            object_id.as_user_ptr(),
             "missing_object".len(),
             TEE_DATA_FLAG_ACCESS_READ as c_ulong,
             obj.as_user_ref(),
@@ -1990,14 +1983,14 @@ pub mod tests_tee_svc_storage {
 
         let result = syscall_storage_obj_create(
             storage_id,
-            object_id_user.as_user_ptr() as *mut c_void,
+            object_id_user.as_user_ptr(),
             object_id.len(),
             (TEE_DATA_FLAG_ACCESS_READ
                 | TEE_DATA_FLAG_ACCESS_WRITE
                 | TEE_DATA_FLAG_ACCESS_WRITE_META
                 | TEE_DATA_FLAG_OVERWRITE) as c_ulong,
             TEE_HANDLE_NULL as c_ulong,
-            data_create_user.as_user_ptr() as *mut c_void,
+            data_create_user.as_user_ptr(),
             data_create.len(),
             obj.as_user_ref(),
         );

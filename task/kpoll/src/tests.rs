@@ -25,11 +25,19 @@ unsafe fn waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn waker_wake(data: *const ()) {
+    // SAFETY: `data` is the waker data pointer installed by `make_waker`,
+    // which stores a `&'static AtomicUsize` leaked via `Box::leak`. It is
+    // non-null, properly aligned, valid for `'static`, and only mutated
+    // through atomic operations, so a shared reference is sound.
     let counter = unsafe { &*(data as *const AtomicUsize) };
     counter.fetch_add(1, Ordering::SeqCst);
 }
 
 unsafe fn waker_wake_by_ref(data: *const ()) {
+    // SAFETY: `data` is the waker data pointer installed by `make_waker`,
+    // which stores a `&'static AtomicUsize` leaked via `Box::leak`. It is
+    // non-null, properly aligned, valid for `'static`, and only mutated
+    // through atomic operations, so a shared reference is sound.
     let counter = unsafe { &*(data as *const AtomicUsize) };
     counter.fetch_add(1, Ordering::SeqCst);
 }
@@ -41,6 +49,10 @@ static WAKER_VTABLE: RawWakerVTable =
 
 fn make_waker(counter: &'static AtomicUsize) -> Waker {
     let raw = RawWaker::new(counter as *const _ as *const (), &WAKER_VTABLE);
+    // SAFETY: `raw` is built from `WAKER_VTABLE`, whose clone/wake/wake_by_ref
+    // callbacks return valid `RawWaker`s and whose drop callback is a no-op for
+    // the `'static` `AtomicUsize` data pointer that is never deallocated, so
+    // the `RawWaker` contract required by `Waker::from_raw` is upheld.
     unsafe { Waker::from_raw(raw) }
 }
 

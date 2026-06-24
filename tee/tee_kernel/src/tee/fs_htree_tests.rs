@@ -139,10 +139,8 @@ impl TeeFsHtreeStorageOps for TestHtreeStorage {
         let mut inner = self.inner.lock();
         let bytes = if offs + size <= inner.data_len {
             size
-        } else if offs <= inner.data_len {
-            inner.data_len - offs
         } else {
-            0
+            inner.data_len.saturating_sub(offs)
         };
 
         tee_debug!(
@@ -229,8 +227,8 @@ fn val_from_bn_n_salt(bn: usize, n: usize, salt: u8) -> u32 {
 fn write_block(ht: &mut TeeFsHtree, bn: usize, salt: u8) -> TeeResult {
     let mut b = [0u32; TEST_BLOCK_SIZE / size_of::<u32>()];
 
-    for n in 0..b.len() {
-        b[n] = val_from_bn_n_salt(bn, n, salt);
+    for (n, value) in b.iter_mut().enumerate() {
+        *value = val_from_bn_n_salt(bn, n, salt);
     }
 
     let bytes: &[u8] = bytemuck::cast_slice(&b);
@@ -248,12 +246,12 @@ fn read_block(ht: &mut TeeFsHtree, bn: usize, salt: u8) -> TeeResult {
     // let storage = ht.storage.as_ref();
     tee_fs_htree_read_block(ht, bn, bytes)?;
 
-    for n in 0..b.len() {
-        if b[n] != val_from_bn_n_salt(bn, n, salt) {
+    for (n, value) in b.iter().enumerate() {
+        if *value != val_from_bn_n_salt(bn, n, salt) {
             error!(
                 "Unexpected b[{}]: {:X} (expected {:X})",
                 n,
-                b[n],
+                *value,
                 val_from_bn_n_salt(bn, n, salt)
             );
             return Err(TEE_ERROR_TIME_NOT_SET);
@@ -499,8 +497,7 @@ fn test_corrupt_type(
             // actually read by do_range(read_block)
             let result = tee_fs_htree_open(Box::new(aux2), false, Some(hash), Some(uuid));
             tee_debug!("tee_fs_htree_open: result: {:?}", result);
-            if result.is_ok() {
-                let mut ht = result.unwrap();
+            if let Ok(mut ht) = result {
                 let result = do_range(read_block, &mut ht, 0, num_blocks, 1);
                 // do_range(read_block,) is supposed to detect the
                 // error. If TEE_ERROR_TIME_NOT_SET is returned
@@ -511,7 +508,7 @@ fn test_corrupt_type(
                 //    res == TEE_ERROR_TIME_NOT_SET
                 // there's some problem with the htree
                 // implementation.
-                if result.is_err() && result.unwrap_err() == TEE_ERROR_TIME_NOT_SET {
+                if let Err(TEE_ERROR_TIME_NOT_SET) = result {
                     error!("error: data silently corrupted");
                     return Err(TEE_ERROR_TIME_NOT_SET);
                 }
@@ -539,14 +536,15 @@ fn test_corrupt_type(
         }
     })();
 
-    if res.is_err() {
-        if res.unwrap_err() == TEE_ERROR_TIME_NOT_SET {
-            return Err(TEE_ERROR_TIME_NOT_SET);
+    if let Err(err) = res {
+        if err == TEE_ERROR_TIME_NOT_SET {
+            Err(TEE_ERROR_TIME_NOT_SET)
+        } else {
+            Ok(())
         }
-        return Ok(());
     } else {
         error!("error: data corruption undetected");
-        return Err(TEE_ERROR_SECURITY);
+        Err(TEE_ERROR_SECURITY)
     }
 }
 

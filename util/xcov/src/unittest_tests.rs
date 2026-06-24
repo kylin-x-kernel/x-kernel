@@ -155,6 +155,9 @@ mod export_tests {
 
     #[def_test]
     fn section_accessor_exports() {
+        // SAFETY: each call is a read-only FFI accessor that returns a pointer into
+        // the linker-defined coverage sections; none of them dereference the result
+        // or mutate global state, so invoking them with no arguments is sound.
         unsafe {
             let _: *const u8 = crate::__llvm_profile_begin_counters();
             let _: *const u8 = crate::__llvm_profile_end_counters();
@@ -175,6 +178,10 @@ mod export_tests {
 
     #[def_test]
     fn profiling_function_exports() {
+        // SAFETY: both FFI calls receive a null pointer with length 0, which the
+        // compatibility/merge routines treat as an empty buffer (returning an
+        // error code without dereferencing the pointer); no global state is
+        // mutated in a way observable by this test.
         unsafe {
             let _: i32 = crate::__llvm_profile_merge_from_buffer(ptr::null(), 0);
             let _: i32 = crate::__llvm_profile_check_compatibility(ptr::null(), 0);
@@ -206,6 +213,10 @@ mod export_tests {
 
     #[def_test]
     fn allocator_hook_exports() {
+        // SAFETY: alloc_zeroed(64, 8) requests 64 bytes with 8-byte alignment from
+        // the xcov allocator; the assertion confirms a non-null return before the
+        // matching dealloc reuses the same (size, align) pair, satisfying the
+        // allocator contract of freeing exactly what was allocated.
         unsafe {
             let ptr = crate::minicov_alloc_zeroed(64, 8);
             assert!(!ptr.is_null());
@@ -221,6 +232,10 @@ mod export_tests {
 
     #[def_test]
     fn value_profiling_exports() {
+        // SAFETY: all three instrumentation FFI calls accept a null data pointer;
+        // per the LLVM profiling contract, when the data pointer is null the
+        // routine is a no-op (it records no value profiling site), so no pointer
+        // is dereferenced and no global state is mutated.
         unsafe {
             crate::__llvm_profile_instrument_target(0, ptr::null_mut(), 0);
             crate::__llvm_profile_instrument_target_value(0, ptr::null_mut(), 0, 0);
@@ -237,6 +252,12 @@ mod export_tests {
             size_of::<LlvmProfileHeader>() * 2
         };
         let mut buf = alloc::vec![0u8; alloc_size];
+        // SAFETY: buf is a freshly zero-initialized Vec of alloc_size bytes that
+        // remains live for the duration of the block; writer_ctx borrows buf's
+        // backing storage exclusively (no aliasing references exist) and
+        // buffer_writer writes within [0, alloc_size); the third argument to
+        // lprofWriteData is the contiguous-mode flag, so the FFI fills buf via the
+        // writer and never outlives the borrow.
         unsafe {
             let mut writer = ProfDataWriter {
                 write_fn: crate::writer::buffer_writer,
@@ -276,6 +297,10 @@ mod behavior_tests {
     #[def_test]
     fn check_compatibility_rejects_small_buffer() {
         let buf = [0u8; 4];
+        // SAFETY: buf is a 4-byte stack array whose length (4) is below the header
+        // size the compatibility routine requires, so the FFI never reads beyond
+        // buf and simply returns -1; buf.as_ptr() is valid and aligned for u8 for
+        // the duration of the call.
         let result =
             unsafe { crate::__llvm_profile_check_compatibility(buf.as_ptr(), buf.len() as u64) };
         assert_eq!(result, -1);
@@ -284,6 +309,10 @@ mod behavior_tests {
     #[def_test]
     fn check_compatibility_rejects_bad_magic() {
         let buf = [0u8; 256];
+        // SAFETY: buf is a 256-byte stack array, large enough to read the header
+        // fields; it is zero-initialized so the magic field check fails early and
+        // the routine returns -1 without dereferencing any embedded pointers.
+        // buf.as_ptr() stays valid and properly aligned for u8 for the call.
         let result =
             unsafe { crate::__llvm_profile_check_compatibility(buf.as_ptr(), buf.len() as u64) };
         assert_eq!(result, -1);
@@ -379,11 +408,16 @@ mod port_tests {
     #[def_test]
     fn mem_operations() {
         let mut buf = [0xFFu8; 16];
+        // SAFETY: buf.as_mut_ptr() is a valid, 1-byte-aligned, fully initialized
+        // pointer to a 16-byte stack array; mem_zero writes exactly buf.len()
+        // bytes (16) inside the array, which is the only outstanding borrow.
         unsafe {
             crate::port::mem_zero(buf.as_mut_ptr(), buf.len());
         }
         assert!(buf.iter().all(|&b| b == 0));
 
+        // SAFETY: same 16-byte buf, again valid/aligned/initialized; mem_set
+        // writes exactly buf.len() bytes within bounds and is the sole access.
         unsafe {
             crate::port::mem_set(buf.as_mut_ptr(), 0xAB, buf.len());
         }
@@ -391,17 +425,28 @@ mod port_tests {
 
         let src = [1u8, 2, 3, 4];
         let mut dst = [0u8; 4];
+        // SAFETY: dst and src are disjoint 4-byte arrays; both pointers are valid,
+        // 1-byte aligned, and initialized for 4 bytes; mem_copy reads 4 bytes from
+        // src and writes 4 bytes to dst with no aliasing.
         unsafe {
             crate::port::mem_copy(dst.as_mut_ptr(), src.as_ptr(), 4);
         }
         assert_eq!(dst, src);
 
         assert_eq!(
+            // SAFETY: src and dst are valid 4-byte arrays still alive; mem_cmp
+            // only reads within [0, 4) of each and they do not alias in a way
+            // that affects a byte-wise comparison.
             unsafe { crate::port::mem_cmp(src.as_ptr(), dst.as_ptr(), 4) },
             0
         );
         let other = [1u8, 2, 0, 4];
-        assert!(unsafe { crate::port::mem_cmp(src.as_ptr(), other.as_ptr(), 4) } > 0);
+        assert!(
+            // SAFETY: src and other are valid, 1-byte-aligned, fully initialized
+            // 4-byte arrays; mem_cmp reads at most 4 bytes from each, all within
+            // bounds, and both outlive the call.
+            unsafe { crate::port::mem_cmp(src.as_ptr(), other.as_ptr(), 4) } > 0
+        );
     }
 
     #[def_test]
@@ -471,6 +516,11 @@ mod write_tests {
     #[def_test]
     fn written_header_has_correct_magic_and_version() {
         let mut buf = alloc_write_buffer();
+        // SAFETY: buf is a Vec of at least one LlvmProfileHeader worth of bytes
+        // (alloc_write_buffer guarantees alloc_size >= header size when the
+        // reported buffer size is too small), so __llvm_profile_write_buffer can
+        // serialise the header without overflowing; buf.as_mut_ptr() is the sole
+        // borrow and remains valid for the call.
         let result = unsafe { crate::__llvm_profile_write_buffer(buf.as_mut_ptr()) };
         assert_eq!(result, 0);
 
@@ -487,6 +537,9 @@ mod write_tests {
     #[def_test]
     fn written_header_counts_match_getters() {
         let mut buf = alloc_write_buffer();
+        // SAFETY: same invariant as written_header_has_correct_magic_and_version:
+        // alloc_write_buffer ensures buf holds at least one LlvmProfileHeader, so
+        // the write fits; buf.as_mut_ptr() is the exclusive, in-bounds borrow.
         let result = unsafe { crate::__llvm_profile_write_buffer(buf.as_mut_ptr()) };
         assert_eq!(result, 0);
 
@@ -538,6 +591,11 @@ mod api_tests {
 
     #[def_test]
     fn alloc_feature_enabled_by_default() {
+        // SAFETY: minicov_alloc_zeroed(128, 16) returns a freshly allocated,
+        // zero-initialised, 16-byte-aligned buffer of 128 bytes; the null check
+        // precedes from_raw_parts, so ptr is valid for 128 bytes; the slice only
+        // reads within the allocation, and minicov_dealloc is called with the
+        // identical (128, 16) pair to free exactly what was allocated.
         unsafe {
             let ptr = crate::minicov_alloc_zeroed(128, 16);
             assert!(!ptr.is_null());

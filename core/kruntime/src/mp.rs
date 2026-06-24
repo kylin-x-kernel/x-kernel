@@ -390,6 +390,8 @@ mod tests_tlb_shootdown {
 
             REMOTE_READ.store(0, Ordering::Relaxed);
             kipi::run_on_cpu(remote_cpu, move || {
+                // SAFETY: test_vaddr is mapped read/write to p1 in the kernel page table
+                // before this closure runs, and p1 backs an initialized u64 written above.
                 let val = unsafe { core::ptr::read_volatile(test_vaddr.as_usize() as *const u64) };
                 REMOTE_READ.store(val as usize, Ordering::Release);
             })
@@ -419,6 +421,8 @@ mod tests_tlb_shootdown {
             // Remote CPU reads V → must see MAGIC_B (proves stale TLB was flushed).
             REMOTE_READ.store(0, Ordering::Relaxed);
             kipi::run_on_cpu(remote_cpu, move || {
+                // SAFETY: test_vaddr is remapped read/write to p2 in the kernel page table
+                // before this closure runs, and p2 backs an initialized u64 written above.
                 let val = unsafe { core::ptr::read_volatile(test_vaddr.as_usize() as *const u64) };
                 REMOTE_READ.store(val as usize, Ordering::Release);
             })
@@ -517,6 +521,8 @@ mod tests_tlb_shootdown {
 
             REMOTE_READ_G.store(0, Ordering::Relaxed);
             kipi::run_on_cpu(remote_cpu, move || {
+                // SAFETY: test_vaddr is mapped read/write to p1 in the kernel page table
+                // before this closure runs, and p1 backs an initialized u64 written above.
                 let val = unsafe { core::ptr::read_volatile(test_vaddr.as_usize() as *const u64) };
                 REMOTE_READ_G.store(val as usize, Ordering::Release);
             })
@@ -562,6 +568,8 @@ mod tests_tlb_shootdown {
             // PASSES on all architectures.
             REMOTE_READ_G.store(0, Ordering::Relaxed);
             kipi::run_on_cpu(remote_cpu, move || {
+                // SAFETY: test_vaddr is remapped read/write to p2 in the kernel page table
+                // before this closure runs, and p2 backs an initialized u64 written above.
                 let val = unsafe { core::ptr::read_volatile(test_vaddr.as_usize() as *const u64) };
                 REMOTE_READ_G.store(val as usize, Ordering::Release);
             })

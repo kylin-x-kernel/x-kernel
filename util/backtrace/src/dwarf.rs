@@ -28,6 +28,7 @@ impl DwarfContextStorage {
         unsafe { (*self.0.get()).as_ref() }
     }
 
+    #[cfg_attr(any(test, unittest), allow(dead_code))]
     fn init_once(&self, ctx: Context<DwarfReader>) {
         // SAFETY: `INIT_ONCE` ensures this write runs at most once before the
         // context is ever observed. Subsequent access is read-only.

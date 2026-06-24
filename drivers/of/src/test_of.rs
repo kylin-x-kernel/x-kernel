@@ -40,7 +40,7 @@ impl TestDtbBuilder {
     }
 
     fn align(buf: &mut Vec<u8>) {
-        while buf.len() % 4 != 0 {
+        while !buf.len().is_multiple_of(4) {
             buf.push(0);
         }
     }
@@ -603,6 +603,9 @@ fn pci_host_helpers_cover_ecam_ranges_and_legacy_irq_map() {
 fn reserved_memory_helpers_merge_overlaps_and_keep_names() {
     let fdt = test_fdt();
     let (regions, count) =
+        // SAFETY: `test_dtb_bytes()` returns a valid, fully-initialized DTB
+        // byte buffer; its pointer is aligned, non-null, and valid for the
+        // buffer length, and the callee reads only within those bounds.
         unsafe { read_reserved_memory_regions_from_ptr::<4>(test_dtb_bytes().as_ptr()) }.unwrap();
     assert_eq!(count, 2);
     assert_eq!(regions[0].starting_address as usize, 0x8100_0000);
@@ -664,6 +667,9 @@ fn collect_reserved_regions_merges_sorted_overlaps() {
 #[def_test]
 fn read_memory_regions_from_ptr_reports_memory_node_ranges() {
     let (regions, count) =
+        // SAFETY: `test_dtb_bytes()` returns a valid, fully-initialized DTB
+        // byte buffer; its pointer is aligned, non-null, and valid for the
+        // buffer length, and the callee reads only within those bounds.
         unsafe { read_memory_regions_from_ptr::<2>(test_dtb_bytes().as_ptr()) }.unwrap();
     assert_eq!(count, 1);
     assert_eq!(regions[0].starting_address as usize, 0x8000_0000);

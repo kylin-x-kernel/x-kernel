@@ -165,8 +165,6 @@ pub fn tee_ta_get_session(dispatch_irq: u32) -> TeeResult<SessionIdentity> {
 
 #[cfg(unittest)]
 mod tests {
-    use super::*;
-
     #[test]
     fn validated_payload_len_accepts_within_limit() {
         assert_eq!(

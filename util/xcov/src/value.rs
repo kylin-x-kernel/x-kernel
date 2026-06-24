@@ -495,9 +495,20 @@ mod tests {
         if counters.is_null() {
             return result;
         }
+        // SAFETY: `counters` was checked non-null above and points to an array of
+        // `*mut ValueProfNode` slots indexed by site kind; `site_index` comes from
+        // the caller (iterated in `0..num_sites` against the same array in the
+        // production reader), so the offset is in bounds and the slot is properly
+        // aligned and initialized for a raw pointer read.
         let mut node = unsafe { *counters.add(site_index) };
         while !node.is_null() {
+            // SAFETY: `node` is a non-null `*mut ValueProfNode` produced by
+            // `instrument_target_value`/`instrument_memop`, which allocate it via
+            // `port::alloc` with the correct size/alignment; the node therefore
+            // points to a valid, aligned, initialized `ValueProfNode`.
             result.push((unsafe { (*node).value }, unsafe { (*node).count }));
+            // SAFETY: Same as above — `node` is a valid, aligned, initialized
+            // `ValueProfNode`, so reading its `next` link field is sound.
             node = unsafe { (*node).next };
         }
         result
@@ -515,9 +526,21 @@ mod tests {
         }
 
         for site in 0..num_sites {
+            // SAFETY: `values` was checked non-null above and points to an array of
+            // `*mut ValueProfNode` slots of length `num_sites`; `site` is in
+            // `0..num_sites`, so the offset is in bounds and the slot is properly
+            // aligned and initialized for a raw pointer read.
             let mut node = unsafe { *values.add(site) };
             while !node.is_null() {
+                // SAFETY: Read `next` before freeing: `node` is a non-null
+                // `*mut ValueProfNode` allocated by `instrument_target_value`/
+                // `instrument_memop` via `port::alloc` with the correct size and
+                // alignment, so it is valid, aligned, and initialized.
                 let next = unsafe { (*node).next };
+                // SAFETY: `node` was allocated by `port::alloc` with
+                // `size_of::<ValueProfNode>()` and `align_of::<ValueProfNode>()`,
+                // so deallocating with the matching size and alignment satisfies
+                // `port::dealloc`'s allocation-ownership and layout contract.
                 unsafe {
                     port::dealloc(
                         node.cast::<u8>(),
@@ -529,6 +552,11 @@ mod tests {
             }
         }
 
+        // SAFETY: `values` is the base pointer of the site array allocated by
+        // `port::alloc` with element size `size_of::<*mut ValueProfNode>()` over
+        // `num_sites` slots; deallocating it with the matching total size and
+        // pointer alignment satisfies `port::dealloc`'s ownership/layout contract.
+        // After this, the array is freed exactly once.
         unsafe {
             port::dealloc(
                 values.cast::<u8>(),
@@ -566,6 +594,13 @@ mod tests {
         VP_MAX_NUM_VALS_PER_SITE.store(4, core::sync::atomic::Ordering::Relaxed);
 
         let mut data = new_profile_data([1, 0, 0]);
+        // SAFETY: `data` is a local `LlvmProfileData` initialized by
+        // `new_profile_data` with a non-null `values` array sized for
+        // `IPVK_NUM_KINDS` sites and `num_value_sites[0] == 1`; casting `&mut data`
+        // to `*mut c_void` yields a valid, aligned, exclusively-held pointer for
+        // the duration of the call, satisfying `instrument_target_value`'s
+        // documented safety contract (valid `data`, in-bounds `counter_index`,
+        // caller owns the allocation).
         unsafe {
             instrument_target_value(
                 7,
@@ -603,6 +638,12 @@ mod tests {
         VP_MAX_NUM_VALS_PER_SITE.store(2, core::sync::atomic::Ordering::Relaxed);
 
         let mut data = new_profile_data([1, 0, 0]);
+        // SAFETY: `data` is a local `LlvmProfileData` from `new_profile_data`
+        // with a non-null `values` array sized for `IPVK_NUM_KINDS` sites and
+        // `num_value_sites[0] == 1`; `data_ptr` is the exclusive `&mut data` cast
+        // to `*mut c_void`, valid and aligned for the call's duration. All
+        // `counter_index` arguments are `0`, in bounds against `num_value_sites`,
+        // satisfying `instrument_target_value`'s safety contract.
         unsafe {
             let data_ptr = (&mut data as *mut LlvmProfileData).cast::<c_void>();
             instrument_target_value(1, data_ptr, 0, 5);
@@ -632,6 +673,12 @@ mod tests {
         VP_MAX_NUM_VALS_PER_SITE.store(4, core::sync::atomic::Ordering::Relaxed);
 
         let mut data = new_profile_data([0, 1, 0]);
+        // SAFETY: `data` is a local `LlvmProfileData` from `new_profile_data`
+        // with a non-null `values` array sized for `IPVK_NUM_KINDS` sites and
+        // `num_value_sites[1] == 1`; casting `&mut data` to `*mut c_void` yields a
+        // valid, aligned, exclusive pointer for the call's duration.
+        // `counter_index == 0` is in bounds against `num_value_sites`, satisfying
+        // `instrument_memop`'s safety contract.
         unsafe {
             instrument_memop(300, (&mut data as *mut LlvmProfileData).cast::<c_void>(), 0);
             let entries = collect_site_entries(&data, 0);
@@ -648,6 +695,20 @@ mod tests {
         VP_MAX_NUM_VALS_PER_SITE.store(4, core::sync::atomic::Ordering::Relaxed);
 
         let mut data = new_profile_data([1, 0, 0]);
+        // SAFETY: `data` is a local `LlvmProfileData` from `new_profile_data`
+        // with a non-null `values` array sized for `IPVK_NUM_KINDS` sites and
+        // `num_value_sites[0] == 1`; `data_ptr` is the exclusive `&mut data` cast
+        // to `*mut c_void`, valid and aligned for every call's duration, and
+        // `counter_index == 0` is in bounds. The `reader` function pointers come
+        // from `get_vpdo_data_reader()` (a `&'static` table of well-formed C
+        // function pointers) and are invoked with matching argument
+        // types/counts: `init_rt_record` receives `&data` and a pointer to the
+        // `site_count_arrays` array whose `[IPVK_INDIRECT_CALL_TARGET]` slot is
+        // `indirect_counts.as_mut_ptr()` (valid, aligned, exclusive for the
+        // call's duration); `get_value_data` receives `out.as_mut_ptr()` over 2
+        // initialized `InstrProfValueData` slots matching the passed capacity of
+        // 2. All pointers are exclusively held by this thread (single-threaded
+        // `#[def_test(serial)]`).
         unsafe {
             let data_ptr = (&mut data as *mut LlvmProfileData).cast::<c_void>();
             instrument_target_value(11, data_ptr, 0, 1);

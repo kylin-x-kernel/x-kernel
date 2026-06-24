@@ -753,7 +753,7 @@ mod tests {
 
     fn listen_endpoint(addr: Option<Ipv4Addr>, port: u16) -> IpListenEndpoint {
         IpListenEndpoint {
-            addr: addr.map(|ip| IpAddress::Ipv4(Ipv4Address::from(ip))),
+            addr: addr.map(IpAddress::Ipv4),
             port,
         }
     }

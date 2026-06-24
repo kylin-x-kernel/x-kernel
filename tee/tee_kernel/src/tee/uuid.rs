@@ -88,10 +88,6 @@ pub fn ta_unix_socket_path(uuid: &str) -> TeeResult<String> {
 
 #[cfg(unittest)]
 mod tests {
-    use tee_raw_sys::TEE_ERROR_BAD_FORMAT;
-
-    use super::*;
-
     #[test]
     fn ta_unix_socket_path_valid_uuid() {
         let path = ta_unix_socket_path("936da01f-9abd-4d9d-80c7-02af85c822a8").unwrap();

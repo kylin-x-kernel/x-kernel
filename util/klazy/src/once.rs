@@ -638,6 +638,9 @@ mod unittest_tests {
             Some(7)
         );
 
+        // SAFETY: `once` is a local, fully owned `Once::initialized` value, so
+        // this is the only reference to it; `as_mut_ptr` yields a valid,
+        // exclusive pointer to the stored `usize`, which is initialized.
         unsafe {
             *once.as_mut_ptr() = 13;
         }

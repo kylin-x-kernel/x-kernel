@@ -405,14 +405,23 @@ mod tests {
         io_vecs: *mut ProfDataIOVec,
         num_io_vecs: u32,
     ) -> u32 {
+        // SAFETY: `(*this).writer_ctx` was installed by the test harness and
+        // points to a live `Vec<u8>` owned exclusively by this call; the borrow
+        // is unique because the writer callback runs single-threaded.
         let out = unsafe { &mut *((*this).writer_ctx as *mut Vec<u8>) };
         for idx in 0..num_io_vecs as usize {
+            // SAFETY: `io_vecs` points to the caller's array of `num_io_vecs`
+            // valid `ProfDataIOVec` entries, so offset `idx` is in bounds and
+            // the resulting reference is properly aligned for the struct.
             let iov = unsafe { &*io_vecs.add(idx) };
             let total = iov.elm_size * iov.num_elm;
             if iov.data.is_null() {
                 let old_len = out.len();
                 out.resize(old_len + total, 0);
             } else {
+                // SAFETY: `iov.data` is a non-null caller-provided source buffer
+                // holding at least `total = elm_size * num_elm` bytes; reading
+                // that many bytes as `u8` has no alignment requirement.
                 let bytes = unsafe { core::slice::from_raw_parts(iov.data.cast::<u8>(), total) };
                 out.extend_from_slice(bytes);
             }
@@ -444,6 +453,10 @@ mod tests {
         _data: *const LlvmProfileData,
         site_count_array: *mut *mut u8,
     ) -> u32 {
+        // SAFETY: `site_count_array` is the writer's per-kind site-count slot
+        // array of length `IPVK_NUM_KINDS`; indexing at `IPVK_INDIRECT_CALL_TARGET`
+        // is in bounds, and the stored `*mut u8` was provided by the writer to a
+        // writable one-byte buffer so the byte store is valid and aligned.
         unsafe {
             let site_counts = *site_count_array.add(IPVK_INDIRECT_CALL_TARGET as usize);
             if !site_counts.is_null() {
@@ -461,6 +474,11 @@ mod tests {
     }
 
     unsafe extern "C" fn fake_first_record(data: *mut ValueProfData) -> *mut ValueProfRecord {
+        // SAFETY: `data` points to a `ValueProfData` allocation followed by
+        // trailing record bytes; offsetting by `size_of::<ValueProfData>()`
+        // yields the address of the first trailing record, returned as a raw
+        // pointer without dereferencing, so no alignment/initialization
+        // requirement applies.
         unsafe { data.cast::<u8>().add(size_of::<ValueProfData>()) }.cast::<ValueProfRecord>()
     }
 
@@ -470,6 +488,8 @@ mod tests {
 
     unsafe extern "C" fn fake_value_prof_data_size() -> u32 {
         size_of::<ValueProfData>() as u32
+            // SAFETY: `fake_header_size` is a pure arithmetic helper that
+            // performs no memory access, so calling it is unconditionally safe.
             + unsafe { fake_header_size(1) }
             + (FAKE_VALUES.len() * size_of::<InstrProfValueData>()) as u32
     }
@@ -483,6 +503,10 @@ mod tests {
     ) -> *mut ValueProfNode {
         let start = FAKE_READ_INDEX.fetch_add(n as usize, Ordering::Relaxed);
         for idx in 0..n as usize {
+            // SAFETY: `dst` points to the writer-provided `InstrProfValueData`
+            // buffer of length `n`, so `dst.add(idx)` is in bounds and properly
+            // aligned; `start + idx` indexes `FAKE_VALUES` within its fixed
+            // length because the test only requests `n <= FAKE_VALUES.len()`.
             unsafe {
                 *dst.add(idx) = FAKE_VALUES[start + idx];
             }
@@ -519,11 +543,18 @@ mod tests {
             },
         ];
 
+        // SAFETY: `writer` carries `out`'s base pointer as its context and the
+        // iovecs' total length (3 + 3 + 2) fits within `out`'s 8 bytes, so the
+        // callback only writes inside the array; `iovs` is a stack array passed
+        // with the correct count.
         let result = unsafe { buffer_writer(&mut writer, iovs.as_mut_ptr(), iovs.len() as u32) };
         assert_eq!(result, 0);
         assert_eq!(out, [1, 2, 3, 0, 0, 0, 0xAA, 0xAA]);
         assert_eq!(
             writer.writer_ctx,
+            // SAFETY: `out` is an 8-element array, so offset 8 is the
+            // one-past-the-end pointer, which is valid to compute (not
+            // dereference).
             unsafe { out.as_mut_ptr().add(8) }.cast::<c_void>()
         );
     }
@@ -547,6 +578,11 @@ mod tests {
             writer_ctx: ptr::null_mut(),
         };
 
+        // SAFETY: section pointers come from local stack arrays (`data` and
+        // `names`) and their `.add(len)` one-past-the-end pointers, so they
+        // denote valid readable ranges; counter/bitmap pointers are null with
+        // a matching zero-length range; `writer` points to the local
+        // `fail_writer`-backed struct.
         let result = unsafe {
             write_data_impl(
                 &mut writer,
@@ -592,6 +628,11 @@ mod tests {
             writer_ctx: (&mut bytes as *mut Vec<u8>).cast::<c_void>(),
         };
 
+        // SAFETY: `writer` is a local struct whose context points to the owned
+        // `bytes: Vec<u8>`, `reader` is a `&VPDataReaderType` referencing the
+        // local fake callbacks, and `data` is a local properly-initialized
+        // `LlvmProfileData` whose `num_value_sites` matches what the fake
+        // reader callbacks expect.
         let result = unsafe { write_one_value_prof_data(&mut writer, &reader, &data) };
         assert_eq!(result, 0);
         assert_eq!(bytes.len(), 56);
