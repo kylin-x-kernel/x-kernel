@@ -17,6 +17,7 @@ extern-trait.workspace = true
 khal.workspace = true
 kcred.workspace = true
 kaddr_layout.workspace = true
+karch.workspace = true
 kerrno.workspace = true
 kfd.workspace = true
 klogger.workspace = true

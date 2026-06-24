@@ -10,6 +10,8 @@ extern crate log;
 
 extern crate alloc;
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64_asid;
 mod aspace;
 pub mod backend;
 mod iomap;
@@ -24,6 +26,8 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{MemoryAddr, PhysAddr, va};
 
+#[cfg(target_arch = "aarch64")]
+pub use self::aarch64_asid::Aarch64UserAsidContext;
 pub use self::{
     aspace::{AddrPolicy, AddrSpace},
     iomap::{

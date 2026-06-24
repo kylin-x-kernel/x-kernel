@@ -320,7 +320,7 @@ pub unsafe fn init_mmu() {
         + TCR_EL1::ORGN1::WriteBack_ReadAlloc_WriteAlloc_Cacheable
         + TCR_EL1::IRGN1::WriteBack_ReadAlloc_WriteAlloc_Cacheable
         + TCR_EL1::T1SZ.val(16);
-    TCR_EL1.write(TCR_EL1::IPS::Bits_48 + tcr_flags0 + tcr_flags1);
+    TCR_EL1.write(TCR_EL1::IPS::Bits_48 + TCR_EL1::AS::ASID16Bits + tcr_flags0 + tcr_flags1);
     barrier::isb(barrier::SY);
 
     TTBR0_EL1.set(ttbr0_root_pa as u64);

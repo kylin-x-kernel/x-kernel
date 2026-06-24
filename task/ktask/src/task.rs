@@ -63,6 +63,10 @@ pub unsafe trait TaskExt {
     fn on_enter(&self) {}
     /// Called when the task is switched out.
     fn on_leave(&self) {}
+    /// Returns the latest hardware user page-table root for switch-in.
+    fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
+        None
+    }
 }
 
 // How many held locks we track per task (debug only).

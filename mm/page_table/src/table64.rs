@@ -16,6 +16,8 @@
 //! When the batch is finalized (via [`PageTableMut::finish`] or `Drop`), the
 //! addresses are flushed either individually (≤ 16 entries) or with a full TLB
 //! shootdown (> 16 entries).
+#[cfg(target_arch = "aarch64")]
+use core::ptr::NonNull;
 use core::{marker::PhantomData, ops::Deref};
 
 use arrayvec::ArrayVec;
@@ -26,6 +28,26 @@ use crate::defs::{
 };
 
 const ENTRY_COUNT: usize = 512;
+
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
+struct UserAsidProvider {
+    ctx: NonNull<()>,
+    get_asid: unsafe fn(NonNull<()>) -> u16,
+}
+
+#[cfg(target_arch = "aarch64")]
+// SAFETY:
+// - the provider context is installed only for address-space-owned ASID state
+//   that outlives the page table using it;
+// - the callback is restricted to read-only ASID fetches, so sharing the
+//   provider across CPUs does not permit unsynchronized mutation.
+unsafe impl Send for UserAsidProvider {}
+
+#[cfg(target_arch = "aarch64")]
+// SAFETY: same argument as `Send`; the provider only exposes read-only access
+// to externally synchronized ASID state.
+unsafe impl Sync for UserAsidProvider {}
 
 const fn p4_idx(vaddr: usize) -> usize {
     (vaddr >> (12 + 27)) & (ENTRY_COUNT - 1)
@@ -76,9 +98,8 @@ pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>
     /// to **all** online CPUs instead of only the current task's
     /// residency mask.
     is_kernel: bool,
-    /// User ASID for ASID-scoped TLB shootdown (AArch64 TTBR0). Zero for
-    /// kernel page tables and before the owner address space assigns one.
-    user_asid: u16,
+    #[cfg(target_arch = "aarch64")]
+    user_asid_provider: Option<UserAsidProvider>,
     _phantom: PhantomData<(M, PTE, H)>,
 }
 
@@ -108,15 +129,29 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
             #[cfg(feature = "copy-from")]
             borrowed_entries: bitmaps::Bitmap::new(),
             is_kernel,
-            user_asid: 0,
+            #[cfg(target_arch = "aarch64")]
+            user_asid_provider: None,
             _phantom: PhantomData,
         })
     }
 
-    /// Sets the user ASID used for TLB shootdown when this page table is
-    /// modified. Must match the ASID packed into TTBR0 on context switch.
-    pub const fn set_user_asid(&mut self, asid: u16) {
-        self.user_asid = asid;
+    /// Registers a dynamic ASID provider for AArch64 user-page-table TLB invalidation.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    ///
+    /// - `ctx` remains valid for the full lifetime of this page table;
+    /// - `get_asid(ctx)` performs only read-only access to that live context;
+    /// - the provider returns the ASID currently paired with this page table's
+    ///   user address-space root.
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn set_user_asid_provider(
+        &mut self,
+        ctx: NonNull<()>,
+        get_asid: unsafe fn(NonNull<()>) -> u16,
+    ) {
+        self.user_asid_provider = Some(UserAsidProvider { ctx, get_asid });
     }
 
     /// Returns the physical address of the root page table frame.
@@ -341,6 +376,17 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         page_size: PageSize,
     ) -> PtResult<&mut PTE> {
         crate::walk_page_table_create!(self, vaddr, page_size)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn current_user_asid(&self) -> u16 {
+        self.inner.user_asid_provider.map_or(0, |provider| {
+            // SAFETY:
+            // - the owning address-space object installs a provider whose
+            //   context outlives this page table;
+            // - the callback performs a read-only fetch of the latest ASID.
+            unsafe { (provider.get_asid)(provider.ctx) }
+        })
     }
 
     /// Maps a virtual address to a physical address with the given page size and flags.
@@ -658,7 +704,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         } else {
             // User page table: invalidate stale entries for this address
             // space's ASID (AArch64) or residency mask (other arches).
-            let asid = self.inner.user_asid;
+            #[cfg(target_arch = "aarch64")]
+            let asid = self.current_user_asid();
+            #[cfg(not(target_arch = "aarch64"))]
+            let asid = 0;
             match &self.flush {
                 ToFlush::None => {}
                 ToFlush::Addresses(addrs) => {

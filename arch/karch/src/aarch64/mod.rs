@@ -15,8 +15,7 @@ mod tls;
 mod trap;
 
 pub use asid::{
-    alloc_user_asid, encode_user_page_table_root, free_user_asid, user_asid_from_ttbr,
-    user_page_table_root_paddr,
+    USER_ASID_BITS, encode_user_page_table_root, user_asid_from_ttbr, user_page_table_root_paddr,
 };
 pub use cache::{
     clean_dcache_line_to_poc, clean_dcache_range_to_poc, flush_icache_all, flush_icache_all_local,

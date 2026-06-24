@@ -21,6 +21,8 @@ use ksched::BaseScheduler;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
+#[cfg(all(feature = "task_ext", target_arch = "aarch64"))]
+use crate::TaskExt;
 use crate::{
     KCpuMask, KtaskRef, Scheduler, TaskInner,
     future::block_on,
@@ -684,6 +686,14 @@ impl RunQueue {
         unsafe {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
+
+            #[cfg(all(feature = "task_ext", target_arch = "aarch64"))]
+            if let Some(root) = next_task
+                .task_ext()
+                .and_then(|ext| ext.switch_page_table_root())
+            {
+                (*next_ctx_ptr).set_page_table_root(root);
+            }
 
             // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
             #[cfg(feature = "smp")]

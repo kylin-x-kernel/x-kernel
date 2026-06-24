@@ -34,7 +34,19 @@ pub trait AsThread {
 // SAFETY: `Box<Thread>` is `Send` because thread state is not shared across
 // threads during migration.
 #[extern_trait]
-unsafe impl TaskExt for Box<Thread> {}
+unsafe impl TaskExt for Box<Thread> {
+    fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
+        #[cfg(target_arch = "aarch64")]
+        {
+            Some(self.proc_state.runtime().page_table_hw_root())
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            None
+        }
+    }
+}
 
 impl AsThread for TaskInner {
     fn try_as_thread(&self) -> Option<&Thread> {

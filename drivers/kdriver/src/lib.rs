@@ -22,7 +22,6 @@
 //! Supports static and dynamic device models via the `dyn` feature.
 
 #![no_std]
-#![feature(associated_type_defaults)]
 
 extern crate alloc;
 

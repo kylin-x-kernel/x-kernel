@@ -5,7 +5,6 @@
 //! TTY subsystem and terminal line discipline.
 
 #![no_std]
-#![feature(bstr)]
 
 #[macro_use]
 extern crate klogger;

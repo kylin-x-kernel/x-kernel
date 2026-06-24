@@ -28,6 +28,8 @@ use memaddr::{
 };
 use memset::{MemoryArea, MemorySet};
 
+#[cfg(target_arch = "aarch64")]
+use crate::Aarch64UserAsidContext;
 use crate::backend::{Backend, BackendOps};
 
 /// The virtual memory address space.
@@ -35,9 +37,8 @@ pub struct AddrSpace {
     range: VirtAddrRange,
     areas: MemorySet<Backend>,
     pgtbl: PageTable,
-    /// User ASID packed into TTBR0_EL1 on AArch64.
     #[cfg(target_arch = "aarch64")]
-    asid: u16,
+    user_asid_context: Option<Arc<Aarch64UserAsidContext>>,
 }
 
 impl AddrSpace {
@@ -75,7 +76,9 @@ impl AddrSpace {
     pub fn page_table_hw_root(&self) -> karch::HwPageTableRoot {
         #[cfg(target_arch = "aarch64")]
         {
-            karch::encode_user_page_table_root(self.page_table_root(), self.asid)
+            self.user_asid_context
+                .as_ref()
+                .map_or_else(|| self.page_table_root().into(), |ctx| ctx.hardware_root())
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
@@ -111,22 +114,10 @@ impl AddrSpace {
     /// page table modifications flush TLB entries on **all** online CPUs.
     fn new_empty_inner(base: VirtAddr, size: usize, is_kernel: bool) -> KResult<Self> {
         #[cfg(target_arch = "aarch64")]
-        let asid = if is_kernel {
-            0
+        let mut pgtbl = if is_kernel {
+            PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
         } else {
-            karch::alloc_user_asid()
-        };
-        #[cfg(target_arch = "aarch64")]
-        let pgtbl = {
-            let mut pgtbl = if is_kernel {
-                PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
-            } else {
-                PageTable::try_new().map_err(|_| KError::NoMemory)?
-            };
-            if asid != 0 {
-                pgtbl.set_user_asid(asid);
-            }
-            pgtbl
+            PageTable::try_new().map_err(|_| KError::NoMemory)?
         };
         #[cfg(not(target_arch = "aarch64"))]
         let pgtbl = if is_kernel {
@@ -134,13 +125,26 @@ impl AddrSpace {
         } else {
             PageTable::try_new().map_err(|_| KError::NoMemory)?
         };
+        #[cfg(target_arch = "aarch64")]
+        let user_asid_context = if is_kernel {
+            None
+        } else {
+            let ctx = Arc::new(Aarch64UserAsidContext::new(pgtbl.root_paddr()));
+            ctx.install_page_table_asid_provider(&mut pgtbl);
+            Some(ctx)
+        };
         Ok(Self {
             range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
             pgtbl,
             #[cfg(target_arch = "aarch64")]
-            asid,
+            user_asid_context,
         })
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn user_asid_context(&self) -> Option<&Arc<Aarch64UserAsidContext>> {
+        self.user_asid_context.as_ref()
     }
 
     /// Creates a new empty user address space with the standard user-space range.
@@ -608,10 +612,6 @@ impl fmt::Debug for AddrSpace {
 
 impl Drop for AddrSpace {
     fn drop(&mut self) {
-        #[cfg(target_arch = "aarch64")]
-        if self.asid != 0 {
-            karch::free_user_asid(self.asid);
-        }
         self.clear();
     }
 }

@@ -16,6 +16,8 @@ use memspace::AddrSpace;
 /// Process runtime state shared by all threads in a process.
 pub struct ProcessRuntimeState {
     address_space: Arc<Mutex<AddrSpace>>,
+    #[cfg(target_arch = "aarch64")]
+    user_asid_context: Arc<memspace::Aarch64UserAsidContext>,
     fs_context: Arc<Mutex<FsContext>>,
     heap_top: AtomicUsize,
     timer_manager: Arc<Mutex<ProcessTimerManager>>,
@@ -29,8 +31,16 @@ impl ProcessRuntimeState {
         fs_context: Arc<Mutex<FsContext>>,
         user_heap_base: usize,
     ) -> Self {
+        #[cfg(target_arch = "aarch64")]
+        let user_asid_context = address_space
+            .lock()
+            .user_asid_context()
+            .expect("user process address space must carry an AArch64 ASID context")
+            .clone();
         Self {
             address_space,
+            #[cfg(target_arch = "aarch64")]
+            user_asid_context,
             fs_context,
             heap_top: AtomicUsize::new(user_heap_base),
             timer_manager: Arc::new(Mutex::new(ProcessTimerManager::new(owner_pid))),
@@ -40,6 +50,12 @@ impl ProcessRuntimeState {
     /// Returns the virtual address space.
     pub fn address_space(&self) -> &Arc<Mutex<AddrSpace>> {
         &self.address_space
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    /// Returns the latest hardware page-table root for context switching.
+    pub fn page_table_hw_root(&self) -> karch::HwPageTableRoot {
+        self.user_asid_context.prepare_switch_root()
     }
 
     /// Returns the process-owned filesystem context.
