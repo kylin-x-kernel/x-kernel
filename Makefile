@@ -63,7 +63,7 @@ endif
 
 BUILD_TARGETS := all build run justrun debug clippy disasm rootfs rootfs-uapps teefs uapps
 KCONFIG_TARGETS := menuconfig defconfig saveconfig savedefconfig oldconfig olddefconfig
-CLEAN_TARGETS := clean clean_c distclean
+CLEAN_TARGETS := clean distclean
 UTILITY_TARGETS := clippy check_deps check_header doc doc_check_missing fmt unittest unittest_no_fail_fast
 
 NON_BUILD_TARGETS := $(KCONFIG_TARGETS) $(CLEAN_TARGETS) $(UTILITY_TARGETS)
@@ -293,23 +293,22 @@ else
 	$(call make_disk_image,fat32,$(DISK_IMG))
 endif
 
-clean: clean_c
-	rm -rf $(APP)/*.bin $(APP)/*.elf
+clean:
+	rm -rf $(CURDIR)/xkernel_*.bin $(CURDIR)/xkernel_*.elf $(CURDIR)/xkernel_*.uimg
 	cargo clean --target-dir $(TARGET_DIR)
+	cargo clean --target-dir $(XCONF_TARGET_DIR)
+	cargo clean --target-dir $(UAPP_TARGET_DIR)
 	@rm -rf $(TARGET_DIR)/kbuild
 
 distclean: clean
 	@rm -f .config .config.old auto.conf autoconf.h
 	@echo "✅ Removed all configuration files"
 
-clean_c::
-	rm -rf $(app-objs)
-
 # Note: gen-const is kept as PHONY to allow manual invocation,
 # but the actual dependency is on $(CONFIG_RS) which is file-based
 .PHONY: all defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const \
 	build disasm run justrun debug \
 	rootfs rootfs-uapps teefs uapps \
-	clippy doc doc_check_missing fmt fmt_c unittest unittest_no_fail_fast \
+	clippy doc doc_check_missing fmt unittest unittest_no_fail_fast \
 	_gen_cargo \
-	disk_img clean distclean clean_c
+	disk_img clean distclean
