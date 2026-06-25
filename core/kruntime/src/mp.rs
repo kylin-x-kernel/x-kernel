@@ -188,6 +188,14 @@ mod tests_tlb_shootdown {
     use memaddr::{PhysAddr, VirtAddr};
     use unittest::{assert, assert_eq, def_test};
 
+    fn enable_tlb_shootdown_for_test() {
+        // These integration tests exercise the runtime after SMP bring-up, so
+        // they must establish the same "all APs are ready" precondition that
+        // production TLB shootdowns require. Do not rely on other unit tests
+        // leaving this global gate enabled.
+        kipi::tlb::mark_all_cpus_started();
+    }
+
     /// Test B: Proves TaskCpuResidencyIf correctly reads on_cpu_mask and
     /// reset_on_cpu_mask correctly resets it.
     #[def_test(serial)]
@@ -231,6 +239,7 @@ mod tests_tlb_shootdown {
     fn test_flush_all_targeted_shootdown() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
+            enable_tlb_shootdown_for_test();
             let my_cpu = this_cpu_id();
             let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
 
@@ -294,6 +303,7 @@ mod tests_tlb_shootdown {
     fn test_finish_triggers_cross_cpu_flush() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
+            enable_tlb_shootdown_for_test();
             let my_cpu = this_cpu_id();
             let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
 
@@ -344,6 +354,7 @@ mod tests_tlb_shootdown {
     fn test_shootdown_clears_stale_tlb() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
+            enable_tlb_shootdown_for_test();
             let my_cpu = this_cpu_id();
             let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
 
@@ -469,6 +480,7 @@ mod tests_tlb_shootdown {
     fn test_kernel_pt_miss_remote_without_mask() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
+            enable_tlb_shootdown_for_test();
             let my_cpu = this_cpu_id();
             let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
 

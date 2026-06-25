@@ -428,6 +428,26 @@ impl TaskContext {
         self.fs_base = tls_area.as_usize();
     }
 
+    /// Returns the saved frame pointer and instruction pointer from a
+    /// completed kernel context-switch frame.
+    pub fn backtrace_frame(&self) -> Option<(usize, usize)> {
+        if self.rsp == 0 {
+            return None;
+        }
+
+        // SAFETY:
+        // - callers only use this after the task has completed switching out,
+        //   so `rsp` already points at the saved `ContextSwitchFrame` and that
+        //   frame is no longer being mutated concurrently;
+        // - the task's kernel stack must remain allocated for the duration of
+        //   this read, even though this is only a best-effort diagnostic path;
+        // - with those preconditions, `rsp` points at the saved
+        //   `ContextSwitchFrame` on this task's kernel stack and we only
+        //   snapshot its stored frame-pointer and instruction-pointer values.
+        let frame = unsafe { &*(self.rsp as *const ContextSwitchFrame) };
+        Some((frame.rbp as usize, frame.rip as usize))
+    }
+
     /// Changes the page table root in this context.
     ///
     /// The hardware register for page table root (`CR3` for x86) will be

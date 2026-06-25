@@ -364,7 +364,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         #[cfg(feature = "snapshot")]
         {
             let _g = kspin::NoPreempt::new();
-            crate::global_task_queue::record_task_for_watchdog(&task);
+            crate::task_registry::record_tracked_task(&task);
         }
         self.inner.scheduler.lock().add_task(task);
     }
@@ -744,7 +744,7 @@ fn poll_gc(cx: &mut Context<'_>) -> Poll<()> {
         #[cfg(feature = "snapshot")]
         {
             let _g = kspin::NoPreempt::new();
-            crate::global_task_queue::sweep_watchdog_tasks(this_cpu_id());
+            crate::task_registry::sweep_tracked_tasks(this_cpu_id());
         }
 
         // Note: we cannot block current task with preemption disabled,
@@ -810,6 +810,10 @@ pub(crate) fn init() {
     // Put the subsequent execution into the `main` task.
     let main_task = TaskInner::new_init("main".into()).into_arc();
     main_task.set_state(TaskState::Running);
+    #[cfg(feature = "smp")]
+    main_task.set_cpu_id(cpu_id);
+    #[cfg(feature = "snapshot")]
+    crate::task_registry::record_tracked_task(&main_task);
     // SAFETY: scheduler bring-up installs the first current task for this CPU
     // before any concurrent task access can occur.
     unsafe { CurrentTask::init_current(main_task) }
@@ -826,6 +830,10 @@ pub(crate) fn init_secondary() {
     // Put the subsequent execution into the `idle` task.
     let idle_task = TaskInner::new_init("idle".into()).into_arc();
     idle_task.set_state(TaskState::Running);
+    #[cfg(feature = "smp")]
+    idle_task.set_cpu_id(cpu_id);
+    #[cfg(feature = "snapshot")]
+    crate::task_registry::record_tracked_task(&idle_task);
     IDLE_TASK.with_current(|i| {
         i.init_once(idle_task.clone());
     });

@@ -30,10 +30,10 @@ extern crate alloc;
 mod run_queue;
 mod api;
 #[cfg(feature = "snapshot")]
-mod global_task_queue;
-#[cfg(feature = "snapshot")]
 pub mod snapshot;
 mod task;
+#[cfg(feature = "snapshot")]
+mod task_registry;
 mod timers;
 mod tracing_hooks;
 mod wait_queue;

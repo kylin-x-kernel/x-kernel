@@ -23,7 +23,7 @@ kruntime timer irq / irq manager / kspin guards
 │  - run_queue.rs: per-CPU runqueue + switch_to     │
 │  - future/wait_queue: block/wake bridge           │
 │  - timers: tick callbacks                         │
-│  - snapshot/global_task_queue (optional)          │
+│  - snapshot/task_registry (optional)              │
 └───────────────────────────────────────────────────┘
         │
         ▼
@@ -72,15 +72,15 @@ ksched algorithms / karch context switch / allocator
 2. 当前任务指针在每 CPU 上始终指向有效任务对象；
 3. 栈释放发生在任务不再运行且无引用后（由 gc task + `Arc::try_unwrap` 保证）。
 
-### 4) `timers.rs` / `global_task_queue.rs` / `snapshot`
+### 4) `timers.rs` / `task_registry.rs` / `snapshot`
 
 - `timers` 使用 per-CPU callback 容器原始引用；
-- `global_task_queue` 使用 `Box::into_raw/from_raw` 存放弱引用槽位；
+- `task_registry` 使用 `Box::into_raw/from_raw` 存放弱引用槽位；
 - `snapshot` 使用 `UnsafeCell` 持有 trap frame 快照，并 `unsafe impl Sync`。
 
 **不变量**：
 
-1. `global_task_queue` 槽位只存 0 或有效 `Box<WeakKtaskRef>` 指针；
+1. `task_registry` 槽位只存 0 或有效 `Box<WeakKtaskRef>` 指针；
 2. CAS 成功的一方负责释放；
 3. snapshot 读写遵守 session 串行化约束（`begin`/`finish`）。
 
@@ -101,7 +101,7 @@ ksched algorithms / karch context switch / allocator
 | T-02 | 任务切换与唤醒并发，导致同任务重复入队 | 高 | 远端 CPU 尚在切换，当前 CPU 立即 unblock | `task.on_cpu()` 自旋等待 + `clear_prev_task_on_cpu` 配对 |
 | T-03 | 退出任务过早释放导致 UAF | 高 | 仍有 joiner/切换路径持有引用 | `EXITED_TASKS` + `gc_task` + `Arc::try_unwrap` |
 | T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查 |
-| T-05 | `global_task_queue` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
+| T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
 | T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护 |
 | T-08 | tick 回调执行耗时过长拖慢调度 | 中 | callback 滥用 | API 文档约束“回调应短小”；系统仍可抢占恢复 |
@@ -123,7 +123,7 @@ ksched algorithms / karch context switch / allocator
 - **快速失败策略**：关键不变量处普遍使用 `assert!`（例如任务状态、IRQ 约束、CPU 编号）。
 - **延迟恢复策略**：抢占采用 pending + 安全点执行，尽量在一致状态下恢复调度。
 - **回收容错策略**：GC 对 `Arc::try_unwrap` 失败重排队，避免误释放。
-- **诊断增强**：`snapshot/watchdog` feature 提供锁等待与回溯检查能力。
+- **诊断增强**：`snapshot/watchdog` feature 通过共享任务注册表提供锁等待与回溯检查能力。
 
 ## 隐私与数据暴露
 

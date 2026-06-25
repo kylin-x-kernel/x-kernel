@@ -202,7 +202,10 @@ pub fn trigger(reason: &str) {
     #[cfg(feature = "ipi")]
     {
         trigger_impl(reason, |seq| {
-            match kipi::run_on_each_cpu_via_ipi(nmi_collect_local) {
+            // `run_on_each_cpu()` executes the callback on the current CPU
+            // synchronously before broadcasting to the other CPUs, so one call
+            // is sufficient to collect both the triggering CPU and all remotes.
+            match kipi::run_on_each_cpu(nmi_collect_local) {
                 Ok(()) => Some(wait_mask(SNAPSHOT_WAIT_TIMEOUT_NS)),
                 Err(err) => {
                     khal::kprint_atomic!("[snapshot {seq}] failed to broadcast snapshot: {err}\n");

@@ -70,7 +70,7 @@ task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
 | `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
 | `WaitQueue` | 事件型阻塞等待 API |
 | `timers` | tick 回调与定时事件检查 |
-| `snapshot/global_task_queue` | 可选诊断：watchdog/NMI 可遍历任务视图 |
+| `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图 |
 
 ## 核心流程
 

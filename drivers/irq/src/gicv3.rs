@@ -83,6 +83,11 @@ pub fn complete_irq(completion_cookie: usize) {
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+    // SAFETY: `ICC_SGI1R_EL1` is written via a system-register `msr`, so we
+    // need `dsb st` here rather than a mere ordering barrier. This guarantees
+    // the shootdown request state stored in Normal memory has completed before
+    // the target CPU can observe the SGI delivery.
+    unsafe { core::arch::asm!("dsb st", options(nomem, nostack)) };
     match target {
         TargetCpu::Self_ => {
             GIC.lock()
@@ -106,4 +111,8 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::All);
         }
     }
+    // SAFETY: `isb` forces the SGI system-register write to be observed as
+    // issued before subsequent instructions continue, matching Linux's
+    // GICv3 SGI-send ordering.
+    unsafe { core::arch::asm!("isb", options(nomem, nostack)) };
 }

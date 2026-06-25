@@ -117,6 +117,13 @@ pub trait IntrManagerIf {
     fn dispatch_irq(id: usize) -> Option<DispatchedIrq>;
     /// Completes a claimed interrupt with its opaque completion cookie.
     fn complete_irq(completion_cookie: usize);
+    /// Sends an IPI to another CPU.
+    ///
+    /// Implementations must ensure that all Normal-memory writes performed by
+    /// the caller before `notify_cpu()` become visible to the target CPU before
+    /// that CPU can observe and handle the delivered IPI. TLB shootdown relies
+    /// on this publish-before-notify ordering to make the request state visible
+    /// before the target acknowledges it.
     fn notify_cpu(id: usize, target: TargetCpu);
     fn set_prio(id: usize, prio: u8);
 }

@@ -80,6 +80,10 @@ fn this_context() -> usize {
 }
 
 fn send_ipi_to_raw_hart(raw_hart_id: usize) {
+    // SAFETY: this fence publishes the caller's prior memory writes before the
+    // SBI IPI request, so remote handlers cannot observe the interrupt before
+    // its request state becomes visible.
+    unsafe { core::arch::asm!("fence rw, rw", options(nomem, nostack)) };
     let res = sbi_rt::send_ipi(HartMask::from_mask_base(1, raw_hart_id));
     if res.is_err() {
         warn!("notify_cpu failed: {res:?}");

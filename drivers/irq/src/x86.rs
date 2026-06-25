@@ -30,6 +30,9 @@ fn enable(irq: usize, enabled: bool) {
 }
 
 fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+    // x86 TSO already preserves the required publish-before-notify ordering
+    // for prior memory writes before the APIC IPI send path, so no extra
+    // barrier is needed here.
     match target {
         TargetCpu::Self_ => x86_apic::send_ipi_self(interrupt_id),
         TargetCpu::Specific(logical_cpu_id) => {

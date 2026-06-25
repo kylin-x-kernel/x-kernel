@@ -269,7 +269,7 @@ pub fn run_idle() -> ! {
 #[cfg(feature = "watchdog")]
 pub fn check_mutex_deadlock(now: usize) -> bool {
     let mut ok = true;
-    crate::global_task_queue::for_each_watchdog_task(khal::percpu::this_cpu_id(), |weaktask| {
+    crate::task_registry::for_each_tracked_task(khal::percpu::this_cpu_id(), |weaktask| {
         if !ok {
             return;
         }

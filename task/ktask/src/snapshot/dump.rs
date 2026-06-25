@@ -23,10 +23,10 @@ pub(crate) fn dump_println(force: bool, args: fmt::Arguments<'_>) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub(crate) fn current_task_for_cpu(cpu_id: LogicalCpuId) -> Option<crate::KtaskRef> {
     let mut running = None;
-    crate::global_task_queue::for_each_watchdog_task(cpu_id, |weaktask| {
+    crate::task_registry::for_each_tracked_task(cpu_id, |weaktask| {
         if running.is_some() {
             return;
         }
@@ -73,7 +73,7 @@ pub(crate) fn dump_raw_backtrace(
 /// Dump backtraces for all non-running tasks on the given CPU.
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool, symbolize: bool) {
-    crate::global_task_queue::for_each_watchdog_task(cpu_id, |weaktask| {
+    crate::task_registry::for_each_tracked_task(cpu_id, |weaktask| {
         if let Some(task) = weaktask.upgrade()
             && !task.inner().is_running()
         {
@@ -95,7 +95,48 @@ pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool, symboli
     });
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool, symbolize: bool) {
+    crate::task_registry::for_each_tracked_task(cpu_id, |weaktask| {
+        if let Some(task) = weaktask.upgrade()
+            && has_stable_saved_task_context(&task)
+            && let Some((rbp, rip)) = task.inner().ctx().backtrace_frame()
+        {
+            let bt = backtrace::Backtrace::capture_trap(rbp, rip, 0);
+            if symbolize {
+                dump_println(
+                    force,
+                    format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id.as_usize(), task.inner()),
+                );
+            } else {
+                dump_raw_backtrace(force, cpu_id, task.inner(), &bt);
+            }
+        }
+    });
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn has_stable_saved_task_context(task: &crate::KtaskRef) -> bool {
+    let inner = task.inner();
+    if inner.is_running() {
+        return false;
+    }
+
+    #[cfg(feature = "smp")]
+    if inner.on_cpu() {
+        return false;
+    }
+
+    #[cfg(not(feature = "smp"))]
+    if crate::current_may_uninit().is_some_and(|curr| curr.ptr_eq(task)) {
+        return false;
+    }
+
+    true
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) fn dump_cpu_task_backtrace(_cpu_id: LogicalCpuId, _force: bool, _symbolize: bool) {
     // Architecture not yet supported for task backtrace dumping.
 }
@@ -137,7 +178,40 @@ pub(crate) fn dump_cur_task_backtrace(
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub(crate) fn dump_cur_task_backtrace(
+    cpu_id: LogicalCpuId,
+    tf: &TrapFrame,
+    force: bool,
+    symbolize: bool,
+) {
+    let bt = backtrace::Backtrace::capture_trap(tf.rbp as usize, tf.rip as usize, 0);
+    let running_task = current_task_for_cpu(cpu_id);
+    if symbolize {
+        dump_println(
+            force,
+            format_args!(
+                "cpu_id: {}, {}\n{bt}",
+                cpu_id.as_usize(),
+                running_task
+                    .as_ref()
+                    .map(|task| alloc::format!("{:?}", task.inner()))
+                    .unwrap_or_else(|| alloc::string::String::from("<running task unavailable>"))
+            ),
+        );
+    } else if let Some(task) = running_task.as_ref() {
+        dump_raw_backtrace(force, cpu_id, task.inner(), &bt);
+    } else {
+        dump_raw_backtrace_with_header(
+            force,
+            format_args!("cpu_id: {}, <running task unavailable>", cpu_id.as_usize()),
+            &bt,
+        );
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline(always)]
 pub(crate) fn dump_cur_task_backtrace(
     _cpu_id: LogicalCpuId,

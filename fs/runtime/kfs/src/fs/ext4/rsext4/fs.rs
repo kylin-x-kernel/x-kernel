@@ -94,13 +94,13 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn writeback_to_disk(&self) -> VfsResult<()> {
-        let mut state = self.inner.lock();
+        let mut state = self.lock();
         let (fs, dev) = state.split();
         Self::writeback_locked(fs, dev)
     }
 
     pub(crate) fn sync_to_disk(&self) -> VfsResult<()> {
-        let mut state = self.inner.lock();
+        let mut state = self.lock();
         let (fs, dev) = state.split();
         Self::writeback_locked(fs, dev)?;
         // Explicit sync must force the pending metadata journal transaction and

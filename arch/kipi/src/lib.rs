@@ -5,8 +5,9 @@
 //! X-Kernel Inter-Processor Communication (IPC) API
 //!
 //! This module provides a lightweight abstraction for CPU-to-CPU communication
-//! using Inter-Processor Interrupts (IPI). It maintains per-CPU callback queues
-//! and dispatches callbacks asynchronously upon IPI interrupt reception.
+//! using Inter-Processor Interrupts (IPI). It maintains per-CPU callback queues,
+//! dispatches generic callbacks from the shared IPI handler, and hosts the TLB
+//! shootdown protocol used by page-table updates.
 //!
 //! ## Safety
 //!
@@ -74,7 +75,10 @@ fn is_ipi_queue_ready(cpu_id: LogicalCpuId) -> bool {
     IPI_QUEUE_READY[cpu_id.as_usize()].load(Ordering::Acquire)
 }
 
-/// Initialize the per-CPU IPI event queue.
+/// Initializes the current CPU's local IPI event queue.
+///
+/// This must run on every CPU before that CPU can receive callbacks through
+/// [`run_on_cpu`] or either broadcast API.
 pub fn init() {
     let cpu_id = this_cpu_id();
     IPI_EVENT_QUEUE.with_current(|ipi_queue| {
@@ -85,9 +89,18 @@ pub fn init() {
 
 /// Executes a callback on the specified destination CPU via IPI.
 ///
-/// # Safety
+/// If `dest_cpu` is the current CPU, the callback runs synchronously in the
+/// caller's current context. Otherwise it is queued onto the target CPU and
+/// later runs from that CPU's shared IPI handler.
 ///
-/// The callback must be `Send` as it will execute on a different CPU.
+/// Callbacks must therefore be valid for the target execution context. In
+/// particular, remotely executed callbacks must not rely on sleeping or other
+/// process-context-only behavior unless the caller has arranged for that to be
+/// safe in the target CPU's IPI handler.
+///
+/// # Notes
+///
+/// The callback must be `Send` because it may execute on a different CPU.
 ///
 /// # Errors
 ///
@@ -143,6 +156,9 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
 ///
 /// The current CPU runs the callback immediately; all other CPUs receive it
 /// through their IPI event queues.
+///
+/// Use this variant when the current CPU may execute the callback in ordinary
+/// task context but the other CPUs may execute it in IPI interrupt context.
 pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     debug!("Send IPI event to all other CPUs");
     let current_cpu_id = this_cpu_id();
@@ -172,6 +188,9 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
 ///
 /// Unlike [`run_on_each_cpu`], the current CPU also receives the callback
 /// through its local IPI queue instead of running it immediately.
+///
+/// Use this variant when all CPUs, including the caller, must observe the same
+/// IPI-handler execution context.
 pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     debug!("Send IPI event to every CPU, including self");
     let current_cpu_id = this_cpu_id();
@@ -245,6 +264,9 @@ fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &Multicas
 ///
 /// This function is called in interrupt context. If a callback panics or fails,
 /// the error is logged but other pending callbacks will still be processed.
+///
+/// TLB shootdowns are processed before generic queued callbacks so that page
+/// table coherency work is not delayed behind ordinary cross-CPU events.
 pub fn ipi_handler() {
     // Process TLB shootdown requests before handling generic callbacks.
     tlb::handle_shootdown();

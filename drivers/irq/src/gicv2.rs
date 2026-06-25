@@ -164,6 +164,10 @@ pub fn complete_irq(completion_cookie: usize) {
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+    // SAFETY: `dmb ishst` orders the caller's prior Normal-memory stores
+    // before the SGI MMIO write, which is required for cross-CPU publish
+    // before notify semantics.
+    unsafe { core::arch::asm!("dmb ishst", options(nomem, nostack)) };
     match target {
         TargetCpu::Self_ => {
             GIC.lock()
