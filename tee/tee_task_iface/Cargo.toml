@@ -32,6 +32,7 @@ uuid = { version = "0.8", default-features = false }
 unittest.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
+kvfs.workspace = true
 xmas-elf = { workspace = true, default-features = false }
 log.workspace = true
 ksync = { workspace = true, optional = true }

@@ -18,5 +18,5 @@ ktask.workspace = true
 lazy_static.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
-memspace_file.workspace = true
 unittest.workspace = true
+vmobj.workspace = true

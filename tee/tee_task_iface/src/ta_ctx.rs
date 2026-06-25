@@ -11,7 +11,8 @@ use alloc::{
 
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kfs::{CachedFile, kernel_fs_context};
+use kfs::{OpenOptions, kernel_fs_context};
+use kvfs::{LookupFlags, LookupIntent, lookup_location};
 use tee_raw_sys::ta_head;
 use uuid as uuid_crate;
 
@@ -126,17 +127,24 @@ pub fn read_ta_head_from_image(image: &[u8]) -> KResult<Option<Vec<u8>>> {
     Ok(Some(image[offset..end].to_vec()))
 }
 
-/// When `path` names a TA, read the ELF via `CachedFile` and return raw `.ta_head` bytes (no signature check).
+/// When `path` names a TA, read the ELF through the opened file and return raw `.ta_head` bytes (no signature check).
 pub fn read_ta_head_if_applicable(path: &str) -> KResult<Option<Vec<u8>>> {
     let Some(normalized) = canonical_ta_install_path(path) else {
         return Ok(None);
     };
-    let loc = kernel_fs_context().lock().resolve(&normalized)?;
-    let cache = CachedFile::get_or_create(loc)?;
-    let len = cache.location().len().map_err(|_| KError::InvalidData)?;
+    let fs = kernel_fs_context().lock();
+    let loc = lookup_location(
+        &fs.lookup_context(),
+        &normalized,
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
+    drop(fs);
+    let file = OpenOptions::new().read(true).open_loc(loc)?;
+    let len = file.location().len().map_err(|_| KError::InvalidData)?;
     let len = usize::try_from(len).map_err(|_| KError::InvalidData)?;
     let mut image = alloc::vec![0u8; len];
-    let n = cache
+    let n = file
         .read_at(&mut image[..], 0)
         .map_err(|_| KError::InvalidData)?;
     if n != len {

@@ -88,6 +88,7 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
     /// Returns a reference to the most-recently-used item.
     ///
     /// This does not change the cache state.
+    #[cfg(unittest)]
     pub(super) fn peek_mru(&self) -> Option<&V> {
         self.storage.get(self.mru_idx as usize).map(|n| &n.payload)
     }

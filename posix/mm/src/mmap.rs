@@ -2,18 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use filemap::{FileMmapRequest, mmap_private_file, mmap_shared_file};
 use kerrno::{KError, KResult};
-use kfd::FileLike;
-use kfs::File;
+use kfs::{File, FileFlags};
 use khal::paging::{MappingFlags, PageSize};
 use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, align_up_4k};
-use memspace::{
-    AddrPolicy,
-    backend::{Backend, BackendOps},
-};
-use memspace_file::{FileMapper, new_alloc};
+use memspace::{AddrPolicy, MsyncPolicy, VmRuntimeRef};
 
 bitflags::bitflags! {
     /// `PROT_*` flags for use with [`sys_mmap`].
@@ -34,23 +30,41 @@ bitflags::bitflags! {
     }
 }
 
-impl From<MmapProt> for MappingFlags {
-    fn from(value: MmapProt) -> Self {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MappingPermissions {
+    pub(crate) current: MappingFlags,
+    pub(crate) maximum: MappingFlags,
+}
+
+impl MappingPermissions {
+    fn from_prot(prot: MmapProt) -> KResult<Self> {
+        if prot.intersects(MmapProt::GROWDOWN | MmapProt::GROWSUP) {
+            return Err(KError::InvalidInput);
+        }
         let mut flags = MappingFlags::USER;
-        if value.contains(MmapProt::READ) {
+        if prot.contains(MmapProt::READ) {
             flags |= MappingFlags::READ;
         }
-        if value.contains(MmapProt::WRITE) {
+        if prot.contains(MmapProt::WRITE) {
             flags |= MappingFlags::WRITE;
         }
-        if value.contains(MmapProt::EXEC) {
+        if prot.contains(MmapProt::EXEC) {
             flags |= MappingFlags::EXECUTE;
         }
-        flags
+        let maximum =
+            MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE;
+        Ok(Self {
+            current: flags,
+            maximum,
+        })
     }
 }
 
 impl MmapProt {
+    fn from_raw(bits: u32) -> KResult<Self> {
+        Self::from_bits(bits).ok_or(KError::InvalidInput)
+    }
+
     fn has_conflicting_grow_directions(self) -> bool {
         self.contains(Self::GROWDOWN | Self::GROWSUP)
     }
@@ -75,14 +89,26 @@ bitflags::bitflags! {
         const FIXED_NOREPLACE = MAP_FIXED_NOREPLACE;
         /// Don't use a file.
         const ANONYMOUS = MAP_ANONYMOUS;
+        /// Stack segment should grow down.
+        const GROWSDOWN = MAP_GROWSDOWN;
+        /// Legacy ignored flag.
+        const EXECUTABLE = MAP_EXECUTABLE;
+        /// Lock mapped pages.
+        const LOCKED = MAP_LOCKED;
         /// Populate the mapping.
         const POPULATE = MAP_POPULATE;
+        /// Non-blocking populate hint.
+        const NONBLOCK = MAP_NONBLOCK;
         /// Don't check for reservations.
         const NORESERVE = MAP_NORESERVE;
         /// Allocation is for a stack.
         const STACK = MAP_STACK;
+        /// Synchronous file-backed mapping.
+        const SYNC = MAP_SYNC;
         /// Huge page
         const HUGE = MAP_HUGETLB;
+        /// Huge page 2m size
+        const HUGE_2MB = MAP_HUGETLB | MAP_HUGE_2MB;
         /// Huge page 1g size
         const HUGE_1GB = MAP_HUGETLB | MAP_HUGE_1GB;
         /// Deprecated flag
@@ -149,6 +175,10 @@ impl MmapFlags {
         self.contains(Self::POPULATE)
     }
 
+    fn unsupported_shared_validate_flags(self) -> Self {
+        self & (Self::GROWSDOWN | Self::EXECUTABLE | Self::LOCKED | Self::NONBLOCK | Self::SYNC)
+    }
+
     fn page_size(self) -> PageSize {
         if self.contains(Self::HUGE_1GB) {
             PageSize::Size1G
@@ -178,12 +208,14 @@ enum MapType {
 }
 
 impl MapType {
-    fn from_flags(raw_flags: u32, map_flags: MmapFlags) -> KResult<Self> {
+    fn from_flags(map_flags: MmapFlags) -> KResult<Self> {
         match map_flags.map_type_bits() {
             MmapFlags::PRIVATE => Ok(Self::Private),
             MmapFlags::SHARED => Ok(Self::Shared),
             MmapFlags::SHARED_VALIDATE => {
-                MmapFlags::from_raw(raw_flags).map_err(|_| KError::OperationNotSupported)?;
+                if !map_flags.unsupported_shared_validate_flags().is_empty() {
+                    return Err(KError::OperationNotSupported);
+                }
                 Ok(Self::Shared)
             }
             _ => Err(KError::InvalidInput),
@@ -195,6 +227,235 @@ impl MapType {
     }
 }
 
+fn validate_file_mapping_access(file: &File, map_type: MapType, current: MappingFlags) -> KResult {
+    file.access(FileFlags::READ)?;
+    if map_type.is_shared() && current.contains(MappingFlags::WRITE) {
+        file.access(FileFlags::WRITE)?;
+    }
+    Ok(())
+}
+
+fn shared_file_max_permissions(file: &File) -> MappingFlags {
+    let mut flags = MappingFlags::USER | MappingFlags::EXECUTE;
+    let file_flags = file.flags();
+    if file_flags.contains(FileFlags::READ) {
+        flags |= MappingFlags::READ;
+    }
+    if file_flags.contains(FileFlags::WRITE) {
+        flags |= MappingFlags::WRITE;
+    }
+    flags
+}
+
+pub(crate) struct MmapRequest {
+    addr: usize,
+    length: usize,
+    fd: i32,
+    offset: usize,
+    flags: MmapFlags,
+    map_type: MapType,
+    page_size: PageSize,
+    pub(crate) permissions: MappingPermissions,
+}
+
+impl MmapRequest {
+    pub(crate) fn from_raw(
+        addr: usize,
+        length: usize,
+        prot: u32,
+        flags: u32,
+        fd: i32,
+        offset: __kernel_off_t,
+    ) -> KResult<Self> {
+        if length == 0 {
+            return Err(KError::InvalidInput);
+        }
+        let offset = usize::try_from(offset).map_err(|_| KError::InvalidInput)?;
+        if !PageSize::Size4K.is_aligned(offset) {
+            return Err(KError::InvalidInput);
+        }
+
+        let map_flags = MmapFlags::from_raw(flags)?;
+        let map_type = MapType::from_flags(map_flags)?;
+        let permissions = MappingPermissions::from_prot(MmapProt::from_raw(prot)?)?;
+        let page_size = map_flags.page_size();
+
+        if map_flags.intersects(MmapFlags::FIXED | MmapFlags::FIXED_NOREPLACE)
+            && !page_size.is_aligned(addr)
+        {
+            return Err(KError::InvalidInput);
+        }
+        if !map_flags.is_anonymous() && map_flags.is_hugetlb() {
+            return Err(KError::InvalidInput);
+        }
+        if map_flags.is_anonymous() && offset != 0 {
+            return Err(KError::InvalidInput);
+        }
+
+        Ok(Self {
+            addr,
+            length,
+            fd,
+            offset,
+            flags: map_flags,
+            map_type,
+            page_size,
+            permissions,
+        })
+    }
+
+    pub(crate) fn resolved_page_size(&self) -> PageSize {
+        if self.flags.is_anonymous() {
+            self.page_size
+        } else {
+            PageSize::Size4K
+        }
+    }
+
+    fn resolved_range(&self) -> KResult<(VirtAddr, usize, PageSize)> {
+        let page_size = self.resolved_page_size();
+        let start = self.addr.align_down(page_size);
+        let end = self
+            .addr
+            .checked_add(self.length)
+            .ok_or(KError::NoMemory)?
+            .align_up(page_size);
+        if end < start {
+            return Err(KError::NoMemory);
+        }
+        Ok((VirtAddr::from(start), end - start, page_size))
+    }
+}
+
+pub(crate) struct MunmapRequest {
+    start: VirtAddr,
+    length: usize,
+}
+
+impl MunmapRequest {
+    pub(crate) fn from_raw(addr: usize, length: usize) -> KResult<Self> {
+        if length == 0 {
+            return Err(KError::InvalidInput);
+        }
+        Ok(Self {
+            start: VirtAddr::from(addr),
+            length: align_up_4k(length),
+        })
+    }
+}
+
+pub(crate) struct MprotectRequest {
+    start: VirtAddr,
+    length: usize,
+    permissions: MappingPermissions,
+}
+
+impl MprotectRequest {
+    pub(crate) fn from_raw(addr: usize, length: usize, prot: u32) -> KResult<Self> {
+        let prot = MmapProt::from_raw(prot)?;
+        if prot.has_conflicting_grow_directions() {
+            return Err(KError::InvalidInput);
+        }
+        if prot.intersects(MmapProt::GROWDOWN | MmapProt::GROWSUP) {
+            return Err(KError::OperationNotSupported);
+        }
+        if !addr.is_aligned_4k() {
+            return Err(KError::InvalidInput);
+        }
+        Ok(Self {
+            start: VirtAddr::from(addr),
+            length: align_up_4k(length),
+            permissions: MappingPermissions::from_prot(prot)?,
+        })
+    }
+}
+
+pub(crate) struct MadviseRequest {
+    start: VirtAddr,
+    length: usize,
+}
+
+impl MadviseRequest {
+    pub(crate) fn dontneed_from_raw(
+        addr: usize,
+        length: usize,
+        advice: i32,
+    ) -> KResult<Option<Self>> {
+        if advice != MADV_DONTNEED as i32 {
+            return Err(KError::InvalidInput);
+        }
+        if addr & (memaddr::PAGE_SIZE_4K - 1) != 0 {
+            return Err(KError::InvalidInput);
+        }
+        let end = addr.checked_add(length).ok_or(KError::InvalidInput)?;
+        if length == 0 {
+            return Ok(None);
+        }
+
+        let start = VirtAddr::from(addr);
+        let end = VirtAddr::from(align_up_4k(end));
+        Ok(Some(Self {
+            start,
+            length: end.as_usize().saturating_sub(start.as_usize()),
+        }))
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct MsyncFlags: u32 {
+        const ASYNC = MS_ASYNC;
+        const INVALIDATE = MS_INVALIDATE;
+        const SYNC = MS_SYNC;
+    }
+}
+
+pub(crate) struct MsyncRequest {
+    start: VirtAddr,
+    length: usize,
+    flags: MsyncFlags,
+}
+
+impl MsyncRequest {
+    pub(crate) fn from_raw(addr: usize, length: usize, flags: u32) -> KResult<Self> {
+        let flags = MsyncFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
+        if flags.contains(MsyncFlags::ASYNC | MsyncFlags::SYNC) {
+            return Err(KError::InvalidInput);
+        }
+        if !addr.is_aligned_4k() {
+            return Err(KError::InvalidInput);
+        }
+        let end = addr.checked_add(length).ok_or(KError::NoMemory)?;
+        let end = checked_align_up_4k(end)?;
+        Ok(Self {
+            start: VirtAddr::from(addr),
+            length: end.checked_sub(addr).ok_or(KError::NoMemory)?,
+            flags,
+        })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    pub(crate) fn policy(&self) -> KResult<MsyncPolicy> {
+        MsyncPolicy::try_new(
+            self.flags.contains(MsyncFlags::SYNC),
+            self.flags.contains(MsyncFlags::ASYNC),
+            self.flags.contains(MsyncFlags::INVALIDATE),
+            true,
+        )
+    }
+}
+
+fn checked_align_up_4k(value: usize) -> KResult<usize> {
+    let mask = memaddr::PAGE_SIZE_4K - 1;
+    value
+        .checked_add(mask)
+        .map(|it| it & !mask)
+        .ok_or(KError::NoMemory)
+}
+
 pub fn sys_mmap(
     addr: usize,
     length: usize,
@@ -203,124 +464,110 @@ pub fn sys_mmap(
     fd: i32,
     offset: __kernel_off_t,
 ) -> KResult<isize> {
-    // --- 1. Basic parameter checks ---
-    if length == 0 {
-        return Err(KError::InvalidInput);
-    }
-    let offset = usize::try_from(offset).map_err(|_| KError::InvalidInput)?;
-    if !PageSize::Size4K.is_aligned(offset) {
-        return Err(KError::InvalidInput);
-    }
-
-    let map_flags = MmapFlags::from_bits_truncate(flags);
-    let map_type = MapType::from_flags(flags, map_flags)?;
-    let page_size = map_flags.page_size();
+    let request = MmapRequest::from_raw(addr, length, prot, flags, fd, offset)?;
 
     let proc_state = current_process_state();
-    let (file, page_size) = if !map_flags.is_anonymous() {
-        // Now don't support hugetlb file
-        if map_flags.is_hugetlb() {
-            return Err(KError::InvalidInput);
-        }
-        (
-            Some(proc_state.resources.get_file_like_as::<File>(fd)?),
-            PageSize::Size4K,
-        )
+    let file = if !request.flags.is_anonymous() {
+        Some(proc_state.resources.get_file_like_as::<File>(request.fd)?)
     } else {
-        if offset != 0 {
-            return Err(KError::InvalidInput);
-        }
-        (None, page_size)
+        None
     };
 
     // --- Resolve the mapping address ---
-    let start = addr.align_down(page_size);
-    let end = (addr + length).align_up(page_size);
-    if end < start {
-        return Err(KError::NoMemory);
-    }
-    let mut length = end - start;
+    let (hint, mut length, page_size) = request.resolved_range()?;
 
     let mut aspace = proc_state.address_space().lock();
     let start = aspace.mmap_resolve_addr(
-        VirtAddr::from(start),
+        hint,
         length,
         page_size as usize,
-        map_flags.addr_policy(),
+        request.flags.addr_policy(),
     )?;
 
-    let permission_flags = MmapProt::from_bits_truncate(prot);
-
     debug!(
-        "sys_mmap <= addr: {addr:#x?}, length: {length:#x?}, prot: {permission_flags:?}, flags: \
-         {map_flags:?}, fd: {fd:?}, offset: {offset:?}"
+        "sys_mmap <= addr: {addr:#x?}, length: {length:#x?}, permissions: {:?}, flags: {:?}, fd: \
+         {:?}, offset: {:?}",
+        request.permissions, request.flags, request.fd, request.offset
     );
 
-    let backend = match file {
+    let file_vma = match file.as_ref() {
         None => {
             // Anonymous mapping
-            match map_type {
-                MapType::Shared => Backend::new_anonymous_shared(start, length, page_size)?,
-                MapType::Private => new_alloc(start, page_size),
-            }
+            None
         }
         Some(file) => {
-            let mut mapper = FileMapper::new(
+            validate_file_mapping_access(file, request.map_type, request.permissions.current)?;
+            let max_flags = if request.map_type.is_shared() {
+                shared_file_max_permissions(file)
+            } else {
+                request.permissions.maximum
+            };
+            let invalidate = aspace.invalidate_handle(proc_state.address_space());
+            let req = FileMmapRequest {
                 start,
                 length,
-                offset,
+                offset: request.offset,
                 page_size,
-                map_type.is_shared(),
-                file.clone(),
-                proc_state.address_space().clone(),
-            );
-            file.mmap(&mut mapper)?;
-            length = mapper.length;
-            mapper.into_backend()?
+                flags: request.permissions.current,
+                max_flags,
+                file: file.clone(),
+                mm_id: aspace.mm_id(),
+                aspace: proc_state.address_space().clone(),
+                invalidate,
+            };
+            let (vma, runtime) = if request.map_type.is_shared() {
+                mmap_shared_file(req)?
+            } else {
+                mmap_private_file(FileMmapRequest {
+                    invalidate: req.invalidate.clone(),
+                    ..req
+                })?
+            };
+            length = vma.size();
+            Some((vma, runtime))
         }
     };
 
-    aspace.map(
-        start,
-        length,
-        permission_flags.into(),
-        map_flags.is_populate(),
-        backend,
-    )?;
+    if let Some((vma, runtime)) = file_vma {
+        aspace.map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
+    } else {
+        let runtime = match request.map_type {
+            MapType::Shared => VmRuntimeRef::new_anon_shared(start, length, page_size)?,
+            MapType::Private => VmRuntimeRef::new_anon_private(start, page_size),
+        };
+        aspace.map_with_max_flags(
+            start,
+            length,
+            request.permissions.current,
+            request.permissions.maximum,
+            request.flags.is_populate(),
+            runtime,
+        )?;
+    }
 
     Ok(start.as_usize() as _)
 }
 
 pub fn sys_munmap(addr: usize, length: usize) -> KResult<isize> {
     debug!("sys_munmap <= addr: {addr:#x}, length: {length:x}");
+    let request = MunmapRequest::from_raw(addr, length)?;
     let proc_state = current_process_state();
     let mut aspace = proc_state.address_space().lock();
-    let length = align_up_4k(length);
-    let start_addr = VirtAddr::from(addr);
-    aspace.unmap(start_addr, length)?;
+    aspace.unmap(request.start, request.length)?;
     Ok(0)
 }
 
 pub fn sys_mprotect(addr: usize, length: usize, prot: u32) -> KResult<isize> {
     // TODO: implement PROT_GROWSUP & PROT_GROWSDOWN
-    let Some(permission_flags) = MmapProt::from_bits(prot) else {
-        return Err(KError::InvalidInput);
-    };
-    debug!("sys_mprotect <= addr: {addr:#x}, length: {length:x}, prot: {permission_flags:?}");
-
-    if permission_flags.has_conflicting_grow_directions() {
-        return Err(KError::InvalidInput);
-    }
-
-    if !addr.is_aligned_4k() {
-        return Err(KError::InvalidInput);
-    }
+    let request = MprotectRequest::from_raw(addr, length, prot)?;
+    debug!(
+        "sys_mprotect <= addr: {addr:#x}, length: {length:x}, permissions: {:?}",
+        request.permissions
+    );
 
     let proc_state = current_process_state();
     let mut aspace = proc_state.address_space().lock();
-    let length = align_up_4k(length);
-    let start_addr = VirtAddr::from(addr);
-    aspace.protect(start_addr, length, permission_flags.into())?;
+    aspace.protect(request.start, request.length, request.permissions.current)?;
 
     Ok(0)
 }
@@ -380,25 +627,11 @@ pub fn sys_mremap(
     let proc_state = current_process_state();
     let mut aspace = proc_state.address_space().lock();
 
-    let area = aspace.find_area(addr).ok_or(KError::BadAddress)?;
-    let vma_start = area.start();
-    let vma_end = area.end();
-    let mapping_flags = area.flags();
-    let page_size = area.backend().page_size();
-    let backend = area.backend().clone();
-    let _ = area; // release borrow
-
-    if addr != vma_start {
-        return Err(KError::InvalidInput);
-    }
-
-    if addr.as_usize() + old_size > vma_end.as_usize() {
-        return Err(KError::BadAddress);
-    }
-
-    if !page_size.is_aligned(addr.as_usize()) {
-        return Err(KError::InvalidInput);
-    }
+    let source = aspace.resolve_mremap_source(addr, old_size)?;
+    let vma_end = source.end();
+    let mapping_flags = source.flags();
+    let max_flags = source.max_flags();
+    let page_size = source.page_size();
 
     // --- 3. Dispatch ---
 
@@ -414,44 +647,53 @@ pub fn sys_mremap(
         // Unmap target region
         aspace.unmap(VirtAddr::from(new_addr), new_size)?;
         let target_addr = VirtAddr::from(new_addr);
-        let relocated_backend = backend.relocated(target_addr, &aspace_ref)?;
-        aspace.map(
+        aspace.map_relocated_snapshot(
+            &source,
             target_addr,
             new_size,
             mapping_flags,
-            false,
-            relocated_backend,
+            &aspace_ref,
         )?;
         aspace.move_pages(addr, target_addr, move_size, page_size)?;
-        aspace.unmap(addr, move_size)?;
+        aspace.drop_mapping_metadata(addr, move_size)?;
         if mremap_flags.keeps_source_mapping() {
-            let fresh_backend = new_alloc(addr, page_size);
-            aspace.map(addr, move_size, mapping_flags, false, fresh_backend)?;
+            let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
+            aspace.map_with_max_flags(
+                addr,
+                move_size,
+                mapping_flags,
+                max_flags,
+                false,
+                fresh_runtime,
+            )?;
         }
         return Ok(target_addr.as_usize() as _);
     }
 
     // DONTUNMAP path: move, leave old as fresh anonymous
     if mremap_flags.keeps_source_mapping() {
-        let limit = memaddr::VirtAddrRange::new(aspace.base(), aspace.end());
-        let target_addr = aspace
-            .find_free_area(addr, new_size, limit, page_size as usize)
-            .or(aspace.find_free_area(aspace.base(), new_size, limit, page_size as usize))
-            .ok_or(KError::NoMemory)?;
+        let target_addr = aspace.find_relocation_target(addr, new_size, page_size)?;
 
-        let relocated_backend = backend.relocated(target_addr, &aspace_ref)?;
-        aspace.map(
+        aspace.map_relocated_snapshot(
+            &source,
             target_addr,
             new_size,
             mapping_flags,
-            false,
-            relocated_backend,
+            &aspace_ref,
         )?;
         aspace.move_pages(addr, target_addr, old_size, page_size)?;
-        // Old mapping: unmap metadata + remap fresh anonymous
-        aspace.unmap(addr, old_size)?;
-        let fresh_backend = new_alloc(addr, page_size);
-        aspace.map(addr, old_size, mapping_flags, false, fresh_backend)?;
+        // Old mapping: retire the moved source role, then install a fresh
+        // anonymous mapping at the original address.
+        aspace.drop_mapping_metadata(addr, old_size)?;
+        let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
+        aspace.map_with_max_flags(
+            addr,
+            old_size,
+            mapping_flags,
+            max_flags,
+            false,
+            fresh_runtime,
+        )?;
         return Ok(target_addr.as_usize() as _);
     }
 
@@ -483,35 +725,40 @@ pub fn sys_mremap(
         return Err(KError::NoMemory);
     }
 
-    let limit = memaddr::VirtAddrRange::new(aspace.base(), aspace.end());
-    let target_addr = aspace
-        .find_free_area(addr, new_size, limit, page_size as usize)
-        .or(aspace.find_free_area(aspace.base(), new_size, limit, page_size as usize))
-        .ok_or(KError::NoMemory)?;
+    let target_addr = aspace.find_relocation_target(addr, new_size, page_size)?;
 
     let move_size = old_size.min(new_size);
-    let relocated_backend = backend.relocated(target_addr, &aspace_ref)?;
-    aspace.map(
-        target_addr,
-        new_size,
-        mapping_flags,
-        false,
-        relocated_backend,
-    )?;
+    aspace.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags, &aspace_ref)?;
     aspace.move_pages(addr, target_addr, move_size, page_size)?;
-    aspace.unmap(addr, old_size)?;
+    aspace.drop_mapping_metadata(addr, old_size)?;
 
     Ok(target_addr.as_usize() as _)
 }
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> KResult<isize> {
     debug!("sys_madvise <= addr: {addr:#x}, length: {length:x}, advice: {advice:#x}");
+
+    let Some(request) = MadviseRequest::dontneed_from_raw(addr, length, advice)? else {
+        return Ok(0);
+    };
+
+    let proc_state = current_process_state();
+    let aspace_ref = proc_state.address_space();
+    let mut aspace = aspace_ref.lock();
+    aspace.madvise_dontneed(request.start, request.length)?;
     Ok(0)
 }
 
 pub fn sys_msync(addr: usize, length: usize, flags: u32) -> KResult<isize> {
     debug!("sys_msync <= addr: {addr:#x}, length: {length:x}, flags: {flags:#x}");
 
+    let request = MsyncRequest::from_raw(addr, length, flags)?;
+    if request.is_empty() {
+        return Ok(0);
+    }
+    let proc_state = current_process_state();
+    let mut aspace = proc_state.address_space().lock();
+    aspace.msync_range(request.start, request.length, request.policy()?)?;
     Ok(0)
 }
 
@@ -521,4 +768,36 @@ pub fn sys_mlock(addr: usize, length: usize) -> KResult<isize> {
 
 pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> KResult<isize> {
     Ok(0)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use linux_raw_sys::general::{MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE};
+    use unittest::def_test;
+
+    use super::MremapFlags;
+
+    #[def_test]
+    fn mremap_dontunmap_requires_equal_sizes() {
+        let flags = MremapFlags::from_raw(MREMAP_MAYMOVE | MREMAP_DONTUNMAP).unwrap();
+
+        assert!(flags.validate_args(0x2000, 0x3000).is_err());
+        assert!(flags.validate_args(0x2000, 0x2000).is_ok());
+    }
+
+    #[def_test]
+    fn mremap_fixed_and_dontunmap_require_maymove() {
+        assert!(
+            MremapFlags::from_raw(MREMAP_FIXED)
+                .unwrap()
+                .validate_args(0x2000, 0x2000)
+                .is_err()
+        );
+        assert!(
+            MremapFlags::from_raw(MREMAP_DONTUNMAP)
+                .unwrap()
+                .validate_args(0x2000, 0x2000)
+                .is_err()
+        );
+    }
 }

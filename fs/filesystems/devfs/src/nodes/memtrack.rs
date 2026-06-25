@@ -64,9 +64,9 @@ impl MemoryCategory {
                 "kfs::fs::ext4::inode::Inode::new" => {
                     return Some("ext4 inode");
                 }
-                "kfs::highlevel::file::CachedFile::get_or_create"
-                | "kfs::highlevel::file::CachedFile::page_or_insert" => {
-                    return Some("cached file");
+                "kfs::highlevel::file::File::page_cache_mapping"
+                | "kfs::highlevel::mapping::mapping_for_location" => {
+                    return Some("page-cache file");
                 }
                 "ktask::timers::set_alarm_wakeup" => {
                     return Some("timer");

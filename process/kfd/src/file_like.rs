@@ -12,7 +12,7 @@ use kerrno::{KError, KResult};
 use kio::prelude::*;
 use kpoll::Pollable;
 use ksync::RwLock;
-use kvfs::MmapMapper;
+use kvfs::{Location, MmapMapper};
 
 use crate::{FdTable, Kstat};
 
@@ -90,6 +90,14 @@ pub trait FileLike: Pollable + DowncastSync {
     /// Default returns `ENODEV` (mmap not supported).
     fn mmap(&self, _mapper: &mut dyn MmapMapper) -> KResult<()> {
         Err(KError::NoSuchDevice)
+    }
+
+    /// Returns the VFS location for file-like objects backed by a VFS node.
+    ///
+    /// Non-VFS descriptor objects such as sockets, pipes, eventfd, and pidfd
+    /// should keep the default `None` result.
+    fn vfs_location(&self) -> Option<Location> {
+        None
     }
 
     /// Returns a typed descriptor entry from a specific descriptor table.

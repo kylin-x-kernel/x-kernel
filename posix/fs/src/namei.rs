@@ -7,7 +7,10 @@
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
-use kvfs::path::Path;
+use kvfs::{
+    LookupFlags, LookupIntent, NodePermission, NodeType, lookup_location, lookup_nonexistent,
+    lookup_parent, path::Path, read_link as vfs_read_link,
+};
 use linux_raw_sys::general::*;
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -39,8 +42,13 @@ pub fn sys_linkat(
     if old.is_dir() {
         return Err(KError::OperationNotPermitted);
     }
-    let (new_dir, new_name) =
-        with_fs(new_dirfd, |fs| fs.resolve_nonexistent(Path::new(&new_path)))?;
+    let (new_dir, new_name) = with_fs(new_dirfd, |fs| {
+        lookup_nonexistent(
+            &fs.lookup_context(),
+            Path::new(&new_path),
+            LookupIntent::Open,
+        )
+    })?;
 
     new_dir.link(new_name, &old)?;
     Ok(0)
@@ -57,10 +65,22 @@ pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KRe
     debug!("sys_unlinkat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     with_fs(dirfd, |fs| {
+        let entry = lookup_location(
+            &fs.lookup_context(),
+            path.as_str(),
+            LookupIntent::Open,
+            LookupFlags::no_follow(),
+        )?;
         if flags == AT_REMOVEDIR as usize {
-            fs.remove_dir(path)?;
+            entry
+                .parent()
+                .ok_or(KError::ResourceBusy)?
+                .unlink(entry.name(), true)?;
         } else {
-            fs.remove_file(path)?;
+            entry
+                .parent()
+                .ok_or(KError::IsADirectory)?
+                .unlink(entry.name(), false)?;
         }
         Ok(0)
     })
@@ -92,7 +112,20 @@ pub fn sys_symlinkat(
     debug!("sys_symlinkat <= target: {target:?}, new_dirfd: {new_dirfd}, linkpath: {linkpath:?}");
 
     with_fs(new_dirfd, |fs| {
-        fs.symlink(target, linkpath)?;
+        let (dir, name) = lookup_nonexistent(
+            &fs.lookup_context(),
+            Path::new(&linkpath),
+            LookupIntent::Open,
+        )?;
+        if dir.lookup_no_follow(name).is_ok() {
+            return Err(KError::AlreadyExists);
+        }
+        let symlink = dir.create(
+            name,
+            NodeType::Symlink,
+            NodePermission::from_bits_truncate(0o666),
+        )?;
+        symlink.entry().as_file()?.set_symlink(&target)?;
         Ok(0)
     })
 }
@@ -113,8 +146,7 @@ pub fn sys_readlinkat(
     debug!("sys_readlinkat <= dirfd: {dirfd}, path: {path:?}");
 
     with_fs(dirfd, |fs| {
-        let entry = fs.resolve_no_follow(path)?;
-        let link = entry.read_link()?;
+        let link = vfs_read_link(&fs.lookup_context(), Path::new(&path))?;
         let read = size.min(link.len());
         buf.write_vm_slice(&link.as_bytes()[..read])?;
         Ok(read as isize)
@@ -152,9 +184,20 @@ pub fn sys_renameat2(
          new_path: {new_path}, flags: {flags}"
     );
 
-    let (old_dir, old_name) = with_fs(old_dirfd, |fs| fs.resolve_parent(Path::new(&old_path)))?;
-    let (new_dir, new_name) =
-        with_fs(new_dirfd, |fs| fs.resolve_nonexistent(Path::new(&new_path)))?;
+    let (old_dir, old_name) = with_fs(old_dirfd, |fs| {
+        lookup_parent(
+            &fs.lookup_context(),
+            Path::new(&old_path),
+            LookupIntent::Open,
+        )
+    })?;
+    let (new_dir, new_name) = with_fs(new_dirfd, |fs| {
+        lookup_nonexistent(
+            &fs.lookup_context(),
+            Path::new(&new_path),
+            LookupIntent::Open,
+        )
+    })?;
 
     old_dir.rename(&old_name, &new_dir, new_name)?;
     Ok(0)

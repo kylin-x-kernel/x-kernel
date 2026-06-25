@@ -8,7 +8,7 @@ use core::ffi::c_int;
 use kerrno::{KError, KResult};
 use kfs::FsContext;
 use kvfs::{
-    Location, Metadata,
+    Location, LookupFlags, LookupIntent, Metadata, lookup_location,
     path::{Component, Path},
 };
 use linux_raw_sys::general::{AT_FDCWD, AT_SYMLINK_NOFOLLOW};
@@ -31,7 +31,7 @@ fn is_under_allowed_root(normalized: &str) -> bool {
 ///
 /// Rejects `..` traversal and confines absolute paths to `/tee/` or `/tmp/`.
 /// This is lexical validation only: a symlink under `/tee/` can still redirect
-/// `fs.resolve()` unless callers pass `AT_SYMLINK_NOFOLLOW`. `/tee/` is assumed
+/// VFS lookup unless callers pass `AT_SYMLINK_NOFOLLOW`. `/tee/` is assumed
 /// to be created by a trusted installer and not writable by untrusted TAs.
 pub(crate) fn validate_tee_path(path: &str) -> KResult<String> {
     if path.is_empty() || path.as_bytes().contains(&0) {
@@ -85,11 +85,17 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
     let path = validate_tee_path(path)?;
 
     with_fs(dirfd, |fs| {
-        if flags & AT_SYMLINK_NOFOLLOW != 0 {
-            fs.resolve_no_follow(&path)
+        let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            LookupFlags::no_follow()
         } else {
-            fs.resolve(&path)
-        }
+            LookupFlags::follow()
+        };
+        lookup_location(
+            &fs.lookup_context(),
+            &path,
+            LookupIntent::Stat,
+            lookup_flags,
+        )
         .map(ResolveAtResult::File)
     })
 }

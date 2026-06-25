@@ -15,6 +15,7 @@ use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use linux_sysno::Sysno;
+use memspace::PageFaultOutcome;
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_ipc::SHM_MANAGER;
 
@@ -50,18 +51,24 @@ pub fn new_user_task(
                         runtime_action = dispatch_syscall(&mut uctx);
                     }
                     ReturnReason::PageFault(addr, flags) => {
-                        if !thr
+                        let outcome = thr
                             .proc_state
                             .address_space()
                             .lock()
-                            .dispatch_irq_page_fault(addr, flags)
-                        {
-                            info!(
-                                "{:?}: segmentation fault at {:#x} {:?}",
-                                thr.proc_state.proc, addr, flags
+                            .handle_page_fault(addr, flags);
+                        if outcome.is_retryable() {
+                            continue;
+                        } else if !outcome.is_resolved() {
+                            let signo = match outcome {
+                                PageFaultOutcome::BusError => Signo::SIGBUS,
+                                _ => Signo::SIGSEGV,
+                            };
+                            warn!(
+                                "{:?}: page fault at {:#x} {:?} => {:?}",
+                                thr.proc_state.proc, addr, flags, outcome
                             );
-                            raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV))
-                                .expect("Failed to send SIGSEGV");
+                            raise_signal_fatal(SignalInfo::new_kernel(signo))
+                                .expect("Failed to send fatal fault signal");
                         }
                     }
                     ReturnReason::Interrupt => {}

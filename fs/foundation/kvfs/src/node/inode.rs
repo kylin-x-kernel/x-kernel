@@ -16,8 +16,8 @@ use kpoll::{IoEvents, Pollable};
 
 use super::{DirNode, FileNode, Node, NodeFlags, NodeOps, TypeMap};
 use crate::{
-    AddressSpace, AddressSpaceOperations, DirNodeInodeOperations, FileNodeFileOperations, Metadata,
-    MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
+    AddressSpace, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
+    address_space::{default_address_space_operations, empty_address_space_operations},
 };
 
 /// VFS inode identity shared by one or more directory entries.
@@ -28,6 +28,7 @@ use crate::{
 pub struct VfsInode {
     node: Node,
     node_type: NodeType,
+    i_mapping: Arc<AddressSpace>,
     attachments: Mutex<TypeMap>,
 }
 
@@ -37,18 +38,33 @@ pub type WeakVfsInode = Weak<VfsInode>;
 impl VfsInode {
     /// Construct an inode identity for a file-like node.
     pub fn new_file(node: FileNode, node_type: NodeType) -> Arc<Self> {
-        Arc::new(Self {
+        let ops = default_address_space_operations(node.clone(), node_type);
+        Self::new_file_with_address_space_operations(node, node_type, ops)
+    }
+
+    /// Construct a file-like inode identity with explicit address-space operations.
+    pub fn new_file_with_address_space_operations(
+        node: FileNode,
+        node_type: NodeType,
+        ops: Arc<dyn crate::AddressSpaceOperations>,
+    ) -> Arc<Self> {
+        Arc::new_cyclic(move |this| Self {
             node: Node::File(node),
             node_type,
+            i_mapping: Arc::new(AddressSpace::new(this.clone(), ops)),
             attachments: Mutex::default(),
         })
     }
 
     /// Construct an inode identity for a directory node.
     pub fn new_dir(node: DirNode) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(move |this| Self {
             node: Node::Dir(node),
             node_type: NodeType::Directory,
+            i_mapping: Arc::new(AddressSpace::new(
+                this.clone(),
+                empty_address_space_operations(),
+            )),
             attachments: Mutex::default(),
         })
     }
@@ -110,22 +126,12 @@ impl VfsInode {
         }
     }
 
-    /// Returns a file-operations adapter for file-like inodes.
-    pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
-        self.as_file().map(FileNodeFileOperations::new)
-    }
-
     /// Returns a directory node reference if this inode wraps a directory node.
     pub fn as_dir(&self) -> VfsResult<&DirNode> {
         match &self.node {
             Node::Dir(dir) => Ok(dir),
             _ => Err(VfsError::NotADirectory),
         }
-    }
-
-    /// Returns an inode-operations adapter for directory inodes.
-    pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
-        self.as_dir().map(DirNodeInodeOperations::new)
     }
 
     /// Attempt to downcast the inode to a concrete node type.
@@ -142,25 +148,9 @@ impl VfsInode {
         self.attachments.lock()
     }
 
-    /// Returns this inode's address-space object, if one has been attached.
-    pub fn address_space(&self) -> Option<Arc<AddressSpace>> {
-        self.attachments.lock().get::<AddressSpace>()
-    }
-
-    /// Return or create this inode's address-space object.
-    pub(crate) fn get_or_insert_address_space(
-        self: &Arc<Self>,
-        ops: Arc<dyn AddressSpaceOperations>,
-    ) -> Arc<AddressSpace> {
-        self.get_or_insert_address_space_with(|| AddressSpace::new(Arc::downgrade(self), ops))
-    }
-
-    /// Return or create this inode's address-space object with a custom builder.
-    pub(crate) fn get_or_insert_address_space_with(
-        &self,
-        create: impl FnOnce() -> AddressSpace,
-    ) -> Arc<AddressSpace> {
-        self.attachments.lock().get_or_insert_with(create)
+    /// Returns this inode's address-space object.
+    pub fn address_space(&self) -> Arc<AddressSpace> {
+        self.i_mapping.clone()
     }
 
     /// Read the symlink target as a string.
@@ -183,10 +173,7 @@ impl VfsInode {
     }
 
     fn evict_address_space(&self) -> VfsResult<()> {
-        if let Some(address_space) = self.address_space() {
-            address_space.evict()?;
-        }
-        Ok(())
+        self.i_mapping.evict()
     }
 }
 
@@ -203,7 +190,7 @@ impl Drop for VfsInode {
     fn drop(&mut self) {
         if let Err(err) = self.evict_address_space() {
             log::warn!(
-                "failed to write back inode {} address space during evict: {err:?}",
+                "failed to evict inode {} address space: {err:?}",
                 self.inode()
             );
         }

@@ -258,7 +258,7 @@ impl DataIoCompletion {
 }
 ```
 
-Journal 只能等待 completion，不得访问 `CachedFile`、`FileMapping`、
+Journal 只能等待 completion，不得访问 open file、inode address-space mapping、
 `Ext4Inode` 或 extent tree。
 
 ## B 内部接口
@@ -316,7 +316,7 @@ pub trait AddressSpaceOps {
 演进规则：
 
 - 该 trait 应位于 KFS/kvfs 合适的公共层，不放在 KExt4 中；
-- rsext4 兼容适配和 KExt4 实现可以并存；
+- rsext4 与 KExt4 都接入同一 VFS address-space 边界；
 - PageCache 保持文件数据页所有者；
 - KExt4 返回逻辑映射并执行文件系统相关的块分配和写回；
 - mmap、buffered I/O 和 fsync 必须走同一 mapping identity。
@@ -373,6 +373,6 @@ feature 处理规则：
 4. 错误发生时是否可能部分完成？
 5. crash recovery 如何识别该状态？
 6. 是否引入第二份缓存或重复计数？
-7. 旧调用者如何迁移，临时兼容层何时删除？
+7. 被替代入口在同一变更中如何删除？
 
 接口 PR 合并前不得同时合并依赖该未稳定接口的两套不同实现。

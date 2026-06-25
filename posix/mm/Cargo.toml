@@ -11,7 +11,6 @@ documentation.workspace = true
 
 [dependencies]
 kaddr_layout = { workspace = true }
-kfd = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
 khal = { workspace = true }
@@ -19,7 +18,9 @@ klogger = { workspace = true }
 kthread = { workspace = true }
 linux-raw-sys = { workspace = true }
 memaddr = { workspace = true }
+memfs = { workspace = true }
 memspace = { workspace = true }
-memspace_file = { workspace = true }
+filemap = { workspace = true }
 posix-types = { workspace = true }
 bitflags = { workspace = true }
+unittest = { workspace = true }

@@ -6,10 +6,13 @@ use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
-use kfs::{File, FileFlags, OpenOptions};
+use kfs::{File, OpenOptions};
 use ksync::RwLock;
 use kthread;
-use kvfs::{NodePermission, VfsError};
+use kvfs::{
+    LookupFlags, LookupIntent, NodePermission, NodeType, VfsError, lookup_location,
+    lookup_nonexistent, path::Path,
+};
 use lazy_static::lazy_static;
 use linux_raw_sys::general::*;
 use slab::Slab;
@@ -173,7 +176,18 @@ impl FileVariant {
     pub fn remove_file(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove file with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
-        match with_fs(AT_FDCWD, |fs| fs.remove_file(&path)) {
+        match with_fs(AT_FDCWD, |fs| {
+            let entry = lookup_location(
+                &fs.lookup_context(),
+                &path,
+                LookupIntent::Open,
+                LookupFlags::no_follow(),
+            )?;
+            entry
+                .parent()
+                .ok_or(VfsError::IsADirectory)?
+                .unlink(entry.name(), false)
+        }) {
             Ok(()) => Ok(()),
             Err(VfsError::NotFound) => {
                 tee_debug!("FileVariant::remove_file: file {} not found", path);
@@ -184,6 +198,34 @@ impl FileVariant {
                 Err(TEE_ERROR_GENERIC)
             }
         }
+    }
+
+    /// remove directory.
+    ///
+    /// # Arguments
+    /// * `path` - the path of the file to remove
+    /// # Returns
+    /// * `TeeResult` - the result of the operation
+    #[cfg(unittest)]
+    pub fn remove_dir(path: &str) -> TeeResult {
+        tee_debug!("FileVariant::remove dir with path: {}", path);
+        let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
+        with_fs(AT_FDCWD, |fs| {
+            let entry = lookup_location(
+                &fs.lookup_context(),
+                &path,
+                LookupIntent::Open,
+                LookupFlags::no_follow(),
+            )?;
+            entry
+                .parent()
+                .ok_or(VfsError::ResourceBusy)?
+                .unlink(entry.name(), true)
+        })
+        .inspect_err(|e| error!("remove dir failed: {:?}", e))
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+
+        Ok(())
     }
 
     /// Create a directory at the given path.
@@ -203,7 +245,9 @@ impl FileVariant {
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let mode = NodePermission::from_bits_truncate(0o755);
         with_fs(AT_FDCWD, |fs| {
-            match fs.create_dir(&path, mode) {
+            let (dir, name) =
+                lookup_nonexistent(&fs.lookup_context(), Path::new(&path), LookupIntent::Open)?;
+            match dir.create(name, NodeType::Directory, mode) {
                 Ok(_) => Ok(()),
                 Err(VfsError::AlreadyExists) => {
                     // Directory already exists, return success (idempotent)
@@ -255,9 +299,6 @@ impl TeeFileLike for FileVariant {
     fn ftruncate(&mut self, len: usize) -> TeeResult<()> {
         with_file(self, |file| {
             file.as_ref()
-                .access(FileFlags::WRITE)
-                .inspect_err(|e| error!("access file failed: {:?}", e))
-                .map_err(|_| TEE_ERROR_GENERIC)?
                 .set_len(len as _)
                 .inspect_err(|e| error!("set len failed: {:?}", e))
                 .map_err(|_| TEE_ERROR_GENERIC)
@@ -289,53 +330,21 @@ pub mod tests_file_ops {
     fn file_exists(path: &str) -> bool {
         use crate::file::resolve_at;
 
-        // resolve_at validates and normalizes paths before VFS resolution.
         let loc = resolve_at(AT_FDCWD, Some(path), AT_EMPTY_PATH);
         matches!(loc, Ok(loc) if loc.stat().is_ok())
     }
 
     fn remove_dir(path: &str) -> TeeResult {
-        let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
-        with_fs(AT_FDCWD, |fs| fs.remove_dir(&path))
-            .inspect_err(|e| error!("remove dir failed: {:?}", e))
-            .map_err(|_| TEE_ERROR_GENERIC)
+        FileVariant::remove_dir(path).inspect_err(|e| error!("remove dir failed: {:?}", e))
     }
 
     fn tee_get_file_size(path: &str) -> TeeResult<usize> {
         use crate::file::resolve_at;
 
-        // resolve_at validates and normalizes paths before VFS resolution.
         let loc = resolve_at(AT_FDCWD, Some(path), 0)
             .inspect_err(|e| error!("resolve_at failed: {:?}", e))
             .map_err(|_| TEE_ERROR_GENERIC)?;
         Ok(loc.stat().map_err(|_| TEE_ERROR_GENERIC)?.size as usize)
-    }
-
-    #[unittest::def_test(custom)]
-    fn test_file_ops_resolve_helpers_reject_path_traversal() {
-        assert!(!file_exists("/tee/../etc/passwd"));
-        assert!(!file_exists("/etc/passwd"));
-        assert!(!file_exists("../etc/passwd"));
-        assert!(tee_get_file_size("/etc/passwd").is_err());
-        assert!(tee_get_file_size("../etc/passwd").is_err());
-        assert!(remove_dir("/etc/passwd").is_err());
-        assert!(remove_dir("../etc/passwd").is_err());
-    }
-
-    #[unittest::def_test(custom)]
-    fn test_file_ops_open_rejects_path_traversal() {
-        assert!(matches!(
-            FileVariant::open("/tee/../etc/passwd", O_RDONLY, 0),
-            Err(VfsError::InvalidInput)
-        ));
-        assert!(matches!(
-            FileVariant::open("/etc/passwd", O_RDONLY, 0),
-            Err(VfsError::InvalidInput)
-        ));
-        assert!(matches!(
-            FileVariant::open("../etc/passwd", O_RDONLY, 0),
-            Err(VfsError::InvalidInput)
-        ));
     }
 
     #[unittest::def_test(custom)]

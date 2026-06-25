@@ -68,3 +68,7 @@ entry / ksyscall
 - 该逻辑放在 `posix-process`，因为它围绕进程/线程生命周期状态机，不应该污染 `kthread` 的基础职责。
 - `posix-process` 可以自然承接这类面向进程生命周期的上层 owner 逻辑，并避免 `kthread <-> posix-ipc` 环依赖。
 - 纯 adapter 迁回 `ksyscall/task` 后，本 crate 只保留真正依赖进程生命周期状态机的 owner 逻辑。
+- 用户态 runtime 直接消费 `MmSpace::handle_page_fault()` 的结构化结果，
+  因此架构 trap glue 不需要理解 file-backed fault 细节，同时 runtime 可以把
+  file-backed EOF 等对象级 fault 转换为 `SIGBUS`，把普通权限或缺页错误转换为
+  `SIGSEGV`。

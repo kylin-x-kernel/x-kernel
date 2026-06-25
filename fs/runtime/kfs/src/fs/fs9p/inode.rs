@@ -115,7 +115,7 @@ impl Inode {
 
     /// Create a DirEntry for a symlink, using the 9P `TSYMLINK` operation.
     ///
-    /// This is called from `fs_operations.rs` for the special symlink path.
+    /// This is called from KFS path handling for the special symlink path.
     pub fn create_symlink_entry(&self, name: &str, target: &str) -> VfsResult<DirEntry> {
         let dir_path = self.dir_path()?;
         let link_path = join_child_path(&dir_path, name);

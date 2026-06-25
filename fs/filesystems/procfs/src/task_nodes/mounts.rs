@@ -9,8 +9,9 @@ use alloc::{
     vec::Vec,
 };
 
-use kthread::current_process_state;
-use kvfs::{MountFlags, Mountpoint, ST_RDONLY};
+use ktask::WeakKtaskRef;
+use kthread::{AsThread, current_process_state};
+use kvfs::{Location, MountFlags, Mountpoint, ST_RDONLY};
 use kvfs_simple::{DirMapping, SeqFileNode, SeqIterator, SimpleFs};
 
 #[derive(Clone)]
@@ -29,8 +30,16 @@ pub(crate) struct ProcMountEntry {
 }
 
 struct ProcMountCollector {
+    source: ProcMountSource,
+    root: Option<Location>,
     stack: Vec<(Arc<Mountpoint>, u64)>,
     next_mount_id: u64,
+}
+
+#[derive(Clone)]
+enum ProcMountSource {
+    Current,
+    Task(WeakKtaskRef),
 }
 
 pub(crate) struct ProcMountIter {
@@ -39,8 +48,10 @@ pub(crate) struct ProcMountIter {
 }
 
 impl ProcMountCollector {
-    fn new() -> Self {
+    fn new(source: ProcMountSource) -> Self {
         Self {
+            source,
+            root: None,
             stack: Vec::new(),
             next_mount_id: 1,
         }
@@ -49,20 +60,45 @@ impl ProcMountCollector {
     fn rewind(&mut self) {
         self.stack.clear();
         self.next_mount_id = 1;
-        self.stack.push((root_mountpoint(), 0));
+        self.root = root_location_for_source(&self.source);
+        if let Some(root) = &self.root {
+            self.stack.push((root.mountpoint().clone(), 0));
+        }
     }
 
     fn next_entry(&mut self) -> Option<ProcMountEntry> {
-        let (mount, parent_id) = self.stack.pop()?;
-        let mount_id = self.next_mount_id;
-        self.next_mount_id += 1;
+        let root = self.root.as_ref()?;
+        while let Some((mount, parent_id)) = self.stack.pop() {
+            let mount_id = self.next_mount_id;
+            self.next_mount_id += 1;
 
-        let children = sorted_child_mounts(&mount);
-        for child in children.into_iter().rev() {
-            self.stack.push((child, mount_id));
+            let children = sorted_child_mounts(&mount, root);
+            for child in children.into_iter().rev() {
+                self.stack.push((child, mount_id));
+            }
+
+            if let Some(entry) = make_mount_entry(&mount, root, parent_id, mount_id) {
+                return Some(entry);
+            }
         }
+        None
+    }
+}
 
-        Some(make_mount_entry(&mount, parent_id, mount_id))
+impl ProcMountSource {
+    fn root_location(&self) -> Option<Location> {
+        match self {
+            Self::Current => {
+                let proc_state = current_process_state();
+                let fs = proc_state.fs_context().lock();
+                Some(fs.root_dir().clone())
+            }
+            Self::Task(task) => {
+                let task = task.upgrade()?;
+                let fs = task.as_thread().proc_state.fs_context().lock();
+                Some(fs.root_dir().clone())
+            }
+        }
     }
 }
 
@@ -104,33 +140,42 @@ fn show_mountstats(item: &ProcMountEntry, buf: &mut String) -> core::fmt::Result
 
 impl ProcMountIter {
     pub(crate) fn mounts() -> Self {
-        Self::new(show_mounts)
+        Self::new(ProcMountSource::Current, show_mounts)
     }
 
-    pub(crate) fn mountinfo() -> Self {
-        Self::new(show_mountinfo)
+    pub(crate) fn mounts_for_task(task: WeakKtaskRef) -> Self {
+        Self::new(ProcMountSource::Task(task), show_mounts)
     }
 
-    pub(crate) fn mountstats() -> Self {
-        Self::new(show_mountstats)
+    pub(crate) fn mountinfo_for_task(task: WeakKtaskRef) -> Self {
+        Self::new(ProcMountSource::Task(task), show_mountinfo)
     }
 
-    fn new(formatter: fn(&ProcMountEntry, &mut String) -> core::fmt::Result) -> Self {
+    pub(crate) fn mountstats_for_task(task: WeakKtaskRef) -> Self {
+        Self::new(ProcMountSource::Task(task), show_mountstats)
+    }
+
+    fn new(
+        source: ProcMountSource,
+        formatter: fn(&ProcMountEntry, &mut String) -> core::fmt::Result,
+    ) -> Self {
         Self {
-            collector: ProcMountCollector::new(),
+            collector: ProcMountCollector::new(source),
             formatter,
         }
     }
 }
 
-fn mountpoint_path(mount: &Arc<Mountpoint>) -> String {
-    match mount.location() {
-        None => "/".to_string(),
-        Some(location) => location
-            .absolute_path()
-            .map(|path| path.to_string())
-            .unwrap_or_else(|_| format!("<mount:{}>", location.name())),
+fn mountpoint_path(mount: &Arc<Mountpoint>, root: &Location) -> Option<String> {
+    if Arc::ptr_eq(root.mountpoint(), mount) {
+        return Some("/".to_string());
     }
+
+    let location = mount.location()?;
+    location
+        .path_from_root(root)
+        .ok()
+        .map(|path| path.to_string())
 }
 
 fn mount_source_for(is_root: bool, fs_type: &str) -> String {
@@ -189,8 +234,13 @@ fn format_mount_options(mnt_flags: MountFlags, is_ro: bool) -> String {
     options.join(",")
 }
 
-fn make_mount_entry(mount: &Arc<Mountpoint>, parent_id: u64, mount_id: u64) -> ProcMountEntry {
-    let mount_point = mountpoint_path(mount);
+fn make_mount_entry(
+    mount: &Arc<Mountpoint>,
+    root: &Location,
+    parent_id: u64,
+    mount_id: u64,
+) -> Option<ProcMountEntry> {
+    let mount_point = mountpoint_path(mount, root)?;
     let fs_type = mount.super_block().name().to_string();
     let mnt_flags = mount.flags();
     let st_flags = mount
@@ -200,7 +250,7 @@ fn make_mount_entry(mount: &Arc<Mountpoint>, parent_id: u64, mount_id: u64) -> P
         .map_or(0, |stat| stat.mount_flags);
     let mount_ro = mnt_flags.contains(MountFlags::RDONLY);
     let super_ro = st_flags & ST_RDONLY != 0;
-    ProcMountEntry {
+    Some(ProcMountEntry {
         mount_id,
         parent_id,
         major: 0,
@@ -212,18 +262,18 @@ fn make_mount_entry(mount: &Arc<Mountpoint>, parent_id: u64, mount_id: u64) -> P
         mnt_flags,
         mount_ro,
         super_ro,
-    }
+    })
 }
 
-fn root_mountpoint() -> Arc<Mountpoint> {
-    let proc_state = current_process_state();
-    let fs = proc_state.fs_context().lock();
-    fs.root_dir().mountpoint().clone()
+fn root_location_for_source(source: &ProcMountSource) -> Option<Location> {
+    source.root_location()
 }
 
-fn sorted_child_mounts(mount: &Arc<Mountpoint>) -> Vec<Arc<Mountpoint>> {
+fn sorted_child_mounts(mount: &Arc<Mountpoint>, root: &Location) -> Vec<Arc<Mountpoint>> {
     let mut children = mount.child_mounts();
-    children.sort_by_key(mountpoint_path);
+    children.sort_by_key(|child| {
+        mountpoint_path(child, root).unwrap_or_else(|| format!("~mount:{}", child.device()))
+    });
     children
 }
 

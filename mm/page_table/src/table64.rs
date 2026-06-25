@@ -25,6 +25,7 @@ use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
 
 use crate::defs::{
     PageSize, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData, PtError, PtResult,
+    PteReplaceError, PteSnapshot, TlbFlushReceipt,
 };
 
 const ENTRY_COUNT: usize = 512;
@@ -191,6 +192,28 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         Ok((entry.paddr().add(off), entry.flags(), size))
     }
 
+    /// Queries the present leaf entry that maps `vaddr`.
+    ///
+    /// Unlike [`query`](Self::query), this returns the base physical address
+    /// encoded in the leaf PTE and a compare token suitable for
+    /// [`PageTableMut::replace_if_same`].
+    ///
+    /// # Errors
+    ///
+    /// - [`PtError::NotMapped`] — no present leaf entry maps `vaddr`.
+    /// - [`PtError::MappedToHugePage`] — an intermediate entry blocks the walk.
+    /// - [`PtError::InvalidAddress`] — `vaddr` is not a valid canonical address.
+    pub fn query_entry(&self, vaddr: M::VirtAddr) -> PtResult<PteSnapshot> {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PtError::InvalidAddress);
+        }
+        let (entry, size) = self.get_entry(vaddr)?;
+        if !entry.is_present() {
+            return Err(PtError::NotMapped);
+        }
+        Ok(PteSnapshot::from_entry(entry, size))
+    }
+
     /// Creates a mutable mapping view that tracks TLB flushes.
     ///
     /// The returned [`PageTableMut`] borrows `&mut self`, ensuring exclusive
@@ -274,6 +297,12 @@ enum ToFlush<M: PagingMetaData> {
     None,
     Addresses(ArrayVec<M::VirtAddr, FLUSH_THRESHOLD>),
     Full,
+}
+
+impl<M: PagingMetaData> ToFlush<M> {
+    const fn has_pending(&self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 /// Mutable page table access with deferred TLB flushes.
@@ -458,6 +487,62 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         entry.set_flags(flags, size.is_huge());
         self.flush(vaddr);
         Ok(size)
+    }
+
+    /// Replaces a present mapping only if the leaf entry still equals
+    /// `expected`.
+    ///
+    /// This is the page-table commit primitive for COW-style transactions:
+    /// higher layers may allocate or prepare a replacement page first, then
+    /// commit the PTE only if the mapping observed before preparation has not
+    /// changed. A changed PTE is reported without overwriting the current
+    /// mapping, so callers can drop prepared resources and retry.
+    ///
+    /// The replacement preserves the page size from `expected`.
+    ///
+    /// # Returns
+    ///
+    /// The previous snapshot when the replacement succeeds.
+    ///
+    /// # Errors
+    ///
+    /// - [`PteReplaceError::Changed`] — the current entry no longer matches.
+    /// - [`PteReplaceError::PageTable`] — invalid address, invalid physical
+    ///   address, or page-table walk failure.
+    pub fn replace_if_same(
+        &mut self,
+        vaddr: M::VirtAddr,
+        expected: PteSnapshot,
+        paddr: PhysAddr,
+        flags: PagingFlags,
+    ) -> Result<PteSnapshot, PteReplaceError> {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PteReplaceError::PageTable(PtError::InvalidAddress));
+        }
+        if !M::paddr_is_valid(paddr.as_usize()) {
+            return Err(PteReplaceError::PageTable(PtError::InvalidAddress));
+        }
+
+        let (entry, size) = match self.get_entry_mut(vaddr) {
+            Ok(value) => value,
+            Err(PtError::NotMapped) => return Err(PteReplaceError::Changed { current: None }),
+            Err(err) => return Err(PteReplaceError::PageTable(err)),
+        };
+        if !entry.is_present() {
+            return Err(PteReplaceError::Changed { current: None });
+        }
+
+        let current = PteSnapshot::from_entry(entry, size);
+        if size != expected.page_size() || !expected.matches_entry(entry) {
+            return Err(PteReplaceError::Changed {
+                current: Some(current),
+            });
+        }
+
+        entry.set_paddr(paddr.align_down(expected.page_size()));
+        entry.set_flags(flags, expected.page_size().is_huge());
+        self.flush(vaddr);
+        Ok(current)
     }
 
     /// Changes the permission flags of an existing mapping.
@@ -684,7 +769,8 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// - If more than 16 addresses were recorded, a full TLB shootdown is performed.
     ///
     /// This method is also called automatically on `Drop`.
-    pub fn finish(&mut self) {
+    pub fn finish(&mut self) -> TlbFlushReceipt {
+        let had_pending = self.flush.has_pending();
         #[cfg(not(docsrs))]
         if self.inner.is_kernel {
             // Kernel page table: flush ALL online CPUs — the mapping is
@@ -721,6 +807,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             }
         }
         self.flush = ToFlush::None;
+        TlbFlushReceipt::new(had_pending)
     }
 }
 
@@ -729,5 +816,276 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop
 {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use core::{
+        cell::UnsafeCell,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+    use unittest::def_test;
+
+    use crate::{
+        PageSize, PageTable64, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData,
+        PteReplaceError,
+    };
+
+    #[derive(Clone, Copy)]
+    #[repr(transparent)]
+    struct TestEntry(usize);
+
+    impl PageTableEntry for TestEntry {
+        const EMPTY: Self = Self(0);
+
+        fn new_page(paddr: PhysAddr, flags: PagingFlags, is_huge: bool) -> Self {
+            let mut bits = paddr.as_usize() | (flags.bits() << Self::FLAGS_SHIFT) | Self::PRESENT;
+            if is_huge {
+                bits |= Self::HUGE;
+            }
+            Self(bits)
+        }
+
+        fn new_table(paddr: PhysAddr) -> Self {
+            Self(paddr.as_usize() | Self::PRESENT | Self::TABLE)
+        }
+
+        fn paddr(&self) -> PhysAddr {
+            PhysAddr::from(self.0 & Self::PADDR_MASK)
+        }
+
+        fn flags(&self) -> PagingFlags {
+            PagingFlags::from_bits_truncate((self.0 & Self::FLAGS_MASK) >> Self::FLAGS_SHIFT)
+        }
+
+        fn set_paddr(&mut self, paddr: PhysAddr) {
+            self.0 = (self.0 & !Self::PADDR_MASK) | paddr.as_usize();
+        }
+
+        fn set_flags(&mut self, flags: PagingFlags, is_huge: bool) {
+            self.0 = (self.0 & !(Self::FLAGS_MASK | Self::HUGE))
+                | (flags.bits() << Self::FLAGS_SHIFT)
+                | Self::PRESENT;
+            if is_huge {
+                self.0 |= Self::HUGE;
+            }
+        }
+
+        fn bits(self) -> usize {
+            self.0
+        }
+
+        fn is_present(&self) -> bool {
+            self.0 & Self::PRESENT != 0
+        }
+
+        fn is_huge(&self) -> bool {
+            self.0 & Self::HUGE != 0
+        }
+    }
+
+    impl TestEntry {
+        const FLAGS_MASK: usize = 0x7f << 3;
+        const FLAGS_SHIFT: usize = 3;
+        const HUGE: usize = 1 << 2;
+        const PADDR_MASK: usize = !0xfff;
+        const PRESENT: usize = 1 << 0;
+        const TABLE: usize = 1 << 1;
+    }
+
+    impl core::fmt::Debug for TestEntry {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("TestEntry")
+                .field("paddr", &self.paddr())
+                .field("flags", &self.flags())
+                .finish()
+        }
+    }
+
+    struct TestMeta;
+
+    impl PagingMetaData for TestMeta {
+        type VirtAddr = VirtAddr;
+
+        const LEVELS: usize = 4;
+        const PA_MAX_BITS: usize = usize::BITS as usize - 1;
+        const VA_MAX_BITS: usize = usize::BITS as usize - 1;
+
+        fn vaddr_is_valid(_vaddr: usize) -> bool {
+            true
+        }
+
+        fn paddr_is_valid(_paddr: usize) -> bool {
+            true
+        }
+
+        fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
+    }
+
+    #[repr(align(4096))]
+    #[derive(Clone, Copy)]
+    struct TestFrame {
+        _bytes: [u8; PAGE_SIZE_4K],
+    }
+
+    struct FramePool(UnsafeCell<[TestFrame; 64]>);
+
+    // SAFETY: The unit-test frame allocator publishes frames by monotonically
+    // advancing `NEXT_FRAME`; each successful allocation receives a distinct
+    // slot and `dealloc_frame` never returns slots to the pool. Concurrent test
+    // allocations can therefore race only on `NEXT_FRAME`, not on the same
+    // `UnsafeCell` element.
+    unsafe impl Sync for FramePool {}
+
+    static NEXT_FRAME: AtomicUsize = AtomicUsize::new(0);
+    static FRAME_POOL: FramePool = FramePool(UnsafeCell::new(
+        [TestFrame {
+            _bytes: [0; PAGE_SIZE_4K],
+        }; 64],
+    ));
+
+    struct TestHandler;
+
+    impl PagingHandler for TestHandler {
+        fn alloc_frame() -> Option<PhysAddr> {
+            let index = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
+            if index >= 64 {
+                return None;
+            }
+            // SAFETY: Unit tests allocate each frame at most once by advancing
+            // `NEXT_FRAME`. `FramePool` is 4K-aligned and each slot is exactly
+            // one page, so the returned address satisfies `PagingHandler`.
+            let ptr = unsafe { (*FRAME_POOL.0.get()).as_mut_ptr().add(index) };
+            Some(PhysAddr::from(ptr as usize))
+        }
+
+        fn dealloc_frame(_paddr: PhysAddr) {}
+
+        fn p2v(paddr: PhysAddr) -> VirtAddr {
+            VirtAddr::from(paddr.as_usize())
+        }
+    }
+
+    type TestPageTable = PageTable64<TestMeta, TestEntry, TestHandler>;
+
+    fn paddr(value: usize) -> PhysAddr {
+        PhysAddr::from(value)
+    }
+
+    fn vaddr(value: usize) -> VirtAddr {
+        VirtAddr::from(value)
+    }
+
+    #[def_test]
+    fn query_entry_returns_leaf_snapshot() {
+        let mut table = TestPageTable::try_new().expect("test page table");
+        let page = paddr(0x20_0000);
+        table
+            .modify()
+            .map(
+                vaddr(0x4000),
+                page,
+                PageSize::Size4K,
+                PagingFlags::READ | PagingFlags::WRITE,
+            )
+            .expect("map test page");
+
+        let snapshot = table.query_entry(vaddr(0x4123)).expect("query entry");
+
+        assert_eq!(snapshot.paddr(), page);
+        assert_eq!(snapshot.page_size(), PageSize::Size4K);
+        assert_eq!(snapshot.flags(), PagingFlags::READ | PagingFlags::WRITE);
+    }
+
+    #[def_test]
+    fn replace_if_same_commits_only_matching_snapshot() {
+        let mut table = TestPageTable::try_new().expect("test page table");
+        let old_page = paddr(0x30_0000);
+        let new_page = paddr(0x31_0000);
+        table
+            .modify()
+            .map(vaddr(0x8000), old_page, PageSize::Size4K, PagingFlags::READ)
+            .expect("map test page");
+        let expected = table.query_entry(vaddr(0x8000)).expect("query entry");
+
+        let old_snapshot = table
+            .modify()
+            .replace_if_same(
+                vaddr(0x8000),
+                expected,
+                new_page,
+                PagingFlags::READ | PagingFlags::WRITE,
+            )
+            .expect("replace matching entry");
+
+        assert_eq!(old_snapshot.paddr(), old_page);
+        assert_eq!(
+            table.query(vaddr(0x8000)).expect("query replaced mapping"),
+            (
+                new_page,
+                PagingFlags::READ | PagingFlags::WRITE,
+                PageSize::Size4K,
+            )
+        );
+    }
+
+    #[def_test]
+    fn replace_if_same_reports_changed_without_overwrite() {
+        let mut table = TestPageTable::try_new().expect("test page table");
+        let original_page = paddr(0x40_0000);
+        let competing_page = paddr(0x41_0000);
+        let prepared_page = paddr(0x42_0000);
+        table
+            .modify()
+            .map(
+                vaddr(0xc000),
+                original_page,
+                PageSize::Size4K,
+                PagingFlags::READ,
+            )
+            .expect("map test page");
+        let stale = table.query_entry(vaddr(0xc000)).expect("query entry");
+        table
+            .modify()
+            .remap(vaddr(0xc000), competing_page, PagingFlags::READ)
+            .expect("competing remap");
+
+        let result = table.modify().replace_if_same(
+            vaddr(0xc000),
+            stale,
+            prepared_page,
+            PagingFlags::READ | PagingFlags::WRITE,
+        );
+
+        assert!(matches!(
+            result,
+            Err(PteReplaceError::Changed { current: Some(current) })
+                if current.paddr() == competing_page
+        ));
+        assert_eq!(
+            table.query(vaddr(0xc000)).expect("query unchanged mapping"),
+            (competing_page, PagingFlags::READ, PageSize::Size4K)
+        );
+    }
+
+    #[def_test]
+    fn finish_reports_explicit_flush_boundary() {
+        let mut table = TestPageTable::try_new().expect("test page table");
+        let mut modify = table.modify();
+
+        assert!(!modify.finish().had_pending());
+        modify
+            .map(
+                vaddr(0x10_0000),
+                paddr(0x50_0000),
+                PageSize::Size4K,
+                PagingFlags::READ,
+            )
+            .expect("map test page");
+        assert!(modify.finish().had_pending());
+        assert!(!modify.finish().had_pending());
     }
 }

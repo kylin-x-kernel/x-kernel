@@ -44,7 +44,11 @@ syscall / runtime
 2. `Vm` 先做用户地址范围检查。
 3. `access_user_memory()` 在当前线程上打开“正在访问用户内存”标志。
 4. 底层 `user_copy` 执行读写；若发生页错误，trap handler 转交当前进程地址空间处理。
-5. 访问结束后恢复线程标志，并将失败映射为 `MemError` / `KError`。
+5. `kuaccess` 消费 `MmSpace::handle_page_fault()` 返回的 typed fault outcome：
+   `Resolved` / retry-class outcome 让 fault 指令重试；unmapped、permission、bus、
+   OOM、no-progress 和 generic failure 都返回 false，交给架构 exception-table
+   fixup 使 `user_copy` 返回失败。
+6. 访问结束后恢复线程标志，并将失败映射为 `MemError` / `KError`。
 
 ### 字符串装载
 
@@ -61,3 +65,5 @@ syscall / runtime
 
 - 用户字符串装载留在 `kuaccess`，而不是 syscall crate，因为它属于“如何安全访问用户内存”这一职责，不属于某个单独 syscall 族。
 - 只保留字符串级 helper，不在这里扩张为新的通用用户态参数解析层。
+- trap handler 的外部 ABI 仍是 `bool`，但这个 bool 现在只是架构 trap 分发的适配结果；
+  MM 语义来自 `PageFaultOutcome`，避免 `kuaccess` 重新定义缺页分类。

@@ -9,7 +9,7 @@ use bpffs::BpfProgram;
 use kerrno::{KError, KResult};
 use klogger::debug;
 use kuaccess::vm_load_string;
-use kvfs::path::Path;
+use kvfs::{LookupFlags, LookupIntent, lookup_location, lookup_parent, path::Path};
 use posix_types::{UserConstPtr, UserRead};
 
 /// `BPF_PROG_LOAD` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
@@ -106,8 +106,12 @@ fn bpf_obj_pin(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let fs_context = kthread::current_fs_context();
     let fs = fs_context.lock();
-    let (parent, name) = fs.resolve_parent(Path::new(&pathname))?;
-    bpffs::pin_program(&parent, name.as_ref(), program)?;
+    let (parent, name) = lookup_parent(
+        &fs.lookup_context(),
+        Path::new(&pathname),
+        LookupIntent::Open,
+    )?;
+    bpffs::pin_program(&parent, name.as_str(), program)?;
     Ok(0)
 }
 
@@ -120,7 +124,12 @@ fn bpf_obj_get(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let fs_context = kthread::current_fs_context();
     let fs = fs_context.lock();
-    let location = fs.resolve(Path::new(&pathname))?;
+    let location = lookup_location(
+        &fs.lookup_context(),
+        Path::new(&pathname),
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
     let program = bpffs::program_from_location(&location)?;
     let fd = kthread::current_resources().add_file_like(program, true)?;
     Ok(fd as isize)

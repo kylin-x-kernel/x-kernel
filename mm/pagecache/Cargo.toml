@@ -1,0 +1,18 @@
+[package]
+name = "pagecache"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+kalloc = { workspace = true }
+kerrno = { workspace = true }
+khal = { workspace = true }
+ksync = { workspace = true }
+log = { workspace = true }
+memaddr = { workspace = true }
+vmobj = { workspace = true }
+unittest = { workspace = true }

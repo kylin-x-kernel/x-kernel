@@ -27,6 +27,7 @@ ksync.workspace = true
 ktask.workspace = true
 ktty.workspace = true
 kthread.workspace = true
+kvfs.workspace = true
 linux-raw-sys.workspace = true
 linux_sysno.workspace = true
 memspace.workspace = true

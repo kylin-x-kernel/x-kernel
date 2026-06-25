@@ -10,8 +10,9 @@ use kerrno::{KError, KResult};
 use kfs::File;
 use kthread::current_process_state;
 use kvfs::{
-    Location, MountFlags, NodePermission, ST_NOATIME, ST_NODEV, ST_NODIRATIME, ST_NOEXEC,
-    ST_NOSUID, ST_NOSYMFOLLOW, ST_RDONLY, ST_RELATIME, ST_VALID,
+    Location, LookupFlags, LookupIntent, MountFlags, NodePermission, ST_NOATIME, ST_NODEV,
+    ST_NODIRATIME, ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW, ST_RDONLY, ST_RELATIME, ST_VALID,
+    lookup_location,
 };
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
@@ -187,14 +188,16 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
     let path = path.load_string()?;
     debug!("sys_statfs <= path: {path:?}");
 
-    buf.write_vm(statfs(
-        &current_process_state()
-            .fs_context()
-            .lock()
-            .resolve(path)?
-            .mountpoint()
-            .root_location(),
-    )?)?;
+    let process = current_process_state();
+    let fs_context = process.fs_context();
+    let fs = fs_context.lock();
+    let location = lookup_location(
+        &fs.lookup_context(),
+        path.as_str(),
+        LookupIntent::Stat,
+        LookupFlags::follow(),
+    )?;
+    buf.write_vm(statfs(&location.mountpoint().root_location())?)?;
     Ok(0)
 }
 

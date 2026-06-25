@@ -6,13 +6,13 @@
 //!
 //! These traits name the ownership boundaries for superblock-wide operations,
 //! inode namespace operations, open-file operations, and address-space/page-cache
-//! operations. `SuperBlockOperations` is the owned superblock boundary; the
-//! other families still provide adapters while filesystems migrate away from
-//! legacy node traits.
+//! operations.
+
+use pagecache::{Folio, PageIndex};
 
 use crate::{
-    DirEntry, DirEntrySink, DirNode, FileNode, Metadata, MetadataUpdate, NodePermission, NodeType,
-    StatFs, VfsResult,
+    AddressSpace, DirEntry, DirEntrySink, Metadata, MetadataUpdate, NodePermission, NodeType,
+    StatFs, VfsError, VfsResult,
 };
 
 /// Superblock-wide filesystem operations.
@@ -43,9 +43,7 @@ pub trait SuperBlockOperations: Send + Sync + 'static {
 
 /// Inode metadata and namespace operations.
 ///
-/// This groups inode-scoped namespace operations, plus the current directory
-/// iteration hook that still needs to move out of the compatibility
-/// `DirNodeOps` trait.
+/// This groups inode-scoped namespace operations and directory iteration.
 pub trait InodeOperations: Send + Sync {
     /// Returns metadata for this inode.
     fn metadata(&self) -> VfsResult<Metadata>;
@@ -103,8 +101,7 @@ pub trait InodeOperations: Send + Sync {
 
 /// Open-file operations.
 ///
-/// This is the future home for open-file behavior. The current compatibility
-/// path still routes most calls through `FileNodeOps`.
+/// This is the operation boundary for open-file behavior.
 pub trait FileOperations: Send + Sync {
     /// Reads file data at `offset`.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize>;
@@ -121,30 +118,155 @@ pub trait FileOperations: Send + Sync {
     fn fsync(&self, data_only: bool) -> VfsResult<()>;
 }
 
-/// Adapter from an existing file node to the new file-ops shape.
-pub struct FileNodeFileOperations<'a> {
-    file: &'a FileNode,
+/// Writeback range and mode for `AddressSpaceOperations::writepages`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WritebackControl {
+    range_start: u64,
+    range_end: u64,
+    data_only: bool,
 }
 
-impl<'a> FileNodeFileOperations<'a> {
-    /// Creates an adapter over `file`.
-    pub fn new(file: &'a FileNode) -> Self {
-        Self { file }
+impl WritebackControl {
+    /// Creates a full-address-space writeback request.
+    pub const fn all(data_only: bool) -> Self {
+        Self {
+            range_start: 0,
+            range_end: u64::MAX,
+            data_only,
+        }
+    }
+
+    /// Creates a writeback request from `range_start` through EOF.
+    pub const fn from(range_start: u64, data_only: bool) -> Self {
+        Self {
+            range_start,
+            range_end: u64::MAX,
+            data_only,
+        }
+    }
+
+    /// Creates a bounded writeback request for `[range_start, range_start + len)`.
+    pub fn range(range_start: u64, len: usize, data_only: bool) -> VfsResult<Self> {
+        let range_end = range_start
+            .checked_add(len as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        Ok(Self {
+            range_start,
+            range_end,
+            data_only,
+        })
+    }
+
+    /// Returns the first byte offset covered by this request.
+    pub const fn range_start(self) -> u64 {
+        self.range_start
+    }
+
+    /// Returns the exclusive byte end offset.
+    pub const fn range_end(self) -> u64 {
+        self.range_end
+    }
+
+    /// Returns whether metadata writeback may be skipped.
+    pub const fn is_data_only(self) -> bool {
+        self.data_only
     }
 }
 
-impl FileOperations for FileNodeFileOperations<'_> {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        self.file.read_at(buf, offset)
+/// Readahead window for `AddressSpaceOperations::readahead`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadaheadControl {
+    start_index: PageIndex,
+    count: usize,
+}
+
+impl ReadaheadControl {
+    /// Creates a readahead window starting at `start_index`.
+    pub const fn new(start_index: PageIndex, count: usize) -> Self {
+        Self { start_index, count }
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        self.file.write_at(buf, offset)
+    /// Returns the first folio index in the window.
+    pub const fn start_index(self) -> PageIndex {
+        self.start_index
     }
 
-    fn fsync(&self, data_only: bool) -> VfsResult<()> {
-        self.file.sync(data_only)
+    /// Returns the number of folios requested.
+    pub const fn count(self) -> usize {
+        self.count
     }
+}
+
+/// Buffered write setup request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriteBeginRequest {
+    pos: u64,
+    len: usize,
+}
+
+impl WriteBeginRequest {
+    /// Creates a buffered-write setup request for `[pos, pos + len)`.
+    pub const fn new(pos: u64, len: usize) -> Self {
+        Self { pos, len }
+    }
+
+    /// Returns the starting byte offset.
+    pub const fn pos(self) -> u64 {
+        self.pos
+    }
+
+    /// Returns the requested write length.
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    /// Returns whether the requested write length is zero.
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+/// Buffered write completion request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriteEndRequest {
+    pos: u64,
+    len: usize,
+    copied: usize,
+}
+
+impl WriteEndRequest {
+    /// Creates a buffered-write completion request.
+    pub const fn new(pos: u64, len: usize, copied: usize) -> Self {
+        Self { pos, len, copied }
+    }
+
+    /// Returns the starting byte offset.
+    pub const fn pos(self) -> u64 {
+        self.pos
+    }
+
+    /// Returns the original requested write length.
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    /// Returns whether the original requested write length is zero.
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the bytes copied into the page cache.
+    pub const fn copied(self) -> usize {
+        self.copied
+    }
+}
+
+/// Direct-I/O operation passed to `AddressSpaceOperations::direct_io`.
+pub enum DirectIoRequest<'a> {
+    /// Reads file data into a kernel buffer.
+    Read { offset: u64, buf: &'a mut [u8] },
+    /// Writes file data from a kernel buffer.
+    Write { offset: u64, buf: &'a [u8] },
 }
 
 /// Page-cache and backing-store operations for an inode address space.
@@ -155,88 +277,59 @@ impl FileOperations for FileNodeFileOperations<'_> {
 ///
 /// Implementations should be tied to the owning inode/superblock state, not to
 /// one open file instance.
+/// Inode teardown is driven by VFS inode/superblock lifetime code, not by this
+/// operation family.
 pub trait AddressSpaceOperations: Send + Sync + 'static {
-    /// Reads one page from backing storage into `page`.
-    fn read_page(&self, page_index: u64, page: &mut [u8]) -> VfsResult<usize>;
-
-    /// Writes one page from `page` to backing storage.
-    fn write_page(&self, page_index: u64, page: &[u8]) -> VfsResult<usize>;
+    /// Reads backing storage into a newly materialized folio.
+    fn read_folio(&self, folio: &mut Folio, index: PageIndex) -> VfsResult<usize>;
 
     /// Writes all dirty pages known to this address space.
-    fn writepages(&self, data_only: bool) -> VfsResult<()>;
+    fn writepages(&self, mapping: &AddressSpace, control: WritebackControl) -> VfsResult<()>;
 
-    /// Evicts cached pages before the owning inode is destroyed.
-    fn evict(&self) -> VfsResult<()> {
-        self.writepages(false)
+    /// Marks a folio dirty.
+    fn dirty_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<bool> {
+        let was_dirty = folio.is_dirty();
+        folio.mark_dirty();
+        Ok(!was_dirty)
+    }
+
+    /// Starts readahead for the supplied folio window.
+    fn readahead(&self, _mapping: &AddressSpace, _control: ReadaheadControl) -> VfsResult<()> {
+        Ok(())
+    }
+
+    /// Prepares a buffered write.
+    fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
+        Ok(())
+    }
+
+    /// Completes a buffered write.
+    fn write_end(&self, _mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
+        Ok(request.copied())
     }
 
     /// Invalidates cached pages starting at `page_index`.
-    fn invalidate_from(&self, page_index: u64) -> VfsResult<()>;
-}
-
-/// Adapter from an existing directory node to the new inode-ops shape.
-///
-/// This keeps PR2 incremental: callers can target `InodeOperations` while old
-/// filesystems continue to implement `DirNodeOps`.
-pub struct DirNodeInodeOperations<'a> {
-    dir: &'a DirNode,
-}
-
-impl<'a> DirNodeInodeOperations<'a> {
-    /// Creates an adapter over `dir`.
-    pub fn new(dir: &'a DirNode) -> Self {
-        Self { dir }
-    }
-}
-
-impl InodeOperations for DirNodeInodeOperations<'_> {
-    fn metadata(&self) -> VfsResult<Metadata> {
-        self.dir.metadata()
-    }
-
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        self.dir.update_metadata(update)
-    }
-
-    fn lookup(&self, _dir: &DirEntry, name: &str) -> VfsResult<DirEntry> {
-        self.dir.lookup(name)
-    }
-
-    fn create(
+    fn invalidate_folio(
         &self,
-        _dir: &DirEntry,
-        name: &str,
-        node_type: NodeType,
-        permission: NodePermission,
-    ) -> VfsResult<DirEntry> {
-        self.dir.create(name, node_type, permission)
-    }
-
-    fn link(&self, _dir: &DirEntry, name: &str, source: &DirEntry) -> VfsResult<DirEntry> {
-        self.dir.link(name, source)
-    }
-
-    fn unlink(&self, _dir: &DirEntry, name: &str) -> VfsResult<()> {
-        let entry = self.dir.lookup(name)?;
-        self.dir.unlink(name, entry.is_dir())
-    }
-
-    fn rename(
-        &self,
-        _old_dir: &DirEntry,
-        old_name: &str,
-        new_dir: &DirEntry,
-        new_name: &str,
+        _mapping: &AddressSpace,
+        _folio: &mut Folio,
+        _offset: usize,
+        _len: usize,
     ) -> VfsResult<()> {
-        self.dir.rename(old_name, new_dir.as_dir()?, new_name)
+        Ok(())
     }
 
-    fn read_dir(
+    /// Releases a clean folio if the filesystem has no private attachment left.
+    fn release_folio(&self, _mapping: &AddressSpace, _folio: &Folio) -> VfsResult<bool> {
+        Ok(true)
+    }
+
+    /// Performs direct I/O for this address space.
+    fn direct_io(
         &self,
-        _dir: &DirEntry,
-        offset: u64,
-        sink: &mut dyn DirEntrySink,
+        _mapping: &AddressSpace,
+        _request: DirectIoRequest<'_>,
     ) -> VfsResult<usize> {
-        self.dir.read_dir(offset, sink)
+        Err(VfsError::NoSuchDevice)
     }
 }

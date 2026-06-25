@@ -49,6 +49,7 @@ pub struct DgramTransport {
     rx: Mutex<Option<(async_channel::Receiver<Datagram>, Arc<PollSet>)>>,
     peer: RwLock<Option<Channel>>,
     local_addr: RwLock<UnixAddr>,
+    bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     poll_state: Arc<PollSet>,
     options: GeneralOptions,
     pid: u32,
@@ -59,6 +60,7 @@ impl DgramTransport {
             rx: Mutex::new(None),
             peer: RwLock::new(None),
             local_addr: RwLock::new(UnixAddr::Unbound),
+            bind_slot: Mutex::new(None),
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
             pid,
@@ -74,6 +76,7 @@ impl DgramTransport {
             rx: Mutex::new(Some(rx)),
             peer: RwLock::new(Some(peer)),
             local_addr: RwLock::new(UnixAddr::Unbound),
+            bind_slot: Mutex::new(None),
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
             pid,
@@ -143,6 +146,7 @@ impl Configurable for DgramTransport {
 #[async_trait]
 impl UnixTransportOps for DgramTransport {
     fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
+        let bind_slot_handle = slot.dgram.clone();
         let mut slot = slot.dgram.lock();
         if slot.is_some() {
             return Err(KError::AddrInUse);
@@ -157,8 +161,10 @@ impl UnixTransportOps for DgramTransport {
             tx,
             poll: poll.clone(),
         });
+        drop(slot);
         *guard = Some((rx, poll));
         self.local_addr.write().clone_from(local_addr);
+        *self.bind_slot.lock() = Some(bind_slot_handle);
         self.poll_state.wake();
         Ok(())
     }
@@ -275,6 +281,9 @@ impl Pollable for DgramTransport {
 
 impl Drop for DgramTransport {
     fn drop(&mut self) {
+        if let Some(slot) = self.bind_slot.lock().take() {
+            *slot.lock() = None;
+        }
         if let Some(chan) = self.peer.write().take() {
             chan.poll.wake();
         }

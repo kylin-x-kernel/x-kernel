@@ -18,6 +18,13 @@ Current shared skills:
 - `docs/ai/skills/test-harness/SKILL.md`:
   external Starry Test Harness workflow for guest regression cases,
   suite registration, execution, and syscall-focused test design constraints.
+- `docs/ai/skills/problem-diagnosis/SKILL.md`:
+  first-pass issue classification and localization workflow for build,
+  boot, panic, hang, regression, and performance problems.
+- `docs/ai/skills/linux-mm-design-knowledge/SKILL.md`:
+  Linux memory-management semantic knowledge base for X-Kernel MM design,
+  covering address space, VMA, mmap, faults, anonymous memory, file-backed
+  mmap, COW, brk, madvise, msync, and mlock.
 
 ## Project Overview
 

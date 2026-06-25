@@ -21,29 +21,31 @@ extent、allocator 和 journal。当前 kvfs/KFS 的对象身份、页缓存接�
 
 - 路径关系；
 - `FileNode` 或 `DirNode`；
-- `user_data`；
+- dentry 级 attachment；
 - node type。
 
-PageCache 通过 `Location::user_data()` 挂在 `DirEntry` 上。硬链接可能产生多个
+PageCache 曾经通过 dentry 级 attachment 挂在 `DirEntry` 上。硬链接可能产生多个
 `DirEntry`，甚至多个文件系统 inode wrapper，因此同一磁盘 inode 可能拥有多份
 缓存和锁。第一批 VFS 重构已经把普通文件的缓存迁到 inode attachment，目录 inode
 唯一化仍在后续阶段完成。
 
-### PageCache 属于 `CachedFile`
+### PageCache 属于 inode address-space
 
 改造前关系近似：
 
 ```text
-CachedFile
-  -> CachedFileShared
+open file
+  -> VfsInode::i_mapping
+  -> kvfs::AddressSpace
+  -> pagecache::Mapping
        -> per-file 64-page LRU
        -> eviction listeners
        -> cached pages
 ```
 
-第一批 VFS-2 重构后，`CachedFileShared` 被拆为 inode 级 `FileMapping`，并由
-`CachedFile`、buffered I/O 和 mmap backend 共享。它仍缺少全局 reclaim、dirty
-accounting 和后台 writeback。
+后续 VFS-2 重构把缓存身份绑定到 `VfsInode::i_mapping`，并由 KFS file I/O、
+buffered I/O 和 mmap backend 共享。它仍缺少全局 reclaim、dirty accounting 和
+后台 writeback。
 
 ### 文件系统接口仍是字节 I/O
 
@@ -466,7 +468,7 @@ sequenceDiagram
     P->>K: validate fd and user buffer
     K->>F: read/write on opened file
     F->>AS: buffered I/O through inode address space
-    AS->>X: AddressSpaceOperations read/write/writepages
+    AS->>X: AddressSpaceOperations read_folio/writepages
     X->>X: extent mapping and journal rules
     X->>B: block read/write/flush
     B-->>X: I/O completion or error
@@ -585,7 +587,7 @@ syscall ABI
   -> namei walks Location { Mountpoint, DirEntry }
   -> dentry lookup resolves or creates VfsInode
   -> open creates VfsFile
-  -> read/write calls FileOperations or AddressSpaceOperations
+  -> buffered read/write calls FileOperations or AddressSpaceOperations
   -> ext4 implements the operation using inode/extent/journal/block layers
 ```
 
@@ -729,30 +731,27 @@ pub struct DirEntry {
 
 ### TypeMap 拆分
 
-当前 `DirEntry::user_data` 需要拆成：
+当前 dentry 级 attachment 需要拆成：
 
 - dentry attachment：路径解析、negative dentry、mount 等路径相关状态；
 - inode attachment：`FileMapping`、inode 通知、锁或 inode 级扩展。
 
 禁止再通过 dentry attachment 保存文件数据缓存。
 
-### 对现有文件系统的兼容
+### 现有文件系统改造边界
 
-迁移期间提供构造辅助函数：
+VFS 公共层不再为旧 inode 构造路径保留第二套 identity。已有文件系统需要按同一
+superblock/inode cache 规则接入：
 
-```rust
-DirEntry::new_file_from_inode(...)
-DirEntry::new_dir_from_inode(...)
-```
-
-旧文件系统可以先使用默认 inode cache wrapper，随后逐步改为显式 `iget`。
-KExt4 从第一天开始使用唯一 inode identity。
+- root、lookup、create、link 都返回同一 inode cache 管理的 `VfsInode`；
+- 字节 I/O 文件系统也要通过 inode identity 取得 mapping；
+- KExt4 从第一天开始使用唯一 inode identity。
 
 ## 改造二：建立 inode 级 `FileMapping`
 
 ### 所有权
 
-`FileMapping` 从 `CachedFile` 中抽离，绑定到 `VfsInode`：
+`FileMapping` / `pagecache::Mapping` 绑定到 `VfsInode::i_mapping`：
 
 ```rust
 pub struct FileMapping {
@@ -766,17 +765,17 @@ pub struct FileMapping {
 关系变为：
 
 ```text
-CachedFile A ----+
-CachedFile B ----+--> Arc<FileMapping> --> CachedPage
-mmap backend ----+
+File A ---------+
+File B ---------+--> VfsInode::i_mapping --> AddressSpace --> pagecache::Mapping
+mmap backend ---+
 ```
 
-`CachedFile` 只保存：
+open file 只保存：
 
 - open/location 状态；
 - flags 和 position；
 - append 等 open-file-description 级状态；
-- `Arc<FileMapping>`。
+- 通过 inode address-space 取得的 page-cache mapping 引用。
 
 ### 生命周期
 
@@ -787,7 +786,7 @@ mmap backend ----+
 - inode eviction 前执行最终 writeback 和 invalidation；
 - unmount/freeze 需要遍历该 superblock 的 mappings。
 
-这与当前“最后一个 `CachedFile` drop 时同步并清空”不同。最终架构中，缓存生命
+这与旧的“最后一个 open-file cache wrapper drop 时同步并清空”不同。最终架构中，缓存生命
 周期属于 inode 和内存压力，不属于 fd 数量。
 
 ### 索引
@@ -862,17 +861,11 @@ KFS 负责：
 - ordered-data completion 注册；
 - 文件系统特定错误。
 
-### 兼容适配
+### 字节 I/O 文件系统接入
 
-为旧文件系统提供默认适配器：
-
-```text
-read_pages  -> 循环 FileNodeOps::read_at
-write_pages -> 循环 FileNodeOps::write_at
-```
-
-兼容适配器只用于迁移，不能成为 KExt4 的最终路径。适配器需保留当前短读清零和
-EOF 规则。
+VFS 公共层不提供 `FileNodeOps` 到 page I/O 的公共转换器。仍以字节 I/O 为后端
+的文件系统，需要在自身 address-space 实现中完成页批量读写、短读清零和 EOF
+规则，不能把旧 fd 路径作为公共 VFS 数据路径。
 
 ## 改造四：完善 cached page 状态机
 
@@ -991,7 +984,7 @@ fsync 和 ordered-data 语义。
 
 ## 改造六：truncate、hole punch 与失效协议
 
-当前 `CachedFile::set_len` 先调用文件系统 `set_len`，再直接遍历本地 cache。
+当前 file truncate 路径先调用文件系统 `set_len`，再更新 inode-owned mapping。
 最终需要 mapping 与 inode 操作协作。
 
 建议协议：
@@ -1226,7 +1219,7 @@ PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
   superblock/inode writeback、reclaim 和 mount 域管理提供入口；
 - `kvfs::ops` 增加 Linux 风格的 `SuperBlockOperations`、`InodeOperations`、
   `FileOperations` 和 `AddressSpaceOperations` trait；
-- 现有 `DirNodeOps`/`FileNodeOps` 通过 adapter 暂时接入新 ops family；
+- `DirNodeOps`/`FileNodeOps` 不再通过公开转接层暴露到新 ops family；
 - `InodeCache` 增加目录 inode API，等目录节点移除 dentry/path 上下文后用于 root
   和普通目录唯一化。
 
@@ -1245,18 +1238,15 @@ PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
 
 - `AddressSpace` 反向只弱引用 inode，避免 inode attachment 与 address-space 形成
   `Arc` 引用环；
-- KFS `FileMapping` 提供 `AddressSpaceOperations` adapter，`writepages` 复用现有
-  dirty page sync，`invalidate_from` 复用 flush-and-evict；
-- `CachedFile` 从 `Location.address_space()` 获取/创建 inode page cache，不再直接
-  把 `FileMappingData` 挂在 `VfsInode::inode_data` 顶层；
-- 直接使用 `CachedFile::get_or_create` 的 mmap、exec loader 和 TEE TA loader 改为
-  显式传播 VFS 错误。
+- KFS mapping bridge 的 writeback/invalidate 逻辑收敛到 inode address-space 域；
+- KFS `File` 从 `Location` / `VfsInode::i_mapping` 获取/创建 inode page cache；
+- mmap、exec loader 和 TEE TA loader 改为通过 opened `File` 访问 inode mapping。
 
 ### VFS-2：inode 级 FileMapping
 
 改动：
 
-- 从 `CachedFile` 抽出 `FileMapping` 和 cached page 模块；
+- 从 open-file wrapper 抽出 `FileMapping` 和 cached page 模块；
 - mapping 绑定 `VfsInode`；
 - buffered I/O 和 mmap 共享 mapping；
 - 页面索引改为 `u64`；
@@ -1266,12 +1256,13 @@ PR2 从 VFS 边界开始收敛，而不是继续在 KFS runtime 内堆功能：
 
 当前第一批只完成 `FileMapping` 的所有权和索引类型前置改造：
 
-- `CachedFile` 仍是打开文件的高层 wrapper；
-- `FileMapping` 作为 inode attachment 保存 LRU page cache 和 mmap eviction listener；
+- `File` 是打开文件的高层 wrapper；
+- `FileMapping` / `pagecache::Mapping` 作为 inode address-space 保存 page cache 和 mmap eviction listener；
 - inode attachment 强持有 `FileMapping`，最后一个 fd close 不销毁 page cache；
-- `FileMapping::sync` 只写回脏页，不清空 LRU 页面；
-- `FsOperations::write` 在 helper 返回前显式 sync，作为完整 superblock writeback 前的过渡闭环；
-- buffered I/O 与 `memspace-file` 通过同一个 mapping 共享页面；
+- `AddressSpaceOperations::writepages` 只写回脏页，不清空 LRU 页面；
+- `FsContext::write` 是进程文件系统上下文上的 helper，完整写回由 superblock
+  writeback 路径负责；
+- buffered I/O 与 `mm/filemap` 通过同一个 mapping 共享页面；
 - page index 类型改为 `u64`，避免大文件页号在 mmap/cache 边界截断。
 
 dirty/writeback/error/invalidate 状态机、批量 I/O 和 `AddressSpaceOps` 仍归入后续阶段。
@@ -1292,7 +1283,7 @@ dirty/writeback/error/invalidate 状态机、批量 I/O 和 `AddressSpaceOps` �
 
 - kvfs 公共 trait 和请求类型；
 - KFS 按连续页面形成批次；
-- 旧 `FileNodeOps` compatibility adapter；
+- 删除旧 `FileNodeOps` 转接层；
 - KExt4 原生 `read_pages/write_pages`；
 - read-ahead 和 write clustering 基础。
 
@@ -1338,21 +1329,19 @@ dirty/writeback/error/invalidate 状态机、批量 I/O 和 `AddressSpaceOps` �
 
 VFS-8 可以在首个可用 KExt4 之后完成，但接口设计不能阻止它。
 
-## 兼容迁移
+## 文件系统接入边界
 
-迁移期间必须保持现有文件系统可构建：
-
-| 文件系统 | 迁移策略 |
+| 文件系统 | 接入边界 |
 |---|---|
 | procfs/devfs | 继续 `NON_CACHEABLE`，无需 address space |
 | memfs/tmpfs | 使用 inode mapping，页面本身为权威数据 |
-| fs9p | 默认字节 I/O adapter，按远端一致性策略缓存 |
-| FAT | 默认 adapter，后续可原生批量页 I/O |
-| rsext4 | 默认 adapter，作为 KExt4 性能基线 |
+| fs9p | 远端字节 I/O 策略，按远端一致性策略缓存 |
+| FAT | 当前字节 I/O 策略，后续可原生批量页 I/O |
+| rsext4 | 当前字节 I/O 策略，作为 KExt4 性能基线 |
 | KExt4 | 原生 inode identity 和 `AddressSpaceOps` |
 
-公共 trait 新增方法优先提供默认实现或适配器。删除旧接口前必须完成所有调用者
-迁移，不能长期维护两套权威数据路径。
+公共 trait 新增方法按目标边界实现。旧接口不能继续作为 VFS 公共入口或第二套
+权威数据路径保留。
 
 ## 验证要求
 

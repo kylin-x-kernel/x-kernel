@@ -1545,8 +1545,10 @@ pub fn syscall_storage_next_enum(
 
 #[unittest::mod_test]
 pub mod tests_tee_svc_storage {
+    use alloc::{string::String, vec::Vec};
     use core::ffi::c_ulong;
 
+    use kvfs::{DirEntrySink, LookupFlags, LookupIntent, NodeType, lookup_location};
     use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
@@ -1586,6 +1588,65 @@ pub mod tests_tee_svc_storage {
         let buffer = TestUserBuffer::new(bytes.len()).unwrap();
         buffer.write_bytes(bytes).unwrap();
         buffer
+    }
+
+    #[derive(Default)]
+    struct TestStorageDirSink {
+        entries: Vec<(String, NodeType)>,
+        next_offset: Option<u64>,
+    }
+
+    impl DirEntrySink for TestStorageDirSink {
+        fn accept(&mut self, name: &str, _ino: u64, node_type: NodeType, offset: u64) -> bool {
+            if name != "." && name != ".." {
+                self.entries.push((name.into(), node_type));
+            }
+            self.next_offset = Some(offset);
+            true
+        }
+    }
+
+    fn cleanup_test_storage_root() {
+        let fs_context = kthread::current_fs_context();
+        let fs = fs_context.lock();
+        let Ok(dir) = lookup_location(
+            &fs.lookup_context(),
+            CFG_TEE_FS_PARENT_PATH,
+            LookupIntent::Open,
+            LookupFlags::follow(),
+        ) else {
+            drop(fs);
+            let _ = FileVariant::create_dir(CFG_TEE_FS_PARENT_PATH);
+            return;
+        };
+
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        loop {
+            let mut sink = TestStorageDirSink::default();
+            let Ok(read) = dir.read_dir(offset, &mut sink) else {
+                break;
+            };
+            entries.extend(sink.entries);
+            let Some(next_offset) = sink.next_offset else {
+                break;
+            };
+            if read == 0 || next_offset <= offset {
+                break;
+            }
+            offset = next_offset;
+        }
+        drop(fs);
+
+        for (name, node_type) in entries {
+            let path = alloc::format!("{CFG_TEE_FS_PARENT_PATH}{name}");
+            if node_type == NodeType::Directory {
+                let _ = FileVariant::remove_dir(&path);
+            } else {
+                let _ = FileVariant::remove_file(&path);
+            }
+        }
+        let _ = FileVariant::create_dir(CFG_TEE_FS_PARENT_PATH);
     }
 
     // --- Tests for tee_svc_storage_create_dirname ---
@@ -1739,6 +1800,7 @@ pub mod tests_tee_svc_storage {
     fn test_syscall_storage_obj_create_type_data() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
         let object_id = "test_object_create";
+        cleanup_test_storage_root();
         let flags = TEE_DATA_FLAG_ACCESS_READ
             | TEE_DATA_FLAG_ACCESS_WRITE
             | TEE_DATA_FLAG_ACCESS_WRITE_META
@@ -1903,6 +1965,7 @@ pub mod tests_tee_svc_storage {
     fn test_syscall_storage_obj_open() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
         let object_id = "test_object";
+        cleanup_test_storage_root();
         let create_flags = TEE_DATA_FLAG_ACCESS_READ
             | TEE_DATA_FLAG_ACCESS_WRITE
             | TEE_DATA_FLAG_ACCESS_WRITE_META
@@ -1976,6 +2039,7 @@ pub mod tests_tee_svc_storage {
     fn test_syscall_storage_obj_seek_rejects_invalid_whence() {
         let storage_id = TEE_STORAGE_PRIVATE as c_ulong;
         let object_id = "seek_invalid_whence";
+        cleanup_test_storage_root();
         let data_create = b"seek_data";
         let object_id_user = user_buffer_from_bytes(object_id.as_bytes());
         let data_create_user = user_buffer_from_bytes(data_create);

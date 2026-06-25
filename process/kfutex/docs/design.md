@@ -16,7 +16,7 @@ futex 语义同时依赖：
 - wait/wake/requeue 的等待队列语义。
 
 这些数据和策略需要一起演进。
-如果只把 `FutexTable` 类型放在一个 crate，而把实例管理和 shared/private 路由留在别处，owner 边界会被切开，后续很难审计。
+如果只把 `FutexTable` 类型放在一个 crate，而把实例管理和 shared/private 路由留在别处，owner 边界会被切开，审计 shared/private 隔离会变得困难。
 
 ## 范围
 
@@ -99,7 +99,10 @@ FutexKey::new(aspace, address)
   └─ otherwise                             → Private { address }
 ```
 
-shared key 的 identity 使用共享页或 file-backed futex handle 的 `Weak` 指针身份。
+shared key 的 identity 使用：
+
+- shared-anon 路径：`memspace` 暴露的 `VmObjectId`；
+- file-backed 路径：通过 `memspace` 暴露的 VMA backing 描述，使用 inode-owned `MappingIdentity`。
 
 ### table 选择
 
@@ -141,6 +144,14 @@ syscall / runtime cleanup
 - entry 生命周期与等待队列清理。
 
 因此这部分必须由 `kfutex` 统一拥有，而不是把类型和实例管理拆到不同 crate。
+
+### file-backed shared futex 绑定 inode-owned mapping
+
+Linux 对 file-backed shared futex 的核心不是“哪个 `struct file` 打开的”，而是
+“它属于哪个 `file->f_mapping` / `struct address_space`”。
+
+因此 `kfutex` 使用 inode-owned `MappingIdentity` 作为 file-backed shared table
+的 region identity，而不是把 open-file 实例或 runtime 私有句柄当作共享对象本体。
 
 ### robust-list 仍留在 `kthread`
 

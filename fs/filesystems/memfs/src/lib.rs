@@ -8,6 +8,8 @@
 
 extern crate alloc;
 
+pub mod shmem;
+
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{any::Any, borrow::Borrow, cmp::Ordering, task::Context, time::Duration};
 

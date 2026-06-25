@@ -14,4 +14,7 @@ kvfs-simple.workspace = true
 kpoll.workspace = true
 ksync.workspace = true
 hashbrown.workspace = true
+linux-raw-sys = { workspace = true }
+bitflags = { workspace = true }
 slab = { workspace = true }
+unittest.workspace = true

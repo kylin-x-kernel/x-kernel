@@ -43,7 +43,7 @@ impl Pollable for DummyFd {
     fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
 }
 
-fn write_zeros_range(file: &kfs::FileBackend, start: u64, end: u64) -> KResult<()> {
+fn write_zeros_range(file: &File, start: u64, end: u64) -> KResult<()> {
     if end <= start {
         return Ok(());
     }
@@ -144,10 +144,10 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
     if length < 0 {
         return Err(KError::InvalidInput);
     }
-    let file = OpenOptions::new()
-        .write(true)
-        .open(&kthread::current_process_fs_context().lock(), path)?;
-    file.access(FileFlags::WRITE)?.set_len(length as _)?;
+    let fs_context = kthread::current_process_fs_context();
+    let fs = fs_context.lock();
+    let file = OpenOptions::new().write(true).open(&fs, path)?;
+    file.set_len(length as _)?;
     Ok(0)
 }
 
@@ -156,7 +156,7 @@ pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     debug!("sys_ftruncate <= {fd} {length}");
     // Truncate file descriptor to specified length
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
-    f.access(FileFlags::WRITE)?.set_len(length as _)?;
+    f.set_len(length as _)?;
     Ok(0)
 }
 
@@ -194,12 +194,12 @@ pub fn sys_fallocate(
     let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
 
     let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
-    let file = f.access(FileFlags::WRITE)?;
+    f.access(FileFlags::WRITE)?;
 
     let start = offset as u64;
     let len_u = len as u64;
     let end = start.checked_add(len_u).ok_or(KError::InvalidInput)?;
-    let old_size = file.location().len()?;
+    let old_size = f.location().len()?;
 
     match base_mode {
         // Standard preallocation behavior in our current implementation.
@@ -210,7 +210,7 @@ pub fn sys_fallocate(
                     // Some backends may delay i_size visibility on set_len-only growth.
                     // Force EOF advancement with a single-byte write at target_size - 1.
                     let z = [0u8; 1];
-                    let written = file.write_at(&z[..], target_size - 1)?;
+                    let written = f.write_at(&z[..], target_size - 1)?;
                     if written != 1 {
                         return Err(KError::WriteZero);
                     }
@@ -228,7 +228,7 @@ pub fn sys_fallocate(
                 return Ok(0);
             }
 
-            write_zeros_range(file, start, target_end)?;
+            write_zeros_range(&f, start, target_end)?;
         }
         // Emulate zero-range by writing zeros to the range.
         FALLOC_FL_ZERO_RANGE => {
@@ -241,10 +241,10 @@ pub fn sys_fallocate(
             }
 
             if !keep_size && target_end > old_size {
-                file.set_len(target_end)?;
+                f.set_len(target_end)?;
             }
 
-            write_zeros_range(file, start, target_end)?;
+            write_zeros_range(&f, start, target_end)?;
         }
         // On non-reflink filesystems, emulate unshare by preallocating range semantics.
         FALLOC_FL_UNSHARE_RANGE => {
@@ -252,7 +252,7 @@ pub fn sys_fallocate(
                 let target_size = old_size.max(end);
                 if target_size > old_size {
                     let z = [0u8; 1];
-                    let written = file.write_at(&z[..], target_size - 1)?;
+                    let written = f.write_at(&z[..], target_size - 1)?;
                     if written != 1 {
                         return Err(KError::WriteZero);
                     }
@@ -276,7 +276,7 @@ pub fn sys_fallocate(
             if removed == 0 {
                 return Ok(0);
             }
-            file.collapse_range(start, removed)?;
+            f.collapse_range(start, removed)?;
         }
         // Insert zero-filled [start, start+len) and shift tail right.
         FALLOC_FL_INSERT_RANGE => {
@@ -292,7 +292,7 @@ pub fn sys_fallocate(
             if insert_len == 0 {
                 return Ok(0);
             }
-            file.insert_range(start, insert_len)?;
+            f.insert_range(start, insert_len)?;
         }
         // Other mode combinations are not supported.
         _ => return Err(KError::Unsupported),

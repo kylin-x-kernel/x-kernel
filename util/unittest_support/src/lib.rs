@@ -77,7 +77,7 @@ impl InstalledTestThread {
         let tid = current_task.id().as_u64() as Pid;
         let pid = alloc_test_process_id();
 
-        let mut aspace = memspace::AddrSpace::new_user_empty()?;
+        let mut aspace = memspace::MmSpace::new_user_empty()?;
         ksignal::map_signal_trampoline(&mut aspace)?;
         let aspace = Arc::new(Mutex::new(aspace));
 
@@ -240,7 +240,7 @@ fn run_registered_test_user_stack(test: &TestDescriptor) -> TestResult {
 }
 
 pub struct TestUserBuffer {
-    aspace: Arc<Mutex<memspace::AddrSpace>>,
+    aspace: Arc<Mutex<memspace::MmSpace>>,
     user_addr: usize,
     mapped_size: usize,
     kernel_va: usize,

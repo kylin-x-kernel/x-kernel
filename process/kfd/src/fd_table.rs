@@ -12,7 +12,7 @@ use flatten_objects::FlattenObjects;
 use kerrno::{KError, KResult};
 use ksync::RwLock;
 
-use crate::{FileDescriptor, FileLike};
+use crate::{FdSnapshot, FileDescriptor, FileLike};
 
 /// Process-local file descriptor table.
 pub struct FdTable {
@@ -89,6 +89,13 @@ impl FdTable {
     pub fn get_file_like(&self, fd: c_int) -> KResult<Arc<dyn FileLike>> {
         self.get(fd as usize)
             .map(|descriptor| descriptor.inner().clone())
+            .ok_or(KError::BadFileDescriptor)
+    }
+
+    /// Returns a stable snapshot of the descriptor entry.
+    pub fn snapshot(&self, fd: c_int) -> KResult<FdSnapshot> {
+        self.get(fd as usize)
+            .map(|descriptor| descriptor.snapshot(fd))
             .ok_or(KError::BadFileDescriptor)
     }
 

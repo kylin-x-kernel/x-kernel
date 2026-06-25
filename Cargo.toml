@@ -104,9 +104,12 @@ procfs = { path = "fs/filesystems/procfs" }
 devfs = { path = "fs/filesystems/devfs" }
 memaddr = { path = "mm/memaddr" }
 memset = { path = "mm/memset" }
+anon = { path = "mm/anon" }
 memspace = { path = "mm/memspace" }
-memspace_file = { path = "mm/memspace-file", package = "memspace-file" }
+filemap = { path = "mm/filemap" }
+pagecache = { path = "mm/pagecache" }
 page_table = { path = "mm/page_table" }
+vmobj = { path = "mm/vmobj" }
 rsext4 = { path = "fs/filesystems/rsext4", default-features = false }
 kext4 = { path = "fs/filesystems/kext4", default-features = false }
 

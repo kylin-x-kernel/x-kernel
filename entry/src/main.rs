@@ -126,12 +126,22 @@ fn main() {
     runtime::register_unittest_runtime();
 
     {
-        let cx = kfs::kernel_fs_context().lock();
-        let root = cx.root_dir().clone();
-        let fs_ops = kfs::FsOperations::new(root);
+        let fs_context = kfs::kernel_fs_context().lock().clone();
+        let lookup_context = fs_context.lookup_context();
 
         warn!("Cleaning up stale coverage data if exists...");
-        if let Err(err) = fs_ops.remove_file("/.llvm-cov/default.profraw") {
+        let remove_result = kvfs::lookup_location(
+            &lookup_context,
+            "/.llvm-cov/default.profraw",
+            kvfs::LookupIntent::Open,
+            kvfs::LookupFlags::no_follow(),
+        )
+        .and_then(|file| {
+            file.parent()
+                .ok_or(kvfs::VfsError::IsADirectory)?
+                .unlink(file.name(), false)
+        });
+        if let Err(err) = remove_result {
             if err.canonicalize() != kvfs::VfsError::NotFound {
                 warn!("Failed to remove stale coverage data: {:?}", err);
             }
@@ -309,12 +319,31 @@ fn main() {
     if let Err(e) = xcov::capture_coverage(&mut cov) {
         error!("capture_coverage failed: {:?}", e);
     } else if !cov.is_empty() {
-        let cx = kfs::kernel_fs_context().lock();
-        let root = cx.root_dir().clone();
-        let fs_ops = kfs::FsOperations::new(root);
+        let fs_context = kfs::kernel_fs_context().lock().clone();
+        let lookup_context = fs_context.lookup_context();
+        let write_result = (|| -> kvfs::VfsResult<()> {
+            let _ = kvfs::lookup_nonexistent(
+                &lookup_context,
+                kvfs::path::Path::new("/.llvm-cov"),
+                kvfs::LookupIntent::Open,
+            )
+            .and_then(|(dir, name)| {
+                dir.create(
+                    name,
+                    kvfs::NodeType::Directory,
+                    kvfs::NodePermission::default(),
+                )
+            });
+            let file = kfs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&fs_context, "/.llvm-cov/default.profraw")?;
+            file.write_at(cov.as_slice(), 0)?;
+            file.sync(false)
+        })();
 
-        let _ = fs_ops.create_dir("/.llvm-cov", kvfs::NodePermission::default());
-        if let Err(e) = fs_ops.write("/.llvm-cov/default.profraw", &cov) {
+        if let Err(e) = write_result {
             error!("Failed to write coverage data: {:?}", e);
         } else {
             info!(
@@ -323,7 +352,7 @@ fn main() {
             );
         }
 
-        if let Err(e) = cx.root_dir().super_block().sync_fs() {
+        if let Err(e) = fs_context.root_dir().super_block().sync_fs() {
             error!("Failed to flush filesystem: {:?}", e);
         }
     } else {

@@ -16,4 +16,6 @@ extern crate klogger;
 mod loader;
 mod lru_cache;
 
-pub use self::loader::{clear_elf_cache, load_user_app, load_user_app_at};
+pub use self::loader::{
+    BinPrm, ExecRequest, ExecSource, clear_elf_cache, load_user_app, load_user_app_request,
+};

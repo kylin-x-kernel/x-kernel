@@ -2,14 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::{Arc, Weak};
-
 use memaddr::VirtAddr;
-use memspace::{
-    AddrSpace,
-    backend::{Backend, SharedPages},
-};
-use memspace_file::FileBackend;
+use memspace::{MmSpace, VmBackingKind, VmObjectId};
 
 /// A key that uniquely identifies a futex in the system.
 pub enum FutexKey {
@@ -24,29 +18,37 @@ pub enum FutexKey {
         /// The offset of the futex within the shared memory region.
         offset: usize,
         /// The shared memory region.
-        region: Result<Weak<SharedPages>, Weak<()>>,
+        region: SharedRegionIdentity,
     },
+}
+
+/// Identity of a shared futex backing object.
+pub enum SharedRegionIdentity {
+    /// Shared anonymous memory object identity.
+    Anonymous(VmObjectId),
+    /// File-backed shared object identity.
+    File(VmObjectId),
 }
 
 impl FutexKey {
     /// Creates a new `FutexKey`.
-    pub fn new(aspace: &AddrSpace, address: usize) -> Self {
-        if let Some(area) = aspace.find_area(VirtAddr::from_usize(address)) {
-            match area.backend() {
-                Backend::Shared(backend) => {
+    pub fn new(aspace: &MmSpace, address: usize) -> Self {
+        let vaddr = VirtAddr::from_usize(address);
+        if let Some(vma) = aspace.find_vma(vaddr) {
+            match vma.backing().kind() {
+                VmBackingKind::AnonymousShared { object } => {
                     return Self::Shared {
-                        offset: address - area.start().as_usize(),
-                        region: Ok(Arc::downgrade(backend.pages())),
+                        offset: address - vma.start().as_usize(),
+                        region: SharedRegionIdentity::Anonymous(object),
                     };
                 }
-                _ => {
-                    if let Some(file) = area.backend().downcast_dynamic_ref::<FileBackend>() {
-                        return Self::Shared {
-                            offset: address - area.start().as_usize(),
-                            region: Err(file.futex_handle()),
-                        };
-                    }
+                VmBackingKind::FileShared { object } => {
+                    return Self::Shared {
+                        offset: address - vma.start().as_usize(),
+                        region: SharedRegionIdentity::File(object),
+                    };
                 }
+                _ => {}
             }
         }
         Self::Private { address }

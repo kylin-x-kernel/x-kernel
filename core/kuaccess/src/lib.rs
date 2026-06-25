@@ -25,6 +25,7 @@ use kspin::IrqSave;
 use ktask::{current, current_may_uninit};
 use kthread::AsThread;
 use memaddr::VirtAddr;
+use memspace::PageFaultOutcome;
 use osvm::{MemError, MemResult, VirtMemIo};
 
 /// Enables scoped access into user memory, allowing page faults to occur inside
@@ -54,11 +55,19 @@ fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool 
         return false;
     }
 
-    thread
+    let outcome = thread
         .process_state()
         .address_space()
         .lock()
-        .dispatch_irq_page_fault(vaddr, access_flags)
+        .handle_page_fault(vaddr, access_flags);
+    fault_outcome_to_trap_result(outcome)
+}
+
+fn fault_outcome_to_trap_result(outcome: PageFaultOutcome) -> bool {
+    matches!(
+        outcome,
+        PageFaultOutcome::Resolved | PageFaultOutcome::Retry | PageFaultOutcome::CowConflictRetry
+    )
 }
 
 // `Vm` mirrors the osvm `VirtMemIo` entry point and is kept for future
@@ -131,10 +140,11 @@ unsafe impl VirtMemIo for Vm {
 
 #[cfg(unittest)]
 mod tests {
+    use memspace::PageFaultOutcome;
     use osvm::MemError;
     use unittest::def_test;
 
-    use super::{USER_SPACE_BASE, USER_SPACE_SIZE, check_access};
+    use super::{USER_SPACE_BASE, USER_SPACE_SIZE, check_access, fault_outcome_to_trap_result};
 
     #[def_test]
     fn test_check_access_valid() {
@@ -170,5 +180,26 @@ mod tests {
     fn test_check_access_rejects_far_above_user_space() {
         let res = check_access(USER_SPACE_BASE + USER_SPACE_SIZE + 0x1000, 1);
         assert!(matches!(res, Err(MemError::NoAccess)));
+    }
+
+    #[def_test]
+    fn fault_outcome_mapping_keeps_retry_inside_copy_window() {
+        assert!(fault_outcome_to_trap_result(PageFaultOutcome::Resolved));
+        assert!(fault_outcome_to_trap_result(PageFaultOutcome::Retry));
+        assert!(fault_outcome_to_trap_result(
+            PageFaultOutcome::CowConflictRetry
+        ));
+    }
+
+    #[def_test]
+    fn fault_outcome_mapping_rejects_user_copy_failures() {
+        assert!(!fault_outcome_to_trap_result(PageFaultOutcome::Unmapped));
+        assert!(!fault_outcome_to_trap_result(
+            PageFaultOutcome::AccessDenied
+        ));
+        assert!(!fault_outcome_to_trap_result(PageFaultOutcome::BusError));
+        assert!(!fault_outcome_to_trap_result(PageFaultOutcome::OutOfMemory));
+        assert!(!fault_outcome_to_trap_result(PageFaultOutcome::NoProgress));
+        assert!(!fault_outcome_to_trap_result(PageFaultOutcome::Failed));
     }
 }

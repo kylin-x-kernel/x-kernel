@@ -8,8 +8,8 @@ use kaddr_layout::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX};
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
 use kthread::current_process_state;
-use memaddr::{VirtAddr, align_up_4k};
-use memspace_file::new_alloc;
+use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange, align_up_4k};
+use memspace::{VmBackingKind, VmRuntimeRef};
 
 #[derive(Clone, Copy)]
 struct HeapLayout {
@@ -38,26 +38,60 @@ impl HeapLayout {
     }
 
     fn shrink_range(self, current_top: usize, new_top: usize) -> Option<(VirtAddr, usize)> {
-        let start = self.initial_end.max(align_up_4k(new_top));
+        let start = align_up_4k(new_top);
         let end = align_up_4k(current_top);
         (end > start).then(|| (VirtAddr::from(start), end - start))
+    }
+}
+
+struct BrkRequest {
+    requested_top: usize,
+    current_top: usize,
+    layout: HeapLayout,
+}
+
+impl BrkRequest {
+    fn new(requested_top: usize, current_top: usize) -> Self {
+        Self {
+            requested_top,
+            current_top,
+            layout: HeapLayout::current(),
+        }
+    }
+
+    fn is_query(&self) -> bool {
+        self.requested_top == 0
+    }
+
+    fn is_in_range(&self) -> bool {
+        self.layout.contains_brk(self.requested_top)
+    }
+
+    fn expand_range(&self) -> Option<(VirtAddr, usize)> {
+        self.layout
+            .expand_range(self.current_top, self.requested_top)
+    }
+
+    fn shrink_range(&self) -> Option<(VirtAddr, usize)> {
+        self.layout
+            .shrink_range(self.current_top, self.requested_top)
     }
 }
 
 pub fn sys_brk(addr: usize) -> KResult<isize> {
     let proc_state = current_process_state();
     let current_top = proc_state.heap_top();
-    let heap_layout = HeapLayout::current();
+    let request = BrkRequest::new(addr, current_top);
 
-    if addr == 0 {
+    if request.is_query() {
         return Ok(current_top as isize);
     }
 
-    if !heap_layout.contains_brk(addr) {
+    if !request.is_in_range() {
         return Ok(current_top as isize);
     }
 
-    if let Some((expand_start, expand_size)) = heap_layout.expand_range(current_top, addr) {
+    if let Some((expand_start, expand_size)) = request.expand_range() {
         if proc_state
             .address_space()
             .lock()
@@ -66,22 +100,52 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
                 expand_size,
                 MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
                 false,
-                new_alloc(expand_start, PageSize::Size4K),
+                VmRuntimeRef::new_anon_private(expand_start, PageSize::Size4K),
             )
             .is_err()
         {
             return Ok(current_top as isize);
         }
-    } else if let Some((shrink_start, shrink_size)) = heap_layout.shrink_range(current_top, addr)
-        && proc_state
+    } else if addr > current_top {
+        // Expansion within the pre-mapped range.
+        let mut aspace = proc_state.address_space().lock();
+        let map_start = VirtAddr::from(align_up_4k(current_top));
+        let map_size = align_up_4k(addr) - map_start.as_usize();
+        if map_size > 0 {
+            match aspace.find_vma(map_start) {
+                // External (e.g. shm) VMA at start → block.
+                Some(vma)
+                    if matches!(vma.backing().kind(), VmBackingKind::AnonymousShared { .. }) =>
+                {
+                    return Ok(current_top as isize);
+                }
+                // Brk VMA that already reaches addr → nothing to do.
+                Some(vma) if vma.end().as_usize() >= addr => {}
+                // Fragment or free: check whole range and re-map.
+                _ => {
+                    let limit = VirtAddrRange::new(aspace.base(), aspace.end());
+                    if aspace.find_free_area(map_start, map_size, limit, PAGE_SIZE_4K)
+                        != Some(map_start)
+                    {
+                        return Ok(current_top as isize);
+                    }
+                    let _ = aspace.map(
+                        map_start,
+                        map_size,
+                        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                        false,
+                        VmRuntimeRef::new_anon_private(map_start, PageSize::Size4K),
+                    );
+                }
+            }
+        }
+    } else if let Some((shrink_start, shrink_size)) = request.shrink_range() {
+        let _ = proc_state
             .address_space()
             .lock()
-            .unmap(shrink_start, shrink_size)
-            .is_err()
-    {
-        return Ok(current_top as isize);
+            .unmap(shrink_start, shrink_size);
     }
 
-    proc_state.set_heap_top(addr);
-    Ok(addr as isize)
+    proc_state.set_heap_top(request.requested_top);
+    Ok(request.requested_top as isize)
 }

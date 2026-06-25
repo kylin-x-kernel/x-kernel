@@ -16,8 +16,7 @@ extern crate log;
 #[cfg(feature = "fs9p")]
 use alloc::borrow::ToOwned;
 
-mod test_path_resolver;
-mod test_working_context;
+mod test_fs_context;
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -39,19 +38,11 @@ mod disk;
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) mod fs;
 
-// New refactored components
-mod fs_operations;
-mod path_resolver;
 mod virtual_filesystems;
-mod working_context;
 
 mod highlevel;
-// Export new components (FsOperations for advanced use)
-pub use fs_operations::FsOperations;
 pub use highlevel::*;
-pub use path_resolver::PathResolver;
 pub use virtual_filesystems::{VirtualFsMounts, mount_virtual_filesystems};
-pub use working_context::WorkingContext;
 
 /// Initialize the filesystem subsystem and mount the root filesystem.
 pub fn init_filesystems() {

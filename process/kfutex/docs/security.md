@@ -19,7 +19,7 @@ ksyscall / kthread / posix-process
 └──────────────────────────────────────────┘
           │
           ▼
-memspace / memspace_file / ktask scheduler
+memspace / vmobj / ktask scheduler
 ```
 
 - 调用者负责在 syscall 边界完成用户地址、访问权限、超时值和 errno 映射校验。
@@ -31,8 +31,8 @@ memspace / memspace_file / ktask scheduler
 | 边界 | 来源 | 进入 `kfutex` 的形式 | 约束 |
 |------|------|------------------------|------|
 | 用户 futex 地址 | futex syscall、线程退出清理 | `usize` 地址，经 `FutexKey::new` 参与 key 构造 | 调用者负责地址有效性和访问权限；`kfutex` 不直接解引用 |
-| 地址空间映射 | `memspace` | `AddrSpace` 查询结果和 backend identity | `kfutex` 依赖 `memspace` 正确区分 shared/file-backed 映射 |
-| 共享对象 identity | shared pages / file backend | `Weak` pointer identity | identity 只用于哈希索引，不参与解引用 |
+| 地址空间映射 | `memspace` | `MmSpace` 查询结果和 VMA backing identity | `kfutex` 依赖 `memspace` 正确区分 shared/file-backed 映射 |
+| 共享对象 identity | shared anon / file-backed mapping | `VmObjectId` / `MappingIdentity` | identity 只用于哈希索引，不参与解引用 |
 | 调度与阻塞 | `ktask` | wait/wake/requeue | 调用者必须保证执行上下文允许阻塞 |
 
 ## unsafe 代码清单
@@ -46,6 +46,7 @@ memspace / memspace_file / ktask scheduler
 3. `WaitQueue` 中 inactive waiter 会在唤醒或 drop 路径下被移除，不能长期残留并指向失效 waker。
 4. `ProcessFutexState` 必须保证 private key 永远不会路由到 shared table。
 5. `SharedFutexTables` 只能复用同一 shared identity 对应的 table。
+6. 对 file-backed shared object，同一 inode-owned `Mapping` 必须稳定地产生同一 shared futex identity。
 
 ## 线程安全
 
@@ -61,7 +62,7 @@ memspace / memspace_file / ktask scheduler
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
 | T-01 | private/shared table 路由错误导致跨进程串扰 | 高 | `ProcessFutexState::table_for` 误把 private key 路由到 shared cache | private/shared 分支集中在 `kfutex` owner 内维护 |
-| T-02 | shared futex identity 复用导致旧等待队列串扰 | 高 | weak pointer identity 被复用且 stale table 未清理 | shared cache 周期清理空且无外部引用 table；identity 不参与解引用 |
+| T-02 | shared futex identity 复用导致旧等待队列串扰 | 高 | shared object identity 被错误复用且 stale table 未清理 | shared cache 周期清理空且无外部引用 table；shared-anon 使用稳定 `VmObjectId`，file-backed 使用稳定 `MappingIdentity` |
 | T-03 | wait condition 与入队竞态导致错误阻塞 | 中 | 条件在检查与入队之间变化 | `wait_if` 在持队列锁状态下重新检查条件 |
 | T-04 | inactive waiter 长期滞留导致 wake 计数失真 | 中 | caller drop/timeout 后未正确清理 | waiter token 在 drop 路径清除并从队列移除 |
 | T-05 | entry 过早回收导致后续 wake 丢失 | 中 | table 在仍有外部 guard 或活跃 waiter 时删除 entry | `FutexGuard::drop` 同时检查强引用计数和 wait queue 空状态 |
@@ -90,7 +91,7 @@ memspace / memspace_file / ktask scheduler
 ## 已知限制
 
 - shared table cleanup 使用固定 100 次查找阈值，不是精确或实时回收机制。
-- shared identity 依赖 `Weak` pointer identity，理论上仍存在极低概率的 stale key reuse 风险。
+- shared-anon 与 file-backed 路径都使用稳定 `VmObjectId` / `MappingIdentity`。
 - 本 crate 不负责 robust-list 链表遍历和 `clear_child_tid` 语义，那些线程生命周期逻辑仍在 `kthread` / `posix-process`。
 
 ## 审计清单

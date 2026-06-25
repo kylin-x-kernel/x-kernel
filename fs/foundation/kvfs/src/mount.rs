@@ -6,7 +6,6 @@
 use alloc::{
     string::String,
     sync::{Arc, Weak},
-    vec,
     vec::Vec,
 };
 use core::{
@@ -20,9 +19,9 @@ use inherit_methods_macro::inherit_methods;
 use kpoll::{IoEvents, Pollable};
 
 use crate::{
-    AddressSpace, AddressSpaceOperations, DirEntry, DirEntrySink, Filesystem, Metadata,
-    MetadataUpdate, Mutex, MutexGuard, NodeFlags, NodePermission, NodeType, OpenOptions,
-    ReferenceKey, ST_RDONLY, SuperBlock, TypeMap, VfsError, VfsInode, VfsResult,
+    AddressSpace, DirEntry, DirEntrySink, Filesystem, Metadata, MetadataUpdate, Mutex, MutexGuard,
+    NodeFlags, NodePermission, NodeType, OpenOptions, ReferenceKey, ST_RDONLY, SuperBlock, TypeMap,
+    VfsError, VfsInode, VfsResult,
     path::{DOT, DOTDOT, PathBuf},
 };
 
@@ -219,13 +218,9 @@ impl Location {
 
     pub fn dentry_data(&self) -> MutexGuard<'_, TypeMap>;
 
-    pub fn user_data(&self) -> MutexGuard<'_, TypeMap>;
-
     pub fn inode_data(&self) -> MutexGuard<'_, TypeMap>;
 
     pub fn vfs_inode(&self) -> &Arc<VfsInode>;
-
-    pub fn address_space(&self) -> Option<Arc<AddressSpace>>;
 }
 
 impl Location {
@@ -253,25 +248,9 @@ impl Location {
         &self.entry
     }
 
-    /// Return or create this location's inode address-space object.
-    pub fn get_or_insert_address_space(
-        &self,
-        ops: Arc<dyn AddressSpaceOperations>,
-    ) -> Arc<AddressSpace> {
-        let address_space = self.entry.vfs_inode().get_or_insert_address_space(ops);
-        self.super_block().register_address_space(&address_space);
-        address_space
-    }
-
-    /// Return or create this location's inode address-space object.
-    pub fn get_or_insert_address_space_with(
-        &self,
-        create: impl FnOnce() -> AddressSpace,
-    ) -> Arc<AddressSpace> {
-        let address_space = self
-            .entry
-            .vfs_inode()
-            .get_or_insert_address_space_with(create);
+    /// Returns this location's inode address-space object for cache/writeback use.
+    pub fn address_space(&self) -> Arc<AddressSpace> {
+        let address_space = self.entry.address_space();
         self.super_block().register_address_space(&address_space);
         address_space
     }
@@ -320,6 +299,12 @@ impl Location {
         self.entry.as_file()?.mmap(mapper)
     }
 
+    /// Returns magic-link operations for this location, if the node provides
+    /// Linux-style magic-link semantics.
+    pub fn magic_link(&self) -> Option<Arc<dyn crate::MagicLinkOps>> {
+        self.entry.as_file().ok().and_then(|file| file.magic_link())
+    }
+
     /// Returns whether this location's mountpoint is read-only.
     pub fn is_mount_readonly(&self) -> bool {
         self.mountpoint.is_readonly()
@@ -357,18 +342,69 @@ impl Location {
 
     /// Build the absolute path for this location.
     pub fn absolute_path(&self) -> VfsResult<PathBuf> {
-        let mut components = vec![];
-        let mut cur = self.clone();
+        let mut components = Vec::new();
+        let mut current = self.clone();
         loop {
-            cur.entry.collect_absolute_path(&mut components);
-            cur = match cur.mountpoint.location() {
-                Some(loc) => loc,
-                None => break,
+            if current.is_root() {
+                return Ok(iter::once("/")
+                    .chain(components.iter().map(String::as_str).rev())
+                    .collect());
             }
+
+            if current.entry.ptr_eq(&current.mountpoint.root) {
+                current = current
+                    .mountpoint
+                    .location()
+                    .ok_or(VfsError::InvalidInput)?;
+                continue;
+            }
+
+            let name = current.entry.name();
+            if !name.is_empty() {
+                components.push(String::from(name));
+            }
+
+            current = Self::new(
+                current.mountpoint.clone(),
+                current.entry.parent().ok_or(VfsError::InvalidInput)?,
+            );
         }
-        Ok(iter::once("/")
-            .chain(components.iter().map(String::as_str).rev())
-            .collect())
+    }
+
+    /// Build this location's path relative to `root`.
+    ///
+    /// This is the VFS display-path equivalent of Linux `seq_path_root`: the
+    /// walk is over `(mountpoint, dentry)` pairs, and crossing a mount root
+    /// continues at the mountpoint dentry in the parent mount. If this location
+    /// is not reachable from `root`, `InvalidInput` is returned.
+    pub fn path_from_root(&self, root: &Location) -> VfsResult<PathBuf> {
+        let mut components = Vec::new();
+        let mut current = self.clone();
+        loop {
+            if current.ptr_eq(root) {
+                return Ok(iter::once("/")
+                    .chain(components.iter().map(String::as_str).rev())
+                    .collect());
+            }
+
+            if current.entry.ptr_eq(&current.mountpoint.root) {
+                current = current
+                    .mountpoint
+                    .location()
+                    .ok_or(VfsError::InvalidInput)?;
+                continue;
+            }
+
+            let name = current.entry.name();
+            if !name.is_empty() {
+                components.push(String::from(name));
+            }
+
+            current = Self::new(
+                current.mountpoint.clone(),
+                current.entry.parent().ok_or(VfsError::InvalidInput)?,
+            );
+        }
     }
 
     /// Returns `true` if this location references the same entry.
@@ -640,6 +676,7 @@ mod tests {
     use crate::{
         DirEntry, DirEntrySink, DirNode, DirNodeOps, Filesystem, Metadata, MetadataUpdate, NodeOps,
         NodePermission, NodeType, Reference, StatFs, SuperBlockOperations, VfsError, VfsResult,
+        WeakDirEntry,
     };
 
     struct MockFilesystem {
@@ -653,7 +690,7 @@ mod tests {
 
         fn root_dentry(&self) -> DirEntry {
             DirEntry::new_dir(
-                |_| DirNode::new(Arc::new(MockDirNodeOps::new(self.mount_flags, 1))),
+                |entry| DirNode::new(Arc::new(MockDirNodeOps::new(self.mount_flags, 1, entry))),
                 Reference::root(),
             )
         }
@@ -666,11 +703,16 @@ mod tests {
     struct MockDirNodeOps {
         mount_flags: u32,
         inode: u64,
+        entry: WeakDirEntry,
     }
 
     impl MockDirNodeOps {
-        fn new(mount_flags: u32, inode: u64) -> Self {
-            Self { mount_flags, inode }
+        fn new(mount_flags: u32, inode: u64, entry: WeakDirEntry) -> Self {
+            Self {
+                mount_flags,
+                inode,
+                entry,
+            }
         }
     }
 
@@ -721,14 +763,16 @@ mod tests {
                 return Err(VfsError::NotFound);
             }
 
+            let parent = self.entry.upgrade().ok_or(VfsError::NotFound)?;
             Ok(DirEntry::new_dir(
-                |_| {
+                |entry| {
                     DirNode::new(Arc::new(MockDirNodeOps::new(
                         self.mount_flags,
                         self.inode + 1,
+                        entry,
                     )))
                 },
-                Reference::new(None, String::from(name)),
+                Reference::new(Some(parent), String::from(name)),
             ))
         }
 
@@ -884,7 +928,7 @@ mod tests {
     }
 
     #[def_test]
-    fn test_mount_root_name_and_dotdot_stays_at_mount_root() {
+    fn test_mount_root_name_and_dotdot_crosses_mountpoint_parent() {
         let root_fs = mock_filesystem(0);
         let child_fs = mock_filesystem(0);
         let root_mount = Mountpoint::new_root(&root_fs);
@@ -893,7 +937,7 @@ mod tests {
         let child_root = child_mount.root_location();
         let child_path = child_root.absolute_path().unwrap();
 
-        assert_eq!(child_root.name(), "");
+        assert_eq!(child_root.name(), "mnt");
         assert_eq!(child_path.as_str(), "/mnt");
         assert!(child_root.entry().is_root_of_mount());
         assert!(
@@ -904,12 +948,12 @@ mod tests {
         );
         assert_eq!(
             child_root.lookup_no_follow("..").unwrap().absolute_path(),
-            Ok(PathBuf::from("/mnt"))
+            Ok(PathBuf::from("/"))
         );
     }
 
     #[def_test]
-    fn test_nested_mount_root_dotdot_stays_at_nested_mount_root() {
+    fn test_nested_mount_root_dotdot_crosses_mountpoint_parent() {
         let root_fs = mock_filesystem(0);
         let child_fs = mock_filesystem(0);
         let grandchild_fs = mock_filesystem(0);
@@ -923,14 +967,41 @@ mod tests {
         let grandchild_path = grandchild_root.absolute_path().unwrap();
 
         assert_eq!(grandchild_path.as_str(), "/mnt/mnt");
-        assert_eq!(grandchild_root.name(), "");
+        assert_eq!(grandchild_root.name(), "mnt");
         assert!(grandchild_root.entry().is_root_of_mount());
-        assert!(
+        assert_eq!(
             grandchild_root
                 .lookup_no_follow("..")
                 .unwrap()
-                .absolute_path()
-                == Ok(PathBuf::from("/mnt/mnt"))
+                .absolute_path(),
+            Ok(PathBuf::from("/mnt"))
+        );
+    }
+
+    #[def_test]
+    fn test_path_from_root_crosses_mount_boundaries() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+
+        let root_mount = Mountpoint::new_root(&root_fs);
+        let root = root_mount.root_location();
+        let mount_dir = root.lookup_no_follow("mnt").unwrap();
+        let child_mount = mount_dir.mount(&child_fs).unwrap();
+        let child_root = child_mount.root_location();
+        let child_dir = child_root.lookup_no_follow("mnt").unwrap();
+
+        assert_eq!(child_root.path_from_root(&root), Ok(PathBuf::from("/mnt")));
+        assert_eq!(
+            child_dir.path_from_root(&root),
+            Ok(PathBuf::from("/mnt/mnt"))
+        );
+        assert_eq!(
+            child_root.path_from_root(&child_root),
+            Ok(PathBuf::from("/"))
+        );
+        assert_eq!(
+            root.path_from_root(&child_root),
+            Err(VfsError::InvalidInput)
         );
     }
 

@@ -4,7 +4,8 @@
 
 //! File descriptor entries stored in an [`FdTable`](crate::FdTable).
 
-use alloc::sync::Arc;
+use alloc::{borrow::Cow, sync::Arc};
+use core::ffi::c_int;
 
 use crate::FileLike;
 
@@ -34,5 +35,60 @@ impl FileDescriptor {
     /// Updates the close-on-exec bit for this descriptor.
     pub(crate) fn set_cloexec(&mut self, cloexec: bool) {
         self.cloexec = cloexec;
+    }
+
+    pub(crate) fn snapshot(&self, fd: c_int) -> FdSnapshot {
+        FdSnapshot::new(fd, self.inner.clone(), self.cloexec)
+    }
+}
+
+/// Stable view of a descriptor table entry.
+///
+/// A snapshot owns a strong reference to the descriptor's file-like object and
+/// copies descriptor flags while the fd table is locked. Callers can then drop
+/// the table lock before following procfs magic links, opening files, or
+/// loading exec images.
+#[derive(Clone)]
+pub struct FdSnapshot {
+    fd: c_int,
+    inner: Arc<dyn FileLike>,
+    cloexec: bool,
+    open_flags: u32,
+}
+
+impl FdSnapshot {
+    fn new(fd: c_int, inner: Arc<dyn FileLike>, cloexec: bool) -> Self {
+        let open_flags = inner.open_flags();
+        Self {
+            fd,
+            inner,
+            cloexec,
+            open_flags,
+        }
+    }
+
+    /// Returns the descriptor number that was snapshotted.
+    pub fn fd(&self) -> c_int {
+        self.fd
+    }
+
+    /// Returns the snapshotted file-like object.
+    pub fn inner(&self) -> &Arc<dyn FileLike> {
+        &self.inner
+    }
+
+    /// Returns whether the descriptor was marked close-on-exec.
+    pub fn cloexec(&self) -> bool {
+        self.cloexec
+    }
+
+    /// Returns object-level open flags captured with the snapshot.
+    pub fn open_flags(&self) -> u32 {
+        self.open_flags
+    }
+
+    /// Returns the userspace display path for this descriptor target.
+    pub fn path(&self) -> Cow<'_, str> {
+        self.inner.path()
     }
 }

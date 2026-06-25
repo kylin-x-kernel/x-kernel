@@ -35,7 +35,7 @@ posix/fs/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs          # crate 入口和 syscall re-export
-│   ├── path.rs         # AT_*、/proc/<pid>/fd/<fd> 和 dirfd 路径解析
+│   ├── path.rs         # AT_*、dirfd、VFS magic-link 和 empty-path 解析
 │   ├── open.rs         # open/openat 和设备文件特殊处理
 │   ├── io.rs           # read/write/lseek/fallocate/sendfile/splice 等 I/O
 │   ├── fd_ops.rs       # close/dup/close_range/fcntl/flock
@@ -81,7 +81,7 @@ core/ksyscall
 
 | 子模块 | 职责 |
 |--------|------|
-| `path` | 统一处理 `AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 `/proc/<pid>/fd/<fd>` |
+| `path` | 统一处理 `AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
 | `open` | 将 Linux open flags 转为 `OpenOptions`，并把打开结果加入当前进程 fd 表 |
 | `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
 | `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
@@ -134,15 +134,17 @@ user path pointer
     │ load_string / nullable path handling
     v
 raw path string or AT_EMPTY_PATH
-    │ classify_path / resolve_path_source
-    ├─ normal path ────────────────> FsContext::resolve*
+    │ path.rs helpers
+    ├─ normal path ────────────────> kvfs::namei lookup
     ├─ empty path + AT_EMPTY_PATH ─> dirfd fd object
-    └─ /proc/<pid>/fd/<fd> ────────> foreign/current fd entry
+    └─ magic-link component ───────> kvfs::namei typed follow
 ```
 
-`path.rs` 在解析 `/proc/self/fd/<fd>` 和 `/proc/<pid>/fd/<fd>` 时先做纯字符串分类，
-再读取目标进程 fd 表。
-`O_NOFOLLOW` 和 `AT_SYMLINK_NOFOLLOW` 会影响 procfd 和符号链接解析策略。
+`path.rs` 不拥有 procfd 字符串解析。
+`/proc/<pid>/fd/<fd>` 由 procfs 暴露为 VFS magic-link 节点，`path.rs`
+只负责把 syscall flags 转成 `LookupFlags` 与 `LookupIntent`。final 与
+non-final component 的普通 symlink、magic-link、`NO_MAGIC_LINKS` 和
+`O_NOFOLLOW` 规则都由 `kvfs::namei` 统一执行。
 
 ### 文件数据流
 
@@ -169,8 +171,10 @@ FileLike::read/write
 1. 从用户指针读取路径字符串。
 2. 使用当前进程 `umask` 修正 mode。
 3. 将 Linux open flags 转换为 `kfs::OpenOptions`。
-4. 通过 `resolve_open_path_source` 处理 `O_NOFOLLOW`、`O_PATH` 和 procfd 特例。
-5. 对普通路径调用 `with_fs(dirfd, ...)` 在正确 `FsContext` 下打开。
+4. `OpenOptions` 通过 `kvfs::namei` 使用 `LookupIntent::Open` 与
+   `LookupFlags` 处理 `O_NOFOLLOW`、`O_PATH`、普通 symlink 和 VFS
+   magic-link。
+5. 对普通路径调用 `with_fs(dirfd, ...)` 在正确 root/cwd 上下文下打开。
 6. 对打开结果做设备特殊处理：
    `/dev/ptmx` 创建 pty，当前终端节点解析到控制终端。
 7. 根据 `O_NONBLOCK`、`O_CLOEXEC` 设置对象和 descriptor 标志。
@@ -179,10 +183,33 @@ FileLike::read/write
 ### `resolve_at`
 
 1. `None` 或空路径必须配合 `AT_EMPTY_PATH`，否则返回 `NotFound`。
-2. 非空路径先识别 live procfd。
-3. procfd 路径解析为目标进程 fd 表中的 `FileLike`。
-4. 普通路径根据 `AT_SYMLINK_NOFOLLOW` 选择 `resolve` 或 `resolve_no_follow`。
-5. 返回 `ResolveAtResult::Location(Location)` 或非 VFS 对象 `ResolveAtResult::Other`。
+2. 非空路径进入 `kvfs::namei`，携带 syscall 对应的 `LookupIntent` 和
+   `LookupFlags`。
+3. namei 在同一条路径中处理 final/non-final symlink、magic-link、
+   `AT_SYMLINK_NOFOLLOW` 和 `NO_MAGIC_LINKS`。
+5. 空路径配合 `AT_EMPTY_PATH` 返回 fd 对象对应的 VFS `Location` 或非 VFS
+   `FileLike`。
+
+### `mkdirat`
+
+`mkdirat` 先按当前 `FsContext` 和 `dirfd` 解析待创建项的父目录，并应用当前
+进程 `umask`。如果路径已经可解析为现有对象，包括 `/`、`.`、`..` 这类没有普通
+final component 的目录路径，syscall 边界返回 `AlreadyExists`，对应 Linux
+`EEXIST`。
+
+### exec path source
+
+`execve` 不再单独解析 procfd 字符串或提供专用 magic-link helper：
+
+1. syscall 层读取用户 path 后构造 `LookupContext`。
+2. 非空 path 以 `LookupIntent::Exec` 和 follow-final flags 进入
+   `kvfs::namei`。
+3. 普通路径、procfd magic-link、APK magic source 风格显示路径，以及后续
+   `AT_EMPTY_PATH`/`fexecve` 入口都应收敛为同一套 namei/open-executable
+   语义。
+4. syscall 层把解析得到的 `Location` 与用户显示路径一起传给
+   `process/kexec::ExecRequest::from_resolved_with_display()`，loader 不再重新按
+   procfs 字符串查找目标对象。
 
 ### `getdents64`
 
@@ -199,7 +226,7 @@ FileLike::read/write
 2. 只接受当前实现支持的模式组合。
 3. 普通预分配和 `UNSHARE_RANGE` 通过必要时写入最后一个零字节推进 EOF。
 4. `PUNCH_HOLE` 和 `ZERO_RANGE` 用分块写零模拟。
-5. `COLLAPSE_RANGE`、`INSERT_RANGE` 委托 `FileBackend` 的范围操作。
+5. `COLLAPSE_RANGE`、`INSERT_RANGE` 委托 `File` 的范围操作。
 
 ### `mount`
 
@@ -245,12 +272,13 @@ timer runtime、event counter、pipe buffer 与 endpoint 生命周期，
 `posix-fs` 对这类对象保留的职责，仅限于像 `splice`、`fcntl(F_*PIPE_SZ)` 这样的
 VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 
-### procfd 作为路径解析特例
+### procfd 作为 VFS magic-link
 
-`/proc/<pid>/fd/<fd>` 不是普通 VFS 路径解析。
-当前实现直接读取目标进程 fd 表并把 `File`/`Directory` 转回 `Location`。
-这样能支持 live procfd 语义，
-但要求权限模型、进程生命周期和 fd 表并发由 `get_process_state` 与 resources 层保证。
+`/proc/<pid>/fd/<fd>` 由 procfs 暴露为 magic-link 节点，而不是
+`posix-fs` 内部的字符串解析特例。
+`posix-fs` 根据 syscall flags 决定是否 follow final component，
+实际目标 fd snapshot、readlink display 和 follow 行为由 procfs/kfd/kvfs 协作完成。
+这样能保留 live procfd 对象语义，同时避免 syscall 层复制 procfs 路径规则。
 
 ### 不支持的 mount 操作显式拒绝
 
@@ -267,11 +295,26 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 这有助于部分用户态程序继续运行，
 但不是完整的 POSIX/ Linux 文件锁语义。
 
+### memfd sealing fcntl
+
+`fd_ops` 处理 `F_GET_SEALS` 和 `F_ADD_SEALS`：
+
+```text
+sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
+  -> current_resources().get_file_like_as::<kfs::File>()
+  -> kfs::File::shmem_seal_bits() / add_shmem_seals()
+  -> inode-scoped ShmemObjectState
+```
+
+这些命令只对 KFS shmem-backed files 有效。非 KFS file 或没有
+`ShmemObjectState` 的普通文件返回错误。`F_ADD_SEALS` 只允许单调添加 seal；
+已有 `F_SEAL_SEAL` 时拒绝继续添加。
+
 ### 当前创建者 ID 简化
 
 `open.rs` 的 `current_effective_ids()` 当前返回 `(0, 0)`。
 因此通过 `OpenOptions::user(uid, gid)` 传入的创建者身份暂时固定为 root。
-未来接入 `kcred` 后应改为读取当前进程的有效或文件系统 UID/GID。
+当前未从 `kcred` 读取进程有效 UID/GID 或文件系统 UID/GID。
 
 ### 复制类 syscall 使用中间缓冲区
 
@@ -299,3 +342,6 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 4. `mount` 当前只支持 `tmpfs` 新挂载，不支持 bind、remount、move 和 propagation。
 5. `faccessat2` 当前按 owner 权限位构造检查掩码，尚未完整接入 UID/GID、补充组和 capability。
 6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
+7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
+   writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`
+   执行。

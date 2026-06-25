@@ -45,7 +45,7 @@ fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()>
     Ok(())
 }
 
-fn create_sys_compat_links(fs: &FsContext) -> LinuxResult<()> {
+fn create_sys_graphics_links(fs: &FsContext) -> LinuxResult<()> {
     let mut path = PathBuf::new();
     for comp in Path::new("/sys/class/graphics/fb0/device").components() {
         path.push(comp.as_str());
@@ -78,6 +78,6 @@ pub fn mount_virtual_filesystems(mounts: VirtualFsMounts) -> LinuxResult<()> {
         }
         mount_at(&fs, "/sys/fs/bpf", bpffs::new_bpffs())?;
     }
-    create_sys_compat_links(&fs)?;
+    create_sys_graphics_links(&fs)?;
     Ok(())
 }

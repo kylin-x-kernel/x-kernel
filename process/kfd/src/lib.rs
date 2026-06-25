@@ -15,20 +15,42 @@ mod stat;
 
 pub use self::{
     fd_table::FdTable,
-    file_descriptor::FileDescriptor,
+    file_descriptor::{FdSnapshot, FileDescriptor},
     file_like::{FileLike, IoDst, IoSrc, ReadBuf, WriteBuf},
     stat::Kstat,
 };
 
 #[cfg(unittest)]
 mod tests {
-    use core::time::Duration;
+    use alloc::{borrow::Cow, sync::Arc};
+    use core::{task::Context, time::Duration};
 
+    use kpoll::{IoEvents, Pollable};
     use kvfs::DeviceId;
     use linux_raw_sys::general::stat;
     use unittest::def_test;
 
-    use crate::Kstat;
+    use crate::{FdTable, FileLike, Kstat};
+
+    struct SnapshotTestFile;
+
+    impl Pollable for SnapshotTestFile {
+        fn poll(&self) -> IoEvents {
+            IoEvents::IN
+        }
+
+        fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
+    }
+
+    impl FileLike for SnapshotTestFile {
+        fn path(&self) -> Cow<'_, str> {
+            Cow::Borrowed("/snapshot-test")
+        }
+
+        fn open_flags(&self) -> u32 {
+            0x2000
+        }
+    }
 
     #[def_test]
     fn test_kstat_default() {
@@ -81,5 +103,26 @@ mod tests {
         assert_eq!(s.st_mtime_nsec, 0);
         assert_eq!(s.st_ctime, 3000);
         assert_eq!(s.st_ctime_nsec, 123_456_789);
+    }
+
+    #[def_test]
+    fn test_fd_snapshot_keeps_file_like_alive_after_close() {
+        let mut table = FdTable::default();
+        let fd = table
+            .add_file_like(16, Arc::new(SnapshotTestFile), true)
+            .unwrap();
+
+        let snapshot = table.snapshot(fd).unwrap();
+        table.close_file_like(fd).unwrap();
+
+        assert_eq!(snapshot.fd(), fd);
+        assert!(snapshot.cloexec());
+        assert_eq!(snapshot.open_flags(), 0x2000);
+        assert_eq!(snapshot.path(), "/snapshot-test");
+        assert!(snapshot.inner().poll().contains(IoEvents::IN));
+        assert!(matches!(
+            table.snapshot(fd),
+            Err(kerrno::KError::BadFileDescriptor)
+        ));
     }
 }

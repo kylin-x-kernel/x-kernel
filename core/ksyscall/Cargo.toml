@@ -46,6 +46,7 @@ tee_task_iface = { workspace = true, optional = true }
 kexec.workspace = true
 kuaccess.workspace = true
 ktty.workspace = true
+kvfs.workspace = true
 posix-fs.workspace = true
 posix-bpf = { workspace = true, optional = true }
 posix-ipc.workspace = true

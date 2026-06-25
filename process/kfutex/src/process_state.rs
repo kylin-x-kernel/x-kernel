@@ -2,13 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 
 use hashbrown::HashMap;
 use ksync::Mutex;
 use lazy_static::lazy_static;
+use memspace::VmObjectId;
 
-use crate::{FutexKey, FutexTable};
+use crate::{FutexKey, FutexTable, key::SharedRegionIdentity};
 
 /// Process-owned futex state.
 ///
@@ -33,8 +34,8 @@ impl ProcessFutexState {
             FutexKey::Private { .. } => self.private_table.clone(),
             FutexKey::Shared { region, .. } => {
                 let identity = match region {
-                    Ok(pages) => Weak::as_ptr(pages) as usize,
-                    Err(handle) => Weak::as_ptr(handle) as usize,
+                    SharedRegionIdentity::Anonymous(object) => *object,
+                    SharedRegionIdentity::File(object) => *object,
                 };
                 SHARED_FUTEX_TABLES.lock().get_or_insert(identity)
             }
@@ -43,7 +44,7 @@ impl ProcessFutexState {
 }
 
 struct SharedFutexTables {
-    map: HashMap<usize, Arc<FutexTable>>,
+    map: HashMap<VmObjectId, Arc<FutexTable>>,
     operations: usize,
 }
 
@@ -55,7 +56,7 @@ impl SharedFutexTables {
         }
     }
 
-    fn get_or_insert(&mut self, key: usize) -> Arc<FutexTable> {
+    fn get_or_insert(&mut self, key: VmObjectId) -> Arc<FutexTable> {
         self.operations += 1;
         if self.operations == 100 {
             self.operations = 0;
@@ -77,15 +78,17 @@ lazy_static! {
 mod tests {
     use alloc::sync::Arc;
 
+    use memspace::VmObjectId;
     use unittest::def_test;
+    use vmobj::{AnonObjectId, FileObjectId};
 
     use super::SharedFutexTables;
 
     #[def_test]
     fn test_shared_futextables_get_or_insert_reuses_existing_table() {
         let mut tables = SharedFutexTables::new();
-        let first = tables.get_or_insert(0x1234);
-        let second = tables.get_or_insert(0x1234);
+        let first = tables.get_or_insert(VmObjectId::File(FileObjectId::from_raw(0x1234)));
+        let second = tables.get_or_insert(VmObjectId::File(FileObjectId::from_raw(0x1234)));
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(tables.map.len(), 1);
@@ -95,15 +98,23 @@ mod tests {
     #[def_test]
     fn test_shared_futextables_cleanup_drops_stale_entries_on_threshold() {
         let mut tables = SharedFutexTables::new();
-        let stale = tables.get_or_insert(1);
+        let stale = tables.get_or_insert(VmObjectId::Anon(AnonObjectId::from_raw(1)));
         drop(stale);
 
         tables.operations = 99;
-        let fresh = tables.get_or_insert(2);
+        let fresh = tables.get_or_insert(VmObjectId::Anon(AnonObjectId::from_raw(2)));
 
         assert_eq!(tables.operations, 0);
-        assert!(!tables.map.contains_key(&1));
-        assert!(tables.map.contains_key(&2));
+        assert!(
+            !tables
+                .map
+                .contains_key(&VmObjectId::Anon(AnonObjectId::from_raw(1)))
+        );
+        assert!(
+            tables
+                .map
+                .contains_key(&VmObjectId::Anon(AnonObjectId::from_raw(2)))
+        );
         assert_eq!(Arc::strong_count(&fresh), 2);
     }
 }

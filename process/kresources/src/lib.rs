@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
-use kfd::{FdTable, FileLike};
+use kfd::{FdSnapshot, FdTable, FileLike};
 use krlimit::{Rlimit, Rlimits};
 use ksync::RwLock;
 use linux_raw_sys::general::{RLIM_NLIMITS, RLIMIT_NOFILE};
@@ -95,6 +95,11 @@ impl ProcessResources {
     /// Returns the file-like object stored in the given descriptor.
     pub fn get_file_like(&self, fd: c_int) -> kerrno::KResult<Arc<dyn FileLike>> {
         self.with_fd_table(|fd_table| fd_table.read().get_file_like(fd))
+    }
+
+    /// Returns a stable snapshot of the descriptor entry.
+    pub fn snapshot_fd(&self, fd: c_int) -> kerrno::KResult<FdSnapshot> {
+        self.with_fd_table(|fd_table| fd_table.read().snapshot(fd))
     }
 
     /// Returns the typed file-like object stored in the given descriptor.

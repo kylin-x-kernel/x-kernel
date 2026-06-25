@@ -4,7 +4,7 @@
 
 `kfd` 是 x-kernel 的进程文件描述符运行时 crate。
 它提供进程本地 `FdTable`、单个 `FileDescriptor` 条目、
-`FileLike` trait 抽象以及内核态 `Kstat` 到 Linux ABI `stat/statx`
+`FdSnapshot` 稳定视图、`FileLike` trait 抽象以及内核态 `Kstat` 到 Linux ABI `stat/statx`
 的转换。
 
 目标读者是维护 POSIX 文件 syscall、进程资源复制、socket/pipe/timerfd/eventfd
@@ -27,7 +27,7 @@ process/kfd/
 ├── src/
 │   ├── lib.rs                  # crate 入口和公开 re-export
 │   ├── fd_table.rs             # FdTable 槽位管理、dup、close、cloexec
-│   ├── file_descriptor.rs      # FileDescriptor: Arc<dyn FileLike> + cloexec
+│   ├── file_descriptor.rs      # FileDescriptor / FdSnapshot: Arc<dyn FileLike> + flags
 │   ├── file_like.rs            # FileLike trait 与 IoSrc/IoDst type aliases
 │   └── stat.rs                 # Kstat 与 Linux stat/statx ABI 转换
 ├── Cargo.toml
@@ -69,6 +69,7 @@ VFS file / directory / socket / pipe / epoll / timerfd / eventfd / pidfd
 |------|------|
 | `FdTable` | 分配、查找、复制、关闭 fd 槽位；维护 close-on-exec 标志 |
 | `FileDescriptor` | 保存一个 file-like 对象的共享引用和 descriptor flags |
+| `FdSnapshot` | 在 fd 表锁内复制 fd 号、`Arc<dyn FileLike>` 和 descriptor/object flags，供 procfs magic link、exec 等路径无锁使用 |
 | `FileLike` | 统一 read/write/stat/path/ioctl/mmap/open flags/nonblocking 接口 |
 | `IoSrc` / `IoDst` | syscall I/O 路径使用的 buffer trait object 类型 |
 | `Kstat` | 内核元数据结构，负责转换为 Linux `stat` / `statx` ABI |
@@ -155,6 +156,21 @@ all descriptors removed, lock dropped before FileLike drops
 3. `get_file_like_as<T>` 对 `Arc<dyn FileLike>` 执行 `downcast_arc`。
 4. 类型不匹配返回 `KError::InvalidInput`。
 
+### 获取 descriptor snapshot
+
+1. 调用方持有 fd table 读锁。
+2. `snapshot(fd)` 查找 `FileDescriptor`。
+3. 找不到时返回 `KError::BadFileDescriptor`。
+4. 找到时复制 fd 号、`cloexec`、对象级 `open_flags`，
+   并克隆底层 `Arc<dyn FileLike>`。
+5. 调用方释放 fd table 锁后仍可通过 snapshot 访问同一个 open object。
+
+`FdSnapshot` 用于 `/proc/<pid>/fd/N`、`/proc/self/fd/N`、`fexecve`、
+exec loader 等需要先稳定引用 open file 再进入 VFS 或装载路径的场景。
+它不是 fd table 的 live view：
+snapshot 创建后，原 fd 可以被关闭或复用，
+但 snapshot 仍持有创建时的 open object 强引用。
+
 ### `dup2` / `dup3` 固定目标复制
 
 1. 校验旧 fd 存在，克隆其 `FileDescriptor`。
@@ -192,6 +208,7 @@ all descriptors removed, lock dropped before FileLike drops
 锁策略：
 
 - 查找 fd、读取 `cloexec`：调用方持读锁即可。
+- 创建 `FdSnapshot`：调用方持读锁，克隆 `Arc<dyn FileLike>` 后释放锁。
 - 添加、删除、dup、设置 `cloexec`、close range：调用方必须持写锁。
 - `close_all_if_unshared` 在持写锁时移除 descriptor，
   把移除结果暂存在 `Vec` 中，
@@ -203,4 +220,3 @@ all descriptors removed, lock dropped before FileLike drops
 并通过各自内部锁保证对象级并发安全。
 `kfd` 只管理 descriptor 到对象的引用关系，
 不串行化具体文件对象的读写偏移或 socket 状态。
-

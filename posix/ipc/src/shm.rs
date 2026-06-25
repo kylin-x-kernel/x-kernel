@@ -2,11 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Shared memory management.
+//! SysV shared memory management.
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, format, sync::Arc, vec::Vec};
 
+use filemap::{FileMmapRequest, mmap_shared_file};
 use kerrno::{KError, KResult};
+use kfs::{File, OpenOptions};
 use khal::{
     paging::{MappingFlags, PageSize},
     time::monotonic_time_nanos,
@@ -16,7 +18,7 @@ use ksync::Mutex;
 use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
-use memspace::backend::{Backend, SharedPages};
+use memfs::shmem::create_kernel_file;
 use osvm::VirtPtr;
 use posix_types::{IpcPerm, UserPtr, shmid_ds};
 
@@ -54,23 +56,42 @@ pub struct ShmInner {
     /// Multiple attachments per PID are allowed (one VMA per shmat call).
     /// Each PID maps to a list of VirtAddrRanges, one per attach.
     va_range: BTreeMap<Pid, Vec<VirtAddrRange>>,
-    pub phys_pages: Option<Arc<SharedPages>>,
+    pub file: Arc<File>,
     pub rmid: bool,
     pub mapping_flags: MappingFlags,
     pub shmid_ds: shmid_ds,
 }
 
 impl ShmInner {
-    pub fn new(key: i32, shmid: i32, size: usize, mapping_flags: MappingFlags, pid: Pid) -> Self {
-        ShmInner {
+    pub fn new(
+        key: i32,
+        shmid: i32,
+        size: usize,
+        mapping_flags: MappingFlags,
+        pid: Pid,
+    ) -> KResult<Self> {
+        let page_num = memaddr::align_up_4k(size) / PAGE_SIZE_4K;
+        let location = create_kernel_file(
+            &format!("SYSV{shmid:x}"),
+            kvfs::NodePermission::from_bits_truncate(0o600),
+        )?
+        .into_location();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open_flags(O_RDWR)
+            .open_loc(location)?;
+        file.set_len((page_num * PAGE_SIZE_4K) as u64)?;
+
+        Ok(ShmInner {
             shmid,
-            page_num: memaddr::align_up_4k(size) / PAGE_SIZE_4K,
+            page_num,
             va_range: BTreeMap::new(),
-            phys_pages: None,
+            file: Arc::new(file),
             rmid: false,
             mapping_flags,
             shmid_ds: new_shmid_ds(key, size, mapping_flags.bits() as __kernel_mode_t, pid as _),
-        }
+        })
     }
 
     pub fn try_update(
@@ -88,11 +109,6 @@ impl ShmInner {
         Ok(self.shmid as isize)
     }
 
-    pub fn map_to_phys(&mut self, phys_pages: Arc<SharedPages>) {
-        self.phys_pages = Some(phys_pages);
-    }
-
-    /// Returns the total number of attachments across all PIDs.
     pub fn attach_count(&self) -> usize {
         self.va_range.values().map(|v| v.len()).sum()
     }
@@ -372,7 +388,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
         size,
         mapping_flags,
         cur_pid,
-    )));
+    )?));
     shm_manager.insert_key_shmid(key, shmid);
     shm_manager.insert_shmid_inner(shmid, shm_inner);
 
@@ -380,13 +396,13 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
 }
 
 pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
-    let shm_inner = {
+    let shm_inner_arc = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
             .get_inner_by_shmid(shmid)
             .ok_or(KError::InvalidInput)?
     };
-    let mut shm_inner = shm_inner.lock();
+    let shm_inner = shm_inner_arc.lock();
     let mut mapping_flags = shm_inner.mapping_flags;
     let shm_flg = ShmAtFlags::from_bits_truncate(shmflg);
 
@@ -396,6 +412,10 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
 
     let proc_state = current_process_state();
     let pid = proc_state.proc.pid();
+    let length = shm_inner.page_num * PAGE_SIZE_4K;
+    let file = shm_inner.file.clone();
+    drop(shm_inner);
+
     let mut aspace = proc_state.address_space().lock();
 
     // Validate addr: if non-zero, it must be page-aligned unless SHM_RND is set.
@@ -410,11 +430,6 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     } else {
         0
     };
-    let length = shm_inner.page_num * PAGE_SIZE_4K;
-
-    // Find a free virtual address range for this attachment.
-    // Multiple attachments from the same PID to the same shmid are
-    // allowed (POSIX permits repeated shmat without intervening shmdt).
     let start_addr = aspace
         .find_free_area(
             VirtAddr::from(start_aligned),
@@ -434,20 +449,31 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
     let end_addr = VirtAddr::from(start_addr.as_usize() + length);
     let va_range = VirtAddrRange::new(start_addr, end_addr);
 
-    // Map pages + update ShmInner under shm_inner lock only.
-    // sys_shmget locks SHM_MANAGER → ShmInner; locking ShmInner →
-    // SHM_MANAGER here would be the reverse order (AB/BA deadlock).
-    if let Some(phys_pages) = shm_inner.phys_pages.clone() {
-        let backend = Backend::new_shared(start_addr, phys_pages);
-        aspace.map(start_addr, length, mapping_flags, false, backend)?;
-    } else {
-        let pages = Arc::new(SharedPages::new(length, PageSize::Size4K)?);
-        let backend = Backend::new_shared(start_addr, pages.clone());
-        aspace.map(start_addr, length, mapping_flags, false, backend)?;
+    info!(
+        "Process {} alloc shm virt addr start: {:#x}, size: {}, mapping_flags: {:#x?}",
+        pid,
+        start_addr.as_usize(),
+        length,
+        mapping_flags
+    );
 
-        shm_inner.map_to_phys(pages);
-    }
+    let invalidate = aspace.invalidate_handle(proc_state.address_space());
+    let (vma, runtime) = mmap_shared_file(FileMmapRequest {
+        start: start_addr,
+        length,
+        offset: 0,
+        page_size: PageSize::Size4K,
+        flags: mapping_flags,
+        max_flags: mapping_flags,
+        file,
+        mm_id: aspace.mm_id(),
+        aspace: proc_state.address_space().clone(),
+        invalidate,
+    })?;
+    aspace.map_runtime_vma(vma, false, runtime)?;
+    drop(aspace);
 
+    let mut shm_inner = shm_inner_arc.lock();
     shm_inner.attach_process(pid, va_range);
     let shmid_val = shm_inner.shmid;
     drop(shm_inner);
@@ -567,7 +593,7 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_attach_detach_and_update() {
-        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1).unwrap();
         let range = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
         let vaddr = range.start;
         inner.attach_process(1, range);
@@ -597,28 +623,28 @@ pub mod tests_shm {
     }
 
     #[def_test]
-    fn test_shminner_map_to_phys_and_mode_mismatch() {
-        let mut inner = ShmInner::new(7, 8, 5000, MappingFlags::READ | MappingFlags::WRITE, 9);
+    fn test_shminner_file_backing_and_mode_mismatch() {
+        let mut inner =
+            ShmInner::new(7, 8, 5000, MappingFlags::READ | MappingFlags::WRITE, 9).unwrap();
         assert_eq!(inner.page_num, 2);
-        assert!(inner.phys_pages.is_none());
         assert!(
             inner
                 .try_update(5000, MappingFlags::READ | MappingFlags::WRITE, 10)
                 .is_ok()
         );
         assert!(inner.try_update(5000, MappingFlags::READ, 10).is_err());
+        assert_eq!(
+            inner.file.location().len().unwrap(),
+            2 * PAGE_SIZE_4K as u64
+        );
     }
 
     #[def_test]
     fn test_shm_manager_clear_proc_shm_removes_rmid_segment_after_last_detach() {
         let mut manager = ShmManager::new();
-        let shm_inner = Arc::new(Mutex::new(ShmInner::new(
-            11,
-            22,
-            4096,
-            MappingFlags::READ,
-            7,
-        )));
+        let shm_inner = Arc::new(Mutex::new(
+            ShmInner::new(11, 22, 4096, MappingFlags::READ, 7).unwrap(),
+        ));
         let range = VirtAddrRange::try_from(0x3000usize..0x4000usize).unwrap();
         shm_inner.lock().attach_process(7, range);
         shm_inner.lock().rmid = true;
@@ -635,13 +661,9 @@ pub mod tests_shm {
     #[def_test]
     fn test_clear_proc_shm_rmid_false_preserves_segment() {
         let mut manager = ShmManager::new();
-        let shm_inner = Arc::new(Mutex::new(ShmInner::new(
-            11,
-            33,
-            4096,
-            MappingFlags::READ,
-            7,
-        )));
+        let shm_inner = Arc::new(Mutex::new(
+            ShmInner::new(11, 33, 4096, MappingFlags::READ, 7).unwrap(),
+        ));
         let range = VirtAddrRange::try_from(0x3000usize..0x4000usize).unwrap();
         shm_inner.lock().attach_process(7, range);
         // NOTE: rmid stays false.
@@ -666,7 +688,7 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_multiple_attaches_same_pid() {
-        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1).unwrap();
         let range1 = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
         let range2 = VirtAddrRange::try_from(0x2000usize..0x3000usize).unwrap();
 
@@ -693,7 +715,7 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_detach_all_for_pid() {
-        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1).unwrap();
         let range1 = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
         let range2 = VirtAddrRange::try_from(0x2000usize..0x3000usize).unwrap();
 

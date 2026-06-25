@@ -4,21 +4,23 @@
 
 //! Memory file descriptor syscalls.
 
-use alloc::{format, sync::Arc};
+use alloc::sync::Arc;
 use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
 use kfs::OpenOptions;
-use kthread::{current_process_fs_context, current_process_state};
-use linux_raw_sys::general::{MFD_CLOEXEC, O_RDWR};
+use kthread::current_process_state;
+use linux_raw_sys::general::{MFD_ALLOW_SEALING, MFD_CLOEXEC, O_RDWR};
+use memfs::shmem::create_memfd_file;
 use posix_types::UserConstPtr;
 
-// TODO: correct memfd implementation
+const MEMFD_NAME_MAX_LEN: usize = 249;
 
 bitflags::bitflags! {
-    #[derive(Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct MemfdFlags: u32 {
         const CLOEXEC = MFD_CLOEXEC;
+        const ALLOW_SEALING = MFD_ALLOW_SEALING;
     }
 }
 
@@ -30,29 +32,75 @@ impl MemfdFlags {
     fn is_cloexec(self) -> bool {
         self.contains(Self::CLOEXEC)
     }
+
+    fn allows_sealing(self) -> bool {
+        self.contains(Self::ALLOW_SEALING)
+    }
 }
 
 /// Creates an anonymous in-memory file descriptor.
-pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
+///
+/// This creates a private tmpfs-backed file object whose content is owned by an
+/// inode-backed `pagecache::Mapping`, similar to `shmem_file_setup()` in
+/// Linux `mm/shmem.c`.
+pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let flags = MemfdFlags::from_raw(flags)?;
+    let display_name = name.load_string_with_max_len(MEMFD_NAME_MAX_LEN)?;
+    validate_memfd_name(&display_name)?;
+    let location = create_memfd_file(&format_memfd_name(&display_name), flags.allows_sealing())?
+        .into_location();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open_flags(O_RDWR)
+        .open_loc(location)?;
+    current_process_state()
+        .resources
+        .add_file_like(Arc::new(file), flags.is_cloexec())
+        .map(|fd| fd as _)
+}
 
-    // This is cursed
-    for id in 0..0xffff {
-        let name = format!("/tmp/memfd-{id:04x}");
-        let fs = current_process_fs_context().lock().clone();
-        if fs.resolve(&name).is_err() {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open_flags(O_RDWR)
-                .open(&fs, &name)?;
-            let proc_state = current_process_state();
-            return proc_state
-                .resources
-                .add_file_like(Arc::new(file), flags.is_cloexec())
-                .map(|fd| fd as _);
-        }
+fn validate_memfd_name(name: &str) -> KResult<()> {
+    if name.contains('/') {
+        return Err(KError::InvalidInput);
     }
-    Err(KError::TooManyOpenFiles)
+    Ok(())
+}
+
+fn format_memfd_name(name: &str) -> alloc::string::String {
+    if name.is_empty() {
+        return "memfd".into();
+    }
+    let mut formatted = alloc::string::String::from("memfd:");
+    for ch in name.chars() {
+        formatted.push(if ch == '/' { ':' } else { ch });
+    }
+    formatted
+}
+
+#[cfg(unittest)]
+mod tests {
+    use linux_raw_sys::general::MFD_ALLOW_SEALING;
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn memfd_flags_accept_allow_sealing() {
+        let flags = MemfdFlags::from_raw(MFD_CLOEXEC | MFD_ALLOW_SEALING).unwrap();
+
+        assert!(flags.is_cloexec());
+        assert!(flags.allows_sealing());
+    }
+
+    #[def_test]
+    fn memfd_flags_reject_unknown_bits() {
+        assert_eq!(MemfdFlags::from_raw(0x8000_0000), Err(KError::InvalidInput));
+    }
+
+    #[def_test]
+    fn memfd_name_rejects_slash() {
+        assert_eq!(validate_memfd_name("bad/name"), Err(KError::InvalidInput));
+        assert_eq!(validate_memfd_name("good:name"), Ok(()));
+    }
 }

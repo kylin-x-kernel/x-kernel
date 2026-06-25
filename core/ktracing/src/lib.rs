@@ -239,10 +239,10 @@ impl KernelTraceOps for Kops {
         let start_va = VirtAddr::from(start);
         let old_flags = {
             let layout = memspace::kernel_layout().lock();
-            let Some(area) = layout.find_area(start_va) else {
+            let Some(vma) = layout.find_vma(start_va) else {
                 return;
             };
-            area.flags()
+            vma.flags()
         };
 
         // static-keys patches instructions in kernel text, which is normally RX.

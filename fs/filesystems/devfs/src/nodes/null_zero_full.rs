@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use core::any::Any;
 
 use kerrno::KError;
-use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
+use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsResult};
 use kvfs_simple::{DirMapping, SimpleFs};
 
 use crate::DeviceFile;
@@ -49,6 +49,10 @@ impl DeviceFileOps for Zero {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        mapper.map_anonymous_shared()
     }
 
     fn flags(&self) -> NodeFlags {

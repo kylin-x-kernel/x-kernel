@@ -120,6 +120,97 @@ pub enum PtError {
     InvalidAddress,
 }
 
+/// Stable snapshot of a present page-table leaf entry.
+///
+/// The snapshot is the compare token used by conditional replacement paths
+/// such as COW write faults. Callers may inspect the mapping identity
+/// and permissions, but only `page_table` interprets `raw_bits` when checking
+/// whether the observed PTE is still unchanged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PteSnapshot {
+    paddr: PhysAddr,
+    flags: PagingFlags,
+    page_size: PageSize,
+    raw_bits: usize,
+}
+
+impl PteSnapshot {
+    /// Creates a snapshot from a present page-table entry.
+    pub(crate) fn from_entry<PTE: PageTableEntry>(entry: &PTE, page_size: PageSize) -> Self {
+        Self {
+            paddr: entry.paddr(),
+            flags: entry.flags(),
+            page_size,
+            raw_bits: entry.bits(),
+        }
+    }
+
+    /// Returns the base physical address encoded in the leaf entry.
+    pub const fn paddr(self) -> PhysAddr {
+        self.paddr
+    }
+
+    /// Returns the decoded permission and attribute flags.
+    pub const fn flags(self) -> PagingFlags {
+        self.flags
+    }
+
+    /// Returns the page size represented by this leaf entry.
+    pub const fn page_size(self) -> PageSize {
+        self.page_size
+    }
+
+    /// Returns `true` when `entry` still matches this snapshot exactly.
+    pub(crate) fn matches_entry<PTE: PageTableEntry>(self, entry: &PTE) -> bool {
+        self.raw_bits == entry.bits()
+    }
+}
+
+/// Error returned by conditional PTE replacement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PteReplaceError {
+    /// Page-table walk, address validation, or replacement validation failed.
+    PageTable(PtError),
+    /// The current leaf entry no longer matches the expected snapshot.
+    ///
+    /// `current == None` means the address is no longer mapped by a present
+    /// leaf entry. `Some(snapshot)` lets callers decide whether to retry,
+    /// drop prepared resources, or reclassify the fault.
+    Changed {
+        /// Current present mapping, if any.
+        current: Option<PteSnapshot>,
+    },
+}
+
+impl From<PtError> for PteReplaceError {
+    fn from(value: PtError) -> Self {
+        Self::PageTable(value)
+    }
+}
+
+/// Receipt returned after finalizing pending TLB invalidations.
+///
+/// The receipt is intentionally small: it does not expose architecture flush
+/// details, but it gives higher layers an explicit sequencing point they can
+/// place before releasing frames or object-owned pages that were unmapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TlbFlushReceipt {
+    had_pending: bool,
+}
+
+impl TlbFlushReceipt {
+    /// Creates a receipt for one finalization boundary.
+    pub(crate) const fn new(had_pending: bool) -> Self {
+        Self { had_pending }
+    }
+
+    /// Returns `true` if this boundary flushed at least one pending
+    /// invalidation or a full TLB.
+    pub const fn had_pending(self) -> bool {
+        self.had_pending
+    }
+}
+
 #[cfg(feature = "kerrno")]
 impl From<PtError> for kerrno::KError {
     fn from(value: PtError) -> Self {

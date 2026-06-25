@@ -2,9 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Address space implementation backed by memory sets and page tables.
-use alloc::sync::Arc;
-use core::{fmt, ops::DerefMut};
+//! Address space implementation backed by VMA metadata and page tables.
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::{
+    fmt,
+    ops::DerefMut,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// Address resolution policy for mmap operations.
 pub enum AddrPolicy {
@@ -16,32 +24,484 @@ pub enum AddrPolicy {
     FixedNoReplace,
 }
 
-use kerrno::{KError, KResult, k_bail};
+use kerrno::{KError, KErrorKind, KResult, k_bail};
 use khal::{
     mem::p2v,
-    paging::{MappingFlags, PageSize, PageTable},
+    paging::{MappingFlags, PageSize, PageTable, PagingError},
     trap::PageFaultFlags,
 };
+use kspin::SpinNoIrq;
 use ksync::Mutex;
 use memaddr::{
     MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr, VirtAddrRange, is_aligned_4k,
 };
-use memset::{MemoryArea, MemorySet};
+use vmobj::{MappingViewKind, ObjectInvalidateRequest, VmObjectId};
 
 #[cfg(target_arch = "aarch64")]
 use crate::Aarch64UserAsidContext;
-use crate::backend::{Backend, BackendOps};
+use crate::{
+    FaultContext, FaultInput, ForkCloneTarget, MsyncPolicy, PageFaultOutcome, VmArea, VmAreaSet,
+    VmBackingKind,
+    backend::{FaultCompatResult, map_paging_err, pages_in},
+    vma::VmRuntimeRef,
+};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PendingInvalidateId(u64);
+
+#[derive(Default)]
+struct PendingInvalidations {
+    next_id: u64,
+    order: VecDeque<PendingInvalidateId>,
+    entries: BTreeMap<PendingInvalidateId, ObjectInvalidateRequest>,
+}
+
+static NEXT_MM_ID: AtomicU64 = AtomicU64::new(1);
+
+impl PendingInvalidations {
+    fn enqueue(&mut self, request: ObjectInvalidateRequest) -> PendingInvalidateId {
+        let id = PendingInvalidateId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1);
+        self.order.push_back(id);
+        self.entries.insert(id, request);
+        id
+    }
+
+    fn pop_front(&mut self) -> Option<(PendingInvalidateId, ObjectInvalidateRequest)> {
+        loop {
+            let id = self.order.pop_front()?;
+            if let Some(request) = self.entries.remove(&id) {
+                return Some((id, request));
+            }
+        }
+    }
+
+    fn remove(&mut self, id: PendingInvalidateId) -> bool {
+        self.entries.remove(&id).is_some()
+    }
+
+    fn requeue_back(&mut self, id: PendingInvalidateId, request: ObjectInvalidateRequest) {
+        self.order.push_back(id);
+        self.entries.insert(id, request);
+    }
+}
+
+#[derive(Default)]
+pub struct InvalidateSink {
+    queue: SpinNoIrq<PendingInvalidations>,
+}
+
+impl InvalidateSink {
+    fn enqueue(&self, request: ObjectInvalidateRequest) -> PendingInvalidateId {
+        self.queue.lock().enqueue(request)
+    }
+
+    fn pop_front(&self) -> Option<(PendingInvalidateId, ObjectInvalidateRequest)> {
+        self.queue.lock().pop_front()
+    }
+
+    fn requeue_back(&self, id: PendingInvalidateId, request: ObjectInvalidateRequest) {
+        self.queue.lock().requeue_back(id, request);
+    }
+
+    fn remove(&self, id: PendingInvalidateId) -> bool {
+        self.queue.lock().remove(id)
+    }
+}
+
+#[derive(Clone)]
+pub struct InvalidateHandle {
+    sink: Weak<InvalidateSink>,
+    aspace: Weak<Mutex<MmSpace>>,
+}
+
+impl InvalidateHandle {
+    pub fn enqueue(&self, request: ObjectInvalidateRequest) -> bool {
+        let Some(sink) = self.sink.upgrade() else {
+            return false;
+        };
+        sink.enqueue(request);
+        true
+    }
+
+    pub fn try_apply(&self, request: &ObjectInvalidateRequest) -> KResult<bool> {
+        let Some(aspace) = self.aspace.upgrade() else {
+            return Ok(false);
+        };
+        let Some(mut aspace) = aspace.try_lock() else {
+            return Ok(false);
+        };
+        aspace.apply_invalidate_request(request)?;
+        Ok(true)
+    }
+
+    pub fn submit(&self, request: ObjectInvalidateRequest) -> KResult<bool> {
+        let Some(sink) = self.sink.upgrade() else {
+            return Ok(false);
+        };
+        let id = sink.enqueue(request.clone());
+        match self.try_apply(&request) {
+            Ok(true) => {
+                let _ = sink.remove(id);
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+/// Validated source mapping for `mremap()`.
+///
+/// Syscall code can read only the source
+/// VMA metadata needed to relocate a mapping, while the runtime execution
+/// handle remains encapsulated inside `memspace`.
+pub struct MremapSource {
+    vma: VmArea,
+}
+
+impl MremapSource {
+    /// Returns the source mapping's page size.
+    pub fn page_size(&self) -> PageSize {
+        self.vma.backing().page_size()
+    }
+
+    /// Returns the source mapping's protection flags.
+    pub fn flags(&self) -> MappingFlags {
+        self.vma.flags()
+    }
+
+    /// Returns the source mapping's maximum protection flags.
+    pub fn max_flags(&self) -> MappingFlags {
+        self.vma.max_flags()
+    }
+
+    /// Returns the end address of the source VMA.
+    pub fn end(&self) -> VirtAddr {
+        self.vma.end()
+    }
+}
 /// The virtual memory address space.
-pub struct AddrSpace {
+pub struct MmSpace {
+    mm_id: u64,
     range: VirtAddrRange,
-    areas: MemorySet<Backend>,
+    vmas: VmAreaSet,
     pgtbl: PageTable,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Option<Arc<Aarch64UserAsidContext>>,
+    invalidate_sink: Arc<InvalidateSink>,
 }
 
-impl AddrSpace {
+/// Compatibility alias retained while external crates migrate off the legacy name.
+pub type AddrSpace = MmSpace;
+
+impl MmSpace {
+    pub fn invalidate_handle(&self, aspace: &Arc<Mutex<MmSpace>>) -> InvalidateHandle {
+        InvalidateHandle {
+            sink: Arc::downgrade(&self.invalidate_sink),
+            aspace: Arc::downgrade(aspace),
+        }
+    }
+
+    pub(crate) fn deferred_invalidate_handle(&self) -> InvalidateHandle {
+        InvalidateHandle {
+            sink: Arc::downgrade(&self.invalidate_sink),
+            aspace: Weak::new(),
+        }
+    }
+
+    pub fn enqueue_invalidate(&self, request: ObjectInvalidateRequest) {
+        self.invalidate_sink.enqueue(request);
+    }
+
+    fn invalidate_kind_matches(
+        vma_kind: VmBackingKind,
+        request_kind: MappingViewKind,
+        object: VmObjectId,
+    ) -> bool {
+        match (vma_kind, request_kind) {
+            (VmBackingKind::FileShared { object: left }, MappingViewKind::Shared) => left == object,
+            (VmBackingKind::AnonymousShared { object: left }, MappingViewKind::Shared) => {
+                left == object
+            }
+            (
+                VmBackingKind::FilePrivate {
+                    file_object,
+                    anon_object,
+                    ..
+                },
+                MappingViewKind::Private,
+            ) => match object {
+                VmObjectId::File(_) => file_object == object,
+                VmObjectId::Anon(_) => anon_object == object,
+            },
+            (VmBackingKind::AnonymousPrivate { object: left }, MappingViewKind::Private) => {
+                left == object
+            }
+            _ => false,
+        }
+    }
+
+    fn request_offset_for(vma: &VmArea, object: VmObjectId, addr: VirtAddr) -> Option<u64> {
+        match (vma.backing().kind(), object) {
+            (VmBackingKind::FileShared { object: left }, object)
+            | (VmBackingKind::AnonymousShared { object: left }, object)
+            | (VmBackingKind::AnonymousPrivate { object: left }, object)
+                if left == object =>
+            {
+                vma.backing_offset_for(addr)
+            }
+            (VmBackingKind::FilePrivate { file_object, .. }, object @ VmObjectId::File(_))
+                if file_object == object =>
+            {
+                vma.file_offset_for(addr)
+            }
+            (VmBackingKind::FilePrivate { anon_object, .. }, object @ VmObjectId::Anon(_))
+                if anon_object == object =>
+            {
+                Some(addr.as_usize().saturating_sub(vma.start().as_usize()) as u64)
+            }
+            _ => None,
+        }
+    }
+
+    fn overlap_matches_invalidate(
+        &self,
+        vma: &VmArea,
+        overlap: VirtAddrRange,
+        request: &ObjectInvalidateRequest,
+    ) -> bool {
+        let hit = request.hit();
+        if !Self::invalidate_kind_matches(vma.backing().kind(), hit.view().kind(), request.object())
+        {
+            return false;
+        }
+        let virt_delta = overlap
+            .start
+            .as_usize()
+            .saturating_sub(hit.vma_start() as usize) as u64;
+        let expected_offset = hit.object_start() + virt_delta;
+        Self::request_offset_for(vma, request.object(), overlap.start) == Some(expected_offset)
+    }
+
+    fn zap_present_ranges(&mut self, ranges: Vec<(VirtAddrRange, PageSize)>) -> KResult<()> {
+        let mut modify = self.pgtbl.modify();
+        let mut result = Ok(());
+        'outer: for (range, page_size) in ranges {
+            let iter = match pages_in(range, page_size) {
+                Ok(iter) => iter,
+                Err(err) => {
+                    result = Err(err);
+                    break;
+                }
+            };
+            for vaddr in iter {
+                match modify.unmap(vaddr) {
+                    Ok(_) | Err(PagingError::NotMapped) => {}
+                    Err(err) => {
+                        result = Err(map_paging_err(err));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        modify.finish();
+        result
+    }
+
+    fn apply_invalidate_request(&mut self, request: &ObjectInvalidateRequest) -> KResult<()> {
+        let hit = request.hit();
+        if hit.vma_len() == 0 {
+            return Ok(());
+        }
+        let range = VirtAddrRange::from_start_size(
+            VirtAddr::from_usize(hit.vma_start() as usize),
+            hit.vma_len(),
+        );
+
+        let overlaps = self
+            .vmas
+            .collect_overlapping(range)
+            .into_iter()
+            .filter_map(|vma| {
+                let overlap = VirtAddrRange::new(
+                    VirtAddr::from_usize(hit.vma_start() as usize).max(vma.start()),
+                    range.end.min(vma.end()),
+                );
+                if overlap.is_empty() || !self.overlap_matches_invalidate(&vma, overlap, request) {
+                    return None;
+                }
+                Some((overlap, vma.backing().page_size()))
+            })
+            .collect::<Vec<_>>();
+
+        self.zap_present_ranges(overlaps)
+    }
+
+    fn drain_pending_invalidations(&mut self) {
+        while let Some((id, request)) = self.invalidate_sink.pop_front() {
+            if let Err(err) = self.apply_invalidate_request(&request) {
+                warn!(
+                    "Failed to apply invalidate request view={} at 0x{:x} (len={}): {err}",
+                    request.hit().view().id().raw(),
+                    request.hit().vma_start(),
+                    request.hit().vma_len()
+                );
+                self.invalidate_sink.requeue_back(id, request);
+                break;
+            }
+        }
+    }
+
+    pub fn submit_invalidate_locked(&mut self, request: ObjectInvalidateRequest) -> KResult<()> {
+        let id = self.invalidate_sink.enqueue(request.clone());
+        match self.apply_invalidate_request(&request) {
+            Ok(()) => {
+                let _ = self.invalidate_sink.remove(id);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn kernel_linear_max_flags(flags: MappingFlags) -> MappingFlags {
+        flags
+            | MappingFlags::READ
+            | MappingFlags::WRITE
+            | MappingFlags::EXECUTE
+            | MappingFlags::DEVICE
+            | MappingFlags::UNCACHED
+            | MappingFlags::SHARED
+    }
+
+    fn page_fault_outcome_to_error(outcome: PageFaultOutcome) -> KResult<()> {
+        match outcome {
+            PageFaultOutcome::Resolved => Ok(()),
+            PageFaultOutcome::Retry | PageFaultOutcome::CowConflictRetry => {
+                Err(KError::ResourceBusy)
+            }
+            PageFaultOutcome::Unmapped | PageFaultOutcome::BusError => Err(KError::BadAddress),
+            PageFaultOutcome::AccessDenied => Err(KError::PermissionDenied),
+            PageFaultOutcome::OutOfMemory | PageFaultOutcome::NoProgress => Err(KError::NoMemory),
+            PageFaultOutcome::Failed => Err(KError::BadAddress),
+        }
+    }
+
+    fn page_fault_outcome_to_legacy_handled(outcome: PageFaultOutcome) -> bool {
+        outcome.is_resolved() || outcome.is_retryable()
+    }
+
+    fn install_runtime_mapping(&mut self, mut vma: VmArea, runtime: VmRuntimeRef) -> KResult {
+        runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?;
+        vma.set_runtime(runtime.register_object_views(
+            self.mm_id,
+            self.deferred_invalidate_handle(),
+            &vma,
+        ));
+        self.vmas.insert(vma);
+        Ok(())
+    }
+
+    fn remove_mapping_range(&mut self, start: VirtAddr, size: usize) -> KResult {
+        let range = VirtAddrRange::from_start_size(start, size);
+        let overlapped_vmas = self.vmas.collect_overlapping(range);
+        let operations = overlapped_vmas
+            .iter()
+            .map(|vma| {
+                let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
+                Ok((overlap, runtime))
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        {
+            let mut modify = self.pgtbl.modify();
+            for (overlap, runtime) in &operations {
+                runtime.unmap(*overlap, &mut modify)?;
+            }
+            modify.finish();
+        }
+        self.vmas.unmap(start, size);
+        Ok(())
+    }
+
+    fn remove_mapping_metadata(&mut self, start: VirtAddr, size: usize) -> KResult {
+        self.validate_region(start, size)?;
+        self.vmas.unmap(start, size);
+        Ok(())
+    }
+
+    fn extend_mapping_range(&mut self, start: VirtAddr, additional: usize) -> KResult {
+        let vma = self.vmas.find(start).ok_or(KError::NoMemory)?;
+        let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
+        let current_end = vma.end();
+        let new_end = current_end
+            .checked_add(additional)
+            .ok_or(KError::InvalidInput)?;
+        if self.vmas.overlaps(VirtAddrRange::new(current_end, new_end)) {
+            return Err(KError::AlreadyExists);
+        }
+        runtime.map(
+            VirtAddrRange::from_start_size(current_end, additional),
+            vma.flags(),
+            &mut self.pgtbl.modify(),
+        )?;
+        self.vmas.extend(start, additional);
+        Ok(())
+    }
+
+    fn protect_mapping_range(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+    ) -> KResult {
+        let range = VirtAddrRange::from_start_size(start, size);
+        let overlapped_vmas = self.vmas.collect_overlapping(range);
+        let operations = overlapped_vmas
+            .iter()
+            .map(|vma| {
+                let protect_range =
+                    VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
+                Ok((protect_range, runtime))
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        {
+            let mut modify = self.pgtbl.modify();
+            for (protect_range, runtime) in &operations {
+                let pte_flags = runtime.on_protect(*protect_range, flags, &mut modify)?;
+                modify
+                    .protect_region(protect_range.start, protect_range.size(), pte_flags)
+                    .map_err(crate::backend::map_paging_err)?;
+            }
+            modify.finish();
+        }
+        self.vmas.protect(start, size, flags);
+        Ok(())
+    }
+
+    fn clear_all_mappings(&mut self) {
+        let vmas = self.vmas.iter().cloned().collect::<Vec<_>>();
+        let operations = vmas
+            .iter()
+            .map(|vma| {
+                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
+                Ok((vma.range(), runtime))
+            })
+            .collect::<KResult<Vec<_>>>()
+            .expect("runtime entry must exist for every VMA");
+        {
+            let mut modify = self.pgtbl.modify();
+            for (range, runtime) in &operations {
+                runtime
+                    .unmap(*range, &mut modify)
+                    .expect("backend clear must succeed");
+            }
+            modify.finish();
+        }
+        self.vmas.clear();
+    }
+
     /// Returns the address space base.
     pub const fn base(&self) -> VirtAddr {
         self.range.start
@@ -86,6 +546,12 @@ impl AddrSpace {
         }
     }
 
+    /// Returns the stable address-space identity used by object-side rmap
+    /// registrations.
+    pub const fn mm_id(&self) -> u64 {
+        self.mm_id
+    }
+
     /// Checks if the address space contains the given address range.
     pub fn contains_range(&self, start: VirtAddr, size: usize) -> bool {
         self.range.contains(start) && (self.range.end - start) >= size
@@ -114,10 +580,12 @@ impl AddrSpace {
     /// page table modifications flush TLB entries on **all** online CPUs.
     fn new_empty_inner(base: VirtAddr, size: usize, is_kernel: bool) -> KResult<Self> {
         #[cfg(target_arch = "aarch64")]
-        let mut pgtbl = if is_kernel {
-            PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
-        } else {
-            PageTable::try_new().map_err(|_| KError::NoMemory)?
+        let pgtbl = {
+            if is_kernel {
+                PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
+            } else {
+                PageTable::try_new().map_err(|_| KError::NoMemory)?
+            }
         };
         #[cfg(not(target_arch = "aarch64"))]
         let pgtbl = if is_kernel {
@@ -126,19 +594,22 @@ impl AddrSpace {
             PageTable::try_new().map_err(|_| KError::NoMemory)?
         };
         #[cfg(target_arch = "aarch64")]
-        let user_asid_context = if is_kernel {
-            None
+        let (pgtbl, user_asid_context) = if is_kernel {
+            (pgtbl, None)
         } else {
+            let mut pgtbl = pgtbl;
             let ctx = Arc::new(Aarch64UserAsidContext::new(pgtbl.root_paddr()));
             ctx.install_page_table_asid_provider(&mut pgtbl);
-            Some(ctx)
+            (pgtbl, Some(ctx))
         };
         Ok(Self {
+            mm_id: NEXT_MM_ID.fetch_add(1, Ordering::Relaxed),
             range: VirtAddrRange::from_start_size(base, size),
-            areas: MemorySet::new(),
+            vmas: VmAreaSet::new(),
             pgtbl,
             #[cfg(target_arch = "aarch64")]
             user_asid_context,
+            invalidate_sink: Arc::new(InvalidateSink::default()),
         })
     }
 
@@ -164,7 +635,7 @@ impl AddrSpace {
     /// user space.
     ///
     /// Returns an error if the two address spaces overlap.
-    pub fn copy_mappings_from(&mut self, other: &AddrSpace) -> KResult {
+    pub fn copy_mappings_from(&mut self, other: &MmSpace) -> KResult {
         self.pgtbl
             .modify()
             .copy_from(&other.pgtbl, other.base(), other.size());
@@ -209,12 +680,140 @@ impl AddrSpace {
         limit: VirtAddrRange,
         align: usize,
     ) -> Option<VirtAddr> {
-        self.areas.find_free_area(hint, size, limit, align)
+        self.vmas.find_free_area(hint, size, limit, align)
     }
 
-    /// Find the memory area that contains the given virtual address.
-    pub fn find_area(&self, vaddr: VirtAddr) -> Option<&MemoryArea<Backend>> {
-        self.areas.find(vaddr)
+    /// Finds the VMA containing `vaddr` and returns a Linux-aligned view.
+    pub fn find_vma(&self, vaddr: VirtAddr) -> Option<&VmArea> {
+        self.vmas.find(vaddr)
+    }
+
+    fn runtime_for_vma(&self, vma: &VmArea) -> Option<VmRuntimeRef> {
+        let runtime = vma.runtime()?.clone();
+        if runtime.backing_info() != vma.backing() {
+            warn!(
+                "runtime ref/VMA drift at {:?}: backend={:?} vma={:?}",
+                vma.start(),
+                runtime.backing_info(),
+                vma.backing()
+            );
+            return None;
+        }
+        Some(runtime)
+    }
+
+    fn clone_vma_for_runtime(&self, vma: &VmArea) -> Option<VmArea> {
+        self.runtime_for_vma(vma)?;
+        Some(vma.clone())
+    }
+
+    fn clone_vmas<'a>(&self, vmas: impl IntoIterator<Item = &'a VmArea>) -> KResult<Vec<VmArea>> {
+        vmas.into_iter()
+            .map(|vma| {
+                self.clone_vma_for_runtime(vma).ok_or_else(|| {
+                    warn!("could not clone VMA metadata at {:?}", vma.start());
+                    KError::BadAddress
+                })
+            })
+            .collect()
+    }
+
+    fn covering_vmas_in_range(&self, range: VirtAddrRange) -> KResult<Vec<VmArea>> {
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.range.contains(range.start) || self.range.end < range.end {
+            return Err(KError::NoMemory);
+        }
+        let overlapped_vmas = self.vmas.collect_overlapping(range);
+        let mut cursor = range.start;
+        for vma in &overlapped_vmas {
+            if vma.start() > cursor {
+                return Err(KError::NoMemory);
+            }
+            cursor = vma.end();
+            if cursor >= range.end {
+                return Ok(overlapped_vmas);
+            }
+        }
+        Err(KError::NoMemory)
+    }
+
+    fn snapshot_vmas_in_range(
+        &self,
+        start: VirtAddr,
+        size: usize,
+    ) -> KResult<Vec<(VmArea, VirtAddrRange)>> {
+        self.validate_region(start, size)?;
+        let end = start + size;
+        let mut overlaps = Vec::new();
+        let overlapped_vmas = self.covering_vmas_in_range(VirtAddrRange::new(start, end))?;
+        let mut cursor = start;
+        for vma in &overlapped_vmas {
+            overlaps.push(VirtAddrRange::new(
+                cursor.max(vma.start()),
+                vma.end().min(end),
+            ));
+            cursor = vma.end();
+        }
+
+        let vmas = self.clone_vmas(overlapped_vmas.iter())?;
+        Ok(vmas.into_iter().zip(overlaps).collect())
+    }
+
+    fn clone_all_vmas(&self) -> KResult<Vec<VmArea>> {
+        self.clone_vmas(self.vmas.iter())
+    }
+
+    fn relocated_mapping_from_snapshot(
+        &self,
+        vma: &VmArea,
+        new_start: VirtAddr,
+        new_size: usize,
+        new_flags: MappingFlags,
+        aspace: &Arc<Mutex<MmSpace>>,
+    ) -> KResult<(VmArea, VmRuntimeRef)> {
+        let runtime = self.runtime_for_vma(vma).ok_or(KError::BadAddress)?;
+        let invalidate = Some(self.invalidate_handle(aspace));
+        Ok((
+            vma.relocated(new_start, new_size, new_flags),
+            runtime.relocate_for_mremap(new_start, self.mm_id(), aspace, invalidate)?,
+        ))
+    }
+
+    /// Resolves and validates the source mapping for an `mremap()` request.
+    ///
+    /// The returned snapshot is anchored at the source VMA start and guarantees
+    /// that `old_size` fits within the VMA and respects the backing page size.
+    pub fn resolve_mremap_source(&self, addr: VirtAddr, old_size: usize) -> KResult<MremapSource> {
+        let vma = self.find_vma(addr).ok_or(KError::BadAddress)?;
+        let vma = self.clone_vma_for_runtime(vma).ok_or(KError::BadAddress)?;
+        if addr != vma.start() {
+            return Err(KError::InvalidInput);
+        }
+        if addr.as_usize() + old_size > vma.end().as_usize() {
+            return Err(KError::BadAddress);
+        }
+        if !vma.backing().page_size().is_aligned(addr.as_usize()) {
+            return Err(KError::InvalidInput);
+        }
+        Ok(MremapSource { vma })
+    }
+
+    /// Finds a destination range suitable for relocating a mapping.
+    ///
+    /// The search first honors the provided hint, then falls back to the
+    /// address-space base, matching current `mremap()` relocation policy.
+    pub fn find_relocation_target(
+        &self,
+        hint: VirtAddr,
+        size: usize,
+        page_size: PageSize,
+    ) -> KResult<VirtAddr> {
+        let limit = VirtAddrRange::new(self.base(), self.end());
+        self.find_free_area(hint, size, limit, page_size as usize)
+            .or(self.find_free_area(self.base(), size, limit, page_size as usize))
+            .ok_or(KError::NoMemory)
     }
 
     /// Resolve the mapping address for an mmap operation.
@@ -242,7 +841,7 @@ impl AddrSpace {
             }
             AddrPolicy::FixedNoReplace => {
                 let range = VirtAddrRange::from_start_size(hint, length);
-                if self.areas.overlaps(range) {
+                if self.vmas.overlaps(range) {
                     k_bail!(AlreadyExists, "mapping overlaps existing area");
                 }
                 Ok(hint)
@@ -252,7 +851,7 @@ impl AddrSpace {
 
     /// Add a new linear mapping.
     ///
-    /// See [`Backend`] for more details about the mapping backends.
+    /// The mapping is backed by a linear [`VmRuntimeRef`].
     ///
     /// The `flags` parameter indicates the mapping permissions and attributes.
     ///
@@ -265,6 +864,7 @@ impl AddrSpace {
         size: usize,
         flags: MappingFlags,
     ) -> KResult {
+        self.drain_pending_invalidations();
         self.validate_region(start_vaddr, size)?;
 
         if !start_paddr.is_aligned_4k() {
@@ -272,56 +872,136 @@ impl AddrSpace {
         }
 
         let offset = start_vaddr.as_usize() as isize - start_paddr.as_usize() as isize;
-        let area = MemoryArea::new(start_vaddr, size, flags, Backend::new_linear(offset));
-        self.areas.map(area, &mut self.pgtbl, false)?;
-        Ok(())
+        let runtime = VmRuntimeRef::new_linear(offset);
+        let vma = VmArea::new(
+            start_vaddr,
+            size,
+            flags,
+            Self::kernel_linear_max_flags(flags),
+            runtime.backing_info(),
+            0,
+            None,
+        );
+        self.map_runtime_vma(vma, false, runtime)
     }
 
-    /// Map a region using the provided backend and flags.
+    /// Map a region using the provided runtime execution reference and flags.
     pub fn map(
         &mut self,
         start: VirtAddr,
         size: usize,
         flags: MappingFlags,
         populate: bool,
-        backend: Backend,
+        runtime: VmRuntimeRef,
     ) -> KResult {
+        self.map_with_max_flags(start, size, flags, flags, populate, runtime)
+    }
+
+    /// Map a region using the provided runtime reference and explicit maximum
+    /// permissions.
+    pub fn map_with_max_flags(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        max_flags: MappingFlags,
+        populate: bool,
+        runtime: VmRuntimeRef,
+    ) -> KResult {
+        self.drain_pending_invalidations();
         self.validate_region(start, size)?;
 
-        let area = MemoryArea::new(start, size, flags, backend);
-        self.areas.map(area, &mut self.pgtbl, false)?;
+        if matches!(
+            runtime.backing_info().kind(),
+            VmBackingKind::FileShared { .. } | VmBackingKind::FilePrivate { .. }
+        ) {
+            warn!(
+                "file-backed mappings must use MmSpace::map_runtime_vma with explicit VmArea \
+                 metadata"
+            );
+            return Err(KError::InvalidInput);
+        }
+
+        let vma = VmArea::new(
+            start,
+            size,
+            flags,
+            max_flags,
+            runtime.backing_info(),
+            0,
+            None,
+        );
+        self.map_runtime_vma(vma, populate, runtime)
+    }
+
+    /// Map a region using an explicit VMA metadata record and runtime reference.
+    pub fn map_runtime_vma(
+        &mut self,
+        vma: VmArea,
+        populate: bool,
+        runtime: VmRuntimeRef,
+    ) -> KResult {
+        self.drain_pending_invalidations();
+        let start = vma.start();
+        let size = vma.size();
+        let flags = vma.flags();
+        self.validate_region(start, size)?;
+        self.install_runtime_mapping(vma, runtime)?;
         if populate {
             self.populate_area(start, size, flags)?;
         }
         Ok(())
     }
 
+    /// Installs a relocated copy of an existing mapping snapshot.
+    ///
+    /// This keeps `mremap`-style relocation on the `MmSpace -> VmArea`
+    /// construction path instead of open-coding `relocated VMA + relocated
+    /// backend` assembly in upper layers.
+    pub fn map_relocated_snapshot(
+        &mut self,
+        snapshot: &MremapSource,
+        new_start: VirtAddr,
+        new_size: usize,
+        new_flags: MappingFlags,
+        owner: &Arc<Mutex<MmSpace>>,
+    ) -> KResult {
+        self.drain_pending_invalidations();
+        let (vma, runtime) = self.relocated_mapping_from_snapshot(
+            &snapshot.vma,
+            new_start,
+            new_size,
+            new_flags,
+            owner,
+        )?;
+        self.install_runtime_mapping(vma, runtime)
+    }
+
     /// Populates the area with physical frames, returning false if the area
     /// contains unmapped area.
     pub fn populate_area(
         &mut self,
-        mut start: VirtAddr,
+        start: VirtAddr,
         size: usize,
         access_flags: MappingFlags,
     ) -> KResult {
+        self.drain_pending_invalidations();
         self.validate_region(start, size)?;
         let end = start + size;
+        let overlapped_vmas = self.covering_vmas_in_range(VirtAddrRange::new(start, end))?;
+        let mut cursor = start;
 
-        let mut modify = self.pgtbl.modify();
-        while let Some(area) = self.areas.find(start) {
-            let range = VirtAddrRange::new(start, area.end().min(end));
-            area.backend()
-                .populate(range, area.flags(), access_flags, &mut modify)?;
-            start = area.end();
-            assert!(start.is_aligned_4k());
-            if start >= end {
+        for vma in overlapped_vmas {
+            let range = VirtAddrRange::new(cursor.max(vma.start()), vma.end().min(end));
+            for vaddr in pages_in(range, vma.backing().page_size())? {
+                let outcome = vma.handle_fault(self, FaultContext::new(vaddr, access_flags));
+                Self::page_fault_outcome_to_error(outcome)?;
+            }
+            cursor = vma.end();
+            assert!(cursor.is_aligned_4k());
+            if cursor >= end {
                 break;
             }
-        }
-
-        if start < end {
-            // If the area is not fully mapped, we return ENOMEM.
-            k_bail!(NoMemory);
         }
 
         Ok(())
@@ -332,10 +1012,35 @@ impl AddrSpace {
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
     pub fn unmap(&mut self, start: VirtAddr, size: usize) -> KResult {
+        self.drain_pending_invalidations();
         self.validate_region(start, size)?;
+        self.remove_mapping_range(start, size)
+    }
 
-        self.areas.unmap(start, size, &mut self.pgtbl)?;
-        Ok(())
+    /// Removes VMA metadata for a range whose PTEs and backing ownership have
+    /// already been transferred elsewhere.
+    pub fn drop_mapping_metadata(&mut self, start: VirtAddr, size: usize) -> KResult {
+        self.drain_pending_invalidations();
+        self.remove_mapping_metadata(start, size)
+    }
+
+    /// Drops present PTEs in the specified range while keeping VMA metadata.
+    ///
+    /// This is Linux-style object-driven unmap work after truncate/invalidate:
+    /// the backing object zaps affected PTEs but the VMA remains so subsequent
+    /// faults can re-evaluate current object state.
+    pub fn invalidate_present(&mut self, start: VirtAddr, size: usize) -> KResult {
+        self.drain_pending_invalidations();
+        let overlaps = self
+            .snapshot_vmas_in_range(start, size)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let operations = overlaps
+            .iter()
+            .map(|(vma, overlap)| Ok((*overlap, vma.backing().page_size())))
+            .collect::<KResult<Vec<_>>>()?;
+
+        self.zap_present_ranges(operations)
     }
 
     /// To process data in this area with the given function.
@@ -417,11 +1122,86 @@ impl AddrSpace {
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> KResult {
+        self.drain_pending_invalidations();
         self.validate_region(start, size)?;
+        let overlapped_vmas =
+            self.covering_vmas_in_range(VirtAddrRange::from_start_size(start, size))?;
+        for vma in &overlapped_vmas {
+            if !vma.allows_protection(flags) {
+                return Err(KError::PermissionDenied);
+            }
+        }
+        self.protect_mapping_range(start, size, flags)
+    }
 
-        self.areas
-            .protect(start, size, |_| Some(flags), &mut self.pgtbl)?;
+    /// Applies a `MADV_DONTNEED`-style discard hint through object-side
+    /// producers for private-anon and file-private-anon mappings.
+    pub fn madvise_dontneed(&mut self, start: VirtAddr, size: usize) -> KResult {
+        self.drain_pending_invalidations();
+        self.validate_region(start, size)?;
+        let range = VirtAddrRange::from_start_size(start, size);
+        let overlapped_vmas = self.covering_vmas_in_range(range)?;
+        let mut handled = false;
+        let mut pgtbl = self.pgtbl.modify();
+        for vma in overlapped_vmas {
+            let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+            if overlap.is_empty() {
+                continue;
+            }
+            let Some(runtime) = vma.runtime() else {
+                continue;
+            };
+            handled |= runtime.madvise_dontneed(&vma, overlap, &mut pgtbl)?;
+        }
+        pgtbl.finish();
+        drop(pgtbl);
+        if handled {
+            self.drain_pending_invalidations();
+        }
+        Ok(())
+    }
 
+    /// Synchronizes file-backed shared mappings intersecting `start..start+size`.
+    ///
+    /// This mirrors Linux `msync()` range walking: holes are recorded as an
+    /// address error, but later VMAs in the range are still processed unless a
+    /// stronger runtime/provider error occurs.
+    pub fn msync_range(&mut self, start: VirtAddr, size: usize, policy: MsyncPolicy) -> KResult {
+        self.drain_pending_invalidations();
+        self.validate_region(start, size)?;
+        if size == 0 {
+            return Ok(());
+        }
+        if policy.has_invalidate() {
+            return Err(KError::OperationNotSupported);
+        }
+
+        let range = VirtAddrRange::from_start_size(start, size);
+        let overlapped_vmas = self.vmas.collect_overlapping(range);
+        let mut cursor = start;
+        let mut saw_hole = overlapped_vmas.is_empty();
+
+        for vma in overlapped_vmas {
+            if vma.start() > cursor {
+                saw_hole = true;
+            }
+            let overlap = VirtAddrRange::new(cursor.max(vma.start()), range.end.min(vma.end()));
+            if !overlap.is_empty() {
+                let runtime = self.runtime_for_vma(&vma).ok_or(KError::BadAddress)?;
+                runtime.msync(&vma, overlap, policy)?;
+            }
+            cursor = cursor.max(vma.end());
+            if cursor >= range.end {
+                break;
+            }
+        }
+
+        if cursor < range.end {
+            saw_hole = true;
+        }
+        if saw_hole {
+            return Err(KError::NoMemory);
+        }
         Ok(())
     }
 
@@ -430,18 +1210,17 @@ impl AddrSpace {
     /// Returns an error if the extension would exceed address space bounds
     /// or overlap with another mapping.
     pub fn extend_area(&mut self, start: VirtAddr, additional: usize) -> KResult {
+        self.drain_pending_invalidations();
         // Validate the extension range [area.end, area.end + additional),
         // not [start, start + additional).
         let current_end = self
-            .areas
-            .find(start)
-            .map(|a| a.end())
+            .find_vma(start)
+            .map(|vma| vma.end())
             .ok_or(KError::NoMemory)?;
         if additional > 0 {
             self.validate_region(current_end, additional)?;
         }
-        self.areas.extend_area(start, additional, &mut self.pgtbl)?;
-        Ok(())
+        self.extend_mapping_range(start, additional)
     }
 
     /// Move page table entries from src to dst within the same address space.
@@ -471,12 +1250,14 @@ impl AddrSpace {
                     .expect("unmap must succeed after successful query");
             }
         }
+        modify.finish();
         Ok(())
     }
 
     /// Removes all mappings in the address space.
     pub fn clear(&mut self) {
-        self.areas.clear(&mut self.pgtbl).unwrap();
+        self.drain_pending_invalidations();
+        self.clear_all_mappings();
     }
 
     /// Checks whether an access to the specified memory region is valid.
@@ -489,75 +1270,193 @@ impl AddrSpace {
         size: usize,
         access_flags: MappingFlags,
     ) -> bool {
-        let Some(mut range) = VirtAddrRange::try_from_start_size(start, size) else {
+        let Some(range) = VirtAddrRange::try_from_start_size(start, size) else {
             return false;
         };
-        for area in self.areas.iter() {
-            if area.end() <= range.start {
-                continue;
-            }
-            if area.start() > range.start {
+        let Ok(overlapped_vmas) = self.covering_vmas_in_range(range) else {
+            return false;
+        };
+        for vma in overlapped_vmas {
+            if !vma.flags().contains(access_flags) {
                 return false;
-            }
-
-            // This area overlaps with the memory region
-            if !area.flags().contains(access_flags) {
-                return false;
-            }
-
-            range.start = area.end();
-            if range.is_empty() {
-                return true;
             }
         }
-
-        false
+        true
     }
 
-    /// Handles a page fault at the given address.
+    fn finish_backend_fault(
+        &mut self,
+        vaddr: VirtAddr,
+        flags: MappingFlags,
+        result: FaultCompatResult,
+    ) -> PageFaultOutcome {
+        match result {
+            Ok(mut compat) => {
+                if let Some(cb) = compat.take_post_action() {
+                    cb(self);
+                }
+                if compat.is_cow_conflict_retry() {
+                    return PageFaultOutcome::CowConflictRetry;
+                }
+                if compat.populated() == 0 {
+                    warn!("No pages populated for {vaddr:?} ({flags:?})");
+                    PageFaultOutcome::NoProgress
+                } else {
+                    PageFaultOutcome::Resolved
+                }
+            }
+            Err(err) => {
+                if matches!(
+                    KErrorKind::try_from(err.canonicalize()),
+                    Ok(KErrorKind::NoMemory)
+                ) {
+                    PageFaultOutcome::OutOfMemory
+                } else {
+                    warn!("Failed to populate pages for {vaddr:?} ({flags:?}): {err}");
+                    PageFaultOutcome::Failed
+                }
+            }
+        }
+    }
+
+    fn finish_file_backend_fault(
+        &mut self,
+        vaddr: VirtAddr,
+        flags: MappingFlags,
+        result: FaultCompatResult,
+    ) -> PageFaultOutcome {
+        match result {
+            Ok(compat) => self.finish_backend_fault(vaddr, flags, Ok(compat)),
+            Err(err) => match KErrorKind::try_from(err.canonicalize()) {
+                Ok(KErrorKind::BadAddress) => PageFaultOutcome::BusError,
+                _ => {
+                    warn!("Failed to populate file-backed pages for {vaddr:?} ({flags:?}): {err}");
+                    PageFaultOutcome::Failed
+                }
+            },
+        }
+    }
+
+    fn fault_vma_runtime(&self, vma: &VmArea, _vaddr: VirtAddr) -> Option<(VmArea, VmRuntimeRef)> {
+        let runtime = self.runtime_for_vma(vma)?;
+        Some((vma.clone(), runtime))
+    }
+
+    fn materialize_fault_for_vma(
+        &mut self,
+        vma: VmArea,
+        runtime: VmRuntimeRef,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        let vaddr = ctx.address();
+        let result = runtime.handle_fault(ctx, vma.flags(), &mut self.pgtbl.modify());
+        self.finish_backend_fault(vaddr, vma.flags(), result)
+    }
+
+    fn materialize_anonymous_fault_for_vma(
+        &mut self,
+        vma: VmArea,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        let vaddr = ctx.address();
+        let Some((vma, runtime)) = self.fault_vma_runtime(&vma, vaddr) else {
+            warn!("Backend fault path could not find area for {:?}", vaddr);
+            return PageFaultOutcome::Unmapped;
+        };
+        self.materialize_fault_for_vma(vma, runtime, ctx)
+    }
+
+    fn materialize_file_fault_for_vma(
+        &mut self,
+        vma: VmArea,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        let vaddr = ctx.address();
+        let Some((vma, runtime)) = self.fault_vma_runtime(&vma, vaddr) else {
+            warn!("Backend fault path could not find area for {:?}", vaddr);
+            return PageFaultOutcome::Unmapped;
+        };
+        let result = runtime.handle_fault(ctx, vma.flags(), &mut self.pgtbl.modify());
+        self.finish_file_backend_fault(vaddr, vma.flags(), result)
+    }
+
+    pub(crate) fn handle_linear_fault(
+        &mut self,
+        vma: VmArea,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        self.materialize_anonymous_fault_for_vma(vma, ctx)
+    }
+
+    pub(crate) fn handle_anonymous_shared_fault(
+        &mut self,
+        vma: VmArea,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        self.materialize_anonymous_fault_for_vma(vma, ctx)
+    }
+
+    pub(crate) fn handle_anonymous_private_fault(
+        &mut self,
+        vma: VmArea,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        self.materialize_anonymous_fault_for_vma(vma, ctx)
+    }
+
+    pub(crate) fn handle_file_shared_fault(
+        &mut self,
+        vma: VmArea,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        self.materialize_file_fault_for_vma(vma, ctx)
+    }
+
+    pub(crate) fn handle_file_private_fault(
+        &mut self,
+        vma: VmArea,
+        ctx: FaultContext,
+    ) -> PageFaultOutcome {
+        self.materialize_file_fault_for_vma(vma, ctx)
+    }
+
+    /// Handles a typed page-fault request.
     ///
-    /// `access_flags` indicates the access type that caused the page fault.
-    ///
-    /// Returns `true` if the page fault is dispatch_irqd successfully (not a real
-    /// fault).
+    /// The dispatch consults explicit VMA metadata first and lets the VMA
+    /// choose the fault policy before a runtime materializes pages.
+    pub fn handle_fault_input(&mut self, input: FaultInput) -> PageFaultOutcome {
+        self.drain_pending_invalidations();
+        let vaddr = input.address();
+        if !self.range.contains(vaddr) {
+            return PageFaultOutcome::Unmapped;
+        }
+        let Some(vma) = self.find_vma(vaddr).cloned() else {
+            return PageFaultOutcome::Unmapped;
+        };
+        let access_flags = input.access_flags();
+        if !vma.allows_fault(access_flags) {
+            return PageFaultOutcome::AccessDenied;
+        }
+        vma.handle_fault(self, input.into_context())
+    }
+
+    /// Compatibility wrapper for callers that still pass raw fault fields.
+    pub fn handle_page_fault(
+        &mut self,
+        vaddr: VirtAddr,
+        access_flags: PageFaultFlags,
+    ) -> PageFaultOutcome {
+        self.handle_fault_input(FaultInput::new(vaddr, access_flags))
+    }
+
+    /// Legacy bool-shaped page-fault hook retained for current trap callers.
     pub fn dispatch_irq_page_fault(
         &mut self,
         vaddr: VirtAddr,
         access_flags: PageFaultFlags,
     ) -> bool {
-        if !self.range.contains(vaddr) {
-            return false;
-        }
-        if let Some(area) = self.areas.find(vaddr) {
-            let flags = area.flags();
-            if flags.contains(access_flags) {
-                let page_size = area.backend().page_size();
-                let populate_result = area.backend().populate(
-                    VirtAddrRange::from_start_size(vaddr.align_down(page_size), page_size as _),
-                    flags,
-                    access_flags,
-                    &mut self.pgtbl.modify(),
-                );
-                return match populate_result {
-                    Ok((n, callback)) => {
-                        if let Some(cb) = callback {
-                            cb(self);
-                        }
-                        if n == 0 {
-                            warn!("No pages populated for {vaddr:?} ({flags:?})");
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                    Err(err) => {
-                        warn!("Failed to populate pages for {vaddr:?} ({flags:?}): {err}");
-                        false
-                    }
-                };
-            }
-        }
-        false
+        let outcome = self.handle_page_fault(vaddr, access_flags);
+        Self::page_fault_outcome_to_legacy_handled(outcome)
     }
 
     /// Attempts to clone the current address space into a new one.
@@ -566,51 +1465,68 @@ impl AddrSpace {
     /// size, then iterates over all memory areas in the original address
     /// space to copy or share their mappings into the new one.
     pub fn try_clone(&mut self) -> KResult<Arc<Mutex<Self>>> {
+        self.drain_pending_invalidations();
         let new_aspace = Arc::new(Mutex::new(Self::new_empty_user(self.base(), self.size())?));
         let new_aspace_clone = new_aspace.clone();
 
         let mut guard = new_aspace.lock();
         guard.copy_kernel_mappings()?;
 
+        let vmas = self.clone_all_vmas()?;
+        let operations = vmas
+            .iter()
+            .map(|vma| {
+                let runtime = self.runtime_for_vma(vma).ok_or(KError::BadAddress)?;
+                Ok((vma.clone(), runtime))
+            })
+            .collect::<KResult<Vec<_>>>()?;
         let mut self_modify = self.pgtbl.modify();
-        for area in self.areas.iter() {
-            let new_backend = area.backend().clone_map(
-                area.va_range(),
-                area.flags(),
-                &mut self_modify,
-                &mut guard.pgtbl.modify(),
-                &new_aspace_clone,
-            )?;
+        for (vma_meta, runtime) in &operations {
+            let invalidate = Some(guard.invalidate_handle(&new_aspace_clone));
+            let new_mm_id = guard.mm_id();
+            let new_runtime = {
+                let mut new_modify = guard.pgtbl.modify();
+                runtime.clone_for_fork(
+                    vma_meta.range(),
+                    vma_meta.flags(),
+                    &mut self_modify,
+                    &mut new_modify,
+                    ForkCloneTarget {
+                        new_mm_id,
+                        new_aspace: &new_aspace_clone,
+                        invalidate,
+                    },
+                )?
+            };
+            let vma = vma_meta
+                .relocated(vma_meta.start(), vma_meta.size(), vma_meta.flags())
+                .with_backing(new_runtime.backing_info());
 
-            let new_area = MemoryArea::new(area.start(), area.size(), area.flags(), new_backend);
             let aspace = guard.deref_mut();
-            aspace.areas.map(new_area, &mut aspace.pgtbl, false)?;
+            aspace.install_runtime_mapping(vma, new_runtime)?;
         }
         drop(guard);
 
         Ok(new_aspace)
     }
 
-    /// Returns an iterator over the memory areas.
-    ///
-    /// This is required for `procfs` to generate `/proc/pid/maps`.
-    /// Exposing internal state for system introspection is a standard practice.
-    pub fn areas(&self) -> impl Iterator<Item = &memset::MemoryArea<Backend>> {
-        self.areas.iter()
+    /// Returns VMA views with explicit backing descriptions.
+    pub fn vmas(&self) -> impl Iterator<Item = &VmArea> {
+        self.vmas.iter()
     }
 }
 
-impl fmt::Debug for AddrSpace {
+impl fmt::Debug for MmSpace {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("AddrSpace")
+        f.debug_struct("MmSpace")
             .field("va_range", &self.range)
             .field("page_table_root", &self.pgtbl.root_paddr())
-            .field("areas", &self.areas)
+            .field("vmas", &self.vmas.iter().count())
             .finish()
     }
 }
 
-impl Drop for AddrSpace {
+impl Drop for MmSpace {
     fn drop(&mut self) {
         self.clear();
     }
@@ -618,12 +1534,22 @@ impl Drop for AddrSpace {
 
 #[cfg(unittest)]
 mod tests {
-    use khal::paging::PageSize;
-    use memaddr::PAGE_SIZE_4K;
+    use alloc::sync::Arc;
+
+    use khal::{
+        paging::{MappingFlags, PageSize},
+        trap::PageFaultFlags,
+    };
+    use ksync::Mutex;
+    use memaddr::{PAGE_SIZE_4K, VirtAddr};
     use unittest::def_test;
+    use vmobj::{
+        FileObjectId, MappingView, MappingViewId, MappingViewKind, MappingViewRange,
+        ObjectInvalidateRequest, ObjectViewHit, VmObjectId,
+    };
 
     use super::*;
-    use crate::backend::Backend;
+    use crate::{PageFaultOutcome, vma::VmRuntimeRef};
 
     fn new_test_aspace() -> AddrSpace {
         AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)
@@ -635,14 +1561,107 @@ mod tests {
         start: usize,
         size: usize,
         flags: MappingFlags,
-    ) -> Backend {
+    ) -> VmRuntimeRef {
         let start = VirtAddr::from(start);
-        let backend = Backend::new_anonymous_shared(start, size, PageSize::Size4K)
+        let backend = VmRuntimeRef::new_anon_shared(start, size, PageSize::Size4K)
             .expect("shared backend allocation should succeed");
         aspace
             .map(start, size, flags, false, backend.clone())
             .expect("mapping should succeed");
         backend
+    }
+
+    fn sample_request() -> ObjectInvalidateRequest {
+        let view = MappingView::new(
+            MappingViewId::from_raw(1),
+            7,
+            MappingViewRange {
+                vma_start: 0x4000,
+                vma_len: PAGE_SIZE_4K,
+                object_start: 0,
+                object_len: PAGE_SIZE_4K,
+            },
+            MappingViewKind::Shared,
+        );
+        ObjectInvalidateRequest::new(
+            VmObjectId::File(FileObjectId::from_raw(11)),
+            ObjectViewHit::new(view, 0, PAGE_SIZE_4K),
+        )
+    }
+
+    #[def_test]
+    fn invalidate_sink_removes_exact_enqueued_request() {
+        let sink = InvalidateSink::default();
+        let req = sample_request();
+
+        let first = sink.enqueue(req.clone());
+        let second = sink.enqueue(req.clone());
+
+        assert!(sink.remove(second));
+
+        let (remaining_id, remaining_req) = sink.pop_front().expect("first request must remain");
+        assert_eq!(remaining_id, first);
+        assert_eq!(remaining_req, req);
+        assert!(sink.pop_front().is_none());
+    }
+
+    #[def_test]
+    fn legacy_fault_adapter_treats_retry_outcomes_as_handled() {
+        assert!(MmSpace::page_fault_outcome_to_legacy_handled(
+            PageFaultOutcome::Resolved
+        ));
+        assert!(MmSpace::page_fault_outcome_to_legacy_handled(
+            PageFaultOutcome::Retry
+        ));
+        assert!(MmSpace::page_fault_outcome_to_legacy_handled(
+            PageFaultOutcome::CowConflictRetry
+        ));
+        assert!(!MmSpace::page_fault_outcome_to_legacy_handled(
+            PageFaultOutcome::AccessDenied
+        ));
+    }
+
+    #[def_test]
+    fn madvise_dontneed_requires_fully_mapped_range() {
+        let start = VirtAddr::from_usize(0x4000);
+        let flags = MappingFlags::READ | MappingFlags::WRITE;
+        let mut aspace =
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4).expect("allocate test address space");
+        aspace
+            .map(
+                start,
+                PAGE_SIZE_4K,
+                flags,
+                false,
+                VmRuntimeRef::new_anon_private(start, khal::paging::PageSize::Size4K),
+            )
+            .expect("map first page");
+        aspace
+            .map(
+                start + PAGE_SIZE_4K * 2,
+                PAGE_SIZE_4K,
+                flags,
+                false,
+                VmRuntimeRef::new_anon_private(
+                    start + PAGE_SIZE_4K * 2,
+                    khal::paging::PageSize::Size4K,
+                ),
+            )
+            .expect("map third page");
+        assert!(
+            aspace
+                .handle_page_fault(start, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+
+        assert!(
+            aspace.madvise_dontneed(start, PAGE_SIZE_4K * 3).is_err(),
+            "range with an unmapped gap must not be partially discarded"
+        );
+        assert!(
+            aspace.pgtbl.modify().query(start).is_ok(),
+            "failed MADV_DONTNEED must leave existing PTEs intact"
+        );
     }
 
     #[def_test]
@@ -685,8 +1704,8 @@ mod tests {
             )
             .expect("fixed mappings should unmap and reuse the requested address");
         assert_eq!(fixed, VirtAddr::from(0x5000usize));
-        assert!(aspace.find_area(VirtAddr::from(0x5000usize)).is_none());
-        assert!(aspace.find_area(VirtAddr::from(0x6000usize)).is_some());
+        assert!(aspace.find_vma(VirtAddr::from(0x5000usize)).is_none());
+        assert!(aspace.find_vma(VirtAddr::from(0x6000usize)).is_some());
     }
 
     #[def_test]
@@ -729,7 +1748,7 @@ mod tests {
             .expect("adjacent free space should allow extension");
 
         let area = aspace
-            .find_area(start)
+            .find_vma(start)
             .expect("extended area should remain discoverable");
         assert_eq!(area.size(), PAGE_SIZE_4K * 2);
 
@@ -770,5 +1789,78 @@ mod tests {
             .read(src + 37, &mut buf)
             .expect_err("source mapping should be removed after move");
         assert!(matches!(err, KError::BadAddress));
+    }
+
+    #[def_test]
+    fn map_with_max_flags_allows_protection_raise_within_may_permissions() {
+        let start = VirtAddr::from_usize(0x4000);
+        let current = MappingFlags::USER;
+        let max = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+        let raised = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+        let mut aspace =
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space");
+
+        aspace
+            .map_with_max_flags(
+                start,
+                PAGE_SIZE_4K,
+                current,
+                max,
+                false,
+                VmRuntimeRef::new_anon_private(start, khal::paging::PageSize::Size4K),
+            )
+            .expect("map prot-none-style private region");
+
+        aspace
+            .protect(start, PAGE_SIZE_4K, raised)
+            .expect("mprotect should allow permissions inside max flags");
+        assert!(aspace.can_access_range(start, PAGE_SIZE_4K, raised));
+    }
+
+    #[def_test]
+    fn relocated_private_mapping_keeps_object_contents_after_source_metadata_drop() {
+        let start = VirtAddr::from_usize(0x4000);
+        let target = VirtAddr::from_usize(0x10000);
+        let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+        let len = PAGE_SIZE_4K * 2;
+        let aspace = Arc::new(Mutex::new(
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 32)
+                .expect("allocate relocation test address space"),
+        ));
+
+        let mut mm = aspace.lock();
+        mm.map(
+            start,
+            len,
+            flags,
+            false,
+            VmRuntimeRef::new_anon_private(start, khal::paging::PageSize::Size4K),
+        )
+        .expect("map private source");
+        mm.populate_area(start, PAGE_SIZE_4K, flags)
+            .expect("populate source page");
+        mm.write(start, b"abc").expect("seed source contents");
+
+        let source = mm
+            .resolve_mremap_source(start, len)
+            .expect("resolve relocation source");
+        mm.map_relocated_snapshot(&source, target, len, flags, &aspace)
+            .expect("install relocated snapshot");
+        mm.move_pages(start, target, len, khal::paging::PageSize::Size4K)
+            .expect("move present pages");
+        mm.drop_mapping_metadata(start, len)
+            .expect("retire old metadata");
+
+        assert!(!mm.can_access_range(start, PAGE_SIZE_4K, flags));
+
+        mm.invalidate_present(target, PAGE_SIZE_4K)
+            .expect("drop present destination PTE");
+        mm.populate_area(target, PAGE_SIZE_4K, flags)
+            .expect("refault destination page");
+
+        let mut buf = [0u8; 3];
+        mm.read(target, &mut buf)
+            .expect("read relocated contents after refault");
+        assert_eq!(&buf, b"abc");
     }
 }

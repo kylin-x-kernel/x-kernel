@@ -34,3 +34,17 @@ Current skills:
 - `unsafe-audit-workflow/`:
   standards-first workflow for unsafe auditing, independent confirmation,
   remediation ordering, and reporting standard gaps during unsafe cleanup.
+- `test-harness/`:
+  shared Starry Test Harness workflow for regression cases,
+  suite registration, execution, and result inspection.
+- `problem-diagnosis/`:
+  first-pass issue classification and localization workflow for build,
+  boot, panic, hang, regression, and performance problems.
+- `linux-mm-design-knowledge/`:
+  Linux MM semantic knowledge base used by X-Kernel memory design work,
+  including mm struct, VMA, mmap, page faults, anonymous memory, file-backed
+  mmap, COW, brk, madvise, msync, and mlock.
+- `xkernel-mm-design-workflow/`:
+  multi-agent design-first workflow for X-Kernel memory subsystem topics,
+  coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
+  and implementation task splitting without code generation.

@@ -10,7 +10,7 @@ use alloc::{
 };
 
 use kcred::Credentials;
-use kexec::load_user_app;
+use kexec::{ExecRequest, load_user_app_request};
 use kfs::{kernel_fs_context, new_process_fs_context};
 use khal::uspace::UserContext;
 use kprocess::{Pid, Process};
@@ -20,6 +20,7 @@ use kthread::{
     ProcessState, ProcessStateConfig, Thread, UserThreadRuntimeAction, add_task_to_table,
 };
 use ktty::tty::N_TTY;
+use kvfs::{LookupFlags, LookupIntent, lookup_location};
 use posix_fs::file::add_stdio;
 
 use crate::new_user_task;
@@ -31,23 +32,36 @@ pub fn run_init_process(
     dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
 ) -> i32 {
     let mut uspace =
-        memspace::AddrSpace::new_user_empty().expect("Failed to create user address space");
+        memspace::MmSpace::new_user_empty().expect("Failed to create user address space");
 
-    let loc = kernel_fs_context()
-        .lock()
-        .resolve(&args[0])
-        .expect("Failed to resolve executable path");
+    let fs = kernel_fs_context().lock();
+    let loc = lookup_location(
+        &fs.lookup_context(),
+        args[0].as_str(),
+        LookupIntent::Exec,
+        LookupFlags::follow(),
+    )
+    .expect("Failed to resolve executable path");
     let path = loc
         .absolute_path()
         .expect("Failed to get executable absolute path");
-    let name = loc.name();
+    let name = loc.name().to_string();
+    drop(fs);
 
-    let (entry_vaddr, ustack_top) = load_user_app(&mut uspace, None, args, envs)
-        .unwrap_or_else(|e| panic!("Failed to load user app: {}", e));
+    let (entry_vaddr, ustack_top) = load_user_app_request(
+        &mut uspace,
+        ExecRequest::from_resolved_with_display(
+            loc,
+            path.to_string(),
+            args.to_vec(),
+            envs.to_vec(),
+        ),
+    )
+    .unwrap_or_else(|e| panic!("Failed to load user app: {}", e));
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
 
-    let mut task = new_user_task(name, uctx, 0, dispatch_syscall);
+    let mut task = new_user_task(name.as_str(), uctx, 0, dispatch_syscall);
     task.ctx_mut()
         .set_page_table_root(uspace.page_table_hw_root());
 

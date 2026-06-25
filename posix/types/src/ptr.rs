@@ -326,4 +326,29 @@ impl UserConstPtr<c_char> {
         let bytes = load_vec_until_null(self.0 as *const u8)?;
         String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
     }
+
+    /// Load a null-terminated string whose byte length must not exceed
+    /// `max_len`, excluding the terminator.
+    pub fn load_string_with_max_len(self, max_len: usize) -> KResult<String> {
+        let mut bytes = Vec::new();
+
+        for offset in 0..=max_len {
+            let mut byte = MaybeUninit::<u8>::uninit();
+            #[allow(clippy::unnecessary_cast)]
+            let user_ptr = (self.0 as *const u8).wrapping_add(offset);
+            read_vm_bytes(user_ptr, as_uninit_bytes(&mut byte))?;
+            // SAFETY: `read_vm_bytes` initialized exactly one byte in `byte`.
+            let byte = unsafe { byte.assume_init() };
+
+            if byte == 0 {
+                return String::from_utf8(bytes).map_err(|_| KError::IllegalBytes);
+            }
+            if bytes.len() == max_len {
+                return Err(KError::InvalidInput);
+            }
+            bytes.push(byte);
+        }
+
+        Err(KError::InvalidInput)
+    }
 }

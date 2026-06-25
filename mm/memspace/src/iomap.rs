@@ -206,7 +206,7 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
         .unmap(base, entry.region.size)
         .map_err(|_| IoMapError::MappingFailed)?;
     // TLB shootdown already handled by `PageTableMut::finish()` via
-    // `AddrSpace::unmap` → `Backend::unmap` → `pgtbl.modify()` → `Drop`.
+    // `MmSpace::unmap` → `Backend::unmap` → `pgtbl.modify()` → `Drop`.
     Ok(())
 }
 

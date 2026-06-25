@@ -19,7 +19,11 @@
 ## 内存安全不变量
 
 - `check_access()` 只允许访问用户空间有效区间。
-- `dispatch_irq_page_fault()` 仅在当前线程显式进入用户内存访问窗口时返回 `true`。
+- `dispatch_irq_page_fault()` 仅在当前线程显式进入用户内存访问窗口时处理 fault。
+- `kuaccess` 必须保留 `MmSpace::handle_page_fault()` 的 typed outcome 分类：
+  只有 `Resolved` 和 retry-class outcome 可以转换为 trap handled；unmapped、
+  permission denied、bus error、OOM、no-progress 和 generic failure 必须转换为
+  user-copy failure，而不是继续重试。
 - 字符串 helper 只在成功读取完整字节流后再做 UTF-8 解释。
 
 ## 线程安全
@@ -30,7 +34,7 @@
 ## 威胁分析
 
 - 越界地址：由 `check_access()` 拒绝。
-- 缺页或未映射页：转交地址空间缺页处理；无法处理则向上传播失败。
+- 缺页或未映射页：转交地址空间 typed 缺页处理；无法解析为 resolved/retry 时向上传播失败。
 - 非 UTF-8 输入：映射为 `IllegalBytes`，避免把脏数据当路径或参数继续处理。
 
 ## 故障模式与影响分析（FMEA）
@@ -38,6 +42,8 @@
 - current task 不是线程：`access_user_memory()` 直接 panic，暴露调用方上下文错误。
 - 用户地址在访问过程中失效：返回 `MemError::NoAccess` 或等价 `KError`。
 - 页错误被错误线程接管：依赖访问窗口标志避免。
+- typed fault outcome 被错误压扁为 true：可能导致 user-copy 在不可恢复 fault 上反复重试；
+  `fault_outcome_to_trap_result()` 集中维护 outcome 到 trap bool 的唯一映射。
 
 ## 故障管理
 

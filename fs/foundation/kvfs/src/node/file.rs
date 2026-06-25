@@ -9,7 +9,7 @@ use core::ops::Deref;
 use kpoll::Pollable;
 
 use super::{NodeOps, device::MmapMapper};
-use crate::{VfsError, VfsResult};
+use crate::{MagicLinkOps, VfsError, VfsResult};
 
 /// File node operations.
 pub trait FileNodeOps: NodeOps + Pollable {
@@ -40,6 +40,12 @@ pub trait FileNodeOps: NodeOps + Pollable {
     /// Default returns `ENODEV` (mmap not supported).
     fn mmap(&self, _mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         Err(VfsError::NoSuchDevice)
+    }
+
+    /// Returns a magic-link operation object when this file node has
+    /// Linux-style magic-link follow semantics.
+    fn magic_link(self: Arc<Self>) -> Option<Arc<dyn MagicLinkOps>> {
+        None
     }
 }
 
@@ -85,5 +91,10 @@ impl FileNode {
     /// Handle mmap for this file node.
     pub fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         self.0.mmap(mapper)
+    }
+
+    /// Returns this file node's magic-link operations, if any.
+    pub fn magic_link(&self) -> Option<Arc<dyn MagicLinkOps>> {
+        self.0.clone().magic_link()
     }
 }

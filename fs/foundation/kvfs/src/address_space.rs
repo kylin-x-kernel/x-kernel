@@ -11,12 +11,20 @@
 
 use alloc::sync::Arc;
 
-use crate::{AddressSpaceOperations, Mutex, MutexGuard, TypeMap, VfsResult, WeakVfsInode};
+use kerrno::KResult;
+use memaddr::PAGE_SIZE_4K;
+use pagecache::{Folio, Mapping, MappingKind, MappingOps, PageIndex};
+
+use crate::{
+    AddressSpaceOperations, FileNode, Mutex, MutexGuard, NodeFlags, NodeType, TypeMap, VfsError,
+    VfsResult, WeakVfsInode, WriteBeginRequest, WriteEndRequest, WritebackControl,
+};
 
 /// VFS address space for one inode.
 pub struct AddressSpace {
     inode: WeakVfsInode,
     ops: Arc<dyn AddressSpaceOperations>,
+    page_cache: Mutex<Option<Arc<Mapping>>>,
     data: Mutex<TypeMap>,
 }
 
@@ -26,6 +34,7 @@ impl AddressSpace {
         Self {
             inode,
             ops,
+            page_cache: Mutex::default(),
             data: Mutex::default(),
         }
     }
@@ -40,34 +49,100 @@ impl AddressSpace {
         &self.ops
     }
 
-    /// Reads one page from backing storage.
-    pub fn read_page(&self, page_index: u64, page: &mut [u8]) -> VfsResult<usize> {
-        self.ops.read_page(page_index, page)
+    /// Returns the page-cache object owned by this address space, if present.
+    pub fn page_cache(&self) -> Option<Arc<Mapping>> {
+        self.page_cache.lock().clone()
     }
 
-    /// Writes one page to backing storage.
-    pub fn write_page(&self, page_index: u64, page: &[u8]) -> VfsResult<usize> {
-        self.ops.write_page(page_index, page)
+    /// Returns or creates the page-cache object owned by this address space.
+    pub fn get_or_insert_page_cache(self: &Arc<Self>, kind: MappingKind, len: u64) -> Arc<Mapping> {
+        let mut guard = self.page_cache.lock();
+        if let Some(mapping) = guard.as_ref() {
+            debug_assert_eq!(mapping.kind(), kind);
+            return mapping.clone();
+        }
+        let ops: Arc<dyn MappingOps> = Arc::new(AddressSpacePageCacheOps {
+            address_space: Arc::downgrade(self),
+        });
+        let mapping = Mapping::new(kind, len, ops);
+        *guard = Some(mapping.clone());
+        mapping
+    }
+
+    /// Reads backing storage into a newly materialized folio.
+    pub fn read_folio(&self, folio: &mut Folio, index: PageIndex) -> VfsResult<usize> {
+        self.ops.read_folio(folio, index)
+    }
+
+    /// Marks a folio dirty through this address-space operation set.
+    pub fn dirty_folio(&self, folio: &mut Folio) -> VfsResult<bool> {
+        self.ops.dirty_folio(self, folio)
+    }
+
+    /// Writes bytes into the page cache through the address-space operation set.
+    pub fn write_from(&self, offset: u64, src: &[u8]) -> VfsResult<usize> {
+        self.ops
+            .write_begin(self, WriteBeginRequest::new(offset, src.len()))?;
+        let mapping = self.page_cache().ok_or(VfsError::InvalidInput)?;
+        let copied = mapping.write_from_with_dirty(offset, src, |folio| {
+            self.dirty_folio(folio)?;
+            Ok(())
+        })?;
+        self.ops
+            .write_end(self, WriteEndRequest::new(offset, src.len(), copied))
     }
 
     /// Writes dirty pages belonging to this address space.
     pub fn writepages(&self, data_only: bool) -> VfsResult<()> {
-        self.ops.writepages(data_only)
+        self.ops.writepages(self, WritebackControl::all(data_only))
+    }
+
+    /// Writes dirty pages intersecting `[start, start + len)`.
+    pub fn writepages_range(&self, start: u64, len: usize, data_only: bool) -> VfsResult<()> {
+        self.ops
+            .writepages(self, WritebackControl::range(start, len, data_only)?)
+    }
+
+    /// Writes dirty pages from `start` through EOF.
+    pub fn writepages_from(&self, start: u64, data_only: bool) -> VfsResult<()> {
+        self.ops
+            .writepages(self, WritebackControl::from(start, data_only))
     }
 
     /// Prepares this address space for inode teardown.
     pub fn evict(&self) -> VfsResult<()> {
-        self.ops.evict()
+        if let Some(mapping) = self.page_cache() {
+            mapping.invalidate_from_page(0)?;
+        }
+        Ok(())
     }
 
     /// Invalidates cached pages starting at `page_index`.
     pub fn invalidate_from(&self, page_index: u64) -> VfsResult<()> {
-        self.ops.invalidate_from(page_index)
+        if let Some(mapping) = self.page_cache() {
+            mapping.invalidate_from_page(page_index)?;
+        }
+        Ok(())
     }
 
     /// Access address-space-private attachment storage.
     pub fn data(&self) -> MutexGuard<'_, TypeMap> {
         self.data.lock()
+    }
+
+    fn writeback_cached_folios(
+        &self,
+        control: WritebackControl,
+        mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> VfsResult<()>,
+    ) -> VfsResult<()> {
+        let Some(mapping) = self.page_cache() else {
+            return Ok(());
+        };
+        mapping.writeback_until(
+            control.range_start(),
+            control.range_end(),
+            &mut write_folio_fn,
+        )
     }
 }
 
@@ -75,6 +150,120 @@ impl core::fmt::Debug for AddressSpace {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AddressSpace")
             .field("inode", &self.inode().map(|inode| inode.inode()))
+            .field(
+                "page_cache",
+                &self.page_cache().map(|mapping| mapping.identity()),
+            )
             .finish()
+    }
+}
+
+struct AddressSpacePageCacheOps {
+    address_space: alloc::sync::Weak<AddressSpace>,
+}
+
+impl AddressSpacePageCacheOps {
+    fn address_space(&self) -> VfsResult<Arc<AddressSpace>> {
+        self.address_space.upgrade().ok_or(VfsError::InvalidInput)
+    }
+}
+
+impl MappingOps for AddressSpacePageCacheOps {
+    fn instantiate_folio(&self, index: PageIndex) -> KResult<Folio> {
+        let address_space = self.address_space()?;
+        let mut folio = Folio::new_zeroed()?;
+        address_space.read_folio(&mut folio, index)?;
+        Ok(folio)
+    }
+}
+
+pub(crate) fn default_address_space_operations(
+    file: FileNode,
+    node_type: NodeType,
+) -> Arc<dyn AddressSpaceOperations> {
+    if node_type == NodeType::RegularFile && !file.flags().contains(NodeFlags::NON_CACHEABLE) {
+        file_address_space_operations(file)
+    } else {
+        empty_address_space_operations()
+    }
+}
+
+pub(crate) fn file_address_space_operations(file: FileNode) -> Arc<dyn AddressSpaceOperations> {
+    Arc::new(NodeBackedAddressSpaceOperations::new(file))
+}
+
+pub(crate) fn empty_address_space_operations() -> Arc<dyn AddressSpaceOperations> {
+    Arc::new(EmptyAddressSpaceOperations)
+}
+
+struct NodeBackedAddressSpaceOperations {
+    file: FileNode,
+    in_memory: bool,
+}
+
+impl NodeBackedAddressSpaceOperations {
+    fn new(file: FileNode) -> Self {
+        let in_memory = file.flags().contains(NodeFlags::ALWAYS_CACHE);
+        Self { file, in_memory }
+    }
+
+    fn page_start(page_index: u64) -> VfsResult<u64> {
+        page_index
+            .checked_mul(PAGE_SIZE_4K as u64)
+            .ok_or(VfsError::InvalidInput)
+    }
+
+    fn write_folio_data(&self, page_index: PageIndex, data: &[u8]) -> VfsResult<usize> {
+        let page_start = Self::page_start(page_index)?;
+        let mut written = 0usize;
+        while written < data.len() {
+            let n = self
+                .file
+                .write_at(&data[written..], page_start + written as u64)?;
+            if n == 0 {
+                return Err(VfsError::WriteZero);
+            }
+            written += n;
+        }
+        Ok(written)
+    }
+}
+
+impl AddressSpaceOperations for NodeBackedAddressSpaceOperations {
+    fn read_folio(&self, folio: &mut Folio, page_index: PageIndex) -> VfsResult<usize> {
+        let page = folio.data();
+        if self.in_memory {
+            page.fill(0);
+            return Ok(page.len());
+        }
+        self.file.read_at(page, Self::page_start(page_index)?)
+    }
+
+    fn writepages(&self, mapping: &AddressSpace, control: WritebackControl) -> VfsResult<()> {
+        if self.in_memory {
+            return Ok(());
+        }
+
+        mapping.writeback_cached_folios(control, |index, data, valid_len| {
+            if valid_len == 0 {
+                return Ok(());
+            }
+            self.write_folio_data(index, &data[..valid_len])?;
+            Ok(())
+        })?;
+
+        self.file.sync(control.is_data_only())
+    }
+}
+
+struct EmptyAddressSpaceOperations;
+
+impl AddressSpaceOperations for EmptyAddressSpaceOperations {
+    fn read_folio(&self, _folio: &mut Folio, _index: PageIndex) -> VfsResult<usize> {
+        Err(VfsError::InvalidInput)
+    }
+
+    fn writepages(&self, _mapping: &AddressSpace, _control: WritebackControl) -> VfsResult<()> {
+        Ok(())
     }
 }

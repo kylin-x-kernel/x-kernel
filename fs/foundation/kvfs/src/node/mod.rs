@@ -32,8 +32,7 @@ use kpoll::{IoEvents, Pollable};
 use smallvec::SmallVec;
 
 use crate::{
-    AddressSpace, DirNodeInodeOperations, FileNodeFileOperations, Metadata, MetadataUpdate, Mutex,
-    MutexGuard, NodeType, VfsResult, path::PathBuf,
+    AddressSpace, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsResult, path::PathBuf,
 };
 
 bitflags! {
@@ -175,7 +174,13 @@ impl TypeMap {
 
     /// Insert a value by its concrete type.
     pub fn insert<T: Any + Send + Sync>(&mut self, value: T) {
-        self.0.push((TypeId::of::<T>(), Arc::new(value)));
+        let id = TypeId::of::<T>();
+        let value: Arc<dyn Any + Send + Sync> = Arc::new(value);
+        if let Some((_, slot)) = self.0.iter_mut().find(|(existing, _)| *existing == id) {
+            *slot = value;
+        } else {
+            self.0.push((id, value));
+        }
     }
 
     /// Get a value by its concrete type.
@@ -312,19 +317,9 @@ impl DirEntry {
         &self.0.inode
     }
 
-    /// Returns this inode's address-space object, if one has been attached.
-    pub fn address_space(&self) -> Option<Arc<AddressSpace>> {
+    /// Returns this inode's address-space object.
+    pub fn address_space(&self) -> Arc<AddressSpace> {
         self.0.inode.address_space()
-    }
-
-    /// Returns an inode-operations adapter for directory entries.
-    pub fn inode_operations(&self) -> VfsResult<DirNodeInodeOperations<'_>> {
-        self.0.inode.inode_operations()
-    }
-
-    /// Returns a file-operations adapter for file entries.
-    pub fn file_operations(&self) -> VfsResult<FileNodeFileOperations<'_>> {
-        self.0.inode.file_operations()
     }
 
     /// Returns the cache key for this entry.
@@ -437,14 +432,6 @@ impl DirEntry {
     /// Access per-dentry attachment storage.
     pub fn dentry_data(&self) -> MutexGuard<'_, TypeMap> {
         self.0.dentry_data.lock()
-    }
-
-    /// Access per-dentry attachment storage.
-    ///
-    /// This is kept for compatibility with older call sites. New shared state
-    /// that belongs to the underlying file object should use [`Self::inode_data`].
-    pub fn user_data(&self) -> MutexGuard<'_, TypeMap> {
-        self.dentry_data()
     }
 
     /// Access inode-scoped attachment storage.
@@ -742,13 +729,16 @@ mod tests_node {
         let created = map.get_or_insert_with::<u32>(|| 99);
         assert_eq!(*created, 7);
 
+        map.insert(11_u32);
+        assert_eq!(*map.get::<u32>().unwrap(), 11);
+
         let text = map.get_or_insert_with::<String>(|| String::from("node"));
         assert_eq!(text.as_str(), "node");
         assert_eq!(map.get::<String>().unwrap().as_str(), "node");
     }
 
     #[def_test]
-    fn test_direntry_file_helpers_and_userdata() {
+    fn test_direntry_file_helpers_and_dentry_data() {
         let fs = Arc::new(MockFilesystem);
         let (entry, ops) = make_file_entry(fs, 2, None, "leaf");
 
@@ -766,8 +756,8 @@ mod tests_node {
         let weak = entry.downgrade();
         assert!(weak.upgrade().unwrap().ptr_eq(&entry));
 
-        entry.user_data().insert(42_u32);
-        assert_eq!(*entry.user_data().get::<u32>().unwrap(), 42);
+        entry.dentry_data().insert(42_u32);
+        assert_eq!(*entry.dentry_data().get::<u32>().unwrap(), 42);
 
         assert_eq!(ops.update_count.load(Ordering::Relaxed), 0);
     }
@@ -789,12 +779,12 @@ mod tests_node {
         first.inode_data().insert(42_u32);
         assert_eq!(*second.inode_data().get::<u32>().unwrap(), 42);
 
-        first.user_data().insert(String::from("first dentry"));
-        assert!(second.user_data().get::<String>().is_none());
+        first.dentry_data().insert(String::from("first dentry"));
+        assert!(second.dentry_data().get::<String>().is_none());
     }
 
     #[def_test]
-    fn test_legacy_constructors_create_distinct_inode_identities() {
+    fn test_distinct_entries_create_distinct_inode_identities() {
         let fs = Arc::new(MockFilesystem);
         let (first, _) = make_file_entry(fs.clone(), 40, None, "first");
         let (second, _) = make_file_entry(fs, 40, None, "second");

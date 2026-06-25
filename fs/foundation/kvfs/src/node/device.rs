@@ -23,6 +23,13 @@ pub trait MmapMapper {
     /// Request a file-backed mapping (regular file or cached file).
     fn map_file_backed(&mut self) -> VfsResult<()>;
 
+    /// Request a shared anonymous mapping.
+    ///
+    /// This is used by special nodes such as `/dev/zero`, whose Linux mmap
+    /// semantics are object-less shared anonymous memory rather than ordinary
+    /// file-backed page cache.
+    fn map_anonymous_shared(&mut self) -> VfsResult<()>;
+
     /// Returns the mmap offset supplied by userspace.
     ///
     /// Devices that multiplex multiple buffers behind a single fd (e.g. DRM

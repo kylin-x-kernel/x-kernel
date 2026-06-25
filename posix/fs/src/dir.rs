@@ -12,7 +12,10 @@ use core::{
 
 use kerrno::{KError, KResult};
 use kfs::{File, FsContext};
-use kvfs::{NodePermission, NodeType};
+use kvfs::{
+    LookupFlags, LookupIntent, NodePermission, NodeType, lookup_location, lookup_nonexistent,
+    path::Path,
+};
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
@@ -26,7 +29,12 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
 
     let proc_state = kthread::current_process_state();
     let mut fs = proc_state.fs_context().lock();
-    let entry = fs.resolve(path)?;
+    let entry = lookup_location(
+        &fs.lookup_context(),
+        path.as_str(),
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
     fs.set_current_dir(entry)?;
     Ok(0)
 }
@@ -55,7 +63,12 @@ pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
 
     let proc_state = kthread::current_process_state();
     let mut fs = proc_state.fs_context().lock();
-    let loc = fs.resolve(path)?;
+    let loc = lookup_location(
+        &fs.lookup_context(),
+        path.as_str(),
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
     if loc.node_type() != NodeType::Directory {
         return Err(KError::NotADirectory);
     }
@@ -71,13 +84,41 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
     let mode = mode & !kthread::current_thread().process_state().umask();
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
-    with_fs(dirfd, |fs| match fs.create_dir(&path, mode) {
-        Ok(_) => Ok(0),
-        // `mkdir` on an existing path should report `EEXIST`.
-        Err(KError::InvalidInput) if !path.is_empty() && fs.resolve_no_follow(&path).is_ok() => {
-            Err(KError::AlreadyExists)
+    with_fs(dirfd, |fs| {
+        let context = fs.lookup_context();
+        let (dir, name) = match lookup_nonexistent(&context, Path::new(&path), LookupIntent::Open) {
+            Ok(parent) => parent,
+            Err(KError::InvalidInput)
+                if !path.is_empty()
+                    && lookup_location(
+                        &context,
+                        path.as_str(),
+                        LookupIntent::Open,
+                        LookupFlags::no_follow(),
+                    )
+                    .is_ok() =>
+            {
+                return Err(KError::AlreadyExists);
+            }
+            Err(err) => return Err(err),
+        };
+        match dir.create(name, NodeType::Directory, mode) {
+            Ok(_) => Ok(0),
+            // `mkdir` on an existing path should report `EEXIST`.
+            Err(KError::InvalidInput)
+                if !path.is_empty()
+                    && lookup_location(
+                        &context,
+                        path.as_str(),
+                        LookupIntent::Open,
+                        LookupFlags::no_follow(),
+                    )
+                    .is_ok() =>
+            {
+                Err(KError::AlreadyExists)
+            }
+            Err(err) => Err(err),
         }
-        Err(err) => Err(err),
     })
 }
 

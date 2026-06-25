@@ -24,6 +24,7 @@ kresources
 │                                             │
 │ safe API                                   │
 │  ├─ FdTable add/get/remove/dup/close       │
+│  ├─ FdSnapshot stable descriptor view      │
 │  ├─ FileLike read/write/stat/ioctl/mmap    │
 │  └─ Kstat -> stat/statx conversion         │
 │                                             │
@@ -107,12 +108,16 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
    `duplicate_to` 克隆 `FileDescriptor`，
    共享同一个 `Arc<dyn FileLike>`，
    不复制底层对象。
-3. **fd table 修改独占**：
+3. **snapshot 稳定 open object**：
+   `FdSnapshot` 在 fd table 锁内克隆 `Arc<dyn FileLike>` 并复制 flags。
+   原 fd 后续关闭或复用不影响 snapshot 持有的 open object。
+   snapshot 不是 fd table 的实时视图。
+4. **fd table 修改独占**：
    所有插入、删除和 flag 修改都要求调用方持有 `RwLock<FdTable>` 写锁。
-4. **drop 不在表锁内执行**：
+5. **drop 不在表锁内执行**：
    `close_all_if_unshared` 先从表中取出 descriptor，
    释放写锁后再 drop，降低析构重入风险。
-5. **ABI 结构不泄露未初始化数据**：
+6. **ABI 结构不泄露未初始化数据**：
    `stat` / `statx` 转换先全零初始化，
    再填充字段。
 
@@ -143,6 +148,7 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 | T-09 | 低层槽位 API 被外部绕过资源策略或 descriptor flag 规则 | 中 | `add`、`add_at`、`remove`、`get_mut` 作为跨 crate API 暴露 | 已将这些 helper 收窄为 `pub(crate)`；外部路径使用高层 API |
 | T-10 | `FileLike` 默认方法返回值掩盖不支持操作 | 低 | 具体实现未覆盖 read/write/ioctl/mmap | 默认返回 `InvalidInput`、`NotATty` 或 `NoSuchDevice`；调用者按 errno 处理 |
 | T-11 | `Arc::strong_count` 判断期间出现新的共享者 | 中 | `close_all_if_unshared` 与 fd table 引用复制并发 | 调用方的进程资源替换路径应串行化 fd table Arc 的发布；函数只在 strong count 为 1 时关闭 |
+| T-12 | procfs 或 exec 路径把 `FdSnapshot` 当成 live fd 权限 | 中 | snapshot 创建后原 fd 被关闭、复用或 flag 改变 | snapshot 只表示创建时的 open object；需要 live fd 状态的 syscall 必须重新查 fd table |
 
 影响等级定义：
 
@@ -162,6 +168,7 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 | F-06 | `close_cloexec_files` 关闭过程中 fd 表变化 | 调用方未持写锁 | 关闭集合不一致 | exec 后 fd 泄露或误关 | 2 | 资源层必须持写锁调用 |
 | F-07 | `statx` regular-file atomic write 字段误报 | `mode` 类型位错误 | 用户态看到错误 attribute | 应用可能选择错误 I/O 策略 | 4 | 仅当 `mode & S_IFMT == S_IFREG` 时设置 |
 | F-08 | FileLike 实现忘记覆盖 `path` 以外的方法 | 默认方法被调用 | 返回不支持错误 | 功能降级 | 4 | trait 默认错误返回；实现者测试覆盖自身行为 |
+| F-09 | `snapshot` 返回 `BadFileDescriptor` | fd 不存在或已关闭 | procfd/fexecve/open 路径失败 | 应用收到 `EBADF` 或上层映射后的 errno | 4 | snapshot 前查表，失败不保留对象引用 |
 
 严重度定义：
 
@@ -222,6 +229,7 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 
 - [ ] 新增 `unsafe` 块附有 `SAFETY:` 注释并补入本文件 unsafe 清单。
 - [ ] 新增 fd 插入路径明确是否应用 `max_nofile`。
+- [ ] 新增 snapshot 消费者不把 snapshot 当成 fd table live view。
 - [ ] 新增 close/dup 路径在持锁、drop 和 descriptor flag 语义上符合 POSIX。
 - [ ] 新增 `FileLike` 默认方法不会把不支持操作伪装成成功。
 - [ ] `stat` / `statx` ABI 结构新增字段时保留字段仍清零。

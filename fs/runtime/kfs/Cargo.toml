@@ -28,8 +28,6 @@ crosvm = []
 
 [dependencies]
 bpffs = { workspace = true, optional = true }
-kalloc = { workspace = true }
-alloc-engine = { workspace = true }
 memaddr = { workspace = true }
 kclass = { workspace = true, features = ["block"] }
 kdevice = { workspace = true }
@@ -41,12 +39,11 @@ khal = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 kpoll = { workspace = true }
 ksync = { workspace = true }
-bitflags = "2.10"
+memfs = { workspace = true }
+pagecache = { workspace = true }
 cfg-if = { workspace = true }
 chrono = { workspace = true }
-intrusive-collections = "0.9.7"
 log = { workspace = true }
-lru = "0.16.0"
 slab = { version = "0.4.9", default-features = false }
 unittest = { workspace = true }
 klazy = { workspace = true }

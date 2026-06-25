@@ -97,7 +97,7 @@ impl ProcessState {
         proc: Arc<Process>,
         exe_path: String,
         cmdline: Arc<Vec<String>>,
-        address_space: Arc<Mutex<memspace::AddrSpace>>,
+        address_space: Arc<Mutex<memspace::MmSpace>>,
         fs_context: Arc<Mutex<FsContext>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
         exit_signal: Option<Signo>,
@@ -198,7 +198,7 @@ impl ProcessState {
     }
 
     /// Returns the virtual address space.
-    pub fn address_space(&self) -> &Arc<Mutex<memspace::AddrSpace>> {
+    pub fn address_space(&self) -> &Arc<Mutex<memspace::MmSpace>> {
         self.runtime.address_space()
     }
 

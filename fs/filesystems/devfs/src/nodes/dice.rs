@@ -8,9 +8,10 @@ use core::any::Any;
 
 use dice_driver::{DICE_IOCTL_GET_HANDOVER, DICE_IOCTL_GET_RAW_HANDOVER};
 use kerrno::{KError, KResult};
+use kfs::OpenOptions;
 use klazy::Lazy;
 use ksync::Mutex;
-use kvfs::DeviceFileOps;
+use kvfs::{DeviceFileOps, LookupFlags, LookupIntent, lookup_location};
 use kvfs_simple::{DirMapping, SimpleFs};
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
 use rand_chacha::{
@@ -99,7 +100,25 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     let proc_exe_path = format!("/proc/{}/exe", pid);
     let proc_state = current_process_state();
     let fs = proc_state.fs_context().lock();
-    let data = fs.read(&proc_exe_path).map_err(|_| KError::NotFound)?;
+    let loc = lookup_location(
+        &fs.lookup_context(),
+        proc_exe_path.as_str(),
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )
+    .map_err(|_| KError::NotFound)?;
+    drop(fs);
+    let file = OpenOptions::new()
+        .read(true)
+        .open_loc(loc)
+        .map_err(|_| KError::NotFound)?;
+    let len = usize::try_from(file.location().len().map_err(|_| KError::NotFound)?)
+        .map_err(|_| KError::InvalidData)?;
+    let mut data = vec![0u8; len];
+    let read = file
+        .read_at(&mut data[..], 0)
+        .map_err(|_| KError::NotFound)?;
+    data.truncate(read);
 
     let mut sm3_result = vec![0u8; 32];
     let mut hasher = Sm3::new();

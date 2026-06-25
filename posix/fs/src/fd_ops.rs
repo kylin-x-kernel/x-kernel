@@ -14,6 +14,7 @@ use core::ffi::c_int;
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd_objects::pipe::current_pipe_endpoint;
+use kfs::File;
 use linux_raw_sys::general::*;
 use posix_types::UserPtr;
 
@@ -59,6 +60,10 @@ fn dup_fd(old_fd: c_int, cloexec: bool) -> KResult<isize> {
     let proc_state = kthread::current_process_state();
     let new_fd = proc_state.resources.duplicate_file_like(old_fd, cloexec)?;
     Ok(new_fd as _)
+}
+
+fn seal_bits_from_fcntl_arg(arg: usize) -> KResult<u32> {
+    u32::try_from(arg).map_err(|_| KError::InvalidInput)
 }
 
 /// Duplicates a file descriptor.
@@ -150,6 +155,15 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             let pipe = current_pipe_endpoint(fd)?;
             pipe.resize(arg)?;
             Ok(pipe.capacity() as _)
+        }
+        F_GET_SEALS => {
+            let file = kthread::current_resources().get_file_like_as::<File>(fd)?;
+            Ok(file.shmem_seal_bits()? as _)
+        }
+        F_ADD_SEALS => {
+            let file = kthread::current_resources().get_file_like_as::<File>(fd)?;
+            file.add_shmem_seals(seal_bits_from_fcntl_arg(arg)?)?;
+            Ok(0)
         }
         _ => {
             warn!("unsupported fcntl parameters: cmd: {cmd}");

@@ -11,7 +11,7 @@ use core::{
 };
 
 use kerrno::{KError, KResult, LinuxError};
-use kfs::{File, FileBackend};
+use kfs::File;
 use ksync::Mutex;
 use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsResult};
 use kvfs_simple::{DirMapping, SimpleFs};
@@ -29,7 +29,7 @@ pub struct LoopDevice {
     number: u32,
     dev_id: DeviceId,
     /// Underlying file for the loop device, if any.
-    pub file: Mutex<Option<FileBackend>>,
+    pub file: Mutex<Option<Arc<File>>>,
     /// Read-only flag for the loop device.
     pub ro: AtomicBool,
     /// Read-ahead size for the loop device, in bytes.
@@ -92,7 +92,7 @@ impl LoopDevice {
     }
 
     /// Clone the underlying file of the loop device.
-    pub fn clone_file(&self) -> VfsResult<FileBackend> {
+    pub fn clone_file(&self) -> VfsResult<Arc<File>> {
         let file = self.file.lock().clone();
         file.ok_or(KError::from(LinuxError::ENXIO))
     }
@@ -101,24 +101,28 @@ impl LoopDevice {
 impl DeviceFileOps for LoopDevice {
     fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         match self.file.lock().as_ref() {
-            Some(FileBackend::Cached(_)) => mapper.map_file_backed(),
+            Some(file) if file.location().node_type() == NodeType::RegularFile => {
+                mapper.map_file_backed()
+            }
             _ => Err(kvfs::VfsError::NoSuchDevice),
         }
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        let file = self.file.lock().clone();
-        file.ok_or(KError::OperationNotPermitted)?
-            .read_at(buf, offset)
+        let file = self
+            .clone_file()
+            .map_err(|_| KError::OperationNotPermitted)?;
+        file.read_at(buf, offset)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         if self.ro.load(Ordering::Relaxed) {
             return Err(KError::ReadOnlyFilesystem);
         }
-        let file = self.file.lock().clone();
-        file.ok_or(KError::OperationNotPermitted)?
-            .write_at(buf, offset)
+        let file = self
+            .clone_file()
+            .map_err(|_| KError::OperationNotPermitted)?;
+        file.write_at(buf, offset)
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
@@ -128,16 +132,13 @@ impl DeviceFileOps for LoopDevice {
                 if fd < 0 {
                     return Err(KError::BadFileDescriptor);
                 }
-                let f = kthread::current_resources().get_file_like(fd)?;
-                let Some(file) = f.downcast_ref::<File>() else {
-                    return Err(KError::InvalidInput);
-                };
+                let file = kthread::current_resources().get_file_like_as::<File>(fd)?;
                 let mut guard = self.file.lock();
                 if guard.is_some() {
                     return Err(KError::ResourceBusy);
                 }
 
-                *guard = Some(file.backend()?.clone());
+                *guard = Some(file);
             }
             LOOP_CLR_FD => {
                 let mut guard = self.file.lock();

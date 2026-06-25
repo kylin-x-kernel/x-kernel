@@ -18,7 +18,7 @@ use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
-use kvfs::NodeType;
+use kvfs::{Location, LookupFlags, LookupIntent, NodeType, WeakVfsInode, lookup_location};
 use lazy_static::lazy_static;
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
@@ -88,8 +88,25 @@ impl Default for BindEntry {
     }
 }
 
+struct PathBindEntry {
+    inode: WeakVfsInode,
+    bind: Arc<BindEntry>,
+}
+
 lazy_static! {
     static ref ABSTRACT_BINDINGS: Mutex<HashMap<Arc<[u8]>, BindEntry>> = Mutex::new(HashMap::new());
+    static ref PATH_BINDINGS: Mutex<HashMap<usize, PathBindEntry>> = Mutex::new(HashMap::new());
+}
+
+fn path_inode_key(loc: &Location) -> usize {
+    Arc::as_ptr(loc.vfs_inode()) as usize
+}
+
+fn path_bind_matches(entry: &PathBindEntry, loc: &Location) -> bool {
+    entry
+        .inode
+        .upgrade()
+        .is_some_and(|inode| Arc::ptr_eq(&inode, loc.vfs_inode()))
 }
 
 pub(crate) fn lookup_bind_entry<R>(
@@ -107,17 +124,30 @@ pub(crate) fn lookup_bind_entry<R>(
             }
         }
         UnixAddr::Path(path) => {
-            let loc = kthread::current_fs_context()
-                .lock()
-                .resolve(path.as_ref())?;
+            let fs_context = kthread::current_fs_context();
+            let fs = fs_context.lock();
+            let loc = lookup_location(
+                &fs.lookup_context(),
+                path.as_ref(),
+                LookupIntent::Open,
+                LookupFlags::follow(),
+            )?;
             if loc.metadata()?.node_type != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
-            f(loc
-                .user_data()
-                .get::<BindEntry>()
-                .ok_or(KError::ConnectionRefused)?
-                .as_ref())
+            let key = path_inode_key(&loc);
+            let entry = {
+                let mut bindings = PATH_BINDINGS.lock();
+                let Some(entry) = bindings.get(&key) else {
+                    return Err(KError::ConnectionRefused);
+                };
+                if !path_bind_matches(entry, &loc) {
+                    bindings.remove(&key);
+                    return Err(KError::ConnectionRefused);
+                }
+                entry.bind.clone()
+            };
+            f(entry.as_ref())
         }
     }
 }
@@ -132,19 +162,36 @@ fn lookup_or_create_bind_entry<R>(
             f(bindings.entry(name.clone()).or_default())
         }
         UnixAddr::Path(path) => {
+            let fs_context = kthread::current_fs_context();
+            let fs = fs_context.lock();
             let file = OpenOptions::new()
                 .write(true)
                 .create(true)
                 .node_type(NodeType::Socket)
-                .open(&kthread::current_fs_context().lock(), path.as_ref())?;
+                .open(&fs, path.as_ref())?;
             let loc = file.location().clone();
             if loc.metadata()?.node_type != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
-            f(loc
-                .user_data()
-                .get_or_insert_with(BindEntry::default)
-                .as_ref())
+            let key = path_inode_key(&loc);
+            let entry = {
+                let mut bindings = PATH_BINDINGS.lock();
+                if bindings
+                    .get(&key)
+                    .is_some_and(|entry| !path_bind_matches(entry, &loc))
+                {
+                    bindings.remove(&key);
+                }
+                bindings
+                    .entry(key)
+                    .or_insert_with(|| PathBindEntry {
+                        inode: Arc::downgrade(loc.vfs_inode()),
+                        bind: Arc::new(BindEntry::default()),
+                    })
+                    .bind
+                    .clone()
+            };
+            f(entry.as_ref())
         }
     }
 }

@@ -8,7 +8,7 @@ use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
 use kthread::current_process_state;
-use kvfs::{MountFlags, ST_RDONLY};
+use kvfs::{LookupFlags, LookupIntent, MountFlags, ST_RDONLY, lookup_location};
 use memfs::MemoryFs;
 use posix_types::UserConstPtr;
 
@@ -105,7 +105,7 @@ pub fn sys_mount(
     debug!("sys_mount <= source: {source:?}, target: {target:?}, fs_type: {fs_type:?}");
 
     let mount_flags = per_mount_flags(flags);
-    let fs = match fs_type.as_str() {
+    let mount_fs = match fs_type.as_str() {
         "tmpfs" => {
             MemoryFs::new_with_name_and_flags("tmpfs", superblock_flags_from_sys_mount(flags))
         }
@@ -113,11 +113,16 @@ pub fn sys_mount(
         "bpf" => bpffs::new_bpffs(),
         _ => return Err(KError::NoSuchDevice),
     };
-    let target = current_process_state()
-        .fs_context()
-        .lock()
-        .resolve(target)?;
-    target.mount_with_flags(&fs, mount_flags)?;
+    let process = current_process_state();
+    let fs_context = process.fs_context();
+    let fs = fs_context.lock();
+    let target = lookup_location(
+        &fs.lookup_context(),
+        target.as_str(),
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
+    target.mount_with_flags(&mount_fs, mount_flags)?;
 
     Ok(0)
 }
@@ -141,10 +146,15 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     let target = target.load_string()?;
     debug!("sys_umount2 <= target: {target:?}");
 
-    let target = current_process_state()
-        .fs_context()
-        .lock()
-        .resolve(target)?;
+    let process = current_process_state();
+    let fs_context = process.fs_context();
+    let fs = fs_context.lock();
+    let target = lookup_location(
+        &fs.lookup_context(),
+        target.as_str(),
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
     target.unmount()?;
     Ok(0)
 }

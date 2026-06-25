@@ -111,34 +111,27 @@ impl SuperBlock {
         self.max_file_size
     }
 
-    /// Registers an inode address space owned by this superblock.
+    /// Tracks an inode address space for superblock writeback.
     pub fn register_address_space(&self, address_space: &Arc<AddressSpace>) {
         let mut address_spaces = self.address_spaces.lock();
-        let mut exists = false;
-        address_spaces.retain(|existing| {
-            let Some(existing) = existing.upgrade() else {
-                return false;
-            };
-            if Arc::ptr_eq(&existing, address_space) {
-                exists = true;
-            }
-            true
+        address_spaces.retain(|existing| match existing.upgrade() {
+            Some(existing) => !Arc::ptr_eq(&existing, address_space),
+            None => false,
         });
-        if !exists {
-            address_spaces.push(Arc::downgrade(address_space));
-        }
+        address_spaces.push(Arc::downgrade(address_space));
     }
 
     fn live_address_spaces(&self) -> Vec<Arc<AddressSpace>> {
-        let mut address_spaces = self.address_spaces.lock();
         let mut live = Vec::new();
-        address_spaces.retain(|address_space| {
-            let Some(address_space) = address_space.upgrade() else {
-                return false;
-            };
-            live.push(address_space);
-            true
-        });
+        self.address_spaces
+            .lock()
+            .retain(|address_space| match address_space.upgrade() {
+                Some(address_space) => {
+                    live.push(address_space);
+                    true
+                }
+                None => false,
+            });
         live
     }
 

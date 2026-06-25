@@ -14,7 +14,9 @@ extern crate alloc;
 mod aarch64_asid;
 mod aspace;
 pub mod backend;
+mod fault;
 mod iomap;
+mod vma;
 
 use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
 use kerrno::LinuxResult;
@@ -25,18 +27,24 @@ use khal::{
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{MemoryAddr, PhysAddr, va};
+pub use vmobj::{ObjectInvalidateRequest, VmObjectId};
 
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64_asid::Aarch64UserAsidContext;
 pub use self::{
-    aspace::{AddrPolicy, AddrSpace},
+    aspace::{AddrPolicy, AddrSpace, InvalidateHandle, MmSpace, MremapSource},
+    fault::{FaultContext, FaultInput, FaultOutcome, PageFaultOutcome},
     iomap::{
         DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device, iounmap,
         register_device_region, register_fixed_device_region,
     },
+    vma::{
+        FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, VmArea, VmAreaSet,
+        VmBackingInfo, VmBackingKind, VmInheritance, VmMayPerm, VmPerm, VmRuntimeOps, VmRuntimeRef,
+    },
 };
 
-static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();
+static KERNEL_ASPACE: LazyInit<SpinNoIrq<MmSpace>> = LazyInit::new();
 
 fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
     let mut flags = MappingFlags::empty();
@@ -58,7 +66,7 @@ fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
     flags
 }
 
-fn map_memory_region(vmspace: &mut AddrSpace, region: MemoryRegion) -> LinuxResult<()> {
+fn map_memory_region(vmspace: &mut MmSpace, region: MemoryRegion) -> LinuxResult<()> {
     let start = region.paddr.align_down_4k();
     let end = (region.paddr + region.size).align_up_4k();
     let target_va = match region.vaddr {
@@ -75,9 +83,9 @@ fn map_memory_region(vmspace: &mut AddrSpace, region: MemoryRegion) -> LinuxResu
 }
 
 /// Creates a new address space for kernel itself.
-pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
+pub fn new_kernel_layout() -> LinuxResult<MmSpace> {
     let mut vmspace =
-        AddrSpace::new_empty_kernel(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
+        MmSpace::new_empty_kernel(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
     for region in memory_regions() {
         map_memory_region(&mut vmspace, region)?;
     }
@@ -90,7 +98,7 @@ pub fn new_kernel_layout() -> LinuxResult<AddrSpace> {
 }
 
 /// Returns the globally unique kernel address space.
-pub fn kernel_layout() -> &'static SpinNoIrq<AddrSpace> {
+pub fn kernel_layout() -> &'static SpinNoIrq<MmSpace> {
     &KERNEL_ASPACE
 }
 

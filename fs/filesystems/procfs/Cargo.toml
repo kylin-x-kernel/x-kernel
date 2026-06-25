@@ -23,12 +23,12 @@ kdevice.workspace = true
 khal.workspace = true
 kvfs-simple.workspace = true
 kprocess.workspace = true
+kpoll.workspace = true
 kthread.workspace = true
 ktask.workspace = true
 ktracing.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
-memspace_file.workspace = true
 unittest.workspace = true
 tee_task_iface = { workspace = true, optional = true }
 

@@ -4,15 +4,19 @@
 
 //! Open-file objects.
 //!
-//! `VfsFile` owns per-open state separately from inode identity and
-//! directory-entry name bindings: opened location, access mode, file offset, raw
-//! open flags, and file-private attachment storage.
+//! `VfsFile` owns per-open state: opened path, inode, address-space view,
+//! access mode, file offset, raw open flags, and file-private attachment
+//! storage.
 
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use kerrno::LinuxError;
 
-use crate::{Location, Mutex, MutexGuard, NodeFlags, TypeMap, VfsError, VfsResult};
+use crate::{
+    AddressSpace, FileOperations, Location, Mutex, MutexGuard, NodeFlags, TypeMap, VfsError,
+    VfsInode, VfsResult,
+};
 
 bitflags::bitflags! {
     /// Access mode flags for an opened VFS file.
@@ -133,6 +137,9 @@ pub fn check_file_size(location: &Location, len: u64) -> VfsResult<()> {
 /// VFS-owned open-file state.
 pub struct VfsFile {
     location: Location,
+    inode: Arc<VfsInode>,
+    address_space: Arc<AddressSpace>,
+    operations: Arc<dyn FileOperations>,
     flags: VfsFileFlags,
     position: Option<Mutex<u64>>,
     open_flags: u32,
@@ -148,10 +155,28 @@ impl VfsFile {
 
     /// Creates a VFS file with raw user-visible open flags.
     pub fn with_open_flags(location: Location, flags: VfsFileFlags, open_flags: u32) -> Self {
+        let operations: Arc<dyn FileOperations> = Arc::new(NodeBackedFileOperations {
+            location: location.clone(),
+        });
+        Self::with_operations(location, flags, open_flags, operations)
+    }
+
+    /// Creates a VFS file with explicit file operations.
+    pub fn with_operations(
+        location: Location,
+        flags: VfsFileFlags,
+        open_flags: u32,
+        operations: Arc<dyn FileOperations>,
+    ) -> Self {
         let position = (!location.flags().contains(NodeFlags::STREAM)).then(|| Mutex::new(0));
+        let inode = location.vfs_inode().clone();
+        let address_space = inode.address_space();
 
         Self {
             location,
+            inode,
+            address_space,
+            operations,
             flags,
             position,
             open_flags,
@@ -163,6 +188,21 @@ impl VfsFile {
     /// Returns the opened VFS location.
     pub fn location(&self) -> &Location {
         &self.location
+    }
+
+    /// Returns the inode opened by this file.
+    pub fn inode(&self) -> &Arc<VfsInode> {
+        &self.inode
+    }
+
+    /// Returns this file's address space.
+    pub fn address_space(&self) -> Arc<AddressSpace> {
+        self.address_space.clone()
+    }
+
+    /// Returns the operations installed for this open file.
+    pub fn operations(&self) -> &Arc<dyn FileOperations> {
+        &self.operations
     }
 
     /// Returns this file's access mode flags.
@@ -252,5 +292,27 @@ impl VfsFile {
     /// Access file-private attachment storage.
     pub fn private_data(&self) -> MutexGuard<'_, TypeMap> {
         self.private_data.lock()
+    }
+}
+
+struct NodeBackedFileOperations {
+    location: Location,
+}
+
+impl FileOperations for NodeBackedFileOperations {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        self.location.entry().as_file()?.read_at(buf, offset)
+    }
+
+    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+        self.location.entry().as_file()?.write_at(buf, offset)
+    }
+
+    fn fsync(&self, data_only: bool) -> VfsResult<()> {
+        if self.location.is_dir() {
+            self.location.sync(data_only)
+        } else {
+            self.location.entry().as_file()?.sync(data_only)
+        }
     }
 }

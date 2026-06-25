@@ -12,6 +12,7 @@
 use kbuild_config::ARCH;
 use kerrno::KResult;
 use kthread::{current_process_fs_context, processes};
+use kvfs::{LookupFlags, LookupIntent, lookup_location};
 use linux_raw_sys::{
     ctypes::c_char,
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
@@ -100,7 +101,14 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
         "/dev/urandom"
     };
 
-    let f = current_process_fs_context().lock().resolve(path)?;
+    let fs_context = current_process_fs_context();
+    let fs = fs_context.lock();
+    let f = lookup_location(
+        &fs.lookup_context(),
+        path,
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
     let mut kbuf = alloc::vec![0; len];
     let len = f.entry().as_file()?.read_at(&mut kbuf, 0)?;
 

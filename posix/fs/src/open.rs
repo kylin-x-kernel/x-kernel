@@ -10,14 +10,16 @@ use core::ffi::{c_char, c_int};
 use devfs::DeviceFile;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
-use kfs::{File, FileBackend, OpenOptions};
+use kfs::{File, OpenOptions};
 use kthread::current_process_state;
 use ktty::tty;
-use kvfs::{DirEntry, FileNode, Location, NodeType, Reference};
+use kvfs::{
+    DirEntry, FileNode, Location, LookupFlags, LookupIntent, NodeType, Reference, lookup_location,
+};
 use linux_raw_sys::general::*;
 use posix_types::UserConstPtr;
 
-use crate::path::{PathSource, resolve_open_path_source, with_fs};
+use crate::path::with_fs;
 
 fn current_effective_ids() -> (u32, u32) {
     (0, 0)
@@ -67,17 +69,22 @@ fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
         let inner = device.inner().as_any();
         if let Some(ptmx) = inner.downcast_ref::<devfs::Ptmx>() {
             let (master, pty_number) = ptmx.create_pty()?;
-            let pts = current_process_state()
-                .fs_context()
-                .lock()
-                .resolve("/dev/pts")?;
+            let process = current_process_state();
+            let fs_context = process.fs_context();
+            let fs = fs_context.lock();
+            let pts = lookup_location(
+                &fs.lookup_context(),
+                "/dev/pts",
+                LookupIntent::Open,
+                LookupFlags::follow(),
+            )?;
             let entry = DirEntry::new_file(
                 FileNode::new(master),
                 NodeType::CharacterDevice,
                 Reference::new(Some(pts.entry().clone()), pty_number.to_string()),
             );
             let loc = Location::new(file.location().mountpoint().clone(), entry);
-            file = File::with_open_flags(FileBackend::Direct(loc), file.flags(), file.open_flags());
+            file = File::with_open_flags(loc, file.flags(), file.open_flags());
         } else if inner.is::<tty::CurrentTty>() {
             let term = kthread::current_thread()
                 .process_state()
@@ -93,10 +100,15 @@ fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
             } else {
                 return Err(KError::OperationNotSupported);
             };
-            let loc = kthread::current_process_fs_context()
-                .lock()
-                .resolve(&path)?;
-            file = File::with_open_flags(FileBackend::Direct(loc), file.flags(), file.open_flags());
+            let fs_context = kthread::current_process_fs_context();
+            let fs = fs_context.lock();
+            let loc = lookup_location(
+                &fs.lookup_context(),
+                path.as_str(),
+                LookupIntent::Open,
+                LookupFlags::follow(),
+            )?;
+            file = File::with_open_flags(loc, file.flags(), file.open_flags());
         }
     }
     let f: Arc<dyn FileLike> = Arc::new(file);
@@ -117,19 +129,9 @@ pub fn sys_openat(
 ) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_openat <= {dirfd} {path:?} {flags:#o} {mode:#o}");
-    let raw_flags = flags as u32;
-
     let mode = mode & !kthread::current_thread().process_state().umask();
     let options = flags_to_options(flags, mode, current_effective_ids());
 
-    if let PathSource::Resolved(path) = resolve_open_path_source(dirfd, Some(&path), raw_flags)?
-        && path.is_procfd()
-    {
-        return options
-            .open_loc(path.location().ok_or(KError::InvalidInput)?)
-            .and_then(|it| add_to_fd(it, flags as _))
-            .map(|fd| fd as isize);
-    }
     with_fs(dirfd, |fs| options.open(fs, path))
         .and_then(|it| add_to_fd(it, flags as _))
         .map(|fd| fd as isize)

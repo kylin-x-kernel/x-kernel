@@ -14,10 +14,11 @@ use core::ffi::c_char;
 
 use kaddr_layout::USER_HEAP_BASE;
 use kerrno::{KError, KResult};
-use kexec::load_user_app_at;
+use kexec::{ExecRequest, load_user_app_request};
 use khal::uspace::UserContext;
 use ktask::current;
 use kuaccess::vm_load_string;
+use kvfs::{LookupFlags, LookupIntent, lookup_location};
 use osvm::load_vec_until_null;
 
 pub fn sys_execve(
@@ -60,13 +61,31 @@ pub fn sys_execve(
         return Err(KError::WouldBlock);
     }
 
-    let loc = proc_state.fs_context().lock().resolve(&path)?;
-    let absolute_path = loc.absolute_path()?.to_string();
+    let fs = proc_state.fs_context().lock();
+    let loc = lookup_location(
+        &fs.lookup_context(),
+        path.as_str(),
+        LookupIntent::Exec,
+        LookupFlags::follow(),
+    )?;
+    drop(fs);
+    let absolute_path = loc
+        .absolute_path()
+        .map(|path| path.to_string())
+        .unwrap_or_else(|_| path.clone());
     let entry_name = loc.name().to_string();
 
     let mut aspace = proc_state.address_space().lock();
-    let (entry_point, user_stack_base) =
-        load_user_app_at(&mut aspace, loc, absolute_path.as_str(), &args, &envs)?;
+    let load_result = load_user_app_request(
+        &mut aspace,
+        ExecRequest::from_resolved_with_display(
+            loc.clone(),
+            path.clone(),
+            args.clone(),
+            envs.clone(),
+        ),
+    );
+    let (entry_point, user_stack_base) = load_result?;
     drop(aspace);
 
     curr.set_name(entry_name.as_str());
@@ -77,11 +96,13 @@ pub fn sys_execve(
     #[cfg(feature = "tee")]
     {
         #[cfg(feature = "tee_ta_sign")]
-        let ta_head_bytes =
-            tee_task_iface::tasign::get_ta_head_cached(absolute_path.as_str())?.unwrap_or_default();
+        let ta_head_bytes = tee_task_iface::tasign::get_ta_head_cached(absolute_path.as_str())
+            .unwrap_or_default()
+            .unwrap_or_default();
         #[cfg(not(feature = "tee_ta_sign"))]
         let ta_head_bytes =
-            tee_task_iface::ta_ctx::read_ta_head_if_applicable(absolute_path.as_str())?
+            tee_task_iface::ta_ctx::read_ta_head_if_applicable(absolute_path.as_str())
+                .unwrap_or_default()
                 .unwrap_or_default();
         proc_state
             .tee_ta_ctx
@@ -111,5 +132,6 @@ pub fn sys_execve(
 
     uctx.set_ip(entry_point.as_usize());
     uctx.set_sp(user_stack_base.as_usize());
+    uctx.set_tls(0);
     Ok(0)
 }

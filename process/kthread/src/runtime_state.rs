@@ -11,11 +11,11 @@ use kfs::FsContext;
 use kprocess::Pid;
 use ksync::Mutex;
 use ktimer::ProcessTimerManager;
-use memspace::AddrSpace;
+use memspace::MmSpace;
 
 /// Process runtime state shared by all threads in a process.
 pub struct ProcessRuntimeState {
-    address_space: Arc<Mutex<AddrSpace>>,
+    address_space: Arc<Mutex<MmSpace>>,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Arc<memspace::Aarch64UserAsidContext>,
     fs_context: Arc<Mutex<FsContext>>,
@@ -27,7 +27,7 @@ impl ProcessRuntimeState {
     /// Creates a new [`ProcessRuntimeState`].
     pub fn new(
         owner_pid: Pid,
-        address_space: Arc<Mutex<AddrSpace>>,
+        address_space: Arc<Mutex<MmSpace>>,
         fs_context: Arc<Mutex<FsContext>>,
         user_heap_base: usize,
     ) -> Self {
@@ -48,7 +48,7 @@ impl ProcessRuntimeState {
     }
 
     /// Returns the virtual address space.
-    pub fn address_space(&self) -> &Arc<Mutex<AddrSpace>> {
+    pub fn address_space(&self) -> &Arc<Mutex<MmSpace>> {
         &self.address_space
     }
 

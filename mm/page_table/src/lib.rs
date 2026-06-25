@@ -22,6 +22,10 @@
 //!
 //! - [`PageTable64`] — read-only page table (query only).
 //! - [`PageTableMut`] — mutable page table access with deferred TLB flushes.
+//! - [`PteSnapshot`] / [`PteReplaceError`] — conditional PTE replacement
+//!   contract for COW-style commit paths.
+//! - [`TlbFlushReceipt`] — explicit flush-finalization receipt used as the
+//!   release-after-flush ordering boundary.
 //!
 //! # Architecture support
 //!

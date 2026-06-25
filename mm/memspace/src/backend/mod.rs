@@ -3,25 +3,23 @@
 // See LICENSES for license details.
 
 //! Memory mapping backends.
-use alloc::{boxed::Box, sync::Arc};
-use core::any::Any;
+use alloc::boxed::Box;
 
 use kalloc::{UsageKind, global_allocator};
 use kerrno::{KError, KResult};
 use khal::{
     mem::{p2v, v2p},
-    paging::{MappingFlags, PageSize, PageTable, PageTableMut, PagingError},
+    paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
-use ksync::Mutex;
-use memaddr::{DynPageIter, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
-use memset::MemorySetBackend;
-
+use memaddr::{DynPageIter, MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 pub mod linear;
+pub mod private;
 pub mod shared;
 
+pub use private::{PrivateBackend, private_anon_invalidate_notifier};
 pub use shared::SharedPages;
 
-use crate::aspace::AddrSpace;
+use crate::{FaultContext, MmSpace, vma::VmBackingInfo};
 
 #[doc(hidden)]
 pub fn divide_page(size: usize, pgsize: PageSize) -> usize {
@@ -73,6 +71,9 @@ pub trait BackendOps {
     /// Returns the page size of the backend.
     fn page_size(&self) -> PageSize;
 
+    /// Returns a Linux-aligned description of the VMA backing object.
+    fn backing_info(&self) -> VmBackingInfo;
+
     /// Map a memory region.
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult;
 
@@ -83,10 +84,10 @@ pub trait BackendOps {
     fn on_protect(
         &self,
         _range: VirtAddrRange,
-        _new_flags: MappingFlags,
+        new_flags: MappingFlags,
         _pgtbl: &mut PageTableMut,
-    ) -> KResult {
-        Ok(())
+    ) -> KResult<MappingFlags> {
+        Ok(new_flags)
     }
 
     /// Populate a memory region and return how many pages now satisfy
@@ -104,431 +105,74 @@ pub trait BackendOps {
         Ok((0, None))
     }
 
-    /// Duplicates this mapping for use in a different page table.
+    /// Materialize the page(s) needed to satisfy a fault.
     ///
-    /// This differs from `clone`, which is designed for splitting a mapping
-    /// within the same table.
-    ///
-    /// [`BackendOps::map`] will be latter called to the returned backend.
-    fn clone_map(
+    /// The default compatibility path still reuses `populate()`, but higher
+    /// level VMA dispatch now enters through this method so backend-specific
+    /// fault handlers can gradually replace raw populate calls.
+    fn handle_fault(
         &self,
-        range: VirtAddrRange,
+        ctx: FaultContext,
         flags: MappingFlags,
-        old_pgtbl: &mut PageTableMut,
-        new_pgtbl: &mut PageTableMut,
-        new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> KResult<Backend>;
-}
-
-pub trait DynBackendOps: Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-    fn page_size(&self) -> PageSize;
-    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult;
-    fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult;
-    fn on_protect(
-        &self,
-        range: VirtAddrRange,
-        new_flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> KResult;
-    fn populate(
-        &self,
-        range: VirtAddrRange,
-        flags: MappingFlags,
-        access_flags: MappingFlags,
-        pgtbl: &mut PageTableMut,
-    ) -> PopulateResult;
-    fn clone_map(
-        &self,
-        range: VirtAddrRange,
-        flags: MappingFlags,
-        old_pgtbl: &mut PageTableMut,
-        new_pgtbl: &mut PageTableMut,
-        new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> KResult<Backend>;
-    /// Create a relocated copy of this backend at a new start virtual address.
-    fn relocated(&self, new_start: VirtAddr, aspace: &Arc<Mutex<AddrSpace>>) -> KResult<Backend>;
-    /// Returns `true` if this is an anonymous (non-file-backed) mapping.
-    fn is_anonymous(&self) -> bool;
-}
-
-#[derive(Clone)]
-pub struct DynamicBackend(Arc<dyn DynBackendOps>);
-
-impl DynamicBackend {
-    pub fn new(backend: Arc<dyn DynBackendOps>) -> Self {
-        Self(backend)
-    }
-
-    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
-        self.0.as_any().downcast_ref::<T>()
-    }
-}
-
-type PopulateHook = Box<dyn FnOnce(&mut AddrSpace)>;
-type PopulateResult = KResult<(usize, Option<PopulateHook>)>;
-
-/// A unified enum type for different memory mapping backends.
-#[derive(Clone)]
-pub enum Backend {
-    Linear(linear::LinearBackend),
-    Shared(shared::SharedBackend),
-    Dynamic(DynamicBackend),
-}
-
-impl Backend {
-    pub fn new_dynamic(backend: Arc<dyn DynBackendOps>) -> Self {
-        Self::Dynamic(DynamicBackend::new(backend))
-    }
-
-    pub fn downcast_dynamic_ref<T: 'static>(&self) -> Option<&T> {
-        match self {
-            Self::Dynamic(dynamic) => dynamic.downcast_ref::<T>(),
-            _ => None,
-        }
-    }
-
-    /// Create a relocated copy of this backend at a new start address.
-    ///
-    /// Used by mremap to move a mapping to a different virtual address while
-    /// preserving the backend's physical pages and semantics.
-    ///
-    /// Returns `OperationNotSupported` for linear backends (their VA-to-PA
-    /// offset is fixed and cannot be relocated).
-    pub fn relocated(
-        &self,
-        new_start: VirtAddr,
-        aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> KResult<Backend> {
-        match self {
-            Self::Linear(_) => Err(KError::OperationNotSupported),
-            Self::Shared(inner) => Ok(inner.relocated(new_start)),
-            Self::Dynamic(inner) => inner.0.relocated(new_start, aspace),
-        }
-    }
-
-    /// Returns `true` if this is an anonymous (non-file-backed) mapping.
-    pub fn is_anonymous(&self) -> bool {
-        match self {
-            Self::Linear(_) => false,
-            Self::Shared(_) => true,
-            Self::Dynamic(inner) => inner.0.is_anonymous(),
-        }
-    }
-}
-
-impl BackendOps for Backend {
-    fn page_size(&self) -> PageSize {
-        match self {
-            Self::Linear(inner) => inner.page_size(),
-            Self::Shared(inner) => inner.page_size(),
-            Self::Dynamic(inner) => inner.0.page_size(),
-        }
-    }
-
-    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
-        match self {
-            Self::Linear(inner) => inner.map(range, flags, pgtbl),
-            Self::Shared(inner) => inner.map(range, flags, pgtbl),
-            Self::Dynamic(inner) => inner.0.map(range, flags, pgtbl),
-        }
-    }
-
-    fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
-        match self {
-            Self::Linear(inner) => inner.unmap(range, pgtbl),
-            Self::Shared(inner) => inner.unmap(range, pgtbl),
-            Self::Dynamic(inner) => inner.0.unmap(range, pgtbl),
-        }
-    }
-
-    fn on_protect(
-        &self,
-        range: VirtAddrRange,
-        new_flags: MappingFlags,
-        pgtbl: &mut PageTableMut,
-    ) -> KResult {
-        match self {
-            Self::Linear(inner) => inner.on_protect(range, new_flags, pgtbl),
-            Self::Shared(inner) => inner.on_protect(range, new_flags, pgtbl),
-            Self::Dynamic(inner) => inner.0.on_protect(range, new_flags, pgtbl),
-        }
-    }
-
-    fn populate(
-        &self,
-        range: VirtAddrRange,
-        flags: MappingFlags,
-        access_flags: MappingFlags,
-        pgtbl: &mut PageTableMut,
-    ) -> PopulateResult {
-        match self {
-            Self::Linear(inner) => inner.populate(range, flags, access_flags, pgtbl),
-            Self::Shared(inner) => inner.populate(range, flags, access_flags, pgtbl),
-            Self::Dynamic(inner) => inner.0.populate(range, flags, access_flags, pgtbl),
-        }
-    }
-
-    fn clone_map(
-        &self,
-        range: VirtAddrRange,
-        flags: MappingFlags,
-        old_pgtbl: &mut PageTableMut,
-        new_pgtbl: &mut PageTableMut,
-        new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> KResult<Backend> {
-        match self {
-            Self::Linear(inner) => inner.clone_map(range, flags, old_pgtbl, new_pgtbl, new_aspace),
-            Self::Shared(inner) => inner.clone_map(range, flags, old_pgtbl, new_pgtbl, new_aspace),
-            Self::Dynamic(inner) => inner
-                .0
-                .clone_map(range, flags, old_pgtbl, new_pgtbl, new_aspace),
-        }
-    }
-}
-
-impl MemorySetBackend for Backend {
-    type Addr = VirtAddr;
-    type Flags = MappingFlags;
-    type PageTable = PageTable;
-
-    fn map(
-        &self,
-        start: VirtAddr,
-        size: usize,
-        flags: MappingFlags,
-        pgtbl: &mut PageTable,
-    ) -> bool {
-        let range = VirtAddrRange::from_start_size(start, size);
-        if let Err(err) = BackendOps::map(self, range, flags, &mut pgtbl.modify()) {
-            warn!("Failed to map area: {:?}", err);
-            false
-        } else {
-            true
-        }
-    }
-
-    fn unmap(&self, start: VirtAddr, size: usize, pgtbl: &mut PageTable) -> bool {
-        let range = VirtAddrRange::from_start_size(start, size);
-        if let Err(err) = BackendOps::unmap(self, range, &mut pgtbl.modify()) {
-            warn!("Failed to unmap area: {:?}", err);
-            false
-        } else {
-            true
-        }
-    }
-
-    fn protect(
-        &self,
-        start: Self::Addr,
-        size: usize,
-        new_flags: Self::Flags,
-        pgtbl: &mut Self::PageTable,
-    ) -> bool {
-        let range = VirtAddrRange::from_start_size(start, size);
-        let mut modifier = pgtbl.modify();
-        if let Err(err) = BackendOps::on_protect(self, range, new_flags, &mut modifier) {
-            warn!("Failed to protect area: {:?}", err);
-            return false;
-        }
-        modifier.protect_region(start, size, new_flags).is_ok()
-    }
-}
-
-#[cfg(unittest)]
-mod tests {
-    use alloc::{sync::Arc, vec, vec::Vec};
-    use core::any::Any;
-
-    use kerrno::KError;
-    use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
-    use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
-    use unittest::def_test;
-
-    use super::{Backend, DynBackendOps, SharedPages, divide_page, map_paging_err, pages_in};
-    use crate::aspace::AddrSpace;
-
-    struct TestDynBackend {
-        is_anonymous: bool,
-        relocated_result: Result<Backend, KError>,
-        last_relocated: ksync::Mutex<Option<(VirtAddr, usize)>>,
-    }
-
-    impl TestDynBackend {
-        fn new(is_anonymous: bool, relocated_result: Result<Backend, KError>) -> Self {
-            Self {
-                is_anonymous,
-                relocated_result,
-                last_relocated: ksync::Mutex::new(None),
-            }
-        }
-    }
-
-    impl DynBackendOps for TestDynBackend {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn page_size(&self) -> PageSize {
-            PageSize::Size4K
-        }
-
-        fn map(
-            &self,
-            _range: VirtAddrRange,
-            _flags: MappingFlags,
-            _pgtbl: &mut PageTableMut,
-        ) -> kerrno::KResult {
-            unreachable!("test backend does not map pages")
-        }
-
-        fn unmap(&self, _range: VirtAddrRange, _pgtbl: &mut PageTableMut) -> kerrno::KResult {
-            unreachable!("test backend does not unmap pages")
-        }
-
-        fn on_protect(
-            &self,
-            _range: VirtAddrRange,
-            _new_flags: MappingFlags,
-            _pgtbl: &mut PageTableMut,
-        ) -> kerrno::KResult {
-            unreachable!("test backend does not protect pages")
-        }
-
-        fn populate(
-            &self,
-            _range: VirtAddrRange,
-            _flags: MappingFlags,
-            _access_flags: MappingFlags,
-            _pgtbl: &mut PageTableMut,
-        ) -> super::PopulateResult {
-            unreachable!("test backend does not populate pages")
-        }
-
-        fn clone_map(
-            &self,
-            _range: VirtAddrRange,
-            _flags: MappingFlags,
-            _old_pgtbl: &mut PageTableMut,
-            _new_pgtbl: &mut PageTableMut,
-            _new_aspace: &Arc<ksync::Mutex<AddrSpace>>,
-        ) -> kerrno::KResult<Backend> {
-            unreachable!("test backend does not clone mappings")
-        }
-
-        fn relocated(
-            &self,
-            new_start: VirtAddr,
-            aspace: &Arc<ksync::Mutex<AddrSpace>>,
-        ) -> kerrno::KResult<Backend> {
-            *self.last_relocated.lock() = Some((new_start, Arc::as_ptr(aspace) as usize));
-            self.relocated_result.clone()
-        }
-
-        fn is_anonymous(&self) -> bool {
-            self.is_anonymous
-        }
-    }
-
-    fn new_test_aspace() -> Arc<ksync::Mutex<AddrSpace>> {
-        Arc::new(ksync::Mutex::new(
-            AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K)
-                .expect("test address space should be constructible"),
-        ))
-    }
-
-    #[def_test]
-    fn test_divide_page_supports_base_and_huge_pages() {
-        assert_eq!(divide_page(PAGE_SIZE_4K * 3, PageSize::Size4K), 3);
-        assert_eq!(
-            divide_page((PageSize::Size2M as usize) * 2, PageSize::Size2M),
-            2
+    ) -> FaultCompatResult {
+        let range = VirtAddrRange::from_start_size(
+            ctx.address().align_down(self.page_size()),
+            self.page_size() as usize,
         );
+        self.populate(range, flags, ctx.access_flags(), pgtbl)
+            .map(FaultCompat::from_populate)
     }
+}
 
-    #[def_test]
-    fn test_pages_in_yields_expected_page_sequence() {
-        let range = VirtAddrRange::from_start_size(VirtAddr::from(0x4000usize), PAGE_SIZE_4K * 3);
-        let pages = pages_in(range, PageSize::Size4K)
-            .expect("aligned range should produce page iterator")
-            .map(VirtAddr::as_usize)
-            .collect::<Vec<_>>();
+type PopulateHook = Box<dyn FnOnce(&mut MmSpace)>;
+pub(crate) type PopulateResult = KResult<(usize, Option<PopulateHook>)>;
 
-        assert_eq!(pages, vec![0x4000, 0x5000, 0x6000]);
-    }
+/// Transitional fault-completion payload returned by backends.
+///
+/// This remains part of the compatibility layer while X-Kernel migrates from
+/// raw `populate()` callbacks toward Linux-style fault handlers.
+pub struct FaultCompat {
+    populated: usize,
+    post_action: Option<PopulateHook>,
+    cow_conflict_retry: bool,
+}
 
-    #[def_test]
-    fn test_pages_in_rejects_unaligned_range() {
-        let range = VirtAddrRange::from_start_size(VirtAddr::from(0x4000usize), PAGE_SIZE_4K + 1);
-        assert!(matches!(
-            pages_in(range, PageSize::Size4K),
-            Err(KError::InvalidInput)
-        ));
-    }
-
-    #[def_test]
-    fn test_map_paging_err_preserves_no_memory_and_flattens_others() {
-        assert_eq!(map_paging_err(PagingError::NoMemory), KError::NoMemory);
-        assert_eq!(map_paging_err(PagingError::NotMapped), KError::InvalidInput);
-    }
-
-    #[def_test]
-    fn test_backend_relocated_rejects_linear_backend() {
-        let aspace = new_test_aspace();
-        let result = Backend::new_linear(0).relocated(VirtAddr::from(0x8000usize), &aspace);
-
-        assert!(matches!(result, Err(KError::OperationNotSupported)));
-    }
-
-    #[def_test]
-    fn test_backend_relocated_updates_shared_backend_start() {
-        let pages = Arc::new(SharedPages {
-            phys_pages: Vec::new(),
-            size: PageSize::Size4K,
-        });
-        let backend = Backend::new_shared(VirtAddr::from(0x2000usize), pages.clone());
-        let relocated = backend
-            .relocated(VirtAddr::from(0x9000usize), &new_test_aspace())
-            .expect("shared backend relocation should succeed");
-
-        assert!(relocated.is_anonymous());
-        match relocated {
-            Backend::Shared(inner) => {
-                assert!(Arc::ptr_eq(inner.pages(), &pages));
-            }
-            _ => panic!("expected relocated shared backend"),
+impl FaultCompat {
+    /// Builds a fault-completion payload from a legacy populate result.
+    pub fn from_populate((populated, post_action): (usize, Option<PopulateHook>)) -> Self {
+        Self {
+            populated,
+            post_action,
+            cow_conflict_retry: false,
         }
     }
 
-    #[def_test]
-    fn test_backend_dynamic_relocated_forwards_arguments_and_result() {
-        let aspace = new_test_aspace();
-        let inner = Arc::new(TestDynBackend::new(false, Ok(Backend::new_linear(17))));
-        let backend = Backend::new_dynamic(inner.clone());
-        let new_start = VirtAddr::from(0xb000usize);
-
-        let relocated = backend
-            .relocated(new_start, &aspace)
-            .expect("dynamic relocation should use backend result");
-
-        assert!(!backend.is_anonymous());
-        assert!(matches!(relocated, Backend::Linear(_)));
-        assert_eq!(
-            *inner.last_relocated.lock(),
-            Some((new_start, Arc::as_ptr(&aspace) as usize))
-        );
+    /// Builds a retry payload for a COW compare/replace conflict.
+    pub const fn cow_conflict_retry() -> Self {
+        Self {
+            populated: 0,
+            post_action: None,
+            cow_conflict_retry: true,
+        }
     }
 
-    #[def_test]
-    fn test_backend_dynamic_relocated_propagates_errors_and_anonymous_flag() {
-        let aspace = new_test_aspace();
-        let inner = Arc::new(TestDynBackend::new(true, Err(KError::InvalidInput)));
-        let backend = Backend::new_dynamic(inner.clone());
+    /// Returns the number of pages materialized for the fault.
+    pub const fn populated(&self) -> usize {
+        self.populated
+    }
 
-        assert!(backend.is_anonymous());
-        assert!(matches!(
-            backend.relocated(VirtAddr::from(0xc000usize), &aspace),
-            Err(KError::InvalidInput)
-        ));
+    /// Returns `true` when backend state changed during COW resolution and
+    /// the fault should be retried instead of reported as no progress.
+    pub const fn is_cow_conflict_retry(&self) -> bool {
+        self.cow_conflict_retry
+    }
+
+    /// Takes the deferred post-fault action, if the backend produced one.
+    pub fn take_post_action(&mut self) -> Option<PopulateHook> {
+        self.post_action.take()
     }
 }
+
+/// Result type for runtime fault handlers.
+pub type FaultCompatResult = KResult<FaultCompat>;

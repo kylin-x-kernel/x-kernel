@@ -1,0 +1,16 @@
+[package]
+name = "anon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+kerrno = { workspace = true }
+khal = { workspace = true }
+kspin = { workspace = true }
+ksync = { workspace = true }
+unittest = { workspace = true }
+vmobj = { workspace = true }

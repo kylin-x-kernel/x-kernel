@@ -3,7 +3,7 @@
 ## 概述
 
 `posix-fs` 是用户态文件系统 syscall 进入内核 VFS、fd 表和设备对象的边界层。
-主要风险来自用户指针和路径字符串、文件描述符复用、跨进程 procfd 解析、
+主要风险来自用户指针和路径字符串、文件描述符复用、VFS magic-link follow、
 目录项 ABI 布局、元数据权限语义、mount flags 兼容和 fd-to-fd 数据复制。
 
 `timerfd`、`eventfd` 等不以文件系统状态为核心的 fd-backed kernel object
@@ -50,7 +50,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | 用户 iovec | `readv`、`writev`、`preadv2`、`pwritev2` | iovec 数量过大、范围溢出、读写方向错误 |
 | fd 编号 | 几乎所有 fd syscall | 已关闭 fd、类型不匹配、fd 复用、`CLOEXEC`/非阻塞标志混淆 |
 | 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs context 更新、umask 和当前目录语义 |
-| procfd 路径 | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化 |
+| VFS magic link | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化、no-follow 策略 |
 | VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、mount flags、文件系统实现差异 |
 | fd-to-fd 复制 | `sendfile`、`copy_file_range`、`splice` | 源目标类型错误、offset 指针 TOCTOU、同文件重叠、阻塞语义 |
 
@@ -97,10 +97,11 @@ kfd resources / kfs / kvfs / device and pipe implementations
    不应改变底层 `FileLike` 对象。
 2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 通过 `FileLike::set_nonblocking` 作用于对象。
 3. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
-4. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 procfd 解析。
+4. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
 5. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
 6. 创建文件和目录时应应用当前进程 `umask`。
 7. `chroot` 目标必须是目录。
+8. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
 
 ## 线程安全
 
@@ -110,7 +111,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | `FsContext` | 通过进程 fs context 锁访问 | `chdir`、`chroot` 与相对路径解析并发 |
 | 目录 offset | `Directory::offset` 锁保护 | `getdents64` 和目录 `lseek` 并发更新 |
 | `FileLike` 对象 | 由具体文件、pipe、设备实现负责 | 阻塞、非阻塞状态和 offset 更新语义 |
-| procfd 目标 fd 表 | 读取目标进程 resources 的 fd table read lock | 目标进程退出或 fd 关闭时的生命周期 |
+| procfs magic-link target | procfs/kfd snapshot 持有目标 `FileLike` 引用 | 目标进程退出或 fd 关闭时的生命周期 |
 
 `posix-fs` 不定义跨资源全局锁顺序。
 新增代码应缩短持锁区间，
@@ -123,15 +124,16 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | T-01 | 用户坏指针导致内核越界读写 | 用户路径/缓冲区/iovec | 高 | 直接解引用用户地址或忽略 copy 错误 | 统一使用 `UserPtr`、`UserConstPtr`、`VmBytes`、`IoVectorBuf` 并传播 `KResult` |
 | T-02 | `getdents64` 写出目录项时越过临时缓冲区 | 用户输出缓冲区 / ABI 布局 | 高 | 记录长度计算错误或未检查剩余空间 | `DirBuffer::write_entry` 先检查空间，记录长度按 ABI 对齐 |
 | T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 使用 zeroed 初始化后逐项赋值 |
-| T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或权限模型 | `classify_procfd_path` 拒绝无效 pid/fd；fd 表读取经 `get_process_state` 和 resources；后续权限仍依赖底层对象 |
-| T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 procfd 路径被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | `resolve_open_path_source` 将 `O_NOFOLLOW` 转为 `AT_SYMLINK_NOFOLLOW`，并对 live procfd 返回 loop 错误 |
+| T-04 | `/proc/<pid>/fd/<fd>` magic-link 绕过普通路径解析访问不该访问的对象 | VFS magic-link | 高 | procfs follow 未保持 fd 生命周期或缺少权限模型 | procfs fd entry 通过 fd snapshot 持有目标对象；非 VFS 目标 follow 返回不支持；跨进程权限策略仍需收紧 |
+| T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 magic-link 被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | syscall 层统一把 flags 转成 `LookupFlags`，`kvfs::namei` 按 `LookupIntent` 处理 final/non-final symlink 与 magic-link |
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
-| T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；新增完整语义前不应宣称等价 Linux |
+| T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；当前不宣称等价 Linux |
 | T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 bind、remount、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput` |
-| T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；未来实现前审计所有锁相关返回路径 |
-| T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | `current_effective_ids()` 固定 `(0, 0)` | 文档列为限制；接入 `kcred` 后应使用当前 fsuid/fsgid |
-| T-11 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；未来需接入 `kcred::AccessCredentials` |
+| T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；锁相关返回路径必须按当前占位语义审计 |
+| T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | `current_effective_ids()` 固定 `(0, 0)` | 文档列为限制；当前未读取真实 fsuid/fsgid |
+| T-11 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；当前未接入 `kcred::AccessCredentials` |
 | T-12 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
+| T-13 | memfd seals 被非 shmem fd 或普通文件伪造 | fcntl / shmem | 中 | `F_ADD_SEALS` / `F_GET_SEALS` 没有校验 fd object 类型和 inode state | fcntl 先 downcast 到 `kfs::File`，再由 KFS shmem state 判断是否存在 |
 
 影响等级定义：
 
@@ -152,8 +154,8 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | F-07 | `mount` 请求不支持的文件系统 | `fs_type != "tmpfs"` | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | 显式检查 fs_type |
 | F-08 | `syncfs` 目标不是文件或目录 | fd 指向 pipe/socket/设备 | 返回 `InvalidInput` | 当前同步请求失败 | 4 | downcast 后只 flush 文件系统对象 |
 | F-09 | `copy_file_range` 语义不完整 | 重叠和普通文件检查 TODO | 可能出现与 Linux 不一致的数据结果 | 相关应用复制行为异常 | 2 | 非零 flags 显式拒绝；其余限制实现前需要补充测试 |
-| F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；后续应按 cmd 补充错误语义 |
-| F-11 | `close_range(UNSHARE)` 资源复制失败 | 下层 unshare 实现异常或未来改为可失败 | 当前 API 没有错误承载 | fd 表隔离语义不完整 | 2 | 审计 `unshare_fd_table` 语义，未来可失败时更新 syscall 返回 |
+| F-10 | `fcntl` unsupported cmd 返回成功 | 兼容占位 | 应用误判某些控制操作已生效 | 可能产生行为差异 | 2 | warning 记录；有安全影响的命令应显式实现或拒绝 |
+| F-11 | `close_range(UNSHARE)` 资源复制失败 | 下层 unshare 实现异常 | 当前 API 没有错误承载 | fd 表隔离语义不完整 | 2 | `unshare_fd_table` 当前按不可失败路径使用 |
 
 严重度定义：
 
@@ -171,7 +173,8 @@ kfd resources / kfs / kvfs / device and pipe implementations
 - 对常见探测型 ioctl 失败，例如非终端 fd 上的 `TCGETS` / `TIOCGWINSZ`，
   不记录 warning，避免日志噪声。
 - 对不支持的 `fcntl` 参数当前记录 warning 但返回成功，
-  这是兼容占位，不应扩展到有安全影响的新命令。
+  这是兼容占位，不应扩展到有安全影响的新命令。`F_ADD_SEALS` 和
+  `F_GET_SEALS` 已显式接入 shmem object state。
 - 本 crate 没有统一重试机制；
   用户态或上层 syscall 调度负责根据 errno 决定重试。
 
@@ -195,6 +198,8 @@ kfd resources / kfs / kvfs / device and pipe implementations
 5. `mount` 只支持 `tmpfs`，不支持 bind、remount、move、propagation 和 lazy/force unmount。
 6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
    非零 flags 返回 `Unsupported`。
+7. memfd `F_ADD_SEALS` / `F_GET_SEALS` 已接入；shared writable mmap 和
+   `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap` 执行。
 
 ## 审计清单
 

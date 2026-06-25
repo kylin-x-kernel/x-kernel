@@ -5,14 +5,15 @@
 //! Linear mapping backend.
 use alloc::sync::Arc;
 
-use kerrno::KResult;
-use khal::paging::{MappingFlags, PageSize, PageTableMut};
+use kerrno::{KError, KResult};
+use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
-use memaddr::{PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
+use memaddr::{MemoryAddr, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{
-    aspace::AddrSpace,
-    backend::{Backend, BackendOps, map_paging_err},
+    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmBackingInfo, VmBackingKind,
+    backend::{BackendOps, FaultCompat, FaultCompatResult, map_paging_err},
+    vma::VmRuntimeOps,
 };
 
 /// Linear mapping backend.
@@ -26,6 +27,22 @@ pub struct LinearBackend {
 }
 
 impl LinearBackend {
+    pub fn new(offset: isize) -> Self {
+        Self { offset }
+    }
+
+    pub fn clone_for_fork_runtime(
+        &self,
+        _range: VirtAddrRange,
+        _flags: MappingFlags,
+        _old_pgtbl: &mut PageTableMut,
+        _new_pgtbl: &mut PageTableMut,
+        _new_aspace: &Arc<Mutex<MmSpace>>,
+        _invalidate: Option<InvalidateHandle>,
+    ) -> KResult<Self> {
+        Ok(self.clone())
+    }
+
     fn pa(&self, va: VirtAddr) -> PhysAddr {
         let pa = (va.as_usize() as isize)
             .checked_sub(self.offset)
@@ -38,6 +55,10 @@ impl LinearBackend {
 impl BackendOps for LinearBackend {
     fn page_size(&self) -> PageSize {
         PageSize::Size4K
+    }
+
+    fn backing_info(&self) -> VmBackingInfo {
+        VmBackingInfo::new(VmBackingKind::Linear, self.page_size())
     }
 
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
@@ -58,21 +79,83 @@ impl BackendOps for LinearBackend {
         Ok(())
     }
 
-    fn clone_map(
+    fn handle_fault(
+        &self,
+        ctx: FaultContext,
+        flags: MappingFlags,
+        pgtbl: &mut PageTableMut,
+    ) -> FaultCompatResult {
+        let addr = ctx.address().align_down(self.page_size());
+        let expected = self.pa(addr);
+        match pgtbl.query(addr) {
+            Ok((paddr, page_flags, _)) => {
+                if paddr != expected {
+                    return Err(KError::BadAddress);
+                }
+                if !page_flags.contains(ctx.access_flags()) {
+                    pgtbl.protect(addr, flags).map_err(map_paging_err)?;
+                }
+            }
+            Err(PagingError::NotMapped) => {
+                pgtbl
+                    .map(addr, expected, self.page_size(), flags)
+                    .map_err(map_paging_err)?;
+            }
+            Err(_) => return Err(KError::BadAddress),
+        }
+        Ok(FaultCompat::from_populate((1, None)))
+    }
+}
+
+impl VmRuntimeOps for LinearBackend {
+    fn backing_info(&self) -> VmBackingInfo {
+        BackendOps::backing_info(self)
+    }
+
+    fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
+        BackendOps::map(self, range, flags, pgtbl)
+    }
+
+    fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
+        BackendOps::unmap(self, range, pgtbl)
+    }
+
+    fn on_protect(
+        &self,
+        range: VirtAddrRange,
+        flags: MappingFlags,
+        pgtbl: &mut PageTableMut,
+    ) -> KResult<MappingFlags> {
+        BackendOps::on_protect(self, range, flags, pgtbl)
+    }
+
+    fn handle_fault(
+        &self,
+        ctx: FaultContext,
+        flags: MappingFlags,
+        pgtbl: &mut PageTableMut,
+    ) -> FaultCompatResult {
+        BackendOps::handle_fault(self, ctx, flags, pgtbl)
+    }
+
+    fn relocate_for_mremap(
+        &self,
+        _new_start: VirtAddr,
+        _new_mm_id: u64,
+        _aspace: &Arc<Mutex<MmSpace>>,
+        _invalidate: Option<InvalidateHandle>,
+    ) -> KResult<Arc<dyn VmRuntimeOps>> {
+        Err(KError::OperationNotSupported)
+    }
+
+    fn clone_for_fork(
         &self,
         _range: VirtAddrRange,
         _flags: MappingFlags,
         _old_pgtbl: &mut PageTableMut,
         _new_pgtbl: &mut PageTableMut,
-        _new_aspace: &Arc<Mutex<AddrSpace>>,
-    ) -> KResult<Backend> {
-        Ok(Backend::Linear(self.clone()))
-    }
-}
-
-impl Backend {
-    /// Create a linear mapping backend with a fixed PA-VA offset.
-    pub fn new_linear(offset: isize) -> Self {
-        Self::Linear(LinearBackend { offset })
+        _target: ForkCloneTarget<'_>,
+    ) -> KResult<Arc<dyn VmRuntimeOps>> {
+        Ok(Arc::new(self.clone()))
     }
 }

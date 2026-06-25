@@ -25,7 +25,7 @@ kthread.workspace = true
 kvfs.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
-memspace_file.workspace = true
+filemap.workspace = true
 ouroboros.workspace = true
 tee_task_iface = { workspace = true, optional = true }
 unittest.workspace = true
