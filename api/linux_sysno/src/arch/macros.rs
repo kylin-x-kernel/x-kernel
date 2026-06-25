@@ -15,6 +15,20 @@ macro_rules! syscall_enum {
             )*
         }
 
+        $(
+            EXTENSIONS {
+                $(
+                    #[$extension:meta]
+                    {
+                        $(
+                            $(#[$extension_inner:meta])*
+                            $extension_syscall:ident = $extension_num:expr,
+                        )*
+                    }
+                )*
+            }
+        )?
+
         LAST: $last_syscall:ident;
     ) => {
         /// Complete list of Linux syscalls.
@@ -31,6 +45,13 @@ macro_rules! syscall_enum {
                 $(#[$inner])*
                 $syscall = $num,
             )*
+            $($(
+                $(
+                    #[$extension]
+                    $(#[$extension_inner])*
+                    $extension_syscall = $extension_num,
+                )*
+            )*)?
         }
 
         impl $Name {
@@ -40,6 +61,12 @@ macro_rules! syscall_enum {
                 $(
                     Self::$syscall,
                 )*
+                $($(
+                    $(
+                        #[$extension]
+                        Self::$extension_syscall,
+                    )*
+                )*)?
             ];
 
             /// Constructs a new syscall from the given ID. If the ID does not
@@ -52,6 +79,12 @@ macro_rules! syscall_enum {
                     $(
                         $num => Some(Self::$syscall),
                     )*
+                    $($(
+                        $(
+                            #[$extension]
+                            $extension_num => Some(Self::$extension_syscall),
+                        )*
+                    )*)?
                     _ => None,
                 }
             }
@@ -63,19 +96,25 @@ macro_rules! syscall_enum {
                     $(
                         Self::$syscall => core::stringify!($syscall),
                     )*
+                    $($(
+                        $(
+                            #[$extension]
+                            Self::$extension_syscall => core::stringify!($extension_syscall),
+                        )*
+                    )*)?
                 }
             }
 
             /// Returns the next syscall in the table. Returns `None` if this is
             /// the last syscall.
             pub const fn next(&self) -> Option<Self> {
-                if let Self::$last_syscall = self {
+                if self.id() == Self::last().id() {
                     return None;
                 }
 
                 let mut next_id = self.id() + 1;
 
-                while next_id < Self::last().id() {
+                while next_id <= Self::last().id() {
                     if let Some(next) = Self::new(next_id as usize) {
                         return Some(next);
                     }
@@ -93,7 +132,7 @@ macro_rules! syscall_enum {
 
             /// Returns the last syscall in the table.
             pub const fn last() -> Self {
-                Self::$last_syscall
+                Self::ALL[Self::ALL.len() - 1]
             }
 
             /// Returns the syscall number.
@@ -133,6 +172,12 @@ macro_rules! syscall_enum {
                     $(
                         core::stringify!($syscall) => Ok(Self::$syscall),
                     )*
+                    $($(
+                        $(
+                            #[$extension]
+                            core::stringify!($extension_syscall) => Ok(Self::$extension_syscall),
+                        )*
+                    )*)?
                     _ => Err(()),
                 }
             }

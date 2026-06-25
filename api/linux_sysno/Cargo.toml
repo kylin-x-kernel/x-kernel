@@ -24,6 +24,7 @@ loongarch64 = []
 riscv64 = []
 x86_64 = []
 tee = []
+tipc = []
 
 # Deprecated: Use `serde` instead.
 with-serde = ["serde", "serde_repr"]
