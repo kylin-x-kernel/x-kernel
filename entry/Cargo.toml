@@ -13,7 +13,7 @@ dma-trace = ["kfeat/dma-trace"]
 
 [dependencies]
 kvfs.workspace = true
-xcov.workspace = true
+xcover.workspace = true
 kfeat.workspace = true
 kfs.workspace = true
 khal.workspace = true

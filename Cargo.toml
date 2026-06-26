@@ -173,7 +173,7 @@ klogger = { path = "util/klogger" }
 macros = { path = "util/macros" }
 unittest = { path = "util/unittest" }
 unittest_support = { path = "util/unittest_support" }
-xcov = { path = "util/xcov" }
+xcover = { path = "util/xcover" }
 
 # External crates
 bitflags = "2.10"

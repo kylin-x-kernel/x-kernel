@@ -316,8 +316,8 @@ fn main() {
 
     info!("Writing LLVM coverage data to /.llvm-cov/default.profraw ...");
     let mut cov = Vec::new();
-    if let Err(e) = xcov::capture_coverage(&mut cov) {
-        error!("capture_coverage failed: {:?}", e);
+    if let Err(e) = xcover::write_profraw(&mut cov) {
+        error!("write_profraw failed: {:?}", e);
     } else if !cov.is_empty() {
         let fs_context = kfs::kernel_fs_context().lock().clone();
         let lookup_context = fs_context.lookup_context();

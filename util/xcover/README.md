@@ -1,8 +1,8 @@
-# xcov
+# xcover
 
 Pure Rust code coverage and profile-guided optimization (PGO) support for `no_std` and embedded programs.
 
-This crate is a **pure Rust reimplementation** of [minicov](https://github.com/Amanieu/minicov), which originally uses a modified C version of the LLVM profiling runtime (from compiler-rt). xcov replaces all C code with idiomatic Rust while providing the same API and producing identical `.profraw` output.
+This crate is a **pure Rust reimplementation** of [minicov](https://github.com/Amanieu/minicov), which originally uses a modified C version of the LLVM profiling runtime (from compiler-rt). xcover replaces all C code with idiomatic Rust while producing compatible `.profraw` output.
 
 All types of instrumentation using the LLVM profiling runtime are supported:
 
@@ -34,31 +34,29 @@ cargo build
 cargo build --target x86_64-unknown-linux-gnu
 ```
 
-2. Add the `xcov` crate as a dependency to your program:
+2. Add the `xcover` crate as a dependency to your program:
 
 ```toml
 [dependencies]
-xcov = "0.1"
+xcover = "0.1"
 ```
 
-3. Before your program exits, call `xcov::capture_coverage` with a sink (such as `Vec`) and then dump its contents to a file with the `.profraw` extension:
+3. Before your program exits, call `xcover::write_profraw` with a writer (such as `Vec`) and then dump its contents to a file with the `.profraw` extension:
 
 ```ignore
 fn main() {
     // ...
 
     let mut coverage = vec![];
-    unsafe {
-        // Note that this function is not thread-safe! Use a lock if needed.
-        xcov::capture_coverage(&mut coverage).unwrap();
-    }
+    // Note that this function is not thread-safe! Use a lock if needed.
+    xcover::write_profraw(&mut coverage).unwrap();
     std::fs::write("output.profraw", coverage).unwrap();
 }
 ```
 
 If your program is running on a different system than your build system then you will need to transfer this file back to your build system.
 
-Sinks must implement the `CoverageWriter` trait. If the default `alloc` feature is enabled then an implementation is provided for `Vec<u8>`.
+Sinks must implement the `ProfileWriter` trait. If the default `alloc` feature is enabled then an implementation is provided for `Vec<u8>`.
 
 4. Use a tool such as [grcov] or `llvm-cov` to generate a human-readable coverage report:
 
@@ -84,7 +82,7 @@ cargo run --target x86_64-unknown-linux-gnu --release
 # The rust-profdata tool comes from cargo-binutils.
 rust-profdata merge -o output.profdata output.profraw
 
-# Optimized build using PGO. xcov is not needed in this step.
+# Optimized build using PGO. xcover is not needed in this step.
 export RUSTFLAGS="-Cprofile-use=output.profdata"
 cargo build --target x86_64-unknown-linux-gnu --release
 ```

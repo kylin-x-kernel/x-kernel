@@ -18,9 +18,76 @@
 //! compiler places profiling data into sections and provides accessor
 //! functions. For library-only builds (testing), we use static buffers.
 
-use core::ptr;
+use core::{marker::PhantomData, ptr};
 
-use crate::types::{LlvmProfileData, ValueProfNode};
+use crate::abi::layout::{LlvmProfileData, ValueProfNode};
+
+pub struct SectionRange<T> {
+    begin: *const T,
+    end: *const T,
+    _marker: PhantomData<T>,
+}
+
+impl<T> Clone for SectionRange<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for SectionRange<T> {}
+
+impl<T> SectionRange<T> {
+    const fn new(begin: *const T, end: *const T) -> Self {
+        Self {
+            begin,
+            end,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn begin(self) -> *const T {
+        self.begin
+    }
+
+    pub fn end(self) -> *const T {
+        self.end
+    }
+
+    pub fn byte_len(self) -> usize {
+        (self.end as usize).saturating_sub(self.begin as usize)
+    }
+}
+
+impl SectionRange<u8> {
+    pub fn as_slice(self) -> &'static [u8] {
+        // SAFETY: profile sections are process-lifetime linker sections, and
+        // this immutable view is bounded by the captured section range.
+        unsafe { core::slice::from_raw_parts(self.begin, self.byte_len()) }
+    }
+}
+
+impl SectionRange<LlvmProfileData> {
+    pub fn len(self) -> usize {
+        self.byte_len() / core::mem::size_of::<LlvmProfileData>()
+    }
+
+    pub fn as_slice(self) -> &'static [LlvmProfileData] {
+        // SAFETY: the linker-provided profile-data section contains initialized
+        // `LlvmProfileData` records for the process lifetime.
+        unsafe { core::slice::from_raw_parts(self.begin, self.len()) }
+    }
+}
+
+#[derive(Clone)]
+pub struct ProfileSections {
+    pub data: SectionRange<LlvmProfileData>,
+    pub counters: SectionRange<u8>,
+    pub bitmap: SectionRange<u8>,
+    pub names: SectionRange<u8>,
+    pub vnodes: SectionRange<ValueProfNode>,
+    pub vtables: SectionRange<u8>,
+    pub vtabnames: SectionRange<u8>,
+}
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -136,28 +203,30 @@ mod imp {
     }
 }
 
-pub use imp::*;
+pub fn profile_sections() -> ProfileSections {
+    ProfileSections {
+        data: SectionRange::new(imp::begin_data(), imp::end_data()),
+        counters: SectionRange::new(imp::begin_counters(), imp::end_counters()),
+        bitmap: SectionRange::new(imp::begin_bitmap(), imp::end_bitmap()),
+        names: SectionRange::new(imp::begin_names(), imp::end_names()),
+        vnodes: SectionRange::new(imp::begin_vnodes(), imp::end_vnodes()),
+        vtables: SectionRange::new(begin_vtables(), end_vtables()),
+        vtabnames: SectionRange::new(begin_vtabnames(), end_vtabnames()),
+    }
+}
 
-pub fn begin_vtables() -> *const u8 {
+fn begin_vtables() -> *const u8 {
     ptr::null()
 }
 
-pub fn end_vtables() -> *const u8 {
+fn end_vtables() -> *const u8 {
     ptr::null()
 }
 
-pub fn begin_vtabnames() -> *const u8 {
+fn begin_vtabnames() -> *const u8 {
     ptr::null()
 }
 
-pub fn end_vtabnames() -> *const u8 {
+fn end_vtabnames() -> *const u8 {
     ptr::null()
-}
-
-pub fn write_binary_ids(_writer: *mut crate::types::ProfDataWriter) -> i32 {
-    0
-}
-
-pub fn get_binary_ids_size() -> u64 {
-    0
 }

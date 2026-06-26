@@ -1,4 +1,4 @@
-EXTRACT_COV = cargo extract-cov
+DEBUGFS ?= debugfs
 CONVERT_COV = cargo convert-cov
 out_target := $(TARGET_DIR)/$(TARGET)/$(MODE)
 cov_profraw := $(out_target)/default.profraw
@@ -22,7 +22,9 @@ endif
 
 define coverage_report
   @printf "    $(CYAN_C)Generating$(END_C) coverage report...\n"
-  @$(EXTRACT_COV) --image $(DISK_IMG) --profraw-path /.llvm-cov/default.profraw --out-path $(cov_profraw)
+  @rm -f $(cov_profraw)
+  @$(DEBUGFS) -R "dump -p /.llvm-cov/default.profraw $(cov_profraw)" $(DISK_IMG) >/dev/null 2>&1 || \
+    (printf "$(RED_C)error$(END_C): failed to extract /.llvm-cov/default.profraw from $(DISK_IMG)\n"; exit 1)
   @printf "    $(CYAN_C)Extracted$(END_C) raw coverage data to $(notdir $(cov_profraw)).\n"
   @rust-profdata merge -o $(cov_prodata) $(cov_profraw)
   @printf "    $(CYAN_C)Merged$(END_C) raw coverage data into $(notdir $(cov_prodata)).\n"
