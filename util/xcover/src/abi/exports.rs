@@ -134,16 +134,13 @@ pub(crate) unsafe extern "C" fn __llvm_profile_check_compatibility(
         return -1;
     };
     match crate::parse::parse_profraw(profile.as_bytes()) {
-        Ok(parsed) => {
-            let guard = crate::runtime::image_mut();
-            match guard.as_ref() {
-                Some(image) => match crate::parse::check_compatibility(image, &parsed) {
-                    Ok(()) => 0,
-                    Err(_) => -1,
-                },
-                None => -1,
-            }
-        }
+        Ok(parsed) => match crate::runtime::image_or_init() {
+            Ok(image) => match crate::parse::check_compatibility(image, &parsed) {
+                Ok(()) => 0,
+                Err(_) => -1,
+            },
+            Err(_) => -1,
+        },
         Err(_) => -1,
     }
 }
@@ -235,9 +232,8 @@ pub(crate) extern "C" fn __llvm_profile_get_num_padding_bytes(size_in_bytes: u64
 pub(crate) extern "C" fn __llvm_profile_get_size_for_buffer() -> u64 {
     #[cfg(feature = "alloc")]
     {
-        let guard = crate::runtime::image_mut();
-        match guard.as_ref() {
-            Some(image) => crate::serialize::encoded_size(&image.snapshot()),
+        match crate::runtime::snapshot() {
+            Some(snap) => crate::serialize::encoded_size(&snap),
             None => 0,
         }
     }
@@ -252,11 +248,9 @@ pub(crate) extern "C" fn __llvm_profile_get_size_for_buffer() -> u64 {
 pub(crate) unsafe extern "C" fn __llvm_profile_write_buffer(buffer: *mut u8) -> i32 {
     #[cfg(feature = "alloc")]
     {
-        let guard = crate::runtime::image_mut();
-        let Some(image) = guard.as_ref() else {
+        let Some(snapshot) = crate::runtime::snapshot() else {
             return -1;
         };
-        let snapshot = image.snapshot();
         let size = crate::serialize::encoded_size(&snapshot);
         let Ok(usize_size) = usize::try_from(size) else {
             return -1;

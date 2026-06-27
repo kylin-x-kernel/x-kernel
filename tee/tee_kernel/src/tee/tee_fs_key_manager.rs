@@ -4,8 +4,8 @@
 
 use alloc::vec;
 
+use klazy::lazy_static;
 use ksync::Mutex;
-use lazy_static::lazy_static;
 use static_assertions::const_assert;
 use tee_crypto::{block_cipher::BlockCipher, mac::Mac};
 use tee_raw_sys::{

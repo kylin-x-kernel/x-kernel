@@ -4,18 +4,21 @@
 
 //! Profile data merging.
 //!
-//! Merges a `ParsedProfraw` into a `ProfileImage` using structured data.
+//! Merges a `ParsedProfraw` into a live `ProfileImage` using structured data.
 //! No unsafe, no ABI types, no raw pointers.
 //!
 //! Merge rules:
-//! - Wide counters: `saturating_add`
-//! - Byte counters: bitwise AND
-//! - Bitmap: bitwise OR
-//! - Value sites: accumulate counts per site
+//! - Wide counters: `saturating_add` via atomic CAS
+//! - Byte counters: bitwise AND via atomic fetch_and
+//! - Bitmap: bitwise OR via atomic fetch_or
+//! - Value sites: per-site atomic accumulate
+//!
+//! The live `ProfileImage` exposes only `&self`; all mutations go through
+//! atomic operations.
 
 use crate::{
     ProfileError,
-    image::{CounterStore, ProfileImage},
+    image::{AtomicCounterStore, CounterStore, ProfileImage},
     parse::ParsedProfraw,
 };
 
@@ -23,65 +26,42 @@ use crate::{
 ///
 /// The caller must ensure compatibility (same version, same records)
 /// before calling this function.
-pub fn merge(image: &mut ProfileImage, parsed: &ParsedProfraw) -> Result<(), ProfileError> {
-    // Merge counters.
-    merge_counters(&mut image.counters, &parsed.counters)?;
+pub fn merge(image: &ProfileImage, parsed: &ParsedProfraw) -> Result<(), ProfileError> {
+    check_counter_lengths(&image.counters, &parsed.counters)?;
 
-    // Merge bitmap.
-    merge_bitmap(&mut image.bitmap, &parsed.bitmap);
+    image.counters.merge_from(&parsed.counters);
 
-    // Merge value profiling data.
-    merge_value_sites(&mut image.value_sites, &parsed.value_sites);
+    let min_bitmap = image.bitmap.len().min(parsed.bitmap.len());
+    image.bitmap.or_assign(
+        crate::record::BitmapRange {
+            start: 0,
+            len: min_bitmap,
+        },
+        &parsed.bitmap.as_slice()[..min_bitmap],
+    );
+
+    image.value_sites.merge_from(&parsed.value_sites);
 
     Ok(())
 }
 
-/// Merges source counters into destination counters.
-pub(crate) fn merge_counters(
-    dst: &mut CounterStore,
-    src: &CounterStore,
-) -> Result<(), ProfileError> {
+/// Verifies that destination (atomic) and source (parsed) counter stores
+/// have matching length and kind before merging.
+fn check_counter_lengths(dst: &AtomicCounterStore, src: &CounterStore) -> Result<(), ProfileError> {
     match (dst, src) {
-        (CounterStore::Wide(dst_vec), CounterStore::Wide(src_vec)) => {
-            if dst_vec.len() != src_vec.len() {
+        (AtomicCounterStore::Wide(d), CounterStore::Wide(s)) => {
+            if d.len() != s.len() {
                 return Err(ProfileError::IncompatibleInput);
-            }
-            for (d, s) in dst_vec.iter_mut().zip(src_vec.iter()) {
-                *d = d.saturating_add(*s);
             }
         }
-        (CounterStore::Byte(dst_vec), CounterStore::Byte(src_vec)) => {
-            if dst_vec.len() != src_vec.len() {
+        (AtomicCounterStore::Byte(d), CounterStore::Byte(s)) => {
+            if d.len() != s.len() {
                 return Err(ProfileError::IncompatibleInput);
-            }
-            for (d, s) in dst_vec.iter_mut().zip(src_vec.iter()) {
-                *d &= *s;
             }
         }
         _ => return Err(ProfileError::IncompatibleInput),
     }
     Ok(())
-}
-
-/// Merges source bitmap into destination bitmap via bitwise OR.
-fn merge_bitmap(dst: &mut crate::image::BitmapStore, src: &crate::image::BitmapStore) {
-    let dst_slice = dst.as_slice();
-    let src_slice = src.as_slice();
-    // Use or_assign with a full-range BitmapRange.
-    let range = crate::record::BitmapRange {
-        start: 0,
-        len: dst_slice.len().min(src_slice.len()),
-    };
-    let src_bytes = &src_slice[..range.len.min(src_slice.len())];
-    dst.or_assign(range, src_bytes);
-}
-
-/// Merges source value sites into destination by accumulating counts.
-fn merge_value_sites(
-    dst: &mut crate::image::ValueProfileStore,
-    src: &crate::image::ValueProfileStore,
-) {
-    dst.merge_from(src);
 }
 
 /// Computes a load module signature from a `ProfileImage`.
@@ -90,10 +70,7 @@ fn merge_value_sites(
 ///   (NumVnodes << 10) + FirstD->NameRef + Version + Magic
 pub fn get_load_module_signature(image: &ProfileImage) -> u64 {
     let names_size = image.names.len() as u64;
-    let num_counters = match &image.counters {
-        CounterStore::Wide(v) => v.len() as u64,
-        CounterStore::Byte(v) => v.len() as u64,
-    };
+    let num_counters = image.counters.len() as u64;
     let num_data = image.records.len() as u64;
     let num_vnodes = image.value_sites.total_value_count() as u64;
     let first_name_ref = if num_data > 0 {

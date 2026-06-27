@@ -19,6 +19,7 @@ mod record;
 mod runtime;
 mod serialize;
 mod state;
+mod sync;
 mod value;
 
 // Platform module still needed for section access by abi layer.
@@ -92,14 +93,13 @@ pub fn write_profraw(writer: &mut dyn ProfileWriter) -> Result<(), ProfileError>
 /// Merges the given profile data (in `.profraw` format) into the current
 /// runtime counters.
 ///
-/// This function is not thread-safe: concurrent calls or concurrent execution
-/// of instrumented code may produce inaccurate profile data.
+/// Concurrent calls and concurrent execution of instrumented code are
+/// sound: all mutations go through atomic operations on the live image.
 #[cfg(feature = "alloc")]
 pub fn merge_profraw(bytes: &[u8]) -> Result<(), ProfileError> {
     let parsed = parse::parse_profraw(bytes)?;
 
-    let mut guard = runtime::image_mut();
-    let image = guard.as_mut().ok_or(ProfileError::NotEnabled)?;
+    let image = runtime::image_or_init()?;
 
     // Check compatibility using the already-parsed data.
     parse::check_compatibility(image, &parsed)?;
@@ -110,21 +110,19 @@ pub fn merge_profraw(bytes: &[u8]) -> Result<(), ProfileError> {
 
 /// Resets all profiling counters to their initial state.
 ///
-/// Must not be called concurrently with other profiling operations.
+/// Concurrent calls and concurrent execution of instrumented code are
+/// sound: reset is implemented via atomic stores.
 pub fn reset() {
     #[cfg(feature = "alloc")]
-    runtime::reset_via_runtime();
+    runtime::reset();
 }
 
 /// Returns a signature value unique to the current load module.
-///
-/// Must not be called concurrently with other profiling operations.
 #[cfg(feature = "alloc")]
 pub fn module_signature() -> u64 {
-    let guard = runtime::image_mut();
-    match guard.as_ref() {
-        Some(image) => merge::get_load_module_signature(image),
-        None => 0,
+    match runtime::image_or_init() {
+        Ok(image) => merge::get_load_module_signature(image),
+        Err(_) => 0,
     }
 }
 

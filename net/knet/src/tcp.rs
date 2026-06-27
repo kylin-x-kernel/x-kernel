@@ -13,9 +13,9 @@ use core::{
 use hashbrown::HashMap;
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
+use klazy::lazy_static;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
-use lazy_static::lazy_static;
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp as smol,

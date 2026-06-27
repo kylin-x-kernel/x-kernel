@@ -338,10 +338,7 @@ impl InodeAllocator {
 
 use alloc::collections::btree_map::BTreeMap;
 
-use lazy_static::lazy_static;
 use log::error;
-// crete global inode_alloctor and block alloctor;
-lazy_static! {}
 
 #[cfg(test)]
 mod tests {

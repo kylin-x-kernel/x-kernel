@@ -10,8 +10,8 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
+use klazy::lazy_static;
 use ksync::Mutex;
-use lazy_static::lazy_static;
 use tee_raw_sys::*;
 
 use super::{TeeResult, tee_ree_fs::TeeFileOperations, uuid::Uuid};

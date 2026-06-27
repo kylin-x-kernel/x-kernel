@@ -6,8 +6,8 @@ use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use console_driver::runtime::{active_console_id, read_active_console, write_active_console};
+use klazy::lazy_static;
 use ktask::future::register_irq_waker;
-use lazy_static::lazy_static;
 
 use super::Tty;
 use crate::terminal::ldisc::{ProcessMode, TtyConfig, TtyRead, TtyWrite};

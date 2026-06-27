@@ -33,7 +33,7 @@ cfg-if = { workspace = true }
 enum_dispatch = { workspace = true }
 hashbrown = "0.16"
 lazyinit = { workspace = true }
-lazy_static = { workspace = true }
+klazy.workspace = true
 log = { workspace = true }
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 async-channel = { version = "2.5.0", default-features = false }

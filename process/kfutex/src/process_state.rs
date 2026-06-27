@@ -5,8 +5,8 @@
 use alloc::sync::Arc;
 
 use hashbrown::HashMap;
+use klazy::lazy_static;
 use ksync::Mutex;
-use lazy_static::lazy_static;
 use memspace::VmObjectId;
 
 use crate::{FutexKey, FutexTable, key::SharedRegionIdentity};

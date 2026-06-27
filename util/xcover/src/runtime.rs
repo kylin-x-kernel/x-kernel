@@ -4,115 +4,74 @@
 
 //! Runtime state management.
 //!
-//! Owns `ProfileImage` and `ValueProfileStore` through `lazy_static`.
-//! Captures snapshots for serialization without holding locks during I/O.
-
-use core::sync::atomic::Ordering;
-
-use lazy_static::lazy_static;
-use portable_atomic::{AtomicBool, AtomicU32};
+//! Holds the live `ProfileImage` inside a [`crate::sync::Once`], which
+//! serializes initialization via CAS. After initialization, all access is
+//! through `&ProfileImage`; mutation happens via atomic operations on the
+//! image's fields.
+//!
+//! Thread-safety does not rely on a `Mutex`: the only mutable state lives
+//! inside atomic fields (`AtomicCounterStore`, `AtomicBitmapStore`,
+//! `AtomicValueProfileStore`). Multiple threads may call any of these
+//! functions concurrently without data races.
 
 #[cfg(feature = "alloc")]
-use crate::image::{ProfileImage, ProfileSnapshot, ValueProfileStore};
-use crate::state;
+use crate::image::ProfileImage;
+use crate::sync::Once;
 
-/// Maximum number of value profiling entries per site.
-static VP_MAX_NUM_VALS_PER_SITE: AtomicU32 = AtomicU32::new(24);
+/// Global profile image. Initialized on first access via
+/// [`crate::abi::collect::collect_profile_image`].
+#[cfg(feature = "alloc")]
+static RUNTIME_IMAGE: Once<ProfileImage> = Once::new();
 
-lazy_static! {
-    static ref RUNTIME: Runtime = Runtime::new();
-}
-
-/// Global profile runtime.
+/// Returns `Ok(&ProfileImage)` on success, `Err(ProfileError)` if collection
+/// failed. On the fast path (already initialized), this is a single atomic
+/// load.
 ///
-/// Owns the profile image and value profiling store. All access goes
-/// through `Mutex`-protected methods — no raw `static mut` needed.
+/// Concurrent first-callers race via [`Once`]'s CAS — only one actually
+/// initializes; others spin-wait on the result.
 #[cfg(feature = "alloc")]
-pub(crate) struct Runtime {
-    image: spin::Mutex<Option<ProfileImage>>,
-    value: spin::Mutex<ValueProfileStore>,
-    dumped: AtomicBool,
+pub(crate) fn image_or_init() -> Result<&'static ProfileImage, crate::ProfileError> {
+    RUNTIME_IMAGE.get_or_try_init(crate::abi::collect::collect_profile_image)
 }
 
-#[cfg(feature = "alloc")]
-impl Runtime {
-    fn new() -> Self {
-        let max_vals = VP_MAX_NUM_VALS_PER_SITE.load(Ordering::Relaxed) as usize;
-        Self {
-            image: spin::Mutex::new(None),
-            value: spin::Mutex::new(ValueProfileStore::new(max_vals)),
-            dumped: AtomicBool::new(false),
-        }
-    }
-
-    /// Gets or initializes the profile image, then returns a snapshot.
-    pub fn snapshot(&self) -> Option<ProfileSnapshot> {
-        let mut guard = self.image.lock();
-        if guard.is_none() {
-            // We hold the image lock, so no concurrent access.
-            match crate::abi::collect::collect_profile_image() {
-                Ok(image) => {
-                    *guard = Some(image);
-                }
-                Err(_) => return None,
-            }
-        }
-        guard.as_ref().map(|img| img.snapshot())
-    }
-
-    /// Gets mutable access to the profile image for merge/reset.
-    pub fn image_mut(&self) -> spin::MutexGuard<'_, Option<ProfileImage>> {
-        self.image.lock()
-    }
-
-    /// Records a value profiling observation.
-    pub fn record_value(&self, site_index: usize, value: u64, count: u64) {
-        let mut store = self.value.lock();
-        store.record_value(site_index, value, count);
-    }
-
-    /// Resets all counters, bitmap, and value counts.
-    pub fn reset(&self) {
-        let mut guard = self.image.lock();
-        if let Some(image) = guard.as_mut() {
-            image.counters.reset();
-            image.bitmap.clear();
-            image.value_sites.clear_counts();
-        }
-        self.dumped.store(false, Ordering::Release);
-        state::set_dumped(false);
-    }
-}
-
-// === Module-level public functions ===
-
-/// Takes a snapshot of the current profile image.
-#[cfg(feature = "alloc")]
-pub(crate) fn snapshot() -> Option<ProfileSnapshot> {
-    RUNTIME.snapshot()
-}
-
-/// Gets mutable access to the profile image.
-#[cfg(feature = "alloc")]
-pub(crate) fn image_mut() -> spin::MutexGuard<'static, Option<ProfileImage>> {
-    RUNTIME.image_mut()
-}
-
-/// Records a value profiling observation.
-pub(crate) fn record_value(site_index: usize, value: u64, count: u64) {
-    #[cfg(feature = "alloc")]
-    RUNTIME.record_value(site_index, value, count);
-}
-
-/// Resets all profiling counters via the runtime.
-#[cfg(feature = "alloc")]
-pub(crate) fn reset_via_runtime() {
-    RUNTIME.reset();
-}
-
-/// Checks if the runtime has been initialized and has an image.
+/// Returns `true` iff the profile image has been initialized.
+///
+/// Single atomic load, no allocation, no contention.
 #[cfg(feature = "alloc")]
 pub(crate) fn has_image() -> bool {
-    let guard = RUNTIME.image.lock();
-    guard.is_some()
+    RUNTIME_IMAGE.get().is_some()
+}
+
+/// Captures a snapshot of the current profile image for serialization.
+///
+/// Returns `None` if the image has not been initialized or initialization
+/// fails on this call.
+#[cfg(feature = "alloc")]
+pub(crate) fn snapshot() -> Option<crate::image::ProfileSnapshot> {
+    image_or_init().ok().map(|img| img.snapshot())
+}
+
+/// Records a value-profiling observation at the given flat site index.
+///
+/// Lock-free on the hot path: scans the site's existing entries with
+/// atomic loads; on miss, CAS-claims a new slot. Drops the new value if
+/// the site is full (see [`crate::image::AtomicValueSite`] for rationale).
+///
+/// If the image has not been initialized yet, this is a no-op.
+#[cfg(feature = "alloc")]
+pub(crate) fn record_value(site_index: usize, value: u64, count: u64) {
+    if let Some(img) = RUNTIME_IMAGE.get() {
+        img.value_sites.record_value(site_index, value, count);
+    }
+}
+
+/// Resets counters, bitmap, and value-site counts via atomic stores.
+///
+/// No-op if the image has not been initialized.
+#[cfg(feature = "alloc")]
+pub(crate) fn reset() {
+    if let Some(img) = RUNTIME_IMAGE.get() {
+        img.reset();
+    }
+    crate::state::set_dumped(false);
 }

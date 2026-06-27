@@ -187,7 +187,6 @@ event-listener = { version = "5.4.0", default-features = false }
 extern-trait = "0.2"
 fatfs = { version = "0.1.0-pre.0", default-features = false, package = "axfatfs" }
 hashbrown = "0.16"
-lazy_static = { version = "1.5", features = ["spin_no_std"] }
 lazyinit = "0.2"
 linux-raw-sys = { version = "0.11", default-features = false, features = [
     "no_std",

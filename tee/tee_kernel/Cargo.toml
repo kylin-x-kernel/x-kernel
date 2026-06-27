@@ -37,7 +37,6 @@ ksync.workspace = true
 bitflags.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 cfg-if.workspace = true
-lazy_static = { workspace = true }
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 osvm.workspace = true
 posix-types.workspace = true

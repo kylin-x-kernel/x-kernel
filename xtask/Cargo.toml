@@ -11,5 +11,4 @@ homepage = "https://gitee.com/openkylin/x-kernel"
 repository = "https://gitee.com/openkylin/x-kernel"
 
 [workspace.dependencies]
-lazy_static = { version = "1.5", features = ["spin_no_std"] }
 rsext4 = { path = "../fs/filesystems/rsext4", default-features = false }

@@ -23,5 +23,4 @@ vfs-perf = []
 
 [dependencies]
 bitflags = "2.10"
-lazy_static = { version = "1.5", features = ["spin_no_std"] }
 log = "0.4"

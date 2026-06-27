@@ -12,10 +12,10 @@ documentation.workspace = true
 [dependencies]
 hashbrown.workspace = true
 kerrno.workspace = true
+klazy.workspace = true
 kspin.workspace = true
 ksync.workspace = true
 ktask.workspace = true
-lazy_static.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 unittest.workspace = true

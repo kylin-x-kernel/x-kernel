@@ -19,6 +19,7 @@
 #![cfg_attr(not(test), no_std)]
 
 mod lazy;
+pub mod lazy_static;
 mod once;
 pub use lazy::Lazy;
 pub use once::Once;

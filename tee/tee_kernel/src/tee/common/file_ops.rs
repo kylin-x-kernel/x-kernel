@@ -7,13 +7,13 @@ use core::ffi::c_int;
 
 use kerrno::{KError, KResult};
 use kfs::{File, OpenOptions};
+use klazy::lazy_static;
 use ksync::RwLock;
 use kthread;
 use kvfs::{
     LookupFlags, LookupIntent, NodePermission, NodeType, VfsError, lookup_location,
     lookup_nonexistent, path::Path,
 };
-use lazy_static::lazy_static;
 use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};

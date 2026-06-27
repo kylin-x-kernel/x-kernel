@@ -15,11 +15,11 @@ use hashbrown::HashMap;
 use kerrno::{KError, KResult};
 use kfs::OpenOptions;
 use kio::{IoBuf, Read, Write};
+use klazy::lazy_static;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
 use kvfs::{Location, LookupFlags, LookupIntent, NodeType, WeakVfsInode, lookup_location};
-use lazy_static::lazy_static;
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
 use crate::{

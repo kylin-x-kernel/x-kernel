@@ -15,7 +15,10 @@ use core::mem::size_of;
 use crate::ProfileError;
 use crate::abi::layout::*;
 #[cfg(feature = "alloc")]
-use crate::image::*;
+use crate::image::{
+    AtomicBitmapStore, AtomicCounterStore, AtomicValueProfileStore, NameTable, ProfileFormat,
+    ProfileImage,
+};
 #[cfg(feature = "alloc")]
 use crate::record::*;
 
@@ -31,10 +34,11 @@ pub(crate) fn collect_profile_image() -> Result<ProfileImage, ProfileError> {
     let is_byte_coverage = version & VARIANT_MASK_BYTE_COVERAGE != 0;
 
     let records = collect_records(sections.data.as_slice())?;
-    let counters = collect_counters(sections.counters.as_slice(), is_byte_coverage)?;
-    let bitmap = BitmapStore::new(sections.bitmap.as_slice().to_vec());
+    let counters = AtomicCounterStore::from_section(sections.counters.as_slice(), is_byte_coverage);
+    let bitmap = AtomicBitmapStore::from_slice(sections.bitmap.as_slice());
     let names = NameTable::new(sections.names.as_slice().to_vec());
-    let mut value_sites = ValueProfileStore::new(INSTR_PROF_DEFAULT_NUM_VAL_PER_SITE as usize);
+    let mut value_sites =
+        AtomicValueProfileStore::new(INSTR_PROF_DEFAULT_NUM_VAL_PER_SITE as usize);
     value_sites.initialize_sites(&records);
 
     let format = ProfileFormat {
@@ -84,26 +88,4 @@ fn collect_records(data: &[LlvmProfileData]) -> Result<Vec<FunctionRecord>, Prof
     }
 
     Ok(records)
-}
-
-#[cfg(feature = "alloc")]
-fn collect_counters(counters: &[u8], is_byte_coverage: bool) -> Result<CounterStore, ProfileError> {
-    if is_byte_coverage {
-        Ok(CounterStore::Byte(counters.to_vec()))
-    } else {
-        let entry_size = size_of::<u64>();
-        if !counters.len().is_multiple_of(entry_size) {
-            return Err(ProfileError::MalformedInput);
-        }
-        let num_counters = counters.len() / entry_size;
-        let mut wide = Vec::with_capacity(num_counters);
-        for i in 0..num_counters {
-            let offset = i * entry_size;
-            let bytes = &counters[offset..offset + entry_size];
-            wide.push(u64::from_ne_bytes(
-                bytes.try_into().map_err(|_| ProfileError::MalformedInput)?,
-            ));
-        }
-        Ok(CounterStore::Wide(wide))
-    }
 }
