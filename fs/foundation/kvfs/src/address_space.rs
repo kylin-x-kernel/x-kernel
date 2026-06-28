@@ -110,8 +110,19 @@ impl AddressSpace {
     }
 
     /// Prepares this address space for inode teardown.
+    ///
+    /// Writes back dirty pages before dropping the page cache.  For
+    /// file-backed files this persists data to disk; for in-memory files
+    /// (memfs/tmpfs) the current `writepages` is a no-op — data lives in
+    /// the page cache and eviction here is only reached on file deletion
+    /// (unlink), where discarding is correct.
+    ///
+    /// When swap or background memory reclaim is added, `writepages` for
+    /// in-memory files should either write dirty folios to swap or mark
+    /// them unevictable (noswap).
     pub fn evict(&self) -> VfsResult<()> {
         if let Some(mapping) = self.page_cache() {
+            self.writepages(false)?;
             mapping.invalidate_from_page(0)?;
         }
         Ok(())
@@ -241,6 +252,14 @@ impl AddressSpaceOperations for NodeBackedAddressSpaceOperations {
 
     fn writepages(&self, mapping: &AddressSpace, control: WritebackControl) -> VfsResult<()> {
         if self.in_memory {
+            // In-memory files (memfs/tmpfs) have no backing store — their
+            // page cache IS the storage.  Eviction is only triggered by
+            // file deletion (unlink), at which point discarding the pages
+            // is correct behaviour.
+            //
+            // When swap or background memory reclaim is added, this is the
+            // place to either write dirty folios to swap, or mark them as
+            // unevictable when swap is unavailable (noswap).
             return Ok(());
         }
 
@@ -265,5 +284,108 @@ impl AddressSpaceOperations for EmptyAddressSpaceOperations {
 
     fn writepages(&self, _mapping: &AddressSpace, _control: WritebackControl) -> VfsResult<()> {
         Ok(())
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::sync::{Arc, Weak};
+
+    use ksync::Mutex;
+    use pagecache::{Folio, MappingKind, PageIndex};
+    use unittest::def_test;
+
+    use super::*;
+
+    /// An `AddressSpaceOperations` that records whether `writepages` was
+    /// called, and how many dirty folios were written back.
+    struct TestOps {
+        writepages_called: Mutex<bool>,
+        writeback_count: Mutex<usize>,
+    }
+
+    impl TestOps {
+        fn new_arc() -> Arc<Self> {
+            Arc::new(Self {
+                writepages_called: Mutex::new(false),
+                writeback_count: Mutex::new(0),
+            })
+        }
+    }
+
+    impl AddressSpaceOperations for TestOps {
+        fn read_folio(&self, folio: &mut Folio, _index: PageIndex) -> VfsResult<usize> {
+            folio.data().fill(0);
+            Ok(folio.data().len())
+        }
+
+        fn writepages(&self, mapping: &AddressSpace, control: WritebackControl) -> VfsResult<()> {
+            *self.writepages_called.lock() = true;
+            // Simulate writing dirty folios: count and clear them.
+            mapping.writeback_cached_folios(control, |_index, _data, _valid_len| {
+                *self.writeback_count.lock() += 1;
+                Ok(())
+            })
+        }
+    }
+
+    /// Verifies that `AddressSpace::evict()` calls `writepages()` **before**
+    /// `invalidate_from_page()`, so dirty page-cache folios are written back
+    /// rather than silently dropped.
+    ///
+    /// This is a regression test for the bug where inode eviction dropped
+    /// dirty file data without writing it to the backing store, causing
+    /// APK cache corruption (APKINDEX.tar.gz "file format is invalid").
+    #[def_test]
+    fn evict_writes_back_dirty_folios_before_invalidation() {
+        let ops = TestOps::new_arc();
+        let address_space = Arc::new(AddressSpace::new(
+            Weak::new(),
+            ops.clone() as Arc<dyn AddressSpaceOperations>,
+        ));
+
+        // Create the page cache and write dirty data.
+        let _mapping = address_space.get_or_insert_page_cache(MappingKind::InMemory, 4096);
+        address_space
+            .write_from(0, b"hello world")
+            .expect("write_from should succeed");
+
+        // Evict — this is the code path that was broken.
+        address_space.evict().expect("evict should succeed");
+
+        // writepages MUST have been called.
+        assert!(
+            *ops.writepages_called.lock(),
+            "evict() must call writepages() before invalidating"
+        );
+        // At least one dirty folio must have been written back.
+        assert!(
+            *ops.writeback_count.lock() > 0,
+            "evict() must write back dirty folios"
+        );
+    }
+
+    /// Verifies that `evict()` on a *clean* address space is harmless and
+    /// does not spuriously write back clean folios.
+    #[def_test]
+    fn evict_on_clean_address_space_writes_back_zero_folios() {
+        let ops = TestOps::new_arc();
+        let address_space = Arc::new(AddressSpace::new(
+            Weak::new(),
+            ops.clone() as Arc<dyn AddressSpaceOperations>,
+        ));
+
+        // Create the page cache but do NOT write any data.
+        let _mapping = address_space.get_or_insert_page_cache(MappingKind::InMemory, 0);
+
+        // Evict on a clean cache should succeed.
+        address_space.evict().expect("evict should succeed");
+
+        // writepages may be called but should find no dirty folios.
+        assert_eq!(
+            *ops.writeback_count.lock(),
+            0,
+            "evict on clean cache should not write back anything"
+        );
     }
 }

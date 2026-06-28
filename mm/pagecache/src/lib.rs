@@ -1041,4 +1041,63 @@ mod tests {
         assert_eq!(view.object_to_vma_offset(0x1800), Some(0x800));
         assert_eq!(view.object_to_vma_offset(0x5000), None);
     }
+
+    /// Regression test: `invalidate_from_page` drops dirty folios without
+    /// calling writeback.  Callers (like `AddressSpace::evict()`) MUST call
+    /// writeback first — otherwise dirty data is silently lost.
+    #[def_test]
+    fn invalidate_without_writeback_drops_dirty_folios() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(
+            MappingKind::FileBacked,
+            (PAGE_SIZE_4K * 2) as u64,
+            ops.clone(),
+        );
+        // Write data: two folios become dirty.
+        mapping.write_from(0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        mapping
+            .write_from(PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K])
+            .unwrap();
+
+        // Verify both folios are dirty.
+        mapping.with_folio(0, |folio| {
+            assert!(folio.expect("folio 0").is_dirty());
+        });
+        mapping.with_folio(1, |folio| {
+            assert!(folio.expect("folio 1").is_dirty());
+        });
+
+        // Invalidate without writeback — dirty data is lost.
+        let dropped = mapping.invalidate_from_page(0).unwrap();
+        assert_eq!(dropped.len(), 2);
+        assert!(
+            ops.writes().is_empty(),
+            "writeback must not have been called"
+        );
+    }
+
+    /// Regression test: writeback-then-invalidate preserves dirty data.
+    /// This is the correct pattern that `AddressSpace::evict()` now follows.
+    #[def_test]
+    fn writeback_before_invalidate_preserves_dirty_data() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(
+            MappingKind::FileBacked,
+            (PAGE_SIZE_4K * 2) as u64,
+            ops.clone(),
+        );
+        mapping.write_from(0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        mapping
+            .write_from(PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K])
+            .unwrap();
+
+        // Writeback THEN invalidate — the correct pattern.
+        mapping
+            .writeback(|index, _data, valid_len| ops.record_write(index, valid_len))
+            .unwrap();
+        let dropped = mapping.invalidate_from_page(0).unwrap();
+
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(ops.writes(), vec![(0, PAGE_SIZE_4K), (1, PAGE_SIZE_4K)]);
+    }
 }
