@@ -24,7 +24,7 @@ sched_fifo = []
 sched_rr = ["preempt"]
 sched_cfs = ["preempt"]
 sched_eevdf = ["preempt"]
-crosvm = []
+arm-timer-resume-fixup = []
 
 test = ["percpu/sp-naive"]
 

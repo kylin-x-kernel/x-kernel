@@ -17,8 +17,6 @@ char = ["dep:char_driver", "kclass/char"]
 display = ["dep:display", "kclass/display"]
 input = ["dep:input", "kclass/input"]
 vsock = ["dep:vsock", "kclass/vsock"]
-
-crosvm = ["pci-non-ecam"]
 dma-trace = ["kdma/dma-trace"]
 
 # Concrete driver selection now gates directly on Cargo features; there is no

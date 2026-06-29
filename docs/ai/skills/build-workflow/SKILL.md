@@ -57,14 +57,19 @@ Platforms with checked-in defconfig:
 | Platform | Description |
 |---|---|
 | `aarch64-qemu-virt` | QEMU ARM64 Virtual Machine |
-| `aarch64-crosvm-virt` | CROSVM ARM64 Virtual Machine |
 | `riscv64-qemu-virt` | QEMU RISC-V 64 Virtual Machine |
 | `x86_64-qemu-virt` | QEMU x86_64 (q35) |
 | `x86-csv` | Hygon CSV (SEV) Platform |
 
+Additional checked-in defconfig variants:
+
+| Defconfig Path | Description |
+|---|---|
+| `platforms/aarch64-qemu-virt/crosvm_defconfig` | Capability bundle for the legacy CrosVM guest setup, built on the shared `aarch64-qemu-virt` platform crate |
+
 ## Required Preparation
 
-Before `make build`, `make run`, `make unittest`,
+Before `make build`, `make run`, `make clippy`, `make unittest`,
 or QEMU-based unit-test commands,
 prepare `.config` from a platform defconfig.
 
@@ -78,6 +83,10 @@ make defconfig
 If the task targets a different platform,
 replace the defconfig path accordingly.
 Do not assume an existing `.config` is correct for the requested target.
+Copying a platform defconfig alone is not sufficient;
+the copied file is only a minimal seed and must be expanded
+with `make defconfig` before Make-based build, run, lint,
+or unit-test commands.
 
 Exception:
 
@@ -105,6 +114,9 @@ The normal relationship is:
 `make defconfig` does not choose a platform by itself.
 It expects `.config` to already exist,
 usually because a platform `defconfig` was copied there first.
+In this repository, `make build`, `make run`, `make clippy`,
+and unit-test Make targets expect that expansion step
+to have already happened.
 
 Typical usage:
 
@@ -193,6 +205,7 @@ and writes the result to `./defconfig`.
 Typical usage:
 
 ```bash
+cp platforms/aarch64-qemu-virt/defconfig .config
 make menuconfig
 make savedefconfig
 ```
@@ -216,6 +229,9 @@ Important:
 
 - `make savedefconfig` does not update
   `platforms/<platform>/defconfig` automatically.
+- Run `make defconfig`, `make menuconfig`, `make oldconfig`,
+  `make olddefconfig`, or `make saveconfig` before `make savedefconfig`;
+  `savedefconfig` is only valid on a prepared working `.config`.
 - After generating `./defconfig`,
   compare it with the target platform defconfig
   and copy it into the correct platform directory if appropriate.
@@ -435,19 +451,21 @@ without changing kernel source code.
 When an agent needs to validate a code change:
 
 1. Select the appropriate platform defconfig.
-2. Refresh `.config` with `make defconfig`.
-3. Run the narrowest meaningful validation for the task.
-4. Prefer Makefile targets over bare cargo commands.
+2. Copy it to the repository root as `.config`.
+3. Refresh `.config` with `make defconfig`.
+4. Run the narrowest meaningful validation for the task.
+5. Prefer Makefile targets over bare cargo commands.
 
 When an agent changes checked-in platform configuration:
 
 1. Start from `platforms/<platform>/defconfig`.
-2. Expand it into `.config` with `make defconfig`.
-3. Make the intended config changes.
-4. Run `make savedefconfig`.
-5. Move the generated root `./defconfig`
+2. Copy it to `.config`.
+3. Expand it into `.config` with `make defconfig`.
+4. Make the intended config changes.
+5. Run `make savedefconfig`.
+6. Move the generated root `./defconfig`
    into `platforms/<platform>/defconfig`.
-6. Re-expand and validate again before finishing.
+7. Re-expand and validate again before finishing.
 
 Examples:
 
@@ -460,6 +478,10 @@ Examples:
   or `make unittest_no_fail_fast`.
 - For kernel-side unit tests with crate filtering,
   run `make UNITTEST=y run UNITTEST_CRATE=<crate-list>`.
+- Before `make build`, `make run`, `make clippy`,
+  or `make UNITTEST=y run`,
+  prepare `.config` by copying the platform defconfig
+  and then running `make defconfig`.
 - Before `make run` or `make UNITTEST=y run`,
   check host prerequisites such as `vhost-vsock` access
   and whether port `5555` is already in use.
@@ -468,7 +490,9 @@ Examples:
 
 - Do not use bare `cargo check -p <crate>`
   as the main validation path.
-- Do not skip `.config` preparation before Make-based build or run commands.
+- Do not skip `make defconfig` after copying a platform defconfig.
+- Do not skip `.config` preparation before Make-based build,
+  run, lint, or unit-test commands.
 - Do not commit a hand-edited expanded `.config`
   as a substitute for updating a platform `defconfig`.
 - Do not assume `make savedefconfig`

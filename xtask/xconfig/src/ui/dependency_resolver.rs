@@ -226,6 +226,13 @@ impl DependencyResolver {
         Ok(())
     }
 
+    pub fn is_selected_by_enabled_symbol(&self, symbol: &str, symbol_table: &SymbolTable) -> bool {
+        self.reverse_select_map
+            .get(symbol)
+            .map(|selectors| selectors.iter().any(|selector| symbol_table.is_enabled(selector)))
+            .unwrap_or(false)
+    }
+
     /// Apply select cascade when enabling a symbol
     pub fn apply_selects(&self, symbol: &str, symbol_table: &mut SymbolTable) -> Vec<String> {
         let mut enabled = Vec::new();

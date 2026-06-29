@@ -16,6 +16,8 @@ pub fn saveconfig_command(output: PathBuf, kconfig: PathBuf, srctree: PathBuf) -
     println!("Output: {}", output.display());
 
     let mut engine = ConfigEngine::from_kconfig(&kconfig, &srctree)?;
+    engine.load_config(&output)?;
+    engine.refresh_prompt_state();
     engine.prune_inactive_symbols();
     let generated = engine.write_artifacts(&output)?;
     println!("✅ Saved .config to {}", output.display());

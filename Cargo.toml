@@ -150,7 +150,6 @@ timer_driver = { path = "drivers/timer", package = "timer-driver" }
 x86_apic = { path = "drivers/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
-aarch64-crosvm-virt = { path = "platforms/aarch64-crosvm-virt" }
 aarch64-peripherals = { path = "platforms/aarch64-peripherals", default-features = false }
 aarch64-qemu-virt = { path = "platforms/aarch64-qemu-virt" }
 loongarch64-qemu-virt = { path = "platforms/loongarch64-qemu-virt" }

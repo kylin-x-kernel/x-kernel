@@ -13,14 +13,10 @@ extern crate kplat;
 // Force-link kernel_boot so that _start and boot code are included in the final binary.
 extern crate kernel_boot;
 
+mod dma;
 mod init;
+mod mmio;
 mod power;
-
-struct DmaPlatformImpl;
-struct MmioPlatformImpl;
-
-kplat::default_dma_if_impl!(DmaPlatformImpl);
-kplat::default_mmio_if_impl!(MmioPlatformImpl);
 #[cfg(feature = "pmu")]
 aarch64_peripherals::pmu_if_impl!(PerfMgrImpl);
 #[cfg(feature = "nmi")]

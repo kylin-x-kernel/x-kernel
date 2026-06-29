@@ -10,7 +10,9 @@ use kplat::boot::{BootHandler, BootInfo};
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
-    fn prepare_boot_memory(_boot_info: &BootInfo) {}
+    fn prepare_boot_memory(_boot_info: &BootInfo) {
+        crate::mmio::prepare_boot_memory();
+    }
 
     fn firmware_init(_boot_info: &BootInfo) {
         aarch64_peripherals::psci::init(PSCI_METHOD);

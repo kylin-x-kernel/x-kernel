@@ -10,6 +10,8 @@ repository.workspace = true
 
 [features]
 default = []
+kvm-guest-mem-share = []
+kvm-mmio-guard = []
 pmr = []
 pmu = ["dep:aarch64-pmuv3", "kplat/pmu"]
 nmi-pmu = ["pmr", "pmu", "kplat/nmi"]

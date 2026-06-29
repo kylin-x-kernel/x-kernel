@@ -11,7 +11,7 @@ documentation.workspace = true
 
 [features]
 default = []
-crosvm = []
+arm-timer-resume-fixup = []
 
 [dependencies]
 khal = { workspace = true }

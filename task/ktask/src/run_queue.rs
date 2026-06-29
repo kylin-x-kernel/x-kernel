@@ -64,6 +64,7 @@ impl RunQueueRegistry {
         self.0[cpu_id.as_usize()].call_once(|| run_queue.as_ptr().addr());
     }
 
+    #[cfg(feature = "smp")]
     fn get(&self, index: usize) -> &'static mut RunQueue {
         let run_queue = *self.0[index]
             .get()

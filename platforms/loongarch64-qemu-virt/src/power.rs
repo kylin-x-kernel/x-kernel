@@ -4,6 +4,7 @@
 
 #[cfg(feature = "smp")]
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+#[cfg(feature = "smp")]
 use kerrno::KResult;
 use khal::mem::PhysAddr;
 use kplat::sys::SysCtrl;
@@ -30,6 +31,9 @@ impl SysCtrl for PowerImpl {
             .unwrap_or_else(|err| panic!("failed to iomap ged: {err:?}"))
             .as_mut_ptr();
         info!("Shutting down...");
+        // SAFETY: `halt_addr` comes from `iomap_device()` for the GED MMIO
+        // page, and writing `0x34` to this documented shutdown register is the
+        // required QEMU power-off sequence for this platform.
         unsafe { halt_addr.write_volatile(0x34) };
         karch::stop_cpu();
         warn!("It should shutdown!");

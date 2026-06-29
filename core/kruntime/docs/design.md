@@ -156,7 +156,8 @@ SECOND_KERNEL_ENTRY(logical_cpu_id)
 | `rtc` | 启动时打印墙钟时间 |
 | `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化 |
 | `pmu` | PMU 溢出中断 |
-| `crosvm` | Crosvm 相关组合 feature |
+| `arm-timer-resume-fixup` | 修复 AArch64 虚拟计时器在 idle/WFI 返回后的计数回退 |
+| `rootfs-secondary-block` | 将第二个块设备作为根文件系统后端 |
 
 默认全部关闭；由 `entry` / `kfeat` 的 defconfig 打开。
 

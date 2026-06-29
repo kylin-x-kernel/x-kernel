@@ -211,11 +211,11 @@ Uses a HashSet to track parsed files - O(1) lookup, minimal memory overhead.
 
 ### Planned Features
 1. **Full menuconfig TUI**: Interactive terminal UI for configuration
-2. **Defconfig support**: Apply and save defconfig files
-3. **Constraint validation**: Check select/imply constraints
-4. **Dependency resolution**: Auto-enable dependencies
-5. **Config merging**: Merge multiple configuration fragments
-6. **Export formats**: JSON, YAML export of configuration
+2. **Constraint validation**: Deepen Linux-compatible diagnostics around
+   `select` / `imply` / `range`
+3. **Dependency resolution**: Auto-enable dependencies
+4. **Config merging**: Merge multiple configuration fragments
+5. **Export formats**: JSON, YAML export of configuration
 
 ### Performance Optimizations
 1. **Lazy parsing**: Only parse files when needed

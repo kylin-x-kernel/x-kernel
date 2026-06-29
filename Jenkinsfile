@@ -74,10 +74,18 @@ pipeline {
             }
         }
 
-        stage('Build & Test') {
+        stage('Build') {
             steps {
                 script {
-                    parallel ciParallelBranches()
+                    parallel ciBuildBranches()
+                }
+            }
+        }
+
+        stage('Run & Test') {
+            steps {
+                script {
+                    parallel ciRunBranches()
                 }
             }
         }
@@ -110,12 +118,13 @@ def ciSequentialStages() {
     ]
 }
 
-def ciParallelStages() {
+def ciBuildStages() {
     def stages = [[
         name: 'Build Check: aarch64-crosvm-virt',
         failure: 'clippy 或 build 失败',
         type: 'build',
         platform: 'aarch64-crosvm-virt',
+        defconfig: 'platforms/aarch64-qemu-virt/crosvm_defconfig',
     ], [
         name: 'Build Check: aarch64-qemu-virt-virtcca',
         failure: 'clippy 或 build 失败',
@@ -131,9 +140,36 @@ def ciParallelStages() {
 
     runtimeTestArchitectures().each { arch ->
         stages << [
+            name: "Build Artifact: ${arch}-qemu-virt",
+            failure: 'clippy 或 normal build 失败',
+            type: 'build_artifact',
+            arch: arch,
+        ]
+        stages << [
+            name: "Build Artifact: ${arch}-qemu-virt unittest",
+            failure: 'unittest build 失败',
+            type: 'unittest_build',
+            arch: arch,
+        ]
+    }
+
+    return stages
+}
+
+def ciRunStages() {
+    def stages = []
+
+    runtimeTestArchitectures().each { arch ->
+        stages << [
             name: "Runtime Test: ${arch}-qemu-virt",
-            failure: 'clippy、单元测试、覆盖率或 runtime 测试失败',
-            type: 'runtime',
+            failure: 'runtime 测试失败',
+            type: 'runtime_run',
+            arch: arch,
+        ]
+        stages << [
+            name: "Unit Tests: ${arch}-qemu-virt",
+            failure: '单元测试或覆盖率生成失败',
+            type: 'unittest_run',
             arch: arch,
         ]
     }
@@ -142,12 +178,16 @@ def ciParallelStages() {
         stages << [
             name: "TEE Tests: ${arch}",
             failure: 'TEE 测试失败',
-            type: 'tee',
+            type: 'tee_run',
             arch: arch,
         ]
     }
 
     return stages
+}
+
+def ciParallelStages() {
+    return ciBuildStages() + ciRunStages()
 }
 
 def ciStageNames(List stages) {
@@ -251,10 +291,26 @@ def buildFailureDetail(String stageName, String defaultDetail, Throwable error) 
     return details ? details.join('\n') : "${stageName} 失败，请查看 Jenkins 日志"
 }
 
-def ciParallelBranches() {
+def ciBuildBranches() {
     def branches = [:]
 
-    ciParallelStages().each { stageSpec ->
+    ciBuildStages().each { stageSpec ->
+        def spec = stageSpec
+        branches[spec.name] = {
+            runParallelCiStage(spec.name, spec.failure) {
+                runCiWorkload(spec)
+            }
+        }
+    }
+
+    branches.failFast = true
+    return branches
+}
+
+def ciRunBranches() {
+    def branches = [:]
+
+    ciRunStages().each { stageSpec ->
         def spec = stageSpec
         branches[spec.name] = {
             runParallelCiStage(spec.name, spec.failure) {
@@ -275,10 +331,19 @@ def runCiWorkload(Map spec) {
         case 'doc':
             runGendocStage(spec.arch)
             break
-        case 'runtime':
-            runClippyAndRuntime(spec.arch)
+        case 'build_artifact':
+            runBuildArtifact(spec.arch)
             break
-        case 'tee':
+        case 'unittest_build':
+            runUnittestBuildArtifact(spec.arch)
+            break
+        case 'runtime_run':
+            runRuntimeTests(spec.arch)
+            break
+        case 'unittest_run':
+            runUnitTestStage(spec.arch)
+            break
+        case 'tee_run':
             teeResults[spec.arch] = runTeeStorageTest(spec.arch)
             break
         default:
@@ -341,6 +406,7 @@ def runClippyAndBuild(String platform, String defconfigPath) {
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 cp ${defconfigPath} .config
+make defconfig
 make clippy
 stdbuf -oL -eL make build
 """
@@ -348,32 +414,58 @@ stdbuf -oL -eL make build
     }
 }
 
-def runClippyAndRuntime(String arch) {
+def runBuildArtifact(String arch) {
+    def platform = "${arch}-qemu-virt"
+    def stageName = "Build Artifact: ${platform}"
+    initStageLog(stageName)
+    def runtimeTargetDir = targetDirForArch(arch)
+
+    withCleanSourceWorkspace("build-artifact-${arch}") {
+        withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
+            sh label: "Clippy and build ${platform}", script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+cp platforms/${platform}/defconfig .config
+make defconfig
+make clippy
+stdbuf -oL -eL make build
+"""
+            publishKernelArtifact(artifactNameForNormal(arch), platform)
+        }
+    }
+}
+
+def runUnittestBuildArtifact(String arch) {
+    def platform = "${arch}-qemu-virt"
+    def stageName = "Build Artifact: ${platform} unittest"
+    initStageLog(stageName)
+    def unittestTargetDir = targetDirForUnittest(arch)
+
+    withCleanSourceWorkspace("build-artifact-${arch}-unittest") {
+        withEnv(["TARGET_DIR=${unittestTargetDir}"]) {
+            sh label: "Build unittest artifact ${platform}", script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+cp platforms/${platform}/defconfig .config
+scripts/ci/prepare_unittest_config.sh .config
+make defconfig
+stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n build
+"""
+            publishKernelArtifact(artifactNameForUnittest(arch), platform)
+        }
+    }
+}
+
+def runRuntimeTests(String arch) {
     def platform = "${arch}-qemu-virt"
     def stageName = "Runtime Test: ${platform}"
     def stageLog = stageLogFile(stageName)
     initStageLog(stageName)
     def runtimeTargetDir = targetDirForArch(arch)
 
-    withCleanSourceWorkspace(arch) {
+    withCleanSourceWorkspace("runtime-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}", "STAGE_LOG=${stageLog}"]) {
-            sh label: "Clippy ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-cp platforms/${platform}/defconfig .config
-make clippy
-"""
-            runUnitTests(arch)
-            generateCoverageHtml(arch)
-            copyCoverageToWorkspace(arch)
-
-            sh label: "Build ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-cp platforms/${platform}/defconfig .config
-stdbuf -oL -eL make build
-"""
-
+            restoreKernelArtifact(artifactNameForNormal(arch))
             dir('test-harness') {
                 gitCheckoutWithToken(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
                 markSafeDirectory()
@@ -390,6 +482,23 @@ stdbuf -oL -eL make ci-test run
 """
                 }
             }
+        }
+    }
+}
+
+def runUnitTestStage(String arch) {
+    def platform = "${arch}-qemu-virt"
+    def stageName = "Unit Tests: ${platform}"
+    def stageLog = stageLogFile(stageName)
+    initStageLog(stageName)
+    def unittestTargetDir = targetDirForUnittest(arch)
+
+    withCleanSourceWorkspace("unittest-${arch}") {
+        withEnv(["TARGET_DIR=${unittestTargetDir}", "STAGE_LOG=${stageLog}", "SKIP_KERNEL_BUILD=1"]) {
+            restoreKernelArtifact(artifactNameForUnittest(arch))
+            runUnitTests(arch)
+            generateCoverageHtml(arch, unittestTargetDir)
+            copyCoverageToWorkspace(arch, unittestTargetDir)
         }
     }
 }
@@ -433,9 +542,8 @@ scripts/ci/run_unit_tests.sh '${arch}'
 """
 }
 
-def generateCoverageHtml(String arch) {
+def generateCoverageHtml(String arch, String baseDir = targetDirForArch(arch)) {
     def triple = targetTripleFor(arch)
-    def baseDir = targetDirForArch(arch)
     def covInfo = "${baseDir}/${triple}/release/coverage.info"
     def htmlOut = "${baseDir}/${triple}/release/coverage-html"
     sh label: "Generate coverage HTML ${arch}", script: """#!/bin/bash
@@ -453,9 +561,8 @@ echo "HTML coverage report generated at ${htmlOut}/"
 """
 }
 
-def copyCoverageToWorkspace(String arch) {
+def copyCoverageToWorkspace(String arch, String baseDir = targetDirForArch(arch)) {
     def triple = targetTripleFor(arch)
-    def baseDir = targetDirForArch(arch)
     def srcDir = "${baseDir}/${triple}/release"
     sh label: "Collect coverage artifacts ${arch}", script: """#!/bin/bash
 set -euo pipefail
@@ -684,8 +791,72 @@ def targetDirForArch(String arch) {
     return "/xkernel-target/runtime-${arch}"
 }
 
+def targetDirForUnittest(String arch) {
+    return "/xkernel-target/unittest-${arch}"
+}
+
 def targetDirForDoc(String arch) {
     return "/xkernel-target/doc-${arch}"
+}
+
+def ciArtifactRoot() {
+    return "/xkernel-target/ci-artifacts"
+}
+
+def artifactNameForNormal(String arch) {
+    return "${arch}-normal"
+}
+
+def artifactNameForUnittest(String arch) {
+    return "${arch}-unittest"
+}
+
+def publishKernelArtifact(String artifactName, String platform) {
+    def artifactDir = "${ciArtifactRoot()}/${artifactName}"
+    sh label: "Publish artifact ${artifactName}", script: """#!/bin/bash
+set -euo pipefail
+artifact_dir='${artifactDir}'
+rm -rf "\${artifact_dir}"
+mkdir -p "\${artifact_dir}"
+cp .config .config.prepared auto.conf autoconf.h "\${artifact_dir}/"
+shopt -s nullglob
+for image in xkernel_${platform}.*; do
+    cp "\${image}" "\${artifact_dir}/"
+done
+"""
+}
+
+def restoreKernelArtifact(String artifactName) {
+    def artifactDir = "${ciArtifactRoot()}/${artifactName}"
+    // NOTE:
+    // This only restores workspace-level runtime inputs (.config, generated
+    // Kconfig side files, and final xkernel_* images). It does NOT snapshot
+    // or restore the full cargo/boot TARGET_DIR tree.
+    //
+    // The current pipeline relies on all stages sharing the same top-level
+    // docker agent and the same /xkernel-target mount, so build-stage outputs
+    // under TARGET_DIR remain available to later Run & Test stages.
+    //
+    // If we later split build and test across different agents/containers,
+    // this is no longer sufficient: the target-dir contents (boot artifacts,
+    // OVMF vars, linker outputs, cargo intermediates, etc.) must either be
+    // archived/restored explicitly or rebuilt on the test-side agent.
+    sh label: "Restore artifact ${artifactName}", script: """#!/bin/bash
+set -euo pipefail
+artifact_dir='${artifactDir}'
+if [ ! -d "\${artifact_dir}" ]; then
+    echo "artifact not found: \${artifact_dir}" >&2
+    exit 1
+fi
+cp "\${artifact_dir}/.config" .
+cp "\${artifact_dir}/.config.prepared" .
+cp "\${artifact_dir}/auto.conf" .
+cp "\${artifact_dir}/autoconf.h" .
+shopt -s nullglob
+for image in "\${artifact_dir}"/xkernel_*; do
+    cp "\${image}" .
+done
+"""
 }
 
 def teePortFor(String arch) {
@@ -948,7 +1119,7 @@ def runTeeStorageTest(String arch) {
     def stageName = "TEE Tests: ${arch}"
     initStageLog(stageName)
     def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '', missingApps: []]
-    def teeTargetDir = "/xkernel-target/tee-${arch}"
+    def teeTargetDir = targetDirForArch(arch)
     def teeHostfwdPort = teePortFor(arch)
     def teeVsockCid = teeVsockCidFor(arch)
     def testBins = teeTestBinaries()
@@ -957,7 +1128,9 @@ def runTeeStorageTest(String arch) {
         withEnv(["TARGET_DIR=${teeTargetDir}",
                  "HOSTFWD_PORT=${teeHostfwdPort}",
                  "VSOCK_CID=${teeVsockCid}",
-                 "TEE_TEST_BINS=${testBins.join(' ')}"]) {
+                 "TEE_TEST_BINS=${testBins.join(' ')}",
+                 "SKIP_KERNEL_BUILD=1"]) {
+            restoreKernelArtifact(artifactNameForNormal(arch))
             sh label: "Run TEE tests ${arch}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}

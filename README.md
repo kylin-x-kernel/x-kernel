@@ -103,10 +103,12 @@ we support directly running the kernel on QEMU
 
 ```bash
 cp platforms/aarch64-qemu-virt/defconfig .config
+make defconfig
 make run
 
 cp platforms/x86_64-qemu-virt/defconfig .config
 # Default x86_64 QEMU flow: LinuxBoot/direct boot
+make defconfig
 make run
 
 # Optional x86_64 UEFI flow: OVMF + generated UEFI boot disk

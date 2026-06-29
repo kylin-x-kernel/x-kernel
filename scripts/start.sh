@@ -35,6 +35,7 @@ if [[ -z "${OVMF_CODE}" || -z "${OVMF_VARS_TEMPLATE}" ]]; then
 fi
 
 cp platforms/x86-csv/defconfig .config
+make defconfig
 make build UEFI=y
 
 UEFI_IMG="${ROOT_DIR}/xkernel_x86-csv.uefi.img"

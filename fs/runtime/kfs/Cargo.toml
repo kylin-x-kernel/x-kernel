@@ -24,7 +24,7 @@ fs9p = ["dep:fs9p", "kclass/virtio-9p"]
 
 times = []
 std = []
-crosvm = []
+rootfs-secondary-block = []
 
 [dependencies]
 bpffs = { workspace = true, optional = true }

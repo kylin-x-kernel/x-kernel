@@ -241,11 +241,11 @@ pub fn exit(exit_code: i32) -> ! {
 pub fn run_idle() -> ! {
     loop {
         yield_now();
-        #[cfg(feature = "crosvm")]
+        #[cfg(feature = "arm-timer-resume-fixup")]
         let cntpct_before = khal::time::now_ticks();
         karch::await_interrupts();
 
-        #[cfg(feature = "crosvm")]
+        #[cfg(feature = "arm-timer-resume-fixup")]
         {
             let repaired = khal::time::handle_idle_return(cntpct_before);
             let cntpct_after = khal::time::now_ticks();

@@ -101,10 +101,12 @@ make build
 
 ```bash
 cp platforms/aarch64-qemu-virt/defconfig .config
+make defconfig
 make run
 
 cp platforms/x86_64-qemu-virt/defconfig .config
 # 默认 x86_64 QEMU 流程：LinuxBoot/直接引导
+make defconfig
 make run
 
 # 可选 x86_64 UEFI 流程：OVMF + 生成的 UEFI 引导盘

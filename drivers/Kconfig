@@ -13,6 +13,12 @@ config PHYS_BUS_OFFSET
     help
       Specify the physical bus offset for device memory mapping.
 
+config KFEAT_PCI_NON_ECAM
+    bool "Enable non-ECAM PCI discovery quirks"
+    help
+      Enable the PCI quirks needed on guests whose PCI fabric does not behave
+      like a fully standard ECAM implementation.
+
 config PCI_ECAM_BASE
     hex "PCI ECAM Base Address"
     default 0x40100000000
@@ -183,10 +189,7 @@ config KFEAT_DRIVER_CONSOLE_PL011
 
 config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
     bool "NS16550 MMIO runtime console handoff"
-    depends on KFEAT_CHAR && (PLATFORM_AARCH64_CROSVM_VIRT || PLATFORM_RISCV64_QEMU_VIRT || PLATFORM_LOONGARCH64_QEMU_VIRT)
-    default y if PLATFORM_AARCH64_CROSVM_VIRT
-    default y if PLATFORM_RISCV64_QEMU_VIRT
-    default y if PLATFORM_LOONGARCH64_QEMU_VIRT
+    depends on KFEAT_CHAR
     help
       Reuse the early-boot NS16550 MMIO console as a runtime character device
       managed by kdriver.

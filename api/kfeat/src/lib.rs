@@ -38,8 +38,6 @@
 //!     - `driver-bcm2835-sdhci`: Enable the BCM2835 SDHCI driver (Raspberry Pi SD card).
 #![no_std]
 
-#[cfg(feature = "platform_aarch64_crosvm_virt")]
-extern crate aarch64_crosvm_virt;
 #[cfg(feature = "platform_aarch64_qemu_virt")]
 extern crate aarch64_qemu_virt;
 #[cfg(feature = "platform_loongarch64_qemu_virt")]

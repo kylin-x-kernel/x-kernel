@@ -50,12 +50,12 @@ pub fn init_filesystems() {
 
     let mut block_devs = block_devices();
     let handle = {
-        #[cfg(feature = "crosvm")]
+        #[cfg(feature = "rootfs-secondary-block")]
         {
             assert!(block_devs.len() >= 2, "Less than two block devices found!");
             block_devs.remove(1)
         }
-        #[cfg(not(feature = "crosvm"))]
+        #[cfg(not(feature = "rootfs-secondary-block"))]
         {
             block_devs.pop().expect("No block device found!")
         }

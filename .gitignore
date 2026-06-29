@@ -28,6 +28,7 @@ venv
 defconfig
 .config
 .config.old
+.config.prepared
 auto.conf
 autoconf.h
 target/kbuild/

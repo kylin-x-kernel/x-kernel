@@ -8,6 +8,7 @@ use std::fs;
 
 use tempfile::TempDir;
 use xconfig::{
+    cli::defconfig_to_output,
     config::ConfigReader,
     kconfig::{Parser, SymbolTable},
 };
@@ -321,6 +322,32 @@ fn test_arch_value_correct_for_x86_64_defconfig() {
     );
 }
 
+#[test]
+fn test_defconfig_to_output_recomputes_cross_arch_derived_values() {
+    let kconfig_path = std::path::PathBuf::from("tests/fixtures/arch_config/Kconfig");
+    let srctree = std::path::PathBuf::from("tests/fixtures/arch_config");
+
+    let temp_dir = TempDir::new().unwrap();
+    let defconfig_path = temp_dir.path().join("defconfig");
+    let output_path = temp_dir.path().join(".config");
+
+    fs::write(
+        &defconfig_path,
+        "ARCH_X86_64=y\nPLATFORM_X86_64_QEMU_VIRT=y\n",
+    )
+    .unwrap();
+
+    defconfig_to_output(defconfig_path, output_path.clone(), kconfig_path, srctree).unwrap();
+
+    let config = fs::read_to_string(output_path).unwrap();
+    assert!(config.contains("ARCH=\"x86_64\""));
+    assert!(config.contains("ARCH_X86_64=y"));
+    assert!(config.contains("# ARCH_AARCH64 is not set"));
+    assert!(config.contains("PLATFORM=\"x86_64-qemu-virt\""));
+    assert!(config.contains("PLATFORM_X86_64_QEMU_VIRT=y"));
+    assert!(config.contains("# PLATFORM_AARCH64_QEMU_VIRT is not set"));
+}
+
 /// Bug 1: When loading a defconfig with ARCH_AARCH64=y, ARCH should be "aarch64"
 #[test]
 fn test_arch_value_correct_for_aarch64_defconfig() {
@@ -355,7 +382,7 @@ fn test_cross_arch_pollution_filtered() {
     // x86_64 defconfig that was copied from aarch64 (has aarch64-specific entries)
     let polluted_defconfig = "\
 ARCH_X86_64=y
-PLATFORM_AARCH64_CROSVM_VIRT=y
+PLATFORM_AARCH64_QEMU_VIRT=y
 PMU_IRQ=23
 PSCI_METHOD=hvc
 ";
@@ -372,9 +399,9 @@ PSCI_METHOD=hvc
 
     // aarch64-specific platform should be filtered out (set to "n")
     assert_ne!(
-        symbol_table.get_value("PLATFORM_AARCH64_CROSVM_VIRT"),
+        symbol_table.get_value("PLATFORM_AARCH64_QEMU_VIRT"),
         Some("y".to_string()),
-        "Bug 2: PLATFORM_AARCH64_CROSVM_VIRT should be filtered when ARCH_X86_64=y"
+        "Bug 2: PLATFORM_AARCH64_QEMU_VIRT should be filtered when ARCH_X86_64=y"
     );
 
     // aarch64-specific int config should be cleared

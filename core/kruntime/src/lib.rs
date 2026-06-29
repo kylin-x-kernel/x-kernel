@@ -17,7 +17,8 @@
 //! - `rtc`: Wall-clock banner at boot
 //! - `watchdog` / `watchdog_hardlockup`: Watchdog on primary/secondary CPUs
 //! - `pmu`: PMU overflow IRQ handler
-//! - `crosvm`: Crosvm-oriented feature bundle
+//! - `arm-timer-resume-fixup`: repair virtual timer regressions after idle/WFI
+//! - `rootfs-secondary-block`: mount the secondary block device as the root FS
 //!
 //! All features are optional and disabled by default.
 
@@ -474,9 +475,9 @@ fn init_interrupt() {
         ktask::on_timer_tick();
     });
 
-    #[cfg(any(feature = "ipi", all(feature = "smp", feature = "crosvm")))]
+    #[cfg(feature = "ipi")]
     khal::irq::register(kbuild_config::IPI_IRQ, || {
-        #[cfg(all(target_arch = "aarch64", feature = "crosvm"))]
+        #[cfg(feature = "arm-timer-resume-fixup")]
         timer_driver::arm_generic::handle_ipi_fixup();
         #[cfg(feature = "ipi")]
         kipi::ipi_handler();

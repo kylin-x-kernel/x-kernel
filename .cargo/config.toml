@@ -20,7 +20,7 @@ rustdocflags = [
     "--check-cfg",
     "cfg(unittest)",
     "--check-cfg",
-    'cfg(k_plat_name, values("aarch64-crosvm-virt", "aarch64-qemu-virt", "loongarch64-qemu-virt", "riscv64-qemu-virt", "x86_64-qemu-virt"))',
+    'cfg(k_plat_name, values("aarch64-qemu-virt", "loongarch64-qemu-virt", "riscv64-qemu-virt", "x86_64-qemu-virt"))',
 ]
 
 [target.aarch64-unknown-none-softfloat]

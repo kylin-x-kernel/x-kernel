@@ -77,6 +77,7 @@ jobs:
           elif [ "${{ matrix.arch }}" = "x86_64" ]; then
             cp ./platforms/x86_64-qemu-virt/defconfig .config
           fi
+          make defconfig
 
       - name: Run kernel unit tests
         run: |

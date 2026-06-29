@@ -73,9 +73,6 @@ choice
     config PLATFORM_AARCH64_QEMU_VIRT
         bool "QEMU ARM64 Virtual Machine"
 
-    config PLATFORM_AARCH64_CROSVM_VIRT
-        bool "CROSVM ARM64 Virtual Machine"
-
     config PLATFORM_AARCH64_RASPI
         bool "Raspberry Pi 4B"
 endchoice
@@ -124,7 +121,6 @@ endif # ARCH_LOONGARCH64
 config PLATFORM
     string
     default "aarch64-qemu-virt" if PLATFORM_AARCH64_QEMU_VIRT
-    default "aarch64-crosvm-virt" if PLATFORM_AARCH64_CROSVM_VIRT
     default "aarch64-raspi4b" if PLATFORM_AARCH64_RASPI
     default "riscv64-qemu-virt" if PLATFORM_RISCV64_QEMU_VIRT
     default "x86_64-qemu-virt" if PLATFORM_X86_64_QEMU_VIRT
@@ -186,6 +182,34 @@ config KFEAT_DWARF
     help
       Keep DWARF sections in the image and enable backtrace symbolication
       support in the kernel.
+
+config KFEAT_KVM_GUEST_MEM_SHARE
+    bool "Enable KVM guest memory share/unshare hooks"
+    depends on ARCH_AARCH64
+    help
+      Enable the platform DMA hooks that issue the KVM vendor hypercalls
+      needed to share and unshare guest memory with the host.
+
+config KFEAT_KVM_MMIO_GUARD
+    bool "Enable KVM MMIO guard mapping hooks"
+    depends on ARCH_AARCH64
+    help
+      Enable the platform MMIO hooks that use the KVM vendor MMIO guard
+      hypercalls before mapping guarded device ranges.
+
+config KFEAT_ARM_TIMER_RESUME_FIXUP
+    bool "Enable AArch64 virtual timer resume fixup"
+    depends on ARCH_AARCH64
+    help
+      Repair virtual timer regressions observed after returning from idle/WFI
+      on guests that require an offset-based timer resume fixup.
+
+config KFEAT_ROOTFS_SECONDARY_BLOCK
+    bool "Mount the secondary block device as root filesystem"
+    depends on KFEAT_FS
+    help
+      Select the second discovered block device as the root filesystem
+      backing store instead of the last discovered one.
 
 endmenu
 

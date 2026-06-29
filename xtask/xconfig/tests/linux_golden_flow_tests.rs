@@ -5,7 +5,7 @@
 use std::{fs, path::PathBuf};
 
 use tempfile::TempDir;
-use xconfig::cli::{defconfig_to_output, olddefconfig_command, savedefconfig_command};
+use xconfig::cli::{defconfig_to_output, olddefconfig_command, saveconfig_command, savedefconfig_command};
 
 fn config_body(content: &str) -> String {
     content
@@ -60,6 +60,95 @@ NAME="fallback""#;
 }
 
 #[test]
+fn test_defconfig_golden_output_applies_selects_and_implies() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+    let output_path = temp_dir.path().join(".config");
+    let defconfig_path = temp_dir.path().join("defconfig");
+
+    fs::write(
+        &kconfig_path,
+        r#"
+config HELPER_SELECTED
+    bool "Selected helper"
+
+config HELPER_IMPLIED
+    bool "Implied helper"
+
+config HELPER_EXPLICIT
+    bool "Explicit helper"
+
+config SELECTOR
+    bool "Selector"
+    select HELPER_SELECTED
+    imply HELPER_IMPLIED
+    imply HELPER_EXPLICIT
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &defconfig_path,
+        "SELECTOR=y\n# HELPER_EXPLICIT is not set\n",
+    )
+    .unwrap();
+
+    defconfig_to_output(
+        defconfig_path,
+        output_path.clone(),
+        kconfig_path,
+        PathBuf::from(temp_dir.path()),
+    )
+    .unwrap();
+
+    let actual = config_body(&fs::read_to_string(output_path).unwrap());
+    let expected = r#"# HELPER_EXPLICIT is not set
+HELPER_IMPLIED=y
+HELPER_SELECTED=y
+SELECTOR=y"#;
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_defconfig_golden_output_applies_transitive_select_imply_chain() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+    let output_path = temp_dir.path().join(".config");
+    let defconfig_path = temp_dir.path().join("defconfig");
+
+    fs::write(
+        &kconfig_path,
+        r#"
+config IMPLIED
+    bool "Implied"
+
+config SELECTED
+    bool "Selected"
+    imply IMPLIED
+
+config ROOT
+    bool "Root"
+    select SELECTED
+"#,
+    )
+    .unwrap();
+    fs::write(&defconfig_path, "ROOT=y\n").unwrap();
+
+    defconfig_to_output(
+        defconfig_path,
+        output_path.clone(),
+        kconfig_path,
+        PathBuf::from(temp_dir.path()),
+    )
+    .unwrap();
+
+    let actual = config_body(&fs::read_to_string(output_path).unwrap());
+    let expected = r#"IMPLIED=y
+ROOT=y
+SELECTED=y"#;
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn test_olddefconfig_golden_output_applies_defaults_to_new_symbols() {
     let temp_dir = TempDir::new().unwrap();
     let kconfig_path = temp_dir.path().join("Kconfig");
@@ -95,6 +184,168 @@ config NAME
     let expected = r#"FEATURE_A=y
 FEATURE_B=y
 NAME="fallback""#;
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_olddefconfig_golden_output_applies_selects() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+    let config_path = temp_dir.path().join(".config");
+
+    fs::write(
+        &kconfig_path,
+        r#"
+config HELPER
+    bool "Helper"
+
+config SELECTOR
+    bool "Selector"
+    select HELPER
+"#,
+    )
+    .unwrap();
+    fs::write(&config_path, "SELECTOR=y\n").unwrap();
+
+    olddefconfig_command(
+        config_path.clone(),
+        kconfig_path,
+        PathBuf::from(temp_dir.path()),
+    )
+    .unwrap();
+
+    let actual = config_body(&fs::read_to_string(config_path).unwrap());
+    let expected = r#"HELPER=y
+SELECTOR=y"#;
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_defconfig_golden_output_clamps_range_violations() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+    let output_path = temp_dir.path().join(".config");
+    let defconfig_path = temp_dir.path().join("defconfig");
+
+    fs::write(
+        &kconfig_path,
+        r#"
+config LIMIT_MIN
+    u32
+    default 4
+
+config LIMIT_MAX
+    u32
+    default 8
+
+config COUNT
+    u32 "Count"
+    range LIMIT_MIN LIMIT_MAX
+    default 6
+"#,
+    )
+    .unwrap();
+    fs::write(&defconfig_path, "COUNT=99\n").unwrap();
+
+    defconfig_to_output(
+        defconfig_path,
+        output_path.clone(),
+        kconfig_path,
+        PathBuf::from(temp_dir.path()),
+    )
+    .unwrap();
+
+    let actual = config_body(&fs::read_to_string(output_path).unwrap());
+    let expected = r#"COUNT=8
+LIMIT_MAX=8
+LIMIT_MIN=4"#;
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_saveconfig_golden_output_preserves_effective_config() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+    let config_path = temp_dir.path().join(".config");
+
+    fs::write(
+        &kconfig_path,
+        r#"
+config HELPER
+    bool "Helper"
+
+config SELECTOR
+    bool "Selector"
+    select HELPER
+
+config LIMIT_MIN
+    u32
+    default 4
+
+config LIMIT_MAX
+    u32
+    default 8
+
+config COUNT
+    u32 "Count"
+    range LIMIT_MIN LIMIT_MAX
+    default 6
+"#,
+    )
+    .unwrap();
+    fs::write(&config_path, "SELECTOR=y\nCOUNT=99\n").unwrap();
+
+    saveconfig_command(
+        config_path.clone(),
+        kconfig_path,
+        PathBuf::from(temp_dir.path()),
+    )
+    .unwrap();
+
+    let actual = config_body(&fs::read_to_string(config_path).unwrap());
+    let expected = r#"COUNT=8
+HELPER=y
+LIMIT_MAX=8
+LIMIT_MIN=4
+SELECTOR=y"#;
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_saveconfig_golden_output_preserves_transitive_select_imply_chain() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+    let config_path = temp_dir.path().join(".config");
+
+    fs::write(
+        &kconfig_path,
+        r#"
+config IMPLIED
+    bool "Implied"
+
+config SELECTED
+    bool "Selected"
+    imply IMPLIED
+
+config ROOT
+    bool "Root"
+    select SELECTED
+"#,
+    )
+    .unwrap();
+    fs::write(&config_path, "ROOT=y\n").unwrap();
+
+    saveconfig_command(
+        config_path.clone(),
+        kconfig_path,
+        PathBuf::from(temp_dir.path()),
+    )
+    .unwrap();
+
+    let actual = config_body(&fs::read_to_string(config_path).unwrap());
+    let expected = r#"IMPLIED=y
+ROOT=y
+SELECTED=y"#;
     assert_eq!(actual, expected);
 }
 

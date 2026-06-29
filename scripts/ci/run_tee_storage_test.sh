@@ -66,9 +66,13 @@ env -u CARGO_BUILD_TARGET RUSTFLAGS= cargo run --release \
   --image disk.img --size-bytes 64M \
   "${copy_args[@]}"
 
-echo "==> Building kernel..."
-cp "platforms/${arch}-qemu-virt/defconfig" .config
-make build
+if [ "${SKIP_KERNEL_BUILD:-0}" != "1" ]; then
+    echo "==> Building kernel..."
+    cp "platforms/${arch}-qemu-virt/defconfig" .config
+    make build
+else
+    echo "==> Reusing prebuilt kernel artifact..."
+fi
 
 echo "==> Running TEE tests..."
 printf 'TEE_TEST_APPS: %s\n' "${tee_test_bins[*]}" > tee-test-output.log

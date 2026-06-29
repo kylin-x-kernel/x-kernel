@@ -4,6 +4,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    path::Path,
     path::PathBuf,
 };
 
@@ -11,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
+    config::ConfigEngine,
     config::ConfigReader,
     error::{KconfigError, Result},
 };
@@ -43,7 +45,7 @@ pub fn gen_cargo_command(
     ld_script: Option<String>,
     dwarf: bool,
 ) -> Result<()> {
-    let config_map = ConfigReader::read(&config)?;
+    let config_map = load_effective_build_config(&config)?;
     let opts = BuildOpts {
         unittest,
         ld_script,
@@ -51,6 +53,27 @@ pub fn gen_cargo_command(
     };
     generate_rust_analyzer_and_cargo_config(&config_map, &opts)?;
     Ok(())
+}
+
+fn load_effective_build_config(config: &Path) -> Result<HashMap<String, String>> {
+    let raw = ConfigReader::read(config)?;
+    let kconfig = Path::new("Kconfig");
+    if !kconfig.exists() {
+        return Ok(raw);
+    }
+
+    let mut engine = ConfigEngine::from_kconfig(kconfig, Path::new("."))?;
+    engine.load_config(config)?;
+    engine.refresh_prompt_state();
+
+    let mut effective = HashMap::new();
+    for (name, symbol) in engine.symbols().all_symbols() {
+        if let Some(value) = &symbol.value {
+            effective.insert(name.clone(), value.clone());
+        }
+    }
+
+    Ok(effective)
 }
 
 /// Write `content` to `path` only if it differs from the current file content.
@@ -103,8 +126,6 @@ fn resolve_target(arch: &str) -> Option<&'static str> {
 fn resolve_plat_name(config: &HashMap<String, String>) -> &'static str {
     if config.get("PLATFORM_AARCH64_QEMU_VIRT") == Some(&"y".to_string()) {
         "aarch64-qemu-virt"
-    } else if config.get("PLATFORM_AARCH64_CROSVM_VIRT") == Some(&"y".to_string()) {
-        "aarch64-crosvm-virt"
     } else if config.get("PLATFORM_AARCH64_RASPI") == Some(&"y".to_string()) {
         "aarch64-raspi"
     } else if config.get("PLATFORM_RISCV64_QEMU_VIRT") == Some(&"y".to_string()) {

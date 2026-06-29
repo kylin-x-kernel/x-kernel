@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use tempfile::TempDir;
+use xconfig::KconfigError;
 use xconfig::kconfig::Parser;
 
 #[test]
@@ -114,5 +116,67 @@ fn test_parse_conditional_defaults() {
     assert!(
         default.condition.is_none(),
         "Last default should be unconditional"
+    );
+}
+
+#[test]
+fn test_parse_range_bounds_accept_numeric_literals_and_symbols() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+
+    std::fs::write(
+        &kconfig_path,
+        r#"
+config LIMIT_MAX
+    hex
+    default 0x20
+
+config COUNT
+    hex "Count"
+    range 0x10 LIMIT_MAX
+    default 0x18
+"#,
+    )
+    .unwrap();
+
+    let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+    let result = parser.parse();
+    assert!(result.is_ok(), "hex literal range bounds should parse");
+}
+
+#[test]
+fn test_parse_range_bounds_reject_complex_expressions() {
+    let temp_dir = TempDir::new().unwrap();
+    let kconfig_path = temp_dir.path().join("Kconfig");
+
+    std::fs::write(
+        &kconfig_path,
+        r#"
+config LIMIT_MIN
+    u32
+    default 4
+
+config LIMIT_MAX
+    u32
+    default 8
+
+config COUNT
+    u32 "Count"
+    range LIMIT_MIN < LIMIT_MAX
+    default 6
+"#,
+    )
+    .unwrap();
+
+    let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+    let result = parser.parse();
+    assert!(result.is_err(), "complex range bounds should be rejected");
+
+    let err = result.unwrap_err();
+    assert!(matches!(err, KconfigError::Syntax { .. }));
+    assert!(
+        err.to_string()
+            .contains("range bounds must be a symbol reference or numeric literal"),
+        "unexpected parse error: {err}"
     );
 }

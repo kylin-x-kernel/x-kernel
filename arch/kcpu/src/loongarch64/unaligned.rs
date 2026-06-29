@@ -65,393 +65,97 @@ fn unaligned_write(addr: u64, value: u64, n: u64) -> Result<(), UnalignedError> 
     Ok(())
 }
 
-// SAFETY (for all asm_write_fpr_N and asm_read_fpr_N functions): These use
-// `movgr2fr.d` / `movfr2gr.d` which only move data between general-purpose and
-// FP registers — no memory access. Each function is hardcoded to a specific
-// register number matching its match arm in `write_fpr`/`read_fpr`.
-#[inline]
-fn asm_write_fpr_0(val: u64) {
-    unsafe { asm!("movgr2fr.d $f0,  {val} ", val = in(reg) val) }
+macro_rules! define_asm_write_fpr {
+    ($fn_name:ident, $fpr:literal) => {
+        #[inline]
+        fn $fn_name(val: u64) {
+            // SAFETY: `movgr2fr.d` only transfers the provided general-purpose
+            // register value into the fixed FPR selected in this macro
+            // instantiation, without touching memory or stack state.
+            unsafe { asm!(concat!("movgr2fr.d $f", $fpr, ", {val}"), val = in(reg) val) }
+        }
+    };
 }
 
-#[inline]
-fn asm_write_fpr_1(val: u64) {
-    unsafe { asm!("movgr2fr.d $f1,  {val} ", val = in(reg) val) }
+macro_rules! define_asm_read_fpr {
+    ($fn_name:ident, $fpr:literal) => {
+        #[inline]
+        fn $fn_name() -> u64 {
+            let value: u64;
+            // SAFETY: `movfr2gr.d` only transfers the contents of the fixed
+            // FPR selected in this macro instantiation into a general-purpose
+            // output register, without touching memory or stack state.
+            unsafe { asm!(concat!("movfr2gr.d {val}, $f", $fpr), val = out(reg) value) }
+            value
+        }
+    };
 }
 
-#[inline]
-fn asm_write_fpr_2(val: u64) {
-    unsafe { asm!("movgr2fr.d $f2,  {val} ", val = in(reg) val) }
-}
+define_asm_write_fpr!(asm_write_fpr_0, "0");
+define_asm_write_fpr!(asm_write_fpr_1, "1");
+define_asm_write_fpr!(asm_write_fpr_2, "2");
+define_asm_write_fpr!(asm_write_fpr_3, "3");
+define_asm_write_fpr!(asm_write_fpr_4, "4");
+define_asm_write_fpr!(asm_write_fpr_5, "5");
+define_asm_write_fpr!(asm_write_fpr_6, "6");
+define_asm_write_fpr!(asm_write_fpr_7, "7");
+define_asm_write_fpr!(asm_write_fpr_8, "8");
+define_asm_write_fpr!(asm_write_fpr_9, "9");
+define_asm_write_fpr!(asm_write_fpr_10, "10");
+define_asm_write_fpr!(asm_write_fpr_11, "11");
+define_asm_write_fpr!(asm_write_fpr_12, "12");
+define_asm_write_fpr!(asm_write_fpr_13, "13");
+define_asm_write_fpr!(asm_write_fpr_14, "14");
+define_asm_write_fpr!(asm_write_fpr_15, "15");
+define_asm_write_fpr!(asm_write_fpr_16, "16");
+define_asm_write_fpr!(asm_write_fpr_17, "17");
+define_asm_write_fpr!(asm_write_fpr_18, "18");
+define_asm_write_fpr!(asm_write_fpr_19, "19");
+define_asm_write_fpr!(asm_write_fpr_20, "20");
+define_asm_write_fpr!(asm_write_fpr_21, "21");
+define_asm_write_fpr!(asm_write_fpr_22, "22");
+define_asm_write_fpr!(asm_write_fpr_23, "23");
+define_asm_write_fpr!(asm_write_fpr_24, "24");
+define_asm_write_fpr!(asm_write_fpr_25, "25");
+define_asm_write_fpr!(asm_write_fpr_26, "26");
+define_asm_write_fpr!(asm_write_fpr_27, "27");
+define_asm_write_fpr!(asm_write_fpr_28, "28");
+define_asm_write_fpr!(asm_write_fpr_29, "29");
+define_asm_write_fpr!(asm_write_fpr_30, "30");
+define_asm_write_fpr!(asm_write_fpr_31, "31");
 
-#[inline]
-fn asm_write_fpr_3(val: u64) {
-    unsafe { asm!("movgr2fr.d $f3,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_4(val: u64) {
-    unsafe { asm!("movgr2fr.d $f4,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_5(val: u64) {
-    unsafe { asm!("movgr2fr.d $f5,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_6(val: u64) {
-    unsafe { asm!("movgr2fr.d $f6,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_7(val: u64) {
-    unsafe { asm!("movgr2fr.d $f7,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_8(val: u64) {
-    unsafe { asm!("movgr2fr.d $f8,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_9(val: u64) {
-    unsafe { asm!("movgr2fr.d $f9,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_10(val: u64) {
-    unsafe { asm!("movgr2fr.d $f10,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_11(val: u64) {
-    unsafe { asm!("movgr2fr.d $f11,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_12(val: u64) {
-    unsafe { asm!("movgr2fr.d $f12,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_13(val: u64) {
-    unsafe { asm!("movgr2fr.d $f13,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_14(val: u64) {
-    unsafe { asm!("movgr2fr.d $f14,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_15(val: u64) {
-    unsafe { asm!("movgr2fr.d $f15,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_16(val: u64) {
-    unsafe { asm!("movgr2fr.d $f16,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_17(val: u64) {
-    unsafe { asm!("movgr2fr.d $f17,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_18(val: u64) {
-    unsafe { asm!("movgr2fr.d $f18,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_19(val: u64) {
-    unsafe { asm!("movgr2fr.d $f19,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_20(val: u64) {
-    unsafe { asm!("movgr2fr.d $f20,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_21(val: u64) {
-    unsafe { asm!("movgr2fr.d $f21,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_22(val: u64) {
-    unsafe { asm!("movgr2fr.d $f22,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_23(val: u64) {
-    unsafe { asm!("movgr2fr.d $f23,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_24(val: u64) {
-    unsafe { asm!("movgr2fr.d $f24,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_25(val: u64) {
-    unsafe { asm!("movgr2fr.d $f25,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_26(val: u64) {
-    unsafe { asm!("movgr2fr.d $f26,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_27(val: u64) {
-    unsafe { asm!("movgr2fr.d $f27,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_28(val: u64) {
-    unsafe { asm!("movgr2fr.d $f28,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_29(val: u64) {
-    unsafe { asm!("movgr2fr.d $f29,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_30(val: u64) {
-    unsafe { asm!("movgr2fr.d $f30,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_write_fpr_31(val: u64) {
-    unsafe { asm!("movgr2fr.d $f31,  {val} ", val = in(reg) val) }
-}
-
-#[inline]
-fn asm_read_fpr_0() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f0", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_1() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f1", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_2() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f2", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_3() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f3", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_4() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f4", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_5() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f5", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_6() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f6", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_7() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f7", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_8() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f8", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_9() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f9", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_10() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f10", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_11() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f11", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_12() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f12", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_13() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f13", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_14() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f14", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_15() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f15", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_16() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f16", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_17() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f17", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_18() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f18", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_19() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f19", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_20() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f20", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_21() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f21", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_22() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f22", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_23() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f23", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_24() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f24", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_25() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f25", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_26() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f26", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_27() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f27", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_28() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f28", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_29() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f29", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_30() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f30", val = out(reg) value) }
-    value
-}
-
-#[inline]
-fn asm_read_fpr_31() -> u64 {
-    let mut value: u64;
-    unsafe { asm!( "movfr2gr.d {val}, $f31", val = out(reg) value) }
-    value
-}
+define_asm_read_fpr!(asm_read_fpr_0, "0");
+define_asm_read_fpr!(asm_read_fpr_1, "1");
+define_asm_read_fpr!(asm_read_fpr_2, "2");
+define_asm_read_fpr!(asm_read_fpr_3, "3");
+define_asm_read_fpr!(asm_read_fpr_4, "4");
+define_asm_read_fpr!(asm_read_fpr_5, "5");
+define_asm_read_fpr!(asm_read_fpr_6, "6");
+define_asm_read_fpr!(asm_read_fpr_7, "7");
+define_asm_read_fpr!(asm_read_fpr_8, "8");
+define_asm_read_fpr!(asm_read_fpr_9, "9");
+define_asm_read_fpr!(asm_read_fpr_10, "10");
+define_asm_read_fpr!(asm_read_fpr_11, "11");
+define_asm_read_fpr!(asm_read_fpr_12, "12");
+define_asm_read_fpr!(asm_read_fpr_13, "13");
+define_asm_read_fpr!(asm_read_fpr_14, "14");
+define_asm_read_fpr!(asm_read_fpr_15, "15");
+define_asm_read_fpr!(asm_read_fpr_16, "16");
+define_asm_read_fpr!(asm_read_fpr_17, "17");
+define_asm_read_fpr!(asm_read_fpr_18, "18");
+define_asm_read_fpr!(asm_read_fpr_19, "19");
+define_asm_read_fpr!(asm_read_fpr_20, "20");
+define_asm_read_fpr!(asm_read_fpr_21, "21");
+define_asm_read_fpr!(asm_read_fpr_22, "22");
+define_asm_read_fpr!(asm_read_fpr_23, "23");
+define_asm_read_fpr!(asm_read_fpr_24, "24");
+define_asm_read_fpr!(asm_read_fpr_25, "25");
+define_asm_read_fpr!(asm_read_fpr_26, "26");
+define_asm_read_fpr!(asm_read_fpr_27, "27");
+define_asm_read_fpr!(asm_read_fpr_28, "28");
+define_asm_read_fpr!(asm_read_fpr_29, "29");
+define_asm_read_fpr!(asm_read_fpr_30, "30");
+define_asm_read_fpr!(asm_read_fpr_31, "31");
 
 /// Writes a value to the specified floating-point register.
 fn write_fpr(fd: usize, val: u64) {

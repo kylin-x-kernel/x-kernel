@@ -455,8 +455,8 @@ impl Parser {
                 }
                 Token::Range => {
                     self.advance()?;
-                    let min = self.parse_expr()?;
-                    let max = self.parse_expr()?;
+                    let min = self.parse_range_bound()?;
+                    let max = self.parse_range_bound()?;
                     let cond = if matches!(self.current_context().current_token, Token::If) {
                         self.advance()?;
                         Some(self.parse_expr()?)
@@ -615,6 +615,30 @@ impl Parser {
 
     fn parse_expr(&mut self) -> Result<Expr> {
         self.parse_or_expr()
+    }
+
+    fn parse_range_bound(&mut self) -> Result<Expr> {
+        match &self.current_context().current_token.clone() {
+            Token::Identifier(name) => {
+                let name = name.clone();
+                self.advance()?;
+                if name.starts_with("0x") || name.starts_with("0X") {
+                    Ok(Expr::Const(name))
+                } else {
+                    Ok(Expr::Symbol(name))
+                }
+            }
+            Token::Number(n) => {
+                let n = *n;
+                self.advance()?;
+                Ok(Expr::Const(n.to_string()))
+            }
+            _ => Err(KconfigError::Syntax {
+                file: self.current_file.clone(),
+                line: self.current_context().lexer.current_line(),
+                message: "range bounds must be a symbol reference or numeric literal".to_string(),
+            }),
+        }
     }
 
     fn parse_or_expr(&mut self) -> Result<Expr> {

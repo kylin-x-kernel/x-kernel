@@ -19,7 +19,6 @@ smp = [
     "kruntime/smp",
     "ktask?/smp",
     "kspin/smp",
-    "aarch64-crosvm-virt?/smp",
     "aarch64-qemu-virt?/smp",
     "loongarch64-qemu-virt?/smp",
     "riscv64-qemu-virt?/smp",
@@ -32,11 +31,20 @@ fp-simd = ["khal/fp-simd"]
 
 # Interrupts
 ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi", "ktask?/ipi"]
-
-crosvm = ["khal/crosvm", "kdriver/crosvm", "kruntime/crosvm"]
 dma-trace = ["kdriver/dma-trace"]
 dev_log = ["devfs/dev-log"]
 dice = ["dep:kalloc", "dep:tee_kernel", "kalloc/dice", "tee_kernel/dice_huk_key", "devfs/dice"]
+kvm_guest_mem_share = [
+    "aarch64-qemu-virt?/kvm-guest-mem-share",
+    "aarch64-peripherals?/kvm-guest-mem-share",
+]
+kvm_mmio_guard = [
+    "aarch64-qemu-virt?/kvm-mmio-guard",
+    "aarch64-peripherals?/kvm-mmio-guard",
+]
+arm_timer_resume_fixup = ["kruntime/arm-timer-resume-fixup", "ktask?/arm-timer-resume-fixup"]
+rootfs_secondary_block = ["kruntime/rootfs-secondary-block", "kfs?/rootfs-secondary-block"]
+pci_non_ecam = ["kdriver/pci-non-ecam"]
 
 # Platform wiring
 platform_aarch64_qemu_virt = [
@@ -61,14 +69,6 @@ platform_loongarch64_qemu_virt = [
     "dep:loongarch64-qemu-virt",
     "fp-simd",
     "dev_log",
-]
-platform_aarch64_crosvm_virt = [
-    "dep:aarch64-crosvm-virt",
-    "fp-simd",
-    "smp",
-    "crosvm",
-    "dev_log",
-    "dice",
 ]
 
 # Memory
@@ -140,8 +140,11 @@ driver_fxmac = ["kdriver/fxmac"]
 driver_ahci = ["kdriver/ahci"]
 driver_bcm2835_sdhci = ["kdriver/bcm2835-sdhci"]
 driver_sdmmc = ["kdriver/sdmmc"]
-driver_console_pl011 = ["kdriver/console-pl011"]
-driver_console_ns16550_mmio = ["kdriver/console-ns16550-mmio"]
+driver_console_pl011 = ["kdriver/console-pl011", "aarch64-qemu-virt?/console-pl011"]
+driver_console_ns16550_mmio = [
+    "kdriver/console-ns16550-mmio",
+    "aarch64-qemu-virt?/console-ns16550-mmio",
+]
 driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
 
 # Backtrace
@@ -189,10 +192,7 @@ aarch64-qemu-virt = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",
 ] }
-aarch64-crosvm-virt = { workspace = true, optional = true, features = [
-    "fp-simd",
-    "rtc",
-] }
+aarch64-peripherals = { workspace = true, optional = true }
 x86_64-qemu-virt = { workspace = true, optional = true, features = [
     "fp-simd",
     "rtc",

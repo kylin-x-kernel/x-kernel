@@ -9,6 +9,13 @@ config KFEAT_TEE
 
 if KFEAT_TEE
 
+config KFEAT_DICE
+    bool "Enable DICE handover integration"
+    depends on ARCH_AARCH64
+    help
+      Enable the DICE device integration, including devfs exposure and the
+      TEE-side hardware unique key flow based on the incoming DICE handover.
+
 config KFEAT_TEE_TA_SIGN
     bool "Enable TA ELF signature verification"
     help

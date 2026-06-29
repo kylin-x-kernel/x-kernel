@@ -31,10 +31,16 @@ if [ "${arch}" = "aarch64" ]; then
     TIMEOUT=481
 fi
 
-sed -i -e 's/WARN/__TEMP__/g' -e 's/ERROR/WARN/g' -e 's/__TEMP__/ERROR/g' .config
+if [ "${SKIP_KERNEL_BUILD:-0}" != "1" ]; then
+    scripts/ci/prepare_unittest_config.sh .config
+fi
 
 set +e
-timeout "${TIMEOUT}" stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n run | ansi_filter | tee unittest-output.log
+make_goal=run
+if [ "${SKIP_KERNEL_BUILD:-0}" = "1" ]; then
+    make_goal=justrun
+fi
+timeout "${TIMEOUT}" stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n "${make_goal}" | ansi_filter | tee unittest-output.log
 status=${PIPESTATUS[0]}
 set -e
 

@@ -8,6 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use kcpu_id_map::RawCpuId;
 use kerrno::{KError, KErrorKind};
+
+use crate::smccc;
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;
 const PSCI_0_2_64BIT: u32 = 0x40000000;
 const PSCI_0_2_FN_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + 1;
@@ -65,42 +67,13 @@ impl From<PsciError> for KError {
         kind.into()
     }
 }
-fn arm_smccc_smc(func: u32, arg0: usize, arg1: usize, arg2: usize) -> usize {
-    let mut ret;
-    // SAFETY: issues a PSCI SMC call using the standard SMCCC calling
-    // convention, touching only the documented argument/result registers.
-    unsafe {
-        core::arch::asm!(
-            "smc #0",
-            inlateout("x0") func as usize => ret,
-            in("x1") arg0,
-            in("x2") arg1,
-            in("x3") arg2,
-        )
-    }
-    ret
-}
-fn psci_hvc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> usize {
-    let ret;
-    // SAFETY: issues a PSCI HVC call using the standard SMCCC calling
-    // convention, touching only the documented argument/result registers.
-    unsafe {
-        core::arch::asm!(
-            "hvc #0",
-            inlateout("x0") func as usize => ret,
-            in("x1") arg0,
-            in("x2") arg1,
-            in("x3") arg2,
-        )
-    }
-    ret
-}
 fn psci_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> Result<(), PsciError> {
-    let ret = if PSCI_METHOD_HVC.load(Ordering::Acquire) {
-        psci_hvc_call(func, arg0, arg1, arg2)
+    let result = if PSCI_METHOD_HVC.load(Ordering::Acquire) {
+        smccc::hvc_call(func, arg0, arg1, arg2)
     } else {
-        arm_smccc_smc(func, arg0, arg1, arg2)
+        smccc::smc_call(func, arg0, arg1, arg2)
     };
+    let ret = result.x0;
     if ret == 0 {
         Ok(())
     } else {

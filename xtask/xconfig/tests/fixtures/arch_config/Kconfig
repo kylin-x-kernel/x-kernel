@@ -32,9 +32,6 @@ choice
 config PLATFORM_AARCH64_QEMU_VIRT
     bool "QEMU ARM64 Virtual Machine"
 
-config PLATFORM_AARCH64_CROSVM_VIRT
-    bool "CROSVM ARM64 Virtual Machine"
-
 endchoice
 
 config PMU_IRQ
@@ -65,5 +62,4 @@ endmenu
 config PLATFORM
     string
     default "aarch64-qemu-virt" if PLATFORM_AARCH64_QEMU_VIRT
-    default "aarch64-crosvm-virt" if PLATFORM_AARCH64_CROSVM_VIRT
     default "x86_64-qemu-virt" if PLATFORM_X86_64_QEMU_VIRT

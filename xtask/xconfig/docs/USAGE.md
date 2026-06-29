@@ -33,18 +33,42 @@ xconf parse --kconfig examples/sample_project/Kconfig --srctree examples/sample_
 
 ### Defconfig Command
 
-Apply a defconfig file (not yet implemented):
+Apply a defconfig file and expand it into a full `.config`:
 
 ```bash
 xconf defconfig <defconfig-path> --kconfig Kconfig --srctree .
 ```
 
+This flow now mirrors Linux-style non-interactive expansion:
+
+- loads the minimal input defconfig
+- reconciles `choice` state and derived defaults
+- applies `select` / `imply`
+- enforces scalar `range` constraints
+- writes the expanded `.config`
+
 ### Menuconfig Command
 
-Interactive TUI configuration (not yet implemented):
+Interactive TUI configuration:
 
 ```bash
 xconf menuconfig --kconfig Kconfig --srctree .
+```
+
+### Olddefconfig Command
+
+Refresh an existing `.config` and apply defaults to newly introduced symbols:
+
+```bash
+xconf olddefconfig --config .config --kconfig Kconfig --srctree .
+```
+
+### Savedefconfig Command
+
+Minimize the current `.config` and write a reviewable defconfig:
+
+```bash
+xconf savedefconfig --config .config --output defconfig --kconfig Kconfig --srctree .
 ```
 
 ### Generate Command

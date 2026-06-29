@@ -81,7 +81,7 @@ impl ConfigEngine {
 
     pub fn load_config(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let values = ConfigReader::read(path)?;
-        self.apply_config_values(&values);
+        self.apply_menuconfig_values(&values);
         Ok(())
     }
 
@@ -163,6 +163,9 @@ impl ConfigEngine {
                     .dependency_resolver
                     .can_enable(name, &self.symbols)
                     .is_err()
+                    && !self
+                        .dependency_resolver
+                        .is_selected_by_enabled_symbol(name, &self.symbols)
                 {
                     Some(name.clone())
                 } else {
@@ -226,6 +229,12 @@ impl ConfigEngine {
                     .dependency_resolver
                     .can_enable(symbol_name, &self.symbols)
                 {
+                    if self
+                        .dependency_resolver
+                        .is_selected_by_enabled_symbol(symbol_name, &self.symbols)
+                    {
+                        continue;
+                    }
                     violations.push(format!("{}: {}", symbol_name, err));
                 }
             }
@@ -251,6 +260,9 @@ impl ConfigEngine {
         self.enforce_choice_mutual_exclusion();
         self.filter_by_if_conditions();
         self.reevaluate_defaults();
+        self.apply_noninteractive_reverse_dependencies();
+        self.reevaluate_defaults();
+        self.validate_symbol_ranges();
         self.prune_inactive_symbols();
     }
 
@@ -377,6 +389,47 @@ impl ConfigEngine {
 
     fn clear_stale_menuconfig_conditional_defaults(&mut self) {
         clear_stale_menuconfig_conditional_defaults_inner(&self.entries, &mut self.symbols);
+    }
+
+    fn apply_noninteractive_reverse_dependencies(&mut self) {
+        let mut pending: Vec<String> = self
+            .symbols
+            .all_symbols()
+            .filter_map(|(name, _)| self.symbols.is_enabled(name).then_some(name.clone()))
+            .collect();
+        let mut processed = HashSet::new();
+
+        while let Some(symbol) = pending.pop() {
+            if !processed.insert(symbol.clone()) {
+                continue;
+            }
+
+            for selected in self
+                .dependency_resolver
+                .apply_selects(&symbol, &mut self.symbols)
+            {
+                pending.push(selected);
+            }
+
+            for implied in self
+                .dependency_resolver
+                .get_implied_symbols(&symbol, &self.symbols)
+            {
+                let implied_from_config = self
+                    .symbols
+                    .get_symbol(&implied)
+                    .map(|sym| sym.from_config)
+                    .unwrap_or(false);
+                if !implied_from_config {
+                    self.symbols.set_value(&implied, "y".to_string());
+                    pending.push(implied);
+                }
+            }
+        }
+    }
+
+    fn validate_symbol_ranges(&mut self) {
+        validate_symbol_ranges_inner(&self.entries, &mut self.symbols);
     }
 
     pub fn write_config(&self, output: impl AsRef<Path>) -> Result<()> {
@@ -628,6 +681,102 @@ fn clear_stale_conditional_default(
         _ => {
             symbol_table.clear_value(name);
         }
+    }
+}
+
+fn validate_symbol_ranges_inner(entries: &[Entry], symbol_table: &mut SymbolTable) {
+    for entry in entries {
+        match entry {
+            Entry::Config(config) => validate_symbol_range(
+                &config.name,
+                &config.symbol_type,
+                &config.properties,
+                symbol_table,
+            ),
+            Entry::MenuConfig(menuconfig) => validate_symbol_range(
+                &menuconfig.name,
+                &menuconfig.symbol_type,
+                &menuconfig.properties,
+                symbol_table,
+            ),
+            Entry::Menu(menu) => validate_symbol_ranges_inner(&menu.entries, symbol_table),
+            Entry::If(if_entry) => validate_symbol_ranges_inner(&if_entry.entries, symbol_table),
+            _ => {}
+        }
+    }
+}
+
+fn validate_symbol_range(
+    name: &str,
+    symbol_type: &crate::kconfig::ast::SymbolType,
+    properties: &crate::kconfig::ast::Property,
+    symbol_table: &mut SymbolTable,
+) {
+    let Some((min_expr, max_expr, condition)) = &properties.range else {
+        return;
+    };
+
+    if let Some(condition) = condition {
+        if !evaluate_expr(condition, symbol_table).unwrap_or(false) {
+            return;
+        }
+    }
+
+    let Some(current_value) = symbol_table.get_value(name) else {
+        return;
+    };
+
+    let Some(current_numeric) = parse_symbol_numeric_value(symbol_type, &current_value) else {
+        return;
+    };
+    let Some(min_numeric) = parse_expr_numeric_value(symbol_type, min_expr, symbol_table) else {
+        return;
+    };
+    let Some(max_numeric) = parse_expr_numeric_value(symbol_type, max_expr, symbol_table) else {
+        return;
+    };
+
+    let clamped = current_numeric.clamp(min_numeric, max_numeric);
+    if clamped != current_numeric {
+        symbol_table.set_value(name, format_numeric_value(symbol_type, clamped));
+    }
+}
+
+fn parse_expr_numeric_value(
+    symbol_type: &crate::kconfig::ast::SymbolType,
+    expr: &crate::kconfig::ast::Expr,
+    symbol_table: &SymbolTable,
+) -> Option<i128> {
+    match expr {
+        crate::kconfig::ast::Expr::Const(value) => parse_symbol_numeric_value(symbol_type, value),
+        crate::kconfig::ast::Expr::Symbol(symbol) => symbol_table
+            .get_value(symbol)
+            .and_then(|value| parse_symbol_numeric_value(symbol_type, &value)),
+        _ => None,
+    }
+}
+
+fn parse_symbol_numeric_value(
+    symbol_type: &crate::kconfig::ast::SymbolType,
+    value: &str,
+) -> Option<i128> {
+    match symbol_type {
+        crate::kconfig::ast::SymbolType::Hex => {
+            let normalized = value
+                .strip_prefix("0x")
+                .or_else(|| value.strip_prefix("0X"))
+                .unwrap_or(value);
+            i128::from_str_radix(normalized, 16).ok()
+        }
+        ty if ty.is_integer_type() => value.parse::<i128>().ok(),
+        _ => None,
+    }
+}
+
+fn format_numeric_value(symbol_type: &crate::kconfig::ast::SymbolType, value: i128) -> String {
+    match symbol_type {
+        crate::kconfig::ast::SymbolType::Hex => format!("0x{:x}", value),
+        _ => value.to_string(),
     }
 }
 

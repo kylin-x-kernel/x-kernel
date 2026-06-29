@@ -13,7 +13,7 @@ use aarch64_cpu::registers::{
 };
 use int_ratio::Ratio;
 use klazy::Once;
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 use log::info;
 
 use crate::TimerSource;
@@ -22,12 +22,12 @@ static TIMER_IRQ: AtomicUsize = AtomicUsize::new(0);
 static TIMER_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 static TIMER_MODE: AtomicUsize = AtomicUsize::new(TimerMode::Physical as usize);
 static TIMER_INIT_TICKS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 static TICK_RESUME_OFFSET: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 #[percpu::def_percpu]
 static LAST_LOGICAL_TICKS: u64 = 0;
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 static IPI_FIXUP_PENDING: AtomicUsize = AtomicUsize::new(0);
 static CNTPCT_TO_NANOS_RATIO: Once<Ratio> = Once::new();
 static NANOS_TO_CNTPCT_RATIO: Once<Ratio> = Once::new();
@@ -120,7 +120,7 @@ impl khal::time::MonotonicTimerIf for ArmGenericMonotonicTimer {
         arm_timer(deadline_ns)
     }
 
-    #[cfg(feature = "crosvm")]
+    #[cfg(feature = "arm-timer-resume-fixup")]
     fn handle_idle_return(previous_ticks: u64) -> bool {
         handle_idle_return(previous_ticks)
     }
@@ -135,7 +135,7 @@ pub fn init(config: TimerConfig) {
         TimerMode::Virtual => raw_now_ticks(),
     };
     TIMER_INIT_TICKS.store(init_ticks, Ordering::Relaxed);
-    #[cfg(feature = "crosvm")]
+    #[cfg(feature = "arm-timer-resume-fixup")]
     TICK_RESUME_OFFSET.store(0, Ordering::Relaxed);
 
     let freq = config.frequency_hz.unwrap_or_else(|| CNTFRQ_EL0.get());
@@ -150,7 +150,7 @@ pub fn init(config: TimerConfig) {
 }
 
 pub fn init_percpu() {
-    #[cfg(feature = "crosvm")]
+    #[cfg(feature = "arm-timer-resume-fixup")]
     // SAFETY: this initializes only the current CPU's percpu logical-tick slot
     // during local timer bring-up, before normal timer events use it.
     unsafe {
@@ -179,7 +179,7 @@ fn rearm_local_timer_irq() {
 
 #[inline]
 pub fn now_ticks() -> u64 {
-    #[cfg(feature = "crosvm")]
+    #[cfg(feature = "arm-timer-resume-fixup")]
     {
         track_logical_ticks(logical_ticks(
             raw_now_ticks(),
@@ -187,13 +187,13 @@ pub fn now_ticks() -> u64 {
         ))
     }
 
-    #[cfg(not(feature = "crosvm"))]
+    #[cfg(not(feature = "arm-timer-resume-fixup"))]
     {
         raw_now_ticks().saturating_sub(TIMER_INIT_TICKS.load(Ordering::Relaxed))
     }
 }
 
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 pub fn handle_idle_return(previous_ticks: u64) -> bool {
     let raw = raw_now_ticks();
     let cpu_id = khal::percpu::this_cpu_id();
@@ -228,7 +228,7 @@ pub fn handle_idle_return(previous_ticks: u64) -> bool {
     repaired
 }
 
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 pub fn handle_ipi_fixup() {
     let cpu_id = khal::percpu::this_cpu_id();
     let bit = 1usize << cpu_id.as_usize();
@@ -374,7 +374,7 @@ fn mode() -> TimerMode {
     TimerMode::from_usize(TIMER_MODE.load(Ordering::Relaxed))
 }
 
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 #[inline]
 fn logical_ticks(raw_ticks: u64, resume_offset: u64) -> u64 {
     raw_ticks
@@ -382,7 +382,7 @@ fn logical_ticks(raw_ticks: u64, resume_offset: u64) -> u64 {
         .saturating_sub(TIMER_INIT_TICKS.load(Ordering::Relaxed))
 }
 
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 #[inline]
 fn track_logical_ticks(ticks: u64) -> u64 {
     // Safety: this only accesses the current CPU's percpu timer state.
@@ -396,7 +396,7 @@ fn track_logical_ticks(ticks: u64) -> u64 {
     }
 }
 
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 fn install_resume_offset(raw_ticks: u64, target_ticks: u64) -> bool {
     loop {
         let current_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
@@ -418,7 +418,7 @@ fn install_resume_offset(raw_ticks: u64, target_ticks: u64) -> bool {
     }
 }
 
-#[cfg(feature = "crosvm")]
+#[cfg(feature = "arm-timer-resume-fixup")]
 fn request_remote_timer_fixup() {
     if kbuild_config::CPU_NUM <= 1 {
         return;

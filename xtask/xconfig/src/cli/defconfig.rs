@@ -22,6 +22,10 @@ pub fn defconfig_to_output(
 
     let mut engine = ConfigEngine::from_kconfig(&kconfig, &srctree)?;
     engine.load_config(&defconfig)?;
+    // Match Linux defconfig semantics: after loading the minimal seed config,
+    // recompute choice selection, visibility-gated symbols, and derived
+    // defaults before emitting the expanded .config.
+    engine.refresh_prompt_state();
     engine.prune_inactive_symbols();
     engine.write_artifacts(output)
 }

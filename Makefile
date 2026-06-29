@@ -68,19 +68,48 @@ UTILITY_TARGETS := clippy check_deps check_header doc doc_check_missing fmt unit
 
 NON_BUILD_TARGETS := $(KCONFIG_TARGETS) $(CLEAN_TARGETS) $(UTILITY_TARGETS)
 
-CURRENT_GOAL := $(or $(MAKECMDGOALS),$(.DEFAULT_GOAL))
+REQUESTED_GOALS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),$(.DEFAULT_GOAL))
+PRIMARY_GOAL := $(firstword $(REQUESTED_GOALS))
 
-IS_BUILD := $(filter $(BUILD_TARGETS),$(CURRENT_GOAL))
-IS_NON_BUILD := $(filter $(NON_BUILD_TARGETS),$(CURRENT_GOAL))
+IS_BUILD := $(filter $(BUILD_TARGETS),$(REQUESTED_GOALS))
+IS_NON_BUILD := $(filter $(NON_BUILD_TARGETS),$(REQUESTED_GOALS))
+CONFIG_READY_STAMP := .config.prepared
 
-# Install dependencies
-include scripts/make/deps.mk
-
-# .config check
+CONFIG_NEEDS_PREPARE :=
+CONFIG_PREPARE_REASON :=
 ifneq ($(IS_BUILD),)
 ifeq ($(wildcard .config),)
-  $(error ❌ No .config found. Please run: make menuconfig)
+  $(error ❌ No .config found. Please copy a platform defconfig to .config, then run: make defconfig)
 endif
+ifeq ($(wildcard $(CONFIG_READY_STAMP)),)
+  CONFIG_NEEDS_PREPARE := y
+  CONFIG_PREPARE_REASON := .config has not been expanded yet
+else ifneq ($(shell test $(CONFIG_READY_STAMP) -nt .config; echo $$?),0)
+  CONFIG_NEEDS_PREPARE := y
+  CONFIG_PREPARE_REASON := .config changed after the last Kconfig refresh
+endif
+endif
+
+ifeq ($(CONFIG_NEEDS_PREPARE),y)
+.PHONY: $(REQUESTED_GOALS) __prepare_config_then_reexec
+
+# Build-like targets parse ARCH/PLAT/TARGET from `.config` during Makefile
+# evaluation, so a copied seed defconfig cannot be fixed up with a normal
+# prerequisite. Re-expand `.config` first, then re-exec the original goals in
+# a fresh make process that will parse the prepared configuration.
+__prepare_config_then_reexec:
+	@echo "⚙️  $(CONFIG_PREPARE_REASON); running 'make defconfig' first..."
+	@$(MAKE) --no-print-directory defconfig
+	@$(MAKE) --no-print-directory $(REQUESTED_GOALS)
+
+$(PRIMARY_GOAL): __prepare_config_then_reexec
+
+$(filter-out $(PRIMARY_GOAL),$(REQUESTED_GOALS)):
+	@:
+else
+ifneq ($(IS_BUILD),)
+# Install dependencies
+include scripts/make/deps.mk
 
 include scripts/make/kconfig.mk
 include scripts/make/deps.mk
@@ -147,6 +176,7 @@ ROOTFS_VARIANT ?= alpine-busybox
 ROOTFS_IMG = x-kernel-$(ROOTFS_VARIANT)-$(ARCH).img
 
 endif # end of IS_BUILD
+endif
 
 include scripts/make/hooks.mk
 
@@ -154,6 +184,7 @@ include scripts/make/hooks.mk
 menuconfig:
 	@$(XCONF) menuconfig -k Kconfig -s .
 	@if [ -f .config ]; then \
+		touch $(CONFIG_READY_STAMP); \
 		echo "✅ Configuration saved to .config"; \
 	else \
 		echo "ℹ️  No changes saved"; \
@@ -197,15 +228,22 @@ defconfig:
 		exit 1; \
 	fi
 	@$(XCONF) defconfig .config -k Kconfig -s .
+	@touch $(CONFIG_READY_STAMP)
 	@echo "✅ Default configuration expanded into .config"
 
 saveconfig:
 	@$(XCONF) saveconfig -o .config -k Kconfig -s .
+	@touch $(CONFIG_READY_STAMP)
 
 savedefconfig:
 	@if [ ! -f .config ]; then \
 		echo "$(RED_C)Error$(END_C): .config not found."; \
-		echo "Please run 'make defconfig' or 'make menuconfig' first."; \
+		echo "Please copy a platform defconfig to .config, then run 'make defconfig' first."; \
+		exit 1; \
+	fi
+	@if [ ! -f $(CONFIG_READY_STAMP) ] || [ .config -nt $(CONFIG_READY_STAMP) ]; then \
+		echo "$(RED_C)Error$(END_C): .config is not prepared."; \
+		echo "Please run 'make defconfig', 'make menuconfig', or another config refresh target first."; \
 		exit 1; \
 	fi
 	@$(XCONF) savedefconfig -c .config -o defconfig -k Kconfig -s .
@@ -214,18 +252,20 @@ savedefconfig:
 oldconfig:
 	@if [ ! -f .config ]; then \
 		echo "$(RED_C)Error$(END_C): .config not found."; \
-		echo "Please run 'make defconfig' or 'make menuconfig' first."; \
+		echo "Please copy a platform defconfig to .config, then run 'make defconfig' first."; \
 		exit 1; \
 	fi
 	@$(XCONF) oldconfig -c .config -k Kconfig -s .
+	@touch $(CONFIG_READY_STAMP)
 
 olddefconfig:
 	@if [ ! -f .config ]; then \
 		echo "$(RED_C)Error$(END_C): .config not found."; \
-		echo "Please run 'make defconfig' or 'make menuconfig' first."; \
+		echo "Please copy a platform defconfig to .config, then run 'make defconfig' first."; \
 		exit 1; \
 	fi
 	@$(XCONF) olddefconfig -c .config -k Kconfig -s .
+	@touch $(CONFIG_READY_STAMP)
 	@echo "✅ New symbols refreshed from Kconfig defaults"
 
 
@@ -301,7 +341,7 @@ clean:
 	@rm -rf $(TARGET_DIR)/kbuild
 
 distclean: clean
-	@rm -f .config .config.old auto.conf autoconf.h
+	@rm -f .config .config.old .config.prepared auto.conf autoconf.h
 	@echo "✅ Removed all configuration files"
 
 # Note: gen-const is kept as PHONY to allow manual invocation,

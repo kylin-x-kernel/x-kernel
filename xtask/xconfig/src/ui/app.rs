@@ -1425,6 +1425,11 @@ impl MenuConfigApp {
     /// 3. Enables the selected option
     /// 4. Updates UI state to reflect changes
     fn handle_choice_selection(&mut self, choice_id: &str, selected_option: &str) -> Result<()> {
+        if let Err(err) = self.engine.can_enable(selected_option) {
+            self.dialog_type = Some(DialogType::DependencyError(err));
+            return Ok(());
+        }
+
         // 1. Get all options in this choice
         let choice_options = self.get_choice_options(choice_id);
 
@@ -1437,13 +1442,26 @@ impl MenuConfigApp {
 
         // 3. Enable the selected option
         self.apply_value_change(selected_option, ConfigValue::Bool(true))?;
+        let selected = self.engine.apply_selects(selected_option);
+        let implied = self.engine.get_implied_symbols(selected_option);
+        if !implied.is_empty() {
+            self.dialog_type = Some(DialogType::ImplySuggestion { implied });
+        }
 
         // 4. Update UI state
         self.sync_ui_state_from_symbol_table()?;
         self.update_enabled_states()?;
 
         // 5. Show status message
-        self.status_message = Some(format!(" {} selected", selected_option));
+        self.status_message = if selected.is_empty() {
+            Some(format!(" {} selected", selected_option))
+        } else {
+            Some(format!(
+                " {} selected (also enabled: {})",
+                selected_option,
+                selected.join(", ")
+            ))
+        };
 
         Ok(())
     }
@@ -1535,6 +1553,8 @@ impl MenuConfigApp {
 
     fn save_config(&mut self) -> Result<()> {
         use std::path::Path;
+
+        self.engine.refresh_prompt_state();
 
         // Audit before saving
         let violations = self.audit_all_dependencies();
@@ -2049,13 +2069,21 @@ impl MenuConfigApp {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::{Mutex, OnceLock},
+    };
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tempfile::TempDir;
 
     use super::*;
     use crate::kconfig::{Parser, SymbolTable};
+
+    fn cwd_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_validate_int() {
@@ -2258,5 +2286,140 @@ endchoice
         let app = MenuConfigApp::new(ast.entries, symbol_table).unwrap();
 
         assert!(app.engine().can_enable("KFEAT_FS_EXT4").is_err());
+    }
+
+    #[test]
+    fn test_choice_selection_applies_selects() {
+        let temp_dir = TempDir::new().unwrap();
+        let kconfig_path = temp_dir.path().join("Kconfig");
+
+        let kconfig_content = r#"
+choice
+    prompt "Console backend"
+    default CONSOLE_PL011
+
+config CONSOLE_PL011
+    bool "pl011"
+    select HELPER
+
+config CONSOLE_NS16550
+    bool "ns16550"
+
+endchoice
+
+config HELPER
+    bool "helper"
+"#;
+
+        fs::write(&kconfig_path, kconfig_content).unwrap();
+
+        let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+        let ast = parser.parse().unwrap();
+
+        let mut symbol_table = SymbolTable::new();
+        symbol_table.add_symbol("CONSOLE_PL011".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("CONSOLE_NS16550".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("HELPER".to_string(), SymbolType::Bool);
+        symbol_table.set_value("CONSOLE_NS16550", "y".to_string());
+
+        let mut app = MenuConfigApp::new(ast.entries, symbol_table).unwrap();
+        app.handle_choice_selection("choice_CONSOLE_PL011", "CONSOLE_PL011")
+            .unwrap();
+
+        assert_eq!(app.engine().get_value("CONSOLE_PL011").as_deref(), Some("y"));
+        assert_eq!(app.engine().get_value("CONSOLE_NS16550").as_deref(), Some("n"));
+        assert_eq!(app.engine().get_value("HELPER").as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn test_save_config_refreshes_effective_state_before_write() {
+        let _guard = cwd_test_lock().lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        let kconfig_path = temp_dir.path().join("Kconfig");
+
+        let kconfig_content = r#"
+config LIMIT_MIN
+    u32
+    default 4
+
+config LIMIT_MAX
+    u32
+    default 8
+
+config COUNT
+    u32 "Count"
+    range LIMIT_MIN LIMIT_MAX
+    default 6
+"#;
+
+        fs::write(&kconfig_path, kconfig_content).unwrap();
+
+        let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+        let ast = parser.parse().unwrap();
+
+        let mut symbol_table = SymbolTable::new();
+        symbol_table.add_symbol("LIMIT_MIN".to_string(), SymbolType::U32);
+        symbol_table.add_symbol("LIMIT_MAX".to_string(), SymbolType::U32);
+        symbol_table.add_symbol("COUNT".to_string(), SymbolType::U32);
+        symbol_table.set_value("LIMIT_MIN", "4".to_string());
+        symbol_table.set_value("LIMIT_MAX", "8".to_string());
+        symbol_table.set_value("COUNT", "99".to_string());
+
+        let mut app = MenuConfigApp::new(ast.entries, symbol_table).unwrap();
+
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+        let result = app.save_config();
+        std::env::set_current_dir(old_cwd).unwrap();
+        result.unwrap();
+
+        let config = fs::read_to_string(temp_dir.path().join(".config")).unwrap();
+        assert!(config.contains("COUNT=8"));
+    }
+
+    #[test]
+    fn test_save_config_allows_linux_style_selected_symbol_with_unmet_direct_deps() {
+        let _guard = cwd_test_lock().lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        let kconfig_path = temp_dir.path().join("Kconfig");
+
+        let kconfig_content = r#"
+config DEP
+    bool "dep"
+    default n
+
+config HELPER
+    bool "helper"
+    depends on DEP
+
+config SELECTOR
+    bool "selector"
+    select HELPER
+"#;
+
+        fs::write(&kconfig_path, kconfig_content).unwrap();
+
+        let mut parser = Parser::new(&kconfig_path, temp_dir.path()).unwrap();
+        let ast = parser.parse().unwrap();
+
+        let mut symbol_table = SymbolTable::new();
+        symbol_table.add_symbol("DEP".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("HELPER".to_string(), SymbolType::Bool);
+        symbol_table.add_symbol("SELECTOR".to_string(), SymbolType::Bool);
+        symbol_table.set_value("DEP", "n".to_string());
+        symbol_table.set_value("SELECTOR", "y".to_string());
+        symbol_table.set_value("HELPER", "y".to_string());
+
+        let mut app = MenuConfigApp::new(ast.entries, symbol_table).unwrap();
+
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+        let result = app.save_config();
+        std::env::set_current_dir(old_cwd).unwrap();
+        result.unwrap();
+
+        let config = fs::read_to_string(temp_dir.path().join(".config")).unwrap();
+        assert!(config.contains("SELECTOR=y"));
+        assert!(config.contains("HELPER=y"));
     }
 }

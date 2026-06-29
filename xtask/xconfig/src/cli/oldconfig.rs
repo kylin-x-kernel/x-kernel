@@ -60,6 +60,7 @@ pub fn oldconfig_command_with_io<R: BufRead, W: Write>(
 
     if auto_defaults {
         writeln!(output, "\nApplying default values to new symbols...")?;
+        engine.refresh_prompt_state();
     } else {
         writeln!(output, "\nPrompting for new configuration options...")?;
         run_oldconfig_prompts(&mut engine, input, output)?;
