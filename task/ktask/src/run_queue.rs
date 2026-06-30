@@ -21,8 +21,6 @@ use ksched::BaseScheduler;
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
-#[cfg(all(feature = "task_ext", target_arch = "aarch64"))]
-use crate::TaskExt;
 use crate::{
     KCpuMask, KtaskRef, Scheduler, TaskInner,
     future::block_on,
@@ -669,7 +667,17 @@ impl RunQueue {
             next_task.set_on_cpu_mask_bit(this_cpu_id());
         }
 
-        #[cfg(feature = "task_ext")]
+        use crate::TaskExt;
+        let cpu_id = this_cpu_id();
+        if let Some(ext) = next_task.task_ext() {
+            // Publish the CPU in the next mm before switching hardware state
+            // so concurrent flushers can over-target but never miss this CPU.
+            // We intentionally do not clear the previous mm here: code after
+            // `switch_to()` runs only when the old task is scheduled again, so
+            // eager clear-after-switch is not a sound timing point.
+            ext.set_user_mm_resident_cpu(cpu_id);
+        }
+
         {
             use crate::TaskExt;
 
@@ -688,7 +696,7 @@ impl RunQueue {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
 
-            #[cfg(all(feature = "task_ext", target_arch = "aarch64"))]
+            #[cfg(target_arch = "aarch64")]
             if let Some(root) = next_task
                 .task_ext()
                 .and_then(|ext| ext.switch_page_table_root())

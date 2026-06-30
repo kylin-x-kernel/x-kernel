@@ -20,7 +20,7 @@ x-kernel 将**引导**（`kernel-boot`、平台 `platconfig`）与**运行时**�
 core/kruntime/
 ├── src/
 │   ├── lib.rs              # 主核 rust_main、日志适配、中断/分配器、内存区日志
-│   ├── mp.rs               # SMP 从核启动、TaskCpuResidencyIf、TLB 单测
+│   ├── mp.rs               # SMP 从核启动、TLB 单测
 │   ├── init_setup.rs       # .init_array 构造函数表遍历
 │   ├── dma_integration.rs  # kdma::DmaPageTableIf 实现
 │   └── lang_items.rs       # #[panic_handler]
@@ -57,7 +57,6 @@ kernel-boot (汇编 / MMU / BootInfo)
 侧向接线（链接期，非启动顺序）：
   dma_integration  ──impl──►  kdma::DmaPageTableIf  ──►  memspace
   LogIfImpl          ──impl──►  klogger::LoggerAdapter
-  TaskCpuResidencyImpl ──impl──► kipi::tlb::TaskCpuResidencyIf
 ```
 
 | 组件 | 职责 |
@@ -142,8 +141,6 @@ SECOND_KERNEL_ENTRY(logical_cpu_id)
 |------|----------|------|
 | `kdma::DmaPageTableIf` | `dma_integration.rs` | 打破 `kdma` ↔ `memspace` 循环依赖 |
 | `klogger::LoggerAdapter` | `lib.rs` `LogIfImpl` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
-| `kipi::tlb::TaskCpuResidencyIf` | `mp.rs` | TLB shootdown 查询任务 CPU 驻留掩码 |
-
 均为链接期单实现，非运行时注册。
 
 ## Cargo Features

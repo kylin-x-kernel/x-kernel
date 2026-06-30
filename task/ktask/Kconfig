@@ -30,12 +30,6 @@ config KFEAT_SCHED_EEVDF
 
 endchoice
 
-config KFEAT_TASK_EXT
-    bool "Enable task extended data"
-    default y
-    help
-      Allow attaching user-defined extension data to each task.
-
 menu "Task Diagnostics"
 
 config KFEAT_SNAPSHOT

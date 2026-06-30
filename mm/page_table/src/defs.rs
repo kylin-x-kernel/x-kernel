@@ -6,6 +6,8 @@
 
 use core::fmt;
 
+#[cfg(feature = "smp")]
+use kcpu_id_map::KCpuMask;
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr};
 
 bitflags::bitflags! {
@@ -271,14 +273,24 @@ pub trait PagingMetaData: Sync + Send {
     /// only the entry mapping `vaddr`.
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
 
-    /// Flush TLB on CPUs where the **current task** has been scheduled
-    /// (per-process CPU residency mask).  Correct for user page tables.
+    /// Flush TLB on CPUs that may still retain the target user address
+    /// space's translations.
     ///
     /// Default: local-only, backward compatible with single-CPU builds.
     /// When `feature = "smp"` is enabled, architectures override this to
     /// also broadcast to remote CPUs.
     #[inline]
     fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) {
+        Self::flush_tlb(vaddr);
+    }
+
+    /// Like [`flush_tlb_process`](Self::flush_tlb_process), but targets an
+    /// explicit residency mask for the user address space being modified.
+    ///
+    /// Default: local-only, backward compatible with single-CPU builds.
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn flush_tlb_process_mask(vaddr: Option<Self::VirtAddr>, _target_mask: KCpuMask) {
         Self::flush_tlb(vaddr);
     }
 
@@ -312,8 +324,8 @@ pub trait PagingMetaData: Sync + Send {
 #[cfg(feature = "smp")]
 #[crate_interface::def_interface]
 pub trait TlbFlushIf {
-    /// Flush TLB entries on remote CPUs where the **current task** has been
-    /// scheduled (per-process CPU residency mask).
+    /// Flush TLB entries on remote CPUs that may still retain the target
+    /// user address space's translations (mm-owned CPU residency mask).
     ///
     /// This is the right choice for per-process user page tables, where only
     /// CPUs that have run threads of the current process can hold stale
@@ -322,7 +334,7 @@ pub trait TlbFlushIf {
     /// If `vaddr` is `None`, flush the entire TLB; otherwise flush only the
     /// entry mapping `vaddr`.  The local CPU flush is the caller's
     /// responsibility — this method only handles remote CPUs.
-    fn flush_process(vaddr: Option<VirtAddr>);
+    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask);
 
     /// Flush TLB entries on **all** online CPUs, regardless of task
     /// residency.  This is required for modifications to the global kernel

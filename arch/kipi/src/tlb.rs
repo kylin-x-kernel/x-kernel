@@ -7,10 +7,10 @@
 //! When one CPU modifies page tables, other CPUs may hold stale TLB entries.
 //! This module provides two IPI-based shootdown paths:
 //!
-//! 1. **Per-process flush** (`flush_process`): the initiator sends IPIs only to
-//!    the CPUs that the current task has been scheduled on (tracked by
-//!    `on_cpu_mask`). Used for user page table modifications whose visibility is
-//!    scoped to a single address space.
+//! 1. **Per-address-space flush** (`flush_process_mask`): the initiator sends
+//!    IPIs only to CPUs recorded in the target user address space's mm-owned
+//!    residency mask. Used for user page table modifications whose visibility
+//!    is scoped to a single address space.
 //!
 //! 2. **All-CPU flush** (`flush_all_cpus`): the initiator broadcasts IPIs to
 //!    **all** online CPUs via `for_each_present_logical_cpu()`. Used for kernel
@@ -23,11 +23,10 @@
 //! shootdowns from different CPUs cannot overwrite each other's completion
 //! state.
 //!
-//! The residency mask is only reset on a **full** TLB flush
-//! (`flush_process(None)` or `flush_all_cpus(None)`), where every target CPU has
-//! invalidated all entries. For single-VA flushes the mask is preserved so that
-//! CPUs are not prematurely removed while still holding valid TLB entries for
-//! other virtual addresses.
+//! Residency maintenance is owned by the scheduler/context-switch path rather
+//! than the flush path itself. Shootdown consumes a conservative residency
+//! snapshot; it does not rebuild or reset residency after full or partial
+//! flushes.
 //!
 //! Implements the [`page_table::TlbFlushIf`] interface defined in the
 //! `page_table` crate, breaking the circular dependency between `page_table` and
@@ -73,6 +72,14 @@ impl RequestSeq {
 
     const fn get(self) -> u64 {
         self.0
+    }
+
+    const fn next_after(raw: u64) -> Self {
+        if raw == u64::MAX {
+            Self(1)
+        } else {
+            Self(raw + 1)
+        }
     }
 }
 
@@ -174,15 +181,15 @@ impl ShootdownRequestSlot {
     }
 
     fn allocate_seq(&self) -> RequestSeq {
-        let seq = self
+        let previous = self
             .next_seq
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                let next = if current == u64::MAX { 1 } else { current + 1 };
-                Some(next)
+                Some(RequestSeq::next_after(current).get())
             })
             .expect("fetch_update closure always returns Some");
-        debug_assert_ne!(seq, RequestSeq::INITIAL.get());
-        RequestSeq(seq)
+        let seq = RequestSeq::next_after(previous);
+        debug_assert_ne!(seq, RequestSeq::INITIAL);
+        seq
     }
 
     fn clear_targets(&self) {
@@ -241,8 +248,7 @@ impl ShootdownRequestSlot {
 /// and reuse the same per-CPU slot before the current shootdown finishes.
 ///
 /// Important: this guard must stay scoped to the request-slot publish/send/wait
-/// window only. It must be dropped before any path that can block, sleep, or
-/// take a sleepable lock, such as `reset_on_cpu_mask()`.
+/// window only. It must be dropped before any path that can block or sleep.
 struct ActiveShootdownSlot<'a> {
     _no_preempt: NoPreempt,
     slot: &'a ShootdownRequestSlot,
@@ -307,23 +313,6 @@ impl Drop for ActiveShootdownSlot<'_> {
     }
 }
 
-/// Interface for querying per-task CPU residency, used to limit shootdown
-/// scope. Implemented by the runtime layer which has access to `ktask`.
-#[crate_interface::def_interface]
-pub trait TaskCpuResidencyIf {
-    /// Returns the set of CPUs the current task has been scheduled on.
-    ///
-    /// TLB shootdown uses this to narrow per-process invalidations to CPUs
-    /// that may still hold translations for the current task's address space.
-    fn current_on_cpu_mask() -> KCpuMask;
-
-    /// Resets the current task's residency mask to only the given CPU.
-    ///
-    /// This is called only after a full flush has completed on all targets and
-    /// must therefore be valid outside the no-preempt request-slot lifetime.
-    fn reset_on_cpu_mask();
-}
-
 /// Mark that all secondary CPUs have entered the runtime.
 ///
 /// Must be called exactly once from the primary CPU after
@@ -338,14 +327,11 @@ struct TlbFlushImpl;
 
 #[crate_interface::impl_interface]
 impl TlbFlushIf for TlbFlushImpl {
-    fn flush_process(vaddr: Option<VirtAddr>) {
+    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
         if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
             return;
         }
-        flush_remote(
-            vaddr,
-            crate_interface::call_interface!(TaskCpuResidencyIf::current_on_cpu_mask()),
-        );
+        flush_remote(vaddr, target_mask);
     }
 
     fn flush_all_cpus(vaddr: Option<VirtAddr>) {
@@ -388,8 +374,8 @@ fn set_last_handled_pending_epoch(epoch: u64) {
 }
 
 /// Shared shootdown logic: publish `vaddr`, send IPIs to every CPU set in
-/// `target_mask` (except self), spin-wait for acknowledgement of this exact
-/// request sequence, and reset residency masks on full flushes.
+/// `target_mask` (except self), and spin-wait for acknowledgement of this
+/// exact request sequence.
 fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
     let should_retry = {
         let Some(active_slot) = ActiveShootdownSlot::try_acquire_current() else {
@@ -459,13 +445,6 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
 
     if should_retry {
         flush_remote(None, all_present_cpu_mask());
-        return;
-    }
-
-    // This must remain outside `ActiveShootdownSlot` so the potential registry
-    // lookup and sleepable lock acquisition happen after preemption is restored.
-    if vaddr.is_none() {
-        crate_interface::call_interface!(TaskCpuResidencyIf::reset_on_cpu_mask());
     }
 }
 

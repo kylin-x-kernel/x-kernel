@@ -14,6 +14,7 @@ extern crate alloc;
 mod aarch64_asid;
 mod aspace;
 pub mod backend;
+mod cpu_residency;
 mod fault;
 mod iomap;
 mod vma;
@@ -33,6 +34,7 @@ pub use vmobj::{ObjectInvalidateRequest, VmObjectId};
 pub use self::aarch64_asid::Aarch64UserAsidContext;
 pub use self::{
     aspace::{AddrPolicy, AddrSpace, InvalidateHandle, MmSpace, MremapSource},
+    cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
     fault::{FaultContext, FaultInput, FaultOutcome, PageFaultOutcome},
     iomap::{
         DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device, iounmap,

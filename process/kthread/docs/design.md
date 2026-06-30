@@ -132,7 +132,7 @@ clone / init entry
   → add_task_to_table 注册 task/process/group/session weak entry
 ```
 
-`Thread` 作为 `ktask::TaskExt` 挂到任务扩展槽。
+`Thread` 作为 `ktask::TaskExt` 挂到任务扩展槽；该扩展槽是 `ktask` 的常规能力，不依赖额外 feature。
 后续 `TaskInner::as_thread` 通过扩展槽 downcast 取回 `Thread`。
 内核任务没有 `Thread` 扩展，调用进程专用入口会触发 panic 或返回错误。
 

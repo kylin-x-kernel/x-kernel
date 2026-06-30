@@ -103,8 +103,8 @@ arch/kipi/
 - TLB shootdown 依赖所有 AP 已经启动，`mark_all_cpus_started()` 之后才会真正发 IPI。
 - `flush_remote()` 在发布 request slot 的生命周期内禁用抢占，防止同一 CPU 上的
   另一个任务复用相同 slot。
-- `flush_remote()` 不能把不可睡眠上下文扩展到 `reset_on_cpu_mask()` 等会拿
-  sleepable lock 的路径，因此 active slot guard 必须在那之前释放。
+- 用户页表 shootdown 的目标集合由调度路径维护的 mm-owned residency 提供；
+  `flush_remote()` 只消费快照，不在 flush 结束后重建或 reset residency。
 
 ## 状态机
 
@@ -173,7 +173,6 @@ inactive
 6. 发送 IPI。
 7. 等待每个目标 CPU 将 `acked_seq_by_cpu[target]` 推进到该 `request_seq`。
 8. 释放 active slot；若期间检测到同 CPU 嵌套请求，则补发 full retry flush。
-9. 对 full flush 在 guard 释放后执行 `reset_on_cpu_mask()`。
 
 ### `tlb::handle_shootdown`
 

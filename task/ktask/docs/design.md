@@ -151,6 +151,10 @@ init_scheduler_secondary()
 - 当前实现无主动负载均衡器；任务跨核迁移主要由 affinity 变化触发。
 - 对 `Blocked` 任务重新入队时，SMP 下会等待 `task.on_cpu()` 清零，避免与远端 CPU 的切换过程并发冲突。
 - 远端 run queue 唤醒不会直接切换远端 CPU；在支持 IPI 和抢占时，通过远端 pending-resched 请求把切换推迟到远端安全点。
+- `TaskInner::on_cpu_mask()` 现在只表示 `ktask` 自己的调度驻留快照；用户地址空间
+  的 TLB shootdown 目标集合由 `memspace::MmCpuResidency` 持有。当前实现只在
+  switch-in 时保守聚合设置该 mask，允许 over-target，但不保证在 switch-away
+  后立即回收旧 CPU footprint。
 
 ## 调度点模型（何时可能发生切换）
 
@@ -178,7 +182,9 @@ init_scheduler_secondary()
 | `sched_eevdf` | EEVDF 抢占式调度（隐含 `preempt`） |
 | `snapshot` | 任务快照与回溯基础能力 |
 | `watchdog` | watchdog 诊断（依赖 `snapshot`） |
-| `ipi` / `tls` / `task_ext` | 可选扩展能力 |
+| `ipi` / `tls` | 可选扩展能力 |
+
+`TaskExt` / `KTaskExt` 是 `ktask` 的常规任务挂接机制，不再通过单独 feature 控制。
 
 调度算法默认由 Kconfig 选择（默认 EEVDF）。
 

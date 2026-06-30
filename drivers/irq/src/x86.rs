@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
+use core::sync::atomic::Ordering;
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use khal::irq::{IrqPolarity, IrqTrigger, TargetCpu};
@@ -30,9 +31,12 @@ fn enable(irq: usize, enabled: bool) {
 }
 
 fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
-    // x86 TSO already preserves the required publish-before-notify ordering
-    // for prior memory writes before the APIC IPI send path, so no extra
-    // barrier is needed here.
+    // Publish prior Normal-memory stores before programming the local APIC
+    // ICR/MSR. x86 TSO orders ordinary WB-memory accesses, but `notify_cpu()`
+    // is also the architecture boundary where we transition into device/APIC
+    // state. Keep the publish-before-notify guarantee here so callers do not
+    // need a separate fence before every IPI send.
+    core::sync::atomic::fence(Ordering::SeqCst);
     match target {
         TargetCpu::Self_ => x86_apic::send_ipi_self(interrupt_id),
         TargetCpu::Specific(logical_cpu_id) => {

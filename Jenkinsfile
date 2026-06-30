@@ -23,6 +23,11 @@ pipeline {
 
     environment {
         CI = 'true'
+        // Git ownership checks can fail before any pipeline step has a chance
+        // to call markSafeDirectory() inside the containerized workspace.
+        GIT_CONFIG_COUNT = '1'
+        GIT_CONFIG_KEY_0 = 'safe.directory'
+        GIT_CONFIG_VALUE_0 = '*'
         PROJECT_REPO = 'https://gitee.com/openkylin/x-kernel'
         DEFAULT_BRANCH = 'main'
         LIBUTEE_REPO = 'https://gitee.com/openkylin/rust-libutee'

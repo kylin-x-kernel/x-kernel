@@ -13,6 +13,7 @@ smp = ["page_table/smp"]
 [dependencies]
 anon = { workspace = true }
 kalloc = { workspace = true }
+kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 khal = { workspace = true }
 kplat = { workspace = true }

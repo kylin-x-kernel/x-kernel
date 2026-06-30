@@ -41,7 +41,13 @@ impl MappingPermissions {
         if prot.intersects(MmapProt::GROWDOWN | MmapProt::GROWSUP) {
             return Err(KError::InvalidInput);
         }
-        let mut flags = MappingFlags::USER;
+        // `PROT_NONE` must translate to an empty current-permission set rather
+        // than retaining `USER`, otherwise the page-table layer may keep the
+        // mapping user-accessible in the current encoding.
+        let mut flags = MappingFlags::empty();
+        if !prot.is_empty() {
+            flags |= MappingFlags::USER;
+        }
         if prot.contains(MmapProt::READ) {
             flags |= MappingFlags::READ;
         }

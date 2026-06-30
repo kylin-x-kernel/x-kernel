@@ -15,7 +15,6 @@ default = []
 snapshot = ["dep:backtrace"]
 ipi = ["dep:kipi"]
 watchdog = ["snapshot"]
-task_ext = ["dep:extern-trait"]
 tls = ["khal/tls"]
 preempt = ["percpu/preempt", "kspin/preempt"]
 smp = ["kspin/smp"]
@@ -39,7 +38,7 @@ ksched = { workspace = true }
 cfg-if.workspace = true
 crate_interface = { workspace = true }
 event-listener = { workspace = true }
-extern-trait = { version = "0.2", optional = true }
+extern-trait.workspace = true
 futures-util = { version = "0.3", default-features = false, features = [
     "alloc",
     "async-await-macro",

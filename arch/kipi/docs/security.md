@@ -129,8 +129,8 @@
 3. **同一发起 CPU 的 request slot 在 active 生命周期内不可被另一个任务复用**  
    这由 `ActiveShootdownSlot` 的 no-preempt guard 维持。
 
-4. **full flush 的后续资源状态修正必须发生在退出 no-preempt 区域之后**  
-   否则可能在不可睡眠上下文里拿 sleepable lock。
+4. **TLB shootdown 不能在 flush 路径内重建 residency 状态**  
+   residency 由调度切换路径维护；flush 路径只允许消费一个保守快照。
 
 5. **pending epoch 只能作为 fast path gate，不能替代真实 ack 协议**  
    epoch 只决定“要不要扫描”，真正的完成条件仍是 `acked_seq_by_cpu`。
@@ -159,7 +159,6 @@
 | T-03 | 普通 IPI 共用同一向量导致无意义全表扫描 | 每次 IPI 都无条件扫描 TLB slots | 高频无关 IPI 造成 O(CPU_NUM) 热路径开销 | per-target `pending_epoch` fast path |
 | T-04 | 调用者把不适合中断上下文的逻辑作为回调广播到其它 CPU | 回调内部睡眠、拿大锁或跑长路径 | IPI handler 延迟、锁顺序问题、可用性下降 | `kipi` 文档约束回调必须适合该执行上下文；模块不兜底 |
 | T-05 | 队列未初始化前被远程入队 | AP 尚未执行 `init()`，但已经成为 IPI 目标 | 通过原始 per-CPU 引用访问未就绪槽位 | API 显式检查 `IPI_QUEUE_READY`，失败返回 `TargetCpuNotReady` |
-| T-06 | TLB full flush 后在 no-preempt 区域内做 residency reset | 后续路径拿 sleepable lock | 触发调度/锁断言或潜在死锁 | `reset_on_cpu_mask()` 明确放在 guard 释放后执行 |
 
 ## 故障模式与影响分析（FMEA）
 

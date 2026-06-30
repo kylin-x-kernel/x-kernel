@@ -53,7 +53,6 @@ pub enum TaskState {
 /// User-defined task extended data.
 /// # Safety
 /// See [`extern_trait`].
-#[cfg(feature = "task_ext")]
 #[extern_trait::extern_trait(
     /// The impl proxy type for [`TaskExt`].
     pub KTaskExt
@@ -63,6 +62,9 @@ pub unsafe trait TaskExt {
     fn on_enter(&self) {}
     /// Called when the task is switched out.
     fn on_leave(&self) {}
+    /// Marks that the current CPU may retain TLB state for this task's user
+    /// address space.
+    fn set_user_mm_resident_cpu(&self, _cpu_id: LogicalCpuId) {}
     /// Returns the latest hardware user page-table root for switch-in.
     fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
         None
@@ -166,7 +168,6 @@ pub struct TaskInner {
     kstack: Option<TaskStack>,
     ctx: TaskContextCell,
 
-    #[cfg(feature = "task_ext")]
     task_ext: Option<KTaskExt>,
 
     #[cfg(feature = "tls")]
@@ -269,13 +270,11 @@ impl TaskInner {
     }
 
     /// Returns a reference to the task extended data.
-    #[cfg(feature = "task_ext")]
     pub fn task_ext(&self) -> Option<&KTaskExt> {
         self.task_ext.as_ref()
     }
 
     /// Returns a mutable reference to the task extended data.
-    #[cfg(feature = "task_ext")]
     pub fn task_ext_mut(&mut self) -> &mut Option<KTaskExt> {
         &mut self.task_ext
     }
@@ -467,7 +466,6 @@ impl TaskInner {
             wait_for_exit: AtomicWaker::new(),
             kstack: None,
             ctx: TaskContextCell::new(),
-            #[cfg(feature = "task_ext")]
             task_ext: None,
             #[cfg(feature = "tls")]
             tls: TlsArea::alloc(),
@@ -625,21 +623,25 @@ impl TaskInner {
         self.on_cpu.store(on_cpu, Ordering::Release)
     }
 
-    /// Returns a snapshot of the CPUs this task has been scheduled on.
+    /// Returns the task-local scheduler residency snapshot for this task.
+    ///
+    /// This state is owned by `ktask` and tracks where this task has run from
+    /// the scheduler's perspective. User address-space TLB shootdown targeting
+    /// is tracked separately by `memspace::MmCpuResidency`.
     #[cfg(feature = "smp")]
     #[inline]
     pub fn on_cpu_mask(&self) -> KCpuMask {
         *self.on_cpu_mask.lock()
     }
 
-    /// Marks the given CPU as part of this task's residency mask.
+    /// Marks the given CPU in this task-local scheduler residency snapshot.
     #[cfg(feature = "smp")]
     #[inline]
     pub fn set_on_cpu_mask_bit(&self, cpu_id: LogicalCpuId) {
         self.on_cpu_mask.lock().set_logical(cpu_id, true);
     }
 
-    /// Clears the residency mask and sets only the given CPU.
+    /// Replaces this task-local scheduler residency snapshot with one CPU.
     #[cfg(feature = "smp")]
     #[inline]
     pub fn reset_on_cpu_mask(&self, cpu_id: LogicalCpuId) {

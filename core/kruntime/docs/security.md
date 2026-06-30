@@ -74,7 +74,7 @@ SECONDARY_BOOT_STACKS.stack_top(...)
 
 ### 6. `crate_interface` 实现
 
-`dma_integration`、`LogIfImpl`、`TaskCpuResidencyIf` 为 safe Rust；安全性委托给 `memspace::protect`、`khal::console` 等被调用方。
+`dma_integration`、`LogIfImpl` 为 safe Rust；安全性委托给 `memspace::protect`、`khal::console` 等被调用方。
 
 ## 内存与并发不变量
 

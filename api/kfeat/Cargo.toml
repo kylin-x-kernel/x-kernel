@@ -79,7 +79,6 @@ alloc_buddy = ["alloc", "alloc-engine/buddy", "kalloc/buddy"]
 dma = []
 
 # Task scheduler (driven by core/ktask/Kconfig)
-task_ext = ["ktask/task_ext"]
 sched_fifo = ["ktask/sched_fifo"]
 sched_rr = ["ktask/sched_rr"]
 sched_cfs = ["ktask/sched_cfs"]

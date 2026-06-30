@@ -5,6 +5,7 @@
 use alloc::boxed::Box;
 
 use extern_trait::extern_trait;
+use kcpu_id_map::LogicalCpuId;
 use ktask::{TaskExt, TaskInner};
 
 use super::Thread;
@@ -35,6 +36,10 @@ pub trait AsThread {
 // threads during migration.
 #[extern_trait]
 unsafe impl TaskExt for Box<Thread> {
+    fn set_user_mm_resident_cpu(&self, cpu_id: LogicalCpuId) {
+        self.proc_state.runtime().mm_cpu_residency().set_cpu(cpu_id);
+    }
+
     fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
         #[cfg(target_arch = "aarch64")]
         {

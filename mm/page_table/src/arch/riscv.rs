@@ -149,6 +149,13 @@ pub trait SvVirtAddr: memaddr::MemoryAddr + Send + Sync {
         Self::flush_tlb(vaddr);
     }
 
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn flush_tlb_process_mask(vaddr: Option<Self>, target_mask: kcpu_id_map::KCpuMask) {
+        let _ = target_mask;
+        Self::flush_tlb(vaddr);
+    }
+
     #[inline]
     fn flush_tlb_all_cpus(vaddr: Option<Self>) {
         Self::flush_tlb_process(vaddr);
@@ -163,9 +170,12 @@ impl SvVirtAddr for VirtAddr {
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process(vaddr: Option<Self>) {
+    fn flush_tlb_process_mask(vaddr: Option<Self>, target_mask: kcpu_id_map::KCpuMask) {
         karch::flush_tlb(vaddr);
-        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_process(vaddr));
+        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_process_mask(
+            vaddr,
+            target_mask
+        ));
     }
 
     #[cfg(feature = "smp")]
@@ -203,6 +213,12 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv39MetaData<VA> {
         <VA as SvVirtAddr>::flush_tlb_process(vaddr);
     }
 
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn flush_tlb_process_mask(vaddr: Option<VA>, target_mask: kcpu_id_map::KCpuMask) {
+        <VA as SvVirtAddr>::flush_tlb_process_mask(vaddr, target_mask);
+    }
+
     #[inline]
     fn flush_tlb_all_cpus(vaddr: Option<VA>) {
         <VA as SvVirtAddr>::flush_tlb_all_cpus(vaddr);
@@ -224,6 +240,12 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv48MetaData<VA> {
     #[inline]
     fn flush_tlb_process(vaddr: Option<VA>) {
         <VA as SvVirtAddr>::flush_tlb_process(vaddr);
+    }
+
+    #[cfg(feature = "smp")]
+    #[inline]
+    fn flush_tlb_process_mask(vaddr: Option<VA>, target_mask: kcpu_id_map::KCpuMask) {
+        <VA as SvVirtAddr>::flush_tlb_process_mask(vaddr, target_mask);
     }
 
     #[inline]

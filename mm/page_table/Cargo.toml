@@ -19,6 +19,7 @@ arrayvec = { version = "0.7", default-features = false }
 bitflags = "2.9"
 bitmaps = { version = "3.2", default-features = false, optional = true }
 crate_interface.workspace = true
+kcpu_id_map.workspace = true
 log = "0.4"
 memaddr = { workspace = true }
 kerrno = { workspace = true, optional = true }

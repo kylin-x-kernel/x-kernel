@@ -16,11 +16,16 @@
 //! When the batch is finalized (via [`PageTableMut::finish`] or `Drop`), the
 //! addresses are flushed either individually (≤ 16 entries) or with a full TLB
 //! shootdown (> 16 entries).
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(
+    target_arch = "aarch64",
+    all(feature = "smp", not(target_arch = "aarch64"))
+))]
 use core::ptr::NonNull;
 use core::{marker::PhantomData, ops::Deref};
 
 use arrayvec::ArrayVec;
+#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+use kcpu_id_map::KCpuMask;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
 
 use crate::defs::{
@@ -37,6 +42,13 @@ struct UserAsidProvider {
     get_asid: unsafe fn(NonNull<()>) -> u16,
 }
 
+#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+#[derive(Clone, Copy)]
+struct UserCpuMaskProvider {
+    ctx: NonNull<()>,
+    get_mask: unsafe fn(NonNull<()>) -> KCpuMask,
+}
+
 #[cfg(target_arch = "aarch64")]
 // SAFETY:
 // - the provider context is installed only for address-space-owned ASID state
@@ -49,6 +61,19 @@ unsafe impl Send for UserAsidProvider {}
 // SAFETY: same argument as `Send`; the provider only exposes read-only access
 // to externally synchronized ASID state.
 unsafe impl Sync for UserAsidProvider {}
+
+#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+// SAFETY:
+// - the provider context is installed only for address-space-owned residency
+//   state that outlives the page table using it;
+// - the callback is restricted to taking a snapshot copy of that residency
+//   state, so sharing it across CPUs does not create unsynchronized mutation.
+unsafe impl Send for UserCpuMaskProvider {}
+
+#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+// SAFETY: same argument as `Send`; the provider only exposes snapshot reads of
+// externally synchronized residency state.
+unsafe impl Sync for UserCpuMaskProvider {}
 
 const fn p4_idx(vaddr: usize) -> usize {
     (vaddr >> (12 + 27)) & (ENTRY_COUNT - 1)
@@ -101,6 +126,8 @@ pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>
     is_kernel: bool,
     #[cfg(target_arch = "aarch64")]
     user_asid_provider: Option<UserAsidProvider>,
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    user_cpu_mask_provider: Option<UserCpuMaskProvider>,
     _phantom: PhantomData<(M, PTE, H)>,
 }
 
@@ -132,6 +159,8 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
             is_kernel,
             #[cfg(target_arch = "aarch64")]
             user_asid_provider: None,
+            #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+            user_cpu_mask_provider: None,
             _phantom: PhantomData,
         })
     }
@@ -153,6 +182,25 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         get_asid: unsafe fn(NonNull<()>) -> u16,
     ) {
         self.user_asid_provider = Some(UserAsidProvider { ctx, get_asid });
+    }
+
+    /// Registers a CPU-residency provider for non-AArch64 user-page-table TLB targeting.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    ///
+    /// - `ctx` remains valid for the full lifetime of this page table;
+    /// - `get_mask(ctx)` performs only read-only access to that live context;
+    /// - the provider returns the residency mask for this page table's user
+    ///   address space.
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    pub unsafe fn set_user_cpu_mask_provider(
+        &mut self,
+        ctx: NonNull<()>,
+        get_mask: unsafe fn(NonNull<()>) -> KCpuMask,
+    ) {
+        self.user_cpu_mask_provider = Some(UserCpuMaskProvider { ctx, get_mask });
     }
 
     /// Returns the physical address of the root page table frame.
@@ -221,6 +269,17 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     /// type. TLB flushes are deferred until [`PageTableMut::finish`] or `Drop`.
     pub fn modify(&mut self) -> PageTableMut<'_, M, PTE, H> {
         PageTableMut::new(self)
+    }
+
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    fn current_user_cpu_mask(&self) -> KCpuMask {
+        self.user_cpu_mask_provider
+            .map_or_else(KCpuMask::new, |provider| {
+                // SAFETY: the provider contract guarantees that `ctx` stays valid
+                // for the page table lifetime and that the callback performs only
+                // a read-only snapshot of the residency state.
+                unsafe { (provider.get_mask)(provider.ctx) }
+            })
     }
 }
 
@@ -567,7 +626,11 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         if !entry.is_present() {
             return Err(PtError::NotMapped);
         }
-        entry.set_flags(flags, size.is_huge());
+        if flags.is_empty() {
+            entry.clear();
+        } else {
+            entry.set_flags(flags, size.is_huge());
+        }
         self.flush(vaddr);
         Ok(size)
     }
@@ -792,17 +855,27 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             // space's ASID (AArch64) or residency mask (other arches).
             #[cfg(target_arch = "aarch64")]
             let asid = self.current_user_asid();
-            #[cfg(not(target_arch = "aarch64"))]
-            let asid = 0;
+            #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+            let target_mask = self.current_user_cpu_mask();
             match &self.flush {
                 ToFlush::None => {}
                 ToFlush::Addresses(addrs) => {
                     for vaddr in addrs.iter() {
+                        #[cfg(target_arch = "aarch64")]
                         M::flush_tlb_process_asid(Some(*vaddr), asid);
+                        #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+                        M::flush_tlb_process_mask(Some(*vaddr), target_mask);
+                        #[cfg(not(any(target_arch = "aarch64", feature = "smp")))]
+                        M::flush_tlb_process(Some(*vaddr));
                     }
                 }
                 ToFlush::Full => {
+                    #[cfg(target_arch = "aarch64")]
                     M::flush_tlb_process_asid(None, asid);
+                    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+                    M::flush_tlb_process_mask(None, target_mask);
+                    #[cfg(not(any(target_arch = "aarch64", feature = "smp")))]
+                    M::flush_tlb_process(None);
                 }
             }
         }
@@ -821,11 +894,17 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop
 
 #[cfg(unittest)]
 mod tests {
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    use core::ptr::NonNull;
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    use core::sync::atomic::AtomicBool;
     use core::{
         cell::UnsafeCell,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    use kcpu_id_map::KCpuMask;
     use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
     use unittest::def_test;
 
@@ -923,6 +1002,34 @@ mod tests {
         }
 
         fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
+
+        #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+        fn flush_tlb_process_mask(_vaddr: Option<Self::VirtAddr>, target_mask: KCpuMask) {
+            PROCESS_MASK_FLUSH_CALLS.fetch_add(1, Ordering::Relaxed);
+            for (cpu, observed_bit) in OBSERVED_PROCESS_MASK_BITS.iter().enumerate() {
+                observed_bit.store(target_mask.get(cpu), Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    static PROCESS_MASK_FLUSH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    static PROVIDER_MASK_BITS: [AtomicBool; kbuild_config::CPU_NUM] =
+        [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM];
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    static OBSERVED_PROCESS_MASK_BITS: [AtomicBool; kbuild_config::CPU_NUM] =
+        [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM];
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    static PROVIDER_CTX: () = ();
+
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    unsafe fn test_user_cpu_mask_provider(_ctx: NonNull<()>) -> KCpuMask {
+        let mut mask = KCpuMask::new();
+        for (cpu, provider_bit) in PROVIDER_MASK_BITS.iter().enumerate() {
+            mask.set(cpu, provider_bit.load(Ordering::Relaxed));
+        }
+        mask
     }
 
     #[repr(align(4096))]
@@ -1087,5 +1194,55 @@ mod tests {
             .expect("map test page");
         assert!(modify.finish().had_pending());
         assert!(!modify.finish().had_pending());
+    }
+
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    #[def_test]
+    fn user_page_table_flush_uses_installed_process_mask() {
+        PROCESS_MASK_FLUSH_CALLS.store(0, Ordering::Relaxed);
+        for provider_bit in &PROVIDER_MASK_BITS {
+            provider_bit.store(false, Ordering::Relaxed);
+        }
+        for observed_bit in &OBSERVED_PROCESS_MASK_BITS {
+            observed_bit.store(false, Ordering::Relaxed);
+        }
+
+        let mut expected_targets = [false; kbuild_config::CPU_NUM];
+        let first_nonzero_cpu = 1;
+        let primary_target_cpu = if kbuild_config::CPU_NUM > 1 {
+            first_nonzero_cpu
+        } else {
+            0
+        };
+        PROVIDER_MASK_BITS[primary_target_cpu].store(true, Ordering::Relaxed);
+        expected_targets[primary_target_cpu] = true;
+
+        let secondary_target_cpu = kbuild_config::CPU_NUM.saturating_sub(1);
+        if secondary_target_cpu != primary_target_cpu {
+            PROVIDER_MASK_BITS[secondary_target_cpu].store(true, Ordering::Relaxed);
+            expected_targets[secondary_target_cpu] = true;
+        }
+
+        let mut table = TestPageTable::try_new().expect("test page table");
+        let ctx = NonNull::from(&PROVIDER_CTX).cast();
+        // SAFETY: the callback reads only the static test mask above, and
+        // `PROVIDER_CTX` is a live static whose address remains valid for the
+        // entire test, satisfying the provider lifetime contract.
+        unsafe { table.set_user_cpu_mask_provider(ctx, test_user_cpu_mask_provider) };
+
+        table
+            .modify()
+            .map(
+                vaddr(0x20_0000),
+                paddr(0x40_0000),
+                PageSize::Size4K,
+                PagingFlags::READ,
+            )
+            .expect("map test page");
+
+        assert_eq!(PROCESS_MASK_FLUSH_CALLS.load(Ordering::Relaxed), 1);
+        for (cpu, observed_bit) in OBSERVED_PROCESS_MASK_BITS.iter().enumerate() {
+            assert_eq!(observed_bit.load(Ordering::Relaxed), expected_targets[cpu]);
+        }
     }
 }

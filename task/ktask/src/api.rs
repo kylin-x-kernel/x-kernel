@@ -13,11 +13,8 @@ use core::sync::atomic::AtomicUsize;
 use kspin::NoPreemptIrqSave;
 
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
-#[doc(cfg(feature = "task_ext"))]
-#[cfg(feature = "task_ext")]
-pub use crate::task::{KTaskExt, TaskExt};
 pub use crate::{
-    task::{CurrentTask, TaskId, TaskInner, TaskState},
+    task::{CurrentTask, KTaskExt, TaskExt, TaskId, TaskInner, TaskState},
     timers::register_timer_callback,
     wait_queue::WaitQueue,
 };

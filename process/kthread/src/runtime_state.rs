@@ -11,11 +11,12 @@ use kfs::FsContext;
 use kprocess::Pid;
 use ksync::Mutex;
 use ktimer::ProcessTimerManager;
-use memspace::MmSpace;
+use memspace::{MmCpuResidencyRef, MmSpace};
 
 /// Process runtime state shared by all threads in a process.
 pub struct ProcessRuntimeState {
     address_space: Arc<Mutex<MmSpace>>,
+    mm_cpu_residency: MmCpuResidencyRef,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Arc<memspace::Aarch64UserAsidContext>,
     fs_context: Arc<Mutex<FsContext>>,
@@ -31,6 +32,7 @@ impl ProcessRuntimeState {
         fs_context: Arc<Mutex<FsContext>>,
         user_heap_base: usize,
     ) -> Self {
+        let mm_cpu_residency = address_space.lock().cpu_residency().clone();
         #[cfg(target_arch = "aarch64")]
         let user_asid_context = address_space
             .lock()
@@ -39,6 +41,7 @@ impl ProcessRuntimeState {
             .clone();
         Self {
             address_space,
+            mm_cpu_residency,
             #[cfg(target_arch = "aarch64")]
             user_asid_context,
             fs_context,
@@ -50,6 +53,11 @@ impl ProcessRuntimeState {
     /// Returns the virtual address space.
     pub fn address_space(&self) -> &Arc<Mutex<MmSpace>> {
         &self.address_space
+    }
+
+    /// Returns the mm-owned CPU residency state for this process address space.
+    pub fn mm_cpu_residency(&self) -> &MmCpuResidencyRef {
+        &self.mm_cpu_residency
     }
 
     #[cfg(target_arch = "aarch64")]

@@ -64,6 +64,8 @@
   spinlock.
 - `msync_range()` may block through file-backed runtime/provider sync and is
   only valid in process context.
+- `MmCpuResidency` 只允许在调度切换边界做“先加入新 mm、后移除旧 mm”的保守更新，
+  不能在 page-table flush 路径中重建目标集合。
 
 ## 威胁分析
 
@@ -86,6 +88,9 @@
 
 6. TLB stale entry 访问已释放 frame。
    - 防护：释放 detached frame 前显式完成 `PageTableMut::finish()`。
+
+7. 调度切换时过早把当前 CPU 从旧 mm 的目标集合移除。
+   - 防护：切入路径先把 CPU 发布到新 mm，待硬件页表切换完成后再从旧 mm 清除。
 
 7. relocation source retirement误用 ordinary unmap。
    - 防护：successful move uses metadata-only retirement after destination

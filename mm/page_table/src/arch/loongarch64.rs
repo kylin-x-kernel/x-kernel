@@ -177,9 +177,12 @@ impl PagingMetaData for LA64MetaData {
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process(vaddr: Option<VirtAddr>) {
+    fn flush_tlb_process_mask(vaddr: Option<VirtAddr>, target_mask: kcpu_id_map::KCpuMask) {
         karch::flush_tlb(vaddr);
-        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_process(vaddr));
+        crate_interface::call_interface!(crate::defs::TlbFlushIf::flush_process_mask(
+            vaddr,
+            target_mask
+        ));
     }
 
     #[cfg(feature = "smp")]

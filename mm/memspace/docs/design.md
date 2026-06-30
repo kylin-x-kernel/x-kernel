@@ -38,6 +38,7 @@ Linux 对应关系：
 ```text
 MmSpace
   -> PageTable
+  -> MmCpuResidency
   -> VmAreaSet
        -> VmArea
             -> VmBackingInfo
@@ -197,6 +198,9 @@ dirty tracking.
 ## 并发模型
 
 - `MmSpace` 由外层锁串行化。
+- `MmCpuResidency` 由 `MmSpace` 拥有，用于记录“哪些 CPU 可能还保留该地址空间
+  的 TLB 状态”。调度切换路径在切入新 mm 前先 set CPU，硬件切换完成后再从旧 mm
+  clear CPU，保证 shootdown 最多过度命中、不会漏掉目标 CPU。
 - `InvalidateSink` 使用 `SpinNoIrq` 保护短队列操作，不在该锁内执行 runtime
   unmap 或获取 `MmSpace` 主锁。
 - `PageTable::modify()` 提供页表独占修改 guard。

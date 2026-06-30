@@ -13,7 +13,6 @@ use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
 use kernel_boot::{SECOND_KERNEL_ENTRY, register_boot_init};
 use kerrno::KResult;
 use khal::mem::{VirtAddr, v2p};
-use kthread::AsThread;
 
 #[unsafe(link_section = ".bss.stack")]
 static SECONDARY_BOOT_STACKS: SecondaryBootStacks = SecondaryBootStacks::new();
@@ -125,56 +124,6 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     ktask::run_idle();
 }
 
-/// Implements the [`TaskCpuResidencyIf`](kipi::tlb::TaskCpuResidencyIf)
-/// interface so the TLB shootdown code can query per-task CPU residency.
-struct TaskCpuResidencyImpl;
-
-#[crate_interface::impl_interface]
-impl kipi::tlb::TaskCpuResidencyIf for TaskCpuResidencyImpl {
-    fn current_on_cpu_mask() -> kcpu_id_map::KCpuMask {
-        let Some(current) = ktask::current_may_uninit() else {
-            return kcpu_id_map::KCpuMask::new();
-        };
-        // Kernel tasks (e.g. during boot) don't have a Thread; fall back to
-        // the current task's mask only.
-        let Some(thread) = current.try_as_thread() else {
-            return current.on_cpu_mask();
-        };
-        // Collect on_cpu_mask from all threads sharing the same address space.
-        // Per-task masks alone may not cover all CPUs running sibling threads,
-        // which would cause TLB shootdowns to miss those CPUs.
-        let mut mask = current.on_cpu_mask();
-        for tid in thread.proc_state.proc.threads() {
-            if let Ok(task) = kthread::get_task(tid) {
-                mask |= task.on_cpu_mask();
-            }
-        }
-        mask
-    }
-
-    fn reset_on_cpu_mask() {
-        let Some(current) = ktask::current_may_uninit() else {
-            return;
-        };
-        // Kernel tasks don't have a Thread; fall back to the current task.
-        let Some(thread) = current.try_as_thread() else {
-            current.reset_on_cpu_mask(khal::percpu::this_cpu_id());
-            return;
-        };
-        // Reset every thread's mask to its own current CPU — the shootdown has
-        // just invalidated stale TLB entries on all targeted CPUs, so each
-        // thread only needs to track the CPU it is currently on.
-        for tid in thread.proc_state.proc.threads() {
-            if let Ok(task) = kthread::get_task(tid) {
-                task.reset_on_cpu_mask(task.cpu_id());
-            }
-        }
-        // Ensure the current task's mask always reflects this CPU, even if
-        // task.cpu_id() hasn't been updated by the scheduler yet.
-        current.reset_on_cpu_mask(khal::percpu::this_cpu_id());
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Integration tests (kernel-mode, run on QEMU via `make run UNITTEST=y`)
 // ---------------------------------------------------------------------------
@@ -196,64 +145,16 @@ mod tests_tlb_shootdown {
         kipi::tlb::mark_all_cpus_started();
     }
 
-    /// Test B: Proves TaskCpuResidencyIf correctly reads on_cpu_mask and
-    /// reset_on_cpu_mask correctly resets it.
-    #[def_test(serial)]
-    fn test_task_cpu_residency_interface() {
-        let cpu_num = kbuild_config::CPU_NUM;
-        if cpu_num >= 4 {
-            let task = ktask::current_may_uninit().unwrap();
-            // Clear any existing bits
-            task.reset_on_cpu_mask(this_cpu_id());
-
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(2));
-
-            let mask = task.on_cpu_mask();
-            assert!(mask.get(0));
-            assert!(mask.get(2));
-            assert!(!mask.get(1));
-
-            let raw = crate_interface::call_interface!(
-                kipi::tlb::TaskCpuResidencyIf::current_on_cpu_mask()
-            );
-            // raw mask includes this_cpu_id() in addition to the bits we set.
-            // includes this_cpu_id() in addition to the bits we set.
-            assert!(raw.get(0));
-            assert!(raw.get(2));
-            assert!(raw.get(this_cpu_id().as_usize()));
-
-            crate_interface::call_interface!(kipi::tlb::TaskCpuResidencyIf::reset_on_cpu_mask());
-            let mask = task.on_cpu_mask();
-            // reset_on_cpu_mask resets each thread's mask to the CPU it is
-            // currently running on.
-            assert!(mask.get(this_cpu_id().as_usize()));
-            assert!(!mask.get(0) || this_cpu_id().as_usize() == 0);
-            assert!(!mask.get(2) || this_cpu_id().as_usize() == 2);
-        }
-    }
-
-    /// Test C: Proves flush_all_cpus sends IPIs to all online CPUs,
-    /// waits for remote completion, and resets the mask.
+    /// Test C: Proves flush_all_cpus sends IPIs to all online CPUs and waits
+    /// for remote completion.
     #[def_test(serial)]
     fn test_flush_all_targeted_shootdown() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
             enable_tlb_shootdown_for_test();
-            let my_cpu = this_cpu_id();
-            let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
-
-            let task = ktask::current_may_uninit().unwrap();
-            task.set_on_cpu_mask_bit(remote_cpu);
-
             // Call flush_all — if it returns, the remote CPU received the IPI,
             // called handle_shootdown() → karch::flush_tlb(), and set COMPLETED.
             kipi::tlb::trigger_flush_all(None);
-
-            // Verify mask was reset to {my_cpu} only.
-            let mask = task.on_cpu_mask();
-            assert!(mask.get(my_cpu.as_usize()));
-            assert!(!mask.get(remote_cpu.as_usize()));
         }
     }
 
@@ -297,19 +198,12 @@ mod tests_tlb_shootdown {
     /// Creates a real page table, maps a page (setting ToFlush::Addresses),
     /// then drops the PageTableMut which calls finish() → flush_tlb_all_cpus
     /// → flush_remote → targeted IPI → completion.
-    /// Single-VA flushes do **not** reset the residency mask (only full flushes
-    /// do), so the remote CPU bit remains set.
+    /// Flush completion does not rebuild residency state.
     #[def_test(serial)]
     fn test_finish_triggers_cross_cpu_flush() {
         let cpu_num = kbuild_config::CPU_NUM;
         if cpu_num >= 2 {
             enable_tlb_shootdown_for_test();
-            let my_cpu = this_cpu_id();
-            let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
-
-            let task = ktask::current_may_uninit().unwrap();
-            task.set_on_cpu_mask_bit(remote_cpu);
-
             // Create a new page table (allocates a root page via kernel allocator).
             let mut pt = khal::paging::PageTable::try_new().expect("test page table alloc");
 
@@ -327,20 +221,6 @@ mod tests_tlb_shootdown {
             // On architectures without hardware broadcast (x86_64, riscv64), this sends IPIs.
             // If the remote CPU doesn't respond, this hangs.
             drop(pt_mut);
-
-            // If we reach here, finish() → flush_tlb_all_cpus completed.
-            // Single-VA flush preserves the mask — only full flushes reset it.
-            // The remote CPU was flushed for this specific VA, but the mask bit
-            // stays so future shootdowns for other VAs will still target it.
-            {
-                let mask = task.on_cpu_mask();
-                assert!(mask.get(my_cpu.as_usize()));
-                // Remote CPU bit is still present (mask not reset on single-VA).
-                assert!(mask.get(remote_cpu.as_usize()));
-            }
-
-            // Clean up: manually reset mask.
-            task.reset_on_cpu_mask(my_cpu);
         }
     }
 
@@ -451,10 +331,6 @@ mod tests_tlb_shootdown {
             }
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
-
-            // Clean up the mask correctly for platforms (like aarch64) that don't reset
-            // via software IPI — reset to the CPU the task is currently running on.
-            task.reset_on_cpu_mask(my_cpu);
         }
     }
 
@@ -463,19 +339,17 @@ mod tests_tlb_shootdown {
     ///
     /// Kernel page table modifications (is_kernel=true) go through
     /// `flush_all_cpus()`, which builds a full CPU mask via
-    /// `for_each_present_logical_cpu()`.  Every online CPU — including
-    /// those not in the current task's `on_cpu_mask` — receives a
-    /// shootdown IPI.
+    /// `for_each_present_logical_cpu()`. Every online CPU receives a
+    /// shootdown IPI regardless of user-mm residency targeting.
     ///
     /// ### What this test verifies
     ///
     /// 1. **Correct shootdown**: after modifying the kernel page table, the
-    ///    remote CPU (which is deliberately absent from the current task's
-    ///    `on_cpu_mask`) still receives a TLB shootdown IPI and reads the
-    ///    new mapping (MAGIC_B instead of stale MAGIC_A).
+    ///    remote CPU still receives a TLB shootdown IPI and reads the new
+    ///    mapping (MAGIC_B instead of stale MAGIC_A).
     ///
-    /// 2. **Mask reset**: after a full flush (`None` vaddr), the task's
-    ///    residency mask is correctly reset to only the current CPU.
+    /// 2. **Task-local fallback irrelevant**: kernel page table shootdown does
+    ///    not depend on the current task's local fallback mask.
     #[def_test(serial)]
     fn test_kernel_pt_miss_remote_without_mask() {
         let cpu_num = kbuild_config::CPU_NUM;
@@ -609,8 +483,6 @@ mod tests_tlb_shootdown {
             }
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
-
-            task.reset_on_cpu_mask(my_cpu);
         }
     }
 }

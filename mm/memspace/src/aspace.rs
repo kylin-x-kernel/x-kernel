@@ -8,6 +8,8 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+use core::ptr::NonNull;
 use core::{
     fmt,
     ops::DerefMut,
@@ -43,8 +45,20 @@ use crate::{
     FaultContext, FaultInput, ForkCloneTarget, MsyncPolicy, PageFaultOutcome, VmArea, VmAreaSet,
     VmBackingKind,
     backend::{FaultCompatResult, map_paging_err, pages_in},
+    cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
     vma::VmRuntimeRef,
 };
+
+#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+unsafe fn page_table_user_cpu_mask(ctx: NonNull<()>) -> kcpu_id_map::KCpuMask {
+    // SAFETY: `ctx` is installed from `Arc::as_ref(&cpu_residency)` in
+    // `new_empty_inner()`. The `MmSpace` owns both the page table and the
+    // `Arc<MmCpuResidency>`, and the page table is dropped before the
+    // residency field, so the pointee remains valid for the provider's
+    // lifetime.
+    let residency = unsafe { ctx.cast::<MmCpuResidency>().as_ref() };
+    residency.snapshot()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PendingInvalidateId(u64);
@@ -187,6 +201,7 @@ pub struct MmSpace {
     range: VirtAddrRange,
     vmas: VmAreaSet,
     pgtbl: PageTable,
+    cpu_residency: MmCpuResidencyRef,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Option<Arc<Aarch64UserAsidContext>>,
     invalidate_sink: Arc<InvalidateSink>,
@@ -560,8 +575,8 @@ impl MmSpace {
     /// Creates a new empty user address space.
     ///
     /// The returned address space uses a user page table; TLB shootdowns for
-    /// page table modifications are scoped to the current task's CPU residency
-    /// mask.
+    /// page table modifications are scoped to this address space's CPU
+    /// residency mask.
     pub fn new_empty_user(base: VirtAddr, size: usize) -> KResult<Self> {
         Self::new_empty_inner(base, size, false)
     }
@@ -579,6 +594,7 @@ impl MmSpace {
     /// Set `is_kernel` to `true` for the global kernel address space so that
     /// page table modifications flush TLB entries on **all** online CPUs.
     fn new_empty_inner(base: VirtAddr, size: usize, is_kernel: bool) -> KResult<Self> {
+        let cpu_residency = Arc::new(MmCpuResidency::new());
         #[cfg(target_arch = "aarch64")]
         let pgtbl = {
             if is_kernel {
@@ -602,11 +618,26 @@ impl MmSpace {
             ctx.install_page_table_asid_provider(&mut pgtbl);
             (pgtbl, Some(ctx))
         };
+        #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+        let pgtbl = if is_kernel {
+            pgtbl
+        } else {
+            let mut pgtbl = pgtbl;
+            let ctx = NonNull::from(Arc::as_ref(&cpu_residency)).cast();
+            // SAFETY: the provider snapshots the `MmCpuResidency` owned by
+            // this `MmSpace`. That residency allocation stays alive for the
+            // full lifetime of the page table because both are fields of the
+            // same `MmSpace`, and `MmSpace` drops the page table before the
+            // residency handle.
+            unsafe { pgtbl.set_user_cpu_mask_provider(ctx, page_table_user_cpu_mask) };
+            pgtbl
+        };
         Ok(Self {
             mm_id: NEXT_MM_ID.fetch_add(1, Ordering::Relaxed),
             range: VirtAddrRange::from_start_size(base, size),
             vmas: VmAreaSet::new(),
             pgtbl,
+            cpu_residency,
             #[cfg(target_arch = "aarch64")]
             user_asid_context,
             invalidate_sink: Arc::new(InvalidateSink::default()),
@@ -616,6 +647,12 @@ impl MmSpace {
     #[cfg(target_arch = "aarch64")]
     pub fn user_asid_context(&self) -> Option<&Arc<Aarch64UserAsidContext>> {
         self.user_asid_context.as_ref()
+    }
+
+    /// Returns the mm-owned CPU residency state used by non-AArch64 user TLB
+    /// shootdown targeting.
+    pub fn cpu_residency(&self) -> &MmCpuResidencyRef {
+        &self.cpu_residency
     }
 
     /// Creates a new empty user address space with the standard user-space range.

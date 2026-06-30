@@ -15,6 +15,7 @@ tee_ta_sign = []
 [dependencies]
 extern-trait.workspace = true
 khal.workspace = true
+kcpu_id_map.workspace = true
 kcred.workspace = true
 kaddr_layout.workspace = true
 karch.workspace = true
