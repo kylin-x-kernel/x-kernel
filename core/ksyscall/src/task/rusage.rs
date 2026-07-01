@@ -116,3 +116,58 @@ pub fn sys_getrusage(who: i32, usage: UserPtr<rusage>) -> KResult<isize> {
     usage.write_vm(result.into())?;
     Ok(0)
 }
+
+#[cfg(unittest)]
+mod tests {
+    use khal::time::TimeValue;
+    use unittest::def_test;
+
+    use super::Rusage;
+
+    #[def_test]
+    fn rusage_collate_adds_user_and_system_time() {
+        let a = Rusage {
+            utime: TimeValue::new(1, 500_000_000),
+            stime: TimeValue::new(2, 0),
+        };
+        let b = Rusage {
+            utime: TimeValue::new(0, 500_000_000),
+            stime: TimeValue::new(3, 0),
+        };
+
+        let c = a.collate(b);
+
+        assert_eq!(c.utime, TimeValue::new(2, 0));
+        assert_eq!(c.stime, TimeValue::new(5, 0));
+    }
+
+    #[def_test]
+    fn rusage_collate_default_is_identity() {
+        let a = Rusage {
+            utime: TimeValue::new(7, 0),
+            stime: TimeValue::new(8, 0),
+        };
+
+        let c = a.collate(Rusage::default());
+
+        assert_eq!(c.utime, TimeValue::new(7, 0));
+        assert_eq!(c.stime, TimeValue::new(8, 0));
+    }
+
+    #[def_test]
+    fn rusage_collate_normalizes_nanoseconds_into_seconds() {
+        let a = Rusage {
+            utime: TimeValue::new(0, 600_000_000),
+            stime: TimeValue::new(0, 0),
+        };
+        let b = Rusage {
+            utime: TimeValue::new(0, 600_000_000),
+            stime: TimeValue::new(0, 0),
+        };
+
+        let c = a.collate(b);
+
+        assert_eq!(c.utime, TimeValue::new(1, 200_000_000));
+        assert_eq!(c.stime, TimeValue::new(0, 0));
+    }
+}

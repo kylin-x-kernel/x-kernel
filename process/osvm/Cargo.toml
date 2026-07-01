@@ -21,4 +21,3 @@ bytemuck = { version = "1.24", features = [
     "zeroable_maybe_uninit",
 ] }
 extern-trait = "0.3"
-unittest.workspace = true

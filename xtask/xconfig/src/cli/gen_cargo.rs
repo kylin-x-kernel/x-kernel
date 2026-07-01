@@ -297,6 +297,14 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
         target_rustflags.push("instrument-coverage".into());
         target_rustflags.push("-Z".into());
         target_rustflags.push("no-profiler-runtime".into());
+        // One codegen unit per crate so that any live reference to a crate
+        // pulls its whole compilation unit — including `#[def_test]` descriptors
+        // in `.unittest` — into the link, where the linker-script `KEEP` retains
+        // them. Without this, test-only codegen units of large crates (e.g.
+        // ksyscall, which is otherwise unreferenced in the unittest image) get
+        // dropped by `--gc-sections`.
+        target_rustflags.push("-C".into());
+        target_rustflags.push("codegen-units=1".into());
     }
 
     let mut envs = BTreeMap::new();

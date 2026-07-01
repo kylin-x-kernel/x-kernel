@@ -55,6 +55,7 @@ posix-net.workspace = true
 posix-process.workspace = true
 posix-types.workspace = true
 num_enum = { version = "0.7", default-features = false }
+unittest.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = "0.14"

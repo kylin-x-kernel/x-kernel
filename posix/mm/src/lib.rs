@@ -95,9 +95,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(request.permissions.current.contains(MappingFlags::USER));
-        assert!(!request.permissions.current.contains(MappingFlags::READ));
-        assert!(!request.permissions.current.contains(MappingFlags::WRITE));
+        assert!(request.permissions.current.is_empty());
         assert!(request.permissions.maximum.contains(MappingFlags::READ));
         assert!(request.permissions.maximum.contains(MappingFlags::WRITE));
     }

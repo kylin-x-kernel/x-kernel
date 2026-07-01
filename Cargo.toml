@@ -103,7 +103,6 @@ kfs = { path = "fs/runtime/kfs" }
 procfs = { path = "fs/filesystems/procfs" }
 devfs = { path = "fs/filesystems/devfs" }
 memaddr = { path = "mm/memaddr" }
-memset = { path = "mm/memset" }
 anon = { path = "mm/anon" }
 memspace = { path = "mm/memspace" }
 filemap = { path = "mm/filemap" }

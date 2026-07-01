@@ -13,3 +13,6 @@ categories.workspace = true
 [dependencies]
 log.workspace = true
 macros.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }
