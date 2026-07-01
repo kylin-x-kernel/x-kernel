@@ -278,6 +278,28 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
     }
 }
 
+#[inline]
+pub(crate) fn task_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
+    let irq_state = G::acquire();
+    #[cfg(not(feature = "smp"))]
+    {
+        let _ = task;
+        KRunQueueRef {
+            inner: current_run_queue_mut(),
+            state: irq_state,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+    #[cfg(feature = "smp")]
+    {
+        KRunQueueRef {
+            inner: get_run_queue(task.cpu_id().as_usize()),
+            state: irq_state,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
 #[cfg(feature = "preempt")]
 fn request_resched(cpu_id: LogicalCpuId) {
     if cpu_id == this_cpu_id() {
@@ -552,6 +574,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             .scheduler
             .lock()
             .set_priority(&self.current_task, prio)
+    }
+}
+
+impl<G: BaseGuard> KRunQueueRef<'_, G> {
+    pub fn set_task_priority(&mut self, task: &KtaskRef, prio: isize) -> bool {
+        self.inner.scheduler.lock().set_priority(task, prio)
     }
 }
 

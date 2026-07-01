@@ -12,6 +12,7 @@ use core::sync::atomic::AtomicUsize;
 
 use kspin::NoPreemptIrqSave;
 
+use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
 pub use crate::{
     task::{CurrentTask, KTaskExt, TaskExt, TaskId, TaskInner, TaskState},
@@ -172,6 +173,14 @@ where
 /// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_prio(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
+}
+
+/// Set the priority for the specified task.
+///
+/// The interpretation of `prio` depends on the configured scheduler. For
+/// fair schedulers, it matches the Linux nice range `-20..=19`.
+pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
+    task_run_queue::<NoPreemptIrqSave>(task).set_task_priority(task, prio)
 }
 
 /// Set the affinity for the current task.

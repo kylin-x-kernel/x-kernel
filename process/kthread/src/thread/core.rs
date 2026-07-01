@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 use khal::time::TimeValue;
 use kprocess::Pid;
@@ -38,6 +38,15 @@ pub struct Thread {
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
 
+    /// The Linux nice value for ordinary scheduler priority.
+    nice: AtomicI32,
+
+    /// Linux scheduler policy stored for syscall ABI compatibility.
+    scheduler_policy: AtomicU32,
+
+    /// Linux scheduler priority stored for syscall ABI compatibility.
+    scheduler_priority: AtomicI32,
+
     /// Indicates whether the thread is ready to exit.
     exit: AtomicBool,
 
@@ -59,6 +68,9 @@ impl Thread {
             robust_list_head: AtomicUsize::new(0),
             time: Mutex::new(CpuTimeStatistics::new()),
             oom_score_adj: AtomicI32::new(200),
+            nice: AtomicI32::new(0),
+            scheduler_policy: AtomicU32::new(u32::MAX),
+            scheduler_priority: AtomicI32::new(0),
             exit: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
             #[cfg(feature = "tee")]
@@ -96,6 +108,35 @@ impl Thread {
     /// Sets the OOM score adjustment value.
     pub fn set_oom_score_adj(&self, value: i32) {
         self.oom_score_adj.store(value, Ordering::SeqCst);
+    }
+
+    /// Returns the Linux nice value for ordinary scheduler priority.
+    pub fn nice(&self) -> i32 {
+        self.nice.load(Ordering::Acquire)
+    }
+
+    /// Sets the Linux nice value for ordinary scheduler priority.
+    pub fn set_nice(&self, nice: i32) {
+        self.nice.store(nice, Ordering::Release);
+    }
+
+    /// Returns the Linux scheduler policy set through scheduler syscalls.
+    pub fn scheduler_policy(&self) -> Option<u32> {
+        match self.scheduler_policy.load(Ordering::Acquire) {
+            u32::MAX => None,
+            policy => Some(policy),
+        }
+    }
+
+    /// Returns the Linux scheduler priority set through scheduler syscalls.
+    pub fn scheduler_priority(&self) -> i32 {
+        self.scheduler_priority.load(Ordering::Acquire)
+    }
+
+    /// Stores Linux scheduler state for syscall ABI compatibility.
+    pub fn set_scheduler(&self, policy: u32, priority: i32) {
+        self.scheduler_priority.store(priority, Ordering::Release);
+        self.scheduler_policy.store(policy, Ordering::Release);
     }
 
     /// Returns whether the thread is exiting.
