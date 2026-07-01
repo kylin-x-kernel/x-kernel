@@ -84,7 +84,7 @@ endif
 ifeq ($(wildcard $(CONFIG_READY_STAMP)),)
   CONFIG_NEEDS_PREPARE := y
   CONFIG_PREPARE_REASON := .config has not been expanded yet
-else ifneq ($(shell test $(CONFIG_READY_STAMP) -nt .config; echo $$?),0)
+else ifeq ($(shell test .config -nt $(CONFIG_READY_STAMP); echo $$?),0)
   CONFIG_NEEDS_PREPARE := y
   CONFIG_PREPARE_REASON := .config changed after the last Kconfig refresh
 endif
