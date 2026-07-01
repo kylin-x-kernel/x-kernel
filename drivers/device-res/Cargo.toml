@@ -15,6 +15,7 @@ categories.workspace = true
 name = "device_res"
 
 [dependencies]
+klazy = { workspace = true }
 kspin = { workspace = true }
 smallvec = { version = "1.15", features = ["const_generics", "union"] }
 unittest = { workspace = true }

@@ -103,10 +103,10 @@ impl PlatformBackend {
                     }));
                 }
                 if let Some(irq) = dev.irq {
-                    resources.push(ResourceDesc::Irq(IrqResource {
-                        number: irq.irq,
-                        trigger: kdevice::irq_trigger_from_firmware(irq.trigger),
-                    }));
+                    resources.push(ResourceDesc::Irq(IrqResource::new(
+                        irq.irq,
+                        kdevice::irq_trigger_from_firmware(irq.trigger),
+                    )));
                 }
 
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {

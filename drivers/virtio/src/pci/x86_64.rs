@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use device_res::{IrqController, IrqRouteDesc, IrqTriggerMode, irq_provider, try_irq_provider};
 use pci::{
     PciConfigAccess,
     msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT},
@@ -108,12 +109,8 @@ impl PciMsixState {
 
     pub(super) fn release(self) {
         self.disable();
-        if !khal::irq::free_msix_vector(self.vector) {
-            log::warn!(
-                "PCI virtio device at {:?}: MSI-X vector {:#x} was already free",
-                self.bdf,
-                self.vector
-            );
+        if let Some(p) = try_irq_provider() {
+            p.free_msix_vector(self.vector);
         }
     }
 
@@ -310,8 +307,6 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
 ) -> Option<(usize, PciMsixState)> {
     use core::mem::size_of;
 
-    use khal::irq::{alloc_msix_vector, current_apic_id, free_msix_vector};
-
     const REQUIRED_MSIX_TABLE_ENTRIES: u16 = 2;
 
     let cap = msix::find_msix_capability(root, config, bdf)?;
@@ -336,6 +331,17 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
 
     let (_, command) = root.get_status_command(bdf);
     root.set_command(bdf, command | Command::MEMORY_SPACE | Command::BUS_MASTER);
+
+    // The IRQ provider is installed once during early init and never removed,
+    // so the same reference serves both vector allocation below and APIC id
+    // targeting afterwards — no need to re-query or fall back to a default.
+    let provider = match irq_provider() {
+        Ok(p) => p,
+        Err(_) => {
+            root.set_command(bdf, command);
+            return None;
+        }
+    };
 
     let prepared = (|| {
         let common_cfg = map_virtio_common_cfg::<H, C>(root, bdf, config)?;
@@ -368,7 +374,7 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
         // size was validated against the BAR size above.
         let table = unsafe { MsixTable::new(table_base, usize::from(cap.table_size)) };
 
-        let vector = alloc_msix_vector()?;
+        let vector = provider.alloc_msix_vector().ok()?;
         Some((common_cfg, table, vector))
     })();
     let Some((common_cfg, table, vector)) = prepared else {
@@ -378,8 +384,9 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
 
     msix::prepare_msix(root, config, bdf, &cap);
 
+    let apic_id = provider.current_apic_id();
     for entry in 0..usize::from(REQUIRED_MSIX_TABLE_ENTRIES) {
-        if msix::configure_msix_entry(&table, entry, vector, current_apic_id()).is_some() {
+        if msix::configure_msix_entry(&table, entry, vector, apic_id).is_some() {
             continue;
         }
 
@@ -389,13 +396,7 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
             entry
         );
         msix::disable_msix(root, config, bdf, &cap);
-        if !free_msix_vector(vector) {
-            log::warn!(
-                "PCI virtio device at {:?}: MSI-X vector {:#x} was already free",
-                bdf,
-                vector
-            );
-        }
+        provider.free_msix_vector(vector);
         root.set_command(bdf, command);
         return None;
     }
@@ -435,9 +436,11 @@ pub(super) fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) 
         return None;
     }
 
-    Some(khal::irq::map(
-        khal::irq::IrqDesc::new(irq_line, khal::irq::IrqTrigger::LevelLow)
-            .with_controller(khal::irq::IrqControllerKind::IoApic)
-            .with_domain(khal::irq::IO_APIC_DOMAIN),
-    ))
+    let desc = IrqRouteDesc {
+        hwirq: irq_line,
+        trigger: IrqTriggerMode::LevelLow,
+        controller: IrqController::IoApic,
+        domain: None,
+    };
+    Some(irq_provider().ok()?.map_irq(desc).ok()?.number)
 }

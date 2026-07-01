@@ -7,10 +7,12 @@ use alloc::boxed::Box;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
+use device_res::{
+    DmaAllocation, DmaDirection, DmaMapping, DmaSpec, MmioRegion, dma_provider, mmio_provider,
+    try_dma_provider,
+};
 use driver_base::DriverResult;
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
-
-use crate::iomap_mmio;
 
 cfg_if! {
     if #[cfg(feature = "virtio-net")] {
@@ -119,47 +121,53 @@ use memaddr::PAGE_SIZE_4K;
 pub struct VirtIoHalImpl;
 
 // SAFETY: `VirtIoHal` requires that DMA buffers handed to the device are
-// valid for the device's view of memory and stay alive until
-// `dma_dealloc` is called, that MMIO physical-to-virtual translations
-// produce valid kernel mappings of the MMIO window, and that `share` /
-// `unshare` keep CPU and device views of a buffer coherent.
+// valid for the device's view of memory and stay alive until `dma_dealloc`
+// is called, that MMIO physical-to-virtual translations produce valid kernel
+// mappings of the MMIO window, and that `share` / `unshare` keep CPU and
+// device views of a buffer coherent.
 //
-// This implementation upholds those invariants by:
-// * `dma_alloc` / `dma_dealloc` going through `kdma::allocate_dma_memory`
-//   / `kdma::deallocate_dma_memory`, which return a paired
-//   (`cpu_addr`, `bus_addr`) for the same DMA region and free the entire
-//   region in one call;
-// * `mmio_phys_to_virt` resolving the address through `iomap_mmio`,
-//   which installs (or reuses) a kernel mapping covering the requested
-//   MMIO range before returning a virtual pointer;
-// * `share` / `unshare` delegating to `kdma::map_dma_buffer` /
-//   `kdma::unmap_dma_buffer`, which perform the cache maintenance and
-//   IOMMU bookkeeping required to keep CPU and device views in sync for
-//   the requested `BufferDirection`.
+// This implementation upholds those invariants by routing every operation
+// through the `device_res` provider rather than x-kernel APIs directly:
+// * `dma_alloc` / `dma_dealloc` use `alloc_coherent` / `free_coherent`, which
+//   return a paired (`cpu_addr`, `bus_addr`) for the same region and free it
+//   in one call;
+// * `mmio_phys_to_virt` uses `map_mmio`, which installs (or reuses) a kernel
+//   mapping covering the requested MMIO range before returning a virtual
+//   pointer;
+// * `share` / `unshare` use `map_streaming` / `unmap_streaming`, which perform
+//   the cache maintenance and IOMMU bookkeeping required to keep CPU and
+//   device views in sync for the requested `BufferDirection`.
+const fn hal_direction(direction: BufferDirection) -> DmaDirection {
+    match direction {
+        BufferDirection::DriverToDevice => DmaDirection::DriverToDevice,
+        BufferDirection::DeviceToDriver => DmaDirection::DeviceToDriver,
+        BufferDirection::Both => DmaDirection::Bidirectional,
+    }
+}
+
+// SAFETY: every method routes hardware access through the `device_res`
+// provider, so the HAL holds no x-kernel state; DMA / MMIO ownership
+// invariants are delegated to the installed provider.
 unsafe impl VirtIoHal for VirtIoHalImpl {
     fn dma_alloc(
         pages: usize,
         _direction: BufferDirection,
         _access_platform: bool,
     ) -> (PhysAddr, NonNull<u8>) {
-        use core::alloc::Layout;
         let size = pages * PAGE_SIZE_4K;
-        let layout = Layout::from_size_align(size, PAGE_SIZE_4K).unwrap();
-        // SAFETY: `layout` is a valid non-zero layout constructed from
-        // `pages * PAGE_SIZE_4K` with `PAGE_SIZE_4K` alignment. The
-        // returned buffer is owned exclusively by the VirtIO transport
-        // until `dma_dealloc` is called.
-        match unsafe { kdma::allocate_dma_memory(layout) } {
-            Ok(dma_info) => {
-                // SAFETY: `dma_info.cpu_addr` was just returned by
-                // `allocate_dma_memory` and points to `size` bytes of
-                // valid, exclusively-owned DMA memory. Zeroing prevents
-                // the device from reading stale kernel data.
-                unsafe {
-                    core::ptr::write_bytes(dma_info.cpu_addr.as_ptr(), 0, size);
-                }
-                let paddr = dma_info.bus_addr.as_u64() as PhysAddr;
-                let ptr = dma_info.cpu_addr;
+        let spec = DmaSpec::new(size, PAGE_SIZE_4K);
+        match dma_provider().and_then(|p| p.alloc_coherent(spec)) {
+            Ok(alloc) => {
+                let cpu_ptr = alloc.cpu_addr as *mut u8;
+                // SAFETY: `alloc.cpu_addr` was just returned by the provider and
+                // points to `size` bytes of valid, exclusively-owned DMA memory.
+                // Zeroing prevents the device from reading stale kernel data.
+                unsafe { core::ptr::write_bytes(cpu_ptr, 0, size) };
+                // Ownership of the allocation is handed to the virtio transport
+                // and returned via `dma_dealloc`. We deliberately do NOT wrap it
+                // in `DmaCoherent` (whose Drop would free it on return).
+                let paddr = alloc.bus_addr as PhysAddr;
+                let ptr = NonNull::new(cpu_ptr).expect("dma allocation stored a null CPU address");
                 (paddr, ptr)
             }
             Err(err) => {
@@ -176,29 +184,36 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         pages: usize,
         _access_platform: bool,
     ) -> i32 {
-        use core::alloc::Layout;
-        let size = pages * PAGE_SIZE_4K;
-        let layout = Layout::from_size_align(size, PAGE_SIZE_4K).unwrap();
-        let dma_info = kdma::DMAInfo {
-            cpu_addr: vaddr,
-            bus_addr: kdma::DmaBusAddress::new(paddr),
-        };
-        // SAFETY: `dma_info` and `layout` describe a coherent buffer
-        // previously returned by `dma_alloc` with the same `pages`.
-        // The caller (VirtIO transport) guarantees the buffer is no
-        // longer in use by the device.
-        unsafe { kdma::deallocate_dma_memory(dma_info, layout) };
+        let spec = DmaSpec::new(pages * PAGE_SIZE_4K, PAGE_SIZE_4K);
+        if let Some(p) = try_dma_provider() {
+            p.free_coherent(DmaAllocation {
+                cpu_addr: vaddr.as_ptr() as usize,
+                bus_addr: paddr,
+                spec,
+            });
+        }
         0
     }
 
     #[inline]
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
-        // SAFETY: The caller (VirtIO transport) has confirmed the device
-        // exists at `paddr` before calling this function. `iomap_mmio`
-        // delegates to `memspace::iomap_device` which validates the
-        // physical address range.
-        iomap_mmio(paddr as usize, size, "virtio-mmio-hal")
-            .expect("failed to iomap virtio MMIO region")
+        let region = MmioRegion {
+            base: paddr as usize,
+            size,
+        };
+        match mmio_provider().and_then(|p| p.map_mmio(region, "virtio-hal")) {
+            Ok(m) => NonNull::new(m.vaddr as *mut u8)
+                .expect("virtio mmio mapping stored a null virtual address"),
+            Err(err) => {
+                log::error!(
+                    "virtio mmio_phys_to_virt failed: paddr={:#x}, size={:#x}, err={:?}",
+                    paddr,
+                    size,
+                    err
+                );
+                panic!("virtio mmio_phys_to_virt failed")
+            }
+        }
     }
 
     #[allow(unused_variables)]
@@ -208,14 +223,13 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) -> PhysAddr {
-        // SAFETY: `buffer` is a valid DMA buffer allocated by the VirtIO
-        // transport layer (via `dma_alloc` or an upper-layer provider).
-        // `kdma::map_dma_buffer` performs the necessary cache maintenance
-        // and IOMMU mapping to make the buffer visible to the device.
-        unsafe { kdma::map_dma_buffer(buffer, dma_direction(direction)) }
-            .expect("failed to map shared DMA buffer via kdma")
-            .bus_addr
-            .as_u64() as PhysAddr
+        match dma_provider().and_then(|p| p.map_streaming(buffer, hal_direction(direction))) {
+            Ok(m) => m.bus_addr as PhysAddr,
+            Err(err) => {
+                log::error!("virtio share failed: err={:?}", err);
+                0
+            }
+        }
     }
 
     #[inline]
@@ -226,25 +240,19 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) {
-        // SAFETY: `paddr` and `buffer` are the same values returned by
-        // a previous `share` call on this buffer. `kdma::unmap_dma_buffer`
-        // reverses the cache maintenance and IOMMU mapping performed by
-        // `map_dma_buffer`. The caller (VirtIO transport) guarantees the
-        // device is no longer accessing the buffer.
-        unsafe {
-            kdma::unmap_dma_buffer(
-                kdma::DmaBusAddress::new(paddr),
-                buffer,
-                dma_direction(direction),
-            )
+        let dir = hal_direction(direction);
+        let Some(p) = try_dma_provider() else {
+            return;
         };
-    }
-}
-
-const fn dma_direction(direction: BufferDirection) -> kdma::DmaDirection {
-    match direction {
-        BufferDirection::DriverToDevice => kdma::DmaDirection::DriverToDevice,
-        BufferDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,
-        BufferDirection::Both => kdma::DmaDirection::Bidirectional,
+        // SAFETY: `buffer` is valid (caller contract); `paddr` / `buffer` come
+        // from a prior `share` call, so reconstructing the mapping reverses it.
+        let slice = unsafe { buffer.as_ref() };
+        let cpu_addr = NonNull::from(slice).cast::<u8>();
+        p.unmap_streaming(DmaMapping {
+            cpu_addr: cpu_addr.as_ptr() as usize,
+            bus_addr: paddr,
+            len: slice.len(),
+            direction: dir,
+        });
     }
 }

@@ -18,6 +18,10 @@ use core::{
 };
 
 use khal::firmware::devices as fw;
+// Re-export the OS-neutral firmware interrupt descriptor types so downstream
+// crates (e.g. virtio) can consume them without taking a direct `khal`
+// dependency.
+pub use khal::firmware::devices::{InterruptControllerKind, InterruptTrigger};
 pub use virtio_drivers::transport::pci::bus::{
     BarInfo, Cam, CapabilityInfo, Command, ConfigurationAccess, DeviceFunction, DeviceFunctionInfo,
     HeaderType, MemoryBarType, MmioCam, PciError, PciRoot, Status,

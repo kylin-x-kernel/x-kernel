@@ -18,8 +18,9 @@ use alloc::sync::Arc;
 use core::{alloc::Layout, ptr::NonNull};
 
 use device_res::{
-    DmaAllocation, DmaSpec, IrqHandler, IrqResource, MmioMapping, MmioRegion, ResError, ResResult,
-    ResourceProvider,
+    DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController, IrqHandler, IrqOp,
+    IrqResource, IrqRouteDesc, IrqTriggerMode, MmioMapping, MmioOp, MmioRegion, ResError,
+    ResResult,
 };
 use driver_base::{DriverError, DriverResult};
 use kdevice::DeviceObject;
@@ -86,7 +87,7 @@ static IRQ_TRAMPOLINES: [fn(); MAX_IRQ_SLOTS] = irq_trampolines!(
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
 );
 
-impl ResourceProvider for HostResourceProvider {
+impl MmioOp for HostResourceProvider {
     fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping> {
         let vaddr =
             memspace::iomap_device(region.base.into(), region.size, name).map_err(map_iomap_err)?;
@@ -101,7 +102,76 @@ impl ResourceProvider for HostResourceProvider {
         let vaddr = memaddr::VirtAddr::from(mapping.vaddr);
         let _ = memspace::iounmap(vaddr);
     }
+}
 
+impl DmaOp for HostResourceProvider {
+    fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation> {
+        let layout =
+            Layout::from_size_align(spec.len, spec.align).map_err(|_| ResError::InvalidResource)?;
+        // SAFETY: `layout` is a valid non-zero layout and the returned buffer is
+        // owned exclusively by the `DmaCoherent` handle that wraps this
+        // allocation until it is freed via `free_coherent`.
+        let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
+        Ok(DmaAllocation {
+            cpu_addr: info.cpu_addr.as_ptr() as usize,
+            bus_addr: info.bus_addr.as_u64(),
+            spec,
+        })
+    }
+
+    fn free_coherent(&self, alloc: DmaAllocation) {
+        let Ok(layout) = Layout::from_size_align(alloc.spec.len, alloc.spec.align) else {
+            return;
+        };
+        let info = kdma::DMAInfo {
+            cpu_addr: NonNull::new(alloc.cpu_addr as *mut u8)
+                .expect("coherent DMA allocation stored a null CPU address"),
+            bus_addr: kdma::DmaBusAddress::new(alloc.bus_addr),
+        };
+        // SAFETY: `info` and `layout` describe a coherent buffer previously
+        // returned by `alloc_coherent` for the same spec, and it is freed
+        // exactly once when its owning handle is dropped.
+        unsafe { kdma::deallocate_dma_memory(info, layout) };
+    }
+
+    fn map_streaming(
+        &self,
+        buffer: NonNull<[u8]>,
+        direction: DmaDirection,
+    ) -> ResResult<DmaMapping> {
+        let dir = map_dma_direction(direction);
+        // SAFETY: the caller guarantees `buffer` is a valid, live slice for the
+        // duration of the mapping.
+        let slice: &[u8] = unsafe { buffer.as_ref() };
+        let len = slice.len();
+        let cpu_addr = NonNull::from(slice).cast::<u8>();
+        // SAFETY: same contract — `buffer` is valid for the mapping duration.
+        let info = unsafe { kdma::map_dma_buffer(buffer, dir) }.map_err(|_| ResError::NoMemory)?;
+        Ok(DmaMapping {
+            cpu_addr: cpu_addr.as_ptr() as usize,
+            bus_addr: info.bus_addr.as_u64(),
+            len,
+            direction,
+        })
+    }
+
+    fn unmap_streaming(&self, mapping: DmaMapping) {
+        let cpu_addr = NonNull::new(mapping.cpu_addr as *mut u8)
+            .expect("streaming DMA mapping stored a null CPU address");
+        let buffer = NonNull::slice_from_raw_parts(cpu_addr, mapping.len);
+        // SAFETY: `mapping` describes a streaming mapping previously established
+        // by `map_streaming`; `cpu_addr` + `len` reconstruct the original buffer.
+        unsafe {
+            kdma::unmap_dma_buffer(
+                kdma::DmaBusAddress::new(mapping.bus_addr),
+                buffer,
+                map_dma_direction(mapping.direction),
+            );
+        }
+    }
+}
+
+impl IrqOp for HostResourceProvider {
     fn request_irq(&self, irq: IrqResource, handler: Arc<dyn IrqHandler>) -> ResResult<()> {
         for (slot, trampoline) in IRQ_SLOTS.iter().zip(IRQ_TRAMPOLINES.iter()) {
             let mut guard = slot.state.lock();
@@ -138,33 +208,43 @@ impl ResourceProvider for HostResourceProvider {
         khal::irq::enable(irq.number, enabled);
     }
 
-    fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation> {
-        let layout =
-            Layout::from_size_align(spec.len, spec.align).map_err(|_| ResError::InvalidResource)?;
-        // SAFETY: `layout` is a valid non-zero layout and the returned buffer is
-        // owned exclusively by the `DmaCoherent` handle that wraps this
-        // allocation until it is freed via `free_coherent`.
-        let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
-        Ok(DmaAllocation {
-            cpu_addr: info.cpu_addr.as_ptr() as usize,
-            bus_addr: info.bus_addr.as_u64(),
-            spec,
-        })
+    fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
+        let trigger = map_khal_trigger(route.trigger);
+        let desc = match route.controller {
+            IrqController::Gic => khal::irq::IrqDesc::new(route.hwirq, trigger)
+                .with_controller(khal::irq::IrqControllerKind::Gic)
+                .with_domain(khal::irq::GIC_ROOT_DOMAIN),
+            IrqController::Plic => khal::irq::IrqDesc::new(route.hwirq, trigger)
+                .with_controller(khal::irq::IrqControllerKind::Plic)
+                .with_domain(khal::irq::PLIC_ROOT_DOMAIN),
+            IrqController::IoApic => khal::irq::IrqDesc::new(route.hwirq, trigger)
+                .with_controller(khal::irq::IrqControllerKind::IoApic)
+                .with_domain(khal::irq::IO_APIC_DOMAIN),
+            IrqController::LoongArchExtioi => khal::irq::IrqDesc::new(route.hwirq, trigger)
+                .with_controller(khal::irq::IrqControllerKind::LoongArchExtioi),
+            IrqController::Unknown => khal::irq::IrqDesc::new(route.hwirq, trigger),
+        };
+        let virq = khal::irq::map(desc);
+        Ok(IrqResource::new(virq, route.trigger)
+            .with_controller(route.controller)
+            .with_hwirq(route.hwirq))
     }
 
-    fn free_coherent(&self, alloc: DmaAllocation) {
-        let Ok(layout) = Layout::from_size_align(alloc.spec.len, alloc.spec.align) else {
-            return;
-        };
-        let info = kdma::DMAInfo {
-            cpu_addr: NonNull::new(alloc.cpu_addr as *mut u8)
-                .expect("coherent DMA allocation stored a null CPU address"),
-            bus_addr: kdma::DmaBusAddress::new(alloc.bus_addr),
-        };
-        // SAFETY: `info` and `layout` describe a coherent buffer previously
-        // returned by `alloc_coherent` for the same spec, and it is freed
-        // exactly once when its owning handle is dropped.
-        unsafe { kdma::deallocate_dma_memory(info, layout) };
+    #[cfg(target_arch = "x86_64")]
+    fn alloc_msix_vector(&self) -> ResResult<u8> {
+        khal::irq::alloc_msix_vector().ok_or(ResError::NoMemory)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn free_msix_vector(&self, vector: u8) {
+        if !khal::irq::free_msix_vector(vector) {
+            log::warn!("failed to free MSI-X vector {:#x} (not allocated?)", vector);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn current_apic_id(&self) -> u8 {
+        khal::irq::current_apic_id()
     }
 }
 
@@ -175,7 +255,29 @@ impl ResourceProvider for HostResourceProvider {
 /// as the console input line) flow through the resource provider rather than
 /// `khal` directly.
 pub fn install_resource_provider() {
-    device_res::set_provider(&HOST_PROVIDER);
+    device_res::set_mmio_provider(&HOST_PROVIDER);
+    device_res::set_dma_provider(&HOST_PROVIDER);
+    device_res::set_irq_provider(&HOST_PROVIDER);
+}
+
+/// Translate a device-res DMA direction into the matching `kdma` direction.
+fn map_dma_direction(d: DmaDirection) -> kdma::DmaDirection {
+    match d {
+        DmaDirection::DriverToDevice => kdma::DmaDirection::DriverToDevice,
+        DmaDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,
+        DmaDirection::Bidirectional => kdma::DmaDirection::Bidirectional,
+    }
+}
+
+/// Translate a device-res IRQ trigger mode into the matching `khal` trigger.
+fn map_khal_trigger(t: IrqTriggerMode) -> khal::irq::IrqTrigger {
+    match t {
+        IrqTriggerMode::EdgeRising => khal::irq::IrqTrigger::EdgeRising,
+        IrqTriggerMode::EdgeFalling => khal::irq::IrqTrigger::EdgeFalling,
+        IrqTriggerMode::LevelHigh => khal::irq::IrqTrigger::LevelHigh,
+        IrqTriggerMode::LevelLow => khal::irq::IrqTrigger::LevelLow,
+        IrqTriggerMode::Unspecified => khal::irq::IrqTrigger::Unknown(0),
+    }
 }
 
 fn map_iomap_err(err: memspace::IoMapError) -> ResError {

@@ -2,9 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::{alloc::Layout, ptr::NonNull};
+use core::ptr::NonNull;
 
-use kdma::{DMAInfo, DmaBusAddress, allocate_dma_memory, deallocate_dma_memory};
+use device_res::{DmaAllocation, DmaSpec, dma_provider, try_dma_provider};
 use khal::mem::{p2v, v2p};
 use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 
@@ -20,8 +20,8 @@ pub struct IxgbeHalImpl;
 // physical address.
 //
 // This implementation upholds those invariants by:
-// * `dma_alloc` / `dma_dealloc` going through `kdma::allocate_dma_memory`
-//   / `kdma::deallocate_dma_memory`, which return a paired
+// * `dma_alloc` / `dma_dealloc` going through the `device_res` provider's
+//   `alloc_coherent` / `free_coherent`, which return a paired
 //   (`cpu_addr`, `bus_addr`) for the same DMA region;
 // * `mmio_p2v` / `mmio_v2p` delegating to `khal::mem::p2v` / `khal::mem::v2p`,
 //   which assume the caller (ixgbe driver probe) has already validated the
@@ -32,27 +32,29 @@ pub struct IxgbeHalImpl;
 // so that when the feature is fully enabled the invariants are clear.
 unsafe impl IxgbeHal for IxgbeHalImpl {
     fn dma_alloc(size: usize) -> (IxgbePhysAddr, NonNull<u8>) {
-        let layout = Layout::from_size_align(size, 8).unwrap();
-        // SAFETY: `layout` is a valid non-zero layout constructed from
-        // `size` with 8-byte alignment. The returned buffer is owned
-        // exclusively by the caller until `dma_dealloc`.
-        match unsafe { allocate_dma_memory(layout) } {
-            Ok(dma_info) => (dma_info.bus_addr.as_u64() as usize, dma_info.cpu_addr),
-            Err(_) => (0, NonNull::dangling()),
+        let spec = DmaSpec::new(size, 8);
+        match dma_provider().and_then(|p| p.alloc_coherent(spec)) {
+            Ok(alloc) => (
+                alloc.bus_addr as IxgbePhysAddr,
+                NonNull::new(alloc.cpu_addr as *mut u8)
+                    .expect("ixgbe dma allocation stored a null CPU address"),
+            ),
+            Err(err) => {
+                log::error!("ixgbe dma_alloc failed: size={}, err={:?}", size, err);
+                (0, NonNull::dangling())
+            }
         }
     }
 
     unsafe fn dma_dealloc(paddr: IxgbePhysAddr, vaddr: NonNull<u8>, size: usize) -> i32 {
-        let layout = Layout::from_size_align(size, 8).unwrap();
-        let dma_info = DMAInfo {
-            cpu_addr: vaddr,
-            bus_addr: DmaBusAddress::from(paddr as u64),
-        };
-        // SAFETY: `dma_info` and `layout` describe a coherent buffer
-        // previously returned by `dma_alloc` with the same `size`.
-        // The caller guarantees this buffer is no longer in use by
-        // the device.
-        unsafe { deallocate_dma_memory(dma_info, layout) };
+        let spec = DmaSpec::new(size, 8);
+        if let Some(p) = try_dma_provider() {
+            p.free_coherent(DmaAllocation {
+                cpu_addr: vaddr.as_ptr() as usize,
+                bus_addr: paddr as u64,
+                spec,
+            });
+        }
         0
     }
 

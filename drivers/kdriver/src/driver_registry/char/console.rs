@@ -78,10 +78,10 @@ pub(crate) fn adopt_boot_console(bus_id: BusId, location_id: u16) -> DriverResul
         }
     };
     if let Some(desc) = config.irq {
-        resources.push(ResourceDesc::Irq(IrqResource {
-            number: desc.hwirq,
-            trigger: kdevice::irq_trigger_from_khal(desc.trigger),
-        }));
+        resources.push(ResourceDesc::Irq(IrqResource::new(
+            desc.hwirq,
+            kdevice::irq_trigger_from_khal(desc.trigger),
+        )));
     }
 
     let device = kdevice::adopt_active_device(ActiveDeviceAdoption {

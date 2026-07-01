@@ -6,7 +6,7 @@
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use device_res::{Irq, IrqResource, IrqReturn, IrqTriggerMode};
+use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTriggerMode, try_irq_provider};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice};
 use kspin::{SpinNoIrq, SpinNoPreempt};
@@ -58,12 +58,18 @@ static REGISTERED_NET_IRQS: SpinNoIrq<BTreeSet<usize>> = SpinNoIrq::new(BTreeSet
 /// kernel; dropping an [`Irq`] guard would release the handler.
 static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
 
-fn handle_virtio_net_irq() -> IrqReturn {
+/// Event source bits reported by the virtio-net IRQ handler. The regular
+/// handler only acks; these bits are advisory for future multi-queue routing
+/// (the rx-task wake path does not read them).
+const RX_SRC: IrqEventSource = 0;
+const TX_SRC: IrqEventSource = 1;
+
+fn handle_virtio_net_irq() -> IrqEvent {
     let handles = NET_IRQ_HANDLES.lock();
     handles.iter().for_each(|irq_handle| {
         let _ = irq_handle.ack_interrupt();
     });
-    IrqReturn::Handled
+    IrqEvent::from_sources((1 << RX_SRC) | (1 << TX_SRC))
 }
 
 fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: usize>(
@@ -80,10 +86,7 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
         }));
 
     if REGISTERED_NET_IRQS.lock().insert(irq) {
-        let resource = IrqResource {
-            number: irq,
-            trigger: IrqTriggerMode::Unspecified,
-        };
+        let resource = IrqResource::new(irq, IrqTriggerMode::Unspecified);
         match Irq::request(resource, Arc::new(handle_virtio_net_irq)) {
             Ok(guard) => NET_IRQ_GUARDS.lock().push(guard),
             Err(_) => {
@@ -105,7 +108,9 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
     let irq_still_used = NET_IRQ_HANDLES.lock().iter().any(|h| h.irq() == irq);
     if !irq_still_used {
         REGISTERED_NET_IRQS.lock().remove(&irq);
-        khal::irq::unregister(irq);
+        if let Some(p) = try_irq_provider() {
+            p.release_irq(IrqResource::new(irq, IrqTriggerMode::Unspecified));
+        }
     }
 }
 

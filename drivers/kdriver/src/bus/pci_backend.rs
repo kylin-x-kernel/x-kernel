@@ -424,10 +424,10 @@ impl BusBackend for PciBackend {
             // negotiated MSI/MSI-X. Best-effort: errors from firmware lookup
             // are silently ignored because most modern devices use MSI-X.
             if let Some(route) = pci::legacy_interrupt_route(config, bdf) {
-                resources.push(ResourceDesc::Irq(IrqResource {
-                    number: route.irq,
-                    trigger: kdevice::irq_trigger_from_firmware(route.trigger),
-                }));
+                resources.push(ResourceDesc::Irq(IrqResource::new(
+                    route.irq,
+                    kdevice::irq_trigger_from_firmware(route.trigger),
+                )));
             }
 
             let location = DeviceLocation::Pci {

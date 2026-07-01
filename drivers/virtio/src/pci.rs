@@ -4,10 +4,14 @@
 
 //! VirtIO PCI transport integration.
 
+#[cfg(not(target_arch = "x86_64"))]
+use device_res::{IrqController, IrqRouteDesc, IrqTriggerMode, irq_provider};
 use driver_base::DeviceKind;
 use pci::PciConfigAccess;
 #[cfg(not(target_arch = "x86_64"))]
 use pci::legacy_interrupt_route;
+#[cfg(not(target_arch = "x86_64"))]
+use pci::{InterruptControllerKind, InterruptTrigger};
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 use virtio_drivers::{
@@ -262,48 +266,70 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) -> Option<usize> {
-    if let Some(route) = legacy_interrupt_route(config, bdf) {
-        #[cfg(target_arch = "aarch64")]
-        {
-            use khal::firmware::devices::InterruptTrigger;
+fn fw_trigger_to_mode(t: InterruptTrigger) -> IrqTriggerMode {
+    match t {
+        InterruptTrigger::EdgeRising => IrqTriggerMode::EdgeRising,
+        InterruptTrigger::EdgeFalling => IrqTriggerMode::EdgeFalling,
+        InterruptTrigger::LevelHigh => IrqTriggerMode::LevelHigh,
+        InterruptTrigger::LevelLow => IrqTriggerMode::LevelLow,
+        InterruptTrigger::Unknown(_) => IrqTriggerMode::Unspecified,
+    }
+}
 
-            let desc = match route.trigger {
-                InterruptTrigger::EdgeRising => khal::irq::gic_edge_irq_desc(route.irq),
-                InterruptTrigger::LevelHigh
-                | InterruptTrigger::LevelLow
-                | InterruptTrigger::EdgeFalling
-                | InterruptTrigger::Unknown(_) => khal::irq::gic_level_irq_desc(route.irq),
-            };
-            return Some(khal::irq::map(desc));
-        }
-        #[cfg(target_arch = "riscv64")]
+#[cfg(not(target_arch = "x86_64"))]
+fn fw_controller_to_kind(c: InterruptControllerKind) -> IrqController {
+    match c {
+        InterruptControllerKind::Gic => IrqController::Gic,
+        InterruptControllerKind::Plic => IrqController::Plic,
+        InterruptControllerKind::Unknown => IrqController::Unknown,
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn legacy_irq_for_bdf(config: &PciConfigAccess, bdf: DeviceFunction) -> Option<usize> {
+    // Prefer firmware-described routing (device-tree / ACPI). The provider's
+    // `map_irq` translates the (hwirq, trigger, controller) route into an
+    // OS-visible virtual IRQ, replacing the per-architecture `khal::irq`
+    // descriptor constructors.
+    if let Some(route) = legacy_interrupt_route(config, bdf) {
+        let desc = IrqRouteDesc {
+            hwirq: route.irq,
+            trigger: fw_trigger_to_mode(route.trigger),
+            controller: fw_controller_to_kind(route.controller),
+            domain: None,
+        };
+        if let Ok(p) = irq_provider()
+            && let Ok(irq) = p.map_irq(desc)
         {
-            return Some(khal::irq::map(khal::irq::plic_irq_desc(route.irq)));
-        }
-        #[cfg(target_arch = "loongarch64")]
-        {
-            return Some(route.irq);
+            return Some(irq.number);
         }
     }
 
-    // These constants are the legacy static PCI INTx fallback used before
-    // firmware interrupt routing was available. They match the QEMU virt-style
-    // platform IRQ ranges used by each port: LoongArch PCH PIC starts at 0x10,
-    // RISC-V PLIC PCI IRQs start at 0x20, and the aarch64 test DT interrupt-map
-    // covers 0x20..0x23. Use firmware routing above whenever it is present.
+    // Static fallback (no firmware routing): legacy PCI INTx ranges used by
+    // each QEMU virt-style port. LoongArch PCH PIC starts at 0x10, RISC-V PLIC
+    // PCI IRQs at 0x20, aarch64 test DT interrupt-map covers 0x20..0x23.
     cfg_select! {
         target_arch = "loongarch64" => {
-            let hwirq = 0x10 + (bdf.device & 3) as usize;
-            Some(hwirq)
+            // LoongArch uses a 1:1 hwirq→virq mapping for these lines.
+            Some(0x10 + (bdf.device & 3) as usize)
         }
         target_arch = "aarch64" => {
-            let hwirq = 0x23 + (bdf.device & 3) as usize;
-            Some(khal::irq::map(khal::irq::gic_level_irq_desc(hwirq)))
+            let desc = IrqRouteDesc {
+                hwirq: 0x23 + (bdf.device & 3) as usize,
+                trigger: IrqTriggerMode::LevelHigh,
+                controller: IrqController::Gic,
+                domain: None,
+            };
+            Some(irq_provider().ok()?.map_irq(desc).ok()?.number)
         }
         target_arch = "riscv64" => {
-            let hwirq = 0x20 + (bdf.device & 3) as usize;
-            Some(khal::irq::map(khal::irq::plic_irq_desc(hwirq)))
+            let desc = IrqRouteDesc {
+                hwirq: 0x20 + (bdf.device & 3) as usize,
+                trigger: IrqTriggerMode::LevelHigh,
+                controller: IrqController::Plic,
+                domain: None,
+            };
+            Some(irq_provider().ok()?.map_irq(desc).ok()?.number)
         }
     }
 }

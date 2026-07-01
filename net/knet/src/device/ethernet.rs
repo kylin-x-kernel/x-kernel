@@ -56,13 +56,36 @@ impl EthernetDevice {
                     * ETHERNET_MAX_PENDING_PACKETS
             ],
         );
-        Self {
+        // Capture the IRQ before `inner` moves into `Self`.
+        let irq = inner.irq();
+        let dev = Self {
             name,
             inner,
             neighbors: HashMap::new(),
             ip,
             pending_tx,
+        };
+        // Spawn an interrupt-driven rx task that drains the NIC receive queue
+        // via `poll_interfaces` whenever the device raises an interrupt.
+        // Without this, received packets sit in the virtio queue until a socket
+        // operation happens to call `poll_interfaces` inline. The pattern
+        // mirrors io/ktty's line-discipline reader: drain, register the waker,
+        // then drain again to close the lost-wakeup race.
+        if let Some(irq) = irq {
+            let _ = ktask::spawn_with_name(
+                move || {
+                    use core::{future::poll_fn, task::Poll};
+                    ktask::future::block_on(poll_fn(move |cx| {
+                        crate::poll_interfaces();
+                        register_irq_waker(irq, cx.waker());
+                        crate::poll_interfaces();
+                        Poll::<()>::Pending
+                    }));
+                },
+                "knet-rx".into(),
+            );
         }
+        dev
     }
 
     #[inline]

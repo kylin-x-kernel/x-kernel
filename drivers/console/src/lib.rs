@@ -11,7 +11,7 @@ pub mod runtime;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use device_res::{Irq, IrqResource, IrqReturn, IrqTriggerMode};
+use device_res::{Irq, IrqEvent, IrqResource, IrqTriggerMode};
 use khal::{irq::IrqDesc, mem::PhysAddr};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
@@ -218,9 +218,9 @@ pub fn getchar() -> Option<u8> {
     backend::getchar()
 }
 
-fn handle_input_irq() -> IrqReturn {
+fn handle_input_irq() -> IrqEvent {
     backend::ack_interrupt();
-    IrqReturn::Handled
+    IrqEvent::HANDLED
 }
 
 pub fn register_input_irq_handler() {
@@ -242,10 +242,7 @@ pub fn register_input_irq_handler() {
     // The descriptor was already resolved into `khal` via `map`, so the host
     // provider can register by logical IRQ number; trigger/polarity metadata is
     // applied from the stored descriptor.
-    let resource = IrqResource {
-        number: virq,
-        trigger: IrqTriggerMode::Unspecified,
-    };
+    let resource = IrqResource::new(virq, IrqTriggerMode::Unspecified);
     match Irq::request(resource, Arc::new(handle_input_irq)) {
         Ok(guard) => *INPUT_IRQ.lock() = Some(guard),
         Err(err) => {
