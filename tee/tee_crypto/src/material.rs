@@ -18,6 +18,7 @@ pub enum SignatureAlgorithm {
     RsaPkcs1v15,
     RsaPss,
     Sm2Dsa,
+    Ed25519,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

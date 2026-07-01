@@ -5,4 +5,5 @@
 //! TEE operation-level cryptographic APIs.
 
 pub mod ecc;
+pub mod ed25519;
 pub mod rsa;

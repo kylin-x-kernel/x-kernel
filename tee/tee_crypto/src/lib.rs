@@ -33,3 +33,4 @@ pub mod pkix;
 pub use algorithms::{aead, block_cipher, cipher, ecc, hash, hkdf, mac, md5, rsa, sm2, xts};
 pub use error::{CryptoError, Result};
 pub use rng::CryptoRng;
+pub use tee_ops::ed25519;
