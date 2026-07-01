@@ -33,7 +33,7 @@ rustflags = ["-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=non
 rustflags = ["-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=none"]
 
 [target.x86_64-unknown-none]
-rustflags = ["--cfg", "aes_backend=\"soft\"", "-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=none"]
+rustflags = ["--cfg", "aes_backend=\"soft\"", "--cfg", "curve25519_dalek_backend=\"serial\"", "-C", "force-frame-pointers", "-C", "debuginfo=2", "-C", "strip=none"]
 
 [alias]
 xconfig = "run --manifest-path xtask/xconfig/Cargo.toml --"
