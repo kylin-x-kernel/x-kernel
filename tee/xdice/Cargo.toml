@@ -1,0 +1,22 @@
+[package]
+name = "xdice"
+edition = "2024"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Rust wrapper for dice."
+
+[features]
+default = ["nostd"]
+nostd = ["tee_crypto/alloc"]
+std = ["tee_crypto/std"]
+
+[lib]
+name = "xdice"
+
+[dependencies]
+tee_crypto.workspace = true
+zeroize.workspace = true
+unittest.workspace = true

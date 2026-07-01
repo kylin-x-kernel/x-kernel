@@ -13,4 +13,4 @@ kerrno.workspace = true
 khal.workspace = true
 memaddr.workspace = true
 of.workspace = true
-rust-dice = { workspace = true, features = ["nostd"] }
+xdice = { workspace = true, features = ["nostd"] }

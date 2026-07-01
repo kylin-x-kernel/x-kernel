@@ -163,6 +163,7 @@ tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }
 tasign = { version = "0.2", default-features = false }
+xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
 
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }
@@ -179,6 +180,7 @@ bitflags = "2.10"
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
 zerocopy = { version = "0.8", features = ["derive"] }
+zeroize = { version = "1.9", default-features = false }
 chrono = { version = "0.4", default-features = false }
 crate_interface = { version = "0.3", features = ["weak_default"] }
 enum_dispatch = "0.3"
@@ -201,7 +203,7 @@ log = "0.4"
 int_ratio = "0.1"
 ouroboros = { version = "0.18.5", default-features = false }
 percpu = "0.4"
-rust-dice = { version = "0.1", default-features = false, features = ["nostd"] }
+
 safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
 slab_allocator = { version = "0.4", package = "ax_slab_allocator" }

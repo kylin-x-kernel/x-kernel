@@ -15,14 +15,14 @@ tee_cfg_memtag = []
 tee_ss_smx = []
 csv_huk_key = ["dep:kcpu"]
 # dice_huk_key and virtcca_huk_key are mutually exclusive (compile_error in tee/arch/aarch64/mod.rs).
-dice_huk_key = ["dep:dice_driver", "dep:rust-dice"]
+dice_huk_key = ["dep:dice_driver", "dep:xdice"]
 virtcca_huk_key = []
 
 [dependencies]
 kalloc.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
-rust-dice = { workspace = true, optional = true, features = ["nostd"] }
+xdice = { workspace = true, optional = true, features = ["nostd"] }
 klazy.workspace = true
 tee_crypto = { workspace = true, features = ["alloc"] }
 kcpu = { workspace = true, optional = true }

@@ -13,7 +13,7 @@ use alloc::{vec, vec::Vec};
 use kerrno::{KError, KResult};
 use memaddr::{VirtAddr, pa};
 use of::dice_region;
-use rust_dice::{dice_main_flow_chain_codehash, dice_parse_handover};
+use xdice::{dice_main_flow_chain_codehash, dice_parse_handover};
 
 const MAX_DICE_DATA_SIZE: usize = 0x1000;
 

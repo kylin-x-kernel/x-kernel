@@ -3,9 +3,9 @@
 // See LICENSES for license details.
 
 use dice_driver::read_raw_handover_data;
-use rust_dice::dice_parse_handover;
 use tee_crypto::{hkdf, mac::HmacSm3};
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_BAD_STATE};
+use xdice::dice_parse_handover;
 
 use crate::tee::TeeResult;
 

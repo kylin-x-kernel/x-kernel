@@ -127,7 +127,7 @@ export KBUILD_BUILD_INFO ?= machine=$(KBUILD_BUILD_MACHINE);time=$(KBUILD_BUILD_
 # Binutils
 CROSS_COMPILE ?= $(ARCH)-linux-musl-
 CC := $(CROSS_COMPILE)gcc
-# A temp export for rust-dice, after we change to real rust dice we need remove it
+# Export C toolchain variables for crates that build native support objects.
 export CC
 AR := $(CROSS_COMPILE)ar
 RANLIB := $(CROSS_COMPILE)ranlib
