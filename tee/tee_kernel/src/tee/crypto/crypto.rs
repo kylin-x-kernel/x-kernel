@@ -20,6 +20,10 @@ use tee_crypto::{
     streaming_cipher::{Direction, PaddingMode, StreamingCipherAlgo, StreamingCipherCtx},
     tee_ops::{
         ecc::{self as ecc_ops, EccHashAlgo},
+        ed25519::{
+            self as ed25519_ops, ED25519_CTX_MAX_LENGTH, ED25519_KEY_SIZE_BYTES,
+            ED25519_SIGNATURE_SIZE_BYTES, Ed25519Variant,
+        },
         rsa::{self as rsa_ops, RsaEncPadding, RsaHashAlgo, RsaSignPadding},
     },
 };
@@ -38,7 +42,7 @@ use crate::tee::{
     rng_software::TeeSoftwareRng,
     tee_api_defines_extensions::TEE_ALG_SM4_XTS,
     tee_obj::{TeeObjIdType, tee_obj_get},
-    tee_svc_cryp::{CryptoAttrRef, TeeCryptObj, TeeCryptoOps},
+    tee_svc_cryp::{CryptoAttrRef, KernelAttribute, TeeCryptObj, TeeCryptoOps},
     tee_svc_cryp2::{
         CipherPaddingMode, CmacContext, CrypCtx, CrypState, HashContext, HmacContext, TeeCrypState,
     },
@@ -1576,4 +1580,177 @@ pub(crate) fn crypto_acipher_ecc_verify(
     } else {
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Ed25519Keypair {
+    pub priv_key: [u8; ED25519_KEY_SIZE_BYTES],
+    pub pub_key: [u8; ED25519_KEY_SIZE_BYTES],
+    pub curve: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Ed25519PublicKey {
+    pub pub_key: [u8; ED25519_KEY_SIZE_BYTES],
+    pub curve: u32,
+}
+
+impl TeeCryptoOps for Ed25519Keypair {
+    fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
+        if key_type != TEE_TYPE_ED25519_KEYPAIR || key_size_bits != 256 {
+            return Err(TEE_ERROR_NOT_SUPPORTED);
+        }
+        Ok(Self {
+            curve: TEE_ECC_CURVE_25519,
+            ..Default::default()
+        })
+    }
+
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
+        match attr_id as u32 {
+            TEE_ATTR_ED25519_PRIVATE_VALUE => Ok(CryptoAttrRef::Key32(&mut self.priv_key)),
+            TEE_ATTR_ED25519_PUBLIC_VALUE => Ok(CryptoAttrRef::Key32(&mut self.pub_key)),
+            _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        }
+    }
+}
+
+impl TeeCryptoOps for Ed25519PublicKey {
+    fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
+        if key_type != TEE_TYPE_ED25519_PUBLIC_KEY || key_size_bits != 256 {
+            return Err(TEE_ERROR_NOT_SUPPORTED);
+        }
+        Ok(Self {
+            curve: TEE_ECC_CURVE_25519,
+            ..Default::default()
+        })
+    }
+
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
+        match attr_id as u32 {
+            TEE_ATTR_ED25519_PUBLIC_VALUE => Ok(CryptoAttrRef::Key32(&mut self.pub_key)),
+            _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        }
+    }
+}
+
+pub(crate) struct Ed25519OperationParams {
+    pub variant: Ed25519Variant,
+}
+
+pub(crate) fn parse_ed25519_operation_params(
+    params: Option<&[KernelAttribute]>,
+) -> TeeResult<Ed25519OperationParams> {
+    let mut ph_flag = false;
+    let mut ctx: Option<alloc::vec::Vec<u8>> = None;
+
+    if let Some(params) = params {
+        for attr in params {
+            match attr {
+                KernelAttribute::Value { id, a, .. } if *id == TEE_ATTR_EDDSA_PREHASH => match *a {
+                    0 => ph_flag = false,
+                    1 => ph_flag = true,
+                    _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+                },
+                KernelAttribute::Memref { id, data } if *id == TEE_ATTR_EDDSA_CTX => {
+                    if ctx.is_some() {
+                        return Err(TEE_ERROR_BAD_PARAMETERS);
+                    }
+                    if data.len() > ED25519_CTX_MAX_LENGTH {
+                        return Err(TEE_ERROR_BAD_PARAMETERS);
+                    }
+                    if data.is_empty() {
+                        continue;
+                    }
+                    ctx = Some(data.to_vec());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let variant = Ed25519Variant {
+        prehash: ph_flag,
+        context: ctx,
+    };
+    variant.validate().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    Ok(Ed25519OperationParams { variant })
+}
+
+fn map_ed25519_verify_err(err: tee_crypto::CryptoError) -> u32 {
+    match err {
+        tee_crypto::CryptoError::VerificationFailed => TEE_ERROR_SIGNATURE_INVALID,
+        tee_crypto::CryptoError::UnsupportedAlgorithm => TEE_ERROR_NOT_SUPPORTED,
+        _ => TEE_ERROR_BAD_PARAMETERS,
+    }
+}
+
+pub(crate) fn crypto_acipher_gen_ed25519_key(
+    key: &mut Ed25519Keypair,
+    key_size_bits: usize,
+) -> TeeResult {
+    if key_size_bits != 256 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let mut rng = TeeSoftwareRng::new();
+    let (seed, public_key) =
+        ed25519_ops::ed25519_generate_keypair(&mut rng).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    key.priv_key = seed;
+    key.pub_key = public_key;
+    key.curve = TEE_ECC_CURVE_25519;
+    Ok(())
+}
+
+pub(crate) fn crypto_acipher_ed25519_sign(
+    cs: Arc<Mutex<TeeCrypState>>,
+    message: &[u8],
+    output: &mut [u8],
+    required: &mut usize,
+    params: Option<&[KernelAttribute]>,
+) -> TeeResult<usize> {
+    let cs_guard = cs.lock();
+    let key1 = cs_guard.key1.ok_or(TEE_ERROR_BAD_STATE)?;
+    drop(cs_guard);
+
+    let obj = tee_obj_get(key1 as _)?;
+    let obj_guard = obj.lock();
+    let key = match &obj_guard.attr[0] {
+        TeeCryptObj::Ed25519Keypair(key) => key,
+        _ => return Err(TEE_ERROR_BAD_STATE),
+    };
+
+    *required = ED25519_SIGNATURE_SIZE_BYTES;
+    if output.len() < ED25519_SIGNATURE_SIZE_BYTES {
+        return Err(TEE_ERROR_SHORT_BUFFER);
+    }
+
+    let op_params = parse_ed25519_operation_params(params)?;
+    let signature = ed25519_ops::ed25519_sign_variant(&key.priv_key, message, &op_params.variant)
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let sig = signature.as_bytes();
+    output[..sig.len()].copy_from_slice(sig);
+    Ok(sig.len())
+}
+
+pub(crate) fn crypto_acipher_ed25519_verify(
+    cs: Arc<Mutex<TeeCrypState>>,
+    message: &[u8],
+    signature: &[u8],
+    params: Option<&[KernelAttribute]>,
+) -> TeeResult {
+    let cs_guard = cs.lock();
+    let key1 = cs_guard.key1.ok_or(TEE_ERROR_BAD_STATE)?;
+    drop(cs_guard);
+
+    let obj = tee_obj_get(key1 as _)?;
+    let obj_guard = obj.lock();
+    let pub_key = match &obj_guard.attr[0] {
+        TeeCryptObj::Ed25519PublicKey(key) => &key.pub_key,
+        TeeCryptObj::Ed25519Keypair(key) => &key.pub_key,
+        _ => return Err(TEE_ERROR_BAD_STATE),
+    };
+
+    let op_params = parse_ed25519_operation_params(params)?;
+    ed25519_ops::ed25519_verify_variant(pub_key, message, signature, &op_params.variant)
+        .map_err(map_ed25519_verify_err)
 }

@@ -25,20 +25,22 @@ use super::{
 };
 use crate::tee::{
     TEE_ALG_DES3_CMAC, TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5, TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5,
-    TEE_ALG_SHA3_224, TEE_ALG_SHA3_256, TEE_ALG_SHA3_384, TEE_ALG_SHA3_512, TEE_TYPE_CONCAT_KDF_Z,
-    TEE_TYPE_HKDF_IKM, TEE_TYPE_PBKDF2_PASSWORD, crypto,
+    TEE_ALG_RSASSA_PKCS1_V1_5, TEE_ALG_SHA3_224, TEE_ALG_SHA3_256, TEE_ALG_SHA3_384,
+    TEE_ALG_SHA3_512, TEE_TYPE_CONCAT_KDF_Z, TEE_TYPE_HKDF_IKM, TEE_TYPE_PBKDF2_PASSWORD, crypto,
     crypto::crypto::{
-        crypto_acipher_ecc_sign, crypto_acipher_ecc_verify, crypto_acipher_rsaes_decrypt,
-        crypto_acipher_rsaes_encrypt, crypto_acipher_rsanopad_decrypt,
-        crypto_acipher_rsanopad_encrypt, crypto_acipher_rsassa_sign, crypto_acipher_rsassa_verify,
-        crypto_acipher_sm2_pke_decrypt, crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final,
-        crypto_authenc_enc_final, crypto_authenc_init, crypto_authenc_update_aad,
-        crypto_cipher_final, crypto_cipher_init, crypto_cipher_max_output_len,
-        crypto_cipher_update, crypto_ecc_init, crypto_rsa_init, crypto_xts_cipher_final,
+        crypto_acipher_ecc_sign, crypto_acipher_ecc_verify, crypto_acipher_ed25519_sign,
+        crypto_acipher_ed25519_verify, crypto_acipher_rsaes_decrypt, crypto_acipher_rsaes_encrypt,
+        crypto_acipher_rsanopad_decrypt, crypto_acipher_rsanopad_encrypt,
+        crypto_acipher_rsassa_sign, crypto_acipher_rsassa_verify, crypto_acipher_sm2_pke_decrypt,
+        crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final, crypto_authenc_enc_final,
+        crypto_authenc_init, crypto_authenc_update_aad, crypto_cipher_final, crypto_cipher_init,
+        crypto_cipher_max_output_len, crypto_cipher_update, crypto_ecc_init, crypto_rsa_init,
+        crypto_xts_cipher_final,
     },
     memtag::{memtag_strip_tag, memtag_strip_tag_const},
     rng_software::crypto_rng_read,
     tee_session::{with_tee_session_ctx, with_tee_session_ctx_mut},
+    tee_svc_cryp::KernelAttribute,
     utee_defines::{
         TEE_AES_BLOCK_SIZE, TEE_DES_BLOCK_SIZE, TEE_MD5_HASH_SIZE, TEE_SHA1_HASH_SIZE,
         TEE_SHA224_HASH_SIZE, TEE_SHA256_HASH_SIZE, TEE_SHA384_HASH_SIZE, TEE_SHA512_HASH_SIZE,
@@ -522,6 +524,45 @@ fn tee_cryp_asymm_init(
         }
         _ => Ok(()),
     }
+}
+
+/// OP-TEE: `pkcs1_get_salt_len()` — when absent, salt length defaults to digest size.
+fn pkcs1_get_salt_len(params: Option<&[KernelAttribute]>, default_len: usize) -> usize {
+    params
+        .into_iter()
+        .flatten()
+        .find_map(|attr| match attr {
+            KernelAttribute::Value { id, a, .. } if *id == TEE_ATTR_RSA_PSS_SALT_LENGTH => {
+                Some(*a as usize)
+            }
+            _ => None,
+        })
+        .unwrap_or(default_len)
+}
+
+fn rsassa_expected_digest_len(algo: u32) -> TeeResult<usize> {
+    let hash_algo = match algo {
+        TEE_ALG_RSASSA_PKCS1_V1_5_MD5 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5 => TEE_ALG_MD5,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA1 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1 => TEE_ALG_SHA1,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA224 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224 => TEE_ALG_SHA224,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA256 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256 => TEE_ALG_SHA256,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA384 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384 => TEE_ALG_SHA384,
+        TEE_ALG_RSASSA_PKCS1_V1_5_SHA512 | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => TEE_ALG_SHA512,
+        _ => return Err(TEE_ERROR_NOT_SUPPORTED),
+    };
+    let mut size = 0;
+    tee_alg_get_digest_size(hash_algo, &mut size)?;
+    Ok(size)
+}
+
+fn tee_cryp_asymm_require_key_initialized(cs: &TeeCrypState) -> TeeResult {
+    let key1 = cs.key1.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    let obj = tee_obj_get(key1 as TeeObjIdType)?;
+    let obj_guard = obj.lock();
+    if obj_guard.info.handleFlags & TEE_HANDLE_FLAG_INITIALIZED == 0 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    Ok(())
 }
 
 // 创建一个TeeCrypState
@@ -1275,7 +1316,7 @@ pub fn tee_cryp_asymm_operate(
     label: Option<&[u8]>,
 ) -> TeeResult<usize> {
     let mut required = 0usize;
-    tee_cryp_asymm_operate_with_required(id, input, output, label, None, &mut required)
+    tee_cryp_asymm_operate_with_required(id, input, output, label, None, None, &mut required)
 }
 
 pub fn tee_cryp_asymm_operate_with_required(
@@ -1284,6 +1325,7 @@ pub fn tee_cryp_asymm_operate_with_required(
     output: &mut [u8],
     label: Option<&[u8]>,
     pss_salt_len: Option<usize>,
+    ed25519_params: Option<&[KernelAttribute]>,
     required: &mut usize,
 ) -> TeeResult<usize> {
     *required = 0;
@@ -1357,8 +1399,10 @@ pub fn tee_cryp_asymm_operate_with_required(
         | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => {
             crypto_acipher_rsassa_sign(cs.clone(), input, output, required, pss_salt_len)
         }
-        TEE_ALG_DSA_SHA1 | TEE_ALG_DSA_SHA224 | TEE_ALG_DSA_SHA256 => Err(TEE_ERROR_NOT_SUPPORTED), /* mbedtls no support for DSA */
-        TEE_ALG_ED25519 => Err(TEE_ERROR_NOT_SUPPORTED), // mbedtls no support for EdDSA
+        TEE_ALG_DSA_SHA1 | TEE_ALG_DSA_SHA224 | TEE_ALG_DSA_SHA256 => Err(TEE_ERROR_NOT_SUPPORTED),
+        TEE_ALG_ED25519 => {
+            crypto_acipher_ed25519_sign(cs.clone(), input, output, required, ed25519_params)
+        }
         TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
         | TEE_ALG_ECDSA_SHA512 | TEE_ALG_SM2_DSA_SM3 => {
             crypto_acipher_ecc_sign(cs.clone(), input, output, required)
@@ -1433,6 +1477,7 @@ pub fn syscall_asymm_operate(
         &mut dst_buf,
         label_ref,
         pss_salt_len,
+        params_attrs.as_deref(),
         &mut required,
     ) {
         Ok(actual) => {
@@ -1454,7 +1499,17 @@ pub fn syscall_asymm_operate(
     }
 }
 
-pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResult {
+/// Kernel-side asymmetric verify on buffers already in kernel memory.
+///
+/// Corresponds to the crypto dispatch in OP-TEE `syscall_asymm_verify` after user
+/// parameters and attributes have been copied in. `params` carries optional
+/// algorithm-specific attributes (Ed25519 prehash/context, RSA-PSS salt length, etc.).
+pub fn tee_cryp_asymm_verify(
+    id: u32,
+    data: &[u8],
+    signature: &[u8],
+    params: Option<&[KernelAttribute]>,
+) -> TeeResult {
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
 
@@ -1465,6 +1520,10 @@ pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResul
     let cryp_state = cs_guard.state;
     drop(cs_guard);
 
+    if mode != TEE_OperationMode::TEE_MODE_VERIFY {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
     if cryp_state != CrypState::Initialized {
         tee_cryp_asymm_init(cs.clone(), algo, mode)?;
         let mut cs_guard = cs.lock();
@@ -1472,50 +1531,62 @@ pub fn tee_cryp_asymm_verify(id: u32, hash: &[u8], signature: &[u8]) -> TeeResul
         drop(cs_guard);
     }
 
-    if mode != TEE_OperationMode::TEE_MODE_VERIFY {
-        return Err(TEE_ERROR_BAD_STATE);
+    {
+        let cs_guard = cs.lock();
+        tee_cryp_asymm_require_key_initialized(&cs_guard)?;
     }
 
-    match algo {
-        TEE_ALG_RSASSA_PKCS1_V1_5_MD5
-        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA1
-        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA224
-        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA256
-        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA384
-        | TEE_ALG_RSASSA_PKCS1_V1_5_SHA512
-        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5
-        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA1
-        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA224
-        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA256
-        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA384
-        | TEE_ALG_RSASSA_PKCS1_PSS_MGF1_SHA512 => {
-            crypto_acipher_rsassa_verify(cs.clone(), hash, signature)
+    match tee_alg_get_main_alg(algo) {
+        TEE_MAIN_ALGO_RSA => {
+            if algo != TEE_ALG_RSASSA_PKCS1_V1_5 {
+                let hash_size = rsassa_expected_digest_len(algo)?;
+                if data.len() != hash_size {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+                let _salt_len = pkcs1_get_salt_len(params, hash_size);
+            }
+            crypto_acipher_rsassa_verify(cs.clone(), data, signature)
         }
-        TEE_ALG_DSA_SHA1 | TEE_ALG_DSA_SHA224 | TEE_ALG_DSA_SHA256 => Err(TEE_ERROR_NOT_SUPPORTED), /* mbedtls no support for DSA */
-        TEE_ALG_ED25519 => Err(TEE_ERROR_NOT_SUPPORTED), // mbedtls no support for EdDSA
-        TEE_ALG_ECDSA_SHA1 | TEE_ALG_ECDSA_SHA224 | TEE_ALG_ECDSA_SHA256 | TEE_ALG_ECDSA_SHA384
-        | TEE_ALG_ECDSA_SHA512 | TEE_ALG_SM2_DSA_SM3 => {
-            crypto_acipher_ecc_verify(cs.clone(), hash, signature)
+        TEE_MAIN_ALGO_DSA => Err(TEE_ERROR_NOT_SUPPORTED),
+        TEE_MAIN_ALGO_ED25519 => crypto_acipher_ed25519_verify(cs.clone(), data, signature, params),
+        TEE_MAIN_ALGO_ECDSA | TEE_MAIN_ALGO_SM2_DSA_SM3 => {
+            crypto_acipher_ecc_verify(cs.clone(), data, signature)
         }
         _ => Err(TEE_ERROR_NOT_SUPPORTED),
     }
 }
 
-/// arg1与arg2参数与RSASSA有关
-/// 暂未进行处理，目前只支持ECC和SM2
+/// GP `syscall_asymm_verify`: validate user buffers, copy attributes, then verify.
+///
+/// OP-TEE keeps the user/kernel boundary in the syscall; algorithm dispatch lives in
+/// [`tee_cryp_asymm_verify`].
 pub fn syscall_asymm_verify(
     arg0: usize,
-    _arg1: usize,
-    _arg2: usize,
+    arg1: usize,
+    arg2: usize,
     arg3: usize,
     arg4: usize,
     arg5: usize,
     arg6: usize,
 ) -> TeeResult {
+    let cs = tee_cryp_state_get(arg0 as _)?;
+    if cs.lock().mode != TEE_OperationMode::TEE_MODE_VERIFY {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let params_attrs = if arg2 == 0 {
+        None
+    } else {
+        let usr_attrs = UserConstPtr::<utee_attribute>::from(arg1)
+            .load_vm_vec(arg2)
+            .map_err(map_user_mem_error)?;
+        Some(copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs)?)
+    };
+
     let data = read_required_user_bytes(arg3, arg4)?;
     let sig = read_required_user_bytes(arg5, arg6)?;
-    tee_cryp_asymm_verify(arg0 as _, &data, &sig)?;
-    Ok(())
+
+    tee_cryp_asymm_verify(arg0 as _, &data, &sig, params_attrs.as_deref())
 }
 
 #[unittest::mod_test]
@@ -3782,7 +3853,7 @@ pub mod tests_cryp {
         assert!(res.is_ok());
         let len = res.unwrap();
 
-        let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len]);
+        let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len], None);
         assert!(res.is_ok());
     }
 
@@ -3830,6 +3901,9 @@ pub mod tests_cryp {
             BigNum(tee_crypto::bignum::TeeBigNum::from_bytes(&pubkey[32..]).expect("y from bytes"));
 
         let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::EccPublicKey(ecc_key));
+        obj.have_attrs = (1 << 2) - 1;
+        obj.info.objectSize = 256;
+        obj.info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
         drop(obj);
 
         let mut state: u32 = 0;
@@ -3849,7 +3923,7 @@ pub mod tests_cryp {
         )
         .expect("sm2 sign digest");
 
-        let res = tee_cryp_asymm_verify(state, &data, &sig);
+        let res = tee_cryp_asymm_verify(state, &data, &sig, None);
         assert!(res.is_ok());
     }
 
@@ -3920,7 +3994,7 @@ pub mod tests_cryp {
             &pubkey,
         )
         .expect("sm2 sign digest");
-        let res = tee_cryp_asymm_verify(state, &data, &sig);
+        let res = tee_cryp_asymm_verify(state, &data, &sig, None);
         assert!(res.is_ok());
     }
 
@@ -4379,7 +4453,7 @@ pub mod tests_cryp {
         assert!(res.is_ok());
         let sig_len = res.unwrap();
 
-        let res = tee_cryp_asymm_verify(st_vfy, data, &sig[..sig_len]);
+        let res = tee_cryp_asymm_verify(st_vfy, data, &sig[..sig_len], None);
         assert!(res.is_ok());
     }
 
@@ -4413,12 +4487,12 @@ pub mod tests_cryp {
         assert!(res.is_ok());
         let sig_len = res.unwrap();
 
-        let res = tee_cryp_asymm_verify(st_vfy, data, &sig[..sig_len]);
+        let res = tee_cryp_asymm_verify(st_vfy, data, &sig[..sig_len], None);
         assert!(res.is_ok());
 
         let mut bad = sig;
         bad[sig_len - 1] ^= 0xff;
-        let res = tee_cryp_asymm_verify(st_vfy, data, &bad[..sig_len]);
+        let res = tee_cryp_asymm_verify(st_vfy, data, &bad[..sig_len], None);
         assert_eq!(res.err(), Some(TEE_ERROR_SIGNATURE_INVALID));
     }
 
@@ -4440,5 +4514,69 @@ pub mod tests_cryp {
         let mut out = [0u8; 256];
         let res = tee_cryp_asymm_operate(st, data, &mut out, None);
         assert_eq!(res.err(), Some(TEE_ERROR_GENERIC));
+    }
+
+    fn hex_decode(s: &str) -> alloc::vec::Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid test hex"))
+            .collect()
+    }
+
+    #[unittest::def_test(custom)]
+    fn test_cryp_ed25519_verify_sig_structure_vector() {
+        let pub_key =
+            hex_decode("720e968320f6d324d29423d546524c7acbb549c12a49e059dbc508c56099f82e");
+        let signature = hex_decode(
+            "8399c94482427c9831776073c2e5c3b73f4f8a659601606f3c56aab6b27c68543948cb578a1c7b17f178ac203546d69f6174443a885448e8371659788162a400",
+        );
+        let message = hex_decode(
+            "846a5369676e61747572653143a1012740590188a901782830323836306133303533633262626339666336396262383235663134653134333136393965323930027828376266386562323866393934323830373062363862346263356534323163373166313765306166313a0047445058400bde5e136fceb2c6fdeda53ec8faac595e88f46c5b5a93fe03a3d17f76f5753ce94d5748d2f8709ac546585da5aa1cc13bdba7b013e00fe6b4d1646eb05423bf3a0047445354a23a00011171634156423a000111721a1a0001733a004744525840a6793f45095c98d12b197fd255c2401c885d042df34c25779febefbbd179e7f3fce6b0393526a57e7637a3a7884d78e7047c152d64fcc01928dbc57a00e25f6d3a004744545840000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003a0047445641023a00474457582da50101032704810220062158202ce5042362885a95d0897c033359516fd8e98cd2f5b8e3052dd0a1cd540ddb283a004744584120",
+        );
+
+        assert_eq!(pub_key.len(), 32);
+        assert_eq!(signature.len(), 64);
+        assert_eq!(message.len(), 412);
+
+        let pub_obj = TestUserValue::<c_uint>::from_value(0);
+        assert!(pub_obj.is_ok());
+        let mut pub_obj = pub_obj.unwrap();
+        let res =
+            syscall_cryp_obj_alloc(TEE_TYPE_ED25519_PUBLIC_KEY as _, 256, pub_obj.as_user_ref());
+        assert!(res.is_ok());
+        let pub_id = pub_obj.read();
+
+        let obj_arc = tee_obj_get(pub_id as TeeObjIdType);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let mut obj = obj_arc.lock();
+
+        let mut ed25519_pub =
+            crate::tee::crypto::crypto::Ed25519PublicKey::new(TEE_TYPE_ED25519_PUBLIC_KEY, 256)
+                .expect("ed25519 public key");
+        ed25519_pub.pub_key.copy_from_slice(&pub_key);
+        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::Ed25519PublicKey(ed25519_pub));
+        obj.have_attrs = (1 << 1) - 1;
+        obj.info.objectSize = 256;
+        obj.info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
+        drop(obj);
+
+        let mut st_vfy: u32 = 0;
+        let res = tee_cryp_state_alloc(
+            TEE_ALG_ED25519,
+            TEE_OperationMode::TEE_MODE_VERIFY,
+            Some(pub_id),
+            None,
+            &mut st_vfy,
+        );
+        assert!(res.is_ok());
+
+        let res = tee_cryp_asymm_verify(st_vfy, &message, &signature, None);
+        assert!(res.is_ok(), "ed25519 verify failed: {:?}", res.err());
+
+        let mut bad_sig = signature.clone();
+        bad_sig[63] ^= 0xff;
+        let res = tee_cryp_asymm_verify(st_vfy, &message, &bad_sig, None);
+        assert_eq!(res.err(), Some(TEE_ERROR_SIGNATURE_INVALID));
     }
 }

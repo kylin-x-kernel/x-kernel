@@ -49,6 +49,7 @@ mod bitstring;
 mod common;
 mod config;
 mod crypto;
+mod curve25519_key;
 mod fs_dirfile;
 mod fs_htree;
 #[cfg(unittest)]
