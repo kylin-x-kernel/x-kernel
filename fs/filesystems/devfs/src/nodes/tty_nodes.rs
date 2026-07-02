@@ -27,7 +27,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             fs.clone(),
             NodeType::CharacterDevice,
             DeviceId::new(5, 1),
-            (**tty::N_TTY).clone(),
+            tty::N_TTY.clone(),
         ),
     );
     root.add(

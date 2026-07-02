@@ -18,6 +18,11 @@
 
 #![cfg_attr(not(test), no_std)]
 
+// Re-export `paste` under a hidden path so the `lazy_static!` macro can rely on
+// ident splicing without leaking the dependency into the public API.
+#[doc(hidden)]
+pub use paste as __paste;
+
 mod lazy;
 pub mod lazy_static;
 mod once;

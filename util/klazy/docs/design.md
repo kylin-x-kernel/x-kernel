@@ -157,6 +157,34 @@ Lazy<T, F>  ──使用──>  Once<T>
 polyfill。当前支持的目标（x86_64、aarch64、riscv64、loongarch64）上
 `AtomicU8` 均为 lock-free，无需额外依赖。
 
+### `lazy_static!` 宏的 Deref 语义
+
+`lazy_static!` 为每个 `static ref NAME: T` 生成一个**独立的、零大小的
+包装类型**（通过 `paste` crate 做 ident 拼接，名为 `NAME__LazyRef` 等
+内部符号），它 `Deref<Target = T>`。这与上游 `lazy_static` crate 的分发
+语义和隔离模型一致：
+
+- **分发语义**：对静态变量调用 trait 方法（如 `NAME.clone()`、
+  `NAME.lock()`）会经 autoderef 穿透到内部值 `T`，而不是克隆/操作外层
+  包装。
+- **类型隔离**：每个静态拥有自己的包装类型，两个静态即使内部值类型
+  相同也不可互换——编译器会拒绝把 `STATIC_A` 当作 `STATIC_B` 传递。
+
+包装类型刻意**不**实现 `Clone`/`Copy`。否则 `NAME.clone()` 会优先匹配
+包装自身的 `Clone`，无法到达 `T::clone`。保留这两个 trait 未实现正是
+`NAME.clone()` 能解析为 `T::clone`（例如克隆内部 `Arc`）的关键。
+
+包装类型可见性跟随用户声明的 `$vis`（`pub`/`pub(crate)`/私有），并加
+`#[doc(hidden)]`，这样 `pub static` 可跨 crate 引用，但包装类型本身不
+出现在渲染的 API 文档里。`paste` 仅作编译期 ident 拼接，是 proc-macro，
+不进入运行时二进制。
+
+历史上 `lazy_static!` 曾把 `NAME` 直接生成成 `&'static Lazy<T>` 引用。
+在那种形态下 `NAME.clone()` 走的是 `&T` 的 `Clone`（克隆引用本身），
+autoderef 不发生，因此调用方必须手写 `(**NAME).clone()` 才能拿到内部
+`Arc` 的克隆。当前的独立包装消除了这一 workaround——迁移自旧形态的
+代码应把 `(**NAME).clone()` 改回 `NAME.clone()`。
+
 ## Drop 行为
 
 `Once<T>` 实现了 `Drop`：状态为 `Ready` 时，通过 `ptr::drop_in_place`

@@ -39,6 +39,7 @@ TARGET_DIR ?= $(PWD)/target
 export TARGET_DIR
 XCONF_TARGET_DIR ?= $(TARGET_DIR)/tools/xconf
 UAPP_TARGET_DIR ?= $(TARGET_DIR)/tools/uapp
+XTASK_TARGET_DIR ?= $(PWD)/xtask/target
 HOST_TARGET := $(shell rustc -vV | sed -n 's|host: ||p')
 XCONF = env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(XCONF_TARGET_DIR) --manifest-path xtask/xconfig/Cargo.toml --bin xconf --
 UAPP_TOOL = env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run --target-dir $(UAPP_TARGET_DIR) --manifest-path xtask/uapp/Cargo.toml --
@@ -338,6 +339,7 @@ clean:
 	cargo clean --target-dir $(TARGET_DIR)
 	cargo clean --target-dir $(XCONF_TARGET_DIR)
 	cargo clean --target-dir $(UAPP_TARGET_DIR)
+	cargo clean --target-dir $(XTASK_TARGET_DIR)
 	@rm -rf $(TARGET_DIR)/kbuild
 
 distclean: clean

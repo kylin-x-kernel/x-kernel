@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+paste = { workspace = true }
 unittest = { workspace = true }
 
 [lints.rust]
