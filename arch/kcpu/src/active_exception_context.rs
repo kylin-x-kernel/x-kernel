@@ -24,6 +24,20 @@ use crate::ExceptionContext;
 #[percpu::def_percpu]
 static ACTIVE_EXCEPTION_CONTEXT_PTR: AtomicUsize = AtomicUsize::new(0);
 
+/// Returns whether the current CPU is executing inside an exception context.
+#[inline]
+pub fn in_exception_context() -> bool {
+    // SAFETY: `current_ref_raw()` returns a raw pointer to this CPU's per-CPU
+    // data area. The pointer is written only by this CPU's exception guard while
+    // IRQs are off, so Relaxed ordering is sufficient for this local state.
+    unsafe {
+        ACTIVE_EXCEPTION_CONTEXT_PTR
+            .current_ref_raw()
+            .load(Ordering::Relaxed)
+            != 0
+    }
+}
+
 /// Returns a copy of the currently active trapframe, if any.
 ///
 /// The active trapframe itself lives on the current CPU's trap stack. This
@@ -125,6 +139,7 @@ pub mod tests_active_exception_context {
     #[def_test(serial)]
     fn test_active_exception_context_none() {
         assert!(active_exception_context().is_none());
+        assert!(!in_exception_context());
     }
 
     #[def_test(serial)]
@@ -133,8 +148,10 @@ pub mod tests_active_exception_context {
         {
             let _guard = ExceptionContextGuard::new(&ctx);
             assert!(active_exception_context().is_some());
+            assert!(in_exception_context());
         }
         assert!(active_exception_context().is_none());
+        assert!(!in_exception_context());
     }
 
     #[def_test(serial)]
@@ -144,10 +161,29 @@ pub mod tests_active_exception_context {
         ctx.set_ip(0x5678);
         ctx.set_arg1(0x9abc);
         let _guard = ExceptionContextGuard::new(&ctx);
+        assert!(in_exception_context());
         let got = with_active_exception_context(|opt| opt.copied());
         let got = got.expect("active exception context snapshot missing");
         assert_eq!(got.retval(), ctx.retval());
         assert_eq!(got.ip(), ctx.ip());
         assert_eq!(got.arg1(), ctx.arg1());
+    }
+
+    #[def_test(serial)]
+    fn test_nested_exception_context_state() {
+        let outer = ExceptionContext::default();
+        let inner = ExceptionContext::default();
+
+        {
+            let _outer_guard = ExceptionContextGuard::new(&outer);
+            assert!(in_exception_context());
+            {
+                let _inner_guard = ExceptionContextGuard::new(&inner);
+                assert!(in_exception_context());
+            }
+            assert!(in_exception_context());
+        }
+
+        assert!(!in_exception_context());
     }
 }

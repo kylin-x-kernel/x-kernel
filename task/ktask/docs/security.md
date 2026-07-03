@@ -87,7 +87,7 @@ ksched algorithms / karch context switch / allocator
 ## 内存与并发不变量
 
 1. **任务状态机单向约束**：`Running/Ready/Blocked/Exited` 转换由 run queue 统一入口执行；`transition_state` 防止重复唤醒重入。
-2. **延迟抢占模型**：tick 仅设置 `need_resched`，真实切换在 `enable_preempt` 安全点触发，避免临界区中途切换。
+2. **延迟抢占模型**：tick 仅设置 `need_resched`，真实切换在 `enable_preempt` 安全点触发，避免临界区中途切换；若当前 CPU 仍处于 active exception context，则继续延迟抢占直到异常/IRQ trapframe guard 释放。
 3. **SMP blocked 唤醒保护**：Blocked 任务重新入队前（`smp`）等待 `task.on_cpu()==false`，防止与远端 CPU `switch_to` 并发。
 4. **唤醒抢占请求分离**：waker 只把任务转为 `Ready` 并设置本地或远端 `need_resched` 请求，真实切换仍发生在抢占安全点。
 5. **退出回收隔离**：退出任务先进入 `EXITED_TASKS`，由每 CPU `gc_task` 延迟回收，避免切换路径直接 drop。
@@ -100,7 +100,7 @@ ksched algorithms / karch context switch / allocator
 | T-01 | per-CPU `&'static mut` 别名导致 UB | 高 | 同 CPU 并发可变借用 | guard + IRQ/preempt 约束；调用点集中封装 |
 | T-02 | 任务切换与唤醒并发，导致同任务重复入队 | 高 | 远端 CPU 尚在切换，当前 CPU 立即 unblock | `task.on_cpu()` 自旋等待 + `clear_prev_task_on_cpu` 配对 |
 | T-03 | 退出任务过早释放导致 UAF | 高 | 仍有 joiner/切换路径持有引用 | `EXITED_TASKS` + `gc_task` + `Arc::try_unwrap` |
-| T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查 |
+| T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内或异常/IRQ trapframe guard 未释放时直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查，并在 active exception context 内延迟实际切换 |
 | T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
 | T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护 |

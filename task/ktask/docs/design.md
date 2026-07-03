@@ -120,9 +120,13 @@ init_scheduler_secondary()
 `kspin` guard acquire/release 会调用 `KernelGuardIf::disable_preempt/enable_preempt`。`ktask` 提供该接口实现：
 
 - `disable_preempt()`：当前任务 `preempt_disable_count += 1`
-- `enable_preempt(true)`：计数降为 0 时检查 `need_resched`，必要时进入 `preempt_resched()`
+- `enable_preempt(true)`：计数降为 0 时检查 `need_resched`；若当前 CPU 不在异常/IRQ
+  trapframe 作用域内，才进入 `preempt_resched()`
 
-该设计将“临界区边界”与“抢占检查点”绑定，避免在持锁/临界区中途切换任务。
+该设计将“临界区边界”与“抢占检查点”绑定，避免在持锁/临界区中途切换任务。异常/IRQ
+入口通过 `in_exception_context()` 暴露当前 CPU 是否仍在 trapframe guard 作用域内；在该
+guard 尚未释放时，抢占只保留 `need_resched` pending，不实际切换任务，避免普通任务观察到
+仍属于异常路径的 per-CPU trapframe。
 
 ### 5) 阻塞/唤醒与 WaitQueue/Future
 

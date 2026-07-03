@@ -36,7 +36,8 @@ pub mod excp;
 mod active_exception_context;
 
 pub use active_exception_context::{
-    ExceptionContextGuard, active_exception_context, with_active_exception_context,
+    ExceptionContextGuard, active_exception_context, in_exception_context,
+    with_active_exception_context,
 };
 
 mod userspace_common;

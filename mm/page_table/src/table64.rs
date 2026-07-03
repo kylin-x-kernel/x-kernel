@@ -1004,30 +1004,59 @@ mod tests {
         fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
 
         #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-        fn flush_tlb_process_mask(_vaddr: Option<Self::VirtAddr>, target_mask: KCpuMask) {
-            PROCESS_MASK_FLUSH_CALLS.fetch_add(1, Ordering::Relaxed);
-            for (cpu, observed_bit) in OBSERVED_PROCESS_MASK_BITS.iter().enumerate() {
-                observed_bit.store(target_mask.get(cpu), Ordering::Relaxed);
+        fn flush_tlb_process_mask(_vaddr: Option<Self::VirtAddr>, _target_mask: KCpuMask) {}
+    }
+
+    /// Per-instance provider context owned by a single test case.
+    ///
+    /// Moving the flush bookkeeping off module-level statics makes parallel
+    /// test cases independent: each test instantiates its own `ProviderCtx`,
+    /// so concurrent `PageTableMut::drop` → `flush_tlb_process_mask` paths in
+    /// sibling tests can no longer pollute each other's counters. The
+    /// previous global-static design raced under the parallel scheduler,
+    /// inflating `flush_calls` with cross-test flushes.
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    struct ProviderCtx {
+        /// Input residency mask that `test_user_cpu_mask_provider` snapshots.
+        provider_mask_bits: [AtomicBool; kbuild_config::CPU_NUM],
+        /// Number of times `flush_tlb_process_mask` was invoked.
+        flush_calls: AtomicUsize,
+        /// Last mask observed by `flush_tlb_process_mask`.
+        observed_mask_bits: [AtomicBool; kbuild_config::CPU_NUM],
+    }
+
+    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+    impl ProviderCtx {
+        const fn new() -> Self {
+            Self {
+                provider_mask_bits: [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM],
+                flush_calls: AtomicUsize::new(0),
+                observed_mask_bits: [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM],
             }
         }
     }
 
+    /// Provider callback that both returns the residency mask and records the
+    /// observation into `ctx`. Counting here (rather than in
+    /// `TestMeta::flush_tlb_process_mask`, which has no access to the test
+    /// instance) makes each parallel test case self-contained: the counter
+    /// lives on the test-owned `ProviderCtx`, not a shared module static.
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-    static PROCESS_MASK_FLUSH_CALLS: AtomicUsize = AtomicUsize::new(0);
-    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-    static PROVIDER_MASK_BITS: [AtomicBool; kbuild_config::CPU_NUM] =
-        [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM];
-    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-    static OBSERVED_PROCESS_MASK_BITS: [AtomicBool; kbuild_config::CPU_NUM] =
-        [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM];
-    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-    static PROVIDER_CTX: () = ();
-
-    #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-    unsafe fn test_user_cpu_mask_provider(_ctx: NonNull<()>) -> KCpuMask {
+    unsafe fn test_user_cpu_mask_provider(ctx: NonNull<()>) -> KCpuMask {
+        // SAFETY: the caller (PageTable64::set_user_cpu_mask_provider) upholds
+        // the provider contract; `ctx` points to a live `ProviderCtx`.
+        let ctx = unsafe { ctx.cast::<ProviderCtx>().as_ref() };
         let mut mask = KCpuMask::new();
-        for (cpu, provider_bit) in PROVIDER_MASK_BITS.iter().enumerate() {
+        for (cpu, provider_bit) in ctx.provider_mask_bits.iter().enumerate() {
             mask.set(cpu, provider_bit.load(Ordering::Relaxed));
+        }
+        // Record this observation. `finish()` calls `current_user_cpu_mask()`
+        // (this provider) and `flush_tlb_process_mask` in lockstep, so a
+        // provider invocation corresponds one-to-one with a process-mask
+        // TLB flush.
+        ctx.flush_calls.fetch_add(1, Ordering::Relaxed);
+        for (cpu, observed_bit) in ctx.observed_mask_bits.iter().enumerate() {
+            observed_bit.store(mask.get(cpu), Ordering::Relaxed);
         }
         mask
     }
@@ -1196,16 +1225,18 @@ mod tests {
         assert!(!modify.finish().had_pending());
     }
 
+    /// Verifies that an installed CPU-residency provider is consulted exactly
+    /// once per pending `finish()` flush, and that the mask it returns is the
+    /// one delivered to `flush_tlb_process_mask`.
+    ///
+    /// All bookkeeping lives on the stack-local `ProviderCtx`, so this case is
+    /// independent of any sibling test running under the parallel scheduler.
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     #[def_test]
     fn user_page_table_flush_uses_installed_process_mask() {
-        PROCESS_MASK_FLUSH_CALLS.store(0, Ordering::Relaxed);
-        for provider_bit in &PROVIDER_MASK_BITS {
-            provider_bit.store(false, Ordering::Relaxed);
-        }
-        for observed_bit in &OBSERVED_PROCESS_MASK_BITS {
-            observed_bit.store(false, Ordering::Relaxed);
-        }
+        // The provider context outlives the page table, satisfying the
+        // provider lifetime contract.
+        let mut ctx = ProviderCtx::new();
 
         let mut expected_targets = [false; kbuild_config::CPU_NUM];
         let first_nonzero_cpu = 1;
@@ -1214,21 +1245,21 @@ mod tests {
         } else {
             0
         };
-        PROVIDER_MASK_BITS[primary_target_cpu].store(true, Ordering::Relaxed);
+        ctx.provider_mask_bits[primary_target_cpu].store(true, Ordering::Relaxed);
         expected_targets[primary_target_cpu] = true;
 
         let secondary_target_cpu = kbuild_config::CPU_NUM.saturating_sub(1);
         if secondary_target_cpu != primary_target_cpu {
-            PROVIDER_MASK_BITS[secondary_target_cpu].store(true, Ordering::Relaxed);
+            ctx.provider_mask_bits[secondary_target_cpu].store(true, Ordering::Relaxed);
             expected_targets[secondary_target_cpu] = true;
         }
 
         let mut table = TestPageTable::try_new().expect("test page table");
-        let ctx = NonNull::from(&PROVIDER_CTX).cast();
-        // SAFETY: the callback reads only the static test mask above, and
-        // `PROVIDER_CTX` is a live static whose address remains valid for the
-        // entire test, satisfying the provider lifetime contract.
-        unsafe { table.set_user_cpu_mask_provider(ctx, test_user_cpu_mask_provider) };
+        let ctx_ptr = NonNull::from(&mut ctx).cast();
+        // SAFETY: `ctx` lives on this stack frame for the entire lifetime of
+        // `table`, and `test_user_cpu_mask_provider` performs only the read +
+        // bookkeeping documented on `ProviderCtx`.
+        unsafe { table.set_user_cpu_mask_provider(ctx_ptr, test_user_cpu_mask_provider) };
 
         table
             .modify()
@@ -1240,8 +1271,10 @@ mod tests {
             )
             .expect("map test page");
 
-        assert_eq!(PROCESS_MASK_FLUSH_CALLS.load(Ordering::Relaxed), 1);
-        for (cpu, observed_bit) in OBSERVED_PROCESS_MASK_BITS.iter().enumerate() {
+        // `finish()` (via `Drop`) consults the provider once for the single
+        // pending address, so exactly one observation must be recorded.
+        assert_eq!(ctx.flush_calls.load(Ordering::Relaxed), 1);
+        for (cpu, observed_bit) in ctx.observed_mask_bits.iter().enumerate() {
             assert_eq!(observed_bit.load(Ordering::Relaxed), expected_targets[cpu]);
         }
     }

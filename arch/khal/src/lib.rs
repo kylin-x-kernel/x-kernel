@@ -87,9 +87,13 @@ pub mod trap {
 /// - [`with_active_exception_context`]: Executes a closure with the currently active
 ///   trapframe (or `None` if not in a trap). This is intended for diagnostic
 ///   paths such as watchdogs or backtrace collection.
+///
+/// - [`in_exception_context`]: Returns whether the current CPU is still inside
+///   an exception context without exposing the trapframe itself.
 pub mod context {
     pub use kcpu::{
-        TaskContext, TrapFrame, active_exception_context, with_active_exception_context,
+        TaskContext, TrapFrame, active_exception_context, in_exception_context,
+        with_active_exception_context,
     };
 }
 
