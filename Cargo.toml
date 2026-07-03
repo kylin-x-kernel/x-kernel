@@ -206,7 +206,6 @@ percpu = "0.4"
 
 safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
-slab_allocator = { version = "0.4", package = "ax_slab_allocator" }
 smoltcp = { version = "=0.13.0", default-features = false }
 smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
@@ -215,7 +214,6 @@ x86_64 = { version = "0.15.2", features = ["instructions"] }
 fs9p = { path = "fs/filesystems/fs9p", default-features = false }
 ktracepoint = "0.5"
 static-keys = "0.8"
-buddy-slab-allocator = "=0.4.2"
 downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }
 flatten_objects = "0.2.4"
 weak-map = "0.1.1"

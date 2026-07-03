@@ -149,6 +149,9 @@ driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
 # Backtrace
 dwarf = ["backtrace/dwarf"]
 
+# Per-CPU page cache for the buddy allocator
+pcp = ["dep:kalloc", "kalloc/pcp"]
+
 # Diagnostics
 memtrack = ["dep:kalloc", "kalloc/tracking", "devfs/memtrack"]
 snapshot = ["ktask/snapshot"]

@@ -20,12 +20,12 @@ use core::{
 };
 
 #[allow(unused_imports)]
-use alloc_engine::{AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator};
-use buddy_slab_allocator::{
-    SlabPoolTrait, SlabTrait,
-    eii::{slab_pool_impl, virt_to_phys_impl},
+use alloc_engine::{
+    AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
 };
 use kaddr_layout::v2p;
+#[cfg(feature = "pcp")]
+use kspin::IrqSave;
 use kspin::SpinNoIrq;
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
@@ -37,54 +37,13 @@ fn pages_to_bytes(num_pages: usize) -> usize {
         .expect("page count byte size overflow")
 }
 
-#[virt_to_phys_impl]
 fn kernel_virt_to_phys(vaddr: usize) -> usize {
     v2p(vaddr)
 }
 
-struct KernelSlabPool;
-impl SlabTrait for KernelSlabPool {
-    fn cpu_id(&self) -> usize {
-        0
-    }
-
-    fn page_size(&self) -> usize {
-        PAGE_SIZE_4K
-    }
-
-    fn alloc(
-        &self,
-        _layout: Layout,
-    ) -> buddy_slab_allocator::AllocResult<buddy_slab_allocator::SlabAllocResult> {
-        Err(buddy_slab_allocator::AllocError::NoMemory)
-    }
-
-    fn add_slab(&self, _size_class: buddy_slab_allocator::SizeClass, _base: usize, _bytes: usize) {}
-
-    fn dealloc_local(
-        &self,
-        _ptr: NonNull<u8>,
-        _layout: Layout,
-    ) -> buddy_slab_allocator::SlabDeallocResult {
-        buddy_slab_allocator::SlabDeallocResult::Done
-    }
-}
-static KERNEL_SLAB_POOL: KernelSlabPool = KernelSlabPool;
-impl SlabPoolTrait for KernelSlabPool {
-    fn current_slab(&self) -> &dyn SlabTrait {
-        &KERNEL_SLAB_POOL
-    }
-
-    fn owner_slab(&self, _cpu_idx: usize) -> &dyn SlabTrait {
-        &KERNEL_SLAB_POOL
-    }
-}
-#[slab_pool_impl]
-fn kernel_slab_pool() -> &'static dyn SlabPoolTrait {
-    &KERNEL_SLAB_POOL
-}
-
 mod page;
+#[cfg(feature = "pcp")]
+mod pcp;
 pub use page::GlobalPage;
 
 #[cfg(feature = "tracking")]
@@ -253,7 +212,15 @@ impl GlobalAllocator {
     /// It firstly tries to allocate from the byte allocator. If there is no
     /// memory, it asks the page allocator for more memory and adds it to the
     /// byte allocator.
+    ///
+    /// Large allocations (over `PAGE_SIZE_4K / 2`) bypass the byte allocator
+    /// to avoid fragmenting the slab heap and are served directly from the
+    /// page allocator.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
+        // Large allocations: go directly to the page allocator.
+        if layout.size() > PAGE_SIZE_4K / 2 {
+            return self.large_alloc(layout);
+        }
         let mut balloc = self.balloc.lock();
         loop {
             let heap_ready = self.heap_ready.load(Ordering::Acquire);
@@ -308,6 +275,34 @@ impl GlobalAllocator {
         }
     }
 
+    /// Allocate directly from the page allocator for large requests.
+    fn large_alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
+        let pages = layout.size().div_ceil(PAGE_SIZE_4K);
+        let align = layout.align().max(PAGE_SIZE_4K);
+        let addr = self
+            .alloc_pages(pages, align, UsageKind::RustHeap)
+            .inspect_err(|e| {
+                error!(
+                    "large_alloc: failed to allocate {} pages ({} bytes): {:?}",
+                    pages,
+                    layout.size(),
+                    e
+                );
+                error!(
+                    "palloc state: total={} used={} free={}",
+                    self.palloc.lock().total_pages(),
+                    self.palloc.lock().used_pages(),
+                    self.palloc.lock().available_pages(),
+                );
+            })?;
+        // alloc_pages skips usages for RustHeap; track it here.
+        self.usages
+            .lock()
+            .alloc(UsageKind::RustHeap, pages_to_bytes(pages));
+        // SAFETY: `addr` is non-null and properly aligned.
+        Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) })
+    }
+
     /// Gives back the allocated region to the byte allocator.
     ///
     /// The region should be allocated by [`alloc`], and `align_pow2` should be
@@ -316,10 +311,17 @@ impl GlobalAllocator {
     ///
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
-        self.usages
-            .lock()
-            .dealloc(UsageKind::RustHeap, layout.size());
-        self.balloc.lock().deallocate(ptr, layout)
+        // Large allocations bypassed the byte allocator.
+        if layout.size() > PAGE_SIZE_4K / 2 {
+            let pages = layout.size().div_ceil(PAGE_SIZE_4K);
+            // dealloc_pages handles usages tracking internally.
+            self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
+        } else {
+            self.usages
+                .lock()
+                .dealloc(UsageKind::RustHeap, layout.size());
+            self.balloc.lock().deallocate(ptr, layout);
+        }
     }
 
     /// Allocates contiguous pages.
@@ -328,6 +330,9 @@ impl GlobalAllocator {
     ///
     /// `align_pow2` must be a power of 2, and the returned region bound will be
     /// aligned to it.
+    ///
+    /// Single-page allocations with default alignment are served from the
+    /// per-CPU page cache to reduce global lock contention.
     pub fn alloc_pages(
         &self,
         num_pages: usize,
@@ -338,6 +343,35 @@ impl GlobalAllocator {
             self.page_ready.load(Ordering::Acquire),
             "page allocator is not initialized"
         );
+
+        // Fast path: single-page with standard alignment -> PCP cache.
+        #[cfg(feature = "pcp")]
+        {
+            if num_pages == 1 && align_pow2 <= PAGE_SIZE_4K {
+                let _guard = IrqSave::new();
+                if let Some(addr) = pcp::try_alloc() {
+                    drop(_guard);
+                    if !matches!(kind, UsageKind::RustHeap) {
+                        self.usages.lock().alloc(kind, PAGE_SIZE_4K);
+                    }
+                    return Ok(addr);
+                }
+                drop(_guard);
+
+                // Cache miss: batch-fill from the global allocator.
+                let mut palloc = self.palloc.lock();
+                let result = pcp::fill_cache(&mut palloc);
+                drop(palloc);
+                if result.is_ok() {
+                    if !matches!(kind, UsageKind::RustHeap) {
+                        self.usages.lock().alloc(kind, PAGE_SIZE_4K);
+                    }
+                }
+                return result;
+            }
+        }
+
+        // Slow path: multi-page, special alignment, or PCP disabled.
         let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
             self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
@@ -346,6 +380,10 @@ impl GlobalAllocator {
     }
 
     /// Allocates contiguous DMA pages.
+    ///
+    /// DMA allocations must come from physical memory below 4 GiB.
+    /// The page allocator only knows virtual addresses, so the
+    /// DMA32 filtering happens here using `v2p` translation.
     pub fn alloc_dma_pages(
         &self,
         num_pages: usize,
@@ -356,12 +394,19 @@ impl GlobalAllocator {
             self.page_ready.load(Ordering::Acquire),
             "page allocator is not initialized"
         );
-        let addr = self
-            .palloc
-            .lock()
-            .allocate_pages_lowmem(num_pages, align_pow2)?;
+        const DMA32_LIMIT: usize = 0x1_0000_0000;
+
+        let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
+
+        let phys = kernel_virt_to_phys(addr);
+        let size = pages_to_bytes(num_pages);
+        if phys + size > DMA32_LIMIT {
+            self.palloc.lock().deallocate_pages(addr, num_pages);
+            return Err(AllocError::NoMemory);
+        }
+
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+            self.usages.lock().alloc(kind, size);
         }
         Ok(addr)
     }
@@ -396,9 +441,31 @@ impl GlobalAllocator {
     /// should be the same as the one used in [`alloc_pages`]. Otherwise, the
     /// behavior is undefined.
     ///
+    /// Single-page deallocations are cached per-CPU to reduce global lock
+    /// contention.
+    ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
+
+        // Fast path: single page -> try to cache it per-CPU.
+        #[cfg(feature = "pcp")]
+        {
+            if num_pages == 1 {
+                let _guard = IrqSave::new();
+                if pcp::try_free(va) {
+                    return;
+                }
+                drop(_guard);
+
+                // Cache full: bulk-drain to the global allocator.
+                let mut palloc = self.palloc.lock();
+                pcp::drain_cache(&mut palloc, va);
+                return;
+            }
+        }
+
+        // Slow path: multi-page or PCP disabled.
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 

@@ -151,11 +151,8 @@ fn tlsf_alloc() {
 mod test_impls {
     use core::{alloc::Layout, ptr::NonNull};
 
-    use buddy_slab_allocator::{
-        SlabPoolTrait, SlabTrait,
-        eii::{slab_pool_impl, virt_to_phys_impl},
-    };
-    #[virt_to_phys_impl]
+    use alloc_engine::{SlabPoolTrait, SlabTrait};
+
     fn dummy_virt_to_phys(vaddr: usize) -> usize {
         vaddr
     }
@@ -172,24 +169,18 @@ mod test_impls {
         fn alloc(
             &self,
             _layout: Layout,
-        ) -> buddy_slab_allocator::AllocResult<buddy_slab_allocator::SlabAllocResult> {
-            Err(buddy_slab_allocator::AllocError::NoMemory)
+        ) -> alloc_engine::AllocResult<alloc_engine::SlabAllocResult> {
+            Err(alloc_engine::AllocError::NoMemory)
         }
 
-        fn add_slab(
-            &self,
-            _size_class: buddy_slab_allocator::SizeClass,
-            _base: usize,
-            _bytes: usize,
-        ) {
-        }
+        fn add_slab(&self, _size_class: alloc_engine::SizeClass, _base: usize, _bytes: usize) {}
 
         fn dealloc_local(
             &self,
             _ptr: NonNull<u8>,
             _layout: Layout,
-        ) -> buddy_slab_allocator::SlabDeallocResult {
-            buddy_slab_allocator::SlabDeallocResult::Done
+        ) -> alloc_engine::SlabDeallocResult {
+            alloc_engine::SlabDeallocResult::Done
         }
     }
     static DUMMY_POOL: DummySlabPool = DummySlabPool;
@@ -202,7 +193,6 @@ mod test_impls {
             &DUMMY_POOL
         }
     }
-    #[slab_pool_impl]
     fn dummy_slab_pool() -> &'static dyn SlabPoolTrait {
         &DUMMY_POOL
     }

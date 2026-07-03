@@ -15,9 +15,20 @@
 #![no_std]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
-#[allow(unused_imports)]
-#[macro_use]
+#[cfg(any(test, unittest))]
 extern crate alloc;
+
+// ---------------------------------------------------------------------------
+// Internal algorithm modules
+// ---------------------------------------------------------------------------
+
+mod buddy_alloc;
+mod slab_heap;
+pub mod slab_trait;
+
+// ---------------------------------------------------------------------------
+// Allocator adapters (algorithm → trait)
+// ---------------------------------------------------------------------------
 
 #[cfg(feature = "buddy-page")]
 mod buddy_page;
@@ -29,71 +40,6 @@ mod buddy;
 #[cfg(feature = "buddy")]
 pub use buddy::BuddyByteAllocator;
 
-#[cfg(all(test, any(feature = "buddy-page", feature = "buddy", feature = "slab")))]
-mod test_impls {
-    use core::{alloc::Layout, ptr::NonNull};
-
-    use buddy_slab_allocator::{
-        SlabPoolTrait, SlabTrait,
-        eii::{slab_pool_impl, virt_to_phys_impl},
-    };
-
-    #[virt_to_phys_impl]
-    fn dummy_virt_to_phys(vaddr: usize) -> usize {
-        vaddr
-    }
-
-    struct DummySlabPool;
-    impl SlabTrait for DummySlabPool {
-        fn cpu_id(&self) -> usize {
-            0
-        }
-
-        fn page_size(&self) -> usize {
-            4096
-        }
-
-        fn alloc(
-            &self,
-            _layout: Layout,
-        ) -> buddy_slab_allocator::AllocResult<buddy_slab_allocator::SlabAllocResult> {
-            Err(buddy_slab_allocator::AllocError::NoMemory)
-        }
-
-        fn add_slab(
-            &self,
-            _size_class: buddy_slab_allocator::SizeClass,
-            _base: usize,
-            _bytes: usize,
-        ) {
-        }
-
-        fn dealloc_local(
-            &self,
-            _ptr: NonNull<u8>,
-            _layout: Layout,
-        ) -> buddy_slab_allocator::SlabDeallocResult {
-            buddy_slab_allocator::SlabDeallocResult::Done
-        }
-    }
-    static DUMMY_POOL: DummySlabPool = DummySlabPool;
-
-    impl SlabPoolTrait for DummySlabPool {
-        fn current_slab(&self) -> &dyn SlabTrait {
-            &DUMMY_POOL
-        }
-
-        fn owner_slab(&self, _cpu_idx: usize) -> &dyn SlabTrait {
-            &DUMMY_POOL
-        }
-    }
-
-    #[slab_pool_impl]
-    fn dummy_slab_pool() -> &'static dyn SlabPoolTrait {
-        &DUMMY_POOL
-    }
-}
-
 #[cfg(feature = "slab")]
 mod slab;
 #[cfg(feature = "slab")]
@@ -101,24 +47,56 @@ pub use slab::SlabByteAllocator;
 
 #[cfg(feature = "tlsf")]
 mod tlsf;
-use core::{alloc::Layout, ptr::NonNull};
+// ---------------------------------------------------------------------------
+// Common types
+// ---------------------------------------------------------------------------
+use core::{alloc::Layout, fmt, ptr::NonNull};
 
+// ---------------------------------------------------------------------------
+// Re-exports from internal modules
+// ---------------------------------------------------------------------------
+pub use buddy_alloc::{BuddyAllocator, PageFlags};
 #[cfg(feature = "kerrno")]
 use kerrno::KError;
+pub use slab_heap::SlabHeap;
+pub use slab_trait::{
+    SIZE_CLASS_COUNT, SLAB_MAX_SIZE, SizeClass, SlabAllocResult, SlabDeallocResult,
+    SlabPoolDeallocResult, SlabPoolTrait, SlabTrait,
+};
 #[cfg(feature = "tlsf")]
 pub use tlsf::TlsfByteAllocator;
 
 /// The error type used for allocation.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocError {
     /// Invalid `size` or `align_pow2`. (e.g. unaligned)
     InvalidInput,
+    /// The allocator has already been initialized.
+    AlreadyInitialized,
     /// Memory added by `add_region` overlapped with existing memory.
     MemoryOverlap,
     /// No enough memory to allocate.
     NoMemory,
     /// Deallocate an unallocated memory region.
     NotAllocated,
+    /// The allocator has not been initialized yet.
+    NotInitialized,
+    /// Requested address not found in any managed region.
+    NotFound,
+}
+
+impl fmt::Display for AllocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput => write!(f, "invalid input"),
+            Self::AlreadyInitialized => write!(f, "allocator already initialized"),
+            Self::MemoryOverlap => write!(f, "memory regions overlap"),
+            Self::NoMemory => write!(f, "out of memory"),
+            Self::NotAllocated => write!(f, "memory not allocated"),
+            Self::NotInitialized => write!(f, "allocator not initialized"),
+            Self::NotFound => write!(f, "not found"),
+        }
+    }
 }
 
 #[cfg(feature = "kerrno")]
@@ -133,6 +111,10 @@ impl From<AllocError> for KError {
 
 /// A [`Result`] type with [`AllocError`] as the error type.
 pub type AllocResult<T = ()> = Result<T, AllocError>;
+
+// ---------------------------------------------------------------------------
+// Allocator traits
+// ---------------------------------------------------------------------------
 
 /// The base allocator inherited by other allocators.
 pub trait BaseAllocator {

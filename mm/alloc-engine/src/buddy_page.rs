@@ -4,13 +4,9 @@
 
 //! Buddy allocation in page-granularity.
 
-use buddy_slab_allocator::{AllocError as BuddyAllocError, BuddyAllocator};
+use crate::{AllocResult, BaseAllocator, PageAllocator, buddy_alloc::BuddyAllocator};
 
-use crate::{AllocError, AllocResult, BaseAllocator, PageAllocator};
-
-/// A page-granularity memory allocator based on the [buddy allocator].
-///
-/// [slab allocator]: ../slab_allocator/index.html
+/// A page-granularity memory allocator based on the buddy allocator.
 pub struct BuddyPageAllocator<const PAGE_SIZE: usize> {
     inner: BuddyAllocator<PAGE_SIZE>,
 }
@@ -22,49 +18,17 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
             inner: BuddyAllocator::new(),
         }
     }
-
-    /// Allocate pages whose physical address is below 4 GiB (DMA32 zone).
-    pub fn allocate_pages_lowmem(
-        &mut self,
-        num_pages: usize,
-        align_pow2: usize,
-    ) -> AllocResult<usize> {
-        self.inner
-            .alloc_pages_lowmem(num_pages, align_pow2)
-            .map_err(map_alloc_error)
-    }
-}
-
-fn map_alloc_error(err: BuddyAllocError) -> AllocError {
-    match err {
-        BuddyAllocError::NoMemory => AllocError::NoMemory,
-        BuddyAllocError::MemoryOverlap => AllocError::MemoryOverlap,
-        BuddyAllocError::NotAllocated => AllocError::NotAllocated,
-        _ => AllocError::InvalidInput,
-    }
 }
 
 impl<const PAGE_SIZE: usize> BaseAllocator for BuddyPageAllocator<PAGE_SIZE> {
     fn init_region(&mut self, start: usize, size: usize) {
-        // SAFETY: The caller provides a valid, writable memory region at
-        // `[start, start + size)` for allocator metadata and managed pages.
-        let region = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
-        // SAFETY: `region` is a unique mutable slice covering the allocator's
-        // initial backing memory.
-        unsafe {
-            self.inner
-                .init(region)
-                .expect("buddy allocator init failed");
-        }
+        self.inner
+            .init_region(start, size)
+            .expect("buddy allocator init failed");
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
-        // SAFETY: The caller provides a valid, writable memory region at
-        // `[start, start + size)` that can be added to the buddy allocator.
-        let region = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
-        // SAFETY: `region` is a unique mutable slice describing the newly added
-        // backing memory.
-        unsafe { self.inner.add_region(region).map_err(map_alloc_error) }
+        self.inner.add_region(start, size)
     }
 }
 
@@ -72,24 +36,20 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
     const PAGE_SIZE: usize = PAGE_SIZE;
 
     fn allocate_pages(&mut self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
-        self.inner
-            .alloc_pages(num_pages, align_pow2)
-            .map_err(map_alloc_error)
+        self.inner.allocate_pages(num_pages, align_pow2)
     }
 
     fn deallocate_pages(&mut self, base: usize, num_pages: usize) {
-        self.inner.dealloc_pages(base, num_pages);
+        self.inner.deallocate_pages(base, num_pages);
     }
 
     fn allocate_pages_at(
         &mut self,
         base: usize,
-        _num_pages: usize,
-        _align_pow2: usize,
+        num_pages: usize,
+        align_pow2: usize,
     ) -> AllocResult<usize> {
-        // v0.4.0 BuddyAllocator does not support alloc_pages_at
-        let _ = base;
-        Err(AllocError::InvalidInput)
+        self.inner.allocate_pages_at(base, num_pages, align_pow2)
     }
 
     fn total_pages(&self) -> usize {
@@ -97,11 +57,11 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
     }
 
     fn used_pages(&self) -> usize {
-        self.inner.total_pages() - self.inner.free_pages()
+        self.inner.used_pages()
     }
 
     fn available_pages(&self) -> usize {
-        self.inner.free_pages()
+        self.inner.available_pages()
     }
 }
 

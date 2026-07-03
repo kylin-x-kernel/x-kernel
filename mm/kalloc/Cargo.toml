@@ -12,11 +12,11 @@ default = []
 tlsf = []
 slab = []
 buddy = []
-tracking = ["dep:percpu", "dep:backtrace"]
+pcp = []
+tracking = ["dep:backtrace"]
 
 [dependencies]
 alloc-engine = { workspace = true, features = ["buddy-page"] }
-buddy-slab-allocator = { workspace = true }
 backtrace = { workspace = true, optional = true }
 cfg-if.workspace = true
 kaddr_layout.workspace = true
@@ -24,6 +24,6 @@ kerrno.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true
-percpu = { workspace = true, optional = true }
+percpu.workspace = true
 strum = { workspace = true }
 unittest.workspace = true

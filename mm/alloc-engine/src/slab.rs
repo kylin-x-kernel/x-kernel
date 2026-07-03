@@ -8,15 +8,12 @@
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use slab_allocator::Heap;
-
 use super::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
+use crate::slab_heap::SlabHeap;
 
-/// A byte-granularity memory allocator based on the [slab allocator].
-///
-/// [slab allocator]: ../slab_allocator/index.html
+/// A byte-granularity memory allocator based on the slab allocator.
 pub struct SlabByteAllocator {
-    heap: Option<Heap>,
+    heap: Option<SlabHeap>,
 }
 
 impl SlabByteAllocator {
@@ -25,11 +22,11 @@ impl SlabByteAllocator {
         Self { heap: None }
     }
 
-    fn inner_mut(&mut self) -> &mut Heap {
+    fn inner_mut(&mut self) -> &mut SlabHeap {
         self.heap.as_mut().unwrap()
     }
 
-    fn inner(&self) -> &Heap {
+    fn inner(&self) -> &SlabHeap {
         self.heap.as_ref().unwrap()
     }
 }
@@ -44,7 +41,7 @@ impl BaseAllocator for SlabByteAllocator {
     fn init_region(&mut self, start: usize, size: usize) {
         // SAFETY: The caller provides a valid backing region at
         // `[start, start + size)` for constructing the slab heap.
-        self.heap = unsafe { Some(Heap::new(start, size)) };
+        self.heap = unsafe { Some(SlabHeap::new(start, size)) };
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
