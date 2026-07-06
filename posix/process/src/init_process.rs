@@ -83,7 +83,8 @@ pub fn run_init_process(
         ProcessStateConfig::default(),
     );
     {
-        let fs_context = proc_state.fs_context().lock();
+        let fs_context = proc_state.fs_context();
+        let fs_context = fs_context.lock();
         add_stdio(&mut proc_state.resources.fd_table().write(), &fs_context)
             .expect("Failed to add stdio");
     }

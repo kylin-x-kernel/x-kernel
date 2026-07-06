@@ -49,7 +49,7 @@ pub fn current_task_name() -> String {
 pub fn current_fs_context() -> Arc<Mutex<FsContext>> {
     current()
         .try_as_thread()
-        .map(|thread| thread.proc_state.fs_context().clone())
+        .map(|thread| thread.proc_state.fs_context())
         .unwrap_or_else(|| kernel_fs_context().clone())
 }
 
@@ -70,7 +70,7 @@ pub fn current_fs_context() -> Arc<Mutex<FsContext>> {
 /// let _guard = fs_context.lock();
 /// ```
 pub fn current_process_fs_context() -> Arc<Mutex<FsContext>> {
-    current_process_state().fs_context().clone()
+    current_process_state().fs_context()
 }
 
 /// Executes a closure with the current user thread.

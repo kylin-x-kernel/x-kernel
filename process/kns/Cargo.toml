@@ -1,0 +1,17 @@
+[package]
+name = "kns"
+description = "Namespace proxy and namespace types for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+kcgroup.workspace = true
+kfs.workspace = true
+ksync.workspace = true
+linux-raw-sys.workspace = true
+unittest.workspace = true

@@ -25,6 +25,7 @@ klogger.workspace = true
 kpoll.workspace = true
 kfutex.workspace = true
 kfs.workspace = true
+kns.workspace = true
 kprocess.workspace = true
 krlimit.workspace = true
 kresources.workspace = true

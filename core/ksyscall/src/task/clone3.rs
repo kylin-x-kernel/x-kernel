@@ -71,7 +71,11 @@ pub fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KResult<is
 
     let mut req = CloneRequest::new();
 
-    req.set_flags(CloneFlags::from_bits_truncate(kargs.flags))
+    // clone3 rejects unknown flags with EINVAL rather than silently truncating
+    // them (unlike legacy clone, which masks with the low-byte exit signal).
+    let flags = CloneFlags::from_bits(kargs.flags)
+        .ok_or_else(|| KError::from(kerrno::LinuxError::EINVAL))?;
+    req.set_flags(flags)
         .set_exit_signal(kargs.exit_signal)
         .set_stack_with_size(kargs.stack, kargs.stack_size)
         .set_parent_tid(kargs.parent_tid as usize)

@@ -28,7 +28,8 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
     debug!("sys_chdir <= path: {path}");
 
     let proc_state = kthread::current_process_state();
-    let mut fs = proc_state.fs_context().lock();
+    let fs_context = proc_state.fs_context();
+    let mut fs = fs_context.lock();
     let entry = lookup_location(
         &fs.lookup_context(),
         path.as_str(),
@@ -62,7 +63,8 @@ pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
     debug!("sys_chroot <= path: {path}");
 
     let proc_state = kthread::current_process_state();
-    let mut fs = proc_state.fs_context().lock();
+    let fs_context = proc_state.fs_context();
+    let mut fs = fs_context.lock();
     let loc = lookup_location(
         &fs.lookup_context(),
         path.as_str(),

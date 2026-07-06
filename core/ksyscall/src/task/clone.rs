@@ -14,14 +14,14 @@
 use alloc::sync::Arc;
 
 use bitflags::bitflags;
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use kfd::{FdTable, FileLike};
 use khal::uspace::UserContext;
 use kprocess::Pid;
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ktask::{KTaskExt, current, spawn_task};
-use kthread::{PidFd, ProcessState, ProcessStateConfig, Thread};
+use kthread::{CloneNsError, NamespaceFlags, PidFd, ProcessState, ProcessStateConfig, Thread};
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
 use posix_process::new_user_task;
@@ -88,6 +88,9 @@ bitflags! {
         const NEWPID = CLONE_NEWPID as u64;
         /// Create the process in a new network namespace.
         const NEWNET = CLONE_NEWNET as u64;
+        /// Create the process in a new time namespace. Not yet implemented;
+        /// rejected with `ENOSYS` in [`CloneRequest::validate_namespace_flags`].
+        const NEWTIME = CLONE_NEWTIME as u64;
         /// The new process shares an I/O context with the calling process.
         const IO = CLONE_IO as u64;
     }
@@ -195,6 +198,9 @@ impl CloneRequest {
             return Err(KError::InvalidInput);
         }
 
+        // Namespace flag validation
+        self.validate_namespace_flags()?;
+
         let exit_signal = Signo::from_repr(self.exit_signal as u8);
 
         let mut new_uctx = *uctx;
@@ -256,21 +262,30 @@ impl CloneRequest {
             } else {
                 Arc::new(SpinNoIrq::new(old_proc_data.signal.actions.lock().clone()))
             };
-            let fs_context = if self.flags.contains(CloneFlags::FS) {
-                old_proc_data.fs_context().clone()
-            } else {
-                Arc::new(ksync::Mutex::new(old_proc_data.fs_context().lock().clone()))
-            };
-            let proc_state = ProcessState::new(
+            let share_fs = self.flags.contains(CloneFlags::FS);
+
+            // Build child NsProxy based on namespace flags. The NsProxy owns
+            // the FsContext via its MntNamespace, so CLONE_FS sharing and
+            // CLONE_NEWNS isolation are both handled there.
+            let ns_flags = self.extract_namespace_flags();
+            let new_nsproxy = old_proc_data
+                .nsproxy()
+                .clone_for_child(ns_flags, share_fs)
+                .map_err(|e| match e {
+                    CloneNsError::InvalidFlagCombination => KError::from(LinuxError::EINVAL),
+                    CloneNsError::Unimplemented => KError::from(LinuxError::ENOSYS),
+                })?;
+
+            let proc_state = ProcessState::new_with_nsproxy(
                 proc,
                 old_proc_data.exe_path().read().clone(),
                 old_proc_data.cmdline().read().clone(),
                 aspace,
-                fs_context,
                 signal_actions,
                 exit_signal,
                 old_proc_data.credentials.read().clone(),
                 ProcessStateConfig::default(),
+                new_nsproxy,
             );
             proc_state.set_umask(old_proc_data.umask());
             // Inherit heap pointers from parent to ensure child's heap state is consistent after fork
@@ -310,6 +325,79 @@ impl CloneRequest {
         kthread::add_task_to_table(&task);
 
         Ok(tid as _)
+    }
+
+    /// Validates namespace-related flag combinations.
+    fn validate_namespace_flags(&self) -> KResult<()> {
+        let ns = self.flags;
+
+        // CLONE_NEWNS | CLONE_FS is invalid
+        if ns.contains(CloneFlags::NEWNS | CloneFlags::FS) {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
+
+        // CLONE_NEWIPC | CLONE_SYSVSEM is invalid
+        if ns.contains(CloneFlags::NEWIPC | CloneFlags::SYSVSEM) {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
+
+        // CLONE_NEWPID | CLONE_THREAD is invalid
+        if ns.contains(CloneFlags::NEWPID | CloneFlags::THREAD) {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
+
+        // CLONE_NEWPID | CLONE_PARENT is invalid. Linux's copy_process()
+        // rejects this combination with EINVAL because re-parenting semantics
+        // conflict with creating a new PID namespace.
+        if ns.contains(CloneFlags::NEWPID | CloneFlags::PARENT) {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
+
+        // Unimplemented namespace flags: return ENOSYS. NEWPID is included
+        // here because, although the flag is parsed, full PID-namespace
+        // support is not wired up yet.
+        let unimplemented =
+            CloneFlags::NEWNET | CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
+        if ns.intersects(unimplemented) {
+            return Err(KError::from(LinuxError::ENOSYS));
+        }
+
+        // CLONE_NEWPID is not yet fully supported
+        if ns.contains(CloneFlags::NEWPID) {
+            return Err(KError::from(LinuxError::ENOSYS));
+        }
+
+        Ok(())
+    }
+
+    /// Extracts namespace flags into `NamespaceFlags` used by `kns`.
+    fn extract_namespace_flags(&self) -> NamespaceFlags {
+        let mut ns = NamespaceFlags::empty();
+        if self.flags.contains(CloneFlags::NEWNS) {
+            ns |= NamespaceFlags::NEWNS;
+        }
+        if self.flags.contains(CloneFlags::NEWUTS) {
+            ns |= NamespaceFlags::NEWUTS;
+        }
+        if self.flags.contains(CloneFlags::NEWIPC) {
+            ns |= NamespaceFlags::NEWIPC;
+        }
+        if self.flags.contains(CloneFlags::NEWUSER) {
+            ns |= NamespaceFlags::NEWUSER;
+        }
+        if self.flags.contains(CloneFlags::NEWPID) {
+            ns |= NamespaceFlags::NEWPID;
+        }
+        if self.flags.contains(CloneFlags::NEWNET) {
+            ns |= NamespaceFlags::NEWNET;
+        }
+        if self.flags.contains(CloneFlags::NEWCGROUP) {
+            ns |= NamespaceFlags::NEWCGROUP;
+        }
+        if self.flags.contains(CloneFlags::NEWTIME) {
+            ns |= NamespaceFlags::NEWTIME;
+        }
+        ns
     }
 }
 
@@ -353,4 +441,80 @@ pub fn sys_clone(
 #[cfg(target_arch = "x86_64")]
 pub fn sys_fork(uctx: &UserContext) -> KResult<isize> {
     sys_clone(uctx, SIGCHLD, 0, 0, 0, 0)
+}
+
+#[cfg(unittest)]
+mod tests_clone {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn test_validate_rejects_newns_and_fs() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWNS | CloneFlags::FS);
+        assert!(req.validate_namespace_flags().is_err());
+    }
+
+    #[def_test]
+    fn test_validate_rejects_newipc_and_sysvsem() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWIPC | CloneFlags::SYSVSEM);
+        assert!(req.validate_namespace_flags().is_err());
+    }
+
+    #[def_test]
+    fn test_validate_rejects_newpid_and_thread() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWPID | CloneFlags::THREAD);
+        assert!(req.validate_namespace_flags().is_err());
+    }
+
+    #[def_test]
+    fn test_validate_rejects_newpid_and_parent() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWPID | CloneFlags::PARENT);
+        assert!(req.validate_namespace_flags().is_err());
+    }
+
+    #[def_test]
+    fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
+        for flags in [
+            CloneFlags::NEWNET,
+            CloneFlags::NEWUSER,
+            CloneFlags::NEWCGROUP,
+        ] {
+            let mut req = CloneRequest::new();
+            req.set_flags(flags);
+            let err = req.validate_namespace_flags().unwrap_err();
+            // ENOSYS is the expected errno for unimplemented namespaces.
+            assert_eq!(
+                LinuxError::from(err),
+                LinuxError::ENOSYS,
+                "expected ENOSYS for {flags:?}"
+            );
+        }
+    }
+
+    #[def_test]
+    fn test_validate_rejects_newtime_with_enosys() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWTIME);
+        let err = req.validate_namespace_flags().unwrap_err();
+        assert_eq!(
+            LinuxError::from(err),
+            LinuxError::ENOSYS,
+            "expected ENOSYS for NEWTIME"
+        );
+    }
+
+    #[def_test]
+    fn test_extract_namespace_flags_includes_newtime() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWNS | CloneFlags::NEWUTS | CloneFlags::NEWTIME);
+        let ns = req.extract_namespace_flags();
+        assert!(ns.contains(NamespaceFlags::NEWNS));
+        assert!(ns.contains(NamespaceFlags::NEWUTS));
+        assert!(ns.contains(NamespaceFlags::NEWTIME));
+    }
 }

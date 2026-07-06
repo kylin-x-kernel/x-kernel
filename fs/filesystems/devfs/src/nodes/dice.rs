@@ -99,7 +99,8 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     let pid = kthread::current_thread().pid();
     let proc_exe_path = format!("/proc/{}/exe", pid);
     let proc_state = current_process_state();
-    let fs = proc_state.fs_context().lock();
+    let fs_context = proc_state.fs_context();
+    let fs = fs_context.lock();
     let loc = lookup_location(
         &fs.lookup_context(),
         proc_exe_path.as_str(),

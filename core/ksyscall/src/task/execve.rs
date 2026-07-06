@@ -61,7 +61,8 @@ pub fn sys_execve(
         return Err(KError::WouldBlock);
     }
 
-    let fs = proc_state.fs_context().lock();
+    let fs_context = proc_state.fs_context();
+    let fs = fs_context.lock();
     let loc = lookup_location(
         &fs.lookup_context(),
         path.as_str(),

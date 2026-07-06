@@ -14,7 +14,6 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use kfutex::FutexKey;
 #[macro_use]
 extern crate klogger;
 
@@ -33,6 +32,11 @@ mod timer_delivery;
 
 pub use cpu_time::{CpuTimeState, CpuTimeStatistics};
 pub use credentials::{with_current_credentials, with_current_credentials_mut};
+pub use kfutex::{FutexEntry, FutexGuard, FutexKey, FutexTable, WaitQueue};
+pub use kns::{
+    CgroupNamespace, CloneNsError, IpcNamespace, MntNamespace, NamespaceFlags, NamespaceId,
+    NamespaceType, NetNamespace, NsProxy, PidNamespace, TimeNamespace, UserNamespace, UtsNamespace,
+};
 pub use kresources::ProcessResources;
 pub use krlimit::{FILE_LIMIT, Rlimit, Rlimits};
 pub use lifecycle_state::ProcessLifecycleState;

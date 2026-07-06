@@ -77,6 +77,8 @@ kfd_objects = { path = "process/kfd_objects" }
 kexec = { path = "process/kexec" }
 krlimit = { path = "process/krlimit" }
 kresources = { path = "process/kresources" }
+kcgroup = { path = "process/kcgroup" }
+kns = { path = "process/kns" }
 kthread = { path = "process/kthread" }
 ktimer = { path = "process/ktimer" }
 kprocess = { path = "process/kprocess" }

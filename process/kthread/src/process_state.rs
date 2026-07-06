@@ -12,6 +12,7 @@ use kerrno::{KError, KResult};
 use kfs::FsContext;
 use kfutex::ProcessFutexState;
 use khal::time::TimeValue;
+use kns::NsProxy;
 use kpoll::PollSet;
 use kprocess::Process;
 use kresources::ProcessResources;
@@ -68,6 +69,9 @@ pub struct ProcessState {
     /// The runtime state shared by all threads in the process.
     runtime: ProcessRuntimeState,
 
+    /// The namespace proxy bundling all namespace references.
+    nsproxy: RwLock<Arc<NsProxy>>,
+
     /// The process signal manager.
     pub signal: Arc<ProcessSignalManager>,
 
@@ -104,11 +108,37 @@ impl ProcessState {
         credentials: Credentials,
         config: ProcessStateConfig,
     ) -> Arc<Self> {
+        let nsproxy = NsProxy::new_initial(fs_context);
+        Self::new_with_nsproxy(
+            proc,
+            exe_path,
+            cmdline,
+            address_space,
+            signal_actions,
+            exit_signal,
+            credentials,
+            config,
+            nsproxy,
+        )
+    }
+
+    /// Creates a new [`ProcessState`] with an explicit [`NsProxy`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_nsproxy(
+        proc: Arc<Process>,
+        exe_path: String,
+        cmdline: Arc<Vec<String>>,
+        address_space: Arc<Mutex<memspace::AddrSpace>>,
+        signal_actions: Arc<SpinNoIrq<SignalActions>>,
+        exit_signal: Option<Signo>,
+        credentials: Credentials,
+        config: ProcessStateConfig,
+        nsproxy: Arc<NsProxy>,
+    ) -> Arc<Self> {
         #[cfg(feature = "tee")]
         let tee_ta_ctx = RwLock::new(TeeTaCtx::new(&exe_path));
         let posix = ProcessPosixState::new(exe_path, cmdline, exit_signal);
-        let runtime =
-            ProcessRuntimeState::new(proc.pid(), address_space, fs_context, config.user_heap_base);
+        let runtime = ProcessRuntimeState::new(proc.pid(), address_space, config.user_heap_base);
         Arc::new(Self {
             proc,
             #[cfg(feature = "tee")]
@@ -121,6 +151,7 @@ impl ProcessState {
             posix,
             lifecycle: ProcessLifecycleState::new(),
             runtime,
+            nsproxy: RwLock::new(nsproxy),
 
             signal: Arc::new(ProcessSignalManager::new(
                 signal_actions,
@@ -203,8 +234,46 @@ impl ProcessState {
     }
 
     /// Returns the process-owned filesystem context.
-    pub fn fs_context(&self) -> &Arc<Mutex<FsContext>> {
-        self.runtime.fs_context()
+    ///
+    /// The `FsContext` is owned by the mount namespace inside this process's
+    /// `NsProxy` (`self.mnt_ns().fs_context()`), not by the runtime state. This
+    /// is what makes `CLONE_NEWNS` actually isolate filesystem state (cwd, root,
+    /// and—once the mount tree is per-namespace—mount/umount visibility).
+    ///
+    /// # Current limitation (Phase 2)
+    ///
+    /// In this phase `MntNamespace` only isolates the `FsContext` (root/cwd
+    /// references); the underlying mount tree is still shared between cloned
+    /// namespaces, so `mount`/`umount` performed by a child are visible to the
+    /// parent. Full mount-tree isolation is tracked as Phase 2 work.
+    pub fn fs_context(&self) -> Arc<Mutex<FsContext>> {
+        self.mnt_ns().fs_context().clone()
+    }
+
+    /// Returns the namespace proxy.
+    pub fn nsproxy(&self) -> Arc<NsProxy> {
+        self.nsproxy.read().clone()
+    }
+
+    /// Replaces the namespace proxy and returns the old one.
+    pub fn replace_nsproxy(&self, new: Arc<NsProxy>) -> Arc<NsProxy> {
+        let mut guard = self.nsproxy.write();
+        core::mem::replace(&mut *guard, new)
+    }
+
+    /// Returns the mount namespace.
+    pub fn mnt_ns(&self) -> Arc<kns::MntNamespace> {
+        self.nsproxy.read().mnt_ns().clone()
+    }
+
+    /// Returns the UTS namespace.
+    pub fn uts_ns(&self) -> Arc<kns::UtsNamespace> {
+        self.nsproxy.read().uts_ns().clone()
+    }
+
+    /// Returns the IPC namespace.
+    pub fn ipc_ns(&self) -> Arc<kns::IpcNamespace> {
+        self.nsproxy.read().ipc_ns().clone()
     }
 
     /// Returns the top address of the user heap.

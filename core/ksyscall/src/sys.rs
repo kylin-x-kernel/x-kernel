@@ -11,7 +11,7 @@
 
 use kbuild_config::ARCH;
 use kerrno::KResult;
-use kthread::{current_process_fs_context, processes};
+use kthread::{current_process_fs_context, current_process_state, processes};
 use kvfs::{LookupFlags, LookupIntent, lookup_location};
 use linux_raw_sys::{
     ctypes::c_char,
@@ -21,30 +21,62 @@ use linux_raw_sys::{
 use osvm::write_vm_mem;
 use posix_types::UserPtr;
 
-const fn pad_str(info: &str) -> [c_char; 65] {
-    let mut data: [c_char; 65] = [0; 65];
-    let bytes = info.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        data[idx] = bytes[idx] as c_char;
-        idx += 1;
-    }
-    data
-}
+// Static kernel build constants for uname fields that never change per namespace.
+const UTS_SYSNAME: &[u8] = b"Linux";
+const UTS_RELEASE: &[u8] = b"10.0.0";
+const UTS_VERSION: &[u8] = b"10.0.0";
 
-// Compatible with Linux
-const UTSNAME: new_utsname = new_utsname {
-    sysname: pad_str("Linux"),
-    nodename: pad_str("kylin-x"),
-    release: pad_str("10.0.0"),
-    version: pad_str("10.0.0"),
-    machine: pad_str(ARCH),
-    domainname: pad_str("https://gitee/openkylin/x-kernel"),
-};
+// Precomputed uname fields whose inputs are compile-time constants. Building
+// them as consts eliminates the per-call buffer init/copy on the uname hot
+// path (e.g. container init, system-info probing). Only nodename and
+// domainname vary per UTS namespace and are filled at runtime below.
+const UNAME_SYSNAME: [c_char; 65] = pad_field::<65>(UTS_SYSNAME);
+const UNAME_RELEASE: [c_char; 65] = pad_field::<65>(UTS_RELEASE);
+const UNAME_VERSION: [c_char; 65] = pad_field::<65>(UTS_VERSION);
+const UNAME_MACHINE: [c_char; 65] = pad_field::<65>(ARCH.as_bytes());
+
+/// Pads `src` into a fixed NUL-terminated `c_char` array of length `N`.
+///
+/// The destination is zero-filled and at most `N - 1` source bytes are copied,
+/// leaving the final slot as a NUL terminator. The destination size is fixed
+/// at compile time, so the bound is enforced without runtime checks. Marked
+/// `const` so callers can precompute fields whose inputs are compile-time
+/// constants.
+const fn pad_field<const N: usize>(src: &[u8]) -> [c_char; N] {
+    let mut buf: [c_char; N] = [0; N];
+    let copy_len = if src.len() < N - 1 { src.len() } else { N - 1 };
+    // Copy byte by byte to avoid `transmute`, which would be UB on targets
+    // where `c_char` is `i8` (it changes signedness and violates strict
+    // aliasing). ASCII bytes are representable in both signed and unsigned
+    // `c_char`.
+    let mut i = 0;
+    while i < copy_len {
+        buf[i] = src[i] as c_char;
+        i += 1;
+    }
+    buf
+}
 
 /// Get system information including OS name, version, and hardware platform
 pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
-    name.write_vm(UTSNAME)?;
+    let proc_state = current_process_state();
+    let uts_ns = proc_state.uts_ns();
+
+    // Read both per-namespace names into stack buffers in a single locked
+    // read, avoiding the two heap allocations of nodename()/domainname().
+    let mut nodename_buf = [0 as c_char; 65];
+    let mut domainname_buf = [0 as c_char; 65];
+    uts_ns.read_names_into(&mut nodename_buf, &mut domainname_buf);
+
+    let utsname = new_utsname {
+        sysname: UNAME_SYSNAME,
+        nodename: nodename_buf,
+        release: UNAME_RELEASE,
+        version: UNAME_VERSION,
+        machine: UNAME_MACHINE,
+        domainname: domainname_buf,
+    };
+    name.write_vm(utsname)?;
     Ok(0)
 }
 

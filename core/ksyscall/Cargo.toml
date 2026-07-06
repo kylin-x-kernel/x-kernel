@@ -38,7 +38,6 @@ linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 kprocess.workspace = true
 kthread.workspace = true
 ksignal.workspace = true
-ksync.workspace = true
 osvm.workspace = true
 linux_sysno.workspace = true
 tee_kernel = { workspace = true, optional = true }

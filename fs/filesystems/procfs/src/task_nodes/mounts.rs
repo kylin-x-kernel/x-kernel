@@ -90,12 +90,14 @@ impl ProcMountSource {
         match self {
             Self::Current => {
                 let proc_state = current_process_state();
-                let fs = proc_state.fs_context().lock();
+                let fs_context = proc_state.fs_context();
+                let fs = fs_context.lock();
                 Some(fs.root_dir().clone())
             }
             Self::Task(task) => {
                 let task = task.upgrade()?;
-                let fs = task.as_thread().proc_state.fs_context().lock();
+                let fs_context = task.as_thread().proc_state.fs_context();
+                let fs = fs_context.lock();
                 Some(fs.root_dir().clone())
             }
         }
