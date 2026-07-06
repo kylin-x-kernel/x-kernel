@@ -23,9 +23,9 @@ use smoltcp::{
     wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
 
-use super::{LISTEN_TABLE, SOCKET_SET};
 use crate::{
-    RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, Socket,
+    SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},

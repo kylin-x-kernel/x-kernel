@@ -23,27 +23,14 @@ extern crate alloc;
 
 mod consts;
 mod device;
-mod general;
-mod listen_table;
+mod link;
 pub mod netlink;
-pub mod options;
-pub mod packet;
-pub mod raw;
-mod router;
-mod service;
 mod socket;
-mod socket_file;
-pub(crate) mod state;
-pub mod tcp;
-pub mod udp;
-mod udp_err;
+mod stack;
+mod transport;
 pub mod unix;
 #[cfg(feature = "vsock")]
 pub mod vsock;
-mod wrapper;
-
-mod test_options;
-mod test_state;
 
 use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
 
@@ -53,8 +40,13 @@ use kclass::{NetDevice, net_devices};
 use kdevice::subscribe_device_removed;
 use ksync::Mutex;
 use lazyinit::LazyInit;
+pub use link::packet;
 use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
-pub use socket::*;
+pub(crate) use socket::{general, state};
+pub use socket::{options, *};
+pub(crate) use stack::{listen_table, router, service, wrapper};
+pub(crate) use transport::udp_err;
+pub use transport::{raw, tcp, udp};
 
 use crate::{
     consts::{GATEWAY, IP, IP_PREFIX, STANDARD_MTU},

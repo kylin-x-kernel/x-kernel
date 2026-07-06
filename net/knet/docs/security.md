@@ -66,7 +66,7 @@ driver layer / smoltcp / ringbuf
 
 ### 1. `TcpSocket` 的 `Sync` 实现
 
-位置：`src/tcp.rs:60`
+位置：`src/transport/tcp.rs:60`
 
 ```rust
 unsafe impl Sync for TcpSocket {}

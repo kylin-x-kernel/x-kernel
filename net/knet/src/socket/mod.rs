@@ -3,6 +3,16 @@
 // See LICENSES for license details.
 
 //! Common socket wrapper types and poll helpers.
+pub(crate) mod file;
+pub(crate) mod general;
+pub mod options;
+pub(crate) mod state;
+
+#[cfg(unittest)]
+mod test_options;
+#[cfg(unittest)]
+mod test_state;
+
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     any::Any,

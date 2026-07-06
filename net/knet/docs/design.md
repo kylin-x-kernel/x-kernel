@@ -20,29 +20,37 @@ net/knet/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
-    ├── service.rs
-    ├── router.rs
-    ├── listen_table.rs
-    ├── wrapper.rs
-    ├── socket.rs
-    ├── tcp.rs
-    ├── udp.rs
-    ├── raw.rs
-    ├── socket_file.rs
-    ├── general.rs
-    ├── options.rs
-    ├── udp_err.rs
-    ├── state.rs
     ├── device/
     │   ├── mod.rs
     │   ├── ethernet.rs
     │   ├── loopback.rs
     │   └── vsock.rs
+    ├── link/
+    │   ├── mod.rs
+    │   └── packet.rs
     ├── netlink/
     │   ├── mod.rs
     │   ├── route.rs
     │   ├── socket.rs
     │   └── wire.rs
+    ├── socket/
+    │   ├── mod.rs
+    │   ├── file.rs
+    │   ├── general.rs
+    │   ├── options.rs
+    │   └── state.rs
+    ├── stack/
+    │   ├── mod.rs
+    │   ├── service.rs
+    │   ├── router.rs
+    │   ├── listen_table.rs
+    │   └── wrapper.rs
+    ├── transport/
+    │   ├── mod.rs
+    │   ├── tcp.rs
+    │   ├── udp.rs
+    │   ├── raw.rs
+    │   └── udp_err.rs
     ├── unix/
     │   ├── dgram.rs
     │   └── stream.rs
@@ -51,7 +59,7 @@ net/knet/
         └── stream.rs
 ```
 
-测试辅助代码位于 `test_options.rs`、`test_state.rs` 和 `netlink/tests.rs`。
+测试辅助代码位于 `socket/test_options.rs`、`socket/test_state.rs` 和 `netlink/tests.rs`。
 
 ## 架构
 
