@@ -23,7 +23,6 @@ khal = { workspace = true }
 kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 kplat = { workspace = true }
-kbuild_config = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none"]

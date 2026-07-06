@@ -13,7 +13,6 @@ log = "0.4"
 klazy = { workspace = true }
 kcpu_id_map = { workspace = true }
 khal = { workspace = true }
-kbuild_config = { workspace = true }
 boot_info = { workspace = true }
 multiboot2 = "0.24"
 x86_apic = { workspace = true }

@@ -49,7 +49,6 @@ tee_task_iface = { workspace = true }
 uuid = { version = "0.8", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 cty = "0.2"
-kbuild_config.workspace = true
 subtle = { version = "2", default-features = false }
 static_assertions = "1.1.0"
 memoffset = { version = "0.9", default-features = false }

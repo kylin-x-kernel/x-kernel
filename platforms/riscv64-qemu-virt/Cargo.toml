@@ -20,13 +20,11 @@ irq_driver = { workspace = true }
 khal = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-mmio"] }
 kernel_boot = { workspace = true }
-percpu = { workspace = true }
 kcpu = { workspace = true }
 kcpu_id_map = { workspace = true }
 karch = { workspace = true }
 kerrno = { workspace = true }
 kplat = { workspace = true }
-kbuild_config = { workspace = true }
 rtc_driver = { workspace = true }
 timer_driver = { workspace = true }
 
