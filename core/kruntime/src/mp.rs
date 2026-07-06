@@ -260,8 +260,9 @@ mod tests_tlb_shootdown {
                 core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
             }
 
-            // Pick a canonical-high virtual address unlikely to conflict.
-            let test_vaddr = VirtAddr::from(0xFFFF_8000_7F00_0000usize);
+            // Pick a kernel-high virtual address in the reserved region.
+            // Must be valid across all architectures (SV39 needs ≥0xFFFFFFC0).
+            let test_vaddr = VirtAddr::from(kaddr_layout::IOMAP_VADDR + kaddr_layout::IOMAP_VSIZE);
 
             // Phase 1: Map V → P1; remote CPU reads V → sees MAGIC_A.
             {
@@ -386,7 +387,7 @@ mod tests_tlb_shootdown {
                 core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
             }
 
-            let test_vaddr = VirtAddr::from(0xFFFF_8000_7F00_0000usize);
+            let test_vaddr = VirtAddr::from(kaddr_layout::IOMAP_VADDR + kaddr_layout::IOMAP_VSIZE);
 
             // Phase 1: Map V → P1 in the kernel page table; remote CPU reads V.
             // This populates the remote CPU's TLB with V → P1.

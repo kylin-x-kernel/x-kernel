@@ -248,6 +248,16 @@ pub fn rust_main(arg: usize) -> ! {
 
     ktask::init_scheduler();
 
+    #[cfg(feature = "smp")]
+    {
+        self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
+            panic!(
+                "failed to start secondary CPUs after boot CPU {} init: {err:?}",
+                cpu_id.as_usize()
+            )
+        });
+    }
+
     kdriver::init_drivers();
     #[cfg(feature = "char")]
     ktty::tty::try_handoff_console();
@@ -267,16 +277,6 @@ pub fn rust_main(arg: usize) -> ! {
     knet::init_network();
     #[cfg(feature = "vsock")]
     knet::init_vsock();
-
-    #[cfg(feature = "smp")]
-    {
-        self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
-            panic!(
-                "failed to start secondary CPUs after boot CPU {} init: {err:?}",
-                cpu_id.as_usize()
-            )
-        });
-    }
 
     #[cfg(feature = "ipi")]
     kipi::init();
