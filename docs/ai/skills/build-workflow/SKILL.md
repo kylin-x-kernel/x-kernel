@@ -66,6 +66,7 @@ Additional checked-in defconfig variants:
 | Defconfig Path | Description |
 |---|---|
 | `platforms/aarch64-qemu-virt/crosvm_defconfig` | Capability bundle for the legacy CrosVM guest setup, built on the shared `aarch64-qemu-virt` platform crate |
+| `platforms/aarch64-qemu-virt/ramdisk_defconfig` | RAM disk as the root filesystem: `KFEAT_DRIVER_RAMDISK_STATIC=y` (ext4 image embedded via `make ramdisk_img`) with `KFEAT_ROOT_BLOCK="ramdisk"`. virtio-blk may stay enabled (it coexists as a secondary data disk); boot with `make run` |
 
 ## Required Preparation
 
@@ -439,7 +440,31 @@ Root filesystem helpers:
 ```bash
 make rootfs
 make disk_img
+make ramdisk_img
 ```
+
+`make ramdisk_img` builds the filesystem image (`ramdisk.img`) embedded into
+the kernel as the RAM disk root filesystem when
+`KFEAT_DRIVER_RAMDISK_STATIC=y` is selected. The image path, size, and format
+are configurable:
+
+| Variable | Default | Description |
+|---|---|---|
+| `RAMDISK_IMG` | `$(PWD)/ramdisk.img` | Image embedded into the RAM disk |
+| `RAMDISK_IMG_SIZE` | `8` | Image size in MiB |
+| `RAMDISK_IMG_FS` | `ext4` | Image format (`ext4` or `fat32`) |
+| `RAMDISK_ROOTFS` | `$(DISK_IMG)` | Source image to extract a minimal shell from |
+
+When `RAMDISK_ROOTFS` exists and `RAMDISK_IMG_FS=ext4`, `make ramdisk_img`
+extracts `/bin/busybox` plus the musl runtime (`/lib/ld-musl-aarch64.so.1`)
+from it and injects them (with applet symlinks and standard directories) into
+the image via `mkfs.ext4 -d`, so the default ramdisk boots to a shell without
+embedding a full rootfs. Set `RAMDISK_ROOTFS=` to build a truly empty image.
+
+`RAMDISK_IMG_FS` must match the selected filesystem backend
+(`KFEAT_FS_EXT4` / `KFEAT_FS_FAT`). Override `RAMDISK_IMG` to embed a custom
+image. The image is embedded in `.data`, so the kernel binary grows by roughly
+the image size.
 
 For rootfs-based runtime customization,
 the repository also documents workflows

@@ -29,6 +29,7 @@ rootfs-secondary-block = []
 [dependencies]
 bpffs = { workspace = true, optional = true }
 memaddr = { workspace = true }
+kbuild_config = { workspace = true }
 kclass = { workspace = true, features = ["block"] }
 kdevice = { workspace = true }
 kerrno = { workspace = true }

@@ -33,10 +33,29 @@
 export RUSTC_BOOTSTRAP := 1
 export DISK_IMG ?= $(PWD)/disk.img
 
+# RAM disk root filesystem image (embedded into the kernel when
+# KFEAT_DRIVER_RAMDISK_STATIC=y). Distinct from DISK_IMG, which is the
+# virtio-blk QEMU backing file. RAMDISK_IMG_SIZE is in MiB and is passed
+# explicitly because make_disk_image_* otherwise defaults to 64 MiB.
+# RAMDISK_IMG_FS must match the selected filesystem backend
+# (KFEAT_FS_EXT4 / KFEAT_FS_FAT); defaults to ext4, the maintained backend.
+RAMDISK_IMG ?= $(PWD)/ramdisk.img
+RAMDISK_IMG_SIZE ?= 8
+RAMDISK_IMG_FS ?= ext4
+# Source image to extract a minimal shell (/bin/sh + musl runtime) from when
+# building the RAM disk image, so an otherwise-empty ramdisk can still boot to
+# a shell. Defaults to DISK_IMG. Set to empty, or point it at a non-existent
+# path, to build a truly empty ramdisk. Only used when RAMDISK_IMG_FS=ext4.
+RAMDISK_ROOTFS ?= $(DISK_IMG)
+export XKERNEL_RAMDISK_IMG := $(abspath $(RAMDISK_IMG))
+
 V ?=
 LTO ?=
 TARGET_DIR ?= $(PWD)/target
 export TARGET_DIR
+# Populated staging dir for the RAM disk shell injection. Must come after
+# TARGET_DIR. Only set when a shell source exists and RAMDISK_IMG_FS=ext4.
+RAMDISK_STAGING := $(if $(filter ext4,$(RAMDISK_IMG_FS)),$(if $(wildcard $(RAMDISK_ROOTFS)),$(TARGET_DIR)/ramdisk-staging))
 XCONF_TARGET_DIR ?= $(TARGET_DIR)/tools/xconf
 UAPP_TARGET_DIR ?= $(TARGET_DIR)/tools/uapp
 XTASK_TARGET_DIR ?= $(PWD)/xtask/target
@@ -283,6 +302,15 @@ gen-const: $(CONFIG_RS)
 
 build: $(CONFIG_RS) _gen_cargo $(OUT_DIR) $(FINAL_IMG)
 
+# When the static RAM disk is enabled, the embedded image must exist before
+# cargo compiles the `block` crate. `_gen_cargo` runs before `$(FINAL_IMG)`
+# (the kernel link step that invokes cargo), and `build` lists its
+# prerequisites in order, so attaching here guarantees the image is present
+# before any compilation without reordering `build`.
+ifeq ($(shell grep -qx 'KFEAT_DRIVER_RAMDISK_STATIC=y' .config 2>/dev/null && echo y),y)
+_gen_cargo: ramdisk_img
+endif
+
 disasm:
 	$(OBJDUMP) $(OUT_ELF) | less
 
@@ -334,6 +362,42 @@ else
 	$(call make_disk_image,fat32,$(DISK_IMG))
 endif
 
+# Filesystem image embedded into the kernel as the RAM disk root filesystem
+# (see KFEAT_DRIVER_RAMDISK_STATIC). When a shell source (RAMDISK_ROOTFS,
+# default DISK_IMG) is available and RAMDISK_IMG_FS=ext4, a minimal shell
+# (/bin/sh + musl runtime) is extracted and injected so the ramdisk can boot
+# to a shell without embedding a full rootfs. Otherwise the image is empty.
+# Override RAMDISK_IMG to embed a custom image; set RAMDISK_IMG_FS + the
+# matching KFEAT_FS_* backend if the format differs from the ext4 default.
+# Written as one shell recipe (rather than the make_disk_image macro) because
+# multi-line define expansion is unreliable after nested make conditionals.
+ramdisk_img:
+ifeq ($(wildcard $(RAMDISK_IMG)),)
+	@staging="$(RAMDISK_STAGING)"; \
+	if [ -n "$$staging" ]; then \
+		rm -rf "$$staging"; \
+		mkdir -p "$$staging/bin" "$$staging/lib" "$$staging/root" "$$staging/tmp" \
+			"$$staging/proc" "$$staging/sys" "$$staging/dev" "$$staging/etc"; \
+		printf "  $(GREEN_C)Injecting$(END_C) minimal shell (/bin/sh + musl) from $(RAMDISK_ROOTFS)\n"; \
+		debugfs -R "dump /bin/busybox $$staging/bin/busybox" "$(RAMDISK_ROOTFS)" 2>/dev/null; \
+		debugfs -R "dump /lib/ld-musl-aarch64.so.1 $$staging/lib/ld-musl-aarch64.so.1" "$(RAMDISK_ROOTFS)" 2>/dev/null; \
+		chmod 0755 "$$staging/bin/busybox" "$$staging/lib/ld-musl-aarch64.so.1"; \
+		ln -s busybox "$$staging/bin/sh"; \
+		ln -s ld-musl-aarch64.so.1 "$$staging/lib/libc.musl-aarch64.so.1"; \
+		for app in env ls cat mount umount mkdir rmdir uname ps dmesg cp mv rm echo pwd; do \
+			ln -s busybox "$$staging/bin/$$app"; \
+		done; \
+	fi; \
+	printf "    $(GREEN_C)Creating$(END_C) $(RAMDISK_IMG_FS) ramdisk image \"$(RAMDISK_IMG)\" ...\n"; \
+	dd if=/dev/zero of=$(RAMDISK_IMG) bs=1M count=$(RAMDISK_IMG_SIZE) >/dev/null 2>&1; \
+	if [ "$(RAMDISK_IMG_FS)" = "fat32" ]; then \
+		mkfs.fat -F 32 $(RAMDISK_IMG) >/dev/null 2>&1; \
+	else \
+		mkfs.ext4 -q -F -b 4096 -O ^metadata_csum,^64bit $${staging:+-d $$staging} $(RAMDISK_IMG); \
+	fi; \
+	rm -rf "$$staging"
+endif
+
 clean:
 	rm -rf $(CURDIR)/xkernel_*.bin $(CURDIR)/xkernel_*.elf $(CURDIR)/xkernel_*.uimg
 	cargo clean --target-dir $(TARGET_DIR)
@@ -353,4 +417,4 @@ distclean: clean
 	rootfs rootfs-uapps teefs uapps \
 	clippy doc doc_check_missing fmt unittest unittest_no_fail_fast \
 	_gen_cargo \
-	disk_img clean distclean
+	disk_img ramdisk_img clean distclean

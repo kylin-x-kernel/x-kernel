@@ -44,6 +44,7 @@ console-ns16550-mmio = ["console", "console_driver/ns16550-mmio"]
 console-ns16550-ioport = ["console", "console_driver/ns16550-ioport"]
 
 ramdisk = ["block", "block/ramdisk"]
+ramdisk-static = ["ramdisk", "block/ramdisk-static"]
 # Placeholder concrete-driver feature names kept so source-level cfg(feature =
 # "...") remains check-cfg-clean after removing the old build.rs mapping.
 # They intentionally do not enable downstream dependencies yet.

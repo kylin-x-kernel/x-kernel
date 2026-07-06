@@ -81,7 +81,7 @@ impl BlockDevice for RamDisk {
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        if buf.len() % BLOCK_SIZE != 0 {
+        if !buf.len().is_multiple_of(BLOCK_SIZE) {
             return Err(DriverError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;
@@ -94,7 +94,7 @@ impl BlockDevice for RamDisk {
     }
 
     fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        if buf.len() % BLOCK_SIZE != 0 {
+        if !buf.len().is_multiple_of(BLOCK_SIZE) {
             return Err(DriverError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;

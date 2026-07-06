@@ -31,7 +31,16 @@ impl DeviceDriver for RamdiskDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
+        // `ramdisk-static` backs the device with a build-time filesystem image
+        // (embedded, zero-copy) so it can be mounted as a real root filesystem.
+        // Otherwise the device is an empty zero-filled region, useful only for
+        // driver bring-up. The two arms produce different concrete types, so
+        // this must be `#[cfg]` attributes rather than `if cfg!()`.
+        #[cfg(feature = "ramdisk-static")]
+        let dev = block::ramdisk_image::ramdisk();
+        #[cfg(not(feature = "ramdisk-static"))]
         let dev = block::ramdisk::RamDisk::new(0x100_0000); // 16 MiB
+
         kclass::publish_block(device, Box::new(dev))
     }
 }

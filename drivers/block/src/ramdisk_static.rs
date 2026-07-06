@@ -29,7 +29,7 @@ impl Default for RamDisk {
     fn default() -> Self {
         RamDisk {
             lock: SpinNoPreempt::new(()),
-            base_addr: (&mut []).as_mut_ptr().addr(),
+            base_addr: [0u8; 0].as_mut_ptr().addr(),
             len: 0,
         }
     }
@@ -96,7 +96,7 @@ impl BlockDevice for RamDisk {
 
     /// Reads a single block from the RAM disk into the provided buffer.
     fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
-        if buffer.len() % BLOCK_SIZE != 0 {
+        if !buffer.len().is_multiple_of(BLOCK_SIZE) {
             return Err(DriverError::InvalidInput);
         }
 
@@ -113,7 +113,7 @@ impl BlockDevice for RamDisk {
 
     /// Writes a single block to the RAM disk from the provided buffer.
     fn write_block(&self, block_id: u64, buffer: &[u8]) -> DriverResult {
-        if buffer.len() % BLOCK_SIZE != 0 {
+        if !buffer.len().is_multiple_of(BLOCK_SIZE) {
             return Err(DriverError::InvalidInput);
         }
 

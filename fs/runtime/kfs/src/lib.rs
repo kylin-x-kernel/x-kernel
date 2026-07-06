@@ -20,7 +20,7 @@ mod test_fs_context;
 
 use alloc::{sync::Arc, vec::Vec};
 
-use kclass::block_devices;
+use kclass::{BlockDeviceImpl, ClassDevice, block_devices};
 #[cfg(feature = "fs9p")]
 use kclass::{Virtio9pDevice as _, virtio_9p_devices};
 use kdevice::{DeviceId as KDeviceId, subscribe_device_removed};
@@ -44,22 +44,45 @@ mod highlevel;
 pub use highlevel::*;
 pub use virtual_filesystems::{VirtualFsMounts, mount_virtual_filesystems};
 
+/// Choose the block device to mount as the root filesystem.
+///
+/// Preference order:
+/// 1. If [`kbuild_config::KFEAT_ROOT_BLOCK`] names an available device (e.g.
+///    `"ramdisk"`), select it. This lets multiple block devices coexist -- a
+///    RAM disk can be the root filesystem alongside a virtio-blk data disk --
+///    without disabling either driver.
+/// 2. Otherwise fall back to the historical positional selection: the secondary
+///    device when the `rootfs-secondary-block` feature is enabled, else the
+///    last-registered device.
+fn select_root_block(devs: &mut Vec<ClassDevice<BlockDeviceImpl>>) -> ClassDevice<BlockDeviceImpl> {
+    let preferred = kbuild_config::KFEAT_ROOT_BLOCK.trim();
+    if !preferred.is_empty() {
+        if let Some(idx) = devs.iter().position(|d| d.name() == preferred) {
+            return devs.remove(idx);
+        }
+        warn!(
+            "preferred root block device '{preferred}' not found among {:?}; falling back",
+            devs.iter().map(|d| d.name()).collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(feature = "rootfs-secondary-block")]
+    {
+        assert!(devs.len() >= 2, "Less than two block devices found!");
+        devs.remove(1)
+    }
+    #[cfg(not(feature = "rootfs-secondary-block"))]
+    {
+        devs.pop().expect("No block device found!")
+    }
+}
+
 /// Initialize the filesystem subsystem and mount the root filesystem.
 pub fn init_filesystems() {
     info!("Initialize filesystem subsystem...");
 
     let mut block_devs = block_devices();
-    let handle = {
-        #[cfg(feature = "rootfs-secondary-block")]
-        {
-            assert!(block_devs.len() >= 2, "Less than two block devices found!");
-            block_devs.remove(1)
-        }
-        #[cfg(not(feature = "rootfs-secondary-block"))]
-        {
-            block_devs.pop().expect("No block device found!")
-        }
-    };
+    let handle = select_root_block(&mut block_devs);
 
     let backing_id = handle.id();
     subscribe_fs_backing_unregister(backing_id, "block");

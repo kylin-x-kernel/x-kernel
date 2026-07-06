@@ -226,6 +226,8 @@ Registered ──► early_init() ──► enumerate() ──► probe_pending(
 2. **Boot console adoption**：如果 console feature 启用且尚未被 adoption，在此阶段完成。
 3. **静态设备阶段**：注册编译期已知的平台设备（ramdisk 始终注册；AHCI/sdmmc/bcm2835-sdhci 仅在无 firmware 描述时注册）。
 
+   > ramdisk 的存储后端由 `KFEAT_DRIVER_RAMDISK_STATIC` 控制：关闭时为 16 MiB 全零堆内存（仅用于驱动验证）；开启时由构建期嵌入的文件系统镜像零拷贝承载（路径由 Makefile 变量 `RAMDISK_IMG` 指定，格式由 `RAMDISK_IMG_FS` 控制，默认 ext4，由 `make ramdisk_img` 生成空镜像），从而可挂载为真实的可读写 root 文件系统。详见 `drivers/block/src/ramdisk_image.rs`。
+
 ### 驱动匹配与激活
 
 1. `EnumerationContext::probe_pending` 取出所有 pending 描述符。
