@@ -173,6 +173,14 @@ def ci_stage_status(ci_results, stage_name):
     return "not_run"
 
 
+def is_fail_fast_abort_detail(detail):
+    """Jenkins fail-fast 中止并行分支时，catch 可能误标 failed；根据 detail 识别。"""
+    if not detail:
+        return False
+    text = detail.lower()
+    return "aborted due to" in text or "flowinterruptedexception" in text
+
+
 def update_check_run(token, owner, repo, check_run_id, *, name=None,
                      status=None, conclusion=None, output=None,
                      annotations=None):
@@ -878,6 +886,16 @@ def handle_jenkins_manifest(token, owner, repo, manifest, *, pr_db_id_fallback=N
                 token, owner, repo, int(check_id),
             )
             if st == "failed":
+                detail = (ci_results.get(name) or {}).get("detail") or ""
+                if is_fail_fast_abort_detail(detail):
+                    override = {"status": "skipped", "detail": skip_detail}
+                    _, code = finish_stage_from_manifest(
+                        token, owner, repo, manifest, name,
+                        pr_db_id=pr_id, override_ci_result=override,
+                    )
+                    if code and code >= 300:
+                        last_code = code
+                    continue
                 if in_progress:
                     _, code = finish_stage_from_manifest(
                         token, owner, repo, manifest, name, pr_db_id=pr_id,

@@ -266,6 +266,17 @@ def runCiStage(String stageName, String failedDetail, Closure body) {
     runCiStage(stageName, failedDetail, true, body)
 }
 
+def isCiAborted(Throwable error) {
+    def ex = error
+    while (ex != null) {
+        if (ex instanceof org.jenkinsci.plugins.workflow.steps.FlowInterruptedException) {
+            return true
+        }
+        ex = ex.getCause()
+    }
+    return false
+}
+
 def runCiStage(String stageName, String failedDetail, boolean startCheckRun, Closure body) {
     if (startCheckRun) {
         giteeStartCheckRun(stageName)
@@ -275,7 +286,14 @@ def runCiStage(String stageName, String failedDetail, boolean startCheckRun, Clo
         body.call()
         ciResults[stageName] = [status: 'passed']
     } catch (e) {
-        ciResults[stageName] = [status: 'failed', detail: buildFailureDetail(stageName, failedDetail, e)]
+        if (isCiAborted(e)) {
+            ciResults[stageName] = [
+                status: 'skipped',
+                detail: '因其他并行阶段失败而中止（fail-fast）',
+            ]
+        } else {
+            ciResults[stageName] = [status: 'failed', detail: buildFailureDetail(stageName, failedDetail, e)]
+        }
         throw e
     } finally {
         ciFinishGiteeStage(stageName, ciResults, failedDetail)
@@ -1341,7 +1359,7 @@ def buildCiComment(Map results, String coverageSummary = '', Map failedStageLogs
 
     def rows = stageOrder.collect { name ->
         def r = normalizedResults[name]
-        def icon = r.status == 'passed' ? '✅' : (r.status == 'not_run' ? '⏭' : '❌')
+        def icon = r.status == 'passed' ? '✅' : (r.status in ['not_run', 'skipped'] ? '⏭' : '❌')
         "| ${name} | ${icon} |"
     }.join('\n')
 
@@ -1370,7 +1388,7 @@ ${rows}
     }
 
     def errorBlocks = stageOrder.findAll { name ->
-        normalizedResults[name].status != 'passed' &&
+        normalizedResults[name].status == 'failed' &&
             (failedStageLogs[name]?.trim() || normalizedResults[name].detail?.trim())
     }.collect { name ->
         def detail = (failedStageLogs[name]?.trim() ?: normalizedResults[name].detail).take(4000)
