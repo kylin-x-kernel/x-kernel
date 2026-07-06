@@ -526,6 +526,11 @@ impl Mapping {
             .range(first_truncated..)
             .map(|(index, folio)| (*index, folio.clone()))
             .collect::<Vec<_>>();
+        // Explicit truncation: clear dirty before eviction, analogous to
+        // Linux's cancel_dirty_page() in truncate_inode_pages_range().
+        for (_, folio) in &dropped_folios {
+            folio.lock().clear_dirty();
+        }
         let dropped_pages = dropped_folios.iter().map(|(index, _)| *index).collect();
         inner.pages.retain(|index, _| *index < first_truncated);
 
@@ -675,6 +680,11 @@ impl Mapping {
             inner.pages.retain(|index, _| *index < first_page);
             dropped
         };
+        // Callers must writeback before invalidation.
+        assert!(
+            dropped_folios.iter().all(|(_, f)| !f.lock().is_dirty()),
+            "invalidate_from_page: dirty folios in eviction range — call writeback first"
+        );
         self.notify_evicted_folios(&dropped_folios);
         Ok(dropped_folios.into_iter().map(|(index, _)| index).collect())
     }
@@ -1042,11 +1052,36 @@ mod tests {
         assert_eq!(view.object_to_vma_offset(0x5000), None);
     }
 
-    /// Regression test: `invalidate_from_page` drops dirty folios without
-    /// calling writeback.  Callers (like `AddressSpace::evict()`) MUST call
-    /// writeback first — otherwise dirty data is silently lost.
+    /// `invalidate_from_page` asserts evicted folios are clean.
+    /// Callers must writeback first.
     #[def_test]
-    fn invalidate_without_writeback_drops_dirty_folios() {
+    fn invalidate_from_page_rejects_dirty_folios() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(
+            MappingKind::FileBacked,
+            (PAGE_SIZE_4K * 2) as u64,
+            ops.clone(),
+        );
+        mapping.write_from(0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        mapping
+            .write_from(PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K])
+            .unwrap();
+
+        // Writeback first, then invalidate.
+        mapping
+            .writeback(|index, _data, valid_len| ops.record_write(index, valid_len))
+            .unwrap();
+        let dropped = mapping.invalidate_from_page(0).unwrap();
+
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(ops.writes(), vec![(0, PAGE_SIZE_4K), (1, PAGE_SIZE_4K)]);
+    }
+
+    /// Regression test: `set_len` truncation drops dirty folios without
+    /// calling writeback — the "dropping dirty in-memory folio" warning path.
+    /// This is triggered by `echo > file` in shell scripts.
+    #[def_test]
+    fn set_len_truncation_without_writeback_drops_dirty_folios() {
         let ops = RecordingOps::new(false);
         let mapping = Mapping::new(
             MappingKind::FileBacked,
@@ -1067,12 +1102,12 @@ mod tests {
             assert!(folio.expect("folio 1").is_dirty());
         });
 
-        // Invalidate without writeback — dirty data is lost.
-        let dropped = mapping.invalidate_from_page(0).unwrap();
-        assert_eq!(dropped.len(), 2);
+        // Truncate to 0 without writeback — dirty folios are silently lost.
+        mapping.set_len(0).unwrap();
+
         assert!(
             ops.writes().is_empty(),
-            "writeback must not have been called"
+            "writeback must not have been called during set_len truncation"
         );
     }
 

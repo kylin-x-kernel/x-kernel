@@ -252,15 +252,15 @@ impl AddressSpaceOperations for NodeBackedAddressSpaceOperations {
 
     fn writepages(&self, mapping: &AddressSpace, control: WritebackControl) -> VfsResult<()> {
         if self.in_memory {
-            // In-memory files (memfs/tmpfs) have no backing store — their
-            // page cache IS the storage.  Eviction is only triggered by
-            // file deletion (unlink), at which point discarding the pages
-            // is correct behaviour.
+            // In-memory files have no backing store, but we still route
+            // through writeback_cached_folios so the writeback machinery
+            // clears the dirty flag on each folio.  The callback is a
+            // no-op — there is nowhere to write to, and the data lives
+            // in the page cache until eviction.
             //
-            // When swap or background memory reclaim is added, this is the
-            // place to either write dirty folios to swap, or mark them as
-            // unevictable when swap is unavailable (noswap).
-            return Ok(());
+            // When swap or background reclaim is added, the callback
+            // should write dirty folios to swap instead.
+            return mapping.writeback_cached_folios(control, |_, _, _| Ok(()));
         }
 
         mapping.writeback_cached_folios(control, |index, data, valid_len| {
