@@ -25,6 +25,9 @@
 //! }
 //! ```
 //!
+//! With `stats` enabled, heap locks bind a per-init-site class in [`Mutex::new`];
+//! static locks use [`static_lock`].
+//!
 //! ## Mutex with Custom Spin Configuration
 //! ```no_run
 //! use ksync::{Mutex, SpinConfig};
@@ -70,7 +73,9 @@
 //!
 //! # Features
 //!
-//! - `stats`: Enable mutex statistics tracking (total locks, spins, blocks)
+//! - `stats` (Kconfig `KFEAT_LOCK_STAT`): Enable per-class lock contention
+//!   statistics via `klockstat`. Counts successful acquisitions and contentions
+//!   per `file:line` lock class.
 //! - `watchdog`: Enable watchdog support for deadlock detection
 
 #![cfg_attr(not(test), no_std)]
@@ -83,8 +88,17 @@ mod semaphore;
 mod tests;
 mod util;
 
+#[cfg(not(feature = "stats"))]
+#[macro_export]
+macro_rules! static_lock {
+    ($item:item) => {
+        $item
+    };
+}
+
 #[cfg(feature = "stats")]
-pub use self::mutex::MutexStats;
+pub use klockstat::{LOCK_CLASSES, LockClassStats, linkme, static_lock};
+
 pub use self::{
     mutex::{Mutex, MutexGuard, RawMutex},
     rwlock::{RawRwLock, RwLock, RwLockReadGuard, RwLockWriteGuard},

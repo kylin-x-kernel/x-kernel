@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::{any::Any, ffi::c_uint, fmt::Debug};
 
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use tee_raw_sys::{TEE_STORAGE_PRIVATE, *};
 
 use super::{
@@ -35,22 +35,18 @@ use super::{
 };
 use crate::tee::utils::slice_fmt;
 
-/// Global REE FS state: combines the mutex and the directory handle cache.
-///
-/// This matches GP semantics where `ree_fs_mutex` protects the global
-/// `ree_fs_dirh`. By using `Mutex<ReeFsDirh>`, the lock and the data it
-/// protects are bound together, eliminating the need for raw pointers and
-/// preventing use-after-free across processes/threads.
-static REE_FS_STATE: Mutex<ReeFsDirh> = Mutex::new(ReeFsDirh::new());
-
-/// Extra global mutex to match GP reference semantics more closely.
-///
-/// In GP, `ree_fs_mutex` serializes the whole ree_fs_* operation
-/// (including out-of-place write + htree sync + directory bookkeeping).
-/// Rust already uses `REE_FS_STATE` for dirh caching, but the additional mutex
-/// makes the serialization explicit and prevents subtle reordering across
-/// different code paths.
-static REE_FS_MUTEX: Mutex<()> = Mutex::new(());
+// Global REE FS state: combines the mutex and the directory handle cache.
+//
+// This matches GP semantics where `ree_fs_mutex` protects the global
+// `ree_fs_dirh`. By using `Mutex<ReeFsDirh>`, the lock and the data it
+// protects are bound together, eliminating the need for raw pointers and
+// preventing use-after-free across processes/threads.
+static_lock! {
+    static REE_FS_STATE: Mutex<ReeFsDirh> = Mutex::new(ReeFsDirh::new());
+}
+static_lock! {
+    static REE_FS_MUTEX: Mutex<()> = Mutex::new(());
+}
 
 pub const BLOCK_SHIFT: usize = 12;
 pub const BLOCK_SIZE: usize = 1 << BLOCK_SHIFT;

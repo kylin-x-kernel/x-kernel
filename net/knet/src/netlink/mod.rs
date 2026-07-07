@@ -18,7 +18,7 @@ use alloc::{
 };
 use core::sync::atomic::AtomicU64;
 
-use ksync::{Mutex, RwLock};
+use ksync::{Mutex, RwLock, static_lock};
 use lazyinit::LazyInit;
 use smoltcp::wire::IpAddress;
 
@@ -130,7 +130,9 @@ pub(crate) struct RtnetlinkState {
 }
 
 pub(super) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
-pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
+static_lock! {
+    pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
+}
 pub(super) static UEVENT_SEQNUM: AtomicU64 = AtomicU64::new(0);
 pub(super) const NETLINK_RX_QUEUE_LIMIT: usize = 64 * 1024;
 

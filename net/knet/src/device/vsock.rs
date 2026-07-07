@@ -12,14 +12,20 @@ use core::{
 use kclass::{ClassDevice, prelude::*};
 use kdevice::DeviceId;
 use kerrno::{KError, KResult, k_bail};
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use ktask::future::{block_on, interruptible};
 
 use crate::{alloc::string::ToString, vsock::connection_manager::VSOCK_CONN_MANAGER};
 
-// A single global vsock device instance.
-static VSOCK_DEV: Mutex<Option<ClassDevice<VsockDeviceImpl>>> = Mutex::new(None);
-static VSOCK_EVENT_QUEUE: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
+static_lock! {
+    static VSOCK_DEV: Mutex<Option<ClassDevice<VsockDeviceImpl>>> = Mutex::new(None);
+}
+static_lock! {
+    static VSOCK_EVENT_QUEUE: Mutex<VecDeque<VsockDriverEventType>> = Mutex::new(VecDeque::new());
+}
+static_lock! {
+    static POLL_USERS: Mutex<usize> = Mutex::new(0);
+}
 
 const VSOCK_RX_SCRATCH_SIZE: usize = 0x1000; // 4KiB scratch buffer for vsock receive
 
@@ -49,7 +55,6 @@ pub fn unregister_vsock_dev(id: DeviceId) -> bool {
     true
 }
 
-static POLL_USERS: Mutex<usize> = Mutex::new(0);
 static POLL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static POLL_BACKOFF: PollBackoff = PollBackoff::new();
 

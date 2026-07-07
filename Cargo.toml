@@ -180,6 +180,8 @@ macros = { path = "util/macros" }
 unittest = { path = "util/unittest" }
 unittest_support = { path = "util/unittest_support" }
 xcover = { path = "util/xcover" }
+klockstat = { path = "util/klockstat" }
+klockstat-macros = { path = "util/klockstat-macros" }
 
 # External crates
 bitflags = "2.10"

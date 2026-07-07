@@ -10,7 +10,7 @@ use core::mem::size_of;
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time_nanos;
 use kprocess::Pid;
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
@@ -204,7 +204,9 @@ pub const MSGMNI: usize = 32000;
 pub const MSGMNB: usize = 16384;
 pub const MSGMAX: usize = 8192;
 
-pub static MSG_MANAGER: Mutex<MsgManager> = Mutex::new(MsgManager::new());
+static_lock! {
+    pub static MSG_MANAGER: Mutex<MsgManager> = Mutex::new(MsgManager::new());
+}
 
 bitflags::bitflags! {
     #[derive(Debug)]

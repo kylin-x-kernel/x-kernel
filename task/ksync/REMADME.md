@@ -86,22 +86,27 @@ SEM.release();
 
 ## Features
 
-### `stats`
+### `stats` (Kconfig `KFEAT_LOCK_STAT`)
 
-Enable mutex statistics tracking:
+Enable lock contention statistics through `klockstat`:
 
 ```toml
 ksync = { version = "0.1", features = ["stats"] }
 ```
 
-```rust
-use ksync::Mutex;
+Runtime locks created with `Mutex::new` / `RwLock::new` share one lock class per
+init site (`file:line`). Static locks register through `static_lock!`:
 
-let mutex = Mutex::new(0);
-let _guard = mutex.lock();
-let (locks, spins, blocks) = mutex.stats();
-println!("Locks: {}, Spins: {}, Blocks: {}", locks, spins, blocks);
+```rust
+use ksync::{Mutex, static_lock};
+
+static_lock! {
+    static TASK_TABLE: Mutex<TaskTable> = Mutex::new(TaskTable::new());
+}
 ```
+
+Read aggregated statistics from `/proc/lock_stat` or through
+`klockstat::dump_lock_stat()`.
 
 ### `watchdog`
 

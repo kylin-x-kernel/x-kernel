@@ -14,7 +14,7 @@ use khal::{
     time::monotonic_time_nanos,
 };
 use kprocess::Pid;
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
@@ -340,7 +340,9 @@ impl ShmManager {
     }
 }
 
-pub static SHM_MANAGER: Mutex<ShmManager> = Mutex::new(ShmManager::new());
+static_lock! {
+    pub static SHM_MANAGER: Mutex<ShmManager> = Mutex::new(ShmManager::new());
+}
 
 bitflags::bitflags! {
     #[derive(Debug)]

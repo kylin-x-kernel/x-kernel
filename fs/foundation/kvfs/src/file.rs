@@ -254,7 +254,7 @@ impl VfsFile {
 
     /// Locks the current file offset, if this file tracks one.
     pub fn position_lock(&self) -> Option<MutexGuard<'_, u64>> {
-        self.position.as_ref().map(Mutex::lock)
+        self.position.as_ref().map(|position| position.lock())
     }
 
     /// Locks the current file offset for operations that require seekability.

@@ -24,14 +24,16 @@ use kclass::{BlockDeviceImpl, ClassDevice, block_devices};
 #[cfg(feature = "fs9p")]
 use kclass::{Virtio9pDevice as _, virtio_9p_devices};
 use kdevice::{DeviceId as KDeviceId, subscribe_device_removed};
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 #[cfg(feature = "fs9p")]
 use kvfs::{
     NodePermission,
     path::{Path, PathBuf},
 };
 
-static FS_BACKING_DEVICES: Mutex<Vec<KDeviceId>> = Mutex::new(Vec::new());
+static_lock! {
+    static FS_BACKING_DEVICES: Mutex<Vec<KDeviceId>> = Mutex::new(Vec::new());
+}
 
 #[cfg(feature = "fat")]
 mod disk;

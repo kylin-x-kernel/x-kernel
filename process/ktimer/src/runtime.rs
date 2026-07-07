@@ -18,7 +18,7 @@ use event_listener::{Event, listener};
 use khal::time::monotonic_time;
 use klazy::Once;
 use kprocess::Pid;
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use ktask::future::{block_on, timeout_at};
 
 struct Entry {
@@ -49,7 +49,9 @@ impl Ord for Entry {
     }
 }
 
-static ALARM_LIST: Mutex<BinaryHeap<Entry>> = Mutex::new(BinaryHeap::new());
+static_lock! {
+    static ALARM_LIST: Mutex<BinaryHeap<Entry>> = Mutex::new(BinaryHeap::new());
+}
 
 static EVENT_NEW_TIMER: Event = Event::new();
 static EXPIRED_TASK_HANDLER: Once<fn(Pid)> = Once::new();

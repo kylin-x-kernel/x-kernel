@@ -165,6 +165,14 @@ watchdog_hardlockup = [
     "kruntime/watchdog_hardlockup",
     "aarch64-qemu-virt?/nmi",
 ]
+lock_stat = [
+    "dep:procfs",
+    "procfs/lock_stat",
+    "dep:ksync",
+    "ksync/stats",
+    "dep:kspin",
+    "kspin/stats",
+]
 
 # TEE
 tee = [

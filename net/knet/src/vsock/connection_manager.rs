@@ -7,7 +7,7 @@ use alloc::{collections::BTreeMap, sync::Arc};
 
 use kerrno::{KError, KResult, k_bail};
 use kpoll::PollSet;
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use ktask::WaitQueue;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 
@@ -528,8 +528,10 @@ pub struct VsockStats {
     pub total_dropped_bytes: usize,
 }
 
-pub static VSOCK_CONN_MANAGER: Mutex<VsockConnectionManager> =
-    Mutex::new(VsockConnectionManager::new());
+static_lock! {
+    pub static VSOCK_CONN_MANAGER: Mutex<VsockConnectionManager> =
+        Mutex::new(VsockConnectionManager::new());
+}
 
 /// for debug
 #[allow(dead_code)]

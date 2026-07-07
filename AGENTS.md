@@ -21,6 +21,9 @@ Current shared skills:
 - `docs/ai/skills/problem-diagnosis/SKILL.md`:
   first-pass issue classification and localization workflow for build,
   boot, panic, hang, regression, and performance problems.
+- `docs/ai/skills/performance-analysis/SKILL.md`:
+  performance investigation workflow (workloads, baselines, reporting);
+  lock_stat is documented as a sub-item under `references/lock-stat.md`.
 - `docs/ai/skills/linux-mm-design-knowledge/SKILL.md`:
   Linux memory-management semantic knowledge base for X-Kernel MM design,
   covering address space, VMA, mmap, faults, anonymous memory, file-backed

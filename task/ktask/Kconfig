@@ -62,6 +62,12 @@ config KFEAT_WATCHDOG_HARDLOCKUP
       currently implemented through the PMU-driven NMI path and global snapshot
       rendezvous.
 
+config KFEAT_LOCK_STAT
+    bool "Lock contention statistics (/proc/lock_stat)"
+    help
+      Enable per-class lock contention statistics for kernel mutexes, rwlocks,
+      and spinlocks. Statistics are exposed through `/proc/lock_stat`.
+
 endmenu
 
 endmenu

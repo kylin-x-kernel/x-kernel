@@ -47,6 +47,8 @@ pub struct SpinLock<G: BaseGuard, T: ?Sized> {
     marker: PhantomData<G>,
     #[cfg(feature = "smp")]
     flag: AtomicBool,
+    #[cfg(feature = "stats")]
+    stats: &'static klockstat::LockClassStats,
     storage: UnsafeCell<T>,
 }
 
@@ -74,12 +76,33 @@ unsafe impl<G: BaseGuard, T: ?Sized + Send> Send for SpinLock<G, T> {}
 impl<G: BaseGuard, T> SpinLock<G, T> {
     /// Create a new spinlock.
     #[inline(always)]
+    #[cfg(not(feature = "stats"))]
     pub const fn new(data: T) -> Self {
         Self {
             marker: PhantomData,
             storage: UnsafeCell::new(data),
             #[cfg(feature = "smp")]
             flag: AtomicBool::new(false),
+        }
+    }
+
+    /// Create a new spinlock.
+    #[inline(always)]
+    #[cfg(feature = "stats")]
+    pub const fn new(data: T) -> Self {
+        Self::new_with_stats(data, &klockstat::NOOP_CLASS)
+    }
+
+    /// Creates a new spinlock bound to `stats`.
+    #[inline(always)]
+    #[cfg(feature = "stats")]
+    pub const fn new_with_stats(data: T, stats: &'static klockstat::LockClassStats) -> Self {
+        Self {
+            marker: PhantomData,
+            storage: UnsafeCell::new(data),
+            #[cfg(feature = "smp")]
+            flag: AtomicBool::new(false),
+            stats,
         }
     }
 
@@ -102,6 +125,8 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
 
         #[cfg(feature = "smp")]
         {
+            #[cfg(feature = "stats")]
+            let mut did_wait = false;
             // Opportunistic acquire: weak CAS in a loop, with a secondary
             // spin phase while the lock appears taken.
             loop {
@@ -110,13 +135,27 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
                     .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
+                    #[cfg(feature = "stats")]
+                    {
+                        self.record_acquisitions();
+                        if did_wait {
+                            self.record_contentions();
+                        }
+                    }
                     break;
                 }
                 while self.is_locked() {
+                    #[cfg(feature = "stats")]
+                    {
+                        did_wait = true;
+                    }
                     core::hint::spin_loop();
                 }
             }
         }
+
+        #[cfg(all(feature = "stats", not(feature = "smp")))]
+        self.record_acquisitions();
 
         SpinLockGuard {
             _token: &PhantomData,
@@ -164,6 +203,8 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
         let is_unlocked = true;
 
         if is_unlocked {
+            #[cfg(feature = "stats")]
+            self.record_acquisitions();
             Some(SpinLockGuard {
                 _token: &PhantomData,
                 guard_state,
@@ -245,6 +286,19 @@ impl<G: BaseGuard, T: ?Sized> DerefMut for SpinLockGuard<'_, G, T> {
 impl<G: BaseGuard, T: ?Sized + fmt::Debug> fmt::Debug for SpinLockGuard<'_, G, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
+    }
+}
+
+#[cfg(feature = "stats")]
+impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
+    #[inline(always)]
+    fn record_acquisitions(&self) {
+        self.stats.record_acquisitions(1);
+    }
+
+    #[inline(always)]
+    fn record_contentions(&self) {
+        self.stats.record_contentions(1);
     }
 }
 

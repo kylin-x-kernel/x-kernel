@@ -4,26 +4,12 @@
 
 //! A blocking mutex implementation.
 
-#[cfg(feature = "stats")]
-use core::sync::atomic::AtomicU64 as StatsAtomicU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use event_listener::{Event, listener};
 use ktask::{current, future::block_on};
 
 use crate::util::{Spin, SpinConfig};
-
-/// Statistics for mutex operations (available with `stats` feature).
-#[cfg(feature = "stats")]
-#[derive(Debug, Default)]
-pub struct MutexStats {
-    /// Total number of lock acquisitions
-    pub total_locks: StatsAtomicU64,
-    /// Total number of spin iterations
-    pub total_spins: StatsAtomicU64,
-    /// Total number of times the task blocked
-    pub total_blocks: StatsAtomicU64,
-}
 
 /// A [`lock_api::RawMutex`] implementation.
 ///
@@ -35,7 +21,7 @@ pub struct RawMutex {
     owner_id: AtomicU64,
     config: SpinConfig,
     #[cfg(feature = "stats")]
-    stats: MutexStats,
+    stats: &'static klockstat::LockClassStats,
 }
 
 impl RawMutex {
@@ -56,39 +42,37 @@ impl RawMutex {
             owner_id: AtomicU64::new(0),
             config,
             #[cfg(feature = "stats")]
-            stats: MutexStats {
-                total_locks: StatsAtomicU64::new(0),
-                total_spins: StatsAtomicU64::new(0),
-                total_blocks: StatsAtomicU64::new(0),
-            },
+            stats: &klockstat::NOOP_CLASS,
         }
-    }
-
-    /// Gets the mutex statistics (only available with `stats` feature).
-    ///
-    /// Returns `(total_locks, total_spins, total_blocks)`.
-    #[cfg(feature = "stats")]
-    pub fn stats(&self) -> (u64, u64, u64) {
-        (
-            self.stats.total_locks.load(Ordering::Relaxed),
-            self.stats.total_spins.load(Ordering::Relaxed),
-            self.stats.total_blocks.load(Ordering::Relaxed),
-        )
-    }
-
-    /// Resets all statistics counters (only available with `stats` feature).
-    ///
-    /// Note: This method is not synchronized. If called while the mutex is being
-    /// actively used, the reset may produce inconsistent results as the individual
-    /// counters are reset independently.
-    #[cfg(feature = "stats")]
-    pub fn reset_stats(&self) {
-        self.stats.total_locks.store(0, Ordering::Relaxed);
-        self.stats.total_spins.store(0, Ordering::Relaxed);
-        self.stats.total_blocks.store(0, Ordering::Relaxed);
     }
 }
 
+#[cfg(feature = "stats")]
+impl RawMutex {
+    /// Creates a [`RawMutex`] bound to `stats`.
+    #[inline(always)]
+    pub const fn new_with_stats(stats: &'static klockstat::LockClassStats) -> Self {
+        Self {
+            event: Event::new(),
+            owner_id: AtomicU64::new(0),
+            config: SpinConfig {
+                max_spins: 10,
+                spin_before_yield: 3,
+            },
+            stats,
+        }
+    }
+
+    #[inline(always)]
+    fn record_acquisitions(&self) {
+        self.stats.record_acquisitions(1);
+    }
+
+    #[inline(always)]
+    fn record_blocking(&self) {
+        self.stats.record_contentions(1);
+    }
+}
 impl Default for RawMutex {
     fn default() -> Self {
         Self::new()
@@ -110,13 +94,11 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     fn lock(&self) {
-        #[cfg(feature = "stats")]
-        self.stats.total_locks.fetch_add(1, Ordering::Relaxed);
         let current_id = current().id().as_u64();
         let mut spin = Spin::new(self.config);
         let mut owner_id = self.owner_id.load(Ordering::Relaxed);
         #[cfg(feature = "stats")]
-        let mut spin_count = 0u64;
+        let mut did_block = false;
 
         loop {
             assert_ne!(
@@ -135,11 +117,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
                 ) {
                     Ok(_) => {
                         #[cfg(feature = "stats")]
-                        {
-                            self.stats
-                                .total_spins
-                                .fetch_add(spin_count, Ordering::Relaxed);
-                        }
+                        self.record_acquisitions();
 
                         #[cfg(feature = "watchdog")]
                         {
@@ -154,20 +132,8 @@ unsafe impl lock_api::RawMutex for RawMutex {
             }
 
             if spin.spin() {
-                #[cfg(feature = "stats")]
-                {
-                    spin_count += 1;
-                }
                 owner_id = self.owner_id.load(Ordering::Relaxed);
                 continue;
-            }
-
-            #[cfg(feature = "stats")]
-            {
-                self.stats
-                    .total_spins
-                    .fetch_add(spin_count, Ordering::Relaxed);
-                self.stats.total_blocks.fetch_add(1, Ordering::Relaxed);
             }
 
             listener!(self.event => listener);
@@ -176,6 +142,13 @@ unsafe impl lock_api::RawMutex for RawMutex {
             if owner_id == 0 {
                 continue;
             }
+
+            #[cfg(feature = "stats")]
+            if !did_block {
+                self.record_blocking();
+                did_block = true;
+            }
+
             #[cfg(feature = "watchdog")]
             current()
                 .inner()
@@ -195,6 +168,8 @@ unsafe impl lock_api::RawMutex for RawMutex {
             .compare_exchange(0, current_id, Ordering::Acquire, Ordering::Relaxed)
             .is_ok();
         if acquired {
+            #[cfg(feature = "stats")]
+            self.record_acquisitions();
             #[cfg(feature = "watchdog")]
             current().inner().push_held_lock(self as *const _ as usize);
         }
@@ -224,8 +199,65 @@ unsafe impl lock_api::RawMutex for RawMutex {
     }
 }
 
-/// An alias of [`lock_api::Mutex`].
-pub type Mutex<T> = lock_api::Mutex<RawMutex, T>;
+/// A kernel mutex built on [`lock_api::Mutex`].
+pub struct Mutex<T>(lock_api::Mutex<RawMutex, T>);
+
+impl<T> core::ops::Deref for Mutex<T> {
+    type Target = lock_api::Mutex<RawMutex, T>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Default> Default for Mutex<T> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for Mutex<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T> Mutex<T> {
+    /// Creates a new [`Mutex`].
+    #[inline(always)]
+    #[cfg(not(feature = "stats"))]
+    pub const fn new(val: T) -> Self {
+        Self(lock_api::Mutex::const_new(RawMutex::new(), val))
+    }
+
+    /// Creates a new [`Mutex`] bound to this init site's lock class.
+    #[inline(always)]
+    #[cfg(feature = "stats")]
+    #[track_caller]
+    pub fn new(val: T) -> Self {
+        let stats = klockstat::class_for_init_site(core::panic::Location::caller(), "Mutex");
+        Self::new_with_stats(val, stats)
+    }
+
+    /// Creates a [`Mutex`] bound to `stats`.
+    #[inline(always)]
+    #[cfg(feature = "stats")]
+    pub const fn new_with_stats(val: T, stats: &'static klockstat::LockClassStats) -> Self {
+        Self(lock_api::Mutex::const_new(
+            RawMutex::new_with_stats(stats),
+            val,
+        ))
+    }
+
+    /// Creates a [`Mutex`] from a custom [`RawMutex`] and initial value.
+    #[inline(always)]
+    pub const fn const_new(raw: RawMutex, val: T) -> Self {
+        Self(lock_api::Mutex::const_new(raw, val))
+    }
+}
+
 /// An alias of [`lock_api::MutexGuard`].
 pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
@@ -235,7 +267,7 @@ mod tests {
 
     use ktask as thread;
 
-    use crate::Mutex;
+    use crate::{Mutex, static_lock};
 
     static INIT: Once = Once::new();
 
@@ -252,7 +284,9 @@ mod tests {
 
         const NUM_TASKS: u32 = 10;
         const NUM_ITERS: u32 = 10_000;
-        static M: Mutex<u32> = Mutex::new(0);
+        static_lock! {
+            static M: Mutex<u32> = Mutex::new(0);
+        }
 
         fn inc(delta: u32) {
             for _ in 0..NUM_ITERS {

@@ -12,7 +12,7 @@ use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_
 use kerrno::{KError, KResult};
 use kfs::{File, OpenOptions};
 use khal::paging::{MappingFlags, PageSize};
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use kvfs::{Location, LookupFlags, LookupIntent, lookup_location};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::{MmSpace, VmRuntimeRef};
@@ -415,7 +415,9 @@ impl ElfLoader {
     }
 }
 
-static ELF_LOADER: Mutex<ElfLoader> = Mutex::new(ElfLoader::new());
+static_lock! {
+    static ELF_LOADER: Mutex<ElfLoader> = Mutex::new(ElfLoader::new());
+}
 
 /// Clear the ELF cache.
 ///

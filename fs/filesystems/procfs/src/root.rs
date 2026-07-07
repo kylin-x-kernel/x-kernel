@@ -4,6 +4,8 @@
 
 use alloc::sync::Arc;
 
+#[cfg(feature = "lock_stat")]
+use kvfs_simple::SimpleFile;
 use kvfs_simple::{DirMaker, DirMapping, SimpleDir, SimpleDirOps, SimpleFs};
 
 use crate::{basic_nodes, device_nodes, irq_nodes, mem_nodes, task_nodes, trace_nodes};
@@ -17,6 +19,11 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     mem_nodes::root::add_root_entries(&mut root, fs.clone());
     task_nodes::mounts::add_root_entries(&mut root, fs.clone());
     trace_nodes::root::add_root_entries(&mut root, fs.clone());
+    #[cfg(feature = "lock_stat")]
+    root.add(
+        "lock_stat",
+        SimpleFile::new_regular(fs.clone(), || Ok(klockstat::dump_lock_stat())),
+    );
     #[cfg(feature = "sysrq")]
     crate::sysrq_nodes::root::add_root_entries(&mut root, fs.clone());
 

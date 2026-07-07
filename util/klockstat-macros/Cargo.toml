@@ -1,0 +1,18 @@
+[package]
+name = "klockstat-macros"
+description = "Procedural macros for `klockstat` static lock registration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+proc-macro-crate = "3"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+
+[lib]
+proc-macro = true

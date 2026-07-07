@@ -11,13 +11,17 @@ use core::{
 };
 
 use klazy::lazy_static;
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use tee_raw_sys::*;
 
 use super::{TeeResult, tee_ree_fs::TeeFileOperations, uuid::Uuid};
 
-static POBJS_MUTEX: Mutex<()> = Mutex::new(());
-static POBJS_USAGE_MUTEX: Mutex<()> = Mutex::new(());
+static_lock! {
+    static POBJS_MUTEX: Mutex<()> = Mutex::new(());
+}
+static_lock! {
+    static POBJS_USAGE_MUTEX: Mutex<()> = Mutex::new(());
+}
 // static POBJS: LazyInit<Arc<Mutex<VecDeque<TeePobj>>>> = LazyInit::new();
 lazy_static! {
     static ref POBJS: TeePobjs = TeePobjs::new();

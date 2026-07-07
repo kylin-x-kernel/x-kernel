@@ -101,8 +101,11 @@ struct TeeTaTimeOffs {
 }
 
 // Global time offset storage
-use ksync::Mutex;
-static TEE_TIME_OFFS: Mutex<Option<vec::Vec<TeeTaTimeOffs>>> = Mutex::new(None);
+use ksync::{Mutex, static_lock};
+
+static_lock! {
+    static TEE_TIME_OFFS: Mutex<Option<vec::Vec<TeeTaTimeOffs>>> = Mutex::new(None);
+}
 
 // Helper function: compare UUIDs
 fn uuid_equal(uuid1: &TEE_UUID, uuid2: &TEE_UUID) -> bool {

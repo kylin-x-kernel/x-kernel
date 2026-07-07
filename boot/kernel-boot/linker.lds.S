@@ -139,6 +139,8 @@ SECTIONS {
     linkm2_PRIMARY_KERNEL_ENTRY : { KEEP(*(linkm2_PRIMARY_KERNEL_ENTRY)) }
     linkme_SECOND_KERNEL_ENTRY : { KEEP(*(linkme_SECOND_KERNEL_ENTRY)) }
     linkm2_SECOND_KERNEL_ENTRY : { KEEP(*(linkm2_SECOND_KERNEL_ENTRY)) }
+    linkme_LOCK_CLASSES : { KEEP(*(linkme_LOCK_CLASSES)) }
+    linkm2_LOCK_CLASSES : { KEEP(*(linkm2_LOCK_CLASSES)) }
     scope_local : { KEEP(*(scope_local)) }
 
     /* Unittest section */

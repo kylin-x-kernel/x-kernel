@@ -12,7 +12,7 @@ use core::{
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, Pollable};
-use ksync::{Mutex, RwLock};
+use ksync::{Mutex, RwLock, static_lock};
 use smoltcp::{
     iface::SocketHandle,
     phy::PacketMeta,
@@ -418,7 +418,9 @@ impl Drop for UdpSocket {
 fn get_ephemeral_port() -> KResult<u16> {
     const PORT_START: u16 = 0xc000;
     const PORT_END: u16 = 0xffff;
-    static CURR: Mutex<u16> = Mutex::new(PORT_START);
+    static_lock! {
+        static CURR: Mutex<u16> = Mutex::new(PORT_START);
+    }
     let mut curr = CURR.lock();
 
     let port = *curr;

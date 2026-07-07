@@ -12,6 +12,7 @@ repository.workspace = true
 default = []
 sysrq = ["ktask/snapshot"]
 tee = ["kthread/tee", "dep:tee_task_iface"]
+lock_stat = ["dep:klockstat", "klockstat/stats"]
 
 [dependencies]
 kbuild_config.workspace = true
@@ -21,6 +22,7 @@ kalloc.workspace = true
 kcpu_id_map.workspace = true
 kdevice.workspace = true
 khal.workspace = true
+klockstat = { workspace = true, optional = true }
 kvfs-simple.workspace = true
 kprocess.workspace = true
 kpoll.workspace = true

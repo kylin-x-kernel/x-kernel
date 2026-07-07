@@ -57,6 +57,11 @@ For an initial pass, focus on rough localization:
 - determine whether the slowdown is global or workload-specific;
 - avoid speculative micro-optimizations before the hotspot class is known.
 
+When locking is suspected and `KFEAT_LOCK_STAT` is available, continue with
+`docs/ai/skills/performance-analysis/SKILL.md` and its
+`references/lock-stat.md` sub-item for `/proc/lock_stat` workloads,
+snapshot comparison, and contention reporting.
+
 ## Stop Condition
 
 Stop this first pass once you can report:

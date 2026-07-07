@@ -15,7 +15,7 @@ use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use klazy::lazy_static;
 use kpoll::{IoEvents, PollSet, Pollable};
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp as smol,
@@ -687,7 +687,9 @@ fn listen_addrs_conflict(a: Option<IpAddress>, b: Option<IpAddress>) -> bool {
 fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
     const PORT_START: u16 = 0xc000;
     const PORT_END: u16 = 0xffff;
-    static CURR: Mutex<u16> = Mutex::new(PORT_START);
+    static_lock! {
+        static CURR: Mutex<u16> = Mutex::new(PORT_START);
+    }
 
     let mut curr = CURR.lock();
     let mut tries = 0;

@@ -17,6 +17,7 @@ use core::{
 
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
+use klazy::lazy_static;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 use smoltcp::wire::{EthernetAddress, EthernetFrame, EthernetProtocol};
@@ -47,7 +48,9 @@ const PACKET_MR_PROMISC: u16 = 1;
 const PACKET_RX_QUEUE_LIMIT_BYTES: usize = 64 * 1024;
 const PACKET_RX_QUEUE_LIMIT_FRAMES: usize = 1024;
 
-static PACKET_HANDLERS: PacketHandlerRegistry = PacketHandlerRegistry::new();
+lazy_static! {
+    static ref PACKET_HANDLERS: PacketHandlerRegistry = PacketHandlerRegistry::new();
+}
 
 struct PacketHandlerRegistry {
     handlers: Mutex<Vec<Weak<PacketSocketInner>>>,
@@ -55,7 +58,7 @@ struct PacketHandlerRegistry {
 }
 
 impl PacketHandlerRegistry {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             handlers: Mutex::new(Vec::new()),
             active_count: AtomicUsize::new(0),

@@ -21,15 +21,20 @@ pub struct RawRwLock {
     state: AtomicU32, // High bit: write lock, low 31 bits: reader count
     writer_event: Event,
     reader_event: Event,
+    #[cfg(feature = "stats")]
+    stats: &'static klockstat::LockClassStats,
 }
 
 impl RawRwLock {
     /// Creates a new [`RawRwLock`].
+    #[inline(always)]
     pub const fn new() -> Self {
         Self {
             state: AtomicU32::new(0),
             writer_event: Event::new(),
             reader_event: Event::new(),
+            #[cfg(feature = "stats")]
+            stats: &klockstat::NOOP_CLASS,
         }
     }
 }
@@ -50,6 +55,9 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
     #[inline]
     fn lock_shared(&self) {
+        #[cfg(feature = "stats")]
+        let mut did_block = false;
+
         loop {
             let state = self.state.load(Ordering::Relaxed);
 
@@ -57,6 +65,11 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
             if state & WRITE_LOCKED != 0 {
                 listener!(self.reader_event => listener);
                 if self.state.load(Ordering::Acquire) & WRITE_LOCKED != 0 {
+                    #[cfg(feature = "stats")]
+                    if !did_block {
+                        self.record_read_contentions();
+                        did_block = true;
+                    }
                     block_on(listener);
                 }
                 continue;
@@ -74,7 +87,11 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return,
+                Ok(_) => {
+                    #[cfg(feature = "stats")]
+                    self.record_read_acquisitions();
+                    return;
+                }
                 Err(_) => continue,
             }
         }
@@ -90,9 +107,15 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
         // Using strong compare_exchange here since this is a single-shot attempt
         // without retry loop, unlike lock_shared which uses _weak in a loop
-        self.state
+        let acquired = self
+            .state
             .compare_exchange(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+            .is_ok();
+        if acquired {
+            #[cfg(feature = "stats")]
+            self.record_read_acquisitions();
+        }
+        acquired
     }
 
     #[inline]
@@ -110,16 +133,28 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
     #[inline]
     fn lock_exclusive(&self) {
+        #[cfg(feature = "stats")]
+        let mut did_block = false;
+
         loop {
             // Try to acquire write lock
             match self
                 .state
                 .compare_exchange(0, WRITE_LOCKED, Ordering::Acquire, Ordering::Relaxed)
             {
-                Ok(_) => return,
+                Ok(_) => {
+                    #[cfg(feature = "stats")]
+                    self.record_write_acquisitions();
+                    return;
+                }
                 Err(_) => {
                     listener!(self.writer_event => listener);
                     if self.state.load(Ordering::Acquire) != 0 {
+                        #[cfg(feature = "stats")]
+                        if !did_block {
+                            self.record_write_contentions();
+                            did_block = true;
+                        }
                         block_on(listener);
                     }
                 }
@@ -129,9 +164,15 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
     #[inline]
     fn try_lock_exclusive(&self) -> bool {
-        self.state
+        let acquired = self
+            .state
             .compare_exchange(0, WRITE_LOCKED, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+            .is_ok();
+        if acquired {
+            #[cfg(feature = "stats")]
+            self.record_write_acquisitions();
+        }
+        acquired
     }
 
     #[inline]
@@ -147,8 +188,99 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
     }
 }
 
-/// A reader-writer lock.
-pub type RwLock<T> = lock_api::RwLock<RawRwLock, T>;
+#[cfg(feature = "stats")]
+impl RawRwLock {
+    /// Creates a new [`RawRwLock`] bound to `stats`.
+    #[inline(always)]
+    pub const fn new_with_stats(stats: &'static klockstat::LockClassStats) -> Self {
+        Self {
+            state: AtomicU32::new(0),
+            writer_event: Event::new(),
+            reader_event: Event::new(),
+            stats,
+        }
+    }
+
+    #[inline(always)]
+    fn record_read_acquisitions(&self) {
+        self.stats.record_acquisitions(1);
+    }
+
+    #[inline(always)]
+    fn record_write_acquisitions(&self) {
+        self.stats.record_acquisitions(1);
+    }
+
+    #[inline(always)]
+    fn record_read_contentions(&self) {
+        self.stats.record_contentions(1);
+    }
+
+    #[inline(always)]
+    fn record_write_contentions(&self) {
+        self.stats.record_contentions(1);
+    }
+}
+
+/// A reader-writer lock built on [`lock_api::RwLock`].
+pub struct RwLock<T>(lock_api::RwLock<RawRwLock, T>);
+
+impl<T> core::ops::Deref for RwLock<T> {
+    type Target = lock_api::RwLock<RawRwLock, T>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Default> Default for RwLock<T> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for RwLock<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T> RwLock<T> {
+    /// Creates a new [`RwLock`].
+    #[inline(always)]
+    #[cfg(not(feature = "stats"))]
+    pub const fn new(val: T) -> Self {
+        Self(lock_api::RwLock::const_new(RawRwLock::new(), val))
+    }
+
+    /// Creates a new [`RwLock`] bound to this init site's lock class.
+    #[inline(always)]
+    #[cfg(feature = "stats")]
+    #[track_caller]
+    pub fn new(val: T) -> Self {
+        let stats = klockstat::class_for_init_site(core::panic::Location::caller(), "RwLock");
+        Self::new_with_stats(val, stats)
+    }
+
+    /// Creates an [`RwLock`] bound to `stats`.
+    #[inline(always)]
+    #[cfg(feature = "stats")]
+    pub const fn new_with_stats(val: T, stats: &'static klockstat::LockClassStats) -> Self {
+        Self(lock_api::RwLock::const_new(
+            RawRwLock::new_with_stats(stats),
+            val,
+        ))
+    }
+
+    /// Creates an [`RwLock`] from a custom [`RawRwLock`] and initial value.
+    #[inline(always)]
+    pub const fn const_new(raw: RawRwLock, val: T) -> Self {
+        Self(lock_api::RwLock::const_new(raw, val))
+    }
+}
+
 /// A read guard for a [`RwLock`].
 pub type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, RawRwLock, T>;
 /// A write guard for a [`RwLock`].

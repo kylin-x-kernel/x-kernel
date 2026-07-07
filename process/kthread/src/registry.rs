@@ -9,16 +9,24 @@ use alloc::{
 
 use kerrno::{KError, KResult};
 use kprocess::{Pid, ProcessGroup, Session};
-use ksync::RwLock;
+use ksync::{RwLock, static_lock};
 use ktask::{KtaskRef, WeakKtaskRef, current};
 use weak_map::WeakMap;
 
 use crate::{AsThread, ProcessState, current_process_state};
 
-static TASK_TABLE: RwLock<WeakMap<Pid, WeakKtaskRef>> = RwLock::new(WeakMap::new());
-static PROCESS_TABLE: RwLock<WeakMap<Pid, Weak<ProcessState>>> = RwLock::new(WeakMap::new());
-static PROCESS_GROUP_TABLE: RwLock<WeakMap<Pid, Weak<ProcessGroup>>> = RwLock::new(WeakMap::new());
-static SESSION_TABLE: RwLock<WeakMap<Pid, Weak<Session>>> = RwLock::new(WeakMap::new());
+static_lock! {
+    static TASK_TABLE: RwLock<WeakMap<Pid, WeakKtaskRef>> = RwLock::new(WeakMap::new());
+}
+static_lock! {
+    static PROCESS_TABLE: RwLock<WeakMap<Pid, Weak<ProcessState>>> = RwLock::new(WeakMap::new());
+}
+static_lock! {
+    static PROCESS_GROUP_TABLE: RwLock<WeakMap<Pid, Weak<ProcessGroup>>> = RwLock::new(WeakMap::new());
+}
+static_lock! {
+    static SESSION_TABLE: RwLock<WeakMap<Pid, Weak<Session>>> = RwLock::new(WeakMap::new());
+}
 
 /// Cleans up expired entries in the task tables.
 pub fn cleanup_task_tables() {

@@ -40,6 +40,9 @@ Current skills:
 - `problem-diagnosis/`:
   first-pass issue classification and localization workflow for build,
   boot, panic, hang, regression, and performance problems.
+- `performance-analysis/`:
+  performance investigation workflow: workloads, baselines, reporting;
+  `lock_stat` lock contention is one sub-reference under `references/`.
 - `linux-mm-design-knowledge/`:
   Linux MM semantic knowledge base used by X-Kernel memory design work,
   including mm struct, VMA, mmap, page faults, anonymous memory, file-backed

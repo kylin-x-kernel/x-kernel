@@ -91,6 +91,8 @@ mod lock;
 mod tests;
 
 pub use guard::{BaseGuard, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave};
+#[cfg(feature = "stats")]
+pub use klockstat::{LOCK_CLASSES, LockClassStats, linkme, static_lock};
 pub use lock::{SpinLock, SpinLockGuard};
 
 /// Raw spinlock with no guards.
