@@ -47,17 +47,17 @@ use page_table::TlbFlushIf;
 static ALL_CPUS_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Monotonic sequence allocator per initiator CPU.
-static REQUEST_SLOTS: [ShootdownRequestSlot; kbuild_config::CPU_NUM] =
-    [const { ShootdownRequestSlot::new() }; kbuild_config::CPU_NUM];
+static REQUEST_SLOTS: [ShootdownRequestSlot; kbuild_config::NR_CPUS] =
+    [const { ShootdownRequestSlot::new() }; kbuild_config::NR_CPUS];
 
 /// Per-target fast path gate for `handle_shootdown()`.
 ///
 /// Each initiator increments the epoch for every target CPU before sending a
 /// TLB IPI. The target CPU snapshots its local epoch at IPI entry and skips the
-/// O(CPU_NUM) slot scan when no epoch change has occurred since the last TLB
+/// O(NR_CPUS) slot scan when no epoch change has occurred since the last TLB
 /// scan on that CPU.
-static PENDING_EPOCH_BY_CPU: [AtomicU64; kbuild_config::CPU_NUM] =
-    [const { AtomicU64::new(0) }; kbuild_config::CPU_NUM];
+static PENDING_EPOCH_BY_CPU: [AtomicU64; kbuild_config::NR_CPUS] =
+    [const { AtomicU64::new(0) }; kbuild_config::NR_CPUS];
 
 #[percpu::def_percpu]
 static LAST_HANDLED_PENDING_EPOCH: u64 = 0;
@@ -121,8 +121,8 @@ struct ShootdownRequestSlot {
     is_flush_all: AtomicBool,
     is_active: AtomicBool,
     needs_retry_full_flush: AtomicBool,
-    targeted_cpus: [AtomicBool; kbuild_config::CPU_NUM],
-    acked_seq_by_cpu: [AtomicU64; kbuild_config::CPU_NUM],
+    targeted_cpus: [AtomicBool; kbuild_config::NR_CPUS],
+    acked_seq_by_cpu: [AtomicU64; kbuild_config::NR_CPUS],
 }
 
 impl ShootdownRequestSlot {
@@ -134,9 +134,9 @@ impl ShootdownRequestSlot {
             is_flush_all: AtomicBool::new(false),
             is_active: AtomicBool::new(false),
             needs_retry_full_flush: AtomicBool::new(false),
-            targeted_cpus: [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM],
+            targeted_cpus: [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS],
             acked_seq_by_cpu: [const { AtomicU64::new(RequestSeq::INITIAL.get()) };
-                kbuild_config::CPU_NUM],
+                kbuild_config::NR_CPUS],
         }
     }
 
@@ -232,11 +232,11 @@ impl ShootdownRequestSlot {
         self.acked_seq_by_cpu[cpu].store(request_seq.get(), Ordering::Release);
     }
 
-    fn targeted_snapshot(&self) -> [bool; kbuild_config::CPU_NUM] {
+    fn targeted_snapshot(&self) -> [bool; kbuild_config::NR_CPUS] {
         core::array::from_fn(|cpu| self.targeted_cpus[cpu].load(Ordering::Relaxed))
     }
 
-    fn acked_snapshot(&self) -> [u64; kbuild_config::CPU_NUM] {
+    fn acked_snapshot(&self) -> [u64; kbuild_config::NR_CPUS] {
         core::array::from_fn(|cpu| self.acked_seq_by_cpu[cpu].load(Ordering::Relaxed))
     }
 }
@@ -294,11 +294,11 @@ impl<'a> ActiveShootdownSlot<'a> {
         self.slot.is_acked_by(cpu, request_seq)
     }
 
-    fn targeted_snapshot(&self) -> [bool; kbuild_config::CPU_NUM] {
+    fn targeted_snapshot(&self) -> [bool; kbuild_config::NR_CPUS] {
         self.slot.targeted_snapshot()
     }
 
-    fn acked_snapshot(&self) -> [u64; kbuild_config::CPU_NUM] {
+    fn acked_snapshot(&self) -> [u64; kbuild_config::NR_CPUS] {
         self.slot.acked_snapshot()
     }
 
@@ -385,8 +385,8 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
         };
         let my_cpu = this_cpu_id();
 
-        let targets: [Option<LogicalCpuId>; kbuild_config::CPU_NUM] = {
-            let mut buf = [None; kbuild_config::CPU_NUM];
+        let targets: [Option<LogicalCpuId>; kbuild_config::NR_CPUS] = {
+            let mut buf = [None; kbuild_config::NR_CPUS];
             let mut idx = 0;
             for cpu in target_mask.iter_logical() {
                 if cpu != my_cpu {
@@ -462,15 +462,18 @@ pub fn handle_shootdown() {
         return;
     }
 
-    for request_slot in &REQUEST_SLOTS {
+    // Only scan slots belonging to present CPUs, skipping the tail of the
+    // `NR_CPUS`-sized array that corresponds to non-existent CPUs.
+    for_each_present_logical_cpu(|_, initiator, _| {
+        let request_slot = &REQUEST_SLOTS[initiator.as_usize()];
         let Some(request) = request_slot.load_published_request() else {
-            continue;
+            return;
         };
         if request_slot.is_acked_by(cpu, request.seq()) {
-            continue;
+            return;
         }
         if !request.targets_cpu(cpu) {
-            continue;
+            return;
         }
 
         if let Some(vaddr) = request.flush_vaddr() {
@@ -480,7 +483,7 @@ pub fn handle_shootdown() {
         }
 
         request_slot.ack(cpu, request.seq());
-    }
+    });
 
     // Store the entry snapshot, not a post-scan re-read. If a new request
     // arrives during the scan, it will raise the epoch again and force another
@@ -616,7 +619,7 @@ mod tests {
     #[def_test(serial)]
     fn test_cross_cpu_shootdown_via_run_on_cpu() {
         reset_request_state();
-        let cpu_num = kbuild_config::CPU_NUM;
+        let cpu_num = kcpu_id_map::nr_cpus();
         if cpu_num >= 2 {
             let my_cpu = this_cpu_id();
             let mut remote_cpu = None;
@@ -669,7 +672,7 @@ mod tests {
     /// unit-test runs.
     #[def_test(serial)]
     fn test_dual_initiator_requests_are_isolated() {
-        let cpu_num = kbuild_config::CPU_NUM;
+        let cpu_num = kcpu_id_map::nr_cpus();
         if cpu_num < 2 {
             return unittest::TestResult::Ok;
         }

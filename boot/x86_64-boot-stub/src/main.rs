@@ -117,7 +117,7 @@ unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, source_image_paddr: us
             protocol_info_paddr,
             loaded.load_paddr as usize,
             0.into(),
-            kbuild_config::CPU_NUM,
+            kbuild_config::NR_CPUS,
         )
         .with_boot_runtime(boot_runtime_start, boot_runtime_end - boot_runtime_start);
         if rsdp_paddr != 0 {

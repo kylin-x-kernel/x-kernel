@@ -354,7 +354,7 @@ pub unsafe extern "C" fn __primary_switched(
                 serial::BOOT_UART_BOOT_VADDR,
             )
             .with_cpu_id(logical_cpu_id)
-            .with_cpu_count(kbuild_config::CPU_NUM);
+            .with_cpu_count(kcpu_id_map::nr_cpus());
     }
     crate::bootln!(
         "entered primary switched cpu={} mpidr={:#x} dtb={:#x} kimage_voffset={:#x}",

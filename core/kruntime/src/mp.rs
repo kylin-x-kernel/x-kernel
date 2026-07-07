@@ -8,7 +8,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use kbuild_config::{CPU_NUM, TASK_STACK_SIZE};
+use kbuild_config::{NR_CPUS, TASK_STACK_SIZE};
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
 use kernel_boot::{SECOND_KERNEL_ENTRY, register_boot_init};
 use kerrno::KResult;
@@ -20,19 +20,19 @@ static SECONDARY_BOOT_STACKS: SecondaryBootStacks = SecondaryBootStacks::new();
 static ENTERED_CPUS: AtomicUsize = AtomicUsize::new(1);
 
 struct SecondaryBootStacks {
-    stacks: UnsafeCell<[[u8; TASK_STACK_SIZE]; CPU_NUM - 1]>,
+    stacks: UnsafeCell<[[u8; TASK_STACK_SIZE]; NR_CPUS - 1]>,
 }
 
 impl SecondaryBootStacks {
     const fn new() -> Self {
         Self {
-            stacks: UnsafeCell::new([[0; TASK_STACK_SIZE]; CPU_NUM - 1]),
+            stacks: UnsafeCell::new([[0; TASK_STACK_SIZE]; NR_CPUS - 1]),
         }
     }
 
     fn stack_top(&self, secondary_cpu_index: usize) -> VirtAddr {
         // SAFETY: `secondary_cpu_index` is allocated monotonically by the
-        // serialized AP bring-up loop and is bounded by `CPU_NUM - 1`. The
+        // serialized AP bring-up loop and is bounded by `NR_CPUS - 1`. The
         // boot-stack backing array lives for the entire kernel lifetime, so
         // advancing to the selected slot and computing its one-past-end
         // address stays within the same allocation.
@@ -60,7 +60,7 @@ pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
         if start_result.is_err() {
             return;
         }
-        if logical_cpu_id == primary_cpu_id || secondary_logical_cpu_id >= CPU_NUM - 1 {
+        if logical_cpu_id == primary_cpu_id || secondary_logical_cpu_id >= NR_CPUS - 1 {
             return;
         }
 
@@ -149,7 +149,7 @@ mod tests_tlb_shootdown {
     /// for remote completion.
     #[def_test(serial)]
     fn test_flush_all_targeted_shootdown() {
-        let cpu_num = kbuild_config::CPU_NUM;
+        let cpu_num = kcpu_id_map::nr_cpus();
         if cpu_num >= 2 {
             enable_tlb_shootdown_for_test();
             // Call flush_all — if it returns, the remote CPU received the IPI,
@@ -161,7 +161,7 @@ mod tests_tlb_shootdown {
     /// Test D: Proves context switch updates on_cpu_mask.
     #[def_test(serial)]
     fn test_context_switch_updates_on_cpu_mask() {
-        let cpu_num = kbuild_config::CPU_NUM;
+        let cpu_num = kcpu_id_map::nr_cpus();
         if cpu_num >= 2 {
             let remote_cpu = if this_cpu_id() == LogicalCpuId::new(0) {
                 1
@@ -201,7 +201,7 @@ mod tests_tlb_shootdown {
     /// Flush completion does not rebuild residency state.
     #[def_test(serial)]
     fn test_finish_triggers_cross_cpu_flush() {
-        let cpu_num = kbuild_config::CPU_NUM;
+        let cpu_num = kcpu_id_map::nr_cpus();
         if cpu_num >= 2 {
             enable_tlb_shootdown_for_test();
             // Create a new page table (allocates a root page via kernel allocator).
@@ -232,7 +232,7 @@ mod tests_tlb_shootdown {
     /// content, proving the stale V→P1 TLB entry was invalidated.
     #[def_test(serial)]
     fn test_shootdown_clears_stale_tlb() {
-        let cpu_num = kbuild_config::CPU_NUM;
+        let cpu_num = kcpu_id_map::nr_cpus();
         if cpu_num >= 2 {
             enable_tlb_shootdown_for_test();
             let my_cpu = this_cpu_id();
@@ -353,7 +353,7 @@ mod tests_tlb_shootdown {
     ///    not depend on the current task's local fallback mask.
     #[def_test(serial)]
     fn test_kernel_pt_miss_remote_without_mask() {
-        let cpu_num = kbuild_config::CPU_NUM;
+        let cpu_num = kcpu_id_map::nr_cpus();
         if cpu_num >= 2 {
             enable_tlb_shootdown_for_test();
             let my_cpu = this_cpu_id();

@@ -36,3 +36,17 @@ pub fn for_each_present_logical_cpu(mut f: impl FnMut(usize, LogicalCpuId, usize
         f(present_index, logical_cpu_id, present_count);
     });
 }
+
+/// Returns the number of present CPUs discovered at runtime from the device
+/// tree (AArch64/RISC-V/LoongArch) or ACPI MADT (x86_64), clamped to the
+/// compile-time `NR_CPUS` cap.
+///
+/// This is the runtime counterpart to the compile-time `NR_CPUS` maximum: it
+/// reflects how many CPUs the platform actually described, rather than the
+/// static array bound. Before the CPU id map is initialized it returns 1, since
+/// the boot CPU is always present.
+pub fn nr_cpus() -> usize {
+    imp::ensure_runtime_cpu_id_map();
+
+    cpu_id::present_count().max(1)
+}

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kbuild_config::CPU_NUM;
+use kbuild_config::NR_CPUS;
 use klazy::Once;
 
 const INVALID_RAW_CPU_ID: usize = usize::MAX;
@@ -46,6 +46,12 @@ pub(crate) fn raw_to_logical(raw_cpu_id: RawCpuId) -> Option<LogicalCpuId> {
 
 pub(crate) fn for_each_present_logical_cpu(mut f: impl FnMut(usize, LogicalCpuId, usize)) {
     current_cpu_id_map().for_each_present_logical_cpu(&mut f);
+}
+
+/// Returns the number of present logical CPUs discovered from the device tree
+/// or ACPI MADT. Returns 0 before the CPU id map has been populated.
+pub(crate) fn present_count() -> usize {
+    current_cpu_id_map().present_count()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -127,7 +133,7 @@ fn load_cpu_id_map(load: impl FnOnce(&mut CpuIdMap) -> bool) -> bool {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct CpuIdMap {
-    raw_cpu_ids_by_logical: [usize; CPU_NUM],
+    raw_cpu_ids_by_logical: [usize; NR_CPUS],
     present_count: usize,
     invalid_raw_cpu_id: usize,
 }
@@ -136,7 +142,7 @@ impl CpuIdMap {
     #[inline]
     pub(crate) const fn new(invalid_raw_cpu_id: usize) -> Self {
         Self {
-            raw_cpu_ids_by_logical: [invalid_raw_cpu_id; CPU_NUM],
+            raw_cpu_ids_by_logical: [invalid_raw_cpu_id; NR_CPUS],
             present_count: 0,
             invalid_raw_cpu_id,
         }
@@ -164,7 +170,7 @@ impl CpuIdMap {
 
     /// Loads logical-to-raw mappings from an iterator of raw CPU ids.
     ///
-    /// Returns `true` when the iterator contains more CPUs than `CPU_NUM` and
+    /// Returns `true` when the iterator contains more CPUs than `NR_CPUS` and
     /// the extra entries were truncated.
     pub(crate) fn load_from_raw_cpu_ids(
         &mut self,
@@ -172,7 +178,7 @@ impl CpuIdMap {
     ) -> bool {
         self.clear();
         for (logical_cpu_index, raw_cpu_id) in raw_cpu_ids.into_iter().enumerate() {
-            if logical_cpu_index >= CPU_NUM {
+            if logical_cpu_index >= NR_CPUS {
                 return true;
             }
 
@@ -184,7 +190,7 @@ impl CpuIdMap {
 
     /// Loads logical-to-raw mappings from enabled CPU nodes in a device tree.
     ///
-    /// Returns `true` when the device tree describes more CPUs than `CPU_NUM`
+    /// Returns `true` when the device tree describes more CPUs than `NR_CPUS`
     /// and the extra entries were truncated.
     #[cfg(any(
         target_arch = "aarch64",
@@ -204,7 +210,7 @@ impl CpuIdMap {
 
     /// Loads logical-to-raw mappings from enabled local APIC entries in MADT.
     ///
-    /// Returns `true` when MADT describes more CPUs than `CPU_NUM` and the
+    /// Returns `true` when MADT describes more CPUs than `NR_CPUS` and the
     /// extra entries were truncated.
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn load_from_madt(
@@ -225,7 +231,7 @@ impl CpuIdMap {
     #[inline]
     pub(crate) fn logical_to_raw(&self, logical_cpu_id: LogicalCpuId) -> Option<RawCpuId> {
         let logical_cpu_index = logical_cpu_id.as_usize();
-        if logical_cpu_index >= CPU_NUM {
+        if logical_cpu_index >= NR_CPUS {
             return None;
         }
 
@@ -237,7 +243,7 @@ impl CpuIdMap {
     #[inline]
     pub(crate) fn raw_to_logical(&self, raw_cpu_id: RawCpuId) -> Option<LogicalCpuId> {
         let mut logical_cpu_index = 0;
-        while logical_cpu_index < CPU_NUM {
+        while logical_cpu_index < NR_CPUS {
             let logical_cpu_id = LogicalCpuId::new(logical_cpu_index);
             if self.logical_to_raw(logical_cpu_id) == Some(raw_cpu_id) {
                 return Some(logical_cpu_id);
@@ -259,7 +265,7 @@ impl CpuIdMap {
         let present_count = self.present_count();
         let mut present_index = 0;
 
-        for logical_cpu_index in 0..CPU_NUM {
+        for logical_cpu_index in 0..NR_CPUS {
             let logical_cpu_id = LogicalCpuId::new(logical_cpu_index);
             if self.logical_to_raw(logical_cpu_id).is_none() {
                 continue;
@@ -272,7 +278,7 @@ impl CpuIdMap {
 }
 
 /// The kernel CPU mask type, parameterized by the configured maximum CPU count.
-pub type KCpuMask = cpumask::CpuMask<{ CPU_NUM }>;
+pub type KCpuMask = cpumask::CpuMask<{ NR_CPUS }>;
 
 /// Extension trait adding [`LogicalCpuId`]-typed operations to [`KCpuMask`].
 pub trait KCpuMaskExt {
@@ -308,7 +314,7 @@ impl KCpuMaskExt for KCpuMask {
 
 /// Iterator over set bits in a [`KCpuMask`], yielding [`LogicalCpuId`] values.
 pub struct LogicalCpuIdIter<'a> {
-    inner: cpumask::Iter<'a, { CPU_NUM }>,
+    inner: cpumask::Iter<'a, { NR_CPUS }>,
 }
 
 impl<'a> Iterator for LogicalCpuIdIter<'a> {

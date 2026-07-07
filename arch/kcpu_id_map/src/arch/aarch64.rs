@@ -13,11 +13,15 @@ pub const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
 
 fn load_raw_cpu_ids_from_fdt(fdt: &of::LinuxFdt<'_>) {
     let is_truncated = load_cpu_id_map_from_fdt(fdt, normalize_raw_id);
-    assert!(
-        !is_truncated,
-        "device tree cpu count exceeds configured CPU_NUM={}",
-        kbuild_config::CPU_NUM
-    );
+    if is_truncated {
+        // The device tree describes more CPUs than the kernel was compiled to
+        // support (NR_CPUS). Cap to NR_CPUS rather than panicking, so the same
+        // image can boot on a larger machine and simply ignore the extra CPUs.
+        log::warn!(
+            "device tree describes more CPUs than NR_CPUS={}; extra CPUs ignored",
+            kbuild_config::NR_CPUS
+        );
+    }
 }
 
 pub(crate) fn ensure_runtime_cpu_id_map() {

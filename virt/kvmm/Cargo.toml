@@ -16,7 +16,7 @@ log.workspace = true
 kaddr_layout.workspace = true
 ktask.workspace = true
 kalloc.workspace = true
-kbuild_config.workspace = true
+kcpu_id_map.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 percpu.workspace = true

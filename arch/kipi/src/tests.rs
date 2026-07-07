@@ -40,7 +40,7 @@ fn test_error_debug_format() {
 #[def_test]
 fn test_run_on_cpu_rejects_non_present_cpu() {
     let mut non_present_cpu = None;
-    for logical_cpu_id in 0..kbuild_config::CPU_NUM {
+    for logical_cpu_id in 0..kbuild_config::NR_CPUS {
         let logical_cpu_id = LogicalCpuId::new(logical_cpu_id);
         if raw_cpu_id(logical_cpu_id).is_none() {
             non_present_cpu = Some(logical_cpu_id);

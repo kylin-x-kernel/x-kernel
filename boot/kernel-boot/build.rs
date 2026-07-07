@@ -37,7 +37,7 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
     let layout = kaddr_layout::for_arch(arch);
     let ld_content = ld_content.replace("%KIMAGE_VADDR%", &format!("{:#x}", layout.kimage_vaddr));
 
-    let ld_content = ld_content.replace("%CPU_NUM%", &format!("{}", kbuild_config::CPU_NUM));
+    let ld_content = ld_content.replace("%NR_CPUS%", &format!("{}", kbuild_config::NR_CPUS));
     let ld_content = ld_content.replace(
         "%DWARF%",
         if kbuild_config::KFEAT_DWARF {

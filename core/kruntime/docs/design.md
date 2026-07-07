@@ -42,7 +42,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 │    khal / memspace / kalloc / klogger / backtrace             │
 │    ktask / kdriver·kfs·knet (feature) / SMP / IPI / IRQ        │
 │    init_setup::init_cb (.init_array)                          │
-│    等待 INITED_CPUS == CPU_NUM                                 │
+│    等待 INITED_CPUS == nr_cpus                                 │
 │    main()  ──────────────────────────────►  entry crate       │
 └───────────────────────────────────────────────────────────────┘
         │
@@ -99,12 +99,12 @@ BootInfo*
 ### 全局就绪屏障 `is_init_ok`
 
 ```rust
-INITED_CPUS.load(Acquire) == kbuild_config::CPU_NUM
+INITED_CPUS.load(Acquire) == kcpu_id_map::nr_cpus()
 ```
 
 - 主核在完成自身初始化后对 `INITED_CPUS` 执行 `fetch_add(1, Release)`。
 - 每个从核在 `rust_main_secondary` 末尾同样 `fetch_add(1, Release)`。
-- 主核在调用 `main()` 前自旋等待计数达到 `CPU_NUM`，保证应用入口启动时所有逻辑 CPU 已完成 runtime 初始化。
+- 主核在调用 `main()` 前自旋等待计数达到 `nr_cpus()`（运行时从设备树/ACPI 发现的实际核数，而非编译期 `NR_CPUS` 上限），保证应用入口启动时所有逻辑 CPU 已完成 runtime 初始化。QEMU `-smp` 与 `NR_CPUS` 不再强耦合：给少于 `NR_CPUS` 的核不会死锁，给多于 `NR_CPUS` 的核会被告警截断。
 
 从核在屏障之后开启本地 IRQ（及可选 watchdog），进入 `ktask::run_idle()`，**不**执行 `main()`。
 

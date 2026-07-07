@@ -143,7 +143,11 @@ struct RegionLogSummary {
 }
 
 fn is_init_ok() -> bool {
-    INITED_CPUS.load(Ordering::Acquire) == kbuild_config::CPU_NUM
+    // Wait for all *discovered* CPUs (enumerated from the DT/ACPI at boot),
+    // not the compile-time `NR_CPUS` cap. Using the cap would deadlock whenever
+    // the platform describes fewer CPUs than `NR_CPUS` (e.g. a smaller QEMU
+    // `-smp`), because those slots never increment the counter.
+    INITED_CPUS.load(Ordering::Acquire) == kcpu_id_map::nr_cpus()
 }
 
 fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {

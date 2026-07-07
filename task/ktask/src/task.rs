@@ -815,7 +815,7 @@ mod tests_on_cpu_mask {
 
     #[def_test]
     fn test_set_on_cpu_mask_bit() {
-        if kbuild_config::CPU_NUM >= 2 {
+        if kcpu_id_map::nr_cpus() >= 2 {
             let task = new_test_task();
             task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
             assert!(task.on_cpu_mask().get(0));
@@ -825,7 +825,7 @@ mod tests_on_cpu_mask {
 
     #[def_test]
     fn test_reset_on_cpu_mask() {
-        if kbuild_config::CPU_NUM >= 3 {
+        if kcpu_id_map::nr_cpus() >= 3 {
             let task = new_test_task();
             task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
             task.set_on_cpu_mask_bit(LogicalCpuId::new(1));
@@ -839,7 +839,7 @@ mod tests_on_cpu_mask {
 
     #[def_test]
     fn test_on_cpu_mask_multiple_bits() {
-        if kbuild_config::CPU_NUM >= 4 {
+        if kcpu_id_map::nr_cpus() >= 4 {
             let task = new_test_task();
             task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
             task.set_on_cpu_mask_bit(LogicalCpuId::new(2));

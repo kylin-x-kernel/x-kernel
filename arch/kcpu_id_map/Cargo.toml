@@ -12,6 +12,7 @@ repository.workspace = true
 kbuild_config = { workspace = true }
 kaddr_layout.workspace = true
 klazy.workspace = true
+log.workspace = true
 cpumask = { version = "0.1" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

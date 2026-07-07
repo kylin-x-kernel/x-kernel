@@ -1018,20 +1018,20 @@ mod tests {
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     struct ProviderCtx {
         /// Input residency mask that `test_user_cpu_mask_provider` snapshots.
-        provider_mask_bits: [AtomicBool; kbuild_config::CPU_NUM],
+        provider_mask_bits: [AtomicBool; kbuild_config::NR_CPUS],
         /// Number of times `flush_tlb_process_mask` was invoked.
         flush_calls: AtomicUsize,
         /// Last mask observed by `flush_tlb_process_mask`.
-        observed_mask_bits: [AtomicBool; kbuild_config::CPU_NUM],
+        observed_mask_bits: [AtomicBool; kbuild_config::NR_CPUS],
     }
 
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     impl ProviderCtx {
         const fn new() -> Self {
             Self {
-                provider_mask_bits: [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM],
+                provider_mask_bits: [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS],
                 flush_calls: AtomicUsize::new(0),
-                observed_mask_bits: [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM],
+                observed_mask_bits: [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS],
             }
         }
     }
@@ -1238,9 +1238,9 @@ mod tests {
         // provider lifetime contract.
         let mut ctx = ProviderCtx::new();
 
-        let mut expected_targets = [false; kbuild_config::CPU_NUM];
+        let mut expected_targets = [false; kbuild_config::NR_CPUS];
         let first_nonzero_cpu = 1;
-        let primary_target_cpu = if kbuild_config::CPU_NUM > 1 {
+        let primary_target_cpu = if kbuild_config::NR_CPUS > 1 {
             first_nonzero_cpu
         } else {
             0
@@ -1248,7 +1248,7 @@ mod tests {
         ctx.provider_mask_bits[primary_target_cpu].store(true, Ordering::Relaxed);
         expected_targets[primary_target_cpu] = true;
 
-        let secondary_target_cpu = kbuild_config::CPU_NUM.saturating_sub(1);
+        let secondary_target_cpu = kbuild_config::NR_CPUS.saturating_sub(1);
         if secondary_target_cpu != primary_target_cpu {
             ctx.provider_mask_bits[secondary_target_cpu].store(true, Ordering::Relaxed);
             expected_targets[secondary_target_cpu] = true;

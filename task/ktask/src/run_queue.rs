@@ -51,11 +51,11 @@ percpu_static! {
     PREV_TASK: Weak<crate::KTask> = Weak::new(),
 }
 
-struct RunQueueRegistry([Once<usize>; kbuild_config::CPU_NUM]);
+struct RunQueueRegistry([Once<usize>; kbuild_config::NR_CPUS]);
 
 impl RunQueueRegistry {
     const fn new() -> Self {
-        Self([const { Once::new() }; kbuild_config::CPU_NUM])
+        Self([const { Once::new() }; kbuild_config::NR_CPUS])
     }
 
     fn register_current(&self, cpu_id: LogicalCpuId, run_queue: NonNull<RunQueue>) {
@@ -167,22 +167,24 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
 ///
 /// This function will panic if `cpu_mask` is empty, indicating that there are no available CPUs for task execution.
 #[cfg(feature = "smp")]
-// The modulo operation is safe here because `kbuild_config::CPU_NUM` is always greater than 1 with "smp" enabled.
-#[allow(clippy::modulo_one)]
 #[inline]
-fn select_run_queue_index(cpumask: KCpuMask) -> usize {
+fn select_run_queue_index(cpumask: &KCpuMask) -> usize {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static RUN_QUEUE_INDEX: AtomicUsize = AtomicUsize::new(0);
 
     assert!(!cpumask.is_empty(), "No available CPU for task execution");
 
-    // Round-robin selection of the run queue index.
-    loop {
-        let index = RUN_QUEUE_INDEX.fetch_add(1, Ordering::SeqCst) % kbuild_config::CPU_NUM;
-        if cpumask.get(index) {
-            return index;
-        }
+    // Collect eligible CPU indices into a small stack buffer and round-robin
+    // over them directly. This avoids scanning NR_CPUS-sized ranges when only
+    // a subset of CPUs are present and eligible.
+    let mut eligible = [0usize; kbuild_config::NR_CPUS];
+    let mut count = 0usize;
+    for cpu_id in cpumask.iter_logical() {
+        eligible[count] = cpu_id.as_usize();
+        count += 1;
     }
+    let nth = RUN_QUEUE_INDEX.fetch_add(1, Ordering::Relaxed) % count;
+    eligible[nth]
 }
 
 /// Retrieves a `'static` reference to the run queue corresponding to the given index.
@@ -240,7 +242,7 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     #[cfg(feature = "smp")]
     {
         // When SMP is enabled, select the run queue based on the task's CPU affinity and load balance.
-        let index = select_run_queue_index(task.cpumask());
+        let index = select_run_queue_index(&task.cpumask());
         KRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -268,7 +270,7 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
         let inner = if task.cpumask().get(current_cpu.as_usize()) {
             current_run_queue_mut()
         } else {
-            get_run_queue(select_run_queue_index(task.cpumask()))
+            get_run_queue(select_run_queue_index(&task.cpumask()))
         };
         KRunQueueRef {
             inner,

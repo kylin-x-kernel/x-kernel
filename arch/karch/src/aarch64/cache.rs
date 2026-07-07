@@ -41,7 +41,7 @@ pub fn flush_icache_remote() {
 #[inline]
 pub fn flush_icache_all() {
     flush_icache_all_local();
-    if kbuild_config::CPU_NUM > 1 {
+    if kcpu_id_map::nr_cpus() > 1 {
         crate::flush_icache_others();
     }
 }
@@ -68,7 +68,7 @@ pub fn flush_icache_range(start: VirtAddr, size: usize) {
     aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
     aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
 
-    if kbuild_config::CPU_NUM > 1 {
+    if kcpu_id_map::nr_cpus() > 1 {
         crate::flush_icache_others();
     }
 }

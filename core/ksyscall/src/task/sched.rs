@@ -35,7 +35,7 @@ pub fn sys_sched_getaffinity(
     cpusetsize: usize,
     user_mask: UserPtr<u8>,
 ) -> KResult<isize> {
-    if cpusetsize * 8 < kbuild_config::CPU_NUM {
+    if cpusetsize * 8 < kbuild_config::NR_CPUS {
         return Err(KError::InvalidInput);
     }
 
@@ -55,11 +55,11 @@ pub fn sys_sched_setaffinity(
     cpusetsize: usize,
     user_mask: UserConstPtr<u8>,
 ) -> KResult<isize> {
-    let size = cpusetsize.min(kbuild_config::CPU_NUM.div_ceil(8));
+    let size = cpusetsize.min(kbuild_config::NR_CPUS.div_ceil(8));
     let user_mask = user_mask.load_vm_vec(size)?;
     let mut cpu_mask = KCpuMask::new();
 
-    for i in 0..(size * 8).min(kbuild_config::CPU_NUM) {
+    for i in 0..(size * 8).min(kbuild_config::NR_CPUS) {
         if user_mask[i / 8] & (1 << (i % 8)) != 0 {
             cpu_mask.set(i, true);
         }

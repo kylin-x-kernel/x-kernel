@@ -90,7 +90,7 @@ const VCPUS_PER_CPU: usize = 2;
 /// hardware init, then runs the guest test program independently.
 /// Returns `true` if all vCPUs exit normally.
 pub fn vmm_selftest_smp() -> bool {
-    let nr_cpus = kbuild_config::CPU_NUM;
+    let nr_cpus = kcpu_id_map::nr_cpus();
     let total = nr_cpus * VCPUS_PER_CPU;
     log::info!(
         "[vmm] === SMP Self-Test: {} vCPUs on {} CPUs ===",
@@ -101,7 +101,7 @@ pub fn vmm_selftest_smp() -> bool {
 }
 
 fn selftest_smp_impl<A: VmmArch + 'static>() -> bool {
-    let nr_cpus = kbuild_config::CPU_NUM;
+    let nr_cpus = kcpu_id_map::nr_cpus();
     let total = nr_cpus * VCPUS_PER_CPU;
     let entry_fn = A::guest_test_entry();
 

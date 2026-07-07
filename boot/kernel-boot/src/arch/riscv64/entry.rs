@@ -8,7 +8,7 @@ use core::arch::naked_asm;
 
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
-use kbuild_config::{BOOT_STACK_SIZE, CPU_NUM};
+use kbuild_config::BOOT_STACK_SIZE;
 use kcpu_id_map::RawCpuId;
 #[cfg(feature = "fp-simd")]
 use riscv::register::sstatus::{self, FS};
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn __primary_switched(
                 PAGE_OFFSET + kbuild_config::BOOT_CONSOLE_ADDR,
             )
             .with_cpu_id(logical_cpu_id)
-            .with_cpu_count(CPU_NUM);
+            .with_cpu_count(kcpu_id_map::nr_cpus());
     }
 
     let boot_info_ptr = core::ptr::addr_of!(RISCV_BOOT_INFO) as usize;

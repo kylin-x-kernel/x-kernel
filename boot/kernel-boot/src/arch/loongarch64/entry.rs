@@ -6,7 +6,7 @@ use core::arch::naked_asm;
 
 use boot_info::{BootInfo, BootProtocol, HardwareDescriptionRoot, MemoryDescriptionRoot};
 use kaddr_layout::{KIMAGE_VADDR, PAGE_OFFSET};
-use kbuild_config::{BOOT_CONSOLE_ADDR, BOOT_STACK_SIZE, CPU_NUM};
+use kbuild_config::{BOOT_CONSOLE_ADDR, BOOT_STACK_SIZE};
 use kcpu_id_map::RawCpuId;
 
 use super::{BOOT_DMW_BASE, BOOT_DMW_UNCACHED_BASE};
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn __primary_switched(
                 kaddr_layout::p2v(BOOT_CONSOLE_ADDR),
             )
             .with_cpu_id(logical_cpu_id)
-            .with_cpu_count(CPU_NUM);
+            .with_cpu_count(kcpu_id_map::nr_cpus());
     }
 
     crate::bootln!(

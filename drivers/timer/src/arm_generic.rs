@@ -429,15 +429,15 @@ fn install_resume_offset(raw_ticks: u64, target_ticks: u64) -> bool {
 
 #[cfg(feature = "arm-timer-resume-fixup")]
 fn request_remote_timer_fixup() {
-    if kbuild_config::CPU_NUM <= 1 {
+    if kcpu_id_map::nr_cpus() <= 1 {
         return;
     }
 
     let current_cpu = khal::percpu::this_cpu_id();
-    let all_cpus_mask = if kbuild_config::CPU_NUM >= usize::BITS as usize {
+    let all_cpus_mask = if kcpu_id_map::nr_cpus() >= usize::BITS as usize {
         usize::MAX
     } else {
-        (1usize << kbuild_config::CPU_NUM) - 1
+        (1usize << kcpu_id_map::nr_cpus()) - 1
     };
     let remote_mask = all_cpus_mask & !(1usize << current_cpu.as_usize());
     if remote_mask == 0 {
@@ -449,7 +449,7 @@ fn request_remote_timer_fixup() {
         kbuild_config::IPI_IRQ,
         khal::irq::TargetCpu::AllButSelf {
             me: current_cpu.into(),
-            total: kbuild_config::CPU_NUM,
+            total: kcpu_id_map::nr_cpus(),
         },
     );
 }

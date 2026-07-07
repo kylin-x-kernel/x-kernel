@@ -9,7 +9,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use kcpu_id_map::LogicalCpuId;
+use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
 use khal::{context::TrapFrame, percpu::this_cpu_id};
 
 struct SnapshotSlot(UnsafeCell<Option<TrapFrame>>);
@@ -43,11 +43,11 @@ impl SnapshotSlot {
 // after `COLLECTED` establishes Release/Acquire ordering for that slot.
 unsafe impl Sync for SnapshotSlot {}
 
-struct TrapFrames([SnapshotSlot; kbuild_config::CPU_NUM]);
+struct TrapFrames([SnapshotSlot; kbuild_config::NR_CPUS]);
 
 impl TrapFrames {
     const fn new() -> Self {
-        Self([const { SnapshotSlot::new() }; kbuild_config::CPU_NUM])
+        Self([const { SnapshotSlot::new() }; kbuild_config::NR_CPUS])
     }
 
     fn clear(&self) {
@@ -82,21 +82,21 @@ impl Drop for SnapshotGuard {
 }
 
 const _: () = assert!(
-    kbuild_config::CPU_NUM <= usize::BITS as usize,
+    kbuild_config::NR_CPUS <= usize::BITS as usize,
     "snapshot CPU mask cannot represent all configured CPUs"
 );
 
-#[inline]
-const fn full_mask() -> usize {
-    if kbuild_config::CPU_NUM >= usize::BITS as usize {
-        usize::MAX
-    } else {
-        (1usize << kbuild_config::CPU_NUM) - 1
-    }
+/// Returns a bitmask with a bit set for each present logical CPU.
+fn present_mask() -> usize {
+    let mut mask = 0usize;
+    for_each_present_logical_cpu(|_, cpu_id, _| {
+        mask |= 1usize << cpu_id.as_usize();
+    });
+    mask
 }
 
 fn cpu_bit(cpu: usize) -> Option<usize> {
-    if cpu >= kbuild_config::CPU_NUM {
+    if cpu >= kbuild_config::NR_CPUS {
         None
     } else {
         Some(1usize << cpu)
@@ -138,7 +138,7 @@ fn collect_local() {
 }
 
 fn wait_mask(timeout_ns: usize) -> usize {
-    let expect = full_mask();
+    let expect = present_mask();
     let start = khal::time::monotonic_time_nanos();
     let timeout_ns = timeout_ns as u64;
 
@@ -155,23 +155,23 @@ fn wait_mask(timeout_ns: usize) -> usize {
 }
 
 fn dump_all(mask: usize, symbolize: bool) {
-    let expect = full_mask();
+    let expect = present_mask();
 
-    for cpu in 0..kbuild_config::CPU_NUM {
-        let bit = cpu_bit(cpu);
+    for_each_present_logical_cpu(|_, cpu_id, _| {
+        let cpu = cpu_id.as_usize();
+        let bit = 1usize << cpu;
 
-        if bit.is_none_or(|bit| expect & bit != 0 && mask & bit == 0) {
+        if expect & bit != 0 && mask & bit == 0 {
             khal::kprint_atomic!("[snapshot] cpu={cpu} NOT RESPONDING\n");
-            continue;
+            return;
         }
 
-        let cpu_id = LogicalCpuId::new(cpu);
         match TRAP_FRAMES.read(cpu_id) {
             Some(tf) => dump::dump_cur_task_backtrace(cpu_id, &tf, true, symbolize),
             None => khal::kprint_atomic!("[snapshot] cpu={cpu} no active trap frame\n"),
         }
         dump::dump_cpu_task_backtrace(cpu_id, true, symbolize);
-    }
+    });
 }
 
 fn trigger_impl(reason: &str, collect_mask: impl FnOnce(usize) -> Option<usize>) {

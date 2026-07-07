@@ -127,7 +127,7 @@ fn efi_main() -> Status {
                 protocol_info_addr,
                 loaded_kernel.load_paddr as usize,
                 0.into(),
-                kbuild_config::CPU_NUM,
+                kbuild_config::NR_CPUS,
             )
             .with_hardware_description_root(HardwareDescriptionRoot::Acpi)
             .with_rsdp(rsdp_addr),

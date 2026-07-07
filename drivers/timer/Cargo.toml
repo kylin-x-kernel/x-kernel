@@ -18,6 +18,7 @@ vmm = []
 khal = { workspace = true }
 kplat = { workspace = true }
 kbuild_config = { workspace = true }
+kcpu_id_map = { workspace = true }
 klazy = { workspace = true }
 log = "0.4"
 percpu.workspace = true

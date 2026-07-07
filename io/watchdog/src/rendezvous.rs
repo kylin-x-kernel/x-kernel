@@ -100,7 +100,10 @@ pub fn arrived_bitmap() -> usize {
 
 #[inline]
 pub fn all_arrived_mask() -> usize {
-    let n = kbuild_config::CPU_NUM;
+    // Cover only the CPUs the platform actually described (DT/ACPI), not the
+    // compile-time `NR_CPUS` cap; otherwise the rendezvous would wait forever
+    // for non-present CPUs to arrive.
+    let n = kcpu_id_map::nr_cpus();
     if n >= usize::BITS as usize {
         usize::MAX
     } else {

@@ -27,6 +27,7 @@ kthread.workspace = true
 kuaccess.workspace = true
 ksyscall.workspace = true
 kbuild_config.workspace = true
+kcpu_id_map.workspace = true
 kerrno.workspace = true
 posix-process.workspace = true
 devfs.workspace = true

@@ -150,11 +150,20 @@ config BOOT_STACK_SIZE
     help
       Specify the stack size for the boot process in bytes.
 
-config CPU_NUM
-    usize "Number of CPUs"
+config NR_CPUS
+    usize "Maximum number of CPUs (NR_CPUS)"
+    range 1 8
     default 4
     help
-      Specify the number of CPUs to simulate in the kernel.
+      Compile-time upper bound on the number of CPUs the kernel can support.
+      The actual CPU count is discovered at boot from the device tree
+      (AArch64/RISC-V/LoongArch) or the ACPI MADT (x86_64); CPUs described
+      beyond this bound are ignored. Static per-CPU resources (secondary boot
+      stacks, the logical-to-raw CPU id map, IPI/TLB-shootdown slots, CPU
+      masks) are sized by this value, so raising it increases static memory
+      usage (e.g. 256 KiB of secondary stack per CPU). Bounded to [1, 8];
+      raising the cap above 8 also requires re-auditing the static per-CPU
+      allocation budget (secondary stacks, id map, IPI/snapshot slots).
 
 config TICKS_PER_SECOND
     u32 "Ticks Per Second"

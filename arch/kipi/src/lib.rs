@@ -67,8 +67,8 @@ impl core::fmt::Display for KipiError {
 #[percpu::def_percpu]
 static IPI_EVENT_QUEUE: LazyInit<SpinNoIrq<IpiEventQueue>> = LazyInit::new();
 
-static IPI_QUEUE_READY: [AtomicBool; kbuild_config::CPU_NUM] =
-    [const { AtomicBool::new(false) }; kbuild_config::CPU_NUM];
+static IPI_QUEUE_READY: [AtomicBool; kbuild_config::NR_CPUS] =
+    [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS];
 
 #[inline]
 fn is_ipi_queue_ready(cpu_id: LogicalCpuId) -> bool {
@@ -110,7 +110,7 @@ pub fn init() {
 /// Returns `KipiError::TargetCpuNotReady` if the destination CPU exists but
 /// has not finished initializing its local IPI queue.
 pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Result<()> {
-    let cpu_num = kbuild_config::CPU_NUM;
+    let cpu_num = kbuild_config::NR_CPUS;
     let dest_cpu_index = dest_cpu.as_usize();
 
     // Error handling: check CPU ID validity
@@ -177,7 +177,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
         IPI_IRQ,
         IpiTarget::AllButSelf {
             me: current_cpu_id.as_usize(),
-            total: kbuild_config::CPU_NUM,
+            total: kcpu_id_map::nr_cpus(),
         },
     );
 
@@ -212,7 +212,7 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
         IPI_IRQ,
         IpiTarget::AllButSelf {
             me: current_cpu_id.as_usize(),
-            total: kbuild_config::CPU_NUM,
+            total: kcpu_id_map::nr_cpus(),
         },
     );
 

@@ -9,8 +9,8 @@ ifneq ($(wildcard .config),)
   # Read .config once and extract ARCH and PLAT in a single pass
   CONFIG_VALUES := $(shell awk '/ARCH_[A-Z0-9_]+=y/ { print $$0 } /PLATFORM_[A-Z0-9_]+=y/ { print $$0 } /BUILD_TYPE_[A-Z]+=y/ { print $$0 }' .config 2>/dev/null)
 
-  # APPEND CPU_NUM TO CONFIG_VALUES
-  CONFIG_VALUES += $(shell awk '/CPU_NUM=[0-9]+/ { print $$0 }' .config 2>/dev/null)
+  # APPEND NR_CPUS TO CONFIG_VALUES
+  CONFIG_VALUES += $(shell awk '/NR_CPUS=[0-9]+/ { print $$0 }' .config 2>/dev/null)
   CONFIG_VALUES += $(shell awk '/KFEAT_DWARF=y/ { print $$0 }' .config 2>/dev/null)
   CONFIG_VALUES += $(shell awk '/KFEAT_VIRTIO_BUS_(PCI|MMIO)=y/ { print $$0 }' .config 2>/dev/null)
   CONFIG_VALUES += $(shell awk '/KFEAT_VMM=y/ { print $$0 }' .config 2>/dev/null)
@@ -56,13 +56,18 @@ ifneq ($(wildcard .config),)
     endif
 
 
-    # Parse CPU_NUM
-    CPU_NUM_FROM_CONFIG := $(shell awk -F= '/CPU_NUM=[0-9]+/ { print $$2 }' .config 2>/dev/null)
-    ifneq ($(CPU_NUM_FROM_CONFIG),)
-       SMP := $(CPU_NUM_FROM_CONFIG)
-    else
-   	$(error "`CPU_NUM` is not defined in the .config file")
+    # Parse NR_CPUS (required: compile-time cap that sizes static per-CPU arrays).
+    NR_CPUS_FROM_CONFIG := $(shell awk -F= '/NR_CPUS=[0-9]+/ { print $$2 }' .config 2>/dev/null)
+    ifeq ($(NR_CPUS_FROM_CONFIG),)
+        $(error "`NR_CPUS` is not defined in the .config file")
     endif
+
+    # SMP (the QEMU `-smp` value) is independent of the NR_CPUS cap: the kernel
+    # discovers the actual CPU count at runtime from the device tree / ACPI
+    # MADT, so `make run SMP=N` neither has to match NR_CPUS nor requires a
+    # rebuild. It defaults to NR_CPUS (boot with as many cores as the image
+    # supports) and is overridable on the command line or via the environment.
+    SMP ?= $(NR_CPUS_FROM_CONFIG)
 
 
     # Use config values as defaults, but allow command line override
@@ -76,7 +81,7 @@ ifneq ($(wildcard .config),)
     $(info "PLAT from .config: $(PLAT)")
     $(info "MODE from .config: $(MODE)")
     $(info "DWARF from .config: $(DWARF)")
-    $(info "SMP from .config: $(SMP)")
+    $(info "SMP (QEMU -smp, defaults to NR_CPUS, overridable): $(SMP)")
     export ARCH PLAT MODE SMP DWARF
   endif
 endif

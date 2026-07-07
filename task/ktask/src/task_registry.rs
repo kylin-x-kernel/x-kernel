@@ -27,14 +27,14 @@ const TASK_REGISTRY_SLOTS: usize = 4096;
 ///   `upgrade()` (which is internally atomic).
 /// - GC sweeps invalid weak refs and frees their boxes.
 struct TaskRegistry {
-    slots: [[AtomicUsize; TASK_REGISTRY_SLOTS]; kbuild_config::CPU_NUM],
+    slots: [[AtomicUsize; TASK_REGISTRY_SLOTS]; kbuild_config::NR_CPUS],
 }
 
 impl TaskRegistry {
     const fn new() -> Self {
         Self {
             slots: [const { [const { AtomicUsize::new(0) }; TASK_REGISTRY_SLOTS] };
-                kbuild_config::CPU_NUM],
+                kbuild_config::NR_CPUS],
         }
     }
 

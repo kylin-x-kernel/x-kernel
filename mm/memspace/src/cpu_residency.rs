@@ -59,7 +59,7 @@ pub type MmCpuResidencyRef = Arc<MmCpuResidency>;
 
 #[cfg(unittest)]
 mod tests_cpu_residency {
-    use kbuild_config::CPU_NUM;
+    use kbuild_config::NR_CPUS;
     use kcpu_id_map::LogicalCpuId;
     use unittest::{assert, def_test};
 
@@ -70,7 +70,7 @@ mod tests_cpu_residency {
     }
 
     fn alternate_cpu() -> LogicalCpuId {
-        let cpu = CPU_NUM.saturating_sub(1);
+        let cpu = NR_CPUS.saturating_sub(1);
         LogicalCpuId::new(cpu)
     }
 

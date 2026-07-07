@@ -16,6 +16,7 @@ arm-el2 = []
 cfg-if = "1.0"
 memaddr = { workspace = true }
 kbuild_config = { workspace = true }
+kcpu_id_map = { workspace = true }
 crate_interface = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

@@ -17,12 +17,12 @@ const USER_ASID_FIRST_VERSION: u64 = 1_u64 << karch::USER_ASID_BITS;
 const USER_ASID_MASK: u64 = USER_ASID_FIRST_VERSION - 1;
 const USER_ASID_MAX: u16 = USER_ASID_MASK as u16;
 const USER_ASID_BITMAP_WORDS: usize = (USER_ASID_MAX as usize + 1).div_ceil(64);
-const MAX_PINNED_ASIDS: usize = USER_ASID_MAX as usize - kbuild_config::CPU_NUM - 1;
+const MAX_PINNED_ASIDS: usize = USER_ASID_MAX as usize - kbuild_config::NR_CPUS - 1;
 
-type RuntimeUserAsidAllocator = UserAsidAllocator<{ kbuild_config::CPU_NUM }>;
+type RuntimeUserAsidAllocator = UserAsidAllocator<{ kbuild_config::NR_CPUS }>;
 
-static ACTIVE_ASID_CONTEXT_IDS: [AtomicU64; kbuild_config::CPU_NUM] =
-    [const { AtomicU64::new(0) }; kbuild_config::CPU_NUM];
+static ACTIVE_ASID_CONTEXT_IDS: [AtomicU64; kbuild_config::NR_CPUS] =
+    [const { AtomicU64::new(0) }; kbuild_config::NR_CPUS];
 
 static USER_ASID_ALLOCATOR: SpinNoIrq<RuntimeUserAsidAllocator> =
     SpinNoIrq::new(UserAsidAllocator::new());

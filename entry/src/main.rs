@@ -75,7 +75,7 @@ fn print_boot_info() {
         option_env!("KBUILD_BUILD_TIME").unwrap_or("unknown"),
         configured_log_level(),
         backtrace::is_enabled(),
-        kbuild_config::CPU_NUM,
+        kcpu_id_map::nr_cpus(),
         if kbuild_config::KFEAT_VMM {
             "on"
         } else {

@@ -10,7 +10,13 @@ pub const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
 }
 
 fn load_raw_cpu_ids_from_madt(entries: acpi::MadtEntryIter) {
-    load_cpu_id_map_from_madt(entries, normalize_raw_id);
+    let is_truncated = load_cpu_id_map_from_madt(entries, normalize_raw_id);
+    if is_truncated {
+        log::warn!(
+            "ACPI MADT describes more CPUs than NR_CPUS={}; extra CPUs ignored",
+            kbuild_config::NR_CPUS
+        );
+    }
 }
 
 pub(crate) fn ensure_runtime_cpu_id_map() {
