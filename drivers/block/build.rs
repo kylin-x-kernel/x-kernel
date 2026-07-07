@@ -35,26 +35,32 @@ fn main() {
     let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     println!("cargo:rustc-env=XKERNEL_RAMDISK_IMG={}", abs.display());
-    println!("cargo:rerun-if-changed={}", abs.display());
 
-    // Content fingerprint: forces the crate to recompile (and thus re-run
-    // `include_bytes!`) when the image changes, since Cargo cannot otherwise
-    // see the dependency behind `env!()`.
-    //
-    // The image byte length is also exposed so the source can size its static
-    // array without a second `include_bytes!` call.
-    if let Ok(meta) = std::fs::metadata(&abs) {
-        println!("cargo:rustc-env=XKERNEL_RAMDISK_IMG_LEN={}", meta.len());
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| format!("{}:{}", d.as_secs(), d.subsec_nanos()))
-            .unwrap_or_else(|| "0".into());
-        println!(
-            "cargo:rustc-env=XKERNEL_RAMDISK_IMG_FINGERPRINT={}_{}",
-            meta.len(),
-            mtime
-        );
-    }
+    let Ok(meta) = std::fs::metadata(&abs) else {
+        // The variable points at a path that does not exist (typically because
+        // the `ramdisk-static` feature is not in use). Emitting
+        // `rerun-if-changed` for a missing file would make Cargo flag this
+        // build script as stale on every invocation, so we deliberately omit
+        // it here. If the feature is later enabled and the image is generated,
+        // the resulting `include_bytes!` error at compile time makes the
+        // misconfiguration obvious.
+        return;
+    };
+
+    // The image exists: track it so the crate is rebuilt (and the image
+    // re-embedded) whenever it changes. The byte length is also exposed so the
+    // source can size its static array without a second `include_bytes!` call.
+    println!("cargo:rerun-if-changed={}", abs.display());
+    println!("cargo:rustc-env=XKERNEL_RAMDISK_IMG_LEN={}", meta.len());
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| format!("{}:{}", d.as_secs(), d.subsec_nanos()))
+        .unwrap_or_else(|| "0".into());
+    println!(
+        "cargo:rustc-env=XKERNEL_RAMDISK_IMG_FINGERPRINT={}_{}",
+        meta.len(),
+        mtime
+    );
 }
