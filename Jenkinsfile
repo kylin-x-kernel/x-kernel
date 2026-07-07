@@ -21,6 +21,14 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
     }
 
+    parameters {
+        string(name: 'PROJECT_REPO', defaultValue: 'https://gitee.com/openkylin/x-kernel')
+        string(name: 'DEFAULT_BRANCH', defaultValue: 'main')
+        string(name: 'LIBUTEE_REPO', defaultValue: 'https://gitee.com/openkylin/rust-libutee')
+        string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
+        string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
+    }
+
     environment {
         CI = 'true'
         // Git ownership checks can fail before any pipeline step has a chance
@@ -28,11 +36,11 @@ pipeline {
         GIT_CONFIG_COUNT = '1'
         GIT_CONFIG_KEY_0 = 'safe.directory'
         GIT_CONFIG_VALUE_0 = '*'
-        PROJECT_REPO = 'https://gitee.com/openkylin/x-kernel'
-        DEFAULT_BRANCH = 'main'
-        LIBUTEE_REPO = 'https://gitee.com/openkylin/rust-libutee'
-        TEST_HARNESS_REPO = 'https://gitee.com/openkylin/starry-test-harness'
-        TEST_HARNESS_BRANCH = 'master'
+        PROJECT_REPO = "${params.PROJECT_REPO}"
+        DEFAULT_BRANCH = "${params.DEFAULT_BRANCH}"
+        LIBUTEE_REPO = "${params.LIBUTEE_REPO}"
+        TEST_HARNESS_REPO = "${params.TEST_HARNESS_REPO}"
+        TEST_HARNESS_BRANCH = "${params.TEST_HARNESS_BRANCH}"
         AUX_RUST_TOOLCHAIN = 'nightly-2026-03-08'
         CARGO_TERM_COLOR = 'always'
         CARGO_TERM_QUIET = 'true'
@@ -48,7 +56,9 @@ pipeline {
             steps {
                 script {
                     env.ROOT_WS = env.WORKSPACE
-                    currentBuild.description = "PR#${env.giteePullRequestIid ?: 'manual'}"
+                    currentBuild.description = env.giteePullRequestIid?.trim()
+                        ? "PR#${env.giteePullRequestIid}"
+                        : "${env.DEFAULT_BRANCH} (manual)"
                     runCiStage(sourceStageName(), ciFailureDetail(sourceStageName()), false) {
                         prepareSource()
                         // 先创建 6 个并行检查占位（较早创建 -> Gitee 列表靠下）；顺序 3 项在后续 start/finish
@@ -668,21 +678,78 @@ def prepareSource() {
 
 def checkNotDiverged(String stageName = '') {
     def targetBranch = env.giteeTargetBranch ?: env.DEFAULT_BRANCH
+    def forkPr = isForkPullRequest()
+    def remoteName = forkPr ? 'upstream' : 'origin'
     def teeLine = stageName ? stageLogTeeLine(stageName) : ''
-    def result = sh(label: 'Check PR branch is rebased', script: """#!/bin/bash
+    def result
+
+    if (forkPr) {
+        def targetRepo = targetRepoUrl()
+        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GIT_TOKEN')]) {
+            def authUrl = targetRepo.replace('https://', "https://oauth2:${GIT_TOKEN}@")
+            result = sh(label: 'Check PR branch is rebased', script: """#!/bin/bash
 set -euo pipefail
 ${teeLine}
-git fetch origin ${targetBranch} --quiet
-BASE=\$(git merge-base HEAD origin/${targetBranch})
-TARGET=\$(git rev-parse origin/${targetBranch})
+if ! git remote get-url upstream >/dev/null 2>&1; then
+    git remote add upstream '${authUrl}'
+else
+    git remote set-url upstream '${authUrl}'
+fi
+git fetch ${remoteName} ${targetBranch} --quiet --no-recurse-submodules --no-tags
+git remote set-url upstream '${targetRepo}'
+BASE=\$(git merge-base HEAD ${remoteName}/${targetBranch})
+TARGET=\$(git rev-parse ${remoteName}/${targetBranch})
 if [ "\$BASE" != "\$TARGET" ]; then
     echo "DIVERGED"
 fi
 """, returnStdout: true).trim()
+        }
+    } else {
+        result = sh(label: 'Check PR branch is rebased', script: """#!/bin/bash
+set -euo pipefail
+${teeLine}
+git fetch ${remoteName} ${targetBranch} --quiet
+BASE=\$(git merge-base HEAD ${remoteName}/${targetBranch})
+TARGET=\$(git rev-parse ${remoteName}/${targetBranch})
+if [ "\$BASE" != "\$TARGET" ]; then
+    echo "DIVERGED"
+fi
+""", returnStdout: true).trim()
+    }
 
     if (result == 'DIVERGED') {
         error("该 PR 与目标分支 `${targetBranch}` 存在冲突，请先执行 rebase 后再重新提交。")
     }
+}
+
+def isForkPullRequest() {
+    return normalizeRepoId(sourceRepoUrl()) != normalizeRepoId(targetRepoUrl())
+}
+
+def sourceRepoUrl() {
+    def http = env.giteeSourceRepoHttpUrl?.trim()
+    if (http) return http
+    def ns = env.giteeSourceNamespace?.trim()
+    def repo = env.giteeSourceRepoName?.trim()
+    if (ns && repo) return "https://gitee.com/${ns}/${repo}"
+    return env.PROJECT_REPO
+}
+
+def normalizeRepoId(String urlOrPath) {
+    if (!urlOrPath?.trim()) return ''
+    return urlOrPath.trim().toLowerCase()
+        .replaceFirst(/^https?:\\/\\/(oauth2:[^@]+@)?/, '')
+        .replaceFirst(/\\.git$/, '')
+        .replaceAll('/+$', '')
+}
+
+def targetRepoUrl() {
+    def ns = env.giteeTargetNamespace?.trim()
+    def repo = env.giteeTargetRepoName?.trim()
+    if (ns && repo) {
+        return "https://gitee.com/${ns}/${repo}"
+    }
+    return env.PROJECT_REPO
 }
 
 def restoreSource() {
