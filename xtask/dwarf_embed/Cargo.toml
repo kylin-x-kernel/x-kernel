@@ -1,0 +1,12 @@
+[package]
+name = "dwarf_embed"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Embed selected DWARF sections into X-Kernel alloc sections"
+
+[dependencies]
+goblin = "0.10"
+scroll = "0.13"

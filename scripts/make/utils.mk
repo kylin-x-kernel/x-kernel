@@ -12,6 +12,11 @@ define run_cmd
   @$(1) $(2)
 endef
 
+define copy_file
+  @printf '$(WHITE_C)cp$(END_C) $(GRAY_C)$(1) $(2)$(END_C)\n'
+  @cp --reflink=auto $(1) $(2) 2>/dev/null || cp -c $(1) $(2) 2>/dev/null || cp $(1) $(2)
+endef
+
 define make_disk_image_fat32
   @printf "    $(GREEN_C)Creating$(END_C) FAT32 disk image \"$(1)\" ...\n"
   @dd if=/dev/zero of=$(1) bs=1M count=$(if $(strip $(2)),$(2),64)

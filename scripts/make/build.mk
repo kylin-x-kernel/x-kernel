@@ -38,14 +38,14 @@ _cargo_build: _gen_cargo
 	$(call cargo_build,$(APP),$(KFEAT) $(APP_FEAT))
 
 $(OUT_ELF): $(CONFIG_RS) _cargo_build | $(OUT_DIR)
-	$(call run_cmd,cp,$(rust_elf) $@)
+	$(call copy_file,$(rust_elf),$@)
 
 $(OUT_DIR):
 	$(call run_cmd,mkdir,-p $@)
 
 _dwarf: $(OUT_ELF)
 ifeq ($(DWARF), y)
-	$(call run_cmd,./scripts/make/dwarf.sh,$(OUT_ELF) $(OBJCOPY))
+	$(call run_cmd,cargo,run --quiet --manifest-path $(PWD)/xtask/Cargo.toml -p dwarf_embed --release -- $(OUT_ELF))
 endif
 
 $(OUT_BIN): _cargo_build $(OUT_ELF) _dwarf

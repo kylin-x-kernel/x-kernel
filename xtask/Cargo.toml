@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["xconfig", "convert_cov", "crate_rootfs", "gendoc", "uapp"]
+members = [
+    "xconfig",
+    "convert_cov",
+    "crate_rootfs",
+    "dwarf_embed",
+    "gendoc",
+    "uapp",
+]
 
 [workspace.package]
 version = "0.1.0"
