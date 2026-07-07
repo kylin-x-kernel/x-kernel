@@ -159,11 +159,11 @@ x86-peripherals = { path = "platforms/x86-peripherals" }
 x86_64-qemu-virt = { path = "platforms/x86_64-qemu-virt" }
 
 # Internal: tee
-tee_crypto = { version = "0.1", default-features = false }
+tee_crypto = { version = "0.1.3", default-features = false }
 tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }
-tasign = { version = "0.2", default-features = false }
+tasign = { version = "0.2.3", default-features = false }
 xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
 
 # Internal: utilities and tooling
