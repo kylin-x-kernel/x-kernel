@@ -13,6 +13,7 @@ fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["rtc_driver/cmos"]
 smp = ["kplat/smp", "kspin/smp"]
 reboot-on-system-off = []
+vmm = []
 
 [dependencies]
 kernel_boot = { workspace = true }

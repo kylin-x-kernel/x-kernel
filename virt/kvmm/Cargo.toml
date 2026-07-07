@@ -1,0 +1,22 @@
+[package]
+name = "kvmm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Architecture-independent virtual machine monitor for x-kernel"
+
+[features]
+default = []
+
+[dependencies]
+log.workspace = true
+kaddr_layout.workspace = true
+ktask.workspace = true
+kalloc.workspace = true
+kbuild_config.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+percpu.workspace = true

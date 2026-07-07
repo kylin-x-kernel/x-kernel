@@ -28,6 +28,9 @@ smp = [
 # Floating point/SIMD
 fp-simd = ["khal/fp-simd"]
 
+# Virtualization (VMM)
+vmm = ["khal/vmm", "aarch64-qemu-virt?/vmm", "x86_64-qemu-virt?/vmm", "riscv64-qemu-virt?/vmm"]
+
 
 # Interrupts
 ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi", "ktask?/ipi"]

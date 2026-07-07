@@ -12,6 +12,7 @@ description = "Architecture boot entry and handoff layer for x-kernel"
 [features]
 default = []
 fp-simd = []
+vmm = []
 
 [dependencies]
 kbuild_config = { workspace = true }

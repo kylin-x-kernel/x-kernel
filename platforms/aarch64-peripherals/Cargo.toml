@@ -16,6 +16,7 @@ pmr = []
 pmu = ["dep:aarch64-pmuv3", "kplat/pmu"]
 nmi-pmu = ["pmr", "pmu", "kplat/nmi"]
 nmi-sdei = []
+vmm = []
 
 [dependencies]
 memaddr = { workspace = true }

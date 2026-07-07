@@ -60,6 +60,11 @@ impl TimerMode {
 
     fn preferred_interrupt_names(self) -> &'static [&'static str] {
         match self {
+            // VHE: EL2 accesses to CNTP_*_EL0 are redirected to CNTHP_*_EL2
+            // (the EL2 physical timer), which fires on INTID 26 ("hyp-phys").
+            #[cfg(feature = "vmm")]
+            Self::Physical => &["hyp-phys", "phys", "virt", "sec-phys", "hyp-virt"],
+            #[cfg(not(feature = "vmm"))]
             Self::Physical => &["phys", "virt", "sec-phys", "hyp-phys", "hyp-virt"],
             Self::Virtual => &["virt", "phys", "sec-phys", "hyp-phys", "hyp-virt"],
         }
@@ -67,6 +72,10 @@ impl TimerMode {
 
     fn fallback_interrupt_indices(self) -> &'static [usize] {
         match self {
+            // VHE: prefer hyp-phys (index 3) over phys (index 1).
+            #[cfg(feature = "vmm")]
+            Self::Physical => &[3, 1, 0, 2, 4],
+            #[cfg(not(feature = "vmm"))]
             Self::Physical => &[1, 0, 2, 3, 4],
             Self::Virtual => &[2, 1, 0, 3, 4],
         }

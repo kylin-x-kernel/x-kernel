@@ -232,5 +232,6 @@ source "net/Kconfig"
 source "tee/Kconfig"
 source "task/Kconfig"
 source "core/kbpf/Kconfig"
+source "virt/Kconfig"
 
 source "drivers/Kconfig"

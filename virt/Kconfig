@@ -1,0 +1,11 @@
+menu "Virtualization"
+
+config KFEAT_VMM
+    bool "Enable VMM (Virtual Machine Monitor)"
+    help
+      Enable hardware-assisted virtualization support.
+      AArch64: VHE (stay in EL2 with E2H=1).
+      x86_64: VMX (Intel VT-x).
+      RISC-V: H-extension (HS-mode).
+
+endmenu

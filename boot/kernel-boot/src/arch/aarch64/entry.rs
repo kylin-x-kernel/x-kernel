@@ -154,8 +154,8 @@ pub unsafe extern "C" fn primary_entry() -> ! {
         "add     x8, x8, {boot_stack_size}",
         "mov     sp, x8",
 
-        // Drop to EL1 (no-op when already at EL1).
-        "bl      {switch_to_el1}",
+        // EL initialization: VHE (stay in EL2) or drop to EL1.
+        "bl      {el_init}",
 
         // Enable FP/SIMD so that Rust code can use float registers.
         "bl      {enable_fp}",
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn primary_entry() -> ! {
         preserve_boot_args      = sym preserve_boot_args,
         boot_stack              = sym BOOT_STACK,
         boot_stack_size         = const BOOT_STACK_SIZE,
-        switch_to_el1           = sym el::switch_to_el1,
+        el_init                 = sym el_init,
         enable_fp               = sym enable_fp,
         create_boot_page_tables = sym mmu::create_boot_page_tables,
         init_mmu                = sym mmu::init_mmu,
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         "b.ne    2f",
         "cbz     x24, 2f",
         "mov     sp, x24",
-        "bl      {switch_to_el1}",
+        "bl      {el_init}",
         "bl      {enable_fp}",
         "bl      {init_mmu}",
         // Adjust SP to KIMAGE_VADDR range (same as primary_entry):
@@ -272,7 +272,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         "wfe",
         "b       2b",
         secondary_boot_context = sym SECONDARY_BOOT_CONTEXT,
-        switch_to_el1    = sym el::switch_to_el1,
+        el_init          = sym el_init,
         enable_fp        = sym enable_fp,
         init_mmu         = sym mmu::init_mmu,
         kernel_start     = sym _start,
@@ -375,4 +375,27 @@ pub unsafe extern "C" fn __primary_switched(
 fn enable_fp() {
     #[cfg(feature = "fp-simd")]
     karch::enable_fp();
+}
+
+/// Exception-level initialization for early boot.
+///
+/// With the `vmm` feature, stays in EL2 with VHE (E2H=1, TGE=1).
+/// Without it, drops from EL2/EL3 to EL1 via `switch_to_el1`.
+///
+/// # Safety
+///
+/// Must only be called during early boot with the expected EL2/EL3
+/// register state, before normal kernel execution begins.
+#[unsafe(link_section = ".idmap.text")]
+unsafe fn el_init() {
+    #[cfg(feature = "vmm")]
+    // SAFETY: caller guarantees early-boot context with EL2 entry state.
+    unsafe {
+        el::init_el2_vhe();
+    }
+    #[cfg(not(feature = "vmm"))]
+    // SAFETY: caller guarantees early-boot context with EL2/EL3 entry state.
+    unsafe {
+        el::switch_to_el1();
+    }
 }

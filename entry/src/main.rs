@@ -65,6 +65,7 @@ fn print_boot_info() {
             log_level = {}
             backtrace = {}
             smp = {}
+            virt = {}
         "},
         kbuild_config::ARCH,
         kbuild_config::PLATFORM,
@@ -75,6 +76,11 @@ fn print_boot_info() {
         configured_log_level(),
         backtrace::is_enabled(),
         kbuild_config::CPU_NUM,
+        if kbuild_config::KFEAT_VMM {
+            "on"
+        } else {
+            "off"
+        },
     );
 }
 
@@ -87,6 +93,10 @@ fn main() {
 
     use kfs::kernel_fs_context;
     runtime::init_runtime();
+
+    if kbuild_config::KFEAT_VMM && !kvmm::selftest::vmm_selftest_smp() {
+        error!("VMM selftest failed");
+    }
 
     let args = CMDLINE
         .iter()

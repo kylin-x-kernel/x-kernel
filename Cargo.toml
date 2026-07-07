@@ -9,6 +9,8 @@ members = [
     "fs/filesystems/kext4",
     # tee_crypto source tree (publish / local tests); kernel deps use crates.io via workspace.dependencies
     "tee/tee_crypto",
+    # virtualization
+    "virt/*",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace
@@ -165,6 +167,9 @@ tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }
 tasign = { version = "=0.2.3", default-features = false }
 xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
+
+# Internal: virtualization
+kvmm = { path = "virt/kvmm" }
 
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }

@@ -106,6 +106,8 @@ else ifeq ($(ARCH), riscv64)
 else ifeq ($(ARCH), aarch64)
   ifeq ($(PLAT_NAME), aarch64-raspi4)
     machine := raspi4b
+  else ifeq ($(findstring KFEAT_VMM=y,$(CONFIG_VALUES)),KFEAT_VMM=y)
+    machine := virt,virtualization=on
   else
     machine := virt
   endif
@@ -126,13 +128,18 @@ qemu_args-x86_64 := \
   -kernel $(OUT_LINUXBOOT)
 endif
 
+# x86 VMM: expose VMX to the guest.
+ifeq ($(ARCH):$(findstring KFEAT_VMM=y,$(CONFIG_VALUES)),x86_64:KFEAT_VMM=y)
+  qemu_args-x86_64 += -cpu max,+vmx
+endif
+
 qemu_args-riscv64 := \
   -machine $(machine) \
   -bios default \
   -kernel $(FINAL_IMG)
 
 qemu_args-aarch64 := \
-  -cpu cortex-a72 \
+  -cpu cortex-a76 \
   -machine $(machine) \
   -kernel $(FINAL_IMG)
 
@@ -263,11 +270,28 @@ ifeq ($(ACCEL),)
   endif
 endif
 
-# Do not use KVM for debugging
-ifeq ($(shell uname), Darwin)
-#   qemu_args-$(ACCEL) += -cpu host -accel hvf
-#else ifneq ($(wildcard /dev/kvm),)
-#  qemu_args-$(ACCEL) += -cpu host -accel kvm
+# KVM/HVF acceleration — only when host arch matches target arch.
+ifeq ($(findstring KFEAT_VMM=y,$(CONFIG_VALUES)),KFEAT_VMM=y)
+  HOST_ARCH := $(shell uname -m)
+  ifeq ($(shell uname), Darwin)
+    ifeq ($(filter $(HOST_ARCH),arm64 aarch64),$(HOST_ARCH))
+      ifeq ($(ARCH), aarch64)
+        qemu_args-$(ACCEL) += -cpu host -accel hvf
+      endif
+    else ifeq ($(HOST_ARCH), x86_64)
+      ifeq ($(ARCH), x86_64)
+        qemu_args-$(ACCEL) += -cpu host -accel hvf
+      endif
+    endif
+  else ifneq ($(wildcard /dev/kvm),)
+    ifeq ($(HOST_ARCH):$(ARCH),x86_64:x86_64)
+      qemu_args-$(ACCEL) += -cpu host -accel kvm
+    else ifeq ($(filter $(HOST_ARCH),arm64 aarch64):$(ARCH),$(HOST_ARCH):aarch64)
+      qemu_args-$(ACCEL) += -cpu host -accel kvm
+    else ifeq ($(HOST_ARCH):$(ARCH),riscv64:riscv64)
+      qemu_args-$(ACCEL) += -cpu host -accel kvm
+    endif
+  endif
 endif
 
 define run_qemu

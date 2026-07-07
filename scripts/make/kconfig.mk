@@ -13,6 +13,7 @@ ifneq ($(wildcard .config),)
   CONFIG_VALUES += $(shell awk '/CPU_NUM=[0-9]+/ { print $$0 }' .config 2>/dev/null)
   CONFIG_VALUES += $(shell awk '/KFEAT_DWARF=y/ { print $$0 }' .config 2>/dev/null)
   CONFIG_VALUES += $(shell awk '/KFEAT_VIRTIO_BUS_(PCI|MMIO)=y/ { print $$0 }' .config 2>/dev/null)
+  CONFIG_VALUES += $(shell awk '/KFEAT_VMM=y/ { print $$0 }' .config 2>/dev/null)
 
   # Parse architecture (only if CONFIG_VALUES is not empty)
   ifneq ($(CONFIG_VALUES),)

@@ -13,6 +13,7 @@ description = "Hardware abstraction layer, provides unified APIs for platform-sp
 default = []
 smp = ["kplat/smp",]
 fp-simd = ["kcpu/fp-simd",]
+vmm = ["kernel_boot/vmm"]
 rtc = []
 nmi = ["kplat/nmi"]
 pmu = []
