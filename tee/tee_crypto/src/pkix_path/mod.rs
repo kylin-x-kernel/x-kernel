@@ -889,10 +889,15 @@ pub struct ValidationPolicy {
     /// [`Error::ValidityPeriod`]. If you see unexpected `ValidityPeriod`
     /// errors, check that `current_time_unix` is set to the current time.
     ///
-    /// **Warning**: passing `u64::MAX` causes all `notAfter` checks to pass.
-    /// This effectively disables expiry checking — only use it in contexts
-    /// where you explicitly want permissive (clock-free) validation.
+    /// Ignored when [`Self::skip_validity_period`] is `true`.
     pub current_time_unix: u64,
+
+    /// When `true`, RFC 5280 §6.1.3(a)(2) validity (`notBefore` / `notAfter`) is
+    /// not checked. Use for clock-free contexts (`no_std` without RTC) or when
+    /// [`ValidationPolicy::from_validation_time`] receives `None` / `u64::MAX`.
+    ///
+    /// Signature, chain linkage, and other policy checks still run.
+    pub skip_validity_period: bool,
 
     /// Enforce the `KeyUsage` extension when present. Default: `true`.
     ///
@@ -1048,9 +1053,11 @@ impl ValidationPolicy {
     /// `current_time_unix = 0` would cause.
     #[must_use]
     pub fn new(now_unix: u64) -> Self {
+        let skip_validity_period = now_unix == u64::MAX;
         Self {
             max_path_len: 10,
             current_time_unix: now_unix,
+            skip_validity_period,
             enforce_key_usage: true,
             require_crl_sign_on_cas: false,
             initial_explicit_policy: false,
@@ -1065,6 +1072,26 @@ impl ValidationPolicy {
             required_leaf_eku: None,
             required_leaf_policy_oids: None,
             required_leaf_subject_dn_attrs: None,
+        }
+    }
+
+    /// Build a policy that skips notBefore/notAfter checks (clock-free validation).
+    #[must_use]
+    pub fn without_validity_check() -> Self {
+        let mut policy = Self::new(0);
+        policy.skip_validity_period = true;
+        policy
+    }
+
+    /// Map an optional wall-clock to a validation policy.
+    ///
+    /// - `Some(ts)` with `ts != u64::MAX`: check validity at Unix second `ts`.
+    /// - `Some(u64::MAX)` or `None`: skip validity checks ([`Self::skip_validity_period`]).
+    #[must_use]
+    pub fn from_validation_time(now_unix: Option<u64>) -> Self {
+        match now_unix {
+            None | Some(u64::MAX) => Self::without_validity_check(),
+            Some(ts) => Self::new(ts),
         }
     }
 }
@@ -3278,7 +3305,9 @@ fn chain_walk<V: SignatureVerifier>(
         )?;
 
         // (c) Validity period.
-        check_validity(cert, policy.current_time_unix, i)?;
+        if !policy.skip_validity_period {
+            check_validity(cert, policy.current_time_unix, i)?;
+        }
 
         // (c2) Max validity period length check (extracted; see `check_max_validity`).
         check_max_validity(cert, policy, i)?;
@@ -5718,6 +5747,44 @@ mod tests_chain_walk {
             ),
             "expired leaf must return ValidityPeriod {{ index: 0 }}"
         );
+    }
+
+    /// Expired leaf with `skip_validity_period` (or `u64::MAX` via `ValidationPolicy::new`) passes.
+    #[test]
+    fn skip_validity_period_ignores_expired_leaf() {
+        let root = load(include_bytes!("../../tests/fixtures/pkix/gry-root.der"));
+        let anchor = TrustAnchor::from_cert(root);
+
+        let policy_max = policy_at(u64::MAX);
+        assert!(
+            policy_max.skip_validity_period,
+            "u64::MAX must enable skip_validity_period"
+        );
+        {
+            let int_cert = load(include_bytes!("../../tests/fixtures/pkix/gry-int.der"));
+            let leaf = load(include_bytes!("../../tests/fixtures/pkix/gry-leaf.der"));
+            assert!(
+                chain_walk(&[leaf, int_cert], &anchor, &policy_max, &EcdsaP256Verifier).is_ok(),
+                "expired leaf must pass when skip_validity_period is set via u64::MAX"
+            );
+        }
+
+        let mut policy_explicit = policy_at(GRY_EXPIRED);
+        policy_explicit.skip_validity_period = true;
+        {
+            let int_cert = load(include_bytes!("../../tests/fixtures/pkix/gry-int.der"));
+            let leaf = load(include_bytes!("../../tests/fixtures/pkix/gry-leaf.der"));
+            assert!(
+                chain_walk(
+                    &[leaf, int_cert],
+                    &anchor,
+                    &policy_explicit,
+                    &EcdsaP256Verifier
+                )
+                .is_ok(),
+                "expired leaf must pass when skip_validity_period is explicitly true"
+            );
+        }
     }
 
     /// Not-yet-valid intermediate → `ValidityPeriod` at index 1.

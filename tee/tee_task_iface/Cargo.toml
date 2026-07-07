@@ -18,6 +18,7 @@ default = []
 tee_ta_sign = [
     "dep:ksync",
     "dep:klazy",
+    "dep:khal",
     "dep:tasign",
 ]
 # Enable certificate-chain verification by embedding the built-in CA PEM.
@@ -32,6 +33,7 @@ uuid = { version = "0.8", default-features = false }
 unittest.workspace = true
 kerrno.workspace = true
 kfs.workspace = true
+khal = { workspace = true, optional = true }
 kvfs.workspace = true
 xmas-elf = { workspace = true, default-features = false }
 log.workspace = true
