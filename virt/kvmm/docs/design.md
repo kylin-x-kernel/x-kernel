@@ -251,9 +251,100 @@ AT&T syntax.
    **Fix**: Added `movb $1, 0x84(%r15)` in `kvmm_vmx_return` to set the launched flag
    after each successful VM-exit.
 
----
+### 8. x86_64: Sporadic `assertion failed: !curr.is_idle()` after guest-mem selftest
 
-## Current State
+**Symptom**: After `vmm_selftest_guest_mem` passes, the kernel sporadically panics with
+`assertion failed: !curr.is_idle()` in the scheduler run queue. The vCPU thread's
+`current_task_ptr()` returns an idle task from a different CPU.
+
+**Reproduction**: Only triggers when `vmm_selftest_guest_mem` (unpinned vCPU thread) runs.
+`vmm_selftest_smp` (CPU-pinned threads) never triggers it, even under heavy load.
+
+**Root cause**: `vmcs_init_vcpu` writes `HostBaseGs = rdmsr(MSR_GS_BASE)` once at
+initialization time, capturing the GS base of whatever CPU runs `init_vcpu`. On x86_64,
+GS base points to the per-CPU data area — `current_task_ptr()` is a single `gs:[offset]`
+load. The `selftest_guest_mem_impl` pattern is:
+
+```
+init_vcpu(...)          ← runs on CPU X, VMCS captures CPU X's GS base
+spawn_vcpu_thread(vcpu) ← new thread scheduled on CPU Y
+  → vmptrld + vmlaunch  ← executes on CPU Y
+  → VM exit             ← processor restores HostBaseGs = CPU X's GS base
+  → now running on CPU Y with CPU X's per-CPU pointer
+  → current_task_ptr() returns CPU X's current task (possibly idle)
+  → scheduler asserts !is_idle() → panic
+```
+
+The SMP selftest is immune because each thread pins itself with `set_current_affinity`
+before calling `init_vcpu`, so init and execution always happen on the same CPU.
+
+**Fix**: Refresh `HostBaseGs` in the VMCS before every `vmlaunch`/`vmresume`:
+
+```rust
+fn enter_guest(vcpu: &mut Vcpu<Self>) -> bool {
+    vmptrld(vcpu.arch.vmcs_pa);
+    vmcs_write(VmcsField::HostBaseGs, rdmsr(MSR_GS_BASE));  // ← fix
+    vmx_enter_guest(...);
+}
+```
+
+This ensures VM exit always restores the correct CPU's GS base, regardless of
+thread migration between entries.
+
+### 9. x86_64: VMCS cross-CPU migration without vmclear — hang in CI
+
+**Symptom**: `vmm_selftest_guest_mem` hangs when run after `vmm_selftest_smp`. The
+vCPU thread stops making progress at a random HLT iteration. Running `guest_mem`
+alone (before `smp`) passes consistently.
+
+**Reproduction**: `-smp 4 -cpu host -accel kvm` (nested VMX). The SMP test performs
+VMXON on all 4 CPUs; the subsequent unpinned `guest_mem` thread can then be
+rescheduled to any of them.
+
+**Root cause**: Intel SDM Vol 3C §24.11.2 requires that a VMCS be vmclear'd on its
+current logical processor before being loaded (vmptrld) on a different one. Without
+vmclear, the destination CPU may read stale processor-internal VMCS cache — producing
+undefined behavior (typically an infinite hang on vmlaunch/vmresume).
+
+The `handle_hlt` exit calls `ktask::yield_now()`, which allows the scheduler to
+migrate the vCPU thread to a different physical CPU. On resume, `enter_guest` does
+`vmptrld` on the new CPU without the required vmclear on the old CPU.
+
+Additionally, even if vmclear is performed, the per-CPU host state fields in the VMCS
+(HostBaseGdtr, HostBaseTr, HostBaseGs, HostBaseFs, HostCr3) are stale — they describe
+the old CPU's GDT, TSS, and per-CPU area. VM exit restores these stale values into
+the host, corrupting scheduler state on the new CPU.
+
+**Fix**: Two-part fix following Intel SDM §24.11.2:
+
+1. **vmclear before yield** in `handle_hlt`:
+```rust
+fn handle_hlt(vcpu: &mut Vcpu<X86Vmx>) -> ExitAction {
+    vmcs_write(VmcsField::GuestRip, rip + inst_len);
+    vmx::vmclear(vcpu.arch.vmcs_pa);  // flush VMCS to memory
+    vcpu.launched = false;             // next entry must use vmlaunch
+    ktask::yield_now();                // thread may migrate
+    ExitAction::Resume
+}
+```
+
+2. **Refresh all per-CPU host state** in `enter_guest` after vmptrld:
+```rust
+pub fn refresh_host_state() {
+    let gdt_base = sgdt_base();
+    vmcs_write(VmcsField::HostCr3, read_cr3());
+    vmcs_write(VmcsField::HostBaseGdtr, gdt_base);
+    vmcs_write(VmcsField::HostBaseIdtr, sidt_base());
+    vmcs_write(VmcsField::HostBaseTr, read_tss_base(gdt_base));
+    vmcs_write(VmcsField::HostBaseFs, rdmsr(MSR_FS_BASE));
+    vmcs_write(VmcsField::HostBaseGs, rdmsr(MSR_GS_BASE));
+}
+```
+
+This supersedes the earlier fix (#8) that only refreshed HostBaseGs — the full
+refresh handles all per-CPU-variable host fields.
+
+---
 
 All three architecture selftests pass in both single-vCPU and SMP modes:
 - **AArch64**: 100 iterations of WFI + HVC, verified on QEMU `virt` with EL2

@@ -13,7 +13,10 @@ pub mod x86_64;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
 
-use crate::vcpu::{ExitAction, Vcpu};
+use crate::{
+    mm::GuestMem,
+    vcpu::{ExitAction, Vcpu},
+};
 
 /// Architecture VMM hooks.
 ///
@@ -23,6 +26,9 @@ pub trait VmmArch {
     /// Per-architecture vCPU state (GPRs, sysregs, host save area).
     /// Must be `#[repr(C)]` with ABI-stable layout for assembly.
     type ArchVcpu: Default + Send;
+
+    /// Second-stage page table type for this architecture.
+    type GuestMem: GuestMem + Send + Sync;
 
     /// Initialize vCPU state with guest entry point and stack pointer.
     ///
@@ -54,12 +60,38 @@ pub trait VmmArch {
     where
         Self: Sized;
 
-    /// Guest selftest entry point address.
-    fn guest_test_entry() -> u64;
+    /// Guest selftest code pointer and size in bytes.
+    ///
+    /// Returns `(start_ptr, size)` of the guest test binary in kernel
+    /// `.text`. The loader copies this to a fresh page before execution.
+    fn guest_test_code() -> (*const u8, usize);
 
     /// Per-CPU hardware init (idempotent). Called on each physical CPU
     /// before running vCPUs. Returns `false` on failure.
     fn percpu_hw_init() -> bool {
         true
+    }
+
+    /// Activate second-stage page table for a vCPU.
+    ///
+    /// Default implementation writes the hardware register (VTTBR_EL2
+    /// on AArch64, hgatp on RISC-V). x86_64 overrides to write EPTP
+    /// into the vCPU's VMCS.
+    fn activate_guest_mem(vcpu: &mut Vcpu<Self>, guest_mem: &Self::GuestMem)
+    where
+        Self: Sized,
+    {
+        let _ = vcpu;
+        guest_mem.activate();
+    }
+
+    /// Teardown hardware state before dropping a vCPU.
+    ///
+    /// Called at the end of `vmm_run_vcpu` before the `Vcpu` is dropped.
+    /// x86_64 uses this to `vmclear` the VMCS before the page is freed.
+    fn teardown_vcpu(_vcpu: &mut Vcpu<Self>)
+    where
+        Self: Sized,
+    {
     }
 }

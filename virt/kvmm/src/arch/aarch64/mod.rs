@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn kvmm_save_sysregs_el12(buf: *mut u8);
     fn kvmm_restore_sysregs_el12(buf: *mut u8);
     pub(crate) fn kvmm_guest_test_entry();
+    pub(crate) fn kvmm_guest_test_entry_end();
 }
 
 /// ESR_EL2 exception class values.
@@ -57,6 +58,9 @@ pub struct Aarch64Vcpu {
     pub host_tpidr: u64,
     /// Guest EL1 system registers (offset 392).
     pub sysregs: [u8; 128],
+    /// Exit type set by vector entry (offset 520).
+    /// 0=sync, 1=IRQ, 2=FIQ, 3=SError.
+    pub exit_type: u64,
 }
 
 impl Default for Aarch64Vcpu {
@@ -70,6 +74,7 @@ impl Default for Aarch64Vcpu {
             host_vbar: 0,
             host_tpidr: 0,
             sysregs: [0; 128],
+            exit_type: 0,
         }
     }
 }
@@ -97,7 +102,7 @@ fn advance_pc(vcpu: &mut Aarch64Vcpu, esr: u64) {
 
 fn handle_wfi(vcpu: &mut Aarch64Vcpu, esr: u64) -> ExitAction {
     advance_pc(vcpu, esr);
-    ktask::yield_now();
+    ktask::sleep(core::time::Duration::from_millis(1));
     ExitAction::Resume
 }
 
@@ -105,10 +110,10 @@ fn handle_hvc(vcpu: &mut Aarch64Vcpu) -> ExitAction {
     let no = vcpu.gprs[0];
     match no {
         HVC_PRINT => {
-            let iter = vcpu.gprs[1];
-            if iter.is_multiple_of(20) {
-                log::info!("[VMM] HVC_PRINT: iter={} (aarch64)", iter);
-            }
+            let _iter = vcpu.gprs[1];
+            // if _iter.is_multiple_of(20) {
+            //     log::info!("[VMM] HVC_PRINT: iter={} (aarch64)", _iter);
+            // }
             ExitAction::Resume
         }
         HVC_DONE => {
@@ -123,20 +128,61 @@ fn handle_hvc(vcpu: &mut Aarch64Vcpu) -> ExitAction {
     }
 }
 
-fn handle_data_abort(vcpu: &Aarch64Vcpu, esr: u64) -> ExitAction {
+#[inline]
+fn read_hpfar_el2() -> u64 {
+    let val: u64;
+    // SAFETY: reading HPFAR_EL2 is always safe from EL2.
+    unsafe { core::arch::asm!("mrs {}, hpfar_el2", out(reg) val) };
+    val
+}
+
+fn handle_data_abort(vcpu: &mut Vcpu<Aarch64Vhe>, esr: u64) -> ExitAction {
     let far = read_far_el2();
-    let wnr = (esr >> 6) & 1;
+    let hpfar = read_hpfar_el2();
+    let ipa = (hpfar << 8) | (far & 0xFFF);
+    let is_write = (esr >> 6) & 1 != 0;
+
+    // Try MMIO dispatch via the VM's device bus.
+    let mut bus = vcpu.vm.mmio_bus().lock();
+    if let Some(_val) = bus.handle(ipa, is_write, 4, 0) {
+        drop(bus);
+
+        // Log VM topology on MMIO access.
+        let nr = vcpu.vm.nr_vcpus();
+        let this_pcpu = khal::percpu::this_cpu_id().as_usize();
+        log::info!(
+            "[VMM] MMIO {}: IPA={:#x} vcpu{} on pCPU{}",
+            if is_write { "write" } else { "read" },
+            ipa,
+            vcpu.vcpu_id,
+            this_pcpu,
+        );
+        for i in 0..nr as u32 {
+            let pcpu = vcpu.vm.vcpu_pcpu(i);
+            if pcpu >= 0 {
+                log::info!("[VMM]   vcpu{} → pCPU{}", i, pcpu);
+            }
+        }
+
+        // Advance past faulting instruction and resume.
+        vcpu.arch.elr += 4;
+        return ExitAction::Resume;
+    }
+    drop(bus);
+
     log::error!(
-        "[VMM] Stage-2 {} fault: FAR={:#x} ELR={:#x} (aarch64, Phase 5 needed)",
-        if wnr == 1 { "write" } else { "read" },
+        "[VMM] Stage-2 {} fault: IPA={:#x} FAR={:#x} ELR={:#x}",
+        if is_write { "write" } else { "read" },
+        ipa,
         far,
-        vcpu.elr,
+        vcpu.arch.elr,
     );
     ExitAction::Exit
 }
 
 impl VmmArch for Aarch64Vhe {
     type ArchVcpu = Aarch64Vcpu;
+    type GuestMem = crate::mm::stage2::Stage2;
 
     fn init_vcpu(vcpu: &mut Vcpu<Self>, entry: u64, sp: u64) -> bool {
         vcpu.arch.elr = kaddr_layout::v2p(entry as usize) as u64;
@@ -162,30 +208,36 @@ impl VmmArch for Aarch64Vhe {
     }
 
     fn exit_handler(vcpu: &mut Vcpu<Self>) -> ExitAction {
+        // Unmask IRQ — EL2 entry masks PSTATE.I; host needs interrupts.
+        // SAFETY: re-enabling IRQ in host context is safe.
+        unsafe { core::arch::asm!("msr daifclr, #2") };
+
+        let exit_type = vcpu.arch.exit_type;
+
+        if exit_type != 0 {
+            // IRQ/FIQ/SError — not a synchronous exception.
+            // ESR_EL2 is stale; just yield and resume guest.
+            ktask::yield_now();
+            return ExitAction::Resume;
+        }
+
+        // Synchronous exception — ESR_EL2 is valid.
         let esr = read_esr_el2();
         let ec = (esr >> 26) as u32;
 
         match ec {
             EC_WFI_WFE => handle_wfi(&mut vcpu.arch, esr),
             EC_HVC64 => handle_hvc(&mut vcpu.arch),
-            EC_DATA_ABORT_LOWER => handle_data_abort(&vcpu.arch, esr),
+            EC_DATA_ABORT_LOWER => handle_data_abort(vcpu, esr),
             _ => {
-                log::error!(
-                    "[VMM] Unhandled exit: EC={:#x} ESR={:#x} ELR={:#x} SPSR={:#x}",
+                let far = read_far_el2();
+                log::warn!(
+                    "[VMM] Unhandled sync EC={:#x} ESR={:#x} FAR={:#x} ELR={:#x}",
                     ec,
                     esr,
+                    far,
                     vcpu.arch.elr,
-                    vcpu.arch.spsr,
                 );
-                for i in (0..8).step_by(2) {
-                    log::error!(
-                        "  x{}={:#x}  x{}={:#x}",
-                        i,
-                        vcpu.arch.gprs[i],
-                        i + 1,
-                        vcpu.arch.gprs[i + 1],
-                    );
-                }
                 ExitAction::Exit
             }
         }
@@ -198,7 +250,9 @@ impl VmmArch for Aarch64Vhe {
         }
     }
 
-    fn guest_test_entry() -> u64 {
-        kvmm_guest_test_entry as *const () as u64
+    fn guest_test_code() -> (*const u8, usize) {
+        let start = kvmm_guest_test_entry as *const u8;
+        let end = kvmm_guest_test_entry_end as *const u8;
+        (start, end as usize - start as usize)
     }
 }

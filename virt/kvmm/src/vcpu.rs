@@ -4,7 +4,13 @@
 
 //! vCPU control block and VMM run loop.
 
-use crate::arch::VmmArch;
+use alloc::sync::Arc;
+
+use crate::{
+    arch::VmmArch,
+    mm::GuestMem,
+    vm::{VmRef, VmShared},
+};
 
 /// VMM exit action returned by the architecture exit handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +28,7 @@ pub enum ExitAction {
 }
 
 /// Maximum number of vCPUs per VM.
-pub const MAX_VCPUS: usize = 4;
+pub const MAX_VCPUS: usize = 16;
 
 /// Architecture-specific vCPU state.
 ///
@@ -35,17 +41,25 @@ pub struct Vcpu<A: VmmArch> {
     pub arch: A::ArchVcpu,
     /// vCPU identifier within the VM.
     pub vcpu_id: u32,
-    /// Whether the guest has been entered at least once.
+    /// Whether `vmlaunch` has run for this vCPU (x86 VMX only).
+    /// Read by `vmx_run.S` at a fixed ABI offset from `arch`.
     pub launched: bool,
+    /// Back-reference to the parent VM's shared state.
+    pub vm: VmRef<A>,
+    /// Hardware pages owned by this vCPU (e.g. x86 VMCS page).
+    /// Placed after all assembly-visible fields so ABI offsets are stable.
+    pub hw_pages: alloc::vec::Vec<kalloc::GlobalPage>,
 }
 
 impl<A: VmmArch> Vcpu<A> {
-    /// Create a new vCPU with zeroed architecture state.
-    pub fn new(vcpu_id: u32) -> Self {
+    /// Create a new vCPU bound to the given VM.
+    pub fn new(vcpu_id: u32, vm: Arc<VmShared<A>>) -> Self {
         Self {
             arch: A::ArchVcpu::default(),
             vcpu_id,
             launched: false,
+            vm,
+            hw_pages: alloc::vec::Vec::new(),
         }
     }
 }
@@ -60,13 +74,32 @@ impl<A: VmmArch> Vcpu<A> {
 pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
     log::info!("[VMM] Starting vcpu{}", vcpu.vcpu_id);
 
+    // One-time guest memory activation on the vCPU thread.
+    // x86: writes EPTP to VMCS. aarch64/riscv64: writes per-CPU register.
+    {
+        let vm_ref = Arc::clone(&vcpu.vm);
+        if let Some(gm) = vm_ref.guest_mem() {
+            A::activate_guest_mem(vcpu, gm);
+        }
+    }
+
     A::restore_guest_ctx(vcpu);
 
-    loop {
-        if !A::enter_guest(vcpu) {
-            log::error!("[VMM] vcpu{}: guest entry failed", vcpu.vcpu_id);
-            return Err(());
+    let result = loop {
+        let pcpu = khal::percpu::this_cpu_id().as_usize() as i32;
+        vcpu.vm.set_vcpu_pcpu(vcpu.vcpu_id, pcpu);
+
+        if let Some(gm) = vcpu.vm.guest_mem() {
+            gm.activate();
         }
+
+        if !A::enter_guest(vcpu) {
+            vcpu.vm.set_vcpu_pcpu(vcpu.vcpu_id, -1);
+            log::error!("[VMM] vcpu{}: guest entry failed", vcpu.vcpu_id);
+            break Err(());
+        }
+
+        vcpu.vm.set_vcpu_pcpu(vcpu.vcpu_id, -1);
 
         A::save_guest_ctx(vcpu);
 
@@ -74,18 +107,21 @@ pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
             ExitAction::Resume | ExitAction::VmSkip => continue,
             ExitAction::VmExit => {
                 log::info!("[VMM] vcpu{}: guest exited normally", vcpu.vcpu_id);
-                return Ok(());
+                break Ok(());
             }
             ExitAction::VmAbort => {
                 log::warn!("[VMM] vcpu{}: guest aborted", vcpu.vcpu_id);
-                return Ok(());
+                break Ok(());
             }
             ExitAction::Exit => {
                 log::error!("[VMM] vcpu{}: unhandled exit, stopping VMM", vcpu.vcpu_id);
-                return Err(());
+                break Err(());
             }
         }
-    }
+    };
+
+    A::teardown_vcpu(vcpu);
+    result
 }
 
 /// Spawn a kernel thread to run a vCPU.

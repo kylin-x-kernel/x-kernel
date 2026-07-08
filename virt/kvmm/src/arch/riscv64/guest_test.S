@@ -4,7 +4,10 @@
 // RISC-V H-ext guest test program — finite version for selftest.
 //
 // Runs in VS-mode (vsatp=0, no translation).
-// Does 100 iterations of WFI + ecall(PRINT) every 20, then ecall(DONE).
+//
+// a0 = test mode on entry:
+//   0 → normal: 100 iterations then MMIO + ecall(DONE)
+//   non-zero → infinite WFI loop (VM stays alive)
 //
 // ecall protocol (a7 = hypercall number):
 //   a7=1 (PRINT): a0 = iteration count
@@ -18,6 +21,9 @@
 .global kvmm_guest_test_entry_rv
 .type kvmm_guest_test_entry_rv, @function
 kvmm_guest_test_entry_rv:
+    // Check test mode: a0 != 0 → infinite loop
+    bnez    a0, .Linfinite
+
     li      s0, 0             // iteration counter
     li      s1, 100           // max iterations
     li      s2, 20            // print interval
@@ -43,6 +49,11 @@ kvmm_guest_test_entry_rv:
 .Lgt_skip_print:
     blt     s0, s1, .Lgt_loop
 
+    // Test MMIO: store to unmapped GPA triggers G-stage fault.
+    // The VMM handles it via MmioBus dispatch and resumes.
+    li      t0, 0x10000000
+    sw      s0, 0(t0)
+
     // Done.
     li      a7, GUEST_ECALL_DONE
     li      a0, 0
@@ -51,4 +62,11 @@ kvmm_guest_test_entry_rv:
     // Unreachable.
 1:  wfi
     j       1b
+
+.Linfinite:
+    //wfi
+    j       .Linfinite
+
+.global kvmm_guest_test_entry_rv_end
+kvmm_guest_test_entry_rv_end:
 .size kvmm_guest_test_entry_rv, . - kvmm_guest_test_entry_rv

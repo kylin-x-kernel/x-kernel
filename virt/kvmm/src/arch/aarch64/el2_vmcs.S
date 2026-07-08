@@ -29,6 +29,11 @@
 .global el2_enter_guest
 .type el2_enter_guest, @function
 el2_enter_guest:
+    // 0. Mask IRQ to prevent preemption between tpidr_el2 write and eret.
+    //    With VHE (E2H=1), tpidr_el1 and tpidr_el2 alias the same physical
+    //    register. If preempted, another vCPU thread could overwrite it.
+    msr  daifset, #2            // PSTATE.I = 1 (mask IRQ)
+
     // 1. Save host per-CPU pointer (accessed via tpidr_el1 with TGE=1
     //    under VHE E2H=1 aliasing), then stash vcpu pointer in tpidr_el2
     //    (used by el2_trap_exit with TGE=0 to find vcpu).
@@ -60,12 +65,15 @@ el2_enter_guest:
     mrs  x2, vbar_el1
     str  x2, [x0, #376]         // vcpu->host_vbar
 
-    // 5. Switch HCR_EL2 to guest mode: clear TGE, set TWI.
-    //    VM bit is NOT set here — stage-2 must be configured separately
-    //    via kvmm_set_stage2_pgd before enabling VM.
+    // 5. Switch HCR_EL2 to guest mode: clear TGE, set TWI+IMO+FMO.
+    //    IMO/FMO route physical IRQ/FIQ to EL2 so the host timer can
+    //    preempt a guest running a tight loop (no voluntary exit).
+    //    VM bit (Stage-2 enable) is set by Stage2::activate() if configured.
     mrs  x2, hcr_el2
     bic  x2, x2, #(1 << 27)    // clear TGE
     orr  x2, x2, #(1 << 13)    // set TWI
+    orr  x2, x2, #(1 << 4)     // set IMO (route IRQ to EL2)
+    orr  x2, x2, #(1 << 3)     // set FMO (route FIQ to EL2)
     msr  hcr_el2, x2
     isb
 
@@ -106,21 +114,15 @@ el2_enter_guest:
 .size el2_enter_guest, . - el2_enter_guest
 
 
-// ── el2_trap_exit ──
+// ── el2_trap_exit_common ──
 // Called from guest_vec_table when guest traps to EL2.
-// CPU state on entry: x0-x30 = guest values, ELR/SPSR_EL2 = guest PC/PSTATE,
-// SP = host SP_EL2 (unchanged).
-.global el2_trap_exit
-.type el2_trap_exit, @function
-el2_trap_exit:
-    // Spill guest x0, x1 onto host stack.
-    sub  sp, sp, #16
-    stp  x0, x1, [sp, #0]
-
-    // Recover vcpu pointer from tpidr_el2.
-    mrs  x0, tpidr_el2
-
-    // Save guest x2-x30.
+// On entry: x0 = vcpu* (from tpidr_el2), guest x0/x1 on stack,
+// exit_type already stored to vcpu->exit_type by vector entry.
+// x2-x30 = guest values.
+.global el2_trap_exit_common
+.type el2_trap_exit_common, @function
+el2_trap_exit_common:
+    // Save guest x2-x30 (x0 = vcpu*).
     stp  x2,  x3,  [x0, #16]
     stp  x4,  x5,  [x0, #32]
     stp  x6,  x7,  [x0, #48]
@@ -137,9 +139,8 @@ el2_trap_exit:
     stp  x28, x29, [x0, #224]
     str  x30,      [x0, #240]
 
-    // Restore guest x0, x1 from stack and save to vcpu.
-    ldp  x1, x2, [sp, #0]
-    add  sp, sp, #16
+    // Pop guest x0, x1 from stack and save to vcpu.
+    ldp  x1, x2, [sp], #16
     str  x1, [x0, #0]          // vcpu->gprs[0] = guest x0
     str  x2, [x0, #8]          // vcpu->gprs[1] = guest x1
 
@@ -156,10 +157,13 @@ el2_trap_exit:
     mrs  x1, tpidr_el1
     str  x1, [x0, #456]
 
-    // Restore HCR_EL2 to host mode: set TGE, clear TWI.
+    // Restore HCR_EL2 to host mode: set TGE, clear TWI+VM+IMO+FMO.
     mrs  x1, hcr_el2
     orr  x1, x1, #(1 << 27)    // set TGE
     bic  x1, x1, #(1 << 13)    // clear TWI
+    bic  x1, x1, #(1 << 4)     // clear IMO
+    bic  x1, x1, #(1 << 3)     // clear FMO
+    bic  x1, x1, #1            // clear VM (disable Stage-2)
     msr  hcr_el2, x1
     isb
 
@@ -185,4 +189,4 @@ el2_trap_exit:
     mov  sp, x2
 
     ret
-.size el2_trap_exit, . - el2_trap_exit
+.size el2_trap_exit_common, . - el2_trap_exit_common

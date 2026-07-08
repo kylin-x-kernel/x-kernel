@@ -16,6 +16,7 @@ core::arch::global_asm!(include_str!("guest_test.S"));
 unsafe extern "C" {
     fn hext_enter_guest(vcpu: *mut RiscvVcpu) -> i32;
     pub(crate) fn kvmm_guest_test_entry_rv();
+    pub(crate) fn kvmm_guest_test_entry_rv_end();
 }
 
 /// VS-mode ecall cause (scause = 10).
@@ -85,13 +86,13 @@ pub fn hext_init() {
 }
 fn handle_wfi(vcpu: &mut RiscvVcpu) -> ExitAction {
     vcpu.vsepc += 4;
-    ktask::yield_now();
+    ktask::sleep(core::time::Duration::from_millis(1));
     ExitAction::Resume
 }
 
 fn handle_vs_ecall(vcpu: &mut RiscvVcpu) -> ExitAction {
     let nr = vcpu.gprs[17]; // a7
-    // let arg0 = vcpu.gprs[10]; // a0
+    let _arg0 = vcpu.gprs[10]; // a0
 
     // Step past ecall instruction.
     vcpu.vsepc += 4;
@@ -117,6 +118,7 @@ fn handle_vs_ecall(vcpu: &mut RiscvVcpu) -> ExitAction {
 
 impl VmmArch for RiscvHext {
     type ArchVcpu = RiscvVcpu;
+    type GuestMem = crate::mm::gstage::GStage;
 
     fn init_vcpu(vcpu: &mut Vcpu<Self>, entry: u64, sp: u64) -> bool {
         vcpu.arch.vsepc = kaddr_layout::v2p(entry as usize) as u64;
@@ -152,6 +154,7 @@ impl VmmArch for RiscvHext {
                     "csrci sstatus, 0x2",
                 );
             }
+            ktask::yield_now();
             ExitAction::Resume
         } else {
             match code {
@@ -167,6 +170,43 @@ impl VmmArch for RiscvHext {
                         code,
                         vcpu.arch.vsepc,
                         vcpu.arch.stval_save,
+                    );
+                    ExitAction::Exit
+                }
+                20 | 21 | 23 => {
+                    let gpa = (vcpu.arch.htval_save << 2) | (vcpu.arch.stval_save & 0xFFF);
+                    let is_write = code == 23 || code == 21;
+
+                    let mut bus = vcpu.vm.mmio_bus().lock();
+                    if let Some(_val) = bus.handle(gpa, is_write, 4, 0) {
+                        drop(bus);
+
+                        let nr = vcpu.vm.nr_vcpus();
+                        let this_pcpu = khal::percpu::this_cpu_id().as_usize();
+                        log::info!(
+                            "[HEXT] MMIO {}: GPA={:#x} vcpu{} on pCPU{}",
+                            if is_write { "write" } else { "read/fetch" },
+                            gpa,
+                            vcpu.vcpu_id,
+                            this_pcpu,
+                        );
+                        for i in 0..nr as u32 {
+                            let pcpu = vcpu.vm.vcpu_pcpu(i);
+                            if pcpu >= 0 {
+                                log::info!("[HEXT]   vcpu{} → pCPU{}", i, pcpu);
+                            }
+                        }
+
+                        vcpu.arch.vsepc += 4;
+                        return ExitAction::Resume;
+                    }
+                    drop(bus);
+
+                    log::error!(
+                        "[HEXT] G-stage {} fault: gpa={:#x} vsepc={:#x}",
+                        if is_write { "write" } else { "read/fetch" },
+                        gpa,
+                        vcpu.arch.vsepc,
                     );
                     ExitAction::Exit
                 }
@@ -186,8 +226,10 @@ impl VmmArch for RiscvHext {
         // VS-CSRs are saved inside hext_trap_vector assembly.
     }
 
-    fn guest_test_entry() -> u64 {
-        kvmm_guest_test_entry_rv as *const () as u64
+    fn guest_test_code() -> (*const u8, usize) {
+        let start = kvmm_guest_test_entry_rv as *const u8;
+        let end = kvmm_guest_test_entry_rv_end as *const u8;
+        (start, end as usize - start as usize)
     }
 
     fn percpu_hw_init() -> bool {

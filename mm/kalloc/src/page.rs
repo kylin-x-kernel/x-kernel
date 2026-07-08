@@ -18,6 +18,19 @@ pub struct GlobalPage {
 }
 
 impl GlobalPage {
+    /// Reconstruct a `GlobalPage` from a known VA and page count.
+    ///
+    /// # Safety
+    ///
+    /// `start_va` must have been returned by a prior `alloc_pages` with the
+    /// same `num_pages`, and no other `GlobalPage` currently owns it.
+    pub unsafe fn from_raw(start_va: VirtAddr, num_pages: usize) -> Self {
+        Self {
+            start_va,
+            num_pages,
+        }
+    }
+
     /// Allocates one 4K-sized page.
     pub fn alloc() -> KResult<Self> {
         Self::alloc_pages(1)

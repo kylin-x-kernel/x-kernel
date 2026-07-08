@@ -3,8 +3,12 @@
 
 // AArch64 guest trap vector table.
 //
-// Installed into VBAR_EL2 (via vbar_el1 VHE alias) before entering guest.
-// All 16 entries branch to el2_trap_exit.
+// Installed into VBAR_EL2 before entering guest.
+// Each entry saves guest x0/x1 to the host stack, writes exit_type
+// into vcpu->exit_type (offset 520 via tpidr_el2), then branches
+// to el2_trap_exit_common.
+//
+// Exit types: 0=synchronous, 1=IRQ, 2=FIQ, 3=SError
 //
 // AArch64 vector table: 16 entries × 128 bytes each, 2KB aligned.
 //   0x000: Current EL, SP_EL0
@@ -14,9 +18,13 @@
 
 .arch armv8.2-a
 
-.macro KVMM_GUEST_ENTRY
+.macro KVMM_GUEST_ENTRY type
     .balign 128
-    b  el2_trap_exit
+    stp  x0, x1, [sp, #-16]!
+    mrs  x0, tpidr_el2
+    mov  x1, #\type
+    str  x1, [x0, #520]
+    b    el2_trap_exit_common
 .endm
 
 .section .text.kvmm_guest_vec
@@ -24,25 +32,25 @@
 .global kvmm_guest_vec_table
 kvmm_guest_vec_table:
     // 0x000: Current EL + SP_EL0 — Sync / IRQ / FIQ / SError
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
+    KVMM_GUEST_ENTRY 0
+    KVMM_GUEST_ENTRY 1
+    KVMM_GUEST_ENTRY 2
+    KVMM_GUEST_ENTRY 3
 
     // 0x200: Current EL + SP_ELx — Sync / IRQ / FIQ / SError
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
+    KVMM_GUEST_ENTRY 0
+    KVMM_GUEST_ENTRY 1
+    KVMM_GUEST_ENTRY 2
+    KVMM_GUEST_ENTRY 3
 
     // 0x400: Lower EL AArch64 — Sync / IRQ / FIQ / SError
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
+    KVMM_GUEST_ENTRY 0
+    KVMM_GUEST_ENTRY 1
+    KVMM_GUEST_ENTRY 2
+    KVMM_GUEST_ENTRY 3
 
     // 0x600: Lower EL AArch32 — Sync / IRQ / FIQ / SError
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
-    KVMM_GUEST_ENTRY
+    KVMM_GUEST_ENTRY 0
+    KVMM_GUEST_ENTRY 1
+    KVMM_GUEST_ENTRY 2
+    KVMM_GUEST_ENTRY 3
