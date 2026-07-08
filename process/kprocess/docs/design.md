@@ -92,7 +92,7 @@ Process
 |------|------|
 | `Process` | 保存 leader `PidHandle`、父子关系、线程组状态、lifecycle 事件、已退出线程/已回收 child CPU time、zombie 标志、当前进程组、弱 runtime 引用，以及对外 capability 入口 |
 | `ProcessPublication` | 保存 published task/process/group/session 的全局可观测目录，并承载 publish / unpublish / lookup / iteration；目录更新在单次 publication 事务内完成，避免 task/process/group/session lookup 读到跨表半发布状态；其中 `published` 覆盖 zombie 未 reap 的稳定身份，`live` 仅表示非 zombie 的外部可操作进程 |
-| `kidentity` | 维护底层 `PidHandle` 与 `PidNamespace`；`kprocess` 当前对外仍暴露 root/global `Pid/Tid` 语义 |
+| `kidentity` | 作为 process domain 的 identity owner，维护底层 `PidHandle` 与 `PidNamespace`；`kprocess` 当前对外仍暴露 root/global `Pid/Tid` 语义 |
 | `lookup` | `kprocess` 内部目录原语层，负责 `published/live` 合约下的 task/process/group 查找 |
 | `procfs` / `scheduler` / `job_control` / `pidfd` / `process_signals` / `resource_limits` / `process_exit` / `wait_reap` / `system_view` | 面向外部领域语义的窄接口层；外部模块通过这些模块表达“要做什么”，而不是自己理解 `published/live` |
 | `ProcessLifecycleState` | 保存子进程退出事件、进程退出事件、已退出线程 CPU time 和已回收子进程 CPU time |

@@ -174,7 +174,7 @@ kvmm = { path = "virt/kvmm" }
 backtrace = { path = "util/backtrace" }
 kbuild_config = { path = "util/kbuild_config" }
 kerrno = { path = "util/kerrno" }
-kidentity = { path = "util/kidentity" }
+kidentity = { path = "process/kidentity" }
 klogger = { path = "util/klogger" }
 macros = { path = "util/macros" }
 unittest = { path = "util/unittest" }
