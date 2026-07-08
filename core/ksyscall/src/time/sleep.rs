@@ -8,7 +8,8 @@ use kerrno::{KError, KResult};
 use khal::time::TimeValue;
 use ktask::future::{block_on, interruptible, sleep};
 use linux_raw_sys::general::{
-    __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, TIMER_ABSTIME, timespec,
+    __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW, CLOCK_REALTIME, TIMER_ABSTIME,
+    timespec,
 };
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
@@ -52,6 +53,7 @@ pub fn sys_clock_nanosleep(
     let clock = match clock_id as u32 {
         CLOCK_REALTIME => khal::time::wall_time,
         CLOCK_MONOTONIC => khal::time::monotonic_time,
+        CLOCK_MONOTONIC_RAW => return Err(KError::OperationNotSupported),
         _ => {
             warn!("Unsupported clock_id: {clock_id}");
             return Err(KError::InvalidInput);
