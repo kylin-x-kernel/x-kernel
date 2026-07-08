@@ -12,20 +12,16 @@
 
 extern crate alloc;
 
-use alloc::{borrow::Cow, string::String, sync::Arc, vec::Vec};
-use core::{any::Any, task::Context};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 use hashbrown::HashMap;
 use kerrno::KResult;
-use kfd::FileLike;
-use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use kvfs::{
-    DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem, Metadata,
-    MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
-    WeakDirEntry,
+    AnonInodeFs, Dentry, DirContext, FMode, FileDirOperations, FileOperations, InodeDirOperations,
+    InodeOperations, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, SimpleFs,
+    SimpleFsNode, SuperBlock, VfsError, VfsFile, VfsInode, VfsResult,
 };
-use kvfs_simple::{SimpleFs, SimpleFsNode};
 
 /// Linux `BPF_FS_MAGIC`.
 const BPF_FS_MAGIC: u32 = 0xcafe4a11;
@@ -45,21 +41,23 @@ impl BpfProgram {
     pub fn new(insns: Arc<[u8]>) -> Self {
         Self { insns }
     }
-}
 
-impl FileLike for BpfProgram {
-    fn path(&self) -> Cow<'_, str> {
-        "anon_inode:bpf_prog".into()
+    pub fn new_file(insns: Arc<[u8]>) -> VfsResult<Arc<VfsFile>> {
+        Arc::new(Self::new(insns)).into_file()
+    }
+
+    pub fn into_file(self: Arc<Self>) -> VfsResult<Arc<VfsFile>> {
+        let fops: Arc<dyn FileOperations> = self.clone();
+        AnonInodeFs::global().get_file("bpf-prog", fops, self, FMode::READ | FMode::WRITE, 0)
+    }
+
+    pub fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
+        file.private_data_get::<Self>()
+            .ok_or(VfsError::BadFileDescriptor)
     }
 }
 
-impl Pollable for BpfProgram {
-    fn poll(&self) -> IoEvents {
-        IoEvents::empty()
-    }
-
-    fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
-}
+impl FileOperations for BpfProgram {}
 
 #[derive(Clone)]
 enum BpfEntry {
@@ -100,6 +98,10 @@ impl Inode {
         })
     }
 
+    fn is_dir(&self) -> bool {
+        matches!(self.kind, InodeKind::Dir(_))
+    }
+
     fn as_dir(&self) -> VfsResult<&Mutex<HashMap<String, BpfEntry>>> {
         match &self.kind {
             InodeKind::Dir(entries) => Ok(entries),
@@ -119,32 +121,71 @@ impl Inode {
 pub struct BpfNode {
     fs: Arc<SimpleFs>,
     inode: Arc<Inode>,
-    this: Option<WeakDirEntry>,
 }
 
 impl BpfNode {
-    fn new(fs: Arc<SimpleFs>, inode: Arc<Inode>, this: Option<WeakDirEntry>) -> Arc<Self> {
-        Arc::new(Self { fs, inode, this })
+    fn new(fs: Arc<SimpleFs>, inode: Arc<Inode>) -> Arc<Self> {
+        Arc::new(Self { fs, inode })
     }
 
-    fn new_entry(&self, name: &str, entry: BpfEntry) -> VfsResult<DirEntry> {
+    fn new_entry(&self, parent: &Dentry, name: &str, entry: BpfEntry) -> VfsResult<Dentry> {
         let inode = entry.inode();
-        let reference = Reference::new(
-            self.this.as_ref().and_then(WeakDirEntry::upgrade),
-            name.into(),
-        );
+        let d_parent = Some(parent.clone());
+        let d_name = String::from(name);
 
         Ok(match entry {
-            BpfEntry::Dir(_) => DirEntry::new_dir(
-                |this| DirNode::new(Self::new(self.fs.clone(), inode, Some(this))),
-                reference,
+            BpfEntry::Dir(_) => BpfNode::new(self.fs.clone(), inode).into_dentry(
+                NodeFlags::empty(),
+                d_parent,
+                d_name,
             ),
-            BpfEntry::Program(_) => DirEntry::new_file(
-                FileNode::new(Self::new(self.fs.clone(), inode, None)),
-                NodeType::RegularFile,
-                reference,
-            ),
+            BpfEntry::Program(_) => {
+                let node = BpfNode::new(self.fs.clone(), inode);
+                node.into_dentry(NodeFlags::NON_CACHEABLE, d_parent, d_name)
+            }
         })
+    }
+
+    fn into_vfs_inode(self: Arc<Self>, flags: NodeFlags) -> Arc<VfsInode> {
+        let init = self.inode.node.inode_init();
+        let is_dir = self.inode.is_dir();
+        debug_assert_eq!(is_dir, init.node_type() == NodeType::Directory);
+        let private_data: Arc<dyn core::any::Any + Send + Sync> = self.clone();
+        let inode_operations: Arc<dyn InodeOperations> =
+            Arc::new(BpfInodeOperations::new(self.clone()));
+        let file_operations: Arc<dyn FileOperations> = Arc::new(BpfFileOperations::new(self));
+        if is_dir {
+            VfsInode::new_dir_with_operations(
+                private_data,
+                inode_operations,
+                file_operations,
+                flags,
+                init,
+            )
+        } else {
+            VfsInode::new_file_with_operations(
+                private_data,
+                inode_operations,
+                file_operations,
+                flags,
+                init,
+            )
+        }
+    }
+
+    fn into_dentry(
+        self: Arc<Self>,
+        flags: NodeFlags,
+        parent: Option<Dentry>,
+        name: String,
+    ) -> Dentry {
+        let is_dir = self.inode.is_dir();
+        let inode = self.into_vfs_inode(flags);
+        if is_dir {
+            Dentry::new_dir_from_inode(inode, parent, name)
+        } else {
+            Dentry::new_file_from_inode(inode, parent, name)
+        }
     }
 
     fn pin_program(&self, name: &str, program: Arc<BpfProgram>) -> VfsResult<()> {
@@ -162,155 +203,104 @@ impl BpfNode {
     }
 }
 
-impl NodeOps for BpfNode {
-    fn inode(&self) -> u64 {
-        self.inode.node.inode()
+struct BpfInodeOperations {
+    node: Arc<BpfNode>,
+}
+
+impl BpfInodeOperations {
+    fn new(node: Arc<BpfNode>) -> Self {
+        Self { node }
+    }
+}
+
+impl InodeOperations for BpfInodeOperations {
+    fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
+        if self.node.inode.is_dir() {
+            Some(self)
+        } else {
+            None
+        }
     }
 
-    fn metadata(&self) -> VfsResult<Metadata> {
-        let mut metadata = self.inode.node.metadata()?;
-        if let InodeKind::Dir(entries) = &self.inode.kind {
+    fn getattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        let mut metadata = self
+            .node
+            .inode
+            .node
+            .getattr(idmap, path, request_mask, query_flags)?;
+        if let InodeKind::Dir(entries) = &self.node.inode.kind {
             metadata.size = entries.lock().len() as u64;
         }
         Ok(metadata)
     }
 
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        self.inode.node.update_metadata(update)
-    }
-
-    fn sync(&self, _data_only: bool) -> VfsResult<()> {
-        Ok(())
-    }
-
-    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
-
-    fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE
+    fn setattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<()> {
+        self.node.inode.node.setattr(idmap, dentry, update)
     }
 }
 
-impl FileNodeOps for BpfNode {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        Err(VfsError::InvalidInput)
-    }
-
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Err(VfsError::InvalidInput)
-    }
-
-    fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
-        Err(VfsError::InvalidInput)
-    }
-
-    fn set_len(&self, _len: u64) -> VfsResult<()> {
-        Err(VfsError::InvalidInput)
-    }
-
-    fn set_symlink(&self, _target: &str) -> VfsResult<()> {
-        Err(VfsError::InvalidInput)
-    }
-}
-
-impl Pollable for BpfNode {
-    fn poll(&self) -> IoEvents {
-        IoEvents::empty()
-    }
-
-    fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
-}
-
-impl DirNodeOps for BpfNode {
-    fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
-        let children: Vec<(String, Arc<Inode>)> = self
-            .inode
-            .as_dir()?
-            .lock()
-            .iter()
-            .map(|(name, entry)| (name.clone(), entry.inode()))
-            .collect();
-
-        let dotdot = {
-            let parent = self
-                .this
-                .as_ref()
-                .and_then(WeakDirEntry::upgrade)
-                .and_then(|entry| entry.parent());
-            if let Some(parent) = parent {
-                let metadata = parent.metadata()?;
-                (metadata.inode, metadata.node_type)
-            } else {
-                (self.inode(), NodeType::Directory)
-            }
-        };
-
-        let total = 2 + children.len();
-        let start = offset as usize;
-        if start >= total {
-            return Ok(0);
-        }
-
-        let mut count = 0;
-        for i in start..total {
-            let (name, ino, node_type) = match i {
-                0 => (".", self.inode(), NodeType::Directory),
-                1 => ("..", dotdot.0, dotdot.1),
-                j => {
-                    let (name, inode) = &children[j - 2];
-                    let metadata = inode.node.metadata()?;
-                    (name.as_str(), metadata.inode, metadata.node_type)
-                }
-            };
-            if !sink.accept(name, ino, node_type, i as u64 + 1) {
-                break;
-            }
-            count += 1;
-        }
-        Ok(count)
-    }
-
-    fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+impl InodeDirOperations for BpfInodeOperations {
+    fn lookup(
+        &self,
+        _dir: &kvfs::VfsInode,
+        dentry: &Dentry,
+        _flags: kvfs::InodeLookupFlags,
+    ) -> VfsResult<Dentry> {
+        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let name = dentry.name();
         let entry = self
+            .node
             .inode
             .as_dir()?
             .lock()
             .get(name)
             .cloned()
             .ok_or(VfsError::NotFound)?;
-        self.new_entry(name, entry)
+        self.node.new_entry(&dir, name, entry)
     }
 
-    fn supports_dentry_cache(&self) -> bool {
-        false
-    }
-
-    fn create(
+    fn mkdir(
         &self,
-        name: &str,
-        node_type: NodeType,
-        _permission: NodePermission,
-    ) -> VfsResult<DirEntry> {
-        if node_type != NodeType::Directory {
-            return Err(VfsError::OperationNotPermitted);
-        }
-        let inode = Inode::new_dir(self.fs.clone());
+        _idmap: &kvfs::MountIdmap,
+        _dir: &kvfs::VfsInode,
+        dentry: &Dentry,
+        _mode: kvfs::Umode,
+    ) -> VfsResult<Dentry> {
+        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let name = dentry.name();
+        let inode = Inode::new_dir(self.node.fs.clone());
         let entry = BpfEntry::Dir(inode.clone());
-        let mut entries = self.inode.as_dir()?.lock();
+        let mut entries = self.node.inode.as_dir()?.lock();
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
         entries.insert(name.into(), entry.clone());
-        self.new_entry(name, entry)
+        self.node.new_entry(&dir, name, entry)
     }
 
-    fn link(&self, _name: &str, _node: &DirEntry) -> VfsResult<DirEntry> {
+    fn link(
+        &self,
+        _old_dentry: &Dentry,
+        _dir: &kvfs::VfsInode,
+        _new_dentry: &Dentry,
+    ) -> VfsResult<Dentry> {
         Err(VfsError::OperationNotPermitted)
     }
 
-    fn unlink(&self, name: &str) -> VfsResult<()> {
-        let mut entries = self.inode.as_dir()?.lock();
+    fn unlink(&self, _dir: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<()> {
+        let name = dentry.name();
+        let mut entries = self.node.inode.as_dir()?.lock();
         let entry = entries.get(name).ok_or(VfsError::NotFound)?;
         if let InodeKind::Dir(children) = &entry.inode().kind
             && !children.lock().is_empty()
@@ -321,31 +311,130 @@ impl DirNodeOps for BpfNode {
         Ok(())
     }
 
-    fn rename(&self, _src_name: &str, _dst_dir: &DirNode, _dst_name: &str) -> VfsResult<()> {
+    fn rename(
+        &self,
+        _idmap: &kvfs::MountIdmap,
+        _old_dir: &kvfs::VfsInode,
+        _old_dentry: &Dentry,
+        _new_dir: &kvfs::VfsInode,
+        _new_dentry: &Dentry,
+        _flags: kvfs::RenameFlags,
+    ) -> VfsResult<()> {
         Err(VfsError::OperationNotPermitted)
     }
 }
 
-/// Creates a new bpffs filesystem instance.
-pub fn new_bpffs() -> Filesystem {
+struct BpfFileOperations {
+    node: Arc<BpfNode>,
+}
+
+impl BpfFileOperations {
+    fn new(node: Arc<BpfNode>) -> Self {
+        Self { node }
+    }
+}
+
+impl FileOperations for BpfFileOperations {
+    fn dir_operations(&self) -> Option<&dyn FileDirOperations> {
+        if self.node.inode.is_dir() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    fn supports_read(&self) -> bool {
+        self.node.inode.is_dir()
+    }
+
+    fn read(&self, _file: &VfsFile, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        if self.node.inode.is_dir() {
+            Err(VfsError::IsADirectory)
+        } else {
+            Err(VfsError::InvalidInput)
+        }
+    }
+}
+
+impl FileDirOperations for BpfFileOperations {
+    fn iterate_shared(&self, file: &VfsFile, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
+        let children: Vec<(String, Arc<Inode>)> = self
+            .node
+            .inode
+            .as_dir()?
+            .lock()
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.inode()))
+            .collect();
+
+        let current_metadata = file.path().metadata();
+        let dotdot = {
+            if let Some(parent) = file.path().parent() {
+                let metadata = parent.metadata();
+                (metadata.inode, metadata.mode.node_type())
+            } else {
+                (current_metadata.inode, current_metadata.mode.node_type())
+            }
+        };
+
+        let total = 2 + children.len();
+        let offset = ctx.pos();
+        let start = offset as usize;
+        if start >= total {
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        for i in start..total {
+            let (name, ino, node_type) = match i {
+                0 => (
+                    ".",
+                    current_metadata.inode,
+                    current_metadata.mode.node_type(),
+                ),
+                1 => ("..", dotdot.0, dotdot.1),
+                j => {
+                    let (name, inode) = &children[j - 2];
+                    let init = inode.node.inode_init();
+                    (name.as_str(), init.inode_number(), init.node_type())
+                }
+            };
+            if !ctx.emit(name, ino, node_type, i as u64 + 1) {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+}
+
+/// Creates a bpffs superblock.
+pub fn new_bpffs() -> Arc<SuperBlock> {
     SimpleFs::new_with_flags("bpf".into(), BPF_FS_MAGIC, BPF_MOUNT_FLAGS, |fs| {
         let root = Inode::new_dir(fs.clone());
-        Arc::new(move |this| BpfNode::new(fs.clone(), root.clone(), Some(this)))
+        Arc::new(move || {
+            let node = BpfNode::new(fs.clone(), root.clone());
+            node.into_vfs_inode(NodeFlags::empty())
+        })
     })
 }
 
 /// Pins a BPF program in a resolved bpffs directory.
-pub fn pin_program(parent: &kvfs::Location, name: &str, program: Arc<BpfProgram>) -> KResult<()> {
+pub fn pin_program(parent: &kvfs::Path, name: &str, program: Arc<BpfProgram>) -> KResult<()> {
     parent.check_writable_mount()?;
-    parent.check_is_dir()?;
-    let dir = parent.entry().downcast::<BpfNode>()?;
+    if !parent.is_dir() {
+        return Err(VfsError::NotADirectory);
+    }
+    let dir = parent.downcast_node::<BpfNode>()?;
     dir.pin_program(name, program)?;
     Ok(())
 }
 
 /// Returns the BPF program pinned at a resolved bpffs file location.
-pub fn program_from_location(location: &kvfs::Location) -> KResult<Arc<BpfProgram>> {
-    location.check_is_file()?;
-    let file = location.entry().downcast::<BpfNode>()?;
+pub fn program_from_location(location: &kvfs::Path) -> KResult<Arc<BpfProgram>> {
+    if !location.is_file() {
+        return Err(VfsError::InvalidInput);
+    }
+    let file = location.downcast_node::<BpfNode>()?;
     file.program()
 }

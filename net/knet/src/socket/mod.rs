@@ -129,6 +129,14 @@ bitflags! {
         const TRUNCATE = 0x02;
         /// Receive a pending asynchronous error instead of data.
         const ERROR_QUEUE = 0x04;
+        /// Do not block for this receive operation.
+        const DONT_WAIT = 0x08;
+    }
+}
+
+impl RecvFlags {
+    pub(crate) fn nonblocking(self) -> bool {
+        self.contains(Self::DONT_WAIT)
     }
 }
 

@@ -120,9 +120,20 @@ impl GeneralOptions {
         pollable: &P,
         f: F,
     ) -> KResult<T> {
+        self.recv_poller_with_nonblocking(pollable, false, f)
+    }
+
+    /// Poll for receive readiness and run the operation with a per-call
+    /// nonblocking override.
+    pub fn recv_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(
+        &self,
+        pollable: &P,
+        nonblocking: bool,
+        f: F,
+    ) -> KResult<T> {
         block_on(timeout(
             self.recv_timeout(),
-            poll_io(pollable, IoEvents::IN, self.nonblocking(), f),
+            poll_io(pollable, IoEvents::IN, self.nonblocking() || nonblocking, f),
         ))?
     }
 }

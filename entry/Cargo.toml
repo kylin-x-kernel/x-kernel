@@ -14,9 +14,9 @@ dma-trace = ["kfeat/dma-trace"]
 [dependencies]
 kvfs.workspace = true
 kvmm.workspace = true
+fs_context.workspace = true
 xcover.workspace = true
 kfeat.workspace = true
-kfs.workspace = true
 khal.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
@@ -28,11 +28,8 @@ kuaccess.workspace = true
 ksyscall.workspace = true
 kbuild_config.workspace = true
 kcpu_id_map.workspace = true
-kerrno.workspace = true
+linux-raw-sys.workspace = true
 posix-process.workspace = true
-devfs.workspace = true
-memfs.workspace = true
-procfs.workspace = true
 indoc = "2"
 backtrace.workspace = true
 unittest = { workspace = true, optional = true }

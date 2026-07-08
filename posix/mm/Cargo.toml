@@ -12,7 +12,7 @@ documentation.workspace = true
 [dependencies]
 kaddr_layout = { workspace = true }
 kerrno = { workspace = true }
-kfs = { workspace = true }
+kvfs = { workspace = true }
 khal = { workspace = true }
 klogger = { workspace = true }
 kprocess = { workspace = true }

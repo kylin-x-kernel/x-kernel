@@ -74,6 +74,7 @@ ksched = { path = "task/ksched" }
 
 # Internal: process management
 kfutex = { path = "process/kfutex" }
+fs_context = { path = "process/fs_context" }
 kfd = { path = "process/kfd" }
 kfd_objects = { path = "process/kfd_objects" }
 kexec = { path = "process/kexec" }
@@ -96,15 +97,19 @@ posix-bpf = { path = "posix/bpf" }
 
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
-kvfs = { path = "fs/foundation/kvfs" }
-kvfs-simple = { path = "fs/foundation/kvfs-simple" }
+kvfs = { path = "fs/kvfs" }
 bpffs = { path = "fs/filesystems/bpffs" }
 memfs = { path = "fs/filesystems/memfs" }
 kaddr_layout = { path = "mm/kaddr_layout" }
 kalloc = { path = "mm/kalloc" }
-kfs = { path = "fs/runtime/kfs" }
+fat = { path = "fs/filesystems/fat" }
+fs_block = { path = "fs/block" }
+fs_boot = { path = "fs/boot" }
 procfs = { path = "fs/filesystems/procfs" }
 devfs = { path = "fs/filesystems/devfs" }
+fs9p = { path = "fs/filesystems/fs9p", default-features = false }
+rsext4_vfs = { path = "fs/bridges/rsext4_vfs" }
+v9fs = { path = "fs/bridges/v9fs" }
 memaddr = { path = "mm/memaddr" }
 anon = { path = "mm/anon" }
 memspace = { path = "mm/memspace" }
@@ -121,6 +126,7 @@ drmdevice = { path = "io/drmdevice" }
 inputdev = { path = "io/inputdev" }
 kdma = { path = "io/kdma" }
 kio = { path = "io/kio" }
+iov_iter = { path = "io/iov_iter" }
 knet = { path = "net/knet" }
 ktty = { path = "io/ktty" }
 watchdog = { path = "io/watchdog" }
@@ -220,7 +226,6 @@ smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 x86_64 = { version = "0.15.2", features = ["instructions"] }
-fs9p = { path = "fs/filesystems/fs9p", default-features = false }
 ktracepoint = "0.5"
 static-keys = "0.8"
 downcast-rs = { version = "2.0", default-features = false, features = ["sync"] }

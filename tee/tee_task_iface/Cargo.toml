@@ -32,8 +32,8 @@ hashbrown = { workspace = true }
 uuid = { version = "0.8", default-features = false }
 unittest.workspace = true
 kerrno.workspace = true
-kfs.workspace = true
 khal = { workspace = true, optional = true }
+fs_context.workspace = true
 kvfs.workspace = true
 xmas-elf = { workspace = true, default-features = false }
 log.workspace = true

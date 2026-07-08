@@ -37,7 +37,7 @@ kprocess / posix/process / ksyscall / ktty
 4. **terminal 对象类型擦除**：`Session::terminal` 保存 `Arc<dyn Any + Send + Sync>`，只通过指针相等清除，不在 `kprocess` 内 downcast。
 5. **zombie 回收顺序**：`free` 只能作用于 zombie 进程，避免 still-running 子进程从父表中被移除。
 6. **lifecycle 事件归属稳定**：`child_exit_event` 与 `exit_event` 归属于 `Process`，
-   不依赖 `ProcessState` 是否仍可升级。
+   不依赖 `ProcessRuntime` 是否仍可升级。
 7. **弱 runtime 引用非拥有**：`Process` 只保存 `Weak<ProcessRuntime>`，
    不延长 runtime 生命周期；upgrade 失败时由上层折叠为 `NoSuchProcess` 等语义错误。
 8. **live 语义独立于弱 runtime 引用**：外部 `live process` 以 `!is_zombie()` 为准，

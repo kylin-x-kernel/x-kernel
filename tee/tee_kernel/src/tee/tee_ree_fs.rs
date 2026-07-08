@@ -12,7 +12,7 @@ use tee_raw_sys::{TEE_STORAGE_PRIVATE, *};
 
 use super::{
     TeeResult,
-    common::file_ops::{FileVariant, TeeFileLike},
+    common::file_ops::FileVariant,
     fs_dirfile::{
         TeeFsDirfileDirh, TeeFsDirfileFileh, tee_fs_dirfile_close, tee_fs_dirfile_commit_writes,
         tee_fs_dirfile_find, tee_fs_dirfile_get_next, tee_fs_dirfile_get_tmp, tee_fs_dirfile_open,

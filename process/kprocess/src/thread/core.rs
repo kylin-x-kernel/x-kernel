@@ -135,7 +135,7 @@ impl Thread {
 
     /// Prepares a sibling thread clone together with its thread identity.
     pub fn prepare_thread_clone(&self) -> KResult<PreparedUserClone> {
-        let task_number = allocate_thread_task_number(&self.process_runtime())?;
+        let task_number = allocate_thread_task_number()?;
         let thread = Self::new(
             self.process.clone(),
             self.runtime.clone(),

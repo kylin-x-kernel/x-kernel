@@ -5,7 +5,7 @@
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 
 use kalloc::UsageKind;
-use kvfs_simple::{DirMapping, SeqFileNode, SeqIterator, SimpleFile, SimpleFs};
+use kvfs::{DirMapping, SeqFileInode, SeqIterator, SimpleFile, SimpleFs};
 use memaddr::{KB, PAGE_SIZE_4K};
 
 fn bytes_to_kib(bytes: usize) -> usize {
@@ -99,7 +99,7 @@ impl SeqIterator for MeminfoIter {
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "meminfo",
-        SeqFileNode::new_regular(fs.clone(), MeminfoIter::new()),
+        SeqFileInode::new_regular(fs.clone(), MeminfoIter::new),
     );
     root.add(
         "meminfo2",

@@ -1,0 +1,13 @@
+[package]
+name = "fs_block"
+description = "Block-device helpers for filesystem implementations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kclass = { workspace = true, features = ["block"] }

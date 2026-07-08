@@ -4,7 +4,7 @@
 
 //! Network namespace (placeholder).
 
-use crate::types::NamespaceId;
+use kcred::NamespaceId;
 
 /// Network namespace.
 ///

@@ -4,27 +4,33 @@
 
 //! File descriptor entries stored in an [`FdTable`](crate::FdTable).
 
-use alloc::{borrow::Cow, sync::Arc};
+use alloc::sync::Arc;
 use core::ffi::c_int;
 
-use crate::FileLike;
+use kerrno::KResult;
+use kvfs::{Path, VfsFile};
 
 /// A file descriptor entry in the file descriptor table.
 #[derive(Clone)]
 pub struct FileDescriptor {
-    inner: Arc<dyn FileLike>,
+    file: Arc<VfsFile>,
     cloexec: bool,
 }
 
 impl FileDescriptor {
     /// Creates a new descriptor entry.
-    pub(crate) fn new(inner: Arc<dyn FileLike>, cloexec: bool) -> Self {
-        Self { inner, cloexec }
+    pub(crate) fn new(file: Arc<VfsFile>, cloexec: bool) -> Self {
+        Self { file, cloexec }
     }
 
-    /// Returns the underlying file-like object.
-    pub fn inner(&self) -> &Arc<dyn FileLike> {
-        &self.inner
+    /// Returns the underlying open file.
+    pub fn file(&self) -> &Arc<VfsFile> {
+        &self.file
+    }
+
+    /// Closes the descriptor's file reference.
+    pub fn close(self) -> KResult {
+        self.file.close_file()
     }
 
     /// Returns whether this descriptor is marked close-on-exec.
@@ -38,30 +44,30 @@ impl FileDescriptor {
     }
 
     pub(crate) fn snapshot(&self, fd: c_int) -> FdSnapshot {
-        FdSnapshot::new(fd, self.inner.clone(), self.cloexec)
+        FdSnapshot::new(fd, self.file.clone(), self.cloexec)
     }
 }
 
 /// Stable view of a descriptor table entry.
 ///
-/// A snapshot owns a strong reference to the descriptor's file-like object and
+/// A snapshot owns a strong reference to the descriptor's open file and
 /// copies descriptor flags while the fd table is locked. Callers can then drop
 /// the table lock before following procfs magic links, opening files, or
 /// loading exec images.
 #[derive(Clone)]
 pub struct FdSnapshot {
     fd: c_int,
-    inner: Arc<dyn FileLike>,
+    file: Arc<VfsFile>,
     cloexec: bool,
     open_flags: u32,
 }
 
 impl FdSnapshot {
-    fn new(fd: c_int, inner: Arc<dyn FileLike>, cloexec: bool) -> Self {
-        let open_flags = inner.open_flags();
+    fn new(fd: c_int, file: Arc<VfsFile>, cloexec: bool) -> Self {
+        let open_flags = file.flags();
         Self {
             fd,
-            inner,
+            file,
             cloexec,
             open_flags,
         }
@@ -72,9 +78,9 @@ impl FdSnapshot {
         self.fd
     }
 
-    /// Returns the snapshotted file-like object.
-    pub fn inner(&self) -> &Arc<dyn FileLike> {
-        &self.inner
+    /// Returns the snapshotted open file.
+    pub fn file(&self) -> &Arc<VfsFile> {
+        &self.file
     }
 
     /// Returns whether the descriptor was marked close-on-exec.
@@ -87,8 +93,8 @@ impl FdSnapshot {
         self.open_flags
     }
 
-    /// Returns the userspace display path for this descriptor target.
-    pub fn path(&self) -> Cow<'_, str> {
-        self.inner.path()
+    /// Returns the VFS path referenced by this descriptor target.
+    pub fn path(&self) -> &Path {
+        self.file.path()
     }
 }

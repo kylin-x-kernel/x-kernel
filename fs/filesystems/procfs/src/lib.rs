@@ -16,13 +16,14 @@ mod sysrq_nodes;
 mod task_nodes;
 mod trace_nodes;
 
-use kvfs::{Filesystem, ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME};
-use kvfs_simple::SimpleFs;
+use alloc::sync::Arc;
+
+use kvfs::{ST_NODEV, ST_NOEXEC, ST_NOSUID, ST_RELATIME, SimpleFs, SuperBlock};
 
 const PROC_MOUNT_FLAGS: u32 = ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME;
 
-/// Create a new procfs filesystem for process information.
-pub fn new_procfs() -> Filesystem {
+/// Creates a procfs superblock for process information.
+pub fn new_procfs() -> Arc<SuperBlock> {
     SimpleFs::new_with_flags("proc".into(), 0x9fa0, PROC_MOUNT_FLAGS, root::builder)
 }
 

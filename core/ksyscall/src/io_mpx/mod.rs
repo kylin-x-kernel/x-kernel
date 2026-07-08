@@ -17,12 +17,12 @@ mod select;
 use alloc::{sync::Arc, vec::Vec};
 use core::task::Context;
 
-use kfd::FileLike;
 use kpoll::{IoEvents, Pollable};
+use kvfs::VfsFile;
 
 pub use self::{epoll::*, poll::*, select::*};
 
-struct FdPollSet(pub Vec<(Arc<dyn FileLike>, IoEvents)>);
+struct FdPollSet(pub Vec<(Arc<VfsFile>, IoEvents)>);
 impl Pollable for FdPollSet {
     fn poll(&self) -> IoEvents {
         unreachable!()
@@ -30,7 +30,7 @@ impl Pollable for FdPollSet {
 
     fn register(&self, context: &mut Context<'_>, _events: IoEvents) {
         for (file, events) in &self.0 {
-            file.register(context, *events);
+            file.register_poll(context, *events);
         }
     }
 }

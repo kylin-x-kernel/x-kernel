@@ -14,13 +14,13 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{any::TypeId, net::Ipv4Addr, time::Duration};
 
 use kerrno::{KError, KResult, LinuxError};
-use kfd::FileLike;
 use khal::time::wall_time;
 use kio::prelude::*;
 use knet::{
-    AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags, SendOptions, Socket,
-    SocketAddrEx, SocketErrorInfo, SocketOps,
+    AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags, SendOptions,
+    SocketAddrEx, SocketErrorInfo, SocketOps, sock_from_file,
 };
+use kvfs::VfsFile;
 use linux_raw_sys::{
     general::timespec,
     net::{
@@ -56,7 +56,7 @@ fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Dur
 }
 
 fn parse_send_cmsgs(
-    resources: &kprocess::ProcessResources,
+    resources: &kresources::ProcessResources,
     control_ptr: usize,
     control_len: usize,
 ) -> KResult<Vec<AncillaryData>> {
@@ -87,7 +87,7 @@ fn parse_send_cmsgs(
 }
 
 enum SocketAncillary {
-    Rights { fds: Vec<Arc<dyn FileLike>> },
+    Rights { fds: Vec<Arc<VfsFile>> },
     IpError(SocketErrorInfo),
 }
 
@@ -113,7 +113,7 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
 }
 
 fn push_socket_cmsg(
-    resources: &kprocess::ProcessResources,
+    resources: &kresources::ProcessResources,
     builder: &mut CMsgBuilder<'_>,
     ancillary: SocketAncillary,
 ) -> KResult<bool> {
@@ -132,7 +132,7 @@ fn push_socket_cmsg(
                 .into_iter()
                 .zip(data[..body_len].chunks_exact_mut(size_of::<i32>()))
             {
-                let fd = resources.add_file_like(f, false)?;
+                let fd = resources.add_file(f, false)?;
                 chunk.copy_from_slice(&fd.to_ne_bytes());
                 written += size_of::<i32>();
             }
@@ -159,12 +159,17 @@ fn send_impl(
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
-    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
+    let mut send_flags = parse_send_flags(flags);
+    if file.is_nonblocking() {
+        send_flags |= SendFlags::DONT_WAIT;
+    }
     let sent = socket.send(
         &mut src,
         SendOptions {
             to: addr,
-            flags: parse_send_flags(flags),
+            flags: send_flags,
             ancillary,
         },
     )?;
@@ -260,8 +265,9 @@ fn recv_impl(
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
-    let resources = kprocess::current_resources();
-    let socket = resources.get_file_like_as::<Socket>(fd)?;
+    let resources = kprocess::current_user_process().resources()?;
+    let file = resources.get_file(fd)?;
+    let socket = sock_from_file(&file)?;
     let mut recv_flags = RecvFlags::empty();
     if flags & MSG_PEEK != 0 {
         recv_flags |= RecvFlags::PEEK;
@@ -271,6 +277,9 @@ fn recv_impl(
     }
     if flags & MSG_ERRQUEUE != 0 {
         recv_flags |= RecvFlags::ERROR_QUEUE;
+    }
+    if file.is_nonblocking() || flags & MSG_DONTWAIT != 0 {
+        recv_flags |= RecvFlags::DONT_WAIT;
     }
 
     let mut ancillary = Vec::new();

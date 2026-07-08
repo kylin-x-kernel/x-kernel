@@ -23,9 +23,7 @@ kcpu_id_map.workspace = true
 kdevice.workspace = true
 khal.workspace = true
 klockstat = { workspace = true, optional = true }
-kvfs-simple.workspace = true
 kprocess.workspace = true
-kpoll.workspace = true
 ktask.workspace = true
 ktracing.workspace = true
 memaddr.workspace = true

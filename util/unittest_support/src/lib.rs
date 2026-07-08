@@ -84,7 +84,7 @@ impl InstalledTestThread {
             "[unittest-user]".into(),
             Arc::new(vec![]),
             aspace,
-            kfs::new_process_fs_context(),
+            fs_context::copy_init_fs_struct(),
             Arc::new(SpinNoIrq::new(SignalActions::default())),
             Credentials::root(),
         );

@@ -4,7 +4,7 @@
 
 use alloc::sync::Arc;
 
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{DirMapping, SimpleFs};
 
 pub(crate) fn add_root_entries(_root: &mut DirMapping, _fs: Arc<SimpleFs>) {
     // /proc/interrupts stub — will be replaced with per-IRQ statistics from khal.

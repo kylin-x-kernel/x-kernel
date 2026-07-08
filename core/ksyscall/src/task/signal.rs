@@ -12,8 +12,8 @@ use khal::uspace::UserContext;
 use kprocess::Pid;
 use ksignal::{SignalInfo, SignalSet, SignalStack, Signo};
 use linux_raw_sys::general::{
-    MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SS_DISABLE, SS_ONSTACK,
-    timespec,
+    MINSIGSTKSZ, O_NONBLOCK, O_RDWR, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK,
+    SS_DISABLE, SS_ONSTACK, timespec,
 };
 use posix_process::check_signals;
 use posix_types::{
@@ -39,26 +39,22 @@ pub fn sys_rt_sigprocmask(
     let current_thread = kprocess::current_user_thread();
     let signal = current_thread.signal_manager();
     let old = signal.blocked();
-    let requested_set = set
-        .check_non_null()
-        .map(UserConstPtr::read_vm)
-        .transpose()?
-        .map(|set: k_sigset| -> SignalSet { set.into() });
 
     if let Some(oldset) = oldset.check_non_null() {
         oldset.write_vm(old.into())?;
     }
 
-    if let Some(set) = requested_set {
-        let new_mask = match how as u32 {
+    if let Some(set) = set.check_non_null() {
+        let set: SignalSet = set.read_vm()?.into();
+        let set = match how as u32 {
             SIG_BLOCK => old | set,
             SIG_UNBLOCK => old & !set,
             SIG_SETMASK => set,
             _ => return Err(KError::InvalidInput),
         };
 
-        debug!("sys_rt_sigprocmask <= {new_mask:?}");
-        signal.set_blocked(new_mask);
+        debug!("sys_rt_sigprocmask <= {set:?}");
+        signal.set_blocked(set);
     }
 
     Ok(0)
@@ -103,8 +99,12 @@ pub fn sys_rt_sigaction(
 /// See <https://man7.org/linux/man-pages/man2/rt_sigpending.2.html>.
 pub fn sys_rt_sigpending(set: UserPtr<k_sigset>, sigsetsize: usize) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
-    let current_thread = kprocess::current_user_thread();
-    set.write_vm(current_thread.signal_manager().pending().into())?;
+    set.write_vm(
+        kprocess::current_user_thread()
+            .signal_manager()
+            .pending()
+            .into(),
+    )?;
     Ok(0)
 }
 
@@ -235,8 +235,9 @@ pub fn sys_rt_tgsigqueueinfo(
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigreturn.2.html>.
 pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
-    let current_thread = kprocess::current_user_thread();
-    current_thread.signal_manager().restore(uctx);
+    kprocess::current_user_thread()
+        .signal_manager()
+        .restore(uctx);
     Ok(uctx.retval() as isize)
 }
 
@@ -398,16 +399,15 @@ pub fn sys_signalfd4(
     mask.remove(Signo::SIGSTOP);
 
     if fd != -1 {
-        let signalfd = kprocess::current_resources().get_file_like_as::<Signalfd>(fd)?;
-        kfd::FileLike::set_nonblocking(signalfd.as_ref(), flags.contains(SignalfdFlags::NONBLOCK))?;
+        let file = kprocess::current_resources().get_file(fd)?;
+        let signalfd = Signalfd::from_file(&file)?;
         signalfd.update_mask(mask);
         return Ok(fd as _);
     }
 
-    let signalfd = Signalfd::new(mask);
-    kfd::FileLike::set_nonblocking(signalfd.as_ref(), flags.contains(SignalfdFlags::NONBLOCK))?;
+    let file = Signalfd::new_file(mask, O_RDWR | (flags.bits() & O_NONBLOCK))?;
 
     kprocess::current_resources()
-        .add_file_like(signalfd as _, flags.contains(SignalfdFlags::CLOEXEC))
+        .add_file(file, flags.contains(SignalfdFlags::CLOEXEC))
         .map(|fd| fd as _)
 }

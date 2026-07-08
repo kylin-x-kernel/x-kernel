@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 
-use kvfs_simple::{DirMapping, SimpleDir, SimpleFs};
+use kvfs::{DirMapping, SimpleDir, SimpleFs};
 
 /// Register /dev/shm as an empty directory.
 ///

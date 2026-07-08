@@ -13,13 +13,14 @@ use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kfs::OpenOptions;
 use kio::{IoBuf, Read, Write};
 use klazy::lazy_static;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
 use ktask::future::{block_on, interruptible};
-use kvfs::{Location, LookupFlags, LookupIntent, NodeType, WeakVfsInode, lookup_location};
+use kvfs::{
+    DeviceId, Filename, LookupFlags, LookupIntent, NodePermission, NodeType, Path, WeakVfsInode,
+};
 
 pub use self::{dgram::DgramTransport, stream::StreamTransport};
 use crate::{
@@ -98,15 +99,33 @@ lazy_static! {
     static ref PATH_BINDINGS: Mutex<HashMap<usize, PathBindEntry>> = Mutex::new(HashMap::new());
 }
 
-fn path_inode_key(loc: &Location) -> usize {
-    Arc::as_ptr(loc.vfs_inode()) as usize
+fn path_inode_key(loc: &Path) -> usize {
+    loc.inode_key()
 }
 
-fn path_bind_matches(entry: &PathBindEntry, loc: &Location) -> bool {
+fn path_bind_matches(entry: &PathBindEntry, loc: &Path) -> bool {
     entry
         .inode
         .upgrade()
-        .is_some_and(|inode| Arc::ptr_eq(&inode, loc.vfs_inode()))
+        .is_some_and(|inode| Arc::ptr_eq(&inode, &loc.inode()))
+}
+
+fn lookup_or_create_bind_location(root: &Path, pwd: &Path, path: &str) -> KResult<Path> {
+    match Filename::new(path).lookup_at(root, pwd, LookupIntent::Open, LookupFlags::follow()) {
+        Ok(loc) => Ok(loc),
+        Err(err) if err.canonicalize() == KError::NotFound => {
+            let (parent, name) = Filename::new(path)
+                .parent_at(root, pwd, LookupIntent::Open)?
+                .into_normal()?;
+            parent.mknod(
+                &name,
+                NodeType::Socket,
+                NodePermission::from_bits_truncate(0o666),
+                DeviceId::default(),
+            )
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) fn lookup_bind_entry<R>(
@@ -124,15 +143,15 @@ pub(crate) fn lookup_bind_entry<R>(
             }
         }
         UnixAddr::Path(path) => {
-            let fs_context = kprocess::current_fs_context();
-            let fs = fs_context.lock();
-            let loc = lookup_location(
-                &fs.lookup_context(),
-                path.as_ref(),
+            let fs_struct = kprocess::current_fs_context();
+            let fs = fs_struct.lock();
+            let loc = Filename::new(path.as_ref()).lookup_at(
+                fs.root(),
+                fs.pwd(),
                 LookupIntent::Open,
                 LookupFlags::follow(),
             )?;
-            if loc.metadata()?.node_type != NodeType::Socket {
+            if loc.getattr()?.mode.node_type() != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
             let key = path_inode_key(&loc);
@@ -162,15 +181,10 @@ fn lookup_or_create_bind_entry<R>(
             f(bindings.entry(name.clone()).or_default())
         }
         UnixAddr::Path(path) => {
-            let fs_context = kprocess::current_fs_context();
-            let fs = fs_context.lock();
-            let file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .node_type(NodeType::Socket)
-                .open(&fs, path.as_ref())?;
-            let loc = file.location().clone();
-            if loc.metadata()?.node_type != NodeType::Socket {
+            let fs_struct = kprocess::current_fs_context();
+            let fs = fs_struct.lock();
+            let loc = lookup_or_create_bind_location(fs.root(), fs.pwd(), path.as_ref())?;
+            if loc.getattr()?.mode.node_type() != NodeType::Socket {
                 return Err(KError::NotASocket);
             }
             let key = path_inode_key(&loc);
@@ -185,7 +199,7 @@ fn lookup_or_create_bind_entry<R>(
                 bindings
                     .entry(key)
                     .or_insert_with(|| PathBindEntry {
-                        inode: Arc::downgrade(loc.vfs_inode()),
+                        inode: loc.weak_inode(),
                         bind: Arc::new(BindEntry::default()),
                     })
                     .bind

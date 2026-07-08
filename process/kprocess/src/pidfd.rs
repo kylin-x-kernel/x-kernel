@@ -2,13 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{borrow::Cow, sync::Arc};
+use alloc::sync::Arc;
 use core::task::Context;
 
-use kerrno::KResult;
-use kfd::FileLike;
+use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::KtaskRef;
+use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
 
 use crate::{Pid, Process, Tid, lookup};
 
@@ -25,6 +25,23 @@ impl PidFd {
             process: process.clone(),
             exit_event: process.exit_event().clone(),
         }
+    }
+
+    /// Create the anonymous-inode file used by `pidfd_open`.
+    pub fn new_file(process: &Arc<Process>, open_flags: u32) -> KResult<Arc<VfsFile>> {
+        AnonInodeFs::global().get_file(
+            "[pidfd]",
+            Arc::new(PidfdFops),
+            Arc::new(Self::new(process)),
+            FMode::READ | FMode::STREAM,
+            open_flags,
+        )
+    }
+
+    /// Returns the pidfd object attached to a pidfd file.
+    pub fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
+        file.private_data_get::<Self>()
+            .ok_or(KError::BadFileDescriptor)
     }
 
     /// Returns the published process identity.
@@ -51,12 +68,6 @@ pub fn robust_list_task(tid: Tid) -> KResult<KtaskRef> {
     lookup::task(tid)
 }
 
-impl FileLike for PidFd {
-    fn path(&self) -> Cow<'_, str> {
-        "anon_inode:[pidfd]".into()
-    }
-}
-
 impl Pollable for PidFd {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
@@ -67,6 +78,30 @@ impl Pollable for PidFd {
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         if events.contains(IoEvents::IN) {
             self.exit_event.register(context.waker());
+        }
+    }
+}
+
+struct PidfdFops;
+
+impl PidfdFops {
+    fn pidfd(file: &VfsFile) -> KResult<Arc<PidFd>> {
+        PidFd::from_file(file)
+    }
+}
+
+impl FileOperations for PidfdFops {
+    fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> KResult<()> {
+        Ok(())
+    }
+
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        Self::pidfd(file).map_or(IoEvents::ERR, |pidfd| pidfd.poll())
+    }
+
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(pidfd) = Self::pidfd(file) {
+            pidfd.register(context, events);
         }
     }
 }

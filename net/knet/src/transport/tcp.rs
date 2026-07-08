@@ -466,32 +466,33 @@ impl SocketOps for TcpSocket {
         if self.rx_closed.load(Ordering::Acquire) {
             return Err(KError::NotConnected);
         }
-        self.general.recv_poller(self, || {
-            poll_interfaces();
-            self.with_smol_socket(|socket| {
-                if socket.can_recv() {
-                    if options.flags.contains(RecvFlags::PEEK) {
-                        dst.write(
+        self.general
+            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                poll_interfaces();
+                self.with_smol_socket(|socket| {
+                    if socket.can_recv() {
+                        if options.flags.contains(RecvFlags::PEEK) {
+                            dst.write(
+                                socket
+                                    .peek(dst.remaining_mut())
+                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
+                            )
+                        } else {
                             socket
-                                .peek(dst.remaining_mut())
-                                .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
-                        )
+                                .recv(|buf| {
+                                    let result = dst.write(buf);
+                                    let len = result.unwrap_or(0);
+                                    (len, result)
+                                })
+                                .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
+                        }
+                    } else if !socket.may_recv() {
+                        Ok(0)
                     } else {
-                        socket
-                            .recv(|buf| {
-                                let result = dst.write(buf);
-                                let len = result.unwrap_or(0);
-                                (len, result)
-                            })
-                            .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
+                        Err(KError::WouldBlock)
                     }
-                } else if !socket.may_recv() {
-                    Ok(0)
-                } else {
-                    Err(KError::WouldBlock)
-                }
+                })
             })
-        })
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {

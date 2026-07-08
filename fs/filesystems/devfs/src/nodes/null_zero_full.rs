@@ -5,85 +5,129 @@
 //! /dev/null, /dev/zero, and /dev/full device nodes.
 
 use alloc::sync::Arc;
-use core::any::Any;
 
 use kerrno::KError;
-use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, NodeType, SimpleFs, VfsFile,
+    VfsResult,
+};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 /// /dev/null device - discards all writes and returns empty on reads.
 struct Null;
 
-impl DeviceFileOps for Null {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+impl Null {
+    fn read_bytes(&self, _buf: &mut [u8]) -> VfsResult<usize> {
         Ok(0)
     }
 
-    fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    fn write_bytes(&self, buf: &[u8]) -> VfsResult<usize> {
         Ok(buf.len())
     }
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
+impl DeviceFileOps for Null {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        self.read_bytes(buf)
+    }
+
+    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        self.write_bytes(buf)
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
     }
 }
 
 /// /dev/zero device - returns zero-filled data on reads.
 struct Zero;
 
-impl DeviceFileOps for Zero {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+impl Zero {
+    fn read_bytes(&self, buf: &mut [u8]) -> VfsResult<usize> {
         buf.fill(0);
         Ok(buf.len())
     }
 
-    fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    fn write_bytes(&self, buf: &[u8]) -> VfsResult<usize> {
         Ok(buf.len())
     }
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
+impl DeviceFileOps for Zero {
+    fn supports_read(&self) -> bool {
+        true
     }
 
-    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        self.read_bytes(buf)
+    }
+
+    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        self.write_bytes(buf)
+    }
+
+    fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         mapper.map_anonymous_shared()
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
     }
 }
 
 /// /dev/full device - returns ENOSPC error on writes.
 struct Full;
 
-impl DeviceFileOps for Full {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+impl Full {
+    fn read_bytes(&self, buf: &mut [u8]) -> VfsResult<usize> {
         buf.fill(0);
         Ok(buf.len())
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    fn write_bytes(&self, _buf: &[u8]) -> VfsResult<usize> {
         Err(KError::StorageFull)
     }
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
+impl DeviceFileOps for Full {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        self.read_bytes(buf)
+    }
+
+    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        self.write_bytes(buf)
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
     }
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+    add_device_entry(
+        root,
         "null",
         DeviceFile::new(
             fs.clone(),
@@ -92,7 +136,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             Arc::new(Null),
         ),
     );
-    root.add(
+    add_device_entry(
+        root,
         "zero",
         DeviceFile::new(
             fs.clone(),
@@ -101,7 +146,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             Arc::new(Zero),
         ),
     );
-    root.add(
+    add_device_entry(
+        root,
         "full",
         DeviceFile::new(
             fs,
@@ -122,7 +168,7 @@ mod tests {
     fn test_null_read_returns_zero() {
         let dev = Null;
         let mut buf = [0xFFu8; 64];
-        let n = dev.read_at(&mut buf, 0).unwrap();
+        let n = dev.read_bytes(&mut buf).unwrap();
         assert_eq!(n, 0);
     }
 
@@ -130,7 +176,7 @@ mod tests {
     fn test_null_write_accepts_all() {
         let dev = Null;
         let data = [1u8; 128];
-        let n = dev.write_at(&data, 0).unwrap();
+        let n = dev.write_bytes(&data).unwrap();
         assert_eq!(n, 128);
     }
 
@@ -138,7 +184,7 @@ mod tests {
     fn test_zero_read_fills_zeros() {
         let dev = Zero;
         let mut buf = [0xFFu8; 32];
-        let n = dev.read_at(&mut buf, 0).unwrap();
+        let n = dev.read_bytes(&mut buf).unwrap();
         assert_eq!(n, 32);
         assert!(buf.iter().all(|&b| b == 0));
     }
@@ -147,7 +193,7 @@ mod tests {
     fn test_zero_write_accepts_all() {
         let dev = Zero;
         let data = [42u8; 64];
-        let n = dev.write_at(&data, 0).unwrap();
+        let n = dev.write_bytes(&data).unwrap();
         assert_eq!(n, 64);
     }
 
@@ -155,7 +201,7 @@ mod tests {
     fn test_full_read_fills_zeros() {
         let dev = Full;
         let mut buf = [0xFFu8; 16];
-        let n = dev.read_at(&mut buf, 0).unwrap();
+        let n = dev.read_bytes(&mut buf).unwrap();
         assert_eq!(n, 16);
         assert!(buf.iter().all(|&b| b == 0));
     }
@@ -164,7 +210,7 @@ mod tests {
     fn test_full_write_returns_error() {
         let dev = Full;
         let data = [1u8; 8];
-        assert!(dev.write_at(&data, 0).is_err());
+        assert!(dev.write_bytes(&data).is_err());
     }
 
     #[def_test]
@@ -172,7 +218,6 @@ mod tests {
         let dev = Null;
         let flags = dev.flags();
         assert!(flags.contains(NodeFlags::NON_CACHEABLE));
-        assert!(flags.contains(NodeFlags::STREAM));
     }
 
     #[def_test]
@@ -180,6 +225,5 @@ mod tests {
         let dev = Zero;
         let flags = dev.flags();
         assert!(flags.contains(NodeFlags::NON_CACHEABLE));
-        assert!(flags.contains(NodeFlags::STREAM));
     }
 }

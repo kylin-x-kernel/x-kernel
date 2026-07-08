@@ -6,6 +6,7 @@
 
 use core::{mem::MaybeUninit, slice};
 
+use kerrno::KError;
 use kio::prelude::*;
 
 use crate::{read_vm_mem, write_vm_mem};
@@ -29,6 +30,14 @@ impl VmBytes {
     /// Cast to a mutable [`VmBytesMut`].
     pub fn cast_mut(&self) -> VmBytesMut {
         VmBytesMut::new(self.ptr as *mut u8, self.len)
+    }
+
+    /// Moves the buffer cursor backward by `count` bytes.
+    pub fn rewind_bytes(&mut self, count: usize) -> kio::Result<()> {
+        let len = self.len.checked_add(count).ok_or(KError::InvalidInput)?;
+        self.ptr = self.ptr.wrapping_sub(count);
+        self.len = len;
+        Ok(())
     }
 }
 
@@ -74,6 +83,14 @@ impl VmBytesMut {
     /// Cast to a read-only [`VmBytes`].
     pub fn cast_const(&self) -> VmBytes {
         VmBytes::new(self.ptr, self.len)
+    }
+
+    /// Moves the buffer cursor backward by `count` bytes.
+    pub fn rewind_bytes(&mut self, count: usize) -> kio::Result<()> {
+        let len = self.len.checked_add(count).ok_or(KError::InvalidInput)?;
+        self.ptr = self.ptr.wrapping_sub(count);
+        self.len = len;
+        Ok(())
     }
 }
 

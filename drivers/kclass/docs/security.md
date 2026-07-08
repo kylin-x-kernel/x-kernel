@@ -26,7 +26,7 @@
                │
                │ query / subscribe / trait calls
                v
-    knet / kfs / input subsystem / ...
+    knet / fs_boot / input subsystem / ...
 ```
 
 - `kclass` 信任 `kdriver` 在调用 `publish_<class>()` 前已完成驱动 probe，

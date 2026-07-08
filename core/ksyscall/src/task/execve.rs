@@ -18,7 +18,7 @@ use kexec::{ExecRequest, load_user_app_request};
 use khal::uspace::UserContext;
 use ktask::current;
 use kuaccess::vm_load_string;
-use kvfs::{LookupFlags, LookupIntent, lookup_location};
+use kvfs::{Filename, LookupFlags, LookupIntent};
 use osvm::load_vec_until_null;
 
 pub fn sys_execve(
@@ -63,9 +63,9 @@ pub fn sys_execve(
 
     let fs_context = process.fs_context()?;
     let fs = fs_context.lock();
-    let loc = lookup_location(
-        &fs.lookup_context(),
-        path.as_str(),
+    let loc = Filename::new(path.as_str()).lookup_at(
+        fs.root(),
+        fs.pwd(),
         LookupIntent::Exec,
         LookupFlags::follow(),
     )?;

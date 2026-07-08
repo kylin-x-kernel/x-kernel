@@ -3,7 +3,7 @@
 ## 定位
 
 `kfd_objects` 是 x-kernel 中 fd-backed kernel object 的 owner crate。
-它承接那些通过进程 fd table 暴露给用户态、实现 `FileLike` / `Pollable`，
+它承接那些通过进程 fd table 暴露给用户态、实现 VFS `FileOperations` / `Pollable`，
 但本质上不属于路径/VFS 对象的数据和状态机。
 
 当前该 crate 先承接 `TimerFd`、`EventFd`、`PipeObject`、`Signalfd` 和 `Epoll`。
@@ -48,10 +48,10 @@ core/ksyscall adapter
     │ eventfd2 / timerfd_* / pipe2 / epoll_* ABI binding
     v
 process/kfd_objects::{Epoll, EventFd, PipeObject, Signalfd, TimerFd}
-    │ owns epoll/timer/event/pipe/signalfd state and FileLike/Pollable behavior
+    │ owns epoll/timer/event/pipe/signalfd state and FileOperations/Pollable behavior
     v
 kfd / kresources fd table
-    │ stores Arc<dyn FileLike>
+    │ stores Arc<VfsFile>
     v
 read/poll/close via generic fd syscalls
 ```
@@ -61,7 +61,8 @@ read/poll/close via generic fd syscalls
 - syscall ABI 适配留在 `ksyscall`。
 - `kfd_objects` 拥有对象状态、不变量和生命周期。
 - `kfd`/`kresources` 只负责 fd 槽位和对象句柄，不拥有对象业务语义。
-- 路径/VFS 相关逻辑不进入该 crate。
+- 路径查找和通用 VFS 管理不进入该 crate；匿名 fd 对象通过 `VfsFile`
+  和对象自己的 `FileOperations` 暴露行为。
 
 ## `TimerFd` 角色
 
@@ -88,7 +89,7 @@ read/poll/close via generic fd syscalls
 
 - 当前 64-bit 计数值；
 - semaphore 与普通累加两种读语义；
-- 非阻塞模式；
+- 基于打开文件状态的非阻塞读写语义；
 - `poll(IN/OUT)` 的就绪状态与唤醒点。
 
 它不处理：
@@ -107,9 +108,9 @@ read/poll/close via generic fd syscalls
 - `SIGPIPE`、EOF 和 `PIPE_BUF` 原子写入语义；
 - 容量调整与上限检查。
 
-`PipeReadEnd` / `PipeWriteEnd` 是 fd table 中暴露给用户态的 capability view。
-它们共享同一个 `PipeObject`，并通过通用 `read/write/poll/ioctl/close`
-fd 路径暴露语义。
+读端/写端 `VfsFile` 是 fd table 中暴露给用户态的 capability view。
+它们共享同一个 `PipeObject`，并通过对象自己的 `FileOperations` 接入通用
+`read/write/poll/ioctl/close` fd 路径。
 
 它不处理：
 
@@ -122,7 +123,7 @@ fd 路径暴露语义。
 `Signalfd` 拥有：
 
 - signal mask；
-- nonblocking 状态；
+- 基于打开文件状态的 nonblocking 语义；
 - `read()` 消费 pending signal 的 fd 语义；
 - `poll(IN)` 与 pending signal 可见性的对应关系。
 

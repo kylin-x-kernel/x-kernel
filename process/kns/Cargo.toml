@@ -10,9 +10,12 @@ repository.workspace = true
 
 [dependencies]
 bitflags.workspace = true
+fs_context.workspace = true
 kcgroup.workspace = true
-kfs.workspace = true
 kidentity.workspace = true
+kcred.workspace = true
+klazy.workspace = true
 ksync.workspace = true
+kvfs.workspace = true
 linux-raw-sys.workspace = true
 unittest.workspace = true

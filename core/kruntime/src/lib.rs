@@ -272,10 +272,13 @@ pub fn rust_main(arg: usize) -> ! {
     inputdev::init_input();
 
     #[cfg(feature = "fs")]
-    kfs::init_filesystems();
+    {
+        fs_boot::prepare_namespace();
+        fs_boot::mount_virtual_filesystems();
+    }
 
     #[cfg(feature = "fs9p")]
-    kfs::mount_9pfilesystems("/mnt/hostshare");
+    fs_boot::mount_host_share("/mnt/hostshare");
 
     #[cfg(feature = "net")]
     knet::init_network();

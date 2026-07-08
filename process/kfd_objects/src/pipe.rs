@@ -4,150 +4,73 @@
 
 //! `pipe` object implementation.
 
-use alloc::{borrow::Cow, format, sync::Arc};
-use core::{
-    mem,
-    sync::atomic::{AtomicBool, Ordering},
-    task::Context,
-};
+use alloc::{collections::VecDeque, sync::Arc};
+use core::task::Context;
 
 use kerrno::{KError, KResult};
-use kfd::{FileLike, IoDst, IoSrc, Kstat};
 use kpoll::{IoEvents, PollSet, Pollable};
-use ksignal::{SignalInfo, Signo};
+use ksignal::{Signo, send_sig_current};
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io};
-use linux_raw_sys::{
-    general::{O_RDONLY, O_WRONLY, S_IFIFO},
-    ioctl::FIONREAD,
-};
-use memaddr::PAGE_SIZE_4K;
+use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode, VfsResult};
+use linux_raw_sys::ioctl::FIONREAD;
 use osvm::VirtMutPtr;
-use ringbuf::{
-    HeapRb,
-    traits::{Consumer, Observer, Producer},
-};
 
-const RING_BUFFER_INIT_SIZE: usize = 65536; // 64 KiB
-const PIPE_MAX_SIZE: usize = 1024 * 1024; // 1 MiB, matching Linux pipe-max-size default.
-const PIPE_BUF: usize = 4096;
+/// Initial pipe buffer capacity in bytes.
+pub const RING_BUFFER_INIT_SIZE: usize = 65536;
+/// Maximum pipe buffer capacity in bytes.
+pub const PIPE_MAX_SIZE: usize = 1024 * 1024;
+/// Maximum size of an atomic pipe write.
+pub const PIPE_BUF: usize = 4096;
 
-/// Shared pipe state exposed through read and write endpoints in the fd table.
-pub struct PipeObject {
-    state: Mutex<PipeState>,
-    poll_rx: PollSet,
-    poll_tx: PollSet,
-}
+const PAGE_SIZE_4K: usize = 4096;
 
 struct PipeState {
-    buffer: HeapRb<u8>,
+    buffer: VecDeque<u8>,
+    capacity: usize,
     readers: usize,
     writers: usize,
 }
 
-fn write_into_vacant_ringbuf(state: &mut PipeState, src: &mut IoSrc) -> KResult<usize> {
-    let (left, right) = state.buffer.vacant_slices_mut();
-
-    // SAFETY: `vacant_slices_mut` exposes writable spare capacity, and `IoSrc`
-    // only initializes the bytes it reports as written.
-    let mut count = unsafe { src.read(left.assume_init_mut()) }?;
-    if count >= left.len() {
-        // SAFETY: same as above for the second vacant slice.
-        count += unsafe { src.read(right.assume_init_mut()) }?;
-    }
-
-    // SAFETY: `count` is exactly the number of bytes just initialized in the
-    // vacant slices, so advancing by it only publishes initialized bytes.
-    unsafe { state.buffer.advance_write_index(count) };
-    Ok(count)
-}
-
-/// Read endpoint for a pipe object.
-pub struct PipeReadEnd {
-    pipe: Arc<PipeObject>,
-    non_blocking: AtomicBool,
-}
-
-/// Write endpoint for a pipe object.
-pub struct PipeWriteEnd {
-    pipe: Arc<PipeObject>,
-    non_blocking: AtomicBool,
+/// Shared pipe state exposed through read and write VFS files in the fd table.
+pub struct PipeObject {
+    state: Mutex<PipeState>,
+    rd_wait: PollSet,
+    wr_wait: PollSet,
 }
 
 /// Pipe endpoint resolved from a file descriptor lookup.
 pub enum PipeEndpoint {
-    Read(Arc<PipeReadEnd>),
-    Write(Arc<PipeWriteEnd>),
-}
-
-impl Drop for PipeReadEnd {
-    fn drop(&mut self) {
-        let should_wake = {
-            let mut state = self.pipe.state.lock();
-            state.readers = state
-                .readers
-                .checked_sub(1)
-                .expect("pipe reader count underflow");
-            state.readers == 0 && state.writers > 0
-        };
-
-        if should_wake {
-            self.pipe.poll_rx.wake();
-            self.pipe.poll_tx.wake();
-        }
-    }
-}
-
-impl Drop for PipeWriteEnd {
-    fn drop(&mut self) {
-        let should_wake = {
-            let mut state = self.pipe.state.lock();
-            state.writers = state
-                .writers
-                .checked_sub(1)
-                .expect("pipe writer count underflow");
-            state.writers == 0 && state.readers > 0
-        };
-
-        if should_wake {
-            self.pipe.poll_rx.wake();
-            self.pipe.poll_tx.wake();
-        }
-    }
+    Read(Arc<PipeObject>),
+    Write(Arc<PipeObject>),
 }
 
 impl PipeObject {
-    /// Create a new pipe object and return its read and write endpoints.
-    pub fn create_endpoints() -> (PipeReadEnd, PipeWriteEnd) {
-        let pipe = Arc::new(Self {
+    fn new_anonymous() -> Arc<Self> {
+        Arc::new(Self {
             state: Mutex::new(PipeState {
-                buffer: HeapRb::new(RING_BUFFER_INIT_SIZE),
+                buffer: VecDeque::with_capacity(RING_BUFFER_INIT_SIZE),
+                capacity: RING_BUFFER_INIT_SIZE,
                 readers: 1,
                 writers: 1,
             }),
-            poll_rx: PollSet::new(),
-            poll_tx: PollSet::new(),
-        });
-        let read_end = PipeReadEnd {
-            pipe: pipe.clone(),
-            non_blocking: AtomicBool::new(false),
-        };
-        let write_end = PipeWriteEnd {
-            pipe,
-            non_blocking: AtomicBool::new(false),
-        };
-        (read_end, write_end)
+            rd_wait: PollSet::new(),
+            wr_wait: PollSet::new(),
+        })
     }
 
-    fn path(&self) -> Cow<'_, str> {
-        format!("pipe:[{}]", self as *const _ as usize).into()
+    fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
+        file.private_data_get::<Self>()
+            .ok_or(KError::BadFileDescriptor)
     }
 
-    fn capacity(&self) -> usize {
-        self.state.lock().buffer.capacity().get()
+    /// Returns the current pipe buffer capacity in bytes.
+    pub fn capacity(&self) -> usize {
+        self.state.lock().capacity
     }
 
-    fn resize(&self, new_size: usize) -> KResult<()> {
+    /// Resize the pipe buffer.
+    pub fn resize(&self, new_size: usize) -> KResult<()> {
         let pages = new_size
             .checked_add(PAGE_SIZE_4K - 1)
             .ok_or(KError::InvalidInput)?
@@ -165,55 +88,52 @@ impl PipeObject {
 
         let should_wake_writers = {
             let mut state = self.state.lock();
-            let old_size = state.buffer.capacity().get();
+            let old_size = state.capacity;
             if new_size == old_size {
                 return Ok(());
             }
-            if new_size < state.buffer.occupied_len() {
+            if new_size < state.buffer.len() {
                 return Err(KError::ResourceBusy);
             }
 
-            let new_buffer = HeapRb::try_new(new_size).map_err(|_| KError::NoMemory)?;
-            let old_buffer = mem::replace(&mut state.buffer, new_buffer);
-            let (left, right) = old_buffer.as_slices();
-            state.buffer.push_slice(left);
-            state.buffer.push_slice(right);
+            let mut new_buffer = VecDeque::with_capacity(new_size);
+            new_buffer.extend(state.buffer.iter().copied());
+            state.buffer = new_buffer;
+            state.capacity = new_size;
             new_size > old_size
         };
 
         if should_wake_writers {
-            self.poll_tx.wake();
+            self.wr_wait.wake();
         }
 
         Ok(())
     }
 
     fn readable_len(&self) -> usize {
-        self.state.lock().buffer.occupied_len()
+        self.state.lock().buffer.len()
     }
 
-    fn read(&self, nonblocking: bool, dst: &mut IoDst) -> KResult<usize> {
-        if dst.is_full() {
+    fn read(&self, nonblocking: bool, buf: &mut [u8]) -> KResult<usize> {
+        if buf.is_empty() {
             return Ok(0);
         }
 
         block_on(poll_io(self, IoEvents::IN, nonblocking, || {
             let (read, has_writers) = {
-                let state = self.state.lock();
-                let (left, right) = state.buffer.as_slices();
-                let mut count = dst.write(left)?;
-                if count >= left.len() {
-                    count += dst.write(right)?;
+                let mut state = self.state.lock();
+                let count = buf.len().min(state.buffer.len());
+                for slot in &mut buf[..count] {
+                    *slot = state
+                        .buffer
+                        .pop_front()
+                        .expect("pipe readable length changed");
                 }
-
-                // SAFETY: `count` is derived from bytes copied out of the current readable
-                // slices, so it never exceeds the readable length protected by this lock.
-                unsafe { state.buffer.advance_read_index(count) };
                 (count, state.writers > 0)
             };
 
             if read > 0 {
-                self.poll_tx.wake();
+                self.wr_wait.wake();
                 Ok(read)
             } else if !has_writers {
                 Ok(0)
@@ -223,40 +143,44 @@ impl PipeObject {
         }))
     }
 
-    fn write(&self, nonblocking: bool, src: &mut IoSrc) -> KResult<usize> {
-        let size = src.remaining();
-        if size == 0 {
+    fn write(&self, nonblocking: bool, buf: &[u8]) -> KResult<usize> {
+        if buf.is_empty() {
             return Ok(0);
         }
 
-        let mut total_written = 0;
+        let size = buf.len();
+        let mut written_total = 0usize;
         block_on(poll_io(self, IoEvents::OUT, nonblocking, || {
             let written = {
                 let mut state = self.state.lock();
                 if state.readers == 0 {
                     None
                 } else {
-                    let available = state.buffer.vacant_len();
-                    if total_written == 0 && size <= PIPE_BUF && available < size {
+                    let available = state.capacity.saturating_sub(state.buffer.len());
+                    if written_total == 0 && size <= PIPE_BUF && available < size {
                         return Err(KError::WouldBlock);
                     }
-                    Some(write_into_vacant_ringbuf(&mut state, src)?)
+                    let count = available.min(size - written_total);
+                    state
+                        .buffer
+                        .extend(buf[written_total..written_total + count].iter().copied());
+                    Some(count)
                 }
             };
 
             let Some(written) = written else {
-                raise_pipe();
-                if total_written > 0 {
-                    return Ok(total_written);
+                let _ = send_sig_current(Signo::SIGPIPE);
+                if written_total > 0 {
+                    return Ok(written_total);
                 }
                 return Err(KError::BrokenPipe);
             };
 
             if written > 0 {
-                self.poll_rx.wake();
-                total_written += written;
-                if total_written == size || nonblocking {
-                    return Ok(total_written);
+                written_total += written;
+                self.rd_wait.wake();
+                if written_total == size || nonblocking {
+                    return Ok(written_total);
                 }
             }
 
@@ -267,10 +191,10 @@ impl PipeObject {
 
 impl Pollable for PipeObject {
     fn poll(&self) -> IoEvents {
-        let mut events = IoEvents::empty();
         let state = self.state.lock();
-        events.set(IoEvents::IN, state.buffer.occupied_len() > 0);
-        events.set(IoEvents::OUT, state.buffer.vacant_len() > 0);
+        let mut events = IoEvents::empty();
+        events.set(IoEvents::IN, !state.buffer.is_empty());
+        events.set(IoEvents::OUT, state.buffer.len() < state.capacity);
         events.set(IoEvents::HUP, state.writers == 0);
         events.set(IoEvents::ERR, state.readers == 0);
         events
@@ -278,45 +202,11 @@ impl Pollable for PipeObject {
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         if events.contains(IoEvents::IN) {
-            self.poll_rx.register(context.waker());
+            self.rd_wait.register(context.waker());
         }
         if events.contains(IoEvents::OUT) {
-            self.poll_tx.register(context.waker());
+            self.wr_wait.register(context.waker());
         }
-    }
-}
-
-impl PipeReadEnd {
-    /// Returns `true` because this endpoint is the read side.
-    pub fn is_read(&self) -> bool {
-        true
-    }
-
-    /// Returns the current pipe buffer capacity in bytes.
-    pub fn capacity(&self) -> usize {
-        self.pipe.capacity()
-    }
-
-    /// Resize the shared pipe buffer.
-    pub fn resize(&self, new_size: usize) -> KResult<()> {
-        self.pipe.resize(new_size)
-    }
-}
-
-impl PipeWriteEnd {
-    /// Returns `true` because this endpoint is the write side.
-    pub fn is_write(&self) -> bool {
-        true
-    }
-
-    /// Returns the current pipe buffer capacity in bytes.
-    pub fn capacity(&self) -> usize {
-        self.pipe.capacity()
-    }
-
-    /// Resize the shared pipe buffer.
-    pub fn resize(&self, new_size: usize) -> KResult<()> {
-        self.pipe.resize(new_size)
     }
 }
 
@@ -334,406 +224,249 @@ impl PipeEndpoint {
     /// Returns the current pipe buffer capacity in bytes.
     pub fn capacity(&self) -> usize {
         match self {
-            Self::Read(pipe) => pipe.capacity(),
-            Self::Write(pipe) => pipe.capacity(),
+            Self::Read(pipe) | Self::Write(pipe) => pipe.capacity(),
         }
     }
 
     /// Resize the shared pipe buffer behind either endpoint.
     pub fn resize(&self, new_size: usize) -> KResult<()> {
         match self {
-            Self::Read(pipe) => pipe.resize(new_size),
-            Self::Write(pipe) => pipe.resize(new_size),
+            Self::Read(pipe) | Self::Write(pipe) => pipe.resize(new_size),
         }
     }
 }
 
+struct PipeFileOperations;
+
+impl PipeFileOperations {
+    fn poll_for(file: &VfsFile, pipe: &PipeObject) -> IoEvents {
+        let mut events = pipe.poll();
+        if !file.mode().contains(FMode::READ) {
+            events.remove(IoEvents::IN);
+            events.remove(IoEvents::HUP);
+        }
+        if !file.mode().contains(FMode::WRITE) {
+            events.remove(IoEvents::OUT);
+            events.remove(IoEvents::ERR);
+        }
+        events
+    }
+}
+
+impl FileOperations for PipeFileOperations {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        if !file.mode().contains(FMode::READ) {
+            return Err(KError::BadFileDescriptor);
+        }
+        PipeObject::from_file(file)?.read(file.is_nonblocking(), buf)
+    }
+
+    fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        if !file.mode().contains(FMode::WRITE) {
+            return Err(KError::BadFileDescriptor);
+        }
+        PipeObject::from_file(file)?.write(file.is_nonblocking(), buf)
+    }
+
+    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+        let pipe = PipeObject::from_file(file)?;
+        match cmd {
+            FIONREAD => {
+                (arg as *mut u32).write_vm(pipe.readable_len() as u32)?;
+                Ok(0)
+            }
+            _ => Err(KError::NotATty),
+        }
+    }
+
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        PipeObject::from_file(file).map_or(IoEvents::ERR, |pipe| Self::poll_for(file, &pipe))
+    }
+
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(pipe) = PipeObject::from_file(file) {
+            pipe.register(context, events);
+        }
+    }
+
+    fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        let pipe = PipeObject::from_file(file)?;
+        if file.mode().contains(FMode::READ) {
+            pipe_close_reader(&pipe);
+        }
+        if file.mode().contains(FMode::WRITE) {
+            pipe_close_writer(&pipe);
+        }
+        Ok(())
+    }
+}
+
+fn pipe_close_reader(pipe: &PipeObject) {
+    let should_wake = {
+        let mut state = pipe.state.lock();
+        state.readers = state.readers.saturating_sub(1);
+        state.readers == 0 && state.writers > 0
+    };
+    if should_wake {
+        pipe.rd_wait.wake();
+        pipe.wr_wait.wake();
+    }
+}
+
+fn pipe_close_writer(pipe: &PipeObject) {
+    let should_wake = {
+        let mut state = pipe.state.lock();
+        state.writers = state.writers.saturating_sub(1);
+        state.writers == 0 && state.readers > 0
+    };
+    if should_wake {
+        pipe.rd_wait.wake();
+        pipe.wr_wait.wake();
+    }
+}
+
+/// Create the read and write VFS files for an anonymous pipe.
+pub fn create_pipe_files(
+    read_flags: u32,
+    write_flags: u32,
+) -> KResult<(Arc<VfsFile>, Arc<VfsFile>)> {
+    let pipe = PipeObject::new_anonymous();
+    let operations: Arc<dyn FileOperations> = Arc::new(PipeFileOperations);
+    let write_file = AnonInodeFs::global().get_file(
+        "[pipe]",
+        operations.clone(),
+        pipe.clone(),
+        FMode::WRITE | FMode::STREAM,
+        write_flags,
+    )?;
+
+    let read_file = write_file.alloc_clone_with_private_data(
+        FMode::READ | FMode::STREAM,
+        read_flags,
+        operations,
+        pipe,
+    )?;
+
+    Ok((read_file, write_file))
+}
+
 /// Resolve the current process file descriptor to a concrete pipe endpoint.
 pub fn current_pipe_endpoint(fd: i32) -> KResult<PipeEndpoint> {
-    let resources = kprocess::current_resources();
-    if let Ok(pipe) = resources.get_file_like_as::<PipeReadEnd>(fd) {
+    let file = kprocess::current_resources().get_file(fd)?;
+    let pipe = PipeObject::from_file(&file)?;
+    if file.mode().contains(FMode::READ) {
         return Ok(PipeEndpoint::Read(pipe));
     }
-    if let Ok(pipe) = resources.get_file_like_as::<PipeWriteEnd>(fd) {
+    if file.mode().contains(FMode::WRITE) {
         return Ok(PipeEndpoint::Write(pipe));
     }
     Err(KError::BadFileDescriptor)
 }
 
-fn raise_pipe() {
-    kprocess::process_signals::send_to_process(
-        kprocess::current_user_thread().pid(),
-        Some(SignalInfo::new_kernel(Signo::SIGPIPE)),
-    )
-    .expect("Failed to send SIGPIPE");
-}
-
-impl FileLike for PipeReadEnd {
-    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
-        self.pipe.read(self.nonblocking(), dst)
-    }
-
-    fn stat(&self) -> KResult<Kstat> {
-        Ok(Kstat {
-            mode: S_IFIFO | 0o444,
-            ..Default::default()
-        })
-    }
-
-    fn path(&self) -> Cow<'_, str> {
-        self.pipe.path()
-    }
-
-    fn open_flags(&self) -> u32 {
-        O_RDONLY
-    }
-
-    fn set_nonblocking(&self, nonblocking: bool) -> KResult {
-        self.non_blocking.store(nonblocking, Ordering::Release);
-        Ok(())
-    }
-
-    fn nonblocking(&self) -> bool {
-        self.non_blocking.load(Ordering::Acquire)
-    }
-
-    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
-        match cmd {
-            FIONREAD => {
-                (arg as *mut u32).write_vm(self.pipe.readable_len() as u32)?;
-                Ok(0)
-            }
-            _ => Err(KError::NotATty),
-        }
-    }
-}
-
-impl FileLike for PipeWriteEnd {
-    fn write(&self, src: &mut IoSrc) -> KResult<usize> {
-        self.pipe.write(self.nonblocking(), src)
-    }
-
-    fn stat(&self) -> KResult<Kstat> {
-        Ok(Kstat {
-            mode: S_IFIFO | 0o222,
-            ..Default::default()
-        })
-    }
-
-    fn path(&self) -> Cow<'_, str> {
-        self.pipe.path()
-    }
-
-    fn open_flags(&self) -> u32 {
-        O_WRONLY
-    }
-
-    fn set_nonblocking(&self, nonblocking: bool) -> KResult {
-        self.non_blocking.store(nonblocking, Ordering::Release);
-        Ok(())
-    }
-
-    fn nonblocking(&self) -> bool {
-        self.non_blocking.load(Ordering::Acquire)
-    }
-
-    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
-        match cmd {
-            FIONREAD => {
-                (arg as *mut u32).write_vm(self.pipe.readable_len() as u32)?;
-                Ok(0)
-            }
-            _ => Err(KError::NotATty),
-        }
-    }
-}
-
-impl Pollable for PipeReadEnd {
-    fn poll(&self) -> IoEvents {
-        let mut events = self.pipe.poll();
-        events.remove(IoEvents::OUT);
-        events.remove(IoEvents::ERR);
-        events
-    }
-
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        self.pipe.register(context, events);
-    }
-}
-
-impl Pollable for PipeWriteEnd {
-    fn poll(&self) -> IoEvents {
-        let mut events = self.pipe.poll();
-        events.remove(IoEvents::IN);
-        events.remove(IoEvents::HUP);
-        events
-    }
-
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        self.pipe.register(context, events);
-    }
-}
-
 #[cfg(unittest)]
-mod pipe_tests {
-    use alloc::sync::Arc;
-
+mod tests {
     use unittest::def_test;
 
     use super::*;
 
-    #[def_test]
-    fn test_pipe_creation() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-
-        assert!(read_end.is_read());
-        assert!(write_end.is_write());
+    fn pipe_files() -> (Arc<VfsFile>, Arc<VfsFile>, Arc<PipeObject>) {
+        let (read_file, write_file) = create_pipe_files(0, 0).expect("anonymous pipe files open");
+        let pipe = PipeObject::from_file(&read_file).expect("pipe private data is installed");
+        (read_file, write_file, pipe)
     }
 
     #[def_test]
-    fn test_pipe_constants() {
-        assert_eq!(S_IFIFO, 0o010000);
-        assert_eq!(FIONREAD, 0x541B);
+    fn anonymous_pipe_files_share_state() {
+        let (read_file, write_file, pipe) = pipe_files();
+        let write_pipe =
+            PipeObject::from_file(&write_file).expect("pipe private data is installed");
+
+        assert!(read_file.mode().contains(FMode::READ));
+        assert!(write_file.mode().contains(FMode::WRITE));
+        assert!(Arc::ptr_eq(&pipe, &write_pipe));
+        assert_eq!(pipe.capacity(), RING_BUFFER_INIT_SIZE);
     }
 
     #[def_test]
-    fn test_pipe_initial_capacity() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        assert_eq!(read_end.capacity(), RING_BUFFER_INIT_SIZE);
-    }
+    fn anonymous_pipe_poll_after_endpoint_drop() {
+        let (read_file, write_file, _) = pipe_files();
+        drop(write_file);
 
-    #[def_test]
-    fn test_pipe_not_closed_both_alive() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        let read_state = read_end.pipe.state.lock();
-        assert!(read_state.writers > 0);
-        drop(read_state);
-
-        let write_state = write_end.pipe.state.lock();
-        assert!(write_state.readers > 0);
-    }
-
-    #[def_test]
-    fn test_pipe_closed_when_other_dropped() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        drop(write_end);
-        assert_eq!(read_end.pipe.state.lock().writers, 0);
-    }
-
-    #[def_test]
-    fn test_pipe_closed_read_dropped() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        drop(read_end);
-        assert_eq!(write_end.pipe.state.lock().readers, 0);
-    }
-
-    #[def_test]
-    fn test_pipe_nonblocking_default() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        assert!(!read_end.nonblocking());
-        assert!(!write_end.nonblocking());
-    }
-
-    #[def_test]
-    fn test_pipe_set_nonblocking() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        read_end.set_nonblocking(true).unwrap();
-        assert!(read_end.nonblocking());
-        assert!(!write_end.nonblocking());
-
-        write_end.set_nonblocking(true).unwrap();
-        assert!(write_end.nonblocking());
-    }
-
-    #[def_test]
-    fn test_pipe_stat_read_end() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        let stat = read_end.stat().unwrap();
-        assert_eq!(stat.mode, S_IFIFO | 0o444);
-    }
-
-    #[def_test]
-    fn test_pipe_stat_write_end() {
-        let (_read_end, write_end) = PipeObject::create_endpoints();
-        let stat = write_end.stat().unwrap();
-        assert_eq!(stat.mode, S_IFIFO | 0o222);
-    }
-
-    #[def_test]
-    fn test_pipe_path_format() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        let path = read_end.path();
-        assert!(path.starts_with("pipe:["));
-        assert!(path.ends_with("]"));
-    }
-
-    #[def_test]
-    fn test_pipe_poll_empty() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        let r_events = read_end.poll();
-        assert!(!r_events.contains(IoEvents::IN));
-        let w_events = write_end.poll();
-        assert!(w_events.contains(IoEvents::OUT));
-    }
-
-    #[def_test]
-    fn test_pipe_poll_hup_after_writer_dropped() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        drop(write_end);
-        let events = read_end.poll();
+        let events = read_file.poll();
         assert!(!events.contains(IoEvents::IN));
         assert!(events.contains(IoEvents::HUP));
     }
 
     #[def_test]
-    fn test_pipe_poll_err_after_reader_dropped() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        drop(read_end);
-        let events = write_end.poll();
-        assert!(events.contains(IoEvents::OUT));
-        assert!(events.contains(IoEvents::ERR));
-    }
-
-    #[def_test]
-    fn test_pipe_arc_dup_writer_keeps_read_end_open() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        let writer = Arc::new(write_end);
-        let writer_dup = writer.clone();
-
-        drop(writer);
-        assert!(!read_end.poll().contains(IoEvents::HUP));
-
-        drop(writer_dup);
-        assert!(read_end.poll().contains(IoEvents::HUP));
-    }
-
-    #[def_test]
-    fn test_pipe_writer_close_with_buffered_data_reports_in_and_hup() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
+    fn anonymous_pipe_buffered_data_survives_writer_drop() {
+        let (read_file, write_file, _) = pipe_files();
         let data = b"hello";
-        let mut src = kio::Cursor::new(data.as_slice());
+        let mut write_pos = 0;
+        assert_eq!(
+            write_file.write_from(data, &mut write_pos).unwrap(),
+            data.len()
+        );
+        drop(write_file);
 
-        assert_eq!(write_end.write(&mut src).unwrap(), data.len());
-        drop(write_end);
-
-        let events = read_end.poll();
+        let events = read_file.poll();
         assert!(events.contains(IoEvents::IN));
         assert!(events.contains(IoEvents::HUP));
 
         let mut buf = [0u8; 5];
-        let mut dst = kio::Cursor::new(buf.as_mut_slice());
-        assert_eq!(read_end.read(&mut dst).unwrap(), data.len());
-        assert_eq!(&buf, data);
-
-        let events = read_end.poll();
-        assert!(!events.contains(IoEvents::IN));
-        assert!(events.contains(IoEvents::HUP));
-
-        let mut eof_buf = [0u8; 1];
-        let mut eof_dst = kio::Cursor::new(eof_buf.as_mut_slice());
-        assert_eq!(read_end.read(&mut eof_dst).unwrap(), 0);
-    }
-
-    #[def_test]
-    fn test_pipe_resize() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        read_end.resize(4096).unwrap();
-        assert_eq!(read_end.capacity(), 4096);
-    }
-
-    #[def_test]
-    fn test_pipe_resize_rounds_up() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        read_end.resize(5000).unwrap();
-        assert_eq!(read_end.capacity(), 8192);
-    }
-
-    #[def_test]
-    fn test_pipe_resize_rounds_up_to_power_of_two_pages() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        read_end.resize(12 * 1024).unwrap();
-        assert_eq!(read_end.capacity(), 16 * 1024);
-
-        read_end.resize(20 * 1024).unwrap();
-        assert_eq!(read_end.capacity(), 32 * 1024);
-    }
-
-    #[def_test]
-    fn test_pipe_resize_minimum() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        read_end.resize(0).unwrap();
-        assert_eq!(read_end.capacity(), PAGE_SIZE_4K);
-    }
-
-    #[def_test]
-    fn test_pipe_resize_to_maximum() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        read_end.resize(PIPE_MAX_SIZE).unwrap();
-        assert_eq!(read_end.capacity(), PIPE_MAX_SIZE);
-    }
-
-    #[def_test]
-    fn test_pipe_resize_rejects_excessive_size() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
+        let mut read_pos = 0;
         assert_eq!(
-            read_end.resize(PIPE_MAX_SIZE + 1),
+            read_file.read_from(&mut buf, &mut read_pos).unwrap(),
+            data.len()
+        );
+        assert_eq!(&buf, data);
+    }
+
+    #[def_test]
+    fn anonymous_pipe_resize_rounds_to_power_of_two_pages() {
+        let (_, _, pipe) = pipe_files();
+
+        pipe.resize(5000).unwrap();
+        assert_eq!(pipe.capacity(), 8192);
+        pipe.resize(12 * 1024).unwrap();
+        assert_eq!(pipe.capacity(), 16 * 1024);
+    }
+
+    #[def_test]
+    fn anonymous_pipe_resize_rejects_invalid_sizes() {
+        let (_, _, pipe) = pipe_files();
+
+        assert_eq!(
+            pipe.resize(PIPE_MAX_SIZE + 1),
             Err(KError::OperationNotPermitted)
         );
-        assert_eq!(read_end.capacity(), RING_BUFFER_INIT_SIZE);
+        assert_eq!(pipe.capacity(), RING_BUFFER_INIT_SIZE);
+        assert_eq!(pipe.resize(usize::MAX), Err(KError::InvalidInput));
+        assert_eq!(pipe.capacity(), RING_BUFFER_INIT_SIZE);
     }
 
     #[def_test]
-    fn test_pipe_resize_rejects_overflow_size() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        assert_eq!(read_end.resize(usize::MAX), Err(KError::InvalidInput));
-        assert_eq!(read_end.capacity(), RING_BUFFER_INIT_SIZE);
-    }
-
-    #[def_test]
-    fn test_pipe_read_wrong_end() {
-        let (_read_end, write_end) = PipeObject::create_endpoints();
-        let mut buf = [0u8; 10];
-        let mut dst = kio::Cursor::new(buf.as_mut_slice());
-        assert!(write_end.read(&mut dst).is_err());
-    }
-
-    #[def_test]
-    fn test_pipe_write_wrong_end() {
-        let (read_end, _write_end) = PipeObject::create_endpoints();
-        let data = b"hello";
-        let mut src = kio::Cursor::new(data.as_slice());
-        assert!(read_end.write(&mut src).is_err());
-    }
-
-    #[def_test]
-    fn test_pipe_nonblocking_pipe_buf_write_is_atomic() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        read_end.resize(PAGE_SIZE_4K).unwrap();
-        write_end.set_nonblocking(true).unwrap();
+    fn anonymous_pipe_nonblocking_pipe_buf_write_is_atomic() {
+        let (_read_file, write_file, pipe) = pipe_files();
+        pipe.resize(PAGE_SIZE_4K).unwrap();
+        write_file.set_nonblocking(true);
 
         let fill = [0u8; PAGE_SIZE_4K - 64];
-        let mut fill_src = kio::Cursor::new(fill.as_slice());
-        assert_eq!(write_end.write(&mut fill_src).unwrap(), fill.len());
+        let mut pos = 0;
+        assert_eq!(write_file.write_from(&fill, &mut pos).unwrap(), fill.len());
 
         let payload = [1u8; 128];
-        let mut payload_src = kio::Cursor::new(payload.as_slice());
-        assert_eq!(write_end.write(&mut payload_src), Err(KError::WouldBlock));
-        assert_eq!(read_end.pipe.readable_len(), fill.len());
-    }
-
-    #[def_test]
-    fn test_pipe_nonblocking_large_write_allows_partial_progress() {
-        let (read_end, write_end) = PipeObject::create_endpoints();
-        read_end.resize(PAGE_SIZE_4K).unwrap();
-        write_end.set_nonblocking(true).unwrap();
-
-        let fill = [0u8; PAGE_SIZE_4K - 64];
-        let mut fill_src = kio::Cursor::new(fill.as_slice());
-        assert_eq!(write_end.write(&mut fill_src).unwrap(), fill.len());
-
-        let payload = [1u8; PIPE_BUF + 1];
-        let mut payload_src = kio::Cursor::new(payload.as_slice());
-        assert_eq!(write_end.write(&mut payload_src).unwrap(), 64);
-        assert_eq!(read_end.pipe.readable_len(), PAGE_SIZE_4K);
+        assert_eq!(
+            write_file.write_from(&payload, &mut pos),
+            Err(KError::WouldBlock)
+        );
+        assert_eq!(pipe.readable_len(), fill.len());
     }
 }

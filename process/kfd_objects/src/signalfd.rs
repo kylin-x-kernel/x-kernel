@@ -4,20 +4,20 @@
 
 //! Linux `signalfd` object support.
 
-use alloc::{borrow::Cow, sync::Arc};
-use core::{
-    mem,
-    sync::atomic::{AtomicBool, Ordering},
-    task::Context,
-};
+use alloc::sync::Arc;
+use core::{mem, task::Context};
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kfd::{FileLike, IoDst, IoSrc};
 use kpoll::{IoEvents, PollSet, Pollable};
-use ksignal::{SignalInfo, SignalSet};
+use kprocess::AsThread;
+use ksignal::{SignalInfo, SignalSet, api::ThreadSignalManager};
 use ksync::RwLock;
-use ktask::future::{block_on, poll_io};
+use ktask::{
+    current,
+    future::{block_on, poll_io},
+};
+use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
 use zerocopy::{Immutable, IntoBytes};
 
@@ -102,10 +102,9 @@ impl SignalfdSiginfo {
     }
 }
 
-/// A file-like adapter that exposes pending signals through `read`.
+/// Signal file private data.
 pub struct Signalfd {
     mask: RwLock<SignalSet>,
-    non_blocking: AtomicBool,
     poll_rx: PollSet,
 }
 
@@ -113,9 +112,24 @@ impl Signalfd {
     pub fn new(mask: SignalSet) -> Arc<Self> {
         Arc::new(Self {
             mask: RwLock::new(mask),
-            non_blocking: AtomicBool::new(false),
             poll_rx: PollSet::new(),
         })
+    }
+
+    pub fn new_file(mask: SignalSet, open_flags: u32) -> KResult<Arc<VfsFile>> {
+        AnonInodeFs::global().get_file(
+            "[signalfd]",
+            Arc::new(SignalfdFops),
+            Self::new(mask),
+            FMode::READ | FMode::STREAM,
+            open_flags,
+        )
+    }
+
+    /// Returns the signalfd object attached to a signalfd file.
+    pub fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
+        file.private_data_get::<Self>()
+            .ok_or(KError::BadFileDescriptor)
     }
 
     pub fn update_mask(&self, mask: SignalSet) {
@@ -126,64 +140,27 @@ impl Signalfd {
     fn mask(&self) -> SignalSet {
         *self.mask.read()
     }
+}
 
+struct SignalfdAccess {
+    signalfd: Arc<Signalfd>,
+    signal: Arc<ThreadSignalManager>,
+}
+
+impl SignalfdAccess {
     fn has_pending_signals(&self) -> bool {
-        let mask = self.mask();
-        let current_thread = kprocess::current_user_thread();
-        let signal = current_thread.signal_manager();
-        let pending = signal.pending();
+        let mask = self.signalfd.mask();
+        let pending = self.signal.pending();
         !(pending & mask).is_empty()
     }
 
     fn dequeue_signal(&self) -> Option<SignalInfo> {
-        let mask = self.mask();
-        let current_thread = kprocess::current_user_thread();
-        let signal = current_thread.signal_manager();
-        signal.dequeue_signal(&mask)
+        let mask = self.signalfd.mask();
+        self.signal.dequeue_signal(&mask)
     }
 }
 
-impl FileLike for Signalfd {
-    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
-        if dst.remaining_mut() < SIGNALFD_SIGINFO_SIZE {
-            return Err(KError::InvalidInput);
-        }
-
-        block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
-            if let Some(sig_info) = self.dequeue_signal() {
-                let sfd_info = SignalfdSiginfo::from_signal_info(&sig_info);
-                dst.write(sfd_info.as_bytes())?;
-
-                if self.has_pending_signals() {
-                    self.poll_rx.wake();
-                }
-
-                Ok(SIGNALFD_SIGINFO_SIZE)
-            } else {
-                Err(KError::WouldBlock)
-            }
-        }))
-    }
-
-    fn write(&self, _src: &mut IoSrc) -> KResult<usize> {
-        Err(KError::BadFileDescriptor)
-    }
-
-    fn nonblocking(&self) -> bool {
-        self.non_blocking.load(Ordering::Acquire)
-    }
-
-    fn set_nonblocking(&self, non_blocking: bool) -> KResult {
-        self.non_blocking.store(non_blocking, Ordering::Release);
-        Ok(())
-    }
-
-    fn path(&self) -> Cow<'_, str> {
-        "anon_inode:[signalfd]".into()
-    }
-}
-
-impl Pollable for Signalfd {
+impl Pollable for SignalfdAccess {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
         events.set(IoEvents::IN, self.has_pending_signals());
@@ -192,23 +169,90 @@ impl Pollable for Signalfd {
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         if events.contains(IoEvents::IN) {
-            self.poll_rx.register(context.waker());
+            self.signalfd.poll_rx.register(context.waker());
+        }
+    }
+}
+
+struct SignalfdFops;
+
+impl SignalfdFops {
+    fn signalfd(file: &VfsFile) -> KResult<Arc<Signalfd>> {
+        Signalfd::from_file(file)
+    }
+
+    fn current_signal() -> KResult<Arc<ThreadSignalManager>> {
+        let task = current();
+        let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;
+        Ok(thread.signal_manager().clone())
+    }
+
+    fn access(file: &VfsFile) -> KResult<SignalfdAccess> {
+        Ok(SignalfdAccess {
+            signalfd: Self::signalfd(file)?,
+            signal: Self::current_signal()?,
+        })
+    }
+}
+
+impl FileOperations for SignalfdFops {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> KResult<usize> {
+        if buf.len() < SIGNALFD_SIGINFO_SIZE {
+            return Err(KError::InvalidInput);
+        }
+
+        let access = Self::access(file)?;
+        block_on(poll_io(
+            &access,
+            IoEvents::IN,
+            file.is_nonblocking(),
+            || {
+                if let Some(sig_info) = access.dequeue_signal() {
+                    let sfd_info = SignalfdSiginfo::from_signal_info(&sig_info);
+                    buf[..SIGNALFD_SIGINFO_SIZE].copy_from_slice(sfd_info.as_bytes());
+
+                    if access.has_pending_signals() {
+                        access.signalfd.poll_rx.wake();
+                    }
+
+                    Ok(SIGNALFD_SIGINFO_SIZE)
+                } else {
+                    Err(KError::WouldBlock)
+                }
+            },
+        ))
+    }
+
+    fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> KResult<()> {
+        Ok(())
+    }
+
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        Self::access(file).map_or(IoEvents::ERR, |access| access.poll())
+    }
+
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(access) = Self::access(file) {
+            access.register(context, events);
         }
     }
 }
 
 #[cfg(unittest)]
 mod tests {
-    use kio::Cursor;
     use ksignal::Signo;
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
 
     #[def_test]
-    fn test_signalfd_path() {
-        let signalfd = Signalfd::new(SignalSet::default());
-        assert_eq!(signalfd.path(), "anon_inode:[signalfd]");
+    fn test_signalfd_poll_empty() {
+        let file = Signalfd::new_file(SignalSet::default(), 0).expect("signalfd file opens");
+        assert!(file.poll().contains(IoEvents::ERR));
     }
 
     #[def_test]
@@ -219,19 +263,19 @@ mod tests {
 
     #[def_test]
     fn test_signalfd_nonblocking() {
-        let signalfd = Signalfd::new(SignalSet::default());
-        assert!(!signalfd.nonblocking());
-        signalfd.set_nonblocking(true).unwrap();
-        assert!(signalfd.nonblocking());
-        signalfd.set_nonblocking(false).unwrap();
-        assert!(!signalfd.nonblocking());
+        let file = Signalfd::new_file(SignalSet::default(), 0).expect("signalfd file opens");
+        assert!(!file.is_nonblocking());
+        file.set_nonblocking(true);
+        assert!(file.is_nonblocking());
+        file.set_nonblocking(false);
+        assert!(!file.is_nonblocking());
     }
 
     #[def_test]
     fn test_signalfd_write_returns_error() {
-        let signalfd = Signalfd::new(SignalSet::default());
-        let mut src = Cursor::new(b"test".as_slice());
-        assert!(signalfd.write(&mut src).is_err());
+        let file = Signalfd::new_file(SignalSet::default(), 0).expect("signalfd file opens");
+        let mut pos = 0;
+        assert!(file.write_from(b"test", &mut pos).is_err());
     }
 
     #[def_test]

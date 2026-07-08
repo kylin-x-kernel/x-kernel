@@ -13,6 +13,7 @@ kaddr_layout.workspace = true
 kcpu.workspace = true
 kerrno.workspace = true
 khal.workspace = true
+crate_interface.workspace = true
 bitflags = { workspace = true }
 cfg-if = { workspace = true }
 derive_more = { version = "2.0", default-features = false, features = ["full"] }

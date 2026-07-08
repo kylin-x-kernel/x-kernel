@@ -37,7 +37,5 @@ crate_dirs := $(sort $(foreach root,$(package_roots),$(dir $(wildcard $(CURDIR)/
 all_packages := $(notdir $(patsubst %/,%,$(crate_dirs)))
 
 define unit_test
-  $(call run_cmd,cargo test,-p kfs $(1) $(verbose) -- --nocapture)
-  $(call run_cmd,cargo test,-p kfs $(1) --features "myfs" $(verbose) -- --nocapture)
-  $(call run_cmd,cargo test,--workspace --exclude kfs $(1) $(verbose) -- --nocapture)
+  $(call run_cmd,cargo test,--workspace $(1) $(verbose) -- --nocapture)
 endef

@@ -17,6 +17,8 @@ pub enum CloneNsError {
     /// `CLONE_NEWNET`, `CLONE_NEWUSER`, `CLONE_NEWCGROUP`, `CLONE_NEWPID`,
     /// `CLONE_NEWTIME`).
     Unimplemented,
+    /// Mount namespace copy or filesystem-context retargeting failed.
+    Mount(kvfs::VfsError),
 }
 
 /// Errors that can occur when setting a UTS namespace name (nodename or

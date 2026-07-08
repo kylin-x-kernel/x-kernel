@@ -2,68 +2,80 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! File-like interface for network sockets.
+//! Open file operations for network sockets.
 
-use alloc::{borrow::Cow, format, sync::Arc};
-use core::{ffi::c_int, task::Context};
+use alloc::{format, sync::Arc};
+use core::task::Context;
 
 use kerrno::{KError, KResult};
-use kfd::{FdTable, FileLike, IoDst, IoSrc, Kstat};
 use kpoll::{IoEvents, Pollable};
-use ksync::RwLock;
-use linux_raw_sys::general::{O_RDWR, S_IFSOCK};
+use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsResult};
 
-use crate::{
-    RecvOptions, SendOptions, Socket, SocketOps,
-    options::{Configurable, GetSocketOption, SetSocketOption},
-};
+use crate::{RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps};
 
-impl FileLike for Socket {
-    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
-        self.recv(dst, RecvOptions::default())
+pub fn sock_alloc_file(socket: Socket, flags: u32) -> KResult<Arc<VfsFile>> {
+    let socket = Arc::new(socket);
+    let name = format!("socket:[{}]", socket.as_ref() as *const _ as usize);
+    AnonInodeFs::global().get_file(
+        &name,
+        Arc::new(SocketFileOps),
+        socket,
+        FMode::READ | FMode::WRITE | FMode::STREAM,
+        flags,
+    )
+}
+
+pub fn sock_from_file(file: &VfsFile) -> KResult<Arc<Socket>> {
+    file.private_data_get::<Socket>().ok_or(KError::NotASocket)
+}
+
+struct SocketFileOps;
+
+impl SocketFileOps {
+    fn socket(file: &VfsFile) -> VfsResult<Arc<Socket>> {
+        sock_from_file(file)
+    }
+}
+
+impl FileOperations for SocketFileOps {
+    fn supports_read(&self) -> bool {
+        true
     }
 
-    fn write(&self, src: &mut IoSrc) -> KResult<usize> {
-        self.send(src, SendOptions::default())
+    fn supports_write(&self) -> bool {
+        true
     }
 
-    fn stat(&self) -> KResult<Kstat> {
-        // TODO(mivik): implement stat for sockets
-        Ok(Kstat {
-            mode: S_IFSOCK | 0o777u32,
-            blksize: 4096,
-            ..Default::default()
-        })
+    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        let socket = Self::socket(file)?;
+        let mut dst = buf;
+        let mut options = RecvOptions::default();
+        if file.is_nonblocking() {
+            options.flags |= RecvFlags::DONT_WAIT;
+        }
+        socket.recv(&mut dst, options)
     }
 
-    fn nonblocking(&self) -> bool {
-        let mut result = false;
-        self.get_option(GetSocketOption::NonBlocking(&mut result))
-            .unwrap();
-        result
+    fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        let socket = Self::socket(file)?;
+        let src = buf;
+        let mut options = SendOptions::default();
+        if file.is_nonblocking() {
+            options.flags |= SendFlags::DONT_WAIT;
+        }
+        socket.send(src, options)
     }
 
-    fn set_nonblocking(&self, nonblocking: bool) -> KResult<()> {
-        self.set_option(SetSocketOption::NonBlocking(&nonblocking))
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        Self::socket(file)
+            .map(|socket| socket.poll())
+            .unwrap_or_else(|_| IoEvents::ERR)
     }
 
-    fn path(&self) -> Cow<'_, str> {
-        format!("socket:[{}]", self as *const _ as usize).into()
-    }
-
-    fn open_flags(&self) -> u32 {
-        O_RDWR
-    }
-
-    fn from_fd(fd_table: &RwLock<FdTable>, fd: c_int) -> KResult<Arc<Self>>
-    where
-        Self: Sized + 'static,
-    {
-        fd_table
-            .read()
-            .get_file_like(fd)?
-            .downcast_arc()
-            .map_err(|_| KError::NotASocket)
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(socket) = Self::socket(file) {
+            socket.register(context, events);
+        }
     }
 }
 

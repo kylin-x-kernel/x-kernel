@@ -5,9 +5,9 @@
 use alloc::sync::Arc;
 
 use kerrno::KResult;
-use kfs::File;
 use khal::paging::{MappingFlags, PageSize};
 use ksync::Mutex;
+use kvfs::VfsFile;
 use memaddr::VirtAddr;
 use memspace::{FileMappingInfo, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmRuntimeRef};
 use pagecache::{Mapping, MappingViewGuard};
@@ -57,7 +57,7 @@ pub(crate) struct SharedFileSourceSpec {
 pub(crate) struct SharedFileSourceAdapter {
     start: VirtAddr,
     len: usize,
-    file: Arc<File>,
+    file: Arc<VfsFile>,
     mapping: Arc<Mapping>,
     offset_page: u64,
     object: VmObjectId,
@@ -65,7 +65,11 @@ pub(crate) struct SharedFileSourceAdapter {
 }
 
 impl SharedFileSourceAdapter {
-    pub(crate) fn new(file: Arc<File>, mapping: Arc<Mapping>, spec: SharedFileSourceSpec) -> Self {
+    pub(crate) fn new(
+        file: Arc<VfsFile>,
+        mapping: Arc<Mapping>,
+        spec: SharedFileSourceSpec,
+    ) -> Self {
         let object = mapping.identity().vm_object_id();
         let mapping_view = register_cached_mapping_view(
             &mapping,
@@ -102,11 +106,11 @@ impl SharedFileSourceAdapter {
         self.offset_page
     }
 
-    pub(crate) fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &VfsFile {
         &self.file
     }
 
-    pub(crate) fn file_arc(&self) -> Arc<File> {
+    pub(crate) fn file_arc(&self) -> Arc<VfsFile> {
         self.file.clone()
     }
 
@@ -120,7 +124,7 @@ impl SharedFileSourceAdapter {
 
     #[cfg(unittest)]
     pub(crate) fn new_without_view(
-        file: Arc<File>,
+        file: Arc<VfsFile>,
         mapping: Arc<Mapping>,
         mm_id: u64,
         start: VirtAddr,
@@ -160,20 +164,20 @@ pub(crate) fn register_cached_mapping_view(
 pub(crate) fn build_file_runtime(
     start: VirtAddr,
     len: usize,
-    file: &Arc<File>,
+    file: &Arc<VfsFile>,
     offset: usize,
     page_size: PageSize,
     mode: FileMappingMode,
     ctx: FileRuntimeContext<'_>,
 ) -> KResult<VmRuntimeRef> {
-    let mapping = file.page_cache_mapping()?;
+    let mapping = file.page_cache();
     match mode {
         FileMappingMode::Shared => Ok(new_shared_runtime(FileSharedRuntimeSpec {
             start,
             len,
             file: file.clone(),
             mapping,
-            flags: file.flags(),
+            flags: file.mode(),
             offset,
             mm_id: ctx.mm_id,
             invalidate: ctx.invalidate,
@@ -211,12 +215,12 @@ pub fn new_file_private_vma(
     start: VirtAddr,
     len: usize,
     page_size: PageSize,
-    file: Arc<File>,
+    file: Arc<VfsFile>,
     offset: u64,
     file_end: Option<u64>,
     flags: MappingFlags,
 ) -> KResult<(VmArea, VmRuntimeRef)> {
-    let mapping = file.page_cache_mapping()?;
+    let mapping = file.page_cache();
     let runtime = new_private_runtime(
         start,
         len,
@@ -235,9 +239,9 @@ pub fn new_file_private_vma(
             flags,
             max_flags: flags,
             offset,
-            inode: file.location().inode(),
+            inode: file.inode().inode(),
             path: file
-                .location()
+                .path()
                 .absolute_path()
                 .ok()
                 .map(|it| it.as_str().into()),
@@ -251,54 +255,32 @@ pub fn new_file_private_vma(
 mod tests {
     use alloc::sync::Arc;
 
-    use kfs::OpenOptions;
     use khal::paging::MappingFlags;
     use memaddr::{PAGE_SIZE_4K, VirtAddr};
     use memspace::VmBackingKind;
     use unittest::def_test;
 
     use super::{FileRuntimeContext, FileVmaSpec, build_file_runtime, build_file_vma};
-    use crate::test_support::anonymous_location;
+    use crate::test_support::{anonymous_location, open_test_file};
+
+    const O_RDWR: u32 = 2;
 
     #[def_test]
     fn cached_file_sources_share_inode_owned_object_identity() {
         let location = anonymous_location("cached-private-identity");
-        let cached = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open_loc(location.clone())
-            .expect("cached file");
-        let reopened = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open_loc(location)
-            .expect("reopened cached file");
+        let cached = open_test_file(location.clone(), O_RDWR);
+        let reopened = open_test_file(location, O_RDWR);
 
         assert_eq!(
-            cached
-                .page_cache_mapping()
-                .expect("cached file mapping")
-                .identity()
-                .vm_object_id(),
-            reopened
-                .page_cache_mapping()
-                .expect("reopened file mapping")
-                .identity()
-                .vm_object_id()
+            cached.page_cache().identity().vm_object_id(),
+            reopened.page_cache().identity().vm_object_id()
         );
     }
 
     #[def_test]
-    fn private_runtime_from_direct_open_uses_inode_owned_cached_object_identity() {
-        let location = anonymous_location("direct-open-private-runtime");
-        let file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .direct(true)
-                .open_loc(location.clone())
-                .expect("direct file"),
-        );
+    fn private_runtime_from_reopened_file_uses_inode_owned_cached_object_identity() {
+        let location = anonymous_location("reopened-private-runtime");
+        let file = open_test_file(location.clone(), O_RDWR);
         let aspace = Arc::new(ksync::Mutex::new(
             memspace::MmSpace::new_user_empty().expect("mm"),
         ));
@@ -325,19 +307,14 @@ mod tests {
                 flags: MappingFlags::READ | MappingFlags::WRITE,
                 max_flags: MappingFlags::READ | MappingFlags::WRITE,
                 offset: 0,
-                inode: location.inode(),
+                inode: location.inode().inode(),
                 path: None,
             },
             runtime.backing_info(),
         );
 
-        let expected = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open_loc(location)
-            .expect("cached file")
-            .page_cache_mapping()
-            .expect("cached file mapping")
+        let expected = open_test_file(location, O_RDWR)
+            .page_cache()
             .identity()
             .vm_object_id();
         let VmBackingKind::FilePrivate { file_object, .. } = vma.backing().kind() else {

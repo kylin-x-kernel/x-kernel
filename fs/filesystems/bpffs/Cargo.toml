@@ -11,8 +11,6 @@ repository.workspace = true
 [dependencies]
 hashbrown.workspace = true
 kerrno.workspace = true
-kfd.workspace = true
-kpoll.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
-kvfs-simple.workspace = true
+

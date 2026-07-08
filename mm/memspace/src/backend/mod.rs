@@ -107,39 +107,35 @@ pub trait BackendOps {
 
     /// Materialize the page(s) needed to satisfy a fault.
     ///
-    /// The default compatibility path still reuses `populate()`, but higher
-    /// level VMA dispatch now enters through this method so backend-specific
-    /// fault handlers can gradually replace raw populate calls.
+    /// The default path reuses `populate()`, while backend-specific fault
+    /// handlers can override this method.
     fn handle_fault(
         &self,
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         let range = VirtAddrRange::from_start_size(
             ctx.address().align_down(self.page_size()),
             self.page_size() as usize,
         );
         self.populate(range, flags, ctx.access_flags(), pgtbl)
-            .map(FaultCompat::from_populate)
+            .map(FaultCompletion::from_populate)
     }
 }
 
 type PopulateHook = Box<dyn FnOnce(&mut MmSpace)>;
 pub(crate) type PopulateResult = KResult<(usize, Option<PopulateHook>)>;
 
-/// Transitional fault-completion payload returned by backends.
-///
-/// This remains part of the compatibility layer while X-Kernel migrates from
-/// raw `populate()` callbacks toward Linux-style fault handlers.
-pub struct FaultCompat {
+/// Fault-completion payload returned by backends.
+pub struct FaultCompletion {
     populated: usize,
     post_action: Option<PopulateHook>,
     cow_conflict_retry: bool,
 }
 
-impl FaultCompat {
-    /// Builds a fault-completion payload from a legacy populate result.
+impl FaultCompletion {
+    /// Builds a fault-completion payload from a populate result.
     pub fn from_populate((populated, post_action): (usize, Option<PopulateHook>)) -> Self {
         Self {
             populated,
@@ -175,4 +171,4 @@ impl FaultCompat {
 }
 
 /// Result type for runtime fault handlers.
-pub type FaultCompatResult = KResult<FaultCompat>;
+pub type FaultCompletionResult = KResult<FaultCompletion>;

@@ -11,11 +11,7 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
-use kfs::{File, FsContext};
-use kvfs::{
-    LookupFlags, LookupIntent, NodePermission, NodeType, lookup_location, lookup_nonexistent,
-    path::Path,
-};
+use kvfs::{DirContext, Filename, LookupFlags, LookupIntent, NodePermission, NodeType};
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
@@ -27,15 +23,18 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chdir <= path: {path}");
 
-    let fs_context = kprocess::current_user_process_fs_context();
-    let mut fs = fs_context.lock();
-    let entry = lookup_location(
-        &fs.lookup_context(),
-        path.as_str(),
-        LookupIntent::Open,
-        LookupFlags::follow(),
-    )?;
-    fs.set_current_dir(entry)?;
+    let entry = with_fs(AT_FDCWD, |fs| {
+        Filename::new(path.as_str()).lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::follow(),
+        )
+    })?;
+    kprocess::current_user_process()
+        .fs_context()?
+        .lock()
+        .set_pwd(entry)?;
     Ok(0)
 }
 
@@ -43,10 +42,11 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
 pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
-    let entry = with_fs(dirfd, |fs| Ok(fs.current_dir().clone()))?;
-    kprocess::current_user_process_fs_context()
+    let entry = with_fs(dirfd, |fs| Ok(fs.pwd().clone()))?;
+    kprocess::current_user_process()
+        .fs_context()?
         .lock()
-        .set_current_dir(entry)?;
+        .set_pwd(entry)?;
     Ok(0)
 }
 
@@ -60,18 +60,21 @@ pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chroot <= path: {path}");
 
-    let fs_context = kprocess::current_user_process_fs_context();
-    let mut fs = fs_context.lock();
-    let loc = lookup_location(
-        &fs.lookup_context(),
-        path.as_str(),
-        LookupIntent::Open,
-        LookupFlags::follow(),
-    )?;
-    if loc.node_type() != NodeType::Directory {
+    let loc = with_fs(AT_FDCWD, |fs| {
+        Filename::new(path.as_str()).lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::follow(),
+        )
+    })?;
+    if !loc.is_dir() {
         return Err(KError::NotADirectory);
     }
-    *fs = FsContext::new(loc);
+    kprocess::current_user_process()
+        .fs_context()?
+        .lock()
+        .set_root(loc)?;
     Ok(0)
 }
 
@@ -84,36 +87,31 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
     with_fs(dirfd, |fs| {
-        let context = fs.lookup_context();
-        let (dir, name) = match lookup_nonexistent(&context, Path::new(&path), LookupIntent::Open) {
+        let path_exists = || {
+            Filename::new(path.as_str())
+                .lookup_at(
+                    fs.root(),
+                    fs.pwd(),
+                    LookupIntent::Open,
+                    LookupFlags::no_follow(),
+                )
+                .is_ok()
+        };
+        let (dir, name) = match Filename::new(path.as_str()).create_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::DIRECTORY,
+        ) {
             Ok(parent) => parent,
-            Err(KError::InvalidInput)
-                if !path.is_empty()
-                    && lookup_location(
-                        &context,
-                        path.as_str(),
-                        LookupIntent::Open,
-                        LookupFlags::no_follow(),
-                    )
-                    .is_ok() =>
-            {
+            Err(KError::InvalidInput) if !path.is_empty() && path_exists() => {
                 return Err(KError::AlreadyExists);
             }
             Err(err) => return Err(err),
         };
-        match dir.create(name, NodeType::Directory, mode) {
+        match dir.mkdir(&name, mode) {
             Ok(_) => Ok(0),
-            // `mkdir` on an existing path should report `EEXIST`.
-            Err(KError::InvalidInput)
-                if !path.is_empty()
-                    && lookup_location(
-                        &context,
-                        path.as_str(),
-                        LookupIntent::Open,
-                        LookupFlags::no_follow(),
-                    )
-                    .is_ok() =>
-            {
+            Err(KError::InvalidInput) if !path.is_empty() && path_exists() => {
                 Err(KError::AlreadyExists)
             }
             Err(err) => Err(err),
@@ -181,16 +179,18 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     );
 
     let mut buffer = DirBuffer::new(len);
-    let dir = kprocess::current_resources().get_file_like_as::<File>(fd)?;
+    let dir = kprocess::current_resources().get_file(fd)?;
     let mut has_remaining = false;
 
-    dir.read_dir(&mut |name: &str, ino, node_type, offset| {
+    let mut sink = |name: &str, ino, node_type, offset| {
         has_remaining = true;
         if !buffer.write_entry(ino, offset as _, node_type, name.as_bytes()) {
             return false;
         }
         true
-    })?;
+    };
+    let mut ctx = DirContext::new(dir.position(), &mut sink);
+    dir.iterate_dir(&mut ctx)?;
 
     if has_remaining && buffer.offset == 0 {
         return Err(KError::InvalidInput);
@@ -207,9 +207,10 @@ pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
         return Ok(0);
     }
 
-    let cwd = kprocess::current_user_process_fs_context()
+    let cwd = kprocess::current_user_process()
+        .fs_context()?
         .lock()
-        .current_dir()
+        .pwd()
         .absolute_path()?;
     debug!("sys_getcwd => cwd: {cwd}");
 

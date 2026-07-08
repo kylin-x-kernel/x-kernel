@@ -11,8 +11,8 @@
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
-    Socket,
     options::{Configurable, GetSocketOption, SetSocketOption},
+    sock_from_file,
 };
 use linux_raw_sys::net::socklen_t;
 use osvm::{VirtPtr, write_vm_mem};
@@ -221,7 +221,8 @@ pub fn sys_getsockopt(
         .map_err(Into::into)
     }
 
-    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
     macro_rules! dispatch {
         ($which:ident) => {
             let mut val = Default::default();
@@ -261,7 +262,8 @@ pub fn sys_setsockopt(
         val.cast::<T>().read_vm().map_err(KError::from)
     }
 
-    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
     macro_rules! dispatch {
         ($which:ident) => {
             let val = get(optval, optlen)?;

@@ -1567,7 +1567,7 @@ pub fn tee_fs_htree_sync_to_storage(
     }
 
     // TODO: fd through out parameters?
-    // let mut fd = open_file_like("filenamne", FS_OFLAG_DEFAULT, FS_MODE_644)
+    // let mut fd = FileVariant::open("filenamne", FS_OFLAG_DEFAULT, FS_MODE_644)
     //     .map_err(|_| TeeResultCode::ErrorGeneric)?;
 
     sync_tree_to_storage(ht).inspect_err(|e| error!("sync_tree_to_storage error! {:X?}", e))?;

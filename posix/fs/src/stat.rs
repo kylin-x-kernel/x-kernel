@@ -2,17 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux stat and access compatibility entry points.
+//! Stat and access syscall entry points.
 
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
-use kfs::File;
-use kprocess::current_user_process_fs_context;
+use kprocess::current_user_process;
 use kvfs::{
-    Location, LookupFlags, LookupIntent, MountFlags, NodePermission, ST_NOATIME, ST_NODEV,
+    Filename, LookupFlags, LookupIntent, MountFlags, NodePermission, Path, ST_NOATIME, ST_NODEV,
     ST_NODIRATIME, ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW, ST_RDONLY, ST_RELATIME, ST_VALID,
-    lookup_location,
 };
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
@@ -161,10 +159,10 @@ fn statfs_flags(mnt_flags: MountFlags, st_flags: u32) -> u32 {
     flags
 }
 
-fn statfs(loc: &Location) -> KResult<statfs> {
-    let stat = loc.super_block().stat()?;
+fn statfs(loc: &Path) -> KResult<statfs> {
+    let stat = loc.filesystem_stat()?;
     // SAFETY: `statfs` is a plain Linux ABI data structure. Zeroing it
-    // initializes padding and fields that this compatibility layer does not
+    // initializes padding and fields that this syscall path does not
     // currently set explicitly before copying the value to user memory.
     let mut result: statfs = unsafe { core::mem::zeroed() };
     result.f_type = stat.fs_type as _;
@@ -175,11 +173,11 @@ fn statfs(loc: &Location) -> KResult<statfs> {
     result.f_files = stat.file_count as _;
     result.f_ffree = stat.free_file_count as _;
     result.f_fsid = __kernel_fsid_t {
-        val: [0, loc.mountpoint().device() as _],
+        val: [0, loc.mount().synthetic_device_id() as _],
     };
     result.f_namelen = stat.name_length as _;
     result.f_frsize = stat.fragment_size as _;
-    result.f_flags = statfs_flags(loc.mountpoint().flags(), stat.mount_flags) as _;
+    result.f_flags = statfs_flags(loc.mount().flags(), stat.mount_flags) as _;
     Ok(result)
 }
 
@@ -188,15 +186,16 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
     let path = path.load_string()?;
     debug!("sys_statfs <= path: {path:?}");
 
-    let fs_context = current_user_process_fs_context();
-    let fs = fs_context.lock();
-    let location = lookup_location(
-        &fs.lookup_context(),
-        path.as_str(),
+    let process = current_user_process();
+    let fs_struct = process.fs_context()?;
+    let fs = fs_struct.lock();
+    let location = Filename::new(path.as_str()).lookup_at(
+        fs.root(),
+        fs.pwd(),
         LookupIntent::Stat,
         LookupFlags::follow(),
     )?;
-    buf.write_vm(statfs(&location.mountpoint().root_location())?)?;
+    buf.write_vm(statfs(&location.mount().root_path())?)?;
     Ok(0)
 }
 
@@ -204,8 +203,9 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
 pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     debug!("sys_fstatfs <= fd: {fd}");
 
-    let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
-    buf.write_vm(statfs(file.location())?)?;
+    let resources = current_user_process().resources()?;
+    let file = resources.get_file(fd)?;
+    buf.write_vm(statfs(file.path())?)?;
     Ok(0)
 }
 

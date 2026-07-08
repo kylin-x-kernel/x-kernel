@@ -1548,7 +1548,9 @@ pub mod tests_tee_svc_storage {
     use alloc::{string::String, vec::Vec};
     use core::ffi::c_ulong;
 
-    use kvfs::{DirEntrySink, LookupFlags, LookupIntent, NodeType, lookup_location};
+    use kvfs::{
+        DirContext, DirEntrySink, Filename, LookupFlags, LookupIntent, NodeType, dentry_open,
+    };
     use unittest::{assert, assert_eq, assert_ne};
 
     use super::*;
@@ -1607,11 +1609,11 @@ pub mod tests_tee_svc_storage {
     }
 
     fn cleanup_test_storage_root() {
-        let fs_context = kprocess::current_fs_context();
-        let fs = fs_context.lock();
-        let Ok(dir) = lookup_location(
-            &fs.lookup_context(),
-            CFG_TEE_FS_PARENT_PATH,
+        let fs_struct = kprocess::current_fs_context();
+        let fs = fs_struct.lock();
+        let Ok(dir) = Filename::new(CFG_TEE_FS_PARENT_PATH).lookup_at(
+            fs.root(),
+            fs.pwd(),
             LookupIntent::Open,
             LookupFlags::follow(),
         ) else {
@@ -1624,7 +1626,12 @@ pub mod tests_tee_svc_storage {
         let mut offset = 0;
         loop {
             let mut sink = TestStorageDirSink::default();
-            let Ok(read) = dir.read_dir(offset, &mut sink) else {
+            let Ok(file) = dentry_open(dir.clone(), 0) else {
+                break;
+            };
+            file.set_position(offset);
+            let mut ctx = DirContext::new(offset, &mut sink);
+            let Ok(read) = file.iterate_dir(&mut ctx) else {
                 break;
             };
             entries.extend(sink.entries);

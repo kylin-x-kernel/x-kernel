@@ -9,7 +9,7 @@
 
 `posix-mm` 不拥有 VMA tree、页表、page cache、文件对象或 anonymous object。
 这些状态分别由 `mm/memspace`、`mm/filemap`、`pagecache`、`memfs`、
-`kfs` 和 `mm/anon` 维护。
+`kvfs` 和 `mm/anon` 维护。
 
 ## 范围
 
@@ -115,15 +115,15 @@ sys_memfd_create
        -> regular-file inode
        -> inode-owned Mapping
        -> inode-scoped ShmemObjectState
-  -> kfs::OpenOptions::open_loc()
+       -> opened VfsFile
   -> current process fd table install
 ```
 
 `memfd_create` 创建 fd-only 的 tmpfs/shmem 风格匿名文件对象。对象内容由
 regular-file inode 的 inode-owned `pagecache::Mapping` 提供。`posix-mm`
 只处理 syscall ABI、名字校验和 fd 安装；private tmpfs file 创建与 shmem
-policy state 由 `memfs::shmem` factory 拥有，KFS 只负责打开返回的 regular-file
-location。名字只作为调试标签，不进入全局路径命名空间。
+policy state 由 `memfs::shmem` factory 拥有，并由 shmem 对象自己转换成
+opened `VfsFile`。名字只作为调试标签，不进入全局路径命名空间。
 
 `MFD_ALLOW_SEALING` 控制初始 seal state：未设置时对象带
 `F_SEAL_SEAL`，设置时对象从空 seal set 开始。

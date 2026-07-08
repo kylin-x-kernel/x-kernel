@@ -5,21 +5,22 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 
 use kerrno::{KError, KResult};
-use kfs::{File, FileFlags};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
+use kvfs::{FMode, VfsFile};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use memfs::shmem;
 use memspace::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, MsyncPolicy, MsyncRuntimeResult,
     VmArea, VmBackingInfo, VmBackingKind, VmRuntimeOps, VmRuntimeRef,
-    backend::{FaultCompat, FaultCompatResult, map_paging_err, pages_in},
+    backend::{FaultCompletion, FaultCompletionResult, map_paging_err, pages_in},
 };
 
 use crate::runtime::{SharedFileSourceAdapter, SharedFileSourceSpec};
 
 pub(crate) struct FileSharedRuntimeInner {
     source: SharedFileSourceAdapter,
-    flags: FileFlags,
+    flags: FMode,
     shared_ranges: Mutex<Vec<VirtAddrRange>>,
     writable_shared_ranges: Mutex<Vec<VirtAddrRange>>,
 }
@@ -75,9 +76,9 @@ impl FileSharedRuntimeInner {
             .iter()
             .map(|range| Self::writable_pages(*range))
             .sum();
-        self.source
-            .file()
-            .register_shmem_writable_shared_pages(pages)?;
+        let file = self.source.file();
+        file.verify_mode(FMode::WRITE)?;
+        shmem::register_writable_shared_pages(file.path(), pages)?;
         ranges.extend(missing);
         Ok(())
     }
@@ -89,7 +90,7 @@ impl FileSharedRuntimeInner {
             .iter()
             .map(|range| Self::writable_pages(*range))
             .sum();
-        self.source.file().register_shmem_shared_pages(pages)?;
+        shmem::register_shared_pages(self.source.file().path(), pages)?;
         ranges.extend(missing);
         Ok(())
     }
@@ -116,9 +117,7 @@ impl FileSharedRuntimeInner {
         }
         *ranges = remaining;
         drop(ranges);
-        self.source
-            .file()
-            .unregister_shmem_shared_pages(removed_pages);
+        shmem::unregister_shared_pages(self.source.file().path(), removed_pages);
     }
 
     fn unregister_writable_shared_range(&self, range: VirtAddrRange) {
@@ -143,9 +142,7 @@ impl FileSharedRuntimeInner {
         }
         *ranges = remaining;
         drop(ranges);
-        self.source
-            .file()
-            .unregister_shmem_writable_shared_pages(removed_pages);
+        shmem::unregister_writable_shared_pages(self.source.file().path(), removed_pages);
     }
 }
 
@@ -158,12 +155,12 @@ impl FileSharedRuntime {
     }
 
     fn check_flags(&self, flags: MappingFlags) -> KResult {
-        let mut required_flags = FileFlags::empty();
+        let mut required_flags = FMode::empty();
         if flags.contains(MappingFlags::READ) {
-            required_flags |= FileFlags::READ;
+            required_flags |= FMode::READ;
         }
         if flags.contains(MappingFlags::WRITE) {
-            required_flags |= FileFlags::WRITE;
+            required_flags |= FMode::WRITE;
         }
 
         if !self.0.flags.contains(required_flags) {
@@ -174,24 +171,18 @@ impl FileSharedRuntime {
 
     fn check_shared_writable_mapping_allowed(&self, flags: MappingFlags) -> KResult {
         if flags.contains(MappingFlags::WRITE) {
-            self.0
-                .source
-                .file()
-                .check_shmem_shared_writable_mapping_allowed()?;
+            shmem::check_shared_writable_mapping_allowed(self.0.source.file().path())?;
         }
         Ok(())
     }
 
     fn check_shared_write_fault_allowed(&self) -> KResult {
-        self.0
-            .source
-            .file()
-            .check_shmem_shared_write_fault_allowed()?;
+        shmem::check_shared_write_fault_allowed(self.0.source.file().path())?;
         Ok(())
     }
 
     fn file_len(&self) -> KResult<u64> {
-        self.0.source.file().len().map_err(|_| KError::BadAddress)
+        Ok(self.0.source.file().size())
     }
 
     fn cloned_runtime(
@@ -291,11 +282,11 @@ impl FileSharedRuntime {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         let addr = ctx.address().align_down(self.page_size());
         let page_file_offset = ctx.page_file_offset(addr).ok_or(KError::BadAddress)?;
-        // Linux only reports SIGBUS once the faulting page itself starts at or
-        // past EOF. Bytes beyond EOF inside the last mapped file page stay
+        // A fault only fails once the faulting page itself starts at or past
+        // EOF. Bytes beyond EOF inside the last mapped file page stay
         // zero-filled and faultable.
         if page_file_offset >= self.file_len()? {
             return Err(KError::BadAddress);
@@ -339,7 +330,7 @@ impl FileSharedRuntime {
             Err(_) => return Err(KError::BadAddress),
         }
 
-        Ok(FaultCompat::from_populate((populated, None)))
+        Ok(FaultCompletion::from_populate((populated, None)))
     }
 
     fn msync_impl(
@@ -357,12 +348,11 @@ impl FileSharedRuntime {
         let object_start = vma
             .file_offset_for(range.start)
             .ok_or(KError::InvalidInput)?;
-        self.0
-            .source
-            .file()
-            .location()
-            .address_space()
-            .writepages_range(object_start, range.size(), policy.is_data_only())?;
+        self.0.source.file().writeback_mapping_range(
+            object_start,
+            range.size(),
+            policy.is_data_only(),
+        )?;
         Ok(MsyncRuntimeResult::Synced)
     }
 }
@@ -394,7 +384,7 @@ impl VmRuntimeOps for FileSharedRuntime {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         self.handle_fault_impl(ctx, flags, pgtbl)
     }
 
@@ -437,9 +427,9 @@ impl VmRuntimeOps for FileSharedRuntime {
 pub(crate) struct FileSharedRuntimeSpec {
     pub start: VirtAddr,
     pub len: usize,
-    pub file: Arc<File>,
+    pub file: Arc<VfsFile>,
     pub mapping: Arc<pagecache::Mapping>,
-    pub flags: FileFlags,
+    pub flags: FMode,
     pub offset: usize,
     pub mm_id: u64,
     pub invalidate: InvalidateHandle,
@@ -477,7 +467,7 @@ mod tests {
     use unittest::def_test;
     use vmobj::VmObjectId;
 
-    use super::{FileFlags, FileSharedRuntimeInner};
+    use super::{FMode, FileSharedRuntimeInner};
     use crate::{
         new_file_private_vma, runtime::SharedFileSourceAdapter, test_support::page_cache_file,
     };
@@ -485,15 +475,16 @@ mod tests {
     #[def_test]
     fn cached_file_read_observes_inode_mapping_write() {
         let file = page_cache_file("cached-read-mapping-write");
-        file.write_at(&b"old"[..], 0).expect("seed file");
-        file.page_cache_mapping()
-            .expect("page-cache mapping")
+        let mut pos = 0;
+        file.write_from(&b"old"[..], &mut pos).expect("seed file");
+        file.page_cache()
             .write_from(0, b"new")
-            .expect("mapping write");
+            .expect("page-cache write");
 
         let mut out = [0u8; 3];
+        let mut pos = 0;
         let read = file
-            .read_at(&mut &mut out[..], 0)
+            .read_from(&mut out, &mut pos)
             .expect("cached read from mapping");
 
         assert_eq!(read, 3);
@@ -503,13 +494,13 @@ mod tests {
     #[def_test]
     fn cached_file_write_updates_inode_mapping() {
         let file = page_cache_file("cached-write-mapping");
-        file.write_at(&b"mapping-owned"[..], 0)
+        let mut pos = 0;
+        file.write_from(&b"mapping-owned"[..], &mut pos)
             .expect("cached write");
 
         let mut out = [0u8; 13];
         let read = file
-            .page_cache_mapping()
-            .expect("page-cache mapping")
+            .page_cache()
             .read_into_or_create(0, &mut out)
             .expect("mapping read");
 
@@ -521,11 +512,12 @@ mod tests {
     fn shared_and_private_runtime_share_same_file_source_object() {
         let file = page_cache_file("shared-private-same-source");
         let payload = vec![0x5au8; PAGE_SIZE_4K];
+        let mut pos = 0;
         let written = file
-            .write_at(&payload[..], 0)
+            .write_from(&payload[..], &mut pos)
             .expect("seed cached file with one page");
         assert_eq!(written, PAGE_SIZE_4K);
-        let mapping = file.page_cache_mapping().expect("page-cache mapping");
+        let mapping = file.page_cache();
 
         let shared = FileSharedRuntimeInner {
             source: SharedFileSourceAdapter::new_without_view(
@@ -536,7 +528,7 @@ mod tests {
                 PAGE_SIZE_4K,
                 0,
             ),
-            flags: FileFlags::READ | FileFlags::WRITE,
+            flags: FMode::READ | FMode::WRITE,
             shared_ranges: Mutex::new(Vec::new()),
             writable_shared_ranges: Mutex::new(Vec::new()),
         };
@@ -570,7 +562,7 @@ mod tests {
     #[def_test]
     fn shared_file_source_adapter_and_private_runtime_agree_on_file_object() {
         let file = page_cache_file("shared-source-adapter-same-file-object");
-        let mapping = file.page_cache_mapping().expect("page-cache mapping");
+        let mapping = file.page_cache();
         let adapter = SharedFileSourceAdapter::new_without_view(
             file.clone(),
             mapping,

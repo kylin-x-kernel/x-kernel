@@ -22,7 +22,7 @@ ksyscall
    │ validates ABI shape and dispatches
    v
 resource owners
-   ├─ posix-fs / kfs / kvfs
+   ├─ posix-fs / kvfs
    ├─ kfd_objects
    ├─ kprocess
    ├─ posix-process / kprocess

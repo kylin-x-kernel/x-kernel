@@ -5,17 +5,15 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     alloc::Layout,
-    any::Any,
     cmp, fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use backtrace::Backtrace;
 use kexec::clear_elf_cache;
-use kvfs::{DeviceFileOps, NodeFlags, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{DeviceFileOps, DirMapping, NodeFlags, SimpleFs, VfsFile, VfsResult};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 static STAMPED_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -51,7 +49,7 @@ impl MemoryCategory {
                 "kexec::loader::ElfLoader::load" => {
                     return Some("elf cache");
                 }
-                "kprocess::process_state::ProcessState::new" => {
+                "kprocess::process_runtime::ProcessRuntime::new" => {
                     return Some("process state");
                 }
                 "kprocess::process::Process::new" => {
@@ -60,22 +58,17 @@ impl MemoryCategory {
                 "kprocess::process_group::ProcessGroup::new" => {
                     return Some("process group");
                 }
-                "kfs::fs::ext4::inode::Inode::new" => {
+                "ext4::inode::Inode::new" => {
                     return Some("ext4 inode");
-                }
-                "kfs::highlevel::file::File::page_cache_mapping"
-                | "kfs::highlevel::mapping::mapping_for_location" => {
-                    return Some("page-cache file");
                 }
                 "ktask::timers::set_alarm_wakeup" => {
                     return Some("timer");
                 }
-                "kvfs::node::dir::DirNode::lookup_locked"
-                | "kvfs::node::dir::DirNode::create_locked" => {
+                "kvfs::node::Dentry::lookup" | "kvfs::node::Dentry::create" => {
                     return Some("dentry");
                 }
                 "ext4_user_malloc" => {
-                    return Some("lwext4");
+                    return Some("ext4");
                 }
                 _ => continue,
             }
@@ -144,11 +137,19 @@ fn run_memory_analysis() {
 pub(crate) struct MemTrack;
 
 impl DeviceFileOps for MemTrack {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         Ok(buf.len())
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+    fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
         if offset == 0 && !buf.is_empty() {
             match buf {
                 b"start\n" => {
@@ -167,17 +168,14 @@ impl DeviceFileOps for MemTrack {
         Ok(buf.len())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
     }
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+    add_device_entry(
+        root,
         "memtrack",
         DeviceFile::new(
             fs.clone(),

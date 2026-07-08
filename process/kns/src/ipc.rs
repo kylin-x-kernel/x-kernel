@@ -4,7 +4,7 @@
 
 //! IPC namespace.
 
-use crate::types::NamespaceId;
+use kcred::NamespaceId;
 
 /// IPC namespace.
 ///

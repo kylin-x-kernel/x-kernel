@@ -4,7 +4,7 @@
 
 use alloc::sync::Arc;
 
-use kvfs_simple::{DirMaker, DirMapping, SimpleDir, SimpleFs};
+use kvfs::{DirMaker, DirMapping, SimpleDir, SimpleFs};
 
 use crate::nodes;
 

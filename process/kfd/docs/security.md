@@ -115,8 +115,8 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 4. **fd table 修改独占**：
    所有插入、删除和 flag 修改都要求调用方持有 `RwLock<FdTable>` 写锁。
 5. **drop 不在表锁内执行**：
-   `close_all_if_unshared` 先从表中取出 descriptor，
-   释放写锁后再 drop，降低析构重入风险。
+   `remove_all_if_unshared` 先从表中取出 descriptor，
+   释放写锁后再关闭，降低释放路径重入风险。
 6. **ABI 结构不泄露未初始化数据**：
    `stat` / `statx` 转换先全零初始化，
    再填充字段。
@@ -141,13 +141,13 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 | T-02 | 负 fd 经 `as usize` 转换为巨大索引 | 中 | syscall 层漏掉负 fd 校验 | 巨大索引查找失败；多数路径返回 `BadFileDescriptor`；syscall 层仍应保留语义校验 |
 | T-03 | `max_nofile` 未执行导致突破进程资源限制 | 中 | 启动预装之外的路径直接调用 `insert_file_like` | 普通 syscall 路径使用 `add_file_like`；`insert_file_like` 保留给 stdio 预装和已授权路径 |
 | T-04 | `dup2` / `dup3` 错误处理 `old_fd == new_fd` | 中 | 上层直接调用 `duplicate_to` | `posix/fs` 在 syscall 层处理特例；`duplicate_to` 文档记录调用前提 |
-| T-05 | `cloexec` 未关闭导致 fd 泄露到 exec 后程序 | 中 | exec 路径未调用 `close_cloexec_files` 或 flag 未设置 | `close_cloexec_files` 统一收集并关闭；新增 exec 路径需调用 |
-| T-06 | 关闭 fd 时底层对象析构重入 fd table | 中 | drop 在持有 fd table 写锁时触发资源回收 | `close_all_if_unshared` 释放表锁后 drop 移除项；其他 close 路径调用方需避免持锁执行复杂析构 |
+| T-05 | `cloexec` 未关闭导致 fd 泄露到 exec 后程序 | 中 | exec 路径未调用 `close_cloexec_files` 或 flag 未设置 | `ProcessResources::close_cloexec_files` 统一收集并关闭；新增 exec 路径需调用 |
+| T-06 | 关闭 fd 时底层对象析构重入 fd table | 中 | drop 在持有 fd table 写锁时触发资源回收 | fd table 只移除并返回 descriptor；`ProcessResources` 释放表锁后调用 close |
 | T-07 | downcast 类型错误被当成合法对象使用 | 中 | 调用者用错误的 `T::from_fd` 类型 | `downcast_arc` 失败返回 `InvalidInput` |
 | T-08 | `stat` / `statx` 未初始化字段泄露内核内存 | 高 | 直接构造 ABI 结构但未清零 reserved 字段 | 转换先 `zeroed()`，保留字段保持 0 |
 | T-09 | 低层槽位 API 被外部绕过资源策略或 descriptor flag 规则 | 中 | `add`、`add_at`、`remove`、`get_mut` 作为跨 crate API 暴露 | 已将这些 helper 收窄为 `pub(crate)`；外部路径使用高层 API |
 | T-10 | `FileLike` 默认方法返回值掩盖不支持操作 | 低 | 具体实现未覆盖 read/write/ioctl/mmap | 默认返回 `InvalidInput`、`NotATty` 或 `NoSuchDevice`；调用者按 errno 处理 |
-| T-11 | `Arc::strong_count` 判断期间出现新的共享者 | 中 | `close_all_if_unshared` 与 fd table 引用复制并发 | 调用方的进程资源替换路径应串行化 fd table Arc 的发布；函数只在 strong count 为 1 时关闭 |
+| T-11 | `Arc::strong_count` 判断期间出现新的共享者 | 中 | `remove_all_if_unshared` 与 fd table 引用复制并发 | 调用方的进程资源替换路径应串行化 fd table Arc 的发布；函数只在 strong count 为 1 时关闭 |
 | T-12 | procfs 或 exec 路径把 `FdSnapshot` 当成 live fd 权限 | 中 | snapshot 创建后原 fd 被关闭、复用或 flag 改变 | snapshot 只表示创建时的 open object；需要 live fd 状态的 syscall 必须重新查 fd table |
 
 影响等级定义：
@@ -208,7 +208,7 @@ let mut statx: statx = unsafe { core::mem::zeroed() };
 3. **`FileLike` errno 语义由实现者补充**：
    trait 默认方法只描述通用不支持操作，
    具体对象仍需在自身 crate 中说明 read/write/ioctl/mmap 的 errno 细节。
-4. **`close_all_if_unshared` 依赖发布侧串行化**：
+4. **`remove_all_if_unshared` 依赖发布侧串行化**：
    `Arc::strong_count` 只能表达当前引用数，
    不能替代进程资源层对 fd table 替换的同步。
 

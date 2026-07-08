@@ -70,7 +70,8 @@ fn do_select(
          {except_fds:?}] timeout: {timeout:?}"
     );
 
-    let fd_table = kprocess::current_resources().fd_table();
+    let resources = kprocess::current_resources();
+    let fd_table = resources.fd_table();
     let fd_table = fd_table.read();
     let mut fds = Vec::with_capacity(nfds);
     let mut fd_indices = Vec::with_capacity(nfds);
@@ -84,7 +85,7 @@ fn do_select(
         let f = fd_table
             .get(fd)
             .ok_or(KError::BadFileDescriptor)?
-            .inner()
+            .file()
             .clone();
         let mut events = IoEvents::empty();
         events.set(IoEvents::IN, is_read);

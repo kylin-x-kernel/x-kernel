@@ -358,35 +358,37 @@ impl SocketOps for PacketSocket {
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions<'_>) -> KResult<usize> {
-        self.inner.general.recv_poller(self, || {
-            let _recv_guard = self.inner.recv_lock.lock();
-            let frame = {
-                let rx_queue = self.inner.rx_queue.lock();
-                rx_queue.front().cloned().ok_or(KError::WouldBlock)?
-            };
+        self.inner
+            .general
+            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                let _recv_guard = self.inner.recv_lock.lock();
+                let frame = {
+                    let rx_queue = self.inner.rx_queue.lock();
+                    rx_queue.front().cloned().ok_or(KError::WouldBlock)?
+                };
 
-            if let Some(from) = options.from.as_deref_mut() {
-                *from = SocketAddrEx::Packet(frame.from);
-            }
+                if let Some(from) = options.from.as_deref_mut() {
+                    *from = SocketAddrEx::Packet(frame.from);
+                }
 
-            let frame_data = frame.bytes();
-            let write_len = frame_data.len().min(dst.remaining_mut());
-            dst.write_all(&frame_data[..write_len])?;
-            if !options.flags.contains(RecvFlags::PEEK) {
-                let mut rx_queue = self.inner.rx_queue.lock();
-                let _ = rx_queue.pop_front();
-            }
-            if write_len < frame_data.len()
-                && let Some(out_flags) = options.out_flags.as_deref_mut()
-            {
-                *out_flags |= RecvFlags::TRUNCATE;
-            }
-            Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
-                frame_data.len()
-            } else {
-                write_len
+                let frame_data = frame.bytes();
+                let write_len = frame_data.len().min(dst.remaining_mut());
+                dst.write_all(&frame_data[..write_len])?;
+                if !options.flags.contains(RecvFlags::PEEK) {
+                    let mut rx_queue = self.inner.rx_queue.lock();
+                    let _ = rx_queue.pop_front();
+                }
+                if write_len < frame_data.len()
+                    && let Some(out_flags) = options.out_flags.as_deref_mut()
+                {
+                    *out_flags |= RecvFlags::TRUNCATE;
+                }
+                Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
+                    frame_data.len()
+                } else {
+                    write_len
+                })
             })
-        })
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {

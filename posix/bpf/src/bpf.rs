@@ -9,7 +9,7 @@ use bpffs::BpfProgram;
 use kerrno::{KError, KResult};
 use klogger::debug;
 use kuaccess::vm_load_string;
-use kvfs::{LookupFlags, LookupIntent, lookup_location, lookup_parent, path::Path};
+use kvfs::{Filename, LookupFlags, LookupIntent};
 use posix_types::{UserConstPtr, UserRead};
 
 /// `BPF_PROG_LOAD` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
@@ -91,8 +91,7 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
     };
 
     let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
-    let fd =
-        kprocess::current_resources().add_file_like(Arc::new(BpfProgram::new(arc_insns)), true)?;
+    let fd = kprocess::current_resources().add_file(BpfProgram::new_file(arc_insns)?, true)?;
     Ok(fd as isize)
 }
 
@@ -102,15 +101,14 @@ fn bpf_obj_pin(attr_ptr: usize, size: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
     let pathname = load_pathname(attr.pathname)?;
-    let program = kprocess::current_resources().get_file_like_as::<BpfProgram>(attr.bpf_fd as _)?;
+    let file = kprocess::current_resources().get_file(attr.bpf_fd as _)?;
+    let program = BpfProgram::from_file(&file)?;
 
-    let fs_context = kprocess::current_fs_context();
-    let fs = fs_context.lock();
-    let (parent, name) = lookup_parent(
-        &fs.lookup_context(),
-        Path::new(&pathname),
-        LookupIntent::Open,
-    )?;
+    let fs_struct = kprocess::current_fs_context();
+    let fs = fs_struct.lock();
+    let (parent, name) = Filename::new(pathname.as_str())
+        .parent_at(fs.root(), fs.pwd(), LookupIntent::Open)?
+        .into_normal()?;
     bpffs::pin_program(&parent, name.as_str(), program)?;
     Ok(0)
 }
@@ -122,16 +120,16 @@ fn bpf_obj_get(attr_ptr: usize, size: u32) -> KResult<isize> {
     }
     let pathname = load_pathname(attr.pathname)?;
 
-    let fs_context = kprocess::current_fs_context();
-    let fs = fs_context.lock();
-    let location = lookup_location(
-        &fs.lookup_context(),
-        Path::new(&pathname),
+    let fs_struct = kprocess::current_fs_context();
+    let fs = fs_struct.lock();
+    let location = Filename::new(pathname.as_str()).lookup_at(
+        fs.root(),
+        fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
     )?;
     let program = bpffs::program_from_location(&location)?;
-    let fd = kprocess::current_resources().add_file_like(program, true)?;
+    let fd = kprocess::current_resources().add_file(program.into_file()?, true)?;
     Ok(fd as isize)
 }
 

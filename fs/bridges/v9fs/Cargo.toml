@@ -1,0 +1,19 @@
+[package]
+name = "v9fs"
+description = "VFS bridge for the 9P client library"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+fs9p.workspace = true
+kerrno.workspace = true
+ksync.workspace = true
+kvfs.workspace = true

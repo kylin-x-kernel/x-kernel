@@ -4,37 +4,38 @@
 
 //! Filesystem-local file helper utilities owned by `posix-fs`.
 //!
-//! Fd-backed kernel objects with their own object state live in owner crates
-//! such as `kfd_objects` or `kthread`. This module keeps only filesystem-local
-//! helpers like stdio installation.
+//! Fd-backed kernel objects with their own object state live in owner crates.
+//! This module keeps only filesystem-local helpers like stdio installation.
 
-use alloc::sync::Arc;
-
+use fs_context::FsStruct;
 use kerrno::{KError, KResult};
 use kfd::FdTable;
-use kfs::{FsContext, OpenOptions};
+use kvfs::{Filename, NodePermission};
 use linux_raw_sys::general::{O_RDONLY, O_WRONLY};
 
 /// Add stdin, stdout, and stderr backed by `/dev/console`.
-pub fn add_stdio(fd_table: &mut FdTable, fs_context: &FsContext) -> KResult<()> {
+pub fn add_stdio(fd_table: &mut FdTable, fs_struct: &FsStruct) -> KResult<()> {
     assert_eq!(fd_table.count(), 0);
 
-    let open = |options: &mut OpenOptions, flags| {
-        KResult::Ok(Arc::new(
-            options.open_flags(flags).open(fs_context, "/dev/console")?,
-        ))
+    let open = |flags| {
+        Filename::new("/dev/console").open_with_flags_at(
+            fs_struct.root(),
+            fs_struct.pwd(),
+            flags,
+            NodePermission::empty(),
+        )
     };
 
-    let tty_in = open(OpenOptions::new().read(true).write(false), O_RDONLY as _)?;
-    let tty_out = open(OpenOptions::new().read(false).write(true), O_WRONLY as _)?;
+    let tty_in = open(O_RDONLY as _)?;
+    let tty_out = open(O_WRONLY as _)?;
     fd_table
-        .insert_file_like(tty_in, false)
+        .insert_file(tty_in, false)
         .map_err(|_| KError::TooManyOpenFiles)?;
     fd_table
-        .insert_file_like(tty_out.clone(), false)
+        .insert_file(tty_out.clone(), false)
         .map_err(|_| KError::TooManyOpenFiles)?;
     fd_table
-        .insert_file_like(tty_out, false)
+        .insert_file(tty_out, false)
         .map_err(|_| KError::TooManyOpenFiles)?;
 
     Ok(())

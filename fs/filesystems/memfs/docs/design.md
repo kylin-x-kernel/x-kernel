@@ -24,7 +24,7 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 - `src/shmem.rs`
 - regular-file inode 与 VFS address-space/page-cache 的连接
 - 目录、链接、符号链接和元数据维护
-- fd-only tmpfs/shmem anonymous regular-file factory
+- fd-only tmpfs/shmem anonymous regular-file factory and opened-file conversion
 
 ## 架构
 
@@ -100,7 +100,8 @@ mapping；page cache、evict listener 与 MM shared object identity 的统一宿
 
 3. 匿名文件用私有 tmpfs mount 中的 regular file 表达。
    原因：这保持了 Linux `shmem_file_setup()` 的私有文件对象 + inode-owned page
-   cache 语义，同时不把对象挂入进程可见路径空间。
+   cache 语义，同时不把对象挂入进程可见路径空间。调用方通过 shmem 对象转换成
+   opened `VfsFile`，不重新操作匿名路径的 open 细节。
 
 ## Drop / 资源释放
 

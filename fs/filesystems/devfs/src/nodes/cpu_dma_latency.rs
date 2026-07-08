@@ -5,28 +5,42 @@
 //! /dev/cpu_dma_latency device node.
 
 use alloc::sync::Arc;
-use core::any::Any;
 
 use kerrno::KError;
-use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
+};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 /// /dev/cpu_dma_latency device - controls CPU DMA latency constraints.
 struct CpuDmaLatency;
 
-impl DeviceFileOps for CpuDmaLatency {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+impl CpuDmaLatency {
+    fn read_bytes(&self, _buf: &mut [u8]) -> VfsResult<usize> {
         Err(KError::InvalidInput)
     }
 
-    fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    fn write_bytes(&self, buf: &[u8]) -> VfsResult<usize> {
         Ok(buf.len())
     }
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
+impl DeviceFileOps for CpuDmaLatency {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        self.read_bytes(buf)
+    }
+
+    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        self.write_bytes(buf)
     }
 
     fn flags(&self) -> NodeFlags {
@@ -35,7 +49,8 @@ impl DeviceFileOps for CpuDmaLatency {
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+    add_device_entry(
+        root,
         "cpu_dma_latency",
         DeviceFile::new(
             fs,
@@ -56,14 +71,14 @@ mod tests {
     fn test_cpu_dma_latency_read_error() {
         let dev = CpuDmaLatency;
         let mut buf = [0u8; 4];
-        assert!(dev.read_at(&mut buf, 0).is_err());
+        assert!(dev.read_bytes(&mut buf).is_err());
     }
 
     #[def_test]
     fn test_cpu_dma_latency_write_ok() {
         let dev = CpuDmaLatency;
         let data = [0u8; 4];
-        let n = dev.write_at(&data, 0).unwrap();
+        let n = dev.write_bytes(&data).unwrap();
         assert_eq!(n, 4);
     }
 }

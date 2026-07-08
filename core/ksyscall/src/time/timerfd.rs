@@ -10,11 +10,10 @@
 //! - Timer query (`timerfd_gettime`)
 
 use kerrno::{KError, KResult};
-use kfd::FileLike;
 use kfd_objects::timerfd::TimerFd;
 use linux_raw_sys::general::{
-    CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME,
-    itimerspec, timespec,
+    CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, O_RDWR, TFD_CLOEXEC, TFD_NONBLOCK,
+    TFD_TIMER_ABSTIME, itimerspec, timespec,
 };
 use posix_types::{TimeValueLike, UserConstPtr, UserPtr};
 
@@ -32,13 +31,10 @@ pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let tfd = TimerFd::new(clock_id as u32);
-    if flags & TFD_NONBLOCK != 0 {
-        tfd.set_nonblocking(true)?;
-    }
+    let file = TimerFd::new_file(clock_id as u32, O_RDWR | (flags & TFD_NONBLOCK))?;
 
     kprocess::current_resources()
-        .add_file_like(tfd as _, flags & TFD_CLOEXEC != 0)
+        .add_file(file, flags & TFD_CLOEXEC != 0)
         .map(|fd| fd as _)
 }
 
@@ -62,7 +58,8 @@ pub fn sys_timerfd_settime(
     let value = new.it_value.try_into_time_value()?;
     let interval = new.it_interval.try_into_time_value()?;
 
-    let tfd = kprocess::current_resources().get_file_like_as::<TimerFd>(fd)?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let tfd = TimerFd::from_file(&file)?;
     let (old_interval, old_remaining) = tfd.settime(absolute, value, interval);
 
     if let Some(old_value) = old_value.check_non_null() {
@@ -79,7 +76,8 @@ pub fn sys_timerfd_settime(
 pub fn sys_timerfd_gettime(fd: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
     debug!("sys_timerfd_gettime <= fd: {fd}");
 
-    let tfd = kprocess::current_resources().get_file_like_as::<TimerFd>(fd)?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let tfd = TimerFd::from_file(&file)?;
     let (interval, remaining) = tfd.gettime();
 
     curr_value.write_vm(itimerspec {

@@ -37,7 +37,7 @@ fn do_poll(
             // Skip -1
             continue;
         }
-        match kprocess::current_resources().get_file_like(fd.fd) {
+        match kprocess::current_resources().get_file(fd.fd) {
             Ok(f) => {
                 fds.push((
                     f,

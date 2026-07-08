@@ -152,7 +152,9 @@ Inherited group
 ### fork 子进程
 
 1. `fork_process_runtime` 先克隆 child `NsProxy`。
-2. 它在 child `active_pid_ns` 中分配 leader `PidHandle`，并保持 root-visible `tid == pid`。
+2. 当前 `CLONE_NEWPID` 尚未启用，因此 leader `PidHandle` 仍在 root PID namespace
+   分配，并保持 root-visible `tid == pid`；后续 task-active PID namespace 应挂在
+   task/PID identity 层，而不是 `NsProxy`。
 3. 再创建子进程稳定身份、加入 group 的 weak member 表、挂到父进程 children 表。
 4. 然后在同一个 owner 域内创建 `ProcessRuntime`、地址空间、文件表和信号状态，并把弱 runtime 引用登记到新 `Process`。
 5. syscall 层通过 staged publication 事务先完成 publication，使 PID/TID 与 group/session lookup 对外一致可见；随后执行 `CLONE_PARENT_SETTID` / `CLONE_PIDFD` 等父侧 writeback，成功后才把 task 变为 runnable，失败则回滚 publication 与 owner-side child membership。顺序对齐 Linux `kernel_clone()` 的“先完成 parent-side return setup，再 `wake_up_new_task()`”约束。

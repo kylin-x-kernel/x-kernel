@@ -247,44 +247,48 @@ impl SocketOps for UdpSocket {
 
     fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
         if options.flags.contains(RecvFlags::ERROR_QUEUE) {
-            return self.general.recv_poller(self, || {
-                poll_interfaces();
-                let error = if options.flags.contains(RecvFlags::PEEK) {
-                    self.err_state.peek_error()
-                } else {
-                    self.err_state.pop_error()
-                };
-                let Some(error) = error else {
-                    return Err(KError::WouldBlock);
-                };
-                let QueuedUdpError {
-                    payload,
-                    addr,
-                    ancillary: recv_error,
-                } = error;
+            return self.general.recv_poller_with_nonblocking(
+                self,
+                options.flags.nonblocking(),
+                || {
+                    poll_interfaces();
+                    let error = if options.flags.contains(RecvFlags::PEEK) {
+                        self.err_state.peek_error()
+                    } else {
+                        self.err_state.pop_error()
+                    };
+                    let Some(error) = error else {
+                        return Err(KError::WouldBlock);
+                    };
+                    let QueuedUdpError {
+                        payload,
+                        addr,
+                        ancillary: recv_error,
+                    } = error;
 
-                if let Some(from) = options.from.as_deref_mut() {
-                    *from = SocketAddrEx::Ip(addr);
-                }
-                if let Some(ancillary) = options.ancillary.as_deref_mut() {
-                    ancillary.push(Box::new(KernelAncillaryData::IpError(recv_error)));
-                }
+                    if let Some(from) = options.from.as_deref_mut() {
+                        *from = SocketAddrEx::Ip(addr);
+                    }
+                    if let Some(ancillary) = options.ancillary.as_deref_mut() {
+                        ancillary.push(Box::new(KernelAncillaryData::IpError(recv_error)));
+                    }
 
-                let read = dst.write(&payload)?;
-                if read < payload.len() {
-                    warn!(
-                        "UDP error payload truncated: {} -> {} bytes",
-                        payload.len(),
+                    let read = dst.write(&payload)?;
+                    if read < payload.len() {
+                        warn!(
+                            "UDP error payload truncated: {} -> {} bytes",
+                            payload.len(),
+                            read
+                        );
+                    }
+
+                    Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
+                        payload.len()
+                    } else {
                         read
-                    );
-                }
-
-                Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
-                    payload.len()
-                } else {
-                    read
-                })
-            });
+                    })
+                },
+            );
         }
 
         if self.local_addr.read().is_none() {
@@ -300,56 +304,57 @@ impl SocketOps for UdpSocket {
             None => ExpectedRemote::Expecting(self.remote_endpoint()?.0),
         };
 
-        self.general.recv_poller(self, || {
-            poll_interfaces();
-            self.with_smol_socket(|socket| {
-                if !socket.is_open() {
-                    // not bound
-                    Err(k_err_type!(NotConnected))
-                } else if !socket.can_recv() {
-                    Err(KError::WouldBlock)
-                } else {
-                    let result = if options.flags.contains(RecvFlags::PEEK) {
-                        socket.peek().map(|(data, meta)| (data, *meta))
+        self.general
+            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                poll_interfaces();
+                self.with_smol_socket(|socket| {
+                    if !socket.is_open() {
+                        // not bound
+                        Err(k_err_type!(NotConnected))
+                    } else if !socket.can_recv() {
+                        Err(KError::WouldBlock)
                     } else {
-                        socket.recv()
-                    };
-                    match result {
-                        Ok((src, meta)) => {
-                            match &mut expected_remote {
-                                ExpectedRemote::Any(remote_addr) => {
-                                    **remote_addr = SocketAddrEx::Ip(meta.endpoint.into());
-                                }
-                                ExpectedRemote::Expecting(expected) => {
-                                    if (!expected.addr.is_unspecified()
-                                        && expected.addr != meta.endpoint.addr)
-                                        || (expected.port != 0
-                                            && expected.port != meta.endpoint.port)
-                                    {
-                                        return Err(KError::WouldBlock);
+                        let result = if options.flags.contains(RecvFlags::PEEK) {
+                            socket.peek().map(|(data, meta)| (data, *meta))
+                        } else {
+                            socket.recv()
+                        };
+                        match result {
+                            Ok((src, meta)) => {
+                                match &mut expected_remote {
+                                    ExpectedRemote::Any(remote_addr) => {
+                                        **remote_addr = SocketAddrEx::Ip(meta.endpoint.into());
+                                    }
+                                    ExpectedRemote::Expecting(expected) => {
+                                        if (!expected.addr.is_unspecified()
+                                            && expected.addr != meta.endpoint.addr)
+                                            || (expected.port != 0
+                                                && expected.port != meta.endpoint.port)
+                                        {
+                                            return Err(KError::WouldBlock);
+                                        }
                                     }
                                 }
-                            }
 
-                            let read = dst.write(src)?;
-                            if read < src.len() {
-                                warn!("UDP message truncated: {} -> {} bytes", src.len(), read);
-                            }
+                                let read = dst.write(src)?;
+                                if read < src.len() {
+                                    warn!("UDP message truncated: {} -> {} bytes", src.len(), read);
+                                }
 
-                            Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
-                                src.len()
-                            } else {
-                                read
-                            })
-                        }
-                        Err(smol::RecvError::Exhausted) => Err(KError::WouldBlock),
-                        Err(smol::RecvError::Truncated) => {
-                            unreachable!("UDP socket recv never returns Err(Truncated)")
+                                Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
+                                    src.len()
+                                } else {
+                                    read
+                                })
+                            }
+                            Err(smol::RecvError::Exhausted) => Err(KError::WouldBlock),
+                            Err(smol::RecvError::Truncated) => {
+                                unreachable!("UDP socket recv never returns Err(Truncated)")
+                            }
                         }
                     }
-                }
+                })
             })
-        })
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {

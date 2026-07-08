@@ -13,7 +13,7 @@ must not bypass those layers by owning page frames directly.
 ## Core Invariants
 
 - `SHM_MANAGER` is the only owner of global key/shmid lookup state.
-- `ShmInner` owns only IPC metadata plus an `Arc<kfs::File>` backing object.
+- `ShmInner` owns only IPC metadata plus an `Arc<kvfs::VfsFile>` backing object.
 - SysV shm contents must flow through inode-owned `pagecache::Mapping`.
 - `ShmInner.page_num` is derived from a page-aligned segment size.
 - `shm_nattch` must match the number of process attach records in

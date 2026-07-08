@@ -27,19 +27,19 @@ user process
 │  ├─ validates ABI flags and scalar ranges where needed    │
 │  ├─ copies user strings/buffers through posix_types/osvm  │
 │  ├─ resolves fd/path against current process context      │
-│  ├─ delegates object semantics to kfd/kfs/kvfs/kfd_objects/devfs │
+│  ├─ delegates object semantics to kfd/kvfs/kfd_objects           │
 │  └─ maps failures to KError/KResult                       │
 └──────────────────────────────────────────────────────────┘
   │
   v
-kfd resources / kfs / kvfs / device and pipe implementations
+kfd resources / kvfs / device and pipe implementations
 ```
 
 - 用户态参数不可信，包括空指针、无效地址、过长路径、恶意 flags、负 offset 和 fd 复用。
 - `posix-fs` 信任 `posix_types` / `osvm` 对用户地址执行边界检查和错误传播。
 - `posix-fs` 信任 `kfd` 在 fd 查找、复制、关闭和 descriptor flags 上保持并发安全。
-- `posix-fs` 信任 `kfs` / `kvfs` / `kfd_objects` / 设备对象执行真实读写、权限、目录和挂载语义。
-- 进程当前上下文、fd 表、`FsContext` 和用户地址空间必须来自当前 syscall 执行线程。
+- `posix-fs` 信任 `kvfs` / `kfd_objects` / 设备对象执行真实读写、权限、目录和挂载语义。
+- 进程当前上下文、fd 表、`FsStruct` 和用户地址空间必须来自当前 syscall 执行线程。
 
 ## 外部边界 / 攻击面
 
@@ -49,7 +49,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | 用户读写缓冲区 | `read`、`write`、`readlinkat`、`getdents64`、`statfs` | 坏地址、短缓冲区、跨页访问失败、内核信息写回格式错误 |
 | 用户 iovec | `readv`、`writev`、`preadv2`、`pwritev2` | iovec 数量过大、范围溢出、读写方向错误 |
 | fd 编号 | 几乎所有 fd syscall | 已关闭 fd、类型不匹配、fd 复用、`CLOEXEC`/非阻塞标志混淆 |
-| 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs context 更新、umask 和当前目录语义 |
+| 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs_struct 更新、umask 和当前目录语义 |
 | VFS magic link | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化、no-follow 策略 |
 | VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、mount flags、文件系统实现差异 |
 | fd-to-fd 复制 | `sendfile`、`copy_file_range`、`splice` | 源目标类型错误、offset 指针 TOCTOU、同文件重叠、阻塞语义 |
@@ -95,7 +95,8 @@ kfd resources / kfs / kvfs / device and pipe implementations
 
 1. `O_CLOEXEC`、`FD_CLOEXEC` 和 `close_range(CLOEXEC)` 必须只影响 descriptor flags，
    不应改变底层 `FileLike` 对象。
-2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 通过 `FileLike::set_nonblocking` 作用于对象。
+2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 必须修改 open file description 的
+   `VfsFile::f_flags`，`nonblocking()` 只能从该字段派生。
 3. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
 4. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
 5. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
@@ -108,7 +109,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | 资源 | 并发条件 | 风险 |
 |------|----------|------|
 | fd 表 | 由当前进程 resources 内部锁保护 | close/dup/lookup 竞态会导致 fd 复用或对象泄漏 |
-| `FsContext` | 通过进程 fs context 锁访问 | `chdir`、`chroot` 与相对路径解析并发 |
+| `FsStruct` | 通过进程 fs_struct 锁访问 | `chdir`、`chroot` 与相对路径解析并发 |
 | 目录 offset | `Directory::offset` 锁保护 | `getdents64` 和目录 `lseek` 并发更新 |
 | `FileLike` 对象 | 由具体文件、pipe、设备实现负责 | 阻塞、非阻塞状态和 offset 更新语义 |
 | procfs magic-link target | procfs/kfd snapshot 持有目标 `FileLike` 引用 | 目标进程退出或 fd 关闭时的生命周期 |
@@ -133,7 +134,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | `current_effective_ids()` 固定 `(0, 0)` | 文档列为限制；当前未读取真实 fsuid/fsgid |
 | T-11 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；当前未接入 `kcred::AccessCredentials` |
 | T-12 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
-| T-13 | memfd seals 被非 shmem fd 或普通文件伪造 | fcntl / shmem | 中 | `F_ADD_SEALS` / `F_GET_SEALS` 没有校验 fd object 类型和 inode state | fcntl 先 downcast 到 `kfs::File`，再由 KFS shmem state 判断是否存在 |
+| T-13 | memfd seals 被非 shmem fd 或普通文件伪造 | fcntl / shmem | 中 | `F_ADD_SEALS` / `F_GET_SEALS` 没有校验 fd object 类型和 inode state | fcntl 先取得 `kvfs::VfsFile`，再由 shmem inode state 判断是否存在 |
 
 影响等级定义：
 
@@ -148,7 +149,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | F-01 | 路径读取失败 | 用户指针无效或字符串不可访问 | syscall 返回地址错误相关 `KError` | 当前操作失败 | 3 | `load_string` 失败直接传播 |
 | F-02 | fd 类型不匹配 | 对目录执行文件写、对非 pipe 执行 pipe 操作 | 返回 `BadFileDescriptor`、`InvalidInput` 或底层错误 | 应用收到 Linux errno 等价错误 | 3 | 使用 `get_file_like_as` / downcast 校验 |
 | F-03 | 用户输出缓冲区太小 | `getdents64` 一条记录也放不下，`getcwd` size 不足 | 返回 `InvalidInput` 或 `OutOfRange` | 调用方可扩大缓冲区重试 | 4 | 写入前计算长度 |
-| F-04 | `open` 设备特殊处理失败 | `/dev/ptmx`、当前终端或 `/dev/pts` 解析失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；未知终端类型返回 `OperationNotSupported` |
+| F-04 | 设备 open 失败 | 设备 file operations 拒绝 open 或初始化失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；设备语义由对应设备实现维护 |
 | F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
 | F-06 | `sendfile`/`splice` 遇到 `WouldBlock` | 非阻塞源暂时无数据 | 已写入部分则返回部分进度，否则返回错误 | 调用方可轮询后重试 | 4 | `do_send` 保留部分写入语义 |
 | F-07 | `mount` 请求不支持的文件系统 | `fs_type != "tmpfs"` | 返回 `NoSuchDevice` | 用户态 mount 失败 | 3 | 显式检查 fs_type |

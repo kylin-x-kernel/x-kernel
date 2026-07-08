@@ -8,7 +8,7 @@ use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::fmt::Write;
 
 use kdevice::{DeviceIdentity, DeviceKind, TransportInfo};
-use kvfs_simple::{DirMapping, SeqFileNode, SeqIterator, SimpleDir, SimpleFs};
+use kvfs::{DirMapping, SeqFileInode, SeqIterator, SimpleDir, SimpleFs};
 
 // ---------------------------------------------------------------------------
 // /proc/devices — all devices grouped by kind
@@ -415,21 +415,21 @@ fn format_identity(identity: &DeviceIdentity, transport: Option<TransportInfo>) 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "devices",
-        SeqFileNode::new_regular(fs.clone(), DevicesIter::new()),
+        SeqFileInode::new_regular(fs.clone(), DevicesIter::new),
     );
     root.add("bus", {
         let mut bus = DirMapping::new();
         bus.add(
             "devices",
-            SeqFileNode::new_regular(fs.clone(), BusDevicesIter::new()),
+            SeqFileInode::new_regular(fs.clone(), BusDevicesIter::new),
         );
         bus.add(
             "drivers",
-            SeqFileNode::new_regular(fs.clone(), BusDriversIter::new()),
+            SeqFileInode::new_regular(fs.clone(), BusDriversIter::new),
         );
         bus.add(
             "topology",
-            SeqFileNode::new_regular(fs.clone(), BusTopologyIter::new()),
+            SeqFileInode::new_regular(fs.clone(), BusTopologyIter::new),
         );
         SimpleDir::new_maker(fs.clone(), Arc::new(bus))
     });

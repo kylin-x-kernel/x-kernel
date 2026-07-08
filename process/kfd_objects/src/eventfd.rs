@@ -4,23 +4,22 @@
 
 //! `eventfd` object implementation.
 
-use alloc::{borrow::Cow, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     mem::size_of,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
     task::Context,
 };
 
-use kerrno::KError;
-use kfd::{FileLike, IoDst, IoSrc};
+use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ktask::future::{block_on, poll_io};
+use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile};
 
 /// Kernel object implementing eventfd semantics.
 pub struct EventFd {
     count: AtomicU64,
     semaphore: bool,
-    non_blocking: AtomicBool,
     poll_rx: PollSet,
     poll_tx: PollSet,
 }
@@ -31,86 +30,132 @@ impl EventFd {
         Arc::new(Self {
             count: AtomicU64::new(initval),
             semaphore,
-            non_blocking: AtomicBool::new(false),
             poll_rx: PollSet::new(),
             poll_tx: PollSet::new(),
         })
     }
+
+    /// Create the anonymous-inode file used by eventfd.
+    pub fn new_file(initval: u64, semaphore: bool, open_flags: u32) -> KResult<Arc<VfsFile>> {
+        let state = Self::new(initval, semaphore);
+        AnonInodeFs::global().get_file(
+            "[eventfd]",
+            Arc::new(EventfdFops),
+            state,
+            FMode::READ | FMode::WRITE | FMode::STREAM,
+            open_flags,
+        )
+    }
+
+    /// Returns the eventfd object attached to an eventfd file.
+    pub fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
+        file.private_data_get::<Self>()
+            .ok_or(KError::BadFileDescriptor)
+    }
 }
 
-impl FileLike for EventFd {
-    fn read(&self, dst: &mut IoDst) -> kio::Result<usize> {
-        if dst.remaining_mut() < size_of::<u64>() {
+struct EventfdFops;
+
+impl EventfdFops {
+    fn state(file: &VfsFile) -> kio::Result<Arc<EventFd>> {
+        EventFd::from_file(file)
+    }
+}
+
+impl FileOperations for EventfdFops {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> kio::Result<usize> {
+        let state = Self::state(file)?;
+        if buf.len() < size_of::<u64>() {
             return Err(KError::InvalidInput);
         }
 
-        block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
-            let result = self
-                .count
-                .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
-                    if count > 0 {
-                        let dec = if self.semaphore { 1 } else { count };
-                        Some(count - dec)
-                    } else {
-                        None
-                    }
-                });
+        block_on(poll_io(
+            state.as_ref(),
+            IoEvents::IN,
+            file.is_nonblocking(),
+            || {
+                let result =
+                    state
+                        .count
+                        .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
+                            if count > 0 {
+                                let dec = if state.semaphore { 1 } else { count };
+                                Some(count - dec)
+                            } else {
+                                None
+                            }
+                        });
 
-            match result {
-                Ok(count) => {
-                    dst.write(&count.to_ne_bytes())?;
-                    self.poll_tx.wake();
-                    Ok(size_of::<u64>())
+                match result {
+                    Ok(count) => {
+                        buf[..size_of::<u64>()].copy_from_slice(&count.to_ne_bytes());
+                        state.poll_tx.wake();
+                        Ok(size_of::<u64>())
+                    }
+                    Err(_) => Err(KError::WouldBlock),
                 }
-                Err(_) => Err(KError::WouldBlock),
-            }
-        }))
+            },
+        ))
     }
 
-    fn write(&self, src: &mut IoSrc) -> kio::Result<usize> {
-        if src.remaining() < size_of::<u64>() {
+    fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> kio::Result<usize> {
+        let state = Self::state(file)?;
+        if buf.len() < size_of::<u64>() {
             return Err(KError::InvalidInput);
         }
 
         let mut value = [0; size_of::<u64>()];
-        src.read(&mut value)?;
+        value.copy_from_slice(&buf[..size_of::<u64>()]);
         let value = u64::from_ne_bytes(value);
         if value == u64::MAX {
             return Err(KError::InvalidInput);
         }
 
-        block_on(poll_io(self, IoEvents::OUT, self.nonblocking(), || {
-            let result = self
-                .count
-                .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
-                    if u64::MAX - count > value {
-                        Some(count + value)
-                    } else {
-                        None
+        block_on(poll_io(
+            state.as_ref(),
+            IoEvents::OUT,
+            file.is_nonblocking(),
+            || {
+                let result =
+                    state
+                        .count
+                        .fetch_update(Ordering::Release, Ordering::Acquire, |count| {
+                            if u64::MAX - count > value {
+                                Some(count + value)
+                            } else {
+                                None
+                            }
+                        });
+
+                match result {
+                    Ok(_) => {
+                        state.poll_rx.wake();
+                        Ok(size_of::<u64>())
                     }
-                });
-
-            match result {
-                Ok(_) => {
-                    self.poll_rx.wake();
-                    Ok(size_of::<u64>())
+                    Err(_) => Err(KError::WouldBlock),
                 }
-                Err(_) => Err(KError::WouldBlock),
-            }
-        }))
+            },
+        ))
     }
 
-    fn nonblocking(&self) -> bool {
-        self.non_blocking.load(Ordering::Acquire)
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        Self::state(file)
+            .map(|state| state.poll())
+            .unwrap_or_else(|_| IoEvents::empty())
     }
 
-    fn set_nonblocking(&self, non_blocking: bool) -> kio::Result {
-        self.non_blocking.store(non_blocking, Ordering::Release);
-        Ok(())
-    }
-
-    fn path(&self) -> Cow<'_, str> {
-        "anon_inode:[eventfd]".into()
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(state) = Self::state(file) {
+            state.register(context, events);
+        }
     }
 }
 
@@ -145,7 +190,8 @@ mod eventfd_tests {
     #[def_test]
     fn test_eventfd_creation() {
         let eventfd = EventFd::new(0, false);
-        assert_eq!(eventfd.path(), "anon_inode:[eventfd]");
+        assert!(!eventfd.poll().contains(IoEvents::IN));
+        assert!(eventfd.poll().contains(IoEvents::OUT));
     }
 
     #[def_test]
@@ -176,20 +222,20 @@ mod eventfd_tests {
     #[def_test]
     fn test_eventfd_semaphore_mode() {
         let eventfd = EventFd::new(10, true);
-        assert_eq!(eventfd.path(), "anon_inode:[eventfd]");
+        assert!(eventfd.poll().contains(IoEvents::IN));
     }
 
     #[def_test]
     fn test_eventfd_nonblocking_mode() {
-        let eventfd = EventFd::new(0, false);
+        let file = EventFd::new_file(0, false, 0).expect("eventfd file opens");
 
-        assert!(!eventfd.nonblocking());
+        assert!(!file.is_nonblocking());
 
-        eventfd.set_nonblocking(true).unwrap();
-        assert!(eventfd.nonblocking());
+        file.set_nonblocking(true);
+        assert!(file.is_nonblocking());
 
-        eventfd.set_nonblocking(false).unwrap();
-        assert!(!eventfd.nonblocking());
+        file.set_nonblocking(false);
+        assert!(!file.is_nonblocking());
     }
 
     #[def_test]
@@ -238,17 +284,6 @@ mod eventfd_tests {
     }
 
     #[def_test]
-    fn test_eventfd_path_consistency() {
-        let eventfd1 = EventFd::new(0, false);
-        let eventfd2 = EventFd::new(100, true);
-        let eventfd3 = EventFd::new(u64::MAX, false);
-
-        assert_eq!(eventfd1.path(), "anon_inode:[eventfd]");
-        assert_eq!(eventfd2.path(), "anon_inode:[eventfd]");
-        assert_eq!(eventfd3.path(), "anon_inode:[eventfd]");
-    }
-
-    #[def_test]
     fn test_eventfd_max_initval() {
         let eventfd = EventFd::new(u64::MAX, false);
         let events = eventfd.poll();
@@ -258,54 +293,64 @@ mod eventfd_tests {
 
     #[def_test]
     fn test_eventfd_write_then_read() {
-        let eventfd = EventFd::new(0, false);
+        let file = EventFd::new_file(0, false, 0).expect("eventfd file opens");
 
         let data = 42u64.to_ne_bytes();
-        let mut src = kio::Cursor::new(data.as_slice());
         let mut dst_buf = [0; size_of::<u64>()];
-        let mut dst = kio::Cursor::new(dst_buf.as_mut_slice());
+        let mut pos = 0;
 
-        assert_eq!(eventfd.write(&mut src).unwrap(), size_of::<u64>());
-        assert!(eventfd.poll().contains(IoEvents::IN));
+        assert_eq!(file.write_from(&data, &mut pos).unwrap(), size_of::<u64>());
+        assert!(file.poll().contains(IoEvents::IN));
 
-        assert_eq!(eventfd.read(&mut dst).unwrap(), size_of::<u64>());
+        assert_eq!(
+            file.read_from(&mut dst_buf, &mut pos).unwrap(),
+            size_of::<u64>()
+        );
         assert_eq!(u64::from_ne_bytes(dst_buf), 42);
-        assert!(!eventfd.poll().contains(IoEvents::IN));
+        assert!(!file.poll().contains(IoEvents::IN));
     }
 
     #[def_test]
     fn test_eventfd_semaphore_read_keeps_remaining_count() {
-        let eventfd = EventFd::new(3, true);
+        let file = EventFd::new_file(3, true, 0).expect("eventfd file opens");
         let mut dst_buf = [0; size_of::<u64>()];
-        let mut dst = kio::Cursor::new(dst_buf.as_mut_slice());
+        let mut pos = 0;
 
-        assert_eq!(eventfd.read(&mut dst).unwrap(), size_of::<u64>());
+        assert_eq!(
+            file.read_from(&mut dst_buf, &mut pos).unwrap(),
+            size_of::<u64>()
+        );
         assert_eq!(u64::from_ne_bytes(dst_buf), 3);
 
-        let events = eventfd.poll();
+        let events = file.poll();
         assert!(events.contains(IoEvents::IN));
         assert!(events.contains(IoEvents::OUT));
     }
 
     #[def_test]
     fn test_eventfd_invalid_write_value() {
-        let eventfd = EventFd::new(0, false);
+        let file = EventFd::new_file(0, false, 0).expect("eventfd file opens");
         let data = u64::MAX.to_ne_bytes();
-        let mut src = kio::Cursor::new(data.as_slice());
+        let mut pos = 0;
 
-        assert_eq!(eventfd.write(&mut src), Err(KError::InvalidInput));
+        assert_eq!(file.write_from(&data, &mut pos), Err(KError::InvalidInput));
     }
 
     #[def_test]
     fn test_eventfd_small_buffers_fail() {
-        let eventfd = EventFd::new(1, false);
+        let file = EventFd::new_file(1, false, 0).expect("eventfd file opens");
+        let mut pos = 0;
 
         let mut short_dst = [0; size_of::<u64>() - 1];
-        let mut dst = kio::Cursor::new(short_dst.as_mut_slice());
-        assert_eq!(eventfd.read(&mut dst), Err(KError::InvalidInput));
+        assert_eq!(
+            file.read_from(&mut short_dst, &mut pos),
+            Err(KError::InvalidInput)
+        );
 
         let short_src = [0; size_of::<u64>() - 1];
-        let mut src = kio::Cursor::new(short_src.as_slice());
-        assert_eq!(eventfd.write(&mut src), Err(KError::InvalidInput));
+        assert_eq!(
+            file.write_from(&short_src, &mut pos),
+            Err(KError::InvalidInput)
+        );
     }
 }

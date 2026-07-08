@@ -4,24 +4,24 @@
 
 use alloc::{format, sync::Arc};
 use core::{
-    any::Any,
     mem::MaybeUninit,
     slice,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use kerrno::{KError, KResult, LinuxError};
-use kfs::File;
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, NodeType, SimpleFs, VfsFile,
+    VfsResult,
+};
 use linux_raw_sys::{
     ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKRAGET, BLKRASET, BLKROGET, BLKROSET},
     loop_device::{LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info},
 };
 use osvm::{VirtMutPtr, VirtPtr};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 /// /dev/loopX devices
 /// Loop device for attaching regular files as block devices
@@ -29,7 +29,7 @@ pub struct LoopDevice {
     number: u32,
     dev_id: DeviceId,
     /// Underlying file for the loop device, if any.
-    pub file: Mutex<Option<Arc<File>>>,
+    pub file: Mutex<Option<Arc<VfsFile>>>,
     /// Read-only flag for the loop device.
     pub ro: AtomicBool,
     /// Read-ahead size for the loop device, in bytes.
@@ -92,47 +92,55 @@ impl LoopDevice {
     }
 
     /// Clone the underlying file of the loop device.
-    pub fn clone_file(&self) -> VfsResult<Arc<File>> {
+    pub fn clone_file(&self) -> VfsResult<Arc<VfsFile>> {
         let file = self.file.lock().clone();
         file.ok_or(KError::from(LinuxError::ENXIO))
     }
 }
 
 impl DeviceFileOps for LoopDevice {
-    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         match self.file.lock().as_ref() {
-            Some(file) if file.location().node_type() == NodeType::RegularFile => {
-                mapper.map_file_backed()
-            }
+            Some(file) if file.is_regular_file() => mapper.map_file_backed(),
             _ => Err(kvfs::VfsError::NoSuchDevice),
         }
     }
 
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let file = self
             .clone_file()
             .map_err(|_| KError::OperationNotPermitted)?;
-        file.read_at(buf, offset)
+        let mut pos = offset;
+        file.read_from(buf, &mut pos)
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+    fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
         if self.ro.load(Ordering::Relaxed) {
             return Err(KError::ReadOnlyFilesystem);
         }
         let file = self
             .clone_file()
             .map_err(|_| KError::OperationNotPermitted)?;
-        file.write_at(buf, offset)
+        let mut pos = offset;
+        file.write_from(buf, &mut pos)
     }
 
-    fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
             LOOP_SET_FD => {
                 let fd = arg as i32;
                 if fd < 0 {
                     return Err(KError::BadFileDescriptor);
                 }
-                let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
+                let file = kprocess::current_resources().get_file(fd)?;
                 let mut guard = self.file.lock();
                 if guard.is_some() {
                     return Err(KError::ResourceBusy);
@@ -166,7 +174,7 @@ impl DeviceFileOps for LoopDevice {
             // TODO: the following should apply to any block devices
             BLKGETSIZE | BLKGETSIZE64 => {
                 let file = self.clone_file()?;
-                let sectors = file.location().len()? / 512;
+                let sectors = file.size() / 512;
                 if cmd == BLKGETSIZE {
                     (arg as *mut u32).write_vm(sectors as _)?;
                 } else {
@@ -198,10 +206,6 @@ impl DeviceFileOps for LoopDevice {
         Ok(0)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
     }
@@ -210,7 +214,8 @@ impl DeviceFileOps for LoopDevice {
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     for i in 0..16 {
         let dev_id = DeviceId::new(7, i);
-        root.add(
+        add_device_entry(
+            root,
             format!("loop{i}"),
             DeviceFile::new(
                 fs.clone(),

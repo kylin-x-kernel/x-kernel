@@ -5,7 +5,7 @@
 `posix-process` 负责进程/线程生命周期相关的上层 owner 逻辑：
 
 - clone / exit / signal-return 需要共享的用户态 trap 主循环；
-- 初始用户进程的地址空间、`ProcessState`、TTY 和 stdio 组装；
+- 初始用户进程的地址空间、`Process`/`Thread` runtime、TTY 和 stdio 组装；
 - 线程退出时的 robust futex 清理、group-exit 和父进程通知；
 - 保持这些逻辑依赖 `kprocess` 原语，但不把它们塞回 `kprocess` 本体。
 

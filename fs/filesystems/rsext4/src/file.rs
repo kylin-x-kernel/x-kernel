@@ -12,7 +12,7 @@ use alloc::{
     vec::Vec,
 };
 
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 
 use crate::{
     blockdev::*,
@@ -989,7 +989,7 @@ pub fn create_symbol_link<B: BlockDevice>(
     Ok(())
 }
 
-fn read_symlink_target<B: BlockDevice>(
+pub fn read_symlink_target<B: BlockDevice>(
     device: &mut Jbd2Dev<B>,
     fs: &mut Ext4FileSystem,
     inode: &mut Ext4Inode,
@@ -1986,7 +1986,7 @@ pub fn mkfile<B: BlockDevice>(
     initial_data: Option<&[u8]>,
     file_type: Option<u8>,
 ) -> Option<Ext4Inode> {
-    mkfile_with_ino(device, fs, path, initial_data, file_type).map(|(_, inode)| inode)
+    mkfile_with_ino(device, fs, path, initial_data, file_type, None).map(|(_, inode)| inode)
 }
 
 pub fn mkfile_with_ino<B: BlockDevice>(
@@ -1995,6 +1995,7 @@ pub fn mkfile_with_ino<B: BlockDevice>(
     path: &str,
     initial_data: Option<&[u8]>,
     file_type: Option<u8>,
+    inode_mode: Option<u16>,
 ) -> Option<(u32, Ext4Inode)> {
     // 规范化路径
     let norm_path = normalize_path(path).ok()?;
@@ -2098,7 +2099,9 @@ pub fn mkfile_with_ino<B: BlockDevice>(
 
     // 构造新文件 inode 的内存版本，然后通过 modify_inode 一次性写回
     let mut new_inode = Ext4Inode::default();
-    let imode = if let Some(ft) = file_type {
+    let imode = if let Some(mode) = inode_mode {
+        mode
+    } else if let Some(ft) = file_type {
         match ft {
             Ext4DirEntry2::EXT4_FT_SYMLINK => Ext4Inode::S_IFLNK | 0o777,
             Ext4DirEntry2::EXT4_FT_REG_FILE => Ext4Inode::S_IFREG | 0o644,
@@ -2206,6 +2209,66 @@ pub fn read_file<B: BlockDevice>(
     read_file_follow(device, fs, &norm_path, 0)
 }
 
+pub fn read_file_with_ino<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    fs: &mut Ext4FileSystem,
+    inode_num: u32,
+    offset: u64,
+    buf: &mut [u8],
+) -> BlockDevResult<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+
+    let mut inode = fs.get_inode_by_num(device, inode_num)?;
+    let file_size = inode.size();
+    if offset >= file_size {
+        return Ok(0);
+    }
+
+    let to_read = core::cmp::min(buf.len() as u64, file_size - offset) as usize;
+    if to_read == 0 {
+        return Ok(0);
+    }
+
+    if !inode.have_extend_header_and_use_extend() {
+        return Err(BlockDevError::Unsupported);
+    }
+
+    let block_bytes = BLOCK_SIZE as u64;
+    let start_off = offset;
+    let end_off = start_off + to_read as u64;
+    let start_lbn = start_off / block_bytes;
+    let end_lbn = (end_off - 1) / block_bytes;
+
+    let mut copied = 0usize;
+    for lbn in start_lbn..=end_lbn {
+        let lbn_start = lbn * block_bytes;
+        let lbn_end = lbn_start + block_bytes;
+        let copy_start = core::cmp::max(start_off, lbn_start) - lbn_start;
+        let copy_end = core::cmp::min(end_off, lbn_end) - lbn_start;
+        let copy_len = copy_end.saturating_sub(copy_start) as usize;
+        if copy_len == 0 {
+            continue;
+        }
+
+        if let Some(phys) = resolve_inode_block(device, &mut inode, lbn as u32)? {
+            let data = read_data_block_direct(device, phys as u64)?;
+            buf[copied..copied + copy_len]
+                .copy_from_slice(&data[copy_start as usize..copy_start as usize + copy_len]);
+        } else {
+            buf[copied..copied + copy_len].fill(0);
+        }
+
+        copied += copy_len;
+        if copied >= to_read {
+            break;
+        }
+    }
+
+    Ok(copied)
+}
+
 pub fn write_file<B: BlockDevice>(
     device: &mut Jbd2Dev<B>,
     fs: &mut Ext4FileSystem,
@@ -2238,70 +2301,120 @@ pub fn write_file_with_ino<B: BlockDevice>(
         return Ok(());
     }
 
+    ext4_map_blocks_for_write(device, fs, inode_num, offset, data.len())?;
+    ext4_write_prepared(device, fs, inode_num, offset, data)?;
+    ext4_da_write_end(device, fs, inode_num, offset, data.len(), data.len())
+}
+
+pub fn ext4_da_write_begin<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    fs: &mut Ext4FileSystem,
+    inode_num: u32,
+    _offset: u64,
+    len: usize,
+) -> BlockDevResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+
     let mut inode = fs.get_inode_by_num(device, inode_num)?;
 
-    let old_size = inode.size();
-    let block_bytes = BLOCK_SIZE as u64;
-
-    // If extents are supported, make sure the inode has a valid extent header
-    // before any extent-based operations. Some inodes may have EXTENTS flag set
-    // but the on-disk header is missing/invalid.
     if fs.superblock.has_extents() && !inode.have_extend_header_and_use_extend() {
         inode.i_flags |= Ext4Inode::EXT4_EXTENTS_FL;
         inode.write_extend_header();
+        fs.modify_inode(device, inode_num, |td| {
+            *td = inode;
+        })?;
+        return Ok(());
     }
 
-    if offset > old_size {
-        info!("Expend write!");
+    if !inode.have_extend_header_and_use_extend() {
+        return Err(BlockDevError::Unsupported);
     }
 
-    let end = offset.saturating_add(data.len() as u64);
+    Ok(())
+}
+
+fn ext4_map_blocks_for_write<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    fs: &mut Ext4FileSystem,
+    inode_num: u32,
+    offset: u64,
+    len: usize,
+) -> BlockDevResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    ext4_da_write_begin(device, fs, inode_num, offset, len)?;
+
+    let mut inode = fs.get_inode_by_num(device, inode_num)?;
+    let block_bytes = BLOCK_SIZE as u64;
+    let end = offset.saturating_add(len as u64);
 
     let start_lbn = offset / block_bytes;
     let end_lbn = (end - 1) / block_bytes;
 
-    // Extent files may be sparse. For writes that cross holes, allocate blocks on-demand.
-    if end > old_size
-        && (!fs.superblock.has_extents() || !inode.have_extend_header_and_use_extend())
-    {
-        // 只在 extent 模式下支持扩展
-        return Err(BlockDevError::Unsupported);
-    }
-
+    let mut changed = false;
     for lbn in start_lbn..=end_lbn {
-        let phys = if inode.have_extend_header_and_use_extend() {
-            match resolve_inode_block(device, &mut inode, lbn as u32)? {
-                Some(b) => b as u64,
-                None => {
-                    // Hole: allocate a new block and insert an extent for this single LBN.
-                    let new_phys = fs.alloc_block(device)?;
-                    let zero = zero_data_block();
-                    if let Err(e) = write_data_block_direct(device, new_phys, &zero) {
-                        let _ = fs.free_block(device, new_phys);
-                        return Err(e);
-                    }
-                    fs.datablock_cache.invalidate(new_phys);
-                    {
-                        let mut tree = ExtentTree::new(&mut inode);
-                        let ext = Ext4Extent::new(lbn as u32, new_phys, 1);
-                        tree.insert_extent(fs, ext, device)?;
-                    }
-
-                    let add_iblocks = (BLOCK_SIZE / 512) as u32;
-                    inode.i_blocks_lo = inode.i_blocks_lo.saturating_add(add_iblocks);
-                    inode.l_i_blocks_high = inode
-                        .l_i_blocks_high
-                        .saturating_add(((add_iblocks as u64) >> 32) as u16);
-
-                    new_phys
+        if inode.have_extend_header_and_use_extend() {
+            if resolve_inode_block(device, &mut inode, lbn as u32)?.is_none() {
+                let new_phys = fs.alloc_block(device)?;
+                let zero = zero_data_block();
+                if let Err(e) = write_data_block_direct(device, new_phys, &zero) {
+                    let _ = fs.free_block(device, new_phys);
+                    return Err(e);
                 }
+                fs.datablock_cache.invalidate(new_phys);
+                {
+                    let mut tree = ExtentTree::new(&mut inode);
+                    let ext = Ext4Extent::new(lbn as u32, new_phys, 1);
+                    tree.insert_extent(fs, ext, device)?;
+                }
+
+                let add_iblocks = (BLOCK_SIZE / 512) as u32;
+                inode.i_blocks_lo = inode.i_blocks_lo.saturating_add(add_iblocks);
+                inode.l_i_blocks_high = inode
+                    .l_i_blocks_high
+                    .saturating_add(((add_iblocks as u64) >> 32) as u16);
+                changed = true;
             }
         } else {
-            match resolve_inode_block(device, &mut inode, lbn as u32)? {
-                Some(b) => b as u64,
-                None => return Err(BlockDevError::Unsupported),
+            if resolve_inode_block(device, &mut inode, lbn as u32)?.is_none() {
+                return Err(BlockDevError::Unsupported);
             }
-        };
+        }
+    }
+
+    if changed {
+        fs.modify_inode(device, inode_num, |td| {
+            *td = inode;
+        })?;
+    }
+
+    Ok(())
+}
+
+fn ext4_write_prepared<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    fs: &mut Ext4FileSystem,
+    inode_num: u32,
+    offset: u64,
+    data: &[u8],
+) -> BlockDevResult<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let mut inode = fs.get_inode_by_num(device, inode_num)?;
+    let block_bytes = BLOCK_SIZE as u64;
+    let end = offset.saturating_add(data.len() as u64);
+    let start_lbn = offset / block_bytes;
+    let end_lbn = (end - 1) / block_bytes;
+
+    for lbn in start_lbn..=end_lbn {
+        let phys = resolve_inode_block(device, &mut inode, lbn as u32)?
+            .ok_or(BlockDevError::Unsupported)? as u64;
 
         let block_start = lbn * block_bytes;
         let block_end = block_start + block_bytes;
@@ -2327,7 +2440,25 @@ pub fn write_file_with_ino<B: BlockDevice>(
         fs.datablock_cache.invalidate(phys as u64);
     }
 
-    if end > old_size {
+    Ok(())
+}
+
+pub fn ext4_da_write_end<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    fs: &mut Ext4FileSystem,
+    inode_num: u32,
+    offset: u64,
+    len: usize,
+    copied: usize,
+) -> BlockDevResult<()> {
+    if len == 0 || copied == 0 {
+        return Ok(());
+    }
+
+    let mut inode = fs.get_inode_by_num(device, inode_num)?;
+    let end = offset.saturating_add(copied.min(len) as u64);
+
+    if end > inode.size() {
         inode.i_size_lo = (end & 0xffff_ffff) as u32;
         inode.i_size_high = (end >> 32) as u32;
     }

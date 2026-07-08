@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! File metadata types shared by file-like objects.
+//! File metadata types shared by descriptor-backed files.
 
 use core::time::Duration;
 
@@ -44,9 +44,7 @@ pub struct Kstat {
 
 impl From<kvfs::Metadata> for Kstat {
     fn from(metadata: kvfs::Metadata) -> Self {
-        let ty = metadata.node_type as u8;
-        let perm = metadata.mode.bits() as u32;
-        let mode = ((ty as u32) << 12) | perm;
+        let mode = u32::from(metadata.mode.bits());
         Self {
             dev: metadata.device,
             ino: metadata.inode,

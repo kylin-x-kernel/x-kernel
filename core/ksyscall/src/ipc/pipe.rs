@@ -4,14 +4,12 @@
 
 //! Pipe syscall adapters.
 
-use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
-use kfd::FileLike;
-use kfd_objects::pipe::PipeObject;
-use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK};
+use kfd_objects::pipe::create_pipe_files;
+use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_WRONLY};
 use posix_types::UserPtr;
 
 bitflags! {
@@ -30,20 +28,20 @@ pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
     let flags = PipeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
 
     let cloexec = flags.contains(PipeFlags::CLOEXEC);
-    let (read_end, write_end) = PipeObject::create_endpoints();
-    if flags.contains(PipeFlags::NONBLOCK) {
-        read_end.set_nonblocking(true)?;
-        write_end.set_nonblocking(true)?;
-    }
+    let status_flags = if flags.contains(PipeFlags::NONBLOCK) {
+        O_NONBLOCK
+    } else {
+        0
+    };
+    let (read_file, write_file) =
+        create_pipe_files(O_RDONLY | status_flags, O_WRONLY | status_flags)?;
     let resources = kprocess::current_resources();
-    let read_fd = resources.add_file_like(Arc::new(read_end), cloexec)?;
-    let write_fd = resources
-        .add_file_like(Arc::new(write_end), cloexec)
-        .inspect_err(|_| {
-            if let Err(err) = resources.close_file_like(read_fd) {
-                warn!("sys_pipe2 cleanup failed for read fd {read_fd}: {err:?}");
-            }
-        })?;
+    let read_fd = resources.add_file(read_file, cloexec)?;
+    let write_fd = resources.add_file(write_file, cloexec).inspect_err(|_| {
+        if let Err(err) = resources.close_file(read_fd) {
+            warn!("sys_pipe2 cleanup failed for read fd {read_fd}: {err:?}");
+        }
+    })?;
 
     fds.write_vm([read_fd, write_fd])?;
 

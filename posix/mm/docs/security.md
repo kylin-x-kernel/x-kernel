@@ -49,7 +49,8 @@
 - anonymous file `Location` 必须绑定到 regular-file inode。
 - anonymous file inode 的内容必须由 inode-owned `Mapping` 提供。
 - `memfd_create` 必须通过 `memfs::shmem` factory 创建匿名文件，不能在 syscall 层
-  复制 private tmpfs 文件创建或绕过 inode-scoped shmem policy state。
+  复制 private tmpfs 文件创建、重新打开 anonymous location，或绕过 inode-scoped
+  shmem policy state。
 - `MFD_ALLOW_SEALING` 必须只影响初始 seal set：未设置时初始
   `F_SEAL_SEAL`，设置时初始空 seal set。
 - `memfd` 名字读取必须有 Linux-compatible 上限，不能无界扫描用户内存。

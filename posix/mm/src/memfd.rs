@@ -4,13 +4,11 @@
 
 //! Memory file descriptor syscalls.
 
-use alloc::sync::Arc;
 use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
-use kfs::OpenOptions;
-use kprocess::current_resources;
-use linux_raw_sys::general::{MFD_ALLOW_SEALING, MFD_CLOEXEC, O_RDWR};
+use kprocess::current_user_process;
+use linux_raw_sys::general::{MFD_ALLOW_SEALING, MFD_CLOEXEC};
 use memfs::shmem::create_memfd_file;
 use posix_types::UserConstPtr;
 
@@ -47,15 +45,11 @@ pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize
     let flags = MemfdFlags::from_raw(flags)?;
     let display_name = name.load_string_with_max_len(MEMFD_NAME_MAX_LEN)?;
     validate_memfd_name(&display_name)?;
-    let location = create_memfd_file(&format_memfd_name(&display_name), flags.allows_sealing())?
-        .into_location();
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open_flags(O_RDWR)
-        .open_loc(location)?;
-    current_resources()
-        .add_file_like(Arc::new(file), flags.is_cloexec())
+    let file = create_memfd_file(&format_memfd_name(&display_name), flags.allows_sealing())?
+        .into_file()?;
+    current_user_process()
+        .resources()?
+        .add_file(file, flags.is_cloexec())
         .map(|fd| fd as _)
 }
 

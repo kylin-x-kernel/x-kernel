@@ -62,7 +62,7 @@ pub fn build_rootfs(args: Args) -> Result<(), String> {
         let data = read_file_bytes(&item.src)?;
         let dest = normalize_dest(&item.dest)?;
 
-        let (inode_num, _inode) = mkfile_with_ino(&mut jbd, &mut fs, &dest, Some(&data), None)
+        let (inode_num, _inode) = mkfile_with_ino(&mut jbd, &mut fs, &dest, Some(&data), None, None)
             .ok_or_else(|| format!("failed to create file {dest} in ext4 image"))?;
 
         fs.modify_inode(&mut jbd, inode_num, |inode| {

@@ -4,10 +4,10 @@
 
 //! Entry-side runtime orchestration and unittest glue.
 
-/// Initialize VFS mounts and the alarm task.
+/// Initialize entry-owned runtime services.
 pub fn init_runtime() {
-    crate::bootstrap::init_virtual_filesystems();
-    crate::bootstrap::init_alarm_runtime();
+    info!("Initialize alarm...");
+    kprocess::init_timer_runtime();
 }
 
 #[cfg(feature = "unittest")]

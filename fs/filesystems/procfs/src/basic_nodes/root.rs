@@ -7,7 +7,7 @@ use core::fmt::Write;
 
 use kbuild_config::ARCH;
 use kcpu_id_map::for_each_present_logical_cpu;
-use kvfs_simple::{DirMapping, SimpleDir, SimpleFile, SimpleFs};
+use kvfs::{DirMapping, SimpleDir, SimpleFile, SimpleFs};
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(

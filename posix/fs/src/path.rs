@@ -4,60 +4,53 @@
 
 //! Linux path-resolution helpers for filesystem syscalls and exec.
 
-use alloc::sync::Arc;
 use core::ffi::c_int;
 
+use fs_context::FsStruct;
 use kerrno::{KError, KResult};
-use kfd::{FileLike, Kstat};
-use kfs::{File, FsContext};
-use kvfs::{Location, LookupFlags, LookupIntent, lookup_location};
+use kfd::Kstat;
+use kprocess::current_user_process;
+use kvfs::{Filename, LookupFlags, LookupIntent, Path};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 /// Executes a function with the file system context for the given directory file descriptor.
 ///
 /// If `dirfd` is `AT_FDCWD`, uses the current directory context.
 /// Otherwise, resolves the directory from the given file descriptor and uses it as the base.
-pub(crate) fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
-    let fs_context = kprocess::current_fs_context();
-    let mut fs = fs_context.lock();
-    if dirfd == AT_FDCWD {
-        f(&mut fs)
+pub(crate) fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsStruct) -> KResult<R>) -> KResult<R> {
+    let fs_struct = kprocess::current_user_process_fs_context();
+    let (root, pwd) = fs_struct.lock().root_and_pwd();
+    let fs = FsStruct::from_root_and_pwd(root, pwd)?;
+    let mut snapshot = if dirfd == AT_FDCWD {
+        fs
     } else {
-        let dir = kprocess::current_resources().get_file_like_as::<File>(dirfd)?;
-        dir.check_is_dir()?;
-        let dir = dir.location().clone();
-        f(&mut fs.with_current_dir(dir)?)
-    }
+        let file = kprocess::current_resources().get_file(dirfd)?;
+        if !file.is_dir() {
+            return Err(KError::NotADirectory);
+        }
+        let dir = file.path().clone();
+        fs.clone_with_pwd(dir)?
+    };
+    f(&mut snapshot)
 }
 
 /// Result of resolving a path at a given directory.
 #[derive(Clone)]
 pub(crate) enum ResolveAtResult {
-    Location(Location),
-    Other(Arc<dyn FileLike>),
+    Path(Path),
 }
 
 impl ResolveAtResult {
-    pub(crate) fn into_location(self) -> KResult<Location> {
+    pub(crate) fn into_path(self) -> KResult<Path> {
         match self {
-            Self::Location(location) => Ok(location),
-            Self::Other(_) => Err(KError::BadFileDescriptor),
+            Self::Path(location) => Ok(location),
         }
     }
 
     pub(crate) fn stat(&self) -> KResult<Kstat> {
         match self {
-            Self::Location(location) => location.metadata().map(Kstat::from),
-            Self::Other(file_like) => file_like.stat(),
+            Self::Path(location) => location.getattr().map(Kstat::from),
         }
-    }
-}
-
-fn resolve_result_from_file_like(file_like: Arc<dyn FileLike>) -> KResult<ResolveAtResult> {
-    if let Some(location) = file_like.vfs_location() {
-        Ok(ResolveAtResult::Location(location))
-    } else {
-        Ok(ResolveAtResult::Other(file_like))
     }
 }
 
@@ -65,25 +58,26 @@ fn resolve_empty_path(dirfd: c_int, flags: u32) -> KResult<ResolveAtResult> {
     if flags & AT_EMPTY_PATH == 0 {
         return Err(KError::NotFound);
     }
-    let file_like = kprocess::current_resources().get_file_like(dirfd)?;
-    resolve_result_from_file_like(file_like)
+    let resources = current_user_process().resources()?;
+    let file = resources.get_file(dirfd)?;
+    Ok(ResolveAtResult::Path(file.path().clone()))
 }
 
-fn resolve_filesystem_path(dirfd: c_int, path: &str, flags: u32) -> KResult<Location> {
+fn resolve_filesystem_path(dirfd: c_int, path: &str, flags: u32) -> KResult<Path> {
     with_fs(dirfd, |fs| {
         let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
             LookupFlags::no_follow()
         } else {
             LookupFlags::follow()
         };
-        lookup_location(&fs.lookup_context(), path, LookupIntent::Stat, lookup_flags)
+        Filename::new(path).lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup_flags)
     })
 }
 
 pub(crate) fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
     match path {
         Some(path) if !path.is_empty() => {
-            resolve_filesystem_path(dirfd, path, flags).map(ResolveAtResult::Location)
+            resolve_filesystem_path(dirfd, path, flags).map(ResolveAtResult::Path)
         }
         _ => resolve_empty_path(dirfd, flags),
     }

@@ -2,117 +2,34 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux open/openat compatibility entry points.
+//! `open` and `openat` syscall entry points.
 
-use alloc::{format, string::ToString, sync::Arc};
+use alloc::sync::Arc;
 use core::ffi::{c_char, c_int};
 
-use devfs::DeviceFile;
-use kerrno::{KError, KResult};
-use kfd::FileLike;
-use kfs::{File, OpenOptions};
-use ktty::tty;
-use kvfs::{
-    DirEntry, FileNode, Location, LookupFlags, LookupIntent, NodeType, Reference, lookup_location,
-};
+use kerrno::KResult;
+use kprocess::current_user_process;
+use kvfs::{Filename, NodePermission, Path, VfsFile};
 use linux_raw_sys::general::*;
 use posix_types::UserConstPtr;
 
 use crate::path::with_fs;
 
-fn current_effective_ids() -> (u32, u32) {
-    (0, 0)
+fn open_path(
+    root: &Path,
+    base: &Path,
+    path: &str,
+    flags: u32,
+    mode: __kernel_mode_t,
+) -> KResult<Arc<VfsFile>> {
+    let permission = NodePermission::from_bits_truncate(mode as _);
+    Filename::new(path).open_with_flags_at(root, base, flags, permission)
 }
 
-/// Converts Linux open flags into internal `OpenOptions`.
-fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32)) -> OpenOptions {
-    let flags = flags as u32;
-    let mut options = OpenOptions::new();
-    options.mode(mode).user(uid, gid).open_flags(flags);
-
-    match flags & 0b11 {
-        O_RDONLY => options.read(true),
-        O_WRONLY => options.write(true),
-        _ => options.read(true).write(true),
-    };
-
-    if flags & O_APPEND != 0 {
-        options.append(true);
-    }
-    if flags & O_TRUNC != 0 {
-        options.truncate(true);
-    }
-    if flags & O_CREAT != 0 {
-        options.create(true);
-    }
-    if flags & O_PATH != 0 {
-        options.path(true);
-    }
-    if flags & O_EXCL != 0 {
-        options.create_new(true);
-    }
-    if flags & O_DIRECTORY != 0 {
-        options.directory(true);
-    }
-    if flags & O_NOFOLLOW != 0 {
-        options.no_follow(true);
-    }
-    if flags & O_DIRECT != 0 {
-        options.direct(true);
-    }
-    options
-}
-
-fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
-    if let Ok(device) = file.location().entry().downcast::<DeviceFile>() {
-        let inner = device.inner().as_any();
-        if let Some(ptmx) = inner.downcast_ref::<devfs::Ptmx>() {
-            let (master, pty_number) = ptmx.create_pty()?;
-            let fs_context = kprocess::current_user_process_fs_context();
-            let fs = fs_context.lock();
-            let pts = lookup_location(
-                &fs.lookup_context(),
-                "/dev/pts",
-                LookupIntent::Open,
-                LookupFlags::follow(),
-            )?;
-            let entry = DirEntry::new_file(
-                FileNode::new(master),
-                NodeType::CharacterDevice,
-                Reference::new(Some(pts.entry().clone()), pty_number.to_string()),
-            );
-            let loc = Location::new(file.location().mountpoint().clone(), entry);
-            file = File::with_open_flags(loc, file.flags(), file.open_flags());
-        } else if inner.is::<tty::CurrentTty>() {
-            let term = kprocess::current_user_thread()
-                .process()
-                .group()
-                .session()
-                .terminal()
-                .ok_or(KError::NotFound)?;
-            let path = if term.is::<tty::NTtyDriver>() {
-                "/dev/console".to_string()
-            } else if let Some(pts) = term.downcast_ref::<tty::PtyDriver>() {
-                format!("/dev/pts/{}", pts.pty_number())
-            } else {
-                return Err(KError::OperationNotSupported);
-            };
-            let fs_context = kprocess::current_user_process_fs_context();
-            let fs = fs_context.lock();
-            let loc = lookup_location(
-                &fs.lookup_context(),
-                path.as_str(),
-                LookupIntent::Open,
-                LookupFlags::follow(),
-            )?;
-            file = File::with_open_flags(loc, file.flags(), file.open_flags());
-        }
-    }
-    let f: Arc<dyn FileLike> = Arc::new(file);
-    if flags & O_NONBLOCK != 0 {
-        f.set_nonblocking(true)?;
-    }
-    kprocess::current_resources().add_file_like(f, flags & O_CLOEXEC != 0)
+fn add_to_fd(file: Arc<VfsFile>, flags: u32) -> KResult<i32> {
+    current_user_process()
+        .resources()?
+        .add_file(file, flags & O_CLOEXEC != 0)
 }
 
 /// Opens a file relative to a directory file descriptor.
@@ -125,11 +42,12 @@ pub fn sys_openat(
     let path = path.load_string()?;
     debug!("sys_openat <= {dirfd} {path:?} {flags:#o} {mode:#o}");
     let mode = mode & !kprocess::current_umask();
-    let options = flags_to_options(flags, mode, current_effective_ids());
 
-    with_fs(dirfd, |fs| options.open(fs, path))
-        .and_then(|it| add_to_fd(it, flags as _))
-        .map(|fd| fd as isize)
+    with_fs(dirfd, |fs| {
+        open_path(fs.root(), fs.pwd(), path.as_str(), flags as u32, mode)
+    })
+    .and_then(|it| add_to_fd(it, flags as _))
+    .map(|fd| fd as isize)
 }
 
 /// Opens a file by path.

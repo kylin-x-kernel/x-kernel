@@ -3,15 +3,16 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::{any::Any, ffi::c_int};
+use core::ffi::c_int;
 
 use chrono::{Datelike, Timelike};
-use kvfs::{DeviceFileOps, DeviceId, NodeFlags, VfsError, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleFs, VfsError, VfsFile, VfsResult,
+};
 use linux_raw_sys::ioctl::RTC_RD_TIME;
 use osvm::VirtMutPtr;
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 /// The device ID for /dev/rtc0
 pub const RTC0_DEVICE_ID: DeviceId = DeviceId::new(250, 0);
@@ -35,15 +36,15 @@ struct rtc_time {
 pub struct Rtc;
 
 impl DeviceFileOps for Rtc {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         Ok(0)
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Ok(0)
-    }
-
-    fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
             RTC_RD_TIME => {
                 let wall =
@@ -65,17 +66,14 @@ impl DeviceFileOps for Rtc {
         Ok(0)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
     }
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+    add_device_entry(
+        root,
         "rtc0",
         DeviceFile::new(
             fs.clone(),

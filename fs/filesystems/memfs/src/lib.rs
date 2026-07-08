@@ -8,21 +8,26 @@
 
 extern crate alloc;
 
+pub mod ramfs;
 pub mod shmem;
 
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
-use core::{any::Any, borrow::Borrow, cmp::Ordering, task::Context, time::Duration};
+use core::{borrow::Borrow, cmp::Ordering, time::Duration};
 
 use hashbrown::HashMap;
-use kpoll::{IoEvents, Pollable};
+use iov_iter::{IovIterDest, IovIterSource};
 use ksync::Mutex;
 use kvfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
-    InodeCache, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference,
-    StatFs, SuperBlockOperations, VfsError, VfsResult, WeakDirEntry,
+    AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FileDirOperations,
+    FileOperations, InodeCache, InodeDirOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
+    Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, StatFs, SuperBlock,
+    SuperBlockOperations, Umode, VfsError, VfsFile, VfsInodeInit, VfsResult, WriteBeginRequest,
+    WriteEndRequest, simple_getattr, simple_rename, simple_statfs_with_flags, simple_write_end,
 };
-use kvfs_simple::dummy_stat_fs_with_flags;
 use slab::Slab;
+
+pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
+pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 struct FileName(String);
@@ -64,30 +69,46 @@ impl Borrow<str> for FileName {
 /// A simple in-memory filesystem that supports basic file operations.
 pub struct MemoryFs {
     name: &'static str,
+    fs_type: u32,
     mount_flags: u32,
     inodes: Mutex<Slab<Arc<Inode>>>,
     inode_cache: InodeCache,
-    root: Mutex<Option<DirEntry>>,
+    root: Mutex<Option<Dentry>>,
 }
 
 impl MemoryFs {
-    /// Creates a new empty in-memory filesystem.
+    /// Creates an in-memory superblock.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new() -> Filesystem {
+    pub fn new() -> Arc<SuperBlock> {
         Self::new_with_name_and_flags("memfs", 0)
     }
 
-    /// Creates a new in-memory filesystem with explicit mount flags.
+    /// Creates an in-memory superblock with explicit mount flags.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new_with_flags(mount_flags: u32) -> Filesystem {
+    pub fn new_with_flags(mount_flags: u32) -> Arc<SuperBlock> {
         Self::new_with_name_and_flags("memfs", mount_flags)
     }
 
-    /// Creates a new in-memory filesystem with a custom name and mount flags.
+    /// Creates an in-memory superblock with a custom name and mount flags.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new_with_name_and_flags(name: &'static str, mount_flags: u32) -> Filesystem {
+    pub fn new_with_name_and_flags(name: &'static str, mount_flags: u32) -> Arc<SuperBlock> {
+        Self::new_with_name_flags_and_root_mode(
+            name,
+            RAMFS_MAGIC,
+            mount_flags,
+            NodePermission::from_bits_truncate(0o755),
+        )
+    }
+
+    pub(crate) fn new_with_name_flags_and_root_mode(
+        name: &'static str,
+        fs_type: u32,
+        mount_flags: u32,
+        root_mode: NodePermission,
+    ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {
             name,
+            fs_type,
             mount_flags,
             inodes: Mutex::new(Slab::new()),
             inode_cache: InodeCache::new(),
@@ -97,13 +118,16 @@ impl MemoryFs {
             &fs,
             None,
             NodeType::Directory,
-            NodePermission::from_bits_truncate(0o755),
+            root_mode,
+            DeviceId::default(),
         );
-        *fs.root.lock() = Some(DirEntry::new_dir(
-            |this| DirNode::new(MemoryNode::new(fs.clone(), root_ino, Some(this))),
-            Reference::root(),
+        *fs.root.lock() = Some(MemoryNode::dentry_from_inode(
+            &fs,
+            None,
+            String::new(),
+            root_ino,
         ));
-        Filesystem::new(fs)
+        SuperBlock::new(fs)
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -116,12 +140,12 @@ impl SuperBlockOperations for MemoryFs {
         self.name
     }
 
-    fn root_dentry(&self) -> DirEntry {
+    fn root_dentry(&self) -> Dentry {
         self.root.lock().clone().unwrap()
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(dummy_stat_fs_with_flags(0x01021994, self.mount_flags))
+        Ok(simple_statfs_with_flags(self.fs_type, self.mount_flags))
     }
 }
 
@@ -136,7 +160,6 @@ fn release_inode(fs: &MemoryFs, inode: &Arc<Inode>, nlink: u64) {
 
 #[derive(Default)]
 struct FileContent {
-    length: Mutex<u64>,
     symlink: Mutex<Option<String>>,
 }
 
@@ -145,15 +168,23 @@ struct DirContent {
     entries: Mutex<HashMap<FileName, InodeRef>>,
 }
 
-enum NodeContent {
+enum InodeContent {
     File(FileContent),
     Dir(DirContent),
+}
+
+#[derive(Default)]
+enum InodePrivate {
+    #[default]
+    None,
+    Shmem(Arc<shmem::ShmemObjectState>),
 }
 
 struct Inode {
     ino: u64,
     metadata: Mutex<Metadata>,
-    content: NodeContent,
+    content: Option<InodeContent>,
+    private: Mutex<InodePrivate>,
 }
 
 impl Inode {
@@ -162,6 +193,7 @@ impl Inode {
         parent: Option<u64>,
         node_type: NodeType,
         permission: NodePermission,
+        rdev: DeviceId,
     ) -> Arc<Inode> {
         let mut inodes = fs.inodes.lock();
         let entry = inodes.vacant_entry();
@@ -170,30 +202,33 @@ impl Inode {
             device: 0,
             inode: ino,
             nlink: 0,
-            mode: permission,
-            node_type,
+            mode: Umode::new(node_type, permission),
             uid: 0,
             gid: 0,
             size: 0,
             block_size: 0,
             blocks: 0,
-            rdev: DeviceId::default(),
+            rdev,
             atime: Duration::default(),
             mtime: Duration::default(),
             ctime: Duration::default(),
         };
         let content = match node_type {
-            NodeType::Directory => NodeContent::Dir(DirContent::default()),
-            _ => NodeContent::File(FileContent::default()),
+            NodeType::Directory => Some(InodeContent::Dir(DirContent::default())),
+            NodeType::RegularFile | NodeType::Symlink => {
+                Some(InodeContent::File(FileContent::default()))
+            }
+            _ => None,
         };
         let result = Arc::new(Self {
             ino,
             metadata: Mutex::new(metadata),
             content,
+            private: Mutex::default(),
         });
         entry.insert(result.clone());
         drop(inodes);
-        if let NodeContent::Dir(dir) = &result.content {
+        if let Some(InodeContent::Dir(dir)) = &result.content {
             let mut entries = dir.entries.lock();
             entries.insert(".".into(), InodeRef::new(fs.clone(), ino));
             entries.insert(
@@ -205,17 +240,37 @@ impl Inode {
     }
 
     fn as_file(&self) -> VfsResult<&FileContent> {
-        match self.content {
-            NodeContent::File(ref content) => Ok(content),
-            _ => Err(VfsError::IsADirectory),
+        match &self.content {
+            Some(InodeContent::File(content)) => Ok(content),
+            Some(InodeContent::Dir(_)) => Err(VfsError::IsADirectory),
+            None => Err(VfsError::InvalidInput),
         }
     }
 
     fn as_dir(&self) -> VfsResult<&DirContent> {
-        match self.content {
-            NodeContent::Dir(ref content) => Ok(content),
+        match &self.content {
+            Some(InodeContent::Dir(content)) => Ok(content),
             _ => Err(VfsError::NotADirectory),
         }
+    }
+
+    fn shmem_state(&self) -> Option<Arc<shmem::ShmemObjectState>> {
+        match &*self.private.lock() {
+            InodePrivate::Shmem(state) => Some(state.clone()),
+            InodePrivate::None => None,
+        }
+    }
+
+    fn attach_shmem_state(
+        &self,
+        state: Arc<shmem::ShmemObjectState>,
+    ) -> Arc<shmem::ShmemObjectState> {
+        let mut private = self.private.lock();
+        if let InodePrivate::Shmem(existing) = &*private {
+            return existing.clone();
+        }
+        *private = InodePrivate::Shmem(state.clone());
+        state
     }
 }
 
@@ -244,60 +299,159 @@ impl Drop for InodeRef {
 struct MemoryNode {
     fs: Arc<MemoryFs>,
     inode: Arc<Inode>,
-    this: Option<WeakDirEntry>,
 }
 
 impl MemoryNode {
-    pub fn new(fs: Arc<MemoryFs>, inode: Arc<Inode>, this: Option<WeakDirEntry>) -> Arc<Self> {
-        Arc::new(Self { fs, inode, this })
+    pub fn new(fs: Arc<MemoryFs>, inode: Arc<Inode>) -> Arc<Self> {
+        Arc::new(Self { fs, inode })
     }
 
-    fn new_entry(&self, name: &str, node_type: NodeType, inode: Arc<Inode>) -> VfsResult<DirEntry> {
-        let fs = self.fs.clone();
-        let reference = Reference::new(
-            self.this.as_ref().and_then(WeakDirEntry::upgrade),
-            name.to_owned(),
-        );
-        Ok(if node_type == NodeType::Directory {
-            DirEntry::new_dir(
-                |this| DirNode::new(MemoryNode::new(fs, inode, Some(this))),
-                reference,
-            )
-        } else {
-            let inode_number = inode.ino;
-            let vfs_inode = self
-                .fs
+    fn dentry_from_inode(
+        fs: &Arc<MemoryFs>,
+        d_parent: Option<Dentry>,
+        d_name: String,
+        inode: Arc<Inode>,
+    ) -> Dentry {
+        let metadata = inode.metadata.lock();
+        let node_type = metadata.mode.node_type();
+        let init = VfsInodeInit::from_metadata(&metadata);
+        drop(metadata);
+        let vfs_inode = match node_type {
+            NodeType::Directory => fs.inode_cache.get_or_insert_openable_dir_with_init(
+                NodeFlags::empty(),
+                init,
+                || MemoryNode::new(fs.clone(), inode),
+            ),
+            NodeType::RegularFile => {
+                fs.inode_cache
+                    .get_or_insert_file_with_init(NodeFlags::ALWAYS_CACHE, init, || {
+                        MemoryNode::new(fs.clone(), inode)
+                    })
+            }
+            NodeType::Symlink => {
+                fs.inode_cache
+                    .get_or_insert_symlink_with_init(NodeFlags::empty(), init, || {
+                        MemoryNode::new(fs.clone(), inode)
+                    })
+            }
+            _ => fs
                 .inode_cache
-                .get_or_insert_file(inode_number, node_type, || {
-                    FileNode::new(MemoryNode::new(fs, inode, None))
-                });
-            DirEntry::new_file_from_inode(vfs_inode, reference)
-        })
+                .get_or_insert_special_with_init(NodeFlags::empty(), init, || {
+                    MemoryNode::new(fs.clone(), inode)
+                }),
+        };
+        if node_type == NodeType::Directory {
+            Dentry::new_dir_from_inode(vfs_inode, d_parent, d_name)
+        } else {
+            Dentry::new_file_from_inode(vfs_inode, d_parent, d_name)
+        }
+    }
+
+    fn new_entry(&self, parent: &Dentry, name: &str, inode: Arc<Inode>) -> Dentry {
+        Self::dentry_from_inode(&self.fs, Some(parent.clone()), name.to_owned(), inode)
+    }
+
+    fn ramfs_get_inode(
+        &self,
+        parent: Option<u64>,
+        mode: kvfs::Umode,
+        device: DeviceId,
+    ) -> Arc<Inode> {
+        Inode::new(
+            &self.fs,
+            parent,
+            mode.node_type(),
+            mode.permission(),
+            device,
+        )
+    }
+
+    fn ramfs_mknod(
+        &self,
+        dentry: &Dentry,
+        mode: kvfs::Umode,
+        device: DeviceId,
+    ) -> VfsResult<Dentry> {
+        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let name = dentry.name();
+        let content = self.inode.as_dir()?;
+        let mut entries = content.entries.lock();
+
+        if entries.contains_key(name) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let inode = self.ramfs_get_inode(Some(self.inode.ino), mode, device);
+        entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
+        drop(entries);
+        Ok(self.new_entry(&dir, name, inode))
+    }
+
+    fn remove_dir_links(inode: &Arc<Inode>) {
+        if let Some(InodeContent::Dir(dir)) = &inode.content {
+            dir.entries.lock().clear();
+        }
+    }
+
+    fn reparent_dir(&self, inode: &Arc<Inode>, new_parent: u64) {
+        if let Some(InodeContent::Dir(dir)) = &inode.content {
+            dir.entries
+                .lock()
+                .insert("..".into(), InodeRef::new(self.fs.clone(), new_parent));
+        }
+    }
+
+    fn node_type(&self) -> NodeType {
+        self.inode.metadata.lock().mode.node_type()
     }
 }
 
-impl NodeOps for MemoryNode {
-    fn inode(&self) -> u64 {
-        self.inode.ino
+impl InodeOperations for MemoryNode {
+    fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
+        if self.node_type() == NodeType::Directory {
+            Some(self)
+        } else {
+            None
+        }
     }
 
-    fn metadata(&self) -> VfsResult<Metadata> {
+    fn symlink_operations(&self) -> Option<&dyn InodeSymlinkOperations> {
+        if self.node_type() == NodeType::Symlink {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    fn getattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        if path.is_some() {
+            return simple_getattr(idmap, path, request_mask, query_flags);
+        }
         let mut metadata = self.inode.metadata.lock().clone();
-        match &self.inode.content {
-            NodeContent::File(content) => {
-                metadata.size = *content.length.lock();
-            }
-            NodeContent::Dir(dir) => {
-                metadata.size = dir.entries.lock().len() as u64;
-            }
+        if let Some(InodeContent::Dir(dir)) = self.inode.content.as_ref() {
+            metadata.size = dir.entries.lock().len() as u64;
         }
         Ok(metadata)
     }
 
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+    fn setattr(
+        &self,
+        _idmap: &kvfs::MountIdmap,
+        _dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<()> {
         let mut metadata = self.inode.metadata.lock();
+        if let Some(size) = update.size {
+            self.inode.as_file()?;
+            metadata.size = size;
+        }
         if let Some(mode) = update.mode {
-            metadata.mode = mode;
+            metadata.mode = metadata.mode.with_permission(mode);
         }
         if let Some((uid, gid)) = update.owner {
             metadata.uid = uid;
@@ -311,154 +465,188 @@ impl NodeOps for MemoryNode {
         }
         Ok(())
     }
-
-    fn sync(&self, _data_only: bool) -> VfsResult<()> {
-        Ok(())
-    }
-
-    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
-
-    fn flags(&self) -> NodeFlags {
-        NodeFlags::ALWAYS_CACHE
-    }
 }
 
-impl FileNodeOps for MemoryNode {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+impl InodeSymlinkOperations for MemoryNode {
+    fn get_link(
+        &self,
+        _dentry: Option<&Dentry>,
+        _inode: &kvfs::VfsInode,
+        _done: &mut kvfs::DelayedCall,
+    ) -> VfsResult<String> {
         let file = self.inode.as_file()?;
-        if let Some(symlink) = file.symlink.lock().as_ref() {
-            assert_eq!(offset, 0);
-            let len = buf.len().min(symlink.len());
-            buf[..len].copy_from_slice(&symlink.as_bytes()[..len]);
-            return Ok(len);
-        }
-        unreachable!("page cache should dispatch reading");
-    }
-
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        unreachable!("page cache should dispatch writing");
-    }
-
-    fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
-        unreachable!("page cache should dispatch writing");
-    }
-
-    fn set_len(&self, len: u64) -> VfsResult<()> {
-        *self.inode.as_file()?.length.lock() = len;
-        Ok(())
-    }
-
-    fn set_symlink(&self, target: &str) -> VfsResult<()> {
-        let file = self.inode.as_file()?;
-        *file.length.lock() = target.len() as u64;
-        *file.symlink.lock() = Some(target.to_owned());
-        Ok(())
+        file.symlink.lock().clone().ok_or(VfsError::InvalidData)
     }
 }
 
-impl Pollable for MemoryNode {
-    fn poll(&self) -> IoEvents {
-        IoEvents::IN | IoEvents::OUT
-    }
-
-    fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
-}
-
-impl DirNodeOps for MemoryNode {
-    fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
-        let mut count = 0;
-        for (i, (name, entry)) in self
-            .inode
-            .as_dir()?
-            .entries
-            .lock()
-            .iter()
-            .enumerate()
-            .skip(offset as usize)
-        {
-            if !sink.accept(
-                &name.0,
-                entry.ino,
-                entry.get().metadata.lock().node_type,
-                i as u64 + 1,
-            ) {
-                return Ok(count);
-            }
-            count += 1;
-        }
-        Ok(count)
-    }
-
-    fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
-        let dir = self.inode.as_dir()?;
-        let entries = dir.entries.lock();
+impl InodeDirOperations for MemoryNode {
+    fn lookup(
+        &self,
+        _dir: &kvfs::VfsInode,
+        dentry: &Dentry,
+        _flags: kvfs::InodeLookupFlags,
+    ) -> VfsResult<Dentry> {
+        let parent = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let name = dentry.name();
+        let content = self.inode.as_dir()?;
+        let entries = content.entries.lock();
 
         let entry = entries.get(name).ok_or(VfsError::NotFound)?;
         let inode = entry.get();
-        let node_type = inode.metadata.lock().node_type;
-        self.new_entry(name, node_type, inode)
+        Ok(self.new_entry(&parent, name, inode))
     }
 
     fn create(
         &self,
-        name: &str,
-        node_type: NodeType,
-        permission: NodePermission,
-    ) -> VfsResult<DirEntry> {
-        let dir = self.inode.as_dir()?;
-        let mut entries = dir.entries.lock();
+        _idmap: &kvfs::MountIdmap,
+        _dir: &kvfs::VfsInode,
+        dentry: &Dentry,
+        mode: kvfs::Umode,
+        _exclusive: bool,
+    ) -> VfsResult<Dentry> {
+        let mode = mode.with_node_type(NodeType::RegularFile);
+        self.ramfs_mknod(dentry, mode, DeviceId::default())
+    }
+
+    fn mkdir(
+        &self,
+        _idmap: &kvfs::MountIdmap,
+        dir_inode: &kvfs::VfsInode,
+        dentry: &Dentry,
+        mode: kvfs::Umode,
+    ) -> VfsResult<Dentry> {
+        let mode = mode.with_node_type(NodeType::Directory);
+        let entry = self.ramfs_mknod(dentry, mode, DeviceId::default())?;
+        dir_inode.increment_link_count();
+        Ok(entry)
+    }
+
+    fn mknod(
+        &self,
+        _idmap: &kvfs::MountIdmap,
+        _dir: &kvfs::VfsInode,
+        dentry: &Dentry,
+        mode: kvfs::Umode,
+        device: DeviceId,
+    ) -> VfsResult<Dentry> {
+        self.ramfs_mknod(dentry, mode, device)
+    }
+
+    fn symlink(
+        &self,
+        _idmap: &kvfs::MountIdmap,
+        _dir: &kvfs::VfsInode,
+        dentry: &Dentry,
+        target: &str,
+    ) -> VfsResult<Dentry> {
+        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let name = dentry.name();
+        let content = self.inode.as_dir()?;
+        let mut entries = content.entries.lock();
 
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
-        let inode = Inode::new(&self.fs, Some(self.inode.ino), node_type, permission);
+        let inode = Inode::new(
+            &self.fs,
+            Some(self.inode.ino),
+            NodeType::Symlink,
+            NodePermission::from_bits_truncate(0o777),
+            DeviceId::default(),
+        );
+        let file = inode.as_file()?;
+        *file.symlink.lock() = Some(target.to_owned());
+        inode.metadata.lock().size = target.len() as u64;
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
-        self.new_entry(name, node_type, inode)
+        Ok(self.new_entry(&dir, name, inode))
     }
 
-    fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
-        let dir = self.inode.as_dir()?;
-        let mut entries = dir.entries.lock();
+    fn link(
+        &self,
+        target_dentry: &Dentry,
+        _dir: &kvfs::VfsInode,
+        dentry: &Dentry,
+    ) -> VfsResult<Dentry> {
+        let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let name = dentry.name();
+        let content = self.inode.as_dir()?;
+        let mut entries = content.entries.lock();
 
-        let target = target.downcast::<Self>()?;
+        let target = target_dentry.downcast::<Self>()?;
 
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
         let inode = target.inode.clone();
-        let node_type = target.metadata()?.node_type;
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
-        self.new_entry(name, node_type, inode)
+        target_dentry.increment_link_count();
+        Ok(self.new_entry(&dir, name, inode))
     }
 
-    fn unlink(&self, name: &str) -> VfsResult<()> {
+    fn unlink(&self, dir_inode: &kvfs::VfsInode, dentry: &Dentry) -> VfsResult<()> {
+        let name = dentry.name();
         let dir = self.inode.as_dir()?;
         let mut entries = dir.entries.lock();
 
         let Some(entry) = entries.get(name) else {
             return Err(VfsError::NotFound);
         };
-        if let NodeContent::Dir(DirContent { entries }) = &entry.get().content
-            && entries.lock().len() > 2
-        {
-            return Err(VfsError::DirectoryNotEmpty);
+        let inode = entry.get();
+        if let Some(InodeContent::Dir(DirContent { entries })) = &inode.content {
+            if entries.lock().len() > 2 {
+                return Err(VfsError::DirectoryNotEmpty);
+            }
+            Self::remove_dir_links(&inode);
+            dentry.decrement_link_count();
+            dir_inode.decrement_link_count();
         }
         entries.remove(name);
+        dentry.decrement_link_count();
 
         Ok(())
     }
 
-    fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+    fn rename(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        old_dir_inode: &kvfs::VfsInode,
+        old_dentry: &Dentry,
+        new_dir_inode: &kvfs::VfsInode,
+        new_dentry: &Dentry,
+        flags: kvfs::RenameFlags,
+    ) -> VfsResult<()> {
+        let old_dir = old_dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let dst_dir = new_dentry.parent().ok_or(VfsError::InvalidInput)?;
+        let src_name = old_dentry.name();
+        let dst_name = new_dentry.name();
         let dst_node = dst_dir.downcast::<Self>()?;
+        let mut replaced_dir = None;
         if let Ok(entry) = dst_dir.lookup(dst_name) {
-            let src_entry = self.lookup(src_name)?;
+            let src_entry = old_dir.lookup(src_name)?;
             if entry.inode() == src_entry.inode() {
                 return Ok(());
             }
+            if src_entry.node_type() == NodeType::Directory
+                && entry.node_type() != NodeType::Directory
+            {
+                return Err(VfsError::NotADirectory);
+            }
+            if entry.node_type() == NodeType::Directory {
+                replaced_dir = Some(entry.downcast::<Self>()?.inode.clone());
+            }
         }
 
+        simple_rename(
+            idmap,
+            old_dir_inode,
+            old_dentry,
+            new_dir_inode,
+            new_dentry,
+            flags,
+        )?;
+        if let Some(inode) = replaced_dir {
+            Self::remove_dir_links(&inode);
+        }
         let src_entry = self
             .inode
             .as_dir()?
@@ -466,6 +654,12 @@ impl DirNodeOps for MemoryNode {
             .lock()
             .remove(src_name)
             .ok_or(VfsError::NotFound)?;
+        let moved_inode = src_entry.get();
+        if moved_inode.metadata.lock().mode.node_type() == NodeType::Directory
+            && old_dir.inode() != dst_dir.inode()
+        {
+            self.reparent_dir(&moved_inode, dst_node.inode.ino);
+        }
         dst_node
             .inode
             .as_dir()?
@@ -476,9 +670,160 @@ impl DirNodeOps for MemoryNode {
     }
 }
 
+impl FileOperations for MemoryNode {
+    fn dir_operations(&self) -> Option<&dyn FileDirOperations> {
+        if matches!(self.inode.content.as_ref(), Some(InodeContent::Dir(_))) {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    fn supports_read(&self) -> bool {
+        matches!(
+            self.inode.content.as_ref(),
+            Some(InodeContent::File(_)) | Some(InodeContent::Dir(_))
+        )
+    }
+
+    fn supports_write(&self) -> bool {
+        matches!(self.inode.content.as_ref(), Some(InodeContent::File(_)))
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        let file = self.inode.as_file()?;
+        if let Some(symlink) = file.symlink.lock().as_ref() {
+            assert_eq!(offset, 0);
+            let len = buf.len().min(symlink.len());
+            buf[..len].copy_from_slice(&symlink.as_bytes()[..len]);
+            return Ok(len);
+        }
+        unreachable!("page cache should dispatch reading");
+    }
+
+    fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
+        let file = self.inode.as_file()?;
+        if let Some(symlink) = file.symlink.lock().as_ref() {
+            let offset = usize::try_from(iocb.ki_pos()).map_err(|_| VfsError::InvalidInput)?;
+            if offset >= symlink.len() {
+                return Ok(0);
+            }
+            let src = &symlink.as_bytes()[offset..];
+            let copied = iter.copy_to_iter(&src[..src.len().min(iter.count())])?;
+            iocb.advance(copied);
+            return Ok(copied);
+        }
+        iocb.generic_file_read_iter(iter)
+    }
+
+    fn write(&self, _file: &VfsFile, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        match self.inode.content.as_ref() {
+            Some(InodeContent::Dir(_)) => Err(VfsError::IsADirectory),
+            None => Err(VfsError::InvalidInput),
+            Some(InodeContent::File(_)) => {
+                unreachable!("page cache should dispatch writing");
+            }
+        }
+    }
+
+    fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
+        self.inode.as_file()?;
+        iocb.generic_file_write_iter(iter)
+    }
+}
+
+impl FileDirOperations for MemoryNode {
+    fn iterate_shared(&self, _file: &VfsFile, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
+        let mut count = 0;
+        let offset = ctx.pos();
+        for (i, (name, entry)) in self
+            .inode
+            .as_dir()?
+            .entries
+            .lock()
+            .iter()
+            .enumerate()
+            .skip(offset as usize)
+        {
+            if !ctx.emit(
+                &name.0,
+                entry.ino,
+                entry.get().metadata.lock().mode.node_type(),
+                i as u64 + 1,
+            ) {
+                return Ok(count);
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+}
+
+impl AddressSpaceOperations for MemoryNode {
+    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        buf.fill(0);
+        Ok(buf.len())
+    }
+
+    fn writepages(
+        &self,
+        _mapping: &AddressSpace,
+        _control: &mut kvfs::WritebackControl,
+    ) -> VfsResult<()> {
+        Ok(())
+    }
+
+    fn set_len(&self, _mapping: &AddressSpace, len: u64) -> VfsResult<()> {
+        self.inode.as_file()?;
+        self.inode.metadata.lock().size = len;
+        Ok(())
+    }
+
+    fn write_begin(&self, _mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
+        self.inode.as_file()?;
+        Ok(())
+    }
+
+    fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
+        let copied = simple_write_end(mapping, request)?;
+        if copied != 0 {
+            let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+            self.inode.metadata.lock().size = inode.size();
+        }
+        Ok(copied)
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use linux_raw_sys::general::{O_CREAT, O_EXCL, O_WRONLY};
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn tmpfs_write_end_updates_vfs_inode_size() {
+        let fs = shmem::new_tmpfs(0);
+        let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+        let file = kvfs::Filename::new("tmp")
+            .open_with_flags_at(
+                &root,
+                &root,
+                O_WRONLY | O_CREAT | O_EXCL,
+                NodePermission::from_bits_truncate(0o600),
+            )
+            .unwrap();
+        let mut pos = 0;
+
+        assert_eq!(file.write_from(b"hello", &mut pos).unwrap(), 5);
+        assert_eq!(file.path().getattr().unwrap().size, 5);
+        assert_eq!(file.inode().size(), 5);
+    }
+}
+
 impl Drop for MemoryNode {
     fn drop(&mut self) {
-        if let NodeContent::Dir(dir) = &self.inode.content {
+        if let Some(InodeContent::Dir(dir)) = &self.inode.content {
             dir.entries.lock().clear();
         }
         release_inode(&self.fs, &self.inode, 0);

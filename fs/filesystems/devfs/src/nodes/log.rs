@@ -10,8 +10,7 @@ use knet::{
     RecvOptions, SocketAddrEx, SocketOps,
     unix::{DgramTransport, UnixAddr, UnixDomainSocket},
 };
-use kvfs::NodeType;
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{DirMapping, NodeType, SimpleFs};
 
 /// Bind /dev/log as a Unix domain socket for syslog messages
 pub fn bind_dev_log() -> LinuxResult<()> {
@@ -51,6 +50,6 @@ pub fn bind_dev_log() -> LinuxResult<()> {
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "log",
-        kvfs_simple::SimpleFile::new(fs.clone(), NodeType::Socket, || Ok(b"")),
+        kvfs::SimpleFile::new(fs.clone(), NodeType::Socket, || Ok(b"")),
     );
 }

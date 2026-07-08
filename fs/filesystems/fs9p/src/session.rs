@@ -60,7 +60,10 @@ pub struct FileAttr {
     pub uid: u32,
     pub gid: u32,
     pub nlink: u64,
+    pub rdev: u64,
     pub size: u64,
+    pub blksize: u64,
+    pub blocks: u64,
     pub atime_sec: u64,
     pub mtime_sec: u64,
     pub ctime_sec: u64,
@@ -167,6 +170,10 @@ impl P9Session {
 
     /// Create a directory at `path`.
     pub fn create_dir(&mut self, path: &str) -> Result<(), String> {
+        self.create_dir_with_mode(path, 0o755)
+    }
+
+    pub fn create_dir_with_mode(&mut self, path: &str, mode: u32) -> Result<(), String> {
         let (parent, name) = split_parent_name(path)?;
         let (fid, is_dir) = self.walk_path(parent)?;
         if !is_dir {
@@ -175,9 +182,9 @@ impl P9Session {
         }
 
         if self.p9_version.is_dotl() {
-            self.mkdir(fid, name, DMDIR | 0o755, 0)?;
+            self.mkdir(fid, name, mode & 0o7777, 0)?;
         } else {
-            self.create(fid, name, OREAD, DMDIR | 0o755)?;
+            self.create(fid, name, OREAD, DMDIR | (mode & 0o777))?;
         }
         self.clunk(fid)?;
         Ok(())
@@ -218,7 +225,11 @@ impl P9Session {
     }
 
     pub fn create_file(&mut self, path: &str) -> Result<u32, String> {
-        self.create_file_with_flags(path, ORDWR, P9_DOTL_RDWR | P9_DOTL_CREATE, 0o644)
+        self.create_file_with_mode(path, 0o100644)
+    }
+
+    pub fn create_file_with_mode(&mut self, path: &str, mode: u32) -> Result<u32, String> {
+        self.create_file_with_flags(path, ORDWR, P9_DOTL_RDWR | P9_DOTL_CREATE, mode)
     }
 
     pub fn create_file_with_flags(
@@ -226,7 +237,7 @@ impl P9Session {
         path: &str,
         mode_9p: u8,
         mode_dotl: u32,
-        perm: u32,
+        mode: u32,
     ) -> Result<u32, String> {
         let (parent, name) = split_parent_name(path)?;
         let (fid, is_dir) = self.walk_path(parent)?;
@@ -236,9 +247,9 @@ impl P9Session {
         }
 
         let result = if self.p9_version.is_dotl() {
-            self.lcreate(fid, name, mode_dotl | P9_DOTL_CREATE, perm, 0)
+            self.lcreate(fid, name, mode_dotl | P9_DOTL_CREATE, mode, 0)
         } else {
-            self.create(fid, name, mode_9p, perm)
+            self.create(fid, name, mode_9p, mode & 0o777)
         };
 
         match result {
@@ -248,6 +259,29 @@ impl P9Session {
                 Err(err)
             }
         }
+    }
+
+    pub fn mknod_dotl(
+        &mut self,
+        path: &str,
+        mode: u32,
+        major: u32,
+        minor: u32,
+        gid: u32,
+    ) -> Result<(), String> {
+        if !self.p9_version.is_dotl() {
+            return Err(String::from("mknod requires 9P2000.L"));
+        }
+        let (parent, name) = split_parent_name(path)?;
+        let (dfid, is_dir) = self.walk_path(parent)?;
+        if !is_dir {
+            self.clunk(dfid)?;
+            return Err(String::from("parent is not a directory"));
+        }
+
+        let result = self.mknod_at(dfid, name, mode, major, minor, gid);
+        let _ = self.clunk(dfid);
+        result
     }
 
     pub fn read_link(&mut self, path: &str) -> Result<String, String> {
@@ -353,10 +387,10 @@ impl P9Session {
                 let uid = read_u32(&resp, &mut off)?;
                 let gid = read_u32(&resp, &mut off)?;
                 let nlink = read_u64(&resp, &mut off)?;
-                let _rdev = read_u64(&resp, &mut off)?;
+                let rdev = read_u64(&resp, &mut off)?;
                 let size = read_u64(&resp, &mut off)?;
-                let _blksize = read_u64(&resp, &mut off)?;
-                let _blocks = read_u64(&resp, &mut off)?;
+                let blksize = read_u64(&resp, &mut off)?;
+                let blocks = read_u64(&resp, &mut off)?;
                 let atime_sec = read_u64(&resp, &mut off)?;
                 let _atime_nsec = read_u64(&resp, &mut off)?;
                 let mtime_sec = read_u64(&resp, &mut off)?;
@@ -369,7 +403,10 @@ impl P9Session {
                     uid,
                     gid,
                     nlink,
+                    rdev,
                     size,
+                    blksize,
+                    blocks,
                     atime_sec,
                     mtime_sec,
                     ctime_sec,
@@ -607,6 +644,29 @@ impl P9Session {
         msg.push_u32(perm);
         msg.push_u32(gid);
         let _ = self.send_recv(msg.finish(), RMKDIR, tag)?;
+        Ok(())
+    }
+
+    fn mknod_at(
+        &mut self,
+        fid: u32,
+        name: &str,
+        mode: u32,
+        major: u32,
+        minor: u32,
+        gid: u32,
+    ) -> Result<(), String> {
+        let tag = self.alloc_tag();
+        let mut msg = Message::new(TMKNOD, tag);
+        msg.push_u32(fid);
+        msg.push_str(name);
+        msg.push_u32(mode);
+        msg.push_u32(major);
+        msg.push_u32(minor);
+        msg.push_u32(gid);
+        let resp = self.send_recv(msg.finish(), RMKNOD, tag)?;
+        let mut offset = 0;
+        let _qid = read_qid(&resp, &mut offset)?;
         Ok(())
     }
 

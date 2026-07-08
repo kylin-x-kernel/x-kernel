@@ -5,14 +5,14 @@
 use alloc::sync::Arc;
 
 use ktty::tty;
-use kvfs::{DeviceId, NodeType};
-use kvfs_simple::{DirMapping, SimpleDir, SimpleFs};
+use kvfs::{DeviceId, DirMapping, NodeType, SimpleDir, SimpleFs};
 
 use super::pts::{Ptmx, PtsDir};
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+    add_device_entry(
+        root,
         "tty",
         DeviceFile::new(
             fs.clone(),
@@ -21,7 +21,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             alloc::sync::Arc::new(tty::CurrentTty),
         ),
     );
-    root.add(
+    add_device_entry(
+        root,
         "console",
         DeviceFile::new(
             fs.clone(),
@@ -30,7 +31,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             tty::N_TTY.clone(),
         ),
     );
-    root.add(
+    add_device_entry(
+        root,
         "ptmx",
         DeviceFile::new(
             fs.clone(),

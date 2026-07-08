@@ -13,7 +13,6 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use kerrno::{KError, KResult, LinuxError};
-use kfd::FileLike;
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
@@ -21,12 +20,13 @@ use knet::{
     netlink::NetlinkSocket,
     packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
+    sock_alloc_file, sock_from_file,
     tcp::TcpSocket,
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixDomainSocket},
 };
 use linux_raw_sys::{
-    general::{O_CLOEXEC, O_NONBLOCK},
+    general::{O_CLOEXEC, O_NONBLOCK, O_RDWR},
     net::{
         AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_ICMP, IPPROTO_TCP,
         IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET,
@@ -36,6 +36,11 @@ use linux_raw_sys::{
 use posix_types::{UserConstPtr, UserPtr};
 
 use crate::addr::SocketAddrExt;
+
+fn socket_from_fd(fd: i32) -> KResult<Arc<Socket>> {
+    let file = kprocess::current_resources().get_file(fd)?;
+    sock_from_file(&file)
+}
 
 /// Create a new socket of the specified domain, type, and protocol
 pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
@@ -83,7 +88,9 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32)))
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
-            if !kprocess::with_current_credentials(|credentials| credentials.is_privileged()) {
+            if !kprocess::current_user_process()
+                .with_credentials(|credentials| credentials.is_privileged())?
+            {
                 return Err(KError::from(LinuxError::EPERM));
             }
             if proto > u16::MAX as u32 {
@@ -111,13 +118,11 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
     };
-    if raw_ty & O_NONBLOCK != 0 {
-        socket.set_nonblocking(true)?;
-    }
     let cloexec = raw_ty & O_CLOEXEC != 0;
 
+    let file = sock_alloc_file(socket, O_RDWR | (raw_ty & O_NONBLOCK))?;
     kprocess::current_resources()
-        .add_file_like(Arc::new(socket), cloexec)
+        .add_file(file, cloexec)
         .map(|fd| fd as isize)
 }
 
@@ -125,9 +130,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
 
-    kprocess::current_resources()
-        .get_file_like_as::<Socket>(fd)?
-        .bind(addr)?;
+    socket_from_fd(fd)?.bind(addr)?;
 
     Ok(0)
 }
@@ -136,16 +139,13 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
 
-    kprocess::current_resources()
-        .get_file_like_as::<Socket>(fd)?
-        .connect(addr)
-        .map_err(|e| {
-            if e == KError::WouldBlock {
-                KError::InProgress
-            } else {
-                e
-            }
-        })?;
+    socket_from_fd(fd)?.connect(addr).map_err(|e| {
+        if e == KError::WouldBlock {
+            KError::InProgress
+        } else {
+            e
+        }
+    })?;
 
     Ok(0)
 }
@@ -161,9 +161,7 @@ pub fn sys_listen(fd: i32, backlog: i32) -> KResult<isize> {
         backlog as usize
     };
 
-    kprocess::current_resources()
-        .get_file_like_as::<Socket>(fd)?
-        .listen(backlog)?;
+    socket_from_fd(fd)?.listen(backlog)?;
 
     Ok(0)
 }
@@ -182,15 +180,13 @@ pub fn sys_accept4(
 ) -> KResult<isize> {
     let cloexec = flags & O_CLOEXEC != 0;
 
-    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
+    let socket = socket_from_fd(fd)?;
     let socket = socket.accept()?;
-    if flags & O_NONBLOCK != 0 {
-        socket.set_nonblocking(true)?;
-    }
 
     let remote_addr = socket.peer_addr()?;
+    let file = sock_alloc_file(socket, O_RDWR | (flags & O_NONBLOCK))?;
     let fd = kprocess::current_resources()
-        .add_file_like(Arc::new(socket), cloexec)
+        .add_file(file, cloexec)
         .map(|fd| fd as isize)?;
 
     if !addr.is_null() {
@@ -204,7 +200,7 @@ pub fn sys_accept4(
 
 /// Shut down all or part of a full-duplex connection
 pub fn sys_shutdown(fd: i32, how: u32) -> KResult<isize> {
-    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
+    let socket = socket_from_fd(fd)?;
     let how = match how {
         SHUT_RD => Shutdown::Read,
         SHUT_WR => Shutdown::Write,
@@ -245,15 +241,17 @@ pub fn sys_socketpair(
     let sock1 = knet::Socket::Unix(Box::new(sock1));
     let sock2 = knet::Socket::Unix(Box::new(sock2));
 
-    if raw_ty & O_NONBLOCK != 0 {
-        sock1.set_nonblocking(true)?;
-        sock2.set_nonblocking(true)?;
-    }
     let cloexec = raw_ty & O_CLOEXEC != 0;
+    let file1 = sock_alloc_file(sock1, O_RDWR | (raw_ty & O_NONBLOCK))?;
+    let file2 = sock_alloc_file(sock2, O_RDWR | (raw_ty & O_NONBLOCK))?;
+    let resources = kprocess::current_resources();
+    let fd1 = resources.add_file(file1, cloexec)?;
+    let fd2 = resources.add_file(file2, cloexec).inspect_err(|_| {
+        if let Err(err) = resources.close_file(fd1) {
+            warn!("sys_socketpair cleanup failed for fd {fd1}: {err:?}");
+        }
+    })?;
 
-    fds.write_vm([
-        kprocess::current_resources().add_file_like(Arc::new(sock1), cloexec)?,
-        kprocess::current_resources().add_file_like(Arc::new(sock2), cloexec)?,
-    ])?;
+    fds.write_vm([fd1, fd2])?;
     Ok(0)
 }

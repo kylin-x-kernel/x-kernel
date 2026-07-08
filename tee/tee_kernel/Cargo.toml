@@ -29,7 +29,7 @@ kcpu = { workspace = true, optional = true }
 dice_driver = { workspace = true, optional = true }
 kerrno.workspace = true
 kvfs.workspace = true
-kfs.workspace = true
+fs_context.workspace = true
 khal.workspace = true
 klogger.workspace = true
 knet.workspace = true

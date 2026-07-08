@@ -10,9 +10,7 @@ repository.workspace = true
 [dependencies]
 anon = { workspace = true }
 karch = { workspace = true }
-kfd = { workspace = true }
 kerrno = { workspace = true }
-kfs = { workspace = true }
 kvfs = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }

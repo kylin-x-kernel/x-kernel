@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{format, string::ToString, sync::Arc, vec};
-use core::{any::Any, task::Context, time::Duration};
+use core::{task::Context, time::Duration};
 
 use bitmaps::Bitmap;
 use kclass::ClassDevice;
@@ -14,8 +14,10 @@ use kerrno::{KError, KResult};
 use khal::time::wall_time;
 use kpoll::{IoEvents, Pollable};
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
-use kvfs_simple::{DirMapping, SimpleDir, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleDir, SimpleFs, VfsFile,
+    VfsFileBuilder, VfsInode, VfsResult,
+};
 use linux_raw_sys::{
     general::{__kernel_old_time_t, __kernel_suseconds_t},
     ioctl::{EVIOCGID, EVIOCGRAB, EVIOCGVERSION},
@@ -23,7 +25,7 @@ use linux_raw_sys::{
 use posix_types::{InputId, UserPtr};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 const KEY_CNT: usize = EventType::Key.bits_count();
 
@@ -175,7 +177,16 @@ pub extern "C" fn ongkey() {
 }
 
 impl DeviceFileOps for EventDev {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        file.stream_open();
+        Ok(())
+    }
+
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -210,23 +221,11 @@ impl DeviceFileOps for EventDev {
         }
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Err(KError::InvalidInput)
-    }
-
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_pollable(&self) -> Option<&dyn Pollable> {
-        Some(self)
-    }
-
-    fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
             EVIOCGVERSION => {
                 UserPtr::<u32>::from(arg).write_vm(0x10001)?;
@@ -332,6 +331,14 @@ impl DeviceFileOps for EventDev {
             }
         }
     }
+
+    fn poll(&self, _file: &VfsFile) -> IoEvents {
+        Pollable::poll(self)
+    }
+
+    fn register_poll(&self, _file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        Pollable::register(self, context, events);
+    }
 }
 
 impl Pollable for EventDev {
@@ -369,9 +376,9 @@ pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
         const BTN_MOUSE: usize = 0x110;
         if keys[BTN_MOUSE / 8] & (1 << (BTN_MOUSE % 8)) != 0 {
             // Mouse
-            inputs.add("mice", dev);
+            add_device_entry(&mut inputs, "mice", dev);
         } else {
-            inputs.add(format!("event{input_id}"), dev);
+            add_device_entry(&mut inputs, format!("event{input_id}"), dev);
             input_id += 1;
         }
     }

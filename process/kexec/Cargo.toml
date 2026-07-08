@@ -15,7 +15,6 @@ tee_ta_sign = ["tee_task_iface/tee_ta_sign"]
 [dependencies]
 kaddr_layout.workspace = true
 kerrno.workspace = true
-kfs.workspace = true
 khal.workspace = true
 kernel-elf-parser = { workspace = true }
 klogger.workspace = true

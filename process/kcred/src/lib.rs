@@ -10,8 +10,10 @@
 extern crate alloc;
 
 mod credentials;
+mod namespace;
 
 pub use credentials::{AccessCredentials, AccessIdKind, CredentialError, Credentials, Gid, Uid};
+pub use namespace::{NamespaceId, UserNamespace, initial_user_namespace};
 
 #[cfg(unittest)]
 mod tests;

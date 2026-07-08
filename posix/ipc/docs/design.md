@@ -22,9 +22,9 @@
 ```text
 sys_shmget()
   -> ShmManager allocates shmid / key mapping
-  -> ShmInner::new()
-       -> memfs::shmem::create_kernel_file("SYSV...")
-       -> kfs::OpenOptions::open_loc()
+       -> ShmInner::new()
+            -> memfs::shmem::create_kernel_file("SYSV...")
+       -> shmem object into opened VfsFile
        -> set file length to page-aligned segment size
 
 sys_shmat()
@@ -41,7 +41,7 @@ sys_shmdt()
   -> remove segment if IPC_RMID and attach count is zero
 ```
 
-`ShmInner` stores IPC metadata and an `Arc<kfs::File>`. It does not store
+`ShmInner` stores IPC metadata and an `Arc<kvfs::VfsFile>`. It does not store
 physical pages or an anonymous shared object. The file is a private
 tmpfs/shmem-style regular inode whose content is owned by inode-scoped
 `pagecache::Mapping`.

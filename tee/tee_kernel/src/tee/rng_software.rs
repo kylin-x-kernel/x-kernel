@@ -4,7 +4,7 @@
 
 use klazy::Lazy;
 use ksync::Mutex;
-use kvfs::{LookupFlags, LookupIntent, lookup_location};
+use kvfs::{Filename, NodePermission};
 use tee_crypto::rng::{DeterministicRng, Infallible, Rng, TryCryptoRng, TryRng};
 use tee_raw_sys::TEE_ERROR_GENERIC;
 
@@ -24,20 +24,16 @@ fn tee_software_get_rand(output: &mut [u8]) {
 
 fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
     let mut seed = [0u8; RNG_SEED_SIZE];
-    let fs_context = kfs::kernel_fs_context();
-    let fs = fs_context.lock();
-    let location = lookup_location(
-        &fs.lookup_context(),
-        "/dev/urandom",
-        LookupIntent::Open,
-        LookupFlags::follow(),
-    )
-    .map_err(|_| TEE_ERROR_GENERIC)?;
-    let len = location
-        .entry()
-        .as_file()
-        .map_err(|_| TEE_ERROR_GENERIC)?
-        .read_at(&mut seed, 0)
+    let fs_guard = fs_context::init_fs();
+    let fs = fs_guard.lock();
+    let file = Filename::new("/dev/urandom")
+        .open_with_flags_at(fs.root(), fs.pwd(), 0, NodePermission::empty())
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    drop(fs);
+
+    let mut pos = 0;
+    let len = file
+        .read_from(&mut seed, &mut pos)
         .map_err(|_| TEE_ERROR_GENERIC)?;
     if len != seed.len() {
         return Err(TEE_ERROR_GENERIC);

@@ -8,8 +8,9 @@ use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 
 use kprocess::AsThread;
 use ktask::{KtaskRef, WeakKtaskRef};
-use kvfs::{VfsError, VfsResult};
-use kvfs_simple::{NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs};
+use kvfs::{
+    Dentry, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFile, SimpleFs, VfsError, VfsResult,
+};
 use tee_task_iface::tee_procfs::{
     has_ta_info as tee_has_ta_info, render_ta_ctx_uuid as tee_render_ta_ctx_uuid,
     render_ta_head as tee_render_ta_head,
@@ -19,21 +20,21 @@ pub fn has_ta_info(task: &KtaskRef) -> bool {
     task.as_thread()
         .process()
         .with_tee_ta_ctx(tee_has_ta_info)
-        .expect("procfs tee view requires a live process tee context")
+        .unwrap_or(false)
 }
 
 pub fn render_ta_ctx_uuid(task: &KtaskRef) -> Vec<u8> {
     task.as_thread()
         .process()
         .with_tee_ta_ctx(tee_render_ta_ctx_uuid)
-        .expect("procfs tee view requires a live process tee context")
+        .unwrap_or_default()
 }
 
 pub fn render_ta_head(task: &KtaskRef) -> Vec<u8> {
     task.as_thread()
         .process()
         .with_tee_ta_ctx(tee_render_ta_head)
-        .expect("procfs tee view requires a live process tee context")
+        .unwrap_or_default()
 }
 
 struct TaInfoDir {
@@ -46,7 +47,7 @@ impl SimpleDirOps for TaInfoDir {
         Box::new(["uuid", "ta_head"].into_iter().map(Cow::Borrowed))
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         if name != "ta_head" && name != "uuid" {
             return Err(VfsError::NotFound);
         }
@@ -55,11 +56,17 @@ impl SimpleDirOps for TaInfoDir {
         if !has_ta_info(&task) {
             return Err(VfsError::NotFound);
         }
-        Ok(match name {
-            "ta_head" => SimpleFile::new_regular(fs, move || Ok(render_ta_head(&task))).into(),
-            "uuid" => SimpleFile::new_regular(fs, move || Ok(render_ta_ctx_uuid(&task))).into(),
+        match name {
+            "ta_head" => lookup.file(
+                name,
+                SimpleFile::new_regular(fs, move || Ok(render_ta_head(&task))),
+            ),
+            "uuid" => lookup.file(
+                name,
+                SimpleFile::new_regular(fs, move || Ok(render_ta_ctx_uuid(&task))),
+            ),
             _ => return Err(VfsError::NotFound),
-        })
+        }
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -67,9 +74,14 @@ impl SimpleDirOps for TaInfoDir {
     }
 }
 
-pub fn make_ta_info_dir(fs: Arc<SimpleFs>, task: WeakKtaskRef) -> NodeOpsMux {
-    NodeOpsMux::Dir(SimpleDir::new_maker(
-        fs.clone(),
-        Arc::new(TaInfoDir { fs, task }),
-    ))
+pub fn make_ta_info_dir(
+    lookup: SimpleDirLookup<'_>,
+    name: &str,
+    fs: Arc<SimpleFs>,
+    task: WeakKtaskRef,
+) -> Dentry {
+    lookup.dir(
+        name,
+        SimpleDir::new_maker(fs.clone(), Arc::new(TaInfoDir { fs, task })),
+    )
 }

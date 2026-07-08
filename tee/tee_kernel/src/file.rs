@@ -5,13 +5,22 @@
 use alloc::{borrow::ToOwned, string::String};
 use core::ffi::c_int;
 
+use fs_context::FsStruct;
 use kerrno::{KError, KResult};
-use kfs::FsContext;
-use kvfs::{
-    Location, LookupFlags, LookupIntent, Metadata, lookup_location,
-    path::{Component, Path},
-};
+use kvfs::{Filename, LookupFlags, LookupIntent, Metadata, Path as VfsPath, path::Pathname};
 use linux_raw_sys::general::{AT_FDCWD, AT_SYMLINK_NOFOLLOW};
+
+pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsStruct) -> KResult<R>) -> KResult<R> {
+    if dirfd != AT_FDCWD {
+        return Err(KError::InvalidInput);
+    }
+
+    // TEE file helpers are callable from both process and kernel-task paths,
+    // so they must use the shared current-path filesystem view.
+    let fs_struct = kprocess::current_user_process_fs_context();
+    let mut fs = fs_struct.lock();
+    f(&mut fs)
+}
 
 const TEE_FS_ROOT: &str = "/tee/";
 const TEE_TMP_ROOT: &str = "/tmp/";
@@ -27,6 +36,10 @@ fn is_under_allowed_root(normalized: &str) -> bool {
     is_under_root(normalized, TEE_FS_ROOT) || is_under_root(normalized, TEE_TMP_ROOT)
 }
 
+fn has_parent_component(path: &str) -> bool {
+    path.split('/').any(|component| component == "..")
+}
+
 /// Normalize and validate a path before TEE filesystem access.
 ///
 /// Rejects `..` traversal and confines absolute paths to `/tee/` or `/tmp/`.
@@ -38,13 +51,13 @@ pub(crate) fn validate_tee_path(path: &str) -> KResult<String> {
         return Err(KError::InvalidInput);
     }
 
-    for component in Path::new(path).components() {
-        if matches!(component, Component::ParentDir) {
-            return Err(KError::InvalidInput);
-        }
+    if has_parent_component(path) {
+        return Err(KError::InvalidInput);
     }
 
-    let normalized = Path::new(path).normalize().ok_or(KError::InvalidInput)?;
+    let normalized = Pathname::new(path)
+        .normalize()
+        .ok_or(KError::InvalidInput)?;
     let normalized = normalized.as_str();
 
     if !is_under_allowed_root(normalized) {
@@ -54,26 +67,14 @@ pub(crate) fn validate_tee_path(path: &str) -> KResult<String> {
     Ok(normalized.to_owned())
 }
 
-pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
-    if dirfd != AT_FDCWD {
-        return Err(KError::InvalidInput);
-    }
-
-    // TEE file helpers are callable from both process and kernel-task paths,
-    // so they must use the shared current-path filesystem view.
-    let fs_context = kprocess::current_fs_context();
-    let mut fs = fs_context.lock();
-    f(&mut fs)
-}
-
 pub enum ResolveAtResult {
-    File(Location),
+    File(VfsPath),
 }
 
 impl ResolveAtResult {
     pub fn stat(&self) -> KResult<Metadata> {
         match self {
-            Self::File(file) => file.metadata(),
+            Self::File(file) => file.getattr(),
         }
     }
 }
@@ -90,13 +91,9 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
         } else {
             LookupFlags::follow()
         };
-        lookup_location(
-            &fs.lookup_context(),
-            &path,
-            LookupIntent::Stat,
-            lookup_flags,
-        )
-        .map(ResolveAtResult::File)
+        Filename::new(path.as_str())
+            .lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup_flags)
+            .map(ResolveAtResult::File)
     })
 }
 

@@ -90,7 +90,7 @@ Open(updated cloexec)
   │ duplicate_to
   ├──────────────► Open at new fd (Arc cloned)
   │
-  │ close / close_range / close_cloexec_files / close_all_if_unshared
+  │ file_close_fd_locked / remove_range / remove_cloexec_files / remove_all_if_unshared
   v
 Free
 ```
@@ -107,17 +107,17 @@ Free
 
 ```text
 Open(cloexec = true)
-   │ close_cloexec_files()
+   │ remove_cloexec_files()
    v
 Free
 
 Open(cloexec = false)
-   │ close_cloexec_files()
+   │ remove_cloexec_files()
    v
 Open
 ```
 
-`close_cloexec_files` 先收集要关闭的 fd 列表，
+`remove_cloexec_files` 先收集要移除的 fd 列表，
 再逐个删除。
 这样可以避免边遍历 `FlattenObjects` 边修改同一结构。
 
@@ -125,14 +125,14 @@ Open
 
 ```text
 Arc strong_count > 1
-   │ close_all_if_unshared
+   │ remove_all_if_unshared
    v
 unchanged
 
 Arc strong_count == 1
-   │ close_all_if_unshared
+   │ remove_all_if_unshared
    v
-all descriptors removed, lock dropped before FileLike drops
+all descriptors removed, lock dropped before descriptor close
 ```
 
 该路径用于进程资源释放。
@@ -210,9 +210,9 @@ snapshot 创建后，原 fd 可以被关闭或复用，
 - 查找 fd、读取 `cloexec`：调用方持读锁即可。
 - 创建 `FdSnapshot`：调用方持读锁，克隆 `Arc<dyn FileLike>` 后释放锁。
 - 添加、删除、dup、设置 `cloexec`、close range：调用方必须持写锁。
-- `close_all_if_unshared` 在持写锁时移除 descriptor，
+- `remove_all_if_unshared` 在持写锁时移除 descriptor，
   把移除结果暂存在 `Vec` 中，
-  然后先释放表锁再 drop `FileDescriptor`。
+  然后由 `ProcessResources` 在表锁外关闭 `FileDescriptor`。
 
 这样可以避免 `FileLike::drop` 或底层对象释放路径在持有 fd table 写锁时重入 fd 表。
 

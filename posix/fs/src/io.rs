@@ -11,39 +11,82 @@
 //! - Splice and transfer operations (splice, sendfile, etc.)
 //! - File synchronization (fsync, fdatasync, etc.)
 
-use alloc::{borrow::Cow, sync::Arc, vec};
-use core::{
-    ffi::{c_char, c_int},
-    task::Context,
-};
+use alloc::{sync::Arc, vec};
+use core::ffi::{c_char, c_int};
 
+use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
+use kcred::AccessIdKind;
 use kerrno::{KError, KResult, LinuxError};
-use kfd::FileLike;
 use kfd_objects::pipe::current_pipe_endpoint;
-use kfs::{File, FileFlags, OpenOptions};
-use kio::{Seek, SeekFrom};
-use kpoll::{IoEvents, Pollable};
-use linux_raw_sys::general::__kernel_off_t;
+use kio::prelude::*;
+use kpoll::IoEvents;
+use kvfs::{FMode, Filename, LookupFlags, LookupIntent, Permission, VfsFile, check_permission};
+use linux_raw_sys::general::{__kernel_off_t, O_APPEND};
 use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
-use posix_types::{IoVec, IoVectorBuf, UserConstPtr, UserPtr};
+use posix_types::{IoVec, IoVectorBuf, IoVectorBufIo, UserConstPtr, UserPtr};
 
-struct DummyFd;
-impl FileLike for DummyFd {
-    fn path(&self) -> Cow<'_, str> {
-        "anon_inode:[dummy]".into()
-    }
-}
-impl Pollable for DummyFd {
-    fn poll(&self) -> IoEvents {
-        IoEvents::empty()
-    }
-
-    // Dummy fd doesn't support event registration
-    fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
+trait RewindBytes {
+    fn rewind_bytes(&mut self, count: usize) -> KResult<()>;
 }
 
-fn write_zeros_range(file: &File, start: u64, end: u64) -> KResult<()> {
+impl RewindBytes for VmBytes {
+    fn rewind_bytes(&mut self, count: usize) -> KResult<()> {
+        VmBytes::rewind_bytes(self, count)
+    }
+}
+
+impl RewindBytes for VmBytesMut {
+    fn rewind_bytes(&mut self, count: usize) -> KResult<()> {
+        VmBytesMut::rewind_bytes(self, count)
+    }
+}
+
+impl RewindBytes for IoVectorBufIo {
+    fn rewind_bytes(&mut self, count: usize) -> KResult<()> {
+        IoVectorBufIo::rewind_bytes(self, count)
+    }
+}
+
+struct IoSourceAdapter<T>(T);
+
+impl<T> IovSource for IoSourceAdapter<T>
+where
+    T: Read + IoBuf + RewindBytes,
+{
+    fn count(&self) -> usize {
+        self.0.remaining()
+    }
+
+    fn copy_from_iter(&mut self, dst: &mut [u8]) -> KResult<usize> {
+        self.0.read(dst)
+    }
+
+    fn revert(&mut self, count: usize) -> KResult<()> {
+        self.0.rewind_bytes(count)
+    }
+}
+
+struct IoSinkAdapter<T>(T);
+
+impl<T> IovSink for IoSinkAdapter<T>
+where
+    T: Write + IoBufMut + RewindBytes,
+{
+    fn count(&self) -> usize {
+        self.0.remaining_mut()
+    }
+
+    fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
+        self.0.write(src)
+    }
+
+    fn revert(&mut self, count: usize) -> KResult<()> {
+        self.0.rewind_bytes(count)
+    }
+}
+
+fn write_zeros_range(file: &VfsFile, start: u64, end: u64) -> KResult<()> {
     if end <= start {
         return Ok(());
     }
@@ -53,28 +96,77 @@ fn write_zeros_range(file: &File, start: u64, end: u64) -> KResult<()> {
     let mut remaining = end - start;
     while remaining > 0 {
         let write_len = remaining.min(zeros.len() as u64) as usize;
-        let written = file.write_at(&zeros[..write_len], pos)?;
+        let written = file.write_from(&zeros[..write_len], &mut pos)?;
         if written == 0 {
             return Err(KError::WriteZero);
         }
-        pos += written as u64;
         remaining -= written as u64;
     }
     Ok(())
 }
 
+fn read_file_to_io(file: &VfsFile, dst: impl Write + IoBufMut + RewindBytes) -> KResult<usize> {
+    let mut dst = IoSinkAdapter(dst);
+    let mut iter = iov_iter_dest(&mut dst);
+    file.read_iter(&mut iter)
+}
+
+fn read_file_at_to_io(
+    file: &VfsFile,
+    dst: impl Write + IoBufMut + RewindBytes,
+    mut offset: u64,
+) -> KResult<usize> {
+    reject_positioned_stream_io(file)?;
+
+    let mut dst = IoSinkAdapter(dst);
+    let mut iter = iov_iter_dest(&mut dst);
+    file.read_iter_from(&mut iter, &mut offset)
+}
+
+fn write_file_from_io_with_pos(
+    file: &VfsFile,
+    src: impl Read + IoBuf + RewindBytes,
+    pos: &mut u64,
+) -> KResult<usize> {
+    let mut src = IoSourceAdapter(src);
+    let mut iter = iov_iter_source(&mut src);
+    file.write_iter_from(&mut iter, pos)
+}
+
+fn write_file_from_io(file: &VfsFile, src: impl Read + IoBuf + RewindBytes) -> KResult<usize> {
+    if file.is_stream() {
+        let mut pos = 0;
+        write_file_from_io_with_pos(file, src, &mut pos)
+    } else {
+        let mut pos = file.position_lock();
+        write_file_from_io_with_pos(file, src, &mut pos)
+    }
+}
+
+fn write_file_at_from_io(
+    file: &VfsFile,
+    src: impl Read + IoBuf + RewindBytes,
+    mut offset: u64,
+) -> KResult<usize> {
+    reject_positioned_stream_io(file)?;
+
+    let mut src = IoSourceAdapter(src);
+    let mut iter = iov_iter_source(&mut src);
+    file.write_iter_from(&mut iter, &mut offset)
+}
+
+fn reject_positioned_stream_io(file: &VfsFile) -> KResult<()> {
+    if file.is_stream() {
+        Err(KError::from(LinuxError::ESPIPE))
+    } else {
+        Ok(())
+    }
+}
+
 /// Creates a dummy file descriptor for unsupported syscalls.
 pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
-    // Check if running under QEMU - if so, report unsupported to let QEMU fall back to alternatives
-    if kprocess::current_task_name().starts_with("qemu-") {
-        // We need to be honest to qemu, since it can automatically fallback to
-        // other strategies.
-        return Err(KError::Unsupported);
-    }
-    warn!("Dummy fd created: {sysno}");
-    kprocess::current_resources()
-        .add_file_like(Arc::new(DummyFd), false)
-        .map(|fd| fd as isize)
+    warn!("Unsupported syscall requested dummy fd: {sysno}");
+    Err(KError::Unsupported)
 }
 
 /// Read data from the file indicated by `fd`.
@@ -83,18 +175,17 @@ pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
 pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_read <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
     // Get the file object and perform the read operation into the user buffer
-    Ok(kprocess::current_resources()
-        .get_file_like(fd)?
-        .read(&mut VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
+    let file = kprocess::current_resources().get_file(fd)?;
+    Ok(read_file_to_io(&file, VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
 }
 
 /// Vectored read into multiple buffers.
 pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_readv <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored read - read data into multiple buffers in a single operation
-    let f = kprocess::current_resources().get_file_like(fd)?;
+    let f = kprocess::current_resources().get_file(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    f.read(&mut iov.into_io()).map(|n| n as _)
+    read_file_to_io(&f, iov.into_io()).map(|n| n as _)
 }
 
 /// Write data to the file indicated by `fd`.
@@ -102,38 +193,24 @@ pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<is
 /// Return the written size if success.
 pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
-    Ok(kprocess::current_resources()
-        .get_file_like(fd)?
-        .write(&mut VmBytes::new(buf.as_ptr(), len))? as _)
+    let file = kprocess::current_resources().get_file(fd)?;
+    Ok(write_file_from_io(&file, VmBytes::new(buf.as_ptr(), len))? as _)
 }
 
 /// Vectored write from multiple buffers.
 pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored write - write data from multiple buffers in a single operation
-    let f = kprocess::current_resources().get_file_like(fd)?;
+    let f = kprocess::current_resources().get_file(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
-    f.write(&mut iov.into_io()).map(|n| n as _)
+    write_file_from_io(&f, iov.into_io()).map(|n| n as _)
 }
 
 /// Repositions the read/write file offset.
 pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<isize> {
     debug!("sys_lseek <= {fd} {offset} {whence}");
-    // Change file position - whence: 0=start, 1=current, 2=end
-    let pos = match whence {
-        0 => SeekFrom::Start(offset as _),
-        1 => SeekFrom::Current(offset as _),
-        2 => SeekFrom::End(offset as _),
-        _ => return Err(KError::InvalidInput),
-    };
-    let any_file = kprocess::current_resources().get_file_like(fd)?;
-
-    if let Ok(f) = any_file.downcast_arc::<File>() {
-        let off = Seek::seek(&mut &*f, pos)?;
-        return Ok(off as _);
-    }
-
-    Err(KError::from(LinuxError::ESPIPE))
+    let file = kprocess::current_resources().get_file(fd)?;
+    Ok(file.llseek(offset, whence)? as _)
 }
 
 /// Truncates a file to a specified length by path.
@@ -144,10 +221,19 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
     if length < 0 {
         return Err(KError::InvalidInput);
     }
-    let fs_context = kprocess::current_user_process_fs_context();
-    let fs = fs_context.lock();
-    let file = OpenOptions::new().write(true).open(&fs, path)?;
-    file.set_len(length as _)?;
+    let fs_struct = kprocess::current_user_process_fs_context();
+    let fs = fs_struct.lock();
+    let loc = Filename::new(path.as_str()).lookup_at(
+        fs.root(),
+        fs.pwd(),
+        LookupIntent::Open,
+        LookupFlags::follow(),
+    )?;
+    let metadata = loc.getattr()?;
+    let credentials =
+        kprocess::with_current_credentials(|creds| creds.access_snapshot(AccessIdKind::Filesystem));
+    check_permission(&metadata, Permission::MAY_WRITE, &credentials)?;
+    loc.truncate(length as _)?;
     Ok(0)
 }
 
@@ -155,8 +241,12 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
 pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     debug!("sys_ftruncate <= {fd} {length}");
     // Truncate file descriptor to specified length
-    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
-    f.set_len(length as _)?;
+    if length < 0 {
+        return Err(KError::InvalidInput);
+    }
+    let f = kprocess::current_resources().get_file(fd)?;
+    f.verify_mode(FMode::WRITE)?;
+    f.path().truncate(length as _)?;
     Ok(0)
 }
 
@@ -193,13 +283,13 @@ pub fn sys_fallocate(
     let keep_size = (mode & FALLOC_FL_KEEP_SIZE) != 0;
     let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
 
-    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
-    f.access(FileFlags::WRITE)?;
+    let f = kprocess::current_resources().get_file(fd)?;
+    f.verify_mode(FMode::WRITE)?;
 
     let start = offset as u64;
     let len_u = len as u64;
     let end = start.checked_add(len_u).ok_or(KError::InvalidInput)?;
-    let old_size = f.location().len()?;
+    let old_size = f.size();
 
     match base_mode {
         // Standard preallocation behavior in our current implementation.
@@ -210,7 +300,8 @@ pub fn sys_fallocate(
                     // Some backends may delay i_size visibility on set_len-only growth.
                     // Force EOF advancement with a single-byte write at target_size - 1.
                     let z = [0u8; 1];
-                    let written = f.write_at(&z[..], target_size - 1)?;
+                    let mut pos = target_size - 1;
+                    let written = f.write_from(&z[..], &mut pos)?;
                     if written != 1 {
                         return Err(KError::WriteZero);
                     }
@@ -219,7 +310,7 @@ pub fn sys_fallocate(
         }
         // Emulate punch hole by zeroing existing file range.
         FALLOC_FL_PUNCH_HOLE => {
-            // Linux requires KEEP_SIZE for PUNCH_HOLE.
+            // PUNCH_HOLE requires KEEP_SIZE.
             if !keep_size {
                 return Err(KError::InvalidInput);
             }
@@ -241,7 +332,7 @@ pub fn sys_fallocate(
             }
 
             if !keep_size && target_end > old_size {
-                f.set_len(target_end)?;
+                f.path().truncate(target_end)?;
             }
 
             write_zeros_range(&f, start, target_end)?;
@@ -252,7 +343,8 @@ pub fn sys_fallocate(
                 let target_size = old_size.max(end);
                 if target_size > old_size {
                     let z = [0u8; 1];
-                    let written = f.write_at(&z[..], target_size - 1)?;
+                    let mut pos = target_size - 1;
+                    let written = f.write_from(&z[..], &mut pos)?;
                     if written != 1 {
                         return Err(KError::WriteZero);
                     }
@@ -261,7 +353,7 @@ pub fn sys_fallocate(
         }
         // Remove [start, end) and shift following bytes left.
         FALLOC_FL_COLLAPSE_RANGE => {
-            // Linux does not allow KEEP_SIZE with COLLAPSE_RANGE.
+            // COLLAPSE_RANGE does not allow KEEP_SIZE.
             if keep_size {
                 return Err(KError::InvalidInput);
             }
@@ -276,11 +368,11 @@ pub fn sys_fallocate(
             if removed == 0 {
                 return Ok(0);
             }
-            f.collapse_range(start, removed)?;
+            f.fallocate(base_mode, start, len_u)?;
         }
         // Insert zero-filled [start, start+len) and shift tail right.
         FALLOC_FL_INSERT_RANGE => {
-            // Linux does not allow KEEP_SIZE with INSERT_RANGE.
+            // INSERT_RANGE does not allow KEEP_SIZE.
             if keep_size {
                 return Err(KError::InvalidInput);
             }
@@ -292,7 +384,7 @@ pub fn sys_fallocate(
             if insert_len == 0 {
                 return Ok(0);
             }
-            f.insert_range(start, insert_len)?;
+            f.fallocate(base_mode, start, len_u)?;
         }
         // Other mode combinations are not supported.
         _ => return Err(KError::Unsupported),
@@ -305,24 +397,18 @@ pub fn sys_fallocate(
 pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
     // Synchronize file to disk - syncs both data and metadata
-    let any_file = kprocess::current_resources().get_file_like(fd)?;
-    if let Ok(f) = any_file.downcast_arc::<File>() {
-        f.sync(false)?;
-        return Ok(0);
-    }
-    Err(KError::from(LinuxError::EINVAL))
+    let file = kprocess::current_resources().get_file(fd)?;
+    file.fsync(false)?;
+    Ok(0)
 }
 
 /// Synchronizes a file's data (not metadata) with storage.
 pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
     // Synchronize file data to disk - only syncs data, not metadata
-    let any_file = kprocess::current_resources().get_file_like(fd)?;
-    if let Ok(f) = any_file.downcast_arc::<File>() {
-        f.sync(true)?;
-        return Ok(0);
-    }
-    Err(KError::from(LinuxError::EINVAL))
+    let file = kprocess::current_resources().get_file(fd)?;
+    file.fsync(true)?;
+    Ok(0)
 }
 
 /// Provides access pattern advice for a file region.
@@ -352,11 +438,16 @@ pub fn sys_pread64(
     offset: __kernel_off_t,
 ) -> KResult<isize> {
     // Read from file at specific offset without changing file position
-    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
-    let read = f.read_at(VmBytesMut::new(buf.as_ptr().cast_mut(), len), offset as _)?;
+    let f = kprocess::current_resources().get_file(fd)?;
+    reject_positioned_stream_io(&f)?;
+    let read = read_file_at_to_io(
+        &f,
+        VmBytesMut::new(buf.as_ptr().cast_mut(), len),
+        offset as _,
+    )?;
     Ok(read as _)
 }
 
@@ -371,11 +462,12 @@ pub fn sys_pwrite64(
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
+    let f = kprocess::current_resources().get_file(fd)?;
+    reject_positioned_stream_io(&f)?;
     if len == 0 {
         return Ok(0);
     }
-    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
-    let write = f.write_at(VmBytes::new(buf.as_ptr(), len), offset as _)?;
+    let write = write_file_at_from_io(&f, VmBytes::new(buf.as_ptr(), len), offset as _)?;
     Ok(write as _)
 }
 
@@ -423,12 +515,15 @@ pub fn sys_preadv2(
     if flags != 0 {
         return Err(KError::Unsupported);
     }
-    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file(fd)?;
+    if offset != -1 {
+        reject_positioned_stream_io(&f)?;
+    }
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     if offset == -1 {
-        f.read(iov.into_io()).map(|n| n as _)
+        read_file_to_io(&f, iov.into_io()).map(|n| n as _)
     } else {
-        f.read_at(iov.into_io(), offset as _).map(|n| n as _)
+        read_file_at_to_io(&f, iov.into_io(), offset as _).map(|n| n as _)
     }
 }
 
@@ -448,20 +543,23 @@ pub fn sys_pwritev2(
     if flags != 0 {
         return Err(KError::Unsupported);
     }
-    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file(fd)?;
+    if offset != -1 {
+        reject_positioned_stream_io(&f)?;
+    }
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     if offset == -1 {
-        f.write(iov.into_io()).map(|n| n as _)
+        write_file_from_io(&f, iov.into_io()).map(|n| n as _)
     } else {
-        f.write_at(iov.into_io(), offset as _).map(|n| n as _)
+        write_file_at_from_io(&f, iov.into_io(), offset as _).map(|n| n as _)
     }
 }
 
 /// Helper for sendfile and copy_file_range operations
 /// Abstracts both fixed position (via offset pointer) and current position reads/writes
 enum SendFile {
-    Direct(Arc<dyn FileLike>),       // Use current file position
-    Offset(Arc<File>, UserPtr<u64>), // Use fixed offset from user space
+    Direct(Arc<VfsFile>),
+    Offset(Arc<VfsFile>, UserPtr<u64>),
 }
 
 impl SendFile {
@@ -475,34 +573,28 @@ impl SendFile {
     }
 
     /// Read from this file, either at current position or from fixed offset
-    fn read(&mut self, mut buf: &mut [u8]) -> KResult<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
         match self {
-            SendFile::Direct(file) => file.read(&mut buf),
+            SendFile::Direct(file) => file.read(buf),
             SendFile::Offset(file, offset) => {
-                // Read from fixed offset and update offset pointer
-                let off = offset.read_vm()?;
-                let bytes_read = file.read_at(&mut buf, off)?;
-                let new_off = off
-                    .checked_add(bytes_read as u64)
-                    .ok_or(KError::InvalidInput)?;
-                offset.write_vm(new_off)?;
+                reject_positioned_stream_io(file)?;
+                let mut off = offset.read_vm()?;
+                let bytes_read = file.read_from(buf, &mut off)?;
+                offset.write_vm(off)?;
                 Ok(bytes_read)
             }
         }
     }
 
     /// Write to this file, either at current position or to fixed offset
-    fn write(&mut self, mut buf: &[u8]) -> KResult<usize> {
+    fn write(&mut self, buf: &[u8]) -> KResult<usize> {
         match self {
-            SendFile::Direct(file) => file.write(&mut buf),
+            SendFile::Direct(file) => file.write(buf),
             SendFile::Offset(file, offset) => {
-                // Write at fixed offset and update offset pointer
-                let off = offset.read_vm()?;
-                let bytes_written = file.write_at(buf, off)?;
-                let new_off = off
-                    .checked_add(bytes_written as u64)
-                    .ok_or(KError::InvalidInput)?;
-                offset.write_vm(new_off)?;
+                reject_positioned_stream_io(file)?;
+                let mut off = offset.read_vm()?;
+                let bytes_written = file.write_from(buf, &mut off)?;
+                offset.write_vm(off)?;
                 Ok(bytes_written)
             }
         }
@@ -568,13 +660,13 @@ pub fn sys_sendfile(
         if offset.read_vm()? > u32::MAX as u64 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(resources.get_file_like_as::<File>(in_fd)?, offset)
+        SendFile::Offset(resources.get_file(in_fd)?, offset)
     } else {
-        SendFile::Direct(resources.get_file_like(in_fd)?)
+        SendFile::Direct(resources.get_file(in_fd)?)
     };
 
     // Destination always uses current file position
-    let dst = SendFile::Direct(resources.get_file_like(out_fd)?);
+    let dst = SendFile::Direct(resources.get_file(out_fd)?);
 
     do_send(src, dst, len).map(|n| n as _)
 }
@@ -608,16 +700,16 @@ pub fn sys_copy_file_range(
     // Source can use fixed offset or current file position
     let resources = kprocess::current_resources();
     let src = if !off_in.is_null() {
-        SendFile::Offset(resources.get_file_like_as::<File>(fd_in)?, off_in)
+        SendFile::Offset(resources.get_file(fd_in)?, off_in)
     } else {
-        SendFile::Direct(resources.get_file_like(fd_in)?)
+        SendFile::Direct(resources.get_file(fd_in)?)
     };
 
     // Destination can also use fixed offset or current file position
     let dst = if !off_out.is_null() {
-        SendFile::Offset(resources.get_file_like_as::<File>(fd_out)?, off_out)
+        SendFile::Offset(resources.get_file(fd_out)?, off_out)
     } else {
-        SendFile::Direct(resources.get_file_like(fd_out)?)
+        SendFile::Direct(resources.get_file(fd_out)?)
     };
 
     do_send(src, dst, len).map(|n| n as _)
@@ -648,20 +740,13 @@ pub fn sys_splice(
 
     let resources = kprocess::current_resources();
 
-    // Dummy file descriptors cannot be spliced
-    if resources.get_file_like_as::<DummyFd>(fd_in).is_ok()
-        || resources.get_file_like_as::<DummyFd>(fd_out).is_ok()
-    {
-        return Err(KError::BadFileDescriptor);
-    }
-
     // Setup source: either with fixed offset or using current position
     let src = if !off_in.is_null() {
         // Fixed offset must be non-negative
         if off_in.read_vm()? < 0 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(resources.get_file_like_as::<File>(fd_in)?, off_in.cast())
+        SendFile::Offset(resources.get_file(fd_in)?, off_in.cast())
     } else {
         // Try to use as pipe first
         if let Ok(src) = current_pipe_endpoint(fd_in) {
@@ -671,12 +756,11 @@ pub fn sys_splice(
             has_pipe = true;
         }
         // Path-only files (opened without O_RDWR/O_WRONLY) cannot be spliced
-        if let Ok(file) = resources.get_file_like_as::<File>(fd_in)
-            && file.is_path()
-        {
+        let file = resources.get_file(fd_in)?;
+        if file.is_path() {
             return Err(KError::InvalidInput);
         }
-        SendFile::Direct(resources.get_file_like(fd_in)?)
+        SendFile::Direct(file)
     };
 
     // Setup destination: either with fixed offset or using current position
@@ -685,7 +769,7 @@ pub fn sys_splice(
         if off_out.read_vm()? < 0 {
             return Err(KError::InvalidInput);
         }
-        SendFile::Offset(resources.get_file_like_as::<File>(fd_out)?, off_out.cast())
+        SendFile::Offset(resources.get_file(fd_out)?, off_out.cast())
     } else {
         // Try to use as pipe first
         if let Ok(dst) = current_pipe_endpoint(fd_out) {
@@ -695,14 +779,12 @@ pub fn sys_splice(
             has_pipe = true;
         }
         // APPEND mode files cannot be spliced (offset cannot be changed)
-        if let Ok(file) = resources.get_file_like_as::<File>(fd_out)
-            && file.access(FileFlags::APPEND).is_ok()
-        {
+        let f = resources.get_file(fd_out)?;
+        if f.flags() & O_APPEND != 0 {
             return Err(KError::InvalidInput);
         }
         // Verify destination is writable with a write probe
-        let f = resources.get_file_like(fd_out)?;
-        f.write(&mut b"".as_slice())?;
+        f.write(b"")?;
         SendFile::Direct(f)
     };
 

@@ -42,8 +42,11 @@ use ksync::Mutex;
 use lazyinit::LazyInit;
 pub use link::packet;
 use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
+pub use socket::{
+    file::{sock_alloc_file, sock_from_file},
+    options, *,
+};
 pub(crate) use socket::{general, state};
-pub use socket::{options, *};
 pub(crate) use stack::{listen_table, router, service, wrapper};
 pub(crate) use transport::udp_err;
 pub use transport::{raw, tcp, udp};

@@ -278,34 +278,35 @@ impl UnixTransportOps for StreamTransport {
             })
     }
 
-    fn recv(&self, mut dst: impl Write, _options: RecvOptions) -> KResult<usize> {
-        self.options.recv_poller(self, || {
-            let mut guard = self.channel.lock();
-            let Some(chan) = guard.as_mut() else {
-                return Err(KError::NotConnected);
-            };
+    fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
+        self.options
+            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                let mut guard = self.channel.lock();
+                let Some(chan) = guard.as_mut() else {
+                    return Err(KError::NotConnected);
+                };
 
-            let count = {
-                let (left, right) = chan.rx.as_slices();
-                let mut count = dst.write(left)?;
-                if count >= left.len() {
-                    count += dst.write(right)?;
+                let count = {
+                    let (left, right) = chan.rx.as_slices();
+                    let mut count = dst.write(left)?;
+                    if count >= left.len() {
+                        count += dst.write(right)?;
+                    }
+                    // SAFETY: `count` is the sum of bytes copied out of the
+                    // occupied slices returned by `as_slices`, so advancing by this
+                    // amount stays within the consumer's readable region.
+                    unsafe { chan.rx.advance_read_index(count) };
+                    count
+                };
+                if count > 0 {
+                    chan.poll.wake();
+                    return Ok(count);
                 }
-                // SAFETY: `count` is the sum of bytes copied out of the
-                // occupied slices returned by `as_slices`, so advancing by this
-                // amount stays within the consumer's readable region.
-                unsafe { chan.rx.advance_read_index(count) };
-                count
-            };
-            if count > 0 {
-                chan.poll.wake();
-                return Ok(count);
-            }
-            if self.rx_closed.load(Ordering::Acquire) {
-                return Ok(0);
-            }
-            Err(KError::WouldBlock)
-        })
+                if self.rx_closed.load(Ordering::Acquire) {
+                    return Ok(0);
+                }
+                Err(KError::WouldBlock)
+            })
     }
 
     fn shutdown(&self, how: Shutdown) -> KResult<()> {

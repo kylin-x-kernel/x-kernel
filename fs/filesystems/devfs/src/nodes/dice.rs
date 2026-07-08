@@ -4,22 +4,20 @@
 
 //! DICE module for handling DICE handover data.
 use alloc::{sync::Arc, vec, vec::Vec};
-use core::any::Any;
 
 use dice_driver::{DICE_IOCTL_GET_HANDOVER, DICE_IOCTL_GET_RAW_HANDOVER};
 use kerrno::{KError, KResult};
-use kfs::OpenOptions;
 use klazy::Lazy;
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, LookupFlags, LookupIntent, lookup_location};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{DeviceFileOps, DirMapping, Filename, NodePermission, SimpleFs, VfsFile};
+use linux_raw_sys::general::O_RDONLY;
 use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
 use rand_chacha::{
     ChaCha8Rng,
     rand_core::{RngCore, SeedableRng},
 };
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DiceNodeInfo;
@@ -61,7 +59,11 @@ impl DiceNodeInfo {
 }
 
 impl DeviceFileOps for DiceNodeInfo {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> KResult<usize> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> KResult<usize> {
         let data = dice_driver::read_raw_handover_data()?;
         let offset = usize::try_from(offset).map_err(|_| KError::InvalidInput)?;
         if offset >= data.len() {
@@ -73,53 +75,34 @@ impl DeviceFileOps for DiceNodeInfo {
         Ok(len)
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> KResult<usize> {
-        Err(KError::InvalidInput)
-    }
-
-    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> KResult<usize> {
         match cmd {
             DICE_IOCTL_GET_HANDOVER => self.sys_dice_get_handover(arg),
             DICE_IOCTL_GET_RAW_HANDOVER => self.sys_dice_get_raw_handover(arg),
             _ => Err(KError::InvalidInput),
         }
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 fn get_process_hash() -> KResult<Vec<u8>> {
     use alloc::format;
 
-    use kprocess::current_user_process;
     use tee_crypto::hash::{Digest, Sm3};
 
-    let pid = kprocess::current_user_thread().pid();
+    let thread = kprocess::current_user_thread();
+    let pid = thread.pid();
     let proc_exe_path = format!("/proc/{}/exe", pid);
-    let process = current_user_process();
-    let fs_context = process
-        .fs_context()
-        .expect("current process must still expose a fs context for /dev/dice");
-    let fs = fs_context.lock();
-    let loc = lookup_location(
-        &fs.lookup_context(),
-        proc_exe_path.as_str(),
-        LookupIntent::Open,
-        LookupFlags::follow(),
-    )
-    .map_err(|_| KError::NotFound)?;
-    drop(fs);
-    let file = OpenOptions::new()
-        .read(true)
-        .open_loc(loc)
+    let fs_struct = thread.process().fs_context()?;
+    let fs = fs_struct.lock();
+    let file = Filename::new(proc_exe_path.as_str())
+        .open_with_flags_at(fs.root(), fs.pwd(), O_RDONLY, NodePermission::empty())
         .map_err(|_| KError::NotFound)?;
-    let len = usize::try_from(file.location().len().map_err(|_| KError::NotFound)?)
-        .map_err(|_| KError::InvalidData)?;
+    drop(fs);
+    let len = usize::try_from(file.size()).map_err(|_| KError::InvalidData)?;
     let mut data = vec![0u8; len];
+    let mut pos = 0;
     let read = file
-        .read_at(&mut data[..], 0)
+        .read_from(&mut data[..], &mut pos)
         .map_err(|_| KError::NotFound)?;
     data.truncate(read);
 
@@ -147,7 +130,8 @@ pub extern "C" fn get_rand(output: usize, len: usize) -> u32 {
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+    add_device_entry(
+        root,
         "dice",
         DeviceFile::new(
             fs.clone(),

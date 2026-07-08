@@ -45,10 +45,10 @@ pub fn sys_fchownat(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_location()?;
-    let meta = loc.metadata()?;
+    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_path()?;
+    let meta = loc.getattr()?;
 
-    let mut mode = meta.mode;
+    let mut mode = meta.mode.permission();
     mode.remove(NodePermission::SET_UID);
     if mode.contains(NodePermission::GROUP_EXEC) {
         mode.remove(NodePermission::SET_GID);
@@ -56,7 +56,7 @@ pub fn sys_fchownat(
 
     let uid = if uid == -1 { meta.uid } else { uid as _ };
     let gid = if gid == -1 { meta.gid } else { gid as _ };
-    loc.update_metadata(MetadataUpdate {
+    loc.setattr(MetadataUpdate {
         owner: Some((uid, gid)),
         mode: Some(mode),
         ..Default::default()
@@ -85,12 +85,11 @@ pub fn sys_fchmodat(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    resolve_at(dirfd, path.as_deref(), flags)?
-        .into_location()?
-        .update_metadata(MetadataUpdate {
-            mode: Some(NodePermission::from_bits_truncate(mode as u16)),
-            ..Default::default()
-        })?;
+    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_path()?;
+    loc.setattr(MetadataUpdate {
+        mode: Some(NodePermission::from_bits_truncate(mode as u16)),
+        ..Default::default()
+    })?;
     Ok(0)
 }
 
@@ -105,13 +104,12 @@ fn update_times(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    resolve_at(dirfd, path.as_deref(), flags)?
-        .into_location()?
-        .update_metadata(MetadataUpdate {
-            atime,
-            mtime,
-            ..Default::default()
-        })?;
+    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_path()?;
+    loc.setattr(MetadataUpdate {
+        atime,
+        mtime,
+        ..Default::default()
+    })?;
     Ok(())
 }
 

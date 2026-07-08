@@ -4,17 +4,12 @@
 
 //! Inode-owned page cache objects.
 //!
-//! This crate introduces the first stage of a Linux-aligned `address_space`
-//! analogue for X-Kernel. The key ownership boundary mirrors Linux:
+//! This crate introduces an inode-owned `address_space` analogue for
+//! X-Kernel. The key ownership boundary is:
 //!
 //! - the inode-facing object owns cached folios;
 //! - VMA or file-open instances reference that object;
 //! - the object, not the VMA, owns cached content and truncation semantics.
-//!
-//! Linux references:
-//! - `struct address_space` in `include/linux/fs.h`
-//! - generic page cache helpers in `mm/filemap.c`
-//! - shmem-backed page cache usage in `mm/shmem.c`
 #![no_std]
 
 extern crate alloc;
@@ -39,6 +34,25 @@ use vmobj::{
 
 /// Page index within a mapping.
 pub type PageIndex = u64;
+
+/// Result counters for one writeback pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WritebackStats {
+    /// Dirty folios successfully written and cleaned.
+    pub pages_written: usize,
+    /// Dirty folios left for a later writeback pass.
+    pub pages_skipped: usize,
+}
+
+impl WritebackStats {
+    fn wrote(&mut self, pages: usize) {
+        self.pages_written = self.pages_written.saturating_add(pages);
+    }
+
+    fn skipped(&mut self, pages: usize) {
+        self.pages_skipped = self.pages_skipped.saturating_add(pages);
+    }
+}
 
 /// Mapping storage class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +160,7 @@ impl TailZeroRange {
 
 /// Object-level truncate/invalidate plan emitted by [`Mapping::resize`].
 ///
-/// This is the first-stage analogue of Linux invalidation work driven from
+/// This is the first-stage analogue of invalidation work driven from
 /// `address_space`: the content object decides which cached folios were
 /// dropped and which surviving tail bytes had to be zeroed. Later `MmSpace`
 /// reverse-mapping work can consume this plan to unmap affected PTEs.
@@ -236,7 +250,7 @@ struct MappingInner {
     len: u64,
 }
 
-/// Linux-like inode-owned cached object.
+/// Inode-owned cached object.
 pub struct Mapping {
     kind: MappingKind,
     identity: MappingIdentity,
@@ -267,6 +281,10 @@ impl Mapping {
         Self::new(MappingKind::InMemory, 0, Arc::new(InMemoryMappingOps))
     }
 
+    fn warn_on_dirty_drop(&self) -> bool {
+        matches!(self.kind, MappingKind::FileBacked)
+    }
+
     /// Returns the mapping kind.
     pub const fn kind(&self) -> MappingKind {
         self.kind
@@ -280,6 +298,11 @@ impl Mapping {
     /// Returns the current object length.
     pub fn len(&self) -> u64 {
         self.inner.lock().len
+    }
+
+    /// Returns `address_space::nrpages`.
+    pub fn nrpages(&self) -> u64 {
+        self.inner.lock().pages.len() as u64
     }
 
     /// Returns `true` if the mapping currently has no visible bytes.
@@ -379,6 +402,22 @@ impl Mapping {
         }
     }
 
+    /// Returns the number of contiguous cached folios starting at `start`.
+    pub fn cached_run_len(&self, start: PageIndex, count: usize) -> usize {
+        if count == 0 {
+            return 0;
+        }
+        let inner = self.inner.lock();
+        let mut found = 0usize;
+        for index in start..start.saturating_add(count as u64) {
+            if !inner.pages.contains_key(&index) {
+                break;
+            }
+            found += 1;
+        }
+        found
+    }
+
     /// Runs `f` with a folio at `index`, allocating one on demand.
     pub fn with_folio_or_create<R>(
         &self,
@@ -390,13 +429,41 @@ impl Mapping {
             if let Some(folio) = inner.pages.get(&index) {
                 folio.clone()
             } else {
-                let folio = Arc::new(Mutex::new(self.ops.instantiate_folio(index)?));
+                let mut folio = self.ops.instantiate_folio(index)?;
+                folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
+                let folio = Arc::new(Mutex::new(folio));
                 inner.pages.insert(index, folio.clone());
                 folio
             }
         };
         let mut folio = folio.lock();
         f(&mut folio)
+    }
+
+    /// Adds or updates one page-cache folio from backing-store data.
+    ///
+    /// This is the page-cache insertion side used by readahead after the
+    /// backing filesystem has already filled a byte range.
+    pub fn filemap_add_folio(&self, index: PageIndex, offset: usize, src: &[u8]) -> KResult<()> {
+        let folio = {
+            let mut inner = self.inner.lock();
+            if let Some(folio) = inner.pages.get(&index) {
+                folio.clone()
+            } else {
+                let mut folio = Folio::new_zeroed()?;
+                folio.set_warn_on_dirty_drop(self.warn_on_dirty_drop());
+                let folio = Arc::new(Mutex::new(folio));
+                inner.pages.insert(index, folio.clone());
+                folio
+            }
+        };
+        let mut folio = folio.lock();
+        let end = offset.checked_add(src.len()).ok_or(KError::InvalidInput)?;
+        if end > PAGE_SIZE_4K {
+            return Err(KError::InvalidInput);
+        }
+        folio.data()[offset..end].copy_from_slice(src);
+        Ok(())
     }
 
     /// Reads bytes from the mapping into `dst`.
@@ -526,8 +593,8 @@ impl Mapping {
             .range(first_truncated..)
             .map(|(index, folio)| (*index, folio.clone()))
             .collect::<Vec<_>>();
-        // Explicit truncation: clear dirty before eviction, analogous to
-        // Linux's cancel_dirty_page() in truncate_inode_pages_range().
+        // Explicit truncation owns the data discard, so clear dirty before
+        // eviction rather than requiring writeback.
         for (_, folio) in &dropped_folios {
             folio.lock().clear_dirty();
         }
@@ -601,7 +668,8 @@ impl Mapping {
         &self,
         mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
     ) -> KResult<()> {
-        self.writeback_until(0, u64::MAX, &mut write_folio_fn)
+        self.writeback_until(0, u64::MAX, usize::MAX, &mut write_folio_fn)
+            .map(|_| ())
     }
 
     /// Writes back dirty cached folios intersecting `[start, start + len)`.
@@ -615,7 +683,8 @@ impl Mapping {
             return Ok(());
         }
         let end = start.checked_add(len as u64).ok_or(KError::InvalidInput)?;
-        self.writeback_until(start, end, &mut write_folio_fn)
+        self.writeback_until(start, end, usize::MAX, &mut write_folio_fn)
+            .map(|_| ())
     }
 
     /// Writes back dirty cached folios from `start` through the end of the object.
@@ -624,7 +693,8 @@ impl Mapping {
         start: u64,
         mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
     ) -> KResult<()> {
-        self.writeback_until(start, u64::MAX, &mut write_folio_fn)
+        self.writeback_until(start, u64::MAX, usize::MAX, &mut write_folio_fn)
+            .map(|_| ())
     }
 
     /// Writes back dirty cached folios intersecting `[start, end)`.
@@ -632,8 +702,13 @@ impl Mapping {
         &self,
         start: u64,
         end: u64,
+        max_pages: usize,
         write_folio_fn: &mut impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
-    ) -> KResult<()> {
+    ) -> KResult<WritebackStats> {
+        let mut stats = WritebackStats::default();
+        if max_pages == 0 {
+            return Ok(stats);
+        }
         let (len, folios) = {
             let inner = self.inner.lock();
             (
@@ -654,18 +729,183 @@ impl Mapping {
         };
 
         for (index, folio) in folios {
+            if stats.pages_written >= max_pages {
+                break;
+            }
             let mut folio = folio.lock();
             if !folio.is_dirty() {
+                continue;
+            }
+            if folio.is_under_writeback() {
+                stats.skipped(1);
                 continue;
             }
             let page_start = index
                 .checked_mul(PAGE_SIZE_4K as u64)
                 .ok_or(KError::InvalidInput)?;
             let valid_len = len.saturating_sub(page_start).min(PAGE_SIZE_4K as u64) as usize;
-            write_folio_fn(index, &folio.data()[..valid_len], valid_len)?;
+            folio.start_writeback();
+            let result = write_folio_fn(index, &folio.data()[..valid_len], valid_len);
+            folio.end_writeback();
+            result?;
             folio.clear_dirty();
+            stats.wrote(1);
         }
-        Ok(())
+        Ok(stats)
+    }
+
+    /// Writes back dirty cached folios in contiguous batches.
+    pub fn write_cache_pages(
+        &self,
+        start: u64,
+        end: u64,
+        max_pages: usize,
+        max_bytes: usize,
+        write_range_fn: &mut impl FnMut(u64, &[u8]) -> KResult<()>,
+    ) -> KResult<WritebackStats> {
+        let mut stats = WritebackStats::default();
+        if max_pages == 0 {
+            return Ok(stats);
+        }
+        let (len, folios) = {
+            let inner = self.inner.lock();
+            (
+                inner.len,
+                inner
+                    .pages
+                    .iter()
+                    .filter(|(index, _)| {
+                        let Some(page_start) = index.checked_mul(PAGE_SIZE_4K as u64) else {
+                            return true;
+                        };
+                        let page_end = page_start.saturating_add(PAGE_SIZE_4K as u64);
+                        page_start < end && start < page_end
+                    })
+                    .map(|(index, folio)| (*index, folio.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let max_bytes = max_bytes.max(PAGE_SIZE_4K);
+        let mut batch_start = 0u64;
+        let mut next_index = None;
+        let mut batch_data = Vec::new();
+        let mut batch_folios = Vec::new();
+
+        let flush_batch = |batch_start: u64,
+                           batch_data: &mut Vec<u8>,
+                           batch_folios: &mut Vec<(PageIndex, Arc<Mutex<Folio>>)>,
+                           write_range_fn: &mut dyn FnMut(u64, &[u8]) -> KResult<()>,
+                           stats: &mut WritebackStats|
+         -> KResult<()> {
+            if batch_data.is_empty() {
+                return Ok(());
+            }
+            let result = write_range_fn(batch_start, batch_data);
+            if result.is_ok() {
+                stats.wrote(batch_folios.len());
+            }
+            for (_, folio) in batch_folios.drain(..) {
+                let mut folio = folio.lock();
+                if result.is_ok() {
+                    folio.clear_dirty();
+                }
+                folio.end_writeback();
+            }
+            batch_data.clear();
+            result?;
+            Ok(())
+        };
+
+        for (index, folio) in folios {
+            if stats.pages_written >= max_pages {
+                break;
+            }
+            let page_start = index
+                .checked_mul(PAGE_SIZE_4K as u64)
+                .ok_or(KError::InvalidInput)?;
+            let valid_len = len.saturating_sub(page_start).min(PAGE_SIZE_4K as u64) as usize;
+            if valid_len == 0 {
+                continue;
+            }
+
+            let mut locked = folio.lock();
+            if !locked.is_dirty() {
+                drop(locked);
+                flush_batch(
+                    batch_start,
+                    &mut batch_data,
+                    &mut batch_folios,
+                    write_range_fn,
+                    &mut stats,
+                )?;
+                if stats.pages_written >= max_pages {
+                    break;
+                }
+                next_index = None;
+                continue;
+            }
+            if locked.is_under_writeback() {
+                drop(locked);
+                flush_batch(
+                    batch_start,
+                    &mut batch_data,
+                    &mut batch_folios,
+                    write_range_fn,
+                    &mut stats,
+                )?;
+                if stats.pages_written >= max_pages {
+                    break;
+                }
+                stats.skipped(1);
+                next_index = None;
+                continue;
+            }
+
+            let contiguous = next_index == Some(index);
+            let would_overflow = batch_data.len().saturating_add(valid_len) > max_bytes;
+            let would_exceed_pages =
+                stats.pages_written.saturating_add(batch_folios.len()) >= max_pages;
+            if !batch_data.is_empty() && (!contiguous || would_overflow || would_exceed_pages) {
+                drop(locked);
+                flush_batch(
+                    batch_start,
+                    &mut batch_data,
+                    &mut batch_folios,
+                    write_range_fn,
+                    &mut stats,
+                )?;
+                if stats.pages_written >= max_pages {
+                    break;
+                }
+                locked = folio.lock();
+                if !locked.is_dirty() || locked.is_under_writeback() {
+                    if locked.is_under_writeback() {
+                        stats.skipped(1);
+                    }
+                    next_index = None;
+                    continue;
+                }
+            }
+
+            if batch_data.is_empty() {
+                batch_start = page_start;
+            }
+            batch_data.extend_from_slice(&locked.data()[..valid_len]);
+            locked.start_writeback();
+            drop(locked);
+            batch_folios.push((index, folio));
+            next_index = Some(index + 1);
+        }
+
+        flush_batch(
+            batch_start,
+            &mut batch_data,
+            &mut batch_folios,
+            write_range_fn,
+            &mut stats,
+        )?;
+        Ok(stats)
     }
 
     /// Drops cached folios whose index is at or after `first_page`.
@@ -685,6 +925,29 @@ impl Mapping {
             dropped_folios.iter().all(|(_, f)| !f.lock().is_dirty()),
             "invalidate_from_page: dirty folios in eviction range — call writeback first"
         );
+        self.notify_evicted_folios(&dropped_folios);
+        Ok(dropped_folios.into_iter().map(|(index, _)| index).collect())
+    }
+
+    /// Drops all cached folios during final mapping teardown.
+    ///
+    /// Unlike ordinary invalidation, final teardown may discard dirty folios
+    /// because no later backing-store writeback is possible.
+    pub fn truncate_final(&self) -> KResult<Vec<PageIndex>> {
+        let dropped_folios = {
+            let mut inner = self.inner.lock();
+            let dropped = inner
+                .pages
+                .iter()
+                .map(|(index, folio)| (*index, folio.clone()))
+                .collect::<Vec<_>>();
+            inner.pages.clear();
+            inner.len = 0;
+            dropped
+        };
+        for (_, folio) in &dropped_folios {
+            folio.lock().clear_dirty();
+        }
         self.notify_evicted_folios(&dropped_folios);
         Ok(dropped_folios.into_iter().map(|(index, _)| index).collect())
     }
@@ -726,6 +989,8 @@ impl Mapping {
 pub struct Folio {
     addr: VirtAddr,
     dirty: bool,
+    writeback: bool,
+    warn_on_dirty_drop: bool,
 }
 
 impl Folio {
@@ -738,7 +1003,12 @@ impl Folio {
         // SAFETY: `alloc_pages` returns a writable virtually mapped page-sized
         // region owned by this folio. Zeroing exactly one page is sound.
         unsafe { core::ptr::write_bytes(addr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
-        Ok(Self { addr, dirty: false })
+        Ok(Self {
+            addr,
+            dirty: false,
+            writeback: false,
+            warn_on_dirty_drop: false,
+        })
     }
 
     /// Returns the physical address of this folio.
@@ -756,9 +1026,26 @@ impl Folio {
         self.dirty
     }
 
+    /// Returns whether a synchronous writeback pass is writing this folio.
+    pub fn is_under_writeback(&self) -> bool {
+        self.writeback
+    }
+
+    fn start_writeback(&mut self) {
+        self.writeback = true;
+    }
+
+    fn end_writeback(&mut self) {
+        self.writeback = false;
+    }
+
     /// Clears the dirty bit after successful writeback or truncation cleanup.
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
+    }
+
+    fn set_warn_on_dirty_drop(&mut self, enabled: bool) {
+        self.warn_on_dirty_drop = enabled;
     }
 
     /// Returns the folio contents as a mutable 4 KiB slice.
@@ -772,8 +1059,8 @@ impl Folio {
 
 impl Drop for Folio {
     fn drop(&mut self) {
-        if self.dirty {
-            warn!("dropping dirty in-memory folio without writeback");
+        if self.dirty && self.warn_on_dirty_drop {
+            warn!("dropping dirty file-backed folio without writeback");
         }
         global_allocator().dealloc_pages(self.addr.as_usize(), 1, UsageKind::PageCache);
     }
@@ -875,6 +1162,7 @@ mod tests {
         mapping.with_folio(1, |folio| {
             assert!(!folio.expect("folio 1").is_dirty());
         });
+        mapping.writeback(|_, _, _| Ok(())).unwrap();
     }
 
     #[def_test]
@@ -892,6 +1180,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(ops.writes(), vec![(1, 123)]);
+        mapping.writeback(|_, _, _| Ok(())).unwrap();
     }
 
     #[def_test]
@@ -911,6 +1200,92 @@ mod tests {
         mapping.with_folio(0, |folio| {
             assert!(folio.expect("folio").is_dirty());
         });
+        mapping.with_folio(0, |folio| {
+            folio.expect("folio").clear_dirty();
+        });
+    }
+
+    #[def_test]
+    fn writeback_until_respects_page_budget() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(
+            MappingKind::FileBacked,
+            (PAGE_SIZE_4K * 2) as u64,
+            ops.clone(),
+        );
+        mapping.write_from(0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        mapping
+            .write_from(PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K])
+            .unwrap();
+
+        let stats = mapping
+            .writeback_until(0, u64::MAX, 1, &mut |index, _data, valid_len| {
+                ops.record_write(index, valid_len)
+            })
+            .unwrap();
+
+        assert_eq!(stats.pages_written, 1);
+        assert_eq!(stats.pages_skipped, 0);
+        assert_eq!(ops.writes(), vec![(0, PAGE_SIZE_4K)]);
+        mapping.with_folio(0, |folio| {
+            let folio = folio.expect("folio 0");
+            assert!(!folio.is_dirty());
+            assert!(!folio.is_under_writeback());
+        });
+        mapping.with_folio(1, |folio| {
+            let folio = folio.expect("folio 1");
+            assert!(folio.is_dirty());
+            assert!(!folio.is_under_writeback());
+        });
+    }
+
+    #[def_test]
+    fn writeback_until_failure_clears_writeback_state() {
+        let ops = RecordingOps::new(true);
+        let mapping = Mapping::new(MappingKind::FileBacked, PAGE_SIZE_4K as u64, ops.clone());
+        mapping.write_from(0, b"dirty").unwrap();
+
+        let err = mapping
+            .writeback_until(0, u64::MAX, usize::MAX, &mut |index, _data, valid_len| {
+                ops.record_write(index, valid_len)
+            })
+            .unwrap_err();
+
+        assert_eq!(err, KError::InvalidInput);
+        mapping.with_folio(0, |folio| {
+            let folio = folio.expect("folio");
+            assert!(folio.is_dirty());
+            assert!(!folio.is_under_writeback());
+        });
+    }
+
+    #[def_test]
+    fn write_cache_pages_failure_clears_batch_writeback_state() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(
+            MappingKind::FileBacked,
+            (PAGE_SIZE_4K * 2) as u64,
+            ops.clone(),
+        );
+        mapping.write_from(0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        mapping
+            .write_from(PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K])
+            .unwrap();
+
+        let err = mapping
+            .write_cache_pages(0, u64::MAX, usize::MAX, PAGE_SIZE_4K * 2, &mut |_, _| {
+                Err(KError::InvalidInput)
+            })
+            .unwrap_err();
+
+        assert_eq!(err, KError::InvalidInput);
+        for index in 0..2 {
+            mapping.with_folio(index, |folio| {
+                let folio = folio.expect("folio");
+                assert!(folio.is_dirty());
+                assert!(!folio.is_under_writeback());
+            });
+        }
     }
 
     #[def_test]
@@ -1111,8 +1486,8 @@ mod tests {
         );
     }
 
-    /// Regression test: writeback-then-invalidate preserves dirty data.
-    /// This is the correct pattern that `AddressSpace::evict()` now follows.
+    /// Regression test: writeback-then-invalidate preserves dirty data for
+    /// ordinary invalidation.
     #[def_test]
     fn writeback_before_invalidate_preserves_dirty_data() {
         let ops = RecordingOps::new(false);
@@ -1134,5 +1509,31 @@ mod tests {
 
         assert_eq!(dropped.len(), 2);
         assert_eq!(ops.writes(), vec![(0, PAGE_SIZE_4K), (1, PAGE_SIZE_4K)]);
+    }
+
+    /// Final teardown drops cached dirty folios without routing through
+    /// ordinary writeback.
+    #[def_test]
+    fn truncate_final_drops_dirty_folios_without_writeback() {
+        let ops = RecordingOps::new(false);
+        let mapping = Mapping::new(
+            MappingKind::FileBacked,
+            (PAGE_SIZE_4K * 2) as u64,
+            ops.clone(),
+        );
+        mapping.write_from(0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        mapping
+            .write_from(PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K])
+            .unwrap();
+
+        let dropped = mapping.truncate_final().unwrap();
+
+        assert_eq!(dropped, vec![0, 1]);
+        assert_eq!(mapping.nrpages(), 0);
+        assert_eq!(mapping.len(), 0);
+        assert!(
+            ops.writes().is_empty(),
+            "final teardown must not force ordinary writeback"
+        );
     }
 }

@@ -50,7 +50,7 @@ ExecRequest
   -> ExecSource::Path | ExecSource::Resolved
   -> ExecRequest::prepare()
        -> resolve executable Location through kvfs::namei LookupIntent::Exec
-       -> open and pin executable kfs::File
+       -> open and pin executable kvfs::VfsFile
        -> build BinPrm
 
 load_user_app()

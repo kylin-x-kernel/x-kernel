@@ -17,7 +17,7 @@ use memspace::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
     VmRuntimeOps, VmRuntimeRef,
     backend::{
-        FaultCompat, FaultCompatResult, alloc_frame, dealloc_frame,
+        FaultCompletion, FaultCompletionResult, alloc_frame, dealloc_frame,
         private::{
             PrivateForkMaterialize, clone_private_object_pages_for_fork, cow_private_object_page,
             discard_private_object_range, map_existing_private_object_page,
@@ -184,7 +184,7 @@ impl FilePrivateRuntime {
         page_size: PageSize,
         pgtbl: &mut PageTableMut,
         ctx: &FaultContext,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         assert_eq!(self.size, page_size);
         if ctx.access_flags().contains(MappingFlags::WRITE)
             && !page_flags.contains(MappingFlags::WRITE)
@@ -193,14 +193,14 @@ impl FilePrivateRuntime {
             if cow_private_object_page(&self.anon, object_start, addr, flags, self.size, pgtbl)?
                 .is_retry()
             {
-                return Ok(FaultCompat::cow_conflict_retry());
+                return Ok(FaultCompletion::cow_conflict_retry());
             }
-            return Ok(FaultCompat::from_populate((1, None)));
+            return Ok(FaultCompletion::from_populate((1, None)));
         }
         if page_flags.contains(ctx.access_flags()) {
-            return Ok(FaultCompat::from_populate((1, None)));
+            return Ok(FaultCompletion::from_populate((1, None)));
         }
-        Ok(FaultCompat::from_populate((0, None)))
+        Ok(FaultCompletion::from_populate((0, None)))
     }
 
     fn handle_unmapped_fault(
@@ -210,7 +210,7 @@ impl FilePrivateRuntime {
         pgtbl: &mut PageTableMut,
         addr: VirtAddr,
         object_start: u64,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         let existing = map_existing_private_object_page(
             &self.anon,
             object_start,
@@ -221,14 +221,14 @@ impl FilePrivateRuntime {
             pgtbl,
         )?;
         if existing.is_retry() {
-            return Ok(FaultCompat::cow_conflict_retry());
+            return Ok(FaultCompletion::cow_conflict_retry());
         }
         if !existing.is_resolved() {
             let (file_page_offset, page_data_offset) =
                 self.prepare_new_file_backed_page(ctx, addr)?;
             self.alloc_new_at(addr, file_page_offset, page_data_offset, flags, pgtbl)?;
         }
-        Ok(FaultCompat::from_populate((1, None)))
+        Ok(FaultCompletion::from_populate((1, None)))
     }
 
     fn register_mapping_view(
@@ -369,7 +369,7 @@ impl FilePrivateRuntime {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         let _ = self.registration_id();
         let _ = self.anon_registration_id();
         let addr = ctx.address().align_down(self.page_size());
@@ -424,7 +424,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         self.handle_fault_impl(ctx, flags, pgtbl)
     }
 
@@ -564,11 +564,7 @@ mod tests {
             len: PAGE_SIZE_4K,
             size: PageSize::Size4K,
             anon: AnonPrivateObject::new_root(),
-            file: Some((
-                file.page_cache_mapping().expect("page-cache mapping"),
-                0,
-                None,
-            )),
+            file: Some((file.page_cache(), 0, None)),
             mapping_view: None,
             anon_view: None,
         };
@@ -602,8 +598,9 @@ mod tests {
     fn file_private_fork_madvise_then_write_fault_preserves_file_source_and_splits_anon_pages() {
         let file = page_cache_file("cow-fork-madvise-write");
         let payload = vec![0x41u8; PAGE_SIZE_4K];
+        let mut pos = 0;
         let written = file
-            .write_at(&payload[..], 0)
+            .write_from(&payload[..], &mut pos)
             .expect("seed cached file with one page");
         assert_eq!(written, PAGE_SIZE_4K);
 
@@ -615,11 +612,7 @@ mod tests {
             len: PAGE_SIZE_4K,
             size: PageSize::Size4K,
             anon: AnonPrivateObject::new_root(),
-            file: Some((
-                file.page_cache_mapping().expect("page-cache mapping"),
-                0,
-                Some(PAGE_SIZE_4K as u64),
-            )),
+            file: Some((file.page_cache(), 0, Some(PAGE_SIZE_4K as u64))),
             mapping_view: None,
             anon_view: None,
         };
@@ -632,10 +625,10 @@ mod tests {
                 Some(0),
                 Some(0),
             );
-            let compat = VmRuntimeOps::handle_fault(&parent, fault, flags, &mut pgtbl)
+            let completion = VmRuntimeOps::handle_fault(&parent, fault, flags, &mut pgtbl)
                 .expect("parent first fault");
             assert_eq!(
-                compat.populated(),
+                completion.populated(),
                 1,
                 "file-private first fault should materialize one anon-backed page"
             );
@@ -711,10 +704,10 @@ mod tests {
         {
             let mut pgtbl = child_pt.modify();
             let fault = FaultContext::new(start, PageFaultFlags::WRITE);
-            let compat = VmRuntimeOps::handle_fault(&*child, fault, flags, &mut pgtbl)
+            let completion = VmRuntimeOps::handle_fault(&*child, fault, flags, &mut pgtbl)
                 .expect("child write fault");
             assert_eq!(
-                compat.populated(),
+                completion.populated(),
                 1,
                 "child write fault should complete via shared helper"
             );
@@ -736,10 +729,10 @@ mod tests {
                 Some(0),
                 Some(0),
             );
-            let compat = VmRuntimeOps::handle_fault(&parent, fault, flags, &mut pgtbl)
+            let completion = VmRuntimeOps::handle_fault(&parent, fault, flags, &mut pgtbl)
                 .expect("parent refault");
             assert_eq!(
-                compat.populated(),
+                completion.populated(),
                 1,
                 "parent refault after MADV_DONTNEED should rematerialize from file source"
             );

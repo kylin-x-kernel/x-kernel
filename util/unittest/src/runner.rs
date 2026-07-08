@@ -105,7 +105,7 @@ pub fn test_run() -> TestStats {
 /// Run unit tests with optional crate filter.
 ///
 /// `crate_filter` supports a single crate name or multiple crate names
-/// separated by commas, for example: `"tee_kernel,kfs"`.
+/// separated by commas, for example: `"tee_kernel,kvfs"`.
 pub fn test_run_filtered(crate_filter: Option<&str>) -> TestStats {
     // Reset the failed flag
     TEST_FAILED_FLAG.store(false, Ordering::Relaxed);

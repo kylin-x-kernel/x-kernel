@@ -56,7 +56,7 @@ pub const DATABLOCK_CACHE_MAX: usize = 128;
 pub const BITMAP_CACHE_MAX: usize = 128;
 
 //============================================================================
-// 目录项DirEntry配置
+// 目录项Dentry配置
 //============================================================================
 pub const DIRNAME_LEN: usize = 255; //目录名长度
 /// 保留inodes数量

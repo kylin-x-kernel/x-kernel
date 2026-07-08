@@ -7,17 +7,16 @@
 use alloc::{string::String, sync::Arc};
 
 use ksync::Mutex;
-use kvfs::{
-    Location, Mountpoint, NodePermission, NodeType, OpenOptions as VfsOpenOptions, VfsResult,
-};
+use kvfs::{Mount, NodePermission, Path, SuperBlock, VfsFile, VfsResult, dentry_open};
 use linux_raw_sys::general::{
-    F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE,
+    F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE, O_CREAT, O_EXCL,
+    O_RDWR,
 };
 
-use crate::MemoryFs;
+use crate::{MemoryFs, MemoryNode, TMPFS_MAGIC};
 
 bitflags::bitflags! {
-    /// Linux memfd seal bits stored on a shmem inode.
+    /// Memfd seal bits stored on a shmem inode.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct ShmemSealSet: u32 {
         /// Prevent adding any more seals.
@@ -33,7 +32,17 @@ bitflags::bitflags! {
     }
 }
 
-/// Kind of Linux-style shmem object represented by a tmpfs-backed inode.
+/// Creates a tmpfs superblock.
+pub fn new_tmpfs(mount_flags: u32) -> Arc<SuperBlock> {
+    MemoryFs::new_with_name_flags_and_root_mode(
+        "tmpfs",
+        TMPFS_MAGIC,
+        mount_flags,
+        NodePermission::from_bits_truncate(0o1777),
+    )
+}
+
+/// Kind of shmem object represented by a tmpfs-backed inode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShmemObjectKind {
     /// Anonymous file created for `memfd_create`.
@@ -47,7 +56,7 @@ enum ShmemObjectKind {
 /// This state intentionally stores shmem policy metadata only. File contents
 /// and object identity remain owned by the inode-scoped page-cache mapping.
 #[derive(Debug)]
-struct ShmemObjectState {
+pub(super) struct ShmemObjectState {
     _kind: ShmemObjectKind,
     _debug_name: String,
     seals: Mutex<ShmemSealSet>,
@@ -67,19 +76,19 @@ impl ShmemObjectState {
         }
     }
 
-    /// Returns the current Linux memfd seal bitmask.
+    /// Returns the current memfd seal bitmask.
     fn seals(&self) -> ShmemSealSet {
         *self.seals.lock()
     }
 
-    /// Returns the current Linux memfd seal bitmask as ABI bits.
+    /// Returns the current memfd seal bitmask as ABI bits.
     fn seal_bits(&self) -> u32 {
         self.seals().bits()
     }
 
     /// Adds seals monotonically to this shmem object.
     ///
-    /// Linux memfd seals can only be added. Once `F_SEAL_SEAL` is present,
+    /// Memfd seals can only be added. Once `F_SEAL_SEAL` is present,
     /// adding any new seal is rejected.
     fn add_seals(&self, new_seals: ShmemSealSet) -> VfsResult<()> {
         if new_seals.is_empty() {
@@ -163,7 +172,7 @@ impl ShmemObjectState {
         *shared_pages = shared_pages.saturating_sub(pages);
     }
 
-    /// Registers active writable `MAP_SHARED` pages for Linux `F_SEAL_WRITE`
+    /// Registers active writable `MAP_SHARED` pages for `F_SEAL_WRITE`
     /// exclusion.
     fn register_writable_shared_pages(&self, pages: usize) -> VfsResult<()> {
         if pages == 0 {
@@ -205,20 +214,25 @@ impl ShmemObjectState {
 
 /// Anonymous tmpfs/shmem regular-file inode plus its inode-scoped policy state.
 pub struct ShmemObject {
-    location: Location,
+    location: Path,
     _state: Arc<ShmemObjectState>,
 }
 
 impl ShmemObject {
     /// Returns the inode location for callers that need to keep object
     /// metadata alongside the file.
-    pub fn location(&self) -> &Location {
+    pub fn location(&self) -> &Path {
         &self.location
     }
 
     /// Returns the created anonymous regular-file location.
-    pub fn into_location(self) -> Location {
+    pub fn into_path(self) -> Path {
         self.location
+    }
+
+    /// Opens this anonymous regular file and consumes the wrapper object.
+    pub fn into_file(self) -> VfsResult<Arc<VfsFile>> {
+        dentry_open(self.location, O_RDWR)
     }
 }
 
@@ -233,28 +247,21 @@ fn create_anonymous_file(
     permission: NodePermission,
     initial_seals: ShmemSealSet,
 ) -> VfsResult<ShmemObject> {
-    let fs = MemoryFs::new_with_name_and_flags("tmpfs", 0);
-    let root = Location::new(Mountpoint::new_root(&fs), fs.root_dir());
-    let location = root.open_file(
-        name,
-        &VfsOpenOptions {
-            create: true,
-            create_new: true,
-            node_type: NodeType::RegularFile,
-            permission,
-            user: None,
-        },
-    )?;
-    let state = attach_state(&location, kind, name, initial_seals);
+    let fs = new_tmpfs(0);
+    let root = Path::new(Mount::new_root(&fs), fs.root_dir());
+    let file =
+        kvfs::Filename::new(name).open_with_flags_at(&root, &root, O_CREAT | O_EXCL, permission)?;
+    let location = file.path().clone();
+    let state = attach_state(&location, kind, name, initial_seals)?;
     Ok(ShmemObject {
         location,
         _state: state,
     })
 }
 
-/// Creates a Linux-style `memfd_create` file object.
+/// Creates a `memfd_create` file object.
 ///
-/// When sealing is not allowed, the object is initialized with the Linux
+/// When sealing is not allowed, the object is initialized with the
 /// default `F_SEAL_SEAL`.
 pub fn create_memfd_file(name: &str, allow_sealing: bool) -> VfsResult<ShmemObject> {
     let initial_seals = if allow_sealing {
@@ -281,26 +288,30 @@ pub fn create_kernel_file(name: &str, permission: NodePermission) -> VfsResult<S
 }
 
 /// Returns inode-scoped shmem state attached to a location, if any.
-fn state_for_location(location: &Location) -> Option<Arc<ShmemObjectState>> {
-    location.inode_data().get::<ShmemObjectState>()
+fn state_for_location(location: &Path) -> Option<Arc<ShmemObjectState>> {
+    location
+        .downcast_node::<MemoryNode>()
+        .ok()?
+        .inode
+        .shmem_state()
 }
 
-/// Returns Linux memfd seal bits for a shmem location.
-pub fn seal_bits_for_location(location: &Location) -> VfsResult<u32> {
+/// Returns memfd seal bits for a shmem location.
+pub fn seal_bits_for_location(location: &Path) -> VfsResult<u32> {
     state_for_location(location)
         .map(|state| state.seal_bits())
         .ok_or(kvfs::VfsError::InvalidInput)
 }
 
-/// Adds Linux memfd seals to a shmem location.
-pub fn add_seals_for_location(location: &Location, seal_bits: u32) -> VfsResult<()> {
+/// Adds memfd seals to a shmem location.
+pub fn add_seals_for_location(location: &Path, seal_bits: u32) -> VfsResult<()> {
     let new_seals = ShmemSealSet::from_bits(seal_bits).ok_or(kvfs::VfsError::InvalidInput)?;
     let state = state_for_location(location).ok_or(kvfs::VfsError::InvalidInput)?;
     state.add_seals(new_seals)
 }
 
 /// Checks shmem write policy for a location.
-pub fn check_write_allowed(location: &Location) -> VfsResult<()> {
+pub fn check_write_allowed(location: &Path) -> VfsResult<()> {
     if let Some(state) = state_for_location(location) {
         state.check_write_allowed()?;
     }
@@ -308,7 +319,7 @@ pub fn check_write_allowed(location: &Location) -> VfsResult<()> {
 }
 
 /// Checks shmem resize policy for a location.
-pub fn check_resize_allowed(location: &Location, old_len: u64, new_len: u64) -> VfsResult<()> {
+pub fn check_resize_allowed(location: &Path, old_len: u64, new_len: u64) -> VfsResult<()> {
     if let Some(state) = state_for_location(location) {
         state.check_resize_allowed(old_len, new_len)?;
     }
@@ -316,7 +327,7 @@ pub fn check_resize_allowed(location: &Location, old_len: u64, new_len: u64) -> 
 }
 
 /// Checks shmem policy before creating or upgrading a writable shared mapping.
-pub fn check_shared_writable_mapping_allowed(location: &Location) -> VfsResult<()> {
+pub fn check_shared_writable_mapping_allowed(location: &Path) -> VfsResult<()> {
     if let Some(state) = state_for_location(location) {
         state.check_shared_writable_mapping_allowed()?;
     }
@@ -324,7 +335,7 @@ pub fn check_shared_writable_mapping_allowed(location: &Location) -> VfsResult<(
 }
 
 /// Checks shmem policy before satisfying a shared write fault.
-pub fn check_shared_write_fault_allowed(location: &Location) -> VfsResult<()> {
+pub fn check_shared_write_fault_allowed(location: &Path) -> VfsResult<()> {
     if let Some(state) = state_for_location(location) {
         state.check_shared_write_fault_allowed()?;
     }
@@ -332,7 +343,7 @@ pub fn check_shared_write_fault_allowed(location: &Location) -> VfsResult<()> {
 }
 
 /// Registers active shared pages for a shmem location.
-pub fn register_shared_pages(location: &Location, pages: usize) -> VfsResult<()> {
+pub fn register_shared_pages(location: &Path, pages: usize) -> VfsResult<()> {
     if let Some(state) = state_for_location(location) {
         state.register_shared_pages(pages)?;
     }
@@ -340,14 +351,14 @@ pub fn register_shared_pages(location: &Location, pages: usize) -> VfsResult<()>
 }
 
 /// Unregisters active shared pages for a shmem location.
-pub fn unregister_shared_pages(location: &Location, pages: usize) {
+pub fn unregister_shared_pages(location: &Path, pages: usize) {
     if let Some(state) = state_for_location(location) {
         state.unregister_shared_pages(pages);
     }
 }
 
 /// Registers active writable shared pages for a shmem location.
-pub fn register_writable_shared_pages(location: &Location, pages: usize) -> VfsResult<()> {
+pub fn register_writable_shared_pages(location: &Path, pages: usize) -> VfsResult<()> {
     if let Some(state) = state_for_location(location) {
         state.register_writable_shared_pages(pages)?;
     }
@@ -355,21 +366,25 @@ pub fn register_writable_shared_pages(location: &Location, pages: usize) -> VfsR
 }
 
 /// Unregisters active writable shared pages for a shmem location.
-pub fn unregister_writable_shared_pages(location: &Location, pages: usize) {
+pub fn unregister_writable_shared_pages(location: &Path, pages: usize) {
     if let Some(state) = state_for_location(location) {
         state.unregister_writable_shared_pages(pages);
     }
 }
 
 fn attach_state(
-    location: &Location,
+    location: &Path,
     kind: ShmemObjectKind,
     name: &str,
     initial_seals: ShmemSealSet,
-) -> Arc<ShmemObjectState> {
-    location
-        .inode_data()
-        .get_or_insert_with(|| ShmemObjectState::new(kind, String::from(name), initial_seals))
+) -> VfsResult<Arc<ShmemObjectState>> {
+    let node = location.downcast_node::<MemoryNode>()?;
+    let state = Arc::new(ShmemObjectState::new(
+        kind,
+        String::from(name),
+        initial_seals,
+    ));
+    Ok(node.inode.attach_shmem_state(state))
 }
 
 #[cfg(unittest)]

@@ -87,7 +87,7 @@ user trap / arch syscall entry
     v
 ksyscall::dispatch_irq_syscall
     │ decode sysno + ABI arguments
-    ├─ vfs adapter  ───────────> posix-fs / kfs / kvfs
+    ├─ vfs adapter  ───────────> posix-fs / kvfs
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
     ├─ time adapter ───────────> khal time sources / kprocess CPU-time state / kfd_objects::TimerFd
     ├─ task adapter ───────────> kprocess / posix-process / kprocess / kcred
@@ -108,7 +108,7 @@ ksyscall::dispatch_irq_syscall
 
 - `vfs/`
   - 路径和 VFS 语义相关 syscall
-  - owner 在 `posix-fs` / `kfs` / `kvfs`
+  - owner 在 `posix-fs` / `kvfs`
 - `ipc/pipe.rs`
   - `pipe2`
   - owner 在 `kfd_objects::PipeObject`
@@ -162,10 +162,10 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `kprocess` 进程/线程 CPU-time 采样状态
 - `task/limits.rs`
   - `getrlimit` / `setrlimit` / `prlimit64`
-  - owner 在 `ProcessState.resources` 的 rlimit 状态
+  - owner 在 `kprocess::ProcessRuntime` 持有的 process resource/rlimit 状态
 - `task/umask.rs`
   - `umask`
-  - owner 在 `ProcessState` 的文件创建掩码状态
+  - owner 在 `kprocess::ProcessRuntime` 的文件创建掩码状态
 - `task/sched.rs`
   - `sched_yield` / `sched_*affinity` / `sched_*scheduler` / `getcpu` / `getpriority` / `setpriority`
   - owner 在 `ktask` 调度接口、`kprocess` 进程/线程状态和 `khal` CPU 查询
@@ -178,6 +178,6 @@ ksyscall::dispatch_irq_syscall
 `ksyscall` 不负责：
 
 - 保存 fd-backed object 的内部状态；
-- 保存 `ProcessState` / 地址空间 / VFS 节点等共享对象；
+- 保存 `ProcessRuntime` / 地址空间 / VFS 节点等共享对象；
 - 实现路径解析、signal 状态机、timer 状态机或 pipe buffer 行为；
 - 提供“方便导入”的 catch-all owner 抽象。

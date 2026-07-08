@@ -14,14 +14,17 @@ use core::ffi::c_int;
 use bitflags::bitflags;
 use kerrno::{KError, KResult};
 use kfd_objects::pipe::current_pipe_endpoint;
-use kfs::File;
+use kvfs::FMode;
 use linux_raw_sys::general::*;
+use memfs::shmem;
 use posix_types::UserPtr;
+
+const SETFL_MASK: u32 = O_APPEND | O_NONBLOCK | O_NDELAY | O_DIRECT | O_NOATIME;
 
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {
     debug!("sys_close <= {fd}");
-    kprocess::current_resources().close_file_like(fd)?;
+    kprocess::current_resources().close_file(fd)?;
     Ok(0)
 }
 
@@ -41,7 +44,7 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
     let flags = CloseRangeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_close_range <= fds: [{first}, {last}], flags: {flags:?}");
 
-    let resources = kprocess::current_resources();
+    let resources = kprocess::current_user_process().resources()?;
     if flags.contains(CloseRangeFlags::UNSHARE) {
         resources.unshare_fd_table();
     }
@@ -57,7 +60,8 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
 
 /// Duplicates a file descriptor and optionally sets `CLOEXEC`.
 fn dup_fd(old_fd: c_int, cloexec: bool) -> KResult<isize> {
-    let new_fd = kprocess::current_resources().duplicate_file_like(old_fd, cloexec)?;
+    let resources = kprocess::current_user_process().resources()?;
+    let new_fd = resources.duplicate_file(old_fd, cloexec)?;
     Ok(new_fd as _)
 }
 
@@ -75,7 +79,7 @@ pub fn sys_dup(old_fd: c_int) -> KResult<isize> {
 /// Duplicates a file descriptor to a specific target fd.
 pub fn sys_dup2(old_fd: c_int, new_fd: c_int) -> KResult<isize> {
     if old_fd == new_fd {
-        kprocess::current_resources().get_file_like(new_fd)?;
+        kprocess::current_resources().get_file(new_fd)?;
         return Ok(new_fd as _);
     }
     sys_dup3(old_fd, new_fd, 0)
@@ -97,8 +101,9 @@ pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    kprocess::current_resources()
-        .duplicate_file_like_to(old_fd, new_fd, flags.contains(Dup3Flags::O_CLOEXEC))
+    kprocess::current_user_process()
+        .resources()?
+        .duplicate_file_to(old_fd, new_fd, flags.contains(Dup3Flags::O_CLOEXEC))
         .map(|fd| fd as _)
 }
 
@@ -119,28 +124,25 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(0)
         }
         F_SETFL => {
+            let mut flags = u32::try_from(arg).map_err(|_| KError::InvalidInput)?;
+            if O_NONBLOCK != O_NDELAY && flags & O_NDELAY != 0 {
+                flags |= O_NONBLOCK;
+            }
             kprocess::current_resources()
-                .get_file_like(fd)?
-                .set_nonblocking(arg & (O_NONBLOCK as usize) > 0)?;
+                .get_file(fd)?
+                .replace_flags(SETFL_MASK, flags);
             Ok(0)
         }
-        F_GETFL => {
-            let f = kprocess::current_resources().get_file_like(fd)?;
-
-            let mut ret = f.open_flags();
-            if f.nonblocking() {
-                ret |= O_NONBLOCK;
-            }
-
-            Ok(ret as _)
-        }
+        F_GETFL => Ok(kprocess::current_resources().get_file(fd)?.flags() as _),
         F_GETFD => {
-            let cloexec = kprocess::current_resources().cloexec(fd)?;
+            let cloexec = kprocess::current_user_process().resources()?.cloexec(fd)?;
             Ok(if cloexec { FD_CLOEXEC as _ } else { 0 })
         }
         F_SETFD => {
             let cloexec = arg & FD_CLOEXEC as usize != 0;
-            kprocess::current_resources().set_cloexec(fd, cloexec)?;
+            kprocess::current_user_process()
+                .resources()?
+                .set_cloexec(fd, cloexec)?;
             Ok(0)
         }
         F_GETPIPE_SZ => {
@@ -153,12 +155,13 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(pipe.capacity() as _)
         }
         F_GET_SEALS => {
-            let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
-            Ok(file.shmem_seal_bits()? as _)
+            let file = kprocess::current_resources().get_file(fd)?;
+            Ok(shmem::seal_bits_for_location(file.path())? as _)
         }
         F_ADD_SEALS => {
-            let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
-            file.add_shmem_seals(seal_bits_from_fcntl_arg(arg)?)?;
+            let file = kprocess::current_resources().get_file(fd)?;
+            file.verify_mode(FMode::WRITE)?;
+            shmem::add_seals_for_location(file.path(), seal_bits_from_fcntl_arg(arg)?)?;
             Ok(0)
         }
         _ => {

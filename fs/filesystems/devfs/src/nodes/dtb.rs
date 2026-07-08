@@ -3,13 +3,13 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc, vec};
-use core::any::Any;
 
-use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
+};
 use lazyinit::LazyInit;
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 static DTB_SNAPSHOT: LazyInit<Box<[u8]>> = LazyInit::new();
 
@@ -42,7 +42,11 @@ pub(crate) fn snapshot_available() -> bool {
 pub(crate) struct DtbSnapshot;
 
 impl DeviceFileOps for DtbSnapshot {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let Some(snapshot) = DTB_SNAPSHOT.get() else {
             return Ok(0);
         };
@@ -55,14 +59,6 @@ impl DeviceFileOps for DtbSnapshot {
         Ok(len)
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Ok(0)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
     }
@@ -70,7 +66,8 @@ impl DeviceFileOps for DtbSnapshot {
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     if snapshot_available() {
-        root.add(
+        add_device_entry(
+            root,
             "firmware-dtb",
             DeviceFile::new(
                 fs.clone(),

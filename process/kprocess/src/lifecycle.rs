@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use kpoll::PollSet;
 
 /// Process lifecycle state shared by all threads in a process.
-pub struct ProcessLifecycleState {
+pub(crate) struct ProcessLifecycleState {
     child_exit_event: Arc<PollSet>,
     exit_event: Arc<PollSet>,
     /// Accumulated user-mode nanoseconds of exited threads in this process.
@@ -31,7 +31,7 @@ impl Default for ProcessLifecycleState {
 
 impl ProcessLifecycleState {
     /// Creates a new [`ProcessLifecycleState`].
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             child_exit_event: Arc::default(),
             exit_event: Arc::default(),
@@ -43,17 +43,17 @@ impl ProcessLifecycleState {
     }
 
     /// Returns the child-exit wait event.
-    pub fn child_exit_event(&self) -> &Arc<PollSet> {
+    pub(crate) fn child_exit_event(&self) -> &Arc<PollSet> {
         &self.child_exit_event
     }
 
     /// Returns the process-exit event.
-    pub fn exit_event(&self) -> &Arc<PollSet> {
+    pub(crate) fn exit_event(&self) -> &Arc<PollSet> {
         &self.exit_event
     }
 
     /// Adds exited-thread CPU time to the accumulated counters.
-    pub fn accumulate_exited_thread_time(&self, utime_ns: usize, stime_ns: usize) {
+    pub(crate) fn accumulate_exited_thread_time(&self, utime_ns: usize, stime_ns: usize) {
         self.exited_thread_utime_ns
             .fetch_add(utime_ns, Ordering::Relaxed);
         self.exited_thread_stime_ns
@@ -61,7 +61,7 @@ impl ProcessLifecycleState {
     }
 
     /// Returns accumulated exited-thread user and kernel time in nanoseconds.
-    pub fn exited_thread_time_ns(&self) -> (usize, usize) {
+    pub(crate) fn exited_thread_time_ns(&self) -> (usize, usize) {
         (
             self.exited_thread_utime_ns.load(Ordering::Relaxed),
             self.exited_thread_stime_ns.load(Ordering::Relaxed),
@@ -74,13 +74,13 @@ impl ProcessLifecycleState {
     /// Mirrors Linux `kernel/exit.c`, where the parent's child CPU totals are
     /// incremented by the reaped thread-group time plus the child's own
     /// accumulated descendant totals.
-    pub fn accumulate_child_time(&self, utime_ns: usize, stime_ns: usize) {
+    pub(crate) fn accumulate_child_time(&self, utime_ns: usize, stime_ns: usize) {
         self.child_utime_ns.fetch_add(utime_ns, Ordering::Relaxed);
         self.child_stime_ns.fetch_add(stime_ns, Ordering::Relaxed);
     }
 
     /// Returns accumulated reaped-children user and kernel time in nanoseconds.
-    pub fn child_time_ns(&self) -> (usize, usize) {
+    pub(crate) fn child_time_ns(&self) -> (usize, usize) {
         (
             self.child_utime_ns.load(Ordering::Relaxed),
             self.child_stime_ns.load(Ordering::Relaxed),

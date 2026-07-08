@@ -2,13 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Mount and umount compatibility entry points.
+//! Mount and umount syscall entry points.
 
 use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
-use kvfs::{LookupFlags, LookupIntent, MountFlags, ST_RDONLY, lookup_location};
-use memfs::MemoryFs;
+use kprocess::current_user_process;
+use kvfs::{Filename, LookupFlags, LookupIntent, MountFlags, ST_RDONLY};
+use memfs::shmem;
 use posix_types::UserConstPtr;
 
 fn superblock_flags_from_sys_mount(flags: i32) -> u32 {
@@ -105,22 +106,23 @@ pub fn sys_mount(
 
     let mount_flags = per_mount_flags(flags);
     let mount_fs = match fs_type.as_str() {
-        "tmpfs" => {
-            MemoryFs::new_with_name_and_flags("tmpfs", superblock_flags_from_sys_mount(flags))
-        }
+        "tmpfs" => shmem::new_tmpfs(superblock_flags_from_sys_mount(flags)),
         #[cfg(feature = "ebpf")]
         "bpf" => bpffs::new_bpffs(),
         _ => return Err(KError::NoSuchDevice),
     };
-    let fs_context = kprocess::current_user_process_fs_context();
-    let fs = fs_context.lock();
-    let target = lookup_location(
-        &fs.lookup_context(),
-        target.as_str(),
+    let process = current_user_process();
+    let fs_struct = process.fs_context()?;
+    let fs = fs_struct.lock();
+    let target = Filename::new(target.as_str()).lookup_at(
+        fs.root(),
+        fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
     )?;
-    target.mount_with_flags(&mount_fs, mount_flags)?;
+    process
+        .mnt_ns()?
+        .attach_with_flags(&target, &mount_fs, mount_flags)?;
 
     Ok(0)
 }
@@ -144,15 +146,16 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     let target = target.load_string()?;
     debug!("sys_umount2 <= target: {target:?}");
 
-    let fs_context = kprocess::current_user_process_fs_context();
-    let fs = fs_context.lock();
-    let target = lookup_location(
-        &fs.lookup_context(),
-        target.as_str(),
+    let process = current_user_process();
+    let fs_struct = process.fs_context()?;
+    let fs = fs_struct.lock();
+    let target = Filename::new(target.as_str()).lookup_at(
+        fs.root(),
+        fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
     )?;
-    target.unmount()?;
+    process.mnt_ns()?.detach(&target)?;
     Ok(0)
 }
 

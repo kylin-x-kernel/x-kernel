@@ -9,6 +9,7 @@
 - `read_into_or_create(offset, len)`
 - `write_from(offset, data)`
 - `resize(len)` / `set_len(len)`
+- `truncate_final()`
 - `sync(data_only)`
 - `with_folio_or_create(index, ...)`
 - `add_evict_listener(...)`
@@ -31,6 +32,8 @@
 - `Folio::data()` 只能在持有 `&mut Folio` 时调用。
 - `MappingInner.pages` 中每个页索引最多对应一个 folio 实例。
 - `len` 描述的是对象可见字节数，不等于缓存页数量。
+- dirty / under-writeback 状态在 folio lock 下更新；写回失败不能留下
+  under-writeback 状态。
 - evict listener lifetime 由 `EvictRegistration` guard 管理；guard drop 后
   listener 不得再被调用。
 
@@ -67,15 +70,24 @@
    - `add_evict_listener()` 返回 RAII guard，drop 自动 unregister，不向调用者暴露
      需要手动管理的 public id
 
+8. ordinary invalidation 丢弃 dirty folio
+   - `invalidate_from_page()` 保持 clean-only 约束；final teardown 必须走
+     `truncate_final()`
+
+9. 写回失败后 folio 永久处于 under-writeback
+   - 所有同步写回错误路径都清除 under-writeback，并保留 dirty 供后续重试
+
 ## 故障模式与影响分析（FMEA）
 
 | 故障 | 触发条件 | 当前处理 | 影响 |
 |---|---|---|---|
 | 页分配失败 | 内存不足 | 返回 `KError::NoMemory` | 上层可转成 `ENOMEM` 或 fault failure |
 | 长度计算溢出 | `offset + len` 溢出 | 返回 `KError::InvalidInput` | 拒绝本次写入 |
-| dirty folio 被释放 | address-space 未 writeback 或 in-memory object drop | 记录警告 | 提示调用方缺少 writeback/drop 前清理 |
+| dirty folio 被 ordinary invalidation 释放 | address-space 未先 writeback | 断言拒绝 | 防止普通失效路径丢数据 |
+| dirty folio 被 final teardown 释放 | inode 生命周期结束 | 清 dirty 后丢弃 | 对象已退出生命周期，不再要求 writeback |
 | filesystem 短写 | file-backed dirty folio writeback | 返回错误并保留 dirty | 防止数据丢失 |
 | range writeback 失败 | `AddressSpaceOperations::writepages()` 返回错误 | 返回错误并保留当前 folio dirty | 调用者可重试 `msync` |
+| under-writeback 状态泄漏 | 后端写回返回错误 | 清除 under-writeback 并保留 dirty | 避免后续写回永久跳过该 folio |
 
 ## 故障管理
 
@@ -103,3 +115,7 @@
 - evict listener 调用方是否保存 `EvictRegistration` guard，并依赖 drop 自动注销。
 - 是否洞页读取始终返回零而非未初始化内存。
 - `writeback_range()` 是否只写回与请求范围相交的 dirty folio，并在失败时保留 dirty。
+- 写回预算耗尽后是否停止本次 pass，而不是无限制扫描/写回。
+- 写回失败路径是否清除 under-writeback 并保留 dirty。
+- ordinary invalidation 是否仍然拒绝 dirty folio，final teardown 是否只通过
+  `truncate_final()` 表达。

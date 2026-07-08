@@ -17,12 +17,13 @@ vsock = ["knet/vsock"]
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
 kerrno.workspace = true
-kfd.workspace = true
 khal.workspace = true
 kio.workspace = true
 klogger.workspace = true
 knet.workspace = true
 kprocess.workspace = true
+kresources.workspace = true
+kvfs.workspace = true
 linux-raw-sys.workspace = true
 osvm.workspace = true
 posix-types.workspace = true

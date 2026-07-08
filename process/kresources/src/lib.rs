@@ -9,12 +9,13 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use core::ffi::c_int;
+use core::{any::Any, ffi::c_int};
 
 use kerrno::{KError, KResult};
-use kfd::{FdSnapshot, FdTable, FileLike};
+use kfd::{FdSnapshot, FdTable, FileDescriptor};
 use krlimit::{Rlimit, Rlimits};
 use ksync::RwLock;
+use kvfs::VfsFile;
 use linux_raw_sys::general::{RLIM_NLIMITS, RLIMIT_NOFILE};
 
 /// Process-owned resource state.
@@ -92,9 +93,15 @@ impl ProcessResources {
         access_fn((*fd_table).as_ref())
     }
 
-    /// Returns the file-like object stored in the given descriptor.
-    pub fn get_file_like(&self, fd: c_int) -> kerrno::KResult<Arc<dyn FileLike>> {
-        self.with_fd_table(|fd_table| fd_table.read().get_file_like(fd))
+    fn close_descriptors(descriptors: impl IntoIterator<Item = FileDescriptor>) {
+        for descriptor in descriptors {
+            let _ = descriptor.close();
+        }
+    }
+
+    /// Returns the open file stored in the given descriptor.
+    pub fn get_file(&self, fd: c_int) -> kerrno::KResult<Arc<VfsFile>> {
+        self.with_fd_table(|fd_table| fd_table.read().get_file(fd))
     }
 
     /// Returns a stable snapshot of the descriptor entry.
@@ -102,43 +109,45 @@ impl ProcessResources {
         self.with_fd_table(|fd_table| fd_table.read().snapshot(fd))
     }
 
-    /// Returns the typed file-like object stored in the given descriptor.
-    pub fn get_file_like_as<T: FileLike + 'static>(&self, fd: c_int) -> kerrno::KResult<Arc<T>> {
-        self.with_fd_table(|fd_table| T::from_fd(fd_table, fd))
+    /// Returns typed file-private data attached to the descriptor's open file.
+    pub fn get_file_private<T>(&self, fd: c_int) -> kerrno::KResult<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.get_file(fd)?
+            .private_data_get::<T>()
+            .ok_or(KError::InvalidInput)
     }
 
-    /// Adds a file-like object to the current descriptor table.
-    pub fn add_file_like(
-        &self,
-        file_like: Arc<dyn FileLike>,
-        cloexec: bool,
-    ) -> kerrno::KResult<c_int> {
-        self.with_fd_table(|fd_table| {
-            fd_table
-                .write()
-                .add_file_like(self.max_nofile(), file_like, cloexec)
-        })
+    /// Adds an open file to the current descriptor table.
+    pub fn add_file(&self, file: Arc<VfsFile>, cloexec: bool) -> kerrno::KResult<c_int> {
+        self.with_fd_table(|fd_table| fd_table.write().add_file(self.max_nofile(), file, cloexec))
     }
 
     /// Duplicates a descriptor into a newly allocated slot.
-    pub fn duplicate_file_like(&self, fd: c_int, cloexec: bool) -> kerrno::KResult<c_int> {
-        let file_like = self.get_file_like(fd)?;
-        self.add_file_like(file_like, cloexec)
+    pub fn duplicate_file(&self, fd: c_int, cloexec: bool) -> kerrno::KResult<c_int> {
+        let file = self.get_file(fd)?;
+        self.add_file(file, cloexec)
     }
 
     /// Duplicates a descriptor into a fixed slot.
-    pub fn duplicate_file_like_to(
+    pub fn duplicate_file_to(
         &self,
         old_fd: c_int,
         new_fd: c_int,
         cloexec: bool,
     ) -> kerrno::KResult<c_int> {
-        self.with_fd_table(|fd_table| fd_table.write().duplicate_to(old_fd, new_fd, cloexec))
+        let (fd, replaced) =
+            self.with_fd_table(|fd_table| fd_table.write().duplicate_to(old_fd, new_fd, cloexec))?;
+        Self::close_descriptors(replaced);
+        Ok(fd)
     }
 
     /// Closes the given file descriptor.
-    pub fn close_file_like(&self, fd: c_int) -> kerrno::KResult {
-        self.with_fd_table(|fd_table| fd_table.write().close_file_like(fd))
+    pub fn close_file(&self, fd: c_int) -> kerrno::KResult {
+        let descriptor =
+            self.with_fd_table(|fd_table| fd_table.write().file_close_fd_locked(fd))?;
+        descriptor.close()
     }
 
     /// Returns whether the given descriptor is marked close-on-exec.
@@ -153,7 +162,9 @@ impl ProcessResources {
 
     /// Closes all descriptors in the given inclusive range.
     pub fn close_range(&self, first_fd: c_int, last_fd: c_int) {
-        self.with_fd_table(|fd_table| fd_table.write().close_range(first_fd, last_fd));
+        let descriptors =
+            self.with_fd_table(|fd_table| fd_table.write().remove_range(first_fd, last_fd));
+        Self::close_descriptors(descriptors);
     }
 
     /// Marks all descriptors in the given inclusive range close-on-exec.
@@ -163,16 +174,20 @@ impl ProcessResources {
 
     /// Closes all descriptors marked close-on-exec.
     pub fn close_cloexec_files(&self) {
-        self.with_fd_table(|fd_table| fd_table.write().close_cloexec_files());
+        let descriptors = self.with_fd_table(|fd_table| fd_table.write().remove_cloexec_files());
+        Self::close_descriptors(descriptors);
     }
 
     /// Closes all file descriptors when the table is not shared.
     pub fn close_all_fds(&self) {
         // Must NOT call self.fd_table() — that clones the inner Arc and
-        // bumps strong_count, tricking close_all_if_unshared into returning
+        // bumps strong_count, tricking remove_all_if_unshared into returning
         // early without closing any descriptors.
-        let guard = self.fd_table.read();
-        FdTable::close_all_if_unshared(&guard);
+        let descriptors = {
+            let guard = self.fd_table.read();
+            FdTable::remove_all_if_unshared(&guard)
+        };
+        Self::close_descriptors(descriptors);
     }
 
     /// Replaces the current fd table with an unshared clone.

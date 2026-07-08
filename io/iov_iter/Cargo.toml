@@ -1,0 +1,12 @@
+[package]
+name = "iov_iter"
+description = "Iterator-backed kernel I/O buffers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+kerrno = { workspace = true }

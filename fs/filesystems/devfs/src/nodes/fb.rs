@@ -3,16 +3,18 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::{any::Any, slice};
+use core::slice;
 
 use kerrno::KError;
 use khal::mem::v2p;
-use kvfs::{DeviceFileOps, DeviceId, MmapMapper, NodeFlags, NodeType, VfsError, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, NodeType, SimpleFs, VfsError,
+    VfsFile, VfsResult,
+};
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 // Types from https://github.com/Tangzh33/asterinas
 
@@ -118,7 +120,15 @@ impl FrameBuffer {
     }
 }
 impl DeviceFileOps for FrameBuffer {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let slice = self.as_mut_slice();
         let len = buf
             .len()
@@ -127,7 +137,7 @@ impl DeviceFileOps for FrameBuffer {
         Ok(len)
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+    fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let slice = self.as_mut_slice();
         if offset >= slice.len() as u64 {
             return Err(VfsError::StorageFull);
@@ -137,7 +147,7 @@ impl DeviceFileOps for FrameBuffer {
         Ok(len)
     }
 
-    fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
             // FBIOGET_VSCREENINFO
             0x4600 => {
@@ -229,11 +239,7 @@ impl DeviceFileOps for FrameBuffer {
         }
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+    fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         mapper.map_physical(PhysAddrRange::from_start_size(v2p(self.base), self.size))
     }
 
@@ -244,7 +250,8 @@ impl DeviceFileOps for FrameBuffer {
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     if fbdevice::fb_available() {
-        root.add(
+        add_device_entry(
+            root,
             "fb0",
             DeviceFile::new(
                 fs.clone(),

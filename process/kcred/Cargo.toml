@@ -9,4 +9,5 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+klazy.workspace = true
 unittest.workspace = true

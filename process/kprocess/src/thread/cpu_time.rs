@@ -18,7 +18,7 @@ pub enum CpuTimeState {
 }
 
 /// Per-thread CPU-time accounting state.
-pub struct CpuTimeStatistics {
+pub(crate) struct CpuTimeStatistics {
     utime_ns: usize,
     stime_ns: usize,
     last_wall_ns: Option<usize>,
@@ -33,7 +33,7 @@ impl Default for CpuTimeStatistics {
 
 impl CpuTimeStatistics {
     /// Creates a new [`CpuTimeStatistics`].
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             utime_ns: 0,
             stime_ns: 0,
@@ -43,20 +43,20 @@ impl CpuTimeStatistics {
     }
 
     /// Returns the current user time and system time as a tuple of [`TimeValue`].
-    pub fn output(&self) -> (TimeValue, TimeValue) {
+    pub(crate) fn output(&self) -> (TimeValue, TimeValue) {
         let utime = TimeValue::from_nanos(self.utime_ns as u64);
         let stime = TimeValue::from_nanos(self.stime_ns as u64);
         (utime, stime)
     }
 
     /// Returns the sampled user and system CPU time in nanoseconds.
-    pub fn sample_nanos(&mut self) -> (usize, usize) {
+    pub(crate) fn sample_nanos(&mut self) -> (usize, usize) {
         self.update();
         (self.utime_ns, self.stime_ns)
     }
 
     /// Returns the sampled user and system CPU time as a tuple of [`TimeValue`].
-    pub fn sample(&mut self) -> (TimeValue, TimeValue) {
+    pub(crate) fn sample(&mut self) -> (TimeValue, TimeValue) {
         self.update();
         self.output()
     }
@@ -80,7 +80,7 @@ impl CpuTimeStatistics {
     }
 
     /// Updates the current CPU-accounting state.
-    pub fn set_state(&mut self, state: CpuTimeState) {
+    pub(crate) fn set_state(&mut self, state: CpuTimeState) {
         self.update();
         self.state = state;
     }

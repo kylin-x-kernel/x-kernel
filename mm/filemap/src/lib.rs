@@ -18,34 +18,23 @@ mod shared;
 mod test_support {
     use alloc::sync::Arc;
 
-    use kfs::{File, OpenOptions};
-    use kvfs::{Location, Mountpoint, NodePermission, NodeType, OpenOptions as VfsOpenOptions};
-    use memfs::MemoryFs;
+    use kvfs::{NodePermission, Path, VfsFile, dentry_open};
+    use memfs::shmem;
 
-    pub(crate) fn anonymous_location(name: &str) -> Location {
-        let fs = MemoryFs::new_with_name_and_flags("tmpfs", 0);
-        let root = Location::new(Mountpoint::new_root(&fs), fs.root_dir());
-        root.open_file(
-            name,
-            &VfsOpenOptions {
-                create: true,
-                create_new: true,
-                node_type: NodeType::RegularFile,
-                permission: NodePermission::from_bits_truncate(0o600),
-                user: None,
-            },
-        )
-        .expect("create anonymous file")
+    const O_RDWR: u32 = 2;
+
+    pub(crate) fn anonymous_location(name: &str) -> Path {
+        shmem::create_kernel_file(name, NodePermission::from_bits_truncate(0o600))
+            .map(|file| file.into_path())
+            .expect("create anonymous file")
     }
 
-    pub(crate) fn page_cache_file(name: &str) -> Arc<File> {
-        Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open_loc(anonymous_location(name))
-                .expect("open page-cache file"),
-        )
+    pub(crate) fn open_test_file(location: Path, flags: u32) -> Arc<VfsFile> {
+        dentry_open(location, flags).expect("open page-cache file")
+    }
+
+    pub(crate) fn page_cache_file(name: &str) -> Arc<VfsFile> {
+        open_test_file(anonymous_location(name), O_RDWR)
     }
 }
 

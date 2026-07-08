@@ -18,7 +18,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    any::Any,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
     task::Context,
 };
@@ -28,7 +27,7 @@ use kalloc::GlobalPage;
 use khal::mem::v2p;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsResult};
+use kvfs::{DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsFile, VfsResult};
 use memaddr::{PAGE_SIZE_4K, PhysAddrRange};
 use posix_types::{UserPtr, UserRead, UserWrite};
 
@@ -427,7 +426,11 @@ fn current_mode() -> DrmModeModeInfo {
 }
 
 impl DeviceFileOps for Card0 {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -451,11 +454,7 @@ impl DeviceFileOps for Card0 {
         }
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Err(VfsError::BadFileDescriptor)
-    }
-
-    fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
             DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => return Ok(0),
             _ => {}
@@ -497,7 +496,7 @@ impl DeviceFileOps for Card0 {
         }
     }
 
-    fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+    fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         let offset = mapper.offset() as u64;
         let dumbs = self.dumbs.lock();
         let Some(b) = dumbs.values().find(|b| b.offset == offset) else {
@@ -513,16 +512,16 @@ impl DeviceFileOps for Card0 {
         mapper.map_physical(range)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_pollable(&self) -> Option<&dyn Pollable> {
-        Some(self)
-    }
-
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
+    }
+
+    fn poll(&self, _file: &VfsFile) -> IoEvents {
+        Pollable::poll(self)
+    }
+
+    fn register_poll(&self, _file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        Pollable::register(self, context, events);
     }
 }
 

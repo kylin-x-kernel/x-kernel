@@ -31,7 +31,8 @@ ktask timer runtime / generic fd readiness
 
 - `ksyscall` 负责用户指针、flag、clockid 的 ABI 校验。
 - `kfd_objects` 信任 `ktask` timer runtime 的 handle/register/cancel 语义。
-- `kfd_objects` 信任 `kfd`/`kresources` 在 fd 生命周期上维持对象强引用。
+- `kfd_objects` 信任 `kfd`/`kresources` 在 fd 生命周期上维持 `VfsFile`
+  及其 private data 的强引用。
 
 ## 状态不变量
 
@@ -52,7 +53,7 @@ ktask timer runtime / generic fd readiness
 
 - `SpinNoIrq<TimerFdInner>` 保护核心 timer 状态；
 - `SpinNoIrq<Option<TimerHandle>>` 保护底层 handle；
-- `AtomicBool` 保存 nonblocking 标志；
+- nonblocking 标志由当前 `VfsFile` 保存；
 - `PollSet` 用于读就绪唤醒。
 
 timer runtime 回调与 `read/poll/settime` 可能并发发生。
@@ -65,16 +66,16 @@ timer runtime 回调与 `read/poll/settime` 可能并发发生。
 
 - `Mutex<PipeState>` 保护 ring buffer 与 reader/writer 计数；
 - 两个 `PollSet` 分别维护读端和写端唤醒；
-- 每个 endpoint 自己的 `AtomicBool` 保存 nonblocking 标志。
+- nonblocking 标志由读端/写端各自的 `VfsFile` 保存。
 
-`PipeReadEnd` / `PipeWriteEnd` 的 `drop`、`read/write`、`poll` 可能并发发生。
+读端/写端 `VfsFile` 的 `release`、`read/write`、`poll` 可能并发发生。
 因此 reader/writer 计数、EOF/HUP/ERR 语义、以及 resize 过程中 buffer 迁移，
 都必须通过同一个 `PipeState` 锁维护。
 
 `Signalfd` 使用：
 
 - `RwLock<SignalSet>` 保护当前 mask；
-- `AtomicBool` 保存 nonblocking 标志；
+- nonblocking 标志由当前 `VfsFile` 保存；
 - `PollSet` 维护可读唤醒。
 
 它不拥有 signal 队列本身；队列 owner 仍在当前线程的 signal state。
@@ -101,8 +102,8 @@ watched file 失效后的清理维护同一个状态机。
 | T-04 | `poll()` 与 `read()` 对 readiness 观察不一致 | 中 | 两者都先 `tick(clock_now(...))` 再判断 |
 | T-05 | `eventfd` 计数溢出或 `poll(OUT)` 与写入条件不一致 | 中 | `fetch_update` 与 `poll()` 共享同一上限判断 |
 | T-06 | `eventfd` semaphore/普通模式读路径分叉导致计数错误 | 中 | 两种语义都经同一原子更新路径处理 |
-| T-07 | pipe reader/writer 计数失配导致 EOF/HUP/ERR 错误 | 中 | `drop`、`poll`、`read/write` 统一经 `PipeState` 锁维护计数 |
-| T-08 | pipe resize 丢数据或发布未初始化字节 | 高 | resize 时先检查 occupied_len，再复制已读写切片并保持容量上限检查 |
+| T-07 | pipe reader/writer 计数失配导致 EOF/HUP/ERR 错误 | 中 | `release`、`poll`、`read/write` 统一经 `PipeState` 锁维护计数 |
+| T-08 | pipe resize 丢数据或发布未初始化字节 | 高 | resize 时先检查已缓冲字节数，再复制已缓冲数据并保持容量上限检查 |
 | T-09 | pipe 写端在无 reader 时未正确抛出 `SIGPIPE` / `BrokenPipe` | 中 | 在写路径同一锁内检查 `readers == 0`，并统一走 signal + error 分支 |
 | T-10 | `signalfd` mask 更新与 `read/poll` 观察不一致 | 中 | mask 经 `RwLock` 更新，并在更新后唤醒 poller 重新观察 |
 | T-11 | `signalfd` 将不可捕获信号暴露给用户态 fd 语义 | 低 | syscall adapter 统一移除 `SIGKILL` / `SIGSTOP` |

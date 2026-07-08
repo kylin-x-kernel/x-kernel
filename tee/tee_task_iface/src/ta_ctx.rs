@@ -9,10 +9,10 @@ use alloc::{
     vec::Vec,
 };
 
+use fs_context::init_fs;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kfs::{OpenOptions, kernel_fs_context};
-use kvfs::{LookupFlags, LookupIntent, lookup_location};
+use kvfs::{Filename, NodePermission};
 use tee_raw_sys::ta_head;
 use uuid as uuid_crate;
 
@@ -132,20 +132,21 @@ pub fn read_ta_head_if_applicable(path: &str) -> KResult<Option<Vec<u8>>> {
     let Some(normalized) = canonical_ta_install_path(path) else {
         return Ok(None);
     };
-    let fs = kernel_fs_context().lock();
-    let loc = lookup_location(
-        &fs.lookup_context(),
-        &normalized,
-        LookupIntent::Open,
-        LookupFlags::follow(),
+    let fs_guard = init_fs();
+    let fs = fs_guard.lock();
+    let file = Filename::new(normalized.as_str()).open_with_flags_at(
+        fs.root(),
+        fs.pwd(),
+        0,
+        NodePermission::empty(),
     )?;
     drop(fs);
-    let file = OpenOptions::new().read(true).open_loc(loc)?;
-    let len = file.location().len().map_err(|_| KError::InvalidData)?;
+    let len = file.size();
     let len = usize::try_from(len).map_err(|_| KError::InvalidData)?;
     let mut image = alloc::vec![0u8; len];
+    let mut pos = 0;
     let n = file
-        .read_at(&mut image[..], 0)
+        .read_from(&mut image[..], &mut pos)
         .map_err(|_| KError::InvalidData)?;
     if n != len {
         return Err(KError::InvalidData);

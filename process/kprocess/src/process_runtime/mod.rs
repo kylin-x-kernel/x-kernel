@@ -9,11 +9,11 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "tee")]
 use core::any::Any;
 
+use fs_context::FsStruct;
 use kcred::Credentials;
 use kerrno::{KError, KResult};
-use kfs::FsContext;
 use kfutex::ProcessFutexState;
-use kns::NsProxy;
+use kns::{NamespaceFsContext, NsProxy};
 use kresources::ProcessResources;
 use ksignal::{
     MAX_SIGNALS, SignalDisposition, Signo,
@@ -71,6 +71,7 @@ pub struct ProcessForkConfig {
 pub(crate) struct ProcessRuntime {
     process: Arc<Process>,
     resources: Arc<ProcessResources>,
+    fs_context: Arc<Mutex<FsStruct>>,
     posix_state: ProcessPosixState,
     runtime_state: ProcessRuntimeState,
     nsproxy: RwLock<Arc<NsProxy>>,
@@ -91,17 +92,18 @@ impl ProcessRuntime {
         exe_path: String,
         cmdline: Arc<Vec<String>>,
         address_space: Arc<Mutex<memspace::MmSpace>>,
-        fs_context: Arc<Mutex<FsContext>>,
+        fs_context: Arc<Mutex<FsStruct>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
         credentials: Credentials,
         config: ProcessRuntimeConfig,
     ) -> Arc<Self> {
-        let nsproxy = NsProxy::new_initial(fs_context);
+        let nsproxy = NsProxy::new_initial();
         Self::new_with_nsproxy(
             process,
             exe_path,
             cmdline,
             address_space,
+            fs_context,
             signal_actions,
             credentials,
             config,
@@ -116,6 +118,7 @@ impl ProcessRuntime {
         exe_path: String,
         cmdline: Arc<Vec<String>>,
         address_space: Arc<Mutex<memspace::MmSpace>>,
+        fs_context: Arc<Mutex<FsStruct>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
         credentials: Credentials,
         config: ProcessRuntimeConfig,
@@ -133,6 +136,7 @@ impl ProcessRuntime {
             #[cfg(feature = "tee")]
             tee_runtime_private: RwLock::new(None),
             resources: ProcessResources::new(config.user_stack_size),
+            fs_context,
             posix_state,
             runtime_state,
             nsproxy: RwLock::new(nsproxy),
@@ -230,8 +234,8 @@ impl ProcessRuntime {
     }
 
     /// Returns the process-owned filesystem context.
-    pub fn fs_context(&self) -> Arc<Mutex<FsContext>> {
-        self.nsproxy.read().mnt_ns().fs_context().clone()
+    pub fn fs_context(&self) -> Arc<Mutex<FsStruct>> {
+        self.fs_context.clone()
     }
 
     /// Returns the namespace proxy.
@@ -303,14 +307,32 @@ pub(crate) fn fork_process_runtime(
     parent: &Arc<ProcessRuntime>,
     config: ProcessForkConfig,
 ) -> KResult<(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>)> {
-    let nsproxy = parent
-        .nsproxy()
-        .clone_for_child(config.namespace_flags, config.share_fs)
-        .map_err(|err| match err {
-            kns::CloneNsError::InvalidFlagCombination => KError::InvalidInput,
-            kns::CloneNsError::Unimplemented => KError::Unsupported,
-        })?;
-    let leader_task_number = kidentity::PidHandle::allocate_in(nsproxy.active_pid_ns())?;
+    let parent_fs_context = parent.fs_context();
+    let fs_context = if config.share_fs {
+        if parent_fs_context.lock().in_exec() {
+            return Err(KError::WouldBlock);
+        }
+        parent_fs_context
+    } else {
+        Arc::new(Mutex::new(parent_fs_context.lock().clone_for_process()))
+    };
+
+    let nsproxy_result = if config.share_fs {
+        parent
+            .nsproxy()
+            .clone_for_child(config.namespace_flags, NamespaceFsContext::Shared)
+    } else {
+        let mut fs = fs_context.lock();
+        parent
+            .nsproxy()
+            .clone_for_child(config.namespace_flags, NamespaceFsContext::Private(&mut fs))
+    };
+    let nsproxy = nsproxy_result.map_err(|err| match err {
+        kns::CloneNsError::InvalidFlagCombination => KError::InvalidInput,
+        kns::CloneNsError::Unimplemented => KError::Unsupported,
+        kns::CloneNsError::Mount(err) => err,
+    })?;
+    let leader_task_number = kidentity::allocate_root_pid_handle()?;
     let parent_process = if config.share_parent {
         parent.process().parent().ok_or(KError::InvalidInput)?
     } else {
@@ -337,6 +359,7 @@ pub(crate) fn fork_process_runtime(
         parent.exe_path().read().clone(),
         parent.cmdline().read().clone(),
         address_space,
+        fs_context,
         signal_actions,
         parent.with_credentials(Clone::clone),
         ProcessRuntimeConfig::default(),

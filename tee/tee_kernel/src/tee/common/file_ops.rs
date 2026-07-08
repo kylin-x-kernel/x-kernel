@@ -3,17 +3,13 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::ffi::c_int;
 
+use fs_context::FsStruct;
 use kerrno::{KError, KResult};
-use kfs::{File, OpenOptions};
 use klazy::lazy_static;
 use kprocess;
 use ksync::RwLock;
-use kvfs::{
-    LookupFlags, LookupIntent, NodePermission, NodeType, VfsError, lookup_location,
-    lookup_nonexistent, path::Path,
-};
+use kvfs::{Filename, LookupFlags, LookupIntent, NodePermission, VfsError, VfsFile};
 use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
@@ -29,86 +25,19 @@ pub const FS_OFLAG_RW: u32 = O_RDWR | O_SYNC;
 
 lazy_static! {
     /// Global open-object table for TEE file descriptors.
-    static ref TEE_FD_TABLE: RwLock<Slab<Arc<File>>> = RwLock::new(Slab::new());
+    static ref TEE_FD_TABLE: RwLock<Slab<Arc<VfsFile>>> = RwLock::new(Slab::new());
 }
 
-/// Convert open flags to [`OpenOptions`].
-fn flags_to_options(flags: c_int, mode: __kernel_mode_t, (uid, gid): (u32, u32)) -> OpenOptions {
-    let flags = flags as u32;
-    let mut options = OpenOptions::new();
-    options.mode(mode).user(uid, gid);
-    match flags & 0b11 {
-        O_RDONLY => options.read(true),
-        O_WRONLY => options.write(true),
-        _ => options.read(true).write(true),
-    };
-    if flags & O_APPEND != 0 {
-        options.append(true);
-    }
-    if flags & O_TRUNC != 0 {
-        options.truncate(true);
-    }
-    if flags & O_CREAT != 0 {
-        options.create(true);
-    }
-    if flags & O_PATH != 0 {
-        options.path(true);
-    }
-    if flags & O_EXCL != 0 {
-        options.create_new(true);
-    }
-    if flags & O_DIRECTORY != 0 {
-        options.directory(true);
-    }
-    if flags & O_NOFOLLOW != 0 {
-        options.no_follow(true);
-    }
-    if flags & O_DIRECT != 0 {
-        options.direct(true);
-    }
-    options
+fn open_path(
+    fs: &FsStruct,
+    path: &str,
+    flags: u32,
+    mode: __kernel_mode_t,
+) -> KResult<Arc<VfsFile>> {
+    let permission = NodePermission::from_bits_truncate(mode as _);
+    Filename::new(path).open_with_flags_at(fs.root(), fs.pwd(), flags, permission)
 }
 
-pub trait TeeFileLike {
-    /// read data from file to buffer at offset
-    ///
-    /// # Arguments
-    /// * `buf` - buffer to store read data
-    /// * `offset` - offset from the beginning of the file
-    ///
-    /// # Returns
-    /// * `Ok(usize)` - number of bytes read
-    /// * `Err(TEE_ERROR_GENERIC)` - error
-    fn pread(&self, buf: &mut [u8], offset: usize) -> TeeResult<usize>;
-
-    /// write data to file at offset
-    ///
-    /// # Arguments
-    /// * `buf` - data to write
-    /// * `offset` - offset from the beginning of the file
-    ///
-    /// # Returns
-    /// * `Ok(usize)` - number of bytes written
-    /// * `Err(TEE_ERROR_GENERIC)` - error
-    fn pwrite(&self, buf: &[u8], offset: usize) -> TeeResult<usize>;
-
-    /// truncate file to length
-    ///
-    /// # Arguments
-    /// * `len` - new file length (number of bytes)
-    ///
-    /// # Returns
-    /// * `Ok(())` - success
-    /// * `Err(TEE_ERROR_GENERIC)` - error
-    fn ftruncate(&mut self, len: usize) -> TeeResult<()>;
-
-    /// close file
-    ///
-    /// # Returns
-    /// * `Ok(())` - success
-    /// * `Err(TEE_ERROR_GENERIC)` - error
-    fn close(&mut self) -> TeeResult<()>;
-}
 #[derive(Debug, Clone, Copy)]
 pub struct FileVariant {
     pub fd: isize,
@@ -120,19 +49,19 @@ impl Default for FileVariant {
     }
 }
 
-fn add_to_fd(file: File, _flags: u32) -> KResult<isize> {
+fn add_to_fd(file: Arc<VfsFile>, _flags: u32) -> KResult<isize> {
     if file.is_dir() {
         info!("add_to_fd = error");
         return Err(KError::InvalidInput);
     }
 
-    let fd = TEE_FD_TABLE.write().insert(Arc::new(file));
+    let fd = TEE_FD_TABLE.write().insert(file);
     Ok(fd as isize)
 }
 
 fn with_file<F, R>(file: &FileVariant, f: F) -> TeeResult<R>
 where
-    F: FnOnce(&Arc<File>) -> TeeResult<R>,
+    F: FnOnce(&Arc<VfsFile>) -> TeeResult<R>,
 {
     let file_arc = TEE_FD_TABLE
         .read()
@@ -156,9 +85,10 @@ impl FileVariant {
         let path = validate_tee_path(path).map_err(|_| VfsError::InvalidInput)?;
         let mode = mode & !kprocess::current_umask();
 
-        let options = flags_to_options(flags as c_int, mode as __kernel_mode_t, (0, 0));
-        let fd = with_fs(AT_FDCWD, |fs| options.open(fs, &path))
-            .and_then(|it| add_to_fd(it, flags as _))?;
+        let fd = with_fs(AT_FDCWD, |fs| {
+            open_path(fs, &path, flags, mode as __kernel_mode_t)
+        })
+        .and_then(|it| add_to_fd(it, flags as _))?;
 
         tee_debug!("FileVariant::open = fd: {}", fd);
         Ok(Self { fd })
@@ -177,16 +107,16 @@ impl FileVariant {
         tee_debug!("FileVariant::remove file with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         match with_fs(AT_FDCWD, |fs| {
-            let entry = lookup_location(
-                &fs.lookup_context(),
-                &path,
+            let entry = Filename::new(path.as_str()).lookup_at(
+                fs.root(),
+                fs.pwd(),
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
             )?;
             entry
                 .parent()
                 .ok_or(VfsError::IsADirectory)?
-                .unlink(entry.name(), false)
+                .unlink(entry.name())
         }) {
             Ok(()) => Ok(()),
             Err(VfsError::NotFound) => {
@@ -211,16 +141,16 @@ impl FileVariant {
         tee_debug!("FileVariant::remove dir with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         with_fs(AT_FDCWD, |fs| {
-            let entry = lookup_location(
-                &fs.lookup_context(),
-                &path,
+            let entry = Filename::new(path.as_str()).lookup_at(
+                fs.root(),
+                fs.pwd(),
                 LookupIntent::Open,
                 LookupFlags::no_follow(),
             )?;
             entry
                 .parent()
                 .ok_or(VfsError::ResourceBusy)?
-                .unlink(entry.name(), true)
+                .rmdir(entry.name())
         })
         .inspect_err(|e| error!("remove dir failed: {:?}", e))
         .map_err(|_| TEE_ERROR_GENERIC)?;
@@ -245,9 +175,17 @@ impl FileVariant {
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let mode = NodePermission::from_bits_truncate(0o755);
         with_fs(AT_FDCWD, |fs| {
-            let (dir, name) =
-                lookup_nonexistent(&fs.lookup_context(), Path::new(&path), LookupIntent::Open)?;
-            match dir.create(name, NodeType::Directory, mode) {
+            let (dir, name) = match Filename::new(path.as_str()).create_at(
+                fs.root(),
+                fs.pwd(),
+                LookupIntent::Open,
+                LookupFlags::DIRECTORY,
+            ) {
+                Ok(location) => location,
+                Err(VfsError::AlreadyExists) => return Ok(()),
+                Err(err) => return Err(err),
+            };
+            match dir.mkdir(&name, mode) {
                 Ok(_) => Ok(()),
                 Err(VfsError::AlreadyExists) => {
                     // Directory already exists, return success (idempotent)
@@ -264,8 +202,8 @@ impl FileVariant {
     }
 }
 
-impl TeeFileLike for FileVariant {
-    fn pread(&self, buf: &mut [u8], offset: usize) -> TeeResult<usize> {
+impl FileVariant {
+    pub fn pread(&self, buf: &mut [u8], offset: usize) -> TeeResult<usize> {
         tee_debug!(
             "FileVariant::pread = fd: {}, offset: 0x{:X?}, buf_len: 0x{:X?}",
             self.fd,
@@ -273,22 +211,22 @@ impl TeeFileLike for FileVariant {
             buf.len(),
         );
         with_file(self, |file| {
-            file.read_at(buf, offset as _)
+            let mut pos = offset as u64;
+            file.read_from(buf, &mut pos)
                 .inspect_err(|e| error!("read_at from file failed: {:?}", e))
                 .map_err(|_| TEE_ERROR_GENERIC)
         })
     }
 
-    fn pwrite(&self, buf: &[u8], offset: usize) -> TeeResult<usize> {
+    pub fn pwrite(&self, buf: &[u8], offset: usize) -> TeeResult<usize> {
         with_file(self, |file| {
+            let mut pos = offset as u64;
             let len = file
-                .write_at(buf, offset as _)
+                .write_from(buf, &mut pos)
                 .inspect_err(|e| error!("write_at to file failed: {:?}", e))
                 .map_err(|_| TEE_ERROR_GENERIC)?;
 
-            // Use sync(true) to sync both data and metadata (file size, etc.)
-            // This is important for ext4 filesystem to ensure file size changes are persisted
-            file.sync(true)
+            file.fsync(true)
                 .inspect_err(|e| error!("pwrite: sync file failed: {:?}", e))
                 .map_err(|_| TEE_ERROR_GENERIC)?;
 
@@ -296,16 +234,16 @@ impl TeeFileLike for FileVariant {
         })
     }
 
-    fn ftruncate(&mut self, len: usize) -> TeeResult<()> {
+    pub fn ftruncate(&mut self, len: usize) -> TeeResult<()> {
         with_file(self, |file| {
-            file.as_ref()
-                .set_len(len as _)
+            file.path()
+                .truncate(len as _)
                 .inspect_err(|e| error!("set len failed: {:?}", e))
                 .map_err(|_| TEE_ERROR_GENERIC)
         })
     }
 
-    fn close(&mut self) -> TeeResult<()> {
+    pub fn close(&mut self) -> TeeResult<()> {
         if self.fd < 0 {
             return Ok(()); // already closed
         }

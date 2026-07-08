@@ -370,7 +370,7 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
 /// `PLATFORM_<NAME>=y` to feature `platform_<name>` (lowercase),
 /// skipping build-time-only keys.
 fn extract_kfeat_features(config: &HashMap<String, String>) -> Vec<String> {
-    const SKIP_KEYS: &[&str] = &["KFEAT_VIRTIO_BUS_PCI", "KFEAT_VIRTIO_BUS_MMIO"];
+    const SKIP_KEYS: &[&str] = &["KFEAT_FS", "KFEAT_VIRTIO_BUS_PCI", "KFEAT_VIRTIO_BUS_MMIO"];
 
     let mut features: Vec<String> = Vec::new();
 

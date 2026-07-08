@@ -13,9 +13,9 @@
 
 use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
-use kfd::FileLike;
 use khal::uspace::UserContext;
-use kprocess::{NamespaceFlags, PidFd, ProcessForkConfig, Tid};
+use kns::NamespaceFlags;
+use kprocess::{Pid, PidFd, ProcessForkConfig, current_user_thread, publish_user_task};
 use ksignal::Signo;
 use ktask::{KTaskExt, current};
 use linux_raw_sys::general::*;
@@ -215,7 +215,7 @@ impl CloneRequest {
         };
 
         let curr = current();
-        let current_thread = kprocess::current_user_thread();
+        let current_thread = current_user_thread();
         let prepared = if self.flags.contains(CloneFlags::THREAD) {
             current_thread.prepare_thread_clone()?
         } else {
@@ -230,6 +230,7 @@ impl CloneRequest {
             })?
         };
         let tid = prepared.tid();
+        let child_process = prepared.process().clone();
         let page_table_root = prepared.page_table_root();
         let (thr, task_number) = prepared.into_parts();
 
@@ -243,12 +244,10 @@ impl CloneRequest {
         new_task.ctx_mut().set_page_table_root(page_table_root);
 
         let pidfd_install = if self.flags.contains(CloneFlags::PIDFD) {
-            let pidfd = PidFd::new(thr.process());
+            let pidfd_file = PidFd::new_file(&child_process, O_RDWR)?;
             let resources = kprocess::current_resources();
-            let fd_table = resources.fd_table();
-            let max_nofile = resources.max_nofile();
-            let fd = pidfd.add_to_fd_table(&fd_table, max_nofile, true)?;
-            Some((fd_table, fd))
+            let fd = resources.add_file(pidfd_file, true)?;
+            Some((resources, fd))
         } else {
             None
         };
@@ -260,14 +259,19 @@ impl CloneRequest {
         // `new_task`, so converting it into the task extension is the intended one-time handoff.
         *new_task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
 
-        kprocess::publish_user_task(new_task).commit(|_| {
-            if self.flags.contains(CloneFlags::PARENT_SETTID) {
-                (self.parent_tid as *mut Tid).write_vm(tid).ok();
-            }
-            if let Some((fd_table, pidfd_number)) = pidfd_install.as_ref()
-                && let Err(err) = (self.pidfd as *mut i32).write_vm(*pidfd_number)
+        publish_user_task(new_task).commit(|_| {
+            if self.flags.contains(CloneFlags::PARENT_SETTID)
+                && let Err(err) = (self.parent_tid as *mut Pid).write_vm(tid)
             {
-                fd_table.write().close_file_like(*pidfd_number).ok();
+                if let Some((resources, fd)) = pidfd_install.as_ref() {
+                    resources.close_file(*fd).ok();
+                }
+                return Err(err.into());
+            }
+            if let Some((resources, fd)) = pidfd_install.as_ref()
+                && let Err(err) = (self.pidfd as *mut i32).write_vm(*fd)
+            {
+                resources.close_file(*fd).ok();
                 return Err(err.into());
             }
             Ok(())

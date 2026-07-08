@@ -46,7 +46,7 @@ kvm_mmio_guard = [
     "aarch64-peripherals?/kvm-mmio-guard",
 ]
 arm_timer_resume_fixup = ["kruntime/arm-timer-resume-fixup", "ktask?/arm-timer-resume-fixup"]
-rootfs_secondary_block = ["kruntime/rootfs-secondary-block", "kfs?/rootfs-secondary-block"]
+rootfs_secondary_block = ["kruntime/rootfs-secondary-block"]
 pci_non_ecam = ["kdriver/pci-non-ecam"]
 
 # Platform wiring
@@ -89,15 +89,12 @@ sched_eevdf = ["ktask/sched_eevdf"]
 
 # File system
 #
-# These features only enable the filesystem stack itself. The actual block
-# device driver (virtio-blk, ramdisk, ...) must be selected separately via the
-# `driver_*` features below, so that non-virtio platforms can use the same
-# filesystem code with their own block backends.
-fs = ["dep:kfs"]
-fs_ext4 = ["fs", "kfs/ext4", "kruntime/fs"]
-fs_fat = ["fs", "kfs/fat", "kruntime/fs"]
-fs_9p = ["fs", "kfs/fs9p", "kruntime/fs9p"]
-fs_times = ["fs", "kfs/times"]
+# `KFEAT_FS` is a Kconfig-only dependency gate. Cargo features expose concrete
+# filesystem capabilities and let kruntime pull in its internal fs core.
+fs_ext4 = ["kruntime/fs_ext4"]
+fs_fat = ["kruntime/fs_fat"]
+fs_9p = ["kruntime/fs9p"]
+fs_times = ["kruntime/fs_times"]
 
 # Networking
 #
@@ -193,7 +190,7 @@ pmu = ["kruntime/pmu"]
 tracepoint = ["ktracing/tracepoint"]
 
 # eBPF
-ebpf = ["dep:kbpf", "dep:kfs", "ksyscall/ebpf", "kfs/ebpf"]
+ebpf = ["dep:kbpf", "ksyscall/ebpf", "kruntime/fs_ebpf"]
 
 [dependencies]
 alloc-engine = { workspace = true, optional = true }
@@ -221,7 +218,6 @@ loongarch64-qemu-virt = { workspace = true, optional = true, features = [
 ] }
 kexec = { workspace = true }
 devfs = { workspace = true }
-kfs = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }

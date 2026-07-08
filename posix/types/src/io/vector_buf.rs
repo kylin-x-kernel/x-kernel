@@ -117,6 +117,43 @@ impl IoVectorBufIo {
         }
         Ok(())
     }
+
+    /// Moves the current I/O position backward by `count` bytes.
+    pub fn rewind_bytes(&mut self, mut count: usize) -> KResult<()> {
+        let rewind = count;
+        let original_start = self.start;
+        let original_offset = self.offset;
+        let original_len = self.inner.len;
+
+        let result = (|| {
+            while count != 0 {
+                if self.offset != 0 {
+                    let step = count.min(self.offset);
+                    self.offset -= step;
+                    count -= step;
+                    continue;
+                }
+                if self.start == 0 {
+                    return Err(KError::InvalidInput);
+                }
+                self.start -= 1;
+                self.offset = self.inner.iovs[self.start].iov_len as usize;
+            }
+            self.inner.len = self
+                .inner
+                .len
+                .checked_add(rewind)
+                .ok_or(KError::InvalidInput)?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.start = original_start;
+            self.offset = original_offset;
+            self.inner.len = original_len;
+        }
+        result
+    }
 }
 
 impl Read for IoVectorBufIo {

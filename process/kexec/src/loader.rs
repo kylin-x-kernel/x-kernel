@@ -10,10 +10,9 @@ use core::{ffi::CStr, iter};
 use filemap::new_file_private_vma;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
-use kfs::{File, OpenOptions};
 use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
-use kvfs::{Location, LookupFlags, LookupIntent, lookup_location};
+use kvfs::{Filename, LookupFlags, LookupIntent, Path, VfsFile, dentry_open};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::{MmSpace, VmRuntimeRef};
 use ouroboros::self_referencing;
@@ -36,10 +35,8 @@ fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     mapping_flags
 }
 
-fn open_exec_file(location: &Location) -> KResult<Arc<File>> {
-    Ok(Arc::new(
-        OpenOptions::new().read(true).open_loc(location.clone())?,
-    ))
+fn open_exec_file(location: &Path) -> KResult<Arc<VfsFile>> {
+    dentry_open(location.clone(), 0)
 }
 
 /// Source of an executable image.
@@ -50,21 +47,21 @@ pub enum ExecSource {
     /// Use an already-resolved VFS location as the executable.
     Resolved {
         /// Resolved executable location.
-        location: Location,
+        location: Path,
         /// Display path used for process metadata and script argv rewriting.
         display_path: Option<String>,
     },
 }
 
 impl ExecSource {
-    fn resolve(&self) -> KResult<(Location, String)> {
+    fn resolve(&self) -> KResult<(Path, String)> {
         match self {
             Self::Path(path) => {
-                let fs_context = kprocess::current_fs_context();
-                let fs = fs_context.lock();
-                let location = lookup_location(
-                    &fs.lookup_context(),
-                    path.as_str(),
+                let fs_struct = kprocess::current_fs_context();
+                let fs = fs_struct.lock();
+                let location = Filename::new(path.as_str()).lookup_at(
+                    fs.root(),
+                    fs.pwd(),
                     LookupIntent::Exec,
                     LookupFlags::follow(),
                 )?;
@@ -101,9 +98,21 @@ impl ExecRequest {
         }
     }
 
+    /// Creates an exec request from an already-resolved executable location.
+    pub fn from_resolved(location: Path, args: Vec<String>, envs: Vec<String>) -> Self {
+        Self {
+            source: ExecSource::Resolved {
+                location,
+                display_path: None,
+            },
+            args,
+            envs,
+        }
+    }
+
     /// Creates an exec request from a resolved executable plus display path.
     pub fn from_resolved_with_display(
-        location: Location,
+        location: Path,
         display_path: String,
         args: Vec<String>,
         envs: Vec<String>,
@@ -150,8 +159,8 @@ impl ExecRequest {
 
 /// Prepared executable image state.
 pub struct BinPrm {
-    location: Location,
-    executable: Arc<File>,
+    location: Path,
+    executable: Arc<VfsFile>,
     display_path: String,
     args: Vec<String>,
     envs: Vec<String>,
@@ -159,12 +168,12 @@ pub struct BinPrm {
 
 impl BinPrm {
     /// Returns the executable location.
-    pub fn location(&self) -> &Location {
+    pub fn location(&self) -> &Path {
         &self.location
     }
 
     /// Returns the opened executable file.
-    pub fn executable(&self) -> &Arc<File> {
+    pub fn executable(&self) -> &Arc<VfsFile> {
         &self.executable
     }
 
@@ -186,7 +195,7 @@ impl BinPrm {
 
 struct PreparedExecImage {
     binprm: BinPrm,
-    interpreter: Option<Arc<File>>,
+    interpreter: Option<Arc<VfsFile>>,
 }
 
 fn map_elf<'a>(
@@ -246,7 +255,7 @@ fn map_elf_error(err: &'static str) -> KError {
 
 #[self_referencing]
 struct ElfCacheEntry {
-    file: Arc<File>,
+    file: Arc<VfsFile>,
     data: Vec<u8>,
     #[borrows(data)]
     #[covariant]
@@ -254,9 +263,10 @@ struct ElfCacheEntry {
 }
 
 impl ElfCacheEntry {
-    fn load_file(file: Arc<File>) -> KResult<Result<Self, Vec<u8>>> {
+    fn load_file(file: Arc<VfsFile>) -> KResult<Result<Self, Vec<u8>>> {
         let mut data = vec![0; 4096];
-        let read = file.read_at(&mut data[..], 0)?;
+        let mut pos = 0;
+        let read = file.read_from(&mut data[..], &mut pos)?;
         data.truncate(read);
         match ElfCacheEntry::try_new_or_recover::<KError>(file.clone(), data, |data| {
             let builder = ELFHeadersBuilder::new(data).map_err(map_elf_error)?;
@@ -265,7 +275,8 @@ impl ElfCacheEntry {
                 builder.build(&data[range.start as usize..range.end as usize])
             } else {
                 let mut buf = vec![0; (range.end - range.start) as usize];
-                file.read_at(&mut buf[..], range.start)?;
+                let mut pos = range.start;
+                file.read_from(&mut buf[..], &mut pos)?;
                 builder.build(&buf)
             }
             .map_err(map_elf_error)
@@ -294,24 +305,24 @@ impl ElfLoader {
         Self(LruCache::new())
     }
 
-    fn access_cached(&mut self, loc: &Location) -> bool {
+    fn access_cached(&mut self, loc: &Path) -> bool {
         if !self
             .0
-            .access(|entry| entry.borrow_file().location().ptr_eq(loc))
+            .access(|entry| entry.borrow_file().path().ptr_eq(loc))
         {
             return false;
         }
         true
     }
 
-    fn cached_entry(&self, loc: &Location) -> Option<&ElfCacheEntry> {
+    fn cached_entry(&self, loc: &Path) -> Option<&ElfCacheEntry> {
         self.0
             .items()
-            .find(|entry| entry.borrow_file().location().ptr_eq(loc))
+            .find(|entry| entry.borrow_file().path().ptr_eq(loc))
     }
 
-    fn ensure_cached(&mut self, file: Arc<File>) -> KResult<CacheProbeResult> {
-        if !self.access_cached(file.location()) {
+    fn ensure_cached(&mut self, file: Arc<VfsFile>) -> KResult<CacheProbeResult> {
+        if !self.access_cached(file.path()) {
             match ElfCacheEntry::load_file(file)? {
                 Ok(entry) => {
                     self.0.put(entry);
@@ -334,7 +345,8 @@ impl ElfLoader {
 
         let file = entry.borrow_file();
         let mut data = vec![0; header.file_size as usize];
-        let read = file.read_at(&mut data[..], header.offset)?;
+        let mut pos = header.offset;
+        let read = file.read_from(&mut data[..], &mut pos)?;
         assert_eq!(data.len(), read);
 
         let ldso = CStr::from_bytes_with_nul(&data)
@@ -358,11 +370,11 @@ impl ElfLoader {
         };
         let interpreter = if let Some(ldso) = interpreter {
             debug!("Loading dynamic linker: {ldso}");
-            let fs_context = kprocess::current_fs_context();
-            let fs = fs_context.lock();
-            let location = lookup_location(
-                &fs.lookup_context(),
-                ldso.as_str(),
+            let fs_struct = kprocess::current_fs_context();
+            let fs = fs_struct.lock();
+            let location = Filename::new(ldso.as_str()).lookup_at(
+                fs.root(),
+                fs.pwd(),
                 LookupIntent::Exec,
                 LookupFlags::follow(),
             )?;
@@ -394,7 +406,7 @@ impl ElfLoader {
             .cached_entry(prepared.binprm.location())
             .expect("prepared executable entry must remain cached while loading");
         let ldso = prepared.interpreter.as_ref().map(|file| {
-            self.cached_entry(file.location())
+            self.cached_entry(file.path())
                 .expect("prepared interpreter entry must remain cached while loading")
         });
 
@@ -450,8 +462,11 @@ pub fn load_user_app(
     let path = path
         .or_else(|| args.first().map(String::as_str))
         .ok_or(KError::InvalidInput)?;
-    let request = ExecRequest::from_path(path.to_owned(), args.to_vec(), envs.to_vec());
-    load_user_app_request_inner(uspace, request, 0)
+    load_user_app_request_inner(
+        uspace,
+        ExecRequest::from_path(path.to_owned(), args.to_vec(), envs.to_vec()),
+        0,
+    )
 }
 
 /// Load a user app from an owned executable request.

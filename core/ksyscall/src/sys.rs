@@ -11,8 +11,8 @@
 
 use kbuild_config::ARCH;
 use kerrno::KResult;
-use kprocess::current_user_process_fs_context;
-use kvfs::{LookupFlags, LookupIntent, lookup_location};
+use kprocess::{current_user_process, current_user_process_fs_context};
+use kvfs::{Filename, NodePermission};
 use linux_raw_sys::{
     ctypes::c_char,
     general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM},
@@ -59,9 +59,7 @@ const fn pad_field<const N: usize>(src: &[u8]) -> [c_char; N] {
 
 /// Get system information including OS name, version, and hardware platform
 pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
-    let uts_ns = kprocess::current_user_process()
-        .uts_ns()
-        .expect("current user thread must have a live UTS namespace");
+    let uts_ns = current_user_process().uts_ns()?;
 
     // Read both per-namespace names into stack buffers in a single locked
     // read, avoiding the two heap allocations of nodename()/domainname().
@@ -119,7 +117,7 @@ bitflags::bitflags! {
     }
 }
 
-/// Get random bytes from /dev/urandom or /dev/random
+/// Get random bytes from the kernel random source.
 pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
     if len == 0 {
         return Ok(0);
@@ -128,22 +126,22 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
 
     debug!("sys_getrandom <= buf: {buf:p}, len: {len}, flags: {flags:?}");
 
+    // TODO: replace this VFS fallback with a real kernel RNG backend.
+    // getrandom(2) should not depend on pathname lookup or /dev/random.
     let path = if flags.contains(GetRandomFlags::RANDOM) {
         "/dev/random"
     } else {
         "/dev/urandom"
     };
 
-    let fs_context = current_user_process_fs_context();
-    let fs = fs_context.lock();
-    let f = lookup_location(
-        &fs.lookup_context(),
-        path,
-        LookupIntent::Open,
-        LookupFlags::follow(),
-    )?;
+    let fs_struct = current_user_process_fs_context();
+    let fs = fs_struct.lock();
+    let file =
+        Filename::new(path).open_with_flags_at(fs.root(), fs.pwd(), 0, NodePermission::empty())?;
+    drop(fs);
     let mut kbuf = alloc::vec![0; len];
-    let len = f.entry().as_file()?.read_at(&mut kbuf, 0)?;
+    let mut pos = 0;
+    let len = file.read_from(&mut kbuf, &mut pos)?;
 
     write_vm_mem(buf, &kbuf)?;
 

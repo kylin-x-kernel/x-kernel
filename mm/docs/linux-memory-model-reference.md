@@ -148,7 +148,8 @@ Linux 核心对象：
 
 X-Kernel 当前落点：
 
-- `fs/runtime/kfs`
+- `fs/kvfs`
+- `fs/boot`
 - `fs/filesystems/memfs`
 - `mm/pagecache`
 - `mm/filemap`

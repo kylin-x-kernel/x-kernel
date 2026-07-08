@@ -118,7 +118,7 @@ pub fn open<B: BlockDevice>(
         return Err(BlockDevError::WriteError);
     }
 
-    let inode = match mkfile_with_ino(dev, fs, &norm_path, None, None) {
+    let inode = match mkfile_with_ino(dev, fs, &norm_path, None, None, None) {
         Some(ino) => ino,
         None => return Err(BlockDevError::WriteError),
     };

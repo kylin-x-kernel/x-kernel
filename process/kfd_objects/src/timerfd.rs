@@ -4,20 +4,19 @@
 
 //! `timerfd` object implementation.
 
-use alloc::{borrow::Cow, sync::Arc, task::Wake};
+use alloc::{sync::Arc, task::Wake};
 use core::{
     mem::size_of,
-    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Waker},
     time::Duration,
 };
 
 use kerrno::{KError, KResult};
-use kfd::{FileLike, IoDst, IoSrc};
 use khal::time::{self, monotonic_time, wall_time};
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoIrq;
 use ktask::future::{TimerHandle, block_on, cancel_timer, poll_io, register_timer};
+use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
 use linux_raw_sys::general::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
 
 fn clock_now(clock_id: u32) -> Duration {
@@ -82,7 +81,6 @@ pub struct TimerFd {
     inner: SpinNoIrq<TimerFdInner>,
     poll_rx: PollSet,
     timer_handle: SpinNoIrq<Option<TimerHandle>>,
-    non_blocking: AtomicBool,
 }
 
 impl TimerFd {
@@ -97,8 +95,24 @@ impl TimerFd {
             }),
             poll_rx: PollSet::new(),
             timer_handle: SpinNoIrq::new(None),
-            non_blocking: AtomicBool::new(false),
         })
+    }
+
+    /// Create the anonymous-inode file used by `timerfd_create`.
+    pub fn new_file(clock_id: u32, open_flags: u32) -> KResult<Arc<VfsFile>> {
+        AnonInodeFs::global().get_file(
+            "[timerfd]",
+            Arc::new(TimerfdFops),
+            Self::new(clock_id),
+            FMode::READ | FMode::STREAM,
+            open_flags,
+        )
+    }
+
+    /// Returns the timerfd object attached to a timerfd file.
+    pub fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
+        file.private_data_get::<Self>()
+            .ok_or(KError::BadFileDescriptor)
     }
 
     fn cancel_pending_timer(&self) {
@@ -209,45 +223,6 @@ impl Drop for TimerFd {
     }
 }
 
-impl FileLike for TimerFd {
-    fn read(&self, dst: &mut IoDst) -> KResult<usize> {
-        if dst.remaining_mut() < size_of::<u64>() {
-            return Err(KError::InvalidInput);
-        }
-
-        block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
-            let mut inner = self.inner.lock();
-            inner.tick(clock_now(self.clock_id));
-            if inner.expirations > 0 {
-                let count = inner.expirations;
-                inner.expirations = 0;
-                drop(inner);
-                dst.write(&count.to_ne_bytes())?;
-                Ok(size_of::<u64>())
-            } else {
-                Err(KError::WouldBlock)
-            }
-        }))
-    }
-
-    fn write(&self, _src: &mut IoSrc) -> KResult<usize> {
-        Err(KError::InvalidInput)
-    }
-
-    fn nonblocking(&self) -> bool {
-        self.non_blocking.load(Ordering::Acquire)
-    }
-
-    fn set_nonblocking(&self, non_blocking: bool) -> KResult {
-        self.non_blocking.store(non_blocking, Ordering::Release);
-        Ok(())
-    }
-
-    fn path(&self) -> Cow<'_, str> {
-        "anon_inode:[timerfd]".into()
-    }
-}
-
 impl Pollable for TimerFd {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
@@ -264,6 +239,60 @@ impl Pollable for TimerFd {
     }
 }
 
+struct TimerfdFops;
+
+impl TimerfdFops {
+    fn timerfd(file: &VfsFile) -> KResult<Arc<TimerFd>> {
+        TimerFd::from_file(file)
+    }
+}
+
+impl FileOperations for TimerfdFops {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> KResult<usize> {
+        if buf.len() < size_of::<u64>() {
+            return Err(KError::InvalidInput);
+        }
+
+        let timerfd = Self::timerfd(file)?;
+        block_on(poll_io(
+            timerfd.as_ref(),
+            IoEvents::IN,
+            file.is_nonblocking(),
+            || {
+                let mut inner = timerfd.inner.lock();
+                inner.tick(clock_now(timerfd.clock_id));
+                if inner.expirations > 0 {
+                    let count = inner.expirations;
+                    inner.expirations = 0;
+                    drop(inner);
+                    buf[..size_of::<u64>()].copy_from_slice(&count.to_ne_bytes());
+                    Ok(size_of::<u64>())
+                } else {
+                    Err(KError::WouldBlock)
+                }
+            },
+        ))
+    }
+
+    fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> KResult<()> {
+        Ok(())
+    }
+
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        Self::timerfd(file).map_or(IoEvents::ERR, |timerfd| timerfd.poll())
+    }
+
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(timerfd) = Self::timerfd(file) {
+            timerfd.register(context, events);
+        }
+    }
+}
+
 #[cfg(unittest)]
 mod timerfd_tests {
     use kpoll::IoEvents;
@@ -274,8 +303,7 @@ mod timerfd_tests {
     #[def_test]
     fn test_timerfd_creation() {
         let tfd = TimerFd::new(CLOCK_MONOTONIC);
-        assert_eq!(tfd.path(), "anon_inode:[timerfd]");
-        assert!(!tfd.nonblocking());
+        assert!(!tfd.poll().contains(IoEvents::IN));
     }
 
     #[def_test]
@@ -294,11 +322,12 @@ mod timerfd_tests {
 
     #[def_test]
     fn test_timerfd_nonblocking() {
-        let tfd = TimerFd::new(CLOCK_MONOTONIC);
-        tfd.set_nonblocking(true).unwrap();
-        assert!(tfd.nonblocking());
-        tfd.set_nonblocking(false).unwrap();
-        assert!(!tfd.nonblocking());
+        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0).expect("timerfd file opens");
+        assert!(!file.is_nonblocking());
+        file.set_nonblocking(true);
+        assert!(file.is_nonblocking());
+        file.set_nonblocking(false);
+        assert!(!file.is_nonblocking());
     }
 
     #[def_test]
@@ -326,18 +355,21 @@ mod timerfd_tests {
 
     #[def_test]
     fn test_timerfd_read_small_buffer() {
-        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0).expect("timerfd file opens");
         let mut small_out = [0u8; 4];
-        let mut dst = kio::Cursor::new(small_out.as_mut_slice());
-        assert_eq!(tfd.read(&mut dst), Err(KError::InvalidInput));
+        let mut pos = 0;
+        assert_eq!(
+            file.read_from(&mut small_out, &mut pos),
+            Err(KError::InvalidInput)
+        );
     }
 
     #[def_test]
     fn test_timerfd_write_returns_error() {
-        let tfd = TimerFd::new(CLOCK_MONOTONIC);
+        let file = TimerFd::new_file(CLOCK_MONOTONIC, 0).expect("timerfd file opens");
         let data = b"test1234";
-        let mut src = kio::Cursor::new(data.as_slice());
-        assert!(tfd.write(&mut src).is_err());
+        let mut pos = 0;
+        assert!(file.write_from(data, &mut pos).is_err());
     }
 
     #[def_test]

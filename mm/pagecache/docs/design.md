@@ -31,6 +31,7 @@ inode-owned content-object 模型。
 - `src/lib.rs`
 - `MappingKind::{InMemory, FileBacked}`
 - source-backed `MappingOps`
+- final teardown through `Mapping::truncate_final()`
 - RAII `EvictRegistration`
 - 不包含 VMA/page-table/fault dispatch
 - 不包含 readahead、swap、reclaim 或完整文件系统 writeback policy
@@ -87,13 +88,19 @@ file open instance / mmap instance
 3. dirty folio writeback 由 VFS `AddressSpaceOperations::writepages()` 发起。
 4. `Mapping::writeback_range()` 只负责枚举与对象 byte range 相交的 dirty
    folio；调用方写回成功后才清 dirty。
+5. 写回期间 folio 处于 under-writeback 状态；失败路径清除该状态但保留 dirty，
+   让调用方可以重试。
+6. writeback pass 可以带页数预算；预算耗尽后剩余 dirty folio 留给后续 pass。
+7. `Mapping::truncate_final()` 属于对象生命周期结束路径，直接清理 cached
+   folio，不进入 ordinary writeback。
 
 ### evict listener
 
 1. `Mapping::add_evict_listener()` 返回 `EvictRegistration`。
 2. 调用方持有该 guard 表示 listener 仍然注册。
 3. `EvictRegistration::drop()` 自动 unregister；调用方不保存或传播裸整数 id。
-4. `invalidate_from_page()` 和 shrink 释放 folio 时通知仍然存活的 listener。
+4. `invalidate_from_page()`、`resize()` shrink 和 `truncate_final()` 释放
+   folio 时通知仍然存活的 listener。
 
 ### `resize` / `set_len`
 
@@ -111,6 +118,7 @@ file open instance / mmap instance
 
 - `Mapping` 内部用单个 `Mutex<MappingInner>` 保护页树和长度。
 - 每个 `Folio` 再用单独的 `Mutex` 保护页内容。
+- 每个 `Folio` 的 dirty / under-writeback 状态跟随 folio lock 更新。
 - 当前并发模型优先保证 ownership 和 object invalidation 语义清晰；高并发 pagecache 优化不属于本 crate 的当前职责。
 
 ## 设计决策
@@ -146,5 +154,9 @@ file open instance / mmap instance
 
 - `Folio` drop 时归还页缓存页。
 - `Mapping` 释放时，所有 folio 跟随释放。
-- `InMemory` mapping 没有外部 writeback；若 dirty folio 被释放，只记录警告。
+- final teardown 通过 `truncate_final()` 清空 cached folio；这是对象生命周期结束
+  的数据丢弃路径，不要求 ordinary writeback。
+- ordinary invalidation 仍要求调用方先完成 writeback，不能直接丢弃 dirty folio。
+- writeback 失败后 folio 仍保持 dirty，并清除 under-writeback 状态。
+- `InMemory` mapping 没有外部 writeback；其最终释放由 final teardown 路径清理。
 - `FileBacked` mapping 通过 VFS `AddressSpaceOperations::writepages()` 把 dirty folio 交回文件系统实现。

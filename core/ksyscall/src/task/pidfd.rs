@@ -4,10 +4,9 @@
 
 //! Process file descriptor syscalls.
 
-use alloc::sync::Arc;
-
 use kerrno::{KError, KResult};
 use kprocess::PidFd;
+use linux_raw_sys::general::O_RDWR;
 use posix_types::{UserConstPtr, k_siginfo};
 
 use super::make_queue_signal_info;
@@ -21,10 +20,8 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
     }
 
     let process = kprocess::pidfd::open_target_process(pid)?;
-    let fd = PidFd::new(&process);
-
     kprocess::current_resources()
-        .add_file_like(Arc::new(fd), true)
+        .add_file(PidFd::new_file(&process, O_RDWR)?, true)
         .map(|fd| fd as _)
 }
 
@@ -32,15 +29,17 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
 pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize> {
     debug!("sys_pidfd_getfd <= pidfd: {pidfd}, target_fd: {target_fd}, flags: {flags}");
 
-    let pidfd = kprocess::current_resources().get_file_like_as::<PidFd>(pidfd)?;
-    let resources = pidfd.live_process()?.resources()?;
-    resources
+    let pidfd_file = kprocess::current_resources().get_file(pidfd)?;
+    let pidfd = PidFd::from_file(&pidfd_file)?;
+    pidfd
+        .live_process()?
+        .resources()?
         .fd_table()
         .read()
         .get(target_fd as usize)
         .ok_or(KError::BadFileDescriptor)
         .and_then(|fd| {
-            let fd = kprocess::current_resources().add_file_like(fd.inner().clone(), true)?;
+            let fd = kprocess::current_resources().add_file(fd.file().clone(), true)?;
             Ok(fd as isize)
         })
 }
@@ -56,7 +55,8 @@ pub fn sys_pidfd_send_signal(
         return Err(KError::InvalidInput);
     }
 
-    let pidfd = kprocess::current_resources().get_file_like_as::<PidFd>(pidfd)?;
+    let pidfd_file = kprocess::current_resources().get_file(pidfd)?;
+    let pidfd = PidFd::from_file(&pidfd_file)?;
     let process = pidfd.live_process()?;
     let pid = process.pid();
 

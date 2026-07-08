@@ -12,6 +12,7 @@ documentation.workspace = true
 [dependencies]
 kfd.workspace = true
 kerrno.workspace = true
+kvfs.workspace = true
 krlimit.workspace = true
 ksync.workspace = true
 linux-raw-sys = { workspace = true, features = ["general"] }

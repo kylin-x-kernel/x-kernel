@@ -11,9 +11,9 @@ use alloc::{
     sync::Arc,
 };
 
-use kvfs::VfsError;
-use kvfs_simple::{
-    NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile, SimpleFileOperation, SimpleFs,
+use kvfs::{
+    Dentry, RwFile, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFile, SimpleFileOperation,
+    SimpleFs, VfsError,
 };
 
 struct TracingDir {
@@ -40,21 +40,23 @@ impl SimpleDirOps for TracingDir {
         Box::new(["trace", "events"].into_iter().map(Cow::Borrowed))
     }
 
-    fn lookup_child(&self, name: &str) -> kvfs::VfsResult<NodeOpsMux> {
-        Ok(match name {
-            "trace" => {
-                SimpleFile::new_regular(self.fs.clone(), || Ok(ktracing::dump_trace_records()))
-                    .into()
-            }
-            "events" => SimpleDir::new_maker(
-                self.fs.clone(),
-                Arc::new(TracingEventsDir {
-                    fs: self.fs.clone(),
-                }),
-            )
-            .into(),
-            _ => return Err(VfsError::NotFound),
-        })
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
+        match name {
+            "trace" => lookup.file(
+                name,
+                SimpleFile::new_regular(self.fs.clone(), || Ok(ktracing::dump_trace_records())),
+            ),
+            "events" => Ok(lookup.dir(
+                name,
+                SimpleDir::new_maker(
+                    self.fs.clone(),
+                    Arc::new(TracingEventsDir {
+                        fs: self.fs.clone(),
+                    }),
+                ),
+            )),
+            _ => Err(VfsError::NotFound),
+        }
     }
 }
 
@@ -63,18 +65,20 @@ impl SimpleDirOps for TracingEventsDir {
         Box::new(ktracing::subsystem_names().into_iter().map(Cow::Owned))
     }
 
-    fn lookup_child(&self, name: &str) -> kvfs::VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
         if !ktracing::subsystem_names().iter().any(|it| it == name) {
             return Err(VfsError::NotFound);
         }
-        Ok(SimpleDir::new_maker(
-            self.fs.clone(),
-            Arc::new(TracingSubsystemDir {
-                fs: self.fs.clone(),
-                subsystem: name.to_string(),
-            }),
-        )
-        .into())
+        Ok(lookup.dir(
+            name,
+            SimpleDir::new_maker(
+                self.fs.clone(),
+                Arc::new(TracingSubsystemDir {
+                    fs: self.fs.clone(),
+                    subsystem: name.to_string(),
+                }),
+            ),
+        ))
     }
 }
 
@@ -87,22 +91,24 @@ impl SimpleDirOps for TracingSubsystemDir {
         )
     }
 
-    fn lookup_child(&self, name: &str) -> kvfs::VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
         if !ktracing::event_names(&self.subsystem)
             .iter()
             .any(|it| it == name)
         {
             return Err(VfsError::NotFound);
         }
-        Ok(SimpleDir::new_maker(
-            self.fs.clone(),
-            Arc::new(TracingEventDir {
-                fs: self.fs.clone(),
-                subsystem: self.subsystem.clone(),
-                event: name.to_string(),
-            }),
-        )
-        .into())
+        Ok(lookup.dir(
+            name,
+            SimpleDir::new_maker(
+                self.fs.clone(),
+                Arc::new(TracingEventDir {
+                    fs: self.fs.clone(),
+                    subsystem: self.subsystem.clone(),
+                    event: name.to_string(),
+                }),
+            ),
+        ))
     }
 }
 
@@ -111,53 +117,59 @@ impl SimpleDirOps for TracingEventDir {
         Box::new(["enable", "format", "id"].into_iter().map(Cow::Borrowed))
     }
 
-    fn lookup_child(&self, name: &str) -> kvfs::VfsResult<NodeOpsMux> {
-        Ok(match name {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
+        match name {
             "enable" => {
                 let subsystem = self.subsystem.clone();
                 let event = self.event.clone();
-                SimpleFile::new_regular(
-                    self.fs.clone(),
-                    RwFile::new(move |req| match req {
-                        SimpleFileOperation::Read => {
-                            ktracing::event_enable_state(&subsystem, &event)
-                                .map(Some)
-                                .ok_or(VfsError::NotFound)
-                        }
-                        SimpleFileOperation::Write(data) => {
-                            if ktracing::write_event_enable(&subsystem, &event, data) {
-                                Ok(None)
-                            } else {
-                                Err(VfsError::InvalidInput)
+                lookup.file(
+                    name,
+                    SimpleFile::new_regular(
+                        self.fs.clone(),
+                        RwFile::new(move |req| match req {
+                            SimpleFileOperation::Read => {
+                                ktracing::event_enable_state(&subsystem, &event)
+                                    .map(Some)
+                                    .ok_or(VfsError::NotFound)
                             }
-                        }
-                    }),
+                            SimpleFileOperation::Write(data) => {
+                                if ktracing::write_event_enable(&subsystem, &event, data) {
+                                    Ok(None)
+                                } else {
+                                    Err(VfsError::InvalidInput)
+                                }
+                            }
+                        }),
+                    ),
                 )
-                .into()
             }
             "format" => {
                 let subsystem = self.subsystem.clone();
                 let event = self.event.clone();
-                SimpleFile::new_regular(self.fs.clone(), move || {
-                    ktracing::event_format(&subsystem, &event).ok_or(VfsError::NotFound)
-                })
-                .into()
+                lookup.file(
+                    name,
+                    SimpleFile::new_regular(self.fs.clone(), move || {
+                        ktracing::event_format(&subsystem, &event).ok_or(VfsError::NotFound)
+                    }),
+                )
             }
             "id" => {
                 let subsystem = self.subsystem.clone();
                 let event = self.event.clone();
-                SimpleFile::new_regular(self.fs.clone(), move || {
-                    ktracing::event_id(&subsystem, &event).ok_or(VfsError::NotFound)
-                })
-                .into()
+                lookup.file(
+                    name,
+                    SimpleFile::new_regular(self.fs.clone(), move || {
+                        ktracing::event_id(&subsystem, &event).ok_or(VfsError::NotFound)
+                    }),
+                )
             }
-            _ => return Err(VfsError::NotFound),
-        })
+            _ => Err(VfsError::NotFound),
+        }
     }
 }
 
-pub(crate) fn add_root_entries(root: &mut kvfs_simple::DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+pub(crate) fn add_root_entries(root: &mut kvfs::DirMapping, fs: Arc<SimpleFs>) {
+    root.add_dir(
         "tracing",
         SimpleDir::new_maker(fs.clone(), Arc::new(TracingDir { fs })),
     );

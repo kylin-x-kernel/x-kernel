@@ -25,7 +25,7 @@ use vmobj::{
 use super::{alloc_frame, dealloc_frame, map_paging_err, pages_in};
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
-    backend::{BackendOps, FaultCompat, FaultCompatResult},
+    backend::{BackendOps, FaultCompletion, FaultCompletionResult},
     vma::VmRuntimeOps,
 };
 
@@ -211,7 +211,7 @@ impl BackendOps for PrivateBackend {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         let _ = self.registration_id();
         let addr = ctx.address().align_down(self.page_size());
         let object_start = self.object_offset_for(addr)?;
@@ -231,7 +231,7 @@ impl BackendOps for PrivateBackend {
                     )?
                     .is_retry()
                     {
-                        return Ok(FaultCompat::cow_conflict_retry());
+                        return Ok(FaultCompletion::cow_conflict_retry());
                     }
                     1
                 } else if page_flags.contains(ctx.access_flags()) {
@@ -251,7 +251,7 @@ impl BackendOps for PrivateBackend {
                     pgtbl,
                 )?;
                 if existing.is_retry() {
-                    return Ok(FaultCompat::cow_conflict_retry());
+                    return Ok(FaultCompletion::cow_conflict_retry());
                 }
                 if !existing.is_resolved() {
                     self.alloc_new_at(addr, flags, pgtbl)?;
@@ -260,7 +260,7 @@ impl BackendOps for PrivateBackend {
             }
             Err(_) => return Err(KError::BadAddress),
         };
-        Ok(FaultCompat::from_populate((populated, None)))
+        Ok(FaultCompletion::from_populate((populated, None)))
     }
 }
 
@@ -304,7 +304,7 @@ impl VmRuntimeOps for PrivateBackend {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         BackendOps::handle_fault(self, ctx, flags, pgtbl)
     }
 
@@ -711,10 +711,10 @@ mod tests {
         {
             let mut pgtbl = parent_pt.modify();
             let fault = FaultContext::new(start, PageFaultFlags::WRITE);
-            let compat =
+            let completion =
                 BackendOps::handle_fault(&backend, fault, flags, &mut pgtbl).expect("fault in");
             assert_eq!(
-                compat.populated(),
+                completion.populated(),
                 1,
                 "initial private fault should materialize one page"
             );
@@ -781,10 +781,10 @@ mod tests {
         {
             let mut pgtbl = child_pt.modify();
             let fault = FaultContext::new(start, PageFaultFlags::WRITE);
-            let compat =
+            let completion =
                 BackendOps::handle_fault(&child, fault, flags, &mut pgtbl).expect("child refault");
             assert_eq!(
-                compat.populated(),
+                completion.populated(),
                 1,
                 "child refault should materialize one fresh page"
             );
@@ -824,9 +824,9 @@ mod tests {
         {
             let mut pgtbl = pgtbl_owner.modify();
             let fault = FaultContext::new(start, PageFaultFlags::WRITE);
-            let compat = BackendOps::handle_fault(&backend, fault, flags, &mut pgtbl)
+            let completion = BackendOps::handle_fault(&backend, fault, flags, &mut pgtbl)
                 .expect("initial private fault");
-            assert_eq!(compat.populated(), 1);
+            assert_eq!(completion.populated(), 1);
         }
         let old_page = backend
             .object
@@ -849,9 +849,9 @@ mod tests {
         {
             let mut pgtbl = pgtbl_owner.modify();
             let fault = FaultContext::new(start, PageFaultFlags::WRITE);
-            let compat = BackendOps::handle_fault(&backend, fault, flags, &mut pgtbl)
+            let completion = BackendOps::handle_fault(&backend, fault, flags, &mut pgtbl)
                 .expect("same mapping refault");
-            assert_eq!(compat.populated(), 1);
+            assert_eq!(completion.populated(), 1);
         }
         let new_page = backend
             .object
@@ -979,9 +979,9 @@ mod tests {
         {
             let mut pgtbl = parent_pt.modify();
             let fault = FaultContext::new(start, PageFaultFlags::WRITE);
-            let compat =
+            let completion =
                 BackendOps::handle_fault(&backend, fault, flags, &mut pgtbl).expect("COW fault");
-            assert_eq!(compat.populated(), 1);
+            assert_eq!(completion.populated(), 1);
         }
 
         let parent_page = backend

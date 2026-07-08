@@ -83,7 +83,7 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
     let address_space = Arc::new(ksync::Mutex::new(aspace));
-    let fs_context = kfs::new_process_fs_context();
+    let fs_context = fs_context::copy_init_fs_struct();
     let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
         ksignal::api::SignalActions::default(),
     ));
@@ -688,7 +688,7 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
         String::from("[mismatch-test]"),
         Arc::new(vec![]),
         Arc::new(ksync::Mutex::new(aspace)),
-        kfs::new_process_fs_context(),
+        fs_context::copy_init_fs_struct(),
         Arc::new(ksync::spin::SpinNoIrq::new(
             ksignal::api::SignalActions::default(),
         )),

@@ -9,9 +9,9 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+iov_iter.workspace = true
 kvfs.workspace = true
-kvfs-simple.workspace = true
-kpoll.workspace = true
+
 ksync.workspace = true
 hashbrown.workspace = true
 linux-raw-sys = { workspace = true }

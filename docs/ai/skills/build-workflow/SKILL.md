@@ -361,8 +361,8 @@ make UNITTEST=y run
 Filter QEMU unit tests by crate:
 
 ```bash
-make UNITTEST=y run UNITTEST_CRATE=kfs
-make UNITTEST=y run UNITTEST_CRATE=kfs,kprocess
+make UNITTEST=y run UNITTEST_CRATE=kvfs
+make UNITTEST=y run UNITTEST_CRATE=kvfs,kprocess
 ```
 
 Host prerequisites for `make UNITTEST=y run`:

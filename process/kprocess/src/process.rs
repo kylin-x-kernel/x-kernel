@@ -14,9 +14,9 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use fs_context::FsStruct;
 use kcred::Credentials;
 use kerrno::{KError, KResult};
-use kfs::FsContext;
 use kfutex::ProcessFutexState;
 use khal::time::TimeValue;
 use kidentity::PidHandle;
@@ -33,7 +33,7 @@ use memspace::MmSpace;
 use weak_map::StrongMap;
 
 use crate::{
-    AsThread, Pid, ProcessGroup, ProcessLifecycleState, ProcessRuntime, Session, Tid,
+    AsThread, Pid, ProcessGroup, ProcessRuntime, Session, Tid, lifecycle::ProcessLifecycleState,
     publication::process_publication,
 };
 
@@ -136,13 +136,19 @@ impl Process {
     }
 
     /// Returns the filesystem context while runtime remains attached.
-    pub fn fs_context(&self) -> KResult<Arc<Mutex<FsContext>>> {
+    pub fn fs_context(&self) -> KResult<Arc<Mutex<FsStruct>>> {
         self.runtime().map(|runtime| runtime.fs_context())
     }
 
     /// Returns the process UTS namespace while runtime remains attached.
     pub fn uts_ns(&self) -> KResult<Arc<kns::UtsNamespace>> {
         self.runtime().map(|runtime| runtime.uts_ns())
+    }
+
+    /// Returns the process mount namespace while runtime remains attached.
+    pub fn mnt_ns(&self) -> KResult<Arc<kns::MntNamespace>> {
+        self.runtime()
+            .map(|runtime| runtime.nsproxy().mnt_ns().clone())
     }
 
     /// Returns the address space while runtime remains attached.
@@ -223,7 +229,11 @@ impl Process {
     }
 
     /// Updates the current executable metadata snapshot.
-    pub fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) -> KResult<()> {
+    pub(crate) fn set_exec_metadata(
+        &self,
+        exe_path: String,
+        cmdline: Arc<Vec<String>>,
+    ) -> KResult<()> {
         self.runtime()
             .map(|runtime| runtime.set_exec_metadata(exe_path, cmdline))
     }
@@ -481,7 +491,7 @@ impl Process {
     }
 
     /// Returns a snapshot of published thread IDs in this [`Process`].
-    pub(crate) fn threads(&self) -> Vec<Tid> {
+    pub fn threads(&self) -> Vec<Tid> {
         let thread_group = self.thread_group.lock();
         thread_group
             .members

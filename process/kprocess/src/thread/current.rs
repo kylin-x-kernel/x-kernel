@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{string::String, sync::Arc};
+use alloc::sync::Arc;
 use core::ops::Deref;
 
-use kfs::{FsContext, kernel_fs_context};
+use fs_context::{FsStruct, init_fs};
 use ksync::Mutex;
 use ktask::current;
 use memspace::MmSpace;
@@ -31,13 +31,8 @@ pub fn current_user_tid() -> Tid {
     current_user_thread().tid()
 }
 
-/// Returns the current task name.
-pub fn current_task_name() -> String {
-    current().name()
-}
-
 /// Returns the current filesystem context for shared current-path helpers.
-pub fn current_fs_context() -> Arc<Mutex<FsContext>> {
+pub fn current_fs_context() -> Arc<Mutex<FsStruct>> {
     current()
         .try_as_thread()
         .map(|thread| {
@@ -46,7 +41,7 @@ pub fn current_fs_context() -> Arc<Mutex<FsContext>> {
                 .fs_context()
                 .expect("current user thread must still expose process fs context")
         })
-        .unwrap_or_else(|| kernel_fs_context().clone())
+        .unwrap_or_else(init_fs)
 }
 
 /// Returns the current process-owned filesystem context.
@@ -55,7 +50,7 @@ pub fn current_fs_context() -> Arc<Mutex<FsContext>> {
 ///
 /// Panics if the current task is not a user thread or if the process runtime
 /// has already detached its filesystem context, such as during late process exit.
-pub fn current_user_process_fs_context() -> Arc<Mutex<FsContext>> {
+pub fn current_user_process_fs_context() -> Arc<Mutex<FsStruct>> {
     current_user_process()
         .fs_context()
         .expect("current user thread must still expose process fs context")

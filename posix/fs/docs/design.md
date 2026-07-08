@@ -8,7 +8,7 @@
 转换为内核内部的 fd 表、进程文件系统上下文、VFS 节点和设备对象操作。
 
 目标读者是维护 `core/ksyscall` 文件系统分发路径、`kfd` 进程 fd 表、
-`kfs`/`kvfs` VFS 层，以及终端和设备文件兼容路径的开发者。
+`kvfs` VFS 层，以及终端和设备文件兼容路径的开发者。
 
 ## 背景
 
@@ -36,7 +36,7 @@ posix/fs/
 ├── src/
 │   ├── lib.rs          # crate 入口和 syscall re-export
 │   ├── path.rs         # AT_*、dirfd、VFS magic-link 和 empty-path 解析
-│   ├── open.rs         # open/openat 和设备文件特殊处理
+│   ├── open.rs         # open/openat 参数转换和 fd 安装
 │   ├── io.rs           # read/write/lseek/fallocate/sendfile/splice 等 I/O
 │   ├── fd_ops.rs       # close/dup/close_range/fcntl/flock
 │   ├── dir.rs          # chdir/chroot/mkdir/getdents64/getcwd
@@ -66,15 +66,14 @@ core/ksyscall
 │   └─ errno-oriented KResult handling                      │
 │                                                          │
 │  Process context                                         │
-│   ├─ kprocess::current_process_state()                    │
-│   ├─ current fd resources                                │
-│   └─ per-process FsContext and umask                      │
+│   ├─ kprocess::current_user_process()                     │
+│   ├─ kprocess::current_resources()                        │
+│   └─ fs_context::FsStruct and process umask               │
 │                                                          │
 │  Internal object dispatch                                │
 │   ├─ kfd::FileLike                                       │
-│   ├─ kfs::{File, Directory, OpenOptions, FsContext}       │
-│   ├─ kvfs::{Location, MetadataUpdate, MountFlags}         │
-│   ├─ devfs/ktty special files                            │
+│   ├─ kvfs::{Filename, VfsFile, MetadataUpdate, MountFlags}  │
+│   ├─ fs_context::FsStruct                                │
 │   └─ kfd_objects::PipeEndpoint interop for splice/fcntl  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -82,7 +81,7 @@ core/ksyscall
 | 子模块 | 职责 |
 |--------|------|
 | `path` | 统一处理 `AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
-| `open` | 将 Linux open flags 转为 `OpenOptions`，并把打开结果加入当前进程 fd 表 |
+| `open` | 将 Linux open 参数交给 `kvfs::Filename`，并把打开结果加入当前进程 fd 表 |
 | `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
 | `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
 | `dir` | 维护当前目录、根目录、目录创建和 `linux_dirent64` 输出 |
@@ -98,8 +97,8 @@ core/ksyscall
 `posix-fs` 是 syscall 层 crate，入口默认运行在当前用户进程线程上下文中。
 多数函数依赖以下上下文：
 
-- 当前线程可通过 `kprocess::current_thread()` 获取；
-- 当前进程有可访问的 `ProcessState`、fd resources 和 `FsContext`；
+- 当前线程可通过 `kprocess` 的当前线程接口获取；
+- 当前进程有可访问的进程运行态、fd resources 和 `FsStruct`；
 - 用户指针可通过 `posix_types` / `osvm` 访问当前地址空间；
 - 调用路径允许阻塞、分配和进入 VFS、fd-backed object 或设备对象；
 - 调度器、进程资源锁、VFS 和内存映射已经初始化。
@@ -154,8 +153,8 @@ user buffer / iovec
     v
 FileLike::read/write
     │
-    ├─ kfs::File offset or read_at/write_at
-    ├─ kfs::Directory offset for lseek/getdents64
+    ├─ kvfs::VfsFile offset or read_at/write_at
+    ├─ kvfs::VfsFile directory position for lseek/getdents64
     ├─ kfd_objects::PipeReadEnd / PipeWriteEnd
     └─ device-specific FileLike implementation
 ```
@@ -170,15 +169,14 @@ FileLike::read/write
 
 1. 从用户指针读取路径字符串。
 2. 使用当前进程 `umask` 修正 mode。
-3. 将 Linux open flags 转换为 `kfs::OpenOptions`。
-4. `OpenOptions` 通过 `kvfs::namei` 使用 `LookupIntent::Open` 与
+3. 将 Linux open flags 和 mode 交给 `kvfs::Filename` 的 open 入口。
+4. `kvfs` 内部构造 namei open 参数，使用 `LookupIntent::Open` 与
    `LookupFlags` 处理 `O_NOFOLLOW`、`O_PATH`、普通 symlink 和 VFS
    magic-link。
 5. 对普通路径调用 `with_fs(dirfd, ...)` 在正确 root/cwd 上下文下打开。
-6. 对打开结果做设备特殊处理：
-   `/dev/ptmx` 创建 pty，当前终端节点解析到控制终端。
+6. 设备节点的特殊 open 语义由对应 VFS/device file operations 处理。
 7. 根据 `O_NONBLOCK`、`O_CLOEXEC` 设置对象和 descriptor 标志。
-8. 把 `FileLike` 加入当前进程 fd 表并返回 fd。
+8. 把打开的 file 加入当前进程 fd 表并返回 fd。
 
 ### `resolve_at`
 
@@ -192,7 +190,7 @@ FileLike::read/write
 
 ### `mkdirat`
 
-`mkdirat` 先按当前 `FsContext` 和 `dirfd` 解析待创建项的父目录，并应用当前
+`mkdirat` 先按当前 `FsStruct` 和 `dirfd` 解析待创建项的父目录，并应用当前
 进程 `umask`。如果路径已经可解析为现有对象，包括 `/`、`.`、`..` 这类没有普通
 final component 的目录路径，syscall 边界返回 `AlreadyExists`，对应 Linux
 `EEXIST`。
@@ -242,7 +240,7 @@ final component 的目录路径，syscall 边界返回 `AlreadyExists`，对应 
 并发控制由下层资源对象负责：
 
 - fd 表和 descriptor flags 由 `kfd`/进程 resources 内部锁保护；
-- `FsContext` 通过进程状态中的锁串行化当前目录、根目录和解析基准更新；
+- `FsStruct` 通过进程状态中的锁串行化当前目录、根目录和解析基准更新；
 - 目录流 offset 由 `Directory::offset` 锁保护；
 - 文件、pipe、设备、mountpoint 和 VFS 节点的内部并发由各自实现负责；
 - 用户内存访问由 `posix_types` / `osvm` 在当前进程地址空间下执行。
@@ -250,7 +248,7 @@ final component 的目录路径，syscall 边界返回 `AlreadyExists`，对应 
 文档使用者需要特别注意跨对象操作：
 `renameat2` 会解析旧目录和新目录后交给 VFS rename；
 `sendfile`/`copy_file_range`/`splice` 在一个循环里交替读写两个 fd；
-`open` 中设备特殊处理会在打开文件后再次访问 fs context。
+设备节点的 open 语义由 VFS/device file operations 自身处理。
 这些路径不在 `posix-fs` 中显式定义全局锁顺序，
 因此新增代码应避免在持有 fd 表或目录 offset 锁时进入可能回调同一资源的复杂路径。
 
@@ -259,7 +257,7 @@ final component 的目录路径，syscall 边界返回 `AlreadyExists`，对应 
 ### syscall 兼容层与 VFS 分离
 
 `posix-fs` 只处理 Linux ABI、当前进程上下文和错误传播，
-把实际文件语义交给 `kfs`、`kvfs`、`kfd`、`kfd_objects` 和设备对象。
+把实际文件语义交给 `kvfs`、`kfd`、`kfd_objects` 和设备对象。
 这样可以避免在 syscall 层复制文件系统实现，
 代价是 syscall 兼容行为必须清楚记录哪些由本 crate 保证、哪些由底层对象保证。
 
@@ -301,12 +299,12 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 
 ```text
 sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
-  -> current_resources().get_file_like_as::<kfs::File>()
-  -> kfs::File::shmem_seal_bits() / add_shmem_seals()
+  -> current_resources().get_file()
+  -> kvfs::VfsFile::shmem_seal_bits() / add_shmem_seals()
   -> inode-scoped ShmemObjectState
 ```
 
-这些命令只对 KFS shmem-backed files 有效。非 KFS file 或没有
+这些命令只对 shmem-backed VFS files 有效。非 VFS file 或没有
 `ShmemObjectState` 的普通文件返回错误。`F_ADD_SEALS` 只允许单调添加 seal；
 已有 `F_SEAL_SEAL` 时拒绝继续添加。
 

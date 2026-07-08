@@ -13,23 +13,21 @@ extern crate alloc;
 
 pub mod error;
 pub mod ipc;
-pub mod mnt;
 pub mod net;
 pub mod nsproxy;
 pub mod pid;
 pub mod time;
 pub mod types;
-pub mod user;
 pub mod uts;
 
 pub use error::{CloneNsError, UtsError};
 pub use ipc::IpcNamespace;
 pub use kcgroup::CgroupNamespace;
-pub use mnt::MntNamespace;
+pub use kcred::{NamespaceId, UserNamespace};
+pub use kvfs::MntNamespace;
 pub use net::NetNamespace;
-pub use nsproxy::NsProxy;
+pub use nsproxy::{NamespaceFsContext, NsProxy};
 pub use pid::PidNamespace;
 pub use time::TimeNamespace;
-pub use types::{NamespaceFlags, NamespaceId, NamespaceType};
-pub use user::UserNamespace;
+pub use types::{NamespaceFlags, NamespaceType};
 pub use uts::UtsNamespace;

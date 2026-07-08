@@ -40,7 +40,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 ┌───────────────────────────────────────────────────────────────┐
 │  kruntime::rust_main (主核)                                    │
 │    khal / memspace / kalloc / klogger / backtrace             │
-│    ktask / kdriver·kfs·knet (feature) / SMP / IPI / IRQ        │
+│    ktask / kdriver·fs_boot·knet (feature) / SMP / IPI / IRQ    │
 │    init_setup::init_cb (.init_array)                          │
 │    等待 INITED_CPUS == nr_cpus                                 │
 │    main()  ──────────────────────────────►  entry crate       │
@@ -83,8 +83,12 @@ BootInfo*
     → klogger + backtrace (链接符号 _stext/_etext)
     → final_init
     → init_scheduler
-    → [feature] init_drivers → kfs / knet / fb / input
     → [smp] start_secondary_cpus
+    → init_drivers
+    → [char/display/input] console handoff / fb / input
+    → [fs] fs_boot (root namespace, virtual filesystems)
+    → [fs9p] fs_boot host-share mount
+    → [net/vsock] knet
     → [ipi] kipi::init, mark_all_cpus_started
     → init_interrupt (定时器 tick、IPI、PMU)
     → [watchdog] init_primary

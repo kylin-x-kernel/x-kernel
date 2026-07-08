@@ -1,0 +1,1555 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Mountpoints and location resolution for the VFS.
+use alloc::{
+    string::{String, ToString},
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
+use core::{
+    iter,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use hashbrown::HashMap;
+use kcred::{NamespaceId, UserNamespace, initial_user_namespace};
+use klazy::Once;
+
+/// Mount idmapping context passed into inode namespace operations.
+#[derive(Debug)]
+pub struct MountIdmap;
+
+use crate::{
+    Dentry, DentryKey, DentryOperations, DeviceId, FMode, FileOperations, GetattrQueryFlags,
+    GetattrRequestMask, Metadata, MetadataUpdate, Mutex, NodeFlags, NodePermission, NodeType,
+    RenameFlags, ST_RDONLY, StatFs, SuperBlock, VfsError, VfsFile, VfsFileBuilder, VfsInode,
+    VfsResult, nullfs, path::PathBuf,
+};
+
+bitflags::bitflags! {
+    /// Per-mount flags, converted from the user-visible `MS_*` constants
+    /// during the `mount(2)` syscall.
+    ///
+    /// See [`per_mount_flags`] in `posix/fs/src/mount.rs` for the mapping.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct MountFlags: u32 {
+        /// Mount read-only.
+        const RDONLY = 0x40;
+        /// Ignore set-user-ID and set-group-ID bits on executables.
+        const NOSUID = 0x01;
+        /// Disallow access to device special files on this mount.
+        const NODEV = 0x02;
+        /// Disallow program execution from this mount.
+        const NOEXEC = 0x04;
+        /// Do not update file access times.
+        const NOATIME = 0x08;
+        /// Do not update directory access times.
+        const NODIRATIME = 0x10;
+        /// Update access time relative to mtime/ctime (the default).
+        const RELATIME = 0x20;
+        /// Do not follow symlinks on this mount.
+        const NOSYMFOLLOW = 0x80;
+    }
+}
+
+/// `struct vfsmount`.
+#[derive(Debug)]
+pub struct VfsMount {
+    mnt_root: Dentry,
+    mnt_sb: Arc<SuperBlock>,
+    mnt_flags: MountFlags,
+}
+
+impl VfsMount {
+    fn new(fs: &Arc<SuperBlock>, flags: MountFlags) -> Self {
+        Self {
+            mnt_root: fs.root_dir(),
+            mnt_sb: fs.clone(),
+            mnt_flags: flags,
+        }
+    }
+
+    fn clone_from_mount(mount: &Mount) -> Self {
+        Self {
+            mnt_root: mount.mnt.mnt_root.clone(),
+            mnt_sb: mount.mnt.mnt_sb.clone(),
+            mnt_flags: mount.mnt.mnt_flags,
+        }
+    }
+}
+
+static INIT_MNT_NS: Once<Arc<MntNamespace>> = Once::new();
+static MOUNT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn new_initial_nullfs_superblock() -> Arc<SuperBlock> {
+    nullfs::new_superblock()
+}
+
+/// `struct mnt_namespace`.
+#[derive(Debug)]
+pub struct MntNamespace {
+    id: NamespaceId,
+    user_ns: Arc<UserNamespace>,
+    root: Arc<Mount>,
+    mounts: Mutex<HashMap<u64, Arc<Mount>>>,
+}
+
+impl MntNamespace {
+    /// Initializes the global initial mount namespace mount tree.
+    pub fn init_mount_tree(root_fs: &Arc<SuperBlock>) -> Arc<Self> {
+        Arc::clone(INIT_MNT_NS.call_once(|| {
+            Self::build_initial_mount_tree(root_fs)
+                .expect("initial mount namespace tree must be created")
+        }))
+    }
+
+    /// Returns the global initial mount namespace.
+    pub fn initial() -> VfsResult<Arc<Self>> {
+        INIT_MNT_NS.get().cloned().ok_or(VfsError::InvalidInput)
+    }
+
+    /// Creates a mount namespace rooted at the given filesystem.
+    pub fn new_root(root_fs: &Arc<SuperBlock>, user_ns: Arc<UserNamespace>) -> Arc<Self> {
+        let root = Mount::new_root(root_fs);
+        let namespace = Arc::new(Self {
+            id: NamespaceId::new(),
+            user_ns,
+            root: root.clone(),
+            mounts: Mutex::default(),
+        });
+        namespace.mounts.lock().insert(root.mount_id(), root);
+        namespace
+    }
+
+    fn build_initial_mount_tree(root_fs: &Arc<SuperBlock>) -> VfsResult<Arc<Self>> {
+        let namespace_root = new_initial_nullfs_superblock();
+        let namespace = Self::new_root(&namespace_root, initial_user_namespace());
+        namespace.attach(&namespace.root_path(), root_fs)?;
+        Ok(namespace)
+    }
+
+    /// Creates a private copy of this mount namespace and retargets paths into it.
+    ///
+    /// The cloned namespace receives new [`Mount`] objects that point at the same
+    /// mounted filesystem roots as the source tree. Dentries and superblocks are
+    /// shared with the source filesystem instances, matching Linux's mount-tree
+    /// copy semantics.
+    pub fn clone_with_root_and_pwd(&self, root: &Path, pwd: &Path) -> VfsResult<NamespaceClone> {
+        let mut mount_map = HashMap::new();
+        let cloned_root = clone_mount_tree(&self.root, None, &mut mount_map);
+        let namespace = Arc::new(Self {
+            id: NamespaceId::new(),
+            user_ns: self.user_ns.clone(),
+            root: cloned_root,
+            mounts: Mutex::default(),
+        });
+        {
+            let mut mounts = namespace.mounts.lock();
+            for mount in mount_map.values() {
+                mounts.insert(mount.mount_id(), mount.clone());
+            }
+        }
+
+        Ok(NamespaceClone {
+            namespace,
+            root: retarget_path(root, &mount_map)?,
+            pwd: retarget_path(pwd, &mount_map)?,
+        })
+    }
+
+    /// Returns this namespace's ID.
+    pub fn id(&self) -> NamespaceId {
+        self.id
+    }
+
+    /// Returns the user namespace that owns this mount namespace.
+    pub fn user_ns(&self) -> &Arc<UserNamespace> {
+        &self.user_ns
+    }
+
+    /// Returns this namespace's root mount.
+    pub fn root_mount(&self) -> &Arc<Mount> {
+        &self.root
+    }
+
+    /// Returns this namespace's root path.
+    pub fn root_path(&self) -> Path {
+        self.root.root_path()
+    }
+
+    /// Returns the path seen as `/` by tasks attached to this namespace.
+    ///
+    /// The initial namespace keeps a non-user-visible structural root mount and
+    /// layers the mutable root filesystem over it, matching Linux
+    /// `init_mount_tree()`. Process `fs_struct` root and pwd should use this
+    /// visible path, not the namespace's structural root path.
+    pub fn visible_root_path(&self) -> Path {
+        self.root_path().resolve_final_mount()
+    }
+
+    /// Mounts a filesystem at a resolved mountpoint in this namespace.
+    pub fn attach(&self, mountpoint: &Path, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
+        self.attach_with_flags(mountpoint, fs, MountFlags::empty())
+    }
+
+    /// Mounts a filesystem with per-mount flags at a resolved mountpoint.
+    pub fn attach_with_flags(
+        &self,
+        mountpoint: &Path,
+        fs: &Arc<SuperBlock>,
+        flags: MountFlags,
+    ) -> VfsResult<Arc<Mount>> {
+        let mount = mountpoint.mount_filesystem_with_flags(fs, flags)?;
+        self.mounts.lock().insert(mount.mount_id(), mount.clone());
+        Ok(mount)
+    }
+
+    /// Unmounts one visible mount from this namespace.
+    pub fn detach(&self, path: &Path) -> VfsResult<()> {
+        let removed = path.mount().clone();
+        path.unmount()?;
+        self.mounts.lock().remove(&removed.mount_id());
+        Ok(())
+    }
+
+    /// Unmounts a visible mount tree from this namespace.
+    pub fn detach_tree(&self, path: &Path) -> VfsResult<()> {
+        let removed = collect_mount_tree(path.mount());
+        path.unmount_tree()?;
+        let mut mounts = self.mounts.lock();
+        for mount in removed {
+            mounts.remove(&mount.mount_id());
+        }
+        Ok(())
+    }
+}
+
+/// Result of cloning a mount namespace and retargeting filesystem context paths.
+#[derive(Debug)]
+pub struct NamespaceClone {
+    /// The cloned mount namespace.
+    pub namespace: Arc<MntNamespace>,
+    /// The old filesystem root path retargeted into the cloned namespace.
+    pub root: Path,
+    /// The old current working directory path retargeted into the cloned namespace.
+    pub pwd: Path,
+}
+
+/// `struct mount`.
+#[derive(Debug)]
+pub struct Mount {
+    mnt: VfsMount,
+    mnt_parent: Option<Weak<Mount>>,
+    mnt_mountpoint: Option<Dentry>,
+    mnt_mounts: Mutex<HashMap<DentryKey, Weak<Self>>>,
+    mnt_id: u64,
+    /// Mount that this one covers (for overmount).
+    ///
+    /// When a new mount is created at a location that already has a mount,
+    /// the old mount is stored here so it can be restored on unmount.
+    covers: Mutex<Option<Arc<Self>>>,
+}
+
+impl Mount {
+    /// Creates a new mount for a filesystem at an optional parent path.
+    pub fn new(fs: &Arc<SuperBlock>, location_in_parent: Option<Path>) -> Arc<Self> {
+        Self::new_with_flags(fs, location_in_parent, MountFlags::empty())
+    }
+
+    /// Creates a new mount with per-mount flags.
+    pub fn new_with_flags(
+        fs: &Arc<SuperBlock>,
+        location_in_parent: Option<Path>,
+        flags: MountFlags,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            mnt: VfsMount::new(fs, flags),
+            mnt_parent: location_in_parent
+                .as_ref()
+                .map(|path| Arc::downgrade(&path.mnt)),
+            mnt_mountpoint: location_in_parent.as_ref().map(|path| path.dentry.clone()),
+            mnt_mounts: Mutex::default(),
+            mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            covers: Mutex::default(),
+        })
+    }
+
+    fn clone_mount(source: &Arc<Self>, location_in_parent: Option<Path>) -> Arc<Self> {
+        Arc::new(Self {
+            mnt: VfsMount::clone_from_mount(source),
+            mnt_parent: location_in_parent
+                .as_ref()
+                .map(|path| Arc::downgrade(&path.mnt)),
+            mnt_mountpoint: location_in_parent.as_ref().map(|path| path.dentry.clone()),
+            mnt_mounts: Mutex::default(),
+            mnt_id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            covers: Mutex::default(),
+        })
+    }
+
+    /// Creates a root mount for a filesystem.
+    pub fn new_root(fs: &Arc<SuperBlock>) -> Arc<Self> {
+        Self::new(fs, None)
+    }
+
+    /// Creates a root mount with per-mount flags.
+    pub fn new_root_with_flags(fs: &Arc<SuperBlock>, flags: MountFlags) -> Arc<Self> {
+        Self::new_with_flags(fs, None, flags)
+    }
+
+    /// Return a `Path` representing the mount root.
+    pub fn root_path(self: &Arc<Self>) -> Path {
+        Path::new(self.clone(), self.mnt.mnt_root.clone())
+    }
+
+    pub(crate) fn super_block(&self) -> &Arc<SuperBlock> {
+        &self.mnt.mnt_sb
+    }
+
+    /// Returns the filesystem type name for this mount.
+    pub fn filesystem_name(&self) -> &str {
+        self.super_block().name()
+    }
+
+    /// Returns filesystem statistics for this mount.
+    pub fn filesystem_stat(&self) -> VfsResult<StatFs> {
+        self.super_block().stat()
+    }
+
+    /// Allocates an opened pseudo file on this mount.
+    pub fn alloc_file_pseudo(
+        self: &Arc<Self>,
+        inode: Arc<VfsInode>,
+        name: &str,
+        flags: FMode,
+        open_flags: u32,
+        f_op: Arc<dyn FileOperations>,
+    ) -> VfsResult<Arc<VfsFile>> {
+        self.alloc_file_pseudo_inner(inode, name, flags, open_flags, f_op, None)
+    }
+
+    /// Allocates an opened pseudo file with dentry operations on this mount.
+    pub fn alloc_file_pseudo_with_dentry_operations(
+        self: &Arc<Self>,
+        inode: Arc<VfsInode>,
+        name: &str,
+        flags: FMode,
+        open_flags: u32,
+        f_op: Arc<dyn FileOperations>,
+        d_op: Arc<dyn DentryOperations>,
+    ) -> VfsResult<Arc<VfsFile>> {
+        self.alloc_file_pseudo_inner(inode, name, flags, open_flags, f_op, Some(d_op))
+    }
+
+    fn alloc_file_pseudo_inner(
+        self: &Arc<Self>,
+        inode: Arc<VfsInode>,
+        name: &str,
+        flags: FMode,
+        open_flags: u32,
+        f_op: Arc<dyn FileOperations>,
+        d_op: Option<Arc<dyn DentryOperations>>,
+    ) -> VfsResult<Arc<VfsFile>> {
+        let dentry = Dentry::new_file_from_inode(inode, None, name.to_string());
+        if let Some(d_op) = d_op {
+            dentry.set_operations(d_op);
+        }
+        dentry.bind_super_block(self.super_block());
+        let path = Path::new(self.clone(), dentry);
+        let mut file = VfsFileBuilder::from_path_state(path, flags, open_flags, f_op);
+        file.mark_opened()?;
+        file.finish()
+    }
+
+    /// Returns the path in the parent mount.
+    pub fn location(&self) -> Option<Path> {
+        Some(Path::new(
+            self.mnt_parent.as_ref()?.upgrade()?,
+            self.mnt_mountpoint.as_ref()?.clone(),
+        ))
+    }
+
+    /// Returns whether this mount has no parent mount.
+    pub fn is_root(&self) -> bool {
+        self.mnt_parent.is_none()
+    }
+
+    /// Returns the mount namespace identity assigned to this mount object.
+    pub fn mount_id(self: &Arc<Self>) -> u64 {
+        self.mnt_id
+    }
+
+    /// Returns the temporary VFS device identity exposed for inode metadata.
+    ///
+    /// X-Kernel does not yet have a superblock-level `s_dev` model, so mounted
+    /// filesystems use the mount ID as a stable synthetic device number.
+    pub fn synthetic_device_id(self: &Arc<Self>) -> u64 {
+        self.mnt_id
+    }
+
+    /// Returns this mount's flags.
+    pub fn flags(&self) -> MountFlags {
+        self.mnt.mnt_flags
+    }
+
+    /// Returns whether this mountpoint is mounted read-only.
+    pub fn is_readonly(&self) -> bool {
+        self.flags().contains(MountFlags::RDONLY)
+    }
+
+    /// Returns a snapshot of direct child mounts currently attached here.
+    pub fn children(self: &Arc<Self>) -> Vec<Arc<Self>> {
+        self.mnt_mounts
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect()
+    }
+
+    fn covered_mount(&self) -> Option<Arc<Self>> {
+        self.covers.lock().clone()
+    }
+
+    fn child_mount_at(&self, dentry: &Dentry) -> Option<Arc<Self>> {
+        let key = dentry.key();
+        let mut mounts = self.mnt_mounts.lock();
+        let mount = mounts.get(&key).and_then(Weak::upgrade);
+        if mount.is_none() {
+            mounts.remove(&key);
+        }
+        mount
+    }
+
+    fn install_child_mount(&self, mountpoint: &Dentry, mount: &Arc<Self>) -> Option<Arc<Self>> {
+        self.mnt_mounts
+            .lock()
+            .insert(mountpoint.key(), Arc::downgrade(mount))
+            .and_then(|old| old.upgrade())
+    }
+
+    fn remove_child_mount(&self, mountpoint: &Dentry) {
+        self.mnt_mounts.lock().remove(&mountpoint.key());
+    }
+}
+
+/// A resolved location within a mountpoint.
+#[derive(Debug, Clone)]
+pub struct Path {
+    mnt: Arc<Mount>,
+    dentry: Dentry,
+}
+
+impl Path {
+    /// Create a `struct path` from a mount and dentry.
+    pub fn new(mnt: Arc<Mount>, dentry: Dentry) -> Self {
+        Self { mnt, dentry }
+    }
+
+    pub(crate) fn with_dentry(&self, dentry: Dentry) -> Self {
+        Self::new(self.mnt.clone(), dentry)
+    }
+
+    /// Returns the mount containing this path.
+    pub fn mount(&self) -> &Arc<Mount> {
+        &self.mnt
+    }
+
+    /// Returns the superblock containing this location.
+    pub(crate) fn super_block(&self) -> &Arc<SuperBlock> {
+        self.mnt.super_block()
+    }
+
+    /// Returns filesystem statistics for this path.
+    pub fn filesystem_stat(&self) -> VfsResult<StatFs> {
+        self.super_block().stat()
+    }
+
+    /// Synchronizes the filesystem containing this path.
+    pub fn sync_filesystem(&self) -> VfsResult<()> {
+        self.super_block().sync_fs()
+    }
+
+    /// Returns the maximum regular-file size allowed on this path.
+    pub fn max_file_size(&self) -> u64 {
+        self.super_block().max_file_size()
+    }
+
+    /// Returns this path's inode identity.
+    pub fn inode(&self) -> Arc<VfsInode> {
+        self.dentry.vfs_inode()
+    }
+
+    /// Returns a stable key for this path's inode identity.
+    pub fn inode_key(&self) -> usize {
+        Arc::as_ptr(&self.inode()) as usize
+    }
+
+    /// Returns a weak reference to this path's inode identity.
+    pub fn weak_inode(&self) -> Weak<VfsInode> {
+        Arc::downgrade(&self.inode())
+    }
+
+    /// Returns this path's node type.
+    pub fn node_type(&self) -> NodeType {
+        self.inode().node_type()
+    }
+
+    /// Returns whether this path names a directory.
+    pub fn is_dir(&self) -> bool {
+        self.node_type() == NodeType::Directory
+    }
+
+    /// Returns whether this path names a regular file.
+    pub fn is_regular_file(&self) -> bool {
+        self.node_type() == NodeType::RegularFile
+    }
+
+    /// Returns whether this path names a non-directory file.
+    pub fn is_file(&self) -> bool {
+        !self.is_dir()
+    }
+
+    /// Returns whether this path names a symbolic link.
+    pub fn is_symlink(&self) -> bool {
+        self.node_type() == NodeType::Symlink
+    }
+
+    /// Attempt to downcast this path's inode-private state.
+    pub fn downcast_node<T: core::any::Any + Send + Sync>(&self) -> VfsResult<Arc<T>> {
+        self.inode().downcast()
+    }
+
+    /// Returns the underlying directory entry.
+    pub(crate) fn dentry(&self) -> &Dentry {
+        &self.dentry
+    }
+
+    /// Returns a cached child inode or inserts a filesystem-created child.
+    pub fn cached_child_inode_or_insert_with(
+        &self,
+        name: &str,
+        create: impl FnOnce(&Dentry, String) -> Dentry,
+    ) -> u64 {
+        if let Some(entry) = self
+            .dentry
+            .lookup_cache(name)
+            .filter(Dentry::is_really_positive)
+        {
+            return entry.inode();
+        }
+
+        let name = name.to_string();
+        let entry = create(&self.dentry, name.clone());
+        let inode = entry.inode();
+        self.dentry.insert_cache(name, entry);
+        inode
+    }
+
+    /// Returns metadata for the inode referenced by this location.
+    pub fn metadata(&self) -> Metadata {
+        self.dentry.vfs_inode().metadata()
+    }
+
+    /// Returns the name of this location within its parent directory.
+    pub fn name(&self) -> &str {
+        self.dentry.name()
+    }
+
+    /// Returns the parent location, if any.
+    pub fn parent(&self) -> Option<Self> {
+        if !self.dentry.is_root_of_mount() {
+            return Some(self.with_dentry(self.dentry.parent()?));
+        }
+        self.mnt.location()?.parent()
+    }
+
+    /// Returns `true` if this is the global root location.
+    pub fn is_root(&self) -> bool {
+        self.mnt.is_root() && self.dentry.is_root_of_mount()
+    }
+
+    /// Build the absolute path for this location.
+    pub fn absolute_path(&self) -> VfsResult<PathBuf> {
+        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root)
+            && let Some(dynamic_name) = self.dentry.dynamic_name()?
+        {
+            return Ok(PathBuf::from(dynamic_name));
+        }
+
+        let mut components = vec![];
+        let mut cur = self.clone();
+        loop {
+            cur.dentry.collect_absolute_path(&mut components);
+            cur = match cur.mnt.location() {
+                Some(loc) => loc,
+                None => break,
+            }
+        }
+        Ok(iter::once("/")
+            .chain(components.iter().map(String::as_str).rev())
+            .collect())
+    }
+
+    /// Returns a display pathname for this location.
+    pub fn display_path(&self) -> VfsResult<String> {
+        Ok(self.absolute_path()?.to_string())
+    }
+
+    /// Returns `true` if this location references the same entry.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.mnt, &other.mnt) && self.dentry.ptr_eq(&other.dentry)
+    }
+
+    /// Returns `true` if both locations point at the same VFS inode identity.
+    pub fn is_same_inode(&self, other: &Self) -> bool {
+        self.dentry.is_same_inode(&other.dentry)
+    }
+
+    /// Returns whether this path's mount is read-only.
+    pub fn is_mount_readonly(&self) -> bool {
+        self.mnt.is_readonly()
+    }
+
+    /// Returns whether this path is effectively read-only.
+    pub fn is_effectively_readonly(&self) -> bool {
+        self.is_mount_readonly()
+            || self
+                .super_block()
+                .stat()
+                .is_ok_and(|stat| stat.mount_flags & ST_RDONLY != 0)
+    }
+
+    /// Ensures this path's mount allows modification.
+    pub fn check_writable_mount(&self) -> VfsResult<()> {
+        if self.is_effectively_readonly() {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
+        Ok(())
+    }
+
+    /// Updates metadata after checking mount writability.
+    pub fn setattr(&self, update: MetadataUpdate) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        self.dentry.update_metadata(update)
+    }
+
+    /// Returns metadata without security checks.
+    pub fn getattr_nosec(
+        &self,
+        request_mask: GetattrRequestMask,
+        query_flags: GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        self.inode().getattr(self, request_mask, query_flags)
+    }
+
+    /// Returns VFS metadata for this path.
+    pub fn getattr(&self) -> VfsResult<Metadata> {
+        let mut metadata = self.getattr_nosec(0, 0)?;
+        metadata.device = self.mnt.synthetic_device_id();
+        Ok(metadata)
+    }
+
+    /// Returns `true` if this path is a mountpoint directory.
+    pub fn is_mountpoint(&self) -> bool {
+        self.dentry.as_dir().is_ok() && self.mnt.child_mount_at(&self.dentry).is_some()
+    }
+
+    fn check_not_mountpoint(&self) -> VfsResult<()> {
+        if self.is_mountpoint() {
+            return Err(VfsError::ResourceBusy);
+        }
+        Ok(())
+    }
+
+    fn lookup_child_in_mount(&self, name: &str) -> VfsResult<Self> {
+        Ok(Self::new(
+            self.mnt.clone(),
+            self.dentry.as_dir()?.lookup(name)?,
+        ))
+    }
+
+    /// Create a regular file under this directory path.
+    pub fn create(&self, name: &str, permission: NodePermission) -> VfsResult<Self> {
+        self.check_writable_mount()?;
+        self.dentry
+            .as_dir()?
+            .create(name, permission)
+            .map(|entry| self.with_dentry(entry))
+    }
+
+    /// Create a directory under this directory path.
+    pub fn mkdir(&self, name: &str, permission: NodePermission) -> VfsResult<Self> {
+        self.check_writable_mount()?;
+        self.dentry
+            .as_dir()?
+            .mkdir(name, permission)
+            .map(|entry| self.with_dentry(entry))
+    }
+
+    /// Create a non-regular filesystem node under this directory path.
+    pub fn mknod(
+        &self,
+        name: &str,
+        node_type: NodeType,
+        permission: NodePermission,
+        device: DeviceId,
+    ) -> VfsResult<Self> {
+        self.check_writable_mount()?;
+        self.dentry
+            .as_dir()?
+            .mknod(name, node_type, permission, device)
+            .map(|entry| self.with_dentry(entry))
+    }
+
+    /// Create a hard link to an existing path.
+    pub fn link(&self, name: &str, source: &Self) -> VfsResult<Self> {
+        if !Arc::ptr_eq(&self.mnt, &source.mnt) {
+            return Err(VfsError::CrossesDevices);
+        }
+        self.check_writable_mount()?;
+        self.dentry
+            .as_dir()?
+            .link(name, &source.dentry)
+            .map(|entry| self.with_dentry(entry))
+    }
+
+    /// Create a symbolic link under this directory path.
+    pub fn symlink(&self, name: &str, target: &str) -> VfsResult<Self> {
+        self.check_writable_mount()?;
+        self.dentry
+            .as_dir()?
+            .symlink(name, target)
+            .map(|entry| self.with_dentry(entry))
+    }
+
+    /// Rename an entry within the same mountpoint.
+    pub fn rename(
+        &self,
+        old_name: &str,
+        new_dir: &Self,
+        new_name: &str,
+        flags: RenameFlags,
+    ) -> VfsResult<()> {
+        if !Arc::ptr_eq(&self.mnt, &new_dir.mnt) {
+            return Err(VfsError::CrossesDevices);
+        }
+        self.check_writable_mount()?;
+        new_dir.check_writable_mount()?;
+
+        let old_path = self.lookup_child_in_mount(old_name)?;
+        old_path.check_not_mountpoint()?;
+        if let Ok(new_path) = new_dir.lookup_child_in_mount(new_name) {
+            new_path.check_not_mountpoint()?;
+        }
+        if !self.ptr_eq(new_dir)
+            && old_path.is_dir()
+            && old_path.dentry.is_ancestor_of(&new_dir.dentry)?
+        {
+            return Err(VfsError::InvalidInput);
+        }
+        self.dentry
+            .as_dir()?
+            .rename(old_name, new_dir.dentry.as_dir()?, new_name, flags)
+    }
+
+    /// Remove a non-directory entry.
+    pub fn unlink(&self, name: &str) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        let path = self.lookup_child_in_mount(name)?;
+        if path.is_dir() {
+            return Err(VfsError::IsADirectory);
+        }
+        path.check_not_mountpoint()?;
+        self.dentry.as_dir()?.unlink(name, false)
+    }
+
+    /// Remove a directory entry.
+    pub fn rmdir(&self, name: &str) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        let path = self.lookup_child_in_mount(name)?;
+        if !path.is_dir() {
+            return Err(VfsError::NotADirectory);
+        }
+        path.check_not_mountpoint()?;
+        self.dentry.as_dir()?.unlink(name, true)
+    }
+
+    /// Mount a filesystem at this path.
+    #[cfg(unittest)]
+    fn mount_filesystem(&self, fs: &Arc<SuperBlock>) -> VfsResult<Arc<Mount>> {
+        self.mount_filesystem_with_flags(fs, MountFlags::empty())
+    }
+
+    /// Mount a filesystem with per-mount flags at this path.
+    fn mount_filesystem_with_flags(
+        &self,
+        fs: &Arc<SuperBlock>,
+        flags: MountFlags,
+    ) -> VfsResult<Arc<Mount>> {
+        self.dentry.as_dir()?;
+        let result = Mount::new_with_flags(fs, Some(self.clone()), flags);
+        if let Some(old) = self.mnt.install_child_mount(&self.dentry, &result) {
+            *result.covers.lock() = Some(old);
+        }
+        Ok(result)
+    }
+
+    /// Unmount the filesystem rooted at this path.
+    fn unmount(&self) -> VfsResult<()> {
+        if !self.dentry.is_root_of_mount() {
+            return Err(VfsError::InvalidInput);
+        }
+        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
+            return Err(VfsError::InvalidInput);
+        }
+        if let Some(parent_path) = self.mnt.location() {
+            if !parent_path
+                .mnt
+                .child_mount_at(&parent_path.dentry)
+                .is_some_and(|mount| Arc::ptr_eq(&mount, &self.mnt))
+            {
+                return Err(VfsError::InvalidInput);
+            }
+            if !self.mnt.mnt_mounts.lock().is_empty() {
+                return Err(VfsError::ResourceBusy);
+            }
+            let covered = self.mnt.covers.lock().take();
+            match covered {
+                Some(ref mount) => {
+                    parent_path
+                        .mnt
+                        .install_child_mount(&parent_path.dentry, mount);
+                }
+                None => {
+                    parent_path.mnt.remove_child_mount(&parent_path.dentry);
+                }
+            }
+        }
+        self.dentry.as_dir()?.forget();
+        Ok(())
+    }
+
+    /// Recursively unmount this filesystem and all children.
+    fn unmount_tree(&self) -> VfsResult<()> {
+        if !self.dentry.is_root_of_mount() {
+            return Err(VfsError::InvalidInput);
+        }
+        let remaining: Vec<_> = self
+            .mnt
+            .mnt_mounts
+            .lock()
+            .iter()
+            .map(|(key, child)| (key.clone(), child.clone()))
+            .collect();
+        let mut failed = false;
+        for (key, child) in remaining {
+            if let Some(mount) = child.upgrade()
+                && let Err(_e) = mount.root_path().unmount_tree()
+            {
+                failed = true;
+                self.mnt
+                    .mnt_mounts
+                    .lock()
+                    .insert(key, Arc::downgrade(&mount));
+            }
+        }
+        if failed {
+            return Err(VfsError::ResourceBusy);
+        }
+        self.unmount()
+    }
+
+    /// Changes a regular file length through the VFS truncate path.
+    pub fn truncate(&self, len: u64) -> VfsResult<()> {
+        self.check_writable_mount()?;
+        if self.is_dir() {
+            return Err(VfsError::IsADirectory);
+        }
+
+        let inode = self.inode();
+        if self.is_regular_file() && !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
+            inode.set_len(len)?;
+        } else {
+            self.dentry.update_metadata(MetadataUpdate {
+                size: Some(len),
+                ..Default::default()
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Resolves overmounts visible from this path.
+    pub(crate) fn resolve_final_mount(self) -> Self {
+        let mut path = self;
+        while let Some(mountpoint) = path.mnt.child_mount_at(&path.dentry) {
+            let entry = mountpoint.mnt.mnt_root.clone();
+            path = Self::new(mountpoint, entry);
+        }
+        path
+    }
+}
+
+/// Look up a child path without following symlinks.
+#[cfg(unittest)]
+fn lookup_no_follow(path: &Path, name: &str) -> VfsResult<Path> {
+    use crate::path::{DOT, DOTDOT};
+
+    Ok(match name {
+        DOT => path.clone(),
+        DOTDOT => path.parent().unwrap_or_else(|| path.clone()),
+        _ => path.lookup_child_in_mount(name)?.resolve_final_mount(),
+    })
+}
+
+fn collect_mount_tree(root: &Arc<Mount>) -> Vec<Arc<Mount>> {
+    let mut mounts = vec![root.clone()];
+    let mut index = 0;
+    while index < mounts.len() {
+        let mount = mounts[index].clone();
+        mounts.extend(mount.children());
+        index += 1;
+    }
+    mounts
+}
+
+fn clone_mount_tree(
+    source: &Arc<Mount>,
+    location_in_parent: Option<Path>,
+    mount_map: &mut HashMap<usize, Arc<Mount>>,
+) -> Arc<Mount> {
+    let cloned = Mount::clone_mount(source, location_in_parent);
+    mount_map.insert(Arc::as_ptr(source) as usize, cloned.clone());
+
+    if let Some(covered) = source.covered_mount() {
+        let location = cloned.location();
+        let cloned_covered = clone_mount_tree(&covered, location, mount_map);
+        *cloned.covers.lock() = Some(cloned_covered);
+    }
+
+    for child in source.children() {
+        let mountpoint = child
+            .mnt_mountpoint
+            .as_ref()
+            .expect("child mount must have mountpoint")
+            .clone();
+        let location = Path::new(cloned.clone(), mountpoint.clone());
+        let cloned_child = clone_mount_tree(&child, Some(location), mount_map);
+        cloned.install_child_mount(&mountpoint, &cloned_child);
+    }
+
+    cloned
+}
+
+fn retarget_path(path: &Path, mount_map: &HashMap<usize, Arc<Mount>>) -> VfsResult<Path> {
+    let key = Arc::as_ptr(path.mount()) as usize;
+    let mount = mount_map.get(&key).ok_or(VfsError::InvalidInput)?;
+    Ok(Path::new(mount.clone(), path.dentry.clone()))
+}
+
+#[cfg(unittest)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::{string::String, sync::Arc};
+    use core::time::Duration;
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+    use crate::{
+        Dentry, DirContext, FileDirOperations, FileOperations, InodeDirOperations, InodeOperations,
+        Metadata, MetadataUpdate, NodePermission, NodeType, StatFs, SuperBlockOperations, VfsError,
+        VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    };
+
+    struct MockFilesystem {
+        mount_flags: u32,
+    }
+
+    impl SuperBlockOperations for MockFilesystem {
+        fn name(&self) -> &str {
+            "mockfs"
+        }
+
+        fn root_dentry(&self) -> Dentry {
+            let inode = VfsInode::new_openable_dir(
+                Arc::new(MockDirOps::new(self.mount_flags, 1)),
+                inode_init(1),
+            );
+            Dentry::new_dir_from_inode(inode, None, String::new())
+        }
+
+        fn statfs(&self) -> VfsResult<StatFs> {
+            statfs(self.mount_flags)
+        }
+    }
+
+    struct MockDirOps {
+        mount_flags: u32,
+        inode: u64,
+    }
+
+    impl MockDirOps {
+        fn new(mount_flags: u32, inode: u64) -> Self {
+            Self { mount_flags, inode }
+        }
+    }
+
+    impl InodeOperations for MockDirOps {
+        fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
+            Some(self)
+        }
+
+        fn getattr(
+            &self,
+            _idmap: &crate::MountIdmap,
+            _path: Option<&crate::Path>,
+            _request_mask: crate::GetattrRequestMask,
+            _query_flags: crate::GetattrQueryFlags,
+        ) -> VfsResult<Metadata> {
+            Ok(Metadata {
+                device: 0,
+                inode: self.inode,
+                nlink: 1,
+                mode: crate::Umode::new(NodeType::Directory, NodePermission::default()),
+                uid: 0,
+                gid: 0,
+                size: 0,
+                block_size: 512,
+                blocks: 1,
+                rdev: Default::default(),
+                atime: Duration::ZERO,
+                mtime: Duration::ZERO,
+                ctime: Duration::ZERO,
+            })
+        }
+
+        fn setattr(
+            &self,
+            _idmap: &crate::MountIdmap,
+            _dentry: &Dentry,
+            _update: MetadataUpdate,
+        ) -> VfsResult<()> {
+            Ok(())
+        }
+    }
+
+    impl InodeDirOperations for MockDirOps {
+        fn lookup(
+            &self,
+            _dir: &VfsInode,
+            dentry: &Dentry,
+            _flags: crate::InodeLookupFlags,
+        ) -> VfsResult<Dentry> {
+            let name = dentry.name();
+            if name != "mnt" {
+                return Err(VfsError::NotFound);
+            }
+
+            let dir = dentry.parent().ok_or(VfsError::InvalidInput)?;
+            let inode = VfsInode::new_openable_dir(
+                Arc::new(MockDirOps::new(self.mount_flags, self.inode + 1)),
+                inode_init(self.inode + 1),
+            );
+            Ok(Dentry::new_dir_from_inode(
+                inode,
+                Some(dir.clone()),
+                String::from(name),
+            ))
+        }
+
+        fn create(
+            &self,
+            _idmap: &crate::MountIdmap,
+            _dir: &VfsInode,
+            _dentry: &Dentry,
+            _mode: crate::Umode,
+            _exclusive: bool,
+        ) -> VfsResult<Dentry> {
+            Err(VfsError::OperationNotSupported)
+        }
+
+        fn link(
+            &self,
+            _old_dentry: &Dentry,
+            _dir: &VfsInode,
+            _new_dentry: &Dentry,
+        ) -> VfsResult<Dentry> {
+            Err(VfsError::OperationNotSupported)
+        }
+
+        fn unlink(&self, _dir: &VfsInode, _dentry: &Dentry) -> VfsResult<()> {
+            Err(VfsError::OperationNotSupported)
+        }
+
+        fn rename(
+            &self,
+            _idmap: &crate::MountIdmap,
+            _old_dir: &VfsInode,
+            _old_dentry: &Dentry,
+            _new_dir: &VfsInode,
+            _new_dentry: &Dentry,
+            _flags: crate::RenameFlags,
+        ) -> VfsResult<()> {
+            Err(VfsError::OperationNotSupported)
+        }
+    }
+
+    fn inode_init(inode: u64) -> VfsInodeInit {
+        VfsInodeInit::new(
+            inode,
+            0,
+            crate::Umode::new(NodeType::Directory, NodePermission::default()),
+        )
+        .with_owner_links_and_rdev(0, 0, 1, Default::default())
+        .with_stat_data(512, 1, Duration::ZERO, Duration::ZERO, Duration::ZERO)
+    }
+
+    impl FileOperations for MockDirOps {
+        fn dir_operations(&self) -> Option<&dyn FileDirOperations> {
+            Some(self)
+        }
+
+        fn supports_read(&self) -> bool {
+            true
+        }
+
+        fn read(&self, _file: &VfsFile, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+            Err(VfsError::IsADirectory)
+        }
+    }
+
+    impl FileDirOperations for MockDirOps {
+        fn iterate_shared(&self, _file: &VfsFile, _ctx: &mut DirContext<'_>) -> VfsResult<usize> {
+            Ok(0)
+        }
+    }
+
+    fn mock_filesystem(mount_flags: u32) -> Arc<SuperBlock> {
+        SuperBlock::new(Arc::new(MockFilesystem { mount_flags }))
+    }
+
+    fn statfs(mount_flags: u32) -> VfsResult<StatFs> {
+        Ok(StatFs {
+            fs_type: 0,
+            block_size: 0,
+            blocks: 0,
+            blocks_free: 0,
+            blocks_available: 0,
+            file_count: 0,
+            free_file_count: 0,
+            name_length: 255,
+            fragment_size: 0,
+            mount_flags,
+        })
+    }
+
+    #[def_test]
+    fn test_mountpoint_thread_safety() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Mount>();
+    }
+
+    #[def_test]
+    fn test_root_mount_defaults_to_writable() {
+        let fs = mock_filesystem(0);
+        let mount = Mount::new_root(&fs);
+        let root = mount.root_path();
+
+        assert_eq!(mount.flags(), MountFlags::empty());
+        assert!(!mount.is_readonly());
+        assert!(!root.is_mount_readonly());
+        assert!(!root.is_effectively_readonly());
+        assert_eq!(root.check_writable_mount(), Ok(()));
+    }
+
+    #[def_test]
+    fn test_root_mount_can_be_readonly() {
+        let fs = mock_filesystem(0);
+        let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
+        let root = mount.root_path();
+
+        assert!(mount.flags().contains(MountFlags::RDONLY));
+        assert!(mount.is_readonly());
+        assert!(root.is_mount_readonly());
+        assert!(root.is_effectively_readonly());
+        assert_eq!(
+            root.check_writable_mount(),
+            Err(VfsError::ReadOnlyFilesystem)
+        );
+    }
+
+    #[def_test]
+    fn test_child_mount_flags_are_independent_from_parent() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let root_mount = Mount::new_root_with_flags(&root_fs, MountFlags::RDONLY);
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = mount_dir
+            .mount_filesystem_with_flags(&child_fs, MountFlags::empty())
+            .unwrap();
+        let child_root = child_mount.root_path();
+
+        assert!(root_mount.is_readonly());
+        assert!(!child_mount.is_readonly());
+        assert!(!child_root.is_mount_readonly());
+        assert!(!child_root.is_effectively_readonly());
+    }
+
+    #[def_test]
+    fn test_filesystem_stat_readonly_makes_location_effectively_readonly() {
+        let fs = mock_filesystem(crate::ST_RDONLY);
+        let mount = Mount::new_root(&fs);
+        let root = mount.root_path();
+
+        assert!(!mount.is_readonly());
+        assert!(!root.is_mount_readonly());
+        assert!(root.is_effectively_readonly());
+        assert_eq!(
+            root.check_writable_mount(),
+            Err(VfsError::ReadOnlyFilesystem)
+        );
+    }
+
+    #[def_test]
+    fn test_mount_flags_combine() {
+        let flags =
+            MountFlags::RDONLY | MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NOSYMFOLLOW;
+        assert!(flags.contains(MountFlags::RDONLY));
+        assert!(flags.contains(MountFlags::NOSUID));
+        assert!(flags.contains(MountFlags::NOEXEC));
+        assert!(flags.contains(MountFlags::NOSYMFOLLOW));
+        assert!(!flags.contains(MountFlags::NODEV));
+        assert!(!flags.contains(MountFlags::NOATIME));
+    }
+
+    #[def_test]
+    fn test_mount_flags_relatime() {
+        let flags = MountFlags::RELATIME | MountFlags::NOSYMFOLLOW;
+        assert!(flags.contains(MountFlags::RELATIME));
+        assert!(!flags.contains(MountFlags::RDONLY));
+        assert!(flags.contains(MountFlags::NOSYMFOLLOW));
+    }
+
+    #[def_test]
+    fn test_initial_namespace_layers_visible_root_over_structural_root() {
+        let root_fs = mock_filesystem(0);
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+
+        let structural_root = namespace.root_path();
+        let visible_root = namespace.visible_root_path();
+
+        assert_eq!(structural_root.mount().filesystem_name(), "nullfs");
+        assert_eq!(visible_root.mount().filesystem_name(), "mockfs");
+        assert!(!structural_root.ptr_eq(&visible_root));
+        assert_eq!(visible_root.absolute_path(), Ok(PathBuf::from("/")));
+    }
+
+    #[def_test]
+    fn test_overmount_hides_previous_and_restores_on_unmount() {
+        let root_fs = mock_filesystem(0);
+        let fs_a = mock_filesystem(0);
+        let fs_b = mock_filesystem(0);
+
+        let root_mount = Mount::new_root(&root_fs);
+        let mnt_loc = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+
+        let mount_a = mnt_loc.mount_filesystem(&fs_a).unwrap();
+        let loc_a = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        assert!(Arc::ptr_eq(loc_a.mount(), &mount_a));
+
+        let mount_b = mnt_loc
+            .mount_filesystem_with_flags(&fs_b, MountFlags::RDONLY)
+            .unwrap();
+        let loc_b = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        assert!(Arc::ptr_eq(loc_b.mount(), &mount_b));
+        assert!(loc_b.is_mount_readonly());
+
+        mount_b.root_path().unmount().unwrap();
+        let loc_a_again = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        assert!(Arc::ptr_eq(loc_a_again.mount(), &mount_a));
+    }
+
+    #[def_test]
+    fn test_mount_root_keeps_root_dentry_name_and_dotdot_crosses_mount() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let root_mount = Mount::new_root(&root_fs);
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_root = child_mount.root_path();
+        let child_path = child_root.absolute_path().unwrap();
+
+        assert_eq!(child_root.name(), "");
+        assert_eq!(child_path.as_str(), "/mnt");
+        assert!(child_root.dentry().is_root_of_mount());
+        assert!(
+            lookup_no_follow(&child_root, ".")
+                .unwrap()
+                .ptr_eq(&child_root)
+        );
+        assert_eq!(
+            lookup_no_follow(&child_root, "..").unwrap().absolute_path(),
+            Ok(PathBuf::from("/"))
+        );
+    }
+
+    #[def_test]
+    fn test_nested_mount_root_dotdot_crosses_to_parent_mount() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let grandchild_fs = mock_filesystem(0);
+
+        let root_mount = Mount::new_root(&root_fs);
+        let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = first_mount_dir.mount_filesystem(&child_fs).unwrap();
+        let second_mount_dir = lookup_no_follow(&child_mount.root_path(), "mnt").unwrap();
+        let grandchild_mount = second_mount_dir.mount_filesystem(&grandchild_fs).unwrap();
+        let grandchild_root = grandchild_mount.root_path();
+        let grandchild_path = grandchild_root.absolute_path().unwrap();
+
+        assert_eq!(grandchild_path.as_str(), "/mnt/mnt");
+        assert_eq!(grandchild_root.name(), "");
+        assert!(grandchild_root.dentry().is_root_of_mount());
+        assert!(
+            lookup_no_follow(&grandchild_root, "..")
+                .unwrap()
+                .absolute_path()
+                == Ok(PathBuf::from("/mnt"))
+        );
+    }
+
+    #[def_test]
+    fn test_mountpoint_child_tracking_updates_for_mount_and_unmount() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+
+        let root_mount = Mount::new_root(&root_fs);
+        assert_eq!(root_mount.children().len(), 0);
+
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = mount_dir.mount_filesystem(&child_fs).unwrap();
+
+        let children = root_mount.children();
+        assert_eq!(children.len(), 1);
+        assert!(Arc::ptr_eq(&children[0], &child_mount));
+
+        child_mount.root_path().unmount().unwrap();
+        assert_eq!(root_mount.children().len(), 0);
+    }
+
+    #[def_test]
+    fn test_mount_namespace_clone_copies_tree_and_retargets_paths() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let overmount_fs = mock_filesystem(0);
+
+        let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+        let root = namespace.root_path();
+        let mountpoint = root.lookup_child_in_mount("mnt").unwrap();
+        let child_mount = namespace.attach(&mountpoint, &child_fs).unwrap();
+        let pwd = lookup_no_follow(&root, "mnt").unwrap();
+
+        let cloned = namespace.clone_with_root_and_pwd(&root, &pwd).unwrap();
+
+        assert!(!Arc::ptr_eq(
+            namespace.root_mount(),
+            cloned.namespace.root_mount()
+        ));
+        assert!(!Arc::ptr_eq(pwd.mount(), cloned.pwd.mount()));
+        assert!(!Arc::ptr_eq(&child_mount, cloned.pwd.mount()));
+        assert_eq!(
+            cloned.pwd.mount().filesystem_name(),
+            child_mount.filesystem_name()
+        );
+
+        let overmount = namespace.attach(&mountpoint, &overmount_fs).unwrap();
+        let old_visible = lookup_no_follow(&root, "mnt").unwrap();
+        let cloned_visible = lookup_no_follow(&cloned.root, "mnt").unwrap();
+
+        assert!(Arc::ptr_eq(old_visible.mount(), &overmount));
+        assert!(Arc::ptr_eq(cloned_visible.mount(), cloned.pwd.mount()));
+    }
+
+    #[def_test]
+    fn test_unmount_rejects_non_mount_root_path() {
+        let root_fs = mock_filesystem(0);
+        let root_mount = Mount::new_root(&root_fs);
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+
+        assert_eq!(mount_dir.unmount(), Err(VfsError::InvalidInput));
+        assert_eq!(mount_dir.unmount_tree(), Err(VfsError::InvalidInput));
+    }
+
+    #[def_test]
+    fn test_unmount_rejects_mount_with_nested_children() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let grandchild_fs = mock_filesystem(0);
+
+        let root_mount = Mount::new_root(&root_fs);
+        let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = first_mount_dir.mount_filesystem(&child_fs).unwrap();
+        let second_mount_dir = lookup_no_follow(&child_mount.root_path(), "mnt").unwrap();
+        let grandchild_mount = second_mount_dir.mount_filesystem(&grandchild_fs).unwrap();
+
+        assert_eq!(
+            child_mount.root_path().unmount(),
+            Err(VfsError::ResourceBusy)
+        );
+        assert_eq!(child_mount.children().len(), 1);
+        assert_eq!(root_mount.children().len(), 1);
+
+        grandchild_mount.root_path().unmount().unwrap();
+        child_mount.root_path().unmount().unwrap();
+        assert_eq!(root_mount.children().len(), 0);
+    }
+
+    #[def_test]
+    fn test_unmount_all_recursively_clears_nested_mounts() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+        let grandchild_fs = mock_filesystem(0);
+
+        let root_mount = Mount::new_root(&root_fs);
+        let first_mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = first_mount_dir.mount_filesystem(&child_fs).unwrap();
+        let second_mount_dir = lookup_no_follow(&child_mount.root_path(), "mnt").unwrap();
+        let grandchild_mount = second_mount_dir.mount_filesystem(&grandchild_fs).unwrap();
+
+        child_mount.root_path().unmount_tree().unwrap();
+
+        assert_eq!(root_mount.children().len(), 0);
+        assert_eq!(child_mount.children().len(), 0);
+        assert_eq!(
+            lookup_no_follow(&root_mount.root_path(), "mnt")
+                .unwrap()
+                .absolute_path(),
+            Ok(PathBuf::from("/mnt"))
+        );
+        assert_eq!(grandchild_mount.children().len(), 0);
+    }
+
+    #[def_test]
+    fn test_hidden_mount_cannot_be_unmounted_while_overmounted() {
+        let root_fs = mock_filesystem(0);
+        let fs_a = mock_filesystem(0);
+        let fs_b = mock_filesystem(0);
+
+        let root_mount = Mount::new_root(&root_fs);
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let mount_a = mount_dir.mount_filesystem(&fs_a).unwrap();
+        let mount_b = mount_dir.mount_filesystem(&fs_b).unwrap();
+
+        assert_eq!(mount_a.root_path().unmount(), Err(VfsError::InvalidInput));
+
+        mount_b.root_path().unmount().unwrap();
+        mount_a.root_path().unmount().unwrap();
+        assert_eq!(root_mount.children().len(), 0);
+    }
+
+    #[def_test]
+    fn test_metadata_uses_synthetic_device_identity() {
+        let root_fs = mock_filesystem(0);
+        let child_fs = mock_filesystem(0);
+
+        let root_mount = Mount::new_root(&root_fs);
+        let mount_dir = lookup_no_follow(&root_mount.root_path(), "mnt").unwrap();
+        let child_mount = mount_dir.mount_filesystem(&child_fs).unwrap();
+        let child_root = child_mount.root_path();
+
+        let root_metadata = root_mount.root_path().getattr().unwrap();
+        let child_metadata = child_root.getattr().unwrap();
+
+        assert_eq!(root_metadata.inode, 1);
+        assert_eq!(child_metadata.inode, 1);
+        assert_eq!(root_metadata.device, root_mount.synthetic_device_id());
+        assert_eq!(child_metadata.device, child_mount.synthetic_device_id());
+        assert!(root_metadata.device != child_metadata.device);
+    }
+
+    #[def_test]
+    fn test_readonly_mount_blocks_create() {
+        let fs = mock_filesystem(0);
+        let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
+        let root = mount.root_path();
+
+        let result = root.create("test", NodePermission::default());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), VfsError::ReadOnlyFilesystem);
+    }
+
+    #[def_test]
+    fn test_readonly_mount_blocks_unlink() {
+        let fs = mock_filesystem(0);
+        let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
+        let root = mount.root_path();
+
+        let result = root.unlink("test");
+        assert_eq!(result, Err(VfsError::ReadOnlyFilesystem));
+    }
+
+    #[def_test]
+    fn test_readonly_mount_blocks_rename() {
+        let fs = mock_filesystem(0);
+        let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
+        let root = mount.root_path();
+
+        let result = root.rename("a", &root, "b", 0);
+        assert_eq!(result, Err(VfsError::ReadOnlyFilesystem));
+    }
+
+    #[def_test]
+    fn test_writable_mount_allows_operations_to_reach_filesystem() {
+        let fs = mock_filesystem(0);
+        let mount = Mount::new_root(&fs);
+        let root = mount.root_path();
+
+        let result = root.create("test", NodePermission::default());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), VfsError::OperationNotSupported);
+
+        assert_eq!(root.unlink("test"), Err(VfsError::NotFound));
+    }
+
+    #[def_test]
+    fn test_stat_rdonly_combined_with_mount_rdonly_is_readonly() {
+        let fs = mock_filesystem(crate::ST_RDONLY);
+        let mount = Mount::new_root_with_flags(&fs, MountFlags::RDONLY);
+        let root = mount.root_path();
+
+        assert!(mount.is_readonly());
+        assert!(root.is_effectively_readonly());
+        assert_eq!(
+            root.check_writable_mount(),
+            Err(VfsError::ReadOnlyFilesystem)
+        );
+    }
+
+    #[def_test]
+    fn test_st_constants_values() {
+        assert_eq!(crate::ST_RDONLY, 0x0001);
+        assert_eq!(crate::ST_NOSUID, 0x0002);
+        assert_eq!(crate::ST_NODEV, 0x0004);
+        assert_eq!(crate::ST_NOEXEC, 0x0008);
+        assert_eq!(crate::ST_NOATIME, 0x0400);
+        assert_eq!(crate::ST_NODIRATIME, 0x0800);
+        assert_eq!(crate::ST_RELATIME, 0x1000);
+        assert_eq!(crate::ST_NOSYMFOLLOW, 0x2000);
+    }
+
+    #[def_test]
+    fn test_mount_flags_constants_values() {
+        assert_eq!(MountFlags::NOSUID.bits(), 0x01);
+        assert_eq!(MountFlags::NODEV.bits(), 0x02);
+        assert_eq!(MountFlags::NOEXEC.bits(), 0x04);
+        assert_eq!(MountFlags::NOATIME.bits(), 0x08);
+        assert_eq!(MountFlags::NODIRATIME.bits(), 0x10);
+        assert_eq!(MountFlags::RELATIME.bits(), 0x20);
+        assert_eq!(MountFlags::RDONLY.bits(), 0x40);
+        assert_eq!(MountFlags::NOSYMFOLLOW.bits(), 0x80);
+    }
+}

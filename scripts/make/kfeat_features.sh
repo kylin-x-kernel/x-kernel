@@ -16,10 +16,16 @@ fi
 # a matching cargo feature on `kfeat`. Skip those so cargo does not fail with
 # "kfeat does not have that feature".
 awk -F= '
+        function is_kconfig_only_feature(key) {
+            return key == "KFEAT_FS" ||
+                   key == "KFEAT_VIRTIO_BUS_PCI" ||
+                   key == "KFEAT_VIRTIO_BUS_MMIO"
+        }
+
         /^KFEAT_[A-Z][A-Z0-9_]*=y$/ {
             key = $1
             # Build-time-only Kconfig keys: not exposed as kfeat features.
-            if (key == "KFEAT_VIRTIO_BUS_PCI" || key == "KFEAT_VIRTIO_BUS_MMIO") {
+            if (is_kconfig_only_feature(key)) {
                 next
             }
             feature = key

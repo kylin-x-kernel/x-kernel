@@ -19,7 +19,9 @@ use vmobj::{
 use super::{alloc_frame, dealloc_frame};
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
-    backend::{BackendOps, FaultCompat, FaultCompatResult, divide_page, map_paging_err, pages_in},
+    backend::{
+        BackendOps, FaultCompletion, FaultCompletionResult, divide_page, map_paging_err, pages_in,
+    },
     vma::VmRuntimeOps,
 };
 
@@ -239,7 +241,7 @@ impl BackendOps for SharedBackend {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         let _ = self.registration_id();
         let addr = ctx.address().align_down(self.page_size());
         let Some(frame) = self.page_for(addr) else {
@@ -261,7 +263,7 @@ impl BackendOps for SharedBackend {
             }
             Err(_) => return Err(KError::BadAddress),
         }
-        Ok(FaultCompat::from_populate((1, None)))
+        Ok(FaultCompletion::from_populate((1, None)))
     }
 }
 
@@ -292,7 +294,7 @@ impl VmRuntimeOps for SharedBackend {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         BackendOps::handle_fault(self, ctx, flags, pgtbl)
     }
 

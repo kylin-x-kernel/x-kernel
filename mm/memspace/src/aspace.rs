@@ -44,7 +44,7 @@ use crate::Aarch64UserAsidContext;
 use crate::{
     FaultContext, FaultInput, ForkCloneTarget, MsyncPolicy, PageFaultOutcome, VmArea, VmAreaSet,
     VmBackingKind,
-    backend::{FaultCompatResult, map_paging_err, pages_in},
+    backend::{FaultCompletionResult, map_paging_err, pages_in},
     cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
     vma::VmRuntimeRef,
 };
@@ -402,7 +402,7 @@ impl MmSpace {
         }
     }
 
-    fn page_fault_outcome_to_legacy_handled(outcome: PageFaultOutcome) -> bool {
+    fn page_fault_outcome_is_handled(outcome: PageFaultOutcome) -> bool {
         outcome.is_resolved() || outcome.is_retryable()
     }
 
@@ -1063,9 +1063,8 @@ impl MmSpace {
 
     /// Drops present PTEs in the specified range while keeping VMA metadata.
     ///
-    /// This is Linux-style object-driven unmap work after truncate/invalidate:
-    /// the backing object zaps affected PTEs but the VMA remains so subsequent
-    /// faults can re-evaluate current object state.
+    /// The backing object zaps affected PTEs but the VMA remains so subsequent
+    /// faults can re-evaluate current object state after truncate or invalidate.
     pub fn invalidate_present(&mut self, start: VirtAddr, size: usize) -> KResult {
         self.drain_pending_invalidations();
         let overlaps = self
@@ -1325,17 +1324,17 @@ impl MmSpace {
         &mut self,
         vaddr: VirtAddr,
         flags: MappingFlags,
-        result: FaultCompatResult,
+        result: FaultCompletionResult,
     ) -> PageFaultOutcome {
         match result {
-            Ok(mut compat) => {
-                if let Some(cb) = compat.take_post_action() {
+            Ok(mut completion) => {
+                if let Some(cb) = completion.take_post_action() {
                     cb(self);
                 }
-                if compat.is_cow_conflict_retry() {
+                if completion.is_cow_conflict_retry() {
                     return PageFaultOutcome::CowConflictRetry;
                 }
-                if compat.populated() == 0 {
+                if completion.populated() == 0 {
                     warn!("No pages populated for {vaddr:?} ({flags:?})");
                     PageFaultOutcome::NoProgress
                 } else {
@@ -1360,12 +1359,19 @@ impl MmSpace {
         &mut self,
         vaddr: VirtAddr,
         flags: MappingFlags,
-        result: FaultCompatResult,
+        result: FaultCompletionResult,
     ) -> PageFaultOutcome {
         match result {
-            Ok(compat) => self.finish_backend_fault(vaddr, flags, Ok(compat)),
+            Ok(completion) => self.finish_backend_fault(vaddr, flags, Ok(completion)),
             Err(err) => match KErrorKind::try_from(err.canonicalize()) {
-                Ok(KErrorKind::BadAddress) => PageFaultOutcome::BusError,
+                Ok(KErrorKind::NoMemory) => PageFaultOutcome::OutOfMemory,
+                Ok(
+                    KErrorKind::BadAddress
+                    | KErrorKind::InvalidData
+                    | KErrorKind::InvalidInput
+                    | KErrorKind::Io
+                    | KErrorKind::UnexpectedEof,
+                ) => PageFaultOutcome::BusError,
                 _ => {
                     warn!("Failed to populate file-backed pages for {vaddr:?} ({flags:?}): {err}");
                     PageFaultOutcome::Failed
@@ -1493,7 +1499,7 @@ impl MmSpace {
         access_flags: PageFaultFlags,
     ) -> bool {
         let outcome = self.handle_page_fault(vaddr, access_flags);
-        Self::page_fault_outcome_to_legacy_handled(outcome)
+        Self::page_fault_outcome_is_handled(outcome)
     }
 
     /// Attempts to clone the current address space into a new one.
@@ -1643,17 +1649,17 @@ mod tests {
     }
 
     #[def_test]
-    fn legacy_fault_adapter_treats_retry_outcomes_as_handled() {
-        assert!(MmSpace::page_fault_outcome_to_legacy_handled(
+    fn fault_adapter_treats_retry_outcomes_as_handled() {
+        assert!(MmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::Resolved
         ));
-        assert!(MmSpace::page_fault_outcome_to_legacy_handled(
+        assert!(MmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::Retry
         ));
-        assert!(MmSpace::page_fault_outcome_to_legacy_handled(
+        assert!(MmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::CowConflictRetry
         ));
-        assert!(!MmSpace::page_fault_outcome_to_legacy_handled(
+        assert!(!MmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::AccessDenied
         ));
     }

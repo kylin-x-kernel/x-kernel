@@ -30,7 +30,7 @@
 
 ## 线程安全
 
-- 本 crate 不自建额外共享状态，依赖 `kprocess`/`ProcessState` 内部同步。
+- 本 crate 不自建额外共享状态，依赖 `kprocess::Process`/`Thread` runtime 内部同步。
 - group-exit 广播和父进程唤醒都基于当前可见线程/进程集合执行。
 - 纯 syscall adapter 已迁到 `ksyscall/task`，不再扩大本 crate 的 ABI 暴露面。
 

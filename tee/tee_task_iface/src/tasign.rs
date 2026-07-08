@@ -7,12 +7,12 @@
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::convert::AsRef;
 
+use fs_context::init_fs;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kfs::{File, OpenOptions, kernel_fs_context};
 use klazy::Lazy;
 use ksync::Mutex;
-use kvfs::{LookupFlags, LookupIntent, lookup_location};
+use kvfs::{Filename, LookupFlags, LookupIntent, VfsFile, dentry_open};
 use log::{error, info};
 
 use crate::ta_ctx::{self, looks_like_ta};
@@ -69,16 +69,17 @@ static TA_HEAD_CACHE: Lazy<Mutex<TaHeadFifoCache>> =
 /// [`crate::TeeTaCtx::is_ta`].
 pub fn verify_ta_elf_signature_if_applicable(
     exec_path: &str,
-    file: &File,
+    file: &VfsFile,
 ) -> KResult<Option<Vec<u8>>> {
     if !looks_like_ta(exec_path) {
         return Ok(None);
     }
-    let len = file.location().len().map_err(|_| KError::InvalidData)?;
+    let len = file.size();
     let len = usize::try_from(len).map_err(|_| KError::InvalidData)?;
     let mut image = alloc::vec![0u8; len];
+    let mut pos = 0;
     let n = file
-        .read_at(&mut image[..], 0)
+        .read_from(&mut image[..], &mut pos)
         .map_err(|_| KError::InvalidData)?;
     if n != len {
         return Err(KError::InvalidData);
@@ -109,8 +110,8 @@ pub fn clear_ta_head_cache() {
 
 /// After a successful ELF parse in the loader: **verify** TA ELF signature (primary), then store
 /// the returned `ta_head` in the FIFO map (secondary; same moment as the former `ElfCacheEntry.ta_head` field).
-pub fn verify_ta_elf_on_load_and_cache_ta_head(file: &File) -> KResult<()> {
-    let abs = file.location().absolute_path()?;
+pub fn verify_ta_elf_on_load_and_cache_ta_head(file: &VfsFile) -> KResult<()> {
+    let abs = file.path().absolute_path()?;
     let key: String = String::from(AsRef::<str>::as_ref(&abs));
     let ta_head = verify_ta_elf_signature_if_applicable(key.as_str(), file)?;
     TA_HEAD_CACHE.lock().insert(key, ta_head);
@@ -124,10 +125,11 @@ pub fn verify_ta_elf_on_load_and_cache_ta_head(file: &File) -> KResult<()> {
 /// raw user-provided exec path so lookup stays independent of per-process cwd
 /// or chroot state.
 pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
-    let fs = kernel_fs_context().lock();
-    let loc = lookup_location(
-        &fs.lookup_context(),
-        path,
+    let fs_guard = init_fs();
+    let fs = fs_guard.lock();
+    let loc = Filename::new(path).lookup_at(
+        fs.root(),
+        fs.pwd(),
         LookupIntent::Open,
         LookupFlags::follow(),
     )?;
@@ -142,7 +144,7 @@ pub fn get_ta_head_cached(path: &str) -> KResult<Option<Vec<u8>>> {
         }
     }
 
-    let file = OpenOptions::new().read(true).open_loc(loc)?;
+    let file = dentry_open(loc, 0)?;
     let ta_head = verify_ta_elf_signature_if_applicable(key.as_str(), &file)?;
 
     let mut guard = TA_HEAD_CACHE.lock();

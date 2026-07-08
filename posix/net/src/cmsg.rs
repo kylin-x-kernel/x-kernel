@@ -12,8 +12,8 @@ use core::{mem::size_of, net::SocketAddr, ptr};
 
 use bytemuck::{NoUninit, bytes_of};
 use kerrno::{KError, KResult, LinuxError};
-use kfd::FileLike;
 use knet::{SocketErrorInfo, SocketErrorOrigin};
+use kvfs::VfsFile;
 use linux_raw_sys::net::{
     AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
     sockaddr_in,
@@ -134,12 +134,12 @@ pub(crate) fn push_ip_recverr_cmsg(
 /// Control message types for socket operations (ancillary data)
 pub(crate) enum CMsg {
     /// SCM_RIGHTS: file descriptor passing between processes
-    Rights { fds: Vec<Arc<dyn FileLike>> },
+    Rights { fds: Vec<Arc<VfsFile>> },
 }
 impl CMsg {
     /// Parse a control message header and extract its data
     pub(crate) fn parse(
-        resources: &kprocess::ProcessResources,
+        resources: &kresources::ProcessResources,
         hdr_ptr: UserConstPtr<cmsghdr>,
         hdr: cmsghdr,
     ) -> KResult<Self> {
@@ -160,7 +160,7 @@ impl CMsg {
                     if fd < 0 {
                         return Err(KError::BadFileDescriptor);
                     }
-                    let f = resources.get_file_like(fd)?;
+                    let f = resources.get_file(fd)?;
                     fds.push(f);
                 }
                 Self::Rights { fds }

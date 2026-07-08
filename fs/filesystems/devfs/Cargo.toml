@@ -19,7 +19,6 @@ dice = ["dep:dice_driver", "dep:klazy", "dep:tee_crypto"]
 kalloc.workspace = true
 kexec.workspace = true
 kerrno.workspace = true
-kfs.workspace = true
 khal.workspace = true
 inherit-methods-macro = "0.1.0"
 klogger.workspace = true
@@ -31,7 +30,7 @@ ktask.workspace = true
 kprocess.workspace = true
 ktty.workspace = true
 kvfs.workspace = true
-kvfs-simple.workspace = true
+
 linux-raw-sys = { workspace = true, features = ["ioctl"] }
 memaddr.workspace = true
 osvm.workspace = true

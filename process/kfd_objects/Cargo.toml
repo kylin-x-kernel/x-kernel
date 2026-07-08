@@ -13,19 +13,17 @@ documentation.workspace = true
 bitflags.workspace = true
 hashbrown.workspace = true
 kerrno.workspace = true
-kfd.workspace = true
 khal.workspace = true
 kio.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
+kvfs.workspace = true
 ksignal.workspace = true
 kspin.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 kprocess.workspace = true
 linux-raw-sys = { workspace = true, features = ["general", "ioctl"] }
-memaddr.workspace = true
 osvm.workspace = true
-ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 unittest.workspace = true
 zerocopy.workspace = true

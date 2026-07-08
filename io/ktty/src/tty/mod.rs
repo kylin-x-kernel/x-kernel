@@ -3,13 +3,13 @@
 // See LICENSES for license details.
 
 use alloc::sync::{Arc, Weak};
-use core::{any::Any, ops::Deref, sync::atomic::Ordering, task::Context};
+use core::{ops::Deref, sync::atomic::Ordering, task::Context};
 
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use kpoll::{IoEvents, Pollable};
 use kprocess::Process;
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, NodeFlags};
+use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode};
 use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::terminal::{
@@ -23,6 +23,39 @@ mod pty;
 
 pub use ntty::{N_TTY, NTtyDriver, try_handoff_console};
 pub use pty::{PtyDriver, create_pty_pair};
+
+fn current_tty_ops() -> KResult<Arc<dyn DeviceFileOps>> {
+    let term = kprocess::current_user_thread()
+        .process()
+        .group()
+        .session()
+        .terminal()
+        .ok_or_else(|| KError::from(LinuxError::ENXIO))?;
+
+    let term = match term.downcast::<NTtyDriver>() {
+        Ok(term) => return Ok(term),
+        Err(term) => term,
+    };
+    match term.downcast::<PtyDriver>() {
+        Ok(term) => Ok(term),
+        Err(_) => Err(KError::OperationNotSupported),
+    }
+}
+
+struct TtyFilePrivate {
+    tty: Arc<dyn DeviceFileOps>,
+}
+
+impl TtyFilePrivate {
+    fn new(tty: Arc<dyn DeviceFileOps>) -> Self {
+        Self { tty }
+    }
+}
+
+fn tty_file_private(file: &VfsFile) -> KResult<Arc<TtyFilePrivate>> {
+    file.private_data_get::<TtyFilePrivate>()
+        .ok_or(KError::InvalidInput)
+}
 
 /// TTY device combining terminal and line discipline
 pub struct Tty<R, W> {
@@ -76,7 +109,15 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
 }
 
 impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> KResult<usize> {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> KResult<usize> {
         if self.is_ptm || self.terminal.job_control.current_in_foreground() {
             self.ldisc.lock().read(buf)
         } else {
@@ -84,12 +125,12 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         }
     }
 
-    fn write_at(&self, buf: &[u8], _offset: u64) -> KResult<usize> {
+    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> KResult<usize> {
         self.writer.write(buf);
         Ok(buf.len())
     }
 
-    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> KResult<usize> {
         use linux_raw_sys::ioctl::*;
         match cmd {
             TCGETS => {
@@ -160,16 +201,16 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         Ok(0)
     }
 
-    fn as_pollable(&self) -> Option<&dyn Pollable> {
-        Some(self)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
+    }
+
+    fn poll(&self, _file: &VfsFile) -> IoEvents {
+        Pollable::poll(self)
+    }
+
+    fn register_poll(&self, _file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        Pollable::register(self, context, events);
     }
 }
 
@@ -195,19 +236,46 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
 /// /dev/tty device - refers to the calling process's controlling terminal
 pub struct CurrentTty;
 impl DeviceFileOps for CurrentTty {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> KResult<usize> {
-        Err(KError::InvalidInput)
+    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> KResult<()> {
+        let tty = current_tty_ops()?;
+        file.set_nonblocking(true);
+        file.set_private_data(Arc::new(TtyFilePrivate::new(tty)));
+        Ok(())
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> KResult<usize> {
-        Ok(0)
+    fn supports_read(&self) -> bool {
+        true
     }
 
-    fn ioctl(&self, _cmd: u32, _arg: usize) -> KResult<usize> {
-        Err(KError::NotATty)
+    fn supports_write(&self) -> bool {
+        true
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> KResult<usize> {
+        let tty = tty_file_private(file)?;
+        tty.tty.read(file, buf, offset)
+    }
+
+    fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> KResult<usize> {
+        let tty = tty_file_private(file)?;
+        tty.tty.write(file, buf, offset)
+    }
+
+    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> KResult<usize> {
+        let tty = tty_file_private(file)?;
+        tty.tty.ioctl(file, cmd, arg)
+    }
+
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        match tty_file_private(file) {
+            Ok(tty) => tty.tty.poll(file),
+            Err(_) => IoEvents::empty(),
+        }
+    }
+
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(tty) = tty_file_private(file) {
+            tty.tty.register_poll(file, context, events);
+        }
     }
 }

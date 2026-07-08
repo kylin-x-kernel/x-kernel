@@ -14,7 +14,6 @@ extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
 
-mod bootstrap;
 mod runtime;
 #[cfg(feature = "unittest")]
 mod unittest_simple;
@@ -91,7 +90,6 @@ fn main() {
 
     print_boot_info();
 
-    use kfs::kernel_fs_context;
     runtime::init_runtime();
 
     if kbuild_config::KFEAT_VMM && !kvmm::selftest::vmm_selftest_smp() {
@@ -116,15 +114,13 @@ fn main() {
     let exit_code = posix_process::run_init_process(&args, &envs, ksyscall::dispatch_irq_syscall);
     info!("Init process exited with code: {exit_code:?}");
 
-    let cx = kernel_fs_context().lock();
-    cx.root_dir()
-        .unmount_all()
+    let namespace = kvfs::MntNamespace::initial().expect("mount namespace must be initialized");
+    kvfs::sync_filesystems().expect("Failed to flush mounted filesystems");
+    let root = namespace.visible_root_path();
+    namespace
+        .detach_tree(&root)
         .expect("Failed to unmount all filesystems");
-    cx.root_dir()
-        .super_block()
-        .sync_fs()
-        .expect("Failed to flush rootfs");
-    drop(cx);
+    root.sync_filesystem().expect("Failed to flush rootfs");
 
     info!("Init process finished, powering off...");
     khal::power::shutdown();
@@ -144,21 +140,21 @@ fn main() {
     runtime::register_unittest_runtime();
 
     {
-        let fs_context = kfs::kernel_fs_context().lock().clone();
-        let lookup_context = fs_context.lookup_context();
+        let fs_struct = fs_context::init_fs().lock().clone_for_process();
 
         warn!("Cleaning up stale coverage data if exists...");
-        let remove_result = kvfs::lookup_location(
-            &lookup_context,
-            "/.llvm-cov/default.profraw",
-            kvfs::LookupIntent::Open,
-            kvfs::LookupFlags::no_follow(),
-        )
-        .and_then(|file| {
-            file.parent()
-                .ok_or(kvfs::VfsError::IsADirectory)?
-                .unlink(file.name(), false)
-        });
+        let remove_result = kvfs::Filename::new("/.llvm-cov/default.profraw")
+            .lookup_at(
+                fs_struct.root(),
+                fs_struct.pwd(),
+                kvfs::LookupIntent::Open,
+                kvfs::LookupFlags::no_follow(),
+            )
+            .and_then(|file| {
+                file.parent()
+                    .ok_or(kvfs::VfsError::IsADirectory)?
+                    .unlink(file.name())
+            });
         if let Err(err) = remove_result {
             if err.canonicalize() != kvfs::VfsError::NotFound {
                 warn!("Failed to remove stale coverage data: {:?}", err);
@@ -337,28 +333,27 @@ fn main() {
     if let Err(e) = xcover::write_profraw(&mut cov) {
         error!("write_profraw failed: {:?}", e);
     } else if !cov.is_empty() {
-        let fs_context = kfs::kernel_fs_context().lock().clone();
-        let lookup_context = fs_context.lookup_context();
+        let fs_struct = fs_context::init_fs().lock().clone_for_process();
         let write_result = (|| -> kvfs::VfsResult<()> {
-            let _ = kvfs::lookup_nonexistent(
-                &lookup_context,
-                kvfs::path::Path::new("/.llvm-cov"),
-                kvfs::LookupIntent::Open,
-            )
-            .and_then(|(dir, name)| {
-                dir.create(
-                    name,
-                    kvfs::NodeType::Directory,
-                    kvfs::NodePermission::default(),
+            let _ = kvfs::Filename::new("/.llvm-cov")
+                .create_at(
+                    fs_struct.root(),
+                    fs_struct.pwd(),
+                    kvfs::LookupIntent::Open,
+                    kvfs::LookupFlags::DIRECTORY,
                 )
-            });
-            let file = kfs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&fs_context, "/.llvm-cov/default.profraw")?;
-            file.write_at(cov.as_slice(), 0)?;
-            file.sync(false)
+                .and_then(|(dir, name)| dir.mkdir(&name, kvfs::NodePermission::default()));
+            let file = kvfs::Filename::new("/.llvm-cov/default.profraw").open_with_flags_at(
+                fs_struct.root(),
+                fs_struct.pwd(),
+                linux_raw_sys::general::O_WRONLY
+                    | linux_raw_sys::general::O_CREAT
+                    | linux_raw_sys::general::O_TRUNC,
+                kvfs::NodePermission::from_bits_truncate(0o644),
+            )?;
+            let mut pos = 0;
+            file.write_from(cov.as_slice(), &mut pos)?;
+            file.fsync(false)
         })();
 
         if let Err(e) = write_result {
@@ -370,7 +365,7 @@ fn main() {
             );
         }
 
-        if let Err(e) = fs_context.root_dir().super_block().sync_fs() {
+        if let Err(e) = kvfs::sync_filesystems() {
             error!("Failed to flush filesystem: {:?}", e);
         }
     } else {

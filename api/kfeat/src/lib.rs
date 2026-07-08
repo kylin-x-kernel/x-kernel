@@ -20,7 +20,8 @@
 //!     - `paging`: Enable page table manipulation.
 //!     - `tls`: Enable thread-local storage.
 //! - Upperlayer stacks (fs, net, display)
-//!     - `fs`: Enable file system support.
+//!     - File system support is gated by Kconfig `KFEAT_FS`; Cargo features
+//!       expose concrete filesystem capabilities such as `fs_ext4`.
 //!     - `myfs`: Allow users to define their custom filesystems to override the default.
 //!     - `net`: Enable networking support.
 //!     - `display`: Enable graphics support.

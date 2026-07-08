@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux filesystem compatibility helpers and syscall implementations.
+//! Filesystem syscall implementations.
 
 #![no_std]
 

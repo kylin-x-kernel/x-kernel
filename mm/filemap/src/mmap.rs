@@ -6,12 +6,11 @@
 use alloc::sync::Arc;
 
 use kerrno::KResult;
-use kfd::FileLike;
-use kfs::File;
 use khal::paging::{MappingFlags, PageSize};
 use ksync::Mutex;
-use kvfs::MmapMapper;
+use kvfs::{MmapMapper, VfsFile};
 use memaddr::{MemoryAddr, PhysAddrRange, VirtAddr};
+use memfs::shmem;
 use memspace::{InvalidateHandle, MmSpace, VmArea, VmRuntimeRef};
 
 use crate::{
@@ -38,7 +37,7 @@ pub struct FileMmapRequest {
     pub page_size: PageSize,
     pub flags: MappingFlags,
     pub max_flags: MappingFlags,
-    pub file: Arc<File>,
+    pub file: Arc<VfsFile>,
     pub mm_id: u64,
     pub aspace: Arc<Mutex<MmSpace>>,
     pub invalidate: InvalidateHandle,
@@ -98,9 +97,9 @@ impl MmapMapper for FileMapper {
 /// shared/private mode, offset, and target address range.
 fn mmap_file(req: FileMmapRequest, mode: FileMappingMode) -> KResult<(VmArea, VmRuntimeRef)> {
     let file = req.file.clone();
-    let inode = file.location().inode();
+    let inode = file.inode().inode();
     let path = file
-        .location()
+        .path()
         .absolute_path()
         .ok()
         .map(|it| it.as_str().into());
@@ -136,7 +135,7 @@ fn mmap_file(req: FileMmapRequest, mode: FileMappingMode) -> KResult<(VmArea, Vm
 /// Resolves a Linux `MAP_SHARED`-style file-backed mapping request.
 pub fn mmap_shared_file(req: FileMmapRequest) -> KResult<(VmArea, VmRuntimeRef)> {
     if req.flags.contains(MappingFlags::WRITE) {
-        req.file.check_shmem_shared_writable_mapping_allowed()?;
+        shmem::check_shared_writable_mapping_allowed(req.file.path())?;
     }
     mmap_file(req, FileMappingMode::Shared)
 }

@@ -2,6 +2,7 @@ menu "eBPF"
 
 config KFEAT_EBPF
     bool "Enable eBPF execution engine"
+    depends on KFEAT_FS
     default n
     help
       Enable the in-kernel eBPF interpreter (crate `kbpf`).

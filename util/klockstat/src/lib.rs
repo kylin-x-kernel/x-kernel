@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn dump_lock_stat_aligns_columns() {
         let out = dump_lock_stat_from(&[LockClassEntry {
-            location: "process/kthread/src/registry.rs:18",
+            location: "process/kprocess/src/scheduler.rs:18",
             kind: "RwLock",
             contentions: 0,
             acquisitions: 33,

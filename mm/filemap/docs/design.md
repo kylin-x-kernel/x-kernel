@@ -10,8 +10,8 @@ VMA-side `vm_operations_struct` setup.
 
 It is not a file content owner. File-backed content ownership belongs to the
 inode address-space object: `VfsInode::i_mapping -> kvfs::AddressSpace ->
-pagecache::Mapping`. `filemap` receives an opened `kfs::File` and reaches the
-Linux-style `file->f_mapping` equivalent through `File::page_cache_mapping()`.
+pagecache::Mapping`. `filemap` receives an opened `kvfs::VfsFile` and reaches
+the Linux-style `file->f_mapping` equivalent through `VfsFile::mapping()`.
 
 ## Responsibilities
 
@@ -42,7 +42,7 @@ Those responsibilities belong to:
 
 - `kvfs`: inode `i_mapping`, `AddressSpace`, and filesystem address-space ops.
 - `pagecache`: file-backed content object and `Mapping` identity.
-- `kfs`: VFS/open-file facade used by current file descriptor paths.
+- `kvfs`: VFS/open-file facade used by current file descriptor paths.
 - `vmobj`: object/view/invalidate language.
 - `anon`: private/shared anonymous object ownership.
 - `memspace`: VMA tree, page-table mutation, fault dispatch, and invalidate
@@ -61,8 +61,8 @@ posix/mm or process/kexec
 
 FileSharedRuntime
   -> SharedFileSourceAdapter
-  -> Arc<kfs::File>
-  -> File::page_cache_mapping()
+  -> Arc<kvfs::VfsFile>
+  -> VfsFile::mapping()
   -> VfsInode::i_mapping / AddressSpace
   -> pagecache::Mapping
   -> map shared folio into PTE

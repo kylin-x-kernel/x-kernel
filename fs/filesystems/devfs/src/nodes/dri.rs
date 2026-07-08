@@ -6,17 +6,18 @@
 
 use alloc::sync::Arc;
 
-use kvfs_simple::{DirMapping, SimpleDir, SimpleFs};
+use kvfs::{DirMapping, SimpleDir, SimpleFs};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
-/// Register `/dev/dri/card0` in devfs if a display device is available.
+/// Register `/dev/dri/card0` if a display device is available.
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     if !drmdevice::available() {
         return;
     }
     let mut dri_dir = DirMapping::new();
-    dri_dir.add(
+    add_device_entry(
+        &mut dri_dir,
         "card0",
         DeviceFile::new(
             fs.clone(),

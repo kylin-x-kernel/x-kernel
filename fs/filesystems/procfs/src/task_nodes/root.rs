@@ -11,22 +11,19 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{any::Any, ffi::CStr, iter, str, task::Context};
+use core::{ffi::CStr, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use khal::paging::MappingFlags;
-use kpoll::{IoEvents, Pollable};
-use kprocess::{AsThread, Process, TaskStat};
+use kprocess::{AsThread, Process, TaskStat, procfs};
 use ktask::{KtaskRef, WeakKtaskRef, current};
-use kvfs::{
-    FileNodeOps, LookupFlags, LookupIntent, MagicLinkOps, Metadata, MetadataUpdate, NodeFlags,
-    NodeOps, NodePermission, NodeType, ResolvedObject, VfsError, VfsResult,
-};
 #[cfg(feature = "tee")]
-use kvfs_simple::DirMapping;
-use kvfs_simple::{
-    NodeOpsMux, RwFile, SeqFileNode, SeqIterator, SimpleDir, SimpleDirOps, SimpleFile,
-    SimpleFileOperation, SimpleFs, SimpleFsNode,
+use kvfs::DirMapping;
+use kvfs::{
+    Dentry, FileOperations, InodeOperations, InodeSymlinkOperations, LookupFlags, LookupIntent,
+    MagicLinkOps, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, ResolvedObject,
+    RwFile, SeqFileInode, SeqIterator, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFile,
+    SimpleFileOperation, SimpleFs, SimpleFsNode, VfsError, VfsFile, VfsInode, VfsResult,
 };
 
 #[cfg(feature = "tee")]
@@ -44,21 +41,22 @@ impl SimpleDirOps for ProcessTaskDir {
             return Box::new(iter::empty());
         };
         Box::new(
-            kprocess::procfs::thread_ids(&process)
+            process
+                .threads()
                 .into_iter()
                 .map(|tid| tid.to_string().into()),
         )
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let process = self.process.upgrade().ok_or(VfsError::NotFound)?;
         let tid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-        let task = kprocess::procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?;
-        if task.as_thread().pid() != process.pid() {
+        let task = procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?;
+        if task.as_thread().process().pid() != process.pid() {
             return Err(VfsError::NotFound);
         }
 
-        Ok(make_thread_dir(self.fs.clone(), &task))
+        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -67,11 +65,12 @@ impl SimpleDirOps for ProcessTaskDir {
 }
 
 fn task_status(task: &KtaskRef) -> String {
-    format_task_status(&task.name(), task.as_thread().pid(), task.as_thread().tid())
+    let thread = task.as_thread();
+    format_task_status(&task.name(), thread.process().pid(), thread.tid() as u64)
 }
 
 #[rustfmt::skip]
-fn format_task_status(name: &str, tgid: u32, pid: u32) -> String {
+fn format_task_status(name: &str, tgid: u32, pid: u64) -> String {
     format!(
         "Name:\t{}\n\
         Tgid:\t{}\n\
@@ -103,6 +102,12 @@ fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
         .and_then(|it| it.parse::<i32>().ok())
         .map(Some)
         .ok_or(VfsError::InvalidInput)
+}
+
+fn proc_self_target() -> VfsResult<String> {
+    let task = current();
+    let thread = task.try_as_thread().ok_or(VfsError::NotFound)?;
+    Ok(thread.process().pid().to_string())
 }
 
 fn maps_permissions(flags: MappingFlags) -> [u8; 4] {
@@ -237,10 +242,9 @@ impl SeqIterator for MapsIter {
         };
 
         let process = task.as_thread().process();
-        let heap_top = process.heap_top().unwrap_or(USER_HEAP_BASE);
-        let aspace_ref = match process.address_space() {
-            Ok(aspace_ref) => aspace_ref,
-            Err(_) => return,
+        let heap_top = process.heap_top().unwrap_or(0);
+        let Ok(aspace_ref) = process.address_space() else {
+            return;
         };
         let aspace = aspace_ref.lock();
         for vma in aspace.vmas() {
@@ -299,11 +303,9 @@ impl ProcFdLink {
 
     fn display_target(&self) -> VfsResult<String> {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        Ok(task
-            .as_thread()
+        task.as_thread()
             .process()
-            .resources()
-            .map_err(|_| VfsError::NotFound)?
+            .resources()?
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -313,52 +315,58 @@ impl ProcFdLink {
                 }
             })?
             .path()
-            .into_owned())
+            .display_path()
+    }
+
+    fn target_len(&self) -> VfsResult<u64> {
+        Ok(self.display_target()?.len() as u64)
     }
 }
 
-impl NodeOps for ProcFdLink {
-    fn inode(&self) -> u64 {
-        self.node.inode()
+impl InodeOperations for ProcFdLink {
+    fn symlink_operations(&self) -> Option<&dyn InodeSymlinkOperations> {
+        Some(self)
     }
 
-    fn metadata(&self) -> VfsResult<Metadata> {
-        let mut metadata = self.node.metadata()?;
-        metadata.size = self.len()?;
+    fn getattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        let mut metadata = self.node.getattr(idmap, path, request_mask, query_flags)?;
+        metadata.size = self.target_len()?;
         Ok(metadata)
     }
 
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        self.node.update_metadata(update)
-    }
-
-    fn len(&self) -> VfsResult<u64> {
-        Ok(self.display_target()?.len() as u64)
-    }
-
-    fn sync(&self, data_only: bool) -> VfsResult<()> {
-        self.node.sync(data_only)
-    }
-
-    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
-
-    fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE
+    fn setattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<()> {
+        self.node.setattr(idmap, dentry, update)
     }
 }
 
-impl Pollable for ProcFdLink {
-    fn poll(&self) -> IoEvents {
-        IoEvents::IN | IoEvents::OUT
+impl InodeSymlinkOperations for ProcFdLink {
+    fn get_link(
+        &self,
+        _dentry: Option<&Dentry>,
+        _inode: &kvfs::VfsInode,
+        _done: &mut kvfs::DelayedCall,
+    ) -> VfsResult<String> {
+        self.display_target()
     }
-
-    fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
 }
 
-impl FileNodeOps for ProcFdLink {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+impl FileOperations for ProcFdLink {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let target = self.display_target()?;
         let data = target.as_bytes();
         if offset >= data.len() as u64 {
@@ -370,25 +378,19 @@ impl FileNodeOps for ProcFdLink {
         Ok(read)
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        Err(VfsError::BadFileDescriptor)
-    }
-
-    fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
-        Err(VfsError::BadFileDescriptor)
-    }
-
-    fn set_len(&self, _len: u64) -> VfsResult<()> {
-        Err(VfsError::BadFileDescriptor)
-    }
-
-    fn set_symlink(&self, _target: &str) -> VfsResult<()> {
-        Err(VfsError::BadFileDescriptor)
-    }
-
     fn magic_link(self: Arc<Self>) -> Option<Arc<dyn MagicLinkOps>> {
         Some(self)
     }
+}
+
+fn proc_fd_link_child(
+    lookup: SimpleDirLookup<'_>,
+    name: &str,
+    link: Arc<ProcFdLink>,
+) -> VfsResult<Dentry> {
+    let init = link.node.inode_init().with_size(link.target_len()?);
+    let inode = VfsInode::new_file_with_flags(link, NodeFlags::NON_CACHEABLE, init);
+    Ok(lookup.file_from_inode(name, inode))
 }
 
 impl MagicLinkOps for ProcFdLink {
@@ -405,8 +407,7 @@ impl MagicLinkOps for ProcFdLink {
         let snapshot = task
             .as_thread()
             .process()
-            .resources()
-            .map_err(|_| VfsError::NotFound)?
+            .resources()?
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -415,11 +416,7 @@ impl MagicLinkOps for ProcFdLink {
                     err
                 }
             })?;
-        let location = snapshot
-            .inner()
-            .vfs_location()
-            .ok_or(VfsError::OperationNotSupported)?;
-        Ok(ResolvedObject::location(location))
+        Ok(ResolvedObject::location(snapshot.file().path().clone()))
     }
 }
 
@@ -445,14 +442,13 @@ impl SimpleDirOps for ThreadFdDir {
         Box::new(ids.into_iter())
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
         task.as_thread()
             .process()
-            .resources()
-            .map_err(|_| VfsError::NotFound)?
+            .resources()?
             .snapshot_fd(fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -461,7 +457,7 @@ impl SimpleDirOps for ThreadFdDir {
                     err
                 }
             })?;
-        Ok(ProcFdLink::new(fs, Arc::downgrade(&task), fd).into())
+        proc_fd_link_child(lookup, name, ProcFdLink::new(fs, Arc::downgrade(&task), fd))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -474,7 +470,12 @@ struct ThreadDir {
     task: WeakKtaskRef,
 }
 
-fn make_thread_dir(fs: Arc<SimpleFs>, task: &KtaskRef) -> NodeOpsMux {
+fn make_thread_dir(
+    lookup: SimpleDirLookup<'_>,
+    name: &str,
+    fs: Arc<SimpleFs>,
+    task: &KtaskRef,
+) -> Dentry {
     let thread_dir = ThreadDir {
         fs: fs.clone(),
         task: Arc::downgrade(task),
@@ -483,17 +484,18 @@ fn make_thread_dir(fs: Arc<SimpleFs>, task: &KtaskRef) -> NodeOpsMux {
     #[cfg(feature = "tee")]
     if has_ta_info(task) {
         let mut ext = DirMapping::new();
-        ext.add(
-            "ta_info",
-            make_ta_info_dir(fs.clone(), Arc::downgrade(task)),
+        ext.add_child("ta_info", {
+            let fs = fs.clone();
+            let task = Arc::downgrade(task);
+            move |lookup, name| Ok(make_ta_info_dir(lookup, name, fs.clone(), task.clone()))
+        });
+        return lookup.dir(
+            name,
+            SimpleDir::new_maker(fs.clone(), Arc::new(thread_dir.chain(ext))),
         );
-        return NodeOpsMux::Dir(SimpleDir::new_maker(
-            fs.clone(),
-            Arc::new(thread_dir.chain(ext)),
-        ));
     }
 
-    NodeOpsMux::Dir(SimpleDir::new_maker(fs, Arc::new(thread_dir)))
+    lookup.dir(name, SimpleDir::new_maker(fs, Arc::new(thread_dir)))
 }
 
 const PROC_NS_BASE: u64 = 0xf000_0000;
@@ -528,7 +530,7 @@ impl SimpleDirOps for ThreadNsDir {
         )
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         if !matches!(
             name,
             "mnt" | "pid" | "net" | "ipc" | "uts" | "user" | "cgroup"
@@ -536,11 +538,11 @@ impl SimpleDirOps for ThreadNsDir {
             return Err(VfsError::NotFound);
         }
         let target = namespace_link_target(name);
-        Ok(
+        lookup.file(
+            name,
             SimpleFile::new(self.fs.clone(), NodeType::Symlink, move || {
                 Ok(target.clone())
-            })
-            .into(),
+            }),
         )
     }
 
@@ -573,115 +575,155 @@ impl SimpleDirOps for ThreadDir {
         )
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        Ok(match name {
-            "stat" => SimpleFile::new_regular(fs, move || {
-                Ok(format!("{}", TaskStat::from_thread(&task)?).into_bytes())
-            })
-            .into(),
-            "status" => SimpleFile::new_regular(fs, move || Ok(task_status(&task))).into(),
-            "oom_score_adj" => SimpleFile::new_regular(
-                fs,
-                RwFile::new(move |req| match req {
-                    SimpleFileOperation::Read => {
-                        Ok(Some(format_oom_score_adj(task.as_thread().oom_score_adj())))
-                    }
-                    SimpleFileOperation::Write(data) => {
-                        if let Some(value) = parse_oom_score_adj_input(data)? {
-                            task.as_thread().set_oom_score_adj(value);
+        match name {
+            "stat" => lookup.file(
+                name,
+                SimpleFile::new_regular(fs.clone(), move || {
+                    Ok(format!("{}", TaskStat::from_thread(&task)?).into_bytes())
+                }),
+            ),
+            "status" => lookup.file(
+                name,
+                SimpleFile::new_regular(fs.clone(), move || Ok(task_status(&task))),
+            ),
+            "oom_score_adj" => lookup.file(
+                name,
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(move |req| match req {
+                        SimpleFileOperation::Read => {
+                            Ok(Some(format_oom_score_adj(task.as_thread().oom_score_adj())))
                         }
-                        Ok(None)
-                    }
-                }),
-            )
-            .into(),
-            "task" => SimpleDir::new_maker(
-                fs.clone(),
-                Arc::new(ProcessTaskDir {
-                    fs,
-                    process: Arc::downgrade(task.as_thread().process()),
-                }),
-            )
-            .into(),
-            "maps" => SeqFileNode::new_regular(fs, MapsIter::new(Arc::downgrade(&task))).into(),
-            "mounts" => SeqFileNode::new_regular(
-                fs.clone(),
-                ProcMountIter::mounts_for_task(Arc::downgrade(&task)),
-            )
-            .into(),
-            "mountinfo" => SeqFileNode::new_regular(
-                fs.clone(),
-                ProcMountIter::mountinfo_for_task(Arc::downgrade(&task)),
-            )
-            .into(),
-            "mountstats" => SeqFileNode::new_regular(
-                fs,
-                ProcMountIter::mountstats_for_task(Arc::downgrade(&task)),
-            )
-            .into(),
-            "cgroup" => SimpleFile::new_regular(fs.clone(), move || Ok("0::/\n")).into(),
-            "ns" => SimpleDir::new_maker(fs.clone(), Arc::new(ThreadNsDir { fs })).into(),
-            "cmdline" => SimpleFile::new_regular(fs, move || {
-                let cmdline = task
-                    .as_thread()
-                    .process()
-                    .cmdline()
-                    .map_err(|_| VfsError::NotFound)?;
-                let mut buf = Vec::new();
-                for arg in cmdline.iter() {
-                    buf.extend_from_slice(arg.as_bytes());
-                    buf.push(0);
-                }
-                Ok(buf)
-            })
-            .into(),
-            "comm" => SimpleFile::new_regular(
-                fs,
-                RwFile::new(move |req| match req {
-                    SimpleFileOperation::Read => {
-                        let mut bytes = vec![0; 16];
-                        let name = task.name();
-                        let copy_len = name.len().min(15);
-                        bytes[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
-                        bytes[copy_len] = b'\n';
-                        Ok(Some(bytes))
-                    }
-                    SimpleFileOperation::Write(data) => {
-                        if !data.is_empty() {
-                            let mut input = [0; 16];
-                            let copy_len = data.len().min(15);
-                            input[..copy_len].copy_from_slice(&data[..copy_len]);
-                            task.set_name(
-                                CStr::from_bytes_until_nul(&input)
-                                    .map_err(|_| VfsError::InvalidInput)?
-                                    .to_str()
-                                    .map_err(|_| VfsError::InvalidInput)?,
-                            );
+                        SimpleFileOperation::Write(data) => {
+                            if let Some(value) = parse_oom_score_adj_input(data)? {
+                                task.as_thread().set_oom_score_adj(value);
+                            }
+                            Ok(None)
                         }
-                        Ok(None)
+                    }),
+                ),
+            ),
+            "task" => Ok(lookup.dir(
+                name,
+                SimpleDir::new_maker(
+                    fs.clone(),
+                    Arc::new(ProcessTaskDir {
+                        fs: fs.clone(),
+                        process: Arc::downgrade(task.as_thread().process()),
+                    }),
+                ),
+            )),
+            "maps" => lookup.file(
+                name,
+                SeqFileInode::new_regular(fs.clone(), move || MapsIter::new(Arc::downgrade(&task))),
+            ),
+            "mounts" => lookup.file(
+                name,
+                SeqFileInode::new_regular(fs.clone(), move || {
+                    let root = task
+                        .as_thread()
+                        .process()
+                        .fs_context()
+                        .ok()
+                        .map(|fs| fs.lock().root().clone());
+                    ProcMountIter::mounts(root)
+                }),
+            ),
+            "mountinfo" => lookup.file(
+                name,
+                SeqFileInode::new_regular(fs.clone(), move || {
+                    let root = task
+                        .as_thread()
+                        .process()
+                        .fs_context()
+                        .ok()
+                        .map(|fs| fs.lock().root().clone());
+                    ProcMountIter::mountinfo(root)
+                }),
+            ),
+            "mountstats" => lookup.file(
+                name,
+                SeqFileInode::new_regular(fs.clone(), move || {
+                    let root = task
+                        .as_thread()
+                        .process()
+                        .fs_context()
+                        .ok()
+                        .map(|fs| fs.lock().root().clone());
+                    ProcMountIter::mountstats(root)
+                }),
+            ),
+            "cgroup" => lookup.file(
+                name,
+                SimpleFile::new_regular(fs.clone(), move || Ok("0::/\n")),
+            ),
+            "ns" => Ok(lookup.dir(
+                name,
+                SimpleDir::new_maker(fs.clone(), Arc::new(ThreadNsDir { fs: fs.clone() })),
+            )),
+            "cmdline" => lookup.file(
+                name,
+                SimpleFile::new_regular(fs.clone(), move || {
+                    let cmdline = task.as_thread().process().cmdline()?;
+                    let mut buf = Vec::new();
+                    for arg in cmdline.iter() {
+                        buf.extend_from_slice(arg.as_bytes());
+                        buf.push(0);
                     }
+                    Ok(buf)
                 }),
-            )
-            .into(),
-            "exe" => SimpleFile::new(fs, NodeType::Symlink, move || {
-                task.as_thread()
-                    .process()
-                    .exe_path()
-                    .map_err(|_| VfsError::NotFound)
-            })
-            .into(),
-            "fd" => SimpleDir::new_maker(
-                fs.clone(),
-                Arc::new(ThreadFdDir {
-                    fs,
-                    task: Arc::downgrade(&task),
+            ),
+            "comm" => lookup.file(
+                name,
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(move |req| match req {
+                        SimpleFileOperation::Read => {
+                            let mut bytes = vec![0; 16];
+                            let name = task.name();
+                            let copy_len = name.len().min(15);
+                            bytes[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+                            bytes[copy_len] = b'\n';
+                            Ok(Some(bytes))
+                        }
+                        SimpleFileOperation::Write(data) => {
+                            if !data.is_empty() {
+                                let mut input = [0; 16];
+                                let copy_len = data.len().min(15);
+                                input[..copy_len].copy_from_slice(&data[..copy_len]);
+                                task.set_name(
+                                    CStr::from_bytes_until_nul(&input)
+                                        .map_err(|_| VfsError::InvalidInput)?
+                                        .to_str()
+                                        .map_err(|_| VfsError::InvalidInput)?,
+                                );
+                            }
+                            Ok(None)
+                        }
+                    }),
+                ),
+            ),
+            "exe" => lookup.file(
+                name,
+                SimpleFile::new(fs.clone(), NodeType::Symlink, move || {
+                    task.as_thread().process().exe_path()
                 }),
-            )
-            .into(),
-            _ => return Err(VfsError::NotFound),
-        })
+            ),
+            "fd" => Ok(lookup.dir(
+                name,
+                SimpleDir::new_maker(
+                    fs.clone(),
+                    Arc::new(ThreadFdDir {
+                        fs: fs.clone(),
+                        task: Arc::downgrade(&task),
+                    }),
+                ),
+            )),
+            _ => Err(VfsError::NotFound),
+        }
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -702,21 +744,24 @@ impl ProcFsHandler {
 impl SimpleDirOps for ProcFsHandler {
     fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
         Box::new(
-            kprocess::procfs::visible_processes()
+            procfs::visible_processes()
                 .into_iter()
-                .map(|proc| Cow::Owned(proc.pid().to_string()))
+                .map(|process| Cow::Owned(process.pid().to_string()))
                 .chain([Cow::Borrowed("self")]),
         )
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
-        let task = if name == "self" {
-            current().clone()
-        } else {
-            let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-            kprocess::procfs::process_task(pid).map_err(|_| VfsError::NotFound)?
-        };
-        Ok(make_thread_dir(self.fs.clone(), &task))
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
+        if name == "self" {
+            return lookup.file(
+                name,
+                SimpleFile::new(self.fs.clone(), NodeType::Symlink, proc_self_target),
+            );
+        }
+
+        let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
+        let task = procfs::process_task(pid).map_err(|_| VfsError::NotFound)?;
+        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
     }
 
     fn supports_dentry_cache(&self) -> bool {

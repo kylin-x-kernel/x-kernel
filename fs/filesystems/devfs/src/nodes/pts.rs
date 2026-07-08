@@ -5,16 +5,17 @@
 //! Pseudo-terminal slave directory and master multiplexer.
 
 use alloc::{borrow::Cow, boxed::Box, string::ToString, sync::Arc, vec::Vec};
-use core::any::Any;
 
 use flatten_objects::FlattenObjects;
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use ktty::tty::{PtyDriver, create_pty_pair};
-use kvfs::{DeviceFileOps, DeviceId, NodeType, VfsResult};
-use kvfs_simple::{NodeOpsMux, SimpleDirOps, SimpleFs};
+use kvfs::{
+    Dentry, DeviceFileOps, DeviceId, NodeType, SimpleDirLookup, SimpleDirOps, SimpleFs, VfsFile,
+    VfsFileBuilder, VfsInode, VfsResult,
+};
 
-use crate::DeviceFile;
+use crate::{DeviceFile, device_dentry};
 
 static PTS_TABLE: SpinNoIrq<FlattenObjects<Arc<DeviceFile>, 16>> =
     SpinNoIrq::new(FlattenObjects::new());
@@ -58,20 +59,14 @@ impl Ptmx {
 }
 
 impl DeviceFileOps for Ptmx {
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> KResult<usize> {
-        Err(KError::InvalidInput)
+    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        let (master, _) = self.create_pty()?;
+        file.replace_fops(master);
+        Ok(())
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> KResult<usize> {
-        Err(KError::InvalidInput)
-    }
-
-    fn ioctl(&self, _cmd: u32, _arg: usize) -> KResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, _cmd: u32, _arg: usize) -> KResult<usize> {
         Err(KError::NotATty)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -88,9 +83,9 @@ impl SimpleDirOps for PtsDir {
         Box::new(ids.into_iter())
     }
 
-    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let id = name.parse::<usize>().map_err(|_| KError::InvalidData)?;
         let pty = PTS_TABLE.lock().get(id).ok_or(KError::NotFound)?.clone();
-        Ok(NodeOpsMux::File(pty))
+        Ok(device_dentry(lookup, name, pty))
     }
 }

@@ -19,7 +19,6 @@ debug_printf = []
 debug_assert = []
 own_assert = []
 CONFIG_META_CSUM_ENABLE = []
-vfs-perf = []
 
 [dependencies]
 bitflags = "2.10"

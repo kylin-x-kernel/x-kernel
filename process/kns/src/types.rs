@@ -4,8 +4,6 @@
 
 //! Namespace types, flags, and metadata.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
 bitflags::bitflags! {
     /// Flags for namespace creation (CLONE_NEW* family).
     #[derive(Debug, Clone, Copy, Default)]
@@ -50,51 +48,11 @@ impl NamespaceType {
     }
 }
 
-/// Globally unique namespace identifier.
-///
-/// Used for `/proc/[pid]/ns/*` readlink output like `mnt:[4026531840]`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct NamespaceId(u64);
-
-impl Default for NamespaceId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl NamespaceId {
-    /// Allocate a new unique namespace ID.
-    pub fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Returns the raw u64 value.
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-}
-
-impl core::fmt::Display for NamespaceId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 #[cfg(unittest)]
 mod tests_types {
     use unittest::def_test;
 
     use super::*;
-
-    #[def_test]
-    fn test_namespace_id_monotonic() {
-        let id1 = NamespaceId::new();
-        let id2 = NamespaceId::new();
-        let id3 = NamespaceId::new();
-        assert!(id2.as_u64() > id1.as_u64());
-        assert!(id3.as_u64() > id2.as_u64());
-    }
 
     #[def_test]
     fn test_namespace_type_names() {
@@ -106,12 +64,5 @@ mod tests_types {
         assert_eq!(NamespaceType::Net.name(), "net");
         assert_eq!(NamespaceType::Cgroup.name(), "cgroup");
         assert_eq!(NamespaceType::Time.name(), "time");
-    }
-
-    #[def_test]
-    fn test_namespace_id_display() {
-        let id = NamespaceId::new();
-        let displayed = alloc::format!("{}", id);
-        assert!(!displayed.is_empty());
     }
 }

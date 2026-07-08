@@ -296,44 +296,45 @@ impl SocketOps for RawSocket {
         }
         let mut options = options;
 
-        self.general.recv_poller(self, || {
-            poll_interfaces();
-            self.with_smol_socket(|socket| {
-                loop {
-                    let packet = if options.flags.contains(RecvFlags::PEEK) {
-                        let packet = socket.peek().map_err(|_| KError::WouldBlock)?;
-                        let (source, _) = self.parse_ip_packet(packet)?;
+        self.general
+            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                poll_interfaces();
+                self.with_smol_socket(|socket| {
+                    loop {
+                        let packet = if options.flags.contains(RecvFlags::PEEK) {
+                            let packet = socket.peek().map_err(|_| KError::WouldBlock)?;
+                            let (source, _) = self.parse_ip_packet(packet)?;
+                            if let Some(peer) = *self.peer_addr.read()
+                                && source != peer
+                            {
+                                let _ = socket.recv().map_err(|_| KError::WouldBlock)?;
+                                continue;
+                            }
+                            packet
+                        } else {
+                            socket.recv().map_err(|_| KError::WouldBlock)?
+                        };
+                        let (source, packet) = self.parse_ip_packet(packet)?;
+
                         if let Some(peer) = *self.peer_addr.read()
                             && source != peer
                         {
-                            let _ = socket.recv().map_err(|_| KError::WouldBlock)?;
                             continue;
                         }
-                        packet
-                    } else {
-                        socket.recv().map_err(|_| KError::WouldBlock)?
-                    };
-                    let (source, packet) = self.parse_ip_packet(packet)?;
 
-                    if let Some(peer) = *self.peer_addr.read()
-                        && source != peer
-                    {
-                        continue;
+                        if let Some(from) = options.from.as_deref_mut() {
+                            *from = SocketAddrEx::Ip(SocketAddr::new(source.into(), 0));
+                        }
+
+                        let written = dst.write(packet)?;
+                        return Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
+                            packet.len()
+                        } else {
+                            written
+                        });
                     }
-
-                    if let Some(from) = options.from.as_deref_mut() {
-                        *from = SocketAddrEx::Ip(SocketAddr::new(source.into(), 0));
-                    }
-
-                    let written = dst.write(packet)?;
-                    return Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
-                        packet.len()
-                    } else {
-                        written
-                    });
-                }
+                })
             })
-        })
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {

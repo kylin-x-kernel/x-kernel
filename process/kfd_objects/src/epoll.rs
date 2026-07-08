@@ -5,7 +5,6 @@
 //! Epoll instance and interest management.
 
 use alloc::{
-    borrow::Cow,
     collections::vec_deque::VecDeque,
     sync::{Arc, Weak},
     task::Wake,
@@ -20,10 +19,10 @@ use core::{
 use bitflags::bitflags;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult};
-use kfd::FileLike;
 use kpoll::{IoEvents, PollSet, Pollable};
 use kspin::SpinNoPreempt;
-use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
+use kvfs::{AnonInodeFs, FMode, FileOperations, VfsFile, VfsInode};
+use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, O_RDWR, epoll_event};
 
 /// A ready event returned by an [`Epoll`] instance.
 pub struct EpollEvent {
@@ -98,11 +97,11 @@ enum ConsumeResult {
 #[derive(Clone)]
 struct EntryKey {
     fd: i32,
-    file: Weak<dyn FileLike>,
+    file: Weak<VfsFile>,
 }
 
 impl EntryKey {
-    fn new(fd: i32, file: &Arc<dyn FileLike>) -> Self {
+    fn new(fd: i32, file: &Arc<VfsFile>) -> Self {
         Self {
             fd,
             file: Arc::downgrade(file),
@@ -110,7 +109,7 @@ impl EntryKey {
     }
 
     #[inline]
-    fn get_file(&self) -> Option<Arc<dyn FileLike>> {
+    fn get_file(&self) -> Option<Arc<VfsFile>> {
         self.file.upgrade()
     }
 }
@@ -168,7 +167,7 @@ impl EpollInterest {
         self.in_ready_queue.store(false, Ordering::Release);
     }
 
-    fn consume(&self, file: &dyn FileLike) -> ConsumeResult {
+    fn consume(&self, file: &VfsFile) -> ConsumeResult {
         let current_events = file.poll();
         let matched = current_events & self.event.events;
         if matched.is_empty() {
@@ -247,7 +246,7 @@ impl Default for EpollInner {
     }
 }
 
-/// An `epoll` file-like object.
+/// An epoll instance.
 #[derive(Default)]
 pub struct Epoll {
     inner: Arc<EpollInner>,
@@ -257,6 +256,23 @@ impl Epoll {
     /// Creates a new epoll instance.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an anonymous-inode file for this epoll instance.
+    pub fn new_file() -> KResult<Arc<VfsFile>> {
+        AnonInodeFs::global().get_file(
+            "[eventpoll]",
+            Arc::new(EventpollFops),
+            Arc::new(Self::new()),
+            FMode::READ | FMode::WRITE | FMode::STREAM,
+            O_RDWR,
+        )
+    }
+
+    /// Returns the epoll instance attached to an epoll file.
+    pub fn from_file(file: &VfsFile) -> KResult<Arc<Self>> {
+        file.private_data_get::<Self>()
+            .ok_or(KError::BadFileDescriptor)
     }
 
     fn register_waker_only(&self, interest: &Arc<EpollInterest>) {
@@ -273,7 +289,7 @@ impl Epoll {
         }));
 
         let mut context = Context::from_waker(&waker);
-        file.register(&mut context, interest.event.events);
+        file.register_poll(&mut context, interest.event.events);
     }
 
     fn replace_ready_interest(
@@ -320,7 +336,7 @@ impl Epoll {
             waker.wake_by_ref();
         } else {
             let mut context = Context::from_waker(&waker);
-            file.register(&mut context, interest.event.events);
+            file.register_poll(&mut context, interest.event.events);
 
             let current = file.poll() & interest.event.events;
             if !current.is_empty() {
@@ -333,7 +349,7 @@ impl Epoll {
     pub fn add(
         &self,
         fd: i32,
-        file: Arc<dyn FileLike>,
+        file: Arc<VfsFile>,
         event: EpollEvent,
         flags: EpollFlags,
     ) -> KResult<()> {
@@ -354,7 +370,7 @@ impl Epoll {
     pub fn modify(
         &self,
         fd: i32,
-        file: Arc<dyn FileLike>,
+        file: Arc<VfsFile>,
         event: EpollEvent,
         flags: EpollFlags,
     ) -> KResult<()> {
@@ -381,7 +397,7 @@ impl Epoll {
     }
 
     /// Removes an existing interest for the given file descriptor.
-    pub fn delete(&self, fd: i32, file: Arc<dyn FileLike>) -> KResult<()> {
+    pub fn delete(&self, fd: i32, file: Arc<VfsFile>) -> KResult<()> {
         let key = EntryKey::new(fd, &file);
         self.inner
             .interests
@@ -466,12 +482,6 @@ impl Epoll {
     }
 }
 
-impl FileLike for Epoll {
-    fn path(&self) -> Cow<'_, str> {
-        "anon_inode:[eventpoll]".into()
-    }
-}
-
 impl Pollable for Epoll {
     fn poll(&self) -> IoEvents {
         if self.inner.ready_queue.lock().is_empty() {
@@ -488,6 +498,24 @@ impl Pollable for Epoll {
     }
 }
 
+struct EventpollFops;
+
+impl FileOperations for EventpollFops {
+    fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> KResult<()> {
+        Ok(())
+    }
+
+    fn poll(&self, file: &VfsFile) -> IoEvents {
+        Epoll::from_file(file).map_or(IoEvents::ERR, |epoll| epoll.poll())
+    }
+
+    fn register_poll(&self, file: &VfsFile, context: &mut Context<'_>, events: IoEvents) {
+        if let Ok(epoll) = Epoll::from_file(file) {
+            epoll.register(context, events);
+        }
+    }
+}
+
 #[cfg(unittest)]
 mod epoll_tests {
     use kpoll::{IoEvents, Pollable};
@@ -497,8 +525,11 @@ mod epoll_tests {
 
     #[def_test]
     fn test_epoll_creation() {
-        let epoll = Epoll::new();
-        assert_eq!(epoll.path(), "anon_inode:[eventpoll]");
+        let file = Epoll::new_file().expect("epoll file opens");
+        assert_eq!(
+            file.path().absolute_path().unwrap().as_str(),
+            "anon_inode:[eventpoll]"
+        );
     }
 
     #[def_test]
@@ -591,14 +622,14 @@ mod epoll_tests {
     #[def_test]
     fn test_epoll_delete_nonexistent() {
         let epoll = Epoll::new();
-        let dummy: Arc<dyn FileLike> = Arc::new(Epoll::new());
+        let dummy = Epoll::new_file().expect("epoll file opens");
         assert!(epoll.delete(999, dummy).is_err());
     }
 
     #[def_test]
     fn test_epoll_modify_nonexistent() {
         let epoll = Epoll::new();
-        let dummy: Arc<dyn FileLike> = Arc::new(Epoll::new());
+        let dummy = Epoll::new_file().expect("epoll file opens");
         let event = EpollEvent {
             events: IoEvents::IN,
             user_data: 42,
@@ -613,6 +644,6 @@ mod epoll_tests {
     #[def_test]
     fn test_epoll_default() {
         let epoll = Epoll::default();
-        assert_eq!(epoll.path(), "anon_inode:[eventpoll]");
+        assert!(epoll.poll().is_empty());
     }
 }

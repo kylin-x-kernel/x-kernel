@@ -7,7 +7,7 @@
 提供类型安全的发布、枚举、查找和可用性订阅接口。
 
 驱动在 probe 成功后通过 `publish_<class>()` 把运行时能力发布到对应 class 注册表；
-子系统（如 `knet`、`kfs`、input 子系统）通过 `*_devices()` / `find_*_device()` / `subscribe_*_available()`
+子系统（如 `knet`、`fs_boot`、input 子系统）通过 `*_devices()` / `find_*_device()` / `subscribe_*_available()`
 发现和使用运行时设备，无需依赖 probe 顺序。
 
 目标读者是实现设备 class 适配、修改 class 注册表语义或添加新设备类别的开发者。
@@ -90,7 +90,7 @@ drivers/kclass/
                        │
                        │ query / subscribe
                        v
-         knet / kfs / input subsystem / ...
+         knet / fs_boot / input subsystem / ...
 ```
 
 | 组件 | 职责 |

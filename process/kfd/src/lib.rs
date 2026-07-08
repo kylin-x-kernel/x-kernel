@@ -10,46 +10,43 @@ extern crate alloc;
 
 mod fd_table;
 mod file_descriptor;
-mod file_like;
 mod stat;
 
 pub use self::{
     fd_table::FdTable,
     file_descriptor::{FdSnapshot, FileDescriptor},
-    file_like::{FileLike, IoDst, IoSrc, ReadBuf, WriteBuf},
     stat::Kstat,
 };
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{borrow::Cow, sync::Arc};
-    use core::{task::Context, time::Duration};
+    use core::time::Duration;
 
-    use kpoll::{IoEvents, Pollable};
-    use kvfs::DeviceId;
-    use linux_raw_sys::general::stat;
+    use kpoll::IoEvents;
+    use kvfs::{AnonInodeFs, DeviceId, FMode, FileOperations, VfsFile};
+    use linux_raw_sys::general::{O_NONBLOCK, stat};
     use unittest::def_test;
 
-    use crate::{FdTable, FileLike, Kstat};
+    use crate::{FdTable, Kstat};
 
-    struct SnapshotTestFile;
+    struct SnapshotTestFops;
 
-    impl Pollable for SnapshotTestFile {
-        fn poll(&self) -> IoEvents {
+    impl FileOperations for SnapshotTestFops {
+        fn poll(&self, _file: &VfsFile) -> IoEvents {
             IoEvents::IN
         }
-
-        fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
     }
 
-    impl FileLike for SnapshotTestFile {
-        fn path(&self) -> Cow<'_, str> {
-            Cow::Borrowed("/snapshot-test")
-        }
-
-        fn open_flags(&self) -> u32 {
-            0x2000
-        }
+    fn snapshot_test_file() -> alloc::sync::Arc<VfsFile> {
+        AnonInodeFs::global()
+            .get_file(
+                "[snapshot-test]",
+                alloc::sync::Arc::new(SnapshotTestFops),
+                alloc::sync::Arc::new(()),
+                FMode::READ,
+                O_NONBLOCK,
+            )
+            .expect("snapshot test anon inode file opens")
     }
 
     #[def_test]
@@ -106,20 +103,21 @@ mod tests {
     }
 
     #[def_test]
-    fn test_fd_snapshot_keeps_file_like_alive_after_close() {
+    fn test_fd_snapshot_keeps_file_alive_after_close() {
         let mut table = FdTable::default();
-        let fd = table
-            .add_file_like(16, Arc::new(SnapshotTestFile), true)
-            .unwrap();
+        let fd = table.add_file(16, snapshot_test_file(), true).unwrap();
 
         let snapshot = table.snapshot(fd).unwrap();
-        table.close_file_like(fd).unwrap();
+        table.file_close_fd_locked(fd).unwrap().close().unwrap();
 
         assert_eq!(snapshot.fd(), fd);
         assert!(snapshot.cloexec());
-        assert_eq!(snapshot.open_flags(), 0x2000);
-        assert_eq!(snapshot.path(), "/snapshot-test");
-        assert!(snapshot.inner().poll().contains(IoEvents::IN));
+        assert_eq!(snapshot.open_flags(), O_NONBLOCK);
+        assert_eq!(
+            snapshot.path().display_path().unwrap(),
+            "anon_inode:[snapshot-test]"
+        );
+        assert!(snapshot.file().poll().contains(IoEvents::IN));
         assert!(matches!(
             table.snapshot(fd),
             Err(kerrno::KError::BadFileDescriptor)

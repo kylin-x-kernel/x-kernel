@@ -4,7 +4,7 @@
 
 //! Time namespace (placeholder).
 
-use crate::types::NamespaceId;
+use kcred::NamespaceId;
 
 /// Time namespace.
 ///

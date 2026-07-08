@@ -6,9 +6,10 @@
 
 use core::ffi::c_char;
 
+use kcred::NamespaceId;
 use ksync::RwLock;
 
-use crate::{error::UtsError, types::NamespaceId};
+use crate::error::UtsError;
 
 const UTS_LEN: usize = 65;
 

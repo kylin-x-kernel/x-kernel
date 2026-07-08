@@ -36,7 +36,6 @@ pub mod resource_limits;
 /// Scheduler-facing task, process, and group resolution.
 pub mod scheduler;
 mod session;
-mod signal;
 mod stat;
 /// System-wide observable process/task views.
 pub mod system_view;
@@ -49,9 +48,6 @@ pub mod wait_reap;
 extern crate klogger;
 
 pub use credentials::{with_current_credentials, with_current_credentials_mut};
-pub use kns::{CloneNsError, NamespaceFlags, NsProxy, UtsNamespace};
-pub use kresources::ProcessResources;
-pub use lifecycle::ProcessLifecycleState;
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
 pub use process::{Process, ProcessExecUpdate, init_proc};
@@ -64,19 +60,17 @@ pub use stat::TaskStat;
 #[cfg(feature = "tee")]
 pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 pub use thread::{
-    AsThread, CpuTimeState, CpuTimeStatistics, CurrentThread, PreparedUserClone, Thread,
-    current_fs_context, current_task_name, current_user_process,
-    current_user_process_address_space, current_user_process_fs_context, current_user_thread,
-    current_user_tid, with_current_user_thread,
+    AsThread, CpuTimeState, CurrentThread, PreparedUserClone, Thread, current_fs_context,
+    current_user_process, current_user_process_address_space, current_user_process_fs_context,
+    current_user_thread, current_user_tid, with_current_user_thread,
 };
 pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers, spawn_alarm_task,
 };
 
-pub(crate) fn allocate_thread_task_number(
-    runtime: &alloc::sync::Arc<ProcessRuntime>,
-) -> kerrno::KResult<alloc::sync::Arc<kidentity::PidHandle>> {
-    kidentity::PidHandle::allocate_in(runtime.nsproxy().active_pid_ns())
+pub(crate) fn allocate_thread_task_number()
+-> kerrno::KResult<alloc::sync::Arc<kidentity::PidHandle>> {
+    kidentity::allocate_root_pid_handle()
 }
 
 /// Runtime action requested by a syscall after handling a user trap.
@@ -153,7 +147,7 @@ pub fn install_init_process(
     exe_path: alloc::string::String,
     cmdline: alloc::sync::Arc<alloc::vec::Vec<alloc::string::String>>,
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
-    fs_context: alloc::sync::Arc<ksync::Mutex<kfs::FsContext>>,
+    fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
     signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
     credentials: kcred::Credentials,
 ) -> kerrno::KResult<alloc::sync::Arc<Process>> {
@@ -193,7 +187,7 @@ pub fn install_process_thread(
     exe_path: alloc::string::String,
     cmdline: alloc::sync::Arc<alloc::vec::Vec<alloc::string::String>>,
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
-    fs_context: alloc::sync::Arc<ksync::Mutex<kfs::FsContext>>,
+    fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
     signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
     credentials: kcred::Credentials,
 ) {
@@ -231,7 +225,7 @@ pub fn build_process_thread(
     exe_path: alloc::string::String,
     cmdline: alloc::sync::Arc<alloc::vec::Vec<alloc::string::String>>,
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
-    fs_context: alloc::sync::Arc<ksync::Mutex<kfs::FsContext>>,
+    fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
     signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
     credentials: kcred::Credentials,
 ) -> alloc::boxed::Box<Thread> {
@@ -255,7 +249,7 @@ pub(crate) fn build_process_thread_with_config(
     exe_path: alloc::string::String,
     cmdline: alloc::sync::Arc<alloc::vec::Vec<alloc::string::String>>,
     address_space: alloc::sync::Arc<ksync::Mutex<memspace::MmSpace>>,
-    fs_context: alloc::sync::Arc<ksync::Mutex<kfs::FsContext>>,
+    fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
     signal_actions: alloc::sync::Arc<ksync::spin::SpinNoIrq<ksignal::api::SignalActions>>,
     credentials: kcred::Credentials,
     config: process_runtime::ProcessRuntimeConfig,

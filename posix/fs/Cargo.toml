@@ -19,12 +19,12 @@ bitflags.workspace = true
 bpffs = { workspace = true, optional = true }
 kfd.workspace = true
 kfd_objects.workspace = true
-devfs.workspace = true
 memfs.workspace = true
-ktty.workspace = true
+fs_context.workspace = true
 kerrno.workspace = true
-kfs.workspace = true
+kcred.workspace = true
 khal.workspace = true
+iov_iter.workspace = true
 kio.workspace = true
 klogger.workspace = true
 kpoll.workspace = true

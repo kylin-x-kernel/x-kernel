@@ -21,7 +21,6 @@ ebpf = ["dep:posix-bpf", "posix-bpf/ebpf", "posix-fs/ebpf"]
 
 [dependencies]
 kaddr_layout.workspace = true
-kfd.workspace = true
 kfd_objects.workspace = true
 kfutex.workspace = true
 kbuild_config = { workspace = true }
@@ -29,6 +28,7 @@ kcred.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true
+kns.workspace = true
 kpoll.workspace = true
 ktask.workspace = true
 ktimer.workspace = true

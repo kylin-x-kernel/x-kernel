@@ -9,7 +9,7 @@ use tee_raw_sys::{TEE_ERROR_BAD_FORMAT, TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM
 
 use super::{
     TeeResult,
-    common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT, FS_OFLAG_RW, FileVariant, TeeFileLike},
+    common::file_ops::{FS_MODE_644, FS_OFLAG_DEFAULT, FS_OFLAG_RW, FileVariant},
     fs_dirfile::TeeFsDirfileFileh,
     tee_fs::TEE_FS_NAME_MAX,
     tee_svc_storage::tee_svc_storage_create_filename_dfh,

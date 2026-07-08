@@ -297,8 +297,8 @@ impl Ext4FileSystem {
 
         // 初始化inode缓存
         // NOTE: inode size is a filesystem property (superblock.s_inode_size), not a fixed constant.
-        // Using a wrong inode size will make inode table offsets incorrect and may read zeroed inodes
-        // (e.g. /dev becomes mode=0, then VFS mount fails with ENOTDIR).
+        // Using a wrong inode size will make inode table offsets incorrect and
+        // may read zeroed inodes, for example a directory with mode=0.
         let inode_size = layout.inode_size as usize;
         let inode_cache = InodeCache::new(INODE_CACHE_MAX, inode_size);
         debug!("Inode cache initialized");

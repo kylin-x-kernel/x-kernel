@@ -148,23 +148,25 @@ impl SocketOps for NetlinkSocket {
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions<'_>) -> KResult<usize> {
-        self.inner.general.recv_poller(self, || {
-            let mut rx_queue = self.inner.rx_queue.lock();
-            let packet_len = rx_queue
-                .front()
-                .map(|packet| packet.data.len())
-                .ok_or(KError::WouldBlock)?;
-            if dst.remaining_mut() < packet_len {
-                return Err(LinuxError::EMSGSIZE.into());
-            }
-            let packet = rx_queue.pop_front().ok_or(KError::WouldBlock)?;
-            if let Some(from) = options.from.as_deref_mut() {
-                *from = SocketAddrEx::Netlink(packet.from);
-            }
+        self.inner
+            .general
+            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                let mut rx_queue = self.inner.rx_queue.lock();
+                let packet_len = rx_queue
+                    .front()
+                    .map(|packet| packet.data.len())
+                    .ok_or(KError::WouldBlock)?;
+                if dst.remaining_mut() < packet_len {
+                    return Err(LinuxError::EMSGSIZE.into());
+                }
+                let packet = rx_queue.pop_front().ok_or(KError::WouldBlock)?;
+                if let Some(from) = options.from.as_deref_mut() {
+                    *from = SocketAddrEx::Netlink(packet.from);
+                }
 
-            let written = dst.write(&packet.data)?;
-            Ok(written)
-        })
+                let written = dst.write(&packet.data)?;
+                Ok(written)
+            })
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {

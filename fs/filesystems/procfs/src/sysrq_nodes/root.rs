@@ -4,8 +4,7 @@
 
 use alloc::{borrow::Cow, sync::Arc};
 
-use kvfs::{VfsError, VfsResult};
-use kvfs_simple::{DirMapping, RwFile, SimpleFile, SimpleFileOperation, SimpleFs};
+use kvfs::{DirMapping, RwFile, SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsResult};
 
 fn sysrq_trigger_read() -> VfsResult<Cow<'static, [u8]>> {
     Ok(Cow::Borrowed(

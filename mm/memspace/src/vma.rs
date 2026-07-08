@@ -20,7 +20,7 @@ use vmobj::VmObjectId;
 use crate::{
     FaultContext, InvalidateHandle, MmSpace, PageFaultOutcome,
     backend::{
-        FaultCompatResult,
+        FaultCompletionResult,
         linear::LinearBackend,
         private::PrivateBackend,
         shared::{SharedBackend, SharedPages},
@@ -65,7 +65,7 @@ pub trait VmRuntimeOps: Send + Sync {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult;
+    ) -> FaultCompletionResult;
     fn relocate_for_mremap(
         &self,
         new_start: VirtAddr,
@@ -323,7 +323,7 @@ impl VmRuntimeRef {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         match self {
             Self::Linear(inner) => VmRuntimeOps::handle_fault(inner, ctx, flags, pgtbl),
             Self::AnonShared(inner) => VmRuntimeOps::handle_fault(inner, ctx, flags, pgtbl),

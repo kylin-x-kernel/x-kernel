@@ -10,7 +10,7 @@
 //! - Socket address queries
 
 use kerrno::KResult;
-use knet::{Socket, SocketOps};
+use knet::{SocketOps, sock_from_file};
 use linux_raw_sys::net::{sockaddr, socklen_t};
 use posix_types::UserPtr;
 
@@ -22,7 +22,8 @@ pub fn sys_getsockname(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
     let local_addr = socket.local_addr()?;
     debug!("sys_getsockname <= fd: {fd}, addr: {local_addr:?}");
 
@@ -38,7 +39,8 @@ pub fn sys_getpeername(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
+    let file = kprocess::current_resources().get_file(fd)?;
+    let socket = sock_from_file(&file)?;
     let peer_addr = socket.peer_addr()?;
     debug!("sys_getpeername <= fd: {fd}, addr: {peer_addr:?}");
 

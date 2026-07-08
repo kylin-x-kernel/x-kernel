@@ -5,18 +5,18 @@
 //! /dev/random and /dev/urandom device nodes.
 
 use alloc::sync::Arc;
-use core::any::Any;
 
 use khal::time::now_ticks;
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, DeviceId, NodeFlags, NodeType, VfsResult};
-use kvfs_simple::{DirMapping, SimpleFs};
+use kvfs::{
+    DeviceFileOps, DeviceId, DirMapping, NodeFlags, NodeType, SimpleFs, VfsFile, VfsResult,
+};
 use rand_chacha::{
     ChaCha20Rng,
     rand_core::{RngCore, SeedableRng},
 };
 
-use crate::DeviceFile;
+use crate::{DeviceFile, add_device_entry};
 
 struct RandomState {
     rng: ChaCha20Rng,
@@ -78,31 +78,44 @@ impl Random {
             state: Mutex::new(RandomState::new()),
         }
     }
-}
 
-impl DeviceFileOps for Random {
-    fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+    fn read_bytes(&self, buf: &mut [u8]) -> VfsResult<usize> {
         self.state.lock().fill_bytes(buf);
         Ok(buf.len())
     }
 
-    fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    fn write_bytes(&self, buf: &[u8]) -> VfsResult<usize> {
         // Writing to /dev/random mixes additional entropy into the PRNG.
         self.state.lock().mix_entropy(buf);
         Ok(buf.len())
     }
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
+impl DeviceFileOps for Random {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        self.read_bytes(buf)
+    }
+
+    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
+        self.write_bytes(buf)
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE | NodeFlags::STREAM
+        NodeFlags::NON_CACHEABLE
     }
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    root.add(
+    add_device_entry(
+        root,
         "random",
         DeviceFile::new(
             fs.clone(),
@@ -111,7 +124,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             Arc::new(Random::new()),
         ),
     );
-    root.add(
+    add_device_entry(
+        root,
         "urandom",
         DeviceFile::new(
             fs,
@@ -132,7 +146,7 @@ mod tests {
     fn test_random_read_fills_buffer() {
         let dev = Random::new();
         let mut buf = [0u8; 64];
-        let n = dev.read_at(&mut buf, 0).unwrap();
+        let n = dev.read_bytes(&mut buf).unwrap();
         assert_eq!(n, 64);
         assert!(buf.iter().any(|&b| b != 0));
     }
@@ -141,7 +155,7 @@ mod tests {
     fn test_random_write_accepts_all() {
         let dev = Random::new();
         let data = [0u8; 32];
-        let n = dev.write_at(&data, 0).unwrap();
+        let n = dev.write_bytes(&data).unwrap();
         assert_eq!(n, 32);
     }
 
@@ -150,8 +164,8 @@ mod tests {
         let dev = Random::new();
         let mut buf1 = [0u8; 32];
         let mut buf2 = [0u8; 32];
-        dev.read_at(&mut buf1, 0).unwrap();
-        dev.read_at(&mut buf2, 0).unwrap();
+        dev.read_bytes(&mut buf1).unwrap();
+        dev.read_bytes(&mut buf2).unwrap();
         assert_ne!(buf1, buf2);
     }
 
@@ -160,9 +174,9 @@ mod tests {
         let dev = Random::new();
         let mut before = [0u8; 32];
         let mut after = [0u8; 32];
-        dev.read_at(&mut before, 0).unwrap();
-        dev.write_at(b"entropy", 0).unwrap();
-        dev.read_at(&mut after, 0).unwrap();
+        dev.read_bytes(&mut before).unwrap();
+        dev.write_bytes(b"entropy").unwrap();
+        dev.read_bytes(&mut after).unwrap();
         assert_ne!(before, after);
     }
 }

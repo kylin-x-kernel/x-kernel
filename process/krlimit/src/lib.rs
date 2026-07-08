@@ -63,9 +63,9 @@ impl Rlimits {
         // fd table, so keep those hard caps at the kernel-supported maximum instead
         // of Linux's larger growable defaults.
         //
-        // If we later add Linux-style stack growth or a resizable fd table, we
-        // should revisit these two entries and align their hard limits with the
-        // Linux defaults we report through `prlimit64`.
+        // If stack growth or a resizable fd table is added, revisit these two
+        // entries and align their hard limits with the defaults reported
+        // through `prlimit64`.
         result[RLIMIT_STACK] = (user_stack_size as u64).into();
         result[RLIMIT_CORE] = Rlimit::new(0, RLIM_INFINITY);
         result[RLIMIT_NPROC] = Rlimit::new(0, 0);

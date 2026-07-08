@@ -12,7 +12,7 @@ use memaddr::{MemoryAddr, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmBackingInfo, VmBackingKind,
-    backend::{BackendOps, FaultCompat, FaultCompatResult, map_paging_err},
+    backend::{BackendOps, FaultCompletion, FaultCompletionResult, map_paging_err},
     vma::VmRuntimeOps,
 };
 
@@ -84,7 +84,7 @@ impl BackendOps for LinearBackend {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         let addr = ctx.address().align_down(self.page_size());
         let expected = self.pa(addr);
         match pgtbl.query(addr) {
@@ -103,7 +103,7 @@ impl BackendOps for LinearBackend {
             }
             Err(_) => return Err(KError::BadAddress),
         }
-        Ok(FaultCompat::from_populate((1, None)))
+        Ok(FaultCompletion::from_populate((1, None)))
     }
 }
 
@@ -134,7 +134,7 @@ impl VmRuntimeOps for LinearBackend {
         ctx: FaultContext,
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
-    ) -> FaultCompatResult {
+    ) -> FaultCompletionResult {
         BackendOps::handle_fault(self, ctx, flags, pgtbl)
     }
 
