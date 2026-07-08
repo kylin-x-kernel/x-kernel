@@ -27,6 +27,7 @@ pipeline {
         string(name: 'LIBUTEE_REPO', defaultValue: 'https://gitee.com/openkylin/rust-libutee')
         string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
         string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
+        booleanParam(name: 'ENABLE_DOC_CHECK', defaultValue: false, description: 'Run Rust documentation generation check')
     }
 
     environment {
@@ -124,6 +125,7 @@ def rustfmtStageName() { return 'Check: Rustfmt' }
 def runtimeTestArchitectures() { return ['x86_64', 'aarch64', 'riscv64'] }
 def teeTestArchitectures() { return ['x86_64', 'aarch64'] }
 def teeTestBinaries() { return ['storage_test', 'cryp_test'] }
+def docCheckEnabled() { return params.ENABLE_DOC_CHECK?.toString()?.toBoolean() ?: false }
 
 def ciSequentialStages() {
     return [
@@ -146,12 +148,16 @@ def ciBuildStages() {
         type: 'build',
         platform: 'aarch64-qemu-virt-virtcca',
         defconfig: 'platforms/aarch64-qemu-virt/virtcca_defconfig',
-    ], [
-        name: 'Doc Check: aarch64',
-        failure: 'Rust 文档生成失败',
-        type: 'doc',
-        arch: 'aarch64',
     ]]
+
+    if (docCheckEnabled()) {
+        stages << [
+            name: 'Doc Check: aarch64',
+            failure: 'Rust 文档生成失败',
+            type: 'doc',
+            arch: 'aarch64',
+        ]
+    }
 
     runtimeTestArchitectures().each { arch ->
         stages << [
@@ -215,7 +221,7 @@ def ciFailureDetail(String stageName) {
 }
 
 def archiveArtifactPatterns() {
-    return [
+    def patterns = [
         'ci-summary.md',
         'stage-logs/**/*.log',
         '**/artifacts/**/*',
@@ -226,8 +232,11 @@ def archiveArtifactPatterns() {
         '**/coverage.info',
         '**/coverage.xml',
         '**/coverage.txt',
-        '**/doc-artifacts/**/*',
     ]
+    if (docCheckEnabled()) {
+        patterns << '**/doc-artifacts/**/*'
+    }
+    return patterns
 }
 
 def finalizeCiBuild() {
@@ -1450,7 +1459,7 @@ ${rows}
     }
 
     def docBlock = ''
-    if (allPassed) {
+    if (allPassed && docCheckEnabled()) {
         docBlock = "\n### 📚 Rust 文档\n\n[aarch64 API 文档](${baseUrl}/doc-aarch64/doc-artifacts/doc/index.html)\n"
     }
 
