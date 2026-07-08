@@ -2,13 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Kernel-direct inter-TA RPC. Wire format NOTE/TODO: [`protocal`](protocal).
+
 use alloc::{
     string::{String, ToString},
     vec,
     vec::Vec,
 };
 
-use bincode::config;
 use knet::{
     RecvOptions, SendOptions, SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixAddr, UnixDomainSocket},
@@ -19,7 +20,7 @@ use tee_task_iface::SessionIdentity;
 
 use crate::tee::{
     TeeResult,
-    protocal::{Parameters, TeeRequest, TeeResponse},
+    protocal::{self, Parameters, TeeRequest, TeeResponse},
     tee_session::{with_tee_ta_ctx, with_tee_ta_ctx_mut},
     uuid::{Uuid, ta_unix_socket_path},
 };
@@ -57,7 +58,7 @@ fn recv_framed_payload(socket: &UnixDomainSocket) -> TeeResult<Vec<u8>> {
     Ok(payload)
 }
 
-fn send_framed_message(socket: &UnixDomainSocket, encoded: &[u8]) -> TeeResult<()> {
+pub(crate) fn send_framed_message(socket: &UnixDomainSocket, encoded: &[u8]) -> TeeResult<()> {
     validated_payload_len(encoded.len())?;
     let mut message = Vec::with_capacity(4 + encoded.len());
     message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
@@ -70,9 +71,7 @@ fn send_framed_message(socket: &UnixDomainSocket, encoded: &[u8]) -> TeeResult<(
 
 fn recv_tee_response(socket: &UnixDomainSocket) -> TeeResult<TeeResponse> {
     let payload = recv_framed_payload(socket)?;
-    let (resp, _) =
-        bincode::decode_from_slice(&payload, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
-    Ok(resp)
+    protocal::decode_message(&payload).map_err(|_| TEE_ERROR_GENERIC)
 }
 
 pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
@@ -90,7 +89,7 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
         uuid: uuid.clone(),
         connection_method: 0,
     };
-    let encoded = bincode::encode_to_vec(req, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+    let encoded = protocal::encode_message(&req).map_err(|_| TEE_ERROR_GENERIC)?;
     send_framed_message(&socket, &encoded)?;
 
     let resp = recv_tee_response(&socket)?;
@@ -120,7 +119,7 @@ pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     let req = TeeRequest::CloseSession {
         session_id: sess_id.session_id,
     };
-    let encoded = bincode::encode_to_vec(req, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+    let encoded = protocal::encode_message(&req).map_err(|_| TEE_ERROR_GENERIC)?;
     send_framed_message(&socket, &encoded)?;
 
     Ok(())
@@ -143,7 +142,7 @@ pub fn tee_ta_invoke_command(
         cmd_id,
         params: Parameters::default(),
     };
-    let encoded = bincode::encode_to_vec(req, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
+    let encoded = protocal::encode_message(&req).map_err(|_| TEE_ERROR_GENERIC)?;
     send_framed_message(&socket, &encoded)?;
 
     let resp = recv_tee_response(&socket)?;

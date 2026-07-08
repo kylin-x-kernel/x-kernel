@@ -2,12 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::vec::Vec;
 use core::ffi::c_char;
 
-use bincode::config;
 use knet::{
-    SendOptions, SocketAddrEx, SocketOps,
+    SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixAddr, UnixDomainSocket},
 };
 use kprocess;
@@ -16,7 +14,8 @@ use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_GENERIC};
 use crate::{
     mm::vm_load_string_with_len,
     tee::{
-        TeeResult, protocal::TeeRequest, tee_session::with_tee_ta_ctx, uuid::ta_unix_socket_path,
+        TeeResult, protocal, protocal::TeeRequest, tee_session::with_tee_ta_ctx,
+        tee_ta_manager::send_framed_message, uuid::ta_unix_socket_path,
     },
 };
 
@@ -40,7 +39,7 @@ pub fn sys_tee_scn_log(buf: *const c_char, len: usize) -> TeeResult {
     Ok(())
 }
 
-/// Panic the current TEE application
+/// Kernel-direct panic notification. Wire format NOTE/TODO: [`crate::tee::protocal`].
 pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
     // Connect to current TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
@@ -51,13 +50,7 @@ pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
 
     // Send panic command request to current TA
     let req = TeeRequest::Panic { panic_code };
-    let encoded = bincode::encode_to_vec(req, config::standard()).map_err(|_| TEE_ERROR_GENERIC)?;
-    let mut message = Vec::with_capacity(4 + encoded.len());
-    message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
-    message.extend_from_slice(&encoded);
-    let src = message.as_slice();
-    socket
-        .send(src, SendOptions::default())
-        .map_err(|_| TEE_ERROR_GENERIC)?;
+    let encoded = protocal::encode_message(&req).map_err(|_| TEE_ERROR_GENERIC)?;
+    send_framed_message(&socket, &encoded)?;
     Ok(())
 }

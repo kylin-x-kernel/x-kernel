@@ -94,7 +94,8 @@ pub fn verify_ta_elf_signature_if_applicable(
             let ca_pem = None;
         }
     }
-    tasign::verify_elf_signature(image.as_slice(), ca_pem).map_err(|e| {
+    let unix_secs = khal::time::wall_time_nanos() / khal::time::NANOS_PER_SEC;
+    tasign::verify_elf_signature_at(image.as_slice(), ca_pem, unix_secs).map_err(|e| {
         error!("verify ta elf signature failed: {e}");
         KError::InvalidExecutable
     })?;
