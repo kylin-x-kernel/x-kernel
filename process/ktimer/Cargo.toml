@@ -14,7 +14,6 @@ event-listener = { workspace = true, default-features = false }
 kbuild_config.workspace = true
 kerrno.workspace = true
 khal.workspace = true
-kprocess.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true

@@ -22,7 +22,7 @@ pub fn sys_getsockname(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
+    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
     let local_addr = socket.local_addr()?;
     debug!("sys_getsockname <= fd: {fd}, addr: {local_addr:?}");
 
@@ -38,7 +38,7 @@ pub fn sys_getpeername(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
+    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
     let peer_addr = socket.peer_addr()?;
     debug!("sys_getpeername <= fd: {fd}, addr: {peer_addr:?}");
 

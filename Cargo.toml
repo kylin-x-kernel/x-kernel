@@ -81,7 +81,6 @@ krlimit = { path = "process/krlimit" }
 kresources = { path = "process/kresources" }
 kcgroup = { path = "process/kcgroup" }
 kns = { path = "process/kns" }
-kthread = { path = "process/kthread" }
 ktimer = { path = "process/ktimer" }
 kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
@@ -175,6 +174,7 @@ kvmm = { path = "virt/kvmm" }
 backtrace = { path = "util/backtrace" }
 kbuild_config = { path = "util/kbuild_config" }
 kerrno = { path = "util/kerrno" }
+kidentity = { path = "util/kidentity" }
 klogger = { path = "util/klogger" }
 macros = { path = "util/macros" }
 unittest = { path = "util/unittest" }

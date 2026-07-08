@@ -15,7 +15,7 @@ kerrno = { workspace = true }
 kfs = { workspace = true }
 khal = { workspace = true }
 klogger = { workspace = true }
-kthread = { workspace = true }
+kprocess = { workspace = true }
 linux-raw-sys = { workspace = true }
 memaddr = { workspace = true }
 memfs = { workspace = true }

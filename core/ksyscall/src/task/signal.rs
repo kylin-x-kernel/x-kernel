@@ -36,24 +36,29 @@ pub fn sys_rt_sigprocmask(
 ) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
 
-    let signal = &kthread::current_thread().signal;
+    let current_thread = kprocess::current_user_thread();
+    let signal = current_thread.signal_manager();
     let old = signal.blocked();
+    let requested_set = set
+        .check_non_null()
+        .map(UserConstPtr::read_vm)
+        .transpose()?
+        .map(|set: k_sigset| -> SignalSet { set.into() });
 
     if let Some(oldset) = oldset.check_non_null() {
         oldset.write_vm(old.into())?;
     }
 
-    if let Some(set) = set.check_non_null() {
-        let set: SignalSet = set.read_vm()?.into();
-        let set = match how as u32 {
+    if let Some(set) = requested_set {
+        let new_mask = match how as u32 {
             SIG_BLOCK => old | set,
             SIG_UNBLOCK => old & !set,
             SIG_SETMASK => set,
             _ => return Err(KError::InvalidInput),
         };
 
-        debug!("sys_rt_sigprocmask <= {set:?}");
-        signal.set_blocked(set);
+        debug!("sys_rt_sigprocmask <= {new_mask:?}");
+        signal.set_blocked(new_mask);
     }
 
     Ok(0)
@@ -75,16 +80,17 @@ pub fn sys_rt_sigaction(
         return Err(KError::InvalidInput);
     }
 
-    let current_thread = kthread::current_thread();
-    let proc_state = current_thread.process_state();
-    let signal = &proc_state.signal;
+    let current_thread = kprocess::current_user_thread();
     let new_action = act
         .check_non_null()
         .map(UserConstPtr::read_vm)
         .transpose()?
         .map(Into::into);
     debug!("sys_rt_sigaction <= signo: {signo:?}, act: {new_action:?}");
-    let old_action = signal.replace_signal_action(signo, new_action);
+    let old_action = current_thread
+        .process()
+        .signal_manager()?
+        .replace_signal_action(signo, new_action);
 
     if let Some(oldact) = oldact.check_non_null() {
         oldact.write_vm(old_action.into())?;
@@ -97,7 +103,8 @@ pub fn sys_rt_sigaction(
 /// See <https://man7.org/linux/man-pages/man2/rt_sigpending.2.html>.
 pub fn sys_rt_sigpending(set: UserPtr<k_sigset>, sigsetsize: usize) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
-    set.write_vm(kthread::current_thread().signal.pending().into())?;
+    let current_thread = kprocess::current_user_thread();
+    set.write_vm(current_thread.signal_manager().pending().into())?;
     Ok(0)
 }
 
@@ -109,7 +116,7 @@ fn make_siginfo(signo: u32, code: i32) -> KResult<Option<SignalInfo>> {
     Ok(Some(SignalInfo::new_user(
         signo,
         code,
-        kthread::current_thread().pid(),
+        kprocess::current_user_thread().pid(),
     )))
 }
 
@@ -121,39 +128,28 @@ pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_USER as _)?;
 
     match pid {
-        1.. => kthread::send_signal_to_process(pid as _, sig)?,
+        1.. => kprocess::process_signals::send_to_process(pid as _, sig)?,
         0 => {
-            let pgid = kthread::current_thread()
-                .process_state()
-                .proc
-                .group()
-                .pgid();
-            kthread::send_signal_to_process_group(pgid, sig)?;
+            let pgid = kprocess::current_user_thread().process().group().pgid();
+            kprocess::process_signals::send_to_process_group(pgid, sig)?;
         }
         -1 => {
-            let current_pid = kthread::current_thread().pid();
-            let mut saw_target = false;
+            let current_pid = kprocess::current_user_thread().pid();
             let mut first_error = None;
+            let targets = kprocess::process_signals::broadcast_process_targets(current_pid);
 
-            for proc_state in kthread::processes() {
-                if proc_state.proc.is_init() || proc_state.proc.pid() == current_pid {
-                    continue;
-                }
-                saw_target = true;
+            for proc in &targets {
                 if let Err(err) =
-                    kthread::send_signal_to_process(proc_state.proc.pid(), sig.clone())
+                    kprocess::process_signals::send_to_process(proc.pid(), sig.clone())
                 {
-                    debug!(
-                        "sys_kill(-1) failed for pid {}: {err:?}",
-                        proc_state.proc.pid()
-                    );
+                    debug!("sys_kill(-1) failed for pid {}: {err:?}", proc.pid());
                     if err != KError::OperationNotPermitted && first_error.is_none() {
                         first_error = Some(err);
                     }
                 }
             }
 
-            if !saw_target {
+            if targets.is_empty() {
                 return Err(KError::NoSuchProcess);
             }
             if let Some(err) = first_error {
@@ -162,7 +158,7 @@ pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
         }
         ..-1 => {
             let pgid = pid.checked_neg().ok_or(KError::InvalidInput)? as Pid;
-            kthread::send_signal_to_process_group(pgid, sig)?;
+            kprocess::process_signals::send_to_process_group(pgid, sig)?;
         }
     }
     Ok(0)
@@ -173,7 +169,7 @@ pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
 /// See <https://man7.org/linux/man-pages/man2/tkill.2.html>.
 pub fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
-    kthread::send_signal_to_thread(None, tid, sig)?;
+    kprocess::process_signals::send_to_thread(None, tid, sig)?;
     Ok(0)
 }
 
@@ -182,7 +178,7 @@ pub fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
 /// See <https://man7.org/linux/man-pages/man2/tgkill.2.html>.
 pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
-    kthread::send_signal_to_thread(Some(tgid), tid, sig)?;
+    kprocess::process_signals::send_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }
 
@@ -199,7 +195,8 @@ pub fn make_queue_signal_info(
     let signo = parse_signo(signo)?;
     let mut sig: SignalInfo = sig.read_vm()?.into();
     sig.set_signo(signo);
-    if kthread::current_thread().pid() != tgid && (sig.code() >= 0 || sig.code() == SI_TKILL) {
+    if kprocess::current_user_thread().pid() != tgid && (sig.code() >= 0 || sig.code() == SI_TKILL)
+    {
         return Err(KError::OperationNotPermitted);
     }
     Ok(Some(sig))
@@ -215,7 +212,7 @@ pub fn sys_rt_sigqueueinfo(
     posix_types::check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
-    kthread::send_signal_to_process(tgid, sig)?;
+    kprocess::process_signals::send_to_process(tgid, sig)?;
     Ok(0)
 }
 
@@ -230,7 +227,7 @@ pub fn sys_rt_tgsigqueueinfo(
     posix_types::check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
-    kthread::send_signal_to_thread(Some(tgid), tid, sig)?;
+    kprocess::process_signals::send_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }
 
@@ -238,7 +235,8 @@ pub fn sys_rt_tgsigqueueinfo(
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigreturn.2.html>.
 pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
-    kthread::current_thread().signal.restore(uctx);
+    let current_thread = kprocess::current_user_thread();
+    current_thread.signal_manager().restore(uctx);
     Ok(uctx.retval() as isize)
 }
 
@@ -265,8 +263,8 @@ pub fn sys_rt_sigtimedwait(
     debug!("sys_rt_sigtimedwait => set = {set:?}, timeout = {timeout:?}");
 
     let current = ktask::current();
-    let current_thread = kthread::current_thread();
-    let signal = &current_thread.signal;
+    let current_thread = kprocess::current_user_thread();
+    let signal = current_thread.signal_manager();
 
     let old_blocked = signal.blocked();
     signal.set_blocked(old_blocked & !set);
@@ -304,28 +302,29 @@ pub fn sys_rt_sigtimedwait(
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigsuspend.2.html>.
 pub fn sys_rt_sigsuspend(
-    uctx: &mut UserContext,
+    _uctx: &mut UserContext,
     set: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
 
     let current = ktask::current();
-    let current_thread = kthread::current_thread();
+    let current_thread = kprocess::current_user_thread();
 
     let set: SignalSet = set.read_vm()?.into();
-    let old_blocked = current_thread.signal.set_blocked(set);
+    let signal = current_thread.signal_manager();
+    let old_blocked = signal.set_blocked(set);
+    signal.set_saved_sigmask(old_blocked);
 
-    uctx.set_retval(-LinuxError::EINTR.into_raw() as usize);
     ktask::future::block_on(poll_fn(|cx| {
-        if check_signals(&current_thread, uctx, Some(old_blocked)) {
+        if !(signal.pending() & !signal.blocked()).is_empty() {
             return Poll::Ready(());
         }
         let _ = current.poll_interrupt(cx);
         Poll::Pending
     }));
 
-    Err(KError::Interrupted)
+    Err(KError::from(LinuxError::ERESTARTNOHAND))
 }
 
 /// Sets or retrieves the alternate signal stack.
@@ -336,8 +335,8 @@ pub fn sys_sigaltstack(
     ss: UserConstPtr<k_sigaltstack>,
     old_ss: UserPtr<k_sigaltstack>,
 ) -> KResult<isize> {
-    let current_thread = kthread::current_thread();
-    let signal = &current_thread.signal;
+    let current_thread = kprocess::current_user_thread();
+    let signal = current_thread.signal_manager();
     let user_sp = uctx.sp();
 
     if let Some(old_ss) = old_ss.check_non_null() {
@@ -399,7 +398,7 @@ pub fn sys_signalfd4(
     mask.remove(Signo::SIGSTOP);
 
     if fd != -1 {
-        let signalfd = kthread::current_resources().get_file_like_as::<Signalfd>(fd)?;
+        let signalfd = kprocess::current_resources().get_file_like_as::<Signalfd>(fd)?;
         kfd::FileLike::set_nonblocking(signalfd.as_ref(), flags.contains(SignalfdFlags::NONBLOCK))?;
         signalfd.update_mask(mask);
         return Ok(fd as _);
@@ -408,7 +407,7 @@ pub fn sys_signalfd4(
     let signalfd = Signalfd::new(mask);
     kfd::FileLike::set_nonblocking(signalfd.as_ref(), flags.contains(SignalfdFlags::NONBLOCK))?;
 
-    kthread::current_resources()
+    kprocess::current_resources()
         .add_file_like(signalfd as _, flags.contains(SignalfdFlags::CLOEXEC))
         .map(|fd| fd as _)
 }

@@ -13,12 +13,9 @@ use kcred::Credentials;
 use kexec::{ExecRequest, load_user_app_request};
 use kfs::{kernel_fs_context, new_process_fs_context};
 use khal::uspace::UserContext;
-use kprocess::{Pid, Process};
+use kidentity::allocate_root_pid_handle;
+use kprocess::{UserThreadRuntimeAction, install_init_process, start_user_task};
 use ksync::Mutex;
-use ktask::{KTaskExt, spawn_task};
-use kthread::{
-    ProcessState, ProcessStateConfig, Thread, UserThreadRuntimeAction, add_task_to_table,
-};
 use ktty::tty::N_TTY;
 use kvfs::{LookupFlags, LookupIntent, lookup_location};
 use posix_fs::file::add_stdio;
@@ -61,42 +58,40 @@ pub fn run_init_process(
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
 
-    let mut task = new_user_task(name.as_str(), uctx, 0, dispatch_syscall);
+    let init_task_number = allocate_root_pid_handle().expect("failed to allocate init pid handle");
+    let mut task = new_user_task(name.as_str(), uctx, 0, init_task_number, dispatch_syscall);
     task.ctx_mut()
         .set_page_table_root(uspace.page_table_hw_root());
 
-    let pid = task.id().as_u64() as Pid;
-    let proc = Process::new_init(pid);
-    proc.add_thread(pid);
-
-    N_TTY.bind_to(&proc).expect("Failed to bind ntty");
-
-    let proc_state = ProcessState::new(
-        proc,
+    let proc = install_init_process(
+        &mut task,
         path.to_string(),
         Arc::new(args.to_vec()),
         Arc::new(Mutex::new(uspace)),
         new_process_fs_context(),
         Arc::default(),
-        None,
         Credentials::root(),
-        ProcessStateConfig::default(),
-    );
+    )
+    .expect("failed to install init process identity");
+
+    N_TTY.bind_to(&proc).expect("Failed to bind ntty");
     {
-        let fs_context = proc_state.fs_context();
-        let fs_context = fs_context.lock();
-        add_stdio(&mut proc_state.resources.fd_table().write(), &fs_context)
-            .expect("Failed to add stdio");
+        let fs_context_ref = proc
+            .fs_context()
+            .expect("init process must have a live fs context");
+        let fs_context = fs_context_ref.lock();
+        add_stdio(
+            &mut proc
+                .resources()
+                .expect("init process must have live resources")
+                .fd_table()
+                .write(),
+            &fs_context,
+        )
+        .expect("Failed to add stdio");
     }
-    let thr = Thread::new(pid, proc_state);
 
-    // SAFETY: The freshly created `Thread` is uniquely owned here and is installed
-    // exactly once as the task extension for the matching user task before the task
-    // is spawned or made visible to any other observer.
-    *task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
-
-    let task = spawn_task(task);
-    add_task_to_table(&task);
+    let task = start_user_task(task);
 
     // TODO: wait for all processes to finish
     let exit_code = task.join();

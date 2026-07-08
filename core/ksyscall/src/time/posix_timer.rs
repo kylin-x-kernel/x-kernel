@@ -4,8 +4,10 @@
 
 //! POSIX process timer syscalls.
 
+use alloc::sync::Arc;
+
 use kerrno::{KError, KResult};
-use kprocess::Pid;
+use kprocess::{AsThread, Pid};
 use ksignal::Signo;
 use ktimer::{PosixTimerCreateNotify, PosixTimerSigValue, TimerSigValue};
 use linux_raw_sys::general::{
@@ -58,9 +60,13 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
                 return Err(KError::InvalidInput);
             }
             let tid = tid as Pid;
-            let current = kthread::current_thread();
-            let proc_state = current.process_state();
-            if !proc_state.contains_thread(tid) {
+            let current = kprocess::current_user_process();
+            if !kprocess::scheduler::process_owns_tid(current.as_ref(), tid) {
+                return Err(KError::InvalidInput);
+            }
+            let target_task = kprocess::scheduler::task_by_tid(tid)?;
+            let target_thread = target_task.try_as_thread().ok_or(KError::InvalidInput)?;
+            if !Arc::ptr_eq(target_thread.process(), &current) {
                 return Err(KError::InvalidInput);
             }
             Ok(PosixTimerCreateNotify::Signal {
@@ -80,9 +86,9 @@ pub fn sys_timer_create(
     timerid: UserPtr<i32>,
 ) -> KResult<isize> {
     let notify = parse_sigevent(sevp)?;
-    let proc_state = kthread::current_thread().process_state().clone();
-    let timer_id = proc_state
-        .timer_manager()
+    let process = kprocess::current_user_process();
+    let timer_id = process
+        .timer_manager()?
         .lock()
         .create_posix_timer(clockid, notify)?;
     timerid.write_vm(timer_id)?;
@@ -91,9 +97,9 @@ pub fn sys_timer_create(
 
 /// Queries the current setting of a POSIX timer.
 pub fn sys_timer_gettime(timerid: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
-    let proc_state = kthread::current_thread().process_state().clone();
-    let (process_utime_ns, process_stime_ns) = proc_state.process_cpu_time_ns();
-    let spec = proc_state.timer_manager().lock().get_posix_timer(
+    let process = kprocess::current_user_process();
+    let (process_utime_ns, process_stime_ns) = process.process_cpu_time_ns();
+    let spec = process.timer_manager()?.lock().get_posix_timer(
         timerid,
         process_utime_ns,
         process_stime_ns,
@@ -118,10 +124,10 @@ pub fn sys_timer_settime(
     let value_ns = parse_timespec_ns(new_value.it_value)?;
     let absolute = flags & TIMER_ABSTIME as i32 != 0;
 
-    let current_thread = kthread::current_thread();
-    let proc_state = current_thread.process_state().clone();
-    let (process_utime_ns, process_stime_ns) = proc_state.process_cpu_time_ns();
-    let (old, delivery) = proc_state.timer_manager().lock().set_posix_timer(
+    let current_thread = kprocess::current_user_thread();
+    let process = current_thread.process().clone();
+    let (process_utime_ns, process_stime_ns) = process.process_cpu_time_ns();
+    let (old, delivery) = process.timer_manager()?.lock().set_posix_timer(
         timerid,
         absolute,
         interval_ns,
@@ -134,16 +140,15 @@ pub fn sys_timer_settime(
         old_value.write_vm(build_itimerspec(old.0, old.1))?;
     }
     if let Some(delivery) = delivery {
-        kthread::dispatch_timer_delivery(proc_state.proc.pid(), delivery);
+        kprocess::dispatch_timer_delivery(current_thread.pid(), delivery);
     }
     Ok(0)
 }
 
 /// Deletes a POSIX timer object.
 pub fn sys_timer_delete(timerid: i32) -> KResult<isize> {
-    kthread::current_thread()
-        .process_state()
-        .timer_manager()
+    kprocess::current_user_process()
+        .timer_manager()?
         .lock()
         .delete_posix_timer(timerid)?;
     Ok(0)
@@ -151,9 +156,8 @@ pub fn sys_timer_delete(timerid: i32) -> KResult<isize> {
 
 /// Returns the overrun count for the last timer notification.
 pub fn sys_timer_getoverrun(timerid: i32) -> KResult<isize> {
-    let overrun = kthread::current_thread()
-        .process_state()
-        .timer_manager()
+    let overrun = kprocess::current_user_process()
+        .timer_manager()?
         .lock()
         .get_posix_timer_overrun(timerid)?;
     Ok(overrun as isize)

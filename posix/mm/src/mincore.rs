@@ -8,7 +8,7 @@ use alloc::vec;
 
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize, PagingError};
-use kthread::current_process_state;
+use kprocess::current_user_process_address_space;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use posix_types::UserPtr;
 
@@ -100,8 +100,8 @@ pub fn sys_mincore(addr: usize, length: usize, vec: UserPtr<u8>) -> KResult<isiz
     let page_count = length.div_ceil(PAGE_SIZE_4K);
 
     // Get current address space
-    let proc_state = current_process_state();
-    let aspace = proc_state.address_space().lock();
+    let aspace = current_user_process_address_space();
+    let aspace = aspace.lock();
 
     let mut result = vec![0u8; page_count];
     let mut i = 0;

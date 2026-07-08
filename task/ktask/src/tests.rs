@@ -81,17 +81,20 @@ fn test_wait_queue() {
     for _ in 0..NUM_TASKS {
         ktask::spawn(move || {
             COUNTER.fetch_add(1, Ordering::Release);
-            println!("wait_queue: task {:?} started", current().id());
+            println!("wait_queue: task {} started", current().owner_key());
             WQ1.notify_one(true); // WQ1.wait_until()
             WQ2.wait();
 
             COUNTER.fetch_sub(1, Ordering::Release);
-            println!("wait_queue: task {:?} finished", current().id());
+            println!("wait_queue: task {} finished", current().owner_key());
             WQ1.notify_one(true); // WQ1.wait_until()
         });
     }
 
-    println!("task {:?} is waiting for tasks to start...", current().id());
+    println!(
+        "task {} is waiting for tasks to start...",
+        current().owner_key()
+    );
     WQ1.wait_until(|| COUNTER.load(Ordering::Acquire) == NUM_TASKS);
     ktask::yield_now();
     assert_eq!(COUNTER.load(Ordering::Acquire), NUM_TASKS);
@@ -99,7 +102,7 @@ fn test_wait_queue() {
 
     println!(
         "task {:?} is waiting for tasks to finish...",
-        current().id()
+        current().owner_key()
     );
     WQ1.wait_until(|| COUNTER.load(Ordering::Acquire) == 0);
     assert_eq!(COUNTER.load(Ordering::Acquire), 0);
@@ -127,5 +130,36 @@ fn test_task_join() {
 
     for (i, task) in tasks.into_iter().enumerate() {
         assert_eq!(task.join(), i as _);
+    }
+}
+
+#[test]
+fn test_prepare_task_requires_activation() {
+    let _lock = SERIAL.lock();
+    INIT.call_once(ktask::init_scheduler);
+
+    static EXECUTED: AtomicUsize = AtomicUsize::new(0);
+
+    let task = ktask::prepare_task(
+        crate::TaskInner::new_kthread(
+            || {
+                EXECUTED.fetch_add(1, Ordering::Release);
+            },
+            format!("prepared-task"),
+            0x1000,
+        )
+        .expect("test kernel thread identity allocation should succeed"),
+    );
+
+    ktask::yield_now();
+    assert_eq!(
+        EXECUTED.load(Ordering::Acquire),
+        0,
+        "prepared task must not run before activate_task"
+    );
+
+    ktask::activate_task(&task);
+    while EXECUTED.load(Ordering::Acquire) == 0 {
+        ktask::yield_now();
     }
 }

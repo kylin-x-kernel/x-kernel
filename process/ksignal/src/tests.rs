@@ -412,6 +412,20 @@ fn test_thread_signal_manager_blocked_and_stack_helpers() {
 }
 
 #[def_test]
+fn test_thread_signal_manager_saved_sigmask_helpers() {
+    let thread = new_thread_manager();
+
+    let mut saved = SignalSet::default();
+    saved.add(Signo::SIGUSR1);
+    thread.set_saved_sigmask(saved);
+
+    let restored = thread.take_saved_sigmask();
+    assert!(restored.is_some());
+    assert!(restored.unwrap().has(Signo::SIGUSR1));
+    assert!(thread.take_saved_sigmask().is_none());
+}
+
+#[def_test]
 fn test_thread_signal_manager_send_signal_and_pending_merge() {
     let thread = new_thread_manager();
 

@@ -93,13 +93,15 @@ impl DeviceFileOps for DiceNodeInfo {
 fn get_process_hash() -> KResult<Vec<u8>> {
     use alloc::format;
 
-    use kthread::current_process_state;
+    use kprocess::current_user_process;
     use tee_crypto::hash::{Digest, Sm3};
 
-    let pid = kthread::current_thread().pid();
+    let pid = kprocess::current_user_thread().pid();
     let proc_exe_path = format!("/proc/{}/exe", pid);
-    let proc_state = current_process_state();
-    let fs_context = proc_state.fs_context();
+    let process = current_user_process();
+    let fs_context = process
+        .fs_context()
+        .expect("current process must still expose a fs context for /dev/dice");
     let fs = fs_context.lock();
     let loc = lookup_location(
         &fs.lookup_context(),

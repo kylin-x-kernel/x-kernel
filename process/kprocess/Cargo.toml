@@ -8,9 +8,36 @@ license.workspace = true
 repository.workspace = true
 description = "Process management for X-Kernel"
 
+[features]
+tee = ["dep:tee_task_iface"]
+tee_ta_sign = ["tee", "tee_task_iface/tee_ta_sign"]
+
 [dependencies]
+extern-trait.workspace = true
+kaddr_layout.workspace = true
+karch.workspace = true
+kcpu_id_map.workspace = true
+kcred.workspace = true
+kerrno.workspace = true
+kfd.workspace = true
+kfs.workspace = true
+kfutex.workspace = true
+khal.workspace = true
+klazy.workspace = true
+kpoll.workspace = true
+kidentity.workspace = true
+kresources.workspace = true
+ksignal.workspace = true
+klogger.workspace = true
+kns.workspace = true
+posix-types.workspace = true
 kspin = { workspace = true }
+ksync.workspace = true
+ktask.workspace = true
+ktimer.workspace = true
 lazyinit.workspace = true
+memspace.workspace = true
+tee_task_iface = { workspace = true, optional = true }
 weak-map.workspace = true
 unittest.workspace = true
 

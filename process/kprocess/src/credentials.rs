@@ -4,15 +4,17 @@
 
 use kcred::Credentials;
 
+use crate::current_user_process;
+
 /// Runs a closure with a read-only view of the current process credentials.
 ///
 /// # Panics
 ///
 /// Panics if the current task is not a user thread.
 pub fn with_current_credentials<R>(f: impl FnOnce(&Credentials) -> R) -> R {
-    let proc_state = crate::current_process_state();
-    let credentials = proc_state.credentials.read();
-    f(&credentials)
+    current_user_process()
+        .with_credentials(f)
+        .expect("current user thread must still expose process credentials")
 }
 
 /// Runs a closure with mutable access to the current process credentials.
@@ -21,7 +23,7 @@ pub fn with_current_credentials<R>(f: impl FnOnce(&Credentials) -> R) -> R {
 ///
 /// Panics if the current task is not a user thread.
 pub fn with_current_credentials_mut<R>(f: impl FnOnce(&mut Credentials) -> R) -> R {
-    let proc_state = crate::current_process_state();
-    let mut credentials = proc_state.credentials.write();
-    f(&mut credentials)
+    current_user_process()
+        .with_credentials_mut(f)
+        .expect("current user thread must still expose process credentials")
 }

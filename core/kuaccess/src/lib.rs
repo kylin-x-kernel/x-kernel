@@ -21,9 +21,9 @@ use khal::{
     paging::MappingFlags,
     trap::{PAGE_FAULT, register_trap_handler},
 };
+use kprocess::AsThread;
 use kspin::IrqSave;
 use ktask::{current, current_may_uninit};
-use kthread::AsThread;
 use memaddr::VirtAddr;
 use memspace::PageFaultOutcome;
 use osvm::{MemError, MemResult, VirtMemIo};
@@ -56,8 +56,9 @@ fn dispatch_irq_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool 
     }
 
     let outcome = thread
-        .process_state()
+        .process()
         .address_space()
+        .expect("accessing user memory requires a live process address space")
         .lock()
         .handle_page_fault(vaddr, access_flags);
     fault_outcome_to_trap_result(outcome)

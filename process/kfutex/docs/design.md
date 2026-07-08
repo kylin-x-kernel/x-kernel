@@ -153,10 +153,10 @@ Linux 对 file-backed shared futex 的核心不是“哪个 `struct file` 打开
 因此 `kfutex` 使用 inode-owned `MappingIdentity` 作为 file-backed shared table
 的 region identity，而不是把 open-file 实例或 runtime 私有句柄当作共享对象本体。
 
-### robust-list 仍留在 `kthread`
+### robust-list 仍留在 `kprocess`
 
 robust-list head 和 `clear_child_tid` 属于线程生命周期状态，不属于 futex 数据 owner。
-`kfutex` 只承接等待队列和 table 组织；线程退出时由 `kthread`/`posix-process` 调用 `kfutex` API 完成唤醒。
+`kfutex` 只承接等待队列和 table 组织；线程退出时由 `kprocess`/`posix-process` 调用 `kfutex` API 完成唤醒。
 
 ## Drop / 资源释放
 

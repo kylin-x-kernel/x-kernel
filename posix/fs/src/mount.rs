@@ -7,7 +7,6 @@
 use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
-use kthread::current_process_state;
 use kvfs::{LookupFlags, LookupIntent, MountFlags, ST_RDONLY, lookup_location};
 use memfs::MemoryFs;
 use posix_types::UserConstPtr;
@@ -113,8 +112,7 @@ pub fn sys_mount(
         "bpf" => bpffs::new_bpffs(),
         _ => return Err(KError::NoSuchDevice),
     };
-    let process = current_process_state();
-    let fs_context = process.fs_context();
+    let fs_context = kprocess::current_user_process_fs_context();
     let fs = fs_context.lock();
     let target = lookup_location(
         &fs.lookup_context(),
@@ -146,8 +144,7 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     let target = target.load_string()?;
     debug!("sys_umount2 <= target: {target:?}");
 
-    let process = current_process_state();
-    let fs_context = process.fs_context();
+    let fs_context = kprocess::current_user_process_fs_context();
     let fs = fs_context.lock();
     let target = lookup_location(
         &fs.lookup_context(),

@@ -139,7 +139,7 @@ pub(crate) enum CMsg {
 impl CMsg {
     /// Parse a control message header and extract its data
     pub(crate) fn parse(
-        resources: &kthread::ProcessResources,
+        resources: &kprocess::ProcessResources,
         hdr_ptr: UserConstPtr<cmsghdr>,
         hdr: cmsghdr,
     ) -> KResult<Self> {

@@ -13,7 +13,6 @@ use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
 use ktask::current;
-use kthread::get_process_state;
 use kuaccess::vm_load_string;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
 use osvm::write_vm_mem;
@@ -28,7 +27,7 @@ fn validate_cap_header(header_ptr: UserPtr<__user_cap_header_struct>) -> KResult
         header_ptr.write_vm(header)?;
         return Err(KError::InvalidInput);
     }
-    let _ = get_process_state(header.pid as u32)?;
+    kprocess::capability::validate_target_pid(header.pid as u32)?;
     Ok(())
 }
 

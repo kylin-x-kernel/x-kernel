@@ -66,13 +66,13 @@ fn write_zeros_range(file: &File, start: u64, end: u64) -> KResult<()> {
 /// Creates a dummy file descriptor for unsupported syscalls.
 pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
     // Check if running under QEMU - if so, report unsupported to let QEMU fall back to alternatives
-    if kthread::current_task_name().starts_with("qemu-") {
+    if kprocess::current_task_name().starts_with("qemu-") {
         // We need to be honest to qemu, since it can automatically fallback to
         // other strategies.
         return Err(KError::Unsupported);
     }
     warn!("Dummy fd created: {sysno}");
-    kthread::current_resources()
+    kprocess::current_resources()
         .add_file_like(Arc::new(DummyFd), false)
         .map(|fd| fd as isize)
 }
@@ -83,7 +83,7 @@ pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
 pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_read <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
     // Get the file object and perform the read operation into the user buffer
-    Ok(kthread::current_resources()
+    Ok(kprocess::current_resources()
         .get_file_like(fd)?
         .read(&mut VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
 }
@@ -92,7 +92,7 @@ pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
 pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_readv <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored read - read data into multiple buffers in a single operation
-    let f = kthread::current_resources().get_file_like(fd)?;
+    let f = kprocess::current_resources().get_file_like(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     f.read(&mut iov.into_io()).map(|n| n as _)
 }
@@ -102,7 +102,7 @@ pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<is
 /// Return the written size if success.
 pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
-    Ok(kthread::current_resources()
+    Ok(kprocess::current_resources()
         .get_file_like(fd)?
         .write(&mut VmBytes::new(buf.as_ptr(), len))? as _)
 }
@@ -111,7 +111,7 @@ pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
 pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored write - write data from multiple buffers in a single operation
-    let f = kthread::current_resources().get_file_like(fd)?;
+    let f = kprocess::current_resources().get_file_like(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     f.write(&mut iov.into_io()).map(|n| n as _)
 }
@@ -126,7 +126,7 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<is
         2 => SeekFrom::End(offset as _),
         _ => return Err(KError::InvalidInput),
     };
-    let any_file = kthread::current_resources().get_file_like(fd)?;
+    let any_file = kprocess::current_resources().get_file_like(fd)?;
 
     if let Ok(f) = any_file.downcast_arc::<File>() {
         let off = Seek::seek(&mut &*f, pos)?;
@@ -144,7 +144,7 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
     if length < 0 {
         return Err(KError::InvalidInput);
     }
-    let fs_context = kthread::current_process_fs_context();
+    let fs_context = kprocess::current_user_process_fs_context();
     let fs = fs_context.lock();
     let file = OpenOptions::new().write(true).open(&fs, path)?;
     file.set_len(length as _)?;
@@ -155,7 +155,7 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
 pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     debug!("sys_ftruncate <= {fd} {length}");
     // Truncate file descriptor to specified length
-    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     f.set_len(length as _)?;
     Ok(0)
 }
@@ -193,7 +193,7 @@ pub fn sys_fallocate(
     let keep_size = (mode & FALLOC_FL_KEEP_SIZE) != 0;
     let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
 
-    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     f.access(FileFlags::WRITE)?;
 
     let start = offset as u64;
@@ -305,7 +305,7 @@ pub fn sys_fallocate(
 pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
     // Synchronize file to disk - syncs both data and metadata
-    let any_file = kthread::current_resources().get_file_like(fd)?;
+    let any_file = kprocess::current_resources().get_file_like(fd)?;
     if let Ok(f) = any_file.downcast_arc::<File>() {
         f.sync(false)?;
         return Ok(0);
@@ -317,7 +317,7 @@ pub fn sys_fsync(fd: c_int) -> KResult<isize> {
 pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
     // Synchronize file data to disk - only syncs data, not metadata
-    let any_file = kthread::current_resources().get_file_like(fd)?;
+    let any_file = kprocess::current_resources().get_file_like(fd)?;
     if let Ok(f) = any_file.downcast_arc::<File>() {
         f.sync(true)?;
         return Ok(0);
@@ -352,7 +352,7 @@ pub fn sys_pread64(
     offset: __kernel_off_t,
 ) -> KResult<isize> {
     // Read from file at specific offset without changing file position
-    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
@@ -374,7 +374,7 @@ pub fn sys_pwrite64(
     if len == 0 {
         return Ok(0);
     }
-    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     let write = f.write_at(VmBytes::new(buf.as_ptr(), len), offset as _)?;
     Ok(write as _)
 }
@@ -423,7 +423,7 @@ pub fn sys_preadv2(
     if flags != 0 {
         return Err(KError::Unsupported);
     }
-    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     if offset == -1 {
         f.read(iov.into_io()).map(|n| n as _)
@@ -448,7 +448,7 @@ pub fn sys_pwritev2(
     if flags != 0 {
         return Err(KError::Unsupported);
     }
-    let f = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let f = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     if offset == -1 {
         f.write(iov.into_io()).map(|n| n as _)
@@ -562,7 +562,7 @@ pub fn sys_sendfile(
     );
 
     // Source can use fixed offset or current file position
-    let resources = kthread::current_resources();
+    let resources = kprocess::current_resources();
     let src = if !offset.is_null() {
         // Check offset fits in 32-bit range (legacy syscall limitation)
         if offset.read_vm()? > u32::MAX as u64 {
@@ -606,7 +606,7 @@ pub fn sys_copy_file_range(
     // TODO: check same file and overlap
 
     // Source can use fixed offset or current file position
-    let resources = kthread::current_resources();
+    let resources = kprocess::current_resources();
     let src = if !off_in.is_null() {
         SendFile::Offset(resources.get_file_like_as::<File>(fd_in)?, off_in)
     } else {
@@ -646,7 +646,7 @@ pub fn sys_splice(
     // Track if we have a pipe - at least one must be present for splice
     let mut has_pipe = false;
 
-    let resources = kthread::current_resources();
+    let resources = kprocess::current_resources();
 
     // Dummy file descriptors cannot be spliced
     if resources.get_file_like_as::<DummyFd>(fd_in).is_ok()

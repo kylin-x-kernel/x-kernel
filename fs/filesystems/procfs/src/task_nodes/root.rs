@@ -16,9 +16,8 @@ use core::{any::Any, ffi::CStr, iter, str, task::Context};
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use khal::paging::MappingFlags;
 use kpoll::{IoEvents, Pollable};
-use kprocess::Process;
+use kprocess::{AsThread, Process, TaskStat};
 use ktask::{KtaskRef, WeakKtaskRef, current};
-use kthread::{AsThread, TaskStat, get_process_state, get_task, processes};
 use kvfs::{
     FileNodeOps, LookupFlags, LookupIntent, MagicLinkOps, Metadata, MetadataUpdate, NodeFlags,
     NodeOps, NodePermission, NodeType, ResolvedObject, VfsError, VfsResult,
@@ -45,8 +44,7 @@ impl SimpleDirOps for ProcessTaskDir {
             return Box::new(iter::empty());
         };
         Box::new(
-            process
-                .threads()
+            kprocess::procfs::thread_ids(&process)
                 .into_iter()
                 .map(|tid| tid.to_string().into()),
         )
@@ -55,8 +53,8 @@ impl SimpleDirOps for ProcessTaskDir {
     fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
         let process = self.process.upgrade().ok_or(VfsError::NotFound)?;
         let tid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-        let task = get_task(tid).map_err(|_| VfsError::NotFound)?;
-        if task.as_thread().proc_state.proc.pid() != process.pid() {
+        let task = kprocess::procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?;
+        if task.as_thread().pid() != process.pid() {
             return Err(VfsError::NotFound);
         }
 
@@ -69,15 +67,11 @@ impl SimpleDirOps for ProcessTaskDir {
 }
 
 fn task_status(task: &KtaskRef) -> String {
-    format_task_status(
-        &task.name(),
-        task.as_thread().proc_state.proc.pid(),
-        task.id().as_u64(),
-    )
+    format_task_status(&task.name(), task.as_thread().pid(), task.as_thread().tid())
 }
 
 #[rustfmt::skip]
-fn format_task_status(name: &str, tgid: u32, pid: u64) -> String {
+fn format_task_status(name: &str, tgid: u32, pid: u32) -> String {
     format!(
         "Name:\t{}\n\
         Tgid:\t{}\n\
@@ -242,9 +236,13 @@ impl SeqIterator for MapsIter {
             return;
         };
 
-        let proc_state = &task.as_thread().proc_state;
-        let heap_top = proc_state.heap_top();
-        let aspace = proc_state.address_space().lock();
+        let process = task.as_thread().process();
+        let heap_top = process.heap_top().unwrap_or(USER_HEAP_BASE);
+        let aspace_ref = match process.address_space() {
+            Ok(aspace_ref) => aspace_ref,
+            Err(_) => return,
+        };
+        let aspace = aspace_ref.lock();
         for vma in aspace.vmas() {
             let start = vma.start().as_usize();
             let end = vma.end().as_usize();
@@ -303,8 +301,9 @@ impl ProcFdLink {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         Ok(task
             .as_thread()
-            .proc_state
-            .resources
+            .process()
+            .resources()
+            .map_err(|_| VfsError::NotFound)?
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -405,8 +404,9 @@ impl MagicLinkOps for ProcFdLink {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let snapshot = task
             .as_thread()
-            .proc_state
-            .resources
+            .process()
+            .resources()
+            .map_err(|_| VfsError::NotFound)?
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -433,10 +433,10 @@ impl SimpleDirOps for ThreadFdDir {
         let Some(task) = self.task.upgrade() else {
             return Box::new(iter::empty());
         };
-        let ids = task
-            .as_thread()
-            .proc_state
-            .resources
+        let Ok(resources) = task.as_thread().process().resources() else {
+            return Box::new(iter::empty());
+        };
+        let ids = resources
             .fd_table()
             .read()
             .ids()
@@ -450,8 +450,9 @@ impl SimpleDirOps for ThreadFdDir {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
         task.as_thread()
-            .proc_state
-            .resources
+            .process()
+            .resources()
+            .map_err(|_| VfsError::NotFound)?
             .snapshot_fd(fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -600,7 +601,7 @@ impl SimpleDirOps for ThreadDir {
                 fs.clone(),
                 Arc::new(ProcessTaskDir {
                     fs,
-                    process: Arc::downgrade(&task.as_thread().proc_state.proc),
+                    process: Arc::downgrade(task.as_thread().process()),
                 }),
             )
             .into(),
@@ -623,7 +624,11 @@ impl SimpleDirOps for ThreadDir {
             "cgroup" => SimpleFile::new_regular(fs.clone(), move || Ok("0::/\n")).into(),
             "ns" => SimpleDir::new_maker(fs.clone(), Arc::new(ThreadNsDir { fs })).into(),
             "cmdline" => SimpleFile::new_regular(fs, move || {
-                let cmdline = task.as_thread().proc_state.cmdline().read();
+                let cmdline = task
+                    .as_thread()
+                    .process()
+                    .cmdline()
+                    .map_err(|_| VfsError::NotFound)?;
                 let mut buf = Vec::new();
                 for arg in cmdline.iter() {
                     buf.extend_from_slice(arg.as_bytes());
@@ -661,7 +666,10 @@ impl SimpleDirOps for ThreadDir {
             )
             .into(),
             "exe" => SimpleFile::new(fs, NodeType::Symlink, move || {
-                Ok(task.as_thread().proc_state.exe_path().read().clone())
+                task.as_thread()
+                    .process()
+                    .exe_path()
+                    .map_err(|_| VfsError::NotFound)
             })
             .into(),
             "fd" => SimpleDir::new_maker(
@@ -694,9 +702,9 @@ impl ProcFsHandler {
 impl SimpleDirOps for ProcFsHandler {
     fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
         Box::new(
-            processes()
+            kprocess::procfs::visible_processes()
                 .into_iter()
-                .map(|proc_state| Cow::Owned(proc_state.proc.pid().to_string()))
+                .map(|proc| Cow::Owned(proc.pid().to_string()))
                 .chain([Cow::Borrowed("self")]),
         )
     }
@@ -706,13 +714,7 @@ impl SimpleDirOps for ProcFsHandler {
             current().clone()
         } else {
             let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-            let proc_state = get_process_state(pid).map_err(|_| VfsError::NotFound)?;
-            proc_state
-                .proc
-                .threads()
-                .into_iter()
-                .find_map(|tid| get_task(tid).ok())
-                .ok_or(VfsError::NotFound)?
+            kprocess::procfs::process_task(pid).map_err(|_| VfsError::NotFound)?
         };
         Ok(make_thread_dir(self.fs.clone(), &task))
     }

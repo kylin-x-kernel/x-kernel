@@ -2,11 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::sync::Arc;
+
 use filemap::{FileMmapRequest, mmap_private_file, mmap_shared_file};
 use kerrno::{KError, KResult};
 use kfs::{File, FileFlags};
 use khal::paging::{MappingFlags, PageSize};
-use kthread::current_process_state;
+use kprocess::{current_resources, current_user_process_address_space};
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, align_up_4k};
 use memspace::{AddrPolicy, MsyncPolicy, VmRuntimeRef};
@@ -472,9 +474,9 @@ pub fn sys_mmap(
 ) -> KResult<isize> {
     let request = MmapRequest::from_raw(addr, length, prot, flags, fd, offset)?;
 
-    let proc_state = current_process_state();
+    let aspace_ref = current_user_process_address_space();
     let file = if !request.flags.is_anonymous() {
-        Some(proc_state.resources.get_file_like_as::<File>(request.fd)?)
+        Some(current_resources().get_file_like_as::<File>(request.fd)?)
     } else {
         None
     };
@@ -482,7 +484,7 @@ pub fn sys_mmap(
     // --- Resolve the mapping address ---
     let (hint, mut length, page_size) = request.resolved_range()?;
 
-    let mut aspace = proc_state.address_space().lock();
+    let mut aspace = aspace_ref.lock();
     let start = aspace.mmap_resolve_addr(
         hint,
         length,
@@ -508,7 +510,7 @@ pub fn sys_mmap(
             } else {
                 request.permissions.maximum
             };
-            let invalidate = aspace.invalidate_handle(proc_state.address_space());
+            let invalidate = aspace.invalidate_handle(&aspace_ref);
             let req = FileMmapRequest {
                 start,
                 length,
@@ -516,9 +518,9 @@ pub fn sys_mmap(
                 page_size,
                 flags: request.permissions.current,
                 max_flags,
-                file: file.clone(),
+                file: Arc::clone(file),
                 mm_id: aspace.mm_id(),
-                aspace: proc_state.address_space().clone(),
+                aspace: aspace_ref.clone(),
                 invalidate,
             };
             let (vma, runtime) = if request.map_type.is_shared() {
@@ -557,8 +559,8 @@ pub fn sys_mmap(
 pub fn sys_munmap(addr: usize, length: usize) -> KResult<isize> {
     debug!("sys_munmap <= addr: {addr:#x}, length: {length:x}");
     let request = MunmapRequest::from_raw(addr, length)?;
-    let proc_state = current_process_state();
-    let mut aspace = proc_state.address_space().lock();
+    let aspace_ref = current_user_process_address_space();
+    let mut aspace = aspace_ref.lock();
     aspace.unmap(request.start, request.length)?;
     Ok(0)
 }
@@ -571,8 +573,8 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: u32) -> KResult<isize> {
         request.permissions
     );
 
-    let proc_state = current_process_state();
-    let mut aspace = proc_state.address_space().lock();
+    let aspace_ref = current_user_process_address_space();
+    let mut aspace = aspace_ref.lock();
     aspace.protect(request.start, request.length, request.permissions.current)?;
 
     Ok(0)
@@ -630,8 +632,8 @@ pub fn sys_mremap(
 
     // --- 2. Find the VMA ---
 
-    let proc_state = current_process_state();
-    let mut aspace = proc_state.address_space().lock();
+    let aspace_ref = current_user_process_address_space();
+    let mut aspace = aspace_ref.lock();
 
     let source = aspace.resolve_mremap_source(addr, old_size)?;
     let vma_end = source.end();
@@ -641,7 +643,7 @@ pub fn sys_mremap(
 
     // --- 3. Dispatch ---
 
-    let aspace_ref = proc_state.address_space().clone();
+    let aspace_ref = aspace_ref.clone();
 
     // FIXED path: move to new_addr (handles both shrink and grow)
     if mremap_flags.is_fixed() {
@@ -748,8 +750,7 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> KResult<isize> {
         return Ok(0);
     };
 
-    let proc_state = current_process_state();
-    let aspace_ref = proc_state.address_space();
+    let aspace_ref = current_user_process_address_space();
     let mut aspace = aspace_ref.lock();
     aspace.madvise_dontneed(request.start, request.length)?;
     Ok(0)
@@ -762,8 +763,8 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> KResult<isize> {
     if request.is_empty() {
         return Ok(0);
     }
-    let proc_state = current_process_state();
-    let mut aspace = proc_state.address_space().lock();
+    let aspace_ref = current_user_process_address_space();
+    let mut aspace = aspace_ref.lock();
     aspace.msync_range(request.start, request.length, request.policy()?)?;
     Ok(0)
 }

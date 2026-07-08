@@ -30,7 +30,7 @@ pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
     let flags = EpollCreateFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_epoll_create1 <= flags: {flags:?}");
 
-    kthread::current_resources()
+    kprocess::current_resources()
         .add_file_like(
             Arc::new(Epoll::new()),
             flags.contains(EpollCreateFlags::CLOEXEC),
@@ -45,8 +45,8 @@ pub fn sys_epoll_ctl(
     fd: i32,
     event: UserConstPtr<epoll_event>,
 ) -> KResult<isize> {
-    let epoll = kthread::current_resources().get_file_like_as::<Epoll>(epfd)?;
-    let file = kthread::current_resources().get_file_like(fd)?;
+    let epoll = kprocess::current_resources().get_file_like_as::<Epoll>(epfd)?;
+    let file = kprocess::current_resources().get_file_like(fd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
@@ -95,7 +95,7 @@ fn do_epoll_wait(
         return Err(KError::InvalidInput);
     }
 
-    let epoll = kthread::current_resources().get_file_like_as::<Epoll>(epfd)?;
+    let epoll = kprocess::current_resources().get_file_like_as::<Epoll>(epfd)?;
     // `posix-types::UserPtr` models copy-to-user semantics rather than a borrowed
     // mutable user slice, so we stage ready events in kernel memory and copy them
     // back once polling completes.
@@ -106,16 +106,16 @@ fn do_epoll_wait(
         .transpose()?;
 
     let ready =
-        kthread::current_thread().with_temp_blocked(sigmask.map(Into::into), || match block_on(
-            future::timeout(
+        kprocess::current_user_thread().with_temp_blocked(sigmask.map(Into::into), || {
+            match block_on(future::timeout(
                 timeout,
                 poll_io(epoll.as_ref(), IoEvents::IN, false, || {
                     epoll.poll_events(&mut output)
                 }),
-            ),
-        ) {
-            Ok(r) => r,
-            Err(_) => Ok(0),
+            )) {
+                Ok(r) => r,
+                Err(_) => Ok(0),
+            }
         })?;
 
     events.write_vm_slice(&output[..ready])?;

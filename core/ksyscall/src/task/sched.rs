@@ -6,8 +6,8 @@
 
 use kerrno::{KError, KResult};
 use khal::percpu::this_cpu_id;
+use kprocess::AsThread;
 use ktask::{KCpuMask, current};
-use kthread::AsThread;
 use linux_raw_sys::general::{
     PRIO_PGRP, PRIO_PROCESS, PRIO_USER, SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_NORMAL, SCHED_RR,
 };
@@ -141,18 +141,18 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
 
     match which {
         PRIO_PROCESS => {
-            let proc_state = if who == 0 {
-                kthread::current_process_state()
+            let proc = if who == 0 {
+                kprocess::current_user_process()
             } else {
-                kthread::get_process_state(who)?
+                kprocess::scheduler::target_process(who)?
             };
-            process_raw_priority(&proc_state.proc)
+            process_raw_priority(&proc)
         }
         PRIO_PGRP => {
             let pg = if who == 0 {
-                kthread::current_process_state().proc.group()
+                kprocess::current_user_process().group()
             } else {
-                kthread::get_process_group(who)?
+                kprocess::scheduler::target_group(who)?
             };
             let mut min_nice = None;
             for proc in pg.processes() {
@@ -165,14 +165,17 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
         }
         PRIO_USER => {
             let uid = if who == 0 {
-                kthread::with_current_credentials(|credentials| credentials.ruid())
+                kprocess::with_current_credentials(|credentials| credentials.ruid())
             } else {
                 who
             };
             let mut min_nice = None;
-            for proc_state in kthread::processes() {
-                if proc_state.credentials.read().ruid() == uid {
-                    update_min_nice(&mut min_nice, process_min_nice(&proc_state.proc));
+            for proc in kprocess::scheduler::processes() {
+                if proc
+                    .credentials_snapshot()
+                    .is_ok_and(|credentials| credentials.ruid() == uid)
+                {
+                    update_min_nice(&mut min_nice, process_min_nice(&proc));
                     if min_nice == Some(MIN_NICE) {
                         break;
                     }
@@ -192,19 +195,19 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
 
     match which {
         PRIO_PROCESS => {
-            let proc_state = if who == 0 {
-                kthread::current_process_state()
+            let proc = if who == 0 {
+                kprocess::current_user_process()
             } else {
-                kthread::get_process_state(who)?
+                kprocess::scheduler::target_process(who)?
             };
-            set_process_nice(&proc_state.proc, prio)?;
+            set_process_nice(&proc, prio)?;
             Ok(0)
         }
         PRIO_PGRP => {
             let pg = if who == 0 {
-                kthread::current_process_state().proc.group()
+                kprocess::current_user_process().group()
             } else {
-                kthread::get_process_group(who)?
+                kprocess::scheduler::target_group(who)?
             };
             let mut updated = false;
             for proc in pg.processes() {
@@ -217,14 +220,17 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
         }
         PRIO_USER => {
             let uid = if who == 0 {
-                kthread::with_current_credentials(|credentials| credentials.ruid())
+                kprocess::with_current_credentials(|credentials| credentials.ruid())
             } else {
                 who
             };
             let mut updated = false;
-            for proc_state in kthread::processes() {
-                if proc_state.credentials.read().ruid() == uid {
-                    updated |= set_process_nice_if_present(&proc_state.proc, prio);
+            for proc in kprocess::scheduler::processes() {
+                if proc
+                    .credentials_snapshot()
+                    .is_ok_and(|credentials| credentials.ruid() == uid)
+                {
+                    updated |= set_process_nice_if_present(&proc, prio);
                 }
             }
             if !updated {
@@ -237,29 +243,7 @@ pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
 }
 
 fn scheduler_target(pid: i32) -> KResult<ktask::KtaskRef> {
-    if pid < 0 {
-        return Err(KError::NoSuchProcess);
-    }
-    if pid == 0 {
-        return Ok(current().clone());
-    }
-
-    let pid = pid as u32;
-    let proc_state = kthread::get_process_state(pid)?;
-    let current_task = current();
-    if let Some(thread) = current_task.try_as_thread()
-        && thread.pid() == pid
-    {
-        return Ok(current_task.clone());
-    }
-
-    let tid = proc_state
-        .proc
-        .threads()
-        .into_iter()
-        .min()
-        .ok_or(KError::NoSuchProcess)?;
-    kthread::get_task(tid)
+    kprocess::scheduler::target_task(pid)
 }
 
 fn configured_scheduler_policy() -> u32 {
@@ -304,10 +288,7 @@ fn process_raw_priority(proc: &kprocess::Process) -> KResult<isize> {
 
 fn process_min_nice(proc: &kprocess::Process) -> Option<i32> {
     let mut min_nice = None;
-    for tid in proc.threads() {
-        let Ok(task) = kthread::get_task(tid) else {
-            continue;
-        };
+    for task in kprocess::scheduler::process_tasks(proc) {
         let Some(thread) = task.try_as_thread() else {
             continue;
         };
@@ -317,6 +298,19 @@ fn process_min_nice(proc: &kprocess::Process) -> Option<i32> {
         }
     }
     min_nice
+}
+
+fn set_process_nice_if_present(proc: &kprocess::Process, nice: i32) -> bool {
+    let mut updated = false;
+    for task in kprocess::scheduler::process_tasks(proc) {
+        let Some(thread) = task.try_as_thread() else {
+            continue;
+        };
+        thread.set_nice(nice);
+        let _ = ktask::set_task_prio(&task, nice as isize);
+        updated = true;
+    }
+    updated
 }
 
 fn update_min_nice(min_nice: &mut Option<i32>, nice: Option<i32>) {
@@ -332,20 +326,4 @@ fn set_process_nice(proc: &kprocess::Process, nice: i32) -> KResult<()> {
     } else {
         Err(KError::NoSuchProcess)
     }
-}
-
-fn set_process_nice_if_present(proc: &kprocess::Process, nice: i32) -> bool {
-    let mut updated = false;
-    for tid in proc.threads() {
-        let Ok(task) = kthread::get_task(tid) else {
-            continue;
-        };
-        let Some(thread) = task.try_as_thread() else {
-            continue;
-        };
-        thread.set_nice(nice);
-        let _ = ktask::set_task_prio(&task, nice as isize);
-        updated = true;
-    }
-    updated
 }

@@ -123,8 +123,7 @@ impl TaskStat {
     /// Creates a new [`TaskStat`] from a [`TaskInner`].
     pub fn from_thread(task: &TaskInner) -> KResult<Self> {
         let thread = task.as_thread();
-        let proc_state = &thread.proc_state;
-        let proc = &proc_state.proc;
+        let proc = thread.process();
 
         let pid = proc.pid();
         let comm = task.name();
@@ -144,8 +143,8 @@ impl TaskStat {
             ppid,
             pgrp,
             session,
-            num_threads: proc.threads().len() as u32,
-            exit_signal: proc_state.exit_signal().unwrap_or(Signo::SIGCHLD) as u8,
+            num_threads: proc.thread_count() as u32,
+            exit_signal: proc.exit_signal().unwrap_or(Signo::SIGCHLD) as u8,
             exit_code: proc.exit_code(),
             ..Default::default()
         })

@@ -7,7 +7,7 @@
 - clone / exit / signal-return 需要共享的用户态 trap 主循环；
 - 初始用户进程的地址空间、`ProcessState`、TTY 和 stdio 组装；
 - 线程退出时的 robust futex 清理、group-exit 和父进程通知；
-- 保持这些逻辑依赖 `kthread` 原语，但不把它们塞回 `kthread` 本体。
+- 保持这些逻辑依赖 `kprocess` 原语，但不把它们塞回 `kprocess` 本体。
 
 纯 syscall adapter（`getpid`、`getrusage`、`umask`、job control、rlimit 等）
 已经迁回 `ksyscall/task`，不再由本 crate 承接。
@@ -29,12 +29,17 @@ entry / ksyscall
   posix-process
     |   \
     v    v
-  kexec  kthread
+  kexec  kprocess
 ```
 
 ## 调用约束 / 执行上下文
 
-- `new_user_task()` 仅用于创建会进入用户态执行的 task。
+- `new_user_task()` 仅用于创建会进入用户态执行的 task，并且要求调用方先准备好该线程的 `PidHandle`。
+- 用户 task 启动路径必须遵守：
+  - 先由 process-domain owner 决定 PID namespace 和线程 identity
+  - 通过 `install_init_process(...)` 或同类 owner API 安装 `KTaskExt`
+  - 调用 `start_user_task(...)`
+  - `kprocess` 内部先完成 publish，再使 task runnable
 - `run_init_process()` 依赖 rootfs、TTY 和默认 stdio 初始化路径可用。
 - `do_exit()`、`check_signals()` 依赖 current task 已安装线程扩展。
 - 这些接口会访问地址空间、信号状态、fd 表和共享内存管理器，可阻塞，不适用于中断上下文。
@@ -43,11 +48,12 @@ entry / ksyscall
 
 ### 用户线程运行
 
-1. 进入用户态运行 `UserContext`。
-2. 因 syscall / page fault / exception / interrupt 返回内核。
-3. 处理返回原因并更新 CPU 计时状态。
-4. 执行信号检查和默认动作。
-5. 轮询 CPU timer 后返回用户态。
+1. task 完成发布并进入 run queue。
+2. 进入用户态运行 `UserContext`。
+3. 因 syscall / page fault / exception / interrupt 返回内核。
+4. 处理返回原因并更新 CPU 计时状态。
+5. 执行信号检查和默认动作。
+6. 轮询 CPU timer 后返回用户态。
 
 ### 线程退出
 
@@ -59,14 +65,14 @@ entry / ksyscall
 
 ## 并发模型
 
-- 线程/进程基础状态由 `kthread` 和其内部锁保护。
+- 线程/进程基础状态由 `kprocess` 和其内部锁保护。
 - 本 crate 负责组织退出与信号路径的调用顺序，不重复持有额外全局状态。
 - robust futex owner-dead 标志通过原子位和等待队列协作。
 
 ## 设计决策
 
-- 该逻辑放在 `posix-process`，因为它围绕进程/线程生命周期状态机，不应该污染 `kthread` 的基础职责。
-- `posix-process` 可以自然承接这类面向进程生命周期的上层 owner 逻辑，并避免 `kthread <-> posix-ipc` 环依赖。
+- 该逻辑放在 `posix-process`，因为它围绕进程/线程生命周期状态机，不应该污染 `kprocess` 的基础职责。
+- `posix-process` 可以自然承接这类面向进程生命周期的上层 owner 逻辑，并避免 `kprocess <-> posix-ipc` 环依赖。
 - 纯 adapter 迁回 `ksyscall/task` 后，本 crate 只保留真正依赖进程生命周期状态机的 owner 逻辑。
 - 用户态 runtime 直接消费 `MmSpace::handle_page_fault()` 的结构化结果，
   因此架构 trap glue 不需要理解 file-backed fault 细节，同时 runtime 可以把

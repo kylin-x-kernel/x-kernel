@@ -71,12 +71,12 @@ pub fn sys_arch_prctl(
 
 /// Returns the thread ID of the current thread.
 pub fn sys_gettid() -> KResult<isize> {
-    Ok(ktask::current().id().as_u64() as _)
+    Ok(kprocess::current_user_tid() as _)
 }
 
 /// Sets the `clear_child_tid` pointer for the current thread.
 pub fn sys_set_tid_address(clear_child_tid: usize) -> KResult<isize> {
-    let current = ktask::current();
-    kthread::current_thread().set_clear_child_tid(clear_child_tid);
-    Ok(current.id().as_u64() as isize)
+    let current_thread = kprocess::current_user_thread();
+    current_thread.set_clear_child_tid(clear_child_tid);
+    Ok(kprocess::current_user_tid() as isize)
 }

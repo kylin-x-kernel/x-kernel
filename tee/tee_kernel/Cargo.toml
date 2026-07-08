@@ -40,7 +40,7 @@ cfg-if.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 osvm.workspace = true
 posix-types.workspace = true
-kthread = { workspace = true, features = ["tee"] }
+kprocess = { workspace = true, features = ["tee"] }
 linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
 bincode = { version = "2.0.1", default-features = false, features = ["alloc", "derive"] }

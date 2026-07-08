@@ -3,7 +3,7 @@
 ## 信任模型
 
 ```text
-kthread / posix/process / ksyscall / ktty
+kprocess / posix/process / ksyscall / ktty
    │
    │ safe API: Process, ProcessGroup, Session, init_proc, Pid
    v
@@ -12,7 +12,8 @@ kthread / posix/process / ksyscall / ktty
 │                              │
 │  process identity graph      │
 │  group/session membership    │
-│  zombie and thread metadata  │
+│  zombie/thread metadata      │
+│  lifecycle wait/exit events  │
 │  controlling terminal slot   │
 │                              │
 │  unsafe boundary: none       │
@@ -35,6 +36,17 @@ kthread / posix/process / ksyscall / ktty
 3. **init 进程存在性**：普通进程 reparent 依赖 `INIT_PROC` 已初始化。
 4. **terminal 对象类型擦除**：`Session::terminal` 保存 `Arc<dyn Any + Send + Sync>`，只通过指针相等清除，不在 `kprocess` 内 downcast。
 5. **zombie 回收顺序**：`free` 只能作用于 zombie 进程，避免 still-running 子进程从父表中被移除。
+6. **lifecycle 事件归属稳定**：`child_exit_event` 与 `exit_event` 归属于 `Process`，
+   不依赖 `ProcessState` 是否仍可升级。
+7. **弱 runtime 引用非拥有**：`Process` 只保存 `Weak<ProcessRuntime>`，
+   不延长 runtime 生命周期；upgrade 失败时由上层折叠为 `NoSuchProcess` 等语义错误。
+8. **live 语义独立于弱 runtime 引用**：外部 `live process` 以 `!is_zombie()` 为准，
+   不允许把“runtime 还没释放”误判成“进程仍然活着”。
+9. **publication 原子可见性**：task/process/group/session 目录在同一 publication 锁下更新，
+   避免 `tgkill(tid)` 已命中而 `kill(pid)` / `pidfd_open(pid)` 仍暂时 `ESRCH` 的跨表半发布状态。
+10. **publication 失败必须可回滚**：若 parent-side `CLONE_PIDFD` / `PARENT_SETTID` 等收尾步骤失败，
+   staged publication 必须撤销 task/process 目录可见性，以及尚未提交 child 的 parent/group 成员关系，
+   不能留下“syscall 失败但 child 仍可见/可 wait”的残留对象。
 
 ## 线程安全
 
@@ -58,7 +70,12 @@ kthread / posix/process / ksyscall / ktty
 | T-07 | wait 或 procfs 遍历读到过期 group member | 低 | WeakMap 中存在已释放对象的 weak entry | `ProcessGroup::processes` 通过 `WeakMap::values` 返回可升级对象，registry 另有 cleanup 路径 |
 | T-08 | 锁顺序误用导致死锁 | 中 | 外部持有 children、group 或 session 成员锁后调用 group/session mutation API | API 内部统一加锁；新增调用点应避免外层持有 `kprocess` 成员锁 |
 | T-09 | group-exit 退出码被普通线程退出覆盖 | 中 | group exit 后其他线程继续调用 `exit_thread` | `exit_thread` 在 `group_exited` 为 true 时不覆盖 `exit_code` |
-| T-10 | 中断上下文误用放大关中断区间 | 中 | 在中断上下文中执行进程关系 mutation，或持有 `SpinNoIrq` 后调用长路径逻辑 | `kprocess` API 内部锁区保持短小；新增调用点应限制在 task/syscall 生命周期路径 |
+| T-10 | lifecycle 唤醒仍依赖 runtime-state 查找 | 中 | 退出路径先拿到 parent，却还要回查另一层状态对象 | lifecycle 事件已归属 `Process`，退出路径可直接 wake parent |
+| T-12 | 进程 live-state 入口依赖 thread-table 反推 | 中 | PID 可见后仍需通过线程集合和 task table 回查 live state | `Process` 现在直接持有 typed runtime attachment，避免把 task table 当作 live-state 真相 |
+| T-13 | zombie 因 runtime 尚未释放而被误判为 live | 中 | 退出尾段里当前线程仍强持有 `ProcessRuntime`，但进程已经进入 zombie | `live` 查询只看 `is_zombie()`；runtime attachment 仅供内部 capability upgrade |
+| T-14 | 多目录分步发布暴露 task/process 可见性裂缝 | 中 | parent 已观察到新 tid/pidfd，但 task/process/group/session 目录仍未统一可见 | `ProcessPublication` 用单锁事务同时更新可观测目录；`clone` 在 publication 完成后才回写 `PARENT_SETTID` / `PIDFD` |
+| T-15 | staged publication 失败后残留未提交 child | 高 | `clone()` 返回错误，但 child 仍留在 parent.children / thread membership / PID 目录里 | publication handle 默认可回滚；失败时同步撤销目录可见性与未提交 child 关系 |
+| T-11 | 中断上下文误用放大关中断区间 | 中 | 在中断上下文中执行进程关系 mutation，或持有 `SpinNoIrq` 后调用长路径逻辑 | `kprocess` API 内部锁区保持短小；新增调用点应限制在 task/syscall 生命周期路径 |
 
 影响等级定义：
 
@@ -75,7 +92,7 @@ kthread / posix/process / ksyscall / ktty
 | F-03 | wait 回收运行中进程 | 调用者绕过 zombie 检查调用 `free` | 父子关系提前删除 | wait、signal 和 procfs 观察错误 | 2 | `free` 对 `is_zombie` 做断言 |
 | F-04 | setsid 或 setpgid 语义错误 | 调用者未检查 ID 冲突或 session 约束 | 进程组关系错误 | job-control 行为异常 | 3 | `move_to_group` 内部拒绝跨 session；冲突检查由 syscall 和 registry 执行 |
 | F-05 | terminal slot 永久占用 | TTY drop 或 ioctl 路径未调用 `unset_terminal` | session 无法绑定新 terminal | TTY job-control 失效 | 3 | `set_terminal_with` 返回失败信号；`TIOCNOTTY` 路径调用 `unset_terminal` |
-| F-06 | WeakMap 残留过期项 | process group 成员释放后索引未清理 | 遍历结果少于表项数量 | 统计或展示短暂不一致 | 4 | `WeakMap::values` 只返回可升级对象；`kthread` registry 提供 cleanup |
+| F-06 | WeakMap 残留过期项 | process group 成员释放后索引未清理 | 遍历结果少于表项数量 | 统计或展示短暂不一致 | 4 | `WeakMap::values` 只返回可升级对象；`kprocess` registry 提供 cleanup |
 | F-07 | 线程集合统计不准 | 调用者漏调 `add_thread` 或 `exit_thread` | `threads()`、CPU time 和 rusage 统计错误 | procfs、wait、timer 逻辑受影响 | 3 | clone 和 exit 路径集中调用对应 API |
 | F-08 | 中断上下文执行进程关系修改 | IRQ 路径误调用 `fork`、`exit`、`create_session` 或 group mutation | 关中断持锁时间变长 | 调度延迟上升，严重时影响系统响应 | 2 | 进程关系修改限定在启动、clone、exit、wait 和 syscall job-control 路径 |
 
@@ -106,6 +123,7 @@ kthread / posix/process / ksyscall / ktty
 - ID 冲突检查不在 `kprocess` 内集中执行，调用者需通过 registry 或 syscall 规则保证唯一性。
 - `Session::terminal` 使用 `Any` 类型擦除，`kprocess` 只管理绑定槽，不了解具体 TTY 类型。
 - `Process::exit` 不主动从 process group 成员表删除进程，成员表依赖 weak entry 释放和 cleanup。
+- 弱 runtime 引用只在 `kprocess` 内部使用，不再作为对外公开的类型擦除桥，也不再作为 `live process` 判据。
 
 ## 审计清单
 
@@ -115,4 +133,5 @@ kthread / posix/process / ksyscall / ktty
 - 新增进程关系转换是否保持 parent/children、group/processes、session/process_groups 三组关系一致。
 - 新增锁嵌套是否遵循现有 API 内部加锁方式，避免外部持有成员锁后调用 mutation API。
 - 新增退出路径是否保持最后线程退出、zombie、wait/free 顺序。
+- 新增 current-thread 尾段路径是否仍可通过稳定 `Process` 访问所需 runtime capability，且不会把 zombie 重新暴露为 live。
 - 新增 controlling terminal 行为是否保持 set-once 和 pointer-match unset 语义。

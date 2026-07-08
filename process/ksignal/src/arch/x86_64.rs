@@ -55,6 +55,11 @@ pub struct MContext {
 }
 
 impl MContext {
+    /// Returns the instruction pointer recorded in this machine context.
+    pub fn ip(&self) -> usize {
+        self.rip
+    }
+
     /// Build machine context from a user context snapshot.
     pub fn new(uctx: &UserContext) -> Self {
         Self {

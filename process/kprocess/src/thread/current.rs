@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+use alloc::{string::String, sync::Arc};
+use core::ops::Deref;
+
+use kfs::{FsContext, kernel_fs_context};
+use ksync::Mutex;
+use ktask::current;
+use memspace::MmSpace;
+
+use super::{AsThread, CurrentThread, Thread};
+use crate::{Process, Tid};
+
+impl Deref for CurrentThread {
+    type Target = Thread;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_thread()
+    }
+}
+
+/// Returns the current user thread.
+pub fn current_user_thread() -> CurrentThread {
+    CurrentThread(current().clone())
+}
+
+/// Returns the current user-visible thread identifier.
+pub fn current_user_tid() -> Tid {
+    current_user_thread().tid()
+}
+
+/// Returns the current task name.
+pub fn current_task_name() -> String {
+    current().name()
+}
+
+/// Returns the current filesystem context for shared current-path helpers.
+pub fn current_fs_context() -> Arc<Mutex<FsContext>> {
+    current()
+        .try_as_thread()
+        .map(|thread| {
+            thread
+                .process()
+                .fs_context()
+                .expect("current user thread must still expose process fs context")
+        })
+        .unwrap_or_else(|| kernel_fs_context().clone())
+}
+
+/// Returns the current process-owned filesystem context.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread or if the process runtime
+/// has already detached its filesystem context, such as during late process exit.
+pub fn current_user_process_fs_context() -> Arc<Mutex<FsContext>> {
+    current_user_process()
+        .fs_context()
+        .expect("current user thread must still expose process fs context")
+}
+
+/// Returns the current process-owned address space.
+///
+/// # Panics
+///
+/// Panics if the current task is not a user thread or if the process runtime
+/// has already detached its address space, such as during late process exit.
+pub fn current_user_process_address_space() -> Arc<Mutex<MmSpace>> {
+    current_user_process()
+        .address_space()
+        .expect("current user thread must still expose process address space")
+}
+
+/// Returns the current stable process identity.
+pub fn current_user_process() -> Arc<Process> {
+    with_current_user_thread(|thread| thread.process().clone())
+}
+
+/// Executes a closure with the current user thread.
+pub fn with_current_user_thread<R>(f: impl FnOnce(&Thread) -> R) -> R {
+    let thread = current_user_thread();
+    f(&thread)
+}

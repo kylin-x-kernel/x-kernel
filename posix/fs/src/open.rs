@@ -11,7 +11,6 @@ use devfs::DeviceFile;
 use kerrno::{KError, KResult};
 use kfd::FileLike;
 use kfs::{File, OpenOptions};
-use kthread::current_process_state;
 use ktty::tty;
 use kvfs::{
     DirEntry, FileNode, Location, LookupFlags, LookupIntent, NodeType, Reference, lookup_location,
@@ -69,8 +68,7 @@ fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
         let inner = device.inner().as_any();
         if let Some(ptmx) = inner.downcast_ref::<devfs::Ptmx>() {
             let (master, pty_number) = ptmx.create_pty()?;
-            let process = current_process_state();
-            let fs_context = process.fs_context();
+            let fs_context = kprocess::current_user_process_fs_context();
             let fs = fs_context.lock();
             let pts = lookup_location(
                 &fs.lookup_context(),
@@ -86,9 +84,8 @@ fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
             let loc = Location::new(file.location().mountpoint().clone(), entry);
             file = File::with_open_flags(loc, file.flags(), file.open_flags());
         } else if inner.is::<tty::CurrentTty>() {
-            let term = kthread::current_thread()
-                .process_state()
-                .proc
+            let term = kprocess::current_user_thread()
+                .process()
                 .group()
                 .session()
                 .terminal()
@@ -100,7 +97,7 @@ fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
             } else {
                 return Err(KError::OperationNotSupported);
             };
-            let fs_context = kthread::current_process_fs_context();
+            let fs_context = kprocess::current_user_process_fs_context();
             let fs = fs_context.lock();
             let loc = lookup_location(
                 &fs.lookup_context(),
@@ -115,9 +112,7 @@ fn add_to_fd(mut file: File, flags: u32) -> KResult<i32> {
     if flags & O_NONBLOCK != 0 {
         f.set_nonblocking(true)?;
     }
-    current_process_state()
-        .resources
-        .add_file_like(f, flags & O_CLOEXEC != 0)
+    kprocess::current_resources().add_file_like(f, flags & O_CLOEXEC != 0)
 }
 
 /// Opens a file relative to a directory file descriptor.
@@ -129,7 +124,7 @@ pub fn sys_openat(
 ) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_openat <= {dirfd} {path:?} {flags:#o} {mode:#o}");
-    let mode = mode & !kthread::current_thread().process_state().umask();
+    let mode = mode & !kprocess::current_umask();
     let options = flags_to_options(flags, mode, current_effective_ids());
 
     with_fs(dirfd, |fs| options.open(fs, path))

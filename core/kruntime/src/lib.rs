@@ -102,7 +102,7 @@ impl klogger::LoggerAdapter for LogIfImpl {
 
     fn task_id() -> Option<u64> {
         if is_init_ok() {
-            ktask::current_may_uninit().map(|curr| curr.id().as_u64())
+            ktask::current_may_uninit().map(|curr| curr.owner_key())
         } else {
             None
         }

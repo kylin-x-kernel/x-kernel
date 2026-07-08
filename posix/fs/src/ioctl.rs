@@ -14,7 +14,7 @@ use posix_types::UserConstPtr;
 /// of special files.
 pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
     debug!("sys_ioctl <= fd: {fd}, cmd: {cmd}, arg: {arg}");
-    let f = kthread::current_resources().get_file_like(fd)?;
+    let f = kprocess::current_resources().get_file_like(fd)?;
     if cmd == FIONBIO {
         let val = UserConstPtr::<c_int>::from(arg).read_vm()?;
         if val != 0 && val != 1 {

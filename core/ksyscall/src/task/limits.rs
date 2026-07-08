@@ -16,9 +16,10 @@ pub fn sys_prlimit64(
     new_limit: UserConstPtr<rlimit64>,
     old_limit: UserPtr<rlimit64>,
 ) -> KResult<isize> {
-    let proc_state = kthread::get_process_state(pid)?;
+    let process = kprocess::resource_limits::target_process(pid)?;
+    let resources = process.resources()?;
     if let Some(old_limit) = old_limit.check_non_null() {
-        let (current, max) = proc_state.resources.rlimit_values(resource)?;
+        let (current, max) = resources.rlimit_values(resource)?;
         old_limit.write_vm(rlimit64 {
             rlim_cur: current,
             rlim_max: max,
@@ -27,9 +28,7 @@ pub fn sys_prlimit64(
 
     if let Some(new_limit) = new_limit.check_non_null() {
         let new_limit = new_limit.read_vm()?;
-        proc_state
-            .resources
-            .set_rlimit_values(resource, new_limit.rlim_cur, new_limit.rlim_max)?;
+        resources.set_rlimit_values(resource, new_limit.rlim_cur, new_limit.rlim_max)?;
     }
 
     Ok(0)

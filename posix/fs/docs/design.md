@@ -66,7 +66,7 @@ core/ksyscall
 │   └─ errno-oriented KResult handling                      │
 │                                                          │
 │  Process context                                         │
-│   ├─ kthread::current_process_state()                    │
+│   ├─ kprocess::current_process_state()                    │
 │   ├─ current fd resources                                │
 │   └─ per-process FsContext and umask                      │
 │                                                          │
@@ -98,7 +98,7 @@ core/ksyscall
 `posix-fs` 是 syscall 层 crate，入口默认运行在当前用户进程线程上下文中。
 多数函数依赖以下上下文：
 
-- 当前线程可通过 `kthread::current_thread()` 获取；
+- 当前线程可通过 `kprocess::current_thread()` 获取；
 - 当前进程有可访问的 `ProcessState`、fd resources 和 `FsContext`；
 - 用户指针可通过 `posix_types` / `osvm` 访问当前地址空间；
 - 调用路径允许阻塞、分配和进入 VFS、fd-backed object 或设备对象；
@@ -126,7 +126,7 @@ Closed fd
 ```
 
 `posix-fs` 不直接保存 fd 表，
-而是通过 `kthread::current_resources()` 操作当前进程资源。
+而是通过 `kprocess::current_resources()` 操作当前进程资源。
 ### 路径解析
 
 ```text

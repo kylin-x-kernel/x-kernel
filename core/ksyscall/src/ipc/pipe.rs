@@ -35,7 +35,7 @@ pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
         read_end.set_nonblocking(true)?;
         write_end.set_nonblocking(true)?;
     }
-    let resources = kthread::current_resources();
+    let resources = kprocess::current_resources();
     let read_fd = resources.add_file_like(Arc::new(read_end), cloexec)?;
     let write_fd = resources
         .add_file_like(Arc::new(write_end), cloexec)

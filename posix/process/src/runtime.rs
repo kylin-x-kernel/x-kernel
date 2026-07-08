@@ -10,7 +10,7 @@ use bytemuck::AnyBitPattern;
 use kbuild_config::KERNEL_STACK_SIZE;
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
-use kprocess::Pid;
+use kprocess::{AsThread, Tid, process_exit};
 use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
@@ -24,26 +24,25 @@ pub fn new_user_task(
     name: &str,
     mut uctx: UserContext,
     set_child_tid: usize,
-    mut dispatch_syscall: impl FnMut(&mut UserContext) -> kthread::UserThreadRuntimeAction
+    task_number: alloc::sync::Arc<kidentity::PidHandle>,
+    mut dispatch_syscall: impl FnMut(&mut UserContext) -> kprocess::UserThreadRuntimeAction
     + Send
     + 'static,
 ) -> TaskInner {
-    TaskInner::new(
+    TaskInner::new_user(
         move || {
-            let curr = ktask::current();
-
-            if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
-                tid.write_vm(curr.id().as_u64() as Pid).ok();
+            if let Some(tid) = (set_child_tid as *mut Tid).check_non_null() {
+                tid.write_vm(kprocess::current_user_tid()).ok();
             }
 
             info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
 
-            let thr = kthread::current_thread();
+            let thr = kprocess::current_user_thread();
             while !thr.is_exiting() {
                 let reason = uctx.run();
-                let mut runtime_action = kthread::UserThreadRuntimeAction::Continue;
+                let mut runtime_action = kprocess::UserThreadRuntimeAction::Continue;
 
-                thr.set_cpu_state(kthread::CpuTimeState::Kernel);
+                thr.set_cpu_state(kprocess::CpuTimeState::Kernel);
 
                 match reason {
                     ReturnReason::Syscall => {
@@ -52,8 +51,9 @@ pub fn new_user_task(
                     }
                     ReturnReason::PageFault(addr, flags) => {
                         let outcome = thr
-                            .proc_state
+                            .process()
                             .address_space()
+                            .expect("running user thread must still expose a process address space")
                             .lock()
                             .handle_page_fault(addr, flags);
                         if outcome.is_retryable() {
@@ -65,7 +65,10 @@ pub fn new_user_task(
                             };
                             warn!(
                                 "{:?}: page fault at {:#x} {:?} => {:?}",
-                                thr.proc_state.proc, addr, flags, outcome
+                                thr.process(),
+                                addr,
+                                flags,
+                                outcome
                             );
                             raise_signal_fatal(SignalInfo::new_kernel(signo))
                                 .expect("Failed to send fatal fault signal");
@@ -106,7 +109,7 @@ pub fn new_user_task(
                 // handler just finished processing and immediately re-enter the handler,
                 // looping forever. Skipping this check once is safe because the restored
                 // context already has the correct signal state.
-                if runtime_action != kthread::UserThreadRuntimeAction::SkipSignalCheckOnce {
+                if runtime_action != kprocess::UserThreadRuntimeAction::SkipSignalCheckOnce {
                     let mut handled_signal = false;
                     while check_signals(&thr, &mut uctx, None) {
                         handled_signal = true;
@@ -116,13 +119,14 @@ pub fn new_user_task(
                     }
                 }
 
-                thr.set_cpu_state(kthread::CpuTimeState::User);
-                kthread::poll_cpu_timers();
-                curr.clear_interrupt();
+                thr.set_cpu_state(kprocess::CpuTimeState::User);
+                kprocess::poll_cpu_timers();
+                ktask::current().clear_interrupt();
             }
         },
         name.into(),
         KERNEL_STACK_SIZE,
+        task_number,
     )
 }
 
@@ -147,11 +151,12 @@ fn dispatch_irq_futex_death(entry: *mut RobustList, offset: i64) -> KResult<()> 
         .checked_add_signed(offset)
         .ok_or(KError::InvalidInput)?;
     let address: usize = address.try_into().map_err(|_| KError::InvalidInput)?;
-    let key = kthread::current_futex_key(address);
+    let key = kprocess::current_futex_key(address);
 
-    let futex_table = kthread::current_thread()
-        .proc_state
+    let process = kprocess::current_user_process();
+    let futex_table = process
         .futex_state()
+        .expect("current user thread must still expose process futex state")
         .table_for(&key);
     let Some(futex) = futex_table.get(&key) else {
         return Ok(());
@@ -199,15 +204,19 @@ fn exit_robust_list(head: *const RobustListHead) {
 
 /// Exit the current thread or process group and perform cleanup.
 pub fn do_exit(exit_code: i32, group_exit: bool) {
-    let curr = current();
-    let thr = kthread::current_thread();
+    let thr = kprocess::current_user_thread();
+    let process = thr.process();
 
-    info!("{} exit with code: {}", curr.id_name(), exit_code);
+    info!("{} exit with code: {}", current().id_name(), exit_code);
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
     if clear_child_tid.write_vm(0).is_ok() {
-        let key = kthread::current_futex_key(clear_child_tid as usize);
-        let table = thr.proc_state.futex_state().table_for(&key);
+        let key = kprocess::current_futex_key(clear_child_tid as usize);
+        let table = thr
+            .process()
+            .futex_state()
+            .expect("exiting thread must still expose process futex state")
+            .table_for(&key);
         if let Some(futex) = table.get(&key) {
             futex.wq.wake(1, u32::MAX);
         }
@@ -227,37 +236,55 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         error!("tee_session_release_state on thread exit: {e:#010X?}");
     }
 
-    let process = &thr.proc_state.proc;
-    if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {
-        thr.proc_state.resources.close_all_fds();
+    let is_last_thread =
+        process_exit::finish_thread_exit(process, kprocess::current_user_tid(), exit_code);
+    let parent_exit_signal = if is_last_thread {
+        process.exit_signal()
+    } else {
+        None
+    };
+    if is_last_thread {
+        process
+            .close_all_fds()
+            .expect("last exiting thread must still expose process resources");
 
-        process.exit();
+        process_exit::finalize_process_exit(process);
 
         // Detach shared memory before waking the parent, so that
         // waitpid() returns only after segments marked IPC_RMID
         // have been destroyed.
         SHM_MANAGER.lock().clear_proc_shm(process.pid());
         #[cfg(feature = "tee")]
-        thr.proc_state.clear_tee_runtime_private();
+        process
+            .clear_tee_runtime_private()
+            .expect("last exiting thread must still expose tee runtime state");
+    }
+
+    // Preserve the exiting thread's final CPU sample on the stable process object
+    // before any parent waiter can observe and reap the zombie.
+    thr.set_cpu_state(kprocess::CpuTimeState::None);
+    let (thread_utime_ns, thread_stime_ns) = thr.sample_cpu_time_ns();
+    process_exit::record_exited_thread_cpu_time(process, thread_utime_ns, thread_stime_ns);
+
+    if is_last_thread {
         if let Some(parent) = process.parent() {
-            if let Some(signo) = thr.proc_state.exit_signal() {
-                let _ = kthread::send_signal_to_process(
+            if let Some(signo) = parent_exit_signal {
+                let _ = kprocess::process_signals::send_to_process(
                     parent.pid(),
                     Some(SignalInfo::new_kernel(signo)),
                 );
             }
-            if let Ok(data) = kthread::get_process_state(parent.pid()) {
-                data.child_exit_event().wake();
-            }
+            parent.child_exit_event().wake();
         }
-        thr.proc_state.exit_event().wake();
+        process.exit_event().wake();
     }
 
     if group_exit && !process.is_group_exited() {
-        process.group_exit();
+        process_exit::mark_group_exited(process);
         let sig = SignalInfo::new_kernel(Signo::SIGKILL);
-        for tid in process.threads() {
-            let _ = kthread::send_signal_to_thread(None, tid, Some(sig.clone()));
+        for task in kprocess::scheduler::process_tasks(process.as_ref()) {
+            let tid = task.as_thread().tid();
+            let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
     }
 
@@ -266,14 +293,17 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
 /// Send a fatal signal to the current process.
 pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
-    let proc_state = &kthread::current_thread().proc_state;
+    let thread = kprocess::current_user_thread();
 
     let signo = sig.signo();
     info!("Send fatal signal {signo:?} to the current process");
-    if let Some(tid) = proc_state.signal.send_signal(sig)
-        && let Ok(task) = kthread::get_task(tid)
+    if thread
+        .process()
+        .signal_manager()
+        .expect("current process must still expose a signal manager")
+        .send_signal(sig)
+        .is_some_and(|tid| kprocess::process_signals::interrupt_thread(tid).is_ok())
     {
-        task.interrupt();
     } else {
         do_exit(signo as i32, true);
     }
@@ -283,11 +313,11 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
 
 /// Check for pending signals and execute default handlers if needed.
 pub fn check_signals(
-    thr: &kthread::Thread,
+    thr: &kprocess::Thread,
     uctx: &mut UserContext,
     restore_blocked: Option<SignalSet>,
 ) -> bool {
-    let Some((sig, os_action)) = thr.signal.check_signals(uctx, restore_blocked) else {
+    let Some((sig, os_action)) = thr.signal_manager().check_signals(uctx, restore_blocked) else {
         return false;
     };
 

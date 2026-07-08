@@ -20,5 +20,5 @@ kerrno.workspace = true
 klogger.workspace = true
 kvfs.workspace = true
 kuaccess.workspace = true
-kthread.workspace = true
+kprocess.workspace = true
 posix-types.workspace = true

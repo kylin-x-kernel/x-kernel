@@ -15,7 +15,7 @@ use core::{
     mem::ManuallyDrop,
     ops::Deref,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering},
     task::{Context, Poll},
 };
 
@@ -23,6 +23,7 @@ use futures_util::task::AtomicWaker;
 #[cfg(feature = "smp")]
 use kcpu_id_map::KCpuMaskExt;
 use kcpu_id_map::LogicalCpuId;
+use kerrno::KResult;
 use khal::context::TaskContext;
 #[cfg(feature = "tls")]
 use khal::tls::TlsArea;
@@ -31,9 +32,29 @@ use memaddr::{VirtAddr, align_up_4k};
 
 use crate::{KCpuMask, KTask, KtaskRef, future::block_on};
 
-/// A unique identifier for a thread.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct TaskId(u64);
+#[derive(Debug, Clone)]
+enum TaskIdentity {
+    Idle,
+    Internal,
+    Thread(Arc<kidentity::PidHandle>),
+}
+
+impl TaskIdentity {
+    fn thread_pid(&self) -> Option<&Arc<kidentity::PidHandle>> {
+        match self {
+            Self::Thread(task_number) => Some(task_number),
+            Self::Idle | Self::Internal => None,
+        }
+    }
+
+    fn trace_id(&self) -> u64 {
+        match self {
+            Self::Idle => 0,
+            Self::Internal => 0,
+            Self::Thread(task_number) => task_number.root_nr() as u64,
+        }
+    }
+}
 
 /// The possible states of a task.
 #[repr(u8)]
@@ -132,9 +153,8 @@ unsafe impl Sync for TaskContextCell {}
 
 /// The inner task structure.
 pub struct TaskInner {
-    id: TaskId,
+    identity: TaskIdentity,
     name: SpinNoIrq<String>,
-    is_idle: bool,
     is_init: bool,
 
     entry: Cell<Option<Box<dyn FnOnce()>>>,
@@ -178,18 +198,6 @@ pub struct TaskInner {
     record_lock: PerTaskRecording,
 }
 
-impl TaskId {
-    fn new() -> Self {
-        static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(ID_COUNTER.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Convert the task ID to a `u64`.
-    pub const fn as_u64(&self) -> u64 {
-        self.0
-    }
-}
-
 impl From<u8> for TaskState {
     #[inline]
     fn from(state: u8) -> Self {
@@ -212,12 +220,16 @@ unsafe impl Send for TaskInner {}
 unsafe impl Sync for TaskInner {}
 
 impl TaskInner {
-    /// Create a new task with the given entry function and stack size.
-    pub fn new<F>(entry: F, name: String, stack_size: usize) -> Self
+    fn new_with_identity<F>(
+        entry: F,
+        name: String,
+        stack_size: usize,
+        identity: TaskIdentity,
+    ) -> Self
     where
         F: FnOnce() + Send + 'static,
     {
-        let mut t = Self::new_common(TaskId::new(), name);
+        let mut t = Self::new_common(identity, name);
         debug!("new task: {}", t.id_name());
         let kstack = TaskStack::alloc(align_up_4k(stack_size));
 
@@ -230,15 +242,66 @@ impl TaskInner {
         t.ctx_mut()
             .init(task_entry as *const () as usize, kstack.top(), tls);
         t.kstack = Some(kstack);
-        if t.name() == "idle" {
-            t.is_idle = true;
-        }
         t
     }
 
-    /// Gets the ID of the task.
-    pub const fn id(&self) -> TaskId {
-        self.id
+    /// Creates a scheduler-internal helper task.
+    pub(crate) fn new_internal<F>(entry: F, name: String, stack_size: usize) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Self::new_with_identity(entry, name, stack_size, TaskIdentity::Internal)
+    }
+
+    /// Creates a Linux-visible kernel thread in the root/default PID namespace.
+    ///
+    /// This constructor is for `ktask`-owned kernel-thread creation paths.
+    /// User-thread identity allocation must stay in the process domain and use
+    /// [`Self::new_user`] with a preallocated [`kidentity::PidHandle`].
+    pub fn new_kthread<F>(entry: F, name: String, stack_size: usize) -> KResult<Self>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Ok(Self::new_with_identity(
+            entry,
+            name,
+            stack_size,
+            TaskIdentity::Thread(kidentity::allocate_root_pid_handle()?),
+        ))
+    }
+
+    /// Creates a user thread with a preallocated thread identity.
+    ///
+    /// Callers must allocate the thread identity in the correct PID namespace
+    /// before constructing the task, so process/thread-group/publication state
+    /// can be built around the same handle before the task becomes runnable.
+    pub fn new_user<F>(
+        entry: F,
+        name: String,
+        stack_size: usize,
+        task_number: Arc<kidentity::PidHandle>,
+    ) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Self::new_with_identity(entry, name, stack_size, TaskIdentity::Thread(task_number))
+    }
+
+    /// Returns the shared task-number handle, if the task has one.
+    pub fn task_number(&self) -> Option<&Arc<kidentity::PidHandle>> {
+        self.identity.thread_pid()
+    }
+
+    /// Returns the Linux-style root/global trace identifier.
+    pub fn trace_id(&self) -> u64 {
+        self.identity.trace_id()
+    }
+
+    /// Returns the scheduler-internal owner key.
+    pub fn owner_key(&self) -> u64 {
+        self.task_number()
+            .map(|task_number| task_number.root_nr() as u64)
+            .unwrap_or_else(|| self as *const _ as usize as u64)
     }
 
     /// Gets the name of the task.
@@ -253,7 +316,7 @@ impl TaskInner {
 
     /// Get a combined string of the task ID and name.
     pub fn id_name(&self) -> alloc::string::String {
-        alloc::format!("Task({}, {:?})", self.id.as_u64(), self.name())
+        alloc::format!("Task({}, {:?})", self.owner_key(), self.name())
     }
 
     /// Wait for the task to exit, and return the exit code.
@@ -409,7 +472,7 @@ impl TaskInner {
                 return;
             }
         }
-        warn!("held locks on task {:?} are full!", self.id);
+        warn!("held locks on task {} are full!", self.id_name());
     }
 
     /// Record that this task released `addr`.
@@ -436,16 +499,15 @@ impl TaskInner {
 
 // private methods
 impl TaskInner {
-    fn new_common(id: TaskId, name: String) -> Self {
+    fn new_common(identity: TaskIdentity, name: String) -> Self {
         let mut cpumask = KCpuMask::new();
         for cpu_id in 0..crate::api::active_cpu_num() {
             cpumask.set(cpu_id, true);
         }
 
         Self {
-            id,
+            identity,
             name: SpinNoIrq::new(name),
-            is_idle: false,
             is_init: false,
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
@@ -482,14 +544,26 @@ impl TaskInner {
     ///
     /// And there is no need to set the `entry`, `kstack` or `tls` fields, as
     /// they will be filled automatically when the task is switches out.
-    pub(crate) fn new_init(name: String) -> Self {
-        let mut t = Self::new_common(TaskId::new(), name);
+    pub(crate) fn new_boot(name: String) -> Self {
+        let mut t = Self::new_common(TaskIdentity::Internal, name);
         t.is_init = true;
         #[cfg(feature = "smp")]
         t.set_on_cpu(true);
-        if t.name() == "idle" {
-            t.is_idle = true;
-        }
+        t
+    }
+
+    pub(crate) fn new_idle<F>(entry: F, name: String, stack_size: usize) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Self::new_with_identity(entry, name, stack_size, TaskIdentity::Idle)
+    }
+
+    pub(crate) fn new_current_idle(name: String) -> Self {
+        let mut t = Self::new_common(TaskIdentity::Idle, name);
+        t.is_init = true;
+        #[cfg(feature = "smp")]
+        t.set_on_cpu(true);
         t
     }
 
@@ -540,7 +614,7 @@ impl TaskInner {
 
     #[inline]
     pub(crate) const fn is_idle(&self) -> bool {
-        self.is_idle
+        matches!(self.identity, TaskIdentity::Idle)
     }
 
     #[inline]
@@ -657,7 +731,7 @@ impl TaskInner {
 impl fmt::Debug for TaskInner {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut ds = f.debug_struct("TaskInner");
-        ds.field("id", &self.id)
+        ds.field("identity", &self.identity)
             .field("name", &self.name)
             .field("state", &self.state());
 
@@ -804,7 +878,7 @@ mod tests_on_cpu_mask {
     use super::*;
 
     fn new_test_task() -> TaskInner {
-        TaskInner::new_common(TaskId::new(), "test".into())
+        TaskInner::new_common(TaskIdentity::Internal, "test".into())
     }
 
     #[def_test]

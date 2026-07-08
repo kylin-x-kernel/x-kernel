@@ -11,17 +11,13 @@
 //!
 //! The core logic is shared between `sys_clone` and `sys_clone3` via [`CloneRequest::do_clone`].
 
-use alloc::sync::Arc;
-
 use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
-use kfd::{FdTable, FileLike};
+use kfd::FileLike;
 use khal::uspace::UserContext;
-use kprocess::Pid;
+use kprocess::{NamespaceFlags, PidFd, ProcessForkConfig, Tid};
 use ksignal::Signo;
-use kspin::SpinNoIrq;
-use ktask::{KTaskExt, current, spawn_task};
-use kthread::{CloneNsError, NamespaceFlags, PidFd, ProcessState, ProcessStateConfig, Thread};
+use ktask::{KTaskExt, current};
 use linux_raw_sys::general::*;
 use osvm::VirtMutPtr;
 use posix_process::new_user_task;
@@ -219,101 +215,44 @@ impl CloneRequest {
         };
 
         let curr = current();
-        let current_thread = kthread::current_thread();
-        let old_proc_data = current_thread.process_state();
+        let current_thread = kprocess::current_user_thread();
+        let prepared = if self.flags.contains(CloneFlags::THREAD) {
+            current_thread.prepare_thread_clone()?
+        } else {
+            current_thread.prepare_process_fork(ProcessForkConfig {
+                share_parent: self.flags.contains(CloneFlags::PARENT),
+                share_vm: self.flags.contains(CloneFlags::VM),
+                share_fs: self.flags.contains(CloneFlags::FS),
+                share_sighand: self.flags.contains(CloneFlags::SIGHAND),
+                share_files: self.flags.contains(CloneFlags::FILES),
+                namespace_flags: self.extract_namespace_flags(),
+                exit_signal,
+            })?
+        };
+        let tid = prepared.tid();
+        let page_table_root = prepared.page_table_root();
+        let (thr, task_number) = prepared.into_parts();
 
         let mut new_task = new_user_task(
             &curr.name(),
             new_uctx,
             set_child_tid,
+            task_number,
             crate::dispatch_irq_syscall,
         );
+        new_task.ctx_mut().set_page_table_root(page_table_root);
 
-        let tid = new_task.id().as_u64() as Pid;
-        if self.flags.contains(CloneFlags::PARENT_SETTID) {
-            (self.parent_tid as *mut Pid).write_vm(tid).ok();
-        }
-
-        let new_proc_data = if self.flags.contains(CloneFlags::THREAD) {
-            new_task
-                .ctx_mut()
-                .set_page_table_root(old_proc_data.address_space().lock().page_table_hw_root());
-            old_proc_data.clone()
+        let pidfd_install = if self.flags.contains(CloneFlags::PIDFD) {
+            let pidfd = PidFd::new(thr.process());
+            let resources = kprocess::current_resources();
+            let fd_table = resources.fd_table();
+            let max_nofile = resources.max_nofile();
+            let fd = pidfd.add_to_fd_table(&fd_table, max_nofile, true)?;
+            Some((fd_table, fd))
         } else {
-            let proc = if self.flags.contains(CloneFlags::PARENT) {
-                old_proc_data.proc.parent().ok_or(KError::InvalidInput)?
-            } else {
-                old_proc_data.proc.clone()
-            }
-            .fork(tid);
-
-            let aspace = if self.flags.contains(CloneFlags::VM) {
-                old_proc_data.address_space().clone()
-            } else {
-                let mut aspace = old_proc_data.address_space().lock();
-                aspace.try_clone()?
-            };
-            new_task
-                .ctx_mut()
-                .set_page_table_root(aspace.lock().page_table_hw_root());
-
-            let signal_actions = if self.flags.contains(CloneFlags::SIGHAND) {
-                old_proc_data.signal.actions.clone()
-            } else {
-                Arc::new(SpinNoIrq::new(old_proc_data.signal.actions.lock().clone()))
-            };
-            let share_fs = self.flags.contains(CloneFlags::FS);
-
-            // Build child NsProxy based on namespace flags. The NsProxy owns
-            // the FsContext via its MntNamespace, so CLONE_FS sharing and
-            // CLONE_NEWNS isolation are both handled there.
-            let ns_flags = self.extract_namespace_flags();
-            let new_nsproxy = old_proc_data
-                .nsproxy()
-                .clone_for_child(ns_flags, share_fs)
-                .map_err(|e| match e {
-                    CloneNsError::InvalidFlagCombination => KError::from(LinuxError::EINVAL),
-                    CloneNsError::Unimplemented => KError::from(LinuxError::ENOSYS),
-                })?;
-
-            let proc_state = ProcessState::new_with_nsproxy(
-                proc,
-                old_proc_data.exe_path().read().clone(),
-                old_proc_data.cmdline().read().clone(),
-                aspace,
-                signal_actions,
-                exit_signal,
-                old_proc_data.credentials.read().clone(),
-                ProcessStateConfig::default(),
-                new_nsproxy,
-            );
-            proc_state.set_umask(old_proc_data.umask());
-            // Inherit heap pointers from parent to ensure child's heap state is consistent after fork
-            proc_state.set_heap_top(old_proc_data.heap_top());
-
-            if self.flags.contains(CloneFlags::FILES) {
-                proc_state
-                    .resources
-                    .replace_fd_table(old_proc_data.resources.fd_table());
-            } else {
-                let fd_table = FdTable::clone_shared_from(&old_proc_data.resources.fd_table());
-                proc_state.resources.replace_fd_table(fd_table);
-            }
-
-            proc_state
+            None
         };
 
-        new_proc_data.proc.add_thread(tid);
-
-        if self.flags.contains(CloneFlags::PIDFD) {
-            let pidfd = PidFd::new(&new_proc_data);
-            let fd_table = old_proc_data.resources.fd_table();
-            let max_nofile = old_proc_data.resources.max_nofile();
-            (self.pidfd as *mut i32)
-                .write_vm(pidfd.add_to_fd_table(&fd_table, max_nofile, true)?)?;
-        }
-
-        let thr = Thread::new(tid, new_proc_data);
         if self.flags.contains(CloneFlags::CHILD_CLEARTID) {
             thr.set_clear_child_tid(self.child_tid);
         }
@@ -321,8 +260,18 @@ impl CloneRequest {
         // `new_task`, so converting it into the task extension is the intended one-time handoff.
         *new_task.task_ext_mut() = Some(unsafe { KTaskExt::from_impl(thr) });
 
-        let task = spawn_task(new_task);
-        kthread::add_task_to_table(&task);
+        kprocess::publish_user_task(new_task).commit(|_| {
+            if self.flags.contains(CloneFlags::PARENT_SETTID) {
+                (self.parent_tid as *mut Tid).write_vm(tid).ok();
+            }
+            if let Some((fd_table, pidfd_number)) = pidfd_install.as_ref()
+                && let Err(err) = (self.pidfd as *mut i32).write_vm(*pidfd_number)
+            {
+                fd_table.write().close_file_like(*pidfd_number).ok();
+                return Err(err.into());
+            }
+            Ok(())
+        })?;
 
         Ok(tid as _)
     }

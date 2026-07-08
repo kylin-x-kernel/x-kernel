@@ -27,8 +27,7 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chdir <= path: {path}");
 
-    let proc_state = kthread::current_process_state();
-    let fs_context = proc_state.fs_context();
+    let fs_context = kprocess::current_user_process_fs_context();
     let mut fs = fs_context.lock();
     let entry = lookup_location(
         &fs.lookup_context(),
@@ -45,8 +44,7 @@ pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
     let entry = with_fs(dirfd, |fs| Ok(fs.current_dir().clone()))?;
-    kthread::current_process_state()
-        .fs_context()
+    kprocess::current_user_process_fs_context()
         .lock()
         .set_current_dir(entry)?;
     Ok(0)
@@ -62,8 +60,7 @@ pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
     let path = path.load_string()?;
     debug!("sys_chroot <= path: {path}");
 
-    let proc_state = kthread::current_process_state();
-    let fs_context = proc_state.fs_context();
+    let fs_context = kprocess::current_user_process_fs_context();
     let mut fs = fs_context.lock();
     let loc = lookup_location(
         &fs.lookup_context(),
@@ -83,7 +80,7 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
     let path = path.load_string()?;
     debug!("sys_mkdirat <= dirfd: {dirfd}, path: {path}, mode: {mode}");
 
-    let mode = mode & !kthread::current_thread().process_state().umask();
+    let mode = mode & !kprocess::current_umask();
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
     with_fs(dirfd, |fs| {
@@ -184,7 +181,7 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     );
 
     let mut buffer = DirBuffer::new(len);
-    let dir = kthread::current_resources().get_file_like_as::<File>(fd)?;
+    let dir = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     let mut has_remaining = false;
 
     dir.read_dir(&mut |name: &str, ino, node_type, offset| {
@@ -210,8 +207,7 @@ pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
         return Ok(0);
     }
 
-    let cwd = kthread::current_process_state()
-        .fs_context()
+    let cwd = kprocess::current_user_process_fs_context()
         .lock()
         .current_dir()
         .absolute_path()?;

@@ -22,7 +22,7 @@ ksignal.workspace = true
 kspin.workspace = true
 ksync.workspace = true
 ktask.workspace = true
-kthread.workspace = true
+kprocess.workspace = true
 linux-raw-sys = { workspace = true, features = ["general", "ioctl"] }
 memaddr.workspace = true
 osvm.workspace = true

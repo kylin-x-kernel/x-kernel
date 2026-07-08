@@ -1,0 +1,15 @@
+[package]
+name = "kidentity"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Kernel identity number-space owner for scheduler and POSIX task IDs"
+
+[dependencies]
+lazyinit.workspace = true
+kerrno.workspace = true
+unittest.workspace = true

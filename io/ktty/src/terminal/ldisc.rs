@@ -14,7 +14,6 @@ use kerrno::{KError, KResult};
 use kpoll::PollSet;
 use ksignal::SignalInfo;
 use ktask::future::block_on;
-use kthread::send_signal_to_process_group;
 use linux_raw_sys::general::{
     ECHOCTL, ECHOK, ICRNL, IGNCR, ISIG, VEOF, VERASE, VKILL, VMIN, VTIME,
 };
@@ -166,7 +165,8 @@ impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
             && let Some(pg) = self.terminal.job_control.foreground()
         {
             let sig = SignalInfo::new_kernel(signo);
-            if let Err(err) = send_signal_to_process_group(pg.pgid(), Some(sig)) {
+            if let Err(err) = kprocess::process_signals::send_to_process_group(pg.pgid(), Some(sig))
+            {
                 warn!("Failed to send signal: {err:?}");
             }
         }

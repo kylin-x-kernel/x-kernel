@@ -12,6 +12,7 @@ repository.workspace = true
 bitflags.workspace = true
 kcgroup.workspace = true
 kfs.workspace = true
+kidentity.workspace = true
 ksync.workspace = true
 linux-raw-sys.workspace = true
 unittest.workspace = true

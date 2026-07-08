@@ -10,7 +10,6 @@ use core::ffi::c_int;
 use kerrno::{KError, KResult};
 use kfd::{FileLike, Kstat};
 use kfs::{File, FsContext};
-use kthread::current_process_state;
 use kvfs::{Location, LookupFlags, LookupIntent, lookup_location};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
@@ -19,12 +18,12 @@ use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 /// If `dirfd` is `AT_FDCWD`, uses the current directory context.
 /// Otherwise, resolves the directory from the given file descriptor and uses it as the base.
 pub(crate) fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
-    let fs_context = kthread::current_fs_context();
+    let fs_context = kprocess::current_fs_context();
     let mut fs = fs_context.lock();
     if dirfd == AT_FDCWD {
         f(&mut fs)
     } else {
-        let dir = kthread::current_resources().get_file_like_as::<File>(dirfd)?;
+        let dir = kprocess::current_resources().get_file_like_as::<File>(dirfd)?;
         dir.check_is_dir()?;
         let dir = dir.location().clone();
         f(&mut fs.with_current_dir(dir)?)
@@ -66,8 +65,7 @@ fn resolve_empty_path(dirfd: c_int, flags: u32) -> KResult<ResolveAtResult> {
     if flags & AT_EMPTY_PATH == 0 {
         return Err(KError::NotFound);
     }
-    let proc_state = current_process_state();
-    let file_like = proc_state.resources.get_file_like(dirfd)?;
+    let file_like = kprocess::current_resources().get_file_like(dirfd)?;
     resolve_result_from_file_like(file_like)
 }
 

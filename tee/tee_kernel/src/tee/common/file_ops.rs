@@ -8,8 +8,8 @@ use core::ffi::c_int;
 use kerrno::{KError, KResult};
 use kfs::{File, OpenOptions};
 use klazy::lazy_static;
+use kprocess;
 use ksync::RwLock;
-use kthread;
 use kvfs::{
     LookupFlags, LookupIntent, NodePermission, NodeType, VfsError, lookup_location,
     lookup_nonexistent, path::Path,
@@ -154,7 +154,7 @@ impl FileVariant {
             mode
         );
         let path = validate_tee_path(path).map_err(|_| VfsError::InvalidInput)?;
-        let mode = mode & !kthread::current_process_state().umask();
+        let mode = mode & !kprocess::current_umask();
 
         let options = flags_to_options(flags as c_int, mode as __kernel_mode_t, (0, 0));
         let fd = with_fs(AT_FDCWD, |fs| options.open(fs, &path))

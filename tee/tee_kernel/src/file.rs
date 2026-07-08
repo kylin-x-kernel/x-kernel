@@ -61,7 +61,7 @@ pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) ->
 
     // TEE file helpers are callable from both process and kernel-task paths,
     // so they must use the shared current-path filesystem view.
-    let fs_context = kthread::current_fs_context();
+    let fs_context = kprocess::current_fs_context();
     let mut fs = fs_context.lock();
     f(&mut fs)
 }

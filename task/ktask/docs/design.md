@@ -72,6 +72,17 @@ task_tick() → set_preempt_pending   blocked_resched / unblock_task / resched
 | `timers` | tick 回调与定时事件检查 |
 | `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图 |
 
+## 创建与发布模型
+
+`ktask` 现在显式区分两段用户可见生命周期：
+
+- `prepare_task()`：只把 `TaskInner` 转成 `Arc`，task 还没有进入 run queue；
+- `activate_task()`：把 prepared task 放入 run queue，使其变成 runnable；
+- `spawn_task()`：保留为通用快捷入口，等价于 `prepare_task() + activate_task()`。
+
+这样需要额外发布步骤的调用方可以先完成 registry 或其它外部可见状态更新，
+再让 task 对调度器可见。用户进程创建路径必须遵守这个顺序。
+
 ## 核心流程
 
 ### 1) 初始化流程

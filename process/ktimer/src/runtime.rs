@@ -17,9 +17,10 @@ use core::{cmp::Ordering, time::Duration};
 use event_listener::{Event, listener};
 use khal::time::monotonic_time;
 use klazy::Once;
-use kprocess::Pid;
 use ksync::{Mutex, static_lock};
 use ktask::future::{block_on, timeout_at};
+
+use crate::Pid;
 
 struct Entry {
     deadline: Duration,

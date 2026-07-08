@@ -12,7 +12,6 @@ use core::{
 
 use backtrace::Backtrace;
 use kexec::clear_elf_cache;
-use kthread::{cleanup_task_tables, tasks};
 use kvfs::{DeviceFileOps, NodeFlags, VfsResult};
 use kvfs_simple::{DirMapping, SimpleFs};
 
@@ -52,7 +51,7 @@ impl MemoryCategory {
                 "kexec::loader::ElfLoader::load" => {
                     return Some("elf cache");
                 }
-                "kthread::process_state::ProcessState::new" => {
+                "kprocess::process_state::ProcessState::new" => {
                     return Some("process state");
                 }
                 "kprocess::process::Process::new" => {
@@ -99,12 +98,15 @@ impl fmt::Display for MemoryCategory {
 fn run_memory_analysis() {
     // Wait for gc
     ktask::yield_now();
-    cleanup_task_tables();
+    kprocess::system_view::cleanup_task_directory();
     clear_elf_cache();
 
     kprintln!(
         "Alive tasks: {:?}",
-        tasks().iter().map(|it| it.id_name()).collect::<Vec<_>>()
+        kprocess::system_view::task_snapshot()
+            .iter()
+            .map(|it| it.id_name())
+            .collect::<Vec<_>>()
     );
 
     let from = STAMPED_GENERATION.load(Ordering::SeqCst);

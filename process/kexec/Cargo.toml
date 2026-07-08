@@ -9,7 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-tee = ["dep:tee_task_iface", "kthread/tee"]
+tee = ["dep:tee_task_iface", "kprocess/tee"]
 tee_ta_sign = ["tee_task_iface/tee_ta_sign"]
 
 [dependencies]
@@ -21,7 +21,7 @@ kernel-elf-parser = { workspace = true }
 klogger.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
-kthread.workspace = true
+kprocess.workspace = true
 kvfs.workspace = true
 memaddr.workspace = true
 memspace.workspace = true

@@ -20,8 +20,8 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: UserPtr<timespec>) ->
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
             monotonic_time()
         }
-        CLOCK_PROCESS_CPUTIME_ID => kthread::current_process_state().process_cpu_time(),
-        CLOCK_THREAD_CPUTIME_ID => kthread::current_thread().cpu_time(),
+        CLOCK_PROCESS_CPUTIME_ID => kprocess::current_user_process().process_cpu_time(),
+        CLOCK_THREAD_CPUTIME_ID => kprocess::current_user_thread().cpu_time(),
         _ => {
             warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
             return Err(KError::InvalidInput);

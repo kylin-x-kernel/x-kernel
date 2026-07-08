@@ -120,9 +120,10 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                 (arg as *mut u32).write_vm(foreground.pgid())?;
             }
             TIOCSPGRP => {
+                let current_process = kprocess::current_user_thread().process().clone();
                 self.terminal
                     .job_control
-                    .set_foreground(&kthread::current_thread().proc_state.proc.group())?;
+                    .set_foreground(&current_process.group())?;
             }
             TIOCGWINSZ => {
                 (arg as *mut WindowSize).write_vm(*self.terminal.window_size.lock())?;
@@ -136,13 +137,13 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
             }
             TIOCSCTTY => {
                 let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
-                tty.bind_to(&kthread::current_thread().proc_state.proc)?;
+                let current_process = kprocess::current_user_thread().process().clone();
+                tty.bind_to(&current_process)?;
             }
             TIOCNOTTY => {
                 let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
-                if kthread::current_thread()
-                    .proc_state
-                    .proc
+                let current_process = kprocess::current_user_thread().process().clone();
+                if current_process
                     .group()
                     .session()
                     .unset_terminal(&(tty as _))

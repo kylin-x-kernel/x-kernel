@@ -5,7 +5,7 @@
 `posix-mm` 信任：
 
 - 体系结构 fault/syscall 入口已把控制流切换到内核；
-- `kthread` 当前进程/线程状态可用；
+- `kprocess` 当前进程/线程状态可用；
 - `kfs`、`memspace`、`filemap` 子系统各自维护内部不变量。
 
 它自身负责：

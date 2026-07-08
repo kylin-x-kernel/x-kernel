@@ -4,9 +4,10 @@
 
 //! Timer-domain delivery descriptions.
 
-use kprocess::Pid;
 use ksignal::Signo;
 use posix_types::k_sigval;
+
+use crate::Tid;
 
 /// A timer-produced signal before it is converted into `SignalInfo`.
 #[derive(Clone)]
@@ -27,5 +28,5 @@ pub enum TimerSignal {
 #[derive(Clone)]
 pub enum TimerDelivery {
     Process(TimerSignal),
-    Thread { tid: Pid, signal: TimerSignal },
+    Thread { tid: Tid, signal: TimerSignal },
 }

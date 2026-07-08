@@ -132,7 +132,7 @@ impl DeviceFileOps for LoopDevice {
                 if fd < 0 {
                     return Err(KError::BadFileDescriptor);
                 }
-                let file = kthread::current_resources().get_file_like_as::<File>(fd)?;
+                let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
                 let mut guard = self.file.lock();
                 if guard.is_some() {
                     return Err(KError::ResourceBusy);

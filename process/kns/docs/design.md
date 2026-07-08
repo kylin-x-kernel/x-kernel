@@ -6,7 +6,7 @@
 Linux `struct nsproxy` 的 `NsProxy`，把一个进程当前使用的 mount、UTS、IPC、PID、
 network、user、cgroup 和 time namespace 引用集中管理。
 
-`kthread::ProcessState` 持有 `Arc<NsProxy>`，syscall 层通过 `kthread` 暴露的窄
+`kprocess::ProcessRuntime` 持有 `Arc<NsProxy>`，syscall 层通过 `kprocess` 暴露的窄
 API 读取当前进程的 namespace。`kns` 不解析 syscall ABI，也不直接调度 syscall。
 
 ## 背景
@@ -41,7 +41,7 @@ namespace flag 静默忽略。
 - `src/time.rs`
 - `process/kcgroup/src/lib.rs` 中被 `NsProxy` 持有的 cgroup namespace 骨架
 
-`clone(2)` ABI 解析位于 `core/ksyscall`，进程状态接入位于 `process/kthread`，
+`clone(2)` ABI 解析位于 `core/ksyscall`，进程状态接入位于 `process/kprocess`，
 不属于本 crate 的实现范围。
 
 ## 架构
@@ -50,14 +50,14 @@ namespace flag 静默忽略。
 core/ksyscall
     |
     v
-process/kthread::ProcessState
+process/kprocess::ProcessRuntime
     |
     v
 process/kns::NsProxy
     |-- MntNamespace  -> kfs::FsContext
     |-- UtsNamespace  -> RwLock<UtsInner>
     |-- IpcNamespace  -> phase-one identity placeholder
-    |-- PidNamespace  -> pid_ns_for_children placeholder
+    |-- PidNamespace  -> active_pid_ns / pid_ns_for_children
     |-- NetNamespace  -> placeholder
     |-- UserNamespace -> root/parent placeholder
     |-- kcgroup::CgroupNamespace
@@ -89,7 +89,7 @@ namespace 分配生命周期内稳定的 ID，用于 procfs namespace 展示等�
 
 `NsProxy::clone_for_child(flags, share_fs)` 是 clone 路径的核心选择器：
 
-1. 若包含尚未实现的 `NEWNET`、`NEWUSER`、`NEWCGROUP`、`NEWPID` 或 `NEWTIME`，
+1. 若包含尚未实现的 `NEWNET`、`NEWUSER`、`NEWCGROUP` 或 `NEWTIME`，
    返回 `CloneNsError::Unimplemented`，由 syscall 层映射为 `ENOSYS`。
 2. 若 `NEWNS` 与 `share_fs` 同时出现，返回 `CloneNsError::InvalidFlagCombination`。
 3. Mount namespace：
@@ -98,12 +98,17 @@ namespace 分配生命周期内稳定的 ID，用于 procfs namespace 展示等�
    - 普通 fork：clone 父 `FsContext` 并创建新的 `MntNamespace`。
 4. UTS namespace：`NEWUTS` 时复制当前名称并创建新 namespace，否则共享。
 5. IPC namespace：`NEWIPC` 时创建新的空占位 namespace，否则共享。
-6. 其他已占位 namespace 当前保持共享。
+6. PID namespace：
+   - `NsProxy` 同时保存 `active_pid_ns` 和 `pid_ns_for_children`；
+   - `clone_for_child(NEWPID)` 会创建新的 child PID namespace，并把两者都指向它；
+   - 但 syscall 层当前仍把 `CLONE_NEWPID` 拦截为 `ENOSYS`，因为 `getpid`、`wait`、
+     `kill`、procfs、registry lookup 还没有全部切成 namespace-aware。
+7. 其他已占位 namespace 当前保持共享。
 
 ## 并发模型
 
 `NsProxy` 自身不可变，生命周期由 `Arc` 管理。替换当前进程 namespace bundle 的写锁
-位于 `kthread::ProcessState`，`kns` 不直接持有该锁。
+位于 `kprocess::ProcessRuntime`，`kns` 不直接持有该锁。
 
 `UtsNamespace` 用 `RwLock<UtsInner>` 保护 hostname 和 domainname。`read_names_into`
 在一次读锁内复制两个字段，避免 `uname()` 热路径为两个名字分别分配临时 `Vec`。
@@ -119,8 +124,9 @@ namespace 分配生命周期内稳定的 ID，用于 procfs namespace 展示等�
   已经生效。
 - 第一阶段的 mount namespace 只隔离 `FsContext` 的 root/cwd 所有权，底层 mount tree
   仍可能共享。完整 mount tree copy 和 propagation 需要在 VFS 层继续设计。
-- PID namespace 当前只保留 `pid_ns_for_children` 占位，不改变 `getpid`、`wait`、
-  `kill` 等进程 API 的全局 PID 语义。
+- PID namespace 的对象图和编号链已经建立，但 syscall ABI 仍保持 root/global PID
+  语义；完整 `CLONE_NEWPID` 支持要等 lookup、signal、wait、procfs 一起
+  namespace-aware 后再打开。
 
 ## Drop / 资源释放
 

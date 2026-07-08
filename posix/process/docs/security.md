@@ -23,13 +23,14 @@
 ## 内存安全不变量
 
 - robust futex 地址必须能转换成当前进程 futex key。
-- 初始用户进程的 `Thread` 必须在 `spawn_task` 前完整安装 task extension。
+- 初始用户进程的 `Thread` 必须在变为 runnable 前完整安装 task extension，
+  并且先通过 `install_init_process(...)` 完成 owner 域安装，再通过 `start_user_task(...)` 完成受控发布。
 - 最后线程退出前必须先关闭 fd，再标记进程退出，避免外部等待者持有悬挂资源语义。
 - `SHM_MANAGER` 清理仅针对已退出进程 PID。
 
 ## 线程安全
 
-- 本 crate 不自建额外共享状态，依赖 `kthread`/`ProcessState` 内部同步。
+- 本 crate 不自建额外共享状态，依赖 `kprocess`/`ProcessState` 内部同步。
 - group-exit 广播和父进程唤醒都基于当前可见线程/进程集合执行。
 - 纯 syscall adapter 已迁到 `ksyscall/task`，不再扩大本 crate 的 ABI 暴露面。
 
@@ -48,7 +49,7 @@
 - 退出路径漏关 fd：会破坏 pipe EOF / wait 语义；当前实现先 `close_all_fds()`。
 - 父进程通知丢失：通过退出信号和 `child_exit_event()` 双路径通知。
 - group-exit 未广播：会留下残余线程；当前实现遍历线程组发 `SIGKILL`。
-- init 进程启动前 task extension 未安装：会导致用户线程 runtime 前提失效；当前实现先安装 `KTaskExt` 再 `spawn_task()`。
+- init 进程启动前 task extension 未安装：会导致用户线程 runtime 前提失效；当前实现先通过 `install_init_process(...)` 安装 init process/thread 语义，再调用 `start_user_task(...)`，由 `kprocess` 内部保证“先 publish、后 runnable”。
 
 ## 故障管理
 

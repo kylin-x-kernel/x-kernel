@@ -5,10 +5,10 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::{any::Any, default::Default};
 
-use ksync::Mutex;
 #[cfg(unittest)]
-use kthread::Thread;
-use kthread::{self, TeeSessionCtxTrait};
+use kprocess::Thread;
+use kprocess::{self, TeeSessionCtxTrait};
+use ksync::Mutex;
 use slab::Slab;
 use tee_raw_sys::*;
 use tee_task_iface::TeeTaCtx;
@@ -89,19 +89,20 @@ pub fn with_tee_session_ctx_mut<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&mut TeeSessionCtx) -> TeeResult<R>,
 {
-    kthread::with_current_thread(|thread| {
+    kprocess::with_current_user_thread(|thread| {
         thread.set_tee_session_ctx(Box::new(TeeSessionCtx::default()));
 
-        let mut lock = thread.tee_session_ctx.lock();
-        let concrete = {
-            let boxed = lock.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
-            boxed
-                .as_any_mut()
-                .downcast_mut::<TeeSessionCtx>()
-                .ok_or(TEE_ERROR_BAD_STATE)?
-        };
+        thread.with_tee_session_ctx_mut(|lock| {
+            let concrete = {
+                let boxed = lock.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
+                boxed
+                    .as_any_mut()
+                    .downcast_mut::<TeeSessionCtx>()
+                    .ok_or(TEE_ERROR_BAD_STATE)?
+            };
 
-        f(concrete)
+            f(concrete)
+        })
     })
 }
 
@@ -120,19 +121,20 @@ pub fn with_tee_session_ctx<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&TeeSessionCtx) -> TeeResult<R>,
 {
-    kthread::with_current_thread(|thread| {
+    kprocess::with_current_user_thread(|thread| {
         thread.set_tee_session_ctx(Box::new(TeeSessionCtx::default()));
 
-        let lock = thread.tee_session_ctx.lock();
-        let concrete = {
-            let boxed = lock.as_ref().ok_or(TEE_ERROR_BAD_STATE)?;
-            boxed
-                .as_any()
-                .downcast_ref::<TeeSessionCtx>()
-                .ok_or(TEE_ERROR_BAD_STATE)?
-        };
+        thread.with_tee_session_ctx(|lock| {
+            let concrete = {
+                let boxed = lock.as_ref().ok_or(TEE_ERROR_BAD_STATE)?;
+                boxed
+                    .as_any()
+                    .downcast_ref::<TeeSessionCtx>()
+                    .ok_or(TEE_ERROR_BAD_STATE)?
+            };
 
-        f(concrete)
+            f(concrete)
+        })
     })
 }
 
@@ -146,7 +148,9 @@ where
 /// Must not be called while `tee_session_ctx` is already locked on the current thread
 /// (non-reentrant `Mutex`). Intended for thread exit after syscall/trap handling returns.
 pub fn tee_session_release_state() -> TeeResult {
-    let has_ctx = kthread::with_current_thread(|thread| thread.tee_session_ctx.lock().is_some());
+    let has_ctx = kprocess::with_current_user_thread(|thread| {
+        thread.with_tee_session_ctx(|tee_session_ctx| tee_session_ctx.is_some())
+    });
     if !has_ctx {
         return Ok(());
     }
@@ -175,9 +179,10 @@ pub fn with_tee_ta_ctx_mut<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&mut TeeTaCtx) -> TeeResult<R>,
 {
-    let proc_state = kthread::current_process_state();
-    let mut lock = proc_state.tee_ta_ctx.write();
-    f(&mut lock)
+    let process = kprocess::current_user_process();
+    process
+        .with_tee_ta_ctx_mut(f)
+        .expect("current tee session requires a live process tee context")
 }
 
 /// Acquire an immutable reference to the global tee_ta_ctx
@@ -193,9 +198,10 @@ pub fn with_tee_ta_ctx<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&TeeTaCtx) -> TeeResult<R>,
 {
-    let proc_state = kthread::current_process_state();
-    let lock = proc_state.tee_ta_ctx.read();
-    f(&lock)
+    let process = kprocess::current_user_process();
+    process
+        .with_tee_ta_ctx(f)
+        .expect("current tee session requires a live process tee context")
 }
 
 // Test module for TEE session functionality

@@ -13,9 +13,8 @@ use khal::{
     paging::{MappingFlags, PageSize},
     time::monotonic_time_nanos,
 };
-use kprocess::Pid;
+use kprocess::{Pid, current_user_process, current_user_process_address_space};
 use ksync::{Mutex, static_lock};
-use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memfs::shmem::create_kernel_file;
@@ -370,7 +369,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
         mapping_flags.insert(MappingFlags::EXECUTE);
     }
 
-    let cur_pid = kthread::current_thread().pid();
+    let cur_pid = kprocess::current_user_thread().pid();
     let mut shm_manager = SHM_MANAGER.lock();
 
     if key != IPC_PRIVATE
@@ -412,13 +411,13 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
         mapping_flags.remove(MappingFlags::WRITE);
     }
 
-    let proc_state = current_process_state();
-    let pid = proc_state.proc.pid();
+    let aspace_ref = current_user_process_address_space();
+    let pid = current_user_process().pid();
     let length = shm_inner.page_num * PAGE_SIZE_4K;
     let file = shm_inner.file.clone();
     drop(shm_inner);
 
-    let mut aspace = proc_state.address_space().lock();
+    let mut aspace = aspace_ref.lock();
 
     // Validate addr: if non-zero, it must be page-aligned unless SHM_RND is set.
     let start_aligned = if addr != 0 {
@@ -459,7 +458,7 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
         mapping_flags
     );
 
-    let invalidate = aspace.invalidate_handle(proc_state.address_space());
+    let invalidate = aspace.invalidate_handle(&aspace_ref);
     let (vma, runtime) = mmap_shared_file(FileMmapRequest {
         start: start_addr,
         length,
@@ -469,7 +468,7 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
         max_flags: mapping_flags,
         file,
         mm_id: aspace.mm_id(),
-        aspace: proc_state.address_space().clone(),
+        aspace: aspace_ref.clone(),
         invalidate,
     })?;
     aspace.map_runtime_vma(vma, false, runtime)?;
@@ -521,9 +520,8 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<shmid_ds>) -> KResult<isize
 pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
     let shmaddr = VirtAddr::from(shmaddr);
 
-    let proc_state = current_process_state();
-
-    let pid = proc_state.proc.pid();
+    let aspace_ref = current_user_process_address_space();
+    let pid = current_user_process().pid();
     let shmid = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
@@ -542,7 +540,7 @@ pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
         .get_addr_range_by_vaddr(pid, shmaddr)
         .ok_or(KError::InvalidInput)?;
 
-    let mut aspace = proc_state.address_space().lock();
+    let mut aspace = aspace_ref.lock();
     aspace.unmap(va_range.start, va_range.size())?;
     drop(aspace);
 

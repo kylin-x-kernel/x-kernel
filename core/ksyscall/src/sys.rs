@@ -11,7 +11,7 @@
 
 use kbuild_config::ARCH;
 use kerrno::KResult;
-use kthread::{current_process_fs_context, current_process_state, processes};
+use kprocess::current_user_process_fs_context;
 use kvfs::{LookupFlags, LookupIntent, lookup_location};
 use linux_raw_sys::{
     ctypes::c_char,
@@ -59,8 +59,9 @@ const fn pad_field<const N: usize>(src: &[u8]) -> [c_char; N] {
 
 /// Get system information including OS name, version, and hardware platform
 pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
-    let proc_state = current_process_state();
-    let uts_ns = proc_state.uts_ns();
+    let uts_ns = kprocess::current_user_process()
+        .uts_ns()
+        .expect("current user thread must have a live UTS namespace");
 
     // Read both per-namespace names into stack buffers in a single locked
     // read, avoiding the two heap allocations of nodename()/domainname().
@@ -98,7 +99,7 @@ pub fn sys_sysinfo(info: UserPtr<sysinfo>) -> KResult<isize> {
         mem_unit: 0,
         _f: linux_raw_sys::system::__IncompleteArrayField::new(),
     };
-    kinfo.procs = processes().len() as _;
+    kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
     info.write_vm(kinfo)?;
     Ok(0)
@@ -133,7 +134,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
         "/dev/urandom"
     };
 
-    let fs_context = current_process_fs_context();
+    let fs_context = current_user_process_fs_context();
     let fs = fs_context.lock();
     let f = lookup_location(
         &fs.lookup_context(),

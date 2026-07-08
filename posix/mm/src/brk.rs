@@ -7,7 +7,7 @@
 use kaddr_layout::{USER_HEAP_BASE, USER_HEAP_SIZE, USER_HEAP_SIZE_MAX};
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
-use kthread::current_process_state;
+use kprocess::{current_user_process, current_user_process_address_space};
 use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange, align_up_4k};
 use memspace::{VmBackingKind, VmRuntimeRef};
 
@@ -79,8 +79,8 @@ impl BrkRequest {
 }
 
 pub fn sys_brk(addr: usize) -> KResult<isize> {
-    let proc_state = current_process_state();
-    let current_top = proc_state.heap_top();
+    let process = current_user_process();
+    let current_top = process.heap_top()?;
     let request = BrkRequest::new(addr, current_top);
 
     if request.is_query() {
@@ -92,8 +92,8 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
     }
 
     if let Some((expand_start, expand_size)) = request.expand_range() {
-        if proc_state
-            .address_space()
+        if process
+            .address_space()?
             .lock()
             .map(
                 expand_start,
@@ -108,7 +108,8 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
         }
     } else if addr > current_top {
         // Expansion within the pre-mapped range.
-        let mut aspace = proc_state.address_space().lock();
+        let aspace_ref = current_user_process_address_space();
+        let mut aspace = aspace_ref.lock();
         let map_start = VirtAddr::from(align_up_4k(current_top));
         let map_size = align_up_4k(addr) - map_start.as_usize();
         if map_size > 0 {
@@ -140,12 +141,12 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
             }
         }
     } else if let Some((shrink_start, shrink_size)) = request.shrink_range() {
-        let _ = proc_state
-            .address_space()
-            .lock()
-            .unmap(shrink_start, shrink_size);
+        let aspace_ref = current_user_process_address_space();
+        let _ = aspace_ref.lock().unmap(shrink_start, shrink_size);
     }
 
-    proc_state.set_heap_top(request.requested_top);
+    current_user_process()
+        .set_heap_top(request.requested_top)
+        .expect("current user thread must have live process heap state");
     Ok(request.requested_top as isize)
 }

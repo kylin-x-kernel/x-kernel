@@ -37,7 +37,7 @@ pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
         tfd.set_nonblocking(true)?;
     }
 
-    kthread::current_resources()
+    kprocess::current_resources()
         .add_file_like(tfd as _, flags & TFD_CLOEXEC != 0)
         .map(|fd| fd as _)
 }
@@ -62,7 +62,7 @@ pub fn sys_timerfd_settime(
     let value = new.it_value.try_into_time_value()?;
     let interval = new.it_interval.try_into_time_value()?;
 
-    let tfd = kthread::current_resources().get_file_like_as::<TimerFd>(fd)?;
+    let tfd = kprocess::current_resources().get_file_like_as::<TimerFd>(fd)?;
     let (old_interval, old_remaining) = tfd.settime(absolute, value, interval);
 
     if let Some(old_value) = old_value.check_non_null() {
@@ -79,7 +79,7 @@ pub fn sys_timerfd_settime(
 pub fn sys_timerfd_gettime(fd: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
     debug!("sys_timerfd_gettime <= fd: {fd}");
 
-    let tfd = kthread::current_resources().get_file_like_as::<TimerFd>(fd)?;
+    let tfd = kprocess::current_resources().get_file_like_as::<TimerFd>(fd)?;
     let (interval, remaining) = tfd.gettime();
 
     curr_value.write_vm(itimerspec {

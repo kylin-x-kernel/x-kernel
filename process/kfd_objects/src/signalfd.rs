@@ -129,14 +129,16 @@ impl Signalfd {
 
     fn has_pending_signals(&self) -> bool {
         let mask = self.mask();
-        let signal = &kthread::current_thread().signal;
+        let current_thread = kprocess::current_user_thread();
+        let signal = current_thread.signal_manager();
         let pending = signal.pending();
         !(pending & mask).is_empty()
     }
 
     fn dequeue_signal(&self) -> Option<SignalInfo> {
         let mask = self.mask();
-        let signal = &kthread::current_thread().signal;
+        let current_thread = kprocess::current_user_thread();
+        let signal = current_thread.signal_manager();
         signal.dequeue_signal(&mask)
     }
 }

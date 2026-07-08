@@ -60,7 +60,7 @@ impl ExecSource {
     fn resolve(&self) -> KResult<(Location, String)> {
         match self {
             Self::Path(path) => {
-                let fs_context = kthread::current_fs_context();
+                let fs_context = kprocess::current_fs_context();
                 let fs = fs_context.lock();
                 let location = lookup_location(
                     &fs.lookup_context(),
@@ -358,7 +358,7 @@ impl ElfLoader {
         };
         let interpreter = if let Some(ldso) = interpreter {
             debug!("Loading dynamic linker: {ldso}");
-            let fs_context = kthread::current_fs_context();
+            let fs_context = kprocess::current_fs_context();
             let fs = fs_context.lock();
             let location = lookup_location(
                 &fs.lookup_context(),

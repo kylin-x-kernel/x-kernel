@@ -17,4 +17,5 @@ mod runtime;
 pub use delivery::{TimerDelivery, TimerSignal};
 pub use manager::ProcessTimerManager;
 pub use posix_timer::{PosixTimerCreateNotify, PosixTimerSigValue, TimerSigValue};
+pub use posix_types::{Pid, Tid};
 pub use runtime::{register_expired_task_handler, spawn_alarm_task};

@@ -10,7 +10,7 @@ use knet::{
     SendOptions, SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixAddr, UnixDomainSocket},
 };
-use kthread;
+use kprocess;
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_GENERIC};
 
 use crate::{
@@ -43,7 +43,7 @@ pub fn sys_tee_scn_log(buf: *const c_char, len: usize) -> TeeResult {
 /// Panic the current TEE application
 pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
     // Connect to current TA via Unix socket
-    let socket = UnixDomainSocket::new(StreamTransport::new(kthread::current_thread().pid()));
+    let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
     let path = ta_unix_socket_path(&uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));

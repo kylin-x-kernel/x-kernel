@@ -92,6 +92,8 @@ ksched algorithms / karch context switch / allocator
 4. **唤醒抢占请求分离**：waker 只把任务转为 `Ready` 并设置本地或远端 `need_resched` 请求，真实切换仍发生在抢占安全点。
 5. **退出回收隔离**：退出任务先进入 `EXITED_TASKS`，由每 CPU `gc_task` 延迟回收，避免切换路径直接 drop。
 6. **idle 任务特判**：idle 不入普通调度实体路径，不参与 `task_tick`，避免算法元数据污染。
+7. **发布先于 runnable**：需要额外注册对象图的调用方必须先 `prepare_task()`，
+   完成外部 publish 后再 `activate_task()`，避免 task 先运行、后补注册。
 
 ## 威胁分析
 

@@ -398,7 +398,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
     /// which means the task is already unblocked by other cores.
     pub fn unblock_task(&mut self, task: KtaskRef, resched: bool) {
         let task_id_name = task.id_name();
-        let task_id = task.id().as_u64();
+        let task_id = task.trace_id();
         // Try to change the state of the task from `Blocked` to `Ready`,
         // if successful, the task will be put into this run queue,
         // otherwise, the task is already unblocked by other cores.
@@ -589,7 +589,7 @@ impl RunQueue {
     /// Create a new run queue for the specified CPU.
     /// The run queue is initialized with a per-CPU gc task in its scheduler.
     fn new(cpu_id: LogicalCpuId) -> Self {
-        let gc_task = TaskInner::new(
+        let gc_task = TaskInner::new_internal(
             || block_on(poll_fn(poll_gc)),
             "gc".into(),
             kbuild_config::TASK_STACK_SIZE,
@@ -687,7 +687,7 @@ impl RunQueue {
         }
 
         // Fire the context switch tracepoint.
-        fire_context_switch(prev_task.id().as_u64(), next_task.id().as_u64());
+        fire_context_switch(prev_task.trace_id(), next_task.trace_id());
 
         // Claim the task as running, we do this before switching to it
         // such that any running task will have this set.
@@ -839,7 +839,7 @@ pub(crate) fn init() {
     // Stack size of idle task should be large because traps/interrupts may happen in idle task,
     // which need more stack space.
     const IDLE_TASK_STACK_SIZE: usize = 16384;
-    let idle_task = TaskInner::new(|| crate::run_idle(), "idle".into(), IDLE_TASK_STACK_SIZE);
+    let idle_task = TaskInner::new_idle(|| crate::run_idle(), "idle".into(), IDLE_TASK_STACK_SIZE);
     // idle task should be pinned to the current CPU.
     idle_task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
     IDLE_TASK.with_current(|i| {
@@ -847,7 +847,7 @@ pub(crate) fn init() {
     });
 
     // Put the subsequent execution into the `main` task.
-    let main_task = TaskInner::new_init("main".into()).into_arc();
+    let main_task = TaskInner::new_boot("main".into()).into_arc();
     main_task.set_state(TaskState::Running);
     #[cfg(feature = "smp")]
     main_task.set_cpu_id(cpu_id);
@@ -867,7 +867,7 @@ pub(crate) fn init_secondary() {
     let cpu_id = this_cpu_id();
 
     // Put the subsequent execution into the `idle` task.
-    let idle_task = TaskInner::new_init("idle".into()).into_arc();
+    let idle_task = TaskInner::new_current_idle("idle".into()).into_arc();
     idle_task.set_state(TaskState::Running);
     #[cfg(feature = "smp")]
     idle_task.set_cpu_id(cpu_id);

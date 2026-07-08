@@ -9,9 +9,8 @@ use core::mem::size_of;
 
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time_nanos;
-use kprocess::Pid;
+use kprocess::{Pid, current_user_process};
 use ksync::{Mutex, static_lock};
-use kthread::current_process_state;
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
 use posix_types::{IpcPerm, UserConstPtr, UserPtr, msgbuf, msginfo, msqid_ds};
@@ -226,10 +225,9 @@ bitflags::bitflags! {
 }
 
 pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
-    let proc_state = current_process_state();
     let current_uid: u32 = 0;
     let current_gid: u32 = 0;
-    let current_pid = proc_state.proc.pid();
+    let current_pid = current_user_process().pid();
 
     let mut msg_manager = MSG_MANAGER.lock();
 
@@ -306,10 +304,9 @@ pub fn sys_msgsnd(
     if msgsz > MSGMAX {
         return Err(KError::from(LinuxError::EINVAL));
     }
-    let proc_state = current_process_state();
     let current_uid: u32 = 0;
     let current_gid: u32 = 0;
-    let current_pid = proc_state.proc.pid();
+    let current_pid = current_user_process().pid();
     let flags = MsgSndFlags::from_bits_truncate(msgflg);
 
     let msg_queue = {
@@ -373,10 +370,9 @@ pub fn sys_msgrcv(
     msgflg: i32,
 ) -> KResult<isize> {
     let flags = MsgRcvFlags::from_bits_truncate(msgflg);
-    let proc_state = current_process_state();
     let current_uid: u32 = 0;
     let current_gid: u32 = 0;
-    let current_pid = proc_state.proc.pid();
+    let current_pid = current_user_process().pid();
 
     if flags.contains(MsgRcvFlags::MSG_COPY) {
         if !flags.contains(MsgRcvFlags::IPC_NOWAIT) {

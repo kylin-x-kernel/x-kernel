@@ -24,7 +24,7 @@ ksyscall
 resource owners
    ├─ posix-fs / kfs / kvfs
    ├─ kfd_objects
-   ├─ kthread
+   ├─ kprocess
    ├─ posix-process / kprocess
    └─ other subsystem owners
 ```
@@ -49,7 +49,7 @@ resource owners
 | T-01 | 用户坏指针导致 copyin/copyout 失败 | 中 | 统一通过 `UserPtr`/`UserConstPtr`/现有封装访问并传播 `KResult` |
 | T-02 | adapter 在错误 owner 下落地，导致边界职责重新混乱 | 中 | 目录和文档按 owner 语义组织；review 时检查路由归属 |
 | T-03 | adapter 重复实现 owner 状态机，造成双重语义源 | 高 | 文档明确 `ksyscall` 不拥有长期状态；仅做 ABI 适配 |
-| T-04 | current-thread/process helper 在错误上下文调用 | 中 | 复用 `kthread` 现有约束，并在 syscall 入口保持 task-context 假设 |
+| T-04 | current-thread/process helper 在错误上下文调用 | 中 | 复用 `kprocess` 现有约束，并在 syscall 入口保持 task-context 假设 |
 | T-05 | 不同 syscall 被历史目录误导，后续继续堆入错误模块 | 中 | crate-local design 文档固定 `vfs/ipc/time/task` 的 adapter 语义 |
 
 ## 审计清单

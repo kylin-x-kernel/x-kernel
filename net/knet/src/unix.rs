@@ -124,7 +124,7 @@ pub(crate) fn lookup_bind_entry<R>(
             }
         }
         UnixAddr::Path(path) => {
-            let fs_context = kthread::current_fs_context();
+            let fs_context = kprocess::current_fs_context();
             let fs = fs_context.lock();
             let loc = lookup_location(
                 &fs.lookup_context(),
@@ -162,7 +162,7 @@ fn lookup_or_create_bind_entry<R>(
             f(bindings.entry(name.clone()).or_default())
         }
         UnixAddr::Path(path) => {
-            let fs_context = kthread::current_fs_context();
+            let fs_context = kprocess::current_fs_context();
             let fs = fs_context.lock();
             let file = OpenOptions::new()
                 .write(true)

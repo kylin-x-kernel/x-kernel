@@ -12,7 +12,7 @@ pub fn init_runtime() {
 
 #[cfg(feature = "unittest")]
 mod unittest_runtime {
-    use kthread::Thread;
+    use kprocess::Thread;
 
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     fn init_unittest_tee_context(thread: &Thread) {

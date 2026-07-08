@@ -1607,7 +1607,7 @@ pub mod tests_tee_svc_storage {
     }
 
     fn cleanup_test_storage_root() {
-        let fs_context = kthread::current_fs_context();
+        let fs_context = kprocess::current_fs_context();
         let fs = fs_context.lock();
         let Ok(dir) = lookup_location(
             &fs.lookup_context(),

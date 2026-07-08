@@ -221,7 +221,7 @@ pub fn sys_getsockopt(
         .map_err(Into::into)
     }
 
-    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
+    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
     macro_rules! dispatch {
         ($which:ident) => {
             let mut val = Default::default();
@@ -261,7 +261,7 @@ pub fn sys_setsockopt(
         val.cast::<T>().read_vm().map_err(KError::from)
     }
 
-    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
+    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
     macro_rules! dispatch {
         ($which:ident) => {
             let val = get(optval, optlen)?;

@@ -9,7 +9,7 @@ use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
 use kfs::OpenOptions;
-use kthread::current_process_state;
+use kprocess::current_resources;
 use linux_raw_sys::general::{MFD_ALLOW_SEALING, MFD_CLOEXEC, O_RDWR};
 use memfs::shmem::create_memfd_file;
 use posix_types::UserConstPtr;
@@ -54,8 +54,7 @@ pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize
         .write(true)
         .open_flags(O_RDWR)
         .open_loc(location)?;
-    current_process_state()
-        .resources
+    current_resources()
         .add_file_like(Arc::new(file), flags.is_cloexec())
         .map(|fd| fd as _)
 }

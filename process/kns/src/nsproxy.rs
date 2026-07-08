@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 
 use kcgroup::CgroupNamespace;
 use kfs::FsContext;
+use kidentity::root_pid_namespace;
 use ksync::Mutex;
 
 use crate::{
@@ -25,6 +26,7 @@ pub struct NsProxy {
     pub(crate) mnt_ns: Arc<MntNamespace>,
     pub(crate) uts_ns: Arc<UtsNamespace>,
     pub(crate) ipc_ns: Arc<IpcNamespace>,
+    pub(crate) active_pid_ns: Arc<PidNamespace>,
     pub(crate) pid_ns_for_children: Arc<PidNamespace>,
     pub(crate) net_ns: Arc<NetNamespace>,
     pub(crate) user_ns: Arc<UserNamespace>,
@@ -53,6 +55,11 @@ impl NsProxy {
         &self.pid_ns_for_children
     }
 
+    /// Returns the PID namespace that names the current process itself.
+    pub fn active_pid_ns(&self) -> &Arc<PidNamespace> {
+        &self.active_pid_ns
+    }
+
     /// Returns the network namespace.
     pub fn net_ns(&self) -> &Arc<NetNamespace> {
         &self.net_ns
@@ -75,11 +82,13 @@ impl NsProxy {
 
     /// Creates the initial `NsProxy` used by the init process.
     pub fn new_initial(fs_context: Arc<Mutex<FsContext>>) -> Arc<Self> {
+        let root_pid_ns = root_pid_namespace().clone();
         Arc::new(Self {
             mnt_ns: Arc::new(MntNamespace::new(fs_context)),
             uts_ns: Arc::new(UtsNamespace::new()),
             ipc_ns: Arc::new(IpcNamespace::new()),
-            pid_ns_for_children: Arc::new(PidNamespace::new_root()),
+            active_pid_ns: root_pid_ns.clone(),
+            pid_ns_for_children: root_pid_ns,
             net_ns: Arc::new(NetNamespace::new()),
             user_ns: Arc::new(UserNamespace::new_root()),
             cgroup_ns: Arc::new(CgroupNamespace::new()),
@@ -110,7 +119,6 @@ impl NsProxy {
         let unimplemented = NamespaceFlags::NEWNET
             | NamespaceFlags::NEWUSER
             | NamespaceFlags::NEWCGROUP
-            | NamespaceFlags::NEWPID
             | NamespaceFlags::NEWTIME;
         if flags.intersects(unimplemented) {
             return Err(CloneNsError::Unimplemented);
@@ -155,11 +163,19 @@ impl NsProxy {
             self.ipc_ns.clone()
         };
 
+        let (active_pid_ns, pid_ns_for_children) = if flags.contains(NamespaceFlags::NEWPID) {
+            let child_pid_ns = PidNamespace::new_child(&self.pid_ns_for_children);
+            (child_pid_ns.clone(), child_pid_ns)
+        } else {
+            (self.active_pid_ns.clone(), self.pid_ns_for_children.clone())
+        };
+
         Ok(Arc::new(Self {
             mnt_ns,
             uts_ns,
             ipc_ns,
-            pid_ns_for_children: self.pid_ns_for_children.clone(),
+            active_pid_ns,
+            pid_ns_for_children,
             net_ns: self.net_ns.clone(),
             user_ns: self.user_ns.clone(),
             cgroup_ns: self.cgroup_ns.clone(),
@@ -198,6 +214,11 @@ mod tests_nsproxy {
 
         assert!(Arc::ptr_eq(&parent.uts_ns, &child.uts_ns));
         assert!(Arc::ptr_eq(&parent.ipc_ns, &child.ipc_ns));
+        assert!(Arc::ptr_eq(&parent.active_pid_ns, &child.active_pid_ns));
+        assert!(Arc::ptr_eq(
+            &parent.pid_ns_for_children,
+            &child.pid_ns_for_children
+        ));
         assert!(!Arc::ptr_eq(&parent.mnt_ns, &child.mnt_ns));
     }
 
@@ -260,6 +281,24 @@ mod tests_nsproxy {
     }
 
     #[def_test]
+    fn test_nsproxy_clone_newpid_creates_child_pid_namespace() {
+        let parent = make_nsproxy();
+        let child = parent
+            .clone_for_child(NamespaceFlags::NEWPID, false)
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&parent.active_pid_ns, &child.active_pid_ns));
+        assert!(Arc::ptr_eq(
+            &child.active_pid_ns,
+            &child.pid_ns_for_children
+        ));
+        assert_eq!(
+            child.active_pid_ns.level(),
+            parent.active_pid_ns.level() + 1
+        );
+    }
+
+    #[def_test]
     fn test_nsproxy_clone_unimplemented_flags_rejected() {
         let parent = make_nsproxy();
 
@@ -276,11 +315,6 @@ mod tests_nsproxy {
         assert!(
             parent
                 .clone_for_child(NamespaceFlags::NEWCGROUP, false)
-                .is_err()
-        );
-        assert!(
-            parent
-                .clone_for_child(NamespaceFlags::NEWPID, false)
                 .is_err()
         );
     }

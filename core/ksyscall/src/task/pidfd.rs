@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
-use kthread::PidFd;
+use kprocess::PidFd;
 use posix_types::{UserConstPtr, k_siginfo};
 
 use super::make_queue_signal_info;
@@ -20,10 +20,10 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let task = kthread::get_process_state(pid)?;
-    let fd = PidFd::new(&task);
+    let process = kprocess::pidfd::open_target_process(pid)?;
+    let fd = PidFd::new(&process);
 
-    kthread::current_resources()
+    kprocess::current_resources()
         .add_file_like(Arc::new(fd), true)
         .map(|fd| fd as _)
 }
@@ -32,16 +32,15 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
 pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize> {
     debug!("sys_pidfd_getfd <= pidfd: {pidfd}, target_fd: {target_fd}, flags: {flags}");
 
-    let pidfd = kthread::current_resources().get_file_like_as::<PidFd>(pidfd)?;
-    let proc_state = pidfd.process_state()?;
-    proc_state
-        .resources
+    let pidfd = kprocess::current_resources().get_file_like_as::<PidFd>(pidfd)?;
+    let resources = pidfd.live_process()?.resources()?;
+    resources
         .fd_table()
         .read()
         .get(target_fd as usize)
         .ok_or(KError::BadFileDescriptor)
         .and_then(|fd| {
-            let fd = kthread::current_resources().add_file_like(fd.inner().clone(), true)?;
+            let fd = kprocess::current_resources().add_file_like(fd.inner().clone(), true)?;
             Ok(fd as isize)
         })
 }
@@ -57,10 +56,11 @@ pub fn sys_pidfd_send_signal(
         return Err(KError::InvalidInput);
     }
 
-    let pidfd = kthread::current_resources().get_file_like_as::<PidFd>(pidfd)?;
-    let pid = pidfd.process_state()?.proc.pid();
+    let pidfd = kprocess::current_resources().get_file_like_as::<PidFd>(pidfd)?;
+    let process = pidfd.live_process()?;
+    let pid = process.pid();
 
     let sig = make_queue_signal_info(pid, signo, sig)?;
-    kthread::send_signal_to_process(pid, sig)?;
+    kprocess::process_signals::send_to_process_ref(process, sig)?;
     Ok(0)
 }

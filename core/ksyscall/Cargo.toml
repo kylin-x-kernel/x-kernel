@@ -13,7 +13,7 @@ vsock = ["posix-net/vsock"]
 tee = [
     "dep:tee_kernel",
     "dep:tee_task_iface",
-    "kthread/tee",
+    "kprocess/tee",
     "posix-process/tee",
 ]
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
@@ -33,10 +33,8 @@ kpoll.workspace = true
 ktask.workspace = true
 ktimer.workspace = true
 bitflags.workspace = true
-kspin.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 kprocess.workspace = true
-kthread.workspace = true
 ksignal.workspace = true
 osvm.workspace = true
 linux_sysno.workspace = true

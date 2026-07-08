@@ -56,7 +56,7 @@ fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Dur
 }
 
 fn parse_send_cmsgs(
-    resources: &kthread::ProcessResources,
+    resources: &kprocess::ProcessResources,
     control_ptr: usize,
     control_len: usize,
 ) -> KResult<Vec<AncillaryData>> {
@@ -113,7 +113,7 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
 }
 
 fn push_socket_cmsg(
-    resources: &kthread::ProcessResources,
+    resources: &kprocess::ProcessResources,
     builder: &mut CMsgBuilder<'_>,
     ancillary: SocketAncillary,
 ) -> KResult<bool> {
@@ -159,7 +159,7 @@ fn send_impl(
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
-    let socket = kthread::current_resources().get_file_like_as::<Socket>(fd)?;
+    let socket = kprocess::current_resources().get_file_like_as::<Socket>(fd)?;
     let sent = socket.send(
         &mut src,
         SendOptions {
@@ -187,7 +187,7 @@ pub fn sys_sendto(
 /// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.read_vm()?;
-    let resources = kthread::current_resources();
+    let resources = kprocess::current_resources();
     let ancillary = parse_send_cmsgs(
         resources.as_ref(),
         msg.msg_control as usize,
@@ -260,8 +260,7 @@ fn recv_impl(
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
-    let proc_state = kthread::current_process_state();
-    let resources = proc_state.resources.clone();
+    let resources = kprocess::current_resources();
     let socket = resources.get_file_like_as::<Socket>(fd)?;
     let mut recv_flags = RecvFlags::empty();
     if flags & MSG_PEEK != 0 {
@@ -402,7 +401,7 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
     }
 
     let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
-    let resources = kthread::current_resources();
+    let resources = kprocess::current_resources();
     let mut sent = 0;
     for msg in msgvec_value.iter_mut() {
         let ancillary = parse_send_cmsgs(

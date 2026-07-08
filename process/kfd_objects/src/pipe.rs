@@ -350,7 +350,7 @@ impl PipeEndpoint {
 
 /// Resolve the current process file descriptor to a concrete pipe endpoint.
 pub fn current_pipe_endpoint(fd: i32) -> KResult<PipeEndpoint> {
-    let resources = kthread::current_resources();
+    let resources = kprocess::current_resources();
     if let Ok(pipe) = resources.get_file_like_as::<PipeReadEnd>(fd) {
         return Ok(PipeEndpoint::Read(pipe));
     }
@@ -361,8 +361,8 @@ pub fn current_pipe_endpoint(fd: i32) -> KResult<PipeEndpoint> {
 }
 
 fn raise_pipe() {
-    kthread::send_signal_to_process(
-        kthread::current_thread().pid(),
+    kprocess::process_signals::send_to_process(
+        kprocess::current_user_thread().pid(),
         Some(SignalInfo::new_kernel(Signo::SIGPIPE)),
     )
     .expect("Failed to send SIGPIPE");

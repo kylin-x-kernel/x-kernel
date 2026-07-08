@@ -36,7 +36,7 @@ impl JobControl {
         self.foreground
             .lock()
             .upgrade()
-            .is_none_or(|pg| Arc::ptr_eq(&kthread::current_thread().proc_state.proc.group(), &pg))
+            .is_none_or(|pg| Arc::ptr_eq(&kprocess::current_user_thread().process().group(), &pg))
     }
 
     /// Get the current foreground process group

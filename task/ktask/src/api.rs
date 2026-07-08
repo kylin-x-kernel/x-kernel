@@ -15,7 +15,7 @@ use kspin::NoPreemptIrqSave;
 use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
 pub use crate::{
-    task::{CurrentTask, KTaskExt, TaskExt, TaskId, TaskInner, TaskState},
+    task::{CurrentTask, KTaskExt, TaskExt, TaskInner, TaskState},
     timers::register_timer_callback,
     wait_queue::WaitQueue,
 };
@@ -124,19 +124,43 @@ pub fn on_timer_tick() {
 
 /// Adds the given task to the run queue, returns the task reference.
 pub fn spawn_task(task: TaskInner) -> KtaskRef {
-    let task_ref = task.into_arc();
-    select_run_queue::<NoPreemptIrqSave>(&task_ref).add_task(task_ref.clone());
+    let task_ref = prepare_task(task);
+    activate_task(&task_ref);
     task_ref
 }
 
-/// Spawns a new task with the given parameters.
+/// Converts a detached task into a shareable task reference without making it runnable.
 ///
-/// Returns the task reference.
+/// This keeps the task in the initial `Ready` state but does not publish it to
+/// any scheduler run queue yet. Callers that need additional publication steps
+/// before the task may run should use this entry point together with
+/// [`activate_task`].
+pub fn prepare_task(task: TaskInner) -> KtaskRef {
+    task.into_arc()
+}
+
+/// Publishes a prepared task to the scheduler run queue, making it runnable.
+///
+/// Callers must finish any required visibility or registry publication before
+/// calling this function, because the task may start executing immediately
+/// after it is enqueued.
+pub fn activate_task(task: &KtaskRef) {
+    select_run_queue::<NoPreemptIrqSave>(task).add_task(task.clone());
+}
+
+/// Spawns a new kernel thread with the given parameters.
+///
+/// The new thread receives a Linux-visible TID from the root/default PID
+/// namespace. User threads must not use this helper; they must be created
+/// through the process-domain staged publication path.
 pub fn spawn_raw<F>(f: F, name: String, stack_size: usize) -> KtaskRef
 where
     F: FnOnce() + Send + 'static,
 {
-    spawn_task(TaskInner::new(f, name, stack_size))
+    spawn_task(
+        TaskInner::new_kthread(f, name, stack_size)
+            .expect("kernel thread identity allocation failed"),
+    )
 }
 
 /// Spawns a new task with the given name and the default stack size ([`kbuild_config::TASK_STACK_SIZE`]).
@@ -201,7 +225,7 @@ pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
         if !cpumask.get(khal::percpu::this_cpu_id().as_usize()) {
             const MIGRATION_TASK_STACK_SIZE: usize = 4096;
             // Spawn a new migration task for migrating.
-            let migration_task = TaskInner::new(
+            let migration_task = TaskInner::new_internal(
                 move || crate::run_queue::migrate_entry(curr),
                 "migration-task".into(),
                 MIGRATION_TASK_STACK_SIZE,

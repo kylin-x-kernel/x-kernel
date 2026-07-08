@@ -13,7 +13,7 @@ pub fn sys_sync() -> KResult<isize> {
 }
 
 pub fn sys_syncfs(fd: i32) -> KResult<isize> {
-    let file_like = kthread::current_resources().get_file_like(fd)?;
+    let file_like = kprocess::current_resources().get_file_like(fd)?;
 
     if let Some(file) = file_like.downcast_ref::<File>() {
         file.location().super_block().sync_fs()?;

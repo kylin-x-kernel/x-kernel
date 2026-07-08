@@ -37,5 +37,5 @@ pub(crate) fn init_virtual_filesystems() {
 
 pub(crate) fn init_alarm_runtime() {
     info!("Initialize alarm...");
-    kthread::init_timer_runtime();
+    kprocess::init_timer_runtime();
 }

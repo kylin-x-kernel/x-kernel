@@ -8,15 +8,14 @@ use kerrno::{KError, KResult};
 
 /// Returns the process ID of the current process.
 pub fn sys_getpid() -> KResult<isize> {
-    Ok(kthread::current_thread().pid() as _)
+    Ok(kprocess::current_user_thread().pid() as _)
 }
 
 /// Returns the parent process ID of the current process.
 pub fn sys_getppid() -> KResult<isize> {
-    let current_thread = kthread::current_thread();
+    let current_thread = kprocess::current_user_thread();
     current_thread
-        .process_state()
-        .proc
+        .process()
         .parent()
         .ok_or(KError::NoSuchProcess)
         .map(|parent| parent.pid() as _)

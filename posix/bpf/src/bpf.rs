@@ -92,7 +92,7 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
 
     let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
     let fd =
-        kthread::current_resources().add_file_like(Arc::new(BpfProgram::new(arc_insns)), true)?;
+        kprocess::current_resources().add_file_like(Arc::new(BpfProgram::new(arc_insns)), true)?;
     Ok(fd as isize)
 }
 
@@ -102,9 +102,9 @@ fn bpf_obj_pin(attr_ptr: usize, size: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
     let pathname = load_pathname(attr.pathname)?;
-    let program = kthread::current_resources().get_file_like_as::<BpfProgram>(attr.bpf_fd as _)?;
+    let program = kprocess::current_resources().get_file_like_as::<BpfProgram>(attr.bpf_fd as _)?;
 
-    let fs_context = kthread::current_fs_context();
+    let fs_context = kprocess::current_fs_context();
     let fs = fs_context.lock();
     let (parent, name) = lookup_parent(
         &fs.lookup_context(),
@@ -122,7 +122,7 @@ fn bpf_obj_get(attr_ptr: usize, size: u32) -> KResult<isize> {
     }
     let pathname = load_pathname(attr.pathname)?;
 
-    let fs_context = kthread::current_fs_context();
+    let fs_context = kprocess::current_fs_context();
     let fs = fs_context.lock();
     let location = lookup_location(
         &fs.lookup_context(),
@@ -131,7 +131,7 @@ fn bpf_obj_get(attr_ptr: usize, size: u32) -> KResult<isize> {
         LookupFlags::follow(),
     )?;
     let program = bpffs::program_from_location(&location)?;
-    let fd = kthread::current_resources().add_file_like(program, true)?;
+    let fd = kprocess::current_resources().add_file_like(program, true)?;
     Ok(fd as isize)
 }
 

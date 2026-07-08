@@ -21,7 +21,7 @@ use posix_types::UserPtr;
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {
     debug!("sys_close <= {fd}");
-    kthread::current_resources().close_file_like(fd)?;
+    kprocess::current_resources().close_file_like(fd)?;
     Ok(0)
 }
 
@@ -41,15 +41,15 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
     let flags = CloseRangeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_close_range <= fds: [{first}, {last}], flags: {flags:?}");
 
-    let proc_state = kthread::current_process_state();
+    let resources = kprocess::current_resources();
     if flags.contains(CloseRangeFlags::UNSHARE) {
-        proc_state.resources.unshare_fd_table();
+        resources.unshare_fd_table();
     }
 
     if flags.contains(CloseRangeFlags::CLOEXEC) {
-        proc_state.resources.set_cloexec_range(first, last);
+        resources.set_cloexec_range(first, last);
     } else {
-        proc_state.resources.close_range(first, last);
+        resources.close_range(first, last);
     }
 
     Ok(0)
@@ -57,8 +57,7 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
 
 /// Duplicates a file descriptor and optionally sets `CLOEXEC`.
 fn dup_fd(old_fd: c_int, cloexec: bool) -> KResult<isize> {
-    let proc_state = kthread::current_process_state();
-    let new_fd = proc_state.resources.duplicate_file_like(old_fd, cloexec)?;
+    let new_fd = kprocess::current_resources().duplicate_file_like(old_fd, cloexec)?;
     Ok(new_fd as _)
 }
 
@@ -76,7 +75,7 @@ pub fn sys_dup(old_fd: c_int) -> KResult<isize> {
 /// Duplicates a file descriptor to a specific target fd.
 pub fn sys_dup2(old_fd: c_int, new_fd: c_int) -> KResult<isize> {
     if old_fd == new_fd {
-        kthread::current_resources().get_file_like(new_fd)?;
+        kprocess::current_resources().get_file_like(new_fd)?;
         return Ok(new_fd as _);
     }
     sys_dup3(old_fd, new_fd, 0)
@@ -98,8 +97,7 @@ pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    kthread::current_process_state()
-        .resources
+    kprocess::current_resources()
         .duplicate_file_like_to(old_fd, new_fd, flags.contains(Dup3Flags::O_CLOEXEC))
         .map(|fd| fd as _)
 }
@@ -121,13 +119,13 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(0)
         }
         F_SETFL => {
-            kthread::current_resources()
+            kprocess::current_resources()
                 .get_file_like(fd)?
                 .set_nonblocking(arg & (O_NONBLOCK as usize) > 0)?;
             Ok(0)
         }
         F_GETFL => {
-            let f = kthread::current_resources().get_file_like(fd)?;
+            let f = kprocess::current_resources().get_file_like(fd)?;
 
             let mut ret = f.open_flags();
             if f.nonblocking() {
@@ -137,14 +135,12 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(ret as _)
         }
         F_GETFD => {
-            let cloexec = kthread::current_process_state().resources.cloexec(fd)?;
+            let cloexec = kprocess::current_resources().cloexec(fd)?;
             Ok(if cloexec { FD_CLOEXEC as _ } else { 0 })
         }
         F_SETFD => {
             let cloexec = arg & FD_CLOEXEC as usize != 0;
-            kthread::current_process_state()
-                .resources
-                .set_cloexec(fd, cloexec)?;
+            kprocess::current_resources().set_cloexec(fd, cloexec)?;
             Ok(0)
         }
         F_GETPIPE_SZ => {
@@ -157,11 +153,11 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             Ok(pipe.capacity() as _)
         }
         F_GET_SEALS => {
-            let file = kthread::current_resources().get_file_like_as::<File>(fd)?;
+            let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
             Ok(file.shmem_seal_bits()? as _)
         }
         F_ADD_SEALS => {
-            let file = kthread::current_resources().get_file_like_as::<File>(fd)?;
+            let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
             file.add_shmem_seals(seal_bits_from_fcntl_arg(arg)?)?;
             Ok(0)
         }

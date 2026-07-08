@@ -89,10 +89,10 @@ ksyscall::dispatch_irq_syscall
     │ decode sysno + ABI arguments
     ├─ vfs adapter  ───────────> posix-fs / kfs / kvfs
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
-    ├─ time adapter ───────────> khal time sources / kthread CPU-time state / kfd_objects::TimerFd
-    ├─ task adapter ───────────> kthread / posix-process / kprocess / kcred
+    ├─ time adapter ───────────> khal time sources / kprocess CPU-time state / kfd_objects::TimerFd
+    ├─ task adapter ───────────> kprocess / posix-process / kprocess / kcred
     ├─ io_mpx adapter ─────────> kfd_objects::Epoll
-    ├─ sync adapter ───────────> kfutex / kthread
+    ├─ sync adapter ───────────> kfutex / kprocess
     └─ misc adapter ───────────> posix-mm / posix-net / ...
 ```
 
@@ -120,7 +120,7 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `kfd_objects::TimerFd`
 - `time/queries.rs`
   - `clock_gettime` / `gettimeofday` / `clock_getres`
-  - owner 在 `khal` 时钟源与 `kthread` CPU-time 查询
+  - owner 在 `khal` 时钟源与 `kprocess` CPU-time 查询
 - `time/sleep.rs`
   - `nanosleep` / `clock_nanosleep`
   - owner 在 `ktask` sleep runtime 与 `khal` 时钟查询
@@ -129,37 +129,37 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `ProcessTimerManager` 的 legacy interval timer 状态
 - `time/posix_timer.rs`
   - `timer_create` / `timer_gettime` / `timer_settime` / `timer_delete` / `timer_getoverrun`
-  - owner 在 `ProcessTimerManager` 的 POSIX timer 状态与 `kthread` timer delivery runtime
+  - owner 在 `ProcessTimerManager` 的 POSIX timer 状态与 `kprocess` timer delivery runtime
 - `io_mpx/`
   - `select` / `pselect6` / `poll` / `ppoll` / `epoll_*`
   - owner 在 `kfd_objects::Epoll` 与通用 `FileLike` poll 接口
 - `task/pidfd.rs`
   - `pidfd_*`
-  - owner 在 `kthread::PidFd`
+  - owner 在 `kprocess::PidFd`
 - `task/credentials.rs`
   - `get*id` / `set*id` / `getgroups` / `setgroups`
-  - owner 在 `kthread` 当前进程 credential helper 与 `kcred` credential 模型
+  - owner 在 `kprocess` 当前进程 credential helper 与 `kcred` credential 模型
 - `task/ids.rs`
   - `getpid` / `getppid`
-  - owner 在 `kthread` 当前线程与父子进程关系
+  - owner 在 `kprocess` 当前线程与父子进程关系
 - `task/job.rs`
   - `getsid` / `setsid` / `getpgid` / `setpgid`
-  - owner 在 `kthread` 进程组与 session 状态
+  - owner 在 `kprocess` 进程组与 session 状态
 - `task/thread.rs`
   - `gettid` / `set_tid_address` / `arch_prctl`
-  - owner 在 `kthread` 当前线程状态与架构线程上下文
+  - owner 在 `kprocess` 当前线程状态与架构线程上下文
 - `task/signal.rs`
   - `rt_sigprocmask` / `rt_sigaction` / `rt_sigpending` / `kill` / `tkill` / `tgkill`
     / `rt_sigqueueinfo` / `rt_tgsigqueueinfo` / `rt_sigreturn` / `rt_sigtimedwait`
     / `rt_sigsuspend` / `sigaltstack` / `signalfd4`
-  - owner 在 `kthread` 当前线程 signal state、`ksignal` signal model
+  - owner 在 `kprocess` 当前线程 signal state、`ksignal` signal model
     与 `kfd_objects::Signalfd`
 - `task/cpu_time.rs`
   - `times`
-  - owner 在 `kthread` 进程 CPU-time 统计与 `khal` 时钟查询
+  - owner 在 `kprocess` 进程 CPU-time 统计与 `khal` 时钟查询
 - `task/rusage.rs`
   - `getrusage`
-  - owner 在 `kthread` 进程/线程 CPU-time 采样状态
+  - owner 在 `kprocess` 进程/线程 CPU-time 采样状态
 - `task/limits.rs`
   - `getrlimit` / `setrlimit` / `prlimit64`
   - owner 在 `ProcessState.resources` 的 rlimit 状态
@@ -168,10 +168,10 @@ ksyscall::dispatch_irq_syscall
   - owner 在 `ProcessState` 的文件创建掩码状态
 - `task/sched.rs`
   - `sched_yield` / `sched_*affinity` / `sched_*scheduler` / `getcpu` / `getpriority` / `setpriority`
-  - owner 在 `ktask` 调度接口、`kthread` 进程/线程状态和 `khal` CPU 查询
+  - owner 在 `ktask` 调度接口、`kprocess` 进程/线程状态和 `khal` CPU 查询
 - `sync/futex.rs`
   - `futex` / `get_robust_list` / `set_robust_list`
-  - owner 在 `kfutex` 等待队列与 `kthread` 线程 robust-list 状态
+  - owner 在 `kfutex` 等待队列与 `kprocess` 线程 robust-list 状态
 
 ## 非目标
 

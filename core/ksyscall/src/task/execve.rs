@@ -52,16 +52,16 @@ pub fn sys_execve(
     debug!("sys_execve <= path: {path:?}, args: {args:?}, envs: {envs:?}");
 
     let curr = current();
-    let current_thread = kthread::current_thread();
-    let proc_state = current_thread.process_state();
+    let thread = kprocess::current_user_thread();
+    let process = thread.process().clone();
 
-    if proc_state.proc.threads().len() > 1 {
+    if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
         // TODO: dispatch_irq multi-thread case
         error!("sys_execve: multi-thread not supported");
         return Err(KError::WouldBlock);
     }
 
-    let fs_context = proc_state.fs_context();
+    let fs_context = process.fs_context()?;
     let fs = fs_context.lock();
     let loc = lookup_location(
         &fs.lookup_context(),
@@ -76,7 +76,8 @@ pub fn sys_execve(
         .unwrap_or_else(|_| path.clone());
     let entry_name = loc.name().to_string();
 
-    let mut aspace = proc_state.address_space().lock();
+    let aspace_ref = process.address_space()?;
+    let mut aspace = aspace_ref.lock();
     let load_result = load_user_app_request(
         &mut aspace,
         ExecRequest::from_resolved_with_display(
@@ -91,11 +92,11 @@ pub fn sys_execve(
 
     curr.set_name(entry_name.as_str());
 
-    *proc_state.exe_path().write() = absolute_path.clone();
-    *proc_state.cmdline().write() = Arc::new(args);
+    let exec_update =
+        kprocess::ProcessExecUpdate::new(absolute_path.clone(), Arc::new(args), USER_HEAP_BASE);
 
     #[cfg(feature = "tee")]
-    {
+    let exec_update = {
         #[cfg(feature = "tee_ta_sign")]
         let ta_head_bytes = tee_task_iface::tasign::get_ta_head_cached(absolute_path.as_str())
             .unwrap_or_default()
@@ -105,31 +106,17 @@ pub fn sys_execve(
             tee_task_iface::ta_ctx::read_ta_head_if_applicable(absolute_path.as_str())
                 .unwrap_or_default()
                 .unwrap_or_default();
-        proc_state
-            .tee_ta_ctx
-            .write()
-            .init_ta_ctx(absolute_path.as_str(), ta_head_bytes.as_slice());
-    }
+        exec_update.with_ta_head_bytes(ta_head_bytes)
+    };
 
-    proc_state.set_heap_top(USER_HEAP_BASE);
-    proc_state.credentials.write().apply_exec();
-
-    *proc_state.signal.actions.lock() = Default::default();
-    proc_state.timer_manager().lock().clear_posix_timers();
-
-    // Clear set_child_tid after exec since the original address is no longer valid
-    kthread::current_thread().set_clear_child_tid(0);
-
-    // Close CLOEXEC file descriptors
-    proc_state.resources.close_cloexec_files();
+    process.apply_exec_update(exec_update)?;
+    thread.reset_after_exec();
 
     // execve replaces the entire address space.  The old mappings are
     // now destroyed (including any System-V shared memory attachments).
     // Clear the stale ShmManager entries so the process can re-attach
     // the same segments later.
-    posix_ipc::SHM_MANAGER
-        .lock()
-        .clear_proc_shm(proc_state.proc.pid());
+    posix_ipc::SHM_MANAGER.lock().clear_proc_shm(process.pid());
 
     uctx.set_ip(entry_point.as_usize());
     uctx.set_sp(user_stack_base.as_usize());

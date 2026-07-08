@@ -37,7 +37,7 @@ fn do_poll(
             // Skip -1
             continue;
         }
-        match kthread::current_resources().get_file_like(fd.fd) {
+        match kprocess::current_resources().get_file_like(fd.fd) {
             Ok(f) => {
                 fds.push((
                     f,
@@ -58,7 +58,7 @@ fn do_poll(
     }
     let fds = FdPollSet(fds);
 
-    kthread::current_thread().with_temp_blocked(sigmask, || {
+    kprocess::current_user_thread().with_temp_blocked(sigmask, || {
         match block_on(future::timeout(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {

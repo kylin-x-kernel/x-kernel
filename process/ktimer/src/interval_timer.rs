@@ -5,11 +5,10 @@
 //! Legacy `setitimer` state and scheduling policy.
 
 use khal::time::TimeValue;
-use kprocess::Pid;
 use ksignal::Signo;
 use posix_types::ITimerType;
 
-use crate::runtime;
+use crate::{Pid, runtime};
 
 pub(crate) const ITIMER_SIGNAL_CAPACITY: usize = 3;
 

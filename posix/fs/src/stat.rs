@@ -8,7 +8,7 @@ use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
 use kfs::File;
-use kthread::current_process_state;
+use kprocess::current_user_process_fs_context;
 use kvfs::{
     Location, LookupFlags, LookupIntent, MountFlags, NodePermission, ST_NOATIME, ST_NODEV,
     ST_NODIRATIME, ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW, ST_RDONLY, ST_RELATIME, ST_VALID,
@@ -188,8 +188,7 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
     let path = path.load_string()?;
     debug!("sys_statfs <= path: {path:?}");
 
-    let process = current_process_state();
-    let fs_context = process.fs_context();
+    let fs_context = current_user_process_fs_context();
     let fs = fs_context.lock();
     let location = lookup_location(
         &fs.lookup_context(),
@@ -205,8 +204,7 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
 pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     debug!("sys_fstatfs <= fd: {fd}");
 
-    let proc_state = current_process_state();
-    let file = proc_state.resources.get_file_like_as::<File>(fd)?;
+    let file = kprocess::current_resources().get_file_like_as::<File>(fd)?;
     buf.write_vm(statfs(file.location())?)?;
     Ok(0)
 }

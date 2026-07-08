@@ -8,10 +8,10 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use kerrno::{KError, KResult};
 use khal::time::{TimeValue, monotonic_time_nanos};
-use kprocess::Pid;
 use posix_types::ITimerType;
 
 use crate::{
+    Pid,
     delivery::{TimerDelivery, TimerSignal},
     interval_timer::{ITIMER_SIGNAL_CAPACITY, ITimer, timer_signal},
     posix_timer::{PosixTimer, PosixTimerClock, PosixTimerCreateNotify},

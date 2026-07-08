@@ -14,26 +14,26 @@ use core::{
     marker::PhantomData,
     mem::{MaybeUninit, size_of},
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
 use kcred::Credentials;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
-use kprocess::Pid;
+use kidentity::PidHandle;
+use kprocess::{AsThread, Pid, Thread, build_process_thread};
 use ksignal::api::SignalActions;
 use ksync::{
     Mutex,
     spin::{NoPreempt, SpinNoIrq},
 };
 use ktask::{KTaskExt, TaskExt, current};
-use kthread::{AsThread, ProcessState, ProcessStateConfig, Thread};
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use osvm::{read_vm_mem, write_vm_mem};
 use unittest::{TestDescriptor, TestResult};
 
 static NEXT_TEST_USER_ADDR: AtomicUsize = AtomicUsize::new(kaddr_layout::USER_HEAP_BASE);
-static NEXT_TEST_PROCESS_ID: AtomicUsize = AtomicUsize::new(0x7000_0000);
+static NEXT_TEST_PROCESS_ID: AtomicU32 = AtomicU32::new(1_000_000);
 static INIT_TEST_THREAD_HOOK: SpinNoIrq<Option<InitTestThreadHook>> = SpinNoIrq::new(None);
 
 #[macro_export]
@@ -50,10 +50,6 @@ pub use crate::__unittest_support_user_vec as user_vec;
 
 /// Optional test-thread initialization hook used when installing the unittest runtime.
 pub type InitTestThreadHook = fn(&Thread);
-
-fn alloc_test_process_id() -> Pid {
-    NEXT_TEST_PROCESS_ID.fetch_add(1, Ordering::Relaxed) as Pid
-}
 
 fn current_task_ptr() -> *mut ktask::TaskInner {
     let current_task = current();
@@ -73,32 +69,33 @@ struct InstalledTestThread {
 
 impl InstalledTestThread {
     fn install(init_thread: InitTestThreadHook) -> KResult<Self> {
-        let current_task = current();
-        let tid = current_task.id().as_u64() as Pid;
-        let pid = alloc_test_process_id();
+        let pid = NEXT_TEST_PROCESS_ID.fetch_add(1, Ordering::Relaxed) as Pid;
 
         let mut aspace = memspace::MmSpace::new_user_empty()?;
         ksignal::map_signal_trampoline(&mut aspace)?;
         let aspace = Arc::new(Mutex::new(aspace));
 
-        let proc = kprocess::Process::new_init(pid);
-        proc.add_thread(tid);
+        let task_number = PidHandle::fixed_root(pid);
+        let proc = kprocess::Process::new_init_with_task_number(task_number.clone());
 
-        let proc_state = ProcessState::new(
+        let thr = build_process_thread(
             proc,
+            task_number,
             "[unittest-user]".into(),
             Arc::new(vec![]),
             aspace,
             kfs::new_process_fs_context(),
             Arc::new(SpinNoIrq::new(SignalActions::default())),
-            None,
             Credentials::root(),
-            ProcessStateConfig::default(),
         );
-        let thr = Thread::new(tid, proc_state);
         init_thread(&thr);
 
-        let page_table_root = thr.proc_state.address_space().lock().page_table_hw_root();
+        let page_table_root = thr
+            .process()
+            .address_space()
+            .expect("test process must have address space")
+            .lock()
+            .page_table_hw_root();
         let task_ptr = current_task_ptr();
         let previous_page_table_root = karch::read_user_page_table();
 
@@ -129,6 +126,8 @@ impl InstalledTestThread {
                 ext.on_enter();
             }
         }
+        #[cfg(unittest)]
+        kprocess::publish_current_unittest_thread_membership();
 
         Ok(Self {
             previous_task_ext,
@@ -252,7 +251,10 @@ impl TestUserBuffer {
     pub fn new(len: usize) -> KResult<Self> {
         let current_task = current();
         let thread = current_task.try_as_thread().ok_or(KError::BadState)?;
-        let aspace = thread.proc_state.address_space().clone();
+        let aspace = thread
+            .process()
+            .address_space()
+            .map_err(|_| KError::BadState)?;
         let mapped_size = len.max(1).next_multiple_of(PAGE_SIZE_4K);
         let num_pages = mapped_size / PAGE_SIZE_4K;
         let kernel_va = kalloc::global_allocator()

@@ -13,6 +13,10 @@ use kpoll::PollSet;
 pub struct ProcessLifecycleState {
     child_exit_event: Arc<PollSet>,
     exit_event: Arc<PollSet>,
+    /// Accumulated user-mode nanoseconds of exited threads in this process.
+    exited_thread_utime_ns: AtomicUsize,
+    /// Accumulated kernel-mode nanoseconds of exited threads in this process.
+    exited_thread_stime_ns: AtomicUsize,
     /// Accumulated user-mode nanoseconds of reaped children.
     child_utime_ns: AtomicUsize,
     /// Accumulated kernel-mode nanoseconds of reaped children.
@@ -31,6 +35,8 @@ impl ProcessLifecycleState {
         Self {
             child_exit_event: Arc::default(),
             exit_event: Arc::default(),
+            exited_thread_utime_ns: AtomicUsize::new(0),
+            exited_thread_stime_ns: AtomicUsize::new(0),
             child_utime_ns: AtomicUsize::new(0),
             child_stime_ns: AtomicUsize::new(0),
         }
@@ -46,10 +52,28 @@ impl ProcessLifecycleState {
         &self.exit_event
     }
 
-    /// Adds reaped-child CPU time to the accumulated counters.
+    /// Adds exited-thread CPU time to the accumulated counters.
+    pub fn accumulate_exited_thread_time(&self, utime_ns: usize, stime_ns: usize) {
+        self.exited_thread_utime_ns
+            .fetch_add(utime_ns, Ordering::Relaxed);
+        self.exited_thread_stime_ns
+            .fetch_add(stime_ns, Ordering::Relaxed);
+    }
+
+    /// Returns accumulated exited-thread user and kernel time in nanoseconds.
+    pub fn exited_thread_time_ns(&self) -> (usize, usize) {
+        (
+            self.exited_thread_utime_ns.load(Ordering::Relaxed),
+            self.exited_thread_stime_ns.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Adds CPU time from a child reaped via `wait*()` to the accumulated
+    /// counters.
     ///
-    /// Called when a child process is reaped via `wait`/`waitpid`.  Mirrors
-    /// Linux `kernel/exit.c:1232-1233` where `psig->cutime += tgutime + sig->cutime`.
+    /// Mirrors Linux `kernel/exit.c`, where the parent's child CPU totals are
+    /// incremented by the reaped thread-group time plus the child's own
+    /// accumulated descendant totals.
     pub fn accumulate_child_time(&self, utime_ns: usize, stime_ns: usize) {
         self.child_utime_ns.fetch_add(utime_ns, Ordering::Relaxed);
         self.child_stime_ns.fetch_add(stime_ns, Ordering::Relaxed);

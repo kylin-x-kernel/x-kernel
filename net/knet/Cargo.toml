@@ -19,7 +19,7 @@ kdevice = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }
 ktask = { workspace = true }
-kthread = { workspace = true }
+kprocess = { workspace = true }
 kerrno = { workspace = true }
 kfs = { workspace = true }
 kvfs = { workspace = true }

@@ -20,7 +20,7 @@
 
 use kerrno::LinuxError;
 use khal::uspace::UserContext;
-use kthread::UserThreadRuntimeAction;
+use kprocess::UserThreadRuntimeAction;
 use linux_sysno::Sysno;
 use posix_ipc::*;
 use posix_mm::*;
@@ -451,10 +451,10 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::exit => sys_exit(uctx.arg0() as _),
         Sysno::exit_group => sys_exit_group(uctx.arg0() as _),
         Sysno::wait4 => sys_waitpid(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::getsid => sys_getsid(uctx.arg0() as _),
+        Sysno::getsid => sys_getsid(uctx.arg0() as i32),
         Sysno::setsid => sys_setsid(),
-        Sysno::getpgid => sys_getpgid(uctx.arg0() as _),
-        Sysno::setpgid => sys_setpgid(uctx.arg0() as _, uctx.arg1() as _),
+        Sysno::getpgid => sys_getpgid(uctx.arg0() as i32),
+        Sysno::setpgid => sys_setpgid(uctx.arg0() as i32, uctx.arg1() as i32),
 
         // signal
         Sysno::rt_sigprocmask => sys_rt_sigprocmask(
@@ -703,7 +703,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         },
 
         _ => {
-            let tid = ktask::current().id().as_u64() as u32;
+            let tid = kprocess::current_user_tid();
             warn!("Unimplemented syscall: {sysno} (tid={tid})");
             Err(kerrno::KError::Unsupported)
         }

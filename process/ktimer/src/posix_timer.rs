@@ -5,7 +5,6 @@
 //! POSIX timer configuration, clock mapping, and overrun bookkeeping.
 
 use khal::time::{self, TimeValue, monotonic_time_nanos, wall_time};
-use kprocess::Pid;
 use ksignal::Signo;
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME,
@@ -13,6 +12,7 @@ use linux_raw_sys::general::{
 use posix_types::k_sigval;
 
 use crate::{
+    Pid, Tid,
     delivery::{TimerDelivery, TimerSignal},
     interval_timer::ITimer,
 };
@@ -22,7 +22,7 @@ pub enum PosixTimerCreateNotify {
     None,
     Signal {
         signo: Signo,
-        target_tid: Option<Pid>,
+        target_tid: Option<Tid>,
         value: PosixTimerSigValue,
     },
 }
@@ -106,7 +106,7 @@ enum PosixTimerNotify {
     None,
     Signal {
         signo: Signo,
-        target_tid: Option<Pid>,
+        target_tid: Option<Tid>,
         value: TimerSigValue,
     },
 }

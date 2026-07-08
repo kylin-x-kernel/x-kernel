@@ -9,8 +9,8 @@ use alloc::{
     vec::Vec,
 };
 
+use kprocess::{AsThread, current_user_process_fs_context};
 use ktask::WeakKtaskRef;
-use kthread::{AsThread, current_process_state};
 use kvfs::{Location, MountFlags, Mountpoint, ST_RDONLY};
 use kvfs_simple::{DirMapping, SeqFileNode, SeqIterator, SimpleFs};
 
@@ -89,14 +89,13 @@ impl ProcMountSource {
     fn root_location(&self) -> Option<Location> {
         match self {
             Self::Current => {
-                let proc_state = current_process_state();
-                let fs_context = proc_state.fs_context();
+                let fs_context = current_user_process_fs_context();
                 let fs = fs_context.lock();
                 Some(fs.root_dir().clone())
             }
             Self::Task(task) => {
                 let task = task.upgrade()?;
-                let fs_context = task.as_thread().proc_state.fs_context();
+                let fs_context = task.as_thread().process().fs_context().ok()?;
                 let fs = fs_context.lock();
                 Some(fs.root_dir().clone())
             }

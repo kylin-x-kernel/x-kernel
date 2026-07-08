@@ -38,6 +38,9 @@ pub struct ThreadSignalManager {
     pending: SpinNoIrq<PendingSignals>,
     /// The set of signals currently blocked from delivery.
     blocked: SpinNoIrq<SignalSet>,
+    /// Previous blocked mask to restore when the next caught signal frame is
+    /// installed, matching Linux `saved_sigmask` semantics.
+    saved_sigmask: SpinNoIrq<Option<SignalSet>>,
     /// The stack used by signal handlers
     stack: SpinNoIrq<SignalStack>,
 
@@ -52,6 +55,7 @@ impl ThreadSignalManager {
 
             pending: SpinNoIrq::new(PendingSignals::default()),
             blocked: SpinNoIrq::new(SignalSet::default()),
+            saved_sigmask: SpinNoIrq::new(None),
             stack: SpinNoIrq::new(SignalStack::default()),
 
             possibly_has_signal: AtomicBool::new(false),
@@ -183,11 +187,14 @@ impl ThreadSignalManager {
     ) -> Option<(SignalInfo, SignalOSAction)> {
         let blocked = self.blocked.lock();
         let mask = !*blocked;
-        let restore_blocked = restore_blocked.unwrap_or_else(|| *blocked);
+        let current_blocked = *blocked;
         drop(blocked);
 
         loop {
             let sig = self.dequeue_signal(&mask)?;
+            let restore_blocked = restore_blocked
+                .or_else(|| self.take_saved_sigmask())
+                .unwrap_or(current_blocked);
             let action = self.proc.actions.lock()[sig.signo()].clone();
 
             if let Some(os_action) = self.dispatch_irq_signal(uctx, restore_blocked, &sig, &action)
@@ -286,6 +293,16 @@ impl ThreadSignalManager {
             self.set_blocked(old);
         }
         result
+    }
+
+    /// Saves a blocked-mask snapshot to restore when the next caught signal
+    /// frame is built. Used by `rt_sigsuspend`.
+    pub fn set_saved_sigmask(&self, sigmask: SignalSet) {
+        *self.saved_sigmask.lock() = Some(sigmask);
+    }
+
+    pub(crate) fn take_saved_sigmask(&self) -> Option<SignalSet> {
+        self.saved_sigmask.lock().take()
     }
 
     /// Gets the signal stack.

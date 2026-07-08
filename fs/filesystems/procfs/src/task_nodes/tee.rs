@@ -6,8 +6,8 @@
 
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 
+use kprocess::AsThread;
 use ktask::{KtaskRef, WeakKtaskRef};
-use kthread::AsThread;
 use kvfs::{VfsError, VfsResult};
 use kvfs_simple::{NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs};
 use tee_task_iface::tee_procfs::{
@@ -16,21 +16,24 @@ use tee_task_iface::tee_procfs::{
 };
 
 pub fn has_ta_info(task: &KtaskRef) -> bool {
-    let proc_state = &task.as_thread().proc_state;
-    let ta_ctx = proc_state.tee_ta_ctx.read();
-    tee_has_ta_info(&ta_ctx)
+    task.as_thread()
+        .process()
+        .with_tee_ta_ctx(tee_has_ta_info)
+        .expect("procfs tee view requires a live process tee context")
 }
 
 pub fn render_ta_ctx_uuid(task: &KtaskRef) -> Vec<u8> {
-    let proc_state = &task.as_thread().proc_state;
-    let ta_ctx = proc_state.tee_ta_ctx.read();
-    tee_render_ta_ctx_uuid(&ta_ctx)
+    task.as_thread()
+        .process()
+        .with_tee_ta_ctx(tee_render_ta_ctx_uuid)
+        .expect("procfs tee view requires a live process tee context")
 }
 
 pub fn render_ta_head(task: &KtaskRef) -> Vec<u8> {
-    let proc_state = &task.as_thread().proc_state;
-    let ta_ctx = proc_state.tee_ta_ctx.read();
-    tee_render_ta_head(&ta_ctx)
+    task.as_thread()
+        .process()
+        .with_tee_ta_ctx(tee_render_ta_head)
+        .expect("procfs tee view requires a live process tee context")
 }
 
 struct TaInfoDir {

@@ -70,7 +70,7 @@ fn do_select(
          {except_fds:?}] timeout: {timeout:?}"
     );
 
-    let fd_table = kthread::current_process_state().resources.fd_table();
+    let fd_table = kprocess::current_resources().fd_table();
     let fd_table = fd_table.read();
     let mut fds = Vec::with_capacity(nfds);
     let mut fd_indices = Vec::with_capacity(nfds);
@@ -101,40 +101,42 @@ fn do_select(
     let mut res_out = FdSet::zeroed();
     let mut res_ex = FdSet::zeroed();
 
-    let result = kthread::current_thread().with_temp_blocked(sigmask.map(Into::into), || {
-        match block_on(future::timeout(
-            timeout,
-            poll_io(&fds, IoEvents::empty(), false, || {
-                res_in.clear();
-                res_out.clear();
-                res_ex.clear();
-                let mut res = 0usize;
-                for ((fd, _), index) in fds.0.iter().zip(fd_indices.iter().copied()) {
-                    let revents = fd.poll();
-                    if read_fds.is_set(index) && revents.intersects(POLLIN_SET) {
-                        res += 1;
-                        res_in.set(index);
+    let result =
+        kprocess::current_user_thread().with_temp_blocked(
+            sigmask.map(Into::into),
+            || match block_on(future::timeout(
+                timeout,
+                poll_io(&fds, IoEvents::empty(), false, || {
+                    res_in.clear();
+                    res_out.clear();
+                    res_ex.clear();
+                    let mut res = 0usize;
+                    for ((fd, _), index) in fds.0.iter().zip(fd_indices.iter().copied()) {
+                        let revents = fd.poll();
+                        if read_fds.is_set(index) && revents.intersects(POLLIN_SET) {
+                            res += 1;
+                            res_in.set(index);
+                        }
+                        if write_fds.is_set(index) && revents.intersects(POLLOUT_SET) {
+                            res += 1;
+                            res_out.set(index);
+                        }
+                        if except_fds.is_set(index) && revents.intersects(POLLEX_SET) {
+                            res += 1;
+                            res_ex.set(index);
+                        }
                     }
-                    if write_fds.is_set(index) && revents.intersects(POLLOUT_SET) {
-                        res += 1;
-                        res_out.set(index);
+                    if res > 0 {
+                        return Ok(res as _);
                     }
-                    if except_fds.is_set(index) && revents.intersects(POLLEX_SET) {
-                        res += 1;
-                        res_ex.set(index);
-                    }
-                }
-                if res > 0 {
-                    return Ok(res as _);
-                }
 
-                Err(KError::WouldBlock)
-            }),
-        )) {
-            Ok(r) => r,
-            Err(_) => Ok(0),
-        }
-    });
+                    Err(KError::WouldBlock)
+                }),
+            )) {
+                Ok(r) => r,
+                Err(_) => Ok(0),
+            },
+        );
 
     // Only write back fd_sets on success; on error (e.g. EINTR) the
     // contents are unspecified per POSIX, so skip the unnecessary copy-out.

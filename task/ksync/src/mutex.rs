@@ -94,7 +94,9 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     fn lock(&self) {
-        let current_id = current().id().as_u64();
+        #[cfg(feature = "stats")]
+        self.stats.total_locks.fetch_add(1, Ordering::Relaxed);
+        let current_id = current().owner_key();
         let mut spin = Spin::new(self.config);
         let mut owner_id = self.owner_id.load(Ordering::Relaxed);
         #[cfg(feature = "stats")]
@@ -160,7 +162,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     fn try_lock(&self) -> bool {
-        let current_id = current().id().as_u64();
+        let current_id = current().owner_key();
         // The reason for using a strong compare_exchange is explained here:
         // https://github.com/Amanieu/parking_lot/pull/207#issuecomment-575869107
         let acquired = self
@@ -184,7 +186,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
         let owner_id = self.owner_id.swap(0, Ordering::Release);
         assert_eq!(
             owner_id,
-            current().id().as_u64(),
+            current().owner_key(),
             "{} tried to release mutex it doesn't own",
             current().id_name()
         );

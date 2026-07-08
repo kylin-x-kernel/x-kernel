@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-tee = ["kthread/tee", "dep:tee_kernel"]
+tee = ["kprocess/tee", "dep:tee_kernel"]
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
@@ -20,13 +20,13 @@ kerrno.workspace = true
 kexec.workspace = true
 kfs.workspace = true
 khal.workspace = true
+kidentity.workspace = true
 klogger.workspace = true
 kprocess.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 ktty.workspace = true
-kthread.workspace = true
 kvfs.workspace = true
 linux-raw-sys.workspace = true
 linux_sysno.workspace = true

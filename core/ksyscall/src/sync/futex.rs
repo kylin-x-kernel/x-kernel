@@ -8,7 +8,7 @@ use core::{mem::size_of, sync::atomic::Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
 use kfutex::FutexKey;
-use kthread::{AsThread, current_futex_key};
+use kprocess::{AsThread, current_futex_key};
 use linux_raw_sys::general::{
     FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT,
     FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
@@ -53,9 +53,8 @@ pub fn sys_futex(
 
     let key = current_key_for_futex_op(uaddr.as_ptr() as usize, futex_op);
 
-    let thr = kthread::current_thread();
-    let proc_state = &thr.proc_state;
-    let futex_table = proc_state.futex_state().table_for(&key);
+    let process = kprocess::current_user_process();
+    let futex_table = process.futex_state()?.table_for(&key);
 
     let command = futex_op & (FUTEX_CMD_MASK as u32);
     match command {
@@ -126,7 +125,7 @@ pub fn sys_futex(
 
             let futex = futex_table.get(&key);
             let key2 = current_key_for_futex_op(uaddr2.as_ptr() as usize, futex_op);
-            let table2 = proc_state.futex_state().table_for(&key2);
+            let table2 = process.futex_state()?.table_for(&key2);
             let futex2 = table2.get_or_insert(&key2);
 
             let mut count = 0;
@@ -148,7 +147,7 @@ pub fn sys_get_robust_list(
     head: UserPtr<*const robust_list_head>,
     size: UserPtr<usize>,
 ) -> KResult<isize> {
-    let task = kthread::get_task(tid)?;
+    let task = kprocess::pidfd::robust_list_task(tid)?;
     head.write_vm(task.as_thread().robust_list_head() as _)?;
     size.write_vm(size_of::<robust_list_head>())?;
     Ok(0)
@@ -159,6 +158,6 @@ pub fn sys_set_robust_list(head: UserConstPtr<robust_list_head>, size: usize) ->
     if size != size_of::<robust_list_head>() {
         return Err(KError::InvalidInput);
     }
-    kthread::current_thread().set_robust_list_head(head.as_ptr() as usize);
+    kprocess::current_user_thread().set_robust_list_head(head.as_ptr() as usize);
     Ok(0)
 }

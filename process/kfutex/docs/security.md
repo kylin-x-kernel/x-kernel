@@ -3,7 +3,7 @@
 ## 信任模型
 
 ```text
-ksyscall / kthread / posix-process
+ksyscall / kprocess / posix-process
           │
           │ safe API: FutexKey, ProcessFutexState, FutexTable, WaitQueue
           ▼
@@ -92,11 +92,11 @@ memspace / vmobj / ktask scheduler
 
 - shared table cleanup 使用固定 100 次查找阈值，不是精确或实时回收机制。
 - shared-anon 与 file-backed 路径都使用稳定 `VmObjectId` / `MappingIdentity`。
-- 本 crate 不负责 robust-list 链表遍历和 `clear_child_tid` 语义，那些线程生命周期逻辑仍在 `kthread` / `posix-process`。
+- 本 crate 不负责 robust-list 链表遍历和 `clear_child_tid` 语义，那些线程生命周期逻辑仍在 `kprocess` / `posix-process`。
 
 ## 审计清单
 
-- 新增 futex 状态时，确认它属于 `kfutex` owner，而不是散落到 `kthread` 或 syscall adapter。
+- 新增 futex 状态时，确认它属于 `kfutex` owner，而不是散落到 `kprocess` 或 syscall adapter。
 - 修改 `FutexKey::new` 时，重新审计 shared/file-backed 映射 identity 来源。
 - 修改 `ProcessFutexState::table_for` 时，确认 private/shared 路由不被打破。
 - 修改 shared table cache 时，确认 stale entry 清理不会删除仍被外部持有的 table。

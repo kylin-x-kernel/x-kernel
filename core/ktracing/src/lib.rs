@@ -215,7 +215,7 @@ impl KernelTraceOps for Kops {
     }
 
     fn current_pid() -> u32 {
-        current().id().as_u64() as u32
+        current().trace_id() as u32
     }
 
     fn trace_pipe_push_raw_record(buf: &[u8]) {
