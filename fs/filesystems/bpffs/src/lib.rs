@@ -4,15 +4,15 @@
 
 //! Minimal BPF filesystem (`bpffs`) support.
 //!
-//! This crate currently supports pinning loaded BPF programs and reopening them
-//! through `BPF_OBJ_GET`. Maps and links are intentionally left for later BPF
-//! subsystem work.
+//! This crate currently supports pinning loaded BPF programs, reopening them
+//! through `BPF_OBJ_GET`, and holding anonymous map fds for the syscall layer.
+//! Links are intentionally left for later BPF subsystem work.
 
 #![no_std]
 
 extern crate alloc;
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 
 use hashbrown::HashMap;
 use kerrno::KResult;
@@ -30,20 +30,68 @@ const BPF_MOUNT_FLAGS: u32 = kvfs::ST_NOSUID | kvfs::ST_NODEV | kvfs::ST_NOEXEC 
 const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);
 
+/// Read-only map value snapshot bound to a loaded BPF program.
+pub struct BpfProgramMapValue {
+    id: u32,
+    bytes: Arc<[u8]>,
+}
+
+impl BpfProgramMapValue {
+    /// Creates a program-visible map value snapshot.
+    pub fn new(id: u32, bytes: Arc<[u8]>) -> Self {
+        Self { id, bytes }
+    }
+
+    /// Returns the identifier encoded in `BPF_PSEUDO_MAP_VALUE`.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Returns the immutable bytes visible to the VM.
+    pub fn bytes(&self) -> Arc<[u8]> {
+        self.bytes.clone()
+    }
+}
+
 /// Loaded BPF program object shared by anonymous fds and bpffs pins.
 pub struct BpfProgram {
     #[allow(dead_code)]
     insns: Arc<[u8]>,
+    prog_type: u32,
+    map_values: Arc<[BpfProgramMapValue]>,
 }
 
 impl BpfProgram {
     /// Creates a loaded BPF program object from validated instruction bytes.
-    pub fn new(insns: Arc<[u8]>) -> Self {
-        Self { insns }
+    pub fn new(insns: Arc<[u8]>, prog_type: u32, map_values: Arc<[BpfProgramMapValue]>) -> Self {
+        Self {
+            insns,
+            prog_type,
+            map_values,
+        }
     }
 
-    pub fn new_file(insns: Arc<[u8]>) -> VfsResult<Arc<VfsFile>> {
-        Arc::new(Self::new(insns)).into_file()
+    /// Returns the Linux BPF program type supplied at load time.
+    pub fn prog_type(&self) -> u32 {
+        self.prog_type
+    }
+
+    /// Returns the raw eBPF instruction bytes backing this loaded program.
+    pub fn insns(&self) -> &[u8] {
+        &self.insns
+    }
+
+    /// Returns read-only map value snapshots bound during program load.
+    pub fn map_values(&self) -> &[BpfProgramMapValue] {
+        &self.map_values
+    }
+
+    pub fn new_file(
+        insns: Arc<[u8]>,
+        prog_type: u32,
+        map_values: Arc<[BpfProgramMapValue]>,
+    ) -> VfsResult<Arc<VfsFile>> {
+        Arc::new(Self::new(insns, prog_type, map_values)).into_file()
     }
 
     pub fn into_file(self: Arc<Self>) -> VfsResult<Arc<VfsFile>> {
@@ -58,6 +106,127 @@ impl BpfProgram {
 }
 
 impl FileOperations for BpfProgram {}
+
+/// Minimal array-map object used by the `bpf(2)` syscall implementation.
+pub struct BpfMap {
+    map_type: u32,
+    key_size: u32,
+    value_size: u32,
+    max_entries: u32,
+    flags: u32,
+    values: Mutex<Vec<u8>>,
+    frozen: Mutex<bool>,
+}
+
+impl BpfMap {
+    /// Creates a flat value store for an array-style BPF map.
+    pub fn new(
+        map_type: u32,
+        key_size: u32,
+        value_size: u32,
+        max_entries: u32,
+        flags: u32,
+    ) -> KResult<Self> {
+        let value_bytes = (value_size as usize)
+            .checked_mul(max_entries as usize)
+            .ok_or(kerrno::KError::InvalidInput)?;
+        Ok(Self {
+            map_type,
+            key_size,
+            value_size,
+            max_entries,
+            flags,
+            values: Mutex::new(vec![0; value_bytes]),
+            frozen: Mutex::new(false),
+        })
+    }
+
+    /// Returns the Linux BPF map type supplied at creation time.
+    pub fn map_type(&self) -> u32 {
+        self.map_type
+    }
+
+    /// Returns the key size in bytes supplied at creation time.
+    pub fn key_size(&self) -> u32 {
+        self.key_size
+    }
+
+    /// Returns the value size in bytes supplied at creation time.
+    pub fn value_size(&self) -> u32 {
+        self.value_size
+    }
+
+    /// Returns the maximum number of array entries.
+    pub fn max_entries(&self) -> u32 {
+        self.max_entries
+    }
+
+    /// Returns the map creation flags.
+    pub fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// Updates one array entry.
+    pub fn update_elem(&self, key: u32, value: &[u8]) -> KResult<()> {
+        if *self.frozen.lock() || key >= self.max_entries || value.len() != self.value_size as usize
+        {
+            return Err(kerrno::KError::InvalidInput);
+        }
+
+        let start = key as usize * self.value_size as usize;
+        let end = start + self.value_size as usize;
+        self.values.lock()[start..end].copy_from_slice(value);
+        Ok(())
+    }
+
+    /// Reads one array entry into `value`.
+    pub fn lookup_elem(&self, key: u32, value: &mut [u8]) -> KResult<()> {
+        if key >= self.max_entries || value.len() != self.value_size as usize {
+            return Err(kerrno::KError::InvalidInput);
+        }
+
+        let start = key as usize * self.value_size as usize;
+        let end = start + self.value_size as usize;
+        value.copy_from_slice(&self.values.lock()[start..end]);
+        Ok(())
+    }
+
+    /// Captures the current flat map value storage for a loaded program.
+    pub fn snapshot_values(&self) -> Arc<[u8]> {
+        self.values.lock().clone().into_boxed_slice().into()
+    }
+
+    /// Marks this map immutable to user updates.
+    pub fn freeze(&self) {
+        *self.frozen.lock() = true;
+    }
+
+    /// Creates an anonymous inode file for a newly allocated map.
+    pub fn new_file(
+        map_type: u32,
+        key_size: u32,
+        value_size: u32,
+        max_entries: u32,
+        flags: u32,
+    ) -> KResult<Arc<VfsFile>> {
+        Ok(Arc::new(Self::new(
+            map_type,
+            key_size,
+            value_size,
+            max_entries,
+            flags,
+        )?)
+        .into_file()?)
+    }
+
+    /// Wraps this map as an anonymous inode file.
+    pub fn into_file(self: Arc<Self>) -> VfsResult<Arc<VfsFile>> {
+        let fops: Arc<dyn FileOperations> = self.clone();
+        AnonInodeFs::global().get_file("bpf-map", fops, self, FMode::READ | FMode::WRITE, 0)
+    }
+}
+
+impl FileOperations for BpfMap {}
 
 #[derive(Clone)]
 enum BpfEntry {

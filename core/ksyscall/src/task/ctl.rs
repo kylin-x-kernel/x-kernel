@@ -19,6 +19,7 @@ use osvm::write_vm_mem;
 use posix_types::UserPtr;
 
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
+const CAP_LAST_CAP: usize = 40;
 
 fn validate_cap_header(header_ptr: UserPtr<__user_cap_header_struct>) -> KResult<()> {
     let mut header = header_ptr.read_vm()?;
@@ -71,6 +72,7 @@ pub fn sys_get_mempolicy(
 /// - PR_SET_NAME: set the name of the calling thread, using the value pointed to by `arg2`
 /// - PR_GET_NAME: get the name of the calling
 /// - PR_SET_SECCOMP: enable seccomp mode, with the mode specified in `arg2`
+/// - PR_CAPBSET_READ: return whether a capability is in the bounding set
 /// - PR_MCE_KILL: set the machine check exception policy
 /// - PR_SET_MM options: set various memory management options (start/end code/data/brk/stack)
 pub fn sys_prctl(
@@ -97,6 +99,12 @@ pub fn sys_prctl(
             write_vm_mem(arg2 as _, &buf)?;
         }
         PR_SET_SECCOMP => {}
+        PR_CAPBSET_READ => {
+            if arg2 > CAP_LAST_CAP {
+                return Err(KError::InvalidInput);
+            }
+            return Ok(1);
+        }
         PR_MCE_KILL => {}
         PR_SET_VMA => {
             // Allow user space to set anonymous VMA names (e.g. Go runtime).

@@ -16,6 +16,7 @@ ebpf = []
 
 [dependencies]
 bpffs.workspace = true
+kbpf.workspace = true
 kerrno.workspace = true
 klogger.workspace = true
 kvfs.workspace = true

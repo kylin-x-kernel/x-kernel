@@ -25,6 +25,11 @@ pub enum Error {
     /// The program ran past its last instruction without executing an
     /// `exit`.
     EndOfProgram,
+    /// A 64-bit immediate instruction was missing its required second
+    /// instruction slot.
+    IncompleteWideImmediate,
+    /// An instruction tried to access memory outside the VM-owned BPF stack.
+    MemoryOutOfBounds,
     /// A `call` instruction referenced a helper id that is not
     /// registered on this VM. Carries the requested id.
     UnknownHelper(u32),

@@ -13,15 +13,18 @@
 //! here — depending on `kbpf` always pulls in the full surface.
 //!
 //! Out of scope here (handled elsewhere or later): the BPF verifier,
-//! the `bpf(2)` syscall surface, JIT, BPF maps, and the standard
-//! Linux helper-function set.
+//! the `bpf(2)` syscall surface, JIT, BPF maps, and most of the
+//! standard Linux helper-function set.
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod error;
+pub mod helpers;
 pub mod insn;
 pub mod vm;
 
 pub use error::{Error, Result};
 pub use insn::{Insn, SLOT_SIZE};
-pub use vm::Vm;
+pub use vm::{ReadOnlyMemory, Vm};
